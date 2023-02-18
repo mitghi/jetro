@@ -1,0 +1,41 @@
+alpha = _{ 'a'..'z' | 'A'..'Z' }
+digit = _{ '0'..'9' }
+number = { digit+ }
+float = { digit+ ~ "." ~ digit+ }
+special_charaters = _{ "_" | "-" | "\\" }
+
+path = { ">" }
+asterisk = _{ "*" }
+slash = { "/" }
+double_dot = _{ ".." }
+ident = { (alpha | digit | special_charaters)+ }
+
+child = { slash ~ ident }
+any_child = { slash ~ asterisk }
+descendant_child = { slash ~ double_dot ~ ident }
+indexed_child = { slash ~ "[" ~ number ~ "]" }
+slice = { slash ~ "[" ~ number ~ ":" ~ number ~ "]" }
+slice_to = { slash ~ "[:" ~ number ~ "]" }
+slice_from = { slash ~ "[" ~ number ~ ":]" }
+pick = { "pick" ~ "(" ~ literal ~ ((",") ~ (" ")? ~ literal)* ~ ")" }
+pickFn = { slash ~ pick }
+
+string = { (alpha | digit | special_charaters | " ")+ }
+literal = { "'" ~ string ~ "'" }
+array = {
+    "[" ~
+        (" ")* ~
+            (
+                float ~ ((",") ~ (" ")* ~ float)* |
+                number ~ ((",") ~ (" ")* ~ number)* |
+                literal ~ ((",") ~ (" ")* ~ literal)*
+            ) ~
+        (" ")* ~
+    "]"
+}
+
+expression = {
+    path ~
+    (pickFn | child | any_child | descendant_child | indexed_child | slice | slice_to | slice_from)* ~
+    EOI
+}
