@@ -1,6 +1,6 @@
 use pest_derive::Parser as Parse;
 
-use crate::context::Filter;
+use crate::context::{Filter, PickFilterInner};
 use pest::Parser;
 
 #[derive(Parse)]
@@ -16,18 +16,27 @@ pub fn parse<'a>(input: &'a str) -> Vec<Filter> {
             Rule::path => actions.push(Filter::Root),
             Rule::any_child => actions.push(Filter::AnyChild),
             Rule::pickFn => {
-                let elems: Vec<String> = token
+                let elems: Vec<PickFilterInner> = token
                     .into_inner()
                     .nth(1)
                     .unwrap()
                     .into_inner()
-                    .map(|v| {
-			let span = v.as_span().as_str().to_string();
-			if span.len() == 2 {
-			    return "".to_string();
-			}
-			return span[1..span.len()-1].to_string();
-		    })
+                    .map(|v| match &v.as_rule() {
+                        Rule::sub_expression => {
+                            return PickFilterInner::Subpath(parse(v.as_str()));
+                        }
+                        Rule::literal => {
+                            println!("rule is : {:?}", &v);
+                            let span = v.as_span().as_str().to_string();
+                            if span.len() == 2 {
+                                return PickFilterInner::Str("".to_string());
+                            }
+                            return PickFilterInner::Str(span[1..span.len() - 1].to_string());
+                        }
+                        _ => {
+                            return PickFilterInner::None;
+                        }
+                    })
                     .collect();
                 actions.push(Filter::Pick(elems));
             }
@@ -90,10 +99,10 @@ mod test {
                 Filter::Child("some".to_string()),
                 Filter::Descendant("descendant".to_string()),
                 Filter::Pick(vec![
-                    "a".to_string(),
-                    "b".to_string(),
-                    "c".to_string(),
-                    "d".to_string()
+                    PickFilterInner::Str("a".to_string()),
+                    PickFilterInner::Str("b".to_string()),
+                    PickFilterInner::Str("c".to_string()),
+                    PickFilterInner::Str("d".to_string())
                 ]),
             ]
         );

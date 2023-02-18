@@ -6,12 +6,19 @@ use std::cell::{Ref, RefCell};
 use std::rc::Rc;
 
 #[derive(Debug, PartialEq)]
+pub enum PickFilterInner {
+    None,
+    Str(String),
+    Subpath(Vec<Filter>),
+}
+
+#[derive(Debug, PartialEq)]
 pub enum Filter {
     Root,
     AnyChild,
     Child(String),
     Descendant(String),
-    Pick(Vec<String>),
+    Pick(Vec<PickFilterInner>),
 }
 
 impl Filter {
@@ -19,16 +26,51 @@ impl Filter {
         match &self {
             Filter::Pick(ref values) => {
                 let mut new_map: Value = Value::Object(Map::new());
-                for key in values {
-                    match obj.get(&key) {
-                        Some(v) => {
-                            new_map
-                                .as_object_mut()
-                                .unwrap()
-                                .insert(key.to_string(), v.clone());
+                for value in values {
+                    match value {
+                        PickFilterInner::Str(ref some_key) => {
+                            match obj.get(&some_key) {
+                                Some(v) => {
+                                    new_map
+                                        .as_object_mut()
+                                        .unwrap()
+                                        .insert(some_key.to_string(), v.clone());
+                                }
+                                _ => {}
+                            };
+                        }
+                        PickFilterInner::Subpath(ref some_subpath) => {
+                            println!("SUBPATH: {:?}", &some_subpath);
+                            for item in
+                                Path::collect_with_filter(obj.clone(), some_subpath.as_slice())
+                                    .0
+                                    .borrow()
+                                    .iter()
+                            {
+                                println!("ITEM: {}", &item);
+                                match *item.clone() {
+                                    Value::Object(ref target_object) => {
+                                        for (k, v) in target_object {
+                                            new_map
+                                                .as_object_mut()
+                                                .unwrap()
+                                                .insert(k.to_string(), v.clone());
+                                        }
+                                    }
+                                    Value::String(ref some_str) => {
+                                        new_map.as_object_mut().unwrap().insert(
+                                            "descendant".to_string(),
+                                            Value::String(some_str.to_string()),
+                                        );
+                                    }
+                                    _ => {
+                                        todo!();
+                                    }
+                                }
+                            }
                         }
                         _ => {}
-                    };
+                    }
                 }
                 Some(new_map)
             }
@@ -51,6 +93,7 @@ pub struct Context<'a> {
 
 type PathOutput = Rc<RefCell<Vec<Rc<Value>>>>;
 pub struct Path;
+#[derive(Debug)]
 pub struct PathResult(PathOutput);
 
 impl Path {
@@ -58,6 +101,13 @@ impl Path {
         let expr: String = expr.into();
         let filters = parser::parse(&expr);
         let mut ctx = Context::new(v, filters.as_slice());
+        ctx.collect();
+
+        PathResult(ctx.results)
+    }
+
+    pub fn collect_with_filter(v: Value, filters: &[Filter]) -> PathResult {
+        let mut ctx = Context::new(v, filters);
         ctx.collect();
 
         PathResult(ctx.results)
@@ -255,7 +305,10 @@ mod test {
         }
         "#;
         let v: Value = serde_json::from_str(data).unwrap();
-        let f: Filter = Filter::Pick(vec!["a".to_string(), "b".to_string()]);
+        let f: Filter = Filter::Pick(vec![
+            PickFilterInner::Str("a".to_string()),
+            PickFilterInner::Str("b".to_string()),
+        ]);
         let v = v.get("obj".to_string()).unwrap();
         let result = f.pick(&v);
 
@@ -346,5 +399,63 @@ mod test {
 
         let output: Output = values.shove(0);
         println!("output: {:?}", output.a);
+    }
+
+    #[test]
+    fn test_pick_with_subpath() {
+        let data = r#"
+	 {
+	   "name": "mr snuggle",
+           "some_entry": {
+           "some_obj": {
+	       "obj": {
+	         "a": "object_a",
+	         "b": "object_b",
+	         "c": "object_c",
+	         "d": {"object_d": "some_value", "with_nested": {"object": "final_value"}}
+	      }
+            }
+          }
+        }
+        "#;
+
+        let mut values = Path::collect(
+            serde_json::from_str(&data).unwrap(),
+            ">/..obj/pick('a', >/..with_nested/pick('object'))",
+        );
+
+        println!("output(subpath): {:?}", values);
+    }
+
+    #[test]
+    fn test_pick_with_mixed_path() {
+        let data = r#"
+	 {
+	   "name": "mr snuggle",
+           "some_entry": {
+           "some_obj": {
+    	       "obj": {
+	         "a": "object_a",
+	         "b": "object_b",
+	         "c": "object_c",
+	         "d": {"object_d": "some_value", "with_nested": {"object": "final_value"}}
+	      }
+            }
+          }
+        }
+        "#;
+
+        let values = Path::collect(
+            serde_json::from_str(&data).unwrap(),
+            ">/..obj/pick('a', >/..object)",
+        );
+
+        println!("output(mixed_path): {:?}", values);
+        for v in (*values.0).borrow().iter() {
+            println!(
+                "json values: {}",
+                serde_json::to_string_pretty::<Value>(v).unwrap()
+            );
+        }
     }
 }
