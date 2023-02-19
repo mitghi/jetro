@@ -5,6 +5,11 @@ use serde_json::Value;
 use std::cell::{Ref, RefCell};
 use std::rc::Rc;
 
+type PathOutput = Rc<RefCell<Vec<Rc<Value>>>>;
+pub struct Path;
+#[derive(Debug)]
+pub struct PathResult(pub PathOutput);
+
 #[derive(Debug, PartialEq)]
 pub enum PickFilterInner {
     None,
@@ -20,6 +25,10 @@ pub enum Filter {
     Child(String),
     Descendant(String),
     Pick(Vec<PickFilterInner>),
+    ArrayIndex(usize),
+    ArrayFrom(usize),
+    ArrayTo(usize),
+    Slice(usize, usize),
 }
 
 struct StackItem<'a> {
@@ -149,11 +158,6 @@ impl<'a> StackItem<'a> {
     }
 }
 
-type PathOutput = Rc<RefCell<Vec<Rc<Value>>>>;
-pub struct Path;
-#[derive(Debug)]
-pub struct PathResult(pub PathOutput);
-
 impl Path {
     pub fn collect<S: Into<String>>(v: Value, expr: S) -> PathResult {
         let expr: String = expr.into();
@@ -233,6 +237,83 @@ impl<'a> Context<'a> {
                         tail,
                         self.stack.clone(),
                     )),
+
+                    (Filter::ArrayIndex(ref index), Some(tail)) => match *current.value {
+                        Value::Array(ref array) => {
+                            if *index < array.len() {
+                                let new_value = array[*index].clone();
+                                let tlen = tail.len();
+                                if tlen == 0 {
+                                    self.results.borrow_mut().push(Rc::new(new_value));
+                                } else {
+                                    self.stack.borrow_mut().push(StackItem::new(
+                                        Rc::new(new_value),
+                                        tail,
+                                        self.stack.clone(),
+                                    ));
+                                }
+                            }
+                        }
+                        _ => {}
+                    },
+
+                    (Filter::Slice(ref from, ref to), Some(tail)) => match *current.value {
+                        Value::Array(ref array) => {
+                            println!("IN SLICE EVALUATOR");
+                            if array.len() >= *to && *from < *to {
+                                let new_slice = Value::Array(array[*from..*to].to_vec());
+                                let tlen = tail.len();
+                                if tlen == 0 {
+                                    self.results.borrow_mut().push(Rc::new(new_slice));
+                                } else {
+                                    self.stack.borrow_mut().push(StackItem::new(
+                                        Rc::new(new_slice),
+                                        tail,
+                                        self.stack.clone(),
+                                    ));
+                                }
+                            }
+                        }
+                        _ => {}
+                    },
+
+                    (Filter::ArrayTo(ref index), Some(tail)) => match *current.value {
+                        Value::Array(ref array) => {
+                            if array.len() >= *index {
+                                let new_array = Value::Array(array[..*index].to_vec());
+                                let tlen = tail.len();
+                                if tlen == 0 {
+                                    self.results.borrow_mut().push(Rc::new(new_array));
+                                } else {
+                                    self.stack.borrow_mut().push(StackItem::new(
+                                        Rc::new(new_array),
+                                        tail,
+                                        self.stack.clone(),
+                                    ));
+                                }
+                            }
+                        }
+                        _ => {}
+                    },
+
+                    (Filter::ArrayFrom(ref index), Some(tail)) => match *current.value {
+                        Value::Array(ref array) => {
+                            if array.len() >= *index {
+                                let new_array = Value::Array(array[*index..].to_vec());
+                                let tlen = tail.len();
+                                if tlen == 0 {
+                                    self.results.borrow_mut().push(Rc::new(new_array));
+                                } else {
+                                    self.stack.borrow_mut().push(StackItem::new(
+                                        Rc::new(new_array),
+                                        tail,
+                                        self.stack.clone(),
+                                    ));
+                                }
+                            }
+                        }
+                        _ => {}
+                    },
 
                     (Filter::Pick(ref values), Some(tail)) => match *current.value {
                         Value::Object(_) => {
@@ -512,6 +593,26 @@ mod test {
         for v in (*values.0).borrow().iter() {
             println!(
                 "json values: {}",
+                serde_json::to_string_pretty::<Value>(v).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn test_slice() {
+        let data = r#"
+	 {
+	   "name": "mr snuggle",
+           "values": [1,2,3,4,5,6]
+        }
+        "#;
+
+        let values = Path::collect(serde_json::from_str(&data).unwrap(), ">/values");
+
+        println!("output(mixed_path): {:?}", values);
+        for v in (*values.0).borrow().iter() {
+            println!(
+                "json values index: {}",
                 serde_json::to_string_pretty::<Value>(v).unwrap()
             );
         }

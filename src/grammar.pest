@@ -13,10 +13,10 @@ ident = { (alpha | digit | special_charaters)+ }
 child = { slash ~ ident }
 any_child = { slash ~ asterisk }
 descendant_child = { slash ~ double_dot ~ ident }
-indexed_child = { slash ~ "[" ~ number ~ "]" }
+array_index = { slash ~ "[" ~ number ~ "]" }
 slice = { slash ~ "[" ~ number ~ ":" ~ number ~ "]" }
-slice_to = { slash ~ "[:" ~ number ~ "]" }
-slice_from = { slash ~ "[" ~ number ~ ":]" }
+array_to = { slash ~ "[:" ~ number ~ "]" }
+array_from = { slash ~ "[" ~ number ~ ":]" }
 pick = { "pick" ~ (" ")* ~ "(" ~ (literal_keyed | sub_expression) ~ as? ~ ((",") ~ (" ")* ~ (literal_keyed | sub_expression) ~ as?)* ~ (" ")* ~ ")" }
 squash = { "squash" ~ "(" ~ ")" }
 squashFn = { slash ~ squash }
@@ -24,7 +24,7 @@ pickFn = { slash ~ pick }
 _as = _{ "as" }
 as = { (" ")* ~ _as ~ (" ")* ~ literal }
 
-sub_expression = { path ~ (pickFn | child | any_child | descendant_child | indexed_child | slice | slice_to | slice_from)* }
+sub_expression = { path ~ (pickFn | child | any_child | descendant_child | array_index | slice | array_to | array_from)* }
 string = { (alpha | digit | special_charaters | " ")+ }
 literal = { "'" ~ string ~ "'" }
 literal_keyed = { literal ~ as? }
@@ -43,6 +43,6 @@ array = {
 
 expression = {
     path ~
-    (pickFn | child | any_child | descendant_child | indexed_child | slice | slice_to | slice_from)* ~
+    (pickFn | child | any_child | descendant_child | array_index | slice | array_to | array_from)* ~
     EOI
 }

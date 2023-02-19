@@ -15,6 +15,40 @@ pub fn parse<'a>(input: &'a str) -> Vec<Filter> {
         match token.as_rule() {
             Rule::path => actions.push(Filter::Root),
             Rule::any_child => actions.push(Filter::AnyChild),
+            Rule::array_index => {
+                let elem = token.into_inner().nth(1).unwrap().as_span();
+                let index: usize = elem.as_str().parse::<usize>().unwrap();
+                actions.push(Filter::ArrayIndex(index));
+            }
+            Rule::array_from => {
+                let elem = token.into_inner().nth(1).unwrap().as_span();
+                let index: usize = elem.as_str().parse::<usize>().unwrap();
+                println!("elems: {:?}", &elem);
+                actions.push(Filter::ArrayFrom(index));
+            }
+            Rule::array_to => {
+                let elem = token.into_inner().nth(1).unwrap().as_span();
+                let index: usize = elem.as_str().parse::<usize>().unwrap();
+                println!("elems ( array to ): {:?}", &elem);
+                actions.push(Filter::ArrayTo(index));
+            }
+            Rule::slice => {
+                println!("IN SLICE PUSHER");
+                let mut it = token.into_inner();
+                it.next();
+                let from: usize = {
+                    let value = it.next().unwrap().as_span();
+                    println!("VALUE: INVALID: {}", value.as_str());
+                    value.as_str().parse::<usize>().unwrap()
+                };
+                println!("BROKE");
+                let to: usize = {
+                    let value = it.next().unwrap().as_span();
+                    value.as_str().parse::<usize>().unwrap()
+                };
+                println!("PUSHING SLICE {} {}", &from, &to);
+                actions.push(Filter::Slice(from, to));
+            }
             Rule::pickFn => {
                 let elems: Vec<PickFilterInner> = token
                     .into_inner()
@@ -156,5 +190,11 @@ mod test {
                 ]),
             ]
         );
+    }
+
+    #[test]
+    fn test_slice() {
+        let actions = parse(">/[1:4]");
+        assert_eq!(actions, vec![Filter::Root, Filter::Slice(1, 4),]);
     }
 }
