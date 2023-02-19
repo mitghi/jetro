@@ -23,30 +23,24 @@ pub fn parse<'a>(input: &'a str) -> Vec<Filter> {
             Rule::array_from => {
                 let elem = token.into_inner().nth(1).unwrap().as_span();
                 let index: usize = elem.as_str().parse::<usize>().unwrap();
-                println!("elems: {:?}", &elem);
                 actions.push(Filter::ArrayFrom(index));
             }
             Rule::array_to => {
                 let elem = token.into_inner().nth(1).unwrap().as_span();
                 let index: usize = elem.as_str().parse::<usize>().unwrap();
-                println!("elems ( array to ): {:?}", &elem);
                 actions.push(Filter::ArrayTo(index));
             }
             Rule::slice => {
-                println!("IN SLICE PUSHER");
                 let mut it = token.into_inner();
                 it.next();
                 let from: usize = {
                     let value = it.next().unwrap().as_span();
-                    println!("VALUE: INVALID: {}", value.as_str());
                     value.as_str().parse::<usize>().unwrap()
                 };
-                println!("BROKE");
                 let to: usize = {
                     let value = it.next().unwrap().as_span();
                     value.as_str().parse::<usize>().unwrap()
                 };
-                println!("PUSHING SLICE {} {}", &from, &to);
                 actions.push(Filter::Slice(from, to));
             }
             Rule::pickFn => {
@@ -69,13 +63,10 @@ pub fn parse<'a>(input: &'a str) -> Vec<Filter> {
                                     if result.len() > 2 {
                                         result = result[1..result.len() - 1].to_string();
                                     }
-                                    println!("GOT ALIAS {:?}", &result);
                                     Some(result)
                                 }
                                 _ => None,
                             };
-
-                            println!("span is : {}", &span);
 
                             match (span.len(), alias) {
                                 (2, _) => return PickFilterInner::Str("".to_string()),
@@ -85,7 +76,6 @@ pub fn parse<'a>(input: &'a str) -> Vec<Filter> {
                                     );
                                 }
                                 (_, Some(alias)) => {
-                                    println!("INSIDE ALIASSSSSSSSS");
                                     return PickFilterInner::KeyedStr {
                                         key: span[1..span.len() - 1].to_string(),
                                         alias: alias.to_string(),

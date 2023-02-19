@@ -1,8 +1,9 @@
 use crate::parser;
+#[allow(unused_imports)]
 use serde::{Deserialize, Serialize};
 use serde_json::map::Map;
 use serde_json::Value;
-use std::cell::{Ref, RefCell};
+use std::cell::RefCell;
 use std::rc::Rc;
 
 type PathOutput = Rc<RefCell<Vec<Rc<Value>>>>;
@@ -31,6 +32,7 @@ pub enum Filter {
     Slice(usize, usize),
 }
 
+#[allow(dead_code)]
 struct StackItem<'a> {
     value: Rc<Value>,
     filters: &'a [Filter],
@@ -39,7 +41,6 @@ struct StackItem<'a> {
 
 pub struct Context<'a> {
     stack: Rc<RefCell<Vec<StackItem<'a>>>>,
-    filters: &'a [Filter],
     pub results: Rc<RefCell<Vec<Rc<Value>>>>,
 }
 
@@ -142,22 +143,6 @@ impl Filter {
     }
 }
 
-impl<'a> StackItem<'a> {
-    fn key(&self) -> Option<String> {
-        if self.filters.len() > 0 {
-            match self.filters.first() {
-                Some(Filter::Descendant(_)) => {
-                    return self.filters.first().unwrap().key();
-                }
-                _ => {
-                    return None;
-                }
-            }
-        }
-        None
-    }
-}
-
 impl Path {
     pub fn collect<S: Into<String>>(v: Value, expr: S) -> PathResult {
         let expr: String = expr.into();
@@ -215,11 +200,7 @@ impl<'a> Context<'a> {
             .borrow_mut()
             .push(StackItem::new(rv.clone(), filters, Rc::clone(&stack)));
 
-        Self {
-            stack,
-            filters,
-            results,
-        }
+        Self { stack, results }
     }
 
     pub fn collect(&mut self) {
@@ -259,7 +240,6 @@ impl<'a> Context<'a> {
 
                     (Filter::Slice(ref from, ref to), Some(tail)) => match *current.value {
                         Value::Array(ref array) => {
-                            println!("IN SLICE EVALUATOR");
                             if array.len() >= *to && *from < *to {
                                 let new_slice = Value::Array(array[*from..*to].to_vec());
                                 let tlen = tail.len();
@@ -315,7 +295,7 @@ impl<'a> Context<'a> {
                         _ => {}
                     },
 
-                    (Filter::Pick(ref values), Some(tail)) => match *current.value {
+                    (Filter::Pick(_), Some(tail)) => match *current.value {
                         Value::Object(_) => {
                             let new_map = current.filters[0].pick(&current.value).unwrap();
                             let tlen = tail.len();
@@ -497,10 +477,6 @@ mod test {
         let mut ctx = Context::new(v, &filters);
         ctx.collect();
 
-        for v in ctx.results.borrow().iter() {
-            println!("got v {:?}", v);
-        }
-
         assert_eq!(
             *ctx.results.borrow().clone(),
             vec![Rc::new(Value::String("value".to_string()))]
@@ -537,7 +513,8 @@ mod test {
         }
 
         let output: Output = values.shove(0);
-        println!("output: {:?}", output.a);
+        assert_eq!(*&output.a, "object_a".to_string());
+        assert_eq!(*&output.b, "object_b".to_string());
     }
 
     #[test]
@@ -558,12 +535,17 @@ mod test {
         }
         "#;
 
-        let mut values = Path::collect(
+        let values = Path::collect(
             serde_json::from_str(&data).unwrap(),
             ">/..obj/pick('a', >/..with_nested/pick('object'))",
         );
 
-        println!("output(subpath): {:?}", values);
+        assert_eq!(
+            *values.0.borrow().clone(),
+            vec![Rc::new(
+                serde_json::json! {{"a": "object_a", "object": "final_value"}}
+            )]
+        );
     }
 
     #[test]
@@ -589,13 +571,12 @@ mod test {
             ">/..obj/pick('a' as 'foo', >/..object)",
         );
 
-        println!("output(mixed_path): {:?}", values);
-        for v in (*values.0).borrow().iter() {
-            println!(
-                "json values: {}",
-                serde_json::to_string_pretty::<Value>(v).unwrap()
-            );
-        }
+        assert_eq!(
+            *values.0.borrow().clone(),
+            vec![Rc::new(
+                serde_json::json! {{"descendant": "final_value", "foo": "object_a"}}
+            )]
+        );
     }
 
     #[test]
@@ -607,14 +588,11 @@ mod test {
         }
         "#;
 
-        let values = Path::collect(serde_json::from_str(&data).unwrap(), ">/values");
+        let values = Path::collect(serde_json::from_str(&data).unwrap(), ">/values/[1]");
 
-        println!("output(mixed_path): {:?}", values);
-        for v in (*values.0).borrow().iter() {
-            println!(
-                "json values index: {}",
-                serde_json::to_string_pretty::<Value>(v).unwrap()
-            );
-        }
+        assert_eq!(
+            *values.0.borrow().clone(),
+            vec![Rc::new(serde_json::json!(2))],
+        );
     }
 }
