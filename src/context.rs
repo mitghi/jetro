@@ -290,20 +290,25 @@ impl<'a> Context<'a> {
                             }
                             .format();
 
-                            let mut result = obj.clone();
-                            result.insert(alias.to_string(), Value::String(output.unwrap()));
+                            match output {
+                                Some(output) => {
+                                    let mut result = obj.clone();
+                                    result.insert(alias.to_string(), Value::String(output));
 
-                            let tlen = tail.len();
-                            if tlen == 0 {
-                                self.results
-                                    .borrow_mut()
-                                    .push(Rc::new(Value::Object(result)));
-                            } else {
-                                self.stack.borrow_mut().push(StackItem::new(
-                                    Rc::new(Value::Object(result)),
-                                    tail,
-                                    self.stack.clone(),
-                                ));
+                                    let tlen = tail.len();
+                                    if tlen == 0 {
+                                        self.results
+                                            .borrow_mut()
+                                            .push(Rc::new(Value::Object(result)));
+                                    } else {
+                                        self.stack.borrow_mut().push(StackItem::new(
+                                            Rc::new(Value::Object(result)),
+                                            tail,
+                                            self.stack.clone(),
+                                        ));
+                                    }
+                                }
+                                _ => {}
                             }
                         }
                         Value::Array(ref array) => {
@@ -321,26 +326,31 @@ impl<'a> Context<'a> {
                                 }
                                 .format();
 
-                                let mut result = e.clone();
-                                match result.as_object_mut() {
-                                    Some(ref mut handle) => {
-                                        handle.insert(
-                                            alias.to_string(),
-                                            Value::String(output.unwrap()),
-                                        );
+                                match output {
+                                    Some(output) => {
+                                        let mut result = e.clone();
+                                        match result.as_object_mut() {
+                                            Some(ref mut handle) => {
+                                                handle.insert(
+                                                    alias.to_string(),
+                                                    Value::String(output),
+                                                );
+                                            }
+                                            _ => {}
+                                        };
+
+                                        let tlen = tail.len();
+                                        if tlen == 0 {
+                                            self.results.borrow_mut().push(Rc::new(result));
+                                        } else {
+                                            self.stack.borrow_mut().push(StackItem::new(
+                                                Rc::new(result),
+                                                tail,
+                                                self.stack.clone(),
+                                            ));
+                                        }
                                     }
                                     _ => {}
-                                };
-
-                                let tlen = tail.len();
-                                if tlen == 0 {
-                                    self.results.borrow_mut().push(Rc::new(result));
-                                } else {
-                                    self.stack.borrow_mut().push(StackItem::new(
-                                        Rc::new(result),
-                                        tail,
-                                        self.stack.clone(),
-                                    ));
                                 }
                             }
                         }
