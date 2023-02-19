@@ -1,4 +1,5 @@
 use crate::parser;
+use dynfmt::{Format, SimpleCurlyFormat};
 #[allow(unused_imports)]
 use serde::{Deserialize, Serialize};
 use serde_json::map::Map;
@@ -43,6 +44,38 @@ struct StackItem<'a> {
 pub struct Context<'a> {
     stack: Rc<RefCell<Vec<StackItem<'a>>>>,
     pub results: Rc<RefCell<Vec<Rc<Value>>>>,
+}
+
+trait KeyFormater {
+    fn format(&self) -> Option<String>;
+}
+
+struct FormatImpl<'a> {
+    format: &'a str,
+    value: &'a Value,
+    keys: &'a [&'a str],
+}
+
+impl<'a> FormatImpl<'a> {
+    fn format(&self) -> Option<String> {
+        let mut values: Vec<&'a Value> = vec![];
+        for key in self.keys.iter() {
+            match self.value.get(&key) {
+                Some(result) => values.push(result),
+                _ => {}
+            };
+        }
+        match SimpleCurlyFormat.format(self.format, values) {
+            Ok(result) => Some(result.into()),
+            _ => None,
+        }
+    }
+}
+
+impl<'a> KeyFormater for FormatImpl<'a> {
+    fn format(&self) -> Option<String> {
+        self.format()
+    }
 }
 
 macro_rules! match_value {
@@ -607,5 +640,23 @@ mod test {
             *values.0.borrow().clone(),
             vec![Rc::new(serde_json::json!(2))],
         );
+    }
+
+    #[test]
+    fn test_format_impl() {
+        let data = serde_json::json!({
+            "name": "mr snuggle",
+            "alias": "jetro"
+        });
+
+        let keys = vec!["name", "alias"];
+
+        let format_impl: Box<dyn KeyFormater> = Box::new(FormatImpl {
+            format: "{}_{}",
+            value: &data,
+            keys: &keys,
+        });
+
+        assert_eq!(format_impl.format(), Some("mr snuggle_jetro".to_string()));
     }
 }

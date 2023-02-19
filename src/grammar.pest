@@ -3,12 +3,16 @@ digit = _{ '0'..'9' }
 number = { digit+ }
 float = { digit+ ~ "." ~ digit+ }
 special_charaters = _{ "_" | "-" | "\\" }
-
+whitespc = _{ " "* }
+lparen = _{"("}
+rparen = _{")"}
 path = { ">" }
 asterisk = _{ "*" }
 slash = { "/" }
 double_dot = _{ ".." }
 ident = { (alpha | digit | special_charaters)+ }
+_as = _{ "as" }
+as = { (" ")* ~ _as ~ (" ")* ~ literal }
 
 child = { slash ~ ident }
 any_child = { slash ~ asterisk }
@@ -21,12 +25,12 @@ pick = { "pick" ~ (" ")* ~ "(" ~ (literal_keyed | sub_expression_keyed ) ~ ((","
 squash = { "squash" ~ "(" ~ ")" }
 squashFn = { slash ~ squash }
 pickFn = { slash ~ pick }
-_as = _{ "as" }
-as = { (" ")* ~ _as ~ (" ")* ~ literal }
+formats = { "formats" ~ whitespc ~ lparen ~ literal ~ ((",")* ~ whitespc ~ literal)+ ~ whitespc ~ rparen}
+formatsFn = { slash ~ formats }
 
 sub_expression = { path ~ (pickFn | child | any_child | descendant_child | array_index | slice | array_to | array_from)* }
 sub_expression_keyed = { sub_expression ~ as? }
-string = { (alpha | digit | special_charaters | " ")+ }
+string = { (alpha | digit | special_charaters | " " | "%" | "{" | "}" | "\\" )+ }
 literal = { "'" ~ string ~ "'" }
 literal_keyed = { literal ~ as? }
 
@@ -44,6 +48,6 @@ array = {
 
 expression = {
     path ~
-    (pickFn | child | any_child | descendant_child | array_index | slice | array_to | array_from)* ~
+    (formatsFn | pickFn | child | any_child | descendant_child | array_index | slice | array_to | array_from)* ~
     EOI
 }
