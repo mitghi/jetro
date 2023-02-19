@@ -21,8 +21,22 @@ pub enum Filter {
     Pick(Vec<PickFilterInner>),
 }
 
+struct StackItem<'a> {
+    value: Rc<Value>,
+    filters: &'a [Filter],
+    stack: Rc<RefCell<Vec<StackItem<'a>>>>,
+}
+
+pub struct Context<'a> {
+    stack: Rc<RefCell<Vec<StackItem<'a>>>>,
+    filters: &'a [Filter],
+    pub results: Rc<RefCell<Vec<Rc<Value>>>>,
+}
+
 impl Filter {
     fn pick(&self, obj: &Value) -> Option<Value> {
+        let target_key = self.key();
+        let descendant_key = target_key.unwrap_or("descendant".to_string());
         match &self {
             Filter::Pick(ref values) => {
                 let mut new_map: Value = Value::Object(Map::new());
@@ -40,15 +54,13 @@ impl Filter {
                             };
                         }
                         PickFilterInner::Subpath(ref some_subpath) => {
-                            println!("SUBPATH: {:?}", &some_subpath);
                             for item in
                                 Path::collect_with_filter(obj.clone(), some_subpath.as_slice())
                                     .0
                                     .borrow()
                                     .iter()
                             {
-                                println!("ITEM: {}", &item);
-                                match *item.clone() {
+                                match &*item.clone() {
                                     Value::Object(ref target_object) => {
                                         for (k, v) in target_object {
                                             new_map
@@ -59,12 +71,33 @@ impl Filter {
                                     }
                                     Value::String(ref some_str) => {
                                         new_map.as_object_mut().unwrap().insert(
-                                            "descendant".to_string(),
+                                            descendant_key.clone(),
                                             Value::String(some_str.to_string()),
                                         );
                                     }
-                                    _ => {
-                                        todo!();
+                                    Value::Bool(ref some_bool) => {
+                                        new_map.as_object_mut().unwrap().insert(
+                                            descendant_key.clone(),
+                                            Value::Bool(some_bool.clone()),
+                                        );
+                                    }
+                                    Value::Number(ref some_number) => {
+                                        new_map.as_object_mut().unwrap().insert(
+                                            descendant_key.clone(),
+                                            Value::Number(some_number.clone()),
+                                        );
+                                    }
+                                    Value::Array(ref some_array) => {
+                                        new_map.as_object_mut().unwrap().insert(
+                                            descendant_key.clone(),
+                                            Value::Array(some_array.clone()),
+                                        );
+                                    }
+                                    Value::Null => {
+                                        new_map
+                                            .as_object_mut()
+                                            .unwrap()
+                                            .insert(descendant_key.clone(), Value::Null);
                                     }
                                 }
                             }
@@ -77,24 +110,38 @@ impl Filter {
             _ => None,
         }
     }
+
+    pub fn key(&self) -> Option<String> {
+        match &self {
+            Filter::Descendant(ref descendant) => {
+                println!("IN DESCENDANT: {}", &descendant);
+                return Some(descendant[2..].to_string());
+            }
+            _ => None,
+        }
+    }
 }
 
-struct StackItem<'a> {
-    value: Rc<Value>,
-    filters: &'a [Filter],
-    stack: Rc<RefCell<Vec<StackItem<'a>>>>,
-}
-
-pub struct Context<'a> {
-    stack: Rc<RefCell<Vec<StackItem<'a>>>>,
-    filters: &'a [Filter],
-    pub results: Rc<RefCell<Vec<Rc<Value>>>>,
+impl<'a> StackItem<'a> {
+    fn key(&self) -> Option<String> {
+        if self.filters.len() > 0 {
+            match self.filters.first() {
+                Some(Filter::Descendant(_)) => {
+                    return self.filters.first().unwrap().key();
+                }
+                _ => {
+                    return None;
+                }
+            }
+        }
+        None
+    }
 }
 
 type PathOutput = Rc<RefCell<Vec<Rc<Value>>>>;
 pub struct Path;
 #[derive(Debug)]
-pub struct PathResult(PathOutput);
+pub struct PathResult(pub PathOutput);
 
 impl Path {
     pub fn collect<S: Into<String>>(v: Value, expr: S) -> PathResult {

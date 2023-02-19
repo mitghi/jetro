@@ -1,4 +1,4 @@
 extern crate pest_derive;
 
-mod parser;
-mod context;
+pub mod parser;
+pub mod context;
