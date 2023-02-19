@@ -9,6 +9,7 @@ use std::rc::Rc;
 pub enum PickFilterInner {
     None,
     Str(String),
+    KeyedStr { key: String, alias: String },
     Subpath(Vec<Filter>),
 }
 
@@ -49,6 +50,17 @@ impl Filter {
                                         .as_object_mut()
                                         .unwrap()
                                         .insert(some_key.to_string(), v.clone());
+                                }
+                                _ => {}
+                            };
+                        }
+                        PickFilterInner::KeyedStr { ref key, ref alias } => {
+                            match obj.get(&key) {
+                                Some(v) => {
+                                    new_map
+                                        .as_object_mut()
+                                        .unwrap()
+                                        .insert(alias.clone(), v.clone());
                                 }
                                 _ => {}
                             };
@@ -114,7 +126,6 @@ impl Filter {
     pub fn key(&self) -> Option<String> {
         match &self {
             Filter::Descendant(ref descendant) => {
-                println!("IN DESCENDANT: {}", &descendant);
                 return Some(descendant[2..].to_string());
             }
             _ => None,
@@ -494,7 +505,7 @@ mod test {
 
         let values = Path::collect(
             serde_json::from_str(&data).unwrap(),
-            ">/..obj/pick('a', >/..object)",
+            ">/..obj/pick('a' as 'foo', >/..object)",
         );
 
         println!("output(mixed_path): {:?}", values);

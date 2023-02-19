@@ -17,14 +17,18 @@ indexed_child = { slash ~ "[" ~ number ~ "]" }
 slice = { slash ~ "[" ~ number ~ ":" ~ number ~ "]" }
 slice_to = { slash ~ "[:" ~ number ~ "]" }
 slice_from = { slash ~ "[" ~ number ~ ":]" }
-pick = { "pick" ~ ("*")* ~ "(" ~ (literal | sub_expression) ~ ((",") ~ (" ")* ~ (literal | sub_expression))* ~ (" ")* ~ ")" }
+pick = { "pick" ~ (" ")* ~ "(" ~ (literal_keyed | sub_expression) ~ as? ~ ((",") ~ (" ")* ~ (literal_keyed | sub_expression) ~ as?)* ~ (" ")* ~ ")" }
 squash = { "squash" ~ "(" ~ ")" }
 squashFn = { slash ~ squash }
 pickFn = { slash ~ pick }
+_as = _{ "as" }
+as = { (" ")* ~ _as ~ (" ")* ~ literal }
 
 sub_expression = { path ~ (pickFn | child | any_child | descendant_child | indexed_child | slice | slice_to | slice_from)* }
 string = { (alpha | digit | special_charaters | " ")+ }
 literal = { "'" ~ string ~ "'" }
+literal_keyed = { literal ~ as? }
+
 array = {
     "[" ~
         (" ")* ~

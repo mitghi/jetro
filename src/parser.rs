@@ -25,13 +25,39 @@ pub fn parse<'a>(input: &'a str) -> Vec<Filter> {
                         Rule::sub_expression => {
                             return PickFilterInner::Subpath(parse(v.as_str()));
                         }
-                        Rule::literal => {
-                            println!("rule is : {:?}", &v);
-                            let span = v.as_span().as_str().to_string();
-                            if span.len() == 2 {
-                                return PickFilterInner::Str("".to_string());
+                        Rule::literal_keyed => {
+                            let mut l = v.into_inner();
+                            let span = l.next().unwrap().as_span().as_str().to_string();
+
+                            let alias: Option<String> = match l.next() {
+                                Some(ref result) => {
+                                    let mut result = result.as_span().as_str()[4..].to_string();
+                                    if result.len() > 2 {
+                                        result = result[1..result.len() - 1].to_string();
+                                    }
+                                    println!("GOT ALIAS {:?}", &result);
+                                    Some(result)
+                                }
+                                _ => None,
+                            };
+
+                            println!("span is : {}", &span);
+
+                            match (span.len(), alias) {
+                                (2, _) => return PickFilterInner::Str("".to_string()),
+                                (_, None) => {
+                                    return PickFilterInner::Str(
+                                        span[1..span.len() - 1].to_string(),
+                                    );
+                                }
+                                (_, Some(alias)) => {
+                                    println!("INSIDE ALIASSSSSSSSS");
+                                    return PickFilterInner::KeyedStr {
+                                        key: span[1..span.len() - 1].to_string(),
+                                        alias: alias.to_string(),
+                                    };
+                                }
                             }
-                            return PickFilterInner::Str(span[1..span.len() - 1].to_string());
                         }
                         _ => {
                             return PickFilterInner::None;
@@ -103,6 +129,30 @@ mod test {
                     PickFilterInner::Str("b".to_string()),
                     PickFilterInner::Str("c".to_string()),
                     PickFilterInner::Str("d".to_string())
+                ]),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_with_keyed_literal() {
+        let actions = parse(">/obj/some/..descendant/pick('f' as 'foo', 'b' as 'bar')");
+        assert_eq!(
+            actions,
+            vec![
+                Filter::Root,
+                Filter::Child("obj".to_string()),
+                Filter::Child("some".to_string()),
+                Filter::Descendant("descendant".to_string()),
+                Filter::Pick(vec![
+                    PickFilterInner::KeyedStr {
+                        key: "f".to_string(),
+                        alias: "foo".to_string()
+                    },
+                    PickFilterInner::KeyedStr {
+                        key: "b".to_string(),
+                        alias: "bar".to_string()
+                    },
                 ]),
             ]
         );
