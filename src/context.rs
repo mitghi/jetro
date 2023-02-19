@@ -17,6 +17,7 @@ pub enum PickFilterInner {
     Str(String),
     KeyedStr { key: String, alias: String },
     Subpath(Vec<Filter>),
+    KeyedSubpath { subpath: Vec<Filter>, alias: String },
 }
 
 #[derive(Debug, PartialEq)]
@@ -74,6 +75,58 @@ impl Filter {
                                 }
                                 _ => {}
                             };
+                        }
+                        PickFilterInner::KeyedSubpath {
+                            subpath: ref some_subpath,
+                            alias: ref some_alias,
+                        } => {
+                            for item in
+                                Path::collect_with_filter(obj.clone(), some_subpath.as_slice())
+                                    .0
+                                    .borrow()
+                                    .iter()
+                            {
+                                match &*item.clone() {
+                                    Value::Object(ref target_object) => {
+                                        for (k, v) in target_object {
+                                            new_map
+                                                .as_object_mut()
+                                                .unwrap()
+                                                .insert(some_alias.clone(), v.clone());
+                                        }
+                                    }
+                                    Value::String(ref some_str) => {
+                                        new_map.as_object_mut().unwrap().insert(
+                                            some_alias.clone(),
+                                            Value::String(some_str.to_string()),
+                                        );
+                                    }
+                                    Value::Bool(ref some_bool) => {
+                                        new_map.as_object_mut().unwrap().insert(
+                                            some_alias.clone(),
+                                            Value::Bool(some_bool.clone()),
+                                        );
+                                    }
+                                    Value::Number(ref some_number) => {
+                                        new_map.as_object_mut().unwrap().insert(
+                                            some_alias.clone(),
+                                            Value::Number(some_number.clone()),
+                                        );
+                                    }
+                                    Value::Array(ref some_array) => {
+                                        new_map.as_object_mut().unwrap().insert(
+                                            some_alias.clone(),
+                                            Value::Array(some_array.clone()),
+                                        );
+                                    }
+                                    Value::Null => {
+                                        new_map
+                                            .as_object_mut()
+                                            .unwrap()
+                                            .insert(some_alias.clone(), Value::Null);
+                                    }
+                                }
+                            }
                         }
                         PickFilterInner::Subpath(ref some_subpath) => {
                             for item in

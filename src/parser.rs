@@ -50,6 +50,32 @@ pub fn parse<'a>(input: &'a str) -> Vec<Filter> {
                     .unwrap()
                     .into_inner()
                     .map(|v| match &v.as_rule() {
+                        Rule::sub_expression_keyed => {
+                            let mut l = v.into_inner();
+                            let subexpr = l.next().unwrap().as_str();
+                            let alias: Option<String> = match l.next() {
+                                Some(ref result) => {
+                                    let mut result = result.as_span().as_str()[4..].to_string();
+                                    if result.len() > 2 {
+                                        result = result[1..result.len() - 1].to_string();
+                                    }
+                                    Some(result)
+                                }
+                                _ => None,
+                            };
+
+                            match alias {
+                                Some(alias) => {
+                                    return PickFilterInner::KeyedSubpath {
+                                        subpath: parse(subexpr),
+                                        alias,
+                                    };
+                                }
+                                None => {
+                                    return PickFilterInner::Subpath(parse(subexpr));
+                                }
+                            }
+                        }
                         Rule::sub_expression => {
                             return PickFilterInner::Subpath(parse(v.as_str()));
                         }
@@ -176,6 +202,34 @@ mod test {
                     PickFilterInner::KeyedStr {
                         key: "b".to_string(),
                         alias: "bar".to_string()
+                    },
+                ]),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_with_sub_expression_keyed() {
+        let actions = parse(">/obj/some/..descendant/pick('f' as 'foo', >/some/branch as 'path')");
+        assert_eq!(
+            actions,
+            vec![
+                Filter::Root,
+                Filter::Child("obj".to_string()),
+                Filter::Child("some".to_string()),
+                Filter::Descendant("descendant".to_string()),
+                Filter::Pick(vec![
+                    PickFilterInner::KeyedStr {
+                        key: "f".to_string(),
+                        alias: "foo".to_string()
+                    },
+                    PickFilterInner::KeyedSubpath {
+                        subpath: vec![
+                            Filter::Root,
+                            Filter::Child("some".to_string()),
+                            Filter::Child("branch".to_string()),
+                        ],
+                        alias: "path".to_string()
                     },
                 ]),
             ]
