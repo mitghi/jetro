@@ -1,6 +1,6 @@
 use pest_derive::Parser as Parse;
 
-use crate::context::{Filter, PickFilterInner};
+use crate::context::{Filter, FormatOp, PickFilterInner};
 use pest::Parser;
 
 #[derive(Parse)]
@@ -14,6 +14,45 @@ pub fn parse<'a>(input: &'a str) -> Vec<Filter> {
     for token in root.into_inner() {
         match token.as_rule() {
             Rule::path => actions.push(Filter::Root),
+            Rule::formatsFn => {
+                let mut arguments: Vec<String> = vec![];
+                let mut elem = token.into_inner().nth(1).unwrap().into_inner();
+                let head = elem.next().unwrap().as_str();
+                let format: String = {
+                    if head.len() > 2 {
+                        head[1..head.len() - 1].to_string()
+                    } else {
+                        "".to_string()
+                    }
+                };
+                let mut alias: String = "unknown".to_string();
+                for e in elem {
+                    match e.as_rule() {
+                        Rule::literal => {
+                            let name: String = {
+                                let elem = e.as_str();
+                                if elem.len() > 2 {
+                                    elem[1..elem.len() - 1].to_string()
+                                } else {
+                                    "".to_string()
+                                }
+                            };
+                            arguments.push(name);
+                        }
+                        _ => {
+                            let e = e.as_str();
+                            if e.len() > 2 {
+                                alias = e[4..e.len() - 1].to_string();
+                            }
+                        }
+                    }
+                }
+                actions.push(Filter::Format(FormatOp::FormatString {
+                    format,
+                    arguments,
+                    alias,
+                }));
+            }
             Rule::any_child => actions.push(Filter::AnyChild),
             Rule::array_index => {
                 let elem = token.into_inner().nth(1).unwrap().as_span();
@@ -240,5 +279,21 @@ mod test {
     fn test_slice() {
         let actions = parse(">/[1:4]");
         assert_eq!(actions, vec![Filter::Root, Filter::Slice(1, 4),]);
+    }
+
+    #[test]
+    fn test_format() {
+        let actions = parse(">/formats('{}{}', 'name', 'alias') as 'some_key'");
+        assert_eq!(
+            actions,
+            vec![
+                Filter::Root,
+                Filter::Format(FormatOp::FormatString {
+                    format: "{}{}".to_string(),
+                    arguments: vec!["name".to_string(), "alias".to_string()],
+                    alias: "some_key".to_string(),
+                })
+            ]
+        );
     }
 }

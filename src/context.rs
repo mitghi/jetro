@@ -13,6 +13,15 @@ pub struct Path;
 pub struct PathResult(pub PathOutput);
 
 #[derive(Debug, PartialEq)]
+pub enum FormatOp {
+    FormatString {
+        format: String,
+        arguments: Vec<String>,
+        alias: String,
+    },
+}
+
+#[derive(Debug, PartialEq)]
 pub enum PickFilterInner {
     None,
     Str(String),
@@ -28,6 +37,7 @@ pub enum Filter {
     Child(String),
     Descendant(String),
     Pick(Vec<PickFilterInner>),
+    Format(FormatOp),
     ArrayIndex(usize),
     ArrayFrom(usize),
     ArrayTo(usize),
@@ -53,7 +63,7 @@ trait KeyFormater {
 struct FormatImpl<'a> {
     format: &'a str,
     value: &'a Value,
-    keys: &'a [&'a str],
+    keys: &'a Vec<String>,
 }
 
 impl<'a> FormatImpl<'a> {
@@ -264,6 +274,78 @@ impl<'a> Context<'a> {
                         tail,
                         self.stack.clone(),
                     )),
+
+                    (Filter::Format(ref target_format), Some(tail)) => match *current.value {
+                        Value::Object(ref obj) => {
+                            let FormatOp::FormatString {
+                                format: ref fmt,
+                                arguments: ref args,
+                                alias: ref alias,
+                            } = target_format;
+
+                            let output: Option<String> = FormatImpl {
+                                format: fmt,
+                                value: &current.value,
+                                keys: args,
+                            }
+                            .format();
+
+                            let mut result = obj.clone();
+                            result.insert(alias.to_string(), Value::String(output.unwrap()));
+
+                            let tlen = tail.len();
+                            if tlen == 0 {
+                                self.results
+                                    .borrow_mut()
+                                    .push(Rc::new(Value::Object(result)));
+                            } else {
+                                self.stack.borrow_mut().push(StackItem::new(
+                                    Rc::new(Value::Object(result)),
+                                    tail,
+                                    self.stack.clone(),
+                                ));
+                            }
+                        }
+                        Value::Array(ref array) => {
+                            for e in array.iter() {
+                                let FormatOp::FormatString {
+                                    format: ref fmt,
+                                    arguments: ref args,
+                                    alias: ref alias,
+                                } = target_format;
+
+                                let output: Option<String> = FormatImpl {
+                                    format: fmt,
+                                    value: &current.value,
+                                    keys: args,
+                                }
+                                .format();
+
+                                let mut result = e.clone();
+                                match result.as_object_mut() {
+                                    Some(ref mut handle) => {
+                                        handle.insert(
+                                            alias.to_string(),
+                                            Value::String(output.unwrap()),
+                                        );
+                                    }
+                                    _ => {}
+                                };
+
+                                let tlen = tail.len();
+                                if tlen == 0 {
+                                    self.results.borrow_mut().push(Rc::new(result));
+                                } else {
+                                    self.stack.borrow_mut().push(StackItem::new(
+                                        Rc::new(result),
+                                        tail,
+                                        self.stack.clone(),
+                                    ));
+                                }
+                            }
+                        }
+                        _ => {}
+                    },
 
                     (Filter::ArrayIndex(ref index), Some(tail)) => match *current.value {
                         Value::Array(ref array) => {
@@ -649,7 +731,7 @@ mod test {
             "alias": "jetro"
         });
 
-        let keys = vec!["name", "alias"];
+        let keys = vec!["name".to_string(), "alias".to_string()];
 
         let format_impl: Box<dyn KeyFormater> = Box::new(FormatImpl {
             format: "{}_{}",

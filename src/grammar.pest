@@ -25,7 +25,7 @@ pick = { "pick" ~ (" ")* ~ "(" ~ (literal_keyed | sub_expression_keyed ) ~ ((","
 squash = { "squash" ~ "(" ~ ")" }
 squashFn = { slash ~ squash }
 pickFn = { slash ~ pick }
-formats = { "formats" ~ whitespc ~ lparen ~ literal ~ ((",")* ~ whitespc ~ literal)+ ~ whitespc ~ rparen}
+formats = { "formats" ~ whitespc ~ lparen ~ literal ~ ((",")* ~ whitespc ~ literal)+ ~ whitespc ~ rparen ~ whitespc ~ as}
 formatsFn = { slash ~ formats }
 
 sub_expression = { path ~ (pickFn | child | any_child | descendant_child | array_index | slice | array_to | array_from)* }
