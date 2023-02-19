@@ -280,7 +280,7 @@ impl<'a> Context<'a> {
                             let FormatOp::FormatString {
                                 format: ref fmt,
                                 arguments: ref args,
-                                alias: ref alias,
+                                ref alias,
                             } = target_format;
 
                             let output: Option<String> = FormatImpl {
@@ -316,7 +316,7 @@ impl<'a> Context<'a> {
                                 let FormatOp::FormatString {
                                     format: ref fmt,
                                     arguments: ref args,
-                                    alias: ref alias,
+                                    ref alias,
                                 } = target_format;
 
                                 let output: Option<String> = FormatImpl {
