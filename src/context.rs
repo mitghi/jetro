@@ -45,6 +45,57 @@ pub struct Context<'a> {
     pub results: Rc<RefCell<Vec<Rc<Value>>>>,
 }
 
+macro_rules! match_value {
+    ($target_object:expr, $target_map:expr, $target_key:expr, $some_path:expr) => {{
+        for item in Path::collect_with_filter($target_object.clone(), $some_path.as_slice())
+            .0
+            .borrow()
+            .iter()
+        {
+            match &*item.clone() {
+                Value::Object(ref target_object) => {
+                    for (k, v) in target_object {
+                        $target_map
+                            .as_object_mut()
+                            .unwrap()
+                            .insert(k.clone(), v.clone());
+                    }
+                }
+                Value::String(ref some_str) => {
+                    $target_map
+                        .as_object_mut()
+                        .unwrap()
+                        .insert($target_key.clone(), Value::String(some_str.to_string()));
+                }
+                Value::Bool(ref some_bool) => {
+                    $target_map
+                        .as_object_mut()
+                        .unwrap()
+                        .insert($target_key.clone(), Value::Bool(some_bool.clone()));
+                }
+                Value::Number(ref some_number) => {
+                    $target_map
+                        .as_object_mut()
+                        .unwrap()
+                        .insert($target_key.clone(), Value::Number(some_number.clone()));
+                }
+                Value::Array(ref some_array) => {
+                    $target_map
+                        .as_object_mut()
+                        .unwrap()
+                        .insert($target_key.clone(), Value::Array(some_array.clone()));
+                }
+                Value::Null => {
+                    $target_map
+                        .as_object_mut()
+                        .unwrap()
+                        .insert($target_key.clone(), Value::Null);
+                }
+            }
+        }
+    }};
+}
+
 impl Filter {
     fn pick(&self, obj: &Value) -> Option<Value> {
         let target_key = self.key();
@@ -76,107 +127,16 @@ impl Filter {
                                 _ => {}
                             };
                         }
+
                         PickFilterInner::KeyedSubpath {
                             subpath: ref some_subpath,
                             alias: ref some_alias,
-                        } => {
-                            for item in
-                                Path::collect_with_filter(obj.clone(), some_subpath.as_slice())
-                                    .0
-                                    .borrow()
-                                    .iter()
-                            {
-                                match &*item.clone() {
-                                    Value::Object(ref target_object) => {
-                                        for (k, v) in target_object {
-                                            new_map
-                                                .as_object_mut()
-                                                .unwrap()
-                                                .insert(some_alias.clone(), v.clone());
-                                        }
-                                    }
-                                    Value::String(ref some_str) => {
-                                        new_map.as_object_mut().unwrap().insert(
-                                            some_alias.clone(),
-                                            Value::String(some_str.to_string()),
-                                        );
-                                    }
-                                    Value::Bool(ref some_bool) => {
-                                        new_map.as_object_mut().unwrap().insert(
-                                            some_alias.clone(),
-                                            Value::Bool(some_bool.clone()),
-                                        );
-                                    }
-                                    Value::Number(ref some_number) => {
-                                        new_map.as_object_mut().unwrap().insert(
-                                            some_alias.clone(),
-                                            Value::Number(some_number.clone()),
-                                        );
-                                    }
-                                    Value::Array(ref some_array) => {
-                                        new_map.as_object_mut().unwrap().insert(
-                                            some_alias.clone(),
-                                            Value::Array(some_array.clone()),
-                                        );
-                                    }
-                                    Value::Null => {
-                                        new_map
-                                            .as_object_mut()
-                                            .unwrap()
-                                            .insert(some_alias.clone(), Value::Null);
-                                    }
-                                }
-                            }
-                        }
+                        } => match_value!(obj, new_map, some_alias, some_subpath),
+
                         PickFilterInner::Subpath(ref some_subpath) => {
-                            for item in
-                                Path::collect_with_filter(obj.clone(), some_subpath.as_slice())
-                                    .0
-                                    .borrow()
-                                    .iter()
-                            {
-                                match &*item.clone() {
-                                    Value::Object(ref target_object) => {
-                                        for (k, v) in target_object {
-                                            new_map
-                                                .as_object_mut()
-                                                .unwrap()
-                                                .insert(k.to_string(), v.clone());
-                                        }
-                                    }
-                                    Value::String(ref some_str) => {
-                                        new_map.as_object_mut().unwrap().insert(
-                                            descendant_key.clone(),
-                                            Value::String(some_str.to_string()),
-                                        );
-                                    }
-                                    Value::Bool(ref some_bool) => {
-                                        new_map.as_object_mut().unwrap().insert(
-                                            descendant_key.clone(),
-                                            Value::Bool(some_bool.clone()),
-                                        );
-                                    }
-                                    Value::Number(ref some_number) => {
-                                        new_map.as_object_mut().unwrap().insert(
-                                            descendant_key.clone(),
-                                            Value::Number(some_number.clone()),
-                                        );
-                                    }
-                                    Value::Array(ref some_array) => {
-                                        new_map.as_object_mut().unwrap().insert(
-                                            descendant_key.clone(),
-                                            Value::Array(some_array.clone()),
-                                        );
-                                    }
-                                    Value::Null => {
-                                        new_map
-                                            .as_object_mut()
-                                            .unwrap()
-                                            .insert(descendant_key.clone(), Value::Null);
-                                    }
-                                }
-                            }
+                            match_value!(obj, new_map, descendant_key, some_subpath)
                         }
+
                         _ => {}
                     }
                 }
