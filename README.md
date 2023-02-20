@@ -1,6 +1,6 @@
 # jetro
 
-Jetro is a tool for transforming, querying and comparing data in JSON format.
+Jetro is a tool for transforming and querying the json format.
 
 # example
 
@@ -41,9 +41,11 @@ Jetro is a tool for transforming, querying and comparing data in JSON format.
 ```json
 >/bar
 ```
-
-produces
-```json
+<details>
+  <summary>See output</summary>
+  
+  ### result
+  ```json
   "bar": {
     "meows": [
       10,
@@ -58,14 +60,20 @@ produces
       "lastname": "Snuggle"
     }
   }
-```
+  ```
+</details>
+
 ---
 
 ```json
 >/pick('foo', >/..person/formats('Herrn {} {}', 'firstname', 'lastname') as 'fullname'/fullname as 'fullname')
 ```
 
-produces
+<details>
+  <summary>See output</summary>
+  
+  ### result
+
 ```json
 {
   "foo": [
@@ -83,6 +91,7 @@ produces
   "fullname": "Herrn Mio Snuggle"
 }
 ```
+</details>
 
 ---
 
@@ -90,7 +99,11 @@ produces
 >/pick('friend', >/..person/formats('Herrn {} {}', 'firstname', 'lastname') as 'fullname'/fullname as 'fullname', >/foo/..contract)
 ```
 
-produces
+<details>
+  <summary>See output</summary>
+  
+  ### result
+
 ```json
 {
   "friend": "Thunder Pur",
@@ -98,6 +111,7 @@ produces
   "kind": "Furry Purr"
 }
 ```
+</details>
 
 ---
 
@@ -105,7 +119,11 @@ produces
 >/..foo/[:4]
 ```
 
-produces
+<details>
+  <summary>See output</summary>
+  
+  ### result
+
 ```json
 [
   1,
@@ -114,6 +132,7 @@ produces
   4
 ]
 ```
+</details>
 
 ---
 
@@ -121,10 +140,15 @@ produces
 >/..meows/[4:]
 ```
 
-produces
+<details>
+  <summary>See output</summary>
+  
+  ### result
+
 ```json
 [
   50,
   60
 ]
 ```
+</details>
