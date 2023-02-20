@@ -88,6 +88,34 @@ impl<'a> KeyFormater for FormatImpl<'a> {
     }
 }
 
+macro_rules! push_to_stack_or_produce {
+    ($results:expr, $stack:expr, $tail:expr, $value:expr) => {
+        let tlen = $tail.len();
+        if tlen == 0 {
+            $results.borrow_mut().push(Rc::new($value));
+        } else {
+            $stack
+                .borrow_mut()
+                .push(StackItem::new(Rc::new($value), $tail, $stack.clone()));
+        }
+    };
+}
+
+macro_rules! push_to_stack_iter_or_produce {
+    ($results:expr, $stack:expr, $tail:expr, $obj:expr) => {
+        let tlen = $tail.len();
+        for (_k, v) in $obj {
+            if tlen == 0 {
+                $results.borrow_mut().push(Rc::new(v.clone()));
+            } else {
+                $stack
+                    .borrow_mut()
+                    .push(StackItem::new(Rc::new(v.clone()), $tail, $stack.clone()));
+            }
+        }
+    };
+}
+
 macro_rules! match_value {
     ($target_object:expr, $target_map:expr, $target_key:expr, $some_path:expr) => {{
         for item in Path::collect_with_filter($target_object.clone(), $some_path.as_slice())
@@ -295,18 +323,12 @@ impl<'a> Context<'a> {
                                     let mut result = obj.clone();
                                     result.insert(alias.to_string(), Value::String(output));
 
-                                    let tlen = tail.len();
-                                    if tlen == 0 {
-                                        self.results
-                                            .borrow_mut()
-                                            .push(Rc::new(Value::Object(result)));
-                                    } else {
-                                        self.stack.borrow_mut().push(StackItem::new(
-                                            Rc::new(Value::Object(result)),
-                                            tail,
-                                            self.stack.clone(),
-                                        ));
-                                    }
+                                    push_to_stack_or_produce!(
+                                        self.results,
+                                        self.stack,
+                                        tail,
+                                        Value::Object(result)
+                                    );
                                 }
                                 _ => {}
                             }
@@ -339,16 +361,12 @@ impl<'a> Context<'a> {
                                             _ => {}
                                         };
 
-                                        let tlen = tail.len();
-                                        if tlen == 0 {
-                                            self.results.borrow_mut().push(Rc::new(result));
-                                        } else {
-                                            self.stack.borrow_mut().push(StackItem::new(
-                                                Rc::new(result),
-                                                tail,
-                                                self.stack.clone(),
-                                            ));
-                                        }
+                                        push_to_stack_or_produce!(
+                                            self.results,
+                                            self.stack,
+                                            tail,
+                                            result
+                                        );
                                     }
                                     _ => {}
                                 }
@@ -361,16 +379,12 @@ impl<'a> Context<'a> {
                         Value::Array(ref array) => {
                             if *index < array.len() {
                                 let new_value = array[*index].clone();
-                                let tlen = tail.len();
-                                if tlen == 0 {
-                                    self.results.borrow_mut().push(Rc::new(new_value));
-                                } else {
-                                    self.stack.borrow_mut().push(StackItem::new(
-                                        Rc::new(new_value),
-                                        tail,
-                                        self.stack.clone(),
-                                    ));
-                                }
+                                push_to_stack_or_produce!(
+                                    self.results,
+                                    self.stack,
+                                    tail,
+                                    new_value
+                                );
                             }
                         }
                         _ => {}
@@ -380,16 +394,12 @@ impl<'a> Context<'a> {
                         Value::Array(ref array) => {
                             if array.len() >= *to && *from < *to {
                                 let new_slice = Value::Array(array[*from..*to].to_vec());
-                                let tlen = tail.len();
-                                if tlen == 0 {
-                                    self.results.borrow_mut().push(Rc::new(new_slice));
-                                } else {
-                                    self.stack.borrow_mut().push(StackItem::new(
-                                        Rc::new(new_slice),
-                                        tail,
-                                        self.stack.clone(),
-                                    ));
-                                }
+                                push_to_stack_or_produce!(
+                                    self.results,
+                                    self.stack,
+                                    tail,
+                                    new_slice
+                                );
                             }
                         }
                         _ => {}
@@ -399,16 +409,12 @@ impl<'a> Context<'a> {
                         Value::Array(ref array) => {
                             if array.len() >= *index {
                                 let new_array = Value::Array(array[..*index].to_vec());
-                                let tlen = tail.len();
-                                if tlen == 0 {
-                                    self.results.borrow_mut().push(Rc::new(new_array));
-                                } else {
-                                    self.stack.borrow_mut().push(StackItem::new(
-                                        Rc::new(new_array),
-                                        tail,
-                                        self.stack.clone(),
-                                    ));
-                                }
+                                push_to_stack_or_produce!(
+                                    self.results,
+                                    self.stack,
+                                    tail,
+                                    new_array
+                                );
                             }
                         }
                         _ => {}
@@ -418,16 +424,12 @@ impl<'a> Context<'a> {
                         Value::Array(ref array) => {
                             if array.len() >= *index {
                                 let new_array = Value::Array(array[*index..].to_vec());
-                                let tlen = tail.len();
-                                if tlen == 0 {
-                                    self.results.borrow_mut().push(Rc::new(new_array));
-                                } else {
-                                    self.stack.borrow_mut().push(StackItem::new(
-                                        Rc::new(new_array),
-                                        tail,
-                                        self.stack.clone(),
-                                    ));
-                                }
+                                push_to_stack_or_produce!(
+                                    self.results,
+                                    self.stack,
+                                    tail,
+                                    new_array
+                                );
                             }
                         }
                         _ => {}
@@ -436,16 +438,7 @@ impl<'a> Context<'a> {
                     (Filter::Pick(_), Some(tail)) => match *current.value {
                         Value::Object(_) => {
                             let new_map = current.filters[0].pick(&current.value).unwrap();
-                            let tlen = tail.len();
-                            if tlen == 0 {
-                                self.results.borrow_mut().push(Rc::new(new_map));
-                            } else {
-                                self.stack.borrow_mut().push(StackItem::new(
-                                    Rc::new(new_map),
-                                    tail,
-                                    self.stack.clone(),
-                                ));
-                            }
+                            push_to_stack_or_produce!(self.results, self.stack, tail, new_map);
                         }
                         Value::Array(_) => {}
                         _ => {}
@@ -453,32 +446,15 @@ impl<'a> Context<'a> {
 
                     (Filter::AnyChild, Some(tail)) => match *current.value {
                         Value::Object(ref obj) => {
-                            let tlen = tail.len();
-                            for (_, v) in obj {
-                                if tlen == 0 {
-                                    self.results.borrow_mut().push(Rc::new(v.clone()));
-                                } else {
-                                    self.stack.borrow_mut().push(StackItem::new(
-                                        Rc::new(v.clone()),
-                                        tail,
-                                        self.stack.clone(),
-                                    ));
-                                }
-                            }
+                            push_to_stack_iter_or_produce!(self.results, self.stack, tail, obj);
                         }
                         Value::Array(ref array) => {
-                            let tlen = tail.len();
-                            for v in array.iter() {
-                                if tlen == 0 {
-                                    self.results.borrow_mut().push(Rc::new(v.clone()));
-                                } else {
-                                    self.stack.borrow_mut().push(StackItem::new(
-                                        Rc::new(v.clone()),
-                                        tail,
-                                        self.stack.clone(),
-                                    ));
-                                }
-                            }
+                            push_to_stack_iter_or_produce!(
+                                self.results,
+                                self.stack,
+                                tail,
+                                array.iter().enumerate()
+                            );
                         }
                         _ => {}
                     },
@@ -486,15 +462,12 @@ impl<'a> Context<'a> {
                     (Filter::Child(ref name), Some(tail)) => match *current.value {
                         Value::Object(ref obj) => match obj.into_iter().find(|(k, _)| *k == name) {
                             Some((_, v)) => {
-                                if tail.len() == 0 {
-                                    self.results.borrow_mut().push(Rc::new(v.clone()));
-                                } else {
-                                    self.stack.borrow_mut().push(StackItem::new(
-                                        Rc::new(v.clone()),
-                                        tail,
-                                        self.stack.clone(),
-                                    ));
-                                }
+                                push_to_stack_or_produce!(
+                                    self.results,
+                                    self.stack,
+                                    tail,
+                                    v.clone()
+                                );
                             }
                             _ => {}
                         },
