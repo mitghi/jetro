@@ -6,13 +6,23 @@ special_charaters = _{ "_" | "-" | "\\" }
 whitespc = _{ " "* }
 lparen = _{"("}
 rparen = _{")"}
+at = _{ "@" }
 path = { ">" }
+reverse_path = { "<" }
 asterisk = _{ "*" }
 slash = { "/" }
 double_dot = _{ ".." }
 ident = { (alpha | digit | special_charaters)+ }
 _as = _{ "as" }
 as = { (" ")* ~ _as ~ (" ")* ~ literal }
+sharp = _{ "#" }
+dot = _{ "." }
+greater = { ">" }
+less = { "<" }
+greater_equal = { ">=" }
+less_equal = { "<=" }
+equal = { "==" }
+cmp = { equal | greater | less | greater_equal | less_equal }
 
 child = { slash ~ ident }
 any_child = { slash ~ asterisk }
@@ -21,18 +31,35 @@ array_index = { slash ~ "[" ~ number ~ "]" }
 slice = { slash ~ "[" ~ number ~ ":" ~ number ~ "]" }
 array_to = { slash ~ "[:" ~ number ~ "]" }
 array_from = { slash ~ "[" ~ number ~ ":]" }
-pick = { "pick" ~ (" ")* ~ "(" ~ (literal_keyed | sub_expression_keyed ) ~ ((",") ~ (" ")* ~ (literal_keyed | sub_expression_keyed ))* ~ (" ")* ~ ")" }
-squash = { "squash" ~ "(" ~ ")" }
+pick = {
+     sharp ~ "pick" ~ (" ")* ~
+         "(" ~ (literal_keyed | (sub_expression_keyed | sub_expression_keyed_reversed) ) ~
+              ((",") ~ (" ")* ~ (literal_keyed | (sub_expression_keyed | sub_expression_keyed_reversed) ))* ~
+         (" ")* ~ ")"
+}
+squash = { sharp ~ "squash" ~ "(" ~ ")" }
+sum = { sharp ~ "sum" }
+len = { sharp ~ "len" }
+all = { sharp ~ "all" }
+allFn = { slash ~ all }
+lenFn = { slash ~ len }
+sumFn = { slash ~ sum }
 squashFn = { slash ~ squash }
 pickFn = { slash ~ pick }
-formats = { "formats" ~ whitespc ~ lparen ~ literal ~ ((",")* ~ whitespc ~ literal)+ ~ whitespc ~ rparen ~ whitespc ~ as}
+formats = { sharp ~ "formats" ~ whitespc ~ lparen ~ literal ~ ((",")* ~ whitespc ~ literal)+ ~ whitespc ~ rparen ~ whitespc ~ as}
 formatsFn = { slash ~ formats }
+filter = { sharp ~ "filter" ~ lparen ~ whitespc ~ ( filter_elem ~ whitespc ~ cmp ~ whitespc ~ literal ) ~ whitespc ~ rparen }
+filter_elem = { literal }
+filterFn = { slash ~ filter }
 
-sub_expression = { path ~ (formatsFn | pickFn | child | any_child | descendant_child | array_index | slice | array_to | array_from)* }
+sub_expression = { path ~ (formatsFn | lenFn | allFn | pickFn | sumFn | filterFn | child | any_child | descendant_child | array_index | slice | array_to | array_from)* }
+sub_expression_reversed = { reverse_path ~ (formatsFn | lenFn | allFn | pickFn | sumFn | filterFn | child | any_child | descendant_child | array_index | slice | array_to | array_from)* }
 sub_expression_keyed = { sub_expression ~ as? }
-string = { (alpha | digit | special_charaters | " " | "%" | "{" | "}" | "\\" )+ }
+sub_expression_keyed_reversed = { sub_expression_reversed ~ as? }
+string = { (alpha | digit | special_charaters | " " | "%" | "{" | "}" | "\\" )+ ~ (whitespc ~ string)* }
 literal = { "'" ~ string ~ "'" }
 literal_keyed = { literal ~ as? }
+
 
 array = {
     "[" ~
@@ -47,7 +74,7 @@ array = {
 }
 
 expression = {
-    path ~
-    (formatsFn | pickFn | child | any_child | descendant_child | array_index | slice | array_to | array_from)* ~
+    (path|reverse_path) ~
+    (formatsFn | lenFn | allFn | pickFn | sumFn | filterFn | child | any_child | descendant_child | array_index | slice | array_to | array_from)* ~
     EOI
 }

@@ -2,6 +2,32 @@
 
 Jetro is a tool for transforming, querying and comparing data in JSON format.
 
+```rust
+let data = serde_json::json!({
+  "name": "mr snuggle",
+  "some_entry": {
+    "some_obj": {
+      "obj": {
+        "a": "object_a",
+        "b": "object_b",
+        "c": "object_c",
+        "d": "object_d"
+      }
+    }
+  }
+});
+
+let mut values = Path::collect(data, ">/..obj/#pick('a','b')");
+
+#[derive(Serialize, Deserialize)]
+struct Output {
+   a: String,
+   b: String,
+}
+
+let output: Option<Output> = values.from_index(0);
+```
+
 # example
 
 ```json
@@ -38,7 +64,7 @@ Jetro is a tool for transforming, querying and comparing data in JSON format.
 
 ### Queries
 
-```json
+```
 >/bar
 ```
 <details>
@@ -65,8 +91,8 @@ Jetro is a tool for transforming, querying and comparing data in JSON format.
 
 ---
 
-```json
->/pick('foo', >/..person/formats('Herrn {} {}', 'firstname', 'lastname') as 'fullname'/fullname as 'fullname')
+```
+>/#pick('foo', >/..person/#formats('Herrn {} {}', 'firstname', 'lastname') as 'fullname'/fullname as 'fullname')
 ```
 
 <details>
@@ -95,8 +121,8 @@ Jetro is a tool for transforming, querying and comparing data in JSON format.
 
 ---
 
-```json
->/pick('friend', >/..person/formats('Herrn {} {}', 'firstname', 'lastname') as 'fullname'/fullname as 'fullname', >/foo/..contract)
+```
+>/#pick('friend', >/..person/#formats('Herrn {} {}', 'firstname', 'lastname') as 'fullname'/fullname as 'fullname', >/foo/..contract)
 ```
 
 <details>
@@ -136,7 +162,7 @@ Jetro is a tool for transforming, querying and comparing data in JSON format.
 
 ---
 
-```json
+```
 >/..meows/[4:]
 ```
 
@@ -150,5 +176,25 @@ Jetro is a tool for transforming, querying and comparing data in JSON format.
   50,
   60
 ]
+```
+</details>
+
+---
+
+```
+>/..foo/..contract/#pick('kind' as 'contract', </..person/#formats('Welcome {}', 'firstname') as 'welcome_message'/#pick('welcome_message'))
+```
+
+<details>
+  <summary>See output</summary>
+  
+  ### result
+
+```json
+{
+  "contract": "Furry Purr",
+  "welcome_message": "Welcome Mio"
+}
+
 ```
 </details>

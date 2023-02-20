@@ -25,9 +25,16 @@ pub enum FormatOp {
 pub enum PickFilterInner {
     None,
     Str(String),
-    KeyedStr { key: String, alias: String },
-    Subpath(Vec<Filter>),
-    KeyedSubpath { subpath: Vec<Filter>, alias: String },
+    KeyedStr {
+        key: String,
+        alias: String,
+    },
+    Subpath(Vec<Filter>, bool),
+    KeyedSubpath {
+        subpath: Vec<Filter>,
+        alias: String,
+        reverse: bool,
+    },
 }
 
 #[derive(Debug, PartialEq)]
@@ -42,6 +49,9 @@ pub enum Filter {
     ArrayFrom(usize),
     ArrayTo(usize),
     Slice(usize, usize),
+    All,
+    Len,
+    Sum,
 }
 
 #[allow(dead_code)]
@@ -52,6 +62,7 @@ struct StackItem<'a> {
 }
 
 pub struct Context<'a> {
+    root: Rc<Value>,
     stack: Rc<RefCell<Vec<StackItem<'a>>>>,
     pub results: Rc<RefCell<Vec<Rc<Value>>>>,
 }
@@ -168,7 +179,7 @@ macro_rules! match_value {
 }
 
 impl Filter {
-    fn pick(&self, obj: &Value) -> Option<Value> {
+    fn pick(&self, obj: &Value, ctx: Option<&Context>) -> Option<Value> {
         let target_key = self.key();
         let descendant_key = target_key.unwrap_or("descendant".to_string());
         match &self {
@@ -202,10 +213,31 @@ impl Filter {
                         PickFilterInner::KeyedSubpath {
                             subpath: ref some_subpath,
                             alias: ref some_alias,
-                        } => match_value!(obj, new_map, some_alias, some_subpath),
+                            reverse,
+                        } => {
+                            match_value!(
+                                if *reverse && ctx.is_some() {
+                                    ctx.unwrap().root.as_ref()
+                                } else {
+                                    obj
+                                },
+                                new_map,
+                                some_alias,
+                                some_subpath
+                            );
+                        }
 
-                        PickFilterInner::Subpath(ref some_subpath) => {
-                            match_value!(obj, new_map, descendant_key, some_subpath)
+                        PickFilterInner::Subpath(ref some_subpath, reverse) => {
+                            match_value!(
+                                if *reverse && ctx.is_some() {
+                                    ctx.unwrap().root.as_ref()
+                                } else {
+                                    obj
+                                },
+                                new_map,
+                                descendant_key,
+                                some_subpath
+                            )
                         }
 
                         _ => {}
@@ -246,10 +278,13 @@ impl Path {
 }
 
 impl PathResult {
-    pub fn shove<T: serde::de::DeserializeOwned>(&mut self, index: usize) -> T {
+    pub fn from_index<T: serde::de::DeserializeOwned>(&mut self, index: usize) -> Option<T> {
         let final_value: &Value = &*self.0.borrow_mut().remove(index);
 
-        serde_json::from_value(final_value.clone().take()).unwrap()
+        match serde_json::from_value(final_value.clone().take()) {
+            Ok(result) => Some(result),
+            _ => None,
+        }
     }
 }
 
@@ -284,7 +319,11 @@ impl<'a> Context<'a> {
             .borrow_mut()
             .push(StackItem::new(rv.clone(), filters, Rc::clone(&stack)));
 
-        Self { stack, results }
+        Self {
+            root: rv.clone(),
+            stack,
+            results,
+        }
     }
 
     pub fn collect(&mut self) {
@@ -302,6 +341,127 @@ impl<'a> Context<'a> {
                         tail,
                         self.stack.clone(),
                     )),
+
+                    (Filter::Len, Some(tail)) => match *current.value {
+                        Value::Object(ref obj) => {
+                            push_to_stack_or_produce!(
+                                self.results,
+                                self.stack,
+                                tail,
+                                Value::Number(serde_json::Number::from(obj.len()))
+                            );
+                        }
+                        Value::Array(ref array) => {
+                            push_to_stack_or_produce!(
+                                self.results,
+                                self.stack,
+                                tail,
+                                Value::Number(serde_json::Number::from(array.len()))
+                            );
+                        }
+                        _ => {}
+                    },
+
+                    (Filter::Sum, Some(tail)) => match *current.value {
+                        Value::Object(ref _obj) => {}
+                        Value::Array(ref array) => {
+                            let mut sum: i64 = 0;
+                            let values = self.results.to_owned();
+                            self.results = Rc::new(RefCell::new(Vec::new()));
+                            for value in values.borrow().clone() {
+                                match *value.as_ref() {
+                                    Value::Array(ref inner_array) => {
+                                        for v in inner_array {
+                                            if v.is_number() {
+                                                sum += v.as_i64().unwrap();
+                                            }
+                                        }
+                                    }
+                                    Value::Number(ref num) => {
+                                        sum += num.as_i64().unwrap();
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            for value in array {
+                                if value.is_number() {
+                                    sum += value.as_i64().unwrap();
+                                }
+                            }
+                            push_to_stack_or_produce!(
+                                self.results,
+                                self.stack,
+                                tail,
+                                Value::Number(serde_json::Number::from(sum))
+                            );
+                        }
+                        _ => {}
+                    },
+
+                    (Filter::All, Some(tail)) => match *current.value {
+                        Value::Object(ref _obj) => {}
+                        Value::Bool(ref value) => {
+                            let mut all = true;
+                            let values = self.results.to_owned();
+                            self.results = Rc::new(RefCell::new(Vec::new()));
+                            for value in values.borrow().clone() {
+                                match *value.as_ref() {
+                                    Value::Array(ref inner_array) => {
+                                        for v in inner_array {
+                                            if v.is_boolean() {
+                                                all = all & v.as_bool().unwrap() == true;
+                                            }
+                                        }
+                                    }
+                                    Value::Bool(ref value) => {
+                                        all = *value == false;
+                                    }
+                                    _ => {}
+                                }
+                            }
+
+                            all = all & (*value == true);
+
+                            push_to_stack_or_produce!(
+                                self.results,
+                                self.stack,
+                                tail,
+                                Value::Bool(all)
+                            );
+                        }
+                        Value::Array(ref array) => {
+                            let mut all = true;
+                            let values = self.results.to_owned();
+                            self.results = Rc::new(RefCell::new(Vec::new()));
+                            for value in values.borrow().clone() {
+                                match *value.as_ref() {
+                                    Value::Array(ref inner_array) => {
+                                        for v in inner_array {
+                                            if v.is_boolean() {
+                                                all = v.as_bool().unwrap() == false;
+                                            }
+                                        }
+                                    }
+                                    Value::Bool(ref value) => {
+                                        all = *value == false;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            for value in array {
+                                if value.is_boolean() {
+                                    all = value.as_bool().unwrap() == false;
+                                }
+                            }
+                            push_to_stack_or_produce!(
+                                self.results,
+                                self.stack,
+                                tail,
+                                Value::Bool(all)
+                            );
+                        }
+                        _ => {}
+                    },
 
                     (Filter::Format(ref target_format), Some(tail)) => match *current.value {
                         Value::Object(ref obj) => {
@@ -437,10 +597,17 @@ impl<'a> Context<'a> {
 
                     (Filter::Pick(_), Some(tail)) => match *current.value {
                         Value::Object(_) => {
-                            let new_map = current.filters[0].pick(&current.value).unwrap();
+                            let new_map = current.filters[0]
+                                .pick(&current.value, Some(&self))
+                                .unwrap();
                             push_to_stack_or_produce!(self.results, self.stack, tail, new_map);
                         }
-                        Value::Array(_) => {}
+                        Value::Array(_) => {
+                            let new_array = current.filters[0]
+                                .pick(&current.value, Some(&self))
+                                .unwrap();
+                            push_to_stack_or_produce!(self.results, self.stack, tail, new_array);
+                        }
                         _ => {}
                     },
 
@@ -471,6 +638,14 @@ impl<'a> Context<'a> {
                             }
                             _ => {}
                         },
+                        Value::Number(ref num) => {
+                            push_to_stack_or_produce!(
+                                self.results,
+                                self.stack,
+                                tail,
+                                Value::Number(num.clone())
+                            );
+                        }
                         _ => {}
                     },
 
@@ -540,7 +715,7 @@ mod test {
             PickFilterInner::Str("b".to_string()),
         ]);
         let v = v.get("obj".to_string()).unwrap();
-        let result = f.pick(&v);
+        let result = f.pick(&v, None);
 
         assert_eq!(result.is_some(), true);
         assert_eq!(
@@ -596,26 +771,23 @@ mod test {
 
     #[test]
     fn test_pick() {
-        let data = r#"
-	 {
-	   "name": "mr snuggle",
-           "some_entry": {
-           "some_obj": {
-    	       "obj": {
-	         "a": "object_a",
-	         "b": "object_b",
-	         "c": "object_c",
-	         "d": "object_d"
-	      }
+        let data = serde_json::json!(
+        {
+          "name": "mr snuggle",
+          "some_entry": {
+            "some_obj": {
+          "obj": {
+            "a": "object_a",
+            "b": "object_b",
+            "c": "object_c",
+            "d": "object_d"
+          }
             }
           }
         }
-        "#;
+          );
 
-        let mut values = Path::collect(
-            serde_json::from_str(&data).unwrap(),
-            ">/..obj/pick('a','b')",
-        );
+        let mut values = Path::collect(data, ">/..obj/#pick('a','b')");
 
         #[derive(Serialize, Deserialize)]
         pub struct Output {
@@ -623,7 +795,10 @@ mod test {
             pub b: String,
         }
 
-        let output: Output = values.shove(0);
+        let result: Option<Output> = values.from_index(0);
+        assert_eq!(result.is_some(), true);
+
+        let output = result.unwrap();
         assert_eq!(*&output.a, "object_a".to_string());
         assert_eq!(*&output.b, "object_b".to_string());
     }
@@ -648,7 +823,7 @@ mod test {
 
         let values = Path::collect(
             serde_json::from_str(&data).unwrap(),
-            ">/..obj/pick('a', >/..with_nested/pick('object'))",
+            ">/..obj/#pick('a', >/..with_nested/#pick('object'))",
         );
 
         assert_eq!(
@@ -679,7 +854,7 @@ mod test {
 
         let values = Path::collect(
             serde_json::from_str(&data).unwrap(),
-            ">/..obj/pick('a' as 'foo', >/..object)",
+            ">/..obj/#pick('a' as 'foo', >/..object)",
         );
 
         assert_eq!(
@@ -695,7 +870,8 @@ mod test {
         let data = r#"
 	 {
 	   "name": "mr snuggle",
-           "values": [1,2,3,4,5,6]
+           "values": [1,2,3,4,5,6, {"isEnabled": true}],
+           "some_value": {"isEnabled": true}
         }
         "#;
 
@@ -711,7 +887,7 @@ mod test {
     fn test_format_impl() {
         let data = serde_json::json!({
             "name": "mr snuggle",
-            "alias": "jetro"
+            "alias": "jetro",
         });
 
         let keys = vec!["name".to_string(), "alias".to_string()];

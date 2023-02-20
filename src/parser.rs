@@ -13,7 +13,10 @@ pub fn parse<'a>(input: &'a str) -> Vec<Filter> {
     let mut actions: Vec<Filter> = vec![];
     for token in root.into_inner() {
         match token.as_rule() {
-            Rule::path => actions.push(Filter::Root),
+            Rule::path | Rule::reverse_path => actions.push(Filter::Root),
+            Rule::allFn => actions.push(Filter::All),
+            Rule::lenFn => actions.push(Filter::Len),
+            Rule::sumFn => actions.push(Filter::Sum),
             Rule::formatsFn => {
                 let mut arguments: Vec<String> = vec![];
                 let mut elem = token.into_inner().nth(1).unwrap().into_inner();
@@ -89,7 +92,8 @@ pub fn parse<'a>(input: &'a str) -> Vec<Filter> {
                     .unwrap()
                     .into_inner()
                     .map(|v| match &v.as_rule() {
-                        Rule::sub_expression_keyed => {
+                        Rule::sub_expression_keyed | Rule::sub_expression_keyed_reversed => {
+                            let reverse = *&v.as_rule() == Rule::sub_expression_keyed_reversed;
                             let mut l = v.into_inner();
                             let subexpr = l.next().unwrap().as_str();
                             let alias: Option<String> = match l.next() {
@@ -108,15 +112,19 @@ pub fn parse<'a>(input: &'a str) -> Vec<Filter> {
                                     return PickFilterInner::KeyedSubpath {
                                         subpath: parse(subexpr),
                                         alias,
+                                        reverse,
                                     };
                                 }
                                 None => {
-                                    return PickFilterInner::Subpath(parse(subexpr));
+                                    return PickFilterInner::Subpath(parse(subexpr), reverse);
                                 }
                             }
                         }
                         Rule::sub_expression => {
-                            return PickFilterInner::Subpath(parse(v.as_str()));
+                            return PickFilterInner::Subpath(parse(v.as_str()), false);
+                        }
+                        Rule::sub_expression_reversed => {
+                            return PickFilterInner::Subpath(parse(v.as_str()), true);
                         }
                         Rule::literal_keyed => {
                             let mut l = v.into_inner();
@@ -205,7 +213,7 @@ mod test {
 
     #[test]
     fn test_three() {
-        let actions = parse(">/obj/some/..descendant/pick('a', 'b', 'c', 'd')");
+        let actions = parse(">/obj/some/..descendant/#pick('a', 'b', 'c', 'd')");
         assert_eq!(
             actions,
             vec![
@@ -225,7 +233,7 @@ mod test {
 
     #[test]
     fn test_with_keyed_literal() {
-        let actions = parse(">/obj/some/..descendant/pick('f' as 'foo', 'b' as 'bar')");
+        let actions = parse(">/obj/some/..descendant/#pick('f' as 'foo', 'b' as 'bar')");
         assert_eq!(
             actions,
             vec![
@@ -249,7 +257,7 @@ mod test {
 
     #[test]
     fn test_with_sub_expression_keyed() {
-        let actions = parse(">/obj/some/..descendant/pick('f' as 'foo', >/some/branch as 'path')");
+        let actions = parse(">/obj/some/..descendant/#pick('f' as 'foo', >/some/branch as 'path')");
         assert_eq!(
             actions,
             vec![
@@ -268,7 +276,37 @@ mod test {
                             Filter::Child("some".to_string()),
                             Filter::Child("branch".to_string()),
                         ],
-                        alias: "path".to_string()
+                        alias: "path".to_string(),
+                        reverse: false,
+                    },
+                ]),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_with_sub_expression_keyed_reverse() {
+        let actions = parse(">/obj/some/..descendant/#pick('f' as 'foo', </some/branch as 'path')");
+        assert_eq!(
+            actions,
+            vec![
+                Filter::Root,
+                Filter::Child("obj".to_string()),
+                Filter::Child("some".to_string()),
+                Filter::Descendant("descendant".to_string()),
+                Filter::Pick(vec![
+                    PickFilterInner::KeyedStr {
+                        key: "f".to_string(),
+                        alias: "foo".to_string()
+                    },
+                    PickFilterInner::KeyedSubpath {
+                        subpath: vec![
+                            Filter::Root,
+                            Filter::Child("some".to_string()),
+                            Filter::Child("branch".to_string()),
+                        ],
+                        alias: "path".to_string(),
+                        reverse: true,
                     },
                 ]),
             ]
@@ -283,7 +321,7 @@ mod test {
 
     #[test]
     fn test_format() {
-        let actions = parse(">/formats('{}{}', 'name', 'alias') as 'some_key'");
+        let actions = parse(">/#formats('{}{}', 'name', 'alias') as 'some_key'");
         assert_eq!(
             actions,
             vec![
