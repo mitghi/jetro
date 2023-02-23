@@ -1,6 +1,6 @@
 use pest_derive::Parser as Parse;
 
-use crate::context::{Filter, FormatOp, PickFilterInner};
+use crate::context::{Filter, FilterInner, FilterOp, FormatOp, PickFilterInner};
 use pest::Parser;
 
 #[derive(Parse)]
@@ -17,6 +17,23 @@ pub fn parse<'a>(input: &'a str) -> Vec<Filter> {
             Rule::allFn => actions.push(Filter::All),
             Rule::lenFn => actions.push(Filter::Len),
             Rule::sumFn => actions.push(Filter::Sum),
+            Rule::filterFn => {
+                let mut elem = token.into_inner().nth(1).unwrap().into_inner();
+
+                actions.push(Filter::Filter(FilterInner::Cond {
+                    left: elem
+                        .next()
+                        .unwrap()
+                        .into_inner()
+                        .next()
+                        .unwrap()
+                        .into_inner()
+                        .as_str()
+                        .to_string(),
+                    op: FilterOp::get(elem.next().unwrap().into_inner().as_str()).unwrap(),
+                    right: elem.next().unwrap().into_inner().as_str().to_string(),
+                }));
+            }
             Rule::formatsFn => {
                 let mut arguments: Vec<String> = vec![];
                 let mut elem = token.into_inner().nth(1).unwrap().into_inner();
@@ -330,6 +347,23 @@ mod test {
                     format: "{}{}".to_string(),
                     arguments: vec!["name".to_string(), "alias".to_string()],
                     alias: "some_key".to_string(),
+                })
+            ]
+        );
+    }
+
+    #[test]
+    fn test_filter() {
+        let actions = parse(">/..meows/#filter('some' == 'value')");
+        assert_eq!(
+            actions,
+            vec![
+                Filter::Root,
+                Filter::Descendant("meows".to_string()),
+                Filter::Filter(FilterInner::Cond {
+                    left: "some".to_string(),
+                    op: FilterOp::Eq,
+                    right: "value".to_string(),
                 })
             ]
         );

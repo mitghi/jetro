@@ -13,6 +13,28 @@ pub struct Path;
 pub struct PathResult(pub PathOutput);
 
 #[derive(Debug, PartialEq)]
+pub enum FilterOp {
+    Less,
+    Gt,
+    Lq,
+    Gq,
+    Eq,
+}
+
+impl FilterOp {
+    pub fn get(input: &str) -> Option<Self> {
+        match input {
+            "==" => Some(Self::Eq),
+            "<=" => Some(Self::Lq),
+            ">=" => Some(Self::Gq),
+            "<" => Some(Self::Less),
+            ">" => Some(Self::Gt),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
 pub enum FormatOp {
     FormatString {
         format: String,
@@ -38,6 +60,15 @@ pub enum PickFilterInner {
 }
 
 #[derive(Debug, PartialEq)]
+pub enum FilterInner {
+    Cond {
+        left: String,
+        op: FilterOp,
+        right: String,
+    },
+}
+
+#[derive(Debug, PartialEq)]
 pub enum Filter {
     Root,
     AnyChild,
@@ -49,6 +80,7 @@ pub enum Filter {
     ArrayFrom(usize),
     ArrayTo(usize),
     Slice(usize, usize),
+    Filter(FilterInner),
     All,
     Len,
     Sum,
@@ -341,6 +373,18 @@ impl<'a> Context<'a> {
                         tail,
                         self.stack.clone(),
                     )),
+
+                    (Filter::Filter(ref cond), Some(tail)) => match *current.value {
+                        Value::Object(ref obj) => {
+                            todo!();
+                        }
+                        Value::Array(ref array) => {
+                            todo!();
+                        }
+                        _ => {
+                            todo!();
+                        }
+                    },
 
                     (Filter::Len, Some(tail)) => match *current.value {
                         Value::Object(ref obj) => {
