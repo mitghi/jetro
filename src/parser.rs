@@ -17,6 +17,15 @@ pub fn parse<'a>(input: &'a str) -> Vec<Filter> {
             Rule::allFn => actions.push(Filter::All),
             Rule::lenFn => actions.push(Filter::Len),
             Rule::sumFn => actions.push(Filter::Sum),
+            Rule::grouped_any => {
+                let elem = token.into_inner().nth(1).unwrap().into_inner();
+                let mut values: Vec<String> = vec![];
+                for e in elem {
+                    values.push(e.into_inner().as_str().to_string());
+                }
+
+                actions.push(Filter::GroupedChild(values));
+            }
             Rule::filterFn => {
                 let mut elem = token.into_inner().nth(1).unwrap().into_inner();
 
@@ -366,6 +375,23 @@ mod test {
                     right: "value".to_string(),
                 })
             ]
+        );
+    }
+
+    #[test]
+    fn test_groupped_literal() {
+        let actions = parse(">/foo/('bar' | 'baz' | 'cuz')");
+        assert_eq!(
+            actions,
+            vec![
+                Filter::Root,
+                Filter::Child("foo".to_string()),
+                Filter::GroupedChild(vec![
+                    "bar".to_string(),
+                    "baz".to_string(),
+                    "cuz".to_string()
+                ]),
+            ],
         );
     }
 }

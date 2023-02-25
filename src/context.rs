@@ -81,6 +81,7 @@ pub enum Filter {
     ArrayTo(usize),
     Slice(usize, usize),
     Filter(FilterInner),
+    GroupedChild(Vec<String>),
     All,
     Len,
     Sum,
@@ -374,11 +375,41 @@ impl<'a> Context<'a> {
                         self.stack.clone(),
                     )),
 
-                    (Filter::Filter(ref cond), Some(tail)) => match *current.value {
+                    (Filter::GroupedChild(ref vec), Some(tail)) => match *current.value {
                         Value::Object(ref obj) => {
+                            let mut target: Option<&Value> = None;
+                            'ML: for target_key in vec.iter() {
+                                match obj.get(target_key) {
+                                    Some(result) => {
+                                        if result.is_null() {
+                                            continue 'ML;
+                                        }
+                                        target = Some(result);
+                                        break 'ML;
+                                    }
+                                    _ => {}
+                                };
+                            }
+                            match target {
+                                Some(result) => {
+                                    push_to_stack_or_produce!(
+                                        self.results,
+                                        self.stack,
+                                        tail,
+                                        result.clone()
+                                    );
+                                }
+                                _ => {}
+                            }
+                        }
+                        _ => {}
+                    },
+
+                    (Filter::Filter(ref _cond), Some(_tail)) => match *current.value {
+                        Value::Object(ref _obj) => {
                             todo!();
                         }
-                        Value::Array(ref array) => {
+                        Value::Array(ref _array) => {
                             todo!();
                         }
                         _ => {
@@ -453,12 +484,12 @@ impl<'a> Context<'a> {
                                     Value::Array(ref inner_array) => {
                                         for v in inner_array {
                                             if v.is_boolean() {
-                                                all = all & v.as_bool().unwrap() == true;
+                                                all = all & (v.as_bool().unwrap() == true);
                                             }
                                         }
                                     }
                                     Value::Bool(ref value) => {
-                                        all = *value == false;
+                                        all = all & (*value == true);
                                     }
                                     _ => {}
                                 }
@@ -482,19 +513,19 @@ impl<'a> Context<'a> {
                                     Value::Array(ref inner_array) => {
                                         for v in inner_array {
                                             if v.is_boolean() {
-                                                all = v.as_bool().unwrap() == false;
+                                                all = all & (v.as_bool().unwrap() == true);
                                             }
                                         }
                                     }
                                     Value::Bool(ref value) => {
-                                        all = *value == false;
+                                        all = all & (*value == true);
                                     }
                                     _ => {}
                                 }
                             }
                             for value in array {
                                 if value.is_boolean() {
-                                    all = value.as_bool().unwrap() == false;
+                                    all = all & (value.as_bool().unwrap() == true);
                                 }
                             }
                             push_to_stack_or_produce!(
@@ -943,5 +974,25 @@ mod test {
         });
 
         assert_eq!(format_impl.format(), Some("mr snuggle_jetro".to_string()));
+    }
+
+    #[test]
+    fn test_grouped_child() {
+        let data = serde_json::json!({
+            "entry": {
+        "some": "value",
+        "foo": null,
+        "another": "word",
+        "till": "deal"
+            }
+        });
+
+        let values = Path::collect(data, ">/entry/('foo' | 'bar' | 'another')");
+
+        assert_eq!(values.0.borrow().len(), 1);
+        assert_eq!(
+            values.0.borrow()[0],
+            Rc::new(Value::String(String::from("word")))
+        );
     }
 }

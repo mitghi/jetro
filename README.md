@@ -43,7 +43,8 @@ let output: Option<Output> = values.from_index(0);
     ],
     "person": {
       "firstname": "Mio",
-      "lastname": "Snuggle"
+      "lastname": "Snuggle",
+	  "hasFurr": true
     }
   },
   "foo": [
@@ -54,7 +55,8 @@ let output: Option<Output> = values.from_index(0);
     5,
     {
       "contract": {
-        "kind": "Furry Purr"
+        "kind": "Furry Purr",
+		"hasFurr": false
       }
     }
   ],
@@ -69,7 +71,7 @@ let output: Option<Output> = values.from_index(0);
 ```
 <details>
   <summary>See output</summary>
-  
+
   ### result
   ```json
   "bar": {
@@ -90,6 +92,128 @@ let output: Option<Output> = values.from_index(0);
 </details>
 
 ---
+```
+>/bar/('person' | 'whatever')
+```
+
+<details>
+  <summary>See output</summary>
+
+  ### result
+
+```json
+{
+  "firstname": "Mio",
+  "hasFurr": true,
+  "lastname": "Snuggle"
+}
+```
+</details>
+
+---
+
+```
+>/('foo' | 'bar' | 'non-exinsting-key')
+```
+
+<details>
+  <summary>See output</summary>
+
+  ### result
+
+```json
+[
+  1,
+  2,
+  3,
+  4,
+  5,
+  {
+    "contract": {
+      "kind": "Furry Purr"
+    }
+  }
+]
+```
+</details>
+
+---
+
+```
+>/('foo' | 'bar' | 'non-exinsting-key')/[:5]/#sum
+```
+
+<details>
+  <summary>See output</summary>
+
+  ### result
+
+```json
+15
+```
+</details>
+
+---
+
+```
+>/..foo/[:4]
+```
+
+<details>
+  <summary>See output</summary>
+
+  ### result
+
+```json
+[
+  1,
+  2,
+  3,
+  4
+]
+```
+</details>
+
+---
+
+```
+>/..meows/[4:]
+```
+
+<details>
+  <summary>See output</summary>
+
+  ### result
+
+```json
+[
+  50,
+  60
+]
+```
+</details>
+
+---
+
+```
+>/#pick(>/..hasFurr/#all as 'totallyFurry')
+```
+
+<details>
+  <summary>See output</summary>
+
+  ### result
+
+```json
+{
+  "totallyFurry": true
+}
+```
+</details>
+
+---
+
+---
 
 ```
 >/#pick('foo', >/..person/#formats('Herrn {} {}', 'firstname', 'lastname') as 'fullname'/fullname as 'fullname')
@@ -97,7 +221,7 @@ let output: Option<Output> = values.from_index(0);
 
 <details>
   <summary>See output</summary>
-  
+
   ### result
 
 ```json
@@ -122,72 +246,12 @@ let output: Option<Output> = values.from_index(0);
 ---
 
 ```
->/#pick('friend', >/..person/#formats('Herrn {} {}', 'firstname', 'lastname') as 'fullname'/fullname as 'fullname', >/foo/..contract)
-```
-
-<details>
-  <summary>See output</summary>
-  
-  ### result
-
-```json
-{
-  "friend": "Thunder Pur",
-  "fullname": "Herrn Mio Snuggle",
-  "kind": "Furry Purr"
-}
-```
-</details>
-
----
-
-```
->/..foo/[:4]
-```
-
-<details>
-  <summary>See output</summary>
-  
-  ### result
-
-```json
-[
-  1,
-  2,
-  3,
-  4
-]
-```
-</details>
-
----
-
-```
->/..meows/[4:]
-```
-
-<details>
-  <summary>See output</summary>
-  
-  ### result
-
-```json
-[
-  50,
-  60
-]
-```
-</details>
-
----
-
-```
 >/..foo/..contract/#pick('kind' as 'contract', </..person/#formats('Welcome {}', 'firstname') as 'welcome_message'/#pick('welcome_message'))
 ```
 
 <details>
   <summary>See output</summary>
-  
+
   ### result
 
 ```json
