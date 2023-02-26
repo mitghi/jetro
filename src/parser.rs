@@ -1,6 +1,8 @@
 use pest_derive::Parser as Parse;
 
-use crate::context::{Filter, FilterInner, FilterOp, FormatOp, PickFilterInner};
+use crate::context::{
+    Filter, FilterInner, FilterInnerRighthand, FilterOp, FormatOp, PickFilterInner,
+};
 use pest::Parser;
 
 #[derive(Parse)]
@@ -28,19 +30,49 @@ pub fn parse<'a>(input: &'a str) -> Vec<Filter> {
             }
             Rule::filterFn => {
                 let mut elem = token.into_inner().nth(1).unwrap().into_inner();
+                let left = elem
+                    .next()
+                    .unwrap()
+                    .into_inner()
+                    .next()
+                    .unwrap()
+                    .into_inner()
+                    .as_str()
+                    .to_string();
+                let op = FilterOp::get(elem.next().unwrap().into_inner().as_str()).unwrap();
+                let right: Option<FilterInnerRighthand>;
+
+                match elem.clone().into_iter().next().unwrap().as_rule() {
+                    Rule::literal => {
+                        right = Some(FilterInnerRighthand::String(
+                            elem.next().unwrap().into_inner().as_str().to_string(),
+                        ));
+                    }
+                    Rule::truthy => {
+                        match elem.next().unwrap().into_inner().next().unwrap().as_rule() {
+                            Rule::true_bool => {
+                                right = Some(FilterInnerRighthand::Bool(true));
+                            }
+                            Rule::false_bool => {
+                                right = Some(FilterInnerRighthand::Bool(false));
+                            }
+                            _ => {
+                                todo!("handle error");
+                            }
+                        }
+                    }
+                    _ => {
+                        todo!();
+                    }
+                }
+                if right.is_none() {
+                    todo!("handle error unknown case in right handside");
+                }
 
                 actions.push(Filter::Filter(FilterInner::Cond {
-                    left: elem
-                        .next()
-                        .unwrap()
-                        .into_inner()
-                        .next()
-                        .unwrap()
-                        .into_inner()
-                        .as_str()
-                        .to_string(),
-                    op: FilterOp::get(elem.next().unwrap().into_inner().as_str()).unwrap(),
-                    right: elem.next().unwrap().into_inner().as_str().to_string(),
+                    left,
+                    op,
+                    right: right.unwrap(),
                 }));
             }
             Rule::formatsFn => {
@@ -372,7 +404,7 @@ mod test {
                 Filter::Filter(FilterInner::Cond {
                     left: "some".to_string(),
                     op: FilterOp::Eq,
-                    right: "value".to_string(),
+                    right: FilterInnerRighthand::String("value".to_string()),
                 })
             ]
         );
@@ -392,6 +424,23 @@ mod test {
                     "cuz".to_string()
                 ]),
             ],
+        );
+    }
+
+    #[test]
+    fn test_truthy_filter() {
+        let actions = parse(">/foo/#filter('is_furry' == true)");
+        assert_eq!(
+            actions,
+            vec![
+                Filter::Root,
+                Filter::Child("foo".to_string()),
+                Filter::Filter(FilterInner::Cond {
+                    left: "is_furry".to_string(),
+                    op: FilterOp::Eq,
+                    right: FilterInnerRighthand::Bool(true)
+                })
+            ]
         );
     }
 }

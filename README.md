@@ -44,8 +44,22 @@ let output: Option<Output> = values.from_index(0);
     "person": {
       "firstname": "Mio",
       "lastname": "Snuggle",
-	  "hasFurr": true
-    }
+      "hasFurr": true
+    },
+    "rolls": [
+      {
+        "roll": "on side"
+      },
+      {
+        "roll": "in space"
+      },
+      {
+        "roll": "in multiverse"
+      },
+      {
+        "roll": "everywhere"
+      }
+    ]
   },
   "foo": [
     1,
@@ -56,7 +70,7 @@ let output: Option<Output> = values.from_index(0);
     {
       "contract": {
         "kind": "Furry Purr",
-		"hasFurr": false
+        "hasFurr": false
       }
     }
   ],
@@ -150,6 +164,26 @@ let output: Option<Output> = values.from_index(0);
 
 ```json
 15
+```
+</details>
+
+---
+
+```
+>/..rolls/#filter('roll' == 'everywhere')
+```
+
+<details>
+  <summary>See output</summary>
+
+  ### result
+
+```json
+[
+  {
+    "roll": "everywhere"
+  }
+]
 ```
 </details>
 

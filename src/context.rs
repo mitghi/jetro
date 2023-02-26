@@ -60,11 +60,17 @@ pub enum PickFilterInner {
 }
 
 #[derive(Debug, PartialEq)]
+pub enum FilterInnerRighthand {
+    String(String),
+    Bool(bool),
+}
+
+#[derive(Debug, PartialEq)]
 pub enum FilterInner {
     Cond {
         left: String,
         op: FilterOp,
-        right: String,
+        right: FilterInnerRighthand,
     },
 }
 
@@ -209,6 +215,42 @@ macro_rules! match_value {
             }
         }
     }};
+}
+
+macro_rules! search_filter_in_array {
+    ($array:expr, $key:expr, $value:expr, $results:expr, $stack:expr, $tail:expr) => {
+        let mut results: Vec<Value> = vec![];
+        for value in $array {
+            if value.is_object() {
+                let obj = value.as_object().unwrap();
+                match obj.get(&$key.clone()) {
+                    Some(result) => match result {
+                        Value::String(ref target_string) => match $value {
+                            FilterInnerRighthand::String(ref str_value) => {
+                                if target_string == str_value {
+                                    results.push(value.clone());
+                                }
+                            }
+                            _ => {}
+                        },
+                        Value::Bool(v) => match $value {
+                            FilterInnerRighthand::Bool(bool_value) => {
+                                if v == bool_value {
+                                    results.push(value.clone());
+                                }
+                            }
+                            _ => {}
+                        },
+                        _ => {}
+                    },
+                    _ => {}
+                }
+            }
+        }
+        if results.len() > 0 {
+            push_to_stack_or_produce!($results, $stack, $tail, Value::Array(results));
+        }
+    };
 }
 
 impl Filter {
@@ -409,9 +451,22 @@ impl<'a> Context<'a> {
                         Value::Object(ref _obj) => {
                             todo!();
                         }
-                        Value::Array(ref _array) => {
-                            todo!();
-                        }
+                        Value::Array(ref _array) => match _cond {
+                            FilterInner::Cond {
+                                ref left,
+                                op: ref _op,
+                                ref right,
+                            } => {
+                                search_filter_in_array!(
+                                    _array,
+                                    left,
+                                    right,
+                                    self.results,
+                                    self.stack,
+                                    _tail
+                                );
+                            }
+                        },
                         _ => {
                             todo!();
                         }
@@ -993,6 +1048,29 @@ mod test {
         assert_eq!(
             values.0.borrow()[0],
             Rc::new(Value::String(String::from("word")))
+        );
+    }
+
+    #[test]
+    fn test_filter() {
+        let data = serde_json::json!(
+            {
+            "values": [
+                {"name": "foo", "is_eligable": true},
+                {"name": "bar", "is_eligable": false},
+                {"name": "abc"},
+                {"name": "xyz"}]
+            }
+        );
+
+        let values = Path::collect(data, ">/values/#filter('is_eligable' == true)");
+
+        assert_eq!(values.0.borrow().len(), 1);
+        assert_eq!(
+            values.0.borrow()[0],
+            Rc::new(Value::Array(vec![
+                serde_json::json!({"name": "foo", "is_eligable": true})
+            ]))
         );
     }
 }
