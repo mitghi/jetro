@@ -1,3 +1,5 @@
+//! Module containing parser for jetro.
+
 use pest_derive::Parser as Parse;
 
 use crate::context::{
@@ -9,7 +11,7 @@ use pest::Parser;
 #[grammar = "./grammar.pest"]
 pub struct ExpressionParser;
 
-pub fn parse<'a>(input: &'a str) -> Vec<Filter> {
+pub(crate) fn parse<'a>(input: &'a str) -> Vec<Filter> {
     let pairs = ExpressionParser::parse(Rule::expression, input);
     let root = pairs.unwrap().next().unwrap();
     let mut actions: Vec<Filter> = vec![];

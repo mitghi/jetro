@@ -1,3 +1,6 @@
+//! Module containing types and functionalities for
+//! evaluating jetro paths.
+
 use crate::parser;
 use dynfmt::{Format, SimpleCurlyFormat};
 #[allow(unused_imports)]
@@ -8,7 +11,11 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 type PathOutput = Rc<RefCell<Vec<Rc<Value>>>>;
+
+/// Path represents the entry for parsing and
+/// evaluating a jetro path.
 pub struct Path;
+
 #[derive(Debug)]
 pub struct PathResult(pub PathOutput);
 
@@ -335,6 +342,30 @@ impl Filter {
 }
 
 impl Path {
+    /// Returns a result given:
+    ///
+    /// # Arguments
+    ///
+    /// * `v` - A serde value
+    /// * `expr` - A jetro path expression
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use jetro;
+    /// use serde_json;
+    ///
+    /// let data = serde_json::json!({"name": "furryfurr", "purs": [{"sound": "prrrr"}, {"sound": "purrrrrr"}]});
+    /// let mut results = jetro::context::Path::collect(data, ">/purs/#filter('sound' == 'prrrr')");
+    ///
+    /// #[derive(serde::Deserialize)]
+    /// struct Item {
+    ///   sound: String,
+    /// }
+    ///
+    /// let items: Vec<Item> = results.from_index(0).unwrap();
+    ///
+    /// ```
     pub fn collect<S: Into<String>>(v: Value, expr: S) -> PathResult {
         let expr: String = expr.into();
         let filters = parser::parse(&expr);
@@ -344,7 +375,7 @@ impl Path {
         PathResult(ctx.results)
     }
 
-    pub fn collect_with_filter(v: Value, filters: &[Filter]) -> PathResult {
+    fn collect_with_filter(v: Value, filters: &[Filter]) -> PathResult {
         let mut ctx = Context::new(v, filters);
         ctx.collect();
 
