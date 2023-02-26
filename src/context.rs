@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::map::Map;
 use serde_json::Value;
 use std::cell::RefCell;
+use std::fmt;
 use std::rc::Rc;
-
 type PathOutput = Rc<RefCell<Vec<Rc<Value>>>>;
 
 /// Path represents the entry for parsing and
@@ -107,7 +107,7 @@ struct StackItem<'a> {
     stack: Rc<RefCell<Vec<StackItem<'a>>>>,
 }
 
-pub struct Context<'a> {
+struct Context<'a> {
     root: Rc<Value>,
     stack: Rc<RefCell<Vec<StackItem<'a>>>>,
     pub results: Rc<RefCell<Vec<Rc<Value>>>>,
@@ -121,6 +121,23 @@ struct FormatImpl<'a> {
     format: &'a str,
     value: &'a Value,
     keys: &'a Vec<String>,
+}
+
+#[derive(Debug)]
+pub enum Error {
+    EmptyQuery,
+    Parse(String),
+    Eval(String),
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match *self {
+            Error::EmptyQuery => write!(f, "query is empty"),
+            Error::Parse(ref msg) => write!(f, "error while parsing query: {}", &msg),
+            Error::Eval(ref msg) => write!(f, "error while evaluating query: {}", &msg),
+        }
+    }
 }
 
 impl<'a> FormatImpl<'a> {
@@ -356,7 +373,7 @@ impl Path {
     /// use serde_json;
     ///
     /// let data = serde_json::json!({"name": "furryfurr", "purs": [{"sound": "prrrr"}, {"sound": "purrrrrr"}]});
-    /// let mut results = jetro::context::Path::collect(data, ">/purs/#filter('sound' == 'prrrr')");
+    /// let mut results = jetro::context::Path::collect(data, ">/purs/#filter('sound' == 'prrrr')").expect("evaluation failed");
     ///
     /// #[derive(serde::Deserialize)]
     /// struct Item {
@@ -366,13 +383,17 @@ impl Path {
     /// let items: Vec<Item> = results.from_index(0).unwrap();
     ///
     /// ```
-    pub fn collect<S: Into<String>>(v: Value, expr: S) -> PathResult {
+    pub fn collect<S: Into<String>>(v: Value, expr: S) -> Result<PathResult, Error> {
         let expr: String = expr.into();
-        let filters = parser::parse(&expr);
+        let filters = match parser::parse(&expr) {
+            Ok(result) => result,
+            Err(err) => return Err(Error::Parse(err.to_string())),
+        };
+
         let mut ctx = Context::new(v, filters.as_slice());
         ctx.collect();
 
-        PathResult(ctx.results)
+        Ok(PathResult(ctx.results))
     }
 
     fn collect_with_filter(v: Value, filters: &[Filter]) -> PathResult {
@@ -433,6 +454,8 @@ impl<'a> Context<'a> {
     }
 
     pub fn collect(&mut self) {
+        // TODO(mitghi): implement context errors
+
         while self.stack.borrow().len() > 0 {
             let current = if let Some(value) = self.stack.borrow_mut().pop() {
                 value
@@ -948,7 +971,7 @@ mod test {
         }
           );
 
-        let mut values = Path::collect(data, ">/..obj/#pick('a','b')");
+        let mut values = Path::collect(data, ">/..obj/#pick('a','b')").expect("unable to parse");
 
         #[derive(Serialize, Deserialize)]
         pub struct Output {
@@ -985,7 +1008,8 @@ mod test {
         let values = Path::collect(
             serde_json::from_str(&data).unwrap(),
             ">/..obj/#pick('a', >/..with_nested/#pick('object'))",
-        );
+        )
+        .expect("unable to parse");
 
         assert_eq!(
             *values.0.borrow().clone(),
@@ -1016,7 +1040,8 @@ mod test {
         let values = Path::collect(
             serde_json::from_str(&data).unwrap(),
             ">/..obj/#pick('a' as 'foo', >/..object)",
-        );
+        )
+        .expect("unable to parse");
 
         assert_eq!(
             *values.0.borrow().clone(),
@@ -1036,7 +1061,8 @@ mod test {
         }
         "#;
 
-        let values = Path::collect(serde_json::from_str(&data).unwrap(), ">/values/[1]");
+        let values = Path::collect(serde_json::from_str(&data).unwrap(), ">/values/[1]")
+            .expect("unable to parse");
 
         assert_eq!(
             *values.0.borrow().clone(),
@@ -1073,7 +1099,8 @@ mod test {
             }
         });
 
-        let values = Path::collect(data, ">/entry/('foo' | 'bar' | 'another')");
+        let values =
+            Path::collect(data, ">/entry/('foo' | 'bar' | 'another')").expect("unable to parse");
 
         assert_eq!(values.0.borrow().len(), 1);
         assert_eq!(
@@ -1094,7 +1121,8 @@ mod test {
             }
         );
 
-        let values = Path::collect(data, ">/values/#filter('is_eligable' == true)");
+        let values = Path::collect(data, ">/values/#filter('is_eligable' == true)")
+            .expect("unable to parse");
 
         assert_eq!(values.0.borrow().len(), 1);
         assert_eq!(
@@ -1103,5 +1131,12 @@ mod test {
                 serde_json::json!({"name": "foo", "is_eligable": true})
             ]))
         );
+    }
+
+    #[test]
+    fn test_invalid() {
+        let data = serde_json::json!({"k": "v"});
+        let values = Path::collect(data, ">/asdfasdfw9u-q23r- q23r 2323r ");
+        assert_eq!(values.is_err(), true);
     }
 }

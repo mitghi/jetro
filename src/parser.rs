@@ -1,18 +1,20 @@
 //! Module containing parser for jetro.
 
-use pest_derive::Parser as Parse;
-
 use crate::context::{
     Filter, FilterInner, FilterInnerRighthand, FilterOp, FormatOp, PickFilterInner,
 };
-use pest::Parser;
+
+use crate::*;
 
 #[derive(Parse)]
 #[grammar = "./grammar.pest"]
 pub struct ExpressionParser;
 
-pub(crate) fn parse<'a>(input: &'a str) -> Vec<Filter> {
+pub(crate) fn parse<'a>(input: &'a str) -> Result<Vec<Filter>, pest::error::Error<Rule>> {
     let pairs = ExpressionParser::parse(Rule::expression, input);
+    if pairs.is_err() {
+        return Err(pairs.err().unwrap());
+    }
     let root = pairs.unwrap().next().unwrap();
     let mut actions: Vec<Filter> = vec![];
     for token in root.into_inner() {
@@ -146,12 +148,9 @@ pub(crate) fn parse<'a>(input: &'a str) -> Vec<Filter> {
                 actions.push(Filter::Slice(from, to));
             }
             Rule::pickFn => {
-                let elems: Vec<PickFilterInner> = token
-                    .into_inner()
-                    .nth(1)
-                    .unwrap()
-                    .into_inner()
-                    .map(|v| match &v.as_rule() {
+                let mut elems: Vec<PickFilterInner> = vec![];
+                for v in token.into_inner().nth(1).unwrap().into_inner() {
+                    match &v.as_rule() {
                         Rule::sub_expression_keyed | Rule::sub_expression_keyed_reversed => {
                             let reverse = *&v.as_rule() == Rule::sub_expression_keyed_reversed;
                             let mut l = v.into_inner();
@@ -169,22 +168,38 @@ pub(crate) fn parse<'a>(input: &'a str) -> Vec<Filter> {
 
                             match alias {
                                 Some(alias) => {
-                                    return PickFilterInner::KeyedSubpath {
-                                        subpath: parse(subexpr),
+                                    let subpath = parse(subexpr);
+                                    if subpath.is_err() {
+                                        return Err(subpath.err().unwrap());
+                                    }
+                                    elems.push(PickFilterInner::KeyedSubpath {
+                                        subpath: subpath.unwrap(),
                                         alias,
                                         reverse,
-                                    };
+                                    });
                                 }
                                 None => {
-                                    return PickFilterInner::Subpath(parse(subexpr), reverse);
+                                    let subpath = parse(subexpr);
+                                    if subpath.is_err() {
+                                        return Err(subpath.err().unwrap());
+                                    }
+                                    elems.push(PickFilterInner::Subpath(subpath.unwrap(), reverse));
                                 }
                             }
                         }
                         Rule::sub_expression => {
-                            return PickFilterInner::Subpath(parse(v.as_str()), false);
+                            let subpath = parse(v.as_str());
+                            if subpath.is_err() {
+                                return Err(subpath.err().unwrap());
+                            }
+                            elems.push(PickFilterInner::Subpath(subpath.unwrap(), false));
                         }
                         Rule::sub_expression_reversed => {
-                            return PickFilterInner::Subpath(parse(v.as_str()), true);
+                            let subpath = parse(v.as_str());
+                            if subpath.is_err() {
+                                return Err(subpath.err().unwrap());
+                            }
+                            elems.push(PickFilterInner::Subpath(subpath.unwrap(), true));
                         }
                         Rule::literal_keyed => {
                             let mut l = v.into_inner();
@@ -202,25 +217,25 @@ pub(crate) fn parse<'a>(input: &'a str) -> Vec<Filter> {
                             };
 
                             match (span.len(), alias) {
-                                (2, _) => return PickFilterInner::Str("".to_string()),
+                                (2, _) => elems.push(PickFilterInner::Str("".to_string())),
                                 (_, None) => {
-                                    return PickFilterInner::Str(
+                                    elems.push(PickFilterInner::Str(
                                         span[1..span.len() - 1].to_string(),
-                                    );
+                                    ));
                                 }
                                 (_, Some(alias)) => {
-                                    return PickFilterInner::KeyedStr {
+                                    elems.push(PickFilterInner::KeyedStr {
                                         key: span[1..span.len() - 1].to_string(),
                                         alias: alias.to_string(),
-                                    };
+                                    });
                                 }
                             }
                         }
                         _ => {
-                            return PickFilterInner::None;
+                            elems.push(PickFilterInner::None);
                         }
-                    })
-                    .collect();
+                    }
+                }
                 actions.push(Filter::Pick(elems));
             }
             Rule::descendant_child => {
@@ -234,7 +249,7 @@ pub(crate) fn parse<'a>(input: &'a str) -> Vec<Filter> {
             _ => {}
         }
     }
-    actions
+    Ok(actions)
 }
 
 #[cfg(test)]
@@ -243,7 +258,7 @@ mod test {
 
     #[test]
     fn test_one() {
-        let actions = parse(">/obj/some/*/name");
+        let actions = parse(">/obj/some/*/name").unwrap();
         assert_eq!(
             actions,
             vec![
@@ -258,7 +273,7 @@ mod test {
 
     #[test]
     fn test_two() {
-        let actions = parse(">/obj/some/..descendant/name");
+        let actions = parse(">/obj/some/..descendant/name").unwrap();
         assert_eq!(
             actions,
             vec![
@@ -273,7 +288,7 @@ mod test {
 
     #[test]
     fn test_three() {
-        let actions = parse(">/obj/some/..descendant/#pick('a', 'b', 'c', 'd')");
+        let actions = parse(">/obj/some/..descendant/#pick('a', 'b', 'c', 'd')").unwrap();
         assert_eq!(
             actions,
             vec![
@@ -293,7 +308,7 @@ mod test {
 
     #[test]
     fn test_with_keyed_literal() {
-        let actions = parse(">/obj/some/..descendant/#pick('f' as 'foo', 'b' as 'bar')");
+        let actions = parse(">/obj/some/..descendant/#pick('f' as 'foo', 'b' as 'bar')").unwrap();
         assert_eq!(
             actions,
             vec![
@@ -317,7 +332,8 @@ mod test {
 
     #[test]
     fn test_with_sub_expression_keyed() {
-        let actions = parse(">/obj/some/..descendant/#pick('f' as 'foo', >/some/branch as 'path')");
+        let actions =
+            parse(">/obj/some/..descendant/#pick('f' as 'foo', >/some/branch as 'path')").unwrap();
         assert_eq!(
             actions,
             vec![
@@ -346,7 +362,8 @@ mod test {
 
     #[test]
     fn test_with_sub_expression_keyed_reverse() {
-        let actions = parse(">/obj/some/..descendant/#pick('f' as 'foo', </some/branch as 'path')");
+        let actions =
+            parse(">/obj/some/..descendant/#pick('f' as 'foo', </some/branch as 'path')").unwrap();
         assert_eq!(
             actions,
             vec![
@@ -375,13 +392,13 @@ mod test {
 
     #[test]
     fn test_slice() {
-        let actions = parse(">/[1:4]");
+        let actions = parse(">/[1:4]").unwrap();
         assert_eq!(actions, vec![Filter::Root, Filter::Slice(1, 4),]);
     }
 
     #[test]
     fn test_format() {
-        let actions = parse(">/#formats('{}{}', 'name', 'alias') as 'some_key'");
+        let actions = parse(">/#formats('{}{}', 'name', 'alias') as 'some_key'").unwrap();
         assert_eq!(
             actions,
             vec![
@@ -397,7 +414,7 @@ mod test {
 
     #[test]
     fn test_filter() {
-        let actions = parse(">/..meows/#filter('some' == 'value')");
+        let actions = parse(">/..meows/#filter('some' == 'value')").unwrap();
         assert_eq!(
             actions,
             vec![
@@ -414,7 +431,7 @@ mod test {
 
     #[test]
     fn test_groupped_literal() {
-        let actions = parse(">/foo/('bar' | 'baz' | 'cuz')");
+        let actions = parse(">/foo/('bar' | 'baz' | 'cuz')").unwrap();
         assert_eq!(
             actions,
             vec![
@@ -431,7 +448,7 @@ mod test {
 
     #[test]
     fn test_truthy_filter() {
-        let actions = parse(">/foo/#filter('is_furry' == true)");
+        let actions = parse(">/foo/#filter('is_furry' == true)").unwrap();
         assert_eq!(
             actions,
             vec![
