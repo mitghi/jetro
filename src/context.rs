@@ -543,7 +543,23 @@ impl<'a> Context<'a> {
                                 Value::Number(serde_json::Number::from(array.len()))
                             );
                         }
-                        _ => {}
+                        _ => {
+                            let mut count: i64 = 0;
+                            let values = self.results.to_owned();
+                            self.results = Rc::new(RefCell::new(Vec::new()));
+                            for value in values.borrow().clone() {
+                                if value.is_number() {
+                                    count += 1;
+                                }
+                            }
+                            count += 1;
+                            push_to_stack_or_produce!(
+                                self.results,
+                                self.stack,
+                                tail,
+                                Value::Number(serde_json::Number::from(count))
+                            );
+                        }
                     },
 
                     (Filter::Sum, Some(tail)) => match *current.value {
@@ -579,7 +595,35 @@ impl<'a> Context<'a> {
                                 Value::Number(serde_json::Number::from(sum))
                             );
                         }
-                        _ => {}
+                        _ => {
+                            let mut sum: i64 = 0;
+                            let values = self.results.to_owned();
+                            self.results = Rc::new(RefCell::new(Vec::new()));
+                            for value in values.borrow().clone() {
+                                match *value.as_ref() {
+                                    Value::Array(ref inner_array) => {
+                                        for v in inner_array {
+                                            if v.is_number() {
+                                                sum += v.as_i64().unwrap();
+                                            }
+                                        }
+                                    }
+                                    Value::Number(ref num) => {
+                                        sum += num.as_i64().unwrap();
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            if current.value.is_number() {
+                                sum += current.value.as_i64().unwrap();
+                            }
+                            push_to_stack_or_produce!(
+                                self.results,
+                                self.stack,
+                                tail,
+                                Value::Number(serde_json::Number::from(sum))
+                            );
+                        }
                     },
 
                     (Filter::All, Some(tail)) => match *current.value {
@@ -1138,5 +1182,16 @@ mod test {
         let data = serde_json::json!({"k": "v"});
         let values = Path::collect(data, ">/asdfasdfw9u-q23r- q23r 2323r ");
         assert_eq!(values.is_err(), true);
+    }
+
+    #[test]
+    fn test_prio() {
+        let data = serde_json::json!({"entry": {"values": [{"name": "gearbox", "priority": 10}, {"name": "steam", "priority": 2}]}});
+        let values = Path::collect(data, ">/..priority/#len");
+        assert_eq!(values.is_ok(), true);
+        assert_eq!(
+            *values.unwrap().0.borrow(),
+            vec![Rc::new(Value::Number(serde_json::Number::from(2)))]
+        );
     }
 }
