@@ -70,6 +70,11 @@ pub(crate) fn parse<'a>(input: &'a str) -> Result<Vec<Filter>, pest::error::Erro
                             elem.next().unwrap().as_str().parse::<i64>().unwrap(),
                         ));
                     }
+                    Rule::float => {
+                        right = Some(FilterInnerRighthand::Float(
+                            elem.next().unwrap().as_str().parse::<f64>().unwrap(),
+                        ));
+                    }
                     _ => {
                         right = None;
                     }
@@ -480,6 +485,23 @@ mod test {
                     op: FilterOp::Eq,
                     right: FilterInnerRighthand::Number(1234),
                 })
+            ],
+        );
+    }
+
+    #[test]
+    fn test_float_filter() {
+        let actions = parse(">/foo/#filter('some_value' == 2.48)").unwrap();
+        assert_eq!(
+            actions,
+            vec![
+                Filter::Root,
+                Filter::Child("foo".to_string()),
+                Filter::Filter(FilterInner::Cond {
+                    left: "some_value".to_string(),
+                    op: FilterOp::Eq,
+                    right: FilterInnerRighthand::Float(2.48),
+                }),
             ],
         );
     }

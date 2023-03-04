@@ -74,7 +74,7 @@ squashFn = { slash ~ squash }
 pickFn = { slash ~ pick }
 formats = { sharp ~ "formats" ~ whitespc ~ lparen ~ literal ~ ((",")* ~ whitespc ~ literal)+ ~ whitespc ~ rparen ~ whitespc ~ as}
 formatsFn = { slash ~ formats }
-filter = { sharp ~ "filter" ~ lparen ~ whitespc ~ ( filter_elem ~ whitespc ~ cmp ~ whitespc ~ (truthy | literal | number | float ) ) ~ whitespc ~ rparen }
+filter = { sharp ~ "filter" ~ lparen ~ whitespc ~ ( filter_elem ~ whitespc ~ cmp ~ whitespc ~ (float | truthy | literal | number ) ) ~ whitespc ~ rparen }
 filter_elem = { literal }
 filterFn = { slash ~ filter }
 

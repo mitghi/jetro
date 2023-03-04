@@ -71,6 +71,7 @@ pub enum FilterInnerRighthand {
     String(String),
     Bool(bool),
     Number(i64),
+    Float(f64),
 }
 
 #[derive(Debug, PartialEq)]
@@ -281,6 +282,11 @@ macro_rules! search_filter_in_array {
                         Value::Number(n) => match $value {
                             FilterInnerRighthand::Number(number_value) => {
                                 if do_comparision!(n.as_i64().unwrap(), $op, *number_value) {
+                                    results.push(value.clone());
+                                }
+                            }
+                            FilterInnerRighthand::Float(float_value) => {
+                                if do_comparision!(n.as_f64().unwrap(), $op, *float_value) {
                                     results.push(value.clone());
                                 }
                             }
@@ -1232,6 +1238,30 @@ mod test {
             (
                 ">/..truth_d/#all".to_string(),
                 vec![Rc::new(Value::Bool(true))],
+            ),
+        ];
+
+        for (path, expect) in tests.iter() {
+            let values = Path::collect(data.clone(), path).unwrap();
+            assert_eq!(*values.0.borrow(), *expect);
+        }
+    }
+
+    #[test]
+    fn test_float_filter_evaluation() {
+        let data = serde_json::json!({"entry": {"values": [{"name": "gearbox", "some_float": 10.1112}, {"name": "steam", "some_float": 2.48}]}});
+        let tests: Vec<(String, Vec<Rc<Value>>)> = vec![
+            (
+                ">/entry/values/#filter('some_float' >= 10.1112)".to_string(),
+                vec![Rc::new(Value::Array(vec![
+                    serde_json::json!({"name": "gearbox", "some_float": 10.1112}),
+                ]))],
+            ),
+            (
+                ">/entry/values/#filter('some_float' == 2.48)".to_string(),
+                vec![Rc::new(Value::Array(vec![
+                    serde_json::json!({"name": "steam", "some_float": 2.48}),
+                ]))],
             ),
         ];
 
