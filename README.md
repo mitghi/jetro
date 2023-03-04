@@ -1,6 +1,7 @@
 # jetro
 
 [<img src="https://img.shields.io/badge/docs-jetro-blue"></img>](https://docs.rs/jetro)
+[<img src="https://img.shields.io/badge/try-online%20repl-brightgreen"></img>](https://coral-app-bgkbr.ondigitalocean.app)
 ![GitHub](https://img.shields.io/github/license/mitghi/jetro)
 
 Jetro is a tool for transforming, querying and comparing data in JSON format.
