@@ -22,7 +22,7 @@ less = { "<" }
 greater_equal = { ">=" }
 less_equal = { "<=" }
 equal = { "==" }
-cmp = { equal | greater | less | greater_equal | less_equal }
+cmp = { greater_equal | less_equal | equal | greater | less }
 true_bool = { "true" }
 false_bool = { "false" }
 truthy = { true_bool | false_bool }
@@ -74,7 +74,7 @@ squashFn = { slash ~ squash }
 pickFn = { slash ~ pick }
 formats = { sharp ~ "formats" ~ whitespc ~ lparen ~ literal ~ ((",")* ~ whitespc ~ literal)+ ~ whitespc ~ rparen ~ whitespc ~ as}
 formatsFn = { slash ~ formats }
-filter = { sharp ~ "filter" ~ lparen ~ whitespc ~ ( filter_elem ~ whitespc ~ cmp ~ whitespc ~ (truthy | literal) ) ~ whitespc ~ rparen }
+filter = { sharp ~ "filter" ~ lparen ~ whitespc ~ ( filter_elem ~ whitespc ~ cmp ~ whitespc ~ (truthy | literal | number | float ) ) ~ whitespc ~ rparen }
 filter_elem = { literal }
 filterFn = { slash ~ filter }
 

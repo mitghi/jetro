@@ -70,6 +70,7 @@ pub enum PickFilterInner {
 pub enum FilterInnerRighthand {
     String(String),
     Bool(bool),
+    Number(i64),
 }
 
 #[derive(Debug, PartialEq)]
@@ -241,8 +242,20 @@ macro_rules! match_value {
     }};
 }
 
+macro_rules! do_comparision {
+    ($lhs:expr, $op:expr, $rhs:expr) => {
+        match $op {
+            FilterOp::Less => $lhs < $rhs,
+            FilterOp::Eq => $lhs == $rhs,
+            FilterOp::Gt => $lhs > $rhs,
+            FilterOp::Lq => $lhs <= $rhs,
+            FilterOp::Gq => $lhs >= $rhs,
+        }
+    };
+}
+
 macro_rules! search_filter_in_array {
-    ($array:expr, $key:expr, $value:expr, $results:expr, $stack:expr, $tail:expr) => {
+    ($array:expr, $key:expr, $value:expr, $op:expr, $results:expr, $stack:expr, $tail:expr) => {
         let mut results: Vec<Value> = vec![];
         for value in $array {
             if value.is_object() {
@@ -251,7 +264,7 @@ macro_rules! search_filter_in_array {
                     Some(result) => match result {
                         Value::String(ref target_string) => match $value {
                             FilterInnerRighthand::String(ref str_value) => {
-                                if target_string == str_value {
+                                if do_comparision!(target_string, $op, str_value) {
                                     results.push(value.clone());
                                 }
                             }
@@ -259,7 +272,15 @@ macro_rules! search_filter_in_array {
                         },
                         Value::Bool(v) => match $value {
                             FilterInnerRighthand::Bool(bool_value) => {
-                                if v == bool_value {
+                                if do_comparision!(v, $op, bool_value) {
+                                    results.push(value.clone());
+                                }
+                            }
+                            _ => {}
+                        },
+                        Value::Number(n) => match $value {
+                            FilterInnerRighthand::Number(number_value) => {
+                                if do_comparision!(n.as_i64().unwrap(), $op, *number_value) {
                                     results.push(value.clone());
                                 }
                             }
@@ -453,6 +474,44 @@ impl<'a> Context<'a> {
         }
     }
 
+    #[inline]
+    pub fn reduce_stack_to_num_count(&mut self) -> i64 {
+        let mut count: i64 = 0;
+        let values = self.results.to_owned();
+        self.results = Rc::new(RefCell::new(Vec::new()));
+        for value in values.borrow().clone() {
+            if value.is_number() {
+                count += 1
+            }
+        }
+
+        return count;
+    }
+
+    #[inline]
+    pub fn reduce_stack_to_sum(&mut self) -> i64 {
+        let mut sum: i64 = 0;
+        let values = self.results.to_owned();
+        self.results = Rc::new(RefCell::new(Vec::new()));
+        for value in values.borrow().clone() {
+            match *value.as_ref() {
+                Value::Array(ref inner_array) => {
+                    for v in inner_array {
+                        if v.is_number() {
+                            sum += v.as_i64().unwrap();
+                        }
+                    }
+                }
+                Value::Number(ref num) => {
+                    sum += num.as_i64().unwrap();
+                }
+                _ => {}
+            }
+        }
+
+        return sum;
+    }
+
     pub fn collect(&mut self) {
         // TODO(mitghi): implement context errors
 
@@ -508,13 +567,14 @@ impl<'a> Context<'a> {
                         Value::Array(ref _array) => match _cond {
                             FilterInner::Cond {
                                 ref left,
-                                op: ref _op,
+                                ref op,
                                 ref right,
                             } => {
                                 search_filter_in_array!(
                                     _array,
                                     left,
                                     right,
+                                    op,
                                     self.results,
                                     self.stack,
                                     _tail
@@ -544,15 +604,7 @@ impl<'a> Context<'a> {
                             );
                         }
                         _ => {
-                            let mut count: i64 = 0;
-                            let values = self.results.to_owned();
-                            self.results = Rc::new(RefCell::new(Vec::new()));
-                            for value in values.borrow().clone() {
-                                if value.is_number() {
-                                    count += 1;
-                                }
-                            }
-                            count += 1;
+                            let count: i64 = self.reduce_stack_to_num_count() + 1;
                             push_to_stack_or_produce!(
                                 self.results,
                                 self.stack,
@@ -565,24 +617,7 @@ impl<'a> Context<'a> {
                     (Filter::Sum, Some(tail)) => match *current.value {
                         Value::Object(ref _obj) => {}
                         Value::Array(ref array) => {
-                            let mut sum: i64 = 0;
-                            let values = self.results.to_owned();
-                            self.results = Rc::new(RefCell::new(Vec::new()));
-                            for value in values.borrow().clone() {
-                                match *value.as_ref() {
-                                    Value::Array(ref inner_array) => {
-                                        for v in inner_array {
-                                            if v.is_number() {
-                                                sum += v.as_i64().unwrap();
-                                            }
-                                        }
-                                    }
-                                    Value::Number(ref num) => {
-                                        sum += num.as_i64().unwrap();
-                                    }
-                                    _ => {}
-                                }
-                            }
+                            let mut sum = self.reduce_stack_to_sum();
                             for value in array {
                                 if value.is_number() {
                                     sum += value.as_i64().unwrap();
@@ -596,24 +631,7 @@ impl<'a> Context<'a> {
                             );
                         }
                         _ => {
-                            let mut sum: i64 = 0;
-                            let values = self.results.to_owned();
-                            self.results = Rc::new(RefCell::new(Vec::new()));
-                            for value in values.borrow().clone() {
-                                match *value.as_ref() {
-                                    Value::Array(ref inner_array) => {
-                                        for v in inner_array {
-                                            if v.is_number() {
-                                                sum += v.as_i64().unwrap();
-                                            }
-                                        }
-                                    }
-                                    Value::Number(ref num) => {
-                                        sum += num.as_i64().unwrap();
-                                    }
-                                    _ => {}
-                                }
-                            }
+                            let mut sum = self.reduce_stack_to_sum();
                             if current.value.is_number() {
                                 sum += current.value.as_i64().unwrap();
                             }
@@ -1192,6 +1210,19 @@ mod test {
         assert_eq!(
             *values.unwrap().0.borrow(),
             vec![Rc::new(Value::Number(serde_json::Number::from(2)))]
+        );
+    }
+
+    #[test]
+    fn test_filter_number() {
+        let data = serde_json::json!({"entry": {"values": [{"name": "gearbox", "priority": 10}, {"name": "steam", "priority": 2}]}});
+        let values = Path::collect(data, ">/entry/values/#filter('priority' == 2)");
+        assert_eq!(values.is_ok(), true);
+        assert_eq!(
+            *values.unwrap().0.borrow(),
+            vec![Rc::new(Value::Array(vec![
+                serde_json::json!({"name": "steam", "priority": 2})
+            ]))]
         );
     }
 }

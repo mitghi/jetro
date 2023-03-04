@@ -65,8 +65,13 @@ pub(crate) fn parse<'a>(input: &'a str) -> Result<Vec<Filter>, pest::error::Erro
                             }
                         }
                     }
+                    Rule::number => {
+                        right = Some(FilterInnerRighthand::Number(
+                            elem.next().unwrap().as_str().parse::<i64>().unwrap(),
+                        ));
+                    }
                     _ => {
-                        todo!();
+                        right = None;
                     }
                 }
                 if right.is_none() {
@@ -460,6 +465,22 @@ mod test {
                     right: FilterInnerRighthand::Bool(true)
                 })
             ]
+        );
+    }
+    #[test]
+    fn test_number_filter() {
+        let actions = parse(">/foo/#filter('some_value' == 1234)").unwrap();
+        assert_eq!(
+            actions,
+            vec![
+                Filter::Root,
+                Filter::Child("foo".to_string()),
+                Filter::Filter(FilterInner::Cond {
+                    left: "some_value".to_string(),
+                    op: FilterOp::Eq,
+                    right: FilterInnerRighthand::Number(1234),
+                })
+            ],
         );
     }
 }
