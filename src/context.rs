@@ -489,6 +489,30 @@ impl<'a> Context<'a> {
     }
 
     #[inline]
+    pub fn reduce_stack_to_all_truth(&mut self) -> bool {
+        let mut all = true;
+        let values = self.results.to_owned();
+        self.results = Rc::new(RefCell::new(Vec::new()));
+        for value in values.borrow().clone() {
+            match *value.as_ref() {
+                Value::Array(ref inner_array) => {
+                    for v in inner_array {
+                        if v.is_boolean() {
+                            all = all & (v.as_bool().unwrap() == true);
+                        }
+                    }
+                }
+                Value::Bool(ref value) => {
+                    all = all & (*value == true);
+                }
+                _ => {}
+            }
+        }
+
+        return all;
+    }
+
+    #[inline]
     pub fn reduce_stack_to_sum(&mut self) -> i64 {
         let mut sum: i64 = 0;
         let values = self.results.to_owned();
@@ -647,27 +671,7 @@ impl<'a> Context<'a> {
                     (Filter::All, Some(tail)) => match *current.value {
                         Value::Object(ref _obj) => {}
                         Value::Bool(ref value) => {
-                            let mut all = true;
-                            let values = self.results.to_owned();
-                            self.results = Rc::new(RefCell::new(Vec::new()));
-                            for value in values.borrow().clone() {
-                                match *value.as_ref() {
-                                    Value::Array(ref inner_array) => {
-                                        for v in inner_array {
-                                            if v.is_boolean() {
-                                                all = all & (v.as_bool().unwrap() == true);
-                                            }
-                                        }
-                                    }
-                                    Value::Bool(ref value) => {
-                                        all = all & (*value == true);
-                                    }
-                                    _ => {}
-                                }
-                            }
-
-                            all = all & (*value == true);
-
+                            let all = self.reduce_stack_to_all_truth() & (*value == true);
                             push_to_stack_or_produce!(
                                 self.results,
                                 self.stack,
@@ -676,24 +680,7 @@ impl<'a> Context<'a> {
                             );
                         }
                         Value::Array(ref array) => {
-                            let mut all = true;
-                            let values = self.results.to_owned();
-                            self.results = Rc::new(RefCell::new(Vec::new()));
-                            for value in values.borrow().clone() {
-                                match *value.as_ref() {
-                                    Value::Array(ref inner_array) => {
-                                        for v in inner_array {
-                                            if v.is_boolean() {
-                                                all = all & (v.as_bool().unwrap() == true);
-                                            }
-                                        }
-                                    }
-                                    Value::Bool(ref value) => {
-                                        all = all & (*value == true);
-                                    }
-                                    _ => {}
-                                }
-                            }
+                            let mut all = self.reduce_stack_to_all_truth();
                             for value in array {
                                 if value.is_boolean() {
                                     all = all & (value.as_bool().unwrap() == true);
@@ -1224,5 +1211,33 @@ mod test {
                 serde_json::json!({"name": "steam", "priority": 2})
             ]))]
         );
+    }
+
+    #[test]
+    fn test_truth() {
+        let data = serde_json::json!({"entry": {"values": [{"name": "gearbox", "priority": 10, "truth_a": true, "truth_b": false, "truth_c": false, "truth_d": true}, {"name": "steam", "priority": 2, "truth_a": false, "truth_b": true, "truth_c": false, "truth_d": true}]}});
+        let tests: Vec<(String, Vec<Rc<Value>>)> = vec![
+            (
+                ">/..truth_a/#all".to_string(),
+                vec![Rc::new(Value::Bool(false))],
+            ),
+            (
+                ">/..truth_b/#all".to_string(),
+                vec![Rc::new(Value::Bool(false))],
+            ),
+            (
+                ">/..truth_c/#all".to_string(),
+                vec![Rc::new(Value::Bool(false))],
+            ),
+            (
+                ">/..truth_d/#all".to_string(),
+                vec![Rc::new(Value::Bool(true))],
+            ),
+        ];
+
+        for (path, expect) in tests.iter() {
+            let values = Path::collect(data.clone(), path).unwrap();
+            assert_eq!(*values.0.borrow(), *expect);
+        }
     }
 }
