@@ -19,6 +19,61 @@ pub struct Path;
 #[derive(Debug)]
 pub struct PathResult(pub PathOutput);
 
+enum Either<A, B> {
+    Left(A),
+    Right(B),
+}
+
+struct Sum(Either<i64, f64>);
+
+impl Sum {
+    fn new() -> Self {
+        Self(Either::Left(0))
+    }
+
+    fn add_i64(&mut self, value: i64) {
+        match self.0 {
+            Either::Left(left) => {
+                self.0 = Either::Left(left + value);
+            }
+            Either::Right(right) => {
+                self.0 = Either::Right(right + value as f64);
+            }
+        }
+    }
+
+    fn add_f64(&mut self, value: f64) {
+        match self.0 {
+            Either::Left(left) => {
+                self.0 = Either::Right(left as f64 + value);
+            }
+            Either::Right(right) => {
+                self.0 = Either::Right(right + value);
+            }
+        }
+    }
+
+    fn add(&mut self, input: &Value) {
+        if input.is_i64() {
+            self.add_i64(input.as_i64().unwrap());
+            return;
+        }
+        if input.is_f64() {
+            self.add_f64(input.as_f64().unwrap());
+            return;
+        }
+    }
+}
+
+impl From<Sum> for serde_json::Number {
+    fn from(value: Sum) -> Self {
+        match value.0 {
+            Either::Left(left) => serde_json::Number::from(left),
+            Either::Right(right) => serde_json::Number::from_f64(right).unwrap(),
+        }
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub enum FilterOp {
     Less,
@@ -519,8 +574,8 @@ impl<'a> Context<'a> {
     }
 
     #[inline]
-    pub fn reduce_stack_to_sum(&mut self) -> i64 {
-        let mut sum: i64 = 0;
+    pub fn reduce_stack_to_sum(&mut self) -> Sum {
+        let mut sum = Sum::new();
         let values = self.results.to_owned();
         self.results = Rc::new(RefCell::new(Vec::new()));
         for value in values.borrow().clone() {
@@ -528,12 +583,12 @@ impl<'a> Context<'a> {
                 Value::Array(ref inner_array) => {
                     for v in inner_array {
                         if v.is_number() {
-                            sum += v.as_i64().unwrap();
+                            sum.add(&v);
                         }
                     }
                 }
-                Value::Number(ref num) => {
-                    sum += num.as_i64().unwrap();
+                Value::Number(_) => {
+                    sum.add(&*value.as_ref());
                 }
                 _ => {}
             }
@@ -650,7 +705,7 @@ impl<'a> Context<'a> {
                             let mut sum = self.reduce_stack_to_sum();
                             for value in array {
                                 if value.is_number() {
-                                    sum += value.as_i64().unwrap();
+                                    sum.add(&value);
                                 }
                             }
                             push_to_stack_or_produce!(
@@ -663,7 +718,7 @@ impl<'a> Context<'a> {
                         _ => {
                             let mut sum = self.reduce_stack_to_sum();
                             if current.value.is_number() {
-                                sum += current.value.as_i64().unwrap();
+                                sum.add(&current.value);
                             }
                             push_to_stack_or_produce!(
                                 self.results,
