@@ -1,8 +1,8 @@
 //! Module containing types and functionalities for
 //! evaluating jetro paths.
 
+use crate::fmt as jetrofmt;
 use crate::parser;
-use dynfmt::{Format, SimpleCurlyFormat};
 #[allow(unused_imports)]
 use serde::{Deserialize, Serialize};
 use serde_json::map::Map;
@@ -74,13 +74,31 @@ impl From<Sum> for serde_json::Number {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum FilterOp {
+    None,
     Less,
     Gt,
     Lq,
     Gq,
     Eq,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum FilterLogicalOp {
+    None,
+    And,
+    Or,
+}
+
+impl FilterLogicalOp {
+    pub fn get(input: &str) -> Option<Self> {
+        match input {
+            "and" => Some(FilterLogicalOp::And),
+            "or" => Some(FilterLogicalOp::Or),
+            _ => None,
+        }
+    }
 }
 
 impl FilterOp {
@@ -96,7 +114,7 @@ impl FilterOp {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum FormatOp {
     FormatString {
         format: String,
@@ -105,7 +123,7 @@ pub enum FormatOp {
     },
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum PickFilterInner {
     None,
     Str(String),
@@ -121,7 +139,7 @@ pub enum PickFilterInner {
     },
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum FilterInnerRighthand {
     String(String),
     Bool(bool),
@@ -129,7 +147,7 @@ pub enum FilterInnerRighthand {
     Float(f64),
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum FilterInner {
     Cond {
         left: String,
@@ -138,7 +156,15 @@ pub enum FilterInner {
     },
 }
 
-#[derive(Debug, PartialEq)]
+#[allow(dead_code)]
+#[derive(Debug)]
+pub(crate) struct FilterAST {
+    pub operand: FilterLogicalOp,
+    pub left: Option<Rc<RefCell<FilterInner>>>,
+    pub right: Option<Rc<RefCell<FilterAST>>>,
+}
+
+#[derive(Debug, PartialEq, Clone)]
 pub enum Filter {
     Root,
     AnyChild,
@@ -167,17 +193,8 @@ struct StackItem<'a> {
 struct Context<'a> {
     root: Rc<Value>,
     stack: Rc<RefCell<Vec<StackItem<'a>>>>,
+    formater: Box<dyn jetrofmt::KeyFormater>,
     pub results: Rc<RefCell<Vec<Rc<Value>>>>,
-}
-
-trait KeyFormater {
-    fn format(&self) -> Option<String>;
-}
-
-struct FormatImpl<'a> {
-    format: &'a str,
-    value: &'a Value,
-    keys: &'a Vec<String>,
 }
 
 #[derive(Debug)]
@@ -194,28 +211,6 @@ impl fmt::Display for Error {
             Error::Parse(ref msg) => write!(f, "error while parsing query: {}", &msg),
             Error::Eval(ref msg) => write!(f, "error while evaluating query: {}", &msg),
         }
-    }
-}
-
-impl<'a> FormatImpl<'a> {
-    fn format(&self) -> Option<String> {
-        let mut values: Vec<&'a Value> = vec![];
-        for key in self.keys.iter() {
-            match self.value.get(&key) {
-                Some(result) => values.push(result),
-                _ => {}
-            };
-        }
-        match SimpleCurlyFormat.format(self.format, values) {
-            Ok(result) => Some(result.into()),
-            _ => None,
-        }
-    }
-}
-
-impl<'a> KeyFormater for FormatImpl<'a> {
-    fn format(&self) -> Option<String> {
-        self.format()
     }
 }
 
@@ -306,6 +301,7 @@ macro_rules! do_comparision {
             FilterOp::Gt => $lhs > $rhs,
             FilterOp::Lq => $lhs <= $rhs,
             FilterOp::Gq => $lhs >= $rhs,
+            _ => false,
         }
     };
 }
@@ -357,6 +353,49 @@ macro_rules! search_filter_in_array {
             push_to_stack_or_produce!($results, $stack, $tail, Value::Array(results));
         }
     };
+}
+
+impl FilterAST {
+    pub fn new(left: FilterInner) -> Self {
+        Self {
+            operand: FilterLogicalOp::None,
+            left: Some(Rc::new(RefCell::new(left))),
+            right: None,
+        }
+    }
+
+    pub fn set_operand(&mut self, operand: FilterLogicalOp) {
+        self.operand = operand;
+    }
+
+    pub fn link_right(
+        &mut self,
+        statement: FilterInner,
+        operand: FilterLogicalOp,
+    ) -> Rc<RefCell<Self>> {
+        let mut rhs: Self = Self::new(statement);
+        rhs.set_operand(operand);
+
+        let inner = Rc::new(RefCell::new(rhs));
+        let output = inner.clone();
+        self.right = Some(inner);
+
+        output
+    }
+
+    #[allow(dead_code)]
+    pub fn repr(&self) -> String {
+        if self.operand == FilterLogicalOp::None && self.right.is_none() {
+            return format!("Filter({:?})", &self.left);
+        }
+        let rhs = &self.right.clone().unwrap().clone();
+        return format!(
+            "Filter({:?}) {:?} {:?}",
+            &self.left,
+            &self.operand,
+            rhs.borrow().repr(),
+        );
+    }
 }
 
 impl Filter {
@@ -524,6 +563,7 @@ impl<'a> Context<'a> {
         let results: Rc<RefCell<Vec<Rc<Value>>>> = Rc::new(RefCell::new(Vec::new()));
         let stack: Rc<RefCell<Vec<StackItem<'a>>>> = Rc::new(RefCell::new(Vec::new()));
         let rv: Rc<Value> = Rc::new(value);
+        let formater: Box<dyn jetrofmt::KeyFormater> = jetrofmt::default();
         stack
             .borrow_mut()
             .push(StackItem::new(rv.clone(), filters, Rc::clone(&stack)));
@@ -531,6 +571,7 @@ impl<'a> Context<'a> {
         Self {
             root: rv.clone(),
             stack,
+            formater,
             results,
         }
     }
@@ -647,7 +688,7 @@ impl<'a> Context<'a> {
 
                     (Filter::Filter(ref _cond), Some(_tail)) => match *current.value {
                         Value::Object(ref _obj) => {
-                            todo!();
+                            todo!("implement filter support for object");
                         }
                         Value::Array(ref _array) => match _cond {
                             FilterInner::Cond {
@@ -667,7 +708,7 @@ impl<'a> Context<'a> {
                             }
                         },
                         _ => {
-                            todo!();
+                            todo!("implement handling of unmatched arm for filter");
                         }
                     },
 
@@ -765,12 +806,8 @@ impl<'a> Context<'a> {
                                 ref alias,
                             } = target_format;
 
-                            let output: Option<String> = FormatImpl {
-                                format: fmt,
-                                value: &current.value,
-                                keys: args,
-                            }
-                            .format();
+                            let output: Option<String> =
+                                self.formater.format(&fmt, &current.value, args);
 
                             match output {
                                 Some(output) => {
@@ -795,12 +832,8 @@ impl<'a> Context<'a> {
                                     ref alias,
                                 } = target_format;
 
-                                let output: Option<String> = FormatImpl {
-                                    format: fmt,
-                                    value: &current.value,
-                                    keys: args,
-                                }
-                                .format();
+                                let output: Option<String> =
+                                    self.formater.format(fmt, &current.value, args);
 
                                 match output {
                                     Some(output) => {
@@ -1178,24 +1211,6 @@ mod test {
             *values.0.borrow().clone(),
             vec![Rc::new(serde_json::json!(2))],
         );
-    }
-
-    #[test]
-    fn test_format_impl() {
-        let data = serde_json::json!({
-            "name": "mr snuggle",
-            "alias": "jetro",
-        });
-
-        let keys = vec!["name".to_string(), "alias".to_string()];
-
-        let format_impl: Box<dyn KeyFormater> = Box::new(FormatImpl {
-            format: "{}_{}",
-            value: &data,
-            keys: &keys,
-        });
-
-        assert_eq!(format_impl.format(), Some("mr snuggle_jetro".to_string()));
     }
 
     #[test]

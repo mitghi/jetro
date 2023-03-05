@@ -63,6 +63,10 @@ array = {
     "]"
 }
 
+and = { "and" }
+or = { "or" }
+
+logical_cmp = { and | or }
 squash = { sharp ~ "squash" ~ "(" ~ ")" }
 sum = { sharp ~ "sum" }
 len = { sharp ~ "len" }
@@ -74,7 +78,8 @@ squashFn = { slash ~ squash }
 pickFn = { slash ~ pick }
 formats = { sharp ~ "formats" ~ whitespc ~ lparen ~ literal ~ ((",")* ~ whitespc ~ literal)+ ~ whitespc ~ rparen ~ whitespc ~ as}
 formatsFn = { slash ~ formats }
-filter = { sharp ~ "filter" ~ lparen ~ whitespc ~ ( filter_elem ~ whitespc ~ cmp ~ whitespc ~ (float | truthy | literal | number ) ) ~ whitespc ~ rparen }
+filterStmt = { ( filter_elem ~ whitespc ~ cmp ~ whitespc ~ (float | truthy | literal | number ) ) }
+filter = { sharp ~ "filter" ~ lparen ~ whitespc ~ ( filterStmt ~ whitespc ~ (logical_cmp ~ whitespc ~ filterStmt~ whitespc)* ) ~ whitespc ~ rparen }
 filter_elem = { literal }
 filterFn = { slash ~ filter }
 

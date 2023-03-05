@@ -1,7 +1,11 @@
 //! Module containing parser for jetro.
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use crate::context::{
-    Filter, FilterInner, FilterInnerRighthand, FilterOp, FormatOp, PickFilterInner,
+    Filter, FilterAST, FilterInner, FilterInnerRighthand, FilterLogicalOp, FilterOp, FormatOp,
+    PickFilterInner,
 };
 
 use crate::*;
@@ -33,61 +37,106 @@ pub(crate) fn parse<'a>(input: &'a str) -> Result<Vec<Filter>, pest::error::Erro
                 actions.push(Filter::GroupedChild(values));
             }
             Rule::filterFn => {
-                let mut elem = token.into_inner().nth(1).unwrap().into_inner();
-                let left = elem
-                    .next()
-                    .unwrap()
-                    .into_inner()
-                    .next()
-                    .unwrap()
-                    .into_inner()
-                    .as_str()
-                    .to_string();
-                let op = FilterOp::get(elem.next().unwrap().into_inner().as_str()).unwrap();
-                let right: Option<FilterInnerRighthand>;
+                let rule = token.into_inner().nth(1).unwrap().into_inner().into_iter();
 
-                match elem.clone().into_iter().next().unwrap().as_rule() {
-                    Rule::literal => {
-                        right = Some(FilterInnerRighthand::String(
-                            elem.next().unwrap().into_inner().as_str().to_string(),
-                        ));
-                    }
-                    Rule::truthy => {
-                        match elem.next().unwrap().into_inner().next().unwrap().as_rule() {
-                            Rule::true_bool => {
-                                right = Some(FilterInnerRighthand::Bool(true));
+                let mut fast_root: Option<Rc<RefCell<FilterAST>>> = None;
+                let mut current: Option<Rc<RefCell<FilterAST>>> = None;
+
+                for item in rule.into_iter() {
+                    let rule = item.as_rule();
+                    let elem = item.clone();
+                    match rule {
+                        Rule::filterStmt => {
+                            let mut inner = elem.into_inner();
+                            let left = inner
+                                .nth(0)
+                                .unwrap()
+                                .into_inner()
+                                .next()
+                                .unwrap()
+                                .into_inner()
+                                .next()
+                                .unwrap()
+                                .as_str()
+                                .to_string();
+                            let op =
+                                FilterOp::get(inner.nth(0).unwrap().into_inner().as_str()).unwrap();
+                            let right: Option<FilterInnerRighthand>;
+
+                            match inner.clone().into_iter().next().unwrap().as_rule() {
+                                Rule::literal => {
+                                    right = Some(FilterInnerRighthand::String(
+                                        inner.next().unwrap().into_inner().as_str().to_string(),
+                                    ));
+                                }
+                                Rule::truthy => {
+                                    match inner
+                                        .next()
+                                        .unwrap()
+                                        .into_inner()
+                                        .next()
+                                        .unwrap()
+                                        .as_rule()
+                                    {
+                                        Rule::true_bool => {
+                                            right = Some(FilterInnerRighthand::Bool(true));
+                                        }
+                                        Rule::false_bool => {
+                                            right = Some(FilterInnerRighthand::Bool(false));
+                                        }
+                                        _ => {
+                                            todo!("handle error");
+                                        }
+                                    }
+                                }
+                                Rule::number => {
+                                    right = Some(FilterInnerRighthand::Number(
+                                        inner.next().unwrap().as_str().parse::<i64>().unwrap(),
+                                    ));
+                                }
+                                Rule::float => {
+                                    right = Some(FilterInnerRighthand::Float(
+                                        inner.next().unwrap().as_str().parse::<f64>().unwrap(),
+                                    ));
+                                }
+                                _ => {
+                                    right = None;
+                                }
                             }
-                            Rule::false_bool => {
-                                right = Some(FilterInnerRighthand::Bool(false));
+
+                            let filter_inner = FilterInner::Cond {
+                                left,
+                                op,
+                                right: right.unwrap(),
+                            };
+
+                            let filter = Filter::Filter(filter_inner.clone());
+
+                            if fast_root.is_none() {
+                                fast_root = Some(Rc::new(RefCell::new(FilterAST::new(
+                                    filter_inner.clone(),
+                                ))));
+                                current = fast_root.clone();
+                            } else {
+                                let node = current.clone().unwrap();
+                                let rhs = node
+                                    .borrow_mut()
+                                    .link_right(filter_inner, FilterLogicalOp::None);
+                                current = Some(rhs);
                             }
-                            _ => {
-                                todo!("handle error");
-                            }
+
+                            actions.push(filter.clone());
+                        }
+                        Rule::logical_cmp => {
+                            let op = FilterLogicalOp::get(elem.as_str()).unwrap();
+                            let node = current.clone().unwrap();
+                            node.borrow_mut().set_operand(op.clone());
+                        }
+                        _ => {
+                            todo!("implement unmatched arm");
                         }
                     }
-                    Rule::number => {
-                        right = Some(FilterInnerRighthand::Number(
-                            elem.next().unwrap().as_str().parse::<i64>().unwrap(),
-                        ));
-                    }
-                    Rule::float => {
-                        right = Some(FilterInnerRighthand::Float(
-                            elem.next().unwrap().as_str().parse::<f64>().unwrap(),
-                        ));
-                    }
-                    _ => {
-                        right = None;
-                    }
                 }
-                if right.is_none() {
-                    todo!("handle error unknown case in right handside");
-                }
-
-                actions.push(Filter::Filter(FilterInner::Cond {
-                    left,
-                    op,
-                    right: right.unwrap(),
-                }));
             }
             Rule::formatsFn => {
                 let mut arguments: Vec<String> = vec![];
@@ -504,5 +553,92 @@ mod test {
                 }),
             ],
         );
+    }
+
+    #[test]
+    fn test_filter_ast() {
+        type FilterNode = Rc<RefCell<FilterAST>>;
+        let root: FilterNode;
+        let mut current: FilterNode;
+
+        let lhs = FilterInner::Cond {
+            left: "some_key".to_string(),
+            op: FilterOp::Eq,
+            right: FilterInnerRighthand::String("some_value".to_string()),
+        };
+
+        let op = FilterLogicalOp::And;
+
+        let rhs = FilterInner::Cond {
+            left: "whiskers".to_string(),
+            op: FilterOp::Gt,
+            right: FilterInnerRighthand::Float(2.48),
+        };
+
+        let standalone_lhs = FilterInner::Cond {
+            left: "standalone".to_string(),
+            op: FilterOp::Eq,
+            right: FilterInnerRighthand::Bool(true),
+        };
+
+        root = Rc::new(RefCell::new(FilterAST::new(lhs)));
+        root.borrow_mut().set_operand(op.clone());
+
+        current = root.clone();
+
+        let new_node = current.borrow_mut().link_right(rhs, FilterLogicalOp::None);
+        current = new_node;
+
+        current.borrow_mut().set_operand(FilterLogicalOp::Or);
+
+        let new_node = current
+            .borrow_mut()
+            .link_right(standalone_lhs, FilterLogicalOp::None);
+        current = new_node;
+        _ = current;
+
+        assert_eq!(root.borrow().operand, FilterLogicalOp::And);
+
+        let lhs = &root.borrow().left.clone().unwrap().clone();
+        match *lhs.borrow() {
+            FilterInner::Cond {
+                left: _,
+                ref op,
+                right: _,
+            } => {
+                assert_eq!(*op, FilterOp::Eq);
+            }
+        }
+
+        let rhs_lhs = &root
+            .borrow()
+            .right
+            .clone()
+            .unwrap()
+            .clone()
+            .borrow()
+            .left
+            .clone()
+            .unwrap()
+            .clone();
+        match *rhs_lhs.borrow() {
+            FilterInner::Cond {
+                left: _,
+                ref op,
+                right: _,
+            } => {
+                assert_eq!(*op, FilterOp::Gt);
+            }
+        };
+    }
+
+    #[test]
+    fn test_multi_filter() {
+        let actions = parse(
+            ">/#filter('some_key' == 'some_value' and 'whiskers' < 2.48 or 'standalone' == true)",
+        )
+        .unwrap();
+
+        println!("result: {:?}", actions);
     }
 }
