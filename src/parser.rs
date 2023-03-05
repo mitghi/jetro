@@ -110,8 +110,6 @@ pub(crate) fn parse<'a>(input: &'a str) -> Result<Vec<Filter>, pest::error::Erro
                                 right: right.unwrap(),
                             };
 
-                            let filter = Filter::Filter(filter_inner.clone());
-
                             if fast_root.is_none() {
                                 fast_root = Some(Rc::new(RefCell::new(FilterAST::new(
                                     filter_inner.clone(),
@@ -124,8 +122,6 @@ pub(crate) fn parse<'a>(input: &'a str) -> Result<Vec<Filter>, pest::error::Erro
                                     .link_right(filter_inner, FilterLogicalOp::None);
                                 current = Some(rhs);
                             }
-
-                            actions.push(filter.clone());
                         }
                         Rule::logical_cmp => {
                             let op = FilterLogicalOp::get(elem.as_str()).unwrap();
@@ -137,6 +133,7 @@ pub(crate) fn parse<'a>(input: &'a str) -> Result<Vec<Filter>, pest::error::Erro
                         }
                     }
                 }
+                actions.push(Filter::MultiFilter(fast_root.unwrap()));
             }
             Rule::formatsFn => {
                 let mut arguments: Vec<String> = vec![];
@@ -479,11 +476,15 @@ mod test {
             vec![
                 Filter::Root,
                 Filter::Descendant("meows".to_string()),
-                Filter::Filter(FilterInner::Cond {
-                    left: "some".to_string(),
-                    op: FilterOp::Eq,
-                    right: FilterInnerRighthand::String("value".to_string()),
-                })
+                Filter::MultiFilter(Rc::new(RefCell::new(FilterAST {
+                    operand: FilterLogicalOp::None,
+                    left: Some(Rc::new(RefCell::new(FilterInner::Cond {
+                        left: "some".to_string(),
+                        op: FilterOp::Eq,
+                        right: FilterInnerRighthand::String("value".to_string()),
+                    }))),
+                    right: None,
+                })))
             ]
         );
     }
@@ -513,11 +514,15 @@ mod test {
             vec![
                 Filter::Root,
                 Filter::Child("foo".to_string()),
-                Filter::Filter(FilterInner::Cond {
-                    left: "is_furry".to_string(),
-                    op: FilterOp::Eq,
-                    right: FilterInnerRighthand::Bool(true)
-                })
+                Filter::MultiFilter(Rc::new(RefCell::new(FilterAST {
+                    operand: FilterLogicalOp::None,
+                    left: Some(Rc::new(RefCell::new(FilterInner::Cond {
+                        left: "is_furry".to_string(),
+                        op: FilterOp::Eq,
+                        right: FilterInnerRighthand::Bool(true)
+                    }))),
+                    right: None,
+                })))
             ]
         );
     }
@@ -529,28 +534,36 @@ mod test {
             vec![
                 Filter::Root,
                 Filter::Child("foo".to_string()),
-                Filter::Filter(FilterInner::Cond {
-                    left: "some_value".to_string(),
-                    op: FilterOp::Eq,
-                    right: FilterInnerRighthand::Number(1234),
-                })
+                Filter::MultiFilter(Rc::new(RefCell::new(FilterAST {
+                    operand: FilterLogicalOp::None,
+                    left: Some(Rc::new(RefCell::new(FilterInner::Cond {
+                        left: "some_value".to_string(),
+                        op: FilterOp::Eq,
+                        right: FilterInnerRighthand::Number(1234),
+                    }))),
+                    right: None,
+                })))
             ],
         );
     }
 
     #[test]
-    fn test_float_filter() {
+    fn test_flaot_filter() {
         let actions = parse(">/foo/#filter('some_value' == 2.48)").unwrap();
         assert_eq!(
             actions,
             vec![
                 Filter::Root,
                 Filter::Child("foo".to_string()),
-                Filter::Filter(FilterInner::Cond {
-                    left: "some_value".to_string(),
-                    op: FilterOp::Eq,
-                    right: FilterInnerRighthand::Float(2.48),
-                }),
+                Filter::MultiFilter(Rc::new(RefCell::new(FilterAST {
+                    operand: FilterLogicalOp::None,
+                    left: Some(Rc::new(RefCell::new(FilterInner::Cond {
+                        left: "some_value".to_string(),
+                        op: FilterOp::Eq,
+                        right: FilterInnerRighthand::Float(2.48),
+                    }))),
+                    right: None,
+                })))
             ],
         );
     }
@@ -630,15 +643,5 @@ mod test {
                 assert_eq!(*op, FilterOp::Gt);
             }
         };
-    }
-
-    #[test]
-    fn test_multi_filter() {
-        let actions = parse(
-            ">/#filter('some_key' == 'some_value' and 'whiskers' < 2.48 or 'standalone' == true)",
-        )
-        .unwrap();
-
-        println!("result: {:?}", actions);
     }
 }

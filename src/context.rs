@@ -157,8 +157,8 @@ pub enum FilterInner {
 }
 
 #[allow(dead_code)]
-#[derive(Debug)]
-pub(crate) struct FilterAST {
+#[derive(Debug, PartialEq, Clone)]
+pub struct FilterAST {
     pub operand: FilterLogicalOp,
     pub left: Option<Rc<RefCell<FilterInner>>>,
     pub right: Option<Rc<RefCell<FilterAST>>>,
@@ -177,6 +177,7 @@ pub enum Filter {
     ArrayTo(usize),
     Slice(usize, usize),
     Filter(FilterInner),
+    MultiFilter(Rc<RefCell<FilterAST>>),
     GroupedChild(Vec<String>),
     All,
     Len,
@@ -306,53 +307,45 @@ macro_rules! do_comparision {
     };
 }
 
-macro_rules! search_filter_in_array {
-    ($array:expr, $key:expr, $value:expr, $op:expr, $results:expr, $stack:expr, $tail:expr) => {
-        let mut results: Vec<Value> = vec![];
-        for value in $array {
-            if value.is_object() {
-                let obj = value.as_object().unwrap();
-                match obj.get(&$key.clone()) {
-                    Some(result) => match result {
-                        Value::String(ref target_string) => match $value {
-                            FilterInnerRighthand::String(ref str_value) => {
-                                if do_comparision!(target_string, $op, str_value) {
-                                    results.push(value.clone());
-                                }
-                            }
-                            _ => {}
-                        },
-                        Value::Bool(v) => match $value {
-                            FilterInnerRighthand::Bool(bool_value) => {
-                                if do_comparision!(v, $op, bool_value) {
-                                    results.push(value.clone());
-                                }
-                            }
-                            _ => {}
-                        },
-                        Value::Number(n) => match $value {
-                            FilterInnerRighthand::Number(number_value) => {
-                                if do_comparision!(n.as_i64().unwrap(), $op, *number_value) {
-                                    results.push(value.clone());
-                                }
-                            }
-                            FilterInnerRighthand::Float(float_value) => {
-                                if do_comparision!(n.as_f64().unwrap(), $op, *float_value) {
-                                    results.push(value.clone());
-                                }
-                            }
-                            _ => {}
-                        },
+impl FilterInner {
+    fn eval(&self, entry: &Value) -> bool {
+        let obj = entry.as_object().unwrap();
+        match self {
+            FilterInner::Cond {
+                ref left,
+                ref op,
+                ref right,
+            } => match obj.get(left) {
+                Some(result) => match result {
+                    Value::String(ref target_string) => match right {
+                        FilterInnerRighthand::String(ref str_value) => {
+                            return do_comparision!(target_string, op, str_value);
+                        }
+                        _ => {}
+                    },
+                    Value::Bool(v) => match right {
+                        FilterInnerRighthand::Bool(bool_value) => {
+                            return do_comparision!(v, op, bool_value);
+                        }
+                        _ => {}
+                    },
+                    Value::Number(n) => match right {
+                        FilterInnerRighthand::Number(number_value) => {
+                            return do_comparision!(n.as_i64().unwrap(), op, *number_value);
+                        }
+                        FilterInnerRighthand::Float(float_value) => {
+                            return do_comparision!(n.as_f64().unwrap(), op, *float_value);
+                        }
                         _ => {}
                     },
                     _ => {}
-                }
-            }
-        }
-        if results.len() > 0 {
-            push_to_stack_or_produce!($results, $stack, $tail, Value::Array(results));
-        }
-    };
+                },
+                _ => {}
+            },
+        };
+
+        return false;
+    }
 }
 
 impl FilterAST {
@@ -381,6 +374,21 @@ impl FilterAST {
         self.right = Some(inner);
 
         output
+    }
+
+    pub fn eval(&self, value: &Value) -> bool {
+        if self.operand == FilterLogicalOp::None && self.right.is_none() {
+            return self.left.clone().unwrap().borrow_mut().eval(&value);
+        }
+
+        let lhs = self.left.clone().unwrap().borrow_mut().eval(&value);
+        let rhs = self.right.clone().unwrap().borrow_mut().eval(&value);
+
+        match self.operand {
+            FilterLogicalOp::And => return lhs && rhs,
+            FilterLogicalOp::Or => return lhs || rhs,
+            _ => todo!("inconsistent state in filter comp"),
+        };
     }
 
     #[allow(dead_code)]
@@ -686,32 +694,54 @@ impl<'a> Context<'a> {
                         _ => {}
                     },
 
-                    (Filter::Filter(ref _cond), Some(_tail)) => match *current.value {
+                    (Filter::MultiFilter(ref ast), Some(tail)) => match *current.value {
                         Value::Object(ref _obj) => {
                             todo!("implement filter support for object");
                         }
-                        Value::Array(ref _array) => match _cond {
-                            FilterInner::Cond {
-                                ref left,
-                                ref op,
-                                ref right,
-                            } => {
-                                search_filter_in_array!(
-                                    _array,
-                                    left,
-                                    right,
-                                    op,
+                        Value::Array(ref array) => {
+                            let mut results: Vec<Value> = vec![];
+                            for value in array {
+                                if ast.borrow_mut().eval(&value) {
+                                    results.push(value.clone());
+                                };
+                            }
+                            if results.len() > 0 {
+                                push_to_stack_or_produce!(
                                     self.results,
                                     self.stack,
-                                    _tail
+                                    tail,
+                                    Value::Array(results)
                                 );
                             }
-                        },
+                        }
+                        _ => {
+                            todo!("handle unmatched arm of experimental filter");
+                        }
+                    },
+                    (Filter::Filter(ref cond), Some(tail)) => match *current.value {
+                        Value::Object(ref _obj) => {
+                            todo!("implement filter support for object");
+                        }
+                        Value::Array(ref array) => {
+                            let mut results: Vec<Value> = vec![];
+                            for value in array {
+                                if cond.eval(&value) {
+                                    results.push(value.clone());
+                                }
+                            }
+                            if results.len() > 0 {
+                                push_to_stack_or_produce!(
+                                    self.results,
+                                    self.stack,
+                                    tail,
+                                    Value::Array(results)
+                                );
+                            }
+                        }
                         _ => {
                             todo!("implement handling of unmatched arm for filter");
                         }
                     },
-
                     (Filter::Len, Some(tail)) => match *current.value {
                         Value::Object(ref obj) => {
                             push_to_stack_or_produce!(
