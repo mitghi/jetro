@@ -14,6 +14,9 @@ use crate::*;
 #[grammar = "./grammar.pest"]
 pub struct ExpressionParser;
 
+/// parse parses the jetro expression, builds the filter along with
+/// abstract syntax tree. It returns an error containing details about
+/// cause of parser failure.
 pub(crate) fn parse<'a>(input: &'a str) -> Result<Vec<Filter>, pest::error::Error<Rule>> {
     let pairs = ExpressionParser::parse(Rule::expression, input);
     if pairs.is_err() {
