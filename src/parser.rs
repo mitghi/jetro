@@ -129,7 +129,7 @@ pub(crate) fn parse<'a>(input: &'a str) -> Result<Vec<Filter>, pest::error::Erro
                         Rule::logical_cmp => {
                             let op = FilterLogicalOp::get(elem.as_str()).unwrap();
                             let node = current.clone().unwrap();
-                            node.borrow_mut().set_operand(op.clone());
+                            node.borrow_mut().set_operator(op.clone());
                         }
                         _ => {
                             todo!("implement unmatched arm");
@@ -485,7 +485,7 @@ mod test {
                 Filter::Root,
                 Filter::Descendant("meows".to_string()),
                 Filter::MultiFilter(Rc::new(RefCell::new(FilterAST {
-                    operand: FilterLogicalOp::None,
+                    operator: FilterLogicalOp::None,
                     left: Some(Rc::new(RefCell::new(FilterInner::Cond {
                         left: "some".to_string(),
                         op: FilterOp::Eq,
@@ -523,7 +523,7 @@ mod test {
                 Filter::Root,
                 Filter::Child("foo".to_string()),
                 Filter::MultiFilter(Rc::new(RefCell::new(FilterAST {
-                    operand: FilterLogicalOp::None,
+                    operator: FilterLogicalOp::None,
                     left: Some(Rc::new(RefCell::new(FilterInner::Cond {
                         left: "is_furry".to_string(),
                         op: FilterOp::Eq,
@@ -543,7 +543,7 @@ mod test {
                 Filter::Root,
                 Filter::Child("foo".to_string()),
                 Filter::MultiFilter(Rc::new(RefCell::new(FilterAST {
-                    operand: FilterLogicalOp::None,
+                    operator: FilterLogicalOp::None,
                     left: Some(Rc::new(RefCell::new(FilterInner::Cond {
                         left: "some_value".to_string(),
                         op: FilterOp::Eq,
@@ -564,7 +564,7 @@ mod test {
                 Filter::Root,
                 Filter::Child("foo".to_string()),
                 Filter::MultiFilter(Rc::new(RefCell::new(FilterAST {
-                    operand: FilterLogicalOp::None,
+                    operator: FilterLogicalOp::None,
                     left: Some(Rc::new(RefCell::new(FilterInner::Cond {
                         left: "some_value".to_string(),
                         op: FilterOp::Eq,
@@ -603,14 +603,14 @@ mod test {
         };
 
         root = Rc::new(RefCell::new(FilterAST::new(lhs)));
-        root.borrow_mut().set_operand(op.clone());
+        root.borrow_mut().set_operator(op.clone());
 
         current = root.clone();
 
         let new_node = current.borrow_mut().link_right(rhs, FilterLogicalOp::None);
         current = new_node;
 
-        current.borrow_mut().set_operand(FilterLogicalOp::Or);
+        current.borrow_mut().set_operator(FilterLogicalOp::Or);
 
         let new_node = current
             .borrow_mut()
@@ -618,7 +618,7 @@ mod test {
         current = new_node;
         _ = current;
 
-        assert_eq!(root.borrow().operand, FilterLogicalOp::And);
+        assert_eq!(root.borrow().operator, FilterLogicalOp::And);
 
         let lhs = &root.borrow().left.clone().unwrap().clone();
         match *lhs.borrow() {
@@ -714,7 +714,7 @@ mod test {
                 Filter::Root,
                 Filter::Child("foo".to_string()),
                 Filter::MultiFilter(Rc::new(RefCell::new(FilterAST {
-                    operand: FilterLogicalOp::None,
+                    operator: FilterLogicalOp::None,
                     left: Some(Rc::new(RefCell::new(FilterInner::Cond {
                         left: "some_key".to_string(),
                         op: FilterOp::Almost,
@@ -735,7 +735,7 @@ mod test {
                 Filter::Root,
                 Filter::Child("foo".to_string()),
                 Filter::MultiFilter(Rc::new(RefCell::new(FilterAST {
-                    operand: FilterLogicalOp::None,
+                    operator: FilterLogicalOp::None,
                     left: Some(Rc::new(RefCell::new(FilterInner::Cond {
                         left: "some_key".to_string(),
                         op: FilterOp::NotEq,

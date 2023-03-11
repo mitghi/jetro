@@ -168,8 +168,34 @@ pub enum FilterInner {
 
 #[allow(dead_code)]
 #[derive(Debug, PartialEq, Clone)]
+// FilterAST represents multi filter in form of
+// abstract syntax tree. It represents the following
+// structure:
+//
+//                     Filter
+//         .______________|_____________.
+//         |              |             |
+// Left(FilterInner)  operator  Right(FilterAST)
+//                                      |
+//                              Filter(Operator)
+//                                      |
+//                                     ...
+//
+// The operator operates at least two filters.
+// The left inner filter, evaluates single filter
+//  expression.
+// The right filter is recursive definition of
+//  the same structure.
+//
+// In case of odd arrity of filters, the inner
+// right most FilterAST contains a No-Op operator
+// with its left filter set, and its right filter
+// set to None.
+//
+// Filter with arrity one, represents the same structure
+// with No-Op opeator, therefore evaluates to left expression.
 pub struct FilterAST {
-    pub operand: FilterLogicalOp,
+    pub operator: FilterLogicalOp,
     pub left: Option<Rc<RefCell<FilterInner>>>,
     pub right: Option<Rc<RefCell<FilterAST>>>,
 }
@@ -378,23 +404,23 @@ impl FilterInner {
 impl FilterAST {
     pub fn new(left: FilterInner) -> Self {
         Self {
-            operand: FilterLogicalOp::None,
+            operator: FilterLogicalOp::None,
             left: Some(Rc::new(RefCell::new(left))),
             right: None,
         }
     }
 
-    pub fn set_operand(&mut self, operand: FilterLogicalOp) {
-        self.operand = operand;
+    pub fn set_operator(&mut self, operator: FilterLogicalOp) {
+        self.operator = operator;
     }
 
     pub fn link_right(
         &mut self,
         statement: FilterInner,
-        operand: FilterLogicalOp,
+        operator: FilterLogicalOp,
     ) -> Rc<RefCell<Self>> {
         let mut rhs: Self = Self::new(statement);
-        rhs.set_operand(operand);
+        rhs.set_operator(operator);
 
         let inner = Rc::new(RefCell::new(rhs));
         let output = inner.clone();
@@ -404,14 +430,14 @@ impl FilterAST {
     }
 
     pub fn eval(&self, value: &Value) -> bool {
-        if self.operand == FilterLogicalOp::None && self.right.is_none() {
+        if self.operator == FilterLogicalOp::None && self.right.is_none() {
             return self.left.clone().unwrap().borrow_mut().eval(&value);
         }
 
         let lhs = self.left.clone().unwrap().borrow_mut().eval(&value);
         let rhs = self.right.clone().unwrap().borrow_mut().eval(&value);
 
-        match self.operand {
+        match self.operator {
             FilterLogicalOp::And => return lhs && rhs,
             FilterLogicalOp::Or => return lhs || rhs,
             _ => todo!("inconsistent state in filter comp"),
@@ -420,14 +446,14 @@ impl FilterAST {
 
     #[allow(dead_code)]
     pub fn repr(&self) -> String {
-        if self.operand == FilterLogicalOp::None && self.right.is_none() {
+        if self.operator == FilterLogicalOp::None && self.right.is_none() {
             return format!("Filter({:?})", &self.left);
         }
         let rhs = &self.right.clone().unwrap().clone();
         return format!(
             "Filter({:?}) {:?} {:?}",
             &self.left,
-            &self.operand,
+            &self.operator,
             rhs.borrow().repr(),
         );
     }

@@ -32,6 +32,9 @@ struct Output {
 let output: Option<Output> = values.from_index(0);
 ```
 
+Jetro can be used in Web Browser by compiling down to WASM. Visit [Jetro Web](https://jetro.io)
+to try it online.
+
 # example
 
 Jetro combines access path with functions which operate on those values matched within the pipeline.
