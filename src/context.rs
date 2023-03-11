@@ -19,15 +19,21 @@ pub struct Path;
 #[derive(Debug)]
 pub struct PathResult(pub PathOutput);
 
+/// Either contains either left or right value.
 enum Either<A, B> {
     Left(A),
     Right(B),
 }
 
+/// Sum either contains left parameter or
+/// upgrades permanentely to the type of
+/// right parameter when addition of both
+/// types take place.
 struct Sum(Either<i64, f64>);
 
 impl Sum {
     fn new() -> Self {
+        // initially, use zero value of left parameter
         Self(Either::Left(0))
     }
 
