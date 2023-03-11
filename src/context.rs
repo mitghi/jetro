@@ -251,6 +251,8 @@ impl fmt::Display for Error {
     }
 }
 
+impl std::error::Error for Error {}
+
 macro_rules! push_to_stack_or_produce {
     ($results:expr, $stack:expr, $tail:expr, $value:expr) => {
         let tlen = $tail.len();
@@ -362,7 +364,11 @@ macro_rules! do_comparision {
 
 impl FilterInner {
     fn eval(&self, entry: &Value) -> bool {
-        let obj = entry.as_object().unwrap();
+        let obj = if let Some(output) = entry.as_object() {
+            output
+        } else {
+            return false;
+        };
         match self {
             FilterInner::Cond {
                 ref left,
