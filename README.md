@@ -45,7 +45,7 @@ By convention, functions are denoted using # operator. Functions can be composed
 - #all
 - #sum
 - #formats('format with placeholder {} {}', 'key_a', 'key_b') [ as | as* 'binding_value' ]
-- #filter('target_key' (>, <, >=, <=, ==, ~=) (string, boolean, number))
+- #filter('target_key' (>, <, >=, <=, ==, ~=, !=) (string, boolean, number))
 
 
 ```json
