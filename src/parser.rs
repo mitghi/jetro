@@ -3,9 +3,11 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use pest::iterators::Pair;
+
 use crate::context::{
     Filter, FilterAST, FilterInner, FilterInnerRighthand, FilterLogicalOp, FilterOp, FormatOp,
-    PickFilterInner,
+    Func, FuncArg, PickFilterInner,
 };
 
 use crate::*;
@@ -26,6 +28,49 @@ pub(crate) fn parse<'a>(input: &'a str) -> Result<Vec<Filter>, pest::error::Erro
     let mut actions: Vec<Filter> = vec![];
     for token in root.into_inner() {
         match token.as_rule() {
+            Rule::r#fn => {
+                let inner: Pair<Rule> = token.clone().into_inner().nth(1).unwrap();
+                let mut func = Func::new();
+
+                func.name
+                    .insert_str(0, inner.clone().into_inner().next().unwrap().as_str());
+
+                for value in inner.into_inner() {
+                    match &value.as_rule() {
+                        Rule::ident => {}
+                        Rule::fnLit => {
+                            let literal = &value
+                                .clone()
+                                .into_inner()
+                                .next()
+                                .unwrap()
+                                .into_inner()
+                                .as_str();
+                            func.args.push(FuncArg::Key(literal.to_string()));
+                        }
+                        Rule::fnExpr => {
+                            let expr = parse(
+                                &value
+                                    .clone()
+                                    .into_inner()
+                                    .next()
+                                    .unwrap()
+                                    .into_inner()
+                                    .as_str(),
+                            )?;
+                            func.args.push(FuncArg::SubExpr(expr));
+                        }
+                        Rule::filterStmtCollection => {
+                            todo!("handle filter statements");
+                        }
+                        _ => {
+                            todo!("handle unmatched arm of function generalization",);
+                        }
+                    }
+                }
+
+                actions.push(Filter::Function(func));
+            }
             Rule::path | Rule::reverse_path => actions.push(Filter::Root),
             Rule::allFn => actions.push(Filter::All),
             Rule::lenFn => actions.push(Filter::Len),
@@ -142,10 +187,12 @@ pub(crate) fn parse<'a>(input: &'a str) -> Result<Vec<Filter>, pest::error::Erro
                 let mut arguments: Vec<String> = vec![];
                 let mut elem = token.into_inner().nth(1).unwrap().into_inner();
                 let format = elem.next().unwrap().into_inner().as_str().to_string();
+
                 // default alias for keyed subpath
                 let mut alias = "unknown".to_string();
                 // sugar to return object containing only '{alias: eval expr}'
                 let mut should_deref = false;
+
                 for e in elem {
                     match e.as_rule() {
                         Rule::literal => {
@@ -743,6 +790,29 @@ mod test {
                     }))),
                     right: None,
                 })))
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_fncall() {
+        let actions = parse(">/#someFn('some', 'argument', >/and/path)").unwrap();
+        assert_eq!(
+            actions,
+            vec![
+                Filter::Root,
+                Filter::Function(Func {
+                    name: "someFn".to_string(),
+                    args: vec![
+                        FuncArg::Key("some".to_string()),
+                        FuncArg::Key("argument".to_string()),
+                        FuncArg::SubExpr(vec![
+                            Filter::Root,
+                            Filter::Child("and".to_string()),
+                            Filter::Child("path".to_string()),
+                        ])
+                    ],
+                })
             ]
         );
     }

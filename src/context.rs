@@ -218,6 +218,7 @@ pub enum Filter {
     All,
     Len,
     Sum,
+    Function(Func),
 }
 
 #[allow(dead_code)]
@@ -239,6 +240,21 @@ pub enum Error {
     EmptyQuery,
     Parse(String),
     Eval(String),
+}
+
+#[allow(dead_code)]
+#[derive(Debug, PartialEq, Clone)]
+pub enum FuncArg {
+    None,
+    Key(String),
+    Ord(Filter),
+    SubExpr(Vec<Filter>),
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct Func {
+    pub name: String,
+    pub args: Vec<FuncArg>,
 }
 
 impl fmt::Display for Error {
@@ -360,6 +376,15 @@ macro_rules! do_comparision {
             _ => false,
         }
     };
+}
+
+impl Func {
+    pub fn new() -> Self {
+        Self {
+            name: String::new(),
+            args: Vec::new(),
+        }
+    }
 }
 
 impl FilterInner {

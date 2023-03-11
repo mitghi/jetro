@@ -51,8 +51,8 @@ pick = {
     ((",") ~ (" ")* ~ (literal_keyed | (sub_expression_keyed | sub_expression_keyed_reversed) ))* ~
     (" ")* ~ ")"
 }
-sub_expression = { path ~ (formatsFn | lenFn | allFn | pickFn | sumFn | filterFn | child | any_child | grouped_any | descendant_child | array_index | slice | array_to | array_from)* }
-sub_expression_reversed = { reverse_path ~ (formatsFn | lenFn | allFn | pickFn | sumFn | filterFn | grouped_any | child | any_child | descendant_child | array_index | slice | array_to | array_from)* }
+sub_expression = { path ~ (formatsFn | lenFn | allFn | pickFn | sumFn | filterFn | child | any_child | grouped_any | descendant_child | array_index | slice | array_to | array_from | fn)* }
+sub_expression_reversed = { reverse_path ~ (formatsFn | lenFn | allFn | pickFn | sumFn | filterFn | grouped_any | child | any_child | descendant_child | array_index | slice | array_to | array_from | fn)* }
 sub_expression_keyed = { sub_expression ~ as? }
 sub_expression_keyed_reversed = { sub_expression_reversed ~ as? }
 
@@ -67,14 +67,18 @@ squashFn = { slash ~ squash }
 pickFn = { slash ~ pick }
 formats = { sharp ~ "formats" ~ whitespace ~ lparen ~ literal ~ ((",")* ~ whitespace ~ literal)+ ~ whitespace ~ rparen ~ whitespace ~ (as | asDeref)}
 formatsFn = { slash ~ formats }
-fnCall = { sharp ~ ident ~ whitespace ~ lparen ~ ((literal|sub_expression) ~ whitespace ~ ((",")* ~ whitespace ~ (literal|sub_expression))*)? ~ whitespace ~ rparen ~ whitespace ~ (as | asDeref)? }
+fnLit = { literal }
+fnExpr = { sub_expression }
+fnCall = { sharp ~ ident ~ whitespace ~ lparen ~ ((filterStmtCollection|fnLit|fnExpr ) ~ whitespace ~ ((",")* ~ whitespace ~ (filterStmtCollection|fnLit|fnExpr))*)? ~ whitespace ~ rparen ~ whitespace ~ (as | asDeref)? }
+fn = {slash ~ fnCall}
 filterStmt = { ( filter_elem ~ whitespace ~ cmp ~ whitespace ~ (float | truthy | literal | number ) ) }
+filterStmtCollection = { filterStmt ~ whitespace ~ (logical_cmp ~ whitespace ~ filterStmt~ whitespace)*  }
 filter = { sharp ~ "filter" ~ lparen ~ whitespace ~ ( filterStmt ~ whitespace ~ (logical_cmp ~ whitespace ~ filterStmt~ whitespace)* ) ~ whitespace ~ rparen }
 filter_elem = { literal }
 filterFn = { slash ~ filter }
 
 expression = {
     (path|reverse_path) ~
-    (formatsFn | lenFn | allFn | pickFn | sumFn | filterFn | grouped_any | child | any_child | descendant_child | array_index | slice | array_to | array_from)* ~
+    (formatsFn | lenFn | allFn | pickFn | sumFn | filterFn | grouped_any | child | any_child | descendant_child | array_index | slice | array_to | array_from | fn)* ~
     EOI
 }
