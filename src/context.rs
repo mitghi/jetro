@@ -82,6 +82,7 @@ pub enum FilterOp {
     Lq,
     Gq,
     Eq,
+    NotEq,
     Almost,
 }
 
@@ -111,6 +112,7 @@ impl FilterOp {
             "<" => Some(Self::Less),
             ">" => Some(Self::Gt),
             "~=" => Some(Self::Almost),
+            "!=" => Some(Self::NotEq),
             _ => None,
         }
     }
@@ -304,6 +306,7 @@ macro_rules! do_comparision {
             FilterOp::Gt => $lhs > $rhs,
             FilterOp::Lq => $lhs <= $rhs,
             FilterOp::Gq => $lhs >= $rhs,
+            FilterOp::NotEq => $lhs != $rhs,
             FilterOp::Almost => $lhs.to_lowercase() == $rhs.to_lowercase(),
             _ => false,
         }
@@ -316,6 +319,7 @@ macro_rules! do_comparision {
             FilterOp::Gt => $lhs > $rhs,
             FilterOp::Lq => $lhs <= $rhs,
             FilterOp::Gq => $lhs >= $rhs,
+            FilterOp::NotEq => $lhs != $rhs,
             FilterOp::Almost => {
                 todo!("implement 'almost' operator");
             }

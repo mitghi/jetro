@@ -722,4 +722,25 @@ mod test {
             ]
         );
     }
+
+    #[test]
+    fn filter_not_equal() {
+        let actions = parse(">/foo/#filter('some_key' != 10)").unwrap();
+        assert_eq!(
+            actions,
+            vec![
+                Filter::Root,
+                Filter::Child("foo".to_string()),
+                Filter::MultiFilter(Rc::new(RefCell::new(FilterAST {
+                    operand: FilterLogicalOp::None,
+                    left: Some(Rc::new(RefCell::new(FilterInner::Cond {
+                        left: "some_key".to_string(),
+                        op: FilterOp::NotEq,
+                        right: FilterInnerRighthand::Number(10),
+                    }))),
+                    right: None,
+                })))
+            ]
+        );
+    }
 }

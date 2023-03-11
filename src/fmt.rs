@@ -1,4 +1,5 @@
 //! Module containing string formater for built-in #format function.
+
 use crate::context::FormatOp;
 use dynfmt::{Format, SimpleCurlyFormat};
 use serde_json::Value;

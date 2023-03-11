@@ -4,7 +4,7 @@
 [<img src="https://img.shields.io/badge/try-online%20repl-brightgreen"></img>](https://jetro.io)
 ![GitHub](https://img.shields.io/github/license/mitghi/jetro)
 
-Jetro is a tool for transforming, querying and comparing data in JSON format.
+Jetro is a tool with custom DSL for transforming, querying and comparing data in JSON format.
 
 ```rust
 let data = serde_json::json!({
@@ -33,6 +33,17 @@ let output: Option<Output> = values.from_index(0);
 ```
 
 # example
+
+Jetro combines access path with functions which operate on those values matched within the pipeline.
+
+By convention, functions are denoted using # operator. Functions can be composed.
+
+- #pick('string' | expression, ...) [ as | as* 'binding_value' ]
+- #all
+- #sum
+- #formats('format with placeholder {} {}', 'key_a', 'key_b') [ as | as* 'binding_value' ]
+- #filter('target_key' (>, <, >=, <=, ==, ~=) (string, boolean, number))
+
 
 ```json
 {

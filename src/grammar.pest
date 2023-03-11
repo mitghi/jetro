@@ -25,7 +25,8 @@ greater_equal = { ">=" }
 less_equal = { "<=" }
 equal = { "==" }
 almost = { "~=" }
-cmp = { almost | greater_equal | less_equal | equal | greater | less }
+not_euql = { "!=" }
+cmp = { almost | not_euql | greater_equal | less_equal | equal | greater | less }
 true_bool = { "true" }
 false_bool = { "false" }
 truthy = { true_bool | false_bool }
