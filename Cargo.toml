@@ -6,6 +6,12 @@ authors = ["Milad (Mike) Taghavi <mitghi@gmail.com>"]
 license = "MIT"
 readme = "README.md"
 exclude = [".gitignore"]
+repository = "https://github.com/mitghi/jetro"
+documentation = "https://github.com/mitghi/jetro"
+homepage = "https://github.com/mitghi/jetro"
+description = "Jetro is tool to transform, query and compare JSON format"
+keywords = ["jetro", "json-transformation", "json-search", "json-query", "json-path", "jmespath", "serde"]
+categories = ["algorithms", "encoding", "parser"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
