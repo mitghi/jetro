@@ -6,6 +6,8 @@
 
 Jetro is a tool with custom DSL for transforming, querying and comparing data in JSON format.
 
+Jetro has minimal dependency, the traversal and eval algorithm is implemented on top of [serde_json](https://serde.rs).
+
 ```rust
 let data = serde_json::json!({
   "name": "mr snuggle",
