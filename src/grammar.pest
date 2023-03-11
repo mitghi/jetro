@@ -3,7 +3,7 @@ digit = _{ '0'..'9' }
 number = { digit+ }
 float = { digit+ ~ "." ~ digit+ }
 special_charaters = _{ "_" | "-" | "\\" }
-whitespc = _{ " "* }
+whitespace = _{ (" "| "\n") * }
 lparen = _{"("}
 rparen = _{")"}
 at = _{ "@" }
@@ -15,6 +15,8 @@ double_dot = _{ ".." }
 ident = { (alpha | digit | special_charaters)+ }
 _as = _{ "as" }
 as = { (" ")* ~ _as ~ (" ")* ~ literal }
+_asDeref = _{ "as*"}
+asDeref = { (" ")* ~ _asDeref ~ (" ")* ~ literal }
 sharp = _{ "#" }
 dot = _{ "." }
 greater = { ">" }
@@ -22,15 +24,18 @@ less = { "<" }
 greater_equal = { ">=" }
 less_equal = { "<=" }
 equal = { "==" }
-cmp = { greater_equal | less_equal | equal | greater | less }
+almost = { "~=" }
+cmp = { almost | greater_equal | less_equal | equal | greater | less }
 true_bool = { "true" }
 false_bool = { "false" }
 truthy = { true_bool | false_bool }
-string = { (alpha | digit | special_charaters | " " | "%" | "{" | "}" | "\\" )+ ~ (whitespc ~ string)* }
+string = { (alpha | digit | special_charaters | " " | "%" | "{" | "}" | "\\" )+ ~ (whitespace ~ string)* }
 literal = { "'" ~ string ~ "'" }
 literal_keyed = { literal ~ as? }
-grouped_literal = { lparen ~ whitespc ~ literal ~ (whitespc ~ ("|") ~ whitespc ~ literal)* ~ rparen }
-
+grouped_literal = { lparen ~ whitespace ~ literal ~ (whitespace ~ ("|") ~ whitespace ~ literal)* ~ rparen }
+and = { "and" }
+or = { "or" }
+logical_cmp = { and | or }
 child = { slash ~ ident }
 any_child = { slash ~ asterisk }
 descendant_child = { slash ~ double_dot ~ ident }
@@ -45,28 +50,11 @@ pick = {
     ((",") ~ (" ")* ~ (literal_keyed | (sub_expression_keyed | sub_expression_keyed_reversed) ))* ~
     (" ")* ~ ")"
 }
-
 sub_expression = { path ~ (formatsFn | lenFn | allFn | pickFn | sumFn | filterFn | child | any_child | grouped_any | descendant_child | array_index | slice | array_to | array_from)* }
 sub_expression_reversed = { reverse_path ~ (formatsFn | lenFn | allFn | pickFn | sumFn | filterFn | grouped_any | child | any_child | descendant_child | array_index | slice | array_to | array_from)* }
 sub_expression_keyed = { sub_expression ~ as? }
 sub_expression_keyed_reversed = { sub_expression_reversed ~ as? }
 
-array = {
-    "[" ~
-    (" ")* ~
-    (
-	float ~ ((",") ~ (" ")* ~ float)* |
-	number ~ ((",") ~ (" ")* ~ number)* |
-	literal ~ ((",") ~ (" ")* ~ literal)*
-    ) ~
-    (" ")* ~
-    "]"
-}
-
-and = { "and" }
-or = { "or" }
-
-logical_cmp = { and | or }
 squash = { sharp ~ "squash" ~ "(" ~ ")" }
 sum = { sharp ~ "sum" }
 len = { sharp ~ "len" }
@@ -76,10 +64,11 @@ lenFn = { slash ~ len }
 sumFn = { slash ~ sum }
 squashFn = { slash ~ squash }
 pickFn = { slash ~ pick }
-formats = { sharp ~ "formats" ~ whitespc ~ lparen ~ literal ~ ((",")* ~ whitespc ~ literal)+ ~ whitespc ~ rparen ~ whitespc ~ as}
+formats = { sharp ~ "formats" ~ whitespace ~ lparen ~ literal ~ ((",")* ~ whitespace ~ literal)+ ~ whitespace ~ rparen ~ whitespace ~ (as | asDeref)}
 formatsFn = { slash ~ formats }
-filterStmt = { ( filter_elem ~ whitespc ~ cmp ~ whitespc ~ (float | truthy | literal | number ) ) }
-filter = { sharp ~ "filter" ~ lparen ~ whitespc ~ ( filterStmt ~ whitespc ~ (logical_cmp ~ whitespc ~ filterStmt~ whitespc)* ) ~ whitespc ~ rparen }
+fnCall = { sharp ~ ident ~ whitespace ~ lparen ~ (literal ~ whitespace ~ ((",")* ~ whitespace ~ literal)*)? ~ whitespace ~ rparen ~ whitespace ~ as}
+filterStmt = { ( filter_elem ~ whitespace ~ cmp ~ whitespace ~ (float | truthy | literal | number ) ) }
+filter = { sharp ~ "filter" ~ lparen ~ whitespace ~ ( filterStmt ~ whitespace ~ (logical_cmp ~ whitespace ~ filterStmt~ whitespace)* ) ~ whitespace ~ rparen }
 filter_elem = { literal }
 filterFn = { slash ~ filter }
 

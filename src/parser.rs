@@ -138,41 +138,46 @@ pub(crate) fn parse<'a>(input: &'a str) -> Result<Vec<Filter>, pest::error::Erro
             Rule::formatsFn => {
                 let mut arguments: Vec<String> = vec![];
                 let mut elem = token.into_inner().nth(1).unwrap().into_inner();
-                let head = elem.next().unwrap().as_str();
-                let format: String = {
-                    if head.len() > 2 {
-                        head[1..head.len() - 1].to_string()
-                    } else {
-                        "".to_string()
-                    }
-                };
-                let mut alias: String = "unknown".to_string();
+                let format = elem.next().unwrap().into_inner().as_str().to_string();
+                // default alias for keyed subpath
+                let mut alias = "unknown".to_string();
+                // sugar to return object containing only '{alias: eval expr}'
+                let mut should_deref = false;
                 for e in elem {
                     match e.as_rule() {
                         Rule::literal => {
-                            let name: String = {
-                                let elem = e.as_str();
-                                if elem.len() > 2 {
-                                    elem[1..elem.len() - 1].to_string()
-                                } else {
-                                    "".to_string()
-                                }
-                            };
+                            let name: String = e.into_inner().as_str().to_string();
                             arguments.push(name);
                         }
+                        Rule::r#as | Rule::asDeref => {
+                            match e.as_rule() {
+                                Rule::asDeref => should_deref = true,
+                                _ => {}
+                            };
+                            alias = e
+                                .into_inner()
+                                .next()
+                                .unwrap()
+                                .into_inner()
+                                .as_str()
+                                .to_string();
+                        }
                         _ => {
-                            let e = e.as_str();
-                            if e.len() > 2 {
-                                alias = e[4..e.len() - 1].to_string();
-                            }
+                            todo!("handle unmatched arm");
                         }
                     }
                 }
                 actions.push(Filter::Format(FormatOp::FormatString {
                     format,
                     arguments,
-                    alias,
+                    alias: alias.clone(),
                 }));
+                if should_deref {
+                    actions.push(Filter::Pick(vec![PickFilterInner::KeyedStr {
+                        key: alias.clone(),
+                        alias: alias.clone(),
+                    }]));
+                }
             }
             Rule::any_child => actions.push(Filter::AnyChild),
             Rule::array_index => {
@@ -643,5 +648,78 @@ mod test {
                 assert_eq!(*op, FilterOp::Gt);
             }
         };
+    }
+
+    #[test]
+    fn formats_deref() {
+        let actions = parse(">/foo/#formats('Msg {}', 'msg') as* 'message'").unwrap();
+        assert_eq!(
+            actions,
+            vec![
+                Filter::Root,
+                Filter::Child("foo".to_string()),
+                Filter::Format(FormatOp::FormatString {
+                    format: "Msg {}".to_string(),
+                    arguments: vec!["msg".to_string()],
+                    alias: "message".to_string()
+                }),
+                Filter::Pick(vec![PickFilterInner::KeyedStr {
+                    key: "message".to_string(),
+                    alias: "message".to_string(),
+                }])
+            ]
+        );
+    }
+
+    #[test]
+    fn pick_formats_deref() {
+        let actions =
+            parse(">/#pick('foo', >/bar/#formats('Msg {}', 'msg') as* 'message')").unwrap();
+        assert_eq!(
+            actions,
+            vec![
+                Filter::Root,
+                Filter::Pick(vec![
+                    PickFilterInner::Str("foo".to_string()),
+                    PickFilterInner::Subpath(
+                        vec![
+                            Filter::Root,
+                            Filter::Child("bar".to_string()),
+                            Filter::Format(FormatOp::FormatString {
+                                format: "Msg {}".to_string(),
+                                arguments: vec!["msg".to_string()],
+                                alias: "message".to_string(),
+                            }),
+                            Filter::Pick(vec![PickFilterInner::KeyedStr {
+                                key: "message".to_string(),
+                                alias: "message".to_string(),
+                            }]),
+                        ],
+                        false /* reverse path? */
+                    ),
+                ]),
+            ]
+        );
+    }
+
+    #[test]
+    fn filter_almost_op() {
+        let actions = parse(">/foo/#filter('some_key' ~= 'test')").unwrap();
+        assert_eq!(
+            actions,
+            vec![
+                Filter::Root,
+                Filter::Child("foo".to_string()),
+                Filter::MultiFilter(Rc::new(RefCell::new(FilterAST {
+                    operand: FilterLogicalOp::None,
+                    left: Some(Rc::new(RefCell::new(FilterInner::Cond {
+                        left: "some_key".to_string(),
+                        op: FilterOp::Almost,
+                        right: FilterInnerRighthand::String("test".to_string()),
+                    },))),
+                    right: None
+                })))
+            ]
+        );
     }
 }

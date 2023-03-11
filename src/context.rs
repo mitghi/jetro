@@ -82,6 +82,7 @@ pub enum FilterOp {
     Lq,
     Gq,
     Eq,
+    Almost,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -109,6 +110,7 @@ impl FilterOp {
             ">=" => Some(Self::Gq),
             "<" => Some(Self::Less),
             ">" => Some(Self::Gt),
+            "~=" => Some(Self::Almost),
             _ => None,
         }
     }
@@ -295,13 +297,28 @@ macro_rules! match_value {
 }
 
 macro_rules! do_comparision {
-    ($lhs:expr, $op:expr, $rhs:expr) => {
+    ($lhs:expr, $op:expr, $rhs:expr, String) => {
         match $op {
             FilterOp::Less => $lhs < $rhs,
             FilterOp::Eq => $lhs == $rhs,
             FilterOp::Gt => $lhs > $rhs,
             FilterOp::Lq => $lhs <= $rhs,
             FilterOp::Gq => $lhs >= $rhs,
+            FilterOp::Almost => $lhs.to_lowercase() == $rhs.to_lowercase(),
+            _ => false,
+        }
+    };
+
+    ($lhs:expr, $op:expr, $rhs:expr, ()) => {
+        match $op {
+            FilterOp::Less => $lhs < $rhs,
+            FilterOp::Eq => $lhs == $rhs,
+            FilterOp::Gt => $lhs > $rhs,
+            FilterOp::Lq => $lhs <= $rhs,
+            FilterOp::Gq => $lhs >= $rhs,
+            FilterOp::Almost => {
+                todo!("implement 'almost' operator");
+            }
             _ => false,
         }
     };
@@ -319,22 +336,22 @@ impl FilterInner {
                 Some(result) => match result {
                     Value::String(ref target_string) => match right {
                         FilterInnerRighthand::String(ref str_value) => {
-                            return do_comparision!(target_string, op, str_value);
+                            return do_comparision!(target_string, op, str_value, String);
                         }
                         _ => {}
                     },
                     Value::Bool(v) => match right {
                         FilterInnerRighthand::Bool(bool_value) => {
-                            return do_comparision!(v, op, bool_value);
+                            return do_comparision!(v, op, bool_value, ());
                         }
                         _ => {}
                     },
                     Value::Number(n) => match right {
                         FilterInnerRighthand::Number(number_value) => {
-                            return do_comparision!(n.as_i64().unwrap(), op, *number_value);
+                            return do_comparision!(n.as_i64().unwrap(), op, *number_value, ());
                         }
                         FilterInnerRighthand::Float(float_value) => {
-                            return do_comparision!(n.as_f64().unwrap(), op, *float_value);
+                            return do_comparision!(n.as_f64().unwrap(), op, *float_value, ());
                         }
                         _ => {}
                     },
@@ -828,69 +845,14 @@ impl<'a> Context<'a> {
                         _ => {}
                     },
 
-                    (Filter::Format(ref target_format), Some(tail)) => match *current.value {
-                        Value::Object(ref obj) => {
-                            let FormatOp::FormatString {
-                                format: ref fmt,
-                                arguments: ref args,
-                                ref alias,
-                            } = target_format;
-
-                            let output: Option<String> =
-                                self.formater.format(&fmt, &current.value, args);
-
-                            match output {
-                                Some(output) => {
-                                    let mut result = obj.clone();
-                                    result.insert(alias.to_string(), Value::String(output));
-
-                                    push_to_stack_or_produce!(
-                                        self.results,
-                                        self.stack,
-                                        tail,
-                                        Value::Object(result)
-                                    );
-                                }
-                                _ => {}
+                    (Filter::Format(ref target_format), Some(tail)) => {
+                        match self.formater.eval(&target_format, &current.value) {
+                            Some(output) => {
+                                push_to_stack_or_produce!(self.results, self.stack, tail, output);
                             }
-                        }
-                        Value::Array(ref array) => {
-                            for e in array.iter() {
-                                let FormatOp::FormatString {
-                                    format: ref fmt,
-                                    arguments: ref args,
-                                    ref alias,
-                                } = target_format;
-
-                                let output: Option<String> =
-                                    self.formater.format(fmt, &current.value, args);
-
-                                match output {
-                                    Some(output) => {
-                                        let mut result = e.clone();
-                                        match result.as_object_mut() {
-                                            Some(ref mut handle) => {
-                                                handle.insert(
-                                                    alias.to_string(),
-                                                    Value::String(output),
-                                                );
-                                            }
-                                            _ => {}
-                                        };
-
-                                        push_to_stack_or_produce!(
-                                            self.results,
-                                            self.stack,
-                                            tail,
-                                            result
-                                        );
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                        _ => {}
-                    },
+                            _ => {}
+                        };
+                    }
 
                     (Filter::ArrayIndex(ref index), Some(tail)) => match *current.value {
                         Value::Array(ref array) => {
@@ -1245,14 +1207,7 @@ mod test {
 
     #[test]
     fn test_grouped_child() {
-        let data = serde_json::json!({
-            "entry": {
-        "some": "value",
-        "foo": null,
-        "another": "word",
-        "till": "deal"
-            }
-        });
+        let data = serde_json::json!({"entry": {"some": "value","foo": null, "another": "word", "till": "deal"}});
 
         let values =
             Path::collect(data, ">/entry/('foo' | 'bar' | 'another')").expect("unable to parse");

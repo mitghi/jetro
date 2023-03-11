@@ -1,7 +1,7 @@
 # jetro
 
 [<img src="https://img.shields.io/badge/docs-jetro-blue"></img>](https://docs.rs/jetro)
-[<img src="https://img.shields.io/badge/try-online%20repl-brightgreen"></img>](https://coral-app-bgkbr.ondigitalocean.app)
+[<img src="https://img.shields.io/badge/try-online%20repl-brightgreen"></img>](https://jetro.io)
 ![GitHub](https://img.shields.io/github/license/mitghi/jetro)
 
 Jetro is a tool for transforming, querying and comparing data in JSON format.
@@ -194,6 +194,45 @@ let output: Option<Output> = values.from_index(0);
 ---
 
 ```
+>/..values/#filter('priority'  < 11 and 'name' ~= 'STEam')
+```
+
+<details>
+  <summary>See output</summary>
+
+  ### result
+
+```json
+[
+  {
+    "name": "STEAM",
+    "priority": 2
+  }
+]
+```
+</details>
+
+---
+
+```
+>/entry/values/#filter('name' ~= 'gearBOX')/[0]/#formats('Enter {}', 'name') as* 'name'
+```
+
+<details>
+  <summary>See output</summary>
+
+  ### result
+
+```json
+{
+  "name": "Enter GEARBOX"
+}
+```
+</details>
+
+---
+
+```
 >/..foo/[:4]
 ```
 
@@ -254,7 +293,7 @@ let output: Option<Output> = values.from_index(0);
 ---
 
 ```
->/#pick('foo', >/..person/#formats('Herrn {} {}', 'firstname', 'lastname') as 'fullname'/fullname as 'fullname')
+>/#pick('foo', >/..person/#formats('Herrn {} {}', 'firstname', 'lastname') as* 'fullname')
 ```
 
 <details>
@@ -284,7 +323,7 @@ let output: Option<Output> = values.from_index(0);
 ---
 
 ```
->/..foo/..contract/#pick('kind' as 'contract', </..person/#formats('Welcome {}', 'firstname') as 'welcome_message'/#pick('welcome_message'))
+>/..foo/..contract/#pick('kind' as 'contract', </..person/#formats('Welcome {}', 'firstname') as* 'welcome_message')
 ```
 
 <details>
