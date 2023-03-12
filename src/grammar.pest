@@ -51,8 +51,8 @@ pick = {
     ((",") ~ (" ")* ~ (literal_keyed | (sub_expression_keyed | sub_expression_keyed_reversed) ))* ~
     (" ")* ~ ")"
 }
-sub_expression = { path ~ (lenFn | allFn | pickFn | sumFn | filterFn | child | any_child | grouped_any | descendant_child | array_index | slice | array_to | array_from | fn)* }
-sub_expression_reversed = { reverse_path ~ (lenFn | allFn | pickFn | sumFn | filterFn | grouped_any | child | any_child | descendant_child | array_index | slice | array_to | array_from | fn)* }
+sub_expression = { path ~ (lenFn | allFn | pickFn | filterFn | child | any_child | grouped_any | descendant_child | array_index | slice | array_to | array_from | fn)* }
+sub_expression_reversed = { reverse_path ~ (lenFn | allFn | pickFn | filterFn | grouped_any | child | any_child | descendant_child | array_index | slice | array_to | array_from | fn)* }
 sub_expression_keyed = { sub_expression ~ as? }
 sub_expression_keyed_reversed = { sub_expression_reversed ~ as? }
 
@@ -62,12 +62,11 @@ len = { sharp ~ "len" }
 all = { sharp ~ "all" }
 allFn = { slash ~ all }
 lenFn = { slash ~ len }
-sumFn = { slash ~ sum }
 squashFn = { slash ~ squash }
 pickFn = { slash ~ pick }
 fnLit = { literal }
 fnExpr = { sub_expression }
-fnCall = { sharp ~ ident ~ whitespace ~ lparen ~ ((filterStmtCollection|fnLit|fnExpr ) ~ whitespace ~ ((",")* ~ whitespace ~ (filterStmtCollection|fnLit|fnExpr))*)? ~ whitespace ~ rparen ~ whitespace ~ (as | asDeref)? }
+fnCall = { sharp ~ ident ~ (whitespace ~ lparen ~ ((filterStmtCollection|fnLit|fnExpr ) ~ whitespace ~ ((",")* ~ whitespace ~ (filterStmtCollection|fnLit|fnExpr))*)? ~ whitespace ~ rparen ~ whitespace)? ~ (as | asDeref)? }
 fn = {slash ~ fnCall}
 filterStmt = { ( filter_elem ~ whitespace ~ cmp ~ whitespace ~ (float | truthy | literal | number ) ) }
 filterStmtCollection = { filterStmt ~ whitespace ~ (logical_cmp ~ whitespace ~ filterStmt~ whitespace)*  }
@@ -77,6 +76,6 @@ filterFn = { slash ~ filter }
 
 expression = {
     (path|reverse_path) ~
-    (lenFn | allFn | pickFn | sumFn | filterFn | grouped_any | child | any_child | descendant_child | array_index | slice | array_to | array_from | fn)* ~
+    (lenFn | allFn | pickFn | filterFn | grouped_any | child | any_child | descendant_child | array_index | slice | array_to | array_from | fn)* ~
     EOI
 }

@@ -28,7 +28,7 @@ enum Either<A, B> {
 /// upgrades permanentely to the type of
 /// right parameter when addition of both
 /// types take place.
-struct Sum(Either<i64, f64>);
+pub(crate) struct Sum(Either<i64, f64>);
 
 impl Sum {
     fn new() -> Self {
@@ -58,7 +58,7 @@ impl Sum {
         }
     }
 
-    fn add(&mut self, input: &Value) {
+    pub(crate) fn add(&mut self, input: &Value) {
         if input.is_i64() {
             self.add_i64(input.as_i64().unwrap());
             return;
@@ -215,7 +215,6 @@ pub enum Filter {
     GroupedChild(Vec<String>),
     All,
     Len,
-    Sum,
     Function(Func),
 }
 
@@ -226,10 +225,10 @@ struct StackItem<'a> {
     stack: Rc<RefCell<Vec<StackItem<'a>>>>,
 }
 
-struct Context<'a> {
+pub(crate) struct Context<'a> {
     root: Rc<Value>,
     stack: Rc<RefCell<Vec<StackItem<'a>>>>,
-    registry: Box<dyn crate::func::Registry>,
+    registry: Rc<RefCell<dyn crate::func::Registry>>,
     pub results: Rc<RefCell<Vec<Rc<Value>>>>,
 }
 
@@ -661,7 +660,7 @@ impl<'a> Context<'a> {
         let results: Rc<RefCell<Vec<Rc<Value>>>> = Rc::new(RefCell::new(Vec::new()));
         let stack: Rc<RefCell<Vec<StackItem<'a>>>> = Rc::new(RefCell::new(Vec::new()));
         let rv: Rc<Value> = Rc::new(value);
-        let registry: Box<dyn crate::func::Registry> = crate::func::default_registry();
+        let registry: Rc<RefCell<dyn crate::func::Registry>> = crate::func::default_registry();
         stack
             .borrow_mut()
             .push(StackItem::new(rv.clone(), filters, Rc::clone(&stack)));
@@ -754,7 +753,11 @@ impl<'a> Context<'a> {
                     )),
 
                     (Filter::Function(ref func), Some(tail)) => {
-                        match &self.registry.as_mut().call(&func, &current.value) {
+                        let registry = self.registry.clone();
+                        match registry
+                            .borrow_mut()
+                            .call(&func, &current.value, Some(self))
+                        {
                             Ok(result) => {
                                 push_to_stack_or_produce!(
                                     self.results,
@@ -766,7 +769,7 @@ impl<'a> Context<'a> {
                             Err(err) => {
                                 return Err(Error::FuncEval(err.to_string()));
                             }
-                        }
+                        };
                     }
 
                     (Filter::GroupedChild(ref vec), Some(tail)) => match *current.value {
@@ -871,36 +874,6 @@ impl<'a> Context<'a> {
                                 self.stack,
                                 tail,
                                 Value::Number(serde_json::Number::from(count))
-                            );
-                        }
-                    },
-
-                    (Filter::Sum, Some(tail)) => match *current.value {
-                        Value::Object(ref _obj) => {}
-                        Value::Array(ref array) => {
-                            let mut sum = self.reduce_stack_to_sum();
-                            for value in array {
-                                if value.is_number() {
-                                    sum.add(&value);
-                                }
-                            }
-                            push_to_stack_or_produce!(
-                                self.results,
-                                self.stack,
-                                tail,
-                                Value::Number(serde_json::Number::from(sum))
-                            );
-                        }
-                        _ => {
-                            let mut sum = self.reduce_stack_to_sum();
-                            if current.value.is_number() {
-                                sum.add(&current.value);
-                            }
-                            push_to_stack_or_produce!(
-                                self.results,
-                                self.stack,
-                                tail,
-                                Value::Number(serde_json::Number::from(sum))
                             );
                         }
                     },
