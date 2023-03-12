@@ -9,7 +9,7 @@ pub(crate) trait KeyFormater {
     fn eval(&self, target_format: &FormatOp, value: &Value) -> Option<Value>;
 }
 
-struct FormatImpl;
+pub(crate) struct FormatImpl;
 
 impl FormatImpl {
     fn format(&self, format: &str, value: &Value, keys: &Vec<String>) -> Option<String> {
@@ -60,7 +60,7 @@ impl KeyFormater for FormatImpl {
     }
 }
 
-pub(crate) fn default() -> Box<impl KeyFormater> {
+pub(crate) fn default_formater() -> Box<impl KeyFormater> {
     Box::new(FormatImpl)
 }
 

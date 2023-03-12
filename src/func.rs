@@ -1,6 +1,6 @@
 //! Module func provides abstraction for jetro functions.
 
-use crate::context::{Error, Func};
+use crate::context::{Error, Func, FuncArg};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
@@ -62,10 +62,60 @@ impl Callable for Reverse {
     }
 }
 
+struct Formats;
+
+impl Formats {
+    fn ensure_str(&mut self, value: &Value) -> Result<(), Error> {
+        match &value {
+            Value::String(_) => Ok(()),
+            _ => Err(Error::FuncEval("invalid type, expected string".to_string())),
+        }
+    }
+}
+
+impl Callable for Formats {
+    fn call(&mut self, func: &Func, value: &Value) -> Result<Value, Error> {
+        if func.args.len() < 2 {
+            return Err(Error::FuncEval("deficit number of arguments".to_string()));
+        }
+        let format = match func.args.get(0).unwrap() {
+            FuncArg::Key(some_key) => some_key,
+            _ => {
+                return Err(Error::FuncEval("invalid type, expected string".to_string()));
+            }
+        };
+        let mut args: Vec<String> = vec![];
+        for v in func.args[1..].iter() {
+            match &v {
+                FuncArg::Key(some_key) => {
+                    args.push(some_key.clone());
+                }
+                _ => {
+                    return Err(Error::FuncEval("invalid type, expected string".to_string()));
+                }
+            };
+        }
+
+        let formater: Box<dyn crate::fmt::KeyFormater> = crate::fmt::default_formater();
+        match formater.eval(
+            &crate::context::FormatOp::FormatString {
+                format: format.to_string(),
+                arguments: args,
+                alias: func.alias.clone().unwrap(),
+            },
+            &value,
+        ) {
+            Some(output) => Ok(output),
+            _ => Err(Error::FuncEval("format failed".to_string())),
+        }
+    }
+}
+
 impl Default for FuncRegistry {
     fn default() -> Self {
         let mut output = FuncRegistry::new();
         output.register("reverse", Box::new(Reverse));
+        output.register("formats", Box::new(Formats));
         output
     }
 }

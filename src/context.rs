@@ -1,7 +1,6 @@
 //! Module containing types and functionalities for
 //! evaluating jetro paths.
 
-use crate::fmt as jetrofmt;
 use crate::parser;
 #[allow(unused_imports)]
 use serde::{Deserialize, Serialize};
@@ -207,7 +206,6 @@ pub enum Filter {
     Child(String),
     Descendant(String),
     Pick(Vec<PickFilterInner>),
-    Format(FormatOp),
     ArrayIndex(usize),
     ArrayFrom(usize),
     ArrayTo(usize),
@@ -231,7 +229,6 @@ struct StackItem<'a> {
 struct Context<'a> {
     root: Rc<Value>,
     stack: Rc<RefCell<Vec<StackItem<'a>>>>,
-    formater: Box<dyn jetrofmt::KeyFormater>,
     registry: Box<dyn crate::func::Registry>,
     pub results: Rc<RefCell<Vec<Rc<Value>>>>,
 }
@@ -257,15 +254,17 @@ pub enum FuncArg {
 pub struct Func {
     pub name: String,
     pub args: Vec<FuncArg>,
+    pub alias: Option<String>,
+    pub should_deref: bool,
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
             Error::EmptyQuery => write!(f, "query is empty"),
-            Error::Parse(ref msg) => write!(f, "error while parsing query: {}", &msg),
-            Error::Eval(ref msg) => write!(f, "error while evaluating query: {}", &msg),
-            Error::FuncEval(ref msg) => write!(f, "error while evaluating function: {}", &msg),
+            Error::Parse(ref msg) => write!(f, "parse: {}", &msg),
+            Error::Eval(ref msg) => write!(f, "eval: {}", &msg),
+            Error::FuncEval(ref msg) => write!(f, "func_eval: {}", &msg),
         }
     }
 }
@@ -386,6 +385,8 @@ impl Func {
         Self {
             name: String::new(),
             args: Vec::new(),
+            alias: None,
+            should_deref: false,
         }
     }
 }
@@ -660,7 +661,6 @@ impl<'a> Context<'a> {
         let results: Rc<RefCell<Vec<Rc<Value>>>> = Rc::new(RefCell::new(Vec::new()));
         let stack: Rc<RefCell<Vec<StackItem<'a>>>> = Rc::new(RefCell::new(Vec::new()));
         let rv: Rc<Value> = Rc::new(value);
-        let formater: Box<dyn jetrofmt::KeyFormater> = jetrofmt::default();
         let registry: Box<dyn crate::func::Registry> = crate::func::default_registry();
         stack
             .borrow_mut()
@@ -669,7 +669,6 @@ impl<'a> Context<'a> {
         Self {
             root: rv.clone(),
             stack,
-            formater,
             registry,
             results,
         }
@@ -933,15 +932,6 @@ impl<'a> Context<'a> {
                         }
                         _ => {}
                     },
-
-                    (Filter::Format(ref target_format), Some(tail)) => {
-                        match self.formater.eval(&target_format, &current.value) {
-                            Some(output) => {
-                                push_to_stack_or_produce!(self.results, self.stack, tail, output);
-                            }
-                            _ => {}
-                        };
-                    }
 
                     (Filter::ArrayIndex(ref index), Some(tail)) => match *current.value {
                         Value::Array(ref array) => {

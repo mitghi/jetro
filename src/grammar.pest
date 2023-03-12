@@ -51,8 +51,8 @@ pick = {
     ((",") ~ (" ")* ~ (literal_keyed | (sub_expression_keyed | sub_expression_keyed_reversed) ))* ~
     (" ")* ~ ")"
 }
-sub_expression = { path ~ (formatsFn | lenFn | allFn | pickFn | sumFn | filterFn | child | any_child | grouped_any | descendant_child | array_index | slice | array_to | array_from | fn)* }
-sub_expression_reversed = { reverse_path ~ (formatsFn | lenFn | allFn | pickFn | sumFn | filterFn | grouped_any | child | any_child | descendant_child | array_index | slice | array_to | array_from | fn)* }
+sub_expression = { path ~ (lenFn | allFn | pickFn | sumFn | filterFn | child | any_child | grouped_any | descendant_child | array_index | slice | array_to | array_from | fn)* }
+sub_expression_reversed = { reverse_path ~ (lenFn | allFn | pickFn | sumFn | filterFn | grouped_any | child | any_child | descendant_child | array_index | slice | array_to | array_from | fn)* }
 sub_expression_keyed = { sub_expression ~ as? }
 sub_expression_keyed_reversed = { sub_expression_reversed ~ as? }
 
@@ -65,8 +65,6 @@ lenFn = { slash ~ len }
 sumFn = { slash ~ sum }
 squashFn = { slash ~ squash }
 pickFn = { slash ~ pick }
-formats = { sharp ~ "formats" ~ whitespace ~ lparen ~ literal ~ ((",")* ~ whitespace ~ literal)+ ~ whitespace ~ rparen ~ whitespace ~ (as | asDeref)}
-formatsFn = { slash ~ formats }
 fnLit = { literal }
 fnExpr = { sub_expression }
 fnCall = { sharp ~ ident ~ whitespace ~ lparen ~ ((filterStmtCollection|fnLit|fnExpr ) ~ whitespace ~ ((",")* ~ whitespace ~ (filterStmtCollection|fnLit|fnExpr))*)? ~ whitespace ~ rparen ~ whitespace ~ (as | asDeref)? }
@@ -79,6 +77,6 @@ filterFn = { slash ~ filter }
 
 expression = {
     (path|reverse_path) ~
-    (formatsFn | lenFn | allFn | pickFn | sumFn | filterFn | grouped_any | child | any_child | descendant_child | array_index | slice | array_to | array_from | fn)* ~
+    (lenFn | allFn | pickFn | sumFn | filterFn | grouped_any | child | any_child | descendant_child | array_index | slice | array_to | array_from | fn)* ~
     EOI
 }
