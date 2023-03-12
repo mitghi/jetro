@@ -232,6 +232,7 @@ struct Context<'a> {
     root: Rc<Value>,
     stack: Rc<RefCell<Vec<StackItem<'a>>>>,
     formater: Box<dyn jetrofmt::KeyFormater>,
+    registry: Box<dyn crate::func::Registry>,
     pub results: Rc<RefCell<Vec<Rc<Value>>>>,
 }
 
@@ -240,6 +241,7 @@ pub enum Error {
     EmptyQuery,
     Parse(String),
     Eval(String),
+    FuncEval(String),
 }
 
 #[allow(dead_code)]
@@ -263,6 +265,7 @@ impl fmt::Display for Error {
             Error::EmptyQuery => write!(f, "query is empty"),
             Error::Parse(ref msg) => write!(f, "error while parsing query: {}", &msg),
             Error::Eval(ref msg) => write!(f, "error while evaluating query: {}", &msg),
+            Error::FuncEval(ref msg) => write!(f, "error while evaluating function: {}", &msg),
         }
     }
 }
@@ -604,12 +607,14 @@ impl Path {
         };
 
         let mut ctx = Context::new(v, filters.as_slice());
-        ctx.collect();
-
-        Ok(PathResult(ctx.results))
+        match ctx.collect() {
+            Ok(_) => Ok(PathResult(ctx.results)),
+            Err(err) => Err(err),
+        }
     }
 
     fn collect_with_filter(v: Value, filters: &[Filter]) -> PathResult {
+        // TODO(): handle errors similar to collect method
         let mut ctx = Context::new(v, filters);
         ctx.collect();
 
@@ -656,6 +661,7 @@ impl<'a> Context<'a> {
         let stack: Rc<RefCell<Vec<StackItem<'a>>>> = Rc::new(RefCell::new(Vec::new()));
         let rv: Rc<Value> = Rc::new(value);
         let formater: Box<dyn jetrofmt::KeyFormater> = jetrofmt::default();
+        let registry: Box<dyn crate::func::Registry> = crate::func::default_registry();
         stack
             .borrow_mut()
             .push(StackItem::new(rv.clone(), filters, Rc::clone(&stack)));
@@ -664,6 +670,7 @@ impl<'a> Context<'a> {
             root: rv.clone(),
             stack,
             formater,
+            registry,
             results,
         }
     }
@@ -730,16 +737,15 @@ impl<'a> Context<'a> {
         return sum;
     }
 
-    pub fn collect(&mut self) {
+    pub fn collect(&mut self) -> Result<(), Error> {
         // TODO(mitghi): implement context errors
 
         while self.stack.borrow().len() > 0 {
             let current = if let Some(value) = self.stack.borrow_mut().pop() {
                 value
             } else {
-                return;
+                return Ok(());
             };
-
             match current.step() {
                 Some(step) => match step {
                     (Filter::Root, Some(tail)) => self.stack.borrow_mut().push(StackItem::new(
@@ -747,6 +753,22 @@ impl<'a> Context<'a> {
                         tail,
                         self.stack.clone(),
                     )),
+
+                    (Filter::Function(ref func), Some(tail)) => {
+                        match &self.registry.as_mut().call(&func, &current.value) {
+                            Ok(result) => {
+                                push_to_stack_or_produce!(
+                                    self.results,
+                                    self.stack,
+                                    tail,
+                                    result.clone()
+                                );
+                            }
+                            Err(err) => {
+                                return Err(Error::FuncEval(err.to_string()));
+                            }
+                        }
+                    }
 
                     (Filter::GroupedChild(ref vec), Some(tail)) => match *current.value {
                         Value::Object(ref obj) => {
@@ -1072,6 +1094,8 @@ impl<'a> Context<'a> {
                 _ => {}
             }
         }
+
+        Ok(())
     }
 }
 
@@ -1391,5 +1415,19 @@ mod test {
             let values = Path::collect(data.clone(), path).unwrap();
             assert_eq!(*values.0.borrow(), *expect);
         }
+    }
+
+    #[test]
+    fn test_func() {
+        let data =
+            serde_json::json!({"entry": {"values": [{"name": "gearbox"}, {"name": "steam"}]}});
+        let result = Path::collect(data, ">/entry/values/#reverse()").unwrap();
+        assert_eq!(
+            *result.0.borrow(),
+            vec![Rc::new(Value::Array(vec![
+                serde_json::json!({"name": "steam"}),
+                serde_json::json!({"name": "gearbox"})
+            ]))]
+        );
     }
 }
