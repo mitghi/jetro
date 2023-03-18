@@ -1,8 +1,10 @@
 //! Module func provides abstraction for jetro functions.
 
-use crate::context::{Context, Error, Func, FuncArg};
+use crate::context::{Context, Error, Filter, Func, FuncArg, MapBody, Path};
 use serde_json::Value;
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
+
+use super::context::MapAST;
 
 pub(crate) trait Callable {
     fn call(
@@ -263,6 +265,62 @@ impl Callable for AllOnBoolean {
     }
 }
 
+struct MapFn;
+impl MapFn {
+    fn eval(&mut self, value: &Value, subpath: &[Filter]) -> Result<Vec<Value>, Error> {
+        let mut output: Vec<Value> = vec![];
+        match &value {
+            Value::Array(ref array) => {
+                for item in array {
+                    let result = Path::collect_with_filter(item.clone(), &subpath);
+                    if result.0.borrow().len() == 0 {
+                        return Err(Error::FuncEval(
+                            "map statement do not evaluates to anything".to_owned(),
+                        ));
+                    }
+                    let head = result.0.borrow()[0].clone();
+                    output.push((*head).clone());
+                }
+            }
+            _ => {}
+        };
+        return Ok(output);
+    }
+}
+
+impl Callable for MapFn {
+    fn call(
+        &mut self,
+        func: &Func,
+        value: &Value,
+        _ctx: Option<&mut Context<'_>>,
+    ) -> Result<Value, Error> {
+        match func.args.get(0) {
+            Some(&FuncArg::MapStmt(MapAST { arg: _, ref body })) => match &body {
+                MapBody::Method {
+                    name: _,
+                    subpath: _,
+                } => {
+                    todo!("not implemented");
+                    return Err(Error::FuncEval("WIP: not implemented".to_owned()));
+                }
+                MapBody::Subpath(ref subpath) => {
+                    let output = self.eval(&value, &subpath.as_slice())?;
+                    return Ok(Value::Array(output));
+                }
+                _ => {
+                    return Err(Error::FuncEval("expetcted method call on path".to_owned()));
+                }
+            },
+            _ => {
+                return Err(Error::FuncEval(
+                    "expected first argument to be map statement".to_owned(),
+                ));
+            }
+        };
+    }
+}
+
 impl Default for FuncRegistry {
     fn default() -> Self {
         let mut output = FuncRegistry::new();
@@ -273,6 +331,7 @@ impl Default for FuncRegistry {
         output.register("head", Box::new(Head));
         output.register("tail", Box::new(Tail));
         output.register("all", Box::new(AllOnBoolean));
+        output.register("map", Box::new(MapFn));
         output
     }
 }

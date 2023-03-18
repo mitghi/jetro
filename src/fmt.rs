@@ -39,8 +39,22 @@ impl FormatImpl {
             Some(output) => match &value {
                 Value::Object(ref obj) => {
                     let mut result = obj.clone();
-                    result.insert(alias.to_string(), Value::String(output));
+                    result.insert(alias.to_string(), Value::String(output.clone()));
                     return Some(Value::Object(result));
+                }
+                Value::Array(ref array) => {
+                    let mut ret: Vec<Value> = vec![];
+                    for item in array {
+                        match &item {
+                            Value::Object(ref obj) => {
+                                let mut result = obj.clone();
+                                result.insert(alias.to_string(), Value::String(output.clone()));
+                                ret.push(Value::Object(result));
+                            }
+                            _ => {}
+                        };
+                    }
+                    return Some(Value::Array(ret));
                 }
                 _ => {}
             },

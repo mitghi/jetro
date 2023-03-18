@@ -7,7 +7,7 @@ use pest::iterators::Pair;
 
 use crate::context::{
     Filter, FilterAST, FilterInner, FilterInnerRighthand, FilterLogicalOp, FilterOp, Func, FuncArg,
-    PickFilterInner,
+    MapAST, MapBody, PickFilterInner,
 };
 
 use crate::*;
@@ -89,6 +89,55 @@ pub(crate) fn parse<'a>(input: &'a str) -> Result<Vec<Filter>, pest::error::Erro
                             );
                             func.should_deref = true;
                             should_deref = true;
+                        }
+                        Rule::mapStmt => {
+                            let mut ast = MapAST::default();
+                            ast.arg = value
+                                .clone()
+                                .into_inner()
+                                .nth(0)
+                                .unwrap()
+                                .as_str()
+                                .to_string();
+                            let stmt = value.clone().into_inner().nth(1).unwrap().into_inner();
+                            for value in stmt {
+                                match &value.as_rule() {
+                                    Rule::ident => match &mut ast.body {
+                                        MapBody::None => {
+                                            let v = value.as_str();
+                                            if v != ast.arg {
+                                                todo!("handle wrong map arg");
+                                            }
+                                            ast.body = MapBody::Subpath(vec![Filter::Root]);
+                                        }
+                                        MapBody::Subpath(ref mut subpath) => {
+                                            let v = value.as_str();
+                                            subpath.push(Filter::Child(v.to_string()));
+                                        }
+                                        _ => {
+                                            todo!("handle unmatched arm");
+                                        }
+                                    },
+                                    Rule::methodCall => {
+                                        let v = &value.clone().into_inner().as_str();
+                                        match &ast.body {
+                                            MapBody::Subpath(subpath) => {
+                                                ast.body = MapBody::Method {
+                                                    name: v.to_string(),
+                                                    subpath: subpath.to_vec(),
+                                                };
+                                            }
+                                            _ => {
+                                                todo!("handle invalid type");
+                                            }
+                                        }
+                                    }
+                                    _ => {
+                                        todo!("in unmatched arm");
+                                    }
+                                }
+                            }
+                            func.args.push(FuncArg::MapStmt(ast));
                         }
                         _ => {
                             todo!("handle unmatched arm of function generalization",);
@@ -866,6 +915,35 @@ mod test {
                     alias: "test".to_string(),
                     reverse: false,
                 }]),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_map_statement() {
+        let actions = parse(">/..values/#map(x: x.a.b.c.to_string())").unwrap();
+        assert_eq!(
+            actions,
+            vec![
+                Filter::Root,
+                Filter::Descendant("values".to_string()),
+                Filter::Function(Func {
+                    name: "map".to_string(),
+                    alias: None,
+                    should_deref: false,
+                    args: vec![FuncArg::MapStmt(MapAST {
+                        arg: "x".to_string(),
+                        body: MapBody::Method {
+                            name: "to_string".to_string(),
+                            subpath: vec![
+                                Filter::Root,
+                                Filter::Child("a".to_string()),
+                                Filter::Child("b".to_string()),
+                                Filter::Child("c".to_string()),
+                            ],
+                        },
+                    })],
+                })
             ]
         );
     }

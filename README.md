@@ -4,9 +4,14 @@
 [<img src="https://img.shields.io/badge/try-online%20repl-brightgreen"></img>](https://jetro.io)
 ![GitHub](https://img.shields.io/github/license/mitghi/jetro)
 
-Jetro is a tool with custom DSL for transforming, querying and comparing data in JSON format.
+Jetro is a library which provides a custom DSL for transforming, querying and comparing data in JSON format. It is simple to use and extend.
 
 Jetro has minimal dependency, the traversal and eval algorithm is implemented on top of [serde_json](https://serde.rs).
+
+Jetro can be used inside Web Browser by compiling down to WASM. Visit [Jetro Web](https://jetro.io)
+to try it online, or [clone it](https://github.com/mitghi/jetroweb) and give it a shot.
+
+Jetro can be used in command line using [Jetrocli](https://github.com/mitghi/jetrocli).
 
 ```rust
 let data = serde_json::json!({
@@ -34,12 +39,13 @@ struct Output {
 let output: Option<Output> = values.from_index(0);
 ```
 
-Jetro can be used in Web Browser by compiling down to WASM. Visit [Jetro Web](https://jetro.io)
-to try it online.
+# architecture
+
+Jetro consists of a parser, context wrapper which manages traversal and evaluation of each step of user input and a runtime for dynamic functions. The future version will support user-defined functions.
 
 # example
 
-Jetro combines access path with functions which operate on those values matched within the pipeline.
+Jetro combines access path with functions which operate on values matched within the pipeline.
 
 By convention, functions are denoted using # operator. Functions can be composed.
 
@@ -53,6 +59,7 @@ By convention, functions are denoted using # operator. Functions can be composed
 | #sum | Sum of numbers |
 | #formats('format with placeholder {} {}', 'key_a', 'key_b') [ -> \| ->* 'binding_value' ] | Insert formatted key:value into object or return it as single key:value  |
 | #filter('target_key' (>, <, >=, <=, ==, ~=, !=) (string, boolean, number)) | Perform Filter on list |
+| #map(x: x.y.z \| x.y.z.some_method())| Map each item in a list with the given lambda |
 
 ```json
 {

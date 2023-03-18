@@ -232,6 +232,28 @@ pub(crate) struct Context<'a> {
     pub results: Rc<RefCell<Vec<Rc<Value>>>>,
 }
 
+#[derive(Debug, PartialEq, Clone)]
+pub enum MapBody {
+    None,
+    Method { name: String, subpath: Vec<Filter> },
+    Subpath(Vec<Filter>),
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct MapAST {
+    pub arg: String,
+    pub body: MapBody,
+}
+
+impl Default for MapAST {
+    fn default() -> Self {
+        Self {
+            arg: String::from(""),
+            body: MapBody::None,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum Error {
     EmptyQuery,
@@ -247,6 +269,7 @@ pub enum FuncArg {
     Key(String),
     Ord(Filter),
     SubExpr(Vec<Filter>),
+    MapStmt(MapAST),
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -613,7 +636,7 @@ impl Path {
         }
     }
 
-    fn collect_with_filter(v: Value, filters: &[Filter]) -> PathResult {
+    pub(crate) fn collect_with_filter(v: Value, filters: &[Filter]) -> PathResult {
         // TODO(): handle errors similar to collect method
         let mut ctx = Context::new(v, filters);
         ctx.collect();
@@ -1335,6 +1358,20 @@ mod test {
             vec![Rc::new(Value::Array(vec![
                 serde_json::json!({"name": "steam"}),
                 serde_json::json!({"name": "gearbox"})
+            ]))]
+        );
+    }
+
+    #[test]
+    fn test_map_on_path() {
+        let data =
+            serde_json::json!({"entry": {"values": [{"name": "gearbox"}, {"name": "steam"}]}});
+        let result = Path::collect(data, ">/..values/#map(x: x.name)").unwrap();
+        assert_eq!(
+            *result.0.borrow(),
+            vec![Rc::new(Value::Array(vec![
+                Value::String("gearbox".to_string()),
+                Value::String("steam".to_string()),
             ]))]
         );
     }
