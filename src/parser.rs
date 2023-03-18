@@ -113,7 +113,6 @@ pub(crate) fn parse<'a>(input: &'a str) -> Result<Vec<Filter>, pest::error::Erro
                 }
             }
             Rule::path | Rule::reverse_path => actions.push(Filter::Root),
-            Rule::allFn => actions.push(Filter::All),
             Rule::grouped_any => {
                 let elem = token.into_inner().nth(1).unwrap().into_inner();
                 let mut values: Vec<String> = vec![];

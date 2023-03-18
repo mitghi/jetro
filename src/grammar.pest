@@ -55,13 +55,10 @@ pick = {
     ((",") ~ (" ")* ~ (literal_keyed | (sub_expression_keyed | sub_expression_keyed_reversed) ))* ~
     (" ")* ~ ")"
 }
-sub_expression = { path ~ (allFn | pickFn | filterFn | child | any_child | grouped_any | descendant_child | array_index | slice | array_to | array_from | fn)* }
-sub_expression_reversed = { reverse_path ~ (allFn | pickFn | filterFn | grouped_any | child | any_child | descendant_child | array_index | slice | array_to | array_from | fn )* }
+sub_expression = { path ~ (pickFn | filterFn | child | any_child | grouped_any | descendant_child | array_index | slice | array_to | array_from | fn)* }
+sub_expression_reversed = { reverse_path ~ (pickFn | filterFn | grouped_any | child | any_child | descendant_child | array_index | slice | array_to | array_from | fn )* }
 sub_expression_keyed = { sub_expression ~ as? }
 sub_expression_keyed_reversed = { sub_expression_reversed ~ as? }
-
-all = { sharp ~ "all" }
-allFn = { slash ~ all }
 pickFn = { slash ~ pick }
 fnLit = { literal }
 fnExpr = { sub_expression }
@@ -75,6 +72,6 @@ filterFn = { slash ~ filter }
 
 expression = {
     (path|reverse_path) ~
-    (allFn | pickFn | filterFn | grouped_any | child | any_child | descendant_child | array_index | slice | array_to | array_from | fn)* ~
+    (pickFn | filterFn | grouped_any | child | any_child | descendant_child | array_index | slice | array_to | array_from | fn)* ~
     EOI
 }

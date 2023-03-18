@@ -234,6 +234,35 @@ impl Callable for Tail {
     }
 }
 
+struct AllOnBoolean;
+impl Callable for AllOnBoolean {
+    fn call(
+        &mut self,
+        _func: &Func,
+        value: &Value,
+        ctx: Option<&mut Context<'_>>,
+    ) -> Result<Value, Error> {
+        match &value {
+            Value::Bool(ref value) => {
+                let all = ctx.unwrap().reduce_stack_to_all_truth();
+                return Ok(Value::Bool(all & (*value == true)));
+            }
+            Value::Array(ref array) => {
+                let mut all = ctx.unwrap().reduce_stack_to_all_truth();
+                for value in array {
+                    if value.is_boolean() {
+                        all = all & (value.as_bool().unwrap() == true);
+                    }
+                }
+                return Ok(Value::Bool(all));
+            }
+            _ => {
+                return Err(Error::FuncEval("input is not reducable".to_owned()));
+            }
+        }
+    }
+}
+
 impl Default for FuncRegistry {
     fn default() -> Self {
         let mut output = FuncRegistry::new();
@@ -243,6 +272,7 @@ impl Default for FuncRegistry {
         output.register("len", Box::new(LenFn));
         output.register("head", Box::new(Head));
         output.register("tail", Box::new(Tail));
+        output.register("all", Box::new(AllOnBoolean));
         output
     }
 }

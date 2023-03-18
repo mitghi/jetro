@@ -851,34 +851,6 @@ impl<'a> Context<'a> {
                         }
                     },
 
-                    (Filter::All, Some(tail)) => match *current.value {
-                        Value::Object(ref _obj) => {}
-                        Value::Bool(ref value) => {
-                            let all = self.reduce_stack_to_all_truth() & (*value == true);
-                            push_to_stack_or_produce!(
-                                self.results,
-                                self.stack,
-                                tail,
-                                Value::Bool(all)
-                            );
-                        }
-                        Value::Array(ref array) => {
-                            let mut all = self.reduce_stack_to_all_truth();
-                            for value in array {
-                                if value.is_boolean() {
-                                    all = all & (value.as_bool().unwrap() == true);
-                                }
-                            }
-                            push_to_stack_or_produce!(
-                                self.results,
-                                self.stack,
-                                tail,
-                                Value::Bool(all)
-                            );
-                        }
-                        _ => {}
-                    },
-
                     (Filter::ArrayIndex(ref index), Some(tail)) => match *current.value {
                         Value::Array(ref array) => {
                             if *index < array.len() {
