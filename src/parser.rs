@@ -64,7 +64,7 @@ pub(crate) fn parse<'a>(input: &'a str) -> Result<Vec<Filter>, pest::error::Erro
                         Rule::filterStmtCollection => {
                             todo!("handle filter statements");
                         }
-                        Rule::r#as => {
+                        Rule::arrow => {
                             func.alias = Some(
                                 value
                                     .clone()
@@ -76,7 +76,7 @@ pub(crate) fn parse<'a>(input: &'a str) -> Result<Vec<Filter>, pest::error::Erro
                                     .to_string(),
                             );
                         }
-                        Rule::asDeref => {
+                        Rule::arrowDeref => {
                             func.alias = Some(
                                 value
                                     .clone()
@@ -114,7 +114,6 @@ pub(crate) fn parse<'a>(input: &'a str) -> Result<Vec<Filter>, pest::error::Erro
             }
             Rule::path | Rule::reverse_path => actions.push(Filter::Root),
             Rule::allFn => actions.push(Filter::All),
-            Rule::lenFn => actions.push(Filter::Len),
             Rule::grouped_any => {
                 let elem = token.into_inner().nth(1).unwrap().into_inner();
                 let mut values: Vec<String> = vec![];
@@ -503,7 +502,7 @@ mod test {
 
     #[test]
     fn test_format() {
-        let actions = parse(">/#formats('{}{}', 'name', 'alias') as 'some_key'").unwrap();
+        let actions = parse(">/#formats('{}{}', 'name', 'alias') -> 'some_key'").unwrap();
         assert_eq!(
             actions,
             vec![
@@ -701,7 +700,7 @@ mod test {
 
     #[test]
     fn formats_without_deref() {
-        let actions = parse(">/foo/#formats('Msg {}', 'msg') as 'message'").unwrap();
+        let actions = parse(">/foo/#formats('Msg {}', 'msg') -> 'message'").unwrap();
         assert_eq!(
             actions,
             vec![
@@ -723,7 +722,7 @@ mod test {
     #[test]
     fn pick_formats_deref() {
         let actions =
-            parse(">/#pick('foo', >/bar/#formats('Msg {}', 'msg') as* 'message')").unwrap();
+            parse(">/#pick('foo', >/bar/#formats('Msg {}', 'msg') ->* 'message')").unwrap();
         assert_eq!(
             actions,
             vec![
@@ -824,7 +823,7 @@ mod test {
 
     #[test]
     fn parse_call_ending_with_deref() {
-        let actions = parse(">/#call('format {}', 'a', 'a') as* 'test'").unwrap();
+        let actions = parse(">/#call('format {}', 'a', 'a') ->* 'test'").unwrap();
         assert_eq!(
             actions,
             vec![
@@ -842,6 +841,31 @@ mod test {
                 Filter::Pick(vec![PickFilterInner::KeyedStr {
                     key: "test".to_string(),
                     alias: "test".to_string(),
+                }]),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_len_inside_pick() {
+        let actions = parse(">/#pick(>/..priority/#len as 'test')").unwrap();
+        assert_eq!(
+            actions,
+            vec![
+                Filter::Root,
+                Filter::Pick(vec![PickFilterInner::KeyedSubpath {
+                    subpath: vec![
+                        Filter::Root,
+                        Filter::Descendant("priority".to_string()),
+                        Filter::Function(Func {
+                            name: "len".to_string(),
+                            args: vec![],
+                            alias: None,
+                            should_deref: false,
+                        }),
+                    ],
+                    alias: "test".to_string(),
+                    reverse: false,
                 }]),
             ]
         );

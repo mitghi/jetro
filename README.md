@@ -43,12 +43,16 @@ Jetro combines access path with functions which operate on those values matched 
 
 By convention, functions are denoted using # operator. Functions can be composed.
 
-- #pick('string' | expression, ...) [ as | as* 'binding_value' ]
-- #all
-- #sum
-- #formats('format with placeholder {} {}', 'key_a', 'key_b') [ as | as* 'binding_value' ]
-- #filter('target_key' (>, <, >=, <=, ==, ~=, !=) (string, boolean, number))
-
+| Function | Action |
+| -------- | ------ |
+| #pick('string' \| expression, ...) [ as \| as* 'binding_value' ] | Select a key from an object, bind it to a name, select multiple sub queries to create new object |
+| #head | Head of the list|
+| #tail | Tail of the list |
+| #reverse | Reverse the list |
+| #all | Whether all boolean values are true |
+| #sum | Sum of numbers |
+| #formats('format with placeholder {} {}', 'key_a', 'key_b') [ -> \| ->* 'binding_value' ] | Insert formatted key:value into object or return it as single key:value  |
+| #filter('target_key' (>, <, >=, <=, ==, ~=, !=) (string, boolean, number)) | Perform Filter on list |
 
 ```json
 {
@@ -210,7 +214,7 @@ By convention, functions are denoted using # operator. Functions can be composed
 ---
 
 ```
->/..values/#filter('priority'  < 11 and 'name' ~= 'STEam')
+>/..rolls/#filter('priority'  < 11 and 'roll' ~= 'ON Side')
 ```
 
 <details>
@@ -221,8 +225,8 @@ By convention, functions are denoted using # operator. Functions can be composed
 ```json
 [
   {
-    "name": "STEAM",
-    "priority": 2
+    "priority": 1,
+    "roll": "on side"
   }
 ]
 ```
@@ -231,7 +235,7 @@ By convention, functions are denoted using # operator. Functions can be composed
 ---
 
 ```
->/entry/values/#filter('name' ~= 'gearBOX')/[0]/#formats('Enter {}', 'name') as* 'name'
+>/..rolls/#head/#formats('Rolling {}', 'roll') -> 'msg'
 ```
 
 <details>
@@ -241,7 +245,9 @@ By convention, functions are denoted using # operator. Functions can be composed
 
 ```json
 {
-  "name": "Enter GEARBOX"
+  "msg": "Rolling on side",
+  "priority": 1,
+  "roll": "on side"
 }
 ```
 </details>
@@ -309,7 +315,7 @@ By convention, functions are denoted using # operator. Functions can be composed
 ---
 
 ```
->/#pick('foo', >/..person/#formats('Herrn {} {}', 'firstname', 'lastname') as* 'fullname')
+>/#pick('foo', >/..person/#formats('Herrn {} {}', 'firstname', 'lastname') ->* 'fullname')
 ```
 
 <details>
@@ -339,7 +345,7 @@ By convention, functions are denoted using # operator. Functions can be composed
 ---
 
 ```
->/..foo/..contract/#pick('kind' as 'contract', </..person/#formats('Welcome {}', 'firstname') as* 'welcome_message')
+>/..foo/..contract/#pick('kind' as 'contract', </..person/#formats('Welcome {}', 'firstname') ->* 'welcome_message')
 ```
 
 <details>

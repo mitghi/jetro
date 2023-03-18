@@ -94,6 +94,11 @@ impl Callable for Formats {
                 return Err(Error::FuncEval("invalid type, expected string".to_owned()));
             }
         };
+        if func.alias.is_none() {
+            return Err(Error::FuncEval(
+                "expected alias to have some value".to_owned(),
+            ));
+        }
         let mut args: Vec<String> = vec![];
         for v in func.args[1..].iter() {
             match &v {
@@ -157,12 +162,87 @@ impl Callable for SumFn {
     }
 }
 
+struct LenFn;
+impl Callable for LenFn {
+    fn call(
+        &mut self,
+        _func: &Func,
+        value: &Value,
+        ctx: Option<&mut Context<'_>>,
+    ) -> Result<Value, Error> {
+        match &value {
+            Value::Object(ref obj) => {
+                return Ok(Value::Number(serde_json::Number::from(obj.len())));
+            }
+            Value::Array(ref array) => {
+                return Ok(Value::Number(serde_json::Number::from(array.len())));
+            }
+            _ => {
+                let count: i64 = ctx.unwrap().reduce_stack_to_num_count() + 1;
+                return Ok(Value::Number(serde_json::Number::from(count)));
+            }
+        }
+    }
+}
+
+struct Head;
+impl Callable for Head {
+    fn call(
+        &mut self,
+        _func: &Func,
+        value: &Value,
+        _ctx: Option<&mut Context<'_>>,
+    ) -> Result<Value, Error> {
+        match &value {
+            Value::Array(ref array) => {
+                if array.len() == 0 {
+                    return Ok(value.clone());
+                } else {
+                    let head = array[0].clone();
+                    return Ok(head);
+                }
+            }
+            _ => {
+                return Err(Error::FuncEval("expected array".to_owned()));
+            }
+        }
+    }
+}
+
+struct Tail;
+impl Callable for Tail {
+    fn call(
+        &mut self,
+        _func: &Func,
+        value: &Value,
+        _ctx: Option<&mut Context<'_>>,
+    ) -> Result<Value, Error> {
+        match &value {
+            Value::Array(ref array) => match array.len() {
+                0 | 1 => {
+                    return Ok(Value::Array(vec![]));
+                }
+                _ => {
+                    let tail = array[1..].to_vec();
+                    return Ok(Value::Array(tail));
+                }
+            },
+            _ => {
+                return Err(Error::FuncEval("expected array".to_owned()));
+            }
+        }
+    }
+}
+
 impl Default for FuncRegistry {
     fn default() -> Self {
         let mut output = FuncRegistry::new();
         output.register("reverse", Box::new(Reverse));
         output.register("formats", Box::new(Formats));
         output.register("sum", Box::new(SumFn));
+        output.register("len", Box::new(LenFn));
+        output.register("head", Box::new(Head));
+        output.register("tail", Box::new(Tail));
         output
     }
 }
@@ -206,5 +286,38 @@ mod test {
             },
             Err(err) => panic!("{}", err),
         };
+    }
+
+    #[test]
+    fn get_head() {
+        const NAME: &'static str = "head";
+        let mut m = FuncRegistry::new();
+        m.register("head", Box::new(Head));
+
+        assert_eq!(m.map.len(), 1);
+
+        let v = m.get(NAME);
+        assert_eq!(v.is_none(), false);
+
+        let d = v.unwrap().as_mut();
+        let serde_value = Value::Array(vec![
+            Value::String("foo".to_string()),
+            Value::String("bar".to_string()),
+        ]);
+
+        let func = Func::new();
+        match d.call(&func, &serde_value, None) {
+            Ok(result) => match result {
+                Value::String(ref output) => {
+                    assert_eq!(*output, Value::String("foo".to_string()));
+                }
+                _ => {
+                    panic!("invalid types {:?}", result);
+                }
+            },
+            Err(err) => {
+                panic!("{}", err);
+            }
+        }
     }
 }

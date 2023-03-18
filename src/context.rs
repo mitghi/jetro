@@ -850,33 +850,6 @@ impl<'a> Context<'a> {
                             todo!("implement handling of unmatched arm for filter");
                         }
                     },
-                    (Filter::Len, Some(tail)) => match *current.value {
-                        Value::Object(ref obj) => {
-                            push_to_stack_or_produce!(
-                                self.results,
-                                self.stack,
-                                tail,
-                                Value::Number(serde_json::Number::from(obj.len()))
-                            );
-                        }
-                        Value::Array(ref array) => {
-                            push_to_stack_or_produce!(
-                                self.results,
-                                self.stack,
-                                tail,
-                                Value::Number(serde_json::Number::from(array.len()))
-                            );
-                        }
-                        _ => {
-                            let count: i64 = self.reduce_stack_to_num_count() + 1;
-                            push_to_stack_or_produce!(
-                                self.results,
-                                self.stack,
-                                tail,
-                                Value::Number(serde_json::Number::from(count))
-                            );
-                        }
-                    },
 
                     (Filter::All, Some(tail)) => match *current.value {
                         Value::Object(ref _obj) => {}
