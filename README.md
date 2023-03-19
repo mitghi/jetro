@@ -4,7 +4,7 @@
 [<img src="https://img.shields.io/badge/try-online%20repl-brightgreen"></img>](https://jetro.io)
 ![GitHub](https://img.shields.io/github/license/mitghi/jetro)
 
-Jetro is a library which provides a custom DSL for transforming, querying and comparing data in JSON format. It is simple to use and extend.
+Jetro is a library which provides a custom DSL for transforming, querying and comparing data in JSON format. It is easy to use and extend.
 
 Jetro has minimal dependency, the traversal and eval algorithm is implemented on top of [serde_json](https://serde.rs).
 
@@ -12,6 +12,23 @@ Jetro can be used inside Web Browser by compiling down to WASM. Visit [Jetro Web
 to try it online, or [clone it](https://github.com/mitghi/jetroweb) and give it a shot.
 
 Jetro can be used in command line using [Jetrocli](https://github.com/mitghi/jetrocli).
+
+Jetro combines access path with functions which operate on values matched within the pipeline. Access path uses `/` as separator similar to structure of URI, the start of access path should denote whether the access starts from root by using `>`, it is possible to traverse from root in nested paths by using `<`. 
+
+By convention, functions are denoted using `#` operator. Functions can be composed.
+
+| Function | Action |
+| -------- | ------ |
+| #pick('string' \| expression, ...) [ as \| as* 'binding_value' ] | Select a key from an object, bind it to a name, select multiple sub queries to create new object |
+| #head | Head of the list|
+| #tail | Tail of the list |
+| #reverse | Reverse the list |
+| #all | Whether all boolean values are true |
+| #sum | Sum of numbers |
+| #formats('format with placeholder {} {}', 'key_a', 'key_b') [ -> \| ->* 'binding_value' ] | Insert formatted key:value into object or return it as single key:value  |
+| #filter('target_key' (>, <, >=, <=, ==, ~=, !=) (string, boolean, number)) | Perform Filter on list |
+| #map(x: x.y.z \| x.y.z.some_method())| Map each item in a list with the given lambda |
+
 
 ```rust
 let data = serde_json::json!({
@@ -38,28 +55,10 @@ struct Output {
 
 let output: Option<Output> = values.from_index(0);
 ```
-
-# architecture
-
+#### structure
 Jetro consists of a parser, context wrapper which manages traversal and evaluation of each step of user input and a runtime for dynamic functions. The future version will support user-defined functions.
 
 # example
-
-Jetro combines access path with functions which operate on values matched within the pipeline.
-
-By convention, functions are denoted using # operator. Functions can be composed.
-
-| Function | Action |
-| -------- | ------ |
-| #pick('string' \| expression, ...) [ as \| as* 'binding_value' ] | Select a key from an object, bind it to a name, select multiple sub queries to create new object |
-| #head | Head of the list|
-| #tail | Tail of the list |
-| #reverse | Reverse the list |
-| #all | Whether all boolean values are true |
-| #sum | Sum of numbers |
-| #formats('format with placeholder {} {}', 'key_a', 'key_b') [ -> \| ->* 'binding_value' ] | Insert formatted key:value into object or return it as single key:value  |
-| #filter('target_key' (>, <, >=, <=, ==, ~=, !=) (string, boolean, number)) | Perform Filter on list |
-| #map(x: x.y.z \| x.y.z.some_method())| Map each item in a list with the given lambda |
 
 ```json
 {
@@ -111,6 +110,8 @@ By convention, functions are denoted using # operator. Functions can be composed
 
 ### Queries
 
+Get value associated with `bar`.
+
 ```
 >/bar
 ```
@@ -137,6 +138,9 @@ By convention, functions are denoted using # operator. Functions can be composed
 </details>
 
 ---
+
+Get value associated with `bar`, return first value associated with any existing key.
+
 ```
 >/bar/('person' | 'whatever')
 ```
@@ -221,7 +225,7 @@ By convention, functions are denoted using # operator. Functions can be composed
 ---
 
 ```
->/..rolls/#filter('priority'  < 11 and 'roll' ~= 'ON Side')
+>/..rolls/#filter('priority' < 11 and 'roll' ~= 'ON Side')
 ```
 
 <details>
@@ -366,5 +370,21 @@ By convention, functions are denoted using # operator. Functions can be composed
   "welcome_message": "Welcome Mio"
 }
 
+```
+</details>
+
+---
+
+```
+>/..values/#map(x: x.name)/#head
+```
+
+<details>
+  <summary>See output</summary>
+
+  ### result
+
+```json
+"gearbox"
 ```
 </details>
