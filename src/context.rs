@@ -9,6 +9,8 @@ use serde_json::Value;
 use std::cell::RefCell;
 use std::fmt;
 use std::rc::Rc;
+
+/// PathOutput is type of fully evaluated jetro expression.
 type PathOutput = Rc<RefCell<Vec<Rc<Value>>>>;
 
 /// Path represents the entry for parsing and
@@ -79,6 +81,8 @@ impl From<Sum> for serde_json::Number {
     }
 }
 
+/// FilterOp represents comparision
+/// operators inside filter function.
 #[derive(Debug, PartialEq, Clone)]
 pub enum FilterOp {
     None,
@@ -91,6 +95,8 @@ pub enum FilterOp {
     Almost,
 }
 
+/// FilterLogicalOp is logical operation
+/// between several filters.
 #[derive(Debug, PartialEq, Clone)]
 pub enum FilterLogicalOp {
     None,
@@ -132,6 +138,8 @@ pub enum FormatOp {
     },
 }
 
+/// PickFilterInner represents arguments
+/// of pick function.
 #[derive(Debug, PartialEq, Clone)]
 pub enum PickFilterInner {
     None,
@@ -148,6 +156,8 @@ pub enum PickFilterInner {
     },
 }
 
+/// FilterInnerRighthand represents the
+/// right handside of filter operator.
 #[derive(Debug, PartialEq, Clone)]
 pub enum FilterInnerRighthand {
     String(String),
@@ -156,6 +166,8 @@ pub enum FilterInnerRighthand {
     Float(f64),
 }
 
+/// FilterInner represents a filter
+/// statement.
 #[derive(Debug, PartialEq, Clone)]
 pub enum FilterInner {
     Cond {
@@ -199,6 +211,9 @@ pub struct FilterAST {
     pub right: Option<Rc<RefCell<FilterAST>>>,
 }
 
+/// Filter contains operations that transform, match
+/// or search the input based on structure generated
+/// the from parser.
 #[derive(Debug, PartialEq, Clone)]
 pub enum Filter {
     Root,
@@ -213,11 +228,14 @@ pub enum Filter {
     Filter(FilterInner),
     MultiFilter(Rc<RefCell<FilterAST>>),
     GroupedChild(Vec<String>),
-    All,
-    Len,
     Function(Func),
 }
 
+/// StackItem represents an abstract step
+/// in the control stack. It evaluates the
+/// head of filters and either produces a
+/// result ( when terminal ) or produces
+/// more stack items.
 #[allow(dead_code)]
 struct StackItem<'a> {
     value: Rc<Value>,
@@ -225,6 +243,8 @@ struct StackItem<'a> {
     stack: Rc<RefCell<Vec<StackItem<'a>>>>,
 }
 
+/// Context binds components required for traversing
+/// and evaluating a jetro expression.
 pub(crate) struct Context<'a> {
     root: Rc<Value>,
     stack: Rc<RefCell<Vec<StackItem<'a>>>>,
@@ -232,6 +252,7 @@ pub(crate) struct Context<'a> {
     pub results: Rc<RefCell<Vec<Rc<Value>>>>,
 }
 
+/// MapBody represents the body of map function.
 #[derive(Debug, PartialEq, Clone)]
 pub enum MapBody {
     None,
@@ -239,6 +260,8 @@ pub enum MapBody {
     Subpath(Vec<Filter>),
 }
 
+/// MapAST represents the abstract structure
+/// of map function.
 #[derive(Debug, PartialEq, Clone)]
 pub struct MapAST {
     pub arg: String,
@@ -254,6 +277,7 @@ impl Default for MapAST {
     }
 }
 
+/// Error represents jetro errors.
 #[derive(Debug)]
 pub enum Error {
     EmptyQuery,
@@ -262,6 +286,10 @@ pub enum Error {
     FuncEval(String),
 }
 
+/// FuncArg represents an individual argument
+/// produced by the parser which gets passed
+/// to module reponsible for dynamic functions
+/// and gets evaluated during runtime.
 #[allow(dead_code)]
 #[derive(Debug, PartialEq, Clone)]
 pub enum FuncArg {
@@ -272,6 +300,8 @@ pub enum FuncArg {
     MapStmt(MapAST),
 }
 
+/// Func represents abstract structure of
+/// a jetro function.
 #[derive(Debug, PartialEq, Clone)]
 pub struct Func {
     pub name: String,
