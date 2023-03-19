@@ -309,7 +309,7 @@ pub(crate) fn parse<'a>(input: &'a str) -> Result<Vec<Filter>, pest::error::Erro
                             let subexpr = l.next().unwrap().as_str();
                             let alias: Option<String> = match l.next() {
                                 Some(ref result) => {
-                                    let mut result = result
+                                    let result = result
                                         .clone()
                                         .into_inner()
                                         .next()
