@@ -15,6 +15,8 @@ Jetro can be used in command line using [Jetrocli](https://github.com/mitghi/jet
 
 Jetro combines access path with functions which operate on values matched within the pipeline. Access path uses `/` as separator similar to structure of URI, the start of access path should denote whether the access starts from root by using `>`, it is possible to traverse from root in nested paths by using `<`. 
 
+Jetro expressions support line breaks and whitespace, the statements can be broken up into smaller parts.
+
 By convention, functions are denoted using `#` operator. Functions can be composed.
 
 | Function | Action |
@@ -22,6 +24,8 @@ By convention, functions are denoted using `#` operator. Functions can be compos
 | #pick('string' \| expression, ...) [ as \| as* 'binding_value' ] | Select a key from an object, bind it to a name, select multiple sub queries to create new object |
 | #head | Head of the list|
 | #tail | Tail of the list |
+| #keys | Keys associated with an object |
+| #values | Values associated with an object |
 | #reverse | Reverse the list |
 | #all | Whether all boolean values are true |
 | #sum | Sum of numbers |
@@ -62,87 +66,132 @@ Jetro consists of a parser, context wrapper which manages traversal and evaluati
 
 ```json
 {
-  "bar": {
-    "meows": [
-      10,
-      20,
-      30,
-      40,
-      50,
-      60
-    ],
-    "person": {
-      "firstname": "Mio",
-      "lastname": "Snuggle",
-      "hasFurr": true
+  "customer": {
+    "id": "xyz",
+    "ident": {
+      "user": {
+        "isExternal": false,
+        "profile": {
+          "firstname": "John",
+          "alias": "Japp",
+          "lastname": "Appleseed"
+        }
+      }
     },
-    "rolls": [
+    "preferences": []
+  },
+  "line_items": {
+    "items": [
       {
-        "roll": "on side"
+        "ident": "abc",
+        "is_gratis": false,
+        "name": "pizza",
+        "price": 4.8,
+        "total": 1,
+        "type": "base_composable"
       },
       {
-        "roll": "in space"
+        "ident": "def",
+        "is_gratis": false,
+        "name": "salami",
+        "price": 2.8,
+        "total": 10,
+        "type": "ingredient"
       },
       {
-        "roll": "in multiverse"
+        "ident": "ghi",
+        "is_gratis": false,
+        "name": "cheese",
+        "price": 2,
+        "total": 1,
+        "type": "ingredient"
       },
       {
-        "roll": "everywhere"
+        "ident": "uip",
+        "is_gratis": true,
+        "name": "chilli",
+        "price": 0,
+        "total": 1,
+        "type": "ingredient"
+      },
+      {
+        "ident": "ewq",
+        "is_gratis": true,
+        "name": "bread sticks",
+        "price": 0,
+        "total": 8,
+        "type": "box"
       }
     ]
-  },
-  "foo": [
-    1,
-    2,
-    3,
-    4,
-    5,
-    {
-      "contract": {
-        "kind": "Furry Purr",
-        "hasFurr": false
-      }
-    }
-  ],
-  "friend": "Thunder Pur"
+  }
 }
 ```
 
 ### Queries
 
-Get value associated with `bar`.
+Get value associated with `line_items`.
 
 ```
->/bar
+>/line_items
 ```
 <details>
   <summary>See output</summary>
 
   ### result
   ```json
-  "bar": {
-    "meows": [
-      10,
-      20,
-      30,
-      40,
-      50,
-      60
-    ],
-    "person": {
-      "firstname": "Mio",
-      "lastname": "Snuggle"
+{
+  "items": [
+    {
+      "ident": "abc",
+      "is_gratis": false,
+      "name": "pizza",
+      "price": 4.8,
+      "total": 1,
+      "type": "base_composable"
+    },
+    {
+      "ident": "def",
+      "is_gratis": false,
+      "name": "salami",
+      "price": 2.8,
+      "total": 10,
+      "type": "ingredient"
+    },
+    {
+      "ident": "ghi",
+      "is_gratis": false,
+      "name": "cheese",
+      "price": 2,
+      "total": 1,
+      "type": "ingredient"
+    },
+    {
+      "ident": "uip",
+      "is_gratis": true,
+      "name": "chilli",
+      "price": 0,
+      "total": 1,
+      "type": "ingridient"
+    },
+    {
+      "ident": "ewq",
+      "is_gratis": true,
+      "name": "bread sticks",
+      "price": 0,
+      "total": 8,
+      "type": "box"
     }
-  }
+  ]
+}
   ```
 </details>
 
 ---
 
-Get value associated with `bar`, return first value associated with any existing key.
+Get value associated with first matching key which has a value and return its `id` field.
 
 ```
->/bar/('person' | 'whatever')
+>/('non-existing-member' | 'customer')/id
 ```
 
 <details>
@@ -151,18 +200,13 @@ Get value associated with `bar`, return first value associated with any existing
   ### result
 
 ```json
-{
-  "firstname": "Mio",
-  "hasFurr": true,
-  "lastname": "Snuggle"
-}
+"xyz"
 ```
 </details>
 
 ---
-
 ```
->/('foo' | 'bar' | 'non-exinsting-key')
+>/..items/#tail
 ```
 
 <details>
@@ -172,219 +216,262 @@ Get value associated with `bar`, return first value associated with any existing
 
 ```json
 [
+  {
+    "ident": "def",
+    "is_gratis": false,
+    "name": "salami",
+    "price": 2.8,
+    "total": 10,
+    "type": "ingredient"
+  },
+  {
+    "ident": "ghi",
+    "is_gratis": false,
+    "name": "cheese",
+    "price": 2,
+    "total": 1,
+    "type": "ingredient"
+  },
+  {
+    "ident": "uip",
+    "is_gratis": true,
+    "name": "chilli",
+    "price": 0,
+    "total": 1,
+    "type": "ingridient"
+  },
+  {
+    "ident": "ewq",
+    "is_gratis": true,
+    "name": "bread sticks",
+    "price": 0,
+    "total": 8,
+    "type": "box"
+  }
+]
+```
+</details>
+
+---
+
+```
+>/..items/#filter('is_gratis' == true and 'name' ~= 'ChILLi')
+```
+
+<details>
+  <summary>See output</summary>
+
+  ### result
+
+```json
+[
+  {
+    "ident": "uip",
+    "is_gratis": true,
+    "name": "chilli",
+    "price": 0,
+    "total": 1,
+    "type": "ingridient"
+  }
+]
+```
+</details>
+
+---
+
+```
+>/..items/#filter('is_gratis' == true and 'name' ~= 'ChILLi')/#map(x: x.type)
+```
+
+<details>
+  <summary>See output</summary>
+
+  ### result
+
+```json
+[
+  "ingridient"
+]
+```
+</details>
+
+---
+
+Create a new object with scheme `{'total': ..., 'fullname': ...}` as follow:
+- recursively search for `line_items`, dive into any matched object, filter matches with `is_gratis == false` statement, recursively look for their prices and return the sum of prices
+- recursively search for object `user`, select its `profile` and create a new object with schema `{'fullname': ...}` formated by concatenating values of keys ('firstname', 'lastname')
+
+```
+>/#pick(
+  >/..line_items
+   /*
+   /#filter('is_gratis' == false)/..price/#sum as 'total',
+
+  >/..user
+   /profile
+   /#formats('{} {}', 'firstname', 'lastname') ->* 'fullname'
+)
+```
+
+<details>
+  <summary>See output</summary>
+
+  ### result
+
+```json
+{
+  "fullname": "John Appleseed",
+  "total": 9.6
+}
+```
+</details>
+
+---
+
+Select up to 4 items from index zero of array `items`
+
+```
+>/..items/[:4]
+```
+
+<details>
+  <summary>See output</summary>
+
+  ### result
+
+```json
+[
+  {
+    "ident": "abc",
+    "is_gratis": false,
+    "name": "pizza",
+    "price": 4.8,
+    "total": 1,
+    "type": "base_composable"
+  },
+  {
+    "ident": "def",
+    "is_gratis": false,
+    "name": "salami",
+    "price": 2.8,
+    "total": 10,
+    "type": "ingredient"
+  },
+  {
+    "ident": "ghi",
+    "is_gratis": false,
+    "name": "cheese",
+    "price": 2,
+    "total": 1,
+    "type": "ingredient"
+  },
+  {
+    "ident": "uip",
+    "is_gratis": true,
+    "name": "chilli",
+    "price": 0,
+    "total": 1,
+    "type": "ingridient"
+  }
+]
+```
+</details>
+
+---
+
+Select from 4th index and consume until end of array `items`
+
+```
+>/..items/[4:]
+```
+
+<details>
+  <summary>See output</summary>
+
+  ### result
+
+```json
+[
+  {
+    "ident": "ewq",
+    "is_gratis": true,
+    "name": "bread sticks",
+    "price": 0,
+    "total": 8,
+    "type": "box"
+  }
+]
+```
+</details>
+
+---
+
+Create a new object with schema `{'total_gratis': ...}` as follow:
+- Recursively look for any object containing `items`, and then recursively search within the matched object for `is_gratis` and length of matched values
+
+```
+>/#pick(>/..items/..is_gratis/#len as 'total_gratis')
+```
+
+<details>
+  <summary>See output</summary>
+
+  ### result
+
+```json
+{
+  "total_gratis": 2
+}
+```
+</details>
+
+---
+
+Recursively search for object `items`, select its first item and return its keys
+
+```
+>/..items/[0]/#keys
+```
+
+<details>
+  <summary>See output</summary>
+
+  ### result
+
+```json
+[
+  "ident",
+  "is_gratis",
+  "name",
+  "price",
+  "total",
+  "type"
+]
+```
+</details>
+
+---
+
+Recursively search for object `items`, select its first item and return its values
+
+```
+>/..items/[0]/#values
+```
+
+<details>
+  <summary>See output</summary>
+
+  ### result
+
+```json
+[
+  "abc",
+  false,
+  "pizza",
+  4.8,
   1,
-  2,
-  3,
-  4,
-  5,
-  {
-    "contract": {
-      "kind": "Furry Purr"
-    }
-  }
+  "base_composable"
 ]
 ```
 </details>
 
----
-
-```
->/('foo' | 'bar' | 'non-exinsting-key')/[:5]/#sum
-```
-
-<details>
-  <summary>See output</summary>
-
-  ### result
-
-```json
-15
-```
-</details>
-
----
-
-```
->/..rolls/#filter('roll' == 'everywhere')
-```
-
-<details>
-  <summary>See output</summary>
-
-  ### result
-
-```json
-[
-  {
-    "roll": "everywhere"
-  }
-]
-```
-</details>
-
----
-
-```
->/..rolls/#filter('priority' < 11 and 'roll' ~= 'ON Side')
-```
-
-<details>
-  <summary>See output</summary>
-
-  ### result
-
-```json
-[
-  {
-    "priority": 1,
-    "roll": "on side"
-  }
-]
-```
-</details>
-
----
-
-```
->/..rolls/#head/#formats('Rolling {}', 'roll') -> 'msg'
-```
-
-<details>
-  <summary>See output</summary>
-
-  ### result
-
-```json
-{
-  "msg": "Rolling on side",
-  "priority": 1,
-  "roll": "on side"
-}
-```
-</details>
-
----
-
-```
->/..foo/[:4]
-```
-
-<details>
-  <summary>See output</summary>
-
-  ### result
-
-```json
-[
-  1,
-  2,
-  3,
-  4
-]
-```
-</details>
-
----
-
-```
->/..meows/[4:]
-```
-
-<details>
-  <summary>See output</summary>
-
-  ### result
-
-```json
-[
-  50,
-  60
-]
-```
-</details>
-
----
-
-```
->/#pick(>/..hasFurr/#all as 'totallyFurry')
-```
-
-<details>
-  <summary>See output</summary>
-
-  ### result
-
-```json
-{
-  "totallyFurry": true
-}
-```
-</details>
-
----
-
----
-
-```
->/#pick('foo', >/..person/#formats('Herrn {} {}', 'firstname', 'lastname') ->* 'fullname')
-```
-
-<details>
-  <summary>See output</summary>
-
-  ### result
-
-```json
-{
-  "foo": [
-    1,
-    2,
-    3,
-    4,
-    5,
-    {
-      "contract": {
-        "kind": "Furry Purr"
-      }
-    }
-  ],
-  "fullname": "Herrn Mio Snuggle"
-}
-```
-</details>
-
----
-
-```
->/..foo/..contract/#pick('kind' as 'contract', </..person/#formats('Welcome {}', 'firstname') ->* 'welcome_message')
-```
-
-<details>
-  <summary>See output</summary>
-
-  ### result
-
-```json
-{
-  "contract": "Furry Purr",
-  "welcome_message": "Welcome Mio"
-}
-
-```
-</details>
-
----
-
-```
->/..values/#map(x: x.name)/#head
-```
-
-<details>
-  <summary>See output</summary>
-
-  ### result
-
-```json
-"gearbox"
-```
-</details>
