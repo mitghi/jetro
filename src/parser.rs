@@ -951,4 +951,69 @@ mod test {
             ]
         );
     }
+
+    #[test]
+    fn parse_with_line_break() {
+        let actions = parse(
+            r#">/#pick(
+  >/get
+   /..recursive
+   /value
+   /#filter('some_key' > 10) as 'values',
+
+  >/..preferences
+   /#map(x: x.preference) as 'preferences'
+)
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            actions,
+            vec![
+                Filter::Root,
+                Filter::Pick(vec![
+                    PickFilterInner::KeyedSubpath {
+                        alias: "values".to_string(),
+                        reverse: false,
+                        subpath: vec![
+                            Filter::Root,
+                            Filter::Child("get".to_string()),
+                            Filter::Descendant("recursive".to_string()),
+                            Filter::Child("value".to_string()),
+                            Filter::MultiFilter(Rc::new(RefCell::new(FilterAST {
+                                operator: FilterLogicalOp::None,
+                                left: Some(Rc::new(RefCell::new(FilterInner::Cond {
+                                    left: "some_key".to_string(),
+                                    op: FilterOp::Gt,
+                                    right: FilterInnerRighthand::Number(10),
+                                }))),
+                                right: None,
+                            }))),
+                        ],
+                    },
+                    PickFilterInner::KeyedSubpath {
+                        alias: "preferences".to_string(),
+                        reverse: false,
+                        subpath: vec![
+                            Filter::Root,
+                            Filter::Descendant("preferences".to_string()),
+                            Filter::Function(Func {
+                                name: "map".to_string(),
+                                alias: None,
+                                should_deref: false,
+                                args: vec![FuncArg::MapStmt(MapAST {
+                                    arg: "x".to_string(),
+                                    body: MapBody::Subpath(vec![
+                                        Filter::Root,
+                                        Filter::Child("preference".to_string()),
+                                    ],),
+                                })],
+                            }),
+                        ],
+                    }
+                ]),
+            ]
+        );
+    }
 }

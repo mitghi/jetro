@@ -46,7 +46,7 @@ and = { "and" }
 or = { "or" }
 logical_cmp = { and | or }
 child = { slash ~ ident }
-any_child = { slash ~ asterisk }
+any_child = { slash ~ asterisk  }
 descendant_child = { slash ~ double_dot ~ ident }
 grouped_any = { slash ~ grouped_literal }
 array_index = { slash ~ "[" ~ number ~ "]" }
@@ -55,19 +55,19 @@ slice = { slash ~ "[" ~ number ~ ":" ~ number ~ "]" }
 array_to = { slash ~ "[:" ~ number ~ "]" }
 array_from = { slash ~ "[" ~ number ~ ":]" }
 pick = {
-    sharp ~ "pick" ~ (" ")* ~
-    "(" ~ (literal_keyed | (sub_expression_keyed | sub_expression_keyed_reversed) ) ~
-    ((",") ~ (" ")* ~ (literal_keyed | (sub_expression_keyed | sub_expression_keyed_reversed) ))* ~
-    (" ")* ~ ")"
+    sharp ~ "pick"  ~
+    "(" ~ whitespace ~ (literal_keyed | (sub_expression_keyed | sub_expression_keyed_reversed) ) ~ whitespace ~
+    (whitespace ~ (",") ~ whitespace ~ (literal_keyed | (sub_expression_keyed | sub_expression_keyed_reversed) ))* ~
+    whitespace ~ ")"
 }
-sub_expression = { path ~ (pickFn | filterFn | child | any_child | grouped_any | descendant_child | array_index | slice | array_to | array_from | fn)* }
+sub_expression = { path ~ (pickFn ~ whitespace| filterFn ~ whitespace| child ~ whitespace| any_child ~ whitespace| grouped_any ~ whitespace| descendant_child ~ whitespace| array_index ~ whitespace| slice ~ whitespace| array_to ~ whitespace| array_from ~ whitespace| fn ~ whitespace)* }
 sub_expression_reversed = { reverse_path ~ (pickFn | filterFn | grouped_any | child | any_child | descendant_child | array_index | slice | array_to | array_from | fn )* }
 sub_expression_keyed = { sub_expression ~ as? }
 sub_expression_keyed_reversed = { sub_expression_reversed ~ as? }
 pickFn = { slash ~ pick }
 fnLit = { literal }
 fnExpr = { sub_expression }
-fnCall = { sharp ~ ident ~ (whitespace ~ lparen ~ ((mapStmt|filterStmtCollection|fnLit|fnExpr) ~ whitespace ~ ((",")* ~ whitespace ~ (mapStmt|filterStmtCollection|fnLit|fnExpr))*)? ~ whitespace ~ rparen ~ whitespace)? ~ (arrow | arrowDeref)? }
+fnCall = { sharp ~ ident ~ (whitespace ~ lparen ~ ((mapStmt|filterStmtCollection|fnLit|fnExpr) ~ whitespace ~ ((",") ~ whitespace ~ (mapStmt|filterStmtCollection|fnLit|fnExpr))*)? ~ whitespace ~ rparen ~ whitespace)? ~ (arrow | arrowDeref)? }
 fn = {slash ~ fnCall}
 filterStmt = { ( filter_elem ~ whitespace ~ cmp ~ whitespace ~ (float | truthy | literal | number ) ) }
 filterStmtCollection = { filterStmt ~ whitespace ~ (logical_cmp ~ whitespace ~ filterStmt~ whitespace)*  }
@@ -79,7 +79,7 @@ pathExpr = { ident ~  (dot ~ (pure_index|methodCall|ident))* }
 mapStmt = { ident ~ whitespace ~ colon ~ whitespace ~ pathExpr }
 
 expression = {
-    (path|reverse_path) ~
-    (pickFn | filterFn | grouped_any | child | any_child | descendant_child | array_index | slice | array_to | array_from | fn)* ~
+    (path|reverse_path) ~ whitespace ~
+    (whitespace ~ pickFn ~ whitespace | filterFn ~ whitespace| grouped_any ~ whitespace | child  ~ whitespace | any_child  ~ whitespace | descendant_child  ~ whitespace | array_index  ~ whitespace | slice  ~ whitespace | array_to  ~ whitespace | array_from  ~ whitespace | fn ~ whitespace)* ~
     EOI
 }
