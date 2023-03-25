@@ -321,6 +321,58 @@ impl Callable for MapFn {
     }
 }
 
+struct Keys;
+impl Callable for Keys {
+    fn call(
+        &mut self,
+        func: &Func,
+        value: &Value,
+        _ctx: Option<&mut Context<'_>>,
+    ) -> Result<Value, Error> {
+        if func.args.len() > 0 {
+            return Err(Error::FuncEval("keys takes no argument".to_owned()));
+        }
+
+        match &value {
+            Value::Object(ref obj) => {
+                let keys: Vec<Value> = obj.keys().map(|v| Value::String(v.to_string())).collect();
+                return Ok(Value::Array(keys));
+            }
+            _ => {
+                return Err(Error::FuncEval(
+                    "keys can be exec only on objects".to_owned(),
+                ));
+            }
+        }
+    }
+}
+
+struct Values;
+impl Callable for Values {
+    fn call(
+        &mut self,
+        func: &Func,
+        value: &Value,
+        _ctx: Option<&mut Context<'_>>,
+    ) -> Result<Value, Error> {
+        if func.args.len() > 0 {
+            return Err(Error::FuncEval("values takes no argument".to_owned()));
+        }
+
+        match &value {
+            Value::Object(ref obj) => {
+                let values: Vec<Value> = obj.values().map(|v| v.clone()).collect();
+                return Ok(Value::Array(values));
+            }
+            _ => {
+                return Err(Error::FuncEval(
+                    "values can be exec only on objects".to_owned(),
+                ));
+            }
+        }
+    }
+}
+
 impl Default for FuncRegistry {
     fn default() -> Self {
         let mut output = FuncRegistry::new();
@@ -332,6 +384,8 @@ impl Default for FuncRegistry {
         output.register("tail", Box::new(Tail));
         output.register("all", Box::new(AllOnBoolean));
         output.register("map", Box::new(MapFn));
+        output.register("keys", Box::new(Keys));
+        output.register("values", Box::new(Values));
         output
     }
 }
