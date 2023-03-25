@@ -373,6 +373,74 @@ impl Callable for Values {
     }
 }
 
+struct Min;
+impl Callable for Min {
+    fn call(
+        &mut self,
+        _func: &Func,
+        value: &Value,
+        _ctx: Option<&mut Context<'_>>,
+    ) -> Result<Value, Error> {
+        match &value {
+            Value::Array(ref array) => {
+                let mut result = array
+                    .iter()
+                    .filter(|v| v.is_number())
+                    .map(|v| v.as_f64().unwrap())
+                    .collect::<Vec<f64>>();
+                result.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                match result.get(0) {
+                    Some(output) => {
+                        return Ok(Value::Number(
+                            serde_json::Number::from_f64(*output).unwrap(),
+                        ));
+                    }
+                    _ => {
+                        return Ok(Value::Array(Vec::<Value>::new()));
+                    }
+                }
+            }
+            _ => {
+                return Err(Error::FuncEval("expected value to be array".to_owned()));
+            }
+        }
+    }
+}
+
+struct Max;
+impl Callable for Max {
+    fn call(
+        &mut self,
+        _func: &Func,
+        value: &Value,
+        _ctx: Option<&mut Context<'_>>,
+    ) -> Result<Value, Error> {
+        match &value {
+            Value::Array(ref array) => {
+                let mut result = array
+                    .iter()
+                    .filter(|v| v.is_number())
+                    .map(|v| v.as_f64().unwrap())
+                    .collect::<Vec<f64>>();
+                result.sort_by(|a, b| b.partial_cmp(a).unwrap());
+                match result.get(0) {
+                    Some(output) => {
+                        return Ok(Value::Number(
+                            serde_json::Number::from_f64(*output).unwrap(),
+                        ));
+                    }
+                    _ => {
+                        return Ok(Value::Array(Vec::<Value>::new()));
+                    }
+                }
+            }
+            _ => {
+                return Err(Error::FuncEval("expected value to be array".to_owned()));
+            }
+        }
+    }
+}
+
 impl Default for FuncRegistry {
     fn default() -> Self {
         let mut output = FuncRegistry::new();
@@ -386,6 +454,8 @@ impl Default for FuncRegistry {
         output.register("map", Box::new(MapFn));
         output.register("keys", Box::new(Keys));
         output.register("values", Box::new(Values));
+        output.register("min", Box::new(Min));
+        output.register("max", Box::new(Max));
         output
     }
 }

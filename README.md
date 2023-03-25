@@ -27,6 +27,8 @@ By convention, functions are denoted using `#` operator. Functions can be compos
 | #keys | Keys associated with an object |
 | #values | Values associated with an object |
 | #reverse | Reverse the list |
+| #min | Min value of numbers |
+| #max | Max value of numbers |
 | #all | Whether all boolean values are true |
 | #sum | Sum of numbers |
 | #formats('format with placeholder {} {}', 'key_a', 'key_b') [ -> \| ->* 'binding_value' ] | Insert formatted key:value into object or return it as single key:value  |
