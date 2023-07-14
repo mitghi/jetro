@@ -1,6 +1,6 @@
 [package]
 name = "jetro"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 authors = ["Milad (Mike) Taghavi <mitghi.at.gmail.com>"]
 license = "MIT"
@@ -16,8 +16,8 @@ categories = ["algorithms", "encoding", "parser"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-serde_json = "1.0.91"
-pest = "2.5.4"
-pest_derive = "2.5.4"
-serde = { version = "1.0.152", features = ["derive"] }
+serde_json = "1.0.102"
+pest = "2.7.0"
+pest_derive = "2.7.0"
+serde = { version = "1.0.171", features = ["derive"] }
 dynfmt = { version = "0.1.5", features = ["curly"] }

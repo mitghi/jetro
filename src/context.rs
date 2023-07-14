@@ -368,10 +368,34 @@ macro_rules! match_value {
                     }
                 }
                 Value::String(ref some_str) => {
-                    $target_map
-                        .as_object_mut()
-                        .unwrap()
-                        .insert($target_key.clone(), Value::String(some_str.to_string()));
+                    let map = $target_map.as_object_mut().unwrap();
+                    let v = map.remove(&$target_key.clone());
+                    if v.is_none() {
+                        map.insert($target_key.clone(), Value::String(some_str.clone()));
+                        continue;
+                    }
+                    match &v {
+                        Some(Value::String(ref s)) => {
+                            map.insert(
+                                $target_key.clone(),
+                                Value::Array(vec![
+                                    Value::String(some_str.clone()),
+                                    Value::String(s.clone()),
+                                ]),
+                            );
+                        }
+                        Some(Value::Array(ref array)) => {
+                            let mut array = array.clone();
+                            array.push(Value::String(some_str.clone()));
+                            $target_map
+                                .as_object_mut()
+                                .unwrap()
+                                .insert($target_key.clone(), Value::Array(array));
+                        }
+                        _ => {
+                            map.insert($target_key.clone(), Value::String(some_str.clone()));
+                        }
+                    };
                 }
                 Value::Bool(ref some_bool) => {
                     $target_map
@@ -380,10 +404,35 @@ macro_rules! match_value {
                         .insert($target_key.clone(), Value::Bool(some_bool.clone()));
                 }
                 Value::Number(ref some_number) => {
-                    $target_map
-                        .as_object_mut()
-                        .unwrap()
-                        .insert($target_key.clone(), Value::Number(some_number.clone()));
+                    let map = $target_map.as_object_mut().unwrap();
+                    let v = map.remove(&$target_key.clone());
+                    if v.is_none() {
+                        map.insert($target_key.clone(), Value::Number(some_number.clone()));
+                        continue;
+                    }
+                    match &v {
+                        Some(Value::Number(ref n)) => {
+                            map.insert(
+                                $target_key.clone(),
+                                Value::Array(vec![
+                                    Value::Number(serde_json::Number::from(some_number.clone())),
+                                    Value::Number(serde_json::Number::from(n.clone())),
+                                ]),
+                            );
+                        }
+                        Some(Value::Array(ref array)) => {
+                            let mut array = array.clone();
+                            array
+                                .push(Value::Number(serde_json::Number::from(some_number.clone())));
+                            $target_map
+                                .as_object_mut()
+                                .unwrap()
+                                .insert($target_key.clone(), Value::Array(array));
+                        }
+                        _ => {
+                            map.insert($target_key.clone(), Value::Number(some_number.clone()));
+                        }
+                    };
                 }
                 Value::Array(ref some_array) => {
                     $target_map
@@ -669,7 +718,7 @@ impl Path {
     pub(crate) fn collect_with_filter(v: Value, filters: &[Filter]) -> PathResult {
         // TODO(): handle errors similar to collect method
         let mut ctx = Context::new(v, filters);
-        ctx.collect();
+        let _ = ctx.collect();
 
         PathResult(ctx.results)
     }
@@ -1132,7 +1181,7 @@ mod test {
         ];
 
         let mut ctx = Context::new(v, &filters);
-        ctx.collect();
+        let _ = ctx.collect();
 
         assert_eq!(
             *ctx.results.borrow().clone(),
@@ -1388,6 +1437,23 @@ mod test {
             vec![Rc::new(Value::Array(vec![
                 serde_json::json!({"name": "steam"}),
                 serde_json::json!({"name": "gearbox"})
+            ]))]
+        );
+    }
+
+    #[test]
+    fn test_pick_and_zip() {
+        let data = serde_json::json!({"a": [{"name": "tool", "value": {"nested": "field"}}, {"name": "pneuma", "value": {"nested": "seal"}}], "b": [2000, 2100]});
+        let result = Path::collect(
+            data,
+            ">/#pick(>/..name as 'name', >/..nested as 'field', >/..b as 'release')/#zip",
+        )
+        .unwrap();
+        assert_eq!(
+            *result.0.borrow(),
+            vec![Rc::new(Value::Array(vec![
+                serde_json::json!({"field": "field", "name": "tool", "release": 2000}),
+                serde_json::json!({"field": "seal", "name": "pneuma", "release": 2100})
             ]))]
         );
     }

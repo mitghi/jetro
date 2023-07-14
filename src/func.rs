@@ -2,7 +2,11 @@
 
 use crate::context::{Context, Error, Filter, Func, FuncArg, MapBody, Path};
 use serde_json::Value;
-use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, VecDeque},
+    rc::Rc,
+};
 
 use super::context::MapAST;
 
@@ -301,7 +305,6 @@ impl Callable for MapFn {
                     name: _,
                     subpath: _,
                 } => {
-                    todo!("not implemented");
                     return Err(Error::FuncEval("WIP: not implemented".to_owned()));
                 }
                 MapBody::Subpath(ref subpath) => {
@@ -441,6 +444,53 @@ impl Callable for Max {
     }
 }
 
+struct Zip;
+impl Callable for Zip {
+    fn call(
+        &mut self,
+        _func: &Func,
+        value: &Value,
+        _ctx: Option<&mut Context<'_>>,
+    ) -> Result<Value, Error> {
+        match &value {
+            Value::Object(ref obj) => {
+                let mut stack: VecDeque<Value> = VecDeque::new();
+                for (i, (k, vs)) in obj.iter().enumerate() {
+                    match &vs {
+                        Value::Array(ref array) => {
+                            for (j, v) in array.iter().enumerate() {
+                                if i == 0 {
+                                    let mut item = serde_json::Map::<String, Value>::new();
+                                    item.insert(k.clone(), v.clone());
+                                    stack.push_back(Value::Object(item));
+                                    continue;
+                                }
+
+                                let value = stack.remove(j);
+                                match value {
+                                    Some(item) => match item {
+                                        Value::Object(mut obj) => {
+                                            obj.insert(k.clone(), v.clone());
+                                            stack.insert(j, Value::Object(obj));
+                                        }
+                                        _ => {}
+                                    },
+                                    _ => {}
+                                }
+                            }
+                        }
+                        _ => {}
+                    };
+                }
+                let result: Vec<Value> = Vec::from(stack);
+                return Ok(Value::Array(result));
+            }
+            _ => {}
+        }
+        Err(Error::Eval("nothing to zip".to_string()))
+    }
+}
+
 impl Default for FuncRegistry {
     fn default() -> Self {
         let mut output = FuncRegistry::new();
@@ -456,6 +506,7 @@ impl Default for FuncRegistry {
         output.register("values", Box::new(Values));
         output.register("min", Box::new(Min));
         output.register("max", Box::new(Max));
+        output.register("zip", Box::new(Zip));
         output
     }
 }

@@ -34,6 +34,7 @@ By convention, functions are denoted using `#` operator. Functions can be compos
 | #formats('format with placeholder {} {}', 'key_a', 'key_b') [ -> \| ->* 'binding_value' ] | Insert formatted key:value into object or return it as single key:value  |
 | #filter('target_key' (>, <, >=, <=, ==, ~=, !=) (string, boolean, number)) | Perform Filter on list |
 | #map(x: x.y.z \| x.y.z.some_method())| Map each item in a list with the given lambda |
+| #zip | Zip two or more arrays together |
 
 
 ```rust
@@ -477,3 +478,59 @@ Recursively search for object `items`, select its first item and return its valu
 ```
 </details>
 
+---
+
+Zip two or more arrays together.
+
+
+```
+>/#pick(>/..name as 'name',
+        >/..nested as 'field',
+        >/..b as 'release')/#zip
+```
+
+JSON:
+
+```json
+{
+  "a": [
+    {
+      "name": "tool",
+      "value": {
+        "nested": "field"
+      }
+    },
+    {
+      "name": "pneuma",
+      "value": {
+        "nested": "seal"
+      }
+    }
+  ],
+  "b": [
+    2000,
+    2100
+  ]
+}
+```
+
+<details>
+  <summary>See output</summary>
+
+  ### result
+
+```json
+[
+  {
+    "field": "field",
+    "name": "tool",
+    "release": 2000
+  },
+  {
+    "field": "seal",
+    "name": "pneuma",
+    "release": 2100
+  }
+]
+```
+</details>
