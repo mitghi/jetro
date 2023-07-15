@@ -256,6 +256,7 @@ pub(crate) struct Context<'a> {
     stack: Rc<RefCell<Vec<StackItem<'a>>>>,
     registry: Rc<RefCell<dyn crate::func::Registry>>,
     pub results: Rc<RefCell<Vec<Rc<Value>>>>,
+    step_results: Rc<RefCell<Vec<Value>>>,
 }
 
 /// MapBody represents the body of map function.
@@ -773,6 +774,7 @@ impl<'a> Context<'a> {
         let results: Rc<RefCell<Vec<Rc<Value>>>> = Rc::new(RefCell::new(Vec::new()));
         let stack: Rc<RefCell<Vec<StackItem<'a>>>> = Rc::new(RefCell::new(Vec::new()));
         let rv: Rc<Value> = Rc::new(value);
+        let step_results: Rc<RefCell<Vec<Value>>> = Rc::new(RefCell::new(Vec::new()));
         let registry: Rc<RefCell<dyn crate::func::Registry>> = crate::func::default_registry();
         stack
             .borrow_mut()
@@ -783,6 +785,7 @@ impl<'a> Context<'a> {
             stack,
             registry,
             results,
+            step_results,
         }
     }
 
@@ -1132,9 +1135,9 @@ impl<'a> Context<'a> {
                                         };
 
                                         if filters.len() == 0 && found_match {
-                                            self.results
+                                            self.step_results
                                                 .borrow_mut()
-                                                .insert(0, current.value.clone());
+                                                .push(serde_json::Value::Object(obj.clone()));
                                         }
                                         self.stack.borrow_mut().push(StackItem::new(
                                             Rc::new(v.clone()),
@@ -1160,6 +1163,22 @@ impl<'a> Context<'a> {
                     _ => {}
                 },
                 _ => {}
+            }
+        }
+
+        // no more filter to process
+        // push intermediate results
+        // such as from recursive search
+        // with pair (key, value) into
+        // final results
+        {
+            let sr = self.step_results.borrow();
+            if sr.len() > 0 {
+                let mut output: Vec<Value> = Vec::new();
+                for v in self.step_results.borrow().iter() {
+                    output.insert(0, v.clone());
+                }
+                self.results.borrow_mut().push(Value::Array(output).into());
             }
         }
 
@@ -1526,6 +1545,19 @@ mod test {
             vec![Rc::new(Value::Array(vec![
                 Value::String("gearbox".to_string()),
                 Value::String("steam".to_string()),
+            ]))]
+        );
+    }
+
+    #[test]
+    fn test_descendant_keyed() {
+        let data = serde_json::json!({"entry": {"values": [{"name": "gearbox"}, {"name": "gearbox", "test": "2000"}]}});
+        let result = Path::collect(data, ">/..('name'='gearbox')").unwrap();
+        assert_eq!(
+            *result.0.borrow(),
+            vec![Rc::new(Value::Array(vec![
+                serde_json::json!({"name": "gearbox"}),
+                serde_json::json!({"name": "gearbox", "test": "2000"})
             ]))]
         );
     }
