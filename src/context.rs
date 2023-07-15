@@ -211,6 +211,12 @@ pub struct FilterAST {
     pub right: Option<Rc<RefCell<FilterAST>>>,
 }
 
+#[derive(Debug, PartialEq, Clone)]
+pub enum FilterDescendant {
+    Single(String),
+    Pair(String, String),
+}
+
 /// Filter contains operations that transform, match
 /// or search the input based on structure generated
 /// the from parser.
@@ -219,7 +225,7 @@ pub enum Filter {
     Root,
     AnyChild,
     Child(String),
-    Descendant(String),
+    DescendantChild(FilterDescendant),
     Pick(Vec<PickFilterInner>),
     ArrayIndex(usize),
     ArrayFrom(usize),
@@ -668,9 +674,14 @@ impl Filter {
 
     pub fn key(&self) -> Option<String> {
         match &self {
-            Filter::Descendant(ref descendant) => {
-                return Some(descendant[2..].to_string());
-            }
+            Filter::DescendantChild(entry) => match entry {
+                FilterDescendant::Single(ref descendant) => {
+                    return Some(descendant[2..].to_string());
+                }
+                _ => {
+                    todo!("pair descendant not implemented");
+                }
+            },
             _ => None,
         }
     }
@@ -1067,36 +1078,83 @@ impl<'a> Context<'a> {
                         _ => {}
                     },
 
-                    (Filter::Descendant(ref descendant), Some(tail)) => match *current.value {
-                        Value::Object(ref obj) => {
-                            for (k, v) in obj {
-                                let filters: &[Filter] = if k == descendant {
-                                    tail
-                                } else {
-                                    current.filters
-                                };
+                    (Filter::DescendantChild(ref entry), Some(tail)) => match entry {
+                        FilterDescendant::Single(ref descendant) => match *current.value {
+                            Value::Object(ref obj) => {
+                                for (k, v) in obj {
+                                    let filters: &[Filter] = if k == descendant {
+                                        tail
+                                    } else {
+                                        current.filters
+                                    };
 
-                                if filters.len() == 0 {
-                                    self.results.borrow_mut().push(Rc::new(v.clone()));
-                                } else {
+                                    if filters.len() == 0 {
+                                        self.results.borrow_mut().push(Rc::new(v.clone()));
+                                    } else {
+                                        self.stack.borrow_mut().push(StackItem::new(
+                                            Rc::new(v.clone()),
+                                            filters,
+                                            self.stack.clone(),
+                                        ));
+                                    }
+                                }
+                            }
+                            Value::Array(ref array) => {
+                                for v in array {
                                     self.stack.borrow_mut().push(StackItem::new(
                                         Rc::new(v.clone()),
-                                        filters,
+                                        current.filters,
                                         self.stack.clone(),
                                     ));
                                 }
                             }
-                        }
-                        Value::Array(ref array) => {
-                            for v in array {
-                                self.stack.borrow_mut().push(StackItem::new(
-                                    Rc::new(v.clone()),
-                                    current.filters,
-                                    self.stack.clone(),
-                                ));
+                            _ => {}
+                        },
+                        FilterDescendant::Pair(ref descendant, ref target_value) => {
+                            match *current.value {
+                                Value::Object(ref obj) => {
+                                    let mut found_match = false;
+                                    for (k, v) in obj {
+                                        let filters: &[Filter] = if k == descendant {
+                                            match &v {
+                                                Value::String(ref current_value) => {
+                                                    if *current_value == *target_value {
+                                                        found_match = true;
+                                                        tail
+                                                    } else {
+                                                        current.filters
+                                                    }
+                                                }
+                                                _ => current.filters,
+                                            }
+                                        } else {
+                                            current.filters
+                                        };
+
+                                        if filters.len() == 0 && found_match {
+                                            self.results
+                                                .borrow_mut()
+                                                .insert(0, current.value.clone());
+                                        }
+                                        self.stack.borrow_mut().push(StackItem::new(
+                                            Rc::new(v.clone()),
+                                            filters,
+                                            self.stack.clone(),
+                                        ));
+                                    }
+                                }
+                                Value::Array(ref array) => {
+                                    for v in array {
+                                        self.stack.borrow_mut().push(StackItem::new(
+                                            Rc::new(v.clone()),
+                                            current.filters,
+                                            self.stack.clone(),
+                                        ));
+                                    }
+                                }
+                                _ => {}
                             }
                         }
-                        _ => {}
                     },
 
                     _ => {}
@@ -1177,7 +1235,7 @@ mod test {
         let filters = vec![
             Filter::Root,
             Filter::Child("foo".to_string()),
-            Filter::Descendant("within".to_string()),
+            Filter::DescendantChild(FilterDescendant::Single("within".to_string())),
         ];
 
         let mut ctx = Context::new(v, &filters);

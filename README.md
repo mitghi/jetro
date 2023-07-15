@@ -174,7 +174,7 @@ Get value associated with `line_items`.
       "name": "chilli",
       "price": 0,
       "total": 1,
-      "type": "ingridient"
+      "type": "ingredient"
     },
     {
       "ident": "ewq",
@@ -204,6 +204,41 @@ Get value associated with first matching key which has a value and return its `i
 
 ```json
 "xyz"
+```
+</details>
+
+---
+
+Recursively search for objects that has key with specified value.
+
+```
+>/..('type'='ingredient')
+```
+
+<details>
+  <summary>See output</summary>
+
+  ### result
+
+```json
+[
+  {
+	"ident": "ghi",
+	"is_gratis": false,
+	"name": "cheese",
+	"price": 2,
+	"total": 1,
+	"type": "ingredient"
+  },
+  {
+	"ident": "def",
+	"is_gratis": false,
+	"name": "salami",
+	"price": 2.8,
+	"total": 10,
+	"type": "ingredient"
+  }
+]
 ```
 </details>
 
@@ -241,7 +276,7 @@ Get value associated with first matching key which has a value and return its `i
     "name": "chilli",
     "price": 0,
     "total": 1,
-    "type": "ingridient"
+    "type": "ingredient"
   },
   {
     "ident": "ewq",
@@ -274,7 +309,7 @@ Get value associated with first matching key which has a value and return its `i
     "name": "chilli",
     "price": 0,
     "total": 1,
-    "type": "ingridient"
+    "type": "ingredient"
   }
 ]
 ```
@@ -293,7 +328,7 @@ Get value associated with first matching key which has a value and return its `i
 
 ```json
 [
-  "ingridient"
+  "ingredient"
 ]
 ```
 </details>
@@ -374,7 +409,7 @@ Select up to 4 items from index zero of array `items`
     "name": "chilli",
     "price": 0,
     "total": 1,
-    "type": "ingridient"
+    "type": "ingredient"
   }
 ]
 ```

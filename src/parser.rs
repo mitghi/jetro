@@ -6,8 +6,8 @@ use std::rc::Rc;
 use pest::iterators::Pair;
 
 use crate::context::{
-    Filter, FilterAST, FilterInner, FilterInnerRighthand, FilterLogicalOp, FilterOp, Func, FuncArg,
-    MapAST, MapBody, PickFilterInner,
+    Filter, FilterAST, FilterDescendant, FilterInner, FilterInnerRighthand, FilterLogicalOp,
+    FilterOp, Func, FuncArg, MapAST, MapBody, PickFilterInner,
 };
 
 use crate::*;
@@ -395,8 +395,26 @@ pub(crate) fn parse<'a>(input: &'a str) -> Result<Vec<Filter>, pest::error::Erro
                 actions.push(Filter::Pick(elems));
             }
             Rule::descendant_child => {
-                let ident = token.into_inner().nth(1).unwrap().as_str().to_owned();
-                actions.push(Filter::Descendant(ident));
+                let entry = token.into_inner().nth(1).unwrap();
+                let node = entry.into_inner().next().unwrap();
+                let rule = node.as_rule();
+                match &rule {
+                    Rule::ident => {
+                        let ident = node.as_str().to_owned();
+                        actions.push(Filter::DescendantChild(FilterDescendant::Single(ident)));
+                    }
+                    Rule::keyed_ident => {
+                        let mut node = node.into_inner();
+                        let mut lnode = node.next().unwrap().into_inner();
+                        let mut rnode = node.next().unwrap().into_inner();
+                        let lstr = lnode.next().unwrap().as_str().to_owned();
+                        let rstr = rnode.next().unwrap().as_str().to_owned();
+                        actions.push(Filter::DescendantChild(FilterDescendant::Pair(lstr, rstr)));
+                    }
+                    _ => {
+                        panic!("unreachable")
+                    }
+                }
             }
             Rule::child => {
                 let ident = token.into_inner().nth(1).unwrap().as_str().to_owned();
@@ -413,7 +431,7 @@ mod test {
     use super::*;
 
     #[test]
-    fn test_one() {
+    fn test_simple_path() {
         let actions = parse(">/obj/some/*/name").unwrap();
         assert_eq!(
             actions,
@@ -428,7 +446,7 @@ mod test {
     }
 
     #[test]
-    fn test_two() {
+    fn test_simple_path_with_recursive_descendant() {
         let actions = parse(">/obj/some/..descendant/name").unwrap();
         assert_eq!(
             actions,
@@ -436,14 +454,29 @@ mod test {
                 Filter::Root,
                 Filter::Child("obj".to_string()),
                 Filter::Child("some".to_string()),
-                Filter::Descendant("descendant".to_string()),
+                Filter::DescendantChild(FilterDescendant::Single("descendant".to_string())),
                 Filter::Child("name".to_string()),
             ]
         );
     }
 
     #[test]
-    fn test_three() {
+    fn test_recursive_descendant_keyed() {
+        let actions = parse(">/..('key' = 'value')").unwrap();
+        assert_eq!(
+            actions,
+            vec![
+                Filter::Root,
+                Filter::DescendantChild(FilterDescendant::Pair(
+                    "key".to_string(),
+                    "value".to_string()
+                )),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_simple_path_with_recursive_descendant_and_pick() {
         let actions = parse(">/obj/some/..descendant/#pick('a', 'b', 'c', 'd')").unwrap();
         assert_eq!(
             actions,
@@ -451,7 +484,7 @@ mod test {
                 Filter::Root,
                 Filter::Child("obj".to_string()),
                 Filter::Child("some".to_string()),
-                Filter::Descendant("descendant".to_string()),
+                Filter::DescendantChild(FilterDescendant::Single("descendant".to_string())),
                 Filter::Pick(vec![
                     PickFilterInner::Str("a".to_string()),
                     PickFilterInner::Str("b".to_string()),
@@ -471,7 +504,7 @@ mod test {
                 Filter::Root,
                 Filter::Child("obj".to_string()),
                 Filter::Child("some".to_string()),
-                Filter::Descendant("descendant".to_string()),
+                Filter::DescendantChild(FilterDescendant::Single("descendant".to_string())),
                 Filter::Pick(vec![
                     PickFilterInner::KeyedStr {
                         key: "f".to_string(),
@@ -496,7 +529,7 @@ mod test {
                 Filter::Root,
                 Filter::Child("obj".to_string()),
                 Filter::Child("some".to_string()),
-                Filter::Descendant("descendant".to_string()),
+                Filter::DescendantChild(FilterDescendant::Single("descendant".to_string())),
                 Filter::Pick(vec![
                     PickFilterInner::KeyedStr {
                         key: "f".to_string(),
@@ -526,7 +559,7 @@ mod test {
                 Filter::Root,
                 Filter::Child("obj".to_string()),
                 Filter::Child("some".to_string()),
-                Filter::Descendant("descendant".to_string()),
+                Filter::DescendantChild(FilterDescendant::Single("descendant".to_string())),
                 Filter::Pick(vec![
                     PickFilterInner::KeyedStr {
                         key: "f".to_string(),
@@ -580,7 +613,7 @@ mod test {
             actions,
             vec![
                 Filter::Root,
-                Filter::Descendant("meows".to_string()),
+                Filter::DescendantChild(FilterDescendant::Single("meows".to_string())),
                 Filter::MultiFilter(Rc::new(RefCell::new(FilterAST {
                     operator: FilterLogicalOp::None,
                     left: Some(Rc::new(RefCell::new(FilterInner::Cond {
@@ -908,7 +941,7 @@ mod test {
                 Filter::Pick(vec![PickFilterInner::KeyedSubpath {
                     subpath: vec![
                         Filter::Root,
-                        Filter::Descendant("priority".to_string()),
+                        Filter::DescendantChild(FilterDescendant::Single("priority".to_string())),
                         Filter::Function(Func {
                             name: "len".to_string(),
                             args: vec![],
@@ -930,7 +963,7 @@ mod test {
             actions,
             vec![
                 Filter::Root,
-                Filter::Descendant("values".to_string()),
+                Filter::DescendantChild(FilterDescendant::Single("values".to_string())),
                 Filter::Function(Func {
                     name: "map".to_string(),
                     alias: None,
@@ -979,7 +1012,9 @@ mod test {
                         subpath: vec![
                             Filter::Root,
                             Filter::Child("get".to_string()),
-                            Filter::Descendant("recursive".to_string()),
+                            Filter::DescendantChild(FilterDescendant::Single(
+                                "recursive".to_string()
+                            )),
                             Filter::Child("value".to_string()),
                             Filter::MultiFilter(Rc::new(RefCell::new(FilterAST {
                                 operator: FilterLogicalOp::None,
@@ -997,7 +1032,9 @@ mod test {
                         reverse: false,
                         subpath: vec![
                             Filter::Root,
-                            Filter::Descendant("preferences".to_string()),
+                            Filter::DescendantChild(FilterDescendant::Single(
+                                "preferences".to_string()
+                            )),
                             Filter::Function(Func {
                                 name: "map".to_string(),
                                 alias: None,
