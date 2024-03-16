@@ -8,8 +8,7 @@ Jetro is a library which provides a custom DSL for transforming, querying and co
 
 Jetro has minimal dependency, the traversal and eval algorithm is implemented on top of [serde_json](https://serde.rs).
 
-Jetro can be used inside Web Browser by compiling down to WASM. Visit [Jetro Web](https://jetro.io)
-to try it online, or [clone it](https://github.com/mitghi/jetroweb) and give it a shot.
+Jetro can be used inside Web Browser by compiling down to WASM. [Clone it](https://github.com/mitghi/jetroweb) and give it a shot.
 
 Jetro can be used in command line using [Jetrocli](https://github.com/mitghi/jetrocli).
 
