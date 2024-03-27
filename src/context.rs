@@ -718,8 +718,12 @@ impl Path {
         let mut ctx = Context::new(v, filters.as_slice());
         match ctx.collect() {
             Ok(_) => {
-                let x = ctx.results.take().to_owned();
-                Ok(PathResult(x))
+                let output = ctx.results.take().to_owned();
+                let v = ctx.step_results.take();
+                drop(v);
+                let v = ctx.stack.take();
+                drop(v);
+                Ok(PathResult(output))
             }
             Err(err) => Err(err),
         }
@@ -729,10 +733,14 @@ impl Path {
         // TODO(): handle errors similar to collect method
         let mut ctx = Context::new(v, filters);
         let _ = ctx.collect();
+        let output = ctx.results.take().to_owned();
 
-        let x = ctx.results.take().to_owned();
+        let v = ctx.step_results.take();
+        drop(v);
+        let v = ctx.stack.take();
+        drop(v);
 
-        PathResult(x)
+        PathResult(output)
     }
 }
 

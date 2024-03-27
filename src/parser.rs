@@ -1,8 +1,6 @@
 //! Module containing parser for jetro.
 
-use std::cell::RefCell;
-use std::rc::Rc;
-
+use std::{rc::Rc, cell::RefCell};
 use pest::iterators::Pair;
 
 use crate::context::{
@@ -246,14 +244,11 @@ pub(crate) fn parse<'a>(input: &'a str) -> Result<Vec<Filter>, pest::error::Erro
                             };
 
                             if fast_root.is_none() {
-                                fast_root = Some(FilterAST::new(
-                                    filter_inner.clone(),
-                                ));
+                                fast_root = Some(FilterAST::new(filter_inner.clone()));
                                 current = fast_root.clone();
                             } else {
                                 let mut node = current.clone().unwrap();
-                                let rhs = node
-                                    .link_right(filter_inner, FilterLogicalOp::None);
+                                let rhs = node.link_right(filter_inner, FilterLogicalOp::None);
                                 current = Some(rhs);
                             }
                         }
@@ -770,7 +765,7 @@ mod test {
             .clone()
             .unwrap()
             .clone();
-        match *rhs_lhs{
+        match *rhs_lhs {
             FilterInner::Cond {
                 left: _,
                 ref op,
