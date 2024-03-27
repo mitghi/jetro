@@ -21,3 +21,10 @@ pest = "2.7.0"
 pest_derive = "2.7.0"
 serde = { version = "1.0.171", features = ["derive"] }
 dynfmt = { version = "0.1.5", features = ["curly"] }
+dhat = "0.3.3"
+
+[profile.release]
+debug = 1
+
+[features]
+dhat-heap = []    # if you are doing heap profiling

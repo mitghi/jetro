@@ -174,8 +174,8 @@ pub(crate) fn parse<'a>(input: &'a str) -> Result<Vec<Filter>, pest::error::Erro
             Rule::filterFn => {
                 let rule = token.into_inner().nth(1).unwrap().into_inner().into_iter();
 
-                let mut fast_root: Option<Rc<RefCell<FilterAST>>> = None;
-                let mut current: Option<Rc<RefCell<FilterAST>>> = None;
+                let mut fast_root: Option<FilterAST> = None;
+                let mut current: Option<FilterAST> = None;
 
                 for item in rule.into_iter() {
                     let rule = item.as_rule();
@@ -246,22 +246,21 @@ pub(crate) fn parse<'a>(input: &'a str) -> Result<Vec<Filter>, pest::error::Erro
                             };
 
                             if fast_root.is_none() {
-                                fast_root = Some(Rc::new(RefCell::new(FilterAST::new(
+                                fast_root = Some(FilterAST::new(
                                     filter_inner.clone(),
-                                ))));
+                                ));
                                 current = fast_root.clone();
                             } else {
-                                let node = current.clone().unwrap();
+                                let mut node = current.clone().unwrap();
                                 let rhs = node
-                                    .borrow_mut()
                                     .link_right(filter_inner, FilterLogicalOp::None);
                                 current = Some(rhs);
                             }
                         }
                         Rule::logical_cmp => {
                             let op = FilterLogicalOp::get(elem.as_str()).unwrap();
-                            let node = current.clone().unwrap();
-                            node.borrow_mut().set_operator(op.clone());
+                            let mut node = current.clone().unwrap();
+                            node.set_operator(op.clone());
                         }
                         _ => {
                             todo!("implement unmatched arm");
@@ -614,15 +613,15 @@ mod test {
             vec![
                 Filter::Root,
                 Filter::DescendantChild(FilterDescendant::Single("meows".to_string())),
-                Filter::MultiFilter(Rc::new(RefCell::new(FilterAST {
+                Filter::MultiFilter(FilterAST {
                     operator: FilterLogicalOp::None,
-                    left: Some(Rc::new(RefCell::new(FilterInner::Cond {
+                    left: Some(FilterInner::Cond {
                         left: "some".to_string(),
                         op: FilterOp::Eq,
                         right: FilterInnerRighthand::String("value".to_string()),
-                    }))),
+                    }),
                     right: None,
-                })))
+                })
             ]
         );
     }
@@ -652,15 +651,15 @@ mod test {
             vec![
                 Filter::Root,
                 Filter::Child("foo".to_string()),
-                Filter::MultiFilter(Rc::new(RefCell::new(FilterAST {
+                Filter::MultiFilter(FilterAST {
                     operator: FilterLogicalOp::None,
-                    left: Some(Rc::new(RefCell::new(FilterInner::Cond {
+                    left: Some(FilterInner::Cond {
                         left: "is_furry".to_string(),
                         op: FilterOp::Eq,
                         right: FilterInnerRighthand::Bool(true)
-                    }))),
+                    }),
                     right: None,
-                })))
+                })
             ]
         );
     }
@@ -672,15 +671,15 @@ mod test {
             vec![
                 Filter::Root,
                 Filter::Child("foo".to_string()),
-                Filter::MultiFilter(Rc::new(RefCell::new(FilterAST {
+                Filter::MultiFilter(FilterAST {
                     operator: FilterLogicalOp::None,
-                    left: Some(Rc::new(RefCell::new(FilterInner::Cond {
+                    left: Some(FilterInner::Cond {
                         left: "some_value".to_string(),
                         op: FilterOp::Eq,
                         right: FilterInnerRighthand::Number(1234),
-                    }))),
+                    }),
                     right: None,
-                })))
+                })
             ],
         );
     }
@@ -693,15 +692,15 @@ mod test {
             vec![
                 Filter::Root,
                 Filter::Child("foo".to_string()),
-                Filter::MultiFilter(Rc::new(RefCell::new(FilterAST {
+                Filter::MultiFilter(FilterAST {
                     operator: FilterLogicalOp::None,
-                    left: Some(Rc::new(RefCell::new(FilterInner::Cond {
+                    left: Some(FilterInner::Cond {
                         left: "some_value".to_string(),
                         op: FilterOp::Eq,
                         right: FilterInnerRighthand::Float(2.48),
-                    }))),
+                    }),
                     right: None,
-                })))
+                })
             ],
         );
     }
@@ -738,20 +737,20 @@ mod test {
         current = root.clone();
 
         let new_node = current.borrow_mut().link_right(rhs, FilterLogicalOp::None);
-        current = new_node;
+        current = Rc::new(RefCell::new(new_node));
 
         current.borrow_mut().set_operator(FilterLogicalOp::Or);
 
         let new_node = current
             .borrow_mut()
             .link_right(standalone_lhs, FilterLogicalOp::None);
-        current = new_node;
+        current = Rc::new(RefCell::new(new_node));
         _ = current;
 
         assert_eq!(root.borrow().operator, FilterLogicalOp::And);
 
         let lhs = &root.borrow().left.clone().unwrap().clone();
-        match *lhs.borrow() {
+        match *lhs {
             FilterInner::Cond {
                 left: _,
                 ref op,
@@ -767,12 +766,11 @@ mod test {
             .clone()
             .unwrap()
             .clone()
-            .borrow()
             .left
             .clone()
             .unwrap()
             .clone();
-        match *rhs_lhs.borrow() {
+        match *rhs_lhs{
             FilterInner::Cond {
                 left: _,
                 ref op,
@@ -847,15 +845,15 @@ mod test {
             vec![
                 Filter::Root,
                 Filter::Child("foo".to_string()),
-                Filter::MultiFilter(Rc::new(RefCell::new(FilterAST {
+                Filter::MultiFilter(FilterAST {
                     operator: FilterLogicalOp::None,
-                    left: Some(Rc::new(RefCell::new(FilterInner::Cond {
+                    left: Some(FilterInner::Cond {
                         left: "some_key".to_string(),
                         op: FilterOp::Almost,
                         right: FilterInnerRighthand::String("test".to_string()),
-                    },))),
+                    },),
                     right: None
-                })))
+                })
             ]
         );
     }
@@ -868,15 +866,15 @@ mod test {
             vec![
                 Filter::Root,
                 Filter::Child("foo".to_string()),
-                Filter::MultiFilter(Rc::new(RefCell::new(FilterAST {
+                Filter::MultiFilter(FilterAST {
                     operator: FilterLogicalOp::None,
-                    left: Some(Rc::new(RefCell::new(FilterInner::Cond {
+                    left: Some(FilterInner::Cond {
                         left: "some_key".to_string(),
                         op: FilterOp::NotEq,
                         right: FilterInnerRighthand::Number(10),
-                    }))),
+                    }),
                     right: None,
-                })))
+                })
             ]
         );
     }
@@ -1016,15 +1014,15 @@ mod test {
                                 "recursive".to_string()
                             )),
                             Filter::Child("value".to_string()),
-                            Filter::MultiFilter(Rc::new(RefCell::new(FilterAST {
+                            Filter::MultiFilter(FilterAST {
                                 operator: FilterLogicalOp::None,
-                                left: Some(Rc::new(RefCell::new(FilterInner::Cond {
+                                left: Some(FilterInner::Cond {
                                     left: "some_key".to_string(),
                                     op: FilterOp::Gt,
                                     right: FilterInnerRighthand::Number(10),
-                                }))),
+                                }),
                                 right: None,
-                            }))),
+                            }),
                         ],
                     },
                     PickFilterInner::KeyedSubpath {

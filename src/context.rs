@@ -11,7 +11,7 @@ use std::fmt;
 use std::rc::Rc;
 
 /// PathOutput is type of fully evaluated jetro expression.
-type PathOutput = Rc<RefCell<Vec<Rc<Value>>>>;
+type PathOutput = Vec<Value>;
 
 /// Path represents the entry for parsing and
 /// evaluating a jetro path.
@@ -207,8 +207,8 @@ pub enum FilterInner {
 // with No-Op opeator, therefore evaluates to left expression.
 pub struct FilterAST {
     pub operator: FilterLogicalOp,
-    pub left: Option<Rc<RefCell<FilterInner>>>,
-    pub right: Option<Rc<RefCell<FilterAST>>>,
+    pub left: Option<FilterInner>,
+    pub right: Option<Rc<FilterAST>>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -232,7 +232,7 @@ pub enum Filter {
     ArrayTo(usize),
     Slice(usize, usize),
     Filter(FilterInner),
-    MultiFilter(Rc<RefCell<FilterAST>>),
+    MultiFilter(FilterAST),
     GroupedChild(Vec<String>),
     Function(Func),
 }
@@ -244,7 +244,7 @@ pub enum Filter {
 /// more stack items.
 #[allow(dead_code)]
 struct StackItem<'a> {
-    value: Rc<Value>,
+    value: Value,
     filters: &'a [Filter],
     stack: Rc<RefCell<Vec<StackItem<'a>>>>,
 }
@@ -252,10 +252,10 @@ struct StackItem<'a> {
 /// Context binds components required for traversing
 /// and evaluating a jetro expression.
 pub(crate) struct Context<'a> {
-    root: Rc<Value>,
+    root: Value,
     stack: Rc<RefCell<Vec<StackItem<'a>>>>,
     registry: Rc<RefCell<dyn crate::func::Registry>>,
-    pub results: Rc<RefCell<Vec<Rc<Value>>>>,
+    pub results: Rc<RefCell<Vec<Value>>>,
     step_results: Rc<RefCell<Vec<Value>>>,
 }
 
@@ -334,11 +334,11 @@ macro_rules! push_to_stack_or_produce {
     ($results:expr, $stack:expr, $tail:expr, $value:expr) => {
         let tlen = $tail.len();
         if tlen == 0 {
-            $results.borrow_mut().push(Rc::new($value));
+            $results.borrow_mut().push($value);
         } else {
             $stack
                 .borrow_mut()
-                .push(StackItem::new(Rc::new($value), $tail, $stack.clone()));
+                .push(StackItem::new($value, $tail, $stack.clone()));
         }
     };
 }
@@ -348,11 +348,11 @@ macro_rules! push_to_stack_iter_or_produce {
         let tlen = $tail.len();
         for (_k, v) in $obj {
             if tlen == 0 {
-                $results.borrow_mut().push(Rc::new(v.clone()));
+                $results.borrow_mut().push(v.clone());
             } else {
                 $stack
                     .borrow_mut()
-                    .push(StackItem::new(Rc::new(v.clone()), $tail, $stack.clone()));
+                    .push(StackItem::new(v.clone(), $tail, $stack.clone()));
             }
         }
     };
@@ -362,10 +362,9 @@ macro_rules! match_value {
     ($target_object:expr, $target_map:expr, $target_key:expr, $some_path:expr) => {{
         for item in Path::collect_with_filter($target_object.clone(), $some_path.as_slice())
             .0
-            .borrow()
             .iter()
         {
-            match &*item.clone() {
+            match item.clone() {
                 Value::Object(ref target_object) => {
                     for (k, v) in target_object {
                         $target_map
@@ -548,7 +547,7 @@ impl FilterAST {
     pub fn new(left: FilterInner) -> Self {
         Self {
             operator: FilterLogicalOp::None,
-            left: Some(Rc::new(RefCell::new(left))),
+            left: Some(left),
             right: None,
         }
     }
@@ -557,28 +556,24 @@ impl FilterAST {
         self.operator = operator;
     }
 
-    pub fn link_right(
-        &mut self,
-        statement: FilterInner,
-        operator: FilterLogicalOp,
-    ) -> Rc<RefCell<Self>> {
+    pub fn link_right(&mut self, statement: FilterInner, operator: FilterLogicalOp) -> Self {
         let mut rhs: Self = Self::new(statement);
         rhs.set_operator(operator);
 
-        let inner = Rc::new(RefCell::new(rhs));
+        let inner = rhs;
         let output = inner.clone();
-        self.right = Some(inner);
+        self.right = Some(Rc::new(inner));
 
         output
     }
 
     pub fn eval(&self, value: &Value) -> bool {
         if self.operator == FilterLogicalOp::None && self.right.is_none() {
-            return self.left.clone().unwrap().borrow_mut().eval(&value);
+            return self.left.clone().unwrap().eval(&value);
         }
 
-        let lhs = self.left.clone().unwrap().borrow_mut().eval(&value);
-        let rhs = self.right.clone().unwrap().borrow_mut().eval(&value);
+        let lhs = self.left.clone().unwrap().eval(&value);
+        let rhs = self.right.clone().unwrap().eval(&value);
 
         match self.operator {
             FilterLogicalOp::And => return lhs && rhs,
@@ -597,7 +592,7 @@ impl FilterAST {
             "Filter({:?}) {:?} {:?}",
             &self.left,
             &self.operator,
-            rhs.borrow().repr(),
+            rhs.repr(),
         );
     }
 }
@@ -641,7 +636,7 @@ impl Filter {
                         } => {
                             match_value!(
                                 if *reverse && ctx.is_some() {
-                                    ctx.unwrap().root.as_ref()
+                                    &ctx.unwrap().root
                                 } else {
                                     obj
                                 },
@@ -654,7 +649,7 @@ impl Filter {
                         PickFilterInner::Subpath(ref some_subpath, reverse) => {
                             match_value!(
                                 if *reverse && ctx.is_some() {
-                                    ctx.unwrap().root.as_ref()
+                                    &ctx.unwrap().root
                                 } else {
                                     obj
                                 },
@@ -722,7 +717,10 @@ impl Path {
 
         let mut ctx = Context::new(v, filters.as_slice());
         match ctx.collect() {
-            Ok(_) => Ok(PathResult(ctx.results)),
+            Ok(_) => {
+                let x = ctx.results.take().to_owned();
+                Ok(PathResult(x))
+            }
             Err(err) => Err(err),
         }
     }
@@ -732,13 +730,15 @@ impl Path {
         let mut ctx = Context::new(v, filters);
         let _ = ctx.collect();
 
-        PathResult(ctx.results)
+        let x = ctx.results.take().to_owned();
+
+        PathResult(x)
     }
 }
 
 impl PathResult {
     pub fn from_index<T: serde::de::DeserializeOwned>(&mut self, index: usize) -> Option<T> {
-        let final_value: &Value = &*self.0.borrow_mut().remove(index);
+        let final_value: Value = self.0.remove(index);
 
         match serde_json::from_value(final_value.clone().take()) {
             Ok(result) => Some(result),
@@ -749,7 +749,7 @@ impl PathResult {
 
 impl<'a> StackItem<'a> {
     pub fn new(
-        value: Rc<Value>,
+        value: Value,
         filters: &'a [Filter],
         stack: Rc<RefCell<Vec<StackItem<'a>>>>,
     ) -> Self {
@@ -771,17 +771,16 @@ impl<'a> StackItem<'a> {
 
 impl<'a> Context<'a> {
     pub fn new(value: Value, filters: &'a [Filter]) -> Self {
-        let results: Rc<RefCell<Vec<Rc<Value>>>> = Rc::new(RefCell::new(Vec::new()));
+        let results: Rc<RefCell<Vec<Value>>> = Rc::new(RefCell::new(Vec::new()));
         let stack: Rc<RefCell<Vec<StackItem<'a>>>> = Rc::new(RefCell::new(Vec::new()));
-        let rv: Rc<Value> = Rc::new(value);
         let step_results: Rc<RefCell<Vec<Value>>> = Rc::new(RefCell::new(Vec::new()));
         let registry: Rc<RefCell<dyn crate::func::Registry>> = crate::func::default_registry();
         stack
             .borrow_mut()
-            .push(StackItem::new(rv.clone(), filters, Rc::clone(&stack)));
+            .push(StackItem::new(value.clone(), filters, Rc::clone(&stack)));
 
         Self {
-            root: rv.clone(),
+            root: value.clone(),
             stack,
             registry,
             results,
@@ -809,7 +808,7 @@ impl<'a> Context<'a> {
         let values = self.results.to_owned();
         self.results = Rc::new(RefCell::new(Vec::new()));
         for value in values.borrow().clone() {
-            match *value.as_ref() {
+            match value {
                 Value::Array(ref inner_array) => {
                     for v in inner_array {
                         if v.is_boolean() {
@@ -833,7 +832,7 @@ impl<'a> Context<'a> {
         let values = self.results.to_owned();
         self.results = Rc::new(RefCell::new(Vec::new()));
         for value in values.borrow().clone() {
-            match *value.as_ref() {
+            match value {
                 Value::Array(ref inner_array) => {
                     for v in inner_array {
                         if v.is_number() {
@@ -842,7 +841,7 @@ impl<'a> Context<'a> {
                     }
                 }
                 Value::Number(_) => {
-                    sum.add(&*value.as_ref());
+                    sum.add(&value);
                 }
                 _ => {}
             }
@@ -888,7 +887,7 @@ impl<'a> Context<'a> {
                         };
                     }
 
-                    (Filter::GroupedChild(ref vec), Some(tail)) => match *current.value {
+                    (Filter::GroupedChild(ref vec), Some(tail)) => match &current.value {
                         Value::Object(ref obj) => {
                             let mut target: Option<&Value> = None;
                             'ML: for target_key in vec.iter() {
@@ -918,14 +917,14 @@ impl<'a> Context<'a> {
                         _ => {}
                     },
 
-                    (Filter::MultiFilter(ref ast), Some(tail)) => match *current.value {
+                    (Filter::MultiFilter(ref ast), Some(tail)) => match &current.value {
                         Value::Object(ref _obj) => {
                             todo!("implement filter support for object");
                         }
                         Value::Array(ref array) => {
                             let mut results: Vec<Value> = vec![];
                             for value in array {
-                                if ast.borrow_mut().eval(&value) {
+                                if ast.eval(&value) {
                                     results.push(value.clone());
                                 };
                             }
@@ -942,7 +941,7 @@ impl<'a> Context<'a> {
                             todo!("handle unmatched arm of experimental filter");
                         }
                     },
-                    (Filter::Filter(ref cond), Some(tail)) => match *current.value {
+                    (Filter::Filter(ref cond), Some(tail)) => match &current.value {
                         Value::Object(ref _obj) => {
                             todo!("implement filter support for object");
                         }
@@ -967,7 +966,7 @@ impl<'a> Context<'a> {
                         }
                     },
 
-                    (Filter::ArrayIndex(ref index), Some(tail)) => match *current.value {
+                    (Filter::ArrayIndex(ref index), Some(tail)) => match &current.value {
                         Value::Array(ref array) => {
                             if *index < array.len() {
                                 let new_value = array[*index].clone();
@@ -982,7 +981,7 @@ impl<'a> Context<'a> {
                         _ => {}
                     },
 
-                    (Filter::Slice(ref from, ref to), Some(tail)) => match *current.value {
+                    (Filter::Slice(ref from, ref to), Some(tail)) => match &current.value {
                         Value::Array(ref array) => {
                             if array.len() >= *to && *from < *to {
                                 let new_slice = Value::Array(array[*from..*to].to_vec());
@@ -997,7 +996,7 @@ impl<'a> Context<'a> {
                         _ => {}
                     },
 
-                    (Filter::ArrayTo(ref index), Some(tail)) => match *current.value {
+                    (Filter::ArrayTo(ref index), Some(tail)) => match &current.value {
                         Value::Array(ref array) => {
                             if array.len() >= *index {
                                 let new_array = Value::Array(array[..*index].to_vec());
@@ -1012,7 +1011,7 @@ impl<'a> Context<'a> {
                         _ => {}
                     },
 
-                    (Filter::ArrayFrom(ref index), Some(tail)) => match *current.value {
+                    (Filter::ArrayFrom(ref index), Some(tail)) => match &current.value {
                         Value::Array(ref array) => {
                             if array.len() >= *index {
                                 let new_array = Value::Array(array[*index..].to_vec());
@@ -1027,7 +1026,7 @@ impl<'a> Context<'a> {
                         _ => {}
                     },
 
-                    (Filter::Pick(_), Some(tail)) => match *current.value {
+                    (Filter::Pick(_), Some(tail)) => match &current.value {
                         Value::Object(_) => {
                             let new_map = current.filters[0]
                                 .pick(&current.value, Some(&self))
@@ -1043,7 +1042,7 @@ impl<'a> Context<'a> {
                         _ => {}
                     },
 
-                    (Filter::AnyChild, Some(tail)) => match *current.value {
+                    (Filter::AnyChild, Some(tail)) => match &current.value {
                         Value::Object(ref obj) => {
                             push_to_stack_iter_or_produce!(self.results, self.stack, tail, obj);
                         }
@@ -1058,7 +1057,7 @@ impl<'a> Context<'a> {
                         _ => {}
                     },
 
-                    (Filter::Child(ref name), Some(tail)) => match *current.value {
+                    (Filter::Child(ref name), Some(tail)) => match &current.value {
                         Value::Object(ref obj) => match obj.into_iter().find(|(k, _)| *k == name) {
                             Some((_, v)) => {
                                 push_to_stack_or_produce!(
@@ -1082,7 +1081,7 @@ impl<'a> Context<'a> {
                     },
 
                     (Filter::DescendantChild(ref entry), Some(tail)) => match entry {
-                        FilterDescendant::Single(ref descendant) => match *current.value {
+                        FilterDescendant::Single(ref descendant) => match &current.value {
                             Value::Object(ref obj) => {
                                 for (k, v) in obj {
                                     let filters: &[Filter] = if k == descendant {
@@ -1092,10 +1091,10 @@ impl<'a> Context<'a> {
                                     };
 
                                     if filters.len() == 0 {
-                                        self.results.borrow_mut().push(Rc::new(v.clone()));
+                                        self.results.borrow_mut().push(v.clone());
                                     } else {
                                         self.stack.borrow_mut().push(StackItem::new(
-                                            Rc::new(v.clone()),
+                                            v.clone(),
                                             filters,
                                             self.stack.clone(),
                                         ));
@@ -1105,7 +1104,7 @@ impl<'a> Context<'a> {
                             Value::Array(ref array) => {
                                 for v in array {
                                     self.stack.borrow_mut().push(StackItem::new(
-                                        Rc::new(v.clone()),
+                                        v.clone(),
                                         current.filters,
                                         self.stack.clone(),
                                     ));
@@ -1114,7 +1113,7 @@ impl<'a> Context<'a> {
                             _ => {}
                         },
                         FilterDescendant::Pair(ref descendant, ref target_value) => {
-                            match *current.value {
+                            match &current.value {
                                 Value::Object(ref obj) => {
                                     let mut found_match = false;
                                     for (k, v) in obj {
@@ -1140,7 +1139,7 @@ impl<'a> Context<'a> {
                                                 .push(serde_json::Value::Object(obj.clone()));
                                         }
                                         self.stack.borrow_mut().push(StackItem::new(
-                                            Rc::new(v.clone()),
+                                            v.clone(),
                                             filters,
                                             self.stack.clone(),
                                         ));
@@ -1149,7 +1148,7 @@ impl<'a> Context<'a> {
                                 Value::Array(ref array) => {
                                     for v in array {
                                         self.stack.borrow_mut().push(StackItem::new(
-                                            Rc::new(v.clone()),
+                                            v.clone(),
                                             current.filters,
                                             self.stack.clone(),
                                         ));
@@ -1260,10 +1259,7 @@ mod test {
         let mut ctx = Context::new(v, &filters);
         let _ = ctx.collect();
 
-        assert_eq!(
-            *ctx.results.borrow().clone(),
-            vec![Rc::new(Value::String("value".to_string()))]
-        );
+        assert_eq!(ctx.results.take(), vec![Value::String("value".to_string())]);
     }
 
     #[test]
@@ -1325,10 +1321,8 @@ mod test {
         .expect("unable to parse");
 
         assert_eq!(
-            *values.0.borrow().clone(),
-            vec![Rc::new(
-                serde_json::json! {{"a": "object_a", "object": "final_value"}}
-            )]
+            values.0,
+            vec![serde_json::json! {{"a": "object_a", "object": "final_value"}}]
         );
     }
 
@@ -1357,10 +1351,8 @@ mod test {
         .expect("unable to parse");
 
         assert_eq!(
-            *values.0.borrow().clone(),
-            vec![Rc::new(
-                serde_json::json! {{"descendant": "final_value", "foo": "object_a"}}
-            )]
+            values.0,
+            vec![serde_json::json! {{"descendant": "final_value", "foo": "object_a"}}]
         );
     }
 
@@ -1377,10 +1369,7 @@ mod test {
         let values = Path::collect(serde_json::from_str(&data).unwrap(), ">/values/[1]")
             .expect("unable to parse");
 
-        assert_eq!(
-            *values.0.borrow().clone(),
-            vec![Rc::new(serde_json::json!(2))],
-        );
+        assert_eq!(values.0, vec![serde_json::json!(2)],);
     }
 
     #[test]
@@ -1390,11 +1379,8 @@ mod test {
         let values =
             Path::collect(data, ">/entry/('foo' | 'bar' | 'another')").expect("unable to parse");
 
-        assert_eq!(values.0.borrow().len(), 1);
-        assert_eq!(
-            values.0.borrow()[0],
-            Rc::new(Value::String(String::from("word")))
-        );
+        assert_eq!(values.0.len(), 1);
+        assert_eq!(values.0[0], Value::String(String::from("word")));
     }
 
     #[test]
@@ -1412,12 +1398,12 @@ mod test {
         let values = Path::collect(data, ">/values/#filter('is_eligable' == true)")
             .expect("unable to parse");
 
-        assert_eq!(values.0.borrow().len(), 1);
+        assert_eq!(values.0.len(), 1);
         assert_eq!(
-            values.0.borrow()[0],
-            Rc::new(Value::Array(vec![
+            values.0[0],
+            Value::Array(vec![
                 serde_json::json!({"name": "foo", "is_eligable": true})
-            ]))
+            ])
         );
     }
 
@@ -1434,8 +1420,8 @@ mod test {
         let values = Path::collect(data, ">/..priority/#len");
         assert_eq!(values.is_ok(), true);
         assert_eq!(
-            *values.unwrap().0.borrow(),
-            vec![Rc::new(Value::Number(serde_json::Number::from(2)))]
+            values.unwrap().0,
+            vec![Value::Number(serde_json::Number::from(2))]
         );
     }
 
@@ -1445,62 +1431,50 @@ mod test {
         let values = Path::collect(data, ">/entry/values/#filter('priority' == 2)");
         assert_eq!(values.is_ok(), true);
         assert_eq!(
-            *values.unwrap().0.borrow(),
-            vec![Rc::new(Value::Array(vec![
+            values.unwrap().0,
+            vec![Value::Array(vec![
                 serde_json::json!({"name": "steam", "priority": 2})
-            ]))]
+            ])]
         );
     }
 
     #[test]
     fn test_truth() {
         let data = serde_json::json!({"entry": {"values": [{"name": "gearbox", "priority": 10, "truth_a": true, "truth_b": false, "truth_c": false, "truth_d": true}, {"name": "steam", "priority": 2, "truth_a": false, "truth_b": true, "truth_c": false, "truth_d": true}]}});
-        let tests: Vec<(String, Vec<Rc<Value>>)> = vec![
-            (
-                ">/..truth_a/#all".to_string(),
-                vec![Rc::new(Value::Bool(false))],
-            ),
-            (
-                ">/..truth_b/#all".to_string(),
-                vec![Rc::new(Value::Bool(false))],
-            ),
-            (
-                ">/..truth_c/#all".to_string(),
-                vec![Rc::new(Value::Bool(false))],
-            ),
-            (
-                ">/..truth_d/#all".to_string(),
-                vec![Rc::new(Value::Bool(true))],
-            ),
+        let tests: Vec<(String, Vec<Value>)> = vec![
+            (">/..truth_a/#all".to_string(), vec![Value::Bool(false)]),
+            (">/..truth_b/#all".to_string(), vec![Value::Bool(false)]),
+            (">/..truth_c/#all".to_string(), vec![Value::Bool(false)]),
+            (">/..truth_d/#all".to_string(), vec![Value::Bool(true)]),
         ];
 
         for (path, expect) in tests.iter() {
             let values = Path::collect(data.clone(), path).unwrap();
-            assert_eq!(*values.0.borrow(), *expect);
+            assert_eq!(values.0, *expect);
         }
     }
 
     #[test]
     fn test_float_filter_evaluation() {
         let data = serde_json::json!({"entry": {"values": [{"name": "gearbox", "some_float": 10.1112}, {"name": "steam", "some_float": 2.48}]}});
-        let tests: Vec<(String, Vec<Rc<Value>>)> = vec![
+        let tests: Vec<(String, Vec<Value>)> = vec![
             (
                 ">/entry/values/#filter('some_float' >= 10.1112)".to_string(),
-                vec![Rc::new(Value::Array(vec![
+                vec![Value::Array(vec![
                     serde_json::json!({"name": "gearbox", "some_float": 10.1112}),
-                ]))],
+                ])],
             ),
             (
                 ">/entry/values/#filter('some_float' == 2.48)".to_string(),
-                vec![Rc::new(Value::Array(vec![
+                vec![Value::Array(vec![
                     serde_json::json!({"name": "steam", "some_float": 2.48}),
-                ]))],
+                ])],
             ),
         ];
 
         for (path, expect) in tests.iter() {
             let values = Path::collect(data.clone(), path).unwrap();
-            assert_eq!(*values.0.borrow(), *expect);
+            assert_eq!(values.0, *expect);
         }
     }
 
@@ -1510,11 +1484,11 @@ mod test {
             serde_json::json!({"entry": {"values": [{"name": "gearbox"}, {"name": "steam"}]}});
         let result = Path::collect(data, ">/entry/values/#reverse()").unwrap();
         assert_eq!(
-            *result.0.borrow(),
-            vec![Rc::new(Value::Array(vec![
+            result.0,
+            vec![Value::Array(vec![
                 serde_json::json!({"name": "steam"}),
                 serde_json::json!({"name": "gearbox"})
-            ]))]
+            ])]
         );
     }
 
@@ -1527,11 +1501,11 @@ mod test {
         )
         .unwrap();
         assert_eq!(
-            *result.0.borrow(),
-            vec![Rc::new(Value::Array(vec![
+            result.0,
+            vec![Value::Array(vec![
                 serde_json::json!({"field": "field", "name": "tool", "release": 2000}),
                 serde_json::json!({"field": "seal", "name": "pneuma", "release": 2100})
-            ]))]
+            ])]
         );
     }
 
@@ -1541,11 +1515,11 @@ mod test {
             serde_json::json!({"entry": {"values": [{"name": "gearbox"}, {"name": "steam"}]}});
         let result = Path::collect(data, ">/..values/#map(x: x.name)").unwrap();
         assert_eq!(
-            *result.0.borrow(),
-            vec![Rc::new(Value::Array(vec![
+            result.0,
+            vec![Value::Array(vec![
                 Value::String("gearbox".to_string()),
                 Value::String("steam".to_string()),
-            ]))]
+            ])]
         );
     }
 
@@ -1554,11 +1528,11 @@ mod test {
         let data = serde_json::json!({"entry": {"values": [{"name": "gearbox"}, {"name": "gearbox", "test": "2000"}]}});
         let result = Path::collect(data, ">/..('name'='gearbox')").unwrap();
         assert_eq!(
-            *result.0.borrow(),
-            vec![Rc::new(Value::Array(vec![
+            result.0,
+            vec![Value::Array(vec![
                 serde_json::json!({"name": "gearbox"}),
                 serde_json::json!({"name": "gearbox", "test": "2000"})
-            ]))]
+            ])]
         );
     }
 }
