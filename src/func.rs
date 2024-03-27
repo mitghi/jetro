@@ -277,18 +277,18 @@ impl MapFn {
             Value::Array(ref array) => {
                 for item in array {
                     let result = Path::collect_with_filter(item.clone(), &subpath);
-                    if result.0.borrow().len() == 0 {
+                    if result.0.len() == 0 {
                         return Err(Error::FuncEval(
                             "map statement do not evaluates to anything".to_owned(),
                         ));
                     }
-                    let head = result.0.borrow()[0].clone();
-                    output.push((*head).clone());
+                    let head = result.0[0].clone();
+                    output.push(head.clone());
                 }
             }
             _ => {}
         };
-        return Ok(output);
+        Ok(output)
     }
 }
 
