@@ -1171,8 +1171,57 @@ impl<'a> Context<'a> {
                                 _ => {}
                             }
                         }
+                        _ => {}
                     },
+                    (Filter::Assertion(assertion), Some(tail)) => match assertion {
+                        AssertionChild::Pair(ref left, ref op, ref right) => match &current.value {
+                            Value::Object(ref obj) => match obj.get(left) {
+                                Some(result) => match &result {
+                                    Value::String(some_right) => match op {
+                                        FilterOp::Eq => {
+                                            println!("left, someright: {}, {}", &left, &some_right);
+                                            if *right == *some_right {
+                                                self.step_results
+                                                    .borrow_mut()
+                                                    .push(serde_json::Value::Bool(true));
+                                                self.stack.borrow_mut().push(StackItem::new(
+                                                    current.value.clone(),
+                                                    tail,
+                                                    self.stack.clone(),
+                                                ));
+                                            }
+                                        }
+                                        FilterOp::NotEq => {
+                                            if *right != *some_right {
+                                                self.step_results
+                                                    .borrow_mut()
+                                                    .push(serde_json::Value::Bool(false));
+                                                self.stack.borrow_mut().push(StackItem::new(
+                                                    current.value.clone(),
+                                                    tail,
+                                                    self.stack.clone(),
+                                                ));
+                                            }
+                                        }
+                                        _ => {
+                                            todo!("operator not implemented");
+                                        }
+                                    },
+                                    _ => {
+                                        todo!("obj type not supported yet");
+                                    }
+                                },
 
+                                _ => {}
+                            },
+
+                            Value::Array(ref array) => {}
+                            _ => {
+                                todo!("type not supported yet");
+                            }
+                        },
+                        _ => {}
+                    },
                     _ => {}
                 },
                 _ => {}
@@ -1548,5 +1597,12 @@ mod test {
                 serde_json::json!({"name": "gearbox", "test": "2000"})
             ])]
         );
+    }
+
+    #[test]
+    fn test_assertion() {
+        let data = serde_json::json!({"entry": {"values": [{"name": "gearbox"}, {"name": "gearbox", "test": "2000"}]}});
+        let result = Path::collect(data, ">/entry/values/[0]/('name'='gearbox')").unwrap();
+        assert_eq!(result.0, vec![Value::Bool(true),])
     }
 }
