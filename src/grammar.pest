@@ -1,54 +1,57 @@
-alpha                         = _{ 'a'..'z' | 'A'..'Z' }
-digit                         = _{ '0'..'9' }
-number                        =  { digit+ }
-float                         =  { digit+ ~ "." ~ digit+ }
-special_charaters             = _{ "_" | "-" | "\\" }
-whitespace                    = _{ (" " | "\n")* }
-colon                         = _{ ":" }
-lbracket                      = _{ "[" }
-rbracket                      = _{ "]" }
-lparen                        = _{ "(" }
-rparen                        = _{ ")" }
-parenPair                     = _{ lparen ~ rparen }
-at                            = _{ "@" }
-path                          =  { ">" }
-reverse_path                  =  { "<" }
-asterisk                      = _{ "*" }
-slash                         =  { "/" }
-double_dot                    = _{ ".." }
-ident                         =  { (alpha | digit | special_charaters | "_")+ }
-_as                           = _{ "as" }
-_arrow                        = _{ "->" }
-as                            =  { (" ")* ~ _as ~ (" ")* ~ literal }
-_asDeref                      = _{ "as*" }
-_arrowDeref                   = _{ "->*" }
-asDeref                       =  { (" ")* ~ _asDeref ~ (" ")* ~ literal }
-arrow                         =  { (" ")* ~ _arrow ~ (" ")* ~ literal }
-arrowDeref                    =  { (" ")* ~ _arrowDeref ~ (" ")* ~ literal }
-sharp                         = _{ "#" }
-dot                           = _{ "." }
-greater                       =  { ">" }
-less                          =  { "<" }
-greater_equal                 =  { ">=" }
-less_equal                    =  { "<=" }
-equal                         =  { "==" }
-almost                        =  { "~=" }
-not_euql                      =  { "!=" }
-cmp                           =  { almost | not_euql | greater_equal | less_equal | equal | greater | less }
-true_bool                     =  { "true" }
-false_bool                    =  { "false" }
-truthy                        =  { true_bool | false_bool }
-string                        =  { (alpha | digit | special_charaters | " " | "%" | "{" | "}" | "\\")+ ~ (whitespace ~ string)* }
-literal                       =  { "'" ~ string ~ "'" }
-literal_keyed                 =  { literal ~ as? }
-grouped_literal               =  { lparen ~ whitespace ~ literal ~ (whitespace ~ ("|") ~ whitespace ~ literal)* ~ rparen }
-and                           =  { "and" }
-or                            =  { "or" }
-logical_cmp                   =  { and | or }
-child                         =  { slash ~ ident }
+alpha             = _{ 'a'..'z' | 'A'..'Z' }
+digit             = _{ '0'..'9' }
+number            =  { digit+ }
+float             =  { digit+ ~ "." ~ digit+ }
+special_charaters = _{ "_" | "-" | "\\" }
+whitespace        = _{ (" " | "\n")* }
+colon             = _{ ":" }
+lbracket          = _{ "[" }
+rbracket          = _{ "]" }
+lparen            = _{ "(" }
+rparen            = _{ ")" }
+parenPair         = _{ lparen ~ rparen }
+at                = _{ "@" }
+path              =  { ">" }
+reverse_path      =  { "<" }
+asterisk          = _{ "*" }
+slash             =  { "/" }
+double_dot        = _{ ".." }
+ident             =  { (alpha | digit | special_charaters | "_")+ }
+_as               = _{ "as" }
+_arrow            = _{ "->" }
+as                =  { (" ")* ~ _as ~ (" ")* ~ literal }
+_asDeref          = _{ "as*" }
+_arrowDeref       = _{ "->*" }
+asDeref           =  { (" ")* ~ _asDeref ~ (" ")* ~ literal }
+arrow             =  { (" ")* ~ _arrow ~ (" ")* ~ literal }
+arrowDeref        =  { (" ")* ~ _arrowDeref ~ (" ")* ~ literal }
+sharp             = _{ "#" }
+dot               = _{ "." }
+greater           =  { ">" }
+less              =  { "<" }
+greater_equal     =  { ">=" }
+less_equal        =  { "<=" }
+equal             =  { "==" }
+almost            =  { "~=" }
+not_euql          =  { "!=" }
+eq                =  { "=" }
+cmp               =  { almost | not_euql | greater_equal | less_equal | equal | greater | less | eq }
+true_bool         =  { "true" }
+false_bool        =  { "false" }
+truthy            =  { true_bool | false_bool }
+string            =  { (alpha | digit | special_charaters | " " | "%" | "{" | "}" | "\\")+ ~ (whitespace ~ string)* }
+literal           =  { "'" ~ string ~ "'" }
+literal_keyed     =  { literal ~ as? }
+grouped_literal   =  { lparen ~ whitespace ~ literal ~ (whitespace ~ ("|") ~ whitespace ~ literal)* ~ rparen }
+and               =  { "and" }
+or                =  { "or" }
+logical_cmp       =  { and | or }
+child             =  { slash ~ ident }
+
 any_child                     =  { slash ~ asterisk }
-keyed_ident                   =  { literal ~ whitespace ~ "=" ~ whitespace ~ literal }
-ident_or_keyed                =  { (lparen ~ keyed_ident ~ rparen) | ident }
+keyed_ident                   =  { literal ~ whitespace ~ "=" ~ whitespace ~ (literal | truthy | float | number) }
+keyed_ident_with_logical_op   =  { literal ~ whitespace ~ cmp ~ whitespace ~ (literal | truthy | float | number) }
+ident_or_keyed                =  { (lparen ~ keyed_ident_with_logical_op ~ rparen) | ident }
 descendant_child              =  { slash ~ double_dot ~ ident_or_keyed }
 grouped_any                   =  { slash ~ grouped_literal }
 array_index                   =  { slash ~ "[" ~ number ~ "]" }
@@ -76,7 +79,9 @@ filterFn                      =  { slash ~ filter }
 methodCall                    =  { ident ~ "()" }
 pathExpr                      =  { ident ~ (dot ~ (pure_index | methodCall | ident))* }
 mapStmt                       =  { ident ~ whitespace ~ colon ~ whitespace ~ pathExpr }
+slash_silent                  = _{ slash }
+assertion_child               =  { slash ~ ident_or_keyed }
 
 expression = {
-    (path | reverse_path) ~ whitespace ~ (whitespace ~ pickFn ~ whitespace | filterFn ~ whitespace | grouped_any ~ whitespace | child ~ whitespace | any_child ~ whitespace | descendant_child ~ whitespace | array_index ~ whitespace | slice ~ whitespace | array_to ~ whitespace | array_from ~ whitespace | fn ~ whitespace)* ~ EOI
+    (path | reverse_path) ~ whitespace ~ (whitespace ~ pickFn ~ whitespace | filterFn ~ whitespace | grouped_any ~ whitespace | child ~ whitespace | any_child ~ whitespace | descendant_child ~ whitespace | array_index ~ whitespace | slice ~ whitespace | array_to ~ whitespace | array_from ~ whitespace | fn ~ whitespace | assertion_child ~ whitespace)* ~ EOI
 }

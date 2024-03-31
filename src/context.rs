@@ -117,7 +117,7 @@ impl FilterLogicalOp {
 impl FilterOp {
     pub fn get(input: &str) -> Option<Self> {
         match input {
-            "==" => Some(Self::Eq),
+            "==" | "=" => Some(Self::Eq),
             "<=" => Some(Self::Lq),
             ">=" => Some(Self::Gq),
             "<" => Some(Self::Less),
@@ -217,6 +217,11 @@ pub enum FilterDescendant {
     Pair(String, String),
 }
 
+#[derive(Debug, PartialEq, Clone)]
+pub enum AssertionChild {
+    Pair(String, FilterOp, String),
+}
+
 /// Filter contains operations that transform, match
 /// or search the input based on structure generated
 /// the from parser.
@@ -225,6 +230,7 @@ pub enum Filter {
     Root,
     AnyChild,
     Child(String),
+    Assertion(AssertionChild),
     DescendantChild(FilterDescendant),
     Pick(Vec<PickFilterInner>),
     ArrayIndex(usize),
@@ -1532,7 +1538,7 @@ mod test {
     }
 
     #[test]
-    fn test_descendant_keyed() {
+    fn test_descendant_keeyd() {
         let data = serde_json::json!({"entry": {"values": [{"name": "gearbox"}, {"name": "gearbox", "test": "2000"}]}});
         let result = Path::collect(data, ">/..('name'='gearbox')").unwrap();
         assert_eq!(

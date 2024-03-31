@@ -1,11 +1,12 @@
 //! Module containing parser for jetro.
 
-use std::{rc::Rc, cell::RefCell};
 use pest::iterators::Pair;
+use std::cell::RefCell;
+use std::rc::Rc;
 
 use crate::context::{
-    Filter, FilterAST, FilterDescendant, FilterInner, FilterInnerRighthand, FilterLogicalOp,
-    FilterOp, Func, FuncArg, MapAST, MapBody, PickFilterInner,
+    AssertionChild, Filter, FilterAST, FilterDescendant, FilterInner, FilterInnerRighthand,
+    FilterLogicalOp, FilterOp, Func, FuncArg, MapAST, MapBody, PickFilterInner,
 };
 
 use crate::*;
@@ -405,8 +406,28 @@ pub(crate) fn parse<'a>(input: &'a str) -> Result<Vec<Filter>, pest::error::Erro
                         let rstr = rnode.next().unwrap().as_str().to_owned();
                         actions.push(Filter::DescendantChild(FilterDescendant::Pair(lstr, rstr)));
                     }
+
+                    Rule::keyed_ident_with_logical_op => {
+                        let mut node = node.into_inner();
+                        let mut lnode = node.next().unwrap().into_inner();
+                        let operator_node = node.next().unwrap().into_inner().as_str().to_owned();
+                        // TODO(): change type of filter, add operator
+                        let _ = match FilterOp::get(&operator_node) {
+                            Some(result) => result,
+                            None => {
+                                todo!(
+                                    "not implemented yet, handle this casee, operator: {:?}",
+                                    &operator_node
+                                );
+                            }
+                        };
+                        let mut rnode = node.next().unwrap().into_inner();
+                        let lstr = lnode.next().unwrap().as_str().to_owned();
+                        let rstr = rnode.next().unwrap().as_str().to_owned();
+                        actions.push(Filter::DescendantChild(FilterDescendant::Pair(lstr, rstr)));
+                    }
                     _ => {
-                        panic!("unreachable")
+                        panic!("unreachable {:?}", &node);
                     }
                 }
             }
@@ -414,7 +435,36 @@ pub(crate) fn parse<'a>(input: &'a str) -> Result<Vec<Filter>, pest::error::Erro
                 let ident = token.into_inner().nth(1).unwrap().as_str().to_owned();
                 actions.push(Filter::Child(ident));
             }
-            _ => {}
+            Rule::assertion_child => {
+                let entry = token.into_inner().nth(1).unwrap();
+                for v in entry.into_inner() {
+                    let rule = v.as_rule();
+                    match rule {
+                        Rule::keyed_ident_with_logical_op => {
+                            let mut node = v.into_inner();
+                            let left = node.next().unwrap().into_inner().as_str().to_owned();
+                            let op = node.next().unwrap().into_inner().as_str();
+                            let operator = match FilterOp::get(op) {
+                                Some(result) => result,
+                                _ => {
+                                    todo!("handle unknown operator");
+                                }
+                            };
+                            let right = node.next().unwrap().into_inner().as_str().to_owned();
+                            actions.push(Filter::Assertion(AssertionChild::Pair(
+                                left, operator, right,
+                            )));
+                        }
+                        _ => {
+                            println!("whatever");
+                        }
+                    };
+                }
+            }
+            Rule::EOI => {}
+            _ => {
+                panic!("unknown token: {}", &token);
+            }
         }
     }
     Ok(actions)
@@ -982,15 +1032,15 @@ mod test {
     fn parse_with_line_break() {
         let actions = parse(
             r#">/#pick(
-  >/get
-   /..recursive
-   /value
-   /#filter('some_key' > 10) as 'values',
+      >/get
+       /..recursive
+       /value
+       /#filter('some_key' > 10) as 'values',
 
-  >/..preferences
-   /#map(x: x.preference) as 'preferences'
-)
-"#,
+      >/..preferences
+       /#map(x: x.preference) as 'preferences'
+    )
+    "#,
         )
         .unwrap();
 
@@ -1043,6 +1093,38 @@ mod test {
                         ],
                     }
                 ]),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_assertion_child() {
+        // - expression
+        //   - path: ">"
+        //   - child
+        //     - slash: "/"
+        //     - ident: "path"
+        //   - assertion_child
+        //     - slash: "/"
+        //     - ident_or_keyed > keyed_ident_with_logical_op
+        //       - literal > string: "a"
+        //       - cmp > eq: "="
+        //       - literal > string: "xyz"
+        //   - EOI: ""
+
+        let actions = parse(">/path/('a'='xyz')").unwrap();
+        println!("actions: {:?}", &actions);
+
+        assert_eq!(
+            actions,
+            vec![
+                Filter::Root,
+                Filter::Child("path".to_string()),
+                Filter::Assertion(AssertionChild::Pair(
+                    "a".to_string(),
+                    FilterOp::Eq,
+                    "xyz".to_string()
+                )),
             ]
         );
     }
