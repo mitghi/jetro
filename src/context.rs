@@ -138,6 +138,14 @@ pub enum FormatOp {
     },
 }
 
+/// ObjKey represents the key of a field in an object-construction literal.
+/// Keys are either static string literals or dynamically computed expressions.
+#[derive(Debug, PartialEq, Clone)]
+pub enum ObjKey {
+    Static(String),
+    Dynamic(Vec<Filter>),
+}
+
 /// PickFilterInner represents arguments
 /// of pick function.
 #[derive(Debug, PartialEq, Clone)]
@@ -241,6 +249,12 @@ pub enum Filter {
     MultiFilter(FilterAST),
     GroupedChild(Vec<String>),
     Function(Func),
+    /// `@` — current pipeline item (behaves like Root within its evaluation context).
+    CurrentItem,
+    /// `>{ "key": expr, ... }` — construct a JSON object; keys and values are expressions.
+    ObjectConstruct(Vec<(ObjKey, Vec<Filter>)>),
+    /// `>[expr, expr, ...]` — construct a JSON array from expressions.
+    ArrayConstruct(Vec<Vec<Filter>>),
 }
 
 /// StackItem represents an abstract step
@@ -258,7 +272,7 @@ struct StackItem<'a> {
 /// Context binds components required for traversing
 /// and evaluating a jetro expression.
 pub(crate) struct Context<'a> {
-    root: Value,
+    pub(crate) root: Value,
     stack: Rc<RefCell<Vec<StackItem<'a>>>>,
     registry: Rc<RefCell<dyn crate::func::Registry>>,
     pub results: Rc<RefCell<Vec<Value>>>,
@@ -308,9 +322,14 @@ pub enum Error {
 pub enum FuncArg {
     None,
     Key(String),
+    Number(f64),
     Ord(Filter),
     SubExpr(Vec<Filter>),
     MapStmt(MapAST),
+    ObjConstruct(Vec<(ObjKey, Vec<Filter>)>),
+    ArrConstruct(Vec<Vec<Filter>>),
+    /// A filter condition used as a function argument (e.g. for `#find`).
+    FilterExpr(FilterAST),
 }
 
 /// Func represents abstract structure of
@@ -1212,6 +1231,7 @@ impl<'a> Context<'a> {
                                     }
                                 },
 
+<<<<<<< Updated upstream
                                 _ => {}
                             },
 
@@ -1222,6 +1242,75 @@ impl<'a> Context<'a> {
                         },
                         _ => {}
                     },
+=======
+                    (Filter::CurrentItem, Some(tail)) => {
+                        self.stack.borrow_mut().push(StackItem::new(
+                            current.value,
+                            tail,
+                            self.stack.clone(),
+                        ));
+                    }
+
+                    (Filter::ObjectConstruct(ref fields), Some(tail)) => {
+                        let mut map = serde_json::Map::new();
+                        for (obj_key, value_filters) in fields {
+                            // Resolve key
+                            let key: String = match obj_key {
+                                ObjKey::Static(s) => s.clone(),
+                                ObjKey::Dynamic(key_filters) => {
+                                    let r = Path::collect_with_filter(
+                                        current.value.clone(),
+                                        key_filters,
+                                    );
+                                    match r.0.into_iter().next() {
+                                        Some(Value::String(s)) => s,
+                                        Some(other) => {
+                                            // strip surrounding quotes that serde adds
+                                            let raw = other.to_string();
+                                            let raw = raw.trim_matches('"');
+                                            raw.to_string()
+                                        }
+                                        None => continue,
+                                    }
+                                }
+                            };
+                            // Resolve value
+                            let r = Path::collect_with_filter(
+                                current.value.clone(),
+                                value_filters,
+                            );
+                            if let Some(v) = r.0.into_iter().next() {
+                                map.insert(key, v);
+                            }
+                        }
+                        push_to_stack_or_produce!(
+                            self.results,
+                            self.stack,
+                            tail,
+                            Value::Object(map)
+                        );
+                    }
+
+                    (Filter::ArrayConstruct(ref elems), Some(tail)) => {
+                        let mut arr: Vec<Value> = Vec::new();
+                        for elem_filters in elems {
+                            let r = Path::collect_with_filter(
+                                current.value.clone(),
+                                elem_filters,
+                            );
+                            if let Some(v) = r.0.into_iter().next() {
+                                arr.push(v);
+                            }
+                        }
+                        push_to_stack_or_produce!(
+                            self.results,
+                            self.stack,
+                            tail,
+                            Value::Array(arr)
+                        );
+                    }
+
+>>>>>>> Stashed changes
                     _ => {}
                 },
                 _ => {}

@@ -3,6 +3,7 @@ digit             = _{ '0'..'9' }
 number            =  { digit+ }
 float             =  { digit+ ~ "." ~ digit+ }
 special_charaters = _{ "_" | "-" | "\\" }
+<<<<<<< Updated upstream
 whitespace        = _{ (" " | "\n")* }
 colon             = _{ ":" }
 lbracket          = _{ "[" }
@@ -81,7 +82,125 @@ pathExpr                      =  { ident ~ (dot ~ (pure_index | methodCall | ide
 mapStmt                       =  { ident ~ whitespace ~ colon ~ whitespace ~ pathExpr }
 slash_silent                  = _{ slash }
 assertion_child               =  { slash ~ ident_or_keyed }
+=======
+whitespace = _{ (" "| "\n") * }
+colon = _{":"}
+lbracket = _{"["}
+rbracket = _{"]"}
+lbrace = _{ "{" }
+rbrace = _{ "}" }
+lparen = _{"("}
+rparen = _{")"}
+parenPair = _{ lparen ~ rparen}
+at = _{ "@" }
+at_sym = { "@" }
+path = { ">" }
+reverse_path = { "<" }
+asterisk = _{ "*" }
+slash = { "/" }
+double_dot = _{ ".." }
+ident = { (alpha | digit | special_charaters | "_")+ }
+_as = _{ "as" }
+_arrow = _{ "->" }
+as = { (" ")* ~ _as ~ (" ")* ~ literal }
+_asDeref = _{ "as*"}
+_arrowDeref = _{"->*"}
+asDeref = { (" ")* ~ _asDeref ~ (" ")* ~ literal }
+arrow = { (" ")* ~ _arrow ~ (" ")* ~ literal }
+arrowDeref = { (" ")* ~ _arrowDeref ~ (" ")* ~ literal }
+sharp = _{ "#" }
+dot = _{ "." }
+greater = { ">" }
+less = { "<" }
+greater_equal = { ">=" }
+less_equal = { "<=" }
+equal = { "==" }
+almost = { "~=" }
+not_euql = { "!=" }
+cmp = { almost | not_euql | greater_equal | less_equal | equal | greater | less }
+true_bool = { "true" }
+false_bool = { "false" }
+truthy = { true_bool | false_bool }
+null_lit = { "null" }
+string = { (alpha | digit | special_charaters | " " | "%" | "{" | "}" | "\\" )+ ~ (whitespace ~ string)* }
+literal = { "'" ~ string ~ "'" }
+literal_keyed = { literal ~ as? }
+grouped_literal = { lparen ~ whitespace ~ literal ~ (whitespace ~ ("|") ~ whitespace ~ literal)* ~ rparen }
+and = { "and" }
+or = { "or" }
+logical_cmp = { and | or }
+child = { slash ~ ident }
+any_child = { slash ~ asterisk  }
+keyed_ident = { literal ~ whitespace ~ "=" ~ whitespace ~ literal }
+ident_or_keyed = { ( lparen ~ keyed_ident ~ rparen )| ident }
+descendant_child = { slash ~ double_dot ~ ident_or_keyed }
+grouped_any = { slash ~ grouped_literal }
+array_index = { slash ~ "[" ~ number ~ "]" }
+pure_index = {"[" ~ number ~ "]"}
+slice = { slash ~ "[" ~ number ~ ":" ~ number ~ "]" }
+array_to = { slash ~ "[:" ~ number ~ "]" }
+array_from = { slash ~ "[" ~ number ~ ":]" }
+pick = {
+    sharp ~ "pick"  ~
+    "(" ~ whitespace ~ (literal_keyed | (sub_expression_keyed | sub_expression_keyed_reversed) ) ~ whitespace ~
+    (whitespace ~ (",") ~ whitespace ~ (literal_keyed | (sub_expression_keyed | sub_expression_keyed_reversed) ))* ~
+    whitespace ~ ")"
+}
+sub_expression = { path ~ (pickFn ~ whitespace| filterFn ~ whitespace| child ~ whitespace| any_child ~ whitespace| grouped_any ~ whitespace| descendant_child ~ whitespace| array_index ~ whitespace| slice ~ whitespace| array_to ~ whitespace| array_from ~ whitespace| fn ~ whitespace)* }
+sub_expression_reversed = { reverse_path ~ (pickFn | filterFn | grouped_any | child | any_child | descendant_child | array_index | slice | array_to | array_from | fn )* }
+sub_expression_keyed = { sub_expression ~ as? }
+sub_expression_keyed_reversed = { sub_expression_reversed ~ as? }
+pickFn = { slash ~ pick }
+fnLit = { literal }
+fnNum = { float | number }
+fnExpr = { sub_expression }
+
+// @ current-item path: usable as function arg or object field value
+at_expr = { at_sym ~ (child ~ whitespace | any_child ~ whitespace | fn ~ whitespace | descendant_child ~ whitespace | array_index ~ whitespace | slice ~ whitespace | array_to ~ whitespace | array_from ~ whitespace | pickFn ~ whitespace | filterFn ~ whitespace)* }
+
+// function call with extended argument types
+fnArg = { obj_construct | arr_construct | fnNum | at_expr | mapStmt | filterStmtCollection | fnLit | fnExpr }
+fnCall = { sharp ~ ident ~ (whitespace ~ lparen ~ (fnArg ~ whitespace ~ (("," ~ whitespace ~ fnArg ~ whitespace))*)? ~ rparen ~ whitespace)? ~ (arrow | arrowDeref)? }
+fn = {slash ~ fnCall}
+filterStmt = { ( filter_elem ~ whitespace ~ cmp ~ whitespace ~ (float | truthy | literal | number ) ) }
+filterStmtCollection = { filterStmt ~ whitespace ~ (logical_cmp ~ whitespace ~ filterStmt~ whitespace)*  }
+filter = { sharp ~ "filter" ~ lparen ~ whitespace ~ ( filterStmt ~ whitespace ~ (logical_cmp ~ whitespace ~ filterStmt~ whitespace)* ) ~ whitespace ~ rparen }
+filter_elem = { literal }
+filterFn = { slash ~ filter }
+methodCall = {ident ~ "()"}
+pathExpr = { ident ~  (dot ~ (pure_index|methodCall|ident))* }
+mapStmt = { ident ~ whitespace ~ colon ~ whitespace ~ pathExpr }
+>>>>>>> Stashed changes
+
+// ── Object construction ────────────────────────────────────────────────────────
+// >{ "static_key": >/expr, [>/key_expr]: >/val_expr }
+// Static keys accept both single-quoted ('key') and double-quoted ("key") literals.
+dq_string       = { (alpha | digit | special_charaters | " " | "'" | "%" | "\\" )+ }
+dq_literal      = { "\"" ~ dq_string ~ "\"" }
+obj_static_key  = { dq_literal | literal }
+obj_dynamic_key = { lbracket ~ whitespace ~ (at_expr | sub_expression) ~ whitespace ~ rbracket }
+obj_key         = { obj_dynamic_key | obj_static_key }
+obj_field_val   = { obj_construct | arr_construct | at_expr | sub_expression }
+obj_field       = { obj_key ~ whitespace ~ colon ~ whitespace ~ obj_field_val }
+obj_construct   = { path ~ lbrace ~ whitespace ~ obj_field ~ (whitespace ~ "," ~ whitespace ~ obj_field)* ~ whitespace ~ rbrace }
+
+// ── Array construction ─────────────────────────────────────────────────────────
+// >[>/expr1, >/expr2, ...]
+arr_elem      = { obj_construct | arr_construct | at_expr | sub_expression }
+arr_construct = { path ~ lbracket ~ whitespace ~ arr_elem ~ (whitespace ~ "," ~ whitespace ~ arr_elem)* ~ whitespace ~ rbracket }
 
 expression = {
+<<<<<<< Updated upstream
     (path | reverse_path) ~ whitespace ~ (whitespace ~ pickFn ~ whitespace | filterFn ~ whitespace | grouped_any ~ whitespace | child ~ whitespace | any_child ~ whitespace | descendant_child ~ whitespace | array_index ~ whitespace | slice ~ whitespace | array_to ~ whitespace | array_from ~ whitespace | fn ~ whitespace | assertion_child ~ whitespace)* ~ EOI
+=======
+    (
+        obj_construct |
+        arr_construct |
+        (
+            (path | at_sym | reverse_path) ~ whitespace ~
+            (whitespace ~ pickFn ~ whitespace | filterFn ~ whitespace | grouped_any ~ whitespace | child ~ whitespace | any_child ~ whitespace | descendant_child ~ whitespace | array_index ~ whitespace | slice ~ whitespace | array_to ~ whitespace | array_from ~ whitespace | fn ~ whitespace)*
+        )
+    ) ~
+    EOI
+>>>>>>> Stashed changes
 }
