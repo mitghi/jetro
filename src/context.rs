@@ -225,11 +225,6 @@ pub enum FilterDescendant {
     Pair(String, String),
 }
 
-#[derive(Debug, PartialEq, Clone)]
-pub enum AssertionChild {
-    Pair(String, FilterOp, String),
-}
-
 /// Filter contains operations that transform, match
 /// or search the input based on structure generated
 /// the from parser.
@@ -238,7 +233,6 @@ pub enum Filter {
     Root,
     AnyChild,
     Child(String),
-    Assertion(AssertionChild),
     DescendantChild(FilterDescendant),
     Pick(Vec<PickFilterInner>),
     ArrayIndex(usize),
@@ -1192,57 +1186,6 @@ impl<'a> Context<'a> {
                         }
                         _ => {}
                     },
-                    (Filter::Assertion(assertion), Some(tail)) => match assertion {
-                        AssertionChild::Pair(ref left, ref op, ref right) => match &current.value {
-                            Value::Object(ref obj) => match obj.get(left) {
-                                Some(result) => match &result {
-                                    Value::String(some_right) => match op {
-                                        FilterOp::Eq => {
-                                            println!("left, someright: {}, {}", &left, &some_right);
-                                            if *right == *some_right {
-                                                self.step_results
-                                                    .borrow_mut()
-                                                    .push(serde_json::Value::Bool(true));
-                                                self.stack.borrow_mut().push(StackItem::new(
-                                                    current.value.clone(),
-                                                    tail,
-                                                    self.stack.clone(),
-                                                ));
-                                            }
-                                        }
-                                        FilterOp::NotEq => {
-                                            if *right != *some_right {
-                                                self.step_results
-                                                    .borrow_mut()
-                                                    .push(serde_json::Value::Bool(false));
-                                                self.stack.borrow_mut().push(StackItem::new(
-                                                    current.value.clone(),
-                                                    tail,
-                                                    self.stack.clone(),
-                                                ));
-                                            }
-                                        }
-                                        _ => {
-                                            todo!("operator not implemented");
-                                        }
-                                    },
-                                    _ => {
-                                        todo!("obj type not supported yet");
-                                    }
-                                },
-
-<<<<<<< Updated upstream
-                                _ => {}
-                            },
-
-                            Value::Array(ref array) => {}
-                            _ => {
-                                todo!("type not supported yet");
-                            }
-                        },
-                        _ => {}
-                    },
-=======
                     (Filter::CurrentItem, Some(tail)) => {
                         self.stack.borrow_mut().push(StackItem::new(
                             current.value,
@@ -1254,7 +1197,6 @@ impl<'a> Context<'a> {
                     (Filter::ObjectConstruct(ref fields), Some(tail)) => {
                         let mut map = serde_json::Map::new();
                         for (obj_key, value_filters) in fields {
-                            // Resolve key
                             let key: String = match obj_key {
                                 ObjKey::Static(s) => s.clone(),
                                 ObjKey::Dynamic(key_filters) => {
@@ -1265,16 +1207,13 @@ impl<'a> Context<'a> {
                                     match r.0.into_iter().next() {
                                         Some(Value::String(s)) => s,
                                         Some(other) => {
-                                            // strip surrounding quotes that serde adds
                                             let raw = other.to_string();
-                                            let raw = raw.trim_matches('"');
-                                            raw.to_string()
+                                            raw.trim_matches('"').to_string()
                                         }
                                         None => continue,
                                     }
                                 }
                             };
-                            // Resolve value
                             let r = Path::collect_with_filter(
                                 current.value.clone(),
                                 value_filters,
@@ -1310,7 +1249,6 @@ impl<'a> Context<'a> {
                         );
                     }
 
->>>>>>> Stashed changes
                     _ => {}
                 },
                 _ => {}
@@ -1688,10 +1626,4 @@ mod test {
         );
     }
 
-    #[test]
-    fn test_assertion() {
-        let data = serde_json::json!({"entry": {"values": [{"name": "gearbox"}, {"name": "gearbox", "test": "2000"}]}});
-        let result = Path::collect(data, ">/entry/values/[0]/('name'='gearbox')").unwrap();
-        assert_eq!(result.0, vec![Value::Bool(true),])
-    }
 }
