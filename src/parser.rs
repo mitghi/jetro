@@ -1,11 +1,14 @@
 //! Module containing parser for jetro.
 
-use std::{rc::Rc, cell::RefCell};
 use pest::iterators::Pair;
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use pest::iterators::Pairs;
 
 use crate::context::{
     Filter, FilterAST, FilterDescendant, FilterInner, FilterInnerRighthand, FilterLogicalOp,
-    FilterOp, Func, FuncArg, MapAST, MapBody, PickFilterInner,
+    FilterOp, Func, FuncArg, MapAST, MapBody, ObjKey, PickFilterInner,
 };
 
 use crate::*;
@@ -13,6 +16,177 @@ use crate::*;
 #[derive(Parse)]
 #[grammar = "./grammar.pest"]
 pub struct ExpressionParser;
+
+// ── Helper: parse a filterStmtCollection into a FilterAST ─────────────────────
+// Shared by filterFn (as a path step) and filterStmtCollection as a fnArg.
+
+fn parse_filter_collection(
+    iter: Pairs<Rule>,
+) -> Result<FilterAST, pest::error::Error<Rule>> {
+    let mut fast_root: Option<FilterAST> = None;
+    let mut current: Option<FilterAST> = None;
+
+    for item in iter {
+        match item.as_rule() {
+            Rule::filterStmt => {
+                let mut inner = item.into_inner();
+                let left = inner
+                    .nth(0).unwrap()           // filter_elem
+                    .into_inner().next().unwrap() // literal
+                    .into_inner().next().unwrap() // string
+                    .as_str().to_string();
+                let op = FilterOp::get(inner.nth(0).unwrap().into_inner().as_str()).unwrap();
+                let right = match inner.clone().into_iter().next().unwrap().as_rule() {
+                    Rule::literal => Some(FilterInnerRighthand::String(
+                        inner.next().unwrap().into_inner().as_str().to_string(),
+                    )),
+                    Rule::truthy => {
+                        match inner.next().unwrap().into_inner().next().unwrap().as_rule() {
+                            Rule::true_bool  => Some(FilterInnerRighthand::Bool(true)),
+                            Rule::false_bool => Some(FilterInnerRighthand::Bool(false)),
+                            _ => None,
+                        }
+                    }
+                    Rule::number => Some(FilterInnerRighthand::Number(
+                        inner.next().unwrap().as_str().parse::<i64>().unwrap(),
+                    )),
+                    Rule::float => Some(FilterInnerRighthand::Float(
+                        inner.next().unwrap().as_str().parse::<f64>().unwrap(),
+                    )),
+                    _ => None,
+                };
+                let filter_inner = FilterInner::Cond {
+                    left,
+                    op,
+                    right: right.unwrap(),
+                };
+                if fast_root.is_none() {
+                    fast_root = Some(FilterAST::new(filter_inner.clone()));
+                    current = fast_root.clone();
+                } else {
+                    let mut node = current.clone().unwrap();
+                    let rhs = node.link_right(filter_inner, FilterLogicalOp::None);
+                    current = Some(rhs);
+                }
+            }
+            Rule::logical_cmp => {
+                let op = FilterLogicalOp::get(item.as_str()).unwrap();
+                let mut node = current.clone().unwrap();
+                node.set_operator(op);
+            }
+            _ => {}
+        }
+    }
+    Ok(fast_root.unwrap())
+}
+
+// ── Helper: parse object-construction literal ─────────────────────────────────
+
+fn parse_obj_construct(
+    pair: Pair<Rule>,
+) -> Result<Vec<(ObjKey, Vec<Filter>)>, pest::error::Error<Rule>> {
+    let mut fields: Vec<(ObjKey, Vec<Filter>)> = Vec::new();
+    for token in pair.into_inner() {
+        match token.as_rule() {
+            Rule::path | Rule::at_sym => {}
+            Rule::obj_field => {
+                let (key, val) = parse_obj_field(token)?;
+                fields.push((key, val));
+            }
+            _ => {}
+        }
+    }
+    Ok(fields)
+}
+
+fn parse_obj_field(
+    pair: Pair<Rule>,
+) -> Result<(ObjKey, Vec<Filter>), pest::error::Error<Rule>> {
+    let mut iter = pair.into_inner();
+    let key_pair = iter.next().unwrap();  // obj_key
+    let val_pair = iter.next().unwrap();  // obj_field_val
+    let key = parse_obj_key(key_pair)?;
+    let val = parse_obj_field_val(val_pair)?;
+    Ok((key, val))
+}
+
+fn parse_obj_key(pair: Pair<Rule>) -> Result<ObjKey, pest::error::Error<Rule>> {
+    // obj_key = { obj_dynamic_key | obj_static_key }
+    let inner = pair.into_inner().next().unwrap();
+    match inner.as_rule() {
+        Rule::obj_static_key => {
+            // obj_static_key = { dq_literal | literal }
+            let lit = inner.into_inner().next().unwrap();
+            let s = lit.as_str();
+            // Both dq_literal and literal wrap their content in delimiters — strip first & last char.
+            let s = s[1..s.len() - 1].to_string();
+            Ok(ObjKey::Static(s))
+        }
+        Rule::obj_dynamic_key => {
+            // obj_dynamic_key = { lbracket ~ whitespace ~ (at_expr | sub_expression) ~ whitespace ~ rbracket }
+            // lbracket/rbracket are silent; skip to first real child
+            let expr = inner.into_inner().next().unwrap();
+            let filters = parse(expr.as_str())?;
+            Ok(ObjKey::Dynamic(filters))
+        }
+        _ => unreachable!("unexpected obj_key variant"),
+    }
+}
+
+fn parse_obj_field_val(pair: Pair<Rule>) -> Result<Vec<Filter>, pest::error::Error<Rule>> {
+    // obj_field_val = { obj_construct | arr_construct | at_expr | sub_expression }
+    let inner = pair.into_inner().next().unwrap();
+    match inner.as_rule() {
+        Rule::obj_construct => {
+            let fields = parse_obj_construct(inner)?;
+            Ok(vec![Filter::ObjectConstruct(fields)])
+        }
+        Rule::arr_construct => {
+            let elems = parse_arr_construct(inner)?;
+            Ok(vec![Filter::ArrayConstruct(elems)])
+        }
+        Rule::at_expr | Rule::sub_expression => parse(inner.as_str()),
+        _ => unreachable!("unexpected obj_field_val variant"),
+    }
+}
+
+// ── Helper: parse array-construction literal ──────────────────────────────────
+
+fn parse_arr_construct(
+    pair: Pair<Rule>,
+) -> Result<Vec<Vec<Filter>>, pest::error::Error<Rule>> {
+    let mut elems: Vec<Vec<Filter>> = Vec::new();
+    for token in pair.into_inner() {
+        match token.as_rule() {
+            Rule::path | Rule::at_sym => {}
+            Rule::arr_elem => {
+                let filters = parse_arr_elem(token)?;
+                elems.push(filters);
+            }
+            _ => {}
+        }
+    }
+    Ok(elems)
+}
+
+fn parse_arr_elem(pair: Pair<Rule>) -> Result<Vec<Filter>, pest::error::Error<Rule>> {
+    // arr_elem = { obj_construct | arr_construct | at_expr | sub_expression }
+    let inner = pair.into_inner().next().unwrap();
+    match inner.as_rule() {
+        Rule::obj_construct => {
+            let fields = parse_obj_construct(inner)?;
+            Ok(vec![Filter::ObjectConstruct(fields)])
+        }
+        Rule::arr_construct => {
+            let elems = parse_arr_construct(inner)?;
+            Ok(vec![Filter::ArrayConstruct(elems)])
+        }
+        Rule::at_expr | Rule::sub_expression => parse(inner.as_str()),
+        _ => unreachable!("unexpected arr_elem variant"),
+    }
+}
+
+// ── Main parse function ────────────────────────────────────────────────────────
 
 /// parse parses the jetro expression, builds the filter along with
 /// abstract syntax tree. It returns an error containing details about
@@ -26,6 +200,21 @@ pub(crate) fn parse<'a>(input: &'a str) -> Result<Vec<Filter>, pest::error::Erro
     let mut actions: Vec<Filter> = vec![];
     for token in root.into_inner() {
         match token.as_rule() {
+            // ── Top-level object / array construction ─────────────────────────
+            Rule::obj_construct => {
+                let fields = parse_obj_construct(token)?;
+                actions.push(Filter::ObjectConstruct(fields));
+            }
+            Rule::arr_construct => {
+                let elems = parse_arr_construct(token)?;
+                actions.push(Filter::ArrayConstruct(elems));
+            }
+
+            // ── Path roots ────────────────────────────────────────────────────
+            Rule::path | Rule::reverse_path => actions.push(Filter::Root),
+            Rule::at_sym => actions.push(Filter::CurrentItem),
+
+            // ── Function call (/# ...) ────────────────────────────────────────
             Rule::r#fn => {
                 let inner: Pair<Rule> = token.clone().into_inner().nth(1).unwrap();
                 let mut func = Func::new();
@@ -37,6 +226,8 @@ pub(crate) fn parse<'a>(input: &'a str) -> Result<Vec<Filter>, pest::error::Erro
                 for value in inner.into_inner() {
                     match &value.as_rule() {
                         Rule::ident => {}
+
+                        // ── existing argument types ───────────────────────────
                         Rule::fnLit => {
                             let literal = &value
                                 .clone()
@@ -60,7 +251,8 @@ pub(crate) fn parse<'a>(input: &'a str) -> Result<Vec<Filter>, pest::error::Erro
                             func.args.push(FuncArg::SubExpr(expr));
                         }
                         Rule::filterStmtCollection => {
-                            todo!("handle filter statements");
+                            let ast = parse_filter_collection(value.into_inner())?;
+                            func.args.push(FuncArg::FilterExpr(ast));
                         }
                         Rule::arrow => {
                             func.alias = Some(
@@ -137,8 +329,114 @@ pub(crate) fn parse<'a>(input: &'a str) -> Result<Vec<Filter>, pest::error::Erro
                             }
                             func.args.push(FuncArg::MapStmt(ast));
                         }
+
+                        // ── new argument types ────────────────────────────────
+                        Rule::fnArg => {
+                            // fnArg wraps the actual arg type; recurse into it
+                            let inner_arg = value.clone().into_inner().next().unwrap();
+                            match inner_arg.as_rule() {
+                                Rule::fnNum => {
+                                    let n_pair = inner_arg.into_inner().next().unwrap();
+                                    let n: f64 = n_pair.as_str().parse().unwrap_or(0.0);
+                                    func.args.push(FuncArg::Number(n));
+                                }
+                                Rule::fnLit => {
+                                    let s = inner_arg
+                                        .into_inner()
+                                        .next()
+                                        .unwrap()
+                                        .into_inner()
+                                        .as_str()
+                                        .to_string();
+                                    func.args.push(FuncArg::Key(s));
+                                }
+                                Rule::fnExpr => {
+                                    let expr = parse(
+                                        inner_arg
+                                            .into_inner()
+                                            .next()
+                                            .unwrap()
+                                            .into_inner()
+                                            .as_str(),
+                                    )?;
+                                    func.args.push(FuncArg::SubExpr(expr));
+                                }
+                                Rule::at_expr => {
+                                    let expr = parse(inner_arg.as_str())?;
+                                    func.args.push(FuncArg::SubExpr(expr));
+                                }
+                                Rule::obj_construct => {
+                                    let fields = parse_obj_construct(inner_arg)?;
+                                    func.args.push(FuncArg::ObjConstruct(fields));
+                                }
+                                Rule::arr_construct => {
+                                    let elems = parse_arr_construct(inner_arg)?;
+                                    func.args.push(FuncArg::ArrConstruct(elems));
+                                }
+                                Rule::mapStmt => {
+                                    let mut ast = MapAST::default();
+                                    ast.arg = inner_arg
+                                        .clone()
+                                        .into_inner()
+                                        .nth(0)
+                                        .unwrap()
+                                        .as_str()
+                                        .to_string();
+                                    let stmt =
+                                        inner_arg.into_inner().nth(1).unwrap().into_inner();
+                                    for v in stmt {
+                                        match v.as_rule() {
+                                            Rule::ident => match &mut ast.body {
+                                                MapBody::None => {
+                                                    ast.body =
+                                                        MapBody::Subpath(vec![Filter::Root]);
+                                                }
+                                                MapBody::Subpath(ref mut sp) => {
+                                                    sp.push(Filter::Child(
+                                                        v.as_str().to_string(),
+                                                    ));
+                                                }
+                                                _ => {}
+                                            },
+                                            Rule::methodCall => {
+                                                let name =
+                                                    v.into_inner().as_str().to_string();
+                                                if let MapBody::Subpath(sp) = &ast.body {
+                                                    ast.body = MapBody::Method {
+                                                        name,
+                                                        subpath: sp.to_vec(),
+                                                    };
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                    func.args.push(FuncArg::MapStmt(ast));
+                                }
+                                _ => {}
+                            }
+                        }
+
+                        Rule::fnNum => {
+                            let n_pair = value.clone().into_inner().next().unwrap();
+                            let n: f64 = n_pair.as_str().parse().unwrap_or(0.0);
+                            func.args.push(FuncArg::Number(n));
+                        }
+                        Rule::at_expr => {
+                            let expr = parse(value.as_str())?;
+                            func.args.push(FuncArg::SubExpr(expr));
+                        }
+                        Rule::obj_construct => {
+                            let fields = parse_obj_construct(value.clone())?;
+                            func.args.push(FuncArg::ObjConstruct(fields));
+                        }
+                        Rule::arr_construct => {
+                            let elems = parse_arr_construct(value.clone())?;
+                            func.args.push(FuncArg::ArrConstruct(elems));
+                        }
+
                         _ => {
-                            todo!("handle unmatched arm of function generalization",);
+                            todo!("handle unmatched arm of function generalization: {:?}", value.as_rule());
                         }
                     }
                 }
@@ -159,7 +457,6 @@ pub(crate) fn parse<'a>(input: &'a str) -> Result<Vec<Filter>, pest::error::Erro
                     });
                 }
             }
-            Rule::path | Rule::reverse_path => actions.push(Filter::Root),
             Rule::grouped_any => {
                 let elem = token.into_inner().nth(1).unwrap().into_inner();
                 let mut values: Vec<String> = vec![];
@@ -170,99 +467,9 @@ pub(crate) fn parse<'a>(input: &'a str) -> Result<Vec<Filter>, pest::error::Erro
                 actions.push(Filter::GroupedChild(values));
             }
             Rule::filterFn => {
-                let rule = token.into_inner().nth(1).unwrap().into_inner().into_iter();
-
-                let mut fast_root: Option<FilterAST> = None;
-                let mut current: Option<FilterAST> = None;
-
-                for item in rule.into_iter() {
-                    let rule = item.as_rule();
-                    let elem = item.clone();
-                    match rule {
-                        Rule::filterStmt => {
-                            let mut inner = elem.into_inner();
-                            let left = inner
-                                .nth(0)
-                                .unwrap()
-                                .into_inner()
-                                .next()
-                                .unwrap()
-                                .into_inner()
-                                .next()
-                                .unwrap()
-                                .as_str()
-                                .to_string();
-                            let op =
-                                FilterOp::get(inner.nth(0).unwrap().into_inner().as_str()).unwrap();
-                            let right: Option<FilterInnerRighthand>;
-
-                            match inner.clone().into_iter().next().unwrap().as_rule() {
-                                Rule::literal => {
-                                    right = Some(FilterInnerRighthand::String(
-                                        inner.next().unwrap().into_inner().as_str().to_string(),
-                                    ));
-                                }
-                                Rule::truthy => {
-                                    match inner
-                                        .next()
-                                        .unwrap()
-                                        .into_inner()
-                                        .next()
-                                        .unwrap()
-                                        .as_rule()
-                                    {
-                                        Rule::true_bool => {
-                                            right = Some(FilterInnerRighthand::Bool(true));
-                                        }
-                                        Rule::false_bool => {
-                                            right = Some(FilterInnerRighthand::Bool(false));
-                                        }
-                                        _ => {
-                                            todo!("handle error");
-                                        }
-                                    }
-                                }
-                                Rule::number => {
-                                    right = Some(FilterInnerRighthand::Number(
-                                        inner.next().unwrap().as_str().parse::<i64>().unwrap(),
-                                    ));
-                                }
-                                Rule::float => {
-                                    right = Some(FilterInnerRighthand::Float(
-                                        inner.next().unwrap().as_str().parse::<f64>().unwrap(),
-                                    ));
-                                }
-                                _ => {
-                                    right = None;
-                                }
-                            }
-
-                            let filter_inner = FilterInner::Cond {
-                                left,
-                                op,
-                                right: right.unwrap(),
-                            };
-
-                            if fast_root.is_none() {
-                                fast_root = Some(FilterAST::new(filter_inner.clone()));
-                                current = fast_root.clone();
-                            } else {
-                                let mut node = current.clone().unwrap();
-                                let rhs = node.link_right(filter_inner, FilterLogicalOp::None);
-                                current = Some(rhs);
-                            }
-                        }
-                        Rule::logical_cmp => {
-                            let op = FilterLogicalOp::get(elem.as_str()).unwrap();
-                            let mut node = current.clone().unwrap();
-                            node.set_operator(op.clone());
-                        }
-                        _ => {
-                            todo!("implement unmatched arm");
-                        }
-                    }
-                }
-                actions.push(Filter::MultiFilter(fast_root.unwrap()));
+                let iter = token.into_inner().nth(1).unwrap().into_inner();
+                let ast = parse_filter_collection(iter)?;
+                actions.push(Filter::MultiFilter(ast));
             }
             Rule::any_child => actions.push(Filter::AnyChild),
             Rule::array_index => {
@@ -405,8 +612,9 @@ pub(crate) fn parse<'a>(input: &'a str) -> Result<Vec<Filter>, pest::error::Erro
                         let rstr = rnode.next().unwrap().as_str().to_owned();
                         actions.push(Filter::DescendantChild(FilterDescendant::Pair(lstr, rstr)));
                     }
+
                     _ => {
-                        panic!("unreachable")
+                        panic!("unreachable {:?}", &node);
                     }
                 }
             }
@@ -414,21 +622,27 @@ pub(crate) fn parse<'a>(input: &'a str) -> Result<Vec<Filter>, pest::error::Erro
                 let ident = token.into_inner().nth(1).unwrap().as_str().to_owned();
                 actions.push(Filter::Child(ident));
             }
-            _ => {}
+            Rule::EOI => {}
+            _ => {
+                panic!("unknown token: {}", &token);
+            }
         }
     }
     Ok(actions)
 }
 
+// ── Tests ──────────────────────────────────────────────────────────────────────
+
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::context::{Filter, FilterDescendant, ObjKey};
 
     #[test]
     fn test_simple_path() {
-        let actions = parse(">/obj/some/*/name").unwrap();
+        let result = parse(">/obj/some/*/name").unwrap();
         assert_eq!(
-            actions,
+            result,
             vec![
                 Filter::Root,
                 Filter::Child("obj".to_string()),
@@ -440,30 +654,60 @@ mod test {
     }
 
     #[test]
-    fn test_simple_path_with_recursive_descendant() {
-        let actions = parse(">/obj/some/..descendant/name").unwrap();
-        assert_eq!(
-            actions,
-            vec![
-                Filter::Root,
-                Filter::Child("obj".to_string()),
-                Filter::Child("some".to_string()),
-                Filter::DescendantChild(FilterDescendant::Single("descendant".to_string())),
-                Filter::Child("name".to_string()),
-            ]
-        );
+    fn test_obj_construct_static_keys() {
+        let result = parse(r#">{"name": >/customer/name, "total": >/items/#len}"#);
+        assert!(result.is_ok(), "parse failed: {:?}", result.err());
+        let filters = result.unwrap();
+        assert_eq!(filters.len(), 1);
+        match &filters[0] {
+            Filter::ObjectConstruct(fields) => {
+                assert_eq!(fields.len(), 2);
+                assert_eq!(fields[0].0, ObjKey::Static("name".to_string()));
+                assert_eq!(fields[1].0, ObjKey::Static("total".to_string()));
+            }
+            other => panic!("expected ObjectConstruct, got {:?}", other),
+        }
     }
 
     #[test]
-    fn test_recursive_descendant_keyed() {
-        let actions = parse(">/..('key' = 'value')").unwrap();
+    fn test_arr_construct() {
+        let result = parse(r#">[>/name, >/age]"#);
+        assert!(result.is_ok(), "parse failed: {:?}", result.err());
+        let filters = result.unwrap();
+        assert_eq!(filters.len(), 1);
+        match &filters[0] {
+            Filter::ArrayConstruct(elems) => {
+                assert_eq!(elems.len(), 2);
+            }
+            other => panic!("expected ArrayConstruct, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_at_sym_in_expression() {
+        let result = parse("@/name");
+        assert!(result.is_ok(), "parse failed: {:?}", result.err());
+        let filters = result.unwrap();
+        assert_eq!(filters[0], Filter::CurrentItem);
+        assert_eq!(filters[1], Filter::Child("name".to_string()));
+    }
+
+    #[test]
+    fn test_fn_num_arg() {
+        let result = parse(">/items/#nth(2)");
+        assert!(result.is_ok(), "parse failed: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_existing_path() {
+        let result = parse(">/..('type'='ingredient')").unwrap();
         assert_eq!(
-            actions,
+            result,
             vec![
                 Filter::Root,
                 Filter::DescendantChild(FilterDescendant::Pair(
-                    "key".to_string(),
-                    "value".to_string()
+                    "type".to_string(),
+                    "ingredient".to_string(),
                 )),
             ]
         );
@@ -982,15 +1226,15 @@ mod test {
     fn parse_with_line_break() {
         let actions = parse(
             r#">/#pick(
-  >/get
-   /..recursive
-   /value
-   /#filter('some_key' > 10) as 'values',
+      >/get
+       /..recursive
+       /value
+       /#filter('some_key' > 10) as 'values',
 
-  >/..preferences
-   /#map(x: x.preference) as 'preferences'
-)
-"#,
+      >/..preferences
+       /#map(x: x.preference) as 'preferences'
+    )
+    "#,
         )
         .unwrap();
 
@@ -1046,4 +1290,5 @@ mod test {
             ]
         );
     }
+
 }

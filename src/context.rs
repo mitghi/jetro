@@ -1,7 +1,6 @@
 //! Module containing types and functionalities for
 //! evaluating jetro paths.
 
-use crate::parser;
 #[allow(unused_imports)]
 use serde::{Deserialize, Serialize};
 use serde_json::map::Map;
@@ -117,7 +116,7 @@ impl FilterLogicalOp {
 impl FilterOp {
     pub fn get(input: &str) -> Option<Self> {
         match input {
-            "==" => Some(Self::Eq),
+            "==" | "=" => Some(Self::Eq),
             "<=" => Some(Self::Lq),
             ">=" => Some(Self::Gq),
             "<" => Some(Self::Less),
@@ -136,6 +135,14 @@ pub enum FormatOp {
         arguments: Vec<String>,
         alias: String,
     },
+}
+
+/// ObjKey represents the key of a field in an object-construction literal.
+/// Keys are either static string literals or dynamically computed expressions.
+#[derive(Debug, PartialEq, Clone)]
+pub enum ObjKey {
+    Static(String),
+    Dynamic(Vec<Filter>),
 }
 
 /// PickFilterInner represents arguments
@@ -235,6 +242,12 @@ pub enum Filter {
     MultiFilter(FilterAST),
     GroupedChild(Vec<String>),
     Function(Func),
+    /// `@` — current pipeline item (behaves like Root within its evaluation context).
+    CurrentItem,
+    /// `>{ "key": expr, ... }` — construct a JSON object; keys and values are expressions.
+    ObjectConstruct(Vec<(ObjKey, Vec<Filter>)>),
+    /// `>[expr, expr, ...]` — construct a JSON array from expressions.
+    ArrayConstruct(Vec<Vec<Filter>>),
 }
 
 /// StackItem represents an abstract step
@@ -243,16 +256,16 @@ pub enum Filter {
 /// result ( when terminal ) or produces
 /// more stack items.
 #[allow(dead_code)]
-struct StackItem<'a> {
-    value: Value,
-    filters: &'a [Filter],
-    stack: Rc<RefCell<Vec<StackItem<'a>>>>,
+pub(crate) struct StackItem<'a> {
+    pub(crate) value: Value,
+    pub(crate) filters: &'a [Filter],
+    pub(crate) stack: Rc<RefCell<Vec<StackItem<'a>>>>,
 }
 
 /// Context binds components required for traversing
 /// and evaluating a jetro expression.
 pub(crate) struct Context<'a> {
-    root: Value,
+    pub(crate) root: Value,
     stack: Rc<RefCell<Vec<StackItem<'a>>>>,
     registry: Rc<RefCell<dyn crate::func::Registry>>,
     pub results: Rc<RefCell<Vec<Value>>>,
@@ -302,9 +315,14 @@ pub enum Error {
 pub enum FuncArg {
     None,
     Key(String),
+    Number(f64),
     Ord(Filter),
     SubExpr(Vec<Filter>),
     MapStmt(MapAST),
+    ObjConstruct(Vec<(ObjKey, Vec<Filter>)>),
+    ArrConstruct(Vec<Vec<Filter>>),
+    /// A filter condition used as a function argument (e.g. for `#find`).
+    FilterExpr(FilterAST),
 }
 
 /// Func represents abstract structure of
@@ -710,23 +728,19 @@ impl Path {
     /// ```
     pub fn collect<S: Into<String>>(v: Value, expr: S) -> Result<PathResult, Error> {
         let expr: String = expr.into();
-        let filters = match parser::parse(&expr) {
-            Ok(result) => result,
-            Err(err) => return Err(Error::Parse(err.to_string())),
-        };
-
-        let mut ctx = Context::new(v, filters.as_slice());
-        match ctx.collect() {
-            Ok(_) => {
-                let output = ctx.results.take().to_owned();
-                let v = ctx.step_results.take();
-                drop(v);
-                let v = ctx.stack.take();
-                drop(v);
-                Ok(PathResult(output))
+        // Delegate to the thread-local VM so compile and resolution caches are
+        // shared across all calls on the same thread.
+        //
+        // `try_borrow_mut` gracefully handles re-entrant calls (e.g. from
+        // inside a function implementation) by falling back to a fresh VM.
+        crate::vm::THREAD_VM.with(|cell| match cell.try_borrow_mut() {
+            Ok(mut vm) => vm.run_str(&expr, &v),
+            Err(_) => {
+                // Re-entrant call — create a temporary VM to avoid RefCell panic.
+                let mut tmp = crate::vm::VM::new();
+                tmp.run_str(&expr, &v)
             }
-            Err(err) => Err(err),
-        }
+        })
     }
 
     pub(crate) fn collect_with_filter(v: Value, filters: &[Filter]) -> PathResult {
@@ -1166,6 +1180,68 @@ impl<'a> Context<'a> {
                             }
                         }
                     },
+                    (Filter::CurrentItem, Some(tail)) => {
+                        self.stack.borrow_mut().push(StackItem::new(
+                            current.value,
+                            tail,
+                            self.stack.clone(),
+                        ));
+                    }
+
+                    (Filter::ObjectConstruct(ref fields), Some(tail)) => {
+                        let mut map = serde_json::Map::new();
+                        for (obj_key, value_filters) in fields {
+                            let key: String = match obj_key {
+                                ObjKey::Static(s) => s.clone(),
+                                ObjKey::Dynamic(key_filters) => {
+                                    let r = Path::collect_with_filter(
+                                        current.value.clone(),
+                                        key_filters,
+                                    );
+                                    match r.0.into_iter().next() {
+                                        Some(Value::String(s)) => s,
+                                        Some(other) => {
+                                            let raw = other.to_string();
+                                            raw.trim_matches('"').to_string()
+                                        }
+                                        None => continue,
+                                    }
+                                }
+                            };
+                            let r = Path::collect_with_filter(
+                                current.value.clone(),
+                                value_filters,
+                            );
+                            if let Some(v) = r.0.into_iter().next() {
+                                map.insert(key, v);
+                            }
+                        }
+                        push_to_stack_or_produce!(
+                            self.results,
+                            self.stack,
+                            tail,
+                            Value::Object(map)
+                        );
+                    }
+
+                    (Filter::ArrayConstruct(ref elems), Some(tail)) => {
+                        let mut arr: Vec<Value> = Vec::new();
+                        for elem_filters in elems {
+                            let r = Path::collect_with_filter(
+                                current.value.clone(),
+                                elem_filters,
+                            );
+                            if let Some(v) = r.0.into_iter().next() {
+                                arr.push(v);
+                            }
+                        }
+                        push_to_stack_or_produce!(
+                            self.results,
+                            self.stack,
+                            tail,
+                            Value::Array(arr)
+                        );
+                    }
 
                     _ => {}
                 },
@@ -1532,7 +1608,7 @@ mod test {
     }
 
     #[test]
-    fn test_descendant_keyed() {
+    fn test_descendant_keeyd() {
         let data = serde_json::json!({"entry": {"values": [{"name": "gearbox"}, {"name": "gearbox", "test": "2000"}]}});
         let result = Path::collect(data, ">/..('name'='gearbox')").unwrap();
         assert_eq!(
@@ -1543,4 +1619,5 @@ mod test {
             ])]
         );
     }
+
 }

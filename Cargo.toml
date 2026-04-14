@@ -1,8 +1,8 @@
 [package]
 name = "jetro"
-version = "0.2.5"
+version = "0.2.6"
 edition = "2021"
-authors = ["Milad (Mike) Taghavi <mitghi.at.gmail.com>"]
+authors = ["Milad (Mike) Taghavi <mitghi.at.me.com>"]
 license = "MIT"
 readme = "README.md"
 exclude = [".gitignore"]
