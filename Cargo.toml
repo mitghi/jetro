@@ -11,7 +11,7 @@ documentation = "https://github.com/mitghi/jetro"
 homepage = "https://github.com/mitghi/jetro"
 description = "Jetro is tool to transform, query and compare JSON format"
 keywords = ["json-search", "json-query", "json-path", "jmespath", "serde"]
-categories = ["algorithms", "encoding", "parser"]
+categories = ["algorithms", "encoding"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
