@@ -1,7 +1,6 @@
 //! Module containing types and functionalities for
 //! evaluating jetro paths.
 
-use crate::parser;
 #[allow(unused_imports)]
 use serde::{Deserialize, Serialize};
 use serde_json::map::Map;
@@ -257,10 +256,10 @@ pub enum Filter {
 /// result ( when terminal ) or produces
 /// more stack items.
 #[allow(dead_code)]
-struct StackItem<'a> {
-    value: Value,
-    filters: &'a [Filter],
-    stack: Rc<RefCell<Vec<StackItem<'a>>>>,
+pub(crate) struct StackItem<'a> {
+    pub(crate) value: Value,
+    pub(crate) filters: &'a [Filter],
+    pub(crate) stack: Rc<RefCell<Vec<StackItem<'a>>>>,
 }
 
 /// Context binds components required for traversing
@@ -729,23 +728,19 @@ impl Path {
     /// ```
     pub fn collect<S: Into<String>>(v: Value, expr: S) -> Result<PathResult, Error> {
         let expr: String = expr.into();
-        let filters = match parser::parse(&expr) {
-            Ok(result) => result,
-            Err(err) => return Err(Error::Parse(err.to_string())),
-        };
-
-        let mut ctx = Context::new(v, filters.as_slice());
-        match ctx.collect() {
-            Ok(_) => {
-                let output = ctx.results.take().to_owned();
-                let v = ctx.step_results.take();
-                drop(v);
-                let v = ctx.stack.take();
-                drop(v);
-                Ok(PathResult(output))
+        // Delegate to the thread-local VM so compile and resolution caches are
+        // shared across all calls on the same thread.
+        //
+        // `try_borrow_mut` gracefully handles re-entrant calls (e.g. from
+        // inside a function implementation) by falling back to a fresh VM.
+        crate::vm::THREAD_VM.with(|cell| match cell.try_borrow_mut() {
+            Ok(mut vm) => vm.run_str(&expr, &v),
+            Err(_) => {
+                // Re-entrant call — create a temporary VM to avoid RefCell panic.
+                let mut tmp = crate::vm::VM::new();
+                tmp.run_str(&expr, &v)
             }
-            Err(err) => Err(err),
-        }
+        })
     }
 
     pub(crate) fn collect_with_filter(v: Value, filters: &[Filter]) -> PathResult {
@@ -1184,7 +1179,6 @@ impl<'a> Context<'a> {
                                 _ => {}
                             }
                         }
-                        _ => {}
                     },
                     (Filter::CurrentItem, Some(tail)) => {
                         self.stack.borrow_mut().push(StackItem::new(
