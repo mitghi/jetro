@@ -516,7 +516,7 @@ let result = g.query(">/order/..items/#resolve('ident', >/catalogue, 'ident')")?
 
 ---
 
-## Enterprise example
+## Example
 
 The following dataset models a B2B SaaS company's operational data — customers, product catalogue, sales orders, line items, and employees — all in a single document. Every Jetro feature is demonstrated against it.
 
