@@ -10,7 +10,88 @@ use std::{
 
 use super::context::MapAST;
 
-pub(crate) trait Callable {
+// ── BuiltinFn ─────────────────────────────────────────────────────────────────
+
+/// Compile-time identity for every built-in function.
+///
+/// Resolved once at compile time from the function name string and stored
+/// directly in `Opcode::CallBuiltin`, eliminating all `BTreeMap` lookups,
+/// vtable dispatches, and `Box<dyn Callable>` indirections at runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BuiltinFn {
+    Reverse, Formats, Sum, Len, Head, Tail, All, Map, Keys, Values, Min, Max, Zip,
+    Avg, Add, Sub, Mul, Div, Abs, Round, Floor, Ceil,
+    Any, Not,
+    Last, Nth, Flatten, FlatMap, Chunk, Unique, Distinct, SortBy, JoinStr, Compact, Count,
+    GroupBy, CountBy, IndexBy, Tally,
+    Merge, Omit, Select, Rename, Set, Coalesce,
+    Join, Lookup,
+    Find, FilterBy, Get, Resolve, Deref, Pluck,
+}
+
+impl BuiltinFn {
+    #[inline]
+    pub(crate) fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "reverse"   => Some(Self::Reverse),
+            "formats"   => Some(Self::Formats),
+            "sum"       => Some(Self::Sum),
+            "len"       => Some(Self::Len),
+            "head"      => Some(Self::Head),
+            "tail"      => Some(Self::Tail),
+            "all"       => Some(Self::All),
+            "map"       => Some(Self::Map),
+            "keys"      => Some(Self::Keys),
+            "values"    => Some(Self::Values),
+            "min"       => Some(Self::Min),
+            "max"       => Some(Self::Max),
+            "zip"       => Some(Self::Zip),
+            "avg"       => Some(Self::Avg),
+            "add"       => Some(Self::Add),
+            "sub"       => Some(Self::Sub),
+            "mul"       => Some(Self::Mul),
+            "div"       => Some(Self::Div),
+            "abs"       => Some(Self::Abs),
+            "round"     => Some(Self::Round),
+            "floor"     => Some(Self::Floor),
+            "ceil"      => Some(Self::Ceil),
+            "any"       => Some(Self::Any),
+            "not"       => Some(Self::Not),
+            "last"      => Some(Self::Last),
+            "nth"       => Some(Self::Nth),
+            "flatten"   => Some(Self::Flatten),
+            "flat_map"  => Some(Self::FlatMap),
+            "chunk"     => Some(Self::Chunk),
+            "unique"    => Some(Self::Unique),
+            "distinct"  => Some(Self::Distinct),
+            "sort_by"   => Some(Self::SortBy),
+            "join_str"  => Some(Self::JoinStr),
+            "compact"   => Some(Self::Compact),
+            "count"     => Some(Self::Count),
+            "group_by"  => Some(Self::GroupBy),
+            "count_by"  => Some(Self::CountBy),
+            "index_by"  => Some(Self::IndexBy),
+            "tally"     => Some(Self::Tally),
+            "merge"     => Some(Self::Merge),
+            "omit"      => Some(Self::Omit),
+            "select"    => Some(Self::Select),
+            "rename"    => Some(Self::Rename),
+            "set"       => Some(Self::Set),
+            "coalesce"  => Some(Self::Coalesce),
+            "join"      => Some(Self::Join),
+            "lookup"    => Some(Self::Lookup),
+            "find"      => Some(Self::Find),
+            "filter_by" => Some(Self::FilterBy),
+            "get"       => Some(Self::Get),
+            "resolve"   => Some(Self::Resolve),
+            "deref"     => Some(Self::Deref),
+            "pluck"     => Some(Self::Pluck),
+            _ => None,
+        }
+    }
+}
+
+pub trait Callable {
     fn call(
         &mut self,
         func: &Func,
@@ -21,7 +102,7 @@ pub(crate) trait Callable {
 
 pub(crate) trait Registry: Callable {}
 
-pub(crate) struct FuncRegistry {
+pub struct FuncRegistry {
     map: BTreeMap<String, Box<dyn Callable>>,
 }
 
@@ -727,11 +808,9 @@ impl Callable for SortByFn {
                 v.sort_by(|a, b| {
                     let av = a.get(&key).and_then(value_as_f64);
                     let bv = b.get(&key).and_then(value_as_f64);
-                    let s_a = a.get(&key).and_then(Value::as_str).map(|s| s.to_string());
-                    let s_b = b.get(&key).and_then(Value::as_str).map(|s| s.to_string());
                     let order = match (av, bv) {
                         (Some(an), Some(bn)) => an.partial_cmp(&bn).unwrap_or(std::cmp::Ordering::Equal),
-                        _ => s_a.cmp(&s_b),
+                        _ => a.get(&key).and_then(Value::as_str).cmp(&b.get(&key).and_then(Value::as_str)),
                     };
                     if descending { order.reverse() } else { order }
                 });
@@ -831,9 +910,8 @@ impl Callable for CountByFn {
                             other => other.to_string().trim_matches('"').to_string(),
                         };
                         let entry = map.entry(group_key).or_insert(Value::Number(serde_json::Number::from(0i64)));
-                        if let Value::Number(ref n) = entry.clone() {
-                            *entry = Value::Number(serde_json::Number::from(n.as_i64().unwrap_or(0) + 1));
-                        }
+                        let prev = entry.as_i64().unwrap_or(0);
+                        *entry = Value::Number(serde_json::Number::from(prev + 1));
                     }
                 }
                 Ok(Value::Object(map))
@@ -878,9 +956,8 @@ impl Callable for TallyFn {
                         other => other.to_string().trim_matches('"').to_string(),
                     };
                     let entry = map.entry(k).or_insert(Value::Number(serde_json::Number::from(0i64)));
-                    if let Value::Number(ref n) = entry.clone() {
-                        *entry = Value::Number(serde_json::Number::from(n.as_i64().unwrap_or(0) + 1));
-                    }
+                    let prev = entry.as_i64().unwrap_or(0);
+                    *entry = Value::Number(serde_json::Number::from(prev + 1));
                 }
                 Ok(Value::Object(map))
             }

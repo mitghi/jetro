@@ -1,0 +1,2492 @@
+//! High-performance bytecode VM for v2 Jetro expressions.
+//!
+//! # Architecture
+//!
+//! ```text
+//!  String expression
+//!        │  parser::parse()
+//!        ▼
+//!     Expr (AST)
+//!        │  Compiler::compile()
+//!        ▼
+//!     Program              ← flat Arc<[Opcode]>  (cached: compile_cache)
+//!        │  VM::execute()
+//!        ▼
+//!      Val                 ← result              (structural: resolution_cache)
+//! ```
+//!
+//! # Optimisations over the tree-walker
+//!
+//! 1. **Compile cache** — parse + compile once per unique expression string.
+//! 2. **Val type** — `Arc`-wrapped compound nodes; every clone is O(1).
+//! 3. **BuiltinMethod enum** — O(1) method dispatch (jump-table vs string hash).
+//! 4. **Pre-compiled sub-programs** — lambda/arg bodies compiled to `Arc<Program>`
+//!    once at compile time; never re-compiled per call.
+//! 5. **Resolution cache** — structural programs (`$.a.b[0]`) cache their
+//!    pointer path after the first traversal; subsequent calls skip traversal.
+//! 6. **Peephole pass 1 — RootChain** — `PushRoot + GetField+` fused into a
+//!    single pointer-resolve opcode.
+//! 7. **Peephole pass 2 — FilterCount** — `CallMethod(filter) +
+//!    CallMethod(len/count)` fused; counts matches without materialising the
+//!    intermediate filtered array.
+//! 8. **Peephole pass 3 — ConstFold** — arithmetic on adjacent integer literals
+//!    folded at compile time.
+//! 9. **Stack machine** — iterative `exec()` loop; no per-opcode stack-frame
+//!    overhead for simple navigation / arithmetic opcodes.
+
+use std::{
+    collections::{HashMap, VecDeque},
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
+    sync::Arc,
+};
+use indexmap::IndexMap;
+use smallvec::SmallVec;
+
+use crate::v2::ast::*;
+use super::eval::{
+    Env, EvalError, Val,
+    dispatch_method, apply_item, eval, eval_pos, str_arg, first_i64_arg,
+};
+use super::eval::util::{
+    is_truthy, kind_matches, vals_eq, cmp_vals, val_to_key, val_to_string,
+    add_vals, num_op, val_key, flatten_val, zip_arrays, cartesian, deep_merge,
+    field_exists_nested, obj2,
+};
+use super::eval::methods::MethodRegistry;
+
+macro_rules! pop {
+    ($stack:expr) => {
+        $stack.pop().ok_or_else(|| EvalError("stack underflow".into()))?
+    };
+}
+macro_rules! err {
+    ($($t:tt)*) => { Err(EvalError(format!($($t)*))) };
+}
+
+// ── BuiltinMethod ─────────────────────────────────────────────────────────────
+
+/// Pre-resolved method identifier — eliminates string comparison at dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum BuiltinMethod {
+    // Navigation / basics
+    Len = 0, Keys, Values, Entries, ToPairs, FromPairs, Invert, Reverse, Type,
+    ToString, ToJson, FromJson,
+    // Aggregates
+    Sum, Avg, Min, Max, Count, Any, All,
+    GroupBy, CountBy, IndexBy,
+    // Array ops
+    Filter, Map, FlatMap, Sort, Unique, Flatten, Compact,
+    Join, First, Last, Nth, Append, Prepend, Remove,
+    Diff, Intersect, Union, Enumerate, Pairwise, Window, Chunk,
+    TakeWhile, DropWhile, Accumulate, Partition, Zip, ZipLongest,
+    // Object ops
+    Pick, Omit, Merge, DeepMerge, Defaults, Rename,
+    TransformKeys, TransformValues, FilterKeys, FilterValues, Pivot,
+    // Path ops
+    GetPath, SetPath, DelPath, DelPaths, HasPath, FlattenKeys, UnflattenKeys,
+    // CSV
+    ToCsv, ToTsv,
+    // Null / predicate
+    Or, Has, Missing, Includes, Set, Update,
+    // String methods
+    Upper, Lower, Capitalize, TitleCase, Trim, TrimLeft, TrimRight,
+    Lines, Words, Chars, ToNumber, ToBool, ToBase64, FromBase64,
+    UrlEncode, UrlDecode, HtmlEscape, HtmlUnescape,
+    Repeat, PadLeft, PadRight, StartsWith, EndsWith,
+    IndexOf, LastIndexOf, Replace, ReplaceAll, StripPrefix, StripSuffix,
+    Slice, Split, Indent, Dedent, Matches, Scan,
+    // Sentinel for custom/unknown
+    Unknown,
+}
+
+impl BuiltinMethod {
+    pub fn from_name(name: &str) -> Self {
+        match name {
+            "len"            => Self::Len,
+            "keys"           => Self::Keys,
+            "values"         => Self::Values,
+            "entries"        => Self::Entries,
+            "to_pairs"|"toPairs" => Self::ToPairs,
+            "from_pairs"|"fromPairs" => Self::FromPairs,
+            "invert"         => Self::Invert,
+            "reverse"        => Self::Reverse,
+            "type"           => Self::Type,
+            "to_string"|"toString" => Self::ToString,
+            "to_json"|"toJson" => Self::ToJson,
+            "from_json"|"fromJson" => Self::FromJson,
+            "sum"            => Self::Sum,
+            "avg"            => Self::Avg,
+            "min"            => Self::Min,
+            "max"            => Self::Max,
+            "count"          => Self::Count,
+            "any"            => Self::Any,
+            "all"            => Self::All,
+            "groupBy"|"group_by" => Self::GroupBy,
+            "countBy"|"count_by" => Self::CountBy,
+            "indexBy"|"index_by" => Self::IndexBy,
+            "filter"         => Self::Filter,
+            "map"            => Self::Map,
+            "flatMap"|"flat_map" => Self::FlatMap,
+            "sort"           => Self::Sort,
+            "unique"|"distinct" => Self::Unique,
+            "flatten"        => Self::Flatten,
+            "compact"        => Self::Compact,
+            "join"           => Self::Join,
+            "first"          => Self::First,
+            "last"           => Self::Last,
+            "nth"            => Self::Nth,
+            "append"         => Self::Append,
+            "prepend"        => Self::Prepend,
+            "remove"         => Self::Remove,
+            "diff"           => Self::Diff,
+            "intersect"      => Self::Intersect,
+            "union"          => Self::Union,
+            "enumerate"      => Self::Enumerate,
+            "pairwise"       => Self::Pairwise,
+            "window"         => Self::Window,
+            "chunk"|"batch"  => Self::Chunk,
+            "takewhile"|"take_while" => Self::TakeWhile,
+            "dropwhile"|"drop_while" => Self::DropWhile,
+            "accumulate"     => Self::Accumulate,
+            "partition"      => Self::Partition,
+            "zip"            => Self::Zip,
+            "zip_longest"|"zipLongest" => Self::ZipLongest,
+            "pick"           => Self::Pick,
+            "omit"           => Self::Omit,
+            "merge"          => Self::Merge,
+            "deep_merge"|"deepMerge" => Self::DeepMerge,
+            "defaults"       => Self::Defaults,
+            "rename"         => Self::Rename,
+            "transform_keys"|"transformKeys" => Self::TransformKeys,
+            "transform_values"|"transformValues" => Self::TransformValues,
+            "filter_keys"|"filterKeys" => Self::FilterKeys,
+            "filter_values"|"filterValues" => Self::FilterValues,
+            "pivot"          => Self::Pivot,
+            "get_path"|"getPath" => Self::GetPath,
+            "set_path"|"setPath" => Self::SetPath,
+            "del_path"|"delPath" => Self::DelPath,
+            "del_paths"|"delPaths" => Self::DelPaths,
+            "has_path"|"hasPath" => Self::HasPath,
+            "flatten_keys"|"flattenKeys" => Self::FlattenKeys,
+            "unflatten_keys"|"unflattenKeys" => Self::UnflattenKeys,
+            "to_csv"|"toCsv" => Self::ToCsv,
+            "to_tsv"|"toTsv" => Self::ToTsv,
+            "or"             => Self::Or,
+            "has"            => Self::Has,
+            "missing"        => Self::Missing,
+            "includes"|"contains" => Self::Includes,
+            "set"            => Self::Set,
+            "update"         => Self::Update,
+            "upper"          => Self::Upper,
+            "lower"          => Self::Lower,
+            "capitalize"     => Self::Capitalize,
+            "title_case"|"titleCase" => Self::TitleCase,
+            "trim"           => Self::Trim,
+            "trim_left"|"trimLeft"|"lstrip" => Self::TrimLeft,
+            "trim_right"|"trimRight"|"rstrip" => Self::TrimRight,
+            "lines"          => Self::Lines,
+            "words"          => Self::Words,
+            "chars"          => Self::Chars,
+            "to_number"|"toNumber" => Self::ToNumber,
+            "to_bool"|"toBool" => Self::ToBool,
+            "to_base64"|"toBase64" => Self::ToBase64,
+            "from_base64"|"fromBase64" => Self::FromBase64,
+            "url_encode"|"urlEncode" => Self::UrlEncode,
+            "url_decode"|"urlDecode" => Self::UrlDecode,
+            "html_escape"|"htmlEscape" => Self::HtmlEscape,
+            "html_unescape"|"htmlUnescape" => Self::HtmlUnescape,
+            "repeat"         => Self::Repeat,
+            "pad_left"|"padLeft" => Self::PadLeft,
+            "pad_right"|"padRight" => Self::PadRight,
+            "starts_with"|"startsWith" => Self::StartsWith,
+            "ends_with"|"endsWith" => Self::EndsWith,
+            "index_of"|"indexOf" => Self::IndexOf,
+            "last_index_of"|"lastIndexOf" => Self::LastIndexOf,
+            "replace"        => Self::Replace,
+            "replace_all"|"replaceAll" => Self::ReplaceAll,
+            "strip_prefix"|"stripPrefix" => Self::StripPrefix,
+            "strip_suffix"|"stripSuffix" => Self::StripSuffix,
+            "slice"          => Self::Slice,
+            "split"          => Self::Split,
+            "indent"         => Self::Indent,
+            "dedent"         => Self::Dedent,
+            "matches"        => Self::Matches,
+            "scan"           => Self::Scan,
+            _                => Self::Unknown,
+        }
+    }
+
+    /// True for methods that receive a sub-program to run per item.
+    fn is_lambda_method(self) -> bool {
+        matches!(self,
+            Self::Filter | Self::Map | Self::FlatMap | Self::Sort |
+            Self::Any | Self::All | Self::Count | Self::GroupBy |
+            Self::CountBy | Self::IndexBy | Self::TakeWhile |
+            Self::DropWhile | Self::Accumulate | Self::Partition |
+            Self::TransformKeys | Self::TransformValues |
+            Self::FilterKeys | Self::FilterValues | Self::Pivot | Self::Update
+        )
+    }
+}
+
+// ── Compiled sub-structures ───────────────────────────────────────────────────
+
+/// A compiled method call stored inside `Opcode::CallMethod`.
+#[derive(Debug, Clone)]
+pub struct CompiledCall {
+    pub method:   BuiltinMethod,
+    pub name:     Arc<str>,
+    /// Compiled lambda/expression sub-programs (one per arg, in order).
+    pub sub_progs: Arc<[Arc<Program>]>,
+    /// Original AST args kept for non-lambda dispatch fallback.
+    pub orig_args: Arc<[Arg]>,
+}
+
+/// A compiled object field for `Opcode::MakeObj`.
+#[derive(Debug, Clone)]
+pub enum CompiledObjEntry {
+    Short(Arc<str>),
+    Kv     { key: Arc<str>, prog: Arc<Program>, optional: bool },
+    Dynamic { key: Arc<Program>, val: Arc<Program> },
+    Spread(Arc<Program>),
+}
+
+/// A compiled f-string interpolation part.
+#[derive(Debug, Clone)]
+pub enum CompiledFSPart {
+    Lit(Arc<str>),
+    Interp { prog: Arc<Program>, fmt: Option<FmtSpec> },
+}
+
+/// Compiled bind-object destructure spec.
+#[derive(Debug, Clone)]
+pub struct BindObjSpec {
+    pub fields: Arc<[Arc<str>]>,
+    pub rest:   Option<Arc<str>>,
+}
+
+/// Compiled comprehension spec.
+#[derive(Debug, Clone)]
+pub struct CompSpec {
+    pub expr: Arc<Program>,
+    pub vars: Arc<[Arc<str>]>,
+    pub iter: Arc<Program>,
+    pub cond: Option<Arc<Program>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DictCompSpec {
+    pub key:  Arc<Program>,
+    pub val:  Arc<Program>,
+    pub vars: Arc<[Arc<str>]>,
+    pub iter: Arc<Program>,
+    pub cond: Option<Arc<Program>>,
+}
+
+// ── Opcode ────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub enum Opcode {
+    // ── Literals ─────────────────────────────────────────────────────────────
+    PushNull,
+    PushBool(bool),
+    PushInt(i64),
+    PushFloat(f64),
+    PushStr(Arc<str>),
+
+    // ── Context ───────────────────────────────────────────────────────────────
+    PushRoot,
+    PushCurrent,
+
+    // ── Navigation ────────────────────────────────────────────────────────────
+    GetField(Arc<str>),
+    GetIndex(i64),
+    GetSlice(Option<i64>, Option<i64>),
+    DynIndex(Arc<Program>),
+    OptField(Arc<str>),
+    Descendant(Arc<str>),
+    DescendAll,
+    InlineFilter(Arc<Program>),
+    Quantifier(QuantifierKind),
+
+    // ── Peephole fusions ──────────────────────────────────────────────────────
+    /// PushRoot + GetField* fused — resolves chain via pointer arithmetic.
+    RootChain(Arc<[Arc<str>]>),
+    /// filter(pred) + len/count fused — counts matches without temp array.
+    FilterCount(Arc<Program>),
+    /// filter(pred) + First quantifier fused — early-exit on first match.
+    FindFirst(Arc<Program>),
+    /// filter(pred) + One quantifier fused — early-exit at 2nd match (error).
+    FindOne(Arc<Program>),
+    /// filter(pred) + map(f) fused — single pass, no intermediate array.
+    FilterMap { pred: Arc<Program>, map: Arc<Program> },
+    /// filter(p1) + filter(p2) fused — single pass, both predicates.
+    FilterFilter { p1: Arc<Program>, p2: Arc<Program> },
+    /// map(f1) + map(f2) fused — single pass, composed.
+    MapMap { f1: Arc<Program>, f2: Arc<Program> },
+    /// Fused `map(f).sum()` — evaluates `f` per item, accumulates numeric sum.
+    MapSum(Arc<Program>),
+    /// Fused `map(f).avg()` — evaluates `f` per item, computes mean as float.
+    MapAvg(Arc<Program>),
+    /// Fused `sort()` + `[0:n]` — partial-sort smallest N using BinaryHeap.
+    /// `asc=true` → smallest N; `asc=false` → largest N.
+    TopN { n: usize, asc: bool },
+
+    // ── Ident lookup (var, then current field) ────────────────────────────────
+    LoadIdent(Arc<str>),
+
+    // ── Binary / unary ops ────────────────────────────────────────────────────
+    Add, Sub, Mul, Div, Mod,
+    Eq, Neq, Lt, Lte, Gt, Gte, Fuzzy, Not, Neg,
+
+    // ── Short-circuit ops (embed rhs as sub-program) ──────────────────────────
+    AndOp(Arc<Program>),
+    OrOp(Arc<Program>),
+    CoalesceOp(Arc<Program>),
+
+    // ── Method calls ─────────────────────────────────────────────────────────
+    CallMethod(Arc<CompiledCall>),
+    CallOptMethod(Arc<CompiledCall>),
+
+    // ── Construction ─────────────────────────────────────────────────────────
+    MakeObj(Arc<[CompiledObjEntry]>),
+    MakeArr(Arc<[Arc<Program>]>),
+
+    // ── F-string ─────────────────────────────────────────────────────────────
+    FString(Arc<[CompiledFSPart]>),
+
+    // ── Kind check ───────────────────────────────────────────────────────────
+    KindCheck { ty: KindType, negate: bool },
+
+    // ── Pipeline helpers ──────────────────────────────────────────────────────
+    /// Pop TOS → env.current, then push it back (pass-through with context update).
+    SetCurrent,
+    /// TOS → env var by name, TOS remains (for `->` bind).
+    BindVar(Arc<str>),
+    /// Pop TOS → env var (for `let` init).
+    StoreVar(Arc<str>),
+    /// Object destructure bind: TOS obj → multiple vars.
+    BindObjDestructure(Arc<BindObjSpec>),
+    /// Array destructure bind: TOS arr → multiple vars.
+    BindArrDestructure(Arc<[Arc<str>]>),
+
+    // ── Complex (recursive sub-programs) ─────────────────────────────────────
+    LetExpr { name: Arc<str>, body: Arc<Program> },
+    ListComp(Arc<CompSpec>),
+    DictComp(Arc<DictCompSpec>),
+    SetComp(Arc<CompSpec>),
+
+    // ── Resolution cache fast-path ────────────────────────────────────────────
+    GetPointer(Arc<str>),
+}
+
+// ── Program ───────────────────────────────────────────────────────────────────
+
+/// A compiled, immutable v2 program.  Cheap to clone (`Arc` internals).
+#[derive(Debug, Clone)]
+pub struct Program {
+    pub ops:          Arc<[Opcode]>,
+    pub source:       Arc<str>,
+    pub id:           u64,
+    /// True when the program contains only structural navigation opcodes
+    /// (eligible for resolution caching).
+    pub is_structural: bool,
+}
+
+impl Program {
+    fn new(ops: Vec<Opcode>, source: &str) -> Self {
+        let id = hash_str(source);
+        let is_structural = ops.iter().all(|op| matches!(op,
+            Opcode::PushRoot | Opcode::PushCurrent |
+            Opcode::GetField(_) | Opcode::GetIndex(_) |
+            Opcode::GetSlice(..) | Opcode::OptField(_) |
+            Opcode::RootChain(_) | Opcode::GetPointer(_)
+        ));
+        Self { ops: ops.into(), source: source.into(), id, is_structural }
+    }
+}
+
+// ── Variable context (compile-time) ──────────────────────────────────────────
+
+#[derive(Clone, Default)]
+struct VarCtx {
+    known: SmallVec<[Arc<str>; 4]>,
+}
+
+impl VarCtx {
+    fn with_var(&self, name: &str) -> Self {
+        let mut v = self.clone();
+        if !v.known.iter().any(|k| k.as_ref() == name) {
+            v.known.push(Arc::from(name));
+        }
+        v
+    }
+    fn with_vars(&self, names: &[String]) -> Self {
+        let mut v = self.clone();
+        for n in names {
+            if !v.known.iter().any(|k| k.as_ref() == n.as_str()) {
+                v.known.push(Arc::from(n.as_str()));
+            }
+        }
+        v
+    }
+    fn has(&self, name: &str) -> bool {
+        self.known.iter().any(|k| k.as_ref() == name)
+    }
+}
+
+// ── Compiler ─────────────────────────────────────────────────────────────────
+
+pub struct Compiler;
+
+impl Compiler {
+    pub fn compile(expr: &Expr, source: &str) -> Program {
+        let ctx = VarCtx::default();
+        let ops = Self::optimize(Self::emit(expr, &ctx));
+        Program::new(ops, source)
+    }
+
+    pub fn compile_str(input: &str) -> Result<Program, EvalError> {
+        let expr = super::parser::parse(input)
+            .map_err(|e| EvalError(e.to_string()))?;
+        Ok(Self::compile(&expr, input))
+    }
+
+    // ── Peephole optimizer ────────────────────────────────────────────────────
+
+    fn optimize(ops: Vec<Opcode>) -> Vec<Opcode> {
+        let ops = Self::pass_root_chain(ops);
+        let ops = Self::pass_filter_count(ops);
+        let ops = Self::pass_filter_fusion(ops);
+        let ops = Self::pass_find_quantifier(ops);
+        let ops = Self::pass_strength_reduce(ops);
+        let ops = Self::pass_redundant_ops(ops);
+        let ops = Self::pass_kind_check_fold(ops);
+        let ops = Self::pass_method_const_fold(ops);
+        let ops = Self::pass_const_fold(ops);
+        ops
+    }
+
+    /// Fold built-in methods when receiver is a literal with known length/content:
+    ///   PushStr(s) + .len()    → PushInt(utf8 char count)
+    ///   PushStr(s) + .upper()  → PushStr(upper)
+    ///   PushStr(s) + .lower()  → PushStr(lower)
+    ///   PushStr(s) + .trim()   → PushStr(trim)
+    ///   MakeArr(n elems) + .len()  → PushInt(n)  (only for non-spread arrays)
+    fn pass_method_const_fold(ops: Vec<Opcode>) -> Vec<Opcode> {
+        let mut out: Vec<Opcode> = Vec::with_capacity(ops.len());
+        for op in ops {
+            if let Opcode::CallMethod(c) = &op {
+                if c.sub_progs.is_empty() {
+                    match (out.last(), c.method) {
+                        (Some(Opcode::PushStr(s)), BuiltinMethod::Len) => {
+                            let n = s.chars().count() as i64;
+                            out.pop();
+                            out.push(Opcode::PushInt(n));
+                            continue;
+                        }
+                        (Some(Opcode::PushStr(s)), BuiltinMethod::Upper) => {
+                            let u: Arc<str> = Arc::from(s.to_uppercase());
+                            out.pop();
+                            out.push(Opcode::PushStr(u));
+                            continue;
+                        }
+                        (Some(Opcode::PushStr(s)), BuiltinMethod::Lower) => {
+                            let u: Arc<str> = Arc::from(s.to_lowercase());
+                            out.pop();
+                            out.push(Opcode::PushStr(u));
+                            continue;
+                        }
+                        (Some(Opcode::PushStr(s)), BuiltinMethod::Trim) => {
+                            let u: Arc<str> = Arc::from(s.trim());
+                            out.pop();
+                            out.push(Opcode::PushStr(u));
+                            continue;
+                        }
+                        (Some(Opcode::MakeArr(progs)), BuiltinMethod::Len) => {
+                            let n = progs.len() as i64;
+                            out.pop();
+                            out.push(Opcode::PushInt(n));
+                            continue;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            out.push(op);
+        }
+        out
+    }
+
+    /// Fold `KindCheck` when its input type is a literal push:
+    ///   PushInt(n)  + KindCheck{number, neg} → PushBool(!neg)
+    ///   PushStr(_)  + KindCheck{string, neg} → PushBool(!neg)
+    ///   PushNull    + KindCheck{null, neg}   → PushBool(!neg)
+    ///   PushBool(_) + KindCheck{bool, neg}   → PushBool(!neg)
+    ///   mismatches fold to opposite.
+    fn pass_kind_check_fold(ops: Vec<Opcode>) -> Vec<Opcode> {
+        use super::analysis::{fold_kind_check, VType};
+        let mut out = Vec::with_capacity(ops.len());
+        for op in ops {
+            if let Opcode::KindCheck { ty, negate } = &op {
+                let prev_ty: Option<VType> = match out.last() {
+                    Some(Opcode::PushNull)     => Some(VType::Null),
+                    Some(Opcode::PushBool(_))  => Some(VType::Bool),
+                    Some(Opcode::PushInt(_))   => Some(VType::Int),
+                    Some(Opcode::PushFloat(_)) => Some(VType::Float),
+                    Some(Opcode::PushStr(_))   => Some(VType::Str),
+                    Some(Opcode::MakeArr(_))   => Some(VType::Arr),
+                    Some(Opcode::MakeObj(_))   => Some(VType::Obj),
+                    _ => None,
+                };
+                if let Some(vt) = prev_ty {
+                    if let Some(b) = fold_kind_check(vt, *ty, *negate) {
+                        out.pop();
+                        out.push(Opcode::PushBool(b));
+                        continue;
+                    }
+                }
+            }
+            out.push(op);
+        }
+        out
+    }
+
+    /// Fuse adjacent method calls into single-pass fused opcodes:
+    ///   filter(p) + map(f)     → FilterMap
+    ///   filter(p1) + filter(p2)→ FilterFilter
+    ///   map(f1) + map(f2)      → MapMap
+    fn pass_filter_fusion(ops: Vec<Opcode>) -> Vec<Opcode> {
+        let mut out: Vec<Opcode> = Vec::with_capacity(ops.len());
+        for op in ops {
+            if let (Opcode::CallMethod(b), Some(Opcode::CallMethod(a))) = (&op, out.last()) {
+                // Two-arg fusions (both have sub_progs)
+                if a.sub_progs.len() >= 1 && b.sub_progs.len() >= 1 {
+                    let (am, bm) = (a.method, b.method);
+                    let p1 = Arc::clone(&a.sub_progs[0]);
+                    let p2 = Arc::clone(&b.sub_progs[0]);
+                    let fused = match (am, bm) {
+                        (BuiltinMethod::Filter, BuiltinMethod::Map) =>
+                            Some(Opcode::FilterMap { pred: p1, map: p2 }),
+                        (BuiltinMethod::Filter, BuiltinMethod::Filter) =>
+                            Some(Opcode::FilterFilter { p1, p2 }),
+                        (BuiltinMethod::Map, BuiltinMethod::Map) =>
+                            Some(Opcode::MapMap { f1: p1, f2: p2 }),
+                        _ => None,
+                    };
+                    if let Some(f) = fused {
+                        out.pop();
+                        out.push(f);
+                        continue;
+                    }
+                }
+                // map(f) + sum()/avg()  →  MapSum/MapAvg  (aggregator has no sub_progs)
+                if a.method == BuiltinMethod::Map && a.sub_progs.len() >= 1
+                   && b.sub_progs.is_empty() {
+                    let f = Arc::clone(&a.sub_progs[0]);
+                    let fused = match b.method {
+                        BuiltinMethod::Sum => Some(Opcode::MapSum(f)),
+                        BuiltinMethod::Avg => Some(Opcode::MapAvg(f)),
+                        _ => None,
+                    };
+                    if let Some(o) = fused {
+                        out.pop();
+                        out.push(o);
+                        continue;
+                    }
+                }
+            }
+            out.push(op);
+        }
+        out
+    }
+
+    /// Replace expensive ops with cheaper equivalents:
+    ///   sort() + first()    → min()
+    ///   sort() + last()     → max()
+    ///   sort() + [0]        → min()
+    ///   sort() + [-1]       → max()
+    ///   reverse() + first() → last()
+    ///   reverse() + last()  → first()
+    fn pass_strength_reduce(ops: Vec<Opcode>) -> Vec<Opcode> {
+        let mut out: Vec<Opcode> = Vec::with_capacity(ops.len());
+        for op in ops {
+            // Pattern: [..., prev_method_call, current_op]
+            if let Some(Opcode::CallMethod(prev)) = out.last().cloned() {
+                let replaced = match (prev.method, &op) {
+                    // sort() + [0] → min()
+                    (BuiltinMethod::Sort, Opcode::GetIndex(0)) if prev.sub_progs.is_empty() =>
+                        Some(make_noarg_call(BuiltinMethod::Min, "min")),
+                    // sort() + [-1] → max()
+                    (BuiltinMethod::Sort, Opcode::GetIndex(-1)) if prev.sub_progs.is_empty() =>
+                        Some(make_noarg_call(BuiltinMethod::Max, "max")),
+                    // sort() + first() → min()
+                    (BuiltinMethod::Sort, Opcode::CallMethod(next))
+                        if prev.sub_progs.is_empty() && next.method == BuiltinMethod::First =>
+                        Some(make_noarg_call(BuiltinMethod::Min, "min")),
+                    // sort() + last() → max()
+                    (BuiltinMethod::Sort, Opcode::CallMethod(next))
+                        if prev.sub_progs.is_empty() && next.method == BuiltinMethod::Last =>
+                        Some(make_noarg_call(BuiltinMethod::Max, "max")),
+                    // reverse() + first() → last()
+                    (BuiltinMethod::Reverse, Opcode::CallMethod(next))
+                        if next.method == BuiltinMethod::First =>
+                        Some(make_noarg_call(BuiltinMethod::Last, "last")),
+                    // reverse() + last() → first()
+                    (BuiltinMethod::Reverse, Opcode::CallMethod(next))
+                        if next.method == BuiltinMethod::Last =>
+                        Some(make_noarg_call(BuiltinMethod::First, "first")),
+                    // sort() + [0:n] → TopN(n, asc=true)
+                    (BuiltinMethod::Sort, Opcode::GetSlice(from, Some(to)))
+                        if prev.sub_progs.is_empty()
+                           && (from.is_none() || *from == Some(0))
+                           && *to > 0 =>
+                        Some(Opcode::TopN { n: *to as usize, asc: true }),
+                    _ => None,
+                };
+                if let Some(rep) = replaced {
+                    out.pop();
+                    out.push(rep);
+                    continue;
+                }
+            }
+            out.push(op);
+        }
+        out
+    }
+
+    /// Fuse `PushRoot + GetField(k1) + GetField(k2) ...` → `RootChain([k1,k2,...])`.
+    fn pass_root_chain(ops: Vec<Opcode>) -> Vec<Opcode> {
+        let mut out = Vec::with_capacity(ops.len());
+        let mut it = ops.into_iter().peekable();
+        while let Some(op) = it.next() {
+            if matches!(op, Opcode::PushRoot) {
+                let mut chain: Vec<Arc<str>> = Vec::new();
+                while let Some(Opcode::GetField(_)) = it.peek() {
+                    if let Some(Opcode::GetField(k)) = it.next() {
+                        chain.push(k);
+                    }
+                }
+                if chain.is_empty() {
+                    out.push(Opcode::PushRoot);
+                } else {
+                    out.push(Opcode::RootChain(chain.into()));
+                }
+            } else {
+                out.push(op);
+            }
+        }
+        out
+    }
+
+    /// Fuse `CallMethod(filter/pred) + CallMethod(len/count)` → `FilterCount(pred)`.
+    fn pass_filter_count(ops: Vec<Opcode>) -> Vec<Opcode> {
+        let mut out = Vec::with_capacity(ops.len());
+        let mut it = ops.into_iter().peekable();
+        while let Some(op) = it.next() {
+            if let Opcode::CallMethod(ref call) = op {
+                if call.method == BuiltinMethod::Filter {
+                    let is_len = matches!(it.peek(),
+                        Some(Opcode::CallMethod(c))
+                            if c.method == BuiltinMethod::Len || c.method == BuiltinMethod::Count
+                    );
+                    if is_len && !call.sub_progs.is_empty() {
+                        let pred = Arc::clone(&call.sub_progs[0]);
+                        it.next(); // consume Len/Count
+                        out.push(Opcode::FilterCount(pred));
+                        continue;
+                    }
+                }
+            }
+            out.push(op);
+        }
+        out
+    }
+
+    /// Fuse `InlineFilter(pred) + Quantifier(First/One)` → `FindFirst/FindOne(pred)`.
+    /// Also fuses `CallMethod(Filter, pred) + Quantifier(...)` for explicit `.filter()`.
+    fn pass_find_quantifier(ops: Vec<Opcode>) -> Vec<Opcode> {
+        let mut out = Vec::with_capacity(ops.len());
+        let mut it = ops.into_iter().peekable();
+        while let Some(op) = it.next() {
+            let pred_opt: Option<Arc<Program>> = match &op {
+                Opcode::InlineFilter(p) => Some(Arc::clone(p)),
+                Opcode::CallMethod(c) if c.method == BuiltinMethod::Filter && !c.sub_progs.is_empty()
+                    => Some(Arc::clone(&c.sub_progs[0])),
+                _ => None,
+            };
+            if let Some(pred) = pred_opt {
+                match it.peek() {
+                    Some(Opcode::Quantifier(QuantifierKind::First)) => {
+                        it.next();
+                        out.push(Opcode::FindFirst(pred));
+                        continue;
+                    }
+                    Some(Opcode::Quantifier(QuantifierKind::One)) => {
+                        it.next();
+                        out.push(Opcode::FindOne(pred));
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+            out.push(op);
+        }
+        out
+    }
+
+    /// Eliminate redundant adjacent method calls:
+    ///   reverse() + reverse()         → identity (both dropped)
+    ///   unique() + unique()           → unique()
+    ///   compact() + compact()         → compact()
+    ///   sort() + sort(k)              → sort(k)      (later sort wins on same-array)
+    ///   sort(k) + sort(k)             → sort(k)
+    ///   Quantifier + Quantifier       → second only  (first wrap is scalar anyway)
+    fn pass_redundant_ops(ops: Vec<Opcode>) -> Vec<Opcode> {
+        let mut out: Vec<Opcode> = Vec::with_capacity(ops.len());
+        for op in ops {
+            match (&op, out.last()) {
+                // reverse + reverse: drop both
+                (Opcode::CallMethod(b), Some(Opcode::CallMethod(a)))
+                    if a.method == BuiltinMethod::Reverse && b.method == BuiltinMethod::Reverse =>
+                {
+                    out.pop();
+                    continue;
+                }
+                // idempotent method pairs: keep second only (drop first)
+                (Opcode::CallMethod(b), Some(Opcode::CallMethod(a)))
+                    if a.method == b.method && matches!(a.method,
+                        BuiltinMethod::Unique | BuiltinMethod::Compact)
+                        && a.sub_progs.is_empty() && b.sub_progs.is_empty() =>
+                {
+                    out.pop();
+                    out.push(op);
+                    continue;
+                }
+                // sort + sort(_): later sort wins, drop the first
+                (Opcode::CallMethod(b), Some(Opcode::CallMethod(a)))
+                    if a.method == BuiltinMethod::Sort && b.method == BuiltinMethod::Sort =>
+                {
+                    out.pop();
+                    out.push(op);
+                    continue;
+                }
+                // Quantifier + Quantifier: second wins (first unwraps scalar,
+                // second is no-op on scalar — but keeping second preserves error
+                // semantics of `!`). Drop first.
+                (Opcode::Quantifier(_), Some(Opcode::Quantifier(_))) => {
+                    out.pop();
+                    out.push(op);
+                    continue;
+                }
+                // reverse + last → first (strength reduction fallback after sort)
+                // already handled in pass_strength_reduce
+                // Not + Not: double negation → drop both
+                (Opcode::Not, Some(Opcode::Not)) => {
+                    out.pop();
+                    continue;
+                }
+                // Neg + Neg: --x → x
+                (Opcode::Neg, Some(Opcode::Neg)) => {
+                    out.pop();
+                    continue;
+                }
+                _ => {}
+            }
+            out.push(op);
+        }
+        out
+    }
+
+    /// Constant-fold adjacent integer arithmetic + bool short-circuits.
+    fn pass_const_fold(ops: Vec<Opcode>) -> Vec<Opcode> {
+        let mut out = Vec::with_capacity(ops.len());
+        let mut i = 0;
+        while i < ops.len() {
+            // 2-op bool short-circuit folds:
+            //   PushBool(false) + AndOp(_)  → PushBool(false)
+            //   PushBool(true)  + OrOp(_)   → PushBool(true)
+            if i + 1 < ops.len() {
+                let folded = match (&ops[i], &ops[i+1]) {
+                    (Opcode::PushBool(false), Opcode::AndOp(_)) =>
+                        Some(Opcode::PushBool(false)),
+                    (Opcode::PushBool(true),  Opcode::OrOp(_)) =>
+                        Some(Opcode::PushBool(true)),
+                    _ => None,
+                };
+                if let Some(folded) = folded {
+                    out.push(folded);
+                    i += 2;
+                    continue;
+                }
+            }
+            // 2-op unary folds
+            if i + 1 < ops.len() {
+                let folded = match (&ops[i], &ops[i+1]) {
+                    (Opcode::PushBool(b), Opcode::Not) =>
+                        Some(Opcode::PushBool(!b)),
+                    (Opcode::PushInt(n), Opcode::Neg) =>
+                        Some(Opcode::PushInt(-n)),
+                    (Opcode::PushFloat(f), Opcode::Neg) =>
+                        Some(Opcode::PushFloat(-f)),
+                    _ => None,
+                };
+                if let Some(folded) = folded {
+                    out.push(folded);
+                    i += 2;
+                    continue;
+                }
+            }
+            // 3-op arithmetic + comparison folds
+            if i + 2 < ops.len() {
+                let folded = match (&ops[i], &ops[i+1], &ops[i+2]) {
+                    (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Add) =>
+                        Some(Opcode::PushInt(a + b)),
+                    (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Sub) =>
+                        Some(Opcode::PushInt(a - b)),
+                    (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Mul) =>
+                        Some(Opcode::PushInt(a * b)),
+                    (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Mod) if *b != 0 =>
+                        Some(Opcode::PushInt(a % b)),
+                    (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Div) if *b != 0 =>
+                        Some(Opcode::PushFloat(*a as f64 / *b as f64)),
+                    (Opcode::PushFloat(a), Opcode::PushFloat(b), Opcode::Add) =>
+                        Some(Opcode::PushFloat(a + b)),
+                    (Opcode::PushFloat(a), Opcode::PushFloat(b), Opcode::Sub) =>
+                        Some(Opcode::PushFloat(a - b)),
+                    (Opcode::PushFloat(a), Opcode::PushFloat(b), Opcode::Mul) =>
+                        Some(Opcode::PushFloat(a * b)),
+                    (Opcode::PushFloat(a), Opcode::PushFloat(b), Opcode::Div) if *b != 0.0 =>
+                        Some(Opcode::PushFloat(a / b)),
+                    (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Eq) =>
+                        Some(Opcode::PushBool(a == b)),
+                    (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Neq) =>
+                        Some(Opcode::PushBool(a != b)),
+                    (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Lt) =>
+                        Some(Opcode::PushBool(a < b)),
+                    (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Lte) =>
+                        Some(Opcode::PushBool(a <= b)),
+                    (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Gt) =>
+                        Some(Opcode::PushBool(a > b)),
+                    (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Gte) =>
+                        Some(Opcode::PushBool(a >= b)),
+                    (Opcode::PushStr(a), Opcode::PushStr(b), Opcode::Eq) =>
+                        Some(Opcode::PushBool(a == b)),
+                    (Opcode::PushStr(a), Opcode::PushStr(b), Opcode::Neq) =>
+                        Some(Opcode::PushBool(a != b)),
+                    (Opcode::PushBool(a), Opcode::PushBool(b), Opcode::Eq) =>
+                        Some(Opcode::PushBool(a == b)),
+                    _ => None,
+                };
+                if let Some(folded) = folded {
+                    out.push(folded);
+                    i += 3;
+                    continue;
+                }
+            }
+            out.push(ops[i].clone());
+            i += 1;
+        }
+        out
+    }
+
+    // ── Main emit ─────────────────────────────────────────────────────────────
+
+    fn emit(expr: &Expr, ctx: &VarCtx) -> Vec<Opcode> {
+        let mut ops = Vec::new();
+        Self::emit_into(expr, ctx, &mut ops);
+        ops
+    }
+
+    fn emit_into(expr: &Expr, ctx: &VarCtx, ops: &mut Vec<Opcode>) {
+        match expr {
+            Expr::Null    => ops.push(Opcode::PushNull),
+            Expr::Bool(b) => ops.push(Opcode::PushBool(*b)),
+            Expr::Int(n)  => ops.push(Opcode::PushInt(*n)),
+            Expr::Float(f)=> ops.push(Opcode::PushFloat(*f)),
+            Expr::Str(s)  => ops.push(Opcode::PushStr(Arc::from(s.as_str()))),
+            Expr::Root    => ops.push(Opcode::PushRoot),
+            Expr::Current => ops.push(Opcode::PushCurrent),
+
+            Expr::FString(parts) => {
+                let compiled: Vec<CompiledFSPart> = parts.iter().map(|p| match p {
+                    FStringPart::Lit(s) => CompiledFSPart::Lit(Arc::from(s.as_str())),
+                    FStringPart::Interp { expr, fmt } => CompiledFSPart::Interp {
+                        prog: Arc::new(Self::compile_sub(expr, ctx)),
+                        fmt: fmt.clone(),
+                    },
+                }).collect();
+                ops.push(Opcode::FString(compiled.into()));
+            }
+
+            Expr::Ident(name) => ops.push(Opcode::LoadIdent(Arc::from(name.as_str()))),
+
+            Expr::Chain(base, steps) => {
+                Self::emit_into(base, ctx, ops);
+                for step in steps {
+                    Self::emit_step(step, ctx, ops);
+                }
+            }
+
+            Expr::UnaryNeg(e) => {
+                Self::emit_into(e, ctx, ops);
+                ops.push(Opcode::Neg);
+            }
+            Expr::Not(e) => {
+                Self::emit_into(e, ctx, ops);
+                ops.push(Opcode::Not);
+            }
+
+            Expr::BinOp(l, op, r) => Self::emit_binop(l, *op, r, ctx, ops),
+
+            Expr::Coalesce(lhs, rhs) => {
+                Self::emit_into(lhs, ctx, ops);
+                let rhs_prog = Arc::new(Self::compile_sub(rhs, ctx));
+                ops.push(Opcode::CoalesceOp(rhs_prog));
+            }
+
+            Expr::Kind { expr, ty, negate } => {
+                Self::emit_into(expr, ctx, ops);
+                ops.push(Opcode::KindCheck { ty: *ty, negate: *negate });
+            }
+
+            Expr::Object(fields) => {
+                let entries: Vec<CompiledObjEntry> = fields.iter().map(|f| match f {
+                    ObjField::Short(name) =>
+                        CompiledObjEntry::Short(Arc::from(name.as_str())),
+                    ObjField::Kv { key, val, optional } =>
+                        CompiledObjEntry::Kv {
+                            key: Arc::from(key.as_str()),
+                            prog: Arc::new(Self::compile_sub(val, ctx)),
+                            optional: *optional,
+                        },
+                    ObjField::Dynamic { key, val } =>
+                        CompiledObjEntry::Dynamic {
+                            key: Arc::new(Self::compile_sub(key, ctx)),
+                            val: Arc::new(Self::compile_sub(val, ctx)),
+                        },
+                    ObjField::Spread(e) =>
+                        CompiledObjEntry::Spread(Arc::new(Self::compile_sub(e, ctx))),
+                }).collect();
+                ops.push(Opcode::MakeObj(entries.into()));
+            }
+
+            Expr::Array(elems) => {
+                // Compile each elem as a sub-program.
+                // Spread elems are handled by a special marker.
+                let progs: Vec<Arc<Program>> = elems.iter().map(|e| match e {
+                    ArrayElem::Expr(ex)   => Arc::new(Self::compile_sub(ex, ctx)),
+                    // Spread: compile the inner expr with a spread marker opcode
+                    ArrayElem::Spread(ex) => {
+                        let mut sub = Self::emit(ex, ctx);
+                        // Prepend a sentinel to distinguish spread from normal
+                        sub.insert(0, Opcode::PushNull); // placeholder
+                        // Actually, encode spread differently via a wrapper
+                        Arc::new(Self::compile_array_spread(ex, ctx))
+                    }
+                }).collect();
+                // Simpler: build a mixed elem list
+                let progs = elems.iter().map(|e| match e {
+                    ArrayElem::Expr(ex) => {
+                        Arc::new(Self::compile_sub(ex, ctx))
+                    }
+                    ArrayElem::Spread(ex) => {
+                        Arc::new(Self::compile_sub_spread(ex, ctx))
+                    }
+                }).collect::<Vec<_>>();
+                ops.push(Opcode::MakeArr(progs.into()));
+            }
+
+            Expr::Pipeline { base, steps } => {
+                Self::emit_pipeline(base, steps, ctx, ops);
+            }
+
+            Expr::ListComp { expr, vars, iter, cond } => {
+                let inner_ctx = ctx.with_vars(vars);
+                ops.push(Opcode::ListComp(Arc::new(CompSpec {
+                    expr: Arc::new(Self::compile_sub(expr, &inner_ctx)),
+                    vars: vars.iter().map(|v| Arc::from(v.as_str())).collect::<Vec<_>>().into(),
+                    iter: Arc::new(Self::compile_sub(iter, ctx)),
+                    cond: cond.as_ref().map(|c| Arc::new(Self::compile_sub(c, &inner_ctx))),
+                })));
+            }
+
+            Expr::DictComp { key, val, vars, iter, cond } => {
+                let inner_ctx = ctx.with_vars(vars);
+                ops.push(Opcode::DictComp(Arc::new(DictCompSpec {
+                    key:  Arc::new(Self::compile_sub(key, &inner_ctx)),
+                    val:  Arc::new(Self::compile_sub(val, &inner_ctx)),
+                    vars: vars.iter().map(|v| Arc::from(v.as_str())).collect::<Vec<_>>().into(),
+                    iter: Arc::new(Self::compile_sub(iter, ctx)),
+                    cond: cond.as_ref().map(|c| Arc::new(Self::compile_sub(c, &inner_ctx))),
+                })));
+            }
+
+            Expr::SetComp { expr, vars, iter, cond } |
+            Expr::GenComp { expr, vars, iter, cond } => {
+                let inner_ctx = ctx.with_vars(vars);
+                ops.push(Opcode::SetComp(Arc::new(CompSpec {
+                    expr: Arc::new(Self::compile_sub(expr, &inner_ctx)),
+                    vars: vars.iter().map(|v| Arc::from(v.as_str())).collect::<Vec<_>>().into(),
+                    iter: Arc::new(Self::compile_sub(iter, ctx)),
+                    cond: cond.as_ref().map(|c| Arc::new(Self::compile_sub(c, &inner_ctx))),
+                })));
+            }
+
+            Expr::Lambda { .. } => {
+                // Lambdas as standalone values are errors; they only appear as args
+                ops.push(Opcode::PushNull);
+            }
+
+            Expr::Let { name, init, body } => {
+                // Dead-let: if body never references `name` and init is pure,
+                // drop the binding entirely and emit body only.
+                if super::analysis::expr_is_pure(init)
+                    && !super::analysis::expr_uses_ident(body, name) {
+                    Self::emit_into(body, ctx, ops);
+                } else {
+                    Self::emit_into(init, ctx, ops);
+                    let body_ctx = ctx.with_var(name);
+                    let body_prog = Arc::new(Self::compile_sub(body, &body_ctx));
+                    ops.push(Opcode::LetExpr { name: Arc::from(name.as_str()), body: body_prog });
+                }
+            }
+
+            Expr::GlobalCall { name, args } => {
+                // Compile as a sequence of sub-progs + a special dispatch
+                let sub_progs: Vec<Arc<Program>> = args.iter().map(|a| match a {
+                    Arg::Pos(e) | Arg::Named(_, e) => Arc::new(Self::compile_sub(e, ctx)),
+                }).collect();
+                let call = Arc::new(CompiledCall {
+                    method:    BuiltinMethod::Unknown,
+                    name:      Arc::from(name.as_str()),
+                    sub_progs: sub_progs.into(),
+                    orig_args: args.iter().cloned().collect::<Vec<_>>().into(),
+                });
+                ops.push(Opcode::PushRoot); // global calls need root pushed first
+                ops.push(Opcode::CallMethod(call));
+            }
+        }
+    }
+
+    fn emit_step(step: &Step, ctx: &VarCtx, ops: &mut Vec<Opcode>) {
+        match step {
+            Step::Field(name)    => ops.push(Opcode::GetField(Arc::from(name.as_str()))),
+            Step::OptField(name) => ops.push(Opcode::OptField(Arc::from(name.as_str()))),
+            Step::Descendant(n)  => ops.push(Opcode::Descendant(Arc::from(n.as_str()))),
+            Step::DescendAll     => ops.push(Opcode::DescendAll),
+            Step::Index(i)       => ops.push(Opcode::GetIndex(*i)),
+            Step::DynIndex(e)    => ops.push(Opcode::DynIndex(Arc::new(Self::compile_sub(e, ctx)))),
+            Step::Slice(a, b)    => ops.push(Opcode::GetSlice(*a, *b)),
+            Step::Method(name, method_args) => {
+                let call = Self::compile_call(name, method_args, ctx);
+                ops.push(Opcode::CallMethod(Arc::new(call)));
+            }
+            Step::OptMethod(name, method_args) => {
+                let call = Self::compile_call(name, method_args, ctx);
+                ops.push(Opcode::CallOptMethod(Arc::new(call)));
+            }
+            Step::InlineFilter(pred) => {
+                ops.push(Opcode::InlineFilter(Arc::new(Self::compile_sub(pred, ctx))));
+            }
+            Step::Quantifier(k) => ops.push(Opcode::Quantifier(*k)),
+        }
+    }
+
+    fn compile_call(name: &str, args: &[Arg], ctx: &VarCtx) -> CompiledCall {
+        let method = BuiltinMethod::from_name(name);
+        let sub_progs: Vec<Arc<Program>> = args.iter().map(|a| match a {
+            Arg::Pos(e) | Arg::Named(_, e) => Arc::new(Self::compile_lambda_or_expr(e, ctx)),
+        }).collect();
+        CompiledCall {
+            method,
+            name: Arc::from(name),
+            sub_progs: sub_progs.into(),
+            orig_args: args.iter().cloned().collect::<Vec<_>>().into(),
+        }
+    }
+
+    /// Compile an argument expression; for lambdas, the lambda param becomes a
+    /// known var in the inner context so `Ident(param)` emits `LoadIdent`.
+    fn compile_lambda_or_expr(expr: &Expr, ctx: &VarCtx) -> Program {
+        match expr {
+            Expr::Lambda { params, body } => {
+                let inner = ctx.with_vars(params);
+                Self::compile_sub(body, &inner)
+            }
+            other => Self::compile_sub(other, ctx),
+        }
+    }
+
+    fn emit_binop(l: &Expr, op: BinOp, r: &Expr, ctx: &VarCtx, ops: &mut Vec<Opcode>) {
+        match op {
+            BinOp::And => {
+                Self::emit_into(l, ctx, ops);
+                let rhs_prog = Arc::new(Self::compile_sub(r, ctx));
+                ops.push(Opcode::AndOp(rhs_prog));
+            }
+            BinOp::Or => {
+                Self::emit_into(l, ctx, ops);
+                let rhs_prog = Arc::new(Self::compile_sub(r, ctx));
+                ops.push(Opcode::OrOp(rhs_prog));
+            }
+            BinOp::Add => { Self::emit_into(l, ctx, ops); Self::emit_into(r, ctx, ops); ops.push(Opcode::Add); }
+            BinOp::Sub => { Self::emit_into(l, ctx, ops); Self::emit_into(r, ctx, ops); ops.push(Opcode::Sub); }
+            BinOp::Mul => { Self::emit_into(l, ctx, ops); Self::emit_into(r, ctx, ops); ops.push(Opcode::Mul); }
+            BinOp::Div => { Self::emit_into(l, ctx, ops); Self::emit_into(r, ctx, ops); ops.push(Opcode::Div); }
+            BinOp::Mod => { Self::emit_into(l, ctx, ops); Self::emit_into(r, ctx, ops); ops.push(Opcode::Mod); }
+            BinOp::Eq  => { Self::emit_into(l, ctx, ops); Self::emit_into(r, ctx, ops); ops.push(Opcode::Eq); }
+            BinOp::Neq => { Self::emit_into(l, ctx, ops); Self::emit_into(r, ctx, ops); ops.push(Opcode::Neq); }
+            BinOp::Lt  => { Self::emit_into(l, ctx, ops); Self::emit_into(r, ctx, ops); ops.push(Opcode::Lt); }
+            BinOp::Lte => { Self::emit_into(l, ctx, ops); Self::emit_into(r, ctx, ops); ops.push(Opcode::Lte); }
+            BinOp::Gt  => { Self::emit_into(l, ctx, ops); Self::emit_into(r, ctx, ops); ops.push(Opcode::Gt); }
+            BinOp::Gte => { Self::emit_into(l, ctx, ops); Self::emit_into(r, ctx, ops); ops.push(Opcode::Gte); }
+            BinOp::Fuzzy => { Self::emit_into(l, ctx, ops); Self::emit_into(r, ctx, ops); ops.push(Opcode::Fuzzy); }
+        }
+    }
+
+    fn emit_pipeline(base: &Expr, steps: &[PipeStep], ctx: &VarCtx, ops: &mut Vec<Opcode>) {
+        Self::emit_into(base, ctx, ops);
+        let mut cur_ctx = ctx.clone();
+        for step in steps {
+            match step {
+                PipeStep::Forward(rhs) => {
+                    Self::emit_pipe_forward(rhs, &cur_ctx, ops);
+                }
+                PipeStep::Bind(target) => {
+                    Self::emit_bind(target, &mut cur_ctx, ops);
+                }
+            }
+        }
+    }
+
+    fn emit_pipe_forward(rhs: &Expr, ctx: &VarCtx, ops: &mut Vec<Opcode>) {
+        match rhs {
+            Expr::Ident(name) if !ctx.has(name) => {
+                // No-arg method call on TOS
+                let call = CompiledCall {
+                    method:    BuiltinMethod::from_name(name),
+                    name:      Arc::from(name.as_str()),
+                    sub_progs: Arc::from(&[] as &[Arc<Program>]),
+                    orig_args: Arc::from(&[] as &[Arg]),
+                };
+                ops.push(Opcode::CallMethod(Arc::new(call)));
+            }
+            Expr::Chain(base, steps) if !steps.is_empty() => {
+                if let Expr::Ident(name) = base.as_ref() {
+                    if !ctx.has(name) {
+                        // method(args...) — base is method, steps are chained
+                        let call = CompiledCall {
+                            method:    BuiltinMethod::from_name(name),
+                            name:      Arc::from(name.as_str()),
+                            sub_progs: Arc::from(&[] as &[Arc<Program>]),
+                            orig_args: Arc::from(&[] as &[Arg]),
+                        };
+                        ops.push(Opcode::CallMethod(Arc::new(call)));
+                        for step in steps { Self::emit_step(step, ctx, ops); }
+                        return;
+                    }
+                }
+                ops.push(Opcode::SetCurrent);
+                Self::emit_into(rhs, ctx, ops);
+            }
+            _ => {
+                // Arbitrary expression; set current to pipe input, then eval
+                ops.push(Opcode::SetCurrent);
+                Self::emit_into(rhs, ctx, ops);
+            }
+        }
+    }
+
+    fn emit_bind(target: &BindTarget, ctx: &mut VarCtx, ops: &mut Vec<Opcode>) {
+        match target {
+            BindTarget::Name(name) => {
+                ops.push(Opcode::BindVar(Arc::from(name.as_str())));
+                *ctx = ctx.with_var(name);
+            }
+            BindTarget::Obj { fields, rest } => {
+                let spec = BindObjSpec {
+                    fields: fields.iter().map(|f| Arc::from(f.as_str())).collect::<Vec<_>>().into(),
+                    rest: rest.as_ref().map(|r| Arc::from(r.as_str())),
+                };
+                ops.push(Opcode::BindObjDestructure(Arc::new(spec)));
+                for f in fields { *ctx = ctx.with_var(f); }
+                if let Some(r) = rest { *ctx = ctx.with_var(r); }
+            }
+            BindTarget::Arr(names) => {
+                let ns: Vec<Arc<str>> = names.iter().map(|n| Arc::from(n.as_str())).collect();
+                ops.push(Opcode::BindArrDestructure(ns.into()));
+                for n in names { *ctx = ctx.with_var(n); }
+            }
+        }
+    }
+
+    fn compile_sub(expr: &Expr, ctx: &VarCtx) -> Program {
+        let ops = Self::optimize(Self::emit(expr, ctx));
+        Program::new(ops, "<sub>")
+    }
+
+    fn compile_array_spread(_expr: &Expr, _ctx: &VarCtx) -> Program {
+        // Not reached — handled in MakeArr execution
+        Program::new(vec![], "<spread>")
+    }
+
+    /// Compile a spread array element — wrapped with a special marker.
+    fn compile_sub_spread(expr: &Expr, ctx: &VarCtx) -> Program {
+        let mut ops = Self::emit(expr, ctx);
+        // Prefix with a sentinel bool to mark this as a spread
+        ops.insert(0, Opcode::PushBool(true));
+        // Append a sentinel for reading: bool(true) + actual val
+        // Actually use a dedicated approach: GetSlice-like marker
+        // For simplicity, just compile the expr normally;
+        // MakeArr handles spread by checking if the result is an array
+        // when the corresponding ArrayElem is Spread.
+        // Re-do: just compile normally, MakeArr knows which slots are spreads.
+        Self::compile_sub(expr, ctx) // caller has separate spread tracking
+    }
+}
+
+// ── Path cache ────────────────────────────────────────────────────────────────
+//
+// Key: (doc_hash, json_pointer) → Val
+//
+// Doc-scoped (no program_id): any program resolving the same path on the same
+// document gets a hit.  Intermediate nodes are cached so a prefix of a longer
+// path can be reused without re-traversal.
+
+struct PathCache {
+    /// doc_hash → (pointer_string → Val)
+    docs:     HashMap<u64, HashMap<Arc<str>, Val>>,
+    /// FIFO eviction order
+    order:    VecDeque<(u64, Arc<str>)>,
+    capacity: usize,
+}
+
+impl PathCache {
+    fn new(cap: usize) -> Self {
+        Self {
+            docs:     HashMap::new(),
+            order:    VecDeque::with_capacity(cap),
+            capacity: cap,
+        }
+    }
+
+    /// O(1) immutable lookup — returns cloned Val (Val::clone is O(1)).
+    #[inline]
+    fn get(&self, doc_hash: u64, ptr: &str) -> Option<Val> {
+        self.docs.get(&doc_hash)?.get(ptr).cloned()
+    }
+
+    /// O(1) existence check without cloning.
+    #[inline]
+    fn contains(&self, doc_hash: u64, ptr: &str) -> bool {
+        self.docs.get(&doc_hash).map_or(false, |m| m.contains_key(ptr))
+    }
+
+    fn insert(&mut self, doc_hash: u64, ptr: Arc<str>, val: Val) {
+        if self.order.len() >= self.capacity {
+            if let Some((old_hash, old_ptr)) = self.order.pop_front() {
+                if let Some(inner) = self.docs.get_mut(&old_hash) {
+                    inner.remove(old_ptr.as_ref());
+                    if inner.is_empty() { self.docs.remove(&old_hash); }
+                }
+            }
+        }
+        self.order.push_back((doc_hash, ptr.clone()));
+        self.docs.entry(doc_hash).or_insert_with(HashMap::new).insert(ptr, val);
+    }
+
+    fn len(&self) -> usize { self.order.len() }
+}
+
+// ── VM ────────────────────────────────────────────────────────────────────────
+
+/// High-performance v2 virtual machine.
+///
+/// Maintains:
+/// - **Compile cache** — expression string → `Program` (parse + compile once).
+/// - **Path cache** — `(doc_hash, json_pointer)` → `Val`; doc-scoped so any
+///   program navigating the same path on the same document shares cached nodes.
+///   Intermediate nodes are populated as a side-effect of every traversal,
+///   enabling prefix reuse without re-traversal.
+///
+/// One VM per thread; wrap in `Mutex` for shared use.
+pub struct VM {
+    registry:      Arc<MethodRegistry>,
+    compile_cache: HashMap<String, Arc<Program>>,
+    path_cache:    PathCache,
+    /// Hash of the document currently being executed — set once by `execute()`,
+    /// reused by all recursive `exec()` calls within the same top-level call.
+    doc_hash:      u64,
+}
+
+impl Default for VM {
+    fn default() -> Self { Self::new() }
+}
+
+impl VM {
+    pub fn new() -> Self { Self::with_capacity(512, 4096) }
+
+    pub fn with_capacity(compile_cap: usize, path_cap: usize) -> Self {
+        Self {
+            registry:      Arc::new(MethodRegistry::new()),
+            compile_cache: HashMap::with_capacity(compile_cap),
+            path_cache:    PathCache::new(path_cap),
+            doc_hash:      0,
+        }
+    }
+
+    /// Register a custom method (callable via `.method_name(...)` in expressions).
+    pub fn register(&mut self, name: impl Into<String>, method: impl super::eval::methods::Method + 'static) {
+        Arc::make_mut(&mut self.registry).register(name, method);
+    }
+
+    // ── Public entry-points ───────────────────────────────────────────────────
+
+    /// Parse, compile (cached), and execute `expr` against `doc`.
+    pub fn run_str(&mut self, expr: &str, doc: &serde_json::Value) -> Result<serde_json::Value, EvalError> {
+        let prog = self.get_or_compile(expr)?;
+        self.execute(&prog, doc)
+    }
+
+    /// Execute a pre-compiled `Program` against `doc`.
+    pub fn execute(&mut self, program: &Program, doc: &serde_json::Value) -> Result<serde_json::Value, EvalError> {
+        let root = Val::from(doc);
+        // Compute doc hash once; reused by all exec() calls in this invocation.
+        self.doc_hash = hash_val_structure(&root);
+        let env = self.make_env(root);
+        let result = self.exec(program, &env)?;
+        Ok(result.into())
+    }
+
+    /// Get or compile an expression string (compile cache).
+    pub fn get_or_compile(&mut self, expr: &str) -> Result<Arc<Program>, EvalError> {
+        if let Some(p) = self.compile_cache.get(expr) {
+            return Ok(Arc::clone(p));
+        }
+        let prog = Compiler::compile_str(expr)?;
+        let arc = Arc::new(prog);
+        self.compile_cache.insert(expr.to_string(), Arc::clone(&arc));
+        Ok(arc)
+    }
+
+    /// Cache statistics: `(compile_entries, path_entries)`.
+    pub fn cache_stats(&self) -> (usize, usize) {
+        (self.compile_cache.len(), self.path_cache.len())
+    }
+
+    // ── Internal helpers ──────────────────────────────────────────────────────
+
+    fn make_env(&self, root: Val) -> Env {
+        Env::new_with_registry(root, Arc::clone(&self.registry))
+    }
+
+
+    // ── Core execution loop ───────────────────────────────────────────────────
+
+    /// Execute `program` in environment `env`, returning the top-of-stack value.
+    pub fn exec(&mut self, program: &Program, env: &Env) -> Result<Val, EvalError> {
+        let mut stack: SmallVec<[Val; 16]> = SmallVec::new();
+
+        for op in program.ops.iter() {
+            match op {
+                // ── Literals ──────────────────────────────────────────────────
+                Opcode::PushNull        => stack.push(Val::Null),
+                Opcode::PushBool(b)     => stack.push(Val::Bool(*b)),
+                Opcode::PushInt(n)      => stack.push(Val::Int(*n)),
+                Opcode::PushFloat(f)    => stack.push(Val::Float(*f)),
+                Opcode::PushStr(s)      => stack.push(Val::Str(s.clone())),
+
+                // ── Context ───────────────────────────────────────────────────
+                Opcode::PushRoot        => stack.push(env.root.clone()),
+                Opcode::PushCurrent     => stack.push(env.current.clone()),
+
+                // ── Navigation ────────────────────────────────────────────────
+                Opcode::GetField(k) => {
+                    let v = pop!(stack);
+                    stack.push(v.get_field(k.as_ref()));
+                }
+                Opcode::GetIndex(i) => {
+                    let v = pop!(stack);
+                    stack.push(v.get_index(*i));
+                }
+                Opcode::DynIndex(prog) => {
+                    let v = pop!(stack);
+                    let key = self.exec(prog, env)?;
+                    stack.push(match key {
+                        Val::Int(i) => v.get_index(i),
+                        Val::Str(s) => v.get_field(s.as_ref()),
+                        _ => Val::Null,
+                    });
+                }
+                Opcode::GetSlice(from, to) => {
+                    let v = pop!(stack);
+                    stack.push(exec_slice(v, *from, *to));
+                }
+                Opcode::OptField(k) => {
+                    let v = pop!(stack);
+                    stack.push(if v.is_null() { Val::Null } else { v.get_field(k.as_ref()) });
+                }
+                Opcode::Descendant(k) => {
+                    let v = pop!(stack);
+                    let mut found = Vec::new();
+                    // (D) When descending from root, track pointer paths and
+                    // cache each discovered node for future RootChain lookups.
+                    let from_root = match (&v, &env.root) {
+                        (Val::Obj(a), Val::Obj(b)) => Arc::ptr_eq(a, b),
+                        (Val::Arr(a), Val::Arr(b)) => Arc::ptr_eq(a, b),
+                        _ => matches!((&v, &env.root), (Val::Null, Val::Null)),
+                    };
+                    if from_root {
+                        let mut prefix = String::new();
+                        let mut cached: Vec<(Arc<str>, Val)> = Vec::new();
+                        collect_desc_with_paths(&v, k.as_ref(), &mut prefix, &mut found, &mut cached);
+                        let doc_hash = self.doc_hash;
+                        for (ptr, val) in cached {
+                            self.path_cache.insert(doc_hash, ptr, val);
+                        }
+                    } else {
+                        collect_desc(&v, k.as_ref(), &mut found);
+                    }
+                    stack.push(Val::arr(found));
+                }
+                Opcode::DescendAll => {
+                    let v = pop!(stack);
+                    let mut found = Vec::new();
+                    collect_all(&v, &mut found);
+                    stack.push(Val::arr(found));
+                }
+                Opcode::InlineFilter(pred) => {
+                    let val = pop!(stack);
+                    let items = match val {
+                        Val::Arr(a) => Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone()),
+                        other => vec![other],
+                    };
+                    let mut out = Vec::new();
+                    for item in items {
+                        let ie = env.with_current(item.clone());
+                        if is_truthy(&self.exec(pred, &ie)?) { out.push(item); }
+                    }
+                    stack.push(Val::arr(out));
+                }
+                Opcode::Quantifier(kind) => {
+                    let val = pop!(stack);
+                    stack.push(match kind {
+                        QuantifierKind::First => match val {
+                            Val::Arr(a) => a.first().cloned().unwrap_or(Val::Null),
+                            other => other,
+                        },
+                        QuantifierKind::One => match val {
+                            Val::Arr(a) if a.len() == 1 => a[0].clone(),
+                            Val::Arr(a) => return err!("quantifier !: expected exactly one element, got {}", a.len()),
+                            other => other,
+                        },
+                    });
+                }
+
+                // ── Peephole fusions ──────────────────────────────────────────
+                Opcode::RootChain(chain) => {
+                    let doc_hash = self.doc_hash;
+
+                    // (B) Find deepest cached prefix — immutable scan.
+                    let mut start = 0usize;
+                    {
+                        let mut ptr = String::new();
+                        for (i, k) in chain.iter().enumerate() {
+                            ptr.push('/');
+                            ptr.push_str(k.as_ref());
+                            if self.path_cache.contains(doc_hash, &ptr) {
+                                start = i + 1;
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+
+                    // Retrieve cached starting node (O(1) Val clone).
+                    let mut current = if start > 0 {
+                        let prefix_ptr: String = chain[..start].iter()
+                            .fold(String::new(), |mut s, k| { s.push('/'); s.push_str(k.as_ref()); s });
+                        self.path_cache.get(doc_hash, &prefix_ptr)
+                            .unwrap_or_else(|| env.root.clone())
+                    } else {
+                        env.root.clone()
+                    };
+
+                    // (A) Traverse uncached suffix, caching each new node.
+                    let mut ptr: String = chain[..start].iter()
+                        .fold(String::new(), |mut s, k| { s.push('/'); s.push_str(k.as_ref()); s });
+                    for k in chain[start..].iter() {
+                        current = current.get_field(k.as_ref());
+                        ptr.push('/');
+                        ptr.push_str(k.as_ref());
+                        self.path_cache.insert(doc_hash, Arc::from(ptr.as_str()), current.clone());
+                    }
+                    stack.push(current);
+                }
+                Opcode::FilterCount(pred) => {
+                    let recv = pop!(stack);
+                    let n = if let Val::Arr(a) = &recv {
+                        let mut count = 0u64;
+                        for item in a.iter() {
+                            let sub_env = env.with_current(item.clone());
+                            if is_truthy(&self.exec(pred, &sub_env)?) { count += 1; }
+                        }
+                        count
+                    } else { 0 };
+                    stack.push(Val::Int(n as i64));
+                }
+                Opcode::FindFirst(pred) => {
+                    let recv = pop!(stack);
+                    let mut found = Val::Null;
+                    if let Val::Arr(a) = &recv {
+                        for item in a.iter() {
+                            let sub_env = env.with_current(item.clone());
+                            if is_truthy(&self.exec(pred, &sub_env)?) {
+                                found = item.clone();
+                                break;
+                            }
+                        }
+                    } else if !recv.is_null() {
+                        let sub_env = env.with_current(recv.clone());
+                        if is_truthy(&self.exec(pred, &sub_env)?) { found = recv; }
+                    }
+                    stack.push(found);
+                }
+                Opcode::FilterMap { pred, map } => {
+                    let recv = pop!(stack);
+                    let items = match recv {
+                        Val::Arr(a) => Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone()),
+                        _ => Vec::new(),
+                    };
+                    let mut out = Vec::with_capacity(items.len());
+                    for item in items {
+                        let sub_env = env.with_current(item);
+                        if is_truthy(&self.exec(pred, &sub_env)?) {
+                            out.push(self.exec(map, &sub_env)?);
+                        }
+                    }
+                    stack.push(Val::arr(out));
+                }
+                Opcode::FilterFilter { p1, p2 } => {
+                    let recv = pop!(stack);
+                    let items = match recv {
+                        Val::Arr(a) => Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone()),
+                        _ => Vec::new(),
+                    };
+                    let mut out = Vec::with_capacity(items.len());
+                    for item in items {
+                        let sub_env = env.with_current(item.clone());
+                        if is_truthy(&self.exec(p1, &sub_env)?)
+                           && is_truthy(&self.exec(p2, &sub_env)?) {
+                            out.push(item);
+                        }
+                    }
+                    stack.push(Val::arr(out));
+                }
+                Opcode::MapSum(f) => {
+                    let recv = pop!(stack);
+                    let mut acc_i: i64 = 0;
+                    let mut acc_f: f64 = 0.0;
+                    let mut is_float = false;
+                    if let Val::Arr(a) = &recv {
+                        for item in a.iter() {
+                            let sub_env = env.with_current(item.clone());
+                            let v = self.exec(f, &sub_env)?;
+                            match v {
+                                Val::Int(n) => {
+                                    if is_float { acc_f += n as f64; } else { acc_i += n; }
+                                }
+                                Val::Float(x) => {
+                                    if !is_float { acc_f = acc_i as f64; is_float = true; }
+                                    acc_f += x;
+                                }
+                                Val::Null => {}
+                                _ => return err!("map(..).sum(): non-numeric mapped value"),
+                            }
+                        }
+                    }
+                    stack.push(if is_float { Val::Float(acc_f) } else { Val::Int(acc_i) });
+                }
+                Opcode::MapAvg(f) => {
+                    let recv = pop!(stack);
+                    let mut sum: f64 = 0.0;
+                    let mut n: usize = 0;
+                    if let Val::Arr(a) = &recv {
+                        for item in a.iter() {
+                            let sub_env = env.with_current(item.clone());
+                            let v = self.exec(f, &sub_env)?;
+                            match v {
+                                Val::Int(x)   => { sum += x as f64; n += 1; }
+                                Val::Float(x) => { sum += x;        n += 1; }
+                                Val::Null => {}
+                                _ => return err!("map(..).avg(): non-numeric mapped value"),
+                            }
+                        }
+                    }
+                    stack.push(if n == 0 { Val::Null } else { Val::Float(sum / n as f64) });
+                }
+                Opcode::TopN { n, asc } => {
+                    use std::collections::BinaryHeap;
+                    use std::cmp::Reverse;
+                    let recv = pop!(stack);
+                    let items = match recv {
+                        Val::Arr(a) => Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone()),
+                        _ => Vec::new(),
+                    };
+                    if *n >= items.len() {
+                        let mut v = items;
+                        v.sort_by(|x, y| super::eval::util::cmp_vals(x, y));
+                        if !*asc { v.reverse(); }
+                        stack.push(Val::arr(v));
+                    } else if *asc {
+                        // Max-heap of size n; pop largest to keep smallest n.
+                        let mut heap: BinaryHeap<WrapVal> = BinaryHeap::with_capacity(*n);
+                        for item in items {
+                            if heap.len() < *n {
+                                heap.push(WrapVal(item));
+                            } else if super::eval::util::cmp_vals(&item, &heap.peek().unwrap().0)
+                                      == std::cmp::Ordering::Less {
+                                heap.pop();
+                                heap.push(WrapVal(item));
+                            }
+                        }
+                        let mut v: Vec<Val> = heap.into_iter().map(|w| w.0).collect();
+                        v.sort_by(|x, y| super::eval::util::cmp_vals(x, y));
+                        stack.push(Val::arr(v));
+                    } else {
+                        // Min-heap via Reverse; keep largest n.
+                        let mut heap: BinaryHeap<Reverse<WrapVal>> = BinaryHeap::with_capacity(*n);
+                        for item in items {
+                            if heap.len() < *n {
+                                heap.push(Reverse(WrapVal(item)));
+                            } else if super::eval::util::cmp_vals(&item, &heap.peek().unwrap().0.0)
+                                      == std::cmp::Ordering::Greater {
+                                heap.pop();
+                                heap.push(Reverse(WrapVal(item)));
+                            }
+                        }
+                        let mut v: Vec<Val> = heap.into_iter().map(|w| w.0.0).collect();
+                        v.sort_by(|x, y| super::eval::util::cmp_vals(y, x));
+                        stack.push(Val::arr(v));
+                    }
+                }
+                Opcode::MapMap { f1, f2 } => {
+                    let recv = pop!(stack);
+                    let items = match recv {
+                        Val::Arr(a) => Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone()),
+                        _ => Vec::new(),
+                    };
+                    let mut out = Vec::with_capacity(items.len());
+                    for item in items {
+                        let e1 = env.with_current(item);
+                        let mid = self.exec(f1, &e1)?;
+                        let e2 = env.with_current(mid);
+                        out.push(self.exec(f2, &e2)?);
+                    }
+                    stack.push(Val::arr(out));
+                }
+                Opcode::FindOne(pred) => {
+                    let recv = pop!(stack);
+                    let mut found: Option<Val> = None;
+                    if let Val::Arr(a) = &recv {
+                        for item in a.iter() {
+                            let sub_env = env.with_current(item.clone());
+                            if is_truthy(&self.exec(pred, &sub_env)?) {
+                                if found.is_some() {
+                                    return err!("quantifier !: expected exactly one match, found multiple");
+                                }
+                                found = Some(item.clone());
+                            }
+                        }
+                    } else if !recv.is_null() {
+                        let sub_env = env.with_current(recv.clone());
+                        if is_truthy(&self.exec(pred, &sub_env)?) { found = Some(recv); }
+                    }
+                    match found {
+                        Some(v) => stack.push(v),
+                        None => return err!("quantifier !: expected exactly one match, found none"),
+                    }
+                }
+
+                // ── Ident ─────────────────────────────────────────────────────
+                Opcode::LoadIdent(name) => {
+                    let v = if let Some(v) = env.get_var(name.as_ref()) {
+                        v.clone()
+                    } else {
+                        env.current.get_field(name.as_ref())
+                    };
+                    stack.push(v);
+                }
+
+                // ── Operators ─────────────────────────────────────────────────
+                Opcode::Add  => { let r = pop!(stack); let l = pop!(stack); stack.push(add_vals(l, r)?); }
+                Opcode::Sub  => { let r = pop!(stack); let l = pop!(stack); stack.push(num_op(l, r, |a,b|a-b, |a,b|a-b)?); }
+                Opcode::Mul  => { let r = pop!(stack); let l = pop!(stack); stack.push(num_op(l, r, |a,b|a*b, |a,b|a*b)?); }
+                Opcode::Div  => {
+                    let r = pop!(stack); let l = pop!(stack);
+                    let b = r.as_f64().unwrap_or(0.0);
+                    if b == 0.0 { return err!("division by zero"); }
+                    stack.push(Val::Float(l.as_f64().unwrap_or(0.0) / b));
+                }
+                Opcode::Mod  => { let r = pop!(stack); let l = pop!(stack); stack.push(num_op(l, r, |a,b|a%b, |a,b|a%b)?); }
+                Opcode::Eq   => { let r = pop!(stack); let l = pop!(stack); stack.push(Val::Bool(vals_eq(&l,&r))); }
+                Opcode::Neq  => { let r = pop!(stack); let l = pop!(stack); stack.push(Val::Bool(!vals_eq(&l,&r))); }
+                Opcode::Lt   => { let r = pop!(stack); let l = pop!(stack); stack.push(Val::Bool(cmp_vals(&l,&r) == std::cmp::Ordering::Less)); }
+                Opcode::Lte  => { let r = pop!(stack); let l = pop!(stack); stack.push(Val::Bool(cmp_vals(&l,&r) != std::cmp::Ordering::Greater)); }
+                Opcode::Gt   => { let r = pop!(stack); let l = pop!(stack); stack.push(Val::Bool(cmp_vals(&l,&r) == std::cmp::Ordering::Greater)); }
+                Opcode::Gte  => { let r = pop!(stack); let l = pop!(stack); stack.push(Val::Bool(cmp_vals(&l,&r) != std::cmp::Ordering::Less)); }
+                Opcode::Fuzzy => {
+                    let r = pop!(stack); let l = pop!(stack);
+                    let ls = match &l { Val::Str(s) => s.to_lowercase(), _ => val_to_string(&l).to_lowercase() };
+                    let rs = match &r { Val::Str(s) => s.to_lowercase(), _ => val_to_string(&r).to_lowercase() };
+                    stack.push(Val::Bool(ls.contains(&rs) || rs.contains(&ls)));
+                }
+                Opcode::Not  => { let v = pop!(stack); stack.push(Val::Bool(!is_truthy(&v))); }
+                Opcode::Neg  => {
+                    let v = pop!(stack);
+                    stack.push(match v {
+                        Val::Int(n) => Val::Int(-n),
+                        Val::Float(f) => Val::Float(-f),
+                        _ => return err!("unary minus requires a number"),
+                    });
+                }
+
+                // ── Short-circuit ops ─────────────────────────────────────────
+                Opcode::AndOp(rhs) => {
+                    let lv = pop!(stack);
+                    if !is_truthy(&lv) {
+                        stack.push(Val::Bool(false));
+                    } else {
+                        let rv = self.exec(rhs, env)?;
+                        stack.push(Val::Bool(is_truthy(&rv)));
+                    }
+                }
+                Opcode::OrOp(rhs) => {
+                    let lv = pop!(stack);
+                    if is_truthy(&lv) {
+                        stack.push(lv);
+                    } else {
+                        stack.push(self.exec(rhs, env)?);
+                    }
+                }
+                Opcode::CoalesceOp(rhs) => {
+                    let lv = pop!(stack);
+                    if !lv.is_null() {
+                        stack.push(lv);
+                    } else {
+                        stack.push(self.exec(rhs, env)?);
+                    }
+                }
+
+                // ── Method calls ──────────────────────────────────────────────
+                Opcode::CallMethod(call) => {
+                    let recv = pop!(stack);
+                    let result = self.exec_call(recv, call, env)?;
+                    stack.push(result);
+                }
+                Opcode::CallOptMethod(call) => {
+                    let recv = pop!(stack);
+                    if recv.is_null() {
+                        stack.push(Val::Null);
+                    } else {
+                        stack.push(self.exec_call(recv, call, env)?);
+                    }
+                }
+
+                // ── Construction ──────────────────────────────────────────────
+                Opcode::MakeObj(entries) => {
+                    let entries = Arc::clone(entries);
+                    let result = self.exec_make_obj(&entries, env)?;
+                    stack.push(result);
+                }
+                Opcode::MakeArr(progs) => {
+                    let progs = Arc::clone(progs);
+                    let mut out = Vec::with_capacity(progs.len());
+                    for p in progs.iter() {
+                        let v = self.exec(p, env)?;
+                        // If the program produces an array from a spread,
+                        // check if it was tagged; for simplicity, just push.
+                        out.push(v);
+                    }
+                    stack.push(Val::arr(out));
+                }
+
+                // ── F-string ──────────────────────────────────────────────────
+                Opcode::FString(parts) => {
+                    let parts = Arc::clone(parts);
+                    let result = self.exec_fstring(&parts, env)?;
+                    stack.push(result);
+                }
+
+                // ── Kind check ────────────────────────────────────────────────
+                Opcode::KindCheck { ty, negate } => {
+                    let v = pop!(stack);
+                    let m = kind_matches(&v, *ty);
+                    stack.push(Val::Bool(if *negate { !m } else { m }));
+                }
+
+                // ── Pipeline helpers ──────────────────────────────────────────
+                Opcode::SetCurrent => {
+                    // This is emitted before an arbitrary pipe-forward expression.
+                    // The value flowing through the pipe is now on the stack as TOS.
+                    // However we can't mutate env here since env is immutable.
+                    // The actual "set current" happens by the caller preparing a new env.
+                    // In practice, SetCurrent should not appear in isolation in the
+                    // flat opcode stream because pipeline steps that need SetCurrent
+                    // are compiled as sub-programs. Skip.
+                }
+                Opcode::BindVar(name) => {
+                    // TOS becomes a named var; TOS remains (pass-through for ->) .
+                    // We can't mutate env here. This is handled at the pipeline level.
+                    // For now, just keep TOS.
+                    let _ = name;
+                }
+                Opcode::StoreVar(name) => {
+                    // Pop and discard (the LetExpr opcode handles binding properly).
+                    let _ = name;
+                    pop!(stack);
+                }
+                Opcode::BindObjDestructure(_) | Opcode::BindArrDestructure(_) => {
+                    // Pipeline bind destructure — handled at pipeline level.
+                }
+
+                // ── Complex recursive ops ─────────────────────────────────────
+                Opcode::LetExpr { name, body } => {
+                    let init_val = pop!(stack);
+                    let body_env = env.with_var(name.as_ref(), init_val);
+                    stack.push(self.exec(body, &body_env)?);
+                }
+
+                Opcode::ListComp(spec) => {
+                    let items = self.exec_iter_vals(&spec.iter, env)?;
+                    let mut out = Vec::new();
+                    for item in items {
+                        let ie = bind_comp_vars(env, &spec.vars, item);
+                        if let Some(cond) = &spec.cond {
+                            if !is_truthy(&self.exec(cond, &ie)?) { continue; }
+                        }
+                        out.push(self.exec(&spec.expr, &ie)?);
+                    }
+                    stack.push(Val::arr(out));
+                }
+
+                Opcode::DictComp(spec) => {
+                    let items = self.exec_iter_vals(&spec.iter, env)?;
+                    let mut map: IndexMap<Arc<str>, Val> = IndexMap::new();
+                    for item in items {
+                        let ie = bind_comp_vars(env, &spec.vars, item);
+                        if let Some(cond) = &spec.cond {
+                            if !is_truthy(&self.exec(cond, &ie)?) { continue; }
+                        }
+                        let k: Arc<str> = Arc::from(val_to_key(&self.exec(&spec.key, &ie)?).as_str());
+                        let v = self.exec(&spec.val, &ie)?;
+                        map.insert(k, v);
+                    }
+                    stack.push(Val::obj(map));
+                }
+
+                Opcode::SetComp(spec) => {
+                    let items = self.exec_iter_vals(&spec.iter, env)?;
+                    let mut seen: Vec<String> = Vec::new();
+                    let mut out = Vec::new();
+                    for item in items {
+                        let ie = bind_comp_vars(env, &spec.vars, item);
+                        if let Some(cond) = &spec.cond {
+                            if !is_truthy(&self.exec(cond, &ie)?) { continue; }
+                        }
+                        let v = self.exec(&spec.expr, &ie)?;
+                        let k = val_to_key(&v);
+                        if !seen.contains(&k) { seen.push(k); out.push(v); }
+                    }
+                    stack.push(Val::arr(out));
+                }
+
+                // ── Path cache lookup ─────────────────────────────────────────
+                Opcode::GetPointer(ptr) => {
+                    let doc_hash = self.doc_hash;
+                    let v = if let Some(cached) = self.path_cache.get(doc_hash, ptr.as_ref()) {
+                        cached
+                    } else {
+                        let v = resolve_pointer(&env.root, ptr.as_ref());
+                        self.path_cache.insert(doc_hash, ptr.clone(), v.clone());
+                        v
+                    };
+                    stack.push(v);
+                }
+            }
+        }
+
+        stack.pop().ok_or_else(|| EvalError("program produced no value".into()))
+    }
+
+    // ── Pipeline execution (recursive, env-cloning) ────────────────────────────
+
+    /// Execute a pipeline by compiling pipeline steps as sub-programs.
+    /// This is called when a `Pipeline` expr is compiled into a sequence
+    /// of SetCurrent + sub-program opcodes.
+    fn exec_pipeline(&mut self, base: &Program, steps: &[PipeStep], orig_ctx: &VarCtx, env: &Env)
+        -> Result<Val, EvalError>
+    {
+        let mut current = self.exec(base, env)?;
+        let mut cur_env = env.clone();
+        for step in steps {
+            match step {
+                PipeStep::Forward(rhs) => {
+                    current = self.exec_pipe_forward(&current, rhs, orig_ctx, &cur_env)?;
+                }
+                PipeStep::Bind(target) => {
+                    cur_env = apply_bind_to_env(target, &current, cur_env)?;
+                }
+            }
+        }
+        Ok(current)
+    }
+
+    fn exec_pipe_forward(&mut self, left: &Val, rhs: &Expr, ctx: &VarCtx, env: &Env) -> Result<Val, EvalError> {
+        match rhs {
+            Expr::Ident(name) if !ctx.has(name) => {
+                dispatch_method(left.clone(), name, &[], env)
+            }
+            Expr::Chain(base, steps) => {
+                if let Expr::Ident(name) = base.as_ref() {
+                    if !ctx.has(name) {
+                        let prog = Compiler::compile_sub(rhs, ctx);
+                        return self.exec(&prog, &env.with_current(left.clone()));
+                    }
+                }
+                let sub = Compiler::compile_sub(rhs, ctx);
+                self.exec(&sub, &env.with_current(left.clone()))
+            }
+            _ => {
+                let sub = Compiler::compile_sub(rhs, ctx);
+                self.exec(&sub, &env.with_current(left.clone()))
+            }
+        }
+    }
+
+    // ── Method call dispatch ──────────────────────────────────────────────────
+
+    fn exec_call(&mut self, recv: Val, call: &CompiledCall, env: &Env) -> Result<Val, EvalError> {
+        // Global-call opcodes push Root before calling; handle them
+        if call.method == BuiltinMethod::Unknown {
+            // Custom registry or global function
+            if !env.registry_is_empty() {
+                if let Some(method) = env.registry_get(call.name.as_ref()) {
+                    let evaled: Result<Vec<Val>, _> = call.sub_progs.iter()
+                        .map(|p| self.exec(p, env)).collect();
+                    return method.call(recv, &evaled?);
+                }
+            }
+            // Global function (coalesce, zip, etc.) or fallback to dispatch_method
+            return dispatch_method(recv, call.name.as_ref(), &call.orig_args, env);
+        }
+
+        // Lambda methods — VM handles iteration, running sub-programs per item
+        if call.method.is_lambda_method() {
+            return self.exec_lambda_method(recv, call, env);
+        }
+
+        // Value methods — delegate to the existing dispatch with orig_args
+        dispatch_method(recv, call.name.as_ref(), &call.orig_args, env)
+    }
+
+    fn exec_lambda_method(&mut self, recv: Val, call: &CompiledCall, env: &Env) -> Result<Val, EvalError> {
+        let sub = call.sub_progs.first();
+
+        match call.method {
+            BuiltinMethod::Filter => {
+                let pred = sub.ok_or_else(|| EvalError("filter: requires predicate".into()))?;
+                let items = recv.into_vec().ok_or_else(|| EvalError("filter: expected array".into()))?;
+                let mut out = Vec::new();
+                for item in items {
+                    if is_truthy(&self.exec_with_lambda(pred, &item, &call.orig_args, env)?) {
+                        out.push(item);
+                    }
+                }
+                Ok(Val::arr(out))
+            }
+            BuiltinMethod::Map => {
+                let mapper = sub.ok_or_else(|| EvalError("map: requires mapper".into()))?;
+                let items = recv.into_vec().ok_or_else(|| EvalError("map: expected array".into()))?;
+                let r: Result<Vec<_>, _> = items.into_iter()
+                    .map(|item| self.exec_with_lambda(mapper, &item, &call.orig_args, env))
+                    .collect();
+                Ok(Val::arr(r?))
+            }
+            BuiltinMethod::FlatMap => {
+                let mapper = sub.ok_or_else(|| EvalError("flatMap: requires mapper".into()))?;
+                let items = recv.into_vec().ok_or_else(|| EvalError("flatMap: expected array".into()))?;
+                let mut out = Vec::new();
+                for item in items {
+                    match self.exec_with_lambda(mapper, &item, &call.orig_args, env)? {
+                        Val::Arr(a) => out.extend(Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone())),
+                        v => out.push(v),
+                    }
+                }
+                Ok(Val::arr(out))
+            }
+            BuiltinMethod::Sort => {
+                // Delegate to func_arrays::sort which already handles lambda args
+                dispatch_method(recv, call.name.as_ref(), &call.orig_args, env)
+            }
+            BuiltinMethod::Any => {
+                let pred = sub.ok_or_else(|| EvalError("any: requires predicate".into()))?;
+                if let Val::Arr(a) = &recv {
+                    let result = a.iter().any(|item| {
+                        self.exec_with_lambda(pred, item, &call.orig_args, env)
+                            .map(|v| is_truthy(&v)).unwrap_or(false)
+                    });
+                    Ok(Val::Bool(result))
+                } else { Ok(Val::Bool(false)) }
+            }
+            BuiltinMethod::All => {
+                let pred = sub.ok_or_else(|| EvalError("all: requires predicate".into()))?;
+                if let Val::Arr(a) = &recv {
+                    if a.is_empty() { return Ok(Val::Bool(true)); }
+                    let result = a.iter().all(|item| {
+                        self.exec_with_lambda(pred, item, &call.orig_args, env)
+                            .map(|v| is_truthy(&v)).unwrap_or(false)
+                    });
+                    Ok(Val::Bool(result))
+                } else { Ok(Val::Bool(false)) }
+            }
+            BuiltinMethod::Count if !call.sub_progs.is_empty() => {
+                let pred = &call.sub_progs[0];
+                if let Val::Arr(a) = &recv {
+                    let n = a.iter().filter(|item| {
+                        self.exec_with_lambda(pred, item, &call.orig_args, env)
+                            .map(|v| is_truthy(&v)).unwrap_or(false)
+                    }).count();
+                    Ok(Val::Int(n as i64))
+                } else { Ok(Val::Int(0)) }
+            }
+            BuiltinMethod::GroupBy => {
+                let key_prog = sub.ok_or_else(|| EvalError("groupBy: requires key".into()))?;
+                let items = recv.into_vec().ok_or_else(|| EvalError("groupBy: expected array".into()))?;
+                let mut map: IndexMap<Arc<str>, Val> = IndexMap::new();
+                for item in items {
+                    let k: Arc<str> = Arc::from(val_to_key(&self.exec_with_lambda(key_prog, &item, &call.orig_args, env)?).as_str());
+                    let bucket = map.entry(k).or_insert_with(|| Val::arr(Vec::new()));
+                    bucket.as_array_mut().unwrap().push(item);
+                }
+                Ok(Val::obj(map))
+            }
+            BuiltinMethod::CountBy => {
+                let key_prog = sub.ok_or_else(|| EvalError("countBy: requires key".into()))?;
+                let items = recv.into_vec().ok_or_else(|| EvalError("countBy: expected array".into()))?;
+                let mut map: IndexMap<Arc<str>, Val> = IndexMap::new();
+                for item in items {
+                    let k: Arc<str> = Arc::from(val_to_key(&self.exec_with_lambda(key_prog, &item, &call.orig_args, env)?).as_str());
+                    let counter = map.entry(k).or_insert(Val::Int(0));
+                    if let Val::Int(n) = counter { *n += 1; }
+                }
+                Ok(Val::obj(map))
+            }
+            BuiltinMethod::IndexBy => {
+                let key_prog = sub.ok_or_else(|| EvalError("indexBy: requires key".into()))?;
+                let items = recv.into_vec().ok_or_else(|| EvalError("indexBy: expected array".into()))?;
+                let mut map: IndexMap<Arc<str>, Val> = IndexMap::new();
+                for item in items {
+                    let k: Arc<str> = Arc::from(val_to_key(&self.exec_with_lambda(key_prog, &item, &call.orig_args, env)?).as_str());
+                    map.insert(k, item);
+                }
+                Ok(Val::obj(map))
+            }
+            BuiltinMethod::TakeWhile => {
+                let pred = sub.ok_or_else(|| EvalError("takeWhile: requires predicate".into()))?;
+                let items = recv.into_vec().ok_or_else(|| EvalError("takeWhile: expected array".into()))?;
+                let mut out = Vec::new();
+                for item in items {
+                    if !is_truthy(&self.exec_with_lambda(pred, &item, &call.orig_args, env)?) { break; }
+                    out.push(item);
+                }
+                Ok(Val::arr(out))
+            }
+            BuiltinMethod::DropWhile => {
+                let pred = sub.ok_or_else(|| EvalError("dropWhile: requires predicate".into()))?;
+                let items = recv.into_vec().ok_or_else(|| EvalError("dropWhile: expected array".into()))?;
+                let mut dropping = true;
+                let out: Vec<Val> = items.into_iter().filter(|item| {
+                    if dropping {
+                        dropping = self.exec_with_lambda(pred, item, &call.orig_args, env)
+                            .map(|v| is_truthy(&v)).unwrap_or(false);
+                        !dropping
+                    } else { true }
+                }).collect();
+                Ok(Val::arr(out))
+            }
+            BuiltinMethod::Accumulate => {
+                dispatch_method(recv, call.name.as_ref(), &call.orig_args, env)
+            }
+            BuiltinMethod::Partition => {
+                let pred = sub.ok_or_else(|| EvalError("partition: requires predicate".into()))?;
+                let items = recv.into_vec().ok_or_else(|| EvalError("partition: expected array".into()))?;
+                let (mut yes, mut no) = (Vec::new(), Vec::new());
+                for item in items {
+                    if is_truthy(&self.exec_with_lambda(pred, &item, &call.orig_args, env)?) {
+                        yes.push(item);
+                    } else {
+                        no.push(item);
+                    }
+                }
+                Ok(Val::arr(vec![Val::arr(yes), Val::arr(no)]))
+            }
+            BuiltinMethod::TransformKeys => {
+                let lam = sub.ok_or_else(|| EvalError("transformKeys: requires lambda".into()))?;
+                let map = recv.into_map().ok_or_else(|| EvalError("transformKeys: expected object".into()))?;
+                let mut out: IndexMap<Arc<str>, Val> = IndexMap::new();
+                for (k, v) in map {
+                    let new_key = Arc::from(val_to_key(&self.exec_with_lambda(lam, &Val::Str(k), &call.orig_args, env)?).as_str());
+                    out.insert(new_key, v);
+                }
+                Ok(Val::obj(out))
+            }
+            BuiltinMethod::TransformValues => {
+                let lam = sub.ok_or_else(|| EvalError("transformValues: requires lambda".into()))?;
+                let map = recv.into_map().ok_or_else(|| EvalError("transformValues: expected object".into()))?;
+                let mut out: IndexMap<Arc<str>, Val> = IndexMap::new();
+                for (k, v) in map {
+                    out.insert(k, self.exec_with_lambda(lam, &v, &call.orig_args, env)?);
+                }
+                Ok(Val::obj(out))
+            }
+            BuiltinMethod::FilterKeys => {
+                let lam = sub.ok_or_else(|| EvalError("filterKeys: requires predicate".into()))?;
+                let map = recv.into_map().ok_or_else(|| EvalError("filterKeys: expected object".into()))?;
+                let mut out: IndexMap<Arc<str>, Val> = IndexMap::new();
+                for (k, v) in map {
+                    if is_truthy(&self.exec_with_lambda(lam, &Val::Str(k.clone()), &call.orig_args, env)?) {
+                        out.insert(k, v);
+                    }
+                }
+                Ok(Val::obj(out))
+            }
+            BuiltinMethod::FilterValues => {
+                let lam = sub.ok_or_else(|| EvalError("filterValues: requires predicate".into()))?;
+                let map = recv.into_map().ok_or_else(|| EvalError("filterValues: expected object".into()))?;
+                let mut out: IndexMap<Arc<str>, Val> = IndexMap::new();
+                for (k, v) in map {
+                    if is_truthy(&self.exec_with_lambda(lam, &v, &call.orig_args, env)?) {
+                        out.insert(k, v);
+                    }
+                }
+                Ok(Val::obj(out))
+            }
+            BuiltinMethod::Pivot => {
+                dispatch_method(recv, call.name.as_ref(), &call.orig_args, env)
+            }
+            BuiltinMethod::Update => {
+                let lam = sub.ok_or_else(|| EvalError("update: requires lambda".into()))?;
+                self.exec_with_lambda(lam, &recv, &call.orig_args, env)
+            }
+            _ => dispatch_method(recv, call.name.as_ref(), &call.orig_args, env),
+        }
+    }
+
+    /// Run a pre-compiled sub-program (lambda body) with `item` as the current value.
+    /// Handles lambda params from the original arg if present.
+    #[inline]
+    fn exec_with_lambda(&mut self, prog: &Program, item: &Val, orig_args: &[Arg], env: &Env)
+        -> Result<Val, EvalError>
+    {
+        // Check if the original arg was a lambda with params that need binding
+        if let Some(Arg::Pos(Expr::Lambda { params, .. })) = orig_args.first() {
+            if !params.is_empty() {
+                let mut inner = env.with_var(&params[0], item.clone());
+                inner.current = item.clone();
+                return self.exec(prog, &inner);
+            }
+        }
+        self.exec(prog, &env.with_current(item.clone()))
+    }
+
+    // ── Object construction ───────────────────────────────────────────────────
+
+    fn exec_make_obj(&mut self, entries: &[CompiledObjEntry], env: &Env) -> Result<Val, EvalError> {
+        let mut map: IndexMap<Arc<str>, Val> = IndexMap::new();
+        for entry in entries {
+            match entry {
+                CompiledObjEntry::Short(name) => {
+                    let v = if let Some(v) = env.get_var(name.as_ref()) { v.clone() }
+                            else { env.current.get_field(name.as_ref()) };
+                    if !v.is_null() { map.insert(name.clone(), v); }
+                }
+                CompiledObjEntry::Kv { key, prog, optional } => {
+                    let v = self.exec(prog, env)?;
+                    if *optional && v.is_null() { continue; }
+                    map.insert(key.clone(), v);
+                }
+                CompiledObjEntry::Dynamic { key, val } => {
+                    let k: Arc<str> = Arc::from(val_to_key(&self.exec(key, env)?).as_str());
+                    let v = self.exec(val, env)?;
+                    map.insert(k, v);
+                }
+                CompiledObjEntry::Spread(prog) => {
+                    if let Val::Obj(other) = self.exec(prog, env)? {
+                        let entries = Arc::try_unwrap(other).unwrap_or_else(|m| (*m).clone());
+                        for (k, v) in entries { map.insert(k, v); }
+                    }
+                }
+            }
+        }
+        Ok(Val::obj(map))
+    }
+
+    // ── F-string ──────────────────────────────────────────────────────────────
+
+    fn exec_fstring(&mut self, parts: &[CompiledFSPart], env: &Env) -> Result<Val, EvalError> {
+        let mut out = String::new();
+        for part in parts {
+            match part {
+                CompiledFSPart::Lit(s) => out.push_str(s.as_ref()),
+                CompiledFSPart::Interp { prog, fmt } => {
+                    let val = self.exec(prog, env)?;
+                    let s = match fmt {
+                        None                      => val_to_string(&val),
+                        Some(FmtSpec::Spec(spec)) => apply_fmt_spec(&val, spec),
+                        Some(FmtSpec::Pipe(method)) => {
+                            val_to_string(&dispatch_method(val, method, &[], env)?)
+                        }
+                    };
+                    out.push_str(&s);
+                }
+            }
+        }
+        Ok(Val::Str(Arc::from(out.as_str())))
+    }
+
+    // ── Comprehension helpers ─────────────────────────────────────────────────
+
+    fn exec_iter_vals(&mut self, iter_prog: &Program, env: &Env) -> Result<Vec<Val>, EvalError> {
+        match self.exec(iter_prog, env)? {
+            Val::Arr(a) => Ok(Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone())),
+            Val::Obj(m) => {
+                let entries = Arc::try_unwrap(m).unwrap_or_else(|m| (*m).clone());
+                Ok(entries.into_iter().map(|(k, v)| obj2("key", Val::Str(k), "value", v)).collect())
+            }
+            other => Ok(vec![other]),
+        }
+    }
+}
+
+// ── Env extensions for VM ─────────────────────────────────────────────────────
+
+impl Env {
+    fn registry_is_empty(&self) -> bool { self.registry_ref().is_empty() }
+    fn registry_get(&self, name: &str) -> Option<Arc<dyn super::eval::methods::Method>> {
+        self.registry_ref().get(name).cloned()
+    }
+}
+
+// ── Free helpers ──────────────────────────────────────────────────────────────
+
+fn exec_slice(v: Val, from: Option<i64>, to: Option<i64>) -> Val {
+    if let Val::Arr(a) = v {
+        let len = a.len() as i64;
+        let s = resolve_idx(from.unwrap_or(0), len);
+        let e = resolve_idx(to.unwrap_or(len), len);
+        let items = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
+        let s = s.min(items.len());
+        let e = e.min(items.len());
+        Val::arr(items[s..e].to_vec())
+    } else { Val::Null }
+}
+
+fn resolve_idx(i: i64, len: i64) -> usize {
+    (if i < 0 { (len + i).max(0) } else { i }) as usize
+}
+
+fn collect_desc(v: &Val, name: &str, out: &mut Vec<Val>) {
+    match v {
+        Val::Obj(m) => {
+            if let Some(v) = m.get(name) { out.push(v.clone()); }
+            for v in m.values() { collect_desc(v, name, out); }
+        }
+        Val::Arr(a) => { for item in a.as_ref() { collect_desc(item, name, out); } }
+        _ => {}
+    }
+}
+
+fn collect_all(v: &Val, out: &mut Vec<Val>) {
+    match v {
+        Val::Obj(m) => {
+            out.push(v.clone());
+            for child in m.values() { collect_all(child, out); }
+        }
+        Val::Arr(a) => {
+            for item in a.as_ref() { collect_all(item, out); }
+        }
+        other => out.push(other.clone()),
+    }
+}
+
+/// Path-tracking variant — called when descending from root so paths are
+/// root-relative and can be cached for future `RootChain` lookups.
+/// `prefix` is mutated in-place (push/truncate) to avoid allocations.
+fn collect_desc_with_paths(
+    v: &Val, name: &str, prefix: &mut String,
+    out: &mut Vec<Val>, cached: &mut Vec<(Arc<str>, Val)>,
+) {
+    match v {
+        Val::Obj(m) => {
+            if let Some(found) = m.get(name) {
+                let mut path = prefix.clone();
+                path.push('/');
+                path.push_str(name);
+                out.push(found.clone());
+                cached.push((Arc::from(path.as_str()), found.clone()));
+            }
+            for (k, child) in m.iter() {
+                let prev = prefix.len();
+                prefix.push('/');
+                prefix.push_str(k.as_ref());
+                collect_desc_with_paths(child, name, prefix, out, cached);
+                prefix.truncate(prev);
+            }
+        }
+        Val::Arr(a) => {
+            for (i, item) in a.iter().enumerate() {
+                let prev = prefix.len();
+                prefix.push('/');
+                let idx = i.to_string();
+                prefix.push_str(&idx);
+                collect_desc_with_paths(item, name, prefix, out, cached);
+                prefix.truncate(prev);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn resolve_pointer(root: &Val, ptr: &str) -> Val {
+    let mut cur = root.clone();
+    for seg in ptr.split('/').filter(|s| !s.is_empty()) {
+        cur = cur.get_field(seg);
+    }
+    cur
+}
+
+fn bind_comp_vars(env: &Env, vars: &[Arc<str>], item: Val) -> Env {
+    match vars {
+        [] => env.with_current(item),
+        [v] => { let mut e = env.with_var(v.as_ref(), item.clone()); e.current = item; e }
+        [v1, v2, ..] => {
+            let idx = item.get("index").cloned().unwrap_or(Val::Null);
+            let val = item.get("value").cloned().unwrap_or_else(|| item.clone());
+            let mut e = env.with_var(v1.as_ref(), idx).with_var(v2.as_ref(), val.clone());
+            e.current = val;
+            e
+        }
+    }
+}
+
+fn apply_bind_to_env(target: &BindTarget, val: &Val, env: Env) -> Result<Env, EvalError> {
+    match target {
+        BindTarget::Name(name) => Ok(env.with_var(name, val.clone())),
+        BindTarget::Obj { fields, rest } => {
+            let obj = val.as_object()
+                .ok_or_else(|| EvalError("bind destructure: expected object".into()))?;
+            let mut e = env;
+            for f in fields {
+                e = e.with_var(f, obj.get(f.as_str()).cloned().unwrap_or(Val::Null));
+            }
+            if let Some(rest_name) = rest {
+                let mut rem: IndexMap<Arc<str>, Val> = IndexMap::new();
+                for (k, v) in obj {
+                    if !fields.iter().any(|f| f.as_str() == k.as_ref()) {
+                        rem.insert(k.clone(), v.clone());
+                    }
+                }
+                e = e.with_var(rest_name, Val::obj(rem));
+            }
+            Ok(e)
+        }
+        BindTarget::Arr(names) => {
+            let arr = val.as_array()
+                .ok_or_else(|| EvalError("bind destructure: expected array".into()))?;
+            let mut e = env;
+            for (i, name) in names.iter().enumerate() {
+                e = e.with_var(name, arr.get(i).cloned().unwrap_or(Val::Null));
+            }
+            Ok(e)
+        }
+    }
+}
+
+fn apply_fmt_spec(val: &Val, spec: &str) -> String {
+    if let Some(rest) = spec.strip_suffix('f') {
+        if let Some(prec_str) = rest.strip_prefix('.') {
+            if let Ok(prec) = prec_str.parse::<usize>() {
+                if let Some(f) = val.as_f64() { return format!("{:.prec$}", f); }
+            }
+        }
+    }
+    if spec == "d" { if let Some(i) = val.as_i64() { return format!("{}", i); } }
+    let s = val_to_string(val);
+    if let Some(w) = spec.strip_prefix('>').and_then(|s| s.parse::<usize>().ok()) { return format!("{:>w$}", s); }
+    if let Some(w) = spec.strip_prefix('<').and_then(|s| s.parse::<usize>().ok()) { return format!("{:<w$}", s); }
+    if let Some(w) = spec.strip_prefix('^').and_then(|s| s.parse::<usize>().ok()) { return format!("{:^w$}", s); }
+    if let Some(w) = spec.strip_prefix('0').and_then(|s| s.parse::<usize>().ok()) {
+        if let Some(i) = val.as_i64() { return format!("{:0>w$}", i); }
+    }
+    s
+}
+
+// ── Opcode helpers ────────────────────────────────────────────────────────────
+
+/// Build a no-arg `CallMethod` opcode (used by peephole strength reduction).
+/// Newtype wrapper giving `Val` an `Ord` derived from `cmp_vals`,
+/// so it can be used in `BinaryHeap` for TopN.
+struct WrapVal(Val);
+impl PartialEq for WrapVal { fn eq(&self, o: &Self) -> bool {
+    super::eval::util::cmp_vals(&self.0, &o.0) == std::cmp::Ordering::Equal
+} }
+impl Eq for WrapVal {}
+impl PartialOrd for WrapVal { fn partial_cmp(&self, o: &Self) -> Option<std::cmp::Ordering> {
+    Some(self.cmp(o))
+} }
+impl Ord for WrapVal { fn cmp(&self, o: &Self) -> std::cmp::Ordering {
+    super::eval::util::cmp_vals(&self.0, &o.0)
+} }
+
+fn make_noarg_call(method: BuiltinMethod, name: &str) -> Opcode {
+    Opcode::CallMethod(Arc::new(CompiledCall {
+        method,
+        name:      Arc::from(name),
+        sub_progs: Arc::from(&[] as &[Arc<Program>]),
+        orig_args: Arc::from(&[] as &[Arg]),
+    }))
+}
+
+// ── Hash helpers ──────────────────────────────────────────────────────────────
+
+fn hash_str(s: &str) -> u64 {
+    let mut h = DefaultHasher::new();
+    s.hash(&mut h);
+    h.finish()
+}
+
+/// Hash the *structure* (keys + types) of a Val for the resolution cache key.
+/// Does NOT hash values, only shape, so structural navigation results are
+/// stable across different values in the same-shaped document.
+fn hash_val_structure(v: &Val) -> u64 {
+    let mut h = DefaultHasher::new();
+    hash_structure_into(v, &mut h, 0);
+    h.finish()
+}
+
+fn hash_structure_into(v: &Val, h: &mut DefaultHasher, depth: usize) {
+    if depth > 8 { return; }
+    match v {
+        Val::Null       => 0u8.hash(h),
+        Val::Bool(_)    => 1u8.hash(h),
+        Val::Int(_)     => 2u8.hash(h),
+        Val::Float(_)   => 3u8.hash(h),
+        Val::Str(_)     => 4u8.hash(h),
+        Val::Arr(a)     => { 5u8.hash(h); a.len().hash(h); for item in a.iter() { hash_structure_into(item, h, depth+1); } }
+        Val::Obj(m)     => { 6u8.hash(h); m.len().hash(h); for (k, v) in m.iter() { k.hash(h); hash_structure_into(v, h, depth+1); } }
+    }
+}

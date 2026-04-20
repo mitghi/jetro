@@ -26,11 +26,13 @@ use pest::Parser;
 use pest_derive::Parser as Parse;
 
 pub mod context;
+pub mod db;
 pub mod graph;
 pub mod parser;
+pub mod v2;
 pub mod vm;
 mod fmt;
-mod func;
+pub mod func;
 
 // Re-export the two types users need most so they don't have to dig into
 // sub-modules for everyday use.

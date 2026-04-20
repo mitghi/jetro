@@ -264,7 +264,7 @@ pub(crate) struct StackItem<'a> {
 
 /// Context binds components required for traversing
 /// and evaluating a jetro expression.
-pub(crate) struct Context<'a> {
+pub struct Context<'a> {
     pub(crate) root: Value,
     stack: Rc<RefCell<Vec<StackItem<'a>>>>,
     registry: Rc<RefCell<dyn crate::func::Registry>>,
@@ -544,7 +544,12 @@ impl FilterInner {
                     },
                     Value::Number(n) => match right {
                         FilterInnerRighthand::Number(number_value) => {
-                            return do_comparision!(n.as_i64().unwrap(), op, *number_value, ());
+                            // JSON number may be float even when RHS is integer literal.
+                            if let Some(iv) = n.as_i64() {
+                                return do_comparision!(iv, op, *number_value, ());
+                            } else if let Some(fv) = n.as_f64() {
+                                return do_comparision!(fv, op, *number_value as f64, ());
+                            }
                         }
                         FilterInnerRighthand::Float(float_value) => {
                             return do_comparision!(n.as_f64().unwrap(), op, *float_value, ());
@@ -812,64 +817,39 @@ impl<'a> Context<'a> {
 
     #[inline]
     pub fn reduce_stack_to_num_count(&mut self) -> i64 {
-        let mut count: i64 = 0;
-        let values = self.results.to_owned();
-        self.results = Rc::new(RefCell::new(Vec::new()));
-        for value in values.borrow().clone() {
-            if value.is_number() {
-                count += 1
-            }
-        }
-
-        return count;
+        let old = std::mem::replace(&mut self.results, Rc::new(RefCell::new(Vec::new())));
+        let vec = Rc::try_unwrap(old).map(RefCell::into_inner).unwrap_or_default();
+        vec.iter().filter(|v| v.is_number()).count() as i64
     }
 
     #[inline]
     pub fn reduce_stack_to_all_truth(&mut self) -> bool {
-        let mut all = true;
-        let values = self.results.to_owned();
-        self.results = Rc::new(RefCell::new(Vec::new()));
-        for value in values.borrow().clone() {
-            match value {
-                Value::Array(ref inner_array) => {
-                    for v in inner_array {
-                        if v.is_boolean() {
-                            all = all & (v.as_bool().unwrap() == true);
-                        }
-                    }
-                }
-                Value::Bool(ref value) => {
-                    all = all & (*value == true);
-                }
-                _ => {}
-            }
-        }
-
-        return all;
+        let old = std::mem::replace(&mut self.results, Rc::new(RefCell::new(Vec::new())));
+        let vec = Rc::try_unwrap(old).map(RefCell::into_inner).unwrap_or_default();
+        vec.iter().all(|value| match value {
+            Value::Array(ref inner) => inner.iter().all(|v| v.as_bool().unwrap_or(false)),
+            Value::Bool(b) => *b,
+            _ => true,
+        })
     }
 
     #[inline]
     pub fn reduce_stack_to_sum(&mut self) -> Sum {
         let mut sum = Sum::new();
-        let values = self.results.to_owned();
-        self.results = Rc::new(RefCell::new(Vec::new()));
-        for value in values.borrow().clone() {
+        let old = std::mem::replace(&mut self.results, Rc::new(RefCell::new(Vec::new())));
+        let vec = Rc::try_unwrap(old).map(RefCell::into_inner).unwrap_or_default();
+        for value in &vec {
             match value {
                 Value::Array(ref inner_array) => {
                     for v in inner_array {
-                        if v.is_number() {
-                            sum.add(&v);
-                        }
+                        if v.is_number() { sum.add(v); }
                     }
                 }
-                Value::Number(_) => {
-                    sum.add(&value);
-                }
+                Value::Number(_) => { sum.add(value); }
                 _ => {}
             }
         }
-
-        return sum;
+        sum
     }
 
     pub fn collect(&mut self) -> Result<(), Error> {

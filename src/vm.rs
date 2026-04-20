@@ -60,11 +60,37 @@ use serde_json::{Map, Value};
 use crate::{
     context::{
         Context, Error, Filter, FilterAST, FilterDescendant,
-        Func, ObjKey, Path, PathResult, PickFilterInner,
+        Func, FuncArg, MapBody, ObjKey, Path, PathResult, PickFilterInner,
     },
-    func::{default_registry, Registry},
+    func::{BuiltinFn, Callable, FuncRegistry},
     parser,
 };
+
+// ── CompiledArg ───────────────────────────────────────────────────────────────
+
+/// A pre-compiled function argument stored in `Opcode::CallBuiltin`.
+///
+/// Sub-expression arguments (`>/path`, `@/field`) are compiled into `Program`s
+/// once at compile time rather than re-interpreted as `Vec<Filter>` on every
+/// function invocation.  This eliminates per-call re-compilation in `#map`,
+/// `#flat_map`, `#resolve`, `#deref`, `#join`, and `#lookup`.
+#[derive(Debug, Clone)]
+pub(crate) enum CompiledArg {
+    Key(Arc<str>),
+    Number(f64),
+    /// Pre-compiled map body: `@/field` or any sub-path used in `#map`.
+    MapPath(Arc<Program>),
+    /// Pre-compiled `#map({key: path, ...})` object-construct body.
+    MapObjConstruct(Arc<[(ObjKey, Arc<Program>)]>),
+    /// Pre-compiled `#map([path, ...])` array-construct body.
+    MapArrConstruct(Arc<[Arc<Program>]>),
+    /// A filter predicate (`#find(cond)`, `#filter_by(cond)`).
+    FilterExpr(Arc<FilterAST>),
+    /// Pre-compiled sub-expression for `#join`, `#resolve`, `#deref`, `#lookup`.
+    SubExpr(Arc<Program>),
+    /// Fallback for arg types that have no pre-compiled form yet.
+    Raw(Arc<FuncArg>),
+}
 
 // ── Opcode ────────────────────────────────────────────────────────────────────
 
@@ -105,7 +131,30 @@ pub enum Opcode {
 
     // ── Functions ─────────────────────────────────────────────────────────────
     /// Call a named function with pre-parsed arguments.
+    /// Fallback path for unknown / user-registered functions.
     CallFn(Arc<Func>),
+
+    /// Static-dispatch call to a known built-in function.
+    ///
+    /// `fn_id` is resolved once at compile time from the function name string.
+    /// Args are pre-compiled `CompiledArg`s — sub-expressions are `Program`s
+    /// rather than raw `Vec<Filter>`, so they are never re-compiled at runtime.
+    /// No `BTreeMap` lookup, no vtable, no `pack_slice` allocation for arity-1
+    /// pure functions.
+    CallBuiltin {
+        fn_id: BuiltinFn,
+        args: Arc<[CompiledArg]>,
+        alias: Option<Arc<str>>,
+        should_deref: bool,
+    },
+
+    // ── Fused opcodes ─────────────────────────────────────────────────────────
+    /// Fused `FilterMulti(ast)` + `CallBuiltin(Len)`.
+    ///
+    /// Emitted by the peephole optimizer when it detects the pattern
+    /// `FilterMulti → CallBuiltin(Len|Count)`.  Counts matching elements
+    /// without allocating an intermediate `Value::Array`.
+    FilterCount(Arc<FilterAST>),
 
     // ── Pick ──────────────────────────────────────────────────────────────────
     /// Execute a `#pick(...)` expression.
@@ -189,28 +238,51 @@ impl Compiler {
         Program::new(ops, source)
     }
 
-    /// Peephole optimizer: fuses `PushRoot + GetChild(k)*` chains into a single
-    /// `RootPointer("/k1/k2/…")` opcode, eliminating repeated hash-map lookups
-    /// and reducing the step count for the common `>/a/b/c` access pattern.
+    /// Peephole optimizer.
+    ///
+    /// Pass 1 — fuses `PushRoot + GetChild(k)*` chains into `RootPointer`.
+    /// Pass 2 — fuses `FilterMulti(ast) + CallBuiltin(Len|Count)` into `FilterCount(ast)`,
+    ///           eliminating the intermediate `Value::Array` allocation.
     fn optimize(ops: Vec<Opcode>) -> Vec<Opcode> {
-        let mut result: Vec<Opcode> = Vec::with_capacity(ops.len());
-        let mut ops = ops.into_iter().peekable();
-
-        while let Some(op) = ops.next() {
+        // Pass 1: RootPointer fusion
+        let mut pass1: Vec<Opcode> = Vec::with_capacity(ops.len());
+        let mut it = ops.into_iter().peekable();
+        while let Some(op) = it.next() {
             match op {
                 Opcode::PushRoot => {
-                    // Consume as many trailing GetChild ops as possible.
                     let mut path = String::new();
-                    while matches!(ops.peek(), Some(Opcode::GetChild(_))) {
-                        if let Some(Opcode::GetChild(k)) = ops.next() {
+                    while matches!(it.peek(), Some(Opcode::GetChild(_))) {
+                        if let Some(Opcode::GetChild(k)) = it.next() {
                             path.push('/');
                             path.push_str(k.as_ref());
                         }
                     }
                     if path.is_empty() {
-                        result.push(Opcode::PushRoot);
+                        pass1.push(Opcode::PushRoot);
                     } else {
-                        result.push(Opcode::RootPointer(Arc::from(path.as_str())));
+                        pass1.push(Opcode::RootPointer(Arc::from(path.as_str())));
+                    }
+                }
+                other => pass1.push(other),
+            }
+        }
+
+        // Pass 2: FilterCount fusion
+        let mut result: Vec<Opcode> = Vec::with_capacity(pass1.len());
+        let mut it = pass1.into_iter().peekable();
+        while let Some(op) = it.next() {
+            match op {
+                Opcode::FilterMulti(ref ast) => {
+                    let is_len = matches!(
+                        it.peek(),
+                        Some(Opcode::CallBuiltin { fn_id: BuiltinFn::Len, .. })
+                            | Some(Opcode::CallBuiltin { fn_id: BuiltinFn::Count, .. })
+                    );
+                    if is_len {
+                        it.next(); // consume the Len/Count opcode
+                        result.push(Opcode::FilterCount(Arc::clone(ast)));
+                    } else {
+                        result.push(op);
                     }
                 }
                 other => result.push(other),
@@ -223,6 +295,42 @@ impl Compiler {
     pub fn compile_str(expr: &str) -> Result<Program, Error> {
         let filters = parser::parse(expr).map_err(|e| Error::Parse(e.to_string()))?;
         Ok(Self::compile(filters, expr))
+    }
+
+    /// Compile a single `FuncArg` into a `CompiledArg`.
+    ///
+    /// Sub-expressions (`Vec<Filter>`) are compiled into `Program`s here so
+    /// they are never re-compiled at evaluation time.
+    fn compile_func_arg(arg: FuncArg) -> CompiledArg {
+        match arg {
+            FuncArg::Key(k)    => CompiledArg::Key(k.into()),
+            FuncArg::Number(n) => CompiledArg::Number(n),
+            FuncArg::SubExpr(filters) => {
+                CompiledArg::SubExpr(Arc::new(Self::compile(filters, "<sub>")))
+            }
+            FuncArg::FilterExpr(ast) => CompiledArg::FilterExpr(Arc::new(ast)),
+            FuncArg::MapStmt(ref map_ast) => match &map_ast.body {
+                MapBody::Subpath(filters) => {
+                    CompiledArg::MapPath(Arc::new(Self::compile(filters.clone(), "<map-path>")))
+                }
+                _ => CompiledArg::Raw(Arc::new(arg)),
+            },
+            FuncArg::ObjConstruct(fields) => {
+                let compiled: Vec<(ObjKey, Arc<Program>)> = fields
+                    .into_iter()
+                    .map(|(k, f)| (k, Arc::new(Self::compile(f, "<map-obj>"))))
+                    .collect();
+                CompiledArg::MapObjConstruct(compiled.into())
+            }
+            FuncArg::ArrConstruct(elems) => {
+                let compiled: Vec<Arc<Program>> = elems
+                    .into_iter()
+                    .map(|f| Arc::new(Self::compile(f, "<map-arr>")))
+                    .collect();
+                CompiledArg::MapArrConstruct(compiled.into())
+            }
+            other => CompiledArg::Raw(Arc::new(other)),
+        }
     }
 
     fn lower(filters: Vec<Filter>) -> Vec<Opcode> {
@@ -253,7 +361,20 @@ impl Compiler {
                 ops.push(Opcode::FilterMulti(Arc::new(ast)));
             }
             Filter::MultiFilter(ast) => ops.push(Opcode::FilterMulti(Arc::new(ast))),
-            Filter::Function(func) => ops.push(Opcode::CallFn(Arc::new(func))),
+            Filter::Function(func) => {
+                if let Some(fn_id) = BuiltinFn::from_name(&func.name) {
+                    let args: Arc<[CompiledArg]> = func
+                        .args
+                        .into_iter()
+                        .map(Self::compile_func_arg)
+                        .collect::<Vec<_>>()
+                        .into();
+                    let alias = func.alias.map(|s| Arc::from(s.as_str()));
+                    ops.push(Opcode::CallBuiltin { fn_id, args, alias, should_deref: func.should_deref });
+                } else {
+                    ops.push(Opcode::CallFn(Arc::new(func)));
+                }
+            }
             Filter::Pick(elems) => ops.push(Opcode::Pick(elems.into())),
             Filter::ObjectConstruct(fields) => {
                 let compiled: Vec<(ObjKey, Program)> = fields
@@ -344,7 +465,7 @@ impl ResolutionCache {
 /// `VM` is single-threaded (`Rc`/`RefCell` internals).  Create one `VM` per
 /// thread, or wrap in a `Mutex` for shared use.
 pub struct VM {
-    registry: Rc<RefCell<dyn Registry>>,
+    registry: FuncRegistry,
     /// Expression string → compiled `Program`.
     compile_cache: HashMap<String, Arc<Program>>,
     /// `(program_id, doc_hash)` → resolved pointer strings.
@@ -367,7 +488,7 @@ impl VM {
     /// Create a VM with explicit cache capacities.
     pub fn with_capacity(compile_cap: usize, resolution_cap: usize) -> Self {
         Self {
-            registry: default_registry(),
+            registry: FuncRegistry::default(),
             compile_cache: HashMap::with_capacity(compile_cap),
             resolution_cache: ResolutionCache::new(resolution_cap),
         }
@@ -415,6 +536,38 @@ impl VM {
         let arc = Arc::new(prog);
         self.compile_cache.insert(expr.to_string(), Arc::clone(&arc));
         Ok(arc)
+    }
+
+    /// Register a custom callable function by name.
+    ///
+    /// Custom functions are invoked via `#name(...)` in expressions exactly like
+    /// built-ins, but dispatched through the legacy `FuncRegistry` path (`CallFn`
+    /// opcode) rather than the static `CallBuiltin` path.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use jetro::vm::VM;
+    /// use jetro::context::{Context, Error, Func};
+    /// use serde_json::Value;
+    ///
+    /// struct DoubleFn;
+    /// impl jetro::func::Callable for DoubleFn {
+    ///     fn call(&mut self, _func: &Func, value: &Value, _ctx: Option<&mut Context<'_>>) -> Result<Value, Error> {
+    ///         match value.as_f64() {
+    ///             Some(n) => Ok(Value::Number(serde_json::Number::from_f64(n * 2.0).unwrap())),
+    ///             None => Err(Error::FuncEval("double: expected number".into())),
+    ///         }
+    ///     }
+    /// }
+    ///
+    /// let mut vm = VM::new();
+    /// vm.register("double", DoubleFn);
+    /// let result = vm.run_str(">/price/#double", &serde_json::json!({"price": 21.0})).unwrap();
+    /// assert_eq!(result.0[0], serde_json::json!(42.0));
+    /// ```
+    pub fn register(&mut self, name: impl Into<String>, func: impl crate::func::Callable + 'static) {
+        self.registry.register(name, Box::new(func));
     }
 
     /// Return cache statistics `((compile_hits, compile_size), (res_hits, res_misses))`.
@@ -613,12 +766,23 @@ impl VM {
 
             // ── Functions ─────────────────────────────────────────────────────
             Opcode::CallFn(func) => {
-                // Functions always return their result as a single value.
-                // Spreading array results (out.extend) would mis-unwrap functions
-                // like #reverse, #map, #zip that intentionally return arrays.
                 let value = pack_slice(inputs);
                 let result = self.call_fn(func, &value, root)?;
                 out.push(result);
+            }
+
+            Opcode::CallBuiltin { fn_id, args, alias, should_deref } => {
+                let result = self.exec_builtin(*fn_id, inputs, args, alias.as_deref(), *should_deref, root)?;
+                out.push(result);
+            }
+
+            Opcode::FilterCount(ast) => {
+                for v in inputs {
+                    if let Value::Array(ref arr) = v {
+                        let n = arr.iter().filter(|item| ast.eval(item)).count();
+                        out.push(Value::Number(serde_json::Number::from(n)));
+                    }
+                }
             }
 
             // ── Pick ──────────────────────────────────────────────────────────
@@ -845,9 +1009,852 @@ impl VM {
         // resolve, deref, …) receive the document root.
         let mut ctx = Context::new(root.clone(), &[]);
         self.registry
-            .borrow_mut()
             .call(func, value, Some(&mut ctx))
             .map_err(|e| Error::FuncEval(e.to_string()))
+    }
+
+    // ── Static builtin dispatch ───────────────────────────────────────────────
+
+    /// Execute a built-in function via direct static dispatch.
+    ///
+    /// No `BTreeMap` lookup, no vtable, no `RefCell` borrow.  Pure functions
+    /// (everything except `join`, `lookup`, `resolve`, `deref`) skip
+    /// `Context::new` and `root.clone()` entirely.  Sub-expression arguments
+    /// are pre-compiled `Program`s evaluated inline by the VM.
+    #[allow(clippy::too_many_arguments)]
+    fn exec_builtin(
+        &mut self,
+        fn_id: BuiltinFn,
+        inputs: &[Value],
+        args: &[CompiledArg],
+        alias: Option<&str>,
+        _should_deref: bool,
+        root: &Value,
+    ) -> Result<Value, Error> {
+        // Helper: resolve a pre-compiled SubExpr arg against root, returning a Vec<Value>.
+        // Used by join/lookup/resolve/deref.
+        macro_rules! run_sub {
+            ($idx:expr) => {{
+                match args.get($idx) {
+                    Some(CompiledArg::SubExpr(prog)) => self.run(prog, root, root)?,
+                    _ => return Err(Error::FuncEval(format!("expected sub-expression at arg {}", $idx))),
+                }
+            }};
+        }
+        macro_rules! run_sub_array {
+            ($idx:expr) => {{
+                let vals = run_sub!($idx);
+                match vals.into_iter().next() {
+                    Some(Value::Array(arr)) => arr,
+                    Some(other) => vec![other],
+                    None => vec![],
+                }
+            }};
+        }
+        macro_rules! key_arg {
+            ($idx:expr, $fn_name:expr) => {
+                match args.get($idx) {
+                    Some(CompiledArg::Key(k)) => k.as_ref(),
+                    _ => return Err(Error::FuncEval(concat!($fn_name, ": expected string key argument").into())),
+                }
+            };
+        }
+        macro_rules! num_arg {
+            ($idx:expr, $fn_name:expr) => {
+                match args.get($idx) {
+                    Some(CompiledArg::Number(n)) => *n,
+                    Some(CompiledArg::Key(s)) => s.parse::<f64>().map_err(|_| {
+                        Error::FuncEval(format!("{}: expected number", $fn_name))
+                    })?,
+                    _ => return Err(Error::FuncEval(format!("{}: expected numeric argument", $fn_name))),
+                }
+            };
+        }
+
+        // Pack inputs → single Value (same semantics as pack_slice, but inline).
+        let value: Value;
+        let v: &Value = if inputs.len() == 1 {
+            &inputs[0]
+        } else {
+            value = Value::Array(inputs.to_vec());
+            &value
+        };
+
+        match fn_id {
+            // ── Pure aggregate: sum ───────────────────────────────────────────
+            BuiltinFn::Sum => {
+                let mut total = 0.0f64;
+                match v {
+                    Value::Array(arr) => {
+                        for item in arr { if let Some(n) = item.as_f64() { total += n; } }
+                    }
+                    _ => { if let Some(n) = v.as_f64() { total += n; } }
+                }
+                Ok(Value::Number(serde_json::Number::from_f64(total)
+                    .unwrap_or_else(|| serde_json::Number::from(0i64))))
+            }
+
+            // ── Pure aggregate: len / count ───────────────────────────────────
+            BuiltinFn::Len | BuiltinFn::Count => {
+                match v {
+                    Value::Array(arr) => Ok(Value::Number(serde_json::Number::from(arr.len()))),
+                    Value::Object(obj) => Ok(Value::Number(serde_json::Number::from(obj.len()))),
+                    _ => Ok(Value::Number(serde_json::Number::from(inputs.len()))),
+                }
+            }
+
+            // ── Pure: reverse ─────────────────────────────────────────────────
+            BuiltinFn::Reverse => match v {
+                Value::Array(arr) => Ok(Value::Array(arr.iter().rev().cloned().collect())),
+                _ => Err(Error::FuncEval("reverse: expected array".into())),
+            },
+
+            // ── Pure: head ────────────────────────────────────────────────────
+            BuiltinFn::Head => match v {
+                Value::Array(arr) => {
+                    Ok(if arr.is_empty() { v.clone() } else { arr[0].clone() })
+                }
+                _ => Err(Error::FuncEval("head: expected array".into())),
+            },
+
+            // ── Pure: tail ────────────────────────────────────────────────────
+            BuiltinFn::Tail => match v {
+                Value::Array(arr) => Ok(Value::Array(match arr.len() {
+                    0 | 1 => vec![],
+                    _ => arr[1..].to_vec(),
+                })),
+                _ => Err(Error::FuncEval("tail: expected array".into())),
+            },
+
+            // ── Pure: last ────────────────────────────────────────────────────
+            BuiltinFn::Last => match v {
+                Value::Array(arr) => Ok(arr.last().cloned().unwrap_or_else(|| Value::Array(vec![]))),
+                _ => Err(Error::FuncEval("last: expected array".into())),
+            },
+
+            // ── Pure aggregate: all ───────────────────────────────────────────
+            BuiltinFn::All => match v {
+                Value::Bool(b) => Ok(Value::Bool(*b)),
+                Value::Array(arr) => {
+                    let all = arr.iter().all(|x| x.as_bool().unwrap_or(false));
+                    Ok(Value::Bool(all))
+                }
+                _ => Err(Error::FuncEval("all: input is not reducible".into())),
+            },
+
+            // ── Pure: any ─────────────────────────────────────────────────────
+            BuiltinFn::Any => match v {
+                Value::Array(arr) => Ok(Value::Bool(arr.iter().any(|x| x.as_bool().unwrap_or(false)))),
+                Value::Bool(b) => Ok(Value::Bool(*b)),
+                _ => Err(Error::FuncEval("any: expected array of booleans".into())),
+            },
+
+            // ── Pure: not ─────────────────────────────────────────────────────
+            BuiltinFn::Not => match v {
+                Value::Bool(b) => Ok(Value::Bool(!b)),
+                _ => Err(Error::FuncEval("not: expected boolean".into())),
+            },
+
+            // ── Pure: keys / values ───────────────────────────────────────────
+            BuiltinFn::Keys => match v {
+                Value::Object(obj) => Ok(Value::Array(
+                    obj.keys().map(|k| Value::String(k.clone())).collect()
+                )),
+                _ => Err(Error::FuncEval("keys: expected object".into())),
+            },
+            BuiltinFn::Values => match v {
+                Value::Object(obj) => Ok(Value::Array(obj.values().cloned().collect())),
+                _ => Err(Error::FuncEval("values: expected object".into())),
+            },
+
+            // ── Pure: min / max ───────────────────────────────────────────────
+            BuiltinFn::Min => match v {
+                Value::Array(arr) => {
+                    let mut nums: Vec<f64> = arr.iter().filter_map(|x| x.as_f64()).collect();
+                    nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                    match nums.first() {
+                        Some(&n) => Ok(Value::Number(serde_json::Number::from_f64(n).unwrap())),
+                        _ => Ok(Value::Array(vec![])),
+                    }
+                }
+                _ => Err(Error::FuncEval("min: expected array".into())),
+            },
+            BuiltinFn::Max => match v {
+                Value::Array(arr) => {
+                    let mut nums: Vec<f64> = arr.iter().filter_map(|x| x.as_f64()).collect();
+                    nums.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+                    match nums.first() {
+                        Some(&n) => Ok(Value::Number(serde_json::Number::from_f64(n).unwrap())),
+                        _ => Ok(Value::Array(vec![])),
+                    }
+                }
+                _ => Err(Error::FuncEval("max: expected array".into())),
+            },
+
+            // ── Pure: avg ─────────────────────────────────────────────────────
+            BuiltinFn::Avg => match v {
+                Value::Array(arr) => {
+                    let nums: Vec<f64> = arr.iter().filter_map(|x| x.as_f64()).collect();
+                    if nums.is_empty() { return Ok(Value::Null); }
+                    let avg = nums.iter().sum::<f64>() / nums.len() as f64;
+                    Ok(Value::Number(serde_json::Number::from_f64(avg).unwrap()))
+                }
+                _ if v.is_number() => Ok(v.clone()),
+                _ => Err(Error::FuncEval("avg: expected array of numbers".into())),
+            },
+
+            // ── Pure: math ────────────────────────────────────────────────────
+            BuiltinFn::Add => {
+                let n = num_arg!(0, "add");
+                match v.as_f64() {
+                    Some(x) => Ok(Value::Number(serde_json::Number::from_f64(x + n).unwrap())),
+                    _ => Err(Error::FuncEval("add: expected number".into())),
+                }
+            }
+            BuiltinFn::Sub => {
+                let n = num_arg!(0, "sub");
+                match v.as_f64() {
+                    Some(x) => Ok(Value::Number(serde_json::Number::from_f64(x - n).unwrap())),
+                    _ => Err(Error::FuncEval("sub: expected number".into())),
+                }
+            }
+            BuiltinFn::Mul => {
+                let n = num_arg!(0, "mul");
+                match v.as_f64() {
+                    Some(x) => Ok(Value::Number(serde_json::Number::from_f64(x * n).unwrap())),
+                    _ => Err(Error::FuncEval("mul: expected number".into())),
+                }
+            }
+            BuiltinFn::Div => {
+                let n = num_arg!(0, "div");
+                if n == 0.0 { return Err(Error::FuncEval("div: division by zero".into())); }
+                match v.as_f64() {
+                    Some(x) => Ok(Value::Number(serde_json::Number::from_f64(x / n).unwrap())),
+                    _ => Err(Error::FuncEval("div: expected number".into())),
+                }
+            }
+            BuiltinFn::Abs => match v.as_f64() {
+                Some(x) => Ok(Value::Number(serde_json::Number::from_f64(x.abs()).unwrap())),
+                _ => Err(Error::FuncEval("abs: expected number".into())),
+            },
+            BuiltinFn::Round => match v.as_f64() {
+                Some(x) => Ok(Value::Number(serde_json::Number::from_f64(x.round()).unwrap())),
+                _ => Err(Error::FuncEval("round: expected number".into())),
+            },
+            BuiltinFn::Floor => match v.as_f64() {
+                Some(x) => Ok(Value::Number(serde_json::Number::from_f64(x.floor()).unwrap())),
+                _ => Err(Error::FuncEval("floor: expected number".into())),
+            },
+            BuiltinFn::Ceil => match v.as_f64() {
+                Some(x) => Ok(Value::Number(serde_json::Number::from_f64(x.ceil()).unwrap())),
+                _ => Err(Error::FuncEval("ceil: expected number".into())),
+            },
+
+            // ── Pure: nth ─────────────────────────────────────────────────────
+            BuiltinFn::Nth => {
+                let idx = num_arg!(0, "nth") as usize;
+                match v {
+                    Value::Array(arr) => Ok(arr.get(idx).cloned().unwrap_or(Value::Null)),
+                    _ => Err(Error::FuncEval("nth: expected array".into())),
+                }
+            }
+
+            // ── Pure: flatten ─────────────────────────────────────────────────
+            BuiltinFn::Flatten => match v {
+                Value::Array(arr) => {
+                    let mut out: Vec<Value> = Vec::new();
+                    for item in arr {
+                        match item {
+                            Value::Array(inner) => out.extend(inner.clone()),
+                            other => out.push(other.clone()),
+                        }
+                    }
+                    Ok(Value::Array(out))
+                }
+                _ => Err(Error::FuncEval("flatten: expected array".into())),
+            },
+
+            // ── Pure: chunk ───────────────────────────────────────────────────
+            BuiltinFn::Chunk => {
+                let size = num_arg!(0, "chunk") as usize;
+                if size == 0 { return Err(Error::FuncEval("chunk: size must be > 0".into())); }
+                match v {
+                    Value::Array(arr) => Ok(Value::Array(
+                        arr.chunks(size).map(|c| Value::Array(c.to_vec())).collect()
+                    )),
+                    _ => Err(Error::FuncEval("chunk: expected array".into())),
+                }
+            }
+
+            // ── Pure: unique ──────────────────────────────────────────────────
+            BuiltinFn::Unique => match v {
+                Value::Array(arr) => {
+                    let mut seen: Vec<String> = Vec::new();
+                    let mut out: Vec<Value> = Vec::new();
+                    for x in arr {
+                        let k = x.to_string();
+                        if !seen.contains(&k) { seen.push(k); out.push(x.clone()); }
+                    }
+                    Ok(Value::Array(out))
+                }
+                _ => Err(Error::FuncEval("unique: expected array".into())),
+            },
+
+            // ── Pure: distinct ────────────────────────────────────────────────
+            BuiltinFn::Distinct => {
+                let key = key_arg!(0, "distinct").to_string();
+                match v {
+                    Value::Array(arr) => {
+                        let mut seen: Vec<String> = Vec::new();
+                        let mut out: Vec<Value> = Vec::new();
+                        for x in arr {
+                            if let Some(field) = x.get(&key) {
+                                let k = field.to_string();
+                                if !seen.contains(&k) { seen.push(k); out.push(x.clone()); }
+                            }
+                        }
+                        Ok(Value::Array(out))
+                    }
+                    _ => Err(Error::FuncEval("distinct: expected array".into())),
+                }
+            }
+
+            // ── Pure: sort_by ─────────────────────────────────────────────────
+            BuiltinFn::SortBy => {
+                let key = key_arg!(0, "sort_by").to_string();
+                let descending = matches!(args.get(1), Some(CompiledArg::Key(d)) if d.as_ref() == "desc");
+                match v {
+                    Value::Array(arr) => {
+                        let mut a = arr.clone();
+                        a.sort_by(|x, y| {
+                            let xn = x.get(&key).and_then(Value::as_f64);
+                            let yn = y.get(&key).and_then(Value::as_f64);
+                            let ord = match (xn, yn) {
+                                (Some(a), Some(b)) => a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal),
+                                _ => {
+                                    // compare &str directly — no String allocation per comparison
+                                    let xs = x.get(&key).and_then(Value::as_str);
+                                    let ys = y.get(&key).and_then(Value::as_str);
+                                    xs.cmp(&ys)
+                                }
+                            };
+                            if descending { ord.reverse() } else { ord }
+                        });
+                        Ok(Value::Array(a))
+                    }
+                    _ => Err(Error::FuncEval("sort_by: expected array".into())),
+                }
+            }
+
+            // ── Pure: join_str ────────────────────────────────────────────────
+            BuiltinFn::JoinStr => {
+                let sep = match args.first() {
+                    Some(CompiledArg::Key(s)) => s.as_ref().to_string(),
+                    _ => String::new(),
+                };
+                match v {
+                    Value::Array(arr) => {
+                        let parts: Vec<String> = arr.iter()
+                            .filter_map(|x| x.as_str().map(String::from))
+                            .collect();
+                        Ok(Value::String(parts.join(&sep)))
+                    }
+                    _ => Err(Error::FuncEval("join_str: expected array".into())),
+                }
+            }
+
+            // ── Pure: compact ─────────────────────────────────────────────────
+            BuiltinFn::Compact => match v {
+                Value::Array(arr) => Ok(Value::Array(arr.iter().filter(|x| !x.is_null()).cloned().collect())),
+                _ => Err(Error::FuncEval("compact: expected array".into())),
+            },
+
+            // ── Pure: zip ─────────────────────────────────────────────────────
+            BuiltinFn::Zip => match v {
+                Value::Object(obj) => {
+                    let mut stack: std::collections::VecDeque<Value> = std::collections::VecDeque::new();
+                    for (i, (k, vs)) in obj.iter().enumerate() {
+                        if let Value::Array(arr) = vs {
+                            for (j, item) in arr.iter().enumerate() {
+                                if i == 0 {
+                                    let mut m = serde_json::Map::new();
+                                    m.insert(k.clone(), item.clone());
+                                    stack.push_back(Value::Object(m));
+                                } else {
+                                    let entry = stack.remove(j);
+                                    if let Some(Value::Object(mut obj2)) = entry {
+                                        obj2.insert(k.clone(), item.clone());
+                                        stack.insert(j, Value::Object(obj2));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Ok(Value::Array(Vec::from(stack)))
+                }
+                _ => Err(Error::FuncEval("zip: expected object".into())),
+            },
+
+            // ── Pure: group_by ────────────────────────────────────────────────
+            BuiltinFn::GroupBy => {
+                let key = key_arg!(0, "group_by").to_string();
+                match v {
+                    Value::Array(arr) => {
+                        let mut map: serde_json::Map<String, Value> = serde_json::Map::new();
+                        for item in arr {
+                            if let Some(field) = item.get(&key) {
+                                let gk = match field {
+                                    Value::String(s) => s.clone(),
+                                    other => other.to_string().trim_matches('"').to_string(),
+                                };
+                                let entry = map.entry(gk).or_insert_with(|| Value::Array(vec![]));
+                                if let Value::Array(ref mut a) = entry { a.push(item.clone()); }
+                            }
+                        }
+                        Ok(Value::Object(map))
+                    }
+                    _ => Err(Error::FuncEval("group_by: expected array".into())),
+                }
+            }
+
+            // ── Pure: count_by ────────────────────────────────────────────────
+            BuiltinFn::CountBy => {
+                let key = key_arg!(0, "count_by").to_string();
+                match v {
+                    Value::Array(arr) => {
+                        let mut map: serde_json::Map<String, Value> = serde_json::Map::new();
+                        for item in arr {
+                            if let Some(field) = item.get(&key) {
+                                let gk = match field {
+                                    Value::String(s) => s.clone(),
+                                    other => other.to_string().trim_matches('"').to_string(),
+                                };
+                                let entry = map.entry(gk).or_insert(Value::Number(serde_json::Number::from(0i64)));
+                                let prev = entry.as_i64().unwrap_or(0);
+                                *entry = Value::Number(serde_json::Number::from(prev + 1));
+                            }
+                        }
+                        Ok(Value::Object(map))
+                    }
+                    _ => Err(Error::FuncEval("count_by: expected array".into())),
+                }
+            }
+
+            // ── Pure: index_by ────────────────────────────────────────────────
+            BuiltinFn::IndexBy => {
+                let key = key_arg!(0, "index_by").to_string();
+                match v {
+                    Value::Array(arr) => {
+                        let mut map: serde_json::Map<String, Value> = serde_json::Map::new();
+                        for item in arr {
+                            if let Some(field) = item.get(&key) {
+                                let k = match field {
+                                    Value::String(s) => s.clone(),
+                                    other => other.to_string().trim_matches('"').to_string(),
+                                };
+                                map.insert(k, item.clone());
+                            }
+                        }
+                        Ok(Value::Object(map))
+                    }
+                    _ => Err(Error::FuncEval("index_by: expected array".into())),
+                }
+            }
+
+            // ── Pure: tally ───────────────────────────────────────────────────
+            BuiltinFn::Tally => match v {
+                Value::Array(arr) => {
+                    let mut map: serde_json::Map<String, Value> = serde_json::Map::new();
+                    for item in arr {
+                        let k = match item {
+                            Value::String(s) => s.clone(),
+                            other => other.to_string().trim_matches('"').to_string(),
+                        };
+                        let entry = map.entry(k).or_insert(Value::Number(serde_json::Number::from(0i64)));
+                        let prev = entry.as_i64().unwrap_or(0);
+                        *entry = Value::Number(serde_json::Number::from(prev + 1));
+                    }
+                    Ok(Value::Object(map))
+                }
+                _ => Err(Error::FuncEval("tally: expected array".into())),
+            },
+
+            // ── Pure: merge ───────────────────────────────────────────────────
+            BuiltinFn::Merge => match v {
+                Value::Array(arr) => {
+                    let mut out: serde_json::Map<String, Value> = serde_json::Map::new();
+                    for item in arr {
+                        if let Value::Object(obj2) = item {
+                            for (k, val) in obj2 { out.insert(k.clone(), val.clone()); }
+                        }
+                    }
+                    Ok(Value::Object(out))
+                }
+                Value::Object(_) => Ok(v.clone()),
+                _ => Err(Error::FuncEval("merge: expected array of objects".into())),
+            },
+
+            // ── Pure: omit ────────────────────────────────────────────────────
+            BuiltinFn::Omit => {
+                let keys: Vec<&str> = args.iter().filter_map(|a| {
+                    if let CompiledArg::Key(k) = a { Some(k.as_ref()) } else { None }
+                }).collect();
+                let omit = |obj: &serde_json::Map<String, Value>| -> Value {
+                    Value::Object(obj.iter()
+                        .filter(|(k, _)| !keys.contains(&k.as_str()))
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect())
+                };
+                match v {
+                    Value::Object(obj) => Ok(omit(obj)),
+                    Value::Array(arr) => Ok(Value::Array(arr.iter().filter_map(|item| {
+                        if let Value::Object(obj) = item { Some(omit(obj)) } else { None }
+                    }).collect())),
+                    _ => Err(Error::FuncEval("omit: expected object or array".into())),
+                }
+            }
+
+            // ── Pure: select ──────────────────────────────────────────────────
+            BuiltinFn::Select => {
+                let keys: Vec<&str> = args.iter().filter_map(|a| {
+                    if let CompiledArg::Key(k) = a { Some(k.as_ref()) } else { None }
+                }).collect();
+                let sel = |obj: &serde_json::Map<String, Value>| -> Value {
+                    Value::Object(obj.iter()
+                        .filter(|(k, _)| keys.contains(&k.as_str()))
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect())
+                };
+                match v {
+                    Value::Object(obj) => Ok(sel(obj)),
+                    Value::Array(arr) => Ok(Value::Array(arr.iter().filter_map(|item| {
+                        if let Value::Object(obj) = item { Some(sel(obj)) } else { None }
+                    }).collect())),
+                    _ => Err(Error::FuncEval("select: expected object or array".into())),
+                }
+            }
+
+            // ── Pure: rename ──────────────────────────────────────────────────
+            BuiltinFn::Rename => {
+                let from = key_arg!(0, "rename").to_string();
+                let to   = key_arg!(1, "rename").to_string();
+                let ren  = |obj: &serde_json::Map<String, Value>| -> Value {
+                    Value::Object(obj.iter().map(|(k, x)| {
+                        if k == &from { (to.clone(), x.clone()) } else { (k.clone(), x.clone()) }
+                    }).collect())
+                };
+                match v {
+                    Value::Object(obj) => Ok(ren(obj)),
+                    Value::Array(arr) => Ok(Value::Array(arr.iter().filter_map(|item| {
+                        if let Value::Object(obj) = item { Some(ren(obj)) } else { None }
+                    }).collect())),
+                    _ => Err(Error::FuncEval("rename: expected object or array".into())),
+                }
+            }
+
+            // ── Pure: set ─────────────────────────────────────────────────────
+            BuiltinFn::Set => {
+                let key = key_arg!(0, "set").to_string();
+                let val = match args.get(1) {
+                    Some(CompiledArg::Key(s)) => Value::String(s.as_ref().to_string()),
+                    Some(CompiledArg::Number(n)) => {
+                        Value::Number(serde_json::Number::from_f64(*n).unwrap())
+                    }
+                    _ => return Err(Error::FuncEval("set: expected key and value arguments".into())),
+                };
+                let ins = |obj: &serde_json::Map<String, Value>| -> Value {
+                    let mut m = obj.clone();
+                    m.insert(key.clone(), val.clone());
+                    Value::Object(m)
+                };
+                match v {
+                    Value::Object(obj) => Ok(ins(obj)),
+                    Value::Array(arr) => Ok(Value::Array(arr.iter().filter_map(|item| {
+                        if let Value::Object(obj) = item { Some(ins(obj)) } else { None }
+                    }).collect())),
+                    _ => Err(Error::FuncEval("set: expected object or array".into())),
+                }
+            }
+
+            // ── Pure: coalesce ────────────────────────────────────────────────
+            BuiltinFn::Coalesce => {
+                let empty = match v {
+                    Value::Null => true,
+                    Value::Array(a) => a.is_empty(),
+                    Value::String(s) => s.is_empty(),
+                    _ => false,
+                };
+                if !empty { return Ok(v.clone()); }
+                match args.first() {
+                    Some(CompiledArg::Key(k)) => Ok(Value::String(k.as_ref().to_string())),
+                    Some(CompiledArg::Number(n)) => Ok(Value::Number(serde_json::Number::from_f64(*n).unwrap())),
+                    _ => Ok(Value::Null),
+                }
+            }
+
+            // ── Pure: pluck ───────────────────────────────────────────────────
+            BuiltinFn::Pluck => {
+                let key = key_arg!(0, "pluck").to_string();
+                match v {
+                    Value::Array(arr) => Ok(Value::Array(
+                        arr.iter().filter_map(|item| item.get(&key).cloned()).collect()
+                    )),
+                    Value::Object(obj) => Ok(obj.get(&key).cloned().unwrap_or(Value::Null)),
+                    _ => Err(Error::FuncEval("pluck: expected array or object".into())),
+                }
+            }
+
+            // ── Pure: get ─────────────────────────────────────────────────────
+            BuiltinFn::Get => {
+                let key = key_arg!(0, "get").to_string();
+                match v {
+                    Value::Object(obj) => Ok(obj.get(&key).cloned().unwrap_or(Value::Null)),
+                    _ => Err(Error::FuncEval("get: expected object".into())),
+                }
+            }
+
+            // ── Pure: find ────────────────────────────────────────────────────
+            BuiltinFn::Find => {
+                let ast = match args.first() {
+                    Some(CompiledArg::FilterExpr(a)) => Arc::clone(a),
+                    _ => return Err(Error::FuncEval("find: expected filter condition".into())),
+                };
+                match v {
+                    Value::Array(arr) => Ok(arr.iter().find(|item| ast.eval(item)).cloned().unwrap_or(Value::Null)),
+                    _ => Err(Error::FuncEval("find: expected array".into())),
+                }
+            }
+
+            // ── Pure: filter_by ───────────────────────────────────────────────
+            BuiltinFn::FilterBy => {
+                let ast = match args.first() {
+                    Some(CompiledArg::FilterExpr(a)) => Arc::clone(a),
+                    _ => return Err(Error::FuncEval("filter_by: expected filter condition".into())),
+                };
+                match v {
+                    Value::Array(arr) => Ok(Value::Array(
+                        arr.iter().filter(|item| ast.eval(item)).cloned().collect()
+                    )),
+                    _ => Err(Error::FuncEval("filter_by: expected array".into())),
+                }
+            }
+
+            // ── map — uses pre-compiled sub-program ───────────────────────────
+            BuiltinFn::Map => {
+                match args.first() {
+                    // MapPath and SubExpr: run the pre-compiled program with `item`
+                    // as both input and root, so Filter::Root / PushRoot within the
+                    // sub-expression resolves to the current array element (not the
+                    // document root) — mirroring Path::collect_with_filter(item, ...).
+                    Some(CompiledArg::MapPath(prog)) | Some(CompiledArg::SubExpr(prog)) => {
+                        let prog = Arc::clone(prog);
+                        match v {
+                            Value::Array(arr) => {
+                                let mut out = Vec::with_capacity(arr.len());
+                                for item in arr {
+                                    let res = self.run(&prog, item, item)?;
+                                    if !res.is_empty() { out.push(res[0].clone()); } else {
+                                        return Err(Error::FuncEval("map: sub-expression produced no value".into()));
+                                    }
+                                }
+                                Ok(Value::Array(out))
+                            }
+                            _ => Err(Error::FuncEval("map: expected array".into())),
+                        }
+                    }
+                    Some(CompiledArg::MapObjConstruct(fields)) => {
+                        let fields = Arc::clone(fields);
+                        match v {
+                            Value::Array(arr) => {
+                                let mut out = Vec::with_capacity(arr.len());
+                                for item in arr {
+                                    let mut map = serde_json::Map::new();
+                                    for (obj_key, prog) in fields.iter() {
+                                        let key = match obj_key {
+                                            ObjKey::Static(s) => s.clone(),
+                                            ObjKey::Dynamic(kf) => {
+                                                let kp = Compiler::compile(kf.clone(), "<dyn-key>");
+                                                let kv = self.run(&kp, item, item)?;
+                                                match kv.into_iter().next() {
+                                                    Some(Value::String(s)) => s,
+                                                    Some(other) => other.to_string().trim_matches('"').to_string(),
+                                                    None => continue,
+                                                }
+                                            }
+                                        };
+                                        let vals = self.run(prog, item, item)?;
+                                        if let Some(fv) = vals.into_iter().next() { map.insert(key, fv); }
+                                    }
+                                    out.push(Value::Object(map));
+                                }
+                                Ok(Value::Array(out))
+                            }
+                            _ => Err(Error::FuncEval("map: expected array".into())),
+                        }
+                    }
+                    Some(CompiledArg::MapArrConstruct(elems)) => {
+                        let elems = Arc::clone(elems);
+                        match v {
+                            Value::Array(arr) => {
+                                let mut out = Vec::with_capacity(arr.len());
+                                for item in arr {
+                                    let mut row = Vec::with_capacity(elems.len());
+                                    for prog in elems.iter() {
+                                        let vals = self.run(prog, item, item)?;
+                                        if let Some(fv) = vals.into_iter().next() { row.push(fv); }
+                                    }
+                                    out.push(Value::Array(row));
+                                }
+                                Ok(Value::Array(out))
+                            }
+                            _ => Err(Error::FuncEval("map: expected array".into())),
+                        }
+                    }
+                    // Fallback: Raw FuncArg — delegate to old FuncRegistry
+                    Some(CompiledArg::Raw(raw_arg)) => {
+                        let func_arg = (**raw_arg).clone();
+                        let mut func = Func::new();
+                        func.name = "map".to_string();
+                        func.args = vec![func_arg];
+                        self.call_fn(&func, v, root)
+                    }
+                    _ => Err(Error::FuncEval("map: expected map statement or subpath".into())),
+                }
+            }
+
+            // ── flat_map ──────────────────────────────────────────────────────
+            BuiltinFn::FlatMap => {
+                let prog = match args.first() {
+                    Some(CompiledArg::MapPath(p)) => Arc::clone(p),
+                    Some(CompiledArg::SubExpr(p)) => Arc::clone(p),
+                    _ => return Err(Error::FuncEval("flat_map: expected subpath".into())),
+                };
+                match v {
+                    Value::Array(arr) => {
+                        let mut out: Vec<Value> = Vec::new();
+                        for item in arr {
+                            let res = self.run(&prog, item, item)?;
+                            for r in res {
+                                match r {
+                                    Value::Array(inner) => out.extend(inner),
+                                    other => out.push(other),
+                                }
+                            }
+                        }
+                        Ok(Value::Array(out))
+                    }
+                    _ => Err(Error::FuncEval("flat_map: expected array".into())),
+                }
+            }
+
+            // ── join (requires root) ──────────────────────────────────────────
+            BuiltinFn::Join => {
+                let left_key = key_arg!(1, "join").to_string();
+                let right_key = key_arg!(2, "join").to_string();
+                let right = run_sub_array!(0);
+                let left_arr = match v {
+                    Value::Array(a) => a.clone(),
+                    _ => return Err(Error::FuncEval("join: expected array on left".into())),
+                };
+                let mut out: Vec<Value> = Vec::new();
+                for li in &left_arr {
+                    let lv = li.get(&left_key);
+                    for ri in &right {
+                        if ri.get(&right_key) == lv {
+                            let mut merged = serde_json::Map::new();
+                            if let Value::Object(lo) = li { for (k, x) in lo { merged.insert(k.clone(), x.clone()); } }
+                            if let Value::Object(ro) = ri {
+                                for (k, x) in ro { if !merged.contains_key(k) { merged.insert(k.clone(), x.clone()); } }
+                            }
+                            out.push(Value::Object(merged));
+                        }
+                    }
+                }
+                Ok(Value::Array(out))
+            }
+
+            // ── lookup (requires root) ────────────────────────────────────────
+            BuiltinFn::Lookup => {
+                let left_key  = key_arg!(1, "lookup").to_string();
+                let right_key = key_arg!(2, "lookup").to_string();
+                let right = run_sub_array!(0);
+                let left_arr = match v {
+                    Value::Array(a) => a.clone(),
+                    other => vec![other.clone()],
+                };
+                let mut out: Vec<Value> = Vec::new();
+                for li in &left_arr {
+                    let lv = li.get(&left_key);
+                    let matched = right.iter().find(|ri| ri.get(&right_key) == lv);
+                    let mut merged = serde_json::Map::new();
+                    if let Value::Object(lo) = li { for (k, x) in lo { merged.insert(k.clone(), x.clone()); } }
+                    if let Some(Value::Object(ro)) = matched {
+                        for (k, x) in ro { if !merged.contains_key(k) { merged.insert(k.clone(), x.clone()); } }
+                    }
+                    out.push(Value::Object(merged));
+                }
+                Ok(Value::Array(out))
+            }
+
+            // ── resolve (requires root) ───────────────────────────────────────
+            BuiltinFn::Resolve => {
+                let ref_field  = key_arg!(0, "resolve").to_string();
+                let target = run_sub_array!(1);
+                let match_field = match args.get(2) {
+                    Some(CompiledArg::Key(k)) => k.as_ref().to_string(),
+                    _ => ref_field.clone(),
+                };
+                let process = |item: &Value| -> Value {
+                    let ref_val = match item.get(&ref_field) { Some(x) => x, None => return item.clone() };
+                    match target.iter().find(|t| t.get(&match_field) == Some(ref_val)) {
+                        None => item.clone(),
+                        Some(found) => {
+                            let mut merged = serde_json::Map::new();
+                            if let Value::Object(o) = item { for (k, x) in o { merged.insert(k.clone(), x.clone()); } }
+                            merged.insert(ref_field.clone(), found.clone());
+                            Value::Object(merged)
+                        }
+                    }
+                };
+                Ok(match v {
+                    Value::Array(arr) => Value::Array(arr.iter().map(process).collect()),
+                    single => process(single),
+                })
+            }
+
+            // ── deref (requires root) ─────────────────────────────────────────
+            BuiltinFn::Deref => {
+                let target = run_sub_array!(0);
+                let match_field = match args.get(1) {
+                    Some(CompiledArg::Key(k)) => Some(k.as_ref().to_string()),
+                    _ => None,
+                };
+                let result = match match_field {
+                    Some(field) => target.into_iter().find(|t| t.get(&field) == Some(v)),
+                    None => target.into_iter().find(|t| match t {
+                        Value::Object(o) => o.values().any(|x| x == v),
+                        other => other == v,
+                    }),
+                };
+                Ok(result.unwrap_or(Value::Null))
+            }
+
+            // ── formats (needs alias from Func) ───────────────────────────────
+            BuiltinFn::Formats => {
+                // alias is required by formats; reconstruct a Func and fall through
+                // to the old registry since formats also uses its own key-based args.
+                let mut func = Func::new();
+                func.name = "formats".to_string();
+                func.alias = alias.map(String::from);
+                func.args = args.iter().filter_map(|a| match a {
+                    CompiledArg::Key(k) => Some(crate::context::FuncArg::Key(k.as_ref().to_string())),
+                    CompiledArg::Number(n) => Some(crate::context::FuncArg::Number(*n)),
+                    CompiledArg::Raw(r) => Some((**r).clone()),
+                    _ => None,
+                }).collect();
+                self.call_fn(&func, v, root)
+            }
+        }
     }
 
     // ── Pick execution ────────────────────────────────────────────────────────
