@@ -2105,6 +2105,50 @@ mod tests {
     }
 
     #[test]
+    fn patch_composes_pipe() {
+        let doc = json!({"name": "Alice", "age": 30});
+        let r = query(r#"patch $ { name: "Bob" } | @.name"#, &doc).unwrap();
+        assert_eq!(r, json!("Bob"));
+    }
+
+    #[test]
+    fn patch_composes_method_chain() {
+        let doc = json!({"name": "Alice", "age": 30});
+        let r = query(r#"patch $ { name: "Bob" }.keys()"#, &doc).unwrap();
+        let mut keys = r.as_array().unwrap().clone();
+        keys.sort_by(|a, b| a.as_str().unwrap().cmp(b.as_str().unwrap()));
+        assert_eq!(keys, vec![json!("age"), json!("name")]);
+    }
+
+    #[test]
+    fn patch_composes_nested_in_object() {
+        let doc = json!({"name": "Alice"});
+        let r = query(r#"{result: patch $ { name: "Bob" }}"#, &doc).unwrap();
+        assert_eq!(r, json!({"result": {"name": "Bob"}}));
+    }
+
+    #[test]
+    fn patch_composes_let_binding() {
+        let doc = json!({"name": "Alice", "age": 30});
+        let r = query(r#"let x = patch $ { name: "Bob" } in x.name"#, &doc).unwrap();
+        assert_eq!(r, json!("Bob"));
+    }
+
+    #[test]
+    fn patch_composes_nested_patch() {
+        let doc = json!({"name": "Alice", "age": 30});
+        let r = query(r#"patch (patch $ { name: "Bob" }) { age: 99 }"#, &doc).unwrap();
+        assert_eq!(r, json!({"name": "Bob", "age": 99}));
+    }
+
+    #[test]
+    fn patch_composes_inside_map() {
+        let doc = json!({"users": [{"n": 1}, {"n": 2}, {"n": 3}]});
+        let r = query(r#"$.users.map(patch @ { n: @ * 10 })"#, &doc).unwrap();
+        assert_eq!(r, json!([{"n": 10}, {"n": 20}, {"n": 30}]));
+    }
+
+    #[test]
     fn patch_delete_mark_outside_patch_errors() {
         let doc = json!({});
         let r = query(r#"DELETE"#, &doc);
