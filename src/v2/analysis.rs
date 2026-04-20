@@ -301,6 +301,22 @@ fn apply_op(op: &Opcode, stack: &mut Vec<AbstractVal>) {
         Opcode::ListComp(_) | Opcode::SetComp(_) => stack.push(AbstractVal::array()),
         Opcode::DictComp(_) => stack.push(AbstractVal::object()),
         Opcode::GetPointer(_) => stack.push(AbstractVal::UNKNOWN),
+        Opcode::PatchEval(_) => stack.push(AbstractVal::UNKNOWN),
+        Opcode::CastOp(ty) => {
+            pop1!();
+            use super::ast::CastType;
+            let av = match ty {
+                CastType::Int    => AbstractVal::scalar(VType::Int),
+                CastType::Float  => AbstractVal::scalar(VType::Float),
+                CastType::Number => AbstractVal::scalar(VType::Num),
+                CastType::Str    => AbstractVal::scalar(VType::Str),
+                CastType::Bool   => AbstractVal::scalar(VType::Bool),
+                CastType::Array  => AbstractVal::array(),
+                CastType::Object => AbstractVal::object(),
+                CastType::Null   => AbstractVal::NULL,
+            };
+            stack.push(av);
+        }
     }
 }
 
@@ -402,12 +418,16 @@ fn count_ident_uses_in_ops(ops: &[Opcode], name: &str, acc: &mut usize) {
                 for e in entries.iter() {
                     match e {
                         CompiledObjEntry::Short(_) => {}
-                        CompiledObjEntry::Kv { prog, .. } => count_ident_uses_in_ops(&prog.ops, name, acc),
+                        CompiledObjEntry::Kv { prog, cond, .. } => {
+                            count_ident_uses_in_ops(&prog.ops, name, acc);
+                            if let Some(c) = cond { count_ident_uses_in_ops(&c.ops, name, acc); }
+                        }
                         CompiledObjEntry::Dynamic { key, val } => {
                             count_ident_uses_in_ops(&key.ops, name, acc);
                             count_ident_uses_in_ops(&val.ops, name, acc);
                         }
                         CompiledObjEntry::Spread(p) => count_ident_uses_in_ops(&p.ops, name, acc),
+                        CompiledObjEntry::SpreadDeep(p) => count_ident_uses_in_ops(&p.ops, name, acc),
                     }
                 }
             }
@@ -563,9 +583,13 @@ fn walk_subprograms(ops: &[Opcode], map: &mut HashMap<u64, usize>) {
                 for e in entries.iter() {
                     match e {
                         CompiledObjEntry::Short(_) => {}
-                        CompiledObjEntry::Kv { prog, .. } => v.push(prog),
+                        CompiledObjEntry::Kv { prog, cond, .. } => {
+                            v.push(prog);
+                            if let Some(c) = cond { v.push(c); }
+                        }
                         CompiledObjEntry::Dynamic { key, val } => { v.push(key); v.push(val); }
                         CompiledObjEntry::Spread(p) => v.push(p),
+                        CompiledObjEntry::SpreadDeep(p) => v.push(p),
                     }
                 }
                 v
@@ -612,11 +636,14 @@ pub fn expr_uses_ident(expr: &super::ast::Expr, name: &str) -> bool {
         Expr::Kind { expr, .. } => expr_uses_ident(expr, name),
         Expr::Coalesce(l, r) => expr_uses_ident(l, name) || expr_uses_ident(r, name),
         Expr::Object(fields) => fields.iter().any(|f| match f {
-            ObjField::Kv { val, .. } => expr_uses_ident(val, name),
+            ObjField::Kv { val, cond, .. } =>
+                expr_uses_ident(val, name)
+                || cond.as_ref().map_or(false, |c| expr_uses_ident(c, name)),
             ObjField::Short(n) => n == name,
             ObjField::Dynamic { key, val } =>
                 expr_uses_ident(key, name) || expr_uses_ident(val, name),
             ObjField::Spread(e) => expr_uses_ident(e, name),
+            ObjField::SpreadDeep(e) => expr_uses_ident(e, name),
         }),
         Expr::Array(elems) => elems.iter().any(|e| match e {
             ArrayElem::Expr(e) | ArrayElem::Spread(e) => expr_uses_ident(e, name),
@@ -660,6 +687,20 @@ pub fn expr_uses_ident(expr: &super::ast::Expr, name: &str) -> bool {
         Expr::GlobalCall { args, .. } => args.iter().any(|a| match a {
             Arg::Pos(e) | Arg::Named(_, e) => expr_uses_ident(e, name),
         }),
+        Expr::Cast { expr, .. } => expr_uses_ident(expr, name),
+        Expr::Patch { root, ops } => {
+            use super::ast::PathStep;
+            if expr_uses_ident(root, name) { return true; }
+            ops.iter().any(|op| {
+                op.path.iter().any(|s| match s {
+                    PathStep::WildcardFilter(e) => expr_uses_ident(e, name),
+                    _ => false,
+                })
+                || expr_uses_ident(&op.val, name)
+                || op.cond.as_ref().map_or(false, |c| expr_uses_ident(c, name))
+            })
+        }
+        Expr::DeleteMark => false,
     }
 }
 
@@ -761,16 +802,18 @@ fn rewrite_op(op: &Opcode, cache: &mut HashMap<u64, Arc<Program>>) -> Opcode {
         Opcode::MakeObj(entries) => {
             let new_entries: Vec<CompiledObjEntry> = entries.iter().map(|e| match e {
                 CompiledObjEntry::Short(s) => CompiledObjEntry::Short(s.clone()),
-                CompiledObjEntry::Kv { key, prog, optional } => CompiledObjEntry::Kv {
+                CompiledObjEntry::Kv { key, prog, optional, cond } => CompiledObjEntry::Kv {
                     key: key.clone(),
                     prog: dedup_rec(prog, cache),
                     optional: *optional,
+                    cond: cond.as_ref().map(|c| dedup_rec(c, cache)),
                 },
                 CompiledObjEntry::Dynamic { key, val } => CompiledObjEntry::Dynamic {
                     key: dedup_rec(key, cache),
                     val: dedup_rec(val, cache),
                 },
                 CompiledObjEntry::Spread(p) => CompiledObjEntry::Spread(dedup_rec(p, cache)),
+                CompiledObjEntry::SpreadDeep(p) => CompiledObjEntry::SpreadDeep(dedup_rec(p, cache)),
             }).collect();
             Opcode::MakeObj(new_entries.into())
         }
@@ -875,9 +918,11 @@ pub fn opcode_cost(op: &Opcode) -> u32 {
             use super::vm::CompiledObjEntry;
             entries.iter().map(|e| match e {
                 CompiledObjEntry::Short(_) => 2,
-                CompiledObjEntry::Kv { prog, .. } => 2 + program_cost(prog),
+                CompiledObjEntry::Kv { prog, cond, .. } =>
+                    2 + program_cost(prog) + cond.as_ref().map_or(0, |c| program_cost(c)),
                 CompiledObjEntry::Dynamic { key, val } => 3 + program_cost(key) + program_cost(val),
                 CompiledObjEntry::Spread(p) => 5 + program_cost(p),
+                CompiledObjEntry::SpreadDeep(p) => 8 + program_cost(p),
             }).sum()
         }
         Opcode::MakeArr(progs) => progs.iter().map(|p| 1 + program_cost(p)).sum(),
@@ -896,6 +941,8 @@ pub fn opcode_cost(op: &Opcode) -> u32 {
                + s.cond.as_ref().map_or(0, |c| program_cost(c)),
         Opcode::LetExpr { body, .. } => 2 + program_cost(body),
         Opcode::Quantifier(_) => 2,
+        Opcode::CastOp(_) => 2,
+        Opcode::PatchEval(_) => 50,
     }
 }
 

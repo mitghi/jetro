@@ -219,6 +219,30 @@ pub fn deep_merge(base: Val, other: Val) -> Val {
     }
 }
 
+/// Deep-merge where arrays concatenate instead of replace.  Used by the
+/// `...**` spread operator.  Objects recurse, arrays concat, scalars rhs-wins.
+pub fn deep_merge_concat(base: Val, other: Val) -> Val {
+    match (base, other) {
+        (Val::Obj(bm), Val::Obj(om)) => {
+            let mut map = Arc::try_unwrap(bm).unwrap_or_else(|m| (*m).clone());
+            for (k, v) in Arc::try_unwrap(om).unwrap_or_else(|m| (*m).clone()) {
+                let existing = map.shift_remove(&k);
+                map.insert(k, match existing {
+                    Some(e) => deep_merge_concat(e, v),
+                    None    => v,
+                });
+            }
+            Val::obj(map)
+        }
+        (Val::Arr(ba), Val::Arr(oa)) => {
+            let mut a = Arc::try_unwrap(ba).unwrap_or_else(|a| (*a).clone());
+            for v in Arc::try_unwrap(oa).unwrap_or_else(|a| (*a).clone()) { a.push(v); }
+            Val::arr(a)
+        }
+        (_, other) => other,
+    }
+}
+
 // ── Object building helpers ───────────────────────────────────────────────────
 
 /// Build a Val::Obj with two string-key entries (common pattern for itertools output).

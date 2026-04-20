@@ -64,6 +64,7 @@ fn is_kw(rule: Rule) -> bool {
         rule,
         Rule::kw_and | Rule::kw_or | Rule::kw_not | Rule::kw_for
             | Rule::kw_in | Rule::kw_if | Rule::kw_let | Rule::kw_lambda | Rule::kw_kind
+            | Rule::kw_is | Rule::kw_as
     )
 }
 
@@ -81,6 +82,7 @@ fn parse_expr(pair: Pair<Rule>) -> Expr {
         Rule::cmp_expr      => parse_cmp(pair),
         Rule::add_expr      => parse_add(pair),
         Rule::mul_expr      => parse_mul(pair),
+        Rule::cast_expr     => parse_cast(pair),
         Rule::unary_expr    => parse_unary(pair),
         Rule::postfix_expr  => parse_postfix_expr(pair),
         Rule::primary       => parse_primary(pair),
@@ -202,7 +204,7 @@ fn parse_kind(pair: Pair<Rule>) -> Expr {
     let cmp = parse_expr(inner.next().unwrap());
     match inner.next() {
         None => cmp,
-        Some(p) if p.as_rule() == Rule::kw_kind => {
+        Some(p) if matches!(p.as_rule(), Rule::kw_kind | Rule::kw_is) => {
             let next = inner.next().unwrap();
             let (negate, kind_type_str) = if next.as_rule() == Rule::kw_not {
                 (true, inner.next().unwrap().as_str())
@@ -274,6 +276,33 @@ where
     acc
 }
 
+// ── Cast ──────────────────────────────────────────────────────────────────────
+
+fn parse_cast(pair: Pair<Rule>) -> Expr {
+    // cast_expr = { unary_expr ~ (kw_as ~ kind_type)* }
+    let mut inner = pair.into_inner().peekable();
+    let mut acc = parse_expr(inner.next().unwrap());
+    while inner.peek().is_some() {
+        // Consume kw_as then kind_type
+        let kw = inner.next().unwrap();
+        debug_assert_eq!(kw.as_rule(), Rule::kw_as);
+        let ty_pair = inner.next().unwrap();
+        let ty = match ty_pair.as_str() {
+            "int"    => CastType::Int,
+            "float"  => CastType::Float,
+            "number" => CastType::Number,
+            "string" => CastType::Str,
+            "bool"   => CastType::Bool,
+            "array"  => CastType::Array,
+            "object" => CastType::Object,
+            "null"   => CastType::Null,
+            o        => panic!("unknown cast type: {}", o),
+        };
+        acc = Expr::Cast { expr: Box::new(acc), ty };
+    }
+    acc
+}
+
 // ── Unary ─────────────────────────────────────────────────────────────────────
 
 fn parse_unary(pair: Pair<Rule>) -> Expr {
@@ -293,52 +322,81 @@ fn parse_unary(pair: Pair<Rule>) -> Expr {
 fn parse_postfix_expr(pair: Pair<Rule>) -> Expr {
     let mut inner = pair.into_inner();
     let base = parse_primary(inner.next().unwrap());
-    let steps: Vec<Step> = inner.map(parse_postfix_step).collect();
+    let steps: Vec<Step> = inner.flat_map(parse_postfix_step).collect();
     base.maybe_chain(steps)
 }
 
-fn parse_postfix_step(pair: Pair<Rule>) -> Step {
+fn parse_postfix_step(pair: Pair<Rule>) -> Vec<Step> {
     let inner_pair = pair.into_inner().next().unwrap();
     match inner_pair.as_rule() {
         Rule::field_access => {
             let name = inner_pair.into_inner().next().unwrap().as_str().to_string();
-            Step::Field(name)
+            vec![Step::Field(name)]
         }
         Rule::opt_field => {
             let name = inner_pair.into_inner().next().unwrap().as_str().to_string();
-            Step::OptField(name)
+            vec![Step::OptField(name)]
         }
         Rule::descendant => {
             let mut di = inner_pair.into_inner();
             match di.next() {
-                Some(p) => Step::Descendant(p.as_str().to_string()),
-                None    => Step::DescendAll,
+                Some(p) => vec![Step::Descendant(p.as_str().to_string())],
+                None    => vec![Step::DescendAll],
             }
         }
         Rule::inline_filter => {
             let expr = parse_expr(inner_pair.into_inner().next().unwrap());
-            Step::InlineFilter(Box::new(expr))
+            vec![Step::InlineFilter(Box::new(expr))]
         }
         Rule::quantifier => {
             let s = inner_pair.as_str();
-            if s.starts_with('!') { Step::Quantifier(QuantifierKind::One) }
-            else                  { Step::Quantifier(QuantifierKind::First) }
+            if s.starts_with('!') { vec![Step::Quantifier(QuantifierKind::One)] }
+            else                  { vec![Step::Quantifier(QuantifierKind::First)] }
         }
         Rule::method_call => {
             let mut mi = inner_pair.into_inner();
             let name = mi.next().unwrap().as_str().to_string();
             let args = mi.next().map(parse_arg_list).unwrap_or_default();
-            Step::Method(name, args)
+            vec![Step::Method(name, args)]
         }
         Rule::opt_method => {
             let mut mi = inner_pair.into_inner();
             let name = mi.next().unwrap().as_str().to_string();
             let args = mi.next().map(parse_arg_list).unwrap_or_default();
-            Step::OptMethod(name, args)
+            vec![Step::OptMethod(name, args)]
         }
         Rule::index_access => {
             let bi = inner_pair.into_inner().next().unwrap();
-            parse_bracket(bi)
+            vec![parse_bracket(bi)]
+        }
+        Rule::dyn_field => {
+            let expr = parse_expr(inner_pair.into_inner().next().unwrap());
+            vec![Step::DynIndex(Box::new(expr))]
+        }
+        Rule::map_into_shape => {
+            // `[*] => body` or `[* if g] => body`
+            // Desugar: with guard  → .filter(g).map(body)
+            //          no guard    → .map(body)
+            let mut guard: Option<Expr> = None;
+            let mut body:  Option<Expr> = None;
+            let mut saw_if = false;
+            for p in inner_pair.into_inner() {
+                match p.as_rule() {
+                    Rule::kw_if => saw_if = true,
+                    Rule::expr  => {
+                        if saw_if && guard.is_none() { guard = Some(parse_expr(p)); }
+                        else                         { body  = Some(parse_expr(p)); }
+                    }
+                    _ => {}
+                }
+            }
+            let body = body.expect("map_into_shape requires body");
+            let mut steps = Vec::new();
+            if let Some(g) = guard {
+                steps.push(Step::Method("filter".into(), vec![Arg::Pos(g)]));
+            }
+            steps.push(Step::Method("map".into(), vec![Arg::Pos(body)]));
+            steps
         }
         r => panic!("unexpected postfix rule: {:?}", r),
     }
@@ -382,6 +440,7 @@ fn parse_primary(pair: Pair<Rule>) -> Expr {
         Rule::ident         => Expr::Ident(inner.as_str().to_string()),
         Rule::let_expr      => parse_let(inner),
         Rule::lambda_expr   => parse_lambda(inner),
+        Rule::arrow_lambda  => parse_arrow_lambda(inner),
         Rule::list_comp     => parse_list_comp(inner),
         Rule::dict_comp     => parse_dict_comp(inner),
         Rule::set_comp      => parse_set_comp(inner),
@@ -390,6 +449,8 @@ fn parse_primary(pair: Pair<Rule>) -> Expr {
         Rule::arr_construct => parse_arr(inner),
         Rule::global_call   => parse_global_call(inner),
         Rule::expr          => parse_expr(inner),
+        Rule::patch_block   => parse_patch(inner),
+        Rule::kw_delete     => Expr::DeleteMark,
         r => panic!("unexpected primary rule: {:?}", r),
     }
 }
@@ -495,12 +556,19 @@ fn split_fstring_interp(inner: &str) -> (&str, Option<FmtSpec>) {
 // ── Let ───────────────────────────────────────────────────────────────────────
 
 fn parse_let(pair: Pair<Rule>) -> Expr {
-    let mut inner = pair.into_inner()
-        .filter(|p| !matches!(p.as_rule(), Rule::kw_let | Rule::kw_in));
-    let name = inner.next().unwrap().as_str().to_string();
-    let init = parse_expr(inner.next().unwrap());
-    let body = parse_expr(inner.next().unwrap());
-    Expr::Let { name, init: Box::new(init), body: Box::new(body) }
+    // let_expr = { kw_let ~ let_binding ~ ("," ~ let_binding)* ~ kw_in ~ expr }
+    // Desugar multi-binding into nested Let: `let a=x, b=y in body` → Let a x (Let b y body)
+    let inner: Vec<Pair<Rule>> = pair.into_inner()
+        .filter(|p| !matches!(p.as_rule(), Rule::kw_let | Rule::kw_in))
+        .collect();
+    let (bindings, body_pair) = inner.split_at(inner.len() - 1);
+    let body = parse_expr(body_pair[0].clone());
+    bindings.iter().rev().fold(body, |acc, b| {
+        let mut bi = b.clone().into_inner();
+        let name = bi.next().unwrap().as_str().to_string();
+        let init = parse_expr(bi.next().unwrap());
+        Expr::Let { name, init: Box::new(init), body: Box::new(acc) }
+    })
 }
 
 // ── Lambda ────────────────────────────────────────────────────────────────────
@@ -508,6 +576,20 @@ fn parse_let(pair: Pair<Rule>) -> Expr {
 fn parse_lambda(pair: Pair<Rule>) -> Expr {
     let mut inner = pair.into_inner()
         .filter(|p| p.as_rule() != Rule::kw_lambda);
+    let params_pair = inner.next().unwrap();
+    let params: Vec<String> = params_pair
+        .into_inner()
+        .filter(|p| p.as_rule() == Rule::ident)
+        .map(|p| p.as_str().to_string())
+        .collect();
+    let body = parse_expr(inner.next().unwrap());
+    Expr::Lambda { params, body: Box::new(body) }
+}
+
+/// Arrow lambda: `x => body` or `(x, y) => body`.  Lowered to same
+/// `Expr::Lambda` node — the `=>` form is pure surface sugar.
+fn parse_arrow_lambda(pair: Pair<Rule>) -> Expr {
+    let mut inner = pair.into_inner();
     let params_pair = inner.next().unwrap();
     let params: Vec<String> = params_pair
         .into_inner()
@@ -592,21 +674,42 @@ fn parse_obj_field(pair: Pair<Rule>) -> ObjField {
             let mut i = inner.into_inner();
             let key = obj_key_str(i.next().unwrap());
             let val = parse_expr(i.next().unwrap());
-            ObjField::Kv { key, val, optional: true }
+            ObjField::Kv { key, val, optional: true, cond: None }
         }
         Rule::obj_field_opt => {
             let key = obj_key_str(inner.into_inner().next().unwrap());
-            ObjField::Kv { key: key.clone(), val: Expr::Ident(key), optional: true }
+            ObjField::Kv { key: key.clone(), val: Expr::Ident(key), optional: true, cond: None }
         }
         Rule::obj_field_spread => {
             let expr = parse_expr(inner.into_inner().next().unwrap());
             ObjField::Spread(expr)
         }
+        Rule::obj_field_spread_deep => {
+            let expr = parse_expr(inner.into_inner().next().unwrap());
+            ObjField::SpreadDeep(expr)
+        }
         Rule::obj_field_kv => {
-            let mut i = inner.into_inner();
-            let key = obj_key_str(i.next().unwrap());
-            let val = parse_expr(i.next().unwrap());
-            ObjField::Kv { key, val, optional: false }
+            let mut cond: Option<Expr> = None;
+            let mut key: Option<String> = None;
+            let mut val: Option<Expr> = None;
+            let mut saw_when = false;
+            for p in inner.into_inner() {
+                match p.as_rule() {
+                    Rule::kw_when => saw_when = true,
+                    Rule::obj_key_expr => key = Some(obj_key_str(p)),
+                    Rule::expr => {
+                        if saw_when { cond = Some(parse_expr(p)); }
+                        else        { val  = Some(parse_expr(p)); }
+                    }
+                    _ => {}
+                }
+            }
+            ObjField::Kv {
+                key:      key.expect("obj_field_kv missing key"),
+                val:      val.expect("obj_field_kv missing val"),
+                optional: false,
+                cond,
+            }
         }
         Rule::obj_field_short => {
             let name = inner.into_inner().next().unwrap().as_str().to_string();
@@ -653,6 +756,95 @@ fn parse_global_call(pair: Pair<Rule>) -> Expr {
     let name = inner.next().unwrap().as_str().to_string();
     let args = inner.next().map(parse_arg_list).unwrap_or_default();
     Expr::GlobalCall { name, args }
+}
+
+// ── Patch block ───────────────────────────────────────────────────────────────
+
+fn parse_patch(pair: Pair<Rule>) -> Expr {
+    let mut root: Option<Expr> = None;
+    let mut ops: Vec<PatchOp> = Vec::new();
+    for p in pair.into_inner() {
+        match p.as_rule() {
+            Rule::kw_patch   => {}
+            Rule::patch_field => ops.push(parse_patch_field(p)),
+            _ => {
+                // This branch handles the root expression (coalesce_expr and
+                // any of its descendants that parse_expr accepts).
+                if root.is_none() { root = Some(parse_expr(p)); }
+            }
+        }
+    }
+    Expr::Patch {
+        root: Box::new(root.expect("patch requires root expression")),
+        ops,
+    }
+}
+
+fn parse_patch_field(pair: Pair<Rule>) -> PatchOp {
+    let mut path: Vec<PathStep> = Vec::new();
+    let mut val:  Option<Expr> = None;
+    let mut cond: Option<Expr> = None;
+    let mut saw_when = false;
+    for p in pair.into_inner() {
+        match p.as_rule() {
+            Rule::patch_key => path = parse_patch_key(p),
+            Rule::kw_when   => saw_when = true,
+            Rule::expr => {
+                if saw_when { cond = Some(parse_expr(p)); }
+                else        { val  = Some(parse_expr(p)); }
+            }
+            _ => {}
+        }
+    }
+    PatchOp {
+        path,
+        val:  val.expect("patch_field missing val"),
+        cond,
+    }
+}
+
+fn parse_patch_key(pair: Pair<Rule>) -> Vec<PathStep> {
+    let mut steps: Vec<PathStep> = Vec::new();
+    let mut first = true;
+    for p in pair.into_inner() {
+        match p.as_rule() {
+            Rule::ident if first => {
+                steps.push(PathStep::Field(p.as_str().to_string()));
+                first = false;
+            }
+            Rule::patch_step => steps.push(parse_patch_step(p)),
+            _ => {}
+        }
+    }
+    steps
+}
+
+fn parse_patch_step(pair: Pair<Rule>) -> PathStep {
+    let inner = pair.into_inner().next().unwrap();
+    match inner.as_rule() {
+        Rule::pp_dot_field => {
+            let name = inner.into_inner().next().unwrap().as_str().to_string();
+            PathStep::Field(name)
+        }
+        Rule::pp_index => {
+            let idx: i64 = inner.into_inner().next().unwrap().as_str().parse().unwrap();
+            PathStep::Index(idx)
+        }
+        Rule::pp_wild => PathStep::Wildcard,
+        Rule::pp_wild_filter => {
+            // `[* if expr]`
+            let mut e: Option<Expr> = None;
+            for p in inner.into_inner() {
+                if p.as_rule() == Rule::expr { e = Some(parse_expr(p)); }
+            }
+            PathStep::WildcardFilter(Box::new(e.expect("pp_wild_filter missing expr")))
+        }
+        Rule::pp_descendant => {
+            let name = inner.into_inner().next().unwrap().as_str().to_string();
+            PathStep::Descendant(name)
+        }
+        r => panic!("unexpected patch_step rule: {:?}", r),
+    }
 }
 
 // ── Arguments ─────────────────────────────────────────────────────────────────

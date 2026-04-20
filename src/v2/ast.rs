@@ -103,6 +103,50 @@ pub enum Expr {
         name: String,
         args: Vec<Arg>,
     },
+
+    // Type cast: `expr as int` / `expr as string` etc.  Add-on sugar on top
+    // of existing `.to_int()` / `.to_string()` methods — semantics identical.
+    Cast {
+        expr: Box<Expr>,
+        ty:   CastType,
+    },
+
+    // Declarative patch block: `patch root { path1: val1, path2: val2, ... }`.
+    // Returns a new document with the listed paths rewritten in order.
+    // COW semantics — unchanged subtrees are shared.
+    Patch {
+        root: Box<Expr>,
+        ops:  Vec<PatchOp>,
+    },
+
+    // Sentinel: `DELETE` inside a patch-field value removes the key.
+    // Only meaningful at the leaf of a patch path; outside patch it errors.
+    DeleteMark,
+}
+
+// ── Patch ─────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct PatchOp {
+    pub path: Vec<PathStep>,
+    pub val:  Expr,
+    pub cond: Option<Expr>,
+}
+
+#[derive(Debug, Clone)]
+pub enum PathStep {
+    Field(String),
+    Index(i64),
+    Wildcard,
+    WildcardFilter(Box<Expr>),
+    Descendant(String),
+}
+
+// ── Cast type ─────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CastType {
+    Int, Float, Number, Str, Bool, Array, Object, Null,
 }
 
 // ── Pipeline step ─────────────────────────────────────────────────────────────
@@ -181,14 +225,17 @@ pub enum Arg {
 
 #[derive(Debug, Clone)]
 pub enum ObjField {
-    /// `key: expr`
-    Kv { key: String, val: Expr, optional: bool },
+    /// `key: expr` (optionally `key: expr when cond`)
+    Kv { key: String, val: Expr, optional: bool, cond: Option<Expr> },
     /// `key` — shorthand for `key: key`
     Short(String),
     /// `[expr]: expr` — dynamic key
     Dynamic { key: Expr, val: Expr },
-    /// `...expr` — spread object
+    /// `...expr` — spread object (shallow)
     Spread(Expr),
+    /// `...**expr` — deep-merge spread: recurse into nested objects,
+    /// concatenate arrays, rhs wins for scalars
+    SpreadDeep(Expr),
 }
 
 // ── Binary operators ──────────────────────────────────────────────────────────

@@ -118,7 +118,8 @@ fn op_arity(op: &Opcode) -> Arity {
             | Opcode::PushRoot | Opcode::PushCurrent | Opcode::LoadIdent(_)
             | Opcode::RootChain(_) | Opcode::GetPointer(_)
             | Opcode::MakeObj(_) | Opcode::MakeArr(_) | Opcode::FString(_)
-            | Opcode::ListComp(_) | Opcode::DictComp(_) | Opcode::SetComp(_) =>
+            | Opcode::ListComp(_) | Opcode::DictComp(_) | Opcode::SetComp(_)
+            | Opcode::PatchEval(_) =>
             Arity { pops: 0, pushes: true },
 
         Opcode::GetField(_) | Opcode::OptField(_) | Opcode::GetIndex(_)
@@ -134,7 +135,8 @@ fn op_arity(op: &Opcode) -> Arity {
             | Opcode::TopN { .. } | Opcode::KindCheck { .. }
             | Opcode::Not | Opcode::Neg
             | Opcode::CallMethod(_) | Opcode::CallOptMethod(_)
-            | Opcode::AndOp(_) | Opcode::OrOp(_) | Opcode::CoalesceOp(_) =>
+            | Opcode::AndOp(_) | Opcode::OrOp(_) | Opcode::CoalesceOp(_)
+            | Opcode::CastOp(_) =>
             Arity { pops: 1, pushes: true },
 
         Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Div | Opcode::Mod

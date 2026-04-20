@@ -420,6 +420,19 @@ mod tests {
     }
 
     #[test]
+    fn nested_obj_construct_indefinite() {
+        let doc = json!({
+            "books": [{"t":"x"},{"t":"y"}],
+            "another": {"field": 42},
+            "deep": {"a": {"b": {"c": "leaf"}}}
+        });
+        let r = query("{a: $.books, b: {c: $.another.field}}", &doc).unwrap();
+        assert_eq!(r, json!({"a":[{"t":"x"},{"t":"y"}],"b":{"c":42}}));
+        let r2 = query("{x: {y: {z: $.deep.a.b.c, arr: [1, $.another.field, {w: $.books[0].t}]}}}", &doc).unwrap();
+        assert_eq!(r2, json!({"x":{"y":{"z":"leaf","arr":[1,42,{"w":"x"}]}}}));
+    }
+
+    #[test]
     fn optional_field_omitted() {
         let doc = json!({"user": {"name": "Alice"}});
         let r = query("$.user.map({name, email?})", &doc);
@@ -1675,5 +1688,426 @@ mod tests {
             assert!(p <= last, "not sorted descending: {} > {}", p, last);
             last = p;
         }
+    }
+
+    // ── Tier-1A/1B syntax refinements ─────────────────────────────────────────
+
+    #[test]
+    fn pipe_alias_long() {
+        let doc = books();
+        let a = query("$.store.books | count()", &doc).unwrap();
+        let b = query("$.store.books |> count()", &doc).unwrap();
+        assert_eq!(a, b);
+        assert_eq!(a, json!(4));
+    }
+
+    #[test]
+    fn coalesce_double_q() {
+        let doc = json!({"a": null, "b": 5});
+        let a = query("$.a ?| $.b", &doc).unwrap();
+        let b = query("$.a ?? $.b", &doc).unwrap();
+        assert_eq!(a, b);
+        assert_eq!(a, json!(5));
+    }
+
+    #[test]
+    fn coalesce_double_q_chain() {
+        let doc = json!({"a": null, "b": null, "c": 7});
+        let r = query("$.a ?? $.b ?? $.c", &doc).unwrap();
+        assert_eq!(r, json!(7));
+    }
+
+    #[test]
+    fn is_kind_alias() {
+        let doc = json!({"x": 42});
+        let a = query("$.x kind number", &doc).unwrap();
+        let b = query("$.x is number", &doc).unwrap();
+        assert_eq!(a, b);
+        assert_eq!(a, json!(true));
+    }
+
+    #[test]
+    fn is_not_kind_alias() {
+        let doc = json!({"x": "hello"});
+        let a = query("$.x kind not number", &doc).unwrap();
+        let b = query("$.x is not number", &doc).unwrap();
+        assert_eq!(a, b);
+        assert_eq!(a, json!(true));
+    }
+
+    #[test]
+    fn multi_binding_let() {
+        let doc = books();
+        let r = query("let a = 2, b = 3 in a + b", &doc).unwrap();
+        assert_eq!(r, json!(5));
+    }
+
+    #[test]
+    fn multi_binding_let_nested_ref() {
+        let doc = books();
+        // Second binding may refer to first (nested desugar).
+        let r = query("let a = 10, b = a * 2 in b", &doc).unwrap();
+        assert_eq!(r, json!(20));
+    }
+
+    #[test]
+    fn arrow_lambda_single_param() {
+        let doc = books();
+        let r = query("$.store.books.map(b => b.price)", &doc).unwrap();
+        let arr = r.as_array().unwrap();
+        assert_eq!(arr.len(), 4);
+        assert_eq!(arr[0], json!(12.99));
+    }
+
+    #[test]
+    fn arrow_lambda_paren_params() {
+        let doc = json!({"nums": [1,2,3,4]});
+        let r = query("$.nums.map((x) => x * 2)", &doc).unwrap();
+        assert_eq!(r, json!([2,4,6,8]));
+    }
+
+    #[test]
+    fn arrow_lambda_multi_param() {
+        // Sort supports a 2-param lambda comparator `lambda a,b: a<b`.
+        // Test arrow-form `(a,b) => a < b` desugars identically.
+        let doc = json!({"nums": [3, 1, 4, 1, 5, 9, 2, 6]});
+        let r = query("$.nums.sort((a, b) => a < b)", &doc).unwrap();
+        assert_eq!(r, json!([1, 1, 2, 3, 4, 5, 6, 9]));
+    }
+
+    #[test]
+    fn cast_int_from_str() {
+        let doc = json!({"s": "42"});
+        let r = query("$.s as int", &doc).unwrap();
+        assert_eq!(r, json!(42));
+    }
+
+    #[test]
+    fn cast_float_from_int() {
+        let doc = json!({"n": 3});
+        let r = query("$.n as float", &doc).unwrap();
+        assert_eq!(r, json!(3.0));
+    }
+
+    #[test]
+    fn cast_str_from_number() {
+        let doc = json!({"n": 42});
+        let r = query("$.n as string", &doc).unwrap();
+        assert_eq!(r, json!("42"));
+    }
+
+    #[test]
+    fn cast_bool_from_int() {
+        let doc = json!({"n": 1});
+        let r = query("$.n as bool", &doc).unwrap();
+        assert_eq!(r, json!(true));
+    }
+
+    #[test]
+    fn cast_chain_with_arithmetic() {
+        let doc = json!({"s": "10"});
+        // `as` tighter than *, so `$.s as int * 2` == `($.s as int) * 2` == 20.
+        let r = query("$.s as int * 2", &doc).unwrap();
+        assert_eq!(r, json!(20));
+    }
+
+    #[test]
+    fn dyn_field_string_key() {
+        let doc = json!({"user": {"name": "Alice", "age": 30}});
+        // `.{expr}` picks a key dynamically — same semantics as [expr].
+        let r = query("let k = \"name\" in $.user.{k}", &doc).unwrap();
+        assert_eq!(r, json!("Alice"));
+    }
+
+    #[test]
+    fn dyn_field_int_index() {
+        let doc = json!({"items": [10, 20, 30]});
+        let r = query("let i = 1 in $.items.{i}", &doc).unwrap();
+        assert_eq!(r, json!(20));
+    }
+
+    #[test]
+    fn dyn_field_computed_key() {
+        let doc = json!({"prefix_name": "hello", "key": "name"});
+        let r = query("$.{\"prefix_\" + $.key}", &doc).unwrap();
+        assert_eq!(r, json!("hello"));
+    }
+
+    #[test]
+    fn dyn_field_equivalent_to_bracket() {
+        let doc = json!({"user": {"name": "Bob"}});
+        let a = query("$.user[\"name\"]", &doc).unwrap();
+        let b = query("$.user.{\"name\"}", &doc).unwrap();
+        assert_eq!(a, b);
+    }
+
+    // ── Phase 2: [*] => map-into-shape template ───────────────────────────────
+
+    #[test]
+    fn map_shape_basic() {
+        let doc = books();
+        let a = query("$.store.books.map({title})", &doc).unwrap();
+        let b = query("$.store.books[*] => {title}", &doc).unwrap();
+        assert_eq!(a, b);
+        assert_eq!(a.as_array().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn map_shape_with_guard() {
+        let doc = books();
+        let a = query("$.store.books.filter(price > 10).map({title, price})", &doc).unwrap();
+        let b = query("$.store.books[* if price > 10] => {title, price}", &doc).unwrap();
+        assert_eq!(a, b);
+        let arr = b.as_array().unwrap();
+        assert!(arr.len() >= 2);
+        for it in arr {
+            assert!(it.get("title").is_some());
+            assert!(it.get("price").unwrap().as_f64().unwrap() > 10.0);
+        }
+    }
+
+    #[test]
+    fn map_shape_nested() {
+        let doc = json!({
+            "groups": [
+                {"name": "A", "items": [{"n": 1}, {"n": 2}]},
+                {"name": "B", "items": [{"n": 3}]},
+            ]
+        });
+        let r = query("$.groups[*] => {name, ns: items[*] => n}", &doc).unwrap();
+        assert_eq!(r, json!([
+            {"name": "A", "ns": [1, 2]},
+            {"name": "B", "ns": [3]},
+        ]));
+    }
+
+    #[test]
+    fn map_shape_projection_subset() {
+        let doc = books();
+        let r = query("$.store.books[*] => {title, price}", &doc).unwrap();
+        let arr = r.as_array().unwrap();
+        assert_eq!(arr.len(), 4);
+        for it in arr {
+            let obj = it.as_object().unwrap();
+            assert_eq!(obj.len(), 2);
+            assert!(obj.contains_key("title"));
+            assert!(obj.contains_key("price"));
+        }
+    }
+
+    // ── Phase 2: `when` conditional field ─────────────────────────────────────
+
+    #[test]
+    fn when_field_included_true() {
+        let doc = json!({"name": "Alice", "email": "a@x.com", "verified": true});
+        let r = query("{name, email: $.email when $.verified}", &doc).unwrap();
+        assert_eq!(r, json!({"name": "Alice", "email": "a@x.com"}));
+    }
+
+    #[test]
+    fn when_field_excluded_false() {
+        let doc = json!({"name": "Alice", "email": "a@x.com", "verified": false});
+        let r = query("{name, email: $.email when $.verified}", &doc).unwrap();
+        assert_eq!(r, json!({"name": "Alice"}));
+    }
+
+    #[test]
+    fn when_field_excluded_null_guard() {
+        let doc = json!({"name": "Bob"});
+        let r = query("{name, email: \"default\" when $.verified}", &doc).unwrap();
+        assert_eq!(r, json!({"name": "Bob"}));
+    }
+
+    #[test]
+    fn when_field_in_nested_shape() {
+        let doc = json!({
+            "users": [
+                {"name": "A", "active": true,  "role": "admin"},
+                {"name": "B", "active": false, "role": "user"},
+            ]
+        });
+        // Inside map, `@` is current item — `role` (bare ident) reads from current.
+        let r = query("$.users[*] => {name, role: role when active}", &doc).unwrap();
+        assert_eq!(r, json!([
+            {"name": "A", "role": "admin"},
+            {"name": "B"},
+        ]));
+    }
+
+    #[test]
+    fn when_field_guard_uses_other_fields() {
+        let doc = json!({"score": 85, "threshold": 70});
+        let r = query("{grade: \"pass\" when score > threshold}", &doc).unwrap();
+        assert_eq!(r, json!({"grade": "pass"}));
+    }
+
+    // ── Phase 2: `...**` deep-merge spread ────────────────────────────────────
+
+    #[test]
+    fn spread_deep_merges_nested_objects() {
+        let doc = json!({
+            "base": {"x": {"p": 1, "q": 2}, "y": 10},
+            "over": {"x": {"q": 99, "r": 3}, "z": 20},
+        });
+        // Shallow spread would overwrite `x` entirely; deep-spread merges nested.
+        let r = query("{...**$.base, ...**$.over}", &doc).unwrap();
+        assert_eq!(r, json!({
+            "x": {"p": 1, "q": 99, "r": 3},
+            "y": 10,
+            "z": 20,
+        }));
+    }
+
+    #[test]
+    fn spread_deep_vs_shallow() {
+        let doc = json!({
+            "base": {"x": {"p": 1}},
+            "over": {"x": {"q": 2}},
+        });
+        let shallow = query("{...$.base, ...$.over}", &doc).unwrap();
+        let deep    = query("{...**$.base, ...**$.over}", &doc).unwrap();
+        // Shallow: x is just {q:2} (replaced). Deep: x is {p:1, q:2} (merged).
+        assert_eq!(shallow, json!({"x": {"q": 2}}));
+        assert_eq!(deep,    json!({"x": {"p": 1, "q": 2}}));
+    }
+
+    #[test]
+    fn spread_deep_concatenates_arrays() {
+        let doc = json!({
+            "a": {"tags": ["one", "two"]},
+            "b": {"tags": ["three"]},
+        });
+        let r = query("{...**$.a, ...**$.b}", &doc).unwrap();
+        assert_eq!(r, json!({"tags": ["one", "two", "three"]}));
+    }
+
+    #[test]
+    fn spread_deep_scalar_rhs_wins() {
+        let doc = json!({
+            "a": {"name": "Alice", "info": {"nested": 1}},
+            "b": {"name": "Bob"},
+        });
+        let r = query("{...**$.a, ...**$.b}", &doc).unwrap();
+        assert_eq!(r, json!({"name": "Bob", "info": {"nested": 1}}));
+    }
+
+    // ── Patch block ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn patch_simple_field_replace() {
+        let doc = json!({"name": "Alice", "age": 30});
+        let r = query(r#"patch $ { name: "Bob" }"#, &doc).unwrap();
+        assert_eq!(r, json!({"name": "Bob", "age": 30}));
+    }
+
+    #[test]
+    fn patch_nested_field_replace() {
+        let doc = json!({"user": {"name": "Alice", "age": 30}});
+        let r = query(r#"patch $ { user.name: "Bob" }"#, &doc).unwrap();
+        assert_eq!(r, json!({"user": {"name": "Bob", "age": 30}}));
+    }
+
+    #[test]
+    fn patch_delete_field() {
+        let doc = json!({"name": "Alice", "tmp": "remove-me", "age": 30});
+        let r = query(r#"patch $ { tmp: DELETE }"#, &doc).unwrap();
+        assert_eq!(r, json!({"name": "Alice", "age": 30}));
+    }
+
+    #[test]
+    fn patch_add_new_field() {
+        let doc = json!({"name": "Alice"});
+        let r = query(r#"patch $ { age: 42 }"#, &doc).unwrap();
+        assert_eq!(r, json!({"name": "Alice", "age": 42}));
+    }
+
+    #[test]
+    fn patch_wildcard_array() {
+        let doc = json!({"users": [
+            {"name": "Alice", "seen": false},
+            {"name": "Bob",   "seen": false},
+        ]});
+        let r = query(r#"patch $ { users[*].seen: true }"#, &doc).unwrap();
+        assert_eq!(r, json!({"users": [
+            {"name": "Alice", "seen": true},
+            {"name": "Bob",   "seen": true},
+        ]}));
+    }
+
+    #[test]
+    fn patch_wildcard_filter() {
+        let doc = json!({"users": [
+            {"name": "Alice", "active": true,  "role": "user"},
+            {"name": "Bob",   "active": false, "role": "user"},
+            {"name": "Cara",  "active": true,  "role": "user"},
+        ]});
+        let r = query(r#"patch $ { users[* if active].role: "admin" }"#, &doc).unwrap();
+        assert_eq!(r, json!({"users": [
+            {"name": "Alice", "active": true,  "role": "admin"},
+            {"name": "Bob",   "active": false, "role": "user"},
+            {"name": "Cara",  "active": true,  "role": "admin"},
+        ]}));
+    }
+
+    #[test]
+    fn patch_uses_current_value() {
+        let doc = json!({"users": [
+            {"name": "Alice", "email": "ALICE@X"},
+            {"name": "Bob",   "email": "BOB@X"},
+        ]});
+        let r = query(r#"patch $ { users[*].email: @.lower() }"#, &doc).unwrap();
+        assert_eq!(r, json!({"users": [
+            {"name": "Alice", "email": "alice@x"},
+            {"name": "Bob",   "email": "bob@x"},
+        ]}));
+    }
+
+    #[test]
+    fn patch_conditional_when_truthy() {
+        let doc = json!({"count": 5, "enabled": true});
+        let r = query(r#"patch $ { count: @ + 1 when $.enabled }"#, &doc).unwrap();
+        assert_eq!(r, json!({"count": 6, "enabled": true}));
+    }
+
+    #[test]
+    fn patch_conditional_when_falsy_skips() {
+        let doc = json!({"count": 5, "enabled": false});
+        let r = query(r#"patch $ { count: @ + 1 when $.enabled }"#, &doc).unwrap();
+        assert_eq!(r, json!({"count": 5, "enabled": false}));
+    }
+
+    #[test]
+    fn patch_multiple_ops_in_order() {
+        let doc = json!({"a": 1, "b": 2, "c": 3});
+        let r = query(r#"patch $ { a: 10, b: DELETE, c: 30 }"#, &doc).unwrap();
+        assert_eq!(r, json!({"a": 10, "c": 30}));
+    }
+
+    #[test]
+    fn patch_index_access() {
+        let doc = json!({"items": [10, 20, 30]});
+        let r = query(r#"patch $ { items[1]: 99 }"#, &doc).unwrap();
+        assert_eq!(r, json!({"items": [10, 99, 30]}));
+    }
+
+    #[test]
+    fn patch_delete_from_wildcard() {
+        let doc = json!({"users": [
+            {"name": "Alice", "active": true},
+            {"name": "Bob",   "active": false},
+            {"name": "Cara",  "active": true},
+        ]});
+        let r = query(r#"patch $ { users[* if not active]: DELETE }"#, &doc).unwrap();
+        assert_eq!(r, json!({"users": [
+            {"name": "Alice", "active": true},
+            {"name": "Cara",  "active": true},
+        ]}));
+    }
+
+    #[test]
+    fn patch_delete_mark_outside_patch_errors() {
+        let doc = json!({});
+        let r = query(r#"DELETE"#, &doc);
+        assert!(r.is_err());
     }
 }

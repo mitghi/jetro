@@ -295,6 +295,164 @@ pub(super) fn eval(expr: &Expr, env: &Env) -> Result<Val, EvalError> {
         }
 
         Expr::GlobalCall { name, args } => eval_global(name, args, env),
+
+        Expr::Cast { expr, ty } => {
+            let v = eval(expr, env)?;
+            cast_val(&v, *ty)
+        }
+
+        Expr::Patch { root, ops } => eval_patch(root, ops, env),
+        Expr::DeleteMark =>
+            err!("DELETE can only appear as a patch-field value"),
+    }
+}
+
+// ── Patch ─────────────────────────────────────────────────────────────────────
+
+use super::ast::{PatchOp, PathStep};
+
+enum PatchResult { Replace(Val), Delete }
+
+fn eval_patch(root: &Expr, ops: &[PatchOp], env: &Env) -> Result<Val, EvalError> {
+    let mut doc = eval(root, env)?;
+    for op in ops {
+        if let Some(c) = &op.cond {
+            let cenv = env.with_current(doc.clone());
+            if !is_truthy(&eval(c, &cenv)?) { continue; }
+        }
+        match apply_patch_step(doc, &op.path, 0, &op.val, env)? {
+            PatchResult::Replace(v) => doc = v,
+            PatchResult::Delete     => doc = Val::Null,
+        }
+    }
+    Ok(doc)
+}
+
+fn apply_patch_step(
+    v:        Val,
+    path:     &[PathStep],
+    i:        usize,
+    val_expr: &Expr,
+    env:      &Env,
+) -> Result<PatchResult, EvalError> {
+    if i == path.len() {
+        if matches!(val_expr, Expr::DeleteMark) {
+            return Ok(PatchResult::Delete);
+        }
+        let nv = eval(val_expr, &env.with_current(v))?;
+        return Ok(PatchResult::Replace(nv));
+    }
+    match &path[i] {
+        PathStep::Field(name) => {
+            let existing = v.get_field(name);
+            let child = apply_patch_step(existing, path, i+1, val_expr, env)?;
+            let mut m = v.into_map().unwrap_or_default();
+            match child {
+                PatchResult::Delete => { m.shift_remove(name.as_str()); }
+                PatchResult::Replace(nv) => { m.insert(Arc::from(name.as_str()), nv); }
+            }
+            Ok(PatchResult::Replace(Val::obj(m)))
+        }
+        PathStep::Index(idx) => {
+            let existing = v.get_index(*idx);
+            let child = apply_patch_step(existing, path, i+1, val_expr, env)?;
+            let mut a = v.into_vec().unwrap_or_default();
+            let resolved = resolve_idx(*idx, a.len() as i64);
+            match child {
+                PatchResult::Delete => {
+                    if resolved < a.len() { a.remove(resolved); }
+                }
+                PatchResult::Replace(nv) => {
+                    if resolved < a.len() { a[resolved] = nv; }
+                }
+            }
+            Ok(PatchResult::Replace(Val::arr(a)))
+        }
+        PathStep::Wildcard => {
+            let arr = v.into_vec().ok_or_else(|| EvalError("patch [*]: expected array".into()))?;
+            let mut out = Vec::with_capacity(arr.len());
+            for item in arr {
+                match apply_patch_step(item, path, i+1, val_expr, env)? {
+                    PatchResult::Delete => {}
+                    PatchResult::Replace(nv) => out.push(nv),
+                }
+            }
+            Ok(PatchResult::Replace(Val::arr(out)))
+        }
+        PathStep::WildcardFilter(pred) => {
+            let arr = v.into_vec().ok_or_else(|| EvalError("patch [* if]: expected array".into()))?;
+            let mut out = Vec::with_capacity(arr.len());
+            for item in arr {
+                let include = is_truthy(&eval(pred, &env.with_current(item.clone()))?);
+                if include {
+                    match apply_patch_step(item, path, i+1, val_expr, env)? {
+                        PatchResult::Delete => {}
+                        PatchResult::Replace(nv) => out.push(nv),
+                    }
+                } else {
+                    out.push(item);
+                }
+            }
+            Ok(PatchResult::Replace(Val::arr(out)))
+        }
+        PathStep::Descendant(_) =>
+            err!("descendant paths (..) in patch are not yet supported"),
+    }
+}
+
+/// Runtime cast dispatcher — powers the `as` operator.  Semantics mirror
+/// the existing `.to_string()` / `.to_bool()` / `.to_number()` methods
+/// for overlapping types; `int`/`float` are new targets that narrow
+/// numeric values.
+fn cast_val(v: &Val, ty: super::ast::CastType) -> Result<Val, EvalError> {
+    use super::ast::CastType;
+    match ty {
+        CastType::Str => Ok(Val::Str(Arc::from(match v {
+            Val::Null       => "null".to_string(),
+            Val::Bool(b)    => b.to_string(),
+            Val::Int(n)     => n.to_string(),
+            Val::Float(f)   => f.to_string(),
+            Val::Str(s)     => s.to_string(),
+            other           => super::eval::util::val_to_string(other),
+        }.as_str()))),
+        CastType::Bool => Ok(Val::Bool(match v {
+            Val::Null       => false,
+            Val::Bool(b)    => *b,
+            Val::Int(n)     => *n != 0,
+            Val::Float(f)   => *f != 0.0,
+            Val::Str(s)     => !s.is_empty(),
+            Val::Arr(a)     => !a.is_empty(),
+            Val::Obj(o)     => !o.is_empty(),
+        })),
+        CastType::Number | CastType::Float => match v {
+            Val::Int(n)     => Ok(Val::Float(*n as f64)),
+            Val::Float(_)   => Ok(v.clone()),
+            Val::Str(s)     => s.parse::<f64>().map(Val::Float)
+                                .map_err(|e| EvalError(format!("as float: {}", e))),
+            Val::Bool(b)    => Ok(Val::Float(if *b { 1.0 } else { 0.0 })),
+            Val::Null       => Ok(Val::Float(0.0)),
+            _               => err!("as float: cannot convert"),
+        },
+        CastType::Int => match v {
+            Val::Int(_)     => Ok(v.clone()),
+            Val::Float(f)   => Ok(Val::Int(*f as i64)),
+            Val::Str(s)     => s.parse::<i64>().map(Val::Int)
+                                .or_else(|_| s.parse::<f64>().map(|f| Val::Int(f as i64)))
+                                .map_err(|e| EvalError(format!("as int: {}", e))),
+            Val::Bool(b)    => Ok(Val::Int(if *b { 1 } else { 0 })),
+            Val::Null       => Ok(Val::Int(0)),
+            _               => err!("as int: cannot convert"),
+        },
+        CastType::Array => match v {
+            Val::Arr(_)     => Ok(v.clone()),
+            Val::Null       => Ok(Val::arr(Vec::new())),
+            other           => Ok(Val::arr(vec![other.clone()])),
+        },
+        CastType::Object => match v {
+            Val::Obj(_)     => Ok(v.clone()),
+            _               => err!("as object: cannot convert non-object"),
+        },
+        CastType::Null => Ok(Val::Null),
     }
 }
 
@@ -498,7 +656,10 @@ fn eval_object(fields: &[ObjField], env: &Env) -> Result<Val, EvalError> {
                         else { env.current.get_field(name) };
                 if !v.is_null() { map.insert(Arc::from(name.as_str()), v); }
             }
-            ObjField::Kv { key, val, optional } => {
+            ObjField::Kv { key, val, optional, cond } => {
+                if let Some(c) = cond {
+                    if !is_truthy(&eval(c, env)?) { continue; }
+                }
                 let v = eval(val, env)?;
                 if *optional && v.is_null() { continue; }
                 map.insert(Arc::from(key.as_str()), v);
@@ -511,6 +672,15 @@ fn eval_object(fields: &[ObjField], env: &Env) -> Result<Val, EvalError> {
                 if let Val::Obj(other) = eval(expr, env)? {
                     let entries = Arc::try_unwrap(other).unwrap_or_else(|m| (*m).clone());
                     for (k, v) in entries { map.insert(k, v); }
+                }
+            }
+            ObjField::SpreadDeep(expr) => {
+                if let Val::Obj(other) = eval(expr, env)? {
+                    let base = std::mem::take(&mut map);
+                    let merged = deep_merge_concat(Val::obj(base), Val::Obj(other));
+                    if let Val::Obj(m) = merged {
+                        map = Arc::try_unwrap(m).unwrap_or_else(|m| (*m).clone());
+                    }
                 }
             }
         }

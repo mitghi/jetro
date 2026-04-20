@@ -251,9 +251,10 @@ pub struct CompiledCall {
 #[derive(Debug, Clone)]
 pub enum CompiledObjEntry {
     Short(Arc<str>),
-    Kv     { key: Arc<str>, prog: Arc<Program>, optional: bool },
+    Kv     { key: Arc<str>, prog: Arc<Program>, optional: bool, cond: Option<Arc<Program>> },
     Dynamic { key: Arc<Program>, val: Arc<Program> },
     Spread(Arc<Program>),
+    SpreadDeep(Arc<Program>),
 }
 
 /// A compiled f-string interpolation part.
@@ -357,6 +358,9 @@ pub enum Opcode {
     Add, Sub, Mul, Div, Mod,
     Eq, Neq, Lt, Lte, Gt, Gte, Fuzzy, Not, Neg,
 
+    // ── Type cast (`as T`) ───────────────────────────────────────────────────
+    CastOp(super::ast::CastType),
+
     // ── Short-circuit ops (embed rhs as sub-program) ──────────────────────────
     AndOp(Arc<Program>),
     OrOp(Arc<Program>),
@@ -396,6 +400,9 @@ pub enum Opcode {
 
     // ── Resolution cache fast-path ────────────────────────────────────────────
     GetPointer(Arc<str>),
+
+    // ── Patch block (delegates to tree-walker eval) ──────────────────────────
+    PatchEval(Arc<super::ast::Expr>),
 }
 
 // ── Program ───────────────────────────────────────────────────────────────────
@@ -1168,11 +1175,12 @@ impl Compiler {
                 let entries: Vec<CompiledObjEntry> = fields.iter().map(|f| match f {
                     ObjField::Short(name) =>
                         CompiledObjEntry::Short(Arc::from(name.as_str())),
-                    ObjField::Kv { key, val, optional } =>
+                    ObjField::Kv { key, val, optional, cond } =>
                         CompiledObjEntry::Kv {
                             key: Arc::from(key.as_str()),
                             prog: Arc::new(Self::compile_sub(val, ctx)),
                             optional: *optional,
+                            cond: cond.as_ref().map(|c| Arc::new(Self::compile_sub(c, ctx))),
                         },
                     ObjField::Dynamic { key, val } =>
                         CompiledObjEntry::Dynamic {
@@ -1181,6 +1189,8 @@ impl Compiler {
                         },
                     ObjField::Spread(e) =>
                         CompiledObjEntry::Spread(Arc::new(Self::compile_sub(e, ctx))),
+                    ObjField::SpreadDeep(e) =>
+                        CompiledObjEntry::SpreadDeep(Arc::new(Self::compile_sub(e, ctx))),
                 }).collect();
                 ops.push(Opcode::MakeObj(entries.into()));
             }
@@ -1279,6 +1289,26 @@ impl Compiler {
                 });
                 ops.push(Opcode::PushRoot); // global calls need root pushed first
                 ops.push(Opcode::CallMethod(call));
+            }
+
+            Expr::Cast { expr, ty } => {
+                Self::emit_into(expr, ctx, ops);
+                ops.push(Opcode::CastOp(*ty));
+            }
+
+            Expr::Patch { .. } => {
+                // Patch block: structural transform with COW writes, conditional
+                // leaves, DELETE sentinel.  Emit opaque opcode; the VM delegates
+                // to the tree-walker at runtime (patch is rare enough that the
+                // opcode compile pays no dividend here).
+                ops.push(Opcode::PatchEval(Arc::new(expr.clone())));
+            }
+
+            Expr::DeleteMark => {
+                // DELETE outside a patch-field value is a static error; the
+                // tree-walker raises it at runtime, so emit a sentinel that
+                // triggers the same path.
+                ops.push(Opcode::PatchEval(Arc::new(Expr::DeleteMark)));
             }
         }
     }
@@ -2218,6 +2248,10 @@ impl VM {
                         _ => return err!("unary minus requires a number"),
                     });
                 }
+                Opcode::CastOp(ty) => {
+                    let v = pop!(stack);
+                    stack.push(exec_cast(&v, *ty)?);
+                }
 
                 // ── Short-circuit ops ─────────────────────────────────────────
                 Opcode::AndOp(rhs) => {
@@ -2380,6 +2414,11 @@ impl VM {
                         v
                     };
                     stack.push(v);
+                }
+
+                // ── Patch block ───────────────────────────────────────────────
+                Opcode::PatchEval(e) => {
+                    stack.push(eval(e, env)?);
                 }
             }
         }
@@ -2679,7 +2718,10 @@ impl VM {
                             else { env.current.get_field(name.as_ref()) };
                     if !v.is_null() { map.insert(name.clone(), v); }
                 }
-                CompiledObjEntry::Kv { key, prog, optional } => {
+                CompiledObjEntry::Kv { key, prog, optional, cond } => {
+                    if let Some(c) = cond {
+                        if !super::eval::util::is_truthy(&self.exec(c, env)?) { continue; }
+                    }
                     let v = self.exec(prog, env)?;
                     if *optional && v.is_null() { continue; }
                     map.insert(key.clone(), v);
@@ -2693,6 +2735,16 @@ impl VM {
                     if let Val::Obj(other) = self.exec(prog, env)? {
                         let entries = Arc::try_unwrap(other).unwrap_or_else(|m| (*m).clone());
                         for (k, v) in entries { map.insert(k, v); }
+                    }
+                }
+                CompiledObjEntry::SpreadDeep(prog) => {
+                    if let Val::Obj(other) = self.exec(prog, env)? {
+                        let base = std::mem::take(&mut map);
+                        let merged = super::eval::util::deep_merge_concat(
+                            Val::obj(base), Val::Obj(other));
+                        if let Val::Obj(m) = merged {
+                            map = Arc::try_unwrap(m).unwrap_or_else(|m| (*m).clone());
+                        }
                     }
                 }
             }
@@ -2845,6 +2897,58 @@ fn bind_comp_vars(env: &Env, vars: &[Arc<str>], item: Val) -> Env {
             e.current = val;
             e
         }
+    }
+}
+
+fn exec_cast(v: &Val, ty: super::ast::CastType) -> Result<Val, EvalError> {
+    use super::ast::CastType;
+    match ty {
+        CastType::Str => Ok(Val::Str(Arc::from(match v {
+            Val::Null     => "null".to_string(),
+            Val::Bool(b)  => b.to_string(),
+            Val::Int(n)   => n.to_string(),
+            Val::Float(f) => f.to_string(),
+            Val::Str(s)   => s.to_string(),
+            other         => super::eval::util::val_to_string(other),
+        }.as_str()))),
+        CastType::Bool => Ok(Val::Bool(match v {
+            Val::Null     => false,
+            Val::Bool(b)  => *b,
+            Val::Int(n)   => *n != 0,
+            Val::Float(f) => *f != 0.0,
+            Val::Str(s)   => !s.is_empty(),
+            Val::Arr(a)   => !a.is_empty(),
+            Val::Obj(o)   => !o.is_empty(),
+        })),
+        CastType::Number | CastType::Float => match v {
+            Val::Int(n)   => Ok(Val::Float(*n as f64)),
+            Val::Float(_) => Ok(v.clone()),
+            Val::Str(s)   => s.parse::<f64>().map(Val::Float)
+                              .map_err(|e| EvalError(format!("as float: {}", e))),
+            Val::Bool(b)  => Ok(Val::Float(if *b { 1.0 } else { 0.0 })),
+            Val::Null     => Ok(Val::Float(0.0)),
+            _             => err!("as float: cannot convert"),
+        },
+        CastType::Int => match v {
+            Val::Int(_)   => Ok(v.clone()),
+            Val::Float(f) => Ok(Val::Int(*f as i64)),
+            Val::Str(s)   => s.parse::<i64>().map(Val::Int)
+                              .or_else(|_| s.parse::<f64>().map(|f| Val::Int(f as i64)))
+                              .map_err(|e| EvalError(format!("as int: {}", e))),
+            Val::Bool(b)  => Ok(Val::Int(if *b { 1 } else { 0 })),
+            Val::Null     => Ok(Val::Int(0)),
+            _             => err!("as int: cannot convert"),
+        },
+        CastType::Array => match v {
+            Val::Arr(_)   => Ok(v.clone()),
+            Val::Null     => Ok(Val::arr(Vec::new())),
+            other         => Ok(Val::arr(vec![other.clone()])),
+        },
+        CastType::Object => match v {
+            Val::Obj(_)   => Ok(v.clone()),
+            _             => err!("as object: cannot convert non-object"),
+        },
+        CastType::Null => Ok(Val::Null),
     }
 }
 
