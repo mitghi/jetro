@@ -16,7 +16,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let db = Database::open(&dir)?;
         let exprs = db.expr_bucket("exprs")?;
-        exprs.put("top_scorers", ">/players/#filter('score' > 80)/#map(@/name)")?;
+        exprs.put("top_scorers", "$.players.filter(score > 80).map(name)")?;
 
         let docs = db.json_bucket("game", &["top_scorers"], &exprs)?;
         docs.insert("round:1", &json!({
@@ -41,8 +41,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let docs = db.json_bucket("game", &["top_scorers"], &exprs)?;
         let top = docs.get_result("round:1", "top_scorers")?.expect("result should persist");
-        println!("Top scorers after restart: {}", top[0]);
-        assert_eq!(top[0], json!(["Alice", "Carol"]));
+        println!("Top scorers after restart: {}", top);
+        assert_eq!(top, json!(["Alice", "Carol"]));
     }
 
     println!("Persistence verified.");

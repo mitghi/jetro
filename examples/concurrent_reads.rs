@@ -14,9 +14,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db = Database::open(tmp.path())?;
 
     let exprs = Arc::new(db.expr_bucket("exprs")?);
-    exprs.put("total",  ">/values/#sum")?;
-    exprs.put("max",    ">/values/#max")?;
-    exprs.put("count",  ">/values/#len")?;
+    exprs.put("total",  "$.values.sum()")?;
+    exprs.put("max",    "$.values.max()")?;
+    exprs.put("count",  "$.values.len()")?;
 
     let docs = Arc::new(db.json_bucket("metrics", &["total", "max", "count"], &exprs)?);
 
@@ -42,7 +42,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let key = format!("metric:{i:04}");
                     let total = docs.get_result(&key, "total").unwrap().unwrap();
                     let expected = 4 * i + 6; // i+(i+1)+(i+2)+(i+3)
-                    let got: u64 = serde_json::from_value(total[0].clone()).unwrap();
+                    let got: u64 = serde_json::from_value(total).unwrap();
                     assert_eq!(got, expected as u64, "tid={tid} i={i}");
                     hits += 1;
                 }

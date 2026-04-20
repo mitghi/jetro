@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::sync::Arc;
 
-use crate::v2::ast::Arg;
+use crate::ast::Arg;
 
 use super::{Env, EvalError, eval_pos, apply_item};
 use super::value::Val;

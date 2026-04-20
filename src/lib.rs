@@ -1,4 +1,91 @@
-//! Jetro is a tool for querying and transforming JSON.
+//! Jetro — query and transform JSON with a compact expression language.
+//!
+//! # Architecture
+//!
+//! ```text
+//!   source text
+//!       │
+//!       ▼
+//!   parser.rs  ── pest grammar → [ast::Expr] tree
+//!       │
+//!       ▼
+//!   vm::Compiler::emit      ── Expr → Vec<Opcode>
+//!       │
+//!       ▼
+//!   vm::Compiler::optimize  ── peephole passes:
+//!                              1. root_chain fusion
+//!                              2. filter_count fusion
+//!                              3. filter / map combinator fusion
+//!                              4. find / quantifier fusion
+//!                              5. strength reduction
+//!                              6. redundant-op removal
+//!                              7. kind_check constant fold
+//!                              8. method constant fold
+//!                              9. expression constant fold
+//!                             10. nullness-driven OptField→GetField
+//!       │
+//!       ▼
+//!   Compiler::compile runs:
+//!       • AST rewrite: reorder_and_operands        (selectivity-based)
+//!       • post-pass : analysis::dedup_subprograms  (CSE on Arc<Program>)
+//!       │
+//!       ▼
+//!   vm::VM::execute          ── stack machine over &serde_json::Value
+//!                                with thread-local pointer cache.
+//! ```
+//!
+//! ## Analysis / IR layers
+//!
+//! Several independent analyses operate on the compiled [`Program`]:
+//!
+//! | Module         | Produces                                  | Uses                              |
+//! |----------------|-------------------------------------------|-----------------------------------|
+//! | [`analysis`]   | Type/Nullness/Cardinality, cost, monot.   | Optimizer heuristics, planner     |
+//! | [`schema`]     | Shape inference from JSON docs            | Specialise `OptField` → `GetField`|
+//! | [`plan`]       | Logical relational plan IR                | Filter push-down, join detection  |
+//! | [`cfg`]        | Basic blocks + edges, dominators,         | Liveness, slot allocator          |
+//! |                | dominance frontiers, loop headers         |                                   |
+//! | [`ssa`]        | SSA-style numbering + phi nodes           | CSE, def-use analysis             |
+//!
+//! None of these are mandatory for correctness — the tree-walking
+//! evaluator in `eval/` is the reference implementation.  They exist
+//! to let advanced callers specialise a program for a known document
+//! shape, run optimisations the peephole layer cannot express, or
+//! export a readable data-flow graph for debugging.
+//!
+//! # Syntax overview
+//!
+//! ```text
+//! // Navigation
+//! $.store.books
+//! $.store.books[0]
+//! $.store.books[-1]
+//! $.store.books[2:5]
+//! $..title
+//!
+//! // Filter
+//! $.books.filter(price > 10 and rating >= 4)
+//! $.books.filter(lambda b: b.tags.includes("sci-fi"))
+//!
+//! // Map / reshape
+//! $.books.map(title)
+//! $.books.map({title, cost: price})
+//!
+//! // Aggregates
+//! $.books.sum(price)
+//! $.books.filter(price > 10).count()
+//!
+//! // Comprehensions
+//! [book.title for book in $.books if book.price > 10]
+//! {user.id: user.name for user in $.users if user.active}
+//!
+//! // Let bindings
+//! let top = $.books.filter(price > 100) in {count: top.len(), titles: top.map(title)}
+//!
+//! // Kind checks
+//! $.items.filter(price kind number and price > 0)
+//! $.data.filter(deleted_at kind null)
+//! ```
 //!
 //! # Quick start
 //!
@@ -15,39 +102,98 @@
 //!     }
 //! }));
 //!
-//! let mut r = j.collect(">/store/books/#len").unwrap();
-//! let count: i64 = r.from_index(0).unwrap();
-//! assert_eq!(count, 2);
+//! let count = j.collect("$.store.books.len()").unwrap();
+//! assert_eq!(count, json!(2));
 //! ```
 
-extern crate pest_derive;
-
-use pest::Parser;
-use pest_derive::Parser as Parse;
-
-pub mod context;
-pub mod db;
+pub mod ast;
+pub mod eval;
 pub mod graph;
 pub mod parser;
-pub mod v2;
 pub mod vm;
-mod fmt;
-pub mod func;
+pub mod analysis;
+pub mod schema;
+pub mod plan;
+pub mod cfg;
+pub mod ssa;
+pub mod db;
 
-// Re-export the two types users need most so they don't have to dig into
-// sub-modules for everyday use.
-pub use context::{Error, PathResult};
+#[cfg(test)]
+mod tests;
+#[cfg(test)]
+mod examples;
 
+use std::cell::RefCell;
+use std::sync::Arc;
 use serde_json::Value;
+
+pub use eval::EvalError;
+pub use eval::{Method, MethodRegistry};
+pub use graph::Graph;
+pub use parser::ParseError;
+pub use vm::{VM, Compiler, Program};
+
+/// Combined error for parse + eval.
+#[derive(Debug)]
+pub enum Error {
+    Parse(ParseError),
+    Eval(EvalError),
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::Parse(e) => write!(f, "{}", e),
+            Error::Eval(e)  => write!(f, "{}", e),
+        }
+    }
+}
+impl std::error::Error for Error {}
+
+impl From<ParseError> for Error { fn from(e: ParseError) -> Self { Error::Parse(e) } }
+impl From<EvalError>  for Error { fn from(e: EvalError)  -> Self { Error::Eval(e)  } }
+
+/// Evaluate a Jetro expression against a JSON value.
+///
+/// ```rust,no_run
+/// use serde_json::json;
+/// use jetro;
+///
+/// let doc = json!({
+///     "store": {
+///         "books": [
+///             {"title": "Dune",       "price": 12.99},
+///             {"title": "Foundation", "price":  9.99},
+///         ]
+///     }
+/// });
+///
+/// let result = jetro::query("$.store.books.filter(price > 10).map(title)", &doc).unwrap();
+/// assert_eq!(result, json!(["Dune"]));
+/// ```
+pub fn query(expr: &str, doc: &Value) -> Result<Value, Error> {
+    let ast = parser::parse(expr)?;
+    Ok(eval::evaluate(&ast, doc)?)
+}
+
+/// Evaluate a Jetro expression with a custom method registry.
+pub fn query_with(expr: &str, doc: &Value, registry: Arc<MethodRegistry>) -> Result<Value, Error> {
+    let ast = parser::parse(expr)?;
+    Ok(eval::evaluate_with(&ast, doc, registry)?)
+}
 
 // ── Jetro ─────────────────────────────────────────────────────────────────────
 
+thread_local! {
+    static THREAD_VM: RefCell<VM> = RefCell::new(VM::new());
+}
+
 /// Primary entry point for evaluating Jetro expressions.
 ///
-/// `Jetro` holds a JSON document and evaluates path expressions against it.
-/// Internally it delegates to a **thread-local VM** that is shared across every
-/// `Jetro` instance on the same thread, so the compile cache and resolution
-/// cache accumulate over the lifetime of the thread — not just one query.
+/// Holds a JSON document and evaluates expressions against it.  Internally
+/// delegates to a thread-local [`VM`] shared across every `Jetro`
+/// instance on the same thread, so the compile cache and resolution cache
+/// accumulate over the lifetime of the thread — not just one query.
 ///
 /// # Example
 ///
@@ -58,14 +204,8 @@ use serde_json::Value;
 /// let doc = json!({"user": {"name": "Alice", "age": 30}});
 /// let j = Jetro::new(doc);
 ///
-/// let mut r = j.collect(">/user/name").unwrap();
-/// let name: String = r.from_index(0).unwrap();
-/// assert_eq!(name, "Alice");
-///
-/// // The same instance can be queried multiple times.
-/// let mut r2 = j.collect(">/user/age").unwrap();
-/// let age: i64 = r2.from_index(0).unwrap();
-/// assert_eq!(age, 30);
+/// assert_eq!(j.collect("$.user.name").unwrap(), json!("Alice"));
+/// assert_eq!(j.collect("$.user.age").unwrap(),  json!(30));
 /// ```
 pub struct Jetro {
     document: Value,
@@ -79,33 +219,18 @@ impl Jetro {
 
     /// Evaluate `expr` against the document.
     ///
-    /// Uses the thread-local VM — the compiled program and resolved pointer
-    /// paths are cached for the lifetime of the current thread, so repeated
-    /// calls with the same expression skip both parsing and traversal.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Err` if the expression cannot be parsed or evaluated.
-    pub fn collect<S: Into<String>>(&self, expr: S) -> Result<PathResult, Error> {
-        let expr = expr.into();
-        vm::THREAD_VM.with(|cell| match cell.try_borrow_mut() {
-            Ok(mut vm) => vm.run_str(&expr, &self.document),
-            // Re-entrant call (e.g. from inside a function): use a fresh VM.
-            Err(_) => vm::VM::new().run_str(&expr, &self.document),
+    /// Uses the thread-local VM — compiled programs and resolved pointer
+    /// paths are cached for the lifetime of the current thread.
+    pub fn collect<S: AsRef<str>>(&self, expr: S) -> Result<Value, Error> {
+        let expr = expr.as_ref();
+        THREAD_VM.with(|cell| match cell.try_borrow_mut() {
+            Ok(mut vm)  => vm.run_str(expr, &self.document).map_err(Error::Eval),
+            // Re-entrant call (e.g. from inside a method): use a fresh VM.
+            Err(_)      => VM::new().run_str(expr, &self.document).map_err(Error::Eval),
         })
     }
 }
 
-/// Convenience: create a `Jetro` instance directly from a `serde_json::Value`.
-///
-/// ```rust
-/// use jetro::Jetro;
-/// use serde_json::json;
-///
-/// let mut r = Jetro::from(json!({"x": 42})).collect(">/x").unwrap();
-/// let x: i64 = r.from_index(0).unwrap();
-/// assert_eq!(x, 42);
-/// ```
 impl From<Value> for Jetro {
     fn from(v: Value) -> Self {
         Self::new(v)

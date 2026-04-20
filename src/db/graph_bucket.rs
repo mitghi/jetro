@@ -36,7 +36,7 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 use serde_json::Value;
 
-use crate::graph::Graph;
+use crate::Graph;
 use super::btree::BTree;
 use super::bucket::ExprBucket;
 use super::error::DbError;
@@ -333,7 +333,7 @@ impl GraphBucket {
     /// - `ByField` — secondary index scan: O(log n + k).
     /// - `All`     — full node scan: O(n). Use only for small reference data.
     /// - `Hot`     — in-memory read: O(1). Requires `preload_hot` first.
-    pub fn query(&self, nodes: &[GraphNode<'_>], expr: &str) -> Result<Vec<Value>, DbError> {
+    pub fn query(&self, nodes: &[GraphNode<'_>], expr: &str) -> Result<Value, DbError> {
         let guard = self.nodes.read();
         let mut graph = Graph::new();
 
@@ -342,8 +342,7 @@ impl GraphBucket {
             graph.add_node(name, value);
         }
 
-        let result = graph.query(expr).map_err(|e| DbError::EvalError(e.to_string()))?;
-        Ok(result.0)
+        graph.query(expr).map_err(|e| DbError::EvalError(e.to_string()))
     }
 
     /// Convenience for the common stream processing pattern:
@@ -368,7 +367,7 @@ impl GraphBucket {
         event: Value,
         lookups: &[(&str, &str, &Value)],
         expr: &str,
-    ) -> Result<Vec<Value>, DbError> {
+    ) -> Result<Value, DbError> {
         let mut node_specs: Vec<GraphNode<'_>> = vec![
             GraphNode::Inline { node: stream_node, value: event },
         ];
@@ -379,7 +378,7 @@ impl GraphBucket {
     }
 
     /// Evaluate a named expression (looked up from the ExprBucket) on the graph.
-    pub fn query_named(&self, nodes: &[GraphNode<'_>], expr_key: &str) -> Result<Vec<Value>, DbError> {
+    pub fn query_named(&self, nodes: &[GraphNode<'_>], expr_key: &str) -> Result<Value, DbError> {
         let expr = self.exprs.get(expr_key)?
             .ok_or_else(|| DbError::ExprNotFound(expr_key.to_string()))?;
         self.query(nodes, &expr)

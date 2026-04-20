@@ -334,7 +334,7 @@ fn walk(plan: &LogicalPlan, out: &mut Vec<JoinCandidate>) {
 }
 
 fn detect_eq_join(pred: &Arc<Program>) -> Option<JoinCandidate> {
-    use crate::v2::vm::Opcode;
+    use crate::vm::Opcode;
     // Look for pattern: LoadIdent + GetField* + LoadIdent + GetField* + Eq
     let ops = &pred.ops;
     if ops.len() < 3 { return None; }
@@ -368,7 +368,7 @@ fn describe_chain(ops: &[super::vm::Opcode]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::v2::vm::Compiler;
+    use crate::vm::Compiler;
 
     #[test]
     fn lift_path() {
@@ -400,7 +400,7 @@ mod tests {
 
     #[test]
     fn roundtrip_lower_preserves_semantics() {
-        use crate::v2::vm::VM;
+        use crate::vm::VM;
         use serde_json::json;
         let doc = json!({"store": {"books": [{"price": 20}, {"price": 5}]}});
         let p = Compiler::compile_str("$.store.books.filter(@.price > 10).count()").unwrap();

@@ -192,7 +192,7 @@ fn _use_arc<T>(_: Arc<T>) {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::v2::vm::Compiler;
+    use crate::vm::Compiler;
 
     #[test]
     fn ssa_builds_graph() {
@@ -219,7 +219,7 @@ mod tests {
         let canon = value_number(&g);
         // Both root-chain loads share canonical id.
         let load_ids: Vec<ValueId> = g.instrs.iter()
-            .filter(|i| matches!(i.op, crate::v2::vm::Opcode::RootChain(_)))
+            .filter(|i| matches!(i.op, crate::vm::Opcode::RootChain(_)))
             .map(|i| canon[&i.id]).collect();
         if load_ids.len() >= 2 {
             assert_eq!(load_ids[0], load_ids[1]);

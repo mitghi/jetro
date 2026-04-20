@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use crate::v2::query;
+    use crate::query;
 
     fn books() -> serde_json::Value {
         json!({
@@ -952,7 +952,7 @@ mod tests {
 
     #[test]
     fn fusion_find_first_opcode_emitted() {
-        use crate::v2::vm::{Compiler, Opcode};
+        use crate::vm::{Compiler, Opcode};
         let prog = Compiler::compile_str("$.books{price > 10}?").unwrap();
         let has_find_first = prog.ops.iter().any(|o| matches!(o, Opcode::FindFirst(_)));
         assert!(has_find_first, "FindFirst opcode not emitted; got: {:?}", prog.ops);
@@ -960,7 +960,7 @@ mod tests {
 
     #[test]
     fn fusion_find_one_opcode_emitted() {
-        use crate::v2::vm::{Compiler, Opcode};
+        use crate::vm::{Compiler, Opcode};
         let prog = Compiler::compile_str("$.books{title == \"x\"}!").unwrap();
         let has_find_one = prog.ops.iter().any(|o| matches!(o, Opcode::FindOne(_)));
         assert!(has_find_one, "FindOne opcode not emitted; got: {:?}", prog.ops);
@@ -968,7 +968,7 @@ mod tests {
 
     #[test]
     fn fusion_find_first_from_filter_method() {
-        use crate::v2::vm::{Compiler, Opcode};
+        use crate::vm::{Compiler, Opcode};
         let prog = Compiler::compile_str("$.books.filter(price > 10)?").unwrap();
         let has_find_first = prog.ops.iter().any(|o| matches!(o, Opcode::FindFirst(_)));
         assert!(has_find_first, "FindFirst should fuse from .filter() too");
@@ -976,7 +976,7 @@ mod tests {
 
     #[test]
     fn redundant_reverse_eliminated() {
-        use crate::v2::vm::{Compiler, Opcode, BuiltinMethod};
+        use crate::vm::{Compiler, Opcode, BuiltinMethod};
         let prog = Compiler::compile_str("$.books.reverse().reverse()").unwrap();
         let reverse_count = prog.ops.iter().filter(|o| matches!(o,
             Opcode::CallMethod(c) if c.method == BuiltinMethod::Reverse
@@ -986,7 +986,7 @@ mod tests {
 
     #[test]
     fn redundant_unique_collapsed() {
-        use crate::v2::vm::{Compiler, Opcode, BuiltinMethod};
+        use crate::vm::{Compiler, Opcode, BuiltinMethod};
         let prog = Compiler::compile_str("$.books.unique().unique()").unwrap();
         let unique_count = prog.ops.iter().filter(|o| matches!(o,
             Opcode::CallMethod(c) if c.method == BuiltinMethod::Unique
@@ -996,7 +996,7 @@ mod tests {
 
     #[test]
     fn bool_short_circuit_folded() {
-        use crate::v2::vm::{Compiler, Opcode};
+        use crate::vm::{Compiler, Opcode};
         let prog = Compiler::compile_str("false and $.expensive.deeply.nested").unwrap();
         // Should be one PushBool(false) with no AndOp or field access
         let has_and = prog.ops.iter().any(|o| matches!(o, Opcode::AndOp(_)));
@@ -1031,7 +1031,7 @@ mod tests {
 
     #[test]
     fn kind_check_literal_fold_int() {
-        use crate::v2::vm::{Compiler, Opcode};
+        use crate::vm::{Compiler, Opcode};
         let prog = Compiler::compile_str("42 kind number").unwrap();
         let has_kind = prog.ops.iter().any(|o| matches!(o, Opcode::KindCheck { .. }));
         assert!(!has_kind, "literal kind check should fold away");
@@ -1040,7 +1040,7 @@ mod tests {
 
     #[test]
     fn kind_check_literal_fold_mismatch() {
-        use crate::v2::vm::{Compiler, Opcode};
+        use crate::vm::{Compiler, Opcode};
         let prog = Compiler::compile_str("\"hi\" kind number").unwrap();
         assert!(matches!(prog.ops.first(), Some(Opcode::PushBool(false))));
         assert!(!prog.ops.iter().any(|o| matches!(o, Opcode::KindCheck { .. })));
@@ -1048,7 +1048,7 @@ mod tests {
 
     #[test]
     fn kind_check_literal_negate() {
-        use crate::v2::vm::{Compiler, Opcode};
+        use crate::vm::{Compiler, Opcode};
         let prog = Compiler::compile_str("42 kind not string").unwrap();
         assert!(matches!(prog.ops.first(), Some(Opcode::PushBool(true))));
         assert!(!prog.ops.iter().any(|o| matches!(o, Opcode::KindCheck { .. })));
@@ -1056,8 +1056,8 @@ mod tests {
 
     #[test]
     fn analysis_infer_result_type() {
-        use crate::v2::analysis::{infer_result_type, VType};
-        use crate::v2::vm::Compiler;
+        use crate::analysis::{infer_result_type, VType};
+        use crate::vm::Compiler;
         let p = Compiler::compile_str("42 + 1").unwrap();
         let av = infer_result_type(&p);
         assert_eq!(av.ty, VType::Int);
@@ -1069,8 +1069,8 @@ mod tests {
 
     #[test]
     fn analysis_count_ident_uses() {
-        use crate::v2::analysis::count_ident_uses;
-        use crate::v2::vm::Compiler;
+        use crate::analysis::count_ident_uses;
+        use crate::vm::Compiler;
         let p = Compiler::compile_str("let x = 10 in x + x + 1").unwrap();
         assert_eq!(count_ident_uses(&p, "x"), 2);
         let p = Compiler::compile_str("let y = 10 in 42").unwrap();
@@ -1079,8 +1079,8 @@ mod tests {
 
     #[test]
     fn analysis_collect_accessed_fields() {
-        use crate::v2::analysis::collect_accessed_fields;
-        use crate::v2::vm::Compiler;
+        use crate::analysis::collect_accessed_fields;
+        use crate::vm::Compiler;
         let p = Compiler::compile_str("$.store.books.map(@.title)").unwrap();
         let fields = collect_accessed_fields(&p);
         assert!(fields.iter().any(|f| f.as_ref() == "store"));
@@ -1090,8 +1090,8 @@ mod tests {
 
     #[test]
     fn analysis_program_signature_stable() {
-        use crate::v2::analysis::program_signature;
-        use crate::v2::vm::Compiler;
+        use crate::analysis::program_signature;
+        use crate::vm::Compiler;
         let a = Compiler::compile_str("$.x.y + 1").unwrap();
         let b = Compiler::compile_str("$.x.y + 1").unwrap();
         assert_eq!(program_signature(&a), program_signature(&b));
@@ -1101,7 +1101,7 @@ mod tests {
 
     #[test]
     fn dead_let_eliminated() {
-        use crate::v2::vm::{Compiler, Opcode};
+        use crate::vm::{Compiler, Opcode};
         let prog = Compiler::compile_str("let x = 100 in 42").unwrap();
         let has_let = prog.ops.iter().any(|o| matches!(o, Opcode::LetExpr { .. }));
         assert!(!has_let, "unused let should be eliminated");
@@ -1110,14 +1110,14 @@ mod tests {
 
     #[test]
     fn dead_let_kept_when_used() {
-        use crate::v2::vm::{Compiler, Opcode};
+        use crate::vm::{Compiler, Opcode};
         let prog = Compiler::compile_str("let x = 10 in x + 1").unwrap();
         assert!(prog.ops.iter().any(|o| matches!(o, Opcode::LetExpr { .. })));
     }
 
     #[test]
     fn const_fold_comparison() {
-        use crate::v2::vm::{Compiler, Opcode};
+        use crate::vm::{Compiler, Opcode};
         let prog = Compiler::compile_str("1 < 2").unwrap();
         assert!(matches!(prog.ops.as_ref(), [Opcode::PushBool(true)]));
         let prog = Compiler::compile_str("5 == 5").unwrap();
@@ -1128,7 +1128,7 @@ mod tests {
 
     #[test]
     fn const_fold_unary() {
-        use crate::v2::vm::{Compiler, Opcode};
+        use crate::vm::{Compiler, Opcode};
         let prog = Compiler::compile_str("not true").unwrap();
         assert!(matches!(prog.ops.as_ref(), [Opcode::PushBool(false)]));
         let prog = Compiler::compile_str("-42").unwrap();
@@ -1137,7 +1137,7 @@ mod tests {
 
     #[test]
     fn fusion_topn_opcode() {
-        use crate::v2::vm::{Compiler, Opcode};
+        use crate::vm::{Compiler, Opcode};
         let prog = Compiler::compile_str("$.nums.sort()[0:3]").unwrap();
         let has = prog.ops.iter().any(|o| matches!(o, Opcode::TopN { n: 3, asc: true }));
         assert!(has, "sort + [0:n] should fuse to TopN");
@@ -1152,8 +1152,8 @@ mod tests {
 
     #[test]
     fn analysis_monotonicity_sort() {
-        use crate::v2::analysis::{infer_monotonicity, Monotonicity};
-        use crate::v2::vm::Compiler;
+        use crate::analysis::{infer_monotonicity, Monotonicity};
+        use crate::vm::Compiler;
         let p = Compiler::compile_str("$.x.sort()").unwrap();
         assert_eq!(infer_monotonicity(&p), Monotonicity::Asc);
         let p = Compiler::compile_str("$.x.sort().reverse()").unwrap();
@@ -1162,8 +1162,8 @@ mod tests {
 
     #[test]
     fn analysis_cost_nonzero() {
-        use crate::v2::analysis::program_cost;
-        use crate::v2::vm::Compiler;
+        use crate::analysis::program_cost;
+        use crate::vm::Compiler;
         let cheap = Compiler::compile_str("42").unwrap();
         let expensive = Compiler::compile_str("$.books.filter(@.price > 10).map(@.title).sort()").unwrap();
         assert!(program_cost(&cheap) < program_cost(&expensive));
@@ -1171,8 +1171,8 @@ mod tests {
 
     #[test]
     fn analysis_selectivity_score() {
-        use crate::v2::analysis::selectivity_score;
-        use crate::v2::parser::parse;
+        use crate::analysis::selectivity_score;
+        use crate::parser::parse;
         let eq = parse("x == 1").unwrap();
         let lt = parse("x < 1").unwrap();
         let t  = parse("true").unwrap();
@@ -1182,8 +1182,8 @@ mod tests {
 
     #[test]
     fn analysis_escapes_doc() {
-        use crate::v2::analysis::escapes_doc;
-        use crate::v2::vm::Compiler;
+        use crate::analysis::escapes_doc;
+        use crate::vm::Compiler;
         let p = Compiler::compile_str("42").unwrap();
         assert!(!escapes_doc(&p));
         let p = Compiler::compile_str("$.x").unwrap();
@@ -1192,7 +1192,7 @@ mod tests {
 
     #[test]
     fn fusion_map_sum_opcode() {
-        use crate::v2::vm::{Compiler, Opcode};
+        use crate::vm::{Compiler, Opcode};
         let prog = Compiler::compile_str("$.books.map(@.price).sum()").unwrap();
         let has = prog.ops.iter().any(|o| matches!(o, Opcode::MapSum(_)));
         assert!(has, "map+sum should fuse to MapSum");
@@ -1200,7 +1200,7 @@ mod tests {
 
     #[test]
     fn fusion_map_avg_opcode() {
-        use crate::v2::vm::{Compiler, Opcode};
+        use crate::vm::{Compiler, Opcode};
         let prog = Compiler::compile_str("$.books.map(@.price).avg()").unwrap();
         let has = prog.ops.iter().any(|o| matches!(o, Opcode::MapAvg(_)));
         assert!(has, "map+avg should fuse to MapAvg");
@@ -1224,13 +1224,13 @@ mod tests {
 
     #[test]
     fn analysis_dedup_subprograms() {
-        use crate::v2::analysis::dedup_subprograms;
-        use crate::v2::vm::Compiler;
+        use crate::analysis::dedup_subprograms;
+        use crate::vm::Compiler;
         // Two identical sub-exprs inside an array — after dedup they share Arc.
         let prog = Compiler::compile_str("[$.a.b + 1, $.a.b + 1]").unwrap();
         let deduped = dedup_subprograms(&prog);
         // Extract MakeArr sub-progs and confirm Arc identity.
-        use crate::v2::vm::Opcode;
+        use crate::vm::Opcode;
         let arcs: Vec<_> = deduped.ops.iter().flat_map(|o| match o {
             Opcode::MakeArr(progs) => progs.iter().cloned().collect::<Vec<_>>(),
             _ => vec![],
@@ -1242,8 +1242,8 @@ mod tests {
 
     #[test]
     fn analysis_find_common_subexprs() {
-        use crate::v2::analysis::find_common_subexprs;
-        use crate::v2::vm::Compiler;
+        use crate::analysis::find_common_subexprs;
+        use crate::vm::Compiler;
         let prog = Compiler::compile_str("[$.x.y, $.x.y, $.z]").unwrap();
         let cs = find_common_subexprs(&prog);
         assert!(!cs.is_empty(), "should find at least one repeated sub-program");
@@ -1251,29 +1251,29 @@ mod tests {
 
     #[test]
     fn method_const_fold_str_len() {
-        use crate::v2::vm::{Compiler, Opcode};
+        use crate::vm::{Compiler, Opcode};
         let prog = Compiler::compile_str("\"hello\".len()").unwrap();
         assert!(matches!(prog.ops.as_ref(), [Opcode::PushInt(5)]));
     }
 
     #[test]
     fn method_const_fold_str_upper() {
-        use crate::v2::vm::{Compiler, Opcode};
+        use crate::vm::{Compiler, Opcode};
         let prog = Compiler::compile_str("\"hi\".upper()").unwrap();
         assert!(matches!(prog.ops.as_ref(), [Opcode::PushStr(s)] if s.as_ref() == "HI"));
     }
 
     #[test]
     fn method_const_fold_arr_len() {
-        use crate::v2::vm::{Compiler, Opcode};
+        use crate::vm::{Compiler, Opcode};
         let prog = Compiler::compile_str("[1,2,3,4].len()").unwrap();
         assert!(matches!(prog.ops.as_ref(), [Opcode::PushInt(4)]));
     }
 
     #[test]
     fn analysis_expr_uses_ident() {
-        use crate::v2::analysis::expr_uses_ident;
-        use crate::v2::parser::parse;
+        use crate::analysis::expr_uses_ident;
+        use crate::parser::parse;
         let e = parse("x + 1").unwrap();
         assert!(expr_uses_ident(&e, "x"));
         assert!(!expr_uses_ident(&e, "y"));
@@ -1283,8 +1283,8 @@ mod tests {
 
     #[test]
     fn analysis_fold_kind_check_helper() {
-        use crate::v2::analysis::{fold_kind_check, VType};
-        use crate::v2::ast::KindType;
+        use crate::analysis::{fold_kind_check, VType};
+        use crate::ast::KindType;
         assert_eq!(fold_kind_check(VType::Int, KindType::Number, false), Some(true));
         assert_eq!(fold_kind_check(VType::Str, KindType::Number, false), Some(false));
         assert_eq!(fold_kind_check(VType::Str, KindType::Str, true),    Some(false));
@@ -1533,7 +1533,7 @@ mod tests {
     }
 
     // Fusion benchmark — run with:
-    //   cargo test --release v2::tests::tests::bench_fusion_vs_naive -- --ignored --nocapture
+    //   cargo test --release tests::tests::bench_fusion_vs_naive -- --ignored --nocapture
     // Measures wall time for a representative pipeline with every pass
     // enabled vs every pass disabled over a 2000-book document.  Use
     // --release for realistic numbers; debug builds dominate with
@@ -1541,7 +1541,7 @@ mod tests {
     #[test]
     #[ignore]
     fn bench_fusion_vs_naive() {
-        use crate::v2::vm::{VM, PassConfig};
+        use crate::vm::{VM, PassConfig};
         use std::time::Instant;
 
         // Synthesize a large store (2000 books).
@@ -1593,7 +1593,7 @@ mod tests {
 
     #[test]
     fn pass_config_cache_isolation() {
-        use crate::v2::vm::{VM, PassConfig};
+        use crate::vm::{VM, PassConfig};
         let mut vm = VM::new();
         let doc = big_store();
         let q = "$.store.books.filter(price > 10).map(title).sort()";
@@ -1615,7 +1615,7 @@ mod tests {
 
     #[test]
     fn lru_compile_cache_evicts_oldest() {
-        use crate::v2::vm::VM;
+        use crate::vm::VM;
         let mut vm = VM::with_capacity(2, 16);
         let doc = json!({"a": 1, "b": 2, "c": 3});
         let _ = vm.run_str("$.a", &doc).unwrap();

@@ -120,8 +120,8 @@ mod tests {
     fn expr_bucket_put_get() {
         let (_dir, db) = tmp_db();
         let exprs = db.expr_bucket("main").unwrap();
-        exprs.put("q1", ">/users/#len").unwrap();
-        assert_eq!(exprs.get("q1").unwrap().as_deref(), Some(">/users/#len"));
+        exprs.put("q1", "$.users.len()").unwrap();
+        assert_eq!(exprs.get("q1").unwrap().as_deref(), Some("$.users.len()"));
         assert_eq!(exprs.get("missing").unwrap(), None);
     }
 
@@ -136,8 +136,8 @@ mod tests {
     fn json_bucket_insert_and_retrieve() {
         let (_dir, db) = tmp_db();
         let exprs = db.expr_bucket("exprs").unwrap();
-        exprs.put("names", ">/users/#map(@/name)").unwrap();
-        exprs.put("count", ">/users/#len").unwrap();
+        exprs.put("names", "$.users.map(name)").unwrap();
+        exprs.put("count", "$.users.len()").unwrap();
 
         let docs = db.json_bucket("docs", &["names", "count"], &exprs).unwrap();
         let doc = json!({
@@ -149,10 +149,10 @@ mod tests {
         docs.insert("doc1", &doc).unwrap();
 
         let names = docs.get_result("doc1", "names").unwrap().unwrap();
-        assert_eq!(names, vec![json!(["Alice", "Bob"])]);
+        assert_eq!(names, json!(["Alice", "Bob"]));
 
         let count = docs.get_result("doc1", "count").unwrap().unwrap();
-        assert_eq!(count, vec![json!(2)]);
+        assert_eq!(count, json!(2));
 
         let original = docs.get_doc("doc1").unwrap().unwrap();
         assert_eq!(original, doc);
@@ -162,14 +162,14 @@ mod tests {
     fn json_bucket_update_replaces_results() {
         let (_dir, db) = tmp_db();
         let exprs = db.expr_bucket("exprs").unwrap();
-        exprs.put("count", ">/items/#len").unwrap();
+        exprs.put("count", "$.items.len()").unwrap();
 
         let docs = db.json_bucket("docs", &["count"], &exprs).unwrap();
         docs.insert("d", &json!({"items": [1, 2, 3]})).unwrap();
         docs.update("d", &json!({"items": [1, 2, 3, 4, 5]})).unwrap();
 
         let count = docs.get_result("d", "count").unwrap().unwrap();
-        assert_eq!(count, vec![json!(5)]);
+        assert_eq!(count, json!(5));
     }
 
     #[test]
@@ -180,7 +180,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = Database::open(dir.path()).unwrap();
         let exprs = Arc::new(db.expr_bucket("exprs").unwrap());
-        exprs.put("total", ">/v/#sum").unwrap();
+        exprs.put("total", "$.v.sum()").unwrap();
 
         let docs = Arc::new(db.json_bucket("docs", &["total"], &exprs).unwrap());
         for i in 0u32..20 {
@@ -193,7 +193,7 @@ mod tests {
                 thread::spawn(move || {
                     for i in 0u32..20 {
                         let res = docs.get_result(&format!("doc{i}"), "total").unwrap().unwrap();
-                        let sum: f64 = serde_json::from_value(res[0].clone()).unwrap();
+                        let sum: f64 = serde_json::from_value(res).unwrap();
                         assert_eq!(sum as u32, 3 * i + 3, "thread={t} i={i}");
                     }
                 })

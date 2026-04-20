@@ -11,17 +11,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── update example ───────────────────────────────────────────────────────
     let exprs = db.expr_bucket("exprs")?;
-    exprs.put("score_sum", ">/scores/#sum")?;
+    exprs.put("score_sum", "$.scores.sum()")?;
 
     let docs = db.json_bucket("game", &["score_sum"], &exprs)?;
 
     docs.insert("player:alice", &json!({"scores": [10, 20, 30]}))?;
     let before = docs.get_result("player:alice", "score_sum")?.unwrap();
-    println!("Before update: sum = {}", before[0]);  // 60
+    println!("Before update: sum = {}", before);  // 60
 
     docs.update("player:alice", &json!({"scores": [10, 20, 30, 40, 50]}))?;
     let after = docs.get_result("player:alice", "score_sum")?.unwrap();
-    println!("After  update: sum = {}", after[0]);   // 150
+    println!("After  update: sum = {}", after);   // 150
 
     // ── range scan example ───────────────────────────────────────────────────
     let path = tmp.path().join("range_demo.btree");

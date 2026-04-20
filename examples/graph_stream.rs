@@ -22,7 +22,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Store a named graph expression
     exprs.put(
         "order_summary",
-        r#">{"customer": >/customers/[0]/name, "tier": >/customers/[0]/tier, "total": >/orders/[0]/total}"#,
+        r#"{customer: $.customers[0].name, tier: $.customers[0].tier, total: $.orders[0].total}"#,
     )?;
 
     // ── Setup graph bucket ────────────────────────────────────────────────────
@@ -75,21 +75,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         GraphNode::Inline  { node: "orders",    value: event },
         GraphNode::ByField { node: "customers", field: "id", value: &cust_id },
     ], "order_summary")?;
-    println!("\nStream event summary: {}", summary[0]);
+    println!("\nStream event summary: {}", summary);
 
     // 2. Index lookup: all orders for customer 1
     let alice_orders = graph.query(&[
         GraphNode::ByField { node: "orders",    field: "customer_id", value: &json!(1) },
         GraphNode::Hot     { node: "customers" },
-    ], ">/orders/#len")?;
-    println!("Alice's orders in DB: {}", alice_orders[0]);
+    ], "$.orders.len()")?;
+    println!("Alice's orders in DB: {}", alice_orders);
 
     // 3. Aggregate over all orders with customer join
     let totals = graph.query(&[
         GraphNode::All { node: "orders" },
         GraphNode::Hot { node: "customers" },
-    ], ">/orders/..total/#sum")?;
-    println!("Total revenue (all orders): {:.2}", totals[0]);
+    ], "$.orders.sum(total)")?;
+    println!("Total revenue (all orders): {}", totals);
 
     // ── Concurrent stream processing ─────────────────────────────────────────
     println!("\nConcurrent stream processing (8 threads)...");
@@ -108,9 +108,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let res = g.process_stream(
                     "orders", order,
                     &[("customers", "id", &id_val)],
-                    r#">{"name": >/customers/[0]/name, "total": >/orders/[0]/total}"#,
+                    r#"{name: $.customers[0].name, total: $.orders[0].total}"#,
                 ).unwrap();
-                assert!(res[0]["name"].is_string());
+                assert!(res["name"].is_string());
                 counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         })

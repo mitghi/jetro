@@ -11,7 +11,7 @@
 use std::sync::Arc;
 use indexmap::IndexMap;
 
-use crate::v2::ast::Arg;
+use crate::ast::Arg;
 use super::{Env, EvalError, eval_pos, str_arg};
 use super::value::Val;
 use super::util::{val_to_string, val_key};

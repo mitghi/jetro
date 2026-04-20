@@ -33,12 +33,11 @@ mod tests {
         let (_dir, db) = setup();
         let g = make_graph(&db);
 
-        let results = g.query(&[
+        let result = g.query(&[
             GraphNode::ByField { node: "orders", field: "customer_id", value: &json!(1) },
-        ], ">/orders/#len").unwrap();
+        ], "$.orders.len()").unwrap();
 
-        let count: i64 = serde_json::from_value(results[0].clone()).unwrap();
-        assert_eq!(count, 2, "Alice has 2 orders");
+        assert_eq!(result, json!(2), "Alice has 2 orders");
     }
 
     #[test]
@@ -46,11 +45,11 @@ mod tests {
         let (_dir, db) = setup();
         let g = make_graph(&db);
 
-        let results = g.query(&[
+        let result = g.query(&[
             GraphNode::ByKey { node: "customers", doc_key: "c:1" },
-        ], ">/customers/[0]/name").unwrap();
+        ], "$.customers[0].name").unwrap();
 
-        assert_eq!(results[0], json!("Alice"));
+        assert_eq!(result, json!("Alice"));
     }
 
     #[test]
@@ -58,20 +57,17 @@ mod tests {
         let (_dir, db) = setup();
         let g = make_graph(&db);
 
-        // Re-assign order o:2 from customer 2 to customer 1
         g.insert("orders", "o:2", &json!({"id": 11, "customer_id": 1, "total": 45.0})).unwrap();
 
         let alice_orders = g.query(&[
             GraphNode::ByField { node: "orders", field: "customer_id", value: &json!(1) },
-        ], ">/orders/#len").unwrap();
-        let count: i64 = serde_json::from_value(alice_orders[0].clone()).unwrap();
-        assert_eq!(count, 3);
+        ], "$.orders.len()").unwrap();
+        assert_eq!(alice_orders, json!(3));
 
         let bob_orders = g.query(&[
             GraphNode::ByField { node: "orders", field: "customer_id", value: &json!(2) },
-        ], ">/orders/#len").unwrap();
-        let count: i64 = serde_json::from_value(bob_orders[0].clone()).unwrap();
-        assert_eq!(count, 0);
+        ], "$.orders.len()").unwrap();
+        assert_eq!(bob_orders, json!(0));
     }
 
     #[test]
@@ -80,11 +76,10 @@ mod tests {
         let g = make_graph(&db);
         g.delete("orders", "o:1").unwrap();
 
-        let results = g.query(&[
+        let result = g.query(&[
             GraphNode::ByField { node: "orders", field: "customer_id", value: &json!(1) },
-        ], ">/orders/#len").unwrap();
-        let count: i64 = serde_json::from_value(results[0].clone()).unwrap();
-        assert_eq!(count, 1); // o:3 remains
+        ], "$.orders.len()").unwrap();
+        assert_eq!(result, json!(1));
     }
 
     // ── Cross-node graph queries ──────────────────────────────────────────────
@@ -94,16 +89,15 @@ mod tests {
         let (_dir, db) = setup();
         let g = make_graph(&db);
 
-        // Simulate stream: order arrives, join with customer
         let incoming = json!({"id": 13, "customer_id": 2, "total": 20.0});
         let cust_id = incoming["customer_id"].clone();
 
-        let results = g.query(&[
-            GraphNode::Inline { node: "orders",    value: json!([incoming]) },
+        let result = g.query(&[
+            GraphNode::Inline  { node: "orders",    value: json!([incoming]) },
             GraphNode::ByField { node: "customers", field: "id", value: &cust_id },
-        ], r#">{"order_total": >/orders/[0]/total, "customer": >/customers/[0]/name}"#).unwrap();
+        ], r#"{order_total: $.orders[0].total, customer: $.customers[0].name}"#).unwrap();
 
-        let obj = results[0].as_object().unwrap();
+        let obj = result.as_object().unwrap();
         assert_eq!(obj["customer"], json!("Bob"));
         assert_eq!(obj["order_total"], json!(20.0));
     }
@@ -116,14 +110,14 @@ mod tests {
         let order = json!({"id": 14, "customer_id": 1, "total": 55.5});
         let cust_id = order["customer_id"].clone();
 
-        let results = g.process_stream(
+        let result = g.process_stream(
             "orders",
             json!([order]),
             &[("customers", "id", &cust_id)],
-            r#">{"name": >/customers/[0]/name, "total": >/orders/[0]/total}"#,
+            r#"{name: $.customers[0].name, total: $.orders[0].total}"#,
         ).unwrap();
 
-        let obj = results[0].as_object().unwrap();
+        let obj = result.as_object().unwrap();
         assert_eq!(obj["name"], json!("Alice"));
         assert_eq!(obj["total"], json!(55.5));
     }
@@ -136,17 +130,17 @@ mod tests {
         let g = make_graph(&db);
         g.preload_hot("customers").unwrap();
 
-        let hot_results = g.query(&[
+        let hot_result = g.query(&[
             GraphNode::ByField { node: "orders",    field: "customer_id", value: &json!(1) },
             GraphNode::Hot     { node: "customers" },
-        ], ">/orders/#len").unwrap();
+        ], "$.orders.len()").unwrap();
 
-        let disk_results = g.query(&[
+        let disk_result = g.query(&[
             GraphNode::ByField { node: "orders",    field: "customer_id", value: &json!(1) },
             GraphNode::All     { node: "customers" },
-        ], ">/orders/#len").unwrap();
+        ], "$.orders.len()").unwrap();
 
-        assert_eq!(hot_results, disk_results);
+        assert_eq!(hot_result, disk_result);
     }
 
     #[test]
@@ -159,9 +153,8 @@ mod tests {
 
         let hot = g.query(&[
             GraphNode::Hot { node: "customers" },
-        ], ">/customers/#len").unwrap();
-        let count: i64 = serde_json::from_value(hot[0].clone()).unwrap();
-        assert_eq!(count, 3);
+        ], "$.customers.len()").unwrap();
+        assert_eq!(hot, json!(3));
     }
 
     // ── All-node scan ─────────────────────────────────────────────────────────
@@ -171,11 +164,11 @@ mod tests {
         let (_dir, db) = setup();
         let g = make_graph(&db);
 
-        let results = g.query(&[
+        let result = g.query(&[
             GraphNode::All { node: "orders" },
-        ], ">/orders/..total/#sum").unwrap();
+        ], "$.orders.sum(total)").unwrap();
 
-        let sum: f64 = serde_json::from_value(results[0].clone()).unwrap();
+        let sum: f64 = serde_json::from_value(result).unwrap();
         assert!((sum - 174.0).abs() < 0.001);
     }
 
@@ -204,15 +197,13 @@ mod tests {
                 for tag in 0u32..5 {
                     let by_field = g.query(&[
                         GraphNode::ByField { node: "items", field: "tag", value: &json!(tag) },
-                    ], ">/items/#len").unwrap();
-                    let count: i64 = serde_json::from_value(by_field[0].clone()).unwrap();
-                    assert_eq!(count, 10, "tag={tag}");
+                    ], "$.items.len()").unwrap();
+                    assert_eq!(by_field, json!(10), "tag={tag}");
 
                     let hot = g.query(&[
                         GraphNode::Hot { node: "items" },
-                    ], ">/items/#len").unwrap();
-                    let total: i64 = serde_json::from_value(hot[0].clone()).unwrap();
-                    assert_eq!(total, 50);
+                    ], "$.items.len()").unwrap();
+                    assert_eq!(hot, json!(50));
                 }
             })
         }).collect();

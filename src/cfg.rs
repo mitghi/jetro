@@ -419,7 +419,7 @@ fn compute_use_def(ops: &[Opcode]) -> (HashSet<Arc<str>>, HashSet<Arc<str>>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::v2::vm::Compiler;
+    use crate::vm::Compiler;
 
     #[test]
     fn cfg_linear_single_block() {

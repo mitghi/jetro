@@ -47,7 +47,7 @@ use std::time::Duration;
 use parking_lot::{Condvar, Mutex, RwLock};
 use serde_json::Value;
 
-use crate::vm::VM;
+use crate::VM;
 use super::btree::BTree;
 use super::error::DbError;
 
@@ -388,12 +388,12 @@ impl LinkBucket {
     /// # Example expressions
     ///
     /// ```text
-    /// >/order/total                    — field from one kind
-    /// >/payment/status                 — field from another kind
-    /// >{"total": >/order/total, "paid": >/payment/amount}  — cross-kind object
-    /// >/order/..total/#sum             — aggregate
+    /// $.order.total                                    — field from one kind
+    /// $.payment.status                                 — field from another kind
+    /// {total: $.order.total, paid: $.payment.amount}   — cross-kind object
+    /// $..total.sum()                                   — aggregate
     /// ```
-    pub fn query(&self, id: &Value, expr: &str) -> Result<Vec<Value>, DbError> {
+    pub fn query(&self, id: &Value, expr: &str) -> Result<Value, DbError> {
         Ok(self.query_timeout(id, expr, None)?.unwrap())
     }
 
@@ -403,7 +403,7 @@ impl LinkBucket {
         id: &Value,
         expr: &str,
         timeout: Option<Duration>,
-    ) -> Result<Option<Vec<Value>>, DbError> {
+    ) -> Result<Option<Value>, DbError> {
         let linked = match self.get_timeout(id, timeout)? {
             Some(d) => d,
             None => return Ok(None),
@@ -412,7 +412,7 @@ impl LinkBucket {
         let mut vm = VM::new();
         let result = vm.run_str(expr, &root)
             .map_err(|e| DbError::EvalError(e.to_string()))?;
-        Ok(Some(result.0))
+        Ok(Some(result))
     }
 
     // ── Internal ──────────────────────────────────────────────────────────────

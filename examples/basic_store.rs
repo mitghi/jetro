@@ -12,9 +12,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // --- expression bucket ---------------------------------------------------
     let exprs = db.expr_bucket("main")?;
 
-    exprs.put("book_titles",  ">/store/books/#map(@/title)")?;
-    exprs.put("book_count",   ">/store/books/#len")?;
-    exprs.put("cheap_books",  ">/store/books/#filter('price' < 15)/#map(@/title)")?;
+    exprs.put("book_titles",  "$.store.books.map(title)")?;
+    exprs.put("book_count",   "$.store.books.len()")?;
+    exprs.put("cheap_books",  "$.store.books.filter(price < 15).map(title)")?;
 
     println!("Stored expressions:");
     for (k, v) in exprs.all()? {
@@ -38,13 +38,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // --- retrieve results ----------------------------------------------------
     let titles = docs.get_result("catalog_2024", "book_titles")?.unwrap();
-    println!("\nAll titles:  {}", titles[0]);
+    println!("\nAll titles:  {}", titles);
 
     let count = docs.get_result("catalog_2024", "book_count")?.unwrap();
-    println!("Book count:  {}", count[0]);
+    println!("Book count:  {}", count);
 
     let cheap = docs.get_result("catalog_2024", "cheap_books")?.unwrap();
-    println!("Under $15:   {}", cheap[0]);
+    println!("Under $15:   {}", cheap);
 
     // --- original document survives ------------------------------------------
     let original = docs.get_doc("catalog_2024")?.unwrap();

@@ -1,4 +1,4 @@
-//! Comprehensive v2 syntax showcase.
+//! Comprehensive syntax showcase.
 //!
 //! One rich JSON document (`world()`) exercises every feature:
 //! navigation, filter, map, aggregates, grouping, array/object/path ops,
@@ -6,12 +6,12 @@
 //! spread, kind checks, null safety, global functions, and the VM path cache.
 //!
 //! Run with:
-//!   cargo test v2::examples
+//!   cargo test examples
 
 #[cfg(test)]
 mod examples {
     use serde_json::{json, Value};
-    use crate::v2::{query, vm::VM};
+    use crate::{query, vm::VM};
 
     // ── Fixture ───────────────────────────────────────────────────────────────
 

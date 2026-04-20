@@ -212,7 +212,7 @@ mod tests {
 
     #[test]
     fn specialize_opt_field_to_get_field() {
-        use crate::v2::vm::{Compiler, Opcode};
+        use crate::vm::{Compiler, Opcode};
         let prog = Compiler::compile_str("$.a?.b").unwrap();
         let shape = Shape::of(&json!({"a": {"b": 1}}));
         let spec = specialize(&prog, &shape);
@@ -222,7 +222,7 @@ mod tests {
 
     #[test]
     fn specialize_preserves_opt_when_missing() {
-        use crate::v2::vm::{Compiler, Opcode};
+        use crate::vm::{Compiler, Opcode};
         let prog = Compiler::compile_str("$.a?.missing").unwrap();
         let shape = Shape::of(&json!({"a": {"b": 1}}));
         let spec = specialize(&prog, &shape);

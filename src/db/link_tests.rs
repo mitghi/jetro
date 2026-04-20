@@ -164,10 +164,10 @@ mod tests {
         // Cross-kind object construction
         let result = lb.query(
             &json!("G1"),
-            r#">{"item": >/order/item, "paid": >/payment/amount, "track": >/shipment/tracking}"#,
+            r#"{item: $.order.item, paid: $.payment.amount, track: $.shipment.tracking}"#,
         ).unwrap();
 
-        let obj = result[0].as_object().unwrap();
+        let obj = result.as_object().unwrap();
         assert_eq!(obj["item"],  json!("Chair"));
         assert_eq!(obj["paid"],  json!(120.0));
         assert_eq!(obj["track"], json!("TRK-G"));
@@ -179,7 +179,7 @@ mod tests {
         let lb = three_way_bucket(&db);
         lb.insert("order", &json!({"order_id": "H1", "item": "X"})).unwrap();
 
-        let r = lb.query_timeout(&json!("H1"), ">/order/item", Some(Duration::from_millis(5))).unwrap();
+        let r = lb.query_timeout(&json!("H1"), "$.order.item", Some(Duration::from_millis(5))).unwrap();
         assert!(r.is_none());
     }
 

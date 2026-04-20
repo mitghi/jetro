@@ -8,7 +8,7 @@
 //! matches user expectations for JSON data.
 
 use std::sync::Arc;
-use crate::v2::ast::Arg;
+use crate::ast::Arg;
 use super::{Env, EvalError, eval_pos, first_i64_arg, str_arg};
 use super::value::Val;
 use super::util::val_str;

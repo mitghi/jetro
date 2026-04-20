@@ -5,6 +5,7 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use crate::Jetro;
+use crate::parser;
 use super::btree::BTree;
 use super::error::DbError;
 
@@ -26,8 +27,7 @@ impl ExprBucket {
 
     /// Store or replace a named expression.
     pub fn put(&self, key: &str, expr: &str) -> Result<(), DbError> {
-        // Validate the expression before storing by parsing it.
-        crate::parser::parse(expr).map_err(|e| DbError::InvalidExpr(e.to_string()))?;
+        parser::parse(expr).map_err(|e| DbError::InvalidExpr(e.to_string()))?;
         self.tree.insert(key.as_bytes(), expr.as_bytes())?;
         Ok(())
     }
@@ -102,11 +102,11 @@ impl JsonBucket {
         &self,
         doc_key: &str,
         expr_key: &str,
-    ) -> Result<Option<Vec<Value>>, DbError> {
+    ) -> Result<Option<Value>, DbError> {
         let composite = composite_key(doc_key, expr_key);
         match self.tree.get(composite.as_bytes())? {
             Some(bytes) => {
-                let v: Vec<Value> = serde_json::from_slice(&bytes)
+                let v: Value = serde_json::from_slice(&bytes)
                     .map_err(|e| DbError::Corrupt(e.to_string()))?;
                 Ok(Some(v))
             }
@@ -131,11 +131,11 @@ impl JsonBucket {
     pub fn get_all_results(
         &self,
         doc_key: &str,
-    ) -> Result<HashMap<String, Vec<Value>>, DbError> {
+    ) -> Result<HashMap<String, Value>, DbError> {
         let mut out = HashMap::new();
         for ek in &self.expr_keys {
-            if let Some(results) = self.get_result(doc_key, ek)? {
-                out.insert(ek.clone(), results);
+            if let Some(result) = self.get_result(doc_key, ek)? {
+                out.insert(ek.clone(), result);
             }
         }
         Ok(out)
@@ -169,7 +169,7 @@ impl JsonBucket {
             let result = jetro
                 .collect(&expr)
                 .map_err(|e| DbError::EvalError(e.to_string()))?;
-            let result_bytes = serde_json::to_vec(&result.0)
+            let result_bytes = serde_json::to_vec(&result)
                 .map_err(|e| DbError::Serialize(e.to_string()))?;
             self.tree.insert(composite_key(key, ek).as_bytes(), &result_bytes)?;
         }
