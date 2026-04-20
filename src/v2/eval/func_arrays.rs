@@ -1,3 +1,18 @@
+//! Array / sequence methods: `filter`, `map`, `flatmap`, `sort`,
+//! `reverse`, `take`, `drop`, `takewhile`, `dropwhile`, `unique`,
+//! `chunk`, `window`, `zip`, `scan`, set operations, etc.
+//!
+//! Every function here takes an already-materialised array (`Vec<Val>`)
+//! or produces one.  `Val::Arr` is `Arc`-wrapped so most functions
+//! `into_vec()` — an `Arc::try_unwrap` + fallback clone — to get
+//! mutable ownership; when the caller holds the only reference this
+//! is free, otherwise one deep clone.
+//!
+//! Predicate evaluation uses [`apply_item`], which binds the element
+//! to the current scope (`@`) before evaluating the lambda body.  A
+//! few two-arg helpers use [`apply_item2`] (e.g. `scan`, which binds
+//! accumulator + element).
+
 use std::sync::Arc;
 use indexmap::IndexMap;
 
@@ -196,6 +211,58 @@ pub fn join(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     let items = recv.into_vec().ok_or_else(|| EvalError("join: expected array".into()))?;
     let parts: Vec<String> = items.iter().map(val_to_string).collect();
     Ok(Val::Str(Arc::from(parts.join(&sep).as_str())))
+}
+
+/// Equi-join: `lhs.equi_join(rhs, lhs_key, rhs_key)`.
+/// Inner hash-join — builds a hash map on rhs_key values of rhs, probes
+/// each lhs element by lhs_key.  Produces a merged object per match
+/// (rhs fields override lhs on collision).  Non-object rows are skipped.
+pub fn equi_join(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+    use std::collections::HashMap;
+    let other = args.first().ok_or_else(|| EvalError("equi_join: requires other array".into()))?;
+    let other = eval_pos(other, env)?;
+    let lhs_key = str_arg_req(args.get(1), env, "equi_join: requires lhs_key")?;
+    let rhs_key = str_arg_req(args.get(2), env, "equi_join: requires rhs_key")?;
+    let left  = recv.into_vec().ok_or_else(|| EvalError("equi_join: lhs not array".into()))?;
+    let right = other.into_vec().ok_or_else(|| EvalError("equi_join: rhs not array".into()))?;
+    let mut idx: HashMap<String, Vec<Val>> = HashMap::new();
+    for r in right {
+        let key = match &r {
+            Val::Obj(o) => o.get(rhs_key.as_ref()).map(val_to_key),
+            _ => None,
+        };
+        if let Some(k) = key { idx.entry(k).or_default().push(r); }
+    }
+    let mut out = Vec::new();
+    for l in left {
+        let key = match &l {
+            Val::Obj(o) => o.get(lhs_key.as_ref()).map(val_to_key),
+            _ => None,
+        };
+        let Some(k) = key else { continue };
+        let Some(matches) = idx.get(&k) else { continue };
+        for r in matches { out.push(merge_pair(&l, r)); }
+    }
+    Ok(Val::arr(out))
+}
+
+fn str_arg_req(a: Option<&Arg>, env: &Env, msg: &'static str) -> Result<Arc<str>, EvalError> {
+    let a = a.ok_or_else(|| EvalError(msg.into()))?;
+    match eval_pos(a, env)? {
+        Val::Str(s) => Ok(s),
+        _ => Err(EvalError(msg.into())),
+    }
+}
+
+fn merge_pair(l: &Val, r: &Val) -> Val {
+    match (l, r) {
+        (Val::Obj(lo), Val::Obj(ro)) => {
+            let mut m = (**lo).clone();
+            for (k, v) in ro.iter() { m.insert(k.clone(), v.clone()); }
+            Val::obj(m)
+        }
+        _ => l.clone(),
+    }
 }
 
 // ── Set operations ────────────────────────────────────────────────────────────

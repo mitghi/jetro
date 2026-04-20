@@ -1,5 +1,62 @@
 //! Jetro v2 — redesigned query syntax for JSON.
 //!
+//! # Architecture
+//!
+//! v2 is built as a layered pipeline.  Each layer has a single,
+//! narrow responsibility so the compiler/optimizer stays tractable
+//! and so each layer is independently testable.
+//!
+//! ```text
+//!   source text
+//!       │
+//!       ▼
+//!   parser.rs  ── pest grammar → [ast::Expr] tree
+//!       │
+//!       ▼
+//!   vm::Compiler::emit      ── Expr → Vec<Opcode>
+//!       │
+//!       ▼
+//!   vm::Compiler::optimize  ── peephole passes:
+//!                              1. root_chain fusion
+//!                              2. filter_count fusion
+//!                              3. filter / map combinator fusion
+//!                              4. find / quantifier fusion
+//!                              5. strength reduction
+//!                              6. redundant-op removal
+//!                              7. kind_check constant fold
+//!                              8. method constant fold
+//!                              9. expression constant fold
+//!                             10. nullness-driven OptField→GetField
+//!       │
+//!       ▼
+//!   Compiler::compile runs:
+//!       • AST rewrite: reorder_and_operands        (selectivity-based)
+//!       • post-pass : analysis::dedup_subprograms  (CSE on Arc<Program>)
+//!       │
+//!       ▼
+//!   vm::VM::execute          ── stack machine over &serde_json::Value
+//!                                with thread-local pointer cache.
+//! ```
+//!
+//! ## Analysis / IR layers
+//!
+//! Several independent analyses operate on the compiled [`Program`]:
+//!
+//! | Module         | Produces                                  | Uses                              |
+//! |----------------|-------------------------------------------|-----------------------------------|
+//! | [`analysis`]   | Type/Nullness/Cardinality, cost, monot.   | Optimizer heuristics, planner     |
+//! | [`schema`]     | Shape inference from JSON docs            | Specialise `OptField` → `GetField`|
+//! | [`plan`]       | Logical relational plan IR                | Filter push-down, join detection  |
+//! | [`cfg`]        | Basic blocks + edges, dominators,         | Liveness, slot allocator          |
+//! |                | dominance frontiers, loop headers         |                                   |
+//! | [`ssa`]        | SSA-style numbering + phi nodes           | CSE, def-use analysis             |
+//!
+//! None of these are mandatory for correctness — the tree-walking
+//! evaluator in `eval/` is the reference implementation.  They exist
+//! to let advanced callers specialise a program for a known document
+//! shape, run optimisations the peephole layer cannot express, or
+//! export a readable data-flow graph for debugging.
+//!
 //! # Syntax overview
 //!
 //! ```text

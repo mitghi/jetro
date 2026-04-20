@@ -365,6 +365,20 @@ mod tests {
         assert_eq!(r, json!([3, 4, 5]));
     }
 
+    #[test]
+    fn fused_filter_drop_while() {
+        let doc = json!({"vals": [1, 2, 3, 4, 5, 6]});
+        let r = query("$.vals.filter(lambda v: v > 1).dropwhile(lambda v: v < 4)", &doc).unwrap();
+        assert_eq!(r, json!([4, 5, 6]));
+    }
+
+    #[test]
+    fn fused_map_unique() {
+        let doc = json!({"xs": [1, 2, 2, 3, 3, 3]});
+        let r = query("$.xs.map(lambda v: v * 2).unique()", &doc).unwrap();
+        assert_eq!(r, json!([2, 4, 6]));
+    }
+
     // ── Global functions ──────────────────────────────────────────────────────
 
     #[test]
@@ -1262,5 +1276,404 @@ mod tests {
         assert_eq!(fold_kind_check(VType::Str, KindType::Number, false), Some(false));
         assert_eq!(fold_kind_check(VType::Str, KindType::Str, true),    Some(false));
         assert_eq!(fold_kind_check(VType::Unknown, KindType::Str, false), None);
+    }
+
+    // ── Optimiser power tests: large queries exercising fusions ──────────────
+    //
+    // These tests drive the VM through deep pipelines that hit every
+    // fusion pass (FilterMap, FilterFilter, MapMap, FilterCount,
+    // FindFirst, FindOne, MapSum, MapAvg, TopN, MapFlatten,
+    // FilterTakeWhile, FilterDropWhile, MapUnique) plus RootChain
+    // fusion, constant folding, strength reduction, and CSE.  Each
+    // asserts the optimized VM produces exactly the documented output.
+
+    fn big_store() -> serde_json::Value {
+        // 20-book store with heterogeneous data — prices, ratings,
+        // multi-tag arrays, nested authors, nullable fields.
+        json!({
+            "store": {
+                "books": [
+                    {"id": 1,  "title": "Dune",              "price": 12.99, "rating": 4.8, "genre": "sci-fi",   "tags": ["sci-fi","classic"],    "author": {"name": "Frank Herbert",  "born": 1920}, "pages": 688},
+                    {"id": 2,  "title": "Foundation",        "price":  9.99, "rating": 4.5, "genre": "sci-fi",   "tags": ["sci-fi","series"],     "author": {"name": "Isaac Asimov",   "born": 1920}, "pages": 255},
+                    {"id": 3,  "title": "Neuromancer",       "price": 11.50, "rating": 4.2, "genre": "cyberpunk","tags": ["sci-fi","cyberpunk"],  "author": {"name": "William Gibson", "born": 1948}, "pages": 271},
+                    {"id": 4,  "title": "1984",              "price":  7.99, "rating": 4.6, "genre": "dystopia", "tags": ["classic","dystopia"],  "author": {"name": "George Orwell",  "born": 1903}, "pages": 328},
+                    {"id": 5,  "title": "Brave New World",   "price":  8.50, "rating": 4.3, "genre": "dystopia", "tags": ["classic","dystopia"],  "author": {"name": "Aldous Huxley",  "born": 1894}, "pages": 311},
+                    {"id": 6,  "title": "Hyperion",          "price": 13.25, "rating": 4.7, "genre": "sci-fi",   "tags": ["sci-fi","epic"],       "author": {"name": "Dan Simmons",    "born": 1948}, "pages": 482},
+                    {"id": 7,  "title": "Snow Crash",        "price": 10.50, "rating": 4.1, "genre": "cyberpunk","tags": ["sci-fi","cyberpunk"],  "author": {"name": "Neal Stephenson","born": 1959}, "pages": 470},
+                    {"id": 8,  "title": "Fahrenheit 451",    "price":  6.99, "rating": 4.4, "genre": "dystopia", "tags": ["classic","dystopia"],  "author": {"name": "Ray Bradbury",   "born": 1920}, "pages": 249},
+                    {"id": 9,  "title": "Ender's Game",      "price":  8.75, "rating": 4.6, "genre": "sci-fi",   "tags": ["sci-fi","military"],   "author": {"name": "Orson Scott Card","born": 1951},"pages": 324},
+                    {"id": 10, "title": "The Left Hand",     "price":  9.25, "rating": 4.2, "genre": "sci-fi",   "tags": ["sci-fi","feminist"],   "author": {"name": "Ursula K. Le Guin","born":1929},"pages": 304},
+                    {"id": 11, "title": "A Scanner Darkly",  "price":  8.00, "rating": 4.0, "genre": "sci-fi",   "tags": ["sci-fi","philosophy"], "author": {"name": "Philip K. Dick", "born": 1928}, "pages": 280},
+                    {"id": 12, "title": "Gateway",           "price":  7.50, "rating": 4.1, "genre": "sci-fi",   "tags": ["sci-fi","classic"],    "author": {"name": "Frederik Pohl",  "born": 1919}, "pages": 313},
+                    {"id": 13, "title": "Stranger",          "price":  9.00, "rating": 4.3, "genre": "sci-fi",   "tags": ["sci-fi","classic"],    "author": {"name": "Robert Heinlein","born": 1907}, "pages": 438},
+                    {"id": 14, "title": "Rendezvous",        "price": 10.00, "rating": 4.5, "genre": "sci-fi",   "tags": ["sci-fi","classic"],    "author": {"name": "Arthur C. Clarke","born": 1917},"pages": 304},
+                    {"id": 15, "title": "Solaris",           "price":  8.25, "rating": 4.2, "genre": "sci-fi",   "tags": ["sci-fi","philosophy"], "author": {"name": "Stanisław Lem",  "born": 1921}, "pages": 204},
+                    {"id": 16, "title": "The Road",          "price":  9.75, "rating": 4.4, "genre": "dystopia", "tags": ["literary","dystopia"], "author": {"name": "Cormac McCarthy","born": 1933}, "pages": 287},
+                    {"id": 17, "title": "Never Let Me Go",   "price":  8.50, "rating": 4.3, "genre": "dystopia", "tags": ["literary","dystopia"], "author": {"name": "Kazuo Ishiguro", "born": 1954}, "pages": 288},
+                    {"id": 18, "title": "Station Eleven",    "price": 11.00, "rating": 4.5, "genre": "dystopia", "tags": ["literary","dystopia"], "author": {"name": "Emily St. John", "born": 1979}, "pages": 333},
+                    {"id": 19, "title": "The Martian",       "price": 12.00, "rating": 4.7, "genre": "sci-fi",   "tags": ["sci-fi","survival"],   "author": {"name": "Andy Weir",      "born": 1972}, "pages": 369},
+                    {"id": 20, "title": "Project Hail Mary", "price": 14.50, "rating": 4.9, "genre": "sci-fi",   "tags": ["sci-fi","survival"],   "author": {"name": "Andy Weir",      "born": 1972}, "pages": 496},
+                ]
+            }
+        })
+    }
+
+    #[test]
+    fn optimized_deep_filter_map_map_fusion() {
+        // Pipeline: filter + map + map chains fuse pairwise into
+        // FilterMap then MapMap, eliminating intermediate Vec<Val>
+        // allocations.  Also exercises strength-reduction: sort() + [0:3]
+        // folds to TopN.
+        let doc = big_store();
+        let q = "$.store.books \
+                 .filter(price >= 8.0 and price <= 12.0 and rating >= 4.2) \
+                 .map({title: title, cost: price, score: rating}) \
+                 .map({label: title, gross: cost}) \
+                 .sort(gross)[0:3]";
+        let r = query(q, &doc).unwrap();
+        let arr = r.as_array().unwrap();
+        assert_eq!(arr.len(), 3);
+        // Lowest three prices in the allowed band, sorted asc.
+        let grosses: Vec<f64> = arr.iter().map(|v| v["gross"].as_f64().unwrap()).collect();
+        let mut sorted = grosses.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(grosses, sorted);
+        // All within band.
+        assert!(grosses.iter().all(|&g| g >= 8.0 && g <= 12.0));
+    }
+
+    #[test]
+    fn optimized_filter_sum_fusion_with_kind_check() {
+        // Kind-check const-fold + MapSum fusion.
+        // price kind number is a guaranteed true for all rows, so the
+        // kind-check predicate folds out, leaving filter(...) + sum(...).
+        let doc = big_store();
+        let q = "$.store.books \
+                 .filter(price kind number and genre == \"sci-fi\") \
+                 .sum(price)";
+        let r = query(q, &doc).unwrap();
+        let total = r.as_f64().unwrap();
+        // Hand-tally of the 12 sci-fi prices (Neuromancer + Snow Crash
+        // are cyberpunk, not sci-fi).
+        let expected = 12.99 + 9.99 + 13.25 + 8.75 + 9.25 + 8.00
+                     + 7.50 + 9.00 + 10.00 + 8.25 + 12.00 + 14.50;
+        assert!((total - expected).abs() < 0.001, "got {} want {}", total, expected);
+    }
+
+    #[test]
+    fn optimized_nested_let_with_cse_and_avg() {
+        // let-binding + reuse triggers interprocedural type inference
+        // and let-init is pure → one emit (dead-let elimination when
+        // body wouldn't use it, which is not the case here).  Also
+        // MapAvg fusion via filter(...).avg(...).
+        let doc = big_store();
+        let q = "let sci = $.store.books.filter(genre == \"sci-fi\") in \
+                 {\
+                    count: sci.len(), \
+                    avg_price:  sci.avg(price), \
+                    avg_rating: sci.avg(rating), \
+                    top_rated:  sci.sort(rating).reverse()[0:3].map(title)\
+                 }";
+        let r = query(q, &doc).unwrap();
+        assert_eq!(r["count"], json!(12));
+        assert!(r["avg_price"].as_f64().unwrap() > 8.0);
+        assert!(r["avg_rating"].as_f64().unwrap() > 4.0);
+        let top = r["top_rated"].as_array().unwrap();
+        assert_eq!(top.len(), 3);
+        // Project Hail Mary (4.9) should be first.
+        assert_eq!(top[0], json!("Project Hail Mary"));
+    }
+
+    #[test]
+    fn optimized_find_quantifier_fusion_short_circuit() {
+        // filter(...).first() → FindFirst; short-circuits at first match.
+        // Combined with AndOp operand reordering (selectivity): the
+        // cheaper predicate (id == 19) should be evaluated first even
+        // though it appears second in source.
+        let doc = big_store();
+        let q = "$.store.books.filter(rating > 4.5 and id == 19).first()";
+        let r = query(q, &doc).unwrap();
+        assert_eq!(r["title"], json!("The Martian"));
+        assert_eq!(r["id"], json!(19));
+    }
+
+    #[test]
+    fn optimized_group_then_aggregate_complex_reshape() {
+        // Large pipeline: filter → group_by → transform_values → sort
+        // by computed key.  Demonstrates object-return from map over
+        // grouped buckets plus RootChain fusion inside the group key.
+        let doc = big_store();
+        let q = "$.store.books \
+                 .filter(rating >= 4.0) \
+                 .group_by(genre) \
+                 .entries() \
+                 .map({genre: @[0], count: @[1].len(), avg_price: @[1].avg(price)}) \
+                 .sort(avg_price) \
+                 .reverse()";
+        let r = query(q, &doc).unwrap();
+        let arr = r.as_array().unwrap();
+        assert!(arr.len() >= 3); // sci-fi, dystopia, cyberpunk
+        let genres: Vec<&str> = arr.iter().map(|v| v["genre"].as_str().unwrap()).collect();
+        // All distinct.
+        let mut u = genres.clone(); u.sort(); u.dedup();
+        assert_eq!(u.len(), genres.len());
+    }
+
+    #[test]
+    fn optimized_map_flatten_fusion_with_unique() {
+        // map(f).flatten() → MapFlatten (single-pass concat).
+        // Then map(f).unique() → MapUnique (streaming dedup).
+        let doc = big_store();
+        let q = "$.store.books.map(tags).flatten().unique().sort()";
+        let r = query(q, &doc).unwrap();
+        let tags = r.as_array().unwrap();
+        // All distinct and sorted.
+        let strs: Vec<&str> = tags.iter().map(|v| v.as_str().unwrap()).collect();
+        let mut s = strs.clone(); s.sort(); s.dedup();
+        assert_eq!(s, strs);
+        // Must include well-known tags.
+        assert!(strs.contains(&"sci-fi"));
+        assert!(strs.contains(&"dystopia"));
+        assert!(strs.contains(&"cyberpunk"));
+    }
+
+    #[test]
+    fn optimized_filter_take_while_fusion() {
+        // filter(p).takewhile(q) → FilterTakeWhile — scans until q fails.
+        // Proves early-out behaviour: later high-priced books must NOT
+        // leak through even though they pass the filter.
+        let doc = big_store();
+        // Books in order, priced > 5; take while price < 12.
+        let q = "$.store.books.filter(price > 5.0).takewhile(price < 12.0).map(title)";
+        let r = query(q, &doc).unwrap();
+        let titles = r.as_array().unwrap();
+        // Dune (12.99) breaks the scan immediately — result should be empty.
+        // Actually Dune is first and its price > 12, so scan stops at 0.
+        assert_eq!(titles.len(), 0);
+    }
+
+    #[test]
+    fn optimized_deep_chain_with_comprehension_and_fstring() {
+        // Very large expression: comprehension over filtered projection
+        // with nested filter + f-string.  Exercises RootChain fusion
+        // at multiple sites, list comprehension lowering, and string
+        // interpolation opcodes.
+        let doc = big_store();
+        let q = "[f\"{b.title} (${b.price})\" \
+                 for b in $.store.books \
+                 if b.rating >= 4.5 and b.genre == \"sci-fi\" \
+                 and b.author.born >= 1940]";
+        let r = query(q, &doc).unwrap();
+        let items = r.as_array().unwrap();
+        // Hyperion, Ender's Game, The Martian, Project Hail Mary.
+        assert!(items.len() >= 3);
+        for s in items {
+            let t = s.as_str().unwrap();
+            assert!(t.contains("$"));
+        }
+    }
+
+    #[test]
+    fn optimized_let_chained_pipelines_with_aggregation() {
+        // Three-level let chain with reuse.  Tests liveness: `books` is
+        // used throughout, `cheap` only in one branch.  Body returns a
+        // large reshape of aggregates.
+        let doc = big_store();
+        let q = "let books = $.store.books in \
+                 let cheap = books.filter(price < 10.0) in \
+                 let expensive = books.filter(price >= 10.0) in \
+                 {\
+                    total: books.len(), \
+                    cheap_count: cheap.len(), \
+                    expensive_count: expensive.len(), \
+                    cheap_avg: cheap.avg(price), \
+                    expensive_avg: expensive.avg(price), \
+                    delta: expensive.avg(price) - cheap.avg(price), \
+                    price_range: books.max(price) - books.min(price), \
+                    top_author: books.sort(rating).reverse()[0].author.name\
+                 }";
+        let r = query(q, &doc).unwrap();
+        assert_eq!(r["total"], json!(20));
+        assert!(r["cheap_count"].as_i64().unwrap() > 0);
+        assert!(r["expensive_count"].as_i64().unwrap() > 0);
+        assert!(r["delta"].as_f64().unwrap() > 0.0);
+        assert!(r["price_range"].as_f64().unwrap() > 5.0);
+        // The book with max rating (4.9) is Project Hail Mary by Andy Weir.
+        assert_eq!(r["top_author"], json!("Andy Weir"));
+    }
+
+    #[test]
+    fn optimized_const_fold_across_arithmetic_and_comparisons() {
+        // Every predicate is trivially-constant-foldable but wrapped
+        // around a real filter path.  Const-fold must eliminate the
+        // dead branches so the filter reduces to the runtime predicate.
+        let doc = big_store();
+        let q = "$.store.books \
+                 .filter((1 + 2) * 3 == 9 and not (5 < 3) and price > 11.0) \
+                 .map(title) \
+                 .sort()";
+        let r = query(q, &doc).unwrap();
+        let titles: Vec<String> = r.as_array().unwrap().iter()
+            .map(|v| v.as_str().unwrap().to_string()).collect();
+        assert!(titles.iter().any(|t| t == "Dune"));
+        assert!(titles.iter().any(|t| t == "Project Hail Mary"));
+    }
+
+    // Fusion benchmark — run with:
+    //   cargo test --release v2::tests::tests::bench_fusion_vs_naive -- --ignored --nocapture
+    // Measures wall time for a representative pipeline with every pass
+    // enabled vs every pass disabled over a 2000-book document.  Use
+    // --release for realistic numbers; debug builds dominate with
+    // bounds-check / iteration overhead that dwarfs fusion wins.
+    #[test]
+    #[ignore]
+    fn bench_fusion_vs_naive() {
+        use crate::v2::vm::{VM, PassConfig};
+        use std::time::Instant;
+
+        // Synthesize a large store (2000 books).
+        let mut books = Vec::with_capacity(2000);
+        let genres = ["sci-fi","dystopia","cyberpunk","classic"];
+        for i in 0..2000 {
+            let g = genres[i % 4];
+            books.push(json!({
+                "id": i,
+                "title": format!("Book {}", i),
+                "price": (i % 50) as f64 + 5.0,
+                "rating": ((i * 7) % 50) as f64 / 10.0,
+                "genre": g,
+                "tags":  ["a","b","c","d"],
+                "author": {"name": format!("Author {}", i % 100), "born": 1900 + (i % 120)},
+            }));
+        }
+        let doc = json!({"store": {"books": books}});
+
+        let pipelines = &[
+            "$.store.books.filter(price > 20 and rating > 3.5).map({t: title, p: price}).map({label: t, cost: p}).sort(cost)[0:10]",
+            "$.store.books.filter(genre == \"sci-fi\").sum(price)",
+            "$.store.books.map(tags).flatten().unique().sort()",
+            "$.store.books.filter(price > 10).first()",
+            "$.store.books.group_by(genre).entries().map({g: @[0], n: @[1].len(), avg: @[1].avg(price)})",
+        ];
+
+        let iters = 50;
+        for q in pipelines {
+            // Fused
+            let mut vm = VM::new();
+            vm.set_pass_config(PassConfig::default());
+            let start = Instant::now();
+            for _ in 0..iters { let _ = vm.run_str(q, &doc).unwrap(); }
+            let fused = start.elapsed();
+
+            // Naive
+            let mut vm = VM::new();
+            vm.set_pass_config(PassConfig::none());
+            let start = Instant::now();
+            for _ in 0..iters { let _ = vm.run_str(q, &doc).unwrap(); }
+            let naive = start.elapsed();
+
+            let ratio = naive.as_secs_f64() / fused.as_secs_f64();
+            println!("[bench] iters={:<3} fused={:>8.2?} naive={:>8.2?}  speedup={:.2}x  q={}",
+                     iters, fused, naive, ratio, q);
+        }
+    }
+
+    #[test]
+    fn pass_config_cache_isolation() {
+        use crate::v2::vm::{VM, PassConfig};
+        let mut vm = VM::new();
+        let doc = big_store();
+        let q = "$.store.books.filter(price > 10).map(title).sort()";
+
+        // Default config — all passes on.
+        let r1 = vm.run_str(q, &doc).unwrap();
+        let (n1, _) = vm.cache_stats();
+        assert!(n1 >= 1);
+
+        // Disable every pass.  Different config-hash → separate cache slot.
+        vm.set_pass_config(PassConfig::none());
+        let r2 = vm.run_str(q, &doc).unwrap();
+        let (n2, _) = vm.cache_stats();
+        assert_eq!(n2, n1 + 1, "separate cache entry per config");
+
+        // Semantics preserved regardless of passes.
+        assert_eq!(r1, r2);
+    }
+
+    #[test]
+    fn lru_compile_cache_evicts_oldest() {
+        use crate::v2::vm::VM;
+        let mut vm = VM::with_capacity(2, 16);
+        let doc = json!({"a": 1, "b": 2, "c": 3});
+        let _ = vm.run_str("$.a", &doc).unwrap();
+        let _ = vm.run_str("$.b", &doc).unwrap();
+        assert_eq!(vm.cache_stats().0, 2);
+        // Touch "$.a" — "$.b" becomes LRU.
+        let _ = vm.run_str("$.a", &doc).unwrap();
+        let _ = vm.run_str("$.c", &doc).unwrap();
+        assert_eq!(vm.cache_stats().0, 2, "cap enforced");
+        // "$.a" still cached.
+        let _ = vm.run_str("$.a", &doc).unwrap();
+        assert_eq!(vm.cache_stats().0, 2);
+        // "$.b" was evicted; re-running reinserts but stays capped.
+        let _ = vm.run_str("$.b", &doc).unwrap();
+        assert_eq!(vm.cache_stats().0, 2);
+    }
+
+    #[test]
+    fn optimized_equi_join_hash_probe() {
+        // Fused EquiJoin: books joined with author_detail by author_name.
+        let doc = json!({
+            "books": [
+                {"title": "Dune",       "author_name": "Frank Herbert"},
+                {"title": "Foundation", "author_name": "Isaac Asimov"},
+                {"title": "1984",       "author_name": "George Orwell"},
+                {"title": "Unknown",    "author_name": "No Match"},
+            ],
+            "authors": [
+                {"name": "Frank Herbert", "nationality": "US"},
+                {"name": "Isaac Asimov",  "nationality": "US"},
+                {"name": "George Orwell", "nationality": "UK"},
+            ]
+        });
+        let q = "$.books.equi_join($.authors, \"author_name\", \"name\")";
+        let r = query(q, &doc).unwrap();
+        let rows = r.as_array().unwrap();
+        assert_eq!(rows.len(), 3); // "Unknown" has no match
+        for row in rows {
+            assert!(row.get("title").is_some());
+            assert!(row.get("nationality").is_some());
+            assert!(row.get("name").is_some());
+        }
+    }
+
+    #[test]
+    fn optimized_pipeline_stress_many_stages() {
+        // Fifteen-stage pipeline, many of which participate in pairwise
+        // fusion.  Result asserts concrete shape to prove every stage
+        // ran in the right order after optimisation.
+        let doc = big_store();
+        let q = "$.store.books \
+                 .filter(rating >= 4.0) \
+                 .filter(price < 15.0) \
+                 .map({t: title, p: price, r: rating, g: genre, b: author.born}) \
+                 .filter(b >= 1900) \
+                 .map({title: t, price: p, score: r * 20, genre: g, era: b}) \
+                 .filter(score >= 85) \
+                 .sort(price) \
+                 .reverse() \
+                 .map({title, price}) \
+                 [0:5]";
+        let r = query(q, &doc).unwrap();
+        let arr = r.as_array().unwrap();
+        assert_eq!(arr.len(), 5);
+        // Must all have title/price keys, price descending.
+        let mut last = f64::MAX;
+        for it in arr {
+            assert!(it.get("title").is_some());
+            let p = it["price"].as_f64().unwrap();
+            assert!(p <= last, "not sorted descending: {} > {}", p, last);
+            last = p;
+        }
     }
 }

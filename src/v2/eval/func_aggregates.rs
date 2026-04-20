@@ -1,3 +1,13 @@
+//! Aggregate methods: `sum`, `avg`, `count`, `group_by`, `index_by`,
+//! `partition`, `count_by`.
+//!
+//! These consume an entire array and produce either a scalar or a
+//! regrouped structure.  Most take an optional key expression
+//! (bare form or lambda) evaluated with each element bound to `@`.
+//! Numeric aggregates widen Int → Float when mixed.  Grouping
+//! aggregates stringify the computed key via `val_key` so the result
+//! can be indexed by an `IndexMap` while preserving insertion order.
+
 use std::sync::Arc;
 use indexmap::IndexMap;
 

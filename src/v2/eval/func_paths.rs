@@ -1,3 +1,13 @@
+//! Path-addressed object operations: `has_path`, `get_path`, `set_path`,
+//! `del_path`, `del_paths`, `flatten_keys`, `unflatten_keys`.
+//!
+//! Paths are dot-separated strings (`"a.b[0].c"`).  Indexing into
+//! arrays uses `[n]` syntax; negative indices count from the end.
+//! `set_path` / `del_path` implement Copy-on-Write: they clone only
+//! the spine from root to leaf (depth proportional to path length),
+//! leaving every sibling subtree sharing its original `Arc`.  This
+//! matches `Val`'s structural-sharing design.
+
 use std::sync::Arc;
 use indexmap::IndexMap;
 

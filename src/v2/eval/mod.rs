@@ -1,3 +1,41 @@
+//! Tree-walking evaluator — reference semantics for Jetro v2.
+//!
+//! This module is the *source of truth*: when the optimiser or VM
+//! behaviour diverges from it, the VM is wrong.  It is also the
+//! smallest path from AST to value and thus the easiest to reason
+//! about.  [`vm`](super::vm) is a faster path that caches compiled
+//! programs and resolved pointers, but every new feature lands here
+//! first.
+//!
+//! # Data flow
+//!
+//! ```text
+//! evaluate(expr, doc)
+//!     │
+//!     ▼
+//!   apply_expr(&Expr, &Env)
+//!     │
+//!     ├── literals / operators    (inline)
+//!     ├── chain navigation        (apply_chain → apply_step)
+//!     ├── method calls            (dispatch_method → func_*/methods.rs)
+//!     └── comprehensions / let    (recursive into new Env)
+//! ```
+//!
+//! # `Env`
+//!
+//! `Env` owns the root doc, the "current" value (`@`), and a
+//! `SmallVec<[(Arc<str>, Val); 4]>` of let-bound names plus an
+//! `Arc<MethodRegistry>` for user-registered methods.  Scopes are
+//! pushed by appending and popped by truncation — lookup is linear
+//! but `SmallVec` keeps the first four slots inline, which covers
+//! every realistic query.
+//!
+//! # Registry
+//!
+//! [`MethodRegistry`] holds user methods behind `Arc<dyn Method>`
+//! and is itself `Clone` (via derive) so threading it through
+//! recursive calls is free.
+
 use std::sync::Arc;
 use indexmap::IndexMap;
 use smallvec::SmallVec;
@@ -72,6 +110,19 @@ impl Env {
             current,
             registry: self.registry.clone(),
         }
+    }
+
+    /// In-place swap of `current` — returns previous.  Paired with
+    /// `restore_current` this lets hot loops avoid cloning `vars`/`root`
+    /// per iteration.
+    #[inline]
+    pub fn swap_current(&mut self, new: Val) -> Val {
+        std::mem::replace(&mut self.current, new)
+    }
+
+    #[inline]
+    pub fn restore_current(&mut self, old: Val) {
+        self.current = old;
     }
 
     #[inline]

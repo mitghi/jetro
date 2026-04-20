@@ -90,6 +90,8 @@ fn build() -> BuiltinRegistry {
     t.insert("sort",      func_arrays::sort);
     t.insert("flatten",   func_arrays::flatten);
     t.insert("join",      func_arrays::join);
+    t.insert("equi_join", func_arrays::equi_join);
+    t.insert("equiJoin",  func_arrays::equi_join);
     t.insert("first",     func_arrays::first);
     t.insert("last",      func_arrays::last);
     t.insert("nth",       func_arrays::nth);

@@ -1,3 +1,23 @@
+//! PEG parser for Jetro v2 source text.
+//!
+//! The grammar lives in [`grammar.pest`]; this module walks the pest
+//! parse tree and builds an [`Expr`] AST.  Operator precedence and
+//! associativity are encoded in the grammar — the walker here is a
+//! near-mechanical tree fold with no precedence decisions of its own.
+//!
+//! # Error handling
+//!
+//! Pest reports errors with line/column spans; we wrap them into a
+//! [`ParseError`] that implements `Display` and `Error`.  The wrapper
+//! exists because callers shouldn't need to depend on pest types.
+//!
+//! # Parser state
+//!
+//! The original v1 parser threaded a `RefCell`-shared counter for
+//! gensym (unique ident generation).  v2 does that differently — we
+//! emit fresh temp names in the compiler, not the parser, so the
+//! parser is a pure function of its input.
+
 use pest::iterators::Pair;
 use pest::Parser as PestParser;
 use pest_derive::Parser;

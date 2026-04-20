@@ -10,6 +10,7 @@
 //! to operate on — v2's restricted branch set means reducible CFGs only.
 
 use std::sync::Arc;
+use std::collections::HashSet;
 use super::vm::{Program, Opcode};
 
 /// A basic block: a straight-line opcode slice with no inner branches.
@@ -111,6 +112,62 @@ impl Cfg {
         }
         doms
     }
+
+    /// Predecessor list per block.
+    pub fn preds(&self) -> Vec<Vec<usize>> {
+        let n = self.blocks.len();
+        let mut p: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for (bi, b) in self.blocks.iter().enumerate() {
+            for e in &b.branches { p[edge_target(e)].push(bi); }
+        }
+        p
+    }
+
+    /// Dominance frontier per block (Cytron et al.).
+    pub fn dominance_frontiers(&self) -> Vec<HashSet<usize>> {
+        let n = self.blocks.len();
+        let doms = self.dominators();
+        let preds = self.preds();
+        let mut df: Vec<HashSet<usize>> = vec![HashSet::new(); n];
+        for b in 0..n {
+            if preds[b].len() < 2 { continue; }
+            let Some(idom_b) = doms[b] else { continue };
+            for &p in &preds[b] {
+                let mut runner = p;
+                while Some(runner) != Some(idom_b) && doms[runner].is_some() {
+                    df[runner].insert(b);
+                    let next = doms[runner].unwrap();
+                    if next == runner { break; }
+                    runner = next;
+                }
+            }
+        }
+        df
+    }
+
+    /// Loop headers: blocks that dominate one of their own predecessors
+    /// (i.e. back-edges terminate here).  Returns (header, back_edge_source).
+    pub fn loop_headers(&self) -> Vec<(usize, usize)> {
+        let doms = self.dominators();
+        let preds = self.preds();
+        let mut out = Vec::new();
+        for (b, ps) in preds.iter().enumerate() {
+            for &p in ps {
+                if dominates(&doms, b, p) { out.push((b, p)); }
+            }
+        }
+        out
+    }
+}
+
+/// Does `a` dominate `b`?
+fn dominates(doms: &[Option<usize>], a: usize, mut b: usize) -> bool {
+    loop {
+        if a == b { return true; }
+        let Some(next) = doms[b] else { return false };
+        if next == b { return false; }
+        b = next;
+    }
 }
 
 fn edge_target(e: &EdgeKind) -> usize {
@@ -156,9 +213,17 @@ fn build_block(cfg: &mut Cfg, ops: &[Opcode]) -> usize {
             }
             Opcode::InlineFilter(p) | Opcode::FilterCount(p)
                 | Opcode::FindFirst(p) | Opcode::FindOne(p)
-                | Opcode::MapSum(p) | Opcode::MapAvg(p) => {
+                | Opcode::MapSum(p) | Opcode::MapAvg(p)
+                | Opcode::MapFlatten(p) => {
                 let t = build_block(cfg, &p.ops);
                 branches.push(EdgeKind::Loop { target: t, name: "filter" });
+                straight.push(op.clone());
+            }
+            Opcode::FilterTakeWhile { pred, stop } => {
+                let tp = build_block(cfg, &pred.ops);
+                let ts = build_block(cfg, &stop.ops);
+                branches.push(EdgeKind::Loop { target: tp, name: "filter" });
+                branches.push(EdgeKind::Loop { target: ts, name: "stop" });
                 straight.push(op.clone());
             }
             Opcode::FilterMap { pred, map } => {
@@ -232,8 +297,6 @@ fn _use_arc<T>(_: Arc<T>) {}
 
 // ── Liveness analysis ────────────────────────────────────────────────────────
 
-use std::collections::HashSet;
-
 /// Per-block live-in / live-out sets of identifier names.
 #[derive(Debug, Clone, Default)]
 pub struct Liveness {
@@ -274,6 +337,65 @@ impl Cfg {
             }
         }
         Liveness { live_in, live_out }
+    }
+}
+
+// ── Live-range allocator ─────────────────────────────────────────────────────
+
+use std::collections::HashMap;
+
+/// Slot assignment for each let/bind-introduced name.
+#[derive(Debug, Clone, Default)]
+pub struct SlotMap {
+    pub slots: HashMap<Arc<str>, usize>,
+    pub count: usize,
+}
+
+impl Cfg {
+    /// Assign a compact slot index per ident using greedy graph colouring
+    /// over the interference graph derived from liveness.  Names live at
+    /// the same block interfere; greedy picks the lowest free slot.
+    pub fn allocate_slots(&self, live: &Liveness) -> SlotMap {
+        // Collect all defined names.
+        let mut all: Vec<Arc<str>> = Vec::new();
+        let mut seen: HashSet<Arc<str>> = HashSet::new();
+        for b in &self.blocks {
+            for op in &b.ops {
+                match op {
+                    Opcode::BindVar(n) | Opcode::StoreVar(n)
+                        | Opcode::LetExpr { name: n, .. } => {
+                        if seen.insert(n.clone()) { all.push(n.clone()); }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // Interference: a,b interfere if both in some live_in/live_out.
+        let mut interf: HashMap<Arc<str>, HashSet<Arc<str>>> = HashMap::new();
+        let mut add_edge = |a: &Arc<str>, b: &Arc<str>, m: &mut HashMap<Arc<str>, HashSet<Arc<str>>>| {
+            if a != b {
+                m.entry(a.clone()).or_default().insert(b.clone());
+                m.entry(b.clone()).or_default().insert(a.clone());
+            }
+        };
+        for s in live.live_in.iter().chain(live.live_out.iter()) {
+            let v: Vec<&Arc<str>> = s.iter().collect();
+            for i in 0..v.len() {
+                for j in (i+1)..v.len() { add_edge(v[i], v[j], &mut interf); }
+            }
+        }
+        // Greedy colouring.
+        let mut slots: HashMap<Arc<str>, usize> = HashMap::new();
+        let mut count = 0;
+        for name in &all {
+            let neighbours = interf.get(name).cloned().unwrap_or_default();
+            let used: HashSet<usize> = neighbours.iter()
+                .filter_map(|n| slots.get(n).copied()).collect();
+            let slot = (0..).find(|s| !used.contains(s)).unwrap();
+            if slot + 1 > count { count = slot + 1; }
+            slots.insert(name.clone(), slot);
+        }
+        SlotMap { slots, count }
     }
 }
 
@@ -340,5 +462,33 @@ mod tests {
         let body_has_x = live.live_in.iter().any(|s|
             s.iter().any(|n| n.as_ref() == "x"));
         assert!(body_has_x, "x should be live inside let body");
+    }
+
+    #[test]
+    fn cfg_dominators_nonempty() {
+        let p = Compiler::compile_str("$.a and $.b").unwrap();
+        let cfg = Cfg::build(&p);
+        let doms = cfg.dominators();
+        assert_eq!(doms.len(), cfg.size());
+        // Entry dominates itself.
+        assert_eq!(doms[cfg.entry], Some(cfg.entry));
+    }
+
+    #[test]
+    fn cfg_dominance_frontiers_sized() {
+        let p = Compiler::compile_str("$.a and $.b").unwrap();
+        let cfg = Cfg::build(&p);
+        let df = cfg.dominance_frontiers();
+        assert_eq!(df.len(), cfg.size());
+    }
+
+    #[test]
+    fn cfg_slot_allocator_distinct() {
+        let p = Compiler::compile_str("let x = $.a in let y = x + 1 in y * 2").unwrap();
+        let cfg = Cfg::build(&p);
+        let live = cfg.liveness();
+        let slots = cfg.allocate_slots(&live);
+        assert!(slots.slots.contains_key("x"));
+        assert!(slots.slots.contains_key("y"));
     }
 }

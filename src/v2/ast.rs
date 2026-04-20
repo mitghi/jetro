@@ -1,3 +1,16 @@
+//! Abstract syntax tree for Jetro v2 expressions.
+//!
+//! The AST is the contract between the parser and every other v2 layer —
+//! the compiler lowers it to opcodes, analyses inspect it for ident-use
+//! / purity, and tests build it directly.  Because every component
+//! observes `Expr`, its variants are kept deliberately orthogonal:
+//! each is a language concept, not an implementation shortcut.
+//!
+//! `Arc<str>` is used for every identifier so that cloning a name into
+//! an opcode is a refcount bump rather than a byte copy.  Recursive
+//! sub-expressions are `Box<Expr>` — owned, not shared — since the
+//! compiler rewrites the AST in-place (see `reorder_and_operands`).
+
 use std::sync::Arc;
 
 // ── AST nodes ─────────────────────────────────────────────────────────────────

@@ -145,8 +145,54 @@ impl AbstractVal {
 /// Returns the top-of-stack abstract value at program end (i.e. the result type).
 pub fn infer_result_type(program: &Program) -> AbstractVal {
     let mut stack: Vec<AbstractVal> = Vec::with_capacity(16);
-    for op in program.ops.iter() { apply_op(op, &mut stack); }
+    let mut env: HashMap<Arc<str>, AbstractVal> = HashMap::new();
+    for op in program.ops.iter() { apply_op_env(op, &mut stack, &mut env); }
     stack.pop().unwrap_or(AbstractVal::UNKNOWN)
+}
+
+/// Same as `infer_result_type` but exposes the bindings environment after
+/// the program finishes — useful for debugging the interprocedural flow.
+pub fn infer_result_type_with_env(program: &Program)
+    -> (AbstractVal, HashMap<Arc<str>, AbstractVal>)
+{
+    let mut stack: Vec<AbstractVal> = Vec::with_capacity(16);
+    let mut env: HashMap<Arc<str>, AbstractVal> = HashMap::new();
+    for op in program.ops.iter() { apply_op_env(op, &mut stack, &mut env); }
+    (stack.pop().unwrap_or(AbstractVal::UNKNOWN), env)
+}
+
+fn apply_op_env(op: &Opcode, stack: &mut Vec<AbstractVal>,
+                env: &mut HashMap<Arc<str>, AbstractVal>) {
+    // Handle binding & ident lookup here, delegate scalar cases to apply_op.
+    match op {
+        Opcode::LoadIdent(name) => {
+            let av = env.get(name).copied().unwrap_or(AbstractVal::UNKNOWN);
+            stack.push(av);
+        }
+        Opcode::BindVar(name) => {
+            // TOS preserved; record type.
+            if let Some(top) = stack.last().copied() { env.insert(name.clone(), top); }
+        }
+        Opcode::StoreVar(name) => {
+            let v = stack.pop().unwrap_or(AbstractVal::UNKNOWN);
+            env.insert(name.clone(), v);
+        }
+        Opcode::LetExpr { name, body } => {
+            let init = stack.pop().unwrap_or(AbstractVal::UNKNOWN);
+            let saved = env.get(name).copied();
+            env.insert(name.clone(), init);
+            let mut sub_stack: Vec<AbstractVal> = Vec::with_capacity(8);
+            for op2 in body.ops.iter() { apply_op_env(op2, &mut sub_stack, env); }
+            let res = sub_stack.pop().unwrap_or(AbstractVal::UNKNOWN);
+            // Restore shadowed binding.
+            match saved {
+                Some(v) => { env.insert(name.clone(), v); }
+                None    => { env.remove(name); }
+            }
+            stack.push(res);
+        }
+        _ => apply_op(op, stack),
+    }
 }
 
 fn apply_op(op: &Opcode, stack: &mut Vec<AbstractVal>) {
@@ -210,7 +256,9 @@ fn apply_op(op: &Opcode, stack: &mut Vec<AbstractVal>) {
             pop1!();
             stack.push(AbstractVal::scalar(VType::Float));
         }
-        Opcode::TopN { .. } => {
+        Opcode::TopN { .. } | Opcode::MapFlatten(_) | Opcode::FilterTakeWhile { .. }
+            | Opcode::FilterDropWhile { .. } | Opcode::MapUnique(_)
+            | Opcode::EquiJoin { .. } => {
             pop1!();
             stack.push(AbstractVal::array());
         }
@@ -294,6 +342,7 @@ pub fn method_result_type(m: BuiltinMethod) -> AbstractVal {
         First | Last | Nth | GetPath => AbstractVal::UNKNOWN,
         HasPath => AbstractVal::scalar(VType::Bool),
         FromJson | Or => AbstractVal::UNKNOWN,
+        EquiJoin => AbstractVal::array(),
         Unknown => AbstractVal::UNKNOWN,
     }
 }
@@ -315,7 +364,12 @@ fn count_ident_uses_in_ops(ops: &[Opcode], name: &str, acc: &mut usize) {
                 | Opcode::InlineFilter(p) | Opcode::FilterCount(p)
                 | Opcode::FindFirst(p) | Opcode::FindOne(p)
                 | Opcode::DynIndex(p)
-                | Opcode::MapSum(p) | Opcode::MapAvg(p) => count_ident_uses_in_ops(&p.ops, name, acc),
+                | Opcode::MapSum(p) | Opcode::MapAvg(p)
+                | Opcode::MapFlatten(p) => count_ident_uses_in_ops(&p.ops, name, acc),
+            Opcode::FilterTakeWhile { pred, stop } => {
+                count_ident_uses_in_ops(&pred.ops, name, acc);
+                count_ident_uses_in_ops(&stop.ops, name, acc);
+            }
             Opcode::FilterMap { pred, map } => {
                 count_ident_uses_in_ops(&pred.ops, name, acc);
                 count_ident_uses_in_ops(&map.ops, name, acc);
@@ -399,7 +453,12 @@ fn collect_fields_in_ops(ops: &[Opcode], acc: &mut Vec<Arc<str>>) {
                 | Opcode::InlineFilter(p) | Opcode::FilterCount(p)
                 | Opcode::FindFirst(p) | Opcode::FindOne(p)
                 | Opcode::DynIndex(p)
-                | Opcode::MapSum(p) | Opcode::MapAvg(p) => collect_fields_in_ops(&p.ops, acc),
+                | Opcode::MapSum(p) | Opcode::MapAvg(p)
+                | Opcode::MapFlatten(p) => collect_fields_in_ops(&p.ops, acc),
+            Opcode::FilterTakeWhile { pred, stop } => {
+                collect_fields_in_ops(&pred.ops, acc);
+                collect_fields_in_ops(&stop.ops, acc);
+            }
             Opcode::FilterMap { pred, map } => {
                 collect_fields_in_ops(&pred.ops, acc);
                 collect_fields_in_ops(&map.ops, acc);
@@ -455,7 +514,12 @@ fn hash_ops(ops: &[Opcode], h: &mut impl std::hash::Hasher) {
                 | Opcode::InlineFilter(p) | Opcode::FilterCount(p)
                 | Opcode::FindFirst(p) | Opcode::FindOne(p)
                 | Opcode::DynIndex(p)
-                | Opcode::MapSum(p) | Opcode::MapAvg(p) => hash_ops(&p.ops, h),
+                | Opcode::MapSum(p) | Opcode::MapAvg(p)
+                | Opcode::MapFlatten(p) => hash_ops(&p.ops, h),
+            Opcode::FilterTakeWhile { pred, stop } => {
+                hash_ops(&pred.ops, h);
+                hash_ops(&stop.ops, h);
+            }
             Opcode::RootChain(chain) => {
                 for k in chain.iter() { k.as_bytes().hash(h); }
             }
@@ -483,7 +547,9 @@ fn walk_subprograms(ops: &[Opcode], map: &mut HashMap<u64, usize>) {
                 | Opcode::InlineFilter(p) | Opcode::FilterCount(p)
                 | Opcode::FindFirst(p) | Opcode::FindOne(p)
                 | Opcode::DynIndex(p)
-                | Opcode::MapSum(p) | Opcode::MapAvg(p) => vec![p],
+                | Opcode::MapSum(p) | Opcode::MapAvg(p)
+                | Opcode::MapFlatten(p) => vec![p],
+            Opcode::FilterTakeWhile { pred, stop } => vec![pred, stop],
             Opcode::FilterMap { pred, map: m } => vec![pred, m],
             Opcode::FilterFilter { p1, p2 } => vec![p1, p2],
             Opcode::MapMap { f1, f2 } => vec![f1, f2],
@@ -662,6 +728,11 @@ fn rewrite_op(op: &Opcode, cache: &mut HashMap<u64, Arc<Program>>) -> Opcode {
         Opcode::FilterCount(p)  => Opcode::FilterCount(dedup_rec(p, cache)),
         Opcode::MapSum(p)       => Opcode::MapSum(dedup_rec(p, cache)),
         Opcode::MapAvg(p)       => Opcode::MapAvg(dedup_rec(p, cache)),
+        Opcode::MapFlatten(p)   => Opcode::MapFlatten(dedup_rec(p, cache)),
+        Opcode::FilterTakeWhile { pred, stop } => Opcode::FilterTakeWhile {
+            pred: dedup_rec(pred, cache),
+            stop: dedup_rec(stop, cache),
+        },
         Opcode::FindFirst(p)    => Opcode::FindFirst(dedup_rec(p, cache)),
         Opcode::FindOne(p)      => Opcode::FindOne(dedup_rec(p, cache)),
         Opcode::DynIndex(p)     => Opcode::DynIndex(dedup_rec(p, cache)),
@@ -780,7 +851,12 @@ pub fn opcode_cost(op: &Opcode) -> u32 {
         Opcode::InlineFilter(p) | Opcode::FilterCount(p)
             | Opcode::FindFirst(p) | Opcode::FindOne(p)
             | Opcode::MapSum(p) | Opcode::MapAvg(p)
+            | Opcode::MapFlatten(p)
             | Opcode::DynIndex(p) => 10 + program_cost(p),
+        Opcode::FilterTakeWhile { pred, stop } => 10 + program_cost(pred) + program_cost(stop),
+        Opcode::FilterDropWhile { pred, drop } => 10 + program_cost(pred) + program_cost(drop),
+        Opcode::MapUnique(p) => 15 + program_cost(p),
+        Opcode::EquiJoin { rhs, .. } => 25 + program_cost(rhs),
         Opcode::FilterMap { pred, map } => 10 + program_cost(pred) + program_cost(map),
         Opcode::FilterFilter { p1, p2 } => 10 + program_cost(p1) + program_cost(p2),
         Opcode::MapMap { f1, f2 } => 10 + program_cost(f1) + program_cost(f2),

@@ -1,3 +1,14 @@
+//! Object methods: `keys`, `values`, `entries`, `pick`, `omit`,
+//! `merge`, `deep_merge`, `rename`, `invert`, `transform_keys`,
+//! `transform_values`, `filter_keys`, `filter_values`, `pivot`.
+//!
+//! All operate on `Val::Obj(Arc<IndexMap<Arc<str>, Val>>)`.  When
+//! mutation is needed, the functions `Arc::try_unwrap` the inner map;
+//! that is free when the caller holds the last refcount and one
+//! `IndexMap::clone()` otherwise.  `IndexMap::shift_remove` is used
+//! everywhere (never `remove`) to preserve insertion order — callers
+//! depend on that for deterministic serialisation.
+
 use std::sync::Arc;
 use indexmap::IndexMap;
 

@@ -1,3 +1,18 @@
+//! Shared helpers used across eval / vm:
+//!
+//! - `cmp_vals`: total ordering on `Val` (null < bool < num < str <
+//!   arr < obj), used by sort, min, max, top-N, distinct.  Unlike
+//!   `PartialOrd`, this never returns `None` — it uses a lexicographic
+//!   fallback when types are incomparable, which is essential for
+//!   heap-based partial sorts.
+//! - `add_vals` / `num_op`: numeric widening + arithmetic dispatch
+//!   shared by the tree-walker and the VM so both semantics match.
+//! - `val_key`: canonical string key for grouping / dedup.
+//! - `flatten_val` / `zip_arrays` / `cartesian` / `deep_merge`:
+//!   array / object combinators reused by builtins.
+//! - `val_str` / `val_to_string`: coercion helpers for string
+//!   methods and CSV emission.
+
 use std::sync::Arc;
 use indexmap::IndexMap;
 

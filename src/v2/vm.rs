@@ -97,6 +97,8 @@ pub enum BuiltinMethod {
     Repeat, PadLeft, PadRight, StartsWith, EndsWith,
     IndexOf, LastIndexOf, Replace, ReplaceAll, StripPrefix, StripSuffix,
     Slice, Split, Indent, Dedent, Matches, Scan,
+    // Relational
+    EquiJoin,
     // Sentinel for custom/unknown
     Unknown,
 }
@@ -134,6 +136,7 @@ impl BuiltinMethod {
             "flatten"        => Self::Flatten,
             "compact"        => Self::Compact,
             "join"           => Self::Join,
+            "equi_join"|"equiJoin" => Self::EquiJoin,
             "first"          => Self::First,
             "last"           => Self::Last,
             "nth"            => Self::Nth,
@@ -333,6 +336,19 @@ pub enum Opcode {
     /// Fused `sort()` + `[0:n]` — partial-sort smallest N using BinaryHeap.
     /// `asc=true` → smallest N; `asc=false` → largest N.
     TopN { n: usize, asc: bool },
+    /// Fused `map(f).flatten()` — single-pass concat of mapped arrays.
+    MapFlatten(Arc<Program>),
+    /// Fused `filter(p).take_while(q)` — scan while both predicates hold.
+    FilterTakeWhile { pred: Arc<Program>, stop: Arc<Program> },
+    /// Fused `filter(p).drop_while(q)` — skip leading matches of q on
+    /// p-filtered elements.
+    FilterDropWhile { pred: Arc<Program>, drop: Arc<Program> },
+    /// Fused `map(f).unique()` — apply f and dedup by resulting value.
+    MapUnique(Arc<Program>),
+    /// Fused equi-join: TOS is lhs array; `rhs` program evaluates
+    /// to rhs array; join by (lhs_key, rhs_key) string field names.
+    /// Produces array of merged objects (rhs wins on collision).
+    EquiJoin { rhs: Arc<Program>, lhs_key: Arc<str>, rhs_key: Arc<str> },
 
     // ── Ident lookup (var, then current field) ────────────────────────────────
     LoadIdent(Arc<str>),
@@ -443,9 +459,104 @@ pub struct Compiler;
 
 impl Compiler {
     pub fn compile(expr: &Expr, source: &str) -> Program {
+        let mut e = expr.clone();
+        Self::reorder_and_operands(&mut e);
         let ctx = VarCtx::default();
-        let ops = Self::optimize(Self::emit(expr, &ctx));
-        Program::new(ops, source)
+        let ops = Self::optimize(Self::emit(&e, &ctx));
+        let prog = Program::new(ops, source);
+        // Post-pass: canonicalise identical sub-programs.
+        let deduped = super::analysis::dedup_subprograms(&prog);
+        Program {
+            ops:           deduped.ops.clone(),
+            source:        prog.source,
+            id:            prog.id,
+            is_structural: prog.is_structural,
+        }
+    }
+
+    /// AST rewrite: for each `a and b`, if `b` is more selective than `a`,
+    /// swap operands so the cheaper/selective predicate runs first.  Safe
+    /// because `and` is commutative on pure, side-effect-free expressions.
+    fn reorder_and_operands(expr: &mut Expr) {
+        use super::analysis::selectivity_score;
+        match expr {
+            Expr::BinOp(l, op, r) if *op == BinOp::And => {
+                Self::reorder_and_operands(l);
+                Self::reorder_and_operands(r);
+                if selectivity_score(r) < selectivity_score(l) {
+                    std::mem::swap(l, r);
+                }
+            }
+            Expr::BinOp(l, _, r) => {
+                Self::reorder_and_operands(l);
+                Self::reorder_and_operands(r);
+            }
+            Expr::UnaryNeg(e) | Expr::Not(e) | Expr::Kind { expr: e, .. } =>
+                Self::reorder_and_operands(e),
+            Expr::Coalesce(l, r) => {
+                Self::reorder_and_operands(l);
+                Self::reorder_and_operands(r);
+            }
+            Expr::Chain(base, steps) => {
+                Self::reorder_and_operands(base);
+                for s in steps {
+                    match s {
+                        super::ast::Step::DynIndex(e) | super::ast::Step::InlineFilter(e) =>
+                            Self::reorder_and_operands(e),
+                        super::ast::Step::Method(_, args) | super::ast::Step::OptMethod(_, args) =>
+                            for a in args { match a {
+                                super::ast::Arg::Pos(e) | super::ast::Arg::Named(_, e) =>
+                                    Self::reorder_and_operands(e),
+                            } },
+                        _ => {}
+                    }
+                }
+            }
+            Expr::Let { init, body, .. } => {
+                Self::reorder_and_operands(init);
+                Self::reorder_and_operands(body);
+            }
+            Expr::Pipeline { base, steps } => {
+                Self::reorder_and_operands(base);
+                for s in steps {
+                    if let super::ast::PipeStep::Forward(e) = s {
+                        Self::reorder_and_operands(e);
+                    }
+                }
+            }
+            Expr::Object(fields) => for f in fields { match f {
+                super::ast::ObjField::Kv { val, .. } => Self::reorder_and_operands(val),
+                super::ast::ObjField::Dynamic { key, val } => {
+                    Self::reorder_and_operands(key);
+                    Self::reorder_and_operands(val);
+                }
+                super::ast::ObjField::Spread(e) => Self::reorder_and_operands(e),
+                _ => {}
+            } },
+            Expr::Array(elems) => for e in elems { match e {
+                super::ast::ArrayElem::Expr(e) | super::ast::ArrayElem::Spread(e) =>
+                    Self::reorder_and_operands(e),
+            } },
+            Expr::ListComp { expr, iter, cond, .. }
+            | Expr::SetComp  { expr, iter, cond, .. }
+            | Expr::GenComp  { expr, iter, cond, .. } => {
+                Self::reorder_and_operands(expr);
+                Self::reorder_and_operands(iter);
+                if let Some(c) = cond { Self::reorder_and_operands(c); }
+            }
+            Expr::DictComp { key, val, iter, cond, .. } => {
+                Self::reorder_and_operands(key);
+                Self::reorder_and_operands(val);
+                Self::reorder_and_operands(iter);
+                if let Some(c) = cond { Self::reorder_and_operands(c); }
+            }
+            Expr::Lambda { body, .. } => Self::reorder_and_operands(body),
+            Expr::GlobalCall { args, .. } => for a in args { match a {
+                super::ast::Arg::Pos(e) | super::ast::Arg::Named(_, e) =>
+                    Self::reorder_and_operands(e),
+            } },
+            _ => {}
+        }
     }
 
     pub fn compile_str(input: &str) -> Result<Program, EvalError> {
@@ -454,19 +565,93 @@ impl Compiler {
         Ok(Self::compile(&expr, input))
     }
 
+    /// Compile with explicit pass configuration.  Cached by callers
+    /// under `(config.hash(), expr)`.
+    pub fn compile_str_with_config(input: &str, config: PassConfig) -> Result<Program, EvalError> {
+        let expr = super::parser::parse(input)
+            .map_err(|e| EvalError(e.to_string()))?;
+        let mut e = expr.clone();
+        if config.reorder_and { Self::reorder_and_operands(&mut e); }
+        let ctx = VarCtx::default();
+        let ops = Self::optimize_with(Self::emit(&e, &ctx), config);
+        let prog = Program::new(ops, input);
+        if config.dedup_subprogs {
+            let deduped = super::analysis::dedup_subprograms(&prog);
+            Ok(Program {
+                ops:           deduped.ops.clone(),
+                source:        prog.source,
+                id:            prog.id,
+                is_structural: prog.is_structural,
+            })
+        } else {
+            Ok(prog)
+        }
+    }
+
     // ── Peephole optimizer ────────────────────────────────────────────────────
 
     fn optimize(ops: Vec<Opcode>) -> Vec<Opcode> {
-        let ops = Self::pass_root_chain(ops);
-        let ops = Self::pass_filter_count(ops);
-        let ops = Self::pass_filter_fusion(ops);
-        let ops = Self::pass_find_quantifier(ops);
-        let ops = Self::pass_strength_reduce(ops);
-        let ops = Self::pass_redundant_ops(ops);
-        let ops = Self::pass_kind_check_fold(ops);
-        let ops = Self::pass_method_const_fold(ops);
-        let ops = Self::pass_const_fold(ops);
+        Self::optimize_with(ops, PassConfig::default())
+    }
+
+    fn optimize_with(ops: Vec<Opcode>, cfg: PassConfig) -> Vec<Opcode> {
+        let ops = if cfg.root_chain      { Self::pass_root_chain(ops) }      else { ops };
+        let ops = if cfg.filter_count    { Self::pass_filter_count(ops) }    else { ops };
+        let ops = if cfg.filter_fusion   { Self::pass_filter_fusion(ops) }   else { ops };
+        let ops = if cfg.find_quantifier { Self::pass_find_quantifier(ops) } else { ops };
+        let ops = if cfg.strength_reduce { Self::pass_strength_reduce(ops) } else { ops };
+        let ops = if cfg.redundant_ops   { Self::pass_redundant_ops(ops) }   else { ops };
+        let ops = if cfg.kind_check_fold { Self::pass_kind_check_fold(ops) } else { ops };
+        let ops = if cfg.method_const    { Self::pass_method_const_fold(ops)} else { ops };
+        let ops = if cfg.const_fold      { Self::pass_const_fold(ops) }      else { ops };
+        let ops = if cfg.nullness        { Self::pass_nullness_opt_field(ops)} else { ops };
+        let ops = if cfg.equi_join       { Self::pass_equi_join_fusion(ops) } else { ops };
         ops
+    }
+
+    /// Rewrite `CallMethod(equi_join, [rhs, PushStr(lk), PushStr(rk)])`
+    /// to the fused `EquiJoin` opcode — removes runtime method dispatch
+    /// and extracts string keys into the opcode so the executor can
+    /// hash directly.
+    fn pass_equi_join_fusion(ops: Vec<Opcode>) -> Vec<Opcode> {
+        let mut out: Vec<Opcode> = Vec::with_capacity(ops.len());
+        for op in ops {
+            if let Opcode::CallMethod(c) = &op {
+                if c.method == BuiltinMethod::EquiJoin && c.sub_progs.len() == 3 {
+                    let rhs = Arc::clone(&c.sub_progs[0]);
+                    let lhs_key = const_str_program(&c.sub_progs[1]);
+                    let rhs_key = const_str_program(&c.sub_progs[2]);
+                    if let (Some(lk), Some(rk)) = (lhs_key, rhs_key) {
+                        out.push(Opcode::EquiJoin { rhs, lhs_key: lk, rhs_key: rk });
+                        continue;
+                    }
+                }
+            }
+            out.push(op);
+        }
+        out
+    }
+
+    /// Nullness-driven: when the preceding op provably leaves a non-null
+    /// receiver on the stack, rewrite `OptField(k)` → `GetField(k)`.
+    /// Conservative: only folds when the predecessor is a construction
+    /// opcode (MakeObj / MakeArr / PushStr / RootChain / GetField).
+    fn pass_nullness_opt_field(ops: Vec<Opcode>) -> Vec<Opcode> {
+        let mut out: Vec<Opcode> = Vec::with_capacity(ops.len());
+        for op in ops {
+            if let Opcode::OptField(k) = &op {
+                // Only safe when receiver is provably a non-null object —
+                // MakeObj is the only opcode that guarantees this without
+                // a schema.  Other cases are handled by schema::specialize.
+                let non_null = matches!(out.last(), Some(Opcode::MakeObj(_)));
+                if non_null {
+                    out.push(Opcode::GetField(k.clone()));
+                    continue;
+                }
+            }
+            out.push(op);
+        }
+        out
     }
 
     /// Fold built-in methods when receiver is a literal with known length/content:
@@ -582,13 +767,14 @@ impl Compiler {
                         continue;
                     }
                 }
-                // map(f) + sum()/avg()  →  MapSum/MapAvg  (aggregator has no sub_progs)
+                // map(f) + sum()/avg()/flatten()
                 if a.method == BuiltinMethod::Map && a.sub_progs.len() >= 1
                    && b.sub_progs.is_empty() {
                     let f = Arc::clone(&a.sub_progs[0]);
                     let fused = match b.method {
                         BuiltinMethod::Sum => Some(Opcode::MapSum(f)),
                         BuiltinMethod::Avg => Some(Opcode::MapAvg(f)),
+                        BuiltinMethod::Flatten => Some(Opcode::MapFlatten(f)),
                         _ => None,
                     };
                     if let Some(o) = fused {
@@ -596,6 +782,32 @@ impl Compiler {
                         out.push(o);
                         continue;
                     }
+                }
+                // filter(p) + take_while(q) → FilterTakeWhile
+                if a.method == BuiltinMethod::Filter && a.sub_progs.len() >= 1
+                   && b.method == BuiltinMethod::TakeWhile && b.sub_progs.len() >= 1 {
+                    let pred = Arc::clone(&a.sub_progs[0]);
+                    let stop = Arc::clone(&b.sub_progs[0]);
+                    out.pop();
+                    out.push(Opcode::FilterTakeWhile { pred, stop });
+                    continue;
+                }
+                // filter(p) + drop_while(q) → FilterDropWhile
+                if a.method == BuiltinMethod::Filter && a.sub_progs.len() >= 1
+                   && b.method == BuiltinMethod::DropWhile && b.sub_progs.len() >= 1 {
+                    let pred = Arc::clone(&a.sub_progs[0]);
+                    let drop = Arc::clone(&b.sub_progs[0]);
+                    out.pop();
+                    out.push(Opcode::FilterDropWhile { pred, drop });
+                    continue;
+                }
+                // map(f) + unique() → MapUnique
+                if a.method == BuiltinMethod::Map && a.sub_progs.len() >= 1
+                   && b.method == BuiltinMethod::Unique && b.sub_progs.is_empty() {
+                    let f = Arc::clone(&a.sub_progs[0]);
+                    out.pop();
+                    out.push(Opcode::MapUnique(f));
+                    continue;
                 }
             }
             out.push(op);
@@ -1313,13 +1525,78 @@ impl PathCache {
 ///   enabling prefix reuse without re-traversal.
 ///
 /// One VM per thread; wrap in `Mutex` for shared use.
+/// Toggle each optimiser pass independently.  Default enables every
+/// pass.  Disabling a pass invalidates the compile cache for the next
+/// compilation by changing `hash()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PassConfig {
+    pub root_chain:      bool,
+    pub filter_count:    bool,
+    pub filter_fusion:   bool,
+    pub find_quantifier: bool,
+    pub strength_reduce: bool,
+    pub redundant_ops:   bool,
+    pub kind_check_fold: bool,
+    pub method_const:    bool,
+    pub const_fold:      bool,
+    pub nullness:        bool,
+    pub equi_join:       bool,
+    pub reorder_and:     bool,
+    pub dedup_subprogs:  bool,
+}
+
+impl Default for PassConfig {
+    fn default() -> Self {
+        Self {
+            root_chain: true, filter_count: true, filter_fusion: true,
+            find_quantifier: true, strength_reduce: true, redundant_ops: true,
+            kind_check_fold: true, method_const: true, const_fold: true,
+            nullness: true, equi_join: true,
+            reorder_and: true, dedup_subprogs: true,
+        }
+    }
+}
+
+impl PassConfig {
+    /// Disable every pass — emit raw opcodes.
+    pub fn none() -> Self {
+        Self {
+            root_chain: false, filter_count: false, filter_fusion: false,
+            find_quantifier: false, strength_reduce: false, redundant_ops: false,
+            kind_check_fold: false, method_const: false, const_fold: false,
+            nullness: false, equi_join: false,
+            reorder_and: false, dedup_subprogs: false,
+        }
+    }
+
+    pub fn hash(&self) -> u64 {
+        let mut bits: u64 = 0;
+        for (i, b) in [self.root_chain, self.filter_count, self.filter_fusion,
+                       self.find_quantifier, self.strength_reduce, self.redundant_ops,
+                       self.kind_check_fold, self.method_const, self.const_fold,
+                       self.nullness, self.equi_join,
+                       self.reorder_and, self.dedup_subprogs].iter().enumerate() {
+            if *b { bits |= 1u64 << i; }
+        }
+        bits
+    }
+}
+
 pub struct VM {
     registry:      Arc<MethodRegistry>,
-    compile_cache: HashMap<String, Arc<Program>>,
+    /// Cache key = (pass_config_hash, expr_string).  Changing `config`
+    /// invalidates prior entries automatically via key divergence.
+    compile_cache: HashMap<(u64, String), Arc<Program>>,
+    /// LRU ordering for `compile_cache`; front = least recently used.
+    /// Entries are moved to back on hit; oldest evicted when over cap.
+    compile_lru:   std::collections::VecDeque<(u64, String)>,
+    compile_cap:   usize,
     path_cache:    PathCache,
     /// Hash of the document currently being executed — set once by `execute()`,
     /// reused by all recursive `exec()` calls within the same top-level call.
     doc_hash:      u64,
+    /// Optimiser pass toggles.  Default: all on.
+    config:        PassConfig,
 }
 
 impl Default for VM {
@@ -1333,10 +1610,20 @@ impl VM {
         Self {
             registry:      Arc::new(MethodRegistry::new()),
             compile_cache: HashMap::with_capacity(compile_cap),
+            compile_lru:   std::collections::VecDeque::with_capacity(compile_cap),
+            compile_cap,
             path_cache:    PathCache::new(path_cap),
             doc_hash:      0,
+            config:        PassConfig::default(),
         }
     }
+
+    /// Replace the pass configuration.  The compile cache is not purged,
+    /// but future lookups key off the new config hash so old entries
+    /// are effectively invalidated for the new regime.
+    pub fn set_pass_config(&mut self, config: PassConfig) { self.config = config; }
+
+    pub fn pass_config(&self) -> PassConfig { self.config }
 
     /// Register a custom method (callable via `.method_name(...)` in expressions).
     pub fn register(&mut self, name: impl Into<String>, method: impl super::eval::methods::Method + 'static) {
@@ -1361,15 +1648,66 @@ impl VM {
         Ok(result.into())
     }
 
+    /// Execute a compiled program against a document, first specialising
+    /// against the given shape (turns `OptField` → `GetField` where safe,
+    /// folds `KindCheck` where type is known, etc.).
+    pub fn execute_with_schema(
+        &mut self,
+        program: &Program,
+        doc: &serde_json::Value,
+        shape: &super::schema::Shape,
+    ) -> Result<serde_json::Value, EvalError> {
+        let specialized = super::schema::specialize(program, shape);
+        self.execute(&specialized, doc)
+    }
+
+    /// Execute a program; infer the shape from the document itself.  Costs
+    /// an O(doc) shape walk before execution; useful when the same
+    /// compiled program is reused across many docs with similar shapes.
+    pub fn execute_with_inferred_schema(
+        &mut self,
+        program: &Program,
+        doc: &serde_json::Value,
+    ) -> Result<serde_json::Value, EvalError> {
+        let shape = super::schema::Shape::of(doc);
+        self.execute_with_schema(program, doc, &shape)
+    }
+
     /// Get or compile an expression string (compile cache).
+    /// Cache key is (pass_config_hash, expr) so that different pass
+    /// configurations yield different compiled programs.
     pub fn get_or_compile(&mut self, expr: &str) -> Result<Arc<Program>, EvalError> {
-        if let Some(p) = self.compile_cache.get(expr) {
-            return Ok(Arc::clone(p));
+        let key = (self.config.hash(), expr.to_string());
+        if let Some(p) = self.compile_cache.get(&key) {
+            let arc = Arc::clone(p);
+            self.touch_lru(&key);
+            return Ok(arc);
         }
-        let prog = Compiler::compile_str(expr)?;
+        let prog = Compiler::compile_str_with_config(expr, self.config)?;
         let arc = Arc::new(prog);
-        self.compile_cache.insert(expr.to_string(), Arc::clone(&arc));
+        self.insert_compile(key, Arc::clone(&arc));
         Ok(arc)
+    }
+
+    /// Move `key` to the back of the LRU queue (most recently used).
+    fn touch_lru(&mut self, key: &(u64, String)) {
+        if let Some(pos) = self.compile_lru.iter().position(|k| k == key) {
+            let k = self.compile_lru.remove(pos).unwrap();
+            self.compile_lru.push_back(k);
+        }
+    }
+
+    /// Insert into compile cache with LRU eviction at `compile_cap`.
+    fn insert_compile(&mut self, key: (u64, String), prog: Arc<Program>) {
+        while self.compile_cache.len() >= self.compile_cap && self.compile_cap > 0 {
+            if let Some(old) = self.compile_lru.pop_front() {
+                self.compile_cache.remove(&old);
+            } else {
+                break;
+            }
+        }
+        self.compile_lru.push_back(key.clone());
+        self.compile_cache.insert(key, prog);
     }
 
     /// Cache statistics: `(compile_entries, path_entries)`.
@@ -1530,9 +1868,12 @@ impl VM {
                     let recv = pop!(stack);
                     let n = if let Val::Arr(a) = &recv {
                         let mut count = 0u64;
+                        let mut scratch = env.clone();
                         for item in a.iter() {
-                            let sub_env = env.with_current(item.clone());
-                            if is_truthy(&self.exec(pred, &sub_env)?) { count += 1; }
+                            let prev = scratch.swap_current(item.clone());
+                            let t = is_truthy(&self.exec(pred, &scratch)?);
+                            scratch.restore_current(prev);
+                            if t { count += 1; }
                         }
                         count
                     } else { 0 };
@@ -1542,12 +1883,12 @@ impl VM {
                     let recv = pop!(stack);
                     let mut found = Val::Null;
                     if let Val::Arr(a) = &recv {
+                        let mut scratch = env.clone();
                         for item in a.iter() {
-                            let sub_env = env.with_current(item.clone());
-                            if is_truthy(&self.exec(pred, &sub_env)?) {
-                                found = item.clone();
-                                break;
-                            }
+                            let prev = scratch.swap_current(item.clone());
+                            let t = is_truthy(&self.exec(pred, &scratch)?);
+                            scratch.restore_current(prev);
+                            if t { found = item.clone(); break; }
                         }
                     } else if !recv.is_null() {
                         let sub_env = env.with_current(recv.clone());
@@ -1557,34 +1898,37 @@ impl VM {
                 }
                 Opcode::FilterMap { pred, map } => {
                     let recv = pop!(stack);
-                    let items = match recv {
-                        Val::Arr(a) => Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone()),
-                        _ => Vec::new(),
-                    };
-                    let mut out = Vec::with_capacity(items.len());
-                    for item in items {
-                        let sub_env = env.with_current(item);
-                        if is_truthy(&self.exec(pred, &sub_env)?) {
-                            out.push(self.exec(map, &sub_env)?);
+                    if let Val::Arr(a) = recv {
+                        let mut out = Vec::with_capacity(a.len());
+                        let mut scratch = env.clone();
+                        for item in a.iter() {
+                            let prev = scratch.swap_current(item.clone());
+                            if is_truthy(&self.exec(pred, &scratch)?) {
+                                out.push(self.exec(map, &scratch)?);
+                            }
+                            scratch.restore_current(prev);
                         }
+                        stack.push(Val::arr(out));
+                    } else {
+                        stack.push(Val::arr(Vec::new()));
                     }
-                    stack.push(Val::arr(out));
                 }
                 Opcode::FilterFilter { p1, p2 } => {
                     let recv = pop!(stack);
-                    let items = match recv {
-                        Val::Arr(a) => Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone()),
-                        _ => Vec::new(),
-                    };
-                    let mut out = Vec::with_capacity(items.len());
-                    for item in items {
-                        let sub_env = env.with_current(item.clone());
-                        if is_truthy(&self.exec(p1, &sub_env)?)
-                           && is_truthy(&self.exec(p2, &sub_env)?) {
-                            out.push(item);
+                    if let Val::Arr(a) = recv {
+                        let mut out = Vec::with_capacity(a.len());
+                        let mut scratch = env.clone();
+                        for item in a.iter() {
+                            let prev = scratch.swap_current(item.clone());
+                            let keep = is_truthy(&self.exec(p1, &scratch)?)
+                                    && is_truthy(&self.exec(p2, &scratch)?);
+                            scratch.restore_current(prev);
+                            if keep { out.push(item.clone()); }
                         }
+                        stack.push(Val::arr(out));
+                    } else {
+                        stack.push(Val::arr(Vec::new()));
                     }
-                    stack.push(Val::arr(out));
                 }
                 Opcode::MapSum(f) => {
                     let recv = pop!(stack);
@@ -1592,9 +1936,11 @@ impl VM {
                     let mut acc_f: f64 = 0.0;
                     let mut is_float = false;
                     if let Val::Arr(a) = &recv {
+                        let mut scratch = env.clone();
                         for item in a.iter() {
-                            let sub_env = env.with_current(item.clone());
-                            let v = self.exec(f, &sub_env)?;
+                            let prev = scratch.swap_current(item.clone());
+                            let v = self.exec(f, &scratch)?;
+                            scratch.restore_current(prev);
                             match v {
                                 Val::Int(n) => {
                                     if is_float { acc_f += n as f64; } else { acc_i += n; }
@@ -1615,9 +1961,11 @@ impl VM {
                     let mut sum: f64 = 0.0;
                     let mut n: usize = 0;
                     if let Val::Arr(a) = &recv {
+                        let mut scratch = env.clone();
                         for item in a.iter() {
-                            let sub_env = env.with_current(item.clone());
-                            let v = self.exec(f, &sub_env)?;
+                            let prev = scratch.swap_current(item.clone());
+                            let v = self.exec(f, &scratch)?;
+                            scratch.restore_current(prev);
                             match v {
                                 Val::Int(x)   => { sum += x as f64; n += 1; }
                                 Val::Float(x) => { sum += x;        n += 1; }
@@ -1627,6 +1975,120 @@ impl VM {
                         }
                     }
                     stack.push(if n == 0 { Val::Null } else { Val::Float(sum / n as f64) });
+                }
+                Opcode::MapFlatten(f) => {
+                    let recv = pop!(stack);
+                    let items = match recv {
+                        Val::Arr(a) => Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone()),
+                        _ => Vec::new(),
+                    };
+                    let mut out = Vec::new();
+                    for item in items {
+                        let sub_env = env.with_current(item);
+                        let mapped = self.exec(f, &sub_env)?;
+                        match mapped {
+                            Val::Arr(a) => {
+                                let v = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
+                                out.extend(v);
+                            }
+                            other => out.push(other),
+                        }
+                    }
+                    stack.push(Val::arr(out));
+                }
+                Opcode::FilterTakeWhile { pred, stop } => {
+                    let recv = pop!(stack);
+                    let items = match recv {
+                        Val::Arr(a) => Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone()),
+                        _ => Vec::new(),
+                    };
+                    let mut out = Vec::new();
+                    for item in items {
+                        let sub_env = env.with_current(item.clone());
+                        if !is_truthy(&self.exec(pred, &sub_env)?) { continue; }
+                        if !is_truthy(&self.exec(stop, &sub_env)?) { break; }
+                        out.push(item);
+                    }
+                    stack.push(Val::arr(out));
+                }
+                Opcode::FilterDropWhile { pred, drop } => {
+                    let recv = pop!(stack);
+                    let items = match recv {
+                        Val::Arr(a) => Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone()),
+                        _ => Vec::new(),
+                    };
+                    let mut out = Vec::new();
+                    let mut dropping = true;
+                    for item in items {
+                        let sub_env = env.with_current(item.clone());
+                        if !is_truthy(&self.exec(pred, &sub_env)?) { continue; }
+                        if dropping {
+                            if is_truthy(&self.exec(drop, &sub_env)?) { continue; }
+                            dropping = false;
+                        }
+                        out.push(item);
+                    }
+                    stack.push(Val::arr(out));
+                }
+                Opcode::EquiJoin { rhs, lhs_key, rhs_key } => {
+                    use std::collections::HashMap;
+                    let left_val = pop!(stack);
+                    let right_val = self.exec(rhs, env)?;
+                    let left = match left_val {
+                        Val::Arr(a) => Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone()),
+                        _ => Vec::new(),
+                    };
+                    let right = match right_val {
+                        Val::Arr(a) => Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone()),
+                        _ => Vec::new(),
+                    };
+                    let mut idx: HashMap<String, Vec<Val>> = HashMap::new();
+                    for r in right {
+                        let key = match &r {
+                            Val::Obj(o) => o.get(rhs_key.as_ref()).map(super::eval::util::val_to_key),
+                            _ => None,
+                        };
+                        if let Some(k) = key { idx.entry(k).or_default().push(r); }
+                    }
+                    let mut out = Vec::new();
+                    for l in left {
+                        let key = match &l {
+                            Val::Obj(o) => o.get(lhs_key.as_ref()).map(super::eval::util::val_to_key),
+                            _ => None,
+                        };
+                        let Some(k) = key else { continue };
+                        let Some(matches) = idx.get(&k) else { continue };
+                        for r in matches {
+                            match (&l, r) {
+                                (Val::Obj(lo), Val::Obj(ro)) => {
+                                    let mut m = (**lo).clone();
+                                    for (k, v) in ro.iter() { m.insert(k.clone(), v.clone()); }
+                                    out.push(Val::obj(m));
+                                }
+                                _ => out.push(l.clone()),
+                            }
+                        }
+                    }
+                    stack.push(Val::arr(out));
+                }
+                Opcode::MapUnique(f) => {
+                    let recv = pop!(stack);
+                    let items = match recv {
+                        Val::Arr(a) => Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone()),
+                        _ => Vec::new(),
+                    };
+                    let mut seen: Vec<Val> = Vec::new();
+                    let mut out = Vec::new();
+                    for item in items {
+                        let sub_env = env.with_current(item);
+                        let mapped = self.exec(f, &sub_env)?;
+                        if !seen.iter().any(|s| super::eval::util::cmp_vals(s, &mapped)
+                                                 == std::cmp::Ordering::Equal) {
+                            seen.push(mapped.clone());
+                            out.push(mapped);
+                        }
+                    }
+                    stack.push(Val::arr(out));
                 }
                 Opcode::TopN { n, asc } => {
                     use std::collections::BinaryHeap;
@@ -1675,18 +2137,21 @@ impl VM {
                 }
                 Opcode::MapMap { f1, f2 } => {
                     let recv = pop!(stack);
-                    let items = match recv {
-                        Val::Arr(a) => Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone()),
-                        _ => Vec::new(),
-                    };
-                    let mut out = Vec::with_capacity(items.len());
-                    for item in items {
-                        let e1 = env.with_current(item);
-                        let mid = self.exec(f1, &e1)?;
-                        let e2 = env.with_current(mid);
-                        out.push(self.exec(f2, &e2)?);
+                    if let Val::Arr(a) = recv {
+                        let mut out = Vec::with_capacity(a.len());
+                        let mut scratch = env.clone();
+                        for item in a.iter() {
+                            let prev = scratch.swap_current(item.clone());
+                            let mid = self.exec(f1, &scratch)?;
+                            scratch.swap_current(mid);
+                            let res = self.exec(f2, &scratch)?;
+                            scratch.restore_current(prev);
+                            out.push(res);
+                        }
+                        stack.push(Val::arr(out));
+                    } else {
+                        stack.push(Val::arr(Vec::new()));
                     }
-                    stack.push(Val::arr(out));
                 }
                 Opcode::FindOne(pred) => {
                     let recv = pop!(stack);
@@ -2451,6 +2916,14 @@ impl PartialOrd for WrapVal { fn partial_cmp(&self, o: &Self) -> Option<std::cmp
 impl Ord for WrapVal { fn cmp(&self, o: &Self) -> std::cmp::Ordering {
     super::eval::util::cmp_vals(&self.0, &o.0)
 } }
+
+/// Extract a literal string from a single-op program `[PushStr(s)]`.
+fn const_str_program(p: &Arc<Program>) -> Option<Arc<str>> {
+    match p.ops.as_ref() {
+        [Opcode::PushStr(s)] => Some(s.clone()),
+        _ => None,
+    }
+}
 
 fn make_noarg_call(method: BuiltinMethod, name: &str) -> Opcode {
     Opcode::CallMethod(Arc::new(CompiledCall {

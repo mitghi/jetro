@@ -1,3 +1,12 @@
+//! String methods: case conversion, trim/pad, split/join,
+//! slicing, search, URL / HTML / base64 encoding, templating.
+//!
+//! All operate on UTF-8 `Arc<str>`.  Indices are char-based, not
+//! byte-based — `"á".chars().count() == 1` even though the byte
+//! length is 2.  Slice/pad arithmetic therefore goes via
+//! `str::chars()` rather than raw byte ranges, which is slower but
+//! matches user expectations for JSON data.
+
 use std::sync::Arc;
 use crate::v2::ast::Arg;
 use super::{Env, EvalError, eval_pos, first_i64_arg, str_arg};

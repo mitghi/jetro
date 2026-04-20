@@ -27,9 +27,22 @@ pub struct SsaInstr {
     pub uses: Vec<ValueId>,
 }
 
+/// A phi node: at a merge point, value takes one of several incoming
+/// values depending on which predecessor path was taken.
+#[derive(Debug, Clone)]
+pub struct Phi {
+    pub id:       ValueId,
+    /// Incoming (predecessor label, value) pairs.
+    pub incoming: Vec<(PhiEdge, ValueId)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PhiEdge { AndLhs, AndRhs, OrLhs, OrRhs, CoalesceLhs, CoalesceRhs }
+
 #[derive(Debug, Clone, Default)]
 pub struct SsaGraph {
     pub instrs: Vec<SsaInstr>,
+    pub phis:   Vec<Phi>,
     /// Last pushed value id — the program's result.
     pub result: Option<ValueId>,
 }
@@ -45,6 +58,24 @@ impl SsaGraph {
                 if let Some(v) = stack.pop() { uses.push(v); }
             }
             let id = ValueId(g.instrs.len() as u32);
+            // Synthesise phi at short-circuit / coalesce merge points.
+            // At an AndOp, the lhs is on the stack; rhs sub-program produces
+            // a new value conditionally.  Result is a phi(lhs, rhs).
+            let phi_edge = match op {
+                Opcode::AndOp(_)      => Some((PhiEdge::AndLhs, PhiEdge::AndRhs)),
+                Opcode::OrOp(_)       => Some((PhiEdge::OrLhs, PhiEdge::OrRhs)),
+                Opcode::CoalesceOp(_) => Some((PhiEdge::CoalesceLhs, PhiEdge::CoalesceRhs)),
+                _ => None,
+            };
+            if let Some((lhs_edge, rhs_edge)) = phi_edge {
+                // uses[0] is the lhs consumed; the "rhs" value is synthetic — we
+                // model it as the instruction's own id (sub-program result).
+                let lhs = uses.first().copied().unwrap_or(id);
+                g.phis.push(Phi {
+                    id,
+                    incoming: vec![(lhs_edge, lhs), (rhs_edge, id)],
+                });
+            }
             g.instrs.push(SsaInstr { id, op: op.clone(), uses });
             if arity.pushes { stack.push(id); }
         }
@@ -97,6 +128,9 @@ fn op_arity(op: &Opcode) -> Arity {
             | Opcode::FindFirst(_) | Opcode::FindOne(_)
             | Opcode::FilterMap { .. } | Opcode::FilterFilter { .. }
             | Opcode::MapMap { .. } | Opcode::MapSum(_) | Opcode::MapAvg(_)
+            | Opcode::MapFlatten(_) | Opcode::FilterTakeWhile { .. }
+            | Opcode::FilterDropWhile { .. } | Opcode::MapUnique(_)
+            | Opcode::EquiJoin { .. }
             | Opcode::TopN { .. } | Opcode::KindCheck { .. }
             | Opcode::Not | Opcode::Neg
             | Opcode::CallMethod(_) | Opcode::CallOptMethod(_)
