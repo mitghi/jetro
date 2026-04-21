@@ -507,7 +507,7 @@ fn collect_fields_in_ops(ops: &[Opcode], acc: &mut Vec<Arc<str>>) {
 /// initialisers or parallel `->` binds.
 pub fn program_signature(program: &Program) -> u64 {
     use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hasher, Hash};
+    use std::hash::Hasher;
     let mut h = DefaultHasher::new();
     hash_ops(&program.ops, &mut h);
     h.finish()

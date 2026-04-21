@@ -435,7 +435,7 @@ mod tests {
     #[test]
     fn optional_field_omitted() {
         let doc = json!({"user": {"name": "Alice"}});
-        let r = query("$.user.map({name, email?})", &doc);
+        let _r = query("$.user.map({name, email?})", &doc);
         // map on non-array returns error, but test optional field in object directly
         let r2 = query("{name: $.user.name, email?: $.user.email}", &doc).unwrap();
         assert!(r2.get("email").is_none());

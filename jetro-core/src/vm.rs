@@ -50,8 +50,7 @@ use super::eval::{
 };
 use super::eval::util::{
     is_truthy, kind_matches, vals_eq, cmp_vals, val_to_key, val_to_string,
-    add_vals, num_op, val_key, flatten_val, zip_arrays, cartesian, deep_merge,
-    field_exists_nested, obj2,
+    add_vals, num_op, obj2,
 };
 use super::eval::methods::MethodRegistry;
 
@@ -1198,7 +1197,7 @@ impl Compiler {
             Expr::Array(elems) => {
                 // Compile each elem as a sub-program.
                 // Spread elems are handled by a special marker.
-                let progs: Vec<Arc<Program>> = elems.iter().map(|e| match e {
+                let _progs: Vec<Arc<Program>> = elems.iter().map(|e| match e {
                     ArrayElem::Expr(ex)   => Arc::new(Self::compile_sub(ex, ctx)),
                     // Spread: compile the inner expr with a spread marker opcode
                     ArrayElem::Spread(ex) => {
@@ -2466,7 +2465,7 @@ impl VM {
             Expr::Ident(name) if !ctx.has(name) => {
                 dispatch_method(left.clone(), name, &[], env)
             }
-            Expr::Chain(base, steps) => {
+            Expr::Chain(base, _steps) => {
                 if let Expr::Ident(name) = base.as_ref() {
                     if !ctx.has(name) {
                         let prog = Compiler::compile_sub(rhs, ctx);

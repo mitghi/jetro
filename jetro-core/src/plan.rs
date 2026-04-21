@@ -342,7 +342,7 @@ fn detect_eq_join(pred: &Arc<Program>) -> Option<JoinCandidate> {
     if !matches!(last, Opcode::Eq) { return None; }
     // Split ops by finding the second LoadIdent (crude): two independent
     // chains, both starting with a LoadIdent.
-    let mut ident_positions: Vec<usize> = ops.iter().enumerate()
+    let ident_positions: Vec<usize> = ops.iter().enumerate()
         .filter(|(_, o)| matches!(o, Opcode::LoadIdent(_)))
         .map(|(i, _)| i).collect();
     if ident_positions.len() != 2 { return None; }

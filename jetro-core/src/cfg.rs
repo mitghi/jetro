@@ -372,7 +372,7 @@ impl Cfg {
         }
         // Interference: a,b interfere if both in some live_in/live_out.
         let mut interf: HashMap<Arc<str>, HashSet<Arc<str>>> = HashMap::new();
-        let mut add_edge = |a: &Arc<str>, b: &Arc<str>, m: &mut HashMap<Arc<str>, HashSet<Arc<str>>>| {
+        let add_edge = |a: &Arc<str>, b: &Arc<str>, m: &mut HashMap<Arc<str>, HashSet<Arc<str>>>| {
             if a != b {
                 m.entry(a.clone()).or_default().insert(b.clone());
                 m.entry(b.clone()).or_default().insert(a.clone());
