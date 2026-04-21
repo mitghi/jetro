@@ -2,7 +2,7 @@
 
 [<img src="https://img.shields.io/badge/docs-jetro-blue"></img>](https://docs.rs/jetro)
 
-Jetro is a library for querying, transforming, and comparing JSON. It provides a compact expression language, a bytecode VM with caching, and a thread-local document handle for zero-ceremony evaluation.
+Jetro is a library for querying, transforming, and comparing JSON. It provides a compact expression language, a bytecode VM with caching.
 
 Jetro has minimal dependencies and operates on top of [serde_json](https://serde.rs).
 
