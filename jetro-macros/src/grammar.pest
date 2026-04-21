@@ -1,0 +1,195 @@
+// Jetro v2 grammar
+
+WHITESPACE = _{ " " | "\t" | "\n" | "\r" }
+
+// ── Character classes ─────────────────────────────────────────────────────────
+ident_char = _{ ASCII_ALPHANUMERIC | "_" }
+field_char = _{ ASCII_ALPHANUMERIC | "_" | "-" }
+
+// ── Atomic keyword rules ──────────────────────────────────────────────────────
+kw_and    = @{ "and"    ~ !ident_char }
+kw_or     = @{ "or"     ~ !ident_char }
+kw_not    = @{ "not"    ~ !ident_char }
+kw_for    = @{ "for"    ~ !ident_char }
+kw_in     = @{ "in"     ~ !ident_char }
+kw_if     = @{ "if"     ~ !ident_char }
+kw_let    = @{ "let"    ~ !ident_char }
+kw_lambda = @{ "lambda" ~ !ident_char }
+kw_kind   = @{ "kind"   ~ !ident_char }
+kw_is     = @{ "is"     ~ !ident_char }
+kw_as     = @{ "as"     ~ !ident_char }
+kw_when   = @{ "when"   ~ !ident_char }
+kw_patch  = @{ "patch"  ~ !ident_char }
+kw_delete = @{ "DELETE" ~ !ident_char }
+
+reserved = _{
+    ("true" | "false" | "null" | "and" | "or" | "not"
+     | "for" | "in" | "if" | "let" | "lambda" | "kind"
+     | "is" | "as" | "when" | "patch" | "DELETE") ~ !ident_char
+}
+
+ident      = @{ !reserved ~ (ASCII_ALPHA | "_") ~ ident_char* }
+field_name = @{ (ASCII_ALPHA | "_") ~ field_char* }
+
+// ── Literals ──────────────────────────────────────────────────────────────────
+lit_null      = @{ "null"  ~ !ident_char }
+lit_true      = @{ "true"  ~ !ident_char }
+lit_false     = @{ "false" ~ !ident_char }
+lit_float     = @{ ASCII_DIGIT+ ~ "." ~ ASCII_DIGIT+ }
+lit_int       = @{ ASCII_DIGIT+ }
+lit_str_dq    = @{ "\"" ~ (!"\"" ~ ANY)* ~ "\"" }
+lit_str_sq    = @{ "'"  ~ (!"'"  ~ ANY)* ~ "'" }
+lit_str       = { lit_str_dq | lit_str_sq }
+// f-strings captured raw; inner expressions parsed in Rust
+lit_fstring   = @{ "f\"" ~ (!"\"" ~ ANY)* ~ "\"" }
+literal       = { lit_null | lit_true | lit_false | lit_float | lit_int | lit_fstring | lit_str }
+
+root    = { "$" }
+current = { "@" }
+
+// ── Kind types (only valid in kind_expr position) ─────────────────────────────
+kind_type = @{ ("number" | "string" | "array" | "object" | "bool" | "null") ~ !ident_char }
+
+// ── Cast types (only valid after `as`) — superset of kind_type incl int/float
+cast_type = @{ ("int" | "float" | "number" | "string" | "array" | "object" | "bool" | "null") ~ !ident_char }
+
+// ── Operators ─────────────────────────────────────────────────────────────────
+cmp_op = { "~=" | "==" | "!=" | ">=" | "<=" | ">" | "<" }
+add_op = { "+" | "-" }
+mul_op = { "*" | "/" | "%" }
+
+// ── Slice / Index ─────────────────────────────────────────────────────────────
+idx_val       = @{ "-"? ~ ASCII_DIGIT+ }
+slice_full    = { idx_val ~ ":" ~ idx_val }
+slice_from    = { idx_val ~ ":" }
+slice_to      = { ":" ~ idx_val }
+idx_only      = { idx_val }
+bracket_inner = { slice_full | slice_from | slice_to | idx_only | expr }
+
+// ── Arguments ─────────────────────────────────────────────────────────────────
+named_arg = { ident ~ ":" ~ expr }
+pos_arg   = { expr }
+arg       = { named_arg | pos_arg }
+arg_list  = { arg ~ ("," ~ arg)* }
+
+// ── Postfix operations ────────────────────────────────────────────────────────
+opt_method     = { "?." ~ field_name ~ "(" ~ arg_list? ~ ")" }
+opt_field      = { "?." ~ field_name }
+descendant     = { ".." ~ field_name? }
+method_call    = { "." ~ field_name ~ "(" ~ arg_list? ~ ")" }
+dyn_field      = { ".{" ~ expr ~ "}" }
+map_into_shape = { "[" ~ "*" ~ (kw_if ~ expr)? ~ "]" ~ "=>" ~ expr }
+field_access   = { "." ~ field_name }
+index_access   = { "[" ~ bracket_inner ~ "]" }
+inline_filter  = { "{" ~ expr ~ "}" }
+quantifier     = { ("?" ~ !("." | "|" | "?")) | "!" }
+postfix = { opt_method | opt_field | descendant | method_call | dyn_field | map_into_shape | field_access | index_access | inline_filter | quantifier }
+
+// ── Expression hierarchy ──────────────────────────────────────────────────────
+expr = { pipe_expr }
+
+// Pipeline: base followed by | steps and -> bind steps
+pipe_step         = { pipe_bind | pipe_forward }
+pipe_method_call  = { ident ~ "(" ~ arg_list? ~ ")" }
+pipe_forward      = { ("|>" | ("|" ~ !"|")) ~ (pipe_method_call | coalesce_expr) }
+pipe_bind    = { "->" ~ bind_target }
+bind_target  = { bind_obj | bind_arr | ident }
+bind_rest    = { "..." ~ ident }
+bind_obj     = { "{" ~ ident ~ ("," ~ ident)* ~ ("," ~ bind_rest)? ~ ","? ~ "}" }
+bind_arr     = { "[" ~ ident ~ ("," ~ ident)* ~ "]" }
+pipe_expr    = { coalesce_expr ~ pipe_step* }
+
+// Null-coalescing: lower precedence than logical, higher than pipe
+coalesce_expr = { or_expr ~ (("??" | "?|") ~ or_expr)* }
+
+or_expr   = { and_expr  ~ (kw_or  ~ and_expr)* }
+and_expr  = { not_expr  ~ (kw_and ~ not_expr)* }
+not_expr  = { kw_not ~ not_expr | kind_expr }
+kind_expr = { cmp_expr ~ ((kw_kind | kw_is) ~ kw_not? ~ kind_type)? }
+cmp_expr  = { add_expr ~ (cmp_op ~ add_expr)? }
+add_expr  = { mul_expr ~ (add_op ~ mul_expr)* }
+mul_expr  = { cast_expr ~ (mul_op ~ cast_expr)* }
+// `as` cast — tighter than arithmetic, looser than postfix
+cast_expr = { unary_expr ~ (kw_as ~ cast_type)* }
+
+unary_neg  = { "-" }
+unary_expr = { unary_neg ~ unary_expr | postfix_expr }
+
+postfix_expr = { primary ~ postfix* }
+
+// ── Comprehension variables ────────────────────────────────────────────────────
+comp_vars = { ident ~ ("," ~ ident)? }
+
+// ── Comprehensions ─────────────────────────────────────────────────────────────
+list_comp = { "[" ~ expr ~ kw_for ~ comp_vars ~ kw_in ~ expr ~ (kw_if ~ expr)? ~ "]" }
+dict_comp = { "{" ~ expr ~ ":" ~ expr ~ kw_for ~ comp_vars ~ kw_in ~ expr ~ (kw_if ~ expr)? ~ "}" }
+set_comp  = { "{" ~ expr ~ kw_for ~ comp_vars ~ kw_in ~ expr ~ (kw_if ~ expr)? ~ "}" }
+gen_comp  = { "(" ~ expr ~ kw_for ~ comp_vars ~ kw_in ~ expr ~ (kw_if ~ expr)? ~ ")" }
+
+// ── Lambda ────────────────────────────────────────────────────────────────────
+lambda_params = { ident ~ ("," ~ ident)* }
+lambda_expr   = { kw_lambda ~ lambda_params ~ ":" ~ expr }
+
+// Arrow-form lambda: `x => body` or `(x, y) => body`
+arrow_params  = { "(" ~ (ident ~ ("," ~ ident)*)? ~ ")" | ident }
+arrow_lambda  = { arrow_params ~ "=>" ~ expr }
+
+// ── Let ───────────────────────────────────────────────────────────────────────
+// Multi-binding: `let a=x, b=y in body` desugars to nested Let in parser.
+let_binding = { ident ~ "=" ~ expr }
+let_expr    = { kw_let ~ let_binding ~ ("," ~ let_binding)* ~ kw_in ~ expr }
+
+// ── Object construction ────────────────────────────────────────────────────────
+obj_key_expr     = { ident | lit_str }
+obj_field_dyn    = { "[" ~ expr ~ "]" ~ ":" ~ expr }
+obj_field_opt_v  = { obj_key_expr ~ "?" ~ ":" ~ expr }
+obj_field_opt    = { obj_key_expr ~ "?" }
+obj_field_spread_deep = { "...**" ~ expr }
+obj_field_spread      = { "..." ~ expr }
+obj_field_kv          = { obj_key_expr ~ ":" ~ expr ~ (kw_when ~ expr)? }
+obj_field_short       = { ident }
+obj_field             = { obj_field_dyn | obj_field_opt_v | obj_field_opt | obj_field_spread_deep | obj_field_spread | obj_field_kv | obj_field_short }
+obj_construct    = { "{" ~ (obj_field ~ ("," ~ obj_field)* ~ ","?)? ~ "}" }
+
+// ── Array construction ─────────────────────────────────────────────────────────
+arr_spread    = { "..." ~ expr }
+arr_elem      = { arr_spread | expr }
+arr_construct = { "[" ~ (arr_elem ~ ("," ~ arr_elem)* ~ ","?)? ~ "]" }
+
+// ── Global function calls ─────────────────────────────────────────────────────
+global_call = { ident ~ "(" ~ arg_list? ~ ")" }
+
+// ── Patch block ───────────────────────────────────────────────────────────────
+pp_wild_filter = { "[" ~ "*" ~ kw_if ~ expr ~ "]" }
+pp_wild        = { "[" ~ "*" ~ "]" }
+pp_index       = { "[" ~ idx_val ~ "]" }
+pp_descendant  = { ".." ~ field_name }
+pp_dot_field   = { "." ~ field_name }
+patch_step     = { pp_wild_filter | pp_wild | pp_index | pp_descendant | pp_dot_field }
+patch_key      = { ident ~ patch_step* }
+patch_field    = { patch_key ~ ":" ~ expr ~ (kw_when ~ expr)? }
+patch_block    = { kw_patch ~ coalesce_expr ~ "{" ~ (patch_field ~ ("," ~ patch_field)* ~ ","?)? ~ "}" }
+
+// ── Primary ───────────────────────────────────────────────────────────────────
+primary = {
+    patch_block   |
+    let_expr      |
+    lambda_expr   |
+    arrow_lambda  |
+    list_comp     |
+    gen_comp      |
+    dict_comp     |
+    set_comp      |
+    obj_construct |
+    arr_construct |
+    global_call   |
+    "(" ~ expr ~ ")" |
+    kw_delete     |
+    root          |
+    current       |
+    literal       |
+    ident
+}
+
+// ── Program ───────────────────────────────────────────────────────────────────
+program = { SOI ~ expr ~ EOI }
