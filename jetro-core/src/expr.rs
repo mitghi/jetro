@@ -15,18 +15,7 @@
 //! `Expr<T>` supports a pipeline operator that mirrors Jetro's own `|`
 //! syntax.  `a | b` produces a new expression whose source is
 //! `"(a) | (b)"`, letting callers build complex queries from reusable
-//! fragments:
-//!
-//! ```rust
-//! use jetro::prelude::*;
-//!
-//! let books    = Expr::<serde_json::Value>::new("$.books")?;
-//! let expensive = Expr::<serde_json::Value>::new("@.filter(price > 10)")?;
-//! let titles    = Expr::<Vec<String>>::new("@.map(title)")?;
-//!
-//! let pipeline = (books | expensive).cast::<Vec<String>>() | titles;
-//! # Ok::<(), jetro::Error>(())
-//! ```
+//! fragments.
 
 use std::marker::PhantomData;
 use std::ops::BitOr;

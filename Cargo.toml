@@ -1,9 +1,9 @@
 [workspace]
-members = ["jetro-macros"]
+members = ["jetro-core", "jetro-macros"]
 
 [package]
 name = "jetro"
-version = "0.2.6"
+version = "0.3.0"
 edition = "2021"
 authors = ["Milad (Mike) Taghavi <mitghi.at.me.com>"]
 license = "MIT"
@@ -12,33 +12,15 @@ exclude = [".gitignore"]
 repository = "https://github.com/mitghi/jetro"
 documentation = "https://github.com/mitghi/jetro"
 homepage = "https://github.com/mitghi/jetro"
-description = "Jetro is tool to transform, query and compare JSON format"
+description = "Jetro - transform, query, and compare JSON"
 keywords = ["json-search", "json-query", "json-path", "jmespath", "serde"]
 categories = ["algorithms", "encoding"]
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
-serde_json = "1.0.102"
-pest = "2.7.0"
-pest_derive = "2.7.0"
-serde = { version = "1.0.171", features = ["derive"] }
-parking_lot = "0.12"
-memmap2 = "0.9"
-smallvec = { version = "1", features = ["union"] }
-indexmap = "2"
-tempfile = "3"
+jetro-core   = { path = "jetro-core", version = "0.3.0" }
+serde_json   = "1.0.102"
 jetro-macros = { path = "jetro-macros", version = "0.1.0", optional = true }
 
 [features]
 default = []
-macros = ["dep:jetro-macros"]
-async = ["dep:tokio"]
-
-[dependencies.tokio]
-version = "1"
-features = ["sync", "rt", "time"]
-optional = true
-
-[dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+macros  = ["dep:jetro-macros"]

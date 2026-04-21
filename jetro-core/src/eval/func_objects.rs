@@ -13,7 +13,7 @@ use std::sync::Arc;
 use indexmap::IndexMap;
 
 use crate::ast::{Arg, Expr};
-use super::{Env, EvalError, apply_item, eval_pos, str_arg};
+use super::{Env, EvalError, apply_item, eval_pos};
 use super::value::Val;
 use super::util::{is_truthy, val_to_key, deep_merge, val_key};
 use super::func_paths::{parse_path_segs, get_path_impl, PathSeg};

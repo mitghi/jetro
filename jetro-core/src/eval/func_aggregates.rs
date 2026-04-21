@@ -12,7 +12,7 @@ use std::sync::Arc;
 use indexmap::IndexMap;
 
 use crate::ast::Arg;
-use super::{Env, EvalError, eval, apply_item, eval_pos};
+use super::{Env, EvalError, eval, apply_item};
 use super::value::Val;
 use super::util::{is_truthy, val_to_key};
 

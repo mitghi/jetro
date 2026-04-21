@@ -5,26 +5,12 @@
 //! `{ "node_name": <value>, ... }` and the expression is evaluated against it.
 //! Reference node data as `$.node_name...` in Jetro syntax.
 //!
-//! # Example
-//!
-//! ```rust,no_run
-//! use jetro::Graph;
-//! use serde_json::json;
-//!
-//! let mut g = Graph::new();
-//! g.add_node("orders",    json!([{"id": 1, "price": 9.99}]))
-//!  .add_node("customers", json!([{"id": 1, "name": "Alice"}]));
-//!
-//! // Sum all prices
-//! let result = g.query("$.orders.sum(price)").expect("query failed");
-//! ```
 
-use std::sync::Arc;
 use indexmap::IndexMap;
 use serde_json::Value;
 
 use super::eval::EvalError;
-use super::eval::{MethodRegistry, Method};
+use super::eval::{Method};
 use super::vm::VM;
 
 // ── Error ─────────────────────────────────────────────────────────────────────

@@ -35,7 +35,7 @@ use syn::{
 mod grammar {
     use pest_derive::Parser;
     #[derive(Parser)]
-    #[grammar = "../src/grammar.pest"]
+    #[grammar = "../jetro-core/src/grammar.pest"]
     pub(crate) struct V2Parser;
 }
 use grammar::{Rule, V2Parser};

@@ -46,7 +46,7 @@ use smallvec::SmallVec;
 use crate::ast::*;
 use super::eval::{
     Env, EvalError, Val,
-    dispatch_method, apply_item, eval, eval_pos, str_arg, first_i64_arg,
+    dispatch_method, eval,
 };
 use super::eval::util::{
     is_truthy, kind_matches, vals_eq, cmp_vals, val_to_key, val_to_string,
