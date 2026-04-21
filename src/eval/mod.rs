@@ -45,7 +45,7 @@ use super::ast::*;
 pub mod value;
 pub mod util;
 pub mod methods;
-pub(super) mod builtins;
+pub mod builtins;
 mod func_strings;
 mod func_arrays;
 mod func_objects;

@@ -1648,6 +1648,18 @@ impl VM {
         }
     }
 
+    /// Build a VM that shares an existing method registry.
+    pub fn with_registry(registry: Arc<MethodRegistry>) -> Self {
+        let mut vm = Self::new();
+        vm.registry = registry;
+        vm
+    }
+
+    /// Register a method already wrapped in `Arc`.
+    pub fn register_arc(&mut self, name: &str, method: Arc<dyn crate::eval::methods::Method>) {
+        Arc::make_mut(&mut self.registry).register_arc(name, method);
+    }
+
     /// Replace the pass configuration.  The compile cache is not purged,
     /// but future lookups key off the new config hash so old entries
     /// are effectively invalidated for the new regime.

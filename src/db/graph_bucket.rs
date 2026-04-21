@@ -30,16 +30,16 @@
 //! ```
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use parking_lot::RwLock;
 use serde_json::Value;
 
 use crate::Graph;
-use super::btree::BTree;
 use super::bucket::ExprBucket;
 use super::error::DbError;
+use super::storage::{FileStorage, Storage, Tree};
 
 // ── Index key encoding ────────────────────────────────────────────────────────
 //
@@ -102,16 +102,16 @@ fn extract_doc_key(index_key: &[u8]) -> Option<String> {
 
 struct NodeStore {
     /// Primary storage: doc_key (UTF-8) → JSON bytes.
-    docs: Arc<BTree>,
-    /// Per-field secondary indexes: field_name → BTree({prefix}{doc_key} → empty).
-    indexes: HashMap<String, Arc<BTree>>,
+    docs: Arc<dyn Tree>,
+    /// Per-field secondary indexes: field_name → Tree({prefix}{doc_key} → empty).
+    indexes: HashMap<String, Arc<dyn Tree>>,
     /// Optional in-memory hot cache for reference nodes.
     /// Populated by `preload_hot` and kept up-to-date on every insert/update/delete.
     hot: Option<RwLock<HashMap<String, Value>>>,
 }
 
 impl NodeStore {
-    fn new(docs: Arc<BTree>) -> Self {
+    fn new(docs: Arc<dyn Tree>) -> Self {
         Self { docs, indexes: HashMap::new(), hot: None }
     }
 
@@ -200,20 +200,32 @@ pub enum GraphNode<'a> {
 pub struct GraphBucket {
     nodes: RwLock<HashMap<String, NodeStore>>,
     exprs: Arc<ExprBucket>,
-    dir: PathBuf,
+    storage: Arc<dyn Storage>,
     name: String,
 }
 
 impl GraphBucket {
+    /// File-backed open. Wrapper around [`GraphBucket::from_storage`].
     pub(super) fn open(
         dir: impl AsRef<Path>,
+        name: &str,
+        exprs: Arc<ExprBucket>,
+    ) -> Result<Arc<Self>, DbError> {
+        let fs = FileStorage::new(dir.as_ref()).map_err(DbError::Io)?;
+        Self::from_storage(Arc::new(fs), name, exprs)
+    }
+
+    /// Open a graph bucket backed by any [`Storage`] (file, memory, custom).
+    /// `name` is used as a prefix for node/index tree names.
+    pub fn from_storage(
+        storage: Arc<dyn Storage>,
         name: &str,
         exprs: Arc<ExprBucket>,
     ) -> Result<Arc<Self>, DbError> {
         Ok(Arc::new(Self {
             nodes: RwLock::new(HashMap::new()),
             exprs,
-            dir: dir.as_ref().to_path_buf(),
+            storage,
             name: name.to_string(),
         }))
     }
@@ -222,16 +234,16 @@ impl GraphBucket {
 
     /// Register a new node. Must be called before inserting documents.
     pub fn add_node(&self, node: &str) -> Result<(), DbError> {
-        let path = self.node_docs_path(node);
-        let tree = BTree::open(&path)?;
+        let tree_name = self.node_docs_tree(node);
+        let tree = self.storage.open_tree(&tree_name).map_err(DbError::Io)?;
         self.nodes.write().insert(node.to_string(), NodeStore::new(tree));
         Ok(())
     }
 
     /// Add a secondary index on `field` for `node`. Rebuilds from existing data.
     pub fn add_index(&self, node: &str, field: &str) -> Result<(), DbError> {
-        let path = self.node_index_path(node, field);
-        let idx = BTree::open(&path)?;
+        let tree_name = self.node_index_tree(node, field);
+        let idx = self.storage.open_tree(&tree_name).map_err(DbError::Io)?;
 
         // Index all existing documents.
         let docs = {
@@ -424,12 +436,12 @@ impl GraphBucket {
         }
     }
 
-    fn node_docs_path(&self, node: &str) -> PathBuf {
-        self.dir.join(format!("{}.{}.docs", self.name, node))
+    fn node_docs_tree(&self, node: &str) -> String {
+        format!("{}.{}.docs", self.name, node)
     }
 
-    fn node_index_path(&self, node: &str, field: &str) -> PathBuf {
-        self.dir.join(format!("{}.{}.idx.{}", self.name, node, field))
+    fn node_index_tree(&self, node: &str, field: &str) -> String {
+        format!("{}.{}.idx.{}", self.name, node, field)
     }
 }
 

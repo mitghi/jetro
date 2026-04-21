@@ -33,6 +33,18 @@ impl BuiltinRegistry {
     pub fn get(&self, name: &str) -> Option<BuiltinFn> {
         self.table.get(name).copied()
     }
+
+    /// Iterate all registered builtin names (includes snake_case and camelCase aliases).
+    pub fn names(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.table.keys().copied()
+    }
+}
+
+/// Convenience — all builtin method names as a sorted `Vec<&'static str>`.
+pub fn all_names() -> Vec<&'static str> {
+    let mut v: Vec<&'static str> = global().names().collect();
+    v.sort_unstable();
+    v
 }
 
 static BUILTINS: OnceLock<BuiltinRegistry> = OnceLock::new();

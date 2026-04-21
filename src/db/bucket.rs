@@ -2,12 +2,14 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
+use parking_lot::RwLock;
 use serde_json::Value;
 
 use crate::Jetro;
 use crate::parser;
 use super::btree::BTree;
 use super::error::DbError;
+use super::storage::{Storage, Tree};
 
 // ── ExprBucket ────────────────────────────────────────────────────────────────
 
@@ -16,12 +18,25 @@ use super::error::DbError;
 /// Expressions are stored as UTF-8 strings. On first use they are compiled by
 /// the thread-local VM (compile cache means repeated use is near-zero cost).
 pub struct ExprBucket {
-    tree: Arc<BTree>,
+    tree: Arc<dyn Tree>,
 }
 
 impl ExprBucket {
+    /// Open a file-backed bucket directly from a path.
+    ///
+    /// Convenience wrapper around [`ExprBucket::from_storage`] for callers that
+    /// just want a single on-disk tree without plumbing a [`Storage`] through.
     pub fn open(path: impl AsRef<Path>) -> Result<Arc<Self>, DbError> {
         let tree = BTree::open(path)?;
+        Ok(Arc::new(Self { tree: tree as Arc<dyn Tree> }))
+    }
+
+    /// Open a bucket backed by any [`Storage`] — file-based, in-memory, or custom.
+    ///
+    /// `name` is the logical tree name within the storage; two buckets opened
+    /// with the same `(storage, name)` share the same underlying tree.
+    pub fn from_storage(storage: Arc<dyn Storage>, name: &str) -> Result<Arc<Self>, DbError> {
+        let tree = storage.open_tree(name).map_err(DbError::Io)?;
         Ok(Arc::new(Self { tree }))
     }
 
@@ -72,19 +87,44 @@ impl ExprBucket {
 ///
 /// The original document is stored under `<doc_key>\x00`.
 pub struct JsonBucket {
-    tree: Arc<BTree>,
-    expr_keys: Vec<String>,
+    tree: Arc<dyn Tree>,
+    expr_keys: RwLock<Vec<String>>,
     exprs: Arc<ExprBucket>,
 }
 
 impl JsonBucket {
+    /// File-backed open. Wrapper around [`JsonBucket::from_storage`].
     pub fn open(
         path: impl AsRef<Path>,
         expr_keys: Vec<String>,
         exprs: Arc<ExprBucket>,
     ) -> Result<Arc<Self>, DbError> {
         let tree = BTree::open(path)?;
-        Ok(Arc::new(Self { tree, expr_keys, exprs }))
+        Ok(Arc::new(Self { tree: tree as Arc<dyn Tree>, expr_keys: RwLock::new(expr_keys), exprs }))
+    }
+
+    /// Open a bucket backed by any [`Storage`]. `name` identifies the tree
+    /// within the storage.
+    pub fn from_storage(
+        storage: Arc<dyn Storage>,
+        name: &str,
+        expr_keys: Vec<String>,
+        exprs: Arc<ExprBucket>,
+    ) -> Result<Arc<Self>, DbError> {
+        let tree = storage.open_tree(name).map_err(DbError::Io)?;
+        Ok(Arc::new(Self { tree, expr_keys: RwLock::new(expr_keys), exprs }))
+    }
+
+    /// Add an expression key after open-time.  Future inserts will
+    /// apply the corresponding expression; existing docs are *not*
+    /// back-filled — call [`rebuild`](Self::rebuild) for that.
+    ///
+    /// No-op if the key is already registered.
+    pub fn add_expr_key(&self, key: &str) {
+        let mut w = self.expr_keys.write();
+        if !w.iter().any(|k| k == key) {
+            w.push(key.to_string());
+        }
     }
 
     /// Insert a document. Applies all configured expressions and stores results.
@@ -133,7 +173,8 @@ impl JsonBucket {
         doc_key: &str,
     ) -> Result<HashMap<String, Value>, DbError> {
         let mut out = HashMap::new();
-        for ek in &self.expr_keys {
+        let keys = self.expr_keys.read().clone();
+        for ek in &keys {
             if let Some(result) = self.get_result(doc_key, ek)? {
                 out.insert(ek.clone(), result);
             }
@@ -145,10 +186,84 @@ impl JsonBucket {
         // Delete original doc
         self.tree.delete(composite_key(doc_key, "").as_bytes())?;
         // Delete all expression results
-        for ek in &self.expr_keys {
+        let keys = self.expr_keys.read().clone();
+        for ek in &keys {
             self.tree.delete(composite_key(doc_key, ek).as_bytes())?;
         }
         Ok(())
+    }
+
+    /// Snapshot of the expression keys this bucket knows about.
+    pub fn expr_keys(&self) -> Vec<String> { self.expr_keys.read().clone() }
+
+    /// Iterate every original document as `(doc_key, Value)` pairs.
+    pub fn iter_docs(&self) -> Result<Vec<(String, Value)>, DbError> {
+        let mut out = Vec::new();
+        for (kb, vb) in self.tree.all()? {
+            // Original docs are stored under `<doc_key>\x00` (expr_key empty).
+            // The composite key always contains exactly one \x00 separator;
+            // docs have nothing after it.
+            let Some(sep) = kb.iter().position(|&b| b == 0x00) else { continue };
+            if sep + 1 != kb.len() { continue; } // result, not a doc
+            let dk = std::str::from_utf8(&kb[..sep])
+                .map_err(|_| DbError::Corrupt("non-UTF8 doc key".into()))?
+                .to_string();
+            let v: Value = serde_json::from_slice(&vb)
+                .map_err(|e| DbError::Corrupt(e.to_string()))?;
+            out.push((dk, v));
+        }
+        Ok(out)
+    }
+
+    /// Re-run `expr_key` across every stored document, overwriting
+    /// any existing result.  Returns the number of docs processed.
+    pub fn rebuild(&self, expr_key: &str) -> Result<usize, DbError> {
+        let known = self.expr_keys.read().iter().any(|k| k == expr_key);
+        if !known {
+            return Err(DbError::ExprNotFound(expr_key.into()));
+        }
+        let expr = self
+            .exprs
+            .get(expr_key)?
+            .ok_or_else(|| DbError::ExprNotFound(expr_key.into()))?;
+        let docs = self.iter_docs()?;
+        let mut n = 0;
+        for (doc_key, doc) in docs {
+            let result = Jetro::new(doc)
+                .collect(&expr)
+                .map_err(|e| DbError::EvalError(e.to_string()))?;
+            let bytes = serde_json::to_vec(&result)
+                .map_err(|e| DbError::Serialize(e.to_string()))?;
+            self.tree.insert(composite_key(&doc_key, expr_key).as_bytes(), &bytes)?;
+            n += 1;
+        }
+        Ok(n)
+    }
+
+    /// Re-run every configured expression across every stored document.
+    pub fn rebuild_all(&self) -> Result<usize, DbError> {
+        let docs = self.iter_docs()?;
+        let keys = self.expr_keys.read().clone();
+        let jetro_cache: Vec<(String, String)> = keys
+            .iter()
+            .map(|k| self.exprs.get(k).and_then(|o| {
+                o.ok_or_else(|| DbError::ExprNotFound(k.clone())).map(|e| (k.clone(), e))
+            }))
+            .collect::<Result<_, _>>()?;
+        let mut n = 0;
+        for (doc_key, doc) in docs {
+            let jetro = Jetro::new(doc);
+            for (ek, src) in &jetro_cache {
+                let result = jetro
+                    .collect(src)
+                    .map_err(|e| DbError::EvalError(e.to_string()))?;
+                let bytes = serde_json::to_vec(&result)
+                    .map_err(|e| DbError::Serialize(e.to_string()))?;
+                self.tree.insert(composite_key(&doc_key, ek).as_bytes(), &bytes)?;
+            }
+            n += 1;
+        }
+        Ok(n)
     }
 
     // ── Internal ─────────────────────────────────────────────────────────────
@@ -161,7 +276,8 @@ impl JsonBucket {
 
         // Apply each expression and store result
         let jetro = Jetro::new(doc.clone());
-        for ek in &self.expr_keys {
+        let keys = self.expr_keys.read().clone();
+        for ek in &keys {
             let expr = self
                 .exprs
                 .get(ek)?

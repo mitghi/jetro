@@ -54,6 +54,17 @@ impl MethodRegistry {
     }
 
     pub fn is_empty(&self) -> bool { self.methods.is_empty() }
+
+    /// Iterate every registered `(name, method)` pair.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &Arc<dyn Method>)> {
+        self.methods.iter().map(|(n, m)| (n.as_str(), m))
+    }
+
+    /// Register a method already wrapped in `Arc`. Lets callers share
+    /// a single method implementation across multiple registries.
+    pub fn register_arc(&mut self, name: impl Into<String>, method: Arc<dyn Method>) {
+        self.methods.insert(name.into(), method);
+    }
 }
 
 impl Default for MethodRegistry {

@@ -1,0 +1,18 @@
+[package]
+name = "jetro-macros"
+version = "0.1.0"
+edition = "2021"
+authors = ["Milad (Mike) Taghavi <mitghi.at.me.com>"]
+license = "MIT"
+description = "Compile-time macros for jetro: jetro!() and #[derive(JetroSchema)]."
+repository = "https://github.com/mitghi/jetro"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }
+pest = "2"
+pest_derive = "2"

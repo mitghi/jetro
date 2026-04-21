@@ -1,3 +1,6 @@
+[workspace]
+members = ["jetro-macros"]
+
 [package]
 name = "jetro"
 version = "0.2.6"
@@ -24,6 +27,18 @@ parking_lot = "0.12"
 memmap2 = "0.9"
 smallvec = { version = "1", features = ["union"] }
 indexmap = "2"
+tempfile = "3"
+jetro-macros = { path = "jetro-macros", version = "0.1.0", optional = true }
+
+[features]
+default = []
+macros = ["dep:jetro-macros"]
+async = ["dep:tokio"]
+
+[dependencies.tokio]
+version = "1"
+features = ["sync", "rt", "time"]
+optional = true
 
 [dev-dependencies]
-tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }

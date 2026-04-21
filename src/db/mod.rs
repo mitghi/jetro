@@ -34,29 +34,54 @@
 //! ```
 
 pub mod btree;
+#[cfg(feature = "async")]
+mod async_join;
 mod bucket;
 mod error;
+mod fluent;
 mod graph_bucket;
-mod link_bucket;
+mod graph_fluent;
+mod join;
 mod node;
 mod page;
+mod row;
+mod storage;
+mod store;
 mod graph_tests;
-mod link_tests;
+mod join_tests;
 mod tests;
 
 pub use btree::BTree;
+#[cfg(feature = "async")]
+pub use async_join::AsyncJoin;
 pub use bucket::{ExprBucket, JsonBucket};
 pub use error::DbError;
+pub use fluent::{Bucket, BucketBuilder};
 pub use graph_bucket::{GraphBucket, GraphNode};
-pub use link_bucket::{LinkBucket, LinkedDoc};
+pub use graph_fluent::{GraphQueryBuilder};
+pub use join::{Join, JoinBuilder, JoinQuery, JoinedDoc, IntoJoinId};
+pub use row::Row;
+pub use storage::{BTreeMem, FileStorage, MemStorage, Storage, Tree};
+pub use store::{Store, BTreeBulk, BTreePrefix, DocIter};
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::{fs, io};
 
 /// Top-level handle for a jetro database directory.
+///
+/// A `Database` is a directory that contains one file per bucket.
+/// Construct with:
+///
+/// - [`Database::open`]     — existing directory (creates if missing)
+/// - [`Database::open_dir`] — alias, explicit about intent
+/// - [`Database::memory`]   — ephemeral, unique temp directory that
+///   is removed automatically when this handle is dropped.
 pub struct Database {
-    dir: PathBuf,
+    dir:    PathBuf,
+    /// Held until drop so the temp directory is cleaned up.  `None`
+    /// for on-disk databases.
+    _tmp:   Option<tempfile::TempDir>,
 }
 
 impl Database {
@@ -64,8 +89,28 @@ impl Database {
     pub fn open(dir: impl AsRef<Path>) -> io::Result<Self> {
         let dir = dir.as_ref().to_path_buf();
         fs::create_dir_all(&dir)?;
-        Ok(Self { dir })
+        Ok(Self { dir, _tmp: None })
     }
+
+    /// Alias for [`open`] — spells out that the argument is a
+    /// directory so users don't pass a file path by accident.
+    pub fn open_dir(dir: impl AsRef<Path>) -> io::Result<Self> {
+        Self::open(dir)
+    }
+
+    /// Open a zero-config, in-process database backed by a unique
+    /// temp directory that is deleted when the returned handle
+    /// is dropped.  Intended for tests, examples, and short-lived
+    /// tools.
+    pub fn memory() -> io::Result<Self> {
+        let tmp = tempfile::Builder::new()
+            .prefix("jetro-mem-")
+            .tempdir()?;
+        Ok(Self { dir: tmp.path().to_path_buf(), _tmp: Some(tmp) })
+    }
+
+    /// Path of the backing directory (stable across calls).
+    pub fn path(&self) -> &Path { &self.dir }
 
     /// Open (or create) a named expression bucket.
     pub fn expr_bucket(&self, name: &str) -> Result<Arc<ExprBucket>, DbError> {
@@ -88,22 +133,20 @@ impl Database {
         JsonBucket::open(path, keys, Arc::clone(exprs))
     }
 
-    /// Open (or create) a named link bucket for blocking stream-join operations.
+    /// Begin a fluent [`Join`] definition for stream-join workloads.
     ///
-    /// `kinds` is a slice of `(kind_name, id_field)` pairs, e.g.:
-    /// ```text
-    /// &[("order", "order_id"), ("payment", "order_id"), ("shipment", "order_id")]
+    /// ```rust,no_run
+    /// use jetro::prelude::*;
+    /// let db = Database::memory()?;
+    /// let orders = db.join("orders")
+    ///     .id("order_id")
+    ///     .kinds(["order", "payment", "shipment"])
+    ///     .open()?;
+    /// # Ok::<(), jetro::Error>(())
     /// ```
-    ///
-    /// A link is complete when one document of every kind has been inserted with
-    /// the **same id value** (extracted from the specified field).  [`LinkBucket::get`]
-    /// and [`LinkBucket::query`] block until the link is complete.
-    pub fn link_bucket(
-        &self,
-        name: &str,
-        kinds: &[(&str, &str)],
-    ) -> Result<Arc<LinkBucket>, DbError> {
-        link_bucket::LinkBucket::open(&self.dir, name, kinds)
+    pub fn join(&self, name: impl Into<String>) -> join::JoinBuilder {
+        join::JoinBuilder::from_dir(&self.dir, name)
+            .expect("Database::join: FileStorage open failed")
     }
 
     /// Open (or create) a named graph bucket for cross-document queries.
