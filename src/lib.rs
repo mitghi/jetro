@@ -1,6 +1,4 @@
-//! Jetro is a tool for querying and transforming JSON.
-//!
-//! # Quick start
+//! Jetro — transform, query, and compare JSON.
 //!
 //! ```rust
 //! use jetro::Jetro;
@@ -15,97 +13,74 @@
 //!     }
 //! }));
 //!
-//! let mut r = j.collect(">/store/books/#len").unwrap();
-//! let count: i64 = r.from_index(0).unwrap();
-//! assert_eq!(count, 2);
+//! let count = j.collect("$.store.books.len()").unwrap();
+//! assert_eq!(count, json!(2));
 //! ```
 
-extern crate pest_derive;
+pub mod prelude;
 
-use pest::Parser;
-use pest_derive::Parser as Parse;
+// Engine surface.
+pub use jetro_core::{
+    Compiler, Engine, EvalError, Expr, Graph, Jetro, JetroSchema, Method, MethodRegistry,
+    ParseError, Program, VM,
+};
 
-pub mod context;
-pub mod graph;
-pub mod parser;
-pub mod vm;
-mod fmt;
-mod func;
+// Module re-exports for callers that reach into submodules.
+pub use jetro_core::ast;
+pub use jetro_core::eval;
+pub use jetro_core::parser;
+pub use jetro_core::vm;
 
-// Re-export the two types users need most so they don't have to dig into
-// sub-modules for everyday use.
-pub use context::{Error, PathResult};
+#[cfg(feature = "macros")]
+pub use jetro_macros::{jetro, JetroSchema};
 
 use serde_json::Value;
+use std::sync::Arc;
 
-// ── Jetro ─────────────────────────────────────────────────────────────────────
-
-/// Primary entry point for evaluating Jetro expressions.
-///
-/// `Jetro` holds a JSON document and evaluates path expressions against it.
-/// Internally it delegates to a **thread-local VM** that is shared across every
-/// `Jetro` instance on the same thread, so the compile cache and resolution
-/// cache accumulate over the lifetime of the thread — not just one query.
-///
-/// # Example
-///
-/// ```rust
-/// use jetro::Jetro;
-/// use serde_json::json;
-///
-/// let doc = json!({"user": {"name": "Alice", "age": 30}});
-/// let j = Jetro::new(doc);
-///
-/// let mut r = j.collect(">/user/name").unwrap();
-/// let name: String = r.from_index(0).unwrap();
-/// assert_eq!(name, "Alice");
-///
-/// // The same instance can be queried multiple times.
-/// let mut r2 = j.collect(">/user/age").unwrap();
-/// let age: i64 = r2.from_index(0).unwrap();
-/// assert_eq!(age, 30);
-/// ```
-pub struct Jetro {
-    document: Value,
+/// Engine-side error type.  Either a parse failure or an evaluation failure.
+#[derive(Debug)]
+pub enum Error {
+    Parse(ParseError),
+    Eval(EvalError),
 }
 
-impl Jetro {
-    /// Create a new `Jetro` instance bound to `document`.
-    pub fn new(document: Value) -> Self {
-        Self { document }
-    }
+pub type Result<T> = std::result::Result<T, Error>;
 
-    /// Evaluate `expr` against the document.
-    ///
-    /// Uses the thread-local VM — the compiled program and resolved pointer
-    /// paths are cached for the lifetime of the current thread, so repeated
-    /// calls with the same expression skip both parsing and traversal.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Err` if the expression cannot be parsed or evaluated.
-    pub fn collect<S: Into<String>>(&self, expr: S) -> Result<PathResult, Error> {
-        let expr = expr.into();
-        vm::THREAD_VM.with(|cell| match cell.try_borrow_mut() {
-            Ok(mut vm) => vm.run_str(&expr, &self.document),
-            // Re-entrant call (e.g. from inside a function): use a fresh VM.
-            Err(_) => vm::VM::new().run_str(&expr, &self.document),
-        })
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::Parse(e) => write!(f, "{}", e),
+            Error::Eval(e)  => write!(f, "{}", e),
+        }
+    }
+}
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Error::Parse(e) => Some(e),
+            Error::Eval(_)  => None,
+        }
     }
 }
 
-/// Convenience: create a `Jetro` instance directly from a `serde_json::Value`.
-///
-/// ```rust
-/// use jetro::Jetro;
-/// use serde_json::json;
-///
-/// let mut r = Jetro::from(json!({"x": 42})).collect(">/x").unwrap();
-/// let x: i64 = r.from_index(0).unwrap();
-/// assert_eq!(x, 42);
-/// ```
-impl From<Value> for Jetro {
-    fn from(v: Value) -> Self {
-        Self::new(v)
+impl From<ParseError> for Error { fn from(e: ParseError) -> Self { Error::Parse(e) } }
+impl From<EvalError>  for Error { fn from(e: EvalError)  -> Self { Error::Eval(e)  } }
+
+impl From<jetro_core::Error> for Error {
+    fn from(e: jetro_core::Error) -> Self {
+        match e {
+            jetro_core::Error::Parse(p) => Error::Parse(p),
+            jetro_core::Error::Eval(v)  => Error::Eval(v),
+        }
     }
+}
+
+/// Evaluate a Jetro expression against a JSON value.
+pub fn query(expr: &str, doc: &Value) -> Result<Value> {
+    Ok(jetro_core::query(expr, doc)?)
+}
+
+/// Evaluate a Jetro expression with a custom method registry.
+pub fn query_with(expr: &str, doc: &Value, registry: Arc<MethodRegistry>) -> Result<Value> {
+    Ok(jetro_core::query_with(expr, doc, registry)?)
 }
