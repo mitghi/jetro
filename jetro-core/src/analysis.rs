@@ -785,11 +785,13 @@ fn dedup_rec(program: &Program, cache: &mut HashMap<u64, Arc<Program>>) -> Arc<P
     let sig = program_signature(program);
     if let Some(a) = cache.get(&sig) { return Arc::clone(a); }
     let new_ops: Vec<Opcode> = program.ops.iter().map(|op| rewrite_op(op, cache)).collect();
+    let ics = crate::vm::fresh_ics(new_ops.len());
     let out = Arc::new(Program {
         ops:           new_ops.into(),
         source:        program.source.clone(),
         id:            program.id,
         is_structural: program.is_structural,
+        ics,
     });
     cache.insert(sig, Arc::clone(&out));
     out

@@ -119,11 +119,13 @@ use super::vm::{Program, Opcode};
 /// Returns a new `Program` with the same source/id.
 pub fn specialize(program: &Program, shape: &Shape) -> Program {
     let new_ops: Vec<Opcode> = specialize_ops(&program.ops, shape);
+    let ics = crate::vm::fresh_ics(new_ops.len());
     Program {
         ops:           new_ops.into(),
         source:        program.source.clone(),
         id:            program.id,
         is_structural: program.is_structural,
+        ics,
     }
 }
 

@@ -39,6 +39,7 @@ use std::{
     collections::hash_map::DefaultHasher,
     hash::{Hash, Hasher},
     sync::Arc,
+    sync::atomic::{AtomicU64, Ordering},
 };
 use indexmap::IndexMap;
 use smallvec::SmallVec;
@@ -438,6 +439,13 @@ pub struct Program {
     /// True when the program contains only structural navigation opcodes
     /// (eligible for resolution caching).
     pub is_structural: bool,
+    /// Inline caches — one `AtomicU64` slot per opcode.  Currently only
+    /// `Opcode::GetField` / `Opcode::OptField` populate a slot:
+    ///   bits 63..32 = truncated `Arc::as_ptr(&obj_map) as u32`
+    ///   bits 31..0  = cached IndexMap slot index
+    /// A value of 0 means "miss" (Arc ptr hash 0 is vanishingly rare —
+    /// minor correctness cost: worst case one extra slow lookup).
+    pub ics:          Arc<[AtomicU64]>,
 }
 
 impl Program {
@@ -450,7 +458,45 @@ impl Program {
             Opcode::RootChain(_) | Opcode::FieldChain(_) |
             Opcode::GetPointer(_)
         ));
-        Self { ops: ops.into(), source: source.into(), id, is_structural }
+        let ics = fresh_ics(ops.len());
+        Self {
+            ops: ops.into(),
+            source: source.into(),
+            id,
+            is_structural,
+            ics,
+        }
+    }
+}
+
+/// Build a fresh IC side-table with one zeroed `AtomicU64` per opcode.
+/// Kept public so other modules that fabricate `Program` values (schema
+/// specialisation, analysis passes) can populate the field.
+pub fn fresh_ics(len: usize) -> Arc<[AtomicU64]> {
+    let mut v = Vec::with_capacity(len);
+    for _ in 0..len { v.push(AtomicU64::new(0)); }
+    v.into()
+}
+
+/// Look up `key` in `m`, using the IC slot as a speculative hint.
+#[inline]
+fn ic_get_field(m: &Arc<IndexMap<Arc<str>, Val>>, key: &str, ic: &AtomicU64) -> Val {
+    let ptr_hash = ((Arc::as_ptr(m) as usize) >> 4) as u32;
+    let cached = ic.load(Ordering::Relaxed);
+    let cached_ptr = (cached >> 32) as u32;
+    let cached_slot = (cached & 0xFFFF_FFFF) as usize;
+    if cached_ptr == ptr_hash && ptr_hash != 0 {
+        if let Some((k, v)) = m.get_index(cached_slot) {
+            if k.as_ref() == key { return v.clone(); }
+        }
+    }
+    // Slow path: full hash lookup, populate cache on hit.
+    if let Some((idx, _, v)) = m.get_full(key) {
+        let packed = ((ptr_hash as u64) << 32) | (idx as u64);
+        ic.store(packed, Ordering::Relaxed);
+        v.clone()
+    } else {
+        Val::Null
     }
 }
 
@@ -496,11 +542,13 @@ impl Compiler {
         let prog = Program::new(ops, source);
         // Post-pass: canonicalise identical sub-programs.
         let deduped = super::analysis::dedup_subprograms(&prog);
+        let ics = fresh_ics(deduped.ops.len());
         Program {
             ops:           deduped.ops.clone(),
             source:        prog.source,
             id:            prog.id,
             is_structural: prog.is_structural,
+            ics,
         }
     }
 
@@ -607,11 +655,13 @@ impl Compiler {
         let prog = Program::new(ops, input);
         if config.dedup_subprogs {
             let deduped = super::analysis::dedup_subprograms(&prog);
+            let ics = fresh_ics(deduped.ops.len());
             Ok(Program {
                 ops:           deduped.ops.clone(),
                 source:        prog.source,
                 id:            prog.id,
                 is_structural: prog.is_structural,
+                ics,
             })
         } else {
             Ok(prog)
@@ -2055,7 +2105,11 @@ impl VM {
                 // ── Navigation ────────────────────────────────────────────────
                 Opcode::GetField(k) => {
                     let v = pop!(stack);
-                    stack.push(v.get_field(k.as_ref()));
+                    let out = match &v {
+                        Val::Obj(m) => ic_get_field(m, k.as_ref(), &program.ics[op_idx]),
+                        _ => Val::Null,
+                    };
+                    stack.push(out);
                 }
                 Opcode::FieldChain(chain) => {
                     let mut cur = pop!(stack);
@@ -2083,7 +2137,12 @@ impl VM {
                 }
                 Opcode::OptField(k) => {
                     let v = pop!(stack);
-                    stack.push(if v.is_null() { Val::Null } else { v.get_field(k.as_ref()) });
+                    let out = match &v {
+                        Val::Null => Val::Null,
+                        Val::Obj(m) => ic_get_field(m, k.as_ref(), &program.ics[op_idx]),
+                        _ => v.get_field(k.as_ref()),
+                    };
+                    stack.push(out);
                 }
                 Opcode::Descendant(k) => {
                     let v = pop!(stack);

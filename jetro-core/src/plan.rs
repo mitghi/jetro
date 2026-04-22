@@ -59,9 +59,13 @@ impl LogicalPlan {
                     LogicalPlan::Path(mut v) => { v.push(k.clone()); LogicalPlan::Path(v) }
                     other => LogicalPlan::Project {
                         input: Box::new(other),
-                        map: Arc::new(Program {
-                            ops: Arc::from(vec![Opcode::PushCurrent, Opcode::GetField(k.clone())]),
-                            source: Arc::from(""), id: 0, is_structural: true,
+                        map: Arc::new({
+                            let ops_vec = vec![Opcode::PushCurrent, Opcode::GetField(k.clone())];
+                            let ics = crate::vm::fresh_ics(ops_vec.len());
+                            Program {
+                                ops: Arc::from(ops_vec),
+                                source: Arc::from(""), id: 0, is_structural: true, ics,
+                            }
                         }),
                     },
                 }
@@ -180,9 +184,13 @@ fn lift_method(input: LogicalPlan, c: &Arc<super::vm::CompiledCall>) -> LogicalP
             LogicalPlan::Aggregate { input: Box::new(input), op: AggOp::First, arg: None },
         BuiltinMethod::Last =>
             LogicalPlan::Aggregate { input: Box::new(input), op: AggOp::Last, arg: None },
-        _ => LogicalPlan::Raw(Arc::new(Program {
-            ops: Arc::from(vec![Opcode::CallMethod(Arc::clone(c))]),
-            source: Arc::from(""), id: 0, is_structural: false,
+        _ => LogicalPlan::Raw(Arc::new({
+            let ops_vec = vec![Opcode::CallMethod(Arc::clone(c))];
+            let ics = crate::vm::fresh_ics(ops_vec.len());
+            Program {
+                ops: Arc::from(ops_vec),
+                source: Arc::from(""), id: 0, is_structural: false, ics,
+            }
         })),
     }
 }
@@ -232,11 +240,13 @@ pub fn pushdown_filter(plan: LogicalPlan) -> LogicalPlan {
 pub fn lower(plan: &LogicalPlan) -> Arc<Program> {
     let mut ops = Vec::new();
     emit(plan, &mut ops);
+    let ics = crate::vm::fresh_ics(ops.len());
     Arc::new(Program {
         ops:           ops.into(),
         source:        Arc::from("<lowered>"),
         id:            0,
         is_structural: false,
+        ics,
     })
 }
 
