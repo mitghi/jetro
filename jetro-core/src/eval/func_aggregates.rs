@@ -123,12 +123,22 @@ pub fn any_all(recv: Val, args: &[Arg], env: &Env, want_all: bool) -> Result<Val
 
 // ── Grouping ──────────────────────────────────────────────────────────────────
 
+/// Compute a grouping key once, reusing the Arc<str> when the key
+/// expression already produced a string.
+#[inline]
+fn group_key(item: &Val, key_arg: &Arg, env: &Env) -> Result<Arc<str>, EvalError> {
+    Ok(match apply_item(item.clone(), key_arg, env)? {
+        Val::Str(s) => s,
+        other       => Arc::<str>::from(val_to_key(&other)),
+    })
+}
+
 pub fn group_by(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     let key_arg = args.first().ok_or_else(|| EvalError("groupBy: requires key".into()))?;
     let items = recv.into_vec().ok_or_else(|| EvalError("groupBy: expected array".into()))?;
-    let mut map: IndexMap<Arc<str>, Val> = IndexMap::new();
+    let mut map: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(items.len());
     for item in items {
-        let k: Arc<str> = Arc::from(val_to_key(&apply_item(item.clone(), key_arg, env)?).as_str());
+        let k = group_key(&item, key_arg, env)?;
         let bucket = map.entry(k).or_insert_with(|| Val::arr(Vec::new()));
         bucket.as_array_mut().unwrap().push(item);
     }
@@ -138,9 +148,9 @@ pub fn group_by(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
 pub fn count_by(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     let key_arg = args.first().ok_or_else(|| EvalError("countBy: requires key".into()))?;
     let items = recv.into_vec().ok_or_else(|| EvalError("countBy: expected array".into()))?;
-    let mut map: IndexMap<Arc<str>, Val> = IndexMap::new();
+    let mut map: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(items.len());
     for item in items {
-        let k: Arc<str> = Arc::from(val_to_key(&apply_item(item.clone(), key_arg, env)?).as_str());
+        let k = group_key(&item, key_arg, env)?;
         let counter = map.entry(k).or_insert(Val::Int(0));
         if let Val::Int(n) = counter { *n += 1; }
     }
@@ -150,9 +160,9 @@ pub fn count_by(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
 pub fn index_by(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     let key_arg = args.first().ok_or_else(|| EvalError("indexBy: requires key".into()))?;
     let items = recv.into_vec().ok_or_else(|| EvalError("indexBy: expected array".into()))?;
-    let mut map: IndexMap<Arc<str>, Val> = IndexMap::new();
+    let mut map: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(items.len());
     for item in items {
-        let k: Arc<str> = Arc::from(val_to_key(&apply_item(item.clone(), key_arg, env)?).as_str());
+        let k = group_key(&item, key_arg, env)?;
         map.insert(k, item);
     }
     Ok(Val::obj(map))
