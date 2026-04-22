@@ -69,9 +69,10 @@ mod tests;
 #[cfg(test)]
 mod examples;
 
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell};
 use std::sync::Arc;
 use serde_json::Value;
+use eval::Val;
 
 pub use engine::Engine;
 pub use eval::EvalError;
@@ -160,6 +161,9 @@ thread_local! {
 /// cache accumulate over the lifetime of the thread.
 pub struct Jetro {
     document: Value,
+    /// Cached `Val` tree — built on first `collect()` and reused across
+    /// subsequent calls, amortising the `Val::from(&Value)` walk.
+    root_val: OnceCell<Val>,
     /// Retained JSON source bytes when the caller built via
     /// [`Jetro::from_bytes`] / [`Jetro::from_slice`].  Enables SIMD
     /// byte-scan fast paths for `$..key` queries.
@@ -168,7 +172,7 @@ pub struct Jetro {
 
 impl Jetro {
     pub fn new(document: Value) -> Self {
-        Self { document, raw_bytes: None }
+        Self { document, root_val: OnceCell::new(), raw_bytes: None }
     }
 
     /// Parse JSON bytes and retain them alongside the parsed document.
@@ -176,12 +180,20 @@ impl Jetro {
     /// instead of walking the tree.
     pub fn from_bytes(bytes: Vec<u8>) -> std::result::Result<Self, serde_json::Error> {
         let document: Value = serde_json::from_slice(&bytes)?;
-        Ok(Self { document, raw_bytes: Some(Arc::from(bytes.into_boxed_slice())) })
+        Ok(Self {
+            document,
+            root_val: OnceCell::new(),
+            raw_bytes: Some(Arc::from(bytes.into_boxed_slice())),
+        })
     }
 
     /// Parse JSON from a slice, retaining a copy of the bytes.
     pub fn from_slice(bytes: &[u8]) -> std::result::Result<Self, serde_json::Error> {
         Self::from_bytes(bytes.to_vec())
+    }
+
+    fn root_val(&self) -> Val {
+        self.root_val.get_or_init(|| Val::from(&self.document)).clone()
     }
 
     /// Evaluate `expr` against the document.  Routes through the thread-local
@@ -191,10 +203,16 @@ impl Jetro {
     pub fn collect<S: AsRef<str>>(&self, expr: S) -> std::result::Result<Value, EvalError> {
         let expr = expr.as_ref();
         THREAD_VM.with(|cell| match (cell.try_borrow_mut(), &self.raw_bytes) {
-            (Ok(mut vm), Some(bytes)) => vm.run_str_with_raw(expr, &self.document, Arc::clone(bytes)),
-            (Ok(mut vm), None)        => vm.run_str(expr, &self.document),
-            (Err(_),     Some(bytes)) => VM::new().run_str_with_raw(expr, &self.document, Arc::clone(bytes)),
-            (Err(_),     None)        => VM::new().run_str(expr, &self.document),
+            (Ok(mut vm), Some(bytes)) => {
+                let prog = vm.get_or_compile(expr)?;
+                vm.execute_val_with_raw(&prog, self.root_val(), Arc::clone(bytes))
+            }
+            (Ok(mut vm), None) => {
+                let prog = vm.get_or_compile(expr)?;
+                vm.execute_val(&prog, self.root_val())
+            }
+            (Err(_), Some(bytes)) => VM::new().run_str_with_raw(expr, &self.document, Arc::clone(bytes)),
+            (Err(_), None)        => VM::new().run_str(expr, &self.document),
         })
     }
 }

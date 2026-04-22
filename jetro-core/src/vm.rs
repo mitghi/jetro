@@ -1915,9 +1915,40 @@ impl VM {
         raw_bytes: Arc<[u8]>,
     ) -> Result<serde_json::Value, EvalError> {
         let root = Val::from(doc);
-        self.doc_hash = hash_val_structure(&root);
+        self.execute_val_with_raw(program, root, raw_bytes)
+    }
+
+    /// Execute against a pre-built `Val` root (skips the `Val::from(&Value)`
+    /// conversion on every call).  With raw bytes, the `doc_hash` pointer-
+    /// cache path is also skipped — byte-scan handles descendants directly
+    /// and `RootChain` reads are O(chain length) against the already-built
+    /// tree.
+    pub fn execute_val_with_raw(
+        &mut self,
+        program: &Program,
+        root: Val,
+        raw_bytes: Arc<[u8]>,
+    ) -> Result<serde_json::Value, EvalError> {
+        // doc_hash seeds the path cache; on the scan fast path we bypass the
+        // cache entirely, so skip the O(doc) structural hash walk.
+        self.doc_hash = 0;
         self.root_chain_cache.clear();
         let env = Env::new_with_raw(root, Arc::clone(&self.registry), raw_bytes);
+        let result = self.exec(program, &env)?;
+        Ok(result.into())
+    }
+
+    /// Execute against a pre-built `Val` root without raw bytes.  Skips the
+    /// `Val::from` conversion only — path cache and doc hash still behave
+    /// as in `execute()`.
+    pub fn execute_val(
+        &mut self,
+        program: &Program,
+        root: Val,
+    ) -> Result<serde_json::Value, EvalError> {
+        self.doc_hash = hash_val_structure(&root);
+        self.root_chain_cache.clear();
+        let env = self.make_env(root);
         let result = self.exec(program, &env)?;
         Ok(result.into())
     }
