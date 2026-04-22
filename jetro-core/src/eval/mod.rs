@@ -279,6 +279,27 @@ pub(super) fn eval(expr: &Expr, env: &Env) -> Result<Val, EvalError> {
             if let (Expr::Root, Some(Step::Descendant(name)), Some(bytes))
                 = (&**base, steps.first(), env.raw_bytes.as_ref())
             {
+                // Literal-match fast path: `$..key{@ == lit}` or
+                // `$..key.filter(@ == lit)` — scan prunes non-matching sites
+                // at the byte level, avoiding a Value allocation per miss.
+                // Requires a canonical-serialising literal (int/string/bool/null).
+                let pred = match steps.get(1) {
+                    Some(Step::InlineFilter(p)) => Some(&**p),
+                    Some(Step::Method(name, args)) if name == "filter" && args.len() == 1 => {
+                        match &args[0] {
+                            Arg::Pos(e) | Arg::Named(_, e) => Some(e),
+                        }
+                    }
+                    _ => None,
+                };
+                if let Some(p) = pred {
+                    if let Some(lit_bytes) = canonical_eq_literal(p) {
+                        let hits = super::scan::extract_values_eq(bytes, name, &lit_bytes);
+                        let mut val = Val::arr(hits.iter().map(Val::from).collect());
+                        for step in &steps[2..] { val = eval_step(val, step, env)?; }
+                        return Ok(val);
+                    }
+                }
                 let hits = super::scan::extract_values(bytes, name);
                 let mut val = Val::arr(hits.iter().map(Val::from).collect());
                 for step in &steps[1..] { val = eval_step(val, step, env)?; }
@@ -671,6 +692,30 @@ fn eval_pipe(left: Val, rhs: &Expr, env: &Env) -> Result<Val, EvalError> {
             eval(rhs, &env.with_current(left))
         }
         _ => eval(rhs, &env.with_current(left)),
+    }
+}
+
+/// Recognise `@ == lit` / `lit == @` predicates where `lit` is a canonical
+/// JSON literal (int, string, bool, null).  Returns the serialised literal
+/// bytes that can be fed to `scan::extract_values_eq`.  Float literals are
+/// deliberately *not* accepted — `1.0` vs `1` and representation variance
+/// make bytewise comparison unsafe.
+fn canonical_eq_literal(pred: &Expr) -> Option<Vec<u8>> {
+    let (l, r) = match pred {
+        Expr::BinOp(l, BinOp::Eq, r) => (&**l, &**r),
+        _ => return None,
+    };
+    let lit = match (l, r) {
+        (Expr::Current, lit) => lit,
+        (lit, Expr::Current) => lit,
+        _ => return None,
+    };
+    match lit {
+        Expr::Int(n)  => Some(n.to_string().into_bytes()),
+        Expr::Bool(b) => Some(if *b { b"true".to_vec() } else { b"false".to_vec() }),
+        Expr::Null    => Some(b"null".to_vec()),
+        Expr::Str(s)  => serde_json::to_vec(&serde_json::Value::String(s.clone())).ok(),
+        _ => None,
     }
 }
 

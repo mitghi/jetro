@@ -124,6 +124,140 @@ pub fn extract_values(bytes: &[u8], key: &str) -> Vec<Value> {
     out
 }
 
+/// Span of a single JSON value in `bytes`: start offset inclusive,
+/// end offset exclusive.  Produced by `find_key_value_spans`; the caller
+/// may compare raw bytes against a literal without allocating a `Value`.
+#[derive(Debug, Clone, Copy)]
+pub struct ValueSpan {
+    pub start: usize,
+    pub end:   usize,
+}
+
+/// Locate the byte span of every value paired with `key`.  Skips
+/// whitespace between `:` and the value and then walks the value to its
+/// end — strings obey escape rules, containers track nesting depth,
+/// scalars run until the next structural terminator.
+pub fn find_key_value_spans(bytes: &[u8], key: &str) -> Vec<ValueSpan> {
+    let positions = find_key_positions(bytes, key);
+    let prefix_len = key.len() + 3;
+    let mut out = Vec::with_capacity(positions.len());
+    for pos in positions {
+        let mut start = pos + prefix_len;
+        while start < bytes.len()
+            && matches!(bytes[start], b' ' | b'\t' | b'\n' | b'\r') {
+            start += 1;
+        }
+        if start >= bytes.len() { continue; }
+        if let Some(end) = value_end(bytes, start) {
+            out.push(ValueSpan { start, end });
+        }
+    }
+    out
+}
+
+/// Extract the parsed `Value` for every `key` site whose raw bytes
+/// equal `lit`.  Matches by bytewise equality on the span — safe for
+/// JSON primitives (strings, numbers, bools, null) which serialise
+/// canonically, not for objects/arrays.  Non-matching sites are
+/// skipped without paying the `serde_json` parse cost.
+pub fn extract_values_eq(bytes: &[u8], key: &str, lit: &[u8]) -> Vec<Value> {
+    let mut out = Vec::new();
+    for span in find_key_value_spans(bytes, key) {
+        if span.end - span.start == lit.len()
+            && &bytes[span.start..span.end] == lit
+        {
+            if let Ok(v) = serde_json::from_slice::<Value>(&bytes[span.start..span.end]) {
+                out.push(v);
+            }
+        }
+    }
+    out
+}
+
+/// Extract every value for `key` **whose raw bytes equal `lit`** after
+/// trimming leading whitespace.  `lit` is expected to be pre-serialised
+/// JSON (e.g. `br#""action""#`, `b"42"`).  Bytewise comparison is safe
+/// for JSON primitives with canonical serialisation; it is *not* correct
+/// for objects/arrays where key order or whitespace may differ.
+///
+/// Skips non-matching sites entirely — no `Value` allocation.
+pub fn count_key_value_eq(bytes: &[u8], key: &str, lit: &[u8]) -> usize {
+    let mut n = 0;
+    for span in find_key_value_spans(bytes, key) {
+        if span.end - span.start == lit.len()
+            && &bytes[span.start..span.end] == lit
+        {
+            n += 1;
+        }
+    }
+    n
+}
+
+/// Walk a JSON value starting at `start`, return the exclusive end offset.
+/// Returns `None` on malformed input (missing close, truncated literal).
+fn value_end(bytes: &[u8], start: usize) -> Option<usize> {
+    if start >= bytes.len() { return None; }
+    match bytes[start] {
+        b'"' => {
+            // Walk the string respecting escapes.
+            let mut i = start + 1;
+            let mut escape = false;
+            while i < bytes.len() {
+                if escape { escape = false; i += 1; continue; }
+                match bytes[i] {
+                    b'\\' => { escape = true; i += 1; }
+                    b'"'  => return Some(i + 1),
+                    _     => i += 1,
+                }
+            }
+            None
+        }
+        b'{' | b'[' => {
+            let open = bytes[start];
+            let close = if open == b'{' { b'}' } else { b']' };
+            let mut depth = 1usize;
+            let mut i = start + 1;
+            let mut in_string = false;
+            let mut escape = false;
+            while i < bytes.len() {
+                let b = bytes[i];
+                if escape { escape = false; i += 1; continue; }
+                if in_string {
+                    match b {
+                        b'\\' => escape = true,
+                        b'"'  => in_string = false,
+                        _     => {}
+                    }
+                    i += 1;
+                    continue;
+                }
+                match b {
+                    b'"' => in_string = true,
+                    c if c == open  => depth += 1,
+                    c if c == close => {
+                        depth -= 1;
+                        if depth == 0 { return Some(i + 1); }
+                    }
+                    _ => {}
+                }
+                i += 1;
+            }
+            None
+        }
+        _ => {
+            // Scalar (number / bool / null) — scan until structural terminator.
+            let mut i = start;
+            while i < bytes.len() {
+                match bytes[i] {
+                    b',' | b'}' | b']' | b' ' | b'\t' | b'\n' | b'\r' => break,
+                    _ => i += 1,
+                }
+            }
+            if i == start { None } else { Some(i) }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,5 +322,45 @@ mod tests {
             serde_json::json!(2),
             serde_json::json!(3),
         ]);
+    }
+
+    #[test]
+    fn spans_cover_every_value_kind() {
+        let doc = br#"{"a":1,"b":"two","c":[1,2,3],"d":{"x":1},"e":true}"#;
+        let keys_and_expected: &[(&str, &[u8])] = &[
+            ("a", b"1"),
+            ("b", b"\"two\""),
+            ("c", b"[1,2,3]"),
+            ("d", b"{\"x\":1}"),
+            ("e", b"true"),
+        ];
+        for (k, want) in keys_and_expected {
+            let spans = find_key_value_spans(doc, k);
+            assert_eq!(spans.len(), 1, "key {} not found", k);
+            assert_eq!(&doc[spans[0].start..spans[0].end], *want);
+        }
+    }
+
+    #[test]
+    fn count_eq_matches_only_literal_equals() {
+        let doc = br#"{"a":[{"type":"action"},{"type":"idle"},{"type":"action"},{"type":"noop"}]}"#;
+        assert_eq!(count_key_value_eq(doc, "type", br#""action""#), 2);
+        assert_eq!(count_key_value_eq(doc, "type", br#""missing""#), 0);
+    }
+
+    #[test]
+    fn count_eq_numeric_literal() {
+        let doc = br#"{"xs":[{"n":10},{"n":42},{"n":10},{"n":42}]}"#;
+        assert_eq!(count_key_value_eq(doc, "n", b"42"), 2);
+        assert_eq!(count_key_value_eq(doc, "n", b"10"), 2);
+    }
+
+    #[test]
+    fn spans_skip_whitespace_after_colon() {
+        let doc = br#"{"a":   42   ,"b":  "x"}"#;
+        let a = find_key_value_spans(doc, "a");
+        assert_eq!(&doc[a[0].start..a[0].end], b"42");
+        let b = find_key_value_spans(doc, "b");
+        assert_eq!(&doc[b[0].start..b[0].end], b"\"x\"");
     }
 }

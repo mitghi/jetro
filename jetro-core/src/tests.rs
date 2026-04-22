@@ -2821,4 +2821,60 @@ mod tests {
         let j = Jetro::from_bytes(raw).unwrap();
         assert_eq!(j.collect("$..p.sum()").unwrap(), json!(60));
     }
+
+    #[test]
+    fn simd_scan_literal_eq_int() {
+        // Tree walker fast path: `$..k[@ == lit]` with raw bytes.  Only
+        // matching sites parse; non-matching bytes are skipped.
+        let doc = json!({"xs":[{"n":10},{"n":42},{"n":10},{"n":42},{"n":7}]});
+        let raw = serde_json::to_vec(&doc).unwrap();
+        let ast = crate::parser::parse("$..n.filter(@ == 42)").unwrap();
+        let r = crate::eval::evaluate_with_raw(
+            &ast,
+            &doc,
+            std::sync::Arc::new(crate::MethodRegistry::new()),
+            std::sync::Arc::from(raw.into_boxed_slice()),
+        ).unwrap();
+        assert_eq!(r, json!([42, 42]));
+    }
+
+    #[test]
+    fn simd_scan_literal_eq_string() {
+        let doc = json!({
+            "events":[
+                {"type":"action"},{"type":"idle"},
+                {"type":"action"},{"type":"noop"}
+            ]
+        });
+        let raw = serde_json::to_vec(&doc).unwrap();
+        let ast = crate::parser::parse(r#"$..type.filter(@ == "action")"#).unwrap();
+        let r = crate::eval::evaluate_with_raw(
+            &ast,
+            &doc,
+            std::sync::Arc::new(crate::MethodRegistry::new()),
+            std::sync::Arc::from(raw.into_boxed_slice()),
+        ).unwrap();
+        assert_eq!(r, json!(["action", "action"]));
+    }
+
+    #[test]
+    fn simd_scan_literal_eq_bool_null() {
+        let doc = json!({"xs":[{"v":true},{"v":false},{"v":true},{"v":null}]});
+        let raw = serde_json::to_vec(&doc).unwrap();
+        let ast = crate::parser::parse("$..v.filter(@ == true)").unwrap();
+        let r = crate::eval::evaluate_with_raw(
+            &ast, &doc,
+            std::sync::Arc::new(crate::MethodRegistry::new()),
+            std::sync::Arc::from(raw.clone().into_boxed_slice()),
+        ).unwrap();
+        assert_eq!(r, json!([true, true]));
+
+        let ast2 = crate::parser::parse("$..v.filter(@ == null)").unwrap();
+        let r2 = crate::eval::evaluate_with_raw(
+            &ast2, &doc,
+            std::sync::Arc::new(crate::MethodRegistry::new()),
+            std::sync::Arc::from(raw.into_boxed_slice()),
+        ).unwrap();
+        assert_eq!(r2, json!([null]));
+    }
 }
