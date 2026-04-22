@@ -2739,13 +2739,17 @@ impl VM {
 
                 Opcode::DictComp(spec) => {
                     let items = self.exec_iter_vals(&spec.iter, env)?;
-                    let mut map: IndexMap<Arc<str>, Val> = IndexMap::new();
+                    let mut map: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(items.len());
                     for item in items {
                         let ie = bind_comp_vars(env, &spec.vars, item);
                         if let Some(cond) = &spec.cond {
                             if !is_truthy(&self.exec(cond, &ie)?) { continue; }
                         }
-                        let k: Arc<str> = Arc::from(val_to_key(&self.exec(&spec.key, &ie)?).as_str());
+                        // Reuse existing Arc<str> when the key is already a string.
+                        let k: Arc<str> = match self.exec(&spec.key, &ie)? {
+                            Val::Str(s) => s,
+                            other       => Arc::<str>::from(val_to_key(&other)),
+                        };
                         let v = self.exec(&spec.val, &ie)?;
                         map.insert(k, v);
                     }
