@@ -2450,16 +2450,15 @@ impl VM {
                         Val::Arr(a) => Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone()),
                         _ => Vec::new(),
                     };
-                    let mut seen: Vec<Val> = Vec::with_capacity(items.len());
+                    let mut seen: std::collections::HashSet<String> =
+                        std::collections::HashSet::with_capacity(items.len());
                     let mut out = Vec::with_capacity(items.len());
                     let mut scratch = env.clone();
                     for item in items {
                         let prev = scratch.swap_current(item);
                         let mapped = self.exec(f, &scratch)?;
                         scratch.restore_current(prev);
-                        if !seen.iter().any(|s| super::eval::util::cmp_vals(s, &mapped)
-                                                 == std::cmp::Ordering::Equal) {
-                            seen.push(mapped.clone());
+                        if seen.insert(super::eval::util::val_to_key(&mapped)) {
                             out.push(mapped);
                         }
                     }
