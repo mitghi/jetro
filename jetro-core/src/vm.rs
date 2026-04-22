@@ -1932,9 +1932,12 @@ impl VM {
                         other => vec![other],
                     };
                     let mut out = Vec::new();
+                    let mut scratch = env.clone();
                     for item in items {
-                        let ie = env.with_current(item.clone());
-                        if is_truthy(&self.exec(pred, &ie)?) { out.push(item); }
+                        let prev = scratch.swap_current(item.clone());
+                        let keep = is_truthy(&self.exec(pred, &scratch)?);
+                        scratch.restore_current(prev);
+                        if keep { out.push(item); }
                     }
                     stack.push(Val::arr(out));
                 }
@@ -2185,9 +2188,11 @@ impl VM {
                         _ => Vec::new(),
                     };
                     let mut out = Vec::new();
+                    let mut scratch = env.clone();
                     for item in items {
-                        let sub_env = env.with_current(item);
-                        let mapped = self.exec(f, &sub_env)?;
+                        let prev = scratch.swap_current(item);
+                        let mapped = self.exec(f, &scratch)?;
+                        scratch.restore_current(prev);
                         match mapped {
                             Val::Arr(a) => {
                                 let v = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
@@ -2205,10 +2210,14 @@ impl VM {
                         _ => Vec::new(),
                     };
                     let mut out = Vec::new();
+                    let mut scratch = env.clone();
                     for item in items {
-                        let sub_env = env.with_current(item.clone());
-                        if !is_truthy(&self.exec(pred, &sub_env)?) { continue; }
-                        if !is_truthy(&self.exec(stop, &sub_env)?) { break; }
+                        let prev = scratch.swap_current(item.clone());
+                        let pass_pred = is_truthy(&self.exec(pred, &scratch)?);
+                        if !pass_pred { scratch.restore_current(prev); continue; }
+                        let stop_ok = is_truthy(&self.exec(stop, &scratch)?);
+                        scratch.restore_current(prev);
+                        if !stop_ok { break; }
                         out.push(item);
                     }
                     stack.push(Val::arr(out));
@@ -2221,13 +2230,20 @@ impl VM {
                     };
                     let mut out = Vec::new();
                     let mut dropping = true;
+                    let mut scratch = env.clone();
                     for item in items {
-                        let sub_env = env.with_current(item.clone());
-                        if !is_truthy(&self.exec(pred, &sub_env)?) { continue; }
+                        let prev = scratch.swap_current(item.clone());
+                        let pass_pred = is_truthy(&self.exec(pred, &scratch)?);
+                        if !pass_pred { scratch.restore_current(prev); continue; }
                         if dropping {
-                            if is_truthy(&self.exec(drop, &sub_env)?) { continue; }
+                            let still_drop = is_truthy(&self.exec(drop, &scratch)?);
+                            scratch.restore_current(prev);
+                            if still_drop { continue; }
                             dropping = false;
+                            out.push(item);
+                            continue;
                         }
+                        scratch.restore_current(prev);
                         out.push(item);
                     }
                     stack.push(Val::arr(out));
