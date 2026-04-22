@@ -1327,6 +1327,36 @@ mod tests {
     }
 
     #[test]
+    fn fusion_sort_sum_drops_sort() {
+        use crate::vm::{Compiler, Opcode, BuiltinMethod};
+        let prog = Compiler::compile_str("$.books.sort().sum()").unwrap();
+        let has_sort = prog.ops.iter().any(|o| matches!(o,
+            Opcode::CallMethod(c) if c.method == BuiltinMethod::Sort));
+        assert!(!has_sort, "sort before sum should be strength-reduced away");
+    }
+
+    #[test]
+    fn fusion_reverse_max_drops_reverse() {
+        use crate::vm::{Compiler, Opcode, BuiltinMethod};
+        let prog = Compiler::compile_str("$.books.reverse().max()").unwrap();
+        let has_rev = prog.ops.iter().any(|o| matches!(o,
+            Opcode::CallMethod(c) if c.method == BuiltinMethod::Reverse));
+        assert!(!has_rev, "reverse before max should be strength-reduced away");
+    }
+
+    #[test]
+    fn fusion_reorder_aggregate_semantics() {
+        let doc = books();
+        // `min` / `max` are exact — no FP summation order to worry about.
+        let a = query("$.store.books.sort(price).min(price)", &doc).unwrap();
+        let b = query("$.store.books.min(price)",             &doc).unwrap();
+        assert_eq!(a, b);
+        let c = query("$.store.books.reverse().max(price)",   &doc).unwrap();
+        let d = query("$.store.books.max(price)",             &doc).unwrap();
+        assert_eq!(c, d);
+    }
+
+    #[test]
     fn fusion_map_sum_semantics() {
         let doc = books();
         let r = query("$.store.books.map(@.price).sum()", &doc).unwrap();

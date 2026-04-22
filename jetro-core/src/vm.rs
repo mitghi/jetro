@@ -907,6 +907,17 @@ impl Compiler {
                            && (next.method == BuiltinMethod::Len
                                || next.method == BuiltinMethod::Count) =>
                         Some(Opcode::CallMethod(Arc::clone(next))),
+                    // Order-independent aggregate after sort/reverse → drop
+                    // the reorder.  sum / avg / min / max only inspect the
+                    // multiset of elements, not their order.
+                    (BuiltinMethod::Sort | BuiltinMethod::Reverse,
+                     Opcode::CallMethod(next))
+                        if prev.sub_progs.is_empty()
+                           && next.sub_progs.is_empty()
+                           && matches!(next.method,
+                                BuiltinMethod::Sum | BuiltinMethod::Avg
+                              | BuiltinMethod::Min | BuiltinMethod::Max) =>
+                        Some(Opcode::CallMethod(Arc::clone(next))),
                     _ => None,
                 };
                 if let Some(rep) = replaced {
