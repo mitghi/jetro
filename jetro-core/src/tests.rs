@@ -1438,6 +1438,31 @@ mod tests {
     }
 
     #[test]
+    fn fusion_filter_last_opcode() {
+        use crate::vm::{Compiler, Opcode};
+        let prog = Compiler::compile_str("$.books.filter(@.price > 10).last()").unwrap();
+        let has = prog.ops.iter().any(|o| matches!(o, Opcode::FilterLast { .. }));
+        assert!(has, "filter+last should fuse to FilterLast: {:?}", prog.ops);
+    }
+
+    #[test]
+    fn fusion_filter_last_semantics() {
+        let doc = books();
+        let fused = query("$.store.books.filter(@.price > 10).last()", &doc).unwrap();
+        let plain = query("$.store.books.filter(@.price > 10)",        &doc).unwrap();
+        let arr = plain.as_array().unwrap();
+        if arr.is_empty() {
+            assert!(fused.is_null());
+        } else {
+            assert_eq!(fused, arr[arr.len() - 1]);
+        }
+
+        let empty_doc: serde_json::Value = serde_json::from_str(r#"{"xs":[]}"#).unwrap();
+        let e = query("$.xs.filter(@.price > 0).last()", &empty_doc).unwrap();
+        assert!(e.is_null());
+    }
+
+    #[test]
     fn fusion_sort_sort_idempotent_collapse() {
         use crate::vm::{Compiler, Opcode, BuiltinMethod};
         let prog = Compiler::compile_str("$.books.sort().sort().first()").unwrap();

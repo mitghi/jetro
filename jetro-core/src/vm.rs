@@ -348,6 +348,9 @@ pub enum Opcode {
     /// Fused `filter(p).map(f).first()` — early-exit: apply `map` once,
     /// to the first item that satisfies `pred`.
     FilterMapFirst { pred: Arc<Program>, map: Arc<Program> },
+    /// Fused `filter(p).last()` — reverse scan, return last item
+    /// satisfying `pred` (or Null when none match / input is Null).
+    FilterLast { pred: Arc<Program> },
     /// Fused `sort()` + `[0:n]` — partial-sort smallest N using BinaryHeap.
     /// `asc=true` → smallest N; `asc=false` → largest N.
     TopN { n: usize, asc: bool },
@@ -834,6 +837,16 @@ impl Compiler {
                         out.push(o);
                         continue;
                     }
+                }
+                // filter(p) + last() → FilterLast (reverse scan, early exit).
+                // filter(p) + first() is handled by pass_find_quantifier
+                // (emits FindFirst).
+                if a.method == BuiltinMethod::Filter && a.sub_progs.len() >= 1
+                   && b.method == BuiltinMethod::Last && b.sub_progs.is_empty() {
+                    let pred = Arc::clone(&a.sub_progs[0]);
+                    out.pop();
+                    out.push(Opcode::FilterLast { pred });
+                    continue;
                 }
                 // filter(p) + take_while(q) → FilterTakeWhile
                 if a.method == BuiltinMethod::Filter && a.sub_progs.len() >= 1
@@ -2293,6 +2306,28 @@ impl VM {
                         let sub = env.with_current(recv.clone());
                         if is_truthy(&self.exec(pred, &sub)?) {
                             out = self.exec(map, &sub)?;
+                        }
+                    }
+                    stack.push(out);
+                }
+                Opcode::FilterLast { pred } => {
+                    let recv = pop!(stack);
+                    let mut out = Val::Null;
+                    if let Val::Arr(a) = &recv {
+                        let mut scratch = env.clone();
+                        for item in a.iter().rev() {
+                            let prev = scratch.swap_current(item.clone());
+                            if is_truthy(&self.exec(pred, &scratch)?) {
+                                scratch.restore_current(prev);
+                                out = item.clone();
+                                break;
+                            }
+                            scratch.restore_current(prev);
+                        }
+                    } else if !recv.is_null() {
+                        let sub = env.with_current(recv.clone());
+                        if is_truthy(&self.exec(pred, &sub)?) {
+                            out = recv;
                         }
                     }
                     stack.push(out);

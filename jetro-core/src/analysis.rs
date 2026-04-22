@@ -263,7 +263,8 @@ fn apply_op(op: &Opcode, stack: &mut Vec<AbstractVal>) {
             pop1!();
             stack.push(AbstractVal::array());
         }
-        Opcode::MapFirst(_) | Opcode::MapLast(_) | Opcode::FilterMapFirst { .. } => {
+        Opcode::MapFirst(_) | Opcode::MapLast(_) | Opcode::FilterMapFirst { .. }
+            | Opcode::FilterLast { .. } => {
             pop1!();
             stack.push(AbstractVal::UNKNOWN);
         }
@@ -387,7 +388,9 @@ fn count_ident_uses_in_ops(ops: &[Opcode], name: &str, acc: &mut usize) {
                 | Opcode::DynIndex(p)
                 | Opcode::MapSum(p) | Opcode::MapAvg(p)
                 | Opcode::MapFlatten(p)
-                | Opcode::MapFirst(p) | Opcode::MapLast(p) => count_ident_uses_in_ops(&p.ops, name, acc),
+                | Opcode::MapFirst(p) | Opcode::MapLast(p)
+                | Opcode::FilterLast { pred: p }
+                => count_ident_uses_in_ops(&p.ops, name, acc),
             Opcode::FilterTakeWhile { pred, stop } => {
                 count_ident_uses_in_ops(&pred.ops, name, acc);
                 count_ident_uses_in_ops(&stop.ops, name, acc);
@@ -488,7 +491,9 @@ fn collect_fields_in_ops(ops: &[Opcode], acc: &mut Vec<Arc<str>>) {
                 | Opcode::DynIndex(p)
                 | Opcode::MapSum(p) | Opcode::MapAvg(p)
                 | Opcode::MapFlatten(p)
-                | Opcode::MapFirst(p) | Opcode::MapLast(p) => collect_fields_in_ops(&p.ops, acc),
+                | Opcode::MapFirst(p) | Opcode::MapLast(p)
+                | Opcode::FilterLast { pred: p }
+                => collect_fields_in_ops(&p.ops, acc),
             Opcode::FilterTakeWhile { pred, stop } => {
                 collect_fields_in_ops(&pred.ops, acc);
                 collect_fields_in_ops(&stop.ops, acc);
@@ -557,7 +562,9 @@ fn hash_ops(ops: &[Opcode], h: &mut impl std::hash::Hasher) {
                 | Opcode::DynIndex(p)
                 | Opcode::MapSum(p) | Opcode::MapAvg(p)
                 | Opcode::MapFlatten(p)
-                | Opcode::MapFirst(p) | Opcode::MapLast(p) => hash_ops(&p.ops, h),
+                | Opcode::MapFirst(p) | Opcode::MapLast(p)
+                | Opcode::FilterLast { pred: p }
+                => hash_ops(&p.ops, h),
             Opcode::FilterTakeWhile { pred, stop } => {
                 hash_ops(&pred.ops, h);
                 hash_ops(&stop.ops, h);
@@ -591,7 +598,9 @@ fn walk_subprograms(ops: &[Opcode], map: &mut HashMap<u64, usize>) {
                 | Opcode::DynIndex(p)
                 | Opcode::MapSum(p) | Opcode::MapAvg(p)
                 | Opcode::MapFlatten(p)
-                | Opcode::MapFirst(p) | Opcode::MapLast(p) => vec![p],
+                | Opcode::MapFirst(p) | Opcode::MapLast(p)
+                | Opcode::FilterLast { pred: p }
+                => vec![p],
             Opcode::FilterTakeWhile { pred, stop } => vec![pred, stop],
             Opcode::FilterMap { pred, map: m }
                 | Opcode::FilterMapSum { pred, map: m }
@@ -799,6 +808,7 @@ fn rewrite_op(op: &Opcode, cache: &mut HashMap<u64, Arc<Program>>) -> Opcode {
         Opcode::MapFlatten(p)   => Opcode::MapFlatten(dedup_rec(p, cache)),
         Opcode::MapFirst(p)     => Opcode::MapFirst(dedup_rec(p, cache)),
         Opcode::MapLast(p)      => Opcode::MapLast(dedup_rec(p, cache)),
+        Opcode::FilterLast  { pred } => Opcode::FilterLast  { pred: dedup_rec(pred, cache) },
         Opcode::FilterTakeWhile { pred, stop } => Opcode::FilterTakeWhile {
             pred: dedup_rec(pred, cache),
             stop: dedup_rec(stop, cache),
@@ -942,6 +952,7 @@ pub fn opcode_cost(op: &Opcode) -> u32 {
             | Opcode::MapSum(p) | Opcode::MapAvg(p)
             | Opcode::MapFlatten(p)
             | Opcode::MapFirst(p) | Opcode::MapLast(p)
+            | Opcode::FilterLast { pred: p }
             | Opcode::DynIndex(p) => 10 + program_cost(p),
         Opcode::FilterTakeWhile { pred, stop } => 10 + program_cost(pred) + program_cost(stop),
         Opcode::FilterDropWhile { pred, drop } => 10 + program_cost(pred) + program_cost(drop),
