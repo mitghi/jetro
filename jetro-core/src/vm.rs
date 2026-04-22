@@ -2636,51 +2636,6 @@ impl VM {
         stack.pop().ok_or_else(|| EvalError("program produced no value".into()))
     }
 
-    // ── Pipeline execution (recursive, env-cloning) ────────────────────────────
-
-    /// Execute a pipeline by compiling pipeline steps as sub-programs.
-    /// This is called when a `Pipeline` expr is compiled into a sequence
-    /// of SetCurrent + sub-program opcodes.
-    fn exec_pipeline(&mut self, base: &Program, steps: &[PipeStep], orig_ctx: &VarCtx, env: &Env)
-        -> Result<Val, EvalError>
-    {
-        let mut current = self.exec(base, env)?;
-        let mut cur_env = env.clone();
-        for step in steps {
-            match step {
-                PipeStep::Forward(rhs) => {
-                    current = self.exec_pipe_forward(&current, rhs, orig_ctx, &cur_env)?;
-                }
-                PipeStep::Bind(target) => {
-                    cur_env = apply_bind_to_env(target, &current, cur_env)?;
-                }
-            }
-        }
-        Ok(current)
-    }
-
-    fn exec_pipe_forward(&mut self, left: &Val, rhs: &Expr, ctx: &VarCtx, env: &Env) -> Result<Val, EvalError> {
-        match rhs {
-            Expr::Ident(name) if !ctx.has(name) => {
-                dispatch_method(left.clone(), name, &[], env)
-            }
-            Expr::Chain(base, _steps) => {
-                if let Expr::Ident(name) = base.as_ref() {
-                    if !ctx.has(name) {
-                        let prog = Compiler::compile_sub(rhs, ctx);
-                        return self.exec(&prog, &env.with_current(left.clone()));
-                    }
-                }
-                let sub = Compiler::compile_sub(rhs, ctx);
-                self.exec(&sub, &env.with_current(left.clone()))
-            }
-            _ => {
-                let sub = Compiler::compile_sub(rhs, ctx);
-                self.exec(&sub, &env.with_current(left.clone()))
-            }
-        }
-    }
-
     // ── Method call dispatch ──────────────────────────────────────────────────
 
     fn exec_call(&mut self, recv: Val, call: &CompiledCall, env: &Env) -> Result<Val, EvalError> {
@@ -2716,6 +2671,9 @@ impl VM {
                 Some(params[0].as_str()),
             _ => None,
         };
+        // Single scratch env per call — reused across every item iteration
+        // below via `push_lam` / `pop_lam` instead of a fresh clone per item.
+        let mut scratch = env.clone();
 
         match call.method {
             BuiltinMethod::Filter => {
@@ -2723,7 +2681,7 @@ impl VM {
                 let items = recv.into_vec().ok_or_else(|| EvalError("filter: expected array".into()))?;
                 let mut out = Vec::new();
                 for item in items {
-                    if is_truthy(&self.exec_lam_body(pred, &item, lam_param, env)?) {
+                    if is_truthy(&self.exec_lam_body_scratch(pred, &item, lam_param, &mut scratch)?) {
                         out.push(item);
                     }
                 }
@@ -2732,17 +2690,18 @@ impl VM {
             BuiltinMethod::Map => {
                 let mapper = sub.ok_or_else(|| EvalError("map: requires mapper".into()))?;
                 let items = recv.into_vec().ok_or_else(|| EvalError("map: expected array".into()))?;
-                let r: Result<Vec<_>, _> = items.into_iter()
-                    .map(|item| self.exec_lam_body(mapper, &item, lam_param, env))
-                    .collect();
-                Ok(Val::arr(r?))
+                let mut out = Vec::with_capacity(items.len());
+                for item in items {
+                    out.push(self.exec_lam_body_scratch(mapper, &item, lam_param, &mut scratch)?);
+                }
+                Ok(Val::arr(out))
             }
             BuiltinMethod::FlatMap => {
                 let mapper = sub.ok_or_else(|| EvalError("flatMap: requires mapper".into()))?;
                 let items = recv.into_vec().ok_or_else(|| EvalError("flatMap: expected array".into()))?;
                 let mut out = Vec::new();
                 for item in items {
-                    match self.exec_lam_body(mapper, &item, lam_param, env)? {
+                    match self.exec_lam_body_scratch(mapper, &item, lam_param, &mut scratch)? {
                         Val::Arr(a) => out.extend(Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone())),
                         v => out.push(v),
                     }
@@ -2754,34 +2713,38 @@ impl VM {
                 dispatch_method(recv, call.name.as_ref(), &call.orig_args, env)
             }
             BuiltinMethod::Any => {
-                let pred = sub.ok_or_else(|| EvalError("any: requires predicate".into()))?;
                 if let Val::Arr(a) = &recv {
-                    let result = a.iter().any(|item| {
-                        self.exec_lam_body(pred, item, lam_param, env)
-                            .map(|v| is_truthy(&v)).unwrap_or(false)
-                    });
-                    Ok(Val::Bool(result))
+                    let pred = sub.ok_or_else(|| EvalError("any: requires predicate".into()))?;
+                    for item in a.iter() {
+                        if is_truthy(&self.exec_lam_body_scratch(pred, item, lam_param, &mut scratch)?) {
+                            return Ok(Val::Bool(true));
+                        }
+                    }
+                    Ok(Val::Bool(false))
                 } else { Ok(Val::Bool(false)) }
             }
             BuiltinMethod::All => {
-                let pred = sub.ok_or_else(|| EvalError("all: requires predicate".into()))?;
                 if let Val::Arr(a) = &recv {
                     if a.is_empty() { return Ok(Val::Bool(true)); }
-                    let result = a.iter().all(|item| {
-                        self.exec_lam_body(pred, item, lam_param, env)
-                            .map(|v| is_truthy(&v)).unwrap_or(false)
-                    });
-                    Ok(Val::Bool(result))
+                    let pred = sub.ok_or_else(|| EvalError("all: requires predicate".into()))?;
+                    for item in a.iter() {
+                        if !is_truthy(&self.exec_lam_body_scratch(pred, item, lam_param, &mut scratch)?) {
+                            return Ok(Val::Bool(false));
+                        }
+                    }
+                    Ok(Val::Bool(true))
                 } else { Ok(Val::Bool(false)) }
             }
             BuiltinMethod::Count if !call.sub_progs.is_empty() => {
-                let pred = &call.sub_progs[0];
                 if let Val::Arr(a) = &recv {
-                    let n = a.iter().filter(|item| {
-                        self.exec_lam_body(pred, item, lam_param, env)
-                            .map(|v| is_truthy(&v)).unwrap_or(false)
-                    }).count();
-                    Ok(Val::Int(n as i64))
+                    let pred = &call.sub_progs[0];
+                    let mut n: i64 = 0;
+                    for item in a.iter() {
+                        if is_truthy(&self.exec_lam_body_scratch(pred, item, lam_param, &mut scratch)?) {
+                            n += 1;
+                        }
+                    }
+                    Ok(Val::Int(n))
                 } else { Ok(Val::Int(0)) }
             }
             BuiltinMethod::GroupBy => {
@@ -2789,7 +2752,7 @@ impl VM {
                 let items = recv.into_vec().ok_or_else(|| EvalError("groupBy: expected array".into()))?;
                 let mut map: IndexMap<Arc<str>, Val> = IndexMap::new();
                 for item in items {
-                    let k: Arc<str> = Arc::from(val_to_key(&self.exec_lam_body(key_prog, &item, lam_param, env)?).as_str());
+                    let k: Arc<str> = Arc::from(val_to_key(&self.exec_lam_body_scratch(key_prog, &item, lam_param, &mut scratch)?).as_str());
                     let bucket = map.entry(k).or_insert_with(|| Val::arr(Vec::new()));
                     bucket.as_array_mut().unwrap().push(item);
                 }
@@ -2800,7 +2763,7 @@ impl VM {
                 let items = recv.into_vec().ok_or_else(|| EvalError("countBy: expected array".into()))?;
                 let mut map: IndexMap<Arc<str>, Val> = IndexMap::new();
                 for item in items {
-                    let k: Arc<str> = Arc::from(val_to_key(&self.exec_lam_body(key_prog, &item, lam_param, env)?).as_str());
+                    let k: Arc<str> = Arc::from(val_to_key(&self.exec_lam_body_scratch(key_prog, &item, lam_param, &mut scratch)?).as_str());
                     let counter = map.entry(k).or_insert(Val::Int(0));
                     if let Val::Int(n) = counter { *n += 1; }
                 }
@@ -2811,7 +2774,7 @@ impl VM {
                 let items = recv.into_vec().ok_or_else(|| EvalError("indexBy: expected array".into()))?;
                 let mut map: IndexMap<Arc<str>, Val> = IndexMap::new();
                 for item in items {
-                    let k: Arc<str> = Arc::from(val_to_key(&self.exec_lam_body(key_prog, &item, lam_param, env)?).as_str());
+                    let k: Arc<str> = Arc::from(val_to_key(&self.exec_lam_body_scratch(key_prog, &item, lam_param, &mut scratch)?).as_str());
                     map.insert(k, item);
                 }
                 Ok(Val::obj(map))
@@ -2821,7 +2784,7 @@ impl VM {
                 let items = recv.into_vec().ok_or_else(|| EvalError("takeWhile: expected array".into()))?;
                 let mut out = Vec::new();
                 for item in items {
-                    if !is_truthy(&self.exec_lam_body(pred, &item, lam_param, env)?) { break; }
+                    if !is_truthy(&self.exec_lam_body_scratch(pred, &item, lam_param, &mut scratch)?) { break; }
                     out.push(item);
                 }
                 Ok(Val::arr(out))
@@ -2830,13 +2793,15 @@ impl VM {
                 let pred = sub.ok_or_else(|| EvalError("dropWhile: requires predicate".into()))?;
                 let items = recv.into_vec().ok_or_else(|| EvalError("dropWhile: expected array".into()))?;
                 let mut dropping = true;
-                let out: Vec<Val> = items.into_iter().filter(|item| {
+                let mut out = Vec::new();
+                for item in items {
                     if dropping {
-                        dropping = self.exec_lam_body(pred, item, lam_param, env)
-                            .map(|v| is_truthy(&v)).unwrap_or(false);
-                        !dropping
-                    } else { true }
-                }).collect();
+                        let still_drop = is_truthy(&self.exec_lam_body_scratch(pred, &item, lam_param, &mut scratch)?);
+                        if still_drop { continue; }
+                        dropping = false;
+                    }
+                    out.push(item);
+                }
                 Ok(Val::arr(out))
             }
             BuiltinMethod::Accumulate => {
@@ -2847,7 +2812,7 @@ impl VM {
                 let items = recv.into_vec().ok_or_else(|| EvalError("partition: expected array".into()))?;
                 let (mut yes, mut no) = (Vec::new(), Vec::new());
                 for item in items {
-                    if is_truthy(&self.exec_lam_body(pred, &item, lam_param, env)?) {
+                    if is_truthy(&self.exec_lam_body_scratch(pred, &item, lam_param, &mut scratch)?) {
                         yes.push(item);
                     } else {
                         no.push(item);
@@ -2860,7 +2825,7 @@ impl VM {
                 let map = recv.into_map().ok_or_else(|| EvalError("transformKeys: expected object".into()))?;
                 let mut out: IndexMap<Arc<str>, Val> = IndexMap::new();
                 for (k, v) in map {
-                    let new_key = Arc::from(val_to_key(&self.exec_lam_body(lam, &Val::Str(k), lam_param, env)?).as_str());
+                    let new_key = Arc::from(val_to_key(&self.exec_lam_body_scratch(lam, &Val::Str(k), lam_param, &mut scratch)?).as_str());
                     out.insert(new_key, v);
                 }
                 Ok(Val::obj(out))
@@ -2870,7 +2835,7 @@ impl VM {
                 let map = recv.into_map().ok_or_else(|| EvalError("transformValues: expected object".into()))?;
                 let mut out: IndexMap<Arc<str>, Val> = IndexMap::new();
                 for (k, v) in map {
-                    out.insert(k, self.exec_lam_body(lam, &v, lam_param, env)?);
+                    out.insert(k, self.exec_lam_body_scratch(lam, &v, lam_param, &mut scratch)?);
                 }
                 Ok(Val::obj(out))
             }
@@ -2879,7 +2844,7 @@ impl VM {
                 let map = recv.into_map().ok_or_else(|| EvalError("filterKeys: expected object".into()))?;
                 let mut out: IndexMap<Arc<str>, Val> = IndexMap::new();
                 for (k, v) in map {
-                    if is_truthy(&self.exec_lam_body(lam, &Val::Str(k.clone()), lam_param, env)?) {
+                    if is_truthy(&self.exec_lam_body_scratch(lam, &Val::Str(k.clone()), lam_param, &mut scratch)?) {
                         out.insert(k, v);
                     }
                 }
@@ -2890,7 +2855,7 @@ impl VM {
                 let map = recv.into_map().ok_or_else(|| EvalError("filterValues: expected object".into()))?;
                 let mut out: IndexMap<Arc<str>, Val> = IndexMap::new();
                 for (k, v) in map {
-                    if is_truthy(&self.exec_lam_body(lam, &v, lam_param, env)?) {
+                    if is_truthy(&self.exec_lam_body_scratch(lam, &v, lam_param, &mut scratch)?) {
                         out.insert(k, v);
                     }
                 }
@@ -2907,35 +2872,28 @@ impl VM {
         }
     }
 
-    /// Run a pre-compiled sub-program (lambda body) with `item` as the current value.
-    /// Handles lambda params from the original arg if present.
-    #[inline]
-    fn exec_with_lambda(&mut self, prog: &Program, item: &Val, orig_args: &[Arg], env: &Env)
-        -> Result<Val, EvalError>
-    {
-        // Check if the original arg was a lambda with params that need binding
-        if let Some(Arg::Pos(Expr::Lambda { params, .. })) = orig_args.first() {
-            if !params.is_empty() {
-                let mut inner = env.with_var(&params[0], item.clone());
-                inner.current = item.clone();
-                return self.exec(prog, &inner);
-            }
-        }
-        self.exec(prog, &env.with_current(item.clone()))
-    }
-
-    /// Like `exec_with_lambda` but takes the pre-extracted lambda param
-    /// name.  Callers that drive a hot loop should hoist the param lookup
-    /// out so we don't re-scan `orig_args` per item.
+    /// Convenience wrapper: clones `env` once, runs the prog, discards
+    /// the scratch.  Hot loops should use `exec_lam_body_scratch` to
+    /// reuse a single scratch env instead.
     fn exec_lam_body(&mut self, prog: &Program, item: &Val, lam_param: Option<&str>, env: &Env)
         -> Result<Val, EvalError>
     {
-        if let Some(name) = lam_param {
-            let mut inner = env.with_var(name, item.clone());
-            inner.current = item.clone();
-            return self.exec(prog, &inner);
-        }
-        self.exec(prog, &env.with_current(item.clone()))
+        let mut scratch = env.clone();
+        self.exec_lam_body_scratch(prog, item, lam_param, &mut scratch)
+    }
+
+    /// Scratch-reusing variant: mutates `scratch` in place via
+    /// `Env::push_lam` / `Env::pop_lam` instead of cloning per item.
+    /// The caller provides (and reuses) the scratch env across loop
+    /// iterations.
+    fn exec_lam_body_scratch(&mut self, prog: &Program, item: &Val,
+                              lam_param: Option<&str>, scratch: &mut Env)
+        -> Result<Val, EvalError>
+    {
+        let frame = scratch.push_lam(lam_param, item.clone());
+        let r = self.exec(prog, scratch);
+        scratch.pop_lam(frame);
+        r
     }
 
     // ── Object construction ───────────────────────────────────────────────────
@@ -3180,39 +3138,6 @@ fn exec_cast(v: &Val, ty: super::ast::CastType) -> Result<Val, EvalError> {
             _             => err!("as object: cannot convert non-object"),
         },
         CastType::Null => Ok(Val::Null),
-    }
-}
-
-fn apply_bind_to_env(target: &BindTarget, val: &Val, env: Env) -> Result<Env, EvalError> {
-    match target {
-        BindTarget::Name(name) => Ok(env.with_var(name, val.clone())),
-        BindTarget::Obj { fields, rest } => {
-            let obj = val.as_object()
-                .ok_or_else(|| EvalError("bind destructure: expected object".into()))?;
-            let mut e = env;
-            for f in fields {
-                e = e.with_var(f, obj.get(f.as_str()).cloned().unwrap_or(Val::Null));
-            }
-            if let Some(rest_name) = rest {
-                let mut rem: IndexMap<Arc<str>, Val> = IndexMap::new();
-                for (k, v) in obj {
-                    if !fields.iter().any(|f| f.as_str() == k.as_ref()) {
-                        rem.insert(k.clone(), v.clone());
-                    }
-                }
-                e = e.with_var(rest_name, Val::obj(rem));
-            }
-            Ok(e)
-        }
-        BindTarget::Arr(names) => {
-            let arr = val.as_array()
-                .ok_or_else(|| EvalError("bind destructure: expected array".into()))?;
-            let mut e = env;
-            for (i, name) in names.iter().enumerate() {
-                e = e.with_var(name, arr.get(i).cloned().unwrap_or(Val::Null));
-            }
-            Ok(e)
-        }
     }
 }
 

@@ -78,6 +78,20 @@ macro_rules! err {
 // SmallVec<4> keeps ≤4 bindings on the stack — covers the vast majority of
 // queries without a heap allocation.  Linear scan is fine for n ≤ 4.
 
+/// Saved-state token returned by `Env::push_lam` and consumed by
+/// `Env::pop_lam`.  Lets hot loops bind a single lambda slot + swap
+/// `current` without cloning the whole Env per iteration.
+pub struct LamFrame {
+    prev_current: Val,
+    prev_var:     LamVarPrev,
+}
+
+enum LamVarPrev {
+    None,
+    Pushed,
+    Replaced(usize, Val),
+}
+
 #[derive(Clone)]
 pub struct Env {
     vars:     SmallVec<[(Arc<str>, Val); 4]>,
@@ -153,6 +167,38 @@ impl Env {
         if let Some(p) = vars.iter().position(|(k, _)| k.as_ref() == n2) { vars[p].1 = v2; }
         else { vars.push((Arc::from(n2), v2)); }
         Self { vars, root: self.root.clone(), current: self.current.clone(), registry: self.registry.clone() }
+    }
+
+    /// Hot-loop helper: bind `name → val` and swap `current`, returning
+    /// the previous state.  If `name` was already bound we remember the
+    /// previous value; otherwise we remember that the slot was freshly
+    /// pushed so `pop_lam` can truncate it off again.
+    #[inline]
+    pub fn push_lam(&mut self, name: Option<&str>, val: Val) -> LamFrame {
+        let prev_current = std::mem::replace(&mut self.current, val.clone());
+        let prev_var = match name {
+            None => LamVarPrev::None,
+            Some(n) => {
+                if let Some(pos) = self.vars.iter().position(|(k, _)| k.as_ref() == n) {
+                    let prev = std::mem::replace(&mut self.vars[pos].1, val);
+                    LamVarPrev::Replaced(pos, prev)
+                } else {
+                    self.vars.push((Arc::from(n), val));
+                    LamVarPrev::Pushed
+                }
+            }
+        };
+        LamFrame { prev_current, prev_var }
+    }
+
+    #[inline]
+    pub fn pop_lam(&mut self, frame: LamFrame) {
+        self.current = frame.prev_current;
+        match frame.prev_var {
+            LamVarPrev::None => {}
+            LamVarPrev::Pushed => { self.vars.pop(); }
+            LamVarPrev::Replaced(pos, prev) => { self.vars[pos].1 = prev; }
+        }
     }
 
     fn extend_vars(&self, extra: impl IntoIterator<Item = (Arc<str>, Val)>) -> Self {
