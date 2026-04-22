@@ -179,7 +179,13 @@ pub fn rename(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
 pub fn invert(recv: Val) -> Result<Val, EvalError> {
     let map = recv.into_map().ok_or_else(|| EvalError("invert: expected object".into()))?;
     let out: IndexMap<Arc<str>, Val> = map.into_iter()
-        .map(|(k, v)| (Arc::from(val_to_key(&v).as_str()), Val::Str(k)))
+        .map(|(k, v)| {
+            let nk = match v {
+                Val::Str(s) => s,
+                other       => Arc::<str>::from(val_to_key(&other)),
+            };
+            (nk, Val::Str(k))
+        })
         .collect();
     Ok(Val::obj(out))
 }
@@ -191,7 +197,10 @@ pub fn transform_keys(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalErr
     let map = recv.into_map().ok_or_else(|| EvalError("transform_keys: expected object".into()))?;
     let mut out = IndexMap::with_capacity(map.len());
     for (k, v) in map {
-        let new_key = Arc::from(val_to_key(&apply_item(Val::Str(k), lam, env)?).as_str());
+        let new_key: Arc<str> = match apply_item(Val::Str(k), lam, env)? {
+            Val::Str(s) => s,
+            other       => Arc::<str>::from(val_to_key(&other)),
+        };
         out.insert(new_key, v);
     }
     Ok(Val::obj(out))
@@ -208,7 +217,7 @@ pub fn transform_values(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalE
 pub fn filter_keys(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     let lam = args.first().ok_or_else(|| EvalError("filter_keys: requires predicate".into()))?;
     let map = recv.into_map().ok_or_else(|| EvalError("filter_keys: expected object".into()))?;
-    let mut out = IndexMap::new();
+    let mut out = IndexMap::with_capacity(map.len());
     for (k, v) in map {
         if is_truthy(&apply_item(Val::Str(k.clone()), lam, env)?) { out.insert(k, v); }
     }
@@ -218,7 +227,7 @@ pub fn filter_keys(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError>
 pub fn filter_values(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     let lam = args.first().ok_or_else(|| EvalError("filter_values: requires predicate".into()))?;
     let map = recv.into_map().ok_or_else(|| EvalError("filter_values: expected object".into()))?;
-    let mut out = IndexMap::new();
+    let mut out = IndexMap::with_capacity(map.len());
     for (k, v) in map {
         if is_truthy(&apply_item(v.clone(), lam, env)?) { out.insert(k, v); }
     }
@@ -255,12 +264,16 @@ fn pivot_field(item: &Val, arg: &Arg, env: &Env) -> Result<Val, EvalError> {
 
 pub fn pivot(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     let items = recv.into_vec().ok_or_else(|| EvalError("pivot: expected array".into()))?;
+    #[inline]
+    fn to_arc(v: Val) -> Arc<str> {
+        match v { Val::Str(s) => s, other => Arc::<str>::from(val_to_key(&other)) }
+    }
     if args.len() >= 3 {
         // 3-arg: pivot(row_field, col_field, val_field) → {row: {col: val}}
         let mut map: IndexMap<Arc<str>, IndexMap<Arc<str>, Val>> = IndexMap::new();
         for item in &items {
-            let row = Arc::from(val_to_key(&pivot_field(item, &args[0], env)?).as_str());
-            let col = Arc::from(val_to_key(&pivot_field(item, &args[1], env)?).as_str());
+            let row = to_arc(pivot_field(item, &args[0], env)?);
+            let col = to_arc(pivot_field(item, &args[1], env)?);
             let v   = pivot_field(item, &args[2], env)?;
             map.entry(row).or_insert_with(IndexMap::new).insert(col, v);
         }
@@ -273,7 +286,7 @@ pub fn pivot(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     let val_arg = args.get(1).ok_or_else(|| EvalError("pivot: requires value arg".into()))?;
     let mut map = IndexMap::with_capacity(items.len());
     for item in &items {
-        let k = Arc::from(val_to_key(&pivot_field(item, key_arg, env)?).as_str());
+        let k = to_arc(pivot_field(item, key_arg, env)?);
         let v = pivot_field(item, val_arg, env)?;
         map.insert(k, v);
     }
