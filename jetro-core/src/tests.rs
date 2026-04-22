@@ -3027,6 +3027,20 @@ mod tests {
     }
 
     #[test]
+    fn find_count_fuses_to_filter_count() {
+        // Compiled program for `find(p).count()` should collapse to a
+        // single FilterCount op (no residual CallMethod for find/count).
+        use crate::VM;
+        let mut vm = VM::new();
+        let prog = vm.get_or_compile("$.xs.find(@ > 5).count()").unwrap();
+        let has_filter_count = prog.ops.iter().any(|op| matches!(
+            op,
+            crate::vm::Opcode::FilterCount(_)
+        ));
+        assert!(has_filter_count, "expected FilterCount, got {:?}", prog.ops);
+    }
+
+    #[test]
     fn route_c_one_mismatch_errors_via_fallthrough() {
         // Quantifier One on != 1 spans breaks the byte chain and falls
         // through to the normal Val-based path which raises the proper error.

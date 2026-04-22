@@ -1040,12 +1040,15 @@ impl Compiler {
         let mut it = ops.into_iter().peekable();
         while let Some(op) = it.next() {
             if let Opcode::CallMethod(ref call) = op {
-                if call.method == BuiltinMethod::Filter {
+                let is_filter_like = call.method == BuiltinMethod::Filter
+                    || (call.method == BuiltinMethod::Unknown
+                        && matches!(call.name.as_ref(), "find" | "find_all" | "findAll"));
+                if is_filter_like && call.sub_progs.len() == 1 {
                     let is_len = matches!(it.peek(),
                         Some(Opcode::CallMethod(c))
                             if c.method == BuiltinMethod::Len || c.method == BuiltinMethod::Count
                     );
-                    if is_len && !call.sub_progs.is_empty() {
+                    if is_len {
                         let pred = Arc::clone(&call.sub_progs[0]);
                         it.next(); // consume Len/Count
                         out.push(Opcode::FilterCount(pred));
