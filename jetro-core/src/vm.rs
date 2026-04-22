@@ -1931,7 +1931,7 @@ impl VM {
                         Val::Arr(a) => Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone()),
                         other => vec![other],
                     };
-                    let mut out = Vec::new();
+                    let mut out = Vec::with_capacity(items.len());
                     let mut scratch = env.clone();
                     for item in items {
                         let prev = scratch.swap_current(item.clone());
@@ -2187,7 +2187,7 @@ impl VM {
                         Val::Arr(a) => Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone()),
                         _ => Vec::new(),
                     };
-                    let mut out = Vec::new();
+                    let mut out = Vec::with_capacity(items.len());
                     let mut scratch = env.clone();
                     for item in items {
                         let prev = scratch.swap_current(item);
@@ -2209,7 +2209,7 @@ impl VM {
                         Val::Arr(a) => Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone()),
                         _ => Vec::new(),
                     };
-                    let mut out = Vec::new();
+                    let mut out = Vec::with_capacity(items.len());
                     let mut scratch = env.clone();
                     for item in items {
                         let prev = scratch.swap_current(item.clone());
@@ -2228,7 +2228,7 @@ impl VM {
                         Val::Arr(a) => Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone()),
                         _ => Vec::new(),
                     };
-                    let mut out = Vec::new();
+                    let mut out = Vec::with_capacity(items.len());
                     let mut dropping = true;
                     let mut scratch = env.clone();
                     for item in items {
@@ -2260,7 +2260,7 @@ impl VM {
                         Val::Arr(a) => Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone()),
                         _ => Vec::new(),
                     };
-                    let mut idx: HashMap<String, Vec<Val>> = HashMap::new();
+                    let mut idx: HashMap<String, Vec<Val>> = HashMap::with_capacity(right.len());
                     for r in right {
                         let key = match &r {
                             Val::Obj(o) => o.get(rhs_key.as_ref()).map(super::eval::util::val_to_key),
@@ -2268,7 +2268,7 @@ impl VM {
                         };
                         if let Some(k) = key { idx.entry(k).or_default().push(r); }
                     }
-                    let mut out = Vec::new();
+                    let mut out = Vec::with_capacity(left.len());
                     for l in left {
                         let key = match &l {
                             Val::Obj(o) => o.get(lhs_key.as_ref()).map(super::eval::util::val_to_key),
@@ -2295,8 +2295,8 @@ impl VM {
                         Val::Arr(a) => Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone()),
                         _ => Vec::new(),
                     };
-                    let mut seen: Vec<Val> = Vec::new();
-                    let mut out = Vec::new();
+                    let mut seen: Vec<Val> = Vec::with_capacity(items.len());
+                    let mut out = Vec::with_capacity(items.len());
                     let mut scratch = env.clone();
                     for item in items {
                         let prev = scratch.swap_current(item);
@@ -2571,7 +2571,7 @@ impl VM {
 
                 Opcode::ListComp(spec) => {
                     let items = self.exec_iter_vals(&spec.iter, env)?;
-                    let mut out = Vec::new();
+                    let mut out = Vec::with_capacity(items.len());
                     for item in items {
                         let ie = bind_comp_vars(env, &spec.vars, item);
                         if let Some(cond) = &spec.cond {
@@ -2599,8 +2599,8 @@ impl VM {
 
                 Opcode::SetComp(spec) => {
                     let items = self.exec_iter_vals(&spec.iter, env)?;
-                    let mut seen: Vec<String> = Vec::new();
-                    let mut out = Vec::new();
+                    let mut seen: Vec<String> = Vec::with_capacity(items.len());
+                    let mut out = Vec::with_capacity(items.len());
                     for item in items {
                         let ie = bind_comp_vars(env, &spec.vars, item);
                         if let Some(cond) = &spec.cond {
@@ -2679,7 +2679,7 @@ impl VM {
             BuiltinMethod::Filter => {
                 let pred = sub.ok_or_else(|| EvalError("filter: requires predicate".into()))?;
                 let items = recv.into_vec().ok_or_else(|| EvalError("filter: expected array".into()))?;
-                let mut out = Vec::new();
+                let mut out = Vec::with_capacity(items.len());
                 for item in items {
                     if is_truthy(&self.exec_lam_body_scratch(pred, &item, lam_param, &mut scratch)?) {
                         out.push(item);
@@ -2699,7 +2699,7 @@ impl VM {
             BuiltinMethod::FlatMap => {
                 let mapper = sub.ok_or_else(|| EvalError("flatMap: requires mapper".into()))?;
                 let items = recv.into_vec().ok_or_else(|| EvalError("flatMap: expected array".into()))?;
-                let mut out = Vec::new();
+                let mut out = Vec::with_capacity(items.len());
                 for item in items {
                     match self.exec_lam_body_scratch(mapper, &item, lam_param, &mut scratch)? {
                         Val::Arr(a) => out.extend(Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone())),
@@ -2782,7 +2782,7 @@ impl VM {
             BuiltinMethod::TakeWhile => {
                 let pred = sub.ok_or_else(|| EvalError("takeWhile: requires predicate".into()))?;
                 let items = recv.into_vec().ok_or_else(|| EvalError("takeWhile: expected array".into()))?;
-                let mut out = Vec::new();
+                let mut out = Vec::with_capacity(items.len());
                 for item in items {
                     if !is_truthy(&self.exec_lam_body_scratch(pred, &item, lam_param, &mut scratch)?) { break; }
                     out.push(item);
@@ -2793,7 +2793,7 @@ impl VM {
                 let pred = sub.ok_or_else(|| EvalError("dropWhile: requires predicate".into()))?;
                 let items = recv.into_vec().ok_or_else(|| EvalError("dropWhile: expected array".into()))?;
                 let mut dropping = true;
-                let mut out = Vec::new();
+                let mut out = Vec::with_capacity(items.len());
                 for item in items {
                     if dropping {
                         let still_drop = is_truthy(&self.exec_lam_body_scratch(pred, &item, lam_param, &mut scratch)?);
@@ -2810,7 +2810,7 @@ impl VM {
             BuiltinMethod::Partition => {
                 let pred = sub.ok_or_else(|| EvalError("partition: requires predicate".into()))?;
                 let items = recv.into_vec().ok_or_else(|| EvalError("partition: expected array".into()))?;
-                let (mut yes, mut no) = (Vec::new(), Vec::new());
+                let (mut yes, mut no) = (Vec::with_capacity(items.len()), Vec::with_capacity(items.len()));
                 for item in items {
                     if is_truthy(&self.exec_lam_body_scratch(pred, &item, lam_param, &mut scratch)?) {
                         yes.push(item);
