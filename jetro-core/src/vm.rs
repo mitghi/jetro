@@ -2340,17 +2340,34 @@ impl VM {
                 Opcode::MapMap { f1, f2 } => {
                     let recv = pop!(stack);
                     if let Val::Arr(a) = recv {
-                        let mut out = Vec::with_capacity(a.len());
+                        // COW fast-path: if the Arc is unique, reuse the Vec
+                        // storage (writing mapped values back in place).
                         let mut scratch = env.clone();
-                        for item in a.iter() {
-                            let prev = scratch.swap_current(item.clone());
-                            let mid = self.exec(f1, &scratch)?;
-                            scratch.swap_current(mid);
-                            let res = self.exec(f2, &scratch)?;
-                            scratch.restore_current(prev);
-                            out.push(res);
+                        match Arc::try_unwrap(a) {
+                            Ok(mut v) => {
+                                for slot in v.iter_mut() {
+                                    let prev = scratch.swap_current(std::mem::replace(slot, Val::Null));
+                                    let mid = self.exec(f1, &scratch)?;
+                                    scratch.swap_current(mid);
+                                    let res = self.exec(f2, &scratch)?;
+                                    scratch.restore_current(prev);
+                                    *slot = res;
+                                }
+                                stack.push(Val::arr(v));
+                            }
+                            Err(a) => {
+                                let mut out = Vec::with_capacity(a.len());
+                                for item in a.iter() {
+                                    let prev = scratch.swap_current(item.clone());
+                                    let mid = self.exec(f1, &scratch)?;
+                                    scratch.swap_current(mid);
+                                    let res = self.exec(f2, &scratch)?;
+                                    scratch.restore_current(prev);
+                                    out.push(res);
+                                }
+                                stack.push(Val::arr(out));
+                            }
                         }
-                        stack.push(Val::arr(out));
                     } else {
                         stack.push(Val::arr(Vec::new()));
                     }
