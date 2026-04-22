@@ -2795,4 +2795,30 @@ mod tests {
         let r = j.collect("$..id.sum()").unwrap();
         assert_eq!(r, json!(6));
     }
+
+    #[test]
+    fn simd_scan_via_vm_path() {
+        // Jetro::collect routes through the thread-local VM.  With raw bytes
+        // the VM's Opcode::Descendant should take the scan fast path and
+        // produce document-order results matching the tree walker for docs
+        // where the key does not also sit at the root (which is the common
+        // case for $..name queries).
+        use crate::Jetro;
+        let raw = br#"{"a":{"x":1},"b":[{"x":2},{"x":3}]}"#.to_vec();
+        let j_b = Jetro::from_bytes(raw.clone()).unwrap();
+        let j_t = Jetro::new(serde_json::from_slice(&raw).unwrap());
+        // Repeat to exercise the compile cache on the second call.
+        assert_eq!(j_b.collect("$..x").unwrap(), j_t.collect("$..x").unwrap());
+        assert_eq!(j_b.collect("$..x").unwrap(), j_t.collect("$..x").unwrap());
+    }
+
+    #[test]
+    fn simd_scan_vm_path_aggregate() {
+        // Exercise Descendant followed by an aggregate — verifies the scan
+        // fast path cooperates with the rest of the VM pipeline.
+        use crate::Jetro;
+        let raw = br#"{"rows":[{"p":10},{"p":20},{"p":30}]}"#.to_vec();
+        let j = Jetro::from_bytes(raw).unwrap();
+        assert_eq!(j.collect("$..p.sum()").unwrap(), json!(60));
+    }
 }

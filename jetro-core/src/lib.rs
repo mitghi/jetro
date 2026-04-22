@@ -184,21 +184,17 @@ impl Jetro {
         Self::from_bytes(bytes.to_vec())
     }
 
-    /// Evaluate `expr` against the document.
+    /// Evaluate `expr` against the document.  Routes through the thread-local
+    /// VM (compile + path caches); when the Jetro handle carries raw bytes
+    /// the VM executes on an env with `raw_bytes` set so `Opcode::Descendant`
+    /// can take the SIMD byte-scan fast path.
     pub fn collect<S: AsRef<str>>(&self, expr: S) -> std::result::Result<Value, EvalError> {
         let expr = expr.as_ref();
-        if let Some(bytes) = &self.raw_bytes {
-            let ast = parser::parse(expr).map_err(|e| EvalError(format!("{}", e)))?;
-            return eval::evaluate_with_raw(
-                &ast,
-                &self.document,
-                Arc::new(MethodRegistry::new()),
-                Arc::clone(bytes),
-            );
-        }
-        THREAD_VM.with(|cell| match cell.try_borrow_mut() {
-            Ok(mut vm) => vm.run_str(expr, &self.document),
-            Err(_)     => VM::new().run_str(expr, &self.document),
+        THREAD_VM.with(|cell| match (cell.try_borrow_mut(), &self.raw_bytes) {
+            (Ok(mut vm), Some(bytes)) => vm.run_str_with_raw(expr, &self.document, Arc::clone(bytes)),
+            (Ok(mut vm), None)        => vm.run_str(expr, &self.document),
+            (Err(_),     Some(bytes)) => VM::new().run_str_with_raw(expr, &self.document, Arc::clone(bytes)),
+            (Err(_),     None)        => VM::new().run_str(expr, &self.document),
         })
     }
 }

@@ -1879,6 +1879,19 @@ impl VM {
         self.execute(&prog, doc)
     }
 
+    /// Parse, compile, and execute with raw JSON source bytes retained so
+    /// that SIMD byte-scan can short-circuit `Opcode::Descendant` at the
+    /// document root.
+    pub fn run_str_with_raw(
+        &mut self,
+        expr: &str,
+        doc: &serde_json::Value,
+        raw_bytes: Arc<[u8]>,
+    ) -> Result<serde_json::Value, EvalError> {
+        let prog = self.get_or_compile(expr)?;
+        self.execute_with_raw(&prog, doc, raw_bytes)
+    }
+
     /// Execute a pre-compiled `Program` against `doc`.
     pub fn execute(&mut self, program: &Program, doc: &serde_json::Value) -> Result<serde_json::Value, EvalError> {
         let root = Val::from(doc);
@@ -1888,6 +1901,23 @@ impl VM {
         // must not outlive this document.  Clear before every run.
         self.root_chain_cache.clear();
         let env = self.make_env(root);
+        let result = self.exec(program, &env)?;
+        Ok(result.into())
+    }
+
+    /// Execute with raw JSON source bytes retained on the environment so
+    /// that descendant opcodes at document root can take the SIMD byte-scan
+    /// fast path instead of walking the tree.
+    pub fn execute_with_raw(
+        &mut self,
+        program: &Program,
+        doc: &serde_json::Value,
+        raw_bytes: Arc<[u8]>,
+    ) -> Result<serde_json::Value, EvalError> {
+        let root = Val::from(doc);
+        self.doc_hash = hash_val_structure(&root);
+        self.root_chain_cache.clear();
+        let env = Env::new_with_raw(root, Arc::clone(&self.registry), raw_bytes);
         let result = self.exec(program, &env)?;
         Ok(result.into())
     }
@@ -2020,7 +2050,6 @@ impl VM {
                 }
                 Opcode::Descendant(k) => {
                     let v = pop!(stack);
-                    let mut found = Vec::new();
                     // (D) When descending from root, track pointer paths and
                     // cache each discovered node for future RootChain lookups.
                     let from_root = match (&v, &env.root) {
@@ -2028,6 +2057,19 @@ impl VM {
                         (Val::Arr(a), Val::Arr(b)) => Arc::ptr_eq(a, b),
                         _ => matches!((&v, &env.root), (Val::Null, Val::Null)),
                     };
+                    // SIMD fast path: descending from root with raw JSON bytes
+                    // retained → byte-scan instead of walking the tree.  Path
+                    // cache is skipped on this path (cost/benefit unfavorable
+                    // vs avoiding the tree walk entirely).
+                    if from_root {
+                        if let Some(bytes) = env.raw_bytes.as_ref() {
+                            let hits = super::scan::extract_values(bytes, k.as_ref());
+                            let found: Vec<Val> = hits.iter().map(Val::from).collect();
+                            stack.push(Val::arr(found));
+                            continue;
+                        }
+                    }
+                    let mut found = Vec::new();
                     if from_root {
                         let mut prefix = String::new();
                         let mut cached: Vec<(Arc<str>, Val)> = Vec::new();
