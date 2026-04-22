@@ -323,7 +323,117 @@ fn parse_postfix_expr(pair: Pair<Rule>) -> Expr {
     let mut inner = pair.into_inner();
     let base = parse_primary(inner.next().unwrap());
     let steps: Vec<Step> = inner.flat_map(parse_postfix_step).collect();
+    if let Some(rewritten) = classify_chain_write(&base, &steps) {
+        return rewritten;
+    }
     base.maybe_chain(steps)
+}
+
+// ── Chain-style terminal writes ──────────────────────────────────────────────
+//
+// When the expression is `$.<traversal>.<terminal>(args)` where `<terminal>`
+// is one of `set / modify / delete / unset / replace`, rewrite it as an
+// `Expr::Patch`.  This lets users write inline updates without the full
+// `patch $ { ... }` block.  Collisions with existing method names are
+// avoided: non-root chains (e.g. `@.set(...)`) are *not* rewritten — they
+// keep their method-call semantics.
+fn classify_chain_write(base: &Expr, steps: &[Step]) -> Option<Expr> {
+    if !matches!(base, Expr::Root) { return None; }
+    let last = steps.last()?;
+    let (name, args) = match last { Step::Method(n, a) => (n.as_str(), a), _ => return None };
+    if !is_terminal_write(name) { return None; }
+
+    let prefix = &steps[..steps.len() - 1];
+    let path = match steps_to_path(prefix) {
+        Ok(p)  => p,
+        Err(_) => return None,  // not a valid traversal — leave as method call
+    };
+
+    let op = build_write_op(name, args, path)?;
+    Some(Expr::Patch { root: Box::new(Expr::Root), ops: vec![op] })
+}
+
+fn is_terminal_write(name: &str) -> bool {
+    // `.replace` deliberately omitted — it would clash with the 2-arg
+    // string `.replace(needle, with)` builtin.  Use `.set(v)` for full
+    // value replacement.
+    matches!(name, "set" | "modify" | "delete" | "unset" | "merge" | "deep_merge" | "deepMerge")
+}
+
+fn steps_to_path(steps: &[Step]) -> Result<Vec<PathStep>, String> {
+    let mut out = Vec::with_capacity(steps.len());
+    for s in steps {
+        match s {
+            Step::Field(f)        => out.push(PathStep::Field(f.clone())),
+            Step::Index(i)        => out.push(PathStep::Index(*i)),
+            Step::OptField(f)     => out.push(PathStep::Field(f.clone())),
+            Step::Descendant(f)   => out.push(PathStep::Descendant(f.clone())),
+            Step::DynIndex(e)     => {
+                // Defer resolution to apply time — PathStep carries the
+                // boxed expression, evaluated against the root doc then.
+                out.push(PathStep::DynIndex((**e).clone()));
+            }
+            _ => return Err("chain-write: unsupported step in path".into()),
+        }
+    }
+    Ok(out)
+}
+
+fn build_write_op(name: &str, args: &[Arg], path: Vec<PathStep>) -> Option<PatchOp> {
+    match name {
+        "set" => {
+            let v = arg_expr(args.first()?).clone();
+            Some(PatchOp { path, val: v, cond: None })
+        }
+        // `.modify(expr)` — expr sees `@` bound to the current value at the path
+        // (patch semantics already bind `@` at the leaf).  Lambda form
+        // `.modify(lambda x: ...)` rewrites to `let x = @ in <body>` so the
+        // bound `@` flows into the param name.
+        "modify" => {
+            let v = match arg_expr(args.first()?).clone() {
+                Expr::Lambda { params, body } => {
+                    if let Some(p) = params.into_iter().next() {
+                        Expr::Let { name: p, init: Box::new(Expr::Current), body }
+                    } else {
+                        *body
+                    }
+                }
+                other => other,
+            };
+            Some(PatchOp { path, val: v, cond: None })
+        }
+        "delete" => {
+            if !args.is_empty() { return None; }
+            Some(PatchOp { path, val: Expr::DeleteMark, cond: None })
+        }
+        // `.merge(obj)` / `.deep_merge(obj)` — desugar to `.modify(@.merge(arg))`
+        // so the patch leaf evaluates against the bound `@`.
+        "merge" | "deep_merge" | "deepMerge" => {
+            let arg = arg_expr(args.first()?).clone();
+            let method = if name == "merge" { "merge".to_string() } else { "deep_merge".to_string() };
+            let v = Expr::Chain(
+                Box::new(Expr::Current),
+                vec![Step::Method(method, vec![Arg::Pos(arg)])],
+            );
+            Some(PatchOp { path, val: v, cond: None })
+        }
+        // `.unset(key)` — append the key onto the path and delete it.
+        "unset" => {
+            let key = match arg_expr(args.first()?) {
+                Expr::Str(s)     => s.clone(),
+                Expr::Ident(s)   => s.clone(),
+                _                => return None,
+            };
+            let mut p = path;
+            p.push(PathStep::Field(key));
+            Some(PatchOp { path: p, val: Expr::DeleteMark, cond: None })
+        }
+        _ => None,
+    }
+}
+
+fn arg_expr(a: &Arg) -> &Expr {
+    match a { Arg::Pos(e) | Arg::Named(_, e) => e }
 }
 
 fn parse_postfix_step(pair: Pair<Rule>) -> Vec<Step> {
@@ -343,6 +453,19 @@ fn parse_postfix_step(pair: Pair<Rule>) -> Vec<Step> {
                 Some(p) => vec![Step::Descendant(p.as_str().to_string())],
                 None    => vec![Step::DescendAll],
             }
+        }
+        Rule::deep_method => {
+            // `..name(args)` — desugar to `.deep_name(args)` for find/shape/like.
+            let mut mi = inner_pair.into_inner();
+            let name = mi.next().unwrap().as_str().to_string();
+            let args = mi.next().map(parse_arg_list).unwrap_or_default();
+            let mapped = match name.as_str() {
+                "find"  | "find_all" | "findAll" => "deep_find".to_string(),
+                "shape"                          => "deep_shape".to_string(),
+                "like"                           => "deep_like".to_string(),
+                other                            => format!("deep_{}", other),
+            };
+            vec![Step::Method(mapped, args)]
         }
         Rule::inline_filter => {
             let expr = parse_expr(inner_pair.into_inner().next().unwrap());

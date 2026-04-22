@@ -12,7 +12,7 @@ use crate::ast::Arg;
 use super::{Env, EvalError, eval_pos, apply_item};
 use super::value::Val;
 use super::util::{val_to_string, val_str, field_exists_nested};
-use super::{func_strings, func_arrays, func_objects, func_paths, func_aggregates, func_csv};
+use super::{func_strings, func_arrays, func_objects, func_paths, func_aggregates, func_csv, func_search};
 
 macro_rules! err {
     ($($t:tt)*) => { Err(EvalError(format!($($t)*))) };
@@ -96,6 +96,9 @@ fn build() -> BuiltinRegistry {
 
     // Arrays — full signature
     t.insert("filter",    func_arrays::filter);
+    t.insert("find",      func_arrays::filter);      // Tier 1 alias (shallow)
+    t.insert("find_all",  func_arrays::filter);      // Tier 1 alias (shallow)
+    t.insert("findAll",   func_arrays::filter);
     t.insert("map",       func_arrays::map);
     t.insert("flatMap",   func_arrays::flat_map);
     t.insert("flat_map",  func_arrays::flat_map);
@@ -133,6 +136,17 @@ fn build() -> BuiltinRegistry {
     t.insert("distinct", b_unique);
     t.insert("compact",  b_compact);
     t.insert("pairwise", b_pairwise);
+
+    // Tier 1 search / match / collect
+    t.insert("unique_by", func_search::unique_by);
+    t.insert("uniqueBy",  func_search::unique_by);
+    t.insert("collect",   func_search::collect);
+    t.insert("deep_find", func_search::deep_find);
+    t.insert("deepFind",  func_search::deep_find);
+    t.insert("deep_shape", func_search::deep_shape);
+    t.insert("deepShape",  func_search::deep_shape);
+    t.insert("deep_like",  func_search::deep_like);
+    t.insert("deepLike",   func_search::deep_like);
 
     // Aggregates — full signature
     t.insert("sum",      func_aggregates::sum);

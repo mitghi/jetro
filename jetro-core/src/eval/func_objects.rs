@@ -15,7 +15,7 @@ use indexmap::IndexMap;
 use crate::ast::{Arg, Expr};
 use super::{Env, EvalError, apply_item, eval_pos};
 use super::value::Val;
-use super::util::{is_truthy, val_to_key, deep_merge, val_key};
+use super::util::{is_truthy, val_to_key, deep_merge};
 use super::func_paths::{parse_path_segs, get_path_impl, PathSeg};
 
 macro_rules! err {
@@ -42,27 +42,76 @@ pub fn entries(recv: Val) -> Result<Val, EvalError> {
 
 // ── Field selection ───────────────────────────────────────────────────────────
 
-pub fn pick(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-    let map = recv.as_object().ok_or_else(|| EvalError("pick: expected object".into()))?.clone();
-    let mut out = IndexMap::new();
-    for a in args {
-        let key = eval_pos(a, env)?;
-        let ks  = match &key { Val::Str(s) => s.to_string(), _ => continue };
-        if ks.contains('.') || ks.contains('[') {
-            let segs = parse_path_segs(&ks);
-            let v    = get_path_impl(&Val::Obj(Arc::new(map.clone())), &segs);
-            if let Some(top) = segs.first() {
-                let top_key: Arc<str> = match top {
-                    PathSeg::Field(f) => Arc::from(f.as_str()),
-                    PathSeg::Index(i) => Arc::from(i.to_string().as_str()),
-                };
-                if !v.is_null() { out.insert(top_key, v); }
+/// Resolve one pick argument into `(out_key, src_key_or_path)`.
+///
+/// Accepted forms:
+///   - `name`                → `("name", "name")`    (ident = field name)
+///   - `"name"`              → `("name", "name")`    (string literal)
+///   - `"a.b"`               → `("a",    "a.b")`     (dotted path, top-key as out key)
+///   - `alias: name`         → `("alias","name")`    (named arg, ident rhs)
+///   - `alias: "name"`       → `("alias","name")`    (named arg, string rhs)
+fn pick_arg(a: &Arg, env: &Env) -> Result<Option<(Arc<str>, String)>, EvalError> {
+    match a {
+        Arg::Pos(Expr::Ident(s)) => Ok(Some((Arc::from(s.as_str()), s.clone()))),
+        Arg::Pos(e) => {
+            let v = super::eval(e, env)?;
+            match v {
+                Val::Str(s) => {
+                    let top: Arc<str> = if s.contains('.') || s.contains('[') {
+                        match parse_path_segs(&s).first() {
+                            Some(PathSeg::Field(f)) => Arc::from(f.as_str()),
+                            Some(PathSeg::Index(i)) => Arc::from(i.to_string().as_str()),
+                            None => Arc::from(s.as_ref()),
+                        }
+                    } else { s.clone() };
+                    Ok(Some((top, s.to_string())))
+                }
+                _ => Ok(None),
             }
-        } else if let Some(v) = map.get(ks.as_str()) {
-            out.insert(val_key(&ks), v.clone());
+        }
+        Arg::Named(alias, Expr::Ident(src)) => {
+            Ok(Some((Arc::from(alias.as_str()), src.clone())))
+        }
+        Arg::Named(alias, e) => {
+            let v = super::eval(e, env)?;
+            match v {
+                Val::Str(s) => Ok(Some((Arc::from(alias.as_str()), s.to_string()))),
+                _ => Ok(None),
+            }
         }
     }
-    Ok(Val::obj(out))
+}
+
+fn pick_one(obj: &IndexMap<Arc<str>, Val>, resolved: &[(Arc<str>, String)]) -> IndexMap<Arc<str>, Val> {
+    let mut out = IndexMap::with_capacity(resolved.len());
+    for (out_key, src) in resolved {
+        if src.contains('.') || src.contains('[') {
+            let segs = parse_path_segs(src);
+            let v = get_path_impl(&Val::Obj(Arc::new(obj.clone())), &segs);
+            if !v.is_null() { out.insert(out_key.clone(), v); }
+        } else if let Some(v) = obj.get(src.as_str()) {
+            out.insert(out_key.clone(), v.clone());
+        }
+    }
+    out
+}
+
+pub fn pick(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+    let mut resolved = Vec::with_capacity(args.len());
+    for a in args {
+        if let Some(p) = pick_arg(a, env)? { resolved.push(p); }
+    }
+    match recv {
+        Val::Obj(m) => Ok(Val::obj(pick_one(&m, &resolved))),
+        Val::Arr(a) => {
+            let out: Vec<Val> = a.iter().map(|el| match el {
+                Val::Obj(m) => Val::obj(pick_one(m, &resolved)),
+                other       => other.clone(),
+            }).collect();
+            Ok(Val::arr(out))
+        }
+        _ => err!("pick: expected object or array of objects"),
+    }
 }
 
 pub fn omit(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {

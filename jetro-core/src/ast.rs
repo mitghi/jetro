@@ -137,6 +137,7 @@ pub struct PatchOp {
 pub enum PathStep {
     Field(String),
     Index(i64),
+    DynIndex(Expr),
     Wildcard,
     WildcardFilter(Box<Expr>),
     Descendant(String),

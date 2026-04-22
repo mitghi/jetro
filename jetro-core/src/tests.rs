@@ -605,6 +605,7 @@ mod tests {
     #[test]
     fn str_replace() {
         let doc = json!({"s": "foo foo foo"});
+        // 2-arg string replace — untouched by the v2 chain-write classifier
         assert_eq!(query("$.s.replace(\"foo\", \"bar\")", &doc).unwrap(), json!("bar foo foo"));
         assert_eq!(query("$.s.replace_all(\"foo\", \"bar\")", &doc).unwrap(), json!("bar bar bar"));
     }
@@ -724,8 +725,9 @@ mod tests {
 
     #[test]
     fn merge_objects() {
+        // chain form is a write terminal now — pipe form preserves old semantics
         let doc = json!({"a": {"x": 1}, "b": {"y": 2}});
-        let r = query("$.a.merge($.b)", &doc).unwrap();
+        let r = query("$.a | merge($.b)", &doc).unwrap();
         assert_eq!(r["x"], json!(1));
         assert_eq!(r["y"], json!(2));
     }
@@ -733,7 +735,7 @@ mod tests {
     #[test]
     fn deep_merge_objects() {
         let doc = json!({"a": {"x": {"p": 1}}, "b": {"x": {"q": 2}, "y": 3}});
-        let r = query("$.a.deep_merge($.b)", &doc).unwrap();
+        let r = query("$.a | deep_merge($.b)", &doc).unwrap();
         assert_eq!(r["x"]["p"], json!(1));
         assert_eq!(r["x"]["q"], json!(2));
         assert_eq!(r["y"], json!(3));
@@ -2153,5 +2155,287 @@ mod tests {
         let doc = json!({});
         let r = query(r#"DELETE"#, &doc);
         assert!(r.is_err());
+    }
+
+    // ── Tier 1: aliases + unique_by + collect + deep_* ────────────────────────
+
+    fn saas() -> serde_json::Value {
+        json!({
+            "org": "acme",
+            "teams": [
+                {
+                    "name": "platform",
+                    "members": [
+                        {"email": "a@acme.io", "role": "lead"},
+                        {"email": "b@acme.io", "role": "eng"}
+                    ],
+                    "projects": [
+                        {"id": 1, "name": "api",     "tasks": [{"id": "t1", "status": "open"}, {"id": "t2", "status": "done"}]},
+                        {"id": 2, "name": "runtime", "tasks": [{"id": "t3", "status": "open"}]}
+                    ]
+                },
+                {
+                    "name": "growth",
+                    "members": [
+                        {"email": "c@acme.io", "role": "lead"},
+                        {"email": "a@acme.io", "role": "eng"}
+                    ],
+                    "projects": [
+                        {"id": 3, "name": "funnel", "tasks": []}
+                    ]
+                }
+            ],
+            "billing": {
+                "invoices": [
+                    {"email": "acme-finance@acme.io", "total": 100}
+                ]
+            }
+        })
+    }
+
+    #[test]
+    fn tier1_find_alias() {
+        let doc = books();
+        let r = query(r#"$.store.books.find(price > 10).map(title)"#, &doc).unwrap();
+        assert_eq!(r, json!(["Dune", "Neuromancer"]));
+    }
+
+    #[test]
+    fn tier1_find_all_alias() {
+        let doc = books();
+        let r = query(r#"$.store.books.find_all(rating > 4.5).map(title)"#, &doc).unwrap();
+        let titles = r.as_array().unwrap();
+        assert!(titles.contains(&json!("Dune")));
+        assert!(titles.contains(&json!("1984")));
+    }
+
+    #[test]
+    fn tier1_unique_by_lambda() {
+        let doc = saas();
+        let r = query(
+            r#"$.teams.flat_map(lambda t: t.members).unique_by(lambda m: m.email).map(email)"#,
+            &doc,
+        ).unwrap();
+        let emails = r.as_array().unwrap();
+        assert_eq!(emails.len(), 3);
+        assert!(emails.contains(&json!("a@acme.io")));
+        assert!(emails.contains(&json!("b@acme.io")));
+        assert!(emails.contains(&json!("c@acme.io")));
+    }
+
+    #[test]
+    fn tier1_collect_scalar() {
+        let doc = json!({"x": 42});
+        let r = query(r#"$.x.collect()"#, &doc).unwrap();
+        assert_eq!(r, json!([42]));
+    }
+
+    #[test]
+    fn tier1_collect_array_identity() {
+        let doc = json!({"xs": [1,2,3]});
+        let r = query(r#"$.xs.collect()"#, &doc).unwrap();
+        assert_eq!(r, json!([1, 2, 3]));
+    }
+
+    #[test]
+    fn tier1_collect_null_to_empty() {
+        let doc = json!({"x": null});
+        let r = query(r#"$.x.collect()"#, &doc).unwrap();
+        assert_eq!(r, json!([]));
+    }
+
+    #[test]
+    fn tier1_deep_shape_email_keys() {
+        let doc = saas();
+        // any object carrying `email` anywhere — members + invoices
+        let r = query(r#"$.deep_shape({email})"#, &doc).unwrap();
+        let arr = r.as_array().unwrap();
+        // 4 members across teams + 1 invoice = 5
+        assert_eq!(arr.len(), 5);
+    }
+
+    #[test]
+    fn tier1_deep_like_role_lead() {
+        let doc = saas();
+        let r = query(r#"$.deep_like({role: "lead"})"#, &doc).unwrap();
+        let arr = r.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        for item in arr {
+            assert_eq!(item.get("role").unwrap(), &json!("lead"));
+        }
+    }
+
+    #[test]
+    fn tier1_pick_ident_keys() {
+        let doc = json!({"user": {"name": "Alice", "age": 30, "score": 85}});
+        let r = query(r#"$.user.pick(name, age)"#, &doc).unwrap();
+        assert_eq!(r, json!({"name": "Alice", "age": 30}));
+    }
+
+    #[test]
+    fn tier1_pick_alias() {
+        let doc = json!({"user": {"name": "Alice", "age": 30}});
+        let r = query(r#"$.user.pick(name, years: age)"#, &doc).unwrap();
+        assert_eq!(r, json!({"name": "Alice", "years": 30}));
+    }
+
+    #[test]
+    fn tier1_pick_over_array() {
+        let doc = saas();
+        let r = query(r#"$.teams[0].members.pick(email)"#, &doc).unwrap();
+        assert_eq!(r, json!([{"email": "a@acme.io"}, {"email": "b@acme.io"}]));
+    }
+
+    #[test]
+    fn tier1_pick_alias_over_array() {
+        let doc = saas();
+        let r = query(r#"$.teams[0].members.pick(addr: email, role)"#, &doc).unwrap();
+        assert_eq!(r, json!([
+            {"addr": "a@acme.io", "role": "lead"},
+            {"addr": "b@acme.io", "role": "eng"}
+        ]));
+    }
+
+    #[test]
+    fn tier1_deep_find_status_open() {
+        let doc = saas();
+        let r = query(r#"$.deep_find(@ kind object and status == "open")"#, &doc).unwrap();
+        let arr = r.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+    }
+
+    #[test]
+    fn tier1_dotdot_find_sugar() {
+        let doc = saas();
+        let r = query(r#"$..find(@ kind object and status == "open")"#, &doc).unwrap();
+        let arr = r.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+    }
+
+    #[test]
+    fn tier1_dotdot_shape_sugar() {
+        let doc = saas();
+        let r = query(r#"$..shape({email})"#, &doc).unwrap();
+        let arr = r.as_array().unwrap();
+        assert_eq!(arr.len(), 5);
+    }
+
+    #[test]
+    fn tier1_dotdot_like_sugar() {
+        let doc = saas();
+        let r = query(r#"$..like({role: "lead"})"#, &doc).unwrap();
+        let arr = r.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+    }
+
+    // ── Tier 1: chain-style terminal writes ──────────────────────────────────
+
+    #[test]
+    fn tier1_chain_set_field() {
+        let doc = json!({"user": {"name": "Alice", "age": 30}});
+        let r = query(r#"$.user.name.set("Bob")"#, &doc).unwrap();
+        assert_eq!(r, json!({"user": {"name": "Bob", "age": 30}}));
+    }
+
+    #[test]
+    fn tier1_chain_set_deep() {
+        let doc = saas();
+        let r = query(r#"$.teams[0].projects[0].name.set("API")"#, &doc).unwrap();
+        assert_eq!(r.pointer("/teams/0/projects/0/name").unwrap(), &json!("API"));
+        // untouched siblings still present
+        assert_eq!(r.pointer("/teams/0/projects/1/name").unwrap(), &json!("runtime"));
+        assert_eq!(r.pointer("/org").unwrap(), &json!("acme"));
+    }
+
+    #[test]
+    fn tier1_chain_modify_using_current() {
+        let doc = json!({"counts": {"n": 5}});
+        let r = query(r#"$.counts.n.modify(@ * 2)"#, &doc).unwrap();
+        assert_eq!(r, json!({"counts": {"n": 10}}));
+    }
+
+    #[test]
+    fn tier1_chain_delete_field() {
+        let doc = json!({"user": {"name": "Alice", "age": 30}});
+        let r = query(r#"$.user.age.delete()"#, &doc).unwrap();
+        assert_eq!(r, json!({"user": {"name": "Alice"}}));
+    }
+
+    #[test]
+    fn tier1_chain_unset_key() {
+        let doc = json!({"user": {"name": "Alice", "age": 30}});
+        let r = query(r#"$.user.unset("age")"#, &doc).unwrap();
+        assert_eq!(r, json!({"user": {"name": "Alice"}}));
+    }
+
+    #[test]
+    fn tier1_chain_set_subtree() {
+        let doc = json!({"a": {"b": {"c": 1}}});
+        let r = query(r#"$.a.b.set({x: 42})"#, &doc).unwrap();
+        assert_eq!(r, json!({"a": {"b": {"x": 42}}}));
+    }
+
+    #[test]
+    fn tier1_chain_descendant_set() {
+        let doc = saas();
+        // every `status` anywhere under the doc flips to "closed"
+        let r = query(r#"$..status.set("closed")"#, &doc).unwrap();
+        let statuses: Vec<&serde_json::Value> = r.pointer("/teams/0/projects/0/tasks").unwrap()
+            .as_array().unwrap().iter()
+            .map(|t| t.get("status").unwrap())
+            .collect();
+        assert!(statuses.iter().all(|s| *s == &json!("closed")));
+    }
+
+    #[test]
+    fn tier1_chain_descendant_delete() {
+        let doc = json!({"a": {"id": 1, "b": {"id": 2, "c": {"id": 3}}}});
+        let r = query(r#"$..id.delete()"#, &doc).unwrap();
+        assert_eq!(r, json!({"a": {"b": {"c": {}}}}));
+    }
+
+    #[test]
+    fn tier1_chain_dyn_index() {
+        let doc = json!({"xs": [10, 20, 30, 40], "i": 2});
+        let r = query(r#"$.xs[$.i].set(99)"#, &doc).unwrap();
+        assert_eq!(r.pointer("/xs").unwrap(), &json!([10, 20, 99, 40]));
+    }
+
+    #[test]
+    fn tier1_chain_merge() {
+        let doc = json!({"config": {"host": "a", "port": 80}});
+        let r = query(r#"$.config.merge({port: 443, tls: true})"#, &doc).unwrap();
+        assert_eq!(r, json!({"config": {"host": "a", "port": 443, "tls": true}}));
+    }
+
+    #[test]
+    fn tier1_chain_deep_merge() {
+        let doc = json!({"a": {"b": {"x": 1}}});
+        let r = query(r#"$.a.deep_merge({b: {y: 2}})"#, &doc).unwrap();
+        assert_eq!(r, json!({"a": {"b": {"x": 1, "y": 2}}}));
+    }
+
+    #[test]
+    fn tier1_chain_modify_lambda() {
+        let doc = json!({"counts": {"n": 5}});
+        let r = query(r#"$.counts.n.modify(lambda x: x * 3)"#, &doc).unwrap();
+        assert_eq!(r, json!({"counts": {"n": 15}}));
+    }
+
+    #[test]
+    fn tier1_non_root_set_is_method_call() {
+        // `.set` without `$` prefix is the old builtin: returns arg, ignoring recv
+        let doc = json!({"x": 1});
+        let r = query(r#"$.x | set(99)"#, &doc).unwrap();
+        assert_eq!(r, json!(99));
+    }
+
+    #[test]
+    fn tier1_descendant_still_works() {
+        // `..field` (no parens) should still be a descendant lookup, not a deep method
+        let doc = books();
+        let r = query("$..title", &doc).unwrap();
+        let titles = r.as_array().unwrap();
+        assert!(titles.contains(&json!("Dune")));
     }
 }

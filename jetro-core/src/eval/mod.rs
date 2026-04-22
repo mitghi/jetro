@@ -52,6 +52,7 @@ mod func_objects;
 mod func_paths;
 mod func_aggregates;
 mod func_csv;
+mod func_search;
 
 pub use value::Val;
 pub use methods::{Method, MethodRegistry};
@@ -368,6 +369,25 @@ fn apply_patch_step(
             }
             Ok(PatchResult::Replace(Val::arr(a)))
         }
+        PathStep::DynIndex(expr) => {
+            let idx_val = eval(expr, env)?;
+            let idx = idx_val.as_i64().ok_or_else(|| {
+                EvalError(format!("patch dyn-index: expected integer, got {}", idx_val.type_name()))
+            })?;
+            let existing = v.get_index(idx);
+            let child = apply_patch_step(existing, path, i+1, val_expr, env)?;
+            let mut a = v.into_vec().unwrap_or_default();
+            let resolved = resolve_idx(idx, a.len() as i64);
+            match child {
+                PatchResult::Delete => {
+                    if resolved < a.len() { a.remove(resolved); }
+                }
+                PatchResult::Replace(nv) => {
+                    if resolved < a.len() { a[resolved] = nv; }
+                }
+            }
+            Ok(PatchResult::Replace(Val::arr(a)))
+        }
         PathStep::Wildcard => {
             let arr = v.into_vec().ok_or_else(|| EvalError("patch [*]: expected array".into()))?;
             let mut out = Vec::with_capacity(arr.len());
@@ -395,8 +415,54 @@ fn apply_patch_step(
             }
             Ok(PatchResult::Replace(Val::arr(out)))
         }
-        PathStep::Descendant(_) =>
-            err!("descendant paths (..) in patch are not yet supported"),
+        PathStep::Descendant(name) => {
+            let v = descend_apply_patch(v, name, path, i, val_expr, env)?;
+            Ok(PatchResult::Replace(v))
+        }
+    }
+}
+
+/// Descendant patch walker — DFS through the subtree.  At every object that
+/// has `name`, apply the remaining path (starting at `i+1`) to the value of
+/// `name`.  Children are visited *before* the current level so freshly-written
+/// values are not re-walked (avoids runaway rewrites when the new value
+/// itself contains `name`).
+fn descend_apply_patch(
+    v:        Val,
+    name:     &str,
+    path:     &[PathStep],
+    i:        usize,
+    val_expr: &Expr,
+    env:      &Env,
+) -> Result<Val, EvalError> {
+    match v {
+        Val::Obj(m) => {
+            let mut map = Arc::try_unwrap(m).unwrap_or_else(|m| (*m).clone());
+            // Recurse into children first, using original values.
+            let keys: Vec<Arc<str>> = map.keys().cloned().collect();
+            for k in keys {
+                let child = map.shift_remove(k.as_ref()).unwrap_or(Val::Null);
+                let replaced = descend_apply_patch(child, name, path, i, val_expr, env)?;
+                map.insert(k, replaced);
+            }
+            // Apply at this level.
+            if let Some(existing) = map.get(name).cloned() {
+                let r = apply_patch_step(existing, path, i + 1, val_expr, env)?;
+                match r {
+                    PatchResult::Delete      => { map.shift_remove(name); }
+                    PatchResult::Replace(nv) => { map.insert(Arc::from(name), nv); }
+                }
+            }
+            Ok(Val::obj(map))
+        }
+        Val::Arr(a) => {
+            let vec = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
+            let out: Result<Vec<Val>, EvalError> = vec.into_iter()
+                .map(|el| descend_apply_patch(el, name, path, i, val_expr, env))
+                .collect();
+            Ok(Val::arr(out?))
+        }
+        other => Ok(other),
     }
 }
 
