@@ -953,6 +953,21 @@ mod tests {
     // ── Peephole fusion passes ────────────────────────────────────────────────
 
     #[test]
+    fn fusion_map_filter_opcode_emitted() {
+        use crate::vm::{Compiler, Opcode};
+        let prog = Compiler::compile_str("$.xs.map(@ * 2).filter(@ > 5)").unwrap();
+        let has_mf = prog.ops.iter().any(|o| matches!(o, Opcode::MapFilter { .. }));
+        assert!(has_mf, "MapFilter not emitted; ops: {:?}", prog.ops);
+    }
+
+    #[test]
+    fn fusion_map_filter_semantics() {
+        let doc = json!({"xs": [1, 2, 3, 4, 5]});
+        let r = query("$.xs.map(@ * 2).filter(@ > 5)", &doc).unwrap();
+        assert_eq!(r, json!([6, 8, 10]));
+    }
+
+    #[test]
     fn fusion_field_chain_opcode_emitted() {
         use crate::vm::{Compiler, Opcode};
         // `.first()` returns object; `.a.b.c` mid-program can't become RootChain

@@ -333,6 +333,8 @@ pub enum Opcode {
     FilterFilter { p1: Arc<Program>, p2: Arc<Program> },
     /// map(f1) + map(f2) fused — single pass, composed.
     MapMap { f1: Arc<Program>, f2: Arc<Program> },
+    /// map(f) + filter(p) fused — single pass; emit `f(x)` only when `p(f(x))` holds.
+    MapFilter { map: Arc<Program>, pred: Arc<Program> },
     /// Fused `map(f).sum()` — evaluates `f` per item, accumulates numeric sum.
     MapSum(Arc<Program>),
     /// Fused `map(f).avg()` — evaluates `f` per item, computes mean as float.
@@ -771,6 +773,8 @@ impl Compiler {
                             Some(Opcode::FilterFilter { p1, p2 }),
                         (BuiltinMethod::Map, BuiltinMethod::Map) =>
                             Some(Opcode::MapMap { f1: p1, f2: p2 }),
+                        (BuiltinMethod::Map, BuiltinMethod::Filter) =>
+                            Some(Opcode::MapFilter { map: p1, pred: p2 }),
                         _ => None,
                     };
                     if let Some(f) = fused {
@@ -1986,6 +1990,25 @@ impl VM {
                             let prev = scratch.swap_current(item.clone());
                             if is_truthy(&self.exec(pred, &scratch)?) {
                                 out.push(self.exec(map, &scratch)?);
+                            }
+                            scratch.restore_current(prev);
+                        }
+                        stack.push(Val::arr(out));
+                    } else {
+                        stack.push(Val::arr(Vec::new()));
+                    }
+                }
+                Opcode::MapFilter { map, pred } => {
+                    let recv = pop!(stack);
+                    if let Val::Arr(a) = recv {
+                        let mut out = Vec::with_capacity(a.len());
+                        let mut scratch = env.clone();
+                        for item in a.iter() {
+                            let prev = scratch.swap_current(item.clone());
+                            let mapped = self.exec(map, &scratch)?;
+                            let pscratch = scratch.with_current(mapped.clone());
+                            if is_truthy(&self.exec(pred, &pscratch)?) {
+                                out.push(mapped);
                             }
                             scratch.restore_current(prev);
                         }

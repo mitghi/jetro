@@ -233,6 +233,13 @@ fn build_block(cfg: &mut Cfg, ops: &[Opcode]) -> usize {
                 branches.push(EdgeKind::Loop { target: tm, name: "map" });
                 straight.push(op.clone());
             }
+            Opcode::MapFilter { map, pred } => {
+                let tm = build_block(cfg, &map.ops);
+                let tp = build_block(cfg, &pred.ops);
+                branches.push(EdgeKind::Loop { target: tm, name: "map" });
+                branches.push(EdgeKind::Loop { target: tp, name: "filter" });
+                straight.push(op.clone());
+            }
             Opcode::FilterFilter { p1, p2 } => {
                 let t1 = build_block(cfg, &p1.ops);
                 let t2 = build_block(cfg, &p2.ops);
