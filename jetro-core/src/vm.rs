@@ -1018,6 +1018,15 @@ impl Compiler {
                         out.push(Opcode::FindOne(pred));
                         continue;
                     }
+                    // `.filter(p).first()` — scans until predicate holds, returns
+                    // that item or null.  Skips materialising a filtered array.
+                    Some(Opcode::CallMethod(c))
+                        if c.method == BuiltinMethod::First && c.sub_progs.is_empty() =>
+                    {
+                        it.next();
+                        out.push(Opcode::FindFirst(pred));
+                        continue;
+                    }
                     _ => {}
                 }
             }

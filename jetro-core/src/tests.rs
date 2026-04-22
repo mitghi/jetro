@@ -1267,6 +1267,22 @@ mod tests {
     }
 
     #[test]
+    fn fusion_filter_first_opcode() {
+        use crate::vm::{Compiler, Opcode};
+        let prog = Compiler::compile_str("$.books.filter(@.price > 10).first()").unwrap();
+        let has = prog.ops.iter().any(|o| matches!(o, Opcode::FindFirst(_)));
+        assert!(has, "filter+first should fuse to FindFirst");
+    }
+
+    #[test]
+    fn fusion_filter_first_semantics() {
+        let doc = books();
+        let fused = query("$.store.books.filter(@.price > 10).first()", &doc).unwrap();
+        let plain = query("$.store.books.filter(@.price > 10) | first()", &doc).unwrap();
+        assert_eq!(fused, plain);
+    }
+
+    #[test]
     fn fusion_filter_map_sum_opcode() {
         use crate::vm::{Compiler, Opcode};
         let prog = Compiler::compile_str(
