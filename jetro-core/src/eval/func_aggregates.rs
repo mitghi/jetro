@@ -53,12 +53,16 @@ pub fn avg(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
 
 pub fn minmax(recv: Val, args: &[Arg], env: &Env, want_max: bool) -> Result<Val, EvalError> {
     let nums = collect_nums(recv, args, env)?;
-    if nums.is_empty() { return Ok(Val::Null); }
-    Ok(nums.into_iter().reduce(|a, b| {
-        let af = a.as_f64().unwrap_or(0.0);
-        let bf = b.as_f64().unwrap_or(0.0);
-        if want_max { if bf > af { b } else { a } } else { if bf < af { b } else { a } }
-    }).unwrap())
+    let mut iter = nums.into_iter();
+    let Some(first) = iter.next() else { return Ok(Val::Null); };
+    let mut best_f = first.as_f64().unwrap_or(0.0);
+    let mut best = first;
+    for v in iter {
+        let vf = v.as_f64().unwrap_or(0.0);
+        let replace = if want_max { vf > best_f } else { vf < best_f };
+        if replace { best_f = vf; best = v; }
+    }
+    Ok(best)
 }
 
 fn collect_nums(recv: Val, args: &[Arg], env: &Env) -> Result<Vec<Val>, EvalError> {
