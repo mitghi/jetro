@@ -229,7 +229,8 @@ fn build_block(cfg: &mut Cfg, ops: &[Opcode]) -> usize {
             }
             Opcode::FilterMap { pred, map }
                 | Opcode::FilterMapSum { pred, map }
-                | Opcode::FilterMapAvg { pred, map } => {
+                | Opcode::FilterMapAvg { pred, map }
+                | Opcode::FilterMapFirst { pred, map } => {
                 let tp = build_block(cfg, &pred.ops);
                 let tm = build_block(cfg, &map.ops);
                 branches.push(EdgeKind::Loop { target: tp, name: "filter" });

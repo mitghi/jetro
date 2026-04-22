@@ -130,6 +130,7 @@ fn op_arity(op: &Opcode) -> Arity {
             | Opcode::FindFirst(_) | Opcode::FindOne(_)
             | Opcode::FilterMap { .. } | Opcode::MapFilter { .. }
             | Opcode::FilterMapSum { .. } | Opcode::FilterMapAvg { .. }
+            | Opcode::FilterMapFirst { .. }
             | Opcode::FilterFilter { .. }
             | Opcode::MapMap { .. } | Opcode::MapSum(_) | Opcode::MapAvg(_)
             | Opcode::MapFlatten(_)

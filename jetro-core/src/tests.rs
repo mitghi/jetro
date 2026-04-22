@@ -1358,6 +1358,39 @@ mod tests {
     }
 
     #[test]
+    fn fusion_filter_map_first_opcode() {
+        use crate::vm::{Compiler, Opcode};
+        let prog = Compiler::compile_str(
+            "$.books.filter(@.price > 10).map(@.title).first()"
+        ).unwrap();
+        let has = prog.ops.iter().any(|o| matches!(o, Opcode::FilterMapFirst { .. }));
+        assert!(has, "filter+map+first should fuse to FilterMapFirst");
+    }
+
+    #[test]
+    fn fusion_filter_map_first_semantics() {
+        let doc = books();
+        let fused = query(
+            "$.store.books.filter(@.price > 10).map(@.title).first()",
+            &doc,
+        ).unwrap();
+        let plain = query(
+            "$.store.books.filter(@.price > 10).map(@.title)",
+            &doc,
+        ).unwrap();
+        let arr = plain.as_array().unwrap();
+        if arr.is_empty() {
+            assert!(fused.is_null());
+        } else {
+            assert_eq!(fused, arr[0]);
+        }
+
+        let empty_doc: serde_json::Value = serde_json::from_str(r#"{"xs":[]}"#).unwrap();
+        let e = query("$.xs.filter(@.price > 0).map(@.title).first()", &empty_doc).unwrap();
+        assert!(e.is_null());
+    }
+
+    #[test]
     fn fusion_sort_sum_drops_sort() {
         use crate::vm::{Compiler, Opcode, BuiltinMethod};
         let prog = Compiler::compile_str("$.books.sort().sum()").unwrap();

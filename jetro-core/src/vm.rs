@@ -345,6 +345,9 @@ pub enum Opcode {
     /// Fused `filter(p).map(f).avg()` — mean as float over mapped values
     /// that pass the predicate.
     FilterMapAvg { pred: Arc<Program>, map: Arc<Program> },
+    /// Fused `filter(p).map(f).first()` — early-exit: apply `map` once,
+    /// to the first item that satisfies `pred`.
+    FilterMapFirst { pred: Arc<Program>, map: Arc<Program> },
     /// Fused `sort()` + `[0:n]` — partial-sort smallest N using BinaryHeap.
     /// `asc=true` → smallest N; `asc=false` → largest N.
     TopN { n: usize, asc: bool },
@@ -771,7 +774,7 @@ impl Compiler {
     fn pass_filter_fusion(ops: Vec<Opcode>) -> Vec<Opcode> {
         let mut out: Vec<Opcode> = Vec::with_capacity(ops.len());
         for op in ops {
-            // FilterMap + sum()/avg() → FilterMapSum / FilterMapAvg (three-way fusion)
+            // FilterMap + sum()/avg()/first() → three-way fusion
             if let Opcode::CallMethod(b) = &op {
                 if b.sub_progs.is_empty() {
                     if let Some(Opcode::FilterMap { pred, map }) = out.last() {
@@ -780,6 +783,7 @@ impl Compiler {
                         let fused = match b.method {
                             BuiltinMethod::Sum => Some(Opcode::FilterMapSum { pred, map }),
                             BuiltinMethod::Avg => Some(Opcode::FilterMapAvg { pred, map }),
+                            BuiltinMethod::First => Some(Opcode::FilterMapFirst { pred, map }),
                             _ => None,
                         };
                         if let Some(o) = fused {
@@ -2197,6 +2201,29 @@ impl VM {
                         }
                     }
                     stack.push(if n == 0 { Val::Null } else { Val::Float(sum / n as f64) });
+                }
+                Opcode::FilterMapFirst { pred, map } => {
+                    let recv = pop!(stack);
+                    let mut out = Val::Null;
+                    if let Val::Arr(a) = &recv {
+                        let mut scratch = env.clone();
+                        for item in a.iter() {
+                            let prev = scratch.swap_current(item.clone());
+                            if is_truthy(&self.exec(pred, &scratch)?) {
+                                let mapped = self.exec(map, &scratch)?;
+                                scratch.restore_current(prev);
+                                out = mapped;
+                                break;
+                            }
+                            scratch.restore_current(prev);
+                        }
+                    } else if !recv.is_null() {
+                        let sub = env.with_current(recv.clone());
+                        if is_truthy(&self.exec(pred, &sub)?) {
+                            out = self.exec(map, &sub)?;
+                        }
+                    }
+                    stack.push(out);
                 }
                 Opcode::MapFirst(f) => {
                     let recv = pop!(stack);
