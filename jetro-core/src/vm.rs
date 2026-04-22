@@ -2758,7 +2758,8 @@ impl VM {
 
                 Opcode::SetComp(spec) => {
                     let items = self.exec_iter_vals(&spec.iter, env)?;
-                    let mut seen: Vec<String> = Vec::with_capacity(items.len());
+                    let mut seen: std::collections::HashSet<String> =
+                        std::collections::HashSet::with_capacity(items.len());
                     let mut out = Vec::with_capacity(items.len());
                     for item in items {
                         let ie = bind_comp_vars(env, &spec.vars, item);
@@ -2767,7 +2768,7 @@ impl VM {
                         }
                         let v = self.exec(&spec.expr, &ie)?;
                         let k = val_to_key(&v);
-                        if !seen.contains(&k) { seen.push(k); out.push(v); }
+                        if seen.insert(k) { out.push(v); }
                     }
                     stack.push(Val::arr(out));
                 }
