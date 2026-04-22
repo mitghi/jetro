@@ -1611,12 +1611,6 @@ impl PathCache {
         self.docs.get(&doc_hash)?.get(ptr).cloned()
     }
 
-    /// O(1) existence check without cloning.
-    #[inline]
-    fn contains(&self, doc_hash: u64, ptr: &str) -> bool {
-        self.docs.get(&doc_hash).map_or(false, |m| m.contains_key(ptr))
-    }
-
     fn insert(&mut self, doc_hash: u64, ptr: Arc<str>, val: Val) {
         if self.order.len() >= self.capacity {
             if let Some((old_hash, old_ptr)) = self.order.pop_front() {
@@ -1713,6 +1707,13 @@ pub struct VM {
     compile_lru:   std::collections::VecDeque<(u64, String)>,
     compile_cap:   usize,
     path_cache:    PathCache,
+    /// Per-exec RootChain resolution cache.  Key = raw address of the
+    /// `chain` Arc slice; value = resolved Val.  Cleared on every top-level
+    /// `execute()` call so stale entries never outlive the doc they
+    /// reference.  Avoids rebuilding the `/a/b/c` pointer string and
+    /// consulting `path_cache` when the same RootChain opcode fires
+    /// repeatedly inside a loop.
+    root_chain_cache: HashMap<usize, Val>,
     /// Hash of the document currently being executed — set once by `execute()`,
     /// reused by all recursive `exec()` calls within the same top-level call.
     doc_hash:      u64,
@@ -1734,6 +1735,7 @@ impl VM {
             compile_lru:   std::collections::VecDeque::with_capacity(compile_cap),
             compile_cap,
             path_cache:    PathCache::new(path_cap),
+            root_chain_cache: HashMap::new(),
             doc_hash:      0,
             config:        PassConfig::default(),
         }
@@ -1776,6 +1778,9 @@ impl VM {
         let root = Val::from(doc);
         // Compute doc hash once; reused by all exec() calls in this invocation.
         self.doc_hash = hash_val_structure(&root);
+        // Per-exec RootChain cache: entries key off raw Arc addresses that
+        // must not outlive this document.  Clear before every run.
+        self.root_chain_cache.clear();
         let env = self.make_env(root);
         let result = self.exec(program, &env)?;
         Ok(result.into())
@@ -1969,42 +1974,36 @@ impl VM {
 
                 // ── Peephole fusions ──────────────────────────────────────────
                 Opcode::RootChain(chain) => {
-                    let doc_hash = self.doc_hash;
-
-                    // (B) Find deepest cached prefix — immutable scan.
-                    let mut start = 0usize;
-                    {
-                        let mut ptr = String::new();
-                        for (i, k) in chain.iter().enumerate() {
-                            ptr.push('/');
-                            ptr.push_str(k.as_ref());
-                            if self.path_cache.contains(doc_hash, &ptr) {
-                                start = i + 1;
-                            } else {
-                                break;
-                            }
-                        }
+                    // Fast path — same RootChain opcode fired earlier in this
+                    // execute() call on this same doc.  Arc pointer identity
+                    // is stable; cache is cleared per top-level execute().
+                    let key = Arc::as_ptr(chain) as *const () as usize;
+                    if let Some(v) = self.root_chain_cache.get(&key) {
+                        stack.push(v.clone());
+                        continue;
                     }
 
-                    // Retrieve cached starting node (O(1) Val clone).
-                    let mut current = if start > 0 {
-                        let prefix_ptr: String = chain[..start].iter()
-                            .fold(String::new(), |mut s, k| { s.push('/'); s.push_str(k.as_ref()); s });
-                        self.path_cache.get(doc_hash, &prefix_ptr)
-                            .unwrap_or_else(|| env.root.clone())
-                    } else {
-                        env.root.clone()
-                    };
-
-                    // (A) Traverse uncached suffix, caching each new node.
-                    let mut ptr: String = chain[..start].iter()
-                        .fold(String::new(), |mut s, k| { s.push('/'); s.push_str(k.as_ref()); s });
-                    for k in chain[start..].iter() {
-                        current = current.get_field(k.as_ref());
+                    let doc_hash = self.doc_hash;
+                    let mut current = env.root.clone();
+                    let mut ptr = String::new();
+                    let mut resumed_from_cache = false;
+                    for k in chain.iter() {
                         ptr.push('/');
                         ptr.push_str(k.as_ref());
+                        // Try resuming from a longer cached prefix before
+                        // stepping through get_field.
+                        if !resumed_from_cache {
+                            if let Some(cached) = self.path_cache.get(doc_hash, &ptr) {
+                                current = cached;
+                                continue;
+                            }
+                            resumed_from_cache = true;
+                        }
+                        current = current.get_field(k.as_ref());
                         self.path_cache.insert(doc_hash, Arc::from(ptr.as_str()), current.clone());
                     }
+
+                    self.root_chain_cache.insert(key, current.clone());
                     stack.push(current);
                 }
                 Opcode::FilterCount(pred) => {
