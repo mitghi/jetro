@@ -81,29 +81,29 @@ pub fn sort(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
         _                               => None,
     }).collect();
 
-    let mut err_cell: Option<EvalError> = None;
-    items.sort_by(|x, y| {
-        if err_cell.is_some() { return std::cmp::Ordering::Equal; }
-        for (key_expr, desc) in &keys {
-            let kx = eval(key_expr, &env.with_current(x.clone()));
-            let ky = eval(key_expr, &env.with_current(y.clone()));
-            match (kx, ky) {
-                (Ok(vx), Ok(vy)) => {
-                    let ord = cmp_vals(&vx, &vy);
-                    if ord != std::cmp::Ordering::Equal {
-                        return if *desc { ord.reverse() } else { ord };
-                    }
-                }
-                (Err(e), _) | (_, Err(e)) => {
-                    err_cell = Some(e);
-                    return std::cmp::Ordering::Equal;
-                }
+    // Schwartzian transform: eval each key expression once per item up
+    // front, then sort by the precomputed keys.  With N items the naive
+    // sort does O(N log N) comparisons, each evaluating keys twice — so
+    // 2·N log N evals.  Precomputing brings this down to N evals plus
+    // O(N log N) Val::cmp operations.
+    let mut keyed: Vec<(Vec<Val>, Val)> = Vec::with_capacity(items.len());
+    for item in items {
+        let mut ks = Vec::with_capacity(keys.len());
+        for (key_expr, _) in &keys {
+            ks.push(eval(key_expr, &env.with_current(item.clone()))?);
+        }
+        keyed.push((ks, item));
+    }
+    keyed.sort_by(|(xk, _), (yk, _)| {
+        for (i, (_, desc)) in keys.iter().enumerate() {
+            let ord = cmp_vals(&xk[i], &yk[i]);
+            if ord != std::cmp::Ordering::Equal {
+                return if *desc { ord.reverse() } else { ord };
             }
         }
         std::cmp::Ordering::Equal
     });
-    if let Some(e) = err_cell { return Err(e); }
-    Ok(Val::arr(items))
+    Ok(Val::arr(keyed.into_iter().map(|(_, v)| v).collect()))
 }
 
 // ── Dedup / flatten ───────────────────────────────────────────────────────────
