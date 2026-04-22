@@ -2709,6 +2709,13 @@ impl VM {
 
     fn exec_lambda_method(&mut self, recv: Val, call: &CompiledCall, env: &Env) -> Result<Val, EvalError> {
         let sub = call.sub_progs.first();
+        // Hoist the lambda param name out of the per-item loop — otherwise
+        // each iteration would re-scan `orig_args` for the Lambda pattern.
+        let lam_param: Option<&str> = match call.orig_args.first() {
+            Some(Arg::Pos(Expr::Lambda { params, .. })) if !params.is_empty() =>
+                Some(params[0].as_str()),
+            _ => None,
+        };
 
         match call.method {
             BuiltinMethod::Filter => {
@@ -2716,7 +2723,7 @@ impl VM {
                 let items = recv.into_vec().ok_or_else(|| EvalError("filter: expected array".into()))?;
                 let mut out = Vec::new();
                 for item in items {
-                    if is_truthy(&self.exec_with_lambda(pred, &item, &call.orig_args, env)?) {
+                    if is_truthy(&self.exec_lam_body(pred, &item, lam_param, env)?) {
                         out.push(item);
                     }
                 }
@@ -2726,7 +2733,7 @@ impl VM {
                 let mapper = sub.ok_or_else(|| EvalError("map: requires mapper".into()))?;
                 let items = recv.into_vec().ok_or_else(|| EvalError("map: expected array".into()))?;
                 let r: Result<Vec<_>, _> = items.into_iter()
-                    .map(|item| self.exec_with_lambda(mapper, &item, &call.orig_args, env))
+                    .map(|item| self.exec_lam_body(mapper, &item, lam_param, env))
                     .collect();
                 Ok(Val::arr(r?))
             }
@@ -2735,7 +2742,7 @@ impl VM {
                 let items = recv.into_vec().ok_or_else(|| EvalError("flatMap: expected array".into()))?;
                 let mut out = Vec::new();
                 for item in items {
-                    match self.exec_with_lambda(mapper, &item, &call.orig_args, env)? {
+                    match self.exec_lam_body(mapper, &item, lam_param, env)? {
                         Val::Arr(a) => out.extend(Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone())),
                         v => out.push(v),
                     }
@@ -2750,7 +2757,7 @@ impl VM {
                 let pred = sub.ok_or_else(|| EvalError("any: requires predicate".into()))?;
                 if let Val::Arr(a) = &recv {
                     let result = a.iter().any(|item| {
-                        self.exec_with_lambda(pred, item, &call.orig_args, env)
+                        self.exec_lam_body(pred, item, lam_param, env)
                             .map(|v| is_truthy(&v)).unwrap_or(false)
                     });
                     Ok(Val::Bool(result))
@@ -2761,7 +2768,7 @@ impl VM {
                 if let Val::Arr(a) = &recv {
                     if a.is_empty() { return Ok(Val::Bool(true)); }
                     let result = a.iter().all(|item| {
-                        self.exec_with_lambda(pred, item, &call.orig_args, env)
+                        self.exec_lam_body(pred, item, lam_param, env)
                             .map(|v| is_truthy(&v)).unwrap_or(false)
                     });
                     Ok(Val::Bool(result))
@@ -2771,7 +2778,7 @@ impl VM {
                 let pred = &call.sub_progs[0];
                 if let Val::Arr(a) = &recv {
                     let n = a.iter().filter(|item| {
-                        self.exec_with_lambda(pred, item, &call.orig_args, env)
+                        self.exec_lam_body(pred, item, lam_param, env)
                             .map(|v| is_truthy(&v)).unwrap_or(false)
                     }).count();
                     Ok(Val::Int(n as i64))
@@ -2782,7 +2789,7 @@ impl VM {
                 let items = recv.into_vec().ok_or_else(|| EvalError("groupBy: expected array".into()))?;
                 let mut map: IndexMap<Arc<str>, Val> = IndexMap::new();
                 for item in items {
-                    let k: Arc<str> = Arc::from(val_to_key(&self.exec_with_lambda(key_prog, &item, &call.orig_args, env)?).as_str());
+                    let k: Arc<str> = Arc::from(val_to_key(&self.exec_lam_body(key_prog, &item, lam_param, env)?).as_str());
                     let bucket = map.entry(k).or_insert_with(|| Val::arr(Vec::new()));
                     bucket.as_array_mut().unwrap().push(item);
                 }
@@ -2793,7 +2800,7 @@ impl VM {
                 let items = recv.into_vec().ok_or_else(|| EvalError("countBy: expected array".into()))?;
                 let mut map: IndexMap<Arc<str>, Val> = IndexMap::new();
                 for item in items {
-                    let k: Arc<str> = Arc::from(val_to_key(&self.exec_with_lambda(key_prog, &item, &call.orig_args, env)?).as_str());
+                    let k: Arc<str> = Arc::from(val_to_key(&self.exec_lam_body(key_prog, &item, lam_param, env)?).as_str());
                     let counter = map.entry(k).or_insert(Val::Int(0));
                     if let Val::Int(n) = counter { *n += 1; }
                 }
@@ -2804,7 +2811,7 @@ impl VM {
                 let items = recv.into_vec().ok_or_else(|| EvalError("indexBy: expected array".into()))?;
                 let mut map: IndexMap<Arc<str>, Val> = IndexMap::new();
                 for item in items {
-                    let k: Arc<str> = Arc::from(val_to_key(&self.exec_with_lambda(key_prog, &item, &call.orig_args, env)?).as_str());
+                    let k: Arc<str> = Arc::from(val_to_key(&self.exec_lam_body(key_prog, &item, lam_param, env)?).as_str());
                     map.insert(k, item);
                 }
                 Ok(Val::obj(map))
@@ -2814,7 +2821,7 @@ impl VM {
                 let items = recv.into_vec().ok_or_else(|| EvalError("takeWhile: expected array".into()))?;
                 let mut out = Vec::new();
                 for item in items {
-                    if !is_truthy(&self.exec_with_lambda(pred, &item, &call.orig_args, env)?) { break; }
+                    if !is_truthy(&self.exec_lam_body(pred, &item, lam_param, env)?) { break; }
                     out.push(item);
                 }
                 Ok(Val::arr(out))
@@ -2825,7 +2832,7 @@ impl VM {
                 let mut dropping = true;
                 let out: Vec<Val> = items.into_iter().filter(|item| {
                     if dropping {
-                        dropping = self.exec_with_lambda(pred, item, &call.orig_args, env)
+                        dropping = self.exec_lam_body(pred, item, lam_param, env)
                             .map(|v| is_truthy(&v)).unwrap_or(false);
                         !dropping
                     } else { true }
@@ -2840,7 +2847,7 @@ impl VM {
                 let items = recv.into_vec().ok_or_else(|| EvalError("partition: expected array".into()))?;
                 let (mut yes, mut no) = (Vec::new(), Vec::new());
                 for item in items {
-                    if is_truthy(&self.exec_with_lambda(pred, &item, &call.orig_args, env)?) {
+                    if is_truthy(&self.exec_lam_body(pred, &item, lam_param, env)?) {
                         yes.push(item);
                     } else {
                         no.push(item);
@@ -2853,7 +2860,7 @@ impl VM {
                 let map = recv.into_map().ok_or_else(|| EvalError("transformKeys: expected object".into()))?;
                 let mut out: IndexMap<Arc<str>, Val> = IndexMap::new();
                 for (k, v) in map {
-                    let new_key = Arc::from(val_to_key(&self.exec_with_lambda(lam, &Val::Str(k), &call.orig_args, env)?).as_str());
+                    let new_key = Arc::from(val_to_key(&self.exec_lam_body(lam, &Val::Str(k), lam_param, env)?).as_str());
                     out.insert(new_key, v);
                 }
                 Ok(Val::obj(out))
@@ -2863,7 +2870,7 @@ impl VM {
                 let map = recv.into_map().ok_or_else(|| EvalError("transformValues: expected object".into()))?;
                 let mut out: IndexMap<Arc<str>, Val> = IndexMap::new();
                 for (k, v) in map {
-                    out.insert(k, self.exec_with_lambda(lam, &v, &call.orig_args, env)?);
+                    out.insert(k, self.exec_lam_body(lam, &v, lam_param, env)?);
                 }
                 Ok(Val::obj(out))
             }
@@ -2872,7 +2879,7 @@ impl VM {
                 let map = recv.into_map().ok_or_else(|| EvalError("filterKeys: expected object".into()))?;
                 let mut out: IndexMap<Arc<str>, Val> = IndexMap::new();
                 for (k, v) in map {
-                    if is_truthy(&self.exec_with_lambda(lam, &Val::Str(k.clone()), &call.orig_args, env)?) {
+                    if is_truthy(&self.exec_lam_body(lam, &Val::Str(k.clone()), lam_param, env)?) {
                         out.insert(k, v);
                     }
                 }
@@ -2883,7 +2890,7 @@ impl VM {
                 let map = recv.into_map().ok_or_else(|| EvalError("filterValues: expected object".into()))?;
                 let mut out: IndexMap<Arc<str>, Val> = IndexMap::new();
                 for (k, v) in map {
-                    if is_truthy(&self.exec_with_lambda(lam, &v, &call.orig_args, env)?) {
+                    if is_truthy(&self.exec_lam_body(lam, &v, lam_param, env)?) {
                         out.insert(k, v);
                     }
                 }
@@ -2894,7 +2901,7 @@ impl VM {
             }
             BuiltinMethod::Update => {
                 let lam = sub.ok_or_else(|| EvalError("update: requires lambda".into()))?;
-                self.exec_with_lambda(lam, &recv, &call.orig_args, env)
+                self.exec_lam_body(lam, &recv, lam_param, env)
             }
             _ => dispatch_method(recv, call.name.as_ref(), &call.orig_args, env),
         }
@@ -2913,6 +2920,20 @@ impl VM {
                 inner.current = item.clone();
                 return self.exec(prog, &inner);
             }
+        }
+        self.exec(prog, &env.with_current(item.clone()))
+    }
+
+    /// Like `exec_with_lambda` but takes the pre-extracted lambda param
+    /// name.  Callers that drive a hot loop should hoist the param lookup
+    /// out so we don't re-scan `orig_args` per item.
+    fn exec_lam_body(&mut self, prog: &Program, item: &Val, lam_param: Option<&str>, env: &Env)
+        -> Result<Val, EvalError>
+    {
+        if let Some(name) = lam_param {
+            let mut inner = env.with_var(name, item.clone());
+            inner.current = item.clone();
+            return self.exec(prog, &inner);
         }
         self.exec(prog, &env.with_current(item.clone()))
     }
