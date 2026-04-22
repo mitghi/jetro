@@ -24,17 +24,31 @@ macro_rules! err {
 
 pub fn sum(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     let nums = collect_nums(recv, args, env)?;
-    if nums.iter().all(|v| matches!(v, Val::Int(_))) {
-        Ok(Val::Int(nums.iter().map(|v| v.as_i64().unwrap_or(0)).sum()))
-    } else {
-        Ok(Val::Float(nums.iter().map(|v| v.as_f64().unwrap_or(0.0)).sum()))
+    // Single pass: stay on Int until we see a Float, then widen once.
+    let mut i_acc: i64 = 0;
+    let mut f_acc: f64 = 0.0;
+    let mut floated = false;
+    for v in &nums {
+        match v {
+            Val::Int(n)   if !floated => { i_acc += *n; }
+            Val::Int(n)              => { f_acc += *n as f64; }
+            Val::Float(f) if !floated => { f_acc = i_acc as f64 + *f; floated = true; }
+            Val::Float(f)            => { f_acc += *f; }
+            _ => {}
+        }
     }
+    Ok(if floated { Val::Float(f_acc) } else { Val::Int(i_acc) })
 }
 
 pub fn avg(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     let nums = collect_nums(recv, args, env)?;
     if nums.is_empty() { return Ok(Val::Null); }
-    Ok(Val::Float(nums.iter().map(|v| v.as_f64().unwrap_or(0.0)).sum::<f64>() / nums.len() as f64))
+    let n = nums.len();
+    let mut acc: f64 = 0.0;
+    for v in &nums {
+        acc += v.as_f64().unwrap_or(0.0);
+    }
+    Ok(Val::Float(acc / n as f64))
 }
 
 pub fn minmax(recv: Val, args: &[Arg], env: &Env, want_max: bool) -> Result<Val, EvalError> {
@@ -52,7 +66,7 @@ fn collect_nums(recv: Val, args: &[Arg], env: &Env) -> Result<Vec<Val>, EvalErro
     if args.is_empty() {
         Ok(items.into_iter().filter(|v| v.is_number()).collect())
     } else {
-        let mut out = Vec::new();
+        let mut out = Vec::with_capacity(items.len());
         for item in items {
             let v = apply_item(item, &args[0], env)?;
             if v.is_number() { out.push(v); }
