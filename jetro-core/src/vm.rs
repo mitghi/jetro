@@ -350,6 +350,11 @@ pub enum Opcode {
     TopN { n: usize, asc: bool },
     /// Fused `map(f).flatten()` — single-pass concat of mapped arrays.
     MapFlatten(Arc<Program>),
+    /// Fused `map(f).first()` — apply `f` only to the first element.
+    /// Empty input → Null (matches plain `first()` on `[]`).
+    MapFirst(Arc<Program>),
+    /// Fused `map(f).last()` — apply `f` only to the last element.
+    MapLast(Arc<Program>),
     /// Fused `filter(p).take_while(q)` — scan while both predicates hold.
     FilterTakeWhile { pred: Arc<Program>, stop: Arc<Program> },
     /// Fused `filter(p).drop_while(q)` — skip leading matches of q on
@@ -816,6 +821,8 @@ impl Compiler {
                         BuiltinMethod::Sum => Some(Opcode::MapSum(f)),
                         BuiltinMethod::Avg => Some(Opcode::MapAvg(f)),
                         BuiltinMethod::Flatten => Some(Opcode::MapFlatten(f)),
+                        BuiltinMethod::First => Some(Opcode::MapFirst(f)),
+                        BuiltinMethod::Last => Some(Opcode::MapLast(f)),
                         _ => None,
                     };
                     if let Some(o) = fused {
@@ -2190,6 +2197,45 @@ impl VM {
                         }
                     }
                     stack.push(if n == 0 { Val::Null } else { Val::Float(sum / n as f64) });
+                }
+                Opcode::MapFirst(f) => {
+                    let recv = pop!(stack);
+                    let first = match recv {
+                        Val::Arr(a) => match Arc::try_unwrap(a) {
+                            Ok(mut v) if !v.is_empty() => Some(v.swap_remove(0)),
+                            Ok(_) => None,
+                            Err(a) => a.first().cloned(),
+                        },
+                        Val::Null => None,
+                        other => Some(other),
+                    };
+                    let out = match first {
+                        None => Val::Null,
+                        Some(item) => {
+                            let sub = env.with_current(item);
+                            self.exec(f, &sub)?
+                        }
+                    };
+                    stack.push(out);
+                }
+                Opcode::MapLast(f) => {
+                    let recv = pop!(stack);
+                    let last = match recv {
+                        Val::Arr(a) => match Arc::try_unwrap(a) {
+                            Ok(mut v) => v.pop(),
+                            Err(a) => a.last().cloned(),
+                        },
+                        Val::Null => None,
+                        other => Some(other),
+                    };
+                    let out = match last {
+                        None => Val::Null,
+                        Some(item) => {
+                            let sub = env.with_current(item);
+                            self.exec(f, &sub)?
+                        }
+                    };
+                    stack.push(out);
                 }
                 Opcode::MapFlatten(f) => {
                     let recv = pop!(stack);

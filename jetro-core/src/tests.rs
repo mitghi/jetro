@@ -1327,6 +1327,37 @@ mod tests {
     }
 
     #[test]
+    fn fusion_map_first_opcode() {
+        use crate::vm::{Compiler, Opcode};
+        let prog = Compiler::compile_str("$.books.map(@.price).first()").unwrap();
+        let has = prog.ops.iter().any(|o| matches!(o, Opcode::MapFirst(_)));
+        assert!(has, "map+first should fuse to MapFirst");
+    }
+
+    #[test]
+    fn fusion_map_last_opcode() {
+        use crate::vm::{Compiler, Opcode};
+        let prog = Compiler::compile_str("$.books.map(@.price).last()").unwrap();
+        let has = prog.ops.iter().any(|o| matches!(o, Opcode::MapLast(_)));
+        assert!(has, "map+last should fuse to MapLast");
+    }
+
+    #[test]
+    fn fusion_map_first_last_semantics() {
+        let doc = books();
+        let f = query("$.store.books.map(@.price).first()", &doc).unwrap();
+        let l = query("$.store.books.map(@.price).last()",  &doc).unwrap();
+        let all = query("$.store.books.map(@.price)",       &doc).unwrap();
+        let arr = all.as_array().unwrap();
+        assert_eq!(f, arr[0]);
+        assert_eq!(l, arr[arr.len() - 1]);
+
+        let empty_doc: serde_json::Value = serde_json::from_str(r#"{"xs":[]}"#).unwrap();
+        let f_empty = query("$.xs.map(@.price).first()", &empty_doc).unwrap();
+        assert!(f_empty.is_null());
+    }
+
+    #[test]
     fn fusion_sort_sum_drops_sort() {
         use crate::vm::{Compiler, Opcode, BuiltinMethod};
         let prog = Compiler::compile_str("$.books.sort().sum()").unwrap();
