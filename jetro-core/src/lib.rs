@@ -62,6 +62,7 @@ pub mod schema;
 pub mod plan;
 pub mod cfg;
 pub mod ssa;
+pub mod scan;
 
 #[cfg(test)]
 mod tests;
@@ -159,16 +160,42 @@ thread_local! {
 /// cache accumulate over the lifetime of the thread.
 pub struct Jetro {
     document: Value,
+    /// Retained JSON source bytes when the caller built via
+    /// [`Jetro::from_bytes`] / [`Jetro::from_slice`].  Enables SIMD
+    /// byte-scan fast paths for `$..key` queries.
+    raw_bytes: Option<Arc<[u8]>>,
 }
 
 impl Jetro {
     pub fn new(document: Value) -> Self {
-        Self { document }
+        Self { document, raw_bytes: None }
+    }
+
+    /// Parse JSON bytes and retain them alongside the parsed document.
+    /// Descendant queries (`$..key`) can then take the SIMD byte-scan path
+    /// instead of walking the tree.
+    pub fn from_bytes(bytes: Vec<u8>) -> std::result::Result<Self, serde_json::Error> {
+        let document: Value = serde_json::from_slice(&bytes)?;
+        Ok(Self { document, raw_bytes: Some(Arc::from(bytes.into_boxed_slice())) })
+    }
+
+    /// Parse JSON from a slice, retaining a copy of the bytes.
+    pub fn from_slice(bytes: &[u8]) -> std::result::Result<Self, serde_json::Error> {
+        Self::from_bytes(bytes.to_vec())
     }
 
     /// Evaluate `expr` against the document.
     pub fn collect<S: AsRef<str>>(&self, expr: S) -> std::result::Result<Value, EvalError> {
         let expr = expr.as_ref();
+        if let Some(bytes) = &self.raw_bytes {
+            let ast = parser::parse(expr).map_err(|e| EvalError(format!("{}", e)))?;
+            return eval::evaluate_with_raw(
+                &ast,
+                &self.document,
+                Arc::new(MethodRegistry::new()),
+                Arc::clone(bytes),
+            );
+        }
         THREAD_VM.with(|cell| match cell.try_borrow_mut() {
             Ok(mut vm) => vm.run_str(expr, &self.document),
             Err(_)     => VM::new().run_str(expr, &self.document),

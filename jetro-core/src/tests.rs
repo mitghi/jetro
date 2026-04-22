@@ -2776,4 +2776,23 @@ mod tests {
         let titles = r.as_array().unwrap();
         assert!(titles.contains(&json!("Dune")));
     }
+
+    #[test]
+    fn simd_scan_descendant_matches_tree_walker() {
+        use crate::Jetro;
+        let raw = br#"{"a":{"test":1},"b":[{"test":2},{"other":9},{"test":3}],"comment":"the \"test\": lie"}"#.to_vec();
+        let j_bytes = Jetro::from_bytes(raw.clone()).unwrap();
+        let j_tree  = Jetro::new(serde_json::from_slice(&raw).unwrap());
+        assert_eq!(j_bytes.collect("$..test").unwrap(),
+                   j_tree.collect("$..test").unwrap());
+    }
+
+    #[test]
+    fn simd_scan_chains_further_steps() {
+        use crate::Jetro;
+        let raw = br#"{"users":[{"id":1,"name":"a"},{"id":2,"name":"b"},{"id":3,"name":"c"}]}"#.to_vec();
+        let j = Jetro::from_bytes(raw).unwrap();
+        let r = j.collect("$..id.sum()").unwrap();
+        assert_eq!(r, json!(6));
+    }
 }

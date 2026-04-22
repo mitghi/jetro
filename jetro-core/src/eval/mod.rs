@@ -98,6 +98,10 @@ pub struct Env {
     pub root:    Val,
     pub current: Val,
     registry: Arc<MethodRegistry>,
+    /// Raw JSON bytes the `root` was parsed from, when available.  Enables
+    /// SIMD byte-scan fast paths for `$..key` and `$..find(key op lit)`
+    /// queries that start at the document root.
+    pub(crate) raw_bytes: Option<Arc<[u8]>>,
 }
 
 impl Env {
@@ -107,11 +111,28 @@ impl Env {
             root: root.clone(),
             current: root,
             registry: Arc::new(MethodRegistry::new()),
+            raw_bytes: None,
         }
     }
 
     pub fn new_with_registry(root: Val, registry: Arc<MethodRegistry>) -> Self {
-        Self { vars: SmallVec::new(), root: root.clone(), current: root, registry }
+        Self { vars: SmallVec::new(), root: root.clone(), current: root, registry, raw_bytes: None }
+    }
+
+    /// Build an `Env` that carries the original JSON source bytes so that
+    /// SIMD byte-scan can short-circuit deep-descendant queries.
+    pub fn new_with_raw(
+        root: Val,
+        registry: Arc<MethodRegistry>,
+        raw_bytes: Arc<[u8]>,
+    ) -> Self {
+        Self {
+            vars: SmallVec::new(),
+            root: root.clone(),
+            current: root,
+            registry,
+            raw_bytes: Some(raw_bytes),
+        }
     }
 
     #[inline]
@@ -124,6 +145,7 @@ impl Env {
             root: self.root.clone(),
             current,
             registry: self.registry.clone(),
+            raw_bytes: self.raw_bytes.clone(),
         }
     }
 
@@ -157,7 +179,7 @@ impl Env {
         } else {
             vars.push((Arc::from(name), val));
         }
-        Self { vars, root: self.root.clone(), current: self.current.clone(), registry: self.registry.clone() }
+        Self { vars, root: self.root.clone(), current: self.current.clone(), registry: self.registry.clone(), raw_bytes: self.raw_bytes.clone() }
     }
 
     fn with_vars2(&self, n1: &str, v1: Val, n2: &str, v2: Val) -> Self {
@@ -166,7 +188,7 @@ impl Env {
         else { vars.push((Arc::from(n1), v1)); }
         if let Some(p) = vars.iter().position(|(k, _)| k.as_ref() == n2) { vars[p].1 = v2; }
         else { vars.push((Arc::from(n2), v2)); }
-        Self { vars, root: self.root.clone(), current: self.current.clone(), registry: self.registry.clone() }
+        Self { vars, root: self.root.clone(), current: self.current.clone(), registry: self.registry.clone(), raw_bytes: self.raw_bytes.clone() }
     }
 
     /// Hot-loop helper: bind `name → val` and swap `current`, returning
@@ -219,6 +241,18 @@ pub fn evaluate_with(
     Ok(eval(expr, &Env::new_with_registry(val, registry))?.into())
 }
 
+/// Evaluate `expr` with the original JSON source bytes retained.  Enables
+/// SIMD byte-scan fast paths for `$..key` descent queries.
+pub fn evaluate_with_raw(
+    expr: &Expr,
+    root: &serde_json::Value,
+    registry: Arc<MethodRegistry>,
+    raw_bytes: Arc<[u8]>,
+) -> Result<serde_json::Value, EvalError> {
+    let val = Val::from(root);
+    Ok(eval(expr, &Env::new_with_raw(val, registry, raw_bytes))?.into())
+}
+
 // ── Core evaluator ────────────────────────────────────────────────────────────
 
 pub(super) fn eval(expr: &Expr, env: &Env) -> Result<Val, EvalError> {
@@ -240,6 +274,16 @@ pub(super) fn eval(expr: &Expr, env: &Env) -> Result<Val, EvalError> {
         }
 
         Expr::Chain(base, steps) => {
+            // SIMD fast path: `$..key<rest>` with raw bytes available —
+            // byte-scan collects descendants without walking the tree.
+            if let (Expr::Root, Some(Step::Descendant(name)), Some(bytes))
+                = (&**base, steps.first(), env.raw_bytes.as_ref())
+            {
+                let hits = super::scan::extract_values(bytes, name);
+                let mut val = Val::arr(hits.iter().map(Val::from).collect());
+                for step in &steps[1..] { val = eval_step(val, step, env)?; }
+                return Ok(val);
+            }
             let mut val = eval(base, env)?;
             for step in steps { val = eval_step(val, step, env)?; }
             Ok(val)

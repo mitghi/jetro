@@ -18,3 +18,4 @@ serde = { version = "1.0.171", features = ["derive"] }
 parking_lot = "0.12"
 smallvec = { version = "1", features = ["union"] }
 indexmap = "2"
+memchr = "2"
