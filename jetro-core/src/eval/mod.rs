@@ -201,17 +201,6 @@ impl Env {
         }
     }
 
-    fn extend_vars(&self, extra: impl IntoIterator<Item = (Arc<str>, Val)>) -> Self {
-        let mut vars = self.vars.clone();
-        for (name, val) in extra {
-            if let Some(pos) = vars.iter().position(|(k, _)| *k == name) {
-                vars[pos].1 = val;
-            } else {
-                vars.push((name, val));
-            }
-        }
-        Self { vars, root: self.root.clone(), current: self.current.clone(), registry: self.registry.clone() }
-    }
 }
 
 // ── Public entry points ───────────────────────────────────────────────────────

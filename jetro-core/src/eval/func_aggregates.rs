@@ -12,7 +12,7 @@ use std::sync::Arc;
 use indexmap::IndexMap;
 
 use crate::ast::Arg;
-use super::{Env, EvalError, eval, apply_item};
+use super::{Env, EvalError, apply_item};
 use super::value::Val;
 use super::util::{is_truthy, val_to_key};
 
@@ -168,8 +168,3 @@ pub fn index_by(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     Ok(Val::obj(map))
 }
 
-// ── Sort helper (exported for func_arrays) ────────────────────────────────────
-
-pub fn sort_key_eval(item: &Val, key_expr: &crate::ast::Expr, env: &Env) -> Result<Val, EvalError> {
-    eval(key_expr, &env.with_current(item.clone()))
-}
