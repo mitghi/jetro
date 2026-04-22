@@ -1281,6 +1281,16 @@ impl Compiler {
                         Some(Opcode::PushBool(a == b)),
                     (Opcode::PushStr(a), Opcode::PushStr(b), Opcode::Neq) =>
                         Some(Opcode::PushBool(a != b)),
+                    (Opcode::PushStr(a), Opcode::PushStr(b), Opcode::Lt) =>
+                        Some(Opcode::PushBool(a < b)),
+                    (Opcode::PushStr(a), Opcode::PushStr(b), Opcode::Lte) =>
+                        Some(Opcode::PushBool(a <= b)),
+                    (Opcode::PushStr(a), Opcode::PushStr(b), Opcode::Gt) =>
+                        Some(Opcode::PushBool(a > b)),
+                    (Opcode::PushStr(a), Opcode::PushStr(b), Opcode::Gte) =>
+                        Some(Opcode::PushBool(a >= b)),
+                    (Opcode::PushStr(a), Opcode::PushStr(b), Opcode::Add) =>
+                        Some(Opcode::PushStr(Arc::<str>::from(format!("{}{}", a, b)))),
                     (Opcode::PushBool(a), Opcode::PushBool(b), Opcode::Eq) =>
                         Some(Opcode::PushBool(a == b)),
                     _ => None,

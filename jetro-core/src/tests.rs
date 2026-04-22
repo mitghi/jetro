@@ -1438,6 +1438,22 @@ mod tests {
     }
 
     #[test]
+    fn const_fold_string_concat_and_cmp() {
+        use crate::vm::{Compiler, Opcode};
+        let p1 = Compiler::compile_str(r#"$ | "a" + "bc""#).unwrap();
+        assert!(p1.ops.iter().any(|o| matches!(o, Opcode::PushStr(s) if s.as_ref() == "abc")),
+                "\"a\" + \"bc\" should fold to PushStr(\"abc\"): {:?}", p1.ops);
+
+        let p2 = Compiler::compile_str(r#"$ | "a" < "b""#).unwrap();
+        assert!(p2.ops.iter().any(|o| matches!(o, Opcode::PushBool(true))),
+                "\"a\" < \"b\" should fold to PushBool(true): {:?}", p2.ops);
+
+        let p3 = Compiler::compile_str(r#"$ | "zz" >= "aa""#).unwrap();
+        assert!(p3.ops.iter().any(|o| matches!(o, Opcode::PushBool(true))),
+                "\"zz\" >= \"aa\" should fold: {:?}", p3.ops);
+    }
+
+    #[test]
     fn fusion_filter_last_opcode() {
         use crate::vm::{Compiler, Opcode};
         let prog = Compiler::compile_str("$.books.filter(@.price > 10).last()").unwrap();
