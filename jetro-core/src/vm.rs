@@ -947,15 +947,24 @@ impl Compiler {
     /// came from elsewhere (method return, filter, comprehension).  Singletons
     /// are left as-is — fusion only triggers at length ≥ 2.
     fn pass_field_chain(ops: Vec<Opcode>) -> Vec<Opcode> {
+        // Both GetField(k) and OptField(k) devolve to `get_field(k)` which
+        // returns Null for non-objects, so OptField can be absorbed into a
+        // FieldChain: null propagates through the remaining get_field calls.
+        fn field_key(op: &Opcode) -> Option<Arc<str>> {
+            match op {
+                Opcode::GetField(k) | Opcode::OptField(k) => Some(Arc::clone(k)),
+                _ => None,
+            }
+        }
         let mut out = Vec::with_capacity(ops.len());
         let mut it = ops.into_iter().peekable();
         while let Some(op) = it.next() {
-            if let Opcode::GetField(_) = &op {
-                if matches!(it.peek(), Some(Opcode::GetField(_))) {
-                    let Opcode::GetField(k0) = op else { unreachable!() };
+            if let Some(k0) = field_key(&op) {
+                if it.peek().and_then(field_key).is_some() {
                     let mut chain: Vec<Arc<str>> = vec![k0];
-                    while let Some(Opcode::GetField(_)) = it.peek() {
-                        if let Some(Opcode::GetField(k)) = it.next() { chain.push(k); }
+                    while let Some(k) = it.peek().and_then(field_key) {
+                        it.next();
+                        chain.push(k);
                     }
                     out.push(Opcode::FieldChain(chain.into()));
                     continue;

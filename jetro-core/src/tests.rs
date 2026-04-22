@@ -1004,6 +1004,30 @@ mod tests {
     }
 
     #[test]
+    fn fusion_opt_field_absorbed_into_field_chain() {
+        use crate::vm::{Compiler, Opcode};
+        // Mid-program OptField chain (receiver from method call so nullness
+        // analyzer can't prove the shape) should still collapse into one
+        // FieldChain — null propagates through `get_field` correctly.
+        let prog = Compiler::compile_str("$.items.first()?.a?.b?.c").unwrap();
+        let has_fc = prog.ops.iter().any(|o| matches!(o, Opcode::FieldChain(c) if c.len() >= 2));
+        let residual = prog.ops.iter().filter(|o|
+            matches!(o, Opcode::OptField(_) | Opcode::GetField(_))).count();
+        assert!(has_fc, "FieldChain not emitted; ops: {:?}", prog.ops);
+        assert_eq!(residual, 0, "residual per-step field ops: {:?}", prog.ops);
+    }
+
+    #[test]
+    fn fusion_opt_field_chain_semantics() {
+        let doc = json!({"items": [{"a": {"b": {"c": 42}}}]});
+        let r = query("$.items.first()?.a?.b?.c", &doc).unwrap();
+        assert_eq!(r, json!(42));
+        let missing = json!({"items": [{"a": null}]});
+        let r2 = query("$.items.first()?.a?.b?.c", &missing).unwrap();
+        assert!(r2.is_null());
+    }
+
+    #[test]
     fn fusion_field_chain_semantics() {
         let doc = json!({"items": [{"a": {"b": {"c": 42}}}]});
         let r = query("$.items.first().a.b.c", &doc).unwrap();
