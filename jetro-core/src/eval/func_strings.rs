@@ -21,12 +21,12 @@ macro_rules! err {
 // All follow fn(Val, &[Arg], &Env) -> Result<Val, EvalError>.
 
 pub fn upper(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    if let Val::Str(s) = recv { Ok(Val::Str(Arc::from(s.to_uppercase().as_str()))) }
+    if let Val::Str(s) = recv { Ok(Val::Str(Arc::<str>::from(s.to_uppercase()))) }
     else { err!("upper: expected string") }
 }
 
 pub fn lower(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    if let Val::Str(s) = recv { Ok(Val::Str(Arc::from(s.to_lowercase().as_str()))) }
+    if let Val::Str(s) = recv { Ok(Val::Str(Arc::<str>::from(s.to_lowercase()))) }
     else { err!("lower: expected string") }
 }
 

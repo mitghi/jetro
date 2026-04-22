@@ -120,7 +120,7 @@ pub fn add_vals(a: Val, b: Val) -> Result<Val, EvalError> {
         (Val::Float(x), Val::Float(y)) => Ok(Val::Float(x + y)),
         (Val::Int(x),   Val::Float(y)) => Ok(Val::Float(x as f64 + y)),
         (Val::Float(x), Val::Int(y))   => Ok(Val::Float(x + y as f64)),
-        (Val::Str(x),   Val::Str(y))   => Ok(Val::Str(Arc::from(format!("{}{}", x, y).as_str()))),
+        (Val::Str(x),   Val::Str(y))   => Ok(Val::Str(Arc::<str>::from(format!("{}{}", x, y)))),
         (Val::Arr(x), Val::Arr(y)) => {
             let mut v = Arc::try_unwrap(x).unwrap_or_else(|a| (*a).clone());
             v.extend_from_slice(&y);

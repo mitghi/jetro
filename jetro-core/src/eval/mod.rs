@@ -299,11 +299,14 @@ pub(super) fn eval(expr: &Expr, env: &Env) -> Result<Val, EvalError> {
 
         Expr::DictComp { key, val, vars, iter, cond } => {
             let items = eval_iter(iter, env)?;
-            let mut map: IndexMap<Arc<str>, Val> = IndexMap::new();
+            let mut map: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(items.len());
             for item in items {
                 let ie = bind_vars(env, vars, item);
                 if let Some(c) = cond { if !is_truthy(&eval(c, &ie)?) { continue; } }
-                let k: Arc<str> = Arc::from(val_to_key(&eval(key, &ie)?).as_str());
+                let k: Arc<str> = match eval(key, &ie)? {
+                    Val::Str(s) => s,
+                    other       => Arc::<str>::from(val_to_key(&other)),
+                };
                 map.insert(k, eval(val, &ie)?);
             }
             Ok(Val::obj(map))
@@ -311,14 +314,14 @@ pub(super) fn eval(expr: &Expr, env: &Env) -> Result<Val, EvalError> {
 
         Expr::SetComp { expr, vars, iter, cond } | Expr::GenComp { expr, vars, iter, cond } => {
             let items = eval_iter(iter, env)?;
-            let mut seen: Vec<String> = Vec::new();
-            let mut out = Vec::new();
+            let mut seen: std::collections::HashSet<String> =
+                std::collections::HashSet::with_capacity(items.len());
+            let mut out = Vec::with_capacity(items.len());
             for item in items {
                 let ie = bind_vars(env, vars, item);
                 if let Some(c) = cond { if !is_truthy(&eval(c, &ie)?) { continue; } }
                 let v = eval(expr, &ie)?;
-                let k = val_to_key(&v);
-                if !seen.contains(&k) { seen.push(k); out.push(v); }
+                if seen.insert(val_to_key(&v)) { out.push(v); }
             }
             Ok(Val::arr(out))
         }
@@ -766,7 +769,10 @@ fn eval_object(fields: &[ObjField], env: &Env) -> Result<Val, EvalError> {
                 map.insert(Arc::from(key.as_str()), v);
             }
             ObjField::Dynamic { key, val } => {
-                let k: Arc<str> = Arc::from(val_to_key(&eval(key, env)?).as_str());
+                let k: Arc<str> = match eval(key, env)? {
+                    Val::Str(s) => s,
+                    other       => Arc::<str>::from(val_to_key(&other)),
+                };
                 map.insert(k, eval(val, env)?);
             }
             ObjField::Spread(expr) => {

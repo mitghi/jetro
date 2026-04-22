@@ -133,7 +133,7 @@ pub fn reverse(recv: Val) -> Result<Val, EvalError> {
             v.reverse();
             Ok(Val::arr(v))
         }
-        Val::Str(s) => Ok(Val::Str(Arc::from(s.chars().rev().collect::<String>().as_str()))),
+        Val::Str(s) => Ok(Val::Str(Arc::<str>::from(s.chars().rev().collect::<String>()))),
         _ => err!("reverse: expected array or string"),
     }
 }
@@ -210,7 +210,7 @@ pub fn join(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
         .unwrap_or_default();
     let items = recv.into_vec().ok_or_else(|| EvalError("join: expected array".into()))?;
     let parts: Vec<String> = items.iter().map(val_to_string).collect();
-    Ok(Val::Str(Arc::from(parts.join(&sep).as_str())))
+    Ok(Val::Str(Arc::<str>::from(parts.join(&sep))))
 }
 
 /// Equi-join: `lhs.equi_join(rhs, lhs_key, rhs_key)`.
