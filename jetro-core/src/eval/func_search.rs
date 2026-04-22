@@ -63,18 +63,43 @@ pub fn deep_find(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     if args.is_empty() {
         return err!("find: requires at least one predicate");
     }
+    // Hot path: every pred in `args` is a bare expression (not Lambda) —
+    // share one scratch Env across all node visits, overwrite `current` in
+    // place, skip the SmallVec clone inside `with_current`.  For lambdas
+    // fall back to `apply_item`.
+    let all_bare = args.iter().all(|a| {
+        !matches!(a, Arg::Pos(Expr::Lambda { .. }) | Arg::Named(_, Expr::Lambda { .. }))
+    });
     let mut out = Vec::new();
     let mut err_cell: Option<EvalError> = None;
-    walk_pre(&recv, &mut |node| {
-        if err_cell.is_some() { return; }
-        for p in args {
-            match apply_item(node.clone(), p, env) {
-                Ok(v)  => if !is_truthy(&v) { return; }
-                Err(e) => { err_cell = Some(e); return; }
+    if all_bare {
+        let mut scratch = env.clone();
+        let exprs: Vec<&Expr> = args.iter().map(|a| match a {
+            Arg::Pos(e) | Arg::Named(_, e) => e,
+        }).collect();
+        walk_pre(&recv, &mut |node| {
+            if err_cell.is_some() { return; }
+            scratch.current = node.clone();
+            for e in &exprs {
+                match eval(e, &scratch) {
+                    Ok(v)  => if !is_truthy(&v) { return; }
+                    Err(err) => { err_cell = Some(err); return; }
+                }
             }
-        }
-        out.push(node.clone());
-    });
+            out.push(node.clone());
+        });
+    } else {
+        walk_pre(&recv, &mut |node| {
+            if err_cell.is_some() { return; }
+            for p in args {
+                match apply_item(node.clone(), p, env) {
+                    Ok(v)  => if !is_truthy(&v) { return; }
+                    Err(e) => { err_cell = Some(e); return; }
+                }
+            }
+            out.push(node.clone());
+        });
+    }
     if let Some(e) = err_cell { return Err(e); }
     Ok(Val::arr(out))
 }

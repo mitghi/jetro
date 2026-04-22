@@ -30,9 +30,21 @@ macro_rules! err {
 pub fn filter(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     let pred = args.first().ok_or_else(|| EvalError("filter: requires predicate".into()))?;
     let items = recv.into_vec().ok_or_else(|| EvalError("filter: expected array".into()))?;
-    let mut out = Vec::new();
-    for item in items {
-        if is_truthy(&apply_item(item.clone(), pred, env)?) { out.push(item); }
+    let mut out = Vec::with_capacity(items.len());
+    let bare = match pred {
+        Arg::Pos(e) | Arg::Named(_, e) =>
+            if !matches!(e, Expr::Lambda { .. }) { Some(e) } else { None },
+    };
+    if let Some(expr) = bare {
+        let mut scratch = env.clone();
+        for item in items {
+            scratch.current = item.clone();
+            if is_truthy(&eval(expr, &scratch)?) { out.push(item); }
+        }
+    } else {
+        for item in items {
+            if is_truthy(&apply_item(item.clone(), pred, env)?) { out.push(item); }
+        }
     }
     Ok(Val::arr(out))
 }
@@ -44,12 +56,29 @@ pub fn find(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
         return err!("find: requires at least one predicate");
     }
     let items = recv.into_vec().ok_or_else(|| EvalError("find: expected array".into()))?;
-    let mut out = Vec::new();
-    'outer: for item in items {
-        for p in args {
-            if !is_truthy(&apply_item(item.clone(), p, env)?) { continue 'outer; }
+    let mut out = Vec::with_capacity(items.len());
+    let all_bare = args.iter().all(|a| {
+        !matches!(a, Arg::Pos(Expr::Lambda { .. }) | Arg::Named(_, Expr::Lambda { .. }))
+    });
+    if all_bare {
+        let mut scratch = env.clone();
+        let exprs: Vec<&Expr> = args.iter().map(|a| match a {
+            Arg::Pos(e) | Arg::Named(_, e) => e,
+        }).collect();
+        'outer: for item in items {
+            scratch.current = item.clone();
+            for e in &exprs {
+                if !is_truthy(&eval(e, &scratch)?) { continue 'outer; }
+            }
+            out.push(item);
         }
-        out.push(item);
+    } else {
+        'outer: for item in items {
+            for p in args {
+                if !is_truthy(&apply_item(item.clone(), p, env)?) { continue 'outer; }
+            }
+            out.push(item);
+        }
     }
     Ok(Val::arr(out))
 }
