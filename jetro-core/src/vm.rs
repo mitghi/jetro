@@ -339,6 +339,12 @@ pub enum Opcode {
     MapSum(Arc<Program>),
     /// Fused `map(f).avg()` — evaluates `f` per item, computes mean as float.
     MapAvg(Arc<Program>),
+    /// Fused `filter(p).map(f).sum()` — single pass, numeric sum of mapped
+    /// values that pass the predicate.  No intermediate array.
+    FilterMapSum { pred: Arc<Program>, map: Arc<Program> },
+    /// Fused `filter(p).map(f).avg()` — mean as float over mapped values
+    /// that pass the predicate.
+    FilterMapAvg { pred: Arc<Program>, map: Arc<Program> },
     /// Fused `sort()` + `[0:n]` — partial-sort smallest N using BinaryHeap.
     /// `asc=true` → smallest N; `asc=false` → largest N.
     TopN { n: usize, asc: bool },
@@ -760,6 +766,25 @@ impl Compiler {
     fn pass_filter_fusion(ops: Vec<Opcode>) -> Vec<Opcode> {
         let mut out: Vec<Opcode> = Vec::with_capacity(ops.len());
         for op in ops {
+            // FilterMap + sum()/avg() → FilterMapSum / FilterMapAvg (three-way fusion)
+            if let Opcode::CallMethod(b) = &op {
+                if b.sub_progs.is_empty() {
+                    if let Some(Opcode::FilterMap { pred, map }) = out.last() {
+                        let pred = Arc::clone(pred);
+                        let map = Arc::clone(map);
+                        let fused = match b.method {
+                            BuiltinMethod::Sum => Some(Opcode::FilterMapSum { pred, map }),
+                            BuiltinMethod::Avg => Some(Opcode::FilterMapAvg { pred, map }),
+                            _ => None,
+                        };
+                        if let Some(o) = fused {
+                            out.pop();
+                            out.push(o);
+                            continue;
+                        }
+                    }
+                }
+            }
             if let (Opcode::CallMethod(b), Some(Opcode::CallMethod(a))) = (&op, out.last()) {
                 // Two-arg fusions (both have sub_progs)
                 if a.sub_progs.len() >= 1 && b.sub_progs.len() >= 1 {
@@ -2085,6 +2110,60 @@ impl VM {
                                 Val::Float(x) => { sum += x;        n += 1; }
                                 Val::Null => {}
                                 _ => return err!("map(..).avg(): non-numeric mapped value"),
+                            }
+                        }
+                    }
+                    stack.push(if n == 0 { Val::Null } else { Val::Float(sum / n as f64) });
+                }
+                Opcode::FilterMapSum { pred, map } => {
+                    let recv = pop!(stack);
+                    let mut acc_i: i64 = 0;
+                    let mut acc_f: f64 = 0.0;
+                    let mut is_float = false;
+                    if let Val::Arr(a) = &recv {
+                        let mut scratch = env.clone();
+                        for item in a.iter() {
+                            let prev = scratch.swap_current(item.clone());
+                            if !is_truthy(&self.exec(pred, &scratch)?) {
+                                scratch.restore_current(prev);
+                                continue;
+                            }
+                            let v = self.exec(map, &scratch)?;
+                            scratch.restore_current(prev);
+                            match v {
+                                Val::Int(n) => {
+                                    if is_float { acc_f += n as f64; } else { acc_i += n; }
+                                }
+                                Val::Float(x) => {
+                                    if !is_float { acc_f = acc_i as f64; is_float = true; }
+                                    acc_f += x;
+                                }
+                                Val::Null => {}
+                                _ => return err!("filter(..).map(..).sum(): non-numeric mapped value"),
+                            }
+                        }
+                    }
+                    stack.push(if is_float { Val::Float(acc_f) } else { Val::Int(acc_i) });
+                }
+                Opcode::FilterMapAvg { pred, map } => {
+                    let recv = pop!(stack);
+                    let mut sum: f64 = 0.0;
+                    let mut n: usize = 0;
+                    if let Val::Arr(a) = &recv {
+                        let mut scratch = env.clone();
+                        for item in a.iter() {
+                            let prev = scratch.swap_current(item.clone());
+                            if !is_truthy(&self.exec(pred, &scratch)?) {
+                                scratch.restore_current(prev);
+                                continue;
+                            }
+                            let v = self.exec(map, &scratch)?;
+                            scratch.restore_current(prev);
+                            match v {
+                                Val::Int(x)   => { sum += x as f64; n += 1; }
+                                Val::Float(x) => { sum += x;        n += 1; }
+                                Val::Null => {}
+                                _ => return err!("filter(..).map(..).avg(): non-numeric mapped value"),
                             }
                         }
                     }

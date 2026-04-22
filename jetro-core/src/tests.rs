@@ -1267,6 +1267,50 @@ mod tests {
     }
 
     #[test]
+    fn fusion_filter_map_sum_opcode() {
+        use crate::vm::{Compiler, Opcode};
+        let prog = Compiler::compile_str(
+            "$.books.filter(@.price > 10).map(@.price).sum()"
+        ).unwrap();
+        let has = prog.ops.iter().any(|o| matches!(o, Opcode::FilterMapSum { .. }));
+        assert!(has, "filter+map+sum should fuse to FilterMapSum");
+    }
+
+    #[test]
+    fn fusion_filter_map_avg_opcode() {
+        use crate::vm::{Compiler, Opcode};
+        let prog = Compiler::compile_str(
+            "$.books.filter(@.price > 10).map(@.price).avg()"
+        ).unwrap();
+        let has = prog.ops.iter().any(|o| matches!(o, Opcode::FilterMapAvg { .. }));
+        assert!(has, "filter+map+avg should fuse to FilterMapAvg");
+    }
+
+    #[test]
+    fn fusion_filter_map_sum_semantics() {
+        let doc = books();
+        let fused = query(
+            "$.store.books.filter(@.price > 10).map(@.price).sum()", &doc
+        ).unwrap();
+        let plain = query(
+            "$.store.books.filter(@.price > 10).sum(price)", &doc
+        ).unwrap();
+        assert_eq!(fused, plain);
+    }
+
+    #[test]
+    fn fusion_filter_map_avg_semantics() {
+        let doc = books();
+        let fused = query(
+            "$.store.books.filter(@.price > 10).map(@.price).avg()", &doc
+        ).unwrap();
+        let plain = query(
+            "$.store.books.filter(@.price > 10).avg(price)", &doc
+        ).unwrap();
+        assert_eq!(fused, plain);
+    }
+
+    #[test]
     fn fusion_map_sum_semantics() {
         let doc = books();
         let r = query("$.store.books.map(@.price).sum()", &doc).unwrap();

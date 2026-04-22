@@ -103,6 +103,22 @@ impl LogicalPlan {
                     op:    AggOp::Avg,
                     arg:   Some(Arc::clone(f)),
                 },
+                (Some(p), Opcode::FilterMapSum { pred, map }) => LogicalPlan::Aggregate {
+                    input: Box::new(LogicalPlan::Filter {
+                        input: Box::new(p),
+                        pred:  Arc::clone(pred),
+                    }),
+                    op:    AggOp::Sum,
+                    arg:   Some(Arc::clone(map)),
+                },
+                (Some(p), Opcode::FilterMapAvg { pred, map }) => LogicalPlan::Aggregate {
+                    input: Box::new(LogicalPlan::Filter {
+                        input: Box::new(p),
+                        pred:  Arc::clone(pred),
+                    }),
+                    op:    AggOp::Avg,
+                    arg:   Some(Arc::clone(map)),
+                },
                 (Some(p), Opcode::TopN { n, asc }) => LogicalPlan::Limit {
                     input: Box::new(LogicalPlan::Sort {
                         input: Box::new(p),
