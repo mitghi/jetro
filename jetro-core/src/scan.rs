@@ -277,6 +277,100 @@ pub fn find_enclosing_objects_eq(bytes: &[u8], key: &str, lit: &[u8]) -> Vec<Val
     out
 }
 
+/// Like `find_enclosing_objects_eq` but accepts N `(key, lit)` conjuncts.
+/// An object is emitted iff it *directly* contains every listed key with
+/// the matching canonical literal value.  Each frame carries a bitmask of
+/// which conjuncts have matched so far (max 64 conjuncts).
+pub fn find_enclosing_objects_eq_multi(
+    bytes: &[u8],
+    conjuncts: &[(String, Vec<u8>)],
+) -> Vec<ValueSpan> {
+    assert!(conjuncts.len() <= 64, "at most 64 conjuncts supported");
+    if conjuncts.is_empty() { return Vec::new(); }
+
+    // Pre-build each needle as `"<key>":` so we compare against a
+    // contiguous slice at the current cursor.
+    let needles: Vec<Vec<u8>> = conjuncts.iter().map(|(k, _)| {
+        let mut s = Vec::with_capacity(k.len() + 3);
+        s.push(b'"');
+        s.extend_from_slice(k.as_bytes());
+        s.extend_from_slice(b"\":");
+        s
+    }).collect();
+    let full_mask: u64 = if conjuncts.len() == 64 { u64::MAX }
+                         else { (1u64 << conjuncts.len()) - 1 };
+
+    let mut out = Vec::new();
+    let mut stack: Vec<(usize, u64)> = Vec::new();
+    let mut i = 0usize;
+    let mut in_string = false;
+    let mut escape = false;
+
+    while i < bytes.len() {
+        if escape { escape = false; i += 1; continue; }
+        if in_string {
+            let rest = &bytes[i..];
+            match memchr2(b'\\', b'"', rest) {
+                Some(off) => {
+                    i += off;
+                    match bytes[i] {
+                        b'\\' => { escape = true;     i += 1; }
+                        b'"'  => { in_string = false; i += 1; }
+                        _     => unreachable!(),
+                    }
+                }
+                None => break,
+            }
+            continue;
+        }
+        match bytes[i] {
+            b'{' => { stack.push((i, 0u64)); i += 1; }
+            b'}' => {
+                if let Some((start, mask)) = stack.pop() {
+                    if mask == full_mask {
+                        out.push(ValueSpan { start, end: i + 1 });
+                    }
+                }
+                i += 1;
+            }
+            b'"' => {
+                let mut matched_idx: Option<usize> = None;
+                for (idx, nb) in needles.iter().enumerate() {
+                    if i + nb.len() <= bytes.len() && &bytes[i..i + nb.len()] == &nb[..] {
+                        matched_idx = Some(idx);
+                        break;
+                    }
+                }
+                if let Some(idx) = matched_idx {
+                    let nb = &needles[idx];
+                    let mut vs = i + nb.len();
+                    while vs < bytes.len()
+                        && matches!(bytes[vs], b' ' | b'\t' | b'\n' | b'\r')
+                    { vs += 1; }
+                    if let Some(ve) = value_end(bytes, vs) {
+                        let lit = &conjuncts[idx].1;
+                        if ve - vs == lit.len() && &bytes[vs..ve] == &lit[..] {
+                            if let Some(top) = stack.last_mut() {
+                                top.1 |= 1u64 << idx;
+                            }
+                        }
+                        i = ve;
+                    } else {
+                        i = vs;
+                    }
+                } else {
+                    in_string = true;
+                    i += 1;
+                }
+            }
+            _ => i += 1,
+        }
+    }
+
+    out.sort_by_key(|s| s.start);
+    out
+}
+
 /// Walk a JSON value starting at `start`, return the exclusive end offset.
 /// Returns `None` on malformed input (missing close, truncated literal).
 fn value_end(bytes: &[u8], start: usize) -> Option<usize> {
@@ -499,6 +593,43 @@ mod tests {
     fn enclosing_object_no_match() {
         let doc = br#"{"xs":[{"v":1},{"v":2}]}"#;
         let spans = find_enclosing_objects_eq(doc, "v", b"99");
+        assert!(spans.is_empty());
+    }
+
+    #[test]
+    fn enclosing_object_multi_and_both_match() {
+        let doc = br#"[{"t":"a","v":1},{"t":"a","v":2},{"t":"b","v":1}]"#;
+        let c = vec![
+            ("t".to_string(), br#""a""#.to_vec()),
+            ("v".to_string(), b"1".to_vec()),
+        ];
+        let spans = find_enclosing_objects_eq_multi(doc, &c);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(&doc[spans[0].start..spans[0].end], br#"{"t":"a","v":1}"#);
+    }
+
+    #[test]
+    fn enclosing_object_multi_and_nested_propagates() {
+        // Child must match on its own; parent's fields don't leak inward.
+        let doc = br#"{"t":"a","child":{"t":"a","v":1},"v":1}"#;
+        let c = vec![
+            ("t".to_string(), br#""a""#.to_vec()),
+            ("v".to_string(), b"1".to_vec()),
+        ];
+        let spans = find_enclosing_objects_eq_multi(doc, &c);
+        assert_eq!(spans.len(), 2);
+        assert!(spans[0].start < spans[1].start);
+    }
+
+    #[test]
+    fn enclosing_object_multi_and_partial_no_match() {
+        // Only one conjunct matches → no emit.
+        let doc = br#"[{"t":"a","v":2},{"t":"b","v":1}]"#;
+        let c = vec![
+            ("t".to_string(), br#""a""#.to_vec()),
+            ("v".to_string(), b"1".to_vec()),
+        ];
+        let spans = find_enclosing_objects_eq_multi(doc, &c);
         assert!(spans.is_empty());
     }
 }

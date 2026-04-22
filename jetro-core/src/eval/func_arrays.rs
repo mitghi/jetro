@@ -37,6 +37,23 @@ pub fn filter(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     Ok(Val::arr(out))
 }
 
+/// `find(p1, p2, ...)` — keep items where *every* predicate is truthy.
+/// Single-arg form is equivalent to `filter(p)`.
+pub fn find(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+    if args.is_empty() {
+        return err!("find: requires at least one predicate");
+    }
+    let items = recv.into_vec().ok_or_else(|| EvalError("find: expected array".into()))?;
+    let mut out = Vec::new();
+    'outer: for item in items {
+        for p in args {
+            if !is_truthy(&apply_item(item.clone(), p, env)?) { continue 'outer; }
+        }
+        out.push(item);
+    }
+    Ok(Val::arr(out))
+}
+
 pub fn map(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     let mapper = args.first().ok_or_else(|| EvalError("map: requires mapper".into()))?;
     let items = recv.into_vec().ok_or_else(|| EvalError("map: expected array".into()))?;

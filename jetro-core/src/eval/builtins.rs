@@ -96,9 +96,9 @@ fn build() -> BuiltinRegistry {
 
     // Arrays — full signature
     t.insert("filter",    func_arrays::filter);
-    t.insert("find",      func_arrays::filter);      // Tier 1 alias (shallow)
-    t.insert("find_all",  func_arrays::filter);      // Tier 1 alias (shallow)
-    t.insert("findAll",   func_arrays::filter);
+    t.insert("find",      func_arrays::find);        // Tier 1 (shallow, multi-pred AND)
+    t.insert("find_all",  func_arrays::find);        // Tier 1 (shallow, multi-pred AND)
+    t.insert("findAll",   func_arrays::find);
     t.insert("map",       func_arrays::map);
     t.insert("flatMap",   func_arrays::flat_map);
     t.insert("flat_map",  func_arrays::flat_map);

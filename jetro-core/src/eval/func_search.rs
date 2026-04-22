@@ -60,15 +60,20 @@ fn walk_pre<F: FnMut(&Val)>(v: &Val, f: &mut F) {
 // ── deep_find ────────────────────────────────────────────────────────────────
 
 pub fn deep_find(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-    let pred = args.first().ok_or_else(|| EvalError("find: requires predicate".into()))?;
+    if args.is_empty() {
+        return err!("find: requires at least one predicate");
+    }
     let mut out = Vec::new();
     let mut err_cell: Option<EvalError> = None;
     walk_pre(&recv, &mut |node| {
         if err_cell.is_some() { return; }
-        match apply_item(node.clone(), pred, env) {
-            Ok(v)  => if is_truthy(&v) { out.push(node.clone()); }
-            Err(e) => err_cell = Some(e),
+        for p in args {
+            match apply_item(node.clone(), p, env) {
+                Ok(v)  => if !is_truthy(&v) { return; }
+                Err(e) => { err_cell = Some(e); return; }
+            }
         }
+        out.push(node.clone());
     });
     if let Some(e) = err_cell { return Err(e); }
     Ok(Val::arr(out))

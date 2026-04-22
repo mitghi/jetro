@@ -2774,7 +2774,7 @@ impl VM {
                     // bytes → scan enclosing objects, skip tree walk.
                     if call.method == BuiltinMethod::Unknown
                         && call.name.as_ref() == "deep_find"
-                        && call.orig_args.len() == 1
+                        && !call.orig_args.is_empty()
                     {
                         if let Some(bytes) = env.raw_bytes.as_ref() {
                             let recv_is_root = match (&recv, &env.root) {
@@ -2783,15 +2783,18 @@ impl VM {
                                 _ => false,
                             };
                             if recv_is_root {
-                                let pred = match &call.orig_args[0] {
-                                    Arg::Pos(e) | Arg::Named(_, e) => e,
-                                };
-                                if let Some((key, lit)) =
-                                    super::eval::canonical_field_eq_literal(pred)
+                                if let Some(conjuncts) =
+                                    super::eval::canonical_field_eq_literals(&call.orig_args)
                                 {
-                                    let spans = super::scan::find_enclosing_objects_eq(
-                                        bytes, &key, &lit,
-                                    );
+                                    let spans = if conjuncts.len() == 1 {
+                                        super::scan::find_enclosing_objects_eq(
+                                            bytes, &conjuncts[0].0, &conjuncts[0].1,
+                                        )
+                                    } else {
+                                        super::scan::find_enclosing_objects_eq_multi(
+                                            bytes, &conjuncts,
+                                        )
+                                    };
                                     let mut vals: Vec<Val> = Vec::with_capacity(spans.len());
                                     for s in &spans {
                                         if let Ok(v) = serde_json::from_slice::<serde_json::Value>(

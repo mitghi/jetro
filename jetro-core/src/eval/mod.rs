@@ -280,12 +280,17 @@ pub(super) fn eval(expr: &Expr, env: &Env) -> Result<Val, EvalError> {
             if let (Expr::Root, Some(Step::Method(name, args)), Some(bytes))
                 = (&**base, steps.first(), env.raw_bytes.as_ref())
             {
-                if name == "deep_find" && args.len() == 1 {
-                    let pred = match &args[0] { Arg::Pos(e) | Arg::Named(_, e) => e };
-                    if let Some((key, lit_bytes)) = canonical_field_eq_literal(pred) {
-                        let spans = super::scan::find_enclosing_objects_eq(
-                            bytes, &key, &lit_bytes,
-                        );
+                if name == "deep_find" && !args.is_empty() {
+                    if let Some(conjuncts) = canonical_field_eq_literals(args) {
+                        let spans = if conjuncts.len() == 1 {
+                            super::scan::find_enclosing_objects_eq(
+                                bytes, &conjuncts[0].0, &conjuncts[0].1,
+                            )
+                        } else {
+                            super::scan::find_enclosing_objects_eq_multi(
+                                bytes, &conjuncts,
+                            )
+                        };
                         let mut vals: Vec<Val> = Vec::with_capacity(spans.len());
                         for s in &spans {
                             if let Ok(v) = serde_json::from_slice::<serde_json::Value>(
@@ -828,6 +833,18 @@ fn canonical_eq_literal(pred: &Expr) -> Option<Vec<u8>> {
 /// `scan::find_enclosing_objects_eq`.  Float literals rejected for the same
 /// reason as `canonical_eq_literal`.  Only a single leading field step is
 /// supported (no nested `@.a.b`).
+/// N-conjunct version: every arg must be a canonical `@.k == lit` predicate,
+/// else returns None.  Empty input returns None.
+pub(crate) fn canonical_field_eq_literals(args: &[Arg]) -> Option<Vec<(String, Vec<u8>)>> {
+    if args.is_empty() || args.len() > 64 { return None; }
+    let mut out = Vec::with_capacity(args.len());
+    for a in args {
+        let e = match a { Arg::Pos(e) | Arg::Named(_, e) => e };
+        out.push(canonical_field_eq_literal(e)?);
+    }
+    Some(out)
+}
+
 pub(crate) fn canonical_field_eq_literal(pred: &Expr) -> Option<(String, Vec<u8>)> {
     let (l, r) = match pred {
         Expr::BinOp(l, BinOp::Eq, r) => (&**l, &**r),

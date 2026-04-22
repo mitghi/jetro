@@ -2982,6 +2982,51 @@ mod tests {
     }
 
     #[test]
+    fn find_shallow_multi_pred_and() {
+        // Shallow `find(p1, p2)` keeps only items where *both* preds hold.
+        use crate::Jetro;
+        let doc = json!({"xs":[
+            {"t":"a","v":1},
+            {"t":"a","v":2},
+            {"t":"b","v":1}
+        ]});
+        let j = Jetro::new(doc);
+        let r = j.collect(r#"$.xs.find(@.t == "a", @.v == 1)"#).unwrap();
+        assert_eq!(r, json!([{"t":"a","v":1}]));
+    }
+
+    #[test]
+    fn find_shallow_single_pred_still_works() {
+        use crate::Jetro;
+        let doc = json!({"xs":[{"v":1},{"v":2}]});
+        let j = Jetro::new(doc);
+        let r = j.collect(r#"$.xs.find(@.v == 2)"#).unwrap();
+        assert_eq!(r, json!([{"v":2}]));
+    }
+
+    #[test]
+    fn deep_find_multi_pred_matches_scan_and_tree() {
+        // SIMD multi-conjunct scan must match tree walker's AND semantics.
+        use crate::Jetro;
+        let doc = json!({
+            "rows":[
+                {"type":"action","device":"mobile","id":1},
+                {"type":"action","device":"desktop","id":2},
+                {"type":"idle","device":"mobile","id":3},
+                {"nested":{"type":"action","device":"mobile","id":4}}
+            ]
+        });
+        let raw = serde_json::to_vec(&doc).unwrap();
+        let j_b = Jetro::from_bytes(raw).unwrap();
+        let j_t = Jetro::new(doc);
+        let q = r#"$..find(@.type == "action", @.device == "mobile")"#;
+        let rb = j_b.collect(q).unwrap();
+        let rt = j_t.collect(q).unwrap();
+        assert_eq!(rb, rt);
+        assert_eq!(rb.as_array().unwrap().len(), 2);
+    }
+
+    #[test]
     fn route_c_one_mismatch_errors_via_fallthrough() {
         // Quantifier One on != 1 spans breaks the byte chain and falls
         // through to the normal Val-based path which raises the proper error.
