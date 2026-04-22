@@ -123,6 +123,7 @@ fn op_arity(op: &Opcode) -> Arity {
             Arity { pops: 0, pushes: true },
 
         Opcode::GetField(_) | Opcode::OptField(_) | Opcode::GetIndex(_)
+            | Opcode::FieldChain(_)
             | Opcode::GetSlice(..) | Opcode::Descendant(_) | Opcode::DescendAll
             | Opcode::DynIndex(_) | Opcode::InlineFilter(_)
             | Opcode::Quantifier(_) | Opcode::FilterCount(_)

@@ -953,6 +953,25 @@ mod tests {
     // ── Peephole fusion passes ────────────────────────────────────────────────
 
     #[test]
+    fn fusion_field_chain_opcode_emitted() {
+        use crate::vm::{Compiler, Opcode};
+        // `.first()` returns object; `.a.b.c` mid-program can't become RootChain
+        // because of the intervening method call.  Expect FieldChain instead.
+        let prog = Compiler::compile_str("$.items.first().a.b.c").unwrap();
+        let has_fc = prog.ops.iter().any(|o| matches!(o, Opcode::FieldChain(c) if c.len() == 3));
+        let get_field_count = prog.ops.iter().filter(|o| matches!(o, Opcode::GetField(_))).count();
+        assert!(has_fc, "FieldChain not emitted; ops: {:?}", prog.ops);
+        assert_eq!(get_field_count, 0, "residual GetField after fusion: {:?}", prog.ops);
+    }
+
+    #[test]
+    fn fusion_field_chain_semantics() {
+        let doc = json!({"items": [{"a": {"b": {"c": 42}}}]});
+        let r = query("$.items.first().a.b.c", &doc).unwrap();
+        assert_eq!(r, json!(42));
+    }
+
+    #[test]
     fn fusion_find_first_opcode_emitted() {
         use crate::vm::{Compiler, Opcode};
         let prog = Compiler::compile_str("$.books{price > 10}?").unwrap();

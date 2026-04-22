@@ -317,6 +317,10 @@ pub enum Opcode {
     // ── Peephole fusions ──────────────────────────────────────────────────────
     /// PushRoot + GetField* fused — resolves chain via pointer arithmetic.
     RootChain(Arc<[Arc<str>]>),
+    /// GetField(k1) + GetField(k2) + … fused — walks TOS through N fields.
+    /// Applies mid-program where `RootChain` does not match (e.g. after a
+    /// method call or filter produces an object on stack).
+    FieldChain(Arc<[Arc<str>]>),
     /// filter(pred) + len/count fused — counts matches without temp array.
     FilterCount(Arc<Program>),
     /// filter(pred) + First quantifier fused — early-exit on first match.
@@ -424,7 +428,8 @@ impl Program {
             Opcode::PushRoot | Opcode::PushCurrent |
             Opcode::GetField(_) | Opcode::GetIndex(_) |
             Opcode::GetSlice(..) | Opcode::OptField(_) |
-            Opcode::RootChain(_) | Opcode::GetPointer(_)
+            Opcode::RootChain(_) | Opcode::FieldChain(_) |
+            Opcode::GetPointer(_)
         ));
         Self { ops: ops.into(), source: source.into(), id, is_structural }
     }
@@ -602,6 +607,7 @@ impl Compiler {
 
     fn optimize_with(ops: Vec<Opcode>, cfg: PassConfig) -> Vec<Opcode> {
         let ops = if cfg.root_chain      { Self::pass_root_chain(ops) }      else { ops };
+        let ops = if cfg.field_chain     { Self::pass_field_chain(ops) }     else { ops };
         let ops = if cfg.filter_count    { Self::pass_filter_count(ops) }    else { ops };
         let ops = if cfg.filter_fusion   { Self::pass_filter_fusion(ops) }   else { ops };
         let ops = if cfg.find_quantifier { Self::pass_find_quantifier(ops) } else { ops };
@@ -871,6 +877,32 @@ impl Compiler {
                 }
             }
             out.push(op);
+        }
+        out
+    }
+
+    /// Fuse runs of `GetField` not consumed by `pass_root_chain` into a
+    /// single `FieldChain`.  Applies mid-program where the object on TOS
+    /// came from elsewhere (method return, filter, comprehension).  Singletons
+    /// are left as-is — fusion only triggers at length ≥ 2.
+    fn pass_field_chain(ops: Vec<Opcode>) -> Vec<Opcode> {
+        let mut out = Vec::with_capacity(ops.len());
+        let mut it = ops.into_iter().peekable();
+        while let Some(op) = it.next() {
+            if let Opcode::GetField(_) = &op {
+                if matches!(it.peek(), Some(Opcode::GetField(_))) {
+                    let Opcode::GetField(k0) = op else { unreachable!() };
+                    let mut chain: Vec<Arc<str>> = vec![k0];
+                    while let Some(Opcode::GetField(_)) = it.peek() {
+                        if let Some(Opcode::GetField(k)) = it.next() { chain.push(k); }
+                    }
+                    out.push(Opcode::FieldChain(chain.into()));
+                    continue;
+                }
+                out.push(op);
+            } else {
+                out.push(op);
+            }
         }
         out
     }
@@ -1560,6 +1592,7 @@ impl PathCache {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PassConfig {
     pub root_chain:      bool,
+    pub field_chain:     bool,
     pub filter_count:    bool,
     pub filter_fusion:   bool,
     pub find_quantifier: bool,
@@ -1577,7 +1610,7 @@ pub struct PassConfig {
 impl Default for PassConfig {
     fn default() -> Self {
         Self {
-            root_chain: true, filter_count: true, filter_fusion: true,
+            root_chain: true, field_chain: true, filter_count: true, filter_fusion: true,
             find_quantifier: true, strength_reduce: true, redundant_ops: true,
             kind_check_fold: true, method_const: true, const_fold: true,
             nullness: true, equi_join: true,
@@ -1590,7 +1623,7 @@ impl PassConfig {
     /// Disable every pass — emit raw opcodes.
     pub fn none() -> Self {
         Self {
-            root_chain: false, filter_count: false, filter_fusion: false,
+            root_chain: false, field_chain: false, filter_count: false, filter_fusion: false,
             find_quantifier: false, strength_reduce: false, redundant_ops: false,
             kind_check_fold: false, method_const: false, const_fold: false,
             nullness: false, equi_join: false,
@@ -1600,7 +1633,7 @@ impl PassConfig {
 
     pub fn hash(&self) -> u64 {
         let mut bits: u64 = 0;
-        for (i, b) in [self.root_chain, self.filter_count, self.filter_fusion,
+        for (i, b) in [self.root_chain, self.field_chain, self.filter_count, self.filter_fusion,
                        self.find_quantifier, self.strength_reduce, self.redundant_ops,
                        self.kind_check_fold, self.method_const, self.const_fold,
                        self.nullness, self.equi_join,
@@ -1786,6 +1819,13 @@ impl VM {
                 Opcode::GetField(k) => {
                     let v = pop!(stack);
                     stack.push(v.get_field(k.as_ref()));
+                }
+                Opcode::FieldChain(chain) => {
+                    let mut cur = pop!(stack);
+                    for k in chain.iter() {
+                        cur = cur.get_field(k.as_ref());
+                    }
+                    stack.push(cur);
                 }
                 Opcode::GetIndex(i) => {
                     let v = pop!(stack);

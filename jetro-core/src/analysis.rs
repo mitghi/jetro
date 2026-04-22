@@ -206,7 +206,7 @@ fn apply_op(op: &Opcode, stack: &mut Vec<AbstractVal>) {
         Opcode::PushStr(_)    => stack.push(AbstractVal::scalar(VType::Str)),
         Opcode::PushRoot | Opcode::PushCurrent | Opcode::LoadIdent(_)
                               => stack.push(AbstractVal::UNKNOWN),
-        Opcode::GetField(_) | Opcode::OptField(_) => {
+        Opcode::GetField(_) | Opcode::OptField(_) | Opcode::FieldChain(_) => {
             pop1!();
             stack.push(AbstractVal::UNKNOWN);
         }
@@ -880,7 +880,8 @@ pub fn opcode_cost(op: &Opcode) -> u32 {
             | Opcode::PushFloat(_) | Opcode::PushStr(_)
             | Opcode::PushRoot | Opcode::PushCurrent | Opcode::LoadIdent(_) => 1,
         Opcode::GetField(_) | Opcode::OptField(_) | Opcode::GetIndex(_)
-            | Opcode::RootChain(_) | Opcode::GetPointer(_) => 2,
+            | Opcode::RootChain(_) | Opcode::FieldChain(_)
+            | Opcode::GetPointer(_) => 2,
         Opcode::GetSlice(..) | Opcode::Descendant(_) => 5,
         Opcode::DescendAll => 20,
         Opcode::Not | Opcode::Neg | Opcode::SetCurrent
