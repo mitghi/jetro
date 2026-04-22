@@ -458,9 +458,14 @@ fn apply_patch_step(
     }
     match &path[i] {
         PathStep::Field(name) => {
-            let existing = v.get_field(name);
-            let child = apply_patch_step(existing, path, i+1, val_expr, env)?;
+            // Take parent first (clone only if refcount > 1), then mem::replace
+            // the child out of its slot so the recursive call owns it with
+            // refcount=1 — chains of into_map/into_vec stay alloc-free.
             let mut m = v.into_map().unwrap_or_default();
+            let existing = if let Some(slot) = m.get_mut(name.as_str()) {
+                std::mem::replace(slot, Val::Null)
+            } else { Val::Null };
+            let child = apply_patch_step(existing, path, i+1, val_expr, env)?;
             match child {
                 PatchResult::Delete => { m.shift_remove(name.as_str()); }
                 PatchResult::Replace(nv) => { m.insert(Arc::from(name.as_str()), nv); }
@@ -468,10 +473,12 @@ fn apply_patch_step(
             Ok(PatchResult::Replace(Val::obj(m)))
         }
         PathStep::Index(idx) => {
-            let existing = v.get_index(*idx);
-            let child = apply_patch_step(existing, path, i+1, val_expr, env)?;
             let mut a = v.into_vec().unwrap_or_default();
             let resolved = resolve_idx(*idx, a.len() as i64);
+            let existing = if resolved < a.len() {
+                std::mem::replace(&mut a[resolved], Val::Null)
+            } else { Val::Null };
+            let child = apply_patch_step(existing, path, i+1, val_expr, env)?;
             match child {
                 PatchResult::Delete => {
                     if resolved < a.len() { a.remove(resolved); }
@@ -487,10 +494,12 @@ fn apply_patch_step(
             let idx = idx_val.as_i64().ok_or_else(|| {
                 EvalError(format!("patch dyn-index: expected integer, got {}", idx_val.type_name()))
             })?;
-            let existing = v.get_index(idx);
-            let child = apply_patch_step(existing, path, i+1, val_expr, env)?;
             let mut a = v.into_vec().unwrap_or_default();
             let resolved = resolve_idx(idx, a.len() as i64);
+            let existing = if resolved < a.len() {
+                std::mem::replace(&mut a[resolved], Val::Null)
+            } else { Val::Null };
+            let child = apply_patch_step(existing, path, i+1, val_expr, env)?;
             match child {
                 PatchResult::Delete => {
                     if resolved < a.len() { a.remove(resolved); }
