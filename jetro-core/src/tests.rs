@@ -1211,6 +1211,29 @@ mod tests {
     }
 
     #[test]
+    fn const_fold_mixed_int_float_arith() {
+        use crate::vm::{Compiler, Opcode};
+        let prog = Compiler::compile_str("1 + 2.5").unwrap();
+        assert!(matches!(prog.ops.as_ref(), [Opcode::PushFloat(f)] if (*f - 3.5).abs() < 1e-9),
+                "1 + 2.5 should fold to 3.5; got {:?}", prog.ops);
+        let prog = Compiler::compile_str("2.0 * 3").unwrap();
+        assert!(matches!(prog.ops.as_ref(), [Opcode::PushFloat(f)] if (*f - 6.0).abs() < 1e-9));
+        let prog = Compiler::compile_str("10 / 4.0").unwrap();
+        assert!(matches!(prog.ops.as_ref(), [Opcode::PushFloat(f)] if (*f - 2.5).abs() < 1e-9));
+    }
+
+    #[test]
+    fn const_fold_mixed_int_float_cmp() {
+        use crate::vm::{Compiler, Opcode};
+        let prog = Compiler::compile_str("1 < 2.5").unwrap();
+        assert!(matches!(prog.ops.as_ref(), [Opcode::PushBool(true)]));
+        let prog = Compiler::compile_str("3.14 > 3").unwrap();
+        assert!(matches!(prog.ops.as_ref(), [Opcode::PushBool(true)]));
+        let prog = Compiler::compile_str("2.0 <= 2").unwrap();
+        assert!(matches!(prog.ops.as_ref(), [Opcode::PushBool(true)]));
+    }
+
+    #[test]
     fn const_fold_unary() {
         use crate::vm::{Compiler, Opcode};
         let prog = Compiler::compile_str("not true").unwrap();

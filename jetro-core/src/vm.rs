@@ -1209,6 +1209,49 @@ impl Compiler {
                         Some(Opcode::PushFloat(a * b)),
                     (Opcode::PushFloat(a), Opcode::PushFloat(b), Opcode::Div) if *b != 0.0 =>
                         Some(Opcode::PushFloat(a / b)),
+                    // Mixed int/float arithmetic
+                    (Opcode::PushInt(a), Opcode::PushFloat(b), Opcode::Add) =>
+                        Some(Opcode::PushFloat(*a as f64 + b)),
+                    (Opcode::PushFloat(a), Opcode::PushInt(b), Opcode::Add) =>
+                        Some(Opcode::PushFloat(a + *b as f64)),
+                    (Opcode::PushInt(a), Opcode::PushFloat(b), Opcode::Sub) =>
+                        Some(Opcode::PushFloat(*a as f64 - b)),
+                    (Opcode::PushFloat(a), Opcode::PushInt(b), Opcode::Sub) =>
+                        Some(Opcode::PushFloat(a - *b as f64)),
+                    (Opcode::PushInt(a), Opcode::PushFloat(b), Opcode::Mul) =>
+                        Some(Opcode::PushFloat(*a as f64 * b)),
+                    (Opcode::PushFloat(a), Opcode::PushInt(b), Opcode::Mul) =>
+                        Some(Opcode::PushFloat(a * *b as f64)),
+                    (Opcode::PushInt(a), Opcode::PushFloat(b), Opcode::Div) if *b != 0.0 =>
+                        Some(Opcode::PushFloat(*a as f64 / b)),
+                    (Opcode::PushFloat(a), Opcode::PushInt(b), Opcode::Div) if *b != 0 =>
+                        Some(Opcode::PushFloat(a / *b as f64)),
+                    // Mixed int/float comparisons
+                    (Opcode::PushInt(a), Opcode::PushFloat(b), Opcode::Lt) =>
+                        Some(Opcode::PushBool((*a as f64) < *b)),
+                    (Opcode::PushFloat(a), Opcode::PushInt(b), Opcode::Lt) =>
+                        Some(Opcode::PushBool(*a < (*b as f64))),
+                    (Opcode::PushInt(a), Opcode::PushFloat(b), Opcode::Gt) =>
+                        Some(Opcode::PushBool((*a as f64) > *b)),
+                    (Opcode::PushFloat(a), Opcode::PushInt(b), Opcode::Gt) =>
+                        Some(Opcode::PushBool(*a > (*b as f64))),
+                    (Opcode::PushInt(a), Opcode::PushFloat(b), Opcode::Lte) =>
+                        Some(Opcode::PushBool((*a as f64) <= *b)),
+                    (Opcode::PushFloat(a), Opcode::PushInt(b), Opcode::Lte) =>
+                        Some(Opcode::PushBool(*a <= (*b as f64))),
+                    (Opcode::PushInt(a), Opcode::PushFloat(b), Opcode::Gte) =>
+                        Some(Opcode::PushBool((*a as f64) >= *b)),
+                    (Opcode::PushFloat(a), Opcode::PushInt(b), Opcode::Gte) =>
+                        Some(Opcode::PushBool(*a >= (*b as f64))),
+                    // Float comparisons (parity with int)
+                    (Opcode::PushFloat(a), Opcode::PushFloat(b), Opcode::Lt) =>
+                        Some(Opcode::PushBool(a < b)),
+                    (Opcode::PushFloat(a), Opcode::PushFloat(b), Opcode::Lte) =>
+                        Some(Opcode::PushBool(a <= b)),
+                    (Opcode::PushFloat(a), Opcode::PushFloat(b), Opcode::Gt) =>
+                        Some(Opcode::PushBool(a > b)),
+                    (Opcode::PushFloat(a), Opcode::PushFloat(b), Opcode::Gte) =>
+                        Some(Opcode::PushBool(a >= b)),
                     (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Eq) =>
                         Some(Opcode::PushBool(a == b)),
                     (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Neq) =>
