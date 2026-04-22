@@ -1415,6 +1415,44 @@ mod tests {
     }
 
     #[test]
+    fn fusion_sort_sort_idempotent_collapse() {
+        use crate::vm::{Compiler, Opcode, BuiltinMethod};
+        let prog = Compiler::compile_str("$.books.sort().sort().first()").unwrap();
+        let sorts = prog.ops.iter().filter(|o| matches!(o,
+            Opcode::CallMethod(c) if c.method == BuiltinMethod::Sort)).count();
+        // Doubled sort collapses to one; sort()+first() then strength-reduces to min().
+        assert_eq!(sorts, 0, "sort().sort() should collapse: {:?}", prog.ops);
+    }
+
+    #[test]
+    fn fusion_unique_unique_collapse() {
+        use crate::vm::{Compiler, Opcode, BuiltinMethod};
+        let prog = Compiler::compile_str("$.items.unique().unique()").unwrap();
+        let uniqs = prog.ops.iter().filter(|o| matches!(o,
+            Opcode::CallMethod(c) if c.method == BuiltinMethod::Unique)).count();
+        assert_eq!(uniqs, 1, "unique().unique() should collapse: {:?}", prog.ops);
+    }
+
+    #[test]
+    fn fusion_reverse_reverse_dropped() {
+        use crate::vm::{Compiler, Opcode, BuiltinMethod};
+        let prog = Compiler::compile_str("$.items.reverse().reverse()").unwrap();
+        let revs = prog.ops.iter().filter(|o| matches!(o,
+            Opcode::CallMethod(c) if c.method == BuiltinMethod::Reverse)).count();
+        assert_eq!(revs, 0, "reverse().reverse() should be dropped: {:?}", prog.ops);
+    }
+
+    #[test]
+    fn fusion_idempotent_semantics() {
+        let doc = json!({"xs": [3, 1, 2, 1, 3]});
+        let a = query("$.xs.unique().unique()", &doc).unwrap();
+        let b = query("$.xs.unique()", &doc).unwrap();
+        assert_eq!(a, b);
+        let c = query("$.xs.reverse().reverse()", &doc).unwrap();
+        assert_eq!(c, json!([3, 1, 2, 1, 3]));
+    }
+
+    #[test]
     fn fusion_sort_sum_drops_sort() {
         use crate::vm::{Compiler, Opcode, BuiltinMethod};
         let prog = Compiler::compile_str("$.books.sort().sum()").unwrap();

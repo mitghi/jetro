@@ -929,12 +929,32 @@ impl Compiler {
                                 BuiltinMethod::Sum | BuiltinMethod::Avg
                               | BuiltinMethod::Min | BuiltinMethod::Max) =>
                         Some(Opcode::CallMethod(Arc::clone(next))),
+                    // Idempotent: f(f(x)) == f(x).  `sort(k)` is idempotent
+                    // only when both calls use the same key, so we restrict
+                    // the no-arg case; `unique()` dedup is always idempotent.
+                    (BuiltinMethod::Sort, Opcode::CallMethod(next))
+                        if prev.sub_progs.is_empty()
+                           && next.method == BuiltinMethod::Sort
+                           && next.sub_progs.is_empty() =>
+                        Some(Opcode::CallMethod(Arc::clone(next))),
+                    (BuiltinMethod::Unique, Opcode::CallMethod(next))
+                        if next.method == BuiltinMethod::Unique =>
+                        Some(Opcode::CallMethod(Arc::clone(next))),
                     _ => None,
                 };
                 if let Some(rep) = replaced {
                     out.pop();
                     out.push(rep);
                     continue;
+                }
+                // Involution: reverse().reverse() → drop both.
+                if prev.method == BuiltinMethod::Reverse && prev.sub_progs.is_empty() {
+                    if let Opcode::CallMethod(next) = &op {
+                        if next.method == BuiltinMethod::Reverse && next.sub_progs.is_empty() {
+                            out.pop();
+                            continue;
+                        }
+                    }
                 }
             }
             out.push(op);
