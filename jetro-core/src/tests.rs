@@ -953,6 +953,30 @@ mod tests {
     // ── Peephole fusion passes ────────────────────────────────────────────────
 
     #[test]
+    fn fusion_drop_noop_before_len() {
+        use crate::vm::{Compiler, Opcode, BuiltinMethod};
+        // sort → len: sort is dropped (sort preserves length)
+        let p1 = Compiler::compile_str("$.xs.sort().len()").unwrap();
+        let sort_ct = p1.ops.iter().filter(|o|
+            matches!(o, Opcode::CallMethod(c) if c.method == BuiltinMethod::Sort)).count();
+        assert_eq!(sort_ct, 0, "sort should be dropped before length; ops: {:?}", p1.ops);
+
+        // map → count: map is dropped
+        let p2 = Compiler::compile_str("$.xs.map(@ * 2).count()").unwrap();
+        let map_ct = p2.ops.iter().filter(|o|
+            matches!(o, Opcode::CallMethod(c) if c.method == BuiltinMethod::Map)).count();
+        assert_eq!(map_ct, 0, "map should be dropped before count; ops: {:?}", p2.ops);
+    }
+
+    #[test]
+    fn fusion_drop_noop_before_len_semantics() {
+        let doc = json!({"xs": [3, 1, 4, 1, 5, 9, 2, 6]});
+        assert_eq!(query("$.xs.sort().len()", &doc).unwrap(), json!(8));
+        assert_eq!(query("$.xs.reverse().count()", &doc).unwrap(), json!(8));
+        assert_eq!(query("$.xs.map(@ * 2).len()", &doc).unwrap(), json!(8));
+    }
+
+    #[test]
     fn fusion_map_filter_opcode_emitted() {
         use crate::vm::{Compiler, Opcode};
         let prog = Compiler::compile_str("$.xs.map(@ * 2).filter(@ > 5)").unwrap();

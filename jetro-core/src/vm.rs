@@ -872,6 +872,16 @@ impl Compiler {
                            && (from.is_none() || *from == Some(0))
                            && *to > 0 =>
                         Some(Opcode::TopN { n: *to as usize, asc: true }),
+                    // Cardinality-preserving op + len/count → drop the first op.
+                    // sort / reverse preserve length by definition; map is
+                    // 1:1 so it also preserves length, and `count` only needs
+                    // the input array length.
+                    (BuiltinMethod::Sort | BuiltinMethod::Reverse | BuiltinMethod::Map,
+                     Opcode::CallMethod(next))
+                        if next.sub_progs.is_empty()
+                           && (next.method == BuiltinMethod::Len
+                               || next.method == BuiltinMethod::Count) =>
+                        Some(Opcode::CallMethod(Arc::clone(next))),
                     _ => None,
                 };
                 if let Some(rep) = replaced {
