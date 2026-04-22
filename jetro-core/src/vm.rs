@@ -2297,9 +2297,11 @@ impl VM {
                     };
                     let mut seen: Vec<Val> = Vec::new();
                     let mut out = Vec::new();
+                    let mut scratch = env.clone();
                     for item in items {
-                        let sub_env = env.with_current(item);
-                        let mapped = self.exec(f, &sub_env)?;
+                        let prev = scratch.swap_current(item);
+                        let mapped = self.exec(f, &scratch)?;
+                        scratch.restore_current(prev);
                         if !seen.iter().any(|s| super::eval::util::cmp_vals(s, &mapped)
                                                  == std::cmp::Ordering::Equal) {
                             seen.push(mapped.clone());
@@ -2392,9 +2394,12 @@ impl VM {
                     let recv = pop!(stack);
                     let mut found: Option<Val> = None;
                     if let Val::Arr(a) = &recv {
+                        let mut scratch = env.clone();
                         for item in a.iter() {
-                            let sub_env = env.with_current(item.clone());
-                            if is_truthy(&self.exec(pred, &sub_env)?) {
+                            let prev = scratch.swap_current(item.clone());
+                            let keep = is_truthy(&self.exec(pred, &scratch)?);
+                            scratch.restore_current(prev);
+                            if keep {
                                 if found.is_some() {
                                     return err!("quantifier !: expected exactly one match, found multiple");
                                 }
