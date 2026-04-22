@@ -2770,6 +2770,42 @@ impl VM {
                 // ── Method calls ──────────────────────────────────────────────
                 Opcode::CallMethod(call) => {
                     let recv = pop!(stack);
+                    // SIMD fast path: `$..find(@.k == lit)` on root with raw
+                    // bytes → scan enclosing objects, skip tree walk.
+                    if call.method == BuiltinMethod::Unknown
+                        && call.name.as_ref() == "deep_find"
+                        && call.orig_args.len() == 1
+                    {
+                        if let Some(bytes) = env.raw_bytes.as_ref() {
+                            let recv_is_root = match (&recv, &env.root) {
+                                (Val::Obj(a), Val::Obj(b)) => Arc::ptr_eq(a, b),
+                                (Val::Arr(a), Val::Arr(b)) => Arc::ptr_eq(a, b),
+                                _ => false,
+                            };
+                            if recv_is_root {
+                                let pred = match &call.orig_args[0] {
+                                    Arg::Pos(e) | Arg::Named(_, e) => e,
+                                };
+                                if let Some((key, lit)) =
+                                    super::eval::canonical_field_eq_literal(pred)
+                                {
+                                    let spans = super::scan::find_enclosing_objects_eq(
+                                        bytes, &key, &lit,
+                                    );
+                                    let mut vals: Vec<Val> = Vec::with_capacity(spans.len());
+                                    for s in &spans {
+                                        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(
+                                            &bytes[s.start..s.end],
+                                        ) {
+                                            vals.push(Val::from(&v));
+                                        }
+                                    }
+                                    stack.push(Val::arr(vals));
+                                    continue;
+                                }
+                            }
+                        }
+                    }
                     let result = self.exec_call(recv, call, env)?;
                     stack.push(result);
                 }

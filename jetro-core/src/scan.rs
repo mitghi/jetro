@@ -193,6 +193,90 @@ pub fn count_key_value_eq(bytes: &[u8], key: &str, lit: &[u8]) -> usize {
     n
 }
 
+/// Locate the byte span of every **enclosing object** whose `key` field
+/// equals the canonical-serialised literal `lit`.  Powers the SIMD fast
+/// path for `$..find(@.key == lit)`.
+///
+/// Implementation: single forward pass.  An explicit stack tracks the
+/// start position of every currently-open `{`.  When `"key":` is encountered
+/// at the top object and the following value bytes equal `lit`, the top
+/// frame is flagged.  On matching `}`, flagged frames emit a `ValueSpan`
+/// covering the object.  Output is sorted by `start` so order matches the
+/// DFS pre-order of the tree walker.
+///
+/// Bytewise literal comparison is safe for JSON primitives (int, string,
+/// bool, null) because they serialise canonically.  It is **not** correct
+/// for floats (`1.0` / `1` representation variance) or structured values
+/// (object key order / whitespace) — callers must reject those literals.
+pub fn find_enclosing_objects_eq(bytes: &[u8], key: &str, lit: &[u8]) -> Vec<ValueSpan> {
+    let needle = {
+        let mut s = String::with_capacity(key.len() + 3);
+        s.push('"');
+        s.push_str(key);
+        s.push_str("\":");
+        s
+    };
+    let needle_b = needle.as_bytes();
+    let mut out = Vec::new();
+    let mut stack: Vec<(usize, bool)> = Vec::new();
+    let mut i = 0usize;
+    let mut in_string = false;
+    let mut escape = false;
+
+    while i < bytes.len() {
+        if escape { escape = false; i += 1; continue; }
+        if in_string {
+            let rest = &bytes[i..];
+            match memchr2(b'\\', b'"', rest) {
+                Some(off) => {
+                    i += off;
+                    match bytes[i] {
+                        b'\\' => { escape = true;     i += 1; }
+                        b'"'  => { in_string = false; i += 1; }
+                        _     => unreachable!(),
+                    }
+                }
+                None => break,
+            }
+            continue;
+        }
+        match bytes[i] {
+            b'{' => { stack.push((i, false)); i += 1; }
+            b'}' => {
+                if let Some((start, matched)) = stack.pop() {
+                    if matched { out.push(ValueSpan { start, end: i + 1 }); }
+                }
+                i += 1;
+            }
+            b'"' => {
+                if i + needle_b.len() <= bytes.len()
+                    && &bytes[i..i + needle_b.len()] == needle_b
+                {
+                    let mut vs = i + needle_b.len();
+                    while vs < bytes.len()
+                        && matches!(bytes[vs], b' ' | b'\t' | b'\n' | b'\r')
+                    { vs += 1; }
+                    if let Some(ve) = value_end(bytes, vs) {
+                        if ve - vs == lit.len() && &bytes[vs..ve] == lit {
+                            if let Some(top) = stack.last_mut() { top.1 = true; }
+                        }
+                        i = ve;
+                    } else {
+                        i = vs;
+                    }
+                } else {
+                    in_string = true;
+                    i += 1;
+                }
+            }
+            _ => i += 1,
+        }
+    }
+
+    out.sort_by_key(|s| s.start);
+    out
+}
+
 /// Walk a JSON value starting at `start`, return the exclusive end offset.
 /// Returns `None` on malformed input (missing close, truncated literal).
 fn value_end(bytes: &[u8], start: usize) -> Option<usize> {
@@ -362,5 +446,59 @@ mod tests {
         assert_eq!(&doc[a[0].start..a[0].end], b"42");
         let b = find_key_value_spans(doc, "b");
         assert_eq!(&doc[b[0].start..b[0].end], b"\"x\"");
+    }
+
+    #[test]
+    fn enclosing_object_simple_match() {
+        let doc = br#"{"events":[{"type":"action","id":1},{"type":"idle","id":2},{"type":"action","id":3}]}"#;
+        let spans = find_enclosing_objects_eq(doc, "type", br#""action""#);
+        assert_eq!(spans.len(), 2);
+        let objs: Vec<_> = spans.iter()
+            .map(|s| serde_json::from_slice::<serde_json::Value>(&doc[s.start..s.end]).unwrap())
+            .collect();
+        assert_eq!(objs[0], serde_json::json!({"type":"action","id":1}));
+        assert_eq!(objs[1], serde_json::json!({"type":"action","id":3}));
+    }
+
+    #[test]
+    fn enclosing_object_nested_both_match() {
+        // Outer and inner object both have type:"x" — both must be emitted
+        // in start-offset order (matches tree walker DFS pre-order).
+        let doc = br#"{"type":"x","child":{"type":"x","n":2}}"#;
+        let spans = find_enclosing_objects_eq(doc, "type", br#""x""#);
+        assert_eq!(spans.len(), 2);
+        assert!(spans[0].start < spans[1].start);
+        assert_eq!(&doc[spans[0].start..spans[0].end], doc);
+        assert_eq!(&doc[spans[1].start..spans[1].end], br#"{"type":"x","n":2}"#);
+    }
+
+    #[test]
+    fn enclosing_object_nested_inner_only() {
+        let doc = br#"{"type":"a","child":{"type":"b","n":2}}"#;
+        let spans = find_enclosing_objects_eq(doc, "type", br#""b""#);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(&doc[spans[0].start..spans[0].end], br#"{"type":"b","n":2}"#);
+    }
+
+    #[test]
+    fn enclosing_object_ignores_string_value_containing_needle() {
+        let doc = br#"{"comment":"the \"type\":\"action\" label","events":[{"type":"action"}]}"#;
+        let spans = find_enclosing_objects_eq(doc, "type", br#""action""#);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(&doc[spans[0].start..spans[0].end], br#"{"type":"action"}"#);
+    }
+
+    #[test]
+    fn enclosing_object_numeric_literal() {
+        let doc = br#"[{"v":10},{"v":42},{"v":42}]"#;
+        let spans = find_enclosing_objects_eq(doc, "v", b"42");
+        assert_eq!(spans.len(), 2);
+    }
+
+    #[test]
+    fn enclosing_object_no_match() {
+        let doc = br#"{"xs":[{"v":1},{"v":2}]}"#;
+        let spans = find_enclosing_objects_eq(doc, "v", b"99");
+        assert!(spans.is_empty());
     }
 }

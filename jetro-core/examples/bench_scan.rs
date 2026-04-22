@@ -105,6 +105,18 @@ fn main() {
     let b = run("byte_scan",   || j_scan.collect("$..missing_key").unwrap());
     speedup(&a, &b);
 
+    println!("\nQ7a $..find(@.type == \"action\")   (enclosing-obj SIMD scan)");
+    let q = r#"$..find(@.type == "action")"#;
+    let a = run("tree_walker", || j_tree.collect(q).unwrap());
+    let b = run("byte_scan",   || j_scan.collect(q).unwrap());
+    speedup(&a, &b);
+
+    println!("\nQ7b $..find(@.id == 100)            (enclosing-obj SIMD scan, int)");
+    let q = "$..find(@.id == 100)";
+    let a = run("tree_walker", || j_tree.collect(q).unwrap());
+    let b = run("byte_scan",   || j_scan.collect(q).unwrap());
+    speedup(&a, &b);
+
     println!("\nQ7  $..groups.first()..rows.first()..tag   (Route C byte chain)");
     let q = "$..groups.first()..rows.first()..tag";
     let a = run("tree_walker", || j_tree.collect(q).unwrap());

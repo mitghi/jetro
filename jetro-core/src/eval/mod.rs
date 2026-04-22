@@ -274,6 +274,32 @@ pub(super) fn eval(expr: &Expr, env: &Env) -> Result<Val, EvalError> {
         }
 
         Expr::Chain(base, steps) => {
+            // SIMD enclosing-object fast path: `$..find(@.k == lit)` with raw
+            // bytes — scan locates each object whose `k` field equals `lit`
+            // without walking the tree.
+            if let (Expr::Root, Some(Step::Method(name, args)), Some(bytes))
+                = (&**base, steps.first(), env.raw_bytes.as_ref())
+            {
+                if name == "deep_find" && args.len() == 1 {
+                    let pred = match &args[0] { Arg::Pos(e) | Arg::Named(_, e) => e };
+                    if let Some((key, lit_bytes)) = canonical_field_eq_literal(pred) {
+                        let spans = super::scan::find_enclosing_objects_eq(
+                            bytes, &key, &lit_bytes,
+                        );
+                        let mut vals: Vec<Val> = Vec::with_capacity(spans.len());
+                        for s in &spans {
+                            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(
+                                &bytes[s.start..s.end]
+                            ) {
+                                vals.push(Val::from(&v));
+                            }
+                        }
+                        let mut val = Val::arr(vals);
+                        for step in &steps[1..] { val = eval_step(val, step, env)?; }
+                        return Ok(val);
+                    }
+                }
+            }
             // SIMD byte-chain fast path: `$..key<rest>` with raw bytes —
             // chains of descendant/quantifier/filter-eq stay as byte spans
             // and never materialise intermediate Vals.
@@ -795,6 +821,39 @@ fn canonical_eq_literal(pred: &Expr) -> Option<Vec<u8>> {
         Expr::Str(s)  => serde_json::to_vec(&serde_json::Value::String(s.clone())).ok(),
         _ => None,
     }
+}
+
+/// Recognise `@.field == lit` / `lit == @.field` predicates. Returns the
+/// field name and serialised literal bytes suitable for
+/// `scan::find_enclosing_objects_eq`.  Float literals rejected for the same
+/// reason as `canonical_eq_literal`.  Only a single leading field step is
+/// supported (no nested `@.a.b`).
+pub(crate) fn canonical_field_eq_literal(pred: &Expr) -> Option<(String, Vec<u8>)> {
+    let (l, r) = match pred {
+        Expr::BinOp(l, BinOp::Eq, r) => (&**l, &**r),
+        _ => return None,
+    };
+    fn as_current_field(e: &Expr) -> Option<String> {
+        if let Expr::Chain(base, steps) = e {
+            if matches!(**base, Expr::Current) && steps.len() == 1 {
+                if let Step::Field(name) = &steps[0] {
+                    return Some(name.clone());
+                }
+            }
+        }
+        None
+    }
+    let (field, lit) = if let Some(f) = as_current_field(l) { (f, r) }
+                       else if let Some(f) = as_current_field(r) { (f, l) }
+                       else { return None };
+    let bytes = match lit {
+        Expr::Int(n)  => n.to_string().into_bytes(),
+        Expr::Bool(b) => if *b { b"true".to_vec() } else { b"false".to_vec() },
+        Expr::Null    => b"null".to_vec(),
+        Expr::Str(s)  => serde_json::to_vec(&serde_json::Value::String(s.clone())).ok()?,
+        _ => return None,
+    };
+    Some((field, bytes))
 }
 
 // ── Step evaluation ───────────────────────────────────────────────────────────

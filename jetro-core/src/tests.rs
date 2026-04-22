@@ -2926,6 +2926,62 @@ mod tests {
     }
 
     #[test]
+    fn deep_find_field_eq_scan_matches_tree_walker() {
+        // SIMD `$..find(@.k == lit)` fast path must agree with tree walker
+        // across nesting depths and return full enclosing objects.
+        use crate::Jetro;
+        let doc = json!({
+            "a":[
+                {"type":"action","v":1},
+                {"type":"idle","v":2},
+                {"nested":{"type":"action","v":3}}
+            ],
+            "b":{"type":"action","v":4}
+        });
+        let raw = serde_json::to_vec(&doc).unwrap();
+        let j_b = Jetro::from_bytes(raw).unwrap();
+        let j_t = Jetro::new(doc);
+        let q = r#"$..find(@.type == "action")"#;
+        let rb = j_b.collect(q).unwrap();
+        let rt = j_t.collect(q).unwrap();
+        assert_eq!(rb, rt);
+        let arr = rb.as_array().unwrap();
+        assert_eq!(arr.len(), 3);
+    }
+
+    #[test]
+    fn deep_find_field_eq_int_literal() {
+        use crate::Jetro;
+        let doc = json!({"xs":[{"id":1,"t":"a"},{"id":2,"t":"b"},{"deep":{"id":1,"t":"c"}}]});
+        let raw = serde_json::to_vec(&doc).unwrap();
+        let j_b = Jetro::from_bytes(raw).unwrap();
+        let j_t = Jetro::new(doc);
+        let q = "$..find(@.id == 1)";
+        assert_eq!(j_b.collect(q).unwrap(), j_t.collect(q).unwrap());
+        assert_eq!(j_b.collect(q).unwrap().as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn deep_find_field_eq_chains_further() {
+        // After the SIMD enclosing-object scan, remaining chain steps still
+        // run on the materialised Vals.
+        use crate::Jetro;
+        let doc = json!({
+            "items":[
+                {"type":"action","v":10},
+                {"type":"idle","v":20},
+                {"type":"action","v":30}
+            ]
+        });
+        let raw = serde_json::to_vec(&doc).unwrap();
+        let j_b = Jetro::from_bytes(raw).unwrap();
+        let j_t = Jetro::new(doc);
+        let q = r#"$..find(@.type == "action").map(v)"#;
+        assert_eq!(j_b.collect(q).unwrap(), j_t.collect(q).unwrap());
+        assert_eq!(j_b.collect(q).unwrap(), json!([10, 30]));
+    }
+
+    #[test]
     fn route_c_one_mismatch_errors_via_fallthrough() {
         // Quantifier One on != 1 spans breaks the byte chain and falls
         // through to the normal Val-based path which raises the proper error.
