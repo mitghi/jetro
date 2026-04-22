@@ -2032,8 +2032,11 @@ impl VM {
     /// Execute `program` in environment `env`, returning the top-of-stack value.
     pub fn exec(&mut self, program: &Program, env: &Env) -> Result<Val, EvalError> {
         let mut stack: SmallVec<[Val; 16]> = SmallVec::new();
+        let ops_slice: &[Opcode] = &program.ops;
+        let mut skip_ahead: usize = 0;
 
-        for op in program.ops.iter() {
+        for (op_idx, op) in ops_slice.iter().enumerate() {
+            if skip_ahead > 0 { skip_ahead -= 1; continue; }
             match op {
                 // ── Literals ──────────────────────────────────────────────────
                 Opcode::PushNull        => stack.push(Val::Null),
@@ -2094,9 +2097,11 @@ impl VM {
                     // vs avoiding the tree walk entirely).
                     if from_root {
                         if let Some(bytes) = env.raw_bytes.as_ref() {
-                            let hits = super::scan::extract_values(bytes, k.as_ref());
-                            let found: Vec<Val> = hits.iter().map(Val::from).collect();
-                            stack.push(Val::arr(found));
+                            let (val, extra) = byte_chain_exec(
+                                bytes, k.as_ref(), &ops_slice[op_idx + 1..]
+                            );
+                            stack.push(val);
+                            skip_ahead = extra;
                             continue;
                         }
                     }
@@ -3265,6 +3270,136 @@ impl Env {
 }
 
 // ── Free helpers ──────────────────────────────────────────────────────────────
+
+/// Route C — chained-descendant byte chain.
+///
+/// Entry: `root_key` is the key of the root `Descendant` that triggered the
+/// scan.  `tail` is the opcode slice immediately after that `Descendant`.
+///
+/// Consumes as many tail opcodes as can be handled on byte spans:
+///   - `Descendant(k)` — re-scan within each current span.
+///   - `Quantifier(First)` — keep first span; `Quantifier(One)` when exactly one.
+///   - `InlineFilter(pred)` / `CallMethod(Filter, [pred])` with a canonical
+///     equality literal (int/string/bool/null) — bytewise retain.
+///
+/// Any other opcode terminates the chain; remaining spans are materialised
+/// into `Val`s and returned, and the caller resumes normal opcode dispatch.
+fn byte_chain_exec(
+    bytes: &[u8],
+    root_key: &str,
+    tail: &[Opcode],
+) -> (Val, usize) {
+    let mut spans: Vec<super::scan::ValueSpan> =
+        super::scan::find_key_value_spans(bytes, root_key);
+    let mut scalar = false;
+    let mut consumed = 0usize;
+
+    for op in tail {
+        match op {
+            Opcode::Descendant(k) => {
+                let mut next = Vec::with_capacity(spans.len());
+                for s in &spans {
+                    let sub = &bytes[s.start..s.end];
+                    for s2 in super::scan::find_key_value_spans(sub, k.as_ref()) {
+                        next.push(super::scan::ValueSpan {
+                            start: s.start + s2.start,
+                            end:   s.start + s2.end,
+                        });
+                    }
+                }
+                spans = next;
+                scalar = false;
+            }
+            Opcode::Quantifier(QuantifierKind::First) => {
+                spans.truncate(1);
+                scalar = true;
+            }
+            Opcode::Quantifier(QuantifierKind::One) => {
+                if spans.len() != 1 { break; }
+                scalar = true;
+            }
+            // `.first()` / `.last()` compile to `CallMethod(First|Last)` not
+            // `Quantifier`.  Handle them as scalar terminators.
+            Opcode::CallMethod(call) if call.sub_progs.is_empty() => {
+                match call.method {
+                    BuiltinMethod::First => {
+                        spans.truncate(1);
+                        scalar = true;
+                    }
+                    BuiltinMethod::Last => {
+                        if let Some(last) = spans.pop() { spans = vec![last]; }
+                        scalar = true;
+                    }
+                    _ => break,
+                }
+            }
+            Opcode::InlineFilter(prog) => {
+                match canonical_eq_literal_from_program(prog) {
+                    Some(lit) => {
+                        spans.retain(|s| {
+                            s.end - s.start == lit.len()
+                                && &bytes[s.start..s.end] == &lit[..]
+                        });
+                        scalar = false;
+                    }
+                    None => break,
+                }
+            }
+            Opcode::CallMethod(call)
+                if call.method == BuiltinMethod::Filter && call.sub_progs.len() == 1 =>
+            {
+                match canonical_eq_literal_from_program(&call.sub_progs[0]) {
+                    Some(lit) => {
+                        spans.retain(|s| {
+                            s.end - s.start == lit.len()
+                                && &bytes[s.start..s.end] == &lit[..]
+                        });
+                        scalar = false;
+                    }
+                    None => break,
+                }
+            }
+            _ => break,
+        }
+        consumed += 1;
+    }
+
+    let mut materialised: Vec<Val> = Vec::with_capacity(spans.len());
+    for s in &spans {
+        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes[s.start..s.end]) {
+            materialised.push(Val::from(&v));
+        }
+    }
+
+    let out = if scalar {
+        materialised.into_iter().next().unwrap_or(Val::Null)
+    } else {
+        Val::arr(materialised)
+    };
+    (out, consumed)
+}
+
+/// Recognise `@ == lit` / `lit == @` compiled to a sub-program.  Matches
+/// the shape `[PushCurrent, Push<Lit>, Eq]` or `[Push<Lit>, PushCurrent, Eq]`
+/// and returns the canonical-serialised literal bytes.  Floats rejected
+/// (representation variance vs `1` / `1.0`).
+fn canonical_eq_literal_from_program(prog: &Program) -> Option<Vec<u8>> {
+    if prog.ops.len() != 3 { return None; }
+    if !matches!(prog.ops[2], Opcode::Eq) { return None; }
+    let (lit_op, has_current) = match (&prog.ops[0], &prog.ops[1]) {
+        (Opcode::PushCurrent, lit) => (lit, true),
+        (lit, Opcode::PushCurrent) => (lit, true),
+        _ => (&prog.ops[0], false),
+    };
+    if !has_current { return None; }
+    match lit_op {
+        Opcode::PushInt(n)  => Some(n.to_string().into_bytes()),
+        Opcode::PushBool(b) => Some(if *b { b"true".to_vec() } else { b"false".to_vec() }),
+        Opcode::PushNull    => Some(b"null".to_vec()),
+        Opcode::PushStr(s)  => serde_json::to_vec(&serde_json::Value::String(s.to_string())).ok(),
+        _ => None,
+    }
+}
 
 fn exec_slice(v: Val, from: Option<i64>, to: Option<i64>) -> Val {
     if let Val::Arr(a) = v {

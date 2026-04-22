@@ -2877,4 +2877,62 @@ mod tests {
         ).unwrap();
         assert_eq!(r2, json!([null]));
     }
+
+    #[test]
+    fn route_c_chained_descendants_match_tree_walker() {
+        // Three-level nested descendant chain with quantifiers in between.
+        // Byte-chain path must agree with the tree walker on the raw doc.
+        use crate::Jetro;
+        let doc = json!({
+            "outer":[
+                {"inner":[{"leaf":1},{"leaf":2}]},
+                {"inner":[{"leaf":3},{"leaf":4}]}
+            ]
+        });
+        let raw = serde_json::to_vec(&doc).unwrap();
+        let j_b = Jetro::from_bytes(raw).unwrap();
+        let j_t = Jetro::new(doc);
+        let q = "$..outer.first()..inner.first()..leaf";
+        assert_eq!(j_b.collect(q).unwrap(), j_t.collect(q).unwrap());
+        assert_eq!(j_b.collect(q).unwrap(), json!([1, 2]));
+    }
+
+    #[test]
+    fn route_c_descendant_after_filter_eq() {
+        // Filter-eq on byte span, then descendant into the chosen span.
+        use crate::Jetro;
+        let doc = json!({
+            "items":[
+                {"kind":"a","children":[{"v":1},{"v":2}]},
+                {"kind":"b","children":[{"v":3},{"v":4}]}
+            ]
+        });
+        let raw = serde_json::to_vec(&doc).unwrap();
+        let j_b = Jetro::from_bytes(raw).unwrap();
+        let j_t = Jetro::new(doc);
+        let q = r#"$..kind.filter(@ == "a")"#;
+        assert_eq!(j_b.collect(q).unwrap(), j_t.collect(q).unwrap());
+        assert_eq!(j_b.collect(q).unwrap(), json!(["a"]));
+    }
+
+    #[test]
+    fn route_c_quantifier_scalar_result() {
+        // `.first()` on a byte chain produces a scalar, not a 1-element array.
+        use crate::Jetro;
+        let doc = json!({"xs":[{"id":7},{"id":8}]});
+        let raw = serde_json::to_vec(&doc).unwrap();
+        let j_b = Jetro::from_bytes(raw).unwrap();
+        assert_eq!(j_b.collect("$..id.first()").unwrap(), json!(7));
+    }
+
+    #[test]
+    fn route_c_one_mismatch_errors_via_fallthrough() {
+        // Quantifier One on != 1 spans breaks the byte chain and falls
+        // through to the normal Val-based path which raises the proper error.
+        use crate::Jetro;
+        let doc = json!({"xs":[{"id":1},{"id":2}]});
+        let raw = serde_json::to_vec(&doc).unwrap();
+        let j_b = Jetro::from_bytes(raw).unwrap();
+        assert!(j_b.collect("$..id.one()").is_err());
+    }
 }

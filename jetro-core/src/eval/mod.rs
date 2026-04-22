@@ -274,35 +274,14 @@ pub(super) fn eval(expr: &Expr, env: &Env) -> Result<Val, EvalError> {
         }
 
         Expr::Chain(base, steps) => {
-            // SIMD fast path: `$..key<rest>` with raw bytes available —
-            // byte-scan collects descendants without walking the tree.
+            // SIMD byte-chain fast path: `$..key<rest>` with raw bytes —
+            // chains of descendant/quantifier/filter-eq stay as byte spans
+            // and never materialise intermediate Vals.
             if let (Expr::Root, Some(Step::Descendant(name)), Some(bytes))
                 = (&**base, steps.first(), env.raw_bytes.as_ref())
             {
-                // Literal-match fast path: `$..key{@ == lit}` or
-                // `$..key.filter(@ == lit)` — scan prunes non-matching sites
-                // at the byte level, avoiding a Value allocation per miss.
-                // Requires a canonical-serialising literal (int/string/bool/null).
-                let pred = match steps.get(1) {
-                    Some(Step::InlineFilter(p)) => Some(&**p),
-                    Some(Step::Method(name, args)) if name == "filter" && args.len() == 1 => {
-                        match &args[0] {
-                            Arg::Pos(e) | Arg::Named(_, e) => Some(e),
-                        }
-                    }
-                    _ => None,
-                };
-                if let Some(p) = pred {
-                    if let Some(lit_bytes) = canonical_eq_literal(p) {
-                        let hits = super::scan::extract_values_eq(bytes, name, &lit_bytes);
-                        let mut val = Val::arr(hits.iter().map(Val::from).collect());
-                        for step in &steps[2..] { val = eval_step(val, step, env)?; }
-                        return Ok(val);
-                    }
-                }
-                let hits = super::scan::extract_values(bytes, name);
-                let mut val = Val::arr(hits.iter().map(Val::from).collect());
-                for step in &steps[1..] { val = eval_step(val, step, env)?; }
+                let (mut val, consumed) = byte_chain_eval(bytes, name, steps);
+                for step in &steps[consumed..] { val = eval_step(val, step, env)?; }
                 return Ok(val);
             }
             let mut val = eval(base, env)?;
@@ -693,6 +672,105 @@ fn eval_pipe(left: Val, rhs: &Expr, env: &Env) -> Result<Val, EvalError> {
         }
         _ => eval(rhs, &env.with_current(left)),
     }
+}
+
+/// Walk as many chain steps as possible on raw byte spans, then materialise.
+///
+/// Supports: `Descendant`, `Quantifier(First)` with any length, `Quantifier(One)`
+/// only when exactly one span remains (otherwise falls through so the materialised
+/// path can raise the proper error), `InlineFilter` / `.filter(...)` whose
+/// predicate is a canonical equality literal.  All other steps terminate the
+/// byte chain; the caller materialises and resumes normal step evaluation.
+///
+/// Returns `(value, steps_consumed)` where `steps_consumed >= 1` because the
+/// entry `Descendant` step is always handled here.
+fn byte_chain_eval(
+    bytes: &[u8],
+    root_key: &str,
+    steps: &[Step],
+) -> (Val, usize) {
+    let mut spans: Vec<super::scan::ValueSpan> =
+        super::scan::find_key_value_spans(bytes, root_key);
+    let mut scalar = false;
+    let mut consumed = 1usize;
+
+    for step in steps.iter().skip(1) {
+        match step {
+            Step::Descendant(k) => {
+                let mut next = Vec::with_capacity(spans.len());
+                for s in &spans {
+                    let sub = &bytes[s.start..s.end];
+                    for s2 in super::scan::find_key_value_spans(sub, k) {
+                        next.push(super::scan::ValueSpan {
+                            start: s.start + s2.start,
+                            end:   s.start + s2.end,
+                        });
+                    }
+                }
+                spans = next;
+                scalar = false;
+            }
+            Step::Quantifier(QuantifierKind::First) => {
+                spans.truncate(1);
+                scalar = true;
+            }
+            Step::Quantifier(QuantifierKind::One) => {
+                if spans.len() != 1 { break; }
+                scalar = true;
+            }
+            // `.first()` / `.last()` arrive as method calls (no `!` / `?` syntax).
+            Step::Method(name, args) if args.is_empty() && name == "first" => {
+                spans.truncate(1);
+                scalar = true;
+            }
+            Step::Method(name, args) if args.is_empty() && name == "last" => {
+                if let Some(last) = spans.pop() { spans = vec![last]; }
+                scalar = true;
+            }
+            Step::InlineFilter(pred) => match canonical_eq_literal(pred) {
+                Some(lit) => {
+                    spans.retain(|s| {
+                        s.end - s.start == lit.len()
+                            && &bytes[s.start..s.end] == &lit[..]
+                    });
+                    scalar = false;
+                }
+                None => break,
+            },
+            Step::Method(name, args)
+                if name == "filter" && args.len() == 1 =>
+            {
+                let pred = match &args[0] { Arg::Pos(e) | Arg::Named(_, e) => e };
+                match canonical_eq_literal(pred) {
+                    Some(lit) => {
+                        spans.retain(|s| {
+                            s.end - s.start == lit.len()
+                                && &bytes[s.start..s.end] == &lit[..]
+                        });
+                        scalar = false;
+                    }
+                    None => break,
+                }
+            }
+            _ => break,
+        }
+        consumed += 1;
+    }
+
+    let mut materialised: Vec<Val> = Vec::with_capacity(spans.len());
+    for s in &spans {
+        match serde_json::from_slice::<serde_json::Value>(&bytes[s.start..s.end]) {
+            Ok(v) => materialised.push(Val::from(&v)),
+            Err(_) => {}
+        }
+    }
+
+    let out = if scalar {
+        materialised.into_iter().next().unwrap_or(Val::Null)
+    } else {
+        Val::arr(materialised)
+    };
+    (out, consumed)
 }
 
 /// Recognise `@ == lit` / `lit == @` predicates where `lit` is a canonical

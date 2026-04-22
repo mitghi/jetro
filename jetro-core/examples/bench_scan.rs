@@ -105,6 +105,12 @@ fn main() {
     let b = run("byte_scan",   || j_scan.collect("$..missing_key").unwrap());
     speedup(&a, &b);
 
+    println!("\nQ7  $..groups.first()..rows.first()..tag   (Route C byte chain)");
+    let q = "$..groups.first()..rows.first()..tag";
+    let a = run("tree_walker", || j_tree.collect(q).unwrap());
+    let b = run("byte_scan",   || j_scan.collect(q).unwrap());
+    speedup(&a, &b);
+
     // Baseline: raw serde_json parse of the same doc.
     println!("\nBaseline");
     run("serde_json::from_slice (parse)", || {
