@@ -355,6 +355,46 @@ fn filter_map_min_max_match_unfused_pipeline() {
 }
 
 #[test]
+fn deep_find_numeric_range_tree_eq_scan() {
+    let doc = synth_doc();
+    let bytes = serde_json::to_vec(&doc).unwrap();
+    let j_tree = Jetro::new(doc.clone());
+    let j_scan = Jetro::from_bytes(bytes).unwrap();
+    // Strict `<` / `>` agree between tree walker and scan.  Inclusive ops
+    // diverge because tree's `cmp_vals` returns `Equal` for null-vs-number,
+    // making `null >= n` truthy — scan is stricter and only matches objects
+    // that actually carry the key with a numeric value.
+    for q in [
+        "$..find(@.total > 500)",
+        "$..find(@.qty < 3)",
+        // literal on LHS — operator flips
+        "$..find(500 < @.total)",
+    ] {
+        let t = as_array(&j_tree.collect(q).unwrap()).len();
+        let s = as_array(&j_scan.collect(q).unwrap()).len();
+        assert_eq!(t, s, "query {}: tree {} vs scan {}", q, t, s);
+        assert!(t > 0, "query {} returned empty", q);
+    }
+    // Inclusive `>=` / `<=` : verify scan against naive ground truth.
+    let orders = doc["orders"].as_array().unwrap();
+    let naive_total_gte_500 = orders.iter()
+        .filter(|o| o["total"].as_f64().unwrap() >= 500.0).count();
+    let scan_total_gte_500 = as_array(
+        &j_scan.collect("$..find(@.total >= 500)").unwrap()
+    ).len();
+    assert_eq!(scan_total_gte_500, naive_total_gte_500);
+
+    let naive_qty_lte_2: usize = orders.iter().map(|o| {
+        o["items"].as_array().unwrap().iter()
+            .filter(|it| it["qty"].as_i64().unwrap() <= 2).count()
+    }).sum();
+    let scan_qty_lte_2 = as_array(
+        &j_scan.collect("$..find(@.qty <= 2)").unwrap()
+    ).len();
+    assert_eq!(scan_qty_lte_2, naive_qty_lte_2);
+}
+
+#[test]
 fn unique_count_fusion_matches_dedup_then_count() {
     let j = Jetro::new(synth_doc());
     let fused  = j.collect("$.orders.map(status).unique().count()").unwrap();

@@ -4067,6 +4067,31 @@ impl VM {
                                     stack.push(Val::arr(vals));
                                     continue;
                                 }
+                                // Single-conjunct numeric-range scan.
+                                if call.orig_args.len() == 1 {
+                                    let e = match &call.orig_args[0] {
+                                        super::ast::Arg::Pos(e)
+                                        | super::ast::Arg::Named(_, e) => e,
+                                    };
+                                    if let Some((field, op, thresh)) =
+                                        super::eval::canonical_field_cmp_literal(e)
+                                    {
+                                        let spans = super::scan::find_enclosing_objects_cmp(
+                                            bytes, &field, op, thresh,
+                                        );
+                                        let mut vals: Vec<Val> =
+                                            Vec::with_capacity(spans.len());
+                                        for s in &spans {
+                                            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(
+                                                &bytes[s.start..s.end],
+                                            ) {
+                                                vals.push(Val::from(&v));
+                                            }
+                                        }
+                                        stack.push(Val::arr(vals));
+                                        continue;
+                                    }
+                                }
                             }
                         }
                     }

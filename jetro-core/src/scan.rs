@@ -371,6 +371,109 @@ pub fn find_enclosing_objects_eq_multi(
     out
 }
 
+/// Comparison operator for numeric-range byte scans.  Mirrors the subset of
+/// `ast::BinOp` that makes sense against a canonical JSON number literal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanCmp { Lt, Lte, Gt, Gte }
+
+impl ScanCmp {
+    #[inline]
+    fn holds(self, lhs: f64, rhs: f64) -> bool {
+        match self {
+            ScanCmp::Lt  => lhs <  rhs,
+            ScanCmp::Lte => lhs <= rhs,
+            ScanCmp::Gt  => lhs >  rhs,
+            ScanCmp::Gte => lhs >= rhs,
+        }
+    }
+}
+
+/// Locate the byte span of every enclosing object whose `key` field is a
+/// JSON number satisfying `op threshold`.  Powers the fast path for
+/// `$..find(@.key op num)` where `op` ∈ `<`, `<=`, `>`, `>=`.
+///
+/// Matches the shape of `find_enclosing_objects_eq` — single forward pass,
+/// stack of opened `{` frames, flag-on-match, emit-on-close, output sorted
+/// by start offset so order mirrors the tree walker's DFS pre-order.
+///
+/// The value is byte-parsed via `parse_num_span`.  Non-numeric values and
+/// malformed numbers are skipped (the conjunct simply doesn't fire).
+pub fn find_enclosing_objects_cmp(
+    bytes: &[u8],
+    key: &str,
+    op: ScanCmp,
+    threshold: f64,
+) -> Vec<ValueSpan> {
+    let needle = {
+        let mut s = String::with_capacity(key.len() + 3);
+        s.push('"');
+        s.push_str(key);
+        s.push_str("\":");
+        s
+    };
+    let needle_b = needle.as_bytes();
+    let mut out = Vec::new();
+    let mut stack: Vec<(usize, bool)> = Vec::new();
+    let mut i = 0usize;
+    let mut in_string = false;
+    let mut escape = false;
+
+    while i < bytes.len() {
+        if escape { escape = false; i += 1; continue; }
+        if in_string {
+            let rest = &bytes[i..];
+            match memchr2(b'\\', b'"', rest) {
+                Some(off) => {
+                    i += off;
+                    match bytes[i] {
+                        b'\\' => { escape = true;     i += 1; }
+                        b'"'  => { in_string = false; i += 1; }
+                        _     => unreachable!(),
+                    }
+                }
+                None => break,
+            }
+            continue;
+        }
+        match bytes[i] {
+            b'{' => { stack.push((i, false)); i += 1; }
+            b'}' => {
+                if let Some((start, matched)) = stack.pop() {
+                    if matched { out.push(ValueSpan { start, end: i + 1 }); }
+                }
+                i += 1;
+            }
+            b'"' => {
+                if i + needle_b.len() <= bytes.len()
+                    && &bytes[i..i + needle_b.len()] == needle_b
+                {
+                    let mut vs = i + needle_b.len();
+                    while vs < bytes.len()
+                        && matches!(bytes[vs], b' ' | b'\t' | b'\n' | b'\r')
+                    { vs += 1; }
+                    if let Some(ve) = value_end(bytes, vs) {
+                        if let Some((_, as_f, _)) = parse_num_span(&bytes[vs..ve]) {
+                            if op.holds(as_f, threshold) {
+                                if let Some(top) = stack.last_mut() { top.1 = true; }
+                            }
+                        }
+                        i = ve;
+                    } else {
+                        i = vs;
+                    }
+                } else {
+                    in_string = true;
+                    i += 1;
+                }
+            }
+            _ => i += 1,
+        }
+    }
+
+    out.sort_by_key(|s| s.start);
+    out
+}
+
 /// Fold numeric values over `spans` into `(int_sum, float_sum, is_float, n)`.
 /// Integer spans accumulate into `int_sum`; a single float promotes the
 /// whole fold to `float_sum` (which tracks the running total as f64).

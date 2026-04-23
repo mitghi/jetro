@@ -303,6 +303,28 @@ pub(super) fn eval(expr: &Expr, env: &Env) -> Result<Val, EvalError> {
                         for step in &steps[1..] { val = eval_step(val, step, env)?; }
                         return Ok(val);
                     }
+                    // Single-conjunct numeric range: `$..find(@.k op num)`
+                    // where `op` ∈ `<`, `<=`, `>`, `>=`.  Extends the byte-scan
+                    // fast path past pure equality literals.
+                    if args.len() == 1 {
+                        let e = match &args[0] { Arg::Pos(e) | Arg::Named(_, e) => e };
+                        if let Some((field, op, thresh)) = canonical_field_cmp_literal(e) {
+                            let spans = super::scan::find_enclosing_objects_cmp(
+                                bytes, &field, op, thresh,
+                            );
+                            let mut vals: Vec<Val> = Vec::with_capacity(spans.len());
+                            for s in &spans {
+                                if let Ok(v) = serde_json::from_slice::<serde_json::Value>(
+                                    &bytes[s.start..s.end]
+                                ) {
+                                    vals.push(Val::from(&v));
+                                }
+                            }
+                            let mut val = Val::arr(vals);
+                            for step in &steps[1..] { val = eval_step(val, step, env)?; }
+                            return Ok(val);
+                        }
+                    }
                 }
             }
             // SIMD byte-chain fast path: `$..key<rest>` with raw bytes —
@@ -901,6 +923,52 @@ pub(crate) fn canonical_field_eq_literals(args: &[Arg]) -> Option<Vec<(String, V
         out.push(canonical_field_eq_literal(e)?);
     }
     Some(out)
+}
+
+/// Recognise `@.field op num` / `num op @.field` predicates where `op` is
+/// one of `<`, `<=`, `>`, `>=` and the literal is a finite JSON number.
+/// Returns `(field, ScanCmp, threshold)` normalised so `@.field` is always
+/// on the LHS of the comparison (operator flipped when the literal was on
+/// the LHS).
+pub(crate) fn canonical_field_cmp_literal(
+    pred: &Expr,
+) -> Option<(String, super::scan::ScanCmp, f64)> {
+    use super::scan::ScanCmp;
+    let (l, op, r) = match pred {
+        Expr::BinOp(l, op @ (BinOp::Lt | BinOp::Lte | BinOp::Gt | BinOp::Gte), r) =>
+            (&**l, *op, &**r),
+        _ => return None,
+    };
+    fn as_current_field(e: &Expr) -> Option<String> {
+        if let Expr::Chain(base, steps) = e {
+            if matches!(**base, Expr::Current) && steps.len() == 1 {
+                if let Step::Field(name) = &steps[0] { return Some(name.clone()); }
+            }
+        }
+        None
+    }
+    fn as_num(e: &Expr) -> Option<f64> {
+        match e {
+            Expr::Int(n)   => Some(*n as f64),
+            Expr::Float(f) => if f.is_finite() { Some(*f) } else { None },
+            _ => None,
+        }
+    }
+    let (field, thresh, flip) = match (as_current_field(l), as_num(r)) {
+        (Some(f), Some(n)) => (f, n, false),
+        _ => match (as_current_field(r), as_num(l)) {
+            (Some(f), Some(n)) => (f, n, true),
+            _ => return None,
+        },
+    };
+    let scan_op = match (op, flip) {
+        (BinOp::Lt,  false) | (BinOp::Gt,  true)  => ScanCmp::Lt,
+        (BinOp::Lte, false) | (BinOp::Gte, true)  => ScanCmp::Lte,
+        (BinOp::Gt,  false) | (BinOp::Lt,  true)  => ScanCmp::Gt,
+        (BinOp::Gte, false) | (BinOp::Lte, true)  => ScanCmp::Gte,
+        _ => return None,
+    };
+    Some((field, scan_op, thresh))
 }
 
 pub(crate) fn canonical_field_eq_literal(pred: &Expr) -> Option<(String, Vec<u8>)> {
