@@ -395,6 +395,36 @@ fn deep_find_numeric_range_tree_eq_scan() {
 }
 
 #[test]
+fn deep_find_then_count_and_aggregate_projection() {
+    // Trailing `.count()` / `.map(k).sum()` etc. fold from byte spans
+    // directly -- no full-object parse, no intermediate array.
+    let doc = synth_doc();
+    let bytes = serde_json::to_vec(&doc).unwrap();
+    let j_tree = Jetro::new(doc.clone());
+    let j_scan = Jetro::from_bytes(bytes).unwrap();
+    for q in [
+        r#"$..find(@.status == "shipped").count()"#,
+        r#"$..find(@.total > 500).count()"#,
+        r#"$..find(@.status == "shipped").map(total).sum()"#,
+        r#"$..find(@.status == "shipped").map(total).min()"#,
+        r#"$..find(@.status == "shipped").map(total).max()"#,
+        r#"$..find(@.status == "shipped").map(total).avg()"#,
+    ] {
+        let t = j_tree.collect(q).unwrap();
+        let s = j_scan.collect(q).unwrap();
+        // Numbers compare with epsilon (floats), ints by as_i64.
+        let eps = 1e-6_f64;
+        let tf = t.as_f64();
+        let sf = s.as_f64();
+        match (tf, sf) {
+            (Some(a), Some(b)) => assert!((a - b).abs() < eps.max(a.abs() * 1e-9),
+                "query {}: tree {} vs scan {}", q, a, b),
+            _ => assert_eq!(t, s, "query {}", q),
+        }
+    }
+}
+
+#[test]
 fn deep_find_then_map_field_direct_extract() {
     // `$..find(pred).map(field)` under the scan fast path must agree
     // with the tree walker and a naive projection — the VM now

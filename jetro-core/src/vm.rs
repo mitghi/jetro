@@ -4721,7 +4721,59 @@ fn materialise_find_scan_spans(
     spans: &[super::scan::ValueSpan],
     tail: &[Opcode],
 ) -> (Val, usize) {
+    // Trailing `.count()` / `.len()` — just the span count, no parse.
+    if let Some(Opcode::CallMethod(c)) = tail.first() {
+        if c.sub_progs.is_empty()
+            && matches!(c.method, BuiltinMethod::Count | BuiltinMethod::Len)
+        {
+            return (Val::Int(spans.len() as i64), 1);
+        }
+    }
+    // Trailing `.map(<field>)` — peek once more for a numeric aggregate
+    // that can fold straight from the per-span direct field, skipping
+    // both the full-object parse and the Val array construction.
     if let Some(Opcode::MapField(k)) = tail.first() {
+        if let Some(Opcode::CallMethod(c)) = tail.get(1) {
+            if c.sub_progs.is_empty() {
+                match c.method {
+                    BuiltinMethod::Count | BuiltinMethod::Len => {
+                        // count of extracted fields == count of spans
+                        // where the key parses successfully.  Fold gives
+                        // us that as `f.count`.
+                        let f = super::scan::fold_direct_field_nums(bytes, spans, k.as_ref());
+                        return (Val::Int(f.count as i64), 2);
+                    }
+                    BuiltinMethod::Sum => {
+                        let f = super::scan::fold_direct_field_nums(bytes, spans, k.as_ref());
+                        let v = if f.count == 0 { Val::Int(0) }
+                                else if f.is_float { Val::Float(f.float_sum) }
+                                else { Val::Int(f.int_sum) };
+                        return (v, 2);
+                    }
+                    BuiltinMethod::Avg => {
+                        let f = super::scan::fold_direct_field_nums(bytes, spans, k.as_ref());
+                        let v = if f.count == 0 { Val::Null }
+                                else { Val::Float(f.float_sum / f.count as f64) };
+                        return (v, 2);
+                    }
+                    BuiltinMethod::Min => {
+                        let f = super::scan::fold_direct_field_nums(bytes, spans, k.as_ref());
+                        let v = if !f.any { Val::Null }
+                                else if f.is_float { Val::Float(f.min_f) }
+                                else { Val::Int(f.min_i) };
+                        return (v, 2);
+                    }
+                    BuiltinMethod::Max => {
+                        let f = super::scan::fold_direct_field_nums(bytes, spans, k.as_ref());
+                        let v = if !f.any { Val::Null }
+                                else if f.is_float { Val::Float(f.max_f) }
+                                else { Val::Int(f.max_i) };
+                        return (v, 2);
+                    }
+                    _ => {}
+                }
+            }
+        }
         let mut vals: Vec<Val> = Vec::with_capacity(spans.len());
         for s in spans {
             let obj_bytes = &bytes[s.start..s.end];

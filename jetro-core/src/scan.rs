@@ -772,6 +772,41 @@ pub fn fold_nums(bytes: &[u8], spans: &[ValueSpan]) -> NumFold {
     f
 }
 
+/// Fold the direct child named `key` of each enclosing object span
+/// into a single `NumFold`.  Combines `find_direct_field` +
+/// `parse_num_span` without materialising any intermediate `Val`.
+/// Spans missing the key or whose value is non-numeric are skipped.
+pub fn fold_direct_field_nums(
+    bytes: &[u8], spans: &[ValueSpan], key: &str,
+) -> NumFold {
+    let mut f = NumFold::default();
+    for s in spans {
+        let obj_bytes = &bytes[s.start..s.end];
+        let Some(vs) = find_direct_field(obj_bytes, key) else { continue };
+        let Some((i, x, is_int)) = parse_num_span(&obj_bytes[vs.start..vs.end])
+            else { continue };
+        f.count += 1;
+        if !f.any {
+            f.any = true;
+            f.min_i = i; f.max_i = i;
+            f.min_f = x; f.max_f = x;
+        } else {
+            if i < f.min_i { f.min_i = i; }
+            if i > f.max_i { f.max_i = i; }
+            if x < f.min_f { f.min_f = x; }
+            if x > f.max_f { f.max_f = x; }
+        }
+        if is_int && !f.is_float {
+            f.int_sum = f.int_sum.wrapping_add(i);
+            f.float_sum += x;
+        } else {
+            if !f.is_float { f.float_sum = f.int_sum as f64; f.is_float = true; }
+            f.float_sum += x;
+        }
+    }
+    f
+}
+
 /// Walk a JSON value starting at `start`, return the exclusive end offset.
 /// Returns `None` on malformed input (missing close, truncated literal).
 fn value_end(bytes: &[u8], start: usize) -> Option<usize> {
