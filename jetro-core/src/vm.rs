@@ -3972,12 +3972,32 @@ impl VM {
                 Opcode::ListComp(spec) => {
                     let items = self.exec_iter_vals(&spec.iter, env)?;
                     let mut out = Vec::with_capacity(items.len());
-                    for item in items {
-                        let ie = bind_comp_vars(env, &spec.vars, item);
-                        if let Some(cond) = &spec.cond {
-                            if !is_truthy(&self.exec(cond, &ie)?) { continue; }
+                    // Fast path: single-var `for x in iter` — reuse one
+                    // scratch Env via push_lam / pop_lam instead of
+                    // cloning per iteration.
+                    if spec.vars.len() == 1 {
+                        let vname = spec.vars[0].clone();
+                        let mut scratch = env.clone();
+                        for item in items {
+                            let frame = scratch.push_lam(Some(vname.as_ref()), item);
+                            let keep = match &spec.cond {
+                                Some(c) => is_truthy(&self.exec(c, &scratch)?),
+                                None => true,
+                            };
+                            if keep {
+                                let v = self.exec(&spec.expr, &scratch)?;
+                                out.push(v);
+                            }
+                            scratch.pop_lam(frame);
                         }
-                        out.push(self.exec(&spec.expr, &ie)?);
+                    } else {
+                        for item in items {
+                            let ie = bind_comp_vars(env, &spec.vars, item);
+                            if let Some(cond) = &spec.cond {
+                                if !is_truthy(&self.exec(cond, &ie)?) { continue; }
+                            }
+                            out.push(self.exec(&spec.expr, &ie)?);
+                        }
                     }
                     stack.push(Val::arr(out));
                 }
