@@ -395,6 +395,28 @@ fn deep_find_numeric_range_tree_eq_scan() {
 }
 
 #[test]
+fn deep_find_mixed_eq_cmp_tree_eq_scan() {
+    // Mixed multi-conjunct: one equality + one numeric-range predicate.
+    // Scan path must agree with the tree walker and match a naive
+    // ground truth over the orders slice.
+    let doc = synth_doc();
+    let bytes = serde_json::to_vec(&doc).unwrap();
+    let j_tree = Jetro::new(doc.clone());
+    let j_scan = Jetro::from_bytes(bytes).unwrap();
+    let q = r#"$..find(@.status == "shipped", @.total > 500)"#;
+    let t = as_array(&j_tree.collect(q).unwrap()).len();
+    let s = as_array(&j_scan.collect(q).unwrap()).len();
+    assert_eq!(t, s, "tree {} vs scan {}", t, s);
+    let orders = doc["orders"].as_array().unwrap();
+    let naive = orders.iter().filter(|o| {
+        o["status"].as_str() == Some("shipped")
+            && o["total"].as_f64().unwrap() > 500.0
+    }).count();
+    assert_eq!(s, naive);
+    assert!(s > 0);
+}
+
+#[test]
 fn descendant_first_early_exit_matches_tree() {
     // `$..k.first()` must agree with the tree walker under the scan
     // early-exit path; the scan now stops at the first match rather

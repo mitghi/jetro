@@ -451,6 +451,18 @@ impl ScanCmp {
     }
 }
 
+/// A single predicate against the value paired with a key inside an
+/// enclosing object.  Drives `find_enclosing_objects_mixed`.
+#[derive(Debug, Clone)]
+pub enum ScanPred {
+    /// Bytewise equality against a canonical JSON literal (int/string/
+    /// bool/null — same shape as `find_enclosing_objects_eq_multi`).
+    Eq(Vec<u8>),
+    /// Numeric comparison: value parsed as f64 then `op` applied vs
+    /// `threshold`.  Non-numeric values do not match.
+    Cmp(ScanCmp, f64),
+}
+
 /// Locate the byte span of every enclosing object whose `key` field is a
 /// JSON number satisfying `op threshold`.  Powers the fast path for
 /// `$..find(@.key op num)` where `op` ∈ `<`, `<=`, `>`, `>=`.
@@ -518,6 +530,106 @@ pub fn find_enclosing_objects_cmp(
                         if let Some((_, as_f, _)) = parse_num_span(&bytes[vs..ve]) {
                             if op.holds(as_f, threshold) {
                                 if let Some(top) = stack.last_mut() { top.1 = true; }
+                            }
+                        }
+                        i = ve;
+                    } else {
+                        i = vs;
+                    }
+                } else {
+                    in_string = true;
+                    i += 1;
+                }
+            }
+            _ => i += 1,
+        }
+    }
+
+    out.sort_by_key(|s| s.start);
+    out
+}
+
+/// Mixed multi-conjunct scan: each conjunct is `(key, ScanPred)` and an
+/// enclosing object is emitted iff every conjunct matches on the same
+/// `{...}` frame.  Generalises `find_enclosing_objects_eq_multi` to allow
+/// equality literals and numeric-range comparisons in the same query.
+/// Frames carry a bitmask of satisfied conjuncts (max 64).
+pub fn find_enclosing_objects_mixed(
+    bytes: &[u8],
+    conjuncts: &[(String, ScanPred)],
+) -> Vec<ValueSpan> {
+    assert!(conjuncts.len() <= 64, "at most 64 conjuncts supported");
+    if conjuncts.is_empty() { return Vec::new(); }
+
+    let needles: Vec<Vec<u8>> = conjuncts.iter().map(|(k, _)| {
+        let mut s = Vec::with_capacity(k.len() + 3);
+        s.push(b'"');
+        s.extend_from_slice(k.as_bytes());
+        s.extend_from_slice(b"\":");
+        s
+    }).collect();
+    let full_mask: u64 = if conjuncts.len() == 64 { u64::MAX }
+                         else { (1u64 << conjuncts.len()) - 1 };
+
+    let mut out = Vec::new();
+    let mut stack: Vec<(usize, u64)> = Vec::new();
+    let mut i = 0usize;
+    let mut in_string = false;
+    let mut escape = false;
+
+    while i < bytes.len() {
+        if escape { escape = false; i += 1; continue; }
+        if in_string {
+            let rest = &bytes[i..];
+            match memchr2(b'\\', b'"', rest) {
+                Some(off) => {
+                    i += off;
+                    match bytes[i] {
+                        b'\\' => { escape = true;     i += 1; }
+                        b'"'  => { in_string = false; i += 1; }
+                        _     => unreachable!(),
+                    }
+                }
+                None => break,
+            }
+            continue;
+        }
+        match bytes[i] {
+            b'{' => { stack.push((i, 0u64)); i += 1; }
+            b'}' => {
+                if let Some((start, mask)) = stack.pop() {
+                    if mask == full_mask {
+                        out.push(ValueSpan { start, end: i + 1 });
+                    }
+                }
+                i += 1;
+            }
+            b'"' => {
+                let mut matched_idx: Option<usize> = None;
+                for (idx, nb) in needles.iter().enumerate() {
+                    if i + nb.len() <= bytes.len() && &bytes[i..i + nb.len()] == &nb[..] {
+                        matched_idx = Some(idx);
+                        break;
+                    }
+                }
+                if let Some(idx) = matched_idx {
+                    let nb = &needles[idx];
+                    let mut vs = i + nb.len();
+                    while vs < bytes.len()
+                        && matches!(bytes[vs], b' ' | b'\t' | b'\n' | b'\r')
+                    { vs += 1; }
+                    if let Some(ve) = value_end(bytes, vs) {
+                        let fires = match &conjuncts[idx].1 {
+                            ScanPred::Eq(lit) =>
+                                ve - vs == lit.len() && &bytes[vs..ve] == &lit[..],
+                            ScanPred::Cmp(op, thresh) =>
+                                parse_num_span(&bytes[vs..ve])
+                                    .map(|(_, f, _)| op.holds(f, *thresh))
+                                    .unwrap_or(false),
+                        };
+                        if fires {
+                            if let Some(top) = stack.last_mut() {
+                                top.1 |= 1u64 << idx;
                             }
                         }
                         i = ve;

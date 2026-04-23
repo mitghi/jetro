@@ -325,6 +325,26 @@ pub(super) fn eval(expr: &Expr, env: &Env) -> Result<Val, EvalError> {
                             return Ok(val);
                         }
                     }
+                    // Mixed multi-conjunct: eq and numeric-range predicates
+                    // together, e.g. `$..find(@.status == "shipped", @.total > 500)`.
+                    // Pure-eq and single-cmp already handled above; this path
+                    // picks up any remaining combination.
+                    if let Some(conjuncts) = canonical_field_mixed_predicates(args) {
+                        let spans = super::scan::find_enclosing_objects_mixed(
+                            bytes, &conjuncts,
+                        );
+                        let mut vals: Vec<Val> = Vec::with_capacity(spans.len());
+                        for s in &spans {
+                            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(
+                                &bytes[s.start..s.end]
+                            ) {
+                                vals.push(Val::from(&v));
+                            }
+                        }
+                        let mut val = Val::arr(vals);
+                        for step in &steps[1..] { val = eval_step(val, step, env)?; }
+                        return Ok(val);
+                    }
                 }
             }
             // SIMD byte-chain fast path: `$..key<rest>` with raw bytes —
@@ -999,6 +1019,29 @@ pub(crate) fn canonical_field_cmp_literal(
         _ => return None,
     };
     Some((field, scan_op, thresh))
+}
+
+/// Canonicalise a predicate list that mixes `@.k == lit` and `@.k op num`
+/// conjuncts into a list of `(field, ScanPred)` pairs the mixed byte scan
+/// can consume.  Returns `None` if any conjunct fits neither shape.
+/// Empty input or more than 64 conjuncts → `None`.
+pub(crate) fn canonical_field_mixed_predicates(
+    args: &[Arg],
+) -> Option<Vec<(String, super::scan::ScanPred)>> {
+    use super::scan::ScanPred;
+    if args.is_empty() || args.len() > 64 { return None; }
+    let mut out = Vec::with_capacity(args.len());
+    for a in args {
+        let e = match a { Arg::Pos(e) | Arg::Named(_, e) => e };
+        if let Some((k, lit)) = canonical_field_eq_literal(e) {
+            out.push((k, ScanPred::Eq(lit)));
+        } else if let Some((k, op, n)) = canonical_field_cmp_literal(e) {
+            out.push((k, ScanPred::Cmp(op, n)));
+        } else {
+            return None;
+        }
+    }
+    Some(out)
 }
 
 pub(crate) fn canonical_field_eq_literal(pred: &Expr) -> Option<(String, Vec<u8>)> {
