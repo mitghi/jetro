@@ -371,6 +371,67 @@ pub fn find_enclosing_objects_eq_multi(
     out
 }
 
+/// Fold numeric values over `spans` into `(int_sum, float_sum, is_float, n)`.
+/// Integer spans accumulate into `int_sum`; a single float promotes the
+/// whole fold to `float_sum` (which tracks the running total as f64).
+/// Spans that don't parse as numbers are skipped.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NumFold {
+    pub int_sum:   i64,
+    pub float_sum: f64,
+    pub is_float:  bool,
+    pub count:     usize,
+    pub min_i:     i64,
+    pub max_i:     i64,
+    pub min_f:     f64,
+    pub max_f:     f64,
+    pub any:       bool,
+}
+
+/// Parse a span of JSON numeric bytes. Returns Some((as_i64, as_f64, is_int))
+/// or None if not a valid number. Canonical JSON numbers only: `-?\d+(\.\d+)?(e±\d+)?`.
+#[inline]
+pub fn parse_num_span(s: &[u8]) -> Option<(i64, f64, bool)> {
+    let s = std::str::from_utf8(s).ok()?;
+    // Integer-looking path (no '.', 'e', 'E') — try i64 first.
+    let has_frac_or_exp = s.bytes().any(|b| matches!(b, b'.' | b'e' | b'E'));
+    if !has_frac_or_exp {
+        if let Ok(n) = s.parse::<i64>() {
+            return Some((n, n as f64, true));
+        }
+    }
+    s.parse::<f64>().ok().map(|f| (f as i64, f, false))
+}
+
+/// Fold numeric spans for sum/avg/min/max. Walks each span, parses as
+/// number, updates the accumulators. Non-numeric spans are skipped.
+pub fn fold_nums(bytes: &[u8], spans: &[ValueSpan]) -> NumFold {
+    let mut f = NumFold::default();
+    for s in spans {
+        let slice = &bytes[s.start..s.end];
+        let Some((i, x, is_int)) = parse_num_span(slice) else { continue };
+        f.count += 1;
+        if !f.any {
+            f.any = true;
+            f.min_i = i; f.max_i = i;
+            f.min_f = x; f.max_f = x;
+        } else {
+            if i < f.min_i { f.min_i = i; }
+            if i > f.max_i { f.max_i = i; }
+            if x < f.min_f { f.min_f = x; }
+            if x > f.max_f { f.max_f = x; }
+        }
+        if is_int && !f.is_float {
+            f.int_sum = f.int_sum.wrapping_add(i);
+            f.float_sum += x;
+        } else {
+            if !f.is_float { f.float_sum = f.int_sum as f64; f.is_float = true; }
+            f.float_sum += x;
+        }
+    }
+    f
+}
+
 /// Walk a JSON value starting at `start`, return the exclusive end offset.
 /// Returns `None` on malformed input (missing close, truncated literal).
 fn value_end(bytes: &[u8], start: usize) -> Option<usize> {

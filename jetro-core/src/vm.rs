@@ -4181,6 +4181,48 @@ fn byte_chain_exec(
         consumed += 1;
     }
 
+    // Numeric-fold fast path: trailing `.sum()/.avg()/.min()/.max()/.count()/.len()`
+    // — skip Val materialisation, parse numbers inline from byte spans.
+    if !scalar {
+        if let Some(Opcode::CallMethod(call)) = tail.get(consumed) {
+            if call.sub_progs.is_empty() && tail.len() == consumed + 1 {
+                match call.method {
+                    BuiltinMethod::Count | BuiltinMethod::Len => {
+                        return (Val::Int(spans.len() as i64), consumed + 1);
+                    }
+                    BuiltinMethod::Sum => {
+                        let f = super::scan::fold_nums(bytes, &spans);
+                        let v = if f.count == 0 { Val::Int(0) }
+                            else if f.is_float { Val::Float(f.float_sum) }
+                            else { Val::Int(f.int_sum) };
+                        return (v, consumed + 1);
+                    }
+                    BuiltinMethod::Avg => {
+                        let f = super::scan::fold_nums(bytes, &spans);
+                        let v = if f.count == 0 { Val::Null }
+                            else { Val::Float(f.float_sum / f.count as f64) };
+                        return (v, consumed + 1);
+                    }
+                    BuiltinMethod::Min => {
+                        let f = super::scan::fold_nums(bytes, &spans);
+                        let v = if !f.any { Val::Null }
+                            else if f.is_float { Val::Float(f.min_f) }
+                            else { Val::Int(f.min_i) };
+                        return (v, consumed + 1);
+                    }
+                    BuiltinMethod::Max => {
+                        let f = super::scan::fold_nums(bytes, &spans);
+                        let v = if !f.any { Val::Null }
+                            else if f.is_float { Val::Float(f.max_f) }
+                            else { Val::Int(f.max_i) };
+                        return (v, consumed + 1);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
     let mut materialised: Vec<Val> = Vec::with_capacity(spans.len());
     for s in &spans {
         if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes[s.start..s.end]) {

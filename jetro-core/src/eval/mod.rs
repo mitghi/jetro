@@ -797,6 +797,51 @@ fn byte_chain_eval(
         consumed += 1;
     }
 
+    // Numeric-fold fast path: trailing `.sum()/.avg()/.min()/.max()/.count()/.len()`
+    // with no args — skip Val materialisation, parse numbers inline.
+    if !scalar {
+        if let Some(Step::Method(name, args)) = steps.get(consumed) {
+            if args.is_empty() {
+                let tail_ok = steps.len() == consumed + 1;
+                if tail_ok {
+                    match name.as_str() {
+                        "count" | "len" => {
+                            return (Val::Int(spans.len() as i64), consumed + 1);
+                        }
+                        "sum" => {
+                            let f = super::scan::fold_nums(bytes, &spans);
+                            let v = if f.count == 0 { Val::Int(0) }
+                                else if f.is_float { Val::Float(f.float_sum) }
+                                else { Val::Int(f.int_sum) };
+                            return (v, consumed + 1);
+                        }
+                        "avg" => {
+                            let f = super::scan::fold_nums(bytes, &spans);
+                            let v = if f.count == 0 { Val::Null }
+                                else { Val::Float(f.float_sum / f.count as f64) };
+                            return (v, consumed + 1);
+                        }
+                        "min" => {
+                            let f = super::scan::fold_nums(bytes, &spans);
+                            let v = if !f.any { Val::Null }
+                                else if f.is_float { Val::Float(f.min_f) }
+                                else { Val::Int(f.min_i) };
+                            return (v, consumed + 1);
+                        }
+                        "max" => {
+                            let f = super::scan::fold_nums(bytes, &spans);
+                            let v = if !f.any { Val::Null }
+                                else if f.is_float { Val::Float(f.max_f) }
+                                else { Val::Int(f.max_i) };
+                            return (v, consumed + 1);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
     let mut materialised: Vec<Val> = Vec::with_capacity(spans.len());
     for s in &spans {
         match serde_json::from_slice::<serde_json::Value>(&bytes[s.start..s.end]) {
