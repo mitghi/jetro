@@ -2955,21 +2955,23 @@ impl VM {
                     let recv = pop!(stack);
                     if let Val::Arr(a) = &recv {
                         let mut out = Vec::with_capacity(a.len());
-                        // IC for first hop only — downstream hops are scalar walks
-                        // where the per-item obj identity changes each iteration,
-                        // so caching would thrash.
-                        let mut idx0: Option<usize> = None;
-                        let k0 = &ks[0];
+                        // One IC slot per hop — `lookup_field_cached` keys on
+                        // slot index + key verify (ptr-independent), so it
+                        // hits across different Arcs of the same shape.
+                        let mut ic: SmallVec<[Option<usize>; 4]> = SmallVec::new();
+                        ic.resize(ks.len(), None);
                         for item in a.iter() {
                             let mut cur: Val = match item {
-                                Val::Obj(m) => lookup_field_cached(m, k0, &mut idx0)
+                                Val::Obj(m) => lookup_field_cached(m, &ks[0], &mut ic[0])
                                     .cloned()
                                     .unwrap_or(Val::Null),
                                 _ => Val::Null,
                             };
-                            for k in &ks[1..] {
+                            for (hop, k) in ks[1..].iter().enumerate() {
                                 cur = match &cur {
-                                    Val::Obj(m) => m.get(k.as_ref()).cloned().unwrap_or(Val::Null),
+                                    Val::Obj(m) => lookup_field_cached(m, k, &mut ic[hop + 1])
+                                        .cloned()
+                                        .unwrap_or(Val::Null),
                                     _ => Val::Null,
                                 };
                                 if matches!(cur, Val::Null) { break; }
