@@ -63,7 +63,7 @@ fn is_kw(rule: Rule) -> bool {
     matches!(
         rule,
         Rule::kw_and | Rule::kw_or | Rule::kw_not | Rule::kw_for
-            | Rule::kw_in | Rule::kw_if | Rule::kw_let | Rule::kw_lambda | Rule::kw_kind
+            | Rule::kw_in | Rule::kw_if | Rule::kw_else | Rule::kw_let | Rule::kw_lambda | Rule::kw_kind
             | Rule::kw_is | Rule::kw_as
     )
 }
@@ -73,6 +73,7 @@ fn is_kw(rule: Rule) -> bool {
 fn parse_expr(pair: Pair<Rule>) -> Expr {
     match pair.as_rule() {
         Rule::expr          => parse_expr(pair.into_inner().next().unwrap()),
+        Rule::cond_expr     => parse_cond(pair),
         Rule::pipe_expr     => parse_pipeline(pair),
         Rule::coalesce_expr => parse_coalesce(pair),
         Rule::or_expr       => parse_or(pair),
@@ -87,6 +88,27 @@ fn parse_expr(pair: Pair<Rule>) -> Expr {
         Rule::postfix_expr  => parse_postfix_expr(pair),
         Rule::primary       => parse_primary(pair),
         r => panic!("unexpected rule in parse_expr: {:?}", r),
+    }
+}
+
+// ── Conditional (Python-style ternary) ────────────────────────────────────────
+// `then_ if cond else else_` — right-associative. Parser receives:
+//   cond_expr := pipe_expr (kw_if pipe_expr kw_else cond_expr)?
+// So inner pairs are either [then_] or [then_, kw_if, cond, kw_else, else_].
+// When the `if` tail is absent we pass through to keep the single pipe_expr.
+
+fn parse_cond(pair: Pair<Rule>) -> Expr {
+    let mut inner = pair.into_inner().filter(|p| !is_kw(p.as_rule()));
+    let then_ = parse_expr(inner.next().unwrap());
+    let cond = match inner.next() {
+        Some(p) => parse_expr(p),
+        None    => return then_,
+    };
+    let else_ = parse_expr(inner.next().unwrap());
+    Expr::IfElse {
+        cond:  Box::new(cond),
+        then_: Box::new(then_),
+        else_: Box::new(else_),
     }
 }
 

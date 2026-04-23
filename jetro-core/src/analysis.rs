@@ -306,6 +306,7 @@ fn apply_op(op: &Opcode, stack: &mut Vec<AbstractVal>) {
             stack.push(AbstractVal::scalar(VType::Bool));
         }
         Opcode::CoalesceOp(_) => { pop1!(); stack.push(AbstractVal::UNKNOWN); }
+        Opcode::IfElse { .. } => { pop1!(); stack.push(AbstractVal::UNKNOWN); }
         Opcode::CallMethod(call) | Opcode::CallOptMethod(call) => {
             pop1!();
             stack.push(method_result_type(call.method));
@@ -413,6 +414,10 @@ fn count_ident_uses_in_ops(ops: &[Opcode], name: &str, acc: &mut usize) {
             Opcode::FilterTakeWhile { pred, stop } => {
                 count_ident_uses_in_ops(&pred.ops, name, acc);
                 count_ident_uses_in_ops(&stop.ops, name, acc);
+            }
+            Opcode::IfElse { then_, else_ } => {
+                count_ident_uses_in_ops(&then_.ops, name, acc);
+                count_ident_uses_in_ops(&else_.ops, name, acc);
             }
             Opcode::FilterMap { pred, map }
                 | Opcode::FilterMapSum { pred, map }
@@ -535,6 +540,10 @@ fn collect_fields_in_ops(ops: &[Opcode], acc: &mut Vec<Arc<str>>) {
                 collect_fields_in_ops(&pred.ops, acc);
                 collect_fields_in_ops(&stop.ops, acc);
             }
+            Opcode::IfElse { then_, else_ } => {
+                collect_fields_in_ops(&then_.ops, acc);
+                collect_fields_in_ops(&else_.ops, acc);
+            }
             Opcode::FilterMap { pred, map }
                 | Opcode::FilterMapSum { pred, map }
                 | Opcode::FilterMapAvg { pred, map }
@@ -607,6 +616,10 @@ fn hash_ops(ops: &[Opcode], h: &mut impl std::hash::Hasher) {
                 hash_ops(&pred.ops, h);
                 hash_ops(&stop.ops, h);
             }
+            Opcode::IfElse { then_, else_ } => {
+                hash_ops(&then_.ops, h);
+                hash_ops(&else_.ops, h);
+            }
             Opcode::RootChain(chain) => {
                 for k in chain.iter() { k.as_bytes().hash(h); }
             }
@@ -641,6 +654,7 @@ fn walk_subprograms(ops: &[Opcode], map: &mut HashMap<u64, usize>) {
                 | Opcode::FilterLast { pred: p }
                 => vec![p],
             Opcode::FilterTakeWhile { pred, stop } => vec![pred, stop],
+            Opcode::IfElse { then_, else_ } => vec![then_, else_],
             Opcode::FilterMap { pred, map: m }
                 | Opcode::FilterMapSum { pred, map: m }
                 | Opcode::FilterMapAvg { pred, map: m }
@@ -759,6 +773,11 @@ pub fn expr_uses_ident(expr: &super::ast::Expr, name: &str) -> bool {
             if n == name { return false; } // inner let shadows
             expr_uses_ident(body, name)
         }
+        Expr::IfElse { cond, then_, else_ } => {
+            expr_uses_ident(cond, name)
+                || expr_uses_ident(then_, name)
+                || expr_uses_ident(else_, name)
+        }
         Expr::GlobalCall { args, .. } => args.iter().any(|a| match a {
             Arg::Pos(e) | Arg::Named(_, e) => expr_uses_ident(e, name),
         }),
@@ -842,6 +861,10 @@ fn rewrite_op(op: &Opcode, cache: &mut HashMap<u64, Arc<Program>>) -> Opcode {
         Opcode::AndOp(p)        => Opcode::AndOp(dedup_rec(p, cache)),
         Opcode::OrOp(p)         => Opcode::OrOp(dedup_rec(p, cache)),
         Opcode::CoalesceOp(p)   => Opcode::CoalesceOp(dedup_rec(p, cache)),
+        Opcode::IfElse { then_, else_ } => Opcode::IfElse {
+            then_: dedup_rec(then_, cache),
+            else_: dedup_rec(else_, cache),
+        },
         Opcode::InlineFilter(p) => Opcode::InlineFilter(dedup_rec(p, cache)),
         Opcode::FilterCount(p)  => Opcode::FilterCount(dedup_rec(p, cache)),
         Opcode::MapSum(p)       => Opcode::MapSum(dedup_rec(p, cache)),
@@ -990,6 +1013,7 @@ pub fn opcode_cost(op: &Opcode) -> u32 {
             | Opcode::Gt | Opcode::Gte | Opcode::Fuzzy => 2,
         Opcode::KindCheck { .. } => 2,
         Opcode::AndOp(p) | Opcode::OrOp(p) | Opcode::CoalesceOp(p) => 2 + program_cost(p),
+        Opcode::IfElse { then_, else_ } => 2 + program_cost(then_) + program_cost(else_),
         Opcode::InlineFilter(p) | Opcode::FilterCount(p)
             | Opcode::FindFirst(p) | Opcode::FindOne(p)
             | Opcode::MapSum(p) | Opcode::MapAvg(p)

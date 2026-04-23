@@ -408,6 +408,10 @@ pub(super) fn eval(expr: &Expr, env: &Env) -> Result<Val, EvalError> {
             eval(body, &env.with_var(name, v))
         }
 
+        Expr::IfElse { cond, then_, else_ } => {
+            if is_truthy(&eval(cond, env)?) { eval(then_, env) } else { eval(else_, env) }
+        }
+
         Expr::GlobalCall { name, args } => eval_global(name, args, env),
 
         Expr::Cast { expr, ty } => {

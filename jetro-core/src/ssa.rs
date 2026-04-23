@@ -158,6 +158,7 @@ fn op_arity(op: &Opcode) -> Arity {
             | Opcode::Not | Opcode::Neg
             | Opcode::CallMethod(_) | Opcode::CallOptMethod(_)
             | Opcode::AndOp(_) | Opcode::OrOp(_) | Opcode::CoalesceOp(_)
+            | Opcode::IfElse { .. }
             | Opcode::CastOp(_) =>
             Arity { pops: 1, pushes: true },
 

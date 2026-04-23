@@ -475,6 +475,9 @@ pub enum Opcode {
 
     // ── Complex (recursive sub-programs) ─────────────────────────────────────
     LetExpr { name: Arc<str>, body: Arc<Program> },
+    /// Python-style ternary: TOS is cond; branch into `then_` or `else_`.
+    /// Short-circuits — only the taken branch is executed.
+    IfElse { then_: Arc<Program>, else_: Arc<Program> },
     ListComp(Arc<CompSpec>),
     DictComp(Arc<DictCompSpec>),
     SetComp(Arc<CompSpec>),
@@ -2064,6 +2067,20 @@ impl Compiler {
                     let body_ctx = ctx.with_var(name);
                     let body_prog = Arc::new(Self::compile_sub(body, &body_ctx));
                     ops.push(Opcode::LetExpr { name: Arc::from(name.as_str()), body: body_prog });
+                }
+            }
+
+            Expr::IfElse { cond, then_, else_ } => {
+                // Compile-time fold when cond is a literal bool.
+                match cond.as_ref() {
+                    Expr::Bool(true)  => { Self::emit_into(then_, ctx, ops); }
+                    Expr::Bool(false) => { Self::emit_into(else_, ctx, ops); }
+                    _ => {
+                        Self::emit_into(cond, ctx, ops);
+                        let then_prog = Arc::new(Self::compile_sub(then_, ctx));
+                        let else_prog = Arc::new(Self::compile_sub(else_, ctx));
+                        ops.push(Opcode::IfElse { then_: then_prog, else_: else_prog });
+                    }
                 }
             }
 
@@ -3962,6 +3979,11 @@ impl VM {
                     } else {
                         stack.push(self.exec(rhs, env)?);
                     }
+                }
+                Opcode::IfElse { then_, else_ } => {
+                    let cv = pop!(stack);
+                    let branch = if is_truthy(&cv) { then_ } else { else_ };
+                    stack.push(self.exec(branch, env)?);
                 }
 
                 // ── Method calls ──────────────────────────────────────────────

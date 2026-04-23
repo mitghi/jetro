@@ -13,6 +13,7 @@ kw_not    = @{ "not"    ~ !ident_char }
 kw_for    = @{ "for"    ~ !ident_char }
 kw_in     = @{ "in"     ~ !ident_char }
 kw_if     = @{ "if"     ~ !ident_char }
+kw_else   = @{ "else"   ~ !ident_char }
 kw_let    = @{ "let"    ~ !ident_char }
 kw_lambda = @{ "lambda" ~ !ident_char }
 kw_kind   = @{ "kind"   ~ !ident_char }
@@ -24,7 +25,7 @@ kw_delete = @{ "DELETE" ~ !ident_char }
 
 reserved = _{
     ("true" | "false" | "null" | "and" | "or" | "not"
-     | "for" | "in" | "if" | "let" | "lambda" | "kind"
+     | "for" | "in" | "if" | "else" | "let" | "lambda" | "kind"
      | "is" | "as" | "when" | "patch" | "DELETE") ~ !ident_char
 }
 
@@ -87,7 +88,12 @@ quantifier     = { ("?" ~ !("." | "|" | "?")) | "!" }
 postfix = { opt_method | opt_field | deep_method | descendant | method_call | dyn_field | map_into_shape | field_access | index_access | inline_filter | quantifier }
 
 // ── Expression hierarchy ──────────────────────────────────────────────────────
-expr = { pipe_expr }
+expr = { cond_expr }
+
+// Python-style ternary: `a if cond else b` — right-associative, lower precedence
+// than pipeline. When `if` is present it MUST have `else`; Pest's `?` backtracks
+// on partial match so plain `pipe_expr` still matches.
+cond_expr = { pipe_expr ~ (kw_if ~ pipe_expr ~ kw_else ~ cond_expr)? }
 
 // Pipeline: base followed by | steps and -> bind steps
 pipe_step         = { pipe_bind | pipe_forward }
