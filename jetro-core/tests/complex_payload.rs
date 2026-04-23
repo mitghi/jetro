@@ -395,6 +395,34 @@ fn deep_find_numeric_range_tree_eq_scan() {
 }
 
 #[test]
+fn deep_find_then_map_field_direct_extract() {
+    // `$..find(pred).map(field)` under the scan fast path must agree
+    // with the tree walker and a naive projection — the VM now
+    // extracts the direct field from each enclosing span without
+    // parsing the full object.
+    let doc = synth_doc();
+    let bytes = serde_json::to_vec(&doc).unwrap();
+    let j_tree = Jetro::new(doc.clone());
+    let j_scan = Jetro::from_bytes(bytes).unwrap();
+    for q in [
+        r#"$..find(@.status == "shipped").map(total)"#,
+        r#"$..find(@.total > 500).map(id)"#,
+        r#"$..find(@.status == "shipped", @.total > 500).map(region)"#,
+    ] {
+        let t: Vec<Value> = as_array(&j_tree.collect(q).unwrap()).clone();
+        let s: Vec<Value> = as_array(&j_scan.collect(q).unwrap()).clone();
+        assert_eq!(t.len(), s.len(), "len differs for {}", q);
+        // Multisets must match — byte scan and tree walker may emit
+        // in different orders on this payload.
+        let mut ts: Vec<String> = t.iter().map(|v| v.to_string()).collect();
+        let mut ss: Vec<String> = s.iter().map(|v| v.to_string()).collect();
+        ts.sort();
+        ss.sort();
+        assert_eq!(ts, ss, "multiset differs for {}", q);
+    }
+}
+
+#[test]
 fn deep_find_mixed_eq_cmp_tree_eq_scan() {
     // Mixed multi-conjunct: one equality + one numeric-range predicate.
     // Scan path must agree with the tree walker and match a naive

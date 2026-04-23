@@ -549,6 +549,68 @@ pub fn find_enclosing_objects_cmp(
     out
 }
 
+/// Extract the span of the *direct* child named `key` inside an object
+/// whose bytes span is `obj_bytes[0] == b'{'`.  Depth-aware: matches
+/// only keys at the top level of the object, not keys nested inside
+/// arrays or sub-objects.  Returned span is relative to `obj_bytes`.
+pub fn find_direct_field(obj_bytes: &[u8], key: &str) -> Option<ValueSpan> {
+    if obj_bytes.is_empty() || obj_bytes[0] != b'{' { return None; }
+    let needle = {
+        let mut s = String::with_capacity(key.len() + 3);
+        s.push('"');
+        s.push_str(key);
+        s.push_str("\":");
+        s
+    };
+    let needle_b = needle.as_bytes();
+    let mut depth: usize = 0;
+    let mut i = 0usize;
+    let mut in_string = false;
+    let mut escape = false;
+    while i < obj_bytes.len() {
+        if escape { escape = false; i += 1; continue; }
+        if in_string {
+            match memchr2(b'\\', b'"', &obj_bytes[i..]) {
+                Some(off) => {
+                    i += off;
+                    match obj_bytes[i] {
+                        b'\\' => { escape = true;     i += 1; }
+                        b'"'  => { in_string = false; i += 1; }
+                        _     => unreachable!(),
+                    }
+                }
+                None => return None,
+            }
+            continue;
+        }
+        match obj_bytes[i] {
+            b'{' | b'[' => { depth += 1; i += 1; }
+            b'}' | b']' => {
+                if depth == 0 { return None; }
+                depth -= 1;
+                i += 1;
+            }
+            b'"' => {
+                if depth == 1
+                    && i + needle_b.len() <= obj_bytes.len()
+                    && &obj_bytes[i..i + needle_b.len()] == needle_b
+                {
+                    let mut vs = i + needle_b.len();
+                    while vs < obj_bytes.len()
+                        && matches!(obj_bytes[vs], b' ' | b'\t' | b'\n' | b'\r')
+                    { vs += 1; }
+                    return value_end(obj_bytes, vs)
+                        .map(|end| ValueSpan { start: vs, end });
+                }
+                in_string = true;
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    None
+}
+
 /// Mixed multi-conjunct scan: each conjunct is `(key, ScanPred)` and an
 /// enclosing object is emitted iff every conjunct matches on the same
 /// `{...}` frame.  Generalises `find_enclosing_objects_eq_multi` to allow

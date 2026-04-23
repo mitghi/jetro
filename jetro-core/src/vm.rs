@@ -4044,6 +4044,7 @@ impl VM {
                                 _ => false,
                             };
                             if recv_is_root {
+                                let tail = &ops_slice[op_idx + 1..];
                                 if let Some(conjuncts) =
                                     super::eval::canonical_field_eq_literals(&call.orig_args)
                                 {
@@ -4056,15 +4057,11 @@ impl VM {
                                             bytes, &conjuncts,
                                         )
                                     };
-                                    let mut vals: Vec<Val> = Vec::with_capacity(spans.len());
-                                    for s in &spans {
-                                        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(
-                                            &bytes[s.start..s.end],
-                                        ) {
-                                            vals.push(Val::from(&v));
-                                        }
-                                    }
-                                    stack.push(Val::arr(vals));
+                                    let (arr, extra) = materialise_find_scan_spans(
+                                        bytes, &spans, tail,
+                                    );
+                                    stack.push(arr);
+                                    skip_ahead = extra;
                                     continue;
                                 }
                                 // Single-conjunct numeric-range scan.
@@ -4079,16 +4076,11 @@ impl VM {
                                         let spans = super::scan::find_enclosing_objects_cmp(
                                             bytes, &field, op, thresh,
                                         );
-                                        let mut vals: Vec<Val> =
-                                            Vec::with_capacity(spans.len());
-                                        for s in &spans {
-                                            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(
-                                                &bytes[s.start..s.end],
-                                            ) {
-                                                vals.push(Val::from(&v));
-                                            }
-                                        }
-                                        stack.push(Val::arr(vals));
+                                        let (arr, extra) = materialise_find_scan_spans(
+                                            bytes, &spans, tail,
+                                        );
+                                        stack.push(arr);
+                                        skip_ahead = extra;
                                         continue;
                                     }
                                 }
@@ -4099,15 +4091,11 @@ impl VM {
                                     let spans = super::scan::find_enclosing_objects_mixed(
                                         bytes, &conjuncts,
                                     );
-                                    let mut vals: Vec<Val> = Vec::with_capacity(spans.len());
-                                    for s in &spans {
-                                        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(
-                                            &bytes[s.start..s.end],
-                                        ) {
-                                            vals.push(Val::from(&v));
-                                        }
-                                    }
-                                    stack.push(Val::arr(vals));
+                                    let (arr, extra) = materialise_find_scan_spans(
+                                        bytes, &spans, tail,
+                                    );
+                                    stack.push(arr);
+                                    skip_ahead = extra;
                                     continue;
                                 }
                             }
@@ -4714,6 +4702,48 @@ fn is_first_selector_op(op: &Opcode) -> bool {
             if c.sub_progs.is_empty() && c.method == BuiltinMethod::First => true,
         _ => false,
     }
+}
+
+/// Materialise byte-scan `spans` into a `Val::Arr`, peeking at `tail`
+/// for a trailing `.map(<field>)` (compiled to `Opcode::MapField`).
+/// When present the direct child is extracted from each span without
+/// paying a full `serde_json::from_slice` on the enclosing object.
+/// Returned `skip` tells the caller how many opcodes were consumed
+/// beyond the current `CallMethod`.
+///
+/// Outlined (`#[cold] #[inline(never)]`) to keep the `exec` dispatch
+/// match compact — inlining the span loop here was enough to cost
+/// Q4/Q13 icache footprint in `bench_lock`.
+#[cold]
+#[inline(never)]
+fn materialise_find_scan_spans(
+    bytes: &[u8],
+    spans: &[super::scan::ValueSpan],
+    tail: &[Opcode],
+) -> (Val, usize) {
+    if let Some(Opcode::MapField(k)) = tail.first() {
+        let mut vals: Vec<Val> = Vec::with_capacity(spans.len());
+        for s in spans {
+            let obj_bytes = &bytes[s.start..s.end];
+            let v = match super::scan::find_direct_field(obj_bytes, k.as_ref()) {
+                Some(vs) => serde_json::from_slice::<serde_json::Value>(
+                    &obj_bytes[vs.start..vs.end],
+                ).ok().map(|sv| Val::from(&sv)).unwrap_or(Val::Null),
+                None => Val::Null,
+            };
+            vals.push(v);
+        }
+        return (Val::arr(vals), 1);
+    }
+    let mut vals: Vec<Val> = Vec::with_capacity(spans.len());
+    for s in spans {
+        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(
+            &bytes[s.start..s.end],
+        ) {
+            vals.push(Val::from(&v));
+        }
+    }
+    (Val::arr(vals), 0)
 }
 
 fn byte_chain_exec(
