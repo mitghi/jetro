@@ -383,6 +383,8 @@ pub enum Opcode {
     MapFieldChain(Arc<[Arc<str>]>),
     /// `map(k).unique()` where `k` is a single field ident. FxHashSet dedup.
     MapFieldUnique(Arc<str>),
+    /// `map(a.b.c).unique()` — walk chain + inline dedup, no intermediate array.
+    MapFieldChainUnique(Arc<[Arc<str>]>),
 
     // ── Flatten-chain fusion (Tier 1) ─────────────────────────────────────────
     /// `.map(k1).flatten().map(k2).flatten()…` collapsed into a single walk.
@@ -1286,6 +1288,9 @@ impl Compiler {
                 Opcode::MapUnique(ref f) => {
                     if let Some(k) = trivial_field(&f.ops) {
                         out2.push(Opcode::MapFieldUnique(k)); continue;
+                    }
+                    if let Some(chain) = trivial_field_chain(&f.ops) {
+                        out2.push(Opcode::MapFieldChainUnique(chain)); continue;
                     }
                 }
                 Opcode::FilterCount(ref pred) => {
@@ -3182,6 +3187,49 @@ impl VM {
                                                 out.push(v.clone());
                                             }
                                         }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    stack.push(Val::arr(out));
+                }
+                Opcode::MapFieldChainUnique(ks) => {
+                    let recv = pop!(stack);
+                    let mut out: Vec<Val> = Vec::new();
+                    let mut seen_int: std::collections::HashSet<i64> = std::collections::HashSet::new();
+                    let mut seen_str: std::collections::HashSet<Arc<str>> = std::collections::HashSet::new();
+                    let mut seen_other: Vec<Val> = Vec::new();
+                    let mut ic: SmallVec<[Option<usize>; 4]> = SmallVec::new();
+                    ic.resize(ks.len(), None);
+                    if let Val::Arr(a) = &recv {
+                        for item in a.iter() {
+                            let mut cur: Val = match item {
+                                Val::Obj(m) => lookup_field_cached(m, &ks[0], &mut ic[0])
+                                    .cloned()
+                                    .unwrap_or(Val::Null),
+                                _ => Val::Null,
+                            };
+                            for (hop, k) in ks[1..].iter().enumerate() {
+                                cur = match &cur {
+                                    Val::Obj(m) => lookup_field_cached(m, k, &mut ic[hop + 1])
+                                        .cloned()
+                                        .unwrap_or(Val::Null),
+                                    _ => Val::Null,
+                                };
+                                if matches!(cur, Val::Null) { break; }
+                            }
+                            match &cur {
+                                Val::Int(n) => {
+                                    if seen_int.insert(*n) { out.push(cur); }
+                                }
+                                Val::Str(s) => {
+                                    if seen_str.insert(s.clone()) { out.push(cur); }
+                                }
+                                _ => {
+                                    if !seen_other.iter().any(|o| crate::eval::util::vals_eq(o, &cur)) {
+                                        seen_other.push(cur.clone());
+                                        out.push(cur);
                                     }
                                 }
                             }

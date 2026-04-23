@@ -9,7 +9,7 @@
     },
     {
       "query": "$.orders.map(customer.address.country_code).unique()",
-      "best_us": 5537,
+      "best_us": 3082,
       "result_hash": 17234915706292712500
     },
     {

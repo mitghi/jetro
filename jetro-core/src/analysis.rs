@@ -271,6 +271,7 @@ fn apply_op(op: &Opcode, stack: &mut Vec<AbstractVal>) {
             | Opcode::FilterDropWhile { .. } | Opcode::MapUnique(_)
             | Opcode::EquiJoin { .. }
             | Opcode::MapField(_) | Opcode::MapFieldChain(_) | Opcode::MapFieldUnique(_)
+            | Opcode::MapFieldChainUnique(_)
             | Opcode::FlatMapChain(_)
             | Opcode::FilterFieldEqLit(_, _) | Opcode::FilterFieldCmpLit(_, _, _)
             | Opcode::FilterFieldCmpField(_, _, _)
@@ -1052,6 +1053,7 @@ pub fn opcode_cost(op: &Opcode) -> u32 {
             | Opcode::MapFieldMin(_) | Opcode::MapFieldMax(_)
             | Opcode::MapField(_) => 5,
         Opcode::MapFieldChain(ks) => 5 + ks.len() as u32 * 2,
+        Opcode::MapFieldChainUnique(ks) => 8 + ks.len() as u32 * 2,
         Opcode::MapFieldUnique(_) => 8,
         Opcode::FlatMapChain(ks) => 5 + ks.len() as u32 * 3,
         Opcode::FilterFieldEqLit(_, _) | Opcode::FilterFieldCmpLit(_, _, _)
