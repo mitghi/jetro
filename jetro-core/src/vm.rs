@@ -349,6 +349,12 @@ pub enum Opcode {
     /// Fused `filter(p).map(f).first()` — early-exit: apply `map` once,
     /// to the first item that satisfies `pred`.
     FilterMapFirst { pred: Arc<Program>, map: Arc<Program> },
+    /// Fused `filter(p).map(f).min()` — single pass, numeric min over
+    /// mapped values that pass the predicate.  No intermediate array.
+    FilterMapMin { pred: Arc<Program>, map: Arc<Program> },
+    /// Fused `filter(p).map(f).max()` — single pass, numeric max over
+    /// mapped values that pass the predicate.
+    FilterMapMax { pred: Arc<Program>, map: Arc<Program> },
     /// Fused `filter(p).last()` — reverse scan, return last item
     /// satisfying `pred` (or Null when none match / input is Null).
     FilterLast { pred: Arc<Program> },
@@ -1169,6 +1175,8 @@ impl Compiler {
                             BuiltinMethod::Sum => Some(Opcode::FilterMapSum { pred, map }),
                             BuiltinMethod::Avg => Some(Opcode::FilterMapAvg { pred, map }),
                             BuiltinMethod::First => Some(Opcode::FilterMapFirst { pred, map }),
+                            BuiltinMethod::Min => Some(Opcode::FilterMapMin { pred, map }),
+                            BuiltinMethod::Max => Some(Opcode::FilterMapMax { pred, map }),
                             _ => None,
                         };
                         if let Some(o) = fused {
@@ -3622,6 +3630,14 @@ impl VM {
                     }
                     stack.push(out);
                 }
+                Opcode::FilterMapMin { pred, map } => {
+                    let recv = pop!(stack);
+                    stack.push(self.filter_map_minmax(recv, pred, map, env, true)?);
+                }
+                Opcode::FilterMapMax { pred, map } => {
+                    let recv = pop!(stack);
+                    stack.push(self.filter_map_minmax(recv, pred, map, env, false)?);
+                }
                 Opcode::FilterLast { pred } => {
                     let recv = pop!(stack);
                     let mut out = Val::Null;
@@ -4220,6 +4236,63 @@ impl VM {
         }
 
         stack.pop().ok_or_else(|| EvalError("program produced no value".into()))
+    }
+
+    // ── Helper: single-pass numeric min/max over filter.map ───────────────────
+    /// Shared body for `FilterMapMin` / `FilterMapMax`.  `is_min=true` keeps the
+    /// smallest value, `false` keeps the largest.  Factored out of the main
+    /// exec match so the hot dispatch loop stays lean.
+    #[cold]
+    #[inline(never)]
+    fn filter_map_minmax(
+        &mut self,
+        recv: Val,
+        pred: &Program,
+        map:  &Program,
+        env:  &Env,
+        is_min: bool,
+    ) -> Result<Val, EvalError> {
+        let mut best_i: Option<i64> = None;
+        let mut best_f: Option<f64> = None;
+        let better = |new: f64, old: f64| if is_min { new < old } else { new > old };
+        let better_i = |new: i64, old: i64| if is_min { new < old } else { new > old };
+        let label = if is_min { "min" } else { "max" };
+        if let Val::Arr(a) = &recv {
+            let mut scratch = env.clone();
+            for item in a.iter() {
+                let prev = scratch.swap_current(item.clone());
+                if !is_truthy(&self.exec(pred, &scratch)?) {
+                    scratch.restore_current(prev);
+                    continue;
+                }
+                let v = self.exec(map, &scratch)?;
+                scratch.restore_current(prev);
+                match v {
+                    Val::Int(n) => {
+                        if let Some(bf) = best_f {
+                            if better(n as f64, bf) { best_f = Some(n as f64); }
+                        } else if let Some(bi) = best_i {
+                            if better_i(n, bi) { best_i = Some(n); }
+                        } else { best_i = Some(n); }
+                    }
+                    Val::Float(x) => {
+                        if best_f.is_none() {
+                            best_f = Some(best_i.map(|i| i as f64).unwrap_or(x));
+                            best_i = None;
+                        }
+                        if better(x, best_f.unwrap()) { best_f = Some(x); }
+                    }
+                    Val::Null => {}
+                    _ => return Err(EvalError(format!(
+                        "filter(..).map(..).{}(): non-numeric mapped value", label))),
+                }
+            }
+        }
+        Ok(match (best_i, best_f) {
+            (_, Some(x)) => Val::Float(x),
+            (Some(i), _) => Val::Int(i),
+            _ => Val::Null,
+        })
     }
 
     // ── Method call dispatch ──────────────────────────────────────────────────

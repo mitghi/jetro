@@ -336,6 +336,25 @@ fn find_count_fusion_yields_same_integer_as_filter_count() {
 }
 
 #[test]
+fn filter_map_min_max_match_unfused_pipeline() {
+    let j = Jetro::new(synth_doc());
+    let fused_min = j.collect(r#"$.orders.filter(status == "shipped").map(total).min()"#).unwrap();
+    let fused_max = j.collect(r#"$.orders.filter(status == "shipped").map(total).max()"#).unwrap();
+    let arr: Vec<f64> = j
+        .collect(r#"$.orders.filter(status == "shipped").map(total)"#)
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    let naive_min = arr.iter().cloned().fold(f64::INFINITY, f64::min);
+    let naive_max = arr.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    assert!((fused_min.as_f64().unwrap() - naive_min).abs() < 1e-9);
+    assert!((fused_max.as_f64().unwrap() - naive_max).abs() < 1e-9);
+}
+
+#[test]
 fn unique_count_fusion_matches_dedup_then_count() {
     let j = Jetro::new(synth_doc());
     let fused  = j.collect("$.orders.map(status).unique().count()").unwrap();
