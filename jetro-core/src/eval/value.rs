@@ -175,16 +175,20 @@ impl From<Val> for serde_json::Value {
                 Number::from_f64(f).unwrap_or_else(|| 0.into())
             ),
             Val::Str(s)  => serde_json::Value::String(s.to_string()),
-            Val::Arr(a)  => serde_json::Value::Array(
-                Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone())
-                    .into_iter().map(serde_json::Value::from).collect()
-            ),
+            Val::Arr(a)  => {
+                let mut out: Vec<serde_json::Value> = Vec::with_capacity(a.len());
+                match Arc::try_unwrap(a) {
+                    Ok(vec) => for item in vec { out.push(item.into()); }
+                    Err(a)  => for item in a.iter() { out.push(item.clone().into()); }
+                }
+                serde_json::Value::Array(out)
+            }
             Val::Obj(m)  => {
-                let map: Map<String, serde_json::Value> =
-                    Arc::try_unwrap(m).unwrap_or_else(|m| (*m).clone())
-                        .into_iter()
-                        .map(|(k, v)| (k.to_string(), serde_json::Value::from(v)))
-                        .collect();
+                let mut map: Map<String, serde_json::Value> = Map::with_capacity(m.len());
+                match Arc::try_unwrap(m) {
+                    Ok(im) => for (k, v) in im { map.insert(k.to_string(), v.into()); }
+                    Err(m) => for (k, v) in m.iter() { map.insert(k.to_string(), v.clone().into()); }
+                }
                 serde_json::Value::Object(map)
             }
         }

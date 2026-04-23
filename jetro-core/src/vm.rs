@@ -712,6 +712,28 @@ fn group_by_field(recv: &Val, k: &str) -> Val {
     Val::obj(finalised)
 }
 
+/// Shape-index cache: cheap inline-cache for repeated `m.get(k)` on arrays of
+/// same-shape objects. First call stores `get_index_of(k)`; subsequent calls
+/// try `get_index(i)` and verify key identity (Arc<str> pointer or bytes).
+/// Fallback to `m.get(k)` on miss.
+#[inline]
+fn lookup_field_cached<'a>(
+    m: &'a indexmap::IndexMap<Arc<str>, Val>,
+    k: &Arc<str>,
+    cached: &mut Option<usize>,
+) -> Option<&'a Val> {
+    if let Some(i) = *cached {
+        if let Some((ki, vi)) = m.get_index(i) {
+            if Arc::ptr_eq(ki, k) || ki.as_ref() == k.as_ref() {
+                return Some(vi);
+            }
+        }
+    }
+    let v = m.get(k.as_ref());
+    *cached = m.get_index_of(k.as_ref());
+    v
+}
+
 // ── Variable context (compile-time) ──────────────────────────────────────────
 
 #[derive(Clone, Default)]
@@ -2209,6 +2231,11 @@ pub struct VM {
     /// Hash of the document currently being executed — set once by `execute()`,
     /// reused by all recursive `exec()` calls within the same top-level call.
     doc_hash:      u64,
+    /// Cache of root Arc pointer → structural hash.  Lets repeated calls
+    /// against the same cached root (e.g. via `Jetro::collect`) skip the
+    /// O(doc) structural walk entirely.  Keyed on the inner Arc ptr of
+    /// the root `Val::Obj`/`Val::Arr`.
+    root_hash_cache: Option<(usize, u64)>,
     /// Optimiser pass toggles.  Default: all on.
     config:        PassConfig,
 }
@@ -2229,6 +2256,7 @@ impl VM {
             path_cache:    PathCache::new(path_cap),
             root_chain_cache: HashMap::new(),
             doc_hash:      0,
+            root_hash_cache: None,
             config:        PassConfig::default(),
         }
     }
@@ -2281,14 +2309,34 @@ impl VM {
     /// Execute a pre-compiled `Program` against `doc`.
     pub fn execute(&mut self, program: &Program, doc: &serde_json::Value) -> Result<serde_json::Value, EvalError> {
         let root = Val::from(doc);
-        // Compute doc hash once; reused by all exec() calls in this invocation.
-        self.doc_hash = hash_val_structure(&root);
+        self.doc_hash = self.compute_or_cache_root_hash(&root);
         // Per-exec RootChain cache: entries key off raw Arc addresses that
         // must not outlive this document.  Clear before every run.
         self.root_chain_cache.clear();
         let env = self.make_env(root);
         let result = self.exec(program, &env)?;
         Ok(result.into())
+    }
+
+    /// Reuse the cached structural hash if `root`'s inner Arc pointer
+    /// matches a prior call; otherwise walk the tree once and cache.
+    /// Primitive roots bypass the cache (hashing is already O(1)).
+    fn compute_or_cache_root_hash(&mut self, root: &Val) -> u64 {
+        let ptr: Option<usize> = match root {
+            Val::Obj(m) => Some(Arc::as_ptr(m) as *const () as usize),
+            Val::Arr(a) => Some(Arc::as_ptr(a) as *const () as usize),
+            _ => None,
+        };
+        if let Some(p) = ptr {
+            if let Some((cp, h)) = self.root_hash_cache {
+                if cp == p { return h; }
+            }
+            let h = hash_val_structure(root);
+            self.root_hash_cache = Some((p, h));
+            h
+        } else {
+            hash_val_structure(root)
+        }
     }
 
     /// Execute with raw JSON source bytes retained on the environment so
@@ -2332,7 +2380,7 @@ impl VM {
         program: &Program,
         root: Val,
     ) -> Result<serde_json::Value, EvalError> {
-        self.doc_hash = hash_val_structure(&root);
+        self.doc_hash = self.compute_or_cache_root_hash(&root);
         self.root_chain_cache.clear();
         let env = self.make_env(root);
         let result = self.exec(program, &env)?;
@@ -2852,10 +2900,11 @@ impl VM {
                     let mut acc_i: i64 = 0;
                     let mut acc_f: f64 = 0.0;
                     let mut is_float = false;
+                    let mut idx: Option<usize> = None;
                     if let Val::Arr(a) = &recv {
                         for item in a.iter() {
                             if let Val::Obj(m) = item {
-                                match m.get(k.as_ref()) {
+                                match lookup_field_cached(m, k, &mut idx) {
                                     Some(Val::Int(n))   => { if is_float { acc_f += *n as f64; } else { acc_i += *n; } }
                                     Some(Val::Float(x)) => { if !is_float { acc_f = acc_i as f64; is_float = true; } acc_f += *x; }
                                     Some(Val::Null) | None => {}
@@ -2870,10 +2919,11 @@ impl VM {
                     let recv = pop!(stack);
                     let mut sum: f64 = 0.0;
                     let mut n: usize = 0;
+                    let mut idx: Option<usize> = None;
                     if let Val::Arr(a) = &recv {
                         for item in a.iter() {
                             if let Val::Obj(m) = item {
-                                match m.get(k.as_ref()) {
+                                match lookup_field_cached(m, k, &mut idx) {
                                     Some(Val::Int(x))   => { sum += *x as f64; n += 1; }
                                     Some(Val::Float(x)) => { sum += *x;        n += 1; }
                                     Some(Val::Null) | None => {}
@@ -2888,10 +2938,11 @@ impl VM {
                     let recv = pop!(stack);
                     let mut best_i: Option<i64> = None;
                     let mut best_f: Option<f64> = None;
+                    let mut idx: Option<usize> = None;
                     if let Val::Arr(a) = &recv {
                         for item in a.iter() {
                             if let Val::Obj(m) = item {
-                                match m.get(k.as_ref()) {
+                                match lookup_field_cached(m, k, &mut idx) {
                                     Some(Val::Int(n)) => {
                                         let n = *n;
                                         if let Some(bf) = best_f { if (n as f64) < bf { best_f = Some(n as f64); } }
@@ -2919,10 +2970,11 @@ impl VM {
                     let recv = pop!(stack);
                     let mut best_i: Option<i64> = None;
                     let mut best_f: Option<f64> = None;
+                    let mut idx: Option<usize> = None;
                     if let Val::Arr(a) = &recv {
                         for item in a.iter() {
                             if let Val::Obj(m) = item {
-                                match m.get(k.as_ref()) {
+                                match lookup_field_cached(m, k, &mut idx) {
                                     Some(Val::Int(n)) => {
                                         let n = *n;
                                         if let Some(bf) = best_f { if (n as f64) > bf { best_f = Some(n as f64); } }
@@ -2952,10 +3004,11 @@ impl VM {
                     let mut seen_int: std::collections::HashSet<i64> = std::collections::HashSet::new();
                     let mut seen_str: std::collections::HashSet<Arc<str>> = std::collections::HashSet::new();
                     let mut seen_other: Vec<Val> = Vec::new();
+                    let mut idx: Option<usize> = None;
                     if let Val::Arr(a) = &recv {
                         for item in a.iter() {
                             if let Val::Obj(m) = item {
-                                if let Some(v) = m.get(k.as_ref()) {
+                                if let Some(v) = lookup_field_cached(m, k, &mut idx) {
                                     match v {
                                         Val::Int(n) => {
                                             if seen_int.insert(*n) { out.push(v.clone()); }
@@ -2986,9 +3039,10 @@ impl VM {
                     };
                     for k in keys.iter() {
                         let mut next: Vec<Val> = Vec::with_capacity(cur.len() * 4);
+                        let mut idx: Option<usize> = None;
                         for item in cur.drain(..) {
                             if let Val::Obj(m) = item {
-                                if let Some(Val::Arr(inner)) = m.get(k.as_ref()) {
+                                if let Some(Val::Arr(inner)) = lookup_field_cached(&m, k, &mut idx) {
                                     for v in inner.iter() { next.push(v.clone()); }
                                 }
                             }
@@ -3002,10 +3056,11 @@ impl VM {
                 Opcode::FilterFieldEqLit(k, lit) => {
                     let recv = pop!(stack);
                     let mut out = Vec::new();
+                    let mut idx: Option<usize> = None;
                     if let Val::Arr(a) = &recv {
                         for item in a.iter() {
                             if let Val::Obj(m) = item {
-                                if let Some(v) = m.get(k.as_ref()) {
+                                if let Some(v) = lookup_field_cached(m, k, &mut idx) {
                                     if crate::eval::util::vals_eq(v, lit) {
                                         out.push(item.clone());
                                     }
@@ -3018,10 +3073,11 @@ impl VM {
                 Opcode::FilterFieldCmpLit(k, op, lit) => {
                     let recv = pop!(stack);
                     let mut out = Vec::new();
+                    let mut idx: Option<usize> = None;
                     if let Val::Arr(a) = &recv {
                         for item in a.iter() {
                             if let Val::Obj(m) = item {
-                                if let Some(v) = m.get(k.as_ref()) {
+                                if let Some(v) = lookup_field_cached(m, k, &mut idx) {
                                     if cmp_val_binop(v, *op, lit) {
                                         out.push(item.clone());
                                     }
@@ -3034,11 +3090,13 @@ impl VM {
                 Opcode::FilterFieldCmpField(k1, op, k2) => {
                     let recv = pop!(stack);
                     let mut out = Vec::new();
+                    let mut i1: Option<usize> = None;
+                    let mut i2: Option<usize> = None;
                     if let Val::Arr(a) = &recv {
                         for item in a.iter() {
                             if let Val::Obj(m) = item {
-                                let v1 = m.get(k1.as_ref());
-                                let v2 = m.get(k2.as_ref());
+                                let v1 = lookup_field_cached(m, k1, &mut i1);
+                                let v2 = lookup_field_cached(m, k2, &mut i2);
                                 if let (Some(v1), Some(v2)) = (v1, v2) {
                                     if cmp_val_binop(v1, *op, v2) {
                                         out.push(item.clone());
@@ -3052,10 +3110,11 @@ impl VM {
                 Opcode::FilterFieldEqLitCount(k, lit) => {
                     let recv = pop!(stack);
                     let mut n: i64 = 0;
+                    let mut idx: Option<usize> = None;
                     if let Val::Arr(a) = &recv {
                         for item in a.iter() {
                             if let Val::Obj(m) = item {
-                                if let Some(v) = m.get(k.as_ref()) {
+                                if let Some(v) = lookup_field_cached(m, k, &mut idx) {
                                     if crate::eval::util::vals_eq(v, lit) { n += 1; }
                                 }
                             }
@@ -3066,10 +3125,11 @@ impl VM {
                 Opcode::FilterFieldCmpLitCount(k, op, lit) => {
                     let recv = pop!(stack);
                     let mut n: i64 = 0;
+                    let mut idx: Option<usize> = None;
                     if let Val::Arr(a) = &recv {
                         for item in a.iter() {
                             if let Val::Obj(m) = item {
-                                if let Some(v) = m.get(k.as_ref()) {
+                                if let Some(v) = lookup_field_cached(m, k, &mut idx) {
                                     if cmp_val_binop(v, *op, lit) { n += 1; }
                                 }
                             }
@@ -3080,11 +3140,13 @@ impl VM {
                 Opcode::FilterFieldCmpFieldCount(k1, op, k2) => {
                     let recv = pop!(stack);
                     let mut n: i64 = 0;
+                    let mut i1: Option<usize> = None;
+                    let mut i2: Option<usize> = None;
                     if let Val::Arr(a) = &recv {
                         for item in a.iter() {
                             if let Val::Obj(m) = item {
-                                let v1 = m.get(k1.as_ref());
-                                let v2 = m.get(k2.as_ref());
+                                let v1 = lookup_field_cached(m, k1, &mut i1);
+                                let v2 = lookup_field_cached(m, k2, &mut i2);
                                 if let (Some(v1), Some(v2)) = (v1, v2) {
                                     if cmp_val_binop(v1, *op, v2) { n += 1; }
                                 }
