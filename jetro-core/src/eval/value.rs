@@ -7,6 +7,7 @@
 /// once on entry and `Val → serde_json::Value` once on exit.
 use std::sync::Arc;
 use indexmap::IndexMap;
+use serde::ser::{Serialize, SerializeMap, SerializeSeq, Serializer};
 use serde_json::{Map, Number};
 
 // ── Core type ─────────────────────────────────────────────────────────────────
@@ -195,6 +196,96 @@ impl From<Val> for serde_json::Value {
     }
 }
 
+// ── Lazy serde adapter ────────────────────────────────────────────────────────
+//
+// `ValRef<'a>` serialises a borrowed `Val` directly to the output byte
+// stream, skipping the intermediate `serde_json::Value` tree that
+// `From<Val> for serde_json::Value` builds.  For Obj-heavy results this
+// elides N key-string clones + the `Map` rebuild per call.
+//
+// Non-finite floats (NaN/±Inf) are coerced to `0` to match the existing
+// `From<Val>` impl, which falls back to `0.into()` when `Number::from_f64`
+// returns `None`.
+
+pub struct ValRef<'a>(pub &'a Val);
+
+impl<'a> Serialize for ValRef<'a> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self.0 {
+            Val::Null    => s.serialize_unit(),
+            Val::Bool(b) => s.serialize_bool(*b),
+            Val::Int(n)  => s.serialize_i64(*n),
+            Val::Float(f) => {
+                if f.is_finite() { s.serialize_f64(*f) } else { s.serialize_i64(0) }
+            }
+            Val::Str(v)  => s.serialize_str(v),
+            Val::Arr(a)  => {
+                let mut seq = s.serialize_seq(Some(a.len()))?;
+                for item in a.iter() { seq.serialize_element(&ValRef(item))?; }
+                seq.end()
+            }
+            Val::Obj(m)  => {
+                let mut map = s.serialize_map(Some(m.len()))?;
+                for (k, v) in m.iter() {
+                    map.serialize_entry(k.as_ref(), &ValRef(v))?;
+                }
+                map.end()
+            }
+        }
+    }
+}
+
+impl Val {
+    /// Serialise `self` as JSON bytes without building an intermediate
+    /// `serde_json::Value` tree.  Preferred over `serde_json::to_vec(&Value::from(val))`
+    /// for Obj-heavy results.
+    pub fn to_json_vec(&self) -> Vec<u8> {
+        serde_json::to_vec(&ValRef(self)).unwrap_or_default()
+    }
+
+    /// Stream `self` as JSON into an `io::Write` sink.
+    pub fn write_json<W: std::io::Write>(&self, w: W) -> serde_json::Result<()> {
+        serde_json::to_writer(w, &ValRef(self))
+    }
+}
+
+#[cfg(test)]
+mod valref_tests {
+    use super::*;
+
+    fn roundtrip(js: &str) {
+        let v: serde_json::Value = serde_json::from_str(js).unwrap();
+        let val = Val::from(&v);
+        let via_tree = serde_json::to_vec(&serde_json::Value::from(val.clone())).unwrap();
+        let via_ref  = val.to_json_vec();
+        // Both paths must serialise to byte-identical JSON (IndexMap and
+        // serde_json::Map both preserve insertion order).
+        assert_eq!(via_tree, via_ref, "payload: {js}");
+    }
+
+    #[test]
+    fn valref_parity_scalars()  { roundtrip(r#"null"#); roundtrip(r#"true"#); roundtrip(r#"42"#); roundtrip(r#"3.14"#); roundtrip(r#""hi""#); }
+
+    #[test]
+    fn valref_parity_array()    { roundtrip(r#"[1,2,3,"x",null,true,4.5]"#); }
+
+    #[test]
+    fn valref_parity_object()   { roundtrip(r#"{"a":1,"b":"x","c":[1,2],"d":{"nested":true}}"#); }
+
+    #[test]
+    fn valref_parity_deep() {
+        roundtrip(r#"{"orders":[{"id":1,"items":[{"sku":"A","qty":2}]},{"id":2,"items":[]}]}"#);
+    }
+
+    #[test]
+    fn valref_nan_inf_coerced_to_zero() {
+        let val = Val::Float(f64::NAN);
+        assert_eq!(val.to_json_vec(), b"0");
+        let val = Val::Float(f64::INFINITY);
+        assert_eq!(val.to_json_vec(), b"0");
+    }
+}
+
 // ── PartialEq for comparison ──────────────────────────────────────────────────
 
 impl PartialEq for Val {
@@ -238,7 +329,10 @@ impl std::fmt::Display for Val {
             Val::Int(n)    => write!(f, "{}", n),
             Val::Float(fl) => write!(f, "{}", fl),
             Val::Str(s)    => write!(f, "{}", s),
-            other => write!(f, "{}", serde_json::Value::from(other.clone())),
+            other => {
+                let bytes = serde_json::to_vec(&ValRef(other)).unwrap_or_default();
+                f.write_str(std::str::from_utf8(&bytes).unwrap_or(""))
+            }
         }
     }
 }
