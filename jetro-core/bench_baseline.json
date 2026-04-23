@@ -4,67 +4,67 @@
   "entries": [
     {
       "query": "$.orders.map(customer.address.city)",
-      "best_us": 8019,
+      "best_us": 5111,
       "result_hash": 4562789332655907777
     },
     {
       "query": "$.orders.map(customer.address.country_code).unique()",
-      "best_us": 8063,
+      "best_us": 5466,
       "result_hash": 17234915706292712500
     },
     {
       "query": "$.orders.filter(total > 500).map(id)",
-      "best_us": 5951,
+      "best_us": 6178,
       "result_hash": 3881991406572976375
     },
     {
       "query": "$.orders.filter(status == \"shipped\" and priority == \"high\").count()",
-      "best_us": 6866,
+      "best_us": 6344,
       "result_hash": 3774695220450827664
     },
     {
       "query": "$..find(@.status == \"shipped\")",
-      "best_us": 78814,
+      "best_us": 75939,
       "result_hash": 15250201336480098615
     },
     {
       "query": "$..find(@.sku == \"SKU-00042\")",
-      "best_us": 61534,
+      "best_us": 59872,
       "result_hash": 4906392417031728007
     },
     {
       "query": "$..find(@.status == \"shipped\", @.priority == \"urgent\")",
-      "best_us": 67568,
+      "best_us": 65225,
       "result_hash": 1023477253303861944
     },
     {
       "query": "$..total.sum()",
-      "best_us": 15148,
+      "best_us": 14986,
       "result_hash": 12417113293128148770
     },
     {
       "query": "$..sku",
-      "best_us": 43112,
+      "best_us": 42820,
       "result_hash": 1446226222789116499
     },
     {
       "query": "$.orders.group_by(status)",
-      "best_us": 81924,
+      "best_us": 79779,
       "result_hash": 1668083266125975683
     },
     {
       "query": "$.orders.map(total).sum()",
-      "best_us": 428,
+      "best_us": 359,
       "result_hash": 12417113293128148770
     },
     {
       "query": "$.orders.map(total).max()",
-      "best_us": 447,
+      "best_us": 380,
       "result_hash": 16948907372224901644
     },
     {
       "query": "[o.id for o in $.orders if o.total > 1000]",
-      "best_us": 6993,
+      "best_us": 7501,
       "result_hash": 3483644353972730971
     }
   ]

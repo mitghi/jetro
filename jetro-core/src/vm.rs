@@ -378,6 +378,9 @@ pub enum Opcode {
     MapFieldMax(Arc<str>),
     /// `map(k)` where `k` is a single field ident — emit array of field values.
     MapField(Arc<str>),
+    /// `map(a.b.c)` on arr-of-obj → walk chain per item, push resulting
+    /// Val (Null if any step hits a non-Obj or missing key).
+    MapFieldChain(Arc<[Arc<str>]>),
     /// `map(k).unique()` where `k` is a single field ident. FxHashSet dedup.
     MapFieldUnique(Arc<str>),
 
@@ -559,6 +562,45 @@ fn trivial_field(ops: &[Opcode]) -> Option<Arc<str>> {
         [Opcode::LoadIdent(k)] => Some(k.clone()),
         _ => None,
     }
+}
+
+/// Recognise `.map(a.b.c)` sub-programs that reduce to a walk of a
+/// nested field chain from the current item.  Patterns accepted:
+///   `[PushCurrent, GetField(k1), GetField(k2), …]`
+///   `[PushCurrent, FieldChain([k1, k2, …])]`
+///   `[GetField(k1), GetField(k2), …]`
+///   `[FieldChain([k1, k2, …])]`
+///   `[LoadIdent(k1), GetField(k2), …]`
+///   `[LoadIdent(k1), FieldChain([k2, k3, …])]`
+/// Returns `None` for single-field patterns (those go via `trivial_field`).
+#[inline]
+fn trivial_field_chain(ops: &[Opcode]) -> Option<Arc<[Arc<str>]>> {
+    let mut out: Vec<Arc<str>> = Vec::new();
+    let mut slice = ops;
+    // Optional leading PushCurrent is absorbed silently.
+    if let [Opcode::PushCurrent, rest @ ..] = slice { slice = rest; }
+    // First step: LoadIdent, GetField, or FieldChain.
+    match slice {
+        [Opcode::LoadIdent(k), rest @ ..] => { out.push(k.clone()); slice = rest; }
+        [Opcode::GetField(k), rest @ ..]  => { out.push(k.clone()); slice = rest; }
+        [Opcode::FieldChain(ks), rest @ ..] => {
+            for k in ks.iter() { out.push(k.clone()); }
+            slice = rest;
+        }
+        _ => return None,
+    }
+    // Remaining steps: any mix of GetField / FieldChain.
+    while !slice.is_empty() {
+        match slice {
+            [Opcode::GetField(k), rest @ ..]  => { out.push(k.clone()); slice = rest; }
+            [Opcode::FieldChain(ks), rest @ ..] => {
+                for k in ks.iter() { out.push(k.clone()); }
+                slice = rest;
+            }
+            _ => return None,
+        }
+    }
+    if out.len() < 2 { None } else { Some(Arc::from(out)) }
 }
 
 /// A literal primitive suitable for filter-predicate fusion.
@@ -1205,6 +1247,9 @@ impl Compiler {
                     if b.method == BuiltinMethod::Map && b.sub_progs.len() == 1 {
                         if let Some(k) = trivial_field(&b.sub_progs[0].ops) {
                             out2.push(Opcode::MapField(k)); continue;
+                        }
+                        if let Some(chain) = trivial_field_chain(&b.sub_progs[0].ops) {
+                            out2.push(Opcode::MapFieldChain(chain)); continue;
                         }
                     }
                     // group_by(k) → GroupByField(k)
@@ -2900,6 +2945,36 @@ impl VM {
                                 Val::Obj(m) => out.push(m.get(k.as_ref()).cloned().unwrap_or(Val::Null)),
                                 _ => out.push(Val::Null),
                             }
+                        }
+                        stack.push(Val::arr(out));
+                    } else {
+                        stack.push(Val::arr(Vec::new()));
+                    }
+                }
+                Opcode::MapFieldChain(ks) => {
+                    let recv = pop!(stack);
+                    if let Val::Arr(a) = &recv {
+                        let mut out = Vec::with_capacity(a.len());
+                        // IC for first hop only — downstream hops are scalar walks
+                        // where the per-item obj identity changes each iteration,
+                        // so caching would thrash.
+                        let mut idx0: Option<usize> = None;
+                        let k0 = &ks[0];
+                        for item in a.iter() {
+                            let mut cur: Val = match item {
+                                Val::Obj(m) => lookup_field_cached(m, k0, &mut idx0)
+                                    .cloned()
+                                    .unwrap_or(Val::Null),
+                                _ => Val::Null,
+                            };
+                            for k in &ks[1..] {
+                                cur = match &cur {
+                                    Val::Obj(m) => m.get(k.as_ref()).cloned().unwrap_or(Val::Null),
+                                    _ => Val::Null,
+                                };
+                                if matches!(cur, Val::Null) { break; }
+                            }
+                            out.push(cur);
                         }
                         stack.push(Val::arr(out));
                     } else {

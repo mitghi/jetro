@@ -137,7 +137,7 @@ fn op_arity(op: &Opcode) -> Arity {
             | Opcode::MapMin(_) | Opcode::MapMax(_)
             | Opcode::MapFieldSum(_) | Opcode::MapFieldAvg(_)
             | Opcode::MapFieldMin(_) | Opcode::MapFieldMax(_)
-            | Opcode::MapField(_) | Opcode::MapFieldUnique(_)
+            | Opcode::MapField(_) | Opcode::MapFieldChain(_) | Opcode::MapFieldUnique(_)
             | Opcode::FlatMapChain(_)
             | Opcode::FilterFieldEqLit(_, _) | Opcode::FilterFieldCmpLit(_, _, _)
             | Opcode::FilterFieldCmpField(_, _, _)
