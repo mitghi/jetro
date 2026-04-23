@@ -40,7 +40,8 @@ The tree-walker in `eval/` is the *reference implementation*: when VM behaviour 
 - **Let**: `let x = init in body`.
 - **Lambdas**: `lambda x, y: body`.
 - **Pipelines**: `base | step1 | step2`, optional named bind `-> name |`.
-- **Reserved words** (guarded against identifier use): `and or not for in if let lambda kind is as when patch DELETE true false null`.
+- **Conditional**: Python-style ternary `then_ if cond else else_` (right-assoc).
+- **Reserved words** (guarded against identifier use): `and or not for in if else let lambda kind is as when patch DELETE true false null`.
 
 The parser walks pest's concrete syntax tree once, producing an `ast::Expr`. Identifiers are stored as `Arc<str>` so that cloning a name into an opcode is a refcount bump instead of a `String` allocation.
 
@@ -62,6 +63,7 @@ pub enum Expr {
     SetComp { … }, GenComp { … },
     Lambda { params, body },
     Let { name, init, body },
+    IfElse { cond, then_, else_ },         // Python-style ternary
     // … patch blocks, cast, f-string parts
 }
 ```
@@ -167,6 +169,13 @@ pub enum Opcode {
     MapAvg(Arc<Program>),                // map(f).avg()
     MapFlatten(Arc<Program>),            // map(f).flatten()
     MapUnique(Arc<Program>),             // map(f).unique()
+    MapField(Arc<str>),                  // map(x => x.k)
+    MapFieldChain(Arc<[Arc<str>]>),      // map(x => x.k1.k2.…)
+    MapFieldUnique(Arc<str>),            // map(x => x.k).unique()
+    MapFieldChainUnique(Arc<[Arc<str>]>),// map(x => x.k1.…).unique()
+    FilterFieldEqLit(Arc<str>, Val),     // filter(@.k == lit)
+    FilterFieldCmpLit(Arc<str>, CmpOp, Val),
+    FilterFieldEqLitMapField(…),         // fused scan + project
     TopN { n: usize, asc: bool },        // sort()[0:n]
     FilterTakeWhile { pred, stop },
     FilterDropWhile { pred, drop },
@@ -178,6 +187,7 @@ pub enum Opcode {
     Eq, Neq, Lt, Lte, Gt, Gte, Fuzzy, Not, Neg,
     CastOp(CastType),
     AndOp(Arc<Program>), OrOp(Arc<Program>), CoalesceOp(Arc<Program>),
+    IfElse { then_: Arc<Program>, else_: Arc<Program> },  // ternary, one branch runs
 
     // Methods, construction, pipelines, comprehensions, patch
     CallMethod(Arc<CompiledCall>), CallOptMethod(Arc<CompiledCall>),
@@ -219,6 +229,9 @@ Run in this order — each may expose new fusions for the next:
 8. **`method_const_fold`** — builtins applied to literal args fold at compile time (`"ab".len()` → `PushInt(2)`).
 9. **`expr_const_fold`** — arithmetic on adjacent integer/float literals folds.
 10. **`nullness_specialisation`** — when upstream analysis proves a field cannot be absent, `OptField` downgrades to `GetField` (one fewer branch per execution).
+11. **`field_specialise`** — `.map(x => x.k)` and `.filter(@.k op lit)` collapse to single `MapField* / FilterField*` opcodes; trivial field chains fuse into `MapFieldChain`, dedup variants into `MapFieldUnique` / `MapFieldChainUnique`.
+12. **`list_comp_specialise`** — `[x.k for x in iter]` and `[x.k for x in iter if x.p op lit]` splice the iter sub-program inline + emit the same fused `MapField` / `FilterFieldEqLitMapField` opcodes as the method-chain form. No per-item opcode dispatch.
+13. **`ifelse_const_fold`** — `then_ if true else e` / `then_ if false else e` collapse to the taken branch at compile time.
 
 Each pass has a `PassConfig` toggle; `VM::set_pass_config` lets you disable any of them at runtime (the cache keys off the config hash, so toggles don't return stale programs).
 

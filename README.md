@@ -151,7 +151,80 @@ let avg   = j.collect("$.store.books.map(price) | @.avg()")?;
 let shout = j.collect("$.store.books[0].title | upper")?;  // "DUNE"
 ```
 
-### 9. Patch blocks
+### 9. Search — shallow and deep
+
+Shallow search / transform helpers (v2.2):
+
+```rust
+// .find / .find_all — aliases of .filter
+let hit     = j.collect(r#"$.store.books.find(title == "Dune")"#)?;
+let classic = j.collect(r#"$.store.books.find_all("classic" in tags)"#)?;
+
+// .pick — field list with optional rename
+let cards = j.collect(r#"
+    $.store.books.pick(title, slug: id, year)
+"#)?;
+
+// .unique_by — dedup by derived key
+let first_per_author = j.collect(r#"
+    $.store.books.sort_by(year).unique_by(author)
+"#)?;
+
+// .collect — scalar → [scalar], array → identity, null → []
+let always_array = j.collect("$.store.books[0].tags.collect()")?;
+```
+
+Deep search walks every descendant (DFS pre-order):
+
+```rust
+// $..find(pred) — every descendant satisfying pred
+let cheap_everywhere = j.collect("$..find(@ kind number and @ < 10)")?;
+
+// $..shape({k, …}) — every object that has all listed keys
+let books_like = j.collect("$..shape({id, title, price})")?;
+
+// $..like({k: v}) — every object whose listed keys equal the literals
+let paid_orders = j.collect(r#"$..like({status: "paid"})"#)?;
+```
+
+`.deep_find` / `.deep_shape` / `.deep_like` are the method-form aliases.
+
+### 10. Chain-style writes
+
+Rooted `$.<path>.<op>(...)` chains desugar into a single `patch` block — terse mutation without leaving the query language:
+
+```rust
+// .set — replace value at path
+let bumped = j.collect(r#"$.store.books[0].price.set(19.99)"#)?;
+
+// .modify — rewrite using @ bound to current leaf
+let discounted = j.collect(r#"$.store.books[*].price.modify(@ * 0.9)"#)?;
+
+// .delete — remove the leaf
+let pruned = j.collect(r#"$.store.books[* if stock == 0].delete()"#)?;
+
+// .unset(key) — drop a child of the leaf object
+let anon = j.collect(r#"$.store.customers[*].unset(credits)"#)?;
+```
+
+Breaking change vs v1: `$.field.set(v)` now returns the full doc with the value written back (old behaviour: ignore receiver, return `v`). Pipe form preserves v1 semantics — `$.field | set(v)` returns `v` — so inside `.map(...)` you can still use the pipe form.
+
+### 11. Conditional — Python-style ternary
+
+```rust
+let label = j.collect(r#"
+    $.store.books.map(
+        "out" if stock == 0
+        else "low" if stock < 5
+        else "ok"
+    )
+"#)?;
+// ["ok", "out", "ok", "ok", "ok"]
+```
+
+Right-associative — chains naturally without parens. Short-circuits: only the taken branch runs. A literal `true` / `false` condition folds at compile time so `expensive_expr() if false else cheap_expr()` never compiles the dead branch.
+
+### 12. Patch blocks
 
 In-place updates that compose like any other expression:
 
@@ -167,7 +240,7 @@ let discounted = j.collect(r#"
 
 Patch-field syntax: `path: value when predicate?`. Paths start with an identifier and may include `.field`, `[n]`, `[*]`, `[* if pred]`, and `..field`. `DELETE` removes the matched key.
 
-### 10. Custom methods
+### 13. Custom methods
 
 Register Rust code as a first-class method:
 
@@ -194,7 +267,7 @@ reg.register(std::sync::Arc::new(Percentile));
 let p90 = jetro::query_with("$.store.books.map(price).percentile(90)", &doc, reg.into())?;
 ```
 
-### 11. Typed `Expr<T>`
+### 14. Typed `Expr<T>`
 
 Expressions carry a phantom return type:
 
@@ -207,7 +280,7 @@ let pipeline = titles | upper;
 let shouted  = pipeline.eval(&doc)?;
 ```
 
-### 12. VM caching
+### 15. VM caching
 
 Every query through `Jetro::collect` or `VM::run_str` hits two caches:
 
@@ -216,7 +289,7 @@ Every query through `Jetro::collect` or `VM::run_str` hits two caches:
 
 Rerunning a workload over fresh documents of the same shape is effectively free after the first call. For one-shot queries use `jetro::query(expr, &doc)` — it skips the VM entirely.
 
-### 13. Recursive descent + drill-down chains
+### 16. Recursive descent + drill-down chains
 
 `$..field` walks every descendant level. Combine with filters and projections:
 
@@ -231,7 +304,7 @@ let keyed = j.collect(r#"
 "#)?;
 ```
 
-### 14. Cross-join via nested comprehensions
+### 17. Cross-join via nested comprehensions
 
 Two generators produce the cartesian product; the `if` filter keeps only matching pairs:
 
@@ -254,7 +327,7 @@ let receipts = j.collect(r#"
 
 Three nested loops + three lookups folded into one compiled program. Hits the pointer cache on repeat calls.
 
-### 15. Layered patch transforms
+### 18. Layered patch transforms
 
 One `patch` block stacks path-scoped clauses. Each clause runs on the patched result of the previous one:
 
@@ -273,7 +346,7 @@ let restocked = j.collect(r#"
 
 Two filter layers: `[* if pred]` filters per element against the element's own fields; `when pred` on a field is evaluated against root `$`. Chain blocks with `let ... in patch ...` when a later mutation needs to see earlier output.
 
-### 16. `Engine` — shared VM across threads
+### 19. `Engine` — shared VM across threads
 
 `Jetro` gives each thread its own VM. `Engine` is a `Send + Sync` handle around a `Mutex<VM>` so one warm cache services many workers:
 
@@ -292,7 +365,7 @@ std::thread::spawn(move || {
 
 First call compiles and fills both caches; every subsequent thread hitting the same expression skips to execution.
 
-### 17. Compile-time expressions — `jetro!`
+### 20. Compile-time expressions — `jetro!`
 
 Enable the `macros` feature. Expressions get a full pest parse at compile time, with errors pointing at the exact macro call-site. Returns a typed `Expr<Value>`:
 
@@ -308,7 +381,7 @@ assert_eq!(n_classic.eval_raw(&doc)?, json!(3));
 
 Unbalanced parens, unterminated strings, unknown operators — build failures, not runtime errors.
 
-### 18. `#[derive(JetroSchema)]` — attribute-driven schemas
+### 21. `#[derive(JetroSchema)]` — attribute-driven schemas
 
 Pair a type with a fixed set of named expressions. The derive emits `EXPRS`, `exprs()`, and `names()`. Each `#[expr(...)]` line is grammar-checked at compile time, so an invalid expression in a schema never ships.
 
@@ -401,6 +474,37 @@ $.books.filter(price > 10).count()
 $.books.sort_by(price).reverse()
 $.users.group_by(tier)
 $.items.map({name, total: price * qty})
+```
+
+### Search — shallow and deep
+
+```
+$.books.find(title == "Dune")            // first match (alias of filter + [0])
+$.books.find_all("classic" in tags)      // alias of filter
+$.books.pick(title, slug: id, year)      // project + rename
+$.books.unique_by(author)                // dedup by key
+$.books[0].tags.collect()                // scalar→[scalar], arr→arr, null→[]
+
+$..find(@.price > 10)                    // deep: every descendant satisfying pred
+$..shape({id, title, price})             // deep: every obj with all listed keys
+$..like({status: "paid"})                // deep: every obj with listed key==lit
+```
+
+### Chain-style writes (terminals on rooted paths)
+
+```
+$.a.b.set(v)          // replace leaf — returns full doc
+$.a.b.modify(@ * 2)   // replace using @ = current leaf
+$.a.b.delete()        // remove leaf
+$.a.b.unset(k)        // remove child of leaf object
+```
+
+### Conditional (Python-style ternary)
+
+```
+then_ if cond else else_
+"big" if n > 10 else "small"
+"a" if n == 1 else "b" if n == 2 else "c"   // right-associative
 ```
 
 ### Comprehensions
