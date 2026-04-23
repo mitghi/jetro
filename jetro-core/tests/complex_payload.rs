@@ -334,3 +334,16 @@ fn find_count_fusion_yields_same_integer_as_filter_count() {
     let b = j.collect(r#"$.orders.filter(status == "shipped").count()"#).unwrap();
     assert_eq!(a, b);
 }
+
+#[test]
+fn unique_count_fusion_matches_dedup_then_count() {
+    let j = Jetro::new(synth_doc());
+    let fused  = j.collect("$.orders.map(status).unique().count()").unwrap();
+    let plain  = j.collect("$.orders.map(status).unique().len()").unwrap();
+    let manual = {
+        let arr = j.collect("$.orders.map(status).unique()").unwrap();
+        serde_json::Value::from(arr.as_array().unwrap().len() as i64)
+    };
+    assert_eq!(fused, manual);
+    assert_eq!(plain, manual);
+}

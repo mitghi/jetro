@@ -154,7 +154,7 @@ fn op_arity(op: &Opcode) -> Arity {
             | Opcode::FilterTakeWhile { .. }
             | Opcode::FilterDropWhile { .. } | Opcode::MapUnique(_)
             | Opcode::EquiJoin { .. }
-            | Opcode::TopN { .. } | Opcode::KindCheck { .. }
+            | Opcode::TopN { .. } | Opcode::UniqueCount | Opcode::KindCheck { .. }
             | Opcode::Not | Opcode::Neg
             | Opcode::CallMethod(_) | Opcode::CallOptMethod(_)
             | Opcode::AndOp(_) | Opcode::OrOp(_) | Opcode::CoalesceOp(_)
