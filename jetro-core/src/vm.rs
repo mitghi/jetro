@@ -4686,27 +4686,56 @@ impl Env {
 ///
 /// Any other opcode terminates the chain; remaining spans are materialised
 /// into `Val`s and returned, and the caller resumes normal opcode dispatch.
+/// A "first-selector" opcode: bare `.first()` / `Quantifier::First`.
+/// When `Descendant(k)` is followed by one of these, the byte scan
+/// can stop at the first match per span.
+fn is_first_selector_op(op: &Opcode) -> bool {
+    match op {
+        Opcode::Quantifier(QuantifierKind::First) => true,
+        Opcode::CallMethod(c)
+            if c.sub_progs.is_empty() && c.method == BuiltinMethod::First => true,
+        _ => false,
+    }
+}
+
 fn byte_chain_exec(
     bytes: &[u8],
     root_key: &str,
     tail: &[Opcode],
 ) -> (Val, usize) {
-    let mut spans: Vec<super::scan::ValueSpan> =
-        super::scan::find_key_value_spans(bytes, root_key);
+    // Early-exit: `$..key.first()` / `$..key!` needs only the first match.
+    let first_after_initial = tail.first().map(is_first_selector_op).unwrap_or(false);
+    let mut spans: Vec<super::scan::ValueSpan> = if first_after_initial {
+        super::scan::find_first_key_value_span(bytes, root_key)
+            .into_iter().collect()
+    } else {
+        super::scan::find_key_value_spans(bytes, root_key)
+    };
     let mut scalar = false;
     let mut consumed = 0usize;
 
-    for op in tail {
+    for (idx, op) in tail.iter().enumerate() {
         match op {
             Opcode::Descendant(k) => {
+                let next_first = tail.get(idx + 1)
+                    .map(is_first_selector_op).unwrap_or(false);
                 let mut next = Vec::with_capacity(spans.len());
                 for s in &spans {
                     let sub = &bytes[s.start..s.end];
-                    for s2 in super::scan::find_key_value_spans(sub, k.as_ref()) {
-                        next.push(super::scan::ValueSpan {
-                            start: s.start + s2.start,
-                            end:   s.start + s2.end,
-                        });
+                    if next_first {
+                        if let Some(s2) = super::scan::find_first_key_value_span(sub, k.as_ref()) {
+                            next.push(super::scan::ValueSpan {
+                                start: s.start + s2.start,
+                                end:   s.start + s2.end,
+                            });
+                        }
+                    } else {
+                        for s2 in super::scan::find_key_value_spans(sub, k.as_ref()) {
+                            next.push(super::scan::ValueSpan {
+                                start: s.start + s2.start,
+                                end:   s.start + s2.end,
+                            });
+                        }
                     }
                 }
                 spans = next;

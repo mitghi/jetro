@@ -750,27 +750,57 @@ fn eval_pipe(left: Val, rhs: &Expr, env: &Env) -> Result<Val, EvalError> {
 ///
 /// Returns `(value, steps_consumed)` where `steps_consumed >= 1` because the
 /// entry `Descendant` step is always handled here.
+/// A "first-selector" step: `.first()` method call or `Quantifier::First`.
+/// When a `Descendant(k)` is immediately followed by one of these, the
+/// scan can early-exit on the first match per span.
+fn is_first_selector(step: &Step) -> bool {
+    match step {
+        Step::Quantifier(QuantifierKind::First) => true,
+        Step::Method(name, args) if args.is_empty() && name == "first" => true,
+        _ => false,
+    }
+}
+
 fn byte_chain_eval(
     bytes: &[u8],
     root_key: &str,
     steps: &[Step],
 ) -> (Val, usize) {
-    let mut spans: Vec<super::scan::ValueSpan> =
-        super::scan::find_key_value_spans(bytes, root_key);
+    // Early-exit: `$..key.first()` / `$..key!` only needs the first match.
+    let first_after_initial = steps.get(1).map(is_first_selector).unwrap_or(false);
+    let mut spans: Vec<super::scan::ValueSpan> = if first_after_initial {
+        super::scan::find_first_key_value_span(bytes, root_key)
+            .into_iter().collect()
+    } else {
+        super::scan::find_key_value_spans(bytes, root_key)
+    };
     let mut scalar = false;
     let mut consumed = 1usize;
 
-    for step in steps.iter().skip(1) {
+    for (idx, step) in steps.iter().enumerate().skip(1) {
         match step {
             Step::Descendant(k) => {
+                // Early-exit when the very next step is a first-selector:
+                // only find one inner match per outer span, skip the rest.
+                let next_first = steps.get(idx + 1)
+                    .map(is_first_selector).unwrap_or(false);
                 let mut next = Vec::with_capacity(spans.len());
                 for s in &spans {
                     let sub = &bytes[s.start..s.end];
-                    for s2 in super::scan::find_key_value_spans(sub, k) {
-                        next.push(super::scan::ValueSpan {
-                            start: s.start + s2.start,
-                            end:   s.start + s2.end,
-                        });
+                    if next_first {
+                        if let Some(s2) = super::scan::find_first_key_value_span(sub, k) {
+                            next.push(super::scan::ValueSpan {
+                                start: s.start + s2.start,
+                                end:   s.start + s2.end,
+                            });
+                        }
+                    } else {
+                        for s2 in super::scan::find_key_value_spans(sub, k) {
+                            next.push(super::scan::ValueSpan {
+                                start: s.start + s2.start,
+                                end:   s.start + s2.end,
+                            });
+                        }
                     }
                 }
                 spans = next;

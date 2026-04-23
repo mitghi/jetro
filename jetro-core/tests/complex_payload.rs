@@ -395,6 +395,35 @@ fn deep_find_numeric_range_tree_eq_scan() {
 }
 
 #[test]
+fn descendant_first_early_exit_matches_tree() {
+    // `$..k.first()` must agree with the tree walker under the scan
+    // early-exit path; the scan now stops at the first match rather
+    // than walking every `"k":` in the buffer.
+    //
+    // `sku` / `qty` are uniquely on items (no re-occurrence at another
+    // depth), so tree (IndexMap insertion order) and scan (byte order,
+    // which is alphabetical when serde_json's `preserve_order` feature
+    // is off) agree on which match is "first".  Keys like `id` exist at
+    // multiple depths and are intentionally avoided.
+    let doc = synth_doc();
+    let bytes = serde_json::to_vec(&doc).unwrap();
+    let j_tree = Jetro::new(doc.clone());
+    let j_scan = Jetro::from_bytes(bytes).unwrap();
+    for q in [
+        "$..sku.first()",
+        "$..qty.first()",
+        "$..items.first()..sku.first()",
+    ] {
+        assert_eq!(j_scan.collect(q).unwrap(), j_tree.collect(q).unwrap(),
+            "query {}", q);
+    }
+    // Sanity: the early-exit scan still resolves a real value from the
+    // document — not `Null` from a missed match.
+    let first_sku = j_scan.collect("$..sku.first()").unwrap();
+    assert!(first_sku.as_str().unwrap_or("").starts_with("SKU-"));
+}
+
+#[test]
 fn unique_count_fusion_matches_dedup_then_count() {
     let j = Jetro::new(synth_doc());
     let fused  = j.collect("$.orders.map(status).unique().count()").unwrap();

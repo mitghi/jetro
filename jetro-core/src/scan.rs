@@ -133,6 +133,69 @@ pub struct ValueSpan {
     pub end:   usize,
 }
 
+/// Early-exit variant of `find_key_value_spans` — returns the first
+/// span paired with `key` encountered in document order, or `None` if
+/// the key does not appear.  Powers the `Descendant(k) + .first()`
+/// fast path: walks only as far as needed to find one match, rather
+/// than scanning the entire byte buffer.
+pub fn find_first_key_value_span(bytes: &[u8], key: &str) -> Option<ValueSpan> {
+    let needle = {
+        let mut s = String::with_capacity(key.len() + 3);
+        s.push('"');
+        s.push_str(key);
+        s.push_str("\":");
+        s
+    };
+    let needle_b = needle.as_bytes();
+    if needle_b.len() > bytes.len() { return None; }
+    let prefix_len = needle_b.len();
+
+    let mut i = 0usize;
+    let mut in_string = false;
+    let mut escape = false;
+
+    while i < bytes.len() {
+        if escape { escape = false; i += 1; continue; }
+        if in_string {
+            let rest = &bytes[i..];
+            match memchr2(b'\\', b'"', rest) {
+                Some(off) => {
+                    i += off;
+                    match bytes[i] {
+                        b'\\' => { escape = true;     i += 1; }
+                        b'"'  => { in_string = false; i += 1; }
+                        _     => unreachable!(),
+                    }
+                }
+                None => return None,
+            }
+        } else {
+            let rest = &bytes[i..];
+            match memchr(b'"', rest) {
+                Some(off) => {
+                    let q = i + off;
+                    if q + prefix_len <= bytes.len()
+                        && &bytes[q..q + prefix_len] == needle_b
+                    {
+                        let mut start = q + prefix_len;
+                        while start < bytes.len()
+                            && matches!(bytes[start], b' ' | b'\t' | b'\n' | b'\r')
+                        { start += 1; }
+                        if start >= bytes.len() { return None; }
+                        return value_end(bytes, start)
+                            .map(|end| ValueSpan { start, end });
+                    } else {
+                        in_string = true;
+                        i = q + 1;
+                    }
+                }
+                None => return None,
+            }
+        }
+    }
+    None
+}
+
 /// Locate the byte span of every value paired with `key`.  Skips
 /// whitespace between `:` and the value and then walks the value to its
 /// end — strings obey escape rules, containers track nesting depth,
