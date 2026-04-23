@@ -2380,11 +2380,22 @@ impl VM {
         program: &Program,
         root: Val,
     ) -> Result<serde_json::Value, EvalError> {
+        Ok(self.execute_val_raw(program, root)?.into())
+    }
+
+    /// Execute against a pre-built `Val` root and return the raw `Val` —
+    /// no `serde_json::Value` materialisation.  Use when the caller will
+    /// consume results structurally (further queries, custom walk) and
+    /// wants to skip a potentially expensive `Val → Value` conversion.
+    pub fn execute_val_raw(
+        &mut self,
+        program: &Program,
+        root: Val,
+    ) -> Result<Val, EvalError> {
         self.doc_hash = self.compute_or_cache_root_hash(&root);
         self.root_chain_cache.clear();
         let env = self.make_env(root);
-        let result = self.exec(program, &env)?;
-        Ok(result.into())
+        self.exec(program, &env)
     }
 
     /// Execute a compiled program against a document, first specialising

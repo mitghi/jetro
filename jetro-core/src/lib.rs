@@ -76,7 +76,7 @@ use eval::Val;
 
 pub use engine::Engine;
 pub use eval::EvalError;
-pub use eval::{Method, MethodRegistry};
+pub use eval::{Method, MethodRegistry, Val as JetroVal};
 pub use expr::Expr;
 pub use graph::Graph;
 pub use parser::ParseError;
@@ -213,6 +213,24 @@ impl Jetro {
             }
             (Err(_), Some(bytes)) => VM::new().run_str_with_raw(expr, &self.document, Arc::clone(bytes)),
             (Err(_), None)        => VM::new().run_str(expr, &self.document),
+        })
+    }
+
+    /// Evaluate `expr` and return the raw `Val` without converting to
+    /// `serde_json::Value`.  For large structural results (e.g. `group_by`
+    /// on 20k+ items) this avoids an expensive materialisation that
+    /// otherwise dominates runtime.  The returned `Val` supports cheap
+    /// `Arc`-clone and shares structure with the source document.
+    ///
+    /// Prefer this over `collect` when the caller consumes the result
+    /// structurally (further queries, custom walk, re-evaluation) rather
+    /// than handing it to `serde_json`-aware code.
+    pub fn collect_val<S: AsRef<str>>(&self, expr: S) -> std::result::Result<JetroVal, EvalError> {
+        let expr = expr.as_ref();
+        THREAD_VM.with(|cell| {
+            let mut vm = cell.try_borrow_mut().map_err(|_| EvalError("VM in use".into()))?;
+            let prog = vm.get_or_compile(expr)?;
+            vm.execute_val_raw(&prog, self.root_val())
         })
     }
 }

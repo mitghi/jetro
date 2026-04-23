@@ -199,6 +199,26 @@ fn q10_group_by_status_partition() {
 }
 
 #[test]
+fn q10_group_by_status_collect_val_matches() {
+    // collect_val returns the raw Val — no serde_json::Value materialisation.
+    // Verifies parity of structure with the standard collect() path.
+    use jetro_core::JetroVal;
+    let j = Jetro::new(synth_doc());
+    let v = j.collect_val("$.orders.group_by(status)").unwrap();
+    let total: usize = match v {
+        JetroVal::Obj(m) => {
+            assert_eq!(m.len(), 5);
+            m.values().map(|b| match b {
+                JetroVal::Arr(a) => a.len(),
+                _ => panic!("bucket is not an array"),
+            }).sum()
+        }
+        _ => panic!("group_by did not return an object"),
+    };
+    assert_eq!(total, N_ORDERS);
+}
+
+#[test]
 fn q11_count_by_region() {
     let j = Jetro::new(synth_doc());
     let out = j.collect("$.orders.count_by(region)").unwrap();
