@@ -141,6 +141,8 @@ fn op_arity(op: &Opcode) -> Arity {
             | Opcode::FlatMapChain(_)
             | Opcode::FilterFieldEqLit(_, _) | Opcode::FilterFieldCmpLit(_, _, _)
             | Opcode::FilterFieldCmpField(_, _, _)
+            | Opcode::FilterFieldEqLitMapField(_, _, _)
+            | Opcode::FilterFieldCmpLitMapField(_, _, _, _)
             | Opcode::FilterFieldEqLitCount(_, _) | Opcode::FilterFieldCmpLitCount(_, _, _)
             | Opcode::FilterFieldCmpFieldCount(_, _, _)
             | Opcode::GroupByField(_)

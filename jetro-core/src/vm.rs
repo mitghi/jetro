@@ -398,6 +398,10 @@ pub enum Opcode {
     FilterFieldCmpLit(Arc<str>, super::ast::BinOp, Val),
     /// `filter(k1 <op> k2)` — predicate compares two fields of the same item.
     FilterFieldCmpField(Arc<str>, super::ast::BinOp, Arc<str>),
+    /// `filter(kp == lit).map(kproj)` fused — single pass, no intermediate array.
+    FilterFieldEqLitMapField(Arc<str>, Val, Arc<str>),
+    /// `filter(kp <cop> lit).map(kproj)` fused — single pass, no intermediate array.
+    FilterFieldCmpLitMapField(Arc<str>, super::ast::BinOp, Val, Arc<str>),
     /// `filter(k == lit).count()` — count without materialising.
     FilterFieldEqLitCount(Arc<str>, Val),
     /// `filter(k <op> lit).count()` — count cmp without materialising.
@@ -1303,6 +1307,22 @@ impl Compiler {
                         }
                         _ => {}
                     }
+                }
+            }
+            // FilterField* + MapField(k) → FilterField*MapField (single pass)
+            if let Opcode::MapField(ref kp) = op {
+                match out3.last().cloned() {
+                    Some(Opcode::FilterFieldEqLit(k, lit)) => {
+                        out3.pop();
+                        out3.push(Opcode::FilterFieldEqLitMapField(k, lit, kp.clone()));
+                        continue;
+                    }
+                    Some(Opcode::FilterFieldCmpLit(k, cop, lit)) => {
+                        out3.pop();
+                        out3.push(Opcode::FilterFieldCmpLitMapField(k, cop, lit, kp.clone()));
+                        continue;
+                    }
+                    _ => {}
                 }
             }
             // MapField(k) + MapFlatten(trivial k2) → FlatMapChain([k, k2])
@@ -3168,6 +3188,50 @@ impl VM {
                                 if let Some(v) = lookup_field_cached(m, k, &mut idx) {
                                     if cmp_val_binop(v, *op, lit) {
                                         out.push(item.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    stack.push(Val::arr(out));
+                }
+                Opcode::FilterFieldEqLitMapField(kp, lit, kproj) => {
+                    let recv = pop!(stack);
+                    let mut out = Vec::new();
+                    let mut ip: Option<usize> = None;
+                    let mut iq: Option<usize> = None;
+                    if let Val::Arr(a) = &recv {
+                        for item in a.iter() {
+                            if let Val::Obj(m) = item {
+                                if let Some(v) = lookup_field_cached(m, kp, &mut ip) {
+                                    if crate::eval::util::vals_eq(v, lit) {
+                                        out.push(
+                                            lookup_field_cached(m, kproj, &mut iq)
+                                                .cloned()
+                                                .unwrap_or(Val::Null),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    stack.push(Val::arr(out));
+                }
+                Opcode::FilterFieldCmpLitMapField(kp, op, lit, kproj) => {
+                    let recv = pop!(stack);
+                    let mut out = Vec::new();
+                    let mut ip: Option<usize> = None;
+                    let mut iq: Option<usize> = None;
+                    if let Val::Arr(a) = &recv {
+                        for item in a.iter() {
+                            if let Val::Obj(m) = item {
+                                if let Some(v) = lookup_field_cached(m, kp, &mut ip) {
+                                    if cmp_val_binop(v, *op, lit) {
+                                        out.push(
+                                            lookup_field_cached(m, kproj, &mut iq)
+                                                .cloned()
+                                                .unwrap_or(Val::Null),
+                                        );
                                     }
                                 }
                             }
