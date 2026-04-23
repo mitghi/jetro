@@ -452,7 +452,9 @@ mod tests {
 
     #[test]
     fn cfg_filter_creates_loop() {
-        let p = Compiler::compile_str("$.x.filter(@.a > 1)").unwrap();
+        // Use a predicate that doesn't match the field-predicate specialiser
+        // (`FilterFieldCmpLit`) so the generic filter opcode survives.
+        let p = Compiler::compile_str("$.x.filter(@.a > 1 and @.a < 10)").unwrap();
         let cfg = Cfg::build(&p);
         assert!(cfg.size() >= 2);
     }

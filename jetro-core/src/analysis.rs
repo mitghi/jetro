@@ -249,17 +249,30 @@ fn apply_op(op: &Opcode, stack: &mut Vec<AbstractVal>) {
             pop1!();
             stack.push(AbstractVal::array());
         }
-        Opcode::MapSum(_) | Opcode::FilterMapSum { .. } => {
+        Opcode::MapSum(_) | Opcode::FilterMapSum { .. }
+        | Opcode::MapMin(_) | Opcode::MapMax(_)
+        | Opcode::MapFieldSum(_) | Opcode::MapFieldMin(_) | Opcode::MapFieldMax(_) => {
             pop1!();
             stack.push(AbstractVal::scalar(VType::Num));
         }
-        Opcode::MapAvg(_) | Opcode::FilterMapAvg { .. } => {
+        Opcode::MapAvg(_) | Opcode::FilterMapAvg { .. } | Opcode::MapFieldAvg(_) => {
             pop1!();
             stack.push(AbstractVal::scalar(VType::Float));
         }
+        Opcode::FilterFieldEqLitCount(_, _)
+        | Opcode::FilterFieldCmpLitCount(_, _, _)
+        | Opcode::FilterFieldCmpFieldCount(_, _, _) => {
+            pop1!();
+            stack.push(AbstractVal::scalar(VType::Int));
+        }
         Opcode::TopN { .. } | Opcode::MapFlatten(_) | Opcode::FilterTakeWhile { .. }
             | Opcode::FilterDropWhile { .. } | Opcode::MapUnique(_)
-            | Opcode::EquiJoin { .. } => {
+            | Opcode::EquiJoin { .. }
+            | Opcode::MapField(_) | Opcode::MapFieldUnique(_)
+            | Opcode::FlatMapChain(_)
+            | Opcode::FilterFieldEqLit(_, _) | Opcode::FilterFieldCmpLit(_, _, _)
+            | Opcode::FilterFieldCmpField(_, _, _)
+            | Opcode::GroupByField(_) => {
             pop1!();
             stack.push(AbstractVal::array());
         }
@@ -387,6 +400,7 @@ fn count_ident_uses_in_ops(ops: &[Opcode], name: &str, acc: &mut usize) {
                 | Opcode::FindFirst(p) | Opcode::FindOne(p)
                 | Opcode::DynIndex(p)
                 | Opcode::MapSum(p) | Opcode::MapAvg(p)
+                | Opcode::MapMin(p) | Opcode::MapMax(p)
                 | Opcode::MapFlatten(p)
                 | Opcode::MapFirst(p) | Opcode::MapLast(p)
                 | Opcode::FilterLast { pred: p }
@@ -477,8 +491,25 @@ pub fn collect_accessed_fields(program: &Program) -> Vec<Arc<str>> {
 fn collect_fields_in_ops(ops: &[Opcode], acc: &mut Vec<Arc<str>>) {
     for op in ops {
         match op {
-            Opcode::GetField(k) | Opcode::OptField(k) | Opcode::Descendant(k) => {
+            Opcode::GetField(k) | Opcode::OptField(k) | Opcode::Descendant(k)
+                | Opcode::MapFieldSum(k) | Opcode::MapFieldAvg(k)
+                | Opcode::MapFieldMin(k) | Opcode::MapFieldMax(k)
+                | Opcode::MapField(k) | Opcode::MapFieldUnique(k)
+                | Opcode::GroupByField(k)
+                | Opcode::FilterFieldEqLit(k, _) | Opcode::FilterFieldCmpLit(k, _, _)
+                | Opcode::FilterFieldEqLitCount(k, _) | Opcode::FilterFieldCmpLitCount(k, _, _)
+                => {
                 if !acc.iter().any(|a: &Arc<str>| a == k) { acc.push(k.clone()); }
+            }
+            Opcode::FilterFieldCmpField(k1, _, k2)
+                | Opcode::FilterFieldCmpFieldCount(k1, _, k2) => {
+                if !acc.iter().any(|a: &Arc<str>| a == k1) { acc.push(k1.clone()); }
+                if !acc.iter().any(|a: &Arc<str>| a == k2) { acc.push(k2.clone()); }
+            }
+            Opcode::FlatMapChain(ks) => {
+                for k in ks.iter() {
+                    if !acc.iter().any(|a: &Arc<str>| a == k) { acc.push(k.clone()); }
+                }
             }
             Opcode::RootChain(chain) => {
                 for k in chain.iter() {
@@ -490,6 +521,7 @@ fn collect_fields_in_ops(ops: &[Opcode], acc: &mut Vec<Arc<str>>) {
                 | Opcode::FindFirst(p) | Opcode::FindOne(p)
                 | Opcode::DynIndex(p)
                 | Opcode::MapSum(p) | Opcode::MapAvg(p)
+                | Opcode::MapMin(p) | Opcode::MapMax(p)
                 | Opcode::MapFlatten(p)
                 | Opcode::MapFirst(p) | Opcode::MapLast(p)
                 | Opcode::FilterLast { pred: p }
@@ -561,6 +593,7 @@ fn hash_ops(ops: &[Opcode], h: &mut impl std::hash::Hasher) {
                 | Opcode::FindFirst(p) | Opcode::FindOne(p)
                 | Opcode::DynIndex(p)
                 | Opcode::MapSum(p) | Opcode::MapAvg(p)
+                | Opcode::MapMin(p) | Opcode::MapMax(p)
                 | Opcode::MapFlatten(p)
                 | Opcode::MapFirst(p) | Opcode::MapLast(p)
                 | Opcode::FilterLast { pred: p }
@@ -597,6 +630,7 @@ fn walk_subprograms(ops: &[Opcode], map: &mut HashMap<u64, usize>) {
                 | Opcode::FindFirst(p) | Opcode::FindOne(p)
                 | Opcode::DynIndex(p)
                 | Opcode::MapSum(p) | Opcode::MapAvg(p)
+                | Opcode::MapMin(p) | Opcode::MapMax(p)
                 | Opcode::MapFlatten(p)
                 | Opcode::MapFirst(p) | Opcode::MapLast(p)
                 | Opcode::FilterLast { pred: p }
@@ -807,6 +841,8 @@ fn rewrite_op(op: &Opcode, cache: &mut HashMap<u64, Arc<Program>>) -> Opcode {
         Opcode::FilterCount(p)  => Opcode::FilterCount(dedup_rec(p, cache)),
         Opcode::MapSum(p)       => Opcode::MapSum(dedup_rec(p, cache)),
         Opcode::MapAvg(p)       => Opcode::MapAvg(dedup_rec(p, cache)),
+        Opcode::MapMin(p)       => Opcode::MapMin(dedup_rec(p, cache)),
+        Opcode::MapMax(p)       => Opcode::MapMax(dedup_rec(p, cache)),
         Opcode::MapFlatten(p)   => Opcode::MapFlatten(dedup_rec(p, cache)),
         Opcode::MapFirst(p)     => Opcode::MapFirst(dedup_rec(p, cache)),
         Opcode::MapLast(p)      => Opcode::MapLast(dedup_rec(p, cache)),
@@ -952,6 +988,7 @@ pub fn opcode_cost(op: &Opcode) -> u32 {
         Opcode::InlineFilter(p) | Opcode::FilterCount(p)
             | Opcode::FindFirst(p) | Opcode::FindOne(p)
             | Opcode::MapSum(p) | Opcode::MapAvg(p)
+            | Opcode::MapMin(p) | Opcode::MapMax(p)
             | Opcode::MapFlatten(p)
             | Opcode::MapFirst(p) | Opcode::MapLast(p)
             | Opcode::FilterLast { pred: p }
@@ -1007,6 +1044,16 @@ pub fn opcode_cost(op: &Opcode) -> u32 {
         Opcode::Quantifier(_) => 2,
         Opcode::CastOp(_) => 2,
         Opcode::PatchEval(_) => 50,
+        Opcode::MapFieldSum(_) | Opcode::MapFieldAvg(_)
+            | Opcode::MapFieldMin(_) | Opcode::MapFieldMax(_)
+            | Opcode::MapField(_) => 5,
+        Opcode::MapFieldUnique(_) => 8,
+        Opcode::FlatMapChain(ks) => 5 + ks.len() as u32 * 3,
+        Opcode::FilterFieldEqLit(_, _) | Opcode::FilterFieldCmpLit(_, _, _)
+            | Opcode::FilterFieldCmpField(_, _, _) => 5,
+        Opcode::FilterFieldEqLitCount(_, _) | Opcode::FilterFieldCmpLitCount(_, _, _)
+            | Opcode::FilterFieldCmpFieldCount(_, _, _) => 4,
+        Opcode::GroupByField(_) => 15,
     }
 }
 

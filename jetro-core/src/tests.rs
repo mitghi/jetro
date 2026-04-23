@@ -1301,16 +1301,18 @@ mod tests {
     fn fusion_map_sum_opcode() {
         use crate::vm::{Compiler, Opcode};
         let prog = Compiler::compile_str("$.books.map(@.price).sum()").unwrap();
-        let has = prog.ops.iter().any(|o| matches!(o, Opcode::MapSum(_)));
-        assert!(has, "map+sum should fuse to MapSum");
+        let has = prog.ops.iter().any(|o|
+            matches!(o, Opcode::MapSum(_) | Opcode::MapFieldSum(_)));
+        assert!(has, "map+sum should fuse to MapSum / MapFieldSum");
     }
 
     #[test]
     fn fusion_map_avg_opcode() {
         use crate::vm::{Compiler, Opcode};
         let prog = Compiler::compile_str("$.books.map(@.price).avg()").unwrap();
-        let has = prog.ops.iter().any(|o| matches!(o, Opcode::MapAvg(_)));
-        assert!(has, "map+avg should fuse to MapAvg");
+        let has = prog.ops.iter().any(|o|
+            matches!(o, Opcode::MapAvg(_) | Opcode::MapFieldAvg(_)));
+        assert!(has, "map+avg should fuse to MapAvg / MapFieldAvg");
     }
 
     #[test]

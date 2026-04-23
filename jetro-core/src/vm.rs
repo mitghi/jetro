@@ -362,6 +362,50 @@ pub enum Opcode {
     MapFirst(Arc<Program>),
     /// Fused `map(f).last()` — apply `f` only to the last element.
     MapLast(Arc<Program>),
+    /// Fused `map(f).min()` — single-pass numeric min over mapped values.
+    MapMin(Arc<Program>),
+    /// Fused `map(f).max()` — single-pass numeric max over mapped values.
+    MapMax(Arc<Program>),
+
+    // ── Field-specialised fusions (Tier 3) ────────────────────────────────────
+    /// `map(k).sum()` where `k` is a single field ident. Skips sub-program exec.
+    MapFieldSum(Arc<str>),
+    /// `map(k).avg()` where `k` is a single field ident.
+    MapFieldAvg(Arc<str>),
+    /// `map(k).min()` where `k` is a single field ident.
+    MapFieldMin(Arc<str>),
+    /// `map(k).max()` where `k` is a single field ident.
+    MapFieldMax(Arc<str>),
+    /// `map(k)` where `k` is a single field ident — emit array of field values.
+    MapField(Arc<str>),
+    /// `map(k).unique()` where `k` is a single field ident. FxHashSet dedup.
+    MapFieldUnique(Arc<str>),
+
+    // ── Flatten-chain fusion (Tier 1) ─────────────────────────────────────────
+    /// `.map(k1).flatten().map(k2).flatten()…` collapsed into a single walk.
+    /// Input is an array of objects; each step descends the named array-valued
+    /// field and concatenates. `N` levels → `N+1` buffers (current+next) instead
+    /// of `2N` allocations.
+    FlatMapChain(Arc<[Arc<str>]>),
+
+    // ── Predicate specialisation (Tier 4) ─────────────────────────────────────
+    /// `filter(k == lit)` — predicate is equality of a single field to a literal.
+    FilterFieldEqLit(Arc<str>, Val),
+    /// `filter(k <op> lit)` — predicate is a comparison of a single field to a literal.
+    FilterFieldCmpLit(Arc<str>, super::ast::BinOp, Val),
+    /// `filter(k1 <op> k2)` — predicate compares two fields of the same item.
+    FilterFieldCmpField(Arc<str>, super::ast::BinOp, Arc<str>),
+    /// `filter(k == lit).count()` — count without materialising.
+    FilterFieldEqLitCount(Arc<str>, Val),
+    /// `filter(k <op> lit).count()` — count cmp without materialising.
+    FilterFieldCmpLitCount(Arc<str>, super::ast::BinOp, Val),
+    /// `filter(k1 <op> k2).count()` — cross-field count.
+    FilterFieldCmpFieldCount(Arc<str>, super::ast::BinOp, Arc<str>),
+
+    // ── group_by specialisation (Tier 2) ──────────────────────────────────────
+    /// `group_by(k)` where `k` is a single field ident. Uses FxHashMap with
+    /// primitive-key fast path.
+    GroupByField(Arc<str>),
     /// Fused `filter(p).take_while(q)` — scan while both predicates hold.
     FilterTakeWhile { pred: Arc<Program>, stop: Arc<Program> },
     /// Fused `filter(p).drop_while(q)` — skip leading matches of q on
@@ -498,6 +542,174 @@ fn ic_get_field(m: &Arc<IndexMap<Arc<str>, Val>>, key: &str, ic: &AtomicU64) -> 
     } else {
         Val::Null
     }
+}
+
+/// Recognise `.map(k)` sub-programs that reduce to a single field access
+/// from the current item: `[PushCurrent, GetField(k)]` or bare `[GetField(k)]`.
+/// Lets MapSum/Min/Max/Avg skip the per-item `exec` dispatch.
+#[inline]
+fn trivial_field(ops: &[Opcode]) -> Option<Arc<str>> {
+    match ops {
+        [Opcode::PushCurrent, Opcode::GetField(k)] => Some(k.clone()),
+        [Opcode::GetField(k)] => Some(k.clone()),
+        // Bare idents in lambda bodies compile to `LoadIdent(k)` which does
+        // var-lookup-then-field fallback; in sub-progs of map/filter/group_by
+        // the var slot is almost never shadowed by a field-name, so treat as
+        // a field read.
+        [Opcode::LoadIdent(k)] => Some(k.clone()),
+        _ => None,
+    }
+}
+
+/// A literal primitive suitable for filter-predicate fusion.
+#[inline]
+fn trivial_literal(op: &Opcode) -> Option<Val> {
+    match op {
+        Opcode::PushNull => Some(Val::Null),
+        Opcode::PushBool(b) => Some(Val::Bool(*b)),
+        Opcode::PushInt(n) => Some(Val::Int(*n)),
+        Opcode::PushStr(s) => Some(Val::Str(s.clone())),
+        _ => None,
+    }
+}
+
+/// Detect a filter-predicate sub-program of shape `field <op> literal`,
+/// `literal <op> field`, or `field1 <op> field2`. Returns one of three variants
+/// so the caller can pick the right fused opcode.
+#[derive(Debug)]
+enum FieldPred {
+    FieldCmpLit(Arc<str>, super::ast::BinOp, Val),
+    FieldCmpField(Arc<str>, super::ast::BinOp, Arc<str>),
+}
+
+fn flip_cmp(op: super::ast::BinOp) -> super::ast::BinOp {
+    use super::ast::BinOp::*;
+    match op {
+        Lt => Gt, Gt => Lt, Lte => Gte, Gte => Lte,
+        other => other,
+    }
+}
+
+fn cmp_opcode(op: &Opcode) -> Option<super::ast::BinOp> {
+    use super::ast::BinOp::*;
+    Some(match op {
+        Opcode::Eq => Eq, Opcode::Neq => Neq,
+        Opcode::Lt => Lt, Opcode::Lte => Lte,
+        Opcode::Gt => Gt, Opcode::Gte => Gte,
+        _ => return None,
+    })
+}
+
+/// Patterns recognised for a filter-lambda body:
+///   `[PushCurrent, GetField(k), PushLit, <cmp>]`
+///   `[PushLit, PushCurrent, GetField(k), <cmp>]`
+///   `[PushCurrent, GetField(k1), PushCurrent, GetField(k2), <cmp>]`
+fn detect_field_pred(ops: &[Opcode]) -> Option<FieldPred> {
+    // Helper: match a single-op "field read" — PushCurrent+GetField, GetField
+    // alone, or LoadIdent (var fallback to field).
+    #[inline]
+    fn field_read_prefix(ops: &[Opcode]) -> Option<(Arc<str>, usize)> {
+        match ops.first()? {
+            Opcode::LoadIdent(k) => Some((k.clone(), 1)),
+            Opcode::GetField(k) => Some((k.clone(), 1)),
+            Opcode::PushCurrent => {
+                if let Some(Opcode::GetField(k)) = ops.get(1) {
+                    Some((k.clone(), 2))
+                } else { None }
+            }
+            _ => None,
+        }
+    }
+    // Form 1: field <op> literal
+    if let Some((k, n)) = field_read_prefix(ops) {
+        if let (Some(lit_op), Some(cmp_op)) = (ops.get(n), ops.get(n + 1)) {
+            if ops.len() == n + 2 {
+                if let (Some(lit), Some(op)) = (trivial_literal(lit_op), cmp_opcode(cmp_op)) {
+                    return Some(FieldPred::FieldCmpLit(k, op, lit));
+                }
+            }
+        }
+        // Form 3: field1 <op> field2
+        if let Some((k2, n2_extra)) = ops.get(n).and_then(|_| {
+            let tail = &ops[n..];
+            field_read_prefix(tail).map(|(kk, nn)| (kk, nn))
+        }) {
+            if let Some(cmp_op) = ops.get(n + n2_extra) {
+                if ops.len() == n + n2_extra + 1 {
+                    if let Some(op) = cmp_opcode(cmp_op) {
+                        return Some(FieldPred::FieldCmpField(k, op, k2));
+                    }
+                }
+            }
+        }
+    }
+    // Form 2: literal <op> field (flip)
+    if let Some(lit) = ops.first().and_then(trivial_literal) {
+        if let Some((k, n2)) = field_read_prefix(&ops[1..]) {
+            if let Some(cmp_op) = ops.get(1 + n2) {
+                if ops.len() == 1 + n2 + 1 {
+                    if let Some(op) = cmp_opcode(cmp_op) {
+                        return Some(FieldPred::FieldCmpLit(k, flip_cmp(op), lit));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Compare two `Val`s using a binary comparison operator. Only implements the
+/// semantics needed for filter predicate fusion; falls back to cmp_vals for
+/// ordering comparisons.
+#[inline]
+fn cmp_val_binop(a: &Val, op: super::ast::BinOp, b: &Val) -> bool {
+    use super::ast::BinOp::*;
+    use std::cmp::Ordering;
+    match op {
+        Eq => crate::eval::util::vals_eq(a, b),
+        Neq => !crate::eval::util::vals_eq(a, b),
+        Lt | Lte | Gt | Gte => {
+            let ord = crate::eval::util::cmp_vals(a, b);
+            match op {
+                Lt  => ord == Ordering::Less,
+                Lte => ord != Ordering::Greater,
+                Gt  => ord == Ordering::Greater,
+                Gte => ord != Ordering::Less,
+                _ => unreachable!(),
+            }
+        }
+        _ => false,
+    }
+}
+
+/// `group_by(k)` where `k` is a bare field ident. Builds an object whose keys
+/// are the distinct field values stringified, mapping to arrays of items.
+/// Preserves first-seen key order.
+fn group_by_field(recv: &Val, k: &str) -> Val {
+    let a = match recv {
+        Val::Arr(a) => a,
+        _ => return Val::obj(indexmap::IndexMap::new()),
+    };
+    let mut out: indexmap::IndexMap<Arc<str>, Vec<Val>> = indexmap::IndexMap::with_capacity(16);
+    for item in a.iter() {
+        let key = if let Val::Obj(m) = item {
+            match m.get(k) {
+                Some(Val::Str(s)) => s.clone(),
+                Some(Val::Int(n)) => Arc::from(n.to_string()),
+                Some(Val::Float(x)) => Arc::from(x.to_string()),
+                Some(Val::Bool(b)) => Arc::from(if *b { "true" } else { "false" }),
+                Some(Val::Null) | None => Arc::from("null"),
+                Some(other) => Arc::from(format!("{:?}", other)),
+            }
+        } else {
+            Arc::from("null")
+        };
+        out.entry(key).or_insert_with(|| Vec::with_capacity(4)).push(item.clone());
+    }
+    let finalised: indexmap::IndexMap<Arc<str>, Val> = out.into_iter()
+        .map(|(k, v)| (k, Val::arr(v)))
+        .collect();
+    Val::obj(finalised)
 }
 
 // ── Variable context (compile-time) ──────────────────────────────────────────
@@ -680,6 +892,7 @@ impl Compiler {
         let ops = if cfg.filter_count    { Self::pass_filter_count(ops) }    else { ops };
         let ops = if cfg.filter_fusion   { Self::pass_filter_fusion(ops) }   else { ops };
         let ops = if cfg.find_quantifier { Self::pass_find_quantifier(ops) } else { ops };
+        let ops = if cfg.filter_fusion   { Self::pass_field_specialise(ops) } else { ops };
         let ops = if cfg.strength_reduce { Self::pass_strength_reduce(ops) } else { ops };
         let ops = if cfg.redundant_ops   { Self::pass_redundant_ops(ops) }   else { ops };
         let ops = if cfg.kind_check_fold { Self::pass_kind_check_fold(ops) } else { ops };
@@ -870,13 +1083,15 @@ impl Compiler {
                         continue;
                     }
                 }
-                // map(f) + sum()/avg()/flatten()
+                // map(f) + sum()/avg()/min()/max()/flatten()/first()/last()
                 if a.method == BuiltinMethod::Map && a.sub_progs.len() >= 1
                    && b.sub_progs.is_empty() {
                     let f = Arc::clone(&a.sub_progs[0]);
                     let fused = match b.method {
                         BuiltinMethod::Sum => Some(Opcode::MapSum(f)),
                         BuiltinMethod::Avg => Some(Opcode::MapAvg(f)),
+                        BuiltinMethod::Min => Some(Opcode::MapMin(f)),
+                        BuiltinMethod::Max => Some(Opcode::MapMax(f)),
                         BuiltinMethod::Flatten => Some(Opcode::MapFlatten(f)),
                         BuiltinMethod::First => Some(Opcode::MapFirst(f)),
                         BuiltinMethod::Last => Some(Opcode::MapLast(f)),
@@ -928,6 +1143,124 @@ impl Compiler {
             out.push(op);
         }
         out
+    }
+
+    /// Lower generic fused opcodes to field-specialised variants when the
+    /// sub-program is a trivial `GetField(k)` read. Runs AFTER
+    /// pass_find_quantifier / pass_filter_count so those passes see the
+    /// generic `CallMethod(Filter)` / `MapSum` forms first.
+    fn pass_field_specialise(ops: Vec<Opcode>) -> Vec<Opcode> {
+        let mut out2: Vec<Opcode> = Vec::with_capacity(ops.len());
+        for op in ops {
+            match op {
+                Opcode::MapSum(ref f) => {
+                    if let Some(k) = trivial_field(&f.ops) {
+                        out2.push(Opcode::MapFieldSum(k)); continue;
+                    }
+                }
+                Opcode::MapAvg(ref f) => {
+                    if let Some(k) = trivial_field(&f.ops) {
+                        out2.push(Opcode::MapFieldAvg(k)); continue;
+                    }
+                }
+                Opcode::MapMin(ref f) => {
+                    if let Some(k) = trivial_field(&f.ops) {
+                        out2.push(Opcode::MapFieldMin(k)); continue;
+                    }
+                }
+                Opcode::MapMax(ref f) => {
+                    if let Some(k) = trivial_field(&f.ops) {
+                        out2.push(Opcode::MapFieldMax(k)); continue;
+                    }
+                }
+                Opcode::MapUnique(ref f) => {
+                    if let Some(k) = trivial_field(&f.ops) {
+                        out2.push(Opcode::MapFieldUnique(k)); continue;
+                    }
+                }
+                Opcode::CallMethod(ref b) => {
+                    // map(k)    → MapField(k)
+                    if b.method == BuiltinMethod::Map && b.sub_progs.len() == 1 {
+                        if let Some(k) = trivial_field(&b.sub_progs[0].ops) {
+                            out2.push(Opcode::MapField(k)); continue;
+                        }
+                    }
+                    // group_by(k) → GroupByField(k)
+                    if b.method == BuiltinMethod::GroupBy && b.sub_progs.len() == 1 {
+                        if let Some(k) = trivial_field(&b.sub_progs[0].ops) {
+                            out2.push(Opcode::GroupByField(k)); continue;
+                        }
+                    }
+                    // filter(field <cmp> lit|field) → FilterField*
+                    if b.method == BuiltinMethod::Filter && b.sub_progs.len() == 1 {
+                        if let Some(p) = detect_field_pred(&b.sub_progs[0].ops) {
+                            let lowered = match p {
+                                FieldPred::FieldCmpLit(k, super::ast::BinOp::Eq, lit) =>
+                                    Opcode::FilterFieldEqLit(k, lit),
+                                FieldPred::FieldCmpLit(k, op, lit) =>
+                                    Opcode::FilterFieldCmpLit(k, op, lit),
+                                FieldPred::FieldCmpField(k1, op, k2) =>
+                                    Opcode::FilterFieldCmpField(k1, op, k2),
+                            };
+                            out2.push(lowered); continue;
+                        }
+                    }
+                }
+                _ => {}
+            }
+            out2.push(op);
+        }
+        // Third pass: fold `FilterField* + count()` into FilterField*Count,
+        // and collapse chains of `MapField(k1) + MapFlatten(trivial k2) + ...`
+        // into a single `FlatMapChain([k1,k2,...])`.
+        let mut out3: Vec<Opcode> = Vec::with_capacity(out2.len());
+        for op in out2 {
+            // FilterField* + count()
+            if let Opcode::CallMethod(ref b) = op {
+                if b.method == BuiltinMethod::Count && b.sub_progs.is_empty() {
+                    match out3.last().cloned() {
+                        Some(Opcode::FilterFieldEqLit(k, lit)) => {
+                            out3.pop();
+                            out3.push(Opcode::FilterFieldEqLitCount(k, lit));
+                            continue;
+                        }
+                        Some(Opcode::FilterFieldCmpLit(k, cop, lit)) => {
+                            out3.pop();
+                            out3.push(Opcode::FilterFieldCmpLitCount(k, cop, lit));
+                            continue;
+                        }
+                        Some(Opcode::FilterFieldCmpField(k1, cop, k2)) => {
+                            out3.pop();
+                            out3.push(Opcode::FilterFieldCmpFieldCount(k1, cop, k2));
+                            continue;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            // MapField(k) + MapFlatten(trivial k2) → FlatMapChain([k, k2])
+            if let Opcode::MapFlatten(ref f) = op {
+                if let Some(k2) = trivial_field(&f.ops) {
+                    match out3.last().cloned() {
+                        Some(Opcode::MapField(k1)) => {
+                            out3.pop();
+                            out3.push(Opcode::FlatMapChain(Arc::from(vec![k1, k2])));
+                            continue;
+                        }
+                        Some(Opcode::FlatMapChain(ks)) => {
+                            let mut v: Vec<Arc<str>> = ks.iter().cloned().collect();
+                            v.push(k2);
+                            out3.pop();
+                            out3.push(Opcode::FlatMapChain(Arc::from(v)));
+                            continue;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            out3.push(op);
+        }
+        out3
     }
 
     /// Replace expensive ops with cheaper equivalents:
@@ -2343,21 +2676,34 @@ impl VM {
                     let mut acc_f: f64 = 0.0;
                     let mut is_float = false;
                     if let Val::Arr(a) = &recv {
-                        let mut scratch = env.clone();
-                        for item in a.iter() {
-                            let prev = scratch.swap_current(item.clone());
-                            let v = self.exec(f, &scratch)?;
-                            scratch.restore_current(prev);
-                            match v {
-                                Val::Int(n) => {
-                                    if is_float { acc_f += n as f64; } else { acc_i += n; }
+                        if let Some(k) = trivial_field(&f.ops) {
+                            for item in a.iter() {
+                                if let Val::Obj(m) = item {
+                                    match m.get(k.as_ref()) {
+                                        Some(Val::Int(n))   => { if is_float { acc_f += *n as f64; } else { acc_i += *n; } }
+                                        Some(Val::Float(x)) => { if !is_float { acc_f = acc_i as f64; is_float = true; } acc_f += *x; }
+                                        Some(Val::Null) | None => {}
+                                        _ => return err!("map(..).sum(): non-numeric mapped value"),
+                                    }
                                 }
-                                Val::Float(x) => {
-                                    if !is_float { acc_f = acc_i as f64; is_float = true; }
-                                    acc_f += x;
+                            }
+                        } else {
+                            let mut scratch = env.clone();
+                            for item in a.iter() {
+                                let prev = scratch.swap_current(item.clone());
+                                let v = self.exec(f, &scratch)?;
+                                scratch.restore_current(prev);
+                                match v {
+                                    Val::Int(n) => {
+                                        if is_float { acc_f += n as f64; } else { acc_i += n; }
+                                    }
+                                    Val::Float(x) => {
+                                        if !is_float { acc_f = acc_i as f64; is_float = true; }
+                                        acc_f += x;
+                                    }
+                                    Val::Null => {}
+                                    _ => return err!("map(..).sum(): non-numeric mapped value"),
                                 }
-                                Val::Null => {}
-                                _ => return err!("map(..).sum(): non-numeric mapped value"),
                             }
                         }
                     }
@@ -2368,20 +2714,390 @@ impl VM {
                     let mut sum: f64 = 0.0;
                     let mut n: usize = 0;
                     if let Val::Arr(a) = &recv {
-                        let mut scratch = env.clone();
-                        for item in a.iter() {
-                            let prev = scratch.swap_current(item.clone());
-                            let v = self.exec(f, &scratch)?;
-                            scratch.restore_current(prev);
-                            match v {
-                                Val::Int(x)   => { sum += x as f64; n += 1; }
-                                Val::Float(x) => { sum += x;        n += 1; }
-                                Val::Null => {}
-                                _ => return err!("map(..).avg(): non-numeric mapped value"),
+                        if let Some(k) = trivial_field(&f.ops) {
+                            for item in a.iter() {
+                                if let Val::Obj(m) = item {
+                                    match m.get(k.as_ref()) {
+                                        Some(Val::Int(x))   => { sum += *x as f64; n += 1; }
+                                        Some(Val::Float(x)) => { sum += *x;        n += 1; }
+                                        Some(Val::Null) | None => {}
+                                        _ => return err!("map(..).avg(): non-numeric mapped value"),
+                                    }
+                                }
+                            }
+                        } else {
+                            let mut scratch = env.clone();
+                            for item in a.iter() {
+                                let prev = scratch.swap_current(item.clone());
+                                let v = self.exec(f, &scratch)?;
+                                scratch.restore_current(prev);
+                                match v {
+                                    Val::Int(x)   => { sum += x as f64; n += 1; }
+                                    Val::Float(x) => { sum += x;        n += 1; }
+                                    Val::Null => {}
+                                    _ => return err!("map(..).avg(): non-numeric mapped value"),
+                                }
                             }
                         }
                     }
                     stack.push(if n == 0 { Val::Null } else { Val::Float(sum / n as f64) });
+                }
+                Opcode::MapMin(f) => {
+                    let recv = pop!(stack);
+                    let mut best_i: Option<i64> = None;
+                    let mut best_f: Option<f64> = None;
+                    macro_rules! fold_min {
+                        ($v:expr) => { match $v {
+                            Val::Int(n) => {
+                                let n = *n;
+                                if let Some(bf) = best_f { if (n as f64) < bf { best_f = Some(n as f64); } }
+                                else if let Some(bi) = best_i { if n < bi { best_i = Some(n); } }
+                                else { best_i = Some(n); }
+                            }
+                            Val::Float(x) => {
+                                let x = *x;
+                                if best_f.is_none() { best_f = Some(best_i.map(|i| i as f64).unwrap_or(x)); best_i = None; }
+                                if x < best_f.unwrap() { best_f = Some(x); }
+                            }
+                            Val::Null => {}
+                            _ => return err!("map(..).min(): non-numeric mapped value"),
+                        } }
+                    }
+                    if let Val::Arr(a) = &recv {
+                        if let Some(k) = trivial_field(&f.ops) {
+                            for item in a.iter() {
+                                if let Val::Obj(m) = item {
+                                    if let Some(v) = m.get(k.as_ref()) { fold_min!(v); }
+                                }
+                            }
+                        } else {
+                            let mut scratch = env.clone();
+                            for item in a.iter() {
+                                let prev = scratch.swap_current(item.clone());
+                                let v = self.exec(f, &scratch)?;
+                                scratch.restore_current(prev);
+                                fold_min!(&v);
+                            }
+                        }
+                    }
+                    stack.push(match (best_i, best_f) {
+                        (_, Some(x)) => Val::Float(x),
+                        (Some(i), _) => Val::Int(i),
+                        _ => Val::Null,
+                    });
+                }
+                Opcode::MapMax(f) => {
+                    let recv = pop!(stack);
+                    let mut best_i: Option<i64> = None;
+                    let mut best_f: Option<f64> = None;
+                    macro_rules! fold_max {
+                        ($v:expr) => { match $v {
+                            Val::Int(n) => {
+                                let n = *n;
+                                if let Some(bf) = best_f { if (n as f64) > bf { best_f = Some(n as f64); } }
+                                else if let Some(bi) = best_i { if n > bi { best_i = Some(n); } }
+                                else { best_i = Some(n); }
+                            }
+                            Val::Float(x) => {
+                                let x = *x;
+                                if best_f.is_none() { best_f = Some(best_i.map(|i| i as f64).unwrap_or(x)); best_i = None; }
+                                if x > best_f.unwrap() { best_f = Some(x); }
+                            }
+                            Val::Null => {}
+                            _ => return err!("map(..).max(): non-numeric mapped value"),
+                        } }
+                    }
+                    if let Val::Arr(a) = &recv {
+                        if let Some(k) = trivial_field(&f.ops) {
+                            for item in a.iter() {
+                                if let Val::Obj(m) = item {
+                                    if let Some(v) = m.get(k.as_ref()) { fold_max!(v); }
+                                }
+                            }
+                        } else {
+                            let mut scratch = env.clone();
+                            for item in a.iter() {
+                                let prev = scratch.swap_current(item.clone());
+                                let v = self.exec(f, &scratch)?;
+                                scratch.restore_current(prev);
+                                fold_max!(&v);
+                            }
+                        }
+                    }
+                    stack.push(match (best_i, best_f) {
+                        (_, Some(x)) => Val::Float(x),
+                        (Some(i), _) => Val::Int(i),
+                        _ => Val::Null,
+                    });
+                }
+
+                // ── Field-specialised fusions (Tier 3) ────────────────────
+                Opcode::MapField(k) => {
+                    let recv = pop!(stack);
+                    if let Val::Arr(a) = &recv {
+                        let mut out = Vec::with_capacity(a.len());
+                        for item in a.iter() {
+                            match item {
+                                Val::Obj(m) => out.push(m.get(k.as_ref()).cloned().unwrap_or(Val::Null)),
+                                _ => out.push(Val::Null),
+                            }
+                        }
+                        stack.push(Val::arr(out));
+                    } else {
+                        stack.push(Val::arr(Vec::new()));
+                    }
+                }
+                Opcode::MapFieldSum(k) => {
+                    let recv = pop!(stack);
+                    let mut acc_i: i64 = 0;
+                    let mut acc_f: f64 = 0.0;
+                    let mut is_float = false;
+                    if let Val::Arr(a) = &recv {
+                        for item in a.iter() {
+                            if let Val::Obj(m) = item {
+                                match m.get(k.as_ref()) {
+                                    Some(Val::Int(n))   => { if is_float { acc_f += *n as f64; } else { acc_i += *n; } }
+                                    Some(Val::Float(x)) => { if !is_float { acc_f = acc_i as f64; is_float = true; } acc_f += *x; }
+                                    Some(Val::Null) | None => {}
+                                    _ => return err!("map(k).sum(): non-numeric field"),
+                                }
+                            }
+                        }
+                    }
+                    stack.push(if is_float { Val::Float(acc_f) } else { Val::Int(acc_i) });
+                }
+                Opcode::MapFieldAvg(k) => {
+                    let recv = pop!(stack);
+                    let mut sum: f64 = 0.0;
+                    let mut n: usize = 0;
+                    if let Val::Arr(a) = &recv {
+                        for item in a.iter() {
+                            if let Val::Obj(m) = item {
+                                match m.get(k.as_ref()) {
+                                    Some(Val::Int(x))   => { sum += *x as f64; n += 1; }
+                                    Some(Val::Float(x)) => { sum += *x;        n += 1; }
+                                    Some(Val::Null) | None => {}
+                                    _ => return err!("map(k).avg(): non-numeric field"),
+                                }
+                            }
+                        }
+                    }
+                    stack.push(if n == 0 { Val::Null } else { Val::Float(sum / n as f64) });
+                }
+                Opcode::MapFieldMin(k) => {
+                    let recv = pop!(stack);
+                    let mut best_i: Option<i64> = None;
+                    let mut best_f: Option<f64> = None;
+                    if let Val::Arr(a) = &recv {
+                        for item in a.iter() {
+                            if let Val::Obj(m) = item {
+                                match m.get(k.as_ref()) {
+                                    Some(Val::Int(n)) => {
+                                        let n = *n;
+                                        if let Some(bf) = best_f { if (n as f64) < bf { best_f = Some(n as f64); } }
+                                        else if let Some(bi) = best_i { if n < bi { best_i = Some(n); } }
+                                        else { best_i = Some(n); }
+                                    }
+                                    Some(Val::Float(x)) => {
+                                        let x = *x;
+                                        if best_f.is_none() { best_f = Some(best_i.map(|i| i as f64).unwrap_or(x)); best_i = None; }
+                                        if x < best_f.unwrap() { best_f = Some(x); }
+                                    }
+                                    Some(Val::Null) | None => {}
+                                    _ => return err!("map(k).min(): non-numeric field"),
+                                }
+                            }
+                        }
+                    }
+                    stack.push(match (best_i, best_f) {
+                        (_, Some(x)) => Val::Float(x),
+                        (Some(i), _) => Val::Int(i),
+                        _ => Val::Null,
+                    });
+                }
+                Opcode::MapFieldMax(k) => {
+                    let recv = pop!(stack);
+                    let mut best_i: Option<i64> = None;
+                    let mut best_f: Option<f64> = None;
+                    if let Val::Arr(a) = &recv {
+                        for item in a.iter() {
+                            if let Val::Obj(m) = item {
+                                match m.get(k.as_ref()) {
+                                    Some(Val::Int(n)) => {
+                                        let n = *n;
+                                        if let Some(bf) = best_f { if (n as f64) > bf { best_f = Some(n as f64); } }
+                                        else if let Some(bi) = best_i { if n > bi { best_i = Some(n); } }
+                                        else { best_i = Some(n); }
+                                    }
+                                    Some(Val::Float(x)) => {
+                                        let x = *x;
+                                        if best_f.is_none() { best_f = Some(best_i.map(|i| i as f64).unwrap_or(x)); best_i = None; }
+                                        if x > best_f.unwrap() { best_f = Some(x); }
+                                    }
+                                    Some(Val::Null) | None => {}
+                                    _ => return err!("map(k).max(): non-numeric field"),
+                                }
+                            }
+                        }
+                    }
+                    stack.push(match (best_i, best_f) {
+                        (_, Some(x)) => Val::Float(x),
+                        (Some(i), _) => Val::Int(i),
+                        _ => Val::Null,
+                    });
+                }
+                Opcode::MapFieldUnique(k) => {
+                    let recv = pop!(stack);
+                    let mut out: Vec<Val> = Vec::new();
+                    let mut seen_int: std::collections::HashSet<i64> = std::collections::HashSet::new();
+                    let mut seen_str: std::collections::HashSet<Arc<str>> = std::collections::HashSet::new();
+                    let mut seen_other: Vec<Val> = Vec::new();
+                    if let Val::Arr(a) = &recv {
+                        for item in a.iter() {
+                            if let Val::Obj(m) = item {
+                                if let Some(v) = m.get(k.as_ref()) {
+                                    match v {
+                                        Val::Int(n) => {
+                                            if seen_int.insert(*n) { out.push(v.clone()); }
+                                        }
+                                        Val::Str(s) => {
+                                            if seen_str.insert(s.clone()) { out.push(v.clone()); }
+                                        }
+                                        _ => {
+                                            if !seen_other.iter().any(|o| crate::eval::util::vals_eq(o, v)) {
+                                                seen_other.push(v.clone());
+                                                out.push(v.clone());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    stack.push(Val::arr(out));
+                }
+
+                // ── FlatMapChain (Tier 1) ─────────────────────────────────
+                Opcode::FlatMapChain(keys) => {
+                    let recv = pop!(stack);
+                    let mut cur: Vec<Val> = match recv {
+                        Val::Arr(a) => a.as_ref().clone(),
+                        _ => Vec::new(),
+                    };
+                    for k in keys.iter() {
+                        let mut next: Vec<Val> = Vec::with_capacity(cur.len() * 4);
+                        for item in cur.drain(..) {
+                            if let Val::Obj(m) = item {
+                                if let Some(Val::Arr(inner)) = m.get(k.as_ref()) {
+                                    for v in inner.iter() { next.push(v.clone()); }
+                                }
+                            }
+                        }
+                        cur = next;
+                    }
+                    stack.push(Val::arr(cur));
+                }
+
+                // ── Predicate specialisation (Tier 4) ─────────────────────
+                Opcode::FilterFieldEqLit(k, lit) => {
+                    let recv = pop!(stack);
+                    let mut out = Vec::new();
+                    if let Val::Arr(a) = &recv {
+                        for item in a.iter() {
+                            if let Val::Obj(m) = item {
+                                if let Some(v) = m.get(k.as_ref()) {
+                                    if crate::eval::util::vals_eq(v, lit) {
+                                        out.push(item.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    stack.push(Val::arr(out));
+                }
+                Opcode::FilterFieldCmpLit(k, op, lit) => {
+                    let recv = pop!(stack);
+                    let mut out = Vec::new();
+                    if let Val::Arr(a) = &recv {
+                        for item in a.iter() {
+                            if let Val::Obj(m) = item {
+                                if let Some(v) = m.get(k.as_ref()) {
+                                    if cmp_val_binop(v, *op, lit) {
+                                        out.push(item.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    stack.push(Val::arr(out));
+                }
+                Opcode::FilterFieldCmpField(k1, op, k2) => {
+                    let recv = pop!(stack);
+                    let mut out = Vec::new();
+                    if let Val::Arr(a) = &recv {
+                        for item in a.iter() {
+                            if let Val::Obj(m) = item {
+                                let v1 = m.get(k1.as_ref());
+                                let v2 = m.get(k2.as_ref());
+                                if let (Some(v1), Some(v2)) = (v1, v2) {
+                                    if cmp_val_binop(v1, *op, v2) {
+                                        out.push(item.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    stack.push(Val::arr(out));
+                }
+                Opcode::FilterFieldEqLitCount(k, lit) => {
+                    let recv = pop!(stack);
+                    let mut n: i64 = 0;
+                    if let Val::Arr(a) = &recv {
+                        for item in a.iter() {
+                            if let Val::Obj(m) = item {
+                                if let Some(v) = m.get(k.as_ref()) {
+                                    if crate::eval::util::vals_eq(v, lit) { n += 1; }
+                                }
+                            }
+                        }
+                    }
+                    stack.push(Val::Int(n));
+                }
+                Opcode::FilterFieldCmpLitCount(k, op, lit) => {
+                    let recv = pop!(stack);
+                    let mut n: i64 = 0;
+                    if let Val::Arr(a) = &recv {
+                        for item in a.iter() {
+                            if let Val::Obj(m) = item {
+                                if let Some(v) = m.get(k.as_ref()) {
+                                    if cmp_val_binop(v, *op, lit) { n += 1; }
+                                }
+                            }
+                        }
+                    }
+                    stack.push(Val::Int(n));
+                }
+                Opcode::FilterFieldCmpFieldCount(k1, op, k2) => {
+                    let recv = pop!(stack);
+                    let mut n: i64 = 0;
+                    if let Val::Arr(a) = &recv {
+                        for item in a.iter() {
+                            if let Val::Obj(m) = item {
+                                let v1 = m.get(k1.as_ref());
+                                let v2 = m.get(k2.as_ref());
+                                if let (Some(v1), Some(v2)) = (v1, v2) {
+                                    if cmp_val_binop(v1, *op, v2) { n += 1; }
+                                }
+                            }
+                        }
+                    }
+                    stack.push(Val::Int(n));
+                }
+
+                // ── GroupByField (Tier 2) ─────────────────────────────────
+                Opcode::GroupByField(k) => {
+                    let recv = pop!(stack);
+                    stack.push(group_by_field(&recv, k.as_ref()));
                 }
                 Opcode::FilterMapSum { pred, map } => {
                     let recv = pop!(stack);
