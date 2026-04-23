@@ -402,6 +402,9 @@ pub enum Opcode {
     FilterFieldEqLitMapField(Arc<str>, Val, Arc<str>),
     /// `filter(kp <cop> lit).map(kproj)` fused — single pass, no intermediate array.
     FilterFieldCmpLitMapField(Arc<str>, super::ast::BinOp, Val, Arc<str>),
+    /// `filter(f1 == l1 AND f2 == l2 AND …).count()` fused — zero alloc,
+    /// one IC slot per conjunct field.
+    FilterFieldsAllEqLitCount(Arc<[(Arc<str>, Val)]>),
     /// `filter(k == lit).count()` — count without materialising.
     FilterFieldEqLitCount(Arc<str>, Val),
     /// `filter(k <op> lit).count()` — count cmp without materialising.
@@ -702,6 +705,42 @@ fn detect_field_pred(ops: &[Opcode]) -> Option<FieldPred> {
         }
     }
     None
+}
+
+/// Detect a predicate body that is a conjunction (AND-chain) of
+/// `field == lit` equalities.  Returns the flat list of `(field, lit)`
+/// pairs when the entire pred reduces to `f1 == l1 AND f2 == l2 AND ...`.
+///
+/// Pattern accepted (N ≥ 2):
+///   `[⟨field==lit⟩, AndOp(⟨field==lit⟩), AndOp(⟨field==lit⟩), …]`
+/// where `⟨field==lit⟩` is one of the trivial-field-eq-lit forms
+/// (`[LoadIdent k, PushLit, Eq]`, `[PushCurrent, GetField k, PushLit, Eq]`,
+/// or the lit-first flipped form).
+fn detect_field_eq_conjuncts(ops: &[Opcode]) -> Option<Vec<(Arc<str>, Val)>> {
+    let mut pairs: Vec<(Arc<str>, Val)> = Vec::new();
+    // First conjunct: a leading ⟨field==lit⟩ using detect_field_pred.
+    // Find the split point: everything before the first AndOp is conjunct #1.
+    let first_and = ops.iter().position(|o| matches!(o, Opcode::AndOp(_)));
+    let first_len = first_and.unwrap_or(ops.len());
+    let first_slice = &ops[..first_len];
+    match detect_field_pred(first_slice)? {
+        FieldPred::FieldCmpLit(k, super::ast::BinOp::Eq, lit) => pairs.push((k, lit)),
+        _ => return None,
+    }
+    // Subsequent conjuncts: each an Opcode::AndOp(sub) where sub itself is
+    // a ⟨field==lit⟩. Walk every remaining op; reject if any non-AndOp
+    // appears past the first split.
+    for op in &ops[first_len..] {
+        if let Opcode::AndOp(sub) = op {
+            match detect_field_pred(&sub.ops)? {
+                FieldPred::FieldCmpLit(k, super::ast::BinOp::Eq, lit) => pairs.push((k, lit)),
+                _ => return None,
+            }
+        } else {
+            return None;
+        }
+    }
+    if pairs.len() >= 2 { Some(pairs) } else { None }
 }
 
 /// Compare two `Val`s using a binary comparison operator. Only implements the
@@ -1244,6 +1283,12 @@ impl Compiler {
                 Opcode::MapUnique(ref f) => {
                     if let Some(k) = trivial_field(&f.ops) {
                         out2.push(Opcode::MapFieldUnique(k)); continue;
+                    }
+                }
+                Opcode::FilterCount(ref pred) => {
+                    if let Some(pairs) = detect_field_eq_conjuncts(&pred.ops) {
+                        out2.push(Opcode::FilterFieldsAllEqLitCount(Arc::from(pairs)));
+                        continue;
                     }
                 }
                 Opcode::CallMethod(ref b) => {
@@ -3258,6 +3303,26 @@ impl VM {
                         }
                     }
                     stack.push(Val::arr(out));
+                }
+                Opcode::FilterFieldsAllEqLitCount(pairs) => {
+                    let recv = pop!(stack);
+                    let mut n: i64 = 0;
+                    let mut ics: SmallVec<[Option<usize>; 4]> = SmallVec::new();
+                    ics.resize(pairs.len(), None);
+                    if let Val::Arr(a) = &recv {
+                        'item: for item in a.iter() {
+                            if let Val::Obj(m) = item {
+                                for (i, (k, lit)) in pairs.iter().enumerate() {
+                                    match lookup_field_cached(m, k, &mut ics[i]) {
+                                        Some(v) if crate::eval::util::vals_eq(v, lit) => {}
+                                        _ => continue 'item,
+                                    }
+                                }
+                                n += 1;
+                            }
+                        }
+                    }
+                    stack.push(Val::Int(n));
                 }
                 Opcode::FilterFieldEqLitCount(k, lit) => {
                     let recv = pop!(stack);
