@@ -19,3 +19,8 @@ parking_lot = "0.12"
 smallvec = { version = "1", features = ["union"] }
 indexmap = "2"
 memchr = "2"
+
+[dev-dependencies]
+jaq-core = "3.0"
+jaq-std = "3.0"
+jaq-json = "2.0"
