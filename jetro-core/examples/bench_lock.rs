@@ -6,14 +6,17 @@
 //! Usage:
 //!   cargo run --release -p jetro-core --example bench_lock
 //!   cargo run --release -p jetro-core --example bench_lock -- --update
+//!   cargo run --release -p jetro-core --example bench_lock -- --hash-only
 //!
 //! Exit codes:
 //!   0 — all queries within tolerance
 //!   1 — at least one regression (perf or result)
 //!   2 — baseline missing (first run); use --update to create
 //!
-//! Tolerance: 1.15x slower than baseline fails. Hash mismatch fails.
-//! Warmup: 3 iterations before timing. Timing: median of 10.
+//! Modes:
+//!   default    — full gate (timing + hash). Laptop / dedicated bench.
+//!   --hash-only — correctness only (no timing). CI-safe on shared runners.
+//!   --update   — reseed baseline with current measurements.
 
 use std::collections::hash_map::DefaultHasher;
 use std::fs;
@@ -145,20 +148,35 @@ fn baseline_path() -> PathBuf {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let update = args.iter().any(|a| a == "--update");
+    let update    = args.iter().any(|a| a == "--update");
+    let hash_only = args.iter().any(|a| a == "--hash-only");
 
     let n_orders = 20_000usize;
     let items_per_order = 6usize;
     let doc = synth_doc(n_orders, items_per_order);
     let j = Jetro::new(doc);
 
-    println!("bench_lock: {} orders x {} items, warmup {}, iters {}",
-             n_orders, items_per_order, WARMUP, ITERS);
+    if hash_only {
+        println!("bench_lock --hash-only: {} orders x {} items (correctness gate, no timing)",
+                 n_orders, items_per_order);
+    } else {
+        println!("bench_lock: {} orders x {} items, warmup {}, iters {}",
+                 n_orders, items_per_order, WARMUP, ITERS);
+    }
 
     let mut entries = Vec::with_capacity(QUERIES.len());
     for (name, q) in QUERIES {
-        let (med, hash) = measure_us(|| j.collect(q).unwrap());
-        println!("  {:28} {:>7}µs  hash={:016x}", name, med, hash);
+        let (med, hash) = if hash_only {
+            let v = j.collect(q).unwrap();
+            (0u128, result_hash(&v))
+        } else {
+            measure_us(|| j.collect(q).unwrap())
+        };
+        if hash_only {
+            println!("  {:28} hash={:016x}", name, hash);
+        } else {
+            println!("  {:28} {:>7}µs  hash={:016x}", name, med, hash);
+        }
         entries.push(Entry { query: (*q).into(), best_us: med, result_hash: hash });
     }
 
@@ -186,14 +204,19 @@ fn main() {
     }
 
     let mut fails: Vec<String> = Vec::new();
-    println!("\n{:<30} {:>9} {:>9} {:>7}  hash", "query", "base_µs", "cur_µs", "ratio");
+    if hash_only {
+        println!("\n{:<30} {:>18} {:>18}  result", "query", "baseline", "current");
+    } else {
+        println!("\n{:<30} {:>9} {:>9} {:>7}  hash", "query", "base_µs", "cur_µs", "ratio");
+    }
     for (i, e) in entries.iter().enumerate() {
         let b = &baseline.entries[i];
         let ratio = e.best_us as f64 / b.best_us.max(1) as f64;
         let hash_ok = e.result_hash == b.result_hash;
         let abs_delta = e.best_us.saturating_sub(b.best_us);
         // Perf passes if under ratio OR under absolute noise floor.
-        let perf_ok = ratio <= TOLERANCE || abs_delta < NOISE_FLOOR_US;
+        // In hash-only mode, skip perf check entirely.
+        let perf_ok = hash_only || ratio <= TOLERANCE || abs_delta < NOISE_FLOOR_US;
         let flag = match (perf_ok, hash_ok) {
             (true, true)  => "  ok",
             (false, true) => " SLOW",
@@ -201,9 +224,15 @@ fn main() {
             (false, false) => " BOTH",
         };
         let name = QUERIES[i].0;
-        println!("{:<30} {:>9} {:>9} {:>6.2}x  {}{}",
-                 name, b.best_us, e.best_us, ratio,
-                 if hash_ok { "ok" } else { "MISMATCH" }, flag);
+        if hash_only {
+            println!("{:<30} {:>18x} {:>18x}  {}",
+                     name, b.result_hash, e.result_hash,
+                     if hash_ok { "ok" } else { "MISMATCH" });
+        } else {
+            println!("{:<30} {:>9} {:>9} {:>6.2}x  {}{}",
+                     name, b.best_us, e.best_us, ratio,
+                     if hash_ok { "ok" } else { "MISMATCH" }, flag);
+        }
         if !perf_ok {
             fails.push(format!("{}: {:.2}x slower ({}µs → {}µs)", name, ratio, b.best_us, e.best_us));
         }

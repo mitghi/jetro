@@ -2,21 +2,21 @@ name: Rust
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "v2.2" ]
   pull_request:
-    branches: [ "main" ]
+    branches: [ "main", "v2.2" ]
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   build:
-
     runs-on: ubuntu-latest
-
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
     - name: Build
-      run: cargo build --verbose
-    - name: Run tests
-      run: cargo test --verbose
+      run: cargo build --verbose --workspace
+    - name: Run tests (release)
+      run: cargo test --release --verbose --workspace
+    - name: Correctness gate (bench_lock --hash-only)
+      run: cargo run --release -p jetro-core --example bench_lock -- --hash-only
