@@ -1005,6 +1005,7 @@ impl Compiler {
         let ops = if cfg.filter_fusion   { Self::pass_filter_fusion(ops) }   else { ops };
         let ops = if cfg.find_quantifier { Self::pass_find_quantifier(ops) } else { ops };
         let ops = if cfg.filter_fusion   { Self::pass_field_specialise(ops) } else { ops };
+        let ops = Self::pass_list_comp_specialise(ops);
         let ops = if cfg.strength_reduce { Self::pass_strength_reduce(ops) } else { ops };
         let ops = if cfg.redundant_ops   { Self::pass_redundant_ops(ops) }   else { ops };
         let ops = if cfg.kind_check_fold { Self::pass_kind_check_fold(ops) } else { ops };
@@ -1405,6 +1406,70 @@ impl Compiler {
             out3.push(op);
         }
         out3
+    }
+
+    /// Lower simple single-var list comprehensions to the same fused
+    /// opcodes we already emit for `.filter(k op lit).map(k2)` chains.
+    /// Matches `[x.k2 for x in <iter> (if x.k op lit)]` — a common shape
+    /// that otherwise pays ~4 opcode dispatches per iteration.
+    fn pass_list_comp_specialise(ops: Vec<Opcode>) -> Vec<Opcode> {
+        #[inline]
+        fn proj_key(ops: &[Opcode], var: &str) -> Option<Arc<str>> {
+            match ops {
+                [Opcode::LoadIdent(v), Opcode::GetField(k)] if v.as_ref() == var =>
+                    Some(k.clone()),
+                _ => None,
+            }
+        }
+        #[inline]
+        fn cond_pred(ops: &[Opcode], var: &str)
+            -> Option<(Arc<str>, super::ast::BinOp, Val)>
+        {
+            if ops.len() != 4 { return None; }
+            let k = match (&ops[0], &ops[1]) {
+                (Opcode::LoadIdent(v), Opcode::GetField(k)) if v.as_ref() == var =>
+                    k.clone(),
+                _ => return None,
+            };
+            let lit = trivial_literal(&ops[2])?;
+            let op = cmp_opcode(&ops[3])?;
+            Some((k, op, lit))
+        }
+
+        let mut out: Vec<Opcode> = Vec::with_capacity(ops.len());
+        for op in ops {
+            if let Opcode::ListComp(ref spec) = op {
+                if spec.vars.len() == 1 {
+                    let var = spec.vars[0].as_ref();
+                    if let Some(proj) = proj_key(&spec.expr.ops, var) {
+                        match &spec.cond {
+                            Some(cond) => {
+                                if let Some((pk, cop, lit)) = cond_pred(&cond.ops, var) {
+                                    for iop in spec.iter.ops.iter() {
+                                        out.push(iop.clone());
+                                    }
+                                    if matches!(cop, super::ast::BinOp::Eq) {
+                                        out.push(Opcode::FilterFieldEqLitMapField(pk, lit, proj));
+                                    } else {
+                                        out.push(Opcode::FilterFieldCmpLitMapField(pk, cop, lit, proj));
+                                    }
+                                    continue;
+                                }
+                            }
+                            None => {
+                                for iop in spec.iter.ops.iter() {
+                                    out.push(iop.clone());
+                                }
+                                out.push(Opcode::MapField(proj));
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+            out.push(op);
+        }
+        out
     }
 
     /// Replace expensive ops with cheaper equivalents:

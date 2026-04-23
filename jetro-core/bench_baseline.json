@@ -64,7 +64,7 @@
     },
     {
       "query": "[o.id for o in $.orders if o.total > 1000]",
-      "best_us": 7055,
+      "best_us": 1432,
       "result_hash": 3483644353972730971
     }
   ]
