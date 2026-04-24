@@ -6405,21 +6405,40 @@ impl VM {
                 Opcode::MapFString(parts) => {
                     let parts = Arc::clone(parts);
                     let recv = pop!(stack);
-                    let recv = if matches!(&recv, Val::StrVec(_) | Val::IntVec(_) | Val::FloatVec(_)) {
+                    let recv = if matches!(&recv, Val::IntVec(_) | Val::FloatVec(_)) {
                         recv.into_arr()
                     } else { recv };
-                    let out_vec: Vec<Val> = if let Val::Arr(a) = &recv {
-                        let mut out = Vec::with_capacity(a.len());
-                        let mut scratch = env.clone();
-                        for item in a.iter() {
-                            let prev = scratch.swap_current(item.clone());
-                            let result = self.exec_fstring(&parts, &scratch)?;
-                            scratch.restore_current(prev);
-                            out.push(result);
+                    // Output is all-strings by construction — emit Val::StrVec
+                    // (Arc<Vec<Arc<str>>>) to drop the per-row Val enum tag
+                    // and keep the columnar lane through downstream methods.
+                    let out_strs: Vec<Arc<str>> = match &recv {
+                        Val::Arr(a) => {
+                            let mut out = Vec::with_capacity(a.len());
+                            let mut scratch = env.clone();
+                            for item in a.iter() {
+                                let prev = scratch.swap_current(item.clone());
+                                let result = self.exec_fstring(&parts, &scratch)?;
+                                scratch.restore_current(prev);
+                                if let Val::Str(s) = result { out.push(s); }
+                                else { out.push(Arc::<str>::from("")); }
+                            }
+                            out
                         }
-                        out
-                    } else { Vec::new() };
-                    stack.push(Val::arr(out_vec));
+                        Val::StrVec(a) => {
+                            let mut out = Vec::with_capacity(a.len());
+                            let mut scratch = env.clone();
+                            for s in a.iter() {
+                                let prev = scratch.swap_current(Val::Str(s.clone()));
+                                let result = self.exec_fstring(&parts, &scratch)?;
+                                scratch.restore_current(prev);
+                                if let Val::Str(s) = result { out.push(s); }
+                                else { out.push(Arc::<str>::from("")); }
+                            }
+                            out
+                        }
+                        _ => Vec::new(),
+                    };
+                    stack.push(Val::StrVec(Arc::new(out_strs)));
                 }
                 Opcode::MapStrSlice { start, end } => {
                     let v = pop!(stack);
