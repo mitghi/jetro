@@ -152,6 +152,12 @@ fn op_arity(op: &Opcode) -> Arity {
             | Opcode::FlatMapChain(_)
             | Opcode::FilterFieldEqLit(_, _) | Opcode::FilterFieldCmpLit(_, _, _)
             | Opcode::FilterCurrentCmpLit(_, _)
+            | Opcode::FilterStrVecStartsWith(_)
+            | Opcode::FilterStrVecEndsWith(_)
+            | Opcode::FilterStrVecContains(_)
+            | Opcode::MapStrVecUpper
+            | Opcode::MapStrVecLower
+            | Opcode::MapStrVecTrim
             | Opcode::FilterFieldCmpField(_, _, _)
             | Opcode::FilterFieldEqLitMapField(_, _, _)
             | Opcode::FilterFieldCmpLitMapField(_, _, _, _)

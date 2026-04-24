@@ -291,6 +291,88 @@ fn filter_strvec_mixed_types_not_columnar() {
     assert_eq!(out.to_string(), r#"["a"]"#);
 }
 
+#[test]
+fn filter_strvec_starts_with() {
+    let doc = json!(["apple", "apricot", "banana", "avocado"]);
+    let out = Jetro::new(doc).collect_val(r#"$.filter(@.starts_with("ap"))"#).unwrap();
+    assert_eq!(out.to_string(), r#"["apple","apricot"]"#);
+}
+
+#[test]
+fn filter_strvec_ends_with() {
+    let doc = json!(["config.json", "main.rs", "notes.txt", "lib.rs"]);
+    let out = Jetro::new(doc).collect_val(r#"$.filter(@.ends_with(".rs"))"#).unwrap();
+    assert_eq!(out.to_string(), r#"["main.rs","lib.rs"]"#);
+}
+
+#[test]
+fn filter_strvec_contains() {
+    let doc = json!(["foobar", "baz", "barfoo", "quux"]);
+    let out = Jetro::new(doc).collect_val(r#"$.filter(@.contains("bar"))"#).unwrap();
+    assert_eq!(out.to_string(), r#"["foobar","barfoo"]"#);
+}
+
+#[test]
+fn filter_strvec_contains_empty_needle() {
+    // Empty needle should match every string.
+    let doc = json!(["a", "bb", "ccc"]);
+    let out = Jetro::new(doc).collect_val(r#"$.filter(@.contains(""))"#).unwrap();
+    assert_eq!(out.to_string(), r#"["a","bb","ccc"]"#);
+}
+
+#[test]
+fn filter_strvec_starts_with_no_match() {
+    let doc = json!(["hi", "hello"]);
+    let out = Jetro::new(doc).collect_val(r#"$.filter(@.starts_with("xyz"))"#).unwrap();
+    assert_eq!(out.to_string(), r#"[]"#);
+}
+
+#[test]
+fn filter_strvec_starts_with_needle_longer_than_item() {
+    // Guard: needle length > item length must not panic.
+    let doc = json!(["a", "bb", "ccc"]);
+    let out = Jetro::new(doc).collect_val(r#"$.filter(@.starts_with("abcd"))"#).unwrap();
+    assert_eq!(out.to_string(), r#"[]"#);
+}
+
+#[test]
+fn map_strvec_upper() {
+    let doc = json!(["foo", "Bar", "BAZ"]);
+    let out = Jetro::new(doc).collect_val(r#"$.map(@.upper())"#).unwrap();
+    assert_eq!(out.to_string(), r#"["FOO","BAR","BAZ"]"#);
+}
+
+#[test]
+fn map_strvec_lower() {
+    let doc = json!(["FOO", "Bar", "baz"]);
+    let out = Jetro::new(doc).collect_val(r#"$.map(@.lower())"#).unwrap();
+    assert_eq!(out.to_string(), r#"["foo","bar","baz"]"#);
+}
+
+#[test]
+fn map_strvec_trim() {
+    let doc = json!(["  a  ", "b", "\tc\n"]);
+    let out = Jetro::new(doc).collect_val(r#"$.map(@.trim())"#).unwrap();
+    assert_eq!(out.to_string(), r#"["a","b","c"]"#);
+}
+
+#[test]
+fn map_strvec_upper_unicode_fallback() {
+    // Non-ASCII input uses std to_uppercase() path, not byte-loop.
+    let doc = json!(["café", "niño"]);
+    let out = Jetro::new(doc).collect_val(r#"$.map(@.upper())"#).unwrap();
+    assert_eq!(out.to_string(), r#"["CAFÉ","NIÑO"]"#);
+}
+
+#[test]
+fn strvec_filter_then_map_chain() {
+    // StrVec path propagates through chained filter + map.
+    let doc = json!(["apple", "banana", "avocado", "cherry"]);
+    let out = Jetro::new(doc)
+        .collect_val(r#"$.filter(@.starts_with("a")).map(@.upper())"#).unwrap();
+    assert_eq!(out.to_string(), r#"["APPLE","AVOCADO"]"#);
+}
+
 // ── Tier C/E: fanout / zip_shape / rec / trace_path ──────────────────────
 
 #[test]

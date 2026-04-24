@@ -43,6 +43,7 @@ use std::{
 };
 use indexmap::IndexMap;
 use memchr::memchr;
+use memchr::memmem;
 use smallvec::SmallVec;
 
 use crate::ast::*;
@@ -489,6 +490,18 @@ pub enum Opcode {
     /// Columnar fast path: IntVec/FloatVec receivers loop on the raw
     /// slice and emit a typed vec; Arr falls back to element iteration.
     FilterCurrentCmpLit(super::ast::BinOp, Val),
+    /// `filter(@.starts_with(lit))` — columnar prefix compare on StrVec.
+    FilterStrVecStartsWith(Arc<str>),
+    /// `filter(@.ends_with(lit))` — columnar suffix compare on StrVec.
+    FilterStrVecEndsWith(Arc<str>),
+    /// `filter(@.contains(lit))` — SIMD substring (memchr::memmem) on StrVec.
+    FilterStrVecContains(Arc<str>),
+    /// `map(@.upper())` — ASCII-fast in-lane StrVec→StrVec.
+    MapStrVecUpper,
+    /// `map(@.lower())` — ASCII-fast in-lane StrVec→StrVec.
+    MapStrVecLower,
+    /// `map(@.trim())` — in-lane StrVec→StrVec.
+    MapStrVecTrim,
 
     // ── group_by specialisation (Tier 2) ──────────────────────────────────────
     /// `group_by(k)` where `k` is a single field ident. Uses FxHashMap with
@@ -794,6 +807,52 @@ fn detect_current_cmp_lit(ops: &[Opcode]) -> Option<(super::ast::BinOp, Val)> {
         if let (Some(lit), Some(op)) = (trivial_literal(a), cmp_opcode(b)) {
             return Some((flip_cmp(op), lit));
         }
+    }
+    None
+}
+
+/// Which StrVec string predicate is recognised at a filter site.
+#[derive(Debug, Clone, Copy)]
+enum StrVecPred { StartsWith, EndsWith, Contains }
+
+/// Detect `@.starts_with(lit)` / `@.ends_with(lit)` / `@.contains(lit)` /
+/// `@.includes(lit)` filter bodies.  Returns which predicate kind and the
+/// literal needle as `Arc<str>`.
+fn detect_current_str_method(ops: &[Opcode]) -> Option<(StrVecPred, Arc<str>)> {
+    // Form: [PushCurrent, CallMethod{<str method>, sub_progs:[[PushStr(lit)]]}]
+    if let [Opcode::PushCurrent, Opcode::CallMethod(b)] = ops {
+        if b.sub_progs.len() != 1 { return None; }
+        let sub = &b.sub_progs[0];
+        if sub.ops.len() != 1 { return None; }
+        let lit = match &sub.ops[0] {
+            Opcode::PushStr(s) => s.clone(),
+            _ => return None,
+        };
+        let kind = match b.method {
+            BuiltinMethod::StartsWith => StrVecPred::StartsWith,
+            BuiltinMethod::EndsWith   => StrVecPred::EndsWith,
+            // `contains` aliases to `includes` at parse time.
+            BuiltinMethod::Includes   => StrVecPred::Contains,
+            _ => return None,
+        };
+        return Some((kind, lit));
+    }
+    None
+}
+
+/// Detect `@.upper()` / `@.lower()` / `@.trim()` map bodies → in-lane StrVec op.
+#[derive(Debug, Clone, Copy)]
+enum StrVecMap { Upper, Lower, Trim }
+
+fn detect_current_str_nullary(ops: &[Opcode]) -> Option<StrVecMap> {
+    if let [Opcode::PushCurrent, Opcode::CallMethod(b)] = ops {
+        if !b.sub_progs.is_empty() { return None; }
+        return Some(match b.method {
+            BuiltinMethod::Upper => StrVecMap::Upper,
+            BuiltinMethod::Lower => StrVecMap::Lower,
+            BuiltinMethod::Trim  => StrVecMap::Trim,
+            _ => return None,
+        });
     }
     None
 }
@@ -1813,6 +1872,26 @@ impl Compiler {
                         // filter(@ <cmp> lit) → FilterCurrentCmpLit
                         if let Some((op, lit)) = detect_current_cmp_lit(&b.sub_progs[0].ops) {
                             out2.push(Opcode::FilterCurrentCmpLit(op, lit));
+                            continue;
+                        }
+                        // filter(@.starts_with/ends_with/contains(lit)) → FilterStrVec*
+                        if let Some((kind, lit)) = detect_current_str_method(&b.sub_progs[0].ops) {
+                            out2.push(match kind {
+                                StrVecPred::StartsWith => Opcode::FilterStrVecStartsWith(lit),
+                                StrVecPred::EndsWith   => Opcode::FilterStrVecEndsWith(lit),
+                                StrVecPred::Contains   => Opcode::FilterStrVecContains(lit),
+                            });
+                            continue;
+                        }
+                    }
+                    // map(@.upper/lower/trim()) → MapStrVec*
+                    if b.method == BuiltinMethod::Map && b.sub_progs.len() == 1 {
+                        if let Some(kind) = detect_current_str_nullary(&b.sub_progs[0].ops) {
+                            out2.push(match kind {
+                                StrVecMap::Upper => Opcode::MapStrVecUpper,
+                                StrVecMap::Lower => Opcode::MapStrVecLower,
+                                StrVecMap::Trim  => Opcode::MapStrVecTrim,
+                            });
                             continue;
                         }
                     }
@@ -3482,6 +3561,10 @@ impl VM {
                 }
                 Opcode::FilterMap { pred, map } => {
                     let recv = pop!(stack);
+                    let recv = match recv {
+                        Val::StrVec(_) | Val::IntVec(_) | Val::FloatVec(_) => recv.into_arr(),
+                        v => v,
+                    };
                     if let Val::Arr(a) = recv {
                         let mut out = Vec::with_capacity(a.len());
                         let mut scratch = env.clone();
@@ -3499,6 +3582,10 @@ impl VM {
                 }
                 Opcode::MapFilter { map, pred } => {
                     let recv = pop!(stack);
+                    let recv = match recv {
+                        Val::StrVec(_) | Val::IntVec(_) | Val::FloatVec(_) => recv.into_arr(),
+                        v => v,
+                    };
                     if let Val::Arr(a) = recv {
                         let mut out = Vec::with_capacity(a.len());
                         let mut scratch = env.clone();
@@ -3518,6 +3605,10 @@ impl VM {
                 }
                 Opcode::FilterFilter { p1, p2 } => {
                     let recv = pop!(stack);
+                    let recv = match recv {
+                        Val::StrVec(_) | Val::IntVec(_) | Val::FloatVec(_) => recv.into_arr(),
+                        v => v,
+                    };
                     if let Val::Arr(a) = recv {
                         let mut out = Vec::with_capacity(a.len());
                         let mut scratch = env.clone();
@@ -4542,6 +4633,198 @@ impl VM {
                     }
                     stack.push(Val::arr(out));
                 }
+                Opcode::FilterStrVecStartsWith(needle) => {
+                    let recv = pop!(stack);
+                    let n_b = needle.as_bytes();
+                    match &recv {
+                        Val::StrVec(a) => {
+                            let mut out: Vec<Arc<str>> = Vec::with_capacity(a.len());
+                            for s in a.iter() {
+                                let b = s.as_bytes();
+                                if b.len() >= n_b.len() && &b[..n_b.len()] == n_b {
+                                    out.push(s.clone());
+                                }
+                            }
+                            stack.push(Val::str_vec(out));
+                        }
+                        Val::Arr(a) => {
+                            let mut out: Vec<Val> = Vec::with_capacity(filter_cap_hint(a.len()));
+                            for item in a.iter() {
+                                if let Val::Str(s) = item {
+                                    let b = s.as_bytes();
+                                    if b.len() >= n_b.len() && &b[..n_b.len()] == n_b {
+                                        out.push(item.clone());
+                                    }
+                                }
+                            }
+                            stack.push(Val::arr(out));
+                        }
+                        _ => stack.push(Val::arr(Vec::new())),
+                    }
+                }
+                Opcode::FilterStrVecEndsWith(needle) => {
+                    let recv = pop!(stack);
+                    let n_b = needle.as_bytes();
+                    match &recv {
+                        Val::StrVec(a) => {
+                            let mut out: Vec<Arc<str>> = Vec::with_capacity(a.len());
+                            for s in a.iter() {
+                                let b = s.as_bytes();
+                                if b.len() >= n_b.len() && &b[b.len() - n_b.len()..] == n_b {
+                                    out.push(s.clone());
+                                }
+                            }
+                            stack.push(Val::str_vec(out));
+                        }
+                        Val::Arr(a) => {
+                            let mut out: Vec<Val> = Vec::with_capacity(filter_cap_hint(a.len()));
+                            for item in a.iter() {
+                                if let Val::Str(s) = item {
+                                    let b = s.as_bytes();
+                                    if b.len() >= n_b.len() && &b[b.len() - n_b.len()..] == n_b {
+                                        out.push(item.clone());
+                                    }
+                                }
+                            }
+                            stack.push(Val::arr(out));
+                        }
+                        _ => stack.push(Val::arr(Vec::new())),
+                    }
+                }
+                Opcode::FilterStrVecContains(needle) => {
+                    let recv = pop!(stack);
+                    let n_b = needle.as_bytes();
+                    // Empty needle → every string matches (std::str::contains semantics).
+                    match &recv {
+                        Val::StrVec(a) => {
+                            if n_b.is_empty() {
+                                stack.push(recv);
+                            } else {
+                                let finder = memmem::Finder::new(n_b);
+                                let mut out: Vec<Arc<str>> = Vec::with_capacity(a.len());
+                                for s in a.iter() {
+                                    if finder.find(s.as_bytes()).is_some() {
+                                        out.push(s.clone());
+                                    }
+                                }
+                                stack.push(Val::str_vec(out));
+                            }
+                        }
+                        Val::Arr(a) => {
+                            let finder = memmem::Finder::new(n_b);
+                            let mut out: Vec<Val> = Vec::with_capacity(filter_cap_hint(a.len()));
+                            for item in a.iter() {
+                                if let Val::Str(s) = item {
+                                    if n_b.is_empty() || finder.find(s.as_bytes()).is_some() {
+                                        out.push(item.clone());
+                                    }
+                                }
+                            }
+                            stack.push(Val::arr(out));
+                        }
+                        _ => stack.push(Val::arr(Vec::new())),
+                    }
+                }
+                Opcode::MapStrVecUpper => {
+                    let recv = pop!(stack);
+                    match &recv {
+                        Val::StrVec(a) => {
+                            let mut out: Vec<Arc<str>> = Vec::with_capacity(a.len());
+                            for s in a.iter() {
+                                // ASCII fast-path: all-ASCII → tight byte loop; else
+                                // fall back to to_uppercase().
+                                let b = s.as_bytes();
+                                if b.is_ascii() {
+                                    let mut v = b.to_vec();
+                                    for c in v.iter_mut() {
+                                        if c.is_ascii_lowercase() { *c -= 32; }
+                                    }
+                                    out.push(Arc::from(String::from_utf8(v).unwrap().as_str()));
+                                } else {
+                                    out.push(Arc::from(s.to_uppercase().as_str()));
+                                }
+                            }
+                            stack.push(Val::str_vec(out));
+                        }
+                        Val::Arr(a) => {
+                            let mut out: Vec<Val> = Vec::with_capacity(a.len());
+                            for item in a.iter() {
+                                if let Val::Str(s) = item {
+                                    out.push(Val::Str(Arc::from(s.to_uppercase().as_str())));
+                                } else {
+                                    out.push(Val::Null);
+                                }
+                            }
+                            stack.push(Val::arr(out));
+                        }
+                        Val::Str(s) => stack.push(Val::Str(Arc::from(s.to_uppercase().as_str()))),
+                        _ => stack.push(recv),
+                    }
+                }
+                Opcode::MapStrVecLower => {
+                    let recv = pop!(stack);
+                    match &recv {
+                        Val::StrVec(a) => {
+                            let mut out: Vec<Arc<str>> = Vec::with_capacity(a.len());
+                            for s in a.iter() {
+                                let b = s.as_bytes();
+                                if b.is_ascii() {
+                                    let mut v = b.to_vec();
+                                    for c in v.iter_mut() {
+                                        if c.is_ascii_uppercase() { *c += 32; }
+                                    }
+                                    out.push(Arc::from(String::from_utf8(v).unwrap().as_str()));
+                                } else {
+                                    out.push(Arc::from(s.to_lowercase().as_str()));
+                                }
+                            }
+                            stack.push(Val::str_vec(out));
+                        }
+                        Val::Arr(a) => {
+                            let mut out: Vec<Val> = Vec::with_capacity(a.len());
+                            for item in a.iter() {
+                                if let Val::Str(s) = item {
+                                    out.push(Val::Str(Arc::from(s.to_lowercase().as_str())));
+                                } else {
+                                    out.push(Val::Null);
+                                }
+                            }
+                            stack.push(Val::arr(out));
+                        }
+                        Val::Str(s) => stack.push(Val::Str(Arc::from(s.to_lowercase().as_str()))),
+                        _ => stack.push(recv),
+                    }
+                }
+                Opcode::MapStrVecTrim => {
+                    let recv = pop!(stack);
+                    match &recv {
+                        Val::StrVec(a) => {
+                            let mut out: Vec<Arc<str>> = Vec::with_capacity(a.len());
+                            for s in a.iter() {
+                                let t = s.trim();
+                                if t.len() == s.len() {
+                                    out.push(s.clone());
+                                } else {
+                                    out.push(Arc::from(t));
+                                }
+                            }
+                            stack.push(Val::str_vec(out));
+                        }
+                        Val::Arr(a) => {
+                            let mut out: Vec<Val> = Vec::with_capacity(a.len());
+                            for item in a.iter() {
+                                if let Val::Str(s) = item {
+                                    out.push(Val::Str(Arc::from(s.trim())));
+                                } else {
+                                    out.push(Val::Null);
+                                }
+                            }
+                            stack.push(Val::arr(out));
+                        }
+                        Val::Str(s) => stack.push(Val::Str(Arc::from(s.trim()))),
+                        _ => stack.push(recv),
+                    }
+                }
                 Opcode::FilterFieldEqLitMapField(kp, lit, kproj) => {
                     let recv = pop!(stack);
                     let hint = match &recv { Val::Arr(a) => filter_cap_hint(a.len()), _ => 0 };
@@ -5101,6 +5384,10 @@ impl VM {
                 }
                 Opcode::MapMap { f1, f2 } => {
                     let recv = pop!(stack);
+                    let recv = match recv {
+                        Val::StrVec(_) | Val::IntVec(_) | Val::FloatVec(_) => recv.into_arr(),
+                        v => v,
+                    };
                     if let Val::Arr(a) = recv {
                         // COW fast-path: if the Arc is unique, reuse the Vec
                         // storage (writing mapped values back in place).
