@@ -120,7 +120,15 @@ pub fn add_vals(a: Val, b: Val) -> Result<Val, EvalError> {
         (Val::Float(x), Val::Float(y)) => Ok(Val::Float(x + y)),
         (Val::Int(x),   Val::Float(y)) => Ok(Val::Float(x as f64 + y)),
         (Val::Float(x), Val::Int(y))   => Ok(Val::Float(x + y as f64)),
-        (Val::Str(x),   Val::Str(y))   => Ok(Val::Str(Arc::<str>::from(format!("{}{}", x, y)))),
+        (Val::Str(x), Val::Str(y)) => {
+            // `format!` would allocate a temporary `String` for argument
+            // formatting, on top of the `Arc::<str>::from` allocation.
+            // Direct `push_str` halves the allocation count.
+            let mut s = String::with_capacity(x.len() + y.len());
+            s.push_str(&x);
+            s.push_str(&y);
+            Ok(Val::Str(Arc::<str>::from(s)))
+        }
         (Val::Arr(x), Val::Arr(y)) => {
             let mut v = Arc::try_unwrap(x).unwrap_or_else(|a| (*a).clone());
             v.extend_from_slice(&y);

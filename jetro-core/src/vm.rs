@@ -4508,6 +4508,38 @@ impl VM {
                     // instead of cloning per iteration.
                     if spec.vars.len() == 1 {
                         let vname = spec.vars[0].clone();
+                        // Hot pattern: `{ f(x): x for x in iter }` with no
+                        // condition.  Both key and val depend only on `x`,
+                        // which is also `current`, so we can elide the
+                        // env rebind and the two `self.exec` calls by
+                        // dispatching the common shapes inline.
+                        let val_is_ident = matches!(
+                            spec.val.ops.as_ref(),
+                            [Opcode::LoadIdent(v)] if v.as_ref() == vname.as_ref()
+                        );
+                        let key_shape = classify_dict_key(&spec.key, vname.as_ref());
+                        if spec.cond.is_none() && val_is_ident && key_shape.is_some() {
+                            let shape = key_shape.unwrap();
+                            for item in items {
+                                let k: Arc<str> = match shape {
+                                    DictKeyShape::Ident => match &item {
+                                        Val::Str(s) => s.clone(),
+                                        other       => Arc::<str>::from(val_to_key(other)),
+                                    },
+                                    DictKeyShape::IdentToString => match &item {
+                                        Val::Str(s) => s.clone(),
+                                        Val::Int(n)   => Arc::<str>::from(n.to_string()),
+                                        Val::Float(f) => Arc::<str>::from(f.to_string()),
+                                        Val::Bool(b)  => Arc::<str>::from(if *b { "true" } else { "false" }),
+                                        Val::Null     => Arc::<str>::from("null"),
+                                        other         => Arc::<str>::from(val_to_key(other)),
+                                    },
+                                };
+                                map.insert(k, item);
+                            }
+                            stack.push(Val::obj(map));
+                            continue;
+                        }
                         let mut scratch = env.clone();
                         for item in items {
                             let frame = scratch.push_lam(Some(vname.as_ref()), item);
@@ -4700,17 +4732,14 @@ impl VM {
                         _ => 1,
                     }).sum();
                     let mut out = Vec::with_capacity(cap);
-                    let items = match recv {
-                        Val::Arr(a) => Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone()),
-                        _ => unreachable!(),
-                    };
-                    for item in items {
+                    // Iterate borrow-wise: for inner arrays we extend from
+                    // `.iter().cloned()` (refcount bumps / copies elements)
+                    // rather than `Arc::try_unwrap + (*a).clone()` — no
+                    // per-inner Vec allocation.
+                    for item in a.iter() {
                         match item {
-                            Val::Arr(inner) => {
-                                let v = Arc::try_unwrap(inner).unwrap_or_else(|a| (*a).clone());
-                                out.extend(v);
-                            }
-                            other => out.push(other),
+                            Val::Arr(inner) => out.extend(inner.iter().cloned()),
+                            other => out.push(other.clone()),
                         }
                     }
                     return Ok(Val::arr(out));
@@ -5672,6 +5701,27 @@ fn resolve_pointer(root: &Val, ptr: &str) -> Val {
         cur = cur.get_field(seg);
     }
     cur
+}
+
+#[derive(Clone, Copy)]
+enum DictKeyShape {
+    /// key prog is `[LoadIdent(v)]` — use item directly (stringify non-Str).
+    Ident,
+    /// key prog is `[LoadIdent(v), CallMethod{ToString, no args}]`.
+    IdentToString,
+}
+
+fn classify_dict_key(prog: &Program, vname: &str) -> Option<DictKeyShape> {
+    match prog.ops.as_ref() {
+        [Opcode::LoadIdent(v)] if v.as_ref() == vname => Some(DictKeyShape::Ident),
+        [Opcode::LoadIdent(v), Opcode::CallMethod(call)]
+            if v.as_ref() == vname
+                && call.method == BuiltinMethod::ToString
+                && call.sub_progs.is_empty()
+                && call.orig_args.is_empty() =>
+            Some(DictKeyShape::IdentToString),
+        _ => None,
+    }
 }
 
 fn bind_comp_vars(env: &Env, vars: &[Arc<str>], item: Val) -> Env {

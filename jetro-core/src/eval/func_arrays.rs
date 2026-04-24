@@ -273,8 +273,45 @@ pub fn join(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
         .and_then(|v| if let Val::Str(s) = v { Some(s.to_string()) } else { None })
         .unwrap_or_default();
     let items = recv.into_vec().ok_or_else(|| EvalError("join: expected array".into()))?;
-    let parts: Vec<String> = items.iter().map(val_to_string).collect();
-    Ok(Val::Str(Arc::<str>::from(parts.join(&sep))))
+    if items.is_empty() {
+        return Ok(Val::Str(Arc::<str>::from("")));
+    }
+    // Fast path: skip the `Vec<String>` intermediate — write straight into
+    // a single preallocated buffer.  Two sub-cases:
+    //   - all items already `Val::Str`: use exact capacity + push_str.
+    //   - general: `write!` via Display for primitives, fall back to
+    //     `val_to_string` only for compound vals.
+    if items.iter().all(|v| matches!(v, Val::Str(_))) {
+        let total_len: usize = items.iter()
+            .map(|v| if let Val::Str(s) = v { s.len() } else { 0 })
+            .sum::<usize>()
+            + sep.len() * (items.len() - 1);
+        let mut out = String::with_capacity(total_len);
+        let mut first = true;
+        for v in &items {
+            if !first { out.push_str(&sep); }
+            first = false;
+            if let Val::Str(s) = v { out.push_str(s); }
+        }
+        return Ok(Val::Str(Arc::<str>::from(out)));
+    }
+    use std::fmt::Write as _;
+    let est_cap = items.len() * 8 + sep.len() * items.len();
+    let mut out = String::with_capacity(est_cap);
+    let mut first = true;
+    for v in &items {
+        if !first { out.push_str(&sep); }
+        first = false;
+        match v {
+            Val::Str(s)   => out.push_str(s),
+            Val::Int(n)   => { let _ = write!(out, "{}", n); }
+            Val::Float(f) => { let _ = write!(out, "{}", f); }
+            Val::Bool(b)  => out.push_str(if *b { "true" } else { "false" }),
+            Val::Null     => out.push_str("null"),
+            other         => out.push_str(&val_to_string(other)),
+        }
+    }
+    Ok(Val::Str(Arc::<str>::from(out)))
 }
 
 /// Equi-join: `lhs.equi_join(rhs, lhs_key, rhs_key)`.
