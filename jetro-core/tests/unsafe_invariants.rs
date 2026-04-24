@@ -95,6 +95,48 @@ fn map_replace_no_hit_shares_parent() {
 }
 
 #[test]
+fn map_upper_replace_fused_ascii() {
+    let doc = json!(["foo-bar-foo", "no match", "abc"]);
+    let out = Jetro::new(doc)
+        .collect_val(r#"$.map(@.upper().replace('FOO', 'BAR'))"#).unwrap();
+    assert_eq!(out.to_string(), r#"["BAR-BAR-FOO","NO MATCH","ABC"]"#);
+}
+
+#[test]
+fn map_upper_replace_all_fused_ascii() {
+    let doc = json!(["foo-foo-foo", "fOo fOo"]);
+    let out = Jetro::new(doc)
+        .collect_val(r#"$.map(@.upper().replace_all('FOO', 'BAR'))"#).unwrap();
+    assert_eq!(out.to_string(), r#"["BAR-BAR-BAR","BAR BAR"]"#);
+}
+
+#[test]
+fn map_lower_replace_all_fused_ascii() {
+    let doc = json!(["FOO-FOO", "Foo BAR Foo"]);
+    let out = Jetro::new(doc)
+        .collect_val(r#"$.map(@.lower().replace_all('foo', 'baz'))"#).unwrap();
+    assert_eq!(out.to_string(), r#"["baz-baz","baz bar baz"]"#);
+}
+
+#[test]
+fn map_upper_replace_no_hit() {
+    let doc = json!(["abc", "def"]);
+    let out = Jetro::new(doc)
+        .collect_val(r#"$.map(@.upper().replace('ZZZ', 'X'))"#).unwrap();
+    assert_eq!(out.to_string(), r#"["ABC","DEF"]"#);
+}
+
+#[test]
+fn map_upper_replace_unicode_fallback() {
+    let doc = json!(["café-foo-café"]);
+    let out = Jetro::new(doc)
+        .collect_val(r#"$.map(@.upper().replace_all('FOO', 'BAR'))"#).unwrap();
+    let s = out.to_string();
+    assert!(s.contains("BAR"));
+    assert!(!s.contains("FOO"));
+}
+
+#[test]
 fn empty_string_edge_cases() {
     let doc = json!([""]);
     let o1 = Jetro::new(doc.clone()).collect_val(r#"$.map(@.trim().upper())"#).unwrap();

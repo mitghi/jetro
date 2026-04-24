@@ -383,6 +383,13 @@ pub enum Opcode {
     /// and replacement inlined; skips per-item sub_prog evaluation for arg
     /// strings.  `all=true` means replace every occurrence, else only first.
     MapReplaceLit { needle: Arc<str>, with: Arc<str>, all: bool },
+    /// Fused `map(@.upper().replace(lit, lit))` (and `replace_all`) — scan
+    /// bytes once: ASCII-upper + memchr needle scan into a single pre-sized
+    /// output String per item. Falls back to non-ASCII path for Unicode.
+    MapUpperReplaceLit { needle: Arc<str>, with: Arc<str>, all: bool },
+    /// Fused `map(@.lower().replace(lit, lit))` (and `replace_all`) — same as
+    /// above but ASCII-lower.
+    MapLowerReplaceLit { needle: Arc<str>, with: Arc<str>, all: bool },
     /// Fused `map(@.split(sep).count())` — byte-scan per row, returns Int;
     /// zero per-row allocations.
     MapSplitCount { sep: Arc<str> },
@@ -1732,10 +1739,14 @@ impl Compiler {
             }
             // map(@.replace(lit, lit))   or   map(@.replace_all(lit, lit))
             // → MapReplaceLit { needle, with, all } — single-op CallMethod.
+            //
+            // Also detects two-step chains:
+            //   map(@.upper().replace(lit, lit))  → MapUpperReplaceLit
+            //   map(@.lower().replace(lit, lit))  → MapLowerReplaceLit
             if let Opcode::CallMethod(a) = &op {
                 if a.method == BuiltinMethod::Map && a.sub_progs.len() == 1 {
                     let body = &a.sub_progs[0].ops;
-                    // Body shape: [PushCurrent, CallMethod(Replace|ReplaceAll, [PushStr, PushStr])]
+                    // Body shape 1: [PushCurrent, CallMethod(Replace|ReplaceAll, [PushStr, PushStr])]
                     let fused = if let [Opcode::PushCurrent, Opcode::CallMethod(inner)] = &body[..] {
                         let is_replace = inner.method == BuiltinMethod::Replace
                                       || inner.method == BuiltinMethod::ReplaceAll;
@@ -1746,6 +1757,31 @@ impl Compiler {
                                 (Some(needle), Some(with)) => {
                                     let all = inner.method == BuiltinMethod::ReplaceAll;
                                     Some(Opcode::MapReplaceLit { needle, with, all })
+                                }
+                                _ => None,
+                            }
+                        } else { None }
+                    } else if let [Opcode::PushCurrent,
+                                    Opcode::CallMethod(case_op),
+                                    Opcode::CallMethod(inner)] = &body[..] {
+                        // Body shape 2: [PushCurrent, CallMethod(Upper|Lower,[]),
+                        //                CallMethod(Replace|ReplaceAll, [PushStr, PushStr])]
+                        let is_replace = inner.method == BuiltinMethod::Replace
+                                      || inner.method == BuiltinMethod::ReplaceAll;
+                        let is_case_nullary = case_op.sub_progs.is_empty()
+                            && (case_op.method == BuiltinMethod::Upper
+                             || case_op.method == BuiltinMethod::Lower);
+                        if is_case_nullary && is_replace && inner.sub_progs.len() == 2 {
+                            let n = trivial_push_str(&inner.sub_progs[0].ops);
+                            let w = trivial_push_str(&inner.sub_progs[1].ops);
+                            match (n, w) {
+                                (Some(needle), Some(with)) => {
+                                    let all = inner.method == BuiltinMethod::ReplaceAll;
+                                    if case_op.method == BuiltinMethod::Upper {
+                                        Some(Opcode::MapUpperReplaceLit { needle, with, all })
+                                    } else {
+                                        Some(Opcode::MapLowerReplaceLit { needle, with, all })
+                                    }
                                 }
                                 _ => None,
                             }
@@ -3948,6 +3984,103 @@ impl VM {
                                     Arc::from_raw(Arc::into_raw(arc_bytes) as *const str)
                                 };
                                 out_vec.push(Val::Str(arc_str));
+                            } else {
+                                out_vec.push(item.clone());
+                            }
+                        }
+                    }
+                    stack.push(Val::arr(out_vec));
+                }
+                Opcode::MapUpperReplaceLit { needle, with, all }
+                | Opcode::MapLowerReplaceLit { needle, with, all } => {
+                    let to_upper = matches!(op, Opcode::MapUpperReplaceLit { .. });
+                    let v = pop!(stack);
+                    let v = if matches!(&v, Val::StrVec(_)) { v.into_arr() } else { v };
+                    let n: &str = needle.as_ref();
+                    let w: &str = with.as_ref();
+                    let nlen = n.len();
+                    let wlen = w.len();
+                    let mut out_vec: Vec<Val> = match &v {
+                        Val::Arr(a) => Vec::with_capacity(a.len()),
+                        _ => Vec::new(),
+                    };
+                    if let Val::Arr(a) = &v {
+                        for item in a.iter() {
+                            if let Val::Str(s) = item {
+                                let src = s.as_ref();
+                                if src.is_ascii() {
+                                    // ASCII fast path: compute needle hits against
+                                    // cased source (upper needle vs upper haystack /
+                                    // lower vs lower) so match semantics equal
+                                    // `s.upper().replace(n, w)`.
+                                    let src_b = src.as_bytes();
+                                    let n_b = n.as_bytes();
+                                    let w_b = w.as_bytes();
+                                    let mut hits: Vec<usize> = Vec::new();
+                                    if nlen > 0 && nlen <= src_b.len() {
+                                        let mut i = 0usize;
+                                        'outer: while i + nlen <= src_b.len() {
+                                            for j in 0..nlen {
+                                                let c = src_b[i + j];
+                                                let cased = if to_upper {
+                                                    if c.is_ascii_lowercase() { c - 32 } else { c }
+                                                } else if c.is_ascii_uppercase() { c + 32 } else { c };
+                                                if cased != n_b[j] {
+                                                    i += 1;
+                                                    continue 'outer;
+                                                }
+                                            }
+                                            hits.push(i);
+                                            if !*all { break; }
+                                            i += nlen;
+                                        }
+                                    }
+                                    let out_len = src_b.len() + hits.len() * wlen - hits.len() * nlen;
+                                    let mut arc = Arc::<[u8]>::new_uninit_slice(out_len);
+                                    let slot = Arc::get_mut(&mut arc).unwrap();
+                                    unsafe {
+                                        let dst = slot.as_mut_ptr() as *mut u8;
+                                        let mut widx = 0usize;
+                                        let mut last_end = 0usize;
+                                        for &hit in &hits {
+                                            // Copy [last_end..hit), case-transformed.
+                                            for k in last_end..hit {
+                                                let c = src_b[k];
+                                                let cased = if to_upper {
+                                                    if c.is_ascii_lowercase() { c - 32 } else { c }
+                                                } else if c.is_ascii_uppercase() { c + 32 } else { c };
+                                                *dst.add(widx) = cased;
+                                                widx += 1;
+                                            }
+                                            std::ptr::copy_nonoverlapping(w_b.as_ptr(), dst.add(widx), wlen);
+                                            widx += wlen;
+                                            last_end = hit + nlen;
+                                        }
+                                        for k in last_end..src_b.len() {
+                                            let c = src_b[k];
+                                            let cased = if to_upper {
+                                                if c.is_ascii_lowercase() { c - 32 } else { c }
+                                            } else if c.is_ascii_uppercase() { c + 32 } else { c };
+                                            *dst.add(widx) = cased;
+                                            widx += 1;
+                                        }
+                                        debug_assert_eq!(widx, out_len);
+                                    }
+                                    let arc_bytes: Arc<[u8]> = unsafe { arc.assume_init() };
+                                    let arc_str: Arc<str> = unsafe {
+                                        Arc::from_raw(Arc::into_raw(arc_bytes) as *const str)
+                                    };
+                                    out_vec.push(Val::Str(arc_str));
+                                } else {
+                                    // Unicode fallback: build cased String, then replace.
+                                    let cased = if to_upper { src.to_uppercase() } else { src.to_lowercase() };
+                                    let replaced = if *all {
+                                        cased.replace(n, w)
+                                    } else {
+                                        cased.replacen(n, w, 1)
+                                    };
+                                    out_vec.push(Val::Str(Arc::<str>::from(replaced)));
+                                }
                             } else {
                                 out_vec.push(item.clone());
                             }
