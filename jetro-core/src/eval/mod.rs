@@ -1394,6 +1394,7 @@ fn eval_global(name: &str, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
         "zip"         => func_arrays::global_zip(args, env),
         "zip_longest" => func_arrays::global_zip_longest(args, env),
         "product"     => func_arrays::global_product(args, env),
+        "range"       => eval_range(args, env),
         other => {
             if let Some(first) = args.first() {
                 let recv = eval_pos(first, env)?;
@@ -1403,6 +1404,49 @@ fn eval_global(name: &str, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
             }
         }
     }
+}
+
+// ── range() generator ────────────────────────────────────────────────────────
+//
+// `range(n)`            -> [0, 1, …, n-1]
+// `range(from, upto)`   -> [from, from+1, …, upto-1]
+// `range(from, upto, step)` -> arithmetic progression; step may be negative.
+//
+// Returns an eager `Val::Arr` (jetro is value-oriented, not streaming).
+// Int-only; non-numeric args produce a descriptive error.  Empty when
+// the step points away from `upto` or when `step == 0`.
+
+fn eval_range(args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+    let n = args.len();
+    if n == 0 || n > 3 {
+        return err!("range: expected 1..3 args, got {}", n);
+    }
+    let mut nums = Vec::with_capacity(n);
+    for a in args {
+        let v = eval_pos(a, env)?;
+        let i = v.as_i64().ok_or_else(|| EvalError("range: expected integer arg".into()))?;
+        nums.push(i);
+    }
+    let (from, upto, step) = match nums.as_slice() {
+        [n]          => (0, *n, 1i64),
+        [f, u]       => (*f, *u, 1i64),
+        [f, u, s]    => (*f, *u, *s),
+        _            => unreachable!(),
+    };
+    if step == 0 { return Ok(Val::arr(Vec::new())); }
+    let len_hint: usize = if step > 0 && upto > from {
+        (((upto - from) + step - 1) / step).max(0) as usize
+    } else if step < 0 && upto < from {
+        (((from - upto) + (-step) - 1) / (-step)).max(0) as usize
+    } else { 0 };
+    let mut out = Vec::with_capacity(len_hint);
+    let mut i = from;
+    if step > 0 {
+        while i < upto { out.push(Val::Int(i)); i += step; }
+    } else {
+        while i > upto { out.push(Val::Int(i)); i += step; }
+    }
+    Ok(Val::arr(out))
 }
 
 // ── Apply helpers ─────────────────────────────────────────────────────────────

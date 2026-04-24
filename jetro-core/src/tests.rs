@@ -3052,4 +3052,77 @@ mod tests {
         let j_b = Jetro::from_bytes(raw).unwrap();
         assert!(j_b.collect("$..id.one()").is_err());
     }
+
+    // ── range() + ceil/floor/round ────────────────────────────────────────────
+
+    #[test]
+    fn range_one_arg() {
+        let doc = json!({});
+        assert_eq!(query("range(5)", &doc).unwrap(), json!([0,1,2,3,4]));
+    }
+
+    #[test]
+    fn range_two_args() {
+        let doc = json!({});
+        assert_eq!(query("range(2, 5)", &doc).unwrap(), json!([2,3,4]));
+    }
+
+    #[test]
+    fn range_three_args_positive_step() {
+        let doc = json!({});
+        assert_eq!(query("range(0, 10, 2)", &doc).unwrap(), json!([0,2,4,6,8]));
+    }
+
+    #[test]
+    fn range_three_args_negative_step() {
+        let doc = json!({});
+        assert_eq!(query("range(10, 0, -2)", &doc).unwrap(), json!([10,8,6,4,2]));
+    }
+
+    #[test]
+    fn range_empty_when_step_wrong_direction() {
+        let doc = json!({});
+        assert_eq!(query("range(5, 0, 1)", &doc).unwrap(), json!([]));
+        assert_eq!(query("range(0, 5, -1)", &doc).unwrap(), json!([]));
+    }
+
+    #[test]
+    fn range_zero_step_empty() {
+        let doc = json!({});
+        assert_eq!(query("range(0, 5, 0)", &doc).unwrap(), json!([]));
+    }
+
+    #[test]
+    fn ceil_floor_round_floats() {
+        let doc = json!({"x": 3.3, "y": 3.7, "z": 3.5, "n": -2.4});
+        assert_eq!(query("$.x.ceil()",  &doc).unwrap(), json!(4));
+        assert_eq!(query("$.x.floor()", &doc).unwrap(), json!(3));
+        assert_eq!(query("$.y.floor()", &doc).unwrap(), json!(3));
+        assert_eq!(query("$.y.round()", &doc).unwrap(), json!(4));
+        assert_eq!(query("$.z.round()", &doc).unwrap(), json!(4));
+        assert_eq!(query("$.n.ceil()",  &doc).unwrap(), json!(-2));
+        assert_eq!(query("$.n.floor()", &doc).unwrap(), json!(-3));
+    }
+
+    #[test]
+    fn ceil_floor_round_int_identity() {
+        let doc = json!({"x": 42});
+        assert_eq!(query("$.x.ceil()",  &doc).unwrap(), json!(42));
+        assert_eq!(query("$.x.floor()", &doc).unwrap(), json!(42));
+        assert_eq!(query("$.x.round()", &doc).unwrap(), json!(42));
+    }
+
+    #[test]
+    fn abs_number() {
+        let doc = json!({"a": -3.5, "b": 7});
+        assert_eq!(query("$.a.abs()", &doc).unwrap(), json!(3.5));
+        assert_eq!(query("$.b.abs()", &doc).unwrap(), json!(7));
+    }
+
+    #[test]
+    fn range_composes_with_map_sum() {
+        let doc = json!({});
+        // 1 + 2 + ... + 9 = 45
+        assert_eq!(query("range(1, 10).sum()", &doc).unwrap(), json!(45));
+    }
 }

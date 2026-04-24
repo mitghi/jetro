@@ -165,6 +165,12 @@ fn build() -> BuiltinRegistry {
     t.insert("any", b_any);
     t.insert("all", b_all);
 
+    // Numeric scalar ops
+    t.insert("ceil",  b_ceil);
+    t.insert("floor", b_floor);
+    t.insert("round", b_round);
+    t.insert("abs",   b_abs);
+
     // Paths
     t.insert("get_path",       func_paths::get_path);
     t.insert("getPath",        func_paths::get_path);
@@ -343,6 +349,40 @@ fn b_any(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
 
 fn b_all(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     func_aggregates::any_all(recv, args, env, true)
+}
+
+fn b_ceil(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
+    match recv {
+        Val::Int(n)   => Ok(Val::Int(n)),
+        Val::Float(f) => Ok(Val::Int(f.ceil() as i64)),
+        _ => err!("ceil: expected number"),
+    }
+}
+
+fn b_floor(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
+    match recv {
+        Val::Int(n)   => Ok(Val::Int(n)),
+        Val::Float(f) => Ok(Val::Int(f.floor() as i64)),
+        _ => err!("floor: expected number"),
+    }
+}
+
+fn b_round(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
+    match recv {
+        Val::Int(n)   => Ok(Val::Int(n)),
+        // Banker's rounding is the IEEE default; jq uses `round()` which
+        // ties-away-from-zero.  Rust's `f64::round` matches jq here.
+        Val::Float(f) => Ok(Val::Int(f.round() as i64)),
+        _ => err!("round: expected number"),
+    }
+}
+
+fn b_abs(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
+    match recv {
+        Val::Int(n)   => Ok(Val::Int(n.wrapping_abs())),
+        Val::Float(f) => Ok(Val::Float(f.abs())),
+        _ => err!("abs: expected number"),
+    }
 }
 
 fn b_to_csv(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
