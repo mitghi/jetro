@@ -21,13 +21,36 @@ macro_rules! err {
 // All follow fn(Val, &[Arg], &Env) -> Result<Val, EvalError>.
 
 pub fn upper(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    if let Val::Str(s) = recv { Ok(Val::Str(Arc::<str>::from(s.to_uppercase()))) }
-    else { err!("upper: expected string") }
+    if let Val::Str(s) = recv {
+        let bytes = s.as_bytes();
+        if bytes.is_ascii() {
+            let mut buf = String::with_capacity(bytes.len());
+            // SAFETY: ASCII upper-case of ASCII bytes stays ASCII → valid UTF-8.
+            unsafe {
+                let v = buf.as_mut_vec();
+                v.extend_from_slice(bytes);
+                for b in v.iter_mut() { *b = b.to_ascii_uppercase(); }
+            }
+            return Ok(Val::Str(Arc::<str>::from(buf)));
+        }
+        Ok(Val::Str(Arc::<str>::from(s.to_uppercase())))
+    } else { err!("upper: expected string") }
 }
 
 pub fn lower(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    if let Val::Str(s) = recv { Ok(Val::Str(Arc::<str>::from(s.to_lowercase()))) }
-    else { err!("lower: expected string") }
+    if let Val::Str(s) = recv {
+        let bytes = s.as_bytes();
+        if bytes.is_ascii() {
+            let mut buf = String::with_capacity(bytes.len());
+            unsafe {
+                let v = buf.as_mut_vec();
+                v.extend_from_slice(bytes);
+                for b in v.iter_mut() { *b = b.to_ascii_lowercase(); }
+            }
+            return Ok(Val::Str(Arc::<str>::from(buf)));
+        }
+        Ok(Val::Str(Arc::<str>::from(s.to_lowercase())))
+    } else { err!("lower: expected string") }
 }
 
 pub fn capitalize(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
@@ -41,18 +64,27 @@ pub fn title_case(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
 }
 
 pub fn trim(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    if let Val::Str(s) = recv { Ok(Val::Str(Arc::from(s.trim()))) }
-    else { err!("trim: expected string") }
+    if let Val::Str(s) = recv {
+        let t = s.trim();
+        if t.len() == s.len() { return Ok(Val::Str(s)); }
+        Ok(Val::Str(Arc::from(t)))
+    } else { err!("trim: expected string") }
 }
 
 pub fn trim_left(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    if let Val::Str(s) = recv { Ok(Val::Str(Arc::from(s.trim_start()))) }
-    else { err!("trim_left: expected string") }
+    if let Val::Str(s) = recv {
+        let t = s.trim_start();
+        if t.len() == s.len() { return Ok(Val::Str(s)); }
+        Ok(Val::Str(Arc::from(t)))
+    } else { err!("trim_left: expected string") }
 }
 
 pub fn trim_right(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    if let Val::Str(s) = recv { Ok(Val::Str(Arc::from(s.trim_end()))) }
-    else { err!("trim_right: expected string") }
+    if let Val::Str(s) = recv {
+        let t = s.trim_end();
+        if t.len() == s.len() { return Ok(Val::Str(s)); }
+        Ok(Val::Str(Arc::from(t)))
+    } else { err!("trim_right: expected string") }
 }
 
 pub fn lines(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
@@ -184,7 +216,9 @@ pub fn replace(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     if let Val::Str(s) = recv {
         let from = str_arg(args, 0, env)?;
         let to   = str_arg(args, 1, env)?;
-        Ok(val_str(&s.replacen(from.as_str(), to.as_str(), 1)))
+        // Short-circuit: needle absent -> return receiver unchanged (no alloc).
+        if !s.contains(from.as_str()) { return Ok(Val::Str(s)); }
+        Ok(Val::Str(Arc::<str>::from(s.replacen(from.as_str(), to.as_str(), 1))))
     } else { err!("replace: expected string") }
 }
 
@@ -192,7 +226,8 @@ pub fn replace_all(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError>
     if let Val::Str(s) = recv {
         let from = str_arg(args, 0, env)?;
         let to   = str_arg(args, 1, env)?;
-        Ok(val_str(&s.replace(from.as_str(), to.as_str())))
+        if !s.contains(from.as_str()) { return Ok(Val::Str(s)); }
+        Ok(Val::Str(Arc::<str>::from(s.replace(from.as_str(), to.as_str()))))
     } else { err!("replace_all: expected string") }
 }
 

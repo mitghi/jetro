@@ -360,6 +360,17 @@ pub enum Opcode {
     /// receivers (`Val::IntVec` / `Val::FloatVec`) shortcut further via
     /// native number-formatting in a tight loop.
     MapToJsonJoin { sep_prog: Arc<Program> },
+    /// Fused `.trim().upper()` — one allocation instead of two, ASCII fast-path.
+    StrTrimUpper,
+    /// Fused `.trim().lower()` — one allocation instead of two, ASCII fast-path.
+    StrTrimLower,
+    /// Fused `.upper().trim()` — one allocation instead of two.
+    StrUpperTrim,
+    /// Fused `.lower().trim()` — one allocation instead of two.
+    StrLowerTrim,
+    /// Fused `.split(sep).reverse().join(sep)` — byte-scan segments and
+    /// emit reversed join into one buffer.  No intermediate `Vec<Arc<str>>`.
+    StrSplitReverseJoin { sep: Arc<str> },
     /// Fused `map(f).avg()` — evaluates `f` per item, computes mean as float.
     MapAvg(Arc<Program>),
     /// Fused `filter(p).map(f).sum()` — single pass, numeric sum of mapped
@@ -633,6 +644,13 @@ fn ic_get_field(m: &Arc<IndexMap<Arc<str>, Val>>, key: &str, ic: &AtomicU64) -> 
 /// from the current item: `[PushCurrent, GetField(k)]` or bare `[GetField(k)]`.
 /// Lets MapSum/Min/Max/Avg skip the per-item `exec` dispatch.
 #[inline]
+fn trivial_push_str(ops: &[Opcode]) -> Option<Arc<str>> {
+    match ops {
+        [Opcode::PushStr(s)] => Some(s.clone()),
+        _ => None,
+    }
+}
+
 fn trivial_field(ops: &[Opcode]) -> Option<Arc<str>> {
     match ops {
         [Opcode::PushCurrent, Opcode::GetField(k)] => Some(k.clone()),
@@ -1230,6 +1248,7 @@ impl Compiler {
         let ops = if cfg.field_chain     { Self::pass_field_chain(ops) }     else { ops };
         let ops = if cfg.filter_count    { Self::pass_filter_count(ops) }    else { ops };
         let ops = if cfg.filter_fusion   { Self::pass_filter_fusion(ops) }   else { ops };
+        let ops = if cfg.filter_fusion   { Self::pass_string_chain_fusion(ops) } else { ops };
         let ops = if cfg.find_quantifier { Self::pass_find_quantifier(ops) } else { ops };
         let ops = if cfg.filter_fusion   { Self::pass_field_specialise(ops) } else { ops };
         let ops = Self::pass_list_comp_specialise(ops);
@@ -1481,6 +1500,25 @@ impl Compiler {
                     out.push(Opcode::MapUnique(f));
                     continue;
                 }
+                // trim + upper/lower  and  upper/lower + trim  → fused StrXY.
+                // Both calls take no arguments.
+                if a.sub_progs.is_empty() && b.sub_progs.is_empty() {
+                    let fused_str = match (a.method, b.method) {
+                        (BuiltinMethod::Trim,  BuiltinMethod::Upper) => Some(Opcode::StrTrimUpper),
+                        (BuiltinMethod::Trim,  BuiltinMethod::Lower) => Some(Opcode::StrTrimLower),
+                        (BuiltinMethod::Upper, BuiltinMethod::Trim)  => Some(Opcode::StrUpperTrim),
+                        (BuiltinMethod::Lower, BuiltinMethod::Trim)  => Some(Opcode::StrLowerTrim),
+                        _ => None,
+                    };
+                    if let Some(o) = fused_str {
+                        out.pop();
+                        out.push(o);
+                        continue;
+                    }
+                }
+                // split(sep) + reverse() — detect; only actually fuse when next
+                // op is join(sep) with the same literal sep.  Done in a
+                // dedicated 3-way pass below via lookahead buffer.
                 // map(@.to_json()) + join(sep) → MapToJsonJoin { sep_prog }
                 // Body is one of:
                 //   [PushCurrent, CallMethod(ToJson, empty)]     — `@.to_json()`
@@ -1505,6 +1543,37 @@ impl Compiler {
                 }
             }
             out.push(op);
+        }
+        out
+    }
+
+    /// Three-way string-method fusion: `split(s).reverse().join(s)` with
+    /// matching string literal `s` collapses to `StrSplitReverseJoin`.
+    fn pass_string_chain_fusion(ops: Vec<Opcode>) -> Vec<Opcode> {
+        let mut out: Vec<Opcode> = Vec::with_capacity(ops.len());
+        let mut i = 0;
+        while i < ops.len() {
+            if i + 2 < ops.len() {
+                if let (Opcode::CallMethod(a),
+                        Opcode::CallMethod(b),
+                        Opcode::CallMethod(c)) = (&ops[i], &ops[i + 1], &ops[i + 2]) {
+                    if a.method == BuiltinMethod::Split && a.sub_progs.len() == 1
+                       && b.method == BuiltinMethod::Reverse && b.sub_progs.is_empty()
+                       && c.method == BuiltinMethod::Join && c.sub_progs.len() == 1 {
+                        let sep_a = trivial_push_str(&a.sub_progs[0].ops);
+                        let sep_c = trivial_push_str(&c.sub_progs[0].ops);
+                        if let (Some(s1), Some(s2)) = (sep_a, sep_c) {
+                            if s1 == s2 {
+                                out.push(Opcode::StrSplitReverseJoin { sep: s1 });
+                                i += 3;
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+            out.push(ops[i].clone());
+            i += 1;
         }
         out
     }
@@ -3367,6 +3436,115 @@ impl VM {
                         }
                         _ => stack.push(Val::Str(Arc::<str>::from(""))),
                     }
+                }
+                // ── Fused string-method chains ────────────────────────────────
+                Opcode::StrTrimUpper | Opcode::StrTrimLower => {
+                    let v = pop!(stack);
+                    let out = if let Val::Str(s) = &v {
+                        let t = s.trim();
+                        let bytes = t.as_bytes();
+                        if bytes.is_ascii() {
+                            let mut buf = String::with_capacity(bytes.len());
+                            // SAFETY: ASCII case-fold preserves ASCII → valid UTF-8.
+                            unsafe {
+                                let vb = buf.as_mut_vec();
+                                vb.extend_from_slice(bytes);
+                                match op {
+                                    Opcode::StrTrimUpper =>
+                                        for b in vb.iter_mut() { *b = b.to_ascii_uppercase(); },
+                                    _ =>
+                                        for b in vb.iter_mut() { *b = b.to_ascii_lowercase(); },
+                                }
+                            }
+                            Val::Str(Arc::<str>::from(buf))
+                        } else {
+                            let s2 = match op {
+                                Opcode::StrTrimUpper => t.to_uppercase(),
+                                _                    => t.to_lowercase(),
+                            };
+                            Val::Str(Arc::<str>::from(s2))
+                        }
+                    } else {
+                        return Err(EvalError(format!("{:?}: expected string", op)));
+                    };
+                    stack.push(out);
+                }
+                Opcode::StrUpperTrim | Opcode::StrLowerTrim => {
+                    let v = pop!(stack);
+                    let out = if let Val::Str(s) = &v {
+                        let bytes = s.as_bytes();
+                        // trim-then-case-fold is identical to case-fold-then-trim
+                        // for ASCII whitespace (space/tab/nl/cr/ff/vt stay
+                        // whitespace after case fold) and for Unicode whitespace
+                        // under std trim rules.
+                        let t = s.trim();
+                        let tb = t.as_bytes();
+                        if bytes.is_ascii() {
+                            let mut buf = String::with_capacity(tb.len());
+                            unsafe {
+                                let vb = buf.as_mut_vec();
+                                vb.extend_from_slice(tb);
+                                match op {
+                                    Opcode::StrUpperTrim =>
+                                        for b in vb.iter_mut() { *b = b.to_ascii_uppercase(); },
+                                    _ =>
+                                        for b in vb.iter_mut() { *b = b.to_ascii_lowercase(); },
+                                }
+                            }
+                            Val::Str(Arc::<str>::from(buf))
+                        } else {
+                            let s2 = match op {
+                                Opcode::StrUpperTrim => t.to_uppercase(),
+                                _                    => t.to_lowercase(),
+                            };
+                            Val::Str(Arc::<str>::from(s2))
+                        }
+                    } else {
+                        return Err(EvalError(format!("{:?}: expected string", op)));
+                    };
+                    stack.push(out);
+                }
+                Opcode::StrSplitReverseJoin { sep } => {
+                    let v = pop!(stack);
+                    let out = if let Val::Str(s) = &v {
+                        let src = s.as_ref();
+                        let sep_s = sep.as_ref();
+                        // Collect segment (start, end) pairs via one byte-scan.
+                        let mut spans: SmallVec<[(usize, usize); 8]> = SmallVec::new();
+                        if sep_s.is_empty() {
+                            // Mirror str::split("") behaviour: every char boundary.
+                            let mut prev = 0usize;
+                            for (i, _) in src.char_indices() {
+                                if i > 0 { spans.push((prev, i)); prev = i; }
+                            }
+                            spans.push((prev, src.len()));
+                        } else {
+                            let mut prev = 0usize;
+                            let sb = sep_s.as_bytes();
+                            let slen = sb.len();
+                            let bytes = src.as_bytes();
+                            let mut i = 0usize;
+                            while i + slen <= bytes.len() {
+                                if &bytes[i..i + slen] == sb {
+                                    spans.push((prev, i));
+                                    i += slen; prev = i;
+                                } else { i += 1; }
+                            }
+                            spans.push((prev, src.len()));
+                        }
+                        let cap = src.len(); // upper bound; same chars + same seps
+                        let mut buf = String::with_capacity(cap);
+                        let n = spans.len();
+                        for idx in 0..n {
+                            let (a, b) = spans[n - 1 - idx];
+                            if idx > 0 { buf.push_str(sep_s); }
+                            buf.push_str(&src[a..b]);
+                        }
+                        Val::Str(Arc::<str>::from(buf))
+                    } else {
+                        return Err(EvalError("split_reverse_join: expected string".into()));
+                    };
+                    stack.push(out);
                 }
                 Opcode::MapSum(f) => {
                     let recv = pop!(stack);

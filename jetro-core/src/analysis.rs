@@ -264,6 +264,12 @@ fn apply_op(op: &Opcode, stack: &mut Vec<AbstractVal>) {
             pop1!();
             stack.push(AbstractVal::scalar(VType::Str));
         }
+        Opcode::StrTrimUpper | Opcode::StrTrimLower
+        | Opcode::StrUpperTrim | Opcode::StrLowerTrim
+        | Opcode::StrSplitReverseJoin { .. } => {
+            pop1!();
+            stack.push(AbstractVal::scalar(VType::Str));
+        }
         Opcode::FilterFieldEqLitCount(_, _)
         | Opcode::FilterFieldCmpLitCount(_, _, _)
         | Opcode::FilterFieldCmpFieldCount(_, _, _)
@@ -1123,6 +1129,9 @@ pub fn opcode_cost(op: &Opcode) -> u32 {
         Opcode::UniqueCount => 6,
         Opcode::ArgExtreme { .. } => 12,
         Opcode::MapToJsonJoin { .. } => 8,
+        Opcode::StrTrimUpper | Opcode::StrTrimLower
+        | Opcode::StrUpperTrim | Opcode::StrLowerTrim => 2,
+        Opcode::StrSplitReverseJoin { .. } => 4,
     }
 }
 
