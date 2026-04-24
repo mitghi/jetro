@@ -74,8 +74,9 @@ arg       = { named_arg | pos_arg }
 arg_list  = { arg ~ ("," ~ arg)* }
 
 // ── Postfix operations ────────────────────────────────────────────────────────
-opt_method     = { "?." ~ field_name ~ "(" ~ arg_list? ~ ")" }
-opt_field      = { "?." ~ field_name }
+// Optional (null-propagation / first-of-array) is now a POSTFIX `?` after
+// the step it guards — `.field?`, `.method()?`, `..field?` — not a prefix
+// `?.field`.  The prefix form is no longer accepted.
 deep_method    = { ".." ~ field_name ~ "(" ~ arg_list? ~ ")" }
 descendant     = { ".." ~ field_name? }
 method_call    = { "." ~ field_name ~ "(" ~ arg_list? ~ ")" }
@@ -84,8 +85,14 @@ map_into_shape = { "[" ~ "*" ~ (kw_if ~ expr)? ~ "]" ~ "=>" ~ expr }
 field_access   = { "." ~ field_name }
 index_access   = { "[" ~ bracket_inner ~ "]" }
 inline_filter  = { "{" ~ expr ~ "}" }
-quantifier     = { ("?" ~ !("." | "|" | "?")) | "!" }
-postfix = { opt_method | opt_field | deep_method | descendant | method_call | dyn_field | map_into_shape | field_access | index_access | inline_filter | quantifier }
+// Quantifier:
+//   `?`  → first-of-array / null-propagate (postfix optional marker)
+//   `!`  → exactly-one (error if 0 or >1)
+// Allow `.` / `?` to follow so postfix `?` can be chained with more steps
+// (e.g. `..services?.name`, `.a?.b?`).  Still reject `?|` to avoid
+// conflict with pipe, and `??` which is coalesce.
+quantifier     = { ("?" ~ !("|" | "?")) | "!" }
+postfix = { deep_method | descendant | method_call | dyn_field | map_into_shape | field_access | index_access | inline_filter | quantifier }
 
 // ── Expression hierarchy ──────────────────────────────────────────────────────
 expr = { cond_expr }

@@ -344,7 +344,31 @@ fn parse_unary(pair: Pair<Rule>) -> Expr {
 fn parse_postfix_expr(pair: Pair<Rule>) -> Expr {
     let mut inner = pair.into_inner();
     let base = parse_primary(inner.next().unwrap());
-    let steps: Vec<Step> = inner.flat_map(parse_postfix_step).collect();
+    let raw_steps: Vec<Step> = inner.flat_map(parse_postfix_step).collect();
+    // Postfix `?` is emitted by the grammar as `Step::Quantifier(First)`.
+    // Semantics are context-sensitive:
+    //   Field(k) ?  → OptField(k)  — null-propagate, *no* array-first
+    //                 (matches the user's intent for `.service?.test`:
+    //                  check-exists, else null; do not take first of an array).
+    //   Every other step + ? → leave as Step::Quantifier(First). For
+    //   descendants this yields first-or-null on the matched array;
+    //   for array-returning methods (`filter`, `find_all`, `sort`, …) it
+    //   preserves the pre-existing `.filter(…)?` → FindFirst fusion path.
+    let mut steps: Vec<Step> = Vec::with_capacity(raw_steps.len());
+    for s in raw_steps {
+        match s {
+            Step::Quantifier(QuantifierKind::First) => {
+                if let Some(Step::Field(_)) = steps.last() {
+                    if let Some(Step::Field(k)) = steps.pop() {
+                        steps.push(Step::OptField(k));
+                    }
+                } else {
+                    steps.push(Step::Quantifier(QuantifierKind::First));
+                }
+            }
+            other => steps.push(other),
+        }
+    }
     if let Some(rewritten) = classify_chain_write(&base, &steps) {
         return rewritten;
     }
@@ -465,10 +489,6 @@ fn parse_postfix_step(pair: Pair<Rule>) -> Vec<Step> {
             let name = inner_pair.into_inner().next().unwrap().as_str().to_string();
             vec![Step::Field(name)]
         }
-        Rule::opt_field => {
-            let name = inner_pair.into_inner().next().unwrap().as_str().to_string();
-            vec![Step::OptField(name)]
-        }
         Rule::descendant => {
             let mut di = inner_pair.into_inner();
             match di.next() {
@@ -503,12 +523,6 @@ fn parse_postfix_step(pair: Pair<Rule>) -> Vec<Step> {
             let name = mi.next().unwrap().as_str().to_string();
             let args = mi.next().map(parse_arg_list).unwrap_or_default();
             vec![Step::Method(name, args)]
-        }
-        Rule::opt_method => {
-            let mut mi = inner_pair.into_inner();
-            let name = mi.next().unwrap().as_str().to_string();
-            let args = mi.next().map(parse_arg_list).unwrap_or_default();
-            vec![Step::OptMethod(name, args)]
         }
         Rule::index_access => {
             let bi = inner_pair.into_inner().next().unwrap();
