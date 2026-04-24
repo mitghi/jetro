@@ -3911,17 +3911,21 @@ impl VM {
                         _ => Vec::new(),
                     };
                     let mut idx: HashMap<String, Vec<Val>> = HashMap::with_capacity(right.len());
+                    let mut r_slot: Option<usize> = None;
                     for r in right {
                         let key = match &r {
-                            Val::Obj(o) => o.get(rhs_key.as_ref()).map(super::eval::util::val_to_key),
+                            Val::Obj(o) => lookup_field_cached(o, rhs_key, &mut r_slot)
+                                .map(super::eval::util::val_to_key),
                             _ => None,
                         };
                         if let Some(k) = key { idx.entry(k).or_default().push(r); }
                     }
                     let mut out = Vec::with_capacity(left.len());
+                    let mut l_slot: Option<usize> = None;
                     for l in left {
                         let key = match &l {
-                            Val::Obj(o) => o.get(lhs_key.as_ref()).map(super::eval::util::val_to_key),
+                            Val::Obj(o) => lookup_field_cached(o, lhs_key, &mut l_slot)
+                                .map(super::eval::util::val_to_key),
                             _ => None,
                         };
                         let Some(k) = key else { continue };
