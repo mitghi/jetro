@@ -28,11 +28,42 @@ pub enum Val {
     Int(i64),
     Float(f64),
     Str(Arc<str>),
+    /// Borrowed slice into a parent `Arc<str>` — zero-alloc view.
+    /// Produced by slice/split-first/substring to avoid a fresh heap
+    /// allocation per row.  Treat identically to `Str` at all semantic
+    /// boundaries (display, serialize, compare, hash).
+    StrSlice(crate::strref::StrRef),
     Arr(Arc<Vec<Val>>),
     IntVec(Arc<Vec<i64>>),
     FloatVec(Arc<Vec<f64>>),
     StrVec(Arc<Vec<Arc<str>>>),
     Obj(Arc<IndexMap<Arc<str>, Val>>),
+}
+
+impl Val {
+    /// Unified borrowed `&str` view that works for both `Val::Str` and
+    /// `Val::StrSlice`.  Returns `None` for non-string variants.
+    #[inline]
+    pub fn as_str_ref(&self) -> Option<&str> {
+        match self {
+            Val::Str(s)      => Some(s.as_ref()),
+            Val::StrSlice(r) => Some(r.as_str()),
+            _                => None,
+        }
+    }
+
+    /// Extract an owning `Arc<str>` — cheap Arc bump for `Val::Str` /
+    /// `Val::StrSlice` covering the full parent, allocates a fresh
+    /// buffer for a partial `StrSlice`.  Returns `None` for non-string
+    /// variants.
+    #[inline]
+    pub fn to_arc_str(&self) -> Option<Arc<str>> {
+        match self {
+            Val::Str(s)      => Some(Arc::clone(s)),
+            Val::StrSlice(r) => Some(r.to_arc()),
+            _                => None,
+        }
+    }
 }
 
 // ── Constants (avoid heap allocation for common nulls) ────────────────────────
@@ -186,7 +217,7 @@ impl Val {
             Val::Null    => "null",
             Val::Bool(_) => "bool",
             Val::Int(_) | Val::Float(_) => "number",
-            Val::Str(_)  => "string",
+            Val::Str(_) | Val::StrSlice(_) => "string",
             Val::Arr(_) | Val::IntVec(_) | Val::FloatVec(_) | Val::StrVec(_) => "array",
             Val::Obj(_)  => "object",
         }
@@ -287,7 +318,8 @@ impl From<Val> for serde_json::Value {
             Val::Float(f) => serde_json::Value::Number(
                 Number::from_f64(f).unwrap_or_else(|| 0.into())
             ),
-            Val::Str(s)  => serde_json::Value::String(s.to_string()),
+            Val::Str(s)       => serde_json::Value::String(s.to_string()),
+            Val::StrSlice(r)  => serde_json::Value::String(r.as_str().to_string()),
             Val::Arr(a)  => {
                 let mut out: Vec<serde_json::Value> = Vec::with_capacity(a.len());
                 match Arc::try_unwrap(a) {
@@ -346,7 +378,8 @@ impl<'a> Serialize for ValRef<'a> {
             Val::Float(f) => {
                 if f.is_finite() { s.serialize_f64(*f) } else { s.serialize_i64(0) }
             }
-            Val::Str(v)  => s.serialize_str(v),
+            Val::Str(v)       => s.serialize_str(v),
+            Val::StrSlice(r)  => s.serialize_str(r.as_str()),
             Val::Arr(a)  => {
                 let mut seq = s.serialize_seq(Some(a.len()))?;
                 for item in a.iter() { seq.serialize_element(&ValRef(item))?; }
@@ -553,7 +586,10 @@ impl PartialEq for Val {
         match (self, other) {
             (Val::Null,    Val::Null)    => true,
             (Val::Bool(a), Val::Bool(b)) => a == b,
-            (Val::Str(a),  Val::Str(b))  => a == b,
+            (Val::Str(a),  Val::Str(b))      => a == b,
+            (Val::Str(a),  Val::StrSlice(b)) => a.as_ref() == b.as_str(),
+            (Val::StrSlice(a), Val::Str(b))  => a.as_str() == b.as_ref(),
+            (Val::StrSlice(a), Val::StrSlice(b)) => a.as_str() == b.as_str(),
             (Val::Int(a),  Val::Int(b))  => a == b,
             (Val::Float(a), Val::Float(b)) => a == b,
             (Val::Int(a),  Val::Float(b)) => (*a as f64) == *b,
@@ -575,7 +611,8 @@ impl std::hash::Hash for Val {
             Val::Bool(b)    => { 1u8.hash(state); b.hash(state); }
             Val::Int(n)     => { 2u8.hash(state); n.hash(state); }
             Val::Float(f)   => { 2u8.hash(state); f.to_bits().hash(state); }
-            Val::Str(s)     => { 3u8.hash(state); s.hash(state); }
+            Val::Str(s)       => { 3u8.hash(state); s.hash(state); }
+            Val::StrSlice(r)  => { 3u8.hash(state); r.as_str().hash(state); }
             Val::Arr(a)     => { 4u8.hash(state); (Arc::as_ptr(a) as usize).hash(state); }
             Val::IntVec(a)  => { 4u8.hash(state); (Arc::as_ptr(a) as usize).hash(state); }
             Val::FloatVec(a) => { 4u8.hash(state); (Arc::as_ptr(a) as usize).hash(state); }
@@ -594,7 +631,8 @@ impl std::fmt::Display for Val {
             Val::Bool(b)   => write!(f, "{}", b),
             Val::Int(n)    => write!(f, "{}", n),
             Val::Float(fl) => write!(f, "{}", fl),
-            Val::Str(s)    => write!(f, "{}", s),
+            Val::Str(s)       => write!(f, "{}", s),
+            Val::StrSlice(r)  => write!(f, "{}", r.as_str()),
             other => {
                 let bytes = serde_json::to_vec(&ValRef(other)).unwrap_or_default();
                 f.write_str(std::str::from_utf8(&bytes).unwrap_or(""))

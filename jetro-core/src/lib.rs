@@ -63,6 +63,7 @@ pub mod plan;
 pub mod cfg;
 pub mod ssa;
 pub mod scan;
+pub mod strref;
 
 #[cfg(test)]
 mod tests;

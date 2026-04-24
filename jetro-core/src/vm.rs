@@ -403,6 +403,12 @@ pub enum Opcode {
     /// nested `MakeObj` dispatch per row and hoists key `Arc<str>` clones
     /// outside the inner loop. Uses one IC slot per key for shape lookup.
     MapProject { keys: Arc<[Arc<str>]>, ics: Arc<[std::sync::atomic::AtomicU64]> },
+    /// Fused `map(@.slice(lit, lit))` — per-row ASCII byte-range slice via
+    /// borrowed `Val::StrSlice` into the parent Arc.  Non-ASCII rows fall
+    /// through to character-index resolution.  Zero allocation per row
+    /// when the input is already `Val::Str` (just an Arc bump for the
+    /// borrowed view).
+    MapStrSlice { start: i64, end: Option<i64> },
     /// Fused `map(@.split(sep).count())` — byte-scan per row, returns Int;
     /// zero per-row allocations.
     MapSplitCount { sep: Arc<str> },
@@ -1803,6 +1809,32 @@ impl Compiler {
                     if let Some(o) = fused {
                         out.push(o);
                         continue;
+                    }
+                }
+            }
+            // map(@.slice(lit, lit)) → MapStrSlice { start, end }
+            // Body shape: [PushCurrent, CallMethod(Slice, [PushInt(a), PushInt(b)])]
+            if let Opcode::CallMethod(a) = &op {
+                if a.method == BuiltinMethod::Map && a.sub_progs.len() == 1 {
+                    let body = &a.sub_progs[0].ops;
+                    if let [Opcode::PushCurrent, Opcode::CallMethod(inner)] = &body[..] {
+                        if inner.method == BuiltinMethod::Slice {
+                            let start = match inner.sub_progs.first()
+                                .map(|p| p.ops.as_ref()) {
+                                Some([Opcode::PushInt(n)]) => Some(*n),
+                                _ => None,
+                            };
+                            let end = match inner.sub_progs.get(1)
+                                .map(|p| p.ops.as_ref()) {
+                                Some([Opcode::PushInt(n)]) => Some(Some(*n)),
+                                None => Some(None),
+                                _ => None,
+                            };
+                            if let (Some(s), Some(e)) = (start, end) {
+                                out.push(Opcode::MapStrSlice { start: s, end: e });
+                                continue;
+                            }
+                        }
                     }
                 }
             }
@@ -4389,21 +4421,20 @@ impl VM {
                         for item in a.iter() {
                             if let Val::Str(s) = item {
                                 let src = s.as_ref();
-                                let seg = if sep_s.is_empty() {
-                                    // str::split("").next() is "".
-                                    ""
-                                } else if let Some(idx) = src.find(sep_s) {
-                                    &src[..idx]
-                                } else {
-                                    src
-                                };
-                                // Full source with no separator → reuse parent Arc.
-                                let arc: Arc<str> = if seg.len() == src.len() {
-                                    s.clone()
-                                } else {
-                                    Arc::<str>::from(seg)
-                                };
-                                out.push(Val::Str(arc));
+                                // Full source with no separator → reuse parent Arc (zero alloc).
+                                if sep_s.is_empty() {
+                                    out.push(Val::Str(Arc::<str>::from("")));
+                                    continue;
+                                }
+                                match src.find(sep_s) {
+                                    Some(idx) => {
+                                        // Borrowed slice into parent Arc — zero alloc.
+                                        out.push(Val::StrSlice(
+                                            crate::strref::StrRef::slice(s.clone(), 0, idx)
+                                        ));
+                                    }
+                                    None => out.push(Val::Str(s.clone())),
+                                }
                             } else {
                                 out.push(Val::Null);
                             }
@@ -6198,6 +6229,73 @@ impl VM {
                     }
                 }
 
+                Opcode::MapStrSlice { start, end } => {
+                    let v = pop!(stack);
+                    let v = if matches!(&v, Val::StrVec(_)) { v.into_arr() } else { v };
+                    let start = *start;
+                    let end_opt = *end;
+                    let out_vec: Vec<Val> = if let Val::Arr(a) = &v {
+                        let mut out = Vec::with_capacity(a.len());
+                        for item in a.iter() {
+                            if let Val::Str(s) = item {
+                                let src = s.as_ref();
+                                if src.is_ascii() {
+                                    let blen = src.len();
+                                    let start_u = if start < 0 {
+                                        blen.saturating_sub((-start) as usize)
+                                    } else { start as usize };
+                                    let end_u = match end_opt {
+                                        Some(e) if e < 0 =>
+                                            blen.saturating_sub((-e) as usize),
+                                        Some(e) => (e as usize).min(blen),
+                                        None    => blen,
+                                    };
+                                    let start_u = start_u.min(end_u).min(blen);
+                                    if start_u == 0 && end_u == blen {
+                                        out.push(Val::Str(s.clone()));
+                                    } else {
+                                        out.push(Val::StrSlice(
+                                            crate::strref::StrRef::slice(
+                                                s.clone(), start_u, end_u)
+                                        ));
+                                    }
+                                } else {
+                                    // Unicode fallback: char-indices walk.
+                                    let mut start_b = src.len();
+                                    let mut end_b = src.len();
+                                    let mut found_start = false;
+                                    let start_want = if start < 0 { 0 } else { start as usize };
+                                    let end_want = end_opt.and_then(|e|
+                                        if e < 0 { None } else { Some(e as usize) });
+                                    for (ci, (bi, _)) in src.char_indices().enumerate() {
+                                        if !found_start && ci == start_want {
+                                            start_b = bi;
+                                            found_start = true;
+                                        }
+                                        if let Some(ew) = end_want {
+                                            if ci == ew { end_b = bi; break; }
+                                        }
+                                    }
+                                    if !found_start { start_b = src.len(); }
+                                    if end_want.is_none() { end_b = src.len(); }
+                                    if start_b > end_b { start_b = end_b; }
+                                    if start_b == 0 && end_b == src.len() {
+                                        out.push(Val::Str(s.clone()));
+                                    } else {
+                                        out.push(Val::StrSlice(
+                                            crate::strref::StrRef::slice(
+                                                s.clone(), start_b, end_b)
+                                        ));
+                                    }
+                                }
+                            } else {
+                                out.push(Val::Null);
+                            }
+                        }
+                        out
+                    } else { Vec::new() };
+                    stack.push(Val::arr(out_vec));
+                }
                 Opcode::MapProject { keys, ics } => {
                     let recv = pop!(stack);
                     let recv = if matches!(&recv, Val::StrVec(_) | Val::IntVec(_) | Val::FloatVec(_)) {
@@ -8004,16 +8102,17 @@ fn exec_cast(v: &Val, ty: super::ast::CastType) -> Result<Val, EvalError> {
             other         => super::eval::util::val_to_string(other),
         }.as_str()))),
         CastType::Bool => Ok(Val::Bool(match v {
-            Val::Null     => false,
-            Val::Bool(b)  => *b,
-            Val::Int(n)   => *n != 0,
-            Val::Float(f) => *f != 0.0,
-            Val::Str(s)   => !s.is_empty(),
-            Val::Arr(a)   => !a.is_empty(),
-            Val::IntVec(a) => !a.is_empty(),
-            Val::FloatVec(a) => !a.is_empty(),
-            Val::StrVec(a) => !a.is_empty(),
-            Val::Obj(o)   => !o.is_empty(),
+            Val::Null         => false,
+            Val::Bool(b)      => *b,
+            Val::Int(n)       => *n != 0,
+            Val::Float(f)     => *f != 0.0,
+            Val::Str(s)       => !s.is_empty(),
+            Val::StrSlice(r)  => !r.is_empty(),
+            Val::Arr(a)       => !a.is_empty(),
+            Val::IntVec(a)    => !a.is_empty(),
+            Val::FloatVec(a)  => !a.is_empty(),
+            Val::StrVec(a)    => !a.is_empty(),
+            Val::Obj(o)       => !o.is_empty(),
         })),
         CastType::Number | CastType::Float => match v {
             Val::Int(n)   => Ok(Val::Float(*n as f64)),
@@ -8124,7 +8223,8 @@ fn hash_structure_into(v: &Val, h: &mut DefaultHasher, depth: usize) {
         Val::Bool(b)    => { 1u8.hash(h); b.hash(h); }
         Val::Int(n)     => { 2u8.hash(h); n.hash(h); }
         Val::Float(f)   => { 3u8.hash(h); f.to_bits().hash(h); }
-        Val::Str(s)     => { 4u8.hash(h); s.hash(h); }
+        Val::Str(s)       => { 4u8.hash(h); s.hash(h); }
+        Val::StrSlice(r)  => { 4u8.hash(h); r.as_str().hash(h); }
         Val::Arr(a)     => { 5u8.hash(h); a.len().hash(h); for item in a.iter() { hash_structure_into(item, h, depth+1); } }
         Val::IntVec(a)  => { 5u8.hash(h); a.len().hash(h); for n in a.iter() { 2u8.hash(h); n.hash(h); } }
         Val::FloatVec(a) => { 5u8.hash(h); a.len().hash(h); for f in a.iter() { 3u8.hash(h); f.to_bits().hash(h); } }

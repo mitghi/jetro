@@ -235,46 +235,77 @@ pub fn strip_suffix(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError
 }
 
 pub fn str_slice(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-    if let Val::Str(s) = recv {
-        let start_arg = first_i64_arg(args, env).unwrap_or(0) as usize;
-        let end_arg = args.get(1)
-            .and_then(|a| eval_pos(a, env).ok())
-            .and_then(|v| v.as_i64())
-            .map(|n| n as usize);
-
-        if s.is_ascii() {
-            let blen = s.len();
-            let end = end_arg.unwrap_or(blen).min(blen);
-            let start = start_arg.min(end);
-            if start == 0 && end == blen {
-                return Ok(Val::Str(s));
-            }
-            return Ok(Val::Str(Arc::<str>::from(&s[start..end])));
+    // Resolve the receiver to (parent Arc, start-byte-offset-into-parent,
+    // viewed-bytes-slice).  Works for both Val::Str (whole Arc) and
+    // Val::StrSlice (view into a parent Arc).
+    let (parent, base_off, view_bytes): (Arc<str>, usize, usize) = match recv {
+        Val::Str(s) => { let len = s.len(); (s, 0, len) }
+        Val::StrSlice(r) => {
+            let view_len = r.len();
+            // Extract parent + view range.  The parent's bytes are shared
+            // across every slice that points into it, so we can carry the
+            // same Arc forward at zero alloc cost.
+            let parent = r.to_arc();
+            // `to_arc()` returns a full-range clone only when view covers
+            // the whole parent; otherwise it re-allocates.  Re-build a
+            // zero-offset StrRef+slice below to keep the zero-alloc path.
+            // If we allocated, `parent` now equals the view exactly so
+            // base_off = 0.
+            let _ = view_len;
+            let plen = parent.len();
+            (parent, 0, plen)
         }
+        _ => return err!("slice: expected string"),
+    };
+    let view = &parent[base_off .. base_off + view_bytes];
 
-        let mut iter = s.char_indices();
-        let mut start_b = s.len();
-        let mut end_b = s.len();
-        let mut found_start = false;
-        let end_want = end_arg;
-        for (char_idx, (byte_idx, _)) in iter.by_ref().enumerate() {
-            if !found_start && char_idx == start_arg {
-                start_b = byte_idx;
-                found_start = true;
-            }
-            if let Some(e) = end_want {
-                if char_idx == e { end_b = byte_idx; break; }
-            }
-        }
-        if !found_start { start_b = s.len(); }
-        if end_want.is_none() { end_b = s.len(); }
-        if start_b > end_b { start_b = end_b; }
+    let start_arg = first_i64_arg(args, env).unwrap_or(0) as usize;
+    let end_arg = args.get(1)
+        .and_then(|a| eval_pos(a, env).ok())
+        .and_then(|v| v.as_i64())
+        .map(|n| n as usize);
 
-        if start_b == 0 && end_b == s.len() {
-            return Ok(Val::Str(s));
+    if view.is_ascii() {
+        let blen = view.len();
+        let end = end_arg.unwrap_or(blen).min(blen);
+        let start = start_arg.min(end);
+        if start == 0 && end == blen {
+            return Ok(Val::Str(parent));
         }
-        Ok(Val::Str(Arc::<str>::from(&s[start_b..end_b])))
-    } else { err!("slice: expected string") }
+        // Zero-alloc borrowed slice into parent.
+        return Ok(Val::StrSlice(crate::strref::StrRef::slice(
+            parent,
+            base_off + start,
+            base_off + end,
+        )));
+    }
+
+    // Unicode path: walk char_indices to find byte boundaries.
+    let mut start_b = view.len();
+    let mut end_b = view.len();
+    let mut found_start = false;
+    let end_want = end_arg;
+    for (char_idx, (byte_idx, _)) in view.char_indices().enumerate() {
+        if !found_start && char_idx == start_arg {
+            start_b = byte_idx;
+            found_start = true;
+        }
+        if let Some(e) = end_want {
+            if char_idx == e { end_b = byte_idx; break; }
+        }
+    }
+    if !found_start { start_b = view.len(); }
+    if end_want.is_none() { end_b = view.len(); }
+    if start_b > end_b { start_b = end_b; }
+
+    if start_b == 0 && end_b == view.len() {
+        return Ok(Val::Str(parent));
+    }
+    Ok(Val::StrSlice(crate::strref::StrRef::slice(
+        parent,
+        base_off + start_b,
+        base_off + end_b,
+    )))
 }
 
 pub fn split(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
