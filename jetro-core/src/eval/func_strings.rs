@@ -236,16 +236,44 @@ pub fn strip_suffix(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError
 
 pub fn str_slice(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     if let Val::Str(s) = recv {
-        let start = first_i64_arg(args, env).unwrap_or(0) as usize;
-        let chars: Vec<char> = s.chars().collect();
-        let end = args.get(1)
+        let start_arg = first_i64_arg(args, env).unwrap_or(0) as usize;
+        let end_arg = args.get(1)
             .and_then(|a| eval_pos(a, env).ok())
             .and_then(|v| v.as_i64())
-            .map(|n| n as usize)
-            .unwrap_or(chars.len())
-            .min(chars.len());
-        let start = start.min(end);
-        Ok(val_str(&chars[start..end].iter().collect::<String>()))
+            .map(|n| n as usize);
+
+        if s.is_ascii() {
+            let blen = s.len();
+            let end = end_arg.unwrap_or(blen).min(blen);
+            let start = start_arg.min(end);
+            if start == 0 && end == blen {
+                return Ok(Val::Str(s));
+            }
+            return Ok(Val::Str(Arc::<str>::from(&s[start..end])));
+        }
+
+        let mut iter = s.char_indices();
+        let mut start_b = s.len();
+        let mut end_b = s.len();
+        let mut found_start = false;
+        let end_want = end_arg;
+        for (char_idx, (byte_idx, _)) in iter.by_ref().enumerate() {
+            if !found_start && char_idx == start_arg {
+                start_b = byte_idx;
+                found_start = true;
+            }
+            if let Some(e) = end_want {
+                if char_idx == e { end_b = byte_idx; break; }
+            }
+        }
+        if !found_start { start_b = s.len(); }
+        if end_want.is_none() { end_b = s.len(); }
+        if start_b > end_b { start_b = end_b; }
+
+        if start_b == 0 && end_b == s.len() {
+            return Ok(Val::Str(s));
+        }
+        Ok(Val::Str(Arc::<str>::from(&s[start_b..end_b])))
     } else { err!("slice: expected string") }
 }
 
