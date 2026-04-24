@@ -476,7 +476,7 @@ fn count_ident_uses_in_ops(ops: &[Opcode], name: &str, acc: &mut usize) {
                 use super::vm::CompiledObjEntry;
                 for e in entries.iter() {
                     match e {
-                        CompiledObjEntry::Short(_) => {}
+                        CompiledObjEntry::Short { .. } => {}
                         CompiledObjEntry::Kv { prog, cond, .. } => {
                             count_ident_uses_in_ops(&prog.ops, name, acc);
                             if let Some(c) = cond { count_ident_uses_in_ops(&c.ops, name, acc); }
@@ -695,7 +695,7 @@ fn walk_subprograms(ops: &[Opcode], map: &mut HashMap<u64, usize>) {
                 let mut v = Vec::new();
                 for e in entries.iter() {
                     match e {
-                        CompiledObjEntry::Short(_) => {}
+                        CompiledObjEntry::Short { .. } => {}
                         CompiledObjEntry::Kv { prog, cond, .. } => {
                             v.push(prog);
                             if let Some(c) = cond { v.push(c); }
@@ -955,17 +955,19 @@ fn rewrite_op(op: &Opcode, cache: &mut HashMap<u64, Arc<Program>>) -> Opcode {
         }
         Opcode::MakeObj(entries) => {
             let new_entries: Vec<CompiledObjEntry> = entries.iter().map(|e| match e {
-                CompiledObjEntry::Short(s) => CompiledObjEntry::Short(s.clone()),
+                CompiledObjEntry::Short { name, ic } =>
+                    CompiledObjEntry::Short { name: name.clone(), ic: ic.clone() },
                 CompiledObjEntry::Kv { key, prog, optional, cond } => CompiledObjEntry::Kv {
                     key: key.clone(),
                     prog: dedup_rec(prog, cache),
                     optional: *optional,
                     cond: cond.as_ref().map(|c| dedup_rec(c, cache)),
                 },
-                CompiledObjEntry::KvPath { key, steps, optional } => CompiledObjEntry::KvPath {
+                CompiledObjEntry::KvPath { key, steps, optional, ics } => CompiledObjEntry::KvPath {
                     key: key.clone(),
                     steps: steps.clone(),
                     optional: *optional,
+                    ics: ics.clone(),
                 },
                 CompiledObjEntry::Dynamic { key, val } => CompiledObjEntry::Dynamic {
                     key: dedup_rec(key, cache),
@@ -1087,7 +1089,7 @@ pub fn opcode_cost(op: &Opcode) -> u32 {
         Opcode::MakeObj(entries) => {
             use super::vm::CompiledObjEntry;
             entries.iter().map(|e| match e {
-                CompiledObjEntry::Short(_) => 2,
+                CompiledObjEntry::Short { .. } => 2,
                 CompiledObjEntry::Kv { prog, cond, .. } =>
                     2 + program_cost(prog) + cond.as_ref().map_or(0, |c| program_cost(c)),
                 CompiledObjEntry::KvPath { steps, .. } => 2 + steps.len() as u32,

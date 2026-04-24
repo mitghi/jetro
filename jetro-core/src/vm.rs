@@ -250,14 +250,20 @@ pub struct CompiledCall {
 /// A compiled object field for `Opcode::MakeObj`.
 #[derive(Debug, Clone)]
 pub enum CompiledObjEntry {
-    Short(Arc<str>),
+    /// `{ name }` / `{ name, … }` shorthand — reads `env.current.name`
+    /// (or a bound variable of that name).  `ic` is a per-entry inline
+    /// cache hint so that repeated MakeObj calls over objects that share
+    /// shape skip the IndexMap key-hash on hit.
+    Short { name: Arc<str>, ic: Arc<AtomicU64> },
     Kv     { key: Arc<str>, prog: Arc<Program>, optional: bool, cond: Option<Arc<Program>> },
     /// Specialised `Kv` where the value is a pure path from current:
     /// `{ key: @.a.b[0] }` compiles to `KvPath` so `exec_make_obj` can
     /// walk `env.current` through the pre-resolved steps without a
     /// sub-program exec.  `optional=true` mirrors `?` in the source —
     /// the field is omitted when the walk lands on `Null`.
-    KvPath { key: Arc<str>, steps: Arc<[KvStep]>, optional: bool },
+    /// `ics[i]` is an inline-cache slot for `steps[i]` — only used when
+    /// the step is `Field`.
+    KvPath { key: Arc<str>, steps: Arc<[KvStep]>, optional: bool, ics: Arc<[AtomicU64]> },
     Dynamic { key: Arc<Program>, val: Arc<Program> },
     Spread(Arc<Program>),
     SpreadDeep(Arc<Program>),
@@ -2352,16 +2358,23 @@ impl Compiler {
             Expr::Object(fields) => {
                 let entries: Vec<CompiledObjEntry> = fields.iter().map(|f| match f {
                     ObjField::Short(name) =>
-                        CompiledObjEntry::Short(Arc::from(name.as_str())),
+                        CompiledObjEntry::Short {
+                            name: Arc::from(name.as_str()),
+                            ic: Arc::new(AtomicU64::new(0)),
+                        },
                     ObjField::Kv { key, val, optional, cond }
                         if cond.is_none()
                             && Self::try_kv_path_steps(val).is_some()
                     => {
-                        let steps = Self::try_kv_path_steps(val).unwrap();
+                        let steps: Vec<KvStep> = Self::try_kv_path_steps(val).unwrap();
+                        let n = steps.len();
+                        let mut ics_vec: Vec<AtomicU64> = Vec::with_capacity(n);
+                        for _ in 0..n { ics_vec.push(AtomicU64::new(0)); }
                         CompiledObjEntry::KvPath {
                             key: Arc::from(key.as_str()),
                             steps: steps.into(),
                             optional: *optional,
+                            ics: ics_vec.into(),
                         }
                     }
                     ObjField::Kv { key, val, optional, cond } =>
@@ -5810,9 +5823,14 @@ impl VM {
         let mut map: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(entries.len());
         for entry in entries {
             match entry {
-                CompiledObjEntry::Short(name) => {
-                    let v = if let Some(v) = env.get_var(name.as_ref()) { v.clone() }
-                            else { env.current.get_field(name.as_ref()) };
+                CompiledObjEntry::Short { name, ic } => {
+                    let v = if let Some(v) = env.get_var(name.as_ref()) {
+                        v.clone()
+                    } else if let Val::Obj(m) = &env.current {
+                        ic_get_field(m, name.as_ref(), ic)
+                    } else {
+                        env.current.get_field(name.as_ref())
+                    };
                     if !v.is_null() { map.insert(name.clone(), v); }
                 }
                 CompiledObjEntry::Kv { key, prog, optional, cond } => {
@@ -5823,11 +5841,17 @@ impl VM {
                     if *optional && v.is_null() { continue; }
                     map.insert(key.clone(), v);
                 }
-                CompiledObjEntry::KvPath { key, steps, optional } => {
+                CompiledObjEntry::KvPath { key, steps, optional, ics } => {
                     let mut v = env.current.clone();
-                    for st in steps.iter() {
+                    for (i, st) in steps.iter().enumerate() {
                         v = match st {
-                            KvStep::Field(f) => v.get_field(f.as_ref()),
+                            KvStep::Field(f) => {
+                                if let Val::Obj(m) = &v {
+                                    ic_get_field(m, f.as_ref(), &ics[i])
+                                } else {
+                                    v.get_field(f.as_ref())
+                                }
+                            }
                             KvStep::Index(i) => v.get_index(*i),
                         };
                         if v.is_null() { break; }
