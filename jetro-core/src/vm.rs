@@ -2770,8 +2770,10 @@ impl VM {
     /// Primitive roots bypass the cache (hashing is already O(1)).
     fn compute_or_cache_root_hash(&mut self, root: &Val) -> u64 {
         let ptr: Option<usize> = match root {
-            Val::Obj(m) => Some(Arc::as_ptr(m) as *const () as usize),
-            Val::Arr(a) => Some(Arc::as_ptr(a) as *const () as usize),
+            Val::Obj(m)      => Some(Arc::as_ptr(m) as *const () as usize),
+            Val::Arr(a)      => Some(Arc::as_ptr(a) as *const () as usize),
+            Val::IntVec(a)   => Some(Arc::as_ptr(a) as *const () as usize),
+            Val::FloatVec(a) => Some(Arc::as_ptr(a) as *const () as usize),
             _ => None,
         };
         if let Some(p) = ptr {
