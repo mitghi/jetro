@@ -182,15 +182,6 @@ impl Env {
         Self { vars, root: self.root.clone(), current: self.current.clone(), registry: self.registry.clone(), raw_bytes: self.raw_bytes.clone() }
     }
 
-    fn with_vars2(&self, n1: &str, v1: Val, n2: &str, v2: Val) -> Self {
-        let mut vars = self.vars.clone();
-        if let Some(p) = vars.iter().position(|(k, _)| k.as_ref() == n1) { vars[p].1 = v1; }
-        else { vars.push((Arc::from(n1), v1)); }
-        if let Some(p) = vars.iter().position(|(k, _)| k.as_ref() == n2) { vars[p].1 = v2; }
-        else { vars.push((Arc::from(n2), v2)); }
-        Self { vars, root: self.root.clone(), current: self.current.clone(), registry: self.registry.clone(), raw_bytes: self.raw_bytes.clone() }
-    }
-
     /// Hot-loop helper: bind `name → val` and swap `current`, returning
     /// the previous state.  If `name` was already bound we remember the
     /// previous value; otherwise we remember that the slot was freshly
@@ -406,10 +397,23 @@ pub(super) fn eval(expr: &Expr, env: &Env) -> Result<Val, EvalError> {
         Expr::ListComp { expr, vars, iter, cond } => {
             let items = eval_iter(iter, env)?;
             let mut out = Vec::new();
+            let mut env_mut = env.clone();
             for item in items {
-                let ie = bind_vars(env, vars, item);
-                if let Some(c) = cond { if !is_truthy(&eval(c, &ie)?) { continue; } }
-                out.push(eval(expr, &ie)?);
+                let frames = bind_vars_mut(&mut env_mut, vars, item);
+                let keep = match cond {
+                    Some(c) => match eval(c, &env_mut) {
+                        Ok(v)  => is_truthy(&v),
+                        Err(e) => { unbind_vars_mut(&mut env_mut, frames); return Err(e); }
+                    },
+                    None => true,
+                };
+                if keep {
+                    match eval(expr, &env_mut) {
+                        Ok(v)  => out.push(v),
+                        Err(e) => { unbind_vars_mut(&mut env_mut, frames); return Err(e); }
+                    }
+                }
+                unbind_vars_mut(&mut env_mut, frames);
             }
             Ok(Val::arr(out))
         }
@@ -417,14 +421,28 @@ pub(super) fn eval(expr: &Expr, env: &Env) -> Result<Val, EvalError> {
         Expr::DictComp { key, val, vars, iter, cond } => {
             let items = eval_iter(iter, env)?;
             let mut map: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(items.len());
+            let mut env_mut = env.clone();
             for item in items {
-                let ie = bind_vars(env, vars, item);
-                if let Some(c) = cond { if !is_truthy(&eval(c, &ie)?) { continue; } }
-                let k: Arc<str> = match eval(key, &ie)? {
-                    Val::Str(s) => s,
-                    other       => Arc::<str>::from(val_to_key(&other)),
+                let frames = bind_vars_mut(&mut env_mut, vars, item);
+                let keep = match cond {
+                    Some(c) => match eval(c, &env_mut) {
+                        Ok(v)  => is_truthy(&v),
+                        Err(e) => { unbind_vars_mut(&mut env_mut, frames); return Err(e); }
+                    },
+                    None => true,
                 };
-                map.insert(k, eval(val, &ie)?);
+                if keep {
+                    let k: Arc<str> = match eval(key, &env_mut) {
+                        Ok(Val::Str(s)) => s,
+                        Ok(other)       => Arc::<str>::from(val_to_key(&other)),
+                        Err(e) => { unbind_vars_mut(&mut env_mut, frames); return Err(e); }
+                    };
+                    match eval(val, &env_mut) {
+                        Ok(v)  => { map.insert(k, v); }
+                        Err(e) => { unbind_vars_mut(&mut env_mut, frames); return Err(e); }
+                    }
+                }
+                unbind_vars_mut(&mut env_mut, frames);
             }
             Ok(Val::obj(map))
         }
@@ -434,11 +452,23 @@ pub(super) fn eval(expr: &Expr, env: &Env) -> Result<Val, EvalError> {
             let mut seen: std::collections::HashSet<String> =
                 std::collections::HashSet::with_capacity(items.len());
             let mut out = Vec::with_capacity(items.len());
+            let mut env_mut = env.clone();
             for item in items {
-                let ie = bind_vars(env, vars, item);
-                if let Some(c) = cond { if !is_truthy(&eval(c, &ie)?) { continue; } }
-                let v = eval(expr, &ie)?;
-                if seen.insert(val_to_key(&v)) { out.push(v); }
+                let frames = bind_vars_mut(&mut env_mut, vars, item);
+                let keep = match cond {
+                    Some(c) => match eval(c, &env_mut) {
+                        Ok(v)  => is_truthy(&v),
+                        Err(e) => { unbind_vars_mut(&mut env_mut, frames); return Err(e); }
+                    },
+                    None => true,
+                };
+                if keep {
+                    match eval(expr, &env_mut) {
+                        Ok(v)  => if seen.insert(val_to_key(&v)) { out.push(v); },
+                        Err(e) => { unbind_vars_mut(&mut env_mut, frames); return Err(e); }
+                    }
+                }
+                unbind_vars_mut(&mut env_mut, frames);
             }
             Ok(Val::arr(out))
         }
@@ -570,8 +600,14 @@ fn apply_patch_step(
         PathStep::WildcardFilter(pred) => {
             let arr = v.into_vec().ok_or_else(|| EvalError("patch [* if]: expected array".into()))?;
             let mut out = Vec::with_capacity(arr.len());
+            let mut env_mut = env.clone();
             for item in arr {
-                let include = is_truthy(&eval(pred, &env.with_current(item.clone()))?);
+                let frame = env_mut.push_lam(None, item.clone());
+                let include = match eval(pred, &env_mut) {
+                    Ok(v)  => is_truthy(&v),
+                    Err(e) => { env_mut.pop_lam(frame); return Err(e); }
+                };
+                env_mut.pop_lam(frame);
                 if include {
                     match apply_patch_step(item, path, i+1, val_expr, env)? {
                         PatchResult::Delete => {}
@@ -1096,9 +1132,15 @@ fn eval_step(val: Val, step: &Step, env: &Env) -> Result<Val, EvalError> {
                 other => vec![other],
             };
             let mut out = Vec::new();
+            let mut env_mut = env.clone();
             for item in items {
-                let ie = env.with_current(item.clone());
-                if is_truthy(&eval(pred, &ie)?) { out.push(item); }
+                let frame = env_mut.push_lam(None, item.clone());
+                let truthy = match eval(pred, &env_mut) {
+                    Ok(v)  => is_truthy(&v),
+                    Err(e) => { env_mut.pop_lam(frame); return Err(e); }
+                };
+                env_mut.pop_lam(frame);
+                if truthy { out.push(item); }
             }
             Ok(Val::arr(out))
         }
@@ -1481,16 +1523,27 @@ fn eval_iter(iter: &Expr, env: &Env) -> Result<Vec<Val>, EvalError> {
     }
 }
 
-fn bind_vars(env: &Env, vars: &[String], item: Val) -> Env {
+/// In-place comprehension bind — one or two vars pushed + `current`
+/// swapped.  Returns a pair of frames (second is `None` for 0/1-var
+/// forms) so the caller can unwind with `unbind_vars_mut`.
+#[inline]
+fn bind_vars_mut(env: &mut Env, vars: &[String], item: Val) -> (LamFrame, Option<LamFrame>) {
     match vars {
-        [] => env.with_current(item),
-        [v] => { let mut e = env.with_var(v, item.clone()); e.current = item; e }
+        [] => (env.push_lam(None, item), None),
+        [v] => (env.push_lam(Some(v), item), None),
         [v1, v2, ..] => {
             let idx = item.get("index").cloned().unwrap_or(Val::Null);
             let val = item.get("value").cloned().unwrap_or_else(|| item.clone());
-            let mut e = env.with_vars2(v1, idx, v2, val.clone());
-            e.current = val;
-            e
+            let f1 = env.push_lam(Some(v1), idx);
+            // Push v2 with val; also sets current to val (matches legacy).
+            let f2 = env.push_lam(Some(v2), val);
+            (f1, Some(f2))
         }
     }
+}
+
+#[inline]
+fn unbind_vars_mut(env: &mut Env, frames: (LamFrame, Option<LamFrame>)) {
+    if let Some(f2) = frames.1 { env.pop_lam(f2); }
+    env.pop_lam(frames.0);
 }

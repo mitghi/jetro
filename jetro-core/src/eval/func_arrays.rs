@@ -112,11 +112,16 @@ pub fn sort(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
             if params.len() == 2 {
                 let p1 = params[0].clone();
                 let p2 = params[1].clone();
+                let mut env_mut = env.clone();
                 let mut err_cell: Option<EvalError> = None;
                 items.sort_by(|x, y| {
                     if err_cell.is_some() { return std::cmp::Ordering::Equal; }
-                    let inner = env.with_vars2(&p1, x.clone(), &p2, y.clone());
-                    match eval(body, &inner) {
+                    let f1 = env_mut.push_lam(Some(&p1), x.clone());
+                    let f2 = env_mut.push_lam(Some(&p2), y.clone());
+                    let r = eval(body, &env_mut);
+                    env_mut.pop_lam(f2);
+                    env_mut.pop_lam(f1);
+                    match r {
                         Ok(Val::Bool(true)) => std::cmp::Ordering::Less,
                         Ok(_) => std::cmp::Ordering::Greater,
                         Err(e) => { err_cell = Some(e); std::cmp::Ordering::Equal }
@@ -138,12 +143,18 @@ pub fn sort(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     // sort does O(N log N) comparisons, each evaluating keys twice — so
     // 2·N log N evals.  Precomputing brings this down to N evals plus
     // O(N log N) Val::cmp operations.
+    let mut env_mut = env.clone();
     let mut keyed: Vec<(Vec<Val>, Val)> = Vec::with_capacity(items.len());
     for item in items {
         let mut ks = Vec::with_capacity(keys.len());
+        let frame = env_mut.push_lam(None, item.clone());
         for (key_expr, _) in &keys {
-            ks.push(eval(key_expr, &env.with_current(item.clone()))?);
+            match eval(key_expr, &env_mut) {
+                Ok(v)  => ks.push(v),
+                Err(e) => { env_mut.pop_lam(frame); return Err(e); }
+            }
         }
+        env_mut.pop_lam(frame);
         keyed.push((ks, item));
     }
     keyed.sort_by(|(xk, _), (yk, _)| {
