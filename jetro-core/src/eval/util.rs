@@ -162,31 +162,91 @@ pub fn flatten_val(v: Val, depth: usize) -> Val {
     match v {
         Val::Arr(a) if depth > 0 => {
             let items = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
+            // Columnar fast-path: Arr of IntVec (or Int scalars) → IntVec out.
+            // Skips per-item Val::Int allocation and keeps the result in the
+            // typed lane for downstream aggregates / accumulate.
+            let all_int_children = !items.is_empty() && items.iter().all(|it| matches!(it,
+                Val::IntVec(_) | Val::Int(_)
+            ));
+            if all_int_children {
+                let cap: usize = items.iter().map(|it| match it {
+                    Val::IntVec(inner) => inner.len(),
+                    _ => 1,
+                }).sum();
+                let mut out: Vec<i64> = Vec::with_capacity(cap);
+                for item in items {
+                    match item {
+                        Val::IntVec(inner) => out.extend(inner.iter().copied()),
+                        Val::Int(n)        => out.push(n),
+                        _ => unreachable!(),
+                    }
+                }
+                return Val::int_vec(out);
+            }
+            let all_float_children = !items.is_empty() && items.iter().all(|it| matches!(it,
+                Val::FloatVec(_) | Val::Float(_) | Val::Int(_)
+            ));
+            if all_float_children {
+                let cap: usize = items.iter().map(|it| match it {
+                    Val::FloatVec(inner) => inner.len(),
+                    _ => 1,
+                }).sum();
+                let mut out: Vec<f64> = Vec::with_capacity(cap);
+                for item in items {
+                    match item {
+                        Val::FloatVec(inner) => out.extend(inner.iter().copied()),
+                        Val::Float(f)        => out.push(f),
+                        Val::Int(n)          => out.push(n as f64),
+                        _ => unreachable!(),
+                    }
+                }
+                return Val::float_vec(out);
+            }
             // Precompute exact capacity in one pass — eliminates Vec doubling
             // reallocations on the hot `$.flatten()` / `.map(...).flatten()`
             // paths.
             let cap: usize = items.iter().map(|it| match it {
                 Val::Arr(inner) => inner.len(),
+                Val::IntVec(inner) => inner.len(),
+                Val::FloatVec(inner) => inner.len(),
                 _ => 1,
             }).sum();
             let mut out = Vec::with_capacity(cap);
             for item in items {
                 match item {
-                    Val::Arr(_) => if let Val::Arr(inner) = flatten_val(item, depth - 1) {
-                        out.extend(Arc::try_unwrap(inner).unwrap_or_else(|a| (*a).clone()));
+                    Val::Arr(_) => match flatten_val(item, depth - 1) {
+                        Val::Arr(inner) => {
+                            out.extend(Arc::try_unwrap(inner).unwrap_or_else(|a| (*a).clone()));
+                        }
+                        Val::IntVec(inner) => {
+                            out.extend(inner.iter().map(|n| Val::Int(*n)));
+                        }
+                        Val::FloatVec(inner) => {
+                            out.extend(inner.iter().map(|f| Val::Float(*f)));
+                        }
+                        _ => {}
                     },
+                    Val::IntVec(inner) => {
+                        // IntVec is already flat-of-scalars — extend once.
+                        out.extend(inner.iter().map(|n| Val::Int(*n)));
+                    }
+                    Val::FloatVec(inner) => {
+                        out.extend(inner.iter().map(|f| Val::Float(*f)));
+                    }
                     other => out.push(other),
                 }
             }
             Val::arr(out)
         }
+        // Columnar receiver — already flat of scalars.
+        Val::IntVec(_) | Val::FloatVec(_) => v,
         other => other,
     }
 }
 
 pub fn zip_arrays(a: Val, b: Val, longest: bool, fill: Val) -> Result<Val, EvalError> {
-    let av = a.as_array().map(|a| a.to_vec()).unwrap_or_default();
-    let bv = b.as_array().map(|b| b.to_vec()).unwrap_or_default();
+    let av = a.as_vals().map(|c| c.into_owned()).unwrap_or_default();
+    let bv = b.as_vals().map(|c| c.into_owned()).unwrap_or_default();
     let len = if longest { av.len().max(bv.len()) } else { av.len().min(bv.len()) };
     Ok(Val::arr((0..len).map(|i| Val::arr(vec![
         av.get(i).cloned().unwrap_or_else(|| fill.clone()),

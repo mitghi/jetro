@@ -97,6 +97,8 @@ pub fn count(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
             }
             Ok(Val::Int(n))
         }
+        Val::IntVec(a)   => Ok(Val::Int(a.len() as i64)),
+        Val::FloatVec(a) => Ok(Val::Int(a.len() as i64)),
         Val::Str(s)  => Ok(Val::Int(s.chars().count() as i64)),
         Val::Obj(m)  => Ok(Val::Int(m.len() as i64)),
         _ => err!("count: unsupported type"),

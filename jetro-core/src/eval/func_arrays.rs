@@ -196,6 +196,16 @@ pub fn reverse(recv: Val) -> Result<Val, EvalError> {
             v.reverse();
             Ok(Val::arr(v))
         }
+        Val::IntVec(a) => {
+            let mut v = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
+            v.reverse();
+            Ok(Val::int_vec(v))
+        }
+        Val::FloatVec(a) => {
+            let mut v = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
+            v.reverse();
+            Ok(Val::float_vec(v))
+        }
         Val::Str(s) => Ok(Val::Str(Arc::<str>::from(s.chars().rev().collect::<String>()))),
         _ => err!("reverse: expected array or string"),
     }
@@ -225,8 +235,8 @@ pub fn last(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
 }
 
 pub fn nth(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-    let n = first_i64_arg(args, env)? as usize;
-    Ok(recv.as_array().and_then(|a| a.get(n)).cloned().unwrap_or(Val::Null))
+    let n = first_i64_arg(args, env)?;
+    Ok(recv.get_index(n))
 }
 
 // ── Mutation ──────────────────────────────────────────────────────────────────
@@ -508,9 +518,9 @@ pub fn zip_longest_method(recv: Val, args: &[Arg], env: &Env) -> Result<Val, Eva
 pub fn global_zip(args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     let arrs: Result<Vec<_>, _> = args.iter().map(|a| eval_pos(a, env)).collect();
     let arrs = arrs?;
-    let len  = arrs.iter().filter_map(|a| a.as_array().map(|a| a.len())).min().unwrap_or(0);
+    let len  = arrs.iter().filter_map(|a| a.arr_len()).min().unwrap_or(0);
     Ok(Val::arr((0..len).map(|i| {
-        Val::arr(arrs.iter().filter_map(|a| a.as_array()?.get(i).cloned()).collect())
+        Val::arr(arrs.iter().map(|a| a.get_index(i as i64)).collect())
     }).collect()))
 }
 
@@ -522,10 +532,12 @@ pub fn global_zip_longest(args: &[Arg], env: &Env) -> Result<Val, EvalError> {
         .filter(|a| matches!(a, Arg::Pos(_)))
         .map(|a| eval_pos(a, env)).collect();
     let arrs = arrs?;
-    let len  = arrs.iter().filter_map(|a| a.as_array().map(|a| a.len())).max().unwrap_or(0);
+    let len  = arrs.iter().filter_map(|a| a.arr_len()).max().unwrap_or(0);
     Ok(Val::arr((0..len).map(|i| {
         Val::arr(arrs.iter().map(|a| {
-            a.as_array().and_then(|arr| arr.get(i)).cloned().unwrap_or_else(|| fill.clone())
+            if (i as usize) < a.arr_len().unwrap_or(0) {
+                a.get_index(i as i64)
+            } else { fill.clone() }
         }).collect())
     }).collect()))
 }

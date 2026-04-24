@@ -41,7 +41,7 @@ pub fn unique_by(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
 
 pub fn collect(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
     match recv {
-        Val::Arr(_) => Ok(recv),
+        Val::Arr(_) | Val::IntVec(_) | Val::FloatVec(_) => Ok(recv),
         Val::Null   => Ok(Val::arr(Vec::new())),
         other       => Ok(Val::arr(vec![other])),
     }

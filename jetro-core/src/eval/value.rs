@@ -230,7 +230,19 @@ impl From<&serde_json::Value> for Val {
                 else { Val::Float(n.as_f64().unwrap_or(0.0)) }
             }
             serde_json::Value::String(s) => Val::Str(Arc::from(s.as_str())),
-            serde_json::Value::Array(a)  => Val::Arr(Arc::new(a.iter().map(Val::from).collect())),
+            serde_json::Value::Array(a)  => {
+                // Columnar fast-path: homogeneous all-int arrays become
+                // `Val::IntVec`.  Saves 3x storage for big numeric docs.
+                let all_i64 = !a.is_empty() && a.iter().all(|v| matches!(v,
+                    serde_json::Value::Number(n) if n.is_i64()));
+                if all_i64 {
+                    let out: Vec<i64> = a.iter().filter_map(|v|
+                        if let serde_json::Value::Number(n) = v { n.as_i64() } else { None }
+                    ).collect();
+                    return Val::IntVec(Arc::new(out));
+                }
+                Val::Arr(Arc::new(a.iter().map(Val::from).collect()))
+            }
             serde_json::Value::Object(m) => Val::Obj(Arc::new(
                 m.iter().map(|(k, v)| (Arc::from(k.as_str()), Val::from(v))).collect()
             )),

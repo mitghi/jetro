@@ -385,6 +385,8 @@ pub(super) fn eval(expr: &Expr, env: &Env) -> Result<Val, EvalError> {
                             let items = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
                             out.extend(items);
                         }
+                        Val::IntVec(a) => out.extend(a.iter().map(|n| Val::Int(*n))),
+                        Val::FloatVec(a) => out.extend(a.iter().map(|f| Val::Float(*f))),
                         v => out.push(v),
                     },
                 }
@@ -784,11 +786,12 @@ fn apply_bind(target: &BindTarget, val: &Val, env: Env) -> Result<Env, EvalError
             Ok(e)
         }
         BindTarget::Arr(names) => {
-            let arr = val.as_array()
+            let len = val.arr_len()
                 .ok_or_else(|| EvalError("bind destructure: expected array".into()))?;
             let mut e = env;
             for (i, name) in names.iter().enumerate() {
-                e = e.with_var(name, arr.get(i).cloned().unwrap_or(Val::Null));
+                let v = if i < len { val.get_index(i as i64) } else { Val::Null };
+                e = e.with_var(name, v);
             }
             Ok(e)
         }
@@ -1408,6 +1411,8 @@ fn eval_global(name: &str, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
                         let items = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
                         out.extend(items);
                     }
+                    Val::IntVec(a) => out.extend(a.iter().map(|n| Val::Int(*n))),
+                    Val::FloatVec(a) => out.extend(a.iter().map(|f| Val::Float(*f))),
                     v => out.push(v),
                 }
             }

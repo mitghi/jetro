@@ -4747,6 +4747,53 @@ impl VM {
                     _ => {}
                 }
             }
+            // Homogeneous-Int `Val::Arr` receivers get routed through
+            // columnar reverse/sort — 3x less memory bandwidth than the
+            // Vec<Val> path.  Clone cost is identical (O(N) in both cases
+            // because the Arr is typically shared); the win is on write.
+            if let Val::Arr(a) = &recv {
+                let is_all_int = a.iter().all(|v| matches!(v, Val::Int(_)));
+                if is_all_int && !a.is_empty() {
+                    match call.method {
+                        BuiltinMethod::Reverse => {
+                            let mut v: Vec<i64> = a.iter().map(|x|
+                                if let Val::Int(n) = x { *n } else { 0 }
+                            ).collect();
+                            v.reverse();
+                            return Ok(Val::int_vec(v));
+                        }
+                        BuiltinMethod::Sort => {
+                            let mut v: Vec<i64> = a.iter().map(|x|
+                                if let Val::Int(n) = x { *n } else { 0 }
+                            ).collect();
+                            v.sort_unstable();
+                            return Ok(Val::int_vec(v));
+                        }
+                        BuiltinMethod::Sum => {
+                            let s: i64 = a.iter().fold(0i64, |acc, v|
+                                if let Val::Int(n) = v { acc.wrapping_add(*n) } else { acc });
+                            return Ok(Val::Int(s));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            // Columnar IntVec receiver — reverse/sort in-place on Vec<i64>.
+            if let Val::IntVec(a) = &recv {
+                match call.method {
+                    BuiltinMethod::Reverse => {
+                        let mut v: Vec<i64> = Arc::try_unwrap(a.clone()).unwrap_or_else(|a| (*a).clone());
+                        v.reverse();
+                        return Ok(Val::int_vec(v));
+                    }
+                    BuiltinMethod::Sort => {
+                        let mut v: Vec<i64> = Arc::try_unwrap(a.clone()).unwrap_or_else(|a| (*a).clone());
+                        v.sort_unstable();
+                        return Ok(Val::int_vec(v));
+                    }
+                    _ => {}
+                }
+            }
             if let Val::FloatVec(a) = &recv {
                 match call.method {
                     BuiltinMethod::Sum => {
