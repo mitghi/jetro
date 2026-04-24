@@ -419,6 +419,24 @@ fn schema_of(v: &Val) -> Val {
             out.insert(Arc::from("fields"), Val::obj(fields));
             Val::obj(out)
         }
+        Val::ObjSmall(pairs) => {
+            let mut required: Vec<Val> = Vec::with_capacity(pairs.len());
+            let mut fields: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(pairs.len());
+            for (k, child) in pairs.iter() {
+                let mut field = schema_of(child);
+                if matches!(child, Val::Null) {
+                    field = set_field(field, "nullable", Val::Bool(true));
+                } else {
+                    required.push(Val::Str(k.clone()));
+                }
+                fields.insert(k.clone(), field);
+            }
+            let mut out: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(3);
+            out.insert(Arc::from("type"), Val::Str(Arc::from("Object")));
+            out.insert(Arc::from("required"), Val::arr(required));
+            out.insert(Arc::from("fields"), Val::obj(fields));
+            Val::obj(out)
+        }
     }
 }
 

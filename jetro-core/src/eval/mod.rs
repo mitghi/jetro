@@ -719,6 +719,7 @@ fn cast_val(v: &Val, ty: super::ast::CastType) -> Result<Val, EvalError> {
             Val::FloatVec(a)  => !a.is_empty(),
             Val::StrVec(a)    => !a.is_empty(),
             Val::Obj(o)       => !o.is_empty(),
+            Val::ObjSmall(p)  => !p.is_empty(),
         })),
         CastType::Number | CastType::Float => match v {
             Val::Int(n)     => Ok(Val::Float(*n as f64)),

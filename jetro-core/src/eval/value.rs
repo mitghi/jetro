@@ -38,6 +38,12 @@ pub enum Val {
     FloatVec(Arc<Vec<f64>>),
     StrVec(Arc<Vec<Arc<str>>>),
     Obj(Arc<IndexMap<Arc<str>, Val>>),
+    /// Inline small object — flat `(key, value)` pair slice, no hashtable.
+    /// Used for per-row `map({k1, k2, ..})` projections and similar hot
+    /// loops where the allocating an `Arc<IndexMap>` per row dominates.
+    /// Lookup is linear scan (fine for ≤8 entries); insertion-order
+    /// preserved.  Promote to `Obj` if growth / key churn demands it.
+    ObjSmall(Arc<[(Arc<str>, Val)]>),
 }
 
 impl Val {
@@ -80,7 +86,13 @@ impl Val {
     pub fn get_field(&self, key: &str) -> Val {
         match self {
             Val::Obj(m) => m.get(key).cloned().unwrap_or(Val::Null),
-            _           => Val::Null,
+            Val::ObjSmall(pairs) => {
+                for (k, v) in pairs.iter() {
+                    if k.as_ref() == key { return v.clone(); }
+                }
+                Val::Null
+            }
+            _ => Val::Null,
         }
     }
 
@@ -121,7 +133,7 @@ impl Val {
     #[inline] pub fn is_number(&self) -> bool { matches!(self, Val::Int(_) | Val::Float(_)) }
     #[inline] pub fn is_string(&self) -> bool { matches!(self, Val::Str(_)) }
     #[inline] pub fn is_array(&self)  -> bool { matches!(self, Val::Arr(_) | Val::IntVec(_) | Val::FloatVec(_) | Val::StrVec(_)) }
-    #[inline] pub fn is_object(&self) -> bool { matches!(self, Val::Obj(_)) }
+    #[inline] pub fn is_object(&self) -> bool { matches!(self, Val::Obj(_) | Val::ObjSmall(_)) }
 
     /// Array length — also works on columnar variants.
     #[inline]
@@ -219,7 +231,7 @@ impl Val {
             Val::Int(_) | Val::Float(_) => "number",
             Val::Str(_) | Val::StrSlice(_) => "string",
             Val::Arr(_) | Val::IntVec(_) | Val::FloatVec(_) | Val::StrVec(_) => "array",
-            Val::Obj(_)  => "object",
+            Val::Obj(_) | Val::ObjSmall(_) => "object",
         }
     }
 
@@ -352,6 +364,13 @@ impl From<Val> for serde_json::Value {
                 }
                 serde_json::Value::Object(map)
             }
+            Val::ObjSmall(pairs) => {
+                let mut map: Map<String, serde_json::Value> = Map::with_capacity(pairs.len());
+                for (k, v) in pairs.iter() {
+                    map.insert(k.to_string(), v.clone().into());
+                }
+                serde_json::Value::Object(map)
+            }
         }
     }
 }
@@ -406,6 +425,13 @@ impl<'a> Serialize for ValRef<'a> {
             Val::Obj(m)  => {
                 let mut map = s.serialize_map(Some(m.len()))?;
                 for (k, v) in m.iter() {
+                    map.serialize_entry(k.as_ref(), &ValRef(v))?;
+                }
+                map.end()
+            }
+            Val::ObjSmall(pairs) => {
+                let mut map = s.serialize_map(Some(pairs.len()))?;
+                for (k, v) in pairs.iter() {
                     map.serialize_entry(k.as_ref(), &ValRef(v))?;
                 }
                 map.end()
@@ -617,7 +643,8 @@ impl std::hash::Hash for Val {
             Val::IntVec(a)  => { 4u8.hash(state); (Arc::as_ptr(a) as usize).hash(state); }
             Val::FloatVec(a) => { 4u8.hash(state); (Arc::as_ptr(a) as usize).hash(state); }
             Val::StrVec(a)  => { 4u8.hash(state); (Arc::as_ptr(a) as usize).hash(state); }
-            Val::Obj(m)     => { 5u8.hash(state); (Arc::as_ptr(m) as usize).hash(state); }
+            Val::Obj(m)       => { 5u8.hash(state); (Arc::as_ptr(m) as usize).hash(state); }
+            Val::ObjSmall(p)  => { 5u8.hash(state); (p.as_ptr() as usize).hash(state); }
         }
     }
 }

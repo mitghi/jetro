@@ -35,7 +35,8 @@ pub fn is_truthy(v: &Val) -> bool {
         Val::IntVec(a) => !a.is_empty(),
         Val::FloatVec(a) => !a.is_empty(),
         Val::StrVec(a) => !a.is_empty(),
-        Val::Obj(m)    => !m.is_empty(),
+        Val::Obj(m)       => !m.is_empty(),
+        Val::ObjSmall(p)  => !p.is_empty(),
     }
 }
 
