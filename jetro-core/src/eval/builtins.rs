@@ -162,6 +162,10 @@ fn build() -> BuiltinRegistry {
     t.insert("count_by", func_aggregates::count_by);
     t.insert("indexBy",  func_aggregates::index_by);
     t.insert("index_by", func_aggregates::index_by);
+    t.insert("explode",     func_aggregates::explode);
+    t.insert("implode",     func_aggregates::implode);
+    t.insert("groupShape",  func_aggregates::group_shape);
+    t.insert("group_shape", func_aggregates::group_shape);
 
     // Aggregates — bool-flag wrappers
     t.insert("min", b_min);

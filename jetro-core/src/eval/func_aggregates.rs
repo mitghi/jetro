@@ -11,7 +11,7 @@
 use std::sync::Arc;
 use indexmap::IndexMap;
 
-use crate::ast::Arg;
+use crate::ast::{Arg, Expr};
 use super::{Env, EvalError, apply_item_mut};
 use super::value::Val;
 use super::util::{is_truthy, val_to_key};
@@ -185,3 +185,90 @@ pub fn index_by(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     Ok(Val::obj(map))
 }
 
+// ── explode / implode / group_shape (Tier B) ──────────────────────────────────
+//
+// `explode(field)` — arr-of-obj.  Rows whose `field` is an array produce
+// one new row per element, copying the rest of the row.  Rows where the
+// field is absent or non-array pass through unchanged.
+//
+// `implode(field)` — inverse of explode.  Groups rows by every non-`field`
+// column; each group collapses to one row whose `field` is the array of
+// per-group values.
+//
+// `group_shape(key, shape)` — `.group_by(key)` then evaluate `shape` with
+// `@` bound to each group's items array.  Returns `{key → shape_result}`.
+
+fn field_name(arg: &Arg, who: &str) -> Result<Arc<str>, EvalError> {
+    match arg {
+        Arg::Pos(Expr::Ident(s)) | Arg::Named(_, Expr::Ident(s)) => Ok(Arc::from(s.as_str())),
+        Arg::Pos(Expr::Str(s))   | Arg::Named(_, Expr::Str(s))   => Ok(Arc::from(s.as_str())),
+        _ => Err(EvalError(format!("{}: field arg must be identifier or string literal", who))),
+    }
+}
+
+pub fn explode(recv: Val, args: &[Arg], _env: &Env) -> Result<Val, EvalError> {
+    let field = field_name(args.first().ok_or_else(|| EvalError("explode: requires field".into()))?, "explode")?;
+    let items = recv.into_vec().ok_or_else(|| EvalError("explode: expected array".into()))?;
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        match item {
+            Val::Obj(ref m) => {
+                let sub = m.get(field.as_ref()).cloned();
+                match sub.as_ref().map(|v| v.is_array()).unwrap_or(false) {
+                    true => {
+                        let elts = sub.unwrap().into_vec().unwrap();
+                        for e in elts {
+                            let mut row = (**m).clone();
+                            row.insert(Arc::clone(&field), e);
+                            out.push(Val::obj(row));
+                        }
+                    }
+                    false => out.push(item),
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    Ok(Val::arr(out))
+}
+
+pub fn implode(recv: Val, args: &[Arg], _env: &Env) -> Result<Val, EvalError> {
+    let field = field_name(args.first().ok_or_else(|| EvalError("implode: requires field".into()))?, "implode")?;
+    let items = recv.into_vec().ok_or_else(|| EvalError("implode: expected array".into()))?;
+    let mut groups: IndexMap<Arc<str>, (IndexMap<Arc<str>, Val>, Vec<Val>)> = IndexMap::new();
+    for item in items {
+        let m = match item {
+            Val::Obj(m) => m,
+            _ => return Err(EvalError("implode: rows must be objects".into())),
+        };
+        let mut rest = (*m).clone();
+        let val = rest.shift_remove(field.as_ref()).unwrap_or(Val::Null);
+        let key_src: IndexMap<Arc<str>, Val> = rest.clone();
+        let key = Arc::<str>::from(val_to_key(&Val::obj(key_src)));
+        groups.entry(key).or_insert_with(|| (rest, Vec::new())).1.push(val);
+    }
+    let mut out = Vec::with_capacity(groups.len());
+    for (_, (mut rest, vals)) in groups {
+        rest.insert(Arc::clone(&field), Val::arr(vals));
+        out.push(Val::obj(rest));
+    }
+    Ok(Val::arr(out))
+}
+
+pub fn group_shape(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+    let key_arg   = args.first().ok_or_else(|| EvalError("group_shape: requires key".into()))?;
+    let shape_arg = args.get(1).ok_or_else(|| EvalError("group_shape: requires shape".into()))?;
+    let items = recv.into_vec().ok_or_else(|| EvalError("group_shape: expected array".into()))?;
+    let mut env_mut = env.clone();
+    let mut buckets: IndexMap<Arc<str>, Vec<Val>> = IndexMap::with_capacity(items.len());
+    for item in items {
+        let k = group_key_mut(&item, key_arg, &mut env_mut)?;
+        buckets.entry(k).or_insert_with(Vec::new).push(item);
+    }
+    let mut out: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(buckets.len());
+    for (k, group) in buckets {
+        let shaped = apply_item_mut(Val::arr(group), shape_arg, &mut env_mut)?;
+        out.insert(k, shaped);
+    }
+    Ok(Val::obj(out))
+}

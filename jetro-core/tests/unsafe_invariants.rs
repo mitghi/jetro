@@ -152,6 +152,67 @@ fn schema_mixed_scalar_array() {
     assert!(s.contains(r#""type":"Mixed""#), "got {s}");
 }
 
+// ── Tier B: explode / implode / group_shape ─────────────────────────────
+
+#[test]
+fn explode_basic() {
+    let doc = json!([
+        {"g":"a", "xs":[1,2,3]},
+        {"g":"b", "xs":[9]},
+        {"g":"c"}
+    ]);
+    let out = Jetro::new(doc).collect_val(r#"$.explode(xs)"#).unwrap();
+    assert_eq!(
+        out.to_string(),
+        r#"[{"g":"a","xs":1},{"g":"a","xs":2},{"g":"a","xs":3},{"g":"b","xs":9},{"g":"c"}]"#
+    );
+}
+
+#[test]
+fn implode_basic() {
+    let doc = json!([
+        {"g":"a", "x":1},
+        {"g":"a", "x":2},
+        {"g":"b", "x":3}
+    ]);
+    let out = Jetro::new(doc).collect_val(r#"$.implode(x)"#).unwrap();
+    assert_eq!(
+        out.to_string(),
+        r#"[{"g":"a","x":[1,2]},{"g":"b","x":[3]}]"#
+    );
+}
+
+#[test]
+fn explode_implode_roundtrip() {
+    let doc = json!([
+        {"g":"a", "x":[1,2]},
+        {"g":"b", "x":[3]}
+    ]);
+    let out = Jetro::new(doc).collect_val(r#"$.explode(x).implode(x)"#).unwrap();
+    assert_eq!(
+        out.to_string(),
+        r#"[{"g":"a","x":[1,2]},{"g":"b","x":[3]}]"#
+    );
+}
+
+#[test]
+fn group_shape_sum() {
+    let doc = json!([{"g":"a","n":1},{"g":"a","n":2},{"g":"b","n":3}]);
+    let out = Jetro::new(doc).collect_val(r#"$.group_shape(g, @.map(n).sum())"#).unwrap();
+    let s = out.to_string();
+    assert!(s.contains(r#""a":3"#), "got {s}");
+    assert!(s.contains(r#""b":3"#), "got {s}");
+}
+
+#[test]
+fn group_shape_count() {
+    let doc = json!([{"g":"a"},{"g":"a"},{"g":"b"}]);
+    let out = Jetro::new(doc).collect_val(r#"$.group_shape(g, @.count())"#).unwrap();
+    let s = out.to_string();
+    assert!(s.contains(r#""a":2"#), "got {s}");
+    assert!(s.contains(r#""b":1"#), "got {s}");
+}
+
 #[test]
 fn split_count_sum_fusion() {
     let doc = json!(["a-b-c-d-e", "one-two", "solo", ""]);
