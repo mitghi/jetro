@@ -371,6 +371,10 @@ pub enum Opcode {
     /// Fused `.split(sep).reverse().join(sep)` — byte-scan segments and
     /// emit reversed join into one buffer.  No intermediate `Vec<Arc<str>>`.
     StrSplitReverseJoin { sep: Arc<str> },
+    /// Fused `map(@.replace(lit, lit))` (and `replace_all`) — literal needle
+    /// and replacement inlined; skips per-item sub_prog evaluation for arg
+    /// strings.  `all=true` means replace every occurrence, else only first.
+    MapReplaceLit { needle: Arc<str>, with: Arc<str>, all: bool },
     /// Fused `map(f).avg()` — evaluates `f` per item, computes mean as float.
     MapAvg(Arc<Program>),
     /// Fused `filter(p).map(f).sum()` — single pass, numeric sum of mapped
@@ -1538,6 +1542,33 @@ impl Compiler {
                         let sep_prog = Arc::clone(&b.sub_progs[0]);
                         out.pop();
                         out.push(Opcode::MapToJsonJoin { sep_prog });
+                        continue;
+                    }
+                }
+            }
+            // map(@.replace(lit, lit))   or   map(@.replace_all(lit, lit))
+            // → MapReplaceLit { needle, with, all } — single-op CallMethod.
+            if let Opcode::CallMethod(a) = &op {
+                if a.method == BuiltinMethod::Map && a.sub_progs.len() == 1 {
+                    let body = &a.sub_progs[0].ops;
+                    // Body shape: [PushCurrent, CallMethod(Replace|ReplaceAll, [PushStr, PushStr])]
+                    let fused = if let [Opcode::PushCurrent, Opcode::CallMethod(inner)] = &body[..] {
+                        let is_replace = inner.method == BuiltinMethod::Replace
+                                      || inner.method == BuiltinMethod::ReplaceAll;
+                        if is_replace && inner.sub_progs.len() == 2 {
+                            let n = trivial_push_str(&inner.sub_progs[0].ops);
+                            let w = trivial_push_str(&inner.sub_progs[1].ops);
+                            match (n, w) {
+                                (Some(needle), Some(with)) => {
+                                    let all = inner.method == BuiltinMethod::ReplaceAll;
+                                    Some(Opcode::MapReplaceLit { needle, with, all })
+                                }
+                                _ => None,
+                            }
+                        } else { None }
+                    } else { None };
+                    if let Some(o) = fused {
+                        out.push(o);
                         continue;
                     }
                 }
@@ -3545,6 +3576,31 @@ impl VM {
                         return Err(EvalError("split_reverse_join: expected string".into()));
                     };
                     stack.push(out);
+                }
+                Opcode::MapReplaceLit { needle, with, all } => {
+                    let v = pop!(stack);
+                    let n: &str = needle.as_ref();
+                    let w: &str = with.as_ref();
+                    let mut out_vec: Vec<Val> = match &v {
+                        Val::Arr(a) => Vec::with_capacity(a.len()),
+                        _ => Vec::new(),
+                    };
+                    if let Val::Arr(a) = &v {
+                        for item in a.iter() {
+                            if let Val::Str(s) = item {
+                                if !s.contains(n) {
+                                    out_vec.push(Val::Str(s.clone()));
+                                } else if *all {
+                                    out_vec.push(Val::Str(Arc::<str>::from(s.replace(n, w))));
+                                } else {
+                                    out_vec.push(Val::Str(Arc::<str>::from(s.replacen(n, w, 1))));
+                                }
+                            } else {
+                                out_vec.push(item.clone());
+                            }
+                        }
+                    }
+                    stack.push(Val::arr(out_vec));
                 }
                 Opcode::MapSum(f) => {
                     let recv = pop!(stack);
