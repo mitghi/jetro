@@ -307,6 +307,8 @@ fn apply_op(op: &Opcode, stack: &mut Vec<AbstractVal>) {
             | Opcode::MapStrVecUpper
             | Opcode::MapStrVecLower
             | Opcode::MapStrVecTrim
+            | Opcode::MapNumVecArith { .. }
+            | Opcode::MapNumVecNeg
             | Opcode::FilterFieldCmpField(_, _, _)
             | Opcode::FilterFieldEqLitMapField(_, _, _)
             | Opcode::FilterFieldCmpLitMapField(_, _, _, _)
@@ -1148,6 +1150,8 @@ pub fn opcode_cost(op: &Opcode) -> u32 {
             | Opcode::MapStrVecUpper
             | Opcode::MapStrVecLower
             | Opcode::MapStrVecTrim
+            | Opcode::MapNumVecArith { .. }
+            | Opcode::MapNumVecNeg
             | Opcode::FilterFieldCmpField(_, _, _) => 5,
         Opcode::FilterFieldEqLitMapField(_, _, _)
             | Opcode::FilterFieldCmpLitMapField(_, _, _, _) => 6,

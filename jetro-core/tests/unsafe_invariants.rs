@@ -365,6 +365,85 @@ fn map_strvec_upper_unicode_fallback() {
 }
 
 #[test]
+fn map_intvec_mul_int() {
+    let doc = json!([1, 2, 3, 4]);
+    let out = Jetro::new(doc).collect_val(r#"$.map(@ * 2)"#).unwrap();
+    assert_eq!(out.to_string(), r#"[2,4,6,8]"#);
+}
+
+#[test]
+fn map_intvec_add_int() {
+    let doc = json!([10, 20, 30]);
+    let out = Jetro::new(doc).collect_val(r#"$.map(@ + 1)"#).unwrap();
+    assert_eq!(out.to_string(), r#"[11,21,31]"#);
+}
+
+#[test]
+fn map_intvec_sub_rhs() {
+    let doc = json!([10, 20, 30]);
+    let out = Jetro::new(doc).collect_val(r#"$.map(@ - 5)"#).unwrap();
+    assert_eq!(out.to_string(), r#"[5,15,25]"#);
+}
+
+#[test]
+fn map_intvec_sub_lhs_flipped() {
+    let doc = json!([1, 2, 3]);
+    let out = Jetro::new(doc).collect_val(r#"$.map(10 - @)"#).unwrap();
+    assert_eq!(out.to_string(), r#"[9,8,7]"#);
+}
+
+#[test]
+fn map_intvec_div_int_promotes_float() {
+    // Int / Int → Float (Div has float-returning semantics)
+    let doc = json!([1, 2, 4]);
+    let out = Jetro::new(doc).collect_val(r#"$.map(@ / 2)"#).unwrap();
+    assert_eq!(out.to_string(), r#"[0.5,1.0,2.0]"#);
+}
+
+#[test]
+fn map_intvec_mod_int() {
+    let doc = json!([7, 8, 9, 10]);
+    let out = Jetro::new(doc).collect_val(r#"$.map(@ % 3)"#).unwrap();
+    assert_eq!(out.to_string(), r#"[1,2,0,1]"#);
+}
+
+#[test]
+fn map_intvec_times_float_promotes() {
+    let doc = json!([1, 2, 3]);
+    let out = Jetro::new(doc).collect_val(r#"$.map(@ * 1.5)"#).unwrap();
+    assert_eq!(out.to_string(), r#"[1.5,3.0,4.5]"#);
+}
+
+#[test]
+fn map_floatvec_add() {
+    let doc = json!([1.0, 2.5, 3.25]);
+    let out = Jetro::new(doc).collect_val(r#"$.map(@ + 1.0)"#).unwrap();
+    assert_eq!(out.to_string(), r#"[2.0,3.5,4.25]"#);
+}
+
+#[test]
+fn map_neg_intvec() {
+    let doc = json!([1, -2, 3]);
+    let out = Jetro::new(doc).collect_val(r#"$.map(-@)"#).unwrap();
+    assert_eq!(out.to_string(), r#"[-1,2,-3]"#);
+}
+
+#[test]
+fn map_neg_floatvec() {
+    let doc = json!([1.5, -2.5, 0.0]);
+    let out = Jetro::new(doc).collect_val(r#"$.map(-@)"#).unwrap();
+    assert_eq!(out.to_string(), r#"[-1.5,2.5,-0.0]"#);
+}
+
+#[test]
+fn map_intvec_mul_chain_filter() {
+    // IntVec filter → IntVec; then IntVec map → IntVec.
+    let doc = json!([1, 2, 3, 4, 5, 6]);
+    let out = Jetro::new(doc).collect_val(r#"$.filter(@ > 2).map(@ * 10)"#).unwrap();
+    assert_eq!(out.to_string(), r#"[30,40,50,60]"#);
+}
+
+#[test]
 fn strvec_filter_then_map_chain() {
     // StrVec path propagates through chained filter + map.
     let doc = json!(["apple", "banana", "avocado", "cherry"]);

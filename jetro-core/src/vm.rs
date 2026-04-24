@@ -502,6 +502,16 @@ pub enum Opcode {
     MapStrVecLower,
     /// `map(@.trim())` — in-lane StrVec→StrVec.
     MapStrVecTrim,
+    /// `map(@ <op> lit)` / `map(lit <op> @)` — columnar arith over
+    /// IntVec / FloatVec receivers.  `flipped=true` means the literal is
+    /// on the LHS (matters for Sub/Div).  Output lane:
+    ///   IntVec   × Int   × {Add,Sub,Mul,Mod} → IntVec
+    ///   IntVec   × Int   × Div               → FloatVec
+    ///   IntVec   × Float × *                 → FloatVec
+    ///   FloatVec × Int/Float × *             → FloatVec
+    MapNumVecArith { op: super::ast::BinOp, lit: Val, flipped: bool },
+    /// `map(-@)` — unary negation per element, preserves lane.
+    MapNumVecNeg,
 
     // ── group_by specialisation (Tier 2) ──────────────────────────────────────
     /// `group_by(k)` where `k` is a single field ident. Uses FxHashMap with
@@ -843,6 +853,42 @@ fn detect_current_str_method(ops: &[Opcode]) -> Option<(StrVecPred, Arc<str>)> {
 /// Detect `@.upper()` / `@.lower()` / `@.trim()` map bodies → in-lane StrVec op.
 #[derive(Debug, Clone, Copy)]
 enum StrVecMap { Upper, Lower, Trim }
+
+/// Detect `@ <op> lit` / `lit <op> @` arith map bodies.
+/// `op` is one of Add/Sub/Mul/Div/Mod.  `flipped=true` → literal on LHS.
+fn detect_current_arith_lit(ops: &[Opcode]) -> Option<(super::ast::BinOp, Val, bool)> {
+    use super::ast::BinOp::*;
+    let arith_op = |o: &Opcode| -> Option<super::ast::BinOp> {
+        Some(match o {
+            Opcode::Add => Add, Opcode::Sub => Sub,
+            Opcode::Mul => Mul, Opcode::Div => Div,
+            Opcode::Mod => Mod,
+            _ => return None,
+        })
+    };
+    // Form: [PushCurrent, <lit>, <arith>]
+    if let [Opcode::PushCurrent, a, b] = ops {
+        if let (Some(lit), Some(op)) = (trivial_literal(a), arith_op(b)) {
+            if matches!(lit, Val::Int(_) | Val::Float(_)) {
+                return Some((op, lit, false));
+            }
+        }
+    }
+    // Form: [<lit>, PushCurrent, <arith>]
+    if let [a, Opcode::PushCurrent, b] = ops {
+        if let (Some(lit), Some(op)) = (trivial_literal(a), arith_op(b)) {
+            if matches!(lit, Val::Int(_) | Val::Float(_)) {
+                return Some((op, lit, true));
+            }
+        }
+    }
+    None
+}
+
+/// Detect `[-@]` — unary negation of the current element.
+fn detect_current_neg(ops: &[Opcode]) -> bool {
+    matches!(ops, [Opcode::PushCurrent, Opcode::Neg])
+}
 
 fn detect_current_str_nullary(ops: &[Opcode]) -> Option<StrVecMap> {
     if let [Opcode::PushCurrent, Opcode::CallMethod(b)] = ops {
@@ -1892,6 +1938,17 @@ impl Compiler {
                                 StrVecMap::Lower => Opcode::MapStrVecLower,
                                 StrVecMap::Trim  => Opcode::MapStrVecTrim,
                             });
+                            continue;
+                        }
+                        // map(@ <arith> lit) / map(lit <arith> @) → MapNumVecArith
+                        if let Some((op, lit, flipped)) =
+                            detect_current_arith_lit(&b.sub_progs[0].ops) {
+                            out2.push(Opcode::MapNumVecArith { op, lit, flipped });
+                            continue;
+                        }
+                        // map(-@) → MapNumVecNeg
+                        if detect_current_neg(&b.sub_progs[0].ops) {
+                            out2.push(Opcode::MapNumVecNeg);
                             continue;
                         }
                     }
@@ -4822,6 +4879,166 @@ impl VM {
                             stack.push(Val::arr(out));
                         }
                         Val::Str(s) => stack.push(Val::Str(Arc::from(s.trim()))),
+                        _ => stack.push(recv),
+                    }
+                }
+                Opcode::MapNumVecArith { op, lit, flipped } => {
+                    use super::ast::BinOp;
+                    let recv = pop!(stack);
+                    // Int literal or Float literal — determine output lane.
+                    let (lit_is_float, lit_i, lit_f) = match lit {
+                        Val::Int(n) => (false, *n, *n as f64),
+                        Val::Float(f) => (true, *f as i64, *f),
+                        _ => { stack.push(recv); continue; }
+                    };
+                    match (&recv, *op, lit_is_float, *flipped) {
+                        // IntVec × Int × {Add,Sub,Mul,Mod} → IntVec
+                        (Val::IntVec(a), BinOp::Add, false, _) => {
+                            let mut out: Vec<i64> = Vec::with_capacity(a.len());
+                            for &n in a.iter() { out.push(n + lit_i); }
+                            stack.push(Val::int_vec(out));
+                        }
+                        (Val::IntVec(a), BinOp::Sub, false, false) => {
+                            let mut out: Vec<i64> = Vec::with_capacity(a.len());
+                            for &n in a.iter() { out.push(n - lit_i); }
+                            stack.push(Val::int_vec(out));
+                        }
+                        (Val::IntVec(a), BinOp::Sub, false, true) => {
+                            let mut out: Vec<i64> = Vec::with_capacity(a.len());
+                            for &n in a.iter() { out.push(lit_i - n); }
+                            stack.push(Val::int_vec(out));
+                        }
+                        (Val::IntVec(a), BinOp::Mul, false, _) => {
+                            let mut out: Vec<i64> = Vec::with_capacity(a.len());
+                            for &n in a.iter() { out.push(n * lit_i); }
+                            stack.push(Val::int_vec(out));
+                        }
+                        (Val::IntVec(a), BinOp::Mod, false, false) if lit_i != 0 => {
+                            let mut out: Vec<i64> = Vec::with_capacity(a.len());
+                            for &n in a.iter() { out.push(n % lit_i); }
+                            stack.push(Val::int_vec(out));
+                        }
+                        // IntVec × Int × Div → FloatVec (matches Val::Div semantics)
+                        (Val::IntVec(a), BinOp::Div, false, false) if lit_i != 0 => {
+                            let mut out: Vec<f64> = Vec::with_capacity(a.len());
+                            let div = lit_i as f64;
+                            for &n in a.iter() { out.push(n as f64 / div); }
+                            stack.push(Val::float_vec(out));
+                        }
+                        (Val::IntVec(a), BinOp::Div, false, true) => {
+                            let mut out: Vec<f64> = Vec::with_capacity(a.len());
+                            let num = lit_i as f64;
+                            for &n in a.iter() {
+                                out.push(if n != 0 { num / n as f64 } else { f64::INFINITY });
+                            }
+                            stack.push(Val::float_vec(out));
+                        }
+                        // IntVec × Float → FloatVec
+                        (Val::IntVec(a), _, true, _) => {
+                            let mut out: Vec<f64> = Vec::with_capacity(a.len());
+                            for &n in a.iter() {
+                                let x = n as f64;
+                                let r = match (op, flipped) {
+                                    (BinOp::Add, _) => x + lit_f,
+                                    (BinOp::Sub, false) => x - lit_f,
+                                    (BinOp::Sub, true)  => lit_f - x,
+                                    (BinOp::Mul, _) => x * lit_f,
+                                    (BinOp::Div, false) => x / lit_f,
+                                    (BinOp::Div, true)  => lit_f / x,
+                                    (BinOp::Mod, false) => x % lit_f,
+                                    (BinOp::Mod, true)  => lit_f % x,
+                                    _ => { out.clear(); break; }
+                                };
+                                out.push(r);
+                            }
+                            if out.len() == a.len() { stack.push(Val::float_vec(out)); }
+                            else { stack.push(recv); }
+                        }
+                        // FloatVec × (Int|Float) → FloatVec
+                        (Val::FloatVec(a), _, _, _) => {
+                            let mut out: Vec<f64> = Vec::with_capacity(a.len());
+                            for &x in a.iter() {
+                                let r = match (op, flipped) {
+                                    (BinOp::Add, _) => x + lit_f,
+                                    (BinOp::Sub, false) => x - lit_f,
+                                    (BinOp::Sub, true)  => lit_f - x,
+                                    (BinOp::Mul, _) => x * lit_f,
+                                    (BinOp::Div, false) => x / lit_f,
+                                    (BinOp::Div, true)  => lit_f / x,
+                                    (BinOp::Mod, false) => x % lit_f,
+                                    (BinOp::Mod, true)  => lit_f % x,
+                                    _ => { out.clear(); break; }
+                                };
+                                out.push(r);
+                            }
+                            if out.len() == a.len() { stack.push(Val::float_vec(out)); }
+                            else { stack.push(recv); }
+                        }
+                        // Arr fallback — per-item numeric arithmetic.
+                        (Val::Arr(a), _, _, _) => {
+                            let a = Arc::clone(a);
+                            drop(recv);
+                            let mut out: Vec<Val> = Vec::with_capacity(a.len());
+                            for item in a.iter() {
+                                let (ix, ifl, is_flt) = match item {
+                                    Val::Int(n) => (*n, *n as f64, false),
+                                    Val::Float(f) => (*f as i64, *f, true),
+                                    _ => { out.push(Val::Null); continue; }
+                                };
+                                let r = if is_flt || lit_is_float {
+                                    let (a, b) = if *flipped { (lit_f, ifl) } else { (ifl, lit_f) };
+                                    match op {
+                                        BinOp::Add => Val::Float(a + b),
+                                        BinOp::Sub => Val::Float(a - b),
+                                        BinOp::Mul => Val::Float(a * b),
+                                        BinOp::Div => Val::Float(a / b),
+                                        BinOp::Mod => Val::Float(a % b),
+                                        _ => Val::Null,
+                                    }
+                                } else {
+                                    let (a, b) = if *flipped { (lit_i, ix) } else { (ix, lit_i) };
+                                    match op {
+                                        BinOp::Add => Val::Int(a + b),
+                                        BinOp::Sub => Val::Int(a - b),
+                                        BinOp::Mul => Val::Int(a * b),
+                                        BinOp::Div if b != 0 => Val::Float(a as f64 / b as f64),
+                                        BinOp::Mod if b != 0 => Val::Int(a % b),
+                                        _ => Val::Null,
+                                    }
+                                };
+                                out.push(r);
+                            }
+                            stack.push(Val::arr(out));
+                        }
+                        _ => stack.push(recv),
+                    }
+                }
+                Opcode::MapNumVecNeg => {
+                    let recv = pop!(stack);
+                    match &recv {
+                        Val::IntVec(a) => {
+                            let mut out: Vec<i64> = Vec::with_capacity(a.len());
+                            for &n in a.iter() { out.push(-n); }
+                            stack.push(Val::int_vec(out));
+                        }
+                        Val::FloatVec(a) => {
+                            let mut out: Vec<f64> = Vec::with_capacity(a.len());
+                            for &f in a.iter() { out.push(-f); }
+                            stack.push(Val::float_vec(out));
+                        }
+                        Val::Arr(a) => {
+                            let mut out: Vec<Val> = Vec::with_capacity(a.len());
+                            for item in a.iter() {
+                                out.push(match item {
+                                    Val::Int(n) => Val::Int(-n),
+                                    Val::Float(f) => Val::Float(-f),
+                                    _ => Val::Null,
+                                });
+                            }
+                            stack.push(Val::arr(out));
+                        }
+                        Val::Int(n) => stack.push(Val::Int(-n)),
+                        Val::Float(f) => stack.push(Val::Float(-f)),
                         _ => stack.push(recv),
                     }
                 }
