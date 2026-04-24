@@ -37,6 +37,67 @@ pub fn unique_by(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     Ok(Val::arr(out))
 }
 
+// ── walk (Tier A) ────────────────────────────────────────────────────────────
+//
+// `.walk(fn)` — post-order traversal.  Recurse into children first, rebuild
+// the container with the transformed children, then apply `fn` to the
+// rebuilt node.  Scalars pass through `fn` directly.
+//
+// Post-order (bottom-up) is the Clojure-ish default: consumers can assume
+// their children are already normalised when they see a composite node.
+
+pub fn walk(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+    let fn_arg = args.first().ok_or_else(|| EvalError("walk: requires fn".into()))?;
+    let mut env_mut = env.clone();
+    walk_impl(recv, fn_arg, &mut env_mut, /*pre=*/false)
+}
+
+pub fn walk_pre_fn(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+    let fn_arg = args.first().ok_or_else(|| EvalError("walk_pre: requires fn".into()))?;
+    let mut env_mut = env.clone();
+    walk_impl(recv, fn_arg, &mut env_mut, /*pre=*/true)
+}
+
+fn walk_impl(v: Val, fn_arg: &Arg, env: &mut super::Env, pre: bool) -> Result<Val, EvalError> {
+    let transformed = if pre {
+        apply_item_mut(v, fn_arg, env)?
+    } else {
+        v
+    };
+    let after_children = match transformed {
+        Val::Arr(a) => {
+            let items = Arc::try_unwrap(a).unwrap_or_else(|arc| (*arc).clone());
+            let mut out = Vec::with_capacity(items.len());
+            for child in items { out.push(walk_impl(child, fn_arg, env, pre)?); }
+            Val::arr(out)
+        }
+        Val::IntVec(a) => {
+            let mut out = Vec::with_capacity(a.len());
+            for n in a.iter() { out.push(walk_impl(Val::Int(*n), fn_arg, env, pre)?); }
+            Val::arr(out)
+        }
+        Val::FloatVec(a) => {
+            let mut out = Vec::with_capacity(a.len());
+            for f in a.iter() { out.push(walk_impl(Val::Float(*f), fn_arg, env, pre)?); }
+            Val::arr(out)
+        }
+        Val::Obj(m) => {
+            let items = Arc::try_unwrap(m).unwrap_or_else(|arc| (*arc).clone());
+            let mut out = indexmap::IndexMap::with_capacity(items.len());
+            for (k, child) in items {
+                out.insert(k, walk_impl(child, fn_arg, env, pre)?);
+            }
+            Val::obj(out)
+        }
+        other => other,
+    };
+    if pre {
+        Ok(after_children)
+    } else {
+        apply_item_mut(after_children, fn_arg, env)
+    }
+}
+
 // ── collect ──────────────────────────────────────────────────────────────────
 
 pub fn collect(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {

@@ -105,6 +105,53 @@ fn empty_string_edge_cases() {
     assert_eq!(o3.to_string(), r#"[""]"#);
 }
 
+// ── Tier A: walk + schema ─────────────────────────────────────────────────
+
+#[test]
+fn walk_post_order_doubles_numbers() {
+    let doc = json!({"a": [1, 2, {"b": 3}], "c": 4});
+    let out = Jetro::new(doc)
+        .collect_val(r#"$.walk(lambda x: x * 2 if x kind number else x)"#).unwrap();
+    assert_eq!(out.to_string(), r#"{"a":[2,4,{"b":6}],"c":8}"#);
+}
+
+#[test]
+fn walk_pre_uppercases_keys_not_triggered() {
+    let doc = json!([1, 2, 3]);
+    let out = Jetro::new(doc)
+        .collect_val(r#"$.walk(lambda x: x + 1 if x kind number else x)"#).unwrap();
+    assert_eq!(out.to_string(), "[2,3,4]");
+}
+
+#[test]
+fn schema_flat_object() {
+    let doc = json!({"id": "a", "n": 1, "active": true});
+    let out = Jetro::new(doc).collect_val("$.schema()").unwrap();
+    let s = out.to_string();
+    assert!(s.contains(r#""type":"Object""#), "got {s}");
+    assert!(s.contains(r#""id":{"type":"String"}"#), "got {s}");
+    assert!(s.contains(r#""n":{"type":"Int"}"#), "got {s}");
+    assert!(s.contains(r#""active":{"type":"Bool"}"#), "got {s}");
+}
+
+#[test]
+fn schema_array_unifies_items() {
+    let doc = json!([{"id": "a", "n": 1}, {"id": "b", "n": 2, "extra": true}]);
+    let out = Jetro::new(doc).collect_val("$.schema()").unwrap();
+    let s = out.to_string();
+    assert!(s.contains(r#""type":"Array""#), "got {s}");
+    // "extra" only in second obj → optional
+    assert!(s.contains(r#""extra":{"type":"Bool","optional":true}"#), "got {s}");
+}
+
+#[test]
+fn schema_mixed_scalar_array() {
+    let doc = json!([1, "two", 3.0]);
+    let out = Jetro::new(doc).collect_val("$.schema()").unwrap();
+    let s = out.to_string();
+    assert!(s.contains(r#""type":"Mixed""#), "got {s}");
+}
+
 #[test]
 fn split_count_sum_fusion() {
     let doc = json!(["a-b-c-d-e", "one-two", "solo", ""]);

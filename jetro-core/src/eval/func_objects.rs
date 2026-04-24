@@ -323,3 +323,194 @@ pub fn pivot(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     }
     Ok(Val::obj(map))
 }
+
+// ── schema (Tier A) ───────────────────────────────────────────────────────────
+//
+// `.schema()` — walk a value and return a schema descriptor.
+//
+// Result shape:
+//   scalar   → { type: "String"|"Int"|"Float"|"Bool"|"Null" }
+//   array    → { type: "Array",  len: N, items: <unified-schema-of-items> }
+//   object   → { type: "Object", required: [keys...], fields: { k: <schema>... } }
+//
+// For heterogeneous arrays the item schema is unified via `unify_schema`:
+//   - differing scalar types collapse to `type: "Mixed"`
+//   - fields present in some but not all objects get `optional: true`
+//   - fields sometimes-null get `nullable: true`
+
+pub fn schema(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
+    Ok(schema_of(&recv))
+}
+
+fn schema_of(v: &Val) -> Val {
+    match v {
+        Val::Null       => ty_obj("Null"),
+        Val::Bool(_)    => ty_obj("Bool"),
+        Val::Int(_)     => ty_obj("Int"),
+        Val::Float(_)   => ty_obj("Float"),
+        Val::Str(_)     => ty_obj("String"),
+        Val::IntVec(a)  => array_schema(a.len(), ty_obj("Int")),
+        Val::FloatVec(a)=> array_schema(a.len(), ty_obj("Float")),
+        Val::Arr(a) => {
+            let items = if a.is_empty() {
+                ty_obj("Unknown")
+            } else {
+                let mut acc = schema_of(&a[0]);
+                for el in a.iter().skip(1) {
+                    acc = unify_schema(acc, schema_of(el));
+                }
+                acc
+            };
+            array_schema(a.len(), items)
+        }
+        Val::Obj(m) => {
+            let mut required: Vec<Val> = Vec::with_capacity(m.len());
+            let mut fields: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(m.len());
+            for (k, child) in m.iter() {
+                let mut field = schema_of(child);
+                if matches!(child, Val::Null) {
+                    field = set_field(field, "nullable", Val::Bool(true));
+                } else {
+                    required.push(Val::Str(k.clone()));
+                }
+                fields.insert(k.clone(), field);
+            }
+            let mut out: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(3);
+            out.insert(Arc::from("type"), Val::Str(Arc::from("Object")));
+            out.insert(Arc::from("required"), Val::arr(required));
+            out.insert(Arc::from("fields"), Val::obj(fields));
+            Val::obj(out)
+        }
+    }
+}
+
+fn ty_obj(name: &str) -> Val {
+    let mut m: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(1);
+    m.insert(Arc::from("type"), Val::Str(Arc::from(name)));
+    Val::obj(m)
+}
+
+fn array_schema(len: usize, items: Val) -> Val {
+    let mut m: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(3);
+    m.insert(Arc::from("type"), Val::Str(Arc::from("Array")));
+    m.insert(Arc::from("len"), Val::Int(len as i64));
+    m.insert(Arc::from("items"), items);
+    Val::obj(m)
+}
+
+fn set_field(obj: Val, key: &str, v: Val) -> Val {
+    if let Val::Obj(m) = obj {
+        let mut m = Arc::try_unwrap(m).unwrap_or_else(|arc| (*arc).clone());
+        m.insert(Arc::from(key), v);
+        Val::obj(m)
+    } else {
+        obj
+    }
+}
+
+fn get_type(v: &Val) -> Option<&str> {
+    if let Val::Obj(m) = v {
+        if let Some(Val::Str(s)) = m.get("type") { return Some(s.as_ref()); }
+    }
+    None
+}
+
+fn unify_schema(a: Val, b: Val) -> Val {
+    let (ta, tb) = (get_type(&a), get_type(&b));
+    match (ta, tb) {
+        (Some(x), Some(y)) if x == y => {
+            match x {
+                "Object" => unify_object_schemas(a, b),
+                "Array" => unify_array_schemas(a, b),
+                _ => mark_nullable_if_either(a, b),
+            }
+        }
+        (Some("Null"), _) => set_field(b, "nullable", Val::Bool(true)),
+        (_, Some("Null")) => set_field(a, "nullable", Val::Bool(true)),
+        _ => ty_obj("Mixed"),
+    }
+}
+
+fn mark_nullable_if_either(a: Val, b: Val) -> Val {
+    let a_null = is_nullable(&a);
+    let b_null = is_nullable(&b);
+    if a_null || b_null { set_field(a, "nullable", Val::Bool(true)) } else { a }
+}
+
+fn is_nullable(v: &Val) -> bool {
+    if let Val::Obj(m) = v {
+        matches!(m.get("nullable"), Some(Val::Bool(true)))
+    } else { false }
+}
+
+fn unify_array_schemas(a: Val, b: Val) -> Val {
+    let a_items = extract_field(&a, "items");
+    let b_items = extract_field(&b, "items");
+    let items = match (a_items, b_items) {
+        (Some(x), Some(y)) => unify_schema(x, y),
+        (Some(x), None)    => x,
+        (None,    Some(y)) => y,
+        (None,    None)    => ty_obj("Unknown"),
+    };
+    let la = extract_int(&a, "len").unwrap_or(0);
+    let lb = extract_int(&b, "len").unwrap_or(0);
+    array_schema((la + lb) as usize, items)
+}
+
+fn extract_field(v: &Val, key: &str) -> Option<Val> {
+    if let Val::Obj(m) = v { m.get(key).cloned() } else { None }
+}
+
+fn extract_int(v: &Val, key: &str) -> Option<i64> {
+    if let Some(Val::Int(n)) = extract_field(v, key) { Some(n) } else { None }
+}
+
+fn unify_object_schemas(a: Val, b: Val) -> Val {
+    let a_fields = extract_field(&a, "fields");
+    let b_fields = extract_field(&b, "fields");
+    let (a_map, b_map) = match (a_fields, b_fields) {
+        (Some(Val::Obj(x)), Some(Val::Obj(y))) => (
+            Arc::try_unwrap(x).unwrap_or_else(|arc| (*arc).clone()),
+            Arc::try_unwrap(y).unwrap_or_else(|arc| (*arc).clone()),
+        ),
+        _ => return ty_obj("Object"),
+    };
+    let a_req = extract_required_set(&a);
+    let b_req = extract_required_set(&b);
+
+    let mut out_fields: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(a_map.len().max(b_map.len()));
+    let mut all_keys: Vec<Arc<str>> = Vec::with_capacity(a_map.len() + b_map.len());
+    for (k, _) in &a_map { all_keys.push(k.clone()); }
+    for (k, _) in &b_map { if !a_map.contains_key(k) { all_keys.push(k.clone()); } }
+
+    let mut required: Vec<Val> = Vec::new();
+    for k in all_keys {
+        let av = a_map.get(&k).cloned();
+        let bv = b_map.get(&k).cloned();
+        let field = match (av, bv) {
+            (Some(x), Some(y)) => unify_schema(x, y),
+            (Some(x), None)    => set_field(x, "optional", Val::Bool(true)),
+            (None,    Some(y)) => set_field(y, "optional", Val::Bool(true)),
+            _                  => ty_obj("Unknown"),
+        };
+        let both_required = a_req.contains(k.as_ref()) && b_req.contains(k.as_ref());
+        if both_required { required.push(Val::Str(k.clone())); }
+        out_fields.insert(k, field);
+    }
+
+    let mut out: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(3);
+    out.insert(Arc::from("type"), Val::Str(Arc::from("Object")));
+    out.insert(Arc::from("required"), Val::arr(required));
+    out.insert(Arc::from("fields"), Val::obj(out_fields));
+    Val::obj(out)
+}
+
+fn extract_required_set(v: &Val) -> std::collections::HashSet<String> {
+    let mut s = std::collections::HashSet::new();
+    if let Some(Val::Arr(a)) = extract_field(v, "required") {
+        for el in a.iter() {
+            if let Val::Str(k) = el { s.insert(k.to_string()); }
+        }
+    }
+    s
+}

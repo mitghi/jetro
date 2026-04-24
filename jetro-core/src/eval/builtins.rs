@@ -147,6 +147,10 @@ fn build() -> BuiltinRegistry {
     t.insert("deepShape",  func_search::deep_shape);
     t.insert("deep_like",  func_search::deep_like);
     t.insert("deepLike",   func_search::deep_like);
+    t.insert("walk",       func_search::walk);
+    t.insert("walk_pre",   func_search::walk_pre_fn);
+    t.insert("walkPre",    func_search::walk_pre_fn);
+    t.insert("schema",     func_objects::schema);
 
     // Aggregates — full signature
     t.insert("sum",      func_aggregates::sum);
