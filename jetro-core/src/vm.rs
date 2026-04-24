@@ -485,6 +485,10 @@ pub enum Opcode {
     FilterFieldCmpLitCount(Arc<str>, super::ast::BinOp, Val),
     /// `filter(k1 <op> k2).count()` — cross-field count.
     FilterFieldCmpFieldCount(Arc<str>, super::ast::BinOp, Arc<str>),
+    /// `filter(@ <op> lit)` — predicate on the current element itself.
+    /// Columnar fast path: IntVec/FloatVec receivers loop on the raw
+    /// slice and emit a typed vec; Arr falls back to element iteration.
+    FilterCurrentCmpLit(super::ast::BinOp, Val),
 
     // ── group_by specialisation (Tier 2) ──────────────────────────────────────
     /// `group_by(k)` where `k` is a single field ident. Uses FxHashMap with
@@ -769,9 +773,29 @@ fn trivial_literal(op: &Opcode) -> Option<Val> {
         Opcode::PushNull => Some(Val::Null),
         Opcode::PushBool(b) => Some(Val::Bool(*b)),
         Opcode::PushInt(n) => Some(Val::Int(*n)),
+        Opcode::PushFloat(f) => Some(Val::Float(*f)),
         Opcode::PushStr(s) => Some(Val::Str(s.clone())),
         _ => None,
     }
+}
+
+/// Detect `@ <op> lit` or `lit <op> @` — a filter predicate comparing
+/// the current element directly to a literal.  Used to lower filter
+/// on columnar IntVec/FloatVec receivers to a tight slice loop.
+fn detect_current_cmp_lit(ops: &[Opcode]) -> Option<(super::ast::BinOp, Val)> {
+    // Form: [PushCurrent, <lit>, <cmp>]
+    if let [Opcode::PushCurrent, a, b] = ops {
+        if let (Some(lit), Some(op)) = (trivial_literal(a), cmp_opcode(b)) {
+            return Some((op, lit));
+        }
+    }
+    // Form: [<lit>, PushCurrent, <cmp>]  →  flip cmp
+    if let [a, Opcode::PushCurrent, b] = ops {
+        if let (Some(lit), Some(op)) = (trivial_literal(a), cmp_opcode(b)) {
+            return Some((flip_cmp(op), lit));
+        }
+    }
+    None
 }
 
 /// Detect a filter-predicate sub-program of shape `field <op> literal`,
@@ -1785,6 +1809,11 @@ impl Compiler {
                                     Opcode::FilterFieldCmpField(k1, op, k2),
                             };
                             out2.push(lowered); continue;
+                        }
+                        // filter(@ <cmp> lit) → FilterCurrentCmpLit
+                        if let Some((op, lit)) = detect_current_cmp_lit(&b.sub_progs[0].ops) {
+                            out2.push(Opcode::FilterCurrentCmpLit(op, lit));
+                            continue;
                         }
                     }
                 }
@@ -4406,6 +4435,89 @@ impl VM {
                                     }
                                 }
                             }
+                        }
+                    }
+                    stack.push(Val::arr(out));
+                }
+                Opcode::FilterCurrentCmpLit(op, lit) => {
+                    use super::ast::BinOp;
+                    let recv = pop!(stack);
+                    // Columnar fast paths — IntVec / FloatVec receivers
+                    // walk the raw slice, produce a typed vec.  This is
+                    // the autovectoriser-friendly shape (branchless
+                    // body, one stride, no heap traffic per hit).
+                    match (&recv, lit) {
+                        (Val::IntVec(a), Val::Int(rhs)) => {
+                            let rhs = *rhs;
+                            let mut out: Vec<i64> = Vec::with_capacity(a.len());
+                            match op {
+                                BinOp::Eq  => for &n in a.iter() { if n == rhs { out.push(n); } }
+                                BinOp::Neq => for &n in a.iter() { if n != rhs { out.push(n); } }
+                                BinOp::Lt  => for &n in a.iter() { if n <  rhs { out.push(n); } }
+                                BinOp::Lte => for &n in a.iter() { if n <= rhs { out.push(n); } }
+                                BinOp::Gt  => for &n in a.iter() { if n >  rhs { out.push(n); } }
+                                BinOp::Gte => for &n in a.iter() { if n >= rhs { out.push(n); } }
+                                _ => {
+                                    stack.push(recv);
+                                    continue;
+                                }
+                            }
+                            stack.push(Val::int_vec(out));
+                            continue;
+                        }
+                        (Val::IntVec(a), Val::Float(rhs)) => {
+                            let rhs = *rhs;
+                            let mut out: Vec<i64> = Vec::with_capacity(a.len());
+                            match op {
+                                BinOp::Eq  => for &n in a.iter() { if (n as f64) == rhs { out.push(n); } }
+                                BinOp::Neq => for &n in a.iter() { if (n as f64) != rhs { out.push(n); } }
+                                BinOp::Lt  => for &n in a.iter() { if (n as f64) <  rhs { out.push(n); } }
+                                BinOp::Lte => for &n in a.iter() { if (n as f64) <= rhs { out.push(n); } }
+                                BinOp::Gt  => for &n in a.iter() { if (n as f64) >  rhs { out.push(n); } }
+                                BinOp::Gte => for &n in a.iter() { if (n as f64) >= rhs { out.push(n); } }
+                                _ => { stack.push(recv); continue; }
+                            }
+                            stack.push(Val::int_vec(out));
+                            continue;
+                        }
+                        (Val::FloatVec(a), Val::Float(rhs)) => {
+                            let rhs = *rhs;
+                            let mut out: Vec<f64> = Vec::with_capacity(a.len());
+                            match op {
+                                BinOp::Eq  => for &f in a.iter() { if f == rhs { out.push(f); } }
+                                BinOp::Neq => for &f in a.iter() { if f != rhs { out.push(f); } }
+                                BinOp::Lt  => for &f in a.iter() { if f <  rhs { out.push(f); } }
+                                BinOp::Lte => for &f in a.iter() { if f <= rhs { out.push(f); } }
+                                BinOp::Gt  => for &f in a.iter() { if f >  rhs { out.push(f); } }
+                                BinOp::Gte => for &f in a.iter() { if f >= rhs { out.push(f); } }
+                                _ => { stack.push(recv); continue; }
+                            }
+                            stack.push(Val::float_vec(out));
+                            continue;
+                        }
+                        (Val::FloatVec(a), Val::Int(rhs)) => {
+                            let rhs = *rhs as f64;
+                            let mut out: Vec<f64> = Vec::with_capacity(a.len());
+                            match op {
+                                BinOp::Eq  => for &f in a.iter() { if f == rhs { out.push(f); } }
+                                BinOp::Neq => for &f in a.iter() { if f != rhs { out.push(f); } }
+                                BinOp::Lt  => for &f in a.iter() { if f <  rhs { out.push(f); } }
+                                BinOp::Lte => for &f in a.iter() { if f <= rhs { out.push(f); } }
+                                BinOp::Gt  => for &f in a.iter() { if f >  rhs { out.push(f); } }
+                                BinOp::Gte => for &f in a.iter() { if f >= rhs { out.push(f); } }
+                                _ => { stack.push(recv); continue; }
+                            }
+                            stack.push(Val::float_vec(out));
+                            continue;
+                        }
+                        _ => {}
+                    }
+                    // Generic fallback — walk Val::Arr, compare each.
+                    let hint = match &recv { Val::Arr(a) => filter_cap_hint(a.len()), _ => 0 };
+                    let mut out = Vec::with_capacity(hint);
+                    if let Val::Arr(a) = &recv {
+                        for item in a.iter() {
+                            if cmp_val_binop(item, *op, lit) { out.push(item.clone()); }
                         }
                     }
                     stack.push(Val::arr(out));

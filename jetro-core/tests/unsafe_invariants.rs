@@ -213,6 +213,53 @@ fn group_shape_count() {
     assert!(s.contains(r#""b":1"#), "got {s}");
 }
 
+// ── Columnar SIMD filter ─────────────────────────────────────────────────
+
+#[test]
+fn filter_intvec_gt_int_literal() {
+    let doc = json!([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    let out = Jetro::new(doc).collect_val(r#"$.filter(@ > 5)"#).unwrap();
+    assert_eq!(out.to_string(), r#"[6,7,8,9,10]"#);
+}
+
+#[test]
+fn filter_intvec_eq_int() {
+    let doc = json!([1, 2, 3, 2, 1]);
+    let out = Jetro::new(doc).collect_val(r#"$.filter(@ == 2)"#).unwrap();
+    assert_eq!(out.to_string(), r#"[2,2]"#);
+}
+
+#[test]
+fn filter_intvec_flipped_lit_lt_current() {
+    let doc = json!([1, 2, 3, 4, 5]);
+    // `2 < @` → flipped to `@ > 2`
+    let out = Jetro::new(doc).collect_val(r#"$.filter(2 < @)"#).unwrap();
+    assert_eq!(out.to_string(), r#"[3,4,5]"#);
+}
+
+#[test]
+fn filter_floatvec_gte_float() {
+    let doc = json!([0.5, 1.0, 1.5, 2.0, 2.5]);
+    let out = Jetro::new(doc).collect_val(r#"$.filter(@ >= 1.5)"#).unwrap();
+    assert_eq!(out.to_string(), r#"[1.5,2.0,2.5]"#);
+}
+
+#[test]
+fn filter_intvec_preserves_typed_output() {
+    // After filter, sum should use the IntVec fast path (not Val::Arr).
+    let doc = json!([1, 2, 3, 4, 5]);
+    let out = Jetro::new(doc).collect_val(r#"$.filter(@ > 2).sum()"#).unwrap();
+    assert_eq!(out.to_string(), "12");
+}
+
+#[test]
+fn filter_non_columnar_fallback() {
+    // Strings — can't go through IntVec path; must hit generic fallback.
+    let doc = json!(["a", "bb", "ccc", "dddd"]);
+    let out = Jetro::new(doc).collect_val(r#"$.filter(@ > "b")"#).unwrap();
+    assert_eq!(out.to_string(), r#"["bb","ccc","dddd"]"#);
+}
+
 // ── Tier C/E: fanout / zip_shape / rec / trace_path ──────────────────────
 
 #[test]
