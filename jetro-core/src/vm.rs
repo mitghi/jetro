@@ -3076,9 +3076,10 @@ impl VM {
                     let mut is_float = false;
                     if let Val::Arr(a) = &recv {
                         if let Some(k) = trivial_field(&f.ops) {
+                            let mut idx: Option<usize> = None;
                             for item in a.iter() {
                                 if let Val::Obj(m) = item {
-                                    match m.get(k.as_ref()) {
+                                    match lookup_field_cached(m, &k, &mut idx) {
                                         Some(Val::Int(n))   => { if is_float { acc_f += *n as f64; } else { acc_i += *n; } }
                                         Some(Val::Float(x)) => { if !is_float { acc_f = acc_i as f64; is_float = true; } acc_f += *x; }
                                         Some(Val::Null) | None => {}
@@ -3114,9 +3115,10 @@ impl VM {
                     let mut n: usize = 0;
                     if let Val::Arr(a) = &recv {
                         if let Some(k) = trivial_field(&f.ops) {
+                            let mut idx: Option<usize> = None;
                             for item in a.iter() {
                                 if let Val::Obj(m) = item {
-                                    match m.get(k.as_ref()) {
+                                    match lookup_field_cached(m, &k, &mut idx) {
                                         Some(Val::Int(x))   => { sum += *x as f64; n += 1; }
                                         Some(Val::Float(x)) => { sum += *x;        n += 1; }
                                         Some(Val::Null) | None => {}
@@ -3164,9 +3166,10 @@ impl VM {
                     }
                     if let Val::Arr(a) = &recv {
                         if let Some(k) = trivial_field(&f.ops) {
+                            let mut idx: Option<usize> = None;
                             for item in a.iter() {
                                 if let Val::Obj(m) = item {
-                                    if let Some(v) = m.get(k.as_ref()) { fold_min!(v); }
+                                    if let Some(v) = lookup_field_cached(m, &k, &mut idx) { fold_min!(v); }
                                 }
                             }
                         } else {
@@ -3208,9 +3211,10 @@ impl VM {
                     }
                     if let Val::Arr(a) = &recv {
                         if let Some(k) = trivial_field(&f.ops) {
+                            let mut idx: Option<usize> = None;
                             for item in a.iter() {
                                 if let Val::Obj(m) = item {
-                                    if let Some(v) = m.get(k.as_ref()) { fold_max!(v); }
+                                    if let Some(v) = lookup_field_cached(m, &k, &mut idx) { fold_max!(v); }
                                 }
                             }
                         } else {
@@ -3235,9 +3239,14 @@ impl VM {
                     let recv = pop!(stack);
                     if let Val::Arr(a) = &recv {
                         let mut out = Vec::with_capacity(a.len());
+                        let mut idx: Option<usize> = None;
                         for item in a.iter() {
                             match item {
-                                Val::Obj(m) => out.push(m.get(k.as_ref()).cloned().unwrap_or(Val::Null)),
+                                Val::Obj(m) => out.push(
+                                    lookup_field_cached(m, k, &mut idx)
+                                        .cloned()
+                                        .unwrap_or(Val::Null),
+                                ),
                                 _ => out.push(Val::Null),
                             }
                         }
