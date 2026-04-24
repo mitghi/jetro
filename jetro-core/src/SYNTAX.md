@@ -51,15 +51,33 @@ Field names allow `A-Z a-z 0-9 _ -` (first char alpha/`_`).
 
 ### Optional (null-safe) field
 
-```
-$.user?.name              // null if $.user is null/missing
-$.orders[0]?.total        // chain safely
-```
-
-### Optional method
+The `?` marker is **postfix** — it attaches to the step it guards, not
+the next step. Prefix `?.field` is not accepted.
 
 ```
-$.items?.first()          // null-short if $.items is null
+$.user?.name              // null if .user missing; .name runs on result
+$.orders[0].total?        // total evaluated; null-safe at the end
+$.a?.b?.c?                // chained null-safe field access
+```
+
+### Optional on descendant — first-match
+
+Postfix `?` on a descendant returns the **first matched object** instead
+of an array:
+
+```
+$..services?              // first `services` descendant, or null
+$..items?.name            // first `items` descendant, then its `.name`
+```
+
+### Optional method / filter (first-of-array)
+
+Postfix `?` on a method call keeps its existing first-of-array
+semantics:
+
+```
+$.books.filter(price > 10)?    // first book with price > 10, or null
+$.orders.sort()?               // first after sort
 ```
 
 ### Array index
@@ -164,7 +182,7 @@ kind / is
 * / %
 as
 unary -
-postfix (., [], (), ?., ?:)
+postfix (., [], (), ?, ?:)
 ```
 
 ---
@@ -474,9 +492,9 @@ len($.items)              // same as $.items.len()
 ## 18. Null Safety Cheat-Sheet
 
 ```
-$.user?.name                 // short-circuit on null
-$.users[0]?.profile?.bio     // chained
-$.items?                     // quantifier — null if empty
+$.user?.name                 // postfix ? on .user — null if user missing
+$.users[0].profile?.bio      // ? on .profile — null-safe field
+$.items?                     // ? on .items — first-or-null (array→first)
 $.field ?| "default"         // coalesce
 coalesce($.a, $.b, "x")      // first non-null
 has(obj, "key")              // existence check
