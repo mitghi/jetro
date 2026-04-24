@@ -1519,6 +1519,24 @@ mod tests {
     }
 
     #[test]
+    fn field_chain_ics_hit_across_shape_uniform_items() {
+        // Drive FieldChain through a filter so compilation doesn't route it
+        // to RootChain's cached path — the IC on FieldChain has to carry
+        // the hit itself.  Repeated invocations over same-shape objects
+        // populate the per-hop slot cache on the first item.
+        let doc = json!({
+            "xs": [
+                {"a": {"b": {"c": 1}}, "tag": "k"},
+                {"a": {"b": {"c": 2}}, "tag": "k"},
+                {"a": {"b": {"c": 3}}, "tag": "x"},
+                {"a": {"b": {"c": 4}}, "tag": "k"},
+            ]
+        });
+        let r = query("$.xs.filter(tag == 'k').map(a.b.c)", &doc).unwrap();
+        assert_eq!(r, json!([1, 2, 4]));
+    }
+
+    #[test]
     fn descendant_first_tree_walker_early_exit() {
         // Self-first DFS order: root has `id` first, so $..id.first() must be 1.
         let doc = json!({

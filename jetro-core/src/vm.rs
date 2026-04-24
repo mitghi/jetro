@@ -321,7 +321,10 @@ pub enum Opcode {
     /// GetField(k1) + GetField(k2) + … fused — walks TOS through N fields.
     /// Applies mid-program where `RootChain` does not match (e.g. after a
     /// method call or filter produces an object on stack).
-    FieldChain(Arc<[Arc<str>]>),
+    /// Carries a per-step inline-cache array so that `map(a.b.c)` over a
+    /// shape-uniform array of objects hits `get_index(cached_slot)`
+    /// instead of re-hashing the key at every iteration.
+    FieldChain(Arc<FieldChainData>),
     /// filter(pred) + len/count fused — counts matches without temp array.
     FilterCount(Arc<Program>),
     /// filter(pred) + First quantifier fused — early-exit on first match.
@@ -543,6 +546,32 @@ impl Program {
             ics,
         }
     }
+}
+
+/// Per-step inline caches for `Opcode::FieldChain`.  One `AtomicU64` slot per
+/// key in the chain — same encoding as `Program.ics` (ptr-hash | slot).
+/// Lives inside the opcode rather than the top-level side-table because the
+/// chain length is known only at compile time of that specific opcode.
+#[derive(Debug)]
+pub struct FieldChainData {
+    pub keys: Arc<[Arc<str>]>,
+    pub ics:  Box<[AtomicU64]>,
+}
+
+impl FieldChainData {
+    pub fn new(keys: Arc<[Arc<str>]>) -> Self {
+        let n = keys.len();
+        let mut ics = Vec::with_capacity(n);
+        for _ in 0..n { ics.push(AtomicU64::new(0)); }
+        Self { keys, ics: ics.into_boxed_slice() }
+    }
+    #[inline] pub fn len(&self) -> usize { self.keys.len() }
+    #[inline] pub fn is_empty(&self) -> bool { self.keys.is_empty() }
+}
+
+impl std::ops::Deref for FieldChainData {
+    type Target = [Arc<str>];
+    #[inline] fn deref(&self) -> &[Arc<str>] { &self.keys }
 }
 
 /// Build a fresh IC side-table with one zeroed `AtomicU64` per opcode.
@@ -1647,7 +1676,7 @@ impl Compiler {
                         it.next();
                         chain.push(k);
                     }
-                    out.push(Opcode::FieldChain(chain.into()));
+                    out.push(Opcode::FieldChain(Arc::new(FieldChainData::new(chain.into()))));
                     continue;
                 }
                 out.push(op);
@@ -2762,8 +2791,12 @@ impl VM {
                 }
                 Opcode::FieldChain(chain) => {
                     let mut cur = pop!(stack);
-                    for k in chain.iter() {
-                        cur = cur.get_field(k.as_ref());
+                    for (i, k) in chain.keys.iter().enumerate() {
+                        cur = if let Val::Obj(m) = &cur {
+                            ic_get_field(m, k.as_ref(), &chain.ics[i])
+                        } else {
+                            cur.get_field(k.as_ref())
+                        };
                     }
                     stack.push(cur);
                 }
