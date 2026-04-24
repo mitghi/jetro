@@ -127,6 +127,30 @@ fn map_upper_replace_no_hit() {
 }
 
 #[test]
+fn map_str_concat_prefix_suffix() {
+    let doc = json!(["a", "bb", ""]);
+    let out = Jetro::new(doc)
+        .collect_val(r#"$.map('P-' + @ + '-S')"#).unwrap();
+    assert_eq!(out.to_string(), r#"["P-a-S","P-bb-S","P--S"]"#);
+}
+
+#[test]
+fn map_str_concat_prefix_only() {
+    let doc = json!(["a", "bb"]);
+    let out = Jetro::new(doc)
+        .collect_val(r#"$.map('P-' + @)"#).unwrap();
+    assert_eq!(out.to_string(), r#"["P-a","P-bb"]"#);
+}
+
+#[test]
+fn map_str_concat_suffix_only() {
+    let doc = json!(["a", "bb"]);
+    let out = Jetro::new(doc)
+        .collect_val(r#"$.map(@ + '-S')"#).unwrap();
+    assert_eq!(out.to_string(), r#"["a-S","bb-S"]"#);
+}
+
+#[test]
 fn map_upper_replace_unicode_fallback() {
     let doc = json!(["café-foo-café"]);
     let out = Jetro::new(doc)

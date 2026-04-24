@@ -272,7 +272,8 @@ fn apply_op(op: &Opcode, stack: &mut Vec<AbstractVal>) {
         }
         Opcode::MapReplaceLit { .. }
         | Opcode::MapUpperReplaceLit { .. }
-        | Opcode::MapLowerReplaceLit { .. } => {
+        | Opcode::MapLowerReplaceLit { .. }
+        | Opcode::MapStrConcat { .. } => {
             pop1!();
             stack.push(AbstractVal::array());
         }
@@ -1170,6 +1171,7 @@ pub fn opcode_cost(op: &Opcode) -> u32 {
         Opcode::StrSplitReverseJoin { .. } => 4,
         Opcode::MapReplaceLit { .. } => 10,
         Opcode::MapUpperReplaceLit { .. } | Opcode::MapLowerReplaceLit { .. } => 11,
+        Opcode::MapStrConcat { .. } => 6,
         Opcode::MapSplitCount { .. } => 3,
         Opcode::MapSplitFirst { .. } => 3,
         Opcode::MapSplitNth   { .. } => 3,

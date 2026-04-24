@@ -390,6 +390,10 @@ pub enum Opcode {
     /// Fused `map(@.lower().replace(lit, lit))` (and `replace_all`) — same as
     /// above but ASCII-lower.
     MapLowerReplaceLit { needle: Arc<str>, with: Arc<str>, all: bool },
+    /// Fused `map(prefix + @ + suffix)` — per item, allocate exact-size
+    /// `Arc<str>` with one uninit slice + copy_nonoverlapping. Either
+    /// prefix or suffix may be empty for the 2-operand forms.
+    MapStrConcat { prefix: Arc<str>, suffix: Arc<str> },
     /// Fused `map(@.split(sep).count())` — byte-scan per row, returns Int;
     /// zero per-row allocations.
     MapSplitCount { sep: Arc<str> },
@@ -1787,6 +1791,37 @@ impl Compiler {
                             }
                         } else { None }
                     } else { None };
+                    if let Some(o) = fused {
+                        out.push(o);
+                        continue;
+                    }
+                }
+            }
+            // map(prefix + @ + suffix), map(prefix + @), map(@ + suffix)
+            //   → MapStrConcat { prefix, suffix }
+            // Body shapes:
+            //   [PushStr(p), PushCurrent, Add, PushStr(s), Add]     prefix+suffix
+            //   [PushStr(p), PushCurrent, Add]                      prefix only
+            //   [PushCurrent, PushStr(s), Add]                      suffix only
+            if let Opcode::CallMethod(a) = &op {
+                if a.method == BuiltinMethod::Map && a.sub_progs.len() == 1 {
+                    let body = &a.sub_progs[0].ops;
+                    let empty: Arc<str> = Arc::from("");
+                    let fused = match &body[..] {
+                        [Opcode::PushStr(p), Opcode::PushCurrent, Opcode::Add,
+                         Opcode::PushStr(s), Opcode::Add] => Some(Opcode::MapStrConcat {
+                            prefix: p.clone(), suffix: s.clone(),
+                        }),
+                        [Opcode::PushStr(p), Opcode::PushCurrent, Opcode::Add] =>
+                            Some(Opcode::MapStrConcat {
+                                prefix: p.clone(), suffix: empty.clone(),
+                            }),
+                        [Opcode::PushCurrent, Opcode::PushStr(s), Opcode::Add] =>
+                            Some(Opcode::MapStrConcat {
+                                prefix: empty.clone(), suffix: s.clone(),
+                            }),
+                        _ => None,
+                    };
                     if let Some(o) = fused {
                         out.push(o);
                         continue;
@@ -4083,6 +4118,55 @@ impl VM {
                                 }
                             } else {
                                 out_vec.push(item.clone());
+                            }
+                        }
+                    }
+                    stack.push(Val::arr(out_vec));
+                }
+                Opcode::MapStrConcat { prefix, suffix } => {
+                    let v = pop!(stack);
+                    let v = if matches!(&v, Val::StrVec(_)) { v.into_arr() } else { v };
+                    let p_b = prefix.as_bytes();
+                    let s_b = suffix.as_bytes();
+                    let pl = p_b.len();
+                    let sl = s_b.len();
+                    let mut out_vec: Vec<Val> = match &v {
+                        Val::Arr(a) => Vec::with_capacity(a.len()),
+                        _ => Vec::new(),
+                    };
+                    if let Val::Arr(a) = &v {
+                        for item in a.iter() {
+                            if let Val::Str(s) = item {
+                                let src_b = s.as_bytes();
+                                let out_len = pl + src_b.len() + sl;
+                                let mut arc = Arc::<[u8]>::new_uninit_slice(out_len);
+                                let slot = Arc::get_mut(&mut arc).unwrap();
+                                unsafe {
+                                    let dst = slot.as_mut_ptr() as *mut u8;
+                                    if pl > 0 {
+                                        std::ptr::copy_nonoverlapping(p_b.as_ptr(), dst, pl);
+                                    }
+                                    std::ptr::copy_nonoverlapping(
+                                        src_b.as_ptr(), dst.add(pl), src_b.len());
+                                    if sl > 0 {
+                                        std::ptr::copy_nonoverlapping(
+                                            s_b.as_ptr(), dst.add(pl + src_b.len()), sl);
+                                    }
+                                }
+                                let arc_bytes: Arc<[u8]> = unsafe { arc.assume_init() };
+                                let arc_str: Arc<str> = unsafe {
+                                    Arc::from_raw(Arc::into_raw(arc_bytes) as *const str)
+                                };
+                                out_vec.push(Val::Str(arc_str));
+                            } else {
+                                // Non-string element: fall back to add_vals semantics.
+                                let a1 = super::eval::util::add_vals(
+                                    Val::Str(prefix.clone()), item.clone())
+                                    .unwrap_or(Val::Null);
+                                let a2 = super::eval::util::add_vals(
+                                    a1, Val::Str(suffix.clone()))
+                                    .unwrap_or(Val::Null);
+                                out_vec.push(a2);
                             }
                         }
                     }
