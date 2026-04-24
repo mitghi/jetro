@@ -5553,6 +5553,84 @@ fn materialise_find_scan_spans(
     spans: &[super::scan::ValueSpan],
     tail: &[Opcode],
 ) -> (Val, usize) {
+    // Consume any leading span-refiner tail ops — compiled forms of
+    // `.filter(@.k == lit)` / `.filter(@.k <cmp> lit)` sitting after the
+    // byte-scan.  Each narrows `spans` in place via `find_direct_field`
+    // + bytewise / numeric comparison; the remaining tail then feeds the
+    // existing map/aggregate dispatch below.
+    let mut consumed_refiners = 0usize;
+    let mut owned: Option<Vec<super::scan::ValueSpan>>;
+    let mut spans_view: &[super::scan::ValueSpan] = spans;
+    loop {
+        match tail.get(consumed_refiners) {
+            Some(Opcode::FilterFieldEqLit(k, lit_val)) => {
+                let Some(lit) = val_to_canonical_lit_bytes(lit_val) else { break };
+                let next: Vec<_> = spans_view.iter().copied().filter(|s| {
+                    let obj = &bytes[s.start..s.end];
+                    match super::scan::find_direct_field(obj, k.as_ref()) {
+                        Some(vs) => vs.end - vs.start == lit.len()
+                            && obj[vs.start..vs.end] == lit[..],
+                        None => false,
+                    }
+                }).collect();
+                owned = Some(next);
+                spans_view = owned.as_deref().unwrap();
+                consumed_refiners += 1;
+            }
+            Some(Opcode::FilterFieldCmpLit(k, op, lit_val)) => {
+                let Some(thresh) = lit_val.as_f64() else { break };
+                let holds: fn(f64, f64) -> bool = match op {
+                    super::ast::BinOp::Lt  => |a, b| a <  b,
+                    super::ast::BinOp::Lte => |a, b| a <= b,
+                    super::ast::BinOp::Gt  => |a, b| a >  b,
+                    super::ast::BinOp::Gte => |a, b| a >= b,
+                    _ => break,
+                };
+                let next: Vec<_> = spans_view.iter().copied().filter(|s| {
+                    let obj = &bytes[s.start..s.end];
+                    let Some(vs) = super::scan::find_direct_field(obj, k.as_ref())
+                        else { return false };
+                    match super::scan::parse_num_span(&obj[vs.start..vs.end]) {
+                        Some((_, f, _)) => holds(f, thresh),
+                        None => false,
+                    }
+                }).collect();
+                owned = Some(next);
+                spans_view = owned.as_deref().unwrap();
+                consumed_refiners += 1;
+            }
+            _ => break,
+        }
+    }
+    let spans = spans_view;
+    let tail = &tail[consumed_refiners..];
+    let (val, inner) = materialise_find_scan_spans_tail(bytes, spans, tail);
+    (val, consumed_refiners + inner)
+}
+
+/// Convert a `Val` literal to its canonical JSON byte encoding — the
+/// same form `find_direct_field` produces when it locates a scalar value
+/// inside an object.  Returns `None` for non-scalar / non-canonical values.
+#[inline]
+fn val_to_canonical_lit_bytes(v: &Val) -> Option<Vec<u8>> {
+    match v {
+        Val::Int(n)   => Some(n.to_string().into_bytes()),
+        Val::Bool(b)  => Some(if *b { b"true".to_vec() } else { b"false".to_vec() }),
+        Val::Null     => Some(b"null".to_vec()),
+        Val::Str(s)   => serde_json::to_vec(
+            &serde_json::Value::String(s.to_string())
+        ).ok(),
+        _ => None,
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn materialise_find_scan_spans_tail(
+    bytes: &[u8],
+    spans: &[super::scan::ValueSpan],
+    tail: &[Opcode],
+) -> (Val, usize) {
     // Trailing `.count()` / `.len()` — just the span count, no parse.
     if let Some(Opcode::CallMethod(c)) = tail.first() {
         if c.sub_progs.is_empty()

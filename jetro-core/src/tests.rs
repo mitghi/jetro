@@ -3167,6 +3167,69 @@ mod tests {
     }
 
     #[test]
+    fn deep_find_then_filter_eq_refines_spans() {
+        // `$..find(eq_preds).filter(@.k == lit)` — the trailing filter
+        // should shrink the byte-scan span set in place without
+        // parsing non-matching objects.
+        use crate::Jetro;
+        let doc = json!({
+            "rows":[
+                {"type":"action","device":"mobile","state":"on","id":1},
+                {"type":"action","device":"mobile","state":"off","id":2},
+                {"type":"action","device":"desktop","state":"on","id":3}
+            ]
+        });
+        let raw = serde_json::to_vec(&doc).unwrap();
+        let j_b = Jetro::from_bytes(raw).unwrap();
+        let j_t = Jetro::new(doc);
+        let q = r#"$..find(@.type == "action", @.device == "mobile").filter(@.state == "on")"#;
+        let rb = j_b.collect(q).unwrap();
+        let rt = j_t.collect(q).unwrap();
+        assert_eq!(rb, rt);
+        assert_eq!(rb.as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn deep_find_then_filter_cmp_refines_spans() {
+        // Trailing `.filter(@.k > n)` after `..find` — numeric refinement.
+        use crate::Jetro;
+        let doc = json!({
+            "rows":[
+                {"type":"action","v":1},
+                {"type":"action","v":10},
+                {"type":"action","v":100},
+                {"type":"idle","v":200}
+            ]
+        });
+        let raw = serde_json::to_vec(&doc).unwrap();
+        let j_b = Jetro::from_bytes(raw).unwrap();
+        let j_t = Jetro::new(doc);
+        let q = r#"$..find(@.type == "action").filter(@.v > 5).map(v).sum()"#;
+        let rb = j_b.collect(q).unwrap();
+        let rt = j_t.collect(q).unwrap();
+        assert_eq!(rb, rt);
+        assert_eq!(rb, json!(110));
+    }
+
+    #[test]
+    fn deep_find_then_filter_then_count() {
+        // Compose scan + refine + count — all on raw bytes.
+        use crate::Jetro;
+        let doc = json!({
+            "rows":[
+                {"type":"action","v":1},
+                {"type":"action","v":10},
+                {"type":"action","v":100},
+                {"type":"idle","v":50}
+            ]
+        });
+        let raw = serde_json::to_vec(&doc).unwrap();
+        let j_b = Jetro::from_bytes(raw).unwrap();
+        let q = r#"$..find(@.type == "action").filter(@.v >= 10).count()"#;
+        assert_eq!(j_b.collect(q).unwrap(), json!(2));
+    }
+
+    #[test]
     fn find_count_fuses_to_filter_count() {
         // Compiled program for `find(p).count()` should collapse to a
         // single FilterCount op (no residual CallMethod for find/count).
