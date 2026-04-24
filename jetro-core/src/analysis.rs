@@ -321,7 +321,9 @@ fn apply_op(op: &Opcode, stack: &mut Vec<AbstractVal>) {
             | Opcode::FilterFieldCmpField(_, _, _)
             | Opcode::FilterFieldEqLitMapField(_, _, _)
             | Opcode::FilterFieldCmpLitMapField(_, _, _, _)
-            | Opcode::GroupByField(_) => {
+            | Opcode::GroupByField(_)
+            | Opcode::CountByField(_)
+            | Opcode::UniqueByField(_) => {
             pop1!();
             stack.push(AbstractVal::array());
         }
@@ -554,6 +556,8 @@ fn collect_fields_in_ops(ops: &[Opcode], acc: &mut Vec<Arc<str>>) {
                 | Opcode::MapFieldMin(k) | Opcode::MapFieldMax(k)
                 | Opcode::MapField(k) | Opcode::MapFieldUnique(k)
                 | Opcode::GroupByField(k)
+                | Opcode::CountByField(k)
+                | Opcode::UniqueByField(k)
                 | Opcode::FilterFieldEqLit(k, _) | Opcode::FilterFieldCmpLit(k, _, _)
                 | Opcode::FilterFieldEqLitCount(k, _) | Opcode::FilterFieldCmpLitCount(k, _, _)
                 => {
@@ -1169,6 +1173,8 @@ pub fn opcode_cost(op: &Opcode) -> u32 {
         Opcode::FilterFieldsAllEqLitCount(pairs) => 4 + pairs.len() as u32 * 2,
         Opcode::FilterFieldsAllCmpLitCount(triples) => 4 + triples.len() as u32 * 2,
         Opcode::GroupByField(_) => 15,
+        Opcode::CountByField(_) => 12,
+        Opcode::UniqueByField(_) => 14,
         Opcode::UniqueCount => 6,
         Opcode::ArgExtreme { .. } => 12,
         Opcode::MapToJsonJoin { .. } => 8,

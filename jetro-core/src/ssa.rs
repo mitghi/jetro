@@ -174,6 +174,8 @@ fn op_arity(op: &Opcode) -> Arity {
             | Opcode::FilterFieldsAllEqLitCount(_)
             | Opcode::FilterFieldsAllCmpLitCount(_)
             | Opcode::GroupByField(_)
+            | Opcode::CountByField(_)
+            | Opcode::UniqueByField(_)
             | Opcode::MapFlatten(_)
             | Opcode::MapFirst(_) | Opcode::MapLast(_)
             | Opcode::FilterTakeWhile { .. }
