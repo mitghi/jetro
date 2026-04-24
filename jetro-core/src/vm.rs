@@ -671,11 +671,24 @@ fn trivial_push_str(ops: &[Opcode]) -> Option<Arc<str>> {
 
 /// Allocate an `Arc<str>` of exactly `bytes.len()` and write ASCII-folded
 /// contents directly into the Arc payload — one allocation, no intermediate
-/// `String`. Caller must ensure `bytes` is ASCII.
+/// `String`.
+///
+/// # Safety invariants
+/// - Caller must ensure `bytes` is pure ASCII (all bytes < 128).
+///   ASCII case-fold preserves ASCII, which is valid UTF-8.
+/// - `Arc::get_mut(&mut arc).unwrap()` succeeds because `arc` was just
+///   returned by `new_uninit_slice`, so no other strong/weak refs exist.
+/// - All `bytes.len()` bytes are initialised before `assume_init`.
+/// - `Arc::from_raw(... as *const str)` layout-reinterprets the `Arc<[u8]>`
+///   as `Arc<str>`: both share `ArcInner<[u8]>` layout (fat pointer =
+///   data ptr + length), and the payload is valid UTF-8 by invariant 1.
 #[inline]
 fn ascii_fold_to_arc_str(bytes: &[u8], upper: bool) -> Arc<str> {
+    debug_assert!(bytes.is_ascii(), "ascii_fold_to_arc_str: non-ASCII input");
     let mut arc = Arc::<[u8]>::new_uninit_slice(bytes.len());
     let slot = Arc::get_mut(&mut arc).unwrap();
+    // SAFETY: see invariants above. `dst` points to `bytes.len()` uninit
+    // bytes owned exclusively by this Arc; writes stay in bounds.
     unsafe {
         let dst = slot.as_mut_ptr() as *mut u8;
         std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, bytes.len());
@@ -685,7 +698,11 @@ fn ascii_fold_to_arc_str(bytes: &[u8], upper: bool) -> Arc<str> {
             for i in 0..bytes.len() { *dst.add(i) = (*dst.add(i)).to_ascii_lowercase(); }
         }
     }
+    // SAFETY: all bytes initialised by the loop above.
     let arc_bytes: Arc<[u8]> = unsafe { arc.assume_init() };
+    // SAFETY: `Arc<[u8]>` and `Arc<str>` share layout (fat pointer over
+    // `ArcInner<T>`). Payload is valid UTF-8: ASCII in + ASCII-preserving
+    // transform = ASCII out.
     unsafe { Arc::from_raw(Arc::into_raw(arc_bytes) as *const str) }
 }
 
@@ -3614,6 +3631,19 @@ impl VM {
                             }
                             spans.push((prev, src.len()));
                         }
+                        // SAFETY plan for the write-loop below:
+                        // - `out_len == src.len()`: reverse join over the
+                        //   same segments + same separator count produces
+                        //   exactly the input byte count.
+                        // - `arc` just returned from `new_uninit_slice`, no
+                        //   other refs: `get_mut().unwrap()` is sound.
+                        // - Segment spans `(a, b)` came from `str::char_indices`
+                        //   or ASCII byte-scan of valid UTF-8 → on UTF-8
+                        //   boundaries.
+                        // - Final cast to `*const str`: payload is valid
+                        //   UTF-8 because it is a permutation of the source
+                        //   bytes joined by the same `sep` (both already
+                        //   valid UTF-8 at known boundaries).
                         let out_len = src.len();
                         let mut arc = Arc::<[u8]>::new_uninit_slice(out_len);
                         let slot = Arc::get_mut(&mut arc).unwrap();
@@ -3621,6 +3651,7 @@ impl VM {
                         let sep_b = sep_s.as_bytes();
                         let slen = sep_b.len();
                         let n = spans.len();
+                        // SAFETY: see plan above.
                         unsafe {
                             let dst = slot.as_mut_ptr() as *mut u8;
                             let mut widx = 0usize;
@@ -3636,7 +3667,11 @@ impl VM {
                             }
                             debug_assert_eq!(widx, out_len);
                         }
+                        // SAFETY: all `out_len` bytes initialised by the
+                        // write-loop above (asserted).
                         let arc_bytes: Arc<[u8]> = unsafe { arc.assume_init() };
+                        // SAFETY: `Arc<[u8]>` and `Arc<str>` share layout;
+                        // payload is valid UTF-8 as argued above.
                         let arc_str: Arc<str> = unsafe {
                             Arc::from_raw(Arc::into_raw(arc_bytes) as *const str)
                         };
@@ -3707,6 +3742,9 @@ impl VM {
                                     }
                                     let tail = src_b.len() - last_end;
                                     std::ptr::copy_nonoverlapping(src_b.as_ptr().add(last_end), dst.add(widx), tail);
+                                    debug_assert_eq!(widx + tail, out_len,
+                                        "MapReplaceLit: hit-count predicted {} bytes, wrote {}",
+                                        out_len, widx + tail);
                                 }
                                 // SAFETY: all `out_len` bytes are initialised above; the
                                 // bytes are valid UTF-8 because src is valid UTF-8 and

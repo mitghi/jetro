@@ -22,15 +22,9 @@ macro_rules! err {
 
 pub fn upper(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
     if let Val::Str(s) = recv {
-        let bytes = s.as_bytes();
-        if bytes.is_ascii() {
-            let mut buf = String::with_capacity(bytes.len());
-            // SAFETY: ASCII upper-case of ASCII bytes stays ASCII → valid UTF-8.
-            unsafe {
-                let v = buf.as_mut_vec();
-                v.extend_from_slice(bytes);
-                for b in v.iter_mut() { *b = b.to_ascii_uppercase(); }
-            }
+        if s.is_ascii() {
+            let mut buf: String = s.as_ref().to_owned();
+            buf.make_ascii_uppercase();
             return Ok(Val::Str(Arc::<str>::from(buf)));
         }
         Ok(Val::Str(Arc::<str>::from(s.to_uppercase())))
@@ -39,14 +33,9 @@ pub fn upper(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
 
 pub fn lower(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
     if let Val::Str(s) = recv {
-        let bytes = s.as_bytes();
-        if bytes.is_ascii() {
-            let mut buf = String::with_capacity(bytes.len());
-            unsafe {
-                let v = buf.as_mut_vec();
-                v.extend_from_slice(bytes);
-                for b in v.iter_mut() { *b = b.to_ascii_lowercase(); }
-            }
+        if s.is_ascii() {
+            let mut buf: String = s.as_ref().to_owned();
+            buf.make_ascii_lowercase();
             return Ok(Val::Str(Arc::<str>::from(buf)));
         }
         Ok(Val::Str(Arc::<str>::from(s.to_lowercase())))
