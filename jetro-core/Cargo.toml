@@ -19,6 +19,7 @@ parking_lot = "0.12"
 smallvec = { version = "1", features = ["union"] }
 indexmap = "2"
 memchr = "2"
+compact_str = "0.8"
 simd-json = { version = "0.13", optional = true }
 
 [features]

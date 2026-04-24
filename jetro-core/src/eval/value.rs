@@ -94,6 +94,37 @@ impl Val {
 
 thread_local! {
     static NULL_VAL: Val = Val::Null;
+    /// Per-thread key intern cache — shared across `visit_map` / `From<&Value>`
+    /// calls within a single deserialize to avoid allocating a fresh
+    /// `Arc<str>` for every repeated key across rows of an array.
+    /// Scoped keys live until the cache hits its capacity limit; common
+    /// short keys like "id", "grp", "status" get reused for the entire
+    /// array walk.
+    static KEY_INTERN: std::cell::RefCell<std::collections::HashMap<Box<str>, Arc<str>>> =
+        std::cell::RefCell::new(std::collections::HashMap::with_capacity(64));
+}
+
+/// Intern an object key for the current thread.  Returns a clone of a
+/// cached `Arc<str>` when the key has already been seen; otherwise
+/// allocates once and caches.  Capped at a soft limit to avoid
+/// unbounded growth on pathological docs.
+#[inline]
+pub fn intern_key(k: &str) -> Arc<str> {
+    const CAP: usize = 4096;
+    KEY_INTERN.with(|cell| {
+        let mut m = cell.borrow_mut();
+        if let Some(a) = m.get(k) {
+            return Arc::clone(a);
+        }
+        if m.len() >= CAP {
+            // Fall back to a fresh Arc without caching — prevents
+            // unbounded growth on docs with wildly varying keys.
+            return Arc::<str>::from(k);
+        }
+        let a: Arc<str> = Arc::<str>::from(k);
+        m.insert(k.into(), Arc::clone(&a));
+        a
+    })
 }
 
 // ── Cheap structural operations ───────────────────────────────────────────────
@@ -335,7 +366,7 @@ impl From<&serde_json::Value> for Val {
                 Val::Arr(Arc::new(a.iter().map(Val::from).collect()))
             }
             serde_json::Value::Object(m) => Val::Obj(Arc::new(
-                m.iter().map(|(k, v)| (Arc::from(k.as_str()), Val::from(v))).collect()
+                m.iter().map(|(k, v)| (intern_key(k.as_str()), Val::from(v))).collect()
             )),
         }
     }
@@ -616,7 +647,7 @@ impl<'de> Visitor<'de> for ValVisitor {
         let mut out: IndexMap<Arc<str>, Val> =
             IndexMap::with_capacity(m.size_hint().unwrap_or(0));
         while let Some((k, v)) = m.next_entry::<String, Val>()? {
-            out.insert(Arc::from(k.as_str()), v);
+            out.insert(intern_key(k.as_str()), v);
         }
         Ok(Val::obj(out))
     }
