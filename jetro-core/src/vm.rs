@@ -887,6 +887,126 @@ fn filter_cap_hint(recv_len: usize) -> usize {
     (recv_len / 4 + 4).min(recv_len)
 }
 
+// ── Typed-numeric aggregate fast-paths ────────────────────────────────────────
+// Direct loops over `&[Val]` for mono-typed or mixed Int/Float arrays.  Used
+// by the bare `.sum()/.min()/.max()/.avg()` no-arg method-call fast path in
+// `exec_call` — skips registry dispatch, `into_vec()` clone, and the extra
+// `.filter().collect()` that `func_aggregates::collect_nums` performs.
+//
+// Semantics match `func_aggregates`: non-numeric items are skipped; Int-only
+// arrays stay on `i64` (no lossy widening); Float appearance widens once.
+
+#[inline]
+fn agg_sum_typed(a: &[Val]) -> Val {
+    // Tight i64 loop until first Float; then switch to f64 loop.
+    let mut i_acc: i64 = 0;
+    let mut it = a.iter();
+    while let Some(v) = it.next() {
+        match v {
+            Val::Int(n) => i_acc = i_acc.wrapping_add(*n),
+            Val::Float(x) => {
+                let mut f_acc = i_acc as f64 + *x;
+                for v in it {
+                    match v {
+                        Val::Int(n)   => f_acc += *n as f64,
+                        Val::Float(x) => f_acc += *x,
+                        _ => {}
+                    }
+                }
+                return Val::Float(f_acc);
+            }
+            _ => {} // skip non-numeric
+        }
+    }
+    Val::Int(i_acc)
+}
+
+#[inline]
+fn agg_avg_typed(a: &[Val]) -> Val {
+    let mut sum: f64 = 0.0;
+    let mut n: usize = 0;
+    for v in a {
+        match v {
+            Val::Int(x)   => { sum += *x as f64; n += 1; }
+            Val::Float(x) => { sum += *x;        n += 1; }
+            _ => {}
+        }
+    }
+    if n == 0 { Val::Null } else { Val::Float(sum / n as f64) }
+}
+
+#[inline]
+fn agg_minmax_typed(a: &[Val], want_max: bool) -> Val {
+    let mut it = a.iter();
+    // Find first number.
+    let first = loop {
+        match it.next() {
+            Some(v) if v.is_number() => break v,
+            Some(_) => continue,
+            None    => return Val::Null,
+        }
+    };
+    match first {
+        Val::Int(n0) => {
+            let mut best: i64 = *n0;
+            // Mono-Int tight loop; on first Float, promote.
+            while let Some(v) = it.next() {
+                match v {
+                    Val::Int(n) => {
+                        let n = *n;
+                        if want_max { if n > best { best = n; } }
+                        else        { if n < best { best = n; } }
+                    }
+                    Val::Float(x) => {
+                        let x = *x;
+                        let mut best_f = best as f64;
+                        if want_max { if x > best_f { best_f = x; } }
+                        else        { if x < best_f { best_f = x; } }
+                        for v in it {
+                            match v {
+                                Val::Int(n) => {
+                                    let n = *n as f64;
+                                    if want_max { if n > best_f { best_f = n; } }
+                                    else        { if n < best_f { best_f = n; } }
+                                }
+                                Val::Float(x) => {
+                                    let x = *x;
+                                    if want_max { if x > best_f { best_f = x; } }
+                                    else        { if x < best_f { best_f = x; } }
+                                }
+                                _ => {}
+                            }
+                        }
+                        return Val::Float(best_f);
+                    }
+                    _ => {}
+                }
+            }
+            Val::Int(best)
+        }
+        Val::Float(x0) => {
+            let mut best_f: f64 = *x0;
+            for v in it {
+                match v {
+                    Val::Int(n) => {
+                        let n = *n as f64;
+                        if want_max { if n > best_f { best_f = n; } }
+                        else        { if n < best_f { best_f = n; } }
+                    }
+                    Val::Float(x) => {
+                        let x = *x;
+                        if want_max { if x > best_f { best_f = x; } }
+                        else        { if x < best_f { best_f = x; } }
+                    }
+                    _ => {}
+                }
+            }
+            Val::Float(best_f)
+        }
+        _ => Val::Null,
+    }
+}
+
 /// `&str`-keyed variant of `lookup_field_cached`; ptr-eq shortcut is skipped
 /// (caller doesn't hold an `Arc<str>`), so the hit path is byte-eq only.
 #[inline]
@@ -4513,6 +4633,20 @@ impl VM {
         // Lambda methods — VM handles iteration, running sub-programs per item
         if call.method.is_lambda_method() {
             return self.exec_lambda_method(recv, call, env);
+        }
+
+        // Typed-numeric aggregate fast-path: bare `.sum()/.min()/.max()/.avg()`
+        // on an array.  Skips registry dispatch + `collect_nums` extra Vec.
+        if call.sub_progs.is_empty() && call.orig_args.is_empty() {
+            if let Val::Arr(a) = &recv {
+                match call.method {
+                    BuiltinMethod::Sum => return Ok(agg_sum_typed(a)),
+                    BuiltinMethod::Avg => return Ok(agg_avg_typed(a)),
+                    BuiltinMethod::Min => return Ok(agg_minmax_typed(a, false)),
+                    BuiltinMethod::Max => return Ok(agg_minmax_typed(a, true)),
+                    _ => {}
+                }
+            }
         }
 
         // Value methods — delegate to the existing dispatch with orig_args
