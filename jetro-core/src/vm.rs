@@ -2816,6 +2816,19 @@ impl VM {
                             continue;
                         }
                     }
+                    // Tree-walker early exit: `$..k.first()` / `$..k!` materialises
+                    // only the first self-first DFS hit.  SIMD byte_chain_exec
+                    // already covers the raw-bytes case; this catches tree-only
+                    // receivers.  Skips pointer-cache population (single-hit
+                    // caller doesn't benefit from storing siblings).
+                    if let Some(next) = ops_slice.get(op_idx + 1) {
+                        if is_first_selector_op(next) {
+                            let hit = find_desc_first(&v, k.as_ref()).unwrap_or(Val::Null);
+                            stack.push(hit);
+                            skip_ahead = 1;
+                            continue;
+                        }
+                    }
                     let mut found = Vec::new();
                     if from_root {
                         let mut prefix = String::new();
@@ -5064,6 +5077,29 @@ fn collect_desc(v: &Val, name: &str, out: &mut Vec<Val>) {
         }
         Val::Arr(a) => { for item in a.as_ref() { collect_desc(item, name, out); } }
         _ => {}
+    }
+}
+
+/// Early-exit variant of `collect_desc`: returns the first self-first DFS
+/// hit for `name`, matching the order that `collect_desc` would produce.
+/// Powers the `$..key.first()` fast path when raw JSON bytes aren't
+/// available (SIMD `byte_chain_exec` handles the raw-bytes case).
+fn find_desc_first(v: &Val, name: &str) -> Option<Val> {
+    match v {
+        Val::Obj(m) => {
+            if let Some(v) = m.get(name) { return Some(v.clone()); }
+            for child in m.values() {
+                if let Some(hit) = find_desc_first(child, name) { return Some(hit); }
+            }
+            None
+        }
+        Val::Arr(a) => {
+            for item in a.as_ref() {
+                if let Some(hit) = find_desc_first(item, name) { return Some(hit); }
+            }
+            None
+        }
+        _ => None,
     }
 }
 

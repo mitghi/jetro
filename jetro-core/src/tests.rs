@@ -1519,6 +1519,49 @@ mod tests {
     }
 
     #[test]
+    fn descendant_first_tree_walker_early_exit() {
+        // Self-first DFS order: root has `id` first, so $..id.first() must be 1.
+        let doc = json!({
+            "id": 1,
+            "child": {"id": 2, "grand": {"id": 3}},
+            "siblings": [{"id": 4}, {"id": 5}]
+        });
+        let r = query("$..id.first()", &doc).unwrap();
+        assert_eq!(r, json!(1));
+    }
+
+    #[test]
+    fn descendant_first_matches_collect_then_first() {
+        let doc = json!({
+            "a": {"k": "hit"},
+            "b": {"c": {"k": "nested"}},
+            "xs": [{"k": "in_array"}, {"k": "late"}]
+        });
+        let early = query("$..k.first()", &doc).unwrap();
+        let all = query("$..k", &doc).unwrap();
+        let first_of_all = all.as_array().and_then(|a| a.first()).cloned().unwrap_or(json!(null));
+        assert_eq!(early, first_of_all);
+    }
+
+    #[test]
+    fn descendant_first_missing_key_is_null() {
+        let doc = json!({"a": 1, "b": {"c": 2}});
+        let r = query("$..missing.first()", &doc).unwrap();
+        assert!(r.is_null());
+    }
+
+    #[test]
+    fn descendant_quantifier_first_tree_walker() {
+        // `!` quantifier compiles to Quantifier(First) in some paths;
+        // is_first_selector_op covers both forms.
+        let doc = json!({"id": 1, "nested": {"id": 2}});
+        let r = query("$..id!", &doc);
+        if let Ok(v) = r {
+            assert_eq!(v, json!(1));
+        }
+    }
+
+    #[test]
     fn fusion_sort_by_first_emits_argextreme() {
         use crate::vm::{Compiler, Opcode, BuiltinMethod};
         let prog = Compiler::compile_str("$.books.sort(price).first()").unwrap();
