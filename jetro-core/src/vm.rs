@@ -3595,6 +3595,7 @@ impl VM {
                     let n: &str = needle.as_ref();
                     let w: &str = with.as_ref();
                     let nlen = n.len();
+                    let wlen = w.len();
                     let mut out_vec: Vec<Val> = match &v {
                         Val::Arr(a) => Vec::with_capacity(a.len()),
                         _ => Vec::new(),
@@ -3603,27 +3604,62 @@ impl VM {
                         for item in a.iter() {
                             if let Val::Str(s) = item {
                                 let src = s.as_ref();
-                                // Single-pass: walk match_indices once, write
-                                // into a heuristically-sized buffer.  When the
-                                // first scan finds no hit, share the parent Arc.
                                 let Some(first_idx) = src.find(n) else {
                                     out_vec.push(Val::Str(s.clone()));
                                     continue;
                                 };
-                                let mut buf = String::with_capacity(src.len() + 8);
-                                buf.push_str(&src[..first_idx]);
-                                buf.push_str(w);
-                                let mut last_end = first_idx + nlen;
-                                if *all {
-                                    while let Some(idx) = src[last_end..].find(n) {
-                                        let abs = last_end + idx;
-                                        buf.push_str(&src[last_end..abs]);
-                                        buf.push_str(w);
-                                        last_end = abs + nlen;
+                                // Two-pass: (1) count hits to compute exact
+                                // size, (2) allocate Arc<str> directly with
+                                // new_uninit_slice and write bytes once —
+                                // avoids intermediate String alloc + copy
+                                // that Arc::<str>::from(String) would do.
+                                let hit_count = if *all {
+                                    let mut c: usize = 1;
+                                    let mut pos = first_idx + nlen;
+                                    while let Some(i) = src[pos..].find(n) {
+                                        c += 1;
+                                        pos += i + nlen;
                                     }
+                                    c
+                                } else { 1 };
+                                let out_len = src.len() + hit_count * wlen - hit_count * nlen;
+                                let mut arc = Arc::<[u8]>::new_uninit_slice(out_len);
+                                // SAFETY: unique new allocation; no other refs exist yet.
+                                let slot = Arc::get_mut(&mut arc).unwrap();
+                                let src_b = src.as_bytes();
+                                let w_b = w.as_bytes();
+                                let mut widx = 0usize;
+                                // Write prefix up to first hit.
+                                // SAFETY: MaybeUninit<u8> has same layout as u8.
+                                unsafe {
+                                    let dst = slot.as_mut_ptr() as *mut u8;
+                                    std::ptr::copy_nonoverlapping(src_b.as_ptr(), dst, first_idx);
+                                    widx += first_idx;
+                                    std::ptr::copy_nonoverlapping(w_b.as_ptr(), dst.add(widx), wlen);
+                                    widx += wlen;
+                                    let mut last_end = first_idx + nlen;
+                                    if *all {
+                                        while let Some(i) = src[last_end..].find(n) {
+                                            let abs = last_end + i;
+                                            let len = abs - last_end;
+                                            std::ptr::copy_nonoverlapping(src_b.as_ptr().add(last_end), dst.add(widx), len);
+                                            widx += len;
+                                            std::ptr::copy_nonoverlapping(w_b.as_ptr(), dst.add(widx), wlen);
+                                            widx += wlen;
+                                            last_end = abs + nlen;
+                                        }
+                                    }
+                                    let tail = src_b.len() - last_end;
+                                    std::ptr::copy_nonoverlapping(src_b.as_ptr().add(last_end), dst.add(widx), tail);
                                 }
-                                buf.push_str(&src[last_end..]);
-                                out_vec.push(Val::Str(Arc::<str>::from(buf)));
+                                // SAFETY: all `out_len` bytes are initialised above; the
+                                // bytes are valid UTF-8 because src is valid UTF-8 and
+                                // every substitution inserts a valid UTF-8 `w`.
+                                let arc_bytes: Arc<[u8]> = unsafe { arc.assume_init() };
+                                let arc_str: Arc<str> = unsafe {
+                                    Arc::from_raw(Arc::into_raw(arc_bytes) as *const str)
+                                };
+                                out_vec.push(Val::Str(arc_str));
                             } else {
                                 out_vec.push(item.clone());
                             }
