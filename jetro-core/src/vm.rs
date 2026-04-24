@@ -866,9 +866,10 @@ fn lookup_field_cached<'a>(
             }
         }
     }
-    let v = m.get(k.as_ref());
-    *cached = m.get_index_of(k.as_ref());
-    v
+    match m.get_full(k.as_ref()) {
+        Some((i, _, v)) => { *cached = Some(i); Some(v) }
+        None => { *cached = None; None }
+    }
 }
 
 // ── Variable context (compile-time) ──────────────────────────────────────────
