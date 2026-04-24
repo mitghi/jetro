@@ -3594,6 +3594,7 @@ impl VM {
                     let v = pop!(stack);
                     let n: &str = needle.as_ref();
                     let w: &str = with.as_ref();
+                    let nlen = n.len();
                     let mut out_vec: Vec<Val> = match &v {
                         Val::Arr(a) => Vec::with_capacity(a.len()),
                         _ => Vec::new(),
@@ -3601,13 +3602,28 @@ impl VM {
                     if let Val::Arr(a) = &v {
                         for item in a.iter() {
                             if let Val::Str(s) = item {
-                                if !s.contains(n) {
+                                let src = s.as_ref();
+                                // Single-pass: walk match_indices once, write
+                                // into a heuristically-sized buffer.  When the
+                                // first scan finds no hit, share the parent Arc.
+                                let Some(first_idx) = src.find(n) else {
                                     out_vec.push(Val::Str(s.clone()));
-                                } else if *all {
-                                    out_vec.push(Val::Str(Arc::<str>::from(s.replace(n, w))));
-                                } else {
-                                    out_vec.push(Val::Str(Arc::<str>::from(s.replacen(n, w, 1))));
+                                    continue;
+                                };
+                                let mut buf = String::with_capacity(src.len() + 8);
+                                buf.push_str(&src[..first_idx]);
+                                buf.push_str(w);
+                                let mut last_end = first_idx + nlen;
+                                if *all {
+                                    while let Some(idx) = src[last_end..].find(n) {
+                                        let abs = last_end + idx;
+                                        buf.push_str(&src[last_end..abs]);
+                                        buf.push_str(w);
+                                        last_end = abs + nlen;
+                                    }
                                 }
+                                buf.push_str(&src[last_end..]);
+                                out_vec.push(Val::Str(Arc::<str>::from(buf)));
                             } else {
                                 out_vec.push(item.clone());
                             }
