@@ -398,6 +398,11 @@ pub enum Opcode {
     /// sum-of-segment-char-lengths. Uses byte-scan (memchr/memmem) for ASCII
     /// source; falls back to char counting for Unicode.
     MapSplitLenSum { sep: Arc<str> },
+    /// Fused `map({k1, k2, ..})` — map over an array projecting each object
+    /// to a fixed set of `Short`-form fields (bare identifiers). Avoids the
+    /// nested `MakeObj` dispatch per row and hoists key `Arc<str>` clones
+    /// outside the inner loop. Uses one IC slot per key for shape lookup.
+    MapProject { keys: Arc<[Arc<str>]>, ics: Arc<[std::sync::atomic::AtomicU64]> },
     /// Fused `map(@.split(sep).count())` — byte-scan per row, returns Int;
     /// zero per-row allocations.
     MapSplitCount { sep: Arc<str> },
@@ -1798,6 +1803,31 @@ impl Compiler {
                     if let Some(o) = fused {
                         out.push(o);
                         continue;
+                    }
+                }
+            }
+            // map({k1, k2, ..}) with all `Short` entries → MapProject
+            if let Opcode::CallMethod(a) = &op {
+                if a.method == BuiltinMethod::Map && a.sub_progs.len() == 1 {
+                    let body = &a.sub_progs[0].ops;
+                    if let [Opcode::MakeObj(entries)] = &body[..] {
+                        let all_short: Option<Vec<Arc<str>>> = entries.iter()
+                            .map(|e| match e {
+                                CompiledObjEntry::Short { name, .. } => Some(name.clone()),
+                                _ => None,
+                            })
+                            .collect();
+                        if let Some(keys) = all_short {
+                            if !keys.is_empty() {
+                                let ics: Vec<std::sync::atomic::AtomicU64> =
+                                    keys.iter().map(|_| std::sync::atomic::AtomicU64::new(0)).collect();
+                                out.push(Opcode::MapProject {
+                                    keys: keys.into(),
+                                    ics: ics.into(),
+                                });
+                                continue;
+                            }
+                        }
                     }
                 }
             }
@@ -6166,6 +6196,33 @@ impl VM {
                     } else {
                         stack.push(self.exec_call(recv, call, env)?);
                     }
+                }
+
+                Opcode::MapProject { keys, ics } => {
+                    let recv = pop!(stack);
+                    let recv = if matches!(&recv, Val::StrVec(_) | Val::IntVec(_) | Val::FloatVec(_)) {
+                        recv.into_arr()
+                    } else { recv };
+                    let out_vec: Vec<Val> = if let Val::Arr(a) = &recv {
+                        let mut out = Vec::with_capacity(a.len());
+                        for item in a.iter() {
+                            if let Val::Obj(m) = item {
+                                let mut map: IndexMap<Arc<str>, Val> =
+                                    IndexMap::with_capacity(keys.len());
+                                for (i, k) in keys.iter().enumerate() {
+                                    let v = ic_get_field(m, k.as_ref(), &ics[i]);
+                                    if !v.is_null() {
+                                        map.insert(k.clone(), v);
+                                    }
+                                }
+                                out.push(Val::obj(map));
+                            } else {
+                                out.push(Val::Null);
+                            }
+                        }
+                        out
+                    } else { Vec::new() };
+                    stack.push(Val::arr(out_vec));
                 }
 
                 // ── Construction ──────────────────────────────────────────────

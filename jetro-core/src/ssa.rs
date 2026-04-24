@@ -144,6 +144,7 @@ fn op_arity(op: &Opcode) -> Arity {
             | Opcode::MapLowerReplaceLit { .. }
             | Opcode::MapStrConcat { .. }
             | Opcode::MapSplitLenSum { .. }
+            | Opcode::MapProject { .. }
             | Opcode::MapSplitCount { .. }
             | Opcode::MapSplitFirst { .. }
             | Opcode::MapSplitNth   { .. }
