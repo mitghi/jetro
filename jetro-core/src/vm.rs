@@ -828,9 +828,11 @@ fn group_by_field(recv: &Val, k: &str) -> Val {
         _ => return Val::obj(indexmap::IndexMap::new()),
     };
     let mut out: indexmap::IndexMap<Arc<str>, Vec<Val>> = indexmap::IndexMap::with_capacity(16);
+    let mut cached: Option<usize> = None;
     for item in a.iter() {
         let key = if let Val::Obj(m) = item {
-            match m.get(k) {
+            let v = lookup_field_by_str_cached(m, k, &mut cached);
+            match v {
                 Some(Val::Str(s)) => s.clone(),
                 Some(Val::Int(n)) => Arc::from(n.to_string()),
                 Some(Val::Float(x)) => Arc::from(x.to_string()),
@@ -867,6 +869,27 @@ fn lookup_field_cached<'a>(
         }
     }
     match m.get_full(k.as_ref()) {
+        Some((i, _, v)) => { *cached = Some(i); Some(v) }
+        None => { *cached = None; None }
+    }
+}
+
+/// `&str`-keyed variant of `lookup_field_cached`; ptr-eq shortcut is skipped
+/// (caller doesn't hold an `Arc<str>`), so the hit path is byte-eq only.
+#[inline]
+fn lookup_field_by_str_cached<'a>(
+    m: &'a indexmap::IndexMap<Arc<str>, Val>,
+    k: &str,
+    cached: &mut Option<usize>,
+) -> Option<&'a Val> {
+    if let Some(i) = *cached {
+        if let Some((ki, vi)) = m.get_index(i) {
+            if ki.as_ref() == k {
+                return Some(vi);
+            }
+        }
+    }
+    match m.get_full(k) {
         Some((i, _, v)) => { *cached = Some(i); Some(v) }
         None => { *cached = None; None }
     }
