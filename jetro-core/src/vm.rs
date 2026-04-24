@@ -4788,17 +4788,24 @@ impl VM {
                         Val::StrVec(a) => {
                             let mut out: Vec<Arc<str>> = Vec::with_capacity(a.len());
                             for s in a.iter() {
-                                // ASCII fast-path: all-ASCII → tight byte loop; else
-                                // fall back to to_uppercase().
+                                // ASCII fast-path: scan for any lowercase; if none,
+                                // reuse input Arc (no-alloc). Otherwise clone+mutate
+                                // in a Vec<u8>, hand ownership to Arc<str> via String.
                                 let b = s.as_bytes();
                                 if b.is_ascii() {
-                                    let mut v = b.to_vec();
-                                    for c in v.iter_mut() {
-                                        if c.is_ascii_lowercase() { *c -= 32; }
+                                    if !b.iter().any(|c| c.is_ascii_lowercase()) {
+                                        out.push(s.clone());
+                                    } else {
+                                        let mut v = b.to_vec();
+                                        for c in v.iter_mut() {
+                                            if c.is_ascii_lowercase() { *c -= 32; }
+                                        }
+                                        // SAFETY: v was ASCII in, byte-shifted within ASCII → still UTF-8.
+                                        let owned = unsafe { String::from_utf8_unchecked(v) };
+                                        out.push(Arc::<str>::from(owned));
                                     }
-                                    out.push(Arc::from(String::from_utf8(v).unwrap().as_str()));
                                 } else {
-                                    out.push(Arc::from(s.to_uppercase().as_str()));
+                                    out.push(Arc::<str>::from(s.to_uppercase()));
                                 }
                             }
                             stack.push(Val::str_vec(out));
@@ -4807,14 +4814,14 @@ impl VM {
                             let mut out: Vec<Val> = Vec::with_capacity(a.len());
                             for item in a.iter() {
                                 if let Val::Str(s) = item {
-                                    out.push(Val::Str(Arc::from(s.to_uppercase().as_str())));
+                                    out.push(Val::Str(Arc::<str>::from(s.to_uppercase())));
                                 } else {
                                     out.push(Val::Null);
                                 }
                             }
                             stack.push(Val::arr(out));
                         }
-                        Val::Str(s) => stack.push(Val::Str(Arc::from(s.to_uppercase().as_str()))),
+                        Val::Str(s) => stack.push(Val::Str(Arc::<str>::from(s.to_uppercase()))),
                         _ => stack.push(recv),
                     }
                 }
@@ -4826,13 +4833,18 @@ impl VM {
                             for s in a.iter() {
                                 let b = s.as_bytes();
                                 if b.is_ascii() {
-                                    let mut v = b.to_vec();
-                                    for c in v.iter_mut() {
-                                        if c.is_ascii_uppercase() { *c += 32; }
+                                    if !b.iter().any(|c| c.is_ascii_uppercase()) {
+                                        out.push(s.clone());
+                                    } else {
+                                        let mut v = b.to_vec();
+                                        for c in v.iter_mut() {
+                                            if c.is_ascii_uppercase() { *c += 32; }
+                                        }
+                                        let owned = unsafe { String::from_utf8_unchecked(v) };
+                                        out.push(Arc::<str>::from(owned));
                                     }
-                                    out.push(Arc::from(String::from_utf8(v).unwrap().as_str()));
                                 } else {
-                                    out.push(Arc::from(s.to_lowercase().as_str()));
+                                    out.push(Arc::<str>::from(s.to_lowercase()));
                                 }
                             }
                             stack.push(Val::str_vec(out));
@@ -4841,14 +4853,14 @@ impl VM {
                             let mut out: Vec<Val> = Vec::with_capacity(a.len());
                             for item in a.iter() {
                                 if let Val::Str(s) = item {
-                                    out.push(Val::Str(Arc::from(s.to_lowercase().as_str())));
+                                    out.push(Val::Str(Arc::<str>::from(s.to_lowercase())));
                                 } else {
                                     out.push(Val::Null);
                                 }
                             }
                             stack.push(Val::arr(out));
                         }
-                        Val::Str(s) => stack.push(Val::Str(Arc::from(s.to_lowercase().as_str()))),
+                        Val::Str(s) => stack.push(Val::Str(Arc::<str>::from(s.to_lowercase()))),
                         _ => stack.push(recv),
                     }
                 }
@@ -4871,14 +4883,26 @@ impl VM {
                             let mut out: Vec<Val> = Vec::with_capacity(a.len());
                             for item in a.iter() {
                                 if let Val::Str(s) = item {
-                                    out.push(Val::Str(Arc::from(s.trim())));
+                                    let t = s.trim();
+                                    if t.len() == s.len() {
+                                        out.push(Val::Str(s.clone()));
+                                    } else {
+                                        out.push(Val::Str(Arc::from(t)));
+                                    }
                                 } else {
                                     out.push(Val::Null);
                                 }
                             }
                             stack.push(Val::arr(out));
                         }
-                        Val::Str(s) => stack.push(Val::Str(Arc::from(s.trim()))),
+                        Val::Str(s) => {
+                            let t = s.trim();
+                            if t.len() == s.len() {
+                                stack.push(Val::Str(s.clone()));
+                            } else {
+                                stack.push(Val::Str(Arc::from(t)));
+                            }
+                        }
                         _ => stack.push(recv),
                     }
                 }
