@@ -587,21 +587,30 @@ fn apply_patch_step(
             Ok(PatchResult::Replace(Val::arr(a)))
         }
         PathStep::Wildcard => {
-            let arr = v.into_vec().ok_or_else(|| EvalError("patch [*]: expected array".into()))?;
-            let mut out = Vec::with_capacity(arr.len());
-            for item in arr {
+            let mut arr = v.into_vec().ok_or_else(|| EvalError("patch [*]: expected array".into()))?;
+            // Two-pointer in-place compact: read each slot, mutate/skip,
+            // write kept results back at `write_idx`.  Reuses `arr`'s
+            // allocation instead of building a fresh Vec.
+            let mut write_idx = 0usize;
+            for read_idx in 0..arr.len() {
+                let item = std::mem::replace(&mut arr[read_idx], Val::Null);
                 match apply_patch_step(item, path, i+1, val_expr, env)? {
                     PatchResult::Delete => {}
-                    PatchResult::Replace(nv) => out.push(nv),
+                    PatchResult::Replace(nv) => {
+                        arr[write_idx] = nv;
+                        write_idx += 1;
+                    }
                 }
             }
-            Ok(PatchResult::Replace(Val::arr(out)))
+            arr.truncate(write_idx);
+            Ok(PatchResult::Replace(Val::arr(arr)))
         }
         PathStep::WildcardFilter(pred) => {
-            let arr = v.into_vec().ok_or_else(|| EvalError("patch [* if]: expected array".into()))?;
-            let mut out = Vec::with_capacity(arr.len());
+            let mut arr = v.into_vec().ok_or_else(|| EvalError("patch [* if]: expected array".into()))?;
             let mut env_mut = env.clone();
-            for item in arr {
+            let mut write_idx = 0usize;
+            for read_idx in 0..arr.len() {
+                let item = std::mem::replace(&mut arr[read_idx], Val::Null);
                 let frame = env_mut.push_lam(None, item.clone());
                 let include = match eval(pred, &env_mut) {
                     Ok(v)  => is_truthy(&v),
@@ -611,13 +620,18 @@ fn apply_patch_step(
                 if include {
                     match apply_patch_step(item, path, i+1, val_expr, env)? {
                         PatchResult::Delete => {}
-                        PatchResult::Replace(nv) => out.push(nv),
+                        PatchResult::Replace(nv) => {
+                            arr[write_idx] = nv;
+                            write_idx += 1;
+                        }
                     }
                 } else {
-                    out.push(item);
+                    arr[write_idx] = item;
+                    write_idx += 1;
                 }
             }
-            Ok(PatchResult::Replace(Val::arr(out)))
+            arr.truncate(write_idx);
+            Ok(PatchResult::Replace(Val::arr(arr)))
         }
         PathStep::Descendant(name) => {
             let v = descend_apply_patch(v, name, path, i, val_expr, env)?;
@@ -642,15 +656,20 @@ fn descend_apply_patch(
     match v {
         Val::Obj(m) => {
             let mut map = Arc::try_unwrap(m).unwrap_or_else(|m| (*m).clone());
-            // Recurse into children first, using original values.
-            let keys: Vec<Arc<str>> = map.keys().cloned().collect();
-            for k in keys {
-                let child = map.shift_remove(k.as_ref()).unwrap_or(Val::Null);
+            // Recurse into children first, using original values.  In-place
+            // slot swap instead of shift_remove+insert (which is O(n) per
+            // key → O(n²) per map on wide objects).
+            let n = map.len();
+            for idx in 0..n {
+                let child = if let Some((_, v)) = map.get_index_mut(idx) {
+                    std::mem::replace(v, Val::Null)
+                } else { continue };
                 let replaced = descend_apply_patch(child, name, path, i, val_expr, env)?;
-                map.insert(k, replaced);
+                if let Some((_, slot)) = map.get_index_mut(idx) { *slot = replaced; }
             }
             // Apply at this level.
-            if let Some(existing) = map.get(name).cloned() {
+            if map.contains_key(name) {
+                let existing = map.get(name).cloned().unwrap_or(Val::Null);
                 let r = apply_patch_step(existing, path, i + 1, val_expr, env)?;
                 match r {
                     PatchResult::Delete      => { map.shift_remove(name); }
@@ -660,11 +679,12 @@ fn descend_apply_patch(
             Ok(Val::obj(map))
         }
         Val::Arr(a) => {
-            let vec = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
-            let out: Result<Vec<Val>, EvalError> = vec.into_iter()
-                .map(|el| descend_apply_patch(el, name, path, i, val_expr, env))
-                .collect();
-            Ok(Val::arr(out?))
+            let mut vec = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
+            for slot in vec.iter_mut() {
+                let old = std::mem::replace(slot, Val::Null);
+                *slot = descend_apply_patch(old, name, path, i, val_expr, env)?;
+            }
+            Ok(Val::arr(vec))
         }
         other => Ok(other),
     }
