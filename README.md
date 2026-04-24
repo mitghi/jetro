@@ -4,7 +4,7 @@
 [![docs.rs](https://img.shields.io/badge/docs-jetro-blue)](https://docs.rs/jetro)
 [![license](https://img.shields.io/crates/l/jetro.svg)](LICENSE)
 
-**Query, transform, and patch JSON at native speed — with a language that fits
+**Query, transform, and patch JSON at (almost) native speed — with a language that fits
 on a postcard.**
 
 Jetro compiles a compact expression language to a caching bytecode VM backed
@@ -55,7 +55,7 @@ assert_eq!(titles, json!(["Dune"]));
   `StrSliceVec` / `ObjVec` run homogeneous arrays as packed vectors,
   not tagged unions — tight loops beat enum dispatch.
 
-- **SIMD byte-scan for deep queries.** `$..id`, `$..k == lit`, chained
+- **SIMD byte-scan for deep-search queries.** `$..id`, `$..k == lit`, chained
   `$..a..b..c` — memchr-accelerated scans over raw document bytes
   when it beats walking the tree.
 
@@ -63,7 +63,7 @@ assert_eq!(titles, json!(["Dune"]));
   friends return borrowed slices into the parent `Arc<str>` — no
   per-row allocation on the hot path.
 
-- **Safe and honest.** A tree-walker reference implementation runs
+- **Safety.** A tree-walker reference implementation runs
   every query the VM does; 540+ unit tests, Miri-audited `unsafe`
   invariants ([SAFETY.md](SAFETY.md)). Every optimization is a
   specialization on the same semantics.
@@ -101,6 +101,8 @@ One-shot without the VM:
 let result = jetro::query("$.store.books.len()", &doc)?;
 ```
 
+Give [Jetro CLI](https://github.com/mitghi/jetrocli) a try for an interactive experience.
+
 ---
 
 ## Benchmarks
@@ -131,9 +133,6 @@ the Go standard library** on string-heavy workloads — for example, on
 `upper + trim` jetro is about 1.3× faster than Go, on `split + reverse +
 join` roughly 4× faster, and on `replace_all` about 3.8× faster. Parity or
 better on the simple scans, with the string-method fusions pulling ahead.
-
-542 tests pass on every release. See [CHANGELOG.md](CHANGELOG.md) for the
-full v0.4.0 bench delta.
 
 ---
 
