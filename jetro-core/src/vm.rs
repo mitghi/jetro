@@ -394,6 +394,10 @@ pub enum Opcode {
     /// `Arc<str>` with one uninit slice + copy_nonoverlapping. Either
     /// prefix or suffix may be empty for the 2-operand forms.
     MapStrConcat { prefix: Arc<str>, suffix: Arc<str> },
+    /// Fused `map(@.split(sep).map(len).sum())` — emits IntVec of per-row
+    /// sum-of-segment-char-lengths. Uses byte-scan (memchr/memmem) for ASCII
+    /// source; falls back to char counting for Unicode.
+    MapSplitLenSum { sep: Arc<str> },
     /// Fused `map(@.split(sep).count())` — byte-scan per row, returns Int;
     /// zero per-row allocations.
     MapSplitCount { sep: Arc<str> },
@@ -1789,6 +1793,29 @@ impl Compiler {
                                 }
                                 _ => None,
                             }
+                        } else { None }
+                    } else { None };
+                    if let Some(o) = fused {
+                        out.push(o);
+                        continue;
+                    }
+                }
+            }
+            // map(@.split(sep).map(len).sum()) → MapSplitLenSum { sep }
+            // Body shape (post pass_field_specialise rewrote map(len) as
+            // MapFieldSum("len")):
+            //   [PushCurrent, CallMethod(Split, [PushStr(sep)]), MapFieldSum("len")]
+            if let Opcode::CallMethod(a) = &op {
+                if a.method == BuiltinMethod::Map && a.sub_progs.len() == 1 {
+                    let body = &a.sub_progs[0].ops;
+                    let fused = if let [Opcode::PushCurrent,
+                                         Opcode::CallMethod(split),
+                                         Opcode::MapFieldSum(field)] = &body[..] {
+                        if split.method == BuiltinMethod::Split
+                           && split.sub_progs.len() == 1
+                           && field.as_ref() == "len" {
+                            let sep_opt = trivial_push_str(&split.sub_progs[0].ops);
+                            sep_opt.map(|sep| Opcode::MapSplitLenSum { sep })
                         } else { None }
                     } else { None };
                     if let Some(o) = fused {
@@ -4171,6 +4198,78 @@ impl VM {
                         }
                     }
                     stack.push(Val::arr(out_vec));
+                }
+                Opcode::MapSplitLenSum { sep } => {
+                    let v = pop!(stack);
+                    let v = if matches!(&v, Val::StrVec(_)) { v.into_arr() } else { v };
+                    let sep_b = sep.as_bytes();
+                    let slen = sep_b.len();
+                    let sep_chars = sep.chars().count() as i64;
+                    let mut out: Vec<i64> = match &v {
+                        Val::Arr(a) => Vec::with_capacity(a.len()),
+                        _ => Vec::new(),
+                    };
+                    if let Val::Arr(a) = &v {
+                        for item in a.iter() {
+                            if let Val::Str(s) = item {
+                                let src = s.as_ref();
+                                let row: i64 = if slen == 0 {
+                                    // split("") yields one segment per char.
+                                    // Each segment is one char, count = char_count.
+                                    // Sum of lens = char_count. But split("") also
+                                    // yields an empty prefix + per char + empty
+                                    // suffix; match existing split(.).count()
+                                    // semantics by falling back for empty sep.
+                                    0
+                                } else if src.is_ascii() && slen == 1 {
+                                    // ASCII 1-byte sep: sum(segment_byte_len)
+                                    //   = src.len() - hits
+                                    let byte = sep_b[0];
+                                    let hits = memchr::memchr_iter(byte, src.as_bytes())
+                                                 .count() as i64;
+                                    src.len() as i64 - hits
+                                } else if src.is_ascii() {
+                                    // Multi-byte ASCII sep.
+                                    let hits = memchr::memmem::find_iter(src.as_bytes(), sep_b)
+                                                 .count() as i64;
+                                    src.len() as i64 - hits * slen as i64
+                                } else {
+                                    // Unicode source: count source chars, then
+                                    // subtract hits * sep_chars.
+                                    let src_chars = src.chars().count() as i64;
+                                    let hits = if slen == 1 {
+                                        memchr::memchr_iter(sep_b[0], src.as_bytes())
+                                            .count() as i64
+                                    } else {
+                                        memchr::memmem::find_iter(src.as_bytes(), sep_b)
+                                            .count() as i64
+                                    };
+                                    src_chars - hits * sep_chars
+                                };
+                                out.push(row);
+                            } else {
+                                out.push(0);
+                            }
+                        }
+                    }
+                    // Fallback for empty sep: recompute via generic path.
+                    if slen == 0 {
+                        // Classic split("") behavior = char count per seg +
+                        // extra; match non-fused by computing via char count.
+                        out.clear();
+                        if let Val::Arr(a) = &v {
+                            for item in a.iter() {
+                                if let Val::Str(s) = item {
+                                    // `split("").count()` is chars+1; sum of
+                                    // individual char lens is just char count.
+                                    out.push(s.chars().count() as i64);
+                                } else {
+                                    out.push(0);
+                                }
+                            }
+                        }
+                    }
+                    stack.push(Val::int_vec(out));
                 }
                 Opcode::MapSplitCountSum { sep } => {
                     let v = pop!(stack);

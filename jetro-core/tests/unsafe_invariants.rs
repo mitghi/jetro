@@ -127,6 +127,36 @@ fn map_upper_replace_no_hit() {
 }
 
 #[test]
+fn map_split_len_sum_single_byte() {
+    let doc = json!(["a-bb-ccc", "x", "foo-bar"]);
+    let out = Jetro::new(doc)
+        .collect_val(r#"$.map(@.split('-').map(len).sum())"#).unwrap();
+    // "a-bb-ccc".split("-") = [a,bb,ccc] lens=[1,2,3] sum=6
+    // "x".split("-") = [x] sum=1
+    // "foo-bar".split("-") = [foo,bar] sum=6
+    assert_eq!(out.to_string(), "[6,1,6]");
+}
+
+#[test]
+fn map_split_len_sum_multi_byte_sep() {
+    let doc = json!(["ab--cd", "e--f--g"]);
+    let out = Jetro::new(doc)
+        .collect_val(r#"$.map(@.split('--').map(len).sum())"#).unwrap();
+    // "ab--cd" → [ab,cd] = [2,2] = 4
+    // "e--f--g" → [e,f,g] = [1,1,1] = 3
+    assert_eq!(out.to_string(), "[4,3]");
+}
+
+#[test]
+fn map_split_len_sum_unicode() {
+    let doc = json!(["é-π-ω"]);
+    let out = Jetro::new(doc)
+        .collect_val(r#"$.map(@.split('-').map(len).sum())"#).unwrap();
+    // 3 segments, each is 1 char → sum = 3
+    assert_eq!(out.to_string(), "[3]");
+}
+
+#[test]
 fn map_str_concat_prefix_suffix() {
     let doc = json!(["a", "bb", ""]);
     let out = Jetro::new(doc)
