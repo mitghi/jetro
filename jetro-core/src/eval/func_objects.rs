@@ -82,31 +82,58 @@ fn pick_arg(a: &Arg, env: &Env) -> Result<Option<(Arc<str>, String)>, EvalError>
     }
 }
 
-fn pick_one(obj: &IndexMap<Arc<str>, Val>, resolved: &[(Arc<str>, String)]) -> IndexMap<Arc<str>, Val> {
+enum PickKind {
+    Field,
+    Path(Vec<PathSeg>),
+}
+
+fn pick_one(
+    obj: &IndexMap<Arc<str>, Val>,
+    resolved: &[(Arc<str>, String, PickKind)],
+    wrapped: &Val,
+) -> IndexMap<Arc<str>, Val> {
     let mut out = IndexMap::with_capacity(resolved.len());
-    for (out_key, src) in resolved {
-        if src.contains('.') || src.contains('[') {
-            let segs = parse_path_segs(src);
-            let v = get_path_impl(&Val::Obj(Arc::new(obj.clone())), &segs);
-            if !v.is_null() { out.insert(out_key.clone(), v); }
-        } else if let Some(v) = obj.get(src.as_str()) {
-            out.insert(out_key.clone(), v.clone());
+    for (out_key, src, kind) in resolved {
+        match kind {
+            PickKind::Field => {
+                if let Some(v) = obj.get(src.as_str()) {
+                    out.insert(out_key.clone(), v.clone());
+                }
+            }
+            PickKind::Path(segs) => {
+                let v = get_path_impl(wrapped, segs);
+                if !v.is_null() { out.insert(out_key.clone(), v); }
+            }
         }
     }
     out
 }
 
 pub fn pick(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-    let mut resolved = Vec::with_capacity(args.len());
+    let mut resolved: Vec<(Arc<str>, String, PickKind)> = Vec::with_capacity(args.len());
     for a in args {
-        if let Some(p) = pick_arg(a, env)? { resolved.push(p); }
+        if let Some((k, s)) = pick_arg(a, env)? {
+            let kind = if s.contains('.') || s.contains('[') {
+                PickKind::Path(parse_path_segs(&s))
+            } else {
+                PickKind::Field
+            };
+            resolved.push((k, s, kind));
+        }
     }
+    let has_path = resolved.iter().any(|(_, _, k)| matches!(k, PickKind::Path(_)));
     match recv {
-        Val::Obj(m) => Ok(Val::obj(pick_one(&m, &resolved))),
+        Val::Obj(m) => {
+            let wrapped = if has_path { Val::Obj(m.clone()) } else { Val::Null };
+            Ok(Val::obj(pick_one(&m, &resolved, &wrapped)))
+        }
         Val::Arr(a) => {
             let out: Vec<Val> = a.iter().map(|el| match el {
-                Val::Obj(m) => Val::obj(pick_one(m, &resolved)),
-                other       => other.clone(),
+                Val::Obj(m) => {
+                    let wrapped = if has_path { Val::Obj(m.clone()) } else { Val::Null };
+                    Val::obj(pick_one(m, &resolved, &wrapped))
+                }
+                other => other.clone(),
             }).collect();
             Ok(Val::arr(out))
         }
