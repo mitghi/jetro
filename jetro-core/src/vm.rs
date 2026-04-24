@@ -381,6 +381,14 @@ pub enum Opcode {
     /// and replacement inlined; skips per-item sub_prog evaluation for arg
     /// strings.  `all=true` means replace every occurrence, else only first.
     MapReplaceLit { needle: Arc<str>, with: Arc<str>, all: bool },
+    /// Fused `map(@.split(sep).count())` — byte-scan per row, returns Int;
+    /// zero per-row allocations.
+    MapSplitCount { sep: Arc<str> },
+    /// Fused `map(@.split(sep).first())` — first segment only; one Arc per
+    /// row instead of N.
+    MapSplitFirst { sep: Arc<str> },
+    /// Fused `map(@.split(sep).nth(n))` — nth segment; one Arc per row.
+    MapSplitNth { sep: Arc<str>, n: usize },
     /// Fused `map(f).avg()` — evaluates `f` per item, computes mean as float.
     MapAvg(Arc<Program>),
     /// Fused `filter(p).map(f).sum()` — single pass, numeric sum of mapped
@@ -1588,6 +1596,41 @@ impl Compiler {
                                 (Some(needle), Some(with)) => {
                                     let all = inner.method == BuiltinMethod::ReplaceAll;
                                     Some(Opcode::MapReplaceLit { needle, with, all })
+                                }
+                                _ => None,
+                            }
+                        } else { None }
+                    } else { None };
+                    if let Some(o) = fused {
+                        out.push(o);
+                        continue;
+                    }
+                }
+            }
+            // map(@.split(lit).count()|.first()|.nth(lit)) → MapSplitCount /
+            // MapSplitFirst / MapSplitNth.  Eliminates N per-row Arcs from
+            // split materialisation when the consumer only needs the count
+            // or a single segment.
+            if let Opcode::CallMethod(a) = &op {
+                if a.method == BuiltinMethod::Map && a.sub_progs.len() == 1 {
+                    let body = &a.sub_progs[0].ops;
+                    let fused = if let [Opcode::PushCurrent,
+                                         Opcode::CallMethod(split),
+                                         Opcode::CallMethod(cons)] = &body[..] {
+                        if split.method == BuiltinMethod::Split && split.sub_progs.len() == 1 {
+                            let sep_opt = trivial_push_str(&split.sub_progs[0].ops);
+                            match (sep_opt, cons.method, cons.sub_progs.len()) {
+                                (Some(sep), BuiltinMethod::Count, 0)
+                              | (Some(sep), BuiltinMethod::Len,   0) =>
+                                    Some(Opcode::MapSplitCount { sep }),
+                                (Some(sep), BuiltinMethod::First, 0) =>
+                                    Some(Opcode::MapSplitFirst { sep }),
+                                (Some(sep), BuiltinMethod::Nth,   1) => {
+                                    if let [Opcode::PushInt(n)] = &cons.sub_progs[0].ops[..] {
+                                        if *n >= 0 {
+                                            Some(Opcode::MapSplitNth { sep, n: *n as usize })
+                                        } else { None }
+                                    } else { None }
                                 }
                                 _ => None,
                             }
@@ -3679,6 +3722,120 @@ impl VM {
                         }
                     }
                     stack.push(Val::arr(out_vec));
+                }
+                Opcode::MapSplitCount { sep } => {
+                    let v = pop!(stack);
+                    let sep_b = sep.as_bytes();
+                    let slen = sep_b.len();
+                    let out = if let Val::Arr(a) = &v {
+                        let mut out = Vec::with_capacity(a.len());
+                        for item in a.iter() {
+                            if let Val::Str(s) = item {
+                                let sb = s.as_bytes();
+                                let c = if slen == 0 {
+                                    // str::split("") ≡ char boundary count + 1.
+                                    s.as_ref().chars().count() as i64 + 1
+                                } else {
+                                    let mut c: i64 = 1;
+                                    let mut i = 0usize;
+                                    while i + slen <= sb.len() {
+                                        if &sb[i..i + slen] == sep_b {
+                                            c += 1; i += slen;
+                                        } else { i += 1; }
+                                    }
+                                    c
+                                };
+                                out.push(Val::Int(c));
+                            } else {
+                                out.push(Val::Null);
+                            }
+                        }
+                        Val::arr(out)
+                    } else { Val::arr(Vec::new()) };
+                    stack.push(out);
+                }
+                Opcode::MapSplitFirst { sep } => {
+                    let v = pop!(stack);
+                    let sep_s = sep.as_ref();
+                    let out = if let Val::Arr(a) = &v {
+                        let mut out = Vec::with_capacity(a.len());
+                        for item in a.iter() {
+                            if let Val::Str(s) = item {
+                                let src = s.as_ref();
+                                let seg = if sep_s.is_empty() {
+                                    // str::split("").next() is "".
+                                    ""
+                                } else if let Some(idx) = src.find(sep_s) {
+                                    &src[..idx]
+                                } else {
+                                    src
+                                };
+                                // Full source with no separator → reuse parent Arc.
+                                let arc: Arc<str> = if seg.len() == src.len() {
+                                    s.clone()
+                                } else {
+                                    Arc::<str>::from(seg)
+                                };
+                                out.push(Val::Str(arc));
+                            } else {
+                                out.push(Val::Null);
+                            }
+                        }
+                        Val::arr(out)
+                    } else { Val::arr(Vec::new()) };
+                    stack.push(out);
+                }
+                Opcode::MapSplitNth { sep, n } => {
+                    let v = pop!(stack);
+                    let sep_s = sep.as_ref();
+                    let want = *n;
+                    let out = if let Val::Arr(a) = &v {
+                        let mut out = Vec::with_capacity(a.len());
+                        for item in a.iter() {
+                            if let Val::Str(s) = item {
+                                let src = s.as_ref();
+                                let mut pushed = false;
+                                if sep_s.is_empty() {
+                                    // nth char boundary
+                                    if let Some((i, _)) = src.char_indices().nth(want) {
+                                        let end = src[i..].chars().next().map(|c| i + c.len_utf8()).unwrap_or(i);
+                                        out.push(Val::Str(Arc::<str>::from(&src[i..end])));
+                                        pushed = true;
+                                    }
+                                } else {
+                                    let mut prev = 0usize;
+                                    let mut idx = 0usize;
+                                    let sb = sep_s.as_bytes();
+                                    let slen = sb.len();
+                                    let bytes = src.as_bytes();
+                                    let mut i = 0usize;
+                                    while i + slen <= bytes.len() {
+                                        if &bytes[i..i + slen] == sb {
+                                            if idx == want {
+                                                out.push(Val::Str(Arc::<str>::from(&src[prev..i])));
+                                                pushed = true;
+                                                break;
+                                            }
+                                            idx += 1;
+                                            i += slen;
+                                            prev = i;
+                                        } else { i += 1; }
+                                    }
+                                    if !pushed && idx == want {
+                                        let arc: Arc<str> = if prev == 0 { s.clone() }
+                                                            else { Arc::<str>::from(&src[prev..]) };
+                                        out.push(Val::Str(arc));
+                                        pushed = true;
+                                    }
+                                }
+                                if !pushed { out.push(Val::Null); }
+                            } else {
+                                out.push(Val::Null);
+                            }
+                        }
+                        Val::arr(out)
+                    } else { Val::arr(Vec::new()) };
+                    stack.push(out);
                 }
                 Opcode::MapSum(f) => {
                     let recv = pop!(stack);
