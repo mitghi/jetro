@@ -3112,17 +3112,42 @@ impl VM {
                 }
                 Opcode::FilterCount(pred) => {
                     let recv = pop!(stack);
-                    let n = if let Val::Arr(a) = &recv {
-                        let mut count = 0u64;
-                        let mut scratch = env.clone();
-                        for item in a.iter() {
-                            let prev = scratch.swap_current(item.clone());
-                            let t = is_truthy(&self.exec(pred, &scratch)?);
-                            scratch.restore_current(prev);
-                            if t { count += 1; }
+                    let n = match &recv {
+                        Val::Arr(a) => {
+                            let mut count = 0u64;
+                            let mut scratch = env.clone();
+                            for item in a.iter() {
+                                let prev = scratch.swap_current(item.clone());
+                                let t = is_truthy(&self.exec(pred, &scratch)?);
+                                scratch.restore_current(prev);
+                                if t { count += 1; }
+                            }
+                            count
                         }
-                        count
-                    } else { 0 };
+                        Val::IntVec(a) => {
+                            let mut count = 0u64;
+                            let mut scratch = env.clone();
+                            for &n in a.iter() {
+                                let prev = scratch.swap_current(Val::Int(n));
+                                let t = is_truthy(&self.exec(pred, &scratch)?);
+                                scratch.restore_current(prev);
+                                if t { count += 1; }
+                            }
+                            count
+                        }
+                        Val::FloatVec(a) => {
+                            let mut count = 0u64;
+                            let mut scratch = env.clone();
+                            for &f in a.iter() {
+                                let prev = scratch.swap_current(Val::Float(f));
+                                let t = is_truthy(&self.exec(pred, &scratch)?);
+                                scratch.restore_current(prev);
+                                if t { count += 1; }
+                            }
+                            count
+                        }
+                        _ => 0,
+                    };
                     stack.push(Val::Int(n as i64));
                 }
                 Opcode::FindFirst(pred) => {
@@ -3816,28 +3841,50 @@ impl VM {
                     let mut acc_i: i64 = 0;
                     let mut acc_f: f64 = 0.0;
                     let mut is_float = false;
-                    if let Val::Arr(a) = &recv {
-                        let mut scratch = env.clone();
-                        for item in a.iter() {
-                            let prev = scratch.swap_current(item.clone());
-                            if !is_truthy(&self.exec(pred, &scratch)?) {
-                                scratch.restore_current(prev);
-                                continue;
-                            }
-                            let v = self.exec(map, &scratch)?;
+                    let run = |this: &mut Self, item: Val, scratch: &mut Env,
+                               acc_i: &mut i64, acc_f: &mut f64, is_float: &mut bool|
+                        -> Result<(), EvalError>
+                    {
+                        let prev = scratch.swap_current(item);
+                        if !is_truthy(&this.exec(pred, scratch)?) {
                             scratch.restore_current(prev);
-                            match v {
-                                Val::Int(n) => {
-                                    if is_float { acc_f += n as f64; } else { acc_i += n; }
-                                }
-                                Val::Float(x) => {
-                                    if !is_float { acc_f = acc_i as f64; is_float = true; }
-                                    acc_f += x;
-                                }
-                                Val::Null => {}
-                                _ => return err!("filter(..).map(..).sum(): non-numeric mapped value"),
+                            return Ok(());
+                        }
+                        let v = this.exec(map, scratch)?;
+                        scratch.restore_current(prev);
+                        match v {
+                            Val::Int(n) => {
+                                if *is_float { *acc_f += n as f64; } else { *acc_i += n; }
+                            }
+                            Val::Float(x) => {
+                                if !*is_float { *acc_f = *acc_i as f64; *is_float = true; }
+                                *acc_f += x;
+                            }
+                            Val::Null => {}
+                            _ => return Err(EvalError("filter(..).map(..).sum(): non-numeric mapped value".into())),
+                        }
+                        Ok(())
+                    };
+                    match &recv {
+                        Val::Arr(a) => {
+                            let mut scratch = env.clone();
+                            for item in a.iter() {
+                                run(self, item.clone(), &mut scratch, &mut acc_i, &mut acc_f, &mut is_float)?;
                             }
                         }
+                        Val::IntVec(a) => {
+                            let mut scratch = env.clone();
+                            for &n in a.iter() {
+                                run(self, Val::Int(n), &mut scratch, &mut acc_i, &mut acc_f, &mut is_float)?;
+                            }
+                        }
+                        Val::FloatVec(a) => {
+                            let mut scratch = env.clone();
+                            for &f in a.iter() {
+                                run(self, Val::Float(f), &mut scratch, &mut acc_i, &mut acc_f, &mut is_float)?;
+                            }
+                        }
+                        _ => {}
                     }
                     stack.push(if is_float { Val::Float(acc_f) } else { Val::Int(acc_i) });
                 }
