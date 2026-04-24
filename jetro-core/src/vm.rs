@@ -661,6 +661,26 @@ fn trivial_push_str(ops: &[Opcode]) -> Option<Arc<str>> {
     }
 }
 
+/// Allocate an `Arc<str>` of exactly `bytes.len()` and write ASCII-folded
+/// contents directly into the Arc payload — one allocation, no intermediate
+/// `String`. Caller must ensure `bytes` is ASCII.
+#[inline]
+fn ascii_fold_to_arc_str(bytes: &[u8], upper: bool) -> Arc<str> {
+    let mut arc = Arc::<[u8]>::new_uninit_slice(bytes.len());
+    let slot = Arc::get_mut(&mut arc).unwrap();
+    unsafe {
+        let dst = slot.as_mut_ptr() as *mut u8;
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, bytes.len());
+        if upper {
+            for i in 0..bytes.len() { *dst.add(i) = (*dst.add(i)).to_ascii_uppercase(); }
+        } else {
+            for i in 0..bytes.len() { *dst.add(i) = (*dst.add(i)).to_ascii_lowercase(); }
+        }
+    }
+    let arc_bytes: Arc<[u8]> = unsafe { arc.assume_init() };
+    unsafe { Arc::from_raw(Arc::into_raw(arc_bytes) as *const str) }
+}
+
 fn trivial_field(ops: &[Opcode]) -> Option<Arc<str>> {
     match ops {
         [Opcode::PushCurrent, Opcode::GetField(k)] => Some(k.clone()),
@@ -3488,19 +3508,8 @@ impl VM {
                         let t = s.trim();
                         let bytes = t.as_bytes();
                         if bytes.is_ascii() {
-                            let mut buf = String::with_capacity(bytes.len());
-                            // SAFETY: ASCII case-fold preserves ASCII → valid UTF-8.
-                            unsafe {
-                                let vb = buf.as_mut_vec();
-                                vb.extend_from_slice(bytes);
-                                match op {
-                                    Opcode::StrTrimUpper =>
-                                        for b in vb.iter_mut() { *b = b.to_ascii_uppercase(); },
-                                    _ =>
-                                        for b in vb.iter_mut() { *b = b.to_ascii_lowercase(); },
-                                }
-                            }
-                            Val::Str(Arc::<str>::from(buf))
+                            let upper = matches!(op, Opcode::StrTrimUpper);
+                            Val::Str(ascii_fold_to_arc_str(bytes, upper))
                         } else {
                             let s2 = match op {
                                 Opcode::StrTrimUpper => t.to_uppercase(),
@@ -3517,25 +3526,11 @@ impl VM {
                     let v = pop!(stack);
                     let out = if let Val::Str(s) = &v {
                         let bytes = s.as_bytes();
-                        // trim-then-case-fold is identical to case-fold-then-trim
-                        // for ASCII whitespace (space/tab/nl/cr/ff/vt stay
-                        // whitespace after case fold) and for Unicode whitespace
-                        // under std trim rules.
                         let t = s.trim();
                         let tb = t.as_bytes();
                         if bytes.is_ascii() {
-                            let mut buf = String::with_capacity(tb.len());
-                            unsafe {
-                                let vb = buf.as_mut_vec();
-                                vb.extend_from_slice(tb);
-                                match op {
-                                    Opcode::StrUpperTrim =>
-                                        for b in vb.iter_mut() { *b = b.to_ascii_uppercase(); },
-                                    _ =>
-                                        for b in vb.iter_mut() { *b = b.to_ascii_lowercase(); },
-                                }
-                            }
-                            Val::Str(Arc::<str>::from(buf))
+                            let upper = matches!(op, Opcode::StrUpperTrim);
+                            Val::Str(ascii_fold_to_arc_str(tb, upper))
                         } else {
                             let s2 = match op {
                                 Opcode::StrUpperTrim => t.to_uppercase(),
@@ -3576,15 +3571,33 @@ impl VM {
                             }
                             spans.push((prev, src.len()));
                         }
-                        let cap = src.len(); // upper bound; same chars + same seps
-                        let mut buf = String::with_capacity(cap);
+                        let out_len = src.len();
+                        let mut arc = Arc::<[u8]>::new_uninit_slice(out_len);
+                        let slot = Arc::get_mut(&mut arc).unwrap();
+                        let src_b = src.as_bytes();
+                        let sep_b = sep_s.as_bytes();
+                        let slen = sep_b.len();
                         let n = spans.len();
-                        for idx in 0..n {
-                            let (a, b) = spans[n - 1 - idx];
-                            if idx > 0 { buf.push_str(sep_s); }
-                            buf.push_str(&src[a..b]);
+                        unsafe {
+                            let dst = slot.as_mut_ptr() as *mut u8;
+                            let mut widx = 0usize;
+                            for idx in 0..n {
+                                let (a, b) = spans[n - 1 - idx];
+                                if idx > 0 && slen > 0 {
+                                    std::ptr::copy_nonoverlapping(sep_b.as_ptr(), dst.add(widx), slen);
+                                    widx += slen;
+                                }
+                                let seg_len = b - a;
+                                std::ptr::copy_nonoverlapping(src_b.as_ptr().add(a), dst.add(widx), seg_len);
+                                widx += seg_len;
+                            }
+                            debug_assert_eq!(widx, out_len);
                         }
-                        Val::Str(Arc::<str>::from(buf))
+                        let arc_bytes: Arc<[u8]> = unsafe { arc.assume_init() };
+                        let arc_str: Arc<str> = unsafe {
+                            Arc::from_raw(Arc::into_raw(arc_bytes) as *const str)
+                        };
+                        Val::Str(arc_str)
                     } else {
                         return Err(EvalError("split_reverse_join: expected string".into()));
                     };
