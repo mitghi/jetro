@@ -7105,24 +7105,71 @@ impl VM {
     // ── F-string ──────────────────────────────────────────────────────────────
 
     fn exec_fstring(&mut self, parts: &[CompiledFSPart], env: &Env) -> Result<Val, EvalError> {
-        let mut out = String::new();
+        use std::fmt::Write as _;
+        // Pre-size by summing literal lengths + rough 8 bytes per interp.
+        let lit_len: usize = parts.iter().map(|p| match p {
+            CompiledFSPart::Lit(s) => s.len(),
+            CompiledFSPart::Interp { .. } => 8,
+        }).sum();
+        let mut out = String::with_capacity(lit_len);
         for part in parts {
             match part {
                 CompiledFSPart::Lit(s) => out.push_str(s.as_ref()),
                 CompiledFSPart::Interp { prog, fmt } => {
-                    let val = self.exec(prog, env)?;
-                    let s = match fmt {
-                        None                      => val_to_string(&val),
-                        Some(FmtSpec::Spec(spec)) => apply_fmt_spec(&val, spec),
-                        Some(FmtSpec::Pipe(method)) => {
-                            val_to_string(&dispatch_method(val, method, &[], env)?)
+                    // Fast path: very small interp programs that just extract
+                    // a field / index / current — avoid full self.exec() recursion
+                    // (stack alloc, ic vec, etc.) per row.
+                    let val: Val = match &prog.ops[..] {
+                        [Opcode::PushCurrent] => env.current.clone(),
+                        [Opcode::PushCurrent, Opcode::GetIndex(n)] => {
+                            match &env.current {
+                                Val::Arr(a) => {
+                                    let idx = if *n >= 0 { *n as usize }
+                                              else { a.len().saturating_sub((-*n) as usize) };
+                                    a.get(idx).cloned().unwrap_or(Val::Null)
+                                }
+                                _ => self.exec(prog, env)?,
+                            }
                         }
+                        [Opcode::PushCurrent, Opcode::GetField(k)] => {
+                            match &env.current {
+                                Val::Obj(m) => m.get(k.as_ref()).cloned().unwrap_or(Val::Null),
+                                _ => self.exec(prog, env)?,
+                            }
+                        }
+                        [Opcode::LoadIdent(name)] => env.get_var(name).cloned().unwrap_or(Val::Null),
+                        _ => self.exec(prog, env)?,
                     };
-                    out.push_str(&s);
+                    match fmt {
+                        None => match &val {
+                            // Fast paths: avoid val_to_string's temporary String.
+                            Val::Str(s)   => out.push_str(s.as_ref()),
+                            Val::Int(n)   => { let _ = write!(out, "{}", n); }
+                            Val::Float(f) => { let _ = write!(out, "{}", f); }
+                            Val::Bool(b)  => { let _ = write!(out, "{}", b); }
+                            Val::Null     => out.push_str("null"),
+                            _             => out.push_str(&val_to_string(&val)),
+                        },
+                        Some(FmtSpec::Spec(spec)) => {
+                            out.push_str(&apply_fmt_spec(&val, spec));
+                        }
+                        Some(FmtSpec::Pipe(method)) => {
+                            let piped = dispatch_method(val, method, &[], env)?;
+                            match &piped {
+                                Val::Str(s)   => out.push_str(s.as_ref()),
+                                Val::Int(n)   => { let _ = write!(out, "{}", n); }
+                                Val::Float(f) => { let _ = write!(out, "{}", f); }
+                                Val::Bool(b)  => { let _ = write!(out, "{}", b); }
+                                Val::Null     => out.push_str("null"),
+                                _             => out.push_str(&val_to_string(&piped)),
+                            }
+                        }
+                    }
                 }
             }
         }
-        Ok(Val::Str(Arc::from(out.as_str())))
+        // `Arc::<str>::from(String)` transfers the buffer — no realloc.
+        Ok(Val::Str(Arc::<str>::from(out)))
     }
 
     // ── Comprehension helpers ─────────────────────────────────────────────────
