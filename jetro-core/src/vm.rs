@@ -518,12 +518,15 @@ pub struct Program {
     /// True when the program contains only structural navigation opcodes
     /// (eligible for resolution caching).
     pub is_structural: bool,
-    /// Inline caches — one `AtomicU64` slot per opcode.  Currently only
-    /// `Opcode::GetField` / `Opcode::OptField` populate a slot:
-    ///   bits 63..32 = truncated `Arc::as_ptr(&obj_map) as u32`
-    ///   bits 31..0  = cached IndexMap slot index
-    /// A value of 0 means "miss" (Arc ptr hash 0 is vanishingly rare —
-    /// minor correctness cost: worst case one extra slow lookup).
+    /// Inline caches — one `AtomicU64` slot per opcode.  Populated by
+    /// `Opcode::GetField` / `Opcode::OptField` / `Opcode::FieldChain`.
+    ///
+    /// Encoding: `stored_slot = slot_idx + 1` (0 reserved for "unset").
+    /// No Arc-ptr gating — the hit path is `get_index(slot)` + byte-eq
+    /// key verify.  That lets a single slot survive across different
+    /// `Arc<IndexMap>` instances of the same shape, which is the common
+    /// case for repeated queries over distinct docs and for shape-uniform
+    /// array iteration reaching the opcode inside a sub-program.
     pub ics:          Arc<[AtomicU64]>,
 }
 
@@ -549,7 +552,7 @@ impl Program {
 }
 
 /// Per-step inline caches for `Opcode::FieldChain`.  One `AtomicU64` slot per
-/// key in the chain — same encoding as `Program.ics` (ptr-hash | slot).
+/// key in the chain — same encoding as `Program.ics` (`slot_idx + 1`, 0 unset).
 /// Lives inside the opcode rather than the top-level side-table because the
 /// chain length is known only at compile time of that specific opcode.
 #[derive(Debug)]
@@ -584,21 +587,23 @@ pub fn fresh_ics(len: usize) -> Arc<[AtomicU64]> {
 }
 
 /// Look up `key` in `m`, using the IC slot as a speculative hint.
+///
+/// IC is ptr-independent: slot survives across different `Arc<IndexMap>`
+/// instances as long as shape (key ordering) is the same.  Hit path is
+/// `get_index(slot) + byte-eq key verify`; miss path is one `get_full`
+/// that also refreshes the slot.  Slot is encoded as `idx + 1` so zero
+/// stays reserved for "unset".
 #[inline]
 fn ic_get_field(m: &Arc<IndexMap<Arc<str>, Val>>, key: &str, ic: &AtomicU64) -> Val {
-    let ptr_hash = ((Arc::as_ptr(m) as usize) >> 4) as u32;
     let cached = ic.load(Ordering::Relaxed);
-    let cached_ptr = (cached >> 32) as u32;
-    let cached_slot = (cached & 0xFFFF_FFFF) as usize;
-    if cached_ptr == ptr_hash && ptr_hash != 0 {
-        if let Some((k, v)) = m.get_index(cached_slot) {
+    if cached != 0 {
+        let slot = (cached - 1) as usize;
+        if let Some((k, v)) = m.get_index(slot) {
             if k.as_ref() == key { return v.clone(); }
         }
     }
-    // Slow path: full hash lookup, populate cache on hit.
     if let Some((idx, _, v)) = m.get_full(key) {
-        let packed = ((ptr_hash as u64) << 32) | (idx as u64);
-        ic.store(packed, Ordering::Relaxed);
+        ic.store((idx as u64) + 1, Ordering::Relaxed);
         v.clone()
     } else {
         Val::Null
