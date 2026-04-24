@@ -887,6 +887,10 @@ fn filter_cap_hint(recv_len: usize) -> usize {
     (recv_len / 4 + 4).min(recv_len)
 }
 
+/// Accumulate lambda pattern tag — selects which fused binop to run.
+#[derive(Copy, Clone)]
+enum AccumOp { Add, Sub, Mul }
+
 // ── Typed-numeric aggregate fast-paths ────────────────────────────────────────
 // Direct loops over `&[Val]` for mono-typed or mixed Int/Float arrays.  Used
 // by the bare `.sum()/.min()/.max()/.avg()` no-arg method-call fast path in
@@ -4741,6 +4745,42 @@ impl VM {
             BuiltinMethod::GroupBy => {
                 let key_prog = sub.ok_or_else(|| EvalError("groupBy: requires key".into()))?;
                 let items = recv.into_vec().ok_or_else(|| EvalError("groupBy: expected array".into()))?;
+                // Pattern specialisation: `lambda x: x % K` where K is a small
+                // positive Int.  Skips per-item exec + string-keying.  Uses a
+                // dense Vec<Vec<Val>> indexed by (n % K).rem_euclid — collapsed
+                // into an IndexMap<Arc<str>, Val> once at the end.
+                if let Some(param) = lam_param {
+                    if let [Opcode::LoadIdent(p), Opcode::PushInt(k_lit), Opcode::Mod]
+                        = key_prog.ops.as_ref()
+                    {
+                        if p.as_ref() == param && *k_lit > 0 && *k_lit <= 4096 {
+                            let k_lit = *k_lit;
+                            let k_u = k_lit as usize;
+                            let mut buckets: Vec<Vec<Val>> = vec![Vec::new(); k_u];
+                            let mut seen: Vec<bool> = vec![false; k_u];
+                            let mut order: Vec<usize> = Vec::new();
+                            // All-numeric fast path; error on non-numeric
+                            // (matches tree-walker `x % K` dispatch).
+                            for item in items {
+                                let idx = match &item {
+                                    Val::Int(n)   => n.rem_euclid(k_lit) as usize,
+                                    Val::Float(x) => (x.trunc() as i64).rem_euclid(k_lit) as usize,
+                                    _ => return err!("group_by(x % K): non-numeric item"),
+                                };
+                                if !seen[idx] { seen[idx] = true; order.push(idx); }
+                                buckets[idx].push(item);
+                            }
+                            let mut map: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(order.len());
+                            for idx in order {
+                                let k: Arc<str> = Arc::from(idx.to_string());
+                                let bucket = std::mem::take(&mut buckets[idx]);
+                                map.insert(k, Val::arr(bucket));
+                            }
+                            return Ok(Val::obj(map));
+                        }
+                    }
+                }
+                // General compiled-bytecode path.
                 let mut map: IndexMap<Arc<str>, Val> = IndexMap::new();
                 for item in items {
                     let k: Arc<str> = Arc::from(val_to_key(&self.exec_lam_body_scratch(key_prog, &item, lam_param, &mut scratch)?).as_str());
@@ -4796,7 +4836,74 @@ impl VM {
                 Ok(Val::arr(out))
             }
             BuiltinMethod::Accumulate => {
-                dispatch_method(recv, call.name.as_ref(), &call.orig_args, env)
+                // VM-accelerate the common 2-param form `accumulate(lambda a, x: …)`
+                // with no `start:` named arg.  Pattern-specialise for a handful
+                // of tight-loop shapes (`a + x`, `a - x`, `a * x`, `max/min`)
+                // that the compiled bytecode would otherwise re-dispatch per
+                // iteration.  Other shapes fall through to a compiled-bytecode
+                // VM loop; unsupported shapes fall back to the tree-walker.
+                let lam_body = sub.ok_or_else(|| EvalError("accumulate: requires lambda".into()))?;
+                let (p1, p2) = match call.orig_args.first() {
+                    Some(Arg::Pos(Expr::Lambda { params, .. })) if params.len() >= 2 =>
+                        (params[0].as_str(), params[1].as_str()),
+                    _ => return dispatch_method(recv, call.name.as_ref(), &call.orig_args, env),
+                };
+                if call.orig_args.iter().any(|a|
+                    matches!(a, Arg::Named(n, _) if n.as_str() == "start"))
+                {
+                    return dispatch_method(recv, call.name.as_ref(), &call.orig_args, env);
+                }
+                // Try pattern specialisation: `LoadIdent(p1), LoadIdent(p2), <BinOp>`.
+                let specialised_binop = match lam_body.ops.as_ref() {
+                    [Opcode::LoadIdent(a), Opcode::LoadIdent(b), op]
+                        if a.as_ref() == p1 && b.as_ref() == p2 =>
+                    {
+                        match op {
+                            Opcode::Add => Some(AccumOp::Add),
+                            Opcode::Sub => Some(AccumOp::Sub),
+                            Opcode::Mul => Some(AccumOp::Mul),
+                            _           => None,
+                        }
+                    }
+                    _ => None,
+                };
+                let items = recv.into_vec()
+                    .ok_or_else(|| EvalError("accumulate: expected array".into()))?;
+                let mut out = Vec::with_capacity(items.len());
+                if let Some(bop) = specialised_binop {
+                    // Inline fold — no env rebind, no exec recursion.
+                    let mut running: Option<Val> = None;
+                    for item in items {
+                        let next = match running.take() {
+                            Some(acc) => match bop {
+                                AccumOp::Add => add_vals(acc, item)?,
+                                AccumOp::Sub => num_op(acc, item, |a,b| a-b, |a,b| a-b)?,
+                                AccumOp::Mul => num_op(acc, item, |a,b| a*b, |a,b| a*b)?,
+                            },
+                            None => item,
+                        };
+                        out.push(next.clone());
+                        running = Some(next);
+                    }
+                    return Ok(Val::arr(out));
+                }
+                // General path: compiled-bytecode VM loop.
+                let mut running: Option<Val> = None;
+                for item in items {
+                    let next = if let Some(acc) = running.take() {
+                        let f1 = scratch.push_lam(Some(p1), acc);
+                        let f2 = scratch.push_lam(Some(p2), item.clone());
+                        let r = self.exec(lam_body, &scratch)?;
+                        scratch.pop_lam(f2);
+                        scratch.pop_lam(f1);
+                        r
+                    } else {
+                        item
+                    };
+                    out.push(next.clone());
+                    running = Some(next);
+                }
+                Ok(Val::arr(out))
             }
             BuiltinMethod::Partition => {
                 let pred = sub.ok_or_else(|| EvalError("partition: requires predicate".into()))?;
