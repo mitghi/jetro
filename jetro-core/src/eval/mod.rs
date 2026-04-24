@@ -1371,17 +1371,60 @@ pub(super) fn apply_item(item: Val, arg: &Arg, env: &Env) -> Result<Val, EvalErr
     }
 }
 
-pub(super) fn apply_item2(a: Val, b: Val, arg: &Arg, env: &Env) -> Result<Val, EvalError> {
+/// Hot-loop variant of `apply_item` that binds into a caller-supplied
+/// mutable Env via `push_lam`/`pop_lam` — zero `SmallVec`/`Arc` clones
+/// per call.  Caller clones the Env once before the loop.
+#[inline]
+pub(super) fn apply_item_mut(item: Val, arg: &Arg, env: &mut Env) -> Result<Val, EvalError> {
+    let expr = match arg { Arg::Pos(e) | Arg::Named(_, e) => e };
+    match expr {
+        Expr::Lambda { params, body } => {
+            let name = params.first().map(|s| s.as_str());
+            let frame = env.push_lam(name, item);
+            let r = eval(body, env);
+            env.pop_lam(frame);
+            r
+        }
+        _ => {
+            let frame = env.push_lam(None, item);
+            let r = eval(expr, env);
+            env.pop_lam(frame);
+            r
+        }
+    }
+}
+
+/// Hot-loop variant of `apply_item2`.  Binds one or two params (or just
+/// `current` for zero-param lambdas) via in-place Env mutation.
+#[inline]
+pub(super) fn apply_item2_mut(a: Val, b: Val, arg: &Arg, env: &mut Env) -> Result<Val, EvalError> {
     match arg {
         Arg::Pos(Expr::Lambda { params, body }) | Arg::Named(_, Expr::Lambda { params, body }) => {
-            let inner = match params.as_slice() {
-                []           => env.with_current(b),
-                [p]          => env.with_var(p, b),
-                [p1, p2, ..] => env.with_vars2(p1, a, p2, b),
-            };
-            eval(body, &inner)
+            match params.as_slice() {
+                [] => {
+                    let frame = env.push_lam(None, b);
+                    let r = eval(body, env);
+                    env.pop_lam(frame);
+                    r
+                }
+                [p] => {
+                    let frame = env.push_lam(Some(p), b);
+                    let r = eval(body, env);
+                    env.pop_lam(frame);
+                    r
+                }
+                [p1, p2, ..] => {
+                    // Two-param: push p1=a, then p2=b (pop order reversed).
+                    let f1 = env.push_lam(Some(p1), a);
+                    let f2 = env.push_lam(Some(p2), b);
+                    let r = eval(body, env);
+                    env.pop_lam(f2);
+                    env.pop_lam(f1);
+                    r
+                }
+            }
         }
-        _ => apply_item(b, arg, env),
+        _ => apply_item_mut(b, arg, env),
     }
 }
 

@@ -17,7 +17,7 @@ use std::sync::Arc;
 use indexmap::IndexMap;
 
 use crate::ast::{Arg, Expr};
-use super::{Env, EvalError, eval, apply_item, apply_item2, eval_pos, first_i64_arg};
+use super::{Env, EvalError, eval, apply_item_mut, apply_item2_mut, eval_pos, first_i64_arg};
 use super::value::Val;
 use super::util::{is_truthy, val_to_key, val_to_string, flatten_val, zip_arrays, cartesian, cmp_vals, val_key, obj2};
 
@@ -42,8 +42,9 @@ pub fn filter(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
             if is_truthy(&eval(expr, &scratch)?) { out.push(item); }
         }
     } else {
+        let mut env_mut = env.clone();
         for item in items {
-            if is_truthy(&apply_item(item.clone(), pred, env)?) { out.push(item); }
+            if is_truthy(&apply_item_mut(item.clone(), pred, &mut env_mut)?) { out.push(item); }
         }
     }
     Ok(Val::arr(out))
@@ -73,9 +74,10 @@ pub fn find(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
             out.push(item);
         }
     } else {
+        let mut env_mut = env.clone();
         'outer: for item in items {
             for p in args {
-                if !is_truthy(&apply_item(item.clone(), p, env)?) { continue 'outer; }
+                if !is_truthy(&apply_item_mut(item.clone(), p, &mut env_mut)?) { continue 'outer; }
             }
             out.push(item);
         }
@@ -86,8 +88,12 @@ pub fn find(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
 pub fn map(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     let mapper = args.first().ok_or_else(|| EvalError("map: requires mapper".into()))?;
     let items = recv.into_vec().ok_or_else(|| EvalError("map: expected array".into()))?;
-    let r: Result<Vec<_>, _> = items.into_iter().map(|item| apply_item(item, mapper, env)).collect();
-    Ok(Val::arr(r?))
+    let mut env_mut = env.clone();
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        out.push(apply_item_mut(item, mapper, &mut env_mut)?);
+    }
+    Ok(Val::arr(out))
 }
 
 pub fn flat_map(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
@@ -235,9 +241,10 @@ pub fn remove(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
         Arg::Pos(Expr::Lambda { .. }) | Arg::Named(_, Expr::Lambda { .. })
     );
     if is_lambda {
+        let mut env_mut = env.clone();
         let mut out = Vec::new();
         for item in v {
-            if !is_truthy(&apply_item(item.clone(), pred, env)?) { out.push(item); }
+            if !is_truthy(&apply_item_mut(item.clone(), pred, &mut env_mut)?) { out.push(item); }
         }
         Ok(Val::arr(out))
     } else {
@@ -343,10 +350,12 @@ pub fn union(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
 pub fn enumerate(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     let items = recv.into_vec().ok_or_else(|| EvalError("enumerate: expected array".into()))?;
     if let Some(lam) = args.first() {
-        let r: Result<Vec<_>, _> = items.into_iter().enumerate()
-            .map(|(i, v)| apply_item2(Val::Int(i as i64), v, lam, env))
-            .collect();
-        Ok(Val::arr(r?))
+        let mut env_mut = env.clone();
+        let mut out = Vec::with_capacity(items.len());
+        for (i, v) in items.into_iter().enumerate() {
+            out.push(apply_item2_mut(Val::Int(i as i64), v, lam, &mut env_mut)?);
+        }
+        Ok(Val::arr(out))
     } else {
         Ok(Val::arr(items.into_iter().enumerate()
             .map(|(i, v)| obj2("index", Val::Int(i as i64), "value", v))
@@ -374,9 +383,10 @@ pub fn chunk(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
 pub fn takewhile(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     let pred  = args.first().ok_or_else(|| EvalError("takewhile: requires predicate".into()))?;
     let items = recv.into_vec().ok_or_else(|| EvalError("takewhile: expected array".into()))?;
+    let mut env_mut = env.clone();
     let mut out = Vec::new();
     for item in items {
-        if is_truthy(&apply_item(item.clone(), pred, env)?) { out.push(item); }
+        if is_truthy(&apply_item_mut(item.clone(), pred, &mut env_mut)?) { out.push(item); }
         else { break; }
     }
     Ok(Val::arr(out))
@@ -385,11 +395,12 @@ pub fn takewhile(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
 pub fn dropwhile(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     let pred  = args.first().ok_or_else(|| EvalError("dropwhile: requires predicate".into()))?;
     let items = recv.into_vec().ok_or_else(|| EvalError("dropwhile: expected array".into()))?;
+    let mut env_mut = env.clone();
     let mut dropping = true;
     let mut out = Vec::new();
     for item in items {
         if dropping {
-            if !is_truthy(&apply_item(item.clone(), pred, env)?) { dropping = false; out.push(item); }
+            if !is_truthy(&apply_item_mut(item.clone(), pred, &mut env_mut)?) { dropping = false; out.push(item); }
         } else { out.push(item); }
     }
     Ok(Val::arr(out))
@@ -403,11 +414,12 @@ pub fn accumulate(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> 
         } else { None }
     });
     let items = recv.into_vec().ok_or_else(|| EvalError("accumulate: expected array".into()))?;
+    let mut env_mut = env.clone();
     let mut running: Option<Val> = start;
     let mut out = Vec::new();
     for item in items {
         running = Some(if let Some(acc) = running {
-            apply_item2(acc, item, lam, env)?
+            apply_item2_mut(acc, item, lam, &mut env_mut)?
         } else { item });
         out.push(running.clone().unwrap());
     }
@@ -417,9 +429,10 @@ pub fn accumulate(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> 
 pub fn partition(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     let pred  = args.first().ok_or_else(|| EvalError("partition: requires predicate".into()))?;
     let items = recv.into_vec().ok_or_else(|| EvalError("partition: expected array".into()))?;
+    let mut env_mut = env.clone();
     let (mut t, mut f) = (Vec::new(), Vec::new());
     for item in items {
-        if is_truthy(&apply_item(item.clone(), pred, env)?) { t.push(item); }
+        if is_truthy(&apply_item_mut(item.clone(), pred, &mut env_mut)?) { t.push(item); }
         else { f.push(item); }
     }
     let mut m = IndexMap::with_capacity(2);

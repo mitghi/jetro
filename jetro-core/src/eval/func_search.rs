@@ -14,7 +14,7 @@
 use std::sync::Arc;
 
 use crate::ast::{Arg, Expr, ObjField};
-use super::{Env, EvalError, apply_item, eval};
+use super::{Env, EvalError, apply_item_mut, eval};
 use super::value::Val;
 use super::util::{is_truthy, val_to_key, vals_eq};
 
@@ -29,8 +29,9 @@ pub fn unique_by(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     let items = recv.into_vec().ok_or_else(|| EvalError("unique_by: expected array".into()))?;
     let mut seen = std::collections::HashSet::new();
     let mut out  = Vec::with_capacity(items.len());
+    let mut env_mut = env.clone();
     for item in items {
-        let k = apply_item(item.clone(), keyfn, env)?;
+        let k = apply_item_mut(item.clone(), keyfn, &mut env_mut)?;
         if seen.insert(val_to_key(&k)) { out.push(item); }
     }
     Ok(Val::arr(out))
@@ -89,10 +90,11 @@ pub fn deep_find(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
             out.push(node.clone());
         });
     } else {
+        let mut env_mut = env.clone();
         walk_pre(&recv, &mut |node| {
             if err_cell.is_some() { return; }
             for p in args {
-                match apply_item(node.clone(), p, env) {
+                match apply_item_mut(node.clone(), p, &mut env_mut) {
                     Ok(v)  => if !is_truthy(&v) { return; }
                     Err(e) => { err_cell = Some(e); return; }
                 }

@@ -13,7 +13,7 @@ use std::sync::Arc;
 use indexmap::IndexMap;
 
 use crate::ast::{Arg, Expr};
-use super::{Env, EvalError, apply_item, eval_pos};
+use super::{Env, EvalError, apply_item, apply_item_mut, eval_pos};
 use super::value::Val;
 use super::util::{is_truthy, val_to_key, deep_merge};
 use super::func_paths::{parse_path_segs, get_path_impl, PathSeg};
@@ -195,9 +195,10 @@ pub fn invert(recv: Val) -> Result<Val, EvalError> {
 pub fn transform_keys(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     let lam = args.first().ok_or_else(|| EvalError("transform_keys: requires lambda".into()))?;
     let map = recv.into_map().ok_or_else(|| EvalError("transform_keys: expected object".into()))?;
+    let mut env_mut = env.clone();
     let mut out = IndexMap::with_capacity(map.len());
     for (k, v) in map {
-        let new_key: Arc<str> = match apply_item(Val::Str(k), lam, env)? {
+        let new_key: Arc<str> = match apply_item_mut(Val::Str(k), lam, &mut env_mut)? {
             Val::Str(s) => s,
             other       => Arc::<str>::from(val_to_key(&other)),
         };
@@ -209,17 +210,19 @@ pub fn transform_keys(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalErr
 pub fn transform_values(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     let lam = args.first().ok_or_else(|| EvalError("transform_values: requires lambda".into()))?;
     let map = recv.into_map().ok_or_else(|| EvalError("transform_values: expected object".into()))?;
+    let mut env_mut = env.clone();
     let mut out = IndexMap::with_capacity(map.len());
-    for (k, v) in map { out.insert(k, apply_item(v, lam, env)?); }
+    for (k, v) in map { out.insert(k, apply_item_mut(v, lam, &mut env_mut)?); }
     Ok(Val::obj(out))
 }
 
 pub fn filter_keys(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     let lam = args.first().ok_or_else(|| EvalError("filter_keys: requires predicate".into()))?;
     let map = recv.into_map().ok_or_else(|| EvalError("filter_keys: expected object".into()))?;
+    let mut env_mut = env.clone();
     let mut out = IndexMap::with_capacity(map.len());
     for (k, v) in map {
-        if is_truthy(&apply_item(Val::Str(k.clone()), lam, env)?) { out.insert(k, v); }
+        if is_truthy(&apply_item_mut(Val::Str(k.clone()), lam, &mut env_mut)?) { out.insert(k, v); }
     }
     Ok(Val::obj(out))
 }
@@ -227,9 +230,10 @@ pub fn filter_keys(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError>
 pub fn filter_values(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     let lam = args.first().ok_or_else(|| EvalError("filter_values: requires predicate".into()))?;
     let map = recv.into_map().ok_or_else(|| EvalError("filter_values: expected object".into()))?;
+    let mut env_mut = env.clone();
     let mut out = IndexMap::with_capacity(map.len());
     for (k, v) in map {
-        if is_truthy(&apply_item(v.clone(), lam, env)?) { out.insert(k, v); }
+        if is_truthy(&apply_item_mut(v.clone(), lam, &mut env_mut)?) { out.insert(k, v); }
     }
     Ok(Val::obj(out))
 }

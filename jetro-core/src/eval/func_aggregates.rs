@@ -12,7 +12,7 @@ use std::sync::Arc;
 use indexmap::IndexMap;
 
 use crate::ast::Arg;
-use super::{Env, EvalError, apply_item};
+use super::{Env, EvalError, apply_item_mut};
 use super::value::Val;
 use super::util::{is_truthy, val_to_key};
 
@@ -70,9 +70,10 @@ fn collect_nums(recv: Val, args: &[Arg], env: &Env) -> Result<Vec<Val>, EvalErro
     if args.is_empty() {
         Ok(items.into_iter().filter(|v| v.is_number()).collect())
     } else {
+        let mut env_mut = env.clone();
         let mut out = Vec::with_capacity(items.len());
         for item in items {
-            let v = apply_item(item, &args[0], env)?;
+            let v = apply_item_mut(item, &args[0], &mut env_mut)?;
             if v.is_number() { out.push(v); }
         }
         Ok(out)
@@ -86,13 +87,15 @@ pub fn count(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
         Val::Arr(a) => {
             if args.is_empty() { return Ok(Val::Int(a.len() as i64)); }
             let items = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
-            let n = items.into_iter().filter(|item| {
-                args.first()
-                    .and_then(|pred| apply_item(item.clone(), pred, env).ok())
-                    .map(|v| is_truthy(&v))
-                    .unwrap_or(false)
-            }).count();
-            Ok(Val::Int(n as i64))
+            let Some(pred) = args.first() else { return Ok(Val::Int(0)); };
+            let mut env_mut = env.clone();
+            let mut n: i64 = 0;
+            for item in items {
+                if apply_item_mut(item, pred, &mut env_mut).map(|v| is_truthy(&v)).unwrap_or(false) {
+                    n += 1;
+                }
+            }
+            Ok(Val::Int(n))
         }
         Val::Str(s)  => Ok(Val::Int(s.chars().count() as i64)),
         Val::Obj(m)  => Ok(Val::Int(m.len() as i64)),
@@ -106,14 +109,23 @@ pub fn any_all(recv: Val, args: &[Arg], env: &Env, want_all: bool) -> Result<Val
             if a.is_empty() { return Ok(Val::Bool(want_all)); }
             if args.is_empty() { return Ok(Val::Bool(true)); }
             let pred = &args[0];
+            let mut env_mut = env.clone();
             let result = if want_all {
-                a.iter().all(|item| {
-                    apply_item(item.clone(), pred, env).map(|v| is_truthy(&v)).unwrap_or(false)
-                })
+                let mut ok = true;
+                for item in a.iter() {
+                    if !apply_item_mut(item.clone(), pred, &mut env_mut).map(|v| is_truthy(&v)).unwrap_or(false) {
+                        ok = false; break;
+                    }
+                }
+                ok
             } else {
-                a.iter().any(|item| {
-                    apply_item(item.clone(), pred, env).map(|v| is_truthy(&v)).unwrap_or(false)
-                })
+                let mut ok = false;
+                for item in a.iter() {
+                    if apply_item_mut(item.clone(), pred, &mut env_mut).map(|v| is_truthy(&v)).unwrap_or(false) {
+                        ok = true; break;
+                    }
+                }
+                ok
             };
             Ok(Val::Bool(result))
         }
@@ -126,8 +138,8 @@ pub fn any_all(recv: Val, args: &[Arg], env: &Env, want_all: bool) -> Result<Val
 /// Compute a grouping key once, reusing the Arc<str> when the key
 /// expression already produced a string.
 #[inline]
-fn group_key(item: &Val, key_arg: &Arg, env: &Env) -> Result<Arc<str>, EvalError> {
-    Ok(match apply_item(item.clone(), key_arg, env)? {
+fn group_key_mut(item: &Val, key_arg: &Arg, env: &mut Env) -> Result<Arc<str>, EvalError> {
+    Ok(match apply_item_mut(item.clone(), key_arg, env)? {
         Val::Str(s) => s,
         other       => Arc::<str>::from(val_to_key(&other)),
     })
@@ -136,9 +148,10 @@ fn group_key(item: &Val, key_arg: &Arg, env: &Env) -> Result<Arc<str>, EvalError
 pub fn group_by(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     let key_arg = args.first().ok_or_else(|| EvalError("groupBy: requires key".into()))?;
     let items = recv.into_vec().ok_or_else(|| EvalError("groupBy: expected array".into()))?;
+    let mut env_mut = env.clone();
     let mut map: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(items.len());
     for item in items {
-        let k = group_key(&item, key_arg, env)?;
+        let k = group_key_mut(&item, key_arg, &mut env_mut)?;
         let bucket = map.entry(k).or_insert_with(|| Val::arr(Vec::new()));
         bucket.as_array_mut().unwrap().push(item);
     }
@@ -148,9 +161,10 @@ pub fn group_by(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
 pub fn count_by(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     let key_arg = args.first().ok_or_else(|| EvalError("countBy: requires key".into()))?;
     let items = recv.into_vec().ok_or_else(|| EvalError("countBy: expected array".into()))?;
+    let mut env_mut = env.clone();
     let mut map: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(items.len());
     for item in items {
-        let k = group_key(&item, key_arg, env)?;
+        let k = group_key_mut(&item, key_arg, &mut env_mut)?;
         let counter = map.entry(k).or_insert(Val::Int(0));
         if let Val::Int(n) = counter { *n += 1; }
     }
@@ -160,9 +174,10 @@ pub fn count_by(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
 pub fn index_by(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     let key_arg = args.first().ok_or_else(|| EvalError("indexBy: requires key".into()))?;
     let items = recv.into_vec().ok_or_else(|| EvalError("indexBy: expected array".into()))?;
+    let mut env_mut = env.clone();
     let mut map: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(items.len());
     for item in items {
-        let k = group_key(&item, key_arg, env)?;
+        let k = group_key_mut(&item, key_arg, &mut env_mut)?;
         map.insert(k, item);
     }
     Ok(Val::obj(map))
