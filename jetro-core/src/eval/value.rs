@@ -373,6 +373,15 @@ impl Val {
         de.end()?;
         Ok(v)
     }
+
+    /// Parse JSON via simd-json (SIMD-accelerated structural scanner).
+    /// Requires the `simd-json` feature.  Input bytes are mutated in-place
+    /// by the simd-json parser — caller must own a writable buffer.
+    /// Falls back to `from_json_slice` on parse error from the simd path.
+    #[cfg(feature = "simd-json")]
+    pub fn from_json_simd(bytes: &mut [u8]) -> Result<Val, String> {
+        simd_json::serde::from_slice::<Val>(bytes).map_err(|e| e.to_string())
+    }
 }
 
 // ── Direct Deserialize ────────────────────────────────────────────────────────

@@ -291,7 +291,21 @@ fn b_to_json(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
 fn b_from_json(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
     // Direct one-pass parse via `Val::deserialize` — no intermediate
     // `serde_json::Value` tree.  For `Val::Str` receivers we skip the
-    // buffer deep-clone too.
+    // buffer deep-clone too.  With the `simd-json` feature enabled,
+    // route through simd-json's SIMD structural scanner instead; the
+    // str receiver path copies once into a mutable buffer (required by
+    // simd-json), still faster than serde_json on docs over ~4KB.
+    #[cfg(feature = "simd-json")]
+    {
+        let bytes_owned: Vec<u8> = match &recv {
+            Val::Str(s) => s.as_bytes().to_vec(),
+            _           => val_to_string(&recv).into_bytes(),
+        };
+        let mut bytes = bytes_owned;
+        return Val::from_json_simd(&mut bytes)
+            .map_err(|e| EvalError(format!("from_json: {}", e)));
+    }
+    #[cfg(not(feature = "simd-json"))]
     match &recv {
         Val::Str(s) => Val::from_json_str(s.as_ref())
             .map_err(|e| EvalError(format!("from_json: {}", e))),
