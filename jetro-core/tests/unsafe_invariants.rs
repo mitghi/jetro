@@ -106,6 +106,14 @@ fn empty_string_edge_cases() {
 }
 
 #[test]
+fn split_count_sum_fusion() {
+    let doc = json!(["a-b-c-d-e", "one-two", "solo", ""]);
+    let total = Jetro::new(doc)
+        .collect_val(r#"$.map(@.split('-').count()).sum()"#).unwrap();
+    assert_eq!(total.to_string(), "9");
+}
+
+#[test]
 fn split_consumer_fusions() {
     let doc = json!(["a-b-c-d-e", "one-two", "solo"]);
     let counts = Jetro::new(doc.clone())

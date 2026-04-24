@@ -280,6 +280,10 @@ fn apply_op(op: &Opcode, stack: &mut Vec<AbstractVal>) {
             pop1!();
             stack.push(AbstractVal::array());
         }
+        Opcode::MapSplitCountSum { .. } => {
+            pop1!();
+            stack.push(AbstractVal::scalar(VType::Int));
+        }
         Opcode::FilterFieldEqLitCount(_, _)
         | Opcode::FilterFieldCmpLitCount(_, _, _)
         | Opcode::FilterFieldCmpFieldCount(_, _, _)
@@ -1148,6 +1152,7 @@ pub fn opcode_cost(op: &Opcode) -> u32 {
         Opcode::MapSplitCount { .. } => 3,
         Opcode::MapSplitFirst { .. } => 3,
         Opcode::MapSplitNth   { .. } => 3,
+        Opcode::MapSplitCountSum { .. } => 3,
     }
 }
 

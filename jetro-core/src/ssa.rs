@@ -143,6 +143,7 @@ fn op_arity(op: &Opcode) -> Arity {
             | Opcode::MapSplitCount { .. }
             | Opcode::MapSplitFirst { .. }
             | Opcode::MapSplitNth   { .. }
+            | Opcode::MapSplitCountSum { .. }
             | Opcode::MapMin(_) | Opcode::MapMax(_)
             | Opcode::MapFieldSum(_) | Opcode::MapFieldAvg(_)
             | Opcode::MapFieldMin(_) | Opcode::MapFieldMax(_)

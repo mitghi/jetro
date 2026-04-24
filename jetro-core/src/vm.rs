@@ -42,6 +42,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 use indexmap::IndexMap;
+use memchr::memchr;
 use smallvec::SmallVec;
 
 use crate::ast::*;
@@ -384,6 +385,9 @@ pub enum Opcode {
     /// Fused `map(@.split(sep).count())` — byte-scan per row, returns Int;
     /// zero per-row allocations.
     MapSplitCount { sep: Arc<str> },
+    /// Fused `map(@.split(sep).count()).sum()` — scalar Int, no intermediate
+    /// `[Int,Int,...]` array. One memchr-backed scan per row, accumulated.
+    MapSplitCountSum { sep: Arc<str> },
     /// Fused `map(@.split(sep).first())` — first segment only; one Arc per
     /// row instead of N.
     MapSplitFirst { sep: Arc<str> },
@@ -1620,6 +1624,18 @@ impl Compiler {
                     } else { None };
                     if let Some(o) = fused {
                         out.push(o);
+                        continue;
+                    }
+                }
+            }
+            // MapSplitCount followed by Sum → MapSplitCountSum (scalar, no
+            // intermediate Int array).
+            if let Opcode::CallMethod(b) = &op {
+                if b.method == BuiltinMethod::Sum && b.sub_progs.is_empty() {
+                    if let Some(Opcode::MapSplitCount { sep }) = out.last() {
+                        let sep = Arc::clone(sep);
+                        out.pop();
+                        out.push(Opcode::MapSplitCountSum { sep });
                         continue;
                     }
                 }
@@ -3761,6 +3777,42 @@ impl VM {
                     }
                     stack.push(Val::arr(out_vec));
                 }
+                Opcode::MapSplitCountSum { sep } => {
+                    let v = pop!(stack);
+                    let sep_b = sep.as_bytes();
+                    let slen = sep_b.len();
+                    let mut total: i64 = 0;
+                    if let Val::Arr(a) = &v {
+                        for item in a.iter() {
+                            if let Val::Str(s) = item {
+                                let sb = s.as_bytes();
+                                let c: i64 = if slen == 0 {
+                                    s.as_ref().chars().count() as i64 + 1
+                                } else if slen == 1 {
+                                    let byte = sep_b[0];
+                                    let mut c: i64 = 1;
+                                    let mut hay = sb;
+                                    while let Some(pos) = memchr(byte, hay) {
+                                        c += 1;
+                                        hay = &hay[pos + 1..];
+                                    }
+                                    c
+                                } else {
+                                    let mut c: i64 = 1;
+                                    let mut i = 0usize;
+                                    while i + slen <= sb.len() {
+                                        if &sb[i..i + slen] == sep_b {
+                                            c += 1; i += slen;
+                                        } else { i += 1; }
+                                    }
+                                    c
+                                };
+                                total += c;
+                            }
+                        }
+                    }
+                    stack.push(Val::Int(total));
+                }
                 Opcode::MapSplitCount { sep } => {
                     let v = pop!(stack);
                     let sep_b = sep.as_bytes();
@@ -3773,6 +3825,16 @@ impl VM {
                                 let c = if slen == 0 {
                                     // str::split("") ≡ char boundary count + 1.
                                     s.as_ref().chars().count() as i64 + 1
+                                } else if slen == 1 {
+                                    // memchr SIMD scan for single-byte sep.
+                                    let byte = sep_b[0];
+                                    let mut c: i64 = 1;
+                                    let mut hay = sb;
+                                    while let Some(pos) = memchr(byte, hay) {
+                                        c += 1;
+                                        hay = &hay[pos + 1..];
+                                    }
+                                    c
                                 } else {
                                     let mut c: i64 = 1;
                                     let mut i = 0usize;
@@ -3846,18 +3908,36 @@ impl VM {
                                     let sb = sep_s.as_bytes();
                                     let slen = sb.len();
                                     let bytes = src.as_bytes();
-                                    let mut i = 0usize;
-                                    while i + slen <= bytes.len() {
-                                        if &bytes[i..i + slen] == sb {
+                                    if slen == 1 {
+                                        let byte = sb[0];
+                                        let mut cursor = 0usize;
+                                        let mut hay = bytes;
+                                        while let Some(off) = memchr(byte, hay) {
+                                            let i = cursor + off;
                                             if idx == want {
                                                 out.push(Val::Str(Arc::<str>::from(&src[prev..i])));
                                                 pushed = true;
                                                 break;
                                             }
                                             idx += 1;
-                                            i += slen;
-                                            prev = i;
-                                        } else { i += 1; }
+                                            cursor = i + 1;
+                                            prev = cursor;
+                                            hay = &bytes[cursor..];
+                                        }
+                                    } else {
+                                        let mut i = 0usize;
+                                        while i + slen <= bytes.len() {
+                                            if &bytes[i..i + slen] == sb {
+                                                if idx == want {
+                                                    out.push(Val::Str(Arc::<str>::from(&src[prev..i])));
+                                                    pushed = true;
+                                                    break;
+                                                }
+                                                idx += 1;
+                                                i += slen;
+                                                prev = i;
+                                            } else { i += 1; }
+                                        }
                                     }
                                     if !pushed && idx == want {
                                         let arc: Arc<str> = if prev == 0 { s.clone() }
