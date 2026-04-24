@@ -345,25 +345,36 @@ fn parse_postfix_expr(pair: Pair<Rule>) -> Expr {
     let mut inner = pair.into_inner();
     let base = parse_primary(inner.next().unwrap());
     let raw_steps: Vec<Step> = inner.flat_map(parse_postfix_step).collect();
-    // Postfix `?` is emitted by the grammar as `Step::Quantifier(First)`.
-    // Semantics are context-sensitive:
-    //   Field(k) ?  → OptField(k)  — null-propagate, *no* array-first
-    //                 (matches the user's intent for `.service?.test`:
-    //                  check-exists, else null; do not take first of an array).
-    //   Every other step + ? → leave as Step::Quantifier(First). For
-    //   descendants this yields first-or-null on the matched array;
-    //   for array-returning methods (`filter`, `find_all`, `sort`, …) it
-    //   preserves the pre-existing `.filter(…)?` → FindFirst fusion path.
+    // Postfix `?` is emitted by the grammar as `Step::Quantifier(First)`
+    // (historical). We collapse it into null-propagation only:
+    //   Field(k)     + `?` → OptField(k)          (null-safe field)
+    //   Method(n, a) + `?` → OptMethod(n, a)      (null-safe method call)
+    //   Descendant   + `?` → Descendant           (drop `?`, keep array)
+    //   Index/Slice  + `?` → step unchanged       (drop `?`)
+    //
+    // Postfix `?` never takes first-of-array. Use `.first()` explicitly
+    // when you want the first element (e.g. `$..services?.first()`).
+    //
+    // `!` (Quantifier::One) keeps its exact-one-element meaning everywhere.
     let mut steps: Vec<Step> = Vec::with_capacity(raw_steps.len());
     for s in raw_steps {
         match s {
             Step::Quantifier(QuantifierKind::First) => {
-                if let Some(Step::Field(_)) = steps.last() {
-                    if let Some(Step::Field(k)) = steps.pop() {
-                        steps.push(Step::OptField(k));
+                match steps.last() {
+                    Some(Step::Field(_)) => {
+                        if let Some(Step::Field(k)) = steps.pop() {
+                            steps.push(Step::OptField(k));
+                        }
                     }
-                } else {
-                    steps.push(Step::Quantifier(QuantifierKind::First));
+                    Some(Step::Method(_, _)) => {
+                        if let Some(Step::Method(n, a)) = steps.pop() {
+                            steps.push(Step::OptMethod(n, a));
+                        }
+                    }
+                    _ => {
+                        // Descendant / Index / Slice / DynIndex / etc:
+                        // drop the `?` — value passes through unchanged.
+                    }
                 }
             }
             other => steps.push(other),

@@ -912,8 +912,9 @@ mod tests {
     #[test]
     fn quantifier_first() {
         let doc = books();
-        // first book over $10
-        let r = query("$.store.books{price > 10}?", &doc).unwrap();
+        // first book over $10 — postfix `?` is null-safety only; use
+        // `.first()` explicitly to take the first element of an array.
+        let r = query("$.store.books{price > 10}.first()", &doc).unwrap();
         assert_eq!(r["title"], json!("Dune"));
     }
 
@@ -1037,7 +1038,8 @@ mod tests {
     #[test]
     fn fusion_find_first_opcode_emitted() {
         use crate::vm::{Compiler, Opcode};
-        let prog = Compiler::compile_str("$.books{price > 10}?").unwrap();
+        // Inline filter followed by `.first()` fuses to FindFirst.
+        let prog = Compiler::compile_str("$.books{price > 10}.first()").unwrap();
         let has_find_first = prog.ops.iter().any(|o| matches!(o, Opcode::FindFirst(_)));
         assert!(has_find_first, "FindFirst opcode not emitted; got: {:?}", prog.ops);
     }
@@ -1053,7 +1055,9 @@ mod tests {
     #[test]
     fn fusion_find_first_from_filter_method() {
         use crate::vm::{Compiler, Opcode};
-        let prog = Compiler::compile_str("$.books.filter(price > 10)?").unwrap();
+        // `.filter(p).first()` fuses to FindFirst the same as the
+        // inline-filter form.
+        let prog = Compiler::compile_str("$.books.filter(price > 10).first()").unwrap();
         let has_find_first = prog.ops.iter().any(|o| matches!(o, Opcode::FindFirst(_)));
         assert!(has_find_first, "FindFirst should fuse from .filter() too");
     }
@@ -1092,8 +1096,8 @@ mod tests {
     #[test]
     fn find_first_matches_semantics() {
         let doc = books();
-        // inline filter + ? matches first result of unfused filter
-        let fused = query("$.store.books{price > 10}?", &doc).unwrap();
+        // inline filter + .first() matches first result.
+        let fused = query("$.store.books{price > 10}.first()", &doc).unwrap();
         assert_eq!(fused["title"], json!("Dune"));
     }
 
