@@ -105,9 +105,9 @@ let result = jetro::query("$.store.books.len()", &doc)?;
 
 ## Benchmarks
 
-Ratio = `jetro / hand-written Rust + serde_json`. Lower is better; sub‑1.0× means jetro wins.
+**vs hand-written Rust + `serde_json`** — ratio is `jetro_ms / native_ms`, lower is better, sub‑1.0× means jetro wins.
 
-| workload | vs native |
+| workload | vs native Rust |
 |---|---|
 | `map(@.split('-').map(len).sum())` | **0.51×** — 2× faster |
 | `map('prefix-' + @ + '-suffix')` | **0.75×** |
@@ -118,6 +118,19 @@ Ratio = `jetro / hand-written Rust + serde_json`. Lower is better; sub‑1.0× m
 | `map(@.slice(10, 30))` | 2.34× |
 | `map(f"{@.id}_{@.grp}")` | 1.59× |
 | `map(@.upper().replace('FOO', 'BAR'))` | 1.13× |
+
+**vs another Rust-based `jq`-style query engine.** Across 13 representative
+queries — projection, filter, deep find, group-by, nested aggregates — jetro
+is **4×–70× faster**. The biggest gaps show up on deep-search and
+reduction workloads (`$..k.sum()`, multi-predicate `$..find`, `map(field).sum()`):
+jetro's fusion passes collapse these to single opcodes, while interpreted
+`jq`-style engines re-walk the tree per pipeline stage.
+
+**vs idiomatic Go (`encoding/json` + `strings`).** Jetro **matches or beats
+the Go standard library** on string-heavy workloads — for example, on
+`upper + trim` jetro is about 1.3× faster than Go, on `split + reverse +
+join` roughly 4× faster, and on `replace_all` about 3.8× faster. Parity or
+better on the simple scans, with the string-method fusions pulling ahead.
 
 542 tests pass on every release. See [CHANGELOG.md](CHANGELOG.md) for the
 full v0.4.0 bench delta.
