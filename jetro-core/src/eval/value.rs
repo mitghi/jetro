@@ -8,6 +8,7 @@
 use std::sync::Arc;
 use indexmap::IndexMap;
 use serde::ser::{Serialize, SerializeMap, SerializeSeq, Serializer};
+use serde::de::{self, Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde_json::{Map, Number};
 
 // ── Core type ─────────────────────────────────────────────────────────────────
@@ -246,6 +247,74 @@ impl Val {
     /// Stream `self` as JSON into an `io::Write` sink.
     pub fn write_json<W: std::io::Write>(&self, w: W) -> serde_json::Result<()> {
         serde_json::to_writer(w, &ValRef(self))
+    }
+
+    /// Parse JSON text into `Val` directly — one pass, no intermediate
+    /// `serde_json::Value` tree.  Preferred over the
+    /// `serde_json::from_str -> serde_json::Value -> Val::from` round-trip
+    /// for hot `from_json` paths.
+    pub fn from_json_str(s: &str) -> serde_json::Result<Val> {
+        let mut de = serde_json::Deserializer::from_str(s);
+        let v = Val::deserialize(&mut de)?;
+        de.end()?;
+        Ok(v)
+    }
+
+    pub fn from_json_slice(b: &[u8]) -> serde_json::Result<Val> {
+        let mut de = serde_json::Deserializer::from_slice(b);
+        let v = Val::deserialize(&mut de)?;
+        de.end()?;
+        Ok(v)
+    }
+}
+
+// ── Direct Deserialize ────────────────────────────────────────────────────────
+//
+// Avoids the intermediate `serde_json::Value` tree that `b_from_json` used
+// to build.  Preserves order by using IndexMap directly in the visitor.
+
+struct ValVisitor;
+
+impl<'de> Visitor<'de> for ValVisitor {
+    type Value = Val;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("any JSON value")
+    }
+
+    fn visit_unit<E: de::Error>(self) -> Result<Val, E> { Ok(Val::Null) }
+    fn visit_none<E: de::Error>(self) -> Result<Val, E> { Ok(Val::Null) }
+    fn visit_some<D: Deserializer<'de>>(self, d: D) -> Result<Val, D::Error> {
+        Val::deserialize(d)
+    }
+    fn visit_bool<E: de::Error>(self, b: bool) -> Result<Val, E> { Ok(Val::Bool(b)) }
+    fn visit_i64<E: de::Error>(self, n: i64) -> Result<Val, E>  { Ok(Val::Int(n)) }
+    fn visit_u64<E: de::Error>(self, n: u64) -> Result<Val, E>  {
+        if n <= i64::MAX as u64 { Ok(Val::Int(n as i64)) } else { Ok(Val::Float(n as f64)) }
+    }
+    fn visit_f64<E: de::Error>(self, f: f64) -> Result<Val, E>  { Ok(Val::Float(f)) }
+    fn visit_str<E: de::Error>(self, s: &str) -> Result<Val, E> { Ok(Val::Str(Arc::from(s))) }
+    fn visit_string<E: de::Error>(self, s: String) -> Result<Val, E> { Ok(Val::Str(Arc::from(s.as_str()))) }
+    fn visit_borrowed_str<E: de::Error>(self, s: &'de str) -> Result<Val, E> { Ok(Val::Str(Arc::from(s))) }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut a: A) -> Result<Val, A::Error> {
+        let mut out: Vec<Val> = Vec::with_capacity(a.size_hint().unwrap_or(0));
+        while let Some(item) = a.next_element::<Val>()? { out.push(item); }
+        Ok(Val::arr(out))
+    }
+    fn visit_map<A: MapAccess<'de>>(self, mut m: A) -> Result<Val, A::Error> {
+        let mut out: IndexMap<Arc<str>, Val> =
+            IndexMap::with_capacity(m.size_hint().unwrap_or(0));
+        while let Some((k, v)) = m.next_entry::<String, Val>()? {
+            out.insert(Arc::from(k.as_str()), v);
+        }
+        Ok(Val::obj(out))
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Val {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Val, D::Error> {
+        d.deserialize_any(ValVisitor)
     }
 }
 

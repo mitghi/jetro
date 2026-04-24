@@ -289,10 +289,18 @@ fn b_to_json(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
 }
 
 fn b_from_json(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    let s = val_to_string(&recv);
-    let sv: serde_json::Value = serde_json::from_str(&s)
-        .map_err(|e| EvalError(format!("from_json: {}", e)))?;
-    Ok(Val::from(&sv))
+    // Direct one-pass parse via `Val::deserialize` — no intermediate
+    // `serde_json::Value` tree.  For `Val::Str` receivers we skip the
+    // buffer deep-clone too.
+    match &recv {
+        Val::Str(s) => Val::from_json_str(s.as_ref())
+            .map_err(|e| EvalError(format!("from_json: {}", e))),
+        _ => {
+            let s = val_to_string(&recv);
+            Val::from_json_str(&s)
+                .map_err(|e| EvalError(format!("from_json: {}", e)))
+        }
+    }
 }
 
 fn b_keys(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
