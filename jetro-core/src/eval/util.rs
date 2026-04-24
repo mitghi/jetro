@@ -33,6 +33,7 @@ pub fn is_truthy(v: &Val) -> bool {
         Val::Arr(a)    => !a.is_empty(),
         Val::IntVec(a) => !a.is_empty(),
         Val::FloatVec(a) => !a.is_empty(),
+        Val::StrVec(a) => !a.is_empty(),
         Val::Obj(m)    => !m.is_empty(),
     }
 }
@@ -209,6 +210,7 @@ pub fn flatten_val(v: Val, depth: usize) -> Val {
                 Val::Arr(inner) => inner.len(),
                 Val::IntVec(inner) => inner.len(),
                 Val::FloatVec(inner) => inner.len(),
+                Val::StrVec(inner) => inner.len(),
                 _ => 1,
             }).sum();
             let mut out = Vec::with_capacity(cap);
@@ -224,6 +226,9 @@ pub fn flatten_val(v: Val, depth: usize) -> Val {
                         Val::FloatVec(inner) => {
                             out.extend(inner.iter().map(|f| Val::Float(*f)));
                         }
+                        Val::StrVec(inner) => {
+                            out.extend(inner.iter().map(|s| Val::Str(s.clone())));
+                        }
                         _ => {}
                     },
                     Val::IntVec(inner) => {
@@ -233,13 +238,16 @@ pub fn flatten_val(v: Val, depth: usize) -> Val {
                     Val::FloatVec(inner) => {
                         out.extend(inner.iter().map(|f| Val::Float(*f)));
                     }
+                    Val::StrVec(inner) => {
+                        out.extend(inner.iter().map(|s| Val::Str(s.clone())));
+                    }
                     other => out.push(other),
                 }
             }
             Val::arr(out)
         }
         // Columnar receiver — already flat of scalars.
-        Val::IntVec(_) | Val::FloatVec(_) => v,
+        Val::IntVec(_) | Val::FloatVec(_) | Val::StrVec(_) => v,
         other => other,
     }
 }
@@ -316,6 +324,15 @@ pub fn deep_merge_concat(base: Val, other: Val) -> Val {
         (Val::Arr(ba), Val::Arr(oa)) => {
             let mut a = Arc::try_unwrap(ba).unwrap_or_else(|a| (*a).clone());
             for v in Arc::try_unwrap(oa).unwrap_or_else(|a| (*a).clone()) { a.push(v); }
+            Val::arr(a)
+        }
+        (base, other)
+            if (base.is_array() && other.is_array())
+            && (matches!(&base, Val::StrVec(_) | Val::IntVec(_) | Val::FloatVec(_))
+                || matches!(&other, Val::StrVec(_) | Val::IntVec(_) | Val::FloatVec(_))) =>
+        {
+            let mut a = base.into_vec().unwrap_or_default();
+            if let Some(v) = other.into_vec() { a.extend(v); }
             Val::arr(a)
         }
         (_, other) => other,

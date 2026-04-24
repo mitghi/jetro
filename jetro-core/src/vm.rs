@@ -3728,6 +3728,7 @@ impl VM {
                 }
                 Opcode::MapReplaceLit { needle, with, all } => {
                     let v = pop!(stack);
+                    let v = if matches!(&v, Val::StrVec(_)) { v.into_arr() } else { v };
                     let n: &str = needle.as_ref();
                     let w: &str = with.as_ref();
                     let nlen = n.len();
@@ -3808,6 +3809,7 @@ impl VM {
                 }
                 Opcode::MapSplitCountSum { sep } => {
                     let v = pop!(stack);
+                    let v = if matches!(&v, Val::StrVec(_)) { v.into_arr() } else { v };
                     let sep_b = sep.as_bytes();
                     let slen = sep_b.len();
                     let mut total: i64 = 0;
@@ -3844,6 +3846,7 @@ impl VM {
                 }
                 Opcode::MapSplitCount { sep } => {
                     let v = pop!(stack);
+                    let v = if matches!(&v, Val::StrVec(_)) { v.into_arr() } else { v };
                     let sep_b = sep.as_bytes();
                     let slen = sep_b.len();
                     let out = if let Val::Arr(a) = &v {
@@ -3885,6 +3888,7 @@ impl VM {
                 }
                 Opcode::MapSplitFirst { sep } => {
                     let v = pop!(stack);
+                    let v = if matches!(&v, Val::StrVec(_)) { v.into_arr() } else { v };
                     let sep_s = sep.as_ref();
                     let out = if let Val::Arr(a) = &v {
                         let mut out = Vec::with_capacity(a.len());
@@ -3916,6 +3920,7 @@ impl VM {
                 }
                 Opcode::MapSplitNth { sep, n } => {
                     let v = pop!(stack);
+                    let v = if matches!(&v, Val::StrVec(_)) { v.into_arr() } else { v };
                     let sep_s = sep.as_ref();
                     let want = *n;
                     let out = if let Val::Arr(a) = &v {
@@ -4508,6 +4513,21 @@ impl VM {
                                 _ => { stack.push(recv); continue; }
                             }
                             stack.push(Val::float_vec(out));
+                            continue;
+                        }
+                        (Val::StrVec(a), Val::Str(rhs)) => {
+                            let rhs_b = rhs.as_bytes();
+                            let mut out: Vec<Arc<str>> = Vec::with_capacity(a.len());
+                            match op {
+                                BinOp::Eq  => for s in a.iter() { if s.as_bytes() == rhs_b { out.push(s.clone()); } }
+                                BinOp::Neq => for s in a.iter() { if s.as_bytes() != rhs_b { out.push(s.clone()); } }
+                                BinOp::Lt  => for s in a.iter() { if s.as_bytes() <  rhs_b { out.push(s.clone()); } }
+                                BinOp::Lte => for s in a.iter() { if s.as_bytes() <= rhs_b { out.push(s.clone()); } }
+                                BinOp::Gt  => for s in a.iter() { if s.as_bytes() >  rhs_b { out.push(s.clone()); } }
+                                BinOp::Gte => for s in a.iter() { if s.as_bytes() >= rhs_b { out.push(s.clone()); } }
+                                _ => { stack.push(recv); continue; }
+                            }
+                            stack.push(Val::str_vec(out));
                             continue;
                         }
                         _ => {}
@@ -7044,6 +7064,7 @@ fn exec_cast(v: &Val, ty: super::ast::CastType) -> Result<Val, EvalError> {
             Val::Arr(a)   => !a.is_empty(),
             Val::IntVec(a) => !a.is_empty(),
             Val::FloatVec(a) => !a.is_empty(),
+            Val::StrVec(a) => !a.is_empty(),
             Val::Obj(o)   => !o.is_empty(),
         })),
         CastType::Number | CastType::Float => match v {
@@ -7159,6 +7180,7 @@ fn hash_structure_into(v: &Val, h: &mut DefaultHasher, depth: usize) {
         Val::Arr(a)     => { 5u8.hash(h); a.len().hash(h); for item in a.iter() { hash_structure_into(item, h, depth+1); } }
         Val::IntVec(a)  => { 5u8.hash(h); a.len().hash(h); for n in a.iter() { 2u8.hash(h); n.hash(h); } }
         Val::FloatVec(a) => { 5u8.hash(h); a.len().hash(h); for f in a.iter() { 3u8.hash(h); f.to_bits().hash(h); } }
+        Val::StrVec(a)  => { 5u8.hash(h); a.len().hash(h); for s in a.iter() { 4u8.hash(h); s.hash(h); } }
         Val::Obj(m)     => { 6u8.hash(h); m.len().hash(h); for (k, v) in m.iter() { k.hash(h); hash_structure_into(v, h, depth+1); } }
     }
 }

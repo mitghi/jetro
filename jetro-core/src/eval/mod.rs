@@ -716,6 +716,7 @@ fn cast_val(v: &Val, ty: super::ast::CastType) -> Result<Val, EvalError> {
             Val::Arr(a)     => !a.is_empty(),
             Val::IntVec(a)  => !a.is_empty(),
             Val::FloatVec(a) => !a.is_empty(),
+            Val::StrVec(a)  => !a.is_empty(),
             Val::Obj(o)     => !o.is_empty(),
         })),
         CastType::Number | CastType::Float => match v {

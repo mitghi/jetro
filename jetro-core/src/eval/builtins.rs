@@ -479,7 +479,13 @@ fn b_includes(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     use super::util::val_to_key;
     let key = val_to_key(&item);
     Ok(Val::Bool(match &recv {
-        Val::Arr(a) => a.iter().any(|v| val_to_key(v) == key),
+        Val::Arr(a)    => a.iter().any(|v| val_to_key(v) == key),
+        Val::IntVec(a) => a.iter().any(|n| val_to_key(&Val::Int(*n)) == key),
+        Val::FloatVec(a) => a.iter().any(|f| val_to_key(&Val::Float(*f)) == key),
+        Val::StrVec(a) => match item.as_str() {
+            Some(needle) => a.iter().any(|s| s.as_ref() == needle),
+            None => false,
+        },
         Val::Str(s) => s.contains(item.as_str().unwrap_or_default()),
         _ => false,
     }))

@@ -254,10 +254,41 @@ fn filter_intvec_preserves_typed_output() {
 
 #[test]
 fn filter_non_columnar_fallback() {
-    // Strings — can't go through IntVec path; must hit generic fallback.
+    // Homogeneous string arrays take the StrVec columnar fast path —
+    // bytewise compare vs literal, output preserves StrVec lane.
     let doc = json!(["a", "bb", "ccc", "dddd"]);
     let out = Jetro::new(doc).collect_val(r#"$.filter(@ > "b")"#).unwrap();
     assert_eq!(out.to_string(), r#"["bb","ccc","dddd"]"#);
+}
+
+#[test]
+fn filter_strvec_eq_str() {
+    let doc = json!(["alpha", "beta", "gamma", "alpha"]);
+    let out = Jetro::new(doc).collect_val(r#"$.filter(@ == "alpha")"#).unwrap();
+    assert_eq!(out.to_string(), r#"["alpha","alpha"]"#);
+}
+
+#[test]
+fn filter_strvec_lt_str() {
+    let doc = json!(["aa", "ab", "ba", "zz"]);
+    let out = Jetro::new(doc).collect_val(r#"$.filter(@ < "b")"#).unwrap();
+    assert_eq!(out.to_string(), r#"["aa","ab"]"#);
+}
+
+#[test]
+fn filter_strvec_preserves_lane_for_sort() {
+    // After StrVec filter, downstream .sort() should still work correctly.
+    let doc = json!(["pear", "apple", "banana", "cherry"]);
+    let out = Jetro::new(doc).collect_val(r#"$.filter(@ > "b").sort()"#).unwrap();
+    assert_eq!(out.to_string(), r#"["banana","cherry","pear"]"#);
+}
+
+#[test]
+fn filter_strvec_mixed_types_not_columnar() {
+    // Non-homogeneous array doesn't promote to StrVec — falls back to Arr path.
+    let doc = json!(["a", 1, "b", 2]);
+    let out = Jetro::new(doc).collect_val(r#"$.filter(@ == "a")"#).unwrap();
+    assert_eq!(out.to_string(), r#"["a"]"#);
 }
 
 // ── Tier C/E: fanout / zip_shape / rec / trace_path ──────────────────────

@@ -31,6 +31,7 @@ pub enum Val {
     Arr(Arc<Vec<Val>>),
     IntVec(Arc<Vec<i64>>),
     FloatVec(Arc<Vec<f64>>),
+    StrVec(Arc<Vec<Arc<str>>>),
     Obj(Arc<IndexMap<Arc<str>, Val>>),
 }
 
@@ -74,6 +75,12 @@ impl Val {
                 } else { i as usize };
                 a.get(idx).copied().map(Val::Float).unwrap_or(Val::Null)
             }
+            Val::StrVec(a) => {
+                let idx = if i < 0 {
+                    a.len().saturating_sub(i.unsigned_abs() as usize)
+                } else { i as usize };
+                a.get(idx).cloned().map(Val::Str).unwrap_or(Val::Null)
+            }
             _ => Val::Null,
         }
     }
@@ -82,7 +89,7 @@ impl Val {
     #[inline] pub fn is_bool(&self)   -> bool { matches!(self, Val::Bool(_)) }
     #[inline] pub fn is_number(&self) -> bool { matches!(self, Val::Int(_) | Val::Float(_)) }
     #[inline] pub fn is_string(&self) -> bool { matches!(self, Val::Str(_)) }
-    #[inline] pub fn is_array(&self)  -> bool { matches!(self, Val::Arr(_) | Val::IntVec(_) | Val::FloatVec(_)) }
+    #[inline] pub fn is_array(&self)  -> bool { matches!(self, Val::Arr(_) | Val::IntVec(_) | Val::FloatVec(_) | Val::StrVec(_)) }
     #[inline] pub fn is_object(&self) -> bool { matches!(self, Val::Obj(_)) }
 
     /// Array length — also works on columnar variants.
@@ -92,6 +99,7 @@ impl Val {
             Val::Arr(a)      => Some(a.len()),
             Val::IntVec(a)   => Some(a.len()),
             Val::FloatVec(a) => Some(a.len()),
+            Val::StrVec(a)   => Some(a.len()),
             _ => None,
         }
     }
@@ -128,6 +136,7 @@ impl Val {
             Val::Arr(a)      => Some(Cow::Borrowed(a.as_slice())),
             Val::IntVec(a)   => Some(Cow::Owned(a.iter().map(|n| Val::Int(*n)).collect())),
             Val::FloatVec(a) => Some(Cow::Owned(a.iter().map(|f| Val::Float(*f)).collect())),
+            Val::StrVec(a)   => Some(Cow::Owned(a.iter().map(|s| Val::Str(s.clone())).collect())),
             _ => None,
         }
     }
@@ -141,6 +150,10 @@ impl Val {
             }
             Val::FloatVec(a) => {
                 let v: Vec<Val> = a.iter().map(|f| Val::Float(*f)).collect();
+                Val::arr(v)
+            }
+            Val::StrVec(a) => {
+                let v: Vec<Val> = a.iter().map(|s| Val::Str(s.clone())).collect();
                 Val::arr(v)
             }
             other => other,
@@ -174,7 +187,7 @@ impl Val {
             Val::Bool(_) => "bool",
             Val::Int(_) | Val::Float(_) => "number",
             Val::Str(_)  => "string",
-            Val::Arr(_) | Val::IntVec(_) | Val::FloatVec(_) => "array",
+            Val::Arr(_) | Val::IntVec(_) | Val::FloatVec(_) | Val::StrVec(_) => "array",
             Val::Obj(_)  => "object",
         }
     }
@@ -186,6 +199,7 @@ impl Val {
             Val::Arr(a) => Some(Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone())),
             Val::IntVec(a) => Some(a.iter().map(|n| Val::Int(*n)).collect()),
             Val::FloatVec(a) => Some(a.iter().map(|f| Val::Float(*f)).collect()),
+            Val::StrVec(a) => Some(a.iter().map(|s| Val::Str(s.clone())).collect()),
             _ => None,
         }
     }
@@ -208,6 +222,10 @@ impl Val {
     /// Build a columnar `Val::FloatVec` from a `Vec<f64>`.
     #[inline]
     pub fn float_vec(v: Vec<f64>) -> Self { Val::FloatVec(Arc::new(v)) }
+
+    /// Build a columnar `Val::StrVec` from a `Vec<Arc<str>>`.
+    #[inline]
+    pub fn str_vec(v: Vec<Arc<str>>) -> Self { Val::StrVec(Arc::new(v)) }
 
     /// Build a Val::Obj from an IndexMap without an extra allocation.
     #[inline]
@@ -240,6 +258,16 @@ impl From<&serde_json::Value> for Val {
                         if let serde_json::Value::Number(n) = v { n.as_i64() } else { None }
                     ).collect();
                     return Val::IntVec(Arc::new(out));
+                }
+                // Homogeneous all-string arrays promote to Val::StrVec for
+                // columnar filter/contains fast paths.
+                let all_str = !a.is_empty() && a.iter()
+                    .all(|v| matches!(v, serde_json::Value::String(_)));
+                if all_str {
+                    let out: Vec<Arc<str>> = a.iter().filter_map(|v|
+                        if let serde_json::Value::String(s) = v { Some(Arc::from(s.as_str())) } else { None }
+                    ).collect();
+                    return Val::StrVec(Arc::new(out));
                 }
                 Val::Arr(Arc::new(a.iter().map(Val::from).collect()))
             }
@@ -277,6 +305,11 @@ impl From<Val> for serde_json::Value {
                 let out: Vec<serde_json::Value> = a.iter().map(|f|
                     serde_json::Value::Number(Number::from_f64(*f).unwrap_or_else(|| 0.into()))
                 ).collect();
+                serde_json::Value::Array(out)
+            }
+            Val::StrVec(a) => {
+                let out: Vec<serde_json::Value> =
+                    a.iter().map(|s| serde_json::Value::String(s.to_string())).collect();
                 serde_json::Value::Array(out)
             }
             Val::Obj(m)  => {
@@ -330,6 +363,11 @@ impl<'a> Serialize for ValRef<'a> {
                     if f.is_finite() { seq.serialize_element(f)?; }
                     else { seq.serialize_element(&0i64)?; }
                 }
+                seq.end()
+            }
+            Val::StrVec(a) => {
+                let mut seq = s.serialize_seq(Some(a.len()))?;
+                for v in a.iter() { seq.serialize_element(v.as_ref())?; }
                 seq.end()
             }
             Val::Obj(m)  => {
@@ -414,29 +452,45 @@ impl<'de> Visitor<'de> for ValVisitor {
     fn visit_borrowed_str<E: de::Error>(self, s: &'de str) -> Result<Val, E> { Ok(Val::Str(Arc::from(s))) }
 
     fn visit_seq<A: SeqAccess<'de>>(self, mut a: A) -> Result<Val, A::Error> {
-        // Speculative all-i64 fast path: collect into a `Vec<i64>` while
-        // every element stays `Val::Int`; on first non-int, migrate to
-        // `Vec<Val>` and keep going.  Emits columnar `Val::IntVec` for
-        // homogeneous numeric arrays (saves 3x storage and write bandwidth
-        // on big int payloads).
+        // Speculative columnar path: lock the lane on the first element.
+        // While every subsequent element matches the lane, push into the
+        // typed vec; on first mismatch, migrate to `Vec<Val>`.  Empty arrays
+        // default to generic Val::Arr (no lane to commit to).
+        enum Lane { Unset, Int(Vec<i64>), Str(Vec<Arc<str>>) }
         let cap = a.size_hint().unwrap_or(0);
-        let mut ints: Vec<i64> = Vec::with_capacity(cap);
+        let mut lane: Lane = Lane::Unset;
         let mut fallback: Option<Vec<Val>> = None;
         while let Some(item) = a.next_element::<Val>()? {
-            match (fallback.as_mut(), item) {
-                (None, Val::Int(n)) => ints.push(n),
-                (None, other) => {
-                    let mut v: Vec<Val> = Vec::with_capacity(ints.len() + cap);
-                    for n in &ints { v.push(Val::Int(*n)); }
+            if let Some(v) = fallback.as_mut() { v.push(item); continue; }
+            match (&mut lane, item) {
+                (Lane::Unset, Val::Int(n)) => lane = Lane::Int(vec![n]),
+                (Lane::Unset, Val::Str(s)) => lane = Lane::Str(vec![s]),
+                (Lane::Unset, other) => {
+                    let mut v: Vec<Val> = Vec::with_capacity(cap);
                     v.push(other);
                     fallback = Some(v);
                 }
-                (Some(v), other) => v.push(other),
+                (Lane::Int(xs), Val::Int(n)) => xs.push(n),
+                (Lane::Str(xs), Val::Str(s)) => xs.push(s),
+                (lane_ref, other) => {
+                    let mut v: Vec<Val> = Vec::with_capacity(cap);
+                    match std::mem::replace(lane_ref, Lane::Unset) {
+                        Lane::Int(xs) => for n in xs { v.push(Val::Int(n)); }
+                        Lane::Str(xs) => for s in xs { v.push(Val::Str(s)); }
+                        Lane::Unset   => {}
+                    }
+                    v.push(other);
+                    fallback = Some(v);
+                }
             }
         }
         Ok(match fallback {
             Some(v) => Val::arr(v),
-            None    => Val::IntVec(Arc::new(ints)),
+            None => match lane {
+                Lane::Int(xs) => Val::IntVec(Arc::new(xs)),
+                Lane::Str(xs) => Val::StrVec(Arc::new(xs)),
+                Lane::Unset   => Val::arr(Vec::new()),
+            },
         })
     }
     fn visit_map<A: MapAccess<'de>>(self, mut m: A) -> Result<Val, A::Error> {
@@ -506,6 +560,7 @@ impl PartialEq for Val {
             (Val::Float(a), Val::Int(b))  => *a == (*b as f64),
             (Val::IntVec(a), Val::IntVec(b)) => a == b,
             (Val::FloatVec(a), Val::FloatVec(b)) => a == b,
+            (Val::StrVec(a), Val::StrVec(b)) => a == b,
             _ => false,
         }
     }
@@ -524,6 +579,7 @@ impl std::hash::Hash for Val {
             Val::Arr(a)     => { 4u8.hash(state); (Arc::as_ptr(a) as usize).hash(state); }
             Val::IntVec(a)  => { 4u8.hash(state); (Arc::as_ptr(a) as usize).hash(state); }
             Val::FloatVec(a) => { 4u8.hash(state); (Arc::as_ptr(a) as usize).hash(state); }
+            Val::StrVec(a)  => { 4u8.hash(state); (Arc::as_ptr(a) as usize).hash(state); }
             Val::Obj(m)     => { 5u8.hash(state); (Arc::as_ptr(m) as usize).hash(state); }
         }
     }
