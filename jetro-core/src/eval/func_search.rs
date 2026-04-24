@@ -231,6 +231,78 @@ pub fn deep_shape(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> 
     Ok(Val::arr(out))
 }
 
+// ── rec (Tier E, fixpoint) ───────────────────────────────────────────────────
+//
+// `.rec(step)` — apply `step` with `@` = current value until the result
+// stops changing.  Cap at 10_000 iterations to surface non-terminating
+// steps instead of hanging.
+
+pub fn rec(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+    let step = args.first().ok_or_else(|| EvalError("rec: requires step expression".into()))?;
+    let mut env_mut = env.clone();
+    let mut cur = recv;
+    for _ in 0..10_000 {
+        let next = apply_item_mut(cur.clone(), step, &mut env_mut)?;
+        if vals_eq(&cur, &next) { return Ok(next); }
+        cur = next;
+    }
+    err!("rec: exceeded 10000 iterations without reaching fixpoint")
+}
+
+// ── trace_path (Tier E) ──────────────────────────────────────────────────────
+//
+// DFS pre-order.  For every descendant where `pred` is truthy, emit
+// `{path: "$.a.b[0]", value: v}`.  `$` represents the root of the
+// received value.
+
+pub fn trace_path(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+    let pred = args.first().ok_or_else(|| EvalError("trace_path: requires predicate".into()))?;
+    let mut env_mut = env.clone();
+    let mut out = Vec::new();
+    trace_walk(&recv, String::from("$"), pred, &mut env_mut, &mut out)?;
+    Ok(Val::arr(out))
+}
+
+fn trace_walk(
+    v: &Val,
+    path: String,
+    pred: &Arg,
+    env: &mut super::Env,
+    out: &mut Vec<Val>,
+) -> Result<(), EvalError> {
+    let matched = apply_item_mut(v.clone(), pred, env).map(|r| is_truthy(&r)).unwrap_or(false);
+    if matched {
+        let mut row = indexmap::IndexMap::with_capacity(2);
+        row.insert(Arc::from("path"), Val::Str(Arc::from(path.as_str())));
+        row.insert(Arc::from("value"), v.clone());
+        out.push(Val::obj(row));
+    }
+    match v {
+        Val::Arr(a) => {
+            for (i, c) in a.iter().enumerate() {
+                trace_walk(c, format!("{}[{}]", path, i), pred, env, out)?;
+            }
+        }
+        Val::IntVec(a) => {
+            for (i, n) in a.iter().enumerate() {
+                trace_walk(&Val::Int(*n), format!("{}[{}]", path, i), pred, env, out)?;
+            }
+        }
+        Val::FloatVec(a) => {
+            for (i, f) in a.iter().enumerate() {
+                trace_walk(&Val::Float(*f), format!("{}[{}]", path, i), pred, env, out)?;
+            }
+        }
+        Val::Obj(m) => {
+            for (k, c) in m.iter() {
+                trace_walk(c, format!("{}.{}", path, k), pred, env, out)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 // ── deep_like ────────────────────────────────────────────────────────────────
 
 pub fn deep_like(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {

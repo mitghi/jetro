@@ -324,6 +324,43 @@ pub fn pivot(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     Ok(Val::obj(map))
 }
 
+// ── fanout / zip_shape (Tier C lite) ─────────────────────────────────────────
+//
+// `fanout(e1, e2, …)` — evaluate each arg with `@` = recv, return the
+// results as an array.  Tuple-on-one-value.
+//
+// `zip_shape(name=expr, …)` — evaluate each named arg with `@` = recv,
+// collect as an ordered object.  Bare idents are shorthand for
+// `name=name` (like `.pick` but with evaluated exprs rather than field
+// lookups).  Names are *not* visible to later exprs (keeps the hot path
+// simple; order is preserved for serialisation only).
+
+pub fn fanout(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+    if args.is_empty() { return err!("fanout: requires at least one expression"); }
+    let mut env_mut = env.clone();
+    let mut out = Vec::with_capacity(args.len());
+    for a in args {
+        out.push(apply_item_mut(recv.clone(), a, &mut env_mut)?);
+    }
+    Ok(Val::arr(out))
+}
+
+pub fn zip_shape(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+    if args.is_empty() { return err!("zip_shape: requires at least one field"); }
+    let mut env_mut = env.clone();
+    let mut out: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(args.len());
+    for a in args {
+        let name: Arc<str> = match a {
+            Arg::Named(n, _)           => Arc::from(n.as_str()),
+            Arg::Pos(Expr::Ident(n))   => Arc::from(n.as_str()),
+            _ => return err!("zip_shape: args must be `name = expr` or bare identifier"),
+        };
+        let v = apply_item_mut(recv.clone(), a, &mut env_mut)?;
+        out.insert(name, v);
+    }
+    Ok(Val::obj(out))
+}
+
 // ── schema (Tier A) ───────────────────────────────────────────────────────────
 //
 // `.schema()` — walk a value and return a schema descriptor.

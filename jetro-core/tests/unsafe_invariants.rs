@@ -213,6 +213,43 @@ fn group_shape_count() {
     assert!(s.contains(r#""b":1"#), "got {s}");
 }
 
+// ── Tier C/E: fanout / zip_shape / rec / trace_path ──────────────────────
+
+#[test]
+fn fanout_multiple_views() {
+    let doc = json!({"a": 3, "b": 4});
+    let out = Jetro::new(doc).collect_val(r#"$.fanout(a, b, a + b)"#).unwrap();
+    assert_eq!(out.to_string(), r#"[3,4,7]"#);
+}
+
+#[test]
+fn zip_shape_named_and_bare() {
+    let doc = json!({"first": "Ada", "last": "Lovelace"});
+    let out = Jetro::new(doc)
+        .collect_val(r#"$.zip_shape(full: first + " " + last, first)"#).unwrap();
+    let s = out.to_string();
+    assert!(s.contains(r#""full":"Ada Lovelace""#), "got {s}");
+    assert!(s.contains(r#""first":"Ada""#), "got {s}");
+}
+
+#[test]
+fn rec_fixpoint_cap() {
+    // keep halving until 0, then return 0 stably
+    let doc = json!(32);
+    let out = Jetro::new(doc).collect_val(r#"$.rec(@ / 2 if @ > 0 else 0)"#).unwrap();
+    assert_eq!(out.to_string(), "0");
+}
+
+#[test]
+fn trace_path_collects_paths() {
+    let doc = json!({"a": {"b": 42}, "c": [1, 2, 42]});
+    let out = Jetro::new(doc)
+        .collect_val(r#"$.trace_path(@ == 42)"#).unwrap();
+    let s = out.to_string();
+    assert!(s.contains(r#""path":"$.a.b""#), "got {s}");
+    assert!(s.contains(r#""path":"$.c[2]""#), "got {s}");
+}
+
 #[test]
 fn split_count_sum_fusion() {
     let doc = json!(["a-b-c-d-e", "one-two", "solo", ""]);

@@ -151,6 +151,12 @@ fn build() -> BuiltinRegistry {
     t.insert("walk_pre",   func_search::walk_pre_fn);
     t.insert("walkPre",    func_search::walk_pre_fn);
     t.insert("schema",     func_objects::schema);
+    t.insert("rec",        func_search::rec);
+    t.insert("trace_path", func_search::trace_path);
+    t.insert("tracePath",  func_search::trace_path);
+    t.insert("fanout",     func_objects::fanout);
+    t.insert("zip_shape",  func_objects::zip_shape);
+    t.insert("zipShape",   func_objects::zip_shape);
 
     // Aggregates — full signature
     t.insert("sum",      func_aggregates::sum);
