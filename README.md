@@ -432,14 +432,19 @@ jetro = { version = "0.3", features = ["macros"] }
 ```
 $.field                // child field
 $.a.b.c                // nested
-$.user?.name           // null-safe field
+$.user?.name           // null-safe (postfix `?` on .user, not prefix `?.`)
 $.items[0]             // array index
 $.items[-1]            // last
 $.items[2:5]           // slice [2, 5)
 $.items[2:]            // tail
 $.items[:5]            // head
 $..title               // recursive descent
+$..services?.first()   // descendant + null-safe + explicit first
 ```
+
+Postfix `?` is null-safety only. It does not take the first element of
+an array — for that use `.first()` explicitly. `!` keeps its
+exactly-one-element meaning (errors on 0 or >1).
 
 ### Literals
 
