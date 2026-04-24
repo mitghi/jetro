@@ -123,19 +123,71 @@ fn op_arity(op: &Opcode) -> Arity {
             Arity { pops: 0, pushes: true },
 
         Opcode::GetField(_) | Opcode::OptField(_) | Opcode::GetIndex(_)
+            | Opcode::FieldChain(_)
             | Opcode::GetSlice(..) | Opcode::Descendant(_) | Opcode::DescendAll
             | Opcode::DynIndex(_) | Opcode::InlineFilter(_)
             | Opcode::Quantifier(_) | Opcode::FilterCount(_)
             | Opcode::FindFirst(_) | Opcode::FindOne(_)
-            | Opcode::FilterMap { .. } | Opcode::FilterFilter { .. }
+            | Opcode::FilterMap { .. } | Opcode::MapFilter { .. }
+            | Opcode::FilterMapSum { .. } | Opcode::FilterMapAvg { .. }
+            | Opcode::FilterMapFirst { .. }
+            | Opcode::FilterMapMin { .. } | Opcode::FilterMapMax { .. }
+            | Opcode::FilterLast { .. }
+            | Opcode::FilterFilter { .. }
             | Opcode::MapMap { .. } | Opcode::MapSum(_) | Opcode::MapAvg(_)
-            | Opcode::MapFlatten(_) | Opcode::FilterTakeWhile { .. }
+            | Opcode::MapToJsonJoin { .. }
+            | Opcode::StrTrimUpper | Opcode::StrTrimLower
+            | Opcode::StrUpperTrim | Opcode::StrLowerTrim
+            | Opcode::StrSplitReverseJoin { .. }
+            | Opcode::MapReplaceLit { .. }
+            | Opcode::MapUpperReplaceLit { .. }
+            | Opcode::MapLowerReplaceLit { .. }
+            | Opcode::MapStrConcat { .. }
+            | Opcode::MapSplitLenSum { .. }
+            | Opcode::MapProject { .. }
+            | Opcode::MapStrSlice { .. }
+            | Opcode::MapFString(_)
+            | Opcode::MapSplitCount { .. }
+            | Opcode::MapSplitFirst { .. }
+            | Opcode::MapSplitNth   { .. }
+            | Opcode::MapSplitCountSum { .. }
+            | Opcode::MapMin(_) | Opcode::MapMax(_)
+            | Opcode::MapFieldSum(_) | Opcode::MapFieldAvg(_)
+            | Opcode::MapFieldMin(_) | Opcode::MapFieldMax(_)
+            | Opcode::MapField(_) | Opcode::MapFieldChain(_) | Opcode::MapFieldUnique(_)
+            | Opcode::MapFieldChainUnique(_)
+            | Opcode::FlatMapChain(_)
+            | Opcode::FilterFieldEqLit(_, _) | Opcode::FilterFieldCmpLit(_, _, _)
+            | Opcode::FilterCurrentCmpLit(_, _)
+            | Opcode::FilterStrVecStartsWith(_)
+            | Opcode::FilterStrVecEndsWith(_)
+            | Opcode::FilterStrVecContains(_)
+            | Opcode::MapStrVecUpper
+            | Opcode::MapStrVecLower
+            | Opcode::MapStrVecTrim
+            | Opcode::MapNumVecArith { .. }
+            | Opcode::MapNumVecNeg
+            | Opcode::FilterFieldCmpField(_, _, _)
+            | Opcode::FilterFieldEqLitMapField(_, _, _)
+            | Opcode::FilterFieldCmpLitMapField(_, _, _, _)
+            | Opcode::FilterFieldEqLitCount(_, _) | Opcode::FilterFieldCmpLitCount(_, _, _)
+            | Opcode::FilterFieldCmpFieldCount(_, _, _)
+            | Opcode::FilterFieldsAllEqLitCount(_)
+            | Opcode::FilterFieldsAllCmpLitCount(_)
+            | Opcode::GroupByField(_)
+            | Opcode::CountByField(_)
+            | Opcode::UniqueByField(_)
+            | Opcode::MapFlatten(_)
+            | Opcode::MapFirst(_) | Opcode::MapLast(_)
+            | Opcode::FilterTakeWhile { .. }
             | Opcode::FilterDropWhile { .. } | Opcode::MapUnique(_)
             | Opcode::EquiJoin { .. }
-            | Opcode::TopN { .. } | Opcode::KindCheck { .. }
+            | Opcode::TopN { .. } | Opcode::UniqueCount
+            | Opcode::ArgExtreme { .. } | Opcode::KindCheck { .. }
             | Opcode::Not | Opcode::Neg
             | Opcode::CallMethod(_) | Opcode::CallOptMethod(_)
             | Opcode::AndOp(_) | Opcode::OrOp(_) | Opcode::CoalesceOp(_)
+            | Opcode::IfElse { .. }
             | Opcode::CastOp(_) =>
             Arity { pops: 1, pushes: true },
 

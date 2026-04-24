@@ -636,8 +636,9 @@ mod examples {
 
     #[test]
     fn obj_merge() {
+        // chain form now writes back — pipe form preserves pure merge
         let doc = json!({"a": {"x": 1, "y": 2}, "b": {"y": 99, "z": 3}});
-        let r = query("$.a.merge($.b)", &doc).unwrap();
+        let r = query("$.a | merge($.b)", &doc).unwrap();
         assert_eq!(r["y"], json!(99));
         assert_eq!(r["z"], json!(3));
     }
@@ -645,7 +646,7 @@ mod examples {
     #[test]
     fn obj_deep_merge() {
         let doc = json!({"a": {"x": {"p": 1}}, "b": {"x": {"q": 2}, "y": 3}});
-        let r = query("$.a.deep_merge($.b)", &doc).unwrap();
+        let r = query("$.a | deep_merge($.b)", &doc).unwrap();
         assert_eq!(r["x"]["p"], json!(1));
         assert_eq!(r["x"]["q"], json!(2));
     }
@@ -1231,9 +1232,12 @@ mod examples {
 
     #[test]
     fn method_set() {
-        // .set(expr) — replaces receiver with expr
+        // v2: rooted `$.<path>.set(expr)` writes the value back into the doc
+        // (chain-style terminal write).  For a scalar-returning rewrite use
+        // the pipe form instead.
         let doc = json!({"v": 1});
-        assert_eq!(query("$.v.set(42)", &doc).unwrap(), json!(42));
+        assert_eq!(query("$.v.set(42)", &doc).unwrap(), json!({"v": 42}));
+        assert_eq!(query("$.v | set(42)", &doc).unwrap(), json!(42));
     }
 
     #[test]

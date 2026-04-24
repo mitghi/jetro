@@ -51,15 +51,36 @@ Field names allow `A-Z a-z 0-9 _ -` (first char alpha/`_`).
 
 ### Optional (null-safe) field
 
-```
-$.user?.name              // null if $.user is null/missing
-$.orders[0]?.total        // chain safely
-```
-
-### Optional method
+The `?` marker is **postfix** — it attaches to the step it guards, not
+the next step. Prefix `?.field` is not accepted.
 
 ```
-$.items?.first()          // null-short if $.items is null
+$.user?.name              // null if .user missing; .name runs on result
+$.orders[0].total?        // total evaluated; null-safe at the end
+$.a?.b?.c?                // chained null-safe field access
+```
+
+### Optional on descendant / method — null-safety only
+
+Postfix `?` is **null-safety**, never first-of-array. It guards the
+chain so that subsequent steps do not blow up on a null receiver.
+To take the first element of an array use `.first()` explicitly.
+
+```
+$..services               // array of all `services` descendants
+$..services?              // same array, null-safe
+$..services?.first()      // first matched services obj (or null)
+
+$.books.filter(price > 10)         // filtered array
+$.books.filter(price > 10).first() // first book with price > 10
+```
+
+### `!` — exactly-one quantifier
+
+`!` keeps its meaning: expect exactly one element, error otherwise.
+
+```
+$.books{title == "1984"}!          // error if 0 or >1 matches
 ```
 
 ### Array index
@@ -164,7 +185,7 @@ kind / is
 * / %
 as
 unary -
-postfix (., [], (), ?., ?:)
+postfix (., [], (), ?, ?:)
 ```
 
 ---
@@ -474,9 +495,9 @@ len($.items)              // same as $.items.len()
 ## 18. Null Safety Cheat-Sheet
 
 ```
-$.user?.name                 // short-circuit on null
-$.users[0]?.profile?.bio     // chained
-$.items?                     // quantifier — null if empty
+$.user?.name                 // postfix ? on .user — null if user missing
+$.users[0].profile?.bio      // ? on .profile — null-safe field
+$.items?.first()             // array passthrough + explicit first
 $.field ?| "default"         // coalesce
 coalesce($.a, $.b, "x")      // first non-null
 has(obj, "key")              // existence check

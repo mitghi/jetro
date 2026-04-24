@@ -98,6 +98,14 @@ pub enum Expr {
         body: Box<Expr>,
     },
 
+    // Python-style conditional: `then_ if cond else else_`.
+    // Short-circuits — only the taken branch is evaluated.
+    IfElse {
+        cond:  Box<Expr>,
+        then_: Box<Expr>,
+        else_: Box<Expr>,
+    },
+
     // Global function calls
     GlobalCall {
         name: String,
@@ -137,6 +145,7 @@ pub struct PatchOp {
 pub enum PathStep {
     Field(String),
     Index(i64),
+    DynIndex(Expr),
     Wildcard,
     WildcardFilter(Box<Expr>),
     Descendant(String),

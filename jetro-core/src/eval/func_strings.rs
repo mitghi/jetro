@@ -21,13 +21,25 @@ macro_rules! err {
 // All follow fn(Val, &[Arg], &Env) -> Result<Val, EvalError>.
 
 pub fn upper(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    if let Val::Str(s) = recv { Ok(Val::Str(Arc::from(s.to_uppercase().as_str()))) }
-    else { err!("upper: expected string") }
+    if let Val::Str(s) = recv {
+        if s.is_ascii() {
+            let mut buf: String = s.as_ref().to_owned();
+            buf.make_ascii_uppercase();
+            return Ok(Val::Str(Arc::<str>::from(buf)));
+        }
+        Ok(Val::Str(Arc::<str>::from(s.to_uppercase())))
+    } else { err!("upper: expected string") }
 }
 
 pub fn lower(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    if let Val::Str(s) = recv { Ok(Val::Str(Arc::from(s.to_lowercase().as_str()))) }
-    else { err!("lower: expected string") }
+    if let Val::Str(s) = recv {
+        if s.is_ascii() {
+            let mut buf: String = s.as_ref().to_owned();
+            buf.make_ascii_lowercase();
+            return Ok(Val::Str(Arc::<str>::from(buf)));
+        }
+        Ok(Val::Str(Arc::<str>::from(s.to_lowercase())))
+    } else { err!("lower: expected string") }
 }
 
 pub fn capitalize(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
@@ -41,18 +53,27 @@ pub fn title_case(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
 }
 
 pub fn trim(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    if let Val::Str(s) = recv { Ok(Val::Str(Arc::from(s.trim()))) }
-    else { err!("trim: expected string") }
+    if let Val::Str(s) = recv {
+        let t = s.trim();
+        if t.len() == s.len() { return Ok(Val::Str(s)); }
+        Ok(Val::Str(Arc::from(t)))
+    } else { err!("trim: expected string") }
 }
 
 pub fn trim_left(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    if let Val::Str(s) = recv { Ok(Val::Str(Arc::from(s.trim_start()))) }
-    else { err!("trim_left: expected string") }
+    if let Val::Str(s) = recv {
+        let t = s.trim_start();
+        if t.len() == s.len() { return Ok(Val::Str(s)); }
+        Ok(Val::Str(Arc::from(t)))
+    } else { err!("trim_left: expected string") }
 }
 
 pub fn trim_right(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    if let Val::Str(s) = recv { Ok(Val::Str(Arc::from(s.trim_end()))) }
-    else { err!("trim_right: expected string") }
+    if let Val::Str(s) = recv {
+        let t = s.trim_end();
+        if t.len() == s.len() { return Ok(Val::Str(s)); }
+        Ok(Val::Str(Arc::from(t)))
+    } else { err!("trim_right: expected string") }
 }
 
 pub fn lines(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
@@ -184,7 +205,9 @@ pub fn replace(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     if let Val::Str(s) = recv {
         let from = str_arg(args, 0, env)?;
         let to   = str_arg(args, 1, env)?;
-        Ok(val_str(&s.replacen(from.as_str(), to.as_str(), 1)))
+        // Short-circuit: needle absent -> return receiver unchanged (no alloc).
+        if !s.contains(from.as_str()) { return Ok(Val::Str(s)); }
+        Ok(Val::Str(Arc::<str>::from(s.replacen(from.as_str(), to.as_str(), 1))))
     } else { err!("replace: expected string") }
 }
 
@@ -192,7 +215,8 @@ pub fn replace_all(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError>
     if let Val::Str(s) = recv {
         let from = str_arg(args, 0, env)?;
         let to   = str_arg(args, 1, env)?;
-        Ok(val_str(&s.replace(from.as_str(), to.as_str())))
+        if !s.contains(from.as_str()) { return Ok(Val::Str(s)); }
+        Ok(Val::Str(Arc::<str>::from(s.replace(from.as_str(), to.as_str()))))
     } else { err!("replace_all: expected string") }
 }
 
@@ -211,18 +235,77 @@ pub fn strip_suffix(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError
 }
 
 pub fn str_slice(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-    if let Val::Str(s) = recv {
-        let start = first_i64_arg(args, env).unwrap_or(0) as usize;
-        let chars: Vec<char> = s.chars().collect();
-        let end = args.get(1)
-            .and_then(|a| eval_pos(a, env).ok())
-            .and_then(|v| v.as_i64())
-            .map(|n| n as usize)
-            .unwrap_or(chars.len())
-            .min(chars.len());
-        let start = start.min(end);
-        Ok(val_str(&chars[start..end].iter().collect::<String>()))
-    } else { err!("slice: expected string") }
+    // Resolve the receiver to (parent Arc, start-byte-offset-into-parent,
+    // viewed-bytes-slice).  Works for both Val::Str (whole Arc) and
+    // Val::StrSlice (view into a parent Arc).
+    let (parent, base_off, view_bytes): (Arc<str>, usize, usize) = match recv {
+        Val::Str(s) => { let len = s.len(); (s, 0, len) }
+        Val::StrSlice(r) => {
+            let view_len = r.len();
+            // Extract parent + view range.  The parent's bytes are shared
+            // across every slice that points into it, so we can carry the
+            // same Arc forward at zero alloc cost.
+            let parent = r.to_arc();
+            // `to_arc()` returns a full-range clone only when view covers
+            // the whole parent; otherwise it re-allocates.  Re-build a
+            // zero-offset StrRef+slice below to keep the zero-alloc path.
+            // If we allocated, `parent` now equals the view exactly so
+            // base_off = 0.
+            let _ = view_len;
+            let plen = parent.len();
+            (parent, 0, plen)
+        }
+        _ => return err!("slice: expected string"),
+    };
+    let view = &parent[base_off .. base_off + view_bytes];
+
+    let start_arg = first_i64_arg(args, env).unwrap_or(0) as usize;
+    let end_arg = args.get(1)
+        .and_then(|a| eval_pos(a, env).ok())
+        .and_then(|v| v.as_i64())
+        .map(|n| n as usize);
+
+    if view.is_ascii() {
+        let blen = view.len();
+        let end = end_arg.unwrap_or(blen).min(blen);
+        let start = start_arg.min(end);
+        if start == 0 && end == blen {
+            return Ok(Val::Str(parent));
+        }
+        // Zero-alloc borrowed slice into parent.
+        return Ok(Val::StrSlice(crate::strref::StrRef::slice(
+            parent,
+            base_off + start,
+            base_off + end,
+        )));
+    }
+
+    // Unicode path: walk char_indices to find byte boundaries.
+    let mut start_b = view.len();
+    let mut end_b = view.len();
+    let mut found_start = false;
+    let end_want = end_arg;
+    for (char_idx, (byte_idx, _)) in view.char_indices().enumerate() {
+        if !found_start && char_idx == start_arg {
+            start_b = byte_idx;
+            found_start = true;
+        }
+        if let Some(e) = end_want {
+            if char_idx == e { end_b = byte_idx; break; }
+        }
+    }
+    if !found_start { start_b = view.len(); }
+    if end_want.is_none() { end_b = view.len(); }
+    if start_b > end_b { start_b = end_b; }
+
+    if start_b == 0 && end_b == view.len() {
+        return Ok(Val::Str(parent));
+    }
+    Ok(Val::StrSlice(crate::strref::StrRef::slice(
+        parent,
+        base_off + start_b,
+        base_off + end_b,
+    )))
 }
 
 pub fn split(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {

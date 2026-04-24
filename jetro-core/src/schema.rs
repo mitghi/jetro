@@ -119,11 +119,13 @@ use super::vm::{Program, Opcode};
 /// Returns a new `Program` with the same source/id.
 pub fn specialize(program: &Program, shape: &Shape) -> Program {
     let new_ops: Vec<Opcode> = specialize_ops(&program.ops, shape);
+    let ics = crate::vm::fresh_ics(new_ops.len());
     Program {
         ops:           new_ops.into(),
         source:        program.source.clone(),
         id:            program.id,
         is_structural: program.is_structural,
+        ics,
     }
 }
 
@@ -213,6 +215,8 @@ mod tests {
     #[test]
     fn specialize_opt_field_to_get_field() {
         use crate::vm::{Compiler, Opcode};
+        // Postfix `?` on `.a` emits OptField(a). Schema proves `a` is
+        // present, so specialize should downgrade OptField(a) to GetField.
         let prog = Compiler::compile_str("$.a?.b").unwrap();
         let shape = Shape::of(&json!({"a": {"b": 1}}));
         let spec = specialize(&prog, &shape);
@@ -223,7 +227,10 @@ mod tests {
     #[test]
     fn specialize_preserves_opt_when_missing() {
         use crate::vm::{Compiler, Opcode};
-        let prog = Compiler::compile_str("$.a?.missing").unwrap();
+        // `.a.missing?` = OptField(missing). Schema proves `missing`
+        // is absent from the shape of `.a`, so the OptField must NOT
+        // be downgraded — the null is real.
+        let prog = Compiler::compile_str("$.a.missing?").unwrap();
         let shape = Shape::of(&json!({"a": {"b": 1}}));
         let spec = specialize(&prog, &shape);
         let has_opt = spec.ops.iter().any(|o| matches!(o, Opcode::OptField(k) if k.as_ref() == "missing"));

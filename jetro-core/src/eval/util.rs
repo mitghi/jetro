@@ -29,9 +29,16 @@ pub fn is_truthy(v: &Val) -> bool {
         Val::Bool(b)   => *b,
         Val::Int(n)    => *n != 0,
         Val::Float(f)  => *f != 0.0,
-        Val::Str(s)    => !s.is_empty(),
+        Val::Str(s)       => !s.is_empty(),
+        Val::StrSlice(r)  => !r.is_empty(),
         Val::Arr(a)    => !a.is_empty(),
-        Val::Obj(m)    => !m.is_empty(),
+        Val::IntVec(a) => !a.is_empty(),
+        Val::FloatVec(a) => !a.is_empty(),
+        Val::StrVec(a)       => !a.is_empty(),
+        Val::StrSliceVec(a)  => !a.is_empty(),
+        Val::ObjVec(d)       => !d.rows.is_empty(),
+        Val::Obj(m)       => !m.is_empty(),
+        Val::ObjSmall(p)  => !p.is_empty(),
     }
 }
 
@@ -44,6 +51,8 @@ pub fn kind_matches(v: &Val, ty: KindType) -> bool {
         (Val::Float(_),     KindType::Number) |
         (Val::Str(_),       KindType::Str)    |
         (Val::Arr(_),       KindType::Array)  |
+        (Val::IntVec(_),    KindType::Array)  |
+        (Val::FloatVec(_),  KindType::Array)  |
         (Val::Obj(_),       KindType::Object)
     )
 }
@@ -120,7 +129,15 @@ pub fn add_vals(a: Val, b: Val) -> Result<Val, EvalError> {
         (Val::Float(x), Val::Float(y)) => Ok(Val::Float(x + y)),
         (Val::Int(x),   Val::Float(y)) => Ok(Val::Float(x as f64 + y)),
         (Val::Float(x), Val::Int(y))   => Ok(Val::Float(x + y as f64)),
-        (Val::Str(x),   Val::Str(y))   => Ok(Val::Str(Arc::from(format!("{}{}", x, y).as_str()))),
+        (Val::Str(x), Val::Str(y)) => {
+            // `format!` would allocate a temporary `String` for argument
+            // formatting, on top of the `Arc::<str>::from` allocation.
+            // Direct `push_str` halves the allocation count.
+            let mut s = String::with_capacity(x.len() + y.len());
+            s.push_str(&x);
+            s.push_str(&y);
+            Ok(Val::Str(Arc::<str>::from(s)))
+        }
         (Val::Arr(x), Val::Arr(y)) => {
             let mut v = Arc::try_unwrap(x).unwrap_or_else(|a| (*a).clone());
             v.extend_from_slice(&y);
@@ -149,25 +166,99 @@ where
 pub fn flatten_val(v: Val, depth: usize) -> Val {
     match v {
         Val::Arr(a) if depth > 0 => {
-            let mut out = Vec::new();
             let items = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
+            // Columnar fast-path: Arr of IntVec (or Int scalars) → IntVec out.
+            // Skips per-item Val::Int allocation and keeps the result in the
+            // typed lane for downstream aggregates / accumulate.
+            let all_int_children = !items.is_empty() && items.iter().all(|it| matches!(it,
+                Val::IntVec(_) | Val::Int(_)
+            ));
+            if all_int_children {
+                let cap: usize = items.iter().map(|it| match it {
+                    Val::IntVec(inner) => inner.len(),
+                    _ => 1,
+                }).sum();
+                let mut out: Vec<i64> = Vec::with_capacity(cap);
+                for item in items {
+                    match item {
+                        Val::IntVec(inner) => out.extend(inner.iter().copied()),
+                        Val::Int(n)        => out.push(n),
+                        _ => unreachable!(),
+                    }
+                }
+                return Val::int_vec(out);
+            }
+            let all_float_children = !items.is_empty() && items.iter().all(|it| matches!(it,
+                Val::FloatVec(_) | Val::Float(_) | Val::Int(_)
+            ));
+            if all_float_children {
+                let cap: usize = items.iter().map(|it| match it {
+                    Val::FloatVec(inner) => inner.len(),
+                    _ => 1,
+                }).sum();
+                let mut out: Vec<f64> = Vec::with_capacity(cap);
+                for item in items {
+                    match item {
+                        Val::FloatVec(inner) => out.extend(inner.iter().copied()),
+                        Val::Float(f)        => out.push(f),
+                        Val::Int(n)          => out.push(n as f64),
+                        _ => unreachable!(),
+                    }
+                }
+                return Val::float_vec(out);
+            }
+            // Precompute exact capacity in one pass — eliminates Vec doubling
+            // reallocations on the hot `$.flatten()` / `.map(...).flatten()`
+            // paths.
+            let cap: usize = items.iter().map(|it| match it {
+                Val::Arr(inner) => inner.len(),
+                Val::IntVec(inner) => inner.len(),
+                Val::FloatVec(inner) => inner.len(),
+                Val::StrVec(inner) => inner.len(),
+                _ => 1,
+            }).sum();
+            let mut out = Vec::with_capacity(cap);
             for item in items {
                 match item {
-                    Val::Arr(_) => if let Val::Arr(inner) = flatten_val(item, depth - 1) {
-                        out.extend(Arc::try_unwrap(inner).unwrap_or_else(|a| (*a).clone()));
+                    Val::Arr(_) => match flatten_val(item, depth - 1) {
+                        Val::Arr(inner) => {
+                            out.extend(Arc::try_unwrap(inner).unwrap_or_else(|a| (*a).clone()));
+                        }
+                        Val::IntVec(inner) => {
+                            out.extend(inner.iter().map(|n| Val::Int(*n)));
+                        }
+                        Val::FloatVec(inner) => {
+                            out.extend(inner.iter().map(|f| Val::Float(*f)));
+                        }
+                        Val::StrVec(inner) => {
+                            out.extend(inner.iter().map(|s| Val::Str(s.clone())));
+                        }
+                        _ => {}
                     },
+                    Val::IntVec(inner) => {
+                        // IntVec is already flat-of-scalars — extend once.
+                        out.extend(inner.iter().map(|n| Val::Int(*n)));
+                    }
+                    Val::FloatVec(inner) => {
+                        out.extend(inner.iter().map(|f| Val::Float(*f)));
+                    }
+                    Val::StrVec(inner) => {
+                        out.extend(inner.iter().map(|s| Val::Str(s.clone())));
+                    }
                     other => out.push(other),
                 }
             }
             Val::arr(out)
         }
+        // Columnar receiver — already flat of scalars.
+        Val::IntVec(_) | Val::FloatVec(_) | Val::StrVec(_) => v,
         other => other,
     }
 }
 
 pub fn zip_arrays(a: Val, b: Val, longest: bool, fill: Val) -> Result<Val, EvalError> {
-    let av = a.as_array().map(|a| a.to_vec()).unwrap_or_default();
-    let bv = b.as_array().map(|b| b.to_vec()).unwrap_or_default();
+    let av = a.as_vals().map(|c| c.into_owned()).unwrap_or_default();
+    let bv = b.as_vals().map(|c| c.into_owned()).unwrap_or_default();
     let len = if longest { av.len().max(bv.len()) } else { av.len().min(bv.len()) };
     Ok(Val::arr((0..len).map(|i| Val::arr(vec![
         av.get(i).cloned().unwrap_or_else(|| fill.clone()),
@@ -237,6 +328,15 @@ pub fn deep_merge_concat(base: Val, other: Val) -> Val {
         (Val::Arr(ba), Val::Arr(oa)) => {
             let mut a = Arc::try_unwrap(ba).unwrap_or_else(|a| (*a).clone());
             for v in Arc::try_unwrap(oa).unwrap_or_else(|a| (*a).clone()) { a.push(v); }
+            Val::arr(a)
+        }
+        (base, other)
+            if (base.is_array() && other.is_array())
+            && (matches!(&base, Val::StrVec(_) | Val::IntVec(_) | Val::FloatVec(_))
+                || matches!(&other, Val::StrVec(_) | Val::IntVec(_) | Val::FloatVec(_))) =>
+        {
+            let mut a = base.into_vec().unwrap_or_default();
+            if let Some(v) = other.into_vec() { a.extend(v); }
             Val::arr(a)
         }
         (_, other) => other,

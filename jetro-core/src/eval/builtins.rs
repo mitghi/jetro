@@ -12,7 +12,7 @@ use crate::ast::Arg;
 use super::{Env, EvalError, eval_pos, apply_item};
 use super::value::Val;
 use super::util::{val_to_string, val_str, field_exists_nested};
-use super::{func_strings, func_arrays, func_objects, func_paths, func_aggregates, func_csv};
+use super::{func_strings, func_arrays, func_objects, func_paths, func_aggregates, func_csv, func_search};
 
 macro_rules! err {
     ($($t:tt)*) => { Err(EvalError(format!($($t)*))) };
@@ -96,6 +96,9 @@ fn build() -> BuiltinRegistry {
 
     // Arrays — full signature
     t.insert("filter",    func_arrays::filter);
+    t.insert("find",      func_arrays::find);        // Tier 1 (shallow, multi-pred AND)
+    t.insert("find_all",  func_arrays::find);        // Tier 1 (shallow, multi-pred AND)
+    t.insert("findAll",   func_arrays::find);
     t.insert("map",       func_arrays::map);
     t.insert("flatMap",   func_arrays::flat_map);
     t.insert("flat_map",  func_arrays::flat_map);
@@ -134,6 +137,27 @@ fn build() -> BuiltinRegistry {
     t.insert("compact",  b_compact);
     t.insert("pairwise", b_pairwise);
 
+    // Tier 1 search / match / collect
+    t.insert("unique_by", func_search::unique_by);
+    t.insert("uniqueBy",  func_search::unique_by);
+    t.insert("collect",   func_search::collect);
+    t.insert("deep_find", func_search::deep_find);
+    t.insert("deepFind",  func_search::deep_find);
+    t.insert("deep_shape", func_search::deep_shape);
+    t.insert("deepShape",  func_search::deep_shape);
+    t.insert("deep_like",  func_search::deep_like);
+    t.insert("deepLike",   func_search::deep_like);
+    t.insert("walk",       func_search::walk);
+    t.insert("walk_pre",   func_search::walk_pre_fn);
+    t.insert("walkPre",    func_search::walk_pre_fn);
+    t.insert("schema",     func_objects::schema);
+    t.insert("rec",        func_search::rec);
+    t.insert("trace_path", func_search::trace_path);
+    t.insert("tracePath",  func_search::trace_path);
+    t.insert("fanout",     func_objects::fanout);
+    t.insert("zip_shape",  func_objects::zip_shape);
+    t.insert("zipShape",   func_objects::zip_shape);
+
     // Aggregates — full signature
     t.insert("sum",      func_aggregates::sum);
     t.insert("avg",      func_aggregates::avg);
@@ -144,12 +168,22 @@ fn build() -> BuiltinRegistry {
     t.insert("count_by", func_aggregates::count_by);
     t.insert("indexBy",  func_aggregates::index_by);
     t.insert("index_by", func_aggregates::index_by);
+    t.insert("explode",     func_aggregates::explode);
+    t.insert("implode",     func_aggregates::implode);
+    t.insert("groupShape",  func_aggregates::group_shape);
+    t.insert("group_shape", func_aggregates::group_shape);
 
     // Aggregates — bool-flag wrappers
     t.insert("min", b_min);
     t.insert("max", b_max);
     t.insert("any", b_any);
     t.insert("all", b_all);
+
+    // Numeric scalar ops
+    t.insert("ceil",  b_ceil);
+    t.insert("floor", b_floor);
+    t.insert("round", b_round);
+    t.insert("abs",   b_abs);
 
     // Paths
     t.insert("get_path",       func_paths::get_path);
@@ -249,6 +283,8 @@ fn build() -> BuiltinRegistry {
 fn b_len(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
     Ok(Val::Int(match &recv {
         Val::Arr(a) => a.len() as i64,
+        Val::IntVec(a) => a.len() as i64,
+        Val::FloatVec(a) => a.len() as i64,
         Val::Obj(m) => m.len() as i64,
         Val::Str(s) => s.chars().count() as i64,
         _ => return err!("len: unsupported type"),
@@ -264,15 +300,58 @@ fn b_to_string(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
 }
 
 fn b_to_json(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
+    // Fast path: primitive scalars serialise without a serde_json::Value
+    // detour.  to_json() gets called per-element in map pipelines, and the
+    // Val -> serde_json::Value conversion was the dominant cost there.
+    match &recv {
+        Val::Int(n)  => return Ok(val_str(&n.to_string())),
+        Val::Float(f) => {
+            if f.is_finite() {
+                let v = serde_json::Value::from(*f);
+                return Ok(val_str(&serde_json::to_string(&v).unwrap_or_default()));
+            } else {
+                return Ok(val_str("null"));
+            }
+        }
+        Val::Bool(b) => return Ok(val_str(if *b { "true" } else { "false" })),
+        Val::Null    => return Ok(val_str("null")),
+        Val::Str(s)  => {
+            let v = serde_json::Value::String(s.to_string());
+            return Ok(val_str(&serde_json::to_string(&v).unwrap_or_default()));
+        }
+        _ => {}
+    }
     let sv: serde_json::Value = recv.into();
     Ok(val_str(&serde_json::to_string(&sv).unwrap_or_default()))
 }
 
 fn b_from_json(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    let s = val_to_string(&recv);
-    let sv: serde_json::Value = serde_json::from_str(&s)
-        .map_err(|e| EvalError(format!("from_json: {}", e)))?;
-    Ok(Val::from(&sv))
+    // Direct one-pass parse via `Val::deserialize` — no intermediate
+    // `serde_json::Value` tree.  For `Val::Str` receivers we skip the
+    // buffer deep-clone too.  With the `simd-json` feature enabled,
+    // route through simd-json's SIMD structural scanner instead; the
+    // str receiver path copies once into a mutable buffer (required by
+    // simd-json), still faster than serde_json on docs over ~4KB.
+    #[cfg(feature = "simd-json")]
+    {
+        let bytes_owned: Vec<u8> = match &recv {
+            Val::Str(s) => s.as_bytes().to_vec(),
+            _           => val_to_string(&recv).into_bytes(),
+        };
+        let mut bytes = bytes_owned;
+        return Val::from_json_simd(&mut bytes)
+            .map_err(|e| EvalError(format!("from_json: {}", e)));
+    }
+    #[cfg(not(feature = "simd-json"))]
+    match &recv {
+        Val::Str(s) => Val::from_json_str(s.as_ref())
+            .map_err(|e| EvalError(format!("from_json: {}", e))),
+        _ => {
+            let s = val_to_string(&recv);
+            Val::from_json_str(&s)
+                .map_err(|e| EvalError(format!("from_json: {}", e)))
+        }
+    }
 }
 
 fn b_keys(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
@@ -331,6 +410,40 @@ fn b_all(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     func_aggregates::any_all(recv, args, env, true)
 }
 
+fn b_ceil(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
+    match recv {
+        Val::Int(n)   => Ok(Val::Int(n)),
+        Val::Float(f) => Ok(Val::Int(f.ceil() as i64)),
+        _ => err!("ceil: expected number"),
+    }
+}
+
+fn b_floor(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
+    match recv {
+        Val::Int(n)   => Ok(Val::Int(n)),
+        Val::Float(f) => Ok(Val::Int(f.floor() as i64)),
+        _ => err!("floor: expected number"),
+    }
+}
+
+fn b_round(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
+    match recv {
+        Val::Int(n)   => Ok(Val::Int(n)),
+        // Banker's rounding is the IEEE default; jq uses `round()` which
+        // ties-away-from-zero.  Rust's `f64::round` matches jq here.
+        Val::Float(f) => Ok(Val::Int(f.round() as i64)),
+        _ => err!("round: expected number"),
+    }
+}
+
+fn b_abs(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
+    match recv {
+        Val::Int(n)   => Ok(Val::Int(n.wrapping_abs())),
+        Val::Float(f) => Ok(Val::Float(f.abs())),
+        _ => err!("abs: expected number"),
+    }
+}
+
 fn b_to_csv(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
     Ok(val_str(&func_csv::to_csv(&recv)))
 }
@@ -366,7 +479,13 @@ fn b_includes(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     use super::util::val_to_key;
     let key = val_to_key(&item);
     Ok(Val::Bool(match &recv {
-        Val::Arr(a) => a.iter().any(|v| val_to_key(v) == key),
+        Val::Arr(a)    => a.iter().any(|v| val_to_key(v) == key),
+        Val::IntVec(a) => a.iter().any(|n| val_to_key(&Val::Int(*n)) == key),
+        Val::FloatVec(a) => a.iter().any(|f| val_to_key(&Val::Float(*f)) == key),
+        Val::StrVec(a) => match item.as_str() {
+            Some(needle) => a.iter().any(|s| s.as_ref() == needle),
+            None => false,
+        },
         Val::Str(s) => s.contains(item.as_str().unwrap_or_default()),
         _ => false,
     }))

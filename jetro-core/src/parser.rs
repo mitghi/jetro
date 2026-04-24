@@ -63,7 +63,7 @@ fn is_kw(rule: Rule) -> bool {
     matches!(
         rule,
         Rule::kw_and | Rule::kw_or | Rule::kw_not | Rule::kw_for
-            | Rule::kw_in | Rule::kw_if | Rule::kw_let | Rule::kw_lambda | Rule::kw_kind
+            | Rule::kw_in | Rule::kw_if | Rule::kw_else | Rule::kw_let | Rule::kw_lambda | Rule::kw_kind
             | Rule::kw_is | Rule::kw_as
     )
 }
@@ -73,6 +73,7 @@ fn is_kw(rule: Rule) -> bool {
 fn parse_expr(pair: Pair<Rule>) -> Expr {
     match pair.as_rule() {
         Rule::expr          => parse_expr(pair.into_inner().next().unwrap()),
+        Rule::cond_expr     => parse_cond(pair),
         Rule::pipe_expr     => parse_pipeline(pair),
         Rule::coalesce_expr => parse_coalesce(pair),
         Rule::or_expr       => parse_or(pair),
@@ -87,6 +88,27 @@ fn parse_expr(pair: Pair<Rule>) -> Expr {
         Rule::postfix_expr  => parse_postfix_expr(pair),
         Rule::primary       => parse_primary(pair),
         r => panic!("unexpected rule in parse_expr: {:?}", r),
+    }
+}
+
+// ── Conditional (Python-style ternary) ────────────────────────────────────────
+// `then_ if cond else else_` — right-associative. Parser receives:
+//   cond_expr := pipe_expr (kw_if pipe_expr kw_else cond_expr)?
+// So inner pairs are either [then_] or [then_, kw_if, cond, kw_else, else_].
+// When the `if` tail is absent we pass through to keep the single pipe_expr.
+
+fn parse_cond(pair: Pair<Rule>) -> Expr {
+    let mut inner = pair.into_inner().filter(|p| !is_kw(p.as_rule()));
+    let then_ = parse_expr(inner.next().unwrap());
+    let cond = match inner.next() {
+        Some(p) => parse_expr(p),
+        None    => return then_,
+    };
+    let else_ = parse_expr(inner.next().unwrap());
+    Expr::IfElse {
+        cond:  Box::new(cond),
+        then_: Box::new(then_),
+        else_: Box::new(else_),
     }
 }
 
@@ -322,8 +344,153 @@ fn parse_unary(pair: Pair<Rule>) -> Expr {
 fn parse_postfix_expr(pair: Pair<Rule>) -> Expr {
     let mut inner = pair.into_inner();
     let base = parse_primary(inner.next().unwrap());
-    let steps: Vec<Step> = inner.flat_map(parse_postfix_step).collect();
+    let raw_steps: Vec<Step> = inner.flat_map(parse_postfix_step).collect();
+    // Postfix `?` is emitted by the grammar as `Step::Quantifier(First)`
+    // (historical). We collapse it into null-propagation only:
+    //   Field(k)     + `?` → OptField(k)          (null-safe field)
+    //   Method(n, a) + `?` → OptMethod(n, a)      (null-safe method call)
+    //   Descendant   + `?` → Descendant           (drop `?`, keep array)
+    //   Index/Slice  + `?` → step unchanged       (drop `?`)
+    //
+    // Postfix `?` never takes first-of-array. Use `.first()` explicitly
+    // when you want the first element (e.g. `$..services?.first()`).
+    //
+    // `!` (Quantifier::One) keeps its exact-one-element meaning everywhere.
+    let mut steps: Vec<Step> = Vec::with_capacity(raw_steps.len());
+    for s in raw_steps {
+        match s {
+            Step::Quantifier(QuantifierKind::First) => {
+                match steps.last() {
+                    Some(Step::Field(_)) => {
+                        if let Some(Step::Field(k)) = steps.pop() {
+                            steps.push(Step::OptField(k));
+                        }
+                    }
+                    Some(Step::Method(_, _)) => {
+                        if let Some(Step::Method(n, a)) = steps.pop() {
+                            steps.push(Step::OptMethod(n, a));
+                        }
+                    }
+                    _ => {
+                        // Descendant / Index / Slice / DynIndex / etc:
+                        // drop the `?` — value passes through unchanged.
+                    }
+                }
+            }
+            other => steps.push(other),
+        }
+    }
+    if let Some(rewritten) = classify_chain_write(&base, &steps) {
+        return rewritten;
+    }
     base.maybe_chain(steps)
+}
+
+// ── Chain-style terminal writes ──────────────────────────────────────────────
+//
+// When the expression is `$.<traversal>.<terminal>(args)` where `<terminal>`
+// is one of `set / modify / delete / unset / replace`, rewrite it as an
+// `Expr::Patch`.  This lets users write inline updates without the full
+// `patch $ { ... }` block.  Collisions with existing method names are
+// avoided: non-root chains (e.g. `@.set(...)`) are *not* rewritten — they
+// keep their method-call semantics.
+fn classify_chain_write(base: &Expr, steps: &[Step]) -> Option<Expr> {
+    if !matches!(base, Expr::Root) { return None; }
+    let last = steps.last()?;
+    let (name, args) = match last { Step::Method(n, a) => (n.as_str(), a), _ => return None };
+    if !is_terminal_write(name) { return None; }
+
+    let prefix = &steps[..steps.len() - 1];
+    let path = match steps_to_path(prefix) {
+        Ok(p)  => p,
+        Err(_) => return None,  // not a valid traversal — leave as method call
+    };
+
+    let op = build_write_op(name, args, path)?;
+    Some(Expr::Patch { root: Box::new(Expr::Root), ops: vec![op] })
+}
+
+fn is_terminal_write(name: &str) -> bool {
+    // `.replace` deliberately omitted — it would clash with the 2-arg
+    // string `.replace(needle, with)` builtin.  Use `.set(v)` for full
+    // value replacement.
+    matches!(name, "set" | "modify" | "delete" | "unset" | "merge" | "deep_merge" | "deepMerge")
+}
+
+fn steps_to_path(steps: &[Step]) -> Result<Vec<PathStep>, String> {
+    let mut out = Vec::with_capacity(steps.len());
+    for s in steps {
+        match s {
+            Step::Field(f)        => out.push(PathStep::Field(f.clone())),
+            Step::Index(i)        => out.push(PathStep::Index(*i)),
+            Step::OptField(f)     => out.push(PathStep::Field(f.clone())),
+            Step::Descendant(f)   => out.push(PathStep::Descendant(f.clone())),
+            Step::DynIndex(e)     => {
+                // Defer resolution to apply time — PathStep carries the
+                // boxed expression, evaluated against the root doc then.
+                out.push(PathStep::DynIndex((**e).clone()));
+            }
+            _ => return Err("chain-write: unsupported step in path".into()),
+        }
+    }
+    Ok(out)
+}
+
+fn build_write_op(name: &str, args: &[Arg], path: Vec<PathStep>) -> Option<PatchOp> {
+    match name {
+        "set" => {
+            let v = arg_expr(args.first()?).clone();
+            Some(PatchOp { path, val: v, cond: None })
+        }
+        // `.modify(expr)` — expr sees `@` bound to the current value at the path
+        // (patch semantics already bind `@` at the leaf).  Lambda form
+        // `.modify(lambda x: ...)` rewrites to `let x = @ in <body>` so the
+        // bound `@` flows into the param name.
+        "modify" => {
+            let v = match arg_expr(args.first()?).clone() {
+                Expr::Lambda { params, body } => {
+                    if let Some(p) = params.into_iter().next() {
+                        Expr::Let { name: p, init: Box::new(Expr::Current), body }
+                    } else {
+                        *body
+                    }
+                }
+                other => other,
+            };
+            Some(PatchOp { path, val: v, cond: None })
+        }
+        "delete" => {
+            if !args.is_empty() { return None; }
+            Some(PatchOp { path, val: Expr::DeleteMark, cond: None })
+        }
+        // `.merge(obj)` / `.deep_merge(obj)` — desugar to `.modify(@.merge(arg))`
+        // so the patch leaf evaluates against the bound `@`.
+        "merge" | "deep_merge" | "deepMerge" => {
+            let arg = arg_expr(args.first()?).clone();
+            let method = if name == "merge" { "merge".to_string() } else { "deep_merge".to_string() };
+            let v = Expr::Chain(
+                Box::new(Expr::Current),
+                vec![Step::Method(method, vec![Arg::Pos(arg)])],
+            );
+            Some(PatchOp { path, val: v, cond: None })
+        }
+        // `.unset(key)` — append the key onto the path and delete it.
+        "unset" => {
+            let key = match arg_expr(args.first()?) {
+                Expr::Str(s)     => s.clone(),
+                Expr::Ident(s)   => s.clone(),
+                _                => return None,
+            };
+            let mut p = path;
+            p.push(PathStep::Field(key));
+            Some(PatchOp { path: p, val: Expr::DeleteMark, cond: None })
+        }
+        _ => None,
+    }
+}
+
+fn arg_expr(a: &Arg) -> &Expr {
+    match a { Arg::Pos(e) | Arg::Named(_, e) => e }
 }
 
 fn parse_postfix_step(pair: Pair<Rule>) -> Vec<Step> {
@@ -333,16 +500,25 @@ fn parse_postfix_step(pair: Pair<Rule>) -> Vec<Step> {
             let name = inner_pair.into_inner().next().unwrap().as_str().to_string();
             vec![Step::Field(name)]
         }
-        Rule::opt_field => {
-            let name = inner_pair.into_inner().next().unwrap().as_str().to_string();
-            vec![Step::OptField(name)]
-        }
         Rule::descendant => {
             let mut di = inner_pair.into_inner();
             match di.next() {
                 Some(p) => vec![Step::Descendant(p.as_str().to_string())],
                 None    => vec![Step::DescendAll],
             }
+        }
+        Rule::deep_method => {
+            // `..name(args)` — desugar to `.deep_name(args)` for find/shape/like.
+            let mut mi = inner_pair.into_inner();
+            let name = mi.next().unwrap().as_str().to_string();
+            let args = mi.next().map(parse_arg_list).unwrap_or_default();
+            let mapped = match name.as_str() {
+                "find"  | "find_all" | "findAll" => "deep_find".to_string(),
+                "shape"                          => "deep_shape".to_string(),
+                "like"                           => "deep_like".to_string(),
+                other                            => format!("deep_{}", other),
+            };
+            vec![Step::Method(mapped, args)]
         }
         Rule::inline_filter => {
             let expr = parse_expr(inner_pair.into_inner().next().unwrap());
@@ -358,12 +534,6 @@ fn parse_postfix_step(pair: Pair<Rule>) -> Vec<Step> {
             let name = mi.next().unwrap().as_str().to_string();
             let args = mi.next().map(parse_arg_list).unwrap_or_default();
             vec![Step::Method(name, args)]
-        }
-        Rule::opt_method => {
-            let mut mi = inner_pair.into_inner();
-            let name = mi.next().unwrap().as_str().to_string();
-            let args = mi.next().map(parse_arg_list).unwrap_or_default();
-            vec![Step::OptMethod(name, args)]
         }
         Rule::index_access => {
             let bi = inner_pair.into_inner().next().unwrap();

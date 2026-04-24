@@ -214,7 +214,9 @@ fn build_block(cfg: &mut Cfg, ops: &[Opcode]) -> usize {
             Opcode::InlineFilter(p) | Opcode::FilterCount(p)
                 | Opcode::FindFirst(p) | Opcode::FindOne(p)
                 | Opcode::MapSum(p) | Opcode::MapAvg(p)
-                | Opcode::MapFlatten(p) => {
+                | Opcode::MapFlatten(p)
+                | Opcode::MapFirst(p) | Opcode::MapLast(p)
+                | Opcode::FilterLast { pred: p } => {
                 let t = build_block(cfg, &p.ops);
                 branches.push(EdgeKind::Loop { target: t, name: "filter" });
                 straight.push(op.clone());
@@ -226,11 +228,21 @@ fn build_block(cfg: &mut Cfg, ops: &[Opcode]) -> usize {
                 branches.push(EdgeKind::Loop { target: ts, name: "stop" });
                 straight.push(op.clone());
             }
-            Opcode::FilterMap { pred, map } => {
+            Opcode::FilterMap { pred, map }
+                | Opcode::FilterMapSum { pred, map }
+                | Opcode::FilterMapAvg { pred, map }
+                | Opcode::FilterMapFirst { pred, map } => {
                 let tp = build_block(cfg, &pred.ops);
                 let tm = build_block(cfg, &map.ops);
                 branches.push(EdgeKind::Loop { target: tp, name: "filter" });
                 branches.push(EdgeKind::Loop { target: tm, name: "map" });
+                straight.push(op.clone());
+            }
+            Opcode::MapFilter { map, pred } => {
+                let tm = build_block(cfg, &map.ops);
+                let tp = build_block(cfg, &pred.ops);
+                branches.push(EdgeKind::Loop { target: tm, name: "map" });
+                branches.push(EdgeKind::Loop { target: tp, name: "filter" });
                 straight.push(op.clone());
             }
             Opcode::FilterFilter { p1, p2 } => {
@@ -440,7 +452,9 @@ mod tests {
 
     #[test]
     fn cfg_filter_creates_loop() {
-        let p = Compiler::compile_str("$.x.filter(@.a > 1)").unwrap();
+        // Use a predicate that doesn't match the field-predicate specialiser
+        // (`FilterFieldCmpLit`) so the generic filter opcode survives.
+        let p = Compiler::compile_str("$.x.filter(@.a > 1 and @.a < 10)").unwrap();
         let cfg = Cfg::build(&p);
         assert!(cfg.size() >= 2);
     }

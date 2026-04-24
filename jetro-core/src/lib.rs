@@ -62,19 +62,22 @@ pub mod schema;
 pub mod plan;
 pub mod cfg;
 pub mod ssa;
+pub mod scan;
+pub mod strref;
 
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod examples;
 
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell};
 use std::sync::Arc;
 use serde_json::Value;
+use eval::Val;
 
 pub use engine::Engine;
 pub use eval::EvalError;
-pub use eval::{Method, MethodRegistry};
+pub use eval::{Method, MethodRegistry, Val as JetroVal};
 pub use expr::Expr;
 pub use graph::Graph;
 pub use parser::ParseError;
@@ -159,19 +162,76 @@ thread_local! {
 /// cache accumulate over the lifetime of the thread.
 pub struct Jetro {
     document: Value,
+    /// Cached `Val` tree — built on first `collect()` and reused across
+    /// subsequent calls, amortising the `Val::from(&Value)` walk.
+    root_val: OnceCell<Val>,
+    /// Retained JSON source bytes when the caller built via
+    /// [`Jetro::from_bytes`] / [`Jetro::from_slice`].  Enables SIMD
+    /// byte-scan fast paths for `$..key` queries.
+    raw_bytes: Option<Arc<[u8]>>,
 }
 
 impl Jetro {
     pub fn new(document: Value) -> Self {
-        Self { document }
+        Self { document, root_val: OnceCell::new(), raw_bytes: None }
     }
 
-    /// Evaluate `expr` against the document.
+    /// Parse JSON bytes and retain them alongside the parsed document.
+    /// Descendant queries (`$..key`) can then take the SIMD byte-scan path
+    /// instead of walking the tree.
+    pub fn from_bytes(bytes: Vec<u8>) -> std::result::Result<Self, serde_json::Error> {
+        let document: Value = serde_json::from_slice(&bytes)?;
+        Ok(Self {
+            document,
+            root_val: OnceCell::new(),
+            raw_bytes: Some(Arc::from(bytes.into_boxed_slice())),
+        })
+    }
+
+    /// Parse JSON from a slice, retaining a copy of the bytes.
+    pub fn from_slice(bytes: &[u8]) -> std::result::Result<Self, serde_json::Error> {
+        Self::from_bytes(bytes.to_vec())
+    }
+
+    fn root_val(&self) -> Val {
+        self.root_val.get_or_init(|| Val::from(&self.document)).clone()
+    }
+
+    /// Evaluate `expr` against the document.  Routes through the thread-local
+    /// VM (compile + path caches); when the Jetro handle carries raw bytes
+    /// the VM executes on an env with `raw_bytes` set so `Opcode::Descendant`
+    /// can take the SIMD byte-scan fast path.
     pub fn collect<S: AsRef<str>>(&self, expr: S) -> std::result::Result<Value, EvalError> {
         let expr = expr.as_ref();
-        THREAD_VM.with(|cell| match cell.try_borrow_mut() {
-            Ok(mut vm) => vm.run_str(expr, &self.document),
-            Err(_)     => VM::new().run_str(expr, &self.document),
+        THREAD_VM.with(|cell| match (cell.try_borrow_mut(), &self.raw_bytes) {
+            (Ok(mut vm), Some(bytes)) => {
+                let prog = vm.get_or_compile(expr)?;
+                vm.execute_val_with_raw(&prog, self.root_val(), Arc::clone(bytes))
+            }
+            (Ok(mut vm), None) => {
+                let prog = vm.get_or_compile(expr)?;
+                vm.execute_val(&prog, self.root_val())
+            }
+            (Err(_), Some(bytes)) => VM::new().run_str_with_raw(expr, &self.document, Arc::clone(bytes)),
+            (Err(_), None)        => VM::new().run_str(expr, &self.document),
+        })
+    }
+
+    /// Evaluate `expr` and return the raw `Val` without converting to
+    /// `serde_json::Value`.  For large structural results (e.g. `group_by`
+    /// on 20k+ items) this avoids an expensive materialisation that
+    /// otherwise dominates runtime.  The returned `Val` supports cheap
+    /// `Arc`-clone and shares structure with the source document.
+    ///
+    /// Prefer this over `collect` when the caller consumes the result
+    /// structurally (further queries, custom walk, re-evaluation) rather
+    /// than handing it to `serde_json`-aware code.
+    pub fn collect_val<S: AsRef<str>>(&self, expr: S) -> std::result::Result<JetroVal, EvalError> {
+        let expr = expr.as_ref();
+        THREAD_VM.with(|cell| {
+            let mut vm = cell.try_borrow_mut().map_err(|_| EvalError("VM in use".into()))?;
+            let prog = vm.get_or_compile(expr)?;
+            vm.execute_val_raw(&prog, self.root_val())
         })
     }
 }

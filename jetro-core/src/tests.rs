@@ -605,6 +605,7 @@ mod tests {
     #[test]
     fn str_replace() {
         let doc = json!({"s": "foo foo foo"});
+        // 2-arg string replace — untouched by the v2 chain-write classifier
         assert_eq!(query("$.s.replace(\"foo\", \"bar\")", &doc).unwrap(), json!("bar foo foo"));
         assert_eq!(query("$.s.replace_all(\"foo\", \"bar\")", &doc).unwrap(), json!("bar bar bar"));
     }
@@ -724,8 +725,9 @@ mod tests {
 
     #[test]
     fn merge_objects() {
+        // chain form is a write terminal now — pipe form preserves old semantics
         let doc = json!({"a": {"x": 1}, "b": {"y": 2}});
-        let r = query("$.a.merge($.b)", &doc).unwrap();
+        let r = query("$.a | merge($.b)", &doc).unwrap();
         assert_eq!(r["x"], json!(1));
         assert_eq!(r["y"], json!(2));
     }
@@ -733,7 +735,7 @@ mod tests {
     #[test]
     fn deep_merge_objects() {
         let doc = json!({"a": {"x": {"p": 1}}, "b": {"x": {"q": 2}, "y": 3}});
-        let r = query("$.a.deep_merge($.b)", &doc).unwrap();
+        let r = query("$.a | deep_merge($.b)", &doc).unwrap();
         assert_eq!(r["x"]["p"], json!(1));
         assert_eq!(r["x"]["q"], json!(2));
         assert_eq!(r["y"], json!(3));
@@ -910,8 +912,9 @@ mod tests {
     #[test]
     fn quantifier_first() {
         let doc = books();
-        // first book over $10
-        let r = query("$.store.books{price > 10}?", &doc).unwrap();
+        // first book over $10 — postfix `?` is null-safety only; use
+        // `.first()` explicitly to take the first element of an array.
+        let r = query("$.store.books{price > 10}.first()", &doc).unwrap();
         assert_eq!(r["title"], json!("Dune"));
     }
 
@@ -951,9 +954,92 @@ mod tests {
     // ── Peephole fusion passes ────────────────────────────────────────────────
 
     #[test]
+    fn fusion_drop_noop_before_len() {
+        use crate::vm::{Compiler, Opcode, BuiltinMethod};
+        // sort → len: sort is dropped (sort preserves length)
+        let p1 = Compiler::compile_str("$.xs.sort().len()").unwrap();
+        let sort_ct = p1.ops.iter().filter(|o|
+            matches!(o, Opcode::CallMethod(c) if c.method == BuiltinMethod::Sort)).count();
+        assert_eq!(sort_ct, 0, "sort should be dropped before length; ops: {:?}", p1.ops);
+
+        // map → count: map is dropped
+        let p2 = Compiler::compile_str("$.xs.map(@ * 2).count()").unwrap();
+        let map_ct = p2.ops.iter().filter(|o|
+            matches!(o, Opcode::CallMethod(c) if c.method == BuiltinMethod::Map)).count();
+        assert_eq!(map_ct, 0, "map should be dropped before count; ops: {:?}", p2.ops);
+    }
+
+    #[test]
+    fn fusion_drop_noop_before_len_semantics() {
+        let doc = json!({"xs": [3, 1, 4, 1, 5, 9, 2, 6]});
+        assert_eq!(query("$.xs.sort().len()", &doc).unwrap(), json!(8));
+        assert_eq!(query("$.xs.reverse().count()", &doc).unwrap(), json!(8));
+        assert_eq!(query("$.xs.map(@ * 2).len()", &doc).unwrap(), json!(8));
+    }
+
+    #[test]
+    fn fusion_map_filter_opcode_emitted() {
+        use crate::vm::{Compiler, Opcode};
+        let prog = Compiler::compile_str("$.xs.map(@ * 2).filter(@ > 5)").unwrap();
+        let has_mf = prog.ops.iter().any(|o| matches!(o, Opcode::MapFilter { .. }));
+        assert!(has_mf, "MapFilter not emitted; ops: {:?}", prog.ops);
+    }
+
+    #[test]
+    fn fusion_map_filter_semantics() {
+        let doc = json!({"xs": [1, 2, 3, 4, 5]});
+        let r = query("$.xs.map(@ * 2).filter(@ > 5)", &doc).unwrap();
+        assert_eq!(r, json!([6, 8, 10]));
+    }
+
+    #[test]
+    fn fusion_field_chain_opcode_emitted() {
+        use crate::vm::{Compiler, Opcode};
+        // `.first()` returns object; `.a.b.c` mid-program can't become RootChain
+        // because of the intervening method call.  Expect FieldChain instead.
+        let prog = Compiler::compile_str("$.items.first().a.b.c").unwrap();
+        let has_fc = prog.ops.iter().any(|o| matches!(o, Opcode::FieldChain(c) if c.len() == 3));
+        let get_field_count = prog.ops.iter().filter(|o| matches!(o, Opcode::GetField(_))).count();
+        assert!(has_fc, "FieldChain not emitted; ops: {:?}", prog.ops);
+        assert_eq!(get_field_count, 0, "residual GetField after fusion: {:?}", prog.ops);
+    }
+
+    #[test]
+    fn fusion_opt_field_absorbed_into_field_chain() {
+        use crate::vm::{Compiler, Opcode};
+        // Mid-program OptField chain (receiver from method call so nullness
+        // analyzer can't prove the shape) should still collapse into one
+        // FieldChain — null propagates through `get_field` correctly.
+        let prog = Compiler::compile_str("$.items.first()?.a?.b?.c").unwrap();
+        let has_fc = prog.ops.iter().any(|o| matches!(o, Opcode::FieldChain(c) if c.len() >= 2));
+        let residual = prog.ops.iter().filter(|o|
+            matches!(o, Opcode::OptField(_) | Opcode::GetField(_))).count();
+        assert!(has_fc, "FieldChain not emitted; ops: {:?}", prog.ops);
+        assert_eq!(residual, 0, "residual per-step field ops: {:?}", prog.ops);
+    }
+
+    #[test]
+    fn fusion_opt_field_chain_semantics() {
+        let doc = json!({"items": [{"a": {"b": {"c": 42}}}]});
+        let r = query("$.items.first()?.a?.b?.c", &doc).unwrap();
+        assert_eq!(r, json!(42));
+        let missing = json!({"items": [{"a": null}]});
+        let r2 = query("$.items.first()?.a?.b?.c", &missing).unwrap();
+        assert!(r2.is_null());
+    }
+
+    #[test]
+    fn fusion_field_chain_semantics() {
+        let doc = json!({"items": [{"a": {"b": {"c": 42}}}]});
+        let r = query("$.items.first().a.b.c", &doc).unwrap();
+        assert_eq!(r, json!(42));
+    }
+
+    #[test]
     fn fusion_find_first_opcode_emitted() {
         use crate::vm::{Compiler, Opcode};
-        let prog = Compiler::compile_str("$.books{price > 10}?").unwrap();
+        // Inline filter followed by `.first()` fuses to FindFirst.
+        let prog = Compiler::compile_str("$.books{price > 10}.first()").unwrap();
         let has_find_first = prog.ops.iter().any(|o| matches!(o, Opcode::FindFirst(_)));
         assert!(has_find_first, "FindFirst opcode not emitted; got: {:?}", prog.ops);
     }
@@ -969,7 +1055,9 @@ mod tests {
     #[test]
     fn fusion_find_first_from_filter_method() {
         use crate::vm::{Compiler, Opcode};
-        let prog = Compiler::compile_str("$.books.filter(price > 10)?").unwrap();
+        // `.filter(p).first()` fuses to FindFirst the same as the
+        // inline-filter form.
+        let prog = Compiler::compile_str("$.books.filter(price > 10).first()").unwrap();
         let has_find_first = prog.ops.iter().any(|o| matches!(o, Opcode::FindFirst(_)));
         assert!(has_find_first, "FindFirst should fuse from .filter() too");
     }
@@ -1008,8 +1096,8 @@ mod tests {
     #[test]
     fn find_first_matches_semantics() {
         let doc = books();
-        // inline filter + ? matches first result of unfused filter
-        let fused = query("$.store.books{price > 10}?", &doc).unwrap();
+        // inline filter + .first() matches first result.
+        let fused = query("$.store.books{price > 10}.first()", &doc).unwrap();
         assert_eq!(fused["title"], json!("Dune"));
     }
 
@@ -1127,6 +1215,29 @@ mod tests {
     }
 
     #[test]
+    fn const_fold_mixed_int_float_arith() {
+        use crate::vm::{Compiler, Opcode};
+        let prog = Compiler::compile_str("1 + 2.5").unwrap();
+        assert!(matches!(prog.ops.as_ref(), [Opcode::PushFloat(f)] if (*f - 3.5).abs() < 1e-9),
+                "1 + 2.5 should fold to 3.5; got {:?}", prog.ops);
+        let prog = Compiler::compile_str("2.0 * 3").unwrap();
+        assert!(matches!(prog.ops.as_ref(), [Opcode::PushFloat(f)] if (*f - 6.0).abs() < 1e-9));
+        let prog = Compiler::compile_str("10 / 4.0").unwrap();
+        assert!(matches!(prog.ops.as_ref(), [Opcode::PushFloat(f)] if (*f - 2.5).abs() < 1e-9));
+    }
+
+    #[test]
+    fn const_fold_mixed_int_float_cmp() {
+        use crate::vm::{Compiler, Opcode};
+        let prog = Compiler::compile_str("1 < 2.5").unwrap();
+        assert!(matches!(prog.ops.as_ref(), [Opcode::PushBool(true)]));
+        let prog = Compiler::compile_str("3.14 > 3").unwrap();
+        assert!(matches!(prog.ops.as_ref(), [Opcode::PushBool(true)]));
+        let prog = Compiler::compile_str("2.0 <= 2").unwrap();
+        assert!(matches!(prog.ops.as_ref(), [Opcode::PushBool(true)]));
+    }
+
+    #[test]
     fn const_fold_unary() {
         use crate::vm::{Compiler, Opcode};
         let prog = Compiler::compile_str("not true").unwrap();
@@ -1194,16 +1305,389 @@ mod tests {
     fn fusion_map_sum_opcode() {
         use crate::vm::{Compiler, Opcode};
         let prog = Compiler::compile_str("$.books.map(@.price).sum()").unwrap();
-        let has = prog.ops.iter().any(|o| matches!(o, Opcode::MapSum(_)));
-        assert!(has, "map+sum should fuse to MapSum");
+        let has = prog.ops.iter().any(|o|
+            matches!(o, Opcode::MapSum(_) | Opcode::MapFieldSum(_)));
+        assert!(has, "map+sum should fuse to MapSum / MapFieldSum");
     }
 
     #[test]
     fn fusion_map_avg_opcode() {
         use crate::vm::{Compiler, Opcode};
         let prog = Compiler::compile_str("$.books.map(@.price).avg()").unwrap();
-        let has = prog.ops.iter().any(|o| matches!(o, Opcode::MapAvg(_)));
-        assert!(has, "map+avg should fuse to MapAvg");
+        let has = prog.ops.iter().any(|o|
+            matches!(o, Opcode::MapAvg(_) | Opcode::MapFieldAvg(_)));
+        assert!(has, "map+avg should fuse to MapAvg / MapFieldAvg");
+    }
+
+    #[test]
+    fn fusion_filter_first_opcode() {
+        use crate::vm::{Compiler, Opcode};
+        let prog = Compiler::compile_str("$.books.filter(@.price > 10).first()").unwrap();
+        let has = prog.ops.iter().any(|o| matches!(o, Opcode::FindFirst(_)));
+        assert!(has, "filter+first should fuse to FindFirst");
+    }
+
+    #[test]
+    fn fusion_filter_first_semantics() {
+        let doc = books();
+        let fused = query("$.store.books.filter(@.price > 10).first()", &doc).unwrap();
+        let plain = query("$.store.books.filter(@.price > 10) | first()", &doc).unwrap();
+        assert_eq!(fused, plain);
+    }
+
+    #[test]
+    fn fusion_filter_map_sum_opcode() {
+        use crate::vm::{Compiler, Opcode};
+        let prog = Compiler::compile_str(
+            "$.books.filter(@.price > 10).map(@.price).sum()"
+        ).unwrap();
+        let has = prog.ops.iter().any(|o| matches!(o, Opcode::FilterMapSum { .. }));
+        assert!(has, "filter+map+sum should fuse to FilterMapSum");
+    }
+
+    #[test]
+    fn fusion_filter_map_avg_opcode() {
+        use crate::vm::{Compiler, Opcode};
+        let prog = Compiler::compile_str(
+            "$.books.filter(@.price > 10).map(@.price).avg()"
+        ).unwrap();
+        let has = prog.ops.iter().any(|o| matches!(o, Opcode::FilterMapAvg { .. }));
+        assert!(has, "filter+map+avg should fuse to FilterMapAvg");
+    }
+
+    #[test]
+    fn fusion_filter_map_sum_semantics() {
+        let doc = books();
+        let fused = query(
+            "$.store.books.filter(@.price > 10).map(@.price).sum()", &doc
+        ).unwrap();
+        let plain = query(
+            "$.store.books.filter(@.price > 10).sum(price)", &doc
+        ).unwrap();
+        assert_eq!(fused, plain);
+    }
+
+    #[test]
+    fn fusion_filter_map_avg_semantics() {
+        let doc = books();
+        let fused = query(
+            "$.store.books.filter(@.price > 10).map(@.price).avg()", &doc
+        ).unwrap();
+        let plain = query(
+            "$.store.books.filter(@.price > 10).avg(price)", &doc
+        ).unwrap();
+        assert_eq!(fused, plain);
+    }
+
+    #[test]
+    fn fusion_map_first_opcode() {
+        use crate::vm::{Compiler, Opcode};
+        let prog = Compiler::compile_str("$.books.map(@.price).first()").unwrap();
+        let has = prog.ops.iter().any(|o| matches!(o, Opcode::MapFirst(_)));
+        assert!(has, "map+first should fuse to MapFirst");
+    }
+
+    #[test]
+    fn fusion_map_last_opcode() {
+        use crate::vm::{Compiler, Opcode};
+        let prog = Compiler::compile_str("$.books.map(@.price).last()").unwrap();
+        let has = prog.ops.iter().any(|o| matches!(o, Opcode::MapLast(_)));
+        assert!(has, "map+last should fuse to MapLast");
+    }
+
+    #[test]
+    fn fusion_map_first_last_semantics() {
+        let doc = books();
+        let f = query("$.store.books.map(@.price).first()", &doc).unwrap();
+        let l = query("$.store.books.map(@.price).last()",  &doc).unwrap();
+        let all = query("$.store.books.map(@.price)",       &doc).unwrap();
+        let arr = all.as_array().unwrap();
+        assert_eq!(f, arr[0]);
+        assert_eq!(l, arr[arr.len() - 1]);
+
+        let empty_doc: serde_json::Value = serde_json::from_str(r#"{"xs":[]}"#).unwrap();
+        let f_empty = query("$.xs.map(@.price).first()", &empty_doc).unwrap();
+        assert!(f_empty.is_null());
+    }
+
+    #[test]
+    fn fusion_filter_map_first_opcode() {
+        use crate::vm::{Compiler, Opcode};
+        let prog = Compiler::compile_str(
+            "$.books.filter(@.price > 10).map(@.title).first()"
+        ).unwrap();
+        let has = prog.ops.iter().any(|o| matches!(o, Opcode::FilterMapFirst { .. }));
+        assert!(has, "filter+map+first should fuse to FilterMapFirst");
+    }
+
+    #[test]
+    fn fusion_filter_map_first_semantics() {
+        let doc = books();
+        let fused = query(
+            "$.store.books.filter(@.price > 10).map(@.title).first()",
+            &doc,
+        ).unwrap();
+        let plain = query(
+            "$.store.books.filter(@.price > 10).map(@.title)",
+            &doc,
+        ).unwrap();
+        let arr = plain.as_array().unwrap();
+        if arr.is_empty() {
+            assert!(fused.is_null());
+        } else {
+            assert_eq!(fused, arr[0]);
+        }
+
+        let empty_doc: serde_json::Value = serde_json::from_str(r#"{"xs":[]}"#).unwrap();
+        let e = query("$.xs.filter(@.price > 0).map(@.title).first()", &empty_doc).unwrap();
+        assert!(e.is_null());
+    }
+
+    #[test]
+    fn const_fold_string_concat_and_cmp() {
+        use crate::vm::{Compiler, Opcode};
+        let p1 = Compiler::compile_str(r#"$ | "a" + "bc""#).unwrap();
+        assert!(p1.ops.iter().any(|o| matches!(o, Opcode::PushStr(s) if s.as_ref() == "abc")),
+                "\"a\" + \"bc\" should fold to PushStr(\"abc\"): {:?}", p1.ops);
+
+        let p2 = Compiler::compile_str(r#"$ | "a" < "b""#).unwrap();
+        assert!(p2.ops.iter().any(|o| matches!(o, Opcode::PushBool(true))),
+                "\"a\" < \"b\" should fold to PushBool(true): {:?}", p2.ops);
+
+        let p3 = Compiler::compile_str(r#"$ | "zz" >= "aa""#).unwrap();
+        assert!(p3.ops.iter().any(|o| matches!(o, Opcode::PushBool(true))),
+                "\"zz\" >= \"aa\" should fold: {:?}", p3.ops);
+    }
+
+    #[test]
+    fn fusion_filter_last_opcode() {
+        use crate::vm::{Compiler, Opcode};
+        let prog = Compiler::compile_str("$.books.filter(@.price > 10).last()").unwrap();
+        let has = prog.ops.iter().any(|o| matches!(o, Opcode::FilterLast { .. }));
+        assert!(has, "filter+last should fuse to FilterLast: {:?}", prog.ops);
+    }
+
+    #[test]
+    fn fusion_filter_last_semantics() {
+        let doc = books();
+        let fused = query("$.store.books.filter(@.price > 10).last()", &doc).unwrap();
+        let plain = query("$.store.books.filter(@.price > 10)",        &doc).unwrap();
+        let arr = plain.as_array().unwrap();
+        if arr.is_empty() {
+            assert!(fused.is_null());
+        } else {
+            assert_eq!(fused, arr[arr.len() - 1]);
+        }
+
+        let empty_doc: serde_json::Value = serde_json::from_str(r#"{"xs":[]}"#).unwrap();
+        let e = query("$.xs.filter(@.price > 0).last()", &empty_doc).unwrap();
+        assert!(e.is_null());
+    }
+
+    #[test]
+    fn fusion_sort_sort_idempotent_collapse() {
+        use crate::vm::{Compiler, Opcode, BuiltinMethod};
+        let prog = Compiler::compile_str("$.books.sort().sort().first()").unwrap();
+        let sorts = prog.ops.iter().filter(|o| matches!(o,
+            Opcode::CallMethod(c) if c.method == BuiltinMethod::Sort)).count();
+        // Doubled sort collapses to one; sort()+first() then strength-reduces to min().
+        assert_eq!(sorts, 0, "sort().sort() should collapse: {:?}", prog.ops);
+    }
+
+    #[test]
+    fn fusion_unique_unique_collapse() {
+        use crate::vm::{Compiler, Opcode, BuiltinMethod};
+        let prog = Compiler::compile_str("$.items.unique().unique()").unwrap();
+        let uniqs = prog.ops.iter().filter(|o| matches!(o,
+            Opcode::CallMethod(c) if c.method == BuiltinMethod::Unique)).count();
+        assert_eq!(uniqs, 1, "unique().unique() should collapse: {:?}", prog.ops);
+    }
+
+    #[test]
+    fn fusion_reverse_reverse_dropped() {
+        use crate::vm::{Compiler, Opcode, BuiltinMethod};
+        let prog = Compiler::compile_str("$.items.reverse().reverse()").unwrap();
+        let revs = prog.ops.iter().filter(|o| matches!(o,
+            Opcode::CallMethod(c) if c.method == BuiltinMethod::Reverse)).count();
+        assert_eq!(revs, 0, "reverse().reverse() should be dropped: {:?}", prog.ops);
+    }
+
+    #[test]
+    fn fusion_idempotent_semantics() {
+        let doc = json!({"xs": [3, 1, 2, 1, 3]});
+        let a = query("$.xs.unique().unique()", &doc).unwrap();
+        let b = query("$.xs.unique()", &doc).unwrap();
+        assert_eq!(a, b);
+        let c = query("$.xs.reverse().reverse()", &doc).unwrap();
+        assert_eq!(c, json!([3, 1, 2, 1, 3]));
+    }
+
+    #[test]
+    fn field_chain_ics_hit_across_shape_uniform_items() {
+        // Drive FieldChain through a filter so compilation doesn't route it
+        // to RootChain's cached path — the IC on FieldChain has to carry
+        // the hit itself.  Repeated invocations over same-shape objects
+        // populate the per-hop slot cache on the first item.
+        let doc = json!({
+            "xs": [
+                {"a": {"b": {"c": 1}}, "tag": "k"},
+                {"a": {"b": {"c": 2}}, "tag": "k"},
+                {"a": {"b": {"c": 3}}, "tag": "x"},
+                {"a": {"b": {"c": 4}}, "tag": "k"},
+            ]
+        });
+        let r = query("$.xs.filter(tag == 'k').map(a.b.c)", &doc).unwrap();
+        assert_eq!(r, json!([1, 2, 4]));
+    }
+
+    #[test]
+    fn descendant_first_tree_walker_early_exit() {
+        // Self-first DFS order: root has `id` first, so $..id.first() must be 1.
+        let doc = json!({
+            "id": 1,
+            "child": {"id": 2, "grand": {"id": 3}},
+            "siblings": [{"id": 4}, {"id": 5}]
+        });
+        let r = query("$..id.first()", &doc).unwrap();
+        assert_eq!(r, json!(1));
+    }
+
+    #[test]
+    fn descendant_first_matches_collect_then_first() {
+        let doc = json!({
+            "a": {"k": "hit"},
+            "b": {"c": {"k": "nested"}},
+            "xs": [{"k": "in_array"}, {"k": "late"}]
+        });
+        let early = query("$..k.first()", &doc).unwrap();
+        let all = query("$..k", &doc).unwrap();
+        let first_of_all = all.as_array().and_then(|a| a.first()).cloned().unwrap_or(json!(null));
+        assert_eq!(early, first_of_all);
+    }
+
+    #[test]
+    fn descendant_first_missing_key_is_null() {
+        let doc = json!({"a": 1, "b": {"c": 2}});
+        let r = query("$..missing.first()", &doc).unwrap();
+        assert!(r.is_null());
+    }
+
+    #[test]
+    fn descendant_quantifier_first_tree_walker() {
+        // `!` quantifier compiles to Quantifier(First) in some paths;
+        // is_first_selector_op covers both forms.
+        let doc = json!({"id": 1, "nested": {"id": 2}});
+        let r = query("$..id!", &doc);
+        if let Ok(v) = r {
+            assert_eq!(v, json!(1));
+        }
+    }
+
+    #[test]
+    fn fusion_sort_by_first_emits_argextreme() {
+        use crate::vm::{Compiler, Opcode, BuiltinMethod};
+        let prog = Compiler::compile_str("$.books.sort(price).first()").unwrap();
+        let has_sort = prog.ops.iter().any(|o| matches!(o,
+            Opcode::CallMethod(c) if c.method == BuiltinMethod::Sort));
+        let has_arg = prog.ops.iter().any(|o| matches!(o, Opcode::ArgExtreme { max: false, .. }));
+        assert!(!has_sort, "sort(k).first() should not retain Sort: {:?}", prog.ops);
+        assert!(has_arg, "expected ArgExtreme{{max:false}}: {:?}", prog.ops);
+    }
+
+    #[test]
+    fn fusion_sort_by_last_emits_argextreme_max() {
+        use crate::vm::{Compiler, Opcode};
+        let prog = Compiler::compile_str("$.books.sort(price).last()").unwrap();
+        let has_arg = prog.ops.iter().any(|o| matches!(o, Opcode::ArgExtreme { max: true, .. }));
+        assert!(has_arg, "expected ArgExtreme{{max:true}}: {:?}", prog.ops);
+    }
+
+    #[test]
+    fn argextreme_sort_by_first_matches_naive() {
+        let doc = json!({"books": [
+            {"title": "a", "price": 9},
+            {"title": "b", "price": 3},
+            {"title": "c", "price": 5},
+            {"title": "d", "price": 3},
+        ]});
+        let r = query("$.books.sort(price).first()", &doc).unwrap();
+        assert_eq!(r, json!({"title": "b", "price": 3}));
+    }
+
+    #[test]
+    fn argextreme_sort_by_last_matches_naive() {
+        let doc = json!({"books": [
+            {"title": "a", "price": 9},
+            {"title": "b", "price": 3},
+            {"title": "c", "price": 9},
+            {"title": "d", "price": 5},
+        ]});
+        let r = query("$.books.sort(price).last()", &doc).unwrap();
+        assert_eq!(r, json!({"title": "c", "price": 9}));
+    }
+
+    #[test]
+    fn argextreme_empty_array_is_null() {
+        let doc = json!({"empty": []});
+        let r = query("$.empty.sort(price).first()", &doc).unwrap();
+        assert!(r.is_null());
+        let r = query("$.empty.sort(price).last()", &doc).unwrap();
+        assert!(r.is_null());
+    }
+
+    #[test]
+    fn argextreme_vm_path_matches_tree() {
+        use crate::vm::{VM, Compiler};
+        let doc = json!({"xs": [
+            {"n": 2, "id": 1},
+            {"n": -1, "id": 2},
+            {"n": 3, "id": 3},
+            {"n": -1, "id": 4},
+        ]});
+        let prog = Compiler::compile_str("$.xs.sort(n).first()").unwrap();
+        let mut vm = VM::new();
+        let v = vm.run_str("$.xs.sort(n).first()", &doc).unwrap();
+        // Stable: earliest min-key (id=2, n=-1)
+        assert_eq!(v, json!({"n": -1, "id": 2}));
+
+        let v = vm.run_str("$.xs.sort(n).last()", &doc).unwrap();
+        // Stable: latest max-key — only one n=3, id=3
+        assert_eq!(v, json!({"n": 3, "id": 3}));
+
+        // Confirm compile emits ArgExtreme
+        use crate::vm::Opcode;
+        let has_arg = prog.ops.iter().any(|o| matches!(o, Opcode::ArgExtreme { .. }));
+        assert!(has_arg, "expected ArgExtreme in compiled program");
+    }
+
+    #[test]
+    fn fusion_sort_sum_drops_sort() {
+        use crate::vm::{Compiler, Opcode, BuiltinMethod};
+        let prog = Compiler::compile_str("$.books.sort().sum()").unwrap();
+        let has_sort = prog.ops.iter().any(|o| matches!(o,
+            Opcode::CallMethod(c) if c.method == BuiltinMethod::Sort));
+        assert!(!has_sort, "sort before sum should be strength-reduced away");
+    }
+
+    #[test]
+    fn fusion_reverse_max_drops_reverse() {
+        use crate::vm::{Compiler, Opcode, BuiltinMethod};
+        let prog = Compiler::compile_str("$.books.reverse().max()").unwrap();
+        let has_rev = prog.ops.iter().any(|o| matches!(o,
+            Opcode::CallMethod(c) if c.method == BuiltinMethod::Reverse));
+        assert!(!has_rev, "reverse before max should be strength-reduced away");
+    }
+
+    #[test]
+    fn fusion_reorder_aggregate_semantics() {
+        let doc = books();
+        // `min` / `max` are exact — no FP summation order to worry about.
+        let a = query("$.store.books.sort(price).min(price)", &doc).unwrap();
+        let b = query("$.store.books.min(price)",             &doc).unwrap();
+        assert_eq!(a, b);
+        let c = query("$.store.books.reverse().max(price)",   &doc).unwrap();
+        let d = query("$.store.books.max(price)",             &doc).unwrap();
+        assert_eq!(c, d);
     }
 
     #[test]
@@ -2153,5 +2637,733 @@ mod tests {
         let doc = json!({});
         let r = query(r#"DELETE"#, &doc);
         assert!(r.is_err());
+    }
+
+    // ── Tier 1: aliases + unique_by + collect + deep_* ────────────────────────
+
+    fn saas() -> serde_json::Value {
+        json!({
+            "org": "acme",
+            "teams": [
+                {
+                    "name": "platform",
+                    "members": [
+                        {"email": "a@acme.io", "role": "lead"},
+                        {"email": "b@acme.io", "role": "eng"}
+                    ],
+                    "projects": [
+                        {"id": 1, "name": "api",     "tasks": [{"id": "t1", "status": "open"}, {"id": "t2", "status": "done"}]},
+                        {"id": 2, "name": "runtime", "tasks": [{"id": "t3", "status": "open"}]}
+                    ]
+                },
+                {
+                    "name": "growth",
+                    "members": [
+                        {"email": "c@acme.io", "role": "lead"},
+                        {"email": "a@acme.io", "role": "eng"}
+                    ],
+                    "projects": [
+                        {"id": 3, "name": "funnel", "tasks": []}
+                    ]
+                }
+            ],
+            "billing": {
+                "invoices": [
+                    {"email": "acme-finance@acme.io", "total": 100}
+                ]
+            }
+        })
+    }
+
+    #[test]
+    fn tier1_find_alias() {
+        let doc = books();
+        let r = query(r#"$.store.books.find(price > 10).map(title)"#, &doc).unwrap();
+        assert_eq!(r, json!(["Dune", "Neuromancer"]));
+    }
+
+    #[test]
+    fn tier1_find_all_alias() {
+        let doc = books();
+        let r = query(r#"$.store.books.find_all(rating > 4.5).map(title)"#, &doc).unwrap();
+        let titles = r.as_array().unwrap();
+        assert!(titles.contains(&json!("Dune")));
+        assert!(titles.contains(&json!("1984")));
+    }
+
+    #[test]
+    fn tier1_unique_by_lambda() {
+        let doc = saas();
+        let r = query(
+            r#"$.teams.flat_map(lambda t: t.members).unique_by(lambda m: m.email).map(email)"#,
+            &doc,
+        ).unwrap();
+        let emails = r.as_array().unwrap();
+        assert_eq!(emails.len(), 3);
+        assert!(emails.contains(&json!("a@acme.io")));
+        assert!(emails.contains(&json!("b@acme.io")));
+        assert!(emails.contains(&json!("c@acme.io")));
+    }
+
+    #[test]
+    fn tier1_collect_scalar() {
+        let doc = json!({"x": 42});
+        let r = query(r#"$.x.collect()"#, &doc).unwrap();
+        assert_eq!(r, json!([42]));
+    }
+
+    #[test]
+    fn tier1_collect_array_identity() {
+        let doc = json!({"xs": [1,2,3]});
+        let r = query(r#"$.xs.collect()"#, &doc).unwrap();
+        assert_eq!(r, json!([1, 2, 3]));
+    }
+
+    #[test]
+    fn tier1_collect_null_to_empty() {
+        let doc = json!({"x": null});
+        let r = query(r#"$.x.collect()"#, &doc).unwrap();
+        assert_eq!(r, json!([]));
+    }
+
+    #[test]
+    fn tier1_deep_shape_email_keys() {
+        let doc = saas();
+        // any object carrying `email` anywhere — members + invoices
+        let r = query(r#"$.deep_shape({email})"#, &doc).unwrap();
+        let arr = r.as_array().unwrap();
+        // 4 members across teams + 1 invoice = 5
+        assert_eq!(arr.len(), 5);
+    }
+
+    #[test]
+    fn tier1_deep_like_role_lead() {
+        let doc = saas();
+        let r = query(r#"$.deep_like({role: "lead"})"#, &doc).unwrap();
+        let arr = r.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        for item in arr {
+            assert_eq!(item.get("role").unwrap(), &json!("lead"));
+        }
+    }
+
+    #[test]
+    fn tier1_pick_ident_keys() {
+        let doc = json!({"user": {"name": "Alice", "age": 30, "score": 85}});
+        let r = query(r#"$.user.pick(name, age)"#, &doc).unwrap();
+        assert_eq!(r, json!({"name": "Alice", "age": 30}));
+    }
+
+    #[test]
+    fn tier1_pick_alias() {
+        let doc = json!({"user": {"name": "Alice", "age": 30}});
+        let r = query(r#"$.user.pick(name, years: age)"#, &doc).unwrap();
+        assert_eq!(r, json!({"name": "Alice", "years": 30}));
+    }
+
+    #[test]
+    fn tier1_pick_over_array() {
+        let doc = saas();
+        let r = query(r#"$.teams[0].members.pick(email)"#, &doc).unwrap();
+        assert_eq!(r, json!([{"email": "a@acme.io"}, {"email": "b@acme.io"}]));
+    }
+
+    #[test]
+    fn tier1_pick_alias_over_array() {
+        let doc = saas();
+        let r = query(r#"$.teams[0].members.pick(addr: email, role)"#, &doc).unwrap();
+        assert_eq!(r, json!([
+            {"addr": "a@acme.io", "role": "lead"},
+            {"addr": "b@acme.io", "role": "eng"}
+        ]));
+    }
+
+    #[test]
+    fn tier1_deep_find_status_open() {
+        let doc = saas();
+        let r = query(r#"$.deep_find(@ kind object and status == "open")"#, &doc).unwrap();
+        let arr = r.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+    }
+
+    #[test]
+    fn tier1_dotdot_find_sugar() {
+        let doc = saas();
+        let r = query(r#"$..find(@ kind object and status == "open")"#, &doc).unwrap();
+        let arr = r.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+    }
+
+    #[test]
+    fn tier1_dotdot_shape_sugar() {
+        let doc = saas();
+        let r = query(r#"$..shape({email})"#, &doc).unwrap();
+        let arr = r.as_array().unwrap();
+        assert_eq!(arr.len(), 5);
+    }
+
+    #[test]
+    fn tier1_dotdot_like_sugar() {
+        let doc = saas();
+        let r = query(r#"$..like({role: "lead"})"#, &doc).unwrap();
+        let arr = r.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+    }
+
+    // ── Tier 1: chain-style terminal writes ──────────────────────────────────
+
+    #[test]
+    fn tier1_chain_set_field() {
+        let doc = json!({"user": {"name": "Alice", "age": 30}});
+        let r = query(r#"$.user.name.set("Bob")"#, &doc).unwrap();
+        assert_eq!(r, json!({"user": {"name": "Bob", "age": 30}}));
+    }
+
+    #[test]
+    fn tier1_chain_set_deep() {
+        let doc = saas();
+        let r = query(r#"$.teams[0].projects[0].name.set("API")"#, &doc).unwrap();
+        assert_eq!(r.pointer("/teams/0/projects/0/name").unwrap(), &json!("API"));
+        // untouched siblings still present
+        assert_eq!(r.pointer("/teams/0/projects/1/name").unwrap(), &json!("runtime"));
+        assert_eq!(r.pointer("/org").unwrap(), &json!("acme"));
+    }
+
+    #[test]
+    fn tier1_chain_modify_using_current() {
+        let doc = json!({"counts": {"n": 5}});
+        let r = query(r#"$.counts.n.modify(@ * 2)"#, &doc).unwrap();
+        assert_eq!(r, json!({"counts": {"n": 10}}));
+    }
+
+    #[test]
+    fn tier1_chain_delete_field() {
+        let doc = json!({"user": {"name": "Alice", "age": 30}});
+        let r = query(r#"$.user.age.delete()"#, &doc).unwrap();
+        assert_eq!(r, json!({"user": {"name": "Alice"}}));
+    }
+
+    #[test]
+    fn tier1_chain_unset_key() {
+        let doc = json!({"user": {"name": "Alice", "age": 30}});
+        let r = query(r#"$.user.unset("age")"#, &doc).unwrap();
+        assert_eq!(r, json!({"user": {"name": "Alice"}}));
+    }
+
+    #[test]
+    fn tier1_chain_set_subtree() {
+        let doc = json!({"a": {"b": {"c": 1}}});
+        let r = query(r#"$.a.b.set({x: 42})"#, &doc).unwrap();
+        assert_eq!(r, json!({"a": {"b": {"x": 42}}}));
+    }
+
+    #[test]
+    fn tier1_chain_descendant_set() {
+        let doc = saas();
+        // every `status` anywhere under the doc flips to "closed"
+        let r = query(r#"$..status.set("closed")"#, &doc).unwrap();
+        let statuses: Vec<&serde_json::Value> = r.pointer("/teams/0/projects/0/tasks").unwrap()
+            .as_array().unwrap().iter()
+            .map(|t| t.get("status").unwrap())
+            .collect();
+        assert!(statuses.iter().all(|s| *s == &json!("closed")));
+    }
+
+    #[test]
+    fn tier1_chain_descendant_delete() {
+        let doc = json!({"a": {"id": 1, "b": {"id": 2, "c": {"id": 3}}}});
+        let r = query(r#"$..id.delete()"#, &doc).unwrap();
+        assert_eq!(r, json!({"a": {"b": {"c": {}}}}));
+    }
+
+    #[test]
+    fn tier1_chain_dyn_index() {
+        let doc = json!({"xs": [10, 20, 30, 40], "i": 2});
+        let r = query(r#"$.xs[$.i].set(99)"#, &doc).unwrap();
+        assert_eq!(r.pointer("/xs").unwrap(), &json!([10, 20, 99, 40]));
+    }
+
+    #[test]
+    fn tier1_chain_merge() {
+        let doc = json!({"config": {"host": "a", "port": 80}});
+        let r = query(r#"$.config.merge({port: 443, tls: true})"#, &doc).unwrap();
+        assert_eq!(r, json!({"config": {"host": "a", "port": 443, "tls": true}}));
+    }
+
+    #[test]
+    fn tier1_chain_deep_merge() {
+        let doc = json!({"a": {"b": {"x": 1}}});
+        let r = query(r#"$.a.deep_merge({b: {y: 2}})"#, &doc).unwrap();
+        assert_eq!(r, json!({"a": {"b": {"x": 1, "y": 2}}}));
+    }
+
+    #[test]
+    fn tier1_chain_modify_lambda() {
+        let doc = json!({"counts": {"n": 5}});
+        let r = query(r#"$.counts.n.modify(lambda x: x * 3)"#, &doc).unwrap();
+        assert_eq!(r, json!({"counts": {"n": 15}}));
+    }
+
+    #[test]
+    fn tier1_non_root_set_is_method_call() {
+        // `.set` without `$` prefix is the old builtin: returns arg, ignoring recv
+        let doc = json!({"x": 1});
+        let r = query(r#"$.x | set(99)"#, &doc).unwrap();
+        assert_eq!(r, json!(99));
+    }
+
+    #[test]
+    fn tier1_descendant_still_works() {
+        // `..field` (no parens) should still be a descendant lookup, not a deep method
+        let doc = books();
+        let r = query("$..title", &doc).unwrap();
+        let titles = r.as_array().unwrap();
+        assert!(titles.contains(&json!("Dune")));
+    }
+
+    #[test]
+    fn simd_scan_descendant_matches_tree_walker() {
+        use crate::Jetro;
+        let raw = br#"{"a":{"test":1},"b":[{"test":2},{"other":9},{"test":3}],"comment":"the \"test\": lie"}"#.to_vec();
+        let j_bytes = Jetro::from_bytes(raw.clone()).unwrap();
+        let j_tree  = Jetro::new(serde_json::from_slice(&raw).unwrap());
+        assert_eq!(j_bytes.collect("$..test").unwrap(),
+                   j_tree.collect("$..test").unwrap());
+    }
+
+    #[test]
+    fn simd_scan_chains_further_steps() {
+        use crate::Jetro;
+        let raw = br#"{"users":[{"id":1,"name":"a"},{"id":2,"name":"b"},{"id":3,"name":"c"}]}"#.to_vec();
+        let j = Jetro::from_bytes(raw).unwrap();
+        let r = j.collect("$..id.sum()").unwrap();
+        assert_eq!(r, json!(6));
+    }
+
+    #[test]
+    fn simd_scan_via_vm_path() {
+        // Jetro::collect routes through the thread-local VM.  With raw bytes
+        // the VM's Opcode::Descendant should take the scan fast path and
+        // produce document-order results matching the tree walker for docs
+        // where the key does not also sit at the root (which is the common
+        // case for $..name queries).
+        use crate::Jetro;
+        let raw = br#"{"a":{"x":1},"b":[{"x":2},{"x":3}]}"#.to_vec();
+        let j_b = Jetro::from_bytes(raw.clone()).unwrap();
+        let j_t = Jetro::new(serde_json::from_slice(&raw).unwrap());
+        // Repeat to exercise the compile cache on the second call.
+        assert_eq!(j_b.collect("$..x").unwrap(), j_t.collect("$..x").unwrap());
+        assert_eq!(j_b.collect("$..x").unwrap(), j_t.collect("$..x").unwrap());
+    }
+
+    #[test]
+    fn simd_scan_vm_path_aggregate() {
+        // Exercise Descendant followed by an aggregate — verifies the scan
+        // fast path cooperates with the rest of the VM pipeline.
+        use crate::Jetro;
+        let raw = br#"{"rows":[{"p":10},{"p":20},{"p":30}]}"#.to_vec();
+        let j = Jetro::from_bytes(raw).unwrap();
+        assert_eq!(j.collect("$..p.sum()").unwrap(), json!(60));
+    }
+
+    #[test]
+    fn simd_scan_literal_eq_int() {
+        // Tree walker fast path: `$..k[@ == lit]` with raw bytes.  Only
+        // matching sites parse; non-matching bytes are skipped.
+        let doc = json!({"xs":[{"n":10},{"n":42},{"n":10},{"n":42},{"n":7}]});
+        let raw = serde_json::to_vec(&doc).unwrap();
+        let ast = crate::parser::parse("$..n.filter(@ == 42)").unwrap();
+        let r = crate::eval::evaluate_with_raw(
+            &ast,
+            &doc,
+            std::sync::Arc::new(crate::MethodRegistry::new()),
+            std::sync::Arc::from(raw.into_boxed_slice()),
+        ).unwrap();
+        assert_eq!(r, json!([42, 42]));
+    }
+
+    #[test]
+    fn simd_scan_literal_eq_string() {
+        let doc = json!({
+            "events":[
+                {"type":"action"},{"type":"idle"},
+                {"type":"action"},{"type":"noop"}
+            ]
+        });
+        let raw = serde_json::to_vec(&doc).unwrap();
+        let ast = crate::parser::parse(r#"$..type.filter(@ == "action")"#).unwrap();
+        let r = crate::eval::evaluate_with_raw(
+            &ast,
+            &doc,
+            std::sync::Arc::new(crate::MethodRegistry::new()),
+            std::sync::Arc::from(raw.into_boxed_slice()),
+        ).unwrap();
+        assert_eq!(r, json!(["action", "action"]));
+    }
+
+    #[test]
+    fn simd_scan_literal_eq_bool_null() {
+        let doc = json!({"xs":[{"v":true},{"v":false},{"v":true},{"v":null}]});
+        let raw = serde_json::to_vec(&doc).unwrap();
+        let ast = crate::parser::parse("$..v.filter(@ == true)").unwrap();
+        let r = crate::eval::evaluate_with_raw(
+            &ast, &doc,
+            std::sync::Arc::new(crate::MethodRegistry::new()),
+            std::sync::Arc::from(raw.clone().into_boxed_slice()),
+        ).unwrap();
+        assert_eq!(r, json!([true, true]));
+
+        let ast2 = crate::parser::parse("$..v.filter(@ == null)").unwrap();
+        let r2 = crate::eval::evaluate_with_raw(
+            &ast2, &doc,
+            std::sync::Arc::new(crate::MethodRegistry::new()),
+            std::sync::Arc::from(raw.into_boxed_slice()),
+        ).unwrap();
+        assert_eq!(r2, json!([null]));
+    }
+
+    #[test]
+    fn route_c_chained_descendants_match_tree_walker() {
+        // Three-level nested descendant chain with quantifiers in between.
+        // Byte-chain path must agree with the tree walker on the raw doc.
+        use crate::Jetro;
+        let doc = json!({
+            "outer":[
+                {"inner":[{"leaf":1},{"leaf":2}]},
+                {"inner":[{"leaf":3},{"leaf":4}]}
+            ]
+        });
+        let raw = serde_json::to_vec(&doc).unwrap();
+        let j_b = Jetro::from_bytes(raw).unwrap();
+        let j_t = Jetro::new(doc);
+        let q = "$..outer.first()..inner.first()..leaf";
+        assert_eq!(j_b.collect(q).unwrap(), j_t.collect(q).unwrap());
+        assert_eq!(j_b.collect(q).unwrap(), json!([1, 2]));
+    }
+
+    #[test]
+    fn route_c_descendant_after_filter_eq() {
+        // Filter-eq on byte span, then descendant into the chosen span.
+        use crate::Jetro;
+        let doc = json!({
+            "items":[
+                {"kind":"a","children":[{"v":1},{"v":2}]},
+                {"kind":"b","children":[{"v":3},{"v":4}]}
+            ]
+        });
+        let raw = serde_json::to_vec(&doc).unwrap();
+        let j_b = Jetro::from_bytes(raw).unwrap();
+        let j_t = Jetro::new(doc);
+        let q = r#"$..kind.filter(@ == "a")"#;
+        assert_eq!(j_b.collect(q).unwrap(), j_t.collect(q).unwrap());
+        assert_eq!(j_b.collect(q).unwrap(), json!(["a"]));
+    }
+
+    #[test]
+    fn route_c_quantifier_scalar_result() {
+        // `.first()` on a byte chain produces a scalar, not a 1-element array.
+        use crate::Jetro;
+        let doc = json!({"xs":[{"id":7},{"id":8}]});
+        let raw = serde_json::to_vec(&doc).unwrap();
+        let j_b = Jetro::from_bytes(raw).unwrap();
+        assert_eq!(j_b.collect("$..id.first()").unwrap(), json!(7));
+    }
+
+    #[test]
+    fn deep_find_field_eq_scan_matches_tree_walker() {
+        // SIMD `$..find(@.k == lit)` fast path must agree with tree walker
+        // across nesting depths and return full enclosing objects.
+        use crate::Jetro;
+        let doc = json!({
+            "a":[
+                {"type":"action","v":1},
+                {"type":"idle","v":2},
+                {"nested":{"type":"action","v":3}}
+            ],
+            "b":{"type":"action","v":4}
+        });
+        let raw = serde_json::to_vec(&doc).unwrap();
+        let j_b = Jetro::from_bytes(raw).unwrap();
+        let j_t = Jetro::new(doc);
+        let q = r#"$..find(@.type == "action")"#;
+        let rb = j_b.collect(q).unwrap();
+        let rt = j_t.collect(q).unwrap();
+        assert_eq!(rb, rt);
+        let arr = rb.as_array().unwrap();
+        assert_eq!(arr.len(), 3);
+    }
+
+    #[test]
+    fn deep_find_field_eq_int_literal() {
+        use crate::Jetro;
+        let doc = json!({"xs":[{"id":1,"t":"a"},{"id":2,"t":"b"},{"deep":{"id":1,"t":"c"}}]});
+        let raw = serde_json::to_vec(&doc).unwrap();
+        let j_b = Jetro::from_bytes(raw).unwrap();
+        let j_t = Jetro::new(doc);
+        let q = "$..find(@.id == 1)";
+        assert_eq!(j_b.collect(q).unwrap(), j_t.collect(q).unwrap());
+        assert_eq!(j_b.collect(q).unwrap().as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn deep_find_field_eq_chains_further() {
+        // After the SIMD enclosing-object scan, remaining chain steps still
+        // run on the materialised Vals.
+        use crate::Jetro;
+        let doc = json!({
+            "items":[
+                {"type":"action","v":10},
+                {"type":"idle","v":20},
+                {"type":"action","v":30}
+            ]
+        });
+        let raw = serde_json::to_vec(&doc).unwrap();
+        let j_b = Jetro::from_bytes(raw).unwrap();
+        let j_t = Jetro::new(doc);
+        let q = r#"$..find(@.type == "action").map(v)"#;
+        assert_eq!(j_b.collect(q).unwrap(), j_t.collect(q).unwrap());
+        assert_eq!(j_b.collect(q).unwrap(), json!([10, 30]));
+    }
+
+    #[test]
+    fn find_shallow_multi_pred_and() {
+        // Shallow `find(p1, p2)` keeps only items where *both* preds hold.
+        use crate::Jetro;
+        let doc = json!({"xs":[
+            {"t":"a","v":1},
+            {"t":"a","v":2},
+            {"t":"b","v":1}
+        ]});
+        let j = Jetro::new(doc);
+        let r = j.collect(r#"$.xs.find(@.t == "a", @.v == 1)"#).unwrap();
+        assert_eq!(r, json!([{"t":"a","v":1}]));
+    }
+
+    #[test]
+    fn find_shallow_single_pred_still_works() {
+        use crate::Jetro;
+        let doc = json!({"xs":[{"v":1},{"v":2}]});
+        let j = Jetro::new(doc);
+        let r = j.collect(r#"$.xs.find(@.v == 2)"#).unwrap();
+        assert_eq!(r, json!([{"v":2}]));
+    }
+
+    #[test]
+    fn deep_find_multi_pred_matches_scan_and_tree() {
+        // SIMD multi-conjunct scan must match tree walker's AND semantics.
+        use crate::Jetro;
+        let doc = json!({
+            "rows":[
+                {"type":"action","device":"mobile","id":1},
+                {"type":"action","device":"desktop","id":2},
+                {"type":"idle","device":"mobile","id":3},
+                {"nested":{"type":"action","device":"mobile","id":4}}
+            ]
+        });
+        let raw = serde_json::to_vec(&doc).unwrap();
+        let j_b = Jetro::from_bytes(raw).unwrap();
+        let j_t = Jetro::new(doc);
+        let q = r#"$..find(@.type == "action", @.device == "mobile")"#;
+        let rb = j_b.collect(q).unwrap();
+        let rt = j_t.collect(q).unwrap();
+        assert_eq!(rb, rt);
+        assert_eq!(rb.as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn deep_find_then_filter_eq_refines_spans() {
+        // `$..find(eq_preds).filter(@.k == lit)` — the trailing filter
+        // should shrink the byte-scan span set in place without
+        // parsing non-matching objects.
+        use crate::Jetro;
+        let doc = json!({
+            "rows":[
+                {"type":"action","device":"mobile","state":"on","id":1},
+                {"type":"action","device":"mobile","state":"off","id":2},
+                {"type":"action","device":"desktop","state":"on","id":3}
+            ]
+        });
+        let raw = serde_json::to_vec(&doc).unwrap();
+        let j_b = Jetro::from_bytes(raw).unwrap();
+        let j_t = Jetro::new(doc);
+        let q = r#"$..find(@.type == "action", @.device == "mobile").filter(@.state == "on")"#;
+        let rb = j_b.collect(q).unwrap();
+        let rt = j_t.collect(q).unwrap();
+        assert_eq!(rb, rt);
+        assert_eq!(rb.as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn deep_find_then_filter_cmp_refines_spans() {
+        // Trailing `.filter(@.k > n)` after `..find` — numeric refinement.
+        use crate::Jetro;
+        let doc = json!({
+            "rows":[
+                {"type":"action","v":1},
+                {"type":"action","v":10},
+                {"type":"action","v":100},
+                {"type":"idle","v":200}
+            ]
+        });
+        let raw = serde_json::to_vec(&doc).unwrap();
+        let j_b = Jetro::from_bytes(raw).unwrap();
+        let j_t = Jetro::new(doc);
+        let q = r#"$..find(@.type == "action").filter(@.v > 5).map(v).sum()"#;
+        let rb = j_b.collect(q).unwrap();
+        let rt = j_t.collect(q).unwrap();
+        assert_eq!(rb, rt);
+        assert_eq!(rb, json!(110));
+    }
+
+    #[test]
+    fn deep_find_then_filter_then_count() {
+        // Compose scan + refine + count — all on raw bytes.
+        use crate::Jetro;
+        let doc = json!({
+            "rows":[
+                {"type":"action","v":1},
+                {"type":"action","v":10},
+                {"type":"action","v":100},
+                {"type":"idle","v":50}
+            ]
+        });
+        let raw = serde_json::to_vec(&doc).unwrap();
+        let j_b = Jetro::from_bytes(raw).unwrap();
+        let q = r#"$..find(@.type == "action").filter(@.v >= 10).count()"#;
+        assert_eq!(j_b.collect(q).unwrap(), json!(2));
+    }
+
+    #[test]
+    fn deep_find_then_fused_filter_map_sum() {
+        // Fused FilterFieldCmpLitMapField trailing byte-scan → refine +
+        // project on bytes, aggregate without Val array.
+        use crate::Jetro;
+        let doc = json!({
+            "rows":[
+                {"type":"action","v":1},
+                {"type":"action","v":10},
+                {"type":"action","v":100}
+            ]
+        });
+        let raw = serde_json::to_vec(&doc).unwrap();
+        let j_b = Jetro::from_bytes(raw).unwrap();
+        let q = r#"$..find(@.type == "action").filter(@.v > 5).map(v).sum()"#;
+        assert_eq!(j_b.collect(q).unwrap(), json!(110));
+    }
+
+    #[test]
+    fn deep_find_then_fused_filter_map_array() {
+        use crate::Jetro;
+        let doc = json!({
+            "rows":[
+                {"type":"action","v":1},
+                {"type":"action","v":10},
+                {"type":"idle","v":50}
+            ]
+        });
+        let raw = serde_json::to_vec(&doc).unwrap();
+        let j_b = Jetro::from_bytes(raw.clone()).unwrap();
+        let j_t = Jetro::new(serde_json::from_slice::<serde_json::Value>(&raw).unwrap());
+        let q = r#"$..find(@.type == "action").filter(@.v >= 10).map(v)"#;
+        assert_eq!(j_b.collect(q).unwrap(), j_t.collect(q).unwrap());
+        assert_eq!(j_b.collect(q).unwrap(), json!([10]));
+    }
+
+    #[test]
+    fn find_count_fuses_to_filter_count() {
+        // Compiled program for `find(p).count()` should collapse to a
+        // single FilterCount op (no residual CallMethod for find/count).
+        use crate::VM;
+        let mut vm = VM::new();
+        let prog = vm.get_or_compile("$.xs.find(@ > 5).count()").unwrap();
+        let has_filter_count = prog.ops.iter().any(|op| matches!(
+            op,
+            crate::vm::Opcode::FilterCount(_)
+        ));
+        assert!(has_filter_count, "expected FilterCount, got {:?}", prog.ops);
+    }
+
+    #[test]
+    fn route_c_one_mismatch_errors_via_fallthrough() {
+        // Quantifier One on != 1 spans breaks the byte chain and falls
+        // through to the normal Val-based path which raises the proper error.
+        use crate::Jetro;
+        let doc = json!({"xs":[{"id":1},{"id":2}]});
+        let raw = serde_json::to_vec(&doc).unwrap();
+        let j_b = Jetro::from_bytes(raw).unwrap();
+        assert!(j_b.collect("$..id.one()").is_err());
+    }
+
+    // ── range() + ceil/floor/round ────────────────────────────────────────────
+
+    #[test]
+    fn range_one_arg() {
+        let doc = json!({});
+        assert_eq!(query("range(5)", &doc).unwrap(), json!([0,1,2,3,4]));
+    }
+
+    #[test]
+    fn range_two_args() {
+        let doc = json!({});
+        assert_eq!(query("range(2, 5)", &doc).unwrap(), json!([2,3,4]));
+    }
+
+    #[test]
+    fn range_three_args_positive_step() {
+        let doc = json!({});
+        assert_eq!(query("range(0, 10, 2)", &doc).unwrap(), json!([0,2,4,6,8]));
+    }
+
+    #[test]
+    fn range_three_args_negative_step() {
+        let doc = json!({});
+        assert_eq!(query("range(10, 0, -2)", &doc).unwrap(), json!([10,8,6,4,2]));
+    }
+
+    #[test]
+    fn range_empty_when_step_wrong_direction() {
+        let doc = json!({});
+        assert_eq!(query("range(5, 0, 1)", &doc).unwrap(), json!([]));
+        assert_eq!(query("range(0, 5, -1)", &doc).unwrap(), json!([]));
+    }
+
+    #[test]
+    fn range_zero_step_empty() {
+        let doc = json!({});
+        assert_eq!(query("range(0, 5, 0)", &doc).unwrap(), json!([]));
+    }
+
+    #[test]
+    fn ceil_floor_round_floats() {
+        let doc = json!({"x": 3.3, "y": 3.7, "z": 3.5, "n": -2.4});
+        assert_eq!(query("$.x.ceil()",  &doc).unwrap(), json!(4));
+        assert_eq!(query("$.x.floor()", &doc).unwrap(), json!(3));
+        assert_eq!(query("$.y.floor()", &doc).unwrap(), json!(3));
+        assert_eq!(query("$.y.round()", &doc).unwrap(), json!(4));
+        assert_eq!(query("$.z.round()", &doc).unwrap(), json!(4));
+        assert_eq!(query("$.n.ceil()",  &doc).unwrap(), json!(-2));
+        assert_eq!(query("$.n.floor()", &doc).unwrap(), json!(-3));
+    }
+
+    #[test]
+    fn ceil_floor_round_int_identity() {
+        let doc = json!({"x": 42});
+        assert_eq!(query("$.x.ceil()",  &doc).unwrap(), json!(42));
+        assert_eq!(query("$.x.floor()", &doc).unwrap(), json!(42));
+        assert_eq!(query("$.x.round()", &doc).unwrap(), json!(42));
+    }
+
+    #[test]
+    fn abs_number() {
+        let doc = json!({"a": -3.5, "b": 7});
+        assert_eq!(query("$.a.abs()", &doc).unwrap(), json!(3.5));
+        assert_eq!(query("$.b.abs()", &doc).unwrap(), json!(7));
+    }
+
+    #[test]
+    fn range_composes_with_map_sum() {
+        let doc = json!({});
+        // 1 + 2 + ... + 9 = 45
+        assert_eq!(query("range(1, 10).sum()", &doc).unwrap(), json!(45));
     }
 }

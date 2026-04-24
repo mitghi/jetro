@@ -1,6 +1,6 @@
 [package]
 name = "jetro-core"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 authors = ["Milad (Mike) Taghavi <mitghi.at.me.com>"]
 license = "MIT"
@@ -18,3 +18,14 @@ serde = { version = "1.0.171", features = ["derive"] }
 parking_lot = "0.12"
 smallvec = { version = "1", features = ["union"] }
 indexmap = "2"
+memchr = "2"
+simd-json = { version = "0.13", optional = true }
+
+[features]
+default = []
+simd-json = ["dep:simd-json"]
+
+[dev-dependencies]
+jaq-core = "3.0"
+jaq-std = "3.0"
+jaq-json = "2.0"
