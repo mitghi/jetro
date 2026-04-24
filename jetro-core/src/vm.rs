@@ -874,6 +874,14 @@ fn lookup_field_cached<'a>(
     }
 }
 
+/// Initial capacity hint for filter `out` Vecs.
+/// Assumes ~25% selectivity; avoids zero-cap realloc storm while not
+/// over-reserving on highly selective predicates.  Capped at receiver len.
+#[inline]
+fn filter_cap_hint(recv_len: usize) -> usize {
+    (recv_len / 4 + 4).min(recv_len)
+}
+
 /// `&str`-keyed variant of `lookup_field_cached`; ptr-eq shortcut is skipped
 /// (caller doesn't hold an `Arc<str>`), so the hit path is byte-eq only.
 #[inline]
@@ -3468,7 +3476,8 @@ impl VM {
                 // ── Predicate specialisation (Tier 4) ─────────────────────
                 Opcode::FilterFieldEqLit(k, lit) => {
                     let recv = pop!(stack);
-                    let mut out = Vec::new();
+                    let hint = match &recv { Val::Arr(a) => filter_cap_hint(a.len()), _ => 0 };
+                    let mut out = Vec::with_capacity(hint);
                     let mut idx: Option<usize> = None;
                     if let Val::Arr(a) = &recv {
                         for item in a.iter() {
@@ -3485,7 +3494,8 @@ impl VM {
                 }
                 Opcode::FilterFieldCmpLit(k, op, lit) => {
                     let recv = pop!(stack);
-                    let mut out = Vec::new();
+                    let hint = match &recv { Val::Arr(a) => filter_cap_hint(a.len()), _ => 0 };
+                    let mut out = Vec::with_capacity(hint);
                     let mut idx: Option<usize> = None;
                     if let Val::Arr(a) = &recv {
                         for item in a.iter() {
@@ -3502,7 +3512,8 @@ impl VM {
                 }
                 Opcode::FilterFieldEqLitMapField(kp, lit, kproj) => {
                     let recv = pop!(stack);
-                    let mut out = Vec::new();
+                    let hint = match &recv { Val::Arr(a) => filter_cap_hint(a.len()), _ => 0 };
+                    let mut out = Vec::with_capacity(hint);
                     let mut ip: Option<usize> = None;
                     let mut iq: Option<usize> = None;
                     if let Val::Arr(a) = &recv {
@@ -3524,7 +3535,8 @@ impl VM {
                 }
                 Opcode::FilterFieldCmpLitMapField(kp, op, lit, kproj) => {
                     let recv = pop!(stack);
-                    let mut out = Vec::new();
+                    let hint = match &recv { Val::Arr(a) => filter_cap_hint(a.len()), _ => 0 };
+                    let mut out = Vec::with_capacity(hint);
                     let mut ip: Option<usize> = None;
                     let mut iq: Option<usize> = None;
                     if let Val::Arr(a) = &recv {
@@ -3546,7 +3558,8 @@ impl VM {
                 }
                 Opcode::FilterFieldCmpField(k1, op, k2) => {
                     let recv = pop!(stack);
-                    let mut out = Vec::new();
+                    let hint = match &recv { Val::Arr(a) => filter_cap_hint(a.len()), _ => 0 };
+                    let mut out = Vec::with_capacity(hint);
                     let mut i1: Option<usize> = None;
                     let mut i2: Option<usize> = None;
                     if let Val::Arr(a) = &recv {
