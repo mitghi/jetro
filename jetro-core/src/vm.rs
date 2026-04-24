@@ -6549,42 +6549,42 @@ impl VM {
                     let recv = if matches!(&recv, Val::StrVec(_) | Val::IntVec(_) | Val::FloatVec(_)) {
                         recv.into_arr()
                     } else { recv };
-                    // Emit Val::ObjSmall per row — flat (key, value) slice,
-                    // no hashtable allocation.  Saves the per-row
-                    // Arc<IndexMap> + IndexMap::with_capacity + hash
-                    // insertion cost that dominates bench_smallstr project.
-                    let out_vec: Vec<Val> = if let Val::Arr(a) = &recv {
-                        let mut out = Vec::with_capacity(a.len());
+                    // Emit Val::ObjVec — columnar struct-of-arrays with one
+                    // shared keys schema and a `Vec<Vec<Val>>` of rows.
+                    // No per-row Arc wrapping, no per-row hashtable.
+                    if let Val::Arr(a) = &recv {
+                        let mut rows: Vec<Vec<Val>> = Vec::with_capacity(a.len());
                         for item in a.iter() {
                             if let Val::Obj(m) = item {
-                                let mut pairs: Vec<(Arc<str>, Val)> =
-                                    Vec::with_capacity(keys.len());
+                                let mut row: Vec<Val> = Vec::with_capacity(keys.len());
                                 for (i, k) in keys.iter().enumerate() {
-                                    let v = ic_get_field(m, k.as_ref(), &ics[i]);
-                                    if !v.is_null() {
-                                        pairs.push((k.clone(), v));
-                                    }
+                                    row.push(ic_get_field(m, k.as_ref(), &ics[i]));
                                 }
-                                out.push(Val::ObjSmall(pairs.into()));
+                                rows.push(row);
                             } else if let Val::ObjSmall(ps) = item {
-                                let mut pairs: Vec<(Arc<str>, Val)> =
-                                    Vec::with_capacity(keys.len());
+                                let mut row: Vec<Val> = Vec::with_capacity(keys.len());
                                 for k in keys.iter() {
+                                    let mut v = Val::Null;
                                     for (kk, vv) in ps.iter() {
                                         if kk.as_ref() == k.as_ref() {
-                                            pairs.push((k.clone(), vv.clone()));
+                                            v = vv.clone();
                                             break;
                                         }
                                     }
+                                    row.push(v);
                                 }
-                                out.push(Val::ObjSmall(pairs.into()));
+                                rows.push(row);
                             } else {
-                                out.push(Val::Null);
+                                rows.push(vec![Val::Null; keys.len()]);
                             }
                         }
-                        out
-                    } else { Vec::new() };
-                    stack.push(Val::arr(out_vec));
+                        stack.push(Val::ObjVec(Arc::new(super::eval::value::ObjVecData {
+                            keys: Arc::clone(keys),
+                            rows,
+                        })));
+                    } else {
+                        stack.push(Val::arr(Vec::new()));
+                    }
                 }
 
                 // ── Construction ──────────────────────────────────────────────
@@ -8377,6 +8377,7 @@ fn exec_cast(v: &Val, ty: super::ast::CastType) -> Result<Val, EvalError> {
             Val::FloatVec(a)  => !a.is_empty(),
             Val::StrVec(a)       => !a.is_empty(),
             Val::StrSliceVec(a)  => !a.is_empty(),
+            Val::ObjVec(d)       => !d.rows.is_empty(),
             Val::Obj(o)       => !o.is_empty(),
             Val::ObjSmall(p)  => !p.is_empty(),
         })),
@@ -8496,6 +8497,7 @@ fn hash_structure_into(v: &Val, h: &mut DefaultHasher, depth: usize) {
         Val::FloatVec(a) => { 5u8.hash(h); a.len().hash(h); for f in a.iter() { 3u8.hash(h); f.to_bits().hash(h); } }
         Val::StrVec(a)  => { 5u8.hash(h); a.len().hash(h); for s in a.iter() { 4u8.hash(h); s.hash(h); } }
         Val::StrSliceVec(a) => { 5u8.hash(h); a.len().hash(h); for r in a.iter() { 4u8.hash(h); r.as_str().hash(h); } }
+        Val::ObjVec(d)  => { 6u8.hash(h); d.rows.len().hash(h); for k in d.keys.iter() { k.hash(h); } }
         Val::Obj(m)     => { 6u8.hash(h); m.len().hash(h); for (k, v) in m.iter() { k.hash(h); hash_structure_into(v, h, depth+1); } }
         Val::ObjSmall(p) => { 6u8.hash(h); p.len().hash(h); for (k, v) in p.iter() { k.hash(h); hash_structure_into(v, h, depth+1); } }
     }

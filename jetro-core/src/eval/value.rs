@@ -49,6 +49,19 @@ pub enum Val {
     /// Lookup is linear scan (fine for ≤8 entries); insertion-order
     /// preserved.  Promote to `Obj` if growth / key churn demands it.
     ObjSmall(Arc<[(Arc<str>, Val)]>),
+    /// Columnar array-of-objects lane — struct-of-arrays with shared key
+    /// schema.  Each row is an object with the exact same keys in the same
+    /// order; keys stored once in `keys`, row values in `rows[i]`.  Used
+    /// by `map({k1, k2, ..})` projections that produce a uniform-shape
+    /// array.  Serialize iterates once over rows without per-row Arc
+    /// allocation or hashtable reconstruction.
+    ObjVec(Arc<ObjVecData>),
+}
+
+#[derive(Debug)]
+pub struct ObjVecData {
+    pub keys: Arc<[Arc<str>]>,
+    pub rows: Vec<Vec<Val>>,
 }
 
 impl Val {
@@ -149,6 +162,7 @@ impl Val {
             Val::FloatVec(a)     => Some(a.len()),
             Val::StrVec(a)       => Some(a.len()),
             Val::StrSliceVec(a)  => Some(a.len()),
+            Val::ObjVec(d)       => Some(d.rows.len()),
             _ => None,
         }
     }
@@ -236,7 +250,7 @@ impl Val {
             Val::Bool(_) => "bool",
             Val::Int(_) | Val::Float(_) => "number",
             Val::Str(_) | Val::StrSlice(_) => "string",
-            Val::Arr(_) | Val::IntVec(_) | Val::FloatVec(_) | Val::StrVec(_) | Val::StrSliceVec(_) => "array",
+            Val::Arr(_) | Val::IntVec(_) | Val::FloatVec(_) | Val::StrVec(_) | Val::StrSliceVec(_) | Val::ObjVec(_) => "array",
             Val::Obj(_) | Val::ObjSmall(_) => "object",
         }
     }
@@ -367,6 +381,17 @@ impl From<Val> for serde_json::Value {
                     a.iter().map(|r| serde_json::Value::String(r.as_str().to_string())).collect();
                 serde_json::Value::Array(out)
             }
+            Val::ObjVec(d) => {
+                let mut out: Vec<serde_json::Value> = Vec::with_capacity(d.rows.len());
+                for row in &d.rows {
+                    let mut map: Map<String, serde_json::Value> = Map::with_capacity(d.keys.len());
+                    for (k, v) in d.keys.iter().zip(row.iter()) {
+                        map.insert(k.to_string(), v.clone().into());
+                    }
+                    out.push(serde_json::Value::Object(map));
+                }
+                serde_json::Value::Array(out)
+            }
             Val::Obj(m)  => {
                 let mut map: Map<String, serde_json::Value> = Map::with_capacity(m.len());
                 match Arc::try_unwrap(m) {
@@ -436,6 +461,25 @@ impl<'a> Serialize for ValRef<'a> {
             Val::StrSliceVec(a) => {
                 let mut seq = s.serialize_seq(Some(a.len()))?;
                 for r in a.iter() { seq.serialize_element(r.as_str())?; }
+                seq.end()
+            }
+            Val::ObjVec(d) => {
+                let mut seq = s.serialize_seq(Some(d.rows.len()))?;
+                // Serialise each row as a map with the shared key schema.
+                // Walks keys + row in lock-step; no per-row hashtable.
+                struct RowRef<'a> { keys: &'a [Arc<str>], row: &'a [Val] }
+                impl<'a> Serialize for RowRef<'a> {
+                    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+                        let mut m = s.serialize_map(Some(self.keys.len()))?;
+                        for (k, v) in self.keys.iter().zip(self.row.iter()) {
+                            m.serialize_entry(k.as_ref(), &ValRef(v))?;
+                        }
+                        m.end()
+                    }
+                }
+                for row in &d.rows {
+                    seq.serialize_element(&RowRef { keys: &d.keys, row })?;
+                }
                 seq.end()
             }
             Val::Obj(m)  => {
@@ -660,6 +704,7 @@ impl std::hash::Hash for Val {
             Val::FloatVec(a) => { 4u8.hash(state); (Arc::as_ptr(a) as usize).hash(state); }
             Val::StrVec(a)  => { 4u8.hash(state); (Arc::as_ptr(a) as usize).hash(state); }
             Val::StrSliceVec(a) => { 4u8.hash(state); (Arc::as_ptr(a) as usize).hash(state); }
+            Val::ObjVec(d)      => { 5u8.hash(state); (Arc::as_ptr(d) as usize).hash(state); }
             Val::Obj(m)       => { 5u8.hash(state); (Arc::as_ptr(m) as usize).hash(state); }
             Val::ObjSmall(p)  => { 5u8.hash(state); (p.as_ptr() as usize).hash(state); }
         }
