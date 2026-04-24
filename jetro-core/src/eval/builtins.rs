@@ -269,6 +269,8 @@ fn build() -> BuiltinRegistry {
 fn b_len(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
     Ok(Val::Int(match &recv {
         Val::Arr(a) => a.len() as i64,
+        Val::IntVec(a) => a.len() as i64,
+        Val::FloatVec(a) => a.len() as i64,
         Val::Obj(m) => m.len() as i64,
         Val::Str(s) => s.chars().count() as i64,
         _ => return err!("len: unsupported type"),

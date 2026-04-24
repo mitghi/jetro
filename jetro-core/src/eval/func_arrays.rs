@@ -101,11 +101,26 @@ pub fn flat_map(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
 }
 
 pub fn sort(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-    let mut items = recv.into_vec().ok_or_else(|| EvalError("sort: expected array".into()))?;
+    // Columnar fast path: numeric arrays sort natively without Val tag dispatch.
     if args.is_empty() {
+        match recv {
+            Val::IntVec(a) => {
+                let mut v = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
+                v.sort();
+                return Ok(Val::int_vec(v));
+            }
+            Val::FloatVec(a) => {
+                let mut v = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
+                v.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+                return Ok(Val::float_vec(v));
+            }
+            _ => {}
+        }
+        let mut items = recv.into_vec().ok_or_else(|| EvalError("sort: expected array".into()))?;
         items.sort_by(|x, y| cmp_vals(x, y));
         return Ok(Val::arr(items));
     }
+    let mut items = recv.into_vec().ok_or_else(|| EvalError("sort: expected array".into()))?;
     // 2-param lambda comparator: sort(lambda a, b: a.field < b.field)
     if args.len() == 1 {
         if let Arg::Pos(Expr::Lambda { params, body }) | Arg::Named(_, Expr::Lambda { params, body }) = &args[0] {

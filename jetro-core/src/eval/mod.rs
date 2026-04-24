@@ -1197,15 +1197,36 @@ fn eval_step(val: Val, step: &Step, env: &Env) -> Result<Val, EvalError> {
             }
         }
         Step::Slice(from, to) => {
-            if let Val::Arr(a) = val {
-                let len = a.len() as i64;
-                let s = resolve_idx(from.unwrap_or(0), len);
-                let e = resolve_idx(to.unwrap_or(len), len);
-                let items = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
-                let s = s.min(items.len());
-                let e = e.min(items.len());
-                Ok(Val::arr(items[s..e].to_vec()))
-            } else { Ok(Val::Null) }
+            match val {
+                Val::Arr(a) => {
+                    let len = a.len() as i64;
+                    let s = resolve_idx(from.unwrap_or(0), len);
+                    let e = resolve_idx(to.unwrap_or(len), len);
+                    let items = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
+                    let s = s.min(items.len());
+                    let e = e.min(items.len());
+                    Ok(Val::arr(items[s..e].to_vec()))
+                }
+                Val::IntVec(a) => {
+                    let len = a.len() as i64;
+                    let s = resolve_idx(from.unwrap_or(0), len);
+                    let e = resolve_idx(to.unwrap_or(len), len);
+                    let items = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
+                    let s = s.min(items.len());
+                    let e = e.min(items.len());
+                    Ok(Val::int_vec(items[s..e].to_vec()))
+                }
+                Val::FloatVec(a) => {
+                    let len = a.len() as i64;
+                    let s = resolve_idx(from.unwrap_or(0), len);
+                    let e = resolve_idx(to.unwrap_or(len), len);
+                    let items = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
+                    let s = s.min(items.len());
+                    let e = e.min(items.len());
+                    Ok(Val::float_vec(items[s..e].to_vec()))
+                }
+                _ => Ok(Val::Null),
+            }
         }
         Step::Method(name, args)    => dispatch_method(val, name, args, env),
         Step::OptMethod(name, args) => {

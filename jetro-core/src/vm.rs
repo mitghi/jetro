@@ -4189,6 +4189,10 @@ impl VM {
                     let recv = pop!(stack);
                     let items = match recv {
                         Val::Arr(a) => Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone()),
+                        Val::IntVec(a) => Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone())
+                            .into_iter().map(Val::Int).collect(),
+                        Val::FloatVec(a) => Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone())
+                            .into_iter().map(Val::Float).collect(),
                         _ => Vec::new(),
                     };
                     if *n >= items.len() {
@@ -6045,15 +6049,36 @@ fn canonical_eq_literal_from_program(prog: &Program) -> Option<Vec<u8>> {
 }
 
 fn exec_slice(v: Val, from: Option<i64>, to: Option<i64>) -> Val {
-    if let Val::Arr(a) = v {
-        let len = a.len() as i64;
-        let s = resolve_idx(from.unwrap_or(0), len);
-        let e = resolve_idx(to.unwrap_or(len), len);
-        let items = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
-        let s = s.min(items.len());
-        let e = e.min(items.len());
-        Val::arr(items[s..e].to_vec())
-    } else { Val::Null }
+    match v {
+        Val::Arr(a) => {
+            let len = a.len() as i64;
+            let s = resolve_idx(from.unwrap_or(0), len);
+            let e = resolve_idx(to.unwrap_or(len), len);
+            let items = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
+            let s = s.min(items.len());
+            let e = e.min(items.len());
+            Val::arr(items[s..e].to_vec())
+        }
+        Val::IntVec(a) => {
+            let len = a.len() as i64;
+            let s = resolve_idx(from.unwrap_or(0), len);
+            let e = resolve_idx(to.unwrap_or(len), len);
+            let items = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
+            let s = s.min(items.len());
+            let e = e.min(items.len());
+            Val::int_vec(items[s..e].to_vec())
+        }
+        Val::FloatVec(a) => {
+            let len = a.len() as i64;
+            let s = resolve_idx(from.unwrap_or(0), len);
+            let e = resolve_idx(to.unwrap_or(len), len);
+            let items = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
+            let s = s.min(items.len());
+            let e = e.min(items.len());
+            Val::float_vec(items[s..e].to_vec())
+        }
+        _ => Val::Null,
+    }
 }
 
 fn resolve_idx(i: i64, len: i64) -> usize {
