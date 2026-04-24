@@ -388,7 +388,8 @@ fn schema_of(v: &Val) -> Val {
         Val::Str(_) | Val::StrSlice(_) => ty_obj("String"),
         Val::IntVec(a)  => array_schema(a.len(), ty_obj("Int")),
         Val::FloatVec(a)=> array_schema(a.len(), ty_obj("Float")),
-        Val::StrVec(a)  => array_schema(a.len(), ty_obj("String")),
+        Val::StrVec(a)       => array_schema(a.len(), ty_obj("String")),
+        Val::StrSliceVec(a)  => array_schema(a.len(), ty_obj("String")),
         Val::Arr(a) => {
             let items = if a.is_empty() {
                 ty_obj("Unknown")

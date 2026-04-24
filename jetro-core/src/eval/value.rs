@@ -37,6 +37,11 @@ pub enum Val {
     IntVec(Arc<Vec<i64>>),
     FloatVec(Arc<Vec<f64>>),
     StrVec(Arc<Vec<Arc<str>>>),
+    /// Columnar lane of borrowed-slice string views.  Each element is a
+    /// `StrRef` (parent Arc + byte range); emitted by map-slice / split
+    /// fusions to avoid per-row `Val` enum tag + per-row heap allocation.
+    /// Serializes directly as JSON array of strings via `ValRef`.
+    StrSliceVec(Arc<Vec<crate::strref::StrRef>>),
     Obj(Arc<IndexMap<Arc<str>, Val>>),
     /// Inline small object — flat `(key, value)` pair slice, no hashtable.
     /// Used for per-row `map({k1, k2, ..})` projections and similar hot
@@ -132,17 +137,18 @@ impl Val {
     #[inline] pub fn is_bool(&self)   -> bool { matches!(self, Val::Bool(_)) }
     #[inline] pub fn is_number(&self) -> bool { matches!(self, Val::Int(_) | Val::Float(_)) }
     #[inline] pub fn is_string(&self) -> bool { matches!(self, Val::Str(_)) }
-    #[inline] pub fn is_array(&self)  -> bool { matches!(self, Val::Arr(_) | Val::IntVec(_) | Val::FloatVec(_) | Val::StrVec(_)) }
+    #[inline] pub fn is_array(&self)  -> bool { matches!(self, Val::Arr(_) | Val::IntVec(_) | Val::FloatVec(_) | Val::StrVec(_) | Val::StrSliceVec(_)) }
     #[inline] pub fn is_object(&self) -> bool { matches!(self, Val::Obj(_) | Val::ObjSmall(_)) }
 
     /// Array length — also works on columnar variants.
     #[inline]
     pub fn arr_len(&self) -> Option<usize> {
         match self {
-            Val::Arr(a)      => Some(a.len()),
-            Val::IntVec(a)   => Some(a.len()),
-            Val::FloatVec(a) => Some(a.len()),
-            Val::StrVec(a)   => Some(a.len()),
+            Val::Arr(a)          => Some(a.len()),
+            Val::IntVec(a)       => Some(a.len()),
+            Val::FloatVec(a)     => Some(a.len()),
+            Val::StrVec(a)       => Some(a.len()),
+            Val::StrSliceVec(a)  => Some(a.len()),
             _ => None,
         }
     }
@@ -230,7 +236,7 @@ impl Val {
             Val::Bool(_) => "bool",
             Val::Int(_) | Val::Float(_) => "number",
             Val::Str(_) | Val::StrSlice(_) => "string",
-            Val::Arr(_) | Val::IntVec(_) | Val::FloatVec(_) | Val::StrVec(_) => "array",
+            Val::Arr(_) | Val::IntVec(_) | Val::FloatVec(_) | Val::StrVec(_) | Val::StrSliceVec(_) => "array",
             Val::Obj(_) | Val::ObjSmall(_) => "object",
         }
     }
@@ -356,6 +362,11 @@ impl From<Val> for serde_json::Value {
                     a.iter().map(|s| serde_json::Value::String(s.to_string())).collect();
                 serde_json::Value::Array(out)
             }
+            Val::StrSliceVec(a) => {
+                let out: Vec<serde_json::Value> =
+                    a.iter().map(|r| serde_json::Value::String(r.as_str().to_string())).collect();
+                serde_json::Value::Array(out)
+            }
             Val::Obj(m)  => {
                 let mut map: Map<String, serde_json::Value> = Map::with_capacity(m.len());
                 match Arc::try_unwrap(m) {
@@ -420,6 +431,11 @@ impl<'a> Serialize for ValRef<'a> {
             Val::StrVec(a) => {
                 let mut seq = s.serialize_seq(Some(a.len()))?;
                 for v in a.iter() { seq.serialize_element(v.as_ref())?; }
+                seq.end()
+            }
+            Val::StrSliceVec(a) => {
+                let mut seq = s.serialize_seq(Some(a.len()))?;
+                for r in a.iter() { seq.serialize_element(r.as_str())?; }
                 seq.end()
             }
             Val::Obj(m)  => {
@@ -643,6 +659,7 @@ impl std::hash::Hash for Val {
             Val::IntVec(a)  => { 4u8.hash(state); (Arc::as_ptr(a) as usize).hash(state); }
             Val::FloatVec(a) => { 4u8.hash(state); (Arc::as_ptr(a) as usize).hash(state); }
             Val::StrVec(a)  => { 4u8.hash(state); (Arc::as_ptr(a) as usize).hash(state); }
+            Val::StrSliceVec(a) => { 4u8.hash(state); (Arc::as_ptr(a) as usize).hash(state); }
             Val::Obj(m)       => { 5u8.hash(state); (Arc::as_ptr(m) as usize).hash(state); }
             Val::ObjSmall(p)  => { 5u8.hash(state); (p.as_ptr() as usize).hash(state); }
         }

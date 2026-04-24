@@ -1087,6 +1087,35 @@ fn cmp_val_binop(a: &Val, op: super::ast::BinOp, b: &Val) -> bool {
 /// `group_by(k)` where `k` is a bare field ident. Builds an object whose keys
 /// are the distinct field values stringified, mapping to arrays of items.
 /// Preserves first-seen key order.
+/// Resolve char-index based slice bounds into byte offsets.
+/// Returns `(start_byte, end_byte)` within `src`.
+fn slice_unicode_bounds(src: &str, start: i64, end: Option<i64>) -> (usize, usize) {
+    let total_chars = src.chars().count() as i64;
+    let start_u = if start < 0 {
+        total_chars.saturating_sub(-start).max(0) as usize
+    } else { start as usize };
+    let end_u = match end {
+        Some(e) if e < 0 => total_chars.saturating_sub(-e).max(0) as usize,
+        Some(e) => e as usize,
+        None    => total_chars as usize,
+    };
+    let mut start_b = src.len();
+    let mut end_b = src.len();
+    let mut found_start = false;
+    for (ci, (bi, _)) in src.char_indices().enumerate() {
+        if !found_start && ci == start_u {
+            start_b = bi;
+            found_start = true;
+        }
+        if ci == end_u {
+            end_b = bi;
+            return (start_b.min(end_b), end_b);
+        }
+    }
+    if !found_start { start_b = src.len(); }
+    (start_b, end_b)
+}
+
 fn count_by_field(recv: &Val, k: &str) -> Val {
     let a = match recv {
         Val::Arr(a) => a,
@@ -4520,21 +4549,51 @@ impl VM {
                 }
                 Opcode::MapSplitFirst { sep } => {
                     let v = pop!(stack);
-                    let v = if matches!(&v, Val::StrVec(_)) { v.into_arr() } else { v };
                     let sep_s = sep.as_ref();
+                    // StrVec / homogeneous Arr<Str> input → emit columnar
+                    // StrSliceVec (Vec<StrRef>), no per-row Val enum tag.
+                    if let Val::StrVec(a) = &v {
+                        let mut out: Vec<crate::strref::StrRef> = Vec::with_capacity(a.len());
+                        for s in a.iter() {
+                            let src = s.as_ref();
+                            if sep_s.is_empty() {
+                                out.push(crate::strref::StrRef::slice(s.clone(), 0, 0));
+                            } else {
+                                let end = src.find(sep_s).unwrap_or(src.len());
+                                out.push(crate::strref::StrRef::slice(s.clone(), 0, end));
+                            }
+                        }
+                        stack.push(Val::StrSliceVec(Arc::new(out)));
+                        continue;
+                    }
                     let out = if let Val::Arr(a) = &v {
+                        let all_str = a.iter().all(|it| matches!(it, Val::Str(_)));
+                        if all_str {
+                            let mut out: Vec<crate::strref::StrRef> = Vec::with_capacity(a.len());
+                            for item in a.iter() {
+                                if let Val::Str(s) = item {
+                                    let src = s.as_ref();
+                                    if sep_s.is_empty() {
+                                        out.push(crate::strref::StrRef::slice(s.clone(), 0, 0));
+                                    } else {
+                                        let end = src.find(sep_s).unwrap_or(src.len());
+                                        out.push(crate::strref::StrRef::slice(s.clone(), 0, end));
+                                    }
+                                }
+                            }
+                            stack.push(Val::StrSliceVec(Arc::new(out)));
+                            continue;
+                        }
                         let mut out = Vec::with_capacity(a.len());
                         for item in a.iter() {
                             if let Val::Str(s) = item {
                                 let src = s.as_ref();
-                                // Full source with no separator → reuse parent Arc (zero alloc).
                                 if sep_s.is_empty() {
                                     out.push(Val::Str(Arc::<str>::from("")));
                                     continue;
                                 }
                                 match src.find(sep_s) {
                                     Some(idx) => {
-                                        // Borrowed slice into parent Arc — zero alloc.
                                         out.push(Val::StrSlice(
                                             crate::strref::StrRef::slice(s.clone(), 0, idx)
                                         ));
@@ -6364,10 +6423,66 @@ impl VM {
                 }
                 Opcode::MapStrSlice { start, end } => {
                     let v = pop!(stack);
-                    let v = if matches!(&v, Val::StrVec(_)) { v.into_arr() } else { v };
                     let start = *start;
                     let end_opt = *end;
+                    // StrVec input: emit columnar StrSliceVec — single Arc
+                    // wrapping Vec<StrRef>, no per-row Val enum tag.
+                    if let Val::StrVec(a) = &v {
+                        let mut out: Vec<crate::strref::StrRef> = Vec::with_capacity(a.len());
+                        for s in a.iter() {
+                            let src = s.as_ref();
+                            if src.is_ascii() {
+                                let blen = src.len();
+                                let start_u = if start < 0 {
+                                    blen.saturating_sub((-start) as usize)
+                                } else { start as usize };
+                                let end_u = match end_opt {
+                                    Some(e) if e < 0 =>
+                                        blen.saturating_sub((-e) as usize),
+                                    Some(e) => (e as usize).min(blen),
+                                    None    => blen,
+                                };
+                                let start_u = start_u.min(end_u).min(blen);
+                                out.push(crate::strref::StrRef::slice(s.clone(), start_u, end_u));
+                            } else {
+                                // Unicode path — char boundaries.
+                                let (start_b, end_b) = slice_unicode_bounds(src, start, end_opt);
+                                out.push(crate::strref::StrRef::slice(s.clone(), start_b, end_b));
+                            }
+                        }
+                        stack.push(Val::StrSliceVec(Arc::new(out)));
+                        continue;
+                    }
                     let out_vec: Vec<Val> = if let Val::Arr(a) = &v {
+                        // Homogeneous Str input → emit columnar StrSliceVec.
+                        let all_str = a.iter().all(|it| matches!(it, Val::Str(_)));
+                        if all_str {
+                            let mut out: Vec<crate::strref::StrRef> = Vec::with_capacity(a.len());
+                            for item in a.iter() {
+                                if let Val::Str(s) = item {
+                                    let src = s.as_ref();
+                                    if src.is_ascii() {
+                                        let blen = src.len();
+                                        let start_u = if start < 0 {
+                                            blen.saturating_sub((-start) as usize)
+                                        } else { start as usize };
+                                        let end_u = match end_opt {
+                                            Some(e) if e < 0 =>
+                                                blen.saturating_sub((-e) as usize),
+                                            Some(e) => (e as usize).min(blen),
+                                            None    => blen,
+                                        };
+                                        let start_u = start_u.min(end_u).min(blen);
+                                        out.push(crate::strref::StrRef::slice(s.clone(), start_u, end_u));
+                                    } else {
+                                        let (start_b, end_b) = slice_unicode_bounds(src, start, end_opt);
+                                        out.push(crate::strref::StrRef::slice(s.clone(), start_b, end_b));
+                                    }
+                                }
+                            }
+                            stack.push(Val::StrSliceVec(Arc::new(out)));
+                            continue;
+                        }
                         let mut out = Vec::with_capacity(a.len());
                         for item in a.iter() {
                             if let Val::Str(s) = item {
@@ -8260,7 +8375,8 @@ fn exec_cast(v: &Val, ty: super::ast::CastType) -> Result<Val, EvalError> {
             Val::Arr(a)       => !a.is_empty(),
             Val::IntVec(a)    => !a.is_empty(),
             Val::FloatVec(a)  => !a.is_empty(),
-            Val::StrVec(a)    => !a.is_empty(),
+            Val::StrVec(a)       => !a.is_empty(),
+            Val::StrSliceVec(a)  => !a.is_empty(),
             Val::Obj(o)       => !o.is_empty(),
             Val::ObjSmall(p)  => !p.is_empty(),
         })),
@@ -8379,6 +8495,7 @@ fn hash_structure_into(v: &Val, h: &mut DefaultHasher, depth: usize) {
         Val::IntVec(a)  => { 5u8.hash(h); a.len().hash(h); for n in a.iter() { 2u8.hash(h); n.hash(h); } }
         Val::FloatVec(a) => { 5u8.hash(h); a.len().hash(h); for f in a.iter() { 3u8.hash(h); f.to_bits().hash(h); } }
         Val::StrVec(a)  => { 5u8.hash(h); a.len().hash(h); for s in a.iter() { 4u8.hash(h); s.hash(h); } }
+        Val::StrSliceVec(a) => { 5u8.hash(h); a.len().hash(h); for r in a.iter() { 4u8.hash(h); r.as_str().hash(h); } }
         Val::Obj(m)     => { 6u8.hash(h); m.len().hash(h); for (k, v) in m.iter() { k.hash(h); hash_structure_into(v, h, depth+1); } }
         Val::ObjSmall(p) => { 6u8.hash(h); p.len().hash(h); for (k, v) in p.iter() { k.hash(h); hash_structure_into(v, h, depth+1); } }
     }
