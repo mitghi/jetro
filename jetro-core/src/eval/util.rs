@@ -31,6 +31,8 @@ pub fn is_truthy(v: &Val) -> bool {
         Val::Float(f)  => *f != 0.0,
         Val::Str(s)    => !s.is_empty(),
         Val::Arr(a)    => !a.is_empty(),
+        Val::IntVec(a) => !a.is_empty(),
+        Val::FloatVec(a) => !a.is_empty(),
         Val::Obj(m)    => !m.is_empty(),
     }
 }
@@ -44,6 +46,8 @@ pub fn kind_matches(v: &Val, ty: KindType) -> bool {
         (Val::Float(_),     KindType::Number) |
         (Val::Str(_),       KindType::Str)    |
         (Val::Arr(_),       KindType::Array)  |
+        (Val::IntVec(_),    KindType::Array)  |
+        (Val::FloatVec(_),  KindType::Array)  |
         (Val::Obj(_),       KindType::Object)
     )
 }

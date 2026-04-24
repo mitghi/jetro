@@ -4723,26 +4723,109 @@ impl VM {
                     _ => {}
                 }
             }
+            // Columnar IntVec — pure i64 tight loops, native parity.
+            if let Val::IntVec(a) = &recv {
+                match call.method {
+                    BuiltinMethod::Sum => {
+                        let s: i64 = a.iter().fold(0i64, |a, b| a.wrapping_add(*b));
+                        return Ok(Val::Int(s));
+                    }
+                    BuiltinMethod::Avg => {
+                        if a.is_empty() { return Ok(Val::Null); }
+                        let s: f64 = a.iter().map(|n| *n as f64).sum();
+                        return Ok(Val::Float(s / a.len() as f64));
+                    }
+                    BuiltinMethod::Min => {
+                        return Ok(a.iter().copied().min().map(Val::Int).unwrap_or(Val::Null));
+                    }
+                    BuiltinMethod::Max => {
+                        return Ok(a.iter().copied().max().map(Val::Int).unwrap_or(Val::Null));
+                    }
+                    BuiltinMethod::Count | BuiltinMethod::Len => {
+                        return Ok(Val::Int(a.len() as i64));
+                    }
+                    _ => {}
+                }
+            }
+            if let Val::FloatVec(a) = &recv {
+                match call.method {
+                    BuiltinMethod::Sum => {
+                        let s: f64 = a.iter().sum();
+                        return Ok(Val::Float(s));
+                    }
+                    BuiltinMethod::Avg => {
+                        if a.is_empty() { return Ok(Val::Null); }
+                        let s: f64 = a.iter().sum();
+                        return Ok(Val::Float(s / a.len() as f64));
+                    }
+                    BuiltinMethod::Min => {
+                        let mut best: Option<f64> = None;
+                        for &f in a.iter() {
+                            best = Some(match best { Some(b) => if f < b { f } else { b }, None => f });
+                        }
+                        return Ok(best.map(Val::Float).unwrap_or(Val::Null));
+                    }
+                    BuiltinMethod::Max => {
+                        let mut best: Option<f64> = None;
+                        for &f in a.iter() {
+                            best = Some(match best { Some(b) => if f > b { f } else { b }, None => f });
+                        }
+                        return Ok(best.map(Val::Float).unwrap_or(Val::Null));
+                    }
+                    BuiltinMethod::Count | BuiltinMethod::Len => {
+                        return Ok(Val::Int(a.len() as i64));
+                    }
+                    _ => {}
+                }
+            }
             // Bare `.flatten()` (depth=1) — inline depth-1 flatten with exact
             // preallocation.  Skips `dispatch_method` + its arg-parse path.
             if call.method == BuiltinMethod::Flatten {
                 if let Val::Arr(a) = &recv {
+                    // Columnar fast-path: all inners Int-only → emit Val::IntVec.
+                    let all_int_inner = a.iter().all(|it| match it {
+                        Val::IntVec(_) => true,
+                        Val::Arr(inner) => inner.iter().all(|v| matches!(v, Val::Int(_))),
+                        Val::Int(_) => true,
+                        _ => false,
+                    });
+                    if all_int_inner {
+                        let cap: usize = a.iter().map(|it| match it {
+                            Val::IntVec(inner) => inner.len(),
+                            Val::Arr(inner)    => inner.len(),
+                            _ => 1,
+                        }).sum();
+                        let mut out: Vec<i64> = Vec::with_capacity(cap);
+                        for item in a.iter() {
+                            match item {
+                                Val::IntVec(inner) => out.extend(inner.iter().copied()),
+                                Val::Arr(inner)    => out.extend(inner.iter().filter_map(|v| v.as_i64())),
+                                Val::Int(n)        => out.push(*n),
+                                _ => {}
+                            }
+                        }
+                        return Ok(Val::int_vec(out));
+                    }
                     let cap: usize = a.iter().map(|it| match it {
                         Val::Arr(inner) => inner.len(),
+                        Val::IntVec(inner) => inner.len(),
+                        Val::FloatVec(inner) => inner.len(),
                         _ => 1,
                     }).sum();
                     let mut out = Vec::with_capacity(cap);
-                    // Iterate borrow-wise: for inner arrays we extend from
-                    // `.iter().cloned()` (refcount bumps / copies elements)
-                    // rather than `Arc::try_unwrap + (*a).clone()` — no
-                    // per-inner Vec allocation.
                     for item in a.iter() {
                         match item {
                             Val::Arr(inner) => out.extend(inner.iter().cloned()),
+                            Val::IntVec(inner) => out.extend(inner.iter().map(|n| Val::Int(*n))),
+                            Val::FloatVec(inner) => out.extend(inner.iter().map(|f| Val::Float(*f))),
                             other => out.push(other.clone()),
                         }
                     }
                     return Ok(Val::arr(out));
+                }
+                // Columnar receiver itself — already flat; return as-is.
+                if matches!(&recv, Val::IntVec(_) | Val::FloatVec(_)) {
+                    return Ok(recv);
                 }
             }
             // Scalar `.to_string()` — inline the conversion.  The registry
@@ -5006,6 +5089,37 @@ impl VM {
                     }
                     _ => None,
                 };
+                // Columnar IntVec input → IntVec output (native-parity).
+                if let (Val::IntVec(a), Some(bop)) = (&recv, specialised_binop.as_ref().copied()) {
+                    let mut out: Vec<i64> = Vec::with_capacity(a.len());
+                    let mut acc: i64 = 0;
+                    let mut first = true;
+                    for &n in a.iter() {
+                        if first { acc = n; first = false; }
+                        else { acc = match bop {
+                            AccumOp::Add => acc.wrapping_add(n),
+                            AccumOp::Sub => acc.wrapping_sub(n),
+                            AccumOp::Mul => acc.wrapping_mul(n),
+                        }; }
+                        out.push(acc);
+                    }
+                    return Ok(Val::int_vec(out));
+                }
+                if let (Val::FloatVec(a), Some(bop)) = (&recv, specialised_binop.as_ref().copied()) {
+                    let mut out: Vec<f64> = Vec::with_capacity(a.len());
+                    let mut acc: f64 = 0.0;
+                    let mut first = true;
+                    for &n in a.iter() {
+                        if first { acc = n; first = false; }
+                        else { acc = match bop {
+                            AccumOp::Add => acc + n,
+                            AccumOp::Sub => acc - n,
+                            AccumOp::Mul => acc * n,
+                        }; }
+                        out.push(acc);
+                    }
+                    return Ok(Val::float_vec(out));
+                }
                 let items = recv.into_vec()
                     .ok_or_else(|| EvalError("accumulate: expected array".into()))?;
                 let mut out = Vec::with_capacity(items.len());
@@ -5014,6 +5128,7 @@ impl VM {
                     // match, no add_vals dispatch, no per-step Val clone —
                     // native parity.
                     if items.iter().all(|v| matches!(v, Val::Int(_))) {
+                        let mut acc_out: Vec<i64> = Vec::with_capacity(items.len());
                         let mut acc: i64 = 0;
                         let mut first = true;
                         for item in &items {
@@ -5024,12 +5139,13 @@ impl VM {
                                 AccumOp::Sub => acc.wrapping_sub(n),
                                 AccumOp::Mul => acc.wrapping_mul(n),
                             }; }
-                            out.push(Val::Int(acc));
+                            acc_out.push(acc);
                         }
-                        return Ok(Val::arr(out));
+                        return Ok(Val::int_vec(acc_out));
                     }
                     // Typed f64 tight-loop when every item is Float.
                     if items.iter().all(|v| matches!(v, Val::Float(_))) {
+                        let mut acc_out: Vec<f64> = Vec::with_capacity(items.len());
                         let mut acc: f64 = 0.0;
                         let mut first = true;
                         for item in &items {
@@ -5040,9 +5156,9 @@ impl VM {
                                 AccumOp::Sub => acc - n,
                                 AccumOp::Mul => acc * n,
                             }; }
-                            out.push(Val::Float(acc));
+                            acc_out.push(acc);
                         }
-                        return Ok(Val::arr(out));
+                        return Ok(Val::float_vec(acc_out));
                     }
                     // Mixed / non-numeric — inline fold via add_vals/num_op.
                     let mut running: Option<Val> = None;
@@ -5756,6 +5872,8 @@ fn exec_cast(v: &Val, ty: super::ast::CastType) -> Result<Val, EvalError> {
             Val::Float(f) => *f != 0.0,
             Val::Str(s)   => !s.is_empty(),
             Val::Arr(a)   => !a.is_empty(),
+            Val::IntVec(a) => !a.is_empty(),
+            Val::FloatVec(a) => !a.is_empty(),
             Val::Obj(o)   => !o.is_empty(),
         })),
         CastType::Number | CastType::Float => match v {
@@ -5869,6 +5987,8 @@ fn hash_structure_into(v: &Val, h: &mut DefaultHasher, depth: usize) {
         Val::Float(f)   => { 3u8.hash(h); f.to_bits().hash(h); }
         Val::Str(s)     => { 4u8.hash(h); s.hash(h); }
         Val::Arr(a)     => { 5u8.hash(h); a.len().hash(h); for item in a.iter() { hash_structure_into(item, h, depth+1); } }
+        Val::IntVec(a)  => { 5u8.hash(h); a.len().hash(h); for n in a.iter() { 2u8.hash(h); n.hash(h); } }
+        Val::FloatVec(a) => { 5u8.hash(h); a.len().hash(h); for f in a.iter() { 3u8.hash(h); f.to_bits().hash(h); } }
         Val::Obj(m)     => { 6u8.hash(h); m.len().hash(h); for (k, v) in m.iter() { k.hash(h); hash_structure_into(v, h, depth+1); } }
     }
 }

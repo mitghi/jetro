@@ -712,6 +712,8 @@ fn cast_val(v: &Val, ty: super::ast::CastType) -> Result<Val, EvalError> {
             Val::Float(f)   => *f != 0.0,
             Val::Str(s)     => !s.is_empty(),
             Val::Arr(a)     => !a.is_empty(),
+            Val::IntVec(a)  => !a.is_empty(),
+            Val::FloatVec(a) => !a.is_empty(),
             Val::Obj(o)     => !o.is_empty(),
         })),
         CastType::Number | CastType::Float => match v {
@@ -1453,20 +1455,20 @@ fn eval_range(args: &[Arg], env: &Env) -> Result<Val, EvalError> {
         [f, u, s]    => (*f, *u, *s),
         _            => unreachable!(),
     };
-    if step == 0 { return Ok(Val::arr(Vec::new())); }
+    if step == 0 { return Ok(Val::int_vec(Vec::new())); }
     let len_hint: usize = if step > 0 && upto > from {
         (((upto - from) + step - 1) / step).max(0) as usize
     } else if step < 0 && upto < from {
         (((from - upto) + (-step) - 1) / (-step)).max(0) as usize
     } else { 0 };
-    let mut out = Vec::with_capacity(len_hint);
+    let mut out: Vec<i64> = Vec::with_capacity(len_hint);
     let mut i = from;
     if step > 0 {
-        while i < upto { out.push(Val::Int(i)); i += step; }
+        while i < upto { out.push(i); i += step; }
     } else {
-        while i > upto { out.push(Val::Int(i)); i += step; }
+        while i > upto { out.push(i); i += step; }
     }
-    Ok(Val::arr(out))
+    Ok(Val::int_vec(out))
 }
 
 // ── Apply helpers ─────────────────────────────────────────────────────────────
