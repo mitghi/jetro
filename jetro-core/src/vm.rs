@@ -252,9 +252,22 @@ pub struct CompiledCall {
 pub enum CompiledObjEntry {
     Short(Arc<str>),
     Kv     { key: Arc<str>, prog: Arc<Program>, optional: bool, cond: Option<Arc<Program>> },
+    /// Specialised `Kv` where the value is a pure path from current:
+    /// `{ key: @.a.b[0] }` compiles to `KvPath` so `exec_make_obj` can
+    /// walk `env.current` through the pre-resolved steps without a
+    /// sub-program exec.  `optional=true` mirrors `?` in the source —
+    /// the field is omitted when the walk lands on `Null`.
+    KvPath { key: Arc<str>, steps: Arc<[KvStep]>, optional: bool },
     Dynamic { key: Arc<Program>, val: Arc<Program> },
     Spread(Arc<Program>),
     SpreadDeep(Arc<Program>),
+}
+
+/// Single step in a pre-resolved `KvPath` projection.
+#[derive(Debug, Clone)]
+pub enum KvStep {
+    Field(Arc<str>),
+    Index(i64),
 }
 
 /// A compiled f-string interpolation part.
@@ -2212,6 +2225,17 @@ impl Compiler {
                 let entries: Vec<CompiledObjEntry> = fields.iter().map(|f| match f {
                     ObjField::Short(name) =>
                         CompiledObjEntry::Short(Arc::from(name.as_str())),
+                    ObjField::Kv { key, val, optional, cond }
+                        if cond.is_none()
+                            && Self::try_kv_path_steps(val).is_some()
+                    => {
+                        let steps = Self::try_kv_path_steps(val).unwrap();
+                        CompiledObjEntry::KvPath {
+                            key: Arc::from(key.as_str()),
+                            steps: steps.into(),
+                            optional: *optional,
+                        }
+                    }
                     ObjField::Kv { key, val, optional, cond } =>
                         CompiledObjEntry::Kv {
                             key: Arc::from(key.as_str()),
@@ -2519,6 +2543,29 @@ impl Compiler {
     fn compile_sub(expr: &Expr, ctx: &VarCtx) -> Program {
         let ops = Self::optimize(Self::emit(expr, ctx));
         Program::new(ops, "<sub>")
+    }
+
+    /// Classify an object-value expression as a pure path on `current`:
+    /// a chain of `Field(name)` / `Index(i)` steps rooted at `Expr::Current`.
+    /// Returns `None` for anything else — the caller falls back to full
+    /// sub-program compilation.
+    fn try_kv_path_steps(expr: &Expr) -> Option<Vec<KvStep>> {
+        use super::ast::Step;
+        let (base, steps) = match expr {
+            Expr::Chain(b, s) => (&**b, s.as_slice()),
+            _ => return None,
+        };
+        if !matches!(base, Expr::Current) { return None; }
+        if steps.is_empty() { return None; }
+        let mut out = Vec::with_capacity(steps.len());
+        for s in steps {
+            match s {
+                Step::Field(name) => out.push(KvStep::Field(Arc::from(name.as_str()))),
+                Step::Index(i)    => out.push(KvStep::Index(*i)),
+                _ => return None,
+            }
+        }
+        Some(out)
     }
 
     fn compile_array_spread(_expr: &Expr, _ctx: &VarCtx) -> Program {
@@ -5421,7 +5468,7 @@ impl VM {
     // ── Object construction ───────────────────────────────────────────────────
 
     fn exec_make_obj(&mut self, entries: &[CompiledObjEntry], env: &Env) -> Result<Val, EvalError> {
-        let mut map: IndexMap<Arc<str>, Val> = IndexMap::new();
+        let mut map: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(entries.len());
         for entry in entries {
             match entry {
                 CompiledObjEntry::Short(name) => {
@@ -5434,6 +5481,18 @@ impl VM {
                         if !super::eval::util::is_truthy(&self.exec(c, env)?) { continue; }
                     }
                     let v = self.exec(prog, env)?;
+                    if *optional && v.is_null() { continue; }
+                    map.insert(key.clone(), v);
+                }
+                CompiledObjEntry::KvPath { key, steps, optional } => {
+                    let mut v = env.current.clone();
+                    for st in steps.iter() {
+                        v = match st {
+                            KvStep::Field(f) => v.get_field(f.as_ref()),
+                            KvStep::Index(i) => v.get_index(*i),
+                        };
+                        if v.is_null() { break; }
+                    }
                     if *optional && v.is_null() { continue; }
                     map.insert(key.clone(), v);
                 }

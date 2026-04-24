@@ -467,6 +467,7 @@ fn count_ident_uses_in_ops(ops: &[Opcode], name: &str, acc: &mut usize) {
                             count_ident_uses_in_ops(&prog.ops, name, acc);
                             if let Some(c) = cond { count_ident_uses_in_ops(&c.ops, name, acc); }
                         }
+                        CompiledObjEntry::KvPath { .. } => {}
                         CompiledObjEntry::Dynamic { key, val } => {
                             count_ident_uses_in_ops(&key.ops, name, acc);
                             count_ident_uses_in_ops(&val.ops, name, acc);
@@ -685,6 +686,7 @@ fn walk_subprograms(ops: &[Opcode], map: &mut HashMap<u64, usize>) {
                             v.push(prog);
                             if let Some(c) = cond { v.push(c); }
                         }
+                        CompiledObjEntry::KvPath { .. } => {}
                         CompiledObjEntry::Dynamic { key, val } => { v.push(key); v.push(val); }
                         CompiledObjEntry::Spread(p) => v.push(p),
                         CompiledObjEntry::SpreadDeep(p) => v.push(p),
@@ -946,6 +948,11 @@ fn rewrite_op(op: &Opcode, cache: &mut HashMap<u64, Arc<Program>>) -> Opcode {
                     optional: *optional,
                     cond: cond.as_ref().map(|c| dedup_rec(c, cache)),
                 },
+                CompiledObjEntry::KvPath { key, steps, optional } => CompiledObjEntry::KvPath {
+                    key: key.clone(),
+                    steps: steps.clone(),
+                    optional: *optional,
+                },
                 CompiledObjEntry::Dynamic { key, val } => CompiledObjEntry::Dynamic {
                     key: dedup_rec(key, cache),
                     val: dedup_rec(val, cache),
@@ -1069,6 +1076,7 @@ pub fn opcode_cost(op: &Opcode) -> u32 {
                 CompiledObjEntry::Short(_) => 2,
                 CompiledObjEntry::Kv { prog, cond, .. } =>
                     2 + program_cost(prog) + cond.as_ref().map_or(0, |c| program_cost(c)),
+                CompiledObjEntry::KvPath { steps, .. } => 2 + steps.len() as u32,
                 CompiledObjEntry::Dynamic { key, val } => 3 + program_cost(key) + program_cost(val),
                 CompiledObjEntry::Spread(p) => 5 + program_cost(p),
                 CompiledObjEntry::SpreadDeep(p) => 8 + program_cost(p),
