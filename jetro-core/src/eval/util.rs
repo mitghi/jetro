@@ -149,8 +149,15 @@ where
 pub fn flatten_val(v: Val, depth: usize) -> Val {
     match v {
         Val::Arr(a) if depth > 0 => {
-            let mut out = Vec::new();
             let items = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
+            // Precompute exact capacity in one pass — eliminates Vec doubling
+            // reallocations on the hot `$.flatten()` / `.map(...).flatten()`
+            // paths.
+            let cap: usize = items.iter().map(|it| match it {
+                Val::Arr(inner) => inner.len(),
+                _ => 1,
+            }).sum();
+            let mut out = Vec::with_capacity(cap);
             for item in items {
                 match item {
                     Val::Arr(_) => if let Val::Arr(inner) = flatten_val(item, depth - 1) {

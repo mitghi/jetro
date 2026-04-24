@@ -4504,18 +4504,40 @@ impl VM {
                 Opcode::DictComp(spec) => {
                     let items = self.exec_iter_vals(&spec.iter, env)?;
                     let mut map: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(items.len());
-                    for item in items {
-                        let ie = bind_comp_vars(env, &spec.vars, item);
-                        if let Some(cond) = &spec.cond {
-                            if !is_truthy(&self.exec(cond, &ie)?) { continue; }
+                    // Single-var fast path: reuse scratch Env via push_lam/pop_lam
+                    // instead of cloning per iteration.
+                    if spec.vars.len() == 1 {
+                        let vname = spec.vars[0].clone();
+                        let mut scratch = env.clone();
+                        for item in items {
+                            let frame = scratch.push_lam(Some(vname.as_ref()), item);
+                            let keep = match &spec.cond {
+                                Some(c) => is_truthy(&self.exec(c, &scratch)?),
+                                None    => true,
+                            };
+                            if keep {
+                                let k: Arc<str> = match self.exec(&spec.key, &scratch)? {
+                                    Val::Str(s) => s,
+                                    other       => Arc::<str>::from(val_to_key(&other)),
+                                };
+                                let v = self.exec(&spec.val, &scratch)?;
+                                map.insert(k, v);
+                            }
+                            scratch.pop_lam(frame);
                         }
-                        // Reuse existing Arc<str> when the key is already a string.
-                        let k: Arc<str> = match self.exec(&spec.key, &ie)? {
-                            Val::Str(s) => s,
-                            other       => Arc::<str>::from(val_to_key(&other)),
-                        };
-                        let v = self.exec(&spec.val, &ie)?;
-                        map.insert(k, v);
+                    } else {
+                        for item in items {
+                            let ie = bind_comp_vars(env, &spec.vars, item);
+                            if let Some(cond) = &spec.cond {
+                                if !is_truthy(&self.exec(cond, &ie)?) { continue; }
+                            }
+                            let k: Arc<str> = match self.exec(&spec.key, &ie)? {
+                                Val::Str(s) => s,
+                                other       => Arc::<str>::from(val_to_key(&other)),
+                            };
+                            let v = self.exec(&spec.val, &ie)?;
+                            map.insert(k, v);
+                        }
                     }
                     stack.push(Val::obj(map));
                 }
@@ -4525,14 +4547,32 @@ impl VM {
                     let mut seen: std::collections::HashSet<String> =
                         std::collections::HashSet::with_capacity(items.len());
                     let mut out = Vec::with_capacity(items.len());
-                    for item in items {
-                        let ie = bind_comp_vars(env, &spec.vars, item);
-                        if let Some(cond) = &spec.cond {
-                            if !is_truthy(&self.exec(cond, &ie)?) { continue; }
+                    if spec.vars.len() == 1 {
+                        let vname = spec.vars[0].clone();
+                        let mut scratch = env.clone();
+                        for item in items {
+                            let frame = scratch.push_lam(Some(vname.as_ref()), item);
+                            let keep = match &spec.cond {
+                                Some(c) => is_truthy(&self.exec(c, &scratch)?),
+                                None    => true,
+                            };
+                            if keep {
+                                let v = self.exec(&spec.expr, &scratch)?;
+                                let k = val_to_key(&v);
+                                if seen.insert(k) { out.push(v); }
+                            }
+                            scratch.pop_lam(frame);
                         }
-                        let v = self.exec(&spec.expr, &ie)?;
-                        let k = val_to_key(&v);
-                        if seen.insert(k) { out.push(v); }
+                    } else {
+                        for item in items {
+                            let ie = bind_comp_vars(env, &spec.vars, item);
+                            if let Some(cond) = &spec.cond {
+                                if !is_truthy(&self.exec(cond, &ie)?) { continue; }
+                            }
+                            let v = self.exec(&spec.expr, &ie)?;
+                            let k = val_to_key(&v);
+                            if seen.insert(k) { out.push(v); }
+                        }
                     }
                     stack.push(Val::arr(out));
                 }
@@ -4648,6 +4688,76 @@ impl VM {
                     BuiltinMethod::Avg => return Ok(agg_avg_typed(a)),
                     BuiltinMethod::Min => return Ok(agg_minmax_typed(a, false)),
                     BuiltinMethod::Max => return Ok(agg_minmax_typed(a, true)),
+                    _ => {}
+                }
+            }
+            // Bare `.flatten()` (depth=1) — inline depth-1 flatten with exact
+            // preallocation.  Skips `dispatch_method` + its arg-parse path.
+            if call.method == BuiltinMethod::Flatten {
+                if let Val::Arr(a) = &recv {
+                    let cap: usize = a.iter().map(|it| match it {
+                        Val::Arr(inner) => inner.len(),
+                        _ => 1,
+                    }).sum();
+                    let mut out = Vec::with_capacity(cap);
+                    let items = match recv {
+                        Val::Arr(a) => Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone()),
+                        _ => unreachable!(),
+                    };
+                    for item in items {
+                        match item {
+                            Val::Arr(inner) => {
+                                let v = Arc::try_unwrap(inner).unwrap_or_else(|a| (*a).clone());
+                                out.extend(v);
+                            }
+                            other => out.push(other),
+                        }
+                    }
+                    return Ok(Val::arr(out));
+                }
+            }
+            // Scalar `.to_string()` — inline the conversion.  The registry
+            // path allocates a fresh `Val::Str` via `val_to_string`; this
+            // does the same work without the dispatch + argslice copy.
+            if call.method == BuiltinMethod::ToString {
+                let s: Arc<str> = match &recv {
+                    Val::Str(s)   => return Ok(Val::Str(s.clone())),
+                    Val::Int(n)   => Arc::from(n.to_string()),
+                    Val::Float(f) => Arc::from(f.to_string()),
+                    Val::Bool(b)  => Arc::from(b.to_string()),
+                    Val::Null     => Arc::from("null"),
+                    other         => Arc::from(super::eval::util::val_to_string(other).as_str()),
+                };
+                return Ok(Val::Str(s));
+            }
+            // Scalar `.to_json()` — skip the `Val -> serde_json::Value ->
+            // String` round-trip for primitives.  Big-ticket users are
+            // `.map(@.to_json())` in hot pipelines.
+            if call.method == BuiltinMethod::ToJson {
+                match &recv {
+                    Val::Int(n)   => return Ok(Val::Str(Arc::from(n.to_string()))),
+                    Val::Float(f) => {
+                        let s = if f.is_finite() { f.to_string() } else { "null".to_string() };
+                        return Ok(Val::Str(Arc::from(s)));
+                    }
+                    Val::Bool(b)  => return Ok(Val::Str(Arc::from(if *b { "true" } else { "false" }))),
+                    Val::Null     => return Ok(Val::Str(Arc::from("null"))),
+                    Val::Str(s) => {
+                        // JSON-escape — fall through for now; cheap escape
+                        // added here to keep the fast-path.  Handles the
+                        // common no-escape case with a single scan.
+                        let src = s.as_ref();
+                        let mut needs_escape = false;
+                        for &b in src.as_bytes() {
+                            if b < 0x20 || b == b'"' || b == b'\\' { needs_escape = true; break; }
+                        }
+                        if !needs_escape {
+                            let mut out = String::with_capacity(src.len() + 2);
+                            out.push('"'); out.push_str(src); out.push('"');
+                            return Ok(Val::Str(Arc::from(out)));
+                        }
+                        // Fall through to serde path for escape handling.
+                    }
                     _ => {}
                 }
             }
@@ -4871,7 +4981,41 @@ impl VM {
                     .ok_or_else(|| EvalError("accumulate: expected array".into()))?;
                 let mut out = Vec::with_capacity(items.len());
                 if let Some(bop) = specialised_binop {
-                    // Inline fold — no env rebind, no exec recursion.
+                    // Typed i64 tight-loop when every item is Int.  No Val
+                    // match, no add_vals dispatch, no per-step Val clone —
+                    // native parity.
+                    if items.iter().all(|v| matches!(v, Val::Int(_))) {
+                        let mut acc: i64 = 0;
+                        let mut first = true;
+                        for item in &items {
+                            let n = if let Val::Int(n) = item { *n } else { unreachable!() };
+                            if first { acc = n; first = false; }
+                            else { acc = match bop {
+                                AccumOp::Add => acc.wrapping_add(n),
+                                AccumOp::Sub => acc.wrapping_sub(n),
+                                AccumOp::Mul => acc.wrapping_mul(n),
+                            }; }
+                            out.push(Val::Int(acc));
+                        }
+                        return Ok(Val::arr(out));
+                    }
+                    // Typed f64 tight-loop when every item is Float.
+                    if items.iter().all(|v| matches!(v, Val::Float(_))) {
+                        let mut acc: f64 = 0.0;
+                        let mut first = true;
+                        for item in &items {
+                            let n = if let Val::Float(n) = item { *n } else { unreachable!() };
+                            if first { acc = n; first = false; }
+                            else { acc = match bop {
+                                AccumOp::Add => acc + n,
+                                AccumOp::Sub => acc - n,
+                                AccumOp::Mul => acc * n,
+                            }; }
+                            out.push(Val::Float(acc));
+                        }
+                        return Ok(Val::arr(out));
+                    }
+                    // Mixed / non-numeric — inline fold via add_vals/num_op.
                     let mut running: Option<Val> = None;
                     for item in items {
                         let next = match running.take() {
@@ -4930,12 +5074,51 @@ impl VM {
             }
             BuiltinMethod::TransformValues => {
                 let lam = sub.ok_or_else(|| EvalError("transformValues: requires lambda".into()))?;
-                let map = recv.into_map().ok_or_else(|| EvalError("transformValues: expected object".into()))?;
-                let mut out: IndexMap<Arc<str>, Val> = IndexMap::new();
-                for (k, v) in map {
-                    out.insert(k, self.exec_lam_body_scratch(lam, &v, lam_param, &mut scratch)?);
+                // COW: if the receiver's Arc is unique we mutate in place,
+                // otherwise deep-clone once and mutate the clone.  Either
+                // way, no fresh IndexMap allocation and no key-Arc clone
+                // per entry (IndexMap::values_mut preserves slot identity).
+                let mut map = recv.into_map().ok_or_else(|| EvalError("transformValues: expected object".into()))?;
+                // Pattern-specialise `[PushCurrent, PushInt(K), <BinOp>]` —
+                // the body of `transform_values(@ + K)` / `(@ - K)` / `(@ * K)`.
+                let pat = match lam.ops.as_ref() {
+                    [Opcode::PushCurrent, Opcode::PushInt(k), op] => match op {
+                        Opcode::Add => Some((AccumOp::Add, *k)),
+                        Opcode::Sub => Some((AccumOp::Sub, *k)),
+                        Opcode::Mul => Some((AccumOp::Mul, *k)),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some((op, k_lit)) = pat {
+                    let kf = k_lit as f64;
+                    for v in map.values_mut() {
+                        match v {
+                            Val::Int(n) => *n = match op {
+                                AccumOp::Add => n.wrapping_add(k_lit),
+                                AccumOp::Sub => n.wrapping_sub(k_lit),
+                                AccumOp::Mul => n.wrapping_mul(k_lit),
+                            },
+                            Val::Float(x) => *x = match op {
+                                AccumOp::Add => *x + kf,
+                                AccumOp::Sub => *x - kf,
+                                AccumOp::Mul => *x * kf,
+                            },
+                            _ => {
+                                let new = self.exec_lam_body_scratch(lam, v, lam_param, &mut scratch)?;
+                                *v = new;
+                            }
+                        }
+                    }
+                    return Ok(Val::obj(map));
                 }
-                Ok(Val::obj(out))
+                // General path — mutate in place via values_mut; no new map,
+                // no key reinsertion.
+                for v in map.values_mut() {
+                    let new = self.exec_lam_body_scratch(lam, v, lam_param, &mut scratch)?;
+                    *v = new;
+                }
+                Ok(Val::obj(map))
             }
             BuiltinMethod::FilterKeys => {
                 let lam = sub.ok_or_else(|| EvalError("filterKeys: requires predicate".into()))?;
