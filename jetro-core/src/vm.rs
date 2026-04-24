@@ -364,6 +364,12 @@ pub enum Opcode {
     /// Fused `unique()` + `count()`/`len()` — count distinct elements without
     /// materialising the deduped array.
     UniqueCount,
+    /// Fused `sort_by(k).first()` / `.last()` — O(N) single pass instead of
+    /// an O(N log N) sort followed by discard.  Preserves stable-sort ordering:
+    /// `max=false` returns the *earliest* item whose key is minimal
+    /// (matches `sort_by(k).first()`); `max=true` returns the *latest* item
+    /// whose key is maximal (matches `sort_by(k).last()`).
+    ArgExtreme { key: Arc<Program>, lam_param: Option<Arc<str>>, max: bool },
     /// Fused `map(f).flatten()` — single-pass concat of mapped arrays.
     MapFlatten(Arc<Program>),
     /// Fused `map(f).first()` — apply `f` only to the first element.
@@ -1486,6 +1492,14 @@ impl Compiler {
         out
     }
 
+    fn sort_lam_param(prev: &CompiledCall) -> Option<Arc<str>> {
+        match prev.orig_args.first() {
+            Some(Arg::Pos(Expr::Lambda { params, .. })) if !params.is_empty() =>
+                Some(Arc::from(params[0].as_str())),
+            _ => None,
+        }
+    }
+
     /// Replace expensive ops with cheaper equivalents:
     ///   sort() + first()    → min()
     ///   sort() + last()     → max()
@@ -1493,6 +1507,7 @@ impl Compiler {
     ///   sort() + [-1]       → max()
     ///   reverse() + first() → last()
     ///   reverse() + last()  → first()
+    ///   sort_by(k) + first()/last() → ArgExtreme (O(N) scan)
     fn pass_strength_reduce(ops: Vec<Opcode>) -> Vec<Opcode> {
         let mut out: Vec<Opcode> = Vec::with_capacity(ops.len());
         for op in ops {
@@ -1513,6 +1528,26 @@ impl Compiler {
                     (BuiltinMethod::Sort, Opcode::CallMethod(next))
                         if prev.sub_progs.is_empty() && next.method == BuiltinMethod::Last =>
                         Some(make_noarg_call(BuiltinMethod::Max, "max")),
+                    // sort_by(k) + first() → ArgExtreme{key, max=false}
+                    (BuiltinMethod::Sort, Opcode::CallMethod(next))
+                        if prev.sub_progs.len() == 1
+                           && next.method == BuiltinMethod::First
+                           && next.sub_progs.is_empty() =>
+                        Some(Opcode::ArgExtreme {
+                            key: Arc::clone(&prev.sub_progs[0]),
+                            lam_param: Self::sort_lam_param(&prev),
+                            max: false,
+                        }),
+                    // sort_by(k) + last() → ArgExtreme{key, max=true}
+                    (BuiltinMethod::Sort, Opcode::CallMethod(next))
+                        if prev.sub_progs.len() == 1
+                           && next.method == BuiltinMethod::Last
+                           && next.sub_progs.is_empty() =>
+                        Some(Opcode::ArgExtreme {
+                            key: Arc::clone(&prev.sub_progs[0]),
+                            lam_param: Self::sort_lam_param(&prev),
+                            max: true,
+                        }),
                     // reverse() + first() → last()
                     (BuiltinMethod::Reverse, Opcode::CallMethod(next))
                         if next.method == BuiltinMethod::First =>
@@ -3887,6 +3922,37 @@ impl VM {
                         if seen.insert(val_to_key(it)) { n += 1; }
                     }
                     stack.push(Val::Int(n));
+                }
+                Opcode::ArgExtreme { key, lam_param, max } => {
+                    let recv = pop!(stack);
+                    let items = match recv {
+                        Val::Arr(a) => a,
+                        _ => { stack.push(Val::Null); continue; }
+                    };
+                    if items.is_empty() { stack.push(Val::Null); continue; }
+                    let mut scratch = env.clone();
+                    let param = lam_param.as_deref();
+                    let mut best_idx: usize = 0;
+                    let mut best_key = self.exec_lam_body_scratch(
+                        key, &items[0], param, &mut scratch)?;
+                    for (i, item) in items.iter().enumerate().skip(1) {
+                        let k = self.exec_lam_body_scratch(
+                            key, item, param, &mut scratch)?;
+                        let ord = super::eval::util::cmp_vals(&k, &best_key);
+                        let take = if *max {
+                            // .last() on sorted asc → last occurrence of max;
+                            // ties update to later index.
+                            ord != std::cmp::Ordering::Less
+                        } else {
+                            // .first() → earliest occurrence of min;
+                            // strict less only (keep earliest on ties).
+                            ord == std::cmp::Ordering::Less
+                        };
+                        if take { best_idx = i; best_key = k; }
+                    }
+                    let mut items_vec = Arc::try_unwrap(items).unwrap_or_else(|a| (*a).clone());
+                    let winner = std::mem::replace(&mut items_vec[best_idx], Val::Null);
+                    stack.push(winner);
                 }
                 Opcode::MapMap { f1, f2 } => {
                     let recv = pop!(stack);

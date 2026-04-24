@@ -1519,6 +1519,83 @@ mod tests {
     }
 
     #[test]
+    fn fusion_sort_by_first_emits_argextreme() {
+        use crate::vm::{Compiler, Opcode, BuiltinMethod};
+        let prog = Compiler::compile_str("$.books.sort(price).first()").unwrap();
+        let has_sort = prog.ops.iter().any(|o| matches!(o,
+            Opcode::CallMethod(c) if c.method == BuiltinMethod::Sort));
+        let has_arg = prog.ops.iter().any(|o| matches!(o, Opcode::ArgExtreme { max: false, .. }));
+        assert!(!has_sort, "sort(k).first() should not retain Sort: {:?}", prog.ops);
+        assert!(has_arg, "expected ArgExtreme{{max:false}}: {:?}", prog.ops);
+    }
+
+    #[test]
+    fn fusion_sort_by_last_emits_argextreme_max() {
+        use crate::vm::{Compiler, Opcode};
+        let prog = Compiler::compile_str("$.books.sort(price).last()").unwrap();
+        let has_arg = prog.ops.iter().any(|o| matches!(o, Opcode::ArgExtreme { max: true, .. }));
+        assert!(has_arg, "expected ArgExtreme{{max:true}}: {:?}", prog.ops);
+    }
+
+    #[test]
+    fn argextreme_sort_by_first_matches_naive() {
+        let doc = json!({"books": [
+            {"title": "a", "price": 9},
+            {"title": "b", "price": 3},
+            {"title": "c", "price": 5},
+            {"title": "d", "price": 3},
+        ]});
+        let r = query("$.books.sort(price).first()", &doc).unwrap();
+        assert_eq!(r, json!({"title": "b", "price": 3}));
+    }
+
+    #[test]
+    fn argextreme_sort_by_last_matches_naive() {
+        let doc = json!({"books": [
+            {"title": "a", "price": 9},
+            {"title": "b", "price": 3},
+            {"title": "c", "price": 9},
+            {"title": "d", "price": 5},
+        ]});
+        let r = query("$.books.sort(price).last()", &doc).unwrap();
+        assert_eq!(r, json!({"title": "c", "price": 9}));
+    }
+
+    #[test]
+    fn argextreme_empty_array_is_null() {
+        let doc = json!({"empty": []});
+        let r = query("$.empty.sort(price).first()", &doc).unwrap();
+        assert!(r.is_null());
+        let r = query("$.empty.sort(price).last()", &doc).unwrap();
+        assert!(r.is_null());
+    }
+
+    #[test]
+    fn argextreme_vm_path_matches_tree() {
+        use crate::vm::{VM, Compiler};
+        let doc = json!({"xs": [
+            {"n": 2, "id": 1},
+            {"n": -1, "id": 2},
+            {"n": 3, "id": 3},
+            {"n": -1, "id": 4},
+        ]});
+        let prog = Compiler::compile_str("$.xs.sort(n).first()").unwrap();
+        let mut vm = VM::new();
+        let v = vm.run_str("$.xs.sort(n).first()", &doc).unwrap();
+        // Stable: earliest min-key (id=2, n=-1)
+        assert_eq!(v, json!({"n": -1, "id": 2}));
+
+        let v = vm.run_str("$.xs.sort(n).last()", &doc).unwrap();
+        // Stable: latest max-key — only one n=3, id=3
+        assert_eq!(v, json!({"n": 3, "id": 3}));
+
+        // Confirm compile emits ArgExtreme
+        use crate::vm::Opcode;
+        let has_arg = prog.ops.iter().any(|o| matches!(o, Opcode::ArgExtreme { .. }));
+        assert!(has_arg, "expected ArgExtreme in compiled program");
+    }
+
+    #[test]
     fn fusion_sort_sum_drops_sort() {
         use crate::vm::{Compiler, Opcode, BuiltinMethod};
         let prog = Compiler::compile_str("$.books.sort().sum()").unwrap();

@@ -284,7 +284,8 @@ fn apply_op(op: &Opcode, stack: &mut Vec<AbstractVal>) {
             stack.push(AbstractVal::array());
         }
         Opcode::MapFirst(_) | Opcode::MapLast(_) | Opcode::FilterMapFirst { .. }
-            | Opcode::FilterLast { .. } => {
+            | Opcode::FilterLast { .. }
+            | Opcode::ArgExtreme { .. } => {
             pop1!();
             stack.push(AbstractVal::UNKNOWN);
         }
@@ -1108,6 +1109,7 @@ pub fn opcode_cost(op: &Opcode) -> u32 {
         Opcode::FilterFieldsAllCmpLitCount(triples) => 4 + triples.len() as u32 * 2,
         Opcode::GroupByField(_) => 15,
         Opcode::UniqueCount => 6,
+        Opcode::ArgExtreme { .. } => 12,
     }
 }
 
