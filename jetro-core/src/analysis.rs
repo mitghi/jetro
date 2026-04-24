@@ -289,7 +289,8 @@ fn apply_op(op: &Opcode, stack: &mut Vec<AbstractVal>) {
         }
         Opcode::MapSplitLenSum { .. }
         | Opcode::MapProject { .. }
-        | Opcode::MapStrSlice { .. } => {
+        | Opcode::MapStrSlice { .. }
+        | Opcode::MapFString(_) => {
             pop1!();
             stack.push(AbstractVal::array());
         }
@@ -1187,6 +1188,7 @@ pub fn opcode_cost(op: &Opcode) -> u32 {
         Opcode::MapSplitLenSum { .. } => 4,
         Opcode::MapProject { .. } => 7,
         Opcode::MapStrSlice { .. } => 4,
+        Opcode::MapFString(_) => 8,
         Opcode::MapSplitCount { .. } => 3,
         Opcode::MapSplitFirst { .. } => 3,
         Opcode::MapSplitNth   { .. } => 3,

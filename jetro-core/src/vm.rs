@@ -409,6 +409,10 @@ pub enum Opcode {
     /// when the input is already `Val::Str` (just an Arc bump for the
     /// borrowed view).
     MapStrSlice { start: i64, end: Option<i64> },
+    /// Fused `map(f"…")` — map over an array applying an f-string to each
+    /// element. Skips the inner CallMethod dispatch / FString Arc-clone
+    /// per row; runs the f-string parts in a tight loop.
+    MapFString(Arc<[CompiledFSPart]>),
     /// Fused `map(@.split(sep).count())` — byte-scan per row, returns Int;
     /// zero per-row allocations.
     MapSplitCount { sep: Arc<str> },
@@ -1885,6 +1889,17 @@ impl Compiler {
                     } else { None };
                     if let Some(o) = fused {
                         out.push(o);
+                        continue;
+                    }
+                }
+            }
+            // map(f"...") with no ident captures → MapFString(parts)
+            // Body shape: [FString(parts)]
+            if let Opcode::CallMethod(a) = &op {
+                if a.method == BuiltinMethod::Map && a.sub_progs.len() == 1 {
+                    let body = &a.sub_progs[0].ops;
+                    if let [Opcode::FString(parts)] = &body[..] {
+                        out.push(Opcode::MapFString(Arc::clone(parts)));
                         continue;
                     }
                 }
@@ -6328,6 +6343,25 @@ impl VM {
                     }
                 }
 
+                Opcode::MapFString(parts) => {
+                    let parts = Arc::clone(parts);
+                    let recv = pop!(stack);
+                    let recv = if matches!(&recv, Val::StrVec(_) | Val::IntVec(_) | Val::FloatVec(_)) {
+                        recv.into_arr()
+                    } else { recv };
+                    let out_vec: Vec<Val> = if let Val::Arr(a) = &recv {
+                        let mut out = Vec::with_capacity(a.len());
+                        let mut scratch = env.clone();
+                        for item in a.iter() {
+                            let prev = scratch.swap_current(item.clone());
+                            let result = self.exec_fstring(&parts, &scratch)?;
+                            scratch.restore_current(prev);
+                            out.push(result);
+                        }
+                        out
+                    } else { Vec::new() };
+                    stack.push(Val::arr(out_vec));
+                }
                 Opcode::MapStrSlice { start, end } => {
                     let v = pop!(stack);
                     let v = if matches!(&v, Val::StrVec(_)) { v.into_arr() } else { v };
