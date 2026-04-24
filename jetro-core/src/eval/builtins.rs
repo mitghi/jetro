@@ -286,6 +286,27 @@ fn b_to_string(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
 }
 
 fn b_to_json(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
+    // Fast path: primitive scalars serialise without a serde_json::Value
+    // detour.  to_json() gets called per-element in map pipelines, and the
+    // Val -> serde_json::Value conversion was the dominant cost there.
+    match &recv {
+        Val::Int(n)  => return Ok(val_str(&n.to_string())),
+        Val::Float(f) => {
+            if f.is_finite() {
+                let v = serde_json::Value::from(*f);
+                return Ok(val_str(&serde_json::to_string(&v).unwrap_or_default()));
+            } else {
+                return Ok(val_str("null"));
+            }
+        }
+        Val::Bool(b) => return Ok(val_str(if *b { "true" } else { "false" })),
+        Val::Null    => return Ok(val_str("null")),
+        Val::Str(s)  => {
+            let v = serde_json::Value::String(s.to_string());
+            return Ok(val_str(&serde_json::to_string(&v).unwrap_or_default()));
+        }
+        _ => {}
+    }
     let sv: serde_json::Value = recv.into();
     Ok(val_str(&serde_json::to_string(&sv).unwrap_or_default()))
 }
