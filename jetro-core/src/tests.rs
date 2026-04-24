@@ -3230,6 +3230,42 @@ mod tests {
     }
 
     #[test]
+    fn deep_find_then_fused_filter_map_sum() {
+        // Fused FilterFieldCmpLitMapField trailing byte-scan → refine +
+        // project on bytes, aggregate without Val array.
+        use crate::Jetro;
+        let doc = json!({
+            "rows":[
+                {"type":"action","v":1},
+                {"type":"action","v":10},
+                {"type":"action","v":100}
+            ]
+        });
+        let raw = serde_json::to_vec(&doc).unwrap();
+        let j_b = Jetro::from_bytes(raw).unwrap();
+        let q = r#"$..find(@.type == "action").filter(@.v > 5).map(v).sum()"#;
+        assert_eq!(j_b.collect(q).unwrap(), json!(110));
+    }
+
+    #[test]
+    fn deep_find_then_fused_filter_map_array() {
+        use crate::Jetro;
+        let doc = json!({
+            "rows":[
+                {"type":"action","v":1},
+                {"type":"action","v":10},
+                {"type":"idle","v":50}
+            ]
+        });
+        let raw = serde_json::to_vec(&doc).unwrap();
+        let j_b = Jetro::from_bytes(raw.clone()).unwrap();
+        let j_t = Jetro::new(serde_json::from_slice::<serde_json::Value>(&raw).unwrap());
+        let q = r#"$..find(@.type == "action").filter(@.v >= 10).map(v)"#;
+        assert_eq!(j_b.collect(q).unwrap(), j_t.collect(q).unwrap());
+        assert_eq!(j_b.collect(q).unwrap(), json!([10]));
+    }
+
+    #[test]
     fn find_count_fuses_to_filter_count() {
         // Compiled program for `find(p).count()` should collapse to a
         // single FilterCount op (no residual CallMethod for find/count).

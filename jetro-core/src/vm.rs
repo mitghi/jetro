@@ -5639,6 +5639,107 @@ fn materialise_find_scan_spans_tail(
             return (Val::Int(spans.len() as i64), 1);
         }
     }
+    // Trailing fused `.filter(@.kp op lit).map(kproj)` — peephole fused
+    // forms `FilterFieldEqLitMapField` / `FilterFieldCmpLitMapField`.
+    // Refine spans by predicate, then project direct-field values; peek
+    // for a numeric aggregate right after to fold on the projection.
+    if let Some(op) = tail.first() {
+        let refined = match op {
+            Opcode::FilterFieldEqLitMapField(kp, lit_v, kproj) => {
+                let lit = val_to_canonical_lit_bytes(lit_v);
+                lit.map(|lit| {
+                    let spans2: Vec<_> = spans.iter().copied().filter(|s| {
+                        let obj = &bytes[s.start..s.end];
+                        match super::scan::find_direct_field(obj, kp.as_ref()) {
+                            Some(vs) => vs.end - vs.start == lit.len()
+                                && obj[vs.start..vs.end] == lit[..],
+                            None => false,
+                        }
+                    }).collect();
+                    (spans2, kproj.clone())
+                })
+            }
+            Opcode::FilterFieldCmpLitMapField(kp, cop, lit_v, kproj) => {
+                let thresh_opt = lit_v.as_f64();
+                let holds_opt: Option<fn(f64, f64) -> bool> = match cop {
+                    super::ast::BinOp::Lt  => Some(|a, b| a <  b),
+                    super::ast::BinOp::Lte => Some(|a, b| a <= b),
+                    super::ast::BinOp::Gt  => Some(|a, b| a >  b),
+                    super::ast::BinOp::Gte => Some(|a, b| a >= b),
+                    _ => None,
+                };
+                match (thresh_opt, holds_opt) {
+                    (Some(thresh), Some(holds)) => {
+                        let spans2: Vec<_> = spans.iter().copied().filter(|s| {
+                            let obj = &bytes[s.start..s.end];
+                            let Some(vs) = super::scan::find_direct_field(obj, kp.as_ref())
+                                else { return false };
+                            match super::scan::parse_num_span(&obj[vs.start..vs.end]) {
+                                Some((_, f, _)) => holds(f, thresh),
+                                None => false,
+                            }
+                        }).collect();
+                        Some((spans2, kproj.clone()))
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        if let Some((spans2, k)) = refined {
+            // Aggregate fold on the projection without materialising.
+            if let Some(Opcode::CallMethod(c)) = tail.get(1) {
+                if c.sub_progs.is_empty() {
+                    match c.method {
+                        BuiltinMethod::Count | BuiltinMethod::Len => {
+                            let f = super::scan::fold_direct_field_nums(bytes, &spans2, k.as_ref());
+                            return (Val::Int(f.count as i64), 2);
+                        }
+                        BuiltinMethod::Sum => {
+                            let f = super::scan::fold_direct_field_nums(bytes, &spans2, k.as_ref());
+                            let v = if f.count == 0 { Val::Int(0) }
+                                    else if f.is_float { Val::Float(f.float_sum) }
+                                    else { Val::Int(f.int_sum) };
+                            return (v, 2);
+                        }
+                        BuiltinMethod::Avg => {
+                            let f = super::scan::fold_direct_field_nums(bytes, &spans2, k.as_ref());
+                            let v = if f.count == 0 { Val::Null }
+                                    else { Val::Float(f.float_sum / f.count as f64) };
+                            return (v, 2);
+                        }
+                        BuiltinMethod::Min => {
+                            let f = super::scan::fold_direct_field_nums(bytes, &spans2, k.as_ref());
+                            let v = if !f.any { Val::Null }
+                                    else if f.is_float { Val::Float(f.min_f) }
+                                    else { Val::Int(f.min_i) };
+                            return (v, 2);
+                        }
+                        BuiltinMethod::Max => {
+                            let f = super::scan::fold_direct_field_nums(bytes, &spans2, k.as_ref());
+                            let v = if !f.any { Val::Null }
+                                    else if f.is_float { Val::Float(f.max_f) }
+                                    else { Val::Int(f.max_i) };
+                            return (v, 2);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            let mut vals: Vec<Val> = Vec::with_capacity(spans2.len());
+            for s in &spans2 {
+                let obj_bytes = &bytes[s.start..s.end];
+                let v = match super::scan::find_direct_field(obj_bytes, k.as_ref()) {
+                    Some(vs) => serde_json::from_slice::<serde_json::Value>(
+                        &obj_bytes[vs.start..vs.end],
+                    ).ok().map(|sv| Val::from(&sv)).unwrap_or(Val::Null),
+                    None => Val::Null,
+                };
+                vals.push(v);
+            }
+            return (Val::arr(vals), 1);
+        }
+    }
     // Trailing `.map(<field>)` — peek once more for a numeric aggregate
     // that can fold straight from the per-span direct field, skipping
     // both the full-object parse and the Val array construction.
