@@ -60,24 +60,27 @@ $.orders[0].total?        // total evaluated; null-safe at the end
 $.a?.b?.c?                // chained null-safe field access
 ```
 
-### Optional on descendant — first-match
+### Optional on descendant / method — null-safety only
 
-Postfix `?` on a descendant returns the **first matched object** instead
-of an array:
-
-```
-$..services?              // first `services` descendant, or null
-$..items?.name            // first `items` descendant, then its `.name`
-```
-
-### Optional method / filter (first-of-array)
-
-Postfix `?` on a method call keeps its existing first-of-array
-semantics:
+Postfix `?` is **null-safety**, never first-of-array. It guards the
+chain so that subsequent steps do not blow up on a null receiver.
+To take the first element of an array use `.first()` explicitly.
 
 ```
-$.books.filter(price > 10)?    // first book with price > 10, or null
-$.orders.sort()?               // first after sort
+$..services               // array of all `services` descendants
+$..services?              // same array, null-safe
+$..services?.first()      // first matched services obj (or null)
+
+$.books.filter(price > 10)         // filtered array
+$.books.filter(price > 10).first() // first book with price > 10
+```
+
+### `!` — exactly-one quantifier
+
+`!` keeps its meaning: expect exactly one element, error otherwise.
+
+```
+$.books{title == "1984"}!          // error if 0 or >1 matches
 ```
 
 ### Array index
@@ -494,7 +497,7 @@ len($.items)              // same as $.items.len()
 ```
 $.user?.name                 // postfix ? on .user — null if user missing
 $.users[0].profile?.bio      // ? on .profile — null-safe field
-$.items?                     // ? on .items — first-or-null (array→first)
+$.items?.first()             // array passthrough + explicit first
 $.field ?| "default"         // coalesce
 coalesce($.a, $.b, "x")      // first non-null
 has(obj, "key")              // existence check
