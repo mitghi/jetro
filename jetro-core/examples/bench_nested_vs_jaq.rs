@@ -194,10 +194,13 @@ fn bench(
     println!("  jetro: {}", jetro_q);
     println!("  jq   : {}", jaq_q);
 
-    let t = sample(|| { let _ = jetro_tree.collect(jetro_q).unwrap(); });
+    // `collect_val` — keep result as jetro's native `Val` for parity with
+    // jaq (which returns its own `Val` iterator without materialising to
+    // `serde_json::Value`).
+    let t = sample(|| { let _ = jetro_tree.collect_val(jetro_q).unwrap(); });
     show("jetro-tree", t);
     if let Some(js) = jetro_scan {
-        let s = sample(|| { let _ = js.collect(jetro_q).unwrap(); });
+        let s = sample(|| { let _ = js.collect_val(jetro_q).unwrap(); });
         show("jetro-scan", s);
     }
     let compiled = compile_jaq(jaq_q);
@@ -208,7 +211,7 @@ fn bench(
     println!("  jetro-tree vs jaq (median): {:.2}x {}",
              ratio, if ratio >= 1.0 { "(jetro faster)" } else { "(jaq faster)" });
     if let Some(js) = jetro_scan {
-        let s = sample(|| { let _ = js.collect(jetro_q).unwrap(); });
+        let s = sample(|| { let _ = js.collect_val(jetro_q).unwrap(); });
         let r = j.median as f64 / s.median.max(1) as f64;
         println!("  jetro-scan vs jaq (median): {:.2}x", r);
     }
