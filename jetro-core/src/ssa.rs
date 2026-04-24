@@ -135,6 +135,7 @@ fn op_arity(op: &Opcode) -> Arity {
             | Opcode::FilterLast { .. }
             | Opcode::FilterFilter { .. }
             | Opcode::MapMap { .. } | Opcode::MapSum(_) | Opcode::MapAvg(_)
+            | Opcode::MapToJsonJoin { .. }
             | Opcode::MapMin(_) | Opcode::MapMax(_)
             | Opcode::MapFieldSum(_) | Opcode::MapFieldAvg(_)
             | Opcode::MapFieldMin(_) | Opcode::MapFieldMax(_)
