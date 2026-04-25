@@ -978,11 +978,16 @@ mod tests {
     }
 
     #[test]
-    fn fusion_map_filter_opcode_emitted() {
-        use crate::vm::{Compiler, Opcode};
+    fn fusion_map_filter_unfused_after_pipeline_migration() {
+        // MapFilter opcode deleted.  map().filter() either specialises
+        // (e.g. MapNumVecArith + FilterCurrentCmpLit for arithmetic
+        // shapes) or stays as two unfused CallMethod ops — but no
+        // MapFilter variant is emitted any more.
+        use crate::vm::Compiler;
         let prog = Compiler::compile_str("$.xs.map(@ * 2).filter(@ > 5)").unwrap();
-        let has_mf = prog.ops.iter().any(|o| matches!(o, Opcode::MapFilter { .. }));
-        assert!(has_mf, "MapFilter not emitted; ops: {:?}", prog.ops);
+        let dbg = format!("{:?}", prog.ops);
+        assert!(!dbg.contains("MapFilter"),
+            "MapFilter should not appear after deletion; ops: {}", dbg);
     }
 
     #[test]

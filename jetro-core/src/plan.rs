@@ -82,13 +82,6 @@ impl LogicalPlan {
                     }),
                     map: Arc::clone(map),
                 },
-                (Some(p), Opcode::MapFilter { map, pred }) => LogicalPlan::Filter {
-                    input: Box::new(LogicalPlan::Project {
-                        input: Box::new(p),
-                        map:   Arc::clone(map),
-                    }),
-                    pred: Arc::clone(pred),
-                },
                 (Some(p), Opcode::FilterCount(pred)) => LogicalPlan::Aggregate {
                     input: Box::new(LogicalPlan::Filter {
                         input: Box::new(p),
