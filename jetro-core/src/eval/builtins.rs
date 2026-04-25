@@ -275,6 +275,67 @@ fn build() -> BuiltinRegistry {
     t.insert("matches",        func_strings::str_matches);
     t.insert("scan",           func_strings::scan);
 
+    // Case-conversion family.
+    t.insert("snake_case",     func_strings::snake_case);
+    t.insert("snakeCase",      func_strings::snake_case);
+    t.insert("kebab_case",     func_strings::kebab_case);
+    t.insert("kebabCase",      func_strings::kebab_case);
+    t.insert("camel_case",     func_strings::camel_case);
+    t.insert("camelCase",      func_strings::camel_case);
+    t.insert("pascal_case",    func_strings::pascal_case);
+    t.insert("pascalCase",     func_strings::pascal_case);
+
+    // Padding / repetition / reversal.
+    t.insert("center",         func_strings::center);
+    t.insert("repeat_str",     func_strings::repeat_str);
+    t.insert("reverseStr",     func_strings::reverse_str);
+
+    // Char / byte introspection.
+    t.insert("chars_of",       func_strings::chars_of);
+    t.insert("charsOf",        func_strings::chars_of);
+    t.insert("bytes",          func_strings::bytes_of);
+    t.insert("byte_len",       func_strings::byte_len);
+    t.insert("byteLen",        func_strings::byte_len);
+
+    // Predicates / parsers.
+    t.insert("is_blank",       func_strings::is_blank);
+    t.insert("isBlank",        func_strings::is_blank);
+    t.insert("is_numeric",     func_strings::is_numeric);
+    t.insert("isNumeric",      func_strings::is_numeric);
+    t.insert("is_alpha",       func_strings::is_alpha);
+    t.insert("isAlpha",        func_strings::is_alpha);
+    t.insert("is_ascii",       func_strings::is_ascii);
+    t.insert("isAscii",        func_strings::is_ascii);
+    t.insert("parse_int",      func_strings::parse_int);
+    t.insert("parseInt",       func_strings::parse_int);
+    t.insert("parse_float",    func_strings::parse_float);
+    t.insert("parseFloat",     func_strings::parse_float);
+    t.insert("parse_bool",     func_strings::parse_bool);
+    t.insert("parseBool",      func_strings::parse_bool);
+
+    // Substring set predicates.
+    t.insert("contains_any",   func_strings::contains_any);
+    t.insert("containsAny",    func_strings::contains_any);
+    t.insert("contains_all",   func_strings::contains_all);
+    t.insert("containsAll",    func_strings::contains_all);
+
+    // Regex family.
+    t.insert("re_match",       func_strings::re_match);
+    t.insert("reMatch",        func_strings::re_match);
+    t.insert("match_first",    func_strings::re_match_first);
+    t.insert("matchFirst",     func_strings::re_match_first);
+    t.insert("match_all",      func_strings::re_match_all);
+    t.insert("matchAll",       func_strings::re_match_all);
+    t.insert("captures",       func_strings::re_captures);
+    t.insert("captures_all",   func_strings::re_captures_all);
+    t.insert("capturesAll",    func_strings::re_captures_all);
+    t.insert("replace_re",     func_strings::re_replace);
+    t.insert("replaceRe",      func_strings::re_replace);
+    t.insert("replace_all_re", func_strings::re_replace_all);
+    t.insert("replaceAllRe",   func_strings::re_replace_all);
+    t.insert("split_re",       func_strings::re_split);
+    t.insert("splitRe",        func_strings::re_split);
+
     BuiltinRegistry { table: t }
 }
 

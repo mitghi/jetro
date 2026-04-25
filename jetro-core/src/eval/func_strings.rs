@@ -480,3 +480,374 @@ pub fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
     }
     Ok(out)
 }
+
+// ── Case-conversion family ────────────────────────────────────────────────────
+
+/// `"helloWorld" -> "hello_world"`. Splits on existing case
+/// transitions and `[-_ ]` separators; joins with `_`.
+pub fn snake_case(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
+    if let Val::Str(s) = recv {
+        return Ok(val_str(&split_words_lower(&s).join("_")));
+    }
+    err!("snake_case: expected string")
+}
+
+pub fn kebab_case(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
+    if let Val::Str(s) = recv {
+        return Ok(val_str(&split_words_lower(&s).join("-")));
+    }
+    err!("kebab_case: expected string")
+}
+
+pub fn camel_case(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
+    if let Val::Str(s) = recv {
+        let parts = split_words_lower(&s);
+        let mut out = String::with_capacity(s.len());
+        for (i, p) in parts.iter().enumerate() {
+            if i == 0 { out.push_str(p); }
+            else { upper_first_into(p, &mut out); }
+        }
+        return Ok(val_str(&out));
+    }
+    err!("camel_case: expected string")
+}
+
+pub fn pascal_case(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
+    if let Val::Str(s) = recv {
+        let parts = split_words_lower(&s);
+        let mut out = String::with_capacity(s.len());
+        for p in parts.iter() { upper_first_into(p, &mut out); }
+        return Ok(val_str(&out));
+    }
+    err!("pascal_case: expected string")
+}
+
+/// Split a string into lowercased word tokens.  Tokens break on
+/// `[-_ \t]`, on lower→upper transitions (`helloWorld`), and on
+/// non-alphanumeric boundaries.
+fn split_words_lower(s: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut prev_lower = false;
+    for c in s.chars() {
+        let is_sep = c == '_' || c == '-' || c.is_whitespace();
+        if is_sep {
+            if !cur.is_empty() { out.push(std::mem::take(&mut cur)); }
+            prev_lower = false;
+            continue;
+        }
+        if c.is_uppercase() && prev_lower {
+            out.push(std::mem::take(&mut cur));
+        }
+        for d in c.to_lowercase() { cur.push(d); }
+        prev_lower = c.is_lowercase();
+    }
+    if !cur.is_empty() { out.push(cur); }
+    out
+}
+
+fn upper_first_into(s: &str, out: &mut String) {
+    let mut chars = s.chars();
+    if let Some(c) = chars.next() {
+        for u in c.to_uppercase() { out.push(u); }
+        for c in chars { out.push(c); }
+    }
+}
+
+// ── Padding / repetition ──────────────────────────────────────────────────────
+
+fn pad_arg_char(args: &[Arg], idx: usize, env: &Env) -> Result<char, EvalError> {
+    match args.get(idx) {
+        None => Ok(' '),
+        Some(a) => {
+            let v = eval_pos(a, env)?;
+            match v {
+                Val::Str(s) if s.chars().count() == 1 => Ok(s.chars().next().unwrap()),
+                _ => err!("pad: filler must be a single-char string"),
+            }
+        }
+    }
+}
+
+pub fn center(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+    if let Val::Str(s) = recv {
+        let n = first_i64_arg(args, env).unwrap_or(0).max(0) as usize;
+        let c = pad_arg_char(args, 1, env)?;
+        let cur = s.chars().count();
+        if cur >= n { return Ok(Val::Str(s)); }
+        let total = n - cur;
+        let left = total / 2;
+        let right = total - left;
+        let mut out = String::with_capacity(s.len() + total);
+        for _ in 0..left { out.push(c); }
+        out.push_str(&s);
+        for _ in 0..right { out.push(c); }
+        return Ok(val_str(&out));
+    }
+    err!("center: expected string")
+}
+
+pub fn repeat_str(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+    if let Val::Str(s) = recv {
+        let n = first_i64_arg(args, env).unwrap_or(0).max(0) as usize;
+        return Ok(val_str(&s.repeat(n)));
+    }
+    err!("repeat: expected string")
+}
+
+pub fn reverse_str(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
+    if let Val::Str(s) = recv {
+        return Ok(val_str(&s.chars().rev().collect::<String>()));
+    }
+    err!("reverse: expected string")
+}
+
+// ── Char / byte introspection ─────────────────────────────────────────────────
+
+pub fn chars_of(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
+    if let Val::Str(s) = recv {
+        let out: Vec<Val> = s.chars().map(|c| {
+            let mut tmp = [0u8; 4];
+            Val::Str(Arc::<str>::from(c.encode_utf8(&mut tmp).to_string().as_str()))
+        }).collect();
+        return Ok(Val::arr(out));
+    }
+    err!("chars: expected string")
+}
+
+pub fn bytes_of(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
+    if let Val::Str(s) = recv {
+        let out: Vec<i64> = s.as_bytes().iter().map(|&b| b as i64).collect();
+        return Ok(Val::int_vec(out));
+    }
+    err!("bytes: expected string")
+}
+
+pub fn byte_len(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
+    if let Val::Str(s) = recv { return Ok(Val::Int(s.len() as i64)); }
+    err!("byte_len: expected string")
+}
+
+// ── Predicates / parsing ──────────────────────────────────────────────────────
+
+pub fn is_blank(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
+    if let Val::Str(s) = recv {
+        return Ok(Val::Bool(s.chars().all(|c| c.is_whitespace())));
+    }
+    err!("is_blank: expected string")
+}
+
+pub fn is_numeric(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
+    if let Val::Str(s) = recv {
+        return Ok(Val::Bool(!s.is_empty() && s.chars().all(|c| c.is_ascii_digit())));
+    }
+    err!("is_numeric: expected string")
+}
+
+pub fn is_alpha(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
+    if let Val::Str(s) = recv {
+        return Ok(Val::Bool(!s.is_empty() && s.chars().all(|c| c.is_alphabetic())));
+    }
+    err!("is_alpha: expected string")
+}
+
+pub fn is_ascii(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
+    if let Val::Str(s) = recv {
+        return Ok(Val::Bool(s.is_ascii()));
+    }
+    err!("is_ascii: expected string")
+}
+
+pub fn parse_int(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
+    if let Val::Str(s) = recv {
+        return Ok(s.trim().parse::<i64>().map(Val::Int).unwrap_or(Val::Null));
+    }
+    err!("parse_int: expected string")
+}
+
+pub fn parse_float(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
+    if let Val::Str(s) = recv {
+        return Ok(s.trim().parse::<f64>().map(Val::Float).unwrap_or(Val::Null));
+    }
+    err!("parse_float: expected string")
+}
+
+pub fn parse_bool(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
+    if let Val::Str(s) = recv {
+        return Ok(match s.trim().to_ascii_lowercase().as_str() {
+            "true" | "yes" | "1" | "on"  => Val::Bool(true),
+            "false" | "no" | "0" | "off" => Val::Bool(false),
+            _ => Val::Null,
+        });
+    }
+    err!("parse_bool: expected string")
+}
+
+// ── Substring set predicates ─────────────────────────────────────────────────
+
+pub fn contains_any(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+    if let Val::Str(s) = recv {
+        let needles = collect_str_arg_list(args, env)?;
+        for n in &needles {
+            if s.contains(n.as_ref()) { return Ok(Val::Bool(true)); }
+        }
+        return Ok(Val::Bool(false));
+    }
+    err!("contains_any: expected string")
+}
+
+pub fn contains_all(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+    if let Val::Str(s) = recv {
+        let needles = collect_str_arg_list(args, env)?;
+        for n in &needles {
+            if !s.contains(n.as_ref()) { return Ok(Val::Bool(false)); }
+        }
+        return Ok(Val::Bool(true));
+    }
+    err!("contains_all: expected string")
+}
+
+fn collect_str_arg_list(args: &[Arg], env: &Env) -> Result<Vec<Arc<str>>, EvalError> {
+    // Accept either a single Val::Arr arg of strings, or N positional
+    // string args.
+    if args.len() == 1 {
+        if let Val::Arr(a) = eval_pos(&args[0], env)? {
+            let mut out = Vec::with_capacity(a.len());
+            for item in a.iter() {
+                if let Val::Str(s) = item { out.push(s.clone()); }
+                else { return err!("contains_*: array elements must be strings"); }
+            }
+            return Ok(out);
+        }
+    }
+    let mut out = Vec::with_capacity(args.len());
+    for a in args {
+        if let Val::Str(s) = eval_pos(a, env)? { out.push(s); }
+        else { return err!("contains_*: arg must be string"); }
+    }
+    Ok(out)
+}
+
+// ── Regex family ──────────────────────────────────────────────────────────────
+//
+// Pattern compile cache (thread-local).  Each unique pattern string
+// hits the compile path once per thread; subsequent uses reuse the
+// same `Arc<Regex>`.
+
+thread_local! {
+    static REGEX_CACHE: std::cell::RefCell<std::collections::HashMap<String, std::sync::Arc<regex::Regex>>>
+        = std::cell::RefCell::new(std::collections::HashMap::with_capacity(32));
+}
+
+fn compile_regex(pat: &str) -> Result<std::sync::Arc<regex::Regex>, EvalError> {
+    REGEX_CACHE.with(|cell| {
+        let mut m = cell.borrow_mut();
+        if let Some(r) = m.get(pat) { return Ok(std::sync::Arc::clone(r)); }
+        let re = regex::Regex::new(pat).map_err(|e| EvalError(format!("regex compile: {}", e)))?;
+        let arc = std::sync::Arc::new(re);
+        m.insert(pat.to_string(), std::sync::Arc::clone(&arc));
+        Ok(arc)
+    })
+}
+
+pub fn re_match(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+    if let Val::Str(s) = recv {
+        let pat = str_arg(args, 0, env)?;
+        let re = compile_regex(pat.as_str())?;
+        return Ok(Val::Bool(re.is_match(s.as_ref())));
+    }
+    err!("match: expected string")
+}
+
+pub fn re_match_first(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+    if let Val::Str(s) = recv {
+        let pat = str_arg(args, 0, env)?;
+        let re = compile_regex(pat.as_str())?;
+        return Ok(re.find(s.as_ref())
+            .map(|m| Val::Str(Arc::<str>::from(m.as_str())))
+            .unwrap_or(Val::Null));
+    }
+    err!("match_first: expected string")
+}
+
+pub fn re_match_all(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+    if let Val::Str(s) = recv {
+        let pat = str_arg(args, 0, env)?;
+        let re = compile_regex(pat.as_str())?;
+        let out: Vec<Arc<str>> = re.find_iter(s.as_ref())
+            .map(|m| Arc::<str>::from(m.as_str())).collect();
+        return Ok(Val::str_vec(out));
+    }
+    err!("match_all: expected string")
+}
+
+pub fn re_captures(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+    if let Val::Str(s) = recv {
+        let pat = str_arg(args, 0, env)?;
+        let re = compile_regex(pat.as_str())?;
+        return Ok(match re.captures(s.as_ref()) {
+            Some(c) => {
+                let mut out: Vec<Val> = Vec::with_capacity(c.len());
+                for i in 0..c.len() {
+                    out.push(c.get(i)
+                        .map(|m| Val::Str(Arc::<str>::from(m.as_str())))
+                        .unwrap_or(Val::Null));
+                }
+                Val::arr(out)
+            }
+            None => Val::Null,
+        });
+    }
+    err!("captures: expected string")
+}
+
+pub fn re_captures_all(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+    if let Val::Str(s) = recv {
+        let pat = str_arg(args, 0, env)?;
+        let re = compile_regex(pat.as_str())?;
+        let mut all: Vec<Val> = Vec::new();
+        for c in re.captures_iter(s.as_ref()) {
+            let mut row: Vec<Val> = Vec::with_capacity(c.len());
+            for i in 0..c.len() {
+                row.push(c.get(i)
+                    .map(|m| Val::Str(Arc::<str>::from(m.as_str())))
+                    .unwrap_or(Val::Null));
+            }
+            all.push(Val::arr(row));
+        }
+        return Ok(Val::arr(all));
+    }
+    err!("captures_all: expected string")
+}
+
+pub fn re_replace(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+    if let Val::Str(s) = recv {
+        let pat = str_arg(args, 0, env)?;
+        let with = str_arg(args, 1, env)?;
+        let re = compile_regex(pat.as_str())?;
+        let out = re.replace(s.as_ref(), with.as_str());
+        return Ok(val_str(&out));
+    }
+    err!("replace_re: expected string")
+}
+
+pub fn re_replace_all(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+    if let Val::Str(s) = recv {
+        let pat = str_arg(args, 0, env)?;
+        let with = str_arg(args, 1, env)?;
+        let re = compile_regex(pat.as_str())?;
+        let out = re.replace_all(s.as_ref(), with.as_str());
+        return Ok(val_str(&out));
+    }
+    err!("replace_all_re: expected string")
+}
+
+pub fn re_split(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+    if let Val::Str(s) = recv {
+        let pat = str_arg(args, 0, env)?;
+        let re = compile_regex(pat.as_str())?;
+        let out: Vec<Arc<str>> = re.split(s.as_ref()).map(Arc::<str>::from).collect();
+        return Ok(Val::str_vec(out));
+    }
+    err!("split_re: expected string")
+}

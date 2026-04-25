@@ -656,6 +656,91 @@ fn compile_handle_run_on_jetro() {
     assert_eq!(q.run_on(&j2).unwrap(), json!(2));
 }
 
+// ── new string functions ────────────────────────────────────────────
+
+#[test]
+fn case_conversions() {
+    let j = Jetro::new(json!("helloWorld"));
+    assert_eq!(j.collect("$.snake_case()").unwrap(), json!("hello_world"));
+    assert_eq!(j.collect("$.kebab_case()").unwrap(), json!("hello-world"));
+    let j2 = Jetro::new(json!("hello_world"));
+    assert_eq!(j2.collect("$.camel_case()").unwrap(), json!("helloWorld"));
+    assert_eq!(j2.collect("$.pascal_case()").unwrap(), json!("HelloWorld"));
+}
+
+#[test]
+fn predicate_and_parsing() {
+    assert_eq!(jetro_core::query("$.is_blank()", &json!("   "))
+        .unwrap(), json!(true));
+    assert_eq!(jetro_core::query("$.is_numeric()", &json!("12345"))
+        .unwrap(), json!(true));
+    assert_eq!(jetro_core::query("$.is_alpha()", &json!("abc"))
+        .unwrap(), json!(true));
+    assert_eq!(jetro_core::query("$.parse_int()", &json!("42"))
+        .unwrap(), json!(42));
+    assert_eq!(jetro_core::query("$.parse_float()", &json!("3.14"))
+        .unwrap(), json!(3.14));
+    assert_eq!(jetro_core::query("$.parse_bool()", &json!("yes"))
+        .unwrap(), json!(true));
+    assert!(jetro_core::query("$.parse_int()", &json!("nope"))
+        .unwrap().is_null());
+}
+
+#[test]
+fn substring_set_predicates() {
+    let j = Jetro::new(json!("hello world"));
+    assert_eq!(j.collect("$.contains_any(['nope', 'world'])").unwrap(), json!(true));
+    assert_eq!(j.collect("$.contains_all(['hello', 'world'])").unwrap(), json!(true));
+    assert_eq!(j.collect("$.contains_all(['hello', 'gone'])").unwrap(), json!(false));
+}
+
+#[test]
+fn pad_center_repeat_reverse() {
+    assert_eq!(jetro_core::query("$.center(7, '*')",  &json!("hi")).unwrap(), json!("**hi***"));
+    assert_eq!(jetro_core::query("$.repeat_str(3)",   &json!("ab")).unwrap(), json!("ababab"));
+    assert_eq!(jetro_core::query("$.reverseStr()",    &json!("abc")).unwrap(), json!("cba"));
+}
+
+#[test]
+fn byte_introspection() {
+    assert_eq!(jetro_core::query("$.byte_len()", &json!("héllo")).unwrap(), json!(6));
+    let bs = jetro_core::query("$.bytes()", &json!("abc")).unwrap();
+    assert_eq!(bs, json!([97, 98, 99]));
+}
+
+// ── regex ───────────────────────────────────────────────────────────
+
+#[test]
+fn regex_match_and_captures() {
+    let j = Jetro::new(json!("hello-world-2024"));
+    assert_eq!(j.collect(r"$.re_match('\d{4}')").unwrap(), json!(true));
+    assert_eq!(j.collect(r"$.match_first('\d+')").unwrap(), json!("2024"));
+    assert_eq!(j.collect(r"$.match_all('\w+')").unwrap(),
+        json!(["hello", "world", "2024"]));
+}
+
+#[test]
+fn regex_captures_groups() {
+    let j = Jetro::new(json!("name=Ada age=42"));
+    let r = j.collect(r"$.captures('name=(\w+) age=(\d+)')").unwrap();
+    assert_eq!(r, json!(["name=Ada age=42", "Ada", "42"]));
+}
+
+#[test]
+fn regex_replace_and_split() {
+    let j = Jetro::new(json!("a1b2c3"));
+    assert_eq!(j.collect(r"$.replace_all_re('\d', '_')").unwrap(),
+        json!("a_b_c_"));
+    assert_eq!(j.collect(r"$.split_re('\d+')").unwrap(),
+        json!(["a", "b", "c", ""]));
+}
+
+#[test]
+fn regex_compile_error_surfaces() {
+    let r = jetro_core::query(r"$.re_match('[unbalanced')", &json!("x"));
+    assert!(r.is_err());
+}
+
 #[test]
 fn collect_typed_primitive() {
     let j = Jetro::new(json!({"books": [{"price": 5.0}, {"price": 15.0}]}));
