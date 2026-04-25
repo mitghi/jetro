@@ -1009,13 +1009,26 @@ impl Pipeline {
                 Some(Ok(Val::arr(out)))
             }
             // Single Filter(FieldCmpLit) → Collect: predicate mask copy.
+            // Phase C1 — when Arc is uniquely held (refcount 1), take
+            // ownership and retain-in-place; saves N Val clones.
             ([Stage::Filter(_)], [BodyKernel::FieldCmpLit(k, op, lit)]) => {
-                let mut out = Vec::with_capacity(arr.len());
-                for v in arr.iter() {
-                    let lhs = v.get_field(k.as_ref());
-                    if eval_cmp_op(&lhs, *op, lit) { out.push(v.clone()); }
+                match Arc::try_unwrap(arr) {
+                    Ok(mut owned) => {
+                        owned.retain(|v| {
+                            let lhs = v.get_field(k.as_ref());
+                            eval_cmp_op(&lhs, *op, lit)
+                        });
+                        Some(Ok(Val::arr(owned)))
+                    }
+                    Err(arr) => {
+                        let mut out = Vec::with_capacity(arr.len());
+                        for v in arr.iter() {
+                            let lhs = v.get_field(k.as_ref());
+                            if eval_cmp_op(&lhs, *op, lit) { out.push(v.clone()); }
+                        }
+                        Some(Ok(Val::arr(out)))
+                    }
                 }
-                Some(Ok(Val::arr(out)))
             }
             // Filter(FieldCmpLit) ∘ Map(FieldRead) → Collect: project filtered column.
             ([Stage::Filter(_), Stage::Map(_)],
