@@ -96,6 +96,75 @@ pub enum ObjVecCol {
     Bools(Vec<bool>),
 }
 
+/// Build typed-column mirror from a row-major Val cells matrix.
+/// Same logic as the pipeline-side helper; lives here so the simd-json
+/// promotion path (`from_simd_tape`) can light up typed kernels at
+/// cold-parse time without depending on the pipeline crate ordering.
+pub fn build_typed_cols_from_cells(
+    cells: &[Val],
+    stride: usize,
+    nrows: usize,
+) -> Vec<ObjVecCol> {
+    let mut out: Vec<ObjVecCol> = Vec::with_capacity(stride);
+    if stride == 0 || nrows == 0 {
+        for _ in 0..stride { out.push(ObjVecCol::Mixed); }
+        return out;
+    }
+    for slot in 0..stride {
+        let target_tag: u8 = match &cells[slot] {
+            Val::Int(_)   => 1,
+            Val::Float(_) => 2,
+            Val::Str(_)   => 3,
+            Val::Bool(_)  => 4,
+            _             => 0,
+        };
+        if target_tag == 0 { out.push(ObjVecCol::Mixed); continue; }
+        let mut ok = true;
+        for r in 0..nrows {
+            let v = &cells[r * stride + slot];
+            let same = matches!(
+                (target_tag, v),
+                (1, Val::Int(_)) | (2, Val::Float(_)) |
+                (3, Val::Str(_)) | (4, Val::Bool(_))
+            );
+            if !same { ok = false; break; }
+        }
+        if !ok { out.push(ObjVecCol::Mixed); continue; }
+        match target_tag {
+            1 => {
+                let mut col: Vec<i64> = Vec::with_capacity(nrows);
+                for r in 0..nrows {
+                    if let Val::Int(n) = &cells[r * stride + slot] { col.push(*n); }
+                }
+                out.push(ObjVecCol::Ints(col));
+            }
+            2 => {
+                let mut col: Vec<f64> = Vec::with_capacity(nrows);
+                for r in 0..nrows {
+                    if let Val::Float(f) = &cells[r * stride + slot] { col.push(*f); }
+                }
+                out.push(ObjVecCol::Floats(col));
+            }
+            3 => {
+                let mut col: Vec<Arc<str>> = Vec::with_capacity(nrows);
+                for r in 0..nrows {
+                    if let Val::Str(s) = &cells[r * stride + slot] { col.push(Arc::clone(s)); }
+                }
+                out.push(ObjVecCol::Strs(col));
+            }
+            4 => {
+                let mut col: Vec<bool> = Vec::with_capacity(nrows);
+                for r in 0..nrows {
+                    if let Val::Bool(b) = &cells[r * stride + slot] { col.push(*b); }
+                }
+                out.push(ObjVecCol::Bools(col));
+            }
+            _ => out.push(ObjVecCol::Mixed),
+        }
+    }
+    out
+}
+
 impl ObjVecData {
     /// Stride between rows (== number of keys).  Per-instance constant.
     #[inline]
@@ -869,7 +938,18 @@ impl Val {
                             }
                             let key_arcs: Arc<[Arc<str>]> =
                                 keys.iter().map(|k| intern_key(k)).collect::<Vec<_>>().into();
-                            return Val::ObjVec(Arc::new(ObjVecData { keys: key_arcs, cells, typed_cols: None }));
+                            // Build typed-column mirror at simd-json
+                            // promotion time.  Cost paid during cold
+                            // parse anyway (cells walk).  Lights up
+                            // typed slot kernels for first-call queries.
+                            let stride = key_arcs.len();
+                            let nrows = if stride == 0 { 0 } else { cells.len() / stride };
+                            let typed = build_typed_cols_from_cells(&cells, stride, nrows);
+                            return Val::ObjVec(Arc::new(ObjVecData {
+                                keys: key_arcs,
+                                cells,
+                                typed_cols: Some(Arc::new(typed)),
+                            }));
                         }
                     }
                 }
