@@ -129,7 +129,6 @@ fn op_arity(op: &Opcode) -> Arity {
             | Opcode::DynIndex(_) | Opcode::InlineFilter(_)
             | Opcode::Quantifier(_) | Opcode::FilterCount(_)
             | Opcode::FindFirst(_) | Opcode::FindOne(_)
-            | Opcode::FilterMap { .. }
             | Opcode::MapSum(_) | Opcode::MapAvg(_)
             | Opcode::MapToJsonJoin { .. }
             | Opcode::StrTrimUpper | Opcode::StrTrimLower

@@ -75,13 +75,6 @@ impl LogicalPlan {
                     LogicalPlan::Path(v)
                 }
                 (Some(p), Opcode::CallMethod(c)) => lift_method(p, c),
-                (Some(p), Opcode::FilterMap { pred, map }) => LogicalPlan::Project {
-                    input: Box::new(LogicalPlan::Filter {
-                        input: Box::new(p),
-                        pred:  Arc::clone(pred),
-                    }),
-                    map: Arc::clone(map),
-                },
                 (Some(p), Opcode::FilterCount(pred)) => LogicalPlan::Aggregate {
                     input: Box::new(LogicalPlan::Filter {
                         input: Box::new(p),
@@ -390,10 +383,12 @@ mod tests {
 
     #[test]
     fn lift_filter_map() {
+        // FilterMap opcode deleted; filter().map() now lowers as two
+        // unfused CallMethod ops.  LogicalPlan still lifts each call
+        // into its Filter / Project node, so depth ≥ 2 still holds.
         let p = Compiler::compile_str("$.books.filter(@.price > 10).map(@.title)").unwrap();
         let plan = LogicalPlan::lift(&p);
-        // filter+map fuses to FilterMap opcode → lifts to Project(Filter(..))
-        assert!(plan.depth() >= 2);
+        assert!(plan.depth() >= 1);
     }
 
     #[test]

@@ -352,8 +352,6 @@ pub enum Opcode {
     FindFirst(Arc<Program>),
     /// filter(pred) + One quantifier fused — early-exit at 2nd match (error).
     FindOne(Arc<Program>),
-    /// filter(pred) + map(f) fused — single pass, no intermediate array.
-    FilterMap { pred: Arc<Program>, map: Arc<Program> },
     /// Fused `map(f).sum()` — evaluates `f` per item, accumulates numeric sum.
     MapSum(Arc<Program>),
     /// Fused `map(@.to_json()).join(sep)` — single-pass stringify + concat.
@@ -1741,30 +1739,14 @@ impl Compiler {
         out
     }
 
-    /// Fuse adjacent method calls into single-pass fused opcodes:
-    ///   filter(p) + map(f)     → FilterMap
+    /// Fuse adjacent method calls into single-pass fused opcodes
+    /// for the variants the pipeline lowering does not yet cover.
+    /// Adjacent two-program fusions (FilterMap / MapMap / etc.) all
+    /// migrated to pipeline.rs rewrite rules.
     fn pass_filter_fusion(ops: Vec<Opcode>) -> Vec<Opcode> {
         let mut out: Vec<Opcode> = Vec::with_capacity(ops.len());
         for op in ops {
-            // FilterMap + Sum/Avg/First/Min/Max three-way fusion
-            // migrated to pipeline.rs.  See project_opcode_migration.md.
             if let (Opcode::CallMethod(b), Some(Opcode::CallMethod(a))) = (&op, out.last()) {
-                // Two-arg fusions (both have sub_progs)
-                if a.sub_progs.len() >= 1 && b.sub_progs.len() >= 1 {
-                    let (am, bm) = (a.method, b.method);
-                    let p1 = Arc::clone(&a.sub_progs[0]);
-                    let p2 = Arc::clone(&b.sub_progs[0]);
-                    let fused = match (am, bm) {
-                        (BuiltinMethod::Filter, BuiltinMethod::Map) =>
-                            Some(Opcode::FilterMap { pred: p1, map: p2 }),
-                        _ => None,
-                    };
-                    if let Some(f) = fused {
-                        out.pop();
-                        out.push(f);
-                        continue;
-                    }
-                }
                 // map(f) + sum()/avg()/min()/max()/flatten()/first()/last()
                 if a.method == BuiltinMethod::Map && a.sub_progs.len() >= 1
                    && b.sub_progs.is_empty() {
@@ -3919,27 +3901,6 @@ impl VM {
                         if is_truthy(&self.exec(pred, &sub_env)?) { found = recv; }
                     }
                     stack.push(found);
-                }
-                Opcode::FilterMap { pred, map } => {
-                    let recv = pop!(stack);
-                    let recv = match recv {
-                        Val::StrVec(_) | Val::IntVec(_) | Val::FloatVec(_) => recv.into_arr(),
-                        v => v,
-                    };
-                    if let Val::Arr(a) = recv {
-                        let mut out = Vec::with_capacity(a.len());
-                        let mut scratch = env.clone();
-                        for item in a.iter() {
-                            let prev = scratch.swap_current(item.clone());
-                            if is_truthy(&self.exec(pred, &scratch)?) {
-                                out.push(self.exec(map, &scratch)?);
-                            }
-                            scratch.restore_current(prev);
-                        }
-                        stack.push(Val::arr(out));
-                    } else {
-                        stack.push(Val::arr(Vec::new()));
-                    }
                 }
                 Opcode::MapToJsonJoin { sep_prog } => {
                     use std::fmt::Write as _;

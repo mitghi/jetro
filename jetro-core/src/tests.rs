@@ -1432,24 +1432,27 @@ mod tests {
 
     #[test]
     fn fusion_filter_map_sum_opcode() {
-        use crate::vm::{Compiler, Opcode};
+        // FilterMap deleted; filter().map().sum() lowers via pipeline
+        // Sink::NumFilterMap.  Opcode stream no longer carries
+        // FilterMap or FilterMapSum.
+        use crate::vm::Compiler;
         let prog = Compiler::compile_str(
             "$.books.filter(@.price > 10).map(@.price).sum()"
         ).unwrap();
-        // FilterMapSum migrated to pipeline.rs; opcode path keeps
-        // unfused FilterMap + bare aggregate.
-        let has = prog.ops.iter().any(|o| matches!(o, Opcode::FilterMap { .. }));
-        assert!(has, "filter+map should still fuse to FilterMap (pre-aggregate)");
+        let dbg = format!("{:?}", prog.ops);
+        assert!(!dbg.contains("FilterMap"),
+            "FilterMap should not appear after deletion; ops: {}", dbg);
     }
 
     #[test]
     fn fusion_filter_map_avg_opcode() {
-        use crate::vm::{Compiler, Opcode};
+        use crate::vm::Compiler;
         let prog = Compiler::compile_str(
             "$.books.filter(@.price > 10).map(@.price).avg()"
         ).unwrap();
-        let has = prog.ops.iter().any(|o| matches!(o, Opcode::FilterMap { .. }));
-        assert!(has, "filter+map should still fuse to FilterMap (pre-aggregate)");
+        let dbg = format!("{:?}", prog.ops);
+        assert!(!dbg.contains("FilterMap"),
+            "FilterMap should not appear after deletion; ops: {}", dbg);
     }
 
     #[test]
@@ -1509,14 +1512,15 @@ mod tests {
 
     #[test]
     fn fusion_filter_map_first_opcode() {
-        use crate::vm::{Compiler, Opcode};
+        // FilterMap deleted; filter().map().first() routes through
+        // pipeline (Sink::FilterFirst when applicable).
+        use crate::vm::Compiler;
         let prog = Compiler::compile_str(
             "$.books.filter(@.price > 10).map(@.title).first()"
         ).unwrap();
-        // FilterMapFirst migrated to pipeline.rs Sink::FilterFirst; opcode
-        // path keeps the unfused FilterMap + bare First sequence.
-        let has = prog.ops.iter().any(|o| matches!(o, Opcode::FilterMap { .. }));
-        assert!(has, "filter+map should still fuse to FilterMap");
+        let dbg = format!("{:?}", prog.ops);
+        assert!(!dbg.contains("FilterMap"),
+            "FilterMap should not appear after deletion; ops: {}", dbg);
     }
 
     #[test]
