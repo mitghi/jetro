@@ -354,8 +354,6 @@ pub enum Opcode {
     FindOne(Arc<Program>),
     /// filter(pred) + map(f) fused — single pass, no intermediate array.
     FilterMap { pred: Arc<Program>, map: Arc<Program> },
-    /// filter(p1) + filter(p2) fused — single pass, both predicates.
-    FilterFilter { p1: Arc<Program>, p2: Arc<Program> },
     /// Fused `map(f).sum()` — evaluates `f` per item, accumulates numeric sum.
     MapSum(Arc<Program>),
     /// Fused `map(@.to_json()).join(sep)` — single-pass stringify + concat.
@@ -1740,7 +1738,6 @@ impl Compiler {
 
     /// Fuse adjacent method calls into single-pass fused opcodes:
     ///   filter(p) + map(f)     → FilterMap
-    ///   filter(p1) + filter(p2)→ FilterFilter
     fn pass_filter_fusion(ops: Vec<Opcode>) -> Vec<Opcode> {
         let mut out: Vec<Opcode> = Vec::with_capacity(ops.len());
         for op in ops {
@@ -1755,8 +1752,6 @@ impl Compiler {
                     let fused = match (am, bm) {
                         (BuiltinMethod::Filter, BuiltinMethod::Map) =>
                             Some(Opcode::FilterMap { pred: p1, map: p2 }),
-                        (BuiltinMethod::Filter, BuiltinMethod::Filter) =>
-                            Some(Opcode::FilterFilter { p1, p2 }),
                         _ => None,
                     };
                     if let Some(f) = fused {
@@ -3966,27 +3961,6 @@ impl VM {
                                 out.push(self.exec(map, &scratch)?);
                             }
                             scratch.restore_current(prev);
-                        }
-                        stack.push(Val::arr(out));
-                    } else {
-                        stack.push(Val::arr(Vec::new()));
-                    }
-                }
-                Opcode::FilterFilter { p1, p2 } => {
-                    let recv = pop!(stack);
-                    let recv = match recv {
-                        Val::StrVec(_) | Val::IntVec(_) | Val::FloatVec(_) => recv.into_arr(),
-                        v => v,
-                    };
-                    if let Val::Arr(a) = recv {
-                        let mut out = Vec::with_capacity(a.len());
-                        let mut scratch = env.clone();
-                        for item in a.iter() {
-                            let prev = scratch.swap_current(item.clone());
-                            let keep = is_truthy(&self.exec(p1, &scratch)?)
-                                    && is_truthy(&self.exec(p2, &scratch)?);
-                            scratch.restore_current(prev);
-                            if keep { out.push(item.clone()); }
                         }
                         stack.push(Val::arr(out));
                     } else {
