@@ -1392,18 +1392,19 @@ mod tests {
     fn fusion_map_sum_opcode() {
         use crate::vm::{Compiler, Opcode};
         let prog = Compiler::compile_str("$.books.map(@.price).sum()").unwrap();
-        let has = prog.ops.iter().any(|o|
-            matches!(o, Opcode::MapSum(_) | Opcode::MapFieldSum(_)));
-        assert!(has, "map+sum should fuse to MapSum / MapFieldSum");
+        // MapFieldSum migrated to pipeline.rs; opcode path keeps
+        // unfused MapSum which is the post-migration fallback for
+        // sub-program / non-Root chains.
+        let has = prog.ops.iter().any(|o| matches!(o, Opcode::MapSum(_)));
+        assert!(has, "map+sum should fuse to MapSum");
     }
 
     #[test]
     fn fusion_map_avg_opcode() {
         use crate::vm::{Compiler, Opcode};
         let prog = Compiler::compile_str("$.books.map(@.price).avg()").unwrap();
-        let has = prog.ops.iter().any(|o|
-            matches!(o, Opcode::MapAvg(_) | Opcode::MapFieldAvg(_)));
-        assert!(has, "map+avg should fuse to MapAvg / MapFieldAvg");
+        let has = prog.ops.iter().any(|o| matches!(o, Opcode::MapAvg(_)));
+        assert!(has, "map+avg should fuse to MapAvg");
     }
 
     #[test]

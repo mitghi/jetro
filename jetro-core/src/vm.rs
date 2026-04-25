@@ -469,14 +469,8 @@ pub enum Opcode {
     MapMax(Arc<Program>),
 
     // ── Field-specialised fusions (Tier 3) ────────────────────────────────────
-    /// `map(k).sum()` where `k` is a single field ident. Skips sub-program exec.
-    MapFieldSum(Arc<str>),
-    /// `map(k).avg()` where `k` is a single field ident.
-    MapFieldAvg(Arc<str>),
-    /// `map(k).min()` where `k` is a single field ident.
-    MapFieldMin(Arc<str>),
-    /// `map(k).max()` where `k` is a single field ident.
-    MapFieldMax(Arc<str>),
+    // MapFieldSum / Avg / Min / Max migrated to pipeline.rs
+    // Sink::NumMap(op, prog).  See memory/project_opcode_migration.md.
     /// `map(k)` where `k` is a single field ident — emit array of field values.
     MapField(Arc<str>),
     /// `map(a.b.c)` on arr-of-obj → walk chain per item, push resulting
@@ -711,7 +705,6 @@ pub fn fresh_ics(len: usize) -> Arc<[AtomicU64]> {
 /// `get_index(slot) + byte-eq key verify`; miss path is one `get_full`
 /// that also refreshes the slot.  Slot is encoded as `idx + 1` so zero
 /// stays reserved for "unset".
-#[inline]
 /// Migration gate for opcode-level fusion.  When the env var
 /// `JETRO_DISABLE_OPCODE_FUSION` is set (any value), `Compiler::optimize`
 /// passes that emit fused/specialised opcodes become no-ops, leaving
@@ -2070,18 +2063,21 @@ impl Compiler {
                 }
             }
             // map(@.split(sep).map(len).sum()) → MapSplitLenSum { sep }
-            // Body shape (post pass_field_specialise rewrote map(len) as
-            // MapFieldSum("len")):
-            //   [PushCurrent, CallMethod(Split, [PushStr(sep)]), MapFieldSum("len")]
+            // Body shape (the inner map's sub-program ran through
+            // pass_field_specialise BEFORE pass_field_specialise was
+            // narrowed for the pipeline migration; we now match the
+            // unfused MapSum form directly):
+            //   [PushCurrent, CallMethod(Split, [PushStr(sep)]),
+            //    MapSum(<prog: PushCurrent + GetField("len")>)]
             if let Opcode::CallMethod(a) = &op {
                 if a.method == BuiltinMethod::Map && a.sub_progs.len() == 1 {
                     let body = &a.sub_progs[0].ops;
                     let fused = if let [Opcode::PushCurrent,
                                          Opcode::CallMethod(split),
-                                         Opcode::MapFieldSum(field)] = &body[..] {
+                                         Opcode::MapSum(map_prog)] = &body[..] {
                         if split.method == BuiltinMethod::Split
                            && split.sub_progs.len() == 1
-                           && field.as_ref() == "len" {
+                           && trivial_field(&map_prog.ops).as_deref().map(|s| s.as_ref()) == Some("len") {
                             let sep_opt = trivial_push_str(&split.sub_progs[0].ops);
                             sep_opt.map(|sep| Opcode::MapSplitLenSum { sep })
                         } else { None }
@@ -2221,26 +2217,12 @@ impl Compiler {
         let mut out2: Vec<Opcode> = Vec::with_capacity(ops.len());
         for op in ops {
             match op {
-                Opcode::MapSum(ref f) => {
-                    if let Some(k) = trivial_field(&f.ops) {
-                        out2.push(Opcode::MapFieldSum(k)); continue;
-                    }
-                }
-                Opcode::MapAvg(ref f) => {
-                    if let Some(k) = trivial_field(&f.ops) {
-                        out2.push(Opcode::MapFieldAvg(k)); continue;
-                    }
-                }
-                Opcode::MapMin(ref f) => {
-                    if let Some(k) = trivial_field(&f.ops) {
-                        out2.push(Opcode::MapFieldMin(k)); continue;
-                    }
-                }
-                Opcode::MapMax(ref f) => {
-                    if let Some(k) = trivial_field(&f.ops) {
-                        out2.push(Opcode::MapFieldMax(k)); continue;
-                    }
-                }
+                // MapSum/Avg/Min/Max specialisations migrated to
+                // pipeline.rs `Sink::NumMap(NumOp::*)` rule (see
+                // memory/project_opcode_migration.md).  Unfused MapSum
+                // / MapAvg / MapMin / MapMax fall through to their
+                // generic handlers below for queries pipeline can't
+                // lower (sub-programs, non-Root chains).
                 Opcode::MapUnique(ref f) => {
                     if let Some(k) = trivial_field(&f.ops) {
                         out2.push(Opcode::MapFieldUnique(k)); continue;
@@ -5091,109 +5073,12 @@ impl VM {
                         stack.push(Val::arr(Vec::new()));
                     }
                 }
-                Opcode::MapFieldSum(k) => {
-                    let recv = pop!(stack);
-                    let mut acc_i: i64 = 0;
-                    let mut acc_f: f64 = 0.0;
-                    let mut is_float = false;
-                    let mut idx: Option<usize> = None;
-                    if let Val::Arr(a) = &recv {
-                        for item in a.iter() {
-                            if let Val::Obj(m) = item {
-                                match lookup_field_cached(m, k, &mut idx) {
-                                    Some(Val::Int(n))   => { if is_float { acc_f += *n as f64; } else { acc_i += *n; } }
-                                    Some(Val::Float(x)) => { if !is_float { acc_f = acc_i as f64; is_float = true; } acc_f += *x; }
-                                    Some(Val::Null) | None => {}
-                                    _ => return err!("map(k).sum(): non-numeric field"),
-                                }
-                            }
-                        }
-                    }
-                    stack.push(if is_float { Val::Float(acc_f) } else { Val::Int(acc_i) });
-                }
-                Opcode::MapFieldAvg(k) => {
-                    let recv = pop!(stack);
-                    let mut sum: f64 = 0.0;
-                    let mut n: usize = 0;
-                    let mut idx: Option<usize> = None;
-                    if let Val::Arr(a) = &recv {
-                        for item in a.iter() {
-                            if let Val::Obj(m) = item {
-                                match lookup_field_cached(m, k, &mut idx) {
-                                    Some(Val::Int(x))   => { sum += *x as f64; n += 1; }
-                                    Some(Val::Float(x)) => { sum += *x;        n += 1; }
-                                    Some(Val::Null) | None => {}
-                                    _ => return err!("map(k).avg(): non-numeric field"),
-                                }
-                            }
-                        }
-                    }
-                    stack.push(if n == 0 { Val::Null } else { Val::Float(sum / n as f64) });
-                }
-                Opcode::MapFieldMin(k) => {
-                    let recv = pop!(stack);
-                    let mut best_i: Option<i64> = None;
-                    let mut best_f: Option<f64> = None;
-                    let mut idx: Option<usize> = None;
-                    if let Val::Arr(a) = &recv {
-                        for item in a.iter() {
-                            if let Val::Obj(m) = item {
-                                match lookup_field_cached(m, k, &mut idx) {
-                                    Some(Val::Int(n)) => {
-                                        let n = *n;
-                                        if let Some(bf) = best_f { if (n as f64) < bf { best_f = Some(n as f64); } }
-                                        else if let Some(bi) = best_i { if n < bi { best_i = Some(n); } }
-                                        else { best_i = Some(n); }
-                                    }
-                                    Some(Val::Float(x)) => {
-                                        let x = *x;
-                                        if best_f.is_none() { best_f = Some(best_i.map(|i| i as f64).unwrap_or(x)); best_i = None; }
-                                        if x < best_f.unwrap() { best_f = Some(x); }
-                                    }
-                                    Some(Val::Null) | None => {}
-                                    _ => return err!("map(k).min(): non-numeric field"),
-                                }
-                            }
-                        }
-                    }
-                    stack.push(match (best_i, best_f) {
-                        (_, Some(x)) => Val::Float(x),
-                        (Some(i), _) => Val::Int(i),
-                        _ => Val::Null,
-                    });
-                }
-                Opcode::MapFieldMax(k) => {
-                    let recv = pop!(stack);
-                    let mut best_i: Option<i64> = None;
-                    let mut best_f: Option<f64> = None;
-                    let mut idx: Option<usize> = None;
-                    if let Val::Arr(a) = &recv {
-                        for item in a.iter() {
-                            if let Val::Obj(m) = item {
-                                match lookup_field_cached(m, k, &mut idx) {
-                                    Some(Val::Int(n)) => {
-                                        let n = *n;
-                                        if let Some(bf) = best_f { if (n as f64) > bf { best_f = Some(n as f64); } }
-                                        else if let Some(bi) = best_i { if n > bi { best_i = Some(n); } }
-                                        else { best_i = Some(n); }
-                                    }
-                                    Some(Val::Float(x)) => {
-                                        let x = *x;
-                                        if best_f.is_none() { best_f = Some(best_i.map(|i| i as f64).unwrap_or(x)); best_i = None; }
-                                        if x > best_f.unwrap() { best_f = Some(x); }
-                                    }
-                                    Some(Val::Null) | None => {}
-                                    _ => return err!("map(k).max(): non-numeric field"),
-                                }
-                            }
-                        }
-                    }
-                    stack.push(match (best_i, best_f) {
-                        (_, Some(x)) => Val::Float(x),
-                        (Some(i), _) => Val::Int(i),
-                        _ => Val::Null,
-                    });
-                }
+                // MapFieldSum / Avg / Min / Max handlers removed —
+                // pipeline.rs `Sink::NumMap(NumOp::*)` covers these
+                // shapes for top-level Root-prefix queries; the
+                // unfused MapSum / MapAvg / MapMin / MapMax handlers
+                // below remain as the fallback path for sub-program
+                // / non-Root chains.
                 Opcode::MapFieldUnique(k) => {
                     let recv = pop!(stack);
                     let mut out: Vec<Val> = Vec::new();

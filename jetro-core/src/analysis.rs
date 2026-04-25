@@ -251,12 +251,11 @@ fn apply_op(op: &Opcode, stack: &mut Vec<AbstractVal>) {
         }
         Opcode::MapSum(_) | Opcode::FilterMapSum { .. }
         | Opcode::MapMin(_) | Opcode::MapMax(_)
-        | Opcode::FilterMapMin { .. } | Opcode::FilterMapMax { .. }
-        | Opcode::MapFieldSum(_) | Opcode::MapFieldMin(_) | Opcode::MapFieldMax(_) => {
+        | Opcode::FilterMapMin { .. } | Opcode::FilterMapMax { .. } => {
             pop1!();
             stack.push(AbstractVal::scalar(VType::Num));
         }
-        Opcode::MapAvg(_) | Opcode::FilterMapAvg { .. } | Opcode::MapFieldAvg(_) => {
+        Opcode::MapAvg(_) | Opcode::FilterMapAvg { .. } => {
             pop1!();
             stack.push(AbstractVal::scalar(VType::Float));
         }
@@ -554,8 +553,6 @@ fn collect_fields_in_ops(ops: &[Opcode], acc: &mut Vec<Arc<str>>) {
     for op in ops {
         match op {
             Opcode::GetField(k) | Opcode::OptField(k) | Opcode::Descendant(k)
-                | Opcode::MapFieldSum(k) | Opcode::MapFieldAvg(k)
-                | Opcode::MapFieldMin(k) | Opcode::MapFieldMax(k)
                 | Opcode::MapField(k) | Opcode::MapFieldUnique(k)
                 | Opcode::GroupByField(k)
                 | Opcode::CountByField(k)
@@ -1154,9 +1151,7 @@ pub fn opcode_cost(op: &Opcode) -> u32 {
         Opcode::Quantifier(_) => 2,
         Opcode::CastOp(_) => 2,
         Opcode::PatchEval(_) => 50,
-        Opcode::MapFieldSum(_) | Opcode::MapFieldAvg(_)
-            | Opcode::MapFieldMin(_) | Opcode::MapFieldMax(_)
-            | Opcode::MapField(_) => 5,
+        Opcode::MapField(_) => 5,
         Opcode::MapFieldChain(ks) => 5 + ks.len() as u32 * 2,
         Opcode::MapFieldChainUnique(ks) => 8 + ks.len() as u32 * 2,
         Opcode::MapFieldUnique(_) => 8,
