@@ -180,33 +180,36 @@ impl BodyKernel {
     pub fn classify(prog: &crate::vm::Program) -> Self {
         use crate::vm::Opcode;
         let ops = prog.ops.as_ref();
+        // Single-step shorthands.  LoadIdent(k) inside a lambda body
+        // resolves to current.get_field(k) at runtime — same semantics
+        // as PushCurrent + GetField(k).  Treat as FieldRead.
         match ops {
             [Opcode::PushBool(b)] => return Self::ConstBool(*b),
-            [Opcode::PushCurrent, Opcode::GetField(k)] =>
+            [Opcode::PushCurrent, Opcode::GetField(k)]
+            | [Opcode::GetField(k)]
+            | [Opcode::LoadIdent(k)] =>
                 return Self::FieldRead(k.clone()),
-            [Opcode::GetField(k)] =>
-                return Self::FieldRead(k.clone()),
-            [Opcode::PushCurrent, Opcode::FieldChain(fc)] =>
-                return Self::FieldChain(fc.keys.clone()),
-            [Opcode::FieldChain(fc)] =>
+            [Opcode::PushCurrent, Opcode::FieldChain(fc)]
+            | [Opcode::FieldChain(fc)] =>
                 return Self::FieldChain(fc.keys.clone()),
             _ => {}
         }
-        // FieldCmpLit shapes
-        if ops.len() == 4 || ops.len() == 3 {
-            let (rest, with_push) = if matches!(ops.first(), Some(Opcode::PushCurrent)) {
-                (&ops[1..], true)
-            } else { (ops, false) };
-            // [GetField(k), <lit>, <cmp>]
-            if rest.len() == 3 {
-                if let (Opcode::GetField(k), lit_op, cmp_op) =
-                    (&rest[0], &rest[1], &rest[2])
-                {
-                    if let Some(lit) = trivial_lit(lit_op) {
-                        if let Some(bo) = cmp_to_binop(cmp_op) {
-                            let _ = with_push;
-                            return Self::FieldCmpLit(k.clone(), bo, lit);
-                        }
+        // FieldCmpLit — predicate shape `<field-read>, <lit-push>, <cmp>`.
+        // `<field-read>` may be LoadIdent(k), GetField(k), or
+        // PushCurrent+GetField(k); strip the optional PushCurrent
+        // prefix first.
+        let rest: &[Opcode] = if matches!(ops.first(), Some(Opcode::PushCurrent)) {
+            &ops[1..]
+        } else { ops };
+        if rest.len() == 3 {
+            let key = match &rest[0] {
+                Opcode::LoadIdent(k) | Opcode::GetField(k) => Some(k.clone()),
+                _ => None,
+            };
+            if let Some(k) = key {
+                if let Some(lit) = trivial_lit(&rest[1]) {
+                    if let Some(bo) = cmp_to_binop(&rest[2]) {
+                        return Self::FieldCmpLit(k, bo, lit);
                     }
                 }
             }
@@ -845,13 +848,117 @@ impl Pipeline {
     ///
     /// Returns `None` if the shape doesn't match the columnar fast
     /// path; caller falls back to the per-row pull loop.
+    /// Phase A2 stage-chain columnar fast path:
+    ///   `Stage::Filter(FieldCmpLit) ∘ Stage::Map(FieldRead) ∘ Sink::Collect`
+    ///   `Stage::Map(FieldRead) ∘ Sink::Collect`
+    ///   `Stage::Filter(FieldCmpLit) ∘ Sink::Count`  (already covered by CountIf rule)
+    ///   `Stage::Filter(FieldCmpLit) ∘ Sink::Numeric(...)` (already covered)
+    /// Walks the column without entering vm.exec per row.
+    fn try_columnar_stage_chain(&self, root: &Val) -> Option<Result<Val, EvalError>> {
+        if !matches!(self.sink, Sink::Collect) { return None; }
+        // Resolve receiver.
+        let recv = match &self.source {
+            Source::Receiver(v) => v.clone(),
+            Source::FieldChain { keys } => walk_field_chain(root, keys),
+        };
+        let arr = match &recv { Val::Arr(a) => Arc::clone(a), _ => return None };
+
+        // Build a (kernel, prog) view of the stages.
+        let stages = &self.stages;
+        let kernels = &self.stage_kernels;
+        if stages.len() != kernels.len() { return None; }
+
+        match (stages.as_slice(), kernels.as_slice()) {
+            // Single Map(FieldRead) → Collect: direct projection.
+            ([Stage::Map(_)], [BodyKernel::FieldRead(k)]) => {
+                let mut out = Vec::with_capacity(arr.len());
+                for v in arr.iter() {
+                    out.push(v.get_field(k.as_ref()));
+                }
+                Some(Ok(Val::arr(out)))
+            }
+            // Single Filter(FieldCmpLit) → Collect: predicate mask copy.
+            ([Stage::Filter(_)], [BodyKernel::FieldCmpLit(k, op, lit)]) => {
+                let mut out = Vec::with_capacity(arr.len());
+                for v in arr.iter() {
+                    let lhs = v.get_field(k.as_ref());
+                    if eval_cmp_op(&lhs, *op, lit) { out.push(v.clone()); }
+                }
+                Some(Ok(Val::arr(out)))
+            }
+            // Filter(FieldCmpLit) ∘ Map(FieldRead) → Collect: project filtered column.
+            ([Stage::Filter(_), Stage::Map(_)],
+             [BodyKernel::FieldCmpLit(pk, pop, plit), BodyKernel::FieldRead(mk)]) => {
+                let mut out = Vec::with_capacity(arr.len());
+                for v in arr.iter() {
+                    let lhs = v.get_field(pk.as_ref());
+                    if eval_cmp_op(&lhs, *pop, plit) {
+                        out.push(v.get_field(mk.as_ref()));
+                    }
+                }
+                Some(Ok(Val::arr(out)))
+            }
+            _ => None,
+        }
+    }
+
     fn try_columnar(&self, root: &Val) -> Option<Result<Val, EvalError>> {
+        // Phase A2 — Stage::Filter(FieldCmpLit) + Stage::Map(FieldRead) +
+        // Sink::Collect over Val::Arr (object rows): walk the column
+        // directly via slot-known IndexMap probes, build typed output
+        // vec.  No per-row vm.exec.
+        if let Some(out) = self.try_columnar_stage_chain(root) { return Some(out); }
+
         if !self.stages.is_empty() { return None; }
 
         let recv = match &self.source {
             Source::Receiver(v) => v.clone(),
             Source::FieldChain { keys } => walk_field_chain(root, keys),
         };
+
+        // Phase A2 — typed-lane fast path.  When receiver is an
+        // already-typed vector (IntVec / FloatVec / StrVec), the
+        // sink can read the slice directly with no per-row Val tag
+        // dispatch.  Each branch is mechanical: same fold, lane-typed.
+        match (&recv, &self.sink) {
+            (Val::IntVec(a), Sink::Numeric(NumOp::Sum)) =>
+                return Some(Ok(Val::Int(a.iter().sum()))),
+            (Val::IntVec(a), Sink::Numeric(NumOp::Min)) =>
+                return Some(Ok(a.iter().copied().min()
+                    .map(Val::Int).unwrap_or(Val::Null))),
+            (Val::IntVec(a), Sink::Numeric(NumOp::Max)) =>
+                return Some(Ok(a.iter().copied().max()
+                    .map(Val::Int).unwrap_or(Val::Null))),
+            (Val::IntVec(a), Sink::Numeric(NumOp::Avg)) => {
+                if a.is_empty() { return Some(Ok(Val::Null)); }
+                let s: i64 = a.iter().sum();
+                return Some(Ok(Val::Float(s as f64 / a.len() as f64)));
+            }
+            (Val::IntVec(a), Sink::Count) =>
+                return Some(Ok(Val::Int(a.len() as i64))),
+            (Val::FloatVec(a), Sink::Numeric(NumOp::Sum)) =>
+                return Some(Ok(Val::Float(a.iter().sum()))),
+            (Val::FloatVec(a), Sink::Numeric(NumOp::Min)) => {
+                if a.is_empty() { return Some(Ok(Val::Null)); }
+                let m = a.iter().copied().fold(f64::INFINITY, f64::min);
+                return Some(Ok(Val::Float(m)));
+            }
+            (Val::FloatVec(a), Sink::Numeric(NumOp::Max)) => {
+                if a.is_empty() { return Some(Ok(Val::Null)); }
+                let m = a.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                return Some(Ok(Val::Float(m)));
+            }
+            (Val::FloatVec(a), Sink::Numeric(NumOp::Avg)) => {
+                if a.is_empty() { return Some(Ok(Val::Null)); }
+                let s: f64 = a.iter().sum();
+                return Some(Ok(Val::Float(s / a.len() as f64)));
+            }
+            (Val::FloatVec(a), Sink::Count) =>
+                return Some(Ok(Val::Int(a.len() as i64))),
+            (Val::StrVec(a), Sink::Count) =>
+                return Some(Ok(Val::Int(a.len() as i64))),
+            _ => {}
+        }
 
         // ObjVec source — slot-indexed direct reads, no IndexMap probe.
         if let Val::ObjVec(d) = &recv {
