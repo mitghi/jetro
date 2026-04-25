@@ -3450,6 +3450,90 @@ pub struct VM {
     root_hash_cache: Option<(usize, u64)>,
     /// Optimiser pass toggles.  Default: all on.
     config:        PassConfig,
+    /// Auto-index for repeated `find(field == lit)` lookups.
+    ///
+    /// Key = `(arr_ptr, field_key)`; each entry tracks a per-call hit
+    /// count and, once the threshold is crossed, an `Arc<HashMap<…>>`
+    /// mapping field-value → matching item indices.  First few calls
+    /// scan as before (cheap on small N); after the threshold the
+    /// FilterFieldEqLit opcode does an O(1) hash lookup instead.
+    /// Invalidation is automatic: a new `Arc::ptr` produces a fresh
+    /// entry; old entries age out via LRU when the table exceeds
+    /// `index_cap`.
+    index_cache:   AutoIndexCache,
+}
+
+/// Cap for the auto-index hash table; entries beyond this evict
+/// LRU-style.
+const AUTO_INDEX_CAP:        usize = 64;
+/// Per-`(arr, field)` invocations before building a hash index.
+/// Below this threshold the linear scan path runs.
+const AUTO_INDEX_THRESHOLD:  u32   = 4;
+
+#[derive(Default)]
+pub(crate) struct AutoIndexCache {
+    entries: HashMap<(usize, Arc<str>), AutoIndexEntry>,
+    lru:     std::collections::VecDeque<(usize, Arc<str>)>,
+}
+
+struct AutoIndexEntry {
+    /// Number of FilterFieldEqLit invocations seen for this
+    /// `(arr_ptr, field_key)`.  Triggers index build at threshold.
+    hits:  u32,
+    /// Built index — `Some` after threshold; `None` while still
+    /// scanning.  Maps stringified key value to matching item indices.
+    index: Option<Arc<HashMap<String, smallvec::SmallVec<[u32; 1]>>>>,
+}
+
+impl AutoIndexCache {
+    fn new() -> Self {
+        Self {
+            entries: HashMap::with_capacity(AUTO_INDEX_CAP),
+            lru:     std::collections::VecDeque::with_capacity(AUTO_INDEX_CAP),
+        }
+    }
+
+    fn evict_if_over_cap(&mut self) {
+        while self.entries.len() > AUTO_INDEX_CAP {
+            if let Some(k) = self.lru.pop_front() {
+                self.entries.remove(&k);
+            } else { break; }
+        }
+    }
+
+    /// Touch an entry — bump its LRU position and return the entry.
+    /// Inserts a fresh `hits=1, index=None` entry on miss.
+    fn touch(&mut self, key: (usize, Arc<str>)) -> &mut AutoIndexEntry {
+        if !self.entries.contains_key(&key) {
+            self.lru.push_back(key.clone());
+            self.entries.insert(key.clone(), AutoIndexEntry { hits: 0, index: None });
+            self.evict_if_over_cap();
+        } else {
+            // Move to back of LRU.
+            if let Some(pos) = self.lru.iter().position(|k| k == &key) {
+                let k = self.lru.remove(pos).unwrap();
+                self.lru.push_back(k);
+            }
+        }
+        self.entries.get_mut(&key).unwrap()
+    }
+}
+
+/// Stable string-form of a `Val` used as auto-index key.
+/// Mirrors `val_to_key` in `eval/util.rs`; we duplicate here to avoid a
+/// hot-path Arc allocation that `val_to_key` does.
+fn auto_index_key(v: &Val) -> Option<String> {
+    match v {
+        Val::Str(s)      => Some(s.as_ref().to_string()),
+        Val::StrSlice(r) => Some(r.as_str().to_string()),
+        Val::Int(n)      => Some(n.to_string()),
+        Val::Float(f)    => Some(f.to_string()),
+        Val::Bool(b)     => Some(b.to_string()),
+        Val::Null        => Some("null".to_string()),
+        // Composite vals as filter literals are uncommon; defer indexing
+        // when we'd have to walk a structure to key it.
+        _ => None,
+    }
 }
 
 impl Default for VM {
@@ -3470,6 +3554,7 @@ impl VM {
             doc_hash:      0,
             root_hash_cache: None,
             config:        PassConfig::default(),
+            index_cache:   AutoIndexCache::new(),
         }
     }
 
@@ -5121,6 +5206,54 @@ impl VM {
                 // ── Predicate specialisation (Tier 4) ─────────────────────
                 Opcode::FilterFieldEqLit(k, lit) => {
                     let recv = pop!(stack);
+                    // Auto-index path: when the same `(arr_ptr, field_key)`
+                    // has been queried at least AUTO_INDEX_THRESHOLD times,
+                    // build a hash index on first crossing, then use it
+                    // for all subsequent lookups.  Pre-built index is
+                    // `Arc`-shared so cloning is cheap.
+                    if let Val::Arr(a) = &recv {
+                        let arr_ptr = Arc::as_ptr(a) as usize;
+                        let key_lit = auto_index_key(lit);
+                        if let Some(klit) = key_lit {
+                            let idx_arc = {
+                                let entry = self.index_cache.touch((arr_ptr, k.clone()));
+                                entry.hits = entry.hits.saturating_add(1);
+                                if entry.index.is_none()
+                                    && entry.hits >= AUTO_INDEX_THRESHOLD
+                                {
+                                    // Build the hash index over the array.
+                                    let mut map: HashMap<String,
+                                        smallvec::SmallVec<[u32; 1]>> =
+                                        HashMap::with_capacity(a.len());
+                                    for (i, item) in a.iter().enumerate() {
+                                        if let Val::Obj(m) = item {
+                                            if let Some(v) = m.get(k.as_ref()) {
+                                                if let Some(ks) = auto_index_key(v) {
+                                                    map.entry(ks)
+                                                        .or_default()
+                                                        .push(i as u32);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    entry.index = Some(Arc::new(map));
+                                }
+                                entry.index.as_ref().map(Arc::clone)
+                            };
+                            if let Some(map) = idx_arc {
+                                // O(1) lookup path.
+                                let out: Vec<Val> = match map.get(&klit) {
+                                    Some(positions) => positions.iter()
+                                        .filter_map(|&i| a.get(i as usize).cloned())
+                                        .collect(),
+                                    None => Vec::new(),
+                                };
+                                stack.push(Val::arr(out));
+                                continue;
+                            }
+                        }
+                    }
+                    // Fallback linear scan.
                     let hint = match &recv { Val::Arr(a) => filter_cap_hint(a.len()), _ => 0 };
                     let mut out = Vec::with_capacity(hint);
                     let mut idx: Option<usize> = None;
