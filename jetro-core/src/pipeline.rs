@@ -1055,6 +1055,39 @@ impl Pipeline {
                 }
                 Some(Ok(Val::arr(out)))
             }
+            // Filter(FieldCmpLit) ∘ Map(FieldChain) → Collect.
+            ([Stage::Filter(_), Stage::Map(_)],
+             [BodyKernel::FieldCmpLit(pk, pop, plit), BodyKernel::FieldChain(mks)]) => {
+                let mut out = Vec::with_capacity(arr.len());
+                for v in arr.iter() {
+                    let lhs = v.get_field(pk.as_ref());
+                    if eval_cmp_op(&lhs, *pop, plit) {
+                        let mut cur = v.clone();
+                        for k in mks.iter() {
+                            cur = cur.get_field(k.as_ref());
+                            if matches!(cur, Val::Null) { break; }
+                        }
+                        out.push(cur);
+                    }
+                }
+                Some(Ok(Val::arr(out)))
+            }
+            // Filter(FieldChainCmpLit) ∘ Map(FieldRead) → Collect.
+            ([Stage::Filter(_), Stage::Map(_)],
+             [BodyKernel::FieldChainCmpLit(pks, pop, plit), BodyKernel::FieldRead(mk)]) => {
+                let mut out = Vec::with_capacity(arr.len());
+                for v in arr.iter() {
+                    let mut lhs = v.clone();
+                    for k in pks.iter() {
+                        lhs = lhs.get_field(k.as_ref());
+                        if matches!(lhs, Val::Null) { break; }
+                    }
+                    if eval_cmp_op(&lhs, *pop, plit) {
+                        out.push(v.get_field(mk.as_ref()));
+                    }
+                }
+                Some(Ok(Val::arr(out)))
+            }
             _ => None,
         }
     }
