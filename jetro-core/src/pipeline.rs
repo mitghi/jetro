@@ -72,6 +72,12 @@ pub enum Stage {
 }
 
 /// Where pipeline output lands.  Determines the result type.
+///
+/// The fused variants (`SumMap`, `CountIf`, `SumFilterMap`,
+/// `CountFilter`) are produced by Phase 2 rewrite rules during
+/// lowering — they collapse adjacent `Map`/`Filter` stages and the
+/// sink into a single inner-loop kernel, eliminating the
+/// per-row exec call per stage.
 #[derive(Debug, Clone)]
 pub enum Sink {
     /// Materialise every element into a `Val::Arr`.
@@ -81,6 +87,14 @@ pub enum Sink {
     Count,
     /// `.sum()` over numerics — yields `Val::Int` or `Val::Float`.
     Sum,
+    /// `Map(prog) ∘ Sum`.  Inner loop computes `prog(@)` and
+    /// accumulates numerically; never materialises a Vec.
+    SumMap(Arc<crate::vm::Program>),
+    /// `Filter(prog) ∘ Count`.  Inner loop runs `prog(@)`; counts
+    /// truthy.
+    CountIf(Arc<crate::vm::Program>),
+    /// `Filter(pred) ∘ Map(f) ∘ Sum`.
+    SumFilterMap(Arc<crate::vm::Program>, Arc<crate::vm::Program>),
 }
 
 #[derive(Debug, Clone)]
@@ -179,7 +193,57 @@ impl Pipeline {
             }
         }
 
-        Some(Pipeline { source: Source::FieldChain { keys }, stages, sink })
+        let mut p = Pipeline { source: Source::FieldChain { keys }, stages, sink };
+        rewrite(&mut p);
+        Some(p)
+    }
+}
+
+/// Apply algebraic rewrite rules until fixed point or a fuel limit
+/// expires.  Each rule shrinks the stage vector by collapsing into a
+/// fused sink — strictly monotonic, so no cycle risk.
+fn rewrite(p: &mut Pipeline) {
+    let mut fuel = 8usize;
+    while fuel > 0 {
+        fuel -= 1;
+        let last_two = if p.stages.len() >= 2 {
+            Some((p.stages.len() - 2, p.stages.len() - 1))
+        } else { None };
+
+        // Rule: Filter(pred) ∘ Map(f) ∘ Sum  →  SumFilterMap(pred, f)
+        if let (Some((i_pred, i_map)), Sink::Sum) = (last_two, &p.sink) {
+            if let (Stage::Filter(pred), Stage::Map(map)) =
+                (&p.stages[i_pred], &p.stages[i_map])
+            {
+                let pred = Arc::clone(pred);
+                let map  = Arc::clone(map);
+                p.stages.truncate(i_pred);
+                p.sink = Sink::SumFilterMap(pred, map);
+                continue;
+            }
+        }
+
+        // Rule: Map(f) ∘ Sum → SumMap(f)
+        if let (Some(last), Sink::Sum) = (p.stages.last(), &p.sink) {
+            if let Stage::Map(prog) = last {
+                let prog = Arc::clone(prog);
+                p.stages.pop();
+                p.sink = Sink::SumMap(prog);
+                continue;
+            }
+        }
+
+        // Rule: Filter(p) ∘ Count → CountIf(p)
+        if let (Some(last), Sink::Count) = (p.stages.last(), &p.sink) {
+            if let Stage::Filter(prog) = last {
+                let prog = Arc::clone(prog);
+                p.stages.pop();
+                p.sink = Sink::CountIf(prog);
+                continue;
+            }
+        }
+
+        break; // no rule matched this round
     }
 }
 
@@ -255,15 +319,45 @@ impl Pipeline {
                     }
                     _ => {}
                 },
+                // Fused sinks consume the (already-stage-processed) item directly.
+                Sink::SumMap(prog) => {
+                    let v = apply_item_root(&mut vm, &item, prog)?;
+                    sum_acc(&mut acc_sum_i, &mut acc_sum_f, &mut sum_floated, &v);
+                }
+                Sink::CountIf(prog) => {
+                    if is_truthy(&apply_item_root(&mut vm, &item, prog)?) { acc_count += 1; }
+                }
+                Sink::SumFilterMap(pred, map) => {
+                    if is_truthy(&apply_item_root(&mut vm, &item, pred)?) {
+                        let v = apply_item_root(&mut vm, &item, map)?;
+                        sum_acc(&mut acc_sum_i, &mut acc_sum_f, &mut sum_floated, &v);
+                    }
+                }
             }
             taken += 1;
         }
 
         Ok(match &self.sink {
-            Sink::Collect => Val::arr(acc_collect),
-            Sink::Count   => Val::Int(acc_count),
-            Sink::Sum     => if sum_floated { Val::Float(acc_sum_f) } else { Val::Int(acc_sum_i) },
+            Sink::Collect          => Val::arr(acc_collect),
+            Sink::Count            => Val::Int(acc_count),
+            Sink::CountIf(_)       => Val::Int(acc_count),
+            Sink::Sum
+            | Sink::SumMap(_)
+            | Sink::SumFilterMap(_, _) =>
+                if sum_floated { Val::Float(acc_sum_f) } else { Val::Int(acc_sum_i) },
         })
+    }
+}
+
+#[inline]
+fn sum_acc(acc_i: &mut i64, acc_f: &mut f64, floated: &mut bool, v: &Val) {
+    match v {
+        Val::Int(n)   => if *floated { *acc_f += *n as f64 } else { *acc_i += *n },
+        Val::Float(f) => {
+            if !*floated { *acc_f = *acc_i as f64; *floated = true; }
+            *acc_f += *f;
+        }
+        _ => {}
     }
 }
 

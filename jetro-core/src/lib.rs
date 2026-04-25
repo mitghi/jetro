@@ -886,14 +886,12 @@ impl Jetro {
                 return out.map(|v| v.into());
             }
         }
-        // Pipeline IR Phase 1.5 substrate ready; wiring deferred until
-        // Phase 2 rewrite rules collapse Map+Sum / Filter+Count into
-        // single fused stages.  Bench shows shared-VM-per-row pipeline
-        // is still 17x slower than fused opcodes on \$.orders.map(total).sum
-        // because each stage does a separate exec call.  Phase 2 rules:
-        //   Map(f) ∘ Sum  → SumMap(f)
-        //   Filter(p) ∘ Count → CountIf(p)
-        // collapse two stage exec calls into one.
+        // Pipeline IR Phase 2 substrate ready (rewrite rules + fused
+        // sinks).  Wiring deferred: even with Map∘Sum → SumMap fusion,
+        // per-row exec_val_raw dispatch remains ~100 ns/row, dwarfing
+        // the existing fused opcode kernels' ~6 ns/row.  Phase 3
+        // (vectorised pull_batch over IntVec/FloatVec/StrVec lanes)
+        // is required to make pipeline competitive.
         let _ = pipeline::Pipeline::lower;
         THREAD_VM.with(|cell| match (cell.try_borrow_mut(), &self.raw_bytes) {
             (Ok(mut vm), Some(bytes)) => {
@@ -927,7 +925,7 @@ impl Jetro {
                 return out;
             }
         }
-        // Pipeline IR wiring deferred — see collect() note.
+        // See collect() — pipeline wiring deferred until Phase 3 batches.
         THREAD_VM.with(|cell| {
             let mut vm = cell.try_borrow_mut().map_err(|_| EvalError("VM in use".into()))?;
             let prog = vm.get_or_compile(expr)?;
