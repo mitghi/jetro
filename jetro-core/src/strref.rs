@@ -593,6 +593,86 @@ pub fn tape_array_filter_count(
     Some(count)
 }
 
+/// `$.<arr>.filter(<pf> <op> <lit>).map(<mf>).<agg>()` — single-pass
+/// filter + project + numeric fold.  Returns `None` if any entry is
+/// not an Object or the projected `mf` value is non-numeric for an
+/// entry that passed the predicate.
+#[cfg(feature = "simd-json")]
+pub fn tape_array_filter_map_numeric_fold(
+    tape: &TapeData,
+    arr_idx: usize,
+    pred_field: &str,
+    op: TapeCmp,
+    lit: &TapeLit,
+    map_field: &str,
+) -> Option<(i64, f64, usize, f64, f64, bool)> {
+    let len = match tape.nodes[arr_idx] {
+        TapeNode::Array { len, .. } => len as usize,
+        _ => return None,
+    };
+    let mut acc = NumAcc {
+        sum_i: 0, sum_f: 0.0, count: 0,
+        min_f: f64::INFINITY, max_f: f64::NEG_INFINITY,
+        is_float: false, mixed: false,
+    };
+    let mut j = arr_idx + 1;
+    for _ in 0..len {
+        let entry = j;
+        if !matches!(tape.nodes[entry], TapeNode::Object { .. }) {
+            return None;
+        }
+        let pass = match tape_object_field(tape, entry, pred_field) {
+            Some(v) => tape_value_cmp(tape, v, op, lit),
+            None => false,
+        };
+        if pass {
+            if let Some(mv) = tape_object_field(tape, entry, map_field) {
+                accumulate(tape.nodes[mv], &mut acc);
+                if acc.mixed { return None; }
+            }
+        }
+        j += tape.span(entry);
+    }
+    Some((acc.sum_i, acc.sum_f, acc.count, acc.min_f, acc.max_f, acc.is_float))
+}
+
+/// `$.<arr>.filter(<pf> <op> <lit>).map(<mf>)` — collect projected
+/// numeric values from passing entries into IntVec / FloatVec.
+#[cfg(feature = "simd-json")]
+pub fn tape_array_filter_map_collect_numeric(
+    tape: &TapeData,
+    arr_idx: usize,
+    pred_field: &str,
+    op: TapeCmp,
+    lit: &TapeLit,
+    map_field: &str,
+) -> Option<(Vec<i64>, Vec<f64>, bool)> {
+    let len = match tape.nodes[arr_idx] {
+        TapeNode::Array { len, .. } => len as usize,
+        _ => return None,
+    };
+    let mut acc = NumCol { ints: Vec::new(), floats: Vec::new(), is_float: false, mixed: false };
+    let mut j = arr_idx + 1;
+    for _ in 0..len {
+        let entry = j;
+        if !matches!(tape.nodes[entry], TapeNode::Object { .. }) {
+            return None;
+        }
+        let pass = match tape_object_field(tape, entry, pred_field) {
+            Some(v) => tape_value_cmp(tape, v, op, lit),
+            None => false,
+        };
+        if pass {
+            if let Some(mv) = tape_object_field(tape, entry, map_field) {
+                collect_value(tape.nodes[mv], &mut acc);
+                if acc.mixed { return None; }
+            }
+        }
+        j += tape.span(entry);
+    }
+    Some((acc.ints, acc.floats, acc.is_float))
+}
+
 /// `$.<arr>.map(<field>)` columnar collect into IntVec/FloatVec.  Same
 /// preconditions as the fold variant.
 #[cfg(feature = "simd-json")]

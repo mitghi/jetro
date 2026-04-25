@@ -121,4 +121,15 @@ fn main() {
         let r = j_tape_arr.collect("$.orders.filter(total > 100).count()").unwrap();
         r.as_i64().unwrap_or(0) as u64
     });
+
+    let _ = j_val_arr.collect("$.orders.filter(total > 100).map(total).sum()").unwrap();
+    let _ = j_tape_arr.collect("$.orders.filter(total > 100).map(total).sum()").unwrap();
+    bench("Val tree     $.orders.filter(total>100).map(total).sum()", iters, || {
+        let r = j_val_arr.collect("$.orders.filter(total > 100).map(total).sum()").unwrap();
+        r.as_i64().unwrap_or(0) as u64
+    });
+    bench("tape walker  $.orders.filter(total>100).map(total).sum()", iters, || {
+        let r = j_tape_arr.collect("$.orders.filter(total > 100).map(total).sum()").unwrap();
+        r.as_i64().unwrap_or(0) as u64
+    });
 }

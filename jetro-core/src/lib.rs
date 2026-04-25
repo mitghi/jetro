@@ -430,9 +430,11 @@ fn classify_cmp_op(op: crate::ast::BinOp) -> Option<crate::strref::TapeCmp> {
     })
 }
 
-/// Tape executor for `$.k1.k2…kN.filter(<field> <op> <lit>).count()`.
-/// Walks the field chain, then counts entries in the target Array
-/// whose `field` satisfies the comparison.
+/// Tape executor for the family
+///   `$.k1.k2…kN.filter(<field> <op> <lit>)[.map(<field2>)][.<agg>()]`
+/// covering: `.count()` / `.len()` (predicate-only); bare collect to
+/// IntVec/FloatVec (`.filter(...).map(field)`); and numeric fold
+/// (`.filter(...).map(field).<sum|avg|min|max|count|len>()`).
 #[cfg(feature = "simd-json")]
 fn try_tape_array_filter_count(
     steps: &[crate::ast::Step],
@@ -441,8 +443,7 @@ fn try_tape_array_filter_count(
     use crate::ast::{Expr, Step, Arg};
     if steps.len() < 2 { return None; }
 
-    // Find `.filter(<binop>)` step preceded only by Field steps and
-    // followed by `.count()` or `.len()`.
+    // Walk leading Field steps, then mandatory `.filter(<binop>)`.
     let mut filter_at = None;
     for (i, s) in steps.iter().enumerate() {
         match s {
@@ -455,12 +456,6 @@ fn try_tape_array_filter_count(
     }
     let f_idx = filter_at?;
     if f_idx == 0 { return None; }
-    if steps.len() != f_idx + 2 { return None; }
-    let agg = match &steps[f_idx + 1] {
-        Step::Method(name, args) if args.is_empty() => name.as_str(),
-        _ => return None,
-    };
-    if agg != "count" && agg != "len" { return None; }
 
     let mut keys: Vec<&str> = Vec::with_capacity(f_idx);
     for s in &steps[..f_idx] {
@@ -468,8 +463,7 @@ fn try_tape_array_filter_count(
     }
     let arr_idx = crate::strref::tape_walk_field_chain(tape, &keys)?;
 
-    // Decode the predicate: must be `<field-ref> <cmp-op> <literal>`
-    // (or the symmetric `<literal> <op> <field-ref>` — flip if so).
+    // Decode the predicate: `<field-ref> <cmp-op> <literal>` (flip if mirrored).
     let pred = match &steps[f_idx] {
         Step::Method(_, args) => match &args[0] {
             Arg::Pos(e) => e,
@@ -483,10 +477,9 @@ fn try_tape_array_filter_count(
     };
     let cmp = classify_cmp_op(op)?;
 
-    let (field, cmp, lit) = if let (Some(f), Some(l)) = (classify_implicit_field(lhs), classify_literal(rhs)) {
+    let (pred_field, cmp, lit) = if let (Some(f), Some(l)) = (classify_implicit_field(lhs), classify_literal(rhs)) {
         (f, cmp, l)
     } else if let (Some(l), Some(f)) = (classify_literal(lhs), classify_implicit_field(rhs)) {
-        // a < @.x  ≡  @.x > a — flip the operator.
         let flipped = match cmp {
             crate::strref::TapeCmp::Lt  => crate::strref::TapeCmp::Gt,
             crate::strref::TapeCmp::Lte => crate::strref::TapeCmp::Gte,
@@ -499,8 +492,65 @@ fn try_tape_array_filter_count(
         return None;
     };
 
-    let n = crate::strref::tape_array_filter_count(tape, arr_idx, field, cmp, &lit)?;
-    Some(Ok(Val::Int(n as i64)))
+    // Tail after .filter(): can be empty, .count()/.len(), .map(g), or
+    // .map(g).<agg>().
+    let tail = &steps[f_idx + 1..];
+
+    // Case 1: .filter(...).count() / .len()
+    if tail.len() == 1 {
+        if let Step::Method(name, args) = &tail[0] {
+            if args.is_empty() && (name == "count" || name == "len") {
+                let n = crate::strref::tape_array_filter_count(tape, arr_idx, pred_field, cmp, &lit)?;
+                return Some(Ok(Val::Int(n as i64)));
+            }
+        }
+    }
+
+    // Case 2/3 require the next step to be .map(<field>).
+    if tail.is_empty() { return None; }
+    let map_field = match &tail[0] {
+        Step::Method(name, args) if name == "map" && args.len() == 1 => match &args[0] {
+            Arg::Pos(e) => classify_implicit_field(e)?,
+            _ => return None,
+        },
+        _ => return None,
+    };
+
+    // Case 2: .filter(...).map(<field>) — bare collect to IntVec / FloatVec.
+    if tail.len() == 1 {
+        let (ints, floats, is_float) =
+            crate::strref::tape_array_filter_map_collect_numeric(tape, arr_idx, pred_field, cmp, &lit, map_field)?;
+        let out = if is_float {
+            Val::FloatVec(Arc::new(floats))
+        } else {
+            Val::IntVec(Arc::new(ints))
+        };
+        return Some(Ok(out));
+    }
+
+    // Case 3: .filter(...).map(<field>).<agg>()
+    if tail.len() != 2 { return None; }
+    let agg = match &tail[1] {
+        Step::Method(name, args) if args.is_empty() => name.as_str(),
+        _ => return None,
+    };
+    let (sum_i, sum_f, count, min_f, max_f, is_float) =
+        crate::strref::tape_array_filter_map_numeric_fold(tape, arr_idx, pred_field, cmp, &lit, map_field)?;
+    let out = match agg {
+        "sum" => if is_float { Val::Float(sum_f) } else { Val::Int(sum_i) },
+        "avg" => {
+            if count == 0 { Val::Null }
+            else {
+                let total = if is_float { sum_f } else { sum_i as f64 };
+                Val::Float(total / count as f64)
+            }
+        }
+        "min" => if count == 0 { Val::Null } else { Val::Float(min_f) },
+        "max" => if count == 0 { Val::Null } else { Val::Float(max_f) },
+        "count" | "len" => Val::Int(count as i64),
+        _ => return None,
+    };
+    Some(Ok(out))
 }
 
 /// Phase 6 tape-aware fast path classifier + executor.

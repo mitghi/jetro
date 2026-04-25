@@ -1083,6 +1083,28 @@ fn tape_descend_bare_collect_int_and_float() {
 
 #[cfg(feature = "simd-json")]
 #[test]
+fn tape_array_filter_map_aggregate() {
+    let bytes = br#"{"orders":[
+      {"id":1,"total":100,"status":"shipped"},
+      {"id":2,"total":50,"status":"pending"},
+      {"id":3,"total":200,"status":"shipped"},
+      {"id":4,"total":75,"status":"shipped"}
+    ]}"#.to_vec();
+    let j = Jetro::from_simd_lazy(bytes).unwrap();
+    let s = j.collect(r#"$.orders.filter(status == "shipped").map(total).sum()"#).unwrap();
+    assert_eq!(s.as_i64().unwrap(), 375);
+    let mx = j.collect(r#"$.orders.filter(status == "shipped").map(total).max()"#).unwrap();
+    assert_eq!(mx.as_f64().unwrap(), 200.0);
+    let mn = j.collect(r#"$.orders.filter(status == "shipped").map(total).min()"#).unwrap();
+    assert_eq!(mn.as_f64().unwrap(), 75.0);
+    let bare = j.collect(r#"$.orders.filter(status == "shipped").map(total)"#).unwrap();
+    assert_eq!(bare, json!([100, 200, 75]));
+    let cnt = j.collect(r#"$.orders.filter(status == "shipped").map(total).count()"#).unwrap();
+    assert_eq!(cnt.as_i64().unwrap(), 3);
+}
+
+#[cfg(feature = "simd-json")]
+#[test]
 fn tape_array_filter_count_numeric_and_string() {
     let bytes = br#"{"orders":[
       {"id":1,"total":100,"status":"shipped"},
