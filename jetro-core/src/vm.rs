@@ -3675,6 +3675,27 @@ impl VM {
         self.exec(program, &env)
     }
 
+    /// Hot-loop variant for pull-based pipelines: skip doc-hash recompute
+    /// + root_chain_cache clear + Env construction per call.  Caller
+    /// builds the Env once outside the loop and threads it via
+    /// `swap_current` per row.  Used by `pipeline::Pipeline::run` and
+    /// any per-element evaluator that knows the document hasn't changed.
+    #[inline]
+    pub fn exec_in_env(
+        &mut self,
+        program: &Program,
+        env: &Env,
+    ) -> Result<Val, EvalError> {
+        self.exec(program, env)
+    }
+
+    /// Make an Env for the given root reusing the VM's current registry.
+    /// Public so the pipeline can build one Env per pull loop and rebind
+    /// `current` per row instead of per-row Env construction.
+    pub fn make_loop_env(&self, root: Val) -> Env {
+        self.make_env(root)
+    }
+
     /// Execute a compiled program against a document, first specialising
     /// against the given shape (turns `OptField` → `GetField` where safe,
     /// folds `KindCheck` where type is known, etc.).

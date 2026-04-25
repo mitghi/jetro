@@ -38,6 +38,77 @@ use crate::ast::Expr;
 use crate::eval::value::Val;
 use crate::eval::EvalError;
 
+// ── Diagnostic tracing ──────────────────────────────────────────────────────
+//
+// `JETRO_PIPELINE_TRACE=1` env-var prints per-call lowering decisions to
+// stderr.  Three event kinds:
+//   activated: <Stage count, Sink kind, Source kind> for each lowered call
+//   fallback : <reason, expr-label> when lower returns None
+//   perf-ok / perf-loss : optional, set in benches via `pipeline_trace::report_run`
+//
+// Reads env var once into a static AtomicBool.  Zero overhead when disabled.
+use std::sync::atomic::{AtomicU8, Ordering};
+static TRACE_INIT: AtomicU8 = AtomicU8::new(0); // 0 = unread, 1 = off, 2 = on
+
+#[inline]
+pub(crate) fn trace_enabled() -> bool {
+    let v = TRACE_INIT.load(Ordering::Relaxed);
+    if v != 0 { return v == 2; }
+    let on = std::env::var_os("JETRO_PIPELINE_TRACE").is_some();
+    TRACE_INIT.store(if on { 2 } else { 1 }, Ordering::Relaxed);
+    on
+}
+
+fn sink_name(s: &Sink) -> &'static str {
+    match s {
+        Sink::Collect => "collect",
+        Sink::Count => "count",
+        Sink::Numeric(NumOp::Sum) => "sum",
+        Sink::Numeric(NumOp::Min) => "min",
+        Sink::Numeric(NumOp::Max) => "max",
+        Sink::Numeric(NumOp::Avg) => "avg",
+        Sink::First => "first",
+        Sink::Last => "last",
+        Sink::NumMap(_, _) => "num_map",
+        Sink::CountIf(_) => "count_if",
+        Sink::NumFilterMap(_, _, _) => "num_filter_map",
+        Sink::FilterFirst(_) => "filter_first",
+        Sink::FilterLast(_) => "filter_last",
+        Sink::FirstMap(_) => "first_map",
+        Sink::LastMap(_) => "last_map",
+        Sink::FlatMapCount(_) => "flat_map_count",
+        Sink::TopN { .. } => "top_n",
+        Sink::MinBy(_) => "min_by",
+        Sink::MaxBy(_) => "max_by",
+        Sink::UniqueCount => "unique_count",
+    }
+}
+
+fn source_name(s: &Source) -> &'static str {
+    match s {
+        Source::Receiver(_) => "receiver",
+        Source::FieldChain { .. } => "field_chain",
+    }
+}
+
+fn expr_label(e: &Expr) -> &'static str {
+    match e {
+        Expr::Chain(_, _) => "chain",
+        Expr::Pipeline { .. } => "pipeline",
+        Expr::Object(_) => "object",
+        Expr::Array(_) => "array",
+        Expr::ListComp { .. } => "list_comp",
+        Expr::DictComp { .. } => "dict_comp",
+        Expr::Let { .. } => "let",
+        Expr::Patch { .. } => "patch",
+        Expr::Lambda { .. } => "lambda",
+        Expr::IfElse { .. } => "if_else",
+        Expr::BinOp(_, _, _) => "binop",
+        Expr::Root => "root_only",
+        _ => "other",
+    }
+}
+
 // ── Plan types ───────────────────────────────────────────────────────────────
 
 /// Where a pipeline starts.  Currently a small set; Phase 2/3 add
@@ -188,6 +259,30 @@ impl Pipeline {
     ///   - Lambda methods (`map(@.x + 1)` is fine; `map(lambda x: …)` is not)
     ///   - Any unrecognised method in stage position
     pub fn lower(expr: &Expr) -> Option<Pipeline> {
+        let p = Self::lower_with_reason(expr);
+        if trace_enabled() {
+            match &p {
+                Ok(pipe) => eprintln!(
+                    "[pipeline] activated: stages={} sink={} src={}",
+                    pipe.stages.len(),
+                    sink_name(&pipe.sink),
+                    source_name(&pipe.source),
+                ),
+                Err(reason) => eprintln!(
+                    "[pipeline] fallback: ({}) at {}",
+                    reason,
+                    expr_label(expr),
+                ),
+            }
+        }
+        p.ok()
+    }
+
+    fn lower_with_reason(expr: &Expr) -> std::result::Result<Pipeline, &'static str> {
+        Self::lower_inner(expr).ok_or("shape not yet supported")
+    }
+
+    fn lower_inner(expr: &Expr) -> Option<Pipeline> {
         use crate::ast::{Step, Arg};
         let (base, steps) = match expr {
             Expr::Chain(b, s) => (b.as_ref(), s.as_slice()),
@@ -709,6 +804,11 @@ impl Pipeline {
         // calls so VM compile / path caches amortise across the row
         // sweep.  Constructing a fresh VM per row regresses 250x.
         let mut vm = crate::vm::VM::new();
+        // Phase A1: build one Env at loop entry; per-row apply uses
+        // `swap_current` instead of full Env construction + doc-hash
+        // recompute + cache clear (those add ~80 ns/row of pure
+        // overhead in execute_val_raw).
+        let mut loop_env = vm.make_loop_env(root.clone());
 
         // Resolve source to an iterable Val::Arr-like sequence.
         let recv = match &self.source {
@@ -775,14 +875,14 @@ impl Pipeline {
                     Stage::Filter(prog) => {
                         let mut out: Vec<Val> = Vec::with_capacity(buf.len());
                         for v in buf.into_iter() {
-                            if is_truthy(&apply_item_root(&mut vm, &v, prog)?) { out.push(v); }
+                            if is_truthy(&apply_item_in_env(&mut vm, &mut loop_env, &v, prog)?) { out.push(v); }
                         }
                         buf = out;
                     }
                     Stage::Map(prog) => {
                         let mut out: Vec<Val> = Vec::with_capacity(buf.len());
                         for v in buf.into_iter() {
-                            out.push(apply_item_root(&mut vm, &v, prog)?);
+                            out.push(apply_item_in_env(&mut vm, &mut loop_env, &v, prog)?);
                         }
                         buf = out;
                     }
@@ -796,7 +896,7 @@ impl Pipeline {
                     Stage::Sort(None) => buf.sort_by(|a, b| cmp_val_total(a, b)),
                     Stage::Sort(Some(prog)) => {
                         let mut keyed: Vec<(Val, Val)> = buf.into_iter().map(|v| {
-                            let k = apply_item_root(&mut vm, &v, prog).unwrap_or(Val::Null);
+                            let k = apply_item_in_env(&mut vm, &mut loop_env, &v, prog).unwrap_or(Val::Null);
                             (k, v)
                         }).collect();
                         keyed.sort_by(|a, b| cmp_val_total(&a.0, &b.0));
@@ -810,7 +910,7 @@ impl Pipeline {
                         let mut seen: std::collections::HashSet<String> = Default::default();
                         let mut keep: Vec<bool> = Vec::with_capacity(buf.len());
                         for v in &buf {
-                            let k = apply_item_root(&mut vm, v, prog).unwrap_or(Val::Null);
+                            let k = apply_item_in_env(&mut vm, &mut loop_env, v, prog).unwrap_or(Val::Null);
                             keep.push(seen.insert(format!("{:?}", k)));
                         }
                         let mut out: Vec<Val> = Vec::with_capacity(buf.len());
@@ -820,7 +920,7 @@ impl Pipeline {
                     Stage::FlatMap(prog) => {
                         let mut out: Vec<Val> = Vec::new();
                         for v in &buf {
-                            let inner = apply_item_root(&mut vm, v, prog)?;
+                            let inner = apply_item_in_env(&mut vm, &mut loop_env, v, prog)?;
                             if let Some(arr) = inner.as_vals() {
                                 out.extend(arr.iter().cloned());
                             } else {
@@ -851,12 +951,12 @@ impl Pipeline {
                             if taken >= *n { break 'outer; }
                         }
                         Stage::Filter(prog) => {
-                            if !is_truthy(&apply_item_root(&mut vm, &item, prog)?) {
+                            if !is_truthy(&apply_item_in_env(&mut vm, &mut loop_env, &item, prog)?) {
                                 continue 'outer;
                             }
                         }
                         Stage::Map(prog) => {
-                            item = apply_item_root(&mut vm, &item, prog)?;
+                            item = apply_item_in_env(&mut vm, &mut loop_env, &item, prog)?;
                         }
                         Stage::Reverse | Stage::Sort(_) | Stage::UniqueBy(_) | Stage::FlatMap(_) => {}
                     }
@@ -875,17 +975,17 @@ impl Pipeline {
                 Sink::First => { if acc_first.is_none() { acc_first = Some(item.clone()); } }
                 Sink::Last  => { acc_last = Some(item.clone()); }
                 Sink::NumMap(op, prog) => {
-                    let v = apply_item_root(&mut vm, &item, prog)?;
+                    let v = apply_item_in_env(&mut vm, &mut loop_env, &item, prog)?;
                     num_fold(&mut acc_sum_i, &mut acc_sum_f, &mut sum_floated,
                              &mut acc_min_f, &mut acc_max_f, &mut acc_n_obs,
                              *op, &v);
                 }
                 Sink::CountIf(prog) => {
-                    if is_truthy(&apply_item_root(&mut vm, &item, prog)?) { acc_count += 1; }
+                    if is_truthy(&apply_item_in_env(&mut vm, &mut loop_env, &item, prog)?) { acc_count += 1; }
                 }
                 Sink::NumFilterMap(op, pred, map) => {
-                    if is_truthy(&apply_item_root(&mut vm, &item, pred)?) {
-                        let v = apply_item_root(&mut vm, &item, map)?;
+                    if is_truthy(&apply_item_in_env(&mut vm, &mut loop_env, &item, pred)?) {
+                        let v = apply_item_in_env(&mut vm, &mut loop_env, &item, map)?;
                         num_fold(&mut acc_sum_i, &mut acc_sum_f, &mut sum_floated,
                                  &mut acc_min_f, &mut acc_max_f, &mut acc_n_obs,
                                  *op, &v);
@@ -893,25 +993,25 @@ impl Pipeline {
                 }
                 Sink::FilterFirst(prog) => {
                     if acc_first.is_none()
-                        && is_truthy(&apply_item_root(&mut vm, &item, prog)?) {
+                        && is_truthy(&apply_item_in_env(&mut vm, &mut loop_env, &item, prog)?) {
                         acc_first = Some(item.clone());
                     }
                 }
                 Sink::FilterLast(prog) => {
-                    if is_truthy(&apply_item_root(&mut vm, &item, prog)?) {
+                    if is_truthy(&apply_item_in_env(&mut vm, &mut loop_env, &item, prog)?) {
                         acc_last = Some(item.clone());
                     }
                 }
                 Sink::FirstMap(prog) => {
                     if acc_first.is_none() {
-                        acc_first = Some(apply_item_root(&mut vm, &item, prog)?);
+                        acc_first = Some(apply_item_in_env(&mut vm, &mut loop_env, &item, prog)?);
                     }
                 }
                 Sink::LastMap(prog) => {
-                    acc_last = Some(apply_item_root(&mut vm, &item, prog)?);
+                    acc_last = Some(apply_item_in_env(&mut vm, &mut loop_env, &item, prog)?);
                 }
                 Sink::FlatMapCount(prog) => {
-                    let inner = apply_item_root(&mut vm, &item, prog)?;
+                    let inner = apply_item_in_env(&mut vm, &mut loop_env, &item, prog)?;
                     if let Some(arr) = inner.as_vals() {
                         acc_count += arr.len() as i64;
                     } else {
@@ -1492,8 +1592,27 @@ fn walk_field_chain(root: &Val, keys: &[Arc<str>]) -> Val {
 
 /// Evaluate `prog` against `item` as the VM root using a long-lived
 /// VM borrowed from the caller (Pipeline::run owns one per query).
-/// Sharing the VM amortises its compile / path caches over the whole
-/// pull loop instead of paying construction per row.
+/// Per-row apply.  Phase A1 fast path: rebinds the loop-shared Env's
+/// `current` slot in place (one swap, two assignments) and runs the
+/// stage program directly via `exec_in_env`.  Skips doc-hash recompute,
+/// root_chain_cache clear, and Env construction that
+/// `execute_val_raw` does on every call.  Saves ~80 ns/row.
+#[inline]
+fn apply_item_in_env(
+    vm: &mut crate::vm::VM,
+    env: &mut crate::eval::Env,
+    item: &Val,
+    prog: &crate::vm::Program,
+) -> Result<Val, EvalError> {
+    let prev = env.swap_current(item.clone());
+    let r = vm.exec_in_env(prog, env);
+    let _ = env.swap_current(prev);
+    r
+}
+
+/// Legacy entry — used only by `try_columnar` paths that pre-build
+/// a one-shot mini-pipeline.  Per-row pull loop must use
+/// `apply_item_in_env` for the A1 fast path.
 #[inline]
 fn apply_item_root(vm: &mut crate::vm::VM, item: &Val, prog: &crate::vm::Program) -> Result<Val, EvalError> {
     vm.execute_val_raw(prog, item.clone())
