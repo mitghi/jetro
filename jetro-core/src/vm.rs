@@ -356,8 +356,6 @@ pub enum Opcode {
     FilterMap { pred: Arc<Program>, map: Arc<Program> },
     /// filter(p1) + filter(p2) fused — single pass, both predicates.
     FilterFilter { p1: Arc<Program>, p2: Arc<Program> },
-    /// map(f1) + map(f2) fused — single pass, composed.
-    MapMap { f1: Arc<Program>, f2: Arc<Program> },
     /// map(f) + filter(p) fused — single pass; emit `f(x)` only when `p(f(x))` holds.
     MapFilter { map: Arc<Program>, pred: Arc<Program> },
     /// Fused `map(f).sum()` — evaluates `f` per item, accumulates numeric sum.
@@ -1745,7 +1743,6 @@ impl Compiler {
     /// Fuse adjacent method calls into single-pass fused opcodes:
     ///   filter(p) + map(f)     → FilterMap
     ///   filter(p1) + filter(p2)→ FilterFilter
-    ///   map(f1) + map(f2)      → MapMap
     fn pass_filter_fusion(ops: Vec<Opcode>) -> Vec<Opcode> {
         let mut out: Vec<Opcode> = Vec::with_capacity(ops.len());
         for op in ops {
@@ -1762,8 +1759,6 @@ impl Compiler {
                             Some(Opcode::FilterMap { pred: p1, map: p2 }),
                         (BuiltinMethod::Filter, BuiltinMethod::Filter) =>
                             Some(Opcode::FilterFilter { p1, p2 }),
-                        (BuiltinMethod::Map, BuiltinMethod::Map) =>
-                            Some(Opcode::MapMap { f1: p1, f2: p2 }),
                         (BuiltinMethod::Map, BuiltinMethod::Filter) =>
                             Some(Opcode::MapFilter { map: p1, pred: p2 }),
                         _ => None,
@@ -5869,45 +5864,9 @@ impl VM {
                 }
                 // ArgExtreme handler removed — pipeline.rs MinBy/MaxBy
                 // covers sort_by(k)+first()/last().
-                Opcode::MapMap { f1, f2 } => {
-                    let recv = pop!(stack);
-                    let recv = match recv {
-                        Val::StrVec(_) | Val::IntVec(_) | Val::FloatVec(_) => recv.into_arr(),
-                        v => v,
-                    };
-                    if let Val::Arr(a) = recv {
-                        // COW fast-path: if the Arc is unique, reuse the Vec
-                        // storage (writing mapped values back in place).
-                        let mut scratch = env.clone();
-                        match Arc::try_unwrap(a) {
-                            Ok(mut v) => {
-                                for slot in v.iter_mut() {
-                                    let prev = scratch.swap_current(std::mem::replace(slot, Val::Null));
-                                    let mid = self.exec(f1, &scratch)?;
-                                    scratch.swap_current(mid);
-                                    let res = self.exec(f2, &scratch)?;
-                                    scratch.restore_current(prev);
-                                    *slot = res;
-                                }
-                                stack.push(Val::arr(v));
-                            }
-                            Err(a) => {
-                                let mut out = Vec::with_capacity(a.len());
-                                for item in a.iter() {
-                                    let prev = scratch.swap_current(item.clone());
-                                    let mid = self.exec(f1, &scratch)?;
-                                    scratch.swap_current(mid);
-                                    let res = self.exec(f2, &scratch)?;
-                                    scratch.restore_current(prev);
-                                    out.push(res);
-                                }
-                                stack.push(Val::arr(out));
-                            }
-                        }
-                    } else {
-                        stack.push(Val::arr(Vec::new()));
-                    }
-                }
+                // MapMap handler removed — pipeline runs two Map stages
+                // sequentially, and the bytecode now lowers `map().map()`
+                // as two unfused CallMethod(Map) ops.
                 Opcode::FindOne(pred) => {
                     let recv = pop!(stack);
                     let mut found: Option<Val> = None;

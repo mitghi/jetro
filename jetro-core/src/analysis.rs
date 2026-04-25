@@ -245,7 +245,7 @@ fn apply_op(op: &Opcode, stack: &mut Vec<AbstractVal>) {
             stack.push(AbstractVal::UNKNOWN);
         }
         Opcode::FilterMap { .. } | Opcode::FilterFilter { .. }
-            | Opcode::MapMap { .. } | Opcode::MapFilter { .. } => {
+            | Opcode::MapFilter { .. } => {
             pop1!();
             stack.push(AbstractVal::array());
         }
@@ -469,10 +469,6 @@ fn count_ident_uses_in_ops(ops: &[Opcode], name: &str, acc: &mut usize) {
                 count_ident_uses_in_ops(&p1.ops, name, acc);
                 count_ident_uses_in_ops(&p2.ops, name, acc);
             }
-            Opcode::MapMap { f1, f2 } => {
-                count_ident_uses_in_ops(&f1.ops, name, acc);
-                count_ident_uses_in_ops(&f2.ops, name, acc);
-            }
             Opcode::CallMethod(c) | Opcode::CallOptMethod(c) => {
                 for p in c.sub_progs.iter() { count_ident_uses_in_ops(&p.ops, name, acc); }
             }
@@ -590,10 +586,6 @@ fn collect_fields_in_ops(ops: &[Opcode], acc: &mut Vec<Arc<str>>) {
                 collect_fields_in_ops(&p1.ops, acc);
                 collect_fields_in_ops(&p2.ops, acc);
             }
-            Opcode::MapMap { f1, f2 } => {
-                collect_fields_in_ops(&f1.ops, acc);
-                collect_fields_in_ops(&f2.ops, acc);
-            }
             Opcode::CallMethod(c) | Opcode::CallOptMethod(c) => {
                 for p in c.sub_progs.iter() { collect_fields_in_ops(&p.ops, acc); }
             }
@@ -687,7 +679,6 @@ fn walk_subprograms(ops: &[Opcode], map: &mut HashMap<u64, usize>) {
             Opcode::FilterMap { pred, map: m } => vec![pred, m],
             Opcode::MapFilter { map: m, pred } => vec![m, pred],
             Opcode::FilterFilter { p1, p2 } => vec![p1, p2],
-            Opcode::MapMap { f1, f2 } => vec![f1, f2],
             Opcode::CallMethod(c) | Opcode::CallOptMethod(c) =>
                 c.sub_progs.iter().collect(),
             Opcode::LetExpr { body, .. } => vec![body],
@@ -923,10 +914,6 @@ fn rewrite_op(op: &Opcode, cache: &mut HashMap<u64, Arc<Program>>) -> Opcode {
             p1: dedup_rec(p1, cache),
             p2: dedup_rec(p2, cache),
         },
-        Opcode::MapMap { f1, f2 } => Opcode::MapMap {
-            f1: dedup_rec(f1, cache),
-            f2: dedup_rec(f2, cache),
-        },
         Opcode::LetExpr { name, body } => Opcode::LetExpr {
             name: name.clone(),
             body: dedup_rec(body, cache),
@@ -1053,7 +1040,6 @@ pub fn opcode_cost(op: &Opcode) -> u32 {
         Opcode::FilterMap { pred, map } => 10 + program_cost(pred) + program_cost(map),
         Opcode::MapFilter { map, pred } => 10 + program_cost(map) + program_cost(pred),
         Opcode::FilterFilter { p1, p2 } => 10 + program_cost(p1) + program_cost(p2),
-        Opcode::MapMap { f1, f2 } => 10 + program_cost(f1) + program_cost(f2),
         Opcode::CallMethod(c) | Opcode::CallOptMethod(c) => {
             let base = match c.method {
                 BuiltinMethod::Filter | BuiltinMethod::Map | BuiltinMethod::FlatMap => 10,
