@@ -224,13 +224,24 @@ impl Val {
     }
 
     /// Materialize any array-like (including columnar) as a `Cow<[Val]>`.
-    /// Borrowed for `Val::Arr`; owned allocation for `Val::IntVec`/`FloatVec`.
+    /// Borrowed for `Val::Arr`; owned allocation for `Val::IntVec`/`FloatVec`/`ObjVec`.
     pub fn as_vals(&self) -> Option<Cow<'_, [Val]>> {
         match self {
             Val::Arr(a)      => Some(Cow::Borrowed(a.as_slice())),
             Val::IntVec(a)   => Some(Cow::Owned(a.iter().map(|n| Val::Int(*n)).collect())),
             Val::FloatVec(a) => Some(Cow::Owned(a.iter().map(|f| Val::Float(*f)).collect())),
             Val::StrVec(a)   => Some(Cow::Owned(a.iter().map(|s| Val::Str(s.clone())).collect())),
+            Val::ObjVec(d)   => {
+                let mut out: Vec<Val> = Vec::with_capacity(d.rows.len());
+                for row in &d.rows {
+                    let mut m: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(d.keys.len());
+                    for (i, k) in d.keys.iter().enumerate() {
+                        m.insert(Arc::clone(k), row[i].clone());
+                    }
+                    out.push(Val::Obj(Arc::new(m)));
+                }
+                Some(Cow::Owned(out))
+            }
             _ => None,
         }
     }
@@ -249,6 +260,17 @@ impl Val {
             Val::StrVec(a) => {
                 let v: Vec<Val> = a.iter().map(|s| Val::Str(s.clone())).collect();
                 Val::arr(v)
+            }
+            Val::ObjVec(d) => {
+                let mut out: Vec<Val> = Vec::with_capacity(d.rows.len());
+                for row in &d.rows {
+                    let mut m: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(d.keys.len());
+                    for (i, k) in d.keys.iter().enumerate() {
+                        m.insert(Arc::clone(k), row[i].clone());
+                    }
+                    out.push(Val::Obj(Arc::new(m)));
+                }
+                Val::arr(out)
             }
             other => other,
         }
