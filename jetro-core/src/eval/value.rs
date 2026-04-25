@@ -817,27 +817,24 @@ impl Val {
                 // promotion is gated off; the probe path stays in source
                 // so the next session can flip it on alongside the
                 // handler migration.
-                let _ = Self::probe_obj_shape_inner;
-                if false {
-                    if let Node::Object { len: first_len, .. } = first {
-                        if first_len > 0 && first_len <= 64 {
-                            let shape_keys = Self::probe_obj_shape_inner(nodes, start, len, first_len as usize);
-                            if let Some(keys) = shape_keys {
-                                let n_keys = keys.len();
-                                let mut cells: Vec<Val> = Vec::with_capacity(len * n_keys);
-                                for _ in 0..len {
-                                    debug_assert!(matches!(nodes[*idx], Node::Object { .. }));
+                if let Node::Object { len: first_len, .. } = first {
+                    if first_len > 0 && first_len <= 64 {
+                        let shape_keys = Self::probe_obj_shape_inner(nodes, start, len, first_len as usize);
+                        if let Some(keys) = shape_keys {
+                            let n_keys = keys.len();
+                            let mut cells: Vec<Val> = Vec::with_capacity(len * n_keys);
+                            for _ in 0..len {
+                                debug_assert!(matches!(nodes[*idx], Node::Object { .. }));
+                                *idx += 1;
+                                for _ in 0..n_keys {
+                                    debug_assert!(matches!(nodes[*idx], Node::String(_)));
                                     *idx += 1;
-                                    for _ in 0..n_keys {
-                                        debug_assert!(matches!(nodes[*idx], Node::String(_)));
-                                        *idx += 1;
-                                        cells.push(Self::from_simd_tape(nodes, idx));
-                                    }
+                                    cells.push(Self::from_simd_tape(nodes, idx));
                                 }
-                                let key_arcs: Arc<[Arc<str>]> =
-                                    keys.iter().map(|k| intern_key(k)).collect::<Vec<_>>().into();
-                                return Val::ObjVec(Arc::new(ObjVecData { keys: key_arcs, cells }));
                             }
+                            let key_arcs: Arc<[Arc<str>]> =
+                                keys.iter().map(|k| intern_key(k)).collect::<Vec<_>>().into();
+                            return Val::ObjVec(Arc::new(ObjVecData { keys: key_arcs, cells }));
                         }
                     }
                 }

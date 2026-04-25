@@ -265,6 +265,37 @@ impl Pipeline {
             Source::Receiver(v) => v.clone(),
             Source::FieldChain { keys } => walk_field_chain(root, keys),
         };
+
+        // ObjVec source — slot-indexed direct reads, no IndexMap probe.
+        if let Val::ObjVec(d) = &recv {
+            if let Sink::SumMap(prog) = &self.sink {
+                let field = single_field_prog(prog)?;
+                let slot = d.slot_of(field)?;
+                return Some(Ok(objvec_sum_slot(d, slot)));
+            }
+            if let Sink::SumFilterMap(pred, map) = &self.sink {
+                let (pf, op, lit) = single_cmp_prog(pred)?;
+                let mf = single_field_prog(map)?;
+                let sp = d.slot_of(pf)?;
+                let sm = d.slot_of(mf)?;
+                return Some(Ok(objvec_filter_sum_slots(d, sp, op, &lit, sm)));
+            }
+            if let Sink::CountIf(pred) = &self.sink {
+                if let Some((pf, op, lit)) = single_cmp_prog(pred) {
+                    let sp = d.slot_of(pf)?;
+                    return Some(Ok(objvec_filter_count_slot(d, sp, op, &lit)));
+                }
+                if let Some(leaves) = and_chain_prog(pred) {
+                    let slots: Option<Vec<(usize, crate::ast::BinOp, Val)>> =
+                        leaves.iter().map(|(f, op, lit)| {
+                            d.slot_of(f).map(|s| (s, *op, lit.clone()))
+                        }).collect();
+                    let slots = slots?;
+                    return Some(Ok(objvec_filter_count_and_slots(d, &slots)));
+                }
+            }
+        }
+
         let arr = match &recv {
             Val::Arr(a) => Arc::clone(a),
             _ => return None,
@@ -325,6 +356,25 @@ impl Pipeline {
             Val::IntVec(a)   => Box::new(a.iter().map(|n| Val::Int(*n)).collect::<Vec<_>>().into_iter()),
             Val::FloatVec(a) => Box::new(a.iter().map(|f| Val::Float(*f)).collect::<Vec<_>>().into_iter()),
             Val::StrVec(a)   => Box::new(a.iter().map(|s| Val::Str(Arc::clone(s))).collect::<Vec<_>>().into_iter()),
+            // ObjVec: materialise rows into Val::Obj for the per-row pull
+            // path.  Slot-indexed columnar fast paths in `try_columnar`
+            // handle the common SumMap / CountIf / SumFilterMap shapes
+            // before this point — landing here means the sink is
+            // Collect / take / skip / etc., which truly need Val::Obj
+            // rows for downstream stages.
+            Val::ObjVec(d)   => {
+                let n = d.nrows();
+                let mut out: Vec<Val> = Vec::with_capacity(n);
+                let stride = d.stride();
+                for row in 0..n {
+                    let mut m: indexmap::IndexMap<Arc<str>, Val> = indexmap::IndexMap::with_capacity(stride);
+                    for (i, k) in d.keys.iter().enumerate() {
+                        m.insert(Arc::clone(k), d.cells[row * stride + i].clone());
+                    }
+                    out.push(Val::Obj(Arc::new(m)));
+                }
+                Box::new(out.into_iter())
+            }
             // Anything else (scalar, Obj, …): single-element "iterator".
             _ => Box::new(std::iter::once(recv.clone())),
         };
@@ -492,6 +542,82 @@ fn decode_cmp_ops<'a>(ops: &'a [crate::vm::Opcode]) -> Option<(&'a str, crate::a
 /// pass a `Program`.
 fn single_cmp_prog<'a>(prog: &'a crate::vm::Program) -> Option<(&'a str, crate::ast::BinOp, Val)> {
     decode_cmp_ops(prog.ops.as_ref())
+}
+
+// ── ObjVec slot-indexed kernels (Phase 3.5) ──────────────────────────────────
+//
+// When the receiver is an ObjVec the row layout is flat
+// `cells: Vec<Val>` with stride = keys.len(); a row's field at slot
+// `s` lives at `cells[row * stride + s]`.  No IndexMap probe per
+// row — direct array index.
+
+fn objvec_sum_slot(d: &Arc<crate::eval::value::ObjVecData>, slot: usize) -> Val {
+    let stride = d.stride();
+    let nrows = d.nrows();
+    let mut acc_i: i64 = 0;
+    let mut acc_f: f64 = 0.0;
+    let mut floated = false;
+    for row in 0..nrows {
+        let v = &d.cells[row * stride + slot];
+        sum_acc(&mut acc_i, &mut acc_f, &mut floated, v);
+    }
+    if floated { Val::Float(acc_f) } else { Val::Int(acc_i) }
+}
+
+fn objvec_filter_count_slot(
+    d:    &Arc<crate::eval::value::ObjVecData>,
+    slot: usize,
+    op:   crate::ast::BinOp,
+    lit:  &Val,
+) -> Val {
+    let stride = d.stride();
+    let nrows = d.nrows();
+    let mut count: i64 = 0;
+    for row in 0..nrows {
+        let v = &d.cells[row * stride + slot];
+        if cmp_val_binop_local(v, op, lit) { count += 1; }
+    }
+    Val::Int(count)
+}
+
+fn objvec_filter_sum_slots(
+    d:        &Arc<crate::eval::value::ObjVecData>,
+    pred_slot: usize,
+    op:       crate::ast::BinOp,
+    lit:      &Val,
+    map_slot:  usize,
+) -> Val {
+    let stride = d.stride();
+    let nrows = d.nrows();
+    let mut acc_i: i64 = 0;
+    let mut acc_f: f64 = 0.0;
+    let mut floated = false;
+    for row in 0..nrows {
+        let off = row * stride;
+        if cmp_val_binop_local(&d.cells[off + pred_slot], op, lit) {
+            sum_acc(&mut acc_i, &mut acc_f, &mut floated, &d.cells[off + map_slot]);
+        }
+    }
+    if floated { Val::Float(acc_f) } else { Val::Int(acc_i) }
+}
+
+fn objvec_filter_count_and_slots(
+    d: &Arc<crate::eval::value::ObjVecData>,
+    leaves: &[(usize, crate::ast::BinOp, Val)],
+) -> Val {
+    let stride = d.stride();
+    let nrows = d.nrows();
+    let mut count: i64 = 0;
+    'rows: for row in 0..nrows {
+        let off = row * stride;
+        for (slot, op, lit) in leaves {
+            if !cmp_val_binop_local(&d.cells[off + slot], *op, lit) {
+                continue 'rows;
+            }
+        }
+        count += 1;
+    }
+    Val::Int(count)
 }
 
 /// Columnar `$.<arr>.map(<field>).sum()` — extract numeric column,
