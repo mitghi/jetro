@@ -1356,14 +1356,22 @@ impl Pipeline {
         let key_strs: Vec<&str> = chain_keys.iter().map(|k| k.as_ref()).collect();
         let arr_idx = crate::strref::tape_walk_field_chain(tape, &key_strs)?;
 
-        // Allow leading Filter stages — predicate kernels are evaluated
-        // on tape; if every filter passes the entry idx is still a tape
-        // Object, so the Sink dispatcher consumes it unchanged.  Other
-        // stage kinds (Map/FlatMap/UniqueBy/Sort/etc.) bail to the Val
-        // path because they'd transform the entry into a non-tape Val.
+        // Stage classifier: split into (leading FlatMap, trailing Filter*).
+        // - Leading optional FlatMap with FieldRead/FieldChain kernel
+        //   (resolves outer entry → inner Array idx; we then iterate the
+        //   inner array).
+        // - Following stages must all be Filter with kernel-pred shape.
+        // - Map/UniqueBy/Sort etc. bail (would transform entry).
+        let mut flat_kernel: Option<&BodyKernel> = None;
         let mut filter_kernels: Vec<&BodyKernel> = Vec::new();
-        for (st, k) in self.stages.iter().zip(self.stage_kernels.iter()) {
+        for (i, (st, k)) in self.stages.iter().zip(self.stage_kernels.iter()).enumerate() {
             match st {
+                Stage::FlatMap(_) if i == 0 => {
+                    if !matches!(k,
+                        BodyKernel::FieldRead(_) | BodyKernel::FieldChain(_))
+                    { return None; }
+                    flat_kernel = Some(k);
+                }
                 Stage::Filter(_) => {
                     if !matches!(k,
                         BodyKernel::FieldRead(_)
@@ -1378,17 +1386,50 @@ impl Pipeline {
         }
 
         let mut acc = SinkAcc::new(&self.sink, &self.sink_kernels)?;
-        let iter = crate::strref::tape_array_iter(tape, arr_idx)?;
-        'rows: for entry_idx in iter {
-            for fk in &filter_kernels {
-                match eval_kernel_pred(fk, tape, entry_idx) {
-                    Some(true) => {}
-                    Some(false) => continue 'rows,
-                    None => return None,  // unsupported kernel
+        let outer_iter = crate::strref::tape_array_iter(tape, arr_idx)?;
+
+        if let Some(fk_kernel) = flat_kernel {
+            // FlatMap: per outer entry, resolve inner Array via kernel,
+            // iterate its entries; apply remaining filters; feed sink.
+            'outer: for outer_idx in outer_iter {
+                let inner_arr = match fk_kernel {
+                    BodyKernel::FieldRead(k) =>
+                        crate::strref::tape_object_field(tape, outer_idx, k.as_ref()),
+                    BodyKernel::FieldChain(keys) => {
+                        let key_strs: Vec<&str> = keys.iter().map(|k| k.as_ref()).collect();
+                        crate::strref::tape_walk_field_chain_from(tape, outer_idx, &key_strs)
+                    }
+                    _ => return None,
+                };
+                let inner_arr = match inner_arr { Some(i) => i, None => continue };
+                let inner_iter = match crate::strref::tape_array_iter(tape, inner_arr) {
+                    Some(it) => it,
+                    None => continue,  // not an array — skip this outer
+                };
+                'inner: for inner_idx in inner_iter {
+                    for fk in &filter_kernels {
+                        match eval_kernel_pred(fk, tape, inner_idx) {
+                            Some(true) => {}
+                            Some(false) => continue 'inner,
+                            None => return None,
+                        }
+                    }
+                    if !acc.feed(tape, inner_idx)? { break 'outer; }
                 }
             }
-            if !acc.feed(tape, entry_idx)? { break; }
+        } else {
+            'rows: for entry_idx in outer_iter {
+                for fk in &filter_kernels {
+                    match eval_kernel_pred(fk, tape, entry_idx) {
+                        Some(true) => {}
+                        Some(false) => continue 'rows,
+                        None => return None,
+                    }
+                }
+                if !acc.feed(tape, entry_idx)? { break; }
+            }
         }
+
         let result = acc.finalise(tape);
         cache.note_tape_run();
         Some(Ok(result))
