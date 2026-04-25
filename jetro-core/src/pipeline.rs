@@ -1043,12 +1043,17 @@ impl Pipeline {
                 Some(Ok(Val::arr(out)))
             }
             // Single Map(FieldChain) → Collect: walk chain per item.
+            // IC-cached probe: first item resolves each chain step via
+            // IndexMap.get_full (returns slot index); subsequent items
+            // try the cached slot first, fall back to hash on miss.
+            // Saves ~half the probe cost on uniform-shape arrays.
             ([Stage::Map(_)], [BodyKernel::FieldChain(ks)]) => {
                 let mut out = Vec::with_capacity(arr.len());
+                let mut slots: Vec<Option<usize>> = vec![None; ks.len()];
                 for v in arr.iter() {
                     let mut cur = v.clone();
-                    for k in ks.iter() {
-                        cur = cur.get_field(k.as_ref());
+                    for (i, k) in ks.iter().enumerate() {
+                        cur = chain_step_ic(&cur, k.as_ref(), &mut slots[i]);
                         if matches!(cur, Val::Null) { break; }
                     }
                     out.push(cur);
@@ -1976,6 +1981,20 @@ fn num_f_cmp(a: f64, b: f64, op: crate::ast::BinOp) -> bool {
 }
 
 #[inline]
+/// IC-cached chain step.  Cached `Option<usize>` slot survives across
+/// rows; missing-key marks slot None.  Used by Map(FieldChain) columnar
+/// path to amortise the IndexMap probe cost across the whole array.
+#[inline]
+fn chain_step_ic(v: &Val, k: &str, ic: &mut Option<usize>) -> Val {
+    match v {
+        Val::Obj(m) => match lookup_via_ic(m, k, ic) {
+            Some(x) => x.clone(),
+            None => Val::Null,
+        },
+        _ => v.get_field(k),
+    }
+}
+
 fn lookup_via_ic<'a>(
     m: &'a indexmap::IndexMap<Arc<str>, Val>,
     k: &str,
