@@ -64,6 +64,7 @@ pub mod cfg;
 pub mod ssa;
 pub mod scan;
 pub mod strref;
+pub mod pipeline;
 
 #[cfg(test)]
 mod tests;
