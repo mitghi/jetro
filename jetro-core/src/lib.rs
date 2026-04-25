@@ -834,34 +834,32 @@ impl Jetro {
     ///
     /// Requires the `simd-json` cargo feature.
     #[cfg(feature = "simd-json")]
-    pub fn from_simd(mut bytes: Vec<u8>) -> std::result::Result<Self, String> {
-        // Snapshot the original bytes for byte-scan fast paths *before*
-        // simd-json mutates them in place. Cheap one-shot Vec clone; the
-        // alternative is rebuilding bytes from the parsed Val later.
-        let raw: Arc<[u8]> = Arc::from(bytes.clone().into_boxed_slice());
-        match Val::from_json_simd(&mut bytes) {
-            Ok(val) => {
-                let cell: OnceCell<Val> = OnceCell::new();
-                let _ = cell.set(val);
+    pub fn from_simd(bytes: Vec<u8>) -> std::result::Result<Self, String> {
+        // Tape-deferred path: parse to TapeData; build Val lazily.
+        // Tape-friendly aggregate / filter / map / collect queries
+        // execute straight off the tape and never pay Val build cost.
+        // Non-tape-friendly queries trigger `root_val()` which rebuilds
+        // a Val via simd-json over the retained raw_bytes — same total
+        // cost as the legacy eager path.
+        match crate::strref::TapeData::parse(bytes) {
+            Ok(tape) => {
+                // Reuse the tape's escape-decoded bytes buffer as
+                // raw_bytes — skips a second 1.7MB clone on cold path.
+                // Byte-scan paths read field names + literal values
+                // which are unaffected by simd-json's in-place mutation
+                // (commas/colons/structural bytes preserved; strings
+                // are escape-decoded which is fine for memchr-style
+                // structural scans).
+                let raw: Arc<[u8]> = Arc::clone(&tape.bytes_buf);
                 Ok(Self {
                     document: Value::Null,
-                    root_val: cell, objvec_cache: Default::default(), tape_runs: std::sync::atomic::AtomicU32::new(0),
+                    root_val: OnceCell::new(), objvec_cache: Default::default(),
+                    tape_runs: std::sync::atomic::AtomicU32::new(0),
                     raw_bytes: Some(raw),
-                    tape: None,
+                    tape: Some(tape),
                 })
             }
-            Err(simd_err) => {
-                // simd-json may have mutated the buffer; reparse from the
-                // pristine raw_bytes copy via serde_json as fallback.
-                let document: Value = serde_json::from_slice(&raw)
-                    .map_err(|e| format!("simd-json: {} ; serde_json fallback: {}", simd_err, e))?;
-                Ok(Self {
-                    document,
-                    root_val: OnceCell::new(), objvec_cache: Default::default(), tape_runs: std::sync::atomic::AtomicU32::new(0),
-                    raw_bytes: Some(raw),
-                    tape: None,
-                })
-            }
+            Err(simd_err) => Err(format!("simd-json parse failed: {}", simd_err)),
         }
     }
 
@@ -996,6 +994,10 @@ impl Jetro {
         // the existing opcode path.
         if let Ok(ast) = parser::parse(expr) {
             if let Some(p) = pipeline::Pipeline::lower(&ast) {
+                #[cfg(feature = "simd-json")]
+                if let Some(out) = p.try_run_no_root(self as &dyn pipeline::ObjVecPromoter) {
+                    return out.map(|v| v.into());
+                }
                 return p.run_with(&self.root_val(), Some(self as &dyn pipeline::ObjVecPromoter))
                     .map(|v| v.into());
             }
@@ -1034,6 +1036,10 @@ impl Jetro {
         }
         if let Ok(ast) = parser::parse(expr) {
             if let Some(p) = pipeline::Pipeline::lower(&ast) {
+                #[cfg(feature = "simd-json")]
+                if let Some(out) = p.try_run_no_root(self as &dyn pipeline::ObjVecPromoter) {
+                    return out;
+                }
                 return p.run_with(&self.root_val(), Some(self as &dyn pipeline::ObjVecPromoter));
             }
         }

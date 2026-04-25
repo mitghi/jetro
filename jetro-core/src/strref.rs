@@ -157,21 +157,37 @@ impl TapeData {
     /// subsequent reads don't need lifetime gymnastics with the
     /// simd-json scratch region.
     pub fn parse(mut bytes: Vec<u8>) -> Result<Arc<Self>, String> {
-        let cap = bytes.len();
+        // simd-json escape-decodes strings in place inside `bytes`.
+        // Each `Node::String(&str)` borrows a slice of that buffer.
+        // Capture per-string (offset, len) BEFORE moving `bytes`, then
+        // hand `bytes` over as the side buffer — zero string copies.
+        // Fallback to `extend_from_slice` only for the (rare) case
+        // where simd-json returns a slice outside the input buffer.
+        let base = bytes.as_ptr() as usize;
+        let bytes_len = bytes.len();
+        let limit = base + bytes_len;
         let tape = simd_json::to_tape(&mut bytes).map_err(|e| e.to_string())?;
-        // Pre-size the side buffer at the input size — string total
-        // is bounded by input size for any escape-free document, and
-        // escaped docs typically shrink (\\n -> 1 byte).
-        let mut buf: Vec<u8> = Vec::with_capacity(cap);
         let mut nodes: Vec<TapeNode> = Vec::with_capacity(tape.0.len());
+        let mut extra_buf: Vec<u8> = Vec::new();
         for n in tape.0.iter() {
             nodes.push(match n {
                 simd_json::Node::Static(s) => TapeNode::Static(*s),
                 simd_json::Node::String(s) => {
-                    let start = buf.len();
-                    buf.extend_from_slice(s.as_bytes());
-                    let end = buf.len();
-                    TapeNode::StringRef { start: start as u32, end: end as u32 }
+                    let p = s.as_ptr() as usize;
+                    if p >= base && p + s.len() <= limit {
+                        let off = p - base;
+                        TapeNode::StringRef {
+                            start: off as u32,
+                            end: (off + s.len()) as u32,
+                        }
+                    } else {
+                        let off = bytes_len + extra_buf.len();
+                        extra_buf.extend_from_slice(s.as_bytes());
+                        TapeNode::StringRef {
+                            start: off as u32,
+                            end: (off + s.len()) as u32,
+                        }
+                    }
                 }
                 simd_json::Node::Object { len, count } =>
                     TapeNode::Object { len: *len as u32, count: *count as u32 },
@@ -179,8 +195,16 @@ impl TapeData {
                     TapeNode::Array  { len: *len as u32, count: *count as u32 },
             });
         }
+        drop(tape);
+        let bytes_buf: Arc<[u8]> = if extra_buf.is_empty() {
+            Arc::from(bytes.into_boxed_slice())
+        } else {
+            let mut combined = bytes;
+            combined.extend_from_slice(&extra_buf);
+            Arc::from(combined.into_boxed_slice())
+        };
         Ok(Arc::new(Self {
-            bytes_buf: Arc::from(buf.into_boxed_slice()),
+            bytes_buf,
             nodes,
         }))
     }
