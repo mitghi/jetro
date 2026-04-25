@@ -627,6 +627,88 @@ fn simd_json_descendant_byte_scan() {
     assert!(s.contains('1') && s.contains('2') && s.contains('3'));
 }
 
+#[test]
+fn compile_once_run_many() {
+    let q = Jetro::compile("$.books.filter(price > 10).map(title)").unwrap();
+    let r1 = q.run(&json!({
+        "books": [
+            {"title": "A", "price": 5.0},
+            {"title": "B", "price": 15.0},
+        ]
+    })).unwrap();
+    assert_eq!(r1, json!(["B"]));
+    // Same compiled handle, different doc.
+    let r2 = q.run(&json!({
+        "books": [
+            {"title": "X", "price": 99.0},
+            {"title": "Y", "price": 1.0},
+        ]
+    })).unwrap();
+    assert_eq!(r2, json!(["X"]));
+}
+
+#[test]
+fn compile_handle_run_on_jetro() {
+    let q = Jetro::compile("$.n").unwrap();
+    let j1 = Jetro::new(json!({"n": 1}));
+    let j2 = Jetro::new(json!({"n": 2}));
+    assert_eq!(q.run_on(&j1).unwrap(), json!(1));
+    assert_eq!(q.run_on(&j2).unwrap(), json!(2));
+}
+
+#[test]
+fn collect_typed_primitive() {
+    let j = Jetro::new(json!({"books": [{"price": 5.0}, {"price": 15.0}]}));
+    let count: i64 = j.collect_typed("$.books.len()").unwrap();
+    assert_eq!(count, 2);
+}
+
+#[test]
+fn collect_typed_vec_of_strings() {
+    let j = Jetro::new(json!({"books": [{"title": "A"}, {"title": "B"}]}));
+    let titles: Vec<String> = j.collect_typed("$.books.map(title)").unwrap();
+    assert_eq!(titles, vec!["A".to_string(), "B".to_string()]);
+}
+
+#[test]
+fn collect_typed_struct() {
+    #[derive(serde::Deserialize, PartialEq, Debug)]
+    struct Book { title: String, price: f64 }
+    let j = Jetro::new(json!({"books": [
+        {"title": "A", "price": 5.0},
+        {"title": "B", "price": 15.5}
+    ]}));
+    let books: Vec<Book> = j.collect_typed("$.books").unwrap();
+    assert_eq!(books, vec![
+        Book { title: "A".into(), price: 5.0 },
+        Book { title: "B".into(), price: 15.5 },
+    ]);
+}
+
+#[test]
+fn compile_query_run_typed() {
+    let q = Jetro::compile("$.users.filter(active).map(name)").unwrap();
+    let names: Vec<String> = q.run_typed(&json!({
+        "users": [
+            {"name": "A", "active": true},
+            {"name": "B", "active": false},
+            {"name": "C", "active": true},
+        ]
+    })).unwrap();
+    assert_eq!(names, vec!["A".to_string(), "C".to_string()]);
+}
+
+#[test]
+fn compile_handle_run_val_skips_value_materialise() {
+    use jetro_core::JetroVal;
+    let q = Jetro::compile("$.count").unwrap();
+    // Build a Val tree directly and run against it.
+    let doc = json!({"count": 42});
+    let val: JetroVal = (&doc).into();
+    let r = q.run_val(val).unwrap();
+    assert_eq!(r.to_string(), "42");
+}
+
 #[cfg(feature = "simd-json")]
 #[test]
 fn simd_json_ndjson_basic() {

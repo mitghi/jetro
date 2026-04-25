@@ -143,6 +143,110 @@ pub fn query(expr: &str, doc: &Value) -> Result<Value> {
     Ok(eval::evaluate(&ast, doc)?)
 }
 
+/// A pre-compiled Jetro query.  Compile once, run against many
+/// documents — bypasses the per-call compile cache lookup and lets
+/// the same opcode program be shared across threads (it's `Send +
+/// Sync`).  See [`Jetro::compile`].
+#[derive(Clone)]
+pub struct CompiledQuery {
+    program: Arc<Program>,
+}
+
+impl CompiledQuery {
+    /// Run against a `serde_json::Value` document; returns `Value`.
+    pub fn run(&self, doc: &Value) -> Result<Value> {
+        let mut vm = VM::new();
+        Ok(vm.execute(&self.program, doc)?)
+    }
+
+    /// Run against a pre-built `JetroVal` root; returns `JetroVal`
+    /// (skips the result-side `Val → serde_json::Value` materialisation).
+    pub fn run_val(&self, root: JetroVal) -> Result<JetroVal> {
+        let mut vm = VM::new();
+        Ok(vm.execute_val_raw(&self.program, root)?)
+    }
+
+    /// Run against an existing `Jetro` handle, reusing its document /
+    /// root_val cache.  Equivalent to `j.collect(expr)` but skips the
+    /// thread-local VM compile cache lookup.
+    pub fn run_on(&self, j: &Jetro) -> Result<Value> {
+        THREAD_VM.with(|cell| {
+            let mut vm = cell.try_borrow_mut().map_err(|_| EvalError("VM in use".into()))?;
+            Ok(vm.execute_val(&self.program, j.root_val_cached())?)
+        })
+    }
+
+    /// Borrow the underlying `Arc<Program>` for callers that want to
+    /// hand it directly to `VM::execute_val_*`.
+    pub fn program(&self) -> &Arc<Program> { &self.program }
+}
+
+impl Jetro {
+    /// Compile a Jetro expression once for repeated use.  The returned
+    /// [`CompiledQuery`] holds an `Arc<Program>` and can be shared
+    /// across threads / documents.
+    ///
+    /// Prefer this over `Jetro::collect` when running the *same* query
+    /// against many documents — saves the per-call thread-local
+    /// compile-cache lookup and avoids re-parsing.
+    ///
+    /// ```ignore
+    /// let q = jetro::Jetro::compile("$.users.filter(active).count()")?;
+    /// for doc in docs {
+    ///     let n = q.run(&doc)?;
+    /// }
+    /// ```
+    pub fn compile<S: AsRef<str>>(expr: S) -> Result<CompiledQuery> {
+        let prog = vm::Compiler::compile_str(expr.as_ref())?;
+        Ok(CompiledQuery { program: Arc::new(prog) })
+    }
+
+    /// Internal helper — exposes root_val for `CompiledQuery::run_on`.
+    pub(crate) fn root_val_cached(&self) -> Val {
+        self.root_val()
+    }
+
+    /// Evaluate `expr` and deserialise the result into a caller-chosen
+    /// type `T`.  Saves the manual `serde_json::from_value` step after
+    /// `.collect()`.
+    ///
+    /// ```ignore
+    /// let titles: Vec<String> = j.collect_typed("$.books.map(title)")?;
+    /// let count:  i64         = j.collect_typed("$.books.len()")?;
+    /// #[derive(serde::Deserialize)] struct Book { title: String, price: f64 }
+    /// let books:  Vec<Book>   = j.collect_typed("$.books")?;
+    /// ```
+    ///
+    /// Internally goes through `collect_val` + `Val::to_json_vec` +
+    /// `serde_json::from_slice` — skips the intermediate
+    /// `serde_json::Value` tree on the result side.
+    pub fn collect_typed<S, T>(&self, expr: S) -> Result<T>
+    where
+        S: AsRef<str>,
+        T: serde::de::DeserializeOwned,
+    {
+        let val = self.collect_val(expr.as_ref())?;
+        let bytes = val.to_json_vec();
+        Ok(serde_json::from_slice::<T>(&bytes)
+            .map_err(|e| EvalError(format!("collect_typed: {}", e)))?)
+    }
+}
+
+impl CompiledQuery {
+    /// Run + deserialise into `T` in one shot.  Same shape as
+    /// [`Jetro::collect_typed`] but uses the pre-compiled program.
+    pub fn run_typed<T>(&self, doc: &Value) -> Result<T>
+    where T: serde::de::DeserializeOwned,
+    {
+        let val: Val = (doc).into();
+        let mut vm = VM::new();
+        let out = vm.execute_val_raw(&self.program, val)?;
+        let bytes = out.to_json_vec();
+        Ok(serde_json::from_slice::<T>(&bytes)
+            .map_err(|e| EvalError(format!("run_typed: {}", e)))?)
+    }
+}
+
 /// Evaluate a Jetro expression with a custom method registry.
 pub fn query_with(expr: &str, doc: &Value, registry: Arc<MethodRegistry>) -> Result<Value> {
     let ast = parser::parse(expr)?;
