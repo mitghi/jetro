@@ -660,6 +660,71 @@ pub fn tape_walk_field_chain(tape: &TapeData, keys: &[&str]) -> Option<usize> {
     Some(idx)
 }
 
+/// Walk a field chain starting at `start` (typically an array entry's
+/// Object node).  `keys.is_empty()` returns `Some(start)`.
+#[cfg(feature = "simd-json")]
+pub fn tape_walk_field_chain_from(tape: &TapeData, start: usize, keys: &[&str]) -> Option<usize> {
+    let mut idx = start;
+    for k in keys {
+        idx = tape_object_field(tape, idx, k)?;
+    }
+    Some(idx)
+}
+
+/// Iterate the entry node indices of a tape Array.  Returns `None` if
+/// `arr_idx` is not an Array.  The iterator advances by `tape.span(j)`
+/// per element so it walks past nested children correctly.
+#[cfg(feature = "simd-json")]
+pub fn tape_array_iter(tape: &TapeData, arr_idx: usize) -> Option<TapeArrayIter<'_>> {
+    let len = match tape.nodes[arr_idx] {
+        TapeNode::Array { len, .. } => len as usize,
+        _ => return None,
+    };
+    Some(TapeArrayIter {
+        tape,
+        cursor: arr_idx + 1,
+        remaining: len,
+    })
+}
+
+#[cfg(feature = "simd-json")]
+pub struct TapeArrayIter<'a> {
+    tape: &'a TapeData,
+    cursor: usize,
+    remaining: usize,
+}
+
+#[cfg(feature = "simd-json")]
+impl<'a> Iterator for TapeArrayIter<'a> {
+    type Item = usize;
+    #[inline]
+    fn next(&mut self) -> Option<usize> {
+        if self.remaining == 0 { return None; }
+        let entry = self.cursor;
+        self.cursor += self.tape.span(entry);
+        self.remaining -= 1;
+        Some(entry)
+    }
+}
+
+/// JSON truthiness for a tape value at node `i`.  `false` / `null` /
+/// `0` / `0.0` / empty string / empty container all read as falsy;
+/// everything else truthy.  Mirrors Val-side `is_truthy`.
+#[cfg(feature = "simd-json")]
+pub fn tape_value_truthy(tape: &TapeData, idx: usize) -> bool {
+    use simd_json::StaticNode as SN;
+    match tape.nodes[idx] {
+        TapeNode::Static(SN::Null) => false,
+        TapeNode::Static(SN::Bool(b)) => b,
+        TapeNode::Static(SN::I64(n)) => n != 0,
+        TapeNode::Static(SN::U64(n)) => n != 0,
+        TapeNode::Static(SN::F64(f)) => f != 0.0,
+        TapeNode::StringRef { start, end } => end > start,
+        TapeNode::Array { len, .. } => len > 0,
+        TapeNode::Object { len, .. } => len > 0,
+    }
+}
+
 /// `$.<arr>.map(<field>).<agg>()` numeric fold.
 ///
 /// Walks the Array at `arr_idx`; for each entry expects an Object,

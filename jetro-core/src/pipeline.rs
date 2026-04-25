@@ -1322,12 +1322,25 @@ impl Pipeline {
         })))
     }
 
-    /// Tape-only aggregate path.  Skips Val tree entirely; folds
-    /// numeric values straight off the simd-json tape.  Active when:
-    ///   - cache provides a tape (cold-start path)
-    ///   - source is FieldChain
-    ///   - sink is Numeric / Count / NumMap / NumFilterMap / CountIf
-    ///   - stages are empty (sinks already encode fused Filter+Map)
+    /// Tape-only aggregate path — single generic executor over a tape
+    /// Array.  All Sink shapes (Count / Numeric / NumMap / NumFilterMap /
+    /// CountIf / FilterFirst / future sinks) plug into the same
+    /// per-entry walker; per-Sink semantics live in `feed_sink`.
+    /// Adding a new Sink ⇒ one match arm in `feed_sink` + accumulator
+    /// state, no new tape walker.  Adding a new BodyKernel variant ⇒
+    /// two match arms in `eval_kernel_value` / `eval_kernel_pred`.
+    /// No per-(Stage_chain, Sink) helpers.
+    ///
+    /// Active when:
+    ///   - cache provides a tape (cold-start path), AND
+    ///   - cache.prefer_tape() is true (Val tree not yet built), AND
+    ///   - source is FieldChain landing on an Array.
+    ///
+    /// Stages must currently be empty — Pipeline IR's rewrite pass
+    /// folds Filter/Map combinations into fused sinks (NumFilterMap,
+    /// CountIf, FilterFirst, etc.) before lowering, so the empty-stage
+    /// constraint covers all bench shapes; the rewrite is the structural
+    /// fusion, not per-shape tape code.
     #[cfg(feature = "simd-json")]
     fn try_tape_aggregate(
         &self,
@@ -1340,50 +1353,19 @@ impl Pipeline {
             Source::FieldChain { keys } => keys,
             _ => return None,
         };
-        // Walk tape down the field chain to find the array.
         let key_strs: Vec<&str> = chain_keys.iter().map(|k| k.as_ref()).collect();
         let arr_idx = crate::strref::tape_walk_field_chain(tape, &key_strs)?;
 
-        // Stages must be empty — the rewrite pass folds Filter+Map+Sum
-        // into a NumFilterMap sink before lowering.
         if !self.stages.is_empty() { return None; }
-        let result = match &self.sink {
-            Sink::Count => {
-                crate::strref::tape_array_count(tape, arr_idx)
-                    .map(|n| Ok(Val::Int(n as i64)))
-            }
-            Sink::Numeric(op) => {
-                let (si, sf, count, min_f, max_f, is_float) =
-                    crate::strref::tape_array_numeric_fold(tape, arr_idx)?;
-                Some(Ok(tape_finalise(*op, si, sf, count, min_f, max_f, is_float)))
-            }
-            Sink::NumMap(op, prog) => {
-                // Single-FieldRead map kernel.
-                let field = single_field_prog(prog)?;
-                let (si, sf, count, min_f, max_f, is_float) =
-                    crate::strref::tape_array_project_numeric_fold(tape, arr_idx, field)?;
-                Some(Ok(tape_finalise(*op, si, sf, count, min_f, max_f, is_float)))
-            }
-            Sink::NumFilterMap(op, _, map_prog) => {
-                // pred + map kernels classified into sink_kernels[0/1].
-                let pred_k = self.sink_kernels.get(0)?;
-                let pred = kernel_to_tape_pred(pred_k)?;
-                let map_field = single_field_prog(map_prog)?;
-                let (si, sf, count, min_f, max_f, is_float) =
-                    crate::strref::tape_array_filter_pred_map_numeric_fold(
-                        tape, arr_idx, &pred, map_field)?;
-                Some(Ok(tape_finalise(*op, si, sf, count, min_f, max_f, is_float)))
-            }
-            Sink::CountIf(_) => {
-                let pred_k = self.sink_kernels.get(0)?;
-                let pred = kernel_to_tape_pred(pred_k)?;
-                let n = crate::strref::tape_array_filter_pred_count(tape, arr_idx, &pred)?;
-                Some(Ok(Val::Int(n as i64)))
-            }
-            _ => None,
-        };
-        if result.is_some() { cache.note_tape_run(); }
-        result
+
+        let mut acc = SinkAcc::new(&self.sink, &self.sink_kernels)?;
+        let iter = crate::strref::tape_array_iter(tape, arr_idx)?;
+        for entry_idx in iter {
+            if !acc.feed(tape, entry_idx)? { break; }
+        }
+        let result = acc.finalise(tape);
+        cache.note_tape_run();
+        Some(Ok(result))
     }
 
     /// Cache-aware variant: when cache promotes the source array,
@@ -2612,42 +2594,151 @@ fn objvec_typed_group_by(
 /// Compose tape-walker accumulator output into a Val per the requested
 /// numeric op.  Mirrors `num_finalise` semantics.
 #[cfg(feature = "simd-json")]
-/// Translate a BodyKernel predicate into a `TapePred` for tape-side
-/// evaluation.  Returns `None` for kernel shapes the tape executor
-/// can't represent — caller falls back to the Val path.
-///
-/// Currently:
-///   - `FieldRead(k)`           → `Cmp { k Eq Bool(true) }` (truthy bool)
-///   - `FieldCmpLit(k, op, l)`  → `Cmp { k <op> <l> }`
-///   - `ConstBool(true)`        → no-op (matches all) via `Eq Null` won't
-///                                work cleanly, so bail
-///   - `Generic` / chains       → `None`
+// ── Generic kernel-tape evaluators ──────────────────────────────────
+//
+// Tape-side analogue of "evaluate a BodyKernel against a row".  Two
+// entry points:
+//   - eval_kernel_value(k, tape, entry) -> Option<TapeVal>
+//   - eval_kernel_pred (k, tape, entry) -> Option<bool>
+//
+// Returning `None` from either signals "kernel shape not supported on
+// tape" (e.g. Generic body) — caller falls back to the Val path.
+// Adding a new BodyKernel variant requires updating one match arm in
+// each — no per-Sink editing.
+
+/// Tape-side scalar value abstraction.  Carries enough info for sink
+/// accumulators to fold without re-indexing the tape per access.
 #[cfg(feature = "simd-json")]
-fn kernel_to_tape_pred(kernel: &BodyKernel) -> Option<crate::strref::TapePred<'_>> {
-    use crate::strref::{TapePred, TapeCmp, TapeLit};
-    use crate::ast::BinOp;
-    match kernel {
-        BodyKernel::FieldRead(k) => Some(TapePred::Cmp {
-            field: k.as_ref(),
-            op: TapeCmp::Eq,
-            lit: TapeLit::Bool(true),
-        }),
-        BodyKernel::FieldCmpLit(k, op, lit) => {
-            let cmp = match op {
-                BinOp::Eq => TapeCmp::Eq, BinOp::Neq => TapeCmp::Neq,
-                BinOp::Lt => TapeCmp::Lt, BinOp::Lte => TapeCmp::Lte,
-                BinOp::Gt => TapeCmp::Gt, BinOp::Gte => TapeCmp::Gte,
-                _ => return None,
-            };
-            let tlit = val_to_tape_lit(lit)?;
-            Some(TapePred::Cmp { field: k.as_ref(), op: cmp, lit: tlit })
+#[derive(Debug, Clone, Copy)]
+enum TapeVal {
+    Null,
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    /// String stored as a tape node index (lazy `as_str()` via tape).
+    StrIdx(usize),
+    /// Field/value missing — counts as "no value" for fold accumulators.
+    Missing,
+}
+
+#[cfg(feature = "simd-json")]
+fn node_to_tape_val(tape: &crate::strref::TapeData, idx: usize) -> TapeVal {
+    use simd_json::StaticNode as SN;
+    use crate::strref::TapeNode;
+    match tape.nodes[idx] {
+        TapeNode::Static(SN::Null) => TapeVal::Null,
+        TapeNode::Static(SN::Bool(b)) => TapeVal::Bool(b),
+        TapeNode::Static(SN::I64(n)) => TapeVal::Int(n),
+        TapeNode::Static(SN::U64(n)) => {
+            if n <= i64::MAX as u64 { TapeVal::Int(n as i64) }
+            else { TapeVal::Float(n as f64) }
         }
-        _ => None,
+        TapeNode::Static(SN::F64(f)) => TapeVal::Float(f),
+        TapeNode::StringRef { .. } => TapeVal::StrIdx(idx),
+        // Containers materialise via owning Val on demand; for now treat
+        // as Missing so sinks that need them bail to the Val path.
+        TapeNode::Array { .. } | TapeNode::Object { .. } => TapeVal::Missing,
+    }
+}
+
+/// Evaluate a BodyKernel that produces a *value* (not a predicate)
+/// against a tape entry.  Returns `None` if the kernel shape is not
+/// representable on tape (Generic / unsupported chain).
+#[cfg(feature = "simd-json")]
+fn eval_kernel_value(
+    kernel: &BodyKernel,
+    tape: &crate::strref::TapeData,
+    entry_idx: usize,
+) -> Option<TapeVal> {
+    use crate::strref::tape_object_field;
+    match kernel {
+        BodyKernel::FieldRead(k) => {
+            match tape_object_field(tape, entry_idx, k.as_ref()) {
+                Some(v) => Some(node_to_tape_val(tape, v)),
+                None => Some(TapeVal::Missing),
+            }
+        }
+        BodyKernel::FieldChain(keys) => {
+            let mut cur = entry_idx;
+            for k in keys.iter() {
+                match tape_object_field(tape, cur, k.as_ref()) {
+                    Some(v) => cur = v,
+                    None => return Some(TapeVal::Missing),
+                }
+            }
+            Some(node_to_tape_val(tape, cur))
+        }
+        BodyKernel::Const(v) => match v {
+            Val::Int(n)   => Some(TapeVal::Int(*n)),
+            Val::Float(f) => Some(TapeVal::Float(*f)),
+            Val::Bool(b)  => Some(TapeVal::Bool(*b)),
+            Val::Null     => Some(TapeVal::Null),
+            _ => None,
+        },
+        BodyKernel::ConstBool(b) => Some(TapeVal::Bool(*b)),
+        // Pred-shaped kernels don't produce values directly; bail.
+        BodyKernel::FieldCmpLit(_, _, _)
+        | BodyKernel::FieldChainCmpLit(_, _, _)
+        | BodyKernel::CurrentCmpLit(_, _)
+        | BodyKernel::Generic => None,
+    }
+}
+
+/// Evaluate a BodyKernel that produces a *boolean* predicate against
+/// a tape entry.  Returns `None` for unsupported shapes (Generic,
+/// CurrentCmpLit on objects).
+#[cfg(feature = "simd-json")]
+fn eval_kernel_pred(
+    kernel: &BodyKernel,
+    tape: &crate::strref::TapeData,
+    entry_idx: usize,
+) -> Option<bool> {
+    use crate::ast::BinOp;
+    use crate::strref::{tape_object_field, tape_value_cmp, tape_value_truthy, TapeCmp};
+    let binop = |op: BinOp| -> Option<TapeCmp> {
+        Some(match op {
+            BinOp::Eq => TapeCmp::Eq, BinOp::Neq => TapeCmp::Neq,
+            BinOp::Lt => TapeCmp::Lt, BinOp::Lte => TapeCmp::Lte,
+            BinOp::Gt => TapeCmp::Gt, BinOp::Gte => TapeCmp::Gte,
+            _ => return None,
+        })
+    };
+    match kernel {
+        BodyKernel::FieldRead(k) => {
+            // Truthy field read.
+            match tape_object_field(tape, entry_idx, k.as_ref()) {
+                Some(v) => Some(tape_value_truthy(tape, v)),
+                None => Some(false),
+            }
+        }
+        BodyKernel::FieldCmpLit(k, op, lit) => {
+            let cmp = binop(*op)?;
+            let tlit = val_to_tape_lit_owned(lit)?;
+            match tape_object_field(tape, entry_idx, k.as_ref()) {
+                Some(v) => Some(tape_value_cmp(tape, v, cmp, &tlit)),
+                None => Some(false),
+            }
+        }
+        BodyKernel::FieldChainCmpLit(keys, op, lit) => {
+            let cmp = binop(*op)?;
+            let tlit = val_to_tape_lit_owned(lit)?;
+            let mut cur = entry_idx;
+            for k in keys.iter() {
+                match tape_object_field(tape, cur, k.as_ref()) {
+                    Some(v) => cur = v,
+                    None => return Some(false),
+                }
+            }
+            Some(tape_value_cmp(tape, cur, cmp, &tlit))
+        }
+        BodyKernel::ConstBool(b) => Some(*b),
+        BodyKernel::CurrentCmpLit(_, _) | BodyKernel::FieldChain(_)
+        | BodyKernel::Const(_) | BodyKernel::Generic => None,
     }
 }
 
 #[cfg(feature = "simd-json")]
-fn val_to_tape_lit(v: &Val) -> Option<crate::strref::TapeLit<'_>> {
+fn val_to_tape_lit_owned(v: &Val) -> Option<crate::strref::TapeLit<'_>> {
     use crate::strref::TapeLit;
     match v {
         Val::Int(n)   => Some(TapeLit::Int(*n)),
@@ -2656,6 +2747,161 @@ fn val_to_tape_lit(v: &Val) -> Option<crate::strref::TapeLit<'_>> {
         Val::Bool(b)  => Some(TapeLit::Bool(*b)),
         Val::Null     => Some(TapeLit::Null),
         _ => None,
+    }
+}
+
+// ── Generic Sink accumulator over tape ──────────────────────────────
+//
+// One state machine per Sink variant; each consumes per-entry tape
+// values via the kernel evaluators above.  Adding a new Sink ⇒ one
+// new variant + match arms in `new` / `feed` / `finalise`.  No per-
+// (Stage_chain, Sink) helpers.
+
+#[cfg(feature = "simd-json")]
+enum SinkAcc<'p> {
+    /// `.count()` / `.len()` — sink emits Int(n) at finalise.
+    Count(usize),
+    /// `.sum/.min/.max/.avg` over raw entry values (no projection).
+    Numeric { op: NumOp, st: NumAccState },
+    /// `Map(kernel) ∘ Numeric(op)` — projects via kernel then accumulates.
+    NumMap { op: NumOp, st: NumAccState, kernel: &'p BodyKernel },
+    /// `Filter(pred) ∘ Map(map) ∘ Numeric(op)`.
+    NumFilterMap {
+        op: NumOp, st: NumAccState,
+        pred: &'p BodyKernel, map: &'p BodyKernel,
+    },
+    /// `Filter(pred) ∘ Count`.
+    CountIf { count: usize, pred: &'p BodyKernel },
+    /// `Filter(pred) ∘ First` — keeps first matching tape entry idx.
+    FilterFirst { hit: Option<usize>, pred: &'p BodyKernel },
+}
+
+#[cfg(feature = "simd-json")]
+#[derive(Default)]
+struct NumAccState {
+    sum_i: i64,
+    sum_f: f64,
+    count: usize,
+    min_f: f64,
+    max_f: f64,
+    is_float: bool,
+}
+
+#[cfg(feature = "simd-json")]
+impl NumAccState {
+    fn new() -> Self {
+        Self {
+            sum_i: 0, sum_f: 0.0, count: 0,
+            min_f: f64::INFINITY, max_f: f64::NEG_INFINITY,
+            is_float: false,
+        }
+    }
+    /// Accumulate a tape value if numeric; return false if non-numeric
+    /// (signals caller to bail to the Val path).
+    fn push(&mut self, v: TapeVal) -> bool {
+        match v {
+            TapeVal::Missing => true,  // skip
+            TapeVal::Int(n) => {
+                self.sum_i = self.sum_i.wrapping_add(n);
+                self.sum_f += n as f64;
+                let nf = n as f64;
+                if nf < self.min_f { self.min_f = nf; }
+                if nf > self.max_f { self.max_f = nf; }
+                self.count += 1;
+                true
+            }
+            TapeVal::Float(f) => {
+                self.sum_f += f;
+                if f < self.min_f { self.min_f = f; }
+                if f > self.max_f { self.max_f = f; }
+                self.is_float = true;
+                self.count += 1;
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+#[cfg(feature = "simd-json")]
+impl<'p> SinkAcc<'p> {
+    fn new(sink: &'p Sink, sink_kernels: &'p [BodyKernel]) -> Option<Self> {
+        match sink {
+            Sink::Count           => Some(Self::Count(0)),
+            Sink::Numeric(op)     => Some(Self::Numeric { op: *op, st: NumAccState::new() }),
+            Sink::NumMap(op, _)   => {
+                let kernel = sink_kernels.get(0)?;
+                Some(Self::NumMap { op: *op, st: NumAccState::new(), kernel })
+            }
+            Sink::NumFilterMap(op, _, _) => {
+                let pred = sink_kernels.get(0)?;
+                let map  = sink_kernels.get(1)?;
+                Some(Self::NumFilterMap { op: *op, st: NumAccState::new(), pred, map })
+            }
+            Sink::CountIf(_)      => {
+                let pred = sink_kernels.get(0)?;
+                Some(Self::CountIf { count: 0, pred })
+            }
+            Sink::FilterFirst(_)  => {
+                let pred = sink_kernels.get(0)?;
+                Some(Self::FilterFirst { hit: None, pred })
+            }
+            // Unsupported sinks bail; caller falls back to Val path.
+            _ => None,
+        }
+    }
+
+    /// Feed one tape entry.  Returns `Some(true)` to continue, `Some(false)`
+    /// to early-exit (sink saturated), `None` to abort (kernel failed —
+    /// caller falls back to Val).
+    fn feed(&mut self, tape: &crate::strref::TapeData, entry_idx: usize) -> Option<bool> {
+        match self {
+            Self::Count(n) => { *n += 1; Some(true) }
+            Self::Numeric { st, .. } => {
+                let v = node_to_tape_val(tape, entry_idx);
+                if !st.push(v) { return None; }
+                Some(true)
+            }
+            Self::NumMap { st, kernel, .. } => {
+                let v = eval_kernel_value(kernel, tape, entry_idx)?;
+                if !st.push(v) { return None; }
+                Some(true)
+            }
+            Self::NumFilterMap { st, pred, map, .. } => {
+                if !eval_kernel_pred(pred, tape, entry_idx)? { return Some(true); }
+                let v = eval_kernel_value(map, tape, entry_idx)?;
+                if !st.push(v) { return None; }
+                Some(true)
+            }
+            Self::CountIf { count, pred } => {
+                if eval_kernel_pred(pred, tape, entry_idx)? { *count += 1; }
+                Some(true)
+            }
+            Self::FilterFirst { hit, pred } => {
+                if eval_kernel_pred(pred, tape, entry_idx)? {
+                    *hit = Some(entry_idx);
+                    return Some(false);  // saturated
+                }
+                Some(true)
+            }
+        }
+    }
+
+    fn finalise(self, tape: &std::sync::Arc<crate::strref::TapeData>) -> Val {
+        match self {
+            Self::Count(n) => Val::Int(n as i64),
+            Self::Numeric { op, st } | Self::NumMap { op, st, .. }
+            | Self::NumFilterMap { op, st, .. } => {
+                tape_finalise(op, st.sum_i, st.sum_f, st.count, st.min_f, st.max_f, st.is_float)
+            }
+            Self::CountIf { count, .. } => Val::Int(count as i64),
+            Self::FilterFirst { hit, .. } => {
+                match hit {
+                    Some(idx) => crate::eval::Val::from_tape_node(tape, idx),
+                    None => Val::Null,
+                }
+            }
+        }
     }
 }
 

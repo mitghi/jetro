@@ -977,6 +977,71 @@ impl Val {
         }
     }
 
+    /// Build a `Val` for a single tape subtree rooted at `start`.
+    /// Generic-purpose tape→Val materialiser used by tape-only sink
+    /// paths (e.g. FilterFirst) that need the matching entry as a Val
+    /// without walking the rest of the document.  Recursive walker;
+    /// per-subtree cost proportional to its node count.
+    #[cfg(feature = "simd-json")]
+    pub fn from_tape_node(
+        tape: &std::sync::Arc<crate::strref::TapeData>,
+        start: usize,
+    ) -> Val {
+        let mut idx = start;
+        Self::tape_walk_subtree(tape, &mut idx)
+    }
+
+    #[cfg(feature = "simd-json")]
+    fn tape_walk_subtree(
+        tape: &std::sync::Arc<crate::strref::TapeData>,
+        idx: &mut usize,
+    ) -> Val {
+        use crate::strref::TapeNode;
+        use simd_json::StaticNode as SN;
+        let here = tape.nodes[*idx];
+        *idx += 1;
+        match here {
+            TapeNode::Static(SN::Null)    => Val::Null,
+            TapeNode::Static(SN::Bool(b)) => Val::Bool(b),
+            TapeNode::Static(SN::I64(n))  => Val::Int(n),
+            TapeNode::Static(SN::U64(n))  => {
+                if n <= i64::MAX as u64 { Val::Int(n as i64) } else { Val::Float(n as f64) }
+            }
+            TapeNode::Static(SN::F64(f))  => Val::Float(f),
+            TapeNode::StringRef { start, end } => {
+                let s = unsafe {
+                    std::str::from_utf8_unchecked(&tape.bytes_buf[start as usize .. end as usize])
+                };
+                Val::Str(Arc::<str>::from(s))
+            }
+            TapeNode::Array { len, .. } => {
+                let len = len as usize;
+                let mut out: Vec<Val> = Vec::with_capacity(len);
+                for _ in 0..len {
+                    out.push(Self::tape_walk_subtree(tape, idx));
+                }
+                Val::Arr(Arc::new(out))
+            }
+            TapeNode::Object { len, .. } => {
+                let len = len as usize;
+                let mut out: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(len);
+                for _ in 0..len {
+                    let key = match tape.nodes[*idx] {
+                        TapeNode::StringRef { start, end } => unsafe {
+                            std::str::from_utf8_unchecked(
+                                &tape.bytes_buf[start as usize .. end as usize])
+                        },
+                        _ => unreachable!("object key must be string"),
+                    };
+                    *idx += 1;
+                    let v = Self::tape_walk_subtree(tape, idx);
+                    out.insert(intern_key(key), v);
+                }
+                Val::Obj(Arc::new(out))
+            }
+        }
+    }
+
     /// Walk a `simd_json::BorrowedValue` into a `Val`.
     /// Mirrors `From<&serde_json::Value>` with columnar all-int / all-str
     /// fast paths, but skips the serde_json::Value materialisation step.
