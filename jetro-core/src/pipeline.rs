@@ -1356,11 +1356,37 @@ impl Pipeline {
         let key_strs: Vec<&str> = chain_keys.iter().map(|k| k.as_ref()).collect();
         let arr_idx = crate::strref::tape_walk_field_chain(tape, &key_strs)?;
 
-        if !self.stages.is_empty() { return None; }
+        // Allow leading Filter stages — predicate kernels are evaluated
+        // on tape; if every filter passes the entry idx is still a tape
+        // Object, so the Sink dispatcher consumes it unchanged.  Other
+        // stage kinds (Map/FlatMap/UniqueBy/Sort/etc.) bail to the Val
+        // path because they'd transform the entry into a non-tape Val.
+        let mut filter_kernels: Vec<&BodyKernel> = Vec::new();
+        for (st, k) in self.stages.iter().zip(self.stage_kernels.iter()) {
+            match st {
+                Stage::Filter(_) => {
+                    if !matches!(k,
+                        BodyKernel::FieldRead(_)
+                        | BodyKernel::FieldCmpLit(_, _, _)
+                        | BodyKernel::FieldChainCmpLit(_, _, _)
+                        | BodyKernel::ConstBool(_))
+                    { return None; }
+                    filter_kernels.push(k);
+                }
+                _ => return None,
+            }
+        }
 
         let mut acc = SinkAcc::new(&self.sink, &self.sink_kernels)?;
         let iter = crate::strref::tape_array_iter(tape, arr_idx)?;
-        for entry_idx in iter {
+        'rows: for entry_idx in iter {
+            for fk in &filter_kernels {
+                match eval_kernel_pred(fk, tape, entry_idx) {
+                    Some(true) => {}
+                    Some(false) => continue 'rows,
+                    None => return None,  // unsupported kernel
+                }
+            }
             if !acc.feed(tape, entry_idx)? { break; }
         }
         let result = acc.finalise(tape);
