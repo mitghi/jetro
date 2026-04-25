@@ -572,6 +572,7 @@ impl Val {
     /// into `Val`, applying the same columnar-lane heuristics as
     /// `From<&serde_json::Value>` (all-int → `IntVec`, all-str → `StrVec`).
     #[cfg(feature = "simd-json")]
+    #[cfg(feature = "simd-json")]
     pub fn from_json_simd(bytes: &mut [u8]) -> Result<Val, String> {
         // Tape path: walk simd-json's flat Vec<Node> directly into Val,
         // skipping the BorrowedValue intermediate tree.  Each Object /
@@ -581,6 +582,66 @@ impl Val {
         let nodes = tape.0;
         let mut idx = 0usize;
         Ok(Self::from_simd_tape(&nodes, &mut idx))
+    }
+
+    /// Number of tape nodes the subtree at `idx` occupies.  Used by
+    /// the shape-probe walker.  Matches simd-json's "count" semantics.
+    #[cfg(feature = "simd-json")]
+    fn node_span(nodes: &[simd_json::Node<'_>], idx: usize) -> usize {
+        match nodes[idx] {
+            simd_json::Node::Object { count, .. } | simd_json::Node::Array { count, .. } =>
+                count + 1,
+            _ => 1,
+        }
+    }
+
+    /// Probe an Array of Objects starting at `start` for uniform shape
+    /// (same `len`, same key sequence in same order).  Returns the
+    /// shared key list as borrowed `&str` slices into the tape's
+    /// scratch buffer when promotion is safe; `None` otherwise.
+    #[cfg(feature = "simd-json")]
+    #[allow(clippy::needless_lifetimes)]
+    fn probe_obj_shape_inner<'a>(
+        nodes: &'a [simd_json::Node<'a>],
+        start: usize,
+        n_entries: usize,
+        first_len: usize,
+    ) -> Option<Vec<&'a str>> {
+        use simd_json::Node;
+        // Grab the first Object's keys as the reference shape.
+        let mut keys: Vec<&'a str> = Vec::with_capacity(first_len);
+        if !matches!(nodes[start], Node::Object { len, .. } if len as usize == first_len) {
+            return None;
+        }
+        let mut idx = start + 1;
+        for _ in 0..first_len {
+            match nodes[idx] {
+                Node::String(s) => keys.push(s),
+                _ => return None,
+            }
+            idx += 1;
+            // Skip value subtree.
+            idx += Self::node_span(nodes, idx);
+        }
+        let mut entry_start = idx;
+        for _ in 1..n_entries {
+            // Each subsequent entry: same Object header `len`, same keys.
+            match nodes[entry_start] {
+                Node::Object { len, .. } if len as usize == first_len => {}
+                _ => return None,
+            }
+            let mut j = entry_start + 1;
+            for k in 0..first_len {
+                match nodes[j] {
+                    Node::String(s) if s == keys[k] => {}
+                    _ => return None,
+                }
+                j += 1;
+                j += Self::node_span(nodes, j);
+            }
+            entry_start = j;
+        }
+        Some(keys)
     }
 
     /// Recursive tape walker.  `idx` advances as nodes are consumed.
@@ -660,6 +721,44 @@ impl Val {
                         *idx += 1;
                     }
                     return Val::StrVec(Arc::new(out));
+                }
+                // ── Phase 7 foundation (DISABLED): homogeneous-shape Object Array → ObjVec ──
+                //
+                // The probe + promotion code below is correct but the
+                // engine's filter/map/sort/group_by/etc. handlers in
+                // eval/mod.rs and vm.rs only accept `Val::Arr`/`Val::IntVec`/`Val::StrVec`
+                // receivers — they do not match `Val::ObjVec`, so promotion
+                // here breaks every downstream operation.  Real Phase 7
+                // requires migrating ~30-50 match sites to handle ObjVec
+                // natively (slot-indexed field reads).  Until that lands,
+                // promotion is gated off; the probe path stays in source
+                // so the next session can flip it on alongside the
+                // handler migration.
+                let _ = Self::probe_obj_shape_inner;
+                if false {
+                    if let Node::Object { len: first_len, .. } = first {
+                        if first_len > 0 && first_len <= 64 {
+                            let shape_keys = Self::probe_obj_shape_inner(nodes, start, len, first_len as usize);
+                            if let Some(keys) = shape_keys {
+                                let n_keys = keys.len();
+                                let mut rows: Vec<Vec<Val>> = Vec::with_capacity(len);
+                                for _ in 0..len {
+                                    debug_assert!(matches!(nodes[*idx], Node::Object { .. }));
+                                    *idx += 1;
+                                    let mut row: Vec<Val> = Vec::with_capacity(n_keys);
+                                    for _ in 0..n_keys {
+                                        debug_assert!(matches!(nodes[*idx], Node::String(_)));
+                                        *idx += 1;
+                                        row.push(Self::from_simd_tape(nodes, idx));
+                                    }
+                                    rows.push(row);
+                                }
+                                let key_arcs: Arc<[Arc<str>]> =
+                                    keys.iter().map(|k| intern_key(k)).collect::<Vec<_>>().into();
+                                return Val::ObjVec(Arc::new(ObjVecData { keys: key_arcs, rows }));
+                            }
+                        }
+                    }
                 }
                 let mut out: Vec<Val> = Vec::with_capacity(len);
                 for _ in 0..len {
