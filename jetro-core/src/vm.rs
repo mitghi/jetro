@@ -634,7 +634,7 @@ pub struct Program {
 }
 
 impl Program {
-    fn new(ops: Vec<Opcode>, source: &str) -> Self {
+    pub fn new(ops: Vec<Opcode>, source: &str) -> Self {
         let id = hash_str(source);
         let is_structural = ops.iter().all(|op| matches!(op,
             Opcode::PushRoot | Opcode::PushCurrent |

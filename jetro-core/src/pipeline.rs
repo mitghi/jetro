@@ -171,6 +171,9 @@ pub enum BodyKernel {
     FieldCmpLit(Arc<str>, crate::ast::BinOp, Val),
     /// `[PushCurrent, FieldChain(...), <lit-push>, <cmp-op>]`  →  pred
     FieldChainCmpLit(Arc<[Arc<str>]>, crate::ast::BinOp, Val),
+    /// `[PushCurrent, <lit-push>, <cmp-op>]`  →  bare `@ <op> lit` predicate.
+    /// Covers numeric-vec filter shapes (`$.scores.filter(@ > 50)…`).
+    CurrentCmpLit(crate::ast::BinOp, Val),
     /// Predicate is a constant boolean (e.g. `@ == 1` already folded).
     ConstBool(bool),
     /// Body produces a constant value independent of item.
@@ -224,6 +227,16 @@ impl BodyKernel {
             &ops[1..]
         } else { ops };
         if rest.len() == 3 {
+            // Bare `@ <op> lit` — current as lhs, literal as rhs.
+            // This shape matters for IntVec / FloatVec / StrVec
+            // filter chains (`$.scores.filter(@ > 50)`).
+            if matches!(&rest[0], Opcode::PushCurrent) {
+                if let Some(lit) = trivial_lit(&rest[1]) {
+                    if let Some(bo) = cmp_to_binop(&rest[2]) {
+                        return Self::CurrentCmpLit(bo, lit);
+                    }
+                }
+            }
             // Single-field cmp.
             let single_key = match &rest[0] {
                 Opcode::LoadIdent(k) | Opcode::GetField(k) => Some(k.clone()),
@@ -637,6 +650,48 @@ fn rewrite_step(p: &mut Pipeline) -> bool {
                 p.stages.remove(i);
                 return true;
             }
+            // Phase B3 — kernel-level loop fusion: Map(field-read) ∘
+            // Map(field-read) collapses to one FieldChain Map.  This
+            // is mechanical translation via the kernel classifier —
+            // no per-shape hand-coding.  Same primitive covers chain
+            // ∘ read / read ∘ chain / chain ∘ chain.
+            (Stage::Map(a_prog), Stage::Map(b_prog)) => {
+                let ka = BodyKernel::classify(a_prog);
+                let kb = BodyKernel::classify(b_prog);
+                let chain: Option<Vec<Arc<str>>> = match (&ka, &kb) {
+                    (BodyKernel::FieldRead(a), BodyKernel::FieldRead(b)) =>
+                        Some(vec![a.clone(), b.clone()]),
+                    (BodyKernel::FieldRead(a), BodyKernel::FieldChain(bs)) => {
+                        let mut v = vec![a.clone()];
+                        v.extend(bs.iter().cloned());
+                        Some(v)
+                    }
+                    (BodyKernel::FieldChain(as_), BodyKernel::FieldRead(b)) => {
+                        let mut v: Vec<Arc<str>> = as_.iter().cloned().collect();
+                        v.push(b.clone());
+                        Some(v)
+                    }
+                    (BodyKernel::FieldChain(as_), BodyKernel::FieldChain(bs)) => {
+                        let mut v: Vec<Arc<str>> = as_.iter().cloned().collect();
+                        v.extend(bs.iter().cloned());
+                        Some(v)
+                    }
+                    _ => None,
+                };
+                if let Some(keys) = chain {
+                    let fcd = Arc::new(crate::vm::FieldChainData {
+                        keys: keys.into(),
+                        ics: (0..0).map(|_|
+                            std::sync::atomic::AtomicU64::new(0)
+                        ).collect::<Vec<_>>().into_boxed_slice(),
+                    });
+                    let new_ops = vec![Opcode::PushCurrent, Opcode::FieldChain(fcd)];
+                    let merged = Arc::new(crate::vm::Program::new(new_ops, "<map-fused>"));
+                    p.stages[i] = Stage::Map(merged);
+                    p.stages.remove(i + 1);
+                    return true;
+                }
+            }
             (Stage::Filter(p_prog), Stage::Filter(q_prog)) => {
                 // Combine via VM-level AndOp embedding; avoids
                 // re-compiling the merged predicate.
@@ -886,12 +941,57 @@ impl Pipeline {
     ///   `Stage::Filter(FieldCmpLit) ∘ Sink::Numeric(...)` (already covered)
     /// Walks the column without entering vm.exec per row.
     fn try_columnar_stage_chain(&self, root: &Val) -> Option<Result<Val, EvalError>> {
-        if !matches!(self.sink, Sink::Collect) { return None; }
         // Resolve receiver.
         let recv = match &self.source {
             Source::Receiver(v) => v.clone(),
             Source::FieldChain { keys } => walk_field_chain(root, keys),
         };
+
+        // Phase B1 — typed-lane filter chain on IntVec / FloatVec /
+        // StrVec receivers.  Stage::Filter(CurrentCmpLit) over a
+        // primitive vec → walk slice directly, build typed output.
+        // Sinks: Collect / Count.
+        if let [Stage::Filter(_)] = self.stages.as_slice() {
+            if let [BodyKernel::CurrentCmpLit(op, lit)] = self.stage_kernels.as_slice() {
+                match (&recv, &self.sink) {
+                    (Val::IntVec(a), Sink::Collect) => {
+                        let mut out: Vec<i64> = Vec::with_capacity(a.len());
+                        for n in a.iter() {
+                            let v = Val::Int(*n);
+                            if eval_cmp_op(&v, *op, lit) { out.push(*n); }
+                        }
+                        return Some(Ok(Val::int_vec(out)));
+                    }
+                    (Val::IntVec(a), Sink::Count) => {
+                        let mut c = 0i64;
+                        for n in a.iter() {
+                            let v = Val::Int(*n);
+                            if eval_cmp_op(&v, *op, lit) { c += 1; }
+                        }
+                        return Some(Ok(Val::Int(c)));
+                    }
+                    (Val::FloatVec(a), Sink::Collect) => {
+                        let mut out: Vec<f64> = Vec::with_capacity(a.len());
+                        for f in a.iter() {
+                            let v = Val::Float(*f);
+                            if eval_cmp_op(&v, *op, lit) { out.push(*f); }
+                        }
+                        return Some(Ok(Val::float_vec(out)));
+                    }
+                    (Val::FloatVec(a), Sink::Count) => {
+                        let mut c = 0i64;
+                        for f in a.iter() {
+                            let v = Val::Float(*f);
+                            if eval_cmp_op(&v, *op, lit) { c += 1; }
+                        }
+                        return Some(Ok(Val::Int(c)));
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        if !matches!(self.sink, Sink::Collect) { return None; }
         let arr = match &recv { Val::Arr(a) => Arc::clone(a), _ => return None };
 
         // Build a (kernel, prog) view of the stages.
@@ -1937,6 +2037,8 @@ fn eval_kernel(
             }
             Ok(Val::Bool(eval_cmp_op(&v, *op, lit)))
         }
+        BodyKernel::CurrentCmpLit(op, lit) =>
+            Ok(Val::Bool(eval_cmp_op(item, *op, lit))),
         BodyKernel::Generic => apply_item_in_env(vm, env, item, fallback),
     }
 }
