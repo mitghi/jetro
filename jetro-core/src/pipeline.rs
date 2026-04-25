@@ -1300,19 +1300,27 @@ impl Pipeline {
             Stage::Reverse | Stage::Sort(_) | Stage::UniqueBy(_) | Stage::FlatMap(_)));
         let pre_iter: Box<dyn Iterator<Item = Val>> = if needs_barrier {
             let mut buf: Vec<Val> = iter.collect();
-            for stage in &self.stages {
+            // Phase 1.2 — barrier-stage path now reads stage_kernels[i]
+            // and dispatches the inline kernel for Sort/UniqueBy keyed
+            // variants too, not just streaming Filter/Map.  Extends
+            // Layer A coverage to the keyed-barrier surface.
+            for (stage_idx, stage) in self.stages.iter().enumerate() {
+                let kernel = self.stage_kernels.get(stage_idx)
+                    .unwrap_or(&BodyKernel::Generic);
                 match stage {
                     Stage::Filter(prog) => {
                         let mut out: Vec<Val> = Vec::with_capacity(buf.len());
                         for v in buf.into_iter() {
-                            if is_truthy(&apply_item_in_env(&mut vm, &mut loop_env, &v, prog)?) { out.push(v); }
+                            if is_truthy(&eval_kernel(kernel, &v, &mut vm, &mut loop_env, prog)?) {
+                                out.push(v);
+                            }
                         }
                         buf = out;
                     }
                     Stage::Map(prog) => {
                         let mut out: Vec<Val> = Vec::with_capacity(buf.len());
                         for v in buf.into_iter() {
-                            out.push(apply_item_in_env(&mut vm, &mut loop_env, &v, prog)?);
+                            out.push(eval_kernel(kernel, &v, &mut vm, &mut loop_env, prog)?);
                         }
                         buf = out;
                     }
@@ -1325,10 +1333,12 @@ impl Pipeline {
                     Stage::Reverse => buf.reverse(),
                     Stage::Sort(None) => buf.sort_by(|a, b| cmp_val_total(a, b)),
                     Stage::Sort(Some(prog)) => {
-                        let mut keyed: Vec<(Val, Val)> = buf.into_iter().map(|v| {
-                            let k = apply_item_in_env(&mut vm, &mut loop_env, &v, prog).unwrap_or(Val::Null);
-                            (k, v)
-                        }).collect();
+                        let mut keyed: Vec<(Val, Val)> = Vec::with_capacity(buf.len());
+                        for v in buf.into_iter() {
+                            let k = eval_kernel(kernel, &v, &mut vm, &mut loop_env, prog)
+                                .unwrap_or(Val::Null);
+                            keyed.push((k, v));
+                        }
                         keyed.sort_by(|a, b| cmp_val_total(&a.0, &b.0));
                         buf = keyed.into_iter().map(|(_, v)| v).collect();
                     }
@@ -1340,7 +1350,8 @@ impl Pipeline {
                         let mut seen: std::collections::HashSet<String> = Default::default();
                         let mut keep: Vec<bool> = Vec::with_capacity(buf.len());
                         for v in &buf {
-                            let k = apply_item_in_env(&mut vm, &mut loop_env, v, prog).unwrap_or(Val::Null);
+                            let k = eval_kernel(kernel, v, &mut vm, &mut loop_env, prog)
+                                .unwrap_or(Val::Null);
                             keep.push(seen.insert(format!("{:?}", k)));
                         }
                         let mut out: Vec<Val> = Vec::with_capacity(buf.len());
@@ -1350,7 +1361,7 @@ impl Pipeline {
                     Stage::FlatMap(prog) => {
                         let mut out: Vec<Val> = Vec::new();
                         for v in &buf {
-                            let inner = apply_item_in_env(&mut vm, &mut loop_env, v, prog)?;
+                            let inner = eval_kernel(kernel, v, &mut vm, &mut loop_env, prog)?;
                             if let Some(arr) = inner.as_vals() {
                                 out.extend(arr.iter().cloned());
                             } else {
@@ -1488,9 +1499,18 @@ impl Pipeline {
                 acc_first.unwrap_or(Val::Null),
             Sink::Last  | Sink::FilterLast(_)  | Sink::LastMap(_) =>
                 acc_last.unwrap_or(Val::Null),
-            Sink::TopN { n, asc, key } => topn_finalise(&mut vm, acc_collect, *n, *asc, key.as_ref())?,
-            Sink::MinBy(key)        => keyed_extreme(&mut vm, acc_collect, key, false)?,
-            Sink::MaxBy(key)        => keyed_extreme(&mut vm, acc_collect, key, true)?,
+            Sink::TopN { n, asc, key } => {
+                let key_kernel = self.sink_kernels.first().unwrap_or(&BodyKernel::Generic);
+                topn_finalise(&mut vm, acc_collect, *n, *asc, key.as_ref(), key_kernel)?
+            }
+            Sink::MinBy(key) => {
+                let key_kernel = self.sink_kernels.first().unwrap_or(&BodyKernel::Generic);
+                keyed_extreme(&mut vm, acc_collect, key, false, key_kernel)?
+            }
+            Sink::MaxBy(key) => {
+                let key_kernel = self.sink_kernels.first().unwrap_or(&BodyKernel::Generic);
+                keyed_extreme(&mut vm, acc_collect, key, true, key_kernel)?
+            }
             Sink::UniqueCount       => unique_count_finalise(acc_collect),
         })
     }
@@ -1516,15 +1536,17 @@ fn topn_finalise(
     n: usize,
     asc: bool,
     key_prog: Option<&Arc<crate::vm::Program>>,
+    key_kernel: &BodyKernel,
 ) -> Result<Val, EvalError> {
     if n == 0 || items.is_empty() { return Ok(Val::arr(Vec::new())); }
     use std::collections::BinaryHeap;
 
     // Compute keys once.  When key_prog is None we use the item itself.
+    let mut env = vm.make_loop_env(Val::Null);
     let mut keyed: Vec<(Val, Val)> = Vec::with_capacity(items.len());
     for it in items {
         let k = match key_prog {
-            Some(p) => apply_item_root(vm, &it, p)?,
+            Some(p) => eval_kernel(key_kernel, &it, vm, &mut env, p)?,
             None => it.clone(),
         };
         keyed.push((k, it));
@@ -1575,10 +1597,12 @@ fn keyed_extreme(
     items: Vec<Val>,
     key_prog: &Arc<crate::vm::Program>,
     want_max: bool,
+    key_kernel: &BodyKernel,
 ) -> Result<Val, EvalError> {
     let mut best: Option<(Val, Val)> = None;
+    let mut env = vm.make_loop_env(Val::Null);
     for it in items {
-        let k = apply_item_root(vm, &it, key_prog)?;
+        let k = eval_kernel(key_kernel, &it, vm, &mut env, key_prog)?;
         match &best {
             None => best = Some((k, it)),
             Some((bk, _)) => {
