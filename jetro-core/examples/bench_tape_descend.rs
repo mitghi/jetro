@@ -160,4 +160,31 @@ fn main() {
         let r = j_tape_q4.collect(q4).unwrap();
         r.as_i64().unwrap_or(0) as u64
     });
+
+    // ObjVec slot-indexed path — `Jetro::from_simd` promotes
+    // homogeneous-shape arrays at parse time; pipeline columnar
+    // kernels then read fields via flat-cell slot offsets.
+    let mut sj_arr = q4_bytes.clone();
+    let j_simd_q4 = Jetro::from_simd(sj_arr).unwrap();
+    let _ = j_simd_q4.collect(q4).unwrap();
+    bench("ObjVec slots Q4 status==shipped AND prio==high count", iters, || {
+        let r = j_simd_q4.collect(q4).unwrap();
+        r.as_i64().unwrap_or(0) as u64
+    });
+    let mut sj_arr2 = arr_bytes.clone();
+    let j_simd_arr = Jetro::from_simd(sj_arr2).unwrap();
+    let _ = j_simd_arr.collect("$.orders.filter(total > 100).map(total).sum()").unwrap();
+    bench("ObjVec slots filter(total>100).map(total).sum()", iters, || {
+        let r = j_simd_arr.collect("$.orders.filter(total > 100).map(total).sum()").unwrap();
+        r.as_i64().unwrap_or(0) as u64
+    });
+    bench("ObjVec slots map(total).sum()", iters, || {
+        let r = j_simd_arr.collect("$.orders.map(total).sum()").unwrap();
+        r.as_i64().unwrap_or(0) as u64
+    });
+    bench("ObjVec slots filter(total>100).count()", iters, || {
+        let r = j_simd_arr.collect("$.orders.filter(total > 100).count()").unwrap();
+        r.as_i64().unwrap_or(0) as u64
+    });
+    let _ = sj_arr; let _ = sj_arr2;  // moved out by from_simd
 }
