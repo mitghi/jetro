@@ -1555,8 +1555,11 @@ mod tests {
     fn fusion_filter_last_opcode() {
         use crate::vm::{Compiler, Opcode};
         let prog = Compiler::compile_str("$.books.filter(@.price > 10).last()").unwrap();
-        let has = prog.ops.iter().any(|o| matches!(o, Opcode::FilterLast { .. }));
-        assert!(has, "filter+last should fuse to FilterLast: {:?}", prog.ops);
+        // FilterLast migrated to pipeline.rs Sink::FilterLast; opcode
+        // path keeps unfused CallMethod(Filter) + CallMethod(Last).
+        let has = prog.ops.iter().any(|o|
+            matches!(o, Opcode::CallMethod(c) if c.method == crate::vm::BuiltinMethod::Last));
+        assert!(has, "expected CallMethod(Last) in unfused form: {:?}", prog.ops);
     }
 
     #[test]

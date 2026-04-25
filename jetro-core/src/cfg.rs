@@ -215,8 +215,7 @@ fn build_block(cfg: &mut Cfg, ops: &[Opcode]) -> usize {
                 | Opcode::FindFirst(p) | Opcode::FindOne(p)
                 | Opcode::MapSum(p) | Opcode::MapAvg(p)
                 | Opcode::MapFlatten(p)
-                | Opcode::MapFirst(p) | Opcode::MapLast(p)
-                | Opcode::FilterLast { pred: p } => {
+                | Opcode::MapFirst(p) | Opcode::MapLast(p) => {
                 let t = build_block(cfg, &p.ops);
                 branches.push(EdgeKind::Loop { target: t, name: "filter" });
                 straight.push(op.clone());
