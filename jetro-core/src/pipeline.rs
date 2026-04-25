@@ -153,6 +153,96 @@ pub enum Stage {
     Sort(Option<Arc<crate::vm::Program>>),
 }
 
+/// Phase A3 — sub-program "kernel" shape recognised at lower-time.
+/// Classifying a Stage's program into one of these shapes lets the
+/// per-row pull loop dispatch a specialised inline path (direct field
+/// pluck, field-cmp-lit, etc.) instead of re-entering `vm.exec` per
+/// element.  The kernel is a *closed set of byte-code patterns* —
+/// classification is mechanical, not per-method hand-coding.  Falls
+/// back to `Generic` for shapes outside the set.
+#[derive(Debug, Clone)]
+pub enum BodyKernel {
+    Generic,
+    /// `[PushCurrent, GetField(k)]`  →  item.get_field(k)
+    FieldRead(Arc<str>),
+    /// `[PushCurrent, FieldChain([k1, k2, …])]`  →  walk k1.k2.k3 from item
+    FieldChain(Arc<[Arc<str>]>),
+    /// `[PushCurrent, GetField(k), <lit-push>, <cmp-op>]`  →  pred
+    FieldCmpLit(Arc<str>, crate::ast::BinOp, Val),
+    /// Predicate is a constant boolean (e.g. `@ == 1` already folded).
+    ConstBool(bool),
+}
+
+impl BodyKernel {
+    /// Classify a sub-program into a kernel.  Reads the byte-code shape;
+    /// no AST inspection.  Returns `Generic` for unrecognised shapes —
+    /// always safe to fall back.
+    pub fn classify(prog: &crate::vm::Program) -> Self {
+        use crate::vm::Opcode;
+        let ops = prog.ops.as_ref();
+        match ops {
+            [Opcode::PushBool(b)] => return Self::ConstBool(*b),
+            [Opcode::PushCurrent, Opcode::GetField(k)] =>
+                return Self::FieldRead(k.clone()),
+            [Opcode::GetField(k)] =>
+                return Self::FieldRead(k.clone()),
+            [Opcode::PushCurrent, Opcode::FieldChain(fc)] =>
+                return Self::FieldChain(fc.keys.clone()),
+            [Opcode::FieldChain(fc)] =>
+                return Self::FieldChain(fc.keys.clone()),
+            _ => {}
+        }
+        // FieldCmpLit shapes
+        if ops.len() == 4 || ops.len() == 3 {
+            let (rest, with_push) = if matches!(ops.first(), Some(Opcode::PushCurrent)) {
+                (&ops[1..], true)
+            } else { (ops, false) };
+            // [GetField(k), <lit>, <cmp>]
+            if rest.len() == 3 {
+                if let (Opcode::GetField(k), lit_op, cmp_op) =
+                    (&rest[0], &rest[1], &rest[2])
+                {
+                    if let Some(lit) = trivial_lit(lit_op) {
+                        if let Some(bo) = cmp_to_binop(cmp_op) {
+                            let _ = with_push;
+                            return Self::FieldCmpLit(k.clone(), bo, lit);
+                        }
+                    }
+                }
+            }
+        }
+        Self::Generic
+    }
+}
+
+#[inline]
+fn trivial_lit(op: &crate::vm::Opcode) -> Option<Val> {
+    use crate::vm::Opcode;
+    match op {
+        Opcode::PushInt(n)   => Some(Val::Int(*n)),
+        Opcode::PushFloat(f) => Some(Val::Float(*f)),
+        Opcode::PushStr(s)   => Some(Val::Str(s.clone())),
+        Opcode::PushBool(b)  => Some(Val::Bool(*b)),
+        Opcode::PushNull     => Some(Val::Null),
+        _ => None,
+    }
+}
+
+#[inline]
+fn cmp_to_binop(op: &crate::vm::Opcode) -> Option<crate::ast::BinOp> {
+    use crate::vm::Opcode as O;
+    use crate::ast::BinOp as B;
+    match op {
+        O::Eq  => Some(B::Eq),
+        O::Neq => Some(B::Neq),
+        O::Lt  => Some(B::Lt),
+        O::Lte => Some(B::Lte),
+        O::Gt  => Some(B::Gt),
+        O::Gte => Some(B::Gte),
+        _ => None,
+    }
+}
+
 /// Numeric fold operator — common shape across `sum`/`min`/`max`/`avg`.
 /// Centralising the op here lets a single set of fused-sink variants
 /// (`NumMap`, `NumFilterMap`) cover four aggregate shapes instead of
@@ -239,6 +329,17 @@ pub struct Pipeline {
     pub source: Source,
     pub stages: Vec<Stage>,
     pub sink:   Sink,
+    /// Phase A3 — per-Stage kernel hint, in 1:1 correspondence with
+    /// `stages`.  Computed once at lowering by `BodyKernel::classify`
+    /// over each stage's sub-program.  Run loop dispatches the
+    /// specialised inline path when the kernel is recognised, falls
+    /// back to the generic `vm.exec_in_env` path for `Generic`.
+    /// Empty when the lowering didn't populate it (legacy code paths).
+    pub stage_kernels: Vec<BodyKernel>,
+    /// Sink kernel hint — same idea for the terminal program (NumMap,
+    /// CountIf, NumFilterMap, FilterFirst, etc.).  Empty `Vec` when
+    /// the sink has no sub-program.
+    pub sink_kernels:  Vec<BodyKernel>,
 }
 
 // ── Lowering ─────────────────────────────────────────────────────────────────
@@ -374,8 +475,35 @@ impl Pipeline {
             }
         }
 
-        let mut p = Pipeline { source: Source::FieldChain { keys }, stages, sink };
+        let mut p = Pipeline {
+            source: Source::FieldChain { keys },
+            stages, sink,
+            stage_kernels: Vec::new(),
+            sink_kernels:  Vec::new(),
+        };
         rewrite(&mut p);
+        // Phase A3 — classify per-stage and per-sink sub-programs once
+        // post-rewrite.  Per-row pull loop reads these hints to choose
+        // a specialised inline path vs the generic vm.exec fallback.
+        p.stage_kernels = p.stages.iter().map(|s| match s {
+            Stage::Filter(p)        => BodyKernel::classify(p),
+            Stage::Map(p)           => BodyKernel::classify(p),
+            Stage::FlatMap(p)       => BodyKernel::classify(p),
+            Stage::UniqueBy(Some(p))=> BodyKernel::classify(p),
+            Stage::Sort(Some(p))    => BodyKernel::classify(p),
+            _                       => BodyKernel::Generic,
+        }).collect();
+        p.sink_kernels = match &p.sink {
+            Sink::NumMap(_, p) | Sink::CountIf(p)
+            | Sink::FilterFirst(p) | Sink::FilterLast(p)
+            | Sink::FirstMap(p) | Sink::LastMap(p)
+            | Sink::FlatMapCount(p) | Sink::MinBy(p) | Sink::MaxBy(p) =>
+                vec![BodyKernel::classify(p)],
+            Sink::NumFilterMap(_, pred, map) =>
+                vec![BodyKernel::classify(pred), BodyKernel::classify(map)],
+            Sink::TopN { key: Some(k), .. } => vec![BodyKernel::classify(k)],
+            _ => Vec::new(),
+        };
         Some(p)
     }
 }
@@ -942,7 +1070,9 @@ impl Pipeline {
             // directly.  When no barriers are present, run streaming
             // stages here.
             if !needs_barrier {
-                for stage in &self.stages {
+                for (stage_idx, stage) in self.stages.iter().enumerate() {
+                    let kernel = self.stage_kernels.get(stage_idx)
+                        .unwrap_or(&BodyKernel::Generic);
                     match stage {
                         Stage::Skip(n) => {
                             if skipped < *n { skipped += 1; continue 'outer; }
@@ -951,12 +1081,11 @@ impl Pipeline {
                             if taken >= *n { break 'outer; }
                         }
                         Stage::Filter(prog) => {
-                            if !is_truthy(&apply_item_in_env(&mut vm, &mut loop_env, &item, prog)?) {
-                                continue 'outer;
-                            }
+                            let v = eval_kernel(kernel, &item, &mut vm, &mut loop_env, prog)?;
+                            if !is_truthy(&v) { continue 'outer; }
                         }
                         Stage::Map(prog) => {
-                            item = apply_item_in_env(&mut vm, &mut loop_env, &item, prog)?;
+                            item = eval_kernel(kernel, &item, &mut vm, &mut loop_env, prog)?;
                         }
                         Stage::Reverse | Stage::Sort(_) | Stage::UniqueBy(_) | Stage::FlatMap(_) => {}
                     }
@@ -975,43 +1104,54 @@ impl Pipeline {
                 Sink::First => { if acc_first.is_none() { acc_first = Some(item.clone()); } }
                 Sink::Last  => { acc_last = Some(item.clone()); }
                 Sink::NumMap(op, prog) => {
-                    let v = apply_item_in_env(&mut vm, &mut loop_env, &item, prog)?;
+                    let kernel = self.sink_kernels.first().unwrap_or(&BodyKernel::Generic);
+                    let v = eval_kernel(kernel, &item, &mut vm, &mut loop_env, prog)?;
                     num_fold(&mut acc_sum_i, &mut acc_sum_f, &mut sum_floated,
                              &mut acc_min_f, &mut acc_max_f, &mut acc_n_obs,
                              *op, &v);
                 }
                 Sink::CountIf(prog) => {
-                    if is_truthy(&apply_item_in_env(&mut vm, &mut loop_env, &item, prog)?) { acc_count += 1; }
+                    let kernel = self.sink_kernels.first().unwrap_or(&BodyKernel::Generic);
+                    if is_truthy(&eval_kernel(kernel, &item, &mut vm, &mut loop_env, prog)?) {
+                        acc_count += 1;
+                    }
                 }
                 Sink::NumFilterMap(op, pred, map) => {
-                    if is_truthy(&apply_item_in_env(&mut vm, &mut loop_env, &item, pred)?) {
-                        let v = apply_item_in_env(&mut vm, &mut loop_env, &item, map)?;
+                    let pred_k = self.sink_kernels.first().unwrap_or(&BodyKernel::Generic);
+                    let map_k  = self.sink_kernels.get(1).unwrap_or(&BodyKernel::Generic);
+                    if is_truthy(&eval_kernel(pred_k, &item, &mut vm, &mut loop_env, pred)?) {
+                        let v = eval_kernel(map_k, &item, &mut vm, &mut loop_env, map)?;
                         num_fold(&mut acc_sum_i, &mut acc_sum_f, &mut sum_floated,
                                  &mut acc_min_f, &mut acc_max_f, &mut acc_n_obs,
                                  *op, &v);
                     }
                 }
                 Sink::FilterFirst(prog) => {
+                    let kernel = self.sink_kernels.first().unwrap_or(&BodyKernel::Generic);
                     if acc_first.is_none()
-                        && is_truthy(&apply_item_in_env(&mut vm, &mut loop_env, &item, prog)?) {
+                        && is_truthy(&eval_kernel(kernel, &item, &mut vm, &mut loop_env, prog)?) {
                         acc_first = Some(item.clone());
                     }
                 }
                 Sink::FilterLast(prog) => {
-                    if is_truthy(&apply_item_in_env(&mut vm, &mut loop_env, &item, prog)?) {
+                    let kernel = self.sink_kernels.first().unwrap_or(&BodyKernel::Generic);
+                    if is_truthy(&eval_kernel(kernel, &item, &mut vm, &mut loop_env, prog)?) {
                         acc_last = Some(item.clone());
                     }
                 }
                 Sink::FirstMap(prog) => {
+                    let kernel = self.sink_kernels.first().unwrap_or(&BodyKernel::Generic);
                     if acc_first.is_none() {
-                        acc_first = Some(apply_item_in_env(&mut vm, &mut loop_env, &item, prog)?);
+                        acc_first = Some(eval_kernel(kernel, &item, &mut vm, &mut loop_env, prog)?);
                     }
                 }
                 Sink::LastMap(prog) => {
-                    acc_last = Some(apply_item_in_env(&mut vm, &mut loop_env, &item, prog)?);
+                    let kernel = self.sink_kernels.first().unwrap_or(&BodyKernel::Generic);
+                    acc_last = Some(eval_kernel(kernel, &item, &mut vm, &mut loop_env, prog)?);
                 }
                 Sink::FlatMapCount(prog) => {
-                    let inner = apply_item_in_env(&mut vm, &mut loop_env, &item, prog)?;
+                    let kernel = self.sink_kernels.first().unwrap_or(&BodyKernel::Generic);
+                    let inner = eval_kernel(kernel, &item, &mut vm, &mut loop_env, prog)?;
                     if let Some(arr) = inner.as_vals() {
                         acc_count += arr.len() as i64;
                     } else {
@@ -1608,6 +1748,54 @@ fn apply_item_in_env(
     let r = vm.exec_in_env(prog, env);
     let _ = env.swap_current(prev);
     r
+}
+
+/// Phase A3 — per-row evaluation that consults a pre-classified kernel
+/// hint and dispatches the specialised inline path when recognised.
+/// Falls back to `apply_item_in_env` for Generic / unknown shapes.
+/// Same semantics as `apply_item_in_env(prog)` for every kernel kind.
+#[inline]
+fn eval_kernel(
+    kernel: &BodyKernel,
+    item: &Val,
+    vm: &mut crate::vm::VM,
+    env: &mut crate::eval::Env,
+    fallback: &crate::vm::Program,
+) -> Result<Val, EvalError> {
+    match kernel {
+        BodyKernel::FieldRead(k) => Ok(item.get_field(k.as_ref())),
+        BodyKernel::FieldChain(ks) => {
+            let mut v = item.clone();
+            for k in ks.iter() {
+                v = v.get_field(k.as_ref());
+                if matches!(v, Val::Null) { break; }
+            }
+            Ok(v)
+        }
+        BodyKernel::ConstBool(b) => Ok(Val::Bool(*b)),
+        BodyKernel::FieldCmpLit(k, op, lit) => {
+            let lhs = item.get_field(k.as_ref());
+            Ok(Val::Bool(eval_cmp_op(&lhs, *op, lit)))
+        }
+        BodyKernel::Generic => apply_item_in_env(vm, env, item, fallback),
+    }
+}
+
+/// Evaluate a compare-op against a value pair.  Mirrors VM's Eq/Lt/etc.
+/// handlers; centralised so the kernel inline path matches semantics.
+#[inline]
+fn eval_cmp_op(lhs: &Val, op: crate::ast::BinOp, rhs: &Val) -> bool {
+    use crate::ast::BinOp as B;
+    use crate::eval::util::{vals_eq, cmp_vals};
+    match op {
+        B::Eq  => vals_eq(lhs, rhs),
+        B::Neq => !vals_eq(lhs, rhs),
+        B::Lt  => cmp_vals(lhs, rhs) == std::cmp::Ordering::Less,
+        B::Lte => cmp_vals(lhs, rhs) != std::cmp::Ordering::Greater,
+        B::Gt  => cmp_vals(lhs, rhs) == std::cmp::Ordering::Greater,
+        B::Gte => cmp_vals(lhs, rhs) != std::cmp::Ordering::Less,
+        _ => false,
+    }
 }
 
 /// Legacy entry — used only by `try_columnar` paths that pre-build
