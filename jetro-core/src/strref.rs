@@ -484,13 +484,22 @@ pub fn tape_array_field_numeric_fold(
         min_f: f64::INFINITY, max_f: f64::NEG_INFINITY,
         is_float: false, mixed: false,
     };
+    let mut ic: Option<ShapeIC> = None;
     let mut j = arr_idx + 1;
     for _ in 0..len {
         let entry = j;
         if !matches!(tape.nodes[entry], TapeNode::Object { .. }) {
             return None;
         }
-        if let Some(v) = tape_object_field(tape, entry, field) {
+        let cached = ic.as_ref().filter(|c| shape_ic_check(tape, entry, c));
+        let v: Option<usize> = if let Some(c) = cached {
+            if c.rel_offs[0] == u32::MAX { None } else { Some(entry + c.rel_offs[0] as usize) }
+        } else {
+            ic = shape_ic_build(tape, entry, [field, ""]);
+            ic.as_ref().and_then(|c| if c.rel_offs[0] == u32::MAX { None }
+                                     else { Some(entry + c.rel_offs[0] as usize) })
+        };
+        if let Some(v) = v {
             accumulate(tape.nodes[v], &mut acc);
             if acc.mixed { return None; }
         }
@@ -625,6 +634,9 @@ pub fn tape_array_filter_count(
 
 /// `$.<arr>.filter(<predicate>).count()` — predicate-only count
 /// where the predicate may be any boolean tree of comparisons.
+///
+/// Single-leaf preds get the shape inline cache treatment; compound
+/// preds fall back to per-entry name-based eval.
 #[cfg(feature = "simd-json")]
 pub fn tape_array_filter_pred_count(
     tape: &TapeData,
@@ -636,11 +648,32 @@ pub fn tape_array_filter_pred_count(
         _ => return None,
     };
     let mut count = 0usize;
+    let mut ic: Option<ShapeIC> = None;
+    let single_leaf: Option<(&str, TapeCmp, &TapeLit)> = match pred {
+        TapePred::Cmp { field, op, lit } => Some((field, *op, lit)),
+        _ => None,
+    };
     let mut j = arr_idx + 1;
     for _ in 0..len {
         let entry = j;
         if let TapeNode::Object { .. } = tape.nodes[entry] {
-            if pred.eval(tape, entry) { count += 1; }
+            let pass = if let Some((pf, op, lit)) = single_leaf {
+                let cached = ic.as_ref().filter(|c| shape_ic_check(tape, entry, c));
+                let pred_v: Option<usize> = if let Some(c) = cached {
+                    if c.rel_offs[0] == u32::MAX { None } else { Some(entry + c.rel_offs[0] as usize) }
+                } else {
+                    ic = shape_ic_build(tape, entry, [pf, ""]);
+                    ic.as_ref().and_then(|c| if c.rel_offs[0] == u32::MAX { None }
+                                             else { Some(entry + c.rel_offs[0] as usize) })
+                };
+                match pred_v {
+                    Some(v) => tape_value_cmp(tape, v, op, lit),
+                    None => false,
+                }
+            } else {
+                pred.eval(tape, entry)
+            };
+            if pass { count += 1; }
         }
         j += tape.span(entry);
     }
@@ -648,6 +681,10 @@ pub fn tape_array_filter_pred_count(
 }
 
 /// Filter+map+fold variant accepting an arbitrary `TapePred`.
+///
+/// Hot-path optimisation: when the predicate is a single `Cmp` leaf
+/// AND the Array is monomorphic (all entries share shape), per-entry
+/// linear key search collapses to two cached relative-offset reads.
 #[cfg(feature = "simd-json")]
 pub fn tape_array_filter_pred_map_numeric_fold(
     tape: &TapeData,
@@ -664,12 +701,46 @@ pub fn tape_array_filter_pred_map_numeric_fold(
         min_f: f64::INFINITY, max_f: f64::NEG_INFINITY,
         is_float: false, mixed: false,
     };
+    let mut ic: Option<ShapeIC> = None;
+
+    // Extract single-leaf shortcut so the hot loop branchless on it.
+    let single_leaf: Option<(&str, TapeCmp, &TapeLit)> = match pred {
+        TapePred::Cmp { field, op, lit } => Some((field, *op, lit)),
+        _ => None,
+    };
+
     let mut j = arr_idx + 1;
     for _ in 0..len {
         let entry = j;
         if !matches!(tape.nodes[entry], TapeNode::Object { .. }) { return None; }
-        if pred.eval(tape, entry) {
-            if let Some(mv) = tape_object_field(tape, entry, map_field) {
+
+        let pass = if let Some((pred_field, op, lit)) = single_leaf {
+            // Try the inline-cached offsets first.
+            let cached = ic.as_ref().filter(|c| shape_ic_check(tape, entry, c));
+            let pred_v: Option<usize> = if let Some(c) = cached {
+                if c.rel_offs[0] == u32::MAX { None } else { Some(entry + c.rel_offs[0] as usize) }
+            } else {
+                ic = shape_ic_build(tape, entry, [pred_field, map_field]);
+                ic.as_ref().and_then(|c| if c.rel_offs[0] == u32::MAX { None }
+                                         else { Some(entry + c.rel_offs[0] as usize) })
+            };
+            match pred_v {
+                Some(v) => tape_value_cmp(tape, v, op, lit),
+                None => false,
+            }
+        } else {
+            pred.eval(tape, entry)
+        };
+
+        if pass {
+            // Map-field via cached offset when single-leaf path is active.
+            let mv: Option<usize> = if single_leaf.is_some() {
+                ic.as_ref().and_then(|c| if c.rel_offs[1] == u32::MAX { None }
+                                         else { Some(entry + c.rel_offs[1] as usize) })
+            } else {
+                tape_object_field(tape, entry, map_field)
+            };
+            if let Some(mv) = mv {
                 accumulate(tape.nodes[mv], &mut acc);
                 if acc.mixed { return None; }
             }
@@ -680,6 +751,7 @@ pub fn tape_array_filter_pred_map_numeric_fold(
 }
 
 /// Filter+map+collect variant accepting an arbitrary `TapePred`.
+/// Same shape inline cache as the fold variant.
 #[cfg(feature = "simd-json")]
 pub fn tape_array_filter_pred_map_collect_numeric(
     tape: &TapeData,
@@ -692,12 +764,41 @@ pub fn tape_array_filter_pred_map_collect_numeric(
         _ => return None,
     };
     let mut acc = NumCol { ints: Vec::new(), floats: Vec::new(), is_float: false, mixed: false };
+    let mut ic: Option<ShapeIC> = None;
+    let single_leaf: Option<(&str, TapeCmp, &TapeLit)> = match pred {
+        TapePred::Cmp { field, op, lit } => Some((field, *op, lit)),
+        _ => None,
+    };
     let mut j = arr_idx + 1;
     for _ in 0..len {
         let entry = j;
         if !matches!(tape.nodes[entry], TapeNode::Object { .. }) { return None; }
-        if pred.eval(tape, entry) {
-            if let Some(mv) = tape_object_field(tape, entry, map_field) {
+
+        let pass = if let Some((pf, op, lit)) = single_leaf {
+            let cached = ic.as_ref().filter(|c| shape_ic_check(tape, entry, c));
+            let pred_v: Option<usize> = if let Some(c) = cached {
+                if c.rel_offs[0] == u32::MAX { None } else { Some(entry + c.rel_offs[0] as usize) }
+            } else {
+                ic = shape_ic_build(tape, entry, [pf, map_field]);
+                ic.as_ref().and_then(|c| if c.rel_offs[0] == u32::MAX { None }
+                                         else { Some(entry + c.rel_offs[0] as usize) })
+            };
+            match pred_v {
+                Some(v) => tape_value_cmp(tape, v, op, lit),
+                None => false,
+            }
+        } else {
+            pred.eval(tape, entry)
+        };
+
+        if pass {
+            let mv: Option<usize> = if single_leaf.is_some() {
+                ic.as_ref().and_then(|c| if c.rel_offs[1] == u32::MAX { None }
+                                         else { Some(entry + c.rel_offs[1] as usize) })
+            } else {
+                tape_object_field(tape, entry, map_field)
+            };
+            if let Some(mv) = mv {
                 collect_value(tape.nodes[mv], &mut acc);
                 if acc.mixed { return None; }
             }
@@ -705,6 +806,88 @@ pub fn tape_array_filter_pred_map_collect_numeric(
         j += tape.span(entry);
     }
     Some((acc.ints, acc.floats, acc.is_float))
+}
+
+/// Tape shape inline-cache.  When an Array's entries are all the same
+/// shape (same `len`, same keys at same indices), we can skip per-entry
+/// linear key search and read predicate/map field values via cached
+/// **relative** offsets from the entry header.  Cache invalidates on
+/// the first entry whose `len` differs or whose first-key bytes differ
+/// from the cached signature.
+///
+/// Note: simd-json's tape stores each occurrence of a key as a fresh
+/// string in `bytes_buf`, so byte-offset identity is NOT a valid
+/// signature — we have to compare key *content* on shape check.  This
+/// is one short memcmp per entry, still much cheaper than a full
+/// linear key scan when the Object has 4+ keys.
+#[cfg(feature = "simd-json")]
+struct ShapeIC {
+    obj_len:    u32,
+    first_key_len: u32,      // cached length to short-circuit memcmp
+    first_key_off: (u32, u32),
+    /// Relative tape-node offset from the entry header to the field's
+    /// VALUE node (so `entry + rel_off` is the value's index).  `u32::MAX`
+    /// = field absent in the cached shape.
+    rel_offs:   [u32; 2],
+}
+
+#[cfg(feature = "simd-json")]
+#[inline]
+fn shape_ic_check(tape: &TapeData, entry: usize, ic: &ShapeIC) -> bool {
+    if let TapeNode::Object { len, .. } = tape.nodes[entry] {
+        if len != ic.obj_len { return false; }
+        if let TapeNode::StringRef { start, end } = tape.nodes[entry + 1] {
+            let this_len = end - start;
+            if this_len != ic.first_key_len { return false; }
+            // Compare bytes: both ranges live in the same bytes_buf.
+            let a = &tape.bytes_buf[start as usize .. end as usize];
+            let b = &tape.bytes_buf[ic.first_key_off.0 as usize .. ic.first_key_off.1 as usize];
+            return a == b;
+        }
+    }
+    false
+}
+
+/// Build a `ShapeIC` for `entry`, recording offsets for the two named
+/// fields (or `u32::MAX` if absent).  Empty `""` slot means "field not
+/// requested" — leaves rel_off at MAX.
+#[cfg(feature = "simd-json")]
+#[inline]
+fn shape_ic_build(tape: &TapeData, entry: usize, fields: [&str; 2]) -> Option<ShapeIC> {
+    let len = match tape.nodes[entry] {
+        TapeNode::Object { len, .. } => len,
+        _ => return None,
+    };
+    let (fk_start, fk_end) = match tape.nodes[entry + 1] {
+        TapeNode::StringRef { start, end } => (start, end),
+        _ => return None,
+    };
+    let mut rel_offs: [u32; 2] = [u32::MAX, u32::MAX];
+    let want = [!fields[0].is_empty(), !fields[1].is_empty()];
+    let mut filled = [!want[0], !want[1]];
+    let mut j = entry + 1;
+    for _ in 0..len {
+        if filled[0] && filled[1] {
+            j += 1;
+            j += tape.span(j);
+            continue;
+        }
+        let k = tape.str_at(j);
+        j += 1;
+        for (idx, name) in fields.iter().enumerate() {
+            if want[idx] && !filled[idx] && k == *name {
+                rel_offs[idx] = (j - entry) as u32;
+                filled[idx] = true;
+            }
+        }
+        j += tape.span(j);
+    }
+    Some(ShapeIC {
+        obj_len: len,
+        first_key_len: fk_end - fk_start,
+        first_key_off: (fk_start, fk_end),
+        rel_offs,
+    })
 }
 
 /// `$.<arr>.filter(<pf> <op> <lit>).map(<mf>).<agg>()` — single-pass
@@ -800,13 +983,22 @@ pub fn tape_array_field_collect_numeric(
         _ => return None,
     };
     let mut acc = NumCol { ints: Vec::with_capacity(len), floats: Vec::new(), is_float: false, mixed: false };
+    let mut ic: Option<ShapeIC> = None;
     let mut j = arr_idx + 1;
     for _ in 0..len {
         let entry = j;
         if !matches!(tape.nodes[entry], TapeNode::Object { .. }) {
             return None;
         }
-        if let Some(v) = tape_object_field(tape, entry, field) {
+        let cached = ic.as_ref().filter(|c| shape_ic_check(tape, entry, c));
+        let v: Option<usize> = if let Some(c) = cached {
+            if c.rel_offs[0] == u32::MAX { None } else { Some(entry + c.rel_offs[0] as usize) }
+        } else {
+            ic = shape_ic_build(tape, entry, [field, ""]);
+            ic.as_ref().and_then(|c| if c.rel_offs[0] == u32::MAX { None }
+                                     else { Some(entry + c.rel_offs[0] as usize) })
+        };
+        if let Some(v) = v {
             collect_value(tape.nodes[v], &mut acc);
             if acc.mixed { return None; }
         }
