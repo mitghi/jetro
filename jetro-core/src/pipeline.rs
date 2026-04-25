@@ -2408,6 +2408,96 @@ fn objvec_filter_count_and_slots(
     d: &Arc<crate::eval::value::ObjVecData>,
     leaves: &[(usize, crate::ast::BinOp, Val)],
 ) -> Val {
+    use crate::eval::value::ObjVecCol;
+    use crate::ast::BinOp as B;
+    // Phase 7-typed-columns AND-chain path.  Pre-resolve each leaf to
+    // a typed checker closure once; per row, run all checkers as
+    // primitive comparisons over typed slices.  Skips per-leaf
+    // cmp_val_binop_local + Val tag check on every row.
+    if let Some(cols) = &d.typed_cols {
+        // Snapshot each leaf as a "typed checker": closures over &[i64]
+        // / &[f64] / &[Arc<str>] indexed by row.  Bail to scalar path
+        // if any leaf can't be typed-resolved.
+        enum Checker<'a> {
+            IntsEq(&'a [i64], i64),
+            IntsNeq(&'a [i64], i64),
+            IntsLt(&'a [i64], i64),
+            IntsLte(&'a [i64], i64),
+            IntsGt(&'a [i64], i64),
+            IntsGte(&'a [i64], i64),
+            FloatsEq(&'a [f64], f64),
+            FloatsNeq(&'a [f64], f64),
+            FloatsLt(&'a [f64], f64),
+            FloatsLte(&'a [f64], f64),
+            FloatsGt(&'a [f64], f64),
+            FloatsGte(&'a [f64], f64),
+            StrsEq(&'a [Arc<str>], &'a str),
+            StrsNeq(&'a [Arc<str>], &'a str),
+            BoolsEq(&'a [bool], bool),
+            BoolsNeq(&'a [bool], bool),
+        }
+        impl<'a> Checker<'a> {
+            #[inline]
+            fn at(&self, i: usize) -> bool {
+                match *self {
+                    Checker::IntsEq(c, r)   => c[i] == r,
+                    Checker::IntsNeq(c, r)  => c[i] != r,
+                    Checker::IntsLt(c, r)   => c[i] < r,
+                    Checker::IntsLte(c, r)  => c[i] <= r,
+                    Checker::IntsGt(c, r)   => c[i] > r,
+                    Checker::IntsGte(c, r)  => c[i] >= r,
+                    Checker::FloatsEq(c, r) => c[i] == r,
+                    Checker::FloatsNeq(c, r)=> c[i] != r,
+                    Checker::FloatsLt(c, r) => c[i] < r,
+                    Checker::FloatsLte(c, r)=> c[i] <= r,
+                    Checker::FloatsGt(c, r) => c[i] > r,
+                    Checker::FloatsGte(c, r)=> c[i] >= r,
+                    Checker::StrsEq(c, r)   => c[i].as_ref() == r,
+                    Checker::StrsNeq(c, r)  => c[i].as_ref() != r,
+                    Checker::BoolsEq(c, r)  => c[i] == r,
+                    Checker::BoolsNeq(c, r) => c[i] != r,
+                }
+            }
+        }
+        let mut typed_checkers: Vec<Checker> = Vec::with_capacity(leaves.len());
+        for (slot, op, lit) in leaves {
+            let col = match cols.get(*slot) { Some(c) => c, None => break };
+            let chk: Option<Checker> = match (col, lit, *op) {
+                (ObjVecCol::Ints(c), Val::Int(r), B::Eq)  => Some(Checker::IntsEq(c.as_slice(), *r)),
+                (ObjVecCol::Ints(c), Val::Int(r), B::Neq) => Some(Checker::IntsNeq(c.as_slice(), *r)),
+                (ObjVecCol::Ints(c), Val::Int(r), B::Lt)  => Some(Checker::IntsLt(c.as_slice(), *r)),
+                (ObjVecCol::Ints(c), Val::Int(r), B::Lte) => Some(Checker::IntsLte(c.as_slice(), *r)),
+                (ObjVecCol::Ints(c), Val::Int(r), B::Gt)  => Some(Checker::IntsGt(c.as_slice(), *r)),
+                (ObjVecCol::Ints(c), Val::Int(r), B::Gte) => Some(Checker::IntsGte(c.as_slice(), *r)),
+                (ObjVecCol::Floats(c), Val::Float(r), B::Eq)  => Some(Checker::FloatsEq(c.as_slice(), *r)),
+                (ObjVecCol::Floats(c), Val::Float(r), B::Neq) => Some(Checker::FloatsNeq(c.as_slice(), *r)),
+                (ObjVecCol::Floats(c), Val::Float(r), B::Lt)  => Some(Checker::FloatsLt(c.as_slice(), *r)),
+                (ObjVecCol::Floats(c), Val::Float(r), B::Lte) => Some(Checker::FloatsLte(c.as_slice(), *r)),
+                (ObjVecCol::Floats(c), Val::Float(r), B::Gt)  => Some(Checker::FloatsGt(c.as_slice(), *r)),
+                (ObjVecCol::Floats(c), Val::Float(r), B::Gte) => Some(Checker::FloatsGte(c.as_slice(), *r)),
+                (ObjVecCol::Strs(c), Val::Str(r), B::Eq)  => Some(Checker::StrsEq(c.as_slice(), r.as_ref())),
+                (ObjVecCol::Strs(c), Val::Str(r), B::Neq) => Some(Checker::StrsNeq(c.as_slice(), r.as_ref())),
+                (ObjVecCol::Bools(c), Val::Bool(r), B::Eq)  => Some(Checker::BoolsEq(c.as_slice(), *r)),
+                (ObjVecCol::Bools(c), Val::Bool(r), B::Neq) => Some(Checker::BoolsNeq(c.as_slice(), *r)),
+                _ => None,
+            };
+            match chk {
+                Some(c) => typed_checkers.push(c),
+                None => { typed_checkers.clear(); break; }
+            }
+        }
+        if typed_checkers.len() == leaves.len() {
+            let nrows = d.nrows();
+            let mut count: i64 = 0;
+            'rows_typed: for row in 0..nrows {
+                for c in &typed_checkers {
+                    if !c.at(row) { continue 'rows_typed; }
+                }
+                count += 1;
+            }
+            return Val::Int(count);
+        }
+    }
     let stride = d.stride();
     let nrows = d.nrows();
     let mut count: i64 = 0;
