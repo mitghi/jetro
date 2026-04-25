@@ -171,6 +171,16 @@ pub struct Jetro {
     raw_bytes: Option<Arc<[u8]>>,
 }
 
+/// Trim leading/trailing ASCII whitespace from a `&[u8]`.
+#[cfg(feature = "simd-json")]
+fn trim_ascii(b: &[u8]) -> &[u8] {
+    let mut s = 0;
+    let mut e = b.len();
+    while s < e && b[s].is_ascii_whitespace() { s += 1; }
+    while e > s && b[e - 1].is_ascii_whitespace() { e -= 1; }
+    &b[s..e]
+}
+
 impl Jetro {
     pub fn new(document: Value) -> Self {
         Self { document, root_val: OnceCell::new(), raw_bytes: None }
@@ -243,6 +253,41 @@ impl Jetro {
     #[cfg(feature = "simd-json")]
     pub fn from_simd_slice(bytes: &[u8]) -> std::result::Result<Self, String> {
         Self::from_simd(bytes.to_vec())
+    }
+
+    /// Parse a newline-delimited JSON (NDJSON / JSON-Lines) buffer into a
+    /// single `Jetro` handle whose root is a `Val::Arr` of one entry per
+    /// non-empty line.  Each line is parsed via simd-json.
+    ///
+    /// Useful for log streams, event captures, and large append-only
+    /// dumps where the producer never writes a wrapping `[…]` array.
+    /// After this call, all of jetro's normal queries work over the
+    /// concatenated array — `$..error.count()`, `$.filter(level == 'warn')`,
+    /// chain-style writes, etc.
+    ///
+    /// Whitespace-only lines and empty lines are skipped.  On any line
+    /// parse error returns `Err` carrying the line number.
+    ///
+    /// Requires the `simd-json` cargo feature.
+    #[cfg(feature = "simd-json")]
+    pub fn from_ndjson(bytes: &[u8]) -> std::result::Result<Self, String> {
+        let mut out: Vec<Val> = Vec::new();
+        for (lineno, raw_line) in bytes.split(|&b| b == b'\n').enumerate() {
+            let trimmed = trim_ascii(raw_line);
+            if trimmed.is_empty() { continue; }
+            let mut buf: Vec<u8> = trimmed.to_vec();
+            let v = Val::from_json_simd(&mut buf)
+                .map_err(|e| format!("ndjson line {}: {}", lineno + 1, e))?;
+            out.push(v);
+        }
+        let arr = Val::arr(out);
+        let cell: OnceCell<Val> = OnceCell::new();
+        let _ = cell.set(arr);
+        Ok(Self {
+            document: Value::Null,
+            root_val: cell,
+            raw_bytes: None,
+        })
     }
 
     fn root_val(&self) -> Val {

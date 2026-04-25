@@ -629,6 +629,35 @@ fn simd_json_descendant_byte_scan() {
 
 #[cfg(feature = "simd-json")]
 #[test]
+fn simd_json_ndjson_basic() {
+    let lines = b"\
+{\"id\":1,\"level\":\"info\",\"msg\":\"start\"}
+{\"id\":2,\"level\":\"warn\",\"msg\":\"slow query\"}
+
+{\"id\":3,\"level\":\"info\",\"msg\":\"done\"}
+";
+    let j = Jetro::from_ndjson(lines).unwrap();
+    let count = j.collect("$.count()").unwrap();
+    assert_eq!(count, json!(3));
+    let warns = j.collect(r#"$.filter(level == "warn").map(id)"#).unwrap();
+    assert_eq!(warns, json!([2]));
+}
+
+#[cfg(feature = "simd-json")]
+#[test]
+fn simd_json_ndjson_error_carries_line_number() {
+    let lines = b"\
+{\"id\":1}
+this is not json
+{\"id\":3}
+";
+    let r = Jetro::from_ndjson(lines);
+    let msg = match r { Err(e) => e, Ok(_) => panic!("expected ndjson error") };
+    assert!(msg.contains("ndjson line 2"));
+}
+
+#[cfg(feature = "simd-json")]
+#[test]
 fn simd_json_invalid_falls_back_with_helpful_error() {
     let bad = b"{ this is not json ".to_vec();
     let r = Jetro::from_simd(bad);
