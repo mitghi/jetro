@@ -221,6 +221,178 @@ impl TapeData {
     }
 }
 
+/// Numeric aggregate over an array node on the tape — sum/min/max/avg/count.
+/// Walks the array elements directly without building any Val.  Returns
+/// (sum_i, sum_f, count, min_f, max_f, is_float, mixed_non_numeric).
+/// On `mixed_non_numeric=true` caller bails to the Val path so semantics
+/// stay correct on heterogeneous arrays.
+#[cfg(feature = "simd-json")]
+pub fn tape_array_numeric_fold(
+    tape: &TapeData,
+    arr_idx: usize,
+) -> Option<(i64, f64, usize, f64, f64, bool)> {
+    let len = match tape.nodes[arr_idx] {
+        TapeNode::Array { len, .. } => len as usize,
+        _ => return None,
+    };
+    let mut acc = NumAcc {
+        sum_i: 0, sum_f: 0.0, count: 0,
+        min_f: f64::INFINITY, max_f: f64::NEG_INFINITY,
+        is_float: false, mixed: false,
+    };
+    let mut j = arr_idx + 1;
+    for _ in 0..len {
+        match tape.nodes[j] {
+            TapeNode::Static(simd_json::StaticNode::I64(n)) => {
+                acc.count += 1;
+                if acc.is_float {
+                    let f = n as f64;
+                    acc.sum_f += f;
+                    if f < acc.min_f { acc.min_f = f; }
+                    if f > acc.max_f { acc.max_f = f; }
+                } else {
+                    acc.sum_i = acc.sum_i.wrapping_add(n);
+                    let f = n as f64;
+                    if f < acc.min_f { acc.min_f = f; }
+                    if f > acc.max_f { acc.max_f = f; }
+                }
+            }
+            TapeNode::Static(simd_json::StaticNode::U64(u)) => {
+                acc.count += 1;
+                let n = u as i64;
+                if acc.is_float {
+                    let f = u as f64;
+                    acc.sum_f += f;
+                    if f < acc.min_f { acc.min_f = f; }
+                    if f > acc.max_f { acc.max_f = f; }
+                } else {
+                    acc.sum_i = acc.sum_i.wrapping_add(n);
+                    let f = u as f64;
+                    if f < acc.min_f { acc.min_f = f; }
+                    if f > acc.max_f { acc.max_f = f; }
+                }
+            }
+            TapeNode::Static(simd_json::StaticNode::F64(f)) => {
+                acc.count += 1;
+                if !acc.is_float {
+                    acc.sum_f = acc.sum_i as f64;
+                    acc.is_float = true;
+                }
+                acc.sum_f += f;
+                if f < acc.min_f { acc.min_f = f; }
+                if f > acc.max_f { acc.max_f = f; }
+            }
+            _ => { acc.mixed = true; return None; }
+        }
+        j += tape.span(j);
+    }
+    if acc.mixed { return None; }
+    Some((acc.sum_i, acc.sum_f, acc.count, acc.min_f, acc.max_f, acc.is_float))
+}
+
+/// Element count of an array node on the tape — used for `.len()` /
+/// `.count()` aggregates.  O(1) (header-encoded).
+#[cfg(feature = "simd-json")]
+pub fn tape_array_count(tape: &TapeData, arr_idx: usize) -> Option<usize> {
+    match tape.nodes[arr_idx] {
+        TapeNode::Array { len, .. } => Some(len as usize),
+        _ => None,
+    }
+}
+
+/// Same as `tape_array_field_numeric_fold` but kept under a different
+/// name for clarity in the new pipeline tape-aware fast path; thin
+/// wrapper that forwards to the existing implementation.
+#[cfg(feature = "simd-json")]
+pub fn tape_array_project_numeric_fold(
+    tape: &TapeData,
+    arr_idx: usize,
+    field: &str,
+) -> Option<(i64, f64, usize, f64, f64, bool)> {
+    tape_array_field_numeric_fold(tape, arr_idx, field)
+}
+
+#[cfg(feature = "simd-json")]
+fn _tape_array_project_numeric_fold_unused(
+    tape: &TapeData,
+    arr_idx: usize,
+    field: &str,
+) -> Option<(i64, f64, usize, f64, f64, bool)> {
+    let len = match tape.nodes[arr_idx] {
+        TapeNode::Array { len, .. } => len as usize,
+        _ => return None,
+    };
+    let mut acc = NumAcc {
+        sum_i: 0, sum_f: 0.0, count: 0,
+        min_f: f64::INFINITY, max_f: f64::NEG_INFINITY,
+        is_float: false, mixed: false,
+    };
+    let mut j = arr_idx + 1;
+    for _ in 0..len {
+        let elem_idx = j;
+        let elem_span = tape.span(elem_idx);
+        match tape.nodes[elem_idx] {
+            TapeNode::Object { len: olen, .. } => {
+                let mut k = elem_idx + 1;
+                let mut hit_idx: Option<usize> = None;
+                for _ in 0..olen {
+                    let kn = tape.str_at(k);
+                    k += 1;
+                    if kn == field {
+                        hit_idx = Some(k);
+                        break;
+                    }
+                    k += tape.span(k);
+                }
+                if let Some(vi) = hit_idx {
+                    match tape.nodes[vi] {
+                        TapeNode::Static(simd_json::StaticNode::I64(n)) => {
+                            acc.count += 1;
+                            if acc.is_float {
+                                let f = n as f64;
+                                acc.sum_f += f;
+                                if f < acc.min_f { acc.min_f = f; }
+                                if f > acc.max_f { acc.max_f = f; }
+                            } else {
+                                acc.sum_i = acc.sum_i.wrapping_add(n);
+                                let f = n as f64;
+                                if f < acc.min_f { acc.min_f = f; }
+                                if f > acc.max_f { acc.max_f = f; }
+                            }
+                        }
+                        TapeNode::Static(simd_json::StaticNode::U64(u)) => {
+                            acc.count += 1;
+                            let f = u as f64;
+                            if acc.is_float {
+                                acc.sum_f += f;
+                            } else {
+                                acc.sum_i = acc.sum_i.wrapping_add(u as i64);
+                            }
+                            if f < acc.min_f { acc.min_f = f; }
+                            if f > acc.max_f { acc.max_f = f; }
+                        }
+                        TapeNode::Static(simd_json::StaticNode::F64(f)) => {
+                            acc.count += 1;
+                            if !acc.is_float {
+                                acc.sum_f = acc.sum_i as f64;
+                                acc.is_float = true;
+                            }
+                            acc.sum_f += f;
+                            if f < acc.min_f { acc.min_f = f; }
+                            if f > acc.max_f { acc.max_f = f; }
+                        }
+                        _ => { acc.mixed = true; return None; }
+                    }
+                }
+            }
+            _ => { acc.mixed = true; return None; }
+        }
+        j += elem_span;
+    }
+    if acc.mixed { return None; }
+    Some((acc.sum_i, acc.sum_f, acc.count, acc.min_f, acc.max_f, acc.is_float))
+}
+
 /// Tape-aware aggregator over `$..key`-style descendant queries.
 ///
 /// Recursively walks the tape, accumulates numeric values found under

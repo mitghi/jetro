@@ -124,6 +124,22 @@ fn build_typed_cols(
 /// Trait so pipeline doesn't need to depend on the `Jetro` concrete type.
 pub trait ObjVecPromoter {
     fn promote(&self, arr: &Arc<Vec<Val>>) -> Option<Arc<crate::eval::value::ObjVecData>>;
+    /// Optional tape access — when present AND Val tree not yet
+    /// materialised (`prefer_tape()` true), enables the tape-only
+    /// query path (skip Val build entirely for tape-friendly shapes).
+    /// Once Val is built, ObjVec slot kernels with typed columns
+    /// outperform tape walking, so this gate flips off after first
+    /// `root_val()` call.
+    #[cfg(feature = "simd-json")]
+    fn tape(&self) -> Option<&Arc<crate::strref::TapeData>> { None }
+    /// True iff tape path is preferable to Val path right now.
+    /// Implementations return true when Val tree hasn't been built
+    /// yet AND tape is available.
+    fn prefer_tape(&self) -> bool { false }
+    /// Called by the tape-aggregate path after a successful run so
+    /// the impl can flip its preference toward Val/ObjVec for warm
+    /// follow-up queries.  Default is a no-op.
+    fn note_tape_run(&self) {}
 }
 
 // ── Diagnostic tracing ──────────────────────────────────────────────────────
@@ -1306,6 +1322,53 @@ impl Pipeline {
         })))
     }
 
+    /// Tape-only aggregate path.  Skips Val tree entirely; folds
+    /// numeric values straight off the simd-json tape.  Active when:
+    ///   - cache provides a tape (cold-start path)
+    ///   - source is FieldChain
+    ///   - sink is Numeric / Count / NumMap with single-FieldRead /
+    ///     NumFilterMap with FieldCmpLit pred + FieldRead map
+    ///   - stages are empty (or compatible filter pred)
+    #[cfg(feature = "simd-json")]
+    fn try_tape_aggregate(
+        &self,
+        cache: Option<&dyn ObjVecPromoter>,
+    ) -> Option<Result<Val, EvalError>> {
+        let cache = cache?;
+        if !cache.prefer_tape() { return None; }
+        let tape = cache.tape()?;
+        cache.note_tape_run();
+        let chain_keys = match &self.source {
+            Source::FieldChain { keys } => keys,
+            _ => return None,
+        };
+        // Walk tape down the field chain to find the array.
+        let key_strs: Vec<&str> = chain_keys.iter().map(|k| k.as_ref()).collect();
+        let arr_idx = crate::strref::tape_walk_field_chain(tape, &key_strs)?;
+
+        // Sinks supported (all stages must be empty for tape-direct path).
+        if !self.stages.is_empty() { return None; }
+        match &self.sink {
+            Sink::Count => {
+                crate::strref::tape_array_count(tape, arr_idx)
+                    .map(|n| Ok(Val::Int(n as i64)))
+            }
+            Sink::Numeric(op) => {
+                let (si, sf, count, min_f, max_f, is_float) =
+                    crate::strref::tape_array_numeric_fold(tape, arr_idx)?;
+                Some(Ok(tape_finalise(*op, si, sf, count, min_f, max_f, is_float)))
+            }
+            Sink::NumMap(op, prog) => {
+                // Single-FieldRead map kernel.
+                let field = single_field_prog(prog)?;
+                let (si, sf, count, min_f, max_f, is_float) =
+                    crate::strref::tape_array_project_numeric_fold(tape, arr_idx, field)?;
+                Some(Ok(tape_finalise(*op, si, sf, count, min_f, max_f, is_float)))
+            }
+            _ => None,
+        }
+    }
+
     /// Cache-aware variant: when cache promotes the source array,
     /// recv is replaced with `Val::ObjVec` and the slot kernels fire.
     fn try_columnar_with(
@@ -1313,7 +1376,15 @@ impl Pipeline {
         root: &Val,
         cache: Option<&dyn ObjVecPromoter>,
     ) -> Option<Result<Val, EvalError>> {
-        // Typed ObjVec stage-chain path first (uses cache).
+        // Tape-only path — bypasses Val entirely for tape-friendly
+        // shapes.  Closes the cold-start gap: simd-json parses to
+        // tape; aggregate queries fold straight from the tape with
+        // no Arc<Vec>/Arc<Obj> ever materialised.
+        #[cfg(feature = "simd-json")]
+        if let Some(out) = self.try_tape_aggregate(cache) {
+            return Some(out);
+        }
+        // Typed ObjVec stage-chain path next (uses cache).
         if let Some(out) = self.try_columnar_stage_chain_with(root, cache) {
             return Some(out);
         }
@@ -2503,6 +2574,32 @@ fn objvec_typed_group_by(
     }
     let _ = nrows;
     Some(Val::Obj(Arc::new(out)))
+}
+
+/// Compose tape-walker accumulator output into a Val per the requested
+/// numeric op.  Mirrors `num_finalise` semantics.
+#[cfg(feature = "simd-json")]
+fn tape_finalise(
+    op: NumOp, si: i64, sf: f64, count: usize,
+    min_f: f64, max_f: f64, is_float: bool,
+) -> Val {
+    if count == 0 {
+        return match op {
+            NumOp::Sum => Val::Int(0),
+            _ => Val::Null,
+        };
+    }
+    match op {
+        NumOp::Sum => {
+            if is_float { Val::Float(sf) } else { Val::Int(si) }
+        }
+        NumOp::Min => Val::Float(min_f),
+        NumOp::Max => Val::Float(max_f),
+        NumOp::Avg => {
+            let total = if is_float { sf } else { si as f64 };
+            Val::Float(total / count as f64)
+        }
+    }
 }
 
 fn materialise_typed_indices(

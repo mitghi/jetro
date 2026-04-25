@@ -290,6 +290,12 @@ pub struct Jetro {
     /// the Jetro handle.
     pub(crate) objvec_cache:
         std::sync::Mutex<std::collections::HashMap<usize, Arc<crate::eval::value::ObjVecData>>>,
+    /// Tape-path cooldown counter — counts tape-only runs.  After a
+    /// small number of tape runs the handle switches to ObjVec
+    /// memoised typed columns (slower cold, faster warm).  Avoids
+    /// re-walking the tape on every repeat query when ObjVec would
+    /// be ~5× faster after the first Val build.
+    pub(crate) tape_runs: std::sync::atomic::AtomicU32,
 }
 
 /// Extract an implicit-current-item field name from a `.map(arg)` /
@@ -712,6 +718,23 @@ impl pipeline::ObjVecPromoter for Jetro {
     fn promote(&self, arr: &Arc<Vec<Val>>) -> Option<Arc<crate::eval::value::ObjVecData>> {
         self.get_or_promote_objvec(arr)
     }
+    #[cfg(feature = "simd-json")]
+    fn tape(&self) -> Option<&Arc<crate::strref::TapeData>> {
+        self.tape.as_ref()
+    }
+    fn prefer_tape(&self) -> bool {
+        // Prefer tape-only path until either (a) Val tree is built or
+        // (b) we've run enough tape queries that ObjVec memoisation
+        // would now be cheaper amortised.  Threshold of 1 — a single
+        // cold-start aggregate fires the tape path; subsequent calls
+        // build Val + ObjVec for warm-path speed.
+        if self.tape.is_none() { return false; }
+        if self.root_val.get().is_some() { return false; }
+        self.tape_runs.load(std::sync::atomic::Ordering::Relaxed) < 1
+    }
+    fn note_tape_run(&self) {
+        self.tape_runs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 impl Jetro {
@@ -739,7 +762,7 @@ impl Jetro {
     }
 
     pub fn new(document: Value) -> Self {
-        Self { document, root_val: OnceCell::new(), objvec_cache: Default::default(), raw_bytes: None, tape: None }
+        Self { document, root_val: OnceCell::new(), objvec_cache: Default::default(), tape_runs: std::sync::atomic::AtomicU32::new(0), raw_bytes: None, tape: None }
     }
 
     /// Parse JSON bytes and retain them alongside the parsed document.
@@ -747,38 +770,31 @@ impl Jetro {
     /// instead of walking the tree.
     pub fn from_bytes(bytes: Vec<u8>) -> std::result::Result<Self, serde_json::Error> {
         // Cold-start fast path — when the simd-json feature is on,
-        // build Val directly from the parser tape, skipping the
-        // intermediate `serde_json::Value` tree + the Value→Val walk.
-        // Plan: `cold_start_direct_parse.md`.  Falls back to the
-        // serde_json path on any simd-json parse error so legacy
-        // edge-case correctness is preserved.
-        //
-        // Allocation discipline: simd-json mutates the input buffer
-        // and we keep raw_bytes for byte-scan fast paths.  Build the
-        // Arc<[u8]> from the original bytes once; pass a writable
-        // copy to the simd parser; on success the raw Arc is reused.
+        // parse to a TapeData first; retain the tape so tape-only
+        // query paths can fold aggregates without ever building Val.
+        // The Val tree builds lazily on first access via root_val()
+        // for queries that need structural data.  Falls back to the
+        // serde_json path on simd-json parse error.
         #[cfg(feature = "simd-json")]
         {
             let raw: Arc<[u8]> = Arc::from(bytes.clone().into_boxed_slice());
-            let mut buf = bytes;
-            match Val::from_json_simd(&mut buf) {
-                Ok(val) => {
-                    let cell: OnceCell<Val> = OnceCell::new();
-                    let _ = cell.set(val);
+            match crate::strref::TapeData::parse(bytes) {
+                Ok(tape) => {
                     return Ok(Self {
                         document: Value::Null,
-                        root_val: cell, objvec_cache: Default::default(),
+                        // Lazy Val build via root_val() — tape stays
+                        // primary.  When a query needs structural Val,
+                        // root_val() rebuilds via simd-json on raw_bytes.
+                        root_val: OnceCell::new(), objvec_cache: Default::default(), tape_runs: std::sync::atomic::AtomicU32::new(0),
                         raw_bytes: Some(raw),
-                        tape: None,
+                        tape: Some(tape),
                     });
                 }
                 Err(_) => {
-                    // simd-json mutated buf; fall through to serde_json
-                    // using the pristine `raw` copy we kept.
                     let document: Value = serde_json::from_slice(&raw)?;
                     return Ok(Self {
                         document,
-                        root_val: OnceCell::new(), objvec_cache: Default::default(),
+                        root_val: OnceCell::new(), objvec_cache: Default::default(), tape_runs: std::sync::atomic::AtomicU32::new(0),
                         raw_bytes: Some(raw),
                         tape: None,
                     });
@@ -790,7 +806,7 @@ impl Jetro {
             let document: Value = serde_json::from_slice(&bytes)?;
             Ok(Self {
                 document,
-                root_val: OnceCell::new(), objvec_cache: Default::default(),
+                root_val: OnceCell::new(), objvec_cache: Default::default(), tape_runs: std::sync::atomic::AtomicU32::new(0),
                 raw_bytes: Some(Arc::from(bytes.into_boxed_slice())),
                 tape: None,
             })
@@ -829,7 +845,7 @@ impl Jetro {
                 let _ = cell.set(val);
                 Ok(Self {
                     document: Value::Null,
-                    root_val: cell, objvec_cache: Default::default(),
+                    root_val: cell, objvec_cache: Default::default(), tape_runs: std::sync::atomic::AtomicU32::new(0),
                     raw_bytes: Some(raw),
                     tape: None,
                 })
@@ -841,7 +857,7 @@ impl Jetro {
                     .map_err(|e| format!("simd-json: {} ; serde_json fallback: {}", simd_err, e))?;
                 Ok(Self {
                     document,
-                    root_val: OnceCell::new(), objvec_cache: Default::default(),
+                    root_val: OnceCell::new(), objvec_cache: Default::default(), tape_runs: std::sync::atomic::AtomicU32::new(0),
                     raw_bytes: Some(raw),
                     tape: None,
                 })
@@ -880,7 +896,7 @@ impl Jetro {
         // by re-parsing `raw_bytes` via simd-json.
         Ok(Self {
             document: Value::Null,
-            root_val: OnceCell::new(), objvec_cache: Default::default(),
+            root_val: OnceCell::new(), objvec_cache: Default::default(), tape_runs: std::sync::atomic::AtomicU32::new(0),
             raw_bytes: Some(raw),
             tape: Some(tape),
         })
@@ -925,7 +941,7 @@ impl Jetro {
         let _ = cell.set(arr);
         Ok(Self {
             document: Value::Null,
-            root_val: cell, objvec_cache: Default::default(),
+            root_val: cell, objvec_cache: Default::default(), tape_runs: std::sync::atomic::AtomicU32::new(0),
             raw_bytes: None,
             tape: None,
         })
