@@ -1097,6 +1097,52 @@ impl Pipeline {
         }
     }
 
+    /// Phase 7-lite — speculative ObjVec promotion at pipeline source.
+    /// When the resolved receiver is `Val::Arr<Val::Obj>` with uniform
+    /// shape (all rows have the same key set, in the same order), build
+    /// a columnar `ObjVecData` on the fly so downstream slot-indexed
+    /// kernels (objvec_*_slot) can fire.  No schema needed; just probe
+    /// the first row + verify subsequent rows match.  Bails on shape
+    /// mismatch, returns the original Arr unchanged.
+    ///
+    /// Cost: O(N × K) where N=row count, K=key count, dominated by
+    /// pointer-equality on Arc<str> keys.  Win: subsequent operations
+    /// run as O(N) slice walks instead of O(N) IndexMap probes.
+    fn try_promote_objvec(arr: &Arc<Vec<Val>>) -> Option<Val> {
+        if arr.is_empty() { return None; }
+        let first = match &arr[0] {
+            Val::Obj(m) => m,
+            _ => return None,
+        };
+        let keys: Vec<Arc<str>> = first.keys().cloned().collect();
+        if keys.is_empty() { return None; }
+        let stride = keys.len();
+        let mut cells: Vec<Val> = Vec::with_capacity(arr.len() * stride);
+        for v in arr.iter() {
+            let m = match v {
+                Val::Obj(m) => m,
+                _ => return None,
+            };
+            if m.len() != stride { return None; }
+            for (i, k) in keys.iter().enumerate() {
+                // Pointer-equal Arc check first (cheap path); fall back
+                // to hash lookup if Arc identity differs across rows.
+                let val = match m.get_index(i) {
+                    Some((k2, v)) if Arc::ptr_eq(k2, k) => v.clone(),
+                    _ => match m.get(k.as_ref()) {
+                        Some(v) => v.clone(),
+                        None => return None,
+                    },
+                };
+                cells.push(val);
+            }
+        }
+        Some(Val::ObjVec(Arc::new(crate::eval::value::ObjVecData {
+            keys: keys.into(),
+            cells,
+        })))
+    }
+
     fn try_columnar(&self, root: &Val) -> Option<Result<Val, EvalError>> {
         // Phase A2 — Stage::Filter(FieldCmpLit) + Stage::Map(FieldRead) +
         // Sink::Collect over Val::Arr (object rows): walk the column
@@ -1110,6 +1156,10 @@ impl Pipeline {
             Source::Receiver(v) => v.clone(),
             Source::FieldChain { keys } => walk_field_chain(root, keys),
         };
+        // ObjVec promotion deferred to Phase 7 (build at parse time);
+        // per-call promotion pays its O(N×K) cost on every collect()
+        // and dominates short queries.  Keep the helper for a future
+        // memoising path that caches the promoted shape on the source.
 
         // Phase A2 — typed-lane fast path.  When receiver is an
         // already-typed vector (IntVec / FloatVec / StrVec), the
