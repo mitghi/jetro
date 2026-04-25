@@ -1028,6 +1028,38 @@ fn compile_handle_run_val_skips_value_materialise() {
 
 #[cfg(feature = "simd-json")]
 #[test]
+fn simd_json_lazy_tape_foundation() {
+    // Phase 6 foundation: Jetro::from_simd_lazy parses the input and
+    // retains a TapeData alongside the Val.  Today the execute path
+    // still uses the Val; the tape is just available for future
+    // tape-aware opcode handlers (Day 2 of the plan).
+    let bytes = br#"{"items":[{"id":1,"name":"a"},{"id":2,"name":"b"}]}"#.to_vec();
+    let j = Jetro::from_simd_lazy(bytes).unwrap();
+    let tape = j.tape().expect("from_simd_lazy must retain tape");
+    assert!(tape.nodes.len() > 0);
+    assert!(tape.root_len() > 0);
+    // Existing query path keeps working through the cached Val.
+    let names = j.collect("$.items.map(name)").unwrap();
+    assert_eq!(names, json!(["a", "b"]));
+}
+
+#[cfg(feature = "simd-json")]
+#[test]
+fn simd_json_lazy_tape_string_offsets_resolve() {
+    let bytes = br#"["alpha","beta","gamma"]"#.to_vec();
+    let j = Jetro::from_simd_lazy(bytes).unwrap();
+    let tape = j.tape().unwrap();
+    let mut found: Vec<&str> = Vec::new();
+    for (i, n) in tape.nodes.iter().enumerate() {
+        if matches!(n, jetro_core::strref::TapeNode::StringRef { .. }) {
+            found.push(tape.str_at(i));
+        }
+    }
+    assert_eq!(found, vec!["alpha", "beta", "gamma"]);
+}
+
+#[cfg(feature = "simd-json")]
+#[test]
 fn simd_json_ndjson_basic() {
     let lines = b"\
 {\"id\":1,\"level\":\"info\",\"msg\":\"start\"}

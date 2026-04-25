@@ -273,6 +273,14 @@ pub struct Jetro {
     /// [`Jetro::from_bytes`] / [`Jetro::from_slice`].  Enables SIMD
     /// byte-scan fast paths for `$..key` queries.
     raw_bytes: Option<Arc<[u8]>>,
+    /// Phase-6 tape lane — present when the handle was built via
+    /// [`Jetro::from_simd_lazy`].  Reserved for future tape-aware
+    /// execute paths; today it's just retained alongside the Val.
+    #[cfg(feature = "simd-json")]
+    tape: Option<Arc<crate::strref::TapeData>>,
+    #[cfg(not(feature = "simd-json"))]
+    #[allow(dead_code)]
+    tape: Option<()>,
 }
 
 /// Trim leading/trailing ASCII whitespace from a `&[u8]`.
@@ -287,7 +295,7 @@ fn trim_ascii(b: &[u8]) -> &[u8] {
 
 impl Jetro {
     pub fn new(document: Value) -> Self {
-        Self { document, root_val: OnceCell::new(), raw_bytes: None }
+        Self { document, root_val: OnceCell::new(), raw_bytes: None, tape: None }
     }
 
     /// Parse JSON bytes and retain them alongside the parsed document.
@@ -299,6 +307,7 @@ impl Jetro {
             document,
             root_val: OnceCell::new(),
             raw_bytes: Some(Arc::from(bytes.into_boxed_slice())),
+            tape: None,
         })
     }
 
@@ -336,6 +345,7 @@ impl Jetro {
                     document: Value::Null,
                     root_val: cell,
                     raw_bytes: Some(raw),
+                    tape: None,
                 })
             }
             Err(simd_err) => {
@@ -347,6 +357,7 @@ impl Jetro {
                     document,
                     root_val: OnceCell::new(),
                     raw_bytes: Some(raw),
+                    tape: None,
                 })
             }
         }
@@ -357,6 +368,51 @@ impl Jetro {
     #[cfg(feature = "simd-json")]
     pub fn from_simd_slice(bytes: &[u8]) -> std::result::Result<Self, String> {
         Self::from_simd(bytes.to_vec())
+    }
+
+    /// Tape-aware ingestion path (Phase 6, foundation).  Parses `bytes`
+    /// via simd-json and stores a flat `TapeData` (bytes + nodes)
+    /// without materialising a `Val` tree.  When subsequent queries
+    /// are tape-friendly (descendant + simple-aggregate forms — see
+    /// `project_tape_aware_vm.md`), the VM walks the tape directly
+    /// without ever building a Val; non-tape-friendly queries
+    /// transparently fall back to materialising a Val on first access.
+    ///
+    /// Currently only the foundation lands: TapeData is built and
+    /// retained, but the execute_tape opcode handlers (Day 2 of the
+    /// plan) are not yet wired, so this constructor behaves
+    /// identically to `from_simd` for execution purposes.  The tape
+    /// itself is reachable via `Jetro::tape()` for future use.
+    ///
+    /// Requires the `simd-json` cargo feature.
+    #[cfg(feature = "simd-json")]
+    pub fn from_simd_lazy(bytes: Vec<u8>) -> std::result::Result<Self, String> {
+        let raw: Arc<[u8]> = Arc::from(bytes.clone().into_boxed_slice());
+        let tape = crate::strref::TapeData::parse(bytes)?;
+        // For now also build the Val eagerly via the same simd-json
+        // borrowed-value walker so existing query paths keep working.
+        // Day 2 will swap this for a lazy tape-aware execute path.
+        let document_bytes: Vec<u8> = (*raw).to_vec();
+        let mut doc = document_bytes;
+        let val = Val::from_json_simd(&mut doc)
+            .map_err(|e| format!("from_simd_lazy: val build: {}", e))?;
+        let cell: OnceCell<Val> = OnceCell::new();
+        let _ = cell.set(val);
+        Ok(Self {
+            document: Value::Null,
+            root_val: cell,
+            raw_bytes: Some(raw),
+            tape: Some(tape),
+        })
+    }
+
+    /// Borrow the parsed tape if the handle was built via
+    /// [`Jetro::from_simd_lazy`].  `None` for handles built any other
+    /// way.  Public so downstream tooling can inspect the flat node
+    /// sequence (e.g. tape-aware exec paths in custom workloads).
+    #[cfg(feature = "simd-json")]
+    pub fn tape(&self) -> Option<&Arc<crate::strref::TapeData>> {
+        self.tape.as_ref()
     }
 
     /// Parse a newline-delimited JSON (NDJSON / JSON-Lines) buffer into a
@@ -391,6 +447,7 @@ impl Jetro {
             document: Value::Null,
             root_val: cell,
             raw_bytes: None,
+            tape: None,
         })
     }
 
