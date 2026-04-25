@@ -59,7 +59,15 @@ use super::eval::methods::MethodRegistry;
 
 macro_rules! pop {
     ($stack:expr) => {
-        $stack.pop().ok_or_else(|| EvalError("stack underflow".into()))?
+        {
+            // Phase 7 universal demote: ObjVec receivers materialise into
+            // Val::Arr<Val::Obj> on pop so opcodes that pattern-match
+            // `Val::Arr(a) =>` directly stay correct.  Opcodes with
+            // ObjVec-aware fast paths must check `peek` BEFORE popping
+            // to keep the columnar receiver intact.
+            let v = $stack.pop().ok_or_else(|| EvalError("stack underflow".into()))?;
+            if matches!(v, Val::ObjVec(_)) { v.into_arr() } else { v }
+        }
     };
 }
 macro_rules! err {
@@ -7110,7 +7118,17 @@ impl VM {
 
     // ── Method call dispatch ──────────────────────────────────────────────────
 
-    fn exec_call(&mut self, recv: Val, call: &CompiledCall, env: &Env) -> Result<Val, EvalError> {
+    fn exec_call(&mut self, mut recv: Val, call: &CompiledCall, env: &Env) -> Result<Val, EvalError> {
+        // Phase 7 universal compatibility: ObjVec receivers without a
+        // dedicated fast-path get demoted to Val::Arr<Val::Obj> on the
+        // way into method dispatch.  Later commits will add slot-indexed
+        // ObjVec arms to the hot kernels (MapField*, Filter*Map*, etc.)
+        // and check for them BEFORE this demotion.  For now: correctness
+        // first.
+        if matches!(recv, Val::ObjVec(_)) {
+            recv = recv.into_arr();
+        }
+
         // Global-call opcodes push Root before calling; handle them
         if call.method == BuiltinMethod::Unknown {
             // Custom registry or global function
