@@ -752,19 +752,49 @@ impl Jetro {
         // Plan: `cold_start_direct_parse.md`.  Falls back to the
         // serde_json path on any simd-json parse error so legacy
         // edge-case correctness is preserved.
+        //
+        // Allocation discipline: simd-json mutates the input buffer
+        // and we keep raw_bytes for byte-scan fast paths.  Build the
+        // Arc<[u8]> from the original bytes once; pass a writable
+        // copy to the simd parser; on success the raw Arc is reused.
         #[cfg(feature = "simd-json")]
         {
-            if let Ok(j) = Self::from_simd(bytes.clone()) {
-                return Ok(j);
+            let raw: Arc<[u8]> = Arc::from(bytes.clone().into_boxed_slice());
+            let mut buf = bytes;
+            match Val::from_json_simd(&mut buf) {
+                Ok(val) => {
+                    let cell: OnceCell<Val> = OnceCell::new();
+                    let _ = cell.set(val);
+                    return Ok(Self {
+                        document: Value::Null,
+                        root_val: cell, objvec_cache: Default::default(),
+                        raw_bytes: Some(raw),
+                        tape: None,
+                    });
+                }
+                Err(_) => {
+                    // simd-json mutated buf; fall through to serde_json
+                    // using the pristine `raw` copy we kept.
+                    let document: Value = serde_json::from_slice(&raw)?;
+                    return Ok(Self {
+                        document,
+                        root_val: OnceCell::new(), objvec_cache: Default::default(),
+                        raw_bytes: Some(raw),
+                        tape: None,
+                    });
+                }
             }
         }
-        let document: Value = serde_json::from_slice(&bytes)?;
-        Ok(Self {
-            document,
-            root_val: OnceCell::new(), objvec_cache: Default::default(),
-            raw_bytes: Some(Arc::from(bytes.into_boxed_slice())),
-            tape: None,
-        })
+        #[allow(unreachable_code)]
+        {
+            let document: Value = serde_json::from_slice(&bytes)?;
+            Ok(Self {
+                document,
+                root_val: OnceCell::new(), objvec_cache: Default::default(),
+                raw_bytes: Some(Arc::from(bytes.into_boxed_slice())),
+                tape: None,
+            })
+        }
     }
 
     /// Parse JSON from a slice, retaining a copy of the bytes.
