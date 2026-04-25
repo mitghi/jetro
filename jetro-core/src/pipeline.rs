@@ -123,6 +123,14 @@ impl Pipeline {
                 _ => break,
             }
         }
+        // Phase 1 deliberately does not lower bare `$.<method>` shapes
+        // (no field-chain prefix) because the existing fused opcodes
+        // (MapSplitLenSum, FilterFieldCmpLitMapField, etc.) often beat
+        // a generic pull-based pipeline for those.  Field-chain prefix
+        // signals a "scan over a sub-array" intent — the pipeline's
+        // sweet spot.
+        if field_end == 0 { return None; }
+
         let keys: Arc<[Arc<str>]> = steps[..field_end].iter()
             .map(|s| match s { Step::Field(k) => Arc::<str>::from(k.as_str()), _ => unreachable!() })
             .collect::<Vec<_>>().into();

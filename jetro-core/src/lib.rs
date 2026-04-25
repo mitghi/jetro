@@ -886,6 +886,14 @@ impl Jetro {
                 return out.map(|v| v.into());
             }
         }
+        // Pipeline IR Phase 1 substrate is wired into `src/pipeline.rs`
+        // but not enabled in collect dispatch yet — per-element tree-walker
+        // eval inside Pipeline::run regresses 15x vs the existing fused
+        // opcodes (MapFieldSum, FilterFieldCmpLitMapField, etc.).  Phase 2
+        // (rewrite rules) + Phase 3 (vectorised pull_batch over IntVec /
+        // FloatVec / StrVec lanes) will land the bytecode-compiled inner
+        // loops; only then is intercepting at this entry point a perf win.
+        let _ = pipeline::Pipeline::lower;
         THREAD_VM.with(|cell| match (cell.try_borrow_mut(), &self.raw_bytes) {
             (Ok(mut vm), Some(bytes)) => {
                 let prog = vm.get_or_compile(expr)?;
@@ -918,6 +926,7 @@ impl Jetro {
                 return out;
             }
         }
+        // See note in collect() — pipeline lowering deferred to Phase 2/3.
         THREAD_VM.with(|cell| {
             let mut vm = cell.try_borrow_mut().map_err(|_| EvalError("VM in use".into()))?;
             let prog = vm.get_or_compile(expr)?;
