@@ -59,15 +59,7 @@ use super::eval::methods::MethodRegistry;
 
 macro_rules! pop {
     ($stack:expr) => {
-        {
-            // Phase 7 universal demote: ObjVec receivers materialise into
-            // Val::Arr<Val::Obj> on pop so opcodes that pattern-match
-            // `Val::Arr(a) =>` directly stay correct.  Opcodes with
-            // ObjVec-aware fast paths must check `peek` BEFORE popping
-            // to keep the columnar receiver intact.
-            let v = $stack.pop().ok_or_else(|| EvalError("stack underflow".into()))?;
-            if matches!(v, Val::ObjVec(_)) { v.into_arr() } else { v }
-        }
+        $stack.pop().ok_or_else(|| EvalError("stack underflow".into()))?
     };
 }
 macro_rules! err {
@@ -5853,6 +5845,30 @@ impl VM {
                     stack.push(Val::arr(out));
                 }
                 Opcode::FilterFieldCmpLitMapField(kp, op, lit, kproj) => {
+                    // Phase 7 fast path: peek the stack — if it's an ObjVec
+                    // with both `kp` and `kproj` resolvable to slots, walk
+                    // the flat cells with constant stride, no IndexMap
+                    // probes.
+                    if let Some(Val::ObjVec(d)) = stack.last() {
+                        if let (Some(slot_p), Some(slot_q)) = (d.slot_of(kp), d.slot_of(kproj)) {
+                            let stride = d.stride();
+                            let nrows = d.nrows();
+                            let mut out = Vec::with_capacity(filter_cap_hint(nrows));
+                            // Pull the receiver via a borrow chain to avoid the pop!-demote path.
+                            let cells = &d.cells;
+                            for row in 0..nrows {
+                                let off = row * stride;
+                                let v = &cells[off + slot_p];
+                                if cmp_val_binop(v, *op, lit) {
+                                    out.push(cells[off + slot_q].clone());
+                                }
+                            }
+                            // Replace the ObjVec on the stack with the projection.
+                            let _ = stack.pop();
+                            stack.push(Val::arr(out));
+                            continue;
+                        }
+                    }
                     let recv = pop!(stack);
                     let hint = match &recv { Val::Arr(a) => filter_cap_hint(a.len()), _ => 0 };
                     let mut out = Vec::with_capacity(hint);
@@ -7118,17 +7134,7 @@ impl VM {
 
     // ── Method call dispatch ──────────────────────────────────────────────────
 
-    fn exec_call(&mut self, mut recv: Val, call: &CompiledCall, env: &Env) -> Result<Val, EvalError> {
-        // Phase 7 universal compatibility: ObjVec receivers without a
-        // dedicated fast-path get demoted to Val::Arr<Val::Obj> on the
-        // way into method dispatch.  Later commits will add slot-indexed
-        // ObjVec arms to the hot kernels (MapField*, Filter*Map*, etc.)
-        // and check for them BEFORE this demotion.  For now: correctness
-        // first.
-        if matches!(recv, Val::ObjVec(_)) {
-            recv = recv.into_arr();
-        }
-
+    fn exec_call(&mut self, recv: Val, call: &CompiledCall, env: &Env) -> Result<Val, EvalError> {
         // Global-call opcodes push Root before calling; handle them
         if call.method == BuiltinMethod::Unknown {
             // Custom registry or global function
