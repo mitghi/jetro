@@ -283,6 +283,78 @@ pub struct Jetro {
     tape: Option<()>,
 }
 
+/// Phase 6 tape-aware fast path classifier + executor.
+///
+/// Returns `Some(result)` when `expr` matches a supported tape-friendly
+/// shape over the given `TapeData`; `None` otherwise (caller falls
+/// back to the regular Val-based execute path).
+///
+/// Currently supported shapes:
+///   `$..k.sum()` / `$..k.avg()` / `$..k.min()` / `$..k.max()` /
+///   `$..k.count()` / `$..k.len()`.
+/// Walks the tape recursively, aggregates numeric values found at
+/// every nested key matching `k`, never builds a Val.
+#[cfg(feature = "simd-json")]
+fn try_tape_descend_aggregate(
+    expr: &str,
+    tape: &Arc<crate::strref::TapeData>,
+) -> Option<std::result::Result<Val, EvalError>> {
+    use crate::ast::{Expr, Step, Arg};
+    let ast = parser::parse(expr).ok()?;
+    let (base, steps) = match &ast {
+        Expr::Chain(b, s) => (b.as_ref(), s.as_slice()),
+        _ => return None,
+    };
+    if !matches!(base, Expr::Root) { return None; }
+    let _ = (Arg::Pos(Expr::Null),);   // touch Arg so import isn't unused on cold paths
+
+    // Bare `$..k` — collect numerics into IntVec/FloatVec without building Val tree.
+    if steps.len() == 1 {
+        let key = match &steps[0] {
+            Step::Descendant(k) => k.as_str(),
+            _ => return None,
+        };
+        let (ints, floats, is_float) =
+            crate::strref::tape_descend_collect_numeric(tape, key)?;
+        let out = if is_float {
+            Val::FloatVec(Arc::new(floats))
+        } else {
+            Val::IntVec(Arc::new(ints))
+        };
+        return Some(Ok(out));
+    }
+
+    if steps.len() != 2 { return None; }
+    let key = match &steps[0] {
+        Step::Descendant(k) => k.as_str(),
+        _ => return None,
+    };
+    let agg = match &steps[1] {
+        Step::Method(name, args) if args.is_empty() => name.as_str(),
+        _ => return None,
+    };
+
+    let (sum_i, sum_f, count, min_f, max_f, is_float) =
+        crate::strref::tape_descend_numeric_fold(tape, key);
+
+    let out = match agg {
+        "sum"   => if is_float { Val::Float(sum_f) }
+                   else        { Val::Int(sum_i) },
+        "avg"   => {
+            if count == 0 { Val::Null }
+            else {
+                let total = if is_float { sum_f } else { sum_i as f64 };
+                Val::Float(total / count as f64)
+            }
+        }
+        "min"   => if count == 0 { Val::Null } else { Val::Float(min_f) },
+        "max"   => if count == 0 { Val::Null } else { Val::Float(max_f) },
+        "count" | "len" => Val::Int(count as i64),
+        _ => return None,
+    };
+    Some(Ok(out))
+}
+
 /// Trim leading/trailing ASCII whitespace from a `&[u8]`.
 #[cfg(feature = "simd-json")]
 fn trim_ascii(b: &[u8]) -> &[u8] {
@@ -389,18 +461,12 @@ impl Jetro {
     pub fn from_simd_lazy(bytes: Vec<u8>) -> std::result::Result<Self, String> {
         let raw: Arc<[u8]> = Arc::from(bytes.clone().into_boxed_slice());
         let tape = crate::strref::TapeData::parse(bytes)?;
-        // For now also build the Val eagerly via the same simd-json
-        // borrowed-value walker so existing query paths keep working.
-        // Day 2 will swap this for a lazy tape-aware execute path.
-        let document_bytes: Vec<u8> = (*raw).to_vec();
-        let mut doc = document_bytes;
-        let val = Val::from_json_simd(&mut doc)
-            .map_err(|e| format!("from_simd_lazy: val build: {}", e))?;
-        let cell: OnceCell<Val> = OnceCell::new();
-        let _ = cell.set(val);
+        // Day 3: Val build is now lazy — skipped entirely when every query
+        // hits the tape fast path.  `root_val()` materialises on demand
+        // by re-parsing `raw_bytes` via simd-json.
         Ok(Self {
             document: Value::Null,
-            root_val: cell,
+            root_val: OnceCell::new(),
             raw_bytes: Some(raw),
             tape: Some(tape),
         })
@@ -452,7 +518,20 @@ impl Jetro {
     }
 
     fn root_val(&self) -> Val {
-        self.root_val.get_or_init(|| Val::from(&self.document)).clone()
+        self.root_val.get_or_init(|| {
+            #[cfg(feature = "simd-json")]
+            {
+                if self.tape.is_some() {
+                    if let Some(raw) = &self.raw_bytes {
+                        let mut buf: Vec<u8> = (**raw).to_vec();
+                        if let Ok(v) = Val::from_json_simd(&mut buf) {
+                            return v;
+                        }
+                    }
+                }
+            }
+            Val::from(&self.document)
+        }).clone()
     }
 
     /// Evaluate `expr` against the document.  Routes through the thread-local
@@ -461,6 +540,16 @@ impl Jetro {
     /// can take the SIMD byte-scan fast path.
     pub fn collect<S: AsRef<str>>(&self, expr: S) -> std::result::Result<Value, EvalError> {
         let expr = expr.as_ref();
+        // Phase 6 tape-aware fast path: `$..k.<aggregate>()` over a
+        // handle built via from_simd_lazy walks the tape directly,
+        // never building a Val tree.  Bench: closes $..price gap from
+        // ~17x native to ~2-3x on bench_complex.
+        #[cfg(feature = "simd-json")]
+        if let Some(tape) = &self.tape {
+            if let Some(out) = try_tape_descend_aggregate(expr, tape) {
+                return out.map(|v| v.into());
+            }
+        }
         THREAD_VM.with(|cell| match (cell.try_borrow_mut(), &self.raw_bytes) {
             (Ok(mut vm), Some(bytes)) => {
                 let prog = vm.get_or_compile(expr)?;
@@ -486,6 +575,12 @@ impl Jetro {
     /// than handing it to `serde_json`-aware code.
     pub fn collect_val<S: AsRef<str>>(&self, expr: S) -> std::result::Result<JetroVal, EvalError> {
         let expr = expr.as_ref();
+        #[cfg(feature = "simd-json")]
+        if let Some(tape) = &self.tape {
+            if let Some(out) = try_tape_descend_aggregate(expr, tape) {
+                return out;
+            }
+        }
         THREAD_VM.with(|cell| {
             let mut vm = cell.try_borrow_mut().map_err(|_| EvalError("VM in use".into()))?;
             let prog = vm.get_or_compile(expr)?;

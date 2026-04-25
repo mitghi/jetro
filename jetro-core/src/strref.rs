@@ -208,4 +208,182 @@ impl TapeData {
             _ => 0,
         }
     }
+
+    /// Number of nodes the subtree at index `i` occupies (1 for
+    /// primitives, `count + 1` for Object/Array).
+    #[inline]
+    pub fn span(&self, i: usize) -> usize {
+        match self.nodes[i] {
+            TapeNode::Object { count, .. } | TapeNode::Array { count, .. } =>
+                count as usize + 1,
+            _ => 1,
+        }
+    }
+}
+
+/// Tape-aware aggregator over `$..key`-style descendant queries.
+///
+/// Recursively walks the tape, accumulates numeric values found under
+/// keys matching `key` at any depth.  Returns `(sum_i64, sum_f64,
+/// count, min_f64, max_f64, is_float)` so the caller can project to
+/// whichever aggregator the original program asked for.
+#[cfg(feature = "simd-json")]
+pub fn tape_descend_numeric_fold(tape: &TapeData, key: &str) -> (i64, f64, usize, f64, f64, bool) {
+    let mut acc = NumAcc {
+        sum_i: 0, sum_f: 0.0, count: 0,
+        min_f: f64::INFINITY, max_f: f64::NEG_INFINITY,
+        is_float: false,
+    };
+    walk(tape, key, 0, &mut acc);
+    (acc.sum_i, acc.sum_f, acc.count, acc.min_f, acc.max_f, acc.is_float)
+}
+
+#[cfg(feature = "simd-json")]
+struct NumAcc {
+    sum_i: i64,
+    sum_f: f64,
+    count: usize,
+    min_f: f64,
+    max_f: f64,
+    is_float: bool,
+}
+
+#[cfg(feature = "simd-json")]
+fn accumulate(n: TapeNode, acc: &mut NumAcc) {
+    use simd_json::StaticNode as SN;
+    if let TapeNode::Static(s) = n {
+        match s {
+            SN::I64(v) => {
+                acc.count += 1;
+                if acc.is_float { acc.sum_f += v as f64; } else { acc.sum_i += v; }
+                let f = v as f64;
+                if f < acc.min_f { acc.min_f = f; }
+                if f > acc.max_f { acc.max_f = f; }
+            }
+            SN::U64(v) if v <= i64::MAX as u64 => {
+                acc.count += 1;
+                if acc.is_float { acc.sum_f += v as f64; } else { acc.sum_i += v as i64; }
+                let f = v as f64;
+                if f < acc.min_f { acc.min_f = f; }
+                if f > acc.max_f { acc.max_f = f; }
+            }
+            SN::F64(v) => {
+                if !acc.is_float { acc.sum_f = acc.sum_i as f64; acc.is_float = true; }
+                acc.count += 1;
+                acc.sum_f += v;
+                if v < acc.min_f { acc.min_f = v; }
+                if v > acc.max_f { acc.max_f = v; }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Tape-aware extractor: `$..key` returning every numeric value found
+/// at any depth under a key matching `key`.  Returns `(ints, floats,
+/// is_float)` — caller picks the representation:
+///   - is_float=false -> emit Val::IntVec(ints)
+///   - is_float=true  -> emit Val::FloatVec(floats) (ints already
+///                       promoted to f64 in floats)
+/// Returns `None` if any value matching `key` is non-numeric (caller
+/// must fall back to the Val path) or if `key` is an Object/Array
+/// (descendant aggregates only target leaves here).
+#[cfg(feature = "simd-json")]
+pub fn tape_descend_collect_numeric(
+    tape: &TapeData,
+    key: &str,
+) -> Option<(Vec<i64>, Vec<f64>, bool)> {
+    let mut acc = NumCol {
+        ints: Vec::new(),
+        floats: Vec::new(),
+        is_float: false,
+        mixed: false,
+    };
+    walk_collect(tape, key, 0, &mut acc);
+    if acc.mixed { return None; }
+    Some((acc.ints, acc.floats, acc.is_float))
+}
+
+#[cfg(feature = "simd-json")]
+struct NumCol {
+    ints:     Vec<i64>,
+    floats:   Vec<f64>,
+    is_float: bool,
+    mixed:    bool,
+}
+
+#[cfg(feature = "simd-json")]
+fn collect_value(n: TapeNode, acc: &mut NumCol) {
+    use simd_json::StaticNode as SN;
+    match n {
+        TapeNode::Static(SN::I64(v)) => {
+            if acc.is_float { acc.floats.push(v as f64); }
+            else            { acc.ints.push(v); }
+        }
+        TapeNode::Static(SN::U64(v)) if v <= i64::MAX as u64 => {
+            if acc.is_float { acc.floats.push(v as f64); }
+            else            { acc.ints.push(v as i64); }
+        }
+        TapeNode::Static(SN::F64(v)) => {
+            if !acc.is_float {
+                acc.is_float = true;
+                acc.floats = acc.ints.iter().map(|x| *x as f64).collect();
+                acc.ints.clear();
+            }
+            acc.floats.push(v);
+        }
+        _ => { acc.mixed = true; }
+    }
+}
+
+#[cfg(feature = "simd-json")]
+fn walk_collect(tape: &TapeData, key: &str, i: usize, acc: &mut NumCol) -> usize {
+    match tape.nodes[i] {
+        TapeNode::Object { len, .. } => {
+            let mut j = i + 1;
+            for _ in 0..len {
+                let k = tape.str_at(j);
+                j += 1;
+                if k == key {
+                    collect_value(tape.nodes[j], acc);
+                }
+                j = walk_collect(tape, key, j, acc);
+            }
+            j
+        }
+        TapeNode::Array { len, .. } => {
+            let mut j = i + 1;
+            for _ in 0..len {
+                j = walk_collect(tape, key, j, acc);
+            }
+            j
+        }
+        _ => i + 1,
+    }
+}
+
+#[cfg(feature = "simd-json")]
+fn walk(tape: &TapeData, key: &str, i: usize, acc: &mut NumAcc) -> usize {
+    match tape.nodes[i] {
+        TapeNode::Object { len, .. } => {
+            let mut j = i + 1;
+            for _ in 0..len {
+                let k = tape.str_at(j);
+                j += 1;
+                if k == key {
+                    accumulate(tape.nodes[j], acc);
+                }
+                j = walk(tape, key, j, acc);
+            }
+            j
+        }
+        TapeNode::Array { len, .. } => {
+            let mut j = i + 1;
+            for _ in 0..len {
+                j = walk(tape, key, j, acc);
+            }
+            j
+        }
+        _ => i + 1,
+    }
 }

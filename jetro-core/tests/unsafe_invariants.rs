@@ -1045,6 +1045,65 @@ fn simd_json_lazy_tape_foundation() {
 
 #[cfg(feature = "simd-json")]
 #[test]
+fn tape_descend_sum_min_max_count() {
+    let bytes = br#"{"products":[
+      {"name":"a","price":10},
+      {"name":"b","price":25},
+      {"nested":{"price":5}},
+      {"items":[{"price":3},{"price":7}]}
+    ]}"#.to_vec();
+    let j = Jetro::from_simd_lazy(bytes).unwrap();
+    let s = j.collect("$..price.sum()").unwrap();
+    assert_eq!(s.as_i64().unwrap(), 50);
+    let c = j.collect("$..price.count()").unwrap();
+    assert_eq!(c.as_i64().unwrap(), 5);
+    let mn = j.collect("$..price.min()").unwrap();
+    assert_eq!(mn.as_f64().unwrap(), 3.0);
+    let mx = j.collect("$..price.max()").unwrap();
+    assert_eq!(mx.as_f64().unwrap(), 25.0);
+    let av = j.collect("$..price.avg()").unwrap();
+    assert!((av.as_f64().unwrap() - 10.0).abs() < 1e-9);
+}
+
+#[cfg(feature = "simd-json")]
+#[test]
+fn tape_descend_bare_collect_int_and_float() {
+    // Bare `$..k` over all-int — IntVec via tape fast path.
+    let bytes = br#"{"a":[{"k":1},{"k":2},{"nested":{"k":3}}]}"#.to_vec();
+    let j = Jetro::from_simd_lazy(bytes).unwrap();
+    let r = j.collect("$..k").unwrap();
+    assert_eq!(r, json!([1, 2, 3]));
+
+    // Bare `$..k` over mixed int+float — FloatVec via tape fast path.
+    let bytes2 = br#"{"a":[{"k":1},{"k":2.5},{"nested":{"k":3}}]}"#.to_vec();
+    let j2 = Jetro::from_simd_lazy(bytes2).unwrap();
+    let r2 = j2.collect("$..k").unwrap();
+    assert_eq!(r2, json!([1.0, 2.5, 3.0]));
+}
+
+#[cfg(feature = "simd-json")]
+#[test]
+fn tape_descend_bare_non_numeric_falls_back() {
+    // Bare `$..k` with a string value — must fall back to Val path.
+    let bytes = br#"{"a":[{"k":"hello"},{"k":"world"}]}"#.to_vec();
+    let j = Jetro::from_simd_lazy(bytes).unwrap();
+    let r = j.collect("$..k").unwrap();
+    assert_eq!(r, json!(["hello", "world"]));
+}
+
+#[cfg(feature = "simd-json")]
+#[test]
+fn tape_unsupported_query_falls_back_to_val() {
+    // Filter on descendant requires Val path; tape fast-path must NOT
+    // intercept and the Val fallback should produce the right result.
+    let bytes = br#"{"items":[{"price":5},{"price":15},{"price":20}]}"#.to_vec();
+    let j = Jetro::from_simd_lazy(bytes).unwrap();
+    let r = j.collect("$.items.filter(price > 10).map(price)").unwrap();
+    assert_eq!(r, json!([15, 20]));
+}
+
+#[cfg(feature = "simd-json")]
+#[test]
 fn simd_json_lazy_tape_string_offsets_resolve() {
     let bytes = br#"["alpha","beta","gamma"]"#.to_vec();
     let j = Jetro::from_simd_lazy(bytes).unwrap();
