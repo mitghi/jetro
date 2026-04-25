@@ -382,7 +382,7 @@ mod examples {
 
     #[test]
     fn agg_group_by() {
-        let r = q("$.users.groupBy(role)");
+        let r = q("$.users.group_by(role)");
         let obj = r.as_object().unwrap();
         assert_eq!(obj["admin"].as_array().unwrap().len(), 1);
         assert_eq!(obj["user"].as_array().unwrap().len(), 2);
@@ -390,7 +390,7 @@ mod examples {
 
     #[test]
     fn agg_count_by() {
-        let r = q("$.orders.countBy(status)");
+        let r = q("$.orders.count_by(status)");
         assert_eq!(r["pending"], json!(2));
         assert_eq!(r["shipped"], json!(1));
     }
@@ -398,7 +398,7 @@ mod examples {
     #[test]
     fn agg_index_by() {
         // index_by creates an object keyed by field value
-        let r = q("$.users.indexBy(id)");
+        let r = q("$.users.index_by(id)");
         let obj = r.as_object().unwrap();
         assert_eq!(obj.len(), 4);
         assert_eq!(obj["1"]["name"], json!("Alice"));
@@ -1354,7 +1354,7 @@ mod examples {
     fn complex_join_like() {
         // Enrich orders with user names via let + map
         let r = q(
-            "let users_idx = $.users.indexBy(id) in \
+            "let users_idx = $.users.index_by(id) in \
              $.orders.map({id, total, status, \
                            user: users_idx[to_string(user_id)].name})"
         );

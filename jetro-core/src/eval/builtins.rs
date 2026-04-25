@@ -34,7 +34,7 @@ impl BuiltinRegistry {
         self.table.get(name).copied()
     }
 
-    /// Iterate all registered builtin names (includes snake_case and camelCase aliases).
+    /// Iterate all registered builtin names (snake_case canonical form).
     pub fn names(&self) -> impl Iterator<Item = &'static str> + '_ {
         self.table.keys().copied()
     }
@@ -62,51 +62,38 @@ fn build() -> BuiltinRegistry {
     t.insert("len",        b_len);
     t.insert("type",       b_type);
     t.insert("to_string",  b_to_string);
-    t.insert("toString",   b_to_string);
     t.insert("to_json",    b_to_json);
-    t.insert("toJson",     b_to_json);
     t.insert("from_json",  b_from_json);
-    t.insert("fromJson",   b_from_json);
 
     // Object
     t.insert("keys",        b_keys);
     t.insert("values",      b_values);
     t.insert("entries",     b_entries);
     t.insert("to_pairs",    b_to_pairs);
-    t.insert("toPairs",     b_to_pairs);
     t.insert("from_pairs",  b_from_pairs);
-    t.insert("fromPairs",   b_from_pairs);
     t.insert("invert",      b_invert);
     t.insert("pick",        func_objects::pick);
     t.insert("omit",        func_objects::omit);
     t.insert("merge",       func_objects::merge);
     t.insert("deep_merge",  func_objects::deep_merge_method);
-    t.insert("deepMerge",   func_objects::deep_merge_method);
     t.insert("defaults",    func_objects::defaults);
     t.insert("rename",      func_objects::rename);
     t.insert("transform_keys",   func_objects::transform_keys);
-    t.insert("transformKeys",    func_objects::transform_keys);
     t.insert("transform_values", func_objects::transform_values);
-    t.insert("transformValues",  func_objects::transform_values);
     t.insert("filter_keys",   func_objects::filter_keys);
-    t.insert("filterKeys",    func_objects::filter_keys);
     t.insert("filter_values", func_objects::filter_values);
-    t.insert("filterValues",  func_objects::filter_values);
     t.insert("pivot",       func_objects::pivot);
 
     // Arrays — full signature
     t.insert("filter",    func_arrays::filter);
     t.insert("find",      func_arrays::find);        // Tier 1 (shallow, multi-pred AND)
     t.insert("find_all",  func_arrays::find);        // Tier 1 (shallow, multi-pred AND)
-    t.insert("findAll",   func_arrays::find);
     t.insert("map",       func_arrays::map);
-    t.insert("flatMap",   func_arrays::flat_map);
     t.insert("flat_map",  func_arrays::flat_map);
     t.insert("sort",      func_arrays::sort);
     t.insert("flatten",   func_arrays::flatten);
     t.insert("join",      func_arrays::join);
     t.insert("equi_join", func_arrays::equi_join);
-    t.insert("equiJoin",  func_arrays::equi_join);
     t.insert("first",     func_arrays::first);
     t.insert("last",      func_arrays::last);
     t.insert("nth",       func_arrays::nth);
@@ -128,7 +115,6 @@ fn build() -> BuiltinRegistry {
     t.insert("partition", func_arrays::partition);
     t.insert("zip",       func_arrays::zip_method);
     t.insert("zip_longest",  func_arrays::zip_longest_method);
-    t.insert("zipLongest",   func_arrays::zip_longest_method);
 
     // Arrays — zero-extra-arg wrappers
     t.insert("reverse",  b_reverse);
@@ -139,38 +125,27 @@ fn build() -> BuiltinRegistry {
 
     // Tier 1 search / match / collect
     t.insert("unique_by", func_search::unique_by);
-    t.insert("uniqueBy",  func_search::unique_by);
     t.insert("collect",   func_search::collect);
     t.insert("deep_find", func_search::deep_find);
-    t.insert("deepFind",  func_search::deep_find);
     t.insert("deep_shape", func_search::deep_shape);
-    t.insert("deepShape",  func_search::deep_shape);
     t.insert("deep_like",  func_search::deep_like);
-    t.insert("deepLike",   func_search::deep_like);
     t.insert("walk",       func_search::walk);
     t.insert("walk_pre",   func_search::walk_pre_fn);
-    t.insert("walkPre",    func_search::walk_pre_fn);
     t.insert("schema",     func_objects::schema);
     t.insert("rec",        func_search::rec);
     t.insert("trace_path", func_search::trace_path);
-    t.insert("tracePath",  func_search::trace_path);
     t.insert("fanout",     func_objects::fanout);
     t.insert("zip_shape",  func_objects::zip_shape);
-    t.insert("zipShape",   func_objects::zip_shape);
 
     // Aggregates — full signature
     t.insert("sum",      func_aggregates::sum);
     t.insert("avg",      func_aggregates::avg);
     t.insert("count",    func_aggregates::count);
-    t.insert("groupBy",  func_aggregates::group_by);
     t.insert("group_by", func_aggregates::group_by);
-    t.insert("countBy",  func_aggregates::count_by);
     t.insert("count_by", func_aggregates::count_by);
-    t.insert("indexBy",  func_aggregates::index_by);
     t.insert("index_by", func_aggregates::index_by);
     t.insert("explode",     func_aggregates::explode);
     t.insert("implode",     func_aggregates::implode);
-    t.insert("groupShape",  func_aggregates::group_shape);
     t.insert("group_shape", func_aggregates::group_shape);
 
     // Aggregates — bool-flag wrappers
@@ -187,25 +162,16 @@ fn build() -> BuiltinRegistry {
 
     // Paths
     t.insert("get_path",       func_paths::get_path);
-    t.insert("getPath",        func_paths::get_path);
     t.insert("set_path",       func_paths::set_path);
-    t.insert("setPath",        func_paths::set_path);
     t.insert("del_path",       func_paths::del_path);
-    t.insert("delPath",        func_paths::del_path);
     t.insert("del_paths",      func_paths::del_paths);
-    t.insert("delPaths",       func_paths::del_paths);
     t.insert("has_path",       func_paths::has_path);
-    t.insert("hasPath",        func_paths::has_path);
     t.insert("flatten_keys",   func_paths::flatten_keys);
-    t.insert("flattenKeys",    func_paths::flatten_keys);
     t.insert("unflatten_keys", func_paths::unflatten_keys);
-    t.insert("unflattenKeys",  func_paths::unflatten_keys);
 
     // CSV
     t.insert("to_csv", b_to_csv);
-    t.insert("toCsv",  b_to_csv);
     t.insert("to_tsv", b_to_tsv);
-    t.insert("toTsv",  b_to_tsv);
 
     // Null safety / existence
     t.insert("or",       b_or);
@@ -223,51 +189,31 @@ fn build() -> BuiltinRegistry {
     t.insert("lower",          func_strings::lower);
     t.insert("capitalize",     func_strings::capitalize);
     t.insert("title_case",     func_strings::title_case);
-    t.insert("titleCase",      func_strings::title_case);
     t.insert("trim",           func_strings::trim);
     t.insert("trim_left",      func_strings::trim_left);
-    t.insert("trimLeft",       func_strings::trim_left);
     t.insert("trim_right",     func_strings::trim_right);
-    t.insert("trimRight",      func_strings::trim_right);
     t.insert("lines",          func_strings::lines);
     t.insert("words",          func_strings::words);
     t.insert("chars",          func_strings::chars);
     t.insert("to_number",      func_strings::to_number);
-    t.insert("toNumber",       func_strings::to_number);
     t.insert("to_bool",        func_strings::to_bool);
-    t.insert("toBool",         func_strings::to_bool);
     t.insert("to_base64",      func_strings::to_base64);
-    t.insert("toBase64",       func_strings::to_base64);
     t.insert("from_base64",    func_strings::from_base64);
-    t.insert("fromBase64",     func_strings::from_base64);
     t.insert("url_encode",     func_strings::url_encode);
-    t.insert("urlEncode",      func_strings::url_encode);
     t.insert("url_decode",     func_strings::url_decode);
-    t.insert("urlDecode",      func_strings::url_decode);
     t.insert("html_escape",    func_strings::html_escape);
-    t.insert("htmlEscape",     func_strings::html_escape);
     t.insert("html_unescape",  func_strings::html_unescape);
-    t.insert("htmlUnescape",   func_strings::html_unescape);
     t.insert("repeat",         func_strings::repeat);
     t.insert("pad_left",       func_strings::pad_left);
-    t.insert("padLeft",        func_strings::pad_left);
     t.insert("pad_right",      func_strings::pad_right);
-    t.insert("padRight",       func_strings::pad_right);
     t.insert("starts_with",    func_strings::starts_with);
-    t.insert("startsWith",     func_strings::starts_with);
     t.insert("ends_with",      func_strings::ends_with);
-    t.insert("endsWith",       func_strings::ends_with);
     t.insert("index_of",       func_strings::index_of);
-    t.insert("indexOf",        func_strings::index_of);
     t.insert("last_index_of",  func_strings::last_index_of);
-    t.insert("lastIndexOf",    func_strings::last_index_of);
     t.insert("replace",        func_strings::replace);
     t.insert("replace_all",    func_strings::replace_all);
-    t.insert("replaceAll",     func_strings::replace_all);
     t.insert("strip_prefix",   func_strings::strip_prefix);
-    t.insert("stripPrefix",    func_strings::strip_prefix);
     t.insert("strip_suffix",   func_strings::strip_suffix);
-    t.insert("stripSuffix",    func_strings::strip_suffix);
     t.insert("slice",          func_strings::str_slice);
     t.insert("split",          func_strings::split);
     t.insert("indent",         func_strings::indent);
@@ -277,102 +223,65 @@ fn build() -> BuiltinRegistry {
 
     // Case-conversion family.
     t.insert("snake_case",     func_strings::snake_case);
-    t.insert("snakeCase",      func_strings::snake_case);
     t.insert("kebab_case",     func_strings::kebab_case);
-    t.insert("kebabCase",      func_strings::kebab_case);
     t.insert("camel_case",     func_strings::camel_case);
-    t.insert("camelCase",      func_strings::camel_case);
     t.insert("pascal_case",    func_strings::pascal_case);
-    t.insert("pascalCase",     func_strings::pascal_case);
 
     // Padding / repetition / reversal.
     t.insert("center",         func_strings::center);
     t.insert("repeat_str",     func_strings::repeat_str);
-    t.insert("reverseStr",     func_strings::reverse_str);
+    t.insert("reverse_str",    func_strings::reverse_str);
 
     // Char / byte introspection.
     t.insert("chars_of",       func_strings::chars_of);
-    t.insert("charsOf",        func_strings::chars_of);
     t.insert("bytes",          func_strings::bytes_of);
     t.insert("byte_len",       func_strings::byte_len);
-    t.insert("byteLen",        func_strings::byte_len);
 
     // Predicates / parsers.
     t.insert("is_blank",       func_strings::is_blank);
-    t.insert("isBlank",        func_strings::is_blank);
     t.insert("is_numeric",     func_strings::is_numeric);
-    t.insert("isNumeric",      func_strings::is_numeric);
     t.insert("is_alpha",       func_strings::is_alpha);
-    t.insert("isAlpha",        func_strings::is_alpha);
     t.insert("is_ascii",       func_strings::is_ascii);
-    t.insert("isAscii",        func_strings::is_ascii);
     t.insert("parse_int",      func_strings::parse_int);
-    t.insert("parseInt",       func_strings::parse_int);
     t.insert("parse_float",    func_strings::parse_float);
-    t.insert("parseFloat",     func_strings::parse_float);
     t.insert("parse_bool",     func_strings::parse_bool);
-    t.insert("parseBool",      func_strings::parse_bool);
 
     // Substring set predicates.
     t.insert("contains_any",   func_strings::contains_any);
-    t.insert("containsAny",    func_strings::contains_any);
     t.insert("contains_all",   func_strings::contains_all);
-    t.insert("containsAll",    func_strings::contains_all);
 
     // Index lookup family.
     t.insert("find_index",     func_arrays::find_index);
-    t.insert("findIndex",      func_arrays::find_index);
     t.insert("index",          func_arrays::index_of_value);
-    t.insert("indexOf",        func_arrays::index_of_value);
     t.insert("indices_where",  func_arrays::indices_where);
-    t.insert("indicesWhere",   func_arrays::indices_where);
     t.insert("indices_of",     func_arrays::indices_of);
-    t.insert("indicesOf",      func_arrays::indices_of);
 
     // Argmax / argmin by key.
     t.insert("max_by",         func_arrays::max_by);
-    t.insert("maxBy",          func_arrays::max_by);
     t.insert("min_by",         func_arrays::min_by);
-    t.insert("minBy",          func_arrays::min_by);
 
     // Window-style numeric ops.
     t.insert("rolling_avg",    func_arrays::rolling_avg);
-    t.insert("rollingAvg",     func_arrays::rolling_avg);
     t.insert("rolling_sum",    func_arrays::rolling_sum);
-    t.insert("rollingSum",     func_arrays::rolling_sum);
     t.insert("rolling_min",    func_arrays::rolling_min);
-    t.insert("rollingMin",     func_arrays::rolling_min);
     t.insert("rolling_max",    func_arrays::rolling_max);
-    t.insert("rollingMax",     func_arrays::rolling_max);
     t.insert("lag",            func_arrays::lag);
     t.insert("lead",           func_arrays::lead);
     t.insert("diff_window",    func_arrays::diff_window);
-    t.insert("diffWindow",     func_arrays::diff_window);
     t.insert("pct_change",     func_arrays::pct_change);
-    t.insert("pctChange",      func_arrays::pct_change);
     t.insert("cummax",         func_arrays::cummax);
-    t.insert("cumMax",         func_arrays::cummax);
     t.insert("cummin",         func_arrays::cummin);
-    t.insert("cumMin",         func_arrays::cummin);
     t.insert("zscore",         func_arrays::zscore);
-    t.insert("zScore",         func_arrays::zscore);
 
     // Regex family.
     t.insert("re_match",       func_strings::re_match);
-    t.insert("reMatch",        func_strings::re_match);
     t.insert("match_first",    func_strings::re_match_first);
-    t.insert("matchFirst",     func_strings::re_match_first);
     t.insert("match_all",      func_strings::re_match_all);
-    t.insert("matchAll",       func_strings::re_match_all);
     t.insert("captures",       func_strings::re_captures);
     t.insert("captures_all",   func_strings::re_captures_all);
-    t.insert("capturesAll",    func_strings::re_captures_all);
     t.insert("replace_re",     func_strings::re_replace);
-    t.insert("replaceRe",      func_strings::re_replace);
     t.insert("replace_all_re", func_strings::re_replace_all);
-    t.insert("replaceAllRe",   func_strings::re_replace_all);
     t.insert("split_re",       func_strings::re_split);
-    t.insert("splitRe",        func_strings::re_split);
 
     BuiltinRegistry { table: t }
 }

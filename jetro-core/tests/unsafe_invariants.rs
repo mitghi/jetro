@@ -821,7 +821,7 @@ fn substring_set_predicates() {
 fn pad_center_repeat_reverse() {
     assert_eq!(jetro_core::query("$.center(7, '*')",  &json!("hi")).unwrap(), json!("**hi***"));
     assert_eq!(jetro_core::query("$.repeat_str(3)",   &json!("ab")).unwrap(), json!("ababab"));
-    assert_eq!(jetro_core::query("$.reverseStr()",    &json!("abc")).unwrap(), json!("cba"));
+    assert_eq!(jetro_core::query("$.reverse_str()",    &json!("abc")).unwrap(), json!("cba"));
 }
 
 #[test]
