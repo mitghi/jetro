@@ -573,14 +573,123 @@ impl Val {
     /// `From<&serde_json::Value>` (all-int → `IntVec`, all-str → `StrVec`).
     #[cfg(feature = "simd-json")]
     pub fn from_json_simd(bytes: &mut [u8]) -> Result<Val, String> {
-        let bv = simd_json::to_borrowed_value(bytes).map_err(|e| e.to_string())?;
-        Ok(Self::from_simd_borrowed(&bv))
+        // Tape path: walk simd-json's flat Vec<Node> directly into Val,
+        // skipping the BorrowedValue intermediate tree.  Each Object /
+        // Array node carries a `count` field telling us how many tape
+        // entries belong to it (for fast skip-ahead in homogeneity probes).
+        let tape = simd_json::to_tape(bytes).map_err(|e| e.to_string())?;
+        let nodes = tape.0;
+        let mut idx = 0usize;
+        Ok(Self::from_simd_tape(&nodes, &mut idx))
+    }
+
+    /// Recursive tape walker.  `idx` advances as nodes are consumed.
+    /// Honours the same columnar all-i64 / all-string lane fast paths as
+    /// `from_simd_borrowed` and `From<&serde_json::Value>`.
+    #[cfg(feature = "simd-json")]
+    fn from_simd_tape(nodes: &[simd_json::Node<'_>], idx: &mut usize) -> Val {
+        use simd_json::Node;
+        use simd_json::StaticNode as SN;
+        let here = nodes[*idx];
+        *idx += 1;
+        match here {
+            Node::Static(SN::Null)    => Val::Null,
+            Node::Static(SN::Bool(b)) => Val::Bool(b),
+            Node::Static(SN::I64(n))  => Val::Int(n),
+            Node::Static(SN::U64(n))  => {
+                if n <= i64::MAX as u64 { Val::Int(n as i64) } else { Val::Float(n as f64) }
+            }
+            Node::Static(SN::F64(f))  => Val::Float(f),
+            Node::String(s)           => Val::Str(Arc::<str>::from(s)),
+            Node::Array { len, .. } => {
+                if len == 0 {
+                    return Val::arr(Vec::new());
+                }
+                let start = *idx;
+                // Probe the first element to decide if we can take a
+                // columnar lane. Only `Static(I64|U64)` and `String`
+                // qualify; if the first child is itself an array/object
+                // we won't promote (skip the probe).
+                let first = nodes[start];
+                let mut try_int = matches!(first, Node::Static(SN::I64(_))
+                    | Node::Static(SN::U64(_)));
+                let mut try_str = matches!(first, Node::String(_));
+                // Walk siblings to verify homogeneity.  A sibling is
+                // identified by stepping over each child's full count.
+                let mut probe = start;
+                let mut counted = 0usize;
+                while counted < len {
+                    let n = nodes[probe];
+                    match n {
+                        Node::Static(SN::I64(_)) | Node::Static(SN::U64(_)) => {
+                            try_str = false;
+                            probe += 1;
+                        }
+                        Node::String(_) => {
+                            try_int = false;
+                            probe += 1;
+                        }
+                        Node::Static(_) => { try_int = false; try_str = false; probe += 1; }
+                        Node::Array { count, .. } | Node::Object { count, .. } => {
+                            try_int = false; try_str = false;
+                            probe += count + 1;
+                        }
+                    }
+                    counted += 1;
+                    if !try_int && !try_str { break; }
+                }
+                if try_int {
+                    let mut out: Vec<i64> = Vec::with_capacity(len);
+                    for _ in 0..len {
+                        match nodes[*idx] {
+                            Node::Static(SN::I64(n)) => out.push(n),
+                            Node::Static(SN::U64(n)) if n <= i64::MAX as u64
+                                => out.push(n as i64),
+                            _ => unreachable!("homogeneity check passed"),
+                        }
+                        *idx += 1;
+                    }
+                    return Val::IntVec(Arc::new(out));
+                }
+                if try_str {
+                    let mut out: Vec<Arc<str>> = Vec::with_capacity(len);
+                    for _ in 0..len {
+                        if let Node::String(s) = nodes[*idx] {
+                            out.push(Arc::<str>::from(s));
+                        }
+                        *idx += 1;
+                    }
+                    return Val::StrVec(Arc::new(out));
+                }
+                let mut out: Vec<Val> = Vec::with_capacity(len);
+                for _ in 0..len {
+                    out.push(Self::from_simd_tape(nodes, idx));
+                }
+                Val::Arr(Arc::new(out))
+            }
+            Node::Object { len, .. } => {
+                let mut out: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(len);
+                for _ in 0..len {
+                    // Object children are key/value pairs: key first,
+                    // then value (which may be nested).
+                    let key = match nodes[*idx] {
+                        Node::String(s) => s,
+                        _ => unreachable!("object key must be string"),
+                    };
+                    *idx += 1;
+                    let v = Self::from_simd_tape(nodes, idx);
+                    out.insert(intern_key(key), v);
+                }
+                Val::Obj(Arc::new(out))
+            }
+        }
     }
 
     /// Walk a `simd_json::BorrowedValue` into a `Val`.
     /// Mirrors `From<&serde_json::Value>` with columnar all-int / all-str
     /// fast paths, but skips the serde_json::Value materialisation step.
     #[cfg(feature = "simd-json")]
+    #[allow(dead_code)]
     fn from_simd_borrowed(v: &simd_json::BorrowedValue<'_>) -> Val {
         use simd_json::value::borrowed::Value as SV;
         use simd_json::StaticNode as SN;
