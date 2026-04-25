@@ -169,8 +169,12 @@ pub enum BodyKernel {
     FieldChain(Arc<[Arc<str>]>),
     /// `[PushCurrent, GetField(k), <lit-push>, <cmp-op>]`  →  pred
     FieldCmpLit(Arc<str>, crate::ast::BinOp, Val),
+    /// `[PushCurrent, FieldChain(...), <lit-push>, <cmp-op>]`  →  pred
+    FieldChainCmpLit(Arc<[Arc<str>]>, crate::ast::BinOp, Val),
     /// Predicate is a constant boolean (e.g. `@ == 1` already folded).
     ConstBool(bool),
+    /// Body produces a constant value independent of item.
+    Const(Val),
 }
 
 impl BodyKernel {
@@ -180,11 +184,20 @@ impl BodyKernel {
     pub fn classify(prog: &crate::vm::Program) -> Self {
         use crate::vm::Opcode;
         let ops = prog.ops.as_ref();
+        // Constant body — push-only programs.  PushInt / PushFloat /
+        // PushStr / PushBool / PushNull all classify as Const(<lit>).
+        if ops.len() == 1 {
+            if let Some(lit) = trivial_lit(&ops[0]) {
+                return match &ops[0] {
+                    Opcode::PushBool(b) => Self::ConstBool(*b),
+                    _ => Self::Const(lit),
+                };
+            }
+        }
         // Single-step shorthands.  LoadIdent(k) inside a lambda body
         // resolves to current.get_field(k) at runtime — same semantics
         // as PushCurrent + GetField(k).  Treat as FieldRead.
         match ops {
-            [Opcode::PushBool(b)] => return Self::ConstBool(*b),
             [Opcode::PushCurrent, Opcode::GetField(k)]
             | [Opcode::GetField(k)]
             | [Opcode::LoadIdent(k)] =>
@@ -192,24 +205,42 @@ impl BodyKernel {
             [Opcode::PushCurrent, Opcode::FieldChain(fc)]
             | [Opcode::FieldChain(fc)] =>
                 return Self::FieldChain(fc.keys.clone()),
+            // `LoadIdent(k1) + GetField(k2) [+ GetField(k3) …]` —
+            // LoadIdent shorthand resolves to current.get_field(k1),
+            // so the whole shape is a chain rooted at `current`.
+            [Opcode::LoadIdent(k1), rest @ ..] if rest.iter()
+                .all(|o| matches!(o, Opcode::GetField(_))) =>
+            {
+                let mut keys = vec![k1.clone()];
+                for o in rest {
+                    if let Opcode::GetField(k) = o { keys.push(k.clone()); }
+                }
+                return Self::FieldChain(keys.into());
+            }
             _ => {}
         }
-        // FieldCmpLit — predicate shape `<field-read>, <lit-push>, <cmp>`.
-        // `<field-read>` may be LoadIdent(k), GetField(k), or
-        // PushCurrent+GetField(k); strip the optional PushCurrent
-        // prefix first.
+        // <field-read>, <lit>, <cmp>  →  FieldCmpLit / FieldChainCmpLit
         let rest: &[Opcode] = if matches!(ops.first(), Some(Opcode::PushCurrent)) {
             &ops[1..]
         } else { ops };
         if rest.len() == 3 {
-            let key = match &rest[0] {
+            // Single-field cmp.
+            let single_key = match &rest[0] {
                 Opcode::LoadIdent(k) | Opcode::GetField(k) => Some(k.clone()),
                 _ => None,
             };
-            if let Some(k) = key {
+            if let Some(k) = single_key {
                 if let Some(lit) = trivial_lit(&rest[1]) {
                     if let Some(bo) = cmp_to_binop(&rest[2]) {
                         return Self::FieldCmpLit(k, bo, lit);
+                    }
+                }
+            }
+            // Chain cmp.
+            if let Opcode::FieldChain(fc) = &rest[0] {
+                if let Some(lit) = trivial_lit(&rest[1]) {
+                    if let Some(bo) = cmp_to_binop(&rest[2]) {
+                        return Self::FieldChainCmpLit(fc.keys.clone(), bo, lit);
                     }
                 }
             }
@@ -895,6 +926,19 @@ impl Pipeline {
                     if eval_cmp_op(&lhs, *pop, plit) {
                         out.push(v.get_field(mk.as_ref()));
                     }
+                }
+                Some(Ok(Val::arr(out)))
+            }
+            // Single Map(FieldChain) → Collect: walk chain per item.
+            ([Stage::Map(_)], [BodyKernel::FieldChain(ks)]) => {
+                let mut out = Vec::with_capacity(arr.len());
+                for v in arr.iter() {
+                    let mut cur = v.clone();
+                    for k in ks.iter() {
+                        cur = cur.get_field(k.as_ref());
+                        if matches!(cur, Val::Null) { break; }
+                    }
+                    out.push(cur);
                 }
                 Some(Ok(Val::arr(out)))
             }
@@ -1880,9 +1924,18 @@ fn eval_kernel(
             Ok(v)
         }
         BodyKernel::ConstBool(b) => Ok(Val::Bool(*b)),
+        BodyKernel::Const(v) => Ok(v.clone()),
         BodyKernel::FieldCmpLit(k, op, lit) => {
             let lhs = item.get_field(k.as_ref());
             Ok(Val::Bool(eval_cmp_op(&lhs, *op, lit)))
+        }
+        BodyKernel::FieldChainCmpLit(ks, op, lit) => {
+            let mut v = item.clone();
+            for k in ks.iter() {
+                v = v.get_field(k.as_ref());
+                if matches!(v, Val::Null) { break; }
+            }
+            Ok(Val::Bool(eval_cmp_op(&v, *op, lit)))
         }
         BodyKernel::Generic => apply_item_in_env(vm, env, item, fallback),
     }
