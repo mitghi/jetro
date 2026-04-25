@@ -132,4 +132,32 @@ fn main() {
         let r = j_tape_arr.collect("$.orders.filter(total > 100).map(total).sum()").unwrap();
         r.as_i64().unwrap_or(0) as u64
     });
+
+    // bench_complex Q4 shape: compound AND predicate.  Build a richer doc
+    // with `status` and `priority` keys.
+    let mut s = String::with_capacity(n * 80);
+    s.push_str("{\"orders\":[");
+    for i in 0..n {
+        if i > 0 { s.push(','); }
+        let status = if i % 3 == 0 { "shipped" } else { "pending" };
+        let pri    = if i % 5 == 0 { "high" } else { "low" };
+        s.push_str(&format!(
+            "{{\"id\":{},\"total\":{},\"status\":\"{}\",\"priority\":\"{}\"}}",
+            i, i, status, pri));
+    }
+    s.push_str("]}");
+    let q4_bytes = s.into_bytes();
+    let j_val_q4  = Jetro::from_slice(&q4_bytes).unwrap();
+    let j_tape_q4 = Jetro::from_simd_lazy(q4_bytes.clone()).unwrap();
+    let q4 = r#"$.orders.filter(status == "shipped" and priority == "high").count()"#;
+    let _ = j_val_q4.collect(q4).unwrap();
+    let _ = j_tape_q4.collect(q4).unwrap();
+    bench("Val tree     Q4 status==shipped AND prio==high count", iters, || {
+        let r = j_val_q4.collect(q4).unwrap();
+        r.as_i64().unwrap_or(0) as u64
+    });
+    bench("tape walker  Q4 status==shipped AND prio==high count", iters, || {
+        let r = j_tape_q4.collect(q4).unwrap();
+        r.as_i64().unwrap_or(0) as u64
+    });
 }

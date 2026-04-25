@@ -515,6 +515,36 @@ pub enum TapeLit<'a> {
 #[derive(Debug, Clone, Copy)]
 pub enum TapeCmp { Eq, Neq, Lt, Lte, Gt, Gte }
 
+/// Predicate tree for tape-side filters.  Compositions over `Cmp`
+/// leaves via boolean conjunction/disjunction.  Negation is folded into
+/// the comparison op at classifier time (Eq↔Neq, Lt↔Gte, …) so it does
+/// not need its own variant.
+#[cfg(feature = "simd-json")]
+#[derive(Debug, Clone)]
+pub enum TapePred<'a> {
+    Cmp { field: &'a str, op: TapeCmp, lit: TapeLit<'a> },
+    And(Vec<TapePred<'a>>),
+    Or(Vec<TapePred<'a>>),
+}
+
+#[cfg(feature = "simd-json")]
+impl<'a> TapePred<'a> {
+    /// Evaluate the predicate against an Object node `entry`.  Missing
+    /// fields are treated as not-matching.
+    pub fn eval(&self, tape: &TapeData, entry: usize) -> bool {
+        match self {
+            TapePred::Cmp { field, op, lit } => {
+                match tape_object_field(tape, entry, field) {
+                    Some(v) => tape_value_cmp(tape, v, *op, lit),
+                    None => false,
+                }
+            }
+            TapePred::And(xs) => xs.iter().all(|p| p.eval(tape, entry)),
+            TapePred::Or (xs) => xs.iter().any(|p| p.eval(tape, entry)),
+        }
+    }
+}
+
 /// Compare a tape value at node `idx` against a literal.  Returns
 /// `false` on type mismatch (e.g. Int vs Str).  Numeric comparisons
 /// promote i64↔f64.
@@ -591,6 +621,90 @@ pub fn tape_array_filter_count(
         j += tape.span(entry);
     }
     Some(count)
+}
+
+/// `$.<arr>.filter(<predicate>).count()` — predicate-only count
+/// where the predicate may be any boolean tree of comparisons.
+#[cfg(feature = "simd-json")]
+pub fn tape_array_filter_pred_count(
+    tape: &TapeData,
+    arr_idx: usize,
+    pred: &TapePred,
+) -> Option<usize> {
+    let len = match tape.nodes[arr_idx] {
+        TapeNode::Array { len, .. } => len as usize,
+        _ => return None,
+    };
+    let mut count = 0usize;
+    let mut j = arr_idx + 1;
+    for _ in 0..len {
+        let entry = j;
+        if let TapeNode::Object { .. } = tape.nodes[entry] {
+            if pred.eval(tape, entry) { count += 1; }
+        }
+        j += tape.span(entry);
+    }
+    Some(count)
+}
+
+/// Filter+map+fold variant accepting an arbitrary `TapePred`.
+#[cfg(feature = "simd-json")]
+pub fn tape_array_filter_pred_map_numeric_fold(
+    tape: &TapeData,
+    arr_idx: usize,
+    pred: &TapePred,
+    map_field: &str,
+) -> Option<(i64, f64, usize, f64, f64, bool)> {
+    let len = match tape.nodes[arr_idx] {
+        TapeNode::Array { len, .. } => len as usize,
+        _ => return None,
+    };
+    let mut acc = NumAcc {
+        sum_i: 0, sum_f: 0.0, count: 0,
+        min_f: f64::INFINITY, max_f: f64::NEG_INFINITY,
+        is_float: false, mixed: false,
+    };
+    let mut j = arr_idx + 1;
+    for _ in 0..len {
+        let entry = j;
+        if !matches!(tape.nodes[entry], TapeNode::Object { .. }) { return None; }
+        if pred.eval(tape, entry) {
+            if let Some(mv) = tape_object_field(tape, entry, map_field) {
+                accumulate(tape.nodes[mv], &mut acc);
+                if acc.mixed { return None; }
+            }
+        }
+        j += tape.span(entry);
+    }
+    Some((acc.sum_i, acc.sum_f, acc.count, acc.min_f, acc.max_f, acc.is_float))
+}
+
+/// Filter+map+collect variant accepting an arbitrary `TapePred`.
+#[cfg(feature = "simd-json")]
+pub fn tape_array_filter_pred_map_collect_numeric(
+    tape: &TapeData,
+    arr_idx: usize,
+    pred: &TapePred,
+    map_field: &str,
+) -> Option<(Vec<i64>, Vec<f64>, bool)> {
+    let len = match tape.nodes[arr_idx] {
+        TapeNode::Array { len, .. } => len as usize,
+        _ => return None,
+    };
+    let mut acc = NumCol { ints: Vec::new(), floats: Vec::new(), is_float: false, mixed: false };
+    let mut j = arr_idx + 1;
+    for _ in 0..len {
+        let entry = j;
+        if !matches!(tape.nodes[entry], TapeNode::Object { .. }) { return None; }
+        if pred.eval(tape, entry) {
+            if let Some(mv) = tape_object_field(tape, entry, map_field) {
+                collect_value(tape.nodes[mv], &mut acc);
+                if acc.mixed { return None; }
+            }
+        }
+        j += tape.span(entry);
+    }
+    Some((acc.ints, acc.floats, acc.is_float))
 }
 
 /// `$.<arr>.filter(<pf> <op> <lit>).map(<mf>).<agg>()` — single-pass

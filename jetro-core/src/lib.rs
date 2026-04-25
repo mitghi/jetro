@@ -430,20 +430,84 @@ fn classify_cmp_op(op: crate::ast::BinOp) -> Option<crate::strref::TapeCmp> {
     })
 }
 
+/// Convert a parsed filter `Expr` into a `TapePred` tree, recursing
+/// through `and` / `or` conjunctions.  Each leaf must be a comparison
+/// of `<field-ref>` against `<literal>` (in either order — operator
+/// flips when the literal is on the LHS).
+#[cfg(feature = "simd-json")]
+fn classify_pred<'a>(e: &'a crate::ast::Expr) -> Option<crate::strref::TapePred<'a>> {
+    use crate::ast::{Expr, BinOp};
+    use crate::strref::{TapePred, TapeCmp};
+    match e {
+        Expr::BinOp(l, BinOp::And, r) => {
+            let mut leaves: Vec<TapePred> = Vec::new();
+            flatten_into(&mut leaves, l, BinOp::And)?;
+            flatten_into(&mut leaves, r, BinOp::And)?;
+            Some(TapePred::And(leaves))
+        }
+        Expr::BinOp(l, BinOp::Or, r) => {
+            let mut leaves: Vec<TapePred> = Vec::new();
+            flatten_into(&mut leaves, l, BinOp::Or)?;
+            flatten_into(&mut leaves, r, BinOp::Or)?;
+            Some(TapePred::Or(leaves))
+        }
+        Expr::BinOp(lhs, op, rhs) => {
+            let cmp = classify_cmp_op(*op)?;
+            if let (Some(f), Some(lit)) = (classify_implicit_field(lhs), classify_literal(rhs)) {
+                Some(TapePred::Cmp { field: f, op: cmp, lit })
+            } else if let (Some(lit), Some(f)) = (classify_literal(lhs), classify_implicit_field(rhs)) {
+                let flipped = match cmp {
+                    TapeCmp::Lt  => TapeCmp::Gt,
+                    TapeCmp::Lte => TapeCmp::Gte,
+                    TapeCmp::Gt  => TapeCmp::Lt,
+                    TapeCmp::Gte => TapeCmp::Lte,
+                    other => other,
+                };
+                Some(TapePred::Cmp { field: f, op: flipped, lit })
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Flatten left-deep `a AND b AND c` chains into a single Vec leaf
+/// list (and the same for `OR`), so the eval loop short-circuits
+/// without per-node recursion overhead.
+#[cfg(feature = "simd-json")]
+fn flatten_into<'a>(
+    out: &mut Vec<crate::strref::TapePred<'a>>,
+    e: &'a crate::ast::Expr,
+    parent: crate::ast::BinOp,
+) -> Option<()> {
+    use crate::ast::{Expr, BinOp};
+    if let Expr::BinOp(l, op, r) = e {
+        if *op == parent && (parent == BinOp::And || parent == BinOp::Or) {
+            flatten_into(out, l, parent)?;
+            flatten_into(out, r, parent)?;
+            return Some(());
+        }
+    }
+    out.push(classify_pred(e)?);
+    Some(())
+}
+
 /// Tape executor for the family
-///   `$.k1.k2…kN.filter(<field> <op> <lit>)[.map(<field2>)][.<agg>()]`
+///   `$.k1.k2…kN.filter(<predicate>)[.map(<field2>)][.<agg>()]`
 /// covering: `.count()` / `.len()` (predicate-only); bare collect to
 /// IntVec/FloatVec (`.filter(...).map(field)`); and numeric fold
 /// (`.filter(...).map(field).<sum|avg|min|max|count|len>()`).
+/// Predicates may be any tree of `<field> <cmp> <lit>` leaves combined
+/// with `and` / `or`.
 #[cfg(feature = "simd-json")]
 fn try_tape_array_filter_count(
     steps: &[crate::ast::Step],
     tape: &Arc<crate::strref::TapeData>,
 ) -> Option<std::result::Result<Val, EvalError>> {
-    use crate::ast::{Expr, Step, Arg};
+    use crate::ast::{Step, Arg};
     if steps.len() < 2 { return None; }
 
-    // Walk leading Field steps, then mandatory `.filter(<binop>)`.
     let mut filter_at = None;
     for (i, s) in steps.iter().enumerate() {
         match s {
@@ -463,50 +527,28 @@ fn try_tape_array_filter_count(
     }
     let arr_idx = crate::strref::tape_walk_field_chain(tape, &keys)?;
 
-    // Decode the predicate: `<field-ref> <cmp-op> <literal>` (flip if mirrored).
-    let pred = match &steps[f_idx] {
+    let pred_expr = match &steps[f_idx] {
         Step::Method(_, args) => match &args[0] {
             Arg::Pos(e) => e,
             _ => return None,
         },
         _ => return None,
     };
-    let (lhs, op, rhs) = match pred {
-        Expr::BinOp(l, op, r) => (l.as_ref(), *op, r.as_ref()),
-        _ => return None,
-    };
-    let cmp = classify_cmp_op(op)?;
+    let pred = classify_pred(pred_expr)?;
 
-    let (pred_field, cmp, lit) = if let (Some(f), Some(l)) = (classify_implicit_field(lhs), classify_literal(rhs)) {
-        (f, cmp, l)
-    } else if let (Some(l), Some(f)) = (classify_literal(lhs), classify_implicit_field(rhs)) {
-        let flipped = match cmp {
-            crate::strref::TapeCmp::Lt  => crate::strref::TapeCmp::Gt,
-            crate::strref::TapeCmp::Lte => crate::strref::TapeCmp::Gte,
-            crate::strref::TapeCmp::Gt  => crate::strref::TapeCmp::Lt,
-            crate::strref::TapeCmp::Gte => crate::strref::TapeCmp::Lte,
-            other => other,
-        };
-        (f, flipped, l)
-    } else {
-        return None;
-    };
-
-    // Tail after .filter(): can be empty, .count()/.len(), .map(g), or
-    // .map(g).<agg>().
     let tail = &steps[f_idx + 1..];
 
     // Case 1: .filter(...).count() / .len()
     if tail.len() == 1 {
         if let Step::Method(name, args) = &tail[0] {
             if args.is_empty() && (name == "count" || name == "len") {
-                let n = crate::strref::tape_array_filter_count(tape, arr_idx, pred_field, cmp, &lit)?;
+                let n = crate::strref::tape_array_filter_pred_count(tape, arr_idx, &pred)?;
                 return Some(Ok(Val::Int(n as i64)));
             }
         }
     }
 
-    // Case 2/3 require the next step to be .map(<field>).
+    // Case 2/3: need .map(<field>).
     if tail.is_empty() { return None; }
     let map_field = match &tail[0] {
         Step::Method(name, args) if name == "map" && args.len() == 1 => match &args[0] {
@@ -516,10 +558,9 @@ fn try_tape_array_filter_count(
         _ => return None,
     };
 
-    // Case 2: .filter(...).map(<field>) — bare collect to IntVec / FloatVec.
     if tail.len() == 1 {
         let (ints, floats, is_float) =
-            crate::strref::tape_array_filter_map_collect_numeric(tape, arr_idx, pred_field, cmp, &lit, map_field)?;
+            crate::strref::tape_array_filter_pred_map_collect_numeric(tape, arr_idx, &pred, map_field)?;
         let out = if is_float {
             Val::FloatVec(Arc::new(floats))
         } else {
@@ -528,14 +569,13 @@ fn try_tape_array_filter_count(
         return Some(Ok(out));
     }
 
-    // Case 3: .filter(...).map(<field>).<agg>()
     if tail.len() != 2 { return None; }
     let agg = match &tail[1] {
         Step::Method(name, args) if args.is_empty() => name.as_str(),
         _ => return None,
     };
     let (sum_i, sum_f, count, min_f, max_f, is_float) =
-        crate::strref::tape_array_filter_map_numeric_fold(tape, arr_idx, pred_field, cmp, &lit, map_field)?;
+        crate::strref::tape_array_filter_pred_map_numeric_fold(tape, arr_idx, &pred, map_field)?;
     let out = match agg {
         "sum" => if is_float { Val::Float(sum_f) } else { Val::Int(sum_i) },
         "avg" => {
