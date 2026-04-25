@@ -377,6 +377,19 @@ impl Val {
             Val::IntVec(a) => Some(a.iter().map(|n| Val::Int(*n)).collect()),
             Val::FloatVec(a) => Some(a.iter().map(|f| Val::Float(*f)).collect()),
             Val::StrVec(a) => Some(a.iter().map(|s| Val::Str(s.clone())).collect()),
+            Val::ObjVec(d) => {
+                let stride = d.keys.len();
+                let nrows = if stride == 0 { 0 } else { d.cells.len() / stride };
+                let mut out = Vec::with_capacity(nrows);
+                for r in 0..nrows {
+                    let mut m: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(stride);
+                    for (i, k) in d.keys.iter().enumerate() {
+                        m.insert(k.clone(), d.cells[r * stride + i].clone());
+                    }
+                    out.push(Val::Obj(Arc::new(m)));
+                }
+                Some(out)
+            }
             _ => None,
         }
     }

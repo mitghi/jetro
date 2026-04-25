@@ -616,6 +616,55 @@ fn hash_ops(ops: &[Opcode], h: &mut impl std::hash::Hasher) {
             Opcode::RootChain(chain) => {
                 for k in chain.iter() { k.as_bytes().hash(h); }
             }
+            Opcode::MakeObj(entries) => {
+                use super::vm::CompiledObjEntry;
+                for e in entries.iter() {
+                    match e {
+                        CompiledObjEntry::Short { name, .. } => {
+                            0u8.hash(h);
+                            name.as_bytes().hash(h);
+                        }
+                        CompiledObjEntry::Kv { key, prog, optional, cond } => {
+                            1u8.hash(h);
+                            key.as_bytes().hash(h);
+                            optional.hash(h);
+                            hash_ops(&prog.ops, h);
+                            if let Some(c) = cond { hash_ops(&c.ops, h); }
+                        }
+                        CompiledObjEntry::KvPath { key, steps, optional, .. } => {
+                            2u8.hash(h);
+                            key.as_bytes().hash(h);
+                            optional.hash(h);
+                            for st in steps.iter() {
+                                use super::vm::KvStep;
+                                match st {
+                                    KvStep::Field(f) => { 0u8.hash(h); f.as_bytes().hash(h); }
+                                    KvStep::Index(i) => { 1u8.hash(h); i.hash(h); }
+                                }
+                            }
+                        }
+                        CompiledObjEntry::Dynamic { key, val } => {
+                            3u8.hash(h);
+                            hash_ops(&key.ops, h);
+                            hash_ops(&val.ops, h);
+                        }
+                        CompiledObjEntry::Spread(p) => {
+                            4u8.hash(h);
+                            hash_ops(&p.ops, h);
+                        }
+                        CompiledObjEntry::SpreadDeep(p) => {
+                            5u8.hash(h);
+                            hash_ops(&p.ops, h);
+                        }
+                    }
+                }
+            }
+            Opcode::MakeArr(entries) => {
+                for (p, sp) in entries.iter() {
+                    sp.hash(h);
+                    hash_ops(&p.ops, h);
+                }
+            }
             _ => {}
         }
     }
