@@ -656,6 +656,65 @@ fn compile_handle_run_on_jetro() {
     assert_eq!(q.run_on(&j2).unwrap(), json!(2));
 }
 
+// ── index lookup + max_by / min_by ──────────────────────────────────
+
+#[test]
+fn find_index_basic() {
+    let r = jetro_core::query("$.find_index(@ > 10)", &json!([1, 5, 12, 3, 20])).unwrap();
+    assert_eq!(r, json!(2));
+    let r = jetro_core::query("$.find_index(@ > 100)", &json!([1, 5, 12])).unwrap();
+    assert!(r.is_null());
+}
+
+#[test]
+fn find_index_with_field_pred() {
+    let r = jetro_core::query(r#"$.find_index(name == "Bob")"#, &json!([
+        {"name": "Ada"}, {"name": "Bob"}, {"name": "Cara"}
+    ])).unwrap();
+    assert_eq!(r, json!(1));
+}
+
+#[test]
+fn index_of_value() {
+    let r = jetro_core::query("$.index('urgent')", &json!(["a", "urgent", "x", "urgent"])).unwrap();
+    assert_eq!(r, json!(1));
+    let r = jetro_core::query("$.index('absent')", &json!(["a", "b"])).unwrap();
+    assert!(r.is_null());
+}
+
+#[test]
+fn indices_where_basic() {
+    let r = jetro_core::query("$.indices_where(@ > 5)", &json!([1, 6, 3, 7, 2, 9])).unwrap();
+    assert_eq!(r, json!([1, 3, 5]));
+}
+
+#[test]
+fn indices_of_basic() {
+    let r = jetro_core::query("$.indices_of('a')", &json!(["a", "b", "a", "c", "a"])).unwrap();
+    assert_eq!(r, json!([0, 2, 4]));
+}
+
+#[test]
+fn max_by_min_by() {
+    let books = json!([
+        {"title": "A", "price": 12.0},
+        {"title": "B", "price":  9.0},
+        {"title": "C", "price": 15.0},
+    ]);
+    let max = jetro_core::query("$.max_by(price)", &books).unwrap();
+    assert_eq!(max["title"], json!("C"));
+    let min = jetro_core::query("$.min_by(price)", &books).unwrap();
+    assert_eq!(min["title"], json!("B"));
+}
+
+#[test]
+fn max_by_min_by_lambda_key() {
+    let r = jetro_core::query("$.max_by(@.len())", &json!(["a", "abc", "ab"])).unwrap();
+    assert_eq!(r, json!("abc"));
+    let r = jetro_core::query("$.min_by(@.len())", &json!(["abc", "a", "ab"])).unwrap();
+    assert_eq!(r, json!("a"));
+}
+
 // ── window-style numeric ops ────────────────────────────────────────
 
 #[test]

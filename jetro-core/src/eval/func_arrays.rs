@@ -736,6 +736,99 @@ pub fn cummin(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
     Ok(floats_to_val(out))
 }
 
+// ── Index lookup family ──────────────────────────────────────────────────────
+//
+// Returning positions instead of items.
+
+pub fn find_index(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+    if args.is_empty() { return err!("find_index: requires a predicate"); }
+    let items = recv.into_vec().ok_or_else(|| EvalError("find_index: expected array".into()))?;
+    let mut env_mut = env.clone();
+    for (i, item) in items.iter().enumerate() {
+        let mut all = true;
+        for p in args {
+            if !is_truthy(&apply_item_mut(item.clone(), p, &mut env_mut)?) {
+                all = false; break;
+            }
+        }
+        if all { return Ok(Val::Int(i as i64)); }
+    }
+    Ok(Val::Null)
+}
+
+pub fn index_of_value(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+    if args.is_empty() { return err!("index: requires a target value"); }
+    let target = eval_pos(&args[0], env)?;
+    let items = recv.into_vec().ok_or_else(|| EvalError("index: expected array".into()))?;
+    for (i, item) in items.iter().enumerate() {
+        if super::util::vals_eq(item, &target) {
+            return Ok(Val::Int(i as i64));
+        }
+    }
+    Ok(Val::Null)
+}
+
+pub fn indices_where(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+    if args.is_empty() { return err!("indices_where: requires a predicate"); }
+    let items = recv.into_vec().ok_or_else(|| EvalError("indices_where: expected array".into()))?;
+    let mut env_mut = env.clone();
+    let mut out: Vec<i64> = Vec::new();
+    for (i, item) in items.iter().enumerate() {
+        let mut all = true;
+        for p in args {
+            if !is_truthy(&apply_item_mut(item.clone(), p, &mut env_mut)?) {
+                all = false; break;
+            }
+        }
+        if all { out.push(i as i64); }
+    }
+    Ok(Val::int_vec(out))
+}
+
+pub fn indices_of(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+    if args.is_empty() { return err!("indices_of: requires a target value"); }
+    let target = eval_pos(&args[0], env)?;
+    let items = recv.into_vec().ok_or_else(|| EvalError("indices_of: expected array".into()))?;
+    let out: Vec<i64> = items.iter().enumerate()
+        .filter(|(_, v)| super::util::vals_eq(v, &target))
+        .map(|(i, _)| i as i64)
+        .collect();
+    Ok(Val::int_vec(out))
+}
+
+// ── max_by / min_by — single-pass argmax / argmin ────────────────────────────
+
+fn extreme_by(recv: Val, args: &[Arg], env: &Env, want_max: bool, name: &str) -> Result<Val, EvalError> {
+    if args.is_empty() { return err!("{}: requires a key expression", name); }
+    let items = recv.into_vec().ok_or_else(|| EvalError(format!("{}: expected array", name)))?;
+    if items.is_empty() { return Ok(Val::Null); }
+    let key_arg = &args[0];
+    let mut env_mut = env.clone();
+    let mut best_idx: usize = 0;
+    let mut best_key: Option<Val> = None;
+    for (i, item) in items.iter().enumerate() {
+        let k = apply_item_mut(item.clone(), key_arg, &mut env_mut)?;
+        let take = match &best_key {
+            None => true,
+            Some(b) => {
+                let ord = cmp_vals(&k, b);
+                if want_max { ord == std::cmp::Ordering::Greater }
+                else        { ord == std::cmp::Ordering::Less }
+            }
+        };
+        if take { best_idx = i; best_key = Some(k); }
+    }
+    Ok(items.into_iter().nth(best_idx).unwrap_or(Val::Null))
+}
+
+pub fn max_by(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+    extreme_by(recv, args, env, true, "max_by")
+}
+
+pub fn min_by(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+    extreme_by(recv, args, env, false, "min_by")
+}
+
 pub fn zscore(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
     let xs = to_floats(&recv)?;
     let nums: Vec<f64> = xs.iter().filter_map(|v| *v).collect();

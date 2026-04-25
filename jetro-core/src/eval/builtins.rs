@@ -319,6 +319,22 @@ fn build() -> BuiltinRegistry {
     t.insert("contains_all",   func_strings::contains_all);
     t.insert("containsAll",    func_strings::contains_all);
 
+    // Index lookup family.
+    t.insert("find_index",     func_arrays::find_index);
+    t.insert("findIndex",      func_arrays::find_index);
+    t.insert("index",          func_arrays::index_of_value);
+    t.insert("indexOf",        func_arrays::index_of_value);
+    t.insert("indices_where",  func_arrays::indices_where);
+    t.insert("indicesWhere",   func_arrays::indices_where);
+    t.insert("indices_of",     func_arrays::indices_of);
+    t.insert("indicesOf",      func_arrays::indices_of);
+
+    // Argmax / argmin by key.
+    t.insert("max_by",         func_arrays::max_by);
+    t.insert("maxBy",          func_arrays::max_by);
+    t.insert("min_by",         func_arrays::min_by);
+    t.insert("minBy",          func_arrays::min_by);
+
     // Window-style numeric ops.
     t.insert("rolling_avg",    func_arrays::rolling_avg);
     t.insert("rollingAvg",     func_arrays::rolling_avg);
