@@ -426,21 +426,9 @@ pub enum Opcode {
     MapSplitNth { sep: Arc<str>, n: usize },
     /// Fused `map(f).avg()` — evaluates `f` per item, computes mean as float.
     MapAvg(Arc<Program>),
-    /// Fused `filter(p).map(f).sum()` — single pass, numeric sum of mapped
-    /// values that pass the predicate.  No intermediate array.
-    FilterMapSum { pred: Arc<Program>, map: Arc<Program> },
-    /// Fused `filter(p).map(f).avg()` — mean as float over mapped values
-    /// that pass the predicate.
-    FilterMapAvg { pred: Arc<Program>, map: Arc<Program> },
-    /// Fused `filter(p).map(f).first()` — early-exit: apply `map` once,
-    /// to the first item that satisfies `pred`.
-    FilterMapFirst { pred: Arc<Program>, map: Arc<Program> },
-    /// Fused `filter(p).map(f).min()` — single pass, numeric min over
-    /// mapped values that pass the predicate.  No intermediate array.
-    FilterMapMin { pred: Arc<Program>, map: Arc<Program> },
-    /// Fused `filter(p).map(f).max()` — single pass, numeric max over
-    /// mapped values that pass the predicate.
-    FilterMapMax { pred: Arc<Program>, map: Arc<Program> },
+    // FilterMapSum / FilterMapAvg / FilterMapFirst / FilterMapMin /
+    // FilterMapMax migrated to pipeline.rs Sink::NumFilterMap (sum,
+    // avg, min, max) and Sink::FilterFirst (first).
     /// Fused `filter(p).last()` — reverse scan, return last item
     /// satisfying `pred` (or Null when none match / input is Null).
     FilterLast { pred: Arc<Program> },
@@ -1798,28 +1786,8 @@ impl Compiler {
     fn pass_filter_fusion(ops: Vec<Opcode>) -> Vec<Opcode> {
         let mut out: Vec<Opcode> = Vec::with_capacity(ops.len());
         for op in ops {
-            // FilterMap + sum()/avg()/first() → three-way fusion
-            if let Opcode::CallMethod(b) = &op {
-                if b.sub_progs.is_empty() {
-                    if let Some(Opcode::FilterMap { pred, map }) = out.last() {
-                        let pred = Arc::clone(pred);
-                        let map = Arc::clone(map);
-                        let fused = match b.method {
-                            BuiltinMethod::Sum => Some(Opcode::FilterMapSum { pred, map }),
-                            BuiltinMethod::Avg => Some(Opcode::FilterMapAvg { pred, map }),
-                            BuiltinMethod::First => Some(Opcode::FilterMapFirst { pred, map }),
-                            BuiltinMethod::Min => Some(Opcode::FilterMapMin { pred, map }),
-                            BuiltinMethod::Max => Some(Opcode::FilterMapMax { pred, map }),
-                            _ => None,
-                        };
-                        if let Some(o) = fused {
-                            out.pop();
-                            out.push(o);
-                            continue;
-                        }
-                    }
-                }
-            }
+            // FilterMap + Sum/Avg/First/Min/Max three-way fusion
+            // migrated to pipeline.rs.  See project_opcode_migration.md.
             if let (Opcode::CallMethod(b), Some(Opcode::CallMethod(a))) = (&op, out.last()) {
                 // Two-arg fusions (both have sub_progs)
                 if a.sub_progs.len() >= 1 && b.sub_progs.len() >= 1 {
@@ -5817,113 +5785,11 @@ impl VM {
                     let recv = pop!(stack);
                     stack.push(unique_by_field(&recv, k.as_ref()));
                 }
-                Opcode::FilterMapSum { pred, map } => {
-                    let recv = pop!(stack);
-                    let mut acc_i: i64 = 0;
-                    let mut acc_f: f64 = 0.0;
-                    let mut is_float = false;
-                    let run = |this: &mut Self, item: Val, scratch: &mut Env,
-                               acc_i: &mut i64, acc_f: &mut f64, is_float: &mut bool|
-                        -> Result<(), EvalError>
-                    {
-                        let prev = scratch.swap_current(item);
-                        if !is_truthy(&this.exec(pred, scratch)?) {
-                            scratch.restore_current(prev);
-                            return Ok(());
-                        }
-                        let v = this.exec(map, scratch)?;
-                        scratch.restore_current(prev);
-                        match v {
-                            Val::Int(n) => {
-                                if *is_float { *acc_f += n as f64; } else { *acc_i += n; }
-                            }
-                            Val::Float(x) => {
-                                if !*is_float { *acc_f = *acc_i as f64; *is_float = true; }
-                                *acc_f += x;
-                            }
-                            Val::Null => {}
-                            _ => return Err(EvalError("filter(..).map(..).sum(): non-numeric mapped value".into())),
-                        }
-                        Ok(())
-                    };
-                    match &recv {
-                        Val::Arr(a) => {
-                            let mut scratch = env.clone();
-                            for item in a.iter() {
-                                run(self, item.clone(), &mut scratch, &mut acc_i, &mut acc_f, &mut is_float)?;
-                            }
-                        }
-                        Val::IntVec(a) => {
-                            let mut scratch = env.clone();
-                            for &n in a.iter() {
-                                run(self, Val::Int(n), &mut scratch, &mut acc_i, &mut acc_f, &mut is_float)?;
-                            }
-                        }
-                        Val::FloatVec(a) => {
-                            let mut scratch = env.clone();
-                            for &f in a.iter() {
-                                run(self, Val::Float(f), &mut scratch, &mut acc_i, &mut acc_f, &mut is_float)?;
-                            }
-                        }
-                        _ => {}
-                    }
-                    stack.push(if is_float { Val::Float(acc_f) } else { Val::Int(acc_i) });
-                }
-                Opcode::FilterMapAvg { pred, map } => {
-                    let recv = pop!(stack);
-                    let mut sum: f64 = 0.0;
-                    let mut n: usize = 0;
-                    if let Val::Arr(a) = &recv {
-                        let mut scratch = env.clone();
-                        for item in a.iter() {
-                            let prev = scratch.swap_current(item.clone());
-                            if !is_truthy(&self.exec(pred, &scratch)?) {
-                                scratch.restore_current(prev);
-                                continue;
-                            }
-                            let v = self.exec(map, &scratch)?;
-                            scratch.restore_current(prev);
-                            match v {
-                                Val::Int(x)   => { sum += x as f64; n += 1; }
-                                Val::Float(x) => { sum += x;        n += 1; }
-                                Val::Null => {}
-                                _ => return err!("filter(..).map(..).avg(): non-numeric mapped value"),
-                            }
-                        }
-                    }
-                    stack.push(if n == 0 { Val::Null } else { Val::Float(sum / n as f64) });
-                }
-                Opcode::FilterMapFirst { pred, map } => {
-                    let recv = pop!(stack);
-                    let mut out = Val::Null;
-                    if let Val::Arr(a) = &recv {
-                        let mut scratch = env.clone();
-                        for item in a.iter() {
-                            let prev = scratch.swap_current(item.clone());
-                            if is_truthy(&self.exec(pred, &scratch)?) {
-                                let mapped = self.exec(map, &scratch)?;
-                                scratch.restore_current(prev);
-                                out = mapped;
-                                break;
-                            }
-                            scratch.restore_current(prev);
-                        }
-                    } else if !recv.is_null() {
-                        let sub = env.with_current(recv.clone());
-                        if is_truthy(&self.exec(pred, &sub)?) {
-                            out = self.exec(map, &sub)?;
-                        }
-                    }
-                    stack.push(out);
-                }
-                Opcode::FilterMapMin { pred, map } => {
-                    let recv = pop!(stack);
-                    stack.push(self.filter_map_minmax(recv, pred, map, env, true)?);
-                }
-                Opcode::FilterMapMax { pred, map } => {
-                    let recv = pop!(stack);
-                    stack.push(self.filter_map_minmax(recv, pred, map, env, false)?);
-                }
+                // FilterMapSum / Avg / First / Min / Max handlers
+                // removed.  Pipeline.rs Sink::NumFilterMap (sum/avg/min/max)
+                // and Sink::FilterFirst cover these shapes for top-level
+                // queries; sub-program path executes FilterMap + bare
+                // aggregate as two separate ops.
                 Opcode::FilterLast { pred } => {
                     let recv = pop!(stack);
                     let mut out = Val::Null;
@@ -6878,62 +6744,8 @@ impl VM {
         stack.pop().ok_or_else(|| EvalError("program produced no value".into()))
     }
 
-    // ── Helper: single-pass numeric min/max over filter.map ───────────────────
-    /// Shared body for `FilterMapMin` / `FilterMapMax`.  `is_min=true` keeps the
-    /// smallest value, `false` keeps the largest.  Factored out of the main
-    /// exec match so the hot dispatch loop stays lean.
-    #[cold]
-    #[inline(never)]
-    fn filter_map_minmax(
-        &mut self,
-        recv: Val,
-        pred: &Program,
-        map:  &Program,
-        env:  &Env,
-        is_min: bool,
-    ) -> Result<Val, EvalError> {
-        let mut best_i: Option<i64> = None;
-        let mut best_f: Option<f64> = None;
-        let better = |new: f64, old: f64| if is_min { new < old } else { new > old };
-        let better_i = |new: i64, old: i64| if is_min { new < old } else { new > old };
-        let label = if is_min { "min" } else { "max" };
-        if let Val::Arr(a) = &recv {
-            let mut scratch = env.clone();
-            for item in a.iter() {
-                let prev = scratch.swap_current(item.clone());
-                if !is_truthy(&self.exec(pred, &scratch)?) {
-                    scratch.restore_current(prev);
-                    continue;
-                }
-                let v = self.exec(map, &scratch)?;
-                scratch.restore_current(prev);
-                match v {
-                    Val::Int(n) => {
-                        if let Some(bf) = best_f {
-                            if better(n as f64, bf) { best_f = Some(n as f64); }
-                        } else if let Some(bi) = best_i {
-                            if better_i(n, bi) { best_i = Some(n); }
-                        } else { best_i = Some(n); }
-                    }
-                    Val::Float(x) => {
-                        if best_f.is_none() {
-                            best_f = Some(best_i.map(|i| i as f64).unwrap_or(x));
-                            best_i = None;
-                        }
-                        if better(x, best_f.unwrap()) { best_f = Some(x); }
-                    }
-                    Val::Null => {}
-                    _ => return Err(EvalError(format!(
-                        "filter(..).map(..).{}(): non-numeric mapped value", label))),
-                }
-            }
-        }
-        Ok(match (best_i, best_f) {
-            (_, Some(x)) => Val::Float(x),
-            (Some(i), _) => Val::Int(i),
-            _ => Val::Null,
-        })
-    }
+    // filter_map_minmax helper removed alongside the FilterMapMin /
+    // FilterMapMax opcodes (migrated to pipeline.rs Sink::NumFilterMap).
 
     // ── Method call dispatch ──────────────────────────────────────────────────
 

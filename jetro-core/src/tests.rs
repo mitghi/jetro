@@ -1429,8 +1429,10 @@ mod tests {
         let prog = Compiler::compile_str(
             "$.books.filter(@.price > 10).map(@.price).sum()"
         ).unwrap();
-        let has = prog.ops.iter().any(|o| matches!(o, Opcode::FilterMapSum { .. }));
-        assert!(has, "filter+map+sum should fuse to FilterMapSum");
+        // FilterMapSum migrated to pipeline.rs; opcode path keeps
+        // unfused FilterMap + bare aggregate.
+        let has = prog.ops.iter().any(|o| matches!(o, Opcode::FilterMap { .. }));
+        assert!(has, "filter+map should still fuse to FilterMap (pre-aggregate)");
     }
 
     #[test]
@@ -1439,8 +1441,8 @@ mod tests {
         let prog = Compiler::compile_str(
             "$.books.filter(@.price > 10).map(@.price).avg()"
         ).unwrap();
-        let has = prog.ops.iter().any(|o| matches!(o, Opcode::FilterMapAvg { .. }));
-        assert!(has, "filter+map+avg should fuse to FilterMapAvg");
+        let has = prog.ops.iter().any(|o| matches!(o, Opcode::FilterMap { .. }));
+        assert!(has, "filter+map should still fuse to FilterMap (pre-aggregate)");
     }
 
     #[test]
@@ -1504,8 +1506,10 @@ mod tests {
         let prog = Compiler::compile_str(
             "$.books.filter(@.price > 10).map(@.title).first()"
         ).unwrap();
-        let has = prog.ops.iter().any(|o| matches!(o, Opcode::FilterMapFirst { .. }));
-        assert!(has, "filter+map+first should fuse to FilterMapFirst");
+        // FilterMapFirst migrated to pipeline.rs Sink::FilterFirst; opcode
+        // path keeps the unfused FilterMap + bare First sequence.
+        let has = prog.ops.iter().any(|o| matches!(o, Opcode::FilterMap { .. }));
+        assert!(has, "filter+map should still fuse to FilterMap");
     }
 
     #[test]
