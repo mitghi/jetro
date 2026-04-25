@@ -113,6 +113,7 @@ struct Arity { pops: usize, pushes: bool }
 
 fn op_arity(op: &Opcode) -> Arity {
     match op {
+        Opcode::PipelineRun { .. } => Arity { pops: 0, pushes: true },
         Opcode::PushNull | Opcode::PushBool(_) | Opcode::PushInt(_)
             | Opcode::PushFloat(_) | Opcode::PushStr(_)
             | Opcode::PushRoot | Opcode::PushCurrent | Opcode::LoadIdent(_)

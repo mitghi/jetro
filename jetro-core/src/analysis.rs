@@ -15,7 +15,7 @@
 use std::sync::Arc;
 use std::collections::HashMap;
 
-use super::vm::{Program, Opcode, BuiltinMethod};
+use super::vm::{Program, Opcode, BuiltinMethod, CompiledPipeStep};
 use super::ast::KindType;
 
 // ── Type lattice ──────────────────────────────────────────────────────────────
@@ -375,6 +375,7 @@ fn apply_op(op: &Opcode, stack: &mut Vec<AbstractVal>) {
             };
             stack.push(av);
         }
+        Opcode::PipelineRun { .. } => stack.push(AbstractVal::UNKNOWN),
     }
 }
 
@@ -1069,6 +1070,12 @@ pub fn opcode_cost(op: &Opcode) -> u32 {
         Opcode::MapSplitFirst { .. } => 3,
         Opcode::MapSplitNth   { .. } => 3,
         Opcode::MapSplitCountSum { .. } => 3,
+        Opcode::PipelineRun { base, steps } => {
+            program_cost(base) + steps.iter().map(|s| match s {
+                CompiledPipeStep::Forward(p) => program_cost(p),
+                _ => 1,
+            }).sum::<u32>()
+        }
     }
 }
 

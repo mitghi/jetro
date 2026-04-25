@@ -292,6 +292,22 @@ pub struct BindObjSpec {
     pub rest:   Option<Arc<str>>,
 }
 
+/// One step inside a `PipelineRun` opcode.  Forward-step evaluates
+/// `prog` against an env where `current = pipe_value` and replaces the
+/// pipe value with the result.  Bind-step stores the pipe value in the
+/// local env's vars (the pipe value is unchanged).
+#[derive(Debug, Clone)]
+pub enum CompiledPipeStep {
+    /// `| <expr>` — env.current = pipe_value; pipe_value = exec(prog).
+    Forward(Arc<Program>),
+    /// `-> name` — env.set_var(name, pipe_value); pipe_value unchanged.
+    BindName(Arc<str>),
+    /// `-> { f1, f2, …, …rest }` — destructure object into named vars.
+    BindObj(Arc<BindObjSpec>),
+    /// `-> [a, b, …]` — destructure array into named vars.
+    BindArr(Arc<[Arc<str>]>),
+}
+
 /// Compiled comprehension spec.
 #[derive(Debug, Clone)]
 pub struct CompSpec {
@@ -563,6 +579,16 @@ pub enum Opcode {
     BindObjDestructure(Arc<BindObjSpec>),
     /// Array destructure bind: TOS arr → multiple vars.
     BindArrDestructure(Arc<[Arc<str>]>),
+    /// Single-opcode pipeline `base | rhs1 | rhs2 -> n | rhs3 ...` —
+    /// runs `base`, threads the value through each step under a local
+    /// mutable Env (forward: env.current = val + run rhs; bind: store
+    /// in env vars, value unchanged).  Replaces the previous SetCurrent
+    /// / BindVar / Bind*Destructure no-op chain in the flat opcode
+    /// stream.
+    PipelineRun {
+        base:  Arc<Program>,
+        steps: Arc<[CompiledPipeStep]>,
+    },
 
     // ── Complex (recursive sub-programs) ─────────────────────────────────────
     LetExpr { name: Arc<str>, body: Arc<Program> },
@@ -3079,30 +3105,81 @@ impl Compiler {
     }
 
     fn emit_pipeline(base: &Expr, steps: &[PipeStep], ctx: &VarCtx, ops: &mut Vec<Opcode>) {
-        Self::emit_into(base, ctx, ops);
+        // Compile base + each step into a fused PipelineRun opcode.
+        // Runtime threads the value through a local mutable Env so
+        // forward steps see env.current = pipe_value and bind steps
+        // store into env vars; downstream steps then resolve the
+        // bound names correctly.
+        let base_prog = Arc::new(Self::compile_sub(base, ctx));
         let mut cur_ctx = ctx.clone();
+        let mut compiled_steps: Vec<CompiledPipeStep> = Vec::with_capacity(steps.len());
         for step in steps {
             match step {
                 PipeStep::Forward(rhs) => {
-                    Self::emit_pipe_forward(rhs, &cur_ctx, ops);
+                    // emit_pipe_forward handles the `Ident(method)` and
+                    // `Chain(method-base, steps)` shapes specially so a
+                    // bare `| len` resolves as a method call on the
+                    // pipe value rather than a variable load.  Reuse
+                    // that logic by emitting into a fresh Vec then
+                    // wrapping as a sub-program.
+                    let mut sub_ops: Vec<Opcode> = Vec::new();
+                    Self::emit_pipe_forward(rhs, &cur_ctx, &mut sub_ops);
+                    // Strip a leading SetCurrent — the PipelineRun
+                    // handler already sets env.current before invoking
+                    // the sub-program, so the opcode is redundant
+                    // here.  All other shapes have no SetCurrent and
+                    // need exactly the emitted ops.
+                    if let Some(Opcode::SetCurrent) = sub_ops.first() {
+                        sub_ops.remove(0);
+                    }
+                    let prog = Program::new(Self::optimize(sub_ops), "<pipe-fwd>");
+                    compiled_steps.push(CompiledPipeStep::Forward(Arc::new(prog)));
                 }
-                PipeStep::Bind(target) => {
-                    Self::emit_bind(target, &mut cur_ctx, ops);
-                }
+                PipeStep::Bind(target) => match target {
+                    BindTarget::Name(name) => {
+                        compiled_steps.push(
+                            CompiledPipeStep::BindName(Arc::from(name.as_str())));
+                        cur_ctx = cur_ctx.with_var(name);
+                    }
+                    BindTarget::Obj { fields, rest } => {
+                        let spec = BindObjSpec {
+                            fields: fields.iter().map(|f| Arc::from(f.as_str()))
+                                .collect::<Vec<_>>().into(),
+                            rest: rest.as_ref().map(|r| Arc::from(r.as_str())),
+                        };
+                        compiled_steps.push(
+                            CompiledPipeStep::BindObj(Arc::new(spec)));
+                        for f in fields { cur_ctx = cur_ctx.with_var(f); }
+                        if let Some(r) = rest { cur_ctx = cur_ctx.with_var(r); }
+                    }
+                    BindTarget::Arr(names) => {
+                        let ns: Vec<Arc<str>> = names.iter()
+                            .map(|n| Arc::from(n.as_str())).collect();
+                        compiled_steps.push(
+                            CompiledPipeStep::BindArr(ns.into()));
+                        for n in names { cur_ctx = cur_ctx.with_var(n); }
+                    }
+                },
             }
         }
+        ops.push(Opcode::PipelineRun {
+            base:  base_prog,
+            steps: compiled_steps.into(),
+        });
     }
 
     fn emit_pipe_forward(rhs: &Expr, ctx: &VarCtx, ops: &mut Vec<Opcode>) {
         match rhs {
             Expr::Ident(name) if !ctx.has(name) => {
-                // No-arg method call on TOS
+                // No-arg method call on the pipe value (env.current).
+                // Push current as the receiver so CallMethod's pop yields it.
                 let call = CompiledCall {
                     method:    BuiltinMethod::from_name(name),
                     name:      Arc::from(name.as_str()),
                     sub_progs: Arc::from(&[] as &[Arc<Program>]),
                     orig_args: Arc::from(&[] as &[Arg]),
                 };
+                ops.push(Opcode::PushCurrent);
                 ops.push(Opcode::CallMethod(Arc::new(call)));
             }
             Expr::Chain(base, steps) if !steps.is_empty() => {
@@ -3115,6 +3192,7 @@ impl Compiler {
                             sub_progs: Arc::from(&[] as &[Arc<Program>]),
                             orig_args: Arc::from(&[] as &[Arg]),
                         };
+                        ops.push(Opcode::PushCurrent);
                         ops.push(Opcode::CallMethod(Arc::new(call)));
                         for step in steps { Self::emit_step(step, ctx, ops); }
                         return;
@@ -6204,6 +6282,65 @@ impl VM {
                 Opcode::BindObjDestructure(_) | Opcode::BindArrDestructure(_) => {
                     // Pipeline bind destructure — handled at pipeline level.
                 }
+                Opcode::PipelineRun { base, steps } => {
+                    let val = self.exec(base, env)?;
+                    let mut local_env = env.clone();
+                    let mut cur = val;
+                    for step in steps.iter() {
+                        match step {
+                            CompiledPipeStep::Forward(rhs) => {
+                                // Sub-program reads env.current to access
+                                // the pipe value.  Method-call shapes
+                                // (`| len`, `| upper(2)`) prepend their
+                                // own PushCurrent at compile-time so
+                                // CallMethod has the receiver on TOS.
+                                let prev = local_env.swap_current(cur);
+                                cur = self.exec(rhs, &local_env)?;
+                                let _ = local_env.swap_current(prev);
+                            }
+                            CompiledPipeStep::BindName(name) => {
+                                local_env = local_env.with_var(name.as_ref(), cur.clone());
+                            }
+                            CompiledPipeStep::BindObj(spec) => {
+                                if let Val::Obj(m) = &cur {
+                                    let mut consumed: std::collections::HashSet<&str> =
+                                        std::collections::HashSet::new();
+                                    for f in spec.fields.iter() {
+                                        let v = m.get(f.as_ref()).cloned().unwrap_or(Val::Null);
+                                        local_env = local_env.with_var(f.as_ref(), v);
+                                        consumed.insert(f.as_ref());
+                                    }
+                                    if let Some(rest) = &spec.rest {
+                                        let mut rest_obj = indexmap::IndexMap::new();
+                                        for (k, v) in m.iter() {
+                                            if !consumed.contains(k.as_ref()) {
+                                                rest_obj.insert(k.clone(), v.clone());
+                                            }
+                                        }
+                                        local_env = local_env.with_var(
+                                            rest.as_ref(),
+                                            Val::Obj(Arc::new(rest_obj)),
+                                        );
+                                    }
+                                }
+                            }
+                            CompiledPipeStep::BindArr(names) => {
+                                let items: Vec<Val> = match &cur {
+                                    Val::Arr(a) => a.iter().cloned().collect(),
+                                    Val::IntVec(a) => a.iter().map(|n| Val::Int(*n)).collect(),
+                                    Val::FloatVec(a) => a.iter().map(|f| Val::Float(*f)).collect(),
+                                    Val::StrVec(a) => a.iter().cloned().map(Val::Str).collect(),
+                                    _ => Vec::new(),
+                                };
+                                for (i, n) in names.iter().enumerate() {
+                                    let v = items.get(i).cloned().unwrap_or(Val::Null);
+                                    local_env = local_env.with_var(n.as_ref(), v);
+                                }
+                            }
+                        }
+                    }
+                    stack.push(cur);
+                }
 
                 // ── Complex recursive ops ─────────────────────────────────────
                 Opcode::LetExpr { name, body } => {
@@ -6933,7 +7070,10 @@ impl VM {
                         no.push(item);
                     }
                 }
-                Ok(Val::arr(vec![Val::arr(yes), Val::arr(no)]))
+                let mut m: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(2);
+                m.insert(Arc::from("true"),  Val::arr(yes));
+                m.insert(Arc::from("false"), Val::arr(no));
+                Ok(Val::obj(m))
             }
             BuiltinMethod::TransformKeys => {
                 let lam = sub.ok_or_else(|| EvalError("transformKeys: requires lambda".into()))?;
