@@ -105,16 +105,6 @@ pub struct Env {
 }
 
 impl Env {
-    fn new(root: Val) -> Self {
-        Self {
-            vars: SmallVec::new(),
-            root: root.clone(),
-            current: root,
-            registry: Arc::new(MethodRegistry::new()),
-            raw_bytes: None,
-        }
-    }
-
     pub fn new_with_registry(root: Val, registry: Arc<MethodRegistry>) -> Self {
         Self { vars: SmallVec::new(), root: root.clone(), current: root, registry, raw_bytes: None }
     }
@@ -227,7 +217,7 @@ pub fn eval_in_env(expr: &Expr, env: &Env) -> Result<Val, EvalError> {
 
 pub fn evaluate(expr: &Expr, root: &serde_json::Value) -> Result<serde_json::Value, EvalError> {
     let val = Val::from(root);
-    Ok(eval(expr, &Env::new(val))?.into())
+    Ok(eval(expr, &Env::new_with_registry(val, Arc::new(MethodRegistry::new())))?.into())
 }
 
 pub fn evaluate_with(
@@ -237,18 +227,6 @@ pub fn evaluate_with(
 ) -> Result<serde_json::Value, EvalError> {
     let val = Val::from(root);
     Ok(eval(expr, &Env::new_with_registry(val, registry))?.into())
-}
-
-/// Evaluate `expr` with the original JSON source bytes retained.  Enables
-/// SIMD byte-scan fast paths for `$..key` descent queries.
-pub fn evaluate_with_raw(
-    expr: &Expr,
-    root: &serde_json::Value,
-    registry: Arc<MethodRegistry>,
-    raw_bytes: Arc<[u8]>,
-) -> Result<serde_json::Value, EvalError> {
-    let val = Val::from(root);
-    Ok(eval(expr, &Env::new_with_raw(val, registry, raw_bytes))?.into())
 }
 
 // ── Core evaluator ────────────────────────────────────────────────────────────
@@ -1435,7 +1413,7 @@ fn eval_binop(l: &Expr, op: BinOp, r: &Expr, env: &Env) -> Result<Val, EvalError
 
 // ── Global functions ──────────────────────────────────────────────────────────
 
-fn eval_global(name: &str, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+pub(crate) fn eval_global(name: &str, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     match name {
         "coalesce" => {
             for arg in args {

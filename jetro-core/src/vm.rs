@@ -6550,7 +6550,16 @@ impl VM {
                     return method.call(recv, &evaled?);
                 }
             }
-            // Global function (coalesce, zip, etc.) or fallback to dispatch_method
+            // Global function (coalesce, zip, range, etc.) — known globals
+            // route through eval_global; unknown names fall back to method
+            // dispatch on the pushed receiver.
+            match call.name.as_ref() {
+                "coalesce" | "chain" | "join" | "zip" | "zip_longest"
+                | "product" | "range" =>
+                    return crate::eval::eval_global(
+                        call.name.as_ref(), &call.orig_args, env),
+                _ => {}
+            }
             return dispatch_method(recv, call.name.as_ref(), &call.orig_args, env);
         }
 
