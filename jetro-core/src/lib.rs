@@ -886,13 +886,19 @@ impl Jetro {
                 return out.map(|v| v.into());
             }
         }
-        // Pipeline IR Phase 2 substrate ready (rewrite rules + fused
-        // sinks).  Wiring deferred: even with Map∘Sum → SumMap fusion,
-        // per-row exec_val_raw dispatch remains ~100 ns/row, dwarfing
-        // the existing fused opcode kernels' ~6 ns/row.  Phase 3
-        // (vectorised pull_batch over IntVec/FloatVec/StrVec lanes)
-        // is required to make pipeline competitive.
-        let _ = pipeline::Pipeline::lower;
+        // Pipeline IR Phase 3: columnar fast path inside Pipeline::run
+        // bypasses per-row exec_val_raw entirely for SumMap /
+        // SumFilterMap shapes — extracts the projected column with
+        // IndexMap inline cache, folds via tight inline loop.  When
+        // the columnar path matches, perf parity with hand-written
+        // fused opcodes; when it misses, falls through to per-row
+        // pull loop (still slower than fused opcodes) and finally to
+        // the existing opcode path.
+        if let Ok(ast) = parser::parse(expr) {
+            if let Some(p) = pipeline::Pipeline::lower(&ast) {
+                return p.run(&self.root_val()).map(|v| v.into());
+            }
+        }
         THREAD_VM.with(|cell| match (cell.try_borrow_mut(), &self.raw_bytes) {
             (Ok(mut vm), Some(bytes)) => {
                 let prog = vm.get_or_compile(expr)?;
@@ -925,7 +931,11 @@ impl Jetro {
                 return out;
             }
         }
-        // See collect() — pipeline wiring deferred until Phase 3 batches.
+        if let Ok(ast) = parser::parse(expr) {
+            if let Some(p) = pipeline::Pipeline::lower(&ast) {
+                return p.run(&self.root_val());
+            }
+        }
         THREAD_VM.with(|cell| {
             let mut vm = cell.try_borrow_mut().map_err(|_| EvalError("VM in use".into()))?;
             let prog = vm.get_or_compile(expr)?;

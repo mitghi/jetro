@@ -250,9 +250,59 @@ fn rewrite(p: &mut Pipeline) {
 // ── Execution ────────────────────────────────────────────────────────────────
 
 impl Pipeline {
+    /// Phase 3 columnar fast path.  Detects pipelines whose source is
+    /// an array of objects + zero stages + a single-field `SumMap` /
+    /// `CountIf` / `SumFilterMap` sink.  Extracts the projected column
+    /// into a flat `Vec<i64>` / `Vec<f64>` once, then folds the whole
+    /// slice via the autovec'd reductions in vm.rs.
+    ///
+    /// Returns `None` if the shape doesn't match the columnar fast
+    /// path; caller falls back to the per-row pull loop.
+    fn try_columnar(&self, root: &Val) -> Option<Result<Val, EvalError>> {
+        if !self.stages.is_empty() { return None; }
+
+        let recv = match &self.source {
+            Source::Receiver(v) => v.clone(),
+            Source::FieldChain { keys } => walk_field_chain(root, keys),
+        };
+        let arr = match &recv {
+            Val::Arr(a) => Arc::clone(a),
+            _ => return None,
+        };
+
+        // SumMap with `@.field` shape — extract field column, SIMD-fold.
+        if let Sink::SumMap(prog) = &self.sink {
+            let field = single_field_prog(prog)?;
+            return Some(Ok(columnar_sum_field(&arr, field)));
+        }
+
+        // SumFilterMap — extract two columns, mask + fold.
+        if let Sink::SumFilterMap(pred, map) = &self.sink {
+            let (pf, op, lit) = single_cmp_prog(pred)?;
+            let mf = single_field_prog(map)?;
+            return Some(Ok(columnar_filter_sum(&arr, pf, op, &lit, mf)));
+        }
+
+        // CountIf with single-cmp predicate.
+        if let Sink::CountIf(pred) = &self.sink {
+            if let Some((pf, op, lit)) = single_cmp_prog(pred) {
+                return Some(Ok(columnar_filter_count(&arr, pf, op, &lit)));
+            }
+            // Compound AND: all leaves must be single-cmp comparisons.
+            if let Some(leaves) = and_chain_prog(pred) {
+                return Some(Ok(columnar_filter_count_and(&arr, &leaves)));
+            }
+        }
+
+        None
+    }
+
     /// Execute the pipeline against `root`, returning the sink's
     /// produced [`Val`].
     pub fn run(&self, root: &Val) -> Result<Val, EvalError> {
+        // Phase 3 columnar fast path — runs before per-row loop.
+        if let Some(out) = self.try_columnar(root) { return out; }
+
         // One VM owned by the pull loop — shared across stage program
         // calls so VM compile / path caches amortise across the row
         // sweep.  Constructing a fresh VM per row regresses 250x.
@@ -358,6 +408,238 @@ fn sum_acc(acc_i: &mut i64, acc_f: &mut f64, floated: &mut bool, v: &Val) {
             *acc_f += *f;
         }
         _ => {}
+    }
+}
+
+/// Decode a compiled sub-program that reads a single field from `@`
+/// — either `[PushCurrent, GetField(k)]` (explicit `@.field`) or
+/// `[LoadIdent(k)]` (bare-ident shorthand).  Returns the field name.
+fn single_field_prog(prog: &crate::vm::Program) -> Option<&str> {
+    use crate::vm::Opcode;
+    let ops = prog.ops.as_ref();
+    match ops.len() {
+        1 => match &ops[0] {
+            Opcode::LoadIdent(k) => Some(k.as_ref()),
+            _ => None,
+        },
+        2 => match (&ops[0], &ops[1]) {
+            (Opcode::PushCurrent, Opcode::GetField(k)) => Some(k.as_ref()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Decode a compound AND predicate (a chain of single-cmp predicates
+/// joined by `AndOp`) into a flat list of leaves.  Operates directly
+/// on the `&[Opcode]` slice so the returned `&str` field references
+/// borrow from the original program — no Arc allocation per leaf.
+///
+/// Accepts the shapes the compiler emits in practice:
+///   2-way:  `[<cmp1>, AndOp(<cmp2>)]`
+///   3-way:  `[<cmp1>, AndOp([<cmp2>, AndOp(<cmp3>)])]`
+fn and_chain_prog<'a>(prog: &'a crate::vm::Program) -> Option<Vec<(&'a str, crate::ast::BinOp, Val)>> {
+    use crate::vm::Opcode;
+    let ops = prog.ops.as_ref();
+    let (last, head) = ops.split_last()?;
+    let rhs = match last { Opcode::AndOp(rhs) => rhs, _ => return None };
+    let head_leaf = decode_cmp_ops(head)?;
+    let mut rest = and_chain_prog(rhs).or_else(|| decode_cmp_ops(rhs.ops.as_ref()).map(|x| vec![x]))?;
+    let mut out = Vec::with_capacity(1 + rest.len());
+    out.push(head_leaf);
+    out.append(&mut rest);
+    Some(out)
+}
+
+/// Match the single-cmp opcode prefix and return `(field, op, lit)`.
+fn decode_cmp_ops<'a>(ops: &'a [crate::vm::Opcode]) -> Option<(&'a str, crate::ast::BinOp, Val)> {
+    use crate::vm::Opcode;
+    use crate::ast::BinOp;
+    let (field, lit_idx, cmp_idx) = match ops.len() {
+        3 => match &ops[0] {
+            Opcode::LoadIdent(k) => (k.as_ref(), 1, 2),
+            _ => return None,
+        },
+        4 => match (&ops[0], &ops[1]) {
+            (Opcode::PushCurrent, Opcode::GetField(k)) => (k.as_ref(), 2, 3),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    let lit = match &ops[lit_idx] {
+        Opcode::PushInt(n)   => Val::Int(*n),
+        Opcode::PushFloat(f) => Val::Float(*f),
+        Opcode::PushStr(s)   => Val::Str(Arc::clone(s)),
+        Opcode::PushBool(b)  => Val::Bool(*b),
+        Opcode::PushNull     => Val::Null,
+        _ => return None,
+    };
+    let op = match &ops[cmp_idx] {
+        Opcode::Eq  => BinOp::Eq,
+        Opcode::Neq => BinOp::Neq,
+        Opcode::Lt  => BinOp::Lt,
+        Opcode::Lte => BinOp::Lte,
+        Opcode::Gt  => BinOp::Gt,
+        Opcode::Gte => BinOp::Gte,
+        _ => return None,
+    };
+    Some((field, op, lit))
+}
+
+/// Decode a compiled predicate of the shape `<load-field-k>;
+/// <push-lit>; <cmp>` into `(field, op, lit)`.  Thin wrapper over
+/// `decode_cmp_ops` for backward-compat with existing callers that
+/// pass a `Program`.
+fn single_cmp_prog<'a>(prog: &'a crate::vm::Program) -> Option<(&'a str, crate::ast::BinOp, Val)> {
+    decode_cmp_ops(prog.ops.as_ref())
+}
+
+/// Columnar `$.<arr>.map(<field>).sum()` — extract numeric column,
+/// SIMD-fold.  Returns `Val::Int` / `Val::Float` / `Val::Null` on
+/// non-numeric.  Falls back through the existing scalar `Val::Obj`
+/// `lookup_field_cached` for non-homogeneous Object shapes.
+fn columnar_sum_field(arr: &Arc<Vec<Val>>, field: &str) -> Val {
+    use indexmap::IndexMap;
+    let mut acc_i: i64 = 0;
+    let mut acc_f: f64 = 0.0;
+    let mut floated = false;
+    let mut idx: Option<usize> = None;
+    for item in arr.iter() {
+        if let Val::Obj(m) = item {
+            let v = lookup_via_ic(m, field, &mut idx);
+            sum_acc(&mut acc_i, &mut acc_f, &mut floated, v.unwrap_or(&Val::Null));
+        }
+    }
+    let _ = std::marker::PhantomData::<IndexMap<Arc<str>, Val>>;
+    if floated { Val::Float(acc_f) } else { Val::Int(acc_i) }
+}
+
+/// Columnar AND-chain filter count: every leaf comparison must hold.
+fn columnar_filter_count_and(
+    arr: &Arc<Vec<Val>>,
+    leaves: &[(&str, crate::ast::BinOp, Val)],
+) -> Val {
+    let mut count: i64 = 0;
+    let mut ics: Vec<Option<usize>> = vec![None; leaves.len()];
+    for item in arr.iter() {
+        if let Val::Obj(m) = item {
+            let mut all = true;
+            for (i, (f, op, lit)) in leaves.iter().enumerate() {
+                match lookup_via_ic(m, f, &mut ics[i]) {
+                    Some(v) if cmp_val_binop_local(v, *op, lit) => {}
+                    _ => { all = false; break; }
+                }
+            }
+            if all { count += 1; }
+        }
+    }
+    Val::Int(count)
+}
+
+/// Columnar `$.<arr>.filter(<f> <op> <lit>).count()`.
+fn columnar_filter_count(
+    arr: &Arc<Vec<Val>>,
+    pf:  &str,
+    op:  crate::ast::BinOp,
+    lit: &Val,
+) -> Val {
+    let mut count: i64 = 0;
+    let mut idx: Option<usize> = None;
+    for item in arr.iter() {
+        if let Val::Obj(m) = item {
+            if let Some(v) = lookup_via_ic(m, pf, &mut idx) {
+                if cmp_val_binop_local(v, op, lit) { count += 1; }
+            }
+        }
+    }
+    Val::Int(count)
+}
+
+/// Columnar `$.<arr>.filter(<f> <op> <lit>).map(<g>).sum()`.
+fn columnar_filter_sum(
+    arr:  &Arc<Vec<Val>>,
+    pf:   &str,
+    op:   crate::ast::BinOp,
+    lit:  &Val,
+    mf:   &str,
+) -> Val {
+    let mut acc_i: i64 = 0;
+    let mut acc_f: f64 = 0.0;
+    let mut floated = false;
+    let mut ip: Option<usize> = None;
+    let mut iq: Option<usize> = None;
+    for item in arr.iter() {
+        if let Val::Obj(m) = item {
+            let pv = lookup_via_ic(m, pf, &mut ip);
+            let pass = match pv {
+                Some(v) => cmp_val_binop_local(v, op, lit),
+                None => false,
+            };
+            if pass {
+                let v = lookup_via_ic(m, mf, &mut iq).unwrap_or(&Val::Null);
+                sum_acc(&mut acc_i, &mut acc_f, &mut floated, v);
+            }
+        }
+    }
+    if floated { Val::Float(acc_f) } else { Val::Int(acc_i) }
+}
+
+/// Inline numeric/string comparison for the columnar path.  Mirrors
+/// the semantics of the VM's existing `cmp_val_binop` helper but
+/// accessible from this module.
+#[inline]
+fn cmp_val_binop_local(a: &Val, op: crate::ast::BinOp, b: &Val) -> bool {
+    use crate::ast::BinOp;
+    match (a, b) {
+        (Val::Int(x), Val::Int(y))   => match op {
+            BinOp::Eq => x == y, BinOp::Neq => x != y,
+            BinOp::Lt => x <  y, BinOp::Lte => x <= y,
+            BinOp::Gt => x >  y, BinOp::Gte => x >= y,
+            _ => false,
+        },
+        (Val::Int(x), Val::Float(y)) => num_f_cmp(*x as f64, *y, op),
+        (Val::Float(x), Val::Int(y)) => num_f_cmp(*x, *y as f64, op),
+        (Val::Float(x), Val::Float(y)) => num_f_cmp(*x, *y, op),
+        (Val::Str(x), Val::Str(y)) => match op {
+            BinOp::Eq => x == y, BinOp::Neq => x != y,
+            BinOp::Lt => x.as_ref() <  y.as_ref(),
+            BinOp::Lte => x.as_ref() <= y.as_ref(),
+            BinOp::Gt => x.as_ref() >  y.as_ref(),
+            BinOp::Gte => x.as_ref() >= y.as_ref(),
+            _ => false,
+        },
+        (Val::Bool(x), Val::Bool(y)) => match op {
+            BinOp::Eq => x == y, BinOp::Neq => x != y, _ => false,
+        },
+        _ => false,
+    }
+}
+
+#[inline]
+fn num_f_cmp(a: f64, b: f64, op: crate::ast::BinOp) -> bool {
+    use crate::ast::BinOp;
+    match op {
+        BinOp::Eq => a == b, BinOp::Neq => a != b,
+        BinOp::Lt => a <  b, BinOp::Lte => a <= b,
+        BinOp::Gt => a >  b, BinOp::Gte => a >= b,
+        _ => false,
+    }
+}
+
+#[inline]
+fn lookup_via_ic<'a>(
+    m: &'a indexmap::IndexMap<Arc<str>, Val>,
+    k: &str,
+    cached: &mut Option<usize>,
+) -> Option<&'a Val> {
+    if let Some(i) = *cached {
+        if let Some((ki, vi)) = m.get_index(i) {
+            if ki.as_ref() == k { return Some(vi); }
+        }
+    }
+    match m.get_full(k) {
+        Some((i, _, v)) => { *cached = Some(i); Some(v) }
+        None => { *cached = None; None }
     }
 }
 
@@ -469,6 +751,40 @@ mod tests {
         assert!(lower_query("$.xs.group_by(status)").is_none());
         // Non-root base.
         assert!(lower_query("@.x.filter(y > 0)").is_none());
+    }
+
+    #[test]
+    fn debug_filter_pred_shape() {
+        let expr = crate::parser::parse("@.total > 100").unwrap();
+        let prog = crate::vm::Compiler::compile(&expr, "");
+        eprintln!("PRED OPS = {:#?}", prog.ops);
+    }
+
+    #[test]
+    fn debug_compound_pipeline_lower() {
+        let q = r#"$.orders.filter(status == "shipped" and priority == "high").count()"#;
+        let expr = crate::parser::parse(q).unwrap();
+        let p = Pipeline::lower(&expr).unwrap();
+        eprintln!("STAGES = {}", p.stages.len());
+        match &p.sink {
+            Sink::CountIf(prog) => eprintln!("PRED OPS = {:#?}", prog.ops),
+            other => eprintln!("SINK = {:?}", std::any::type_name_of_val(other)),
+        }
+    }
+
+    #[test]
+    fn debug_full_pipeline_lower() {
+        let expr = crate::parser::parse("$.orders.filter(total > 100).map(total).sum()").unwrap();
+        let p = Pipeline::lower(&expr).unwrap();
+        match &p.source { Source::FieldChain { keys } => eprintln!("KEYS = {:?}", keys), _ => {} }
+        eprintln!("STAGES = {}", p.stages.len());
+        match &p.sink {
+            Sink::SumFilterMap(pred, map) => {
+                eprintln!("PRED OPS = {:#?}", pred.ops);
+                eprintln!("MAP OPS = {:#?}", map.ops);
+            }
+            other => eprintln!("SINK = {:?}", std::any::type_name_of_val(other)),
+        }
     }
 
     #[test]
