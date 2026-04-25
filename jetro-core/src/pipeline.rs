@@ -1028,6 +1028,37 @@ impl Pipeline {
     ///   `Stage::Filter(FieldCmpLit) ∘ Sink::Count`  (already covered by CountIf rule)
     ///   `Stage::Filter(FieldCmpLit) ∘ Sink::Numeric(...)` (already covered)
     /// Walks the column without entering vm.exec per row.
+    /// Same as [`try_columnar_stage_chain`] but consults the optional
+    /// promoter to upgrade Val::Arr → Val::ObjVec; lets the typed
+    /// stage-chain path (filter+map on ObjVec typed columns) fire.
+    fn try_columnar_stage_chain_with(
+        &self,
+        root: &Val,
+        cache: Option<&dyn ObjVecPromoter>,
+    ) -> Option<Result<Val, EvalError>> {
+        let recv = match &self.source {
+            Source::Receiver(v) => v.clone(),
+            Source::FieldChain { keys } => walk_field_chain(root, keys),
+        };
+        // Promote to ObjVec via cache when available.  Unlocks the
+        // typed-column stage-chain path below.
+        let recv = if let (Some(c), Val::Arr(a)) = (cache, &recv) {
+            if let Some(d) = c.promote(a) { Val::ObjVec(d) } else { recv }
+        } else { recv };
+        // Typed-column ObjVec stage-chain: Filter(FieldCmpLit) ∘
+        // Map(FieldRead) ∘ Collect → primitive mask + typed gather.
+        if !matches!(self.sink, Sink::Collect) { return None; }
+        if let (Some([Stage::Filter(_), Stage::Map(_)]),
+                Some([BodyKernel::FieldCmpLit(pk, pop, plit),
+                      BodyKernel::FieldRead(mk)]),
+                Val::ObjVec(d)) =
+            (self.stages.get(..), self.stage_kernels.get(..), &recv)
+        {
+            return objvec_typed_filter_map_collect(d, pk, *pop, plit, mk);
+        }
+        None
+    }
+
     fn try_columnar_stage_chain(&self, root: &Val) -> Option<Result<Val, EvalError>> {
         // Resolve receiver.
         let recv = match &self.source {
@@ -1256,6 +1287,10 @@ impl Pipeline {
         root: &Val,
         cache: Option<&dyn ObjVecPromoter>,
     ) -> Option<Result<Val, EvalError>> {
+        // Typed ObjVec stage-chain path first (uses cache).
+        if let Some(out) = self.try_columnar_stage_chain_with(root, cache) {
+            return Some(out);
+        }
         if let Some(out) = self.try_columnar_stage_chain(root) { return Some(out); }
         if !self.stages.is_empty() { return None; }
 
@@ -2215,6 +2250,158 @@ fn objvec_filter_num_slots(
         }
     }
     num_finalise(op, acc_i, acc_f, floated, min_f, max_f, n_obs)
+}
+
+/// Phase 7-typed-columns Q3 path: ObjVec source + Filter(FieldCmpLit)
+/// + Map(FieldRead) + Sink::Collect.  When both pred + map slots are
+/// typed lanes, walk primitive columns directly: build typed output
+/// vec sized by predicate hit count; no Val tag check, no IndexMap probe.
+fn objvec_typed_filter_map_collect(
+    d:    &Arc<crate::eval::value::ObjVecData>,
+    pk:   &str,
+    pop:  crate::ast::BinOp,
+    plit: &Val,
+    mk:   &str,
+) -> Option<Result<Val, EvalError>> {
+    use crate::eval::value::ObjVecCol;
+    use crate::ast::BinOp as B;
+    let cols = d.typed_cols.as_ref()?;
+    let pred_slot = d.slot_of(pk)?;
+    let map_slot  = d.slot_of(mk)?;
+    let pred_col  = cols.get(pred_slot)?;
+    let map_col   = cols.get(map_slot)?;
+
+    // Int pred + Int map (e.g. `filter(total > 500).map(id)`).
+    if let (ObjVecCol::Ints(p), ObjVecCol::Ints(m), Val::Int(rhs)) =
+        (pred_col, map_col, plit)
+    {
+        let r = *rhs;
+        let mut out: Vec<i64> = Vec::with_capacity(p.len());
+        for (i, &pv) in p.iter().enumerate() {
+            let hit = match pop {
+                B::Eq  => pv == r, B::Neq => pv != r,
+                B::Lt  => pv < r,  B::Lte => pv <= r,
+                B::Gt  => pv > r,  B::Gte => pv >= r,
+                _ => false,
+            };
+            if hit { out.push(m[i]); }
+        }
+        return Some(Ok(Val::int_vec(out)));
+    }
+    // Float pred + Int map: `filter(total > 500.0).map(id)` —
+    // common bench shape (numeric thresholds with int IDs).
+    // Promote int literal to f64 for cross-type compare.
+    {
+        let pred_f64 = match (pred_col, plit) {
+            (ObjVecCol::Floats(p), Val::Float(r)) => Some((p, *r)),
+            (ObjVecCol::Floats(p), Val::Int(r))   => Some((p, *r as f64)),
+            _ => None,
+        };
+        if let Some((p, r)) = pred_f64 {
+            // Map slot can be Int or Float; pick output.
+            if let ObjVecCol::Ints(m) = map_col {
+                let mut out: Vec<i64> = Vec::with_capacity(p.len());
+                for (i, &pv) in p.iter().enumerate() {
+                    let hit = match pop {
+                        B::Eq  => pv == r, B::Neq => pv != r,
+                        B::Lt  => pv < r,  B::Lte => pv <= r,
+                        B::Gt  => pv > r,  B::Gte => pv >= r,
+                        _ => false,
+                    };
+                    if hit { out.push(m[i]); }
+                }
+                return Some(Ok(Val::int_vec(out)));
+            }
+            if let ObjVecCol::Floats(m) = map_col {
+                let mut out: Vec<f64> = Vec::with_capacity(p.len());
+                for (i, &pv) in p.iter().enumerate() {
+                    let hit = match pop {
+                        B::Eq  => pv == r, B::Neq => pv != r,
+                        B::Lt  => pv < r,  B::Lte => pv <= r,
+                        B::Gt  => pv > r,  B::Gte => pv >= r,
+                        _ => false,
+                    };
+                    if hit { out.push(m[i]); }
+                }
+                return Some(Ok(Val::float_vec(out)));
+            }
+            if let ObjVecCol::Strs(m) = map_col {
+                let mut out: Vec<Arc<str>> = Vec::with_capacity(p.len());
+                for (i, &pv) in p.iter().enumerate() {
+                    let hit = match pop {
+                        B::Eq  => pv == r, B::Neq => pv != r,
+                        B::Lt  => pv < r,  B::Lte => pv <= r,
+                        B::Gt  => pv > r,  B::Gte => pv >= r,
+                        _ => false,
+                    };
+                    if hit { out.push(Arc::clone(&m[i])); }
+                }
+                return Some(Ok(Val::str_vec(out)));
+            }
+        }
+    }
+    // Int pred + Str map (e.g. `filter(total > 500).map(name)`).
+    if let (ObjVecCol::Ints(p), ObjVecCol::Strs(m), Val::Int(rhs)) =
+        (pred_col, map_col, plit)
+    {
+        let r = *rhs;
+        let mut out: Vec<Arc<str>> = Vec::with_capacity(p.len());
+        for (i, &pv) in p.iter().enumerate() {
+            let hit = match pop {
+                B::Eq  => pv == r, B::Neq => pv != r,
+                B::Lt  => pv < r,  B::Lte => pv <= r,
+                B::Gt  => pv > r,  B::Gte => pv >= r,
+                _ => false,
+            };
+            if hit { out.push(Arc::clone(&m[i])); }
+        }
+        return Some(Ok(Val::str_vec(out)));
+    }
+    // Str pred (== / !=) + any map: status-style filter.
+    if let (ObjVecCol::Strs(p), Val::Str(rhs)) = (pred_col, plit) {
+        let r: &str = rhs.as_ref();
+        let mut hits: Vec<usize> = Vec::with_capacity(p.len());
+        for (i, ps) in p.iter().enumerate() {
+            let hit = match pop {
+                B::Eq  => ps.as_ref() == r,
+                B::Neq => ps.as_ref() != r,
+                _ => false,
+            };
+            if hit { hits.push(i); }
+        }
+        return Some(Ok(materialise_typed_indices(map_col, &hits)));
+    }
+    None
+}
+
+fn materialise_typed_indices(
+    col: &crate::eval::value::ObjVecCol,
+    indices: &[usize],
+) -> Val {
+    use crate::eval::value::ObjVecCol;
+    match col {
+        ObjVecCol::Ints(c) => {
+            let mut o: Vec<i64> = Vec::with_capacity(indices.len());
+            for &i in indices { o.push(c[i]); }
+            Val::int_vec(o)
+        }
+        ObjVecCol::Floats(c) => {
+            let mut o: Vec<f64> = Vec::with_capacity(indices.len());
+            for &i in indices { o.push(c[i]); }
+            Val::float_vec(o)
+        }
+        ObjVecCol::Strs(c) => {
+            let mut o: Vec<Arc<str>> = Vec::with_capacity(indices.len());
+            for &i in indices { o.push(Arc::clone(&c[i])); }
+            Val::str_vec(o)
+        }
+        ObjVecCol::Bools(c) => {
+            let mut o: Vec<Val> = Vec::with_capacity(indices.len());
+            for &i in indices { o.push(Val::Bool(c[i])); }
+            Val::arr(o)
+        }
+        ObjVecCol::Mixed => Val::arr(Vec::new()),
+    }
 }
 
 fn objvec_filter_count_and_slots(
