@@ -167,7 +167,6 @@ fn op_arity(op: &Opcode) -> Arity {
             | Opcode::MapNumVecArith { .. }
             | Opcode::MapNumVecNeg
             | Opcode::FilterFieldCmpField(_, _, _)
-            | Opcode::FilterFieldEqLitCount(_, _) | Opcode::FilterFieldCmpLitCount(_, _, _)
             | Opcode::FilterFieldCmpFieldCount(_, _, _)
             | Opcode::FilterFieldsAllEqLitCount(_)
             | Opcode::FilterFieldsAllCmpLitCount(_)

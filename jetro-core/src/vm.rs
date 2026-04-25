@@ -503,10 +503,8 @@ pub enum Opcode {
     FilterFieldsAllEqLitCount(Arc<[(Arc<str>, Val)]>),
     /// `filter(f1 <o1> l1 AND f2 <o2> l2 AND …).count()` fused — general cmp.
     FilterFieldsAllCmpLitCount(Arc<[(Arc<str>, super::ast::BinOp, Val)]>),
-    /// `filter(k == lit).count()` — count without materialising.
-    FilterFieldEqLitCount(Arc<str>, Val),
-    /// `filter(k <op> lit).count()` — count cmp without materialising.
-    FilterFieldCmpLitCount(Arc<str>, super::ast::BinOp, Val),
+    // FilterFieldEqLitCount / FilterFieldCmpLitCount migrated to
+    // pipeline.rs Sink::CountIf (with columnar fast path).
     /// `filter(k1 <op> k2).count()` — cross-field count.
     FilterFieldCmpFieldCount(Arc<str>, super::ast::BinOp, Arc<str>),
     /// `filter(@ <op> lit)` — predicate on the current element itself.
@@ -2330,26 +2328,17 @@ impl Compiler {
         // into a single `FlatMapChain([k1,k2,...])`.
         let mut out3: Vec<Opcode> = Vec::with_capacity(out2.len());
         for op in out2 {
-            // FilterField* + count()
+            // FilterFieldEqLit/CmpLit + count() fusion migrated to
+            // pipeline.rs Sink::CountIf (with columnar fast paths).
+            // FilterFieldCmpField + count() fusion (FilterFieldCmpFieldCount)
+            // stays since pipeline doesn't yet handle field-vs-field
+            // predicates (see project_opcode_migration.md).
             if let Opcode::CallMethod(ref b) = op {
                 if b.method == BuiltinMethod::Count && b.sub_progs.is_empty() {
-                    match out3.last().cloned() {
-                        Some(Opcode::FilterFieldEqLit(k, lit)) => {
-                            out3.pop();
-                            out3.push(Opcode::FilterFieldEqLitCount(k, lit));
-                            continue;
-                        }
-                        Some(Opcode::FilterFieldCmpLit(k, cop, lit)) => {
-                            out3.pop();
-                            out3.push(Opcode::FilterFieldCmpLitCount(k, cop, lit));
-                            continue;
-                        }
-                        Some(Opcode::FilterFieldCmpField(k1, cop, k2)) => {
-                            out3.pop();
-                            out3.push(Opcode::FilterFieldCmpFieldCount(k1, cop, k2));
-                            continue;
-                        }
-                        _ => {}
+                    if let Some(Opcode::FilterFieldCmpField(k1, cop, k2)) = out3.last().cloned() {
+                        out3.pop();
+                        out3.push(Opcode::FilterFieldCmpFieldCount(k1, cop, k2));
+                        continue;
                     }
                 }
             }
@@ -5794,36 +5783,8 @@ impl VM {
                     }
                     stack.push(Val::Int(n));
                 }
-                Opcode::FilterFieldEqLitCount(k, lit) => {
-                    let recv = pop!(stack);
-                    let mut n: i64 = 0;
-                    let mut idx: Option<usize> = None;
-                    if let Val::Arr(a) = &recv {
-                        for item in a.iter() {
-                            if let Val::Obj(m) = item {
-                                if let Some(v) = lookup_field_cached(m, k, &mut idx) {
-                                    if crate::eval::util::vals_eq(v, lit) { n += 1; }
-                                }
-                            }
-                        }
-                    }
-                    stack.push(Val::Int(n));
-                }
-                Opcode::FilterFieldCmpLitCount(k, op, lit) => {
-                    let recv = pop!(stack);
-                    let mut n: i64 = 0;
-                    let mut idx: Option<usize> = None;
-                    if let Val::Arr(a) = &recv {
-                        for item in a.iter() {
-                            if let Val::Obj(m) = item {
-                                if let Some(v) = lookup_field_cached(m, k, &mut idx) {
-                                    if cmp_val_binop(v, *op, lit) { n += 1; }
-                                }
-                            }
-                        }
-                    }
-                    stack.push(Val::Int(n));
-                }
+                // FilterFieldEqLitCount / FilterFieldCmpLitCount handlers
+                // removed — pipeline.rs Sink::CountIf covers both shapes.
                 Opcode::FilterFieldCmpFieldCount(k1, op, k2) => {
                     let recv = pop!(stack);
                     let mut n: i64 = 0;
