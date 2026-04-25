@@ -426,9 +426,6 @@ pub enum Opcode {
     // FilterLast migrated to pipeline.rs Sink::FilterLast.
     // TopN / ArgExtreme migrated to pipeline.rs Sink::TopN / MinBy /
     // MaxBy.  See memory/project_opcode_migration.md.
-    /// Fused `unique()` + `count()`/`len()` — count distinct elements without
-    /// materialising the deduped array.
-    UniqueCount,
     /// Fused `map(f).flatten()` — single-pass concat of mapped arrays.
     MapFlatten(Arc<Program>),
     /// Fused `map(f).first()` — apply `f` only to the first element.
@@ -2420,13 +2417,8 @@ impl Compiler {
                     (BuiltinMethod::Unique, Opcode::CallMethod(next))
                         if next.method == BuiltinMethod::Unique =>
                         Some(Opcode::CallMethod(Arc::clone(next))),
-                    // unique() + count()/len() → UniqueCount (skip materialising dedup array).
-                    (BuiltinMethod::Unique, Opcode::CallMethod(next))
-                        if prev.sub_progs.is_empty()
-                           && next.sub_progs.is_empty()
-                           && (next.method == BuiltinMethod::Count
-                               || next.method == BuiltinMethod::Len) =>
-                        Some(Opcode::UniqueCount),
+                    // UniqueCount removed; pipeline rule
+                    // Unique ∘ Count → UniqueCount fuses at lower-time.
                     _ => None,
                 };
                 if let Some(rep) = replaced {
@@ -5793,22 +5785,8 @@ impl VM {
                 }
                 // TopN handler removed — pipeline.rs Sink::TopN covers
                 // sort()+take(n) for top-level Root-prefix queries.
-                Opcode::UniqueCount => {
-                    use super::eval::util::val_to_key;
-                    let recv = pop!(stack);
-                    let items = match recv {
-                        Val::Arr(a) => Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone()),
-                        Val::Null   => { stack.push(Val::Int(0)); continue; }
-                        other       => vec![other],
-                    };
-                    let mut seen: std::collections::HashSet<String> =
-                        std::collections::HashSet::with_capacity(items.len());
-                    let mut n: i64 = 0;
-                    for it in &items {
-                        if seen.insert(val_to_key(it)) { n += 1; }
-                    }
-                    stack.push(Val::Int(n));
-                }
+                // UniqueCount handler removed — pipeline.rs Sink::UniqueCount
+                // covers unique().count() at lower-time.
                 // ArgExtreme handler removed — pipeline.rs MinBy/MaxBy
                 // covers sort_by(k)+first()/last().
                 // MapMap handler removed — pipeline runs two Map stages

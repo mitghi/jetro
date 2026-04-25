@@ -158,6 +158,9 @@ pub enum Sink {
     MinBy(Arc<crate::vm::Program>),
     /// `Sort_by(k) ∘ Last` → keep argmax by key.
     MaxBy(Arc<crate::vm::Program>),
+    /// `Unique ∘ Count` — count distinct elements via HashSet, no
+    /// intermediate dedup array materialised.
+    UniqueCount,
 }
 
 #[derive(Debug, Clone)]
@@ -552,6 +555,15 @@ fn rewrite_step(p: &mut Pipeline) -> bool {
         }
     }
 
+    // Rule:  Unique ∘ Count → UniqueCount
+    if let (Some(last), Sink::Count) = (p.stages.last(), &p.sink) {
+        if matches!(last, Stage::UniqueBy(None)) {
+            p.stages.pop();
+            p.sink = Sink::UniqueCount;
+            return true;
+        }
+    }
+
     // Rule:  FlatMap(f) ∘ Count → FlatMapCount(f)
     // Closes pipeline_ir.md bench item #1 (44× gap).  No need to
     // materialise the flattened sequence — kernel pulls each yielded
@@ -913,6 +925,9 @@ impl Pipeline {
                 Sink::TopN { .. } | Sink::MinBy(_) | Sink::MaxBy(_) => {
                     acc_collect.push(item);
                 }
+                Sink::UniqueCount => {
+                    acc_collect.push(item);
+                }
             }
             taken += 1;
         }
@@ -934,8 +949,20 @@ impl Pipeline {
             Sink::TopN { n, asc, key } => topn_finalise(&mut vm, acc_collect, *n, *asc, key.as_ref())?,
             Sink::MinBy(key)        => keyed_extreme(&mut vm, acc_collect, key, false)?,
             Sink::MaxBy(key)        => keyed_extreme(&mut vm, acc_collect, key, true)?,
+            Sink::UniqueCount       => unique_count_finalise(acc_collect),
         })
     }
+}
+
+fn unique_count_finalise(items: Vec<Val>) -> Val {
+    use crate::eval::util::val_to_key;
+    let mut seen: std::collections::HashSet<String> =
+        std::collections::HashSet::with_capacity(items.len());
+    let mut n: i64 = 0;
+    for it in &items {
+        if seen.insert(val_to_key(it)) { n += 1; }
+    }
+    Val::Int(n)
 }
 
 /// Heap-based top-N: keep the n smallest (or largest) by natural cmp
