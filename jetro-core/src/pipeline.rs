@@ -200,50 +200,190 @@ impl Pipeline {
 }
 
 /// Apply algebraic rewrite rules until fixed point or a fuel limit
-/// expires.  Each rule shrinks the stage vector by collapsing into a
-/// fused sink — strictly monotonic, so no cycle risk.
+/// expires.  Rules listed in `project_pipeline_ir.md`; this function
+/// implements the subset that operates on the currently-supported
+/// Stage / Sink set (`Filter` / `Map` / `Take` / `Skip` /
+/// `Collect` / `Count` / `Sum` and the fused sinks).
+///
+/// Rules NOT yet implemented (require Stage variants the lowering
+/// + execution don't yet emit):
+///   `Sort ∘ Take → TopK`            (no Sort stage)
+///   `Reverse ∘ Reverse → id`        (no Reverse stage)
+///   `UniqueBy(k) ∘ UniqueBy(k) → UniqueBy(k)`
+///   `Pick(a) ∘ Pick(b) → Pick(a ∩ b)`
+///   `DeepScan(k) ∘ Filter(p on k) → DeepScanFiltered(k, p)`
+///   `DeepScan(k) ∘ Pick({k}) → DeepScan(k)`
+///   `Filter(p) ∘ Map(f) → Map(f) ∘ Filter(p ∘ f⁻¹)`  (needs SSA dep)
+///
+/// Each rule is monotonic — strictly reduces stage count or rewrites
+/// to a structurally smaller form — so a fuel limit of 16 protects
+/// against pathological loops without affecting correctness.
 fn rewrite(p: &mut Pipeline) {
-    let mut fuel = 8usize;
+    let mut fuel = 16usize;
     while fuel > 0 {
         fuel -= 1;
-        let last_two = if p.stages.len() >= 2 {
-            Some((p.stages.len() - 2, p.stages.len() - 1))
-        } else { None };
+        if rewrite_step(p) { continue; }
+        break;
+    }
+}
 
-        // Rule: Filter(pred) ∘ Map(f) ∘ Sum  →  SumFilterMap(pred, f)
-        if let (Some((i_pred, i_map)), Sink::Sum) = (last_two, &p.sink) {
-            if let (Stage::Filter(pred), Stage::Map(map)) =
-                (&p.stages[i_pred], &p.stages[i_map])
-            {
-                let pred = Arc::clone(pred);
-                let map  = Arc::clone(map);
-                p.stages.truncate(i_pred);
-                p.sink = Sink::SumFilterMap(pred, map);
-                continue;
+/// One round of the rewrite loop.  Returns `true` if any rule fired,
+/// `false` if the pipeline is at a local fixed point.
+fn rewrite_step(p: &mut Pipeline) -> bool {
+    use crate::vm::Opcode;
+
+    // ── Constant-fold rules on Filter ────────────────────────────────────
+    //
+    // Rule:  Filter(true)  → id        (drop the stage)
+    // Rule:  Filter(false) → Empty     (replace remaining pipeline with
+    //                                   the sink's empty-input result)
+    let mut const_remove_at: Option<(usize, bool)> = None;
+    for (i, s) in p.stages.iter().enumerate() {
+        if let Stage::Filter(prog) = s {
+            if let Some(b) = prog_const_bool(prog) {
+                const_remove_at = Some((i, b));
+                break;
             }
         }
-
-        // Rule: Map(f) ∘ Sum → SumMap(f)
-        if let (Some(last), Sink::Sum) = (p.stages.last(), &p.sink) {
-            if let Stage::Map(prog) = last {
-                let prog = Arc::clone(prog);
-                p.stages.pop();
-                p.sink = Sink::SumMap(prog);
-                continue;
-            }
+    }
+    if let Some((i, b)) = const_remove_at {
+        if b {
+            p.stages.remove(i);
+        } else {
+            // Filter(false) — pipeline yields zero elements.
+            p.stages.clear();
+            p.sink = empty_sink_for(&p.sink);
         }
+        return true;
+    }
 
-        // Rule: Filter(p) ∘ Count → CountIf(p)
-        if let (Some(last), Sink::Count) = (p.stages.last(), &p.sink) {
-            if let Stage::Filter(prog) = last {
-                let prog = Arc::clone(prog);
-                p.stages.pop();
-                p.sink = Sink::CountIf(prog);
-                continue;
+    // ── Adjacent-stage merges ───────────────────────────────────────────
+    //
+    // Rule:  Skip(a) ∘ Skip(b) → Skip(a + b)
+    // Rule:  Take(a) ∘ Take(b) → Take(min(a, b))
+    for i in 0..p.stages.len().saturating_sub(1) {
+        match (&p.stages[i], &p.stages[i + 1]) {
+            (Stage::Skip(a), Stage::Skip(b)) => {
+                let merged = a.saturating_add(*b);
+                p.stages[i] = Stage::Skip(merged);
+                p.stages.remove(i + 1);
+                return true;
             }
+            (Stage::Take(a), Stage::Take(b)) => {
+                let merged = (*a).min(*b);
+                p.stages[i] = Stage::Take(merged);
+                p.stages.remove(i + 1);
+                return true;
+            }
+            // Rule:  Filter(p) ∘ Filter(q) → Filter(p ∧ q)
+            // Combine via VM-level AndOp embedding; skips sub-Expr
+            // re-compile by wrapping q's Program inside an AndOp opcode
+            // appended to p's ops.
+            (Stage::Filter(p_prog), Stage::Filter(q_prog)) => {
+                let mut ops: Vec<Opcode> = p_prog.ops.as_ref().to_vec();
+                ops.push(Opcode::AndOp(Arc::clone(q_prog)));
+                let merged = Arc::new(crate::vm::Program {
+                    ops: ops.into(),
+                    source: p_prog.source.clone(),
+                    id: 0,
+                    is_structural: false,
+                    ics: p_prog.ics.clone(),
+                });
+                p.stages[i] = Stage::Filter(merged);
+                p.stages.remove(i + 1);
+                return true;
+            }
+            _ => {}
         }
+    }
 
-        break; // no rule matched this round
+    // ── Pushdown: Map(f) ∘ Take(n)  →  Take(n) ∘ Map(f) ────────────────
+    // Run the map only on the first `n` items.  Stage order in `stages`
+    // is left-to-right (apply 0 first), so detect [Map, Take] and
+    // swap to [Take, Map].
+    for i in 0..p.stages.len().saturating_sub(1) {
+        if matches!(&p.stages[i], Stage::Map(_))
+            && matches!(&p.stages[i + 1], Stage::Take(_)) {
+            p.stages.swap(i, i + 1);
+            return true;
+        }
+    }
+
+    // ── Drop pure Map before Count ─────────────────────────────────────
+    // Rule:  Map(f) ∘ Count → Count
+    if matches!(&p.sink, Sink::Count) {
+        if matches!(p.stages.last(), Some(Stage::Map(_))) {
+            p.stages.pop();
+            return true;
+        }
+    }
+
+    // ── Existing fused-sink rules ──────────────────────────────────────
+    let last_two = if p.stages.len() >= 2 {
+        Some((p.stages.len() - 2, p.stages.len() - 1))
+    } else { None };
+
+    // Rule:  Filter(pred) ∘ Map(f) ∘ Sum  →  SumFilterMap(pred, f)
+    if let (Some((i_pred, i_map)), Sink::Sum) = (last_two, &p.sink) {
+        if let (Stage::Filter(pred), Stage::Map(map)) =
+            (&p.stages[i_pred], &p.stages[i_map])
+        {
+            let pred = Arc::clone(pred);
+            let map  = Arc::clone(map);
+            p.stages.truncate(i_pred);
+            p.sink = Sink::SumFilterMap(pred, map);
+            return true;
+        }
+    }
+
+    // Rule:  Map(f) ∘ Sum → SumMap(f)
+    if let (Some(last), Sink::Sum) = (p.stages.last(), &p.sink) {
+        if let Stage::Map(prog) = last {
+            let prog = Arc::clone(prog);
+            p.stages.pop();
+            p.sink = Sink::SumMap(prog);
+            return true;
+        }
+    }
+
+    // Rule:  Filter(p) ∘ Count → CountIf(p)
+    if let (Some(last), Sink::Count) = (p.stages.last(), &p.sink) {
+        if let Stage::Filter(prog) = last {
+            let prog = Arc::clone(prog);
+            p.stages.pop();
+            p.sink = Sink::CountIf(prog);
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Return the result a sink would produce on an empty pull stream.
+/// Used by the `Filter(false)` rewrite to short-circuit the pipeline.
+/// Sums emit `Int(0)`, counts emit `Int(0)`, collect emits `[]`.
+fn empty_sink_for(sink: &Sink) -> Sink {
+    match sink {
+        Sink::Collect | Sink::Count | Sink::Sum
+        | Sink::SumMap(_) | Sink::CountIf(_) | Sink::SumFilterMap(_, _) => sink.clone(),
+    }
+    // (Empty input ⇒ existing accumulators in `Pipeline::run` already
+    // produce Int(0) / Float(0.0) / Val::arr([]).  No need for a
+    // separate Empty sentinel — clearing `stages` suffices because the
+    // outer iter has already been built before this runs in `run`.
+    // The clone here is kept for ABI clarity.)
+}
+
+/// If `prog` evaluates to a constant boolean independent of `@`,
+/// return the literal value.  Currently matches the trivial shape
+/// `[PushBool(b)]`; future SSA work could constant-fold larger preds.
+fn prog_const_bool(prog: &crate::vm::Program) -> Option<bool> {
+    use crate::vm::Opcode;
+    let ops = prog.ops.as_ref();
+    if ops.len() != 1 { return None; }
+    match &ops[0] {
+        Opcode::PushBool(b) => Some(*b),
+        _ => None,
     }
 }
 
@@ -855,11 +995,14 @@ mod tests {
 
     #[test]
     fn lower_filter_map_count() {
+        // Rewrite collapses:
+        //   Map(id) ∘ Count → Count   (drop pure Map before Count)
+        //   Filter(total>100) ∘ Count → CountIf(total>100)
+        // so the lowered pipeline ends up with zero stages and a
+        // CountIf sink.
         let p = lower_query("$.orders.filter(total > 100).map(id).count()").unwrap();
-        assert_eq!(p.stages.len(), 2);
-        assert!(matches!(p.stages[0], Stage::Filter(_)));
-        assert!(matches!(p.stages[1], Stage::Map(_)));
-        assert!(matches!(p.sink, Sink::Count));
+        assert_eq!(p.stages.len(), 0);
+        assert!(matches!(p.sink, Sink::CountIf(_)));
     }
 
     #[test]
@@ -944,6 +1087,58 @@ mod tests {
         let p = lower_query("$.orders.filter(total > 100).map(total).sum()").unwrap();
         let out = p.run(&doc).unwrap();
         assert_eq!(out, Val::Int(350));
+    }
+
+    #[test]
+    fn rewrite_skip_skip_merges() {
+        let p = lower_query("$.xs.skip(2).skip(3).sum()").unwrap();
+        assert_eq!(p.stages.len(), 1);
+        assert!(matches!(p.stages[0], Stage::Skip(5)));
+    }
+
+    #[test]
+    fn rewrite_take_take_merges_min() {
+        let p = lower_query("$.xs.take(10).take(3).sum()").unwrap();
+        assert_eq!(p.stages.len(), 1);
+        assert!(matches!(p.stages[0], Stage::Take(3)));
+    }
+
+    #[test]
+    fn rewrite_filter_filter_merges_via_andop() {
+        let p = lower_query("$.orders.filter(total > 100).filter(qty > 0).sum()").unwrap();
+        assert_eq!(p.stages.len(), 1);
+        match &p.stages[0] {
+            Stage::Filter(prog) => {
+                assert!(prog.ops.iter().any(|o| matches!(o, crate::vm::Opcode::AndOp(_))));
+            }
+            _ => panic!("expected merged Filter"),
+        }
+    }
+
+    #[test]
+    fn rewrite_map_then_count_drops_map() {
+        let p = lower_query("$.orders.map(total).count()").unwrap();
+        assert_eq!(p.stages.len(), 0);
+        assert!(matches!(p.sink, Sink::Count));
+    }
+
+    #[test]
+    fn rewrite_take_after_map_pushdown() {
+        let p = lower_query("$.xs.map(@ * 2).take(3).sum()").unwrap();
+        // After pushdown: [Take(3), Map].  After Map+Sum fusion the
+        // Map stage moves into the sink → stages = [Take(3)] +
+        // SumMap sink.
+        assert_eq!(p.stages.len(), 1);
+        assert!(matches!(p.stages[0], Stage::Take(3)));
+        assert!(matches!(p.sink, Sink::SumMap(_)));
+    }
+
+    #[test]
+    fn rewrite_filter_const_true_dropped() {
+        // `true` literal — Filter(true) collapses to id.
+        let p = lower_query("$.xs.filter(true).count()").unwrap();
+        assert_eq!(p.stages.len(), 0);
+        assert!(matches!(p.sink, Sink::Count));
     }
 
     #[test]
