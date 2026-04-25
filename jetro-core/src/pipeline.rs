@@ -2800,6 +2800,11 @@ enum SinkAcc<'p> {
     CountIf { count: usize, pred: &'p BodyKernel },
     /// `Filter(pred) ∘ First` — keeps first matching tape entry idx.
     FilterFirst { hit: Option<usize>, pred: &'p BodyKernel },
+    /// Collect entries (post-stage) — gathers tape idxs; finalise
+    /// detects uniform numeric / string lanes and emits IntVec /
+    /// FloatVec / StrSliceVec.  Heterogeneous → falls back to Val::Arr
+    /// via `Val::from_tape_node` per entry.
+    Collect { entries: Vec<usize> },
 }
 
 #[cfg(feature = "simd-json")]
@@ -2872,6 +2877,7 @@ impl<'p> SinkAcc<'p> {
                 let pred = sink_kernels.get(0)?;
                 Some(Self::FilterFirst { hit: None, pred })
             }
+            Sink::Collect         => Some(Self::Collect { entries: Vec::new() }),
             // Unsupported sinks bail; caller falls back to Val path.
             _ => None,
         }
@@ -2910,6 +2916,7 @@ impl<'p> SinkAcc<'p> {
                 }
                 Some(true)
             }
+            Self::Collect { entries } => { entries.push(entry_idx); Some(true) }
         }
     }
 
@@ -2927,8 +2934,86 @@ impl<'p> SinkAcc<'p> {
                     None => Val::Null,
                 }
             }
+            Self::Collect { entries } => collect_entries_to_val(tape, &entries),
         }
     }
+}
+
+/// Materialise gathered tape entry idxs into the most-typed Val lane
+/// available.  Probes the first entry for type; verifies uniformity by
+/// scanning kinds; emits IntVec / FloatVec / StrSliceVec on uniform
+/// numeric / string runs (typed lanes light up downstream slot kernels
+/// + serialise without per-element Val tag overhead).  Mixed or
+/// container-typed entries fall through to `Val::Arr` via per-entry
+/// `Val::from_tape_node`.
+#[cfg(feature = "simd-json")]
+fn collect_entries_to_val(
+    tape: &std::sync::Arc<crate::strref::TapeData>,
+    entries: &[usize],
+) -> Val {
+    use crate::strref::TapeNode;
+    use simd_json::StaticNode as SN;
+    if entries.is_empty() { return Val::arr(Vec::new()); }
+    let first = tape.nodes[entries[0]];
+    let mut all_int   = matches!(first, TapeNode::Static(SN::I64(_) | SN::U64(_)));
+    let mut all_float = matches!(first, TapeNode::Static(SN::F64(_) | SN::I64(_) | SN::U64(_)));
+    let mut all_str   = matches!(first, TapeNode::StringRef { .. });
+    for &e in entries.iter() {
+        match tape.nodes[e] {
+            TapeNode::Static(SN::I64(_)) | TapeNode::Static(SN::U64(_)) => {
+                all_str = false;
+            }
+            TapeNode::Static(SN::F64(_)) => { all_int = false; all_str = false; }
+            TapeNode::StringRef { .. } => { all_int = false; all_float = false; }
+            _ => { all_int = false; all_float = false; all_str = false; break; }
+        }
+        if !all_int && !all_float && !all_str { break; }
+    }
+    if all_int {
+        let mut out: Vec<i64> = Vec::with_capacity(entries.len());
+        for &e in entries.iter() {
+            match tape.nodes[e] {
+                TapeNode::Static(SN::I64(n)) => out.push(n),
+                TapeNode::Static(SN::U64(n)) if n <= i64::MAX as u64 => out.push(n as i64),
+                _ => unreachable!("uniformity check"),
+            }
+        }
+        return Val::IntVec(std::sync::Arc::new(out));
+    }
+    if all_float {
+        let mut out: Vec<f64> = Vec::with_capacity(entries.len());
+        for &e in entries.iter() {
+            match tape.nodes[e] {
+                TapeNode::Static(SN::I64(n)) => out.push(n as f64),
+                TapeNode::Static(SN::U64(n)) => out.push(n as f64),
+                TapeNode::Static(SN::F64(f)) => out.push(f),
+                _ => unreachable!("uniformity check"),
+            }
+        }
+        return Val::FloatVec(std::sync::Arc::new(out));
+    }
+    if all_str {
+        let mut out: Vec<crate::strref::StrRef> = Vec::with_capacity(entries.len());
+        let parent_str: std::sync::Arc<str> = unsafe {
+            std::sync::Arc::from_raw(
+                std::sync::Arc::into_raw(std::sync::Arc::clone(&tape.bytes_buf))
+                    as *const str)
+        };
+        for &e in entries.iter() {
+            if let TapeNode::StringRef { start, end } = tape.nodes[e] {
+                out.push(crate::strref::StrRef::slice(
+                    std::sync::Arc::clone(&parent_str),
+                    start as usize, end as usize));
+            }
+        }
+        return Val::StrSliceVec(std::sync::Arc::new(out));
+    }
+    // Mixed / containers — per-entry materialise.
+    let mut out: Vec<Val> = Vec::with_capacity(entries.len());
+    for &e in entries.iter() {
+        out.push(Val::from_tape_node(tape, e));
+    }
+    Val::Arr(std::sync::Arc::new(out))
 }
 
 fn tape_finalise(
