@@ -23,11 +23,12 @@ kw_when   = @{ "when"   ~ !ident_char }
 kw_patch  = @{ "patch"  ~ !ident_char }
 kw_delete = @{ "DELETE" ~ !ident_char }
 kw_try    = @{ "try"    ~ !ident_char }
+kw_has    = @{ "has"    ~ !ident_char }
 
 reserved = _{
     ("true" | "false" | "null" | "and" | "or" | "not"
      | "for" | "in" | "if" | "else" | "let" | "lambda" | "kind"
-     | "is" | "as" | "when" | "patch" | "DELETE" | "try") ~ !ident_char
+     | "is" | "as" | "when" | "patch" | "DELETE" | "try" | "has") ~ !ident_char
 }
 
 ident      = @{ !reserved ~ (ASCII_ALPHA | "_") ~ ident_char* }
@@ -127,8 +128,16 @@ coalesce_expr = { or_expr ~ (("??" | "?|") ~ or_expr)* }
 or_expr   = { and_expr  ~ (kw_or  ~ and_expr)* }
 and_expr  = { not_expr  ~ (kw_and ~ not_expr)* }
 not_expr  = { kw_not ~ not_expr | kind_expr }
-kind_expr = { cmp_expr ~ ((kw_kind | kw_is) ~ kw_not? ~ kind_type)? }
-cmp_expr  = { add_expr ~ (cmp_op ~ add_expr)? }
+kind_expr     = { contains_expr ~ ((kw_kind | kw_is) ~ kw_not? ~ kind_type)? }
+// `lhs has rhs` is syntactic sugar for a membership / containment
+// check: `arr has x` ⇔ `arr.includes(x)`.  Works on arrays (element
+// equality), objects (key existence), and strings (substring).
+//
+// (The `in` keyword would be ambiguous with `let X = Y in Z` and
+//  `for x in xs`, so membership uses `has` only — or the dot-method
+//  forms `.includes(x)` / `.contains(x)` / `.exists(pred)`.)
+contains_expr = { cmp_expr ~ (kw_has ~ cmp_expr)? }
+cmp_expr      = { add_expr ~ (cmp_op ~ add_expr)? }
 add_expr  = { mul_expr ~ (add_op ~ mul_expr)* }
 mul_expr  = { cast_expr ~ (mul_op ~ cast_expr)* }
 // `as` cast — tighter than arithmetic, looser than postfix

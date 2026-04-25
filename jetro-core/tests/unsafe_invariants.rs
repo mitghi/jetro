@@ -656,6 +656,52 @@ fn compile_handle_run_on_jetro() {
     assert_eq!(q.run_on(&j2).unwrap(), json!(2));
 }
 
+// ── has / exists / any ──────────────────────────────────────────────
+
+#[test]
+fn has_array_value() {
+    assert_eq!(jetro_core::query("$ has 'b'", &json!(["a", "b"])).unwrap(), json!(true));
+    assert_eq!(jetro_core::query("$ has 'z'", &json!(["a", "b"])).unwrap(), json!(false));
+}
+
+#[test]
+fn has_object_key() {
+    let doc = json!({"name": "X", "age": 1});
+    assert_eq!(jetro_core::query("$ has 'name'",   &doc).unwrap(), json!(true));
+    assert_eq!(jetro_core::query("$ has 'absent'", &doc).unwrap(), json!(false));
+}
+
+#[test]
+fn has_substring() {
+    assert_eq!(jetro_core::query("$ has 'foo'", &json!("foobar")).unwrap(), json!(true));
+    assert_eq!(jetro_core::query("$ has 'baz'", &json!("foobar")).unwrap(), json!(false));
+}
+
+#[test]
+fn any_exists_alias() {
+    let doc = json!([{"role": "admin"}, {"role": "user"}]);
+    let r1 = jetro_core::query(r#"$.any(role == "admin")"#, &doc).unwrap();
+    let r2 = jetro_core::query(r#"$.exists(role == "admin")"#, &doc).unwrap();
+    assert_eq!(r1, json!(true));
+    assert_eq!(r2, json!(true));
+}
+
+#[test]
+fn elegant_indices_via_any_and_contains() {
+    let doc = json!({
+        "products": [
+            {"id": 1, "reviews": [{"reviewerEmail": "alice@x"}, {"reviewerEmail": "bob@x"}]},
+            {"id": 2, "reviews": [{"reviewerEmail": "ruby.andrews@x"}]},
+            {"id": 3, "reviews": [{"reviewerEmail": "carol@x"}]},
+            {"id": 4, "reviews": [{"reviewerEmail": "ruby.smith@x"}]},
+        ]
+    });
+    let r = jetro_core::query(
+        r#"$.products.indices_where(reviews.any(reviewerEmail.contains('ruby')))"#,
+        &doc).unwrap();
+    assert_eq!(r, json!([1, 3]));
+}
+
 // ── streaming iter ──────────────────────────────────────────────────
 
 #[test]

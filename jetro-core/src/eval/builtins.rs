@@ -151,8 +151,10 @@ fn build() -> BuiltinRegistry {
     // Aggregates — bool-flag wrappers
     t.insert("min", b_min);
     t.insert("max", b_max);
-    t.insert("any", b_any);
-    t.insert("all", b_all);
+    t.insert("any",    b_any);
+    t.insert("exists", b_any);    // alias — reads natural in queries
+    t.insert("all",    b_all);
+    t.insert("every",  b_all);    // alias for all
 
     // Numeric scalar ops
     t.insert("ceil",  b_ceil);
@@ -495,6 +497,16 @@ fn b_includes(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
             None => false,
         },
         Val::Str(s) => s.contains(item.as_str().unwrap_or_default()),
+        // Obj receiver: treat the arg as a key.  Lets `'name' in $.user`
+        // and `$.user has 'name'` resolve to "object has this key".
+        Val::Obj(m) => match item.as_str() {
+            Some(k) => m.contains_key(k),
+            None    => false,
+        },
+        Val::ObjSmall(p) => match item.as_str() {
+            Some(k) => p.iter().any(|(kk, _)| kk.as_ref() == k),
+            None    => false,
+        },
         _ => false,
     }))
 }

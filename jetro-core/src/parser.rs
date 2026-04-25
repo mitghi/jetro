@@ -80,6 +80,7 @@ fn parse_expr(pair: Pair<Rule>) -> Expr {
         Rule::and_expr      => parse_and(pair),
         Rule::not_expr      => parse_not(pair),
         Rule::kind_expr     => parse_kind(pair),
+        Rule::contains_expr => parse_contains(pair),
         Rule::cmp_expr      => parse_cmp(pair),
         Rule::add_expr      => parse_add(pair),
         Rule::mul_expr      => parse_mul(pair),
@@ -269,6 +270,28 @@ fn parse_kind(pair: Pair<Rule>) -> Expr {
             Expr::Kind { expr: Box::new(cmp), ty, negate }
         }
         _ => cmp,
+    }
+}
+
+// ── Containment / membership (`in` / `has`) ────────────────────────────────────
+
+/// `lhs has rhs` lowers to `lhs.includes(rhs)`.  Works on arrays,
+/// objects (key check), and strings (substring).
+fn parse_contains(pair: Pair<Rule>) -> Expr {
+    let mut inner = pair.into_inner();
+    let lhs = parse_expr(inner.next().unwrap());
+    match inner.next() {
+        None => lhs,
+        Some(_op_pair) => {
+            let rhs = parse_expr(inner.next().unwrap());
+            Expr::Chain(
+                Box::new(lhs),
+                vec![Step::Method(
+                    "includes".to_string(),
+                    vec![Arg::Pos(rhs)],
+                )],
+            )
+        }
     }
 }
 
