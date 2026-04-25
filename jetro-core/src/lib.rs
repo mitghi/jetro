@@ -746,6 +746,18 @@ impl Jetro {
     /// Descendant queries (`$..key`) can then take the SIMD byte-scan path
     /// instead of walking the tree.
     pub fn from_bytes(bytes: Vec<u8>) -> std::result::Result<Self, serde_json::Error> {
+        // Cold-start fast path — when the simd-json feature is on,
+        // build Val directly from the parser tape, skipping the
+        // intermediate `serde_json::Value` tree + the Value→Val walk.
+        // Plan: `cold_start_direct_parse.md`.  Falls back to the
+        // serde_json path on any simd-json parse error so legacy
+        // edge-case correctness is preserved.
+        #[cfg(feature = "simd-json")]
+        {
+            if let Ok(j) = Self::from_simd(bytes.clone()) {
+                return Ok(j);
+            }
+        }
         let document: Value = serde_json::from_slice(&bytes)?;
         Ok(Self {
             document,

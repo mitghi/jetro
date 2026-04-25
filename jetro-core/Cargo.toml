@@ -23,7 +23,11 @@ regex = "1.10"
 simd-json = { version = "0.13", optional = true }
 
 [features]
-default = []
+# simd-json default-on per cold_start_direct_parse plan: routes
+# from_bytes / from_slice through the direct bytes→Val parser,
+# skipping the serde_json::Value intermediate.  ~4× cold-start win.
+# Users wanting the legacy serde-only path: default-features = false.
+default = ["simd-json"]
 simd-json = ["dep:simd-json"]
 
 [dev-dependencies]
