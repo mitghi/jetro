@@ -293,8 +293,6 @@ fn apply_op(op: &Opcode, stack: &mut Vec<AbstractVal>) {
             stack.push(AbstractVal::array());
         }
         Opcode::FilterFieldCmpFieldCount(_, _, _)
-        | Opcode::FilterFieldsAllEqLitCount(_)
-        | Opcode::FilterFieldsAllCmpLitCount(_)
         | Opcode::UniqueCount => {
             pop1!();
             stack.push(AbstractVal::scalar(VType::Int));
@@ -1122,8 +1120,6 @@ pub fn opcode_cost(op: &Opcode) -> u32 {
             | Opcode::MapNumVecNeg
             | Opcode::FilterFieldCmpField(_, _, _) => 5,
         Opcode::FilterFieldCmpFieldCount(_, _, _) => 4,
-        Opcode::FilterFieldsAllEqLitCount(pairs) => 4 + pairs.len() as u32 * 2,
-        Opcode::FilterFieldsAllCmpLitCount(triples) => 4 + triples.len() as u32 * 2,
         Opcode::GroupByField(_) => 15,
         Opcode::CountByField(_) => 12,
         Opcode::UniqueByField(_) => 14,

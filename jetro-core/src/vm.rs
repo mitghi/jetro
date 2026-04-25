@@ -486,11 +486,8 @@ pub enum Opcode {
     // FilterFieldEqLitMapField / FilterFieldCmpLitMapField migrated
     // to pipeline.rs Sink::NumFilterMap (with columnar + ObjVec slot
     // kernels).  See memory/project_opcode_migration.md.
-    /// `filter(f1 == l1 AND f2 == l2 AND …).count()` fused — zero alloc,
-    /// one IC slot per conjunct field.
-    FilterFieldsAllEqLitCount(Arc<[(Arc<str>, Val)]>),
-    /// `filter(f1 <o1> l1 AND f2 <o2> l2 AND …).count()` fused — general cmp.
-    FilterFieldsAllCmpLitCount(Arc<[(Arc<str>, super::ast::BinOp, Val)]>),
+    // FilterFieldsAllEqLitCount / FilterFieldsAllCmpLitCount migrated
+    // to pipeline.rs Sink::CountIf with and_chain_prog decoder.
     // FilterFieldEqLitCount / FilterFieldCmpLitCount migrated to
     // pipeline.rs Sink::CountIf (with columnar fast path).
     /// `filter(k1 <op> k2).count()` — cross-field count.
@@ -1026,35 +1023,10 @@ fn detect_field_pred(ops: &[Opcode]) -> Option<FieldPred> {
 ///
 /// Pattern accepted (N ≥ 2):
 ///   `[⟨field cmp lit⟩, AndOp(⟨field cmp lit⟩), AndOp(⟨field cmp lit⟩), …]`
-fn detect_field_cmp_conjuncts(ops: &[Opcode]) -> Option<Vec<(Arc<str>, super::ast::BinOp, Val)>> {
-    let mut triples: Vec<(Arc<str>, super::ast::BinOp, Val)> = Vec::new();
-    let first_and = ops.iter().position(|o| matches!(o, Opcode::AndOp(_)));
-    let first_len = first_and.unwrap_or(ops.len());
-    match detect_field_pred(&ops[..first_len])? {
-        FieldPred::FieldCmpLit(k, op, lit) => triples.push((k, op, lit)),
-        _ => return None,
-    }
-    for op in &ops[first_len..] {
-        if let Opcode::AndOp(sub) = op {
-            match detect_field_pred(&sub.ops)? {
-                FieldPred::FieldCmpLit(k, op, lit) => triples.push((k, op, lit)),
-                _ => return None,
-            }
-        } else {
-            return None;
-        }
-    }
-    if triples.len() >= 2 { Some(triples) } else { None }
-}
-
-/// Convenience: all conjuncts are Eq → produce the flat (field, lit) form
-/// used by `FilterFieldsAllEqLitCount`.
-fn detect_field_eq_conjuncts(ops: &[Opcode]) -> Option<Vec<(Arc<str>, Val)>> {
-    let triples = detect_field_cmp_conjuncts(ops)?;
-    triples.into_iter()
-        .map(|(k, op, v)| if matches!(op, super::ast::BinOp::Eq) { Some((k, v)) } else { None })
-        .collect()
-}
+// detect_field_cmp_conjuncts / detect_field_eq_conjuncts removed
+// alongside the FilterFieldsAllEqLitCount / FilterFieldsAllCmpLitCount
+// opcodes (compound-AND filter+count fusion now lives in
+// pipeline.rs Sink::CountIf via and_chain_prog decoder).
 
 /// Compare two `Val`s using a binary comparison operator. Only implements the
 /// semantics needed for filter predicate fusion; falls back to cmp_vals for
@@ -2196,16 +2168,9 @@ impl Compiler {
                         out2.push(Opcode::MapFieldChainUnique(chain)); continue;
                     }
                 }
-                Opcode::FilterCount(ref pred) => {
-                    if let Some(pairs) = detect_field_eq_conjuncts(&pred.ops) {
-                        out2.push(Opcode::FilterFieldsAllEqLitCount(Arc::from(pairs)));
-                        continue;
-                    }
-                    if let Some(triples) = detect_field_cmp_conjuncts(&pred.ops) {
-                        out2.push(Opcode::FilterFieldsAllCmpLitCount(Arc::from(triples)));
-                        continue;
-                    }
-                }
+                // FilterFieldsAllEqLitCount / FilterFieldsAllCmpLitCount
+                // (compound-AND filter+count specialisations) migrated to
+                // pipeline.rs Sink::CountIf with and_chain_prog decoder.
                 Opcode::CallMethod(ref b) => {
                     // map(k)    → MapField(k)
                     if b.method == BuiltinMethod::Map && b.sub_progs.len() == 1 {
@@ -5711,46 +5676,9 @@ impl VM {
                     }
                     stack.push(Val::arr(out));
                 }
-                Opcode::FilterFieldsAllEqLitCount(pairs) => {
-                    let recv = pop!(stack);
-                    let mut n: i64 = 0;
-                    let mut ics: SmallVec<[Option<usize>; 4]> = SmallVec::new();
-                    ics.resize(pairs.len(), None);
-                    if let Val::Arr(a) = &recv {
-                        'item: for item in a.iter() {
-                            if let Val::Obj(m) = item {
-                                for (i, (k, lit)) in pairs.iter().enumerate() {
-                                    match lookup_field_cached(m, k, &mut ics[i]) {
-                                        Some(v) if crate::eval::util::vals_eq(v, lit) => {}
-                                        _ => continue 'item,
-                                    }
-                                }
-                                n += 1;
-                            }
-                        }
-                    }
-                    stack.push(Val::Int(n));
-                }
-                Opcode::FilterFieldsAllCmpLitCount(triples) => {
-                    let recv = pop!(stack);
-                    let mut n: i64 = 0;
-                    let mut ics: SmallVec<[Option<usize>; 4]> = SmallVec::new();
-                    ics.resize(triples.len(), None);
-                    if let Val::Arr(a) = &recv {
-                        'item: for item in a.iter() {
-                            if let Val::Obj(m) = item {
-                                for (i, (k, cop, lit)) in triples.iter().enumerate() {
-                                    match lookup_field_cached(m, k, &mut ics[i]) {
-                                        Some(v) if cmp_val_binop(v, *cop, lit) => {}
-                                        _ => continue 'item,
-                                    }
-                                }
-                                n += 1;
-                            }
-                        }
-                    }
-                    stack.push(Val::Int(n));
-                }
+                // FilterFieldsAllEqLitCount / FilterFieldsAllCmpLitCount
+                // handlers removed.  Pipeline.rs Sink::CountIf with
+                // and_chain_prog decoder covers compound-AND filter+count.
                 // FilterFieldEqLitCount / FilterFieldCmpLitCount handlers
                 // removed — pipeline.rs Sink::CountIf covers both shapes.
                 Opcode::FilterFieldCmpFieldCount(k1, op, k2) => {
