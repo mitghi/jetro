@@ -38,6 +38,13 @@ use crate::ast::Expr;
 use crate::eval::value::Val;
 use crate::eval::EvalError;
 
+/// Promotes a `Val::Arr<Val::Obj>` to `Val::ObjVec` once per source array.
+/// Implemented by `Jetro::get_or_promote_objvec` which memoises the result.
+/// Trait so pipeline doesn't need to depend on the `Jetro` concrete type.
+pub trait ObjVecPromoter {
+    fn promote(&self, arr: &Arc<Vec<Val>>) -> Option<Arc<crate::eval::value::ObjVecData>>;
+}
+
 // ── Diagnostic tracing ──────────────────────────────────────────────────────
 //
 // `JETRO_PIPELINE_TRACE=1` env-var prints per-call lowering decisions to
@@ -1108,6 +1115,14 @@ impl Pipeline {
     /// Cost: O(N × K) where N=row count, K=key count, dominated by
     /// pointer-equality on Arc<str> keys.  Win: subsequent operations
     /// run as O(N) slice walks instead of O(N) IndexMap probes.
+    /// Wrapper that returns the promoted `ObjVecData` directly (for the
+    /// memoised cache in `Jetro::get_or_promote_objvec`).
+    pub fn try_promote_objvec_arr(arr: &Arc<Vec<Val>>) -> Option<Arc<crate::eval::value::ObjVecData>> {
+        if let Some(Val::ObjVec(d)) = Self::try_promote_objvec(arr) {
+            Some(d)
+        } else { None }
+    }
+
     fn try_promote_objvec(arr: &Arc<Vec<Val>>) -> Option<Val> {
         if arr.is_empty() { return None; }
         let first = match &arr[0] {
@@ -1141,6 +1156,87 @@ impl Pipeline {
             keys: keys.into(),
             cells,
         })))
+    }
+
+    /// Cache-aware variant: when cache promotes the source array,
+    /// recv is replaced with `Val::ObjVec` and the slot kernels fire.
+    fn try_columnar_with(
+        &self,
+        root: &Val,
+        cache: Option<&dyn ObjVecPromoter>,
+    ) -> Option<Result<Val, EvalError>> {
+        if let Some(out) = self.try_columnar_stage_chain(root) { return Some(out); }
+        if !self.stages.is_empty() { return None; }
+
+        let recv = match &self.source {
+            Source::Receiver(v) => v.clone(),
+            Source::FieldChain { keys } => walk_field_chain(root, keys),
+        };
+
+        // Cache-driven ObjVec promotion: only if cache provided AND
+        // recv is Val::Arr.  Promoted ObjVec memoised across calls.
+        let recv = if let (Some(c), Val::Arr(a)) = (cache, &recv) {
+            if let Some(d) = c.promote(a) {
+                Val::ObjVec(d)
+            } else { recv }
+        } else { recv };
+
+        // Reuse the body of try_columnar by running its tail logic
+        // against the (possibly promoted) recv.  Inline the typed-lane
+        // and ObjVec branches:
+        match (&recv, &self.sink) {
+            (Val::IntVec(a), Sink::Numeric(NumOp::Sum)) =>
+                return Some(Ok(Val::Int(a.iter().sum()))),
+            (Val::IntVec(a), Sink::Numeric(NumOp::Min)) =>
+                return Some(Ok(a.iter().copied().min().map(Val::Int).unwrap_or(Val::Null))),
+            (Val::IntVec(a), Sink::Numeric(NumOp::Max)) =>
+                return Some(Ok(a.iter().copied().max().map(Val::Int).unwrap_or(Val::Null))),
+            (Val::IntVec(a), Sink::Count) =>
+                return Some(Ok(Val::Int(a.len() as i64))),
+            (Val::FloatVec(a), Sink::Numeric(NumOp::Sum)) =>
+                return Some(Ok(Val::Float(a.iter().sum()))),
+            (Val::FloatVec(a), Sink::Count) =>
+                return Some(Ok(Val::Int(a.len() as i64))),
+            (Val::StrVec(a), Sink::Count) =>
+                return Some(Ok(Val::Int(a.len() as i64))),
+            _ => {}
+        }
+        if let Val::ObjVec(d) = &recv {
+            if let Sink::FlatMapCount(prog) = &self.sink {
+                if let Some(field) = single_field_prog(prog) {
+                    if let Some(slot) = d.slot_of(field) {
+                        return Some(Ok(objvec_flatmap_count_slot(d, slot)));
+                    }
+                }
+            }
+            if let Sink::NumMap(op, prog) = &self.sink {
+                let field = single_field_prog(prog)?;
+                let slot = d.slot_of(field)?;
+                return Some(Ok(objvec_num_slot(d, slot, *op)));
+            }
+            if let Sink::NumFilterMap(op, pred, map) = &self.sink {
+                let (pf, cop, lit) = single_cmp_prog(pred)?;
+                let mf = single_field_prog(map)?;
+                let sp = d.slot_of(pf)?;
+                let sm = d.slot_of(mf)?;
+                return Some(Ok(objvec_filter_num_slots(d, sp, cop, &lit, sm, *op)));
+            }
+            if let Sink::CountIf(pred) = &self.sink {
+                if let Some((pf, op, lit)) = single_cmp_prog(pred) {
+                    let sp = d.slot_of(pf)?;
+                    return Some(Ok(objvec_filter_count_slot(d, sp, op, &lit)));
+                }
+                if let Some(leaves) = and_chain_prog(pred) {
+                    let slots: Option<Vec<(usize, crate::ast::BinOp, Val)>> =
+                        leaves.iter().map(|(f, op, lit)| {
+                            d.slot_of(f).map(|s| (s, *op, lit.clone()))
+                        }).collect();
+                    let slots = slots?;
+                    return Some(Ok(objvec_filter_count_and_slots(d, &slots)));
+                }
+            }
+        }
+        None
     }
 
     fn try_columnar(&self, root: &Val) -> Option<Result<Val, EvalError>> {
@@ -1277,8 +1373,26 @@ impl Pipeline {
     /// Execute the pipeline against `root`, returning the sink's
     /// produced [`Val`].
     pub fn run(&self, root: &Val) -> Result<Val, EvalError> {
+        self.run_with(root, None)
+    }
+
+    /// Execute with an optional ObjVec promotion cache.  When `cache`
+    /// is `Some`, the pipeline consults it before resolving sources;
+    /// uniform-shape `Val::Arr<Val::Obj>` arrays are promoted to
+    /// `Val::ObjVec` once and reused on every subsequent call.  Cost
+    /// O(N×K) on first promotion, O(1) on hit.  Empty cache (`None`)
+    /// matches legacy `run` semantics.
+    pub fn run_with(
+        &self,
+        root: &Val,
+        cache: Option<&dyn ObjVecPromoter>,
+    ) -> Result<Val, EvalError> {
         // Phase 3 columnar fast path — runs before per-row loop.
-        if let Some(out) = self.try_columnar(root) { return out; }
+        if let Some(out) = self.try_columnar_with(root, cache) { return out; }
+        // Fall back to legacy try_columnar (no cache).
+        if cache.is_none() {
+            if let Some(out) = self.try_columnar(root) { return out; }
+        }
 
         // One VM owned by the pull loop — shared across stage program
         // calls so VM compile / path caches amortise across the row

@@ -282,6 +282,14 @@ pub struct Jetro {
     #[cfg(not(feature = "simd-json"))]
     #[allow(dead_code)]
     tape: Option<()>,
+    /// Memoised ObjVec promotions, keyed by the source `Arc<Vec<Val>>`'s
+    /// pointer identity.  When a Pipeline collects a uniform-shape array
+    /// of objects, the first call probes + builds an `ObjVecData`; all
+    /// subsequent calls (across queries, across iterations) reuse the
+    /// cached columnar layout.  Cost amortised across the lifetime of
+    /// the Jetro handle.
+    pub(crate) objvec_cache:
+        std::sync::Mutex<std::collections::HashMap<usize, Arc<crate::eval::value::ObjVecData>>>,
 }
 
 /// Extract an implicit-current-item field name from a `.map(arg)` /
@@ -700,9 +708,38 @@ fn trim_ascii(b: &[u8]) -> &[u8] {
     &b[s..e]
 }
 
+impl pipeline::ObjVecPromoter for Jetro {
+    fn promote(&self, arr: &Arc<Vec<Val>>) -> Option<Arc<crate::eval::value::ObjVecData>> {
+        self.get_or_promote_objvec(arr)
+    }
+}
+
 impl Jetro {
+    /// Memoised ObjVec promotion.  First call probes the array shape and
+    /// builds a columnar ObjVecData; subsequent calls (same Arc<Vec<Val>>
+    /// pointer) return the cached layout.  Cache key is the Vec ptr —
+    /// safe because `Arc<Vec<Val>>` is immutable in our model.
+    ///
+    /// Cost: O(N × K) on first miss, O(1) on hit.  Pipeline calls this
+    /// once per source array per Jetro lifetime; thereafter every
+    /// columnar slot kernel reads slices directly.
+    pub(crate) fn get_or_promote_objvec(
+        &self,
+        arr: &Arc<Vec<Val>>,
+    ) -> Option<Arc<crate::eval::value::ObjVecData>> {
+        let key = Arc::as_ptr(arr) as usize;
+        if let Ok(cache) = self.objvec_cache.lock() {
+            if let Some(d) = cache.get(&key) { return Some(Arc::clone(d)); }
+        }
+        let promoted = pipeline::Pipeline::try_promote_objvec_arr(arr)?;
+        if let Ok(mut cache) = self.objvec_cache.lock() {
+            cache.entry(key).or_insert_with(|| Arc::clone(&promoted));
+        }
+        Some(promoted)
+    }
+
     pub fn new(document: Value) -> Self {
-        Self { document, root_val: OnceCell::new(), raw_bytes: None, tape: None }
+        Self { document, root_val: OnceCell::new(), objvec_cache: Default::default(), raw_bytes: None, tape: None }
     }
 
     /// Parse JSON bytes and retain them alongside the parsed document.
@@ -712,7 +749,7 @@ impl Jetro {
         let document: Value = serde_json::from_slice(&bytes)?;
         Ok(Self {
             document,
-            root_val: OnceCell::new(),
+            root_val: OnceCell::new(), objvec_cache: Default::default(),
             raw_bytes: Some(Arc::from(bytes.into_boxed_slice())),
             tape: None,
         })
@@ -750,7 +787,7 @@ impl Jetro {
                 let _ = cell.set(val);
                 Ok(Self {
                     document: Value::Null,
-                    root_val: cell,
+                    root_val: cell, objvec_cache: Default::default(),
                     raw_bytes: Some(raw),
                     tape: None,
                 })
@@ -762,7 +799,7 @@ impl Jetro {
                     .map_err(|e| format!("simd-json: {} ; serde_json fallback: {}", simd_err, e))?;
                 Ok(Self {
                     document,
-                    root_val: OnceCell::new(),
+                    root_val: OnceCell::new(), objvec_cache: Default::default(),
                     raw_bytes: Some(raw),
                     tape: None,
                 })
@@ -801,7 +838,7 @@ impl Jetro {
         // by re-parsing `raw_bytes` via simd-json.
         Ok(Self {
             document: Value::Null,
-            root_val: OnceCell::new(),
+            root_val: OnceCell::new(), objvec_cache: Default::default(),
             raw_bytes: Some(raw),
             tape: Some(tape),
         })
@@ -846,7 +883,7 @@ impl Jetro {
         let _ = cell.set(arr);
         Ok(Self {
             document: Value::Null,
-            root_val: cell,
+            root_val: cell, objvec_cache: Default::default(),
             raw_bytes: None,
             tape: None,
         })
@@ -865,6 +902,11 @@ impl Jetro {
                     }
                 }
             }
+            // Tree-wide ObjVec promotion at root_val build time
+            // breaks descendant walker / scan paths (they treat
+            // ObjVec as opaque).  Promotion lives at Pipeline source
+            // resolution instead, memoised per-array via
+            // `Jetro::get_or_promote_objvec`.
             Val::from(&self.document)
         }).clone()
     }
@@ -896,7 +938,8 @@ impl Jetro {
         // the existing opcode path.
         if let Ok(ast) = parser::parse(expr) {
             if let Some(p) = pipeline::Pipeline::lower(&ast) {
-                return p.run(&self.root_val()).map(|v| v.into());
+                return p.run_with(&self.root_val(), Some(self as &dyn pipeline::ObjVecPromoter))
+                    .map(|v| v.into());
             }
         }
         THREAD_VM.with(|cell| match (cell.try_borrow_mut(), &self.raw_bytes) {
@@ -933,7 +976,7 @@ impl Jetro {
         }
         if let Ok(ast) = parser::parse(expr) {
             if let Some(p) = pipeline::Pipeline::lower(&ast) {
-                return p.run(&self.root_val());
+                return p.run_with(&self.root_val(), Some(self as &dyn pipeline::ObjVecPromoter));
             }
         }
         THREAD_VM.with(|cell| {
