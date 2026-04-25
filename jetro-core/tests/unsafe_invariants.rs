@@ -656,6 +656,70 @@ fn compile_handle_run_on_jetro() {
     assert_eq!(q.run_on(&j2).unwrap(), json!(2));
 }
 
+// ── window-style numeric ops ────────────────────────────────────────
+
+#[test]
+fn rolling_avg_basic() {
+    let r = jetro_core::query("$.rolling_avg(3)", &json!([1, 2, 3, 4, 5])).unwrap();
+    // first 2 entries: null (window not full).  rest: avg.
+    assert_eq!(r, json!([null, null, 2.0, 3.0, 4.0]));
+}
+
+#[test]
+fn rolling_sum_basic() {
+    let r = jetro_core::query("$.rolling_sum(2)", &json!([1, 2, 3, 4])).unwrap();
+    assert_eq!(r, json!([null, 3.0, 5.0, 7.0]));
+}
+
+#[test]
+fn rolling_min_max() {
+    let r = jetro_core::query("$.rolling_min(3)", &json!([3, 1, 4, 1, 5, 9, 2])).unwrap();
+    assert_eq!(r, json!([null, null, 1.0, 1.0, 1.0, 1.0, 2.0]));
+    let r = jetro_core::query("$.rolling_max(3)", &json!([3, 1, 4, 1, 5, 9, 2])).unwrap();
+    assert_eq!(r, json!([null, null, 4.0, 4.0, 5.0, 9.0, 9.0]));
+}
+
+#[test]
+fn lag_lead() {
+    let r = jetro_core::query("$.lag(1)", &json!([10, 20, 30])).unwrap();
+    assert_eq!(r, json!([null, 10.0, 20.0]));
+    let r = jetro_core::query("$.lead(1)", &json!([10, 20, 30])).unwrap();
+    assert_eq!(r, json!([20.0, 30.0, null]));
+}
+
+#[test]
+fn diff_window_basic() {
+    let r = jetro_core::query("$.diff_window()", &json!([10, 13, 18, 12])).unwrap();
+    assert_eq!(r, json!([null, 3.0, 5.0, -6.0]));
+}
+
+#[test]
+fn pct_change_basic() {
+    let r = jetro_core::query("$.pct_change()", &json!([100, 110, 99])).unwrap();
+    let arr = r.as_array().unwrap();
+    assert!(arr[0].is_null());
+    assert!((arr[1].as_f64().unwrap() - 0.1).abs() < 1e-9);
+    assert!((arr[2].as_f64().unwrap() - (-0.1)).abs() < 1e-3);
+}
+
+#[test]
+fn cummax_cummin() {
+    let r = jetro_core::query("$.cummax()", &json!([3, 1, 4, 1, 5])).unwrap();
+    assert_eq!(r, json!([3.0, 3.0, 4.0, 4.0, 5.0]));
+    let r = jetro_core::query("$.cummin()", &json!([3, 1, 4, 1, 5])).unwrap();
+    assert_eq!(r, json!([3.0, 1.0, 1.0, 1.0, 1.0]));
+}
+
+#[test]
+fn zscore_basic() {
+    let r = jetro_core::query("$.zscore()", &json!([1, 2, 3, 4, 5])).unwrap();
+    let arr = r.as_array().unwrap();
+    // mean=3, sd=sqrt(2).  z = (x-3)/sqrt(2).
+    assert!((arr[2].as_f64().unwrap() - 0.0).abs() < 1e-9);
+    assert!(arr[0].as_f64().unwrap() < 0.0);
+    assert!(arr[4].as_f64().unwrap() > 0.0);
+}
+
 // ── new string functions ────────────────────────────────────────────
 
 #[test]

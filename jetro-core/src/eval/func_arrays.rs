@@ -563,3 +563,195 @@ pub fn global_product(args: &[Arg], env: &Env) -> Result<Val, EvalError> {
         .collect();
     Ok(Val::arr(cartesian(&arrs?).into_iter().map(Val::arr).collect()))
 }
+
+// ── Window-style numeric ops ─────────────────────────────────────────────────
+//
+// Materialise the input array as `Vec<Option<f64>>` (None marks
+// missing / non-numeric), apply the window transform, return a
+// `Val::FloatVec` (when all positions are present) or `Val::Arr`
+// with `Val::Null` for undefined positions (e.g. first `n-1`
+// rolling values).
+
+fn to_floats(recv: &Val) -> Result<Vec<Option<f64>>, EvalError> {
+    match recv {
+        Val::IntVec(a)   => Ok(a.iter().map(|n| Some(*n as f64)).collect()),
+        Val::FloatVec(a) => Ok(a.iter().map(|f| Some(*f)).collect()),
+        Val::Arr(a)      => Ok(a.iter().map(|v| match v {
+            Val::Int(n)   => Some(*n as f64),
+            Val::Float(f) => Some(*f),
+            _             => None,
+        }).collect()),
+        _ => Err(EvalError("expected numeric array".into())),
+    }
+}
+
+fn floats_to_val(out: Vec<Option<f64>>) -> Val {
+    if out.iter().all(|v| v.is_some()) {
+        Val::float_vec(out.into_iter().map(|v| v.unwrap()).collect())
+    } else {
+        Val::arr(out.into_iter().map(|v| match v {
+            Some(f) => Val::Float(f),
+            None    => Val::Null,
+        }).collect())
+    }
+}
+
+pub fn rolling_avg(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+    let n = first_i64_arg(args, env)? as usize;
+    if n == 0 { return err!("rolling_avg: window must be > 0"); }
+    let xs = to_floats(&recv)?;
+    let mut out: Vec<Option<f64>> = Vec::with_capacity(xs.len());
+    let mut sum: f64 = 0.0;
+    let mut count: usize = 0;
+    for (i, v) in xs.iter().enumerate() {
+        if let Some(x) = v { sum += x; count += 1; }
+        if i >= n {
+            if let Some(old) = xs[i - n] { sum -= old; count -= 1; }
+        }
+        if i + 1 >= n && count > 0 {
+            out.push(Some(sum / count as f64));
+        } else {
+            out.push(None);
+        }
+    }
+    Ok(floats_to_val(out))
+}
+
+pub fn rolling_sum(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+    let n = first_i64_arg(args, env)? as usize;
+    if n == 0 { return err!("rolling_sum: window must be > 0"); }
+    let xs = to_floats(&recv)?;
+    let mut out: Vec<Option<f64>> = Vec::with_capacity(xs.len());
+    let mut sum: f64 = 0.0;
+    for (i, v) in xs.iter().enumerate() {
+        if let Some(x) = v { sum += x; }
+        if i >= n {
+            if let Some(old) = xs[i - n] { sum -= old; }
+        }
+        if i + 1 >= n { out.push(Some(sum)); } else { out.push(None); }
+    }
+    Ok(floats_to_val(out))
+}
+
+pub fn rolling_min(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+    let n = first_i64_arg(args, env)? as usize;
+    if n == 0 { return err!("rolling_min: window must be > 0"); }
+    let xs = to_floats(&recv)?;
+    let mut out: Vec<Option<f64>> = Vec::with_capacity(xs.len());
+    for i in 0..xs.len() {
+        if i + 1 < n { out.push(None); continue; }
+        let lo = i + 1 - n;
+        let m = xs[lo..=i].iter().filter_map(|v| *v)
+            .fold(f64::INFINITY, |a, b| a.min(b));
+        out.push(if m.is_finite() { Some(m) } else { None });
+    }
+    Ok(floats_to_val(out))
+}
+
+pub fn rolling_max(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+    let n = first_i64_arg(args, env)? as usize;
+    if n == 0 { return err!("rolling_max: window must be > 0"); }
+    let xs = to_floats(&recv)?;
+    let mut out: Vec<Option<f64>> = Vec::with_capacity(xs.len());
+    for i in 0..xs.len() {
+        if i + 1 < n { out.push(None); continue; }
+        let lo = i + 1 - n;
+        let m = xs[lo..=i].iter().filter_map(|v| *v)
+            .fold(f64::NEG_INFINITY, |a, b| a.max(b));
+        out.push(if m.is_finite() { Some(m) } else { None });
+    }
+    Ok(floats_to_val(out))
+}
+
+pub fn lag(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+    let n = if args.is_empty() { 1 } else { first_i64_arg(args, env)?.max(0) as usize };
+    let xs = to_floats(&recv)?;
+    let mut out: Vec<Option<f64>> = Vec::with_capacity(xs.len());
+    for i in 0..xs.len() {
+        out.push(if i >= n { xs[i - n] } else { None });
+    }
+    Ok(floats_to_val(out))
+}
+
+pub fn lead(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+    let n = if args.is_empty() { 1 } else { first_i64_arg(args, env)?.max(0) as usize };
+    let xs = to_floats(&recv)?;
+    let mut out: Vec<Option<f64>> = Vec::with_capacity(xs.len());
+    for i in 0..xs.len() {
+        let j = i + n;
+        out.push(if j < xs.len() { xs[j] } else { None });
+    }
+    Ok(floats_to_val(out))
+}
+
+pub fn diff_window(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
+    let xs = to_floats(&recv)?;
+    let mut out: Vec<Option<f64>> = Vec::with_capacity(xs.len());
+    for i in 0..xs.len() {
+        out.push(match (i.checked_sub(1).and_then(|j| xs[j]), xs[i]) {
+            (Some(p), Some(c)) => Some(c - p),
+            _ => None,
+        });
+    }
+    Ok(floats_to_val(out))
+}
+
+pub fn pct_change(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
+    let xs = to_floats(&recv)?;
+    let mut out: Vec<Option<f64>> = Vec::with_capacity(xs.len());
+    for i in 0..xs.len() {
+        out.push(match (i.checked_sub(1).and_then(|j| xs[j]), xs[i]) {
+            (Some(p), Some(c)) if p != 0.0 => Some((c - p) / p),
+            _ => None,
+        });
+    }
+    Ok(floats_to_val(out))
+}
+
+pub fn cummax(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
+    let xs = to_floats(&recv)?;
+    let mut out: Vec<Option<f64>> = Vec::with_capacity(xs.len());
+    let mut best: Option<f64> = None;
+    for v in xs.iter() {
+        match (*v, best) {
+            (Some(x), Some(b)) => { best = Some(x.max(b)); out.push(best); }
+            (Some(x), None)    => { best = Some(x);        out.push(best); }
+            (None, _)          => { out.push(best); }
+        }
+    }
+    Ok(floats_to_val(out))
+}
+
+pub fn cummin(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
+    let xs = to_floats(&recv)?;
+    let mut out: Vec<Option<f64>> = Vec::with_capacity(xs.len());
+    let mut best: Option<f64> = None;
+    for v in xs.iter() {
+        match (*v, best) {
+            (Some(x), Some(b)) => { best = Some(x.min(b)); out.push(best); }
+            (Some(x), None)    => { best = Some(x);        out.push(best); }
+            (None, _)          => { out.push(best); }
+        }
+    }
+    Ok(floats_to_val(out))
+}
+
+pub fn zscore(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
+    let xs = to_floats(&recv)?;
+    let nums: Vec<f64> = xs.iter().filter_map(|v| *v).collect();
+    if nums.is_empty() {
+        return Ok(floats_to_val(vec![None; xs.len()]));
+    }
+    let mean = nums.iter().sum::<f64>() / nums.len() as f64;
+    let var  = nums.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / nums.len() as f64;
+    let sd   = var.sqrt();
+    let mut out: Vec<Option<f64>> = Vec::with_capacity(xs.len());
+    for v in xs.iter() {
+        out.push(match v {
+            Some(x) if sd > 0.0 => Some((x - mean) / sd),
+            Some(_)             => Some(0.0),
+            None                => None,
+        });
+    }
+    Ok(floats_to_val(out))
+}

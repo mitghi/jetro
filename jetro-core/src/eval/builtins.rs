@@ -319,6 +319,28 @@ fn build() -> BuiltinRegistry {
     t.insert("contains_all",   func_strings::contains_all);
     t.insert("containsAll",    func_strings::contains_all);
 
+    // Window-style numeric ops.
+    t.insert("rolling_avg",    func_arrays::rolling_avg);
+    t.insert("rollingAvg",     func_arrays::rolling_avg);
+    t.insert("rolling_sum",    func_arrays::rolling_sum);
+    t.insert("rollingSum",     func_arrays::rolling_sum);
+    t.insert("rolling_min",    func_arrays::rolling_min);
+    t.insert("rollingMin",     func_arrays::rolling_min);
+    t.insert("rolling_max",    func_arrays::rolling_max);
+    t.insert("rollingMax",     func_arrays::rolling_max);
+    t.insert("lag",            func_arrays::lag);
+    t.insert("lead",           func_arrays::lead);
+    t.insert("diff_window",    func_arrays::diff_window);
+    t.insert("diffWindow",     func_arrays::diff_window);
+    t.insert("pct_change",     func_arrays::pct_change);
+    t.insert("pctChange",      func_arrays::pct_change);
+    t.insert("cummax",         func_arrays::cummax);
+    t.insert("cumMax",         func_arrays::cummax);
+    t.insert("cummin",         func_arrays::cummin);
+    t.insert("cumMin",         func_arrays::cummin);
+    t.insert("zscore",         func_arrays::zscore);
+    t.insert("zScore",         func_arrays::zscore);
+
     // Regex family.
     t.insert("re_match",       func_strings::re_match);
     t.insert("reMatch",        func_strings::re_match);
