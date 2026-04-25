@@ -239,6 +239,11 @@ pub enum Stage {
     /// `.sort()` (None) / `.sort_by(key)` (Some) — barrier;
     /// materialises and sorts.
     Sort(Option<Arc<crate::vm::Program>>),
+    /// `.group_by(key)` — barrier; partitions rows by key,
+    /// produces `Val::Obj { key_str → Vec<row> }`.  As a Stage
+    /// this is a sink-shaped operation; placed under Stage so
+    /// downstream `.values()` / `.map(@.len())` can compose.
+    GroupBy(Arc<crate::vm::Program>),
 }
 
 /// Phase A3 — sub-program "kernel" shape recognised at lower-time.
@@ -577,6 +582,10 @@ impl Pipeline {
                             let prog = compile_subexpr(&args[0])?;
                             stages.push(Stage::UniqueBy(Some(prog)));
                         }
+                        ("group_by", 1, _) => {
+                            let prog = compile_subexpr(&args[0])?;
+                            stages.push(Stage::GroupBy(prog));
+                        }
                         ("sort", 0, _) => stages.push(Stage::Sort(None)),
                         ("sort_by", 1, _) => {
                             let prog = compile_subexpr(&args[0])?;
@@ -625,6 +634,7 @@ impl Pipeline {
             Stage::Map(p)           => BodyKernel::classify(p),
             Stage::FlatMap(p)       => BodyKernel::classify(p),
             Stage::UniqueBy(Some(p))=> BodyKernel::classify(p),
+            Stage::GroupBy(p)       => BodyKernel::classify(p),
             Stage::Sort(Some(p))    => BodyKernel::classify(p),
             _                       => BodyKernel::Generic,
         }).collect();
@@ -1045,6 +1055,22 @@ impl Pipeline {
         let recv = if let (Some(c), Val::Arr(a)) = (cache, &recv) {
             if let Some(d) = c.promote(a) { Val::ObjVec(d) } else { recv }
         } else { recv };
+
+        // Typed-column ObjVec group_by: Stage::GroupBy(FieldRead) ∘
+        // Sink::Collect over Strs / Ints / Floats / Bools key column.
+        // Walks the typed key column directly, partitions row indices
+        // per key, materialises Val::Obj { key → Vec<row> }.
+        if let (Some([Stage::GroupBy(_)]),
+                Some([BodyKernel::FieldRead(key)]),
+                Val::ObjVec(d),
+                Sink::Collect) =
+            (self.stages.get(..), self.stage_kernels.get(..), &recv, &self.sink)
+        {
+            if let Some(out) = objvec_typed_group_by(d, key) {
+                return Some(Ok(out));
+            }
+        }
+
         // Typed-column ObjVec stage-chain: Filter(FieldCmpLit) ∘
         // Map(FieldRead) ∘ Collect → primitive mask + typed gather.
         if !matches!(self.sink, Sink::Collect) { return None; }
@@ -1587,7 +1613,7 @@ impl Pipeline {
         // every stage in order so the pipeline semantics match the
         // surface query.
         let needs_barrier = self.stages.iter().any(|s| matches!(s,
-            Stage::Reverse | Stage::Sort(_) | Stage::UniqueBy(_) | Stage::FlatMap(_)));
+            Stage::Reverse | Stage::Sort(_) | Stage::UniqueBy(_) | Stage::FlatMap(_) | Stage::GroupBy(_)));
         let pre_iter: Box<dyn Iterator<Item = Val>> = if needs_barrier {
             let mut buf: Vec<Val> = iter.collect();
             // Phase 1.2 — barrier-stage path now reads stage_kernels[i]
@@ -1660,6 +1686,32 @@ impl Pipeline {
                         }
                         buf = out;
                     }
+                    Stage::GroupBy(prog) => {
+                        // Build IndexMap<key_str, Vec<row>> via per-row
+                        // kernel-evaluated key.  Output is Val::Obj with
+                        // group keys → group arrays.  Drains buf into
+                        // groups; subsequent stages (.values(), .map())
+                        // see the grouped Obj.
+                        use indexmap::IndexMap;
+                        use crate::eval::util::val_to_key;
+                        let mut groups: IndexMap<Arc<str>, Vec<Val>> = IndexMap::new();
+                        for v in buf.into_iter() {
+                            let k = eval_kernel(kernel, &v, &mut vm, &mut loop_env, prog)?;
+                            let key = Arc::<str>::from(val_to_key(&k).as_str());
+                            groups.entry(key).or_insert_with(Vec::new).push(v);
+                        }
+                        // Convert each Vec<Val> bucket to Val::arr.
+                        let mut out_obj: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(groups.len());
+                        for (k, rows) in groups.into_iter() {
+                            out_obj.insert(k, Val::arr(rows));
+                        }
+                        // GroupBy is a barrier that yields one Val::Obj.
+                        // Place it as a single-element buf so downstream
+                        // stages see the grouped object.  Sink::Collect
+                        // will return Val::arr([this_obj]); a separate
+                        // shortcut below converts that to the bare obj.
+                        buf = vec![Val::Obj(Arc::new(out_obj))];
+                    }
                 }
             }
             Box::new(buf.into_iter())
@@ -1690,7 +1742,8 @@ impl Pipeline {
                         Stage::Map(prog) => {
                             item = eval_kernel(kernel, &item, &mut vm, &mut loop_env, prog)?;
                         }
-                        Stage::Reverse | Stage::Sort(_) | Stage::UniqueBy(_) | Stage::FlatMap(_) => {}
+                        Stage::Reverse | Stage::Sort(_) | Stage::UniqueBy(_)
+                        | Stage::FlatMap(_) | Stage::GroupBy(_) => {}
                     }
                 }
             }
@@ -1776,7 +1829,20 @@ impl Pipeline {
         }
 
         Ok(match &self.sink {
-            Sink::Collect           => Val::arr(acc_collect),
+            Sink::Collect => {
+                // GroupBy is a barrier that produces a single Val::Obj
+                // which Sink::Collect would otherwise wrap as
+                // [obj].  When the last stage is GroupBy, return the
+                // bare object to match walker semantics.
+                if matches!(self.stages.last(), Some(Stage::GroupBy(_)))
+                    && acc_collect.len() == 1
+                    && matches!(acc_collect[0], Val::Obj(_))
+                {
+                    acc_collect.into_iter().next().unwrap()
+                } else {
+                    Val::arr(acc_collect)
+                }
+            },
             Sink::Count             => Val::Int(acc_count),
             Sink::CountIf(_)        => Val::Int(acc_count),
             Sink::FlatMapCount(_)   => Val::Int(acc_count),
@@ -2374,6 +2440,71 @@ fn objvec_typed_filter_map_collect(
     None
 }
 
+/// Typed columnar group_by: walk the key column directly, partition
+/// row indices per distinct key, materialise per-group Val::Arr<Val::Obj>
+/// (or a typed lane when all selected rows project the same shape).
+/// Avoids per-row IndexMap probe + per-row key Arc clone of the walker
+/// path.
+fn objvec_typed_group_by(
+    d: &Arc<crate::eval::value::ObjVecData>,
+    key_field: &str,
+) -> Option<Val> {
+    use crate::eval::value::ObjVecCol;
+    let cols = d.typed_cols.as_ref()?;
+    let key_slot = d.slot_of(key_field)?;
+    let key_col = cols.get(key_slot)?;
+    let stride = d.stride();
+    let nrows = d.nrows();
+
+    // Partition row indices by key string.
+    let mut groups: indexmap::IndexMap<Arc<str>, Vec<usize>> =
+        indexmap::IndexMap::new();
+    match key_col {
+        ObjVecCol::Strs(c) => {
+            // Use Arc::clone for repeated keys (Arc is interned-ish).
+            for (i, s) in c.iter().enumerate() {
+                groups.entry(Arc::clone(s)).or_default().push(i);
+            }
+        }
+        ObjVecCol::Ints(c) => {
+            for (i, n) in c.iter().enumerate() {
+                let k: Arc<str> = Arc::from(n.to_string().as_str());
+                groups.entry(k).or_default().push(i);
+            }
+        }
+        ObjVecCol::Bools(c) => {
+            for (i, b) in c.iter().enumerate() {
+                let k: Arc<str> = if *b { Arc::from("true") } else { Arc::from("false") };
+                groups.entry(k).or_default().push(i);
+            }
+        }
+        _ => return None,
+    };
+
+    // Each group output as a sub-ObjVec sharing the parent key list +
+    // gathered cells.  No per-row IndexMap construction — group rows
+    // stay columnar, downstream pipeline ops can re-fire typed kernels
+    // on the sub-ObjVec.
+    use crate::eval::value::ObjVecData;
+    let mut out: indexmap::IndexMap<Arc<str>, Val> = indexmap::IndexMap::with_capacity(groups.len());
+    for (k, indices) in groups.into_iter() {
+        let mut sub_cells: Vec<Val> = Vec::with_capacity(indices.len() * stride);
+        for r in indices {
+            let off = r * stride;
+            for slot in 0..stride {
+                sub_cells.push(d.cells[off + slot].clone());
+            }
+        }
+        out.insert(k, Val::ObjVec(Arc::new(ObjVecData {
+            keys: Arc::clone(&d.keys),
+            cells: sub_cells,
+            typed_cols: None,
+        })));
+    }
+    let _ = nrows;
+    Some(Val::Obj(Arc::new(out)))
+}
+
 fn materialise_typed_indices(
     col: &crate::eval::value::ObjVecCol,
     indices: &[usize],
@@ -2882,8 +3013,9 @@ mod tests {
 
     #[test]
     fn lower_returns_none_for_unsupported_shape() {
-        // Lambda-bodied filter not yet supported.
-        assert!(lower_query("$.xs.group_by(status)").is_none());
+        // group_by now supported as a Stage; verify a different
+        // unsupported shape stays None.
+        assert!(lower_query("$.xs.equi_join($.ys, lhs, rhs)").is_none());
         // Non-root base.
         assert!(lower_query("@.x.filter(y > 0)").is_none());
     }
