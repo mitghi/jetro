@@ -3067,11 +3067,26 @@ impl Compiler {
 
     /// Compile an argument expression; for lambdas, the lambda param becomes a
     /// known var in the inner context so `Ident(param)` emits `LoadIdent`.
+    /// For single-param lambdas the param is bound to the per-iteration
+    /// `current` (push_lam threads both name+current), so substitute the
+    /// resulting `LoadIdent(param)` ops with `PushCurrent`.  This lets
+    /// trivial_field / trivial_field_chain peepholes recognise the
+    /// `b => b.price` shape as equivalent to `map(@.price)`.
     fn compile_lambda_or_expr(expr: &Expr, ctx: &VarCtx) -> Program {
         match expr {
             Expr::Lambda { params, body } => {
                 let inner = ctx.with_vars(params);
-                Self::compile_sub(body, &inner)
+                let mut p = Self::compile_sub(body, &inner);
+                if params.len() == 1 {
+                    let name = params[0].as_str();
+                    let new_ops: Vec<Opcode> = p.ops.iter().map(|op| match op {
+                        Opcode::LoadIdent(k) if k.as_ref() == name =>
+                            Opcode::PushCurrent,
+                        other => other.clone(),
+                    }).collect();
+                    p = Program::new(Self::optimize(new_ops), "<lam-body>");
+                }
+                p
             }
             other => Self::compile_sub(other, ctx),
         }
@@ -5676,6 +5691,9 @@ impl VM {
                     let recv = pop!(stack);
                     let items = match recv {
                         Val::Arr(a) => Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone()),
+                        Val::IntVec(a)   => a.iter().map(|n| Val::Int(*n)).collect(),
+                        Val::FloatVec(a) => a.iter().map(|f| Val::Float(*f)).collect(),
+                        Val::StrVec(a)   => a.iter().cloned().map(Val::Str).collect(),
                         _ => Vec::new(),
                     };
                     let mut out = Vec::with_capacity(items.len());
@@ -5689,6 +5707,9 @@ impl VM {
                                 let v = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
                                 out.extend(v);
                             }
+                            Val::IntVec(a)   => out.extend(a.iter().map(|n| Val::Int(*n))),
+                            Val::FloatVec(a) => out.extend(a.iter().map(|f| Val::Float(*f))),
+                            Val::StrVec(a)   => out.extend(a.iter().cloned().map(Val::Str)),
                             other => out.push(other),
                         }
                     }
@@ -5698,6 +5719,9 @@ impl VM {
                     let recv = pop!(stack);
                     let items = match recv {
                         Val::Arr(a) => Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone()),
+                        Val::IntVec(a)   => a.iter().map(|n| Val::Int(*n)).collect(),
+                        Val::FloatVec(a) => a.iter().map(|f| Val::Float(*f)).collect(),
+                        Val::StrVec(a)   => a.iter().cloned().map(Val::Str).collect(),
                         _ => Vec::new(),
                     };
                     let mut out = Vec::with_capacity(items.len());
@@ -5717,6 +5741,9 @@ impl VM {
                     let recv = pop!(stack);
                     let items = match recv {
                         Val::Arr(a) => Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone()),
+                        Val::IntVec(a)   => a.iter().map(|n| Val::Int(*n)).collect(),
+                        Val::FloatVec(a) => a.iter().map(|f| Val::Float(*f)).collect(),
+                        Val::StrVec(a)   => a.iter().cloned().map(Val::Str).collect(),
                         _ => Vec::new(),
                     };
                     let mut out = Vec::with_capacity(items.len());
@@ -5788,6 +5815,9 @@ impl VM {
                     let recv = pop!(stack);
                     let items = match recv {
                         Val::Arr(a) => Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone()),
+                        Val::IntVec(a)   => a.iter().map(|n| Val::Int(*n)).collect(),
+                        Val::FloatVec(a) => a.iter().map(|f| Val::Float(*f)).collect(),
+                        Val::StrVec(a)   => a.iter().cloned().map(Val::Str).collect(),
                         _ => Vec::new(),
                     };
                     let mut seen: std::collections::HashSet<String> =
