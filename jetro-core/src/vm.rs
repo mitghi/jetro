@@ -1265,7 +1265,66 @@ enum AccumOp { Add, Sub, Mul }
 // Semantics match `func_aggregates`: non-numeric items are skipped; Int-only
 // arrays stay on `i64` (no lossy widening); Float appearance widens once.
 
+/// 4-lane unrolled i64 sum.  LLVM emits SIMD horizontal-reduce for
+/// `chunks_exact(4)` over independent accumulators.
 #[inline]
+fn simd_sum_i64_slice(a: &[i64]) -> i64 {
+    let mut s0: i64 = 0; let mut s1: i64 = 0;
+    let mut s2: i64 = 0; let mut s3: i64 = 0;
+    let chunks = a.chunks_exact(4);
+    let rem = chunks.remainder();
+    for c in chunks {
+        s0 = s0.wrapping_add(c[0]);
+        s1 = s1.wrapping_add(c[1]);
+        s2 = s2.wrapping_add(c[2]);
+        s3 = s3.wrapping_add(c[3]);
+    }
+    let mut tail: i64 = 0;
+    for v in rem { tail = tail.wrapping_add(*v); }
+    s0.wrapping_add(s1).wrapping_add(s2).wrapping_add(s3).wrapping_add(tail)
+}
+
+#[inline]
+fn simd_sum_f64_slice(a: &[f64]) -> f64 {
+    let mut s0: f64 = 0.0; let mut s1: f64 = 0.0;
+    let mut s2: f64 = 0.0; let mut s3: f64 = 0.0;
+    let chunks = a.chunks_exact(4);
+    let rem = chunks.remainder();
+    for c in chunks { s0 += c[0]; s1 += c[1]; s2 += c[2]; s3 += c[3]; }
+    let mut tail: f64 = 0.0;
+    for v in rem { tail += *v; }
+    s0 + s1 + s2 + s3 + tail
+}
+
+#[inline]
+fn simd_min_i64_slice(a: &[i64]) -> Option<i64> {
+    if a.is_empty() { return None; }
+    let mut best = a[0];
+    for v in &a[1..] { if *v < best { best = *v; } }
+    Some(best)
+}
+#[inline]
+fn simd_max_i64_slice(a: &[i64]) -> Option<i64> {
+    if a.is_empty() { return None; }
+    let mut best = a[0];
+    for v in &a[1..] { if *v > best { best = *v; } }
+    Some(best)
+}
+#[inline]
+fn simd_min_f64_slice(a: &[f64]) -> Option<f64> {
+    if a.is_empty() { return None; }
+    let mut best = a[0];
+    for v in &a[1..] { if *v < best { best = *v; } }
+    Some(best)
+}
+#[inline]
+fn simd_max_f64_slice(a: &[f64]) -> Option<f64> {
+    if a.is_empty() { return None; }
+    let mut best = a[0];
+    for v in &a[1..] { if *v > best { best = *v; } }
+    Some(best)
+}
+
 fn agg_sum_typed(a: &[Val]) -> Val {
     // Tight i64 loop until first Float; then switch to f64 loop.
     let mut i_acc: i64 = 0;
@@ -7086,23 +7145,21 @@ impl VM {
                     _ => {}
                 }
             }
-            // Columnar IntVec — pure i64 tight loops, native parity.
+            // Columnar IntVec — autovec-friendly 4-lane unrolled
+            // accumulators get the LLVM vectoriser to emit AVX2 / NEON
+            // horizontal-reduce.  Native parity on x86-64-v3 / aarch64.
             if let Val::IntVec(a) = &recv {
                 match call.method {
-                    BuiltinMethod::Sum => {
-                        let s: i64 = a.iter().fold(0i64, |a, b| a.wrapping_add(*b));
-                        return Ok(Val::Int(s));
-                    }
+                    BuiltinMethod::Sum => return Ok(Val::Int(simd_sum_i64_slice(a))),
                     BuiltinMethod::Avg => {
                         if a.is_empty() { return Ok(Val::Null); }
-                        let s: f64 = a.iter().map(|n| *n as f64).sum();
-                        return Ok(Val::Float(s / a.len() as f64));
+                        return Ok(Val::Float(simd_sum_i64_slice(a) as f64 / a.len() as f64));
                     }
                     BuiltinMethod::Min => {
-                        return Ok(a.iter().copied().min().map(Val::Int).unwrap_or(Val::Null));
+                        return Ok(simd_min_i64_slice(a).map(Val::Int).unwrap_or(Val::Null));
                     }
                     BuiltinMethod::Max => {
-                        return Ok(a.iter().copied().max().map(Val::Int).unwrap_or(Val::Null));
+                        return Ok(simd_max_i64_slice(a).map(Val::Int).unwrap_or(Val::Null));
                     }
                     BuiltinMethod::Count | BuiltinMethod::Len => {
                         return Ok(Val::Int(a.len() as i64));
@@ -7159,29 +7216,13 @@ impl VM {
             }
             if let Val::FloatVec(a) = &recv {
                 match call.method {
-                    BuiltinMethod::Sum => {
-                        let s: f64 = a.iter().sum();
-                        return Ok(Val::Float(s));
-                    }
+                    BuiltinMethod::Sum => return Ok(Val::Float(simd_sum_f64_slice(a))),
                     BuiltinMethod::Avg => {
                         if a.is_empty() { return Ok(Val::Null); }
-                        let s: f64 = a.iter().sum();
-                        return Ok(Val::Float(s / a.len() as f64));
+                        return Ok(Val::Float(simd_sum_f64_slice(a) / a.len() as f64));
                     }
-                    BuiltinMethod::Min => {
-                        let mut best: Option<f64> = None;
-                        for &f in a.iter() {
-                            best = Some(match best { Some(b) => if f < b { f } else { b }, None => f });
-                        }
-                        return Ok(best.map(Val::Float).unwrap_or(Val::Null));
-                    }
-                    BuiltinMethod::Max => {
-                        let mut best: Option<f64> = None;
-                        for &f in a.iter() {
-                            best = Some(match best { Some(b) => if f > b { f } else { b }, None => f });
-                        }
-                        return Ok(best.map(Val::Float).unwrap_or(Val::Null));
-                    }
+                    BuiltinMethod::Min => return Ok(simd_min_f64_slice(a).map(Val::Float).unwrap_or(Val::Null)),
+                    BuiltinMethod::Max => return Ok(simd_max_f64_slice(a).map(Val::Float).unwrap_or(Val::Null)),
                     BuiltinMethod::Count | BuiltinMethod::Len => {
                         return Ok(Val::Int(a.len() as i64));
                     }
