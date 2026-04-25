@@ -54,21 +54,32 @@ pub enum Source {
     FieldChain { keys: Arc<[Arc<str>]> },
 }
 
-/// A pull-based stage.  Filter / Map carry a pre-compiled `Program`
-/// that runs against each row's `@` (current item) bound as the VM
-/// root.  Programs are compiled once at lowering time and reused per
-/// row — drops the per-row tree-walker dispatch cost that the initial
-/// substrate paid.
+/// A pull-based stage.  Streaming stages (Filter / Map / FlatMap /
+/// Take / Skip) flow elements through one at a time; barrier stages
+/// (Reverse / Sort / UniqueBy) require the full input materialised.
+/// Filter / Map / FlatMap / UniqueBy carry a pre-compiled `Program`
+/// reused per row — drops the per-row tree-walker dispatch cost.
 #[derive(Debug, Clone)]
 pub enum Stage {
     /// `.filter(pred)` — drops elements where `pred` is falsy.
     Filter(Arc<crate::vm::Program>),
     /// `.map(f)` — replaces each element with `f(@)`.
     Map(Arc<crate::vm::Program>),
+    /// `.flat_map(f)` — `f(@)` must yield an iterable; flattens one
+    /// level into the pull stream.
+    FlatMap(Arc<crate::vm::Program>),
     /// `.take(n)` — yields at most `n` elements, then completes.
     Take(usize),
     /// `.skip(n)` — drops the first `n` elements.
     Skip(usize),
+    /// `.reverse()` — barrier; materialises and reverses.
+    Reverse,
+    /// `.unique()` (None) / `.unique_by(key)` (Some) — barrier;
+    /// materialises, dedupes by key (or by full value if `None`).
+    UniqueBy(Option<Arc<crate::vm::Program>>),
+    /// `.sort()` (None) / `.sort_by(key)` (Some) — barrier;
+    /// materialises and sorts.
+    Sort(Option<Arc<crate::vm::Program>>),
 }
 
 /// Numeric fold operator — common shape across `sum`/`min`/`max`/`avg`.
@@ -207,6 +218,21 @@ impl Pipeline {
                             let prog = compile_subexpr(&args[0])?;
                             stages.push(Stage::Map(prog));
                         }
+                        ("flat_map", 1, _) => {
+                            let prog = compile_subexpr(&args[0])?;
+                            stages.push(Stage::FlatMap(prog));
+                        }
+                        ("reverse", 0, _) => stages.push(Stage::Reverse),
+                        ("unique", 0, _) => stages.push(Stage::UniqueBy(None)),
+                        ("unique_by", 1, _) => {
+                            let prog = compile_subexpr(&args[0])?;
+                            stages.push(Stage::UniqueBy(Some(prog)));
+                        }
+                        ("sort", 0, _) => stages.push(Stage::Sort(None)),
+                        ("sort_by", 1, _) => {
+                            let prog = compile_subexpr(&args[0])?;
+                            stages.push(Stage::Sort(Some(prog)));
+                        }
                         ("take", 1, _) => {
                             let n = match &args[0] {
                                 Arg::Pos(Expr::Int(n)) if *n >= 0 => *n as usize,
@@ -303,6 +329,10 @@ fn rewrite_step(p: &mut Pipeline) -> bool {
     //
     // Rule:  Skip(a) ∘ Skip(b) → Skip(a + b)
     // Rule:  Take(a) ∘ Take(b) → Take(min(a, b))
+    // Rule:  Reverse ∘ Reverse → id
+    // Rule:  Sort(_) ∘ Sort(k) → Sort(k)        (idempotent)
+    // Rule:  UniqueBy(_) ∘ UniqueBy(k) → UniqueBy(k)
+    // Rule:  Filter(p) ∘ Filter(q) → Filter(p ∧ q)
     for i in 0..p.stages.len().saturating_sub(1) {
         match (&p.stages[i], &p.stages[i + 1]) {
             (Stage::Skip(a), Stage::Skip(b)) => {
@@ -317,11 +347,24 @@ fn rewrite_step(p: &mut Pipeline) -> bool {
                 p.stages.remove(i + 1);
                 return true;
             }
-            // Rule:  Filter(p) ∘ Filter(q) → Filter(p ∧ q)
-            // Combine via VM-level AndOp embedding; skips sub-Expr
-            // re-compile by wrapping q's Program inside an AndOp opcode
-            // appended to p's ops.
+            (Stage::Reverse, Stage::Reverse) => {
+                // Reverse ∘ Reverse cancels — drop both stages.
+                p.stages.drain(i..=i + 1);
+                return true;
+            }
+            (Stage::Sort(_), Stage::Sort(_)) => {
+                // The right-most sort wins (idempotent for same key,
+                // overrides for different key).
+                p.stages.remove(i);
+                return true;
+            }
+            (Stage::UniqueBy(_), Stage::UniqueBy(_)) => {
+                p.stages.remove(i);
+                return true;
+            }
             (Stage::Filter(p_prog), Stage::Filter(q_prog)) => {
+                // Combine via VM-level AndOp embedding; avoids
+                // re-compiling the merged predicate.
                 let mut ops: Vec<Opcode> = p_prog.ops.as_ref().to_vec();
                 ops.push(Opcode::AndOp(Arc::clone(q_prog)));
                 let merged = Arc::new(crate::vm::Program {
@@ -336,6 +379,27 @@ fn rewrite_step(p: &mut Pipeline) -> bool {
                 return true;
             }
             _ => {}
+        }
+    }
+
+    // ── Sort-into-aggregate fold rules ───────────────────────────────────
+    //
+    // Rule:  Sort ∘ First → Min
+    // Rule:  Sort ∘ Last  → Max
+    // Holds when the sort uses the natural ordering (no key prog) —
+    // sort-then-first-with-natural-cmp == min, etc.
+    if matches!(&p.sink, Sink::First) {
+        if let Some(Stage::Sort(None)) = p.stages.last() {
+            p.stages.pop();
+            p.sink = Sink::Numeric(NumOp::Min);
+            return true;
+        }
+    }
+    if matches!(&p.sink, Sink::Last) {
+        if let Some(Stage::Sort(None)) = p.stages.last() {
+            p.stages.pop();
+            p.sink = Sink::Numeric(NumOp::Max);
+            return true;
         }
     }
 
@@ -618,23 +682,103 @@ impl Pipeline {
         let mut acc_first:   Option<Val> = None;
         let mut acc_last:    Option<Val> = None;
 
-        'outer: for mut item in iter {
-            // Apply stages in order.
+        // Stages that materialise force a buffer; stages preceding
+        // them run as streaming filter/map over the buffer.  Process
+        // every stage in order so the pipeline semantics match the
+        // surface query.
+        let needs_barrier = self.stages.iter().any(|s| matches!(s,
+            Stage::Reverse | Stage::Sort(_) | Stage::UniqueBy(_) | Stage::FlatMap(_)));
+        let pre_iter: Box<dyn Iterator<Item = Val>> = if needs_barrier {
+            let mut buf: Vec<Val> = iter.collect();
             for stage in &self.stages {
                 match stage {
-                    Stage::Skip(n) => {
-                        if skipped < *n { skipped += 1; continue 'outer; }
-                    }
-                    Stage::Take(n) => {
-                        if taken >= *n { break 'outer; }
-                    }
                     Stage::Filter(prog) => {
-                        if !is_truthy(&apply_item_root(&mut vm, &item, prog)?) {
-                            continue 'outer;
+                        let mut out: Vec<Val> = Vec::with_capacity(buf.len());
+                        for v in buf.into_iter() {
+                            if is_truthy(&apply_item_root(&mut vm, &v, prog)?) { out.push(v); }
                         }
+                        buf = out;
                     }
                     Stage::Map(prog) => {
-                        item = apply_item_root(&mut vm, &item, prog)?;
+                        let mut out: Vec<Val> = Vec::with_capacity(buf.len());
+                        for v in buf.into_iter() {
+                            out.push(apply_item_root(&mut vm, &v, prog)?);
+                        }
+                        buf = out;
+                    }
+                    Stage::Skip(n) => {
+                        if buf.len() <= *n { buf.clear(); } else { buf.drain(..*n); }
+                    }
+                    Stage::Take(n) => {
+                        buf.truncate(*n);
+                    }
+                    Stage::Reverse => buf.reverse(),
+                    Stage::Sort(None) => buf.sort_by(|a, b| cmp_val_total(a, b)),
+                    Stage::Sort(Some(prog)) => {
+                        let mut keyed: Vec<(Val, Val)> = buf.into_iter().map(|v| {
+                            let k = apply_item_root(&mut vm, &v, prog).unwrap_or(Val::Null);
+                            (k, v)
+                        }).collect();
+                        keyed.sort_by(|a, b| cmp_val_total(&a.0, &b.0));
+                        buf = keyed.into_iter().map(|(_, v)| v).collect();
+                    }
+                    Stage::UniqueBy(None) => {
+                        let mut seen: std::collections::HashSet<String> = Default::default();
+                        buf.retain(|v| seen.insert(format!("{:?}", v)));
+                    }
+                    Stage::UniqueBy(Some(prog)) => {
+                        let mut seen: std::collections::HashSet<String> = Default::default();
+                        let mut keep: Vec<bool> = Vec::with_capacity(buf.len());
+                        for v in &buf {
+                            let k = apply_item_root(&mut vm, v, prog).unwrap_or(Val::Null);
+                            keep.push(seen.insert(format!("{:?}", k)));
+                        }
+                        let mut out: Vec<Val> = Vec::with_capacity(buf.len());
+                        for (i, v) in buf.into_iter().enumerate() { if keep[i] { out.push(v); } }
+                        buf = out;
+                    }
+                    Stage::FlatMap(prog) => {
+                        let mut out: Vec<Val> = Vec::new();
+                        for v in &buf {
+                            let inner = apply_item_root(&mut vm, v, prog)?;
+                            if let Some(arr) = inner.as_vals() {
+                                out.extend(arr.iter().cloned());
+                            } else {
+                                out.push(inner);
+                            }
+                        }
+                        buf = out;
+                    }
+                }
+            }
+            Box::new(buf.into_iter())
+        } else {
+            iter
+        };
+
+        'outer: for mut item in pre_iter {
+            // When barriers ran above, stages have already been
+            // applied — `pre_iter` yields the post-pipeline rows
+            // directly.  When no barriers are present, run streaming
+            // stages here.
+            if !needs_barrier {
+                for stage in &self.stages {
+                    match stage {
+                        Stage::Skip(n) => {
+                            if skipped < *n { skipped += 1; continue 'outer; }
+                        }
+                        Stage::Take(n) => {
+                            if taken >= *n { break 'outer; }
+                        }
+                        Stage::Filter(prog) => {
+                            if !is_truthy(&apply_item_root(&mut vm, &item, prog)?) {
+                                continue 'outer;
+                            }
+                        }
+                        Stage::Map(prog) => {
+                            item = apply_item_root(&mut vm, &item, prog)?;
+                        }
+                        Stage::Reverse | Stage::Sort(_) | Stage::UniqueBy(_) | Stage::FlatMap(_) => {}
                     }
                 }
             }
@@ -1014,6 +1158,23 @@ fn columnar_filter_num(
         }
     }
     num_finalise(op, acc_i, acc_f, floated, min_f, max_f, n_obs)
+}
+
+/// Total ordering over `Val` for sort barriers: numeric < string <
+/// other; ties broken by debug-format equality so the comparator is
+/// stable across calls.  Used only inside Pipeline::run barriers,
+/// not exposed.
+fn cmp_val_total(a: &Val, b: &Val) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let af = match a { Val::Int(n) => Some(*n as f64), Val::Float(x) => Some(*x), _ => None };
+    let bf = match b { Val::Int(n) => Some(*n as f64), Val::Float(x) => Some(*x), _ => None };
+    match (af, bf) {
+        (Some(x), Some(y)) => x.partial_cmp(&y).unwrap_or(Ordering::Equal),
+        _ => match (a, b) {
+            (Val::Str(x), Val::Str(y)) => x.as_ref().cmp(y.as_ref()),
+            _ => format!("{:?}", a).cmp(&format!("{:?}", b)),
+        },
+    }
 }
 
 /// Inline numeric/string comparison for the columnar path.  Mirrors
