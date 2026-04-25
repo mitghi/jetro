@@ -712,6 +712,20 @@ pub fn fresh_ics(len: usize) -> Arc<[AtomicU64]> {
 /// that also refreshes the slot.  Slot is encoded as `idx + 1` so zero
 /// stays reserved for "unset".
 #[inline]
+/// Migration gate for opcode-level fusion.  When the env var
+/// `JETRO_DISABLE_OPCODE_FUSION` is set (any value), `Compiler::optimize`
+/// passes that emit fused/specialised opcodes become no-ops, leaving
+/// the unfused forms in place.  Used to validate that
+/// `pipeline.rs` rewrite rules cover every shape an opcode currently
+/// fuses.  See `memory/project_opcode_migration.md`.
+///
+/// Read once per call (env-var lookup is fast but not free); callers
+/// invoke this from the per-pass entry, not the per-row inner loop.
+#[inline]
+fn disable_opcode_fusion() -> bool {
+    std::env::var_os("JETRO_DISABLE_OPCODE_FUSION").is_some()
+}
+
 fn ic_get_field(m: &Arc<IndexMap<Arc<str>, Val>>, key: &str, ic: &AtomicU64) -> Val {
     let cached = ic.load(Ordering::Relaxed);
     if cached != 0 {
@@ -1631,14 +1645,22 @@ impl Compiler {
     }
 
     fn optimize_with(ops: Vec<Opcode>, cfg: PassConfig) -> Vec<Opcode> {
-        let ops = if cfg.root_chain      { Self::pass_root_chain(ops) }      else { ops };
-        let ops = if cfg.field_chain     { Self::pass_field_chain(ops) }     else { ops };
-        let ops = if cfg.filter_count    { Self::pass_filter_count(ops) }    else { ops };
-        let ops = if cfg.filter_fusion   { Self::pass_filter_fusion(ops) }   else { ops };
-        let ops = if cfg.filter_fusion   { Self::pass_string_chain_fusion(ops) } else { ops };
-        let ops = if cfg.find_quantifier { Self::pass_find_quantifier(ops) } else { ops };
+        // Migration gate: when JETRO_DISABLE_OPCODE_FUSION is set,
+        // skip the fusion-emitting passes so pipeline.rs rewrite
+        // rules become the sole fusion mechanism.  Correctness-level
+        // passes (const fold / nullness / method-const / kind check /
+        // strength reduce / redundant-ops / equi-join — which is a
+        // method dispatch fast-path not a chain fusion) keep running.
+        // See `memory/project_opcode_migration.md`.
+        let no_fusion = disable_opcode_fusion();
+        let ops = if cfg.root_chain      && !no_fusion { Self::pass_root_chain(ops) }      else { ops };
+        let ops = if cfg.field_chain     && !no_fusion { Self::pass_field_chain(ops) }     else { ops };
+        let ops = if cfg.filter_count    && !no_fusion { Self::pass_filter_count(ops) }    else { ops };
+        let ops = if cfg.filter_fusion   && !no_fusion { Self::pass_filter_fusion(ops) }   else { ops };
+        let ops = if cfg.filter_fusion   && !no_fusion { Self::pass_string_chain_fusion(ops) } else { ops };
+        let ops = if cfg.find_quantifier && !no_fusion { Self::pass_find_quantifier(ops) } else { ops };
         let ops = if cfg.filter_fusion   { Self::pass_field_specialise(ops) } else { ops };
-        let ops = Self::pass_list_comp_specialise(ops);
+        let ops = if !no_fusion { Self::pass_list_comp_specialise(ops) } else { ops };
         let ops = if cfg.strength_reduce { Self::pass_strength_reduce(ops) } else { ops };
         let ops = if cfg.redundant_ops   { Self::pass_redundant_ops(ops) }   else { ops };
         let ops = if cfg.kind_check_fold { Self::pass_kind_check_fold(ops) } else { ops };
@@ -2188,7 +2210,14 @@ impl Compiler {
     /// sub-program is a trivial `GetField(k)` read. Runs AFTER
     /// pass_find_quantifier / pass_filter_count so those passes see the
     /// generic `CallMethod(Filter)` / `MapSum` forms first.
+    ///
+    /// Migration gate (`JETRO_DISABLE_OPCODE_FUSION=1`): when set, this
+    /// pass becomes a no-op, leaving the unfused opcode in place so
+    /// pipeline.rs rewrite rules become the sole fusion mechanism.
+    /// Used to validate opcode → rule migration without permanently
+    /// deleting code; see `memory/project_opcode_migration.md`.
     fn pass_field_specialise(ops: Vec<Opcode>) -> Vec<Opcode> {
+        if disable_opcode_fusion() { return ops; }
         let mut out2: Vec<Opcode> = Vec::with_capacity(ops.len());
         for op in ops {
             match op {
