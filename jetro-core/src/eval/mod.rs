@@ -734,7 +734,7 @@ fn cast_val(v: &Val, ty: super::ast::CastType) -> Result<Val, EvalError> {
             Val::FloatVec(a)  => !a.is_empty(),
             Val::StrVec(a)       => !a.is_empty(),
             Val::StrSliceVec(a)  => !a.is_empty(),
-            Val::ObjVec(d)       => !d.rows.is_empty(),
+            Val::ObjVec(d)       => !d.cells.is_empty(),
             Val::Obj(o)       => !o.is_empty(),
             Val::ObjSmall(p)  => !p.is_empty(),
         })),

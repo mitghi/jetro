@@ -58,10 +58,69 @@ pub enum Val {
     ObjVec(Arc<ObjVecData>),
 }
 
+/// Columnar struct-of-arrays for a uniform-shape array of objects.
+///
+/// Phase 7 layout: cells are stored row-major in a single flat
+/// `Vec<Val>` so that a row's fields live in adjacent memory.  Stride
+/// = `keys.len()`; the value at `(row, slot)` is `cells[row * stride + slot]`.
+///
+/// Compared to the prior `Vec<Vec<Val>>` layout this removes one heap
+/// allocation per row and lets the inner loop in slot-aware aggregates
+/// stride through cells with a constant offset, which the autovec /
+/// prefetch path can exploit on hot kernels.
 #[derive(Debug)]
 pub struct ObjVecData {
-    pub keys: Arc<[Arc<str>]>,
-    pub rows: Vec<Vec<Val>>,
+    pub keys:  Arc<[Arc<str>]>,
+    pub cells: Vec<Val>,
+}
+
+impl ObjVecData {
+    /// Stride between rows (== number of keys).  Per-instance constant.
+    #[inline]
+    pub fn stride(&self) -> usize { self.keys.len() }
+
+    /// Number of rows.  `cells.len() / stride()` (cheap, no division when
+    /// stride is a const propagated by the optimiser at the call site).
+    #[inline]
+    pub fn nrows(&self) -> usize {
+        let s = self.stride();
+        if s == 0 { 0 } else { self.cells.len() / s }
+    }
+
+    /// Slot index for `key`, or `None` if the field isn't in the shape.
+    /// Linear scan; called once per opcode, then cached in a closure
+    /// over the slot for the per-row inner loop.
+    #[inline]
+    pub fn slot_of(&self, key: &str) -> Option<usize> {
+        self.keys.iter().position(|k| k.as_ref() == key)
+    }
+
+    /// Borrow the cell at `(row, slot)`.  Caller asserts `slot < stride()`
+    /// and `row < nrows()`; debug-asserted.
+    #[inline]
+    pub fn cell(&self, row: usize, slot: usize) -> &Val {
+        debug_assert!(slot < self.stride());
+        debug_assert!(row < self.nrows());
+        &self.cells[row * self.stride() + slot]
+    }
+
+    /// Iterator over the values in a single column (`slot`).  Steps by
+    /// `stride()` through the flat cells vec.  O(N) materialisation
+    /// avoided — caller may call `.sum()` / `.min()` directly.
+    pub fn column(&self, slot: usize) -> impl Iterator<Item = &Val> {
+        let s = self.stride();
+        debug_assert!(slot < s);
+        self.cells.iter().skip(slot).step_by(s)
+    }
+
+    /// Reconstruct row `i` as a borrowed slice over its `stride()`
+    /// adjacent cells.  Cheap — no allocation.
+    #[inline]
+    pub fn row_slice(&self, row: usize) -> &[Val] {
+        let s = self.stride();
+        let off = row * s;
+        &self.cells[off .. off + s]
+    }
 }
 
 impl Val {
@@ -193,7 +252,7 @@ impl Val {
             Val::FloatVec(a)     => Some(a.len()),
             Val::StrVec(a)       => Some(a.len()),
             Val::StrSliceVec(a)  => Some(a.len()),
-            Val::ObjVec(d)       => Some(d.rows.len()),
+            Val::ObjVec(d)       => Some(d.nrows()),
             _ => None,
         }
     }
@@ -232,11 +291,12 @@ impl Val {
             Val::FloatVec(a) => Some(Cow::Owned(a.iter().map(|f| Val::Float(*f)).collect())),
             Val::StrVec(a)   => Some(Cow::Owned(a.iter().map(|s| Val::Str(s.clone())).collect())),
             Val::ObjVec(d)   => {
-                let mut out: Vec<Val> = Vec::with_capacity(d.rows.len());
-                for row in &d.rows {
+                let n = d.nrows();
+                let mut out: Vec<Val> = Vec::with_capacity(n);
+                for row in 0..n {
                     let mut m: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(d.keys.len());
                     for (i, k) in d.keys.iter().enumerate() {
-                        m.insert(Arc::clone(k), row[i].clone());
+                        m.insert(Arc::clone(k), d.cell(row, i).clone());
                     }
                     out.push(Val::Obj(Arc::new(m)));
                 }
@@ -262,11 +322,12 @@ impl Val {
                 Val::arr(v)
             }
             Val::ObjVec(d) => {
-                let mut out: Vec<Val> = Vec::with_capacity(d.rows.len());
-                for row in &d.rows {
+                let n = d.nrows();
+                let mut out: Vec<Val> = Vec::with_capacity(n);
+                for row in 0..n {
                     let mut m: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(d.keys.len());
                     for (i, k) in d.keys.iter().enumerate() {
-                        m.insert(Arc::clone(k), row[i].clone());
+                        m.insert(Arc::clone(k), d.cell(row, i).clone());
                     }
                     out.push(Val::Obj(Arc::new(m)));
                 }
@@ -435,10 +496,11 @@ impl From<Val> for serde_json::Value {
                 serde_json::Value::Array(out)
             }
             Val::ObjVec(d) => {
-                let mut out: Vec<serde_json::Value> = Vec::with_capacity(d.rows.len());
-                for row in &d.rows {
+                let n = d.nrows();
+                let mut out: Vec<serde_json::Value> = Vec::with_capacity(n);
+                for row in 0..n {
                     let mut map: Map<String, serde_json::Value> = Map::with_capacity(d.keys.len());
-                    for (k, v) in d.keys.iter().zip(row.iter()) {
+                    for (k, v) in d.keys.iter().zip(d.row_slice(row).iter()) {
                         map.insert(k.to_string(), v.clone().into());
                     }
                     out.push(serde_json::Value::Object(map));
@@ -517,9 +579,8 @@ impl<'a> Serialize for ValRef<'a> {
                 seq.end()
             }
             Val::ObjVec(d) => {
-                let mut seq = s.serialize_seq(Some(d.rows.len()))?;
-                // Serialise each row as a map with the shared key schema.
-                // Walks keys + row in lock-step; no per-row hashtable.
+                let n = d.nrows();
+                let mut seq = s.serialize_seq(Some(n))?;
                 struct RowRef<'a> { keys: &'a [Arc<str>], row: &'a [Val] }
                 impl<'a> Serialize for RowRef<'a> {
                     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
@@ -530,8 +591,8 @@ impl<'a> Serialize for ValRef<'a> {
                         m.end()
                     }
                 }
-                for row in &d.rows {
-                    seq.serialize_element(&RowRef { keys: &d.keys, row })?;
+                for row_idx in 0..n {
+                    seq.serialize_element(&RowRef { keys: &d.keys, row: d.row_slice(row_idx) })?;
                 }
                 seq.end()
             }
@@ -763,21 +824,19 @@ impl Val {
                             let shape_keys = Self::probe_obj_shape_inner(nodes, start, len, first_len as usize);
                             if let Some(keys) = shape_keys {
                                 let n_keys = keys.len();
-                                let mut rows: Vec<Vec<Val>> = Vec::with_capacity(len);
+                                let mut cells: Vec<Val> = Vec::with_capacity(len * n_keys);
                                 for _ in 0..len {
                                     debug_assert!(matches!(nodes[*idx], Node::Object { .. }));
                                     *idx += 1;
-                                    let mut row: Vec<Val> = Vec::with_capacity(n_keys);
                                     for _ in 0..n_keys {
                                         debug_assert!(matches!(nodes[*idx], Node::String(_)));
                                         *idx += 1;
-                                        row.push(Self::from_simd_tape(nodes, idx));
+                                        cells.push(Self::from_simd_tape(nodes, idx));
                                     }
-                                    rows.push(row);
                                 }
                                 let key_arcs: Arc<[Arc<str>]> =
                                     keys.iter().map(|k| intern_key(k)).collect::<Vec<_>>().into();
-                                return Val::ObjVec(Arc::new(ObjVecData { keys: key_arcs, rows }));
+                                return Val::ObjVec(Arc::new(ObjVecData { keys: key_arcs, cells }));
                             }
                         }
                     }
