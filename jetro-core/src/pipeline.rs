@@ -71,13 +71,39 @@ pub enum Stage {
     Skip(usize),
 }
 
+/// Numeric fold operator — common shape across `sum`/`min`/`max`/`avg`.
+/// Centralising the op here lets a single set of fused-sink variants
+/// (`NumMap`, `NumFilterMap`) cover four aggregate shapes instead of
+/// twelve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NumOp {
+    Sum,
+    Min,
+    Max,
+    Avg,
+}
+
+impl NumOp {
+    /// Render the bare-aggregate result for the bench's start state
+    /// (zero-element fold).  Sum/Avg → 0/Null; Min/Max → Null when
+    /// no element observed.
+    fn empty(self) -> Val {
+        match self {
+            NumOp::Sum => Val::Int(0),
+            NumOp::Avg => Val::Null,
+            NumOp::Min => Val::Null,
+            NumOp::Max => Val::Null,
+        }
+    }
+}
+
 /// Where pipeline output lands.  Determines the result type.
 ///
-/// The fused variants (`SumMap`, `CountIf`, `SumFilterMap`,
-/// `CountFilter`) are produced by Phase 2 rewrite rules during
-/// lowering — they collapse adjacent `Map`/`Filter` stages and the
-/// sink into a single inner-loop kernel, eliminating the
-/// per-row exec call per stage.
+/// The fused variants (`NumMap`, `NumFilterMap`, `CountIf`,
+/// `FilterFirst`, `FilterLast`) are produced by the Phase 2 rewrite
+/// pass during lowering — collapsing adjacent `Map` / `Filter`
+/// stages plus the sink into a single inner-loop kernel that
+/// eliminates the per-row VM exec dispatch per stage.
 #[derive(Debug, Clone)]
 pub enum Sink {
     /// Materialise every element into a `Val::Arr`.
@@ -85,16 +111,27 @@ pub enum Sink {
     /// `.count()` / `.len()` — yield the number of elements that
     /// reached the sink as a `Val::Int`.
     Count,
-    /// `.sum()` over numerics — yields `Val::Int` or `Val::Float`.
-    Sum,
-    /// `Map(prog) ∘ Sum`.  Inner loop computes `prog(@)` and
-    /// accumulates numerically; never materialises a Vec.
-    SumMap(Arc<crate::vm::Program>),
-    /// `Filter(prog) ∘ Count`.  Inner loop runs `prog(@)`; counts
-    /// truthy.
+    /// `.sum()`/`.min()`/`.max()`/`.avg()` over numerics.
+    Numeric(NumOp),
+    /// `.first()` / `.last()` — yield the first/last element or
+    /// `Val::Null`.
+    First,
+    Last,
+    /// `Map(prog) ∘ <sum/min/max/avg>`.  Inner loop computes `prog(@)`
+    /// and accumulates numerically; never materialises a Vec.
+    NumMap(NumOp, Arc<crate::vm::Program>),
+    /// `Filter(prog) ∘ Count`.  Inner loop runs `prog(@)`; counts truthy.
     CountIf(Arc<crate::vm::Program>),
-    /// `Filter(pred) ∘ Map(f) ∘ Sum`.
-    SumFilterMap(Arc<crate::vm::Program>, Arc<crate::vm::Program>),
+    /// `Filter(pred) ∘ Map(f) ∘ <sum/min/max/avg>`.
+    NumFilterMap(NumOp, Arc<crate::vm::Program>, Arc<crate::vm::Program>),
+    /// `Filter(prog) ∘ First` — find first element where pred holds.
+    FilterFirst(Arc<crate::vm::Program>),
+    /// `Filter(prog) ∘ Last` — find last element where pred holds.
+    FilterLast(Arc<crate::vm::Program>),
+    /// `Map(prog) ∘ First` — first element after projection.
+    FirstMap(Arc<crate::vm::Program>),
+    /// `Map(prog) ∘ Last` — last element after projection.
+    LastMap(Arc<crate::vm::Program>),
 }
 
 #[derive(Debug, Clone)]
@@ -185,7 +222,12 @@ impl Pipeline {
                             stages.push(Stage::Skip(n));
                         }
                         ("count", 0, true) | ("len", 0, true) => sink = Sink::Count,
-                        ("sum", 0, true) => sink = Sink::Sum,
+                        ("sum", 0, true) => sink = Sink::Numeric(NumOp::Sum),
+                        ("min", 0, true) => sink = Sink::Numeric(NumOp::Min),
+                        ("max", 0, true) => sink = Sink::Numeric(NumOp::Max),
+                        ("avg", 0, true) => sink = Sink::Numeric(NumOp::Avg),
+                        ("first", 0, true) => sink = Sink::First,
+                        ("last", 0, true) => sink = Sink::Last,
                         _ => return None,
                     }
                 }
@@ -318,30 +360,32 @@ fn rewrite_step(p: &mut Pipeline) -> bool {
         }
     }
 
-    // ── Existing fused-sink rules ──────────────────────────────────────
+    // ── Fused-sink rules over numeric aggregates (sum/min/max/avg) ─────
     let last_two = if p.stages.len() >= 2 {
         Some((p.stages.len() - 2, p.stages.len() - 1))
     } else { None };
 
-    // Rule:  Filter(pred) ∘ Map(f) ∘ Sum  →  SumFilterMap(pred, f)
-    if let (Some((i_pred, i_map)), Sink::Sum) = (last_two, &p.sink) {
+    // Rule:  Filter(p) ∘ Map(f) ∘ Numeric(op)  →  NumFilterMap(op, p, f)
+    if let (Some((i_pred, i_map)), Sink::Numeric(op)) = (last_two, &p.sink) {
         if let (Stage::Filter(pred), Stage::Map(map)) =
             (&p.stages[i_pred], &p.stages[i_map])
         {
+            let op   = *op;
             let pred = Arc::clone(pred);
             let map  = Arc::clone(map);
             p.stages.truncate(i_pred);
-            p.sink = Sink::SumFilterMap(pred, map);
+            p.sink = Sink::NumFilterMap(op, pred, map);
             return true;
         }
     }
 
-    // Rule:  Map(f) ∘ Sum → SumMap(f)
-    if let (Some(last), Sink::Sum) = (p.stages.last(), &p.sink) {
+    // Rule:  Map(f) ∘ Numeric(op) → NumMap(op, f)
+    if let (Some(last), Sink::Numeric(op)) = (p.stages.last(), &p.sink) {
         if let Stage::Map(prog) = last {
+            let op   = *op;
             let prog = Arc::clone(prog);
             p.stages.pop();
-            p.sink = Sink::SumMap(prog);
+            p.sink = Sink::NumMap(op, prog);
             return true;
         }
     }
@@ -356,6 +400,46 @@ fn rewrite_step(p: &mut Pipeline) -> bool {
         }
     }
 
+    // Rule:  Filter(p) ∘ First → FilterFirst(p)
+    if let (Some(last), Sink::First) = (p.stages.last(), &p.sink) {
+        if let Stage::Filter(prog) = last {
+            let prog = Arc::clone(prog);
+            p.stages.pop();
+            p.sink = Sink::FilterFirst(prog);
+            return true;
+        }
+    }
+
+    // Rule:  Filter(p) ∘ Last → FilterLast(p)
+    if let (Some(last), Sink::Last) = (p.stages.last(), &p.sink) {
+        if let Stage::Filter(prog) = last {
+            let prog = Arc::clone(prog);
+            p.stages.pop();
+            p.sink = Sink::FilterLast(prog);
+            return true;
+        }
+    }
+
+    // Rule:  Map(f) ∘ First → FirstMap(f)
+    if let (Some(last), Sink::First) = (p.stages.last(), &p.sink) {
+        if let Stage::Map(prog) = last {
+            let prog = Arc::clone(prog);
+            p.stages.pop();
+            p.sink = Sink::FirstMap(prog);
+            return true;
+        }
+    }
+
+    // Rule:  Map(f) ∘ Last → LastMap(f)
+    if let (Some(last), Sink::Last) = (p.stages.last(), &p.sink) {
+        if let Stage::Map(prog) = last {
+            let prog = Arc::clone(prog);
+            p.stages.pop();
+            p.sink = Sink::LastMap(prog);
+            return true;
+        }
+    }
+
     false
 }
 
@@ -364,8 +448,11 @@ fn rewrite_step(p: &mut Pipeline) -> bool {
 /// Sums emit `Int(0)`, counts emit `Int(0)`, collect emits `[]`.
 fn empty_sink_for(sink: &Sink) -> Sink {
     match sink {
-        Sink::Collect | Sink::Count | Sink::Sum
-        | Sink::SumMap(_) | Sink::CountIf(_) | Sink::SumFilterMap(_, _) => sink.clone(),
+        // All current sinks have a well-defined empty-input result;
+        // none of them needs special-casing here.  Clone the sink so
+        // the run loop's already-zeroed accumulators produce the
+        // right shape.
+        _ => sink.clone(),
     }
     // (Empty input ⇒ existing accumulators in `Pipeline::run` already
     // produce Int(0) / Float(0.0) / Val::arr([]).  No need for a
@@ -408,17 +495,17 @@ impl Pipeline {
 
         // ObjVec source — slot-indexed direct reads, no IndexMap probe.
         if let Val::ObjVec(d) = &recv {
-            if let Sink::SumMap(prog) = &self.sink {
+            if let Sink::NumMap(op, prog) = &self.sink {
                 let field = single_field_prog(prog)?;
                 let slot = d.slot_of(field)?;
-                return Some(Ok(objvec_sum_slot(d, slot)));
+                return Some(Ok(objvec_num_slot(d, slot, *op)));
             }
-            if let Sink::SumFilterMap(pred, map) = &self.sink {
-                let (pf, op, lit) = single_cmp_prog(pred)?;
+            if let Sink::NumFilterMap(op, pred, map) = &self.sink {
+                let (pf, cop, lit) = single_cmp_prog(pred)?;
                 let mf = single_field_prog(map)?;
                 let sp = d.slot_of(pf)?;
                 let sm = d.slot_of(mf)?;
-                return Some(Ok(objvec_filter_sum_slots(d, sp, op, &lit, sm)));
+                return Some(Ok(objvec_filter_num_slots(d, sp, cop, &lit, sm, *op)));
             }
             if let Sink::CountIf(pred) = &self.sink {
                 if let Some((pf, op, lit)) = single_cmp_prog(pred) {
@@ -441,17 +528,17 @@ impl Pipeline {
             _ => return None,
         };
 
-        // SumMap with `@.field` shape — extract field column, SIMD-fold.
-        if let Sink::SumMap(prog) = &self.sink {
+        // NumMap with `@.field` shape — extract field column, fold.
+        if let Sink::NumMap(op, prog) = &self.sink {
             let field = single_field_prog(prog)?;
-            return Some(Ok(columnar_sum_field(&arr, field)));
+            return Some(Ok(columnar_num_field(&arr, field, *op)));
         }
 
-        // SumFilterMap — extract two columns, mask + fold.
-        if let Sink::SumFilterMap(pred, map) = &self.sink {
-            let (pf, op, lit) = single_cmp_prog(pred)?;
+        // NumFilterMap — extract two columns, mask + fold.
+        if let Sink::NumFilterMap(op, pred, map) = &self.sink {
+            let (pf, cop, lit) = single_cmp_prog(pred)?;
             let mf = single_field_prog(map)?;
-            return Some(Ok(columnar_filter_sum(&arr, pf, op, &lit, mf)));
+            return Some(Ok(columnar_filter_num(&arr, pf, cop, &lit, mf, *op)));
         }
 
         // CountIf with single-cmp predicate.
@@ -525,6 +612,11 @@ impl Pipeline {
         let mut acc_sum_i:   i64 = 0;
         let mut acc_sum_f:   f64 = 0.0;
         let mut sum_floated: bool = false;
+        let mut acc_min_f:   f64 = f64::INFINITY;
+        let mut acc_max_f:   f64 = f64::NEG_INFINITY;
+        let mut acc_n_obs:   usize = 0;
+        let mut acc_first:   Option<Val> = None;
+        let mut acc_last:    Option<Val> = None;
 
         'outer: for mut item in iter {
             // Apply stages in order.
@@ -551,55 +643,117 @@ impl Pipeline {
             match &self.sink {
                 Sink::Collect => acc_collect.push(item),
                 Sink::Count   => acc_count += 1,
-                Sink::Sum     => match item {
-                    Val::Int(n)   => if sum_floated { acc_sum_f += n as f64 } else { acc_sum_i += n },
-                    Val::Float(f) => {
-                        if !sum_floated { acc_sum_f = acc_sum_i as f64; sum_floated = true; }
-                        acc_sum_f += f;
-                    }
-                    _ => {}
-                },
-                // Fused sinks consume the (already-stage-processed) item directly.
-                Sink::SumMap(prog) => {
+                Sink::Numeric(op) => {
+                    num_fold(&mut acc_sum_i, &mut acc_sum_f, &mut sum_floated,
+                             &mut acc_min_f, &mut acc_max_f, &mut acc_n_obs,
+                             *op, &item);
+                }
+                Sink::First => { if acc_first.is_none() { acc_first = Some(item.clone()); } }
+                Sink::Last  => { acc_last = Some(item.clone()); }
+                Sink::NumMap(op, prog) => {
                     let v = apply_item_root(&mut vm, &item, prog)?;
-                    sum_acc(&mut acc_sum_i, &mut acc_sum_f, &mut sum_floated, &v);
+                    num_fold(&mut acc_sum_i, &mut acc_sum_f, &mut sum_floated,
+                             &mut acc_min_f, &mut acc_max_f, &mut acc_n_obs,
+                             *op, &v);
                 }
                 Sink::CountIf(prog) => {
                     if is_truthy(&apply_item_root(&mut vm, &item, prog)?) { acc_count += 1; }
                 }
-                Sink::SumFilterMap(pred, map) => {
+                Sink::NumFilterMap(op, pred, map) => {
                     if is_truthy(&apply_item_root(&mut vm, &item, pred)?) {
                         let v = apply_item_root(&mut vm, &item, map)?;
-                        sum_acc(&mut acc_sum_i, &mut acc_sum_f, &mut sum_floated, &v);
+                        num_fold(&mut acc_sum_i, &mut acc_sum_f, &mut sum_floated,
+                                 &mut acc_min_f, &mut acc_max_f, &mut acc_n_obs,
+                                 *op, &v);
                     }
+                }
+                Sink::FilterFirst(prog) => {
+                    if acc_first.is_none()
+                        && is_truthy(&apply_item_root(&mut vm, &item, prog)?) {
+                        acc_first = Some(item.clone());
+                    }
+                }
+                Sink::FilterLast(prog) => {
+                    if is_truthy(&apply_item_root(&mut vm, &item, prog)?) {
+                        acc_last = Some(item.clone());
+                    }
+                }
+                Sink::FirstMap(prog) => {
+                    if acc_first.is_none() {
+                        acc_first = Some(apply_item_root(&mut vm, &item, prog)?);
+                    }
+                }
+                Sink::LastMap(prog) => {
+                    acc_last = Some(apply_item_root(&mut vm, &item, prog)?);
                 }
             }
             taken += 1;
         }
 
         Ok(match &self.sink {
-            Sink::Collect          => Val::arr(acc_collect),
-            Sink::Count            => Val::Int(acc_count),
-            Sink::CountIf(_)       => Val::Int(acc_count),
-            Sink::Sum
-            | Sink::SumMap(_)
-            | Sink::SumFilterMap(_, _) =>
-                if sum_floated { Val::Float(acc_sum_f) } else { Val::Int(acc_sum_i) },
+            Sink::Collect           => Val::arr(acc_collect),
+            Sink::Count             => Val::Int(acc_count),
+            Sink::CountIf(_)        => Val::Int(acc_count),
+            Sink::Numeric(op)
+            | Sink::NumMap(op, _)
+            | Sink::NumFilterMap(op, _, _) =>
+                num_finalise(*op, acc_sum_i, acc_sum_f, sum_floated,
+                             acc_min_f, acc_max_f, acc_n_obs),
+            Sink::First | Sink::FilterFirst(_) | Sink::FirstMap(_) =>
+                acc_first.unwrap_or(Val::Null),
+            Sink::Last  | Sink::FilterLast(_)  | Sink::LastMap(_) =>
+                acc_last.unwrap_or(Val::Null),
         })
     }
 }
 
 #[inline]
-fn sum_acc(acc_i: &mut i64, acc_f: &mut f64, floated: &mut bool, v: &Val) {
-    match v {
-        Val::Int(n)   => if *floated { *acc_f += *n as f64 } else { *acc_i += *n },
-        Val::Float(f) => {
-            if !*floated { *acc_f = *acc_i as f64; *floated = true; }
-            *acc_f += *f;
+fn num_fold(
+    acc_i: &mut i64, acc_f: &mut f64, floated: &mut bool,
+    min_f: &mut f64, max_f: &mut f64, n_obs: &mut usize,
+    op: NumOp, v: &Val,
+) {
+    let f = match v {
+        Val::Int(n)   => *n as f64,
+        Val::Float(x) => *x,
+        _ => return,
+    };
+    *n_obs += 1;
+    match op {
+        NumOp::Sum | NumOp::Avg => {
+            match v {
+                Val::Int(n)   => if *floated { *acc_f += *n as f64 } else { *acc_i += *n },
+                Val::Float(x) => {
+                    if !*floated { *acc_f = *acc_i as f64; *floated = true; }
+                    *acc_f += *x;
+                }
+                _ => {}
+            }
         }
-        _ => {}
+        NumOp::Min => { if f < *min_f { *min_f = f; } }
+        NumOp::Max => { if f > *max_f { *max_f = f; } }
     }
 }
+
+#[inline]
+fn num_finalise(
+    op: NumOp,
+    acc_i: i64, acc_f: f64, floated: bool,
+    min_f: f64, max_f: f64, n_obs: usize,
+) -> Val {
+    if n_obs == 0 { return op.empty(); }
+    match op {
+        NumOp::Sum => if floated { Val::Float(acc_f) } else { Val::Int(acc_i) },
+        NumOp::Avg => {
+            let total = if floated { acc_f } else { acc_i as f64 };
+            Val::Float(total / n_obs as f64)
+        }
+        NumOp::Min => Val::Float(min_f),
+        NumOp::Max => Val::Float(max_f),
+    }
+}
+
+// (sum_acc removed; superseded by num_fold which handles Sum/Min/Max/Avg)
 
 /// Decode a compiled sub-program that reads a single field from `@`
 /// — either `[PushCurrent, GetField(k)]` (explicit `@.field`) or
@@ -691,17 +845,20 @@ fn single_cmp_prog<'a>(prog: &'a crate::vm::Program) -> Option<(&'a str, crate::
 // `s` lives at `cells[row * stride + s]`.  No IndexMap probe per
 // row — direct array index.
 
-fn objvec_sum_slot(d: &Arc<crate::eval::value::ObjVecData>, slot: usize) -> Val {
+fn objvec_num_slot(d: &Arc<crate::eval::value::ObjVecData>, slot: usize, op: NumOp) -> Val {
     let stride = d.stride();
     let nrows = d.nrows();
     let mut acc_i: i64 = 0;
     let mut acc_f: f64 = 0.0;
     let mut floated = false;
+    let mut min_f = f64::INFINITY;
+    let mut max_f = f64::NEG_INFINITY;
+    let mut n_obs: usize = 0;
     for row in 0..nrows {
         let v = &d.cells[row * stride + slot];
-        sum_acc(&mut acc_i, &mut acc_f, &mut floated, v);
+        num_fold(&mut acc_i, &mut acc_f, &mut floated, &mut min_f, &mut max_f, &mut n_obs, op, v);
     }
-    if floated { Val::Float(acc_f) } else { Val::Int(acc_i) }
+    num_finalise(op, acc_i, acc_f, floated, min_f, max_f, n_obs)
 }
 
 fn objvec_filter_count_slot(
@@ -720,25 +877,30 @@ fn objvec_filter_count_slot(
     Val::Int(count)
 }
 
-fn objvec_filter_sum_slots(
+fn objvec_filter_num_slots(
     d:        &Arc<crate::eval::value::ObjVecData>,
     pred_slot: usize,
-    op:       crate::ast::BinOp,
+    cop:      crate::ast::BinOp,
     lit:      &Val,
     map_slot:  usize,
+    op:       NumOp,
 ) -> Val {
     let stride = d.stride();
     let nrows = d.nrows();
     let mut acc_i: i64 = 0;
     let mut acc_f: f64 = 0.0;
     let mut floated = false;
+    let mut min_f = f64::INFINITY;
+    let mut max_f = f64::NEG_INFINITY;
+    let mut n_obs: usize = 0;
     for row in 0..nrows {
         let off = row * stride;
-        if cmp_val_binop_local(&d.cells[off + pred_slot], op, lit) {
-            sum_acc(&mut acc_i, &mut acc_f, &mut floated, &d.cells[off + map_slot]);
+        if cmp_val_binop_local(&d.cells[off + pred_slot], cop, lit) {
+            num_fold(&mut acc_i, &mut acc_f, &mut floated, &mut min_f, &mut max_f, &mut n_obs,
+                     op, &d.cells[off + map_slot]);
         }
     }
-    if floated { Val::Float(acc_f) } else { Val::Int(acc_i) }
+    num_finalise(op, acc_i, acc_f, floated, min_f, max_f, n_obs)
 }
 
 fn objvec_filter_count_and_slots(
@@ -764,20 +926,22 @@ fn objvec_filter_count_and_slots(
 /// SIMD-fold.  Returns `Val::Int` / `Val::Float` / `Val::Null` on
 /// non-numeric.  Falls back through the existing scalar `Val::Obj`
 /// `lookup_field_cached` for non-homogeneous Object shapes.
-fn columnar_sum_field(arr: &Arc<Vec<Val>>, field: &str) -> Val {
-    use indexmap::IndexMap;
+fn columnar_num_field(arr: &Arc<Vec<Val>>, field: &str, op: NumOp) -> Val {
     let mut acc_i: i64 = 0;
     let mut acc_f: f64 = 0.0;
     let mut floated = false;
+    let mut min_f = f64::INFINITY;
+    let mut max_f = f64::NEG_INFINITY;
+    let mut n_obs: usize = 0;
     let mut idx: Option<usize> = None;
     for item in arr.iter() {
         if let Val::Obj(m) = item {
             let v = lookup_via_ic(m, field, &mut idx);
-            sum_acc(&mut acc_i, &mut acc_f, &mut floated, v.unwrap_or(&Val::Null));
+            num_fold(&mut acc_i, &mut acc_f, &mut floated, &mut min_f, &mut max_f, &mut n_obs,
+                     op, v.unwrap_or(&Val::Null));
         }
     }
-    let _ = std::marker::PhantomData::<IndexMap<Arc<str>, Val>>;
-    if floated { Val::Float(acc_f) } else { Val::Int(acc_i) }
+    num_finalise(op, acc_i, acc_f, floated, min_f, max_f, n_obs)
 }
 
 /// Columnar AND-chain filter count: every leaf comparison must hold.
@@ -822,32 +986,34 @@ fn columnar_filter_count(
 }
 
 /// Columnar `$.<arr>.filter(<f> <op> <lit>).map(<g>).sum()`.
-fn columnar_filter_sum(
-    arr:  &Arc<Vec<Val>>,
-    pf:   &str,
-    op:   crate::ast::BinOp,
-    lit:  &Val,
-    mf:   &str,
+fn columnar_filter_num(
+    arr: &Arc<Vec<Val>>,
+    pf:  &str,
+    cop: crate::ast::BinOp,
+    lit: &Val,
+    mf:  &str,
+    op:  NumOp,
 ) -> Val {
     let mut acc_i: i64 = 0;
     let mut acc_f: f64 = 0.0;
     let mut floated = false;
+    let mut min_f = f64::INFINITY;
+    let mut max_f = f64::NEG_INFINITY;
+    let mut n_obs: usize = 0;
     let mut ip: Option<usize> = None;
     let mut iq: Option<usize> = None;
     for item in arr.iter() {
         if let Val::Obj(m) = item {
             let pv = lookup_via_ic(m, pf, &mut ip);
-            let pass = match pv {
-                Some(v) => cmp_val_binop_local(v, op, lit),
-                None => false,
-            };
+            let pass = match pv { Some(v) => cmp_val_binop_local(v, cop, lit), None => false };
             if pass {
                 let v = lookup_via_ic(m, mf, &mut iq).unwrap_or(&Val::Null);
-                sum_acc(&mut acc_i, &mut acc_f, &mut floated, v);
+                num_fold(&mut acc_i, &mut acc_f, &mut floated, &mut min_f, &mut max_f, &mut n_obs,
+                         op, v);
             }
         }
     }
-    if floated { Val::Float(acc_f) } else { Val::Int(acc_i) }
+    num_finalise(op, acc_i, acc_f, floated, min_f, max_f, n_obs)
 }
 
 /// Inline numeric/string comparison for the columnar path.  Mirrors
@@ -1011,7 +1177,7 @@ mod tests {
         assert_eq!(p.stages.len(), 2);
         assert!(matches!(p.stages[0], Stage::Skip(2)));
         assert!(matches!(p.stages[1], Stage::Take(5)));
-        assert!(matches!(p.sink, Sink::Sum));
+        assert!(matches!(p.sink, Sink::Numeric(NumOp::Sum)));
     }
 
     #[test]
@@ -1048,7 +1214,7 @@ mod tests {
         match &p.source { Source::FieldChain { keys } => eprintln!("KEYS = {:?}", keys), _ => {} }
         eprintln!("STAGES = {}", p.stages.len());
         match &p.sink {
-            Sink::SumFilterMap(pred, map) => {
+            Sink::NumFilterMap(_, pred, map) => {
                 eprintln!("PRED OPS = {:#?}", pred.ops);
                 eprintln!("MAP OPS = {:#?}", map.ops);
             }
@@ -1130,7 +1296,7 @@ mod tests {
         // SumMap sink.
         assert_eq!(p.stages.len(), 1);
         assert!(matches!(p.stages[0], Stage::Take(3)));
-        assert!(matches!(p.sink, Sink::SumMap(_)));
+        assert!(matches!(p.sink, Sink::NumMap(NumOp::Sum, _)));
     }
 
     #[test]
