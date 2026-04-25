@@ -193,6 +193,58 @@ impl Jetro {
         Self::from_bytes(bytes.to_vec())
     }
 
+    /// Parse JSON via [simd-json](https://github.com/simd-lite/simd-json) —
+    /// SIMD-accelerated structural scanner, typically 2-4x faster than
+    /// `serde_json::from_slice` on large inputs.  The parser **mutates**
+    /// the input buffer in place, so the buffer is consumed.
+    ///
+    /// Skips the `serde_json::Value` intermediate tree: simd-json's serde
+    /// shim deserializes directly into [`Val`], saving a full extra walk
+    /// of the document on cold start.
+    ///
+    /// On parse error this falls back to `serde_json::from_slice` over the
+    /// (possibly partially-mutated) buffer; if both fail, the simd-json
+    /// error is returned.  The original bytes (post-mutation) are retained
+    /// so `$..key` byte-scan fast paths still work for descendants.
+    ///
+    /// Requires the `simd-json` cargo feature.
+    #[cfg(feature = "simd-json")]
+    pub fn from_simd(mut bytes: Vec<u8>) -> std::result::Result<Self, String> {
+        // Snapshot the original bytes for byte-scan fast paths *before*
+        // simd-json mutates them in place. Cheap one-shot Vec clone; the
+        // alternative is rebuilding bytes from the parsed Val later.
+        let raw: Arc<[u8]> = Arc::from(bytes.clone().into_boxed_slice());
+        match Val::from_json_simd(&mut bytes) {
+            Ok(val) => {
+                let cell: OnceCell<Val> = OnceCell::new();
+                let _ = cell.set(val);
+                Ok(Self {
+                    document: Value::Null,
+                    root_val: cell,
+                    raw_bytes: Some(raw),
+                })
+            }
+            Err(simd_err) => {
+                // simd-json may have mutated the buffer; reparse from the
+                // pristine raw_bytes copy via serde_json as fallback.
+                let document: Value = serde_json::from_slice(&raw)
+                    .map_err(|e| format!("simd-json: {} ; serde_json fallback: {}", simd_err, e))?;
+                Ok(Self {
+                    document,
+                    root_val: OnceCell::new(),
+                    raw_bytes: Some(raw),
+                })
+            }
+        }
+    }
+
+    /// `from_simd` over a borrowed slice. Allocates a writable copy
+    /// internally (simd-json mutates in place).
+    #[cfg(feature = "simd-json")]
+    pub fn from_simd_slice(bytes: &[u8]) -> std::result::Result<Self, String> {
+        Self::from_simd(bytes.to_vec())
+    }
+
     fn root_val(&self) -> Val {
         self.root_val.get_or_init(|| Val::from(&self.document)).clone()
     }

@@ -606,3 +606,35 @@ fn split_consumer_fusions() {
         .collect_val(r#"$.map(@.split('-').nth(2))"#).unwrap();
     assert_eq!(nth2.to_string(), r#"["c",null,null]"#);
 }
+
+#[cfg(feature = "simd-json")]
+#[test]
+fn simd_json_basic_query() {
+    let bytes = br#"{"store":{"books":[{"title":"Dune","price":12.99},{"title":"Foundation","price":9.99}]}}"#.to_vec();
+    let j = Jetro::from_simd(bytes).unwrap();
+    let titles = j.collect("$.store.books.filter(price > 10).map(title)").unwrap();
+    assert_eq!(titles.to_string(), r#"["Dune"]"#);
+}
+
+#[cfg(feature = "simd-json")]
+#[test]
+fn simd_json_descendant_byte_scan() {
+    // raw_bytes retained so $..key takes the SIMD byte-scan path.
+    let bytes = br#"{"a":{"id":1,"sub":{"id":2}},"b":{"id":3}}"#.to_vec();
+    let j = Jetro::from_simd(bytes).unwrap();
+    let ids = j.collect("$..id").unwrap();
+    let s = ids.to_string();
+    assert!(s.contains('1') && s.contains('2') && s.contains('3'));
+}
+
+#[cfg(feature = "simd-json")]
+#[test]
+fn simd_json_invalid_falls_back_with_helpful_error() {
+    let bad = b"{ this is not json ".to_vec();
+    let r = Jetro::from_simd(bad);
+    let msg = match r {
+        Err(e) => e,
+        Ok(_)  => panic!("expected error on invalid JSON"),
+    };
+    assert!(msg.contains("simd-json") || msg.contains("serde_json"));
+}
