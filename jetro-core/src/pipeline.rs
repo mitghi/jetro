@@ -54,17 +54,17 @@ pub enum Source {
     FieldChain { keys: Arc<[Arc<str>]> },
 }
 
-/// A pull-based stage.  Each stage owns the sub-program (`Expr`) it
-/// evaluates per element when the stage is non-trivial (Filter / Map /
-/// FlatMap / UniqueBy).  Sub-programs that touch only the current
-/// element have access to `@` (current) but not to `$` (root) — same
-/// rule as the existing `apply_item_mut` evaluator.
+/// A pull-based stage.  Filter / Map carry a pre-compiled `Program`
+/// that runs against each row's `@` (current item) bound as the VM
+/// root.  Programs are compiled once at lowering time and reused per
+/// row — drops the per-row tree-walker dispatch cost that the initial
+/// substrate paid.
 #[derive(Debug, Clone)]
 pub enum Stage {
     /// `.filter(pred)` — drops elements where `pred` is falsy.
-    Filter(Arc<Expr>),
+    Filter(Arc<crate::vm::Program>),
     /// `.map(f)` — replaces each element with `f(@)`.
-    Map(Arc<Expr>),
+    Map(Arc<crate::vm::Program>),
     /// `.take(n)` — yields at most `n` elements, then completes.
     Take(usize),
     /// `.skip(n)` — drops the first `n` elements.
@@ -136,6 +136,10 @@ impl Pipeline {
             .collect::<Vec<_>>().into();
 
         // Decode the trailing methods into stages + a sink.
+        // Compile each filter / map sub-Expr to a Program once so
+        // Pipeline::run can reuse it per row.  Sub-programs run against
+        // the current item bound as the VM's root, so `@.field` and
+        // `@` references resolve to the row.
         let mut stages: Vec<Stage> = Vec::new();
         let mut sink: Sink = Sink::Collect;
         let trailing = &steps[field_end..];
@@ -145,12 +149,12 @@ impl Pipeline {
                 Step::Method(name, args) => {
                     match (name.as_str(), args.len(), is_last) {
                         ("filter", 1, _) => {
-                            let arg = match &args[0] { Arg::Pos(e) => Arc::new(e.clone()), _ => return None };
-                            stages.push(Stage::Filter(arg));
+                            let prog = compile_subexpr(&args[0])?;
+                            stages.push(Stage::Filter(prog));
                         }
                         ("map", 1, _) => {
-                            let arg = match &args[0] { Arg::Pos(e) => Arc::new(e.clone()), _ => return None };
-                            stages.push(Stage::Map(arg));
+                            let prog = compile_subexpr(&args[0])?;
+                            stages.push(Stage::Map(prog));
                         }
                         ("take", 1, _) => {
                             let n = match &args[0] {
@@ -185,6 +189,11 @@ impl Pipeline {
     /// Execute the pipeline against `root`, returning the sink's
     /// produced [`Val`].
     pub fn run(&self, root: &Val) -> Result<Val, EvalError> {
+        // One VM owned by the pull loop — shared across stage program
+        // calls so VM compile / path caches amortise across the row
+        // sweep.  Constructing a fresh VM per row regresses 250x.
+        let mut vm = crate::vm::VM::new();
+
         // Resolve source to an iterable Val::Arr-like sequence.
         let recv = match &self.source {
             Source::Receiver(v) => v.clone(),
@@ -224,12 +233,12 @@ impl Pipeline {
                         if taken >= *n { break 'outer; }
                     }
                     Stage::Filter(prog) => {
-                        if !is_truthy(&apply_item_root(root, &item, prog)?) {
+                        if !is_truthy(&apply_item_root(&mut vm, &item, prog)?) {
                             continue 'outer;
                         }
                     }
                     Stage::Map(prog) => {
-                        item = apply_item_root(root, &item, prog)?;
+                        item = apply_item_root(&mut vm, &item, prog)?;
                     }
                 }
             }
@@ -258,6 +267,29 @@ impl Pipeline {
     }
 }
 
+/// Compile a `.filter(arg)` / `.map(arg)` sub-expression into a `Program`
+/// the VM can run against a row's `@`.  The argument's expression is
+/// wrapped so that bare-ident shorthand (`map(total)`) becomes
+/// `@.total` for evaluation against the current row — the tree-walker
+/// applies the same rule via `apply_item_mut` but we have to be
+/// explicit when emitting bytecode.
+fn compile_subexpr(arg: &crate::ast::Arg) -> Option<Arc<crate::vm::Program>> {
+    use crate::ast::{Arg, Expr, Step};
+    let inner = match arg { Arg::Pos(e) => e, _ => return None };
+    let rooted: Expr = match inner {
+        // Bare ident `total` → `@.total`
+        Expr::Ident(name) => Expr::Chain(
+            Box::new(Expr::Current),
+            vec![Step::Field(name.clone())],
+        ),
+        // `@…` chains: keep base = Current, accept as-is
+        Expr::Chain(base, _) if matches!(base.as_ref(), Expr::Current) => inner.clone(),
+        // Anything else: wrap as-is — VM will resolve `@` via Current refs.
+        other => other.clone(),
+    };
+    Some(Arc::new(crate::vm::Compiler::compile(&rooted, "")))
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 /// Walk `$.k1.k2…` from `root`, returning `Val::Null` on any miss.
@@ -270,15 +302,13 @@ fn walk_field_chain(root: &Val, keys: &[Arc<str>]) -> Val {
     cur
 }
 
-/// Evaluate `prog` against the current item with a fresh root binding.
-/// Phase 1 detours through the tree-walker so the substrate stays
-/// independent of opcode emission; Phase 2/3 will compile programs to
-/// a small lane-friendly bytecode.
-fn apply_item_root(root: &Val, item: &Val, prog: &Expr) -> Result<Val, EvalError> {
-    use crate::eval::{Env, eval_in_env};
-    let registry = Arc::new(crate::eval::methods::MethodRegistry::default());
-    let env = Env::new_with_registry(root.clone(), registry).with_current(item.clone());
-    eval_in_env(prog, &env)
+/// Evaluate `prog` against `item` as the VM root using a long-lived
+/// VM borrowed from the caller (Pipeline::run owns one per query).
+/// Sharing the VM amortises its compile / path caches over the whole
+/// pull loop instead of paying construction per row.
+#[inline]
+fn apply_item_root(vm: &mut crate::vm::VM, item: &Val, prog: &crate::vm::Program) -> Result<Val, EvalError> {
+    vm.execute_val_raw(prog, item.clone())
 }
 
 #[inline]
