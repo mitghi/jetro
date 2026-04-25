@@ -543,7 +543,10 @@ pub enum Opcode {
 
     // ── Construction ─────────────────────────────────────────────────────────
     MakeObj(Arc<[CompiledObjEntry]>),
-    MakeArr(Arc<[Arc<Program>]>),
+    /// Array literal `[e0, e1, ...]`.  Each entry carries a spread
+    /// flag — `true` means the element's program produces an iterable
+    /// whose contents are flattened into the result.
+    MakeArr(Arc<[(Arc<Program>, bool)]>),
 
     // ── F-string ─────────────────────────────────────────────────────────────
     FString(Arc<[CompiledFSPart]>),
@@ -1685,10 +1688,15 @@ impl Compiler {
                             continue;
                         }
                         (Some(Opcode::MakeArr(progs)), BuiltinMethod::Len) => {
-                            let n = progs.len() as i64;
-                            out.pop();
-                            out.push(Opcode::PushInt(n));
-                            continue;
+                            // Fold to a constant only when no entry is a
+                            // spread — spreads expand at runtime so the
+                            // length is dynamic.
+                            if progs.iter().all(|(_, sp)| !*sp) {
+                                let n = progs.len() as i64;
+                                out.pop();
+                                out.push(Opcode::PushInt(n));
+                                continue;
+                            }
                         }
                         _ => {}
                     }
@@ -2879,28 +2887,13 @@ impl Compiler {
             }
 
             Expr::Array(elems) => {
-                // Compile each elem as a sub-program.
-                // Spread elems are handled by a special marker.
-                let _progs: Vec<Arc<Program>> = elems.iter().map(|e| match e {
-                    ArrayElem::Expr(ex)   => Arc::new(Self::compile_sub(ex, ctx)),
-                    // Spread: compile the inner expr with a spread marker opcode
-                    ArrayElem::Spread(ex) => {
-                        let mut sub = Self::emit(ex, ctx);
-                        // Prepend a sentinel to distinguish spread from normal
-                        sub.insert(0, Opcode::PushNull); // placeholder
-                        // Actually, encode spread differently via a wrapper
-                        Arc::new(Self::compile_array_spread(ex, ctx))
-                    }
+                // Each entry: (sub-program, is_spread).  Spreads execute
+                // their program normally; the MakeArr handler flattens
+                // an iterable result into the output array.
+                let progs: Vec<(Arc<Program>, bool)> = elems.iter().map(|e| match e {
+                    ArrayElem::Expr(ex)   => (Arc::new(Self::compile_sub(ex, ctx)), false),
+                    ArrayElem::Spread(ex) => (Arc::new(Self::compile_sub(ex, ctx)), true),
                 }).collect();
-                // Simpler: build a mixed elem list
-                let progs = elems.iter().map(|e| match e {
-                    ArrayElem::Expr(ex) => {
-                        Arc::new(Self::compile_sub(ex, ctx))
-                    }
-                    ArrayElem::Spread(ex) => {
-                        Arc::new(Self::compile_sub_spread(ex, ctx))
-                    }
-                }).collect::<Vec<_>>();
                 ops.push(Opcode::MakeArr(progs.into()));
             }
 
@@ -3207,23 +3200,12 @@ impl Compiler {
         Some(out)
     }
 
-    fn compile_array_spread(_expr: &Expr, _ctx: &VarCtx) -> Program {
-        // Not reached — handled in MakeArr execution
+    // (compile_array_spread / compile_sub_spread removed — MakeArr now
+    //  carries an `is_spread` flag per entry, no special program shape
+    //  needed.)
+    #[allow(dead_code)]
+    fn _spread_helpers_removed_marker(_: &Expr, _: &VarCtx) -> Program {
         Program::new(vec![], "<spread>")
-    }
-
-    /// Compile a spread array element — wrapped with a special marker.
-    fn compile_sub_spread(expr: &Expr, ctx: &VarCtx) -> Program {
-        let mut ops = Self::emit(expr, ctx);
-        // Prefix with a sentinel bool to mark this as a spread
-        ops.insert(0, Opcode::PushBool(true));
-        // Append a sentinel for reading: bool(true) + actual val
-        // Actually use a dedicated approach: GetSlice-like marker
-        // For simplicity, just compile the expr normally;
-        // MakeArr handles spread by checking if the result is an array
-        // when the corresponding ArrayElem is Spread.
-        // Re-do: just compile normally, MakeArr knows which slots are spreads.
-        Self::compile_sub(expr, ctx) // caller has separate spread tracking
     }
 }
 
@@ -6199,11 +6181,26 @@ impl VM {
                 Opcode::MakeArr(progs) => {
                     let progs = Arc::clone(progs);
                     let mut out = Vec::with_capacity(progs.len());
-                    for p in progs.iter() {
+                    for (p, is_spread) in progs.iter() {
                         let v = self.exec(p, env)?;
-                        // If the program produces an array from a spread,
-                        // check if it was tagged; for simplicity, just push.
-                        out.push(v);
+                        if *is_spread {
+                            match v {
+                                Val::Arr(a) => {
+                                    let items = Arc::try_unwrap(a)
+                                        .unwrap_or_else(|a| (*a).clone());
+                                    out.extend(items);
+                                }
+                                Val::IntVec(a) =>
+                                    out.extend(a.iter().map(|n| Val::Int(*n))),
+                                Val::FloatVec(a) =>
+                                    out.extend(a.iter().map(|f| Val::Float(*f))),
+                                Val::StrVec(a) =>
+                                    out.extend(a.iter().cloned().map(Val::Str)),
+                                other => out.push(other),
+                            }
+                        } else {
+                            out.push(v);
+                        }
                     }
                     stack.push(Val::arr(out));
                 }

@@ -1820,8 +1820,9 @@ mod tests {
         let deduped = dedup_subprograms(&prog);
         // Extract MakeArr sub-progs and confirm Arc identity.
         use crate::vm::Opcode;
-        let arcs: Vec<_> = deduped.ops.iter().flat_map(|o| match o {
-            Opcode::MakeArr(progs) => progs.iter().cloned().collect::<Vec<_>>(),
+        use std::sync::Arc;
+        let arcs: Vec<Arc<crate::vm::Program>> = deduped.ops.iter().flat_map(|o| match o {
+            Opcode::MakeArr(progs) => progs.iter().map(|(p, _)| Arc::clone(p)).collect::<Vec<_>>(),
             _ => vec![],
         }).collect();
         assert_eq!(arcs.len(), 2);

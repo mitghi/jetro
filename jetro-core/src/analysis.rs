@@ -494,7 +494,7 @@ fn count_ident_uses_in_ops(ops: &[Opcode], name: &str, acc: &mut usize) {
                 }
             }
             Opcode::MakeArr(progs) => {
-                for p in progs.iter() { count_ident_uses_in_ops(&p.ops, name, acc); }
+                for (p, _) in progs.iter() { count_ident_uses_in_ops(&p.ops, name, acc); }
             }
             Opcode::FString(parts) => {
                 use super::vm::CompiledFSPart;
@@ -662,7 +662,7 @@ fn walk_subprograms(ops: &[Opcode], map: &mut HashMap<u64, usize>) {
             Opcode::CallMethod(c) | Opcode::CallOptMethod(c) =>
                 c.sub_progs.iter().collect(),
             Opcode::LetExpr { body, .. } => vec![body],
-            Opcode::MakeArr(progs) => progs.iter().collect(),
+            Opcode::MakeArr(progs) => progs.iter().map(|(p, _)| p).collect(),
             Opcode::MakeObj(entries) => {
                 use super::vm::CompiledObjEntry;
                 let mut v = Vec::new();
@@ -893,7 +893,9 @@ fn rewrite_op(op: &Opcode, cache: &mut HashMap<u64, Arc<Program>>) -> Opcode {
         Opcode::CallMethod(c) => Opcode::CallMethod(rewrite_call(c, cache)),
         Opcode::CallOptMethod(c) => Opcode::CallOptMethod(rewrite_call(c, cache)),
         Opcode::MakeArr(progs) => {
-            let new_progs: Vec<Arc<Program>> = progs.iter().map(|p| dedup_rec(p, cache)).collect();
+            let new_progs: Vec<(Arc<Program>, bool)> = progs.iter()
+                .map(|(p, sp)| (dedup_rec(p, cache), *sp))
+                .collect();
             Opcode::MakeArr(new_progs.into())
         }
         Opcode::MakeObj(entries) => {
@@ -1032,7 +1034,7 @@ pub fn opcode_cost(op: &Opcode) -> u32 {
                 CompiledObjEntry::SpreadDeep(p) => 8 + program_cost(p),
             }).sum()
         }
-        Opcode::MakeArr(progs) => progs.iter().map(|p| 1 + program_cost(p)).sum(),
+        Opcode::MakeArr(progs) => progs.iter().map(|(p, _)| 1 + program_cost(p)).sum(),
         Opcode::FString(parts) => {
             use super::vm::CompiledFSPart;
             parts.iter().map(|p| match p {
