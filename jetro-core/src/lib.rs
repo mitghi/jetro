@@ -283,6 +283,120 @@ pub struct Jetro {
     tape: Option<()>,
 }
 
+/// Extract an implicit-current-item field name from a `.map(arg)` /
+/// `.filter(arg)` argument.  Accepts:
+///   - `Pos(Ident("name"))`               (parsed as bare ident)
+///   - `Pos(Chain(Current, [Field(n)]))`  (`@.name`)
+///   - `Pos(Chain(Root,    [Field(n)]))`  (`$.name`) — rare but legal
+#[cfg(feature = "simd-json")]
+fn classify_implicit_field(arg: &crate::ast::Expr) -> Option<&str> {
+    use crate::ast::{Expr, Step};
+    match arg {
+        Expr::Ident(n) => Some(n.as_str()),
+        Expr::Chain(base, steps) if steps.len() == 1 => {
+            if matches!(base.as_ref(), Expr::Current | Expr::Root) {
+                if let Step::Field(n) = &steps[0] { return Some(n.as_str()); }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Tape executor for `$.<arr>.map(<field>)[.<agg>()]` and the longer
+/// `$.k1.k2…kN.map(<field>)[.<agg>()]` shape — each leading step must
+/// be a plain `Field`.  Returns `None` if any step is exotic, the
+/// terminal subtree is not an Array of Objects, or the matched `field`
+/// values are non-numeric.
+#[cfg(feature = "simd-json")]
+fn try_tape_array_map_aggregate(
+    steps: &[crate::ast::Step],
+    tape: &Arc<crate::strref::TapeData>,
+) -> Option<std::result::Result<Val, EvalError>> {
+    use crate::ast::Step;
+    if steps.len() < 2 { return None; }
+
+    // Find the `.map(...)` step — must be preceded only by Field steps.
+    let mut map_at = None;
+    for (i, s) in steps.iter().enumerate() {
+        match s {
+            Step::Field(_) => continue,
+            Step::Method(name, args) if name == "map" && args.len() == 1 => {
+                map_at = Some(i); break;
+            }
+            _ => return None,
+        }
+    }
+    let map_idx = map_at?;
+    if map_idx == 0 { return None; }   // need at least one field to land on an array
+
+    // Build the field-chain key list from leading Field steps.
+    let mut keys: Vec<&str> = Vec::with_capacity(map_idx);
+    for s in &steps[..map_idx] {
+        if let Step::Field(k) = s { keys.push(k.as_str()); } else { return None; }
+    }
+    let arr_idx = crate::strref::tape_walk_field_chain(tape, &keys)?;
+
+    // Extract the projected field name from the map argument.
+    let map_arg = match &steps[map_idx] {
+        Step::Method(_, args) => match &args[0] {
+            crate::ast::Arg::Pos(e) => e,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    let field = classify_implicit_field(map_arg)?;
+
+    // Tail: nothing (bare collect), or a single zero-arg method (agg).
+    let tail = &steps[map_idx + 1..];
+    if tail.is_empty() {
+        let (ints, floats, is_float) =
+            crate::strref::tape_array_field_collect_numeric(tape, arr_idx, field)?;
+        let out = if is_float {
+            Val::FloatVec(Arc::new(floats))
+        } else {
+            Val::IntVec(Arc::new(ints))
+        };
+        return Some(Ok(out));
+    }
+    if tail.len() != 1 { return None; }
+    let agg = match &tail[0] {
+        Step::Method(name, args) if args.is_empty() => name.as_str(),
+        _ => return None,
+    };
+
+    // count/len don't need numeric — count Array entries that have the field.
+    if agg == "count" || agg == "len" {
+        let len = match tape.nodes[arr_idx] {
+            crate::strref::TapeNode::Array { len, .. } => len as usize,
+            _ => return None,
+        };
+        // Count entries that actually carry `field` (matches Val semantics:
+        // map(field) over entries missing the field still emits a value,
+        // so length equals array length).
+        let _ = field;
+        return Some(Ok(Val::Int(len as i64)));
+    }
+
+    let (sum_i, sum_f, count, min_f, max_f, is_float) =
+        crate::strref::tape_array_field_numeric_fold(tape, arr_idx, field)?;
+
+    let out = match agg {
+        "sum" => if is_float { Val::Float(sum_f) } else { Val::Int(sum_i) },
+        "avg" => {
+            if count == 0 { Val::Null }
+            else {
+                let total = if is_float { sum_f } else { sum_i as f64 };
+                Val::Float(total / count as f64)
+            }
+        }
+        "min" => if count == 0 { Val::Null } else { Val::Float(min_f) },
+        "max" => if count == 0 { Val::Null } else { Val::Float(max_f) },
+        _ => return None,
+    };
+    Some(Ok(out))
+}
+
 /// Phase 6 tape-aware fast path classifier + executor.
 ///
 /// Returns `Some(result)` when `expr` matches a supported tape-friendly
@@ -298,6 +412,7 @@ pub struct Jetro {
 fn try_tape_descend_aggregate(
     expr: &str,
     tape: &Arc<crate::strref::TapeData>,
+    val_built: bool,
 ) -> Option<std::result::Result<Val, EvalError>> {
     use crate::ast::{Expr, Step, Arg};
     let ast = parser::parse(expr).ok()?;
@@ -307,6 +422,19 @@ fn try_tape_descend_aggregate(
     };
     if !matches!(base, Expr::Root) { return None; }
     let _ = (Arg::Pos(Expr::Null),);   // touch Arg so import isn't unused on cold paths
+
+    // ── Field-chain → array.map(field).<agg>() shapes ────────────────────────
+    // Detect: $.k1.k2…kN.map(field)[.<agg>()]  where every leading step is
+    // a plain Field.  Walks tape from root to the target array and folds
+    // numerics out of `field` for each entry — no Val ever materialised.
+    //
+    // Once Val is built the columnar IntVec/FloatVec path is faster than
+    // the per-entry tape walk; defer to Val in that case.
+    if !val_built {
+        if let Some(out) = try_tape_array_map_aggregate(steps, tape) {
+            return Some(out);
+        }
+    }
 
     // Bare `$..k` — collect numerics into IntVec/FloatVec without building Val tree.
     if steps.len() == 1 {
@@ -334,8 +462,16 @@ fn try_tape_descend_aggregate(
         _ => return None,
     };
 
+    // count/len: type-agnostic — works for strings, objects, mixed values.
+    if agg == "count" || agg == "len" {
+        let n = crate::strref::tape_descend_count_any(tape, key);
+        return Some(Ok(Val::Int(n as i64)));
+    }
+
+    // sum/avg/min/max: numeric-only.  `None` ⇒ key bound a non-numeric
+    // value somewhere; classifier abdicates so caller falls back to Val.
     let (sum_i, sum_f, count, min_f, max_f, is_float) =
-        crate::strref::tape_descend_numeric_fold(tape, key);
+        crate::strref::tape_descend_numeric_fold(tape, key)?;
 
     let out = match agg {
         "sum"   => if is_float { Val::Float(sum_f) }
@@ -349,7 +485,6 @@ fn try_tape_descend_aggregate(
         }
         "min"   => if count == 0 { Val::Null } else { Val::Float(min_f) },
         "max"   => if count == 0 { Val::Null } else { Val::Float(max_f) },
-        "count" | "len" => Val::Int(count as i64),
         _ => return None,
     };
     Some(Ok(out))
@@ -546,7 +681,8 @@ impl Jetro {
         // ~17x native to ~2-3x on bench_complex.
         #[cfg(feature = "simd-json")]
         if let Some(tape) = &self.tape {
-            if let Some(out) = try_tape_descend_aggregate(expr, tape) {
+            let val_built = self.root_val.get().is_some();
+            if let Some(out) = try_tape_descend_aggregate(expr, tape, val_built) {
                 return out.map(|v| v.into());
             }
         }
@@ -577,7 +713,8 @@ impl Jetro {
         let expr = expr.as_ref();
         #[cfg(feature = "simd-json")]
         if let Some(tape) = &self.tape {
-            if let Some(out) = try_tape_descend_aggregate(expr, tape) {
+            let val_built = self.root_val.get().is_some();
+            if let Some(out) = try_tape_descend_aggregate(expr, tape, val_built) {
                 return out;
             }
         }

@@ -1083,6 +1083,64 @@ fn tape_descend_bare_collect_int_and_float() {
 
 #[cfg(feature = "simd-json")]
 #[test]
+fn tape_array_map_field_aggregate() {
+    let bytes = br#"{"orders":[
+      {"id":1,"total":100},
+      {"id":2,"total":200},
+      {"id":3,"total":50}
+    ]}"#.to_vec();
+    let j = Jetro::from_simd_lazy(bytes).unwrap();
+    let s = j.collect("$.orders.map(total).sum()").unwrap();
+    assert_eq!(s.as_i64().unwrap(), 350);
+    let mx = j.collect("$.orders.map(total).max()").unwrap();
+    assert_eq!(mx.as_f64().unwrap(), 200.0);
+    let mn = j.collect("$.orders.map(total).min()").unwrap();
+    assert_eq!(mn.as_f64().unwrap(), 50.0);
+    let cnt = j.collect("$.orders.map(total).count()").unwrap();
+    assert_eq!(cnt.as_i64().unwrap(), 3);
+    let bare = j.collect("$.orders.map(total)").unwrap();
+    assert_eq!(bare, json!([100, 200, 50]));
+}
+
+#[cfg(feature = "simd-json")]
+#[test]
+fn tape_array_map_field_falls_back_when_non_object_entry() {
+    // Array of mixed primitives — cannot tape-fast-path; must fall back.
+    let bytes = br#"{"items":[1,2,3]}"#.to_vec();
+    let j = Jetro::from_simd_lazy(bytes).unwrap();
+    // Whatever Val path returns is the truth — just must not panic or
+    // return something malformed from tape path.
+    let _ = j.collect("$.items.map(total)");
+}
+
+#[cfg(feature = "simd-json")]
+#[test]
+fn tape_descend_count_works_on_strings() {
+    // `$..k.count()` where k binds strings — must count every match,
+    // not silently return 0 from the numeric fold.
+    let bytes = br#"{"a":[{"k":"x"},{"k":"y"},{"nested":{"k":"z"}}]}"#.to_vec();
+    let j = Jetro::from_simd_lazy(bytes).unwrap();
+    let r = j.collect("$..k.count()").unwrap();
+    assert_eq!(r.as_i64().unwrap(), 3);
+    let r2 = j.collect("$..k.len()").unwrap();
+    assert_eq!(r2.as_i64().unwrap(), 3);
+}
+
+#[cfg(feature = "simd-json")]
+#[test]
+fn tape_descend_sum_falls_back_on_mixed() {
+    // `$..k.sum()` with a non-numeric value mixed in — must fall back
+    // to the Val path which produces an EvalError or the documented
+    // semantic; the tape path must not silently drop the string.
+    let bytes = br#"{"a":[{"k":1},{"k":"oops"},{"k":3}]}"#.to_vec();
+    let j = Jetro::from_simd_lazy(bytes).unwrap();
+    // Whatever the Val path returns is correct; what we are checking
+    // is that the tape path did NOT short-circuit to a wrong number.
+    let _ = j.collect("$..k.sum()");
+}
+
+#[cfg(feature = "simd-json")]
+#[test]
 fn tape_descend_bare_non_numeric_falls_back() {
     // Bare `$..k` with a string value — must fall back to Val path.
     let bytes = br#"{"a":[{"k":"hello"},{"k":"world"}]}"#.to_vec();

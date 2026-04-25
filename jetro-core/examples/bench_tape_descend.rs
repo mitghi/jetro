@@ -75,4 +75,38 @@ fn main() {
         let r = j.collect("$..price.sum()").unwrap();
         r.as_i64().unwrap_or(0) as u64
     });
+
+    // $.<arr>.map(<field>).<agg>() — Q12 bench_complex shape, hottest
+    // typed-struct-comparable workload.  Need a doc with a top-level array
+    // of homogeneous objects.
+    let mut s = String::with_capacity(n * 60);
+    s.push_str("{\"orders\":[");
+    for i in 0..n {
+        if i > 0 { s.push(','); }
+        s.push_str(&format!("{{\"id\":{},\"total\":{}}}", i, i));
+    }
+    s.push_str("]}");
+    let arr_bytes = s.into_bytes();
+
+    let j_val_arr  = Jetro::from_slice(&arr_bytes).unwrap();
+    let j_tape_arr = Jetro::from_simd_lazy(arr_bytes.clone()).unwrap();
+    let _ = j_val_arr.collect("$.orders.map(total).sum()").unwrap();
+    let _ = j_tape_arr.collect("$.orders.map(total).sum()").unwrap();
+
+    bench("Val tree     $.orders.map(total).sum()", iters, || {
+        let r = j_val_arr.collect("$.orders.map(total).sum()").unwrap();
+        r.as_i64().unwrap_or(0) as u64
+    });
+    bench("tape walker  $.orders.map(total).sum()", iters, || {
+        let r = j_tape_arr.collect("$.orders.map(total).sum()").unwrap();
+        r.as_i64().unwrap_or(0) as u64
+    });
+    bench("Val tree     $.orders.map(total).max()", iters, || {
+        let r = j_val_arr.collect("$.orders.map(total).max()").unwrap();
+        r.as_f64().unwrap_or(0.0) as u64
+    });
+    bench("tape walker  $.orders.map(total).max()", iters, || {
+        let r = j_tape_arr.collect("$.orders.map(total).max()").unwrap();
+        r.as_f64().unwrap_or(0.0) as u64
+    });
 }
