@@ -147,6 +147,17 @@ pub enum Sink {
     /// materialising the flat sequence.  Closes pipeline_ir.md
     /// bench-priority item #1 (`flat_map+filter+count` 44× gap).
     FlatMapCount(Arc<crate::vm::Program>),
+    /// `Sort ∘ Take(n)` → top-N.  Heap-based partial sort: keeps the
+    /// k smallest items via a max-heap of size k.  Asymptotic cost
+    /// O(N log k) vs O(N log N) for full sort.  Per pipeline_ir.md.
+    /// `asc=true`  → smallest n  (natural ordering, default)
+    /// `asc=false` → largest n   (used by `Sort+Reverse+Take` after the
+    ///                            Reverse∘Reverse rule cancels)
+    TopN { n: usize, asc: bool, key: Option<Arc<crate::vm::Program>> },
+    /// `Sort_by(k) ∘ First` → keep argmin by key.  One pass, no full sort.
+    MinBy(Arc<crate::vm::Program>),
+    /// `Sort_by(k) ∘ Last` → keep argmax by key.
+    MaxBy(Arc<crate::vm::Program>),
 }
 
 #[derive(Debug, Clone)]
@@ -388,21 +399,54 @@ fn rewrite_step(p: &mut Pipeline) -> bool {
 
     // ── Sort-into-aggregate fold rules ───────────────────────────────────
     //
-    // Rule:  Sort ∘ First → Min
-    // Rule:  Sort ∘ Last  → Max
-    // Holds when the sort uses the natural ordering (no key prog) —
-    // sort-then-first-with-natural-cmp == min, etc.
+    // Rule:  Sort ∘ First           → Min          (natural-cmp sort)
+    // Rule:  Sort ∘ Last            → Max
+    // Rule:  Sort_by(k) ∘ First     → MinBy(k)     (one-pass argmin)
+    // Rule:  Sort_by(k) ∘ Last      → MaxBy(k)     (one-pass argmax)
+    // Rule:  Sort(_) ∘ Take(n)      → TopN{n}      (heap-based partial
+    //                                                sort, O(N log n))
     if matches!(&p.sink, Sink::First) {
-        if let Some(Stage::Sort(None)) = p.stages.last() {
-            p.stages.pop();
-            p.sink = Sink::Numeric(NumOp::Min);
-            return true;
+        match p.stages.last() {
+            Some(Stage::Sort(None)) => {
+                p.stages.pop();
+                p.sink = Sink::Numeric(NumOp::Min);
+                return true;
+            }
+            Some(Stage::Sort(Some(key_prog))) => {
+                let key = Arc::clone(key_prog);
+                p.stages.pop();
+                p.sink = Sink::MinBy(key);
+                return true;
+            }
+            _ => {}
         }
     }
     if matches!(&p.sink, Sink::Last) {
-        if let Some(Stage::Sort(None)) = p.stages.last() {
-            p.stages.pop();
-            p.sink = Sink::Numeric(NumOp::Max);
+        match p.stages.last() {
+            Some(Stage::Sort(None)) => {
+                p.stages.pop();
+                p.sink = Sink::Numeric(NumOp::Max);
+                return true;
+            }
+            Some(Stage::Sort(Some(key_prog))) => {
+                let key = Arc::clone(key_prog);
+                p.stages.pop();
+                p.sink = Sink::MaxBy(key);
+                return true;
+            }
+            _ => {}
+        }
+    }
+    // Sort ∘ Take(n) → TopN.  The Take stage at the end of a stage
+    // list with a Collect sink fuses into TopN-collect.
+    if matches!(&p.sink, Sink::Collect) && p.stages.len() >= 2 {
+        let last = p.stages.len() - 1;
+        let prev = last - 1;
+        if let (Stage::Sort(key), Stage::Take(n)) = (&p.stages[prev], &p.stages[last]) {
+            let n = *n;
+            let key = key.clone();
+            p.stages.truncate(prev);
+            p.sink = Sink::TopN { n, asc: true, key };
             return true;
         }
     }
@@ -862,6 +906,13 @@ impl Pipeline {
                         acc_count += 1;
                     }
                 }
+                // Sort-fused sinks: collect items into a Vec to apply
+                // the heap-based TopN / single-pass MinBy / MaxBy at
+                // pipeline finalise.  Per-row cost is the prog eval
+                // for keyed variants, plus a heap push for TopN.
+                Sink::TopN { .. } | Sink::MinBy(_) | Sink::MaxBy(_) => {
+                    acc_collect.push(item);
+                }
             }
             taken += 1;
         }
@@ -880,8 +931,95 @@ impl Pipeline {
                 acc_first.unwrap_or(Val::Null),
             Sink::Last  | Sink::FilterLast(_)  | Sink::LastMap(_) =>
                 acc_last.unwrap_or(Val::Null),
+            Sink::TopN { n, asc, key } => topn_finalise(&mut vm, acc_collect, *n, *asc, key.as_ref())?,
+            Sink::MinBy(key)        => keyed_extreme(&mut vm, acc_collect, key, false)?,
+            Sink::MaxBy(key)        => keyed_extreme(&mut vm, acc_collect, key, true)?,
         })
     }
+}
+
+/// Heap-based top-N: keep the n smallest (or largest) by natural cmp
+/// or a key program.  O(N log n) vs O(N log N) for full sort.  Returns
+/// a Val::Arr with the result in ascending sort order.
+fn topn_finalise(
+    vm: &mut crate::vm::VM,
+    items: Vec<Val>,
+    n: usize,
+    asc: bool,
+    key_prog: Option<&Arc<crate::vm::Program>>,
+) -> Result<Val, EvalError> {
+    if n == 0 || items.is_empty() { return Ok(Val::arr(Vec::new())); }
+    use std::collections::BinaryHeap;
+
+    // Compute keys once.  When key_prog is None we use the item itself.
+    let mut keyed: Vec<(Val, Val)> = Vec::with_capacity(items.len());
+    for it in items {
+        let k = match key_prog {
+            Some(p) => apply_item_root(vm, &it, p)?,
+            None => it.clone(),
+        };
+        keyed.push((k, it));
+    }
+
+    // Heap of (cmp_key, value).  For asc=true we want n smallest →
+    // max-heap of size n keyed on the natural ordering.  For asc=false
+    // (largest) we want a min-heap of size n.
+    // Single Ord wrapper carries the key + value so BinaryHeap's
+    // requirements are satisfied without leaning on Val: Ord.
+    struct Entry { key: Val, val: Val, asc: bool }
+    impl PartialEq for Entry { fn eq(&self, o: &Self) -> bool { cmp_val_total(&self.key, &o.key).is_eq() } }
+    impl Eq for Entry {}
+    impl PartialOrd for Entry { fn partial_cmp(&self, o: &Self) -> Option<std::cmp::Ordering> { Some(self.cmp(o)) } }
+    impl Ord for Entry {
+        fn cmp(&self, o: &Self) -> std::cmp::Ordering {
+            let order = cmp_val_total(&self.key, &o.key);
+            // For asc=true we want a max-heap of the n smallest, so
+            // the natural order on the key is also the heap order.
+            // For asc=false we invert so the heap top is the smallest
+            // among the n largest seen so far.
+            if self.asc { order } else { order.reverse() }
+        }
+    }
+
+    let mut heap: BinaryHeap<Entry> = BinaryHeap::with_capacity(n);
+    for (k, v) in keyed {
+        if heap.len() < n {
+            heap.push(Entry { key: k, val: v, asc });
+        } else if let Some(top) = heap.peek() {
+            let order = cmp_val_total(&k, &top.key);
+            let replace = if asc { order.is_lt() } else { order.is_gt() };
+            if replace {
+                heap.pop();
+                heap.push(Entry { key: k, val: v, asc });
+            }
+        }
+    }
+    let sorted: Vec<Entry> = heap.into_sorted_vec();
+    // into_sorted_vec respects Ord; for asc=true that means ascending
+    // (smallest first), for asc=false that means largest-first.
+    Ok(Val::arr(sorted.into_iter().map(|e| e.val).collect()))
+}
+
+/// One-pass argmin/argmax by key program.
+fn keyed_extreme(
+    vm: &mut crate::vm::VM,
+    items: Vec<Val>,
+    key_prog: &Arc<crate::vm::Program>,
+    want_max: bool,
+) -> Result<Val, EvalError> {
+    let mut best: Option<(Val, Val)> = None;
+    for it in items {
+        let k = apply_item_root(vm, &it, key_prog)?;
+        match &best {
+            None => best = Some((k, it)),
+            Some((bk, _)) => {
+                let order = cmp_val_total(&k, bk);
+                let replace = if want_max { order.is_gt() } else { order.is_lt() };
+                if replace { best = Some((k, it)); }
+            }
+        }
+    }
+    Ok(best.map(|(_, v)| v).unwrap_or(Val::Null))
 }
 
 #[inline]
@@ -1512,6 +1650,38 @@ mod tests {
         assert_eq!(p.stages.len(), 1);
         assert!(matches!(p.stages[0], Stage::Take(3)));
         assert!(matches!(p.sink, Sink::NumMap(NumOp::Sum, _)));
+    }
+
+    #[test]
+    fn rewrite_sort_take_to_topn() {
+        let p = lower_query("$.xs.sort().take(3)").unwrap();
+        assert_eq!(p.stages.len(), 0);
+        assert!(matches!(p.sink, Sink::TopN { n: 3, asc: true, key: None }));
+    }
+
+    #[test]
+    fn rewrite_sort_by_first_to_minby() {
+        let p = lower_query("$.xs.sort_by(score).first()").unwrap();
+        assert_eq!(p.stages.len(), 0);
+        assert!(matches!(p.sink, Sink::MinBy(_)));
+    }
+
+    #[test]
+    fn rewrite_sort_by_last_to_maxby() {
+        let p = lower_query("$.xs.sort_by(score).last()").unwrap();
+        assert_eq!(p.stages.len(), 0);
+        assert!(matches!(p.sink, Sink::MaxBy(_)));
+    }
+
+    #[test]
+    fn run_topn_smallest_three() {
+        use serde_json::json;
+        let doc: Val = (&json!({"xs":[5, 2, 8, 1, 4, 7, 3]})).into();
+        let p = lower_query("$.xs.sort().take(3)").unwrap();
+        let out = p.run(&doc).unwrap();
+        // Compare via JSON to avoid Val::Arr vs Val::IntVec variant mismatch.
+        let out_json: serde_json::Value = out.into();
+        assert_eq!(out_json, json!([1, 2, 3]));
     }
 
     #[test]
