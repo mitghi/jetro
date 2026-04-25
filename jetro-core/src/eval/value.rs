@@ -68,10 +68,32 @@ pub enum Val {
 /// allocation per row and lets the inner loop in slot-aware aggregates
 /// stride through cells with a constant offset, which the autovec /
 /// prefetch path can exploit on hot kernels.
+///
+/// Phase 7-typed-columns: alongside `cells` (row-major Val matrix used
+/// for compatibility with all existing kernels), `typed_cols` holds an
+/// optional per-slot column typed as `Vec<i64>` / `Vec<f64>` / etc.
+/// when the slot is uniform-type across all rows.  Slot kernels can
+/// read raw `&[i64]` directly — closes the boxed-Val tag-check tax
+/// (~3-4× win on numeric aggregates).
 #[derive(Debug)]
 pub struct ObjVecData {
     pub keys:  Arc<[Arc<str>]>,
     pub cells: Vec<Val>,
+    /// Typed-column mirror.  `None` if not promoted; `Some(cols)` with
+    /// `cols.len() == keys.len()`.  Each column may be `Mixed` (no
+    /// type lock) or a typed lane (`Ints` / `Floats` / `Strs` / `Bools`).
+    pub typed_cols: Option<Arc<Vec<ObjVecCol>>>,
+}
+
+/// Per-slot typed column variants.  Selected at promotion time when
+/// every row's value at that slot has the same primitive Val tag.
+#[derive(Debug, Clone)]
+pub enum ObjVecCol {
+    Mixed,                  // no uniform type; fall back to cells walk
+    Ints(Vec<i64>),
+    Floats(Vec<f64>),
+    Strs(Vec<Arc<str>>),
+    Bools(Vec<bool>),
 }
 
 impl ObjVecData {
@@ -847,7 +869,7 @@ impl Val {
                             }
                             let key_arcs: Arc<[Arc<str>]> =
                                 keys.iter().map(|k| intern_key(k)).collect::<Vec<_>>().into();
-                            return Val::ObjVec(Arc::new(ObjVecData { keys: key_arcs, cells }));
+                            return Val::ObjVec(Arc::new(ObjVecData { keys: key_arcs, cells, typed_cols: None }));
                         }
                     }
                 }

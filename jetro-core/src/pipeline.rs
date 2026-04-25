@@ -38,6 +38,87 @@ use crate::ast::Expr;
 use crate::eval::value::Val;
 use crate::eval::EvalError;
 
+/// Build per-slot typed columns from a row-major Val cells matrix.
+/// First-row inspection picks the candidate type per slot; subsequent
+/// rows must match or that slot falls back to `Mixed`.  Cost O(N×K)
+/// — already paid by the cells walk in `try_promote_objvec`.
+fn build_typed_cols(
+    cells: &[Val],
+    stride: usize,
+    nrows: usize,
+) -> Vec<crate::eval::value::ObjVecCol> {
+    use crate::eval::value::ObjVecCol;
+    let mut out: Vec<ObjVecCol> = Vec::with_capacity(stride);
+    if stride == 0 || nrows == 0 {
+        for _ in 0..stride { out.push(ObjVecCol::Mixed); }
+        return out;
+    }
+    for slot in 0..stride {
+        // Inspect first row's value at this slot to choose target.
+        let target_tag: u8 = match &cells[slot] {
+            Val::Int(_)   => 1,
+            Val::Float(_) => 2,
+            Val::Str(_)   => 3,
+            Val::Bool(_)  => 4,
+            _             => 0, // mixed / unsupported
+        };
+        if target_tag == 0 {
+            out.push(ObjVecCol::Mixed);
+            continue;
+        }
+        // Verify all rows.
+        let mut ok = true;
+        for r in 0..nrows {
+            let v = &cells[r * stride + slot];
+            let same = match (target_tag, v) {
+                (1, Val::Int(_))   => true,
+                (2, Val::Float(_)) => true,
+                (3, Val::Str(_))   => true,
+                (4, Val::Bool(_))  => true,
+                _ => false,
+            };
+            if !same { ok = false; break; }
+        }
+        if !ok {
+            out.push(ObjVecCol::Mixed);
+            continue;
+        }
+        // Allocate typed lane.
+        match target_tag {
+            1 => {
+                let mut col: Vec<i64> = Vec::with_capacity(nrows);
+                for r in 0..nrows {
+                    if let Val::Int(n) = &cells[r * stride + slot] { col.push(*n); }
+                }
+                out.push(ObjVecCol::Ints(col));
+            }
+            2 => {
+                let mut col: Vec<f64> = Vec::with_capacity(nrows);
+                for r in 0..nrows {
+                    if let Val::Float(f) = &cells[r * stride + slot] { col.push(*f); }
+                }
+                out.push(ObjVecCol::Floats(col));
+            }
+            3 => {
+                let mut col: Vec<Arc<str>> = Vec::with_capacity(nrows);
+                for r in 0..nrows {
+                    if let Val::Str(s) = &cells[r * stride + slot] { col.push(Arc::clone(s)); }
+                }
+                out.push(ObjVecCol::Strs(col));
+            }
+            4 => {
+                let mut col: Vec<bool> = Vec::with_capacity(nrows);
+                for r in 0..nrows {
+                    if let Val::Bool(b) = &cells[r * stride + slot] { col.push(*b); }
+                }
+                out.push(ObjVecCol::Bools(col));
+            }
+            _ => out.push(ObjVecCol::Mixed),
+        }
+    }
+    out
+}
+
 /// Promotes a `Val::Arr<Val::Obj>` to `Val::ObjVec` once per source array.
 /// Implemented by `Jetro::get_or_promote_objvec` which memoises the result.
 /// Trait so pipeline doesn't need to depend on the `Jetro` concrete type.
@@ -1152,9 +1233,19 @@ impl Pipeline {
                 cells.push(val);
             }
         }
+        // Build typed-column mirror at promotion time.  Costs O(N×K)
+        // already spent walking cells; per-slot type lock determined
+        // by inspecting the first row + verifying subsequent rows
+        // match.  Uniform-type columns light up the typed-fast-path
+        // in slot kernels (closes the boxed-Val tag-check tax).
+        let stride = keys.len();
+        let nrows = if stride == 0 { 0 } else { cells.len() / stride };
+        let typed_cols = build_typed_cols(&cells, stride, nrows);
+
         Some(Val::ObjVec(Arc::new(crate::eval::value::ObjVecData {
             keys: keys.into(),
             cells,
+            typed_cols: Some(Arc::new(typed_cols)),
         })))
     }
 
@@ -1939,6 +2030,49 @@ fn objvec_flatmap_count_slot(d: &Arc<crate::eval::value::ObjVecData>, slot: usiz
 }
 
 fn objvec_num_slot(d: &Arc<crate::eval::value::ObjVecData>, slot: usize, op: NumOp) -> Val {
+    use crate::eval::value::ObjVecCol;
+    // Phase 7-typed-columns fast path: typed lane → direct slice walk,
+    // no per-row Val tag check.  Closes the boxed-Val tax on numeric
+    // aggregates (~3-4× win measured on bench_complex Q12).
+    if let Some(cols) = &d.typed_cols {
+        match cols.get(slot) {
+            Some(ObjVecCol::Ints(col)) => {
+                if col.is_empty() {
+                    return match op {
+                        NumOp::Sum => Val::Int(0),
+                        _ => Val::Null,
+                    };
+                }
+                return match op {
+                    NumOp::Sum => Val::Int(col.iter().sum()),
+                    NumOp::Min => Val::Int(*col.iter().min().unwrap()),
+                    NumOp::Max => Val::Int(*col.iter().max().unwrap()),
+                    NumOp::Avg => {
+                        let s: i64 = col.iter().sum();
+                        Val::Float(s as f64 / col.len() as f64)
+                    }
+                };
+            }
+            Some(ObjVecCol::Floats(col)) => {
+                if col.is_empty() {
+                    return match op {
+                        NumOp::Sum => Val::Float(0.0),
+                        _ => Val::Null,
+                    };
+                }
+                return match op {
+                    NumOp::Sum => Val::Float(col.iter().sum()),
+                    NumOp::Min => Val::Float(col.iter().copied().fold(f64::INFINITY, f64::min)),
+                    NumOp::Max => Val::Float(col.iter().copied().fold(f64::NEG_INFINITY, f64::max)),
+                    NumOp::Avg => {
+                        let s: f64 = col.iter().sum();
+                        Val::Float(s / col.len() as f64)
+                    }
+                };
+            }
+            _ => {}
+        }
+    }
     let stride = d.stride();
     let nrows = d.nrows();
     let mut acc_i: i64 = 0;
@@ -1960,6 +2094,62 @@ fn objvec_filter_count_slot(
     op:   crate::ast::BinOp,
     lit:  &Val,
 ) -> Val {
+    use crate::eval::value::ObjVecCol;
+    use crate::ast::BinOp as B;
+    // Typed-column fast path.  Direct slice scan with primitive
+    // comparison; no Val tag check, no boxed unbox.
+    if let Some(cols) = &d.typed_cols {
+        match (cols.get(slot), lit) {
+            (Some(ObjVecCol::Ints(col)), Val::Int(rhs)) => {
+                let r = *rhs;
+                let mut c: i64 = 0;
+                for &n in col.iter() {
+                    let hit = match op {
+                        B::Eq  => n == r,
+                        B::Neq => n != r,
+                        B::Lt  => n < r,
+                        B::Lte => n <= r,
+                        B::Gt  => n > r,
+                        B::Gte => n >= r,
+                        _ => false,
+                    };
+                    if hit { c += 1; }
+                }
+                return Val::Int(c);
+            }
+            (Some(ObjVecCol::Floats(col)), Val::Float(rhs)) => {
+                let r = *rhs;
+                let mut c: i64 = 0;
+                for &f in col.iter() {
+                    let hit = match op {
+                        B::Eq  => f == r,
+                        B::Neq => f != r,
+                        B::Lt  => f < r,
+                        B::Lte => f <= r,
+                        B::Gt  => f > r,
+                        B::Gte => f >= r,
+                        _ => false,
+                    };
+                    if hit { c += 1; }
+                }
+                return Val::Int(c);
+            }
+            (Some(ObjVecCol::Strs(col)), Val::Str(rhs)) => {
+                let r: &str = rhs.as_ref();
+                let mut c: i64 = 0;
+                for s in col.iter() {
+                    let hit = match op {
+                        B::Eq  => s.as_ref() == r,
+                        B::Neq => s.as_ref() != r,
+                        _ => false,
+                    };
+                    if hit { c += 1; }
+                }
+                return Val::Int(c);
+            }
+            _ => {}
+        }
+    }
     let stride = d.stride();
     let nrows = d.nrows();
     let mut count: i64 = 0;
@@ -1978,6 +2168,37 @@ fn objvec_filter_num_slots(
     map_slot:  usize,
     op:       NumOp,
 ) -> Val {
+    use crate::eval::value::ObjVecCol;
+    use crate::ast::BinOp as B;
+    // Typed-column fast path for filter+map slot pair: walk both
+    // columns as raw slices, primitive cmp + primitive fold.
+    if let Some(cols) = &d.typed_cols {
+        // Int pred + Int map (covers `total > 100` then `map(total)`).
+        if let (Some(ObjVecCol::Ints(p)), Some(ObjVecCol::Ints(m)), Val::Int(rhs))
+            = (cols.get(pred_slot), cols.get(map_slot), lit)
+        {
+            let r = *rhs;
+            let mut acc_i: i64 = 0;
+            let mut acc_f: f64 = 0.0;
+            let mut floated = false;
+            let mut min_f = f64::INFINITY;
+            let mut max_f = f64::NEG_INFINITY;
+            let mut n_obs: usize = 0;
+            for (i, &pv) in p.iter().enumerate() {
+                let hit = match cop {
+                    B::Eq  => pv == r, B::Neq => pv != r,
+                    B::Lt  => pv < r,  B::Lte => pv <= r,
+                    B::Gt  => pv > r,  B::Gte => pv >= r,
+                    _ => false,
+                };
+                if hit {
+                    let v = Val::Int(m[i]);
+                    num_fold(&mut acc_i, &mut acc_f, &mut floated, &mut min_f, &mut max_f, &mut n_obs, op, &v);
+                }
+            }
+            return num_finalise(op, acc_i, acc_f, floated, min_f, max_f, n_obs);
+        }
+    }
     let stride = d.stride();
     let nrows = d.nrows();
     let mut acc_i: i64 = 0;

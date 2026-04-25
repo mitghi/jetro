@@ -6256,6 +6256,7 @@ impl VM {
                         stack.push(Val::ObjVec(Arc::new(super::eval::value::ObjVecData {
                             keys: Arc::clone(keys),
                             cells,
+                            typed_cols: None,
                         })));
                     } else {
                         stack.push(Val::arr(Vec::new()));
