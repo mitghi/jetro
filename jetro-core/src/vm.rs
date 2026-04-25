@@ -430,18 +430,11 @@ pub enum Opcode {
     // FilterMapMax migrated to pipeline.rs Sink::NumFilterMap (sum,
     // avg, min, max) and Sink::FilterFirst (first).
     // FilterLast migrated to pipeline.rs Sink::FilterLast.
-    /// Fused `sort()` + `[0:n]` — partial-sort smallest N using BinaryHeap.
-    /// `asc=true` → smallest N; `asc=false` → largest N.
-    TopN { n: usize, asc: bool },
+    // TopN / ArgExtreme migrated to pipeline.rs Sink::TopN / MinBy /
+    // MaxBy.  See memory/project_opcode_migration.md.
     /// Fused `unique()` + `count()`/`len()` — count distinct elements without
     /// materialising the deduped array.
     UniqueCount,
-    /// Fused `sort_by(k).first()` / `.last()` — O(N) single pass instead of
-    /// an O(N log N) sort followed by discard.  Preserves stable-sort ordering:
-    /// `max=false` returns the *earliest* item whose key is minimal
-    /// (matches `sort_by(k).first()`); `max=true` returns the *latest* item
-    /// whose key is maximal (matches `sort_by(k).last()`).
-    ArgExtreme { key: Arc<Program>, lam_param: Option<Arc<str>>, max: bool },
     /// Fused `map(f).flatten()` — single-pass concat of mapped arrays.
     MapFlatten(Arc<Program>),
     /// Fused `map(f).first()` — apply `f` only to the first element.
@@ -2365,13 +2358,7 @@ impl Compiler {
         out
     }
 
-    fn sort_lam_param(prev: &CompiledCall) -> Option<Arc<str>> {
-        match prev.orig_args.first() {
-            Some(Arg::Pos(Expr::Lambda { params, .. })) if !params.is_empty() =>
-                Some(Arc::from(params[0].as_str())),
-            _ => None,
-        }
-    }
+    // sort_lam_param helper removed alongside ArgExtreme opcode.
 
     /// Replace expensive ops with cheaper equivalents:
     ///   sort() + first()    → min()
@@ -2401,26 +2388,10 @@ impl Compiler {
                     (BuiltinMethod::Sort, Opcode::CallMethod(next))
                         if prev.sub_progs.is_empty() && next.method == BuiltinMethod::Last =>
                         Some(make_noarg_call(BuiltinMethod::Max, "max")),
-                    // sort_by(k) + first() → ArgExtreme{key, max=false}
-                    (BuiltinMethod::Sort, Opcode::CallMethod(next))
-                        if prev.sub_progs.len() == 1
-                           && next.method == BuiltinMethod::First
-                           && next.sub_progs.is_empty() =>
-                        Some(Opcode::ArgExtreme {
-                            key: Arc::clone(&prev.sub_progs[0]),
-                            lam_param: Self::sort_lam_param(&prev),
-                            max: false,
-                        }),
-                    // sort_by(k) + last() → ArgExtreme{key, max=true}
-                    (BuiltinMethod::Sort, Opcode::CallMethod(next))
-                        if prev.sub_progs.len() == 1
-                           && next.method == BuiltinMethod::Last
-                           && next.sub_progs.is_empty() =>
-                        Some(Opcode::ArgExtreme {
-                            key: Arc::clone(&prev.sub_progs[0]),
-                            lam_param: Self::sort_lam_param(&prev),
-                            max: true,
-                        }),
+                    // sort_by(k) + first() / + last() fusions migrated to
+                    // pipeline.rs Sink::MinBy(k) / Sink::MaxBy(k).
+                    // Sub-program path: unfused sort_by(k) followed by
+                    // First / Last opcodes.
                     // reverse() + first() → last()
                     (BuiltinMethod::Reverse, Opcode::CallMethod(next))
                         if next.method == BuiltinMethod::First =>
@@ -2429,12 +2400,8 @@ impl Compiler {
                     (BuiltinMethod::Reverse, Opcode::CallMethod(next))
                         if next.method == BuiltinMethod::Last =>
                         Some(make_noarg_call(BuiltinMethod::First, "first")),
-                    // sort() + [0:n] → TopN(n, asc=true)
-                    (BuiltinMethod::Sort, Opcode::GetSlice(from, Some(to)))
-                        if prev.sub_progs.is_empty()
-                           && (from.is_none() || *from == Some(0))
-                           && *to > 0 =>
-                        Some(Opcode::TopN { n: *to as usize, asc: true }),
+                    // sort() + [0:n] / take(n) fusion migrated to
+                    // pipeline.rs Sink::TopN { n, asc }.
                     // Cardinality-preserving op + len/count → drop the first op.
                     // sort / reverse preserve length by definition; map is
                     // 1:1 so it also preserves length, and `count` only needs
@@ -5882,55 +5849,8 @@ impl VM {
                     }
                     stack.push(Val::arr(out));
                 }
-                Opcode::TopN { n, asc } => {
-                    use std::collections::BinaryHeap;
-                    use std::cmp::Reverse;
-                    let recv = pop!(stack);
-                    let items = match recv {
-                        Val::Arr(a) => Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone()),
-                        Val::IntVec(a) => Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone())
-                            .into_iter().map(Val::Int).collect(),
-                        Val::FloatVec(a) => Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone())
-                            .into_iter().map(Val::Float).collect(),
-                        _ => Vec::new(),
-                    };
-                    if *n >= items.len() {
-                        let mut v = items;
-                        v.sort_by(|x, y| super::eval::util::cmp_vals(x, y));
-                        if !*asc { v.reverse(); }
-                        stack.push(Val::arr(v));
-                    } else if *asc {
-                        // Max-heap of size n; pop largest to keep smallest n.
-                        let mut heap: BinaryHeap<WrapVal> = BinaryHeap::with_capacity(*n);
-                        for item in items {
-                            if heap.len() < *n {
-                                heap.push(WrapVal(item));
-                            } else if super::eval::util::cmp_vals(&item, &heap.peek().unwrap().0)
-                                      == std::cmp::Ordering::Less {
-                                heap.pop();
-                                heap.push(WrapVal(item));
-                            }
-                        }
-                        let mut v: Vec<Val> = heap.into_iter().map(|w| w.0).collect();
-                        v.sort_by(|x, y| super::eval::util::cmp_vals(x, y));
-                        stack.push(Val::arr(v));
-                    } else {
-                        // Min-heap via Reverse; keep largest n.
-                        let mut heap: BinaryHeap<Reverse<WrapVal>> = BinaryHeap::with_capacity(*n);
-                        for item in items {
-                            if heap.len() < *n {
-                                heap.push(Reverse(WrapVal(item)));
-                            } else if super::eval::util::cmp_vals(&item, &heap.peek().unwrap().0.0)
-                                      == std::cmp::Ordering::Greater {
-                                heap.pop();
-                                heap.push(Reverse(WrapVal(item)));
-                            }
-                        }
-                        let mut v: Vec<Val> = heap.into_iter().map(|w| w.0.0).collect();
-                        v.sort_by(|x, y| super::eval::util::cmp_vals(y, x));
-                        stack.push(Val::arr(v));
-                    }
-                }
+                // TopN handler removed — pipeline.rs Sink::TopN covers
+                // sort()+take(n) for top-level Root-prefix queries.
                 Opcode::UniqueCount => {
                     use super::eval::util::val_to_key;
                     let recv = pop!(stack);
@@ -5947,37 +5867,8 @@ impl VM {
                     }
                     stack.push(Val::Int(n));
                 }
-                Opcode::ArgExtreme { key, lam_param, max } => {
-                    let recv = pop!(stack);
-                    let items = match recv {
-                        Val::Arr(a) => a,
-                        _ => { stack.push(Val::Null); continue; }
-                    };
-                    if items.is_empty() { stack.push(Val::Null); continue; }
-                    let mut scratch = env.clone();
-                    let param = lam_param.as_deref();
-                    let mut best_idx: usize = 0;
-                    let mut best_key = self.exec_lam_body_scratch(
-                        key, &items[0], param, &mut scratch)?;
-                    for (i, item) in items.iter().enumerate().skip(1) {
-                        let k = self.exec_lam_body_scratch(
-                            key, item, param, &mut scratch)?;
-                        let ord = super::eval::util::cmp_vals(&k, &best_key);
-                        let take = if *max {
-                            // .last() on sorted asc → last occurrence of max;
-                            // ties update to later index.
-                            ord != std::cmp::Ordering::Less
-                        } else {
-                            // .first() → earliest occurrence of min;
-                            // strict less only (keep earliest on ties).
-                            ord == std::cmp::Ordering::Less
-                        };
-                        if take { best_idx = i; best_key = k; }
-                    }
-                    let mut items_vec = Arc::try_unwrap(items).unwrap_or_else(|a| (*a).clone());
-                    let winner = std::mem::replace(&mut items_vec[best_idx], Val::Null);
-                    stack.push(winner);
-                }
+                // ArgExtreme handler removed — pipeline.rs MinBy/MaxBy
+                // covers sort_by(k)+first()/last().
                 Opcode::MapMap { f1, f2 } => {
                     let recv = pop!(stack);
                     let recv = match recv {
@@ -8152,20 +8043,7 @@ fn apply_fmt_spec(val: &Val, spec: &str) -> String {
 
 // ── Opcode helpers ────────────────────────────────────────────────────────────
 
-/// Build a no-arg `CallMethod` opcode (used by peephole strength reduction).
-/// Newtype wrapper giving `Val` an `Ord` derived from `cmp_vals`,
-/// so it can be used in `BinaryHeap` for TopN.
-struct WrapVal(Val);
-impl PartialEq for WrapVal { fn eq(&self, o: &Self) -> bool {
-    super::eval::util::cmp_vals(&self.0, &o.0) == std::cmp::Ordering::Equal
-} }
-impl Eq for WrapVal {}
-impl PartialOrd for WrapVal { fn partial_cmp(&self, o: &Self) -> Option<std::cmp::Ordering> {
-    Some(self.cmp(o))
-} }
-impl Ord for WrapVal { fn cmp(&self, o: &Self) -> std::cmp::Ordering {
-    super::eval::util::cmp_vals(&self.0, &o.0)
-} }
+// WrapVal removed alongside the TopN opcode.
 
 /// Extract a literal string from a single-op program `[PushStr(s)]`.
 fn const_str_program(p: &Arc<Program>) -> Option<Arc<str>> {

@@ -107,14 +107,7 @@ impl LogicalPlan {
                     op:    AggOp::Avg,
                     arg:   Some(Arc::clone(f)),
                 },
-                (Some(p), Opcode::TopN { n, asc }) => LogicalPlan::Limit {
-                    input: Box::new(LogicalPlan::Sort {
-                        input: Box::new(p),
-                        key:   None,
-                        desc:  !asc,
-                    }),
-                    n: *n,
-                },
+                // TopN migrated to pipeline.rs Sink::TopN.
                 _ => return LogicalPlan::Raw(Arc::new(program.clone())),
             });
         }
@@ -255,8 +248,10 @@ fn emit(plan: &LogicalPlan, ops: &mut Vec<super::vm::Opcode>) {
             if *desc { ops.push(reverse_call()); }
         }
         LogicalPlan::Limit { input, n } => {
+            // TopN opcode migrated to pipeline.rs Sink::TopN; logical
+            // plan emits a Sort + GetSlice fallback.
             emit(input, ops);
-            ops.push(Opcode::TopN { n: *n, asc: true });
+            ops.push(Opcode::GetSlice(Some(0), Some(*n as i64)));
         }
         LogicalPlan::Aggregate { input, op, arg } => {
             emit(input, ops);

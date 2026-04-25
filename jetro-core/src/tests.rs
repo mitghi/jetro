@@ -1335,10 +1335,12 @@ mod tests {
 
     #[test]
     fn fusion_topn_opcode() {
+        // TopN opcode migrated to pipeline.rs Sink::TopN; opcode path
+        // executes Sort + GetSlice as the unfused fallback.
         use crate::vm::{Compiler, Opcode};
         let prog = Compiler::compile_str("$.nums.sort()[0:3]").unwrap();
-        let has = prog.ops.iter().any(|o| matches!(o, Opcode::TopN { n: 3, asc: true }));
-        assert!(has, "sort + [0:n] should fuse to TopN");
+        let has_slice = prog.ops.iter().any(|o| matches!(o, Opcode::GetSlice(_, _)));
+        assert!(has_slice, "sort+[0:n] should still emit GetSlice in opcode path");
     }
 
     #[test]
@@ -1680,21 +1682,22 @@ mod tests {
 
     #[test]
     fn fusion_sort_by_first_emits_argextreme() {
+        // ArgExtreme migrated to pipeline.rs Sink::MinBy.  Opcode path
+        // executes unfused Sort + First.
         use crate::vm::{Compiler, Opcode, BuiltinMethod};
         let prog = Compiler::compile_str("$.books.sort(price).first()").unwrap();
-        let has_sort = prog.ops.iter().any(|o| matches!(o,
-            Opcode::CallMethod(c) if c.method == BuiltinMethod::Sort));
-        let has_arg = prog.ops.iter().any(|o| matches!(o, Opcode::ArgExtreme { max: false, .. }));
-        assert!(!has_sort, "sort(k).first() should not retain Sort: {:?}", prog.ops);
-        assert!(has_arg, "expected ArgExtreme{{max:false}}: {:?}", prog.ops);
+        let has_first = prog.ops.iter().any(|o| matches!(o,
+            Opcode::CallMethod(c) if c.method == BuiltinMethod::First));
+        assert!(has_first, "sort(k).first() should retain First call: {:?}", prog.ops);
     }
 
     #[test]
     fn fusion_sort_by_last_emits_argextreme_max() {
-        use crate::vm::{Compiler, Opcode};
+        use crate::vm::{Compiler, Opcode, BuiltinMethod};
         let prog = Compiler::compile_str("$.books.sort(price).last()").unwrap();
-        let has_arg = prog.ops.iter().any(|o| matches!(o, Opcode::ArgExtreme { max: true, .. }));
-        assert!(has_arg, "expected ArgExtreme{{max:true}}: {:?}", prog.ops);
+        let has_last = prog.ops.iter().any(|o| matches!(o,
+            Opcode::CallMethod(c) if c.method == BuiltinMethod::Last));
+        assert!(has_last, "sort(k).last() should retain Last call: {:?}", prog.ops);
     }
 
     #[test]
@@ -1749,10 +1752,12 @@ mod tests {
         // Stable: latest max-key — only one n=3, id=3
         assert_eq!(v, json!({"n": 3, "id": 3}));
 
-        // Confirm compile emits ArgExtreme
-        use crate::vm::Opcode;
-        let has_arg = prog.ops.iter().any(|o| matches!(o, Opcode::ArgExtreme { .. }));
-        assert!(has_arg, "expected ArgExtreme in compiled program");
+        // ArgExtreme migrated to pipeline.rs MinBy/MaxBy; opcode path
+        // keeps unfused Sort + First/Last.
+        use crate::vm::{Opcode, BuiltinMethod};
+        let has_sort = prog.ops.iter().any(|o| matches!(o,
+            Opcode::CallMethod(c) if c.method == BuiltinMethod::Sort));
+        assert!(has_sort, "expected Sort in compiled program");
     }
 
     #[test]

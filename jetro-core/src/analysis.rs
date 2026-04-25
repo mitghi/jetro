@@ -297,7 +297,7 @@ fn apply_op(op: &Opcode, stack: &mut Vec<AbstractVal>) {
             pop1!();
             stack.push(AbstractVal::scalar(VType::Int));
         }
-        Opcode::TopN { .. } | Opcode::MapFlatten(_) | Opcode::FilterTakeWhile { .. }
+        Opcode::MapFlatten(_) | Opcode::FilterTakeWhile { .. }
             | Opcode::FilterDropWhile { .. } | Opcode::MapUnique(_)
             | Opcode::EquiJoin { .. }
             | Opcode::MapField(_) | Opcode::MapFieldChain(_) | Opcode::MapFieldUnique(_)
@@ -320,8 +320,7 @@ fn apply_op(op: &Opcode, stack: &mut Vec<AbstractVal>) {
             pop1!();
             stack.push(AbstractVal::array());
         }
-        Opcode::MapFirst(_) | Opcode::MapLast(_)
-            | Opcode::ArgExtreme { .. } => {
+        Opcode::MapFirst(_) | Opcode::MapLast(_) => {
             pop1!();
             stack.push(AbstractVal::UNKNOWN);
         }
@@ -1055,7 +1054,6 @@ pub fn opcode_cost(op: &Opcode) -> u32 {
         Opcode::MapFilter { map, pred } => 10 + program_cost(map) + program_cost(pred),
         Opcode::FilterFilter { p1, p2 } => 10 + program_cost(p1) + program_cost(p2),
         Opcode::MapMap { f1, f2 } => 10 + program_cost(f1) + program_cost(f2),
-        Opcode::TopN { n, .. } => 15 + *n as u32,
         Opcode::CallMethod(c) | Opcode::CallOptMethod(c) => {
             let base = match c.method {
                 BuiltinMethod::Filter | BuiltinMethod::Map | BuiltinMethod::FlatMap => 10,
@@ -1117,7 +1115,6 @@ pub fn opcode_cost(op: &Opcode) -> u32 {
         Opcode::CountByField(_) => 12,
         Opcode::UniqueByField(_) => 14,
         Opcode::UniqueCount => 6,
-        Opcode::ArgExtreme { .. } => 12,
         Opcode::MapToJsonJoin { .. } => 8,
         Opcode::StrTrimUpper | Opcode::StrTrimLower
         | Opcode::StrUpperTrim | Opcode::StrLowerTrim => 2,
@@ -1170,7 +1167,6 @@ impl Monotonicity {
                 BuiltinMethod::Map     => Monotonicity::Unknown, // key changes
                 _ => Monotonicity::Unknown,
             }
-            Opcode::TopN { asc, .. } => if *asc { Monotonicity::Asc } else { Monotonicity::Desc },
             Opcode::MakeArr(_) | Opcode::ListComp(_) => Monotonicity::Unknown,
             _ => self,
         }
