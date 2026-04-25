@@ -437,6 +437,39 @@ patch $ { users[* if not active]: DELETE }     // bulk delete
 patch $ { ..name: @.upper() }                  // all "name" anywhere
 ```
 
+### `try / else` — fallback expression
+
+Catches both `Val::Null` results AND evaluation errors.  Body can
+optionally be parenthesised; without parens it's a `pipe_expr`.
+Default arm is any expression; chains right-associative.
+
+```
+try $.user.email else 'unknown'
+try $.scores.avg() else 0
+try ($.x if $.kind == 'a' else $.y) else null    // parens for ternary inside body
+try $.id else try $.uid else 'anon'              // chained fallback
+```
+
+Inside object shaping (the killer use case — defensive construction
+over messy upstream data):
+
+```
+$.users.map({
+  id:      id,
+  name:    try .first_name + ' ' + .last_name else .name else 'Anon',
+  age:     try .age | parse_int else null,
+  email:   try .email | lower else null,
+  premium: try .subscription.tier == 'gold' else false,
+})
+```
+
+`try` differs from the coalesce operator `?|`:
+
+```
+try .price | parse_int else 0     // catches parse error AND null
+.price | parse_int ?| 0           // catches null only
+```
+
 ### Conditional (`when`)
 
 ```

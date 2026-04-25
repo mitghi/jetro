@@ -486,6 +486,14 @@ pub(super) fn eval(expr: &Expr, env: &Env) -> Result<Val, EvalError> {
             if is_truthy(&eval(cond, env)?) { eval(then_, env) } else { eval(else_, env) }
         }
 
+        Expr::Try { body, default } => {
+            // Catches both EvalError AND Val::Null.  Panics propagate.
+            match eval(body, env) {
+                Ok(v) if !v.is_null() => Ok(v),
+                Ok(_) | Err(_)        => eval(default, env),
+            }
+        }
+
         Expr::GlobalCall { name, args } => eval_global(name, args, env),
 
         Expr::Cast { expr, ty } => {

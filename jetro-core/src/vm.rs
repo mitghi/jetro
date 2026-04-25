@@ -610,6 +610,10 @@ pub enum Opcode {
     /// Python-style ternary: TOS is cond; branch into `then_` or `else_`.
     /// Short-circuits — only the taken branch is executed.
     IfElse { then_: Arc<Program>, else_: Arc<Program> },
+    /// `try BODY else DEFAULT` — execute `body`; on `EvalError` or
+    /// `Val::Null` result, execute `default`.  Both subprograms are
+    /// isolated; only one's value lands on the stack.
+    TryExpr { body: Arc<Program>, default: Arc<Program> },
     ListComp(Arc<CompSpec>),
     DictComp(Arc<DictCompSpec>),
     SetComp(Arc<CompSpec>),
@@ -3044,6 +3048,23 @@ impl Compiler {
                         let then_prog = Arc::new(Self::compile_sub(then_, ctx));
                         let else_prog = Arc::new(Self::compile_sub(else_, ctx));
                         ops.push(Opcode::IfElse { then_: then_prog, else_: else_prog });
+                    }
+                }
+            }
+
+            Expr::Try { body, default } => {
+                // Compile-time fold: if body is a literal non-null constant,
+                // emit only the body. If body is null literal, emit only the
+                // default. Avoids TryExpr opcode overhead for trivial cases.
+                match body.as_ref() {
+                    Expr::Null => { Self::emit_into(default, ctx, ops); }
+                    Expr::Bool(_) | Expr::Int(_) | Expr::Float(_) | Expr::Str(_) => {
+                        Self::emit_into(body, ctx, ops);
+                    }
+                    _ => {
+                        let body_prog    = Arc::new(Self::compile_sub(body, ctx));
+                        let default_prog = Arc::new(Self::compile_sub(default, ctx));
+                        ops.push(Opcode::TryExpr { body: body_prog, default: default_prog });
                     }
                 }
             }
@@ -6315,6 +6336,13 @@ impl VM {
                     let cv = pop!(stack);
                     let branch = if is_truthy(&cv) { then_ } else { else_ };
                     stack.push(self.exec(branch, env)?);
+                }
+                Opcode::TryExpr { body, default } => {
+                    // Catch EvalError AND Val::Null; panics propagate.
+                    match self.exec(body, env) {
+                        Ok(v) if !v.is_null() => stack.push(v),
+                        Ok(_) | Err(_)        => stack.push(self.exec(default, env)?),
+                    }
                 }
 
                 // ── Method calls ──────────────────────────────────────────────

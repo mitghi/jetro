@@ -83,6 +83,7 @@ assert_eq!(titles, json!(["Dune"]));
 | `lambda x: …` &nbsp; `x => …` | `let a = expr in …` |
 | `.set(v)`, `.modify(@ * 2)`, `.delete()` | `patch $ { .a.b: 1, .c: DELETE }` |
 | `f"hello {$.name}"` | `x when cond else y` |
+| `try EXPR else DEFAULT` | catches null + eval errors |
 
 Full syntax reference: [jetro-core/src/SYNTAX.md](jetro-core/src/SYNTAX.md)
 

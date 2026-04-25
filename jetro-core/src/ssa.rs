@@ -119,7 +119,8 @@ fn op_arity(op: &Opcode) -> Arity {
             | Opcode::RootChain(_) | Opcode::GetPointer(_)
             | Opcode::MakeObj(_) | Opcode::MakeArr(_) | Opcode::FString(_)
             | Opcode::ListComp(_) | Opcode::DictComp(_) | Opcode::SetComp(_)
-            | Opcode::PatchEval(_) =>
+            | Opcode::PatchEval(_)
+            | Opcode::TryExpr { .. } =>
             Arity { pops: 0, pushes: true },
 
         Opcode::GetField(_) | Opcode::OptField(_) | Opcode::GetIndex(_)

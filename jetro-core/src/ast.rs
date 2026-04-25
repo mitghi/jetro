@@ -106,6 +106,15 @@ pub enum Expr {
         else_: Box<Expr>,
     },
 
+    // `try BODY else DEFAULT` — evaluate BODY; on EvalError or
+    // Val::Null result, evaluate DEFAULT instead.  Both BODY and
+    // DEFAULT can be arbitrary expressions; chains right-associative
+    // (`try a else try b else c` parses as `try a else (try b else c)`).
+    Try {
+        body:    Box<Expr>,
+        default: Box<Expr>,
+    },
+
     // Global function calls
     GlobalCall {
         name: String,

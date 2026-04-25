@@ -64,7 +64,7 @@ fn is_kw(rule: Rule) -> bool {
         rule,
         Rule::kw_and | Rule::kw_or | Rule::kw_not | Rule::kw_for
             | Rule::kw_in | Rule::kw_if | Rule::kw_else | Rule::kw_let | Rule::kw_lambda | Rule::kw_kind
-            | Rule::kw_is | Rule::kw_as
+            | Rule::kw_is | Rule::kw_as | Rule::kw_try
     )
 }
 
@@ -98,8 +98,14 @@ fn parse_expr(pair: Pair<Rule>) -> Expr {
 // When the `if` tail is absent we pass through to keep the single pipe_expr.
 
 fn parse_cond(pair: Pair<Rule>) -> Expr {
+    // `cond_expr` is `try_expr | (pipe_expr ~ (kw_if … kw_else …)?)`.
+    // First inner pair is either a `try_expr` or the `pipe_expr` head.
     let mut inner = pair.into_inner().filter(|p| !is_kw(p.as_rule()));
-    let then_ = parse_expr(inner.next().unwrap());
+    let head = inner.next().unwrap();
+    if head.as_rule() == Rule::try_expr {
+        return parse_try(head);
+    }
+    let then_ = parse_expr(head);
     let cond = match inner.next() {
         Some(p) => parse_expr(p),
         None    => return then_,
@@ -109,6 +115,24 @@ fn parse_cond(pair: Pair<Rule>) -> Expr {
         cond:  Box::new(cond),
         then_: Box::new(then_),
         else_: Box::new(else_),
+    }
+}
+
+/// Parse a `try BODY else DEFAULT` form.  BODY is either a parenthesised
+/// arbitrary expression or a bare `pipe_expr`; DEFAULT is a `cond_expr`.
+fn parse_try(pair: Pair<Rule>) -> Expr {
+    let mut inner = pair.into_inner().filter(|p| !is_kw(p.as_rule()));
+    // try_body wraps either `expr` (paren'd) or `pipe_expr` (bare).
+    let body_pair = inner.next().unwrap();
+    let body = {
+        // try_body's inner is either an `expr` or a `pipe_expr`.
+        let mut bi = body_pair.into_inner();
+        parse_expr(bi.next().unwrap())
+    };
+    let default = parse_expr(inner.next().unwrap());
+    Expr::Try {
+        body:    Box::new(body),
+        default: Box::new(default),
     }
 }
 

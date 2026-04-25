@@ -355,6 +355,7 @@ fn apply_op(op: &Opcode, stack: &mut Vec<AbstractVal>) {
         }
         Opcode::CoalesceOp(_) => { pop1!(); stack.push(AbstractVal::UNKNOWN); }
         Opcode::IfElse { .. } => { pop1!(); stack.push(AbstractVal::UNKNOWN); }
+        Opcode::TryExpr { .. } => { stack.push(AbstractVal::UNKNOWN); }
         Opcode::CallMethod(call) | Opcode::CallOptMethod(call) => {
             pop1!();
             stack.push(method_result_type(call.method));
@@ -836,6 +837,9 @@ pub fn expr_uses_ident(expr: &super::ast::Expr, name: &str) -> bool {
                 || expr_uses_ident(then_, name)
                 || expr_uses_ident(else_, name)
         }
+        Expr::Try { body, default } => {
+            expr_uses_ident(body, name) || expr_uses_ident(default, name)
+        }
         Expr::GlobalCall { args, .. } => args.iter().any(|a| match a {
             Arg::Pos(e) | Arg::Named(_, e) => expr_uses_ident(e, name),
         }),
@@ -1087,6 +1091,7 @@ pub fn opcode_cost(op: &Opcode) -> u32 {
         Opcode::KindCheck { .. } => 2,
         Opcode::AndOp(p) | Opcode::OrOp(p) | Opcode::CoalesceOp(p) => 2 + program_cost(p),
         Opcode::IfElse { then_, else_ } => 2 + program_cost(then_) + program_cost(else_),
+        Opcode::TryExpr { body, default } => 2 + program_cost(body) + program_cost(default),
         Opcode::InlineFilter(p) | Opcode::FilterCount(p)
             | Opcode::FindFirst(p) | Opcode::FindOne(p)
             | Opcode::MapSum(p) | Opcode::MapAvg(p)

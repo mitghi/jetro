@@ -1035,6 +1035,93 @@ mod tests {
         assert_eq!(r, json!(42));
     }
 
+    // ── try / else ──────────────────────────────────────────────────
+
+    #[test]
+    fn try_bare_missing_field_uses_default() {
+        let r = query("try $.a.b.c else 0", &json!({})).unwrap();
+        assert_eq!(r, json!(0));
+    }
+
+    #[test]
+    fn try_bare_present_returns_body() {
+        let r = query("try $.a else 0", &json!({"a": 42})).unwrap();
+        assert_eq!(r, json!(42));
+    }
+
+    #[test]
+    fn try_paren_form() {
+        let r = query("try ($.a.b.c) else 0", &json!({})).unwrap();
+        assert_eq!(r, json!(0));
+        let r = query("try ($.a) else 0", &json!({"a": 42})).unwrap();
+        assert_eq!(r, json!(42));
+    }
+
+    #[test]
+    fn try_catches_eval_error() {
+        // bad JSON inside from_json — body errors, default fires.
+        let r = query(r#"try ('bad' | from_json) else null"#, &json!(null)).unwrap();
+        assert!(r.is_null());
+    }
+
+    #[test]
+    fn try_chain_right_associative() {
+        // try a else try b else 'c'  -->  picks b when a is missing.
+        let r = query("try $.a else try $.b else 'c'",
+            &json!({"b": "B"})).unwrap();
+        assert_eq!(r, json!("B"));
+        // both missing -> falls to literal.
+        let r = query("try $.a else try $.b else 'c'",
+            &json!({})).unwrap();
+        assert_eq!(r, json!("c"));
+    }
+
+    #[test]
+    fn try_inside_object_shaping() {
+        let doc = json!([
+            {"id": 1, "name": "A"},
+            {"id": 2}
+        ]);
+        let r = query(r#"$.map({id, name: try name else 'anon'})"#, &doc).unwrap();
+        assert_eq!(r, json!([
+            {"id": 1, "name": "A"},
+            {"id": 2, "name": "anon"}
+        ]));
+    }
+
+    #[test]
+    fn try_zero_is_not_null() {
+        // Body produces 0 (non-null) — default must NOT run.
+        let r = query("try 0 else 99", &json!(null)).unwrap();
+        assert_eq!(r, json!(0));
+    }
+
+    #[test]
+    fn try_paren_required_for_ternary_inside() {
+        let r = query("try (1 if false else 2) else 99", &json!(null)).unwrap();
+        assert_eq!(r, json!(2));
+    }
+
+    #[test]
+    fn try_inside_list_comp() {
+        let doc = json!([{"tags":["a"]}, {}]);
+        let r = query("[try x.tags else [] for x in $]", &doc).unwrap();
+        assert_eq!(r, json!([["a"], []]));
+    }
+
+    #[test]
+    fn try_constant_body_folds_at_compile_time() {
+        use crate::vm::{Compiler, Opcode};
+        // Non-null literal body -> only body emitted, no TryExpr.
+        let prog = Compiler::compile_str("try 42 else 0").unwrap();
+        let has_try = prog.ops.iter().any(|o| matches!(o, Opcode::TryExpr{..}));
+        assert!(!has_try, "constant non-null try should fold; ops: {:?}", prog.ops);
+        // Null body -> only default emitted.
+        let prog = Compiler::compile_str("try null else 7").unwrap();
+        let has_try = prog.ops.iter().any(|o| matches!(o, Opcode::TryExpr{..}));
+        assert!(!has_try, "null body try should fold to default; ops: {:?}", prog.ops);
+    }
+
     #[test]
     fn fusion_find_first_opcode_emitted() {
         use crate::vm::{Compiler, Opcode};

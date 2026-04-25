@@ -22,11 +22,12 @@ kw_as     = @{ "as"     ~ !ident_char }
 kw_when   = @{ "when"   ~ !ident_char }
 kw_patch  = @{ "patch"  ~ !ident_char }
 kw_delete = @{ "DELETE" ~ !ident_char }
+kw_try    = @{ "try"    ~ !ident_char }
 
 reserved = _{
     ("true" | "false" | "null" | "and" | "or" | "not"
      | "for" | "in" | "if" | "else" | "let" | "lambda" | "kind"
-     | "is" | "as" | "when" | "patch" | "DELETE") ~ !ident_char
+     | "is" | "as" | "when" | "patch" | "DELETE" | "try") ~ !ident_char
 }
 
 ident      = @{ !reserved ~ (ASCII_ALPHA | "_") ~ ident_char* }
@@ -100,7 +101,14 @@ expr = { cond_expr }
 // Python-style ternary: `a if cond else b` — right-associative, lower precedence
 // than pipeline. When `if` is present it MUST have `else`; Pest's `?` backtracks
 // on partial match so plain `pipe_expr` still matches.
-cond_expr = { pipe_expr ~ (kw_if ~ pipe_expr ~ kw_else ~ cond_expr)? }
+//
+// `try BODY else DEFAULT` shares precedence with the ternary.  BODY is either
+// a parenthesised arbitrary expression (for cases like a ternary inside the
+// body) or a bare `pipe_expr`.  DEFAULT is a `cond_expr` so chained
+// `try a else try b else c` parses right-associative.
+try_body  = { ("(" ~ expr ~ ")") | pipe_expr }
+try_expr  = { kw_try ~ try_body ~ kw_else ~ cond_expr }
+cond_expr = { try_expr | (pipe_expr ~ (kw_if ~ pipe_expr ~ kw_else ~ cond_expr)?) }
 
 // Pipeline: base followed by | steps and -> bind steps
 pipe_step         = { pipe_bind | pipe_forward }
