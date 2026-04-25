@@ -656,6 +656,69 @@ fn compile_handle_run_on_jetro() {
     assert_eq!(q.run_on(&j2).unwrap(), json!(2));
 }
 
+// ── streaming iter ──────────────────────────────────────────────────
+
+#[test]
+fn iter_eager_array() {
+    let j = Jetro::new(json!([1, 2, 3]));
+    let collected: Vec<jetro_core::JetroVal> = j.iter("$").unwrap()
+        .map(|r| r.unwrap()).collect();
+    assert_eq!(collected.len(), 3);
+}
+
+#[test]
+fn iter_lazy_filter_map() {
+    let j = Jetro::new(json!({
+        "items": [
+            {"id": 1, "active": true},
+            {"id": 2, "active": false},
+            {"id": 3, "active": true},
+            {"id": 4, "active": false},
+        ]
+    }));
+    let ids: Vec<jetro_core::JetroVal> = j
+        .iter("$.items.filter(active).map(id)").unwrap()
+        .map(|r| r.unwrap()).collect();
+    assert_eq!(ids.len(), 2);
+    assert_eq!(ids[0].to_string(), "1");
+    assert_eq!(ids[1].to_string(), "3");
+}
+
+#[test]
+fn iter_lazy_take_skip() {
+    let j = Jetro::new(json!([10, 20, 30, 40, 50]));
+    let xs: Vec<jetro_core::JetroVal> = j.iter("$.skip(1).take(2)").unwrap()
+        .map(|r| r.unwrap()).collect();
+    assert_eq!(xs.len(), 2);
+    assert_eq!(xs[0].to_string(), "20");
+    assert_eq!(xs[1].to_string(), "30");
+}
+
+#[test]
+fn iter_short_circuits_on_take() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let j = Jetro::new(json!([1, 2, 3, 4, 5, 6, 7, 8]));
+    static COUNT: AtomicUsize = AtomicUsize::new(0);
+    COUNT.store(0, Ordering::SeqCst);
+    let mut iter = j.iter("$.filter(@ > 0).take(3)").unwrap();
+    while let Some(v) = iter.next() {
+        v.unwrap();
+        COUNT.fetch_add(1, Ordering::SeqCst);
+    }
+    assert_eq!(COUNT.load(Ordering::SeqCst), 3, "take(3) must yield exactly 3 items");
+}
+
+#[test]
+fn iter_eager_fallback_for_sort() {
+    // sort() forces materialise; the iterator drains the resulting Vec.
+    let j = Jetro::new(json!([3, 1, 2]));
+    let xs: Vec<jetro_core::JetroVal> = j.iter("$.sort()").unwrap()
+        .map(|r| r.unwrap()).collect();
+    assert_eq!(xs.len(), 3);
+    assert_eq!(xs[0].to_string(), "1");
+    assert_eq!(xs[2].to_string(), "3");
+}
+
 // ── index lookup + max_by / min_by ──────────────────────────────────
 
 #[test]

@@ -218,6 +218,13 @@ impl Env {
 
 // ── Public entry points ───────────────────────────────────────────────────────
 
+/// Public helper for callers that already hold an `Env` (e.g. the
+/// streaming iterator).  Returns the result of evaluating `expr`
+/// against the given environment via the tree-walker.
+pub fn eval_in_env(expr: &Expr, env: &Env) -> Result<Val, EvalError> {
+    eval(expr, env)
+}
+
 pub fn evaluate(expr: &Expr, root: &serde_json::Value) -> Result<serde_json::Value, EvalError> {
     let val = Val::from(root);
     Ok(eval(expr, &Env::new(val))?.into())

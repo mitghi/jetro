@@ -435,6 +435,196 @@ impl Jetro {
             vm.execute_val_raw(&prog, self.root_val())
         })
     }
+
+    /// Streaming iterator over a query result.
+    ///
+    /// Returns an [`Iterator<Item = Result<JetroVal, EvalError>>`].
+    /// When the query has the shape `$.<path>.filter(...).map(...).take(n).skip(n)`
+    /// (any subset, in any order, of `filter` / `map` / `take` / `skip`)
+    /// the iterator runs lazily — each `next()` pulls one element from
+    /// the path's array, applies the ops, and yields without
+    /// materialising the full result Vec.  Useful for memory-bounded
+    /// execution on large arrays.
+    ///
+    /// Anything else (lambdas inside a non-trailing position, sort,
+    /// group_by, comprehensions, joins, ...) forces a full eager
+    /// evaluation; the returned iterator transparently drains the
+    /// materialised `Vec`.
+    ///
+    /// ```ignore
+    /// for item in j.iter("$.orders.filter(price > 100).map(id)")? {
+    ///     println!("{}", item?);
+    /// }
+    /// ```
+    pub fn iter<S: AsRef<str>>(&self, expr: S) -> std::result::Result<JetroIter, Error> {
+        let ast = parser::parse(expr.as_ref())?;
+        Ok(JetroIter::from_expr(self, &ast)?)
+    }
+}
+
+/// Streaming-aware iterator returned by [`Jetro::iter`].
+pub struct JetroIter {
+    inner: JetroIterInner,
+}
+
+enum JetroIterInner {
+    Eager(std::vec::IntoIter<Val>),
+    Lazy(Box<LazyState>),
+}
+
+struct LazyState {
+    items: std::vec::IntoIter<Val>,
+    ops:   Vec<LazyOp>,
+    env:   eval::Env,
+}
+
+enum LazyOp {
+    Filter(Arc<ast::Expr>),
+    Map(Arc<ast::Expr>),
+    Take(usize),
+    Skip(usize),
+}
+
+impl JetroIter {
+    /// Build an iterator from a parsed AST.  Detects the lazy
+    /// `Chain(base, [..., Method('filter'|'map'|'take'|'skip', ...) +])`
+    /// shape; everything else falls back to eager `collect_val` +
+    /// `Vec::into_iter`.
+    fn from_expr(j: &Jetro, ast: &ast::Expr) -> std::result::Result<Self, Error> {
+        if let Some((base, ops)) = peel_lazy_tail(ast) {
+            // Eval the prefix to get the source array.
+            let base_val = THREAD_VM.with(|cell| {
+                let mut vm = cell.try_borrow_mut()
+                    .map_err(|_| EvalError("VM in use".into()))?;
+                let prog = Arc::new(vm::Compiler::compile(&base, "<iter>"));
+                vm.execute_val_raw(&prog, j.root_val())
+            })?;
+            let items = match base_val {
+                Val::Arr(a)        => Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone()),
+                Val::IntVec(a)     => a.iter().map(|n| Val::Int(*n)).collect(),
+                Val::FloatVec(a)   => a.iter().map(|f| Val::Float(*f)).collect(),
+                Val::StrVec(a)     => a.iter().cloned().map(Val::Str).collect(),
+                Val::Null          => Vec::new(),
+                other              => vec![other],   // singleton — yields once
+            };
+            let env = eval::Env::new_with_registry(j.root_val(), Arc::new(eval::MethodRegistry::new()));
+            return Ok(JetroIter {
+                inner: JetroIterInner::Lazy(Box::new(LazyState {
+                    items: items.into_iter(),
+                    ops,
+                    env,
+                })),
+            });
+        }
+        // Eager fallback: full eval, drain Vec.
+        let val = THREAD_VM.with(|cell| {
+            let mut vm = cell.try_borrow_mut()
+                .map_err(|_| EvalError("VM in use".into()))?;
+            let prog = Arc::new(vm::Compiler::compile(ast, "<iter>"));
+            vm.execute_val_raw(&prog, j.root_val())
+        })?;
+        let items: Vec<Val> = match val {
+            Val::Arr(a)      => Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone()),
+            Val::IntVec(a)   => a.iter().map(|n| Val::Int(*n)).collect(),
+            Val::FloatVec(a) => a.iter().map(|f| Val::Float(*f)).collect(),
+            Val::StrVec(a)   => a.iter().cloned().map(Val::Str).collect(),
+            Val::Null        => Vec::new(),
+            other            => vec![other],
+        };
+        Ok(JetroIter { inner: JetroIterInner::Eager(items.into_iter()) })
+    }
+}
+
+impl Iterator for JetroIter {
+    type Item = std::result::Result<Val, EvalError>;
+    fn next(&mut self) -> Option<Self::Item> {
+        match &mut self.inner {
+            JetroIterInner::Eager(it) => it.next().map(Ok),
+            JetroIterInner::Lazy(s)   => s.next_lazy(),
+        }
+    }
+}
+
+impl LazyState {
+    fn next_lazy(&mut self) -> Option<std::result::Result<Val, EvalError>> {
+        'pull: loop {
+            let item = self.items.next()?;
+            let mut cur = item;
+            for op in &mut self.ops {
+                match op {
+                    LazyOp::Skip(n) => {
+                        if *n > 0 { *n -= 1; continue 'pull; }
+                    }
+                    LazyOp::Take(n) => {
+                        if *n == 0 { return None; }
+                        *n -= 1;
+                    }
+                    LazyOp::Filter(e) => {
+                        let prev = self.env.swap_current(cur.clone());
+                        let r = eval::eval_in_env(e, &self.env);
+                        let _ = self.env.swap_current(prev);
+                        match r {
+                            Ok(v) if eval::util::is_truthy(&v) => {}
+                            Ok(_)  => continue 'pull,
+                            Err(err) => return Some(Err(err)),
+                        }
+                    }
+                    LazyOp::Map(e) => {
+                        let prev = self.env.swap_current(cur.clone());
+                        let r = eval::eval_in_env(e, &self.env);
+                        let _ = self.env.swap_current(prev);
+                        match r {
+                            Ok(v)  => cur = v,
+                            Err(err) => return Some(Err(err)),
+                        }
+                    }
+                }
+            }
+            return Some(Ok(cur));
+        }
+    }
+}
+
+/// Peel the trailing `filter / map / take / skip` chain off an
+/// `Expr::Chain(base, steps)` AST.  Returns `Some((base_expr,
+/// peeled_ops))` when at least one trailing op is lazy-friendly;
+/// `None` otherwise (caller falls back to eager evaluation).
+fn peel_lazy_tail(ast: &ast::Expr) -> Option<(ast::Expr, Vec<LazyOp>)> {
+    use ast::{Expr, Step, Arg};
+    let (base, steps) = match ast {
+        Expr::Chain(b, s) => (b.as_ref(), s.as_slice()),
+        _ => return None,
+    };
+    let mut ops: Vec<LazyOp> = Vec::new();
+    let mut split: usize = steps.len();
+    for (i, st) in steps.iter().enumerate().rev() {
+        let lazy_op = match st {
+            Step::Method(name, args) => match (name.as_str(), args.as_slice()) {
+                ("filter", [Arg::Pos(e)] | [Arg::Named(_, e)]) => {
+                    Some(LazyOp::Filter(Arc::new(e.clone())))
+                }
+                ("map", [Arg::Pos(e)] | [Arg::Named(_, e)]) => {
+                    Some(LazyOp::Map(Arc::new(e.clone())))
+                }
+                ("take", [Arg::Pos(Expr::Int(n))]) if *n >= 0 => Some(LazyOp::Take(*n as usize)),
+                ("skip", [Arg::Pos(Expr::Int(n))]) if *n >= 0 => Some(LazyOp::Skip(*n as usize)),
+                _ => None,
+            },
+            _ => None,
+        };
+        match lazy_op {
+            Some(op) => { ops.push(op); split = i; }
+            None     => break,
+        }
+    }
+    if split == steps.len() { return None; }
+    ops.reverse();
+    let base_expr = if split == 0 {
+        base.clone()
+    } else {
+        Expr::Chain(Box::new(base.clone()), steps[..split].to_vec())
+    };
+    Some((base_expr, ops))
 }
 
 impl From<Value> for Jetro {
