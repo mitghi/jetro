@@ -495,10 +495,9 @@ pub enum Opcode {
     FilterFieldCmpLit(Arc<str>, super::ast::BinOp, Val),
     /// `filter(k1 <op> k2)` — predicate compares two fields of the same item.
     FilterFieldCmpField(Arc<str>, super::ast::BinOp, Arc<str>),
-    /// `filter(kp == lit).map(kproj)` fused — single pass, no intermediate array.
-    FilterFieldEqLitMapField(Arc<str>, Val, Arc<str>),
-    /// `filter(kp <cop> lit).map(kproj)` fused — single pass, no intermediate array.
-    FilterFieldCmpLitMapField(Arc<str>, super::ast::BinOp, Val, Arc<str>),
+    // FilterFieldEqLitMapField / FilterFieldCmpLitMapField migrated
+    // to pipeline.rs Sink::NumFilterMap (with columnar + ObjVec slot
+    // kernels).  See memory/project_opcode_migration.md.
     /// `filter(f1 == l1 AND f2 == l2 AND …).count()` fused — zero alloc,
     /// one IC slot per conjunct field.
     FilterFieldsAllEqLitCount(Arc<[(Arc<str>, Val)]>),
@@ -2354,22 +2353,11 @@ impl Compiler {
                     }
                 }
             }
-            // FilterField* + MapField(k) → FilterField*MapField (single pass)
-            if let Opcode::MapField(ref kp) = op {
-                match out3.last().cloned() {
-                    Some(Opcode::FilterFieldEqLit(k, lit)) => {
-                        out3.pop();
-                        out3.push(Opcode::FilterFieldEqLitMapField(k, lit, kp.clone()));
-                        continue;
-                    }
-                    Some(Opcode::FilterFieldCmpLit(k, cop, lit)) => {
-                        out3.pop();
-                        out3.push(Opcode::FilterFieldCmpLitMapField(k, cop, lit, kp.clone()));
-                        continue;
-                    }
-                    _ => {}
-                }
-            }
+            // FilterField* + MapField(k) fusion migrated to pipeline.rs
+            // Sink::NumFilterMap (and the columnar fast path) — covered
+            // for top-level Root-prefix queries.  Sub-program path falls
+            // back to the unfused FilterFieldEqLit / FilterFieldCmpLit
+            // followed by MapField sequence.
             // MapField(k) + MapFlatten(trivial k2) → FlatMapChain([k, k2])
             if let Opcode::MapFlatten(ref f) = op {
                 if let Some(k2) = trivial_field(&f.ops) {
@@ -2435,11 +2423,16 @@ impl Compiler {
                                     for iop in spec.iter.ops.iter() {
                                         out.push(iop.clone());
                                     }
+                                    // Emit unfused Filter + MapField; pipeline
+                                    // Sink::NumFilterMap covers the fused
+                                    // shape at lowering time when the chain
+                                    // continues into a numeric aggregate.
                                     if matches!(cop, super::ast::BinOp::Eq) {
-                                        out.push(Opcode::FilterFieldEqLitMapField(pk, lit, proj));
+                                        out.push(Opcode::FilterFieldEqLit(pk, lit));
                                     } else {
-                                        out.push(Opcode::FilterFieldCmpLitMapField(pk, cop, lit, proj));
+                                        out.push(Opcode::FilterFieldCmpLit(pk, cop, lit));
                                     }
+                                    out.push(Opcode::MapField(proj));
                                     continue;
                                 }
                             }
@@ -5735,76 +5728,11 @@ impl VM {
                         _ => stack.push(recv),
                     }
                 }
-                Opcode::FilterFieldEqLitMapField(kp, lit, kproj) => {
-                    let recv = pop!(stack);
-                    let hint = match &recv { Val::Arr(a) => filter_cap_hint(a.len()), _ => 0 };
-                    let mut out = Vec::with_capacity(hint);
-                    let mut ip: Option<usize> = None;
-                    let mut iq: Option<usize> = None;
-                    if let Val::Arr(a) = &recv {
-                        for item in a.iter() {
-                            if let Val::Obj(m) = item {
-                                if let Some(v) = lookup_field_cached(m, kp, &mut ip) {
-                                    if crate::eval::util::vals_eq(v, lit) {
-                                        out.push(
-                                            lookup_field_cached(m, kproj, &mut iq)
-                                                .cloned()
-                                                .unwrap_or(Val::Null),
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    stack.push(Val::arr(out));
-                }
-                Opcode::FilterFieldCmpLitMapField(kp, op, lit, kproj) => {
-                    // Phase 7 fast path: peek the stack — if it's an ObjVec
-                    // with both `kp` and `kproj` resolvable to slots, walk
-                    // the flat cells with constant stride, no IndexMap
-                    // probes.
-                    if let Some(Val::ObjVec(d)) = stack.last() {
-                        if let (Some(slot_p), Some(slot_q)) = (d.slot_of(kp), d.slot_of(kproj)) {
-                            let stride = d.stride();
-                            let nrows = d.nrows();
-                            let mut out = Vec::with_capacity(filter_cap_hint(nrows));
-                            // Pull the receiver via a borrow chain to avoid the pop!-demote path.
-                            let cells = &d.cells;
-                            for row in 0..nrows {
-                                let off = row * stride;
-                                let v = &cells[off + slot_p];
-                                if cmp_val_binop(v, *op, lit) {
-                                    out.push(cells[off + slot_q].clone());
-                                }
-                            }
-                            // Replace the ObjVec on the stack with the projection.
-                            let _ = stack.pop();
-                            stack.push(Val::arr(out));
-                            continue;
-                        }
-                    }
-                    let recv = pop!(stack);
-                    let hint = match &recv { Val::Arr(a) => filter_cap_hint(a.len()), _ => 0 };
-                    let mut out = Vec::with_capacity(hint);
-                    let mut ip: Option<usize> = None;
-                    let mut iq: Option<usize> = None;
-                    if let Val::Arr(a) = &recv {
-                        for item in a.iter() {
-                            if let Val::Obj(m) = item {
-                                if let Some(v) = lookup_field_cached(m, kp, &mut ip) {
-                                    if cmp_val_binop(v, *op, lit) {
-                                        out.push(
-                                            lookup_field_cached(m, kproj, &mut iq)
-                                                .cloned()
-                                                .unwrap_or(Val::Null),
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    stack.push(Val::arr(out));
-                }
+                // FilterFieldEqLitMapField / FilterFieldCmpLitMapField
+                // handlers removed — pipeline.rs Sink::NumFilterMap
+                // covers these shapes for top-level Root-prefix queries.
+                // Sub-program path executes the unfused
+                // FilterFieldEqLit/FilterFieldCmpLit + MapField sequence.
                 Opcode::FilterFieldCmpField(k1, op, k2) => {
                     let recv = pop!(stack);
                     let hint = match &recv { Val::Arr(a) => filter_cap_hint(a.len()), _ => 0 };
@@ -7999,53 +7927,15 @@ fn materialise_find_scan_spans_tail(
             return (Val::Int(spans.len() as i64), 1);
         }
     }
-    // Trailing fused `.filter(@.kp op lit).map(kproj)` — peephole fused
-    // forms `FilterFieldEqLitMapField` / `FilterFieldCmpLitMapField`.
-    // Refine spans by predicate, then project direct-field values; peek
-    // for a numeric aggregate right after to fold on the projection.
-    if let Some(op) = tail.first() {
-        let refined = match op {
-            Opcode::FilterFieldEqLitMapField(kp, lit_v, kproj) => {
-                let lit = val_to_canonical_lit_bytes(lit_v);
-                lit.map(|lit| {
-                    let spans2: Vec<_> = spans.iter().copied().filter(|s| {
-                        let obj = &bytes[s.start..s.end];
-                        match super::scan::find_direct_field(obj, kp.as_ref()) {
-                            Some(vs) => vs.end - vs.start == lit.len()
-                                && obj[vs.start..vs.end] == lit[..],
-                            None => false,
-                        }
-                    }).collect();
-                    (spans2, kproj.clone())
-                })
-            }
-            Opcode::FilterFieldCmpLitMapField(kp, cop, lit_v, kproj) => {
-                let thresh_opt = lit_v.as_f64();
-                let holds_opt: Option<fn(f64, f64) -> bool> = match cop {
-                    super::ast::BinOp::Lt  => Some(|a, b| a <  b),
-                    super::ast::BinOp::Lte => Some(|a, b| a <= b),
-                    super::ast::BinOp::Gt  => Some(|a, b| a >  b),
-                    super::ast::BinOp::Gte => Some(|a, b| a >= b),
-                    _ => None,
-                };
-                match (thresh_opt, holds_opt) {
-                    (Some(thresh), Some(holds)) => {
-                        let spans2: Vec<_> = spans.iter().copied().filter(|s| {
-                            let obj = &bytes[s.start..s.end];
-                            let Some(vs) = super::scan::find_direct_field(obj, kp.as_ref())
-                                else { return false };
-                            match super::scan::parse_num_span(&obj[vs.start..vs.end]) {
-                                Some((_, f, _)) => holds(f, thresh),
-                                None => false,
-                            }
-                        }).collect();
-                        Some((spans2, kproj.clone()))
-                    }
-                    _ => None,
-                }
-            }
-            _ => None,
-        };
+    // Trailing fused `.filter(@.kp op lit).map(kproj)` — byte-scan
+    // refinement for the migrated FilterField*MapField opcodes was
+    // removed alongside the opcodes themselves.  Pipeline.rs
+    // Sink::NumFilterMap covers these shapes for tape / Val tree
+    // queries; the byte-scan refinement here was a duplicate path
+    // for the rarer raw_bytes route.  None branch falls through
+    // to the post-tail count/len check below.
+    if let Some(_op) = tail.first() {
+        let refined: Option<(Vec<crate::scan::ValueSpan>, Arc<str>)> = None;
         if let Some((spans2, k)) = refined {
             // Aggregate fold on the projection without materialising.
             if let Some(Opcode::CallMethod(c)) = tail.get(1) {
