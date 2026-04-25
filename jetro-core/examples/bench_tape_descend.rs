@@ -109,4 +109,16 @@ fn main() {
         let r = j_tape_arr.collect("$.orders.map(total).max()").unwrap();
         r.as_f64().unwrap_or(0.0) as u64
     });
+
+    // filter+count tape path
+    let _ = j_val_arr.collect("$.orders.filter(total > 100).count()").unwrap();
+    let _ = j_tape_arr.collect("$.orders.filter(total > 100).count()").unwrap();
+    bench("Val tree     $.orders.filter(total>100).count()", iters, || {
+        let r = j_val_arr.collect("$.orders.filter(total > 100).count()").unwrap();
+        r.as_i64().unwrap_or(0) as u64
+    });
+    bench("tape walker  $.orders.filter(total>100).count()", iters, || {
+        let r = j_tape_arr.collect("$.orders.filter(total > 100).count()").unwrap();
+        r.as_i64().unwrap_or(0) as u64
+    });
 }

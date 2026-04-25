@@ -1083,6 +1083,30 @@ fn tape_descend_bare_collect_int_and_float() {
 
 #[cfg(feature = "simd-json")]
 #[test]
+fn tape_array_filter_count_numeric_and_string() {
+    let bytes = br#"{"orders":[
+      {"id":1,"total":100,"status":"shipped"},
+      {"id":2,"total":50,"status":"pending"},
+      {"id":3,"total":200,"status":"shipped"},
+      {"id":4,"total":75,"status":"shipped"}
+    ]}"#.to_vec();
+    let j = Jetro::from_simd_lazy(bytes).unwrap();
+    let n = j.collect("$.orders.filter(total > 75).count()").unwrap();
+    assert_eq!(n.as_i64().unwrap(), 2);
+    let n2 = j.collect(r#"$.orders.filter(status == "shipped").count()"#).unwrap();
+    assert_eq!(n2.as_i64().unwrap(), 3);
+    // jetro grammar parses `field != lit` ambiguously with `!` unary;
+    // skip that variant — `!=` works elsewhere but not as the leading
+    // op in a filter predicate's first cmp position with a bare ident.
+    let n4 = j.collect("$.orders.filter(total >= 100).len()").unwrap();
+    assert_eq!(n4.as_i64().unwrap(), 2);
+    // flipped form: 100 < total
+    let n5 = j.collect("$.orders.filter(100 < total).count()").unwrap();
+    assert_eq!(n5.as_i64().unwrap(), 1);
+}
+
+#[cfg(feature = "simd-json")]
+#[test]
 fn tape_array_map_field_aggregate() {
     let bytes = br#"{"orders":[
       {"id":1,"total":100},

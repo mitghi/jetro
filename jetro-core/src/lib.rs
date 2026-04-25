@@ -397,6 +397,112 @@ fn try_tape_array_map_aggregate(
     Some(Ok(out))
 }
 
+/// Pull a comparable literal out of an `Expr`.  Strings/bools/null/ints
+/// /floats only — no compound expressions or references.
+#[cfg(feature = "simd-json")]
+fn classify_literal<'a>(e: &'a crate::ast::Expr) -> Option<crate::strref::TapeLit<'a>> {
+    use crate::ast::Expr;
+    use crate::strref::TapeLit;
+    match e {
+        Expr::Int(v)   => Some(TapeLit::Int(*v)),
+        Expr::Float(v) => Some(TapeLit::Float(*v)),
+        Expr::Str(s)   => Some(TapeLit::Str(s.as_str())),
+        Expr::Bool(b)  => Some(TapeLit::Bool(*b)),
+        Expr::Null     => Some(TapeLit::Null),
+        _ => None,
+    }
+}
+
+/// Map `BinOp` to the tape comparison kind.  Returns `None` for ops
+/// that aren't simple value comparisons (And/Or/Add/Mul/Mod/Fuzzy/...).
+#[cfg(feature = "simd-json")]
+fn classify_cmp_op(op: crate::ast::BinOp) -> Option<crate::strref::TapeCmp> {
+    use crate::ast::BinOp;
+    use crate::strref::TapeCmp;
+    Some(match op {
+        BinOp::Eq  => TapeCmp::Eq,
+        BinOp::Neq => TapeCmp::Neq,
+        BinOp::Lt  => TapeCmp::Lt,
+        BinOp::Lte => TapeCmp::Lte,
+        BinOp::Gt  => TapeCmp::Gt,
+        BinOp::Gte => TapeCmp::Gte,
+        _ => return None,
+    })
+}
+
+/// Tape executor for `$.k1.k2…kN.filter(<field> <op> <lit>).count()`.
+/// Walks the field chain, then counts entries in the target Array
+/// whose `field` satisfies the comparison.
+#[cfg(feature = "simd-json")]
+fn try_tape_array_filter_count(
+    steps: &[crate::ast::Step],
+    tape: &Arc<crate::strref::TapeData>,
+) -> Option<std::result::Result<Val, EvalError>> {
+    use crate::ast::{Expr, Step, Arg};
+    if steps.len() < 2 { return None; }
+
+    // Find `.filter(<binop>)` step preceded only by Field steps and
+    // followed by `.count()` or `.len()`.
+    let mut filter_at = None;
+    for (i, s) in steps.iter().enumerate() {
+        match s {
+            Step::Field(_) => continue,
+            Step::Method(name, args) if name == "filter" && args.len() == 1 => {
+                filter_at = Some(i); break;
+            }
+            _ => return None,
+        }
+    }
+    let f_idx = filter_at?;
+    if f_idx == 0 { return None; }
+    if steps.len() != f_idx + 2 { return None; }
+    let agg = match &steps[f_idx + 1] {
+        Step::Method(name, args) if args.is_empty() => name.as_str(),
+        _ => return None,
+    };
+    if agg != "count" && agg != "len" { return None; }
+
+    let mut keys: Vec<&str> = Vec::with_capacity(f_idx);
+    for s in &steps[..f_idx] {
+        if let Step::Field(k) = s { keys.push(k.as_str()); } else { return None; }
+    }
+    let arr_idx = crate::strref::tape_walk_field_chain(tape, &keys)?;
+
+    // Decode the predicate: must be `<field-ref> <cmp-op> <literal>`
+    // (or the symmetric `<literal> <op> <field-ref>` — flip if so).
+    let pred = match &steps[f_idx] {
+        Step::Method(_, args) => match &args[0] {
+            Arg::Pos(e) => e,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    let (lhs, op, rhs) = match pred {
+        Expr::BinOp(l, op, r) => (l.as_ref(), *op, r.as_ref()),
+        _ => return None,
+    };
+    let cmp = classify_cmp_op(op)?;
+
+    let (field, cmp, lit) = if let (Some(f), Some(l)) = (classify_implicit_field(lhs), classify_literal(rhs)) {
+        (f, cmp, l)
+    } else if let (Some(l), Some(f)) = (classify_literal(lhs), classify_implicit_field(rhs)) {
+        // a < @.x  ≡  @.x > a — flip the operator.
+        let flipped = match cmp {
+            crate::strref::TapeCmp::Lt  => crate::strref::TapeCmp::Gt,
+            crate::strref::TapeCmp::Lte => crate::strref::TapeCmp::Gte,
+            crate::strref::TapeCmp::Gt  => crate::strref::TapeCmp::Lt,
+            crate::strref::TapeCmp::Gte => crate::strref::TapeCmp::Lte,
+            other => other,
+        };
+        (f, flipped, l)
+    } else {
+        return None;
+    };
+
+    let n = crate::strref::tape_array_filter_count(tape, arr_idx, field, cmp, &lit)?;
+    Some(Ok(Val::Int(n as i64)))
+}
+
 /// Phase 6 tape-aware fast path classifier + executor.
 ///
 /// Returns `Some(result)` when `expr` matches a supported tape-friendly
@@ -432,6 +538,9 @@ fn try_tape_descend_aggregate(
     // the per-entry tape walk; defer to Val in that case.
     if !val_built {
         if let Some(out) = try_tape_array_map_aggregate(steps, tape) {
+            return Some(out);
+        }
+        if let Some(out) = try_tape_array_filter_count(steps, tape) {
             return Some(out);
         }
     }

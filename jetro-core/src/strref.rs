@@ -499,6 +499,100 @@ pub fn tape_array_field_numeric_fold(
     Some((acc.sum_i, acc.sum_f, acc.count, acc.min_f, acc.max_f, acc.is_float))
 }
 
+/// Comparable literal kind for tape-side filter predicates.
+#[cfg(feature = "simd-json")]
+#[derive(Debug, Clone)]
+pub enum TapeLit<'a> {
+    Int(i64),
+    Float(f64),
+    Str(&'a str),
+    Bool(bool),
+    Null,
+}
+
+/// 6-way comparison op encoded as a small enum the tape executor uses.
+#[cfg(feature = "simd-json")]
+#[derive(Debug, Clone, Copy)]
+pub enum TapeCmp { Eq, Neq, Lt, Lte, Gt, Gte }
+
+/// Compare a tape value at node `idx` against a literal.  Returns
+/// `false` on type mismatch (e.g. Int vs Str).  Numeric comparisons
+/// promote i64↔f64.
+#[cfg(feature = "simd-json")]
+pub fn tape_value_cmp(tape: &TapeData, idx: usize, op: TapeCmp, lit: &TapeLit) -> bool {
+    use simd_json::StaticNode as SN;
+    match (tape.nodes[idx], lit) {
+        (TapeNode::Static(SN::I64(v)), TapeLit::Int(l)) => num_cmp_i(v, *l, op),
+        (TapeNode::Static(SN::U64(v)), TapeLit::Int(l)) if v <= i64::MAX as u64 =>
+            num_cmp_i(v as i64, *l, op),
+        (TapeNode::Static(SN::I64(v)), TapeLit::Float(l)) => num_cmp_f(v as f64, *l, op),
+        (TapeNode::Static(SN::U64(v)), TapeLit::Float(l)) if v <= i64::MAX as u64 =>
+            num_cmp_f(v as f64, *l, op),
+        (TapeNode::Static(SN::F64(v)), TapeLit::Float(l)) => num_cmp_f(v, *l, op),
+        (TapeNode::Static(SN::F64(v)), TapeLit::Int(l)) => num_cmp_f(v, *l as f64, op),
+        (TapeNode::StringRef { .. }, TapeLit::Str(s)) => str_cmp(tape.str_at(idx), s, op),
+        (TapeNode::Static(SN::Bool(v)), TapeLit::Bool(l)) => bool_cmp(v, *l, op),
+        (TapeNode::Static(SN::Null), TapeLit::Null) => matches!(op, TapeCmp::Eq),
+        _ => false,
+    }
+}
+
+#[cfg(feature = "simd-json")]
+#[inline]
+fn num_cmp_i(a: i64, b: i64, op: TapeCmp) -> bool {
+    match op { TapeCmp::Eq => a == b, TapeCmp::Neq => a != b,
+               TapeCmp::Lt => a < b, TapeCmp::Lte => a <= b,
+               TapeCmp::Gt => a > b, TapeCmp::Gte => a >= b }
+}
+#[cfg(feature = "simd-json")]
+#[inline]
+fn num_cmp_f(a: f64, b: f64, op: TapeCmp) -> bool {
+    match op { TapeCmp::Eq => a == b, TapeCmp::Neq => a != b,
+               TapeCmp::Lt => a < b, TapeCmp::Lte => a <= b,
+               TapeCmp::Gt => a > b, TapeCmp::Gte => a >= b }
+}
+#[cfg(feature = "simd-json")]
+#[inline]
+fn str_cmp(a: &str, b: &str, op: TapeCmp) -> bool {
+    match op { TapeCmp::Eq => a == b, TapeCmp::Neq => a != b,
+               TapeCmp::Lt => a < b, TapeCmp::Lte => a <= b,
+               TapeCmp::Gt => a > b, TapeCmp::Gte => a >= b }
+}
+#[cfg(feature = "simd-json")]
+#[inline]
+fn bool_cmp(a: bool, b: bool, op: TapeCmp) -> bool {
+    match op { TapeCmp::Eq => a == b, TapeCmp::Neq => a != b, _ => false }
+}
+
+/// `$.<arr>.filter(<field> <op> <lit>).count()` — count Array entries
+/// where the projected field satisfies the comparison.  Returns `None`
+/// only if `arr_idx` is not an Array.
+#[cfg(feature = "simd-json")]
+pub fn tape_array_filter_count(
+    tape: &TapeData,
+    arr_idx: usize,
+    field: &str,
+    op: TapeCmp,
+    lit: &TapeLit,
+) -> Option<usize> {
+    let len = match tape.nodes[arr_idx] {
+        TapeNode::Array { len, .. } => len as usize,
+        _ => return None,
+    };
+    let mut count = 0usize;
+    let mut j = arr_idx + 1;
+    for _ in 0..len {
+        let entry = j;
+        if let TapeNode::Object { .. } = tape.nodes[entry] {
+            if let Some(v) = tape_object_field(tape, entry, field) {
+                if tape_value_cmp(tape, v, op, lit) { count += 1; }
+            }
+        }
+        j += tape.span(entry);
+    }
+    Some(count)
+}
+
 /// `$.<arr>.map(<field>)` columnar collect into IntVec/FloatVec.  Same
 /// preconditions as the fold variant.
 #[cfg(feature = "simd-json")]
