@@ -186,5 +186,32 @@ fn main() {
         let r = j_simd_arr.collect("$.orders.filter(total > 100).count()").unwrap();
         r.as_i64().unwrap_or(0) as u64
     });
+
+    // pipeline_ir.md bench item #1: flat_map+filter+count was 44× Go.
+    // FlatMapCount fused sink + ObjVec source close the gap to a
+    // single pass: per row eval inner sequence, count on the fly.
+    let mut s = String::with_capacity(n * 80);
+    s.push_str("{\"orders\":[");
+    for i in 0..n {
+        if i > 0 { s.push(','); }
+        s.push_str(&format!(
+            "{{\"id\":{},\"items\":[{{\"k\":1}},{{\"k\":2}}]}}",
+            i));
+    }
+    s.push_str("]}");
+    let fm_bytes = s.into_bytes();
+    let j_simd_fm  = Jetro::from_simd(fm_bytes.clone()).unwrap();
+    let j_slice_fm = Jetro::from_slice(&fm_bytes).unwrap();
+    let q_fm = "$.orders.flat_map(items).count()";
+    let _ = j_simd_fm.collect(q_fm).unwrap();
+    let _ = j_slice_fm.collect(q_fm).unwrap();
+    bench("Val tree     flat_map(items).count()       ", iters, || {
+        let r = j_slice_fm.collect(q_fm).unwrap();
+        r.as_i64().unwrap_or(0) as u64
+    });
+    bench("Pipeline FMC flat_map(items).count()       ", iters, || {
+        let r = j_simd_fm.collect(q_fm).unwrap();
+        r.as_i64().unwrap_or(0) as u64
+    });
     let _ = sj_arr; let _ = sj_arr2;  // moved out by from_simd
 }

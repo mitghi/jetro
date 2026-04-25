@@ -143,6 +143,10 @@ pub enum Sink {
     FirstMap(Arc<crate::vm::Program>),
     /// `Map(prog) ∘ Last` — last element after projection.
     LastMap(Arc<crate::vm::Program>),
+    /// `FlatMap(prog) ∘ Count` — count yielded inner elements without
+    /// materialising the flat sequence.  Closes pipeline_ir.md
+    /// bench-priority item #1 (`flat_map+filter+count` 44× gap).
+    FlatMapCount(Arc<crate::vm::Program>),
 }
 
 #[derive(Debug, Clone)]
@@ -504,6 +508,19 @@ fn rewrite_step(p: &mut Pipeline) -> bool {
         }
     }
 
+    // Rule:  FlatMap(f) ∘ Count → FlatMapCount(f)
+    // Closes pipeline_ir.md bench item #1 (44× gap).  No need to
+    // materialise the flattened sequence — kernel pulls each yielded
+    // inner element and increments a counter in one pass.
+    if let (Some(last), Sink::Count) = (p.stages.last(), &p.sink) {
+        if let Stage::FlatMap(prog) = last {
+            let prog = Arc::clone(prog);
+            p.stages.pop();
+            p.sink = Sink::FlatMapCount(prog);
+            return true;
+        }
+    }
+
     false
 }
 
@@ -559,6 +576,13 @@ impl Pipeline {
 
         // ObjVec source — slot-indexed direct reads, no IndexMap probe.
         if let Val::ObjVec(d) = &recv {
+            if let Sink::FlatMapCount(prog) = &self.sink {
+                if let Some(field) = single_field_prog(prog) {
+                    if let Some(slot) = d.slot_of(field) {
+                        return Some(Ok(objvec_flatmap_count_slot(d, slot)));
+                    }
+                }
+            }
             if let Sink::NumMap(op, prog) = &self.sink {
                 let field = single_field_prog(prog)?;
                 let slot = d.slot_of(field)?;
@@ -830,6 +854,14 @@ impl Pipeline {
                 Sink::LastMap(prog) => {
                     acc_last = Some(apply_item_root(&mut vm, &item, prog)?);
                 }
+                Sink::FlatMapCount(prog) => {
+                    let inner = apply_item_root(&mut vm, &item, prog)?;
+                    if let Some(arr) = inner.as_vals() {
+                        acc_count += arr.len() as i64;
+                    } else {
+                        acc_count += 1;
+                    }
+                }
             }
             taken += 1;
         }
@@ -838,6 +870,7 @@ impl Pipeline {
             Sink::Collect           => Val::arr(acc_collect),
             Sink::Count             => Val::Int(acc_count),
             Sink::CountIf(_)        => Val::Int(acc_count),
+            Sink::FlatMapCount(_)   => Val::Int(acc_count),
             Sink::Numeric(op)
             | Sink::NumMap(op, _)
             | Sink::NumFilterMap(op, _, _) =>
@@ -988,6 +1021,27 @@ fn single_cmp_prog<'a>(prog: &'a crate::vm::Program) -> Option<(&'a str, crate::
 // `cells: Vec<Val>` with stride = keys.len(); a row's field at slot
 // `s` lives at `cells[row * stride + s]`.  No IndexMap probe per
 // row — direct array index.
+
+/// Columnar `$.<arr>.flat_map(<field>).count()` — sums lengths of the
+/// inner sequences without materialising the flattened result.
+fn objvec_flatmap_count_slot(d: &Arc<crate::eval::value::ObjVecData>, slot: usize) -> Val {
+    let stride = d.stride();
+    let nrows = d.nrows();
+    let mut count: i64 = 0;
+    for row in 0..nrows {
+        let v = &d.cells[row * stride + slot];
+        match v {
+            Val::Arr(a)         => count += a.len() as i64,
+            Val::IntVec(a)      => count += a.len() as i64,
+            Val::FloatVec(a)    => count += a.len() as i64,
+            Val::StrVec(a)      => count += a.len() as i64,
+            Val::StrSliceVec(a) => count += a.len() as i64,
+            Val::ObjVec(ad)     => count += ad.nrows() as i64,
+            _                   => count += 1,
+        }
+    }
+    Val::Int(count)
+}
 
 fn objvec_num_slot(d: &Arc<crate::eval::value::ObjVecData>, slot: usize, op: NumOp) -> Val {
     let stride = d.stride();
