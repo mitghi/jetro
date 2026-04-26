@@ -201,24 +201,9 @@ pub fn last_index_of(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalErro
     } else { err!("last_index_of: expected string") }
 }
 
-pub fn replace(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-    if let Val::Str(s) = recv {
-        let from = str_arg(args, 0, env)?;
-        let to   = str_arg(args, 1, env)?;
-        // Short-circuit: needle absent -> return receiver unchanged (no alloc).
-        if !s.contains(from.as_str()) { return Ok(Val::Str(s)); }
-        Ok(Val::Str(Arc::<str>::from(s.replacen(from.as_str(), to.as_str(), 1))))
-    } else { err!("replace: expected string") }
-}
-
-pub fn replace_all(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-    if let Val::Str(s) = recv {
-        let from = str_arg(args, 0, env)?;
-        let to   = str_arg(args, 1, env)?;
-        if !s.contains(from.as_str()) { return Ok(Val::Str(s)); }
-        Ok(Val::Str(Arc::<str>::from(s.replace(from.as_str(), to.as_str()))))
-    } else { err!("replace_all: expected string") }
-}
+// `.replace` and `.replace_all` lifted to `pipeline::Stage::Replace`.
+// Canonical impl in `pipeline::replace_apply`; dispatch shims in
+// `eval/builtins.rs::{replace_dispatch, replace_all_dispatch}`.
 
 pub fn strip_prefix(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     if let Val::Str(s) = recv {

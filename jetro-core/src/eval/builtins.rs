@@ -212,8 +212,9 @@ fn build() -> BuiltinRegistry {
     t.insert("ends_with",      func_strings::ends_with);
     t.insert("index_of",       func_strings::index_of);
     t.insert("last_index_of",  func_strings::last_index_of);
-    t.insert("replace",        func_strings::replace);
-    t.insert("replace_all",    func_strings::replace_all);
+    // .replace / .replace_all lifted to pipeline::Stage::Replace.
+    t.insert("replace",        replace_dispatch);
+    t.insert("replace_all",    replace_all_dispatch);
     t.insert("strip_prefix",   func_strings::strip_prefix);
     t.insert("strip_suffix",   func_strings::strip_suffix);
     // .slice / .split lifted to pipeline::Stage::Slice / Stage::Split.
@@ -503,6 +504,20 @@ fn slice_dispatch(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> 
         .and_then(|a| eval_pos(a, env).ok())
         .and_then(|v| v.as_i64());
     Ok(crate::pipeline::slice_apply(recv, start, end))
+}
+
+fn replace_dispatch(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+    let needle = str_arg(args, 0, env)?;
+    let replacement = str_arg(args, 1, env)?;
+    crate::pipeline::replace_apply(recv, needle.as_str(), replacement.as_str(), false)
+        .ok_or_else(|| EvalError("replace: expected string".into()))
+}
+
+fn replace_all_dispatch(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+    let needle = str_arg(args, 0, env)?;
+    let replacement = str_arg(args, 1, env)?;
+    crate::pipeline::replace_apply(recv, needle.as_str(), replacement.as_str(), true)
+        .ok_or_else(|| EvalError("replace_all: expected string".into()))
 }
 
 fn b_missing(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {

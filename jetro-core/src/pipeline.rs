@@ -286,6 +286,11 @@ pub enum Stage {
     /// `.slice(start, end)` — 1 string → 1 substring.  `Cardinality::
     /// OneToOne` + `can_indexed=true`.  `end=None` means "to end".
     Slice(i64, Option<i64>),
+
+    /// `.replace(needle, replacement)` (`all=false`, replacen-1-style) and
+    /// `.replace_all(needle, replacement)` (`all=true`) — 1 string → 1
+    /// string.  `Cardinality::OneToOne` + `can_indexed=true`.
+    Replace { needle: Arc<str>, replacement: Arc<str>, all: bool },
 }
 
 /// Phase A3 — sub-program "kernel" shape recognised at lower-time.
@@ -825,8 +830,8 @@ fn upstream_demand(d: Demand, stage: &Stage) -> Demand {
             | Stage::UniqueBy(_)
             | Stage::GroupBy(_)
             | Stage::Split(_) => Demand::UNBOUNDED,
-        // Slice is 1:1 — preserve.
-        Stage::Slice(_, _) => d,
+        // Slice / Replace are 1:1 — preserve.
+        Stage::Slice(_, _) | Stage::Replace { .. } => d,
     }
 }
 
@@ -962,6 +967,15 @@ impl Stage {
                 boundedness: Boundedness::Always(1),
                 can_indexed: true,
                 cost:        1.0,
+                selectivity: 1.0,
+            },
+            Stage::Replace { .. } => StageShape {
+                cardinality: Cardinality::OneToOne,
+                order:       Order::Stateless,
+                purity:      true,
+                boundedness: Boundedness::Always(1),
+                can_indexed: true,
+                cost:        2.0,
                 selectivity: 1.0,
             },
         }
@@ -1445,6 +1459,16 @@ impl Pipeline {
                                 _ => return None,
                             };
                             stages.push(Stage::Slice(start, end));
+                        }
+                        ("replace", 2, _) | ("replace_all", 2, _) => {
+                            let (needle, replacement) = match (&args[0], &args[1]) {
+                                (Arg::Pos(Expr::Str(n)), Arg::Pos(Expr::Str(r))) =>
+                                    (Arc::<str>::from(n.as_str()), Arc::<str>::from(r.as_str())),
+                                _ => return None,
+                            };
+                            stages.push(Stage::Replace {
+                                needle, replacement, all: name.as_str() == "replace_all",
+                            });
                         }
                         ("count", 0, true) | ("len", 0, true) => sink = Sink::Count,
                         ("sum", 0, true) => sink = Sink::Numeric(NumOp::Sum),
@@ -2793,6 +2817,16 @@ impl Pipeline {
                         }
                         buf = out;
                     }
+                    Stage::Replace { needle, replacement, all } => {
+                        let mut out: Vec<Val> = Vec::with_capacity(buf.len());
+                        for v in buf.into_iter() {
+                            match replace_apply(v.clone(), needle, replacement, *all) {
+                                Some(r) => out.push(r),
+                                None    => out.push(v),
+                            }
+                        }
+                        buf = out;
+                    }
                 }
             }
             Box::new(buf.into_iter())
@@ -2828,6 +2862,11 @@ impl Pipeline {
                         Stage::Split(_) => {} // forced into barrier path above
                         Stage::Slice(start, end) => {
                             item = slice_apply(item, *start, *end);
+                        }
+                        Stage::Replace { needle, replacement, all } => {
+                            if let Some(r) = replace_apply(item.clone(), needle, replacement, *all) {
+                                item = r;
+                            }
                         }
                     }
                 }
@@ -2937,6 +2976,23 @@ pub(crate) fn split_apply(recv: &Val, sep: &str) -> Option<Val> {
         _                => return None,
     };
     Some(Val::arr(s.split(sep).map(|p| Val::Str(Arc::<str>::from(p))).collect()))
+}
+
+/// Canonical `.replace(needle, repl)` (all=false, replacen-1) and
+/// `.replace_all(needle, repl)` (all=true).  Shared by Stage::Replace
+/// runtime arms and the dispatch shims.  Returns the receiver unchanged
+/// when needle is absent (no alloc fast-path).  `None` on non-string
+/// receiver.
+pub(crate) fn replace_apply(recv: Val, needle: &str, replacement: &str, all: bool) -> Option<Val> {
+    let s: Arc<str> = match recv {
+        Val::Str(s)      => s,
+        Val::StrSlice(r) => r.to_arc(),
+        _                => return None,
+    };
+    if !s.contains(needle) { return Some(Val::Str(s)); }
+    let out = if all { s.replace(needle, replacement) }
+              else   { s.replacen(needle, replacement, 1) };
+    Some(Val::Str(Arc::<str>::from(out)))
 }
 
 #[inline]
