@@ -966,6 +966,50 @@ impl Stage {
             },
         }
     }
+
+    // ── lift_all_builtins.md template — Tier 1 declarative optimisations ──────
+    //
+    // Three per-Stage methods every lifted built-in can override.  Default
+    // impls return None / false so existing Stages compile unchanged; new
+    // Stages opt in by adding match arms.  Wired into Phase 4 fold +
+    // Phase 0 const-fold + a future cancels_with pass.
+
+    /// Algebraic merge identity — `Stage::A ∘ Stage::B → Some(Stage::C)`.
+    /// Returns `None` when no identity applies.  Examples:
+    /// `Take(a) ∘ Take(b) → Take(min(a,b))`, `Reverse ∘ Reverse → Identity`
+    /// (encoded by callers removing both stages).  Stays None for stages
+    /// that need program-construction (Filter+Filter AndOp); those keep
+    /// their dedicated rule in `rewrite_step` until Phase 4 grows a
+    /// program-builder API.
+    pub fn merge_with(&self, other: &Self) -> Option<Self> {
+        match (self, other) {
+            (Stage::Take(a), Stage::Take(b)) => Some(Stage::Take((*a).min(*b))),
+            (Stage::Skip(a), Stage::Skip(b)) => Some(Stage::Skip((*a).saturating_add(*b))),
+            // Sort / UniqueBy are idempotent — rightmost key wins.
+            (Stage::Sort(_), Stage::Sort(b)) => Some(Stage::Sort(b.clone())),
+            (Stage::UniqueBy(_), Stage::UniqueBy(b)) => Some(Stage::UniqueBy(b.clone())),
+            _ => None,
+        }
+    }
+
+    /// Inverse-pair cancellation — `Stage::A ∘ Stage::B = identity`.
+    /// Both stages drop when this returns true.  Examples (post-lift):
+    /// `Reverse ∘ Reverse`, `to_base64 ∘ from_base64`, `to_pairs ∘ from_pairs`.
+    /// Today only Reverse self-cancels; remaining pairs land with their
+    /// lifted Stage variants.
+    pub fn cancels_with(&self, other: &Self) -> bool {
+        matches!((self, other), (Stage::Reverse, Stage::Reverse))
+    }
+
+    /// Constant-folding hook — when source is a literal Val (or every
+    /// upstream stage already constant-folded), each pure stage can
+    /// pre-compute its output at lower-time.  Default returns None; lifted
+    /// Stages with side-effect-free apply override.  Wired into a future
+    /// Phase 0 const-fold pass; today returns None across the board so
+    /// runtime semantics are preserved.
+    pub fn eval_constant(&self, _v: &Val) -> Option<Val> {
+        None
+    }
 }
 
 /// Strategy = execution kernel selected by Phase 5.  Five kernels; every
@@ -1170,39 +1214,21 @@ fn fold_merge_with_kernels(stages: &mut Vec<Stage>, kernels: &mut Vec<BodyKernel
         }
     }
 
-    // Adjacent-pair merges.
+    // Adjacent-pair fold via Stage::cancels_with + Stage::merge_with.
+    // Per-Stage declarative identities; new lifted Stages plug in by
+    // adding match arms to those two methods — zero changes here.
     let mut i = 0;
     while i + 1 < stages.len() {
-        let merged = match (&stages[i], &stages[i + 1]) {
-            (Stage::Reverse, Stage::Reverse) => Some(None),
-            (Stage::Skip(a), Stage::Skip(b)) =>
-                Some(Some(Stage::Skip(a.saturating_add(*b)))),
-            (Stage::Take(a), Stage::Take(b)) =>
-                Some(Some(Stage::Take((*a).min(*b)))),
-            // Sort idempotence — rightmost key wins (overrides earlier).
-            (Stage::Sort(_), Stage::Sort(_)) => {
-                stages.remove(i);
-                kernels.remove(i);
-                continue;
-            }
-            (Stage::UniqueBy(_), Stage::UniqueBy(_)) => {
-                stages.remove(i);
-                kernels.remove(i);
-                continue;
-            }
-            _ => None,
-        };
-        if let Some(replacement) = merged {
+        if stages[i].cancels_with(&stages[i + 1]) {
+            stages.drain(i..=i + 1);
+            kernels.drain(i..=i + 1);
+            if i > 0 { i -= 1; }
+            continue;
+        }
+        if let Some(merged) = stages[i].merge_with(&stages[i + 1]) {
+            stages[i] = merged;
             stages.remove(i + 1);
             kernels.remove(i + 1);
-            match replacement {
-                Some(s) => stages[i] = s,
-                None    => {
-                    stages.remove(i);
-                    kernels.remove(i);
-                    if i > 0 { i -= 1; }
-                }
-            }
             continue;
         }
         i += 1;
