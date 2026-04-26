@@ -133,7 +133,7 @@ impl Iterator for OwnedValChildIter {
     fn next(&mut self) -> Option<Self::Item> { self.inner.next() }
 }
 
-impl Row<'static> for crate::eval::Val {
+impl<'a> Row<'a> for crate::eval::Val {
     type ArrayIter = OwnedValChildIter;
 
     #[inline]
@@ -197,12 +197,12 @@ impl Row<'static> for crate::eval::Val {
     }
 
     #[inline]
-    fn as_str(&self) -> Option<&'static str> {
-        // Owned Val::Str is `Arc<str>` — cannot return &'static str
-        // without leaking.  Returns None for owned strings; callers
-        // needing string access must materialise() or use as_str_ref.
-        // This is the documented compromise of Row<'static> on owned
-        // Val; the borrowed BVal/TapeRow paths are zero-copy.
+    fn as_str(&self) -> Option<&'a str> {
+        // Owned Val::Str is `Arc<str>` — cannot return `&'a str` for
+        // arbitrary `'a` without leaking.  Returns None for owned
+        // strings; callers needing string access must materialise()
+        // or use the owned Val accessor (`as_str_ref`).  Borrowed
+        // BVal/TapeRow paths remain zero-copy.
         None
     }
 
@@ -215,12 +215,11 @@ impl Row<'static> for crate::eval::Val {
     fn is_null(&self) -> bool { matches!(self, crate::eval::Val::Null) }
 
     #[inline]
-    fn materialise(self, arena: &'static Arena) -> BVal<'static> {
-        // Note: materialise consumes self; arena lifetime is 'static
-        // because owned Val implements Row<'static>.  In practice the
-        // unified runner over owned Val won't use materialise (sinks
-        // can stay in owned Val terms).  Implementation here for
-        // trait completeness.
+    fn materialise(self, arena: &'a Arena) -> BVal<'a> {
+        // Owned Val materialise: deep-clone into the arena via the
+        // existing `borrowed::from_owned` boundary.  Used by
+        // First/Last/Collect sinks when an owned-Val source feeds the
+        // unified borrow runner (Phase 5f).
         crate::eval::borrowed::from_owned(arena, &self)
     }
 }
@@ -394,6 +393,36 @@ mod tests {
             _ => panic!(),
         };
         assert_eq!(bv_keys, tr_keys);
+    }
+
+    #[test]
+    fn owned_val_drives_unified_runner() {
+        // Owned Val implements Row<'a> for any 'a.  Same unified
+        // run_pipeline that runs over BVal / TapeRow now also drives
+        // owned Val with a per-call arena.
+        use crate::eval::Val as OV;
+        use crate::eval::borrowed::Arena;
+        use crate::unified::{run_pipeline, MapField, CountSink};
+        use indexmap::IndexMap;
+        use std::sync::Arc;
+
+        let mut row1 = IndexMap::new();
+        row1.insert(Arc::from("n"), OV::Int(10));
+        let mut row2 = IndexMap::new();
+        row2.insert(Arc::from("n"), OV::Int(20));
+        let mut row3 = IndexMap::new();
+        row3.insert(Arc::from("n"), OV::Int(30));
+        let rows: Vec<OV> = vec![
+            OV::Obj(Arc::new(row1)),
+            OV::Obj(Arc::new(row2)),
+            OV::Obj(Arc::new(row3)),
+        ];
+
+        let arena = Arena::new();
+        let stage = MapField::new(Arc::from("n"));
+        let out = run_pipeline::<OV, CountSink>(&arena, rows.into_iter(), &stage);
+        // 3 rows pass the field map, count = 3.
+        assert!(matches!(out, BVal::Int(3)), "got {:?}", out);
     }
 
     #[test]
