@@ -21,6 +21,7 @@ indexmap = "2"
 memchr = "2"
 regex = "1.10"
 simd-json = { version = "0.13", optional = true }
+bumpalo = { version = "3", features = ["collections"] }
 
 [features]
 # simd-json default-on per cold_start_direct_parse plan: routes
