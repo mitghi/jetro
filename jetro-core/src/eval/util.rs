@@ -90,23 +90,25 @@ pub fn cmp_vals(a: &Val, b: &Val) -> std::cmp::Ordering {
 #[inline]
 pub fn val_to_key(v: &Val) -> String {
     match v {
-        Val::Str(s)    => s.to_string(),
-        Val::Int(n)    => n.to_string(),
-        Val::Float(f)  => f.to_string(),
-        Val::Bool(b)   => b.to_string(),
-        Val::Null      => "null".to_string(),
-        other          => val_to_string(other),
+        Val::Str(s)      => s.to_string(),
+        Val::StrSlice(r) => r.as_str().to_string(),
+        Val::Int(n)      => n.to_string(),
+        Val::Float(f)    => f.to_string(),
+        Val::Bool(b)     => b.to_string(),
+        Val::Null        => "null".to_string(),
+        other            => val_to_string(other),
     }
 }
 
 #[inline]
 pub fn val_to_string(v: &Val) -> String {
     match v {
-        Val::Str(s)    => s.to_string(),
-        Val::Int(n)    => n.to_string(),
-        Val::Float(f)  => f.to_string(),
-        Val::Bool(b)   => b.to_string(),
-        Val::Null      => "null".to_string(),
+        Val::Str(s)      => s.to_string(),
+        Val::StrSlice(r) => r.as_str().to_string(),
+        Val::Int(n)      => n.to_string(),
+        Val::Float(f)    => f.to_string(),
+        Val::Bool(b)     => b.to_string(),
+        Val::Null        => "null".to_string(),
         other          => {
             let sv: serde_json::Value = other.clone().into();
             serde_json::to_string(&sv).unwrap_or_default()

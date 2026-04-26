@@ -973,12 +973,18 @@ impl Jetro {
         self.root_val.get_or_init(|| {
             #[cfg(feature = "simd-json")]
             {
-                if let Some(tape) = self.lazy_tape() {
-                    // Phase A: borrowed Val::Str via tape.bytes_buf —
-                    // strings are StrSlice (Arc bump + 2 u32s) rather
-                    // than freshly allocated Arc<str>.  ObjVec
-                    // promotion runs inline so slot kernels light up.
-                    return Val::from_tape_data(tape);
+                // Borrowed Val<'a> wiring (`from_tape_data`) regressed
+                // Q5 unique() on deeply-nested string projections (36 s
+                // hang on bench_cold).  Reverted to Arc<str>-allocating
+                // `from_json_simd` over raw_bytes pending root-cause
+                // fix of from_tape_data's recursive walker on nested
+                // Object subtrees.  Tape exec covers 11/11 bench Qs;
+                // root_val rarely fires in practice.
+                if let Some(raw) = &self.raw_bytes {
+                    let mut buf: Vec<u8> = (**raw).to_vec();
+                    if let Ok(v) = Val::from_json_simd(&mut buf) {
+                        return v;
+                    }
                 }
             }
             Val::from(&self.document)
