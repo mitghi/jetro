@@ -104,9 +104,11 @@ fn build() -> BuiltinRegistry {
     t.insert("intersect", func_arrays::intersect);
     t.insert("union",     func_arrays::union);
     t.insert("enumerate", func_arrays::enumerate);
-    t.insert("window",    func_arrays::window);
-    t.insert("chunk",     func_arrays::chunk);
-    t.insert("batch",     func_arrays::chunk);
+    // .window / .chunk / .batch lifted to pipeline::Stage::Window /
+    // Stage::Chunk (batch alias).
+    t.insert("window",    window_dispatch);
+    t.insert("chunk",     chunk_dispatch);
+    t.insert("batch",     chunk_dispatch);
     t.insert("takewhile", func_arrays::takewhile);
     t.insert("take_while",func_arrays::takewhile);
     t.insert("dropwhile", func_arrays::dropwhile);
@@ -518,6 +520,20 @@ fn replace_all_dispatch(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalE
     let replacement = str_arg(args, 1, env)?;
     crate::pipeline::replace_apply(recv, needle.as_str(), replacement.as_str(), true)
         .ok_or_else(|| EvalError("replace_all: expected string".into()))
+}
+
+fn chunk_dispatch(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+    let n = first_i64_arg(args, env).unwrap_or(1).max(1) as usize;
+    let items = recv.into_vec()
+        .ok_or_else(|| EvalError("chunk: expected array".into()))?;
+    Ok(Val::arr(crate::pipeline::chunk_apply(&items, n)))
+}
+
+fn window_dispatch(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+    let n = first_i64_arg(args, env).unwrap_or(2).max(1) as usize;
+    let items = recv.into_vec()
+        .ok_or_else(|| EvalError("window: expected array".into()))?;
+    Ok(Val::arr(crate::pipeline::window_apply(&items, n)))
 }
 
 fn b_missing(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {

@@ -441,17 +441,10 @@ pub fn pairwise(recv: Val) -> Result<Val, EvalError> {
     Ok(Val::arr(items.windows(2).map(|w| Val::arr(w.to_vec())).collect()))
 }
 
-pub fn window(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-    let n = first_i64_arg(args, env).unwrap_or(2).max(1) as usize;
-    let items = recv.into_vec().ok_or_else(|| EvalError("window: expected array".into()))?;
-    Ok(Val::arr(items.windows(n).map(|w| Val::arr(w.to_vec())).collect()))
-}
-
-pub fn chunk(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-    let n = first_i64_arg(args, env).unwrap_or(1).max(1) as usize;
-    let items = recv.into_vec().ok_or_else(|| EvalError("chunk: expected array".into()))?;
-    Ok(Val::arr(items.chunks(n).map(|c| Val::arr(c.to_vec())).collect()))
-}
+// `.window` and `.chunk` (alias `.batch`) lifted to
+// `pipeline::Stage::Window` / `pipeline::Stage::Chunk`.  Canonical impls
+// in `pipeline::{window_apply, chunk_apply}`; dispatch shims in
+// `eval/builtins.rs::{window_dispatch, chunk_dispatch}`.
 
 pub fn takewhile(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     let pred  = args.first().ok_or_else(|| EvalError("takewhile: requires predicate".into()))?;

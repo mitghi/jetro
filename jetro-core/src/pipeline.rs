@@ -291,6 +291,14 @@ pub enum Stage {
     /// `.replace_all(needle, replacement)` (`all=true`) — 1 string → 1
     /// string.  `Cardinality::OneToOne` + `can_indexed=true`.
     Replace { needle: Arc<str>, replacement: Arc<str>, all: bool },
+
+    /// `.chunk(n)` — partitions the upstream stream into chunks of size n
+    /// (last chunk may be shorter).  Barrier — needs the full stream.
+    /// Each emitted element is a `Val::arr` of n upstream values.
+    Chunk(usize),
+    /// `.window(n)` — sliding window of size n over the upstream stream.
+    /// Barrier.  Emits `len.saturating_sub(n) + 1` overlapping windows.
+    Window(usize),
 }
 
 /// Phase A3 — sub-program "kernel" shape recognised at lower-time.
@@ -829,7 +837,9 @@ fn upstream_demand(d: Demand, stage: &Stage) -> Demand {
             | Stage::Sort(_)
             | Stage::UniqueBy(_)
             | Stage::GroupBy(_)
-            | Stage::Split(_) => Demand::UNBOUNDED,
+            | Stage::Split(_)
+            | Stage::Chunk(_)
+            | Stage::Window(_) => Demand::UNBOUNDED,
         // Slice / Replace are 1:1 — preserve.
         Stage::Slice(_, _) | Stage::Replace { .. } => d,
     }
@@ -974,6 +984,15 @@ impl Stage {
                 order:       Order::Stateless,
                 purity:      true,
                 boundedness: Boundedness::Always(1),
+                can_indexed: true,
+                cost:        2.0,
+                selectivity: 1.0,
+            },
+            Stage::Chunk(_) | Stage::Window(_) => StageShape {
+                cardinality: Cardinality::Barrier,
+                order:       Order::Stateful,
+                purity:      true,
+                boundedness: Boundedness::AtMost(Bound::Unbounded),
                 can_indexed: true,
                 cost:        2.0,
                 selectivity: 1.0,
@@ -1469,6 +1488,20 @@ impl Pipeline {
                             stages.push(Stage::Replace {
                                 needle, replacement, all: name.as_str() == "replace_all",
                             });
+                        }
+                        ("chunk", 1, _) | ("batch", 1, _) => {
+                            let n = match &args[0] {
+                                Arg::Pos(Expr::Int(n)) if *n >= 1 => *n as usize,
+                                _ => return None,
+                            };
+                            stages.push(Stage::Chunk(n));
+                        }
+                        ("window", 1, _) => {
+                            let n = match &args[0] {
+                                Arg::Pos(Expr::Int(n)) if *n >= 1 => *n as usize,
+                                _ => return None,
+                            };
+                            stages.push(Stage::Window(n));
                         }
                         ("count", 0, true) | ("len", 0, true) => sink = Sink::Count,
                         ("sum", 0, true) => sink = Sink::Numeric(NumOp::Sum),
@@ -2700,7 +2733,7 @@ impl Pipeline {
         let needs_barrier = self.stages.iter().any(|s| matches!(s,
             Stage::Reverse | Stage::Sort(_) | Stage::UniqueBy(_)
                 | Stage::FlatMap(_) | Stage::GroupBy(_)
-                | Stage::Split(_)));
+                | Stage::Split(_) | Stage::Chunk(_) | Stage::Window(_)));
         let pre_iter: Box<dyn Iterator<Item = Val>> = if needs_barrier {
             let mut buf: Vec<Val> = iter.collect();
             // Phase 1.2 — barrier-stage path now reads stage_kernels[i]
@@ -2827,6 +2860,12 @@ impl Pipeline {
                         }
                         buf = out;
                     }
+                    Stage::Chunk(n) => {
+                        buf = chunk_apply(&buf, *n);
+                    }
+                    Stage::Window(n) => {
+                        buf = window_apply(&buf, *n);
+                    }
                 }
             }
             Box::new(buf.into_iter())
@@ -2859,7 +2898,7 @@ impl Pipeline {
                         }
                         Stage::Reverse | Stage::Sort(_) | Stage::UniqueBy(_)
                         | Stage::FlatMap(_) | Stage::GroupBy(_) => {}
-                        Stage::Split(_) => {} // forced into barrier path above
+                        Stage::Split(_) | Stage::Chunk(_) | Stage::Window(_) => {} // forced into barrier path above
                         Stage::Slice(start, end) => {
                             item = slice_apply(item, *start, *end);
                         }
@@ -2976,6 +3015,23 @@ pub(crate) fn split_apply(recv: &Val, sep: &str) -> Option<Val> {
         _                => return None,
     };
     Some(Val::arr(s.split(sep).map(|p| Val::Str(Arc::<str>::from(p))).collect()))
+}
+
+/// Canonical `.chunk(n)` partition into chunks of size `n` (last may be
+/// shorter).  Shared by Stage::Chunk runtime arm and the dispatch shim.
+/// Each emitted Val is a `Val::arr` of up to `n` source elements.
+pub(crate) fn chunk_apply(items: &[Val], n: usize) -> Vec<Val> {
+    let n = n.max(1);
+    items.chunks(n).map(|c| Val::arr(c.to_vec())).collect()
+}
+
+/// Canonical `.window(n)` sliding window of size `n` over the source
+/// stream.  Shared by Stage::Window runtime arm and the dispatch shim.
+/// Emits `len.saturating_sub(n) + 1` overlapping windows; empty when
+/// `n > len`.
+pub(crate) fn window_apply(items: &[Val], n: usize) -> Vec<Val> {
+    let n = n.max(1);
+    items.windows(n).map(|w| Val::arr(w.to_vec())).collect()
 }
 
 /// Canonical `.replace(needle, repl)` (all=false, replacen-1) and
