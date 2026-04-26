@@ -1356,31 +1356,33 @@ impl Pipeline {
         let key_strs: Vec<&str> = chain_keys.iter().map(|k| k.as_ref()).collect();
         let arr_idx = crate::strref::tape_walk_field_chain(tape, &key_strs)?;
 
-        // Stage classifier: (leading FlatMap?, Filter*, Map?, UniqueBy?).
-        // - Leading optional FlatMap (FieldRead/FieldChain kernel) →
-        //   resolves outer entry to inner Array idx; iterate inner.
-        // - Filters apply to current entry idx (pred kernels only).
-        // - Optional Map (FieldRead/FieldChain) projects entry into
-        //   a TapeVal scalar.
-        // - Optional trailing UniqueBy(None) — barrier dedup over
-        //   resulting rows (works on both Entry and Scalar rows).
-        // Other orderings / stage kinds bail.
+        // Stage classifier: (FlatMap?, Filter*, Skip?, Take?, Map?, UniqueBy?, Reverse?).
+        // - FlatMap (leading) — outer entry → inner Array
+        // - Filter (any pred kernel) — entry-side
+        // - Skip(n) — drop first n rows
+        // - Take(n) — keep first n rows
+        // - Map (FieldRead/FieldChain) — entry → TapeVal
+        // - UniqueBy(None) — barrier dedup
+        // - Reverse — barrier flip
         let mut flat_kernel: Option<&BodyKernel> = None;
         let mut filter_kernels: Vec<&BodyKernel> = Vec::new();
+        let mut skip_n: usize = 0;
+        let mut take_n: Option<usize> = None;
         let mut map_kernel: Option<&BodyKernel> = None;
         let mut unique_dedup = false;
+        let mut reverse = false;
         for (i, (st, k)) in self.stages.iter().zip(self.stage_kernels.iter()).enumerate() {
-            if unique_dedup { return None; }  // UniqueBy must be last
+            if reverse { return None; }
             match st {
                 Stage::FlatMap(_) if i == 0 => {
-                    if map_kernel.is_some() { return None; }
+                    if map_kernel.is_some() || skip_n > 0 || take_n.is_some() { return None; }
                     if !matches!(k,
                         BodyKernel::FieldRead(_) | BodyKernel::FieldChain(_))
                     { return None; }
                     flat_kernel = Some(k);
                 }
                 Stage::Filter(_) => {
-                    if map_kernel.is_some() { return None; }
+                    if map_kernel.is_some() || take_n.is_some() { return None; }
                     if !matches!(k,
                         BodyKernel::FieldRead(_)
                         | BodyKernel::FieldCmpLit(_, _, _)
@@ -1388,6 +1390,14 @@ impl Pipeline {
                         | BodyKernel::ConstBool(_))
                     { return None; }
                     filter_kernels.push(k);
+                }
+                Stage::Skip(n) => {
+                    if map_kernel.is_some() || take_n.is_some() { return None; }
+                    skip_n = skip_n.saturating_add(*n);
+                }
+                Stage::Take(n) => {
+                    if map_kernel.is_some() { return None; }
+                    take_n = Some(take_n.map(|m| m.min(*n)).unwrap_or(*n));
                 }
                 Stage::Map(_) => {
                     if map_kernel.is_some() { return None; }
@@ -1397,8 +1407,10 @@ impl Pipeline {
                     map_kernel = Some(k);
                 }
                 Stage::UniqueBy(None) => {
+                    if unique_dedup { return None; }
                     unique_dedup = true;
                 }
+                Stage::Reverse => { reverse = true; }
                 _ => return None,
             }
         }
@@ -1416,9 +1428,14 @@ impl Pipeline {
         }
         let outer_iter = crate::strref::tape_array_iter(tape, arr_idx)?;
 
+        // Skip / Take counters threaded through both branches.  Skip
+        // burns first N post-filter rows; Take ends iteration after
+        // taking N; both are streaming (no buffer).
+        let mut skipped: usize = 0;
+        let mut taken:   usize = 0;
+        let take_limit = take_n;
+
         if let Some(fk_kernel) = flat_kernel {
-            // FlatMap: per outer entry, resolve inner Array via kernel,
-            // iterate its entries; apply remaining filters; feed sink.
             'outer: for outer_idx in outer_iter {
                 let inner_arr = match fk_kernel {
                     BodyKernel::FieldRead(k) =>
@@ -1432,7 +1449,7 @@ impl Pipeline {
                 let inner_arr = match inner_arr { Some(i) => i, None => continue };
                 let inner_iter = match crate::strref::tape_array_iter(tape, inner_arr) {
                     Some(it) => it,
-                    None => continue,  // not an array — skip this outer
+                    None => continue,
                 };
                 'inner: for inner_idx in inner_iter {
                     for fk in &filter_kernels {
@@ -1442,10 +1459,13 @@ impl Pipeline {
                             None => return None,
                         }
                     }
+                    if skipped < skip_n { skipped += 1; continue; }
+                    if let Some(lim) = take_limit { if taken >= lim { break 'outer; } }
                     let row = match map_kernel {
                         Some(mk) => RowSrc::Scalar(eval_kernel_value(mk, tape, inner_idx)?),
                         None => RowSrc::Entry(inner_idx),
                     };
+                    taken += 1;
                     if !acc.feed(tape, row)? { break 'outer; }
                 }
             }
@@ -1458,15 +1478,26 @@ impl Pipeline {
                         None => return None,
                     }
                 }
+                if skipped < skip_n { skipped += 1; continue; }
+                if let Some(lim) = take_limit { if taken >= lim { break; } }
                 let row = match map_kernel {
                     Some(mk) => RowSrc::Scalar(eval_kernel_value(mk, tape, entry_idx)?),
                     None => RowSrc::Entry(entry_idx),
                 };
+                taken += 1;
                 if !acc.feed(tape, row)? { break; }
             }
         }
 
-        let result = acc.finalise(tape);
+        let result_pre_reverse = acc.finalise(tape);
+        // Reverse barrier — only meaningful when sink is Collect; for
+        // other sinks reverse on the result is undefined (most are
+        // scalar). Reverse a Val::Arr / typed-vec by clone-reversing.
+        let result = if reverse {
+            reverse_collect_result(result_pre_reverse)
+        } else {
+            result_pre_reverse
+        };
         cache.note_tape_run();
         Some(Ok(result))
     }
@@ -2963,6 +2994,50 @@ fn float_to_sortable(f: f64) -> u64 {
     let bits = f.to_bits();
     // Twiddle so IEEE float order becomes u64 lexicographic order.
     if bits >> 63 == 0 { bits ^ (1u64 << 63) } else { !bits }
+}
+
+/// Reverse a Collect-shaped result.  Operates on the typed lanes
+/// (IntVec/FloatVec/StrSliceVec) directly via Vec::reverse + Arc
+/// rebuild; on Val::Arr unwraps + reverses + rewraps.  Other Val
+/// variants pass through (Reverse on a scalar is undefined).
+#[cfg(feature = "simd-json")]
+fn reverse_collect_result(v: Val) -> Val {
+    use std::sync::Arc;
+    match v {
+        Val::Arr(a) => {
+            let mut inner = match Arc::try_unwrap(a) {
+                Ok(v) => v,
+                Err(a) => (*a).clone(),
+            };
+            inner.reverse();
+            Val::Arr(Arc::new(inner))
+        }
+        Val::IntVec(a) => {
+            let mut inner = match Arc::try_unwrap(a) {
+                Ok(v) => v,
+                Err(a) => (*a).clone(),
+            };
+            inner.reverse();
+            Val::IntVec(Arc::new(inner))
+        }
+        Val::FloatVec(a) => {
+            let mut inner = match Arc::try_unwrap(a) {
+                Ok(v) => v,
+                Err(a) => (*a).clone(),
+            };
+            inner.reverse();
+            Val::FloatVec(Arc::new(inner))
+        }
+        Val::StrSliceVec(a) => {
+            let mut inner = match Arc::try_unwrap(a) {
+                Ok(v) => v,
+                Err(a) => (*a).clone(),
+            };
+            inner.reverse();
+            Val::StrSliceVec(Arc::new(inner))
+        }
+        other => other,
+    }
 }
 
 /// Invert sort order — flip Int sign, complement Float bits, and
