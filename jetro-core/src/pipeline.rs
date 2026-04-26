@@ -2890,6 +2890,22 @@ enum SinkAcc<'p> {
     CountIf { count: usize, pred: &'p BodyKernel },
     /// `Filter(pred) ∘ First` — keeps first matching tape entry idx.
     FilterFirst { hit: Option<usize>, pred: &'p BodyKernel },
+    /// `Filter(pred) ∘ Last` — keeps last matching tape entry idx.
+    FilterLast { hit: Option<usize>, pred: &'p BodyKernel },
+    /// `FlatMap(f) ∘ Count` — sums inner array lengths per outer entry.
+    /// kernel resolves outer entry → inner Array idx (FieldRead /
+    /// FieldChain).
+    FlatMapCount { count: usize, kernel: &'p BodyKernel },
+    /// `Sort_by(k) ∘ Take(n)` — bounded heap of size N sorted by key
+    /// extracted via kernel.  `asc=true` keeps the N smallest;
+    /// `asc=false` keeps the N largest.  At finalise, drains heap into
+    /// a Val::Arr in sorted order via from_tape_node.
+    TopN {
+        n: usize,
+        asc: bool,
+        kernel: Option<&'p BodyKernel>,
+        heap: std::collections::BinaryHeap<TopHeapItem>,
+    },
     /// Collect rows (post-stage) — gathers RowSrc values.  At finalise:
     /// - all `Entry` rows → typed-lane probe over entry tape nodes
     /// - all `Scalar` rows of uniform type → IntVec / FloatVec /
@@ -2899,6 +2915,91 @@ enum SinkAcc<'p> {
     /// `dedup` enables in-line dedup via HashSet keyed on the row's
     /// content — implements `Stage::UniqueBy(None) ∘ Sink::Collect`.
     Collect { rows: Vec<RowSrc>, dedup: Option<std::collections::HashSet<RowKey>> },
+}
+
+/// Heap item for TopN — carries a sort key + entry idx.  `Ord` impl
+/// is derived from `key`; `entry` only used for materialise at
+/// finalise.  For asc=false (largest N), feed inverts the key sign /
+/// reverses the comparison externally.
+#[cfg(feature = "simd-json")]
+#[derive(Debug, Clone)]
+pub struct TopHeapItem {
+    pub key: TopKey,
+    pub entry: usize,
+}
+
+/// Sortable key — string by content bytes (Vec<u8>) or numeric (i64 or
+/// f64-bits).  Bool / Null / Missing degrade to "smallest".
+#[cfg(feature = "simd-json")]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum TopKey {
+    /// Always-min sentinel (Null / Bool / Missing).
+    Bottom,
+    /// f64-as-bits-with-NaN-canonical preserves total order via
+    /// custom helper at insert time.
+    Int(i64),
+    /// f64 lifted to a sortable u64 (TotalOrder bit twiddle below).
+    Float(u64),
+    Str(Vec<u8>),
+}
+
+#[cfg(feature = "simd-json")]
+impl Ord for TopHeapItem {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering { self.key.cmp(&other.key) }
+}
+#[cfg(feature = "simd-json")]
+impl PartialOrd for TopHeapItem {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> { Some(self.cmp(other)) }
+}
+#[cfg(feature = "simd-json")]
+impl PartialEq for TopHeapItem {
+    fn eq(&self, other: &Self) -> bool { self.key == other.key }
+}
+#[cfg(feature = "simd-json")]
+impl Eq for TopHeapItem {}
+
+#[cfg(feature = "simd-json")]
+fn float_to_sortable(f: f64) -> u64 {
+    let bits = f.to_bits();
+    // Twiddle so IEEE float order becomes u64 lexicographic order.
+    if bits >> 63 == 0 { bits ^ (1u64 << 63) } else { !bits }
+}
+
+/// Invert sort order — flip Int sign, complement Float bits, and
+/// invert each byte of Str.  Pushes "largest original" to the position
+/// of "smallest" so a single max-heap-pop-when-over-N keeps the
+/// largest N (asc=false case) using the same algorithm as smallest-N.
+#[cfg(feature = "simd-json")]
+fn invert_key(k: TopKey) -> TopKey {
+    match k {
+        TopKey::Int(n) => TopKey::Int(n.wrapping_neg()),
+        TopKey::Float(b) => TopKey::Float(!b),
+        TopKey::Str(s) => {
+            let mut inv = s;
+            for byte in inv.iter_mut() { *byte = !*byte; }
+            TopKey::Str(inv)
+        }
+        TopKey::Bottom => TopKey::Bottom,
+    }
+}
+
+#[cfg(feature = "simd-json")]
+fn topkey_from_row(tape: &crate::strref::TapeData, row: RowSrc) -> TopKey {
+    use crate::strref::TapeNode;
+    let v = match row {
+        RowSrc::Scalar(v) => v,
+        RowSrc::Entry(idx) => node_to_tape_val(tape, idx),
+    };
+    match v {
+        TapeVal::Int(n) => TopKey::Int(n),
+        TapeVal::Float(f) => TopKey::Float(float_to_sortable(f)),
+        TapeVal::StrIdx(i) => match tape.nodes[i] {
+            TapeNode::StringRef { start, end } =>
+                TopKey::Str(tape.bytes_buf[start as usize..end as usize].to_vec()),
+            _ => TopKey::Bottom,
+        },
+        _ => TopKey::Bottom,
+    }
 }
 
 /// Hashable key derived from a RowSrc.  Strings keyed by their content
@@ -3019,6 +3120,35 @@ impl<'p> SinkAcc<'p> {
                 let pred = sink_kernels.get(0)?;
                 Some(Self::FilterFirst { hit: None, pred })
             }
+            Sink::FilterLast(_)   => {
+                let pred = sink_kernels.get(0)?;
+                Some(Self::FilterLast { hit: None, pred })
+            }
+            Sink::FlatMapCount(_) => {
+                let kernel = sink_kernels.get(0)?;
+                if !matches!(kernel,
+                    BodyKernel::FieldRead(_) | BodyKernel::FieldChain(_))
+                { return None; }
+                Some(Self::FlatMapCount { count: 0, kernel })
+            }
+            Sink::TopN { n, asc, key } => {
+                // key=None: sort entries themselves (rare).  key=Some(p):
+                // require kernel to be value-producing (FieldRead/FieldChain).
+                let kernel = match key {
+                    Some(_) => {
+                        let k = sink_kernels.get(0)?;
+                        if !matches!(k,
+                            BodyKernel::FieldRead(_) | BodyKernel::FieldChain(_))
+                        { return None; }
+                        Some(k)
+                    }
+                    None => None,
+                };
+                Some(Self::TopN {
+                    n: *n, asc: *asc, kernel,
+                    heap: std::collections::BinaryHeap::with_capacity(*n + 1),
+                })
+            }
             Sink::Collect         => Some(Self::Collect { rows: Vec::new(), dedup: None }),
             // Unsupported sinks bail; caller falls back to Val path.
             _ => None,
@@ -3073,6 +3203,53 @@ impl<'p> SinkAcc<'p> {
                 }
                 Some(true)
             }
+            Self::FilterLast { hit, pred } => {
+                let entry = match row { RowSrc::Entry(i) => i, _ => return None };
+                if eval_kernel_pred(pred, tape, entry)? { *hit = Some(entry); }
+                Some(true)
+            }
+            Self::TopN { n, asc, kernel, heap } => {
+                let entry = match row { RowSrc::Entry(i) => i, _ => return None };
+                // Key extraction.  No-kernel: key from entry tape value.
+                // With kernel: project via FieldRead/FieldChain.
+                let key_row = match kernel {
+                    Some(k) => {
+                        let v = eval_kernel_value(k, tape, entry)?;
+                        RowSrc::Scalar(v)
+                    }
+                    None => RowSrc::Entry(entry),
+                };
+                let mut key = topkey_from_row(tape, key_row);
+                // For descending (asc=false → keep largest), invert key
+                // by reversing comparison through max-heap default.
+                // BinaryHeap is a max-heap.  Strategy: keep "smallest n"
+                // → push, pop max if heap exceeds n.  For "largest n",
+                // negate Int / invert Float bits / reverse Str.
+                if !*asc {
+                    key = invert_key(key);
+                }
+                heap.push(TopHeapItem { key, entry });
+                if heap.len() > *n { heap.pop(); }
+                Some(true)
+            }
+            Self::FlatMapCount { count, kernel } => {
+                let entry = match row { RowSrc::Entry(i) => i, _ => return None };
+                let inner = match kernel {
+                    BodyKernel::FieldRead(k) =>
+                        crate::strref::tape_object_field(tape, entry, k.as_ref()),
+                    BodyKernel::FieldChain(keys) => {
+                        let key_strs: Vec<&str> = keys.iter().map(|k| k.as_ref()).collect();
+                        crate::strref::tape_walk_field_chain_from(tape, entry, &key_strs)
+                    }
+                    _ => return None,
+                };
+                if let Some(inner_arr) = inner {
+                    if let crate::strref::TapeNode::Array { len, .. } = tape.nodes[inner_arr] {
+                        *count += len as usize;
+                    }
+                }
+                Some(true)
+            }
             Self::Collect { rows, dedup } => {
                 if let Some(seen) = dedup {
                     let key = row_key(tape, row);
@@ -3092,11 +3269,30 @@ impl<'p> SinkAcc<'p> {
                 tape_finalise(op, st.sum_i, st.sum_f, st.count, st.min_f, st.max_f, st.is_float)
             }
             Self::CountIf { count, .. } => Val::Int(count as i64),
-            Self::FilterFirst { hit, .. } => {
+            Self::FilterFirst { hit, .. } | Self::FilterLast { hit, .. } => {
                 match hit {
                     Some(idx) => crate::eval::Val::from_tape_node(tape, idx),
                     None => Val::Null,
                 }
+            }
+            Self::FlatMapCount { count, .. } => Val::Int(count as i64),
+            Self::TopN { heap, asc, .. } => {
+                // Drain heap into Vec sorted ascending by stored key.
+                // For asc=true, keys are natural; for asc=false, keys
+                // were inverted at insert so natural sort still gives
+                // descending of the original.
+                let mut items: Vec<TopHeapItem> = heap.into_iter().collect();
+                items.sort_by(|a, b| a.key.cmp(&b.key));
+                // Build Val::Arr in result order — for asc=false the
+                // user expects largest first, which means inverted
+                // ascending (smallest inverted = largest original).
+                let mut out: Vec<Val> = Vec::with_capacity(items.len());
+                if asc {
+                    for it in items { out.push(crate::eval::Val::from_tape_node(tape, it.entry)); }
+                } else {
+                    for it in items { out.push(crate::eval::Val::from_tape_node(tape, it.entry)); }
+                }
+                Val::Arr(std::sync::Arc::new(out))
             }
             Self::Collect { rows, .. } => collect_rows_to_val(tape, &rows),
         }
