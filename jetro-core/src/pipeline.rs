@@ -299,6 +299,16 @@ pub enum Stage {
     /// `.window(n)` — sliding window of size n over the upstream stream.
     /// Barrier.  Emits `len.saturating_sub(n) + 1` overlapping windows.
     Window(usize),
+
+    /// Step 3d-extension (A2): recursive sub-pipeline planning.
+    /// Outer `.map(@.<chain>)` whose body is itself a recognisable
+    /// chain compiles BODY into its own `Plan` instead of an opaque
+    /// `vm::Program`.  Per outer element, the inner Plan runs against
+    /// that element as the seed.  `Cardinality::OneToOne` (one inner
+    /// run per outer element) + `can_indexed=true`.  Wins on shapes
+    /// like `map(@.text.split(",").first())` — inner Plan reduces via
+    /// IndexedDispatch / EarlyExit etc., not full materialisation.
+    CompiledMap(Arc<Plan>),
 }
 
 /// Phase A3 — sub-program "kernel" shape recognised at lower-time.
@@ -840,8 +850,8 @@ fn upstream_demand(d: Demand, stage: &Stage) -> Demand {
             | Stage::Split(_)
             | Stage::Chunk(_)
             | Stage::Window(_) => Demand::UNBOUNDED,
-        // Slice / Replace are 1:1 — preserve.
-        Stage::Slice(_, _) | Stage::Replace { .. } => d,
+        // Slice / Replace / CompiledMap are 1:1 — preserve.
+        Stage::Slice(_, _) | Stage::Replace { .. } | Stage::CompiledMap(_) => d,
     }
 }
 
@@ -995,6 +1005,15 @@ impl Stage {
                 boundedness: Boundedness::AtMost(Bound::Unbounded),
                 can_indexed: true,
                 cost:        2.0,
+                selectivity: 1.0,
+            },
+            Stage::CompiledMap(_) => StageShape {
+                cardinality: Cardinality::OneToOne,
+                order:       Order::Stateless,
+                purity:      true,
+                boundedness: Boundedness::Always(1),
+                can_indexed: true,
+                cost:        10.0,
                 selectivity: 1.0,
             },
         }
@@ -1372,7 +1391,7 @@ impl Pipeline {
     }
 
     fn lower_inner(expr: &Expr) -> Option<Pipeline> {
-        use crate::ast::{Step, Arg};
+        use crate::ast::Step;
         let (base, steps) = match expr {
             Expr::Chain(b, s) => (b.as_ref(), s.as_slice()),
             _ => return None,
@@ -1404,118 +1423,8 @@ impl Pipeline {
         // Pipeline::run can reuse it per row.  Sub-programs run against
         // the current item bound as the VM's root, so `@.field` and
         // `@` references resolve to the row.
-        let mut stages: Vec<Stage> = Vec::new();
-        let mut sink: Sink = Sink::Collect;
         let trailing = &steps[field_end..];
-        for (i, s) in trailing.iter().enumerate() {
-            let is_last = i == trailing.len() - 1;
-            match s {
-                Step::Method(name, args) => {
-                    match (name.as_str(), args.len(), is_last) {
-                        ("filter", 1, _) => {
-                            let prog = compile_subexpr(&args[0])?;
-                            stages.push(Stage::Filter(prog));
-                        }
-                        ("map", 1, _) => {
-                            let prog = compile_subexpr(&args[0])?;
-                            stages.push(Stage::Map(prog));
-                        }
-                        ("flat_map", 1, _) => {
-                            let prog = compile_subexpr(&args[0])?;
-                            stages.push(Stage::FlatMap(prog));
-                        }
-                        ("reverse", 0, _) => stages.push(Stage::Reverse),
-                        ("unique", 0, _) => stages.push(Stage::UniqueBy(None)),
-                        ("unique_by", 1, _) => {
-                            let prog = compile_subexpr(&args[0])?;
-                            stages.push(Stage::UniqueBy(Some(prog)));
-                        }
-                        ("group_by", 1, _) => {
-                            let prog = compile_subexpr(&args[0])?;
-                            stages.push(Stage::GroupBy(prog));
-                        }
-                        ("sort", 0, _) => stages.push(Stage::Sort(None)),
-                        ("sort_by", 1, _) => {
-                            let prog = compile_subexpr(&args[0])?;
-                            stages.push(Stage::Sort(Some(prog)));
-                        }
-                        ("take", 1, _) => {
-                            let n = match &args[0] {
-                                Arg::Pos(Expr::Int(n)) if *n >= 0 => *n as usize,
-                                _ => return None,
-                            };
-                            stages.push(Stage::Take(n));
-                        }
-                        ("skip", 1, _) => {
-                            let n = match &args[0] {
-                                Arg::Pos(Expr::Int(n)) if *n >= 0 => *n as usize,
-                                _ => return None,
-                            };
-                            stages.push(Stage::Skip(n));
-                        }
-                        // Step 3d-extension (C): lifted string Stages.
-                        // Top-level `.split(sep)` / `.slice(start[, end])`
-                        // — accepted only when source is a string-yielding
-                        // pipeline (lowering doesn't validate type; barrier
-                        // path skips non-string inputs).
-                        ("split", 1, _) => {
-                            let sep = match &args[0] {
-                                Arg::Pos(Expr::Str(s)) => Arc::<str>::from(s.as_str()),
-                                _ => return None,
-                            };
-                            stages.push(Stage::Split(sep));
-                        }
-                        ("slice", 1, _) => {
-                            let start = match &args[0] {
-                                Arg::Pos(Expr::Int(n)) => *n,
-                                _ => return None,
-                            };
-                            stages.push(Stage::Slice(start, None));
-                        }
-                        ("slice", 2, _) => {
-                            let (start, end) = match (&args[0], &args[1]) {
-                                (Arg::Pos(Expr::Int(s)), Arg::Pos(Expr::Int(e))) => (*s, Some(*e)),
-                                _ => return None,
-                            };
-                            stages.push(Stage::Slice(start, end));
-                        }
-                        ("replace", 2, _) | ("replace_all", 2, _) => {
-                            let (needle, replacement) = match (&args[0], &args[1]) {
-                                (Arg::Pos(Expr::Str(n)), Arg::Pos(Expr::Str(r))) =>
-                                    (Arc::<str>::from(n.as_str()), Arc::<str>::from(r.as_str())),
-                                _ => return None,
-                            };
-                            stages.push(Stage::Replace {
-                                needle, replacement, all: name.as_str() == "replace_all",
-                            });
-                        }
-                        ("chunk", 1, _) | ("batch", 1, _) => {
-                            let n = match &args[0] {
-                                Arg::Pos(Expr::Int(n)) if *n >= 1 => *n as usize,
-                                _ => return None,
-                            };
-                            stages.push(Stage::Chunk(n));
-                        }
-                        ("window", 1, _) => {
-                            let n = match &args[0] {
-                                Arg::Pos(Expr::Int(n)) if *n >= 1 => *n as usize,
-                                _ => return None,
-                            };
-                            stages.push(Stage::Window(n));
-                        }
-                        ("count", 0, true) | ("len", 0, true) => sink = Sink::Count,
-                        ("sum", 0, true) => sink = Sink::Numeric(NumOp::Sum),
-                        ("min", 0, true) => sink = Sink::Numeric(NumOp::Min),
-                        ("max", 0, true) => sink = Sink::Numeric(NumOp::Max),
-                        ("avg", 0, true) => sink = Sink::Numeric(NumOp::Avg),
-                        ("first", 0, true) => sink = Sink::First,
-                        ("last", 0, true) => sink = Sink::Last,
-                        _ => return None,
-                    }
-                }
-                _ => return None,
-            }
-        }
+        let (stages, sink) = decode_method_chain(trailing)?;
 
         let mut p = Pipeline {
             source: Source::FieldChain { keys },
@@ -1555,6 +1464,191 @@ impl Pipeline {
         p.sink_kernels = Vec::new();
         Some(p)
     }
+}
+
+/// Step 3d-extension (A2): try to decode the body of a Map(...) call as
+/// its own pipeline Plan.  Body must be `Expr::Chain(Expr::Current, [...])`
+/// with at least one trailing method or field access.  Field-chain
+/// prefix becomes a leading `Stage::Map(field-walk)`; trailing methods
+/// decode via the shared `decode_method_chain` helper.  Inner Plan runs
+/// `plan_with_kernels` so it picks IndexedDispatch / BarrierMaterialise /
+/// EarlyExit / DoneTerminating / PullLoop strategies recursively.
+///
+/// Returns None when the body is opaque (lambda, custom method, side
+/// effect) — caller falls back to `Stage::Map(opaque_program)`.
+fn try_decode_map_body(arg: &crate::ast::Arg) -> Option<Plan> {
+    use crate::ast::{Arg, Step};
+    let expr = match arg { Arg::Pos(e) => e, _ => return None };
+    let (base, steps) = match expr {
+        Expr::Chain(b, s) => (b.as_ref(), s.as_slice()),
+        _ => return None,
+    };
+    if !matches!(base, Expr::Current) { return None; }
+
+    // Field-chain prefix walks @.a.b.c → seed.a.b.c.  Encoded as a
+    // leading Map stage whose body is the FieldChain program over @.
+    let mut field_end = 0;
+    for s in steps {
+        match s { Step::Field(_) => field_end += 1, _ => break }
+    }
+    let trailing = &steps[field_end..];
+    // Require at least one trailing method — pure field access alone
+    // is what plain Stage::Map(@.a.b.c) already handles.
+    if trailing.is_empty() { return None; }
+
+    let mut stages: Vec<Stage> = Vec::new();
+    if field_end > 0 {
+        // Build a sub-program `[PushCurrent, FieldChain([...])]` that
+        // walks the prefix from the seed.
+        let keys: Arc<[Arc<str>]> = steps[..field_end].iter()
+            .map(|s| match s { Step::Field(k) => Arc::<str>::from(k.as_str()), _ => unreachable!() })
+            .collect::<Vec<_>>().into();
+        let n_keys = keys.len();
+        let fcd = Arc::new(crate::vm::FieldChainData {
+            keys,
+            ics: (0..n_keys).map(|_| std::sync::atomic::AtomicU64::new(0))
+                .collect::<Vec<_>>().into_boxed_slice(),
+        });
+        let ops = vec![crate::vm::Opcode::PushCurrent, crate::vm::Opcode::FieldChain(fcd)];
+        let prog = Arc::new(crate::vm::Program::new(ops, "<compiled-map-prefix>"));
+        stages.push(Stage::Map(prog));
+    }
+    let (mut more_stages, sink) = decode_method_chain(trailing)?;
+    stages.append(&mut more_stages);
+
+    // Run the same planning the outer pipeline does.  Kernel
+    // classification feeds Phase 3 reorder + Phase 5 strategy select.
+    let kernels: Vec<BodyKernel> = stages.iter().map(|s| match s {
+        Stage::Filter(p)         => BodyKernel::classify(p),
+        Stage::Map(p)            => BodyKernel::classify(p),
+        Stage::FlatMap(p)        => BodyKernel::classify(p),
+        Stage::UniqueBy(Some(p)) => BodyKernel::classify(p),
+        Stage::GroupBy(p)        => BodyKernel::classify(p),
+        Stage::Sort(Some(p))     => BodyKernel::classify(p),
+        _                        => BodyKernel::Generic,
+    }).collect();
+    Some(plan_with_kernels(stages, &kernels, sink))
+}
+
+/// Run a `Plan` against a single seed Val (Step 3d-extension A2).  Used
+/// by `Stage::CompiledMap` per outer element.  Wraps seed as a single-
+/// element Val::Arr and runs through a synth Pipeline so all strategy
+/// selection (IndexedDispatch / EarlyExit / etc.) applies recursively.
+fn run_compiled_map(plan: &Plan, seed: Val) -> Result<Val, EvalError> {
+    let synth = Pipeline {
+        source: Source::Receiver(Val::arr(vec![seed])),
+        stages: plan.stages.clone(),
+        sink:   plan.sink.clone(),
+        stage_kernels: Vec::new(),
+        sink_kernels:  Vec::new(),
+    };
+    synth.run(&Val::Null)
+}
+
+/// Decode a slice of `Step::Method(...)` into pipeline `(stages, sink)`.
+/// Shared by top-level `lower_inner` and Step 3d-extension (A2)
+/// recursive sub-pipeline planning for `Map(@.<chain>)` bodies.
+/// Returns `None` if any method shape isn't recognised.
+fn decode_method_chain(trailing: &[crate::ast::Step]) -> Option<(Vec<Stage>, Sink)> {
+    use crate::ast::{Step, Arg};
+    let mut stages: Vec<Stage> = Vec::new();
+    let mut sink: Sink = Sink::Collect;
+    for (i, s) in trailing.iter().enumerate() {
+        let is_last = i == trailing.len() - 1;
+        match s {
+            Step::Method(name, args) => {
+                match (name.as_str(), args.len(), is_last) {
+                    ("filter", 1, _) => stages.push(Stage::Filter(compile_subexpr(&args[0])?)),
+                    ("map", 1, _) => {
+                        // A2: try recursive sub-pipeline planning first.
+                        // Body shapes that decode as a chain of recognised
+                        // methods over @ become Stage::CompiledMap; opaque
+                        // bodies (lambdas, custom methods) fall through.
+                        match try_decode_map_body(&args[0]) {
+                            Some(plan) => stages.push(Stage::CompiledMap(Arc::new(plan))),
+                            None       => stages.push(Stage::Map(compile_subexpr(&args[0])?)),
+                        }
+                    }
+                    ("flat_map", 1, _) => stages.push(Stage::FlatMap(compile_subexpr(&args[0])?)),
+                    ("reverse", 0, _) => stages.push(Stage::Reverse),
+                    ("unique", 0, _)  => stages.push(Stage::UniqueBy(None)),
+                    ("unique_by", 1, _) => stages.push(Stage::UniqueBy(Some(compile_subexpr(&args[0])?))),
+                    ("group_by", 1, _)  => stages.push(Stage::GroupBy(compile_subexpr(&args[0])?)),
+                    ("sort", 0, _)      => stages.push(Stage::Sort(None)),
+                    ("sort_by", 1, _)   => stages.push(Stage::Sort(Some(compile_subexpr(&args[0])?))),
+                    ("take", 1, _) => {
+                        let n = match &args[0] {
+                            Arg::Pos(Expr::Int(n)) if *n >= 0 => *n as usize,
+                            _ => return None,
+                        };
+                        stages.push(Stage::Take(n));
+                    }
+                    ("skip", 1, _) => {
+                        let n = match &args[0] {
+                            Arg::Pos(Expr::Int(n)) if *n >= 0 => *n as usize,
+                            _ => return None,
+                        };
+                        stages.push(Stage::Skip(n));
+                    }
+                    ("split", 1, _) => {
+                        let sep = match &args[0] {
+                            Arg::Pos(Expr::Str(s)) => Arc::<str>::from(s.as_str()),
+                            _ => return None,
+                        };
+                        stages.push(Stage::Split(sep));
+                    }
+                    ("slice", 1, _) => {
+                        let start = match &args[0] {
+                            Arg::Pos(Expr::Int(n)) => *n,
+                            _ => return None,
+                        };
+                        stages.push(Stage::Slice(start, None));
+                    }
+                    ("slice", 2, _) => {
+                        let (start, end) = match (&args[0], &args[1]) {
+                            (Arg::Pos(Expr::Int(s)), Arg::Pos(Expr::Int(e))) => (*s, Some(*e)),
+                            _ => return None,
+                        };
+                        stages.push(Stage::Slice(start, end));
+                    }
+                    ("replace", 2, _) | ("replace_all", 2, _) => {
+                        let (needle, replacement) = match (&args[0], &args[1]) {
+                            (Arg::Pos(Expr::Str(n)), Arg::Pos(Expr::Str(r))) =>
+                                (Arc::<str>::from(n.as_str()), Arc::<str>::from(r.as_str())),
+                            _ => return None,
+                        };
+                        stages.push(Stage::Replace {
+                            needle, replacement, all: name.as_str() == "replace_all",
+                        });
+                    }
+                    ("chunk", 1, _) | ("batch", 1, _) => {
+                        let n = match &args[0] {
+                            Arg::Pos(Expr::Int(n)) if *n >= 1 => *n as usize,
+                            _ => return None,
+                        };
+                        stages.push(Stage::Chunk(n));
+                    }
+                    ("window", 1, _) => {
+                        let n = match &args[0] {
+                            Arg::Pos(Expr::Int(n)) if *n >= 1 => *n as usize,
+                            _ => return None,
+                        };
+                        stages.push(Stage::Window(n));
+                    }
+                    ("count", 0, true) | ("len", 0, true) => sink = Sink::Count,
+                    ("sum", 0, true) => sink = Sink::Numeric(NumOp::Sum),
+                    ("min", 0, true) => sink = Sink::Numeric(NumOp::Min),
+                    ("max", 0, true) => sink = Sink::Numeric(NumOp::Max),
+                    ("avg", 0, true) => sink = Sink::Numeric(NumOp::Avg),
+                    ("first", 0, true) => sink = Sink::First,
+                    ("last", 0, true)  => sink = Sink::Last,
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        }
+    }
+    Some((stages, sink))
 }
 
 /// Apply algebraic rewrite rules until fixed point or a fuel limit
@@ -2866,6 +2960,13 @@ impl Pipeline {
                     Stage::Window(n) => {
                         buf = window_apply(&buf, *n);
                     }
+                    Stage::CompiledMap(plan) => {
+                        let mut out: Vec<Val> = Vec::with_capacity(buf.len());
+                        for v in buf.into_iter() {
+                            out.push(run_compiled_map(plan, v)?);
+                        }
+                        buf = out;
+                    }
                 }
             }
             Box::new(buf.into_iter())
@@ -2906,6 +3007,9 @@ impl Pipeline {
                             if let Some(r) = replace_apply(item.clone(), needle, replacement, *all) {
                                 item = r;
                             }
+                        }
+                        Stage::CompiledMap(plan) => {
+                            item = run_compiled_map(plan, item)?;
                         }
                     }
                 }

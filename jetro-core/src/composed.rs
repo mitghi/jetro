@@ -1772,6 +1772,41 @@ mod tests {
     }
 
     #[test]
+    fn step3d_ext_a2_compiled_map() {
+        // Step 3d-extension (A2): Map body that's a chain of recognised
+        // methods over @ becomes Stage::CompiledMap.  Inner Plan runs
+        // recursively per outer element — preserves cardinality (N
+        // outer rows → N results) while taking advantage of inner
+        // strategy selection (IndexedDispatch on Split.first(), etc.).
+        use serde_json::json;
+        let doc = json!({ "records": [
+            { "text": "alice,smith,42" },
+            { "text": "bob,jones,17"   },
+            { "text": "carol,xx,99"    },
+        ]});
+        let j = crate::Jetro::new(doc);
+
+        // map(@.text.split(",").first()) — N first-parts, one per
+        // record.  Cardinality preserved (3 results), each computed
+        // via inner Stage::Map(@.text) → Stage::Split(",") → Sink::First.
+        assert_eq!(
+            j.collect("$.records.map(@.text.split(\",\").first())").unwrap(),
+            json!(["alice", "bob", "carol"])
+        );
+        // map(@.text.split(",").last()).
+        assert_eq!(
+            j.collect("$.records.map(@.text.split(\",\").last())").unwrap(),
+            json!(["42", "17", "99"])
+        );
+        // map(@.text.split(",").count()) — Sink::Count inside body
+        // returns one count per row.
+        assert_eq!(
+            j.collect("$.records.map(@.text.split(\",\").count())").unwrap(),
+            json!([3, 3, 3])
+        );
+    }
+
+    #[test]
     fn step3d_ext_split_slice_lifted() {
         // Step 3d-extension (C): top-level Stage::Split + Stage::Slice
         // semantics match legacy method-call dispatch.
