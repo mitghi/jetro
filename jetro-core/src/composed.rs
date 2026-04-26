@@ -782,6 +782,265 @@ fn vals_eq(a: &Val, b: &Val) -> bool {
     }
 }
 
+// ── Tape variant ───────────────────────────────────────────────────────────
+//
+// Step 3a (per `pipeline_unification.md`): parallel `TapeStage` trait
+// operating on simd-json tape node indices instead of materialised
+// `Val`. Borrow stages get a tape impl alongside the Val one. Same
+// algorithm; one walks IndexMap, the other walks tape offsets. Both
+// fit the generic composition framework.
+//
+// Stages that can't run on tape (Sort/UniqueBy/GroupBy barriers,
+// FlatMap with computed body, computed Maps) only implement the Val
+// trait. Caller bails to Val materialisation when chain has any
+// Val-only stage.
+//
+// Output uses raw `usize` tape index. The tape itself is shared via
+// the outer loop; stages don't own it. Pass = forward the index;
+// Filtered = drop; Many = flat fanout; Done = stream-end.
+
+#[cfg(feature = "simd-json")]
+pub mod tape {
+    use super::*;
+    use crate::strref::{TapeData, TapeLit, TapeCmp,
+        tape_object_field, tape_array_iter, tape_value_cmp, tape_value_truthy};
+
+    pub enum TapeOutput {
+        Pass(usize),
+        Filtered,
+        Many(SmallVec<[usize; 4]>),
+        Done,
+    }
+
+    pub trait TapeStage {
+        fn apply(&self, tape: &TapeData, idx: usize) -> TapeOutput;
+    }
+
+    impl<T: TapeStage + ?Sized> TapeStage for Box<T> {
+        #[inline]
+        fn apply(&self, tape: &TapeData, idx: usize) -> TapeOutput {
+            (**self).apply(tape, idx)
+        }
+    }
+
+    pub struct TapeIdentity;
+    impl TapeStage for TapeIdentity {
+        #[inline]
+        fn apply(&self, _tape: &TapeData, idx: usize) -> TapeOutput {
+            TapeOutput::Pass(idx)
+        }
+    }
+
+    pub struct TapeComposed<A: TapeStage, B: TapeStage> {
+        pub a: A,
+        pub b: B,
+    }
+
+    impl<A: TapeStage, B: TapeStage> TapeStage for TapeComposed<A, B> {
+        fn apply(&self, tape: &TapeData, idx: usize) -> TapeOutput {
+            match self.a.apply(tape, idx) {
+                TapeOutput::Pass(v) => self.b.apply(tape, v),
+                TapeOutput::Filtered => TapeOutput::Filtered,
+                TapeOutput::Many(items) => {
+                    let mut out: SmallVec<[usize; 4]> = SmallVec::new();
+                    for it in items {
+                        match self.b.apply(tape, it) {
+                            TapeOutput::Pass(v) => out.push(v),
+                            TapeOutput::Filtered => continue,
+                            TapeOutput::Many(more) => out.extend(more),
+                            TapeOutput::Done => {
+                                return if out.is_empty() {
+                                    TapeOutput::Done
+                                } else {
+                                    TapeOutput::Many(out)
+                                };
+                            }
+                        }
+                    }
+                    if out.is_empty() {
+                        TapeOutput::Filtered
+                    } else if out.len() == 1 {
+                        TapeOutput::Pass(out.into_iter().next().unwrap())
+                    } else {
+                        TapeOutput::Many(out)
+                    }
+                }
+                TapeOutput::Done => TapeOutput::Done,
+            }
+        }
+    }
+
+    // ── Borrow stage tape impls ────────────────────────────────────────────
+
+    pub struct TapeFilterFieldCmpLit {
+        pub field: std::sync::Arc<str>,
+        pub op: TapeCmp,
+        pub lit: TapeLitOwned,
+    }
+
+    /// Owned counterpart of `TapeLit<'a>` (which holds `&'a str`); lets
+    /// stages outlive the tape they point into. Lit is captured at
+    /// build time; comparisons construct a borrowed TapeLit per call.
+    #[derive(Debug, Clone)]
+    pub enum TapeLitOwned {
+        Int(i64),
+        Float(f64),
+        Str(std::sync::Arc<str>),
+        Bool(bool),
+        Null,
+    }
+
+    impl TapeLitOwned {
+        #[inline]
+        pub fn as_borrowed<'a>(&'a self) -> TapeLit<'a> {
+            match self {
+                TapeLitOwned::Int(i) => TapeLit::Int(*i),
+                TapeLitOwned::Float(f) => TapeLit::Float(*f),
+                TapeLitOwned::Str(s) => TapeLit::Str(s.as_ref()),
+                TapeLitOwned::Bool(b) => TapeLit::Bool(*b),
+                TapeLitOwned::Null => TapeLit::Null,
+            }
+        }
+    }
+
+    impl TapeStage for TapeFilterFieldCmpLit {
+        fn apply(&self, tape: &TapeData, idx: usize) -> TapeOutput {
+            let field_idx = match tape_object_field(tape, idx, self.field.as_ref()) {
+                Some(v) => v,
+                None => return TapeOutput::Filtered,
+            };
+            let lit = self.lit.as_borrowed();
+            if tape_value_cmp(tape, field_idx, self.op, &lit) {
+                TapeOutput::Pass(idx)
+            } else {
+                TapeOutput::Filtered
+            }
+        }
+    }
+
+    pub struct TapeMapField {
+        pub field: std::sync::Arc<str>,
+    }
+
+    impl TapeStage for TapeMapField {
+        fn apply(&self, tape: &TapeData, idx: usize) -> TapeOutput {
+            match tape_object_field(tape, idx, self.field.as_ref()) {
+                Some(v) => TapeOutput::Pass(v),
+                None => TapeOutput::Filtered,
+            }
+        }
+    }
+
+    pub struct TapeMapFieldChain {
+        pub keys: std::sync::Arc<[std::sync::Arc<str>]>,
+    }
+
+    impl TapeStage for TapeMapFieldChain {
+        fn apply(&self, tape: &TapeData, idx: usize) -> TapeOutput {
+            let mut cur = idx;
+            for k in self.keys.iter() {
+                match tape_object_field(tape, cur, k.as_ref()) {
+                    Some(v) => cur = v,
+                    None => return TapeOutput::Filtered,
+                }
+            }
+            TapeOutput::Pass(cur)
+        }
+    }
+
+    pub struct TapeFlatMapField {
+        pub field: std::sync::Arc<str>,
+    }
+
+    impl TapeStage for TapeFlatMapField {
+        fn apply(&self, tape: &TapeData, idx: usize) -> TapeOutput {
+            let target = match tape_object_field(tape, idx, self.field.as_ref()) {
+                Some(v) => v,
+                None => return TapeOutput::Filtered,
+            };
+            tape_flatten(tape, target)
+        }
+    }
+
+    pub struct TapeFlatMapFieldChain {
+        pub keys: std::sync::Arc<[std::sync::Arc<str>]>,
+    }
+
+    impl TapeStage for TapeFlatMapFieldChain {
+        fn apply(&self, tape: &TapeData, idx: usize) -> TapeOutput {
+            let mut cur = idx;
+            for k in self.keys.iter() {
+                match tape_object_field(tape, cur, k.as_ref()) {
+                    Some(v) => cur = v,
+                    None => return TapeOutput::Filtered,
+                }
+            }
+            tape_flatten(tape, cur)
+        }
+    }
+
+    /// Generic tape array fanout — yields each entry index as Many.
+    /// One mechanism for any tape array; new array variants need no
+    /// per-shape impl.
+    #[inline]
+    fn tape_flatten(tape: &TapeData, arr_idx: usize) -> TapeOutput {
+        let iter = match tape_array_iter(tape, arr_idx) {
+            Some(it) => it,
+            None => return TapeOutput::Filtered,
+        };
+        let items: SmallVec<[usize; 4]> = iter.collect();
+        if items.is_empty() {
+            TapeOutput::Filtered
+        } else {
+            TapeOutput::Many(items)
+        }
+    }
+
+    pub struct TapeTake {
+        pub remaining: std::cell::Cell<usize>,
+    }
+
+    impl TapeStage for TapeTake {
+        fn apply(&self, _tape: &TapeData, idx: usize) -> TapeOutput {
+            let r = self.remaining.get();
+            if r == 0 { return TapeOutput::Done; }
+            self.remaining.set(r - 1);
+            TapeOutput::Pass(idx)
+        }
+    }
+
+    pub struct TapeSkip {
+        pub remaining: std::cell::Cell<usize>,
+    }
+
+    impl TapeStage for TapeSkip {
+        fn apply(&self, _tape: &TapeData, idx: usize) -> TapeOutput {
+            let r = self.remaining.get();
+            if r > 0 {
+                self.remaining.set(r - 1);
+                return TapeOutput::Filtered;
+            }
+            TapeOutput::Pass(idx)
+        }
+    }
+
+    /// Generic-pred filter that runs `tape_value_truthy` on the
+    /// kernel-evaluated value. Used for `.filter(@.k)` (FieldRead body
+    /// returns the field value; truthy of that field's tape node).
+    pub struct TapeFilterTruthyAtField {
+        pub field: std::sync::Arc<str>,
+    }
+
+    impl TapeStage for TapeFilterTruthyAtField {
+        fn apply(&self, tape: &TapeData, idx: usize) -> TapeOutput {
+            match tape_object_field(tape, idx, self.field.as_ref()) {
+                Some(v) if tape_value_truthy(tape, v) => TapeOutput::Pass(idx),
+                _ => TapeOutput::Filtered,
+            }
+        }
+    }
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -885,6 +1144,53 @@ mod tests {
         let arr: Vec<Val> = vec![Val::Int(10), Val::Int(20), Val::Int(30)];
         assert!(matches!(run_pipeline::<FirstSink>(&arr, &Identity), Val::Int(10)));
         assert!(matches!(run_pipeline::<LastSink>(&arr, &Identity), Val::Int(30)));
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn tape_borrow_stages_smoke() {
+        use crate::composed::tape::*;
+        use crate::strref::{TapeData, TapeCmp, tape_array_iter};
+        use std::sync::Arc;
+
+        let bytes = br#"[{"a":1,"b":10},{"a":2,"b":20},{"a":1,"b":30}]"#.to_vec();
+        let tape = TapeData::parse(bytes).expect("parse");
+
+        // Filter(a == 1) ∘ Map(b) over the array
+        let chain = TapeComposed {
+            a: TapeFilterFieldCmpLit {
+                field: Arc::from("a"),
+                op: TapeCmp::Eq,
+                lit: TapeLitOwned::Int(1),
+            },
+            b: TapeMapField { field: Arc::from("b") },
+        };
+
+        let arr_idx = 0; // root is the array
+        let mut count = 0usize;
+        let iter = tape_array_iter(&tape, arr_idx).expect("array");
+        for entry in iter {
+            match chain.apply(&tape, entry) {
+                TapeOutput::Pass(_) => count += 1,
+                _ => {}
+            }
+        }
+        assert_eq!(count, 2);
+
+        // FlatMapField on a row whose `b` is itself an array
+        let bytes2 = br#"[{"items":[1,2,3]},{"items":[4,5]}]"#.to_vec();
+        let tape2 = TapeData::parse(bytes2).expect("parse");
+        let stage = TapeFlatMapField { field: Arc::from("items") };
+        let mut total_passes = 0usize;
+        let iter2 = tape_array_iter(&tape2, 0).expect("array");
+        for entry in iter2 {
+            match stage.apply(&tape2, entry) {
+                TapeOutput::Many(items) => total_passes += items.len(),
+                TapeOutput::Pass(_) => total_passes += 1,
+                _ => {}
+            }
+        }
+        assert_eq!(total_passes, 5);
     }
 
     #[test]
