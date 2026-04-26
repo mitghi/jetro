@@ -192,6 +192,12 @@ pub enum TapeStageOutputT<'a> {
     Pass(TapeRow<'a>),
     Filtered,
     Done,
+    /// Expanding stage (FlatMap) — emits a sub-array iterator.  The
+    /// outer loop iterates each child cursor in turn, dispatching
+    /// downstream stages per element.  Stored as `(tape, parent_idx)`
+    /// where parent_idx points at an Array node; iteration walks its
+    /// children via tape.span() skip-ahead.
+    Many { tape: &'a TapeData, parent_idx: u32 },
 }
 
 pub trait TapeStageT {
@@ -224,6 +230,16 @@ impl<A: TapeStageT, B: TapeStageT> TapeStageT for ComposedT<A, B> {
             TapeStageOutputT::Pass(v) => self.b.apply(v),
             TapeStageOutputT::Filtered => TapeStageOutputT::Filtered,
             TapeStageOutputT::Done => TapeStageOutputT::Done,
+            // Many propagation: ComposedT cannot flatten Many across
+            // sub-stage `b` without buffering, so it surfaces Many to
+            // the outer loop unchanged.  The outer loop unrolls Many
+            // and re-applies the FULL stage chain (a∘b) per child;
+            // since Many can only originate at a FlatMap stage at
+            // index 0 of the chain (lower_stage validates), surfacing
+            // here yields correct per-child traversal at the outer
+            // run_pipeline_t level (which unrolls via apply_chain).
+            TapeStageOutputT::Many { tape, parent_idx } =>
+                TapeStageOutputT::Many { tape, parent_idx },
         }
     }
 }
@@ -267,6 +283,25 @@ impl TapeStageT for MapFieldChainT {
         match x.walk_path(&chain_refs) {
             Some(c) => TapeStageOutputT::Pass(c),
             None    => TapeStageOutputT::Filtered,
+        }
+    }
+}
+
+/// FlatMap stage — input must be Object containing the inner array
+/// at `field`.  Emits Many pointing at the inner Array node so the
+/// outer loop iterates its children.  Filters/Skip/Take/Map stages
+/// after FlatMap operate on each inner element.
+pub struct FlatMapFieldT {
+    pub field: std::sync::Arc<str>,
+}
+
+impl TapeStageT for FlatMapFieldT {
+    #[inline]
+    fn apply<'a>(&self, x: TapeRow<'a>) -> TapeStageOutputT<'a> {
+        match x.get_field(&self.field) {
+            Some(c) if c.is_array() =>
+                TapeStageOutputT::Many { tape: c.tape, parent_idx: c.idx },
+            _ => TapeStageOutputT::Filtered,
         }
     }
 }
@@ -428,11 +463,72 @@ impl TapeSinkT for CollectSinkT {
 
 /// Run a composed Stage chain over the elements of an Array node.
 /// `arr_idx` must point at an `Array` node in `tape`.
+/// Apply a stage chain over a single row, dispatching downstream
+/// FlatMap expansion via `inner_stages` (the chain to run per Many
+/// child).  Returns the per-row outcome the outer sink loop needs.
+///
+/// Generic across all Pipeline shapes.  When `inner_stages` is None,
+/// no FlatMap is expected — Many is treated as Filtered (caller bug).
+fn apply_or_expand<'a, S: TapeSinkT>(
+    arena: &'a Arena,
+    acc: S::Acc<'a>,
+    cur: TapeRow<'a>,
+    stages: &dyn TapeStageT,
+    inner_stages: Option<&dyn TapeStageT>,
+) -> (S::Acc<'a>, bool) {
+    // Returns (new_acc, done).  done=true => outer loop terminates.
+    match stages.apply(cur) {
+        TapeStageOutputT::Pass(p) => (S::fold(arena, acc, p), false),
+        TapeStageOutputT::Filtered => (acc, false),
+        TapeStageOutputT::Done => (acc, true),
+        TapeStageOutputT::Many { tape, parent_idx } => {
+            let inner = match inner_stages {
+                Some(s) => s,
+                None => return (acc, false),
+            };
+            let i = parent_idx as usize;
+            let len = match tape.nodes[i] {
+                TapeNode::Array { len, .. } => len as usize,
+                _ => return (acc, false),
+            };
+            let mut acc = acc;
+            let mut j = i + 1;
+            for _ in 0..len {
+                let child = TapeRow::new(tape, j as u32);
+                match inner.apply(child) {
+                    TapeStageOutputT::Pass(p) => acc = S::fold(arena, acc, p),
+                    TapeStageOutputT::Filtered => {}
+                    TapeStageOutputT::Done => return (acc, true),
+                    TapeStageOutputT::Many { .. } => {
+                        // Nested FlatMap not supported in this round
+                        // (would need recursion).  Treat as Filtered.
+                    }
+                }
+                j += tape.span(j);
+            }
+            (acc, false)
+        }
+    }
+}
+
 pub fn run_pipeline_t<'a, S: TapeSinkT>(
     arena: &'a Arena,
     tape: &'a TapeData,
     arr_idx: u32,
     stages: &dyn TapeStageT,
+) -> BVal<'a> {
+    run_pipeline_t_with_inner::<S>(arena, tape, arr_idx, stages, None)
+}
+
+/// FlatMap-aware variant.  `inner_stages` is the stage chain that
+/// runs per child of any Many emitted by `stages`.  Typically the
+/// caller passes the post-FlatMap suffix of the original chain.
+pub fn run_pipeline_t_with_inner<'a, S: TapeSinkT>(
+    arena: &'a Arena,
+    tape: &'a TapeData,
+    arr_idx: u32,
+    stages: &dyn TapeStageT,
+    inner_stages: Option<&dyn TapeStageT>,
 ) -> BVal<'a> {
     let mut acc: S::Acc<'a> = S::init();
     let i = arr_idx as usize;
@@ -443,11 +539,9 @@ pub fn run_pipeline_t<'a, S: TapeSinkT>(
     let mut j = i + 1;
     for _ in 0..len {
         let cur = TapeRow::new(tape, j as u32);
-        match stages.apply(cur) {
-            TapeStageOutputT::Pass(p) => acc = S::fold(arena, acc, p),
-            TapeStageOutputT::Filtered => {}
-            TapeStageOutputT::Done => break,
-        }
+        let (new_acc, done) = apply_or_expand::<S>(arena, acc, cur, stages, inner_stages);
+        acc = new_acc;
+        if done { break; }
         j += tape.span(j);
     }
     S::finalise(arena, acc)

@@ -28,10 +28,10 @@ use crate::pipeline::{
 };
 use crate::composed_tape::{
     TapeStageT, IdentityT, ComposedT, FilterT, MapFieldT, MapFieldChainT,
-    TakeT, SkipT,
+    FlatMapFieldT, TakeT, SkipT,
     CountSinkT, SumSinkT, MinSinkT, MaxSinkT, AvgSinkT,
     FirstSinkT, LastSinkT, CollectSinkT,
-    TapeRow, run_pipeline_t,
+    TapeRow, run_pipeline_t, run_pipeline_t_with_inner,
 };
 use crate::strref::TapeData;
 use std::sync::Arc;
@@ -70,6 +70,8 @@ fn lower_stages(stages: &[Stage], kernels: &[BodyKernel]) -> Option<Box<dyn Tape
 
 fn lower_stage(stage: &Stage, kernel: &BodyKernel) -> Option<Box<dyn TapeStageT>> {
     match (stage, kernel) {
+        (Stage::FlatMap(_), BodyKernel::FieldRead(name)) =>
+            Some(Box::new(FlatMapFieldT { field: Arc::clone(name) })),
         (Stage::Take(n), _) => Some(Box::new(TakeT::new(*n))),
         (Stage::Skip(n), _) => Some(Box::new(SkipT::new(*n))),
 
@@ -205,16 +207,57 @@ pub fn try_run_borrow_tape<'a>(
     };
 
     let sink_kind = TapeSinkKind::from_pipeline_sink(&p.sink)?;
-    let stage_chain = lower_stages(&p.stages, &p.stage_kernels)?;
 
+    // Detect leading FlatMap — split chain into outer = [FlatMap] +
+    // inner = [rest].  Outer emits Many; inner runs per child.  Only
+    // single leading FlatMap supported (no nested expansions).
     let chain_refs: Vec<&str> = chain.iter().map(|a| a.as_ref()).collect();
     let arr_idx = crate::strref::tape_walk_field_chain(tape, &chain_refs)?;
     if !matches!(tape.nodes[arr_idx], crate::strref::TapeNode::Array { .. }) {
         return None;
     }
 
+    let leading_flatmap = !p.stages.is_empty()
+        && matches!(p.stages[0], Stage::FlatMap(_))
+        && matches!(p.stage_kernels[0], BodyKernel::FieldRead(_));
+
+    if leading_flatmap {
+        // Reject if any later stage is also FlatMap — nested
+        // expansion not supported in this round.
+        if p.stages[1..].iter().any(|s| matches!(s, Stage::FlatMap(_))) {
+            return None;
+        }
+        let outer: Box<dyn TapeStageT> = lower_stage(&p.stages[0], &p.stage_kernels[0])?;
+        let inner = lower_stages(&p.stages[1..], &p.stage_kernels[1..])?;
+        let out = dispatch_sink_with_inner(
+            arena, tape, arr_idx as u32, &*outer, Some(&*inner), sink_kind,
+        );
+        return Some(Ok(out));
+    }
+
+    let stage_chain = lower_stages(&p.stages, &p.stage_kernels)?;
     let out = dispatch_sink(arena, tape, arr_idx as u32, &*stage_chain, sink_kind);
     Some(Ok(out))
+}
+
+fn dispatch_sink_with_inner<'a>(
+    arena: &'a Arena,
+    tape: &'a TapeData,
+    arr_idx: u32,
+    stages: &dyn TapeStageT,
+    inner: Option<&dyn TapeStageT>,
+    kind: TapeSinkKind,
+) -> BVal<'a> {
+    match kind {
+        TapeSinkKind::Count   => run_pipeline_t_with_inner::<CountSinkT>(arena, tape, arr_idx, stages, inner),
+        TapeSinkKind::Sum     => run_pipeline_t_with_inner::<SumSinkT>(arena, tape, arr_idx, stages, inner),
+        TapeSinkKind::Min     => run_pipeline_t_with_inner::<MinSinkT>(arena, tape, arr_idx, stages, inner),
+        TapeSinkKind::Max     => run_pipeline_t_with_inner::<MaxSinkT>(arena, tape, arr_idx, stages, inner),
+        TapeSinkKind::Avg     => run_pipeline_t_with_inner::<AvgSinkT>(arena, tape, arr_idx, stages, inner),
+        TapeSinkKind::First   => run_pipeline_t_with_inner::<FirstSinkT>(arena, tape, arr_idx, stages, inner),
+        TapeSinkKind::Last    => run_pipeline_t_with_inner::<LastSinkT>(arena, tape, arr_idx, stages, inner),
+        TapeSinkKind::Collect => run_pipeline_t_with_inner::<CollectSinkT>(arena, tape, arr_idx, stages, inner),
+    }
 }
 
 #[cfg(test)]
@@ -267,6 +310,43 @@ mod tests {
             crate::eval::Val::Float(f) if (f - 80.0).abs() < 1e-9 => {}
             other => panic!("got {:?}", other),
         }
+    }
+
+    #[test]
+    fn flat_map_count() {
+        let v = serde_json::json!({
+            "orders": [
+                {"items": [{"p": 1}, {"p": 2}]},
+                {"items": [{"p": 3}, {"p": 4}, {"p": 5}]},
+                {"items": [{"p": 6}]},
+            ]
+        });
+        let bytes = serde_json::to_vec(&v).unwrap();
+        let arena = Arena::new();
+        let parsed = parser::parse("$.orders.flat_map(items).count()").unwrap();
+        let p = Pipeline::lower(&parsed).unwrap();
+        let tape = TapeData::parse(bytes).unwrap();
+        let r = try_run_borrow_tape(&p, &tape, &arena).unwrap().unwrap();
+        let owned = r.to_owned_val();
+        assert!(matches!(owned, crate::eval::Val::Int(6)), "got {:?}", owned);
+    }
+
+    #[test]
+    fn flat_map_filter_count() {
+        let v = serde_json::json!({
+            "orders": [
+                {"items": [{"p": 1}, {"p": 20}, {"p": 5}]},
+                {"items": [{"p": 30}, {"p": 4}, {"p": 50}]},
+            ]
+        });
+        let bytes = serde_json::to_vec(&v).unwrap();
+        let arena = Arena::new();
+        let parsed = parser::parse("$.orders.flat_map(items).filter(p > 10).count()").unwrap();
+        let p = Pipeline::lower(&parsed).unwrap();
+        let tape = TapeData::parse(bytes).unwrap();
+        let r = try_run_borrow_tape(&p, &tape, &arena).unwrap().unwrap();
+        let owned = r.to_owned_val();
+        assert!(matches!(owned, crate::eval::Val::Int(3)), "got {:?}", owned);
     }
 
     #[test]
