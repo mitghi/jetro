@@ -1617,72 +1617,12 @@ impl Pipeline {
             _ => {}
         }
 
-        // ObjVec source — slot-indexed direct reads, no IndexMap probe.
-        if let Val::ObjVec(d) = &recv {
-            if let Sink::FlatMapCount(prog) = &self.sink {
-                if let Some(field) = single_field_prog(prog) {
-                    if let Some(slot) = d.slot_of(field) {
-                        return Some(Ok(objvec_flatmap_count_slot(d, slot)));
-                    }
-                }
-            }
-            if let Sink::NumMap(op, prog) = &self.sink {
-                let field = single_field_prog(prog)?;
-                let slot = d.slot_of(field)?;
-                return Some(Ok(objvec_num_slot(d, slot, *op)));
-            }
-            if let Sink::NumFilterMap(op, pred, map) = &self.sink {
-                let (pf, cop, lit) = single_cmp_prog(pred)?;
-                let mf = single_field_prog(map)?;
-                let sp = d.slot_of(pf)?;
-                let sm = d.slot_of(mf)?;
-                return Some(Ok(objvec_filter_num_slots(d, sp, cop, &lit, sm, *op)));
-            }
-            if let Sink::CountIf(pred) = &self.sink {
-                if let Some((pf, op, lit)) = single_cmp_prog(pred) {
-                    let sp = d.slot_of(pf)?;
-                    return Some(Ok(objvec_filter_count_slot(d, sp, op, &lit)));
-                }
-                if let Some(leaves) = and_chain_prog(pred) {
-                    let slots: Option<Vec<(usize, crate::ast::BinOp, Val)>> =
-                        leaves.iter().map(|(f, op, lit)| {
-                            d.slot_of(f).map(|s| (s, *op, lit.clone()))
-                        }).collect();
-                    let slots = slots?;
-                    return Some(Ok(objvec_filter_count_and_slots(d, &slots)));
-                }
-            }
-        }
-
-        let arr = match &recv {
-            Val::Arr(a) => Arc::clone(a),
-            _ => return None,
-        };
-
-        // NumMap with `@.field` shape — extract field column, fold.
-        if let Sink::NumMap(op, prog) = &self.sink {
-            let field = single_field_prog(prog)?;
-            return Some(Ok(columnar_num_field(&arr, field, *op)));
-        }
-
-        // NumFilterMap — extract two columns, mask + fold.
-        if let Sink::NumFilterMap(op, pred, map) = &self.sink {
-            let (pf, cop, lit) = single_cmp_prog(pred)?;
-            let mf = single_field_prog(map)?;
-            return Some(Ok(columnar_filter_num(&arr, pf, cop, &lit, mf, *op)));
-        }
-
-        // CountIf with single-cmp predicate.
-        if let Sink::CountIf(pred) = &self.sink {
-            if let Some((pf, op, lit)) = single_cmp_prog(pred) {
-                return Some(Ok(columnar_filter_count(&arr, pf, op, &lit)));
-            }
-            // Compound AND: all leaves must be single-cmp comparisons.
-            if let Some(leaves) = and_chain_prog(pred) {
-                return Some(Ok(columnar_filter_count_and(&arr, &leaves)));
-            }
-        }
-
+        // ObjVec slot-kernel paths and Val::Arr columnar paths
+        // previously dispatched on fused Sink variants. All gone post
+        // fusion-off. Canonical-view consumer in `try_columnar_with`
+        // covers the ObjVec shape; primitive-lane fast paths above
+        // (IntVec / FloatVec / StrVec) cover Val::Arr-of-primitives.
+        let _ = recv;
         None
     }
 
@@ -3130,100 +3070,6 @@ fn objvec_filter_count_and_slots(
         count += 1;
     }
     Val::Int(count)
-}
-
-/// Columnar `$.<arr>.map(<field>).sum()` — extract numeric column,
-/// SIMD-fold.  Returns `Val::Int` / `Val::Float` / `Val::Null` on
-/// non-numeric.  Falls back through the existing scalar `Val::Obj`
-/// `lookup_field_cached` for non-homogeneous Object shapes.
-fn columnar_num_field(arr: &Arc<Vec<Val>>, field: &str, op: NumOp) -> Val {
-    let mut acc_i: i64 = 0;
-    let mut acc_f: f64 = 0.0;
-    let mut floated = false;
-    let mut min_f = f64::INFINITY;
-    let mut max_f = f64::NEG_INFINITY;
-    let mut n_obs: usize = 0;
-    let mut idx: Option<usize> = None;
-    for item in arr.iter() {
-        if let Val::Obj(m) = item {
-            let v = lookup_via_ic(m, field, &mut idx);
-            num_fold(&mut acc_i, &mut acc_f, &mut floated, &mut min_f, &mut max_f, &mut n_obs,
-                     op, v.unwrap_or(&Val::Null));
-        }
-    }
-    num_finalise(op, acc_i, acc_f, floated, min_f, max_f, n_obs)
-}
-
-/// Columnar AND-chain filter count: every leaf comparison must hold.
-fn columnar_filter_count_and(
-    arr: &Arc<Vec<Val>>,
-    leaves: &[(&str, crate::ast::BinOp, Val)],
-) -> Val {
-    let mut count: i64 = 0;
-    let mut ics: Vec<Option<usize>> = vec![None; leaves.len()];
-    for item in arr.iter() {
-        if let Val::Obj(m) = item {
-            let mut all = true;
-            for (i, (f, op, lit)) in leaves.iter().enumerate() {
-                match lookup_via_ic(m, f, &mut ics[i]) {
-                    Some(v) if cmp_val_binop_local(v, *op, lit) => {}
-                    _ => { all = false; break; }
-                }
-            }
-            if all { count += 1; }
-        }
-    }
-    Val::Int(count)
-}
-
-/// Columnar `$.<arr>.filter(<f> <op> <lit>).count()`.
-fn columnar_filter_count(
-    arr: &Arc<Vec<Val>>,
-    pf:  &str,
-    op:  crate::ast::BinOp,
-    lit: &Val,
-) -> Val {
-    let mut count: i64 = 0;
-    let mut idx: Option<usize> = None;
-    for item in arr.iter() {
-        if let Val::Obj(m) = item {
-            if let Some(v) = lookup_via_ic(m, pf, &mut idx) {
-                if cmp_val_binop_local(v, op, lit) { count += 1; }
-            }
-        }
-    }
-    Val::Int(count)
-}
-
-/// Columnar `$.<arr>.filter(<f> <op> <lit>).map(<g>).sum()`.
-fn columnar_filter_num(
-    arr: &Arc<Vec<Val>>,
-    pf:  &str,
-    cop: crate::ast::BinOp,
-    lit: &Val,
-    mf:  &str,
-    op:  NumOp,
-) -> Val {
-    let mut acc_i: i64 = 0;
-    let mut acc_f: f64 = 0.0;
-    let mut floated = false;
-    let mut min_f = f64::INFINITY;
-    let mut max_f = f64::NEG_INFINITY;
-    let mut n_obs: usize = 0;
-    let mut ip: Option<usize> = None;
-    let mut iq: Option<usize> = None;
-    for item in arr.iter() {
-        if let Val::Obj(m) = item {
-            let pv = lookup_via_ic(m, pf, &mut ip);
-            let pass = match pv { Some(v) => cmp_val_binop_local(v, cop, lit), None => false };
-            if pass {
-                let v = lookup_via_ic(m, mf, &mut iq).unwrap_or(&Val::Null);
-                num_fold(&mut acc_i, &mut acc_f, &mut floated, &mut min_f, &mut max_f, &mut n_obs,
-                         op, v);
-            }
-        }
-    }
-    num_finalise(op, acc_i, acc_f, floated, min_f, max_f, n_obs)
 }
 
 /// Total ordering over `Val` for sort barriers: numeric < string <
