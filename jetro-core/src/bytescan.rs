@@ -1202,6 +1202,297 @@ fn scalar_to_val(raw: &[u8], s: Scalar) -> Val {
     }
 }
 
+// ── Borrowed (arena) row-build helpers (Phase 3+4) ─────────────────
+//
+// Mirror the owned `scalar_to_val` / `parse_row_obj` / `build_row_val`
+// but emit `borrowed::Val<'a>` allocated in `arena`.  Used by the
+// `try_run_borrow` entry point; the owned path is unchanged.
+//
+// Cost saving vs owned path:
+//   - StrRange → `&'a str` (arena bump, no `Arc::from`).
+//   - Project rows → `Val::Obj(&[(&str, Val)])` (arena slice, no
+//     `IndexMap`, no `Arc<IndexMap>`).
+//   - Full-row parse → `from_json_simd_arena` (no Arc/IndexMap per
+//     nested object).
+
+#[cfg(feature = "simd-json")]
+#[inline]
+fn parse_row_obj_in<'a>(arena: &'a crate::eval::borrowed::Arena, raw: &[u8], span: RowSpan)
+    -> Option<crate::eval::borrowed::Val<'a>>
+{
+    let mut buf: Vec<u8> = raw[span.start..span.end].to_vec();
+    crate::eval::borrowed::from_json_simd_arena(arena, &mut buf).ok()
+}
+
+#[inline]
+fn scalar_to_val_in<'a>(arena: &'a crate::eval::borrowed::Arena, raw: &[u8], s: Scalar)
+    -> crate::eval::borrowed::Val<'a>
+{
+    use crate::eval::borrowed::Val as BVal;
+    match s {
+        Scalar::Null | Scalar::Missing => BVal::Null,
+        Scalar::Bool(b) => BVal::Bool(b),
+        Scalar::Int(n) => BVal::Int(n),
+        Scalar::Float(f) => BVal::Float(f),
+        Scalar::StrRange(start, end) => {
+            let bytes = &raw[start as usize .. end as usize];
+            match std::str::from_utf8(bytes) {
+                Ok(s) => BVal::Str(arena.alloc_str(s)),
+                Err(_) => BVal::Str(arena.alloc_str(&String::from_utf8_lossy(bytes))),
+            }
+        }
+        Scalar::ObjRange(start, end) => {
+            #[cfg(feature = "simd-json")]
+            {
+                let span = RowSpan { start: start as usize, end: end as usize };
+                return parse_row_obj_in(arena, raw, span).unwrap_or(BVal::Null);
+            }
+            #[cfg(not(feature = "simd-json"))]
+            {
+                let _ = (start, end);
+                BVal::Null
+            }
+        }
+    }
+}
+
+#[inline]
+fn build_row_val_in<'a>(
+    arena: &'a crate::eval::borrowed::Arena,
+    raw: &[u8],
+    slots: &Slots,
+    span: RowSpan,
+    map: &MapKind,
+) -> Option<crate::eval::borrowed::Val<'a>> {
+    use crate::eval::borrowed::Val as BVal;
+    match map {
+        MapKind::None => {
+            #[cfg(feature = "simd-json")]
+            { return parse_row_obj_in(arena, raw, span); }
+            #[cfg(not(feature = "simd-json"))]
+            { let _ = span; return None; }
+        }
+        MapKind::Scalar(s) => {
+            Some(slots[*s].map(|sc| scalar_to_val_in(arena, raw, sc)).unwrap_or(BVal::Null))
+        }
+        MapKind::Project(pairs) => {
+            // Build entries list, then bulk-allocate as arena slice.
+            let mut tmp: Vec<(&'a str, BVal<'a>)> = Vec::with_capacity(pairs.len());
+            for (key, slot) in pairs.iter() {
+                let v = slots[*slot].map(|sc| scalar_to_val_in(arena, raw, sc)).unwrap_or(BVal::Null);
+                tmp.push((arena.alloc_str(key), v));
+            }
+            let slice = arena.alloc_slice_fill_iter(tmp.into_iter());
+            Some(BVal::Obj(&*slice))
+        }
+    }
+}
+
+// ── Borrowed entry point (Phase 4 API) ─────────────────────────────
+//
+// Same shape acceptance as `try_run` but only the Sink::Collect path
+// emits borrowed.  Other Sinks (Numeric/Count/First/Last/heap-top-K)
+// fall back to None — caller routes them through owned `try_run` and
+// converts via `from_owned` at the boundary.  Subsequent commits will
+// extend coverage; Sink::Collect is the highest-row-count case where
+// the saving is largest.
+pub fn try_run_borrow<'a>(
+    p: &Pipeline,
+    raw_bytes: &[u8],
+    arena: &'a crate::eval::borrowed::Arena,
+) -> Option<Result<crate::eval::borrowed::Val<'a>, EvalError>> {
+    let chain: Vec<&[u8]> = match &p.source {
+        Source::FieldChain { keys } => keys.iter().map(|k| k.as_bytes()).collect(),
+        _ => return None,
+    };
+    // Heap-top-K: not yet covered by borrowed path; defer.
+    if detect_heap_top_k(&p.stages, &p.stage_kernels, &p.sink).is_some() {
+        return None;
+    }
+    let stage_count = p.stages.len();
+    let last_is_unique = matches!(p.stages.last(), Some(Stage::UniqueBy(None)));
+    let last_payload_idx = if last_is_unique { stage_count.saturating_sub(1) } else { stage_count };
+    for (idx, (st, k)) in p.stages.iter().zip(p.stage_kernels.iter()).enumerate() {
+        match st {
+            Stage::Filter(_) => {
+                if !is_pred_kernel(k) { return None; }
+            }
+            Stage::Skip(_) | Stage::Take(_) => {}
+            Stage::Map(_) if last_payload_idx > 0 && idx == last_payload_idx - 1 => {
+                match k {
+                    BodyKernel::FieldRead(_) => {}
+                    BodyKernel::FieldChain(_) => {}
+                    BodyKernel::ObjProject(entries) => {
+                        if !objproject_is_byte_friendly(entries) { return None; }
+                    }
+                    _ => return None,
+                }
+            }
+            Stage::UniqueBy(None) if idx == stage_count - 1 => {
+                if !matches!(p.sink, Sink::Collect) { return None; }
+            }
+            _ => return None,
+        }
+    }
+    let mut catalog: Catalog = Catalog::default();
+    for (st, k) in p.stages.iter().zip(p.stage_kernels.iter()) {
+        match st {
+            Stage::Skip(_) | Stage::Take(_) | Stage::UniqueBy(None) => continue,
+            _ => {}
+        }
+        collect_paths(k, &mut catalog)?;
+    }
+    for k in p.sink_kernels.iter() { collect_paths(k, &mut catalog)?; }
+
+    let arr_start = walk_chain_to_array(raw_bytes, &chain)?;
+    run_with_sink_borrow(p, &catalog, raw_bytes, arr_start, last_is_unique, arena)
+}
+
+fn run_with_sink_borrow<'a>(
+    p: &Pipeline,
+    cat: &Catalog,
+    raw: &[u8],
+    arr_start: usize,
+    unique_collect: bool,
+    arena: &'a crate::eval::borrowed::Arena,
+) -> Option<Result<crate::eval::borrowed::Val<'a>, EvalError>> {
+    use crate::eval::borrowed::Val as BVal;
+
+    if cat.n_slots() > SCALAR_BUF_CAP { return None; }
+    let wanted: Vec<&[u8]> = cat.top_keys.iter().map(|f| f.as_bytes()).collect();
+    let needles_owned: Vec<Vec<u8>> = build_needles(&wanted);
+    let needles: Vec<&[u8]> = needles_owned.iter().map(|n| n.as_slice()).collect();
+
+    let (cs, ck, csink) = p.canonical();
+
+    let payload_end = cs.len().saturating_sub(if unique_collect { 1 } else { 0 });
+    let trailing_map_kernel: Option<&BodyKernel> =
+        if matches!(csink, Sink::Numeric(_) | Sink::First | Sink::Last | Sink::Collect)
+            && payload_end > 0
+            && matches!(cs.get(payload_end - 1), Some(Stage::Map(_)))
+        {
+            ck.get(payload_end - 1)
+        } else { None };
+    let filter_end = if trailing_map_kernel.is_some() { payload_end - 1 } else { payload_end };
+
+    let mut filter_slots: Vec<(usize, FilterCmp)> = Vec::new();
+    let mut skip_n: usize = 0;
+    let mut take_n: usize = usize::MAX;
+    for (st, k) in cs[..filter_end].iter().zip(ck[..filter_end].iter()) {
+        match st {
+            Stage::Filter(_) => {
+                let (slot, cmp) = resolve_pred_to_slot(k, cat)?;
+                filter_slots.push((slot, cmp));
+            }
+            Stage::Skip(n) => { skip_n = skip_n.saturating_add(*n); }
+            Stage::Take(n) => { take_n = take_n.min(*n); }
+            _ => return None,
+        }
+    }
+
+    macro_rules! sink_walker_b {
+        ($body:expr) => {{
+            let mut seen: usize = 0;
+            let mut taken: usize = 0;
+            let mut row_fn = |slots: &Slots, span: RowSpan| -> Option<ScanCtl> {
+                if seen < skip_n { seen += 1; return Some(ScanCtl::Continue); }
+                if taken >= take_n { return Some(ScanCtl::Done); }
+                taken += 1;
+                ($body)(slots, span)
+            };
+            scan_loop_prcf(raw, arr_start, &needles, cat, &filter_slots, &mut row_fn)?;
+        }};
+    }
+
+    // Convert owned Acc::finalise primitive output to BVal (no arena
+    // alloc — Int/Float/Null are inline).
+    fn acc_to_bval<'a>(arena: &'a crate::eval::borrowed::Arena, acc: Acc, op: NumOp)
+        -> crate::eval::borrowed::Val<'a>
+    {
+        use crate::eval::borrowed::Val as BVal;
+        let v = acc.finalise(op);
+        match v {
+            Val::Null    => BVal::Null,
+            Val::Bool(b) => BVal::Bool(b),
+            Val::Int(n)  => BVal::Int(n),
+            Val::Float(f) => BVal::Float(f),
+            Val::Str(s) => BVal::Str(arena.alloc_str(&s)),
+            _ => BVal::Null,
+        }
+    }
+
+    match (&csink, trailing_map_kernel) {
+        (Sink::Count, None) => {
+            let mut count: u64 = 0;
+            sink_walker_b!(|_slots: &Slots, _span: RowSpan| -> Option<ScanCtl> {
+                count += 1;
+                Some(ScanCtl::Continue)
+            });
+            Some(Ok(BVal::Int(count as i64)))
+        }
+        (Sink::Numeric(op), Some(map_k)) => {
+            let map_slot = resolve_value_to_slot(map_k, cat)?;
+            let op = *op;
+            let mut acc = Acc::new();
+            sink_walker_b!(|slots: &Slots, _span: RowSpan| -> Option<ScanCtl> {
+                if let Some(v) = slots[map_slot] {
+                    if !acc.push(v) { return None; }
+                }
+                Some(ScanCtl::Continue)
+            });
+            Some(Ok(acc_to_bval(arena, acc, op)))
+        }
+        (Sink::First, _) => {
+            let map_kind = build_map_kind(trailing_map_kernel, cat)?;
+            let mut found: Option<BVal<'a>> = None;
+            sink_walker_b!(|slots: &Slots, span: RowSpan| -> Option<ScanCtl> {
+                found = Some(build_row_val_in(arena, raw, slots, span, &map_kind)?);
+                Some(ScanCtl::Done)
+            });
+            Some(Ok(found.unwrap_or(BVal::Null)))
+        }
+        (Sink::Last, _) => {
+            let map_kind = build_map_kind(trailing_map_kernel, cat)?;
+            let mut last_val: Option<BVal<'a>> = None;
+            sink_walker_b!(|slots: &Slots, span: RowSpan| -> Option<ScanCtl> {
+                last_val = Some(build_row_val_in(arena, raw, slots, span, &map_kind)?);
+                Some(ScanCtl::Continue)
+            });
+            Some(Ok(last_val.unwrap_or(BVal::Null)))
+        }
+        (Sink::Collect, _) => {
+            let map_kind = build_map_kind(trailing_map_kernel, cat)?;
+            let mut acc: Vec<BVal<'a>> = Vec::new();
+            if unique_collect {
+                let scalar_slot = match &map_kind {
+                    MapKind::Scalar(s) => *s,
+                    _ => return None,
+                };
+                let mut seen: std::collections::HashSet<UniqueKey> = std::collections::HashSet::new();
+                sink_walker_b!(|slots: &Slots, _span: RowSpan| -> Option<ScanCtl> {
+                    let sc = match slots[scalar_slot] {
+                        Some(sc) => sc,
+                        None => return Some(ScanCtl::Continue),
+                    };
+                    let key = UniqueKey::from_scalar(raw, sc);
+                    if seen.insert(key) {
+                        acc.push(scalar_to_val_in(arena, raw, sc));
+                    }
+                    Some(ScanCtl::Continue)
+                });
+            } else {
+                sink_walker_b!(|slots: &Slots, span: RowSpan| -> Option<ScanCtl> {
+                    acc.push(build_row_val_in(arena, raw, slots, span, &map_kind)?);
+                    Some(ScanCtl::Continue)
+                });
+            }
+            let slice = arena.alloc_slice_fill_iter(acc.into_iter());
+            Some(Ok(BVal::Arr(&*slice)))
+        }
+        _ => None,
+    }
+}
+
 /// Columnar extraction — generic algorithm for filter+map+aggregate
 /// shapes with no Filter stages.  For each wanted key, runs ONE
 /// `memchr::memmem::find_iter` over the full array byte range — SIMD

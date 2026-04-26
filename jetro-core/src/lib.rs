@@ -315,6 +315,11 @@ pub struct Jetro {
     /// re-walking the tape on every repeat query when ObjVec would
     /// be ~5× faster after the first Val build.
     pub(crate) tape_runs: std::sync::atomic::AtomicU32,
+    /// Per-handle bumpalo arena for borrowed `Val<'a>` results.  Lazily
+    /// initialised on first call to `collect_val_borrow` (Phase 4 API).
+    /// Zero overhead on owned-API path.  Lifetime of returned
+    /// `borrowed::Val<'h>` is tied to `&self` via this arena.
+    pub(crate) arena: OnceCell<crate::eval::borrowed::Arena>,
 }
 
 /// Extract an implicit-current-item field name from a `.map(arg)` /
@@ -795,7 +800,7 @@ impl Jetro {
     }
 
     pub fn new(document: Value) -> Self {
-        Self { document, root_val: OnceCell::new(), objvec_cache: Default::default(), tape_runs: std::sync::atomic::AtomicU32::new(0), raw_bytes: None, tape: OnceCell::new() }
+        Self { document, root_val: OnceCell::new(), objvec_cache: Default::default(), tape_runs: std::sync::atomic::AtomicU32::new(0), raw_bytes: None, tape: OnceCell::new(), arena: OnceCell::new() }
     }
 
     /// Parse JSON bytes and retain them alongside the parsed document.
@@ -821,6 +826,7 @@ impl Jetro {
                         root_val: OnceCell::new(), objvec_cache: Default::default(), tape_runs: std::sync::atomic::AtomicU32::new(0),
                         raw_bytes: Some(raw),
                         tape: { let c = OnceCell::new(); let _ = c.set(tape); c },
+                        arena: OnceCell::new(),
                     });
                 }
                 Err(_) => {
@@ -830,6 +836,7 @@ impl Jetro {
                         root_val: OnceCell::new(), objvec_cache: Default::default(), tape_runs: std::sync::atomic::AtomicU32::new(0),
                         raw_bytes: Some(raw),
                         tape: OnceCell::new(),
+                        arena: OnceCell::new(),
                     });
                 }
             }
@@ -842,6 +849,7 @@ impl Jetro {
                 root_val: OnceCell::new(), objvec_cache: Default::default(), tape_runs: std::sync::atomic::AtomicU32::new(0),
                 raw_bytes: Some(Arc::from(bytes.into_boxed_slice())),
                 tape: OnceCell::new(),
+                arena: OnceCell::new(),
             })
         }
     }
@@ -881,6 +889,7 @@ impl Jetro {
             tape_runs: std::sync::atomic::AtomicU32::new(0),
             raw_bytes: Some(raw),
             tape: OnceCell::new(),
+            arena: OnceCell::new(),
         })
     }
 
@@ -918,6 +927,7 @@ impl Jetro {
             root_val: OnceCell::new(), objvec_cache: Default::default(), tape_runs: std::sync::atomic::AtomicU32::new(0),
             raw_bytes: Some(raw),
             tape: { let c = OnceCell::new(); let _ = c.set(tape); c },
+            arena: OnceCell::new(),
         })
     }
 
@@ -963,6 +973,7 @@ impl Jetro {
             root_val: cell, objvec_cache: Default::default(), tape_runs: std::sync::atomic::AtomicU32::new(0),
             raw_bytes: None,
             tape: OnceCell::new(),
+            arena: OnceCell::new(),
         })
     }
 
@@ -1121,6 +1132,56 @@ impl Jetro {
             let prog = vm.get_or_compile(expr)?;
             vm.execute_val_raw(&prog, self.root_val())
         })
+    }
+
+    /// Borrowed-result API (Phase 4).  Returns a `borrowed::Val<'h>`
+    /// allocated in the handle's per-handle bumpalo arena.  Avoids the
+    /// Arc + IndexMap allocations of the owned `Val` builder — every
+    /// string content + every object slice + every array slice lives
+    /// in a single bump-pointer arena, freed in O(1) when the handle
+    /// drops.
+    ///
+    /// Lifetime contract: returned `Val<'h>` borrows from `&self`; it
+    /// must not outlive the `Jetro` handle.
+    ///
+    /// Coverage today: byte-scannable Sink::Collect shapes (e.g.
+    /// `$.array.filter(...).map(...).collect()`,
+    /// `$.array.map(field).unique()`).  Other shapes fall back to the
+    /// owned `collect_val` path then ingest into the arena via
+    /// `borrowed::from_owned` — same allocator cost as the owned API
+    /// but the handle still owns the arena, useful for downstream
+    /// borrowed consumers.
+    ///
+    /// Requires `simd-json` for the borrowed bytescan path; non-feature
+    /// builds always go through the owned-then-ingest fallback.
+    #[cfg(feature = "simd-json")]
+    pub fn collect_val_borrow<'h, S: AsRef<str>>(
+        &'h self,
+        expr: S,
+    ) -> std::result::Result<crate::eval::borrowed::Val<'h>, EvalError> {
+        let arena: &'h crate::eval::borrowed::Arena =
+            self.arena.get_or_init(crate::eval::borrowed::Arena::new);
+
+        let expr_s = expr.as_ref();
+        let parsed = parser::parse(expr_s).ok();
+        let lowered = parsed.as_ref().and_then(pipeline::Pipeline::lower);
+
+        if let Some(p) = &lowered {
+            if !self.root_val.get().is_some() {
+                if let Some(raw) = &self.raw_bytes {
+                    if let Some(out) = bytescan::try_run_borrow(p, raw.as_ref(), arena) {
+                        return out;
+                    }
+                }
+            }
+        }
+
+        // Fallback: run owned path, then ingest into arena.  Same
+        // allocator cost as `collect_val`, but the result lives in
+        // the handle's arena (cheap downstream traversal, no Arc
+        // bumps on read).
+        let owned = self.collect_val(expr_s)?;
+        Ok(crate::eval::borrowed::from_owned(arena, &owned))
     }
 
     /// Streaming iterator over a query result.
