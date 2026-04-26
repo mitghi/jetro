@@ -2160,7 +2160,7 @@ impl Pipeline {
         cache: &dyn ObjVecPromoter,
     ) -> Option<Result<Val, EvalError>> {
         use crate::composed::tape as ct;
-        use crate::strref::{TapeCmp, tape_walk_field_chain};
+        use crate::strref::tape_walk_field_chain;
         use std::cell::Cell;
 
         if !composed_path_enabled() { return None; }
@@ -2191,7 +2191,6 @@ impl Pipeline {
             Sink::Numeric(NumOp::Avg) => SinkKind::Avg,
             Sink::First => SinkKind::First,
             Sink::Last => SinkKind::Last,
-            _ => return None,
         };
 
         // Build tape stage chain. Reject any Generic / barrier /
@@ -2394,7 +2393,6 @@ impl Pipeline {
             Sink::Numeric(NumOp::Avg) => SinkKind::Avg,
             Sink::First => SinkKind::First,
             Sink::Last => SinkKind::Last,
-            _ => return None,
         };
         let _ = SinkKind::GroupByOnly;
 
@@ -2478,7 +2476,6 @@ impl Pipeline {
         // Find barrier positions. Each [last_split..barrier_idx] is a
         // streaming segment; [barrier_idx] is the barrier op.
         let mut last_split = 0usize;
-        let mut group_by_seen: Option<usize> = None;
         for (i, s) in stages_ref.iter().enumerate() {
             let is_barrier = matches!(s,
                 Stage::Reverse | Stage::Sort(_) | Stage::UniqueBy(_) |
@@ -2532,7 +2529,7 @@ impl Pipeline {
                     if i + 1 != stages_ref.len() { return None; }
                     let key = key_from_kernel(kernel)?;
                     let val = cmp::barrier_group_by(buf, &key);
-                    group_by_seen = Some(i);
+                    let _ = i;
                     return Some(Ok(val));
                 }
                 _ => unreachable!(),
@@ -2540,7 +2537,6 @@ impl Pipeline {
 
             last_split = i + 1;
         }
-        let _ = group_by_seen;
 
         // Final streaming segment + sink.
         let mut chain: Box<dyn ComposedStage> = Box::new(cmp::Identity);
@@ -3686,7 +3682,6 @@ fn num_f_cmp(a: f64, b: f64, op: crate::ast::BinOp) -> bool {
     }
 }
 
-#[inline]
 /// IC-cached chain step.  Cached `Option<usize>` slot survives across
 /// rows; missing-key marks slot None.  Used by Map(FieldChain) columnar
 /// path to amortise the IndexMap probe cost across the whole array.

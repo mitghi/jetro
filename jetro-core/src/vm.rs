@@ -1098,46 +1098,9 @@ impl Compiler {
         out
     }
 
-    /// Tier 3: VM peephole fusion gated off — Pipeline IR + composed
-    /// substrate handles every chain shape via base CallMethod
-    /// opcodes. Set `JETRO_VM_FUSE=1` to re-enable for diagnostic
-    /// compare against legacy fused-opcode path.
-    fn pass_filter_fusion(ops: Vec<Opcode>) -> Vec<Opcode> {
-        if std::env::var_os("JETRO_VM_FUSE").is_none() {
-            return ops;
-        }
-        let mut out: Vec<Opcode> = Vec::with_capacity(ops.len());
-        for op in ops {
-            if let (Opcode::CallMethod(b), Some(Opcode::CallMethod(a))) = (&op, out.last()) {
-                // Map+aggregate (Sum/Avg/Min/Max/Flatten/First/Last)
-                // fusion deleted — composed substrate handles via base
-                // CallMethod chain.
-                // filter(p) + last() fusion migrated to pipeline.rs
-                // Sink::FilterLast.  Sub-program path keeps unfused
-                // CallMethod(Filter) + CallMethod(Last) sequence.
-                // FilterTakeWhile / FilterDropWhile fusion deleted —
-                // base CallMethod chain runs filter then take_while/
-                // drop_while sequentially.
-                // MapUnique fusion deleted — base CallMethod chain.
-                // StrTrim*/StrUpperTrim*/StrLowerTrim* fusion deleted —
-                // base CallMethod chain runs trim+upper/lower as two ops.
-                // split(sep) + reverse() — detect; only actually fuse when next
-                // op is join(sep) with the same literal sep.  Done in a
-                // dedicated 3-way pass below via lookahead buffer.
-                // map(@.to_json()) + join(sep) → MapToJsonJoin { sep_prog }
-                // Body is one of:
-                // MapToJsonJoin fusion deleted — composed substrate
-                // handles map(@.to_json()).join(sep) via base CallMethod.
-            }
-            // MapReplaceLit / MapUpperReplaceLit / MapLowerReplaceLit
-            // fusion deleted in Tier 3 — base CallMethod chain.
-            // MapFString / MapStrSlice / MapProject fusion deleted in Tier 3 —
-            // composed substrate runs base CallMethod(Map, body) chain.
-            // MapStrConcat fusion deleted in Tier 3.
-            out.push(op);
-        }
-        out
-    }
+    /// Tier 3: VM peephole fusion deleted — Pipeline IR + composed
+    /// substrate handles every chain shape via base CallMethod opcodes.
+    fn pass_filter_fusion(ops: Vec<Opcode>) -> Vec<Opcode> { ops }
 
     // pass_string_chain_fusion deleted — StrSplitReverseJoin opcode gone.
     fn pass_string_chain_fusion(ops: Vec<Opcode>) -> Vec<Opcode> { ops }

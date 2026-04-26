@@ -20,7 +20,7 @@
 
 use crate::eval::Val;
 use crate::eval::EvalError;
-use crate::pipeline::{Pipeline, Source, Sink, Stage, BodyKernel, NumOp, ArithOperand, ArithOp};
+use crate::pipeline::{Pipeline, Source, Sink, Stage, BodyKernel, NumOp, ArithOperand};
 use std::sync::Arc;
 
 // ── Public entry point ─────────────────────────────────────────────

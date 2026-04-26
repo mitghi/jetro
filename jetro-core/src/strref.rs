@@ -339,11 +339,10 @@ pub fn tape_array_numeric_fold(
                 if f < acc.min_f { acc.min_f = f; }
                 if f > acc.max_f { acc.max_f = f; }
             }
-            _ => { acc.mixed = true; return None; }
+            _ => return None,
         }
         j += tape.span(j);
     }
-    if acc.mixed { return None; }
     Some((acc.sum_i, acc.sum_f, acc.count, acc.min_f, acc.max_f, acc.is_float))
 }
 
@@ -438,15 +437,14 @@ fn _tape_array_project_numeric_fold_unused(
                             if f < acc.min_f { acc.min_f = f; }
                             if f > acc.max_f { acc.max_f = f; }
                         }
-                        _ => { acc.mixed = true; return None; }
+                        _ => return None,
                     }
                 }
             }
-            _ => { acc.mixed = true; return None; }
+            _ => return None,
         }
         j += elem_span;
     }
-    if acc.mixed { return None; }
     Some((acc.sum_i, acc.sum_f, acc.count, acc.min_f, acc.max_f, acc.is_float))
 }
 
