@@ -515,8 +515,6 @@ pub enum Opcode {
     /// Fused `filter(p).drop_while(q)` — skip leading matches of q on
     /// p-filtered elements.
     FilterDropWhile { pred: Arc<Program>, drop: Arc<Program> },
-    /// Fused `map(f).unique()` — apply f and dedup by resulting value.
-    MapUnique(Arc<Program>),
     /// Fused equi-join: TOS is lhs array; `rhs` program evaluates
     /// to rhs array; join by (lhs_key, rhs_key) string field names.
     /// Produces array of merged objects (rhs wins on collision).
@@ -1767,14 +1765,7 @@ impl Compiler {
                     out.push(Opcode::FilterDropWhile { pred, drop });
                     continue;
                 }
-                // map(f) + unique() → MapUnique
-                if a.method == BuiltinMethod::Map && a.sub_progs.len() >= 1
-                   && b.method == BuiltinMethod::Unique && b.sub_progs.is_empty() {
-                    let f = Arc::clone(&a.sub_progs[0]);
-                    out.pop();
-                    out.push(Opcode::MapUnique(f));
-                    continue;
-                }
+                // MapUnique fusion deleted — base CallMethod chain.
                 // StrTrim*/StrUpperTrim*/StrLowerTrim* fusion deleted —
                 // base CallMethod chain runs trim+upper/lower as two ops.
                 // split(sep) + reverse() — detect; only actually fuse when next
@@ -2064,14 +2055,6 @@ impl Compiler {
                 // / MapAvg / MapMin / MapMax fall through to their
                 // generic handlers below for queries pipeline can't
                 // lower (sub-programs, non-Root chains).
-                Opcode::MapUnique(ref f) => {
-                    if let Some(k) = trivial_field(&f.ops) {
-                        out2.push(Opcode::MapFieldUnique(k)); continue;
-                    }
-                    if let Some(chain) = trivial_field_chain(&f.ops) {
-                        out2.push(Opcode::MapFieldChainUnique(chain)); continue;
-                    }
-                }
                 // FilterFieldsAllEqLitCount / FilterFieldsAllCmpLitCount
                 // (compound-AND filter+count specialisations) migrated to
                 // pipeline.rs Sink::CountIf with and_chain_prog decoder.
@@ -5590,29 +5573,6 @@ impl VM {
                                 }
                                 _ => out.push(l.clone()),
                             }
-                        }
-                    }
-                    stack.push(Val::arr(out));
-                }
-                Opcode::MapUnique(f) => {
-                    let recv = pop!(stack);
-                    let items = match recv {
-                        Val::Arr(a) => Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone()),
-                        Val::IntVec(a)   => a.iter().map(|n| Val::Int(*n)).collect(),
-                        Val::FloatVec(a) => a.iter().map(|f| Val::Float(*f)).collect(),
-                        Val::StrVec(a)   => a.iter().cloned().map(Val::Str).collect(),
-                        _ => Vec::new(),
-                    };
-                    let mut seen: std::collections::HashSet<String> =
-                        std::collections::HashSet::with_capacity(items.len());
-                    let mut out = Vec::with_capacity(items.len());
-                    let mut scratch = env.clone();
-                    for item in items {
-                        let prev = scratch.swap_current(item);
-                        let mapped = self.exec(f, &scratch)?;
-                        scratch.restore_current(prev);
-                        if seen.insert(super::eval::util::val_to_key(&mapped)) {
-                            out.push(mapped);
                         }
                     }
                     stack.push(Val::arr(out));
