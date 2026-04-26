@@ -328,13 +328,28 @@ pub enum ArithOperand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArithOp { Add, Sub, Mul, Div, Mod }
 
-/// One field of an ObjProject kernel — output key + path to walk
-/// from the current entry.  Empty `path` means the entry itself
-/// (rare; would only happen for spreads which we don't classify).
+/// One field of an ObjProject kernel — output key + value shape.
+/// Three shapes:
+///   - `Path`: walk path on entry; emit primitive value
+///   - `InnerLen`: walk path → expect Array → emit Int(len)
+///   - `InnerMapSum`: walk path → expect Array of Objects → fold
+///     numeric value extracted via `inner` kernel per inner entry,
+///     return Int/Float sum
 #[derive(Debug, Clone)]
-pub struct ObjProjEntry {
-    pub key: Arc<str>,
-    pub path: Arc<[Arc<str>]>,
+pub enum ObjProjEntry {
+    Path { key: Arc<str>, path: Arc<[Arc<str>]> },
+    InnerLen { key: Arc<str>, path: Arc<[Arc<str>]> },
+    InnerMapSum { key: Arc<str>, path: Arc<[Arc<str>]>, inner: Arc<BodyKernel> },
+}
+
+impl ObjProjEntry {
+    pub fn key(&self) -> &Arc<str> {
+        match self {
+            ObjProjEntry::Path { key, .. } => key,
+            ObjProjEntry::InnerLen { key, .. } => key,
+            ObjProjEntry::InnerMapSum { key, .. } => key,
+        }
+    }
 }
 
 impl BodyKernel {
@@ -540,7 +555,7 @@ fn classify_obj_project(
     let mut out: Vec<ObjProjEntry> = Vec::with_capacity(entries.len());
     for e in entries {
         match e {
-            E::Short { name, .. } => out.push(ObjProjEntry {
+            E::Short { name, .. } => out.push(ObjProjEntry::Path {
                 key: name.clone(),
                 path: Arc::from(vec![name.clone()].into_boxed_slice()),
             }),
@@ -552,12 +567,60 @@ fn classify_obj_project(
                         KvStep::Index(_) => return None,
                     }
                 }
-                out.push(ObjProjEntry { key: key.clone(), path: path.into() });
+                out.push(ObjProjEntry::Path { key: key.clone(), path: path.into() });
+            }
+            E::Kv { key, prog, optional: false, cond: None } => {
+                if let Some(entry) = classify_kv_method(key, prog) {
+                    out.push(entry);
+                } else {
+                    return None;
+                }
             }
             _ => return None,
         }
     }
     Some(out)
+}
+
+/// Classify a Kv entry's prog for nested-method shapes.  Recognises:
+///   `[<path-load>, CallMethod(Len, [])]` -> InnerLen
+///   `[<path-load>, MapSum(<inner-prog>)]` -> InnerMapSum
+/// where <path-load> is LoadIdent / GetField / FieldChain (single op).
+fn classify_kv_method(
+    key: &Arc<str>,
+    prog: &crate::vm::Program,
+) -> Option<ObjProjEntry> {
+    use crate::vm::{Opcode, BuiltinMethod};
+    let ops = prog.ops.as_ref();
+    if ops.len() != 2 { return None; }
+    let path: Arc<[Arc<str>]> = match &ops[0] {
+        Opcode::LoadIdent(k) | Opcode::GetField(k) =>
+            Arc::from(vec![k.clone()].into_boxed_slice()),
+        Opcode::FieldChain(fc) => fc.keys.clone(),
+        _ => return None,
+    };
+    match &ops[1] {
+        Opcode::CallMethod(c)
+            if c.method == BuiltinMethod::Len && c.sub_progs.is_empty() =>
+        {
+            Some(ObjProjEntry::InnerLen { key: key.clone(), path })
+        }
+        Opcode::MapSum(inner_prog) => {
+            let inner = BodyKernel::classify(inner_prog);
+            // Only path / arith inner kernels supported on tape.
+            if !matches!(inner,
+                BodyKernel::FieldRead(_)
+                | BodyKernel::FieldChain(_)
+                | BodyKernel::Arith(_, _, _))
+            { return None; }
+            Some(ObjProjEntry::InnerMapSum {
+                key: key.clone(),
+                path,
+                inner: Arc::new(inner),
+            })
+        }
+        _ => None,
+    }
 }
 
 #[inline]
@@ -3105,22 +3168,53 @@ fn eval_kernel_to_row(
 ) -> Option<RowSrc> {
     match kernel {
         BodyKernel::ObjProject(entries) => {
-            // Build per-row Val::ObjSmall by walking each path on the
-            // current tape entry.  Missing fields skip — matches
-            // existing MakeObj `optional=false` semantics where the key
-            // is omitted when the path resolves to Null/missing.  (We
-            // emit Val::Null for clarity; downstream consumers treat
-            // both equivalently.)
             let mut pairs: Vec<(Arc<str>, Val)> = Vec::with_capacity(entries.len());
             for e in entries.iter() {
-                let key_strs: Vec<&str> = e.path.iter().map(|k| k.as_ref()).collect();
-                let v_idx = crate::strref::tape_walk_field_chain_from(
-                    tape, entry_idx, &key_strs);
-                let v = match v_idx {
-                    Some(idx) => tape_node_to_val_primitive(tape, idx)?,
-                    None => Val::Null,
+                let v = match e {
+                    ObjProjEntry::Path { path, .. } => {
+                        let key_strs: Vec<&str> = path.iter().map(|k| k.as_ref()).collect();
+                        let v_idx = crate::strref::tape_walk_field_chain_from(
+                            tape, entry_idx, &key_strs);
+                        match v_idx {
+                            Some(idx) => tape_node_to_val_primitive(tape, idx)?,
+                            None => Val::Null,
+                        }
+                    }
+                    ObjProjEntry::InnerLen { path, .. } => {
+                        let key_strs: Vec<&str> = path.iter().map(|k| k.as_ref()).collect();
+                        let v_idx = crate::strref::tape_walk_field_chain_from(
+                            tape, entry_idx, &key_strs);
+                        match v_idx {
+                            Some(idx) => match tape.nodes[idx] {
+                                crate::strref::TapeNode::Array { len, .. } => Val::Int(len as i64),
+                                _ => Val::Null,
+                            },
+                            None => Val::Null,
+                        }
+                    }
+                    ObjProjEntry::InnerMapSum { path, inner, .. } => {
+                        let key_strs: Vec<&str> = path.iter().map(|k| k.as_ref()).collect();
+                        let arr_idx = crate::strref::tape_walk_field_chain_from(
+                            tape, entry_idx, &key_strs);
+                        match arr_idx {
+                            Some(idx) => {
+                                let iter = crate::strref::tape_array_iter(tape, idx);
+                                if let Some(iter) = iter {
+                                    let mut st = NumAccState::new();
+                                    for inner_entry in iter {
+                                        let v = eval_kernel_value(inner.as_ref(), tape, inner_entry)?;
+                                        if !st.push(v) { return None; }
+                                    }
+                                    if st.count == 0 { Val::Int(0) }
+                                    else if st.is_float { Val::Float(st.sum_f) }
+                                    else { Val::Int(st.sum_i) }
+                                } else { Val::Null }
+                            }
+                            None => Val::Null,
+                        }
+                    }
                 };
-                pairs.push((e.key.clone(), v));
+                pairs.push((e.key().clone(), v));
             }
             Some(RowSrc::Mat(Val::ObjSmall(Arc::from(pairs.into_boxed_slice()))))
         }
