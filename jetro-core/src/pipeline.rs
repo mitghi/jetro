@@ -691,6 +691,122 @@ pub enum Sink {
     Last,
 }
 
+// ── Step 3d Phase 1: demand propagation ─────────────────────────────────────
+//
+// Two ADTs declare what a Sink wants and what each Stage needs from its
+// upstream.  `Pipeline::compute_strategies` walks stages backward,
+// propagating demand; barrier stages observe their downstream demand
+// and pick algorithm (full sort vs top-k).  No per-shape rewrite rule;
+// `Sort ∘ First` / `Sort ∘ Take(k)` reduce automatically through this
+// propagation.
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Bound {
+    Unbounded,
+    AtMost(usize),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Position { First, Last, Nth(usize) }
+
+#[derive(Debug, Clone, Copy)]
+pub struct Demand {
+    pub consumption: Bound,
+    pub positional:  Option<Position>,
+}
+
+impl Demand {
+    pub const UNBOUNDED: Demand = Demand { consumption: Bound::Unbounded, positional: None };
+}
+
+impl Sink {
+    /// Declare consumption budget + positional preference.  Drives
+    /// Phase 1 demand propagation; barriers use `consumption` to pick
+    /// full-sort vs top-k.
+    pub fn demand(&self) -> Demand {
+        match self {
+            Sink::First => Demand {
+                consumption: Bound::AtMost(1),
+                positional:  Some(Position::First),
+            },
+            Sink::Last => Demand {
+                consumption: Bound::AtMost(1),
+                positional:  Some(Position::Last),
+            },
+            Sink::Count | Sink::Numeric(_) | Sink::Collect => Demand::UNBOUNDED,
+        }
+    }
+}
+
+/// Per-stage strategy chosen by Phase 1 propagation.  Default is
+/// "no adaptation"; Sort observes a bounded downstream demand and
+/// switches to TopK (keep smallest k) or BottomK (keep largest k)
+/// depending on positional preference.  Length matches `Pipeline::stages`.
+#[derive(Debug, Clone, Copy)]
+pub enum StageStrategy {
+    Default,
+    /// Sort + downstream wants AtMost(k) starting from the beginning
+    /// (`First`, `Take(k)`, `Nth(k)`-near-front).  Keep the k smallest-
+    /// by-key elements, sorted ascending.
+    SortTopK(usize),
+    /// Sort + downstream wants the tail (`Last`).  Keep the k largest-
+    /// by-key elements, sorted ascending.  `Sink::Last` then picks the
+    /// final element which is the global max (matching full-sort∘Last
+    /// semantics).
+    SortBottomK(usize),
+}
+
+/// Walk stages right-to-left, threading downstream `Demand` through each.
+/// For each stage, decide its strategy from the demand seen *below* it,
+/// then derive the demand the stage exposes to its *upstream*.  This is
+/// the unified mechanism that subsumes `Sort ∘ First → MinBy`,
+/// `Sort_by ∘ Last → MaxBy`, `Sort ∘ Take(k) → TopN(k)` rewrite rules.
+pub fn compute_strategies(stages: &[Stage], sink: &Sink) -> Vec<StageStrategy> {
+    let mut strategies: Vec<StageStrategy> = vec![StageStrategy::Default; stages.len()];
+    let mut demand = sink.demand();
+    for (i, stage) in stages.iter().enumerate().rev() {
+        // Phase 1: observe & adapt
+        if let Stage::Sort(_) = stage {
+            if let Bound::AtMost(k) = demand.consumption {
+                strategies[i] = match demand.positional {
+                    Some(Position::Last) => StageStrategy::SortBottomK(k),
+                    _                    => StageStrategy::SortTopK(k),
+                };
+            }
+        }
+        // Phase 2: propagate demand upward
+        demand = upstream_demand(demand, stage);
+    }
+    strategies
+}
+
+/// What demand does upstream see, given downstream `d` and a stage?
+#[inline]
+fn upstream_demand(d: Demand, stage: &Stage) -> Demand {
+    match stage {
+        // 1:1 — preserve consumption.  Map preserves position; Filter
+        // can drop elements so downstream's "first" / "last" refers to
+        // post-filter position — upstream demand is unbounded.
+        Stage::Map(_) => d,
+        Stage::Filter(_) => Demand { consumption: d.consumption, positional: None },
+        // Take(n) caps upstream.
+        Stage::Take(n) => {
+            let cap = match d.consumption {
+                Bound::Unbounded => *n,
+                Bound::AtMost(k) => k.min(*n),
+            };
+            Demand { consumption: Bound::AtMost(cap), positional: None }
+        }
+        // Skip + barriers all need the full upstream stream.
+        Stage::Skip(_)
+            | Stage::FlatMap(_)
+            | Stage::Reverse
+            | Stage::Sort(_)
+            | Stage::UniqueBy(_)
+            | Stage::GroupBy(_) => Demand::UNBOUNDED,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Pipeline {
     pub source: Source,
@@ -1832,6 +1948,13 @@ impl Pipeline {
         let kernels = &eff_kernels;
         let stages_ref = &eff_stages;
 
+        // Step 3d Phase 1: demand propagation.  Each stage sees the
+        // demand its downstream wants, picks an algorithm, and exposes
+        // upstream demand.  Sort under bounded downstream demand picks
+        // top-k instead of full sort — generic mechanism, no rewrite
+        // rule.
+        let strategies = compute_strategies(stages_ref, &eff_sink);
+
         // Find barrier positions. Each [last_split..barrier_idx] is a
         // streaming segment; [barrier_idx] is the barrier op.
         let mut last_split = 0usize;
@@ -1860,12 +1983,23 @@ impl Pipeline {
 
             // Apply barrier.
             let kernel = kernels.get(i).unwrap_or(&BodyKernel::Generic);
+            let strategy = strategies.get(i).copied().unwrap_or(StageStrategy::Default);
             buf = match s {
                 Stage::Reverse => cmp::barrier_reverse(buf),
-                Stage::Sort(None) => cmp::barrier_sort(buf, &cmp::KeySource::None),
+                Stage::Sort(None) => match strategy {
+                    StageStrategy::SortTopK(k) =>
+                        cmp::barrier_top_k(buf, &cmp::KeySource::None, k),
+                    StageStrategy::SortBottomK(k) =>
+                        cmp::barrier_bottom_k(buf, &cmp::KeySource::None, k),
+                    _ => cmp::barrier_sort(buf, &cmp::KeySource::None),
+                },
                 Stage::Sort(Some(_)) => {
                     let key = key_from_kernel(kernel)?;
-                    cmp::barrier_sort(buf, &key)
+                    match strategy {
+                        StageStrategy::SortTopK(k) => cmp::barrier_top_k(buf, &key, k),
+                        StageStrategy::SortBottomK(k) => cmp::barrier_bottom_k(buf, &key, k),
+                        _ => cmp::barrier_sort(buf, &key),
+                    }
                 }
                 Stage::UniqueBy(None) =>
                     cmp::barrier_unique_by(buf, &cmp::KeySource::None),

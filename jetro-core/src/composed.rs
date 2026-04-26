@@ -662,6 +662,68 @@ pub fn barrier_sort(buf: Vec<Val>, key: &KeySource) -> Vec<Val> {
     indexed.into_iter().map(|(_, v)| v).collect()
 }
 
+/// Top-k sort: keep the `k` smallest-by-key elements, sorted ascending.
+/// O(N log k) via a max-heap of size k — for `k << N` this is the
+/// algorithmic win that demand propagation unlocks (`Sort ∘ First` →
+/// `Sort.adapt(AtMost(1))` → this kernel).
+pub fn barrier_top_k(buf: Vec<Val>, key: &KeySource, k: usize) -> Vec<Val> {
+    barrier_top_or_bottom_k(buf, key, k, false)
+}
+
+/// Bottom-k sort: keep the `k` largest-by-key elements, sorted ascending.
+/// Driven by `Sort ∘ Last` / positional=Last under demand propagation.
+pub fn barrier_bottom_k(buf: Vec<Val>, key: &KeySource, k: usize) -> Vec<Val> {
+    barrier_top_or_bottom_k(buf, key, k, true)
+}
+
+fn barrier_top_or_bottom_k(buf: Vec<Val>, key: &KeySource, k: usize, largest: bool) -> Vec<Val> {
+    if k == 0 { return Vec::new(); }
+    if buf.len() <= k {
+        // Smaller than budget — fall back to full sort (still O(N log N)
+        // but N ≤ k so equivalent cost).
+        return barrier_sort(buf, key);
+    }
+
+    // Simple Vec + linear-extremum approach.  Avoids the `Ord` bound
+    // that a BinaryHeap would require on `Val` — we only have `cmp_val`
+    // total order.  For small k this is fine; larger k a heap with a
+    // `Reverse<KeyHash>` wrapper would beat it.
+    //
+    // `largest=false` keeps the smallest-k (top-k);
+    // `largest=true`  keeps the largest-k (bottom-k for `.last()`).
+    let mut top: Vec<(Val, Val)> = Vec::with_capacity(k + 1);
+    for v in buf.into_iter() {
+        let kv = key.extract(&v);
+        if top.len() < k {
+            top.push((kv, v));
+            continue;
+        }
+        // Find current "worst" element in `top` — the one most likely
+        // to be displaced.  For top-k that's the maximum; for bottom-k
+        // that's the minimum.
+        let mut worst_idx = 0;
+        for (i, (kk, _)) in top.iter().enumerate().skip(1) {
+            let cmp = cmp_val(kk, &top[worst_idx].0);
+            let displace = if largest {
+                cmp == std::cmp::Ordering::Less       // tracking smallest as worst
+            } else {
+                cmp == std::cmp::Ordering::Greater    // tracking largest as worst
+            };
+            if displace { worst_idx = i; }
+        }
+        let cmp = cmp_val(&kv, &top[worst_idx].0);
+        let take = if largest {
+            cmp == std::cmp::Ordering::Greater
+        } else {
+            cmp == std::cmp::Ordering::Less
+        };
+        if take { top[worst_idx] = (kv, v); }
+    }
+    // Final sort of the kept elements (always ascending).
+    top.sort_by(|a, b| cmp_val(&a.0, &b.0));
+    top.into_iter().map(|(_, v)| v).collect()
+}
+
 /// Dedup by key. Uses a linear-probe HashSet on hashable keys; for
 /// primitive Vals this is O(N).
 pub fn barrier_unique_by(buf: Vec<Val>, key: &KeySource) -> Vec<Val> {
@@ -1624,11 +1686,83 @@ mod tests {
             json!(2)
         );
 
-        // sort_by price + first → smallest
+        // sort_by price + first → smallest (Step 3d Phase 1: top-k, k=1)
         assert_eq!(
             j.collect("$.rows.sort_by(price).first()").unwrap(),
             json!({"city": "NYC", "price": 10})
         );
+    }
+
+    #[test]
+    fn step3d_phase1_sort_topk() {
+        // Demand propagation: Sort sees AtMost(k) downstream and switches
+        // to top-k via barrier_top_k.  Output ordering matches full sort.
+        use serde_json::json;
+        let doc = json!({
+            "rows": [
+                {"id": 5, "v": 50},
+                {"id": 1, "v": 10},
+                {"id": 4, "v": 40},
+                {"id": 2, "v": 20},
+                {"id": 3, "v": 30},
+            ]
+        });
+        let j = crate::Jetro::new(doc);
+
+        // Sort ∘ Take(2) → top-k=2, ascending by v
+        assert_eq!(
+            j.collect("$.rows.sort_by(v).take(2)").unwrap(),
+            json!([{"id": 1, "v": 10}, {"id": 2, "v": 20}])
+        );
+        // Sort ∘ First → top-k=1
+        assert_eq!(
+            j.collect("$.rows.sort_by(v).first()").unwrap(),
+            json!({"id": 1, "v": 10})
+        );
+        // Sort ∘ Last → top-k=1 with positional Last; current Sort produces
+        // sorted ascending, Last picks largest.
+        assert_eq!(
+            j.collect("$.rows.sort_by(v).last()").unwrap(),
+            json!({"id": 5, "v": 50})
+        );
+    }
+
+    #[test]
+    fn step3d_phase1_compute_strategies() {
+        use crate::pipeline::{Stage, Sink, NumOp, StageStrategy, compute_strategies};
+        use std::sync::Arc;
+
+        let dummy_prog = Arc::new(crate::vm::Program::new(Vec::new(), ""));
+
+        // [Sort] + First → SortTopK(1)
+        let stages = vec![Stage::Sort(Some(Arc::clone(&dummy_prog)))];
+        let strats = compute_strategies(&stages, &Sink::First);
+        assert!(matches!(strats[0], StageStrategy::SortTopK(1)));
+
+        // [Sort, Take(5)] + Collect → SortTopK(5) at index 0
+        let stages = vec![
+            Stage::Sort(Some(Arc::clone(&dummy_prog))),
+            Stage::Take(5),
+        ];
+        let strats = compute_strategies(&stages, &Sink::Collect);
+        assert!(matches!(strats[0], StageStrategy::SortTopK(5)));
+        assert!(matches!(strats[1], StageStrategy::Default));
+
+        // [Sort] + Sum → unbounded → Default (full sort)
+        let stages = vec![Stage::Sort(None)];
+        let strats = compute_strategies(&stages, &Sink::Numeric(NumOp::Sum));
+        assert!(matches!(strats[0], StageStrategy::Default));
+
+        // [Sort, Filter] + First → demand becomes unbounded above Filter
+        // (Filter loses positional info upstream)
+        let stages = vec![
+            Stage::Sort(Some(Arc::clone(&dummy_prog))),
+            Stage::Filter(Arc::clone(&dummy_prog)),
+        ];
+        let strats = compute_strategies(&stages, &Sink::First);
+        // Filter still sees AtMost(1) downstream → consumption=AtMost(1)
+        // propagates up to Sort.  Sort picks SortTopK(1).
+        assert!(matches!(strats[0], StageStrategy::SortTopK(1)));
     }
 
     #[test]
