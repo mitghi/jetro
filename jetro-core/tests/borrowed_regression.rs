@@ -78,6 +78,20 @@ fn phase2_arena_builder_speedup() {
     );
 }
 
+/// Shapes NOT yet covered by bytescan_borrow + composed_borrow (today
+/// fall through to owned `collect_val` + `from_owned` ingest).  These
+/// must NOT regress vs owned — they pay one extra `from_owned` walk
+/// today (cheap when result Val is small).  Test gates parity at
+/// the same 1.15× slack.
+const UNCOVERED_SHAPES: &[(&str, &str)] = &[
+    ("FlatMap+filter+count",
+        "$.orders.flat_map(items).filter(price > 10).count()"),
+    ("FlatMap+map+sum",
+        "$.orders.flat_map(items).map(price).sum()"),
+    ("Filter+FlatMap+count",
+        "$.orders.filter(status == 'shipped').flat_map(items).count()"),
+];
+
 const SHAPES: &[(&str, &str)] = &[
     ("Sink::Collect+UniqueBy",
         "$.orders.map(customer.address.city).unique()"),
@@ -128,6 +142,35 @@ fn bytescan_borrowed_parity_per_shape() {
     }
     assert!(violations.is_empty(),
         "borrowed-substrate parity regression(s): {:#?}", violations);
+}
+
+#[test]
+fn uncovered_shape_parity_fallback() {
+    let bytes = make_doc();
+    let mut violations: Vec<String> = Vec::new();
+    for (label, q) in UNCOVERED_SHAPES {
+        let owned = time_med(N_ITERS, || {
+            let j = jetro_core::Jetro::from_simd(bytes.clone()).unwrap();
+            let v = j.collect_val(*q).unwrap();
+            std::hint::black_box(v);
+            std::hint::black_box(j);
+        });
+        let borrowed = time_med(N_ITERS, || {
+            let j = jetro_core::Jetro::from_simd(bytes.clone()).unwrap();
+            let v = j.collect_val_borrow(*q).unwrap();
+            std::hint::black_box(v);
+            std::hint::black_box(j);
+        });
+        let ratio = borrowed as f64 / owned as f64;
+        if ratio > PARITY_SLACK_RATIO {
+            violations.push(format!(
+                "{} borrowed/{} µs slower than owned/{} µs by {:.2}× (gate {:.2}×)",
+                label, borrowed, owned, ratio, PARITY_SLACK_RATIO
+            ));
+        }
+    }
+    assert!(violations.is_empty(),
+        "uncovered-shape fallback regression(s): {:#?}", violations);
 }
 
 #[test]
