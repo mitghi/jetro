@@ -1039,6 +1039,309 @@ pub mod tape {
             }
         }
     }
+
+    // ── TapeSink trait + 8 generic impls ────────────────────────────────────
+
+    pub trait TapeSink {
+        type Acc;
+        fn init() -> Self::Acc;
+        fn fold(acc: Self::Acc, tape: &TapeData, idx: usize) -> Self::Acc;
+        fn finalise(acc: Self::Acc) -> Val;
+    }
+
+    /// Read a tape node as `f64` if numeric, else `None`. Bool→0.0/1.0
+    /// kept out — only Int/Float numbers fold into numeric sinks, same
+    /// shape as `composed::SumSink` for Val. One mechanism, no per-
+    /// kind handler.
+    #[inline]
+    fn tape_num(tape: &TapeData, idx: usize) -> Option<f64> {
+        use crate::strref::TapeNode;
+        use simd_json::StaticNode as SN;
+        match tape.nodes[idx] {
+            TapeNode::Static(SN::I64(v)) => Some(v as f64),
+            TapeNode::Static(SN::U64(v)) if v <= i64::MAX as u64 => Some(v as f64),
+            TapeNode::Static(SN::F64(v)) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// Read a tape node as `i64` if exactly representable, else `None`.
+    #[inline]
+    fn tape_int(tape: &TapeData, idx: usize) -> Option<i64> {
+        use crate::strref::TapeNode;
+        use simd_json::StaticNode as SN;
+        match tape.nodes[idx] {
+            TapeNode::Static(SN::I64(v)) => Some(v),
+            TapeNode::Static(SN::U64(v)) if v <= i64::MAX as u64 => Some(v as i64),
+            _ => None,
+        }
+    }
+
+    /// Materialise a single tape value to `Val`. Used by terminal
+    /// First/Last/Collect sinks — they need an owned Val to return.
+    /// Streaming/numeric sinks never call this.
+    pub fn tape_to_val(tape: &TapeData, idx: usize) -> Val {
+        use crate::strref::TapeNode;
+        use simd_json::StaticNode as SN;
+        match tape.nodes[idx] {
+            TapeNode::Static(SN::Null) => Val::Null,
+            TapeNode::Static(SN::Bool(b)) => Val::Bool(b),
+            TapeNode::Static(SN::I64(i)) => Val::Int(i),
+            TapeNode::Static(SN::U64(u)) if u <= i64::MAX as u64 => Val::Int(u as i64),
+            TapeNode::Static(SN::U64(u)) => Val::Float(u as f64),
+            TapeNode::Static(SN::F64(f)) => Val::Float(f),
+            TapeNode::StringRef { .. } => Val::Str(std::sync::Arc::from(tape.str_at(idx))),
+            TapeNode::Object { .. } | TapeNode::Array { .. } => {
+                // Build IndexMap / Vec via a recursive walk. Same shape
+                // as the eager parse path; only invoked at terminal.
+                tape_to_val_compound(tape, idx)
+            }
+        }
+    }
+
+    fn tape_to_val_compound(tape: &TapeData, idx: usize) -> Val {
+        use crate::strref::TapeNode;
+        match tape.nodes[idx] {
+            TapeNode::Object { len, .. } => {
+                let len = len as usize;
+                let mut m: indexmap::IndexMap<std::sync::Arc<str>, Val> = indexmap::IndexMap::with_capacity(len);
+                let mut cursor = idx + 1;
+                for _ in 0..len {
+                    let key_idx = cursor;
+                    let key_str = tape.str_at(key_idx);
+                    cursor += tape.span(key_idx);
+                    let val_idx = cursor;
+                    let v = tape_to_val(tape, val_idx);
+                    cursor += tape.span(val_idx);
+                    m.insert(std::sync::Arc::from(key_str), v);
+                }
+                Val::Obj(std::sync::Arc::new(m))
+            }
+            TapeNode::Array { len, .. } => {
+                let len = len as usize;
+                let mut out: Vec<Val> = Vec::with_capacity(len);
+                let mut cursor = idx + 1;
+                for _ in 0..len {
+                    out.push(tape_to_val(tape, cursor));
+                    cursor += tape.span(cursor);
+                }
+                Val::Arr(std::sync::Arc::new(out))
+            }
+            _ => Val::Null,
+        }
+    }
+
+    pub struct TapeCountSink;
+    impl TapeSink for TapeCountSink {
+        type Acc = i64;
+        #[inline] fn init() -> i64 { 0 }
+        #[inline] fn fold(acc: i64, _: &TapeData, _: usize) -> i64 { acc + 1 }
+        #[inline] fn finalise(acc: i64) -> Val { Val::Int(acc) }
+    }
+
+    pub struct TapeSumSink;
+    impl TapeSink for TapeSumSink {
+        type Acc = (i64, f64, bool);
+        #[inline] fn init() -> Self::Acc { (0, 0.0, false) }
+        fn fold(mut acc: Self::Acc, tape: &TapeData, idx: usize) -> Self::Acc {
+            if let Some(i) = tape_int(tape, idx) {
+                acc.0 += i;
+            } else if let Some(f) = tape_num(tape, idx) {
+                acc.1 += f;
+                acc.2 = true;
+            }
+            acc
+        }
+        fn finalise(acc: Self::Acc) -> Val {
+            if acc.2 { Val::Float(acc.0 as f64 + acc.1) } else { Val::Int(acc.0) }
+        }
+    }
+
+    pub struct TapeMinSink;
+    impl TapeSink for TapeMinSink {
+        type Acc = Option<f64>;
+        #[inline] fn init() -> Self::Acc { None }
+        fn fold(acc: Self::Acc, tape: &TapeData, idx: usize) -> Self::Acc {
+            match tape_num(tape, idx) {
+                Some(n) => Some(acc.map_or(n, |c| c.min(n))),
+                None => acc,
+            }
+        }
+        fn finalise(acc: Self::Acc) -> Val {
+            match acc {
+                Some(f) if f.fract() == 0.0 && f.abs() < (i64::MAX as f64) => Val::Int(f as i64),
+                Some(f) => Val::Float(f),
+                None => Val::Null,
+            }
+        }
+    }
+
+    pub struct TapeMaxSink;
+    impl TapeSink for TapeMaxSink {
+        type Acc = Option<f64>;
+        #[inline] fn init() -> Self::Acc { None }
+        fn fold(acc: Self::Acc, tape: &TapeData, idx: usize) -> Self::Acc {
+            match tape_num(tape, idx) {
+                Some(n) => Some(acc.map_or(n, |c| c.max(n))),
+                None => acc,
+            }
+        }
+        fn finalise(acc: Self::Acc) -> Val {
+            match acc {
+                Some(f) if f.fract() == 0.0 && f.abs() < (i64::MAX as f64) => Val::Int(f as i64),
+                Some(f) => Val::Float(f),
+                None => Val::Null,
+            }
+        }
+    }
+
+    pub struct TapeAvgSink;
+    impl TapeSink for TapeAvgSink {
+        type Acc = (f64, usize);
+        #[inline] fn init() -> Self::Acc { (0.0, 0) }
+        fn fold(mut acc: Self::Acc, tape: &TapeData, idx: usize) -> Self::Acc {
+            if let Some(n) = tape_num(tape, idx) {
+                acc.0 += n;
+                acc.1 += 1;
+            }
+            acc
+        }
+        fn finalise(acc: Self::Acc) -> Val {
+            if acc.1 == 0 { Val::Null } else { Val::Float(acc.0 / acc.1 as f64) }
+        }
+    }
+
+    pub struct TapeFirstSink;
+    impl TapeSink for TapeFirstSink {
+        type Acc = Option<usize>;
+        #[inline] fn init() -> Self::Acc { None }
+        fn fold(acc: Self::Acc, _: &TapeData, idx: usize) -> Self::Acc {
+            acc.or(Some(idx))
+        }
+        fn finalise(_: Self::Acc) -> Val { Val::Null }
+    }
+
+    pub struct TapeLastSink;
+    impl TapeSink for TapeLastSink {
+        type Acc = Option<usize>;
+        #[inline] fn init() -> Self::Acc { None }
+        fn fold(_: Self::Acc, _: &TapeData, idx: usize) -> Self::Acc { Some(idx) }
+        fn finalise(_: Self::Acc) -> Val { Val::Null }
+    }
+
+    pub struct TapeCollectSink;
+    impl TapeSink for TapeCollectSink {
+        type Acc = Vec<usize>;
+        #[inline] fn init() -> Self::Acc { Vec::new() }
+        fn fold(mut acc: Self::Acc, _: &TapeData, idx: usize) -> Self::Acc {
+            acc.push(idx);
+            acc
+        }
+        fn finalise(_: Self::Acc) -> Val { Val::Null }
+    }
+
+    /// Outer loop — parameterised by `S: TapeSink`. Walks the source
+    /// array via `tape_array_iter`, dispatches each entry through the
+    /// composed `TapeStage` chain, folds results. One mechanism per
+    /// sink kind; no per-chain code.
+    ///
+    /// `First`/`Last`/`Collect` need a post-fold step to materialise
+    /// owned `Val`s from indices — separate runners below pay that
+    /// cost only when sink demands it. Numeric sinks never materialise.
+    pub fn run_pipeline_tape<S: TapeSink>(
+        tape: &TapeData,
+        arr_idx: usize,
+        stages: &dyn TapeStage,
+    ) -> Option<Val> {
+        let iter = tape_array_iter(tape, arr_idx)?;
+        let mut acc = S::init();
+        for entry in iter {
+            match stages.apply(tape, entry) {
+                TapeOutput::Pass(v) => acc = S::fold(acc, tape, v),
+                TapeOutput::Filtered => continue,
+                TapeOutput::Many(items) => {
+                    for it in items { acc = S::fold(acc, tape, it); }
+                }
+                TapeOutput::Done => break,
+            }
+        }
+        Some(S::finalise(acc))
+    }
+
+    /// Specialised runner for `TapeFirstSink` — finalises by
+    /// materialising the captured tape index. Avoids polluting the
+    /// generic `TapeSink::finalise` with a `&TapeData` parameter (which
+    /// would force every numeric sink to carry one).
+    pub fn run_pipeline_tape_first(
+        tape: &TapeData,
+        arr_idx: usize,
+        stages: &dyn TapeStage,
+    ) -> Option<Val> {
+        let iter = tape_array_iter(tape, arr_idx)?;
+        let mut found: Option<usize> = None;
+        for entry in iter {
+            if found.is_some() { break; }
+            match stages.apply(tape, entry) {
+                TapeOutput::Pass(v) => { found = Some(v); }
+                TapeOutput::Filtered => continue,
+                TapeOutput::Many(items) => {
+                    if let Some(&first) = items.first() {
+                        found = Some(first);
+                    }
+                }
+                TapeOutput::Done => break,
+            }
+        }
+        Some(match found {
+            Some(idx) => tape_to_val(tape, idx),
+            None => Val::Null,
+        })
+    }
+
+    pub fn run_pipeline_tape_last(
+        tape: &TapeData,
+        arr_idx: usize,
+        stages: &dyn TapeStage,
+    ) -> Option<Val> {
+        let iter = tape_array_iter(tape, arr_idx)?;
+        let mut found: Option<usize> = None;
+        for entry in iter {
+            match stages.apply(tape, entry) {
+                TapeOutput::Pass(v) => { found = Some(v); }
+                TapeOutput::Filtered => continue,
+                TapeOutput::Many(items) => {
+                    if let Some(&last) = items.last() {
+                        found = Some(last);
+                    }
+                }
+                TapeOutput::Done => break,
+            }
+        }
+        Some(match found {
+            Some(idx) => tape_to_val(tape, idx),
+            None => Val::Null,
+        })
+    }
+
+    pub fn run_pipeline_tape_collect(
+        tape: &TapeData,
+        arr_idx: usize,
+        stages: &dyn TapeStage,
+    ) -> Option<Val> {
+        let iter = tape_array_iter(tape, arr_idx)?;
+        let mut out: Vec<Val> = Vec::new();
+        for entry in iter {
+            match stages.apply(tape, entry) {
+                TapeOutput::Pass(v) => out.push(tape_to_val(tape, v)),
+                TapeOutput::Filtered => continue,
+                TapeOutput::Many(items) => {
+                    for it in items { out.push(tape_to_val(tape, it)); }
+                }
+                TapeOutput::Done => break,
+            }
+        }
+        Some(Val::Arr(std::sync::Arc::new(out)))
+    }
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
@@ -1144,6 +1447,65 @@ mod tests {
         let arr: Vec<Val> = vec![Val::Int(10), Val::Int(20), Val::Int(30)];
         assert!(matches!(run_pipeline::<FirstSink>(&arr, &Identity), Val::Int(10)));
         assert!(matches!(run_pipeline::<LastSink>(&arr, &Identity), Val::Int(30)));
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn tape_sinks_smoke() {
+        use crate::composed::tape::*;
+        use crate::strref::{TapeData, TapeCmp};
+        use std::sync::Arc;
+
+        // [{a:1,b:10},{a:2,b:20},{a:1,b:30}].filter(a==1).map(b)
+        // Sum=40, Count=2, Min=10, Max=30, Avg=20
+        let bytes = br#"[{"a":1,"b":10},{"a":2,"b":20},{"a":1,"b":30}]"#.to_vec();
+        let tape = TapeData::parse(bytes).expect("parse");
+
+        let mk_chain = || TapeComposed {
+            a: TapeFilterFieldCmpLit {
+                field: Arc::from("a"),
+                op: TapeCmp::Eq,
+                lit: TapeLitOwned::Int(1),
+            },
+            b: TapeMapField { field: Arc::from("b") },
+        };
+
+        let chain = mk_chain();
+        assert_eq!(
+            run_pipeline_tape::<TapeCountSink>(&tape, 0, &chain).unwrap(),
+            Val::Int(2)
+        );
+        let chain = mk_chain();
+        assert_eq!(
+            run_pipeline_tape::<TapeSumSink>(&tape, 0, &chain).unwrap(),
+            Val::Int(40)
+        );
+        let chain = mk_chain();
+        assert_eq!(
+            run_pipeline_tape::<TapeMinSink>(&tape, 0, &chain).unwrap(),
+            Val::Int(10)
+        );
+        let chain = mk_chain();
+        assert_eq!(
+            run_pipeline_tape::<TapeMaxSink>(&tape, 0, &chain).unwrap(),
+            Val::Int(30)
+        );
+
+        // First with materialise
+        let chain = mk_chain();
+        assert_eq!(
+            run_pipeline_tape_first(&tape, 0, &chain).unwrap(),
+            Val::Int(10)
+        );
+        // Collect
+        let chain = mk_chain();
+        if let Val::Arr(a) = run_pipeline_tape_collect(&tape, 0, &chain).unwrap() {
+            assert_eq!(a.len(), 2);
+            assert_eq!(a[0], Val::Int(10));
+            assert_eq!(a[1], Val::Int(30));
+        } else {
+            panic!("expected Arr");
+        }
     }
 
     #[cfg(feature = "simd-json")]
