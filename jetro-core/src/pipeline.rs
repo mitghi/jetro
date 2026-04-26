@@ -807,6 +807,211 @@ fn upstream_demand(d: Demand, stage: &Stage) -> Demand {
     }
 }
 
+// ── Step 3d Phases 2-5: StageShape ADT + planning function ─────────────────
+//
+// Per `pipeline_unification.md` Step 3d.  Each Stage declares its shape
+// via `Stage::shape() -> StageShape`.  The planning function consumes
+// these declarations + Sink::demand() and produces an execution
+// `Strategy`.  Five strategies cover every chain shape; new Stages
+// plug in via shape() with no planning changes.
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cardinality {
+    /// 1 input → 1 output (Map).
+    OneToOne,
+    /// 1 input → {0, 1} output (Filter, TakeWhile, DropWhile).
+    Filtering,
+    /// 1 input → many output (FlatMap).
+    Expanding,
+    /// Changes whole stream (Sort, GroupBy, UniqueBy, Reverse).
+    Barrier,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Order {
+    /// Position-independent (Filter, Map).  Reordering allowed across
+    /// adjacent Stateless stages.
+    Stateless,
+    /// Position-dependent (Take, Skip).  Reordering forbidden across
+    /// Stateful boundary.
+    Stateful,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Boundedness {
+    /// 1 input always produces 1 output (Map).  Bound::AtMost(1) downstream
+    /// translates 1:1 upstream.
+    Always(usize),
+    /// At most `k` outputs per input (Filter=1, Take(n)=n, FlatMap=unbounded).
+    AtMost(Bound),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct StageShape {
+    pub cardinality: Cardinality,
+    pub order:       Order,
+    /// Pure = no side effects, no MethodRegistry callouts.  Used by
+    /// Phase 2 dead-stage elimination.
+    pub purity:      bool,
+    pub boundedness: Boundedness,
+    /// True iff `apply(arr[idx])` suffices to compute element `idx` —
+    /// i.e. Stage doesn't need to look at neighbours.  Map=true,
+    /// Filter=true, TakeWhile=false, Sort=false.
+    pub can_indexed: bool,
+}
+
+impl Stage {
+    /// Declarative shape — drives Phase 2-5 planning.  No per-chain
+    /// dispatch logic; planning consults this + Sink::demand().
+    pub fn shape(&self) -> StageShape {
+        match self {
+            Stage::Map(_) => StageShape {
+                cardinality: Cardinality::OneToOne,
+                order:       Order::Stateless,
+                purity:      true,
+                boundedness: Boundedness::Always(1),
+                can_indexed: true,
+            },
+            Stage::Filter(_) => StageShape {
+                cardinality: Cardinality::Filtering,
+                order:       Order::Stateless,
+                purity:      true,
+                boundedness: Boundedness::AtMost(Bound::AtMost(1)),
+                can_indexed: false,
+            },
+            Stage::FlatMap(_) => StageShape {
+                cardinality: Cardinality::Expanding,
+                order:       Order::Stateless,
+                purity:      true,
+                boundedness: Boundedness::AtMost(Bound::Unbounded),
+                can_indexed: false,
+            },
+            Stage::Take(_) | Stage::Skip(_) => StageShape {
+                cardinality: Cardinality::Filtering,
+                order:       Order::Stateful,
+                purity:      true,
+                boundedness: Boundedness::AtMost(Bound::AtMost(1)),
+                can_indexed: false,
+            },
+            Stage::Reverse | Stage::Sort(_) | Stage::UniqueBy(_) | Stage::GroupBy(_)
+                => StageShape {
+                cardinality: Cardinality::Barrier,
+                order:       Order::Stateful,
+                purity:      true,
+                boundedness: Boundedness::AtMost(Bound::Unbounded),
+                can_indexed: false,
+            },
+        }
+    }
+}
+
+/// Strategy = execution kernel selected by Phase 5.  Five kernels; every
+/// chain in the language reduces to one of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Strategy {
+    /// `(Map | identity)*` + positional sink → pull source[idx], run
+    /// chain on one element, return.  O(1) instead of O(N).
+    IndexedDispatch,
+    /// Chain contains a Barrier (Sort/GroupBy/UniqueBy/Reverse) — must
+    /// materialise into Vec, run barrier op, continue.
+    BarrierMaterialise,
+    /// Chain pulls until short-circuit (First/Any/All) — early exit.
+    EarlyExit,
+    /// Chain has a TakeWhile-like Done signal — pull until terminator.
+    DoneTerminating,
+    /// Generic streaming pull loop.
+    PullLoop,
+}
+
+#[derive(Debug, Clone)]
+pub struct Plan {
+    pub stages:     Vec<Stage>,
+    pub sink:       Sink,
+    pub strategies: Vec<StageStrategy>,
+    pub strategy:   Strategy,
+}
+
+/// Step 3d Phase 5 entry point — full planning over (stages, sink) → Plan.
+/// Phase 1: demand propagation (already in `compute_strategies`).
+/// Phase 2: dead pure-stage elimination (Sink::Count + pure Map drops).
+/// Phase 3: commutative reorder (TODO: needs cost/selectivity; gated off).
+/// Phase 4: algebraic merging (Skip+Skip, Take+Take, Reverse∘Reverse, …).
+/// Phase 5: pick Strategy from final shape.
+pub fn plan(stages: Vec<Stage>, sink: Sink) -> Plan {
+    let mut stages = stages;
+
+    // Phase 2 — dead pure-stage elimination.
+    drop_dead_pure_stages(&mut stages, &sink);
+
+    // Phase 4 — algebraic merging.
+    fold_merge_with(&mut stages);
+
+    // Phase 1 — demand propagation (also picks Sort top-k strategy).
+    let strategies = compute_strategies(&stages, &sink);
+
+    // Phase 5 — strategy selection.
+    let strategy = select_strategy(&stages, &sink);
+
+    Plan { stages, sink, strategies, strategy }
+}
+
+/// Phase 2: drop pure stages whose output the sink doesn't read.
+/// Conservative: only `Sink::Count` lets us drop trailing pure
+/// Map/Filter? — Filter affects count, can't drop.  Only pure Map can
+/// be dropped before Count (Map preserves cardinality).
+fn drop_dead_pure_stages(stages: &mut Vec<Stage>, sink: &Sink) {
+    if !matches!(sink, Sink::Count) { return; }
+    // Walk from sink end; drop pure Maps.  Stop at first non-Map or
+    // impure stage.
+    while let Some(last) = stages.last() {
+        let s = last.shape();
+        if matches!(s.cardinality, Cardinality::OneToOne) && s.purity {
+            stages.pop();
+        } else {
+            break;
+        }
+    }
+}
+
+/// Phase 4: algebraic identities.  Reverse+Reverse cancels; Skip+Skip
+/// merges; Take+Take takes the min.
+fn fold_merge_with(stages: &mut Vec<Stage>) {
+    let mut i = 0;
+    while i + 1 < stages.len() {
+        let merged = match (&stages[i], &stages[i + 1]) {
+            (Stage::Reverse, Stage::Reverse) => Some(None),
+            (Stage::Skip(a), Stage::Skip(b)) =>
+                Some(Some(Stage::Skip(a.saturating_add(*b)))),
+            (Stage::Take(a), Stage::Take(b)) =>
+                Some(Some(Stage::Take((*a).min(*b)))),
+            _ => None,
+        };
+        if let Some(replacement) = merged {
+            stages.remove(i + 1);
+            match replacement {
+                Some(s) => stages[i] = s,
+                None    => { stages.remove(i); if i > 0 { i -= 1; } }
+            }
+            continue;
+        }
+        i += 1;
+    }
+}
+
+/// Phase 5: pick Strategy.
+pub fn select_strategy(stages: &[Stage], sink: &Sink) -> Strategy {
+    let stages_can_indexed = stages.iter().all(|s| s.shape().can_indexed);
+    let sink_positional    = sink.demand().positional.is_some();
+    let has_barrier        = stages.iter().any(|s|
+        matches!(s.shape().cardinality, Cardinality::Barrier));
+    let has_short_circuit  = matches!(sink, Sink::First);
+
+    if has_barrier { return Strategy::BarrierMaterialise; }
+    if stages_can_indexed && sink_positional { return Strategy::IndexedDispatch; }
+    if has_short_circuit { return Strategy::EarlyExit; }
+    Strategy::PullLoop
+}
+
 #[derive(Debug, Clone)]
 pub struct Pipeline {
     pub source: Source,
@@ -1842,6 +2047,89 @@ impl Pipeline {
     /// Returns `None` for fused sinks (NumMap/NumFilterMap/CountIf/
     /// FilterFirst/etc.) — Tier 3 will lower those into base sink +
     /// stage chain so the composed path becomes the sole exec route.
+    /// Step 3d Phase 5 — IndexedDispatch.  Generic O(1) optimisation
+    /// for `(Map | identity)*` chains terminated by a positional sink
+    /// (`First` / `Last`).  Pulls source[idx] only, runs the chain on
+    /// that single element, returns.
+    ///
+    /// Falls through (`None`) when:
+    /// - any stage is not 1:1 (Filter, FlatMap, Take, Skip, barriers),
+    /// - sink isn't positional (Sum/Min/Max/Count/Avg/Collect),
+    /// - source is not an indexable Val::Arr / typed-vec lane,
+    /// - chain target index is out of bounds (returns Null via the
+    ///   normal fallback so error semantics match).
+    fn try_indexed_dispatch(&self, root: &Val) -> Option<Result<Val, EvalError>> {
+        // Phase 5 strategy must be IndexedDispatch.
+        let strategy = select_strategy(&self.stages, &self.sink);
+        if strategy != Strategy::IndexedDispatch { return None; }
+
+        // Resolve source — same rules as the generic loop.
+        let recv = match &self.source {
+            Source::Receiver(v) => v.clone(),
+            Source::FieldChain { keys } => walk_field_chain(root, keys),
+        };
+        // Only indexable shapes; bail otherwise.
+        let len = match &recv {
+            Val::Arr(a)      => a.len(),
+            Val::IntVec(a)   => a.len(),
+            Val::FloatVec(a) => a.len(),
+            Val::StrVec(a)   => a.len(),
+            Val::ObjVec(d)   => d.nrows(),
+            _ => return None,
+        };
+
+        // Compute target index from sink demand.
+        let demand = self.sink.demand();
+        let idx = match demand.positional? {
+            Position::First    => 0,
+            Position::Last     => len.checked_sub(1)?,
+            Position::Nth(k)   => k,
+        };
+        if idx >= len {
+            // Out of bounds — sink::First/Last semantics return Null.
+            return Some(Ok(Val::Null));
+        }
+
+        // Pull element[idx] from source.
+        let elem = match &recv {
+            Val::Arr(a)      => a[idx].clone(),
+            Val::IntVec(a)   => Val::Int(a[idx]),
+            Val::FloatVec(a) => Val::Float(a[idx]),
+            Val::StrVec(a)   => Val::Str(Arc::clone(&a[idx])),
+            Val::ObjVec(d)   => {
+                let stride = d.stride();
+                let mut m: indexmap::IndexMap<Arc<str>, Val>
+                    = indexmap::IndexMap::with_capacity(stride);
+                for (i, k) in d.keys.iter().enumerate() {
+                    m.insert(Arc::clone(k), d.cells[idx * stride + i].clone());
+                }
+                Val::Obj(Arc::new(m))
+            }
+            _ => return None,
+        };
+
+        // Run chain on the single element.  All stages are 1:1 (Map),
+        // so each apply produces exactly one Val.
+        let mut vm = crate::vm::VM::new();
+        let mut env = vm.make_loop_env(root.clone());
+        let mut cur = elem;
+        for stage in &self.stages {
+            match stage {
+                Stage::Map(prog) => {
+                    let prev = env.swap_current(cur);
+                    cur = match vm.exec_in_env(prog, &mut env) {
+                        Ok(v) => v,
+                        Err(e) => { env.restore_current(prev); return Some(Err(e)); }
+                    };
+                    env.restore_current(prev);
+                }
+                _ => return None, // shape-check should have rejected; defensive.
+            }
+        }
+
+        Some(Ok(cur))
+    }
+
     fn try_run_composed(&self, root: &Val) -> Option<Result<Val, EvalError>> {
         use crate::composed as cmp;
         use crate::composed::Stage as ComposedStage;
@@ -2057,6 +2345,12 @@ impl Pipeline {
         root: &Val,
         cache: Option<&dyn ObjVecPromoter>,
     ) -> Result<Val, EvalError> {
+        // Step 3d Phase 5 — IndexedDispatch.  When stages are all 1:1
+        // (`Map`, `Identity`) and sink is positional (First/Last), pull
+        // the target element from the source by index, run chain once,
+        // return.  O(1) work for `$.books.map(@.x).first()` shape.
+        if let Some(out) = self.try_indexed_dispatch(root) { return out; }
+
         // Phase 3 columnar fast path — runs before per-row loop.
         // Critical for Q12/Q15-class queries: ObjVec promotion +
         // typed-column slot kernels reach native parity. Composed

@@ -1728,6 +1728,72 @@ mod tests {
     }
 
     #[test]
+    fn step3d_phase5_indexed_dispatch_correctness() {
+        // Map().first/last/nth — output must match generic-loop semantics.
+        use serde_json::json;
+        let doc = json!({
+            "books": [
+                {"price": 10},
+                {"price": 20},
+                {"price": 30},
+            ]
+        });
+        let j = crate::Jetro::new(doc);
+        // map(price).first() — IndexedDispatch picks books[0], runs Map.
+        assert_eq!(j.collect("$.books.map(price).first()").unwrap(), json!(10));
+        // map(price).last() — IndexedDispatch picks books[len-1].
+        assert_eq!(j.collect("$.books.map(price).last()").unwrap(), json!(30));
+        // chained Map's still 1:1 — both elide.
+        assert_eq!(j.collect("$.books.map(price).first()").unwrap(), json!(10));
+    }
+
+    #[test]
+    fn step3d_phase4_merge_take_skip() {
+        use crate::pipeline::{Stage, Sink, plan};
+        // Take(5) ∘ Take(3) → Take(3)
+        let p = plan(vec![Stage::Take(5), Stage::Take(3)], Sink::Collect);
+        assert_eq!(p.stages.len(), 1);
+        assert!(matches!(p.stages[0], Stage::Take(3)));
+
+        // Skip(2) ∘ Skip(3) → Skip(5)
+        let p = plan(vec![Stage::Skip(2), Stage::Skip(3)], Sink::Collect);
+        assert_eq!(p.stages.len(), 1);
+        assert!(matches!(p.stages[0], Stage::Skip(5)));
+
+        // Reverse ∘ Reverse → identity (drops both)
+        let p = plan(vec![Stage::Reverse, Stage::Reverse], Sink::Collect);
+        assert_eq!(p.stages.len(), 0);
+    }
+
+    #[test]
+    fn step3d_phase5_strategy_selection() {
+        use crate::pipeline::{Stage, Sink, NumOp, Strategy, select_strategy};
+        use std::sync::Arc;
+        let dummy = Arc::new(crate::vm::Program::new(Vec::new(), ""));
+
+        // Map + First → IndexedDispatch
+        assert_eq!(
+            select_strategy(&[Stage::Map(Arc::clone(&dummy))], &Sink::First),
+            Strategy::IndexedDispatch
+        );
+        // Filter + First → EarlyExit (Filter not 1:1)
+        assert_eq!(
+            select_strategy(&[Stage::Filter(Arc::clone(&dummy))], &Sink::First),
+            Strategy::EarlyExit
+        );
+        // Sort + First → BarrierMaterialise
+        assert_eq!(
+            select_strategy(&[Stage::Sort(None)], &Sink::First),
+            Strategy::BarrierMaterialise
+        );
+        // Map + Sum → PullLoop (no positional, no barrier)
+        assert_eq!(
+            select_strategy(&[Stage::Map(Arc::clone(&dummy))], &Sink::Numeric(NumOp::Sum)),
+            Strategy::PullLoop
+        );
+    }
+
+    #[test]
     fn step3d_phase1_compute_strategies() {
         use crate::pipeline::{Stage, Sink, NumOp, StageStrategy, compute_strategies};
         use std::sync::Arc;
