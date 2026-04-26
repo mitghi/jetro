@@ -1446,10 +1446,15 @@ impl Pipeline {
                     { return None; }
                     filter_kernels.push(k);
                 }
-                // Sort stage: deferred — needs buffer + sort barrier
-                // in per-row loop (planned). Bail to Val path until
-                // implemented to keep semantics correct.
-                Stage::Sort(_) => return None,
+                Stage::Sort(Some(_)) => {
+                    if sort_kernel.is_some() || map_kernel.is_some() { return None; }
+                    if !matches!(k,
+                        BodyKernel::FieldRead(_) | BodyKernel::FieldChain(_))
+                    { return None; }
+                    sort_kernel = Some(k);
+                }
+                // Sort with no key (None) compares full Vals — bail.
+                Stage::Sort(None) => return None,
                 Stage::Skip(n) => {
                     if map_kernel.is_some() || take_n.is_some() { return None; }
                     skip_n = skip_n.saturating_add(*n);
@@ -1492,10 +1497,106 @@ impl Pipeline {
 
         // Skip / Take counters threaded through both branches.  Skip
         // burns first N post-filter rows; Take ends iteration after
-        // taking N; both are streaming (no buffer).
+        // taking N; both are streaming (no buffer).  When sort_kernel
+        // is set, we buffer post-filter entries first, sort, then
+        // apply Skip/Take/Map/Sink — barrier semantics.
         let mut skipped: usize = 0;
         let mut taken:   usize = 0;
         let take_limit = take_n;
+
+        // Sort barrier: buffer entry idxs, sort by kernel-extracted key,
+        // then drain through Skip→Take→Map→Sink.  Only entry-rows
+        // (post-Filter, pre-Map) are buffered; Map applies after sort.
+        if let Some(sk) = sort_kernel {
+            let mut buf: Vec<usize> = Vec::new();
+            if let Some(fk_kernel) = flat_kernel {
+                'outer_s: for outer_idx in outer_iter {
+                    let inner_arr = match fk_kernel {
+                        BodyKernel::FieldRead(k) =>
+                            crate::strref::tape_object_field(tape, outer_idx, k.as_ref()),
+                        BodyKernel::FieldChain(keys) => {
+                            let key_strs: Vec<&str> = keys.iter().map(|k| k.as_ref()).collect();
+                            crate::strref::tape_walk_field_chain_from(tape, outer_idx, &key_strs)
+                        }
+                        _ => return None,
+                    };
+                    let inner_arr = match inner_arr { Some(i) => i, None => continue };
+                    let inner_iter = match crate::strref::tape_array_iter(tape, inner_arr) {
+                        Some(it) => it, None => continue,
+                    };
+                    'inner_s: for inner_idx in inner_iter {
+                        for fk in &filter_kernels {
+                            match eval_kernel_pred(fk, tape, inner_idx) {
+                                Some(true) => {}
+                                Some(false) => continue 'inner_s,
+                                None => return None,
+                            }
+                        }
+                        buf.push(inner_idx);
+                    }
+                    let _ = (); let _outer_s = ();  // bind label
+                    if false { break 'outer_s; }
+                }
+            } else {
+                'rows_s: for entry_idx in outer_iter {
+                    for fk in &filter_kernels {
+                        match eval_kernel_pred(fk, tape, entry_idx) {
+                            Some(true) => {}
+                            Some(false) => continue 'rows_s,
+                            None => return None,
+                        }
+                    }
+                    buf.push(entry_idx);
+                }
+            }
+            // Sort buffer by key.
+            let key_for = |idx: usize| -> TopKey {
+                let v = match sk {
+                    BodyKernel::FieldRead(k) => {
+                        crate::strref::tape_object_field(tape, idx, k.as_ref())
+                            .map(|i| node_to_tape_val(tape, i))
+                            .unwrap_or(TapeVal::Missing)
+                    }
+                    BodyKernel::FieldChain(keys) => {
+                        let key_strs: Vec<&str> = keys.iter().map(|k| k.as_ref()).collect();
+                        crate::strref::tape_walk_field_chain_from(tape, idx, &key_strs)
+                            .map(|i| node_to_tape_val(tape, i))
+                            .unwrap_or(TapeVal::Missing)
+                    }
+                    _ => TapeVal::Missing,
+                };
+                match v {
+                    TapeVal::Int(n) => TopKey::Int(n),
+                    TapeVal::Float(f) => TopKey::Float(float_to_sortable(f)),
+                    TapeVal::StrIdx(i) => match tape.nodes[i] {
+                        crate::strref::TapeNode::StringRef { start, end } =>
+                            TopKey::Str(tape.bytes_buf[start as usize..end as usize].to_vec()),
+                        _ => TopKey::Bottom,
+                    },
+                    _ => TopKey::Bottom,
+                }
+            };
+            buf.sort_by(|a, b| key_for(*a).cmp(&key_for(*b)));
+            // Drain through Skip / Take / Map / Sink.
+            for entry_idx in buf {
+                if skipped < skip_n { skipped += 1; continue; }
+                if let Some(lim) = take_limit { if taken >= lim { break; } }
+                let row = match map_kernel {
+                    Some(mk) => eval_kernel_to_row(mk, tape, entry_idx)?,
+                    None => RowSrc::Entry(entry_idx),
+                };
+                taken += 1;
+                if !acc.feed(tape, row)? { break; }
+            }
+            let result_pre_reverse = acc.finalise(tape);
+            let result = if reverse {
+                reverse_collect_result(result_pre_reverse)
+            } else {
+                result_pre_reverse
+            };
+            cache.note_tape_run();
+            return Some(Ok(result));
+        }
 
         if let Some(fk_kernel) = flat_kernel {
             'outer: for outer_idx in outer_iter {
