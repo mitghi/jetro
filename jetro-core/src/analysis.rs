@@ -240,10 +240,7 @@ fn apply_op(op: &Opcode, stack: &mut Vec<AbstractVal>) {
             pop1!();
             stack.push(AbstractVal::scalar(VType::Str));
         }
-        Opcode::MapReplaceLit { .. }
-        | Opcode::MapUpperReplaceLit { .. }
-        | Opcode::MapLowerReplaceLit { .. }
-        | Opcode::MapStrConcat { .. } => {
+        Opcode::MapStrConcat { .. } => {
             pop1!();
             stack.push(AbstractVal::array());
         }
@@ -1017,8 +1014,6 @@ pub fn opcode_cost(op: &Opcode) -> u32 {
             | Opcode::FilterFieldCmpField(_, _, _) => 5,
         Opcode::FilterFieldCmpFieldCount(_, _, _) => 4,
         Opcode::StrSplitReverseJoin { .. } => 4,
-        Opcode::MapReplaceLit { .. } => 10,
-        Opcode::MapUpperReplaceLit { .. } | Opcode::MapLowerReplaceLit { .. } => 11,
         Opcode::MapStrConcat { .. } => 6,
         Opcode::MapSplitLenSum { .. } => 4,
         Opcode::MapProject { .. } => 7,
