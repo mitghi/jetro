@@ -163,6 +163,20 @@ pub(crate) fn trace_enabled() -> bool {
     on
 }
 
+// Layer B opt-in gate. When `JETRO_COMPOSED=1`, run_with first tries
+// the composed-Cow Stage chain path (covers base sinks + borrow-form
+// stages); legacy path handles the rest. Cached after first read.
+static COMPOSED_INIT: AtomicU8 = AtomicU8::new(0);
+
+#[inline]
+pub(crate) fn composed_path_enabled() -> bool {
+    let v = COMPOSED_INIT.load(Ordering::Relaxed);
+    if v != 0 { return v == 2; }
+    let on = std::env::var_os("JETRO_COMPOSED").is_some();
+    COMPOSED_INIT.store(if on { 2 } else { 1 }, Ordering::Relaxed);
+    on
+}
+
 fn sink_name(s: &Sink) -> &'static str {
     match s {
         Sink::Collect => "collect",
@@ -1076,6 +1090,21 @@ fn rewrite_step(p: &mut Pipeline) -> bool {
             }
             _ => {}
         }
+    }
+
+    // ── Layer B gate ─────────────────────────────────────────────────────
+    //
+    // Below this point: rules that fuse stages into specialised Sink
+    // variants (NumFilterMap, NumMap, CountIf, FilterFirst/Last,
+    // FirstMap/LastMap, UniqueCount, FlatMapCount, MinBy, MaxBy,
+    // TopN, Numeric(Min/Max) via Sort∘First/Last).
+    //
+    // When `JETRO_COMPOSED=1`, skip these. Pipeline keeps its base
+    // Stage chain + base Sink shape; `try_run_composed` runs it via
+    // composition. Tier 3 deletes the fused Sink variants + these
+    // rules entirely once Layer B bench-greens across all shapes.
+    if composed_path_enabled() {
+        return false;
     }
 
     // ── Sort-into-aggregate fold rules ───────────────────────────────────
@@ -2114,6 +2143,116 @@ impl Pipeline {
         self.try_tape_aggregate(Some(cache))
     }
 
+    /// Layer B — composed-Cow Stage chain runner.
+    ///
+    /// Returns `Some(Ok(val))` when:
+    ///   - source resolves to a `Val::Arr` (or other materialisable seq)
+    ///   - sink is one of the base generic forms (Collect / Count /
+    ///     Numeric(Sum/Min/Max/Avg) / First / Last)
+    ///   - every stage is one of: Filter/Map/FlatMap/Take/Skip with a
+    ///     borrow-form-recognised BodyKernel (FieldRead / FieldChain /
+    ///     FieldCmpLit Eq / Generic-via-VM-fallback)
+    ///   - no barrier stages (Sort/UniqueBy/Reverse/GroupBy) — Day 4-5
+    ///
+    /// Returns `None` for fused sinks (NumMap/NumFilterMap/CountIf/
+    /// FilterFirst/etc.) — Tier 3 will lower those into base sink +
+    /// stage chain so the composed path becomes the sole exec route.
+    fn try_run_composed(&self, root: &Val) -> Option<Result<Val, EvalError>> {
+        use crate::composed as cmp;
+        use crate::composed::Stage as ComposedStage;
+        use std::cell::Cell;
+
+        // Sink mapping — base sinks only. Fused sinks bail (Day 4-5+).
+        enum SinkKind { Count, Sum, Min, Max, Avg, First, Last, Collect }
+        let sink_kind = match &self.sink {
+            Sink::Collect => SinkKind::Collect,
+            Sink::Count => SinkKind::Count,
+            Sink::Numeric(NumOp::Sum) => SinkKind::Sum,
+            Sink::Numeric(NumOp::Min) => SinkKind::Min,
+            Sink::Numeric(NumOp::Max) => SinkKind::Max,
+            Sink::Numeric(NumOp::Avg) => SinkKind::Avg,
+            Sink::First => SinkKind::First,
+            Sink::Last => SinkKind::Last,
+            _ => return None, // fused sink — fallback
+        };
+
+        // Reject barriers (Day 4-5).
+        for s in &self.stages {
+            if matches!(s, Stage::Reverse | Stage::Sort(_) | Stage::UniqueBy(_) | Stage::GroupBy(_) | Stage::FlatMap(_)) {
+                return None;
+            }
+        }
+
+        // Build per-Stage Box<dyn Stage>. Recognised borrow kernels
+        // dispatch inline; Generic kernels bail (Day 3 wires VM
+        // fallback closure stage).
+        let mut chain: Box<dyn ComposedStage> = Box::new(cmp::Identity);
+        let kernels = &self.stage_kernels;
+        for (i, s) in self.stages.iter().enumerate() {
+            let kernel = kernels.get(i).unwrap_or(&BodyKernel::Generic);
+            let next: Box<dyn ComposedStage> = match (s, kernel) {
+                (Stage::Filter(_), BodyKernel::FieldCmpLit(field, op, lit))
+                    if matches!(op, crate::ast::BinOp::Eq) =>
+                {
+                    Box::new(cmp::FilterFieldEqLit {
+                        field: Arc::clone(field),
+                        target: lit.clone(),
+                    })
+                }
+                (Stage::Map(_), BodyKernel::FieldRead(field)) => {
+                    Box::new(cmp::MapField { field: Arc::clone(field) })
+                }
+                (Stage::Map(_), BodyKernel::FieldChain(keys)) => {
+                    Box::new(cmp::MapFieldChain { keys: Arc::clone(keys) })
+                }
+                (Stage::Take(n), _) => {
+                    Box::new(cmp::Take { remaining: Cell::new(*n) })
+                }
+                (Stage::Skip(n), _) => {
+                    Box::new(cmp::Skip { remaining: Cell::new(*n) })
+                }
+                _ => return None, // unsupported shape — Day 3
+            };
+            chain = Box::new(cmp::Composed { a: chain, b: next });
+        }
+
+        // Resolve source to a slice. Materialise non-Arr lanes once.
+        let recv = match &self.source {
+            Source::Receiver(v) => v.clone(),
+            Source::FieldChain { keys } => walk_field_chain(root, keys),
+        };
+        let arr_owned: Vec<Val>;
+        let arr: &[Val] = match &recv {
+            Val::Arr(a) => a.as_slice(),
+            Val::IntVec(a) => {
+                arr_owned = a.iter().map(|n| Val::Int(*n)).collect();
+                arr_owned.as_slice()
+            }
+            Val::FloatVec(a) => {
+                arr_owned = a.iter().map(|f| Val::Float(*f)).collect();
+                arr_owned.as_slice()
+            }
+            Val::StrVec(a) => {
+                arr_owned = a.iter().map(|s| Val::Str(Arc::clone(s))).collect();
+                arr_owned.as_slice()
+            }
+            _ => return None, // ObjVec / scalar / etc. — fallback
+        };
+
+        let out = match sink_kind {
+            SinkKind::Count   => cmp::run_pipeline::<cmp::CountSink>(arr, chain.as_ref()),
+            SinkKind::Sum     => cmp::run_pipeline::<cmp::SumSink>(arr, chain.as_ref()),
+            SinkKind::Min     => cmp::run_pipeline::<cmp::MinSink>(arr, chain.as_ref()),
+            SinkKind::Max     => cmp::run_pipeline::<cmp::MaxSink>(arr, chain.as_ref()),
+            SinkKind::Avg     => cmp::run_pipeline::<cmp::AvgSink>(arr, chain.as_ref()),
+            SinkKind::First   => cmp::run_pipeline::<cmp::FirstSink>(arr, chain.as_ref()),
+            SinkKind::Last    => cmp::run_pipeline::<cmp::LastSink>(arr, chain.as_ref()),
+            SinkKind::Collect => cmp::run_pipeline::<cmp::CollectSink>(arr, chain.as_ref()),
+        };
+
+        Some(Ok(out))
+    }
+
     /// Execute with an optional ObjVec promotion cache.  When `cache`
     /// is `Some`, the pipeline consults it before resolving sources;
     /// uniform-shape `Val::Arr<Val::Obj>` arrays are promoted to
@@ -2125,6 +2264,14 @@ impl Pipeline {
         root: &Val,
         cache: Option<&dyn ObjVecPromoter>,
     ) -> Result<Val, EvalError> {
+        // Layer B — composed-Cow Stage chain. Opt-in under
+        // `JETRO_COMPOSED=1`. Returns None for shapes the composed
+        // path doesn't yet cover (fused Sinks, non-borrow stage
+        // bodies, barriers); legacy run_with handles those.
+        if composed_path_enabled() {
+            if let Some(out) = self.try_run_composed(root) { return out; }
+        }
+
         // Phase 3 columnar fast path — runs before per-row loop.
         if let Some(out) = self.try_columnar_with(root, cache) { return out; }
         // Fall back to legacy try_columnar (no cache).
@@ -4612,6 +4759,15 @@ mod tests {
     use super::*;
     use crate::parser;
 
+    /// Skip body when JETRO_COMPOSED=1 — the rewrite-shape tests below
+    /// assert on fused-Sink output, which the composed gate disables
+    /// by design. Tier 3 deletes both the fused sinks and these
+    /// shape-asserting tests; until then they only run in the default
+    /// (legacy) configuration.
+    fn skip_under_composed() -> bool {
+        super::composed_path_enabled()
+    }
+
     fn lower_query(q: &str) -> Option<Pipeline> {
         let expr = parser::parse(q).ok()?;
         Pipeline::lower(&expr)
@@ -4627,6 +4783,7 @@ mod tests {
 
     #[test]
     fn lower_filter_map_count() {
+        if skip_under_composed() { return; }
         // Rewrite collapses:
         //   Map(id) ∘ Count → Count   (drop pure Map before Count)
         //   Filter(total>100) ∘ Count → CountIf(total>100)
@@ -4750,6 +4907,7 @@ mod tests {
 
     #[test]
     fn rewrite_map_then_count_drops_map() {
+        if skip_under_composed() { return; }
         let p = lower_query("$.orders.map(total).count()").unwrap();
         assert_eq!(p.stages.len(), 0);
         assert!(matches!(p.sink, Sink::Count));
@@ -4757,6 +4915,7 @@ mod tests {
 
     #[test]
     fn rewrite_take_after_map_pushdown() {
+        if skip_under_composed() { return; }
         let p = lower_query("$.xs.map(@ * 2).take(3).sum()").unwrap();
         // After pushdown: [Take(3), Map].  After Map+Sum fusion the
         // Map stage moves into the sink → stages = [Take(3)] +
@@ -4768,6 +4927,7 @@ mod tests {
 
     #[test]
     fn rewrite_sort_take_to_topn() {
+        if skip_under_composed() { return; }
         let p = lower_query("$.xs.sort().take(3)").unwrap();
         assert_eq!(p.stages.len(), 0);
         assert!(matches!(p.sink, Sink::TopN { n: 3, asc: true, key: None }));
@@ -4775,6 +4935,7 @@ mod tests {
 
     #[test]
     fn rewrite_sort_by_first_to_minby() {
+        if skip_under_composed() { return; }
         let p = lower_query("$.xs.sort_by(score).first()").unwrap();
         assert_eq!(p.stages.len(), 0);
         assert!(matches!(p.sink, Sink::MinBy(_)));
@@ -4782,6 +4943,7 @@ mod tests {
 
     #[test]
     fn rewrite_sort_by_last_to_maxby() {
+        if skip_under_composed() { return; }
         let p = lower_query("$.xs.sort_by(score).last()").unwrap();
         assert_eq!(p.stages.len(), 0);
         assert!(matches!(p.sink, Sink::MaxBy(_)));

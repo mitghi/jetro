@@ -58,8 +58,22 @@ pub enum StageOutput<'a> {
 /// A Stage transforms one element into a `StageOutput`. The lifetime
 /// `'a` ties borrowed outputs to the input reference, eliminating the
 /// per-stage clone overhead that owned-Val composition incurred.
-pub trait Stage: Send + Sync {
+///
+/// Pipelines run single-threaded per invocation; no Send/Sync bound.
+/// Stages with interior mutability (`Take`, `Skip` counters) work in
+/// place via `Cell<usize>` reset at lower-time.
+pub trait Stage {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a>;
+}
+
+/// Blanket impl so `Box<dyn Stage>` itself implements `Stage`. Lets a
+/// chain of stages be folded into a single `Box<dyn Stage>` at
+/// lower-time without macro acrobatics.
+impl<T: Stage + ?Sized> Stage for Box<T> {
+    #[inline]
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        (**self).apply(x)
+    }
 }
 
 /// Identity stage — pass-through. Used as the fold seed when composing
@@ -383,12 +397,6 @@ impl Stage for Take {
     }
 }
 
-// `Take` holds `Cell` which is `!Sync`. Pipelines run on one thread at
-// a time; the `Send + Sync` bound on `Stage` is overly strict for it.
-// Provide an unsafe assertion here so the trait stays simple while
-// allowing per-call mutable counters. Day 2 wiring uses single-threaded
-// per-call execution exclusively.
-unsafe impl Sync for Take {}
 
 /// `.skip(n)` — same shape as Take.
 pub struct Skip {
@@ -406,7 +414,6 @@ impl Stage for Skip {
     }
 }
 
-unsafe impl Sync for Skip {}
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -528,6 +535,24 @@ mod tests {
         let arr: Vec<Val> = vec![Val::Int(10), Val::Int(20), Val::Int(30)];
         assert!(matches!(run_pipeline::<FirstSink>(&arr, &Identity), Val::Int(10)));
         assert!(matches!(run_pipeline::<LastSink>(&arr, &Identity), Val::Int(30)));
+    }
+
+    #[test]
+    fn integration_via_jetro() {
+        use serde_json::json;
+
+        let doc = json!({
+            "books": [
+                {"title": "A", "price": 10, "active": true},
+                {"title": "B", "price": 20, "active": false},
+                {"title": "C", "price": 30, "active": true},
+            ]
+        });
+
+        let j = crate::Jetro::new(doc);
+        assert_eq!(j.collect("$.books.map(price).sum()").unwrap(), json!(60));
+        assert_eq!(j.collect("$.books.filter(active == true).count()").unwrap(), json!(2));
+        assert_eq!(j.collect("$.books.count()").unwrap(), json!(3));
     }
 
     #[test]
