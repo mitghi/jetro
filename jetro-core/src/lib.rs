@@ -69,6 +69,7 @@ pub mod pipeline_borrow;
 pub mod composed_tape;
 #[cfg(feature = "simd-json")]
 pub mod pipeline_tape_borrow;
+pub mod row;
 
 #[cfg(test)]
 mod tests;
