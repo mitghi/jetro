@@ -294,7 +294,26 @@ pub enum BodyKernel {
     /// number of fields and any path depth — classifier-driven, no
     /// per-shape walker.
     ObjProject(Arc<[ObjProjEntry]>),
+    /// Binary arithmetic over two operands (path or literal).  Covers
+    /// `qty * price`, `score + 10`, `a - b`, `a / b`, `a % b`.  Per-row
+    /// eval reads operands via tape, applies op, returns numeric
+    /// TapeVal (Float if any operand is Float, else Int).  Generic
+    /// across any (Path|Lit, ArithOp, Path|Lit) combo via one classifier.
+    Arith(ArithOperand, ArithOp, ArithOperand),
 }
+
+/// Arithmetic operand for `BodyKernel::Arith`.
+#[derive(Debug, Clone)]
+pub enum ArithOperand {
+    /// Path on the current tape entry.  Empty path = current itself.
+    Path(Arc<[Arc<str>]>),
+    /// Numeric literal pushed at compile-time.
+    LitInt(i64),
+    LitFloat(f64),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArithOp { Add, Sub, Mul, Div, Mod }
 
 /// One field of an ObjProject kernel — output key + path to walk
 /// from the current entry.  Empty `path` means the entry itself
@@ -393,7 +412,58 @@ impl BodyKernel {
                 }
             }
         }
+        // Arith — RPN-shaped binary arithmetic body.  Body shape
+        // `<lhs> <rhs> <op>` covers `qty * price`, `score + 10`,
+        // `a / b`, etc. Operands are paths (FieldRead/FieldChain) or
+        // numeric literals.  Generic across all combos via classifier.
+        if let Some(arith) = classify_arith(ops) { return arith; }
         Self::Generic
+    }
+}
+
+/// Classify body opcodes as a binary `Arith` kernel.
+/// Recognises `[<lhs-ops>, <rhs-ops>, <arith-op>]` where each operand
+/// is either a path read (PushCurrent + GetField/FieldChain, or
+/// LoadIdent) or a numeric literal (PushInt / PushFloat).
+fn classify_arith(ops: &[crate::vm::Opcode]) -> Option<BodyKernel> {
+    use crate::vm::Opcode;
+    let last = ops.last()?;
+    let op = match last {
+        Opcode::Add => ArithOp::Add,
+        Opcode::Sub => ArithOp::Sub,
+        Opcode::Mul => ArithOp::Mul,
+        Opcode::Div => ArithOp::Div,
+        Opcode::Mod => ArithOp::Mod,
+        _ => return None,
+    };
+    // Split prefix into two operand slices.
+    let prefix = &ops[..ops.len() - 1];
+    // Try every split point — operand encodings vary in length (1 or 2
+    // opcodes per operand).
+    for split in 1..prefix.len() {
+        let lhs = &prefix[..split];
+        let rhs = &prefix[split..];
+        if let (Some(l), Some(r)) = (parse_arith_operand(lhs), parse_arith_operand(rhs)) {
+            return Some(BodyKernel::Arith(l, op, r));
+        }
+    }
+    None
+}
+
+fn parse_arith_operand(ops: &[crate::vm::Opcode]) -> Option<ArithOperand> {
+    use crate::vm::Opcode;
+    match ops {
+        [Opcode::PushInt(n)] => Some(ArithOperand::LitInt(*n)),
+        [Opcode::PushFloat(f)] => Some(ArithOperand::LitFloat(*f)),
+        [Opcode::LoadIdent(k)] | [Opcode::GetField(k)]
+        | [Opcode::PushCurrent, Opcode::GetField(k)] => {
+            Some(ArithOperand::Path(Arc::from(vec![k.clone()].into_boxed_slice())))
+        }
+        [Opcode::FieldChain(fc)]
+        | [Opcode::PushCurrent, Opcode::FieldChain(fc)] => {
+            Some(ArithOperand::Path(fc.keys.clone()))
+        }
+        _ => None,
     }
 }
 
@@ -1468,7 +1538,8 @@ impl Pipeline {
                     if !matches!(k,
                         BodyKernel::FieldRead(_)
                         | BodyKernel::FieldChain(_)
-                        | BodyKernel::ObjProject(_))
+                        | BodyKernel::ObjProject(_)
+                        | BodyKernel::Arith(_, _, _))
                     { return None; }
                     map_kernel = Some(k);
                 }
@@ -3053,6 +3124,11 @@ fn eval_kernel_value(
             _ => None,
         },
         BodyKernel::ConstBool(b) => Some(TapeVal::Bool(*b)),
+        BodyKernel::Arith(lhs, op, rhs) => {
+            let l = arith_operand_value(lhs, tape, entry_idx)?;
+            let r = arith_operand_value(rhs, tape, entry_idx)?;
+            arith_apply(l, *op, r)
+        }
         // Pred-shaped kernels don't produce values directly; bail.
         // ObjProject doesn't fit TapeVal — caller should route through
         // eval_kernel_to_row instead.
@@ -3061,6 +3137,71 @@ fn eval_kernel_value(
         | BodyKernel::CurrentCmpLit(_, _)
         | BodyKernel::ObjProject(_)
         | BodyKernel::Generic => None,
+    }
+}
+
+/// Resolve an ArithOperand to a TapeVal (Int/Float; Missing if path
+/// missing).
+#[cfg(feature = "simd-json")]
+fn arith_operand_value(
+    op: &ArithOperand,
+    tape: &crate::strref::TapeData,
+    entry_idx: usize,
+) -> Option<TapeVal> {
+    match op {
+        ArithOperand::LitInt(n)   => Some(TapeVal::Int(*n)),
+        ArithOperand::LitFloat(f) => Some(TapeVal::Float(*f)),
+        ArithOperand::Path(p) => {
+            if p.is_empty() {
+                return Some(node_to_tape_val(tape, entry_idx));
+            }
+            let key_strs: Vec<&str> = p.iter().map(|k| k.as_ref()).collect();
+            let v = crate::strref::tape_walk_field_chain_from(tape, entry_idx, &key_strs);
+            Some(match v {
+                Some(idx) => node_to_tape_val(tape, idx),
+                None => TapeVal::Missing,
+            })
+        }
+    }
+}
+
+/// Apply ArithOp to two TapeVals.  Numeric coercion: any Float → Float
+/// result; otherwise Int.  Div / Mod by zero returns None (bail).
+#[cfg(feature = "simd-json")]
+fn arith_apply(l: TapeVal, op: ArithOp, r: TapeVal) -> Option<TapeVal> {
+    let (li, lf, lk) = num_parts(l)?;
+    let (ri, rf, rk) = num_parts(r)?;
+    let is_float = lk || rk;
+    if is_float {
+        let lf = if lk { lf } else { li as f64 };
+        let rf = if rk { rf } else { ri as f64 };
+        let out = match op {
+            ArithOp::Add => lf + rf,
+            ArithOp::Sub => lf - rf,
+            ArithOp::Mul => lf * rf,
+            ArithOp::Div => if rf == 0.0 { return None } else { lf / rf },
+            ArithOp::Mod => if rf == 0.0 { return None } else { lf % rf },
+        };
+        Some(TapeVal::Float(out))
+    } else {
+        let out = match op {
+            ArithOp::Add => li.wrapping_add(ri),
+            ArithOp::Sub => li.wrapping_sub(ri),
+            ArithOp::Mul => li.wrapping_mul(ri),
+            ArithOp::Div => if ri == 0 { return None } else { li / ri },
+            ArithOp::Mod => if ri == 0 { return None } else { li % ri },
+        };
+        Some(TapeVal::Int(out))
+    }
+}
+
+/// Decompose a TapeVal into (i64, f64, is_float).  Bail for non-numeric.
+#[cfg(feature = "simd-json")]
+fn num_parts(v: TapeVal) -> Option<(i64, f64, bool)> {
+    match v {
+        TapeVal::Int(n) => Some((n, 0.0, false)),
+        TapeVal::Float(f) => Some((0, f, true)),
+        _ => None,
     }
 }
 
@@ -3114,6 +3255,7 @@ fn eval_kernel_pred(
         BodyKernel::ConstBool(b) => Some(*b),
         BodyKernel::CurrentCmpLit(_, _) | BodyKernel::FieldChain(_)
         | BodyKernel::Const(_) | BodyKernel::ObjProject(_)
+        | BodyKernel::Arith(_, _, _)
         | BodyKernel::Generic => None,
     }
 }
@@ -4204,7 +4346,7 @@ fn eval_kernel(
         }
         BodyKernel::CurrentCmpLit(op, lit) =>
             Ok(Val::Bool(eval_cmp_op(item, *op, lit))),
-        BodyKernel::ObjProject(_) | BodyKernel::Generic =>
+        BodyKernel::ObjProject(_) | BodyKernel::Arith(_, _, _) | BodyKernel::Generic =>
             apply_item_in_env(vm, env, item, fallback),
     }
 }
