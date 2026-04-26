@@ -96,6 +96,55 @@ pub enum ObjVecCol {
     Bools(Vec<bool>),
 }
 
+/// Probe an Array of Objects in a `TapeData` for uniform shape (same
+/// `len`, same key sequence in same order).  Returns the shared key
+/// list as borrowed `&str` slices into `tape.bytes_buf` when promotion
+/// is safe; `None` otherwise.
+#[cfg(feature = "simd-json")]
+pub fn probe_obj_shape_tape<'a>(
+    tape: &'a std::sync::Arc<crate::strref::TapeData>,
+    start: usize,
+    n_entries: usize,
+    first_len: usize,
+) -> Option<Vec<&'a str>> {
+    use crate::strref::TapeNode;
+    let mut keys: Vec<&'a str> = Vec::with_capacity(first_len);
+    if !matches!(tape.nodes[start], TapeNode::Object { len, .. } if len as usize == first_len) {
+        return None;
+    }
+    let mut idx = start + 1;
+    for _ in 0..first_len {
+        match tape.nodes[idx] {
+            TapeNode::StringRef { start, end } =>
+                keys.push(tape.str_at_range(start as usize, end as usize)),
+            _ => return None,
+        }
+        idx += 1;
+        idx += tape.span(idx);
+    }
+    let mut entry_start = idx;
+    for _ in 1..n_entries {
+        match tape.nodes[entry_start] {
+            TapeNode::Object { len, .. } if len as usize == first_len => {}
+            _ => return None,
+        }
+        let mut j = entry_start + 1;
+        for k in 0..first_len {
+            match tape.nodes[j] {
+                TapeNode::StringRef { start, end } => {
+                    let s = tape.str_at_range(start as usize, end as usize);
+                    if s != keys[k] { return None; }
+                }
+                _ => return None,
+            }
+            j += 1;
+            j += tape.span(j);
+        }
+        entry_start = j;
+    }
+    Some(keys)
+}
+
 /// Build typed-column mirror from a row-major Val cells matrix.
 /// Same logic as the pipeline-side helper; lives here so the simd-json
 /// promotion path (`from_simd_tape`) can light up typed kernels at
@@ -468,6 +517,7 @@ impl Val {
             Val::IntVec(a) => Some(a.iter().map(|n| Val::Int(*n)).collect()),
             Val::FloatVec(a) => Some(a.iter().map(|f| Val::Float(*f)).collect()),
             Val::StrVec(a) => Some(a.iter().map(|s| Val::Str(s.clone())).collect()),
+            Val::StrSliceVec(a) => Some(a.iter().map(|s| Val::StrSlice(s.clone())).collect()),
             Val::ObjVec(d) => {
                 let stride = d.keys.len();
                 let nrows = if stride == 0 { 0 } else { d.cells.len() / stride };
@@ -970,6 +1020,154 @@ impl Val {
                     };
                     *idx += 1;
                     let v = Self::from_simd_tape(nodes, idx);
+                    out.insert(intern_key(key), v);
+                }
+                Val::Obj(Arc::new(out))
+            }
+        }
+    }
+
+    /// Build a Val tree from a parsed `TapeData`.  String values share
+    /// `tape.bytes_buf` as their parent buffer — per-string cost is one
+    /// `StrRef` (Arc bump + 2 u32s), no fresh heap allocation.  Closes
+    /// the cold-path `Arc<str>::from` storm that dominates
+    /// `from_json_simd` on docs with many unique string fields.
+    ///
+    /// Includes ObjVec promotion (homogeneous-shape Object Array →
+    /// columnar `Val::ObjVec` with typed_cols) so post-build queries
+    /// hit slot kernels.  Object keys still intern via `intern_key`
+    /// (Phase B scope: borrow keys too).
+    #[cfg(feature = "simd-json")]
+    pub fn from_tape_data(tape: &Arc<crate::strref::TapeData>) -> Val {
+        let mut idx = 0usize;
+        Self::from_tape_walk(tape, &mut idx)
+    }
+
+    #[cfg(feature = "simd-json")]
+    fn from_tape_walk(
+        tape: &Arc<crate::strref::TapeData>,
+        idx: &mut usize,
+    ) -> Val {
+        use crate::strref::TapeNode;
+        use simd_json::StaticNode as SN;
+        let here = tape.nodes[*idx];
+        *idx += 1;
+        match here {
+            TapeNode::Static(SN::Null)    => Val::Null,
+            TapeNode::Static(SN::Bool(b)) => Val::Bool(b),
+            TapeNode::Static(SN::I64(n))  => Val::Int(n),
+            TapeNode::Static(SN::U64(n))  => {
+                if n <= i64::MAX as u64 { Val::Int(n as i64) } else { Val::Float(n as f64) }
+            }
+            TapeNode::Static(SN::F64(f))  => Val::Float(f),
+            TapeNode::StringRef { start, end } => {
+                Val::StrSlice(crate::strref::StrRef::slice_bytes(
+                    Arc::clone(&tape.bytes_buf),
+                    start as usize, end as usize,
+                ))
+            }
+            TapeNode::Array { len, .. } => {
+                let len = len as usize;
+                if len == 0 { return Val::arr(Vec::new()); }
+                // Probe homogeneity for IntVec / StrSliceVec / ObjVec lanes.
+                let first_idx = *idx;
+                let first = tape.nodes[first_idx];
+                let mut try_int = matches!(first,
+                    TapeNode::Static(SN::I64(_)) | TapeNode::Static(SN::U64(_)));
+                let mut try_str = matches!(first, TapeNode::StringRef { .. });
+                let mut probe = first_idx;
+                let mut counted = 0usize;
+                while counted < len && (try_int || try_str) {
+                    match tape.nodes[probe] {
+                        TapeNode::Static(SN::I64(_)) | TapeNode::Static(SN::U64(_)) => {
+                            try_str = false;
+                            probe += 1;
+                        }
+                        TapeNode::StringRef { .. } => {
+                            try_int = false;
+                            probe += 1;
+                        }
+                        TapeNode::Static(_) => { try_int = false; try_str = false; probe += 1; }
+                        TapeNode::Array { .. } | TapeNode::Object { .. } => {
+                            try_int = false; try_str = false;
+                            probe += tape.span(probe);
+                        }
+                    }
+                    counted += 1;
+                }
+                if try_int {
+                    let mut out: Vec<i64> = Vec::with_capacity(len);
+                    for _ in 0..len {
+                        match tape.nodes[*idx] {
+                            TapeNode::Static(SN::I64(n)) => out.push(n),
+                            TapeNode::Static(SN::U64(n)) if n <= i64::MAX as u64 =>
+                                out.push(n as i64),
+                            _ => unreachable!("homogeneity check"),
+                        }
+                        *idx += 1;
+                    }
+                    return Val::IntVec(Arc::new(out));
+                }
+                if try_str {
+                    let mut out: Vec<crate::strref::StrRef> = Vec::with_capacity(len);
+                    for _ in 0..len {
+                        if let TapeNode::StringRef { start, end } = tape.nodes[*idx] {
+                            out.push(crate::strref::StrRef::slice_bytes(
+                                Arc::clone(&tape.bytes_buf),
+                                start as usize, end as usize,
+                            ));
+                        }
+                        *idx += 1;
+                    }
+                    return Val::StrSliceVec(Arc::new(out));
+                }
+                // ObjVec promotion — homogeneous-shape Object Array.
+                if let TapeNode::Object { len: first_len, .. } = first {
+                    if first_len > 0 && first_len <= 64 {
+                        if let Some(keys) = probe_obj_shape_tape(
+                            tape, first_idx, len, first_len as usize)
+                        {
+                            let n_keys = keys.len();
+                            let mut cells: Vec<Val> = Vec::with_capacity(len * n_keys);
+                            for _ in 0..len {
+                                debug_assert!(matches!(tape.nodes[*idx], TapeNode::Object { .. }));
+                                *idx += 1;
+                                for _ in 0..n_keys {
+                                    debug_assert!(matches!(tape.nodes[*idx], TapeNode::StringRef { .. }));
+                                    *idx += 1;
+                                    cells.push(Self::from_tape_walk(tape, idx));
+                                }
+                            }
+                            let key_arcs: Arc<[Arc<str>]> =
+                                keys.iter().map(|k| intern_key(k)).collect::<Vec<_>>().into();
+                            let stride = key_arcs.len();
+                            let nrows = if stride == 0 { 0 } else { cells.len() / stride };
+                            let typed = build_typed_cols_from_cells(&cells, stride, nrows);
+                            return Val::ObjVec(Arc::new(ObjVecData {
+                                keys: key_arcs,
+                                cells,
+                                typed_cols: Some(Arc::new(typed)),
+                            }));
+                        }
+                    }
+                }
+                let mut out: Vec<Val> = Vec::with_capacity(len);
+                for _ in 0..len {
+                    out.push(Self::from_tape_walk(tape, idx));
+                }
+                Val::Arr(Arc::new(out))
+            }
+            TapeNode::Object { len, .. } => {
+                let len = len as usize;
+                let mut out: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(len);
+                for _ in 0..len {
+                    let key = match tape.nodes[*idx] {
+                        TapeNode::StringRef { start, end } =>
+                            tape.str_at_range(start as usize, end as usize),
+                        _ => unreachable!("object key must be string"),
+                    };
+                    *idx += 1;
+                    let v = Self::from_tape_walk(tape, idx);
                     out.insert(intern_key(key), v);
                 }
                 Val::Obj(Arc::new(out))

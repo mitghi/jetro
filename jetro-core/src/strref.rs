@@ -48,6 +48,31 @@ impl StrRef {
         }
     }
 
+    /// Byte-range view into a UTF-8-validated `Arc<[u8]>` parent.
+    /// Used by simd-json tape ingestion: tape's `bytes_buf` is one
+    /// shared `Arc<[u8]>` for the whole document; per-string `StrRef`s
+    /// slice into it with no per-string heap alloc.
+    ///
+    /// SAFETY: caller must ensure `parent[start..end]` is valid UTF-8.
+    /// simd-json validates the entire input as UTF-8 at parse time,
+    /// so any range covering a `Node::String(&str)` slice is safe.
+    #[inline]
+    pub fn slice_bytes(parent: Arc<[u8]>, start: usize, end: usize) -> Self {
+        debug_assert!(start <= end);
+        debug_assert!(end <= parent.len());
+        // Reinterpret the fat pointer: Arc<[u8]> and Arc<str> have
+        // identical layout (pointer + length).  UTF-8 validity is the
+        // caller's contract.
+        let parent_str: Arc<str> = unsafe {
+            Arc::from_raw(Arc::into_raw(parent) as *const str)
+        };
+        Self {
+            parent: parent_str,
+            start: start as u32,
+            end: end as u32,
+        }
+    }
+
     #[inline] pub fn as_str(&self) -> &str {
         &self.parent[self.start as usize .. self.end as usize]
     }

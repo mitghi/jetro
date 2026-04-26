@@ -968,20 +968,14 @@ impl Jetro {
         self.root_val.get_or_init(|| {
             #[cfg(feature = "simd-json")]
             {
-                if self.tape.is_some() {
-                    if let Some(raw) = &self.raw_bytes {
-                        let mut buf: Vec<u8> = (**raw).to_vec();
-                        if let Ok(v) = Val::from_json_simd(&mut buf) {
-                            return v;
-                        }
-                    }
+                if let Some(tape) = &self.tape {
+                    // Phase A: borrowed Val::Str via tape.bytes_buf —
+                    // strings are StrSlice (Arc bump + 2 u32s) rather
+                    // than freshly allocated Arc<str>.  ObjVec
+                    // promotion runs inline so slot kernels light up.
+                    return Val::from_tape_data(tape);
                 }
             }
-            // Tree-wide ObjVec promotion at root_val build time
-            // breaks descendant walker / scan paths (they treat
-            // ObjVec as opaque).  Promotion lives at Pipeline source
-            // resolution instead, memoised per-array via
-            // `Jetro::get_or_promote_objvec`.
             Val::from(&self.document)
         }).clone()
     }
