@@ -1127,32 +1127,9 @@ mod tests {
         assert!(!has_try, "null body try should fold to default; ops: {:?}", prog.ops);
     }
 
-    #[test]
-    fn fusion_find_first_opcode_emitted() {
-        use crate::vm::{Compiler, Opcode};
-        // Inline filter followed by `.first()` fuses to FindFirst.
-        let prog = Compiler::compile_str("$.books{price > 10}.first()").unwrap();
-        let has_find_first = prog.ops.iter().any(|o| matches!(o, Opcode::FindFirst(_)));
-        assert!(has_find_first, "FindFirst opcode not emitted; got: {:?}", prog.ops);
-    }
-
-    #[test]
-    fn fusion_find_one_opcode_emitted() {
-        use crate::vm::{Compiler, Opcode};
-        let prog = Compiler::compile_str("$.books{title == \"x\"}!").unwrap();
-        let has_find_one = prog.ops.iter().any(|o| matches!(o, Opcode::FindOne(_)));
-        assert!(has_find_one, "FindOne opcode not emitted; got: {:?}", prog.ops);
-    }
-
-    #[test]
-    fn fusion_find_first_from_filter_method() {
-        use crate::vm::{Compiler, Opcode};
-        // `.filter(p).first()` fuses to FindFirst the same as the
-        // inline-filter form.
-        let prog = Compiler::compile_str("$.books.filter(price > 10).first()").unwrap();
-        let has_find_first = prog.ops.iter().any(|o| matches!(o, Opcode::FindFirst(_)));
-        assert!(has_find_first, "FindFirst should fuse from .filter() too");
-    }
+    // FindFirst/FindOne fusion-shape tests removed — opcodes deleted
+    // in Tier 3 sweep; semantics covered by existing higher-level
+    // integration tests that exercise filter+first/one shapes.
 
     #[test]
     fn redundant_reverse_eliminated() {
@@ -1399,13 +1376,7 @@ mod tests {
     // VM peephole fusion gated off in Tier 3; map+sum/avg lowers via
     // pipeline composed substrate, not fused MapSum/MapAvg opcodes.
 
-    #[test]
-    fn fusion_filter_first_opcode() {
-        use crate::vm::{Compiler, Opcode};
-        let prog = Compiler::compile_str("$.books.filter(@.price > 10).first()").unwrap();
-        let has = prog.ops.iter().any(|o| matches!(o, Opcode::FindFirst(_)));
-        assert!(has, "filter+first should fuse to FindFirst");
-    }
+    // fusion_filter_first_opcode removed — FindFirst opcode deleted.
 
     #[test]
     fn fusion_filter_first_semantics() {
@@ -3351,19 +3322,8 @@ mod tests {
         assert_eq!(j_b.collect(q).unwrap(), json!([10]));
     }
 
-    #[test]
-    fn find_count_fuses_to_filter_count() {
-        // Compiled program for `find(p).count()` should collapse to a
-        // single FilterCount op (no residual CallMethod for find/count).
-        use crate::VM;
-        let mut vm = VM::new();
-        let prog = vm.get_or_compile("$.xs.find(@ > 5).count()").unwrap();
-        let has_filter_count = prog.ops.iter().any(|op| matches!(
-            op,
-            crate::vm::Opcode::FilterCount(_)
-        ));
-        assert!(has_filter_count, "expected FilterCount, got {:?}", prog.ops);
-    }
+    // find_count_fuses_to_filter_count removed — FilterCount opcode
+    // deleted in Tier 3 sweep.
 
     #[test]
     fn route_c_one_mismatch_errors_via_fallthrough() {

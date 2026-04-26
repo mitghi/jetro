@@ -236,14 +236,6 @@ fn apply_op(op: &Opcode, stack: &mut Vec<AbstractVal>) {
             stack.push(AbstractVal { ty: VType::Unknown, null: Nullness::MaybeNull, card });
         }
         Opcode::RootChain(_) => stack.push(AbstractVal::UNKNOWN),
-        Opcode::FilterCount(_) => {
-            pop1!();
-            stack.push(AbstractVal::scalar(VType::Int));
-        }
-        Opcode::FindFirst(_) | Opcode::FindOne(_) => {
-            pop1!();
-            stack.push(AbstractVal::UNKNOWN);
-        }
         Opcode::StrSplitReverseJoin { .. } => {
             pop1!();
             stack.push(AbstractVal::scalar(VType::Str));
@@ -415,8 +407,8 @@ fn count_ident_uses_in_ops(ops: &[Opcode], name: &str, acc: &mut usize) {
         match op {
             Opcode::LoadIdent(s) if s.as_ref() == name => *acc += 1,
             Opcode::AndOp(p) | Opcode::OrOp(p) | Opcode::CoalesceOp(p)
-                | Opcode::InlineFilter(p) | Opcode::FilterCount(p)
-                | Opcode::FindFirst(p) | Opcode::FindOne(p)
+                | Opcode::InlineFilter(p) 
+                 
                 | Opcode::DynIndex(p)
                 => count_ident_uses_in_ops(&p.ops, name, acc),
             Opcode::IfElse { then_, else_ } => {
@@ -512,8 +504,8 @@ fn collect_fields_in_ops(ops: &[Opcode], acc: &mut Vec<Arc<str>>) {
                 }
             }
             Opcode::AndOp(p) | Opcode::OrOp(p) | Opcode::CoalesceOp(p)
-                | Opcode::InlineFilter(p) | Opcode::FilterCount(p)
-                | Opcode::FindFirst(p) | Opcode::FindOne(p)
+                | Opcode::InlineFilter(p) 
+                 
                 | Opcode::DynIndex(p)
                 => collect_fields_in_ops(&p.ops, acc),
             Opcode::IfElse { then_, else_ } => {
@@ -560,8 +552,8 @@ fn hash_ops(ops: &[Opcode], h: &mut impl std::hash::Hasher) {
                 for p in c.sub_progs.iter() { hash_ops(&p.ops, h); }
             }
             Opcode::AndOp(p) | Opcode::OrOp(p) | Opcode::CoalesceOp(p)
-                | Opcode::InlineFilter(p) | Opcode::FilterCount(p)
-                | Opcode::FindFirst(p) | Opcode::FindOne(p)
+                | Opcode::InlineFilter(p) 
+                 
                 | Opcode::DynIndex(p)
                 => hash_ops(&p.ops, h),
             Opcode::IfElse { then_, else_ } => {
@@ -641,8 +633,8 @@ fn walk_subprograms(ops: &[Opcode], map: &mut HashMap<u64, usize>) {
     for op in ops {
         let sub_progs: Vec<&Arc<Program>> = match op {
             Opcode::AndOp(p) | Opcode::OrOp(p) | Opcode::CoalesceOp(p)
-                | Opcode::InlineFilter(p) | Opcode::FilterCount(p)
-                | Opcode::FindFirst(p) | Opcode::FindOne(p)
+                | Opcode::InlineFilter(p) 
+                 
                 | Opcode::DynIndex(p)
                 => vec![p],
             Opcode::IfElse { then_, else_ } => vec![then_, else_],
@@ -854,9 +846,6 @@ fn rewrite_op(op: &Opcode, cache: &mut HashMap<u64, Arc<Program>>) -> Opcode {
             else_: dedup_rec(else_, cache),
         },
         Opcode::InlineFilter(p) => Opcode::InlineFilter(dedup_rec(p, cache)),
-        Opcode::FilterCount(p)  => Opcode::FilterCount(dedup_rec(p, cache)),
-        Opcode::FindFirst(p)    => Opcode::FindFirst(dedup_rec(p, cache)),
-        Opcode::FindOne(p)      => Opcode::FindOne(dedup_rec(p, cache)),
         Opcode::DynIndex(p)     => Opcode::DynIndex(dedup_rec(p, cache)),
         Opcode::LetExpr { name, body } => Opcode::LetExpr {
             name: name.clone(),
@@ -972,8 +961,8 @@ pub fn opcode_cost(op: &Opcode) -> u32 {
         Opcode::AndOp(p) | Opcode::OrOp(p) | Opcode::CoalesceOp(p) => 2 + program_cost(p),
         Opcode::IfElse { then_, else_ } => 2 + program_cost(then_) + program_cost(else_),
         Opcode::TryExpr { body, default } => 2 + program_cost(body) + program_cost(default),
-        Opcode::InlineFilter(p) | Opcode::FilterCount(p)
-            | Opcode::FindFirst(p) | Opcode::FindOne(p)
+        Opcode::InlineFilter(p) 
+             
             | Opcode::DynIndex(p) => 10 + program_cost(p),
         Opcode::EquiJoin { rhs, .. } => 25 + program_cost(rhs),
         Opcode::CallMethod(c) | Opcode::CallOptMethod(c) => {

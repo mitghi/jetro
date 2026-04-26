@@ -362,12 +362,6 @@ pub enum Opcode {
     /// shape-uniform array of objects hits `get_index(cached_slot)`
     /// instead of re-hashing the key at every iteration.
     FieldChain(Arc<FieldChainData>),
-    /// filter(pred) + len/count fused — counts matches without temp array.
-    FilterCount(Arc<Program>),
-    /// filter(pred) + First quantifier fused — early-exit on first match.
-    FindFirst(Arc<Program>),
-    /// filter(pred) + One quantifier fused — early-exit at 2nd match (error).
-    FindOne(Arc<Program>),
     /// Fused `.split(sep).reverse().join(sep)` — byte-scan segments and
     /// emit reversed join into one buffer.  No intermediate `Vec<Arc<str>>`.
     StrSplitReverseJoin { sep: Arc<str> },
@@ -1537,10 +1531,10 @@ impl Compiler {
         let no_fusion = disable_opcode_fusion();
         let ops = if cfg.root_chain      && !no_fusion { Self::pass_root_chain(ops) }      else { ops };
         let ops = if cfg.field_chain     && !no_fusion { Self::pass_field_chain(ops) }     else { ops };
-        let ops = if cfg.filter_count    && !no_fusion { Self::pass_filter_count(ops) }    else { ops };
+        // pass_filter_count + pass_find_quantifier deleted in Tier 3 —
+        // FilterCount / FindFirst / FindOne opcodes removed.
         let ops = if cfg.filter_fusion   && !no_fusion { Self::pass_filter_fusion(ops) }   else { ops };
         let ops = if cfg.filter_fusion   && !no_fusion { Self::pass_string_chain_fusion(ops) } else { ops };
-        let ops = if cfg.find_quantifier && !no_fusion { Self::pass_find_quantifier(ops) } else { ops };
         let ops = if cfg.filter_fusion   { Self::pass_field_specialise(ops) } else { ops };
         let ops = if !no_fusion { Self::pass_list_comp_specialise(ops) } else { ops };
         let ops = if cfg.strength_reduce { Self::pass_strength_reduce(ops) } else { ops };
@@ -2315,74 +2309,6 @@ impl Compiler {
             } else {
                 out.push(op);
             }
-        }
-        out
-    }
-
-    /// Fuse `CallMethod(filter/pred) + CallMethod(len/count)` → `FilterCount(pred)`.
-    fn pass_filter_count(ops: Vec<Opcode>) -> Vec<Opcode> {
-        let mut out = Vec::with_capacity(ops.len());
-        let mut it = ops.into_iter().peekable();
-        while let Some(op) = it.next() {
-            if let Opcode::CallMethod(ref call) = op {
-                let is_filter_like = call.method == BuiltinMethod::Filter
-                    || (call.method == BuiltinMethod::Unknown
-                        && matches!(call.name.as_ref(), "find" | "find_all" | "findAll"));
-                if is_filter_like && call.sub_progs.len() == 1 {
-                    let is_len = matches!(it.peek(),
-                        Some(Opcode::CallMethod(c))
-                            if c.method == BuiltinMethod::Len || c.method == BuiltinMethod::Count
-                    );
-                    if is_len {
-                        let pred = Arc::clone(&call.sub_progs[0]);
-                        it.next(); // consume Len/Count
-                        out.push(Opcode::FilterCount(pred));
-                        continue;
-                    }
-                }
-            }
-            out.push(op);
-        }
-        out
-    }
-
-    /// Fuse `InlineFilter(pred) + Quantifier(First/One)` → `FindFirst/FindOne(pred)`.
-    /// Also fuses `CallMethod(Filter, pred) + Quantifier(...)` for explicit `.filter()`.
-    fn pass_find_quantifier(ops: Vec<Opcode>) -> Vec<Opcode> {
-        let mut out = Vec::with_capacity(ops.len());
-        let mut it = ops.into_iter().peekable();
-        while let Some(op) = it.next() {
-            let pred_opt: Option<Arc<Program>> = match &op {
-                Opcode::InlineFilter(p) => Some(Arc::clone(p)),
-                Opcode::CallMethod(c) if c.method == BuiltinMethod::Filter && !c.sub_progs.is_empty()
-                    => Some(Arc::clone(&c.sub_progs[0])),
-                _ => None,
-            };
-            if let Some(pred) = pred_opt {
-                match it.peek() {
-                    Some(Opcode::Quantifier(QuantifierKind::First)) => {
-                        it.next();
-                        out.push(Opcode::FindFirst(pred));
-                        continue;
-                    }
-                    Some(Opcode::Quantifier(QuantifierKind::One)) => {
-                        it.next();
-                        out.push(Opcode::FindOne(pred));
-                        continue;
-                    }
-                    // `.filter(p).first()` — scans until predicate holds, returns
-                    // that item or null.  Skips materialising a filtered array.
-                    Some(Opcode::CallMethod(c))
-                        if c.method == BuiltinMethod::First && c.sub_progs.is_empty() =>
-                    {
-                        it.next();
-                        out.push(Opcode::FindFirst(pred));
-                        continue;
-                    }
-                    _ => {}
-                }
-            }
-            out.push(op);
         }
         out
     }
@@ -3717,63 +3643,6 @@ impl VM {
 
                     self.root_chain_cache.insert(key, current.clone());
                     stack.push(current);
-                }
-                Opcode::FilterCount(pred) => {
-                    let recv = pop!(stack);
-                    let n = match &recv {
-                        Val::Arr(a) => {
-                            let mut count = 0u64;
-                            let mut scratch = env.clone();
-                            for item in a.iter() {
-                                let prev = scratch.swap_current(item.clone());
-                                let t = is_truthy(&self.exec(pred, &scratch)?);
-                                scratch.restore_current(prev);
-                                if t { count += 1; }
-                            }
-                            count
-                        }
-                        Val::IntVec(a) => {
-                            let mut count = 0u64;
-                            let mut scratch = env.clone();
-                            for &n in a.iter() {
-                                let prev = scratch.swap_current(Val::Int(n));
-                                let t = is_truthy(&self.exec(pred, &scratch)?);
-                                scratch.restore_current(prev);
-                                if t { count += 1; }
-                            }
-                            count
-                        }
-                        Val::FloatVec(a) => {
-                            let mut count = 0u64;
-                            let mut scratch = env.clone();
-                            for &f in a.iter() {
-                                let prev = scratch.swap_current(Val::Float(f));
-                                let t = is_truthy(&self.exec(pred, &scratch)?);
-                                scratch.restore_current(prev);
-                                if t { count += 1; }
-                            }
-                            count
-                        }
-                        _ => 0,
-                    };
-                    stack.push(Val::Int(n as i64));
-                }
-                Opcode::FindFirst(pred) => {
-                    let recv = pop!(stack);
-                    let mut found = Val::Null;
-                    if let Val::Arr(a) = &recv {
-                        let mut scratch = env.clone();
-                        for item in a.iter() {
-                            let prev = scratch.swap_current(item.clone());
-                            let t = is_truthy(&self.exec(pred, &scratch)?);
-                            scratch.restore_current(prev);
-                            if t { found = item.clone(); break; }
-                        }
-                    } else if !recv.is_null() {
-                        let sub_env = env.with_current(recv.clone());
-                        if is_truthy(&self.exec(pred, &sub_env)?) { found = recv; }
-                    }
-                    stack.push(found);
                 }
                 Opcode::StrSplitReverseJoin { sep } => {
                     let v = pop!(stack);
@@ -5201,33 +5070,6 @@ impl VM {
                 // MapMap handler removed — pipeline runs two Map stages
                 // sequentially, and the bytecode now lowers `map().map()`
                 // as two unfused CallMethod(Map) ops.
-                Opcode::FindOne(pred) => {
-                    let recv = pop!(stack);
-                    let mut found: Option<Val> = None;
-                    if let Val::Arr(a) = &recv {
-                        let mut scratch = env.clone();
-                        for item in a.iter() {
-                            let prev = scratch.swap_current(item.clone());
-                            let keep = is_truthy(&self.exec(pred, &scratch)?);
-                            scratch.restore_current(prev);
-                            if keep {
-                                if found.is_some() {
-                                    return err!("quantifier !: expected exactly one match, found multiple");
-                                }
-                                found = Some(item.clone());
-                            }
-                        }
-                    } else if !recv.is_null() {
-                        let sub_env = env.with_current(recv.clone());
-                        if is_truthy(&self.exec(pred, &sub_env)?) { found = Some(recv); }
-                    }
-                    match found {
-                        Some(v) => stack.push(v),
-                        None => return err!("quantifier !: expected exactly one match, found none"),
-                    }
-                }
-
-                // ── Ident ─────────────────────────────────────────────────────
                 Opcode::LoadIdent(name) => {
                     let v = if let Some(v) = env.get_var(name.as_ref()) {
                         v.clone()
