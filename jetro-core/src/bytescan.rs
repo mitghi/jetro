@@ -461,6 +461,11 @@ fn build_template(
 /// Walk row using template — assume key order matches.  Returns
 /// (entry_end, true) if template matched; (entry_end, false) if
 /// shape diverged (caller re-runs with entry_extract_direct).
+///
+/// Direct byte-slice cmp against expected key bytes; bypasses
+/// `read_string` + memchr2 setup per key.  Hot path tuned for
+/// minimal per-row dispatch.
+#[inline]
 fn entry_extract_template(
     b: &[u8],
     obj_start: usize,
@@ -472,23 +477,36 @@ fn entry_extract_template(
     for s in slots.iter_mut().take(n_wanted) { *s = None; }
     let mut i = obj_start + 1;
     let mut tpl_idx = 0usize;
+    let blen = b.len();
     loop {
-        i = skip_ws(b, i);
-        if i >= b.len() { return None; }
+        // Inline ws-skip — typical case has 0-1 ws bytes.
+        while i < blen && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i >= blen { return None; }
         if b[i] == b'}' {
             return Some((i + 1, tpl_idx == tpl.keys.len()));
         }
         if tpl_idx >= tpl.keys.len() {
-            return Some((skip_value(b, obj_start)?, false));  // diverged
-        }
-        let (after_key, k) = read_string(b, i)?;
-        let expected = &tpl.keys[tpl_idx];
-        if k != expected.name.as_slice() {
             return Some((skip_value(b, obj_start)?, false));
         }
-        i = skip_ws(b, after_key);
+        // Direct key-byte compare — no read_string call.
+        if b[i] != b'"' {
+            return Some((skip_value(b, obj_start)?, false));
+        }
+        let expected = &tpl.keys[tpl_idx];
+        let key_start = i + 1;
+        let key_end = key_start + expected.name.len();
+        if key_end >= blen
+            || &b[key_start..key_end] != expected.name.as_slice()
+            || b[key_end] != b'"'
+        {
+            return Some((skip_value(b, obj_start)?, false));
+        }
+        i = key_end + 1;
+        // Skip ws + `:` + ws.
+        while i < blen && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
         if b.get(i) != Some(&b':') { return None; }
-        i = skip_ws(b, i + 1);
+        i += 1;
+        while i < blen && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
         if let Some(slot) = expected.slot {
             let (next, sc) = parse_primitive(b, i)?;
             slots[slot] = Some(sc);
@@ -496,8 +514,9 @@ fn entry_extract_template(
         } else {
             i = skip_value(b, i)?;
         }
-        i = skip_ws(b, i);
-        if i < b.len() && b[i] == b',' { i += 1; }
+        // Skip ws + optional `,`.
+        while i < blen && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i < blen && b[i] == b',' { i += 1; }
         tpl_idx += 1;
     }
 }
@@ -990,25 +1009,18 @@ fn scan_loop_num_filter_map(
     let mut slots: Slots = [None; SCALAR_BUF_CAP];
     let n_wanted = needles.len();
 
-    // Wanted-key bytes derived from needles (strip leading `"` + trailing `":`).
     let wanted: Vec<&[u8]> = needles.iter().map(|n| {
-        // n = `"<key>":` → key bytes are n[1..n.len()-2]
         &n[1..n.len() - 2]
     }).collect();
 
-    // Probe first row for template.
     if raw.get(i) == Some(&b']') { return Some(acc); }
     let template = build_template(raw, i, &wanted);
 
     while i < raw.len() && raw[i] != b']' {
         let next = if let Some((tpl, _)) = template.as_ref() {
-            // Template-walker fast path.
             match entry_extract_template(raw, i, tpl, &mut slots, n_wanted)? {
                 (n, true) => n,
-                (_, false) => {
-                    // Shape diverged — fall back to memmem-direct.
-                    entry_extract_direct(raw, i, needles, &mut slots)?
-                }
+                (_, false) => entry_extract_direct(raw, i, needles, &mut slots)?,
             }
         } else {
             entry_extract_direct(raw, i, needles, &mut slots)?
@@ -1021,4 +1033,25 @@ fn scan_loop_num_filter_map(
         i = entry_advance(raw, next);
     }
     Some(acc)
+}
+
+/// Branchless integer parser hot path — used in template walker.
+/// Skips std::str::parse dispatch + utf8 check.
+#[inline(always)]
+fn parse_int_fast(b: &[u8]) -> Option<(usize, i64)> {
+    if b.is_empty() { return None; }
+    let mut j = 0;
+    let neg = b[0] == b'-';
+    if neg { j += 1; }
+    let start = j;
+    let mut acc: i64 = 0;
+    while j < b.len() {
+        let c = b[j];
+        if c.wrapping_sub(b'0') < 10 {
+            acc = acc.wrapping_mul(10).wrapping_add((c - b'0') as i64);
+            j += 1;
+        } else { break; }
+    }
+    if j == start { return None; }
+    Some((j, if neg { -acc } else { acc }))
 }
