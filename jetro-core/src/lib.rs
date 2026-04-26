@@ -65,6 +65,7 @@ pub mod ssa;
 pub mod scan;
 pub mod strref;
 pub mod pipeline;
+pub mod bytescan;
 
 #[cfg(test)]
 mod tests;
@@ -293,14 +294,16 @@ pub struct Jetro {
     /// [`Jetro::from_bytes`] / [`Jetro::from_slice`].  Enables SIMD
     /// byte-scan fast paths for `$..key` queries.
     raw_bytes: Option<Arc<[u8]>>,
-    /// Phase-6 tape lane — present when the handle was built via
-    /// [`Jetro::from_simd_lazy`].  Reserved for future tape-aware
-    /// execute paths; today it's just retained alongside the Val.
+    /// Phase-6 tape lane — lazily parsed from `raw_bytes` on first
+    /// `lazy_tape()` access.  Defers the simd-json `to_tape` cost
+    /// (~5-7 ms / MB) until a query needs the tape.  Byte-scan
+    /// dispatcher (`bytescan::try_run`) consumes raw_bytes directly
+    /// and never triggers parse for eligible queries.
     #[cfg(feature = "simd-json")]
-    tape: Option<Arc<crate::strref::TapeData>>,
+    tape: OnceCell<Arc<crate::strref::TapeData>>,
     #[cfg(not(feature = "simd-json"))]
     #[allow(dead_code)]
-    tape: Option<()>,
+    tape: OnceCell<()>,
     /// Memoised ObjVec promotions, keyed by the source `Arc<Vec<Val>>`'s
     /// pointer identity.  When a Pipeline collects a uniform-shape array
     /// of objects, the first call probes + builds an `ObjVecData`; all
@@ -739,15 +742,12 @@ impl pipeline::ObjVecPromoter for Jetro {
     }
     #[cfg(feature = "simd-json")]
     fn tape(&self) -> Option<&Arc<crate::strref::TapeData>> {
-        self.tape.as_ref()
+        self.lazy_tape()
     }
     fn prefer_tape(&self) -> bool {
-        // Prefer tape-only path until either (a) Val tree is built or
-        // (b) we've run enough tape queries that ObjVec memoisation
-        // would now be cheaper amortised.  Threshold of 1 — a single
-        // cold-start aggregate fires the tape path; subsequent calls
-        // build Val + ObjVec for warm-path speed.
-        if self.tape.is_none() { return false; }
+        // Prefer tape-only path when raw bytes available + Val not built.
+        // Lazy parse fires on first access via lazy_tape().
+        if self.raw_bytes.is_none() { return false; }
         if self.root_val.get().is_some() { return false; }
         self.tape_runs.load(std::sync::atomic::Ordering::Relaxed) < 1
     }
@@ -757,6 +757,23 @@ impl pipeline::ObjVecPromoter for Jetro {
 }
 
 impl Jetro {
+    /// Lazily parse raw_bytes into a TapeData on first access.  Cached
+    /// in `tape: OnceCell<Arc<TapeData>>`.  Returns None when no raw
+    /// bytes available (handle built via `Jetro::new(serde_json::Value)`).
+    /// Cost: ~5-7 ms / MB on first call (simd-json `to_tape` + node walk
+    /// + Arc clone).  Subsequent calls return the cached Arc.
+    #[cfg(feature = "simd-json")]
+    pub fn lazy_tape(&self) -> Option<&Arc<crate::strref::TapeData>> {
+        // OnceCell::get_or_try_init isn't stable for std OnceCell; do
+        // get-then-init manually.
+        if let Some(t) = self.tape.get() { return Some(t); }
+        let raw = self.raw_bytes.as_ref()?;
+        let bytes: Vec<u8> = (**raw).to_vec();
+        let parsed = crate::strref::TapeData::parse(bytes).ok()?;
+        let _ = self.tape.set(parsed);
+        self.tape.get()
+    }
+
     /// Memoised ObjVec promotion.  First call probes the array shape and
     /// builds a columnar ObjVecData; subsequent calls (same Arc<Vec<Val>>
     /// pointer) return the cached layout.  Cache key is the Vec ptr —
@@ -781,7 +798,7 @@ impl Jetro {
     }
 
     pub fn new(document: Value) -> Self {
-        Self { document, root_val: OnceCell::new(), objvec_cache: Default::default(), tape_runs: std::sync::atomic::AtomicU32::new(0), raw_bytes: None, tape: None }
+        Self { document, root_val: OnceCell::new(), objvec_cache: Default::default(), tape_runs: std::sync::atomic::AtomicU32::new(0), raw_bytes: None, tape: OnceCell::new() }
     }
 
     /// Parse JSON bytes and retain them alongside the parsed document.
@@ -806,7 +823,7 @@ impl Jetro {
                         // root_val() rebuilds via simd-json on raw_bytes.
                         root_val: OnceCell::new(), objvec_cache: Default::default(), tape_runs: std::sync::atomic::AtomicU32::new(0),
                         raw_bytes: Some(raw),
-                        tape: Some(tape),
+                        tape: { let c = OnceCell::new(); let _ = c.set(tape); c },
                     });
                 }
                 Err(_) => {
@@ -815,7 +832,7 @@ impl Jetro {
                         document,
                         root_val: OnceCell::new(), objvec_cache: Default::default(), tape_runs: std::sync::atomic::AtomicU32::new(0),
                         raw_bytes: Some(raw),
-                        tape: None,
+                        tape: OnceCell::new(),
                     });
                 }
             }
@@ -827,7 +844,7 @@ impl Jetro {
                 document,
                 root_val: OnceCell::new(), objvec_cache: Default::default(), tape_runs: std::sync::atomic::AtomicU32::new(0),
                 raw_bytes: Some(Arc::from(bytes.into_boxed_slice())),
-                tape: None,
+                tape: OnceCell::new(),
             })
         }
     }
@@ -854,32 +871,20 @@ impl Jetro {
     /// Requires the `simd-json` cargo feature.
     #[cfg(feature = "simd-json")]
     pub fn from_simd(bytes: Vec<u8>) -> std::result::Result<Self, String> {
-        // Tape-deferred path: parse to TapeData; build Val lazily.
-        // Tape-friendly aggregate / filter / map / collect queries
-        // execute straight off the tape and never pay Val build cost.
-        // Non-tape-friendly queries trigger `root_val()` which rebuilds
-        // a Val via simd-json over the retained raw_bytes — same total
-        // cost as the legacy eager path.
-        match crate::strref::TapeData::parse(bytes) {
-            Ok(tape) => {
-                // Reuse the tape's escape-decoded bytes buffer as
-                // raw_bytes — skips a second 1.7MB clone on cold path.
-                // Byte-scan paths read field names + literal values
-                // which are unaffected by simd-json's in-place mutation
-                // (commas/colons/structural bytes preserved; strings
-                // are escape-decoded which is fine for memchr-style
-                // structural scans).
-                let raw: Arc<[u8]> = Arc::clone(&tape.bytes_buf);
-                Ok(Self {
-                    document: Value::Null,
-                    root_val: OnceCell::new(), objvec_cache: Default::default(),
-                    tape_runs: std::sync::atomic::AtomicU32::new(0),
-                    raw_bytes: Some(raw),
-                    tape: Some(tape),
-                })
-            }
-            Err(simd_err) => Err(format!("simd-json parse failed: {}", simd_err)),
-        }
+        // Defer simd-json `to_tape` parse — store raw bytes only.
+        // Byte-scan dispatcher (`bytescan::try_run`) consumes raw_bytes
+        // directly and never triggers parse for eligible queries.
+        // Non-byte-scannable queries trigger `lazy_tape()` on first
+        // access, paying parse cost lazily.
+        let raw: Arc<[u8]> = Arc::from(bytes.into_boxed_slice());
+        Ok(Self {
+            document: Value::Null,
+            root_val: OnceCell::new(),
+            objvec_cache: Default::default(),
+            tape_runs: std::sync::atomic::AtomicU32::new(0),
+            raw_bytes: Some(raw),
+            tape: OnceCell::new(),
+        })
     }
 
     /// `from_simd` over a borrowed slice. Allocates a writable copy
@@ -915,7 +920,7 @@ impl Jetro {
             document: Value::Null,
             root_val: OnceCell::new(), objvec_cache: Default::default(), tape_runs: std::sync::atomic::AtomicU32::new(0),
             raw_bytes: Some(raw),
-            tape: Some(tape),
+            tape: { let c = OnceCell::new(); let _ = c.set(tape); c },
         })
     }
 
@@ -925,7 +930,7 @@ impl Jetro {
     /// sequence (e.g. tape-aware exec paths in custom workloads).
     #[cfg(feature = "simd-json")]
     pub fn tape(&self) -> Option<&Arc<crate::strref::TapeData>> {
-        self.tape.as_ref()
+        self.lazy_tape()
     }
 
     /// Parse a newline-delimited JSON (NDJSON / JSON-Lines) buffer into a
@@ -960,7 +965,7 @@ impl Jetro {
             document: Value::Null,
             root_val: cell, objvec_cache: Default::default(), tape_runs: std::sync::atomic::AtomicU32::new(0),
             raw_bytes: None,
-            tape: None,
+            tape: OnceCell::new(),
         })
     }
 
@@ -968,7 +973,7 @@ impl Jetro {
         self.root_val.get_or_init(|| {
             #[cfg(feature = "simd-json")]
             {
-                if let Some(tape) = &self.tape {
+                if let Some(tape) = self.lazy_tape() {
                     // Phase A: borrowed Val::Str via tape.bytes_buf —
                     // strings are StrSlice (Arc bump + 2 u32s) rather
                     // than freshly allocated Arc<str>.  ObjVec
@@ -991,7 +996,7 @@ impl Jetro {
         // never building a Val tree.  Bench: closes $..price gap from
         // ~17x native to ~2-3x on bench_complex.
         #[cfg(feature = "simd-json")]
-        if let Some(tape) = &self.tape {
+        if let Some(tape) = self.lazy_tape() {
             let val_built = self.root_val.get().is_some();
             if let Some(out) = try_tape_descend_aggregate(expr, tape, val_built) {
                 return out.map(|v| v.into());
@@ -1060,7 +1065,7 @@ impl Jetro {
     pub fn collect_val<S: AsRef<str>>(&self, expr: S) -> std::result::Result<JetroVal, EvalError> {
         let expr = expr.as_ref();
         #[cfg(feature = "simd-json")]
-        if let Some(tape) = &self.tape {
+        if let Some(tape) = self.lazy_tape() {
             let val_built = self.root_val.get().is_some();
             if let Some(out) = try_tape_descend_aggregate(expr, tape, val_built) {
                 return out;
@@ -1068,6 +1073,18 @@ impl Jetro {
         }
         if let Ok(ast) = parser::parse(expr) {
             if let Some(p) = pipeline::Pipeline::lower(&ast) {
+                // Schema-aware projected parse — bypasses simd-json tape
+                // entirely for byte-scannable Pipeline shapes.  Reads
+                // raw_bytes via JSON-aware skip-counting; only extracts
+                // the catalog of fields the kernels touch.
+                #[cfg(feature = "simd-json")]
+                if !self.root_val.get().is_some() {
+                    if let Some(raw) = &self.raw_bytes {
+                        if let Some(out) = bytescan::try_run(&p, raw.as_ref()) {
+                            return out;
+                        }
+                    }
+                }
                 #[cfg(feature = "simd-json")]
                 if let Some(out) = p.try_run_no_root(self as &dyn pipeline::ObjVecPromoter) {
                     return out;
