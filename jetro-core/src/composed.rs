@@ -64,6 +64,26 @@ pub enum StageOutput<'a> {
 /// place via `Cell<usize>` reset at lower-time.
 pub trait Stage {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a>;
+
+    /// Step 3d-extension (B) — produce only the kth output for input `x`.
+    /// Default impl materialises via `apply` and indexes; Expanding
+    /// stages with `can_indexed=true` (Split, Range, FlatMap when inner
+    /// is bounded) override with direct computation — e.g. memchr-based
+    /// kth-segment lookup for Split — to convert O(N) work into O(k).
+    /// Used by the planner's IndexedDispatch kernel for `Cardinality::
+    /// Expanding` stages preceded by all 1:1 stages and followed by a
+    /// positional sink.
+    fn apply_indexed<'a>(&self, x: &'a Val, k: usize) -> Option<Cow<'a, Val>> {
+        match self.apply(x) {
+            StageOutput::Pass(v) if k == 0 => Some(v),
+            StageOutput::Pass(_)           => None,
+            StageOutput::Many(mut items)
+                if k < items.len() => Some(items.swap_remove(k)),
+            StageOutput::Many(_)
+                | StageOutput::Filtered
+                | StageOutput::Done => None,
+        }
+    }
 }
 
 /// Blanket impl so `Box<dyn Stage>` itself implements `Stage`. Lets a
@@ -73,6 +93,10 @@ impl<T: Stage + ?Sized> Stage for Box<T> {
     #[inline]
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         (**self).apply(x)
+    }
+    #[inline]
+    fn apply_indexed<'a>(&self, x: &'a Val, k: usize) -> Option<Cow<'a, Val>> {
+        (**self).apply_indexed(x, k)
     }
 }
 
@@ -1745,6 +1769,36 @@ mod tests {
         assert_eq!(j.collect("$.books.map(price).last()").unwrap(), json!(30));
         // chained Map's still 1:1 — both elide.
         assert_eq!(j.collect("$.books.map(price).first()").unwrap(), json!(10));
+    }
+
+    #[test]
+    fn step3d_ext_split_slice_lifted() {
+        // Step 3d-extension (C): top-level Stage::Split + Stage::Slice
+        // semantics match legacy method-call dispatch.
+        use serde_json::json;
+        let doc = json!({ "s": "a,b,c,d,e" });
+        let j = crate::Jetro::new(doc);
+
+        // .split(",") collects to array.
+        assert_eq!(
+            j.collect("$.s.split(\",\")").unwrap(),
+            json!(["a", "b", "c", "d", "e"])
+        );
+        // .split(",").count() — Stage::Split + Sink::Count.
+        assert_eq!(
+            j.collect("$.s.split(\",\").count()").unwrap(),
+            json!(5)
+        );
+        // .split(",").first() — Stage::Split + Sink::First.
+        assert_eq!(
+            j.collect("$.s.split(\",\").first()").unwrap(),
+            json!("a")
+        );
+        // .split(",").last() — Stage::Split + Sink::Last.
+        assert_eq!(
+            j.collect("$.s.split(\",\").last()").unwrap(),
+            json!("e")
+        );
     }
 
     #[test]

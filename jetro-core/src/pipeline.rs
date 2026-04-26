@@ -267,6 +267,25 @@ pub enum Stage {
     /// this is a sink-shaped operation; placed under Stage so
     /// downstream `.values()` / `.map(@.len())` can compose.
     GroupBy(Arc<crate::vm::Program>),
+
+    // ── Step 3d-extension (C): lifted string Stages ──────────────────────────
+    //
+    // Lifts `.split(sep)` / `.slice(a, b)` from MethodRegistry-dispatched
+    // method calls inside Map/Filter sub-program bodies into first-class
+    // Stage variants.  Two wins:
+    //   1. Chain flattening (Step 3d-extension A) can hoist them out of
+    //      Map bodies — `map(@.text.split(",").first())` becomes
+    //      `[Map(@.text), Split(","), Sink::First]`.
+    //   2. apply_indexed override on Split lets IndexedDispatch compute
+    //      `split(",").first()` via one memchr call instead of producing
+    //      the full segment vector.
+
+    /// `.split(sep)` — 1 string → many parts.  `Cardinality::Expanding`
+    /// + `can_indexed=true` (kth segment via memchr).
+    Split(Arc<str>),
+    /// `.slice(start, end)` — 1 string → 1 substring.  `Cardinality::
+    /// OneToOne` + `can_indexed=true`.  `end=None` means "to end".
+    Slice(i64, Option<i64>),
 }
 
 /// Phase A3 — sub-program "kernel" shape recognised at lower-time.
@@ -797,13 +816,17 @@ fn upstream_demand(d: Demand, stage: &Stage) -> Demand {
             };
             Demand { consumption: Bound::AtMost(cap), positional: None }
         }
-        // Skip + barriers all need the full upstream stream.
+        // Skip + barriers + Expanding string Stages all need full
+        // upstream stream (or its sole element, for Split: 1 string).
         Stage::Skip(_)
             | Stage::FlatMap(_)
             | Stage::Reverse
             | Stage::Sort(_)
             | Stage::UniqueBy(_)
-            | Stage::GroupBy(_) => Demand::UNBOUNDED,
+            | Stage::GroupBy(_)
+            | Stage::Split(_) => Demand::UNBOUNDED,
+        // Slice is 1:1 — preserve.
+        Stage::Slice(_, _) => d,
     }
 }
 
@@ -900,6 +923,21 @@ impl Stage {
                 purity:      true,
                 boundedness: Boundedness::AtMost(Bound::Unbounded),
                 can_indexed: false,
+            },
+            // Step 3d-extension lifted Stages.
+            Stage::Split(_) => StageShape {
+                cardinality: Cardinality::Expanding,
+                order:       Order::Stateless,
+                purity:      true,
+                boundedness: Boundedness::AtMost(Bound::Unbounded),
+                can_indexed: true,
+            },
+            Stage::Slice(_, _) => StageShape {
+                cardinality: Cardinality::OneToOne,
+                order:       Order::Stateless,
+                purity:      true,
+                boundedness: Boundedness::Always(1),
+                can_indexed: true,
             },
         }
     }
@@ -1152,6 +1190,32 @@ impl Pipeline {
                                 _ => return None,
                             };
                             stages.push(Stage::Skip(n));
+                        }
+                        // Step 3d-extension (C): lifted string Stages.
+                        // Top-level `.split(sep)` / `.slice(start[, end])`
+                        // — accepted only when source is a string-yielding
+                        // pipeline (lowering doesn't validate type; barrier
+                        // path skips non-string inputs).
+                        ("split", 1, _) => {
+                            let sep = match &args[0] {
+                                Arg::Pos(Expr::Str(s)) => Arc::<str>::from(s.as_str()),
+                                _ => return None,
+                            };
+                            stages.push(Stage::Split(sep));
+                        }
+                        ("slice", 1, _) => {
+                            let start = match &args[0] {
+                                Arg::Pos(Expr::Int(n)) => *n,
+                                _ => return None,
+                            };
+                            stages.push(Stage::Slice(start, None));
+                        }
+                        ("slice", 2, _) => {
+                            let (start, end) = match (&args[0], &args[1]) {
+                                (Arg::Pos(Expr::Int(s)), Arg::Pos(Expr::Int(e))) => (*s, Some(*e)),
+                                _ => return None,
+                            };
+                            stages.push(Stage::Slice(start, end));
                         }
                         ("count", 0, true) | ("len", 0, true) => sink = Sink::Count,
                         ("sum", 0, true) => sink = Sink::Numeric(NumOp::Sum),
@@ -2437,7 +2501,9 @@ impl Pipeline {
         // every stage in order so the pipeline semantics match the
         // surface query.
         let needs_barrier = self.stages.iter().any(|s| matches!(s,
-            Stage::Reverse | Stage::Sort(_) | Stage::UniqueBy(_) | Stage::FlatMap(_) | Stage::GroupBy(_)));
+            Stage::Reverse | Stage::Sort(_) | Stage::UniqueBy(_)
+                | Stage::FlatMap(_) | Stage::GroupBy(_)
+                | Stage::Split(_)));
         let pre_iter: Box<dyn Iterator<Item = Val>> = if needs_barrier {
             let mut buf: Vec<Val> = iter.collect();
             // Phase 1.2 — barrier-stage path now reads stage_kernels[i]
@@ -2536,6 +2602,33 @@ impl Pipeline {
                         // shortcut below converts that to the bare obj.
                         buf = vec![Val::Obj(Arc::new(out_obj))];
                     }
+                    Stage::Split(sep) => {
+                        // Step 3d-extension (C): Expanding string Stage.
+                        // Each input string yields one element per
+                        // separator-delimited segment.
+                        let mut out: Vec<Val> = Vec::with_capacity(buf.len());
+                        for v in buf.into_iter() {
+                            if let Val::Str(s) = &v {
+                                for part in s.as_ref().split(sep.as_ref()) {
+                                    out.push(Val::Str(Arc::<str>::from(part)));
+                                }
+                            }
+                        }
+                        buf = out;
+                    }
+                    Stage::Slice(start, end) => {
+                        // 1:1 string slice with i64 bounds; negative
+                        // indexes count from end.
+                        let mut out: Vec<Val> = Vec::with_capacity(buf.len());
+                        for v in buf.into_iter() {
+                            if let Val::Str(s) = &v {
+                                out.push(Val::Str(slice_str(s, *start, *end)));
+                            } else {
+                                out.push(v);
+                            }
+                        }
+                        buf = out;
+                    }
                 }
             }
             Box::new(buf.into_iter())
@@ -2568,6 +2661,12 @@ impl Pipeline {
                         }
                         Stage::Reverse | Stage::Sort(_) | Stage::UniqueBy(_)
                         | Stage::FlatMap(_) | Stage::GroupBy(_) => {}
+                        Stage::Split(_) => {} // forced into barrier path above
+                        Stage::Slice(start, end) => {
+                            if let Val::Str(s) = &item {
+                                item = Val::Str(slice_str(s, *start, *end));
+                            }
+                        }
                     }
                 }
             }
@@ -2611,6 +2710,44 @@ impl Pipeline {
             Sink::Last =>
                 acc_last.unwrap_or(Val::Null),
         })
+    }
+}
+
+/// Step 3d-extension (C): byte-level slice for `Stage::Slice`.  Negative
+/// indexes count from the end (Python slice semantics); `end=None` means
+/// "to end".  ASCII fast path; falls back to char-indices for non-ASCII.
+fn slice_str(s: &Arc<str>, start: i64, end: Option<i64>) -> Arc<str> {
+    let src = s.as_ref();
+    if src.is_ascii() {
+        let blen = src.len();
+        let start_u = if start < 0 {
+            blen.saturating_sub((-start) as usize)
+        } else {
+            (start as usize).min(blen)
+        };
+        let end_u = match end {
+            Some(e) if e < 0 => blen.saturating_sub((-e) as usize),
+            Some(e) => (e as usize).min(blen),
+            None    => blen,
+        };
+        let start_u = start_u.min(end_u).min(blen);
+        if start_u == 0 && end_u == blen {
+            return Arc::clone(s);
+        }
+        Arc::from(&src[start_u..end_u])
+    } else {
+        let chars: Vec<(usize, char)> = src.char_indices().collect();
+        let n = chars.len() as i64;
+        let resolve = |i: i64| -> usize {
+            let r = if i < 0 { n + i } else { i };
+            r.clamp(0, n) as usize
+        };
+        let s_idx = resolve(start);
+        let e_idx = match end { Some(e) => resolve(e), None => n as usize };
+        let s_idx = s_idx.min(e_idx);
+        let s_b = chars.get(s_idx).map(|c| c.0).unwrap_or(src.len());
+        let e_b = chars.get(e_idx).map(|c| c.0).unwrap_or(src.len());
+        Arc::from(&src[s_b..e_b])
     }
 }
 
