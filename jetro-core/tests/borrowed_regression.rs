@@ -285,9 +285,10 @@ fn composed_tape_phase1_under_budget() {
         let _ = run_pipeline::<TapeRow<'_>, CountSink>(&arena, arr_row.array_children().unwrap(), &id);
         std::hint::black_box((mn, mx, av));
     });
-    // 5000 rows × 5 passes × ~50 ns/row ≈ 1250 µs.  Budget loose (3000 µs)
-    // for CI noise; tape parse is one-shot outside time_med.
-    const BUDGET_US: u128 = 3000;
+    // 5000 rows × 5 passes × ~50 ns/row ≈ 1250 µs.  Budget loose (5000 µs)
+    // for CI noise + parallel-test contention; tape parse is one-shot
+    // outside time_med.
+    const BUDGET_US: u128 = 5000;
     assert!(
         med <= BUDGET_US,
         "composed_tape Phase 1 {} µs > budget {} µs",

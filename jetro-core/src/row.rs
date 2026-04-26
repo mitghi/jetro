@@ -51,7 +51,7 @@ use crate::eval::borrowed::{Arena, Val as BVal};
 ///
 /// `Self::materialise(arena)` returns a value tied to that arena;
 /// used by Sink::Collect / First / Last regardless of substrate.
-pub trait Row<'a>: Copy + 'a {
+pub trait Row<'a>: Clone + 'a {
     /// Iterator over array children (Phase 2 — used by FlatMap).
     /// Lifetime tied to the source data the row borrows from.
     type ArrayIter: Iterator<Item = Self> + 'a;
@@ -76,12 +76,12 @@ pub trait Row<'a>: Copy + 'a {
 // ── Impl: borrowed::Val<'a> ─────────────────────────────────────────
 
 impl<'a> Row<'a> for BVal<'a> {
-    type ArrayIter = std::iter::Copied<std::slice::Iter<'a, BVal<'a>>>;
+    type ArrayIter = std::iter::Cloned<std::slice::Iter<'a, BVal<'a>>>;
 
     #[inline]
     fn array_children(&self) -> Option<Self::ArrayIter> {
         match self {
-            BVal::Arr(items) => Some(items.iter().copied()),
+            BVal::Arr(items) => Some(items.iter().cloned()),
             _ => None,
         }
     }
@@ -111,6 +111,118 @@ impl<'a> Row<'a> for BVal<'a> {
 
     #[inline]
     fn materialise(self, _arena: &'a Arena) -> BVal<'a> { self }
+}
+
+// ── Impl: owned `crate::eval::Val` ──────────────────────────────────
+//
+// Phase 5 unblocker: owned Val impl Row<'static>.  Self-contained
+// (owns its data via Arc), no lifetime parameter on storage.  Methods
+// delegate to existing owned-Val accessors.  array_children iterates
+// the Arr's Arc<Vec<Val>> and clones (Arc bump = cheap).
+//
+// `materialise(arena)` deep-clones the owned tree into the arena via
+// `borrowed::from_owned(arena, self)`.  Used at the boundary when an
+// owned-Val source needs to feed a sink that emits BVal<'a>.
+
+pub struct OwnedValChildIter {
+    inner: std::vec::IntoIter<crate::eval::Val>,
+}
+
+impl Iterator for OwnedValChildIter {
+    type Item = crate::eval::Val;
+    fn next(&mut self) -> Option<Self::Item> { self.inner.next() }
+}
+
+impl Row<'static> for crate::eval::Val {
+    type ArrayIter = OwnedValChildIter;
+
+    #[inline]
+    fn array_children(&self) -> Option<Self::ArrayIter> {
+        use crate::eval::Val as OV;
+        match self {
+            OV::Arr(a) => Some(OwnedValChildIter {
+                inner: a.iter().cloned().collect::<Vec<_>>().into_iter(),
+            }),
+            OV::IntVec(v) => Some(OwnedValChildIter {
+                inner: v.iter().map(|n| OV::Int(*n)).collect::<Vec<_>>().into_iter(),
+            }),
+            OV::FloatVec(v) => Some(OwnedValChildIter {
+                inner: v.iter().map(|f| OV::Float(*f)).collect::<Vec<_>>().into_iter(),
+            }),
+            OV::StrVec(v) => Some(OwnedValChildIter {
+                inner: v.iter().map(|s| OV::Str(s.clone())).collect::<Vec<_>>().into_iter(),
+            }),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    fn get_field(&self, key: &str) -> Option<Self> {
+        let v = crate::eval::Val::get_field(self, key);
+        if matches!(v, crate::eval::Val::Null) && !matches!(self, crate::eval::Val::Obj(_) | crate::eval::Val::ObjSmall(_)) {
+            None
+        } else if matches!(v, crate::eval::Val::Null) {
+            // Distinguish null-from-absent vs null-stored.  The owned
+            // get_field always returns Null on miss; here we treat
+            // absent same as None to match Row<'a> semantics for
+            // BVal/TapeRow.  Stored-null is rare; bench shows safe.
+            None
+        } else {
+            Some(v)
+        }
+    }
+
+    #[inline]
+    fn walk_path(&self, chain: &[&str]) -> Option<Self> {
+        let mut cur = self.clone();
+        for k in chain { cur = Row::get_field(&cur, k)?; }
+        Some(cur)
+    }
+
+    #[inline]
+    fn as_int(&self) -> Option<i64> {
+        match self {
+            crate::eval::Val::Int(n) => Some(*n),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    fn as_float(&self) -> Option<f64> {
+        match self {
+            crate::eval::Val::Float(f) => Some(*f),
+            crate::eval::Val::Int(n) => Some(*n as f64),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    fn as_str(&self) -> Option<&'static str> {
+        // Owned Val::Str is `Arc<str>` — cannot return &'static str
+        // without leaking.  Returns None for owned strings; callers
+        // needing string access must materialise() or use as_str_ref.
+        // This is the documented compromise of Row<'static> on owned
+        // Val; the borrowed BVal/TapeRow paths are zero-copy.
+        None
+    }
+
+    #[inline]
+    fn as_bool(&self) -> Option<bool> {
+        if let crate::eval::Val::Bool(b) = self { Some(*b) } else { None }
+    }
+
+    #[inline]
+    fn is_null(&self) -> bool { matches!(self, crate::eval::Val::Null) }
+
+    #[inline]
+    fn materialise(self, arena: &'static Arena) -> BVal<'static> {
+        // Note: materialise consumes self; arena lifetime is 'static
+        // because owned Val implements Row<'static>.  In practice the
+        // unified runner over owned Val won't use materialise (sinks
+        // can stay in owned Val terms).  Implementation here for
+        // trait completeness.
+        crate::eval::borrowed::from_owned(arena, &self)
+    }
 }
 
 // ── Impl: composed_tape::TapeRow<'a> ────────────────────────────────
@@ -282,6 +394,33 @@ mod tests {
             _ => panic!(),
         };
         assert_eq!(bv_keys, tr_keys);
+    }
+
+    #[test]
+    fn owned_val_implements_row() {
+        use crate::eval::Val as OV;
+        use indexmap::IndexMap;
+        use std::sync::Arc;
+
+        let inner_pairs: IndexMap<Arc<str>, OV> = [
+            (Arc::from("city"), OV::Str(Arc::from("NYC"))),
+        ].into_iter().collect();
+        let inner = OV::Obj(Arc::new(inner_pairs));
+
+        let outer_pairs: IndexMap<Arc<str>, OV> = [
+            (Arc::from("n"), OV::Int(42)),
+            (Arc::from("b"), OV::Bool(true)),
+            (Arc::from("addr"), inner),
+        ].into_iter().collect();
+        let row = OV::Obj(Arc::new(outer_pairs));
+
+        // Use Row trait methods on owned Val.
+        assert_eq!(Row::get_field(&row, "n").and_then(|v| v.as_int()), Some(42));
+        assert_eq!(Row::get_field(&row, "b").and_then(|v| v.as_bool()), Some(true));
+        let city = Row::walk_path(&row, &["addr", "city"]);
+        assert!(city.is_some());
+        assert!(Row::get_field(&row, "missing").is_none());
+        assert!(!Row::is_null(&row));
     }
 
     #[test]
