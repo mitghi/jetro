@@ -2365,71 +2365,20 @@ impl Pipeline {
                 }
                 Sink::First => { if acc_first.is_none() { acc_first = Some(item.clone()); } }
                 Sink::Last  => { acc_last = Some(item.clone()); }
-                Sink::NumMap(op, prog) => {
-                    let kernel = self.sink_kernels.first().unwrap_or(&BodyKernel::Generic);
-                    let v = eval_kernel(kernel, &item, &mut vm, &mut loop_env, prog)?;
-                    num_fold(&mut acc_sum_i, &mut acc_sum_f, &mut sum_floated,
-                             &mut acc_min_f, &mut acc_max_f, &mut acc_n_obs,
-                             *op, &v);
-                }
-                Sink::CountIf(prog) => {
-                    let kernel = self.sink_kernels.first().unwrap_or(&BodyKernel::Generic);
-                    if is_truthy(&eval_kernel(kernel, &item, &mut vm, &mut loop_env, prog)?) {
-                        acc_count += 1;
-                    }
-                }
-                Sink::NumFilterMap(op, pred, map) => {
-                    let pred_k = self.sink_kernels.first().unwrap_or(&BodyKernel::Generic);
-                    let map_k  = self.sink_kernels.get(1).unwrap_or(&BodyKernel::Generic);
-                    if is_truthy(&eval_kernel(pred_k, &item, &mut vm, &mut loop_env, pred)?) {
-                        let v = eval_kernel(map_k, &item, &mut vm, &mut loop_env, map)?;
-                        num_fold(&mut acc_sum_i, &mut acc_sum_f, &mut sum_floated,
-                                 &mut acc_min_f, &mut acc_max_f, &mut acc_n_obs,
-                                 *op, &v);
-                    }
-                }
-                Sink::FilterFirst(prog) => {
-                    let kernel = self.sink_kernels.first().unwrap_or(&BodyKernel::Generic);
-                    if acc_first.is_none()
-                        && is_truthy(&eval_kernel(kernel, &item, &mut vm, &mut loop_env, prog)?) {
-                        acc_first = Some(item.clone());
-                    }
-                }
-                Sink::FilterLast(prog) => {
-                    let kernel = self.sink_kernels.first().unwrap_or(&BodyKernel::Generic);
-                    if is_truthy(&eval_kernel(kernel, &item, &mut vm, &mut loop_env, prog)?) {
-                        acc_last = Some(item.clone());
-                    }
-                }
-                Sink::FirstMap(prog) => {
-                    let kernel = self.sink_kernels.first().unwrap_or(&BodyKernel::Generic);
-                    if acc_first.is_none() {
-                        acc_first = Some(eval_kernel(kernel, &item, &mut vm, &mut loop_env, prog)?);
-                    }
-                }
-                Sink::LastMap(prog) => {
-                    let kernel = self.sink_kernels.first().unwrap_or(&BodyKernel::Generic);
-                    acc_last = Some(eval_kernel(kernel, &item, &mut vm, &mut loop_env, prog)?);
-                }
-                Sink::FlatMapCount(prog) => {
-                    let kernel = self.sink_kernels.first().unwrap_or(&BodyKernel::Generic);
-                    let inner = eval_kernel(kernel, &item, &mut vm, &mut loop_env, prog)?;
-                    if let Some(arr) = inner.as_vals() {
-                        acc_count += arr.len() as i64;
-                    } else {
-                        acc_count += 1;
-                    }
-                }
-                // Sort-fused sinks: collect items into a Vec to apply
-                // the heap-based TopN / single-pass MinBy / MaxBy at
-                // pipeline finalise.  Per-row cost is the prog eval
-                // for keyed variants, plus a heap push for TopN.
-                Sink::TopN { .. } | Sink::MinBy(_) | Sink::MaxBy(_) => {
-                    acc_collect.push(item);
-                }
-                Sink::UniqueCount => {
-                    acc_collect.push(item);
-                }
+                // Fused Sink variants — unreachable post fusion-off.
+                Sink::CountIf(_)        |
+                Sink::FlatMapCount(_)   |
+                Sink::NumMap(_, _)      |
+                Sink::NumFilterMap(_, _, _) |
+                Sink::FilterFirst(_)    |
+                Sink::FirstMap(_)       |
+                Sink::FilterLast(_)     |
+                Sink::LastMap(_)        |
+                Sink::TopN { .. }       |
+                Sink::MinBy(_)          |
+                Sink::MaxBy(_)          |
+                Sink::UniqueCount       =>
+                    unreachable!("fused Sink variant unreachable post fusion-off"),
             }
             taken += 1;
         }
@@ -2450,131 +2399,29 @@ impl Pipeline {
                 }
             },
             Sink::Count             => Val::Int(acc_count),
-            Sink::CountIf(_)        => Val::Int(acc_count),
-            Sink::FlatMapCount(_)   => Val::Int(acc_count),
-            Sink::Numeric(op)
-            | Sink::NumMap(op, _)
-            | Sink::NumFilterMap(op, _, _) =>
+            Sink::Numeric(op) =>
                 num_finalise(*op, acc_sum_i, acc_sum_f, sum_floated,
                              acc_min_f, acc_max_f, acc_n_obs),
-            Sink::First | Sink::FilterFirst(_) | Sink::FirstMap(_) =>
+            Sink::First =>
                 acc_first.unwrap_or(Val::Null),
-            Sink::Last  | Sink::FilterLast(_)  | Sink::LastMap(_) =>
+            Sink::Last =>
                 acc_last.unwrap_or(Val::Null),
-            Sink::TopN { n, asc, key } => {
-                let key_kernel = self.sink_kernels.first().unwrap_or(&BodyKernel::Generic);
-                topn_finalise(&mut vm, acc_collect, *n, *asc, key.as_ref(), key_kernel)?
-            }
-            Sink::MinBy(key) => {
-                let key_kernel = self.sink_kernels.first().unwrap_or(&BodyKernel::Generic);
-                keyed_extreme(&mut vm, acc_collect, key, false, key_kernel)?
-            }
-            Sink::MaxBy(key) => {
-                let key_kernel = self.sink_kernels.first().unwrap_or(&BodyKernel::Generic);
-                keyed_extreme(&mut vm, acc_collect, key, true, key_kernel)?
-            }
-            Sink::UniqueCount       => unique_count_finalise(acc_collect),
+            // Fused Sink variants — unreachable post fusion-off.
+            Sink::CountIf(_)        |
+            Sink::FlatMapCount(_)   |
+            Sink::NumMap(_, _)      |
+            Sink::NumFilterMap(_, _, _) |
+            Sink::FilterFirst(_)    |
+            Sink::FirstMap(_)       |
+            Sink::FilterLast(_)     |
+            Sink::LastMap(_)        |
+            Sink::TopN { .. }       |
+            Sink::MinBy(_)          |
+            Sink::MaxBy(_)          |
+            Sink::UniqueCount       =>
+                unreachable!("fused Sink variant unreachable post fusion-off"),
         })
     }
-}
-
-fn unique_count_finalise(items: Vec<Val>) -> Val {
-    use crate::eval::util::val_to_key;
-    let mut seen: std::collections::HashSet<String> =
-        std::collections::HashSet::with_capacity(items.len());
-    let mut n: i64 = 0;
-    for it in &items {
-        if seen.insert(val_to_key(it)) { n += 1; }
-    }
-    Val::Int(n)
-}
-
-/// Heap-based top-N: keep the n smallest (or largest) by natural cmp
-/// or a key program.  O(N log n) vs O(N log N) for full sort.  Returns
-/// a Val::Arr with the result in ascending sort order.
-fn topn_finalise(
-    vm: &mut crate::vm::VM,
-    items: Vec<Val>,
-    n: usize,
-    asc: bool,
-    key_prog: Option<&Arc<crate::vm::Program>>,
-    key_kernel: &BodyKernel,
-) -> Result<Val, EvalError> {
-    if n == 0 || items.is_empty() { return Ok(Val::arr(Vec::new())); }
-    use std::collections::BinaryHeap;
-
-    // Compute keys once.  When key_prog is None we use the item itself.
-    let mut env = vm.make_loop_env(Val::Null);
-    let mut keyed: Vec<(Val, Val)> = Vec::with_capacity(items.len());
-    for it in items {
-        let k = match key_prog {
-            Some(p) => eval_kernel(key_kernel, &it, vm, &mut env, p)?,
-            None => it.clone(),
-        };
-        keyed.push((k, it));
-    }
-
-    // Heap of (cmp_key, value).  For asc=true we want n smallest →
-    // max-heap of size n keyed on the natural ordering.  For asc=false
-    // (largest) we want a min-heap of size n.
-    // Single Ord wrapper carries the key + value so BinaryHeap's
-    // requirements are satisfied without leaning on Val: Ord.
-    struct Entry { key: Val, val: Val, asc: bool }
-    impl PartialEq for Entry { fn eq(&self, o: &Self) -> bool { cmp_val_total(&self.key, &o.key).is_eq() } }
-    impl Eq for Entry {}
-    impl PartialOrd for Entry { fn partial_cmp(&self, o: &Self) -> Option<std::cmp::Ordering> { Some(self.cmp(o)) } }
-    impl Ord for Entry {
-        fn cmp(&self, o: &Self) -> std::cmp::Ordering {
-            let order = cmp_val_total(&self.key, &o.key);
-            // For asc=true we want a max-heap of the n smallest, so
-            // the natural order on the key is also the heap order.
-            // For asc=false we invert so the heap top is the smallest
-            // among the n largest seen so far.
-            if self.asc { order } else { order.reverse() }
-        }
-    }
-
-    let mut heap: BinaryHeap<Entry> = BinaryHeap::with_capacity(n);
-    for (k, v) in keyed {
-        if heap.len() < n {
-            heap.push(Entry { key: k, val: v, asc });
-        } else if let Some(top) = heap.peek() {
-            let order = cmp_val_total(&k, &top.key);
-            let replace = if asc { order.is_lt() } else { order.is_gt() };
-            if replace {
-                heap.pop();
-                heap.push(Entry { key: k, val: v, asc });
-            }
-        }
-    }
-    let sorted: Vec<Entry> = heap.into_sorted_vec();
-    // into_sorted_vec respects Ord; for asc=true that means ascending
-    // (smallest first), for asc=false that means largest-first.
-    Ok(Val::arr(sorted.into_iter().map(|e| e.val).collect()))
-}
-
-/// One-pass argmin/argmax by key program.
-fn keyed_extreme(
-    vm: &mut crate::vm::VM,
-    items: Vec<Val>,
-    key_prog: &Arc<crate::vm::Program>,
-    want_max: bool,
-    key_kernel: &BodyKernel,
-) -> Result<Val, EvalError> {
-    let mut best: Option<(Val, Val)> = None;
-    let mut env = vm.make_loop_env(Val::Null);
-    for it in items {
-        let k = eval_kernel(key_kernel, &it, vm, &mut env, key_prog)?;
-        match &best {
-            None => best = Some((k, it)),
-            Some((bk, _)) => {
-                let order = cmp_val_total(&k, bk);
-                let replace = if want_max { order.is_gt() } else { order.is_lt() };
-                if replace { best = Some((k, it)); }
-            }
-        }
-    }
-    Ok(best.map(|(_, v)| v).unwrap_or(Val::Null))
 }
 
 #[inline]
@@ -3583,14 +3430,6 @@ fn eval_cmp_op(lhs: &Val, op: crate::ast::BinOp, rhs: &Val) -> bool {
         B::Gte => cmp_vals(lhs, rhs) != std::cmp::Ordering::Less,
         _ => false,
     }
-}
-
-/// Legacy entry — used only by `try_columnar` paths that pre-build
-/// a one-shot mini-pipeline.  Per-row pull loop must use
-/// `apply_item_in_env` for the A1 fast path.
-#[inline]
-fn apply_item_root(vm: &mut crate::vm::VM, item: &Val, prog: &crate::vm::Program) -> Result<Val, EvalError> {
-    vm.execute_val_raw(prog, item.clone())
 }
 
 #[inline]
