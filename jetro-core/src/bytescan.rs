@@ -179,11 +179,27 @@ fn read_string<'a>(b: &'a [u8], mut i: usize) -> Option<(usize, &'a [u8])> {
     None
 }
 
+/// Hand-rolled string skip — avoids memchr2 setup overhead for short
+/// strings (typical case <30 bytes).  For arbitrary-length strings,
+/// memchr2-based `skip_string` is faster; this variant assumes short.
+#[inline]
+fn skip_string_short(b: &[u8], mut i: usize) -> Option<usize> {
+    if b.get(i) != Some(&b'"') { return None; }
+    i += 1;
+    let blen = b.len();
+    while i < blen {
+        let c = b[i];
+        if c == b'"' { return Some(i + 1); }
+        if c == b'\\' { i += 2; } else { i += 1; }
+    }
+    None
+}
+
 fn skip_value(b: &[u8], mut i: usize) -> Option<usize> {
     i = skip_ws(b, i);
     if i >= b.len() { return None; }
     match b[i] {
-        b'"' => skip_string(b, i),
+        b'"' => skip_string_short(b, i),
         b'{' | b'[' => {
             // memchr-SIMD-accelerated brace/bracket/string-quote walker.
             // Searches for the next structural byte (`"`, opener, closer)
