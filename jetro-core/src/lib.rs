@@ -1090,30 +1090,42 @@ impl Jetro {
         Ok(())
     }
 
+    /// Shared prereq for byte-scannable fast paths: parse + lower +
+    /// verify root_val tree not yet built + fetch raw_bytes.  Both
+    /// `collect_val` (owned) and `collect_val_borrow` (borrow) gate
+    /// their bytescan / pipeline-tape paths through this single
+    /// check — eliminates duplicated setup.
+    #[cfg(feature = "simd-json")]
+    fn fast_path_prereqs(&self, expr: &str)
+        -> Option<(pipeline::Pipeline, &[u8])>
+    {
+        let parsed = parser::parse(expr).ok()?;
+        let lowered = pipeline::Pipeline::lower(&parsed)?;
+        if self.root_val.get().is_some() { return None; }
+        let raw = self.raw_bytes.as_deref()?;
+        Some((lowered, raw))
+    }
+
     pub fn collect_val<S: AsRef<str>>(&self, expr: S) -> std::result::Result<JetroVal, EvalError> {
         let expr = expr.as_ref();
-
-        // Parse + lower up-front so bytescan can run BEFORE any
-        // tape parse.  lazy_tape() builds the full simd-json tape
-        // over raw_bytes — ~5-7 ms / MB on cold path; if bytescan
-        // can satisfy the query from raw_bytes alone we skip that.
-        let parsed = parser::parse(expr).ok();
-        let lowered = parsed.as_ref().and_then(pipeline::Pipeline::lower);
 
         // Schema-aware projected parse — generic byte-walker over
         // raw_bytes.  Always tried before tape parse so cold queries
         // that match its supported Sink/Stage surface (Numeric/Count/
         // First/Last/...) never trigger the full tape build.
         #[cfg(feature = "simd-json")]
-        if let Some(p) = &lowered {
-            if !self.root_val.get().is_some() {
-                if let Some(raw) = &self.raw_bytes {
-                    if let Some(out) = bytescan::try_run(p, raw.as_ref()) {
-                        return out;
-                    }
-                }
+        if let Some((p, raw)) = self.fast_path_prereqs(expr) {
+            if let Some(out) = bytescan::try_run(&p, raw) {
+                return out;
             }
         }
+
+        // Re-parse + lower for the slow paths below.  Cheap relative
+        // to tape parse; alternative is plumbing the parsed expr
+        // through `fast_path_prereqs` which complicates lifetimes
+        // for marginal savings.
+        let parsed = parser::parse(expr).ok();
+        let lowered = parsed.as_ref().and_then(pipeline::Pipeline::lower);
 
         // Tape descend-aggregate fast path for `$..k.<aggregate>`
         // shapes that bytescan does not handle.  Triggers tape parse
@@ -1168,55 +1180,37 @@ impl Jetro {
     ) -> std::result::Result<crate::eval::borrowed::Val<'h>, EvalError> {
         let arena: &'h crate::eval::borrowed::Arena =
             self.arena.get_or_init(crate::eval::borrowed::Arena::new);
-
         let expr_s = expr.as_ref();
-        let parsed = parser::parse(expr_s).ok();
-        let lowered = parsed.as_ref().and_then(pipeline::Pipeline::lower);
 
-        if let Some(p) = &lowered {
-            if !self.root_val.get().is_some() {
-                if let Some(raw) = &self.raw_bytes {
-                    if let Some(out) = bytescan::try_run_borrow(p, raw.as_ref(), arena) {
-                        return out;
-                    }
-                    // Phase 3 wire-in (composed_tape) — runs after
-                    // bytescan_borrow declines.  Reuses the cached
-                    // tape (lazy_tape) so no re-parse cost; emits
-                    // BVal<'a> directly without materialising a Val
-                    // tree.  Closes the gap pipeline_borrow couldn't:
-                    // string-lit filters + Sink::Numeric/Count/First/
-                    // Last/Collect on non-bytescannable shapes.
-                    if let Some(tape) = self.lazy_tape() {
-                        if let Some(out) = pipeline_tape_borrow::try_run_borrow_tape(p, tape, arena) {
-                            return out;
-                        }
-                    }
-                    // composed_borrow path is NOT wired in by default
-                    // (kept for direct testing only).
-                    // Reason: pipeline_borrow::try_run_borrow does a
-                    // full `from_json_simd_arena` parse (~3.7 ms on
-                    // 1.1 MB) before running the borrowed Stage chain.
-                    // Owned `collect_val` falls through to tape /
-                    // composed::tape which avoids Val tree build —
-                    // ~1.6 ms total for filter+aggregate sinks.  Until
-                    // composed_borrow can accept a tape source (i.e.
-                    // borrowed Stage::apply over `TapeNode` not
-                    // `BVal`), wiring pipeline_borrow regresses every
-                    // shape where bytescan_borrow declined and tape is
-                    // cheaper than Val materialisation.
-                    //
-                    // pipeline_borrow.rs remains as a substrate for
-                    // future Phase 3+ work — it's exercised via direct
-                    // Rust tests but not the public collect_val_borrow
-                    // path.
+        // Borrow-specific fast paths — share parse+lower+precheck
+        // with `collect_val` via `fast_path_prereqs`.
+        if let Some((p, raw)) = self.fast_path_prereqs(expr_s) {
+            if let Some(out) = bytescan::try_run_borrow(&p, raw, arena) {
+                return out;
+            }
+            // composed_tape path — runs after bytescan_borrow declines.
+            // Reuses cached tape (lazy_tape) so no re-parse cost; emits
+            // BVal<'a> directly without materialising a Val tree.
+            // Closes the gap pipeline_borrow couldn't: string-lit
+            // filters + Sink::Numeric/Count/First/Last/Collect on
+            // non-bytescannable shapes.
+            //
+            // pipeline_borrow path NOT wired by default — its full
+            // `from_json_simd_arena` parse (~3.7 ms on 1.1 MB) is
+            // dominated by composed_tape's tape reuse.  Kept as
+            // substrate for direct tests only.
+            if let Some(tape) = self.lazy_tape() {
+                if let Some(out) = pipeline_tape_borrow::try_run_borrow_tape(&p, tape, arena) {
+                    return out;
                 }
             }
         }
 
-        // Fallback: run owned path, then ingest into arena.  Same
-        // allocator cost as `collect_val`, but the result lives in
-        // the handle's arena (cheap downstream traversal, no Arc
-        // bumps on read).
+        // Fallback: delegate to `collect_val` (owned path: tape
+        // descend / run_with / VM), ingest result into arena via
+        // `from_owned`.  Same allocator cost as `collect_val`, but
+        // the result lives in the handle's arena (cheap downstream
+        // traversal, no Arc bumps on read).
         let owned = self.collect_val(expr_s)?;
         Ok(crate::eval::borrowed::from_owned(arena, &owned))
     }
