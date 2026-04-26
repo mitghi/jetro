@@ -2130,7 +2130,165 @@ impl Pipeline {
         cache: &dyn ObjVecPromoter,
     ) -> Option<Result<Val, EvalError>> {
         if !cache.prefer_tape() { return None; }
+
+        // Step 3c — composed tape route. Preferred over the legacy
+        // `try_tape_aggregate` (which pattern-matches on fused Sink
+        // variants) because it runs through the same generic Stage +
+        // Sink substrate as the Val path. Returns None for shapes the
+        // tape borrow stages don't yet cover; legacy
+        // `try_tape_aggregate` handles those until Tier 3 deletes it.
+        if let Some(out) = self.try_run_composed_tape(cache) { return Some(out); }
+
         self.try_tape_aggregate(Some(cache))
+    }
+
+    /// Step 3c — composed-tape runner. Decomposes fused Sinks at entry
+    /// (same logic as `try_run_composed`), then dispatches via the
+    /// `composed::tape` substrate when every stage classifies to a
+    /// tape borrow stage.
+    #[cfg(feature = "simd-json")]
+    fn try_run_composed_tape(
+        &self,
+        cache: &dyn ObjVecPromoter,
+    ) -> Option<Result<Val, EvalError>> {
+        use crate::composed::tape as ct;
+        use crate::strref::{TapeCmp, tape_walk_field_chain};
+        use std::cell::Cell;
+
+        if !composed_path_enabled() { return None; }
+        let tape = cache.tape()?;
+
+        // Source must be a tape-resolvable field chain. Receiver-form
+        // sources hold a Val that we'd have to look up in the tape;
+        // skip for now.
+        let arr_idx = match &self.source {
+            Source::FieldChain { keys } => {
+                let key_strs: Vec<&str> = keys.iter().map(|k| k.as_ref()).collect();
+                tape_walk_field_chain(tape.as_ref(), &key_strs)?
+            }
+            _ => return None,
+        };
+
+        // Decompose fused Sinks into base Stage + base Sink. Same
+        // mapping table as `try_run_composed`. Tier 3 deletes the
+        // fused variants and merges these decompositions away.
+        let (eff_stages, eff_kernels, eff_sink): (Vec<Stage>, Vec<BodyKernel>, Sink) = {
+            let mut stages = self.stages.clone();
+            let mut kernels = self.stage_kernels.clone();
+            let sink = match &self.sink {
+                Sink::NumMap(op, prog) => {
+                    stages.push(Stage::Map(Arc::clone(prog)));
+                    kernels.push(BodyKernel::classify(prog));
+                    Sink::Numeric(*op)
+                }
+                Sink::NumFilterMap(op, pred, map) => {
+                    stages.push(Stage::Filter(Arc::clone(pred)));
+                    kernels.push(BodyKernel::classify(pred));
+                    stages.push(Stage::Map(Arc::clone(map)));
+                    kernels.push(BodyKernel::classify(map));
+                    Sink::Numeric(*op)
+                }
+                Sink::CountIf(prog) => {
+                    stages.push(Stage::Filter(Arc::clone(prog)));
+                    kernels.push(BodyKernel::classify(prog));
+                    Sink::Count
+                }
+                Sink::FilterFirst(prog) => {
+                    stages.push(Stage::Filter(Arc::clone(prog)));
+                    kernels.push(BodyKernel::classify(prog));
+                    Sink::First
+                }
+                Sink::FilterLast(prog) => {
+                    stages.push(Stage::Filter(Arc::clone(prog)));
+                    kernels.push(BodyKernel::classify(prog));
+                    Sink::Last
+                }
+                Sink::FirstMap(prog) => {
+                    stages.push(Stage::Map(Arc::clone(prog)));
+                    kernels.push(BodyKernel::classify(prog));
+                    Sink::First
+                }
+                Sink::LastMap(prog) => {
+                    stages.push(Stage::Map(Arc::clone(prog)));
+                    kernels.push(BodyKernel::classify(prog));
+                    Sink::Last
+                }
+                Sink::FlatMapCount(prog) => {
+                    stages.push(Stage::FlatMap(Arc::clone(prog)));
+                    kernels.push(BodyKernel::classify(prog));
+                    Sink::Count
+                }
+                base => base.clone(),
+            };
+            (stages, kernels, sink)
+        };
+
+        // Sink mapping. Barriers (Sort/UniqueBy/GroupBy/Reverse)
+        // and computed sinks bail — Val path handles them.
+        enum SinkKind { Count, Sum, Min, Max, Avg, First, Last, Collect }
+        let sink_kind = match &eff_sink {
+            Sink::Collect => SinkKind::Collect,
+            Sink::Count => SinkKind::Count,
+            Sink::Numeric(NumOp::Sum) => SinkKind::Sum,
+            Sink::Numeric(NumOp::Min) => SinkKind::Min,
+            Sink::Numeric(NumOp::Max) => SinkKind::Max,
+            Sink::Numeric(NumOp::Avg) => SinkKind::Avg,
+            Sink::First => SinkKind::First,
+            Sink::Last => SinkKind::Last,
+            _ => return None,
+        };
+
+        // Build tape stage chain. Reject any Generic / barrier /
+        // computed kernel — Val path handles those.
+        let build_tape_stage = |s: &Stage, k: &BodyKernel|
+            -> Option<Box<dyn ct::TapeStage>> {
+            Some(match (s, k) {
+                (Stage::Filter(_), BodyKernel::FieldCmpLit(field, op, lit))
+                    if matches!(op, crate::ast::BinOp::Eq) =>
+                {
+                    let lit_owned = lit_to_tape_owned(lit)?;
+                    Box::new(ct::TapeFilterFieldCmpLit {
+                        field: Arc::clone(field),
+                        op: TapeCmp::Eq,
+                        lit: lit_owned,
+                    })
+                }
+                (Stage::Map(_), BodyKernel::FieldRead(field)) =>
+                    Box::new(ct::TapeMapField { field: Arc::clone(field) }),
+                (Stage::Map(_), BodyKernel::FieldChain(keys)) =>
+                    Box::new(ct::TapeMapFieldChain { keys: Arc::clone(keys) }),
+                (Stage::FlatMap(_), BodyKernel::FieldRead(field)) =>
+                    Box::new(ct::TapeFlatMapField { field: Arc::clone(field) }),
+                (Stage::FlatMap(_), BodyKernel::FieldChain(keys)) =>
+                    Box::new(ct::TapeFlatMapFieldChain { keys: Arc::clone(keys) }),
+                (Stage::Take(n), _) =>
+                    Box::new(ct::TapeTake { remaining: Cell::new(*n) }),
+                (Stage::Skip(n), _) =>
+                    Box::new(ct::TapeSkip { remaining: Cell::new(*n) }),
+                _ => return None,
+            })
+        };
+
+        let mut chain: Box<dyn ct::TapeStage> = Box::new(ct::TapeIdentity);
+        for (i, stage) in eff_stages.iter().enumerate() {
+            let kernel = eff_kernels.get(i).unwrap_or(&BodyKernel::Generic);
+            let next = build_tape_stage(stage, kernel)?;
+            chain = Box::new(ct::TapeComposed { a: chain, b: next });
+        }
+
+        let result = match sink_kind {
+            SinkKind::Count   => ct::run_pipeline_tape::<ct::TapeCountSink>(tape, arr_idx, chain.as_ref()),
+            SinkKind::Sum     => ct::run_pipeline_tape::<ct::TapeSumSink>(tape, arr_idx, chain.as_ref()),
+            SinkKind::Min     => ct::run_pipeline_tape::<ct::TapeMinSink>(tape, arr_idx, chain.as_ref()),
+            SinkKind::Max     => ct::run_pipeline_tape::<ct::TapeMaxSink>(tape, arr_idx, chain.as_ref()),
+            SinkKind::Avg     => ct::run_pipeline_tape::<ct::TapeAvgSink>(tape, arr_idx, chain.as_ref()),
+            SinkKind::First   => ct::run_pipeline_tape_first(tape, arr_idx, chain.as_ref()),
+            SinkKind::Last    => ct::run_pipeline_tape_last(tape, arr_idx, chain.as_ref()),
+            SinkKind::Collect => ct::run_pipeline_tape_collect(tape, arr_idx, chain.as_ref()),
+        };
+        let result = result?;
+        cache.note_tape_run();
+        Some(Ok(result))
     }
 
     /// Layer B — composed-Cow Stage chain runner.
@@ -3782,6 +3940,19 @@ fn eval_kernel_pred(
         | BodyKernel::Const(_) | BodyKernel::ObjProject(_)
         | BodyKernel::Arith(_, _, _) | BodyKernel::FString(_)
         | BodyKernel::Generic => None,
+    }
+}
+
+#[cfg(feature = "simd-json")]
+fn lit_to_tape_owned(v: &Val) -> Option<crate::composed::tape::TapeLitOwned> {
+    use crate::composed::tape::TapeLitOwned;
+    match v {
+        Val::Int(n)   => Some(TapeLitOwned::Int(*n)),
+        Val::Float(f) => Some(TapeLitOwned::Float(*f)),
+        Val::Str(s)   => Some(TapeLitOwned::Str(Arc::clone(s))),
+        Val::Bool(b)  => Some(TapeLitOwned::Bool(*b)),
+        Val::Null     => Some(TapeLitOwned::Null),
+        _ => None,
     }
 }
 
