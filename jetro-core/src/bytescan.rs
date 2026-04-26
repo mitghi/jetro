@@ -407,6 +407,101 @@ fn entry_extract_direct(
     Some(entry_end)
 }
 
+/// Schema-template walker: probes first row's key sequence, builds a
+/// `Vec<TplKey>` describing which keys map to wanted slots; subsequent
+/// rows walk keys IN ORDER and byte-cmp against template — no search.
+///
+/// Per-row cost: O(K) byte-eq compares + ~slots wanted parses.  vs
+/// memmem's O(K × wanted × entry_bytes).  ~10x cut on bench shapes
+/// where row arrays are homogeneous (the common case).
+///
+/// Falls back: if a row doesn't match template (shape divergence),
+/// caller re-runs `entry_extract_direct` on that row.
+struct Template {
+    /// Expected key bytes in order, each tagged with optional wanted slot.
+    keys: Vec<TplKey>,
+}
+
+struct TplKey {
+    /// Key bytes (without quotes).
+    name: Vec<u8>,
+    /// Wanted-slot index, or None if this key is to be skipped.
+    slot: Option<usize>,
+}
+
+/// Probe first row to build template.  Returns None if row shape
+/// can't be probed (malformed / not Object).
+fn build_template(
+    b: &[u8],
+    obj_start: usize,
+    wanted: &[&[u8]],
+) -> Option<(Template, usize)> {
+    if b.get(obj_start) != Some(&b'{') { return None; }
+    let mut i = obj_start + 1;
+    let mut keys: Vec<TplKey> = Vec::new();
+    loop {
+        i = skip_ws(b, i);
+        if i >= b.len() { return None; }
+        if b[i] == b'}' { return Some((Template { keys }, i + 1)); }
+        let (after_key, k) = read_string(b, i)?;
+        i = skip_ws(b, after_key);
+        if b.get(i) != Some(&b':') { return None; }
+        i = skip_ws(b, i + 1);
+        let mut slot: Option<usize> = None;
+        for (s, w) in wanted.iter().enumerate() {
+            if k == *w { slot = Some(s); break; }
+        }
+        keys.push(TplKey { name: k.to_vec(), slot });
+        i = skip_value(b, i)?;
+        i = skip_ws(b, i);
+        if i < b.len() && b[i] == b',' { i += 1; }
+    }
+}
+
+/// Walk row using template — assume key order matches.  Returns
+/// (entry_end, true) if template matched; (entry_end, false) if
+/// shape diverged (caller re-runs with entry_extract_direct).
+fn entry_extract_template(
+    b: &[u8],
+    obj_start: usize,
+    tpl: &Template,
+    slots: &mut Slots,
+    n_wanted: usize,
+) -> Option<(usize, bool)> {
+    if b.get(obj_start) != Some(&b'{') { return None; }
+    for s in slots.iter_mut().take(n_wanted) { *s = None; }
+    let mut i = obj_start + 1;
+    let mut tpl_idx = 0usize;
+    loop {
+        i = skip_ws(b, i);
+        if i >= b.len() { return None; }
+        if b[i] == b'}' {
+            return Some((i + 1, tpl_idx == tpl.keys.len()));
+        }
+        if tpl_idx >= tpl.keys.len() {
+            return Some((skip_value(b, obj_start)?, false));  // diverged
+        }
+        let (after_key, k) = read_string(b, i)?;
+        let expected = &tpl.keys[tpl_idx];
+        if k != expected.name.as_slice() {
+            return Some((skip_value(b, obj_start)?, false));
+        }
+        i = skip_ws(b, after_key);
+        if b.get(i) != Some(&b':') { return None; }
+        i = skip_ws(b, i + 1);
+        if let Some(slot) = expected.slot {
+            let (next, sc) = parse_primitive(b, i)?;
+            slots[slot] = Some(sc);
+            i = next;
+        } else {
+            i = skip_value(b, i)?;
+        }
+        i = skip_ws(b, i);
+        if i < b.len() && b[i] == b',' { i += 1; }
+        tpl_idx += 1;
+    }
+}
+
 // Aho-Corasick experiment removed — for typical 2-3 wanted-key counts
 // the per-row DFA traversal overhead exceeded the cost of N × direct
 // `memchr::memmem::find` calls.  AC wins for ~5+ needles; keep
@@ -893,8 +988,31 @@ fn scan_loop_num_filter_map(
     i = skip_ws(raw, i);
     let mut acc = Acc::new();
     let mut slots: Slots = [None; SCALAR_BUF_CAP];
+    let n_wanted = needles.len();
+
+    // Wanted-key bytes derived from needles (strip leading `"` + trailing `":`).
+    let wanted: Vec<&[u8]> = needles.iter().map(|n| {
+        // n = `"<key>":` → key bytes are n[1..n.len()-2]
+        &n[1..n.len() - 2]
+    }).collect();
+
+    // Probe first row for template.
+    if raw.get(i) == Some(&b']') { return Some(acc); }
+    let template = build_template(raw, i, &wanted);
+
     while i < raw.len() && raw[i] != b']' {
-        let next = entry_extract_direct(raw, i, needles, &mut slots)?;
+        let next = if let Some((tpl, _)) = template.as_ref() {
+            // Template-walker fast path.
+            match entry_extract_template(raw, i, tpl, &mut slots, n_wanted)? {
+                (n, true) => n,
+                (_, false) => {
+                    // Shape diverged — fall back to memmem-direct.
+                    entry_extract_direct(raw, i, needles, &mut slots)?
+                }
+            }
+        } else {
+            entry_extract_direct(raw, i, needles, &mut slots)?
+        };
         if check_filters(&slots, filters) && check_pred(slots[pred_slot], pred_cmp) {
             if let Some(v) = slots[map_slot] {
                 if !acc.push(v) { return None; }
