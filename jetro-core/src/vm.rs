@@ -370,12 +370,6 @@ pub enum Opcode {
     FindOne(Arc<Program>),
     /// Fused `map(f).sum()` — evaluates `f` per item, accumulates numeric sum.
     MapSum(Arc<Program>),
-    /// Fused `map(@.to_json()).join(sep)` — single-pass stringify + concat.
-    /// Skips the intermediate Vec<Val::Str> (N Arc allocations) and writes
-    /// each item's JSON form straight into one output buffer.  Columnar
-    /// receivers (`Val::IntVec` / `Val::FloatVec`) shortcut further via
-    /// native number-formatting in a tight loop.
-    MapToJsonJoin { sep_prog: Arc<Program> },
     /// Fused `.trim().upper()` — one allocation instead of two, ASCII fast-path.
     StrTrimUpper,
     /// Fused `.trim().lower()` — one allocation instead of two, ASCII fast-path.
@@ -1846,26 +1840,8 @@ impl Compiler {
                 // dedicated 3-way pass below via lookahead buffer.
                 // map(@.to_json()) + join(sep) → MapToJsonJoin { sep_prog }
                 // Body is one of:
-                //   [PushCurrent, CallMethod(ToJson, empty)]     — `@.to_json()`
-                //   [LoadIdent(_), CallMethod(ToJson, empty)]    — `lambda x: x.to_json()`
-                if a.method == BuiltinMethod::Map && a.sub_progs.len() == 1
-                   && b.method == BuiltinMethod::Join && b.sub_progs.len() == 1 {
-                    let body = &a.sub_progs[0].ops;
-                    let is_to_json_body = matches!(&body[..],
-                        [Opcode::PushCurrent, Opcode::CallMethod(c)]
-                            if c.method == BuiltinMethod::ToJson
-                               && c.sub_progs.is_empty())
-                        || matches!(&body[..],
-                        [Opcode::LoadIdent(_), Opcode::CallMethod(c)]
-                            if c.method == BuiltinMethod::ToJson
-                               && c.sub_progs.is_empty());
-                    if is_to_json_body {
-                        let sep_prog = Arc::clone(&b.sub_progs[0]);
-                        out.pop();
-                        out.push(Opcode::MapToJsonJoin { sep_prog });
-                        continue;
-                    }
-                }
+                // MapToJsonJoin fusion deleted — composed substrate
+                // handles map(@.to_json()).join(sep) via base CallMethod.
             }
             // map(@.replace(lit, lit))   or   map(@.replace_all(lit, lit))
             // → MapReplaceLit { needle, with, all } — single-op CallMethod.
@@ -3975,80 +3951,6 @@ impl VM {
                     }
                     stack.push(found);
                 }
-                Opcode::MapToJsonJoin { sep_prog } => {
-                    use std::fmt::Write as _;
-                    let recv = pop!(stack);
-                    let sep_val = self.exec(sep_prog, env)?;
-                    let sep: &str = match &sep_val {
-                        Val::Str(s) => s.as_ref(),
-                        _ => "",
-                    };
-                    // Columnar shortcut: IntVec / FloatVec -> tight
-                    // number-format loop without per-item Val alloc.
-                    match &recv {
-                        Val::IntVec(a) => {
-                            let mut out = String::with_capacity(a.len() * 6);
-                            let mut first = true;
-                            for n in a.iter() {
-                                if !first { out.push_str(sep); } first = false;
-                                let _ = write!(out, "{}", n);
-                            }
-                            stack.push(Val::Str(Arc::<str>::from(out)));
-                        }
-                        Val::FloatVec(a) => {
-                            let mut out = String::with_capacity(a.len() * 8);
-                            let mut first = true;
-                            for f in a.iter() {
-                                if !first { out.push_str(sep); } first = false;
-                                if f.is_finite() {
-                                    let v = serde_json::Value::from(*f);
-                                    out.push_str(&serde_json::to_string(&v).unwrap_or_default());
-                                } else {
-                                    out.push_str("null");
-                                }
-                            }
-                            stack.push(Val::Str(Arc::<str>::from(out)));
-                        }
-                        Val::Arr(a) => {
-                            let mut out = String::with_capacity(a.len() * 8);
-                            let mut first = true;
-                            for item in a.iter() {
-                                if !first { out.push_str(sep); } first = false;
-                                match item {
-                                    Val::Int(n)  => { let _ = write!(out, "{}", n); }
-                                    Val::Float(f) => {
-                                        if f.is_finite() {
-                                            let v = serde_json::Value::from(*f);
-                                            out.push_str(&serde_json::to_string(&v).unwrap_or_default());
-                                        } else { out.push_str("null"); }
-                                    }
-                                    Val::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
-                                    Val::Null    => out.push_str("null"),
-                                    Val::Str(s)  => {
-                                        let src = s.as_ref();
-                                        let mut needs_escape = false;
-                                        for &b in src.as_bytes() {
-                                            if b < 0x20 || b == b'"' || b == b'\\' { needs_escape = true; break; }
-                                        }
-                                        if !needs_escape {
-                                            out.push('"'); out.push_str(src); out.push('"');
-                                        } else {
-                                            let v = serde_json::Value::String(s.to_string());
-                                            out.push_str(&serde_json::to_string(&v).unwrap_or_default());
-                                        }
-                                    }
-                                    _ => {
-                                        let sv: serde_json::Value = item.clone().into();
-                                        out.push_str(&serde_json::to_string(&sv).unwrap_or_default());
-                                    }
-                                }
-                            }
-                            stack.push(Val::Str(Arc::<str>::from(out)));
-                        }
-                        _ => stack.push(Val::Str(Arc::<str>::from(""))),
-                    }
-                }
-                // ── Fused string-method chains ────────────────────────────────
                 Opcode::StrTrimUpper | Opcode::StrTrimLower => {
                     let v = pop!(stack);
                     let out = if let Val::Str(s) = &v {
