@@ -192,18 +192,6 @@ fn sink_name(s: &Sink) -> &'static str {
         Sink::Numeric(NumOp::Avg) => "avg",
         Sink::First => "first",
         Sink::Last => "last",
-        Sink::NumMap(_, _) => "num_map",
-        Sink::CountIf(_) => "count_if",
-        Sink::NumFilterMap(_, _, _) => "num_filter_map",
-        Sink::FilterFirst(_) => "filter_first",
-        Sink::FilterLast(_) => "filter_last",
-        Sink::FirstMap(_) => "first_map",
-        Sink::LastMap(_) => "last_map",
-        Sink::FlatMapCount(_) => "flat_map_count",
-        Sink::TopN { .. } => "top_n",
-        Sink::MinBy(_) => "min_by",
-        Sink::MaxBy(_) => "max_by",
-        Sink::UniqueCount => "unique_count",
     }
 }
 
@@ -698,11 +686,10 @@ impl NumOp {
 
 /// Where pipeline output lands.  Determines the result type.
 ///
-/// The fused variants (`NumMap`, `NumFilterMap`, `CountIf`,
-/// `FilterFirst`, `FilterLast`) are produced by the Phase 2 rewrite
-/// pass during lowering — collapsing adjacent `Map` / `Filter`
-/// stages plus the sink into a single inner-loop kernel that
-/// eliminates the per-row VM exec dispatch per stage.
+/// Single mechanism per terminal kind. Fused variants (NumMap,
+/// NumFilterMap, CountIf, etc.) deleted in Tier 3 — composed
+/// substrate + canonical view dispatch handle every chain shape via
+/// base form.
 #[derive(Debug, Clone)]
 pub enum Sink {
     /// Materialise every element into a `Val::Arr`.
@@ -716,39 +703,6 @@ pub enum Sink {
     /// `Val::Null`.
     First,
     Last,
-    /// `Map(prog) ∘ <sum/min/max/avg>`.  Inner loop computes `prog(@)`
-    /// and accumulates numerically; never materialises a Vec.
-    NumMap(NumOp, Arc<crate::vm::Program>),
-    /// `Filter(prog) ∘ Count`.  Inner loop runs `prog(@)`; counts truthy.
-    CountIf(Arc<crate::vm::Program>),
-    /// `Filter(pred) ∘ Map(f) ∘ <sum/min/max/avg>`.
-    NumFilterMap(NumOp, Arc<crate::vm::Program>, Arc<crate::vm::Program>),
-    /// `Filter(prog) ∘ First` — find first element where pred holds.
-    FilterFirst(Arc<crate::vm::Program>),
-    /// `Filter(prog) ∘ Last` — find last element where pred holds.
-    FilterLast(Arc<crate::vm::Program>),
-    /// `Map(prog) ∘ First` — first element after projection.
-    FirstMap(Arc<crate::vm::Program>),
-    /// `Map(prog) ∘ Last` — last element after projection.
-    LastMap(Arc<crate::vm::Program>),
-    /// `FlatMap(prog) ∘ Count` — count yielded inner elements without
-    /// materialising the flat sequence.  Closes pipeline_ir.md
-    /// bench-priority item #1 (`flat_map+filter+count` 44× gap).
-    FlatMapCount(Arc<crate::vm::Program>),
-    /// `Sort ∘ Take(n)` → top-N.  Heap-based partial sort: keeps the
-    /// k smallest items via a max-heap of size k.  Asymptotic cost
-    /// O(N log k) vs O(N log N) for full sort.  Per pipeline_ir.md.
-    /// `asc=true`  → smallest n  (natural ordering, default)
-    /// `asc=false` → largest n   (used by `Sort+Reverse+Take` after the
-    ///                            Reverse∘Reverse rule cancels)
-    TopN { n: usize, asc: bool, key: Option<Arc<crate::vm::Program>> },
-    /// `Sort_by(k) ∘ First` → keep argmin by key.  One pass, no full sort.
-    MinBy(Arc<crate::vm::Program>),
-    /// `Sort_by(k) ∘ Last` → keep argmax by key.
-    MaxBy(Arc<crate::vm::Program>),
-    /// `Unique ∘ Count` — count distinct elements via HashSet, no
-    /// intermediate dedup array materialised.
-    UniqueCount,
 }
 
 #[derive(Debug, Clone)]
@@ -925,17 +879,8 @@ impl Pipeline {
             Stage::Sort(Some(p))    => BodyKernel::classify(p),
             _                       => BodyKernel::Generic,
         }).collect();
-        p.sink_kernels = match &p.sink {
-            Sink::NumMap(_, p) | Sink::CountIf(p)
-            | Sink::FilterFirst(p) | Sink::FilterLast(p)
-            | Sink::FirstMap(p) | Sink::LastMap(p)
-            | Sink::FlatMapCount(p) | Sink::MinBy(p) | Sink::MaxBy(p) =>
-                vec![BodyKernel::classify(p)],
-            Sink::NumFilterMap(_, pred, map) =>
-                vec![BodyKernel::classify(pred), BodyKernel::classify(map)],
-            Sink::TopN { key: Some(k), .. } => vec![BodyKernel::classify(k)],
-            _ => Vec::new(),
-        };
+        // No fused-Sink kernels — base sinks have no sub-programs.
+        p.sink_kernels = Vec::new();
         Some(p)
     }
 }
@@ -1657,94 +1602,13 @@ impl Pipeline {
 
     /// Decompose any fused Sink into a base `(stages, kernels, sink)`
     /// triple. Pure function — does not mutate `self`. Lets every
-    /// downstream consumer (composed Val/tape runners, columnar fast
-    /// paths, bytescan) work on a single canonical view rather than
-    /// pattern-matching every fused variant separately.
-    ///
-    /// This is the bridge that makes the fused Sink variants
-    /// deletable: after every consumer migrates to `canonical()`, the
-    /// rewrite-time fusion can be turned off and the variants removed
-    /// without per-site sweeps.
+    /// Identity view — fused Sink variants deleted in Tier 3, so
+    /// every Pipeline is already in base form. Kept as a stable name
+    /// for downstream consumers (composed Val/tape runners, columnar
+    /// fast paths, bytescan) that built on the canonical-view
+    /// abstraction.
     pub fn canonical(&self) -> (Vec<Stage>, Vec<BodyKernel>, Sink) {
-        let mut stages = self.stages.clone();
-        let mut kernels = self.stage_kernels.clone();
-        let sink = match &self.sink {
-            Sink::NumMap(op, prog) => {
-                stages.push(Stage::Map(Arc::clone(prog)));
-                kernels.push(BodyKernel::classify(prog));
-                Sink::Numeric(*op)
-            }
-            Sink::NumFilterMap(op, pred, map) => {
-                stages.push(Stage::Filter(Arc::clone(pred)));
-                kernels.push(BodyKernel::classify(pred));
-                stages.push(Stage::Map(Arc::clone(map)));
-                kernels.push(BodyKernel::classify(map));
-                Sink::Numeric(*op)
-            }
-            Sink::CountIf(prog) => {
-                stages.push(Stage::Filter(Arc::clone(prog)));
-                kernels.push(BodyKernel::classify(prog));
-                Sink::Count
-            }
-            Sink::FilterFirst(prog) => {
-                stages.push(Stage::Filter(Arc::clone(prog)));
-                kernels.push(BodyKernel::classify(prog));
-                Sink::First
-            }
-            Sink::FilterLast(prog) => {
-                stages.push(Stage::Filter(Arc::clone(prog)));
-                kernels.push(BodyKernel::classify(prog));
-                Sink::Last
-            }
-            Sink::FirstMap(prog) => {
-                stages.push(Stage::Map(Arc::clone(prog)));
-                kernels.push(BodyKernel::classify(prog));
-                Sink::First
-            }
-            Sink::LastMap(prog) => {
-                stages.push(Stage::Map(Arc::clone(prog)));
-                kernels.push(BodyKernel::classify(prog));
-                Sink::Last
-            }
-            Sink::FlatMapCount(prog) => {
-                stages.push(Stage::FlatMap(Arc::clone(prog)));
-                kernels.push(BodyKernel::classify(prog));
-                Sink::Count
-            }
-            Sink::UniqueCount => {
-                stages.push(Stage::UniqueBy(None));
-                kernels.push(BodyKernel::Generic);
-                Sink::Count
-            }
-            Sink::MinBy(key) => {
-                stages.push(Stage::Sort(Some(Arc::clone(key))));
-                kernels.push(BodyKernel::classify(key));
-                Sink::First
-            }
-            Sink::MaxBy(key) => {
-                stages.push(Stage::Sort(Some(Arc::clone(key))));
-                kernels.push(BodyKernel::classify(key));
-                Sink::Last
-            }
-            Sink::TopN { n, asc, key } => {
-                if let Some(k) = key {
-                    stages.push(Stage::Sort(Some(Arc::clone(k))));
-                    kernels.push(BodyKernel::classify(k));
-                } else {
-                    stages.push(Stage::Sort(None));
-                    kernels.push(BodyKernel::Generic);
-                }
-                if !*asc {
-                    stages.push(Stage::Reverse);
-                    kernels.push(BodyKernel::Generic);
-                }
-                stages.push(Stage::Take(*n));
-                kernels.push(BodyKernel::Generic);
-                Sink::Collect
-            }
-            base => base.clone(),
-        };
-        (stages, kernels, sink)
+        (self.stages.clone(), self.stage_kernels.clone(), self.sink.clone())
     }
 
     /// Step 3c — composed-tape runner. Decomposes fused Sinks at entry
@@ -2305,20 +2169,6 @@ impl Pipeline {
                 }
                 Sink::First => { if acc_first.is_none() { acc_first = Some(item.clone()); } }
                 Sink::Last  => { acc_last = Some(item.clone()); }
-                // Fused Sink variants — unreachable post fusion-off.
-                Sink::CountIf(_)        |
-                Sink::FlatMapCount(_)   |
-                Sink::NumMap(_, _)      |
-                Sink::NumFilterMap(_, _, _) |
-                Sink::FilterFirst(_)    |
-                Sink::FirstMap(_)       |
-                Sink::FilterLast(_)     |
-                Sink::LastMap(_)        |
-                Sink::TopN { .. }       |
-                Sink::MinBy(_)          |
-                Sink::MaxBy(_)          |
-                Sink::UniqueCount       =>
-                    unreachable!("fused Sink variant unreachable post fusion-off"),
             }
             taken += 1;
         }
@@ -2346,20 +2196,6 @@ impl Pipeline {
                 acc_first.unwrap_or(Val::Null),
             Sink::Last =>
                 acc_last.unwrap_or(Val::Null),
-            // Fused Sink variants — unreachable post fusion-off.
-            Sink::CountIf(_)        |
-            Sink::FlatMapCount(_)   |
-            Sink::NumMap(_, _)      |
-            Sink::NumFilterMap(_, _, _) |
-            Sink::FilterFirst(_)    |
-            Sink::FirstMap(_)       |
-            Sink::FilterLast(_)     |
-            Sink::LastMap(_)        |
-            Sink::TopN { .. }       |
-            Sink::MinBy(_)          |
-            Sink::MaxBy(_)          |
-            Sink::UniqueCount       =>
-                unreachable!("fused Sink variant unreachable post fusion-off"),
         })
     }
 }
@@ -3327,18 +3163,8 @@ mod tests {
         assert!(matches!(p.sink, Sink::Collect));
     }
 
-    #[test]
-    fn lower_filter_map_count() {
-        if skip_under_composed() { return; }
-        // Rewrite collapses:
-        //   Map(id) ∘ Count → Count   (drop pure Map before Count)
-        //   Filter(total>100) ∘ Count → CountIf(total>100)
-        // so the lowered pipeline ends up with zero stages and a
-        // CountIf sink.
-        let p = lower_query("$.orders.filter(total > 100).map(id).count()").unwrap();
-        assert_eq!(p.stages.len(), 0);
-        assert!(matches!(p.sink, Sink::CountIf(_)));
-    }
+    // `lower_filter_map_count` removed — fused Sink::CountIf variant
+    // deleted in Tier 3. Lowered shape is now [Filter] + Sink::Count.
 
     #[test]
     fn lower_take_skip_sum() {
@@ -3365,32 +3191,8 @@ mod tests {
         eprintln!("PRED OPS = {:#?}", prog.ops);
     }
 
-    #[test]
-    fn debug_compound_pipeline_lower() {
-        let q = r#"$.orders.filter(status == "shipped" and priority == "high").count()"#;
-        let expr = crate::parser::parse(q).unwrap();
-        let p = Pipeline::lower(&expr).unwrap();
-        eprintln!("STAGES = {}", p.stages.len());
-        match &p.sink {
-            Sink::CountIf(prog) => eprintln!("PRED OPS = {:#?}", prog.ops),
-            other => eprintln!("SINK = {:?}", std::any::type_name_of_val(other)),
-        }
-    }
-
-    #[test]
-    fn debug_full_pipeline_lower() {
-        let expr = crate::parser::parse("$.orders.filter(total > 100).map(total).sum()").unwrap();
-        let p = Pipeline::lower(&expr).unwrap();
-        match &p.source { Source::FieldChain { keys } => eprintln!("KEYS = {:?}", keys), _ => {} }
-        eprintln!("STAGES = {}", p.stages.len());
-        match &p.sink {
-            Sink::NumFilterMap(_, pred, map) => {
-                eprintln!("PRED OPS = {:#?}", pred.ops);
-                eprintln!("MAP OPS = {:#?}", map.ops);
-            }
-            other => eprintln!("SINK = {:?}", std::any::type_name_of_val(other)),
-        }
-    }
+    // `debug_compound_pipeline_lower` and `debug_full_pipeline_lower`
+    // removed — referenced fused Sink::CountIf / Sink::NumFilterMap.
 
     #[test]
     fn run_count_on_simple_array() {
@@ -3459,41 +3261,9 @@ mod tests {
         assert!(matches!(p.sink, Sink::Count));
     }
 
-    #[test]
-    fn rewrite_take_after_map_pushdown() {
-        if skip_under_composed() { return; }
-        let p = lower_query("$.xs.map(@ * 2).take(3).sum()").unwrap();
-        // After pushdown: [Take(3), Map].  After Map+Sum fusion the
-        // Map stage moves into the sink → stages = [Take(3)] +
-        // SumMap sink.
-        assert_eq!(p.stages.len(), 1);
-        assert!(matches!(p.stages[0], Stage::Take(3)));
-        assert!(matches!(p.sink, Sink::NumMap(NumOp::Sum, _)));
-    }
-
-    #[test]
-    fn rewrite_sort_take_to_topn() {
-        if skip_under_composed() { return; }
-        let p = lower_query("$.xs.sort().take(3)").unwrap();
-        assert_eq!(p.stages.len(), 0);
-        assert!(matches!(p.sink, Sink::TopN { n: 3, asc: true, key: None }));
-    }
-
-    #[test]
-    fn rewrite_sort_by_first_to_minby() {
-        if skip_under_composed() { return; }
-        let p = lower_query("$.xs.sort_by(score).first()").unwrap();
-        assert_eq!(p.stages.len(), 0);
-        assert!(matches!(p.sink, Sink::MinBy(_)));
-    }
-
-    #[test]
-    fn rewrite_sort_by_last_to_maxby() {
-        if skip_under_composed() { return; }
-        let p = lower_query("$.xs.sort_by(score).last()").unwrap();
-        assert_eq!(p.stages.len(), 0);
-        assert!(matches!(p.sink, Sink::MaxBy(_)));
-    }
+    // `rewrite_take_after_map_pushdown`, `rewrite_sort_take_to_topn`,
+    // `rewrite_sort_by_first_to_minby`, `rewrite_sort_by_last_to_maxby`
+    // removed — fused Sink::NumMap/TopN/MinBy/MaxBy variants deleted.
 
     #[test]
     fn run_topn_smallest_three() {
