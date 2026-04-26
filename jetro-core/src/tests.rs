@@ -1395,24 +1395,9 @@ mod tests {
         assert!(escapes_doc(&p));
     }
 
-    #[test]
-    fn fusion_map_sum_opcode() {
-        use crate::vm::{Compiler, Opcode};
-        let prog = Compiler::compile_str("$.books.map(@.price).sum()").unwrap();
-        // MapFieldSum migrated to pipeline.rs; opcode path keeps
-        // unfused MapSum which is the post-migration fallback for
-        // sub-program / non-Root chains.
-        let has = prog.ops.iter().any(|o| matches!(o, Opcode::MapSum(_)));
-        assert!(has, "map+sum should fuse to MapSum");
-    }
-
-    #[test]
-    fn fusion_map_avg_opcode() {
-        use crate::vm::{Compiler, Opcode};
-        let prog = Compiler::compile_str("$.books.map(@.price).avg()").unwrap();
-        let has = prog.ops.iter().any(|o| matches!(o, Opcode::MapAvg(_)));
-        assert!(has, "map+avg should fuse to MapAvg");
-    }
+    // `fusion_map_sum_opcode` / `fusion_map_avg_opcode` removed —
+    // VM peephole fusion gated off in Tier 3; map+sum/avg lowers via
+    // pipeline composed substrate, not fused MapSum/MapAvg opcodes.
 
     #[test]
     fn fusion_filter_first_opcode() {
@@ -1479,21 +1464,8 @@ mod tests {
         assert_eq!(fused, plain);
     }
 
-    #[test]
-    fn fusion_map_first_opcode() {
-        use crate::vm::{Compiler, Opcode};
-        let prog = Compiler::compile_str("$.books.map(@.price).first()").unwrap();
-        let has = prog.ops.iter().any(|o| matches!(o, Opcode::MapFirst(_)));
-        assert!(has, "map+first should fuse to MapFirst");
-    }
-
-    #[test]
-    fn fusion_map_last_opcode() {
-        use crate::vm::{Compiler, Opcode};
-        let prog = Compiler::compile_str("$.books.map(@.price).last()").unwrap();
-        let has = prog.ops.iter().any(|o| matches!(o, Opcode::MapLast(_)));
-        assert!(has, "map+last should fuse to MapLast");
-    }
+    // `fusion_map_first_opcode` / `fusion_map_last_opcode` removed —
+    // VM peephole fusion gated off in Tier 3.
 
     #[test]
     fn fusion_map_first_last_semantics() {

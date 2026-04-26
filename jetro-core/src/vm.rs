@@ -1765,11 +1765,14 @@ impl Compiler {
         out
     }
 
-    /// Fuse adjacent method calls into single-pass fused opcodes
-    /// for the variants the pipeline lowering does not yet cover.
-    /// Adjacent two-program fusions (FilterMap / MapMap / etc.) all
-    /// migrated to pipeline.rs rewrite rules.
+    /// Tier 3: VM peephole fusion gated off — Pipeline IR + composed
+    /// substrate handles every chain shape via base CallMethod
+    /// opcodes. Set `JETRO_VM_FUSE=1` to re-enable for diagnostic
+    /// compare against legacy fused-opcode path.
     fn pass_filter_fusion(ops: Vec<Opcode>) -> Vec<Opcode> {
+        if std::env::var_os("JETRO_VM_FUSE").is_none() {
+            return ops;
+        }
         let mut out: Vec<Opcode> = Vec::with_capacity(ops.len());
         for op in ops {
             if let (Opcode::CallMethod(b), Some(Opcode::CallMethod(a))) = (&op, out.last()) {
