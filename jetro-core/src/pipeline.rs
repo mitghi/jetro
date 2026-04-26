@@ -644,11 +644,33 @@ fn classify_obj_project(
 ///   `[<path-load>, CallMethod(Len, [])]` -> InnerLen
 ///   `[<path-load>, MapSum(<inner-prog>)]` -> InnerMapSum
 /// where <path-load> is LoadIdent / GetField / FieldChain (single op).
+///
+/// Also handles plain multi-step path projections: when the prog
+/// classifies via `BodyKernel::classify` to a `FieldRead` or
+/// `FieldChain` kernel, emit it as `ObjProjEntry::Path` with the
+/// resolved chain.  This unlocks `name: user.name` style entries
+/// inside `{id, name: user.name, score}` shape projections — which
+/// otherwise fall through to Generic and bypass byte-friendly
+/// classification entirely.
 fn classify_kv_method(
     key: &Arc<str>,
     prog: &crate::vm::Program,
 ) -> Option<ObjProjEntry> {
     use crate::vm::{Opcode, BuiltinMethod};
+    // Path projection shortcut — covers any prog that classifies as
+    // a pure path read.  Wraps the chain into ObjProjEntry::Path.
+    match BodyKernel::classify(prog) {
+        BodyKernel::FieldRead(name) => {
+            return Some(ObjProjEntry::Path {
+                key: key.clone(),
+                path: Arc::from(vec![name].into_boxed_slice()),
+            });
+        }
+        BodyKernel::FieldChain(keys) => {
+            return Some(ObjProjEntry::Path { key: key.clone(), path: keys });
+        }
+        _ => {}
+    }
     let ops = prog.ops.as_ref();
     if ops.len() != 2 { return None; }
     let path: Arc<[Arc<str>]> = match &ops[0] {

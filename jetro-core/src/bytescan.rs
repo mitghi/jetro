@@ -48,28 +48,36 @@ pub fn try_run(p: &Pipeline, raw_bytes: &[u8]) -> Option<Result<Val, EvalError>>
     // a per-row dedup; treat the stage *before* it as the trailing
     // Map for projection purposes.
     let stage_count = p.stages.len();
-    let last_is_unique = matches!(p.stages.last(), Some(Stage::UniqueBy(None)));
+    // Heap-top-K detection: leading `[Sort(Some), Take(k)]` plus
+    // optional trailing Map projection, terminating in Collect.
+    // Pure ordering pattern — no Filter/Skip mixed in for now.  When
+    // matched, dispatches the heap walker after the early-exit + skip
+    // path acceptance logic skips this leg.
+    let heap_top_k = detect_heap_top_k(&p.stages, &p.stage_kernels, &p.sink);
+    let last_is_unique = heap_top_k.is_none() && matches!(p.stages.last(), Some(Stage::UniqueBy(None)));
     let last_payload_idx = if last_is_unique { stage_count.saturating_sub(1) } else { stage_count };
-    for (idx, (st, k)) in p.stages.iter().zip(p.stage_kernels.iter()).enumerate() {
-        match st {
-            Stage::Filter(_) => {
-                if !is_pred_kernel(k) { return None; }
-            }
-            Stage::Skip(_) | Stage::Take(_) => {}
-            Stage::Map(_) if last_payload_idx > 0 && idx == last_payload_idx - 1 => {
-                match k {
-                    BodyKernel::FieldRead(_) => {}
-                    BodyKernel::FieldChain(_) => {}
-                    BodyKernel::ObjProject(entries) => {
-                        if !objproject_is_byte_friendly(entries) { return None; }
-                    }
-                    _ => return None,
+    if heap_top_k.is_none() {
+        for (idx, (st, k)) in p.stages.iter().zip(p.stage_kernels.iter()).enumerate() {
+            match st {
+                Stage::Filter(_) => {
+                    if !is_pred_kernel(k) { return None; }
                 }
+                Stage::Skip(_) | Stage::Take(_) => {}
+                Stage::Map(_) if last_payload_idx > 0 && idx == last_payload_idx - 1 => {
+                    match k {
+                        BodyKernel::FieldRead(_) => {}
+                        BodyKernel::FieldChain(_) => {}
+                        BodyKernel::ObjProject(entries) => {
+                            if !objproject_is_byte_friendly(entries) { return None; }
+                        }
+                        _ => return None,
+                    }
+                }
+                Stage::UniqueBy(None) if idx == stage_count - 1 => {
+                    if !matches!(p.sink, Sink::Collect) { return None; }
+                }
+                _ => return None,
             }
-            Stage::UniqueBy(None) if idx == stage_count - 1 => {
-                if !matches!(p.sink, Sink::Collect) { return None; }
-            }
-            _ => return None,
         }
     }
     // Build wanted-fields catalog from kernels.  Cap field-name uniqueness
@@ -77,24 +85,226 @@ pub fn try_run(p: &Pipeline, raw_bytes: &[u8]) -> Option<Result<Val, EvalError>>
     // Skip/Take stages don't extract per-row fields — those are
     // navigation-only and skipped here.
     let mut catalog: Catalog = Catalog::default();
-    for (st, k) in p.stages.iter().zip(p.stage_kernels.iter()) {
-        match st {
-            // Navigation-only stages carry a Generic kernel by
-            // convention; they don't contribute to the per-row
-            // catalog.  Skipping here avoids the Generic-rejection
-            // in collect_paths.
-            Stage::Skip(_) | Stage::Take(_) | Stage::UniqueBy(None) => continue,
-            _ => {}
+    if let Some(htk) = &heap_top_k {
+        // Heap path: register sort key + projection paths only;
+        // Sort/Take/Map stages are consumed by the heap walker.
+        catalog.slot_for_chain(&htk.sort_key);
+        if let Some(proj) = &htk.proj_kernel {
+            collect_paths(proj, &mut catalog)?;
         }
-        collect_paths(k, &mut catalog)?;
+    } else {
+        for (st, k) in p.stages.iter().zip(p.stage_kernels.iter()) {
+            match st {
+                Stage::Skip(_) | Stage::Take(_) | Stage::UniqueBy(None) => continue,
+                _ => {}
+            }
+            collect_paths(k, &mut catalog)?;
+        }
+        for k in p.sink_kernels.iter() { collect_paths(k, &mut catalog)?; }
     }
-    for k in p.sink_kernels.iter() { collect_paths(k, &mut catalog)?; }
 
     // Locate source array byte position.
     let arr_start = walk_chain_to_array(raw_bytes, &chain)?;
 
-    // Run sink-driven generic walker.
+    if let Some(htk) = heap_top_k {
+        return run_heap_top_k(&htk, &catalog, raw_bytes, arr_start);
+    }
     run_with_sink(p, &catalog, raw_bytes, arr_start, last_is_unique)
+}
+
+/// Heap-top-K shape — picks `k` rows ordered by a path key, optionally
+/// applies a single trailing Map projection.  Eligible Pipeline shape:
+///   `[Sort(Some(...)), Take(k)]` or `[Sort(Some(...)), Take(k), Map]`
+///   terminated by `Sink::Collect`.
+struct HeapTopK {
+    k: usize,
+    sort_key: Vec<Arc<str>>,
+    /// `true` iff the sort program is `0 - <path>` (descending).
+    descending: bool,
+    /// Trailing Map kernel (projection) — when None, output rows are
+    /// the full row Object materialised via simd-json.
+    proj_kernel: Option<BodyKernel>,
+}
+
+fn detect_heap_top_k(
+    stages: &[Stage],
+    kernels: &[BodyKernel],
+    sink: &Sink,
+) -> Option<HeapTopK> {
+    if !matches!(sink, Sink::Collect) { return None; }
+    if stages.len() < 2 { return None; }
+    if !matches!(stages[0], Stage::Sort(Some(_))) { return None; }
+    let k = match stages[1] { Stage::Take(n) => n, _ => return None };
+    // Shape must terminate at Take or [Take, Map].
+    let proj_kernel: Option<BodyKernel> = match stages.len() {
+        2 => None,
+        3 => match (&stages[2], kernels.get(2)) {
+            (Stage::Map(_), Some(k @ BodyKernel::FieldRead(_))) => Some(k.clone()),
+            (Stage::Map(_), Some(k @ BodyKernel::FieldChain(_))) => Some(k.clone()),
+            (Stage::Map(_), Some(k @ BodyKernel::ObjProject(entries)))
+                if objproject_is_byte_friendly(entries) => Some(k.clone()),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    // Sort kernel must be path-based: either FieldRead/FieldChain
+    // (ascending) or Arith(0, Sub, Path) (descending).  Other shapes
+    // (computed expressions) defer to tape.
+    let (sort_key, descending) = match kernels.first()? {
+        BodyKernel::FieldRead(name) => (vec![Arc::clone(name)], false),
+        BodyKernel::FieldChain(keys) => (keys.iter().map(Arc::clone).collect(), false),
+        BodyKernel::Arith(ArithOperand::LitInt(0), crate::pipeline::ArithOp::Sub, ArithOperand::Path(p)) =>
+            (p.iter().map(Arc::clone).collect(), true),
+        _ => return None,
+    };
+    Some(HeapTopK { k, sort_key, descending, proj_kernel })
+}
+
+/// Heap-top-K byte walker.  One pass over the source array; per row
+/// extract the sort-key scalar; maintain a min-heap of size K (max-
+/// heap when descending) keyed by the sort-key.  At end, drain heap
+/// in reverse to produce the K elements in the requested order, each
+/// projected via `proj_kernel` (or full row when None).
+fn run_heap_top_k(
+    htk: &HeapTopK,
+    cat: &Catalog,
+    raw: &[u8],
+    arr_start: usize,
+) -> Option<Result<Val, EvalError>> {
+    use std::collections::BinaryHeap;
+    use std::cmp::Reverse;
+
+    if cat.n_slots() > SCALAR_BUF_CAP { return None; }
+    let wanted: Vec<&[u8]> = cat.top_keys.iter().map(|f| f.as_bytes()).collect();
+    let needles_owned: Vec<Vec<u8>> = build_needles(&wanted);
+    let needles: Vec<&[u8]> = needles_owned.iter().map(|n| n.as_slice()).collect();
+
+    let sort_slot = cat.slot_lookup_chain(&htk.sort_key)?;
+    let map_kind = build_map_kind(htk.proj_kernel.as_ref(), cat)?;
+
+    if htk.k == 0 { return Some(Ok(Val::arr(Vec::new()))); }
+
+    // Heap stores `(OrdKey, seq, val_idx)` keyed by sort-key + insert
+    // sequence (stable for ties).  Val payload lives in a side Vec
+    // indexed by `val_idx` to keep `Val` out of the heap (Val isn't
+    // Ord by design).  Capped at K — pop when over.
+    let mut store: Vec<Val> = Vec::with_capacity(htk.k);
+    let mut asc_heap: BinaryHeap<(OrdKey, Reverse<u64>, u32)> = BinaryHeap::new();
+    let mut desc_heap: BinaryHeap<(Reverse<OrdKey>, Reverse<u64>, u32)> = BinaryHeap::new();
+    let mut seq: u64 = 0;
+
+    let mut row_fn = |slots: &Slots, span: RowSpan| -> Option<ScanCtl> {
+        let key = match slots[sort_slot] {
+            Some(sc) => OrdKey::from_scalar(raw, sc),
+            None => OrdKey::Nullish,
+        };
+        let v = build_row_val(raw, slots, span, &map_kind)?;
+        seq += 1;
+        if htk.descending {
+            // Want largest K.  Min-heap on plain OrdKey: heap top is
+            // the SMALLEST of the kept set; pop when over cap.
+            if desc_heap.len() < htk.k {
+                let idx = store.len() as u32;
+                store.push(v);
+                desc_heap.push((Reverse(key), Reverse(seq), idx));
+            } else if let Some(top) = desc_heap.peek() {
+                if key > (top.0).0 {
+                    let idx = (top.2) as usize;
+                    store[idx] = v;
+                    let new_idx = top.2;
+                    desc_heap.pop();
+                    desc_heap.push((Reverse(key), Reverse(seq), new_idx));
+                }
+            }
+        } else {
+            // Want smallest K.  Max-heap on plain OrdKey via Reverse;
+            // heap top is the LARGEST of the kept set.
+            if asc_heap.len() < htk.k {
+                let idx = store.len() as u32;
+                store.push(v);
+                asc_heap.push((key, Reverse(seq), idx));
+            } else if let Some(top) = asc_heap.peek() {
+                if key < top.0 {
+                    let idx = (top.2) as usize;
+                    store[idx] = v;
+                    let new_idx = top.2;
+                    asc_heap.pop();
+                    asc_heap.push((key, Reverse(seq), new_idx));
+                }
+            }
+        }
+        Some(ScanCtl::Continue)
+    };
+    scan_loop_prcf(raw, arr_start, &needles, cat, &[], &mut row_fn)?;
+
+    // Drain heap into a sorted Vec preserving insertion order on ties.
+    let mut out: Vec<Val> = Vec::with_capacity(if htk.descending { desc_heap.len() } else { asc_heap.len() });
+    if htk.descending {
+        let mut entries: Vec<(OrdKey, u64, u32)> = desc_heap.into_iter()
+            .map(|(Reverse(k), Reverse(s), i)| (k, s, i)).collect();
+        entries.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        for (_, _, i) in entries {
+            out.push(std::mem::replace(&mut store[i as usize], Val::Null));
+        }
+    } else {
+        let mut entries: Vec<(OrdKey, u64, u32)> = asc_heap.into_iter()
+            .map(|(k, Reverse(s), i)| (k, s, i)).collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        for (_, _, i) in entries {
+            out.push(std::mem::replace(&mut store[i as usize], Val::Null));
+        }
+    }
+    Some(Ok(Val::arr(out)))
+}
+
+/// Order-comparable key for heap-top-K.  Numerics compare numerically;
+/// strings compare lexicographically by raw bytes.  Mixed types order
+/// by tag discriminant (deterministic but not semantically meaningful;
+/// real-world queries sort over a single typed column).
+#[derive(Clone)]
+enum OrdKey {
+    Int(i64),
+    Float(f64),
+    Bytes(Vec<u8>),
+    Bool(bool),
+    Nullish,
+}
+
+impl OrdKey {
+    fn from_scalar(raw: &[u8], s: Scalar) -> Self {
+        match s {
+            Scalar::Int(n) => OrdKey::Int(n),
+            Scalar::Float(f) => OrdKey::Float(f),
+            Scalar::StrRange(s, e) => OrdKey::Bytes(raw[s as usize..e as usize].to_vec()),
+            Scalar::Bool(b) => OrdKey::Bool(b),
+            Scalar::Null | Scalar::Missing | Scalar::ObjRange(_, _) => OrdKey::Nullish,
+        }
+    }
+    fn tag(&self) -> u8 {
+        match self {
+            OrdKey::Nullish => 0, OrdKey::Bool(_) => 1, OrdKey::Int(_) => 2,
+            OrdKey::Float(_) => 3, OrdKey::Bytes(_) => 4,
+        }
+    }
+}
+
+impl PartialEq for OrdKey { fn eq(&self, o: &Self) -> bool { self.cmp(o) == std::cmp::Ordering::Equal } }
+impl Eq for OrdKey {}
+impl PartialOrd for OrdKey { fn partial_cmp(&self, o: &Self) -> Option<std::cmp::Ordering> { Some(self.cmp(o)) } }
+impl Ord for OrdKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        match (self, other) {
+            (OrdKey::Int(a), OrdKey::Int(b)) => a.cmp(b),
+            (OrdKey::Float(a), OrdKey::Float(b)) => a.partial_cmp(b).unwrap_or(Ordering::Equal),
+            (OrdKey::Int(a), OrdKey::Float(b)) => (*a as f64).partial_cmp(b).unwrap_or(Ordering::Equal),
+            (OrdKey::Float(a), OrdKey::Int(b)) => a.partial_cmp(&(*b as f64)).unwrap_or(Ordering::Equal),
+            (OrdKey::Bytes(a), OrdKey::Bytes(b)) => a.cmp(b),
+            (OrdKey::Bool(a), OrdKey::Bool(b)) => a.cmp(b),
+            (OrdKey::Nullish, OrdKey::Nullish) => Ordering::Equal,
+            (a, b) => a.tag().cmp(&b.tag()),
+        }
+    }
 }
 
 // ── Path catalog ───────────────────────────────────────────────────
@@ -206,11 +416,11 @@ fn collect_paths(k: &BodyKernel, cat: &mut Catalog) -> Option<()> {
     }
 }
 
-/// True iff every ObjProject entry is a single-step Path projection.
+/// True iff every ObjProject entry is a Path projection.  Path
+/// length unrestricted — multi-step paths resolve through the
+/// catalog's chain-resolution post-extract.
 fn objproject_is_byte_friendly(entries: &[ObjProjEntry]) -> bool {
-    entries.iter().all(|e| matches!(e,
-        ObjProjEntry::Path { path, .. } if path.len() == 1
-    ))
+    entries.iter().all(|e| matches!(e, ObjProjEntry::Path { .. }))
 }
 
 fn collect_arith(op: &ArithOperand, cat: &mut Catalog) -> Option<()> {
