@@ -108,6 +108,32 @@ impl Identity {
     pub fn new() -> Self { Self }
 }
 
+/// Closure-based `.filter(pred)` — for the borrow runner where the
+/// predicate is built from a kernel at lowering time (FieldCmpLit etc.
+/// → owned literal compare).  composed.rs's `GenericFilter` uses VM
+/// dispatch and only impls owned `Stage`; this `Filter` is closure-
+/// based and impls both `unified::Stage<R>` (any substrate) and the
+/// owned `Stage` (R = `&Val` adapter).
+pub struct Filter<R, F: Fn(&R) -> bool> {
+    pub pred: F,
+    _marker: std::marker::PhantomData<fn(R)>,
+}
+impl<R, F: Fn(&R) -> bool> Filter<R, F> {
+    pub fn new(pred: F) -> Self {
+        Self { pred, _marker: std::marker::PhantomData }
+    }
+}
+impl<R, F: Fn(&R) -> bool> crate::unified::Stage<R> for Filter<R, F> {
+    #[inline]
+    fn apply(&self, x: R) -> crate::unified::StageOutputU<R> {
+        if (self.pred)(&x) {
+            crate::unified::StageOutputU::Pass(x)
+        } else {
+            crate::unified::StageOutputU::Filtered
+        }
+    }
+}
+
 impl Default for Identity {
     fn default() -> Self { Self }
 }

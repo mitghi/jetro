@@ -65,29 +65,13 @@ impl<R, T: Stage<R> + ?Sized> Stage<R> for Box<T> {
 // module's `Stage<R>` (borrow), per pipeline_unification.
 pub use crate::composed::{Identity, Composed};
 
-// ── Stages ──────────────────────────────────────────────────────────
-
-pub struct Filter<R, F: Fn(&R) -> bool> {
-    pub pred: F,
-    _marker: std::marker::PhantomData<fn(R)>,
-}
-impl<R, F: Fn(&R) -> bool> Filter<R, F> {
-    pub fn new(pred: F) -> Self { Self { pred, _marker: std::marker::PhantomData } }
-}
-impl<R, F: Fn(&R) -> bool> Stage<R> for Filter<R, F> {
-    #[inline]
-    fn apply(&self, x: R) -> StageOutputU<R> {
-        if (self.pred)(&x) { StageOutputU::Pass(x) } else { StageOutputU::Filtered }
-    }
-}
-
-// Re-exports of stage structs that live in composed.rs.  ONE struct
-// per stage; both the owned `composed::Stage` trait and this module's
-// substrate-generic `Stage<R>` trait are implemented over the same
-// type (see "Bridge" section at end of composed.rs).  Per
-// pipeline_unification: stages are not duplicated — they have ONE
-// definition with TWO trait impls.
+// Re-exports — ALL stages live in composed.rs.  Filter is closure-
+// based and only impls unified::Stage<R> (no owned twin — composed.rs's
+// GenericFilter is the VM-driven owned counterpart).  Other stages have
+// dual impls (owned + borrow).  Per pipeline_unification: stages are
+// not duplicated — one definition per type, multiple trait impls.
 pub use crate::composed::{
+    Filter,
     MapField, MapFieldChain, FlatMapField, FlatMapFieldChain,
     Take, Skip,
 };
