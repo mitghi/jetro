@@ -2777,28 +2777,19 @@ impl Pipeline {
                     }
                     Stage::Split(sep) => {
                         // Step 3d-extension (C): Expanding string Stage.
-                        // Each input string yields one element per
-                        // separator-delimited segment.
                         let mut out: Vec<Val> = Vec::with_capacity(buf.len());
                         for v in buf.into_iter() {
-                            if let Val::Str(s) = &v {
-                                for part in s.as_ref().split(sep.as_ref()) {
-                                    out.push(Val::Str(Arc::<str>::from(part)));
-                                }
+                            if let Some(Val::Arr(a)) = split_apply(&v, sep.as_ref()) {
+                                out.extend(Arc::try_unwrap(a)
+                                    .unwrap_or_else(|a| (*a).clone()));
                             }
                         }
                         buf = out;
                     }
                     Stage::Slice(start, end) => {
-                        // 1:1 string slice with i64 bounds; negative
-                        // indexes count from end.
                         let mut out: Vec<Val> = Vec::with_capacity(buf.len());
                         for v in buf.into_iter() {
-                            if let Val::Str(s) = &v {
-                                out.push(Val::Str(slice_str(s, *start, *end)));
-                            } else {
-                                out.push(v);
-                            }
+                            out.push(slice_apply(v, *start, *end));
                         }
                         buf = out;
                     }
@@ -2836,9 +2827,7 @@ impl Pipeline {
                         | Stage::FlatMap(_) | Stage::GroupBy(_) => {}
                         Stage::Split(_) => {} // forced into barrier path above
                         Stage::Slice(start, end) => {
-                            if let Val::Str(s) = &item {
-                                item = Val::Str(slice_str(s, *start, *end));
-                            }
+                            item = slice_apply(item, *start, *end);
                         }
                     }
                 }
@@ -2886,42 +2875,68 @@ impl Pipeline {
     }
 }
 
-/// Step 3d-extension (C): byte-level slice for `Stage::Slice`.  Negative
-/// indexes count from the end (Python slice semantics); `end=None` means
-/// "to end".  ASCII fast path; falls back to char-indices for non-ASCII.
-fn slice_str(s: &Arc<str>, start: i64, end: Option<i64>) -> Arc<str> {
-    let src = s.as_ref();
-    if src.is_ascii() {
-        let blen = src.len();
-        let start_u = if start < 0 {
-            blen.saturating_sub((-start) as usize)
-        } else {
-            (start as usize).min(blen)
-        };
+/// Canonical `.slice(start[, end])` impl shared by `Stage::Slice` runtime
+/// arms and the `.slice` built-in dispatch shim in `eval::builtins`.
+/// Handles `Val::Str` + `Val::StrSlice` receivers; ASCII fast path returns
+/// zero-alloc `Val::StrSlice` via `StrRef`; Unicode walks `char_indices`.
+/// Negative indexes count from end (Python slice semantics); `end=None`
+/// means "to end".  Non-string receiver returns the value unchanged
+/// (Stage path passes it through; builtin shim guards before calling).
+pub(crate) fn slice_apply(recv: Val, start: i64, end: Option<i64>) -> Val {
+    let (parent, base_off, view_len): (Arc<str>, usize, usize) = match recv {
+        Val::Str(s)      => { let l = s.len(); (s, 0, l) }
+        Val::StrSlice(r) => {
+            let parent = r.to_arc();
+            let plen = parent.len();
+            (parent, 0, plen)
+        }
+        other => return other,
+    };
+    let view = &parent[base_off .. base_off + view_len];
+    let blen = view.len();
+    if view.is_ascii() {
+        let start_u = if start < 0 { blen.saturating_sub((-start) as usize) }
+                       else        { (start as usize).min(blen) };
         let end_u = match end {
             Some(e) if e < 0 => blen.saturating_sub((-e) as usize),
-            Some(e) => (e as usize).min(blen),
-            None    => blen,
+            Some(e)          => (e as usize).min(blen),
+            None             => blen,
         };
-        let start_u = start_u.min(end_u).min(blen);
-        if start_u == 0 && end_u == blen {
-            return Arc::clone(s);
-        }
-        Arc::from(&src[start_u..end_u])
-    } else {
-        let chars: Vec<(usize, char)> = src.char_indices().collect();
-        let n = chars.len() as i64;
-        let resolve = |i: i64| -> usize {
-            let r = if i < 0 { n + i } else { i };
-            r.clamp(0, n) as usize
-        };
-        let s_idx = resolve(start);
-        let e_idx = match end { Some(e) => resolve(e), None => n as usize };
-        let s_idx = s_idx.min(e_idx);
-        let s_b = chars.get(s_idx).map(|c| c.0).unwrap_or(src.len());
-        let e_b = chars.get(e_idx).map(|c| c.0).unwrap_or(src.len());
-        Arc::from(&src[s_b..e_b])
+        let start_u = start_u.min(end_u);
+        if start_u == 0 && end_u == blen { return Val::Str(parent); }
+        return Val::StrSlice(crate::strref::StrRef::slice(
+            parent, base_off + start_u, base_off + end_u,
+        ));
     }
+    let chars: Vec<(usize, char)> = view.char_indices().collect();
+    let n = chars.len() as i64;
+    let resolve = |i: i64| -> usize {
+        let r = if i < 0 { n + i } else { i };
+        r.clamp(0, n) as usize
+    };
+    let s_idx = resolve(start);
+    let e_idx = match end { Some(e) => resolve(e), None => n as usize };
+    let s_idx = s_idx.min(e_idx);
+    let s_b = chars.get(s_idx).map(|c| c.0).unwrap_or(view.len());
+    let e_b = chars.get(e_idx).map(|c| c.0).unwrap_or(view.len());
+    if s_b == 0 && e_b == view.len() { return Val::Str(parent); }
+    Val::StrSlice(crate::strref::StrRef::slice(
+        parent, base_off + s_b, base_off + e_b,
+    ))
+}
+
+/// Canonical `.split(sep)` impl shared by `Stage::Split` runtime arms and
+/// the `.split` built-in dispatch shim.  Returns the split segments as
+/// fresh `Val::Str` allocations wrapped in a `Val::Arr`.  `None` on
+/// non-string receiver (Stage path silently drops; builtin shim turns
+/// `None` into an `EvalError`).
+pub(crate) fn split_apply(recv: &Val, sep: &str) -> Option<Val> {
+    let s: &str = match recv {
+        Val::Str(s)      => s.as_ref(),
+        Val::StrSlice(r) => r.as_str(),
+        _                => return None,
+    };
+    Some(Val::arr(s.split(sep).map(|p| Val::Str(Arc::<str>::from(p))).collect()))
 }
 
 #[inline]

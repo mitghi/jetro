@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use crate::ast::Arg;
 
-use super::{Env, EvalError, eval_pos, apply_item};
+use super::{Env, EvalError, eval_pos, apply_item, str_arg, first_i64_arg};
 use super::value::Val;
 use super::util::{val_to_string, val_str, field_exists_nested};
 use super::{func_strings, func_arrays, func_objects, func_paths, func_aggregates, func_csv, func_search};
@@ -216,8 +216,12 @@ fn build() -> BuiltinRegistry {
     t.insert("replace_all",    func_strings::replace_all);
     t.insert("strip_prefix",   func_strings::strip_prefix);
     t.insert("strip_suffix",   func_strings::strip_suffix);
-    t.insert("slice",          func_strings::str_slice);
-    t.insert("split",          func_strings::split);
+    // .slice / .split lifted to pipeline::Stage::Slice / Stage::Split.
+    // Dispatch shim parses args + delegates to the canonical pipeline
+    // helper.  Stage::apply (per-element) and the dispatch path share
+    // a single implementation — see lift_all_builtins.md.
+    t.insert("slice",          slice_dispatch);
+    t.insert("split",          split_dispatch);
     t.insert("indent",         func_strings::indent);
     t.insert("dedent",         func_strings::dedent);
     t.insert("matches",        func_strings::str_matches);
@@ -475,6 +479,30 @@ fn b_has(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
             .unwrap_or(false)
     });
     Ok(Val::Bool(result))
+}
+
+// ── Pipeline-Stage dispatch shims (lift_all_builtins.md template) ─────────────
+//
+// Each shim parses positional args + delegates to the canonical Stage::apply
+// helper in `crate::pipeline`. Stage's runtime path and the `dispatch_method`
+// path share one implementation. Once a method is lifted, its eval/func_*.rs
+// body deletes — only the shim and the pipeline helper remain.
+
+fn split_dispatch(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+    let sep = str_arg(args, 0, env)?;
+    crate::pipeline::split_apply(&recv, sep.as_str())
+        .ok_or_else(|| EvalError("split: expected string".into()))
+}
+
+fn slice_dispatch(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+    if !matches!(recv, Val::Str(_) | Val::StrSlice(_)) {
+        return err!("slice: expected string");
+    }
+    let start = first_i64_arg(args, env).unwrap_or(0);
+    let end = args.get(1)
+        .and_then(|a| eval_pos(a, env).ok())
+        .and_then(|v| v.as_i64());
+    Ok(crate::pipeline::slice_apply(recv, start, end))
 }
 
 fn b_missing(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
