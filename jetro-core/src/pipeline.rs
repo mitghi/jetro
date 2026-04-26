@@ -2162,8 +2162,8 @@ impl Pipeline {
         use crate::composed::Stage as ComposedStage;
         use std::cell::Cell;
 
-        // Sink mapping — base sinks only. Fused sinks bail (Day 4-5+).
-        enum SinkKind { Count, Sum, Min, Max, Avg, First, Last, Collect }
+        // Sink mapping — base sinks only. Fused sinks bail (Tier 3).
+        enum SinkKind { Count, Sum, Min, Max, Avg, First, Last, Collect, GroupByOnly }
         let sink_kind = match &self.sink {
             Sink::Collect => SinkKind::Collect,
             Sink::Count => SinkKind::Count,
@@ -2175,79 +2175,144 @@ impl Pipeline {
             Sink::Last => SinkKind::Last,
             _ => return None, // fused sink — fallback
         };
+        let _ = SinkKind::GroupByOnly; // silence unused if sole-use removed later
 
-        // Reject barriers (Day 4-5).
-        for s in &self.stages {
-            if matches!(s, Stage::Reverse | Stage::Sort(_) | Stage::UniqueBy(_) | Stage::GroupBy(_) | Stage::FlatMap(_)) {
-                return None;
+        // Build a `KeySource` from a barrier-style kernel. Returns None
+        // when the kernel is computed (Arith/FString/Generic) — caller
+        // bails to legacy.
+        fn key_from_kernel(k: &BodyKernel) -> Option<cmp::KeySource> {
+            match k {
+                BodyKernel::FieldRead(f) => Some(cmp::KeySource::Field(Arc::clone(f))),
+                BodyKernel::FieldChain(keys) => Some(cmp::KeySource::Chain(Arc::clone(keys))),
+                _ => None,
             }
         }
 
-        // Build per-Stage Box<dyn Stage>. Recognised borrow kernels
-        // dispatch inline; Generic kernels bail (Day 3 wires VM
-        // fallback closure stage).
-        let mut chain: Box<dyn ComposedStage> = Box::new(cmp::Identity);
-        let kernels = &self.stage_kernels;
-        for (i, s) in self.stages.iter().enumerate() {
-            let kernel = kernels.get(i).unwrap_or(&BodyKernel::Generic);
-            let next: Box<dyn ComposedStage> = match (s, kernel) {
+        // Build a borrow-form streaming Stage from (Stage, BodyKernel).
+        // Returns None for shapes the composed path doesn't yet
+        // recognise — caller bails. No per-shape fusion arms here;
+        // each arm maps one kernel-level pattern to one generic Stage.
+        fn build_stream_stage(s: &Stage, k: &BodyKernel) -> Option<Box<dyn ComposedStage>> {
+            Some(match (s, k) {
                 (Stage::Filter(_), BodyKernel::FieldCmpLit(field, op, lit))
                     if matches!(op, crate::ast::BinOp::Eq) =>
-                {
                     Box::new(cmp::FilterFieldEqLit {
                         field: Arc::clone(field),
                         target: lit.clone(),
-                    })
-                }
-                (Stage::Map(_), BodyKernel::FieldRead(field)) => {
-                    Box::new(cmp::MapField { field: Arc::clone(field) })
-                }
-                (Stage::Map(_), BodyKernel::FieldChain(keys)) => {
-                    Box::new(cmp::MapFieldChain { keys: Arc::clone(keys) })
-                }
-                (Stage::Take(n), _) => {
-                    Box::new(cmp::Take { remaining: Cell::new(*n) })
-                }
-                (Stage::Skip(n), _) => {
-                    Box::new(cmp::Skip { remaining: Cell::new(*n) })
-                }
-                _ => return None, // unsupported shape — Day 3
-            };
-            chain = Box::new(cmp::Composed { a: chain, b: next });
+                    }),
+                (Stage::Map(_), BodyKernel::FieldRead(field)) =>
+                    Box::new(cmp::MapField { field: Arc::clone(field) }),
+                (Stage::Map(_), BodyKernel::FieldChain(keys)) =>
+                    Box::new(cmp::MapFieldChain { keys: Arc::clone(keys) }),
+                (Stage::FlatMap(_), BodyKernel::FieldRead(field)) =>
+                    Box::new(cmp::FlatMapField { field: Arc::clone(field) }),
+                (Stage::FlatMap(_), BodyKernel::FieldChain(keys)) =>
+                    Box::new(cmp::FlatMapFieldChain { keys: Arc::clone(keys) }),
+                (Stage::Take(n), _) => Box::new(cmp::Take { remaining: Cell::new(*n) }),
+                (Stage::Skip(n), _) => Box::new(cmp::Skip { remaining: Cell::new(*n) }),
+                _ => return None,
+            })
         }
 
-        // Resolve source to a slice. Materialise non-Arr lanes once.
+        // Resolve source to an owned Vec<Val>. Future: avoid clone on
+        // pure Arr by holding Arc<Vec<Val>> for the first segment.
         let recv = match &self.source {
             Source::Receiver(v) => v.clone(),
             Source::FieldChain { keys } => walk_field_chain(root, keys),
         };
-        let arr_owned: Vec<Val>;
-        let arr: &[Val] = match &recv {
-            Val::Arr(a) => a.as_slice(),
-            Val::IntVec(a) => {
-                arr_owned = a.iter().map(|n| Val::Int(*n)).collect();
-                arr_owned.as_slice()
-            }
-            Val::FloatVec(a) => {
-                arr_owned = a.iter().map(|f| Val::Float(*f)).collect();
-                arr_owned.as_slice()
-            }
-            Val::StrVec(a) => {
-                arr_owned = a.iter().map(|s| Val::Str(Arc::clone(s))).collect();
-                arr_owned.as_slice()
-            }
-            _ => return None, // ObjVec / scalar / etc. — fallback
+        let mut buf: Vec<Val> = match recv {
+            Val::Arr(a) => a.as_ref().clone(),
+            Val::IntVec(a) => a.iter().map(|n| Val::Int(*n)).collect(),
+            Val::FloatVec(a) => a.iter().map(|f| Val::Float(*f)).collect(),
+            Val::StrVec(a) => a.iter().map(|s| Val::Str(Arc::clone(s))).collect(),
+            _ => return None,
         };
 
+        // Walk stages, splitting at barriers. Each streaming run uses
+        // a composed-Cow chain into a CollectSink to materialise the
+        // intermediate Vec<Val>; each barrier consumes Vec, returns
+        // Vec. Final segment uses the actual sink. GroupBy is treated
+        // as a barrier whose output Val replaces the buffer (used
+        // only when followed by no further stages + Sink::Collect).
+        let kernels = &self.stage_kernels;
+
+        // Find barrier positions. Each [last_split..barrier_idx] is a
+        // streaming segment; [barrier_idx] is the barrier op.
+        let mut last_split = 0usize;
+        let mut group_by_seen: Option<usize> = None;
+        for (i, s) in self.stages.iter().enumerate() {
+            let is_barrier = matches!(s,
+                Stage::Reverse | Stage::Sort(_) | Stage::UniqueBy(_) |
+                Stage::GroupBy(_));
+            if !is_barrier { continue; }
+
+            // Build streaming chain over [last_split..i].
+            if i > last_split {
+                let mut chain: Box<dyn ComposedStage> = Box::new(cmp::Identity);
+                for j in last_split..i {
+                    let stage = &self.stages[j];
+                    let kernel = kernels.get(j).unwrap_or(&BodyKernel::Generic);
+                    let next = build_stream_stage(stage, kernel)?;
+                    chain = Box::new(cmp::Composed { a: chain, b: next });
+                }
+                let out = cmp::run_pipeline::<cmp::CollectSink>(&buf, chain.as_ref());
+                buf = match out {
+                    Val::Arr(a) => a.as_ref().clone(),
+                    _ => return None,
+                };
+            }
+
+            // Apply barrier.
+            let kernel = kernels.get(i).unwrap_or(&BodyKernel::Generic);
+            buf = match s {
+                Stage::Reverse => cmp::barrier_reverse(buf),
+                Stage::Sort(None) => cmp::barrier_sort(buf, &cmp::KeySource::None),
+                Stage::Sort(Some(_)) => {
+                    let key = key_from_kernel(kernel)?;
+                    cmp::barrier_sort(buf, &key)
+                }
+                Stage::UniqueBy(None) =>
+                    cmp::barrier_unique_by(buf, &cmp::KeySource::None),
+                Stage::UniqueBy(Some(_)) => {
+                    let key = key_from_kernel(kernel)?;
+                    cmp::barrier_unique_by(buf, &key)
+                }
+                Stage::GroupBy(_) => {
+                    // GroupBy yields a Val::Obj; only valid as the last
+                    // op before a Collect sink.
+                    if !matches!(self.sink, Sink::Collect) { return None; }
+                    if i + 1 != self.stages.len() { return None; }
+                    let key = key_from_kernel(kernel)?;
+                    let val = cmp::barrier_group_by(buf, &key);
+                    group_by_seen = Some(i);
+                    return Some(Ok(val));
+                }
+                _ => unreachable!(),
+            };
+
+            last_split = i + 1;
+        }
+        let _ = group_by_seen;
+
+        // Final streaming segment + sink.
+        let mut chain: Box<dyn ComposedStage> = Box::new(cmp::Identity);
+        for j in last_split..self.stages.len() {
+            let stage = &self.stages[j];
+            let kernel = kernels.get(j).unwrap_or(&BodyKernel::Generic);
+            let next = build_stream_stage(stage, kernel)?;
+            chain = Box::new(cmp::Composed { a: chain, b: next });
+        }
+
         let out = match sink_kind {
-            SinkKind::Count   => cmp::run_pipeline::<cmp::CountSink>(arr, chain.as_ref()),
-            SinkKind::Sum     => cmp::run_pipeline::<cmp::SumSink>(arr, chain.as_ref()),
-            SinkKind::Min     => cmp::run_pipeline::<cmp::MinSink>(arr, chain.as_ref()),
-            SinkKind::Max     => cmp::run_pipeline::<cmp::MaxSink>(arr, chain.as_ref()),
-            SinkKind::Avg     => cmp::run_pipeline::<cmp::AvgSink>(arr, chain.as_ref()),
-            SinkKind::First   => cmp::run_pipeline::<cmp::FirstSink>(arr, chain.as_ref()),
-            SinkKind::Last    => cmp::run_pipeline::<cmp::LastSink>(arr, chain.as_ref()),
-            SinkKind::Collect => cmp::run_pipeline::<cmp::CollectSink>(arr, chain.as_ref()),
+            SinkKind::Count   => cmp::run_pipeline::<cmp::CountSink>(&buf, chain.as_ref()),
+            SinkKind::Sum     => cmp::run_pipeline::<cmp::SumSink>(&buf, chain.as_ref()),
+            SinkKind::Min     => cmp::run_pipeline::<cmp::MinSink>(&buf, chain.as_ref()),
+            SinkKind::Max     => cmp::run_pipeline::<cmp::MaxSink>(&buf, chain.as_ref()),
+            SinkKind::Avg     => cmp::run_pipeline::<cmp::AvgSink>(&buf, chain.as_ref()),
+            SinkKind::First   => cmp::run_pipeline::<cmp::FirstSink>(&buf, chain.as_ref()),
+            SinkKind::Last    => cmp::run_pipeline::<cmp::LastSink>(&buf, chain.as_ref()),
+            SinkKind::Collect => cmp::run_pipeline::<cmp::CollectSink>(&buf, chain.as_ref()),
+            SinkKind::GroupByOnly => unreachable!(),
         };
 
         Some(Ok(out))

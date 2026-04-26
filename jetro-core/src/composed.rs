@@ -361,6 +361,81 @@ impl Stage for MapField {
     }
 }
 
+/// `.flat_map(@.k)` — borrow into array field, yield elements as Many.
+/// FieldRead variant: kernel resolves to a single field whose value
+/// is an array; emit each element as a borrow.
+pub struct FlatMapField {
+    pub field: std::sync::Arc<str>,
+}
+
+impl Stage for FlatMapField {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        if let Val::Obj(m) = x {
+            if let Some(v) = m.get(self.field.as_ref()) {
+                return flatten_iterable(v);
+            }
+        }
+        StageOutput::Filtered
+    }
+}
+
+/// `.flat_map(@.a.b.c)` — borrow into deep array field.
+pub struct FlatMapFieldChain {
+    pub keys: std::sync::Arc<[std::sync::Arc<str>]>,
+}
+
+impl Stage for FlatMapFieldChain {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        let mut cur = x;
+        for k in self.keys.iter() {
+            match cur {
+                Val::Obj(m) => match m.get(k.as_ref()) {
+                    Some(next) => cur = next,
+                    None => return StageOutput::Filtered,
+                },
+                _ => return StageOutput::Filtered,
+            }
+        }
+        flatten_iterable(cur)
+    }
+}
+
+/// Generic flatten dispatch — yields each element of any iterable Val
+/// lane (Arr borrowed; IntVec/FloatVec/StrVec/StrSliceVec materialised
+/// owned). One algorithm covers every lane. New lane types add one
+/// arm here, no per-shape FlatMap variants.
+#[inline]
+fn flatten_iterable<'a>(v: &'a Val) -> StageOutput<'a> {
+    match v {
+        Val::Arr(items) => {
+            let mut out: SmallVec<[Cow<'a, Val>; 4]> = SmallVec::with_capacity(items.len());
+            for it in items.iter() { out.push(Cow::Borrowed(it)); }
+            if out.is_empty() { StageOutput::Filtered } else { StageOutput::Many(out) }
+        }
+        Val::IntVec(items) => {
+            let mut out: SmallVec<[Cow<'a, Val>; 4]> = SmallVec::with_capacity(items.len());
+            for n in items.iter() { out.push(Cow::Owned(Val::Int(*n))); }
+            if out.is_empty() { StageOutput::Filtered } else { StageOutput::Many(out) }
+        }
+        Val::FloatVec(items) => {
+            let mut out: SmallVec<[Cow<'a, Val>; 4]> = SmallVec::with_capacity(items.len());
+            for f in items.iter() { out.push(Cow::Owned(Val::Float(*f))); }
+            if out.is_empty() { StageOutput::Filtered } else { StageOutput::Many(out) }
+        }
+        Val::StrVec(items) => {
+            let mut out: SmallVec<[Cow<'a, Val>; 4]> = SmallVec::with_capacity(items.len());
+            for s in items.iter() { out.push(Cow::Owned(Val::Str(std::sync::Arc::clone(s)))); }
+            if out.is_empty() { StageOutput::Filtered } else { StageOutput::Many(out) }
+        }
+        Val::StrSliceVec(items) => {
+            let mut out: SmallVec<[Cow<'a, Val>; 4]> = SmallVec::with_capacity(items.len());
+            for r in items.iter() { out.push(Cow::Owned(Val::StrSlice(r.clone()))); }
+            if out.is_empty() { StageOutput::Filtered } else { StageOutput::Many(out) }
+        }
+        _ => StageOutput::Filtered,
+    }
+}
+
 /// `.map(@.a.b.c)` — generic field chain walk.
 pub struct MapFieldChain {
     pub keys: std::sync::Arc<[std::sync::Arc<str>]>,
@@ -414,6 +489,171 @@ impl Stage for Skip {
     }
 }
 
+
+// ── Barrier ops ─────────────────────────────────────────────────────────────
+//
+// Barriers consume the upstream stream into a Vec<Val>, run a single
+// op, and return a new Vec<Val>. Caller drives them — see
+// `pipeline::Pipeline::try_run_composed` segment loop.
+//
+// Key extraction is shared with the streaming Stage classifier:
+// FieldRead / FieldChain only. Computed-key barriers (Arith, FString,
+// custom lambda) bail to legacy in `try_run_composed`.
+
+/// Source of a barrier key — same shape grammar as borrow stages.
+pub enum KeySource {
+    None,
+    Field(std::sync::Arc<str>),
+    Chain(std::sync::Arc<[std::sync::Arc<str>]>),
+}
+
+impl KeySource {
+    /// Extract key Val by reference; clone-on-extract since the key
+    /// must outlive the borrow on `v` (sort/dedup buffers retain it).
+    pub fn extract(&self, v: &Val) -> Val {
+        match self {
+            KeySource::None => v.clone(),
+            KeySource::Field(f) => match v {
+                Val::Obj(m) => m.get(f.as_ref()).cloned().unwrap_or(Val::Null),
+                _ => Val::Null,
+            },
+            KeySource::Chain(keys) => {
+                let mut cur = v.clone();
+                for k in keys.iter() {
+                    let next = match &cur {
+                        Val::Obj(m) => m.get(k.as_ref()).cloned(),
+                        _ => None,
+                    };
+                    cur = match next {
+                        Some(n) => n,
+                        None => return Val::Null,
+                    };
+                }
+                cur
+            }
+        }
+    }
+}
+
+/// Reverse a buffered stream in place when uniquely owned, else clone.
+pub fn barrier_reverse(buf: Vec<Val>) -> Vec<Val> {
+    let mut buf = buf;
+    buf.reverse();
+    buf
+}
+
+/// Sort with optional key. Compares Val natural ordering via
+/// `cmp_val` — wraps `eval::util::cmp_val` for primitive Vals.
+pub fn barrier_sort(buf: Vec<Val>, key: &KeySource) -> Vec<Val> {
+    let mut indexed: Vec<(Val, Val)> = buf.into_iter()
+        .map(|v| (key.extract(&v), v))
+        .collect();
+    indexed.sort_by(|a, b| cmp_val(&a.0, &b.0));
+    indexed.into_iter().map(|(_, v)| v).collect()
+}
+
+/// Dedup by key. Uses a linear-probe HashSet on hashable keys; for
+/// primitive Vals this is O(N).
+pub fn barrier_unique_by(buf: Vec<Val>, key: &KeySource) -> Vec<Val> {
+    use std::collections::HashSet;
+    let mut seen: HashSet<KeyHash> = HashSet::with_capacity(buf.len());
+    let mut out: Vec<Val> = Vec::with_capacity(buf.len());
+    for v in buf.into_iter() {
+        let k = KeyHash::from(key.extract(&v));
+        if seen.insert(k) {
+            out.push(v);
+        }
+    }
+    out
+}
+
+/// Group-by key. Produces a `Val::Obj` where each key maps to the
+/// `Val::Arr` of rows that hashed to it. Insertion-ordered by first
+/// occurrence (IndexMap preserves this).
+pub fn barrier_group_by(buf: Vec<Val>, key: &KeySource) -> Val {
+    use indexmap::IndexMap;
+    let mut groups: IndexMap<std::sync::Arc<str>, Vec<Val>> = IndexMap::new();
+    for v in buf.into_iter() {
+        let k = key.extract(&v);
+        let ks: std::sync::Arc<str> = match &k {
+            Val::Str(s) => std::sync::Arc::clone(s),
+            Val::StrSlice(r) => std::sync::Arc::from(r.as_str()),
+            Val::Null => std::sync::Arc::from("null"),
+            _ => std::sync::Arc::from(format!("{}", DisplayKey(&k))),
+        };
+        groups.entry(ks).or_insert_with(Vec::new).push(v);
+    }
+    let mut m: indexmap::IndexMap<std::sync::Arc<str>, Val> = indexmap::IndexMap::with_capacity(groups.len());
+    for (k, vs) in groups {
+        m.insert(k, Val::Arr(std::sync::Arc::new(vs)));
+    }
+    Val::Obj(std::sync::Arc::new(m))
+}
+
+// ── Hashable Val key wrapper ──
+
+#[derive(Eq, PartialEq, Hash)]
+struct KeyHash(KeyRepr);
+
+#[derive(Eq, PartialEq, Hash)]
+enum KeyRepr {
+    Null,
+    Bool(bool),
+    Int(i64),
+    Float(u64),    // f64::to_bits for total ordering
+    Str(String),
+}
+
+impl From<Val> for KeyHash {
+    fn from(v: Val) -> Self {
+        let r = match v {
+            Val::Null => KeyRepr::Null,
+            Val::Bool(b) => KeyRepr::Bool(b),
+            Val::Int(i) => KeyRepr::Int(i),
+            Val::Float(f) => KeyRepr::Float(f.to_bits()),
+            Val::Str(s) => KeyRepr::Str(s.as_ref().to_string()),
+            Val::StrSlice(r) => KeyRepr::Str(r.as_str().to_string()),
+            other => KeyRepr::Str(format!("{}", DisplayKey(&other))),
+        };
+        KeyHash(r)
+    }
+}
+
+struct DisplayKey<'a>(&'a Val);
+impl<'a> std::fmt::Display for DisplayKey<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            Val::Null => write!(f, "null"),
+            Val::Bool(b) => write!(f, "{}", b),
+            Val::Int(i) => write!(f, "{}", i),
+            Val::Float(x) => write!(f, "{}", x),
+            Val::Str(s) => write!(f, "{}", s),
+            Val::StrSlice(r) => write!(f, "{}", r.as_str()),
+            _ => write!(f, "<complex>"),
+        }
+    }
+}
+
+/// Total ordering on Val keys; mirrors the legacy sort comparator
+/// shape used in `pipeline::run_with`.
+fn cmp_val(a: &Val, b: &Val) -> std::cmp::Ordering {
+    use std::cmp::Ordering::*;
+    match (a, b) {
+        (Val::Null, Val::Null) => Equal,
+        (Val::Null, _) => Less,
+        (_, Val::Null) => Greater,
+        (Val::Bool(x), Val::Bool(y)) => x.cmp(y),
+        (Val::Int(x), Val::Int(y)) => x.cmp(y),
+        (Val::Float(x), Val::Float(y)) => x.partial_cmp(y).unwrap_or(Equal),
+        (Val::Int(x), Val::Float(y)) => (*x as f64).partial_cmp(y).unwrap_or(Equal),
+        (Val::Float(x), Val::Int(y)) => x.partial_cmp(&(*y as f64)).unwrap_or(Equal),
+        (Val::Str(x), Val::Str(y)) => x.as_ref().cmp(y.as_ref()),
+        (Val::Str(x), Val::StrSlice(r)) => x.as_ref().cmp(r.as_str()),
+        (Val::StrSlice(r), Val::Str(y)) => r.as_str().cmp(y.as_ref()),
+        (Val::StrSlice(x), Val::StrSlice(y)) => x.as_str().cmp(y.as_str()),
+        _ => Equal,
+    }
+}
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -553,6 +793,63 @@ mod tests {
         assert_eq!(j.collect("$.books.map(price).sum()").unwrap(), json!(60));
         assert_eq!(j.collect("$.books.filter(active == true).count()").unwrap(), json!(2));
         assert_eq!(j.collect("$.books.count()").unwrap(), json!(3));
+    }
+
+    #[test]
+    fn integration_barriers() {
+        use serde_json::json;
+
+        let doc = json!({
+            "rows": [
+                {"city": "LA", "price": 30},
+                {"city": "NYC", "price": 10},
+                {"city": "LA", "price": 20},
+                {"city": "NYC", "price": 40},
+            ]
+        });
+
+        let j = crate::Jetro::new(doc);
+
+        // Reverse + collect prices
+        assert_eq!(
+            j.collect("$.rows.reverse().map(price)").unwrap(),
+            json!([40, 20, 10, 30])
+        );
+
+        // unique_by city + count
+        assert_eq!(
+            j.collect("$.rows.unique_by(city).count()").unwrap(),
+            json!(2)
+        );
+
+        // sort_by price + first → smallest
+        assert_eq!(
+            j.collect("$.rows.sort_by(price).first()").unwrap(),
+            json!({"city": "NYC", "price": 10})
+        );
+    }
+
+    #[test]
+    fn integration_flat_map() {
+        use serde_json::json;
+
+        let doc = json!({
+            "groups": [
+                {"items": [1, 2, 3]},
+                {"items": [4, 5]},
+                {"items": [6]},
+            ]
+        });
+
+        let j = crate::Jetro::new(doc);
+        assert_eq!(
+            j.collect("$.groups.flat_map(items).sum()").unwrap(),
+            json!(21)
+        );
+        assert_eq!(
+            j.collect("$.groups.flat_map(items).count()").unwrap(),
+            json!(6)
+        );
     }
 
     #[test]
