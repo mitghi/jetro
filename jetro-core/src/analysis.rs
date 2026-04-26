@@ -282,10 +282,7 @@ fn apply_op(op: &Opcode, stack: &mut Vec<AbstractVal>) {
             | Opcode::MapStrVecTrim
             | Opcode::MapNumVecArith { .. }
             | Opcode::MapNumVecNeg
-            | Opcode::FilterFieldCmpField(_, _, _)
-            | Opcode::GroupByField(_)
-            | Opcode::CountByField(_)
-            | Opcode::UniqueByField(_) => {
+            | Opcode::FilterFieldCmpField(_, _, _) => {
             pop1!();
             stack.push(AbstractVal::array());
         }
@@ -481,9 +478,6 @@ fn collect_fields_in_ops(ops: &[Opcode], acc: &mut Vec<Arc<str>>) {
         match op {
             Opcode::GetField(k) | Opcode::OptField(k) | Opcode::Descendant(k)
                 | Opcode::MapField(k) | Opcode::MapFieldUnique(k)
-                | Opcode::GroupByField(k)
-                | Opcode::CountByField(k)
-                | Opcode::UniqueByField(k)
                 | Opcode::FilterFieldEqLit(k, _) | Opcode::FilterFieldCmpLit(k, _, _)
                 => {
                 if !acc.iter().any(|a: &Arc<str>| a == k) { acc.push(k.clone()); }
@@ -1022,9 +1016,6 @@ pub fn opcode_cost(op: &Opcode) -> u32 {
             | Opcode::MapNumVecNeg
             | Opcode::FilterFieldCmpField(_, _, _) => 5,
         Opcode::FilterFieldCmpFieldCount(_, _, _) => 4,
-        Opcode::GroupByField(_) => 15,
-        Opcode::CountByField(_) => 12,
-        Opcode::UniqueByField(_) => 14,
         Opcode::StrSplitReverseJoin { .. } => 4,
         Opcode::MapReplaceLit { .. } => 10,
         Opcode::MapUpperReplaceLit { .. } | Opcode::MapLowerReplaceLit { .. } => 11,

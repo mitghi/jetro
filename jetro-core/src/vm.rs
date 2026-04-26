@@ -475,15 +475,6 @@ pub enum Opcode {
     /// `map(-@)` — unary negation per element, preserves lane.
     MapNumVecNeg,
 
-    // ── group_by specialisation (Tier 2) ──────────────────────────────────────
-    /// `group_by(k)` where `k` is a single field ident. Uses FxHashMap with
-    /// primitive-key fast path.
-    GroupByField(Arc<str>),
-    /// `.count_by(k)` with trivial field key — per-row `obj.get(k)` instead
-    /// of lambda dispatch; builds Val::Obj<Arc<str>, Int>.
-    CountByField(Arc<str>),
-    /// `.unique_by(k)` with trivial field key — per-row `obj.get(k)` direct.
-    UniqueByField(Arc<str>),
     /// Fused equi-join: TOS is lhs array; `rhs` program evaluates
     /// to rhs array; join by (lhs_key, rhs_key) string field names.
     /// Produces array of merged objects (rhs wins on collision).
@@ -1010,111 +1001,6 @@ fn slice_unicode_bounds(src: &str, start: i64, end: Option<i64>) -> (usize, usiz
     (start_b, end_b)
 }
 
-fn count_by_field(recv: &Val, k: &str) -> Val {
-    let a = match recv {
-        Val::Arr(a) => a,
-        _ => return Val::obj(indexmap::IndexMap::new()),
-    };
-    let mut out: indexmap::IndexMap<Arc<str>, i64> = indexmap::IndexMap::with_capacity(16);
-    let mut cached: Option<usize> = None;
-    for item in a.iter() {
-        let key: Arc<str> = if let Val::Obj(m) = item {
-            let v = lookup_field_by_str_cached(m, k, &mut cached);
-            match v {
-                Some(Val::Str(s)) => s.clone(),
-                Some(Val::StrSlice(r)) => r.to_arc(),
-                Some(Val::Int(n)) => Arc::from(n.to_string()),
-                Some(Val::Float(x)) => Arc::from(x.to_string()),
-                Some(Val::Bool(b)) => Arc::from(if *b { "true" } else { "false" }),
-                Some(Val::Null) | None => Arc::from("null"),
-                Some(other) => Arc::from(format!("{:?}", other)),
-            }
-        } else if let Val::ObjSmall(ps) = item {
-            let mut found: Option<&Val> = None;
-            for (kk, vv) in ps.iter() {
-                if kk.as_ref() == k { found = Some(vv); break; }
-            }
-            match found {
-                Some(Val::Str(s)) => s.clone(),
-                Some(Val::StrSlice(r)) => r.to_arc(),
-                Some(Val::Int(n)) => Arc::from(n.to_string()),
-                Some(Val::Float(x)) => Arc::from(x.to_string()),
-                Some(Val::Bool(b)) => Arc::from(if *b { "true" } else { "false" }),
-                Some(Val::Null) | None => Arc::from("null"),
-                Some(other) => Arc::from(format!("{:?}", other)),
-            }
-        } else {
-            Arc::from("null")
-        };
-        *out.entry(key).or_insert(0) += 1;
-    }
-    let finalised: indexmap::IndexMap<Arc<str>, Val> = out.into_iter()
-        .map(|(k, n)| (k, Val::Int(n)))
-        .collect();
-    Val::obj(finalised)
-}
-
-fn unique_by_field(recv: &Val, k: &str) -> Val {
-    let a = match recv {
-        Val::Arr(a) => a,
-        _ => return Val::arr(Vec::new()),
-    };
-    let mut seen: indexmap::IndexSet<Arc<str>> = indexmap::IndexSet::with_capacity(a.len());
-    let mut out: Vec<Val> = Vec::with_capacity(a.len());
-    let mut cached: Option<usize> = None;
-    for item in a.iter() {
-        let key: Arc<str> = if let Val::Obj(m) = item {
-            let v = lookup_field_by_str_cached(m, k, &mut cached);
-            match v {
-                Some(Val::Str(s)) => s.clone(),
-                Some(Val::StrSlice(r)) => r.to_arc(),
-                Some(Val::Int(n)) => Arc::from(n.to_string()),
-                Some(Val::Float(x)) => Arc::from(x.to_string()),
-                Some(Val::Bool(b)) => Arc::from(if *b { "true" } else { "false" }),
-                Some(Val::Null) | None => Arc::from("null"),
-                Some(other) => Arc::from(format!("{:?}", other)),
-            }
-        } else {
-            Arc::from("null")
-        };
-        if seen.insert(key) { out.push(item.clone()); }
-    }
-    Val::arr(out)
-}
-
-fn group_by_field(recv: &Val, k: &str) -> Val {
-    let a = match recv {
-        Val::Arr(a) => a,
-        _ => return Val::obj(indexmap::IndexMap::new()),
-    };
-    let mut out: indexmap::IndexMap<Arc<str>, Vec<Val>> = indexmap::IndexMap::with_capacity(16);
-    let mut cached: Option<usize> = None;
-    for item in a.iter() {
-        let key = if let Val::Obj(m) = item {
-            let v = lookup_field_by_str_cached(m, k, &mut cached);
-            match v {
-                Some(Val::Str(s)) => s.clone(),
-                Some(Val::Int(n)) => Arc::from(n.to_string()),
-                Some(Val::Float(x)) => Arc::from(x.to_string()),
-                Some(Val::Bool(b)) => Arc::from(if *b { "true" } else { "false" }),
-                Some(Val::Null) | None => Arc::from("null"),
-                Some(other) => Arc::from(format!("{:?}", other)),
-            }
-        } else {
-            Arc::from("null")
-        };
-        out.entry(key).or_insert_with(|| Vec::with_capacity(4)).push(item.clone());
-    }
-    let finalised: indexmap::IndexMap<Arc<str>, Val> = out.into_iter()
-        .map(|(k, v)| (k, Val::arr(v)))
-        .collect();
-    Val::obj(finalised)
-}
-
-/// Shape-index cache: cheap inline-cache for repeated `m.get(k)` on arrays of
-/// same-shape objects. First call stores `get_index_of(k)`; subsequent calls
-/// try `get_index(i)` and verify key identity (Arc<str> pointer or bytes).
-/// Fallback to `m.get(k)` on miss.
 #[inline]
 fn lookup_field_cached<'a>(
     m: &'a indexmap::IndexMap<Arc<str>, Val>,
@@ -1327,25 +1213,6 @@ fn agg_minmax_typed(a: &[Val], want_max: bool) -> Val {
 
 /// `&str`-keyed variant of `lookup_field_cached`; ptr-eq shortcut is skipped
 /// (caller doesn't hold an `Arc<str>`), so the hit path is byte-eq only.
-#[inline]
-fn lookup_field_by_str_cached<'a>(
-    m: &'a indexmap::IndexMap<Arc<str>, Val>,
-    k: &str,
-    cached: &mut Option<usize>,
-) -> Option<&'a Val> {
-    if let Some(i) = *cached {
-        if let Some((ki, vi)) = m.get_index(i) {
-            if ki.as_ref() == k {
-                return Some(vi);
-            }
-        }
-    }
-    match m.get_full(k) {
-        Some((i, _, v)) => { *cached = Some(i); Some(v) }
-        None => { *cached = None; None }
-    }
-}
-
 // ── Variable context (compile-time) ──────────────────────────────────────────
 
 #[derive(Clone, Default)]
@@ -1980,26 +1847,8 @@ impl Compiler {
                             out2.push(Opcode::MapFieldChain(chain)); continue;
                         }
                     }
-                    // group_by(k) → GroupByField(k)
-                    if b.method == BuiltinMethod::GroupBy && b.sub_progs.len() == 1 {
-                        if let Some(k) = trivial_field(&b.sub_progs[0].ops) {
-                            out2.push(Opcode::GroupByField(k)); continue;
-                        }
-                    }
-                    // count_by(k) → CountByField(k)
-                    if b.method == BuiltinMethod::CountBy && b.sub_progs.len() == 1 {
-                        if let Some(k) = trivial_field(&b.sub_progs[0].ops) {
-                            out2.push(Opcode::CountByField(k)); continue;
-                        }
-                    }
-                    // unique_by(k) / uniqueBy(k) → UniqueByField(k)
-                    if b.method == BuiltinMethod::Unknown
-                       && matches!(b.name.as_ref(), "unique_by" | "uniqueBy")
-                       && b.sub_progs.len() == 1 {
-                        if let Some(k) = trivial_field(&b.sub_progs[0].ops) {
-                            out2.push(Opcode::UniqueByField(k)); continue;
-                        }
-                    }
+                    // GroupByField/CountByField/UniqueByField fusion
+                    // deleted in Tier 3 — base CallMethod chain.
                     // filter(field <cmp> lit|field) → FilterField*
                     if b.method == BuiltinMethod::Filter && b.sub_progs.len() == 1 {
                         if let Some(p) = detect_field_pred(&b.sub_progs[0].ops) {
@@ -4996,19 +4845,8 @@ impl VM {
                     stack.push(Val::Int(n));
                 }
 
-                // ── GroupByField (Tier 2) ─────────────────────────────────
-                Opcode::GroupByField(k) => {
-                    let recv = pop!(stack);
-                    stack.push(group_by_field(&recv, k.as_ref()));
-                }
-                Opcode::CountByField(k) => {
-                    let recv = pop!(stack);
-                    stack.push(count_by_field(&recv, k.as_ref()));
-                }
-                Opcode::UniqueByField(k) => {
-                    let recv = pop!(stack);
-                    stack.push(unique_by_field(&recv, k.as_ref()));
-                }
+                // GroupByField/CountByField/UniqueByField handlers
+                // deleted in Tier 3.
                 // FilterMapSum / Avg / First / Min / Max handlers
                 // removed.  Pipeline.rs Sink::NumFilterMap (sum/avg/min/max)
                 // and Sink::FilterFirst cover these shapes for top-level
