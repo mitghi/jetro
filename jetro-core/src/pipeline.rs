@@ -881,12 +881,23 @@ pub struct StageShape {
     /// i.e. Stage doesn't need to look at neighbours.  Map=true,
     /// Filter=true, TakeWhile=false, Sort=false.
     pub can_indexed: bool,
+    /// Phase 3 reorder heuristics — cost is per-element evaluation cost
+    /// (relative; Generic VM round-trip ≈ 10, field-read ≈ 1).
+    pub cost:        f64,
+    /// Probability an input element passes through (for Filter).
+    /// 0.0 = always reject, 1.0 = always pass; 0.5 = unknown.
+    /// For non-Filter stages this is 1.0 (pass-through).
+    pub selectivity: f64,
 }
 
 impl Stage {
     /// Declarative shape — drives Phase 2-5 planning.  No per-chain
     /// dispatch logic; planning consults this + Sink::demand().
     pub fn shape(&self) -> StageShape {
+        // Default cost/selectivity reflects the generic VM-fallback per-row
+        // sub-program evaluation cost (~10 relative units).  Phase 3 reorder
+        // refines these via `kernel_cost_selectivity()` when a specific
+        // BodyKernel is recognised.
         match self {
             Stage::Map(_) => StageShape {
                 cardinality: Cardinality::OneToOne,
@@ -894,6 +905,8 @@ impl Stage {
                 purity:      true,
                 boundedness: Boundedness::Always(1),
                 can_indexed: true,
+                cost:        10.0,
+                selectivity: 1.0,
             },
             Stage::Filter(_) => StageShape {
                 cardinality: Cardinality::Filtering,
@@ -901,6 +914,8 @@ impl Stage {
                 purity:      true,
                 boundedness: Boundedness::AtMost(Bound::AtMost(1)),
                 can_indexed: false,
+                cost:        10.0,
+                selectivity: 0.5,
             },
             Stage::FlatMap(_) => StageShape {
                 cardinality: Cardinality::Expanding,
@@ -908,6 +923,8 @@ impl Stage {
                 purity:      true,
                 boundedness: Boundedness::AtMost(Bound::Unbounded),
                 can_indexed: false,
+                cost:        10.0,
+                selectivity: 1.0,
             },
             Stage::Take(_) | Stage::Skip(_) => StageShape {
                 cardinality: Cardinality::Filtering,
@@ -915,6 +932,8 @@ impl Stage {
                 purity:      true,
                 boundedness: Boundedness::AtMost(Bound::AtMost(1)),
                 can_indexed: false,
+                cost:        0.5,
+                selectivity: 0.5,
             },
             Stage::Reverse | Stage::Sort(_) | Stage::UniqueBy(_) | Stage::GroupBy(_)
                 => StageShape {
@@ -923,6 +942,8 @@ impl Stage {
                 purity:      true,
                 boundedness: Boundedness::AtMost(Bound::Unbounded),
                 can_indexed: false,
+                cost:        20.0,
+                selectivity: 1.0,
             },
             // Step 3d-extension lifted Stages.
             Stage::Split(_) => StageShape {
@@ -931,6 +952,8 @@ impl Stage {
                 purity:      true,
                 boundedness: Boundedness::AtMost(Bound::Unbounded),
                 can_indexed: true,
+                cost:        2.0,
+                selectivity: 1.0,
             },
             Stage::Slice(_, _) => StageShape {
                 cardinality: Cardinality::OneToOne,
@@ -938,6 +961,8 @@ impl Stage {
                 purity:      true,
                 boundedness: Boundedness::Always(1),
                 can_indexed: true,
+                cost:        1.0,
+                selectivity: 1.0,
             },
         }
     }
@@ -972,17 +997,34 @@ pub struct Plan {
 /// Step 3d Phase 5 entry point — full planning over (stages, sink) → Plan.
 /// Phase 1: demand propagation (already in `compute_strategies`).
 /// Phase 2: dead pure-stage elimination (Sink::Count + pure Map drops).
-/// Phase 3: commutative reorder (TODO: needs cost/selectivity; gated off).
+/// Phase 3: commutative reorder by cost-weighted selectivity.
 /// Phase 4: algebraic merging (Skip+Skip, Take+Take, Reverse∘Reverse, …).
 /// Phase 5: pick Strategy from final shape.
 pub fn plan(stages: Vec<Stage>, sink: Sink) -> Plan {
+    plan_with_kernels(stages, &[], sink)
+}
+
+/// Variant of `plan` that consults parallel `BodyKernel` slice for
+/// kernel-aware cost/selectivity.  Pipeline lowering carries kernels in
+/// `Pipeline::stage_kernels`; the caller passes them through here so
+/// Phase 3 reorder gets accurate heuristics.
+pub fn plan_with_kernels(stages: Vec<Stage>, kernels: &[BodyKernel], sink: Sink) -> Plan {
     let mut stages = stages;
+    let mut k_buf: Vec<BodyKernel> = if kernels.len() == stages.len() {
+        kernels.to_vec()
+    } else {
+        // Synthesise Generic kernels when caller didn't supply.
+        vec![BodyKernel::Generic; stages.len()]
+    };
 
     // Phase 2 — dead pure-stage elimination.
-    drop_dead_pure_stages(&mut stages, &sink);
+    drop_dead_pure_stages_kernels(&mut stages, &mut k_buf, &sink);
+
+    // Phase 3 — commutative reorder of adjacent Filter runs.
+    reorder_filter_runs(&mut stages, &mut k_buf);
 
     // Phase 4 — algebraic merging.
-    fold_merge_with(&mut stages);
+    fold_merge_with_kernels(&mut stages, &mut k_buf);
 
     // Phase 1 — demand propagation (also picks Sort top-k strategy).
     let strategies = compute_strategies(&stages, &sink);
@@ -993,26 +1035,152 @@ pub fn plan(stages: Vec<Stage>, sink: Sink) -> Plan {
     Plan { stages, sink, strategies, strategy }
 }
 
-/// Phase 2: drop pure stages whose output the sink doesn't read.
-/// Conservative: only `Sink::Count` lets us drop trailing pure
-/// Map/Filter? — Filter affects count, can't drop.  Only pure Map can
-/// be dropped before Count (Map preserves cardinality).
-fn drop_dead_pure_stages(stages: &mut Vec<Stage>, sink: &Sink) {
-    if !matches!(sink, Sink::Count) { return; }
-    // Walk from sink end; drop pure Maps.  Stop at first non-Map or
-    // impure stage.
-    while let Some(last) = stages.last() {
-        let s = last.shape();
-        if matches!(s.cardinality, Cardinality::OneToOne) && s.purity {
-            stages.pop();
-        } else {
-            break;
+/// Cost + selectivity from a recognised BodyKernel.  Generic falls back
+/// to neutral defaults (cost=10, selectivity=0.5).  Used by Phase 3 to
+/// rank Filter stages.
+fn kernel_cost_selectivity(stage: &Stage, kernel: &BodyKernel) -> (f64, f64) {
+    use crate::ast::BinOp;
+    match (stage, kernel) {
+        // Filter cmp-lit kernels — cost from N field hops, selectivity
+        // from the operator (Eq/Neq are highly skewed; range ops ~50/50).
+        (Stage::Filter(_), BodyKernel::FieldCmpLit(_, op, _)) => {
+            let s = match op {
+                BinOp::Eq                       => 0.10,
+                BinOp::Neq                      => 0.90,
+                BinOp::Lt | BinOp::Gt           => 0.40,
+                BinOp::Lte | BinOp::Gte         => 0.50,
+                _                               => 0.50,
+            };
+            (1.5, s)
+        }
+        (Stage::Filter(_), BodyKernel::FieldChainCmpLit(keys, op, _)) => {
+            let s = match op {
+                BinOp::Eq  => 0.10,
+                BinOp::Neq => 0.90,
+                BinOp::Lt | BinOp::Gt   => 0.40,
+                BinOp::Lte | BinOp::Gte => 0.50,
+                _ => 0.50,
+            };
+            (1.0 + keys.len() as f64, s)
+        }
+        (Stage::Filter(_), BodyKernel::CurrentCmpLit(op, _)) => {
+            let s = match op {
+                BinOp::Eq  => 0.10,
+                BinOp::Neq => 0.90,
+                BinOp::Lt | BinOp::Gt   => 0.40,
+                BinOp::Lte | BinOp::Gte => 0.50,
+                _ => 0.50,
+            };
+            (0.8, s)
+        }
+        (Stage::Filter(_), BodyKernel::FieldRead(_)) => (1.0, 0.7),
+        (Stage::Filter(_), BodyKernel::ConstBool(b)) =>
+            (0.1, if *b { 1.0 } else { 0.0 }),
+        // Generic / unrecognised — fall back to Stage::shape() defaults.
+        _ => {
+            let sh = stage.shape();
+            (sh.cost, sh.selectivity)
         }
     }
 }
 
-/// Phase 4: algebraic identities.  Reverse+Reverse cancels; Skip+Skip
-/// merges; Take+Take takes the min.
+/// Phase 3: reorder adjacent runs of `Stage::Filter` by ascending
+/// `cost / (1 - selectivity)` — cheaper, more-selective filters first
+/// drop rows early.  Skips runs containing any filter with `Generic`
+/// kernel (could be impure or expensive in unpredictable ways) or
+/// non-Filter stages (Map/FlatMap mid-run blocks reorder).
+///
+/// Conservative: only reorder when *every* filter in the run has a
+/// recognised kernel.  Single Filter or no run → no-op.
+fn reorder_filter_runs(stages: &mut Vec<Stage>, kernels: &mut Vec<BodyKernel>) {
+    let mut i = 0;
+    while i < stages.len() {
+        // Find next run of adjacent Filter stages with known kernels.
+        let mut j = i;
+        while j < stages.len()
+            && matches!(stages[j], Stage::Filter(_))
+            && !matches!(kernels.get(j), Some(BodyKernel::Generic) | None)
+        {
+            j += 1;
+        }
+        if j - i >= 2 {
+            // Pair (Stage, Kernel) and rank.
+            let mut run: Vec<(Stage, BodyKernel)> = Vec::with_capacity(j - i);
+            for idx in i..j {
+                run.push((stages[idx].clone(), kernels[idx].clone()));
+            }
+            run.sort_by(|a, b| {
+                let (ca, sa) = kernel_cost_selectivity(&a.0, &a.1);
+                let (cb, sb) = kernel_cost_selectivity(&b.0, &b.1);
+                // Rank = cost / (1 - selectivity); smaller first.
+                // Guard against selectivity=1.0 producing inf (constant
+                // pass-through filter — already eliminated by Phase 2 if
+                // pure, so unlikely; cap at large finite).
+                let ra = ca / (1.0 - sa).max(1e-6);
+                let rb = cb / (1.0 - sb).max(1e-6);
+                ra.partial_cmp(&rb).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            for (idx, (s, k)) in run.into_iter().enumerate() {
+                stages[i + idx] = s;
+                kernels[i + idx] = k;
+            }
+        }
+        i = j.max(i + 1);
+    }
+}
+
+/// Phase 2 with kernel-array shadowing — drops kernels in lockstep.
+fn drop_dead_pure_stages_kernels(
+    stages: &mut Vec<Stage>,
+    kernels: &mut Vec<BodyKernel>,
+    sink: &Sink,
+) {
+    if !matches!(sink, Sink::Count) { return; }
+    while let Some(last) = stages.last() {
+        let s = last.shape();
+        if matches!(s.cardinality, Cardinality::OneToOne) && s.purity {
+            stages.pop();
+            kernels.pop();
+        } else { break; }
+    }
+}
+
+/// Phase 4 with kernel-array shadowing — drops/merges kernels in lockstep.
+fn fold_merge_with_kernels(stages: &mut Vec<Stage>, kernels: &mut Vec<BodyKernel>) {
+    let mut i = 0;
+    while i + 1 < stages.len() {
+        let merged = match (&stages[i], &stages[i + 1]) {
+            (Stage::Reverse, Stage::Reverse) => Some(None),
+            (Stage::Skip(a), Stage::Skip(b)) =>
+                Some(Some(Stage::Skip(a.saturating_add(*b)))),
+            (Stage::Take(a), Stage::Take(b)) =>
+                Some(Some(Stage::Take((*a).min(*b)))),
+            _ => None,
+        };
+        if let Some(replacement) = merged {
+            stages.remove(i + 1);
+            kernels.remove(i + 1);
+            match replacement {
+                Some(s) => stages[i] = s,
+                None    => {
+                    stages.remove(i);
+                    kernels.remove(i);
+                    if i > 0 { i -= 1; }
+                }
+            }
+            continue;
+        }
+        i += 1;
+    }
+}
+
+// `drop_dead_pure_stages` and `fold_merge_with` superseded by
+// `drop_dead_pure_stages_kernels` and `fold_merge_with_kernels` —
+// kernel-array-aware variants used by `plan_with_kernels`.  Kept
+// the old names hidden behind `#[allow(dead_code)]` shims while
+// migrating callers.
+
+#[allow(dead_code)]
 fn fold_merge_with(stages: &mut Vec<Stage>) {
     let mut i = 0;
     while i + 1 < stages.len() {

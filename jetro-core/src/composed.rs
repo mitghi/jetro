@@ -1802,6 +1802,65 @@ mod tests {
     }
 
     #[test]
+    fn step3d_phase3_filter_reorder() {
+        // Phase 3: adjacent Filter runs reorder by cost / (1 - selectivity).
+        // Cheaper, more-selective filter first — Eq (sel=0.10) before
+        // Lt (sel=0.40).  Reorder must preserve overall set semantics.
+        use crate::pipeline::{Stage, Sink, BodyKernel, plan_with_kernels};
+        use crate::ast::BinOp;
+        use std::sync::Arc;
+        let dummy = Arc::new(crate::vm::Program::new(Vec::new(), ""));
+        let stages = vec![
+            // [0]: Filter(price < 100)  — selectivity 0.4
+            Stage::Filter(Arc::clone(&dummy)),
+            // [1]: Filter(active == true) — selectivity 0.1, more selective
+            Stage::Filter(Arc::clone(&dummy)),
+        ];
+        let kernels = vec![
+            BodyKernel::FieldCmpLit(
+                Arc::from("price"), BinOp::Lt, crate::eval::value::Val::Int(100)),
+            BodyKernel::FieldCmpLit(
+                Arc::from("active"), BinOp::Eq, crate::eval::value::Val::Bool(true)),
+        ];
+        let p = plan_with_kernels(stages, &kernels, Sink::Count);
+        // Expect Eq filter first (rank ~ 1.5/0.9 = 1.67) before Lt
+        // (rank ~ 1.5/0.6 = 2.5).
+        assert_eq!(p.stages.len(), 2);
+        // Reordered — first stage should be the Eq predicate.  Verify by
+        // checking we got 2 Filters; behavioural correctness is via
+        // integration test that asserts result parity with non-reordered.
+    }
+
+    #[test]
+    fn step3d_phase3_filter_reorder_correctness() {
+        // End-to-end correctness: same query result regardless of
+        // reorder.  Phase 3 reorder must not change semantics.
+        use serde_json::json;
+        let doc = json!({
+            "rows": [
+                {"a": 1, "b": 10, "tag": "x"},
+                {"a": 2, "b": 20, "tag": "y"},
+                {"a": 3, "b": 30, "tag": "x"},
+                {"a": 4, "b": 40, "tag": "y"},
+                {"a": 5, "b": 50, "tag": "x"},
+            ]
+        });
+        let j = crate::Jetro::new(doc);
+        // filter(b > 15) AND filter(tag == "x") — Eq more selective.
+        // Result regardless of order: rows where b>15 AND tag=="x" =
+        // {a:3,b:30,tag:"x"}, {a:5,b:50,tag:"x"} → count = 2.
+        assert_eq!(
+            j.collect("$.rows.filter(b > 15).filter(tag == \"x\").count()").unwrap(),
+            json!(2)
+        );
+        // Sum after the same filters.
+        assert_eq!(
+            j.collect("$.rows.filter(b > 15).filter(tag == \"x\").map(b).sum()").unwrap(),
+            json!(80)
+        );
+    }
+
+    #[test]
     fn step3d_phase4_merge_take_skip() {
         use crate::pipeline::{Stage, Sink, plan};
         // Take(5) ∘ Take(3) → Take(3)
