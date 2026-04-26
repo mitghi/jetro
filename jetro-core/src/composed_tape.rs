@@ -309,43 +309,44 @@ impl TapeStageT for SkipT {
 // ── Sinks (numeric — no materialisation needed) ────────────────────
 
 pub trait TapeSinkT {
-    type Acc;
-    fn init() -> Self::Acc;
-    fn fold<'a>(acc: Self::Acc, v: TapeRow<'a>) -> Self::Acc;
-    fn finalise<'a>(arena: &'a Arena, acc: Self::Acc) -> BVal<'a>;
+    type Acc<'a>;
+    fn init<'a>() -> Self::Acc<'a>;
+    fn fold<'a>(arena: &'a Arena, acc: Self::Acc<'a>, v: TapeRow<'a>) -> Self::Acc<'a>;
+    fn finalise<'a>(arena: &'a Arena, acc: Self::Acc<'a>) -> BVal<'a>;
 }
 
 pub struct CountSinkT;
 impl TapeSinkT for CountSinkT {
-    type Acc = i64;
-    #[inline] fn init() -> i64 { 0 }
-    #[inline] fn fold<'a>(acc: i64, _: TapeRow<'a>) -> i64 { acc + 1 }
-    #[inline] fn finalise<'a>(_: &'a Arena, acc: i64) -> BVal<'a> { BVal::Int(acc) }
+    type Acc<'a> = i64;
+    #[inline] fn init<'a>() -> Self::Acc<'a> { 0 }
+    #[inline] fn fold<'a>(_: &'a Arena, acc: Self::Acc<'a>, _: TapeRow<'a>) -> Self::Acc<'a> { acc + 1 }
+    #[inline] fn finalise<'a>(_: &'a Arena, acc: Self::Acc<'a>) -> BVal<'a> { BVal::Int(acc) }
 }
 
 pub struct SumSinkT;
 impl TapeSinkT for SumSinkT {
-    type Acc = (i64, f64, bool);
-    #[inline] fn init() -> Self::Acc { (0, 0.0, false) }
-    fn fold<'a>(mut acc: Self::Acc, v: TapeRow<'a>) -> Self::Acc {
+    type Acc<'a> = (i64, f64, bool);
+    #[inline] fn init<'a>() -> Self::Acc<'a> { (0, 0.0, false) }
+    fn fold<'a>(_: &'a Arena, mut acc: Self::Acc<'a>, v: TapeRow<'a>) -> Self::Acc<'a> {
         if let Some(n) = v.as_int() { acc.0 = acc.0.wrapping_add(n); return acc; }
         if let Some(f) = v.as_float() { acc.1 += f; acc.2 = true; return acc; }
         if let Some(b) = v.as_bool() { acc.0 = acc.0.wrapping_add(b as i64); return acc; }
         acc
     }
-    fn finalise<'a>(_: &'a Arena, acc: Self::Acc) -> BVal<'a> {
+    fn finalise<'a>(_: &'a Arena, acc: Self::Acc<'a>) -> BVal<'a> {
         if acc.2 { BVal::Float(acc.0 as f64 + acc.1) } else { BVal::Int(acc.0) }
     }
 }
 
 pub struct MinSinkT;
 impl TapeSinkT for MinSinkT {
-    type Acc = Option<f64>;
-    #[inline] fn init() -> Self::Acc { None }
-    fn fold<'a>(acc: Self::Acc, v: TapeRow<'a>) -> Self::Acc {
-        let n = v.as_float()?; Some(match acc { Some(c) => c.min(n), None => n })
+    type Acc<'a> = Option<f64>;
+    #[inline] fn init<'a>() -> Self::Acc<'a> { None }
+    fn fold<'a>(_: &'a Arena, acc: Self::Acc<'a>, v: TapeRow<'a>) -> Self::Acc<'a> {
+        let n = match v.as_float() { Some(f) => f, None => return acc };
+        Some(match acc { Some(c) => c.min(n), None => n })
     }
-    fn finalise<'a>(_: &'a Arena, acc: Self::Acc) -> BVal<'a> {
+    fn finalise<'a>(_: &'a Arena, acc: Self::Acc<'a>) -> BVal<'a> {
         match acc {
             Some(f) if f.fract() == 0.0 && f.abs() < (i64::MAX as f64) => BVal::Int(f as i64),
             Some(f) => BVal::Float(f),
@@ -356,12 +357,13 @@ impl TapeSinkT for MinSinkT {
 
 pub struct MaxSinkT;
 impl TapeSinkT for MaxSinkT {
-    type Acc = Option<f64>;
-    #[inline] fn init() -> Self::Acc { None }
-    fn fold<'a>(acc: Self::Acc, v: TapeRow<'a>) -> Self::Acc {
-        let n = v.as_float()?; Some(match acc { Some(c) => c.max(n), None => n })
+    type Acc<'a> = Option<f64>;
+    #[inline] fn init<'a>() -> Self::Acc<'a> { None }
+    fn fold<'a>(_: &'a Arena, acc: Self::Acc<'a>, v: TapeRow<'a>) -> Self::Acc<'a> {
+        let n = match v.as_float() { Some(f) => f, None => return acc };
+        Some(match acc { Some(c) => c.max(n), None => n })
     }
-    fn finalise<'a>(_: &'a Arena, acc: Self::Acc) -> BVal<'a> {
+    fn finalise<'a>(_: &'a Arena, acc: Self::Acc<'a>) -> BVal<'a> {
         match acc {
             Some(f) if f.fract() == 0.0 && f.abs() < (i64::MAX as f64) => BVal::Int(f as i64),
             Some(f) => BVal::Float(f),
@@ -372,14 +374,53 @@ impl TapeSinkT for MaxSinkT {
 
 pub struct AvgSinkT;
 impl TapeSinkT for AvgSinkT {
-    type Acc = (f64, usize);
-    #[inline] fn init() -> Self::Acc { (0.0, 0) }
-    fn fold<'a>(mut acc: Self::Acc, v: TapeRow<'a>) -> Self::Acc {
+    type Acc<'a> = (f64, usize);
+    #[inline] fn init<'a>() -> Self::Acc<'a> { (0.0, 0) }
+    fn fold<'a>(_: &'a Arena, mut acc: Self::Acc<'a>, v: TapeRow<'a>) -> Self::Acc<'a> {
         if let Some(n) = v.as_float() { acc.0 += n; acc.1 += 1; }
         acc
     }
-    fn finalise<'a>(_: &'a Arena, acc: Self::Acc) -> BVal<'a> {
+    fn finalise<'a>(_: &'a Arena, acc: Self::Acc<'a>) -> BVal<'a> {
         if acc.1 == 0 { BVal::Null } else { BVal::Float(acc.0 / acc.1 as f64) }
+    }
+}
+
+// ── Phase 2: materialising sinks (First/Last/Collect) ──────────────
+
+pub struct FirstSinkT;
+impl TapeSinkT for FirstSinkT {
+    type Acc<'a> = Option<BVal<'a>>;
+    #[inline] fn init<'a>() -> Self::Acc<'a> { None }
+    #[inline] fn fold<'a>(arena: &'a Arena, acc: Self::Acc<'a>, v: TapeRow<'a>) -> Self::Acc<'a> {
+        if acc.is_some() { acc } else { Some(v.materialise_into(arena)) }
+    }
+    #[inline] fn finalise<'a>(_: &'a Arena, acc: Self::Acc<'a>) -> BVal<'a> {
+        acc.unwrap_or(BVal::Null)
+    }
+}
+
+pub struct LastSinkT;
+impl TapeSinkT for LastSinkT {
+    type Acc<'a> = Option<BVal<'a>>;
+    #[inline] fn init<'a>() -> Self::Acc<'a> { None }
+    #[inline] fn fold<'a>(arena: &'a Arena, _: Self::Acc<'a>, v: TapeRow<'a>) -> Self::Acc<'a> {
+        Some(v.materialise_into(arena))
+    }
+    #[inline] fn finalise<'a>(_: &'a Arena, acc: Self::Acc<'a>) -> BVal<'a> {
+        acc.unwrap_or(BVal::Null)
+    }
+}
+
+pub struct CollectSinkT;
+impl TapeSinkT for CollectSinkT {
+    type Acc<'a> = Vec<BVal<'a>>;
+    #[inline] fn init<'a>() -> Self::Acc<'a> { Vec::new() }
+    #[inline] fn fold<'a>(arena: &'a Arena, mut acc: Self::Acc<'a>, v: TapeRow<'a>) -> Self::Acc<'a> {
+        acc.push(v.materialise_into(arena)); acc
+    }
+    #[inline] fn finalise<'a>(arena: &'a Arena, acc: Self::Acc<'a>) -> BVal<'a> {
+        let slice = arena.alloc_slice_fill_iter(acc.into_iter());
+        BVal::Arr(&*slice)
     }
 }
 
@@ -393,7 +434,7 @@ pub fn run_pipeline_t<'a, S: TapeSinkT>(
     arr_idx: u32,
     stages: &dyn TapeStageT,
 ) -> BVal<'a> {
-    let mut acc = S::init();
+    let mut acc: S::Acc<'a> = S::init();
     let i = arr_idx as usize;
     let len = match tape.nodes[i] {
         TapeNode::Array { len, .. } => len as usize,
@@ -403,7 +444,7 @@ pub fn run_pipeline_t<'a, S: TapeSinkT>(
     for _ in 0..len {
         let cur = TapeRow::new(tape, j as u32);
         match stages.apply(cur) {
-            TapeStageOutputT::Pass(p) => acc = S::fold(acc, p),
+            TapeStageOutputT::Pass(p) => acc = S::fold(arena, acc, p),
             TapeStageOutputT::Filtered => {}
             TapeStageOutputT::Done => break,
         }
@@ -501,6 +542,90 @@ mod tests {
         assert!(matches!(mn, BVal::Int(2)));
         assert!(matches!(mx, BVal::Int(9)));
         match av { BVal::Float(f) => assert!((f - 5.4).abs() < 1e-9), _ => panic!("avg") }
+    }
+
+    #[test]
+    fn first_sink_real() {
+        let doc = br#"{"a":[10,20,30,40]}"#;
+        let tape = parse_doc(doc);
+        let arena = Arena::new();
+        let arr_idx = crate::strref::tape_walk_field_chain(&tape, &["a"]).unwrap();
+        let out = run_pipeline_t::<FirstSinkT>(&arena, &tape, arr_idx as u32, &IdentityT);
+        assert!(matches!(out, BVal::Int(10)), "got {:?}", out);
+    }
+
+    #[test]
+    fn last_sink_real() {
+        let doc = br#"{"a":[10,20,30,40]}"#;
+        let tape = parse_doc(doc);
+        let arena = Arena::new();
+        let arr_idx = crate::strref::tape_walk_field_chain(&tape, &["a"]).unwrap();
+        let out = run_pipeline_t::<LastSinkT>(&arena, &tape, arr_idx as u32, &IdentityT);
+        assert!(matches!(out, BVal::Int(40)), "got {:?}", out);
+    }
+
+    #[test]
+    fn collect_sink_real() {
+        let doc = br#"{"a":[1,2,3,4,5]}"#;
+        let tape = parse_doc(doc);
+        let arena = Arena::new();
+        let arr_idx = crate::strref::tape_walk_field_chain(&tape, &["a"]).unwrap();
+        let out = run_pipeline_t::<CollectSinkT>(&arena, &tape, arr_idx as u32, &IdentityT);
+        match out {
+            BVal::Arr(arr) => {
+                assert_eq!(arr.len(), 5);
+                for (i, v) in arr.iter().enumerate() {
+                    assert!(matches!(v, BVal::Int(n) if *n == (i + 1) as i64));
+                }
+            }
+            _ => panic!("got {:?}", out),
+        }
+    }
+
+    #[test]
+    fn collect_with_filter_and_map_field() {
+        let doc = br#"{"orders":[{"id":1,"v":10},{"id":2,"v":20},{"id":3,"v":30}]}"#;
+        let tape = parse_doc(doc);
+        let arena = Arena::new();
+        let arr_idx = crate::strref::tape_walk_field_chain(&tape, &["orders"]).unwrap();
+        let stages = ComposedT {
+            a: FilterT { pred: |v: &TapeRow<'_>| {
+                v.get_field("v").and_then(|c| c.as_int()).map_or(false, |n| n >= 20)
+            }},
+            b: MapFieldT { field: Arc::from("id") },
+        };
+        let out = run_pipeline_t::<CollectSinkT>(&arena, &tape, arr_idx as u32, &stages);
+        match out {
+            BVal::Arr(arr) => {
+                assert_eq!(arr.len(), 2);
+                assert!(matches!(arr[0], BVal::Int(2)));
+                assert!(matches!(arr[1], BVal::Int(3)));
+            }
+            _ => panic!("got {:?}", out),
+        }
+    }
+
+    #[test]
+    fn first_with_filter_short_circuits() {
+        let doc = br#"{"orders":[{"v":1},{"v":2},{"v":3},{"v":4}]}"#;
+        let tape = parse_doc(doc);
+        let arena = Arena::new();
+        let arr_idx = crate::strref::tape_walk_field_chain(&tape, &["orders"]).unwrap();
+        // Filter v >= 3 then First — result should be {v: 3}
+        let stages = FilterT {
+            pred: |x: &TapeRow<'_>| {
+                x.get_field("v").and_then(|c| c.as_int()).map_or(false, |n| n >= 3)
+            }
+        };
+        let out = run_pipeline_t::<FirstSinkT>(&arena, &tape, arr_idx as u32, &stages);
+        match out {
+            BVal::Obj(entries) => {
+                assert_eq!(entries.len(), 1);
+                assert_eq!(entries[0].0, "v");
+                assert!(matches!(entries[0].1, BVal::Int(3)));
+            }
+            _ => panic!("got {:?}", out),
+        }
     }
 
     #[test]

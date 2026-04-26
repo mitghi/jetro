@@ -67,6 +67,8 @@ pub mod composed_borrow;
 pub mod pipeline_borrow;
 #[cfg(feature = "simd-json")]
 pub mod composed_tape;
+#[cfg(feature = "simd-json")]
+pub mod pipeline_tape_borrow;
 
 #[cfg(test)]
 mod tests;
@@ -1176,8 +1178,20 @@ impl Jetro {
                     if let Some(out) = bytescan::try_run_borrow(p, raw.as_ref(), arena) {
                         return out;
                     }
-                    // Phase 3 wire-in — composed_borrow path is NOT
-                    // wired in by default and the env gate is removed.
+                    // Phase 3 wire-in (composed_tape) — runs after
+                    // bytescan_borrow declines.  Reuses the cached
+                    // tape (lazy_tape) so no re-parse cost; emits
+                    // BVal<'a> directly without materialising a Val
+                    // tree.  Closes the gap pipeline_borrow couldn't:
+                    // string-lit filters + Sink::Numeric/Count/First/
+                    // Last/Collect on non-bytescannable shapes.
+                    if let Some(tape) = self.lazy_tape() {
+                        if let Some(out) = pipeline_tape_borrow::try_run_borrow_tape(p, tape, arena) {
+                            return out;
+                        }
+                    }
+                    // composed_borrow path is NOT wired in by default
+                    // (kept for direct testing only).
                     // Reason: pipeline_borrow::try_run_borrow does a
                     // full `from_json_simd_arena` parse (~3.7 ms on
                     // 1.1 MB) before running the borrowed Stage chain.
