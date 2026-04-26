@@ -1146,7 +1146,31 @@ fn drop_dead_pure_stages_kernels(
 }
 
 /// Phase 4 with kernel-array shadowing — drops/merges kernels in lockstep.
+/// Algebraic identities + idempotence:
+///   Reverse ∘ Reverse → identity
+///   Skip(a) ∘ Skip(b) → Skip(a+b)
+///   Take(a) ∘ Take(b) → Take(min(a,b))
+///   Sort(_) ∘ Sort(k) → Sort(k)              (right wins)
+///   UniqueBy(_) ∘ UniqueBy(k) → UniqueBy(k)  (right wins)
+///   Filter(ConstBool(true))  → identity      (drop)
+///   Filter(ConstBool(false)) → empty pipeline (handled by caller)
 fn fold_merge_with_kernels(stages: &mut Vec<Stage>, kernels: &mut Vec<BodyKernel>) {
+    // Pre-pass: drop Filter(ConstBool(true)) stages.  Filter(false) leaves
+    // the stage in place; rewrite_step still handles short-circuit on
+    // Filter(false) by clearing pipeline + swapping sink.
+    let mut i = 0;
+    while i < stages.len() {
+        if matches!(&stages[i], Stage::Filter(_))
+            && matches!(kernels.get(i), Some(BodyKernel::ConstBool(true)))
+        {
+            stages.remove(i);
+            kernels.remove(i);
+        } else {
+            i += 1;
+        }
+    }
+
+    // Adjacent-pair merges.
     let mut i = 0;
     while i + 1 < stages.len() {
         let merged = match (&stages[i], &stages[i + 1]) {
@@ -1155,6 +1179,17 @@ fn fold_merge_with_kernels(stages: &mut Vec<Stage>, kernels: &mut Vec<BodyKernel
                 Some(Some(Stage::Skip(a.saturating_add(*b)))),
             (Stage::Take(a), Stage::Take(b)) =>
                 Some(Some(Stage::Take((*a).min(*b)))),
+            // Sort idempotence — rightmost key wins (overrides earlier).
+            (Stage::Sort(_), Stage::Sort(_)) => {
+                stages.remove(i);
+                kernels.remove(i);
+                continue;
+            }
+            (Stage::UniqueBy(_), Stage::UniqueBy(_)) => {
+                stages.remove(i);
+                kernels.remove(i);
+                continue;
+            }
             _ => None,
         };
         if let Some(replacement) = merged {
@@ -1406,18 +1441,33 @@ impl Pipeline {
             sink_kernels:  Vec::new(),
         };
         rewrite(&mut p);
-        // Phase A3 — classify per-stage and per-sink sub-programs once
-        // post-rewrite.  Per-row pull loop reads these hints to choose
-        // a specialised inline path vs the generic vm.exec fallback.
-        p.stage_kernels = p.stages.iter().map(|s| match s {
-            Stage::Filter(p)        => BodyKernel::classify(p),
-            Stage::Map(p)           => BodyKernel::classify(p),
-            Stage::FlatMap(p)       => BodyKernel::classify(p),
-            Stage::UniqueBy(Some(p))=> BodyKernel::classify(p),
-            Stage::GroupBy(p)       => BodyKernel::classify(p),
-            Stage::Sort(Some(p))    => BodyKernel::classify(p),
-            _                       => BodyKernel::Generic,
-        }).collect();
+        // Phase A3 — classify per-stage sub-programs.  Per-row pull loop
+        // reads these hints to choose a specialised inline path vs the
+        // generic vm.exec fallback.  Also drives Step 3d Phase 3 reorder.
+        let classify_kernels = |stages: &[Stage]| -> Vec<BodyKernel> {
+            stages.iter().map(|s| match s {
+                Stage::Filter(p)        => BodyKernel::classify(p),
+                Stage::Map(p)           => BodyKernel::classify(p),
+                Stage::FlatMap(p)       => BodyKernel::classify(p),
+                Stage::UniqueBy(Some(p))=> BodyKernel::classify(p),
+                Stage::GroupBy(p)       => BodyKernel::classify(p),
+                Stage::Sort(Some(p))    => BodyKernel::classify(p),
+                _                       => BodyKernel::Generic,
+            }).collect()
+        };
+        let kernels = classify_kernels(&p.stages);
+
+        // Step 3d planning — Phase 2/3/4 transforms with kernel-aware
+        // cost/selectivity.  Result.stages / Result.sink replace the
+        // pre-plan values.  Phase 1 + Phase 5 (demand prop, strategy
+        // selection) re-runs at exec time on the final shape.
+        let plan_result = plan_with_kernels(p.stages.clone(), &kernels, p.sink.clone());
+        p.stages = plan_result.stages;
+        p.sink   = plan_result.sink;
+
+        // Re-classify post-plan since Phase 4 merges may have produced
+        // new sub-programs (e.g. Map+Map → field-chain-Map).
+        p.stage_kernels = classify_kernels(&p.stages);
         // No fused-Sink kernels — base sinks have no sub-programs.
         p.sink_kernels = Vec::new();
         Some(p)
@@ -1454,76 +1504,48 @@ fn rewrite(p: &mut Pipeline) {
 
 /// One round of the rewrite loop.  Returns `true` if any rule fired,
 /// `false` if the pipeline is at a local fixed point.
+///
+/// Most algebraic rules deleted in the Step 1+2 mop-up — Step 3d
+/// `plan_with_kernels()` (called from `lower_with_reason`) now subsumes:
+///   - Filter(true) → identity                     (Phase 4 const-fold)
+///   - Skip+Skip / Take+Take / Reverse∘Reverse     (Phase 4)
+///   - Sort∘Sort / UniqueBy∘UniqueBy idempotence   (Phase 4)
+///   - Map∘Count drop                              (Phase 2)
+///   - Filter run reorder by selectivity           (Phase 3)
+///
+/// What remains here:
+///   - Filter(false) → empty pipeline.  Phase 4 doesn't have access to
+///     the Sink to swap to its identity-element form, so this stays.
+///   - Map(f) ∘ Filter(g) ∘ Filter(h) etc.: the kernel-aware Filter+
+///     Filter merge via `Opcode::AndOp` and the Map+Map field-chain
+///     fusion — both build new `vm::Program`s, which the Phase 4
+///     stage-only API can't do without a wider rewrite.  Kept here.
+///   - Map ∘ Take pushdown: still strictly correct + a perf win, kept.
 fn rewrite_step(p: &mut Pipeline) -> bool {
     use crate::vm::Opcode;
 
-    // ── Constant-fold rules on Filter ────────────────────────────────────
-    //
-    // Rule:  Filter(true)  → id        (drop the stage)
-    // Rule:  Filter(false) → Empty     (replace remaining pipeline with
-    //                                   the sink's empty-input result)
-    let mut const_remove_at: Option<(usize, bool)> = None;
+    // Filter(false) → empty pipeline.  Filter(true) handled by Phase 4.
+    let mut const_false_at: Option<usize> = None;
     for (i, s) in p.stages.iter().enumerate() {
         if let Stage::Filter(prog) = s {
-            if let Some(b) = prog_const_bool(prog) {
-                const_remove_at = Some((i, b));
+            if let Some(false) = prog_const_bool(prog) {
+                const_false_at = Some(i);
                 break;
             }
         }
     }
-    if let Some((i, b)) = const_remove_at {
-        if b {
-            p.stages.remove(i);
-        } else {
-            // Filter(false) — pipeline yields zero elements.
-            p.stages.clear();
-            p.sink = empty_sink_for(&p.sink);
-        }
+    if let Some(_) = const_false_at {
+        p.stages.clear();
+        p.sink = empty_sink_for(&p.sink);
         return true;
     }
 
-    // ── Adjacent-stage merges ───────────────────────────────────────────
-    //
-    // Rule:  Skip(a) ∘ Skip(b) → Skip(a + b)
-    // Rule:  Take(a) ∘ Take(b) → Take(min(a, b))
-    // Rule:  Reverse ∘ Reverse → id
-    // Rule:  Sort(_) ∘ Sort(k) → Sort(k)        (idempotent)
-    // Rule:  UniqueBy(_) ∘ UniqueBy(k) → UniqueBy(k)
-    // Rule:  Filter(p) ∘ Filter(q) → Filter(p ∧ q)
+    // Filter+Filter → AndOp-merged Filter (kernel-aware vm::Program build).
+    // Map+Map → FieldChain Map (kernel-aware vm::Program build).
+    // Both construct new programs — keep here until Phase 4 gains a
+    // program-building API.
     for i in 0..p.stages.len().saturating_sub(1) {
         match (&p.stages[i], &p.stages[i + 1]) {
-            (Stage::Skip(a), Stage::Skip(b)) => {
-                let merged = a.saturating_add(*b);
-                p.stages[i] = Stage::Skip(merged);
-                p.stages.remove(i + 1);
-                return true;
-            }
-            (Stage::Take(a), Stage::Take(b)) => {
-                let merged = (*a).min(*b);
-                p.stages[i] = Stage::Take(merged);
-                p.stages.remove(i + 1);
-                return true;
-            }
-            (Stage::Reverse, Stage::Reverse) => {
-                // Reverse ∘ Reverse cancels — drop both stages.
-                p.stages.drain(i..=i + 1);
-                return true;
-            }
-            (Stage::Sort(_), Stage::Sort(_)) => {
-                // The right-most sort wins (idempotent for same key,
-                // overrides for different key).
-                p.stages.remove(i);
-                return true;
-            }
-            (Stage::UniqueBy(_), Stage::UniqueBy(_)) => {
-                p.stages.remove(i);
-                return true;
-            }
-            // Phase B3 — kernel-level loop fusion: Map(field-read) ∘
-            // Map(field-read) collapses to one FieldChain Map.  This
-            // is mechanical translation via the kernel classifier —
-            // no per-shape hand-coding.  Same primitive covers chain
-            // ∘ read / read ∘ chain / chain ∘ chain.
             (Stage::Map(a_prog), Stage::Map(b_prog)) => {
                 let ka = BodyKernel::classify(a_prog);
                 let kb = BodyKernel::classify(b_prog);
@@ -1562,8 +1584,6 @@ fn rewrite_step(p: &mut Pipeline) -> bool {
                 }
             }
             (Stage::Filter(p_prog), Stage::Filter(q_prog)) => {
-                // Combine via VM-level AndOp embedding; avoids
-                // re-compiling the merged predicate.
                 let mut ops: Vec<Opcode> = p_prog.ops.as_ref().to_vec();
                 ops.push(Opcode::AndOp(Arc::clone(q_prog)));
                 let merged = Arc::new(crate::vm::Program {
@@ -1581,11 +1601,8 @@ fn rewrite_step(p: &mut Pipeline) -> bool {
         }
     }
 
-    // ── Pushdown: Map(f) ∘ Take(n)  →  Take(n) ∘ Map(f) ────────────────
-    // Run the map only on the first `n` items.  Stage order in `stages`
-    // is left-to-right (apply 0 first), so detect [Map, Take] and
-    // swap to [Take, Map]. Strict perf win — composed exec then runs
-    // map only `n` times per call instead of full-stream.
+    // Pushdown: Map(f) ∘ Take(n) → Take(n) ∘ Map(f).
+    // Strict perf win — composed exec runs map only n times.
     for i in 0..p.stages.len().saturating_sub(1) {
         if matches!(&p.stages[i], Stage::Map(_))
             && matches!(&p.stages[i + 1], Stage::Take(_)) {
@@ -1593,23 +1610,6 @@ fn rewrite_step(p: &mut Pipeline) -> bool {
             return true;
         }
     }
-
-    // ── Drop pure Map before Count ─────────────────────────────────────
-    // Rule:  Map(f) ∘ Count → Count
-    // Strict perf win — composed exec doesn't run the dropped Map.
-    if matches!(&p.sink, Sink::Count) {
-        if matches!(p.stages.last(), Some(Stage::Map(_))) {
-            p.stages.pop();
-            return true;
-        }
-    }
-
-    // No fused-Sink rules below this point — Layer B + Step 3 substrate
-    // recognise base Stage chain + base Sink shapes directly via
-    // `Pipeline::canonical()` and dispatch the same fast paths
-    // (objvec_num_slot, objvec_filter_count_slot, run_pipeline_tape, …).
-    // The fused Sink variants themselves are kept in the enum until
-    // the upcoming mechanical sweep deletes their consumer match arms.
 
     false
 }
