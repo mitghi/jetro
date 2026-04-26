@@ -1092,21 +1092,6 @@ fn rewrite_step(p: &mut Pipeline) -> bool {
         }
     }
 
-    // ── Layer B gate ─────────────────────────────────────────────────────
-    //
-    // Below this point: rules that fuse stages into specialised Sink
-    // variants (NumFilterMap, NumMap, CountIf, FilterFirst/Last,
-    // FirstMap/LastMap, UniqueCount, FlatMapCount, MinBy, MaxBy,
-    // TopN, Numeric(Min/Max) via Sort∘First/Last).
-    //
-    // When `JETRO_COMPOSED=1`, skip these. Pipeline keeps its base
-    // Stage chain + base Sink shape; `try_run_composed` runs it via
-    // composition. Tier 3 deletes the fused Sink variants + these
-    // rules entirely once Layer B bench-greens across all shapes.
-    if composed_path_enabled() {
-        return false;
-    }
-
     // ── Sort-into-aggregate fold rules ───────────────────────────────────
     //
     // Rule:  Sort ∘ First           → Min          (natural-cmp sort)
@@ -2163,6 +2148,94 @@ impl Pipeline {
         use std::cell::{Cell, RefCell};
         use std::rc::Rc;
 
+        // Decompose fused Sinks into base Stage chain + base Sink so
+        // the composed substrate runs them uniformly. One match arm
+        // per fused variant; result is a (stages, sink) pair that
+        // mirrors the pre-fusion form. No per-shape exec code — same
+        // generic pipeline handles every result. Tier 3 deletes the
+        // fused Sink variants + this decomposition together.
+        let (eff_stages, eff_kernels, eff_sink): (Vec<Stage>, Vec<BodyKernel>, Sink) = {
+            let mut stages = self.stages.clone();
+            let mut kernels = self.stage_kernels.clone();
+            let sink = match &self.sink {
+                Sink::NumMap(op, prog) => {
+                    stages.push(Stage::Map(Arc::clone(prog)));
+                    kernels.push(BodyKernel::classify(prog));
+                    Sink::Numeric(*op)
+                }
+                Sink::NumFilterMap(op, pred, map) => {
+                    stages.push(Stage::Filter(Arc::clone(pred)));
+                    kernels.push(BodyKernel::classify(pred));
+                    stages.push(Stage::Map(Arc::clone(map)));
+                    kernels.push(BodyKernel::classify(map));
+                    Sink::Numeric(*op)
+                }
+                Sink::CountIf(prog) => {
+                    stages.push(Stage::Filter(Arc::clone(prog)));
+                    kernels.push(BodyKernel::classify(prog));
+                    Sink::Count
+                }
+                Sink::FilterFirst(prog) => {
+                    stages.push(Stage::Filter(Arc::clone(prog)));
+                    kernels.push(BodyKernel::classify(prog));
+                    Sink::First
+                }
+                Sink::FilterLast(prog) => {
+                    stages.push(Stage::Filter(Arc::clone(prog)));
+                    kernels.push(BodyKernel::classify(prog));
+                    Sink::Last
+                }
+                Sink::FirstMap(prog) => {
+                    stages.push(Stage::Map(Arc::clone(prog)));
+                    kernels.push(BodyKernel::classify(prog));
+                    Sink::First
+                }
+                Sink::LastMap(prog) => {
+                    stages.push(Stage::Map(Arc::clone(prog)));
+                    kernels.push(BodyKernel::classify(prog));
+                    Sink::Last
+                }
+                Sink::FlatMapCount(prog) => {
+                    stages.push(Stage::FlatMap(Arc::clone(prog)));
+                    kernels.push(BodyKernel::classify(prog));
+                    Sink::Count
+                }
+                Sink::UniqueCount => {
+                    stages.push(Stage::UniqueBy(None));
+                    kernels.push(BodyKernel::Generic);
+                    Sink::Count
+                }
+                Sink::MinBy(key) => {
+                    stages.push(Stage::Sort(Some(Arc::clone(key))));
+                    kernels.push(BodyKernel::classify(key));
+                    Sink::First
+                }
+                Sink::MaxBy(key) => {
+                    stages.push(Stage::Sort(Some(Arc::clone(key))));
+                    kernels.push(BodyKernel::classify(key));
+                    Sink::Last
+                }
+                Sink::TopN { n, asc, key } => {
+                    if let Some(k) = key {
+                        stages.push(Stage::Sort(Some(Arc::clone(k))));
+                        kernels.push(BodyKernel::classify(k));
+                    } else {
+                        stages.push(Stage::Sort(None));
+                        kernels.push(BodyKernel::Generic);
+                    }
+                    if !*asc {
+                        stages.push(Stage::Reverse);
+                        kernels.push(BodyKernel::Generic);
+                    }
+                    stages.push(Stage::Take(*n));
+                    kernels.push(BodyKernel::Generic);
+                    Sink::Collect
+                }
+                base => base.clone(),
+            };
+            (stages, kernels, sink)
+        };
+
         // Shared VM + Env for any Generic-kernel stage in the chain.
         // Constructed once per call so compile/path caches amortise.
         // Lazy: only built if a Generic stage actually appears.
@@ -2176,9 +2249,9 @@ impl Pipeline {
             Rc::clone(vm_ctx.get_or_init(make_ctx))
         };
 
-        // Sink mapping — base sinks only. Fused sinks bail (Tier 3).
+        // Sink mapping — operates on the post-decomposition base sink.
         enum SinkKind { Count, Sum, Min, Max, Avg, First, Last, Collect, GroupByOnly }
-        let sink_kind = match &self.sink {
+        let sink_kind = match &eff_sink {
             Sink::Collect => SinkKind::Collect,
             Sink::Count => SinkKind::Count,
             Sink::Numeric(NumOp::Sum) => SinkKind::Sum,
@@ -2187,9 +2260,9 @@ impl Pipeline {
             Sink::Numeric(NumOp::Avg) => SinkKind::Avg,
             Sink::First => SinkKind::First,
             Sink::Last => SinkKind::Last,
-            _ => return None, // fused sink — fallback
+            _ => return None,
         };
-        let _ = SinkKind::GroupByOnly; // silence unused if sole-use removed later
+        let _ = SinkKind::GroupByOnly;
 
         // Build a `KeySource` from a barrier-style kernel. Returns None
         // when the kernel is computed (Arith/FString/Generic) — caller
@@ -2258,13 +2331,14 @@ impl Pipeline {
         // Vec. Final segment uses the actual sink. GroupBy is treated
         // as a barrier whose output Val replaces the buffer (used
         // only when followed by no further stages + Sink::Collect).
-        let kernels = &self.stage_kernels;
+        let kernels = &eff_kernels;
+        let stages_ref = &eff_stages;
 
         // Find barrier positions. Each [last_split..barrier_idx] is a
         // streaming segment; [barrier_idx] is the barrier op.
         let mut last_split = 0usize;
         let mut group_by_seen: Option<usize> = None;
-        for (i, s) in self.stages.iter().enumerate() {
+        for (i, s) in stages_ref.iter().enumerate() {
             let is_barrier = matches!(s,
                 Stage::Reverse | Stage::Sort(_) | Stage::UniqueBy(_) |
                 Stage::GroupBy(_));
@@ -2274,7 +2348,7 @@ impl Pipeline {
             if i > last_split {
                 let mut chain: Box<dyn ComposedStage> = Box::new(cmp::Identity);
                 for j in last_split..i {
-                    let stage = &self.stages[j];
+                    let stage = &stages_ref[j];
                     let kernel = kernels.get(j).unwrap_or(&BodyKernel::Generic);
                     let next = build_stream_stage(stage, kernel)?;
                     chain = Box::new(cmp::Composed { a: chain, b: next });
@@ -2302,10 +2376,8 @@ impl Pipeline {
                     cmp::barrier_unique_by(buf, &key)
                 }
                 Stage::GroupBy(_) => {
-                    // GroupBy yields a Val::Obj; only valid as the last
-                    // op before a Collect sink.
-                    if !matches!(self.sink, Sink::Collect) { return None; }
-                    if i + 1 != self.stages.len() { return None; }
+                    if !matches!(eff_sink, Sink::Collect) { return None; }
+                    if i + 1 != stages_ref.len() { return None; }
                     let key = key_from_kernel(kernel)?;
                     let val = cmp::barrier_group_by(buf, &key);
                     group_by_seen = Some(i);
@@ -2320,8 +2392,8 @@ impl Pipeline {
 
         // Final streaming segment + sink.
         let mut chain: Box<dyn ComposedStage> = Box::new(cmp::Identity);
-        for j in last_split..self.stages.len() {
-            let stage = &self.stages[j];
+        for j in last_split..stages_ref.len() {
+            let stage = &stages_ref[j];
             let kernel = kernels.get(j).unwrap_or(&BodyKernel::Generic);
             let next = build_stream_stage(stage, kernel)?;
             chain = Box::new(cmp::Composed { a: chain, b: next });
@@ -2353,19 +2425,23 @@ impl Pipeline {
         root: &Val,
         cache: Option<&dyn ObjVecPromoter>,
     ) -> Result<Val, EvalError> {
-        // Layer B — composed-Cow Stage chain. Opt-in under
-        // `JETRO_COMPOSED=1`. Returns None for shapes the composed
-        // path doesn't yet cover (fused Sinks, non-borrow stage
-        // bodies, barriers); legacy run_with handles those.
-        if composed_path_enabled() {
-            if let Some(out) = self.try_run_composed(root) { return out; }
-        }
-
         // Phase 3 columnar fast path — runs before per-row loop.
+        // Critical for Q12/Q15-class queries: ObjVec promotion +
+        // typed-column slot kernels reach native parity. Composed
+        // path runs AFTER, as fallback for the per-row generic case.
         if let Some(out) = self.try_columnar_with(root, cache) { return out; }
         // Fall back to legacy try_columnar (no cache).
         if cache.is_none() {
             if let Some(out) = self.try_columnar(root) { return out; }
+        }
+
+        // Layer B — composed-Cow Stage chain. Opt-in under
+        // `JETRO_COMPOSED=1`. Replaces the legacy per-row loop for
+        // pipelines whose shape composed handles. Decomposes fused
+        // Sinks (NumMap/NumFilterMap/CountIf/etc.) into base Stage +
+        // base Sink at entry — composition handles the rest.
+        if composed_path_enabled() {
+            if let Some(out) = self.try_run_composed(root) { return out; }
         }
 
         // One VM owned by the pull loop — shared across stage program
