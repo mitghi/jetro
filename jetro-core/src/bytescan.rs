@@ -997,23 +997,3 @@ fn parse_int_branchless(b: &[u8], i: usize) -> Option<(usize, i64)> {
     Some((j, if neg { -acc } else { acc }))
 }
 
-/// Branchless integer parser hot path — used in template walker.
-/// Skips std::str::parse dispatch + utf8 check.
-#[inline(always)]
-fn parse_int_fast(b: &[u8]) -> Option<(usize, i64)> {
-    if b.is_empty() { return None; }
-    let mut j = 0;
-    let neg = b[0] == b'-';
-    if neg { j += 1; }
-    let start = j;
-    let mut acc: i64 = 0;
-    while j < b.len() {
-        let c = b[j];
-        if c.wrapping_sub(b'0') < 10 {
-            acc = acc.wrapping_mul(10).wrapping_add((c - b'0') as i64);
-            j += 1;
-        } else { break; }
-    }
-    if j == start { return None; }
-    Some((j, if neg { -acc } else { acc }))
-}

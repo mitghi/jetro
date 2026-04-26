@@ -3224,29 +3224,6 @@ impl Compiler {
         }
     }
 
-    fn emit_bind(target: &BindTarget, ctx: &mut VarCtx, ops: &mut Vec<Opcode>) {
-        match target {
-            BindTarget::Name(name) => {
-                ops.push(Opcode::BindVar(Arc::from(name.as_str())));
-                *ctx = ctx.with_var(name);
-            }
-            BindTarget::Obj { fields, rest } => {
-                let spec = BindObjSpec {
-                    fields: fields.iter().map(|f| Arc::from(f.as_str())).collect::<Vec<_>>().into(),
-                    rest: rest.as_ref().map(|r| Arc::from(r.as_str())),
-                };
-                ops.push(Opcode::BindObjDestructure(Arc::new(spec)));
-                for f in fields { *ctx = ctx.with_var(f); }
-                if let Some(r) = rest { *ctx = ctx.with_var(r); }
-            }
-            BindTarget::Arr(names) => {
-                let ns: Vec<Arc<str>> = names.iter().map(|n| Arc::from(n.as_str())).collect();
-                ops.push(Opcode::BindArrDestructure(ns.into()));
-                for n in names { *ctx = ctx.with_var(n); }
-            }
-        }
-    }
-
     fn compile_sub(expr: &Expr, ctx: &VarCtx) -> Program {
         let ops = Self::optimize(Self::emit(expr, ctx));
         Program::new(ops, "<sub>")
