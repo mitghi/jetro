@@ -426,6 +426,39 @@ mod tests {
     }
 
     #[test]
+    fn owned_val_with_filter_field_eq_lit_via_unified() {
+        // Owned Val + FilterFieldEqLit (no VM) via unified runner.
+        // Proves owned-substrate VM-driven stages now plug into the
+        // unified runner without porting their bodies.
+        use crate::eval::Val as OV;
+        use crate::eval::borrowed::Arena;
+        use crate::composed::FilterFieldEqLit;
+        use crate::unified::{run_pipeline, CountSink};
+        use indexmap::IndexMap;
+        use std::sync::Arc;
+
+        let mut row1 = IndexMap::new();
+        row1.insert(Arc::from("k"), OV::Str(Arc::from("a")));
+        let mut row2 = IndexMap::new();
+        row2.insert(Arc::from("k"), OV::Str(Arc::from("b")));
+        let mut row3 = IndexMap::new();
+        row3.insert(Arc::from("k"), OV::Str(Arc::from("a")));
+        let rows: Vec<OV> = vec![
+            OV::Obj(Arc::new(row1)),
+            OV::Obj(Arc::new(row2)),
+            OV::Obj(Arc::new(row3)),
+        ];
+
+        let arena = Arena::new();
+        let stage = FilterFieldEqLit {
+            field: Arc::from("k"),
+            target: OV::Str(Arc::from("a")),
+        };
+        let out = run_pipeline::<OV, CountSink>(&arena, rows.into_iter(), &stage);
+        assert!(matches!(out, BVal::Int(2)), "got {:?}", out);
+    }
+
+    #[test]
     fn owned_val_implements_row() {
         use crate::eval::Val as OV;
         use indexmap::IndexMap;

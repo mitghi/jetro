@@ -2220,6 +2220,94 @@ impl<R> crate::unified::Stage<R> for Skip {
     }
 }
 
+// VM-driven Stage<R> impls — gated to R = `Val` (owned).  These
+// stages call the VM, which expects owned `Val` bindings.  For the
+// owned substrate (Pipeline::run_with → Phase 5f), R = Val and these
+// impls let try_run_composed lower into unified::Stage<Val> chains.
+//
+// Borrowed substrates (BVal / TapeRow) don't reach Generic-kernel
+// stages — bytescan + closure-based Filter cover their lowering.
+// FilterFieldEqLit is owned-only (relies on owned Val literal compare
+// shape used by composed::FilterFieldEqLit's struct).
+
+impl crate::unified::Stage<crate::eval::Val> for GenericFilter {
+    fn apply(&self, x: crate::eval::Val) -> crate::unified::StageOutputU<crate::eval::Val> {
+        let mut c = self.ctx.borrow_mut();
+        let VmCtx { vm, env } = &mut *c;
+        let prev = env.swap_current(x.clone());
+        let r = vm.exec_in_env(&self.prog, env);
+        env.restore_current(prev);
+        match r {
+            Ok(v) if crate::eval::util::is_truthy(&v) => crate::unified::StageOutputU::Pass(x),
+            _ => crate::unified::StageOutputU::Filtered,
+        }
+    }
+}
+
+impl crate::unified::Stage<crate::eval::Val> for GenericMap {
+    fn apply(&self, x: crate::eval::Val) -> crate::unified::StageOutputU<crate::eval::Val> {
+        let mut c = self.ctx.borrow_mut();
+        let VmCtx { vm, env } = &mut *c;
+        let prev = env.swap_current(x);
+        let r = vm.exec_in_env(&self.prog, env);
+        env.restore_current(prev);
+        match r {
+            Ok(v) => crate::unified::StageOutputU::Pass(v),
+            Err(_) => crate::unified::StageOutputU::Filtered,
+        }
+    }
+}
+
+impl crate::unified::Stage<crate::eval::Val> for GenericFlatMap {
+    fn apply(&self, x: crate::eval::Val) -> crate::unified::StageOutputU<crate::eval::Val> {
+        use crate::eval::Val as OV;
+        let mut c = self.ctx.borrow_mut();
+        let VmCtx { vm, env } = &mut *c;
+        let prev = env.swap_current(x);
+        let r = vm.exec_in_env(&self.prog, env);
+        env.restore_current(prev);
+        let owned = match r { Ok(v) => v, Err(_) => return crate::unified::StageOutputU::Filtered };
+        let mut out: smallvec::SmallVec<[OV; 4]> = smallvec::SmallVec::new();
+        match &owned {
+            OV::Arr(items)        => for it in items.iter() { out.push(it.clone()); },
+            OV::IntVec(items)     => for n in items.iter() { out.push(OV::Int(*n)); },
+            OV::FloatVec(items)   => for f in items.iter() { out.push(OV::Float(*f)); },
+            OV::StrVec(items)     => for s in items.iter() { out.push(OV::Str(std::sync::Arc::clone(s))); },
+            OV::StrSliceVec(items)=> for r in items.iter() { out.push(OV::StrSlice(r.clone())); },
+            _ => return crate::unified::StageOutputU::Filtered,
+        }
+        if out.is_empty() {
+            crate::unified::StageOutputU::Filtered
+        } else if out.len() == 1 {
+            crate::unified::StageOutputU::Pass(out.into_iter().next().unwrap())
+        } else {
+            crate::unified::StageOutputU::Many(out)
+        }
+    }
+}
+
+impl crate::unified::Stage<crate::eval::Val> for FilterFieldEqLit {
+    fn apply(&self, x: crate::eval::Val) -> crate::unified::StageOutputU<crate::eval::Val> {
+        use crate::eval::Val as OV;
+        let v = match &x {
+            OV::Obj(m) => m.get(self.field.as_ref()).cloned().unwrap_or(OV::Null),
+            OV::ObjSmall(pairs) => {
+                let mut found = OV::Null;
+                for (k, v) in pairs.iter() {
+                    if k.as_ref() == self.field.as_ref() { found = v.clone(); break; }
+                }
+                found
+            }
+            _ => return crate::unified::StageOutputU::Filtered,
+        };
+        if vals_eq(&v, &self.target) {
+            crate::unified::StageOutputU::Pass(x)
+        } else {
+            crate::unified::StageOutputU::Filtered
+        }
+    }
+}
+
 // Sink dedup: composed.rs's CountSink/SumSink/MinSink/MaxSink/AvgSink/
 // FirstSink/LastSink/CollectSink also impl `unified::Sink` so the
 // borrow runner reuses the SAME unit-structs rather than maintaining
