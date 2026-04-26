@@ -1097,82 +1097,11 @@ fn rewrite_step(p: &mut Pipeline) -> bool {
         }
     }
 
-    // ── Tier 3 fused-Sink rewrite gate ───────────────────────────────────
-    //
-    // Layer B + Step 3 substrate now consume Pipelines via
-    // `Pipeline::canonical()`, which decomposes any fused Sink into
-    // base Stage chain + base Sink at every consumer site (composed
-    // Val/tape runners, columnar slot-kernel paths). With every
-    // consumer canonical-aware, the rewrite-time fusion below is
-    // dead weight — base form runs through the same fast paths.
-    //
-    // Disabling the rewrite is the prerequisite to deleting the
-    // fused Sink variants entirely. Bench validates Q12/Q15 native
-    // parity holds because `try_columnar_with` matches the canonical
-    // base shape (Sink::Numeric + last Stage::Map(FieldRead)) and
-    // dispatches the same `objvec_num_slot`.
-    if !std::env::var_os("JETRO_KEEP_FUSED_REWRITE").is_some() {
-        return false;
-    }
-
-    // ── Sort-into-aggregate fold rules ───────────────────────────────────
-    //
-    // Rule:  Sort ∘ First           → Min          (natural-cmp sort)
-    // Rule:  Sort ∘ Last            → Max
-    // Rule:  Sort_by(k) ∘ First     → MinBy(k)     (one-pass argmin)
-    // Rule:  Sort_by(k) ∘ Last      → MaxBy(k)     (one-pass argmax)
-    // Rule:  Sort(_) ∘ Take(n)      → TopN{n}      (heap-based partial
-    //                                                sort, O(N log n))
-    if matches!(&p.sink, Sink::First) {
-        match p.stages.last() {
-            Some(Stage::Sort(None)) => {
-                p.stages.pop();
-                p.sink = Sink::Numeric(NumOp::Min);
-                return true;
-            }
-            Some(Stage::Sort(Some(key_prog))) => {
-                let key = Arc::clone(key_prog);
-                p.stages.pop();
-                p.sink = Sink::MinBy(key);
-                return true;
-            }
-            _ => {}
-        }
-    }
-    if matches!(&p.sink, Sink::Last) {
-        match p.stages.last() {
-            Some(Stage::Sort(None)) => {
-                p.stages.pop();
-                p.sink = Sink::Numeric(NumOp::Max);
-                return true;
-            }
-            Some(Stage::Sort(Some(key_prog))) => {
-                let key = Arc::clone(key_prog);
-                p.stages.pop();
-                p.sink = Sink::MaxBy(key);
-                return true;
-            }
-            _ => {}
-        }
-    }
-    // Sort ∘ Take(n) → TopN.  The Take stage at the end of a stage
-    // list with a Collect sink fuses into TopN-collect.
-    if matches!(&p.sink, Sink::Collect) && p.stages.len() >= 2 {
-        let last = p.stages.len() - 1;
-        let prev = last - 1;
-        if let (Stage::Sort(key), Stage::Take(n)) = (&p.stages[prev], &p.stages[last]) {
-            let n = *n;
-            let key = key.clone();
-            p.stages.truncate(prev);
-            p.sink = Sink::TopN { n, asc: true, key };
-            return true;
-        }
-    }
-
     // ── Pushdown: Map(f) ∘ Take(n)  →  Take(n) ∘ Map(f) ────────────────
     // Run the map only on the first `n` items.  Stage order in `stages`
     // is left-to-right (apply 0 first), so detect [Map, Take] and
-    // swap to [Take, Map].
+    // swap to [Take, Map]. Strict perf win — composed exec then runs
+    // map only `n` times per call instead of full-stream.
     for i in 0..p.stages.len().saturating_sub(1) {
         if matches!(&p.stages[i], Stage::Map(_))
             && matches!(&p.stages[i + 1], Stage::Take(_)) {
@@ -1183,6 +1112,7 @@ fn rewrite_step(p: &mut Pipeline) -> bool {
 
     // ── Drop pure Map before Count ─────────────────────────────────────
     // Rule:  Map(f) ∘ Count → Count
+    // Strict perf win — composed exec doesn't run the dropped Map.
     if matches!(&p.sink, Sink::Count) {
         if matches!(p.stages.last(), Some(Stage::Map(_))) {
             p.stages.pop();
@@ -1190,107 +1120,12 @@ fn rewrite_step(p: &mut Pipeline) -> bool {
         }
     }
 
-    // ── Fused-sink rules over numeric aggregates (sum/min/max/avg) ─────
-    let last_two = if p.stages.len() >= 2 {
-        Some((p.stages.len() - 2, p.stages.len() - 1))
-    } else { None };
-
-    // Rule:  Filter(p) ∘ Map(f) ∘ Numeric(op)  →  NumFilterMap(op, p, f)
-    if let (Some((i_pred, i_map)), Sink::Numeric(op)) = (last_two, &p.sink) {
-        if let (Stage::Filter(pred), Stage::Map(map)) =
-            (&p.stages[i_pred], &p.stages[i_map])
-        {
-            let op   = *op;
-            let pred = Arc::clone(pred);
-            let map  = Arc::clone(map);
-            p.stages.truncate(i_pred);
-            p.sink = Sink::NumFilterMap(op, pred, map);
-            return true;
-        }
-    }
-
-    // Rule:  Map(f) ∘ Numeric(op) → NumMap(op, f)
-    if let (Some(last), Sink::Numeric(op)) = (p.stages.last(), &p.sink) {
-        if let Stage::Map(prog) = last {
-            let op   = *op;
-            let prog = Arc::clone(prog);
-            p.stages.pop();
-            p.sink = Sink::NumMap(op, prog);
-            return true;
-        }
-    }
-
-    // Rule:  Filter(p) ∘ Count → CountIf(p)
-    if let (Some(last), Sink::Count) = (p.stages.last(), &p.sink) {
-        if let Stage::Filter(prog) = last {
-            let prog = Arc::clone(prog);
-            p.stages.pop();
-            p.sink = Sink::CountIf(prog);
-            return true;
-        }
-    }
-
-    // Rule:  Filter(p) ∘ First → FilterFirst(p)
-    if let (Some(last), Sink::First) = (p.stages.last(), &p.sink) {
-        if let Stage::Filter(prog) = last {
-            let prog = Arc::clone(prog);
-            p.stages.pop();
-            p.sink = Sink::FilterFirst(prog);
-            return true;
-        }
-    }
-
-    // Rule:  Filter(p) ∘ Last → FilterLast(p)
-    if let (Some(last), Sink::Last) = (p.stages.last(), &p.sink) {
-        if let Stage::Filter(prog) = last {
-            let prog = Arc::clone(prog);
-            p.stages.pop();
-            p.sink = Sink::FilterLast(prog);
-            return true;
-        }
-    }
-
-    // Rule:  Map(f) ∘ First → FirstMap(f)
-    if let (Some(last), Sink::First) = (p.stages.last(), &p.sink) {
-        if let Stage::Map(prog) = last {
-            let prog = Arc::clone(prog);
-            p.stages.pop();
-            p.sink = Sink::FirstMap(prog);
-            return true;
-        }
-    }
-
-    // Rule:  Map(f) ∘ Last → LastMap(f)
-    if let (Some(last), Sink::Last) = (p.stages.last(), &p.sink) {
-        if let Stage::Map(prog) = last {
-            let prog = Arc::clone(prog);
-            p.stages.pop();
-            p.sink = Sink::LastMap(prog);
-            return true;
-        }
-    }
-
-    // Rule:  Unique ∘ Count → UniqueCount
-    if let (Some(last), Sink::Count) = (p.stages.last(), &p.sink) {
-        if matches!(last, Stage::UniqueBy(None)) {
-            p.stages.pop();
-            p.sink = Sink::UniqueCount;
-            return true;
-        }
-    }
-
-    // Rule:  FlatMap(f) ∘ Count → FlatMapCount(f)
-    // Closes pipeline_ir.md bench item #1 (44× gap).  No need to
-    // materialise the flattened sequence — kernel pulls each yielded
-    // inner element and increments a counter in one pass.
-    if let (Some(last), Sink::Count) = (p.stages.last(), &p.sink) {
-        if let Stage::FlatMap(prog) = last {
-            let prog = Arc::clone(prog);
-            p.stages.pop();
-            p.sink = Sink::FlatMapCount(prog);
-            return true;
-        }
-    }
+    // No fused-Sink rules below this point — Layer B + Step 3 substrate
+    // recognise base Stage chain + base Sink shapes directly via
+    // `Pipeline::canonical()` and dispatch the same fast paths
+    // (objvec_num_slot, objvec_filter_count_slot, run_pipeline_tape, …).
+    // The fused Sink variants themselves are kept in the enum until
+    // the upcoming mechanical sweep deletes their consumer match arms.
 
     false
 }
