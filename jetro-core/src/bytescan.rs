@@ -339,42 +339,6 @@ fn parse_number_inline(b: &[u8], i: usize) -> Option<(usize, Scalar)> {
     Some((k, Scalar::Float(s.parse().ok()?)))
 }
 
-/// Extract catalog fields from one entry Object.  Walks the entry's
-/// keys, parses values for keys whose bytes match a wanted name
-/// (linear bytes-compare, no utf8 conversion), skips everything else.
-/// Per-row cost ~O(N keys × M wanted) byte-compares; M typically ≤ 3.
-fn entry_extract(
-    b: &[u8],
-    obj_start: usize,
-    wanted: &[&[u8]],
-) -> Option<(usize, Vec<Option<Scalar>>)> {
-    if b.get(obj_start) != Some(&b'{') { return None; }
-    let mut i = obj_start + 1;
-    let mut slots: Vec<Option<Scalar>> = vec![None; wanted.len()];
-    loop {
-        i = skip_ws(b, i);
-        if i >= b.len() { return None; }
-        if b[i] == b'}' { return Some((i + 1, slots)); }
-        let (after_key, k) = read_string(b, i)?;
-        i = skip_ws(b, after_key);
-        if b.get(i) != Some(&b':') { return None; }
-        i = skip_ws(b, i + 1);
-        // Byte-equality check against wanted names — no utf8 conversion.
-        let mut hit_slot: Option<usize> = None;
-        for (slot, w) in wanted.iter().enumerate() {
-            if k == *w { hit_slot = Some(slot); break; }
-        }
-        if let Some(slot) = hit_slot {
-            let (next, sc) = parse_primitive(b, i)?;
-            slots[slot] = Some(sc);
-            i = next;
-        } else {
-            i = skip_value(b, i)?;
-        }
-        i = skip_ws(b, i);
-        if i < b.len() && b[i] == b',' { i += 1; }
-    }
-}
 
 /// Direct-key memchr fast path: skip per-key walk by SIMD-searching
 /// for `"<wanted>":` byte patterns inside the entry's byte range.
@@ -554,155 +518,6 @@ fn build_needles(wanted: &[&[u8]]) -> Vec<Vec<u8>> {
     }).collect()
 }
 
-// ── Kernel eval against per-entry slot table ───────────────────────
-
-fn slot_for_kernel_path(name: &str, cat: &Catalog) -> Option<usize> {
-    cat.slot_lookup(name)
-}
-
-fn eval_value_kernel(
-    k: &BodyKernel,
-    slots: &[Option<Scalar>],
-    cat: &Catalog,
-) -> Option<Scalar> {
-    match k {
-        BodyKernel::FieldRead(name) => {
-            let s = slot_for_kernel_path(name.as_ref(), cat)?;
-            Some(slots[s].unwrap_or(Scalar::Missing))
-        }
-        BodyKernel::FieldChain(keys) if keys.len() == 1 => {
-            let s = slot_for_kernel_path(keys[0].as_ref(), cat)?;
-            Some(slots[s].unwrap_or(Scalar::Missing))
-        }
-        BodyKernel::Const(v) => match v {
-            Val::Int(n) => Some(Scalar::Int(*n)),
-            Val::Float(f) => Some(Scalar::Float(*f)),
-            Val::Bool(b) => Some(Scalar::Bool(*b)),
-            Val::Null => Some(Scalar::Null),
-            _ => None,
-        },
-        BodyKernel::ConstBool(b) => Some(Scalar::Bool(*b)),
-        BodyKernel::Arith(lhs, op, rhs) => {
-            let l = eval_arith_operand(lhs, slots, cat)?;
-            let r = eval_arith_operand(rhs, slots, cat)?;
-            arith_apply(l, *op, r)
-        }
-        _ => None,
-    }
-}
-
-fn eval_arith_operand(
-    op: &ArithOperand,
-    slots: &[Option<Scalar>],
-    cat: &Catalog,
-) -> Option<Scalar> {
-    match op {
-        ArithOperand::LitInt(n) => Some(Scalar::Int(*n)),
-        ArithOperand::LitFloat(f) => Some(Scalar::Float(*f)),
-        ArithOperand::Path(p) if p.len() == 1 => {
-            let s = slot_for_kernel_path(p[0].as_ref(), cat)?;
-            Some(slots[s].unwrap_or(Scalar::Missing))
-        }
-        _ => None,
-    }
-}
-
-fn arith_apply(l: Scalar, op: ArithOp, r: Scalar) -> Option<Scalar> {
-    let (li, lf, lk) = num_parts(l)?;
-    let (ri, rf, rk) = num_parts(r)?;
-    let is_float = lk || rk;
-    if is_float {
-        let lf = if lk { lf } else { li as f64 };
-        let rf = if rk { rf } else { ri as f64 };
-        let out = match op {
-            ArithOp::Add => lf + rf,
-            ArithOp::Sub => lf - rf,
-            ArithOp::Mul => lf * rf,
-            ArithOp::Div => if rf == 0.0 { return None } else { lf / rf },
-            ArithOp::Mod => if rf == 0.0 { return None } else { lf % rf },
-        };
-        Some(Scalar::Float(out))
-    } else {
-        let out = match op {
-            ArithOp::Add => li.wrapping_add(ri),
-            ArithOp::Sub => li.wrapping_sub(ri),
-            ArithOp::Mul => li.wrapping_mul(ri),
-            ArithOp::Div => if ri == 0 { return None } else { li / ri },
-            ArithOp::Mod => if ri == 0 { return None } else { li % ri },
-        };
-        Some(Scalar::Int(out))
-    }
-}
-
-fn num_parts(v: Scalar) -> Option<(i64, f64, bool)> {
-    match v {
-        Scalar::Int(n) => Some((n, 0.0, false)),
-        Scalar::Float(f) => Some((0, f, true)),
-        _ => None,
-    }
-}
-
-fn eval_pred_kernel(
-    k: &BodyKernel,
-    slots: &[Option<Scalar>],
-    cat: &Catalog,
-    raw: &[u8],
-) -> Option<bool> {
-    use crate::ast::BinOp;
-    match k {
-        BodyKernel::ConstBool(b) => Some(*b),
-        BodyKernel::FieldRead(name) => {
-            let s = slot_for_kernel_path(name.as_ref(), cat)?;
-            let v = slots[s].unwrap_or(Scalar::Missing);
-            Some(truthy(v))
-        }
-        BodyKernel::FieldChain(keys) if keys.len() == 1 => {
-            let s = slot_for_kernel_path(keys[0].as_ref(), cat)?;
-            let v = slots[s].unwrap_or(Scalar::Missing);
-            Some(truthy(v))
-        }
-        BodyKernel::FieldCmpLit(name, op, lit) => {
-            let s = slot_for_kernel_path(name.as_ref(), cat)?;
-            let v = slots[s].unwrap_or(Scalar::Missing);
-            cmp_scalar(v, *op, lit, raw)
-        }
-        BodyKernel::FieldChainCmpLit(keys, op, lit) if keys.len() == 1 => {
-            let s = slot_for_kernel_path(keys[0].as_ref(), cat)?;
-            let v = slots[s].unwrap_or(Scalar::Missing);
-            cmp_scalar(v, *op, lit, raw)
-        }
-        _ => None,
-    }
-}
-
-fn cmp_scalar(s: Scalar, op: crate::ast::BinOp, lit: &Val, raw: &[u8]) -> Option<bool> {
-    use crate::ast::BinOp as B;
-    let cmp = |ord: std::cmp::Ordering| -> bool {
-        match op {
-            B::Eq => ord == std::cmp::Ordering::Equal,
-            B::Neq => ord != std::cmp::Ordering::Equal,
-            B::Lt => ord == std::cmp::Ordering::Less,
-            B::Lte => ord != std::cmp::Ordering::Greater,
-            B::Gt => ord == std::cmp::Ordering::Greater,
-            B::Gte => ord != std::cmp::Ordering::Less,
-            _ => false,
-        }
-    };
-    match (s, lit) {
-        (Scalar::Int(a), Val::Int(b)) => Some(cmp(a.cmp(b))),
-        (Scalar::Int(a), Val::Float(b)) => Some(cmp((a as f64).partial_cmp(b)?)),
-        (Scalar::Float(a), Val::Int(b)) => Some(cmp(a.partial_cmp(&(*b as f64))?)),
-        (Scalar::Float(a), Val::Float(b)) => Some(cmp(a.partial_cmp(b)?)),
-        (Scalar::Bool(a), Val::Bool(b)) => Some(cmp((a as u8).cmp(&(*b as u8)))),
-        (Scalar::StrRange(s, e), Val::Str(lit_s)) => {
-            let bytes = &raw[s as usize .. e as usize];
-            let s_str = std::str::from_utf8(bytes).ok()?;
-            Some(cmp(s_str.cmp(lit_s.as_ref())))
-        }
-        (Scalar::Null, Val::Null) => Some(matches!(op, B::Eq)),
-        _ => Some(false),
-    }
-}
 
 #[inline]
 fn truthy(s: Scalar) -> bool {
@@ -786,38 +601,50 @@ fn run_with_sink(
     if wanted.len() > SCALAR_BUF_CAP { return None; }
     let needles_owned: Vec<Vec<u8>> = build_needles(&wanted);
     let needles: Vec<&[u8]> = needles_owned.iter().map(|n| n.as_slice()).collect();
-    // Note: Aho-Corasick experiment slower than direct memmem for
-    // typical 2-3 wanted-key counts — overhead dominates.  Removed.
 
-    // Resolve filter-stage kernels to slot indices ONCE — hoisted out
-    // of the hot loop.  Filter kernels are pred-only; non-path bails.
+    // Operate on canonical view — same dispatch shape regardless of
+    // whether lowering left fused Sinks or base form. After fusion-
+    // off (Tier 3), canonical == self. Walking via canonical means
+    // bytescan migrates uniformly with Pipeline IR.
+    let (cs, ck, csink) = p.canonical();
+
+    // Trailing Map kernel — Sink::Numeric over a Map'd projection.
+    let trailing_map_kernel: Option<&BodyKernel> =
+        if matches!(csink, Sink::Numeric(_))
+            && matches!(cs.last(), Some(Stage::Map(_)))
+        {
+            ck.last()
+        } else { None };
+    let filter_end = if trailing_map_kernel.is_some() { cs.len() - 1 } else { cs.len() };
+
+    // Resolve filter-stage kernels to slot indices ONCE.
     let mut filter_slots: Vec<(usize, FilterCmp)> = Vec::new();
-    for (st, k) in p.stages.iter().zip(p.stage_kernels.iter()) {
+    for (st, k) in cs[..filter_end].iter().zip(ck[..filter_end].iter()) {
         if let Stage::Filter(_) = st {
             let (slot, cmp) = resolve_pred_to_slot(k, cat)?;
             filter_slots.push((slot, cmp));
+        } else {
+            // Any non-Filter stage in the prefix is unsupported here.
+            return None;
         }
     }
 
-    // Columnar Extraction fast path — generic algorithm.  When shape
-    // has no Filter stages + Sink ∈ {Numeric, NumMap, NumFilterMap,
-    // CountIf, Count}, find each wanted key's `"<k>":` byte position
-    // via SIMD memmem across the WHOLE array region in ONE pass per
-    // key.  Pair positions by entry-index (sorted) → per-row inline
-    // parse + accumulate.  Bypasses per-row walker entirely.
+    // Columnar Extraction fast path — generic algorithm.  No filters,
+    // sink is Count or Numeric (with optional trailing Map). One memmem
+    // scan per wanted key across the array region; per-row inline parse.
     if filter_slots.is_empty()
-        && matches!(p.sink,
-            Sink::NumFilterMap(_, _, _) | Sink::NumMap(_, _)
-            | Sink::CountIf(_) | Sink::Count | Sink::Numeric(_))
+        && matches!(csink, Sink::Count | Sink::Numeric(_))
     {
-        if let Some(out) = try_columnar_extraction(p, cat, &needles, raw, arr_start) {
+        if let Some(out) = try_columnar_extraction_canonical(
+            &csink, trailing_map_kernel, cat, &needles, raw, arr_start,
+        ) {
             return Some(Ok(out));
         }
     }
 
     // Pipeline-Row Closure Fusion (PRCF) — generic fallback.
-    match &p.sink {
-        Sink::Count => {
+    match (&csink, trailing_map_kernel) {
+        (Sink::Count, None) => {
             let mut count: u64 = 0;
             scan_loop_prcf(raw, arr_start, &needles, &filter_slots, |_slots| {
                 count += 1;
@@ -825,19 +652,9 @@ fn run_with_sink(
             })?;
             Some(Ok(Val::Int(count as i64)))
         }
-        Sink::CountIf(_) => {
-            let pred_k = p.sink_kernels.get(0)?;
-            let (pred_slot, pred_cmp) = resolve_pred_to_slot(pred_k, cat)?;
-            let mut count: u64 = 0;
-            scan_loop_prcf(raw, arr_start, &needles, &filter_slots, |slots| {
-                if check_pred(slots[pred_slot], pred_cmp) { count += 1; }
-                Some(())
-            })?;
-            Some(Ok(Val::Int(count as i64)))
-        }
-        Sink::NumMap(op, _) => {
-            let map_k = p.sink_kernels.get(0)?;
+        (Sink::Numeric(op), Some(map_k)) => {
             let map_slot = resolve_value_to_slot(map_k, cat)?;
+            let op = *op;
             let mut acc = Acc::new();
             scan_loop_prcf(raw, arr_start, &needles, &filter_slots, |slots| {
                 if let Some(v) = slots[map_slot] {
@@ -845,23 +662,7 @@ fn run_with_sink(
                 }
                 Some(())
             })?;
-            Some(Ok(acc.finalise(*op)))
-        }
-        Sink::NumFilterMap(op, _, _) => {
-            let pred_k = p.sink_kernels.get(0)?;
-            let map_k = p.sink_kernels.get(1)?;
-            let (pred_slot, pred_cmp) = resolve_pred_to_slot(pred_k, cat)?;
-            let map_slot = resolve_value_to_slot(map_k, cat)?;
-            let mut acc = Acc::new();
-            scan_loop_prcf(raw, arr_start, &needles, &filter_slots, |slots| {
-                if check_pred(slots[pred_slot], pred_cmp) {
-                    if let Some(v) = slots[map_slot] {
-                        if !acc.push(v) { return None; }
-                    }
-                }
-                Some(())
-            })?;
-            Some(Ok(acc.finalise(*op)))
+            Some(Ok(acc.finalise(op)))
         }
         _ => None,
     }
@@ -879,8 +680,9 @@ fn run_with_sink(
 /// On non-uniform-shape input (some rows missing wanted key), falls
 /// back to PRCF walker.  Generic across Pipeline shapes via the
 /// same closure-builder branches as run_with_sink.
-fn try_columnar_extraction(
-    p: &Pipeline,
+fn try_columnar_extraction_canonical(
+    csink: &Sink,
+    trailing_map_kernel: Option<&BodyKernel>,
     cat: &Catalog,
     needles: &[&[u8]],
     raw: &[u8],
@@ -907,45 +709,18 @@ fn try_columnar_extraction(
     let n_rows = min_hits;
     let n_cols = cols.len();
 
-    // Per-row evaluator dispatched by Sink — generic via closure.
-    match &p.sink {
-        Sink::Count => Some(Val::Int(n_rows as i64)),
-        Sink::CountIf(_) => {
-            let pred_k = p.sink_kernels.get(0)?;
-            let (pred_slot, pred_cmp) = resolve_pred_to_slot(pred_k, cat)?;
-            let mut count: u64 = 0;
-            for row in 0..n_rows {
-                let pred_pos = arr_start + 1 + cols[pred_slot][row] + needles[pred_slot].len();
-                let pred_val = parse_scalar_at(raw, pred_pos)?;
-                if check_pred(Some(pred_val), pred_cmp) { count += 1; }
-            }
-            Some(Val::Int(count as i64))
-        }
-        Sink::NumMap(op, _) => {
-            let map_k = p.sink_kernels.get(0)?;
+    // Per-row evaluator dispatched on canonical (sink, trailing map).
+    // Caller already filtered for filter-free shapes — only Count and
+    // Numeric(+map) reach here.
+    match (csink, trailing_map_kernel) {
+        (Sink::Count, _) => Some(Val::Int(n_rows as i64)),
+        (Sink::Numeric(op), Some(map_k)) => {
             let map_slot = resolve_value_to_slot(map_k, cat)?;
             let mut acc = Acc::new();
             for row in 0..n_rows {
                 let map_pos = arr_start + 1 + cols[map_slot][row] + needles[map_slot].len();
                 let v = parse_scalar_at(raw, map_pos)?;
                 if !acc.push(v) { return None; }
-            }
-            Some(acc.finalise(*op))
-        }
-        Sink::NumFilterMap(op, _, _) => {
-            let pred_k = p.sink_kernels.get(0)?;
-            let map_k = p.sink_kernels.get(1)?;
-            let (pred_slot, pred_cmp) = resolve_pred_to_slot(pred_k, cat)?;
-            let map_slot = resolve_value_to_slot(map_k, cat)?;
-            let mut acc = Acc::new();
-            for row in 0..n_rows {
-                let pred_pos = arr_start + 1 + cols[pred_slot][row] + needles[pred_slot].len();
-                let pred_val = parse_scalar_at(raw, pred_pos)?;
-                if check_pred(Some(pred_val), pred_cmp) {
-                    let map_pos = arr_start + 1 + cols[map_slot][row] + needles[map_slot].len();
-                    let v = parse_scalar_at(raw, map_pos)?;
-                    if !acc.push(v) { return None; }
-                }
             }
             Some(acc.finalise(*op))
         }
