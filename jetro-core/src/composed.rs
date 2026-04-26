@@ -918,6 +918,30 @@ pub mod tape {
         }
     }
 
+    pub struct TapeFilterFieldChainCmpLit {
+        pub keys: std::sync::Arc<[std::sync::Arc<str>]>,
+        pub op: TapeCmp,
+        pub lit: TapeLitOwned,
+    }
+
+    impl TapeStage for TapeFilterFieldChainCmpLit {
+        fn apply(&self, tape: &TapeData, idx: usize) -> TapeOutput {
+            let mut cur = idx;
+            for k in self.keys.iter() {
+                match tape_object_field(tape, cur, k.as_ref()) {
+                    Some(v) => cur = v,
+                    None => return TapeOutput::Filtered,
+                }
+            }
+            let lit = self.lit.as_borrowed();
+            if tape_value_cmp(tape, cur, self.op, &lit) {
+                TapeOutput::Pass(idx)
+            } else {
+                TapeOutput::Filtered
+            }
+        }
+    }
+
     pub struct TapeMapField {
         pub field: std::sync::Arc<str>,
     }

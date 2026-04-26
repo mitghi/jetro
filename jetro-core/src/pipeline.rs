@@ -2320,15 +2320,26 @@ impl Pipeline {
         let build_tape_stage = |s: &Stage, k: &BodyKernel|
             -> Option<Box<dyn ct::TapeStage>> {
             Some(match (s, k) {
-                (Stage::Filter(_), BodyKernel::FieldCmpLit(field, op, lit))
-                    if matches!(op, crate::ast::BinOp::Eq) =>
-                {
+                (Stage::Filter(_), BodyKernel::FieldCmpLit(field, op, lit)) => {
+                    let tape_op = binop_to_tape_cmp(*op)?;
                     let lit_owned = lit_to_tape_owned(lit)?;
                     Box::new(ct::TapeFilterFieldCmpLit {
                         field: Arc::clone(field),
-                        op: TapeCmp::Eq,
+                        op: tape_op,
                         lit: lit_owned,
                     })
+                }
+                (Stage::Filter(_), BodyKernel::FieldChainCmpLit(keys, op, lit)) => {
+                    let tape_op = binop_to_tape_cmp(*op)?;
+                    let lit_owned = lit_to_tape_owned(lit)?;
+                    Box::new(ct::TapeFilterFieldChainCmpLit {
+                        keys: Arc::clone(keys),
+                        op: tape_op,
+                        lit: lit_owned,
+                    })
+                }
+                (Stage::Filter(_), BodyKernel::FieldRead(field)) => {
+                    Box::new(ct::TapeFilterTruthyAtField { field: Arc::clone(field) })
                 }
                 (Stage::Map(_), BodyKernel::FieldRead(field)) =>
                     Box::new(ct::TapeMapField { field: Arc::clone(field) }),
@@ -2346,6 +2357,13 @@ impl Pipeline {
             })
         };
 
+        // Reject barrier stages on tape route — they require buffered
+        // Val materialisation. Composed Val path handles those.
+        for s in &eff_stages {
+            if matches!(s, Stage::Reverse | Stage::Sort(_) | Stage::UniqueBy(_) | Stage::GroupBy(_)) {
+                return None;
+            }
+        }
         let mut chain: Box<dyn ct::TapeStage> = Box::new(ct::TapeIdentity);
         for (i, stage) in eff_stages.iter().enumerate() {
             let kernel = eff_kernels.get(i).unwrap_or(&BodyKernel::Generic);
@@ -3932,6 +3950,21 @@ fn eval_kernel_pred(
         | BodyKernel::Arith(_, _, _) | BodyKernel::FString(_)
         | BodyKernel::Generic => None,
     }
+}
+
+#[cfg(feature = "simd-json")]
+fn binop_to_tape_cmp(op: crate::ast::BinOp) -> Option<crate::strref::TapeCmp> {
+    use crate::ast::BinOp as B;
+    use crate::strref::TapeCmp as T;
+    Some(match op {
+        B::Eq => T::Eq,
+        B::Neq => T::Neq,
+        B::Lt => T::Lt,
+        B::Lte => T::Lte,
+        B::Gt => T::Gt,
+        B::Gte => T::Gte,
+        _ => return None,
+    })
 }
 
 #[cfg(feature = "simd-json")]
