@@ -63,6 +63,7 @@ pub mod strref;
 pub mod pipeline;
 pub mod bytescan;
 pub mod composed;
+pub mod composed_borrow;
 
 #[cfg(test)]
 mod tests;
