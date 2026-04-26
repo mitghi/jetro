@@ -236,9 +236,7 @@ fn apply_op(op: &Opcode, stack: &mut Vec<AbstractVal>) {
             stack.push(AbstractVal { ty: VType::Unknown, null: Nullness::MaybeNull, card });
         }
         Opcode::RootChain(_) => stack.push(AbstractVal::UNKNOWN),
-        Opcode::FilterFieldEqLit(_, _) | Opcode::FilterFieldCmpLit(_, _, _)
-            | Opcode::FilterCurrentCmpLit(_, _)
-            | Opcode::FilterStrVecStartsWith(_)
+        Opcode::FilterStrVecStartsWith(_)
             | Opcode::FilterStrVecEndsWith(_)
             | Opcode::FilterStrVecContains(_)
             | Opcode::MapStrVecUpper
@@ -440,7 +438,6 @@ fn collect_fields_in_ops(ops: &[Opcode], acc: &mut Vec<Arc<str>>) {
     for op in ops {
         match op {
             Opcode::GetField(k) | Opcode::OptField(k) | Opcode::Descendant(k)
-                | Opcode::FilterFieldEqLit(k, _) | Opcode::FilterFieldCmpLit(k, _, _)
                 => {
                 if !acc.iter().any(|a: &Arc<str>| a == k) { acc.push(k.clone()); }
             }
@@ -950,9 +947,7 @@ pub fn opcode_cost(op: &Opcode) -> u32 {
         Opcode::Quantifier(_) => 2,
         Opcode::CastOp(_) => 2,
         Opcode::PatchEval(_) => 50,
-        Opcode::FilterFieldEqLit(_, _) | Opcode::FilterFieldCmpLit(_, _, _)
-            | Opcode::FilterCurrentCmpLit(_, _)
-            | Opcode::FilterStrVecStartsWith(_)
+        Opcode::FilterStrVecStartsWith(_)
             | Opcode::FilterStrVecEndsWith(_)
             | Opcode::FilterStrVecContains(_)
             | Opcode::MapStrVecUpper

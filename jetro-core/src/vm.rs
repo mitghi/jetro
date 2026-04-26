@@ -396,25 +396,15 @@ pub enum Opcode {
     // FlatMapChain fused opcodes deleted in Tier 3.  Pipeline IR Stage::Map
     // + BodyKernel::FieldRead / FieldChain / + Stage::FlatMap covers them.
 
-    // ── Predicate specialisation (Tier 4) ─────────────────────────────────────
-    /// `filter(k == lit)` — predicate is equality of a single field to a literal.
-    FilterFieldEqLit(Arc<str>, Val),
-    /// `filter(k <op> lit)` — predicate is a comparison of a single field to a literal.
-    FilterFieldCmpLit(Arc<str>, super::ast::BinOp, Val),
-    // FilterFieldCmpField + FilterFieldCmpFieldCount deleted in Tier 3.
-    // Pipeline IR runs `filter(k1 op k2)` and its `.count()` extension
-    // through generic Stage::Filter + Sink::Count via dispatch_method.
-    // FilterFieldEqLitMapField / FilterFieldCmpLitMapField migrated
-    // to pipeline.rs Sink::NumFilterMap (with columnar + ObjVec slot
-    // kernels).  See memory/project_opcode_migration.md.
-    // FilterFieldsAllEqLitCount / FilterFieldsAllCmpLitCount migrated
-    // to pipeline.rs Sink::CountIf with and_chain_prog decoder.
-    // FilterFieldEqLitCount / FilterFieldCmpLitCount migrated to
-    // pipeline.rs Sink::CountIf (with columnar fast path).
-    /// `filter(@ <op> lit)` — predicate on the current element itself.
-    /// Columnar fast path: IntVec/FloatVec receivers loop on the raw
-    /// slice and emit a typed vec; Arr falls back to element iteration.
-    FilterCurrentCmpLit(super::ast::BinOp, Val),
+    // ── Filter predicate specialisation deleted in Tier 3 ────────────────────
+    // FilterFieldEqLit / FilterFieldCmpLit / FilterCurrentCmpLit /
+    // FilterFieldCmpField / FilterFieldCmpFieldCount /
+    // FilterFieldEqLitMapField / FilterFieldCmpLitMapField /
+    // FilterFieldsAllEqLitCount / FilterFieldsAllCmpLitCount /
+    // FilterFieldEqLitCount / FilterFieldCmpLitCount — all replaced by
+    // pipeline IR Stage::Filter + composed substrate (auto-index +
+    // columnar IntVec/FloatVec/StrVec lanes preserved through Stage
+    // dispatch).
     /// `filter(@.starts_with(lit))` — columnar prefix compare on StrVec.
     FilterStrVecStartsWith(Arc<str>),
     /// `filter(@.ends_with(lit))` — columnar suffix compare on StrVec.
@@ -1468,29 +1458,12 @@ impl Compiler {
                     let _ = b;
                     // GroupByField/CountByField/UniqueByField fusion
                     // deleted in Tier 3 — base CallMethod chain.
-                    // filter(field <cmp> lit|field) → FilterField*
+                    // Filter field/current cmp-lit fusion deleted in Tier 3 —
+                    // pipeline IR Stage::Filter + composed substrate covers
+                    // single-field, current-element, and field-vs-field
+                    // predicates.  StrVec prefix/suffix/substring fusion stays
+                    // (typed-lane SIMD path).
                     if b.method == BuiltinMethod::Filter && b.sub_progs.len() == 1 {
-                        if let Some(p) = detect_field_pred(&b.sub_progs[0].ops) {
-                            match p {
-                                FieldPred::FieldCmpLit(k, super::ast::BinOp::Eq, lit) => {
-                                    out2.push(Opcode::FilterFieldEqLit(k, lit));
-                                    continue;
-                                }
-                                FieldPred::FieldCmpLit(k, op, lit) => {
-                                    out2.push(Opcode::FilterFieldCmpLit(k, op, lit));
-                                    continue;
-                                }
-                                // FieldCmpField fusion deleted in Tier 3 — base
-                                // CallMethod(Filter, [field-vs-field pred]) chain.
-                                FieldPred::FieldCmpField(_, _, _) => {}
-                            }
-                        }
-                        // filter(@ <cmp> lit) → FilterCurrentCmpLit
-                        if let Some((op, lit)) = detect_current_cmp_lit(&b.sub_progs[0].ops) {
-                            out2.push(Opcode::FilterCurrentCmpLit(op, lit));
-                            continue;
-                        }
-                        // filter(@.starts_with/ends_with/contains(lit)) → FilterStrVec*
                         if let Some((kind, lit)) = detect_current_str_method(&b.sub_progs[0].ops) {
                             out2.push(match kind {
                                 StrVecPred::StartsWith => Opcode::FilterStrVecStartsWith(lit),
@@ -3047,189 +3020,11 @@ impl VM {
                 // chain via composed `MapField` / `MapFieldChain` /
                 // `FlatMapField` / `FlatMapFieldChain` Stages.
 
-                // ── Predicate specialisation (Tier 4) ─────────────────────
-                Opcode::FilterFieldEqLit(k, lit) => {
-                    let recv = pop!(stack);
-                    // Auto-index path: when the same `(arr_ptr, field_key)`
-                    // has been queried at least AUTO_INDEX_THRESHOLD times,
-                    // build a hash index on first crossing, then use it
-                    // for all subsequent lookups.  Pre-built index is
-                    // `Arc`-shared so cloning is cheap.
-                    if let Val::Arr(a) = &recv {
-                        let arr_ptr = Arc::as_ptr(a) as usize;
-                        let key_lit = auto_index_key(lit);
-                        if let Some(klit) = key_lit {
-                            let idx_arc = {
-                                let entry = self.index_cache.touch((arr_ptr, k.clone()));
-                                entry.hits = entry.hits.saturating_add(1);
-                                if entry.index.is_none()
-                                    && entry.hits >= AUTO_INDEX_THRESHOLD
-                                {
-                                    // Build the hash index over the array.
-                                    let mut map: HashMap<String,
-                                        smallvec::SmallVec<[u32; 1]>> =
-                                        HashMap::with_capacity(a.len());
-                                    for (i, item) in a.iter().enumerate() {
-                                        if let Val::Obj(m) = item {
-                                            if let Some(v) = m.get(k.as_ref()) {
-                                                if let Some(ks) = auto_index_key(v) {
-                                                    map.entry(ks)
-                                                        .or_default()
-                                                        .push(i as u32);
-                                                }
-                                            }
-                                        }
-                                    }
-                                    entry.index = Some(Arc::new(map));
-                                }
-                                entry.index.as_ref().map(Arc::clone)
-                            };
-                            if let Some(map) = idx_arc {
-                                // O(1) lookup path.
-                                let out: Vec<Val> = match map.get(&klit) {
-                                    Some(positions) => positions.iter()
-                                        .filter_map(|&i| a.get(i as usize).cloned())
-                                        .collect(),
-                                    None => Vec::new(),
-                                };
-                                stack.push(Val::arr(out));
-                                continue;
-                            }
-                        }
-                    }
-                    // Fallback linear scan.
-                    let hint = match &recv { Val::Arr(a) => filter_cap_hint(a.len()), _ => 0 };
-                    let mut out = Vec::with_capacity(hint);
-                    let mut idx: Option<usize> = None;
-                    if let Val::Arr(a) = &recv {
-                        for item in a.iter() {
-                            if let Val::Obj(m) = item {
-                                if let Some(v) = lookup_field_cached(m, k, &mut idx) {
-                                    if crate::eval::util::vals_eq(v, lit) {
-                                        out.push(item.clone());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    stack.push(Val::arr(out));
-                }
-                Opcode::FilterFieldCmpLit(k, op, lit) => {
-                    let recv = pop!(stack);
-                    let hint = match &recv { Val::Arr(a) => filter_cap_hint(a.len()), _ => 0 };
-                    let mut out = Vec::with_capacity(hint);
-                    let mut idx: Option<usize> = None;
-                    if let Val::Arr(a) = &recv {
-                        for item in a.iter() {
-                            if let Val::Obj(m) = item {
-                                if let Some(v) = lookup_field_cached(m, k, &mut idx) {
-                                    if cmp_val_binop(v, *op, lit) {
-                                        out.push(item.clone());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    stack.push(Val::arr(out));
-                }
-                Opcode::FilterCurrentCmpLit(op, lit) => {
-                    use super::ast::BinOp;
-                    let recv = pop!(stack);
-                    // Columnar fast paths — IntVec / FloatVec receivers
-                    // walk the raw slice, produce a typed vec.  This is
-                    // the autovectoriser-friendly shape (branchless
-                    // body, one stride, no heap traffic per hit).
-                    match (&recv, lit) {
-                        (Val::IntVec(a), Val::Int(rhs)) => {
-                            let rhs = *rhs;
-                            let mut out: Vec<i64> = Vec::with_capacity(a.len());
-                            match op {
-                                BinOp::Eq  => for &n in a.iter() { if n == rhs { out.push(n); } }
-                                BinOp::Neq => for &n in a.iter() { if n != rhs { out.push(n); } }
-                                BinOp::Lt  => for &n in a.iter() { if n <  rhs { out.push(n); } }
-                                BinOp::Lte => for &n in a.iter() { if n <= rhs { out.push(n); } }
-                                BinOp::Gt  => for &n in a.iter() { if n >  rhs { out.push(n); } }
-                                BinOp::Gte => for &n in a.iter() { if n >= rhs { out.push(n); } }
-                                _ => {
-                                    stack.push(recv);
-                                    continue;
-                                }
-                            }
-                            stack.push(Val::int_vec(out));
-                            continue;
-                        }
-                        (Val::IntVec(a), Val::Float(rhs)) => {
-                            let rhs = *rhs;
-                            let mut out: Vec<i64> = Vec::with_capacity(a.len());
-                            match op {
-                                BinOp::Eq  => for &n in a.iter() { if (n as f64) == rhs { out.push(n); } }
-                                BinOp::Neq => for &n in a.iter() { if (n as f64) != rhs { out.push(n); } }
-                                BinOp::Lt  => for &n in a.iter() { if (n as f64) <  rhs { out.push(n); } }
-                                BinOp::Lte => for &n in a.iter() { if (n as f64) <= rhs { out.push(n); } }
-                                BinOp::Gt  => for &n in a.iter() { if (n as f64) >  rhs { out.push(n); } }
-                                BinOp::Gte => for &n in a.iter() { if (n as f64) >= rhs { out.push(n); } }
-                                _ => { stack.push(recv); continue; }
-                            }
-                            stack.push(Val::int_vec(out));
-                            continue;
-                        }
-                        (Val::FloatVec(a), Val::Float(rhs)) => {
-                            let rhs = *rhs;
-                            let mut out: Vec<f64> = Vec::with_capacity(a.len());
-                            match op {
-                                BinOp::Eq  => for &f in a.iter() { if f == rhs { out.push(f); } }
-                                BinOp::Neq => for &f in a.iter() { if f != rhs { out.push(f); } }
-                                BinOp::Lt  => for &f in a.iter() { if f <  rhs { out.push(f); } }
-                                BinOp::Lte => for &f in a.iter() { if f <= rhs { out.push(f); } }
-                                BinOp::Gt  => for &f in a.iter() { if f >  rhs { out.push(f); } }
-                                BinOp::Gte => for &f in a.iter() { if f >= rhs { out.push(f); } }
-                                _ => { stack.push(recv); continue; }
-                            }
-                            stack.push(Val::float_vec(out));
-                            continue;
-                        }
-                        (Val::FloatVec(a), Val::Int(rhs)) => {
-                            let rhs = *rhs as f64;
-                            let mut out: Vec<f64> = Vec::with_capacity(a.len());
-                            match op {
-                                BinOp::Eq  => for &f in a.iter() { if f == rhs { out.push(f); } }
-                                BinOp::Neq => for &f in a.iter() { if f != rhs { out.push(f); } }
-                                BinOp::Lt  => for &f in a.iter() { if f <  rhs { out.push(f); } }
-                                BinOp::Lte => for &f in a.iter() { if f <= rhs { out.push(f); } }
-                                BinOp::Gt  => for &f in a.iter() { if f >  rhs { out.push(f); } }
-                                BinOp::Gte => for &f in a.iter() { if f >= rhs { out.push(f); } }
-                                _ => { stack.push(recv); continue; }
-                            }
-                            stack.push(Val::float_vec(out));
-                            continue;
-                        }
-                        (Val::StrVec(a), Val::Str(rhs)) => {
-                            let rhs_b = rhs.as_bytes();
-                            let mut out: Vec<Arc<str>> = Vec::with_capacity(a.len());
-                            match op {
-                                BinOp::Eq  => for s in a.iter() { if s.as_bytes() == rhs_b { out.push(s.clone()); } }
-                                BinOp::Neq => for s in a.iter() { if s.as_bytes() != rhs_b { out.push(s.clone()); } }
-                                BinOp::Lt  => for s in a.iter() { if s.as_bytes() <  rhs_b { out.push(s.clone()); } }
-                                BinOp::Lte => for s in a.iter() { if s.as_bytes() <= rhs_b { out.push(s.clone()); } }
-                                BinOp::Gt  => for s in a.iter() { if s.as_bytes() >  rhs_b { out.push(s.clone()); } }
-                                BinOp::Gte => for s in a.iter() { if s.as_bytes() >= rhs_b { out.push(s.clone()); } }
-                                _ => { stack.push(recv); continue; }
-                            }
-                            stack.push(Val::str_vec(out));
-                            continue;
-                        }
-                        _ => {}
-                    }
-                    // Generic fallback — walk Val::Arr, compare each.
-                    let hint = match &recv { Val::Arr(a) => filter_cap_hint(a.len()), _ => 0 };
-                    let mut out = Vec::with_capacity(hint);
-                    if let Val::Arr(a) = &recv {
-                        for item in a.iter() {
-                            if cmp_val_binop(item, *op, lit) { out.push(item.clone()); }
-                        }
-                    }
-                    stack.push(Val::arr(out));
-                }
+                // FilterFieldEqLit / FilterFieldCmpLit / FilterCurrentCmpLit
+                // handlers deleted in Tier 3.  Pipeline IR Stage::Filter +
+                // BodyKernel::FieldCmpLit / CurrentCmpLit + composed substrate
+                // covers these — including auto-index, IntVec/FloatVec/StrVec
+                // typed-lane fast paths.
                 Opcode::FilterStrVecStartsWith(needle) => {
                     let recv = pop!(stack);
                     let n_b = needle.as_bytes();
@@ -4989,59 +4784,12 @@ fn materialise_find_scan_spans(
     spans: &[super::scan::ValueSpan],
     tail: &[Opcode],
 ) -> (Val, usize) {
-    // Consume any leading span-refiner tail ops — compiled forms of
-    // `.filter(@.k == lit)` / `.filter(@.k <cmp> lit)` sitting after the
-    // byte-scan.  Each narrows `spans` in place via `find_direct_field`
-    // + bytewise / numeric comparison; the remaining tail then feeds the
-    // existing map/aggregate dispatch below.
-    let mut consumed_refiners = 0usize;
-    let mut owned: Option<Vec<super::scan::ValueSpan>>;
-    let mut spans_view: &[super::scan::ValueSpan] = spans;
-    loop {
-        match tail.get(consumed_refiners) {
-            Some(Opcode::FilterFieldEqLit(k, lit_val)) => {
-                let Some(lit) = val_to_canonical_lit_bytes(lit_val) else { break };
-                let next: Vec<_> = spans_view.iter().copied().filter(|s| {
-                    let obj = &bytes[s.start..s.end];
-                    match super::scan::find_direct_field(obj, k.as_ref()) {
-                        Some(vs) => vs.end - vs.start == lit.len()
-                            && obj[vs.start..vs.end] == lit[..],
-                        None => false,
-                    }
-                }).collect();
-                owned = Some(next);
-                spans_view = owned.as_deref().unwrap();
-                consumed_refiners += 1;
-            }
-            Some(Opcode::FilterFieldCmpLit(k, op, lit_val)) => {
-                let Some(thresh) = lit_val.as_f64() else { break };
-                let holds: fn(f64, f64) -> bool = match op {
-                    super::ast::BinOp::Lt  => |a, b| a <  b,
-                    super::ast::BinOp::Lte => |a, b| a <= b,
-                    super::ast::BinOp::Gt  => |a, b| a >  b,
-                    super::ast::BinOp::Gte => |a, b| a >= b,
-                    _ => break,
-                };
-                let next: Vec<_> = spans_view.iter().copied().filter(|s| {
-                    let obj = &bytes[s.start..s.end];
-                    let Some(vs) = super::scan::find_direct_field(obj, k.as_ref())
-                        else { return false };
-                    match super::scan::parse_num_span(&obj[vs.start..vs.end]) {
-                        Some((_, f, _)) => holds(f, thresh),
-                        None => false,
-                    }
-                }).collect();
-                owned = Some(next);
-                spans_view = owned.as_deref().unwrap();
-                consumed_refiners += 1;
-            }
-            _ => break,
-        }
-    }
-    let spans = spans_view;
-    let tail = &tail[consumed_refiners..];
+    // Span-refiner tail-ops (FilterFieldEqLit / FilterFieldCmpLit) deleted
+    // in Tier 3 along with the underlying opcodes.  Pipeline IR drives
+    // filter narrowing through composed substrate; raw_bytes route just
+    // materialises spans here, falling through to map/aggregate dispatch.
     let (val, inner) = materialise_find_scan_spans_tail(bytes, spans, tail);
-    (val, consumed_refiners + inner)
+    (val, inner)
 }
 
 /// Convert a `Val` literal to its canonical JSON byte encoding — the
