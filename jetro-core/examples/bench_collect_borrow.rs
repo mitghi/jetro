@@ -67,6 +67,8 @@ const QUERIES: &[(&str, &str)] = &[
         "$.orders.filter(status == 'shipped').first()"),
     ("filter last",
         "$.orders.filter(priority == 'high').first()"),
+    ("sort_by+take+map (heap-top-K)",
+        "$.orders.sort_by(total).take(10).map({id, total, name: customer.name})"),
 ];
 
 fn main() {

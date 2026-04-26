@@ -1305,47 +1305,151 @@ pub fn try_run_borrow<'a>(
         Source::FieldChain { keys } => keys.iter().map(|k| k.as_bytes()).collect(),
         _ => return None,
     };
-    // Heap-top-K: not yet covered by borrowed path; defer.
-    if detect_heap_top_k(&p.stages, &p.stage_kernels, &p.sink).is_some() {
-        return None;
-    }
+    // Heap-top-K borrowed path — handled inline below after array
+    // location.  When matched, dispatches the borrowed heap walker and
+    // bypasses the generic stage-acceptance loop.
+    let heap_top_k = detect_heap_top_k(&p.stages, &p.stage_kernels, &p.sink);
     let stage_count = p.stages.len();
-    let last_is_unique = matches!(p.stages.last(), Some(Stage::UniqueBy(None)));
+    let last_is_unique = heap_top_k.is_none() && matches!(p.stages.last(), Some(Stage::UniqueBy(None)));
     let last_payload_idx = if last_is_unique { stage_count.saturating_sub(1) } else { stage_count };
-    for (idx, (st, k)) in p.stages.iter().zip(p.stage_kernels.iter()).enumerate() {
-        match st {
-            Stage::Filter(_) => {
-                if !is_pred_kernel(k) { return None; }
-            }
-            Stage::Skip(_) | Stage::Take(_) => {}
-            Stage::Map(_) if last_payload_idx > 0 && idx == last_payload_idx - 1 => {
-                match k {
-                    BodyKernel::FieldRead(_) => {}
-                    BodyKernel::FieldChain(_) => {}
-                    BodyKernel::ObjProject(entries) => {
-                        if !objproject_is_byte_friendly(entries) { return None; }
-                    }
-                    _ => return None,
+    if heap_top_k.is_none() {
+        for (idx, (st, k)) in p.stages.iter().zip(p.stage_kernels.iter()).enumerate() {
+            match st {
+                Stage::Filter(_) => {
+                    if !is_pred_kernel(k) { return None; }
                 }
+                Stage::Skip(_) | Stage::Take(_) => {}
+                Stage::Map(_) if last_payload_idx > 0 && idx == last_payload_idx - 1 => {
+                    match k {
+                        BodyKernel::FieldRead(_) => {}
+                        BodyKernel::FieldChain(_) => {}
+                        BodyKernel::ObjProject(entries) => {
+                            if !objproject_is_byte_friendly(entries) { return None; }
+                        }
+                        _ => return None,
+                    }
+                }
+                Stage::UniqueBy(None) if idx == stage_count - 1 => {
+                    if !matches!(p.sink, Sink::Collect) { return None; }
+                }
+                _ => return None,
             }
-            Stage::UniqueBy(None) if idx == stage_count - 1 => {
-                if !matches!(p.sink, Sink::Collect) { return None; }
-            }
-            _ => return None,
         }
     }
     let mut catalog: Catalog = Catalog::default();
-    for (st, k) in p.stages.iter().zip(p.stage_kernels.iter()) {
-        match st {
-            Stage::Skip(_) | Stage::Take(_) | Stage::UniqueBy(None) => continue,
-            _ => {}
+    if let Some(htk) = &heap_top_k {
+        catalog.slot_for_chain(&htk.sort_key);
+        if let Some(proj) = &htk.proj_kernel {
+            collect_paths(proj, &mut catalog)?;
         }
-        collect_paths(k, &mut catalog)?;
+    } else {
+        for (st, k) in p.stages.iter().zip(p.stage_kernels.iter()) {
+            match st {
+                Stage::Skip(_) | Stage::Take(_) | Stage::UniqueBy(None) => continue,
+                _ => {}
+            }
+            collect_paths(k, &mut catalog)?;
+        }
+        for k in p.sink_kernels.iter() { collect_paths(k, &mut catalog)?; }
     }
-    for k in p.sink_kernels.iter() { collect_paths(k, &mut catalog)?; }
 
     let arr_start = walk_chain_to_array(raw_bytes, &chain)?;
+    if let Some(htk) = heap_top_k {
+        return run_heap_top_k_borrow(&htk, &catalog, raw_bytes, arr_start, arena);
+    }
     run_with_sink_borrow(p, &catalog, raw_bytes, arr_start, last_is_unique, arena)
+}
+
+/// Borrowed heap-top-K walker — emits `Val::Arr` of `Val<'a>` rows.
+/// Mirrors `run_heap_top_k`; only diverges in row-build (arena) and
+/// final slice allocation (arena).
+fn run_heap_top_k_borrow<'a>(
+    htk: &HeapTopK,
+    cat: &Catalog,
+    raw: &[u8],
+    arr_start: usize,
+    arena: &'a crate::eval::borrowed::Arena,
+) -> Option<Result<crate::eval::borrowed::Val<'a>, EvalError>> {
+    use crate::eval::borrowed::Val as BVal;
+    use std::collections::BinaryHeap;
+    use std::cmp::Reverse;
+
+    if cat.n_slots() > SCALAR_BUF_CAP { return None; }
+    let wanted: Vec<&[u8]> = cat.top_keys.iter().map(|f| f.as_bytes()).collect();
+    let needles_owned: Vec<Vec<u8>> = build_needles(&wanted);
+    let needles: Vec<&[u8]> = needles_owned.iter().map(|n| n.as_slice()).collect();
+
+    let sort_slot = cat.slot_lookup_chain(&htk.sort_key)?;
+    let map_kind = build_map_kind(htk.proj_kernel.as_ref(), cat)?;
+
+    if htk.k == 0 {
+        let empty: &[BVal<'a>] = &[];
+        return Some(Ok(BVal::Arr(arena.alloc_slice_copy(empty))));
+    }
+
+    let mut store: Vec<BVal<'a>> = Vec::with_capacity(htk.k);
+    let mut asc_heap: BinaryHeap<(OrdKey, Reverse<u64>, u32)> = BinaryHeap::new();
+    let mut desc_heap: BinaryHeap<(Reverse<OrdKey>, Reverse<u64>, u32)> = BinaryHeap::new();
+    let mut seq: u64 = 0;
+
+    let mut row_fn = |slots: &Slots, span: RowSpan| -> Option<ScanCtl> {
+        let key = match slots[sort_slot] {
+            Some(sc) => OrdKey::from_scalar(raw, sc),
+            None => OrdKey::Nullish,
+        };
+        let v = build_row_val_in(arena, raw, slots, span, &map_kind)?;
+        seq += 1;
+        if htk.descending {
+            if desc_heap.len() < htk.k {
+                let idx = store.len() as u32;
+                store.push(v);
+                desc_heap.push((Reverse(key), Reverse(seq), idx));
+            } else if let Some(top) = desc_heap.peek() {
+                if key > (top.0).0 {
+                    let idx = (top.2) as usize;
+                    store[idx] = v;
+                    let new_idx = top.2;
+                    desc_heap.pop();
+                    desc_heap.push((Reverse(key), Reverse(seq), new_idx));
+                }
+            }
+        } else {
+            if asc_heap.len() < htk.k {
+                let idx = store.len() as u32;
+                store.push(v);
+                asc_heap.push((key, Reverse(seq), idx));
+            } else if let Some(top) = asc_heap.peek() {
+                if key < top.0 {
+                    let idx = (top.2) as usize;
+                    store[idx] = v;
+                    let new_idx = top.2;
+                    asc_heap.pop();
+                    asc_heap.push((key, Reverse(seq), new_idx));
+                }
+            }
+        }
+        Some(ScanCtl::Continue)
+    };
+    scan_loop_prcf(raw, arr_start, &needles, cat, &[], &mut row_fn)?;
+
+    let mut out: Vec<BVal<'a>> = Vec::with_capacity(if htk.descending { desc_heap.len() } else { asc_heap.len() });
+    if htk.descending {
+        let mut entries: Vec<(OrdKey, u64, u32)> = desc_heap.into_iter()
+            .map(|(Reverse(k), Reverse(s), i)| (k, s, i)).collect();
+        entries.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        for (_, _, i) in entries {
+            out.push(std::mem::replace(&mut store[i as usize], BVal::Null));
+        }
+    } else {
+        let mut entries: Vec<(OrdKey, u64, u32)> = asc_heap.into_iter()
+            .map(|(k, Reverse(s), i)| (k, s, i)).collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        for (_, _, i) in entries {
+            out.push(std::mem::replace(&mut store[i as usize], BVal::Null));
+        }
+    }
+    let slice = arena.alloc_slice_fill_iter(out.into_iter());
+    Some(Ok(BVal::Arr(&*slice)))
 }
 
 fn run_with_sink_borrow<'a>(
