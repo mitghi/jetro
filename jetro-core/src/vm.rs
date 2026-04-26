@@ -3677,29 +3677,8 @@ impl VM {
     }
 
     /// Execute a compiled program against a document, first specialising
-    /// against the given shape (turns `OptField` → `GetField` where safe,
-    /// folds `KindCheck` where type is known, etc.).
-    pub fn execute_with_schema(
-        &mut self,
-        program: &Program,
-        doc: &serde_json::Value,
-        shape: &super::schema::Shape,
-    ) -> Result<serde_json::Value, EvalError> {
-        let specialized = super::schema::specialize(program, shape);
-        self.execute(&specialized, doc)
-    }
-
-    /// Execute a program; infer the shape from the document itself.  Costs
-    /// an O(doc) shape walk before execution; useful when the same
-    /// compiled program is reused across many docs with similar shapes.
-    pub fn execute_with_inferred_schema(
-        &mut self,
-        program: &Program,
-        doc: &serde_json::Value,
-    ) -> Result<serde_json::Value, EvalError> {
-        let shape = super::schema::Shape::of(doc);
-        self.execute_with_schema(program, doc, &shape)
-    }
+    // execute_with_schema / execute_with_inferred_schema removed —
+    // schema.rs deleted in Tier 3 aggressive sweep (warm-only path).
 
     /// Get or compile an expression string (compile cache).
     /// Cache key is (pass_config_hash, expr) so that different pass
