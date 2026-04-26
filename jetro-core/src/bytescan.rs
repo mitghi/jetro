@@ -20,7 +20,7 @@
 
 use crate::eval::Val;
 use crate::eval::EvalError;
-use crate::pipeline::{Pipeline, Source, Sink, Stage, BodyKernel, NumOp, ArithOperand};
+use crate::pipeline::{Pipeline, Source, Sink, Stage, BodyKernel, NumOp, ArithOperand, ObjProjEntry};
 use std::sync::Arc;
 
 // ── Public entry point ─────────────────────────────────────────────
@@ -35,19 +35,43 @@ pub fn try_run(p: &Pipeline, raw_bytes: &[u8]) -> Option<Result<Val, EvalError>>
         Source::FieldChain { keys } => keys.iter().map(|k| k.as_bytes()).collect(),
         _ => return None,
     };
-    // Filter stages — only path-pred shapes.
-    for (st, k) in p.stages.iter().zip(p.stage_kernels.iter()) {
+    // Stage acceptance: Filter (any pred kernel), Skip, Take, and a
+    // single trailing Map (FieldRead/FieldChain[1]/ObjProject).  All
+    // other shapes defer to tape exec.  Skip/Take counts collect for
+    // sink dispatch; Map kernel resolved later via cs.last().
+    let stage_count = p.stages.len();
+    for (idx, (st, k)) in p.stages.iter().zip(p.stage_kernels.iter()).enumerate() {
         match st {
             Stage::Filter(_) => {
                 if !is_pred_kernel(k) { return None; }
             }
-            _ => return None,  // FlatMap/Map/etc. defer to tape exec
+            Stage::Skip(_) | Stage::Take(_) => {}
+            Stage::Map(_) if idx == stage_count - 1 => {
+                match k {
+                    BodyKernel::FieldRead(_) => {}
+                    BodyKernel::FieldChain(keys) if keys.len() == 1 => {}
+                    BodyKernel::ObjProject(entries) => {
+                        if !objproject_is_byte_friendly(entries) { return None; }
+                    }
+                    _ => return None,
+                }
+            }
+            _ => return None,
         }
     }
     // Build wanted-fields catalog from kernels.  Cap field-name uniqueness
     // (~16 distinct fields per row); linear scan of catalog is fine.
+    // Skip/Take stages carry a `Generic` kernel by convention (no body
+    // to classify) — those add nothing to the catalog and are skipped
+    // at this stage to avoid the `Generic`-rejection in collect_paths.
     let mut catalog: Catalog = Catalog::default();
-    for k in p.stage_kernels.iter() { collect_paths(k, &mut catalog)?; }
+    for (st, k) in p.stages.iter().zip(p.stage_kernels.iter()) {
+        match st {
+            Stage::Skip(_) | Stage::Take(_) => continue,
+            _ => {}
+        }
+        collect_paths(k, &mut catalog)?;
+    }
     for k in p.sink_kernels.iter() { collect_paths(k, &mut catalog)?; }
 
     // Locate source array byte position.
@@ -88,7 +112,7 @@ impl Catalog {
 
 /// Walk a kernel and register every top-level field name it reads.
 /// Returns None when the kernel reads something the byte-walker can't
-/// project (FieldChain past one step, ObjProject, FString, Generic).
+/// project (FieldChain past one step, FString, Generic).
 fn collect_paths(k: &BodyKernel, cat: &mut Catalog) -> Option<()> {
     match k {
         BodyKernel::FieldRead(name) => { cat.slot_for(name); Some(()) }
@@ -109,9 +133,30 @@ fn collect_paths(k: &BodyKernel, cat: &mut Catalog) -> Option<()> {
             cat.slot_for(&keys[0]);
             Some(())
         }
-        // Multi-step chains, ObjProject, FString, Generic — bail.
+        // ObjProject: each entry must be a 1-step Path; register its
+        // single field in the catalog.  Anything else (InnerLen,
+        // InnerMapSum, multi-step Path) defers to tape.
+        BodyKernel::ObjProject(entries) => {
+            for e in entries.iter() {
+                match e {
+                    ObjProjEntry::Path { path, .. } if path.len() == 1 => {
+                        cat.slot_for(&path[0]);
+                    }
+                    _ => return None,
+                }
+            }
+            Some(())
+        }
+        // Multi-step chains, FString, Generic — bail.
         _ => None,
     }
+}
+
+/// True iff every ObjProject entry is a single-step Path projection.
+fn objproject_is_byte_friendly(entries: &[ObjProjEntry]) -> bool {
+    entries.iter().all(|e| matches!(e,
+        ObjProjEntry::Path { path, .. } if path.len() == 1
+    ))
 }
 
 fn collect_arith(op: &ArithOperand, cat: &mut Catalog) -> Option<()> {
@@ -608,26 +653,35 @@ fn run_with_sink(
     // bytescan migrates uniformly with Pipeline IR.
     let (cs, ck, csink) = p.canonical();
 
-    // Trailing Map kernel — Sink::Numeric over a Map'd projection.
+    // Trailing Map kernel — projection that the sink consumes.
+    // Applies to Numeric, First, Last, Collect.  Other sinks fall
+    // through to per-Sink branches with trailing_map_kernel = None.
     let trailing_map_kernel: Option<&BodyKernel> =
-        if matches!(csink, Sink::Numeric(_))
+        if matches!(csink, Sink::Numeric(_) | Sink::First | Sink::Last | Sink::Collect)
             && matches!(cs.last(), Some(Stage::Map(_)))
         {
             ck.last()
         } else { None };
     let filter_end = if trailing_map_kernel.is_some() { cs.len() - 1 } else { cs.len() };
 
-    // Resolve filter-stage kernels to slot indices ONCE.
+    // Resolve filter-stage kernels to slot indices ONCE.  Skip/Take
+    // also collected here — counts get consumed by the sink walker.
     let mut filter_slots: Vec<(usize, FilterCmp)> = Vec::new();
+    let mut skip_n: usize = 0;
+    let mut take_n: usize = usize::MAX;
+    let mut has_take = false;
     for (st, k) in cs[..filter_end].iter().zip(ck[..filter_end].iter()) {
-        if let Stage::Filter(_) = st {
-            let (slot, cmp) = resolve_pred_to_slot(k, cat)?;
-            filter_slots.push((slot, cmp));
-        } else {
-            // Any non-Filter stage in the prefix is unsupported here.
-            return None;
+        match st {
+            Stage::Filter(_) => {
+                let (slot, cmp) = resolve_pred_to_slot(k, cat)?;
+                filter_slots.push((slot, cmp));
+            }
+            Stage::Skip(n) => { skip_n = skip_n.saturating_add(*n); }
+            Stage::Take(n) => { take_n = take_n.min(*n); has_take = true; }
+            _ => return None,
         }
     }
+    let _ = has_take;
 
     // Columnar Extraction fast path — generic algorithm.  No filters,
     // sink is Count or Numeric (with optional trailing Map). One memmem
@@ -643,28 +697,171 @@ fn run_with_sink(
     }
 
     // Pipeline-Row Closure Fusion (PRCF) — generic fallback.
+    // Skip/Take are honoured uniformly by gating the per-Sink reducer
+    // on a row counter: skip first `skip_n` matched rows, then process
+    // up to `take_n`, then signal Done.  Closure-monomorphised so the
+    // skip/take check inlines into the hot loop with no overhead when
+    // skip_n=0 / take_n=usize::MAX.
+    macro_rules! sink_walker {
+        ($body:expr) => {{
+            let mut seen: usize = 0;
+            let mut taken: usize = 0;
+            scan_loop_prcf(raw, arr_start, &needles, &filter_slots, |slots, span| {
+                if seen < skip_n { seen += 1; return Some(ScanCtl::Continue); }
+                if taken >= take_n { return Some(ScanCtl::Done); }
+                taken += 1;
+                ($body)(slots, span)
+            })?;
+        }};
+    }
     match (&csink, trailing_map_kernel) {
         (Sink::Count, None) => {
             let mut count: u64 = 0;
-            scan_loop_prcf(raw, arr_start, &needles, &filter_slots, |_slots| {
+            sink_walker!(|_slots: &Slots, _span: RowSpan| -> Option<ScanCtl> {
                 count += 1;
-                Some(())
-            })?;
+                Some(ScanCtl::Continue)
+            });
             Some(Ok(Val::Int(count as i64)))
         }
         (Sink::Numeric(op), Some(map_k)) => {
             let map_slot = resolve_value_to_slot(map_k, cat)?;
             let op = *op;
             let mut acc = Acc::new();
-            scan_loop_prcf(raw, arr_start, &needles, &filter_slots, |slots| {
+            sink_walker!(|slots: &Slots, _span: RowSpan| -> Option<ScanCtl> {
                 if let Some(v) = slots[map_slot] {
                     if !acc.push(v) { return None; }
                 }
-                Some(())
-            })?;
+                Some(ScanCtl::Continue)
+            });
             Some(Ok(acc.finalise(op)))
         }
+        // Sink::First — generic early-exit. Closure returns Done on
+        // first row that passes all filters + skip window; walker
+        // stops, returns matched row Val.  With trailing Map(field/
+        // ObjProject), emits the projected value (no full row alloc).
+        (Sink::First, _) => {
+            let map_kind = build_map_kind(trailing_map_kernel, cat)?;
+            let mut found: Option<Val> = None;
+            sink_walker!(|slots: &Slots, span: RowSpan| -> Option<ScanCtl> {
+                found = Some(build_row_val(raw, slots, span, &map_kind)?);
+                Some(ScanCtl::Done)
+            });
+            Some(Ok(found.unwrap_or(Val::Null)))
+        }
+        // Sink::Last — single-pass, capture the latest matching row.
+        (Sink::Last, _) => {
+            let map_kind = build_map_kind(trailing_map_kernel, cat)?;
+            let mut last_val: Option<Val> = None;
+            sink_walker!(|slots: &Slots, span: RowSpan| -> Option<ScanCtl> {
+                last_val = Some(build_row_val(raw, slots, span, &map_kind)?);
+                Some(ScanCtl::Continue)
+            });
+            Some(Ok(last_val.unwrap_or(Val::Null)))
+        }
+        // Sink::Collect — gather all matched (and within skip/take
+        // window) rows into Val::Arr.  When trailing Map projects to
+        // a scalar slot, output is a flat Vec of primitives; when it
+        // projects to ObjProject, each row builds a small Val::Obj.
+        (Sink::Collect, _) => {
+            let map_kind = build_map_kind(trailing_map_kernel, cat)?;
+            let mut acc: Vec<Val> = Vec::new();
+            sink_walker!(|slots: &Slots, span: RowSpan| -> Option<ScanCtl> {
+                acc.push(build_row_val(raw, slots, span, &map_kind)?);
+                Some(ScanCtl::Continue)
+            });
+            Some(Ok(Val::arr(acc)))
+        }
         _ => None,
+    }
+}
+
+/// Resolved trailing-Map projection.  Captures the slot indices for
+/// each output field — or None when no trailing map (full row dump).
+enum MapKind {
+    /// Full row — `parse_row_obj` materialises the matched JSON object.
+    None,
+    /// Scalar projection at slot index — emits single primitive Val.
+    Scalar(usize),
+    /// Object shape — emits Val::Obj with N (key, slot) pairs.
+    Project(Arc<[(Arc<str>, usize)]>),
+}
+
+fn build_map_kind(k: Option<&BodyKernel>, cat: &Catalog) -> Option<MapKind> {
+    let k = match k { Some(k) => k, None => return Some(MapKind::None) };
+    match k {
+        BodyKernel::FieldRead(_) | BodyKernel::FieldChain(_) => {
+            let s = resolve_value_to_slot(k, cat)?;
+            Some(MapKind::Scalar(s))
+        }
+        BodyKernel::ObjProject(entries) => {
+            let mut pairs: Vec<(Arc<str>, usize)> = Vec::with_capacity(entries.len());
+            for e in entries.iter() {
+                match e {
+                    ObjProjEntry::Path { key, path } if path.len() == 1 => {
+                        let s = cat.slot_lookup(path[0].as_ref())?;
+                        pairs.push((Arc::clone(key), s));
+                    }
+                    _ => return None,
+                }
+            }
+            Some(MapKind::Project(pairs.into()))
+        }
+        _ => None,
+    }
+}
+
+/// Build a Val for a matched row.  Three modes:
+///   - `MapKind::None` — parse the row's byte range as a Val::Obj
+///     (per-call alloc for the row buffer + Val::Obj IndexMap).
+///   - `MapKind::Scalar(slot)` — primitive Val from the slot.
+///   - `MapKind::Project(pairs)` — small Val::Obj with N projected
+///     fields, no per-row JSON parse.
+#[inline]
+fn build_row_val(raw: &[u8], slots: &Slots, span: RowSpan, map: &MapKind) -> Option<Val> {
+    match map {
+        MapKind::None => parse_row_obj(raw, span),
+        MapKind::Scalar(s) => Some(slots[*s].map(|sc| scalar_to_val(raw, sc)).unwrap_or(Val::Null)),
+        MapKind::Project(pairs) => {
+            let mut m: indexmap::IndexMap<Arc<str>, Val> = indexmap::IndexMap::with_capacity(pairs.len());
+            for (key, slot) in pairs.iter() {
+                let v = slots[*slot].map(|sc| scalar_to_val(raw, sc)).unwrap_or(Val::Null);
+                m.insert(Arc::clone(key), v);
+            }
+            Some(Val::Obj(Arc::new(m)))
+        }
+    }
+}
+
+#[inline]
+fn parse_row_obj(raw: &[u8], span: RowSpan) -> Option<Val> {
+    #[cfg(feature = "simd-json")]
+    {
+        let mut buf: Vec<u8> = raw[span.start..span.end].to_vec();
+        return Val::from_json_simd(&mut buf).ok();
+    }
+    #[cfg(not(feature = "simd-json"))]
+    {
+        let s = std::str::from_utf8(&raw[span.start..span.end]).ok()?;
+        let v: serde_json::Value = serde_json::from_str(s).ok()?;
+        Some(Val::from(&v))
+    }
+}
+
+#[inline]
+fn scalar_to_val(raw: &[u8], s: Scalar) -> Val {
+    match s {
+        Scalar::Null | Scalar::Missing => Val::Null,
+        Scalar::Bool(b) => Val::Bool(b),
+        Scalar::Int(n) => Val::Int(n),
+        Scalar::Float(f) => Val::Float(f),
+        Scalar::StrRange(start, end) => {
+            let bytes = &raw[start as usize .. end as usize];
+            // UTF-8 string content; fall back to lossy on malformed.
+            match std::str::from_utf8(bytes) {
+                Ok(s) => Val::Str(Arc::from(s)),
+                Err(_) => Val::Str(Arc::from(String::from_utf8_lossy(bytes).as_ref())),
+            }
+        }
     }
 }
 
@@ -737,6 +934,18 @@ fn parse_scalar_at(raw: &[u8], pos: usize) -> Option<Scalar> {
     Some(sc)
 }
 
+/// Sink loop control: closure tells walker whether to keep walking.
+/// `Continue` = process next row, `Done` = sink satisfied (early-exit
+/// success).  Closure-returned `None` is reserved for hard error
+/// (parse / overflow) and bubbles up as bytescan opt-out.
+#[derive(Copy, Clone)]
+enum ScanCtl { Continue, Done }
+
+/// Byte-range of a single row (object) in `raw`.  Half-open: `start`
+/// at `{`, `end` one-past `}`.
+#[derive(Copy, Clone)]
+struct RowSpan { start: usize, end: usize }
+
 /// Pipeline-Row Closure Fusion — single generic walker that consumes
 /// any per-row processor closure.  Compiler monomorphises per call
 /// site (each Sink branch has a different closure type) → static
@@ -753,7 +962,7 @@ fn scan_loop_prcf<F>(
     mut row_fn: F,
 ) -> Option<()>
 where
-    F: FnMut(&Slots) -> Option<()>,
+    F: FnMut(&Slots, RowSpan) -> Option<ScanCtl>,
 {
     if raw.get(arr_start) != Some(&b'[') { return None; }
     let mut i = arr_start + 1;
@@ -773,6 +982,7 @@ where
         build_template(raw, i, &wanted[..n_wanted])
     } else { None };
     while i < raw.len() && raw[i] != b']' {
+        let row_start = i;
         let next = if let Some((tpl, _)) = template.as_ref() {
             match entry_extract_template(raw, i, tpl, &mut slots, n_wanted)? {
                 (n, true) => n,
@@ -782,7 +992,10 @@ where
             entry_extract_direct(raw, i, needles, &mut slots)?
         };
         if check_filters(&slots, filters) {
-            row_fn(&slots)?;
+            match row_fn(&slots, RowSpan { start: row_start, end: next })? {
+                ScanCtl::Continue => {}
+                ScanCtl::Done => return Some(()),
+            }
         }
         i = entry_advance(raw, next);
     }

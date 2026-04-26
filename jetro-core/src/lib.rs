@@ -994,10 +994,25 @@ impl Jetro {
     /// can take the SIMD byte-scan fast path.
     pub fn collect<S: AsRef<str>>(&self, expr: S) -> std::result::Result<Value, EvalError> {
         let expr = expr.as_ref();
-        // Phase 6 tape-aware fast path: `$..k.<aggregate>()` over a
-        // handle built via from_simd_lazy walks the tape directly,
-        // never building a Val tree.  Bench: closes $..price gap from
-        // ~17x native to ~2-3x on bench_complex.
+
+        let parsed = parser::parse(expr).ok();
+        let lowered = parsed.as_ref().and_then(pipeline::Pipeline::lower);
+
+        // Bytescan first — generic byte walker over raw_bytes; closes
+        // Sink::Numeric/Count/First/Last shapes without paying the
+        // full simd-json tape parse.
+        #[cfg(feature = "simd-json")]
+        if let Some(p) = &lowered {
+            if !self.root_val.get().is_some() {
+                if let Some(raw) = &self.raw_bytes {
+                    if let Some(out) = bytescan::try_run(p, raw.as_ref()) {
+                        return out.map(|v| v.into());
+                    }
+                }
+            }
+        }
+
+        // Tape descend-aggregate path for $..k.<aggregate> shapes.
         #[cfg(feature = "simd-json")]
         if let Some(tape) = self.lazy_tape() {
             let val_built = self.root_val.get().is_some();
@@ -1005,24 +1020,16 @@ impl Jetro {
                 return out.map(|v| v.into());
             }
         }
-        // Pipeline IR Phase 3: columnar fast path inside Pipeline::run
-        // bypasses per-row exec_val_raw entirely for SumMap /
-        // SumFilterMap shapes — extracts the projected column with
-        // IndexMap inline cache, folds via tight inline loop.  When
-        // the columnar path matches, perf parity with hand-written
-        // fused opcodes; when it misses, falls through to per-row
-        // pull loop (still slower than fused opcodes) and finally to
-        // the existing opcode path.
-        if let Ok(ast) = parser::parse(expr) {
-            if let Some(p) = pipeline::Pipeline::lower(&ast) {
-                #[cfg(feature = "simd-json")]
-                if let Some(out) = p.try_run_no_root(self as &dyn pipeline::ObjVecPromoter) {
-                    return out.map(|v| v.into());
-                }
-                return p.run_with(&self.root_val(), Some(self as &dyn pipeline::ObjVecPromoter))
-                    .map(|v| v.into());
+
+        if let Some(p) = lowered {
+            #[cfg(feature = "simd-json")]
+            if let Some(out) = p.try_run_no_root(self as &dyn pipeline::ObjVecPromoter) {
+                return out.map(|v| v.into());
             }
+            return p.run_with(&self.root_val(), Some(self as &dyn pipeline::ObjVecPromoter))
+                .map(|v| v.into());
         }
+
         with_vm(|cell| match (cell.try_borrow_mut(), &self.raw_bytes) {
             (Ok(mut vm), Some(bytes)) => {
                 let prog = vm.get_or_compile(expr)?;
@@ -1067,6 +1074,32 @@ impl Jetro {
 
     pub fn collect_val<S: AsRef<str>>(&self, expr: S) -> std::result::Result<JetroVal, EvalError> {
         let expr = expr.as_ref();
+
+        // Parse + lower up-front so bytescan can run BEFORE any
+        // tape parse.  lazy_tape() builds the full simd-json tape
+        // over raw_bytes — ~5-7 ms / MB on cold path; if bytescan
+        // can satisfy the query from raw_bytes alone we skip that.
+        let parsed = parser::parse(expr).ok();
+        let lowered = parsed.as_ref().and_then(pipeline::Pipeline::lower);
+
+        // Schema-aware projected parse — generic byte-walker over
+        // raw_bytes.  Always tried before tape parse so cold queries
+        // that match its supported Sink/Stage surface (Numeric/Count/
+        // First/Last/...) never trigger the full tape build.
+        #[cfg(feature = "simd-json")]
+        if let Some(p) = &lowered {
+            if !self.root_val.get().is_some() {
+                if let Some(raw) = &self.raw_bytes {
+                    if let Some(out) = bytescan::try_run(p, raw.as_ref()) {
+                        return out;
+                    }
+                }
+            }
+        }
+
+        // Tape descend-aggregate fast path for `$..k.<aggregate>`
+        // shapes that bytescan does not handle.  Triggers tape parse
+        // only when bytescan declined.
         #[cfg(feature = "simd-json")]
         if let Some(tape) = self.lazy_tape() {
             let val_built = self.root_val.get().is_some();
@@ -1074,27 +1107,15 @@ impl Jetro {
                 return out;
             }
         }
-        if let Ok(ast) = parser::parse(expr) {
-            if let Some(p) = pipeline::Pipeline::lower(&ast) {
-                // Schema-aware projected parse — bypasses simd-json tape
-                // entirely for byte-scannable Pipeline shapes.  Reads
-                // raw_bytes via JSON-aware skip-counting; only extracts
-                // the catalog of fields the kernels touch.
-                #[cfg(feature = "simd-json")]
-                if !self.root_val.get().is_some() {
-                    if let Some(raw) = &self.raw_bytes {
-                        if let Some(out) = bytescan::try_run(&p, raw.as_ref()) {
-                            return out;
-                        }
-                    }
-                }
-                #[cfg(feature = "simd-json")]
-                if let Some(out) = p.try_run_no_root(self as &dyn pipeline::ObjVecPromoter) {
-                    return out;
-                }
-                return p.run_with(&self.root_val(), Some(self as &dyn pipeline::ObjVecPromoter));
+
+        if let Some(p) = lowered {
+            #[cfg(feature = "simd-json")]
+            if let Some(out) = p.try_run_no_root(self as &dyn pipeline::ObjVecPromoter) {
+                return out;
             }
+            return p.run_with(&self.root_val(), Some(self as &dyn pipeline::ObjVecPromoter));
         }
+
         with_vm(|cell| {
             let mut vm = cell.try_borrow_mut().map_err(|_| EvalError("VM in use".into()))?;
             let prog = vm.get_or_compile(expr)?;
