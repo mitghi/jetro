@@ -287,6 +287,22 @@ pub enum BodyKernel {
     ConstBool(bool),
     /// Body produces a constant value independent of item.
     Const(Val),
+    /// Body is a single `MakeObj` whose entries are all path projections
+    /// (Short shorthand `{name}` or `KvPath` with Field-only steps).
+    /// Per-row eval walks each path on the current entry and emits a
+    /// `Val::ObjSmall` with the projected fields. Generic across any
+    /// number of fields and any path depth — classifier-driven, no
+    /// per-shape walker.
+    ObjProject(Arc<[ObjProjEntry]>),
+}
+
+/// One field of an ObjProject kernel — output key + path to walk
+/// from the current entry.  Empty `path` means the entry itself
+/// (rare; would only happen for spreads which we don't classify).
+#[derive(Debug, Clone)]
+pub struct ObjProjEntry {
+    pub key: Arc<str>,
+    pub path: Arc<[Arc<str>]>,
 }
 
 impl BodyKernel {
@@ -367,8 +383,50 @@ impl BodyKernel {
                 }
             }
         }
+        // ObjProject — single-opcode `MakeObj(entries)` whose entries
+        // are all path projections (Short / KvPath-Field-only).  Body
+        // shape `{k1, k2: a.b, k3}` compiles to exactly this.
+        if ops.len() == 1 {
+            if let Opcode::MakeObj(entries) = &ops[0] {
+                if let Some(proj) = classify_obj_project(entries) {
+                    return Self::ObjProject(proj.into());
+                }
+            }
+        }
         Self::Generic
     }
+}
+
+/// Try to classify a `MakeObj` entry list as a path-only projection.
+/// Returns `None` if any entry is non-path (Dynamic / Spread / KvPath
+/// with Index step / KvPath optional / KvPath cond / Kv with non-trivial
+/// sub-program).
+fn classify_obj_project(
+    entries: &[crate::vm::CompiledObjEntry],
+) -> Option<Vec<ObjProjEntry>> {
+    use crate::vm::CompiledObjEntry as E;
+    use crate::vm::KvStep;
+    let mut out: Vec<ObjProjEntry> = Vec::with_capacity(entries.len());
+    for e in entries {
+        match e {
+            E::Short { name, .. } => out.push(ObjProjEntry {
+                key: name.clone(),
+                path: Arc::from(vec![name.clone()].into_boxed_slice()),
+            }),
+            E::KvPath { key, steps, optional: false, .. } => {
+                let mut path: Vec<Arc<str>> = Vec::with_capacity(steps.len());
+                for s in steps.iter() {
+                    match s {
+                        KvStep::Field(k) => path.push(k.clone()),
+                        KvStep::Index(_) => return None,
+                    }
+                }
+                out.push(ObjProjEntry { key: key.clone(), path: path.into() });
+            }
+            _ => return None,
+        }
+    }
+    Some(out)
 }
 
 #[inline]
@@ -1402,7 +1460,9 @@ impl Pipeline {
                 Stage::Map(_) => {
                     if map_kernel.is_some() { return None; }
                     if !matches!(k,
-                        BodyKernel::FieldRead(_) | BodyKernel::FieldChain(_))
+                        BodyKernel::FieldRead(_)
+                        | BodyKernel::FieldChain(_)
+                        | BodyKernel::ObjProject(_))
                     { return None; }
                     map_kernel = Some(k);
                 }
@@ -1462,7 +1522,7 @@ impl Pipeline {
                     if skipped < skip_n { skipped += 1; continue; }
                     if let Some(lim) = take_limit { if taken >= lim { break 'outer; } }
                     let row = match map_kernel {
-                        Some(mk) => RowSrc::Scalar(eval_kernel_value(mk, tape, inner_idx)?),
+                        Some(mk) => eval_kernel_to_row(mk, tape, inner_idx)?,
                         None => RowSrc::Entry(inner_idx),
                     };
                     taken += 1;
@@ -2758,14 +2818,16 @@ enum TapeVal {
 /// Per-row state threaded through pipeline stages on tape.
 /// - `Entry(idx)` — current is a tape Object/Array entry; field-read
 ///   kernels apply.  Initial state for each row pulled from a tape Array.
-/// - `Scalar(v)` — current is a projected scalar (post `Map(FieldRead)`
-///   etc.); field-read kernels no longer apply, but pred kernels and
-///   value-passthrough do.
+/// - `Scalar(v)` — current is a projected scalar (post `Map(FieldRead)`).
+/// - `Mat(v)` — current is a materialised Val (post `Map(ObjProject)`
+///   or other kernels that produce containers).  Owns an Arc-wrapped
+///   Val so clone is cheap (Arc bump).
 #[cfg(feature = "simd-json")]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum RowSrc {
     Entry(usize),
     Scalar(TapeVal),
+    Mat(Val),
 }
 
 #[cfg(feature = "simd-json")]
@@ -2786,6 +2848,71 @@ fn node_to_tape_val(tape: &crate::strref::TapeData, idx: usize) -> TapeVal {
         // as Missing so sinks that need them bail to the Val path.
         TapeNode::Array { .. } | TapeNode::Object { .. } => TapeVal::Missing,
     }
+}
+
+/// Evaluate a BodyKernel against a tape entry → `RowSrc`.  Covers
+/// scalar-producing kernels (FieldRead/FieldChain/Const/ConstBool)
+/// AND materialised kernels (ObjProject).  Returns `None` for kernel
+/// shapes the tape executor can't represent.
+#[cfg(feature = "simd-json")]
+fn eval_kernel_to_row(
+    kernel: &BodyKernel,
+    tape: &crate::strref::TapeData,
+    entry_idx: usize,
+) -> Option<RowSrc> {
+    match kernel {
+        BodyKernel::ObjProject(entries) => {
+            // Build per-row Val::ObjSmall by walking each path on the
+            // current tape entry.  Missing fields skip — matches
+            // existing MakeObj `optional=false` semantics where the key
+            // is omitted when the path resolves to Null/missing.  (We
+            // emit Val::Null for clarity; downstream consumers treat
+            // both equivalently.)
+            let mut pairs: Vec<(Arc<str>, Val)> = Vec::with_capacity(entries.len());
+            for e in entries.iter() {
+                let key_strs: Vec<&str> = e.path.iter().map(|k| k.as_ref()).collect();
+                let v_idx = crate::strref::tape_walk_field_chain_from(
+                    tape, entry_idx, &key_strs);
+                let v = match v_idx {
+                    Some(idx) => tape_node_to_val_primitive(tape, idx)?,
+                    None => Val::Null,
+                };
+                pairs.push((e.key.clone(), v));
+            }
+            Some(RowSrc::Mat(Val::ObjSmall(Arc::from(pairs.into_boxed_slice()))))
+        }
+        _ => {
+            let v = eval_kernel_value(kernel, tape, entry_idx)?;
+            Some(RowSrc::Scalar(v))
+        }
+    }
+}
+
+/// Build a primitive Val from a tape node.  Returns None if the node
+/// is a container (Object/Array) — caller bails to the Val path since
+/// containers need full subtree materialise via Val::from_tape_node
+/// (which requires an Arc<TapeData> we don't have at this scope).
+/// For ObjProject's path leaves this is sufficient: bench shapes
+/// (Q4 `{id, name: user.name, score}`, Q10 `{id}`) project primitive
+/// leaves only.
+#[cfg(feature = "simd-json")]
+fn tape_node_to_val_primitive(tape: &crate::strref::TapeData, idx: usize) -> Option<Val> {
+    use crate::strref::TapeNode;
+    use simd_json::StaticNode as SN;
+    Some(match tape.nodes[idx] {
+        TapeNode::Static(SN::Null) => Val::Null,
+        TapeNode::Static(SN::Bool(b)) => Val::Bool(b),
+        TapeNode::Static(SN::I64(n)) => Val::Int(n),
+        TapeNode::Static(SN::U64(n)) => {
+            if n <= i64::MAX as u64 { Val::Int(n as i64) } else { Val::Float(n as f64) }
+        }
+        TapeNode::Static(SN::F64(f)) => Val::Float(f),
+        TapeNode::StringRef { start, end } => {
+            let s = tape.str_at_range(start as usize, end as usize);
+            Val::Str(Arc::<str>::from(s))
+        }
+        TapeNode::Array { .. } | TapeNode::Object { .. } => return None,
+    })
 }
 
 /// Evaluate a BodyKernel that produces a *value* (not a predicate)
@@ -2824,9 +2951,12 @@ fn eval_kernel_value(
         },
         BodyKernel::ConstBool(b) => Some(TapeVal::Bool(*b)),
         // Pred-shaped kernels don't produce values directly; bail.
+        // ObjProject doesn't fit TapeVal — caller should route through
+        // eval_kernel_to_row instead.
         BodyKernel::FieldCmpLit(_, _, _)
         | BodyKernel::FieldChainCmpLit(_, _, _)
         | BodyKernel::CurrentCmpLit(_, _)
+        | BodyKernel::ObjProject(_)
         | BodyKernel::Generic => None,
     }
 }
@@ -2880,7 +3010,8 @@ fn eval_kernel_pred(
         }
         BodyKernel::ConstBool(b) => Some(*b),
         BodyKernel::CurrentCmpLit(_, _) | BodyKernel::FieldChain(_)
-        | BodyKernel::Const(_) | BodyKernel::Generic => None,
+        | BodyKernel::Const(_) | BodyKernel::ObjProject(_)
+        | BodyKernel::Generic => None,
     }
 }
 
@@ -3064,6 +3195,10 @@ fn topkey_from_row(tape: &crate::strref::TapeData, row: RowSrc) -> TopKey {
     let v = match row {
         RowSrc::Scalar(v) => v,
         RowSrc::Entry(idx) => node_to_tape_val(tape, idx),
+        // Mat rows can't sort generically; return Bottom so they bunch
+        // together — TopN with Mat rows is rare (would imply
+        // sort_by(<projected>) over a Map(ObjProject)).
+        RowSrc::Mat(_) => return TopKey::Bottom,
     };
     match v {
         TapeVal::Int(n) => TopKey::Int(n),
@@ -3097,21 +3232,30 @@ enum RowKey {
 }
 
 #[cfg(feature = "simd-json")]
-fn row_key(tape: &crate::strref::TapeData, row: RowSrc) -> RowKey {
+fn row_key(tape: &crate::strref::TapeData, row: &RowSrc) -> RowKey {
     use simd_json::StaticNode as SN;
     use crate::strref::TapeNode;
     match row {
         RowSrc::Scalar(TapeVal::Null) => RowKey::Null,
-        RowSrc::Scalar(TapeVal::Bool(b)) => RowKey::Bool(b),
-        RowSrc::Scalar(TapeVal::Int(n)) => RowKey::Int(n),
+        RowSrc::Scalar(TapeVal::Bool(b)) => RowKey::Bool(*b),
+        RowSrc::Scalar(TapeVal::Int(n)) => RowKey::Int(*n),
         RowSrc::Scalar(TapeVal::Float(f)) => RowKey::FloatBits(f.to_bits()),
-        RowSrc::Scalar(TapeVal::StrIdx(i)) => match tape.nodes[i] {
+        RowSrc::Scalar(TapeVal::StrIdx(i)) => match tape.nodes[*i] {
             TapeNode::StringRef { start, end } =>
                 RowKey::Str(tape.bytes_buf[start as usize..end as usize].into()),
-            _ => RowKey::EntryIdx(i),
+            _ => RowKey::EntryIdx(*i),
         },
         RowSrc::Scalar(TapeVal::Missing) => RowKey::Null,
-        RowSrc::Entry(idx) => match tape.nodes[idx] {
+        // Mat rows: hash the underlying Val via a stable structural
+        // serialisation.  For dedup-of-projections (Map(ObjProject)
+        // ∘ UniqueBy(None)) this lets two structurally-equal Vals
+        // collapse.  Cost: serialise once per row — acceptable for
+        // dedup pass.
+        RowSrc::Mat(v) => {
+            let bytes = v.to_json_vec();
+            RowKey::Str(bytes.into_boxed_slice())
+        }
+        RowSrc::Entry(idx) => match tape.nodes[*idx] {
             TapeNode::Static(SN::Null) => RowKey::Null,
             TapeNode::Static(SN::Bool(b)) => RowKey::Bool(b),
             TapeNode::Static(SN::I64(n)) => RowKey::Int(n),
@@ -3120,7 +3264,7 @@ fn row_key(tape: &crate::strref::TapeData, row: RowSrc) -> RowKey {
             TapeNode::Static(SN::F64(f)) => RowKey::FloatBits(f.to_bits()),
             TapeNode::StringRef { start, end } =>
                 RowKey::Str(tape.bytes_buf[start as usize..end as usize].into()),
-            _ => RowKey::EntryIdx(idx),
+            _ => RowKey::EntryIdx(*idx),
         },
     }
 }
@@ -3243,6 +3387,7 @@ impl<'p> SinkAcc<'p> {
                 let v = match row {
                     RowSrc::Entry(idx) => node_to_tape_val(tape, idx),
                     RowSrc::Scalar(v) => v,
+                    RowSrc::Mat(_) => return None,  // numeric on Val obj — bail
                 };
                 if !st.push(v) { return None; }
                 Some(true)
@@ -3327,7 +3472,7 @@ impl<'p> SinkAcc<'p> {
             }
             Self::Collect { rows, dedup } => {
                 if let Some(seen) = dedup {
-                    let key = row_key(tape, row);
+                    let key = row_key(tape, &row);
                     if !seen.insert(key) { return Some(true); }
                 }
                 rows.push(row);
@@ -3392,16 +3537,17 @@ fn collect_rows_to_val(
     if rows.is_empty() { return Val::arr(Vec::new()); }
 
     // Per-row "type tag" for uniformity probe.
-    // 1=int, 2=float (numeric superset), 3=str, 0=other (container/mixed/null/bool).
-    fn row_tag(tape: &crate::strref::TapeData, row: RowSrc) -> u8 {
+    // 1=int, 2=float (numeric superset), 3=str, 0=other (container/mixed/null/bool/Mat).
+    fn row_tag(tape: &crate::strref::TapeData, row: &RowSrc) -> u8 {
         match row {
+            RowSrc::Mat(_) => 0,
             RowSrc::Scalar(v) => match v {
                 TapeVal::Int(_)   => 1,
                 TapeVal::Float(_) => 2,
                 TapeVal::StrIdx(_) => 3,
                 _ => 0,
             },
-            RowSrc::Entry(idx) => match tape.nodes[idx] {
+            RowSrc::Entry(idx) => match tape.nodes[*idx] {
                 TapeNode::Static(SN::I64(_)) | TapeNode::Static(SN::U64(_)) => 1,
                 TapeNode::Static(SN::F64(_)) => 2,
                 TapeNode::StringRef { .. } => 3,
@@ -3410,11 +3556,11 @@ fn collect_rows_to_val(
         }
     }
 
-    let first_tag = row_tag(tape, rows[0]);
+    let first_tag = row_tag(tape, &rows[0]);
     let mut all_int   = first_tag == 1;
     let mut all_float = first_tag == 1 || first_tag == 2;
     let mut all_str   = first_tag == 3;
-    for &r in rows.iter().skip(1) {
+    for r in rows.iter().skip(1) {
         match row_tag(tape, r) {
             1 => { all_str = false; }
             2 => { all_int = false; all_str = false; }
@@ -3424,10 +3570,10 @@ fn collect_rows_to_val(
         if !all_int && !all_float && !all_str { break; }
     }
 
-    fn row_to_int(tape: &crate::strref::TapeData, row: RowSrc) -> i64 {
+    fn row_to_int(tape: &crate::strref::TapeData, row: &RowSrc) -> i64 {
         match row {
-            RowSrc::Scalar(TapeVal::Int(n)) => n,
-            RowSrc::Entry(idx) => match tape.nodes[idx] {
+            RowSrc::Scalar(TapeVal::Int(n)) => *n,
+            RowSrc::Entry(idx) => match tape.nodes[*idx] {
                 TapeNode::Static(SN::I64(n)) => n,
                 TapeNode::Static(SN::U64(n)) => n as i64,
                 _ => unreachable!("uniformity"),
@@ -3435,11 +3581,11 @@ fn collect_rows_to_val(
             _ => unreachable!("uniformity"),
         }
     }
-    fn row_to_float(tape: &crate::strref::TapeData, row: RowSrc) -> f64 {
+    fn row_to_float(tape: &crate::strref::TapeData, row: &RowSrc) -> f64 {
         match row {
-            RowSrc::Scalar(TapeVal::Int(n))   => n as f64,
-            RowSrc::Scalar(TapeVal::Float(f)) => f,
-            RowSrc::Entry(idx) => match tape.nodes[idx] {
+            RowSrc::Scalar(TapeVal::Int(n))   => *n as f64,
+            RowSrc::Scalar(TapeVal::Float(f)) => *f,
+            RowSrc::Entry(idx) => match tape.nodes[*idx] {
                 TapeNode::Static(SN::I64(n)) => n as f64,
                 TapeNode::Static(SN::U64(n)) => n as f64,
                 TapeNode::Static(SN::F64(f)) => f,
@@ -3448,10 +3594,10 @@ fn collect_rows_to_val(
             _ => unreachable!("uniformity"),
         }
     }
-    fn row_to_str_range(tape: &crate::strref::TapeData, row: RowSrc) -> (u32, u32) {
+    fn row_to_str_range(tape: &crate::strref::TapeData, row: &RowSrc) -> (u32, u32) {
         let idx = match row {
-            RowSrc::Scalar(TapeVal::StrIdx(i)) => i,
-            RowSrc::Entry(i) => i,
+            RowSrc::Scalar(TapeVal::StrIdx(i)) => *i,
+            RowSrc::Entry(i) => *i,
             _ => unreachable!("uniformity"),
         };
         match tape.nodes[idx] {
@@ -3462,12 +3608,12 @@ fn collect_rows_to_val(
 
     if all_int {
         let mut out: Vec<i64> = Vec::with_capacity(rows.len());
-        for &r in rows { out.push(row_to_int(tape, r)); }
+        for r in rows { out.push(row_to_int(tape, r)); }
         return Val::IntVec(std::sync::Arc::new(out));
     }
     if all_float {
         let mut out: Vec<f64> = Vec::with_capacity(rows.len());
-        for &r in rows { out.push(row_to_float(tape, r)); }
+        for r in rows { out.push(row_to_float(tape, r)); }
         return Val::FloatVec(std::sync::Arc::new(out));
     }
     if all_str {
@@ -3477,7 +3623,7 @@ fn collect_rows_to_val(
                 std::sync::Arc::into_raw(std::sync::Arc::clone(&tape.bytes_buf))
                     as *const str)
         };
-        for &r in rows {
+        for r in rows {
             let (start, end) = row_to_str_range(tape, r);
             out.push(crate::strref::StrRef::slice(
                 std::sync::Arc::clone(&parent_str),
@@ -3485,12 +3631,13 @@ fn collect_rows_to_val(
         }
         return Val::StrSliceVec(std::sync::Arc::new(out));
     }
-    // Mixed / containers — per-row materialise.
+    // Mixed / containers / Mat — per-row materialise.
     let mut out: Vec<Val> = Vec::with_capacity(rows.len());
-    for &r in rows {
+    for r in rows {
         out.push(match r {
-            RowSrc::Entry(i) => Val::from_tape_node(tape, i),
-            RowSrc::Scalar(v) => tape_val_to_val(tape, v),
+            RowSrc::Entry(i) => Val::from_tape_node(tape, *i),
+            RowSrc::Scalar(v) => tape_val_to_val(tape, *v),
+            RowSrc::Mat(v) => v.clone(),
         });
     }
     Val::Arr(std::sync::Arc::new(out))
@@ -3954,7 +4101,8 @@ fn eval_kernel(
         }
         BodyKernel::CurrentCmpLit(op, lit) =>
             Ok(Val::Bool(eval_cmp_op(item, *op, lit))),
-        BodyKernel::Generic => apply_item_in_env(vm, env, item, fallback),
+        BodyKernel::ObjProject(_) | BodyKernel::Generic =>
+            apply_item_in_env(vm, env, item, fallback),
     }
 }
 
