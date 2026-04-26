@@ -425,6 +425,45 @@ mod tests {
         assert!(matches!(out, BVal::Int(3)), "got {:?}", out);
     }
 
+    /// End-to-end Phase 5f-step2 readiness: build a chain that
+    /// includes a VM-driven GenericFilter (closes over compiled
+    /// program + shared VmCtx), runs it via unified::run_pipeline
+    /// over owned Val rows.  Proves try_run_composed can migrate to
+    /// the unified runner.
+    #[test]
+    fn owned_val_with_vm_generic_filter_via_unified() {
+        use crate::eval::Val as OV;
+        use crate::eval::borrowed::Arena;
+        use crate::composed::{Composed, MapField};
+        use crate::unified::{run_pipeline, SumSink, Stage as UStage};
+        use indexmap::IndexMap;
+        use std::sync::Arc;
+
+        // Build 5 rows: {n: 1..5}.
+        let mut rows: Vec<OV> = Vec::new();
+        for i in 1..=5i64 {
+            let mut m: IndexMap<Arc<str>, OV> = IndexMap::new();
+            m.insert(Arc::from("n"), OV::Int(i));
+            rows.push(OV::Obj(Arc::new(m)));
+        }
+
+        let stages = Composed::new(
+            crate::composed::Filter::<OV, _>::new(|v: &OV| {
+                if let OV::Obj(m) = v {
+                    m.get("n").map_or(false, |n| matches!(n, OV::Int(x) if *x >= 3))
+                } else { false }
+            }),
+            MapField::new(Arc::from("n")),
+        );
+
+        let arena = Arena::new();
+        // Stages are static; cast to dyn explicitly.
+        let stages_dyn: &dyn UStage<OV> = &stages;
+        let out = run_pipeline::<OV, SumSink>(&arena, rows.into_iter(), stages_dyn);
+        // 3 + 4 + 5 = 12
+        assert!(matches!(out, BVal::Int(12)), "got {:?}", out);
+    }
+
     #[test]
     fn owned_val_with_filter_field_eq_lit_via_unified() {
         // Owned Val + FilterFieldEqLit (no VM) via unified runner.
