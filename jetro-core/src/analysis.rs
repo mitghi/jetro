@@ -236,10 +236,6 @@ fn apply_op(op: &Opcode, stack: &mut Vec<AbstractVal>) {
             stack.push(AbstractVal { ty: VType::Unknown, null: Nullness::MaybeNull, card });
         }
         Opcode::RootChain(_) => stack.push(AbstractVal::UNKNOWN),
-        Opcode::FilterFieldCmpFieldCount(_, _, _) => {
-            pop1!();
-            stack.push(AbstractVal::scalar(VType::Int));
-        }
         Opcode::FilterFieldEqLit(_, _) | Opcode::FilterFieldCmpLit(_, _, _)
             | Opcode::FilterCurrentCmpLit(_, _)
             | Opcode::FilterStrVecStartsWith(_)
@@ -249,8 +245,7 @@ fn apply_op(op: &Opcode, stack: &mut Vec<AbstractVal>) {
             | Opcode::MapStrVecLower
             | Opcode::MapStrVecTrim
             | Opcode::MapNumVecArith { .. }
-            | Opcode::MapNumVecNeg
-            | Opcode::FilterFieldCmpField(_, _, _) => {
+            | Opcode::MapNumVecNeg => {
             pop1!();
             stack.push(AbstractVal::array());
         }
@@ -448,11 +443,6 @@ fn collect_fields_in_ops(ops: &[Opcode], acc: &mut Vec<Arc<str>>) {
                 | Opcode::FilterFieldEqLit(k, _) | Opcode::FilterFieldCmpLit(k, _, _)
                 => {
                 if !acc.iter().any(|a: &Arc<str>| a == k) { acc.push(k.clone()); }
-            }
-            Opcode::FilterFieldCmpField(k1, _, k2)
-                | Opcode::FilterFieldCmpFieldCount(k1, _, k2) => {
-                if !acc.iter().any(|a: &Arc<str>| a == k1) { acc.push(k1.clone()); }
-                if !acc.iter().any(|a: &Arc<str>| a == k2) { acc.push(k2.clone()); }
             }
             Opcode::RootChain(chain) => {
                 for k in chain.iter() {
@@ -969,9 +959,7 @@ pub fn opcode_cost(op: &Opcode) -> u32 {
             | Opcode::MapStrVecLower
             | Opcode::MapStrVecTrim
             | Opcode::MapNumVecArith { .. }
-            | Opcode::MapNumVecNeg
-            | Opcode::FilterFieldCmpField(_, _, _) => 5,
-        Opcode::FilterFieldCmpFieldCount(_, _, _) => 4,
+            | Opcode::MapNumVecNeg => 5,
         Opcode::PipelineRun { base, steps } => {
             program_cost(base) + steps.iter().map(|s| match s {
                 CompiledPipeStep::Forward(p) => program_cost(p),

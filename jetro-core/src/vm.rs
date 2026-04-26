@@ -401,8 +401,9 @@ pub enum Opcode {
     FilterFieldEqLit(Arc<str>, Val),
     /// `filter(k <op> lit)` — predicate is a comparison of a single field to a literal.
     FilterFieldCmpLit(Arc<str>, super::ast::BinOp, Val),
-    /// `filter(k1 <op> k2)` — predicate compares two fields of the same item.
-    FilterFieldCmpField(Arc<str>, super::ast::BinOp, Arc<str>),
+    // FilterFieldCmpField + FilterFieldCmpFieldCount deleted in Tier 3.
+    // Pipeline IR runs `filter(k1 op k2)` and its `.count()` extension
+    // through generic Stage::Filter + Sink::Count via dispatch_method.
     // FilterFieldEqLitMapField / FilterFieldCmpLitMapField migrated
     // to pipeline.rs Sink::NumFilterMap (with columnar + ObjVec slot
     // kernels).  See memory/project_opcode_migration.md.
@@ -410,8 +411,6 @@ pub enum Opcode {
     // to pipeline.rs Sink::CountIf with and_chain_prog decoder.
     // FilterFieldEqLitCount / FilterFieldCmpLitCount migrated to
     // pipeline.rs Sink::CountIf (with columnar fast path).
-    /// `filter(k1 <op> k2).count()` — cross-field count.
-    FilterFieldCmpFieldCount(Arc<str>, super::ast::BinOp, Arc<str>),
     /// `filter(@ <op> lit)` — predicate on the current element itself.
     /// Columnar fast path: IntVec/FloatVec receivers loop on the raw
     /// slice and emit a typed vec; Arr falls back to element iteration.
@@ -1472,15 +1471,19 @@ impl Compiler {
                     // filter(field <cmp> lit|field) → FilterField*
                     if b.method == BuiltinMethod::Filter && b.sub_progs.len() == 1 {
                         if let Some(p) = detect_field_pred(&b.sub_progs[0].ops) {
-                            let lowered = match p {
-                                FieldPred::FieldCmpLit(k, super::ast::BinOp::Eq, lit) =>
-                                    Opcode::FilterFieldEqLit(k, lit),
-                                FieldPred::FieldCmpLit(k, op, lit) =>
-                                    Opcode::FilterFieldCmpLit(k, op, lit),
-                                FieldPred::FieldCmpField(k1, op, k2) =>
-                                    Opcode::FilterFieldCmpField(k1, op, k2),
-                            };
-                            out2.push(lowered); continue;
+                            match p {
+                                FieldPred::FieldCmpLit(k, super::ast::BinOp::Eq, lit) => {
+                                    out2.push(Opcode::FilterFieldEqLit(k, lit));
+                                    continue;
+                                }
+                                FieldPred::FieldCmpLit(k, op, lit) => {
+                                    out2.push(Opcode::FilterFieldCmpLit(k, op, lit));
+                                    continue;
+                                }
+                                // FieldCmpField fusion deleted in Tier 3 — base
+                                // CallMethod(Filter, [field-vs-field pred]) chain.
+                                FieldPred::FieldCmpField(_, _, _) => {}
+                            }
                         }
                         // filter(@ <cmp> lit) → FilterCurrentCmpLit
                         if let Some((op, lit)) = detect_current_cmp_lit(&b.sub_progs[0].ops) {
@@ -1530,19 +1533,8 @@ impl Compiler {
         let mut out3: Vec<Opcode> = Vec::with_capacity(out2.len());
         for op in out2 {
             // FilterFieldEqLit/CmpLit + count() fusion migrated to
-            // pipeline.rs Sink::CountIf (with columnar fast paths).
-            // FilterFieldCmpField + count() fusion (FilterFieldCmpFieldCount)
-            // stays since pipeline doesn't yet handle field-vs-field
-            // predicates (see project_opcode_migration.md).
-            if let Opcode::CallMethod(ref b) = op {
-                if b.method == BuiltinMethod::Count && b.sub_progs.is_empty() {
-                    if let Some(Opcode::FilterFieldCmpField(k1, cop, k2)) = out3.last().cloned() {
-                        out3.pop();
-                        out3.push(Opcode::FilterFieldCmpFieldCount(k1, cop, k2));
-                        continue;
-                    }
-                }
-            }
+            // pipeline.rs Sink::CountIf.  FilterFieldCmpField + count()
+            // fusion deleted in Tier 3 — base Stage::Filter + Sink::Count.
             // FilterField* + MapField(k) fusion migrated to pipeline.rs
             // Sink::NumFilterMap (and the columnar fast path) — covered
             // for top-level Root-prefix queries.  Sub-program path falls
@@ -3619,50 +3611,9 @@ impl VM {
                 // covers these shapes for top-level Root-prefix queries.
                 // Sub-program path executes the unfused
                 // FilterFieldEqLit/FilterFieldCmpLit + MapField sequence.
-                Opcode::FilterFieldCmpField(k1, op, k2) => {
-                    let recv = pop!(stack);
-                    let hint = match &recv { Val::Arr(a) => filter_cap_hint(a.len()), _ => 0 };
-                    let mut out = Vec::with_capacity(hint);
-                    let mut i1: Option<usize> = None;
-                    let mut i2: Option<usize> = None;
-                    if let Val::Arr(a) = &recv {
-                        for item in a.iter() {
-                            if let Val::Obj(m) = item {
-                                let v1 = lookup_field_cached(m, k1, &mut i1);
-                                let v2 = lookup_field_cached(m, k2, &mut i2);
-                                if let (Some(v1), Some(v2)) = (v1, v2) {
-                                    if cmp_val_binop(v1, *op, v2) {
-                                        out.push(item.clone());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    stack.push(Val::arr(out));
-                }
-                // FilterFieldsAllEqLitCount / FilterFieldsAllCmpLitCount
-                // handlers removed.  Pipeline.rs Sink::CountIf with
-                // and_chain_prog decoder covers compound-AND filter+count.
-                // FilterFieldEqLitCount / FilterFieldCmpLitCount handlers
-                // removed — pipeline.rs Sink::CountIf covers both shapes.
-                Opcode::FilterFieldCmpFieldCount(k1, op, k2) => {
-                    let recv = pop!(stack);
-                    let mut n: i64 = 0;
-                    let mut i1: Option<usize> = None;
-                    let mut i2: Option<usize> = None;
-                    if let Val::Arr(a) = &recv {
-                        for item in a.iter() {
-                            if let Val::Obj(m) = item {
-                                let v1 = lookup_field_cached(m, k1, &mut i1);
-                                let v2 = lookup_field_cached(m, k2, &mut i2);
-                                if let (Some(v1), Some(v2)) = (v1, v2) {
-                                    if cmp_val_binop(v1, *op, v2) { n += 1; }
-                                }
-                            }
-                        }
-                    }
-                    stack.push(Val::Int(n));
-                }
+                // FilterFieldCmpField + FilterFieldCmpFieldCount handlers
+                // deleted in Tier 3.  Base CallMethod(Filter, [field-vs-field
+                // predicate]) chain runs through composed substrate.
 
                 // GroupByField/CountByField/UniqueByField handlers
                 // deleted in Tier 3.
