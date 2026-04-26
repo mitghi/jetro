@@ -196,10 +196,10 @@ fn unified_bval_run_loop_under_budget() {
                     |x| matches!(x, BVal::Int(n) if n >= 100))
             }),
             Composed::<BVal, _, _>::new(
-                Skip::<BVal>::new(100),
+                Skip::new(100),
                 Composed::<BVal, _, _>::new(
-                    Take::<BVal>::new(1000),
-                    MapField::<BVal>::new(std::sync::Arc::from("n")),
+                    Take::new(1000),
+                    MapField::new(std::sync::Arc::from("n")),
                 ),
             ),
         );
@@ -233,7 +233,7 @@ fn unified_bval_chain_sinks_under_budget() {
         items.push(BVal::Obj(&*outer_slice));
     }
     let med = time_med(N_ITERS, || {
-        let chain = MapFieldChain::<BVal>::new(
+        let chain = MapFieldChain::new(
             vec![std::sync::Arc::from("addr"), std::sync::Arc::from("n")],
         );
         let mn = run_pipeline::<BVal, MinSink>(&arena, items.iter().copied(), &chain);
@@ -272,12 +272,12 @@ fn composed_tape_phase1_under_budget() {
                     .and_then(|c| c.as_str())
                     .map_or(false, |s| s == "shipped")
             }),
-            jetro_core::unified::MapField::<TapeRow<'_>>::new(std::sync::Arc::from("total")),
+            jetro_core::unified::MapField::new(std::sync::Arc::from("total")),
         );
         let iter = arr_row.array_children().unwrap();
         let out = run_pipeline::<TapeRow<'_>, SumSink>(&arena, iter, &stages);
         std::hint::black_box(out);
-        let chain = MapFieldChain::<TapeRow<'_>>::new(vec![std::sync::Arc::from("total")]);
+        let chain = MapFieldChain::new(vec![std::sync::Arc::from("total")]);
         let mn = run_pipeline::<TapeRow<'_>, MinSink>(&arena, arr_row.array_children().unwrap(), &chain);
         let mx = run_pipeline::<TapeRow<'_>, MaxSink>(&arena, arr_row.array_children().unwrap(), &chain);
         let av = run_pipeline::<TapeRow<'_>, AvgSink>(&arena, arr_row.array_children().unwrap(), &chain);

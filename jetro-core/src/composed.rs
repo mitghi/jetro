@@ -2042,3 +2042,121 @@ mod tests {
         assert!(matches!(run_pipeline::<FirstSink>(&arr, &Identity), Val::Null));
     }
 }
+
+// ── Bridge: unified::Stage<R> impls for the substrate-generic borrow runner.
+//
+// Per pipeline_unification: the SAME stage struct serves both the
+// owned `Stage` trait (above) and the substrate-generic `unified::
+// Stage<R>` trait (over `R: row::Row<'a>`).  No struct is re-defined
+// in unified.rs; only the second trait impl is here.  Future Phase
+// 5b will collapse the two trait surfaces into one once VM-driven
+// stages (GenericFilter / GenericMap / etc.) gain Row<'a> entry
+// points.
+
+impl<'a, R: crate::row::Row<'a>> crate::unified::Stage<R> for MapField {
+    #[inline]
+    fn apply(&self, x: R) -> crate::unified::StageOutputU<R> {
+        match x.get_field(&self.field) {
+            Some(v) => crate::unified::StageOutputU::Pass(v),
+            None    => crate::unified::StageOutputU::Filtered,
+        }
+    }
+}
+
+impl<'a, R: crate::row::Row<'a>> crate::unified::Stage<R> for MapFieldChain {
+    fn apply(&self, x: R) -> crate::unified::StageOutputU<R> {
+        let chain_refs: Vec<&str> = self.keys.iter().map(|a| a.as_ref()).collect();
+        match x.walk_path(&chain_refs) {
+            Some(v) => crate::unified::StageOutputU::Pass(v),
+            None    => crate::unified::StageOutputU::Filtered,
+        }
+    }
+}
+
+impl<'a, R: crate::row::Row<'a>> crate::unified::Stage<R> for FlatMapField {
+    fn apply(&self, x: R) -> crate::unified::StageOutputU<R> {
+        let arr_row = match x.get_field(&self.field) {
+            Some(c) => c,
+            None => return crate::unified::StageOutputU::Filtered,
+        };
+        let iter = match arr_row.array_children() {
+            Some(i) => i,
+            None => return crate::unified::StageOutputU::Filtered,
+        };
+        let items: smallvec::SmallVec<[R; 4]> = iter.collect();
+        if items.is_empty() {
+            crate::unified::StageOutputU::Filtered
+        } else if items.len() == 1 {
+            crate::unified::StageOutputU::Pass(items.into_iter().next().unwrap())
+        } else {
+            crate::unified::StageOutputU::Many(items)
+        }
+    }
+}
+
+impl<'a, R: crate::row::Row<'a>> crate::unified::Stage<R> for FlatMapFieldChain {
+    fn apply(&self, x: R) -> crate::unified::StageOutputU<R> {
+        let chain_refs: Vec<&str> = self.keys.iter().map(|a| a.as_ref()).collect();
+        let arr_row = match x.walk_path(&chain_refs) {
+            Some(c) => c,
+            None => return crate::unified::StageOutputU::Filtered,
+        };
+        let iter = match arr_row.array_children() {
+            Some(i) => i,
+            None => return crate::unified::StageOutputU::Filtered,
+        };
+        let items: smallvec::SmallVec<[R; 4]> = iter.collect();
+        if items.is_empty() {
+            crate::unified::StageOutputU::Filtered
+        } else if items.len() == 1 {
+            crate::unified::StageOutputU::Pass(items.into_iter().next().unwrap())
+        } else {
+            crate::unified::StageOutputU::Many(items)
+        }
+    }
+}
+
+impl<R> crate::unified::Stage<R> for Take {
+    #[inline]
+    fn apply(&self, x: R) -> crate::unified::StageOutputU<R> {
+        let r = self.remaining.get();
+        if r == 0 { return crate::unified::StageOutputU::Done; }
+        self.remaining.set(r - 1);
+        crate::unified::StageOutputU::Pass(x)
+    }
+}
+
+impl<R> crate::unified::Stage<R> for Skip {
+    #[inline]
+    fn apply(&self, x: R) -> crate::unified::StageOutputU<R> {
+        let r = self.remaining.get();
+        if r > 0 {
+            self.remaining.set(r - 1);
+            return crate::unified::StageOutputU::Filtered;
+        }
+        crate::unified::StageOutputU::Pass(x)
+    }
+}
+
+impl Take {
+    pub fn new(n: usize) -> Self { Self { remaining: std::cell::Cell::new(n) } }
+}
+impl Skip {
+    pub fn new(n: usize) -> Self { Self { remaining: std::cell::Cell::new(n) } }
+}
+impl MapField {
+    pub fn new(field: std::sync::Arc<str>) -> Self { Self { field } }
+}
+impl MapFieldChain {
+    pub fn new(keys: Vec<std::sync::Arc<str>>) -> Self {
+        Self { keys: std::sync::Arc::from(keys.into_boxed_slice()) }
+    }
+}
+impl FlatMapField {
+    pub fn new(field: std::sync::Arc<str>) -> Self { Self { field } }
+}
+impl FlatMapFieldChain {
+    pub fn new(keys: Vec<std::sync::Arc<str>>) -> Self {
+        Self { keys: std::sync::Arc::from(keys.into_boxed_slice()) }
+    }
+}

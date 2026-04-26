@@ -82,14 +82,14 @@ fn lower_stages<'a>(
 fn lower_stage<'a>(stage: &Stage, kernel: &BodyKernel) -> Option<Box<dyn USt<TapeRow<'a>> + 'a>> {
     match (stage, kernel) {
         (Stage::FlatMap(_), BodyKernel::FieldRead(name)) =>
-            Some(Box::new(UFlatMapField::<TapeRow<'a>>::new(Arc::clone(name)))),
-        (Stage::Take(n), _) => Some(Box::new(UTake::<TapeRow<'a>>::new(*n))),
-        (Stage::Skip(n), _) => Some(Box::new(USkip::<TapeRow<'a>>::new(*n))),
+            Some(Box::new(UFlatMapField::new(Arc::clone(name)))),
+        (Stage::Take(n), _) => Some(Box::new(UTake::new(*n))),
+        (Stage::Skip(n), _) => Some(Box::new(USkip::new(*n))),
 
         (Stage::Map(_), BodyKernel::FieldRead(name)) =>
-            Some(Box::new(UMapField::<TapeRow<'a>>::new(Arc::clone(name)))),
+            Some(Box::new(UMapField::new(Arc::clone(name)))),
         (Stage::Map(_), BodyKernel::FieldChain(keys)) =>
-            Some(Box::new(UMapFieldChain::<TapeRow<'a>>::new(keys.iter().cloned().collect()))),
+            Some(Box::new(UMapFieldChain::new(keys.iter().cloned().collect()))),
 
         (Stage::Filter(_), BodyKernel::FieldCmpLit(field, op, lit)) => {
             let f = Arc::clone(field);

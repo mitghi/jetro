@@ -128,108 +128,16 @@ impl<R, F: Fn(&R) -> bool> Stage<R> for Filter<R, F> {
     }
 }
 
-pub struct MapField<R> {
-    pub field: std::sync::Arc<str>,
-    _marker: std::marker::PhantomData<fn(R)>,
-}
-impl<R> MapField<R> {
-    pub fn new(field: std::sync::Arc<str>) -> Self {
-        Self { field, _marker: std::marker::PhantomData }
-    }
-}
-impl<'a, R: Row<'a>> Stage<R> for MapField<R> {
-    #[inline]
-    fn apply(&self, x: R) -> StageOutputU<R> {
-        match x.get_field(&self.field) {
-            Some(v) => StageOutputU::Pass(v),
-            None    => StageOutputU::Filtered,
-        }
-    }
-}
-
-pub struct MapFieldChain<R> {
-    pub chain: Vec<std::sync::Arc<str>>,
-    _marker: std::marker::PhantomData<fn(R)>,
-}
-impl<R> MapFieldChain<R> {
-    pub fn new(chain: Vec<std::sync::Arc<str>>) -> Self {
-        Self { chain, _marker: std::marker::PhantomData }
-    }
-}
-impl<'a, R: Row<'a>> Stage<R> for MapFieldChain<R> {
-    fn apply(&self, x: R) -> StageOutputU<R> {
-        let chain_refs: Vec<&str> = self.chain.iter().map(|a| a.as_ref()).collect();
-        match x.walk_path(&chain_refs) {
-            Some(v) => StageOutputU::Pass(v),
-            None    => StageOutputU::Filtered,
-        }
-    }
-}
-
-pub struct FlatMapField<R> {
-    pub field: std::sync::Arc<str>,
-    _marker: std::marker::PhantomData<fn(R)>,
-}
-impl<R> FlatMapField<R> {
-    pub fn new(field: std::sync::Arc<str>) -> Self {
-        Self { field, _marker: std::marker::PhantomData }
-    }
-}
-impl<'a, R: Row<'a>> Stage<R> for FlatMapField<R> {
-    fn apply(&self, x: R) -> StageOutputU<R> {
-        let arr_row = match x.get_field(&self.field) {
-            Some(c) => c,
-            None    => return StageOutputU::Filtered,
-        };
-        let iter = match arr_row.array_children() {
-            Some(i) => i,
-            None    => return StageOutputU::Filtered,
-        };
-        let items: SmallVec<[R; 4]> = iter.collect();
-        if items.is_empty() { StageOutputU::Filtered }
-        else if items.len() == 1 { StageOutputU::Pass(items.into_iter().next().unwrap()) }
-        else { StageOutputU::Many(items) }
-    }
-}
-
-pub struct Take<R> {
-    pub n: usize,
-    seen: std::cell::Cell<usize>,
-    _marker: std::marker::PhantomData<fn(R)>,
-}
-impl<R> Take<R> {
-    pub fn new(n: usize) -> Self {
-        Self { n, seen: std::cell::Cell::new(0), _marker: std::marker::PhantomData }
-    }
-}
-impl<R> Stage<R> for Take<R> {
-    #[inline]
-    fn apply(&self, x: R) -> StageOutputU<R> {
-        let s = self.seen.get();
-        if s >= self.n { return StageOutputU::Done; }
-        self.seen.set(s + 1);
-        StageOutputU::Pass(x)
-    }
-}
-
-pub struct Skip<R> {
-    pub n: usize,
-    seen: std::cell::Cell<usize>,
-    _marker: std::marker::PhantomData<fn(R)>,
-}
-impl<R> Skip<R> {
-    pub fn new(n: usize) -> Self {
-        Self { n, seen: std::cell::Cell::new(0), _marker: std::marker::PhantomData }
-    }
-}
-impl<R> Stage<R> for Skip<R> {
-    #[inline]
-    fn apply(&self, x: R) -> StageOutputU<R> {
-        let s = self.seen.get();
-        if s < self.n { self.seen.set(s + 1); StageOutputU::Filtered }
-        else { StageOutputU::Pass(x) }
-    }
-}
+// Re-exports of stage structs that live in composed.rs.  ONE struct
+// per stage; both the owned `composed::Stage` trait and this module's
+// substrate-generic `Stage<R>` trait are implemented over the same
+// type (see "Bridge" section at end of composed.rs).  Per
+// pipeline_unification: stages are not duplicated — they have ONE
+// definition with TWO trait impls.
+pub use crate::composed::{
+    MapField, MapFieldChain, FlatMapField, FlatMapFieldChain,
+    Take, Skip,
+};
 
 // ── Sink trait ──────────────────────────────────────────────────────
 
@@ -411,7 +319,7 @@ mod tests {
             Filter::<BVal, _>::new(|r: &BVal| {
                 r.get_field("v").and_then(|v| v.as_int()).map_or(false, |n| n >= 30)
             }),
-            MapField::<BVal>::new(Arc::from("v")),
+            MapField::new(Arc::from("v")),
         );
         let out = run_pipeline::<BVal, SumSink>(&arena, orders.iter().copied(), &stages);
         // v >= 30 -> 30 + 40 + 50 = 120
@@ -423,8 +331,8 @@ mod tests {
         let arena = Arena::new();
         let orders = make_orders(&arena);
         let stages = Composed::new(
-            Skip::<BVal>::new(1),
-            Take::<BVal>::new(2),
+            Skip::new(1),
+            Take::new(2),
         );
         let out = run_pipeline::<BVal, CountSink>(&arena, orders.iter().copied(), &stages);
         assert!(matches!(out, BVal::Int(2)));
@@ -434,7 +342,7 @@ mod tests {
     fn collect_over_bval_materialises() {
         let arena = Arena::new();
         let orders = make_orders(&arena);
-        let stages = MapField::<BVal>::new(Arc::from("id"));
+        let stages = MapField::new(Arc::from("id"));
         let out = run_pipeline::<BVal, CollectSink>(&arena, orders.iter().copied(), &stages);
         match out {
             BVal::Arr(arr) => {
@@ -477,7 +385,7 @@ mod tests {
             Filter::<TapeRow<'_>, _>::new(|r: &TapeRow<'_>| {
                 r.get_field("v").and_then(|v| v.as_int()).map_or(false, |n| n >= 30)
             }),
-            MapField::<TapeRow<'_>>::new(Arc::from("v")),
+            MapField::new(Arc::from("v")),
         );
         let iter = arr_row.array_children().unwrap();
         let out = run_pipeline::<TapeRow<'_>, SumSink>(&arena, iter, &stages);
@@ -494,7 +402,7 @@ mod tests {
         let arr_idx = crate::strref::tape_walk_field_chain(&tape, &["orders"]).unwrap();
         let arr_row = TapeRow::new(&tape, arr_idx as u32);
         let arena = Arena::new();
-        let stages = FlatMapField::<TapeRow<'_>>::new(Arc::from("items"));
+        let stages = FlatMapField::new(Arc::from("items"));
         let iter = arr_row.array_children().unwrap();
         let out = run_pipeline::<TapeRow<'_>, SumSink>(&arena, iter, &stages);
         // 1+2+3+4+5+6 = 21

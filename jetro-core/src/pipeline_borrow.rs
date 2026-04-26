@@ -75,14 +75,14 @@ fn lower_stages<'a>(
 fn lower_stage<'a>(stage: &Stage, kernel: &BodyKernel) -> Option<Box<dyn USt<BVal<'a>> + 'a>> {
     match (stage, kernel) {
         (Stage::FlatMap(_), BodyKernel::FieldRead(name)) =>
-            Some(Box::new(UFlatMapField::<BVal<'a>>::new(Arc::clone(name)))),
-        (Stage::Take(n), _) => Some(Box::new(UTake::<BVal<'a>>::new(*n))),
-        (Stage::Skip(n), _) => Some(Box::new(USkip::<BVal<'a>>::new(*n))),
+            Some(Box::new(UFlatMapField::new(Arc::clone(name)))),
+        (Stage::Take(n), _) => Some(Box::new(UTake::new(*n))),
+        (Stage::Skip(n), _) => Some(Box::new(USkip::new(*n))),
 
         (Stage::Map(_), BodyKernel::FieldRead(name)) =>
-            Some(Box::new(UMapField::<BVal<'a>>::new(Arc::clone(name)))),
+            Some(Box::new(UMapField::new(Arc::clone(name)))),
         (Stage::Map(_), BodyKernel::FieldChain(keys)) =>
-            Some(Box::new(UMapFieldChain::<BVal<'a>>::new(keys.iter().cloned().collect()))),
+            Some(Box::new(UMapFieldChain::new(keys.iter().cloned().collect()))),
 
         (Stage::Filter(_), BodyKernel::FieldCmpLit(field, op, lit)) => {
             let f = Arc::clone(field);

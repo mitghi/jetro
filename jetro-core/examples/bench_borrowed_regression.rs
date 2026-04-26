@@ -162,10 +162,10 @@ fn bench_composed_borrow_loop() -> Stat {
                     |x| matches!(x, BVal::Int(n) if n >= 100))
             }),
             Composed::<BVal, _, _>::new(
-                Skip::<BVal>::new(100),
+                Skip::new(100),
                 Composed::<BVal, _, _>::new(
-                    Take::<BVal>::new(1000),
-                    MapField::<BVal>::new(std::sync::Arc::from("n")),
+                    Take::new(1000),
+                    MapField::new(std::sync::Arc::from("n")),
                 ),
             ),
         );
@@ -226,7 +226,7 @@ fn bench_composed_borrow_phase2_sinks() -> Stat {
 
     let stat = time("  Min/Max/Avg ∘ MapFieldChain[addr.n] — 5000 elems",
         N_ITERS, || {
-        let chain = MapFieldChain::<BVal>::new(
+        let chain = MapFieldChain::new(
             vec![std::sync::Arc::from("addr"), std::sync::Arc::from("n")],
         );
         let mn = run_pipeline::<BVal, MinSink>(&arena, items.iter().copied(), &chain);
