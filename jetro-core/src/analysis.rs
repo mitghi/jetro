@@ -285,8 +285,7 @@ fn apply_op(op: &Opcode, stack: &mut Vec<AbstractVal>) {
             pop1!();
             stack.push(AbstractVal::scalar(VType::Int));
         }
-        Opcode::MapFlatten(_) | Opcode::FilterTakeWhile { .. }
-            | Opcode::FilterDropWhile { .. }
+        Opcode::MapFlatten(_)
             | Opcode::EquiJoin { .. }
             | Opcode::MapField(_) | Opcode::MapFieldChain(_) | Opcode::MapFieldUnique(_)
             | Opcode::MapFieldChainUnique(_)
@@ -438,10 +437,6 @@ fn count_ident_uses_in_ops(ops: &[Opcode], name: &str, acc: &mut usize) {
                 | Opcode::MapFlatten(p)
                 | Opcode::MapFirst(p) | Opcode::MapLast(p)
                 => count_ident_uses_in_ops(&p.ops, name, acc),
-            Opcode::FilterTakeWhile { pred, stop } => {
-                count_ident_uses_in_ops(&pred.ops, name, acc);
-                count_ident_uses_in_ops(&stop.ops, name, acc);
-            }
             Opcode::IfElse { then_, else_ } => {
                 count_ident_uses_in_ops(&then_.ops, name, acc);
                 count_ident_uses_in_ops(&else_.ops, name, acc);
@@ -543,10 +538,6 @@ fn collect_fields_in_ops(ops: &[Opcode], acc: &mut Vec<Arc<str>>) {
                 | Opcode::MapFlatten(p)
                 | Opcode::MapFirst(p) | Opcode::MapLast(p)
                 => collect_fields_in_ops(&p.ops, acc),
-            Opcode::FilterTakeWhile { pred, stop } => {
-                collect_fields_in_ops(&pred.ops, acc);
-                collect_fields_in_ops(&stop.ops, acc);
-            }
             Opcode::IfElse { then_, else_ } => {
                 collect_fields_in_ops(&then_.ops, acc);
                 collect_fields_in_ops(&else_.ops, acc);
@@ -599,10 +590,6 @@ fn hash_ops(ops: &[Opcode], h: &mut impl std::hash::Hasher) {
                 | Opcode::MapFlatten(p)
                 | Opcode::MapFirst(p) | Opcode::MapLast(p)
                 => hash_ops(&p.ops, h),
-            Opcode::FilterTakeWhile { pred, stop } => {
-                hash_ops(&pred.ops, h);
-                hash_ops(&stop.ops, h);
-            }
             Opcode::IfElse { then_, else_ } => {
                 hash_ops(&then_.ops, h);
                 hash_ops(&else_.ops, h);
@@ -688,7 +675,6 @@ fn walk_subprograms(ops: &[Opcode], map: &mut HashMap<u64, usize>) {
                 | Opcode::MapFlatten(p)
                 | Opcode::MapFirst(p) | Opcode::MapLast(p)
                 => vec![p],
-            Opcode::FilterTakeWhile { pred, stop } => vec![pred, stop],
             Opcode::IfElse { then_, else_ } => vec![then_, else_],
             Opcode::CallMethod(c) | Opcode::CallOptMethod(c) =>
                 c.sub_progs.iter().collect(),
@@ -906,10 +892,6 @@ fn rewrite_op(op: &Opcode, cache: &mut HashMap<u64, Arc<Program>>) -> Opcode {
         Opcode::MapFlatten(p)   => Opcode::MapFlatten(dedup_rec(p, cache)),
         Opcode::MapFirst(p)     => Opcode::MapFirst(dedup_rec(p, cache)),
         Opcode::MapLast(p)      => Opcode::MapLast(dedup_rec(p, cache)),
-        Opcode::FilterTakeWhile { pred, stop } => Opcode::FilterTakeWhile {
-            pred: dedup_rec(pred, cache),
-            stop: dedup_rec(stop, cache),
-        },
         Opcode::FindFirst(p)    => Opcode::FindFirst(dedup_rec(p, cache)),
         Opcode::FindOne(p)      => Opcode::FindOne(dedup_rec(p, cache)),
         Opcode::DynIndex(p)     => Opcode::DynIndex(dedup_rec(p, cache)),
@@ -1034,8 +1016,6 @@ pub fn opcode_cost(op: &Opcode) -> u32 {
             | Opcode::MapFlatten(p)
             | Opcode::MapFirst(p) | Opcode::MapLast(p)
             | Opcode::DynIndex(p) => 10 + program_cost(p),
-        Opcode::FilterTakeWhile { pred, stop } => 10 + program_cost(pred) + program_cost(stop),
-        Opcode::FilterDropWhile { pred, drop } => 10 + program_cost(pred) + program_cost(drop),
         Opcode::EquiJoin { rhs, .. } => 25 + program_cost(rhs),
         Opcode::CallMethod(c) | Opcode::CallOptMethod(c) => {
             let base = match c.method {

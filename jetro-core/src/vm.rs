@@ -510,11 +510,6 @@ pub enum Opcode {
     CountByField(Arc<str>),
     /// `.unique_by(k)` with trivial field key — per-row `obj.get(k)` direct.
     UniqueByField(Arc<str>),
-    /// Fused `filter(p).take_while(q)` — scan while both predicates hold.
-    FilterTakeWhile { pred: Arc<Program>, stop: Arc<Program> },
-    /// Fused `filter(p).drop_while(q)` — skip leading matches of q on
-    /// p-filtered elements.
-    FilterDropWhile { pred: Arc<Program>, drop: Arc<Program> },
     /// Fused equi-join: TOS is lhs array; `rhs` program evaluates
     /// to rhs array; join by (lhs_key, rhs_key) string field names.
     /// Produces array of merged objects (rhs wins on collision).
@@ -1747,24 +1742,9 @@ impl Compiler {
                 // filter(p) + last() fusion migrated to pipeline.rs
                 // Sink::FilterLast.  Sub-program path keeps unfused
                 // CallMethod(Filter) + CallMethod(Last) sequence.
-                // filter(p) + take_while(q) → FilterTakeWhile
-                if a.method == BuiltinMethod::Filter && a.sub_progs.len() >= 1
-                   && b.method == BuiltinMethod::TakeWhile && b.sub_progs.len() >= 1 {
-                    let pred = Arc::clone(&a.sub_progs[0]);
-                    let stop = Arc::clone(&b.sub_progs[0]);
-                    out.pop();
-                    out.push(Opcode::FilterTakeWhile { pred, stop });
-                    continue;
-                }
-                // filter(p) + drop_while(q) → FilterDropWhile
-                if a.method == BuiltinMethod::Filter && a.sub_progs.len() >= 1
-                   && b.method == BuiltinMethod::DropWhile && b.sub_progs.len() >= 1 {
-                    let pred = Arc::clone(&a.sub_progs[0]);
-                    let drop = Arc::clone(&b.sub_progs[0]);
-                    out.pop();
-                    out.push(Opcode::FilterDropWhile { pred, drop });
-                    continue;
-                }
+                // FilterTakeWhile / FilterDropWhile fusion deleted —
+                // base CallMethod chain runs filter then take_while/
+                // drop_while sequentially.
                 // MapUnique fusion deleted — base CallMethod chain.
                 // StrTrim*/StrUpperTrim*/StrLowerTrim* fusion deleted —
                 // base CallMethod chain runs trim+upper/lower as two ops.
@@ -5478,57 +5458,6 @@ impl VM {
                             Val::StrVec(a)   => out.extend(a.iter().cloned().map(Val::Str)),
                             other => out.push(other),
                         }
-                    }
-                    stack.push(Val::arr(out));
-                }
-                Opcode::FilterTakeWhile { pred, stop } => {
-                    let recv = pop!(stack);
-                    let items = match recv {
-                        Val::Arr(a) => Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone()),
-                        Val::IntVec(a)   => a.iter().map(|n| Val::Int(*n)).collect(),
-                        Val::FloatVec(a) => a.iter().map(|f| Val::Float(*f)).collect(),
-                        Val::StrVec(a)   => a.iter().cloned().map(Val::Str).collect(),
-                        _ => Vec::new(),
-                    };
-                    let mut out = Vec::with_capacity(items.len());
-                    let mut scratch = env.clone();
-                    for item in items {
-                        let prev = scratch.swap_current(item.clone());
-                        let pass_pred = is_truthy(&self.exec(pred, &scratch)?);
-                        if !pass_pred { scratch.restore_current(prev); continue; }
-                        let stop_ok = is_truthy(&self.exec(stop, &scratch)?);
-                        scratch.restore_current(prev);
-                        if !stop_ok { break; }
-                        out.push(item);
-                    }
-                    stack.push(Val::arr(out));
-                }
-                Opcode::FilterDropWhile { pred, drop } => {
-                    let recv = pop!(stack);
-                    let items = match recv {
-                        Val::Arr(a) => Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone()),
-                        Val::IntVec(a)   => a.iter().map(|n| Val::Int(*n)).collect(),
-                        Val::FloatVec(a) => a.iter().map(|f| Val::Float(*f)).collect(),
-                        Val::StrVec(a)   => a.iter().cloned().map(Val::Str).collect(),
-                        _ => Vec::new(),
-                    };
-                    let mut out = Vec::with_capacity(items.len());
-                    let mut dropping = true;
-                    let mut scratch = env.clone();
-                    for item in items {
-                        let prev = scratch.swap_current(item.clone());
-                        let pass_pred = is_truthy(&self.exec(pred, &scratch)?);
-                        if !pass_pred { scratch.restore_current(prev); continue; }
-                        if dropping {
-                            let still_drop = is_truthy(&self.exec(drop, &scratch)?);
-                            scratch.restore_current(prev);
-                            if still_drop { continue; }
-                            dropping = false;
-                            out.push(item);
-                            continue;
-                        }
-                        scratch.restore_current(prev);
-                        out.push(item);
                     }
                     stack.push(Val::arr(out));
                 }
