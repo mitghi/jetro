@@ -1488,6 +1488,10 @@ impl Pipeline {
         //   (FlatMap?, Filter*, Sort?, Skip?, Take?, Map?, UniqueBy?, Reverse?)
         // Sort barriers buffer rows; sort key is kernel-extracted.
         let mut flat_kernel: Option<&BodyKernel> = None;
+        // Outer filters apply pre-FlatMap (to outer entries).
+        // Inner filters apply post-FlatMap (to inner entries).
+        // Without FlatMap, all filters are "inner" (one walk).
+        let mut outer_filter_kernels: Vec<&BodyKernel> = Vec::new();
         let mut filter_kernels: Vec<&BodyKernel> = Vec::new();
         let mut sort_kernel: Option<&BodyKernel> = None;
         let mut sort_asc: bool = true;
@@ -1496,15 +1500,19 @@ impl Pipeline {
         let mut map_kernel: Option<&BodyKernel> = None;
         let mut unique_dedup = false;
         let mut reverse = false;
-        for (i, (st, k)) in self.stages.iter().zip(self.stage_kernels.iter()).enumerate() {
+        for (st, k) in self.stages.iter().zip(self.stage_kernels.iter()) {
             if reverse { return None; }
             match st {
-                Stage::FlatMap(_) if i == 0 => {
+                Stage::FlatMap(_) => {
+                    if flat_kernel.is_some() { return None; }  // one FlatMap
                     if sort_kernel.is_some() || map_kernel.is_some() || skip_n > 0 || take_n.is_some() { return None; }
                     if !matches!(k,
                         BodyKernel::FieldRead(_) | BodyKernel::FieldChain(_))
                     { return None; }
                     flat_kernel = Some(k);
+                    // Pre-FlatMap filters move into outer_filter_kernels.
+                    std::mem::swap(&mut outer_filter_kernels, &mut filter_kernels);
+                    filter_kernels.clear();
                 }
                 Stage::Filter(_) => {
                     if sort_kernel.is_some() || map_kernel.is_some() || take_n.is_some() { return None; }
@@ -1671,6 +1679,16 @@ impl Pipeline {
 
         if let Some(fk_kernel) = flat_kernel {
             'outer: for outer_idx in outer_iter {
+                // Outer filters apply per outer entry pre-FlatMap.
+                let mut outer_pass = true;
+                for fk in &outer_filter_kernels {
+                    match eval_kernel_pred(fk, tape, outer_idx) {
+                        Some(true) => {}
+                        Some(false) => { outer_pass = false; break; }
+                        None => return None,
+                    }
+                }
+                if !outer_pass { continue; }
                 let inner_arr = match fk_kernel {
                     BodyKernel::FieldRead(k) =>
                         crate::strref::tape_object_field(tape, outer_idx, k.as_ref()),
