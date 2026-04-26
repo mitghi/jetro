@@ -1534,9 +1534,10 @@ fn rewrite_step(p: &mut Pipeline) -> bool {
             }
         }
     }
-    if let Some(_) = const_false_at {
+    if const_false_at.is_some() {
+        // Empty input: existing accumulators in run() yield Int(0) /
+        // Float(0.0) / Val::arr([]) — clearing stages suffices.
         p.stages.clear();
-        p.sink = empty_sink_for(&p.sink);
         return true;
     }
 
@@ -1612,24 +1613,6 @@ fn rewrite_step(p: &mut Pipeline) -> bool {
     }
 
     false
-}
-
-/// Return the result a sink would produce on an empty pull stream.
-/// Used by the `Filter(false)` rewrite to short-circuit the pipeline.
-/// Sums emit `Int(0)`, counts emit `Int(0)`, collect emits `[]`.
-fn empty_sink_for(sink: &Sink) -> Sink {
-    match sink {
-        // All current sinks have a well-defined empty-input result;
-        // none of them needs special-casing here.  Clone the sink so
-        // the run loop's already-zeroed accumulators produce the
-        // right shape.
-        _ => sink.clone(),
-    }
-    // (Empty input ⇒ existing accumulators in `Pipeline::run` already
-    // produce Int(0) / Float(0.0) / Val::arr([]).  No need for a
-    // separate Empty sentinel — clearing `stages` suffices because the
-    // outer iter has already been built before this runs in `run`.
-    // The clone here is kept for ABI clarity.)
 }
 
 /// If `prog` evaluates to a constant boolean independent of `@`,
