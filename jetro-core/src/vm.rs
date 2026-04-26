@@ -968,10 +968,9 @@ impl Compiler {
         let no_fusion = disable_opcode_fusion();
         let ops = if cfg.root_chain      && !no_fusion { Self::pass_root_chain(ops) }      else { ops };
         let ops = if cfg.field_chain     && !no_fusion { Self::pass_field_chain(ops) }     else { ops };
-        // pass_filter_count + pass_find_quantifier deleted in Tier 3 —
-        // FilterCount / FindFirst / FindOne opcodes removed.
-        let ops = if cfg.filter_fusion   && !no_fusion { Self::pass_filter_fusion(ops) }   else { ops };
-        let ops = if cfg.filter_fusion   && !no_fusion { Self::pass_string_chain_fusion(ops) } else { ops };
+        // Tier 3: pass_filter_count / pass_find_quantifier / pass_filter_fusion
+        // / pass_string_chain_fusion deleted — composed substrate handles
+        // every chain shape via base CallMethod opcodes.
         let ops = if cfg.filter_fusion   { Self::pass_field_specialise(ops) } else { ops };
         let ops = if !no_fusion { Self::pass_list_comp_specialise(ops) } else { ops };
         let ops = if cfg.strength_reduce { Self::pass_strength_reduce(ops) } else { ops };
@@ -1097,13 +1096,6 @@ impl Compiler {
         }
         out
     }
-
-    /// Tier 3: VM peephole fusion deleted — Pipeline IR + composed
-    /// substrate handles every chain shape via base CallMethod opcodes.
-    fn pass_filter_fusion(ops: Vec<Opcode>) -> Vec<Opcode> { ops }
-
-    // pass_string_chain_fusion deleted — StrSplitReverseJoin opcode gone.
-    fn pass_string_chain_fusion(ops: Vec<Opcode>) -> Vec<Opcode> { ops }
 
     /// Lower generic fused opcodes to field-specialised variants when the
     /// sub-program is a trivial `GetField(k)` read. Runs AFTER
