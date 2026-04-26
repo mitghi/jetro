@@ -421,13 +421,26 @@ impl BodyKernel {
     }
 }
 
-/// Classify body opcodes as a binary `Arith` kernel.
-/// Recognises `[<lhs-ops>, <rhs-ops>, <arith-op>]` where each operand
-/// is either a path read (PushCurrent + GetField/FieldChain, or
-/// LoadIdent) or a numeric literal (PushInt / PushFloat).
+/// Classify body opcodes as an `Arith` kernel.
+/// Two recognised shapes:
+///   1. `[<lhs-ops>, <rhs-ops>, <arith-op>]` — binary arith
+///   2. `[<operand-ops>, Neg]` — unary negation (treated as 0 - operand)
+/// Operands are paths (PushCurrent + GetField/FieldChain or LoadIdent)
+/// or numeric literals (PushInt / PushFloat).
 fn classify_arith(ops: &[crate::vm::Opcode]) -> Option<BodyKernel> {
     use crate::vm::Opcode;
     let last = ops.last()?;
+    // Unary negation shape: `<operand>, Neg`.
+    if matches!(last, Opcode::Neg) && ops.len() >= 2 {
+        let prefix = &ops[..ops.len() - 1];
+        if let Some(operand) = parse_arith_operand(prefix) {
+            return Some(BodyKernel::Arith(
+                ArithOperand::LitInt(0),
+                ArithOp::Sub,
+                operand,
+            ));
+        }
+    }
     let op = match last {
         Opcode::Add => ArithOp::Add,
         Opcode::Sub => ArithOp::Sub,
@@ -436,10 +449,7 @@ fn classify_arith(ops: &[crate::vm::Opcode]) -> Option<BodyKernel> {
         Opcode::Mod => ArithOp::Mod,
         _ => return None,
     };
-    // Split prefix into two operand slices.
     let prefix = &ops[..ops.len() - 1];
-    // Try every split point — operand encodings vary in length (1 or 2
-    // opcodes per operand).
     for split in 1..prefix.len() {
         let lhs = &prefix[..split];
         let rhs = &prefix[split..];
@@ -1527,11 +1537,12 @@ impl Pipeline {
                 Stage::Sort(Some(_)) => {
                     if sort_kernel.is_some() || map_kernel.is_some() { return None; }
                     if !matches!(k,
-                        BodyKernel::FieldRead(_) | BodyKernel::FieldChain(_))
+                        BodyKernel::FieldRead(_)
+                        | BodyKernel::FieldChain(_)
+                        | BodyKernel::Arith(_, _, _))
                     { return None; }
                     sort_kernel = Some(k);
                 }
-                // Sort with no key (None) compares full Vals — bail.
                 Stage::Sort(None) => return None,
                 Stage::Skip(n) => {
                     if map_kernel.is_some() || take_n.is_some() { return None; }
@@ -1628,22 +1639,10 @@ impl Pipeline {
                     buf.push(entry_idx);
                 }
             }
-            // Sort buffer by key.
+            // Sort buffer by key — kernel can be path or Arith
+            // (for `sort_by(-score)` shape, classified as Arith).
             let key_for = |idx: usize| -> TopKey {
-                let v = match sk {
-                    BodyKernel::FieldRead(k) => {
-                        crate::strref::tape_object_field(tape, idx, k.as_ref())
-                            .map(|i| node_to_tape_val(tape, i))
-                            .unwrap_or(TapeVal::Missing)
-                    }
-                    BodyKernel::FieldChain(keys) => {
-                        let key_strs: Vec<&str> = keys.iter().map(|k| k.as_ref()).collect();
-                        crate::strref::tape_walk_field_chain_from(tape, idx, &key_strs)
-                            .map(|i| node_to_tape_val(tape, i))
-                            .unwrap_or(TapeVal::Missing)
-                    }
-                    _ => TapeVal::Missing,
-                };
+                let v = eval_kernel_value(sk, tape, idx).unwrap_or(TapeVal::Missing);
                 match v {
                     TapeVal::Int(n) => TopKey::Int(n),
                     TapeVal::Float(f) => TopKey::Float(float_to_sortable(f)),
