@@ -236,17 +236,6 @@ fn apply_op(op: &Opcode, stack: &mut Vec<AbstractVal>) {
             stack.push(AbstractVal { ty: VType::Unknown, null: Nullness::MaybeNull, card });
         }
         Opcode::RootChain(_) => stack.push(AbstractVal::UNKNOWN),
-        Opcode::FilterStrVecStartsWith(_)
-            | Opcode::FilterStrVecEndsWith(_)
-            | Opcode::FilterStrVecContains(_)
-            | Opcode::MapStrVecUpper
-            | Opcode::MapStrVecLower
-            | Opcode::MapStrVecTrim
-            | Opcode::MapNumVecArith { .. }
-            | Opcode::MapNumVecNeg => {
-            pop1!();
-            stack.push(AbstractVal::array());
-        }
         Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Mod => {
             let (l, r) = pop2!();
             stack.push(AbstractVal::scalar(l.ty.join(r.ty)));
@@ -947,14 +936,6 @@ pub fn opcode_cost(op: &Opcode) -> u32 {
         Opcode::Quantifier(_) => 2,
         Opcode::CastOp(_) => 2,
         Opcode::PatchEval(_) => 50,
-        Opcode::FilterStrVecStartsWith(_)
-            | Opcode::FilterStrVecEndsWith(_)
-            | Opcode::FilterStrVecContains(_)
-            | Opcode::MapStrVecUpper
-            | Opcode::MapStrVecLower
-            | Opcode::MapStrVecTrim
-            | Opcode::MapNumVecArith { .. }
-            | Opcode::MapNumVecNeg => 5,
         Opcode::PipelineRun { base, steps } => {
             program_cost(base) + steps.iter().map(|s| match s {
                 CompiledPipeStep::Forward(p) => program_cost(p),
