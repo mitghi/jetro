@@ -209,6 +209,14 @@ impl TapeData {
         }))
     }
 
+    /// Borrow string contents in `bytes_buf` at the given byte range.
+    /// SAFETY: range was originally produced from a simd-json
+    /// `Node::String(&str)` slice — UTF-8 is validated by the parser.
+    #[inline]
+    pub fn str_at_range(&self, start: usize, end: usize) -> &str {
+        unsafe { std::str::from_utf8_unchecked(&self.bytes_buf[start..end]) }
+    }
+
     /// Borrow the string at node `i` (panics if not a `StringRef`).
     /// SAFETY: simd-json validates UTF-8; the offsets are written
     /// from `&str.as_bytes()` so the slice remains valid UTF-8.

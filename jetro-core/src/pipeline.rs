@@ -1356,15 +1356,19 @@ impl Pipeline {
         let key_strs: Vec<&str> = chain_keys.iter().map(|k| k.as_ref()).collect();
         let arr_idx = crate::strref::tape_walk_field_chain(tape, &key_strs)?;
 
-        // Stage classifier: split into (leading FlatMap, trailing Filter*).
-        // - Leading optional FlatMap with FieldRead/FieldChain kernel
-        //   (resolves outer entry → inner Array idx; we then iterate the
-        //   inner array).
-        // - Following stages must all be Filter with kernel-pred shape.
-        // - Map/UniqueBy/Sort etc. bail (would transform entry).
+        // Stage classifier: (leading FlatMap?, Filter*, trailing Map?).
+        // - Leading optional FlatMap (FieldRead/FieldChain kernel) →
+        //   resolves outer entry to inner Array idx; iterate inner.
+        // - Filters apply to current entry idx (pred kernels only).
+        // - Trailing optional Map (FieldRead/FieldChain) projects entry
+        //   into a TapeVal scalar; subsequent rows are RowSrc::Scalar.
+        //   No stages may follow trailing Map (the entry's gone).
+        // - Map / Filter post-Map / UniqueBy / Sort / etc. bail.
         let mut flat_kernel: Option<&BodyKernel> = None;
         let mut filter_kernels: Vec<&BodyKernel> = Vec::new();
+        let mut map_kernel: Option<&BodyKernel> = None;
         for (i, (st, k)) in self.stages.iter().zip(self.stage_kernels.iter()).enumerate() {
+            if map_kernel.is_some() { return None; }  // Map must be last
             match st {
                 Stage::FlatMap(_) if i == 0 => {
                     if !matches!(k,
@@ -1380,6 +1384,12 @@ impl Pipeline {
                         | BodyKernel::ConstBool(_))
                     { return None; }
                     filter_kernels.push(k);
+                }
+                Stage::Map(_) => {
+                    if !matches!(k,
+                        BodyKernel::FieldRead(_) | BodyKernel::FieldChain(_))
+                    { return None; }
+                    map_kernel = Some(k);
                 }
                 _ => return None,
             }
@@ -1414,7 +1424,11 @@ impl Pipeline {
                             None => return None,
                         }
                     }
-                    if !acc.feed(tape, inner_idx)? { break 'outer; }
+                    let row = match map_kernel {
+                        Some(mk) => RowSrc::Scalar(eval_kernel_value(mk, tape, inner_idx)?),
+                        None => RowSrc::Entry(inner_idx),
+                    };
+                    if !acc.feed(tape, row)? { break 'outer; }
                 }
             }
         } else {
@@ -1426,7 +1440,11 @@ impl Pipeline {
                         None => return None,
                     }
                 }
-                if !acc.feed(tape, entry_idx)? { break; }
+                let row = match map_kernel {
+                    Some(mk) => RowSrc::Scalar(eval_kernel_value(mk, tape, entry_idx)?),
+                    None => RowSrc::Entry(entry_idx),
+                };
+                if !acc.feed(tape, row)? { break; }
             }
         }
 
@@ -2688,6 +2706,19 @@ enum TapeVal {
     Missing,
 }
 
+/// Per-row state threaded through pipeline stages on tape.
+/// - `Entry(idx)` — current is a tape Object/Array entry; field-read
+///   kernels apply.  Initial state for each row pulled from a tape Array.
+/// - `Scalar(v)` — current is a projected scalar (post `Map(FieldRead)`
+///   etc.); field-read kernels no longer apply, but pred kernels and
+///   value-passthrough do.
+#[cfg(feature = "simd-json")]
+#[derive(Debug, Clone, Copy)]
+enum RowSrc {
+    Entry(usize),
+    Scalar(TapeVal),
+}
+
 #[cfg(feature = "simd-json")]
 fn node_to_tape_val(tape: &crate::strref::TapeData, idx: usize) -> TapeVal {
     use simd_json::StaticNode as SN;
@@ -2841,11 +2872,13 @@ enum SinkAcc<'p> {
     CountIf { count: usize, pred: &'p BodyKernel },
     /// `Filter(pred) ∘ First` — keeps first matching tape entry idx.
     FilterFirst { hit: Option<usize>, pred: &'p BodyKernel },
-    /// Collect entries (post-stage) — gathers tape idxs; finalise
-    /// detects uniform numeric / string lanes and emits IntVec /
-    /// FloatVec / StrSliceVec.  Heterogeneous → falls back to Val::Arr
-    /// via `Val::from_tape_node` per entry.
-    Collect { entries: Vec<usize> },
+    /// Collect rows (post-stage) — gathers RowSrc values.  At finalise:
+    /// - all `Entry` rows → typed-lane probe over entry tape nodes
+    /// - all `Scalar` rows of uniform type → IntVec / FloatVec /
+    ///   StrSliceVec direct from tape values
+    /// - heterogeneous → Val::Arr fallback (per-entry materialise +
+    ///   tape-val → Val conversion).
+    Collect { rows: Vec<RowSrc> },
 }
 
 #[cfg(feature = "simd-json")]
@@ -2918,46 +2951,61 @@ impl<'p> SinkAcc<'p> {
                 let pred = sink_kernels.get(0)?;
                 Some(Self::FilterFirst { hit: None, pred })
             }
-            Sink::Collect         => Some(Self::Collect { entries: Vec::new() }),
+            Sink::Collect         => Some(Self::Collect { rows: Vec::new() }),
             // Unsupported sinks bail; caller falls back to Val path.
             _ => None,
         }
     }
 
-    /// Feed one tape entry.  Returns `Some(true)` to continue, `Some(false)`
-    /// to early-exit (sink saturated), `None` to abort (kernel failed —
-    /// caller falls back to Val).
-    fn feed(&mut self, tape: &crate::strref::TapeData, entry_idx: usize) -> Option<bool> {
+    /// Feed one row.  Returns `Some(true)` to continue, `Some(false)`
+    /// to early-exit (sink saturated), `None` to abort (kernel/row
+    /// shape mismatch — caller falls back to Val).
+    ///
+    /// Most sinks need an `Entry`-typed row (kernels read fields).
+    /// `Collect`, `Numeric`, `NumMap` accept `Scalar` rows post-Map.
+    fn feed(&mut self, tape: &crate::strref::TapeData, row: RowSrc) -> Option<bool> {
         match self {
             Self::Count(n) => { *n += 1; Some(true) }
             Self::Numeric { st, .. } => {
-                let v = node_to_tape_val(tape, entry_idx);
+                let v = match row {
+                    RowSrc::Entry(idx) => node_to_tape_val(tape, idx),
+                    RowSrc::Scalar(v) => v,
+                };
                 if !st.push(v) { return None; }
                 Some(true)
             }
             Self::NumMap { st, kernel, .. } => {
-                let v = eval_kernel_value(kernel, tape, entry_idx)?;
+                // NumMap projects via kernel — only Entry rows make sense
+                // (kernel needs fields).  Scalar rows would require a
+                // chained Map; current Pipeline IR fuses Map∘Numeric
+                // into NumMap before Stage::Map could intervene, so this
+                // branch never sees Scalar in the current rule set.
+                let entry = match row { RowSrc::Entry(i) => i, _ => return None };
+                let v = eval_kernel_value(kernel, tape, entry)?;
                 if !st.push(v) { return None; }
                 Some(true)
             }
             Self::NumFilterMap { st, pred, map, .. } => {
-                if !eval_kernel_pred(pred, tape, entry_idx)? { return Some(true); }
-                let v = eval_kernel_value(map, tape, entry_idx)?;
+                let entry = match row { RowSrc::Entry(i) => i, _ => return None };
+                if !eval_kernel_pred(pred, tape, entry)? { return Some(true); }
+                let v = eval_kernel_value(map, tape, entry)?;
                 if !st.push(v) { return None; }
                 Some(true)
             }
             Self::CountIf { count, pred } => {
-                if eval_kernel_pred(pred, tape, entry_idx)? { *count += 1; }
+                let entry = match row { RowSrc::Entry(i) => i, _ => return None };
+                if eval_kernel_pred(pred, tape, entry)? { *count += 1; }
                 Some(true)
             }
             Self::FilterFirst { hit, pred } => {
-                if eval_kernel_pred(pred, tape, entry_idx)? {
-                    *hit = Some(entry_idx);
-                    return Some(false);  // saturated
+                let entry = match row { RowSrc::Entry(i) => i, _ => return None };
+                if eval_kernel_pred(pred, tape, entry)? {
+                    *hit = Some(entry);
+                    return Some(false);
                 }
                 Some(true)
             }
-            Self::Collect { entries } => { entries.push(entry_idx); Some(true) }
+            Self::Collect { rows } => { rows.push(row); Some(true) }
         }
     }
 
@@ -2975,86 +3023,150 @@ impl<'p> SinkAcc<'p> {
                     None => Val::Null,
                 }
             }
-            Self::Collect { entries } => collect_entries_to_val(tape, &entries),
+            Self::Collect { rows } => collect_rows_to_val(tape, &rows),
         }
     }
 }
 
-/// Materialise gathered tape entry idxs into the most-typed Val lane
-/// available.  Probes the first entry for type; verifies uniformity by
-/// scanning kinds; emits IntVec / FloatVec / StrSliceVec on uniform
-/// numeric / string runs (typed lanes light up downstream slot kernels
-/// + serialise without per-element Val tag overhead).  Mixed or
-/// container-typed entries fall through to `Val::Arr` via per-entry
-/// `Val::from_tape_node`.
+/// Materialise gathered RowSrc rows into the strongest typed Val lane
+/// available.  Two row kinds:
+/// - `Entry(idx)` — raw tape entry; probe its tape node for type
+/// - `Scalar(v)` — projected TapeVal from a Map kernel
+///
+/// Uniform numeric / string runs emit IntVec / FloatVec / StrSliceVec
+/// (slices into `tape.bytes_buf` — zero per-string heap alloc).
+/// Mixed → `Val::Arr` with per-element materialise.
 #[cfg(feature = "simd-json")]
-fn collect_entries_to_val(
+fn collect_rows_to_val(
     tape: &std::sync::Arc<crate::strref::TapeData>,
-    entries: &[usize],
+    rows: &[RowSrc],
 ) -> Val {
     use crate::strref::TapeNode;
     use simd_json::StaticNode as SN;
-    if entries.is_empty() { return Val::arr(Vec::new()); }
-    let first = tape.nodes[entries[0]];
-    let mut all_int   = matches!(first, TapeNode::Static(SN::I64(_) | SN::U64(_)));
-    let mut all_float = matches!(first, TapeNode::Static(SN::F64(_) | SN::I64(_) | SN::U64(_)));
-    let mut all_str   = matches!(first, TapeNode::StringRef { .. });
-    for &e in entries.iter() {
-        match tape.nodes[e] {
-            TapeNode::Static(SN::I64(_)) | TapeNode::Static(SN::U64(_)) => {
-                all_str = false;
-            }
-            TapeNode::Static(SN::F64(_)) => { all_int = false; all_str = false; }
-            TapeNode::StringRef { .. } => { all_int = false; all_float = false; }
+    if rows.is_empty() { return Val::arr(Vec::new()); }
+
+    // Per-row "type tag" for uniformity probe.
+    // 1=int, 2=float (numeric superset), 3=str, 0=other (container/mixed/null/bool).
+    fn row_tag(tape: &crate::strref::TapeData, row: RowSrc) -> u8 {
+        match row {
+            RowSrc::Scalar(v) => match v {
+                TapeVal::Int(_)   => 1,
+                TapeVal::Float(_) => 2,
+                TapeVal::StrIdx(_) => 3,
+                _ => 0,
+            },
+            RowSrc::Entry(idx) => match tape.nodes[idx] {
+                TapeNode::Static(SN::I64(_)) | TapeNode::Static(SN::U64(_)) => 1,
+                TapeNode::Static(SN::F64(_)) => 2,
+                TapeNode::StringRef { .. } => 3,
+                _ => 0,
+            },
+        }
+    }
+
+    let first_tag = row_tag(tape, rows[0]);
+    let mut all_int   = first_tag == 1;
+    let mut all_float = first_tag == 1 || first_tag == 2;
+    let mut all_str   = first_tag == 3;
+    for &r in rows.iter().skip(1) {
+        match row_tag(tape, r) {
+            1 => { all_str = false; }
+            2 => { all_int = false; all_str = false; }
+            3 => { all_int = false; all_float = false; }
             _ => { all_int = false; all_float = false; all_str = false; break; }
         }
         if !all_int && !all_float && !all_str { break; }
     }
-    if all_int {
-        let mut out: Vec<i64> = Vec::with_capacity(entries.len());
-        for &e in entries.iter() {
-            match tape.nodes[e] {
-                TapeNode::Static(SN::I64(n)) => out.push(n),
-                TapeNode::Static(SN::U64(n)) if n <= i64::MAX as u64 => out.push(n as i64),
-                _ => unreachable!("uniformity check"),
-            }
+
+    fn row_to_int(tape: &crate::strref::TapeData, row: RowSrc) -> i64 {
+        match row {
+            RowSrc::Scalar(TapeVal::Int(n)) => n,
+            RowSrc::Entry(idx) => match tape.nodes[idx] {
+                TapeNode::Static(SN::I64(n)) => n,
+                TapeNode::Static(SN::U64(n)) => n as i64,
+                _ => unreachable!("uniformity"),
+            },
+            _ => unreachable!("uniformity"),
         }
+    }
+    fn row_to_float(tape: &crate::strref::TapeData, row: RowSrc) -> f64 {
+        match row {
+            RowSrc::Scalar(TapeVal::Int(n))   => n as f64,
+            RowSrc::Scalar(TapeVal::Float(f)) => f,
+            RowSrc::Entry(idx) => match tape.nodes[idx] {
+                TapeNode::Static(SN::I64(n)) => n as f64,
+                TapeNode::Static(SN::U64(n)) => n as f64,
+                TapeNode::Static(SN::F64(f)) => f,
+                _ => unreachable!("uniformity"),
+            },
+            _ => unreachable!("uniformity"),
+        }
+    }
+    fn row_to_str_range(tape: &crate::strref::TapeData, row: RowSrc) -> (u32, u32) {
+        let idx = match row {
+            RowSrc::Scalar(TapeVal::StrIdx(i)) => i,
+            RowSrc::Entry(i) => i,
+            _ => unreachable!("uniformity"),
+        };
+        match tape.nodes[idx] {
+            TapeNode::StringRef { start, end } => (start, end),
+            _ => unreachable!("uniformity"),
+        }
+    }
+
+    if all_int {
+        let mut out: Vec<i64> = Vec::with_capacity(rows.len());
+        for &r in rows { out.push(row_to_int(tape, r)); }
         return Val::IntVec(std::sync::Arc::new(out));
     }
     if all_float {
-        let mut out: Vec<f64> = Vec::with_capacity(entries.len());
-        for &e in entries.iter() {
-            match tape.nodes[e] {
-                TapeNode::Static(SN::I64(n)) => out.push(n as f64),
-                TapeNode::Static(SN::U64(n)) => out.push(n as f64),
-                TapeNode::Static(SN::F64(f)) => out.push(f),
-                _ => unreachable!("uniformity check"),
-            }
-        }
+        let mut out: Vec<f64> = Vec::with_capacity(rows.len());
+        for &r in rows { out.push(row_to_float(tape, r)); }
         return Val::FloatVec(std::sync::Arc::new(out));
     }
     if all_str {
-        let mut out: Vec<crate::strref::StrRef> = Vec::with_capacity(entries.len());
+        let mut out: Vec<crate::strref::StrRef> = Vec::with_capacity(rows.len());
         let parent_str: std::sync::Arc<str> = unsafe {
             std::sync::Arc::from_raw(
                 std::sync::Arc::into_raw(std::sync::Arc::clone(&tape.bytes_buf))
                     as *const str)
         };
-        for &e in entries.iter() {
-            if let TapeNode::StringRef { start, end } = tape.nodes[e] {
-                out.push(crate::strref::StrRef::slice(
-                    std::sync::Arc::clone(&parent_str),
-                    start as usize, end as usize));
-            }
+        for &r in rows {
+            let (start, end) = row_to_str_range(tape, r);
+            out.push(crate::strref::StrRef::slice(
+                std::sync::Arc::clone(&parent_str),
+                start as usize, end as usize));
         }
         return Val::StrSliceVec(std::sync::Arc::new(out));
     }
-    // Mixed / containers — per-entry materialise.
-    let mut out: Vec<Val> = Vec::with_capacity(entries.len());
-    for &e in entries.iter() {
-        out.push(Val::from_tape_node(tape, e));
+    // Mixed / containers — per-row materialise.
+    let mut out: Vec<Val> = Vec::with_capacity(rows.len());
+    for &r in rows {
+        out.push(match r {
+            RowSrc::Entry(i) => Val::from_tape_node(tape, i),
+            RowSrc::Scalar(v) => tape_val_to_val(tape, v),
+        });
     }
     Val::Arr(std::sync::Arc::new(out))
+}
+
+#[cfg(feature = "simd-json")]
+fn tape_val_to_val(tape: &crate::strref::TapeData, v: TapeVal) -> Val {
+    match v {
+        TapeVal::Null => Val::Null,
+        TapeVal::Bool(b) => Val::Bool(b),
+        TapeVal::Int(n) => Val::Int(n),
+        TapeVal::Float(f) => Val::Float(f),
+        TapeVal::StrIdx(i) => {
+            let s = match tape.nodes[i] {
+                crate::strref::TapeNode::StringRef { start, end } =>
+                    tape.str_at_range(start as usize, end as usize),
+                _ => "",
+            };
+            Val::Str(std::sync::Arc::<str>::from(s))
+        }
+        TapeVal::Missing => Val::Null,
+    }
 }
 
 fn tape_finalise(
