@@ -1356,27 +1356,31 @@ impl Pipeline {
         let key_strs: Vec<&str> = chain_keys.iter().map(|k| k.as_ref()).collect();
         let arr_idx = crate::strref::tape_walk_field_chain(tape, &key_strs)?;
 
-        // Stage classifier: (leading FlatMap?, Filter*, trailing Map?).
+        // Stage classifier: (leading FlatMap?, Filter*, Map?, UniqueBy?).
         // - Leading optional FlatMap (FieldRead/FieldChain kernel) →
         //   resolves outer entry to inner Array idx; iterate inner.
         // - Filters apply to current entry idx (pred kernels only).
-        // - Trailing optional Map (FieldRead/FieldChain) projects entry
-        //   into a TapeVal scalar; subsequent rows are RowSrc::Scalar.
-        //   No stages may follow trailing Map (the entry's gone).
-        // - Map / Filter post-Map / UniqueBy / Sort / etc. bail.
+        // - Optional Map (FieldRead/FieldChain) projects entry into
+        //   a TapeVal scalar.
+        // - Optional trailing UniqueBy(None) — barrier dedup over
+        //   resulting rows (works on both Entry and Scalar rows).
+        // Other orderings / stage kinds bail.
         let mut flat_kernel: Option<&BodyKernel> = None;
         let mut filter_kernels: Vec<&BodyKernel> = Vec::new();
         let mut map_kernel: Option<&BodyKernel> = None;
+        let mut unique_dedup = false;
         for (i, (st, k)) in self.stages.iter().zip(self.stage_kernels.iter()).enumerate() {
-            if map_kernel.is_some() { return None; }  // Map must be last
+            if unique_dedup { return None; }  // UniqueBy must be last
             match st {
                 Stage::FlatMap(_) if i == 0 => {
+                    if map_kernel.is_some() { return None; }
                     if !matches!(k,
                         BodyKernel::FieldRead(_) | BodyKernel::FieldChain(_))
                     { return None; }
                     flat_kernel = Some(k);
                 }
                 Stage::Filter(_) => {
+                    if map_kernel.is_some() { return None; }
                     if !matches!(k,
                         BodyKernel::FieldRead(_)
                         | BodyKernel::FieldCmpLit(_, _, _)
@@ -1386,16 +1390,30 @@ impl Pipeline {
                     filter_kernels.push(k);
                 }
                 Stage::Map(_) => {
+                    if map_kernel.is_some() { return None; }
                     if !matches!(k,
                         BodyKernel::FieldRead(_) | BodyKernel::FieldChain(_))
                     { return None; }
                     map_kernel = Some(k);
+                }
+                Stage::UniqueBy(None) => {
+                    unique_dedup = true;
                 }
                 _ => return None,
             }
         }
 
         let mut acc = SinkAcc::new(&self.sink, &self.sink_kernels)?;
+        if unique_dedup {
+            // Currently only Collect supports dedup-mode; other sinks
+            // would need their own variant.  Bail if not Collect.
+            match &mut acc {
+                SinkAcc::Collect { dedup, .. } => {
+                    *dedup = Some(std::collections::HashSet::new());
+                }
+                _ => return None,
+            }
+        }
         let outer_iter = crate::strref::tape_array_iter(tape, arr_idx)?;
 
         if let Some(fk_kernel) = flat_kernel {
@@ -2878,7 +2896,57 @@ enum SinkAcc<'p> {
     ///   StrSliceVec direct from tape values
     /// - heterogeneous → Val::Arr fallback (per-entry materialise +
     ///   tape-val → Val conversion).
-    Collect { rows: Vec<RowSrc> },
+    /// `dedup` enables in-line dedup via HashSet keyed on the row's
+    /// content — implements `Stage::UniqueBy(None) ∘ Sink::Collect`.
+    Collect { rows: Vec<RowSrc>, dedup: Option<std::collections::HashSet<RowKey>> },
+}
+
+/// Hashable key derived from a RowSrc.  Strings keyed by their content
+/// bytes (resolved via tape) so two distinct StrIdx with same content
+/// dedupe correctly.  Entry rows of container kind don't dedupe (each
+/// entry treated unique by tape idx).
+#[cfg(feature = "simd-json")]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum RowKey {
+    Null,
+    Bool(bool),
+    Int(i64),
+    /// f64 keyed by raw bits — NaN behaviour is consistent (NaN bits
+    /// hash equal to themselves; Eq follows bit pattern, not IEEE).
+    FloatBits(u64),
+    Str(Box<[u8]>),
+    /// Fallback for entries we can't easily key — tape node idx (each
+    /// distinct entry becomes its own bucket).
+    EntryIdx(usize),
+}
+
+#[cfg(feature = "simd-json")]
+fn row_key(tape: &crate::strref::TapeData, row: RowSrc) -> RowKey {
+    use simd_json::StaticNode as SN;
+    use crate::strref::TapeNode;
+    match row {
+        RowSrc::Scalar(TapeVal::Null) => RowKey::Null,
+        RowSrc::Scalar(TapeVal::Bool(b)) => RowKey::Bool(b),
+        RowSrc::Scalar(TapeVal::Int(n)) => RowKey::Int(n),
+        RowSrc::Scalar(TapeVal::Float(f)) => RowKey::FloatBits(f.to_bits()),
+        RowSrc::Scalar(TapeVal::StrIdx(i)) => match tape.nodes[i] {
+            TapeNode::StringRef { start, end } =>
+                RowKey::Str(tape.bytes_buf[start as usize..end as usize].into()),
+            _ => RowKey::EntryIdx(i),
+        },
+        RowSrc::Scalar(TapeVal::Missing) => RowKey::Null,
+        RowSrc::Entry(idx) => match tape.nodes[idx] {
+            TapeNode::Static(SN::Null) => RowKey::Null,
+            TapeNode::Static(SN::Bool(b)) => RowKey::Bool(b),
+            TapeNode::Static(SN::I64(n)) => RowKey::Int(n),
+            TapeNode::Static(SN::U64(n)) if n <= i64::MAX as u64 => RowKey::Int(n as i64),
+            TapeNode::Static(SN::U64(n)) => RowKey::FloatBits((n as f64).to_bits()),
+            TapeNode::Static(SN::F64(f)) => RowKey::FloatBits(f.to_bits()),
+            TapeNode::StringRef { start, end } =>
+                RowKey::Str(tape.bytes_buf[start as usize..end as usize].into()),
+            _ => RowKey::EntryIdx(idx),
+        },
+    }
 }
 
 #[cfg(feature = "simd-json")]
@@ -2951,7 +3019,7 @@ impl<'p> SinkAcc<'p> {
                 let pred = sink_kernels.get(0)?;
                 Some(Self::FilterFirst { hit: None, pred })
             }
-            Sink::Collect         => Some(Self::Collect { rows: Vec::new() }),
+            Sink::Collect         => Some(Self::Collect { rows: Vec::new(), dedup: None }),
             // Unsupported sinks bail; caller falls back to Val path.
             _ => None,
         }
@@ -3005,7 +3073,14 @@ impl<'p> SinkAcc<'p> {
                 }
                 Some(true)
             }
-            Self::Collect { rows } => { rows.push(row); Some(true) }
+            Self::Collect { rows, dedup } => {
+                if let Some(seen) = dedup {
+                    let key = row_key(tape, row);
+                    if !seen.insert(key) { return Some(true); }
+                }
+                rows.push(row);
+                Some(true)
+            }
         }
     }
 
@@ -3023,7 +3098,7 @@ impl<'p> SinkAcc<'p> {
                     None => Val::Null,
                 }
             }
-            Self::Collect { rows } => collect_rows_to_val(tape, &rows),
+            Self::Collect { rows, .. } => collect_rows_to_val(tape, &rows),
         }
     }
 }
