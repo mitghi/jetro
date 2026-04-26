@@ -799,13 +799,23 @@ fn run_with_sink(
         }
     }
 
-    // Pipeline-Row Closure Fusion (PRCF) — generic algorithm.
-    // ONE generic scan_loop_prcf parameterised by `impl FnMut(&Slots)`
-    // closure.  Each Sink branch builds a closure capturing pre-resolved
-    // kernel slot indices + pre-decoded accumulator state.  Compiler
-    // monomorphises scan_loop_prcf per call site (different closure
-    // type) so per-row inner work is statically dispatched + inlined.
-    // No per-(stage, sink) hand-rolled walker.
+    // Columnar Extraction fast path — generic algorithm.  When shape
+    // has no Filter stages + Sink ∈ {Numeric, NumMap, NumFilterMap,
+    // CountIf, Count}, find each wanted key's `"<k>":` byte position
+    // via SIMD memmem across the WHOLE array region in ONE pass per
+    // key.  Pair positions by entry-index (sorted) → per-row inline
+    // parse + accumulate.  Bypasses per-row walker entirely.
+    if filter_slots.is_empty()
+        && matches!(p.sink,
+            Sink::NumFilterMap(_, _, _) | Sink::NumMap(_, _)
+            | Sink::CountIf(_) | Sink::Count | Sink::Numeric(_))
+    {
+        if let Some(out) = try_columnar_extraction(p, cat, &needles, raw, arr_start) {
+            return Some(Ok(out));
+        }
+    }
+
+    // Pipeline-Row Closure Fusion (PRCF) — generic fallback.
     match &p.sink {
         Sink::Count => {
             let mut count: u64 = 0;
@@ -855,6 +865,101 @@ fn run_with_sink(
         }
         _ => None,
     }
+}
+
+/// Columnar extraction — generic algorithm for filter+map+aggregate
+/// shapes with no Filter stages.  For each wanted key, runs ONE
+/// `memchr::memmem::find_iter` over the full array byte range — SIMD
+/// at ~1-3 GB/s.  Result: parallel Vec<usize> per wanted key.
+///
+/// Then pairs entries by zip — assumes homogeneous-row shape (each
+/// row has all wanted keys in same order).  Per (entry_idx, pos)
+/// tuple: parse value inline, dispatch via Sink closure, accumulate.
+///
+/// On non-uniform-shape input (some rows missing wanted key), falls
+/// back to PRCF walker.  Generic across Pipeline shapes via the
+/// same closure-builder branches as run_with_sink.
+fn try_columnar_extraction(
+    p: &Pipeline,
+    cat: &Catalog,
+    needles: &[&[u8]],
+    raw: &[u8],
+    arr_start: usize,
+) -> Option<Val> {
+    if raw.get(arr_start) != Some(&b'[') { return None; }
+    let arr_end = skip_value(raw, arr_start)?;
+    let arr_range = &raw[arr_start + 1 .. arr_end - 1];
+
+    // Per-key memmem scan — collect ALL hit positions in array region.
+    let mut cols: Vec<Vec<usize>> = Vec::with_capacity(needles.len());
+    let mut min_hits: usize = usize::MAX;
+    for needle in needles {
+        let positions: Vec<usize> = memchr::memmem::find_iter(arr_range, needle).collect();
+        min_hits = min_hits.min(positions.len());
+        cols.push(positions);
+    }
+    if min_hits == 0 { return None; }
+    // For homogeneous rows, every column has same #hits.  Verify.
+    if !cols.iter().all(|c| c.len() == min_hits) { return None; }
+
+    // Parse value at each (column, row_idx) → 2D scalar grid via
+    // direct positional access on raw bytes.
+    let n_rows = min_hits;
+    let n_cols = cols.len();
+
+    // Per-row evaluator dispatched by Sink — generic via closure.
+    match &p.sink {
+        Sink::Count => Some(Val::Int(n_rows as i64)),
+        Sink::CountIf(_) => {
+            let pred_k = p.sink_kernels.get(0)?;
+            let (pred_slot, pred_cmp) = resolve_pred_to_slot(pred_k, cat)?;
+            let mut count: u64 = 0;
+            for row in 0..n_rows {
+                let pred_pos = arr_start + 1 + cols[pred_slot][row] + needles[pred_slot].len();
+                let pred_val = parse_scalar_at(raw, pred_pos)?;
+                if check_pred(Some(pred_val), pred_cmp) { count += 1; }
+            }
+            Some(Val::Int(count as i64))
+        }
+        Sink::NumMap(op, _) => {
+            let map_k = p.sink_kernels.get(0)?;
+            let map_slot = resolve_value_to_slot(map_k, cat)?;
+            let mut acc = Acc::new();
+            for row in 0..n_rows {
+                let map_pos = arr_start + 1 + cols[map_slot][row] + needles[map_slot].len();
+                let v = parse_scalar_at(raw, map_pos)?;
+                if !acc.push(v) { return None; }
+            }
+            Some(acc.finalise(*op))
+        }
+        Sink::NumFilterMap(op, _, _) => {
+            let pred_k = p.sink_kernels.get(0)?;
+            let map_k = p.sink_kernels.get(1)?;
+            let (pred_slot, pred_cmp) = resolve_pred_to_slot(pred_k, cat)?;
+            let map_slot = resolve_value_to_slot(map_k, cat)?;
+            let mut acc = Acc::new();
+            for row in 0..n_rows {
+                let pred_pos = arr_start + 1 + cols[pred_slot][row] + needles[pred_slot].len();
+                let pred_val = parse_scalar_at(raw, pred_pos)?;
+                if check_pred(Some(pred_val), pred_cmp) {
+                    let map_pos = arr_start + 1 + cols[map_slot][row] + needles[map_slot].len();
+                    let v = parse_scalar_at(raw, map_pos)?;
+                    if !acc.push(v) { return None; }
+                }
+            }
+            Some(acc.finalise(*op))
+        }
+        _ => None,
+    }
+    .map(|v| { let _ = n_cols; v })
+}
+
+/// Inline parse of a primitive at byte position — skips ws first.
+#[inline]
+fn parse_scalar_at(raw: &[u8], pos: usize) -> Option<Scalar> {
+    let pos = skip_ws(raw, pos);
+    let (_, sc) = parse_primitive(raw, pos)?;
+    Some(sc)
 }
 
 /// Pipeline-Row Closure Fusion — single generic walker that consumes
