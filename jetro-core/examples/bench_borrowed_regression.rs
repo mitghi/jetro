@@ -177,6 +177,24 @@ fn bench_composed_borrow_loop() -> Stat {
     stat
 }
 
+fn bench_pipeline_borrow_direct(bytes: &[u8]) -> Stat {
+    use jetro_core::eval::borrowed::Arena;
+    use jetro_core::pipeline::Pipeline;
+    use jetro_core::parser;
+    println!("── pipeline_borrow direct (substrate gate, NOT wired) ──");
+    let q = "$.orders.skip(100).take(50).map(id)";
+    let ast = parser::parse(q).unwrap();
+    let p = Pipeline::lower(&ast).unwrap();
+    let stat = time(&format!("  query: {}", q), N_ITERS, || {
+        let arena = Arena::new();
+        let out = jetro_core::pipeline_borrow::try_run_borrow(&p, bytes, &arena).unwrap().unwrap();
+        std::hint::black_box(out);
+        std::hint::black_box(arena);
+    });
+    println!();
+    stat
+}
+
 fn bench_composed_borrow_phase2_sinks() -> Stat {
     use jetro_core::composed_borrow::{
         IdentityB, FirstSinkB, LastSinkB, CollectSinkB,
@@ -262,6 +280,18 @@ fn main() {
         violations.push(format!(
             "composed_borrow run loop {} µs > budget {} µs",
             cb1.median, COMPOSED_B_BUDGET_US));
+    }
+    println!();
+
+    // ── pipeline_borrow direct (substrate alive, NOT wired) ──
+    let pb = bench_pipeline_borrow_direct(&bytes);
+    const PIPELINE_BORROW_BUDGET_US: u128 = 6000;
+    println!("  pipeline_borrow direct median: {} µs (gate ≤ {} µs)",
+        pb.median, PIPELINE_BORROW_BUDGET_US);
+    if pb.median > PIPELINE_BORROW_BUDGET_US {
+        violations.push(format!(
+            "pipeline_borrow direct {} µs > budget {} µs",
+            pb.median, PIPELINE_BORROW_BUDGET_US));
     }
     println!();
 

@@ -64,6 +64,7 @@ pub mod pipeline;
 pub mod bytescan;
 pub mod composed;
 pub mod composed_borrow;
+pub mod pipeline_borrow;
 
 #[cfg(test)]
 mod tests;
@@ -1173,6 +1174,24 @@ impl Jetro {
                     if let Some(out) = bytescan::try_run_borrow(p, raw.as_ref(), arena) {
                         return out;
                     }
+                    // Phase 3 wire-in — composed_borrow path is NOT
+                    // wired in by default and the env gate is removed.
+                    // Reason: pipeline_borrow::try_run_borrow does a
+                    // full `from_json_simd_arena` parse (~3.7 ms on
+                    // 1.1 MB) before running the borrowed Stage chain.
+                    // Owned `collect_val` falls through to tape /
+                    // composed::tape which avoids Val tree build —
+                    // ~1.6 ms total for filter+aggregate sinks.  Until
+                    // composed_borrow can accept a tape source (i.e.
+                    // borrowed Stage::apply over `TapeNode` not
+                    // `BVal`), wiring pipeline_borrow regresses every
+                    // shape where bytescan_borrow declined and tape is
+                    // cheaper than Val materialisation.
+                    //
+                    // pipeline_borrow.rs remains as a substrate for
+                    // future Phase 3+ work — it's exercised via direct
+                    // Rust tests but not the public collect_val_borrow
+                    // path.
                 }
             }
         }
