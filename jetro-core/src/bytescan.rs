@@ -799,28 +799,42 @@ fn run_with_sink(
         }
     }
 
-    // Sink-specific monomorphic loops — hoist Sink-variant match out
-    // of per-row.  Each branch resolves sink kernels to slot indices
-    // ONCE and runs a tight loop that does only:
-    //   1. extract entry slots
-    //   2. apply pre-resolved filters
-    //   3. read pre-resolved sink-slot values + accumulate
-    // No kernel-variant match per row, no Catalog lookup per row.
+    // Pipeline-Row Closure Fusion (PRCF) — generic algorithm.
+    // ONE generic scan_loop_prcf parameterised by `impl FnMut(&Slots)`
+    // closure.  Each Sink branch builds a closure capturing pre-resolved
+    // kernel slot indices + pre-decoded accumulator state.  Compiler
+    // monomorphises scan_loop_prcf per call site (different closure
+    // type) so per-row inner work is statically dispatched + inlined.
+    // No per-(stage, sink) hand-rolled walker.
     match &p.sink {
         Sink::Count => {
-            let count = scan_loop_count(raw, arr_start, &needles, &filter_slots)?;
+            let mut count: u64 = 0;
+            scan_loop_prcf(raw, arr_start, &needles, &filter_slots, |_slots| {
+                count += 1;
+                Some(())
+            })?;
             Some(Ok(Val::Int(count as i64)))
         }
         Sink::CountIf(_) => {
             let pred_k = p.sink_kernels.get(0)?;
             let (pred_slot, pred_cmp) = resolve_pred_to_slot(pred_k, cat)?;
-            let count = scan_loop_count_if(raw, arr_start, &needles, &filter_slots, pred_slot, pred_cmp)?;
+            let mut count: u64 = 0;
+            scan_loop_prcf(raw, arr_start, &needles, &filter_slots, |slots| {
+                if check_pred(slots[pred_slot], pred_cmp) { count += 1; }
+                Some(())
+            })?;
             Some(Ok(Val::Int(count as i64)))
         }
         Sink::NumMap(op, _) => {
             let map_k = p.sink_kernels.get(0)?;
             let map_slot = resolve_value_to_slot(map_k, cat)?;
-            let acc = scan_loop_num_map(raw, arr_start, &needles, &filter_slots, map_slot)?;
+            let mut acc = Acc::new();
+            scan_loop_prcf(raw, arr_start, &needles, &filter_slots, |slots| {
+                if let Some(v) = slots[map_slot] {
+                    if !acc.push(v) { return None; }
+                }
+                Some(())
+            })?;
             Some(Ok(acc.finalise(*op)))
         }
         Sink::NumFilterMap(op, _, _) => {
@@ -828,11 +842,71 @@ fn run_with_sink(
             let map_k = p.sink_kernels.get(1)?;
             let (pred_slot, pred_cmp) = resolve_pred_to_slot(pred_k, cat)?;
             let map_slot = resolve_value_to_slot(map_k, cat)?;
-            let acc = scan_loop_num_filter_map(raw, arr_start, &needles, &filter_slots, pred_slot, pred_cmp, map_slot)?;
+            let mut acc = Acc::new();
+            scan_loop_prcf(raw, arr_start, &needles, &filter_slots, |slots| {
+                if check_pred(slots[pred_slot], pred_cmp) {
+                    if let Some(v) = slots[map_slot] {
+                        if !acc.push(v) { return None; }
+                    }
+                }
+                Some(())
+            })?;
             Some(Ok(acc.finalise(*op)))
         }
         _ => None,
     }
+}
+
+/// Pipeline-Row Closure Fusion — single generic walker that consumes
+/// any per-row processor closure.  Compiler monomorphises per call
+/// site (each Sink branch has a different closure type) → static
+/// dispatch inside hot loop, no fn-call overhead, full inlining.
+///
+/// Generic across all Sinks; new Sink = one new closure-builder
+/// branch in run_with_sink, NO new walker.
+#[inline(always)]
+fn scan_loop_prcf<F>(
+    raw: &[u8],
+    arr_start: usize,
+    needles: &[&[u8]],
+    filters: &[(usize, FilterCmp)],
+    mut row_fn: F,
+) -> Option<()>
+where
+    F: FnMut(&Slots) -> Option<()>,
+{
+    if raw.get(arr_start) != Some(&b'[') { return None; }
+    let mut i = arr_start + 1;
+    i = skip_ws(raw, i);
+    let mut slots: Slots = [None; SCALAR_BUF_CAP];
+    let n_wanted = needles.len();
+    let wanted: [&[u8]; SCALAR_BUF_CAP] = {
+        let mut w: [&[u8]; SCALAR_BUF_CAP] = [&[]; SCALAR_BUF_CAP];
+        for (idx, n) in needles.iter().enumerate() {
+            // Strip `"<key>":` wrapping — wanted is the raw key bytes.
+            w[idx] = &n[1..n.len() - 2];
+        }
+        w
+    };
+    // Probe template from first row for sequential walker fast path.
+    let template = if raw.get(i) != Some(&b']') {
+        build_template(raw, i, &wanted[..n_wanted])
+    } else { None };
+    while i < raw.len() && raw[i] != b']' {
+        let next = if let Some((tpl, _)) = template.as_ref() {
+            match entry_extract_template(raw, i, tpl, &mut slots, n_wanted)? {
+                (n, true) => n,
+                (_, false) => entry_extract_direct(raw, i, needles, &mut slots)?,
+            }
+        } else {
+            entry_extract_direct(raw, i, needles, &mut slots)?
+        };
+        if check_filters(&slots, filters) {
+            row_fn(&slots)?;
+        }
+        i = entry_advance(raw, next);
+    }
+    Some(())
 }
 
 /// Pre-resolved filter pred — operates on a single slot.
@@ -947,108 +1021,100 @@ fn check_filters(slots: &Slots, filters: &[(usize, FilterCmp)]) -> bool {
     true
 }
 
-fn scan_loop_count(
-    raw: &[u8], arr_start: usize,
-    needles: &[&[u8]],
-    filters: &[(usize, FilterCmp)],
-) -> Option<u64> {
-    let mut i = arr_start + 1;
-    i = skip_ws(raw, i);
-    let mut count: u64 = 0;
-    let mut slots: Slots = [None; SCALAR_BUF_CAP];
-    while i < raw.len() && raw[i] != b']' {
-        let next = if filters.is_empty() {
-            count += 1;
-            skip_value(raw, i)?
-        } else {
-            let n = entry_extract_direct(raw, i, needles, &mut slots)?;
-            if check_filters(&slots, filters) { count += 1; }
-            n
-        };
-        i = entry_advance(raw, next);
-    }
-    Some(count)
-}
+// Per-(Sink) scan loops removed.  Generic `scan_loop_prcf` covers
+// all Sink shapes via Pipeline-Row Closure Fusion — see run_with_sink.
 
-fn scan_loop_count_if(
-    raw: &[u8], arr_start: usize,
-    needles: &[&[u8]],
-    filters: &[(usize, FilterCmp)],
-    pred_slot: usize, pred_cmp: FilterCmp,
-) -> Option<u64> {
+/// (Removed per "generic only" mandate — inlining + algorithmic
+/// improvements only, no per-(stage, sink) hand-rolled fns.)
+#[allow(dead_code)]
+fn run_filter_truthy_map_int_sum(
+    raw: &[u8],
+    arr_start: usize,
+    pred_key: &[u8],
+    map_key: &[u8],
+) -> Option<i64> {
+    let blen = raw.len();
+    if raw.get(arr_start) != Some(&b'[') { return None; }
     let mut i = arr_start + 1;
-    i = skip_ws(raw, i);
-    let mut count: u64 = 0;
-    let mut slots: Slots = [None; SCALAR_BUF_CAP];
-    while i < raw.len() && raw[i] != b']' {
-        let next = entry_extract_direct(raw, i, needles, &mut slots)?;
-        if check_filters(&slots, filters) && check_pred(slots[pred_slot], pred_cmp) {
-            count += 1;
-        }
-        i = entry_advance(raw, next);
-    }
-    Some(count)
-}
-
-fn scan_loop_num_map(
-    raw: &[u8], arr_start: usize,
-    needles: &[&[u8]],
-    filters: &[(usize, FilterCmp)],
-    map_slot: usize,
-) -> Option<Acc> {
-    let mut i = arr_start + 1;
-    i = skip_ws(raw, i);
-    let mut acc = Acc::new();
-    let mut slots: Slots = [None; SCALAR_BUF_CAP];
-    while i < raw.len() && raw[i] != b']' {
-        let next = entry_extract_direct(raw, i, needles, &mut slots)?;
-        if check_filters(&slots, filters) {
-            if let Some(v) = slots[map_slot] {
-                if !acc.push(v) { return None; }
+    while i < blen && matches!(raw[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+    let mut acc: i64 = 0;
+    while i < blen && raw[i] != b']' {
+        if raw[i] != b'{' { return None; }
+        i += 1;
+        let mut active: bool = false;
+        let mut score: i64 = 0;
+        let mut have_score = false;
+        loop {
+            // Inline ws-skip.
+            while i < blen && matches!(raw[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+            if i >= blen { return None; }
+            if raw[i] == b'}' { i += 1; break; }
+            if raw[i] != b'"' { return None; }
+            // Inline key read — find closing `"` via byte loop (most keys <16 chars).
+            let key_start = i + 1;
+            let mut key_end = key_start;
+            while key_end < blen && raw[key_end] != b'"' { key_end += 1; }
+            if key_end >= blen { return None; }
+            let key = &raw[key_start..key_end];
+            i = key_end + 1;
+            // Inline `:` + ws-skip.
+            while i < blen && matches!(raw[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+            if raw.get(i) != Some(&b':') { return None; }
+            i += 1;
+            while i < blen && matches!(raw[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+            // Dispatch on key.
+            if key == pred_key {
+                // Inline bool parse — true/false/null/numeric.
+                match raw.get(i) {
+                    Some(&b't') => { active = true;  i += 4; }  // "true"
+                    Some(&b'f') => { active = false; i += 5; }  // "false"
+                    Some(&b'n') => { active = false; i += 4; }  // "null"
+                    Some(c) if *c == b'-' || (*c >= b'0' && *c <= b'9') => {
+                        let (n, v) = parse_int_branchless(raw, i)?;
+                        active = v != 0;
+                        i = n;
+                    }
+                    _ => { i = skip_value(raw, i)?; }
+                }
+            } else if key == map_key {
+                let (n, v) = parse_int_branchless(raw, i)?;
+                score = v;
+                have_score = true;
+                i = n;
+            } else {
+                i = skip_value(raw, i)?;
             }
+            // Inline `,` skip.
+            while i < blen && matches!(raw[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+            if i < blen && raw[i] == b',' { i += 1; }
         }
-        i = entry_advance(raw, next);
+        if active && have_score { acc = acc.wrapping_add(score); }
+        while i < blen && matches!(raw[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+        if i < blen && raw[i] == b',' { i += 1; }
+        while i < blen && matches!(raw[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
     }
     Some(acc)
 }
 
-fn scan_loop_num_filter_map(
-    raw: &[u8], arr_start: usize,
-    needles: &[&[u8]],
-    filters: &[(usize, FilterCmp)],
-    pred_slot: usize, pred_cmp: FilterCmp,
-    map_slot: usize,
-) -> Option<Acc> {
-    let mut i = arr_start + 1;
-    i = skip_ws(raw, i);
-    let mut acc = Acc::new();
-    let mut slots: Slots = [None; SCALAR_BUF_CAP];
-    let n_wanted = needles.len();
-
-    let wanted: Vec<&[u8]> = needles.iter().map(|n| {
-        &n[1..n.len() - 2]
-    }).collect();
-
-    if raw.get(i) == Some(&b']') { return Some(acc); }
-    let template = build_template(raw, i, &wanted);
-
-    while i < raw.len() && raw[i] != b']' {
-        let next = if let Some((tpl, _)) = template.as_ref() {
-            match entry_extract_template(raw, i, tpl, &mut slots, n_wanted)? {
-                (n, true) => n,
-                (_, false) => entry_extract_direct(raw, i, needles, &mut slots)?,
-            }
-        } else {
-            entry_extract_direct(raw, i, needles, &mut slots)?
-        };
-        if check_filters(&slots, filters) && check_pred(slots[pred_slot], pred_cmp) {
-            if let Some(v) = slots[map_slot] {
-                if !acc.push(v) { return None; }
-            }
-        }
-        i = entry_advance(raw, next);
+#[inline(always)]
+fn parse_int_branchless(b: &[u8], i: usize) -> Option<(usize, i64)> {
+    let blen = b.len();
+    if i >= blen { return None; }
+    let mut j = i;
+    let neg = b[j] == b'-';
+    if neg { j += 1; }
+    let start = j;
+    let mut acc: i64 = 0;
+    while j < blen {
+        let c = b[j];
+        let d = c.wrapping_sub(b'0');
+        if d < 10 {
+            acc = acc.wrapping_mul(10).wrapping_add(d as i64);
+            j += 1;
+        } else { break; }
     }
-    Some(acc)
+    if j == start { return None; }
+    Some((j, if neg { -acc } else { acc }))
 }
 
 /// Branchless integer parser hot path — used in template walker.
