@@ -324,6 +324,116 @@ impl Sink for CollectSink {
     }
 }
 
+// ── Generic VM-fallback stages ──────────────────────────────────────────────
+//
+// Cover any kernel shape the borrow stages don't recognise (Generic,
+// Arith, FString, FieldCmpLit non-Eq, custom lambdas). One VM + Env
+// shared across all Generic stages in the chain via Rc<RefCell>;
+// constructed once per pipeline call so compile/path caches amortise.
+//
+// These exist so `try_run_composed` never bails on body-shape — every
+// pipeline lowers via composition, every chain runs the same outer
+// loop. No per-shape walker; one mechanism for every body.
+
+pub struct VmCtx {
+    pub vm: crate::vm::VM,
+    pub env: crate::eval::Env,
+}
+
+/// `.filter(pred)` with arbitrary pred — VM evaluates per row, result
+/// truthy-checked. Borrow form on pass-through (zero-clone of x).
+pub struct GenericFilter {
+    pub prog: std::sync::Arc<crate::vm::Program>,
+    pub ctx: std::rc::Rc<std::cell::RefCell<VmCtx>>,
+}
+
+impl Stage for GenericFilter {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        let mut c = self.ctx.borrow_mut();
+        let VmCtx { vm, env } = &mut *c;
+        let prev = env.swap_current(x.clone());
+        let r = vm.exec_in_env(&self.prog, env);
+        env.restore_current(prev);
+        match r {
+            Ok(v) if crate::eval::util::is_truthy(&v) => StageOutput::Pass(Cow::Borrowed(x)),
+            _ => StageOutput::Filtered,
+        }
+    }
+}
+
+/// `.map(f)` with arbitrary f — VM emits a fresh Val per row.
+pub struct GenericMap {
+    pub prog: std::sync::Arc<crate::vm::Program>,
+    pub ctx: std::rc::Rc<std::cell::RefCell<VmCtx>>,
+}
+
+impl Stage for GenericMap {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        let mut c = self.ctx.borrow_mut();
+        let VmCtx { vm, env } = &mut *c;
+        let prev = env.swap_current(x.clone());
+        let r = vm.exec_in_env(&self.prog, env);
+        env.restore_current(prev);
+        match r {
+            Ok(v) => StageOutput::Pass(Cow::Owned(v)),
+            Err(_) => StageOutput::Filtered,
+        }
+    }
+}
+
+/// `.flat_map(f)` with arbitrary f — VM emits a Val that must be
+/// iterable; `flatten_iterable` dispatches across all lane variants.
+pub struct GenericFlatMap {
+    pub prog: std::sync::Arc<crate::vm::Program>,
+    pub ctx: std::rc::Rc<std::cell::RefCell<VmCtx>>,
+}
+
+impl Stage for GenericFlatMap {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        let mut c = self.ctx.borrow_mut();
+        let VmCtx { vm, env } = &mut *c;
+        let prev = env.swap_current(x.clone());
+        let r = vm.exec_in_env(&self.prog, env);
+        env.restore_current(prev);
+        let owned = match r {
+            Ok(v) => v,
+            Err(_) => return StageOutput::Filtered,
+        };
+        // `owned` lives in this scope; any borrow against it must be
+        // promoted to owned before returning. Materialise in a way
+        // that doesn't outlive `owned`.
+        let result: StageOutput<'a> = match &owned {
+            Val::Arr(items) => {
+                let mut out: SmallVec<[Cow<'a, Val>; 4]> = SmallVec::with_capacity(items.len());
+                for it in items.iter() { out.push(Cow::Owned(it.clone())); }
+                if out.is_empty() { StageOutput::Filtered } else { StageOutput::Many(out) }
+            }
+            Val::IntVec(items) => {
+                let mut out: SmallVec<[Cow<'a, Val>; 4]> = SmallVec::with_capacity(items.len());
+                for n in items.iter() { out.push(Cow::Owned(Val::Int(*n))); }
+                if out.is_empty() { StageOutput::Filtered } else { StageOutput::Many(out) }
+            }
+            Val::FloatVec(items) => {
+                let mut out: SmallVec<[Cow<'a, Val>; 4]> = SmallVec::with_capacity(items.len());
+                for f in items.iter() { out.push(Cow::Owned(Val::Float(*f))); }
+                if out.is_empty() { StageOutput::Filtered } else { StageOutput::Many(out) }
+            }
+            Val::StrVec(items) => {
+                let mut out: SmallVec<[Cow<'a, Val>; 4]> = SmallVec::with_capacity(items.len());
+                for s in items.iter() { out.push(Cow::Owned(Val::Str(std::sync::Arc::clone(s)))); }
+                if out.is_empty() { StageOutput::Filtered } else { StageOutput::Many(out) }
+            }
+            Val::StrSliceVec(items) => {
+                let mut out: SmallVec<[Cow<'a, Val>; 4]> = SmallVec::with_capacity(items.len());
+                for r in items.iter() { out.push(Cow::Owned(Val::StrSlice(r.clone()))); }
+                if out.is_empty() { StageOutput::Filtered } else { StageOutput::Many(out) }
+            }
+            _ => StageOutput::Filtered,
+        };
+        result
+    }
+}
+
 // ── Borrow-form stages — zero-clone pass-through ────────────────────────────
 
 /// `.filter(@.k == lit)` — borrow-form when pred holds.
@@ -826,6 +936,37 @@ mod tests {
         assert_eq!(
             j.collect("$.rows.sort_by(price).first()").unwrap(),
             json!({"city": "NYC", "price": 10})
+        );
+    }
+
+    #[test]
+    fn integration_generic_kernels() {
+        // Body shapes the borrow stages don't recognise — should
+        // still run via the GenericFilter / GenericMap / GenericFlatMap
+        // VM-fallback path, both default and JETRO_COMPOSED=1.
+        use serde_json::json;
+
+        let doc = json!({
+            "rows": [
+                {"qty": 2, "price": 10},
+                {"qty": 3, "price": 20},
+                {"qty": 1, "price": 30},
+            ]
+        });
+
+        let j = crate::Jetro::new(doc);
+
+        // Arith body — `qty * price` not a borrow shape.
+        assert_eq!(
+            j.collect("$.rows.map(qty * price).sum()").unwrap(),
+            json!(110)
+        );
+
+        // FieldCmpLit non-Eq — `qty > 1` is FieldCmpLit Gt, not the
+        // Eq fast path.
+        assert_eq!(
+            j.collect("$.rows.filter(qty > 1).count()").unwrap(),
+            json!(2)
         );
     }
 

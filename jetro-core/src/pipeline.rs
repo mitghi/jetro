@@ -2160,7 +2160,21 @@ impl Pipeline {
     fn try_run_composed(&self, root: &Val) -> Option<Result<Val, EvalError>> {
         use crate::composed as cmp;
         use crate::composed::Stage as ComposedStage;
-        use std::cell::Cell;
+        use std::cell::{Cell, RefCell};
+        use std::rc::Rc;
+
+        // Shared VM + Env for any Generic-kernel stage in the chain.
+        // Constructed once per call so compile/path caches amortise.
+        // Lazy: only built if a Generic stage actually appears.
+        let vm_ctx: std::cell::OnceCell<Rc<RefCell<cmp::VmCtx>>> = std::cell::OnceCell::new();
+        let make_ctx = || -> Rc<RefCell<cmp::VmCtx>> {
+            let vm = crate::vm::VM::new();
+            let env = vm.make_loop_env(root.clone());
+            Rc::new(RefCell::new(cmp::VmCtx { vm, env }))
+        };
+        let get_ctx = || -> Rc<RefCell<cmp::VmCtx>> {
+            Rc::clone(vm_ctx.get_or_init(make_ctx))
+        };
 
         // Sink mapping — base sinks only. Fused sinks bail (Tier 3).
         enum SinkKind { Count, Sum, Min, Max, Avg, First, Last, Collect, GroupByOnly }
@@ -2188,11 +2202,13 @@ impl Pipeline {
             }
         }
 
-        // Build a borrow-form streaming Stage from (Stage, BodyKernel).
-        // Returns None for shapes the composed path doesn't yet
-        // recognise — caller bails. No per-shape fusion arms here;
-        // each arm maps one kernel-level pattern to one generic Stage.
-        fn build_stream_stage(s: &Stage, k: &BodyKernel) -> Option<Box<dyn ComposedStage>> {
+        // Build a streaming Stage from (Stage, BodyKernel). Recognised
+        // borrow kernels (FieldRead / FieldChain / FieldCmpLit Eq)
+        // dispatch to zero-clone borrow stages; everything else falls
+        // through to the Generic VM-fallback stage that re-enters
+        // `vm.exec_in_env` per row using the shared `vm_ctx`. One arm
+        // per kernel pattern; one mechanism for every body shape.
+        let build_stream_stage = |s: &Stage, k: &BodyKernel| -> Option<Box<dyn ComposedStage>> {
             Some(match (s, k) {
                 (Stage::Filter(_), BodyKernel::FieldCmpLit(field, op, lit))
                     if matches!(op, crate::ast::BinOp::Eq) =>
@@ -2210,9 +2226,17 @@ impl Pipeline {
                     Box::new(cmp::FlatMapFieldChain { keys: Arc::clone(keys) }),
                 (Stage::Take(n), _) => Box::new(cmp::Take { remaining: Cell::new(*n) }),
                 (Stage::Skip(n), _) => Box::new(cmp::Skip { remaining: Cell::new(*n) }),
+                // VM-fallback for any unrecognised body — Generic kernel,
+                // Arith, FString, FieldCmpLit non-Eq, custom lambdas.
+                (Stage::Filter(p), _) =>
+                    Box::new(cmp::GenericFilter { prog: Arc::clone(p), ctx: get_ctx() }),
+                (Stage::Map(p), _) =>
+                    Box::new(cmp::GenericMap { prog: Arc::clone(p), ctx: get_ctx() }),
+                (Stage::FlatMap(p), _) =>
+                    Box::new(cmp::GenericFlatMap { prog: Arc::clone(p), ctx: get_ctx() }),
                 _ => return None,
             })
-        }
+        };
 
         // Resolve source to an owned Vec<Val>. Future: avoid clone on
         // pure Arr by holding Arc<Vec<Val>> for the first segment.
