@@ -39,6 +39,11 @@ pub fn try_run(p: &Pipeline, raw_bytes: &[u8]) -> Option<Result<Val, EvalError>>
     // single trailing Map (FieldRead/FieldChain[1]/ObjProject).  All
     // other shapes defer to tape exec.  Skip/Take counts collect for
     // sink dispatch; Map kernel resolved later via cs.last().
+    // FlatMap stays on the tape route — the simd-json tape parses
+    // nested arrays once and walks them at ~10 ns/element; bytescan's
+    // per-outer memchr + per-inner template extract cost is higher
+    // than tape's amortised parse + walk for typical 2-level shapes.
+    // Bench-validated: keeping FlatMap on tape.
     let stage_count = p.stages.len();
     for (idx, (st, k)) in p.stages.iter().zip(p.stage_kernels.iter()).enumerate() {
         match st {
@@ -61,9 +66,8 @@ pub fn try_run(p: &Pipeline, raw_bytes: &[u8]) -> Option<Result<Val, EvalError>>
     }
     // Build wanted-fields catalog from kernels.  Cap field-name uniqueness
     // (~16 distinct fields per row); linear scan of catalog is fine.
-    // Skip/Take stages carry a `Generic` kernel by convention (no body
-    // to classify) — those add nothing to the catalog and are skipped
-    // at this stage to avoid the `Generic`-rejection in collect_paths.
+    // Skip/Take stages don't extract per-row fields — those are
+    // navigation-only and skipped here.
     let mut catalog: Catalog = Catalog::default();
     for (st, k) in p.stages.iter().zip(p.stage_kernels.iter()) {
         match st {
@@ -666,6 +670,8 @@ fn run_with_sink(
 
     // Resolve filter-stage kernels to slot indices ONCE.  Skip/Take
     // also collected here — counts get consumed by the sink walker.
+    // FlatMap (when present) lives at index 0 and is handled by the
+    // walker dispatch below; skip past it in this loop.
     let mut filter_slots: Vec<(usize, FilterCmp)> = Vec::new();
     let mut skip_n: usize = 0;
     let mut take_n: usize = usize::MAX;
@@ -702,16 +708,22 @@ fn run_with_sink(
     // up to `take_n`, then signal Done.  Closure-monomorphised so the
     // skip/take check inlines into the hot loop with no overhead when
     // skip_n=0 / take_n=usize::MAX.
+    //
+    // When the pipeline starts with FlatMap, the walker uses the
+    // 2-level scan (per outer row, locate inner field, scan inner
+    // array).  Otherwise the direct walker fires.  Same closure body
+    // either way — closure runs against the (post-flatten) row stream.
     macro_rules! sink_walker {
         ($body:expr) => {{
             let mut seen: usize = 0;
             let mut taken: usize = 0;
-            scan_loop_prcf(raw, arr_start, &needles, &filter_slots, |slots, span| {
+            let mut row_fn = |slots: &Slots, span: RowSpan| -> Option<ScanCtl> {
                 if seen < skip_n { seen += 1; return Some(ScanCtl::Continue); }
                 if taken >= take_n { return Some(ScanCtl::Done); }
                 taken += 1;
                 ($body)(slots, span)
-            })?;
+            };
+            scan_loop_prcf(raw, arr_start, &needles, &filter_slots, &mut row_fn)?;
         }};
     }
     match (&csink, trailing_map_kernel) {
@@ -953,6 +965,13 @@ struct RowSpan { start: usize, end: usize }
 ///
 /// Generic across all Sinks; new Sink = one new closure-builder
 /// branch in run_with_sink, NO new walker.
+///
+/// Returns `Some(true)` when the closure signalled `ScanCtl::Done`
+/// (early-exit), `Some(false)` when the array was fully walked.
+/// `None` is reserved for hard error.  Callers that don't care
+/// about early-exit (Count/Numeric/Collect-without-First) ignore the
+/// bool via `?`; nested walkers (FlatMap) propagate it to break the
+/// outer loop on inner Done.
 #[inline(always)]
 fn scan_loop_prcf<F>(
     raw: &[u8],
@@ -960,7 +979,7 @@ fn scan_loop_prcf<F>(
     needles: &[&[u8]],
     filters: &[(usize, FilterCmp)],
     mut row_fn: F,
-) -> Option<()>
+) -> Option<bool>
 where
     F: FnMut(&Slots, RowSpan) -> Option<ScanCtl>,
 {
@@ -994,10 +1013,94 @@ where
         if check_filters(&slots, filters) {
             match row_fn(&slots, RowSpan { start: row_start, end: next })? {
                 ScanCtl::Continue => {}
-                ScanCtl::Done => return Some(()),
+                ScanCtl::Done => return Some(true),
             }
         }
         i = entry_advance(raw, next);
+    }
+    Some(false)
+}
+
+/// FlatMap walker — preserved for future early-exit shapes
+/// (`flat_map(...).first()` / `take(k)`).  Currently unused: bench
+/// showed FlatMap+Sink::Numeric/Count/Collect runs faster on the
+/// tape route (parse amortised over inner walks).  Re-enable at
+/// `try_run` acceptance for FlatMap when paired with First/Last/
+/// Skip+Take(small).
+#[allow(dead_code)]
+/// FlatMap walker: for each outer row, locate `inner_field_needle`
+/// (`"<field>":` bytes), descend into its array value, and walk inner
+/// rows applying `inner_filters` + dispatching `row_fn` per match.
+/// Inner-row closure runs over the flattened stream — same shape and
+/// skip/take semantics as the non-FlatMap path.
+///
+/// Template caching: probes the inner-row shape ONCE on the first
+/// non-empty inner array; subsequent outer rows reuse the template
+/// for direct sequential extract — eliminates per-outer template
+/// build overhead (~1 µs/outer × 5000 outers = ~5 ms saved on bench
+/// data).  Falls back to `entry_extract_direct` when a row's shape
+/// diverges from the template.
+///
+/// Generic across any FieldRead/FieldChain[1] FlatMap kernel.  When
+/// the inner closure signals `ScanCtl::Done` the outer loop breaks
+/// too, preserving early-exit for First / Take.
+#[inline(always)]
+fn scan_loop_flat_map_prcf<F>(
+    raw: &[u8],
+    outer_arr_start: usize,
+    inner_field_needle: &[u8],
+    inner_needles: &[&[u8]],
+    inner_filters: &[(usize, FilterCmp)],
+    mut row_fn: F,
+) -> Option<()>
+where
+    F: FnMut(&Slots, RowSpan) -> Option<ScanCtl>,
+{
+    if raw.get(outer_arr_start) != Some(&b'[') { return None; }
+    let n_wanted = inner_needles.len();
+    let mut wanted: [&[u8]; SCALAR_BUF_CAP] = [&[]; SCALAR_BUF_CAP];
+    for (idx, n) in inner_needles.iter().enumerate() {
+        wanted[idx] = &n[1..n.len() - 2];
+    }
+    let mut slots: Slots = [None; SCALAR_BUF_CAP];
+    let mut template: Option<Template> = None;
+
+    let mut i = outer_arr_start + 1;
+    i = skip_ws(raw, i);
+    while i < raw.len() && raw[i] != b']' {
+        if raw[i] != b'{' { return None; }
+        let outer_end = skip_value(raw, i)?;
+        let outer_inner = &raw[i + 1 .. outer_end - 1];
+        if let Some(pos) = memchr::memmem::find(outer_inner, inner_field_needle) {
+            let val_start_rel = pos + inner_field_needle.len();
+            let val_start = skip_ws(raw, i + 1 + val_start_rel);
+            if raw.get(val_start) == Some(&b'[') {
+                let mut j = val_start + 1;
+                j = skip_ws(raw, j);
+                if template.is_none() && raw.get(j) == Some(&b'{') {
+                    template = build_template(raw, j, &wanted[..n_wanted]).map(|(t, _)| t);
+                }
+                while j < raw.len() && raw[j] != b']' {
+                    let row_start = j;
+                    let next = if let Some(tpl) = template.as_ref() {
+                        match entry_extract_template(raw, j, tpl, &mut slots, n_wanted)? {
+                            (n, true) => n,
+                            (_, false) => entry_extract_direct(raw, j, inner_needles, &mut slots)?,
+                        }
+                    } else {
+                        entry_extract_direct(raw, j, inner_needles, &mut slots)?
+                    };
+                    if check_filters(&slots, inner_filters) {
+                        match row_fn(&slots, RowSpan { start: row_start, end: next })? {
+                            ScanCtl::Continue => {}
+                            ScanCtl::Done => return Some(()),
+                        }
+                    }
+                    j = entry_advance(raw, next);
+                }
+            }
+        }
+        i = entry_advance(raw, outer_end);
     }
     Some(())
 }
