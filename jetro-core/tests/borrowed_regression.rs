@@ -190,14 +190,14 @@ fn unified_bval_run_loop_under_budget() {
         items.push(BVal::Obj(&*slice));
     }
     let med = time_med(N_ITERS, || {
-        let stages = Composed::<BVal, _, _>::new(
+        let stages = Composed::new(
             Filter::<BVal, _>::new(|v: &BVal<'_>| {
                 v.get_field("n").map_or(false,
                     |x| matches!(x, BVal::Int(n) if n >= 100))
             }),
-            Composed::<BVal, _, _>::new(
+            Composed::new(
                 Skip::new(100),
-                Composed::<BVal, _, _>::new(
+                Composed::new(
                     Take::new(1000),
                     MapField::new(std::sync::Arc::from("n")),
                 ),
@@ -266,7 +266,7 @@ fn composed_tape_phase1_under_budget() {
 
     let med = time_med(N_ITERS, || {
         let arena = Arena::new();
-        let stages = Composed::<TapeRow<'_>, _, _>::new(
+        let stages = Composed::new(
             Filter::<TapeRow<'_>, _>::new(|v: &TapeRow<'_>| {
                 v.get_field("status")
                     .and_then(|c| c.as_str())
@@ -281,7 +281,7 @@ fn composed_tape_phase1_under_budget() {
         let mn = run_pipeline::<TapeRow<'_>, MinSink>(&arena, arr_row.array_children().unwrap(), &chain);
         let mx = run_pipeline::<TapeRow<'_>, MaxSink>(&arena, arr_row.array_children().unwrap(), &chain);
         let av = run_pipeline::<TapeRow<'_>, AvgSink>(&arena, arr_row.array_children().unwrap(), &chain);
-        let id: Identity<TapeRow<'_>> = Identity::new();
+        let id = Identity::new();
         let _ = run_pipeline::<TapeRow<'_>, CountSink>(&arena, arr_row.array_children().unwrap(), &id);
         std::hint::black_box((mn, mx, av));
     });

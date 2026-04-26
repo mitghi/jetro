@@ -104,6 +104,14 @@ impl<T: Stage + ?Sized> Stage for Box<T> {
 /// a chain of stages.
 pub struct Identity;
 
+impl Identity {
+    pub fn new() -> Self { Self }
+}
+
+impl Default for Identity {
+    fn default() -> Self { Self }
+}
+
 impl Stage for Identity {
     #[inline]
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
@@ -113,9 +121,17 @@ impl Stage for Identity {
 
 /// Monoidal composition. `Composed { a, b }.apply(x) = b.apply(a.apply(x))`
 /// with proper handling of Filtered / Many / Done propagation.
-pub struct Composed<A: Stage, B: Stage> {
+///
+/// Trait bounds live on the impl blocks rather than the struct so the
+/// SAME `Composed<A, B>` can chain stages under either the owned
+/// `Stage` trait or the substrate-generic `unified::Stage<R>` trait.
+pub struct Composed<A, B> {
     pub a: A,
     pub b: B,
+}
+
+impl<A, B> Composed<A, B> {
+    pub fn new(a: A, b: B) -> Self { Self { a, b } }
 }
 
 impl<A: Stage, B: Stage> Stage for Composed<A, B> {
@@ -2052,6 +2068,46 @@ mod tests {
 // 5b will collapse the two trait surfaces into one once VM-driven
 // stages (GenericFilter / GenericMap / etc.) gain Row<'a> entry
 // points.
+
+impl<R> crate::unified::Stage<R> for Identity {
+    #[inline]
+    fn apply(&self, x: R) -> crate::unified::StageOutputU<R> {
+        crate::unified::StageOutputU::Pass(x)
+    }
+}
+
+impl<R, A: crate::unified::Stage<R>, B: crate::unified::Stage<R>>
+    crate::unified::Stage<R> for Composed<A, B>
+{
+    fn apply(&self, x: R) -> crate::unified::StageOutputU<R> {
+        use crate::unified::StageOutputU;
+        match self.a.apply(x) {
+            StageOutputU::Pass(v) => self.b.apply(v),
+            StageOutputU::Filtered => StageOutputU::Filtered,
+            StageOutputU::Done => StageOutputU::Done,
+            StageOutputU::Many(items) => {
+                let mut out: smallvec::SmallVec<[R; 4]> = smallvec::SmallVec::new();
+                for v in items {
+                    match self.b.apply(v) {
+                        StageOutputU::Pass(p) => out.push(p),
+                        StageOutputU::Filtered => continue,
+                        StageOutputU::Many(more) => out.extend(more),
+                        StageOutputU::Done => {
+                            return if out.is_empty() {
+                                StageOutputU::Done
+                            } else {
+                                StageOutputU::Many(out)
+                            };
+                        }
+                    }
+                }
+                if out.is_empty() { StageOutputU::Filtered }
+                else if out.len() == 1 { StageOutputU::Pass(out.into_iter().next().unwrap()) }
+                else { StageOutputU::Many(out) }
+            }
+        }
+    }
+}
 
 impl<'a, R: crate::row::Row<'a>> crate::unified::Stage<R> for MapField {
     #[inline]

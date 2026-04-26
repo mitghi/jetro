@@ -156,14 +156,14 @@ fn bench_composed_borrow_loop() -> Stat {
     }
     let stat = time("  filter(n>=100).skip(100).take(1000).map(n).sum()",
         N_ITERS, || {
-        let stages = Composed::<BVal, _, _>::new(
+        let stages = Composed::new(
             Filter::<BVal, _>::new(|v: &BVal<'_>| {
                 v.get_field("n").map_or(false,
                     |x| matches!(x, BVal::Int(n) if n >= 100))
             }),
-            Composed::<BVal, _, _>::new(
+            Composed::new(
                 Skip::new(100),
-                Composed::<BVal, _, _>::new(
+                Composed::new(
                     Take::new(1000),
                     MapField::new(std::sync::Arc::from("n")),
                 ),
@@ -214,7 +214,7 @@ fn bench_composed_borrow_phase2_sinks() -> Stat {
         let outer_slice = arena.alloc_slice_fill_iter(outer_pairs.into_iter());
         items.push(BVal::Obj(&*outer_slice));
     }
-    let identity: Identity<BVal> = Identity::new();
+    let identity = Identity::new();
 
     let _ = time("  First/Last/Collect — 5000 elems via Identity",
         N_ITERS, || {

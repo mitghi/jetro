@@ -60,57 +60,10 @@ impl<R, T: Stage<R> + ?Sized> Stage<R> for Box<T> {
     fn apply(&self, x: R) -> StageOutputU<R> { (**self).apply(x) }
 }
 
-pub struct Identity<R>(std::marker::PhantomData<fn(R)>);
-impl<R> Identity<R> {
-    pub fn new() -> Self { Self(std::marker::PhantomData) }
-}
-impl<R> Default for Identity<R> {
-    fn default() -> Self { Self::new() }
-}
-impl<R> Stage<R> for Identity<R> {
-    #[inline]
-    fn apply(&self, x: R) -> StageOutputU<R> { StageOutputU::Pass(x) }
-}
-
-pub struct Composed<R, A: Stage<R>, B: Stage<R>> {
-    pub a: A,
-    pub b: B,
-    _marker: std::marker::PhantomData<fn(R)>,
-}
-impl<R, A: Stage<R>, B: Stage<R>> Composed<R, A, B> {
-    pub fn new(a: A, b: B) -> Self { Self { a, b, _marker: std::marker::PhantomData } }
-}
-impl<R, A: Stage<R>, B: Stage<R>> Stage<R> for Composed<R, A, B> {
-    fn apply(&self, x: R) -> StageOutputU<R> {
-        match self.a.apply(x) {
-            StageOutputU::Pass(v) => self.b.apply(v),
-            StageOutputU::Filtered => StageOutputU::Filtered,
-            StageOutputU::Done => StageOutputU::Done,
-            StageOutputU::Many(items) => {
-                // Apply b to each, collect.  Done short-circuits via
-                // early return.
-                let mut out: SmallVec<[R; 4]> = SmallVec::new();
-                for v in items {
-                    match self.b.apply(v) {
-                        StageOutputU::Pass(p) => out.push(p),
-                        StageOutputU::Filtered => continue,
-                        StageOutputU::Many(more) => out.extend(more),
-                        StageOutputU::Done => {
-                            return if out.is_empty() {
-                                StageOutputU::Done
-                            } else {
-                                StageOutputU::Many(out)
-                            };
-                        }
-                    }
-                }
-                if out.is_empty() { StageOutputU::Filtered }
-                else if out.len() == 1 { StageOutputU::Pass(out.into_iter().next().unwrap()) }
-                else { StageOutputU::Many(out) }
-            }
-        }
-    }
-}
+// Identity + Composed live in composed.rs (re-exports below).  The
+// SAME structs implement both `composed::Stage` (owned) and this
+// module's `Stage<R>` (borrow), per pipeline_unification.
+pub use crate::composed::{Identity, Composed};
 
 // ── Stages ──────────────────────────────────────────────────────────
 
@@ -207,7 +160,7 @@ mod tests {
     fn count_over_bval() {
         let arena = Arena::new();
         let orders = make_orders(&arena);
-        let id: Identity<BVal> = Identity::new();
+        let id = Identity::new();
         let out = run_pipeline::<BVal, CountSink>(&arena, orders.iter().copied(), &id);
         assert!(matches!(out, BVal::Int(5)));
     }
@@ -266,7 +219,7 @@ mod tests {
         let arr_idx = crate::strref::tape_walk_field_chain(&tape, &["a"]).unwrap();
         let arr_row = TapeRow::new(&tape, arr_idx as u32);
         let arena = Arena::new();
-        let id: Identity<TapeRow<'_>> = Identity::new();
+        let id = Identity::new();
         let iter = arr_row.array_children().unwrap();
         let out = run_pipeline::<TapeRow<'_>, CountSink>(&arena, iter, &id);
         assert!(matches!(out, BVal::Int(7)));

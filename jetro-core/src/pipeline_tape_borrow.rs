@@ -71,10 +71,10 @@ fn lower_stages<'a>(
     stages: &[Stage],
     kernels: &[BodyKernel],
 ) -> Option<Box<dyn USt<TapeRow<'a>> + 'a>> {
-    let mut chain: Box<dyn USt<TapeRow<'a>> + 'a> = Box::new(UIdentity::<TapeRow<'a>>::new());
+    let mut chain: Box<dyn USt<TapeRow<'a>> + 'a> = Box::new(UIdentity::new());
     for (st, k) in stages.iter().zip(kernels.iter()) {
         let next: Box<dyn USt<TapeRow<'a>> + 'a> = lower_stage(st, k)?;
-        chain = Box::new(UComposed::<TapeRow<'a>, _, _>::new(chain, next));
+        chain = Box::new(UComposed::new(chain, next));
     }
     Some(chain)
 }
