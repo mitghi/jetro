@@ -441,6 +441,15 @@ impl BodyKernel {
                 }
                 return Self::FieldChain(keys.into());
             }
+            // `LoadIdent(k1) + FieldChain([k2, k3, ...])` — the field
+            // walk peephole (FieldChain) folded after a single
+            // LoadIdent prefix.  Same semantics as a multi-step path
+            // rooted at current.
+            [Opcode::LoadIdent(k1), Opcode::FieldChain(fc)] => {
+                let mut keys = vec![k1.clone()];
+                for k in fc.keys.iter() { keys.push(k.clone()); }
+                return Self::FieldChain(keys.into());
+            }
             _ => {}
         }
         // <field-read>, <lit>, <cmp>  →  FieldCmpLit / FieldChainCmpLit

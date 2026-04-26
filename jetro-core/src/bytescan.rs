@@ -44,22 +44,30 @@ pub fn try_run(p: &Pipeline, raw_bytes: &[u8]) -> Option<Result<Val, EvalError>>
     // per-outer memchr + per-inner template extract cost is higher
     // than tape's amortised parse + walk for typical 2-level shapes.
     // Bench-validated: keeping FlatMap on tape.
+    // Detect trailing UniqueBy(None) — absorbs into Collect sink as
+    // a per-row dedup; treat the stage *before* it as the trailing
+    // Map for projection purposes.
     let stage_count = p.stages.len();
+    let last_is_unique = matches!(p.stages.last(), Some(Stage::UniqueBy(None)));
+    let last_payload_idx = if last_is_unique { stage_count.saturating_sub(1) } else { stage_count };
     for (idx, (st, k)) in p.stages.iter().zip(p.stage_kernels.iter()).enumerate() {
         match st {
             Stage::Filter(_) => {
                 if !is_pred_kernel(k) { return None; }
             }
             Stage::Skip(_) | Stage::Take(_) => {}
-            Stage::Map(_) if idx == stage_count - 1 => {
+            Stage::Map(_) if last_payload_idx > 0 && idx == last_payload_idx - 1 => {
                 match k {
                     BodyKernel::FieldRead(_) => {}
-                    BodyKernel::FieldChain(keys) if keys.len() == 1 => {}
+                    BodyKernel::FieldChain(_) => {}
                     BodyKernel::ObjProject(entries) => {
                         if !objproject_is_byte_friendly(entries) { return None; }
                     }
                     _ => return None,
                 }
+            }
+            Stage::UniqueBy(None) if idx == stage_count - 1 => {
+                if !matches!(p.sink, Sink::Collect) { return None; }
             }
             _ => return None,
         }
@@ -71,7 +79,11 @@ pub fn try_run(p: &Pipeline, raw_bytes: &[u8]) -> Option<Result<Val, EvalError>>
     let mut catalog: Catalog = Catalog::default();
     for (st, k) in p.stages.iter().zip(p.stage_kernels.iter()) {
         match st {
-            Stage::Skip(_) | Stage::Take(_) => continue,
+            // Navigation-only stages carry a Generic kernel by
+            // convention; they don't contribute to the per-row
+            // catalog.  Skipping here avoids the Generic-rejection
+            // in collect_paths.
+            Stage::Skip(_) | Stage::Take(_) | Stage::UniqueBy(None) => continue,
             _ => {}
         }
         collect_paths(k, &mut catalog)?;
@@ -82,41 +94,84 @@ pub fn try_run(p: &Pipeline, raw_bytes: &[u8]) -> Option<Result<Val, EvalError>>
     let arr_start = walk_chain_to_array(raw_bytes, &chain)?;
 
     // Run sink-driven generic walker.
-    run_with_sink(p, &catalog, raw_bytes, arr_start)
+    run_with_sink(p, &catalog, raw_bytes, arr_start, last_is_unique)
 }
 
 // ── Path catalog ───────────────────────────────────────────────────
 
-/// Set of single-field-from-entry paths.  Each entry in `fields` is
-/// the byte name (UTF-8) of a top-level field within a row Object.
-/// Index into `fields` is the slot the kernel reads at eval time.
+/// Per-row extraction catalog.  Each slot maps to a canonical chain
+/// of field names walked from the row root.  Single-step slots
+/// (chain length 1) read primitives directly; multi-step slots
+/// descend through nested objects after the top-level extract.
 ///
-/// Multi-step paths (FieldChain) are expanded as the FIRST step here;
-/// the kernel evaluator descends further from the per-entry extracted
-/// value when needed.  Phase 1 supports only single-step paths
-/// (FieldRead) — extending to FieldChain = walker descends inside
-/// the entry's Object byte range.
+/// Layout:
+///   slots in `top_keys.len()` range = primary top-level fields,
+///     populated by entry_extract_template/direct.
+///   slots beyond top_keys.len() = chain tails registered in
+///     `chains`, resolved post-extract by descending the ObjRange
+///     held at the chain's primary slot.
 #[derive(Default, Debug)]
 struct Catalog {
-    fields: Vec<Arc<str>>,
+    /// Unique top-level field names appearing as either single-step
+    /// reads or as the first step of a multi-step chain.
+    top_keys: Vec<Arc<str>>,
+    /// Multi-step chains.  Each `(primary_slot, tail)` where
+    /// `primary_slot` is the index in `top_keys` for the chain's
+    /// first step and `tail` is the remaining steps.  The chain's
+    /// output slot is `top_keys.len() + idx_in_chains`.
+    chains: Vec<(usize, Vec<Arc<str>>)>,
 }
 
 impl Catalog {
     fn slot_for(&mut self, name: &Arc<str>) -> usize {
-        for (i, f) in self.fields.iter().enumerate() {
+        for (i, f) in self.top_keys.iter().enumerate() {
             if f.as_ref() == name.as_ref() { return i; }
         }
-        self.fields.push(name.clone());
-        self.fields.len() - 1
+        self.top_keys.push(Arc::clone(name));
+        self.top_keys.len() - 1
     }
     fn slot_lookup(&self, name: &str) -> Option<usize> {
-        self.fields.iter().position(|f| f.as_ref() == name)
+        self.top_keys.iter().position(|f| f.as_ref() == name)
     }
+    /// Register a multi-step chain.  Returns the slot index that
+    /// will hold the final descended value at run time.
+    fn slot_for_chain(&mut self, keys: &[Arc<str>]) -> usize {
+        if keys.is_empty() { return usize::MAX; }
+        if keys.len() == 1 { return self.slot_for(&keys[0]); }
+        for (i, (p, t)) in self.chains.iter().enumerate() {
+            if self.top_keys[*p].as_ref() == keys[0].as_ref()
+                && t.len() == keys.len() - 1
+                && t.iter().zip(keys[1..].iter()).all(|(a, b)| a.as_ref() == b.as_ref())
+            {
+                return self.top_keys.len() + i;
+            }
+        }
+        let primary = self.slot_for(&keys[0]);
+        let tail: Vec<Arc<str>> = keys[1..].iter().map(Arc::clone).collect();
+        self.chains.push((primary, tail));
+        self.top_keys.len() + self.chains.len() - 1
+    }
+    /// Lookup slot for a multi-step chain; returns None if not registered.
+    fn slot_lookup_chain(&self, keys: &[Arc<str>]) -> Option<usize> {
+        if keys.is_empty() { return None; }
+        if keys.len() == 1 { return self.slot_lookup(keys[0].as_ref()); }
+        for (i, (p, t)) in self.chains.iter().enumerate() {
+            if self.top_keys.get(*p).map(|s| s.as_ref()) == Some(keys[0].as_ref())
+                && t.len() == keys.len() - 1
+                && t.iter().zip(keys[1..].iter()).all(|(a, b)| a.as_ref() == b.as_ref())
+            {
+                return Some(self.top_keys.len() + i);
+            }
+        }
+        None
+    }
+    fn n_slots(&self) -> usize { self.top_keys.len() + self.chains.len() }
 }
 
-/// Walk a kernel and register every top-level field name it reads.
-/// Returns None when the kernel reads something the byte-walker can't
-/// project (FieldChain past one step, FString, Generic).
+/// Walk a kernel and register every field path it reads.  Returns
+/// None when the kernel reads something the byte-walker can't project
+/// (FString, Generic).  Multi-step FieldChain / FieldChainCmpLit /
+/// ObjProject Path are supported via Catalog::slot_for_chain.
 fn collect_paths(k: &BodyKernel, cat: &mut Catalog) -> Option<()> {
     match k {
         BodyKernel::FieldRead(name) => { cat.slot_for(name); Some(()) }
@@ -127,31 +182,26 @@ fn collect_paths(k: &BodyKernel, cat: &mut Catalog) -> Option<()> {
             collect_arith(rhs, cat)?;
             Some(())
         }
-        // Single-step FieldChain treated as FieldRead.
-        BodyKernel::FieldChain(keys) if keys.len() == 1 => {
-            cat.slot_for(&keys[0]);
+        BodyKernel::FieldChain(keys) => {
+            cat.slot_for_chain(keys);
             Some(())
         }
-        // FieldChainCmpLit single-step also fits.
-        BodyKernel::FieldChainCmpLit(keys, _, _) if keys.len() == 1 => {
-            cat.slot_for(&keys[0]);
+        BodyKernel::FieldChainCmpLit(keys, _, _) => {
+            cat.slot_for_chain(keys);
             Some(())
         }
-        // ObjProject: each entry must be a 1-step Path; register its
-        // single field in the catalog.  Anything else (InnerLen,
-        // InnerMapSum, multi-step Path) defers to tape.
         BodyKernel::ObjProject(entries) => {
             for e in entries.iter() {
                 match e {
-                    ObjProjEntry::Path { path, .. } if path.len() == 1 => {
-                        cat.slot_for(&path[0]);
+                    ObjProjEntry::Path { path, .. } => {
+                        cat.slot_for_chain(path);
                     }
                     _ => return None,
                 }
             }
             Some(())
         }
-        // Multi-step chains, FString, Generic — bail.
+        // FString, Generic — bail.
         _ => None,
     }
 }
@@ -165,9 +215,8 @@ fn objproject_is_byte_friendly(entries: &[ObjProjEntry]) -> bool {
 
 fn collect_arith(op: &ArithOperand, cat: &mut Catalog) -> Option<()> {
     match op {
-        ArithOperand::Path(p) if p.len() == 1 => { cat.slot_for(&p[0]); Some(()) }
+        ArithOperand::Path(p) => { cat.slot_for_chain(p); Some(()) }
         ArithOperand::LitInt(_) | ArithOperand::LitFloat(_) => Some(()),
-        _ => None,
     }
 }
 
@@ -175,9 +224,9 @@ fn is_pred_kernel(k: &BodyKernel) -> bool {
     matches!(k,
         BodyKernel::FieldRead(_)
         | BodyKernel::FieldCmpLit(_, _, _)
-        | BodyKernel::ConstBool(_))
-        || matches!(k, BodyKernel::FieldChainCmpLit(keys, _, _) if keys.len() == 1)
-        || matches!(k, BodyKernel::FieldChain(keys) if keys.len() == 1)
+        | BodyKernel::ConstBool(_)
+        | BodyKernel::FieldChainCmpLit(_, _, _)
+        | BodyKernel::FieldChain(_))
 }
 
 // ── Generic byte JSON walker ──────────────────────────────────────
@@ -327,6 +376,9 @@ enum Scalar {
     Float(f64),
     /// Slice into raw_bytes — string content, not escape-decoded.
     StrRange(u32, u32),
+    /// Slice into raw_bytes — entire object value `{...}` byte range.
+    /// Used as a stepping stone for multi-step FieldChain resolution.
+    ObjRange(u32, u32),
     Missing,
 }
 
@@ -343,6 +395,10 @@ fn parse_primitive(b: &[u8], i: usize) -> Option<(usize, Scalar)> {
             Some((next, Scalar::StrRange(start, end)))
         }
         b'-' | b'0'..=b'9' => parse_number_inline(b, i),
+        b'{' => {
+            let end = skip_value(b, i)?;
+            Some((end, Scalar::ObjRange(i as u32, end as u32)))
+        }
         _ => Some((skip_value(b, i)?, Scalar::Missing)),
     }
 }
@@ -575,6 +631,7 @@ fn truthy(s: Scalar) -> bool {
         Scalar::Int(n) => n != 0,
         Scalar::Float(f) => f != 0.0,
         Scalar::StrRange(s, e) => e > s,
+        Scalar::ObjRange(_, _) => true,
         Scalar::Null | Scalar::Missing => false,
     }
 }
@@ -645,9 +702,10 @@ fn run_with_sink(
     cat: &Catalog,
     raw: &[u8],
     arr_start: usize,
+    unique_collect: bool,
 ) -> Option<Result<Val, EvalError>> {
-    let wanted: Vec<&[u8]> = cat.fields.iter().map(|f| f.as_bytes()).collect();
-    if wanted.len() > SCALAR_BUF_CAP { return None; }
+    if cat.n_slots() > SCALAR_BUF_CAP { return None; }
+    let wanted: Vec<&[u8]> = cat.top_keys.iter().map(|f| f.as_bytes()).collect();
     let needles_owned: Vec<Vec<u8>> = build_needles(&wanted);
     let needles: Vec<&[u8]> = needles_owned.iter().map(|n| n.as_slice()).collect();
 
@@ -658,15 +716,18 @@ fn run_with_sink(
     let (cs, ck, csink) = p.canonical();
 
     // Trailing Map kernel — projection that the sink consumes.
-    // Applies to Numeric, First, Last, Collect.  Other sinks fall
-    // through to per-Sink branches with trailing_map_kernel = None.
+    // Applies to Numeric, First, Last, Collect.  When `unique_collect`
+    // is set, the LAST stage is UniqueBy(None) — the *real* trailing
+    // Map sits at index cs.len() - 2.
+    let payload_end = cs.len().saturating_sub(if unique_collect { 1 } else { 0 });
     let trailing_map_kernel: Option<&BodyKernel> =
         if matches!(csink, Sink::Numeric(_) | Sink::First | Sink::Last | Sink::Collect)
-            && matches!(cs.last(), Some(Stage::Map(_)))
+            && payload_end > 0
+            && matches!(cs.get(payload_end - 1), Some(Stage::Map(_)))
         {
-            ck.last()
+            ck.get(payload_end - 1)
         } else { None };
-    let filter_end = if trailing_map_kernel.is_some() { cs.len() - 1 } else { cs.len() };
+    let filter_end = if trailing_map_kernel.is_some() { payload_end - 1 } else { payload_end };
 
     // Resolve filter-stage kernels to slot indices ONCE.  Skip/Take
     // also collected here — counts get consumed by the sink walker.
@@ -723,7 +784,7 @@ fn run_with_sink(
                 taken += 1;
                 ($body)(slots, span)
             };
-            scan_loop_prcf(raw, arr_start, &needles, &filter_slots, &mut row_fn)?;
+            scan_loop_prcf(raw, arr_start, &needles, cat, &filter_slots, &mut row_fn)?;
         }};
     }
     match (&csink, trailing_map_kernel) {
@@ -771,19 +832,67 @@ fn run_with_sink(
             Some(Ok(last_val.unwrap_or(Val::Null)))
         }
         // Sink::Collect — gather all matched (and within skip/take
-        // window) rows into Val::Arr.  When trailing Map projects to
-        // a scalar slot, output is a flat Vec of primitives; when it
-        // projects to ObjProject, each row builds a small Val::Obj.
+        // window) rows into Val::Arr.  When `unique_collect`, dedupe
+        // by canonical bytes of the projected scalar slot.  When
+        // trailing Map projects ObjProject, each row builds a small
+        // Val::Obj.
         (Sink::Collect, _) => {
             let map_kind = build_map_kind(trailing_map_kernel, cat)?;
             let mut acc: Vec<Val> = Vec::new();
-            sink_walker!(|slots: &Slots, span: RowSpan| -> Option<ScanCtl> {
-                acc.push(build_row_val(raw, slots, span, &map_kind)?);
-                Some(ScanCtl::Continue)
-            });
+            if unique_collect {
+                let scalar_slot = match &map_kind {
+                    MapKind::Scalar(s) => *s,
+                    // Non-scalar dedup would require row-Val byte
+                    // hashing — bail to tape for now.
+                    _ => return None,
+                };
+                let mut seen: std::collections::HashSet<UniqueKey> = std::collections::HashSet::new();
+                sink_walker!(|slots: &Slots, _span: RowSpan| -> Option<ScanCtl> {
+                    let sc = match slots[scalar_slot] {
+                        Some(sc) => sc,
+                        None => return Some(ScanCtl::Continue),
+                    };
+                    let key = UniqueKey::from_scalar(raw, sc);
+                    if seen.insert(key) {
+                        acc.push(scalar_to_val(raw, sc));
+                    }
+                    Some(ScanCtl::Continue)
+                });
+            } else {
+                sink_walker!(|slots: &Slots, span: RowSpan| -> Option<ScanCtl> {
+                    acc.push(build_row_val(raw, slots, span, &map_kind)?);
+                    Some(ScanCtl::Continue)
+                });
+            }
             Some(Ok(Val::arr(acc)))
         }
         _ => None,
+    }
+}
+
+/// Hashable canonical key for scalar dedup.  String content compares
+/// by raw bytes (no escape decode); numerics by typed value.  Object
+/// scalars collapse to a sentinel (caller already excluded ObjRange
+/// from this path).
+#[derive(PartialEq, Eq, Hash)]
+enum UniqueKey {
+    Bytes(Vec<u8>),
+    Int(i64),
+    FloatBits(u64),
+    Bool(bool),
+    Nullish,
+}
+
+impl UniqueKey {
+    fn from_scalar(raw: &[u8], s: Scalar) -> Self {
+        match s {
+            Scalar::StrRange(start, end) => UniqueKey::Bytes(raw[start as usize..end as usize].to_vec()),
+            Scalar::Int(n) => UniqueKey::Int(n),
+            Scalar::Float(f) => UniqueKey::FloatBits(f.to_bits()),
+            Scalar::Bool(b) => UniqueKey::Bool(b),
+            Scalar::Null | Scalar::Missing => UniqueKey::Nullish,
+            Scalar::ObjRange(start, end) => UniqueKey::Bytes(raw[start as usize..end as usize].to_vec()),
+        }
     }
 }
 
@@ -809,8 +918,8 @@ fn build_map_kind(k: Option<&BodyKernel>, cat: &Catalog) -> Option<MapKind> {
             let mut pairs: Vec<(Arc<str>, usize)> = Vec::with_capacity(entries.len());
             for e in entries.iter() {
                 match e {
-                    ObjProjEntry::Path { key, path } if path.len() == 1 => {
-                        let s = cat.slot_lookup(path[0].as_ref())?;
+                    ObjProjEntry::Path { key, path } => {
+                        let s = cat.slot_lookup_chain(path)?;
                         pairs.push((Arc::clone(key), s));
                     }
                     _ => return None,
@@ -868,11 +977,17 @@ fn scalar_to_val(raw: &[u8], s: Scalar) -> Val {
         Scalar::Float(f) => Val::Float(f),
         Scalar::StrRange(start, end) => {
             let bytes = &raw[start as usize .. end as usize];
-            // UTF-8 string content; fall back to lossy on malformed.
             match std::str::from_utf8(bytes) {
                 Ok(s) => Val::Str(Arc::from(s)),
                 Err(_) => Val::Str(Arc::from(String::from_utf8_lossy(bytes).as_ref())),
             }
+        }
+        Scalar::ObjRange(start, end) => {
+            // Materialise nested object as Val via simd-json on a per-
+            // call buffer copy.  Used when ObjProject targets the
+            // intermediate object of a multi-step chain (rare).
+            let span = RowSpan { start: start as usize, end: end as usize };
+            parse_row_obj(raw, span).unwrap_or(Val::Null)
         }
     }
 }
@@ -972,11 +1087,16 @@ struct RowSpan { start: usize, end: usize }
 /// about early-exit (Count/Numeric/Collect-without-First) ignore the
 /// bool via `?`; nested walkers (FlatMap) propagate it to break the
 /// outer loop on inner Done.
+///
+/// `cat` is used to resolve multi-step chain slots after the
+/// per-row top-level extract.  When `cat.chains` is empty the
+/// post-extract chain descent compiles to zero overhead.
 #[inline(always)]
 fn scan_loop_prcf<F>(
     raw: &[u8],
     arr_start: usize,
     needles: &[&[u8]],
+    cat: &Catalog,
     filters: &[(usize, FilterCmp)],
     mut row_fn: F,
 ) -> Option<bool>
@@ -1010,6 +1130,7 @@ where
         } else {
             entry_extract_direct(raw, i, needles, &mut slots)?
         };
+        resolve_chains(raw, cat, &mut slots);
         if check_filters(&slots, filters) {
             match row_fn(&slots, RowSpan { start: row_start, end: next })? {
                 ScanCtl::Continue => {}
@@ -1019,6 +1140,46 @@ where
         i = entry_advance(raw, next);
     }
     Some(false)
+}
+
+/// Post-extract chain descent.  For each registered multi-step chain,
+/// walk its primary slot's ObjRange through the tail keys to produce
+/// the final scalar.  Stores the result at slot `top_keys.len() + i`.
+/// When `cat.chains` is empty this is a no-op call (compiles to a
+/// branch on `chains.is_empty()`).
+#[inline]
+fn resolve_chains(raw: &[u8], cat: &Catalog, slots: &mut Slots) {
+    if cat.chains.is_empty() { return; }
+    let n_top = cat.top_keys.len();
+    for (i, (primary_slot, tail)) in cat.chains.iter().enumerate() {
+        let out_slot = n_top + i;
+        let (mut cur, _end) = match slots[*primary_slot] {
+            Some(Scalar::ObjRange(s, e)) => (s as usize, e as usize),
+            _ => { slots[out_slot] = None; continue; }
+        };
+        let mut final_scalar: Option<Scalar> = None;
+        for (k_idx, key) in tail.iter().enumerate() {
+            let cur_skipped = skip_ws(raw, cur);
+            if raw.get(cur_skipped) != Some(&b'{') { break; }
+            match find_field(raw, cur_skipped, key.as_bytes()) {
+                Some(val_pos) => {
+                    let val_pos = skip_ws(raw, val_pos);
+                    if k_idx == tail.len() - 1 {
+                        if let Some((_, sc)) = parse_primitive(raw, val_pos) {
+                            final_scalar = Some(sc);
+                        }
+                    } else {
+                        // Intermediate step — must descend into another object.
+                        if raw.get(val_pos) == Some(&b'{') {
+                            cur = val_pos;
+                        } else { break; }
+                    }
+                }
+                None => break,
+            }
+        }
+        slots[out_slot] = final_scalar;
+    }
 }
 
 /// FlatMap walker — preserved for future early-exit shapes
@@ -1146,16 +1307,16 @@ fn resolve_pred_to_slot(k: &BodyKernel, cat: &Catalog) -> Option<(usize, FilterC
             let s = cat.slot_lookup(name.as_ref())?;
             Some((s, FilterCmp::Truthy))
         }
-        BodyKernel::FieldChain(keys) if keys.len() == 1 => {
-            let s = cat.slot_lookup(keys[0].as_ref())?;
+        BodyKernel::FieldChain(keys) => {
+            let s = cat.slot_lookup_chain(keys)?;
             Some((s, FilterCmp::Truthy))
         }
         BodyKernel::FieldCmpLit(name, op, lit) => {
             let s = cat.slot_lookup(name.as_ref())?;
             Some((s, to_cmp(*op, to_lit(lit)?)?))
         }
-        BodyKernel::FieldChainCmpLit(keys, op, lit) if keys.len() == 1 => {
-            let s = cat.slot_lookup(keys[0].as_ref())?;
+        BodyKernel::FieldChainCmpLit(keys, op, lit) => {
+            let s = cat.slot_lookup_chain(keys)?;
             Some((s, to_cmp(*op, to_lit(lit)?)?))
         }
         _ => None,
@@ -1165,7 +1326,7 @@ fn resolve_pred_to_slot(k: &BodyKernel, cat: &Catalog) -> Option<(usize, FilterC
 fn resolve_value_to_slot(k: &BodyKernel, cat: &Catalog) -> Option<usize> {
     match k {
         BodyKernel::FieldRead(name) => cat.slot_lookup(name.as_ref()),
-        BodyKernel::FieldChain(keys) if keys.len() == 1 => cat.slot_lookup(keys[0].as_ref()),
+        BodyKernel::FieldChain(keys) => cat.slot_lookup_chain(keys),
         _ => None,
     }
 }
