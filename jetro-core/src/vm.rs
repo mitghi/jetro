@@ -632,24 +632,6 @@ fn trivial_literal(op: &Opcode) -> Option<Val> {
 }
 
 /// Detect `@ <op> lit` or `lit <op> @` — a filter predicate comparing
-/// the current element directly to a literal.  Used to lower filter
-/// on columnar IntVec/FloatVec receivers to a tight slice loop.
-fn detect_current_cmp_lit(ops: &[Opcode]) -> Option<(super::ast::BinOp, Val)> {
-    // Form: [PushCurrent, <lit>, <cmp>]
-    if let [Opcode::PushCurrent, a, b] = ops {
-        if let (Some(lit), Some(op)) = (trivial_literal(a), cmp_opcode(b)) {
-            return Some((op, lit));
-        }
-    }
-    // Form: [<lit>, PushCurrent, <cmp>]  →  flip cmp
-    if let [a, Opcode::PushCurrent, b] = ops {
-        if let (Some(lit), Some(op)) = (trivial_literal(a), cmp_opcode(b)) {
-            return Some((flip_cmp(op), lit));
-        }
-    }
-    None
-}
-
 /// Which StrVec string predicate is recognised at a filter site.
 #[derive(Debug, Clone, Copy)]
 enum StrVecPred { StartsWith, EndsWith, Contains }
@@ -730,149 +712,6 @@ fn detect_current_str_nullary(ops: &[Opcode]) -> Option<StrVecMap> {
         });
     }
     None
-}
-
-/// Detect a filter-predicate sub-program of shape `field <op> literal`,
-/// `literal <op> field`, or `field1 <op> field2`. Returns one of three variants
-/// so the caller can pick the right fused opcode.
-#[derive(Debug)]
-enum FieldPred {
-    FieldCmpLit(Arc<str>, super::ast::BinOp, Val),
-    FieldCmpField(Arc<str>, super::ast::BinOp, Arc<str>),
-}
-
-fn flip_cmp(op: super::ast::BinOp) -> super::ast::BinOp {
-    use super::ast::BinOp::*;
-    match op {
-        Lt => Gt, Gt => Lt, Lte => Gte, Gte => Lte,
-        other => other,
-    }
-}
-
-fn cmp_opcode(op: &Opcode) -> Option<super::ast::BinOp> {
-    use super::ast::BinOp::*;
-    Some(match op {
-        Opcode::Eq => Eq, Opcode::Neq => Neq,
-        Opcode::Lt => Lt, Opcode::Lte => Lte,
-        Opcode::Gt => Gt, Opcode::Gte => Gte,
-        _ => return None,
-    })
-}
-
-/// Patterns recognised for a filter-lambda body:
-///   `[PushCurrent, GetField(k), PushLit, <cmp>]`
-///   `[PushLit, PushCurrent, GetField(k), <cmp>]`
-///   `[PushCurrent, GetField(k1), PushCurrent, GetField(k2), <cmp>]`
-fn detect_field_pred(ops: &[Opcode]) -> Option<FieldPred> {
-    // Helper: match a single-op "field read" — PushCurrent+GetField, GetField
-    // alone, or LoadIdent (var fallback to field).
-    #[inline]
-    fn field_read_prefix(ops: &[Opcode]) -> Option<(Arc<str>, usize)> {
-        match ops.first()? {
-            Opcode::LoadIdent(k) => Some((k.clone(), 1)),
-            Opcode::GetField(k) => Some((k.clone(), 1)),
-            Opcode::PushCurrent => {
-                if let Some(Opcode::GetField(k)) = ops.get(1) {
-                    Some((k.clone(), 2))
-                } else { None }
-            }
-            _ => None,
-        }
-    }
-    // Form 1: field <op> literal
-    if let Some((k, n)) = field_read_prefix(ops) {
-        if let (Some(lit_op), Some(cmp_op)) = (ops.get(n), ops.get(n + 1)) {
-            if ops.len() == n + 2 {
-                if let (Some(lit), Some(op)) = (trivial_literal(lit_op), cmp_opcode(cmp_op)) {
-                    return Some(FieldPred::FieldCmpLit(k, op, lit));
-                }
-            }
-        }
-        // Form 3: field1 <op> field2
-        if let Some((k2, n2_extra)) = ops.get(n).and_then(|_| {
-            let tail = &ops[n..];
-            field_read_prefix(tail).map(|(kk, nn)| (kk, nn))
-        }) {
-            if let Some(cmp_op) = ops.get(n + n2_extra) {
-                if ops.len() == n + n2_extra + 1 {
-                    if let Some(op) = cmp_opcode(cmp_op) {
-                        return Some(FieldPred::FieldCmpField(k, op, k2));
-                    }
-                }
-            }
-        }
-    }
-    // Form 2: literal <op> field (flip)
-    if let Some(lit) = ops.first().and_then(trivial_literal) {
-        if let Some((k, n2)) = field_read_prefix(&ops[1..]) {
-            if let Some(cmp_op) = ops.get(1 + n2) {
-                if ops.len() == 1 + n2 + 1 {
-                    if let Some(op) = cmp_opcode(cmp_op) {
-                        return Some(FieldPred::FieldCmpLit(k, flip_cmp(op), lit));
-                    }
-                }
-            }
-        }
-    }
-    None
-}
-
-/// Detect a predicate body that is a conjunction (AND-chain) of
-/// `field <cmp> lit` comparisons.  Returns the flat list of
-/// `(field, cmp_op, lit)` triples when the entire pred reduces to
-/// `f1 <o1> l1 AND f2 <o2> l2 AND ...`.
-///
-/// Pattern accepted (N ≥ 2):
-///   `[⟨field cmp lit⟩, AndOp(⟨field cmp lit⟩), AndOp(⟨field cmp lit⟩), …]`
-// detect_field_cmp_conjuncts / detect_field_eq_conjuncts removed
-// alongside the FilterFieldsAllEqLitCount / FilterFieldsAllCmpLitCount
-// opcodes (compound-AND filter+count fusion now lives in
-// pipeline.rs Sink::CountIf via and_chain_prog decoder).
-
-/// Compare two `Val`s using a binary comparison operator. Only implements the
-/// semantics needed for filter predicate fusion; falls back to cmp_vals for
-/// ordering comparisons.
-#[inline]
-fn cmp_val_binop(a: &Val, op: super::ast::BinOp, b: &Val) -> bool {
-    use super::ast::BinOp::*;
-    use std::cmp::Ordering;
-    match op {
-        Eq => crate::eval::util::vals_eq(a, b),
-        Neq => !crate::eval::util::vals_eq(a, b),
-        Lt | Lte | Gt | Gte => {
-            let ord = crate::eval::util::cmp_vals(a, b);
-            match op {
-                Lt  => ord == Ordering::Less,
-                Lte => ord != Ordering::Greater,
-                Gt  => ord == Ordering::Greater,
-                Gte => ord != Ordering::Less,
-                _ => unreachable!(),
-            }
-        }
-        _ => false,
-    }
-}
-
-/// `group_by(k)` where `k` is a bare field ident. Builds an object whose keys
-/// are the distinct field values stringified, mapping to arrays of items.
-/// Preserves first-seen key order.
-#[inline]
-fn lookup_field_cached<'a>(
-    m: &'a indexmap::IndexMap<Arc<str>, Val>,
-    k: &Arc<str>,
-    cached: &mut Option<usize>,
-) -> Option<&'a Val> {
-    if let Some(i) = *cached {
-        if let Some((ki, vi)) = m.get_index(i) {
-            if Arc::ptr_eq(ki, k) || ki.as_ref() == k.as_ref() {
-                return Some(vi);
-            }
-        }
-    }
-    match m.get_full(k.as_ref()) {
-        Some((i, _, v)) => { *cached = Some(i); Some(v) }
-        None => { *cached = None; None }
-    }
 }
 
 /// Initial capacity hint for filter `out` Vecs.
@@ -2504,91 +2343,11 @@ pub struct VM {
     root_hash_cache: Option<(usize, u64)>,
     /// Optimiser pass toggles.  Default: all on.
     config:        PassConfig,
-    /// Auto-index for repeated `find(field == lit)` lookups.
-    ///
-    /// Key = `(arr_ptr, field_key)`; each entry tracks a per-call hit
-    /// count and, once the threshold is crossed, an `Arc<HashMap<…>>`
-    /// mapping field-value → matching item indices.  First few calls
-    /// scan as before (cheap on small N); after the threshold the
-    /// FilterFieldEqLit opcode does an O(1) hash lookup instead.
-    /// Invalidation is automatic: a new `Arc::ptr` produces a fresh
-    /// entry; old entries age out via LRU when the table exceeds
-    /// `index_cap`.
-    index_cache:   AutoIndexCache,
 }
 
-/// Cap for the auto-index hash table; entries beyond this evict
-/// LRU-style.
-const AUTO_INDEX_CAP:        usize = 64;
-/// Per-`(arr, field)` invocations before building a hash index.
-/// Below this threshold the linear scan path runs.
-const AUTO_INDEX_THRESHOLD:  u32   = 4;
-
-#[derive(Default)]
-pub(crate) struct AutoIndexCache {
-    entries: HashMap<(usize, Arc<str>), AutoIndexEntry>,
-    lru:     std::collections::VecDeque<(usize, Arc<str>)>,
-}
-
-struct AutoIndexEntry {
-    /// Number of FilterFieldEqLit invocations seen for this
-    /// `(arr_ptr, field_key)`.  Triggers index build at threshold.
-    hits:  u32,
-    /// Built index — `Some` after threshold; `None` while still
-    /// scanning.  Maps stringified key value to matching item indices.
-    index: Option<Arc<HashMap<String, smallvec::SmallVec<[u32; 1]>>>>,
-}
-
-impl AutoIndexCache {
-    fn new() -> Self {
-        Self {
-            entries: HashMap::with_capacity(AUTO_INDEX_CAP),
-            lru:     std::collections::VecDeque::with_capacity(AUTO_INDEX_CAP),
-        }
-    }
-
-    fn evict_if_over_cap(&mut self) {
-        while self.entries.len() > AUTO_INDEX_CAP {
-            if let Some(k) = self.lru.pop_front() {
-                self.entries.remove(&k);
-            } else { break; }
-        }
-    }
-
-    /// Touch an entry — bump its LRU position and return the entry.
-    /// Inserts a fresh `hits=1, index=None` entry on miss.
-    fn touch(&mut self, key: (usize, Arc<str>)) -> &mut AutoIndexEntry {
-        if !self.entries.contains_key(&key) {
-            self.lru.push_back(key.clone());
-            self.entries.insert(key.clone(), AutoIndexEntry { hits: 0, index: None });
-            self.evict_if_over_cap();
-        } else {
-            // Move to back of LRU.
-            if let Some(pos) = self.lru.iter().position(|k| k == &key) {
-                let k = self.lru.remove(pos).unwrap();
-                self.lru.push_back(k);
-            }
-        }
-        self.entries.get_mut(&key).unwrap()
-    }
-}
-
-/// Stable string-form of a `Val` used as auto-index key.
-/// Mirrors `val_to_key` in `eval/util.rs`; we duplicate here to avoid a
-/// hot-path Arc allocation that `val_to_key` does.
-fn auto_index_key(v: &Val) -> Option<String> {
-    match v {
-        Val::Str(s)      => Some(s.as_ref().to_string()),
-        Val::StrSlice(r) => Some(r.as_str().to_string()),
-        Val::Int(n)      => Some(n.to_string()),
-        Val::Float(f)    => Some(f.to_string()),
-        Val::Bool(b)     => Some(b.to_string()),
-        Val::Null        => Some("null".to_string()),
-        // Composite vals as filter literals are uncommon; defer indexing
-        // when we'd have to walk a structure to key it.
-        _ => None,
-    }
-}
+// AutoIndexCache + auto_index_key deleted in Tier 3 — they were only used
+// by the now-removed FilterFieldEqLit opcode.  Pipeline IR Stage::Filter
+// runs predicate without per-VM auto-index state.
 
 impl Default for VM {
     fn default() -> Self { Self::new() }
@@ -2608,7 +2367,6 @@ impl VM {
             doc_hash:      0,
             root_hash_cache: None,
             config:        PassConfig::default(),
-            index_cache:   AutoIndexCache::new(),
         }
     }
 
@@ -4792,21 +4550,8 @@ fn materialise_find_scan_spans(
     (val, inner)
 }
 
-/// Convert a `Val` literal to its canonical JSON byte encoding — the
-/// same form `find_direct_field` produces when it locates a scalar value
-/// inside an object.  Returns `None` for non-scalar / non-canonical values.
-#[inline]
-fn val_to_canonical_lit_bytes(v: &Val) -> Option<Vec<u8>> {
-    match v {
-        Val::Int(n)   => Some(n.to_string().into_bytes()),
-        Val::Bool(b)  => Some(if *b { b"true".to_vec() } else { b"false".to_vec() }),
-        Val::Null     => Some(b"null".to_vec()),
-        Val::Str(s)   => serde_json::to_vec(
-            &serde_json::Value::String(s.to_string())
-        ).ok(),
-        _ => None,
-    }
-}
+// val_to_canonical_lit_bytes deleted in Tier 3 — only consumer was the
+// FilterFieldEqLit byte-scan refiner loop, removed alongside the opcode.
 
 #[cold]
 #[inline(never)]
