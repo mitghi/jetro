@@ -66,6 +66,7 @@ pub mod scan;
 pub mod strref;
 pub mod pipeline;
 pub mod bytescan;
+pub mod composed;
 
 #[cfg(test)]
 mod tests;
