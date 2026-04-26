@@ -2138,6 +2138,114 @@ impl<R> crate::unified::Stage<R> for Skip {
     }
 }
 
+// Sink dedup: composed.rs's CountSink/SumSink/MinSink/MaxSink/AvgSink/
+// FirstSink/LastSink/CollectSink also impl `unified::Sink` so the
+// borrow runner reuses the SAME unit-structs rather than maintaining
+// parallel Sink definitions.
+
+impl crate::unified::Sink for CountSink {
+    type Acc<'a> = i64;
+    #[inline] fn init<'a>() -> Self::Acc<'a> { 0 }
+    #[inline] fn fold<'a, R: crate::row::Row<'a>>(_: &'a crate::eval::borrowed::Arena, acc: Self::Acc<'a>, _: R) -> Self::Acc<'a> { acc + 1 }
+    #[inline] fn finalise<'a>(_: &'a crate::eval::borrowed::Arena, acc: Self::Acc<'a>) -> crate::eval::borrowed::Val<'a> {
+        crate::eval::borrowed::Val::Int(acc)
+    }
+}
+
+impl crate::unified::Sink for SumSink {
+    type Acc<'a> = (i64, f64, bool);
+    #[inline] fn init<'a>() -> Self::Acc<'a> { (0, 0.0, false) }
+    fn fold<'a, R: crate::row::Row<'a>>(_: &'a crate::eval::borrowed::Arena, mut acc: Self::Acc<'a>, v: R) -> Self::Acc<'a> {
+        if let Some(n) = v.as_int() { acc.0 = acc.0.wrapping_add(n); return acc; }
+        if let Some(f) = v.as_float() { acc.1 += f; acc.2 = true; return acc; }
+        if let Some(b) = v.as_bool() { acc.0 = acc.0.wrapping_add(b as i64); return acc; }
+        acc
+    }
+    fn finalise<'a>(_: &'a crate::eval::borrowed::Arena, acc: Self::Acc<'a>) -> crate::eval::borrowed::Val<'a> {
+        if acc.2 { crate::eval::borrowed::Val::Float(acc.0 as f64 + acc.1) }
+        else { crate::eval::borrowed::Val::Int(acc.0) }
+    }
+}
+
+impl crate::unified::Sink for MinSink {
+    type Acc<'a> = Option<f64>;
+    #[inline] fn init<'a>() -> Self::Acc<'a> { None }
+    fn fold<'a, R: crate::row::Row<'a>>(_: &'a crate::eval::borrowed::Arena, acc: Self::Acc<'a>, v: R) -> Self::Acc<'a> {
+        let n = match v.as_float() { Some(f) => f, None => return acc };
+        Some(match acc { Some(c) => c.min(n), None => n })
+    }
+    fn finalise<'a>(_: &'a crate::eval::borrowed::Arena, acc: Self::Acc<'a>) -> crate::eval::borrowed::Val<'a> {
+        match acc {
+            Some(f) if f.fract() == 0.0 && f.abs() < (i64::MAX as f64) => crate::eval::borrowed::Val::Int(f as i64),
+            Some(f) => crate::eval::borrowed::Val::Float(f),
+            None => crate::eval::borrowed::Val::Null,
+        }
+    }
+}
+
+impl crate::unified::Sink for MaxSink {
+    type Acc<'a> = Option<f64>;
+    #[inline] fn init<'a>() -> Self::Acc<'a> { None }
+    fn fold<'a, R: crate::row::Row<'a>>(_: &'a crate::eval::borrowed::Arena, acc: Self::Acc<'a>, v: R) -> Self::Acc<'a> {
+        let n = match v.as_float() { Some(f) => f, None => return acc };
+        Some(match acc { Some(c) => c.max(n), None => n })
+    }
+    fn finalise<'a>(_: &'a crate::eval::borrowed::Arena, acc: Self::Acc<'a>) -> crate::eval::borrowed::Val<'a> {
+        match acc {
+            Some(f) if f.fract() == 0.0 && f.abs() < (i64::MAX as f64) => crate::eval::borrowed::Val::Int(f as i64),
+            Some(f) => crate::eval::borrowed::Val::Float(f),
+            None => crate::eval::borrowed::Val::Null,
+        }
+    }
+}
+
+impl crate::unified::Sink for AvgSink {
+    type Acc<'a> = (f64, usize);
+    #[inline] fn init<'a>() -> Self::Acc<'a> { (0.0, 0) }
+    fn fold<'a, R: crate::row::Row<'a>>(_: &'a crate::eval::borrowed::Arena, mut acc: Self::Acc<'a>, v: R) -> Self::Acc<'a> {
+        if let Some(n) = v.as_float() { acc.0 += n; acc.1 += 1; }
+        acc
+    }
+    fn finalise<'a>(_: &'a crate::eval::borrowed::Arena, acc: Self::Acc<'a>) -> crate::eval::borrowed::Val<'a> {
+        if acc.1 == 0 { crate::eval::borrowed::Val::Null }
+        else { crate::eval::borrowed::Val::Float(acc.0 / acc.1 as f64) }
+    }
+}
+
+impl crate::unified::Sink for FirstSink {
+    type Acc<'a> = Option<crate::eval::borrowed::Val<'a>>;
+    #[inline] fn init<'a>() -> Self::Acc<'a> { None }
+    #[inline] fn fold<'a, R: crate::row::Row<'a>>(arena: &'a crate::eval::borrowed::Arena, acc: Self::Acc<'a>, v: R) -> Self::Acc<'a> {
+        if acc.is_some() { acc } else { Some(v.materialise(arena)) }
+    }
+    #[inline] fn finalise<'a>(_: &'a crate::eval::borrowed::Arena, acc: Self::Acc<'a>) -> crate::eval::borrowed::Val<'a> {
+        acc.unwrap_or(crate::eval::borrowed::Val::Null)
+    }
+}
+
+impl crate::unified::Sink for LastSink {
+    type Acc<'a> = Option<crate::eval::borrowed::Val<'a>>;
+    #[inline] fn init<'a>() -> Self::Acc<'a> { None }
+    #[inline] fn fold<'a, R: crate::row::Row<'a>>(arena: &'a crate::eval::borrowed::Arena, _: Self::Acc<'a>, v: R) -> Self::Acc<'a> {
+        Some(v.materialise(arena))
+    }
+    #[inline] fn finalise<'a>(_: &'a crate::eval::borrowed::Arena, acc: Self::Acc<'a>) -> crate::eval::borrowed::Val<'a> {
+        acc.unwrap_or(crate::eval::borrowed::Val::Null)
+    }
+}
+
+impl crate::unified::Sink for CollectSink {
+    type Acc<'a> = Vec<crate::eval::borrowed::Val<'a>>;
+    #[inline] fn init<'a>() -> Self::Acc<'a> { Vec::new() }
+    #[inline] fn fold<'a, R: crate::row::Row<'a>>(arena: &'a crate::eval::borrowed::Arena, mut acc: Self::Acc<'a>, v: R) -> Self::Acc<'a> {
+        acc.push(v.materialise(arena)); acc
+    }
+    #[inline] fn finalise<'a>(arena: &'a crate::eval::borrowed::Arena, acc: Self::Acc<'a>) -> crate::eval::borrowed::Val<'a> {
+        let slice = arena.alloc_slice_fill_iter(acc.into_iter());
+        crate::eval::borrowed::Val::Arr(&*slice)
+    }
+}
+
 impl Take {
     pub fn new(n: usize) -> Self { Self { remaining: std::cell::Cell::new(n) } }
 }

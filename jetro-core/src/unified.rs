@@ -148,114 +148,15 @@ pub trait Sink {
     fn finalise<'a>(arena: &'a Arena, acc: Self::Acc<'a>) -> BVal<'a>;
 }
 
-// ── Sinks ──────────────────────────────────────────────────────────
-
-pub struct CountSink;
-impl Sink for CountSink {
-    type Acc<'a> = i64;
-    #[inline] fn init<'a>() -> Self::Acc<'a> { 0 }
-    #[inline] fn fold<'a, R: Row<'a>>(_: &'a Arena, acc: Self::Acc<'a>, _: R) -> Self::Acc<'a> { acc + 1 }
-    #[inline] fn finalise<'a>(_: &'a Arena, acc: Self::Acc<'a>) -> BVal<'a> { BVal::Int(acc) }
-}
-
-pub struct SumSink;
-impl Sink for SumSink {
-    type Acc<'a> = (i64, f64, bool);
-    #[inline] fn init<'a>() -> Self::Acc<'a> { (0, 0.0, false) }
-    fn fold<'a, R: Row<'a>>(_: &'a Arena, mut acc: Self::Acc<'a>, v: R) -> Self::Acc<'a> {
-        if let Some(n) = v.as_int()   { acc.0 = acc.0.wrapping_add(n); return acc; }
-        if let Some(f) = v.as_float() { acc.1 += f; acc.2 = true; return acc; }
-        if let Some(b) = v.as_bool()  { acc.0 = acc.0.wrapping_add(b as i64); return acc; }
-        acc
-    }
-    fn finalise<'a>(_: &'a Arena, acc: Self::Acc<'a>) -> BVal<'a> {
-        if acc.2 { BVal::Float(acc.0 as f64 + acc.1) } else { BVal::Int(acc.0) }
-    }
-}
-
-pub struct MinSink;
-impl Sink for MinSink {
-    type Acc<'a> = Option<f64>;
-    #[inline] fn init<'a>() -> Self::Acc<'a> { None }
-    fn fold<'a, R: Row<'a>>(_: &'a Arena, acc: Self::Acc<'a>, v: R) -> Self::Acc<'a> {
-        let n = match v.as_float() { Some(f) => f, None => return acc };
-        Some(match acc { Some(c) => c.min(n), None => n })
-    }
-    fn finalise<'a>(_: &'a Arena, acc: Self::Acc<'a>) -> BVal<'a> {
-        match acc {
-            Some(f) if f.fract() == 0.0 && f.abs() < (i64::MAX as f64) => BVal::Int(f as i64),
-            Some(f) => BVal::Float(f),
-            None => BVal::Null,
-        }
-    }
-}
-
-pub struct MaxSink;
-impl Sink for MaxSink {
-    type Acc<'a> = Option<f64>;
-    #[inline] fn init<'a>() -> Self::Acc<'a> { None }
-    fn fold<'a, R: Row<'a>>(_: &'a Arena, acc: Self::Acc<'a>, v: R) -> Self::Acc<'a> {
-        let n = match v.as_float() { Some(f) => f, None => return acc };
-        Some(match acc { Some(c) => c.max(n), None => n })
-    }
-    fn finalise<'a>(_: &'a Arena, acc: Self::Acc<'a>) -> BVal<'a> {
-        match acc {
-            Some(f) if f.fract() == 0.0 && f.abs() < (i64::MAX as f64) => BVal::Int(f as i64),
-            Some(f) => BVal::Float(f),
-            None => BVal::Null,
-        }
-    }
-}
-
-pub struct AvgSink;
-impl Sink for AvgSink {
-    type Acc<'a> = (f64, usize);
-    #[inline] fn init<'a>() -> Self::Acc<'a> { (0.0, 0) }
-    fn fold<'a, R: Row<'a>>(_: &'a Arena, mut acc: Self::Acc<'a>, v: R) -> Self::Acc<'a> {
-        if let Some(n) = v.as_float() { acc.0 += n; acc.1 += 1; }
-        acc
-    }
-    fn finalise<'a>(_: &'a Arena, acc: Self::Acc<'a>) -> BVal<'a> {
-        if acc.1 == 0 { BVal::Null } else { BVal::Float(acc.0 / acc.1 as f64) }
-    }
-}
-
-pub struct FirstSink;
-impl Sink for FirstSink {
-    type Acc<'a> = Option<BVal<'a>>;
-    #[inline] fn init<'a>() -> Self::Acc<'a> { None }
-    #[inline] fn fold<'a, R: Row<'a>>(arena: &'a Arena, acc: Self::Acc<'a>, v: R) -> Self::Acc<'a> {
-        if acc.is_some() { acc } else { Some(v.materialise(arena)) }
-    }
-    #[inline] fn finalise<'a>(_: &'a Arena, acc: Self::Acc<'a>) -> BVal<'a> {
-        acc.unwrap_or(BVal::Null)
-    }
-}
-
-pub struct LastSink;
-impl Sink for LastSink {
-    type Acc<'a> = Option<BVal<'a>>;
-    #[inline] fn init<'a>() -> Self::Acc<'a> { None }
-    #[inline] fn fold<'a, R: Row<'a>>(arena: &'a Arena, _: Self::Acc<'a>, v: R) -> Self::Acc<'a> {
-        Some(v.materialise(arena))
-    }
-    #[inline] fn finalise<'a>(_: &'a Arena, acc: Self::Acc<'a>) -> BVal<'a> {
-        acc.unwrap_or(BVal::Null)
-    }
-}
-
-pub struct CollectSink;
-impl Sink for CollectSink {
-    type Acc<'a> = Vec<BVal<'a>>;
-    #[inline] fn init<'a>() -> Self::Acc<'a> { Vec::new() }
-    #[inline] fn fold<'a, R: Row<'a>>(arena: &'a Arena, mut acc: Self::Acc<'a>, v: R) -> Self::Acc<'a> {
-        acc.push(v.materialise(arena)); acc
-    }
-    #[inline] fn finalise<'a>(arena: &'a Arena, acc: Self::Acc<'a>) -> BVal<'a> {
-        let slice = arena.alloc_slice_fill_iter(acc.into_iter());
-        BVal::Arr(&*slice)
-    }
-}
+// Sink dedup: composed.rs's CountSink/SumSink/MinSink/MaxSink/AvgSink/
+// FirstSink/LastSink/CollectSink each carry TWO trait impls — owned
+// `composed::Sink` + this module's substrate-generic `Sink`.  Re-export
+// the unit-structs so users of the borrow runner don't need to reach
+// into composed:: directly.
+pub use crate::composed::{
+    CountSink, SumSink, MinSink, MaxSink, AvgSink,
+    FirstSink, LastSink, CollectSink,
+};
 
 // ── Outer loop ──────────────────────────────────────────────────────
 
