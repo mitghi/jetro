@@ -51,7 +51,11 @@ use crate::eval::borrowed::{Arena, Val as BVal};
 ///
 /// `Self::materialise(arena)` returns a value tied to that arena;
 /// used by Sink::Collect / First / Last regardless of substrate.
-pub trait Row<'a>: Copy {
+pub trait Row<'a>: Copy + 'a {
+    /// Iterator over array children (Phase 2 — used by FlatMap).
+    /// Lifetime tied to the source data the row borrows from.
+    type ArrayIter: Iterator<Item = Self> + 'a;
+
     fn get_field(&self, key: &str) -> Option<Self>;
     fn walk_path(&self, chain: &[&str]) -> Option<Self>;
     fn as_int(&self) -> Option<i64>;
@@ -59,6 +63,9 @@ pub trait Row<'a>: Copy {
     fn as_str(&self) -> Option<&'a str>;
     fn as_bool(&self) -> Option<bool>;
     fn is_null(&self) -> bool;
+    /// Iterate the row's children when it points at an Array node.
+    /// `None` when the row is a non-Array.
+    fn array_children(&self) -> Option<Self::ArrayIter>;
     /// Convert this row's subtree into an owned-shape `BVal<'a>`
     /// allocated in `arena`.  For tape-backed rows this walks the
     /// subtree once.  For arena-backed rows this is a 16-byte copy
@@ -69,6 +76,16 @@ pub trait Row<'a>: Copy {
 // ── Impl: borrowed::Val<'a> ─────────────────────────────────────────
 
 impl<'a> Row<'a> for BVal<'a> {
+    type ArrayIter = std::iter::Copied<std::slice::Iter<'a, BVal<'a>>>;
+
+    #[inline]
+    fn array_children(&self) -> Option<Self::ArrayIter> {
+        match self {
+            BVal::Arr(items) => Some(items.iter().copied()),
+            _ => None,
+        }
+    }
+
     #[inline]
     fn get_field(&self, key: &str) -> Option<Self> { BVal::get_field(self, key) }
 
@@ -99,7 +116,41 @@ impl<'a> Row<'a> for BVal<'a> {
 // ── Impl: composed_tape::TapeRow<'a> ────────────────────────────────
 
 #[cfg(feature = "simd-json")]
+pub struct TapeArrayIter<'a> {
+    tape: &'a crate::strref::TapeData,
+    j: usize,
+    remaining: usize,
+}
+
+#[cfg(feature = "simd-json")]
+impl<'a> Iterator for TapeArrayIter<'a> {
+    type Item = crate::composed_tape::TapeRow<'a>;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 { return None; }
+        let cur = crate::composed_tape::TapeRow::new(self.tape, self.j as u32);
+        self.j += self.tape.span(self.j);
+        self.remaining -= 1;
+        Some(cur)
+    }
+}
+
+#[cfg(feature = "simd-json")]
 impl<'a> Row<'a> for crate::composed_tape::TapeRow<'a> {
+    type ArrayIter = TapeArrayIter<'a>;
+
+    #[inline]
+    fn array_children(&self) -> Option<Self::ArrayIter> {
+        let i = self.idx as usize;
+        match self.tape.nodes[i] {
+            crate::strref::TapeNode::Array { len, .. } => Some(TapeArrayIter {
+                tape: self.tape,
+                j: i + 1,
+                remaining: len as usize,
+            }),
+            _ => None,
+        }
+    }
+
     #[inline]
     fn get_field(&self, key: &str) -> Option<Self> { Self::get_field(self, key) }
 

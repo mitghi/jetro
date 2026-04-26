@@ -251,38 +251,39 @@ fn composed_borrow_phase2_sinks_under_budget() {
 
 #[test]
 fn composed_tape_phase1_under_budget() {
-    use jetro_core::composed_tape::{
-        FilterT, MapFieldChainT, TakeT, SkipT,
-        SumSinkT, MinSinkT, MaxSinkT, AvgSinkT, CountSinkT,
-        TapeRow, run_pipeline_t,
-    };
+    use jetro_core::composed_tape::TapeRow;
     use jetro_core::eval::borrowed::Arena;
+    use jetro_core::row::Row;
     use jetro_core::strref::TapeData;
+    use jetro_core::unified::{
+        Composed, Filter, MapFieldChain,
+        SumSink, MinSink, MaxSink, AvgSink, CountSink, Identity,
+        run_pipeline,
+    };
     let bytes = make_doc();
     let tape = TapeData::parse(bytes).unwrap();
-    let arr_idx = jetro_core::strref::tape_walk_field_chain(&tape, &["orders"]).unwrap() as u32;
+    let arr_idx = jetro_core::strref::tape_walk_field_chain(&tape, &["orders"]).unwrap();
+    let arr_row = TapeRow::new(&tape, arr_idx as u32);
 
-    // Filter+Map(total)+Sum across 5000 rows.
     let med = time_med(N_ITERS, || {
         let arena = Arena::new();
-        let stages = jetro_core::composed_tape::ComposedT {
-            a: FilterT { pred: |v: &TapeRow<'_>| {
+        let stages = Composed::<TapeRow<'_>, _, _>::new(
+            Filter::<TapeRow<'_>, _>::new(|v: &TapeRow<'_>| {
                 v.get_field("status")
                     .and_then(|c| c.as_str())
                     .map_or(false, |s| s == "shipped")
-            }},
-            b: jetro_core::composed_tape::MapFieldT { field: std::sync::Arc::from("total") },
-        };
-        let out = run_pipeline_t::<SumSinkT>(&arena, &tape, arr_idx, &stages);
+            }),
+            jetro_core::unified::MapField::<TapeRow<'_>>::new(std::sync::Arc::from("total")),
+        );
+        let iter = arr_row.array_children().unwrap();
+        let out = run_pipeline::<TapeRow<'_>, SumSink>(&arena, iter, &stages);
         std::hint::black_box(out);
-        // Also Min/Max/Avg/Count over MapFieldChain.
-        let chain = MapFieldChainT { chain: vec![std::sync::Arc::from("total")] };
-        let mn = run_pipeline_t::<MinSinkT>(&arena, &tape, arr_idx, &chain);
-        let mx = run_pipeline_t::<MaxSinkT>(&arena, &tape, arr_idx, &chain);
-        let av = run_pipeline_t::<AvgSinkT>(&arena, &tape, arr_idx, &chain);
-        let _ = SkipT::new(0);  // ensure exposed
-        let _ = TakeT::new(usize::MAX);
-        let _ = run_pipeline_t::<CountSinkT>(&arena, &tape, arr_idx, &jetro_core::composed_tape::IdentityT);
+        let chain = MapFieldChain::<TapeRow<'_>>::new(vec![std::sync::Arc::from("total")]);
+        let mn = run_pipeline::<TapeRow<'_>, MinSink>(&arena, arr_row.array_children().unwrap(), &chain);
+        let mx = run_pipeline::<TapeRow<'_>, MaxSink>(&arena, arr_row.array_children().unwrap(), &chain);
+        let av = run_pipeline::<TapeRow<'_>, AvgSink>(&arena, arr_row.array_children().unwrap(), &chain);
+        let id: Identity<TapeRow<'_>> = Identity::new();
+        let _ = run_pipeline::<TapeRow<'_>, CountSink>(&arena, arr_row.array_children().unwrap(), &id);
         std::hint::black_box((mn, mx, av));
     });
     // 5000 rows × 5 passes × ~50 ns/row ≈ 1250 µs.  Budget loose (3000 µs)

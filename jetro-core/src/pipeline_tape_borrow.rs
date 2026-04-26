@@ -1,22 +1,24 @@
-//! Lower a Pipeline IR to the borrowed `composed_tape` substrate.
+//! Lower a Pipeline IR to the UNIFIED borrowed substrate over
+//! `composed_tape::TapeRow<'a>`.
 //!
-//! Phase 3 wire-in for tape-source borrowed pipeline.  Runs AFTER
-//! `bytescan::try_run_borrow` declines and uses the same lazy_tape
-//! that owned `collect_val` would consume — no re-parse, no Val tree
-//! build.  Closes the regression gap that pipeline_borrow.rs had:
-//! pipeline_borrow does a full from_json_simd_arena (~3.7 ms); this
-//! module reuses the cached TapeData (~0 ms after first call).
+//! Phase 3 migration: this module previously consumed `composed_tape`'s
+//! parallel TapeStageT + TapeSinkT.  It now consumes `unified::Stage<R>`
+//! + `unified::Sink` directly, with R = `TapeRow<'a>`.  Same Stage code
+//! is shared with the (future) BVal-substrate lowering; future
+//! sessions delete pipeline_borrow.rs + composed_borrow.rs once the
+//! BVal lowering is also migrated.
 //!
-//! ## Coverage today (Phase 3 initial wire)
+//! Wired into `Jetro::collect_val_borrow` after bytescan_borrow declines.
+//! Reuses `lazy_tape()` so no re-parse cost.
+//!
+//! ## Coverage today
 //!
 //! Source:    Source::FieldChain
 //! Stages:    Filter(FieldCmpLit/FieldChainCmpLit/CurrentCmpLit/ConstBool)
-//!            + Map(FieldRead/FieldChain) + Take(n) + Skip(n)
+//!            + Map(FieldRead/FieldChain) + Take(n) + Skip(n) +
+//!            FlatMap(FieldRead) (anywhere in chain — unified Composed
+//!            handles Many propagation; no special split required).
 //! Sinks:     Count / Numeric(Sum/Min/Max/Avg) / First / Last / Collect
-//!
-//! Out of scope (returns None — caller falls back to owned):
-//!   FlatMap / Sort / UniqueBy / Reverse / GroupBy / Map(ObjProject) /
-//!   Map(FString) / Map(Arith) / Map(Generic) / lambdas.
 
 #![cfg(feature = "simd-json")]
 
@@ -26,59 +28,68 @@ use crate::eval::borrowed::{Arena, Val as BVal};
 use crate::pipeline::{
     Pipeline, Source, Sink, Stage, BodyKernel, NumOp,
 };
-use crate::composed_tape::{
-    TapeStageT, IdentityT, ComposedT, FilterT, MapFieldT, MapFieldChainT,
-    FlatMapFieldT, TakeT, SkipT,
-    CountSinkT, SumSinkT, MinSinkT, MaxSinkT, AvgSinkT,
-    FirstSinkT, LastSinkT, CollectSinkT,
-    TapeRow, run_pipeline_t, run_pipeline_t_with_inner,
-};
+use crate::row::Row;
+use crate::composed_tape::TapeRow;
 use crate::strref::TapeData;
+use crate::unified::{
+    Stage as USt,
+    Identity as UIdentity,
+    Composed as UComposed,
+    Filter as UFilter,
+    MapField as UMapField,
+    MapFieldChain as UMapFieldChain,
+    FlatMapField as UFlatMapField,
+    Take as UTake,
+    Skip as USkip,
+    CountSink, SumSink, MinSink, MaxSink, AvgSink,
+    FirstSink, LastSink, CollectSink,
+    run_pipeline as urun,
+};
 use std::sync::Arc;
 
 #[derive(Copy, Clone)]
-pub enum TapeSinkKind {
-    Count,
-    Sum, Min, Max, Avg,
-    First, Last,
-    Collect,
+pub enum SinkKind {
+    Count, Sum, Min, Max, Avg, First, Last, Collect,
 }
 
-impl TapeSinkKind {
+impl SinkKind {
     fn from_pipeline_sink(s: &Sink) -> Option<Self> {
         Some(match s {
-            Sink::Count               => TapeSinkKind::Count,
-            Sink::Numeric(NumOp::Sum) => TapeSinkKind::Sum,
-            Sink::Numeric(NumOp::Min) => TapeSinkKind::Min,
-            Sink::Numeric(NumOp::Max) => TapeSinkKind::Max,
-            Sink::Numeric(NumOp::Avg) => TapeSinkKind::Avg,
-            Sink::First               => TapeSinkKind::First,
-            Sink::Last                => TapeSinkKind::Last,
-            Sink::Collect             => TapeSinkKind::Collect,
+            Sink::Count               => SinkKind::Count,
+            Sink::Numeric(NumOp::Sum) => SinkKind::Sum,
+            Sink::Numeric(NumOp::Min) => SinkKind::Min,
+            Sink::Numeric(NumOp::Max) => SinkKind::Max,
+            Sink::Numeric(NumOp::Avg) => SinkKind::Avg,
+            Sink::First               => SinkKind::First,
+            Sink::Last                => SinkKind::Last,
+            Sink::Collect             => SinkKind::Collect,
         })
     }
 }
 
-fn lower_stages(stages: &[Stage], kernels: &[BodyKernel]) -> Option<Box<dyn TapeStageT>> {
-    let mut chain: Box<dyn TapeStageT> = Box::new(IdentityT);
+fn lower_stages<'a>(
+    stages: &[Stage],
+    kernels: &[BodyKernel],
+) -> Option<Box<dyn USt<TapeRow<'a>> + 'a>> {
+    let mut chain: Box<dyn USt<TapeRow<'a>> + 'a> = Box::new(UIdentity::<TapeRow<'a>>::new());
     for (st, k) in stages.iter().zip(kernels.iter()) {
-        let next: Box<dyn TapeStageT> = lower_stage(st, k)?;
-        chain = Box::new(ComposedT { a: chain, b: next });
+        let next: Box<dyn USt<TapeRow<'a>> + 'a> = lower_stage(st, k)?;
+        chain = Box::new(UComposed::<TapeRow<'a>, _, _>::new(chain, next));
     }
     Some(chain)
 }
 
-fn lower_stage(stage: &Stage, kernel: &BodyKernel) -> Option<Box<dyn TapeStageT>> {
+fn lower_stage<'a>(stage: &Stage, kernel: &BodyKernel) -> Option<Box<dyn USt<TapeRow<'a>> + 'a>> {
     match (stage, kernel) {
         (Stage::FlatMap(_), BodyKernel::FieldRead(name)) =>
-            Some(Box::new(FlatMapFieldT { field: Arc::clone(name) })),
-        (Stage::Take(n), _) => Some(Box::new(TakeT::new(*n))),
-        (Stage::Skip(n), _) => Some(Box::new(SkipT::new(*n))),
+            Some(Box::new(UFlatMapField::<TapeRow<'a>>::new(Arc::clone(name)))),
+        (Stage::Take(n), _) => Some(Box::new(UTake::<TapeRow<'a>>::new(*n))),
+        (Stage::Skip(n), _) => Some(Box::new(USkip::<TapeRow<'a>>::new(*n))),
 
         (Stage::Map(_), BodyKernel::FieldRead(name)) =>
-            Some(Box::new(MapFieldT { field: Arc::clone(name) })),
+            Some(Box::new(UMapField::<TapeRow<'a>>::new(Arc::clone(name)))),
         (Stage::Map(_), BodyKernel::FieldChain(keys)) =>
-            Some(Box::new(MapFieldChainT { chain: keys.iter().cloned().collect() })),
+            Some(Box::new(UMapFieldChain::<TapeRow<'a>>::new(keys.iter().cloned().collect()))),
 
         (Stage::Filter(_), BodyKernel::FieldCmpLit(field, op, lit)) => {
             let f = Arc::clone(field);
@@ -88,7 +99,7 @@ fn lower_stage(stage: &Stage, kernel: &BodyKernel) -> Option<Box<dyn TapeStageT>
                 let val = match v.get_field(&f) { Some(x) => x, None => return false };
                 trow_cmp_owned(&val, &op, &owned_lit)
             };
-            Some(Box::new(FilterT { pred }))
+            Some(Box::new(UFilter::<TapeRow<'a>, _>::new(pred)))
         }
         (Stage::Filter(_), BodyKernel::FieldChainCmpLit(keys, op, lit)) => {
             let chain: Vec<Arc<str>> = keys.iter().cloned().collect();
@@ -99,7 +110,7 @@ fn lower_stage(stage: &Stage, kernel: &BodyKernel) -> Option<Box<dyn TapeStageT>
                 let val = match v.walk_path(&chain_refs) { Some(x) => x, None => return false };
                 trow_cmp_owned(&val, &op, &owned_lit)
             };
-            Some(Box::new(FilterT { pred }))
+            Some(Box::new(UFilter::<TapeRow<'a>, _>::new(pred)))
         }
         (Stage::Filter(_), BodyKernel::CurrentCmpLit(op, lit)) => {
             let owned_lit = lit.clone();
@@ -107,12 +118,12 @@ fn lower_stage(stage: &Stage, kernel: &BodyKernel) -> Option<Box<dyn TapeStageT>
             let pred = move |v: &TapeRow<'_>| -> bool {
                 trow_cmp_owned(v, &op, &owned_lit)
             };
-            Some(Box::new(FilterT { pred }))
+            Some(Box::new(UFilter::<TapeRow<'a>, _>::new(pred)))
         }
         (Stage::Filter(_), BodyKernel::ConstBool(b)) => {
             let b = *b;
             let pred = move |_: &TapeRow<'_>| -> bool { b };
-            Some(Box::new(FilterT { pred }))
+            Some(Box::new(UFilter::<TapeRow<'a>, _>::new(pred)))
         }
 
         _ => None,
@@ -174,28 +185,26 @@ fn apply_cmp_s(a: &str, b: &str, op: &BinOp) -> bool {
     }
 }
 
-fn dispatch_sink<'a>(
+fn dispatch_sink<'a, I: Iterator<Item = TapeRow<'a>>>(
     arena: &'a Arena,
-    tape: &'a TapeData,
-    arr_idx: u32,
-    stages: &dyn TapeStageT,
-    kind: TapeSinkKind,
+    rows: I,
+    stages: &dyn USt<TapeRow<'a>>,
+    kind: SinkKind,
 ) -> BVal<'a> {
     match kind {
-        TapeSinkKind::Count   => run_pipeline_t::<CountSinkT>(arena, tape, arr_idx, stages),
-        TapeSinkKind::Sum     => run_pipeline_t::<SumSinkT>(arena, tape, arr_idx, stages),
-        TapeSinkKind::Min     => run_pipeline_t::<MinSinkT>(arena, tape, arr_idx, stages),
-        TapeSinkKind::Max     => run_pipeline_t::<MaxSinkT>(arena, tape, arr_idx, stages),
-        TapeSinkKind::Avg     => run_pipeline_t::<AvgSinkT>(arena, tape, arr_idx, stages),
-        TapeSinkKind::First   => run_pipeline_t::<FirstSinkT>(arena, tape, arr_idx, stages),
-        TapeSinkKind::Last    => run_pipeline_t::<LastSinkT>(arena, tape, arr_idx, stages),
-        TapeSinkKind::Collect => run_pipeline_t::<CollectSinkT>(arena, tape, arr_idx, stages),
+        SinkKind::Count   => urun::<TapeRow<'a>, CountSink>(arena, rows, stages),
+        SinkKind::Sum     => urun::<TapeRow<'a>, SumSink>(arena, rows, stages),
+        SinkKind::Min     => urun::<TapeRow<'a>, MinSink>(arena, rows, stages),
+        SinkKind::Max     => urun::<TapeRow<'a>, MaxSink>(arena, rows, stages),
+        SinkKind::Avg     => urun::<TapeRow<'a>, AvgSink>(arena, rows, stages),
+        SinkKind::First   => urun::<TapeRow<'a>, FirstSink>(arena, rows, stages),
+        SinkKind::Last    => urun::<TapeRow<'a>, LastSink>(arena, rows, stages),
+        SinkKind::Collect => urun::<TapeRow<'a>, CollectSink>(arena, rows, stages),
     }
 }
 
-/// Try to run a Pipeline through the borrowed-composed-tape substrate.
-/// Caller passes the cached TapeData (already parsed, ~0 ms cost) and
-/// arena.  Returns None when shape unsupported.
+/// Try to run a Pipeline through the unified borrowed-tape substrate.
+/// Returns None when shape unsupported.
 pub fn try_run_borrow_tape<'a>(
     p: &Pipeline,
     tape: &'a TapeData,
@@ -206,58 +215,16 @@ pub fn try_run_borrow_tape<'a>(
         _ => return None,
     };
 
-    let sink_kind = TapeSinkKind::from_pipeline_sink(&p.sink)?;
+    let sink_kind = SinkKind::from_pipeline_sink(&p.sink)?;
+    let stage_chain = lower_stages(&p.stages, &p.stage_kernels)?;
 
-    // Detect leading FlatMap — split chain into outer = [FlatMap] +
-    // inner = [rest].  Outer emits Many; inner runs per child.  Only
-    // single leading FlatMap supported (no nested expansions).
     let chain_refs: Vec<&str> = chain.iter().map(|a| a.as_ref()).collect();
     let arr_idx = crate::strref::tape_walk_field_chain(tape, &chain_refs)?;
-    if !matches!(tape.nodes[arr_idx], crate::strref::TapeNode::Array { .. }) {
-        return None;
-    }
+    let arr_row = TapeRow::new(tape, arr_idx as u32);
+    let rows = arr_row.array_children()?;
 
-    let leading_flatmap = !p.stages.is_empty()
-        && matches!(p.stages[0], Stage::FlatMap(_))
-        && matches!(p.stage_kernels[0], BodyKernel::FieldRead(_));
-
-    if leading_flatmap {
-        // Reject if any later stage is also FlatMap — nested
-        // expansion not supported in this round.
-        if p.stages[1..].iter().any(|s| matches!(s, Stage::FlatMap(_))) {
-            return None;
-        }
-        let outer: Box<dyn TapeStageT> = lower_stage(&p.stages[0], &p.stage_kernels[0])?;
-        let inner = lower_stages(&p.stages[1..], &p.stage_kernels[1..])?;
-        let out = dispatch_sink_with_inner(
-            arena, tape, arr_idx as u32, &*outer, Some(&*inner), sink_kind,
-        );
-        return Some(Ok(out));
-    }
-
-    let stage_chain = lower_stages(&p.stages, &p.stage_kernels)?;
-    let out = dispatch_sink(arena, tape, arr_idx as u32, &*stage_chain, sink_kind);
+    let out = dispatch_sink(arena, rows, &*stage_chain, sink_kind);
     Some(Ok(out))
-}
-
-fn dispatch_sink_with_inner<'a>(
-    arena: &'a Arena,
-    tape: &'a TapeData,
-    arr_idx: u32,
-    stages: &dyn TapeStageT,
-    inner: Option<&dyn TapeStageT>,
-    kind: TapeSinkKind,
-) -> BVal<'a> {
-    match kind {
-        TapeSinkKind::Count   => run_pipeline_t_with_inner::<CountSinkT>(arena, tape, arr_idx, stages, inner),
-        TapeSinkKind::Sum     => run_pipeline_t_with_inner::<SumSinkT>(arena, tape, arr_idx, stages, inner),
-        TapeSinkKind::Min     => run_pipeline_t_with_inner::<MinSinkT>(arena, tape, arr_idx, stages, inner),
-        TapeSinkKind::Max     => run_pipeline_t_with_inner::<MaxSinkT>(arena, tape, arr_idx, stages, inner),
-        TapeSinkKind::Avg     => run_pipeline_t_with_inner::<AvgSinkT>(arena, tape, arr_idx, stages, inner),
-        TapeSinkKind::First   => run_pipeline_t_with_inner::<FirstSinkT>(arena, tape, arr_idx, stages, inner),
-        TapeSinkKind::Last    => run_pipeline_t_with_inner::<LastSinkT>(arena, tape, arr_idx, stages, inner),
-        TapeSinkKind::Collect => run_pipeline_t_with_inner::<CollectSinkT>(arena, tape, arr_idx, stages, inner),
-    }
 }
 
 #[cfg(test)]
@@ -294,8 +261,6 @@ mod tests {
 
     #[test]
     fn filter_string_lit_count() {
-        // The exact case where bytescan declines (string-lit filter)
-        // and pipeline_borrow regressed.  composed_tape handles it.
         assert!(matches!(
             run("$.orders.filter(status == 'shipped').count()"),
             Some(crate::eval::Val::Int(3))
@@ -313,7 +278,16 @@ mod tests {
     }
 
     #[test]
-    fn flat_map_count() {
+    fn filter_first_via_tape_borrow() {
+        let v = run("$.orders.filter(status == 'shipped').first()").unwrap();
+        match v {
+            crate::eval::Val::Obj(_) | crate::eval::Val::ObjSmall(_) => {}
+            other => panic!("got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn flat_map_count_unified() {
         let v = serde_json::json!({
             "orders": [
                 {"items": [{"p": 1}, {"p": 2}]},
@@ -332,7 +306,7 @@ mod tests {
     }
 
     #[test]
-    fn flat_map_filter_count() {
+    fn flat_map_filter_count_unified() {
         let v = serde_json::json!({
             "orders": [
                 {"items": [{"p": 1}, {"p": 20}, {"p": 5}]},
@@ -347,14 +321,5 @@ mod tests {
         let r = try_run_borrow_tape(&p, &tape, &arena).unwrap().unwrap();
         let owned = r.to_owned_val();
         assert!(matches!(owned, crate::eval::Val::Int(3)), "got {:?}", owned);
-    }
-
-    #[test]
-    fn filter_first_via_tape_borrow() {
-        let v = run("$.orders.filter(status == 'shipped').first()").unwrap();
-        match v {
-            crate::eval::Val::Obj(_) | crate::eval::Val::ObjSmall(_) => {}
-            other => panic!("got {:?}", other),
-        }
     }
 }
