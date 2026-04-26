@@ -240,10 +240,7 @@ fn apply_op(op: &Opcode, stack: &mut Vec<AbstractVal>) {
             pop1!();
             stack.push(AbstractVal::scalar(VType::Int));
         }
-        Opcode::MapField(_) | Opcode::MapFieldChain(_) | Opcode::MapFieldUnique(_)
-            | Opcode::MapFieldChainUnique(_)
-            | Opcode::FlatMapChain(_)
-            | Opcode::FilterFieldEqLit(_, _) | Opcode::FilterFieldCmpLit(_, _, _)
+        Opcode::FilterFieldEqLit(_, _) | Opcode::FilterFieldCmpLit(_, _, _)
             | Opcode::FilterCurrentCmpLit(_, _)
             | Opcode::FilterStrVecStartsWith(_)
             | Opcode::FilterStrVecEndsWith(_)
@@ -448,7 +445,6 @@ fn collect_fields_in_ops(ops: &[Opcode], acc: &mut Vec<Arc<str>>) {
     for op in ops {
         match op {
             Opcode::GetField(k) | Opcode::OptField(k) | Opcode::Descendant(k)
-                | Opcode::MapField(k) | Opcode::MapFieldUnique(k)
                 | Opcode::FilterFieldEqLit(k, _) | Opcode::FilterFieldCmpLit(k, _, _)
                 => {
                 if !acc.iter().any(|a: &Arc<str>| a == k) { acc.push(k.clone()); }
@@ -457,11 +453,6 @@ fn collect_fields_in_ops(ops: &[Opcode], acc: &mut Vec<Arc<str>>) {
                 | Opcode::FilterFieldCmpFieldCount(k1, _, k2) => {
                 if !acc.iter().any(|a: &Arc<str>| a == k1) { acc.push(k1.clone()); }
                 if !acc.iter().any(|a: &Arc<str>| a == k2) { acc.push(k2.clone()); }
-            }
-            Opcode::FlatMapChain(ks) => {
-                for k in ks.iter() {
-                    if !acc.iter().any(|a: &Arc<str>| a == k) { acc.push(k.clone()); }
-                }
             }
             Opcode::RootChain(chain) => {
                 for k in chain.iter() {
@@ -969,11 +960,6 @@ pub fn opcode_cost(op: &Opcode) -> u32 {
         Opcode::Quantifier(_) => 2,
         Opcode::CastOp(_) => 2,
         Opcode::PatchEval(_) => 50,
-        Opcode::MapField(_) => 5,
-        Opcode::MapFieldChain(ks) => 5 + ks.len() as u32 * 2,
-        Opcode::MapFieldChainUnique(ks) => 8 + ks.len() as u32 * 2,
-        Opcode::MapFieldUnique(_) => 8,
-        Opcode::FlatMapChain(ks) => 5 + ks.len() as u32 * 3,
         Opcode::FilterFieldEqLit(_, _) | Opcode::FilterFieldCmpLit(_, _, _)
             | Opcode::FilterCurrentCmpLit(_, _)
             | Opcode::FilterStrVecStartsWith(_)

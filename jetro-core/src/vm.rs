@@ -392,22 +392,9 @@ pub enum Opcode {
     // ── Field-specialised fusions (Tier 3) ────────────────────────────────────
     // MapFieldSum / Avg / Min / Max migrated to pipeline.rs
     // Sink::NumMap(op, prog).  See memory/project_opcode_migration.md.
-    /// `map(k)` where `k` is a single field ident — emit array of field values.
-    MapField(Arc<str>),
-    /// `map(a.b.c)` on arr-of-obj → walk chain per item, push resulting
-    /// Val (Null if any step hits a non-Obj or missing key).
-    MapFieldChain(Arc<[Arc<str>]>),
-    /// `map(k).unique()` where `k` is a single field ident. FxHashSet dedup.
-    MapFieldUnique(Arc<str>),
-    /// `map(a.b.c).unique()` — walk chain + inline dedup, no intermediate array.
-    MapFieldChainUnique(Arc<[Arc<str>]>),
-
-    // ── Flatten-chain fusion (Tier 1) ─────────────────────────────────────────
-    /// `.map(k1).flatten().map(k2).flatten()…` collapsed into a single walk.
-    /// Input is an array of objects; each step descends the named array-valued
-    /// field and concatenates. `N` levels → `N+1` buffers (current+next) instead
-    /// of `2N` allocations.
-    FlatMapChain(Arc<[Arc<str>]>),
+    // MapField / MapFieldChain / MapFieldUnique / MapFieldChainUnique /
+    // FlatMapChain fused opcodes deleted in Tier 3.  Pipeline IR Stage::Map
+    // + BodyKernel::FieldRead / FieldChain / + Stage::FlatMap covers them.
 
     // ── Predicate specialisation (Tier 4) ─────────────────────────────────────
     /// `filter(k == lit)` — predicate is equality of a single field to a literal.
@@ -640,62 +627,6 @@ fn ic_get_field(m: &Arc<IndexMap<Arc<str>, Val>>, key: &str, ic: &AtomicU64) -> 
     } else {
         Val::Null
     }
-}
-
-/// Recognise `.map(k)` sub-programs that reduce to a single field access
-/// from the current item: `[PushCurrent, GetField(k)]` or bare `[GetField(k)]`.
-
-
-fn trivial_field(ops: &[Opcode]) -> Option<Arc<str>> {
-    match ops {
-        [Opcode::PushCurrent, Opcode::GetField(k)] => Some(k.clone()),
-        [Opcode::GetField(k)] => Some(k.clone()),
-        // Bare idents in lambda bodies compile to `LoadIdent(k)` which does
-        // var-lookup-then-field fallback; in sub-progs of map/filter/group_by
-        // the var slot is almost never shadowed by a field-name, so treat as
-        // a field read.
-        [Opcode::LoadIdent(k)] => Some(k.clone()),
-        _ => None,
-    }
-}
-
-/// Recognise `.map(a.b.c)` sub-programs that reduce to a walk of a
-/// nested field chain from the current item.  Patterns accepted:
-///   `[PushCurrent, GetField(k1), GetField(k2), …]`
-///   `[PushCurrent, FieldChain([k1, k2, …])]`
-///   `[GetField(k1), GetField(k2), …]`
-///   `[FieldChain([k1, k2, …])]`
-///   `[LoadIdent(k1), GetField(k2), …]`
-///   `[LoadIdent(k1), FieldChain([k2, k3, …])]`
-/// Returns `None` for single-field patterns (those go via `trivial_field`).
-#[inline]
-fn trivial_field_chain(ops: &[Opcode]) -> Option<Arc<[Arc<str>]>> {
-    let mut out: Vec<Arc<str>> = Vec::new();
-    let mut slice = ops;
-    // Optional leading PushCurrent is absorbed silently.
-    if let [Opcode::PushCurrent, rest @ ..] = slice { slice = rest; }
-    // First step: LoadIdent, GetField, or FieldChain.
-    match slice {
-        [Opcode::LoadIdent(k), rest @ ..] => { out.push(k.clone()); slice = rest; }
-        [Opcode::GetField(k), rest @ ..]  => { out.push(k.clone()); slice = rest; }
-        [Opcode::FieldChain(ks), rest @ ..] => {
-            for k in ks.iter() { out.push(k.clone()); }
-            slice = rest;
-        }
-        _ => return None,
-    }
-    // Remaining steps: any mix of GetField / FieldChain.
-    while !slice.is_empty() {
-        match slice {
-            [Opcode::GetField(k), rest @ ..]  => { out.push(k.clone()); slice = rest; }
-            [Opcode::FieldChain(ks), rest @ ..] => {
-                for k in ks.iter() { out.push(k.clone()); }
-                slice = rest;
-            }
-            _ => return None,
-        }
-    }
-    if out.len() < 2 { None } else { Some(Arc::from(out)) }
 }
 
 /// A literal primitive suitable for filter-predicate fusion.
@@ -1532,15 +1463,10 @@ impl Compiler {
                 // (compound-AND filter+count specialisations) migrated to
                 // pipeline.rs Sink::CountIf with and_chain_prog decoder.
                 Opcode::CallMethod(ref b) => {
-                    // map(k)    → MapField(k)
-                    if b.method == BuiltinMethod::Map && b.sub_progs.len() == 1 {
-                        if let Some(k) = trivial_field(&b.sub_progs[0].ops) {
-                            out2.push(Opcode::MapField(k)); continue;
-                        }
-                        if let Some(chain) = trivial_field_chain(&b.sub_progs[0].ops) {
-                            out2.push(Opcode::MapFieldChain(chain)); continue;
-                        }
-                    }
+                    // MapField / MapFieldChain fusion deleted in Tier 3 —
+                    // pipeline IR Stage::Map + BodyKernel::FieldRead /
+                    // FieldChain covers `map(k)` and `map(a.b.c)`.
+                    let _ = b;
                     // GroupByField/CountByField/UniqueByField fusion
                     // deleted in Tier 3 — base CallMethod chain.
                     // filter(field <cmp> lit|field) → FilterField*
@@ -1628,74 +1554,11 @@ impl Compiler {
         out3
     }
 
-    /// Lower simple single-var list comprehensions to the same fused
-    /// opcodes we already emit for `.filter(k op lit).map(k2)` chains.
-    /// Matches `[x.k2 for x in <iter> (if x.k op lit)]` — a common shape
-    /// that otherwise pays ~4 opcode dispatches per iteration.
-    fn pass_list_comp_specialise(ops: Vec<Opcode>) -> Vec<Opcode> {
-        #[inline]
-        fn proj_key(ops: &[Opcode], var: &str) -> Option<Arc<str>> {
-            match ops {
-                [Opcode::LoadIdent(v), Opcode::GetField(k)] if v.as_ref() == var =>
-                    Some(k.clone()),
-                _ => None,
-            }
-        }
-        #[inline]
-        fn cond_pred(ops: &[Opcode], var: &str)
-            -> Option<(Arc<str>, super::ast::BinOp, Val)>
-        {
-            if ops.len() != 4 { return None; }
-            let k = match (&ops[0], &ops[1]) {
-                (Opcode::LoadIdent(v), Opcode::GetField(k)) if v.as_ref() == var =>
-                    k.clone(),
-                _ => return None,
-            };
-            let lit = trivial_literal(&ops[2])?;
-            let op = cmp_opcode(&ops[3])?;
-            Some((k, op, lit))
-        }
-
-        let mut out: Vec<Opcode> = Vec::with_capacity(ops.len());
-        for op in ops {
-            if let Opcode::ListComp(ref spec) = op {
-                if spec.vars.len() == 1 {
-                    let var = spec.vars[0].as_ref();
-                    if let Some(proj) = proj_key(&spec.expr.ops, var) {
-                        match &spec.cond {
-                            Some(cond) => {
-                                if let Some((pk, cop, lit)) = cond_pred(&cond.ops, var) {
-                                    for iop in spec.iter.ops.iter() {
-                                        out.push(iop.clone());
-                                    }
-                                    // Emit unfused Filter + MapField; pipeline
-                                    // Sink::NumFilterMap covers the fused
-                                    // shape at lowering time when the chain
-                                    // continues into a numeric aggregate.
-                                    if matches!(cop, super::ast::BinOp::Eq) {
-                                        out.push(Opcode::FilterFieldEqLit(pk, lit));
-                                    } else {
-                                        out.push(Opcode::FilterFieldCmpLit(pk, cop, lit));
-                                    }
-                                    out.push(Opcode::MapField(proj));
-                                    continue;
-                                }
-                            }
-                            None => {
-                                for iop in spec.iter.ops.iter() {
-                                    out.push(iop.clone());
-                                }
-                                out.push(Opcode::MapField(proj));
-                                continue;
-                            }
-                        }
-                    }
-                }
-            }
-            out.push(op);
-        }
-        out
-    }
+    /// List-comp specialisation deleted in Tier 3 — it emitted the
+    /// now-removed Opcode::MapField.  Base Opcode::ListComp handler
+    /// covers the same shapes; pipeline IR can hoist the inner
+    /// Filter+Map via Stage composition.
+    fn pass_list_comp_specialise(ops: Vec<Opcode>) -> Vec<Opcode> { ops }
 
     // sort_lam_param helper removed alongside ArgExtreme opcode.
 
@@ -3186,160 +3049,11 @@ impl VM {
                     self.root_chain_cache.insert(key, current.clone());
                     stack.push(current);
                 }
-                Opcode::MapField(k) => {
-                    let recv = pop!(stack);
-                    if let Val::Arr(a) = &recv {
-                        let mut out = Vec::with_capacity(a.len());
-                        let mut idx: Option<usize> = None;
-                        for item in a.iter() {
-                            match item {
-                                Val::Obj(m) => out.push(
-                                    lookup_field_cached(m, k, &mut idx)
-                                        .cloned()
-                                        .unwrap_or(Val::Null),
-                                ),
-                                _ => out.push(Val::Null),
-                            }
-                        }
-                        stack.push(Val::arr(out));
-                    } else {
-                        stack.push(Val::arr(Vec::new()));
-                    }
-                }
-                Opcode::MapFieldChain(ks) => {
-                    let recv = pop!(stack);
-                    if let Val::Arr(a) = &recv {
-                        let mut out = Vec::with_capacity(a.len());
-                        // One IC slot per hop — `lookup_field_cached` keys on
-                        // slot index + key verify (ptr-independent), so it
-                        // hits across different Arcs of the same shape.
-                        let mut ic: SmallVec<[Option<usize>; 4]> = SmallVec::new();
-                        ic.resize(ks.len(), None);
-                        for item in a.iter() {
-                            let mut cur: Val = match item {
-                                Val::Obj(m) => lookup_field_cached(m, &ks[0], &mut ic[0])
-                                    .cloned()
-                                    .unwrap_or(Val::Null),
-                                _ => Val::Null,
-                            };
-                            for (hop, k) in ks[1..].iter().enumerate() {
-                                cur = match &cur {
-                                    Val::Obj(m) => lookup_field_cached(m, k, &mut ic[hop + 1])
-                                        .cloned()
-                                        .unwrap_or(Val::Null),
-                                    _ => Val::Null,
-                                };
-                                if matches!(cur, Val::Null) { break; }
-                            }
-                            out.push(cur);
-                        }
-                        stack.push(Val::arr(out));
-                    } else {
-                        stack.push(Val::arr(Vec::new()));
-                    }
-                }
-                // MapFieldSum / Avg / Min / Max handlers removed —
-                // pipeline.rs `Sink::NumMap(NumOp::*)` covers these
-                // shapes for top-level Root-prefix queries; the
-                // unfused MapSum / MapAvg / MapMin / MapMax handlers
-                // below remain as the fallback path for sub-program
-                // / non-Root chains.
-                Opcode::MapFieldUnique(k) => {
-                    let recv = pop!(stack);
-                    let mut out: Vec<Val> = Vec::new();
-                    let mut seen_int: std::collections::HashSet<i64> = std::collections::HashSet::new();
-                    let mut seen_str: std::collections::HashSet<Arc<str>> = std::collections::HashSet::new();
-                    let mut seen_other: Vec<Val> = Vec::new();
-                    let mut idx: Option<usize> = None;
-                    if let Val::Arr(a) = &recv {
-                        for item in a.iter() {
-                            if let Val::Obj(m) = item {
-                                if let Some(v) = lookup_field_cached(m, k, &mut idx) {
-                                    match v {
-                                        Val::Int(n) => {
-                                            if seen_int.insert(*n) { out.push(v.clone()); }
-                                        }
-                                        Val::Str(s) => {
-                                            if seen_str.insert(s.clone()) { out.push(v.clone()); }
-                                        }
-                                        _ => {
-                                            if !seen_other.iter().any(|o| crate::eval::util::vals_eq(o, v)) {
-                                                seen_other.push(v.clone());
-                                                out.push(v.clone());
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    stack.push(Val::arr(out));
-                }
-                Opcode::MapFieldChainUnique(ks) => {
-                    let recv = pop!(stack);
-                    let mut out: Vec<Val> = Vec::new();
-                    let mut seen_int: std::collections::HashSet<i64> = std::collections::HashSet::new();
-                    let mut seen_str: std::collections::HashSet<Arc<str>> = std::collections::HashSet::new();
-                    let mut seen_other: Vec<Val> = Vec::new();
-                    let mut ic: SmallVec<[Option<usize>; 4]> = SmallVec::new();
-                    ic.resize(ks.len(), None);
-                    if let Val::Arr(a) = &recv {
-                        for item in a.iter() {
-                            let mut cur: Val = match item {
-                                Val::Obj(m) => lookup_field_cached(m, &ks[0], &mut ic[0])
-                                    .cloned()
-                                    .unwrap_or(Val::Null),
-                                _ => Val::Null,
-                            };
-                            for (hop, k) in ks[1..].iter().enumerate() {
-                                cur = match &cur {
-                                    Val::Obj(m) => lookup_field_cached(m, k, &mut ic[hop + 1])
-                                        .cloned()
-                                        .unwrap_or(Val::Null),
-                                    _ => Val::Null,
-                                };
-                                if matches!(cur, Val::Null) { break; }
-                            }
-                            match &cur {
-                                Val::Int(n) => {
-                                    if seen_int.insert(*n) { out.push(cur); }
-                                }
-                                Val::Str(s) => {
-                                    if seen_str.insert(s.clone()) { out.push(cur); }
-                                }
-                                _ => {
-                                    if !seen_other.iter().any(|o| crate::eval::util::vals_eq(o, &cur)) {
-                                        seen_other.push(cur.clone());
-                                        out.push(cur);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    stack.push(Val::arr(out));
-                }
-
-                // ── FlatMapChain (Tier 1) ─────────────────────────────────
-                Opcode::FlatMapChain(keys) => {
-                    let recv = pop!(stack);
-                    let mut cur: Vec<Val> = match recv {
-                        Val::Arr(a) => a.as_ref().clone(),
-                        _ => Vec::new(),
-                    };
-                    for k in keys.iter() {
-                        let mut next: Vec<Val> = Vec::with_capacity(cur.len() * 4);
-                        let mut idx: Option<usize> = None;
-                        for item in cur.drain(..) {
-                            if let Val::Obj(m) = item {
-                                if let Some(Val::Arr(inner)) = lookup_field_cached(&m, k, &mut idx) {
-                                    for v in inner.iter() { next.push(v.clone()); }
-                                }
-                            }
-                        }
-                        cur = next;
-                    }
-                    stack.push(Val::arr(cur));
-                }
+                // MapField / MapFieldChain / MapFieldUnique /
+                // MapFieldChainUnique / FlatMapChain handlers deleted in
+                // Tier 3.  Pipeline IR runs the base `CallMethod(Map | FlatMap | Unique, [GetField...])`
+                // chain via composed `MapField` / `MapFieldChain` /
+                // `FlatMapField` / `FlatMapFieldChain` Stages.
 
                 // ── Predicate specialisation (Tier 4) ─────────────────────
                 Opcode::FilterFieldEqLit(k, lit) => {
@@ -5473,64 +5187,9 @@ fn materialise_find_scan_spans_tail(
             return (Val::arr(vals), 1);
         }
     }
-    // Trailing `.map(<field>)` — peek once more for a numeric aggregate
-    // that can fold straight from the per-span direct field, skipping
-    // both the full-object parse and the Val array construction.
-    if let Some(Opcode::MapField(k)) = tail.first() {
-        if let Some(Opcode::CallMethod(c)) = tail.get(1) {
-            if c.sub_progs.is_empty() {
-                match c.method {
-                    BuiltinMethod::Count | BuiltinMethod::Len => {
-                        // count of extracted fields == count of spans
-                        // where the key parses successfully.  Fold gives
-                        // us that as `f.count`.
-                        let f = super::scan::fold_direct_field_nums(bytes, spans, k.as_ref());
-                        return (Val::Int(f.count as i64), 2);
-                    }
-                    BuiltinMethod::Sum => {
-                        let f = super::scan::fold_direct_field_nums(bytes, spans, k.as_ref());
-                        let v = if f.count == 0 { Val::Int(0) }
-                                else if f.is_float { Val::Float(f.float_sum) }
-                                else { Val::Int(f.int_sum) };
-                        return (v, 2);
-                    }
-                    BuiltinMethod::Avg => {
-                        let f = super::scan::fold_direct_field_nums(bytes, spans, k.as_ref());
-                        let v = if f.count == 0 { Val::Null }
-                                else { Val::Float(f.float_sum / f.count as f64) };
-                        return (v, 2);
-                    }
-                    BuiltinMethod::Min => {
-                        let f = super::scan::fold_direct_field_nums(bytes, spans, k.as_ref());
-                        let v = if !f.any { Val::Null }
-                                else if f.is_float { Val::Float(f.min_f) }
-                                else { Val::Int(f.min_i) };
-                        return (v, 2);
-                    }
-                    BuiltinMethod::Max => {
-                        let f = super::scan::fold_direct_field_nums(bytes, spans, k.as_ref());
-                        let v = if !f.any { Val::Null }
-                                else if f.is_float { Val::Float(f.max_f) }
-                                else { Val::Int(f.max_i) };
-                        return (v, 2);
-                    }
-                    _ => {}
-                }
-            }
-        }
-        let mut vals: Vec<Val> = Vec::with_capacity(spans.len());
-        for s in spans {
-            let obj_bytes = &bytes[s.start..s.end];
-            let v = match super::scan::find_direct_field(obj_bytes, k.as_ref()) {
-                Some(vs) => serde_json::from_slice::<serde_json::Value>(
-                    &obj_bytes[vs.start..vs.end],
-                ).ok().map(|sv| Val::from(&sv)).unwrap_or(Val::Null),
-                None => Val::Null,
-            };
-            vals.push(v);
-        }
-        return (Val::arr(vals), 1);
-    }
+    // Trailing `.map(<field>)` byte-scan tail-peek removed — depended on
+    // Opcode::MapField (deleted in Tier 3).  Pipeline IR Stage::Map +
+    // BodyKernel::FieldRead drives the same shape via composed substrate.
     let mut vals: Vec<Val> = Vec::with_capacity(spans.len());
     for s in spans {
         if let Ok(v) = serde_json::from_slice::<serde_json::Value>(
