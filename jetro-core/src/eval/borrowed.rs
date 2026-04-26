@@ -371,6 +371,73 @@ pub fn from_owned<'a>(arena: &'a Arena, v: &crate::eval::Val) -> Val<'a> {
     }
 }
 
+// ── Direct simd-json → Val<'a> builder (Phase 2) ────────────────────
+
+/// Parse a JSON byte buffer directly into `Val<'a>` allocated in
+/// `arena`.  Bypasses the owned-`Val` builder entirely — every key,
+/// string, array, and object lands in arena memory.  No `Arc`, no
+/// `IndexMap`, no per-row heap calls.
+///
+/// Uses simd-json's tape representation as the parser front-end
+/// (same engine as owned `Val::from_json_simd`); only the conversion
+/// step changes.
+///
+/// `bytes` is mutated in place by simd-json (its parser is destructive
+/// for SIMD reasons).  Caller must pass a writable buffer.
+#[cfg(feature = "simd-json")]
+pub fn from_json_simd_arena<'a>(arena: &'a Arena, bytes: &mut [u8]) -> Result<Val<'a>, String> {
+    let tape = simd_json::to_tape(bytes).map_err(|e| e.to_string())?;
+    let nodes = tape.0;
+    let mut idx = 0usize;
+    Ok(walk_simd_tape(arena, &nodes, &mut idx))
+}
+
+#[cfg(feature = "simd-json")]
+fn walk_simd_tape<'a>(
+    arena: &'a Arena,
+    nodes: &[simd_json::Node<'_>],
+    idx: &mut usize,
+) -> Val<'a> {
+    use simd_json::Node;
+    use simd_json::StaticNode as SN;
+    let here = nodes[*idx];
+    *idx += 1;
+    match here {
+        Node::Static(SN::Null)    => Val::Null,
+        Node::Static(SN::Bool(b)) => Val::Bool(b),
+        Node::Static(SN::I64(n))  => Val::Int(n),
+        Node::Static(SN::U64(n))  => {
+            if n <= i64::MAX as u64 { Val::Int(n as i64) } else { Val::Float(n as f64) }
+        }
+        Node::Static(SN::F64(f))  => Val::Float(f),
+        Node::String(s)           => Val::Str(arena.alloc_str(s)),
+        Node::Array { len, .. } => {
+            // Build elements into a temporary Vec; bulk-copy into arena
+            // at the end.  Bumpalo's slice builders need known length
+            // up-front, and per-element length is variable due to nesting.
+            let mut tmp: Vec<Val<'a>> = Vec::with_capacity(len);
+            for _ in 0..len {
+                tmp.push(walk_simd_tape(arena, nodes, idx));
+            }
+            Val::Arr(arena.alloc_slice_copy(&tmp))
+        }
+        Node::Object { len, .. } => {
+            let mut tmp: Vec<(&'a str, Val<'a>)> = Vec::with_capacity(len);
+            for _ in 0..len {
+                let key = match nodes[*idx] {
+                    Node::String(s) => arena.alloc_str(s),
+                    _ => unreachable!("object key must be string"),
+                };
+                *idx += 1;
+                let v = walk_simd_tape(arena, nodes, idx);
+                tmp.push((key, v));
+            }
+            let slice = arena.alloc_slice_fill_iter(tmp.into_iter());
+            Val::Obj(&*slice)
+        }
+    }
+}
+
 // ── Round-trip tests ────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -492,5 +559,64 @@ mod tests {
         let v = Val::str_in(&arena, "hi");
         fn take(_v: Val<'_>) {}
         take(v); take(v); // would not compile if Val weren't Copy
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn from_json_simd_arena_primitive() {
+        let arena = Arena::new();
+        let mut bytes: Vec<u8> = b"42".to_vec();
+        let v = from_json_simd_arena(&arena, &mut bytes).unwrap();
+        assert!(matches!(v, Val::Int(42)));
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn from_json_simd_arena_object() {
+        let arena = Arena::new();
+        let mut bytes: Vec<u8> = br#"{"a":1,"b":"two","c":true}"#.to_vec();
+        let v = from_json_simd_arena(&arena, &mut bytes).unwrap();
+        let entries = v.as_object().expect("object");
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].0, "a");
+        assert!(matches!(entries[0].1, Val::Int(1)));
+        assert_eq!(entries[1].0, "b");
+        assert_eq!(entries[1].1.as_str(), Some("two"));
+        assert_eq!(entries[2].0, "c");
+        assert!(matches!(entries[2].1, Val::Bool(true)));
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn from_json_simd_arena_nested() {
+        let arena = Arena::new();
+        let mut bytes: Vec<u8> = br#"{"data":[{"id":1,"user":{"name":"alice"}},{"id":2,"user":{"name":"bob"}}]}"#.to_vec();
+        let v = from_json_simd_arena(&arena, &mut bytes).unwrap();
+        let name = v.walk_path(&["data"])
+            .and_then(|d| d.as_array())
+            .and_then(|a| a.first().copied())
+            .and_then(|r| r.walk_path(&["user", "name"]))
+            .and_then(|n| n.as_str())
+            .expect("walk");
+        assert_eq!(name, "alice");
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn from_json_simd_arena_matches_owned() {
+        // Round-trip equivalence: arena-built Val<'a> → owned must
+        // structurally match the owned-direct path on the same input.
+        let json: Vec<u8> = br#"{"orders":[{"id":1,"items":[{"sku":"A","qty":2}]}]}"#.to_vec();
+
+        let arena = Arena::new();
+        let mut buf1 = json.clone();
+        let borrowed = from_json_simd_arena(&arena, &mut buf1).unwrap();
+        let from_borrowed = borrowed.to_owned_val();
+
+        let mut buf2 = json.clone();
+        let direct = crate::eval::Val::from_json_simd(&mut buf2).unwrap();
+
+        // Compare via JSON byte serialisation for shape equality.
+        assert_eq!(from_borrowed.to_json_vec(), direct.to_json_vec());
     }
 }
