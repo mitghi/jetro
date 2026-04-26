@@ -236,26 +236,7 @@ fn apply_op(op: &Opcode, stack: &mut Vec<AbstractVal>) {
             stack.push(AbstractVal { ty: VType::Unknown, null: Nullness::MaybeNull, card });
         }
         Opcode::RootChain(_) => stack.push(AbstractVal::UNKNOWN),
-        Opcode::StrSplitReverseJoin { .. } => {
-            pop1!();
-            stack.push(AbstractVal::scalar(VType::Str));
-        }
-        Opcode::MapStrConcat { .. } => {
-            pop1!();
-            stack.push(AbstractVal::array());
-        }
-        Opcode::MapSplitCount { .. }
-        | Opcode::MapSplitFirst { .. }
-        | Opcode::MapSplitNth { .. } => {
-            pop1!();
-            stack.push(AbstractVal::array());
-        }
-        Opcode::MapSplitCountSum { .. } => {
-            pop1!();
-            stack.push(AbstractVal::scalar(VType::Int));
-        }
-        Opcode::MapSplitLenSum { .. }
-        | Opcode::MapProject { .. }
+        Opcode::MapProject { .. }
         | Opcode::MapStrSlice { .. }
         | Opcode::MapFString(_) => {
             pop1!();
@@ -1013,16 +994,9 @@ pub fn opcode_cost(op: &Opcode) -> u32 {
             | Opcode::MapNumVecNeg
             | Opcode::FilterFieldCmpField(_, _, _) => 5,
         Opcode::FilterFieldCmpFieldCount(_, _, _) => 4,
-        Opcode::StrSplitReverseJoin { .. } => 4,
-        Opcode::MapStrConcat { .. } => 6,
-        Opcode::MapSplitLenSum { .. } => 4,
         Opcode::MapProject { .. } => 7,
         Opcode::MapStrSlice { .. } => 4,
         Opcode::MapFString(_) => 8,
-        Opcode::MapSplitCount { .. } => 3,
-        Opcode::MapSplitFirst { .. } => 3,
-        Opcode::MapSplitNth   { .. } => 3,
-        Opcode::MapSplitCountSum { .. } => 3,
         Opcode::PipelineRun { base, steps } => {
             program_cost(base) + steps.iter().map(|s| match s {
                 CompiledPipeStep::Forward(p) => program_cost(p),
