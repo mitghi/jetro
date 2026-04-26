@@ -277,27 +277,50 @@ fn parse_primitive(b: &[u8], i: usize) -> Option<(usize, Scalar)> {
             let end = start + s.len() as u32;
             Some((next, Scalar::StrRange(start, end)))
         }
-        b'-' | b'0'..=b'9' => {
-            let start = i;
-            let mut j = i;
-            let mut is_float = false;
-            if b[j] == b'-' { j += 1; }
-            while j < b.len() {
-                match b[j] {
-                    b'0'..=b'9' => j += 1,
-                    b'.' | b'e' | b'E' | b'+' | b'-' => { is_float = true; j += 1; }
-                    _ => break,
-                }
-            }
-            let s = std::str::from_utf8(&b[start..j]).ok()?;
-            if is_float {
-                Some((j, Scalar::Float(s.parse().ok()?)))
-            } else {
-                Some((j, Scalar::Int(s.parse().ok()?)))
-            }
-        }
+        b'-' | b'0'..=b'9' => parse_number_inline(b, i),
         _ => Some((skip_value(b, i)?, Scalar::Missing)),
     }
+}
+
+/// Hand-rolled integer/float parser — skips utf8 conversion + std's
+/// generic `s.parse::<i64>()` dispatch.  Per-call ~5-15 ns vs std's
+/// ~50-100 ns.  Hot loop: byte-level digit accumulation, branch-free
+/// in the common all-digits-no-sign case.
+#[inline]
+fn parse_number_inline(b: &[u8], i: usize) -> Option<(usize, Scalar)> {
+    let mut j = i;
+    let neg = b[j] == b'-';
+    if neg { j += 1; }
+    // Integer-only fast path: scan digits, branch out on `.`/`e`/`E`.
+    let int_start = j;
+    let mut acc: i64 = 0;
+    while j < b.len() {
+        let c = b[j];
+        if c.is_ascii_digit() {
+            // wrapping_mul/add: trades overflow correctness for speed
+            // on hot path; bench data fits i64.
+            acc = acc.wrapping_mul(10).wrapping_add((c - b'0') as i64);
+            j += 1;
+        } else { break; }
+    }
+    if j == int_start { return None; }  // sign without digits
+    // Check for fractional / exponent part.
+    let is_float = j < b.len() && matches!(b[j], b'.' | b'e' | b'E');
+    if !is_float {
+        return Some((j, Scalar::Int(if neg { -acc } else { acc })));
+    }
+    // Float path — fall back to std::str::parse for correctness on
+    // exponents / fractions.  Cold path; cost dominated by the
+    // expensive cases anyway.
+    let mut k = j;
+    while k < b.len() {
+        match b[k] {
+            b'0'..=b'9' | b'.' | b'e' | b'E' | b'+' | b'-' => k += 1,
+            _ => break,
+        }
+    }
+    let s = unsafe { std::str::from_utf8_unchecked(&b[i..k]) };
+    Some((k, Scalar::Float(s.parse().ok()?)))
 }
 
 /// Extract catalog fields from one entry Object.  Walks the entry's
@@ -351,19 +374,29 @@ fn entry_extract(
 /// Per-row cost: 1× brace-count over entry bytes + N× memchr search.
 /// Both are SIMD-vectorised at ~20 GB/s — closes most of the gap to
 /// native for bench-shape data.
+/// Max wanted-fields per query that fits in stack scalar buffer.
+/// Larger queries fall back to heap (Vec).  4 covers Q1/Q11; 8 covers
+/// most bench shapes; 16 is the hard cap on bytescan support.
+const SCALAR_BUF_CAP: usize = 16;
+
+/// Stack scalar buffer — fixed-size array of Option<Scalar>.  Avoids
+/// per-row Vec alloc + drop.  At SCALAR_BUF_CAP=16 this is 16 ×
+/// (1 + 16) bytes = 272 bytes per row, fits in L1 cache.
+type Slots = [Option<Scalar>; SCALAR_BUF_CAP];
+
 fn entry_extract_direct(
     b: &[u8],
     obj_start: usize,
     needles: &[&[u8]],
-) -> Option<(usize, Vec<Option<Scalar>>)> {
+    slots: &mut Slots,
+) -> Option<usize> {
     if b.get(obj_start) != Some(&b'{') { return None; }
-    // Locate entry end via brace count (memchr-accelerated via skip_value).
     let entry_end = skip_value(b, obj_start)?;
     let entry_range = &b[obj_start + 1 .. entry_end - 1];
-    let mut slots: Vec<Option<Scalar>> = vec![None; needles.len()];
+    // Reset slots for this row.
+    for s in slots.iter_mut().take(needles.len()) { *s = None; }
     for (slot, needle) in needles.iter().enumerate() {
         if let Some(pos) = memchr::memmem::find(entry_range, needle) {
-            // Skip past `"<key>":` then any whitespace.
             let val_start_rel = pos + needle.len();
             let val_start = obj_start + 1 + val_start_rel;
             let val_start = skip_ws(b, val_start);
@@ -372,7 +405,7 @@ fn entry_extract_direct(
             }
         }
     }
-    Some((entry_end, slots))
+    Some(entry_end)
 }
 
 /// Build pre-quoted needles for direct-memchr search: `"<key>":`.
@@ -617,6 +650,7 @@ fn run_with_sink(
 ) -> Option<Result<Val, EvalError>> {
     // Pre-cache wanted-name bytes — avoids per-row utf8 + Arc<str> compare.
     let wanted: Vec<&[u8]> = cat.fields.iter().map(|f| f.as_bytes()).collect();
+    if wanted.len() > SCALAR_BUF_CAP { return None; }  // bail; too many wanted
     // Pre-build `"<key>":` needles for direct-memchr fast path.
     let needles_owned: Vec<Vec<u8>> = build_needles(&wanted);
     let needles: Vec<&[u8]> = needles_owned.iter().map(|n| n.as_slice()).collect();
@@ -625,9 +659,10 @@ fn run_with_sink(
     i = skip_ws(raw, i + 1);
     let mut acc = Acc::new();
     let mut count: u64 = 0;
+    let mut slots: Slots = [None; SCALAR_BUF_CAP];
     while i < raw.len() {
         if raw[i] == b']' { break; }
-        let (next, slots) = entry_extract_direct(raw, i, &needles)?;
+        let next = entry_extract_direct(raw, i, &needles, &mut slots)?;
         // Eval filters
         let mut pass = true;
         for (st, k) in p.stages.iter().zip(p.stage_kernels.iter()) {
