@@ -1414,16 +1414,13 @@ impl Pipeline {
         let key_strs: Vec<&str> = chain_keys.iter().map(|k| k.as_ref()).collect();
         let arr_idx = crate::strref::tape_walk_field_chain(tape, &key_strs)?;
 
-        // Stage classifier: (FlatMap?, Filter*, Skip?, Take?, Map?, UniqueBy?, Reverse?).
-        // - FlatMap (leading) — outer entry → inner Array
-        // - Filter (any pred kernel) — entry-side
-        // - Skip(n) — drop first n rows
-        // - Take(n) — keep first n rows
-        // - Map (FieldRead/FieldChain) — entry → TapeVal
-        // - UniqueBy(None) — barrier dedup
-        // - Reverse — barrier flip
+        // Stage classifier:
+        //   (FlatMap?, Filter*, Sort?, Skip?, Take?, Map?, UniqueBy?, Reverse?)
+        // Sort barriers buffer rows; sort key is kernel-extracted.
         let mut flat_kernel: Option<&BodyKernel> = None;
         let mut filter_kernels: Vec<&BodyKernel> = Vec::new();
+        let mut sort_kernel: Option<&BodyKernel> = None;
+        let mut sort_asc: bool = true;
         let mut skip_n: usize = 0;
         let mut take_n: Option<usize> = None;
         let mut map_kernel: Option<&BodyKernel> = None;
@@ -1433,14 +1430,14 @@ impl Pipeline {
             if reverse { return None; }
             match st {
                 Stage::FlatMap(_) if i == 0 => {
-                    if map_kernel.is_some() || skip_n > 0 || take_n.is_some() { return None; }
+                    if sort_kernel.is_some() || map_kernel.is_some() || skip_n > 0 || take_n.is_some() { return None; }
                     if !matches!(k,
                         BodyKernel::FieldRead(_) | BodyKernel::FieldChain(_))
                     { return None; }
                     flat_kernel = Some(k);
                 }
                 Stage::Filter(_) => {
-                    if map_kernel.is_some() || take_n.is_some() { return None; }
+                    if sort_kernel.is_some() || map_kernel.is_some() || take_n.is_some() { return None; }
                     if !matches!(k,
                         BodyKernel::FieldRead(_)
                         | BodyKernel::FieldCmpLit(_, _, _)
@@ -1449,6 +1446,10 @@ impl Pipeline {
                     { return None; }
                     filter_kernels.push(k);
                 }
+                // Sort stage: deferred — needs buffer + sort barrier
+                // in per-row loop (planned). Bail to Val path until
+                // implemented to keep semantics correct.
+                Stage::Sort(_) => return None,
                 Stage::Skip(n) => {
                     if map_kernel.is_some() || take_n.is_some() { return None; }
                     skip_n = skip_n.saturating_add(*n);
@@ -1474,6 +1475,7 @@ impl Pipeline {
                 _ => return None,
             }
         }
+        let _ = sort_asc;  // reserved for future negate-detection
 
         let mut acc = SinkAcc::new(&self.sink, &self.sink_kernels)?;
         if unique_dedup {
