@@ -368,8 +368,6 @@ pub enum Opcode {
     FindFirst(Arc<Program>),
     /// filter(pred) + One quantifier fused — early-exit at 2nd match (error).
     FindOne(Arc<Program>),
-    /// Fused `map(f).sum()` — evaluates `f` per item, accumulates numeric sum.
-    MapSum(Arc<Program>),
     /// Fused `.split(sep).reverse().join(sep)` — byte-scan segments and
     /// emit reversed join into one buffer.  No intermediate `Vec<Arc<str>>`.
     StrSplitReverseJoin { sep: Arc<str> },
@@ -418,25 +416,7 @@ pub enum Opcode {
     MapSplitFirst { sep: Arc<str> },
     /// Fused `map(@.split(sep).nth(n))` — nth segment; one Arc per row.
     MapSplitNth { sep: Arc<str>, n: usize },
-    /// Fused `map(f).avg()` — evaluates `f` per item, computes mean as float.
-    MapAvg(Arc<Program>),
-    // FilterMapSum / FilterMapAvg / FilterMapFirst / FilterMapMin /
-    // FilterMapMax migrated to pipeline.rs Sink::NumFilterMap (sum,
-    // avg, min, max) and Sink::FilterFirst (first).
-    // FilterLast migrated to pipeline.rs Sink::FilterLast.
-    // TopN / ArgExtreme migrated to pipeline.rs Sink::TopN / MinBy /
-    // MaxBy.  See memory/project_opcode_migration.md.
-    /// Fused `map(f).flatten()` — single-pass concat of mapped arrays.
-    MapFlatten(Arc<Program>),
-    /// Fused `map(f).first()` — apply `f` only to the first element.
-    /// Empty input → Null (matches plain `first()` on `[]`).
-    MapFirst(Arc<Program>),
-    /// Fused `map(f).last()` — apply `f` only to the last element.
-    MapLast(Arc<Program>),
-    /// Fused `map(f).min()` — single-pass numeric min over mapped values.
-    MapMin(Arc<Program>),
-    /// Fused `map(f).max()` — single-pass numeric max over mapped values.
-    MapMax(Arc<Program>),
+    // Map+<aggregate> fusions deleted in Tier 3.
 
     // ── Field-specialised fusions (Tier 3) ────────────────────────────────────
     // MapFieldSum / Avg / Min / Max migrated to pipeline.rs
@@ -1719,26 +1699,9 @@ impl Compiler {
         let mut out: Vec<Opcode> = Vec::with_capacity(ops.len());
         for op in ops {
             if let (Opcode::CallMethod(b), Some(Opcode::CallMethod(a))) = (&op, out.last()) {
-                // map(f) + sum()/avg()/min()/max()/flatten()/first()/last()
-                if a.method == BuiltinMethod::Map && a.sub_progs.len() >= 1
-                   && b.sub_progs.is_empty() {
-                    let f = Arc::clone(&a.sub_progs[0]);
-                    let fused = match b.method {
-                        BuiltinMethod::Sum => Some(Opcode::MapSum(f)),
-                        BuiltinMethod::Avg => Some(Opcode::MapAvg(f)),
-                        BuiltinMethod::Min => Some(Opcode::MapMin(f)),
-                        BuiltinMethod::Max => Some(Opcode::MapMax(f)),
-                        BuiltinMethod::Flatten => Some(Opcode::MapFlatten(f)),
-                        BuiltinMethod::First => Some(Opcode::MapFirst(f)),
-                        BuiltinMethod::Last => Some(Opcode::MapLast(f)),
-                        _ => None,
-                    };
-                    if let Some(o) = fused {
-                        out.pop();
-                        out.push(o);
-                        continue;
-                    }
-                }
+                // Map+aggregate (Sum/Avg/Min/Max/Flatten/First/Last)
+                // fusion deleted — composed substrate handles via base
+                // CallMethod chain.
                 // filter(p) + last() fusion migrated to pipeline.rs
                 // Sink::FilterLast.  Sub-program path keeps unfused
                 // CallMethod(Filter) + CallMethod(Last) sequence.
@@ -1874,32 +1837,7 @@ impl Compiler {
                     }
                 }
             }
-            // map(@.split(sep).map(len).sum()) → MapSplitLenSum { sep }
-            // Body shape (the inner map's sub-program ran through
-            // pass_field_specialise BEFORE pass_field_specialise was
-            // narrowed for the pipeline migration; we now match the
-            // unfused MapSum form directly):
-            //   [PushCurrent, CallMethod(Split, [PushStr(sep)]),
-            //    MapSum(<prog: PushCurrent + GetField("len")>)]
-            if let Opcode::CallMethod(a) = &op {
-                if a.method == BuiltinMethod::Map && a.sub_progs.len() == 1 {
-                    let body = &a.sub_progs[0].ops;
-                    let fused = if let [Opcode::PushCurrent,
-                                         Opcode::CallMethod(split),
-                                         Opcode::MapSum(map_prog)] = &body[..] {
-                        if split.method == BuiltinMethod::Split
-                           && split.sub_progs.len() == 1
-                           && trivial_field(&map_prog.ops).as_deref().map(|s| s.as_ref()) == Some("len") {
-                            let sep_opt = trivial_push_str(&split.sub_progs[0].ops);
-                            sep_opt.map(|sep| Opcode::MapSplitLenSum { sep })
-                        } else { None }
-                    } else { None };
-                    if let Some(o) = fused {
-                        out.push(o);
-                        continue;
-                    }
-                }
-            }
+            // MapSplitLenSum fusion deleted (depended on MapSum).
             // map(prefix + @ + suffix), map(prefix + @), map(@ + suffix)
             //   → MapStrConcat { prefix, suffix }
             // Body shapes:
@@ -2147,26 +2085,7 @@ impl Compiler {
             // for top-level Root-prefix queries.  Sub-program path falls
             // back to the unfused FilterFieldEqLit / FilterFieldCmpLit
             // followed by MapField sequence.
-            // MapField(k) + MapFlatten(trivial k2) → FlatMapChain([k, k2])
-            if let Opcode::MapFlatten(ref f) = op {
-                if let Some(k2) = trivial_field(&f.ops) {
-                    match out3.last().cloned() {
-                        Some(Opcode::MapField(k1)) => {
-                            out3.pop();
-                            out3.push(Opcode::FlatMapChain(Arc::from(vec![k1, k2])));
-                            continue;
-                        }
-                        Some(Opcode::FlatMapChain(ks)) => {
-                            let mut v: Vec<Arc<str>> = ks.iter().cloned().collect();
-                            v.push(k2);
-                            out3.pop();
-                            out3.push(Opcode::FlatMapChain(Arc::from(v)));
-                            continue;
-                        }
-                        _ => {}
-                    }
-                }
-            }
+            // MapFlatten-based FlatMapChain fusion deleted with MapFlatten.
             out3.push(op);
         }
         out3
@@ -4444,172 +4363,6 @@ impl VM {
                     } else { Val::arr(Vec::new()) };
                     stack.push(out);
                 }
-                Opcode::MapSum(f) => {
-                    let recv = pop!(stack);
-                    let mut acc_i: i64 = 0;
-                    let mut acc_f: f64 = 0.0;
-                    let mut is_float = false;
-                    if let Val::Arr(a) = &recv {
-                        if let Some(k) = trivial_field(&f.ops) {
-                            let mut idx: Option<usize> = None;
-                            for item in a.iter() {
-                                if let Val::Obj(m) = item {
-                                    match lookup_field_cached(m, &k, &mut idx) {
-                                        Some(Val::Int(n))   => { if is_float { acc_f += *n as f64; } else { acc_i += *n; } }
-                                        Some(Val::Float(x)) => { if !is_float { acc_f = acc_i as f64; is_float = true; } acc_f += *x; }
-                                        Some(Val::Null) | None => {}
-                                        _ => return err!("map(..).sum(): non-numeric mapped value"),
-                                    }
-                                }
-                            }
-                        } else {
-                            let mut scratch = env.clone();
-                            for item in a.iter() {
-                                let prev = scratch.swap_current(item.clone());
-                                let v = self.exec(f, &scratch)?;
-                                scratch.restore_current(prev);
-                                match v {
-                                    Val::Int(n) => {
-                                        if is_float { acc_f += n as f64; } else { acc_i += n; }
-                                    }
-                                    Val::Float(x) => {
-                                        if !is_float { acc_f = acc_i as f64; is_float = true; }
-                                        acc_f += x;
-                                    }
-                                    Val::Null => {}
-                                    _ => return err!("map(..).sum(): non-numeric mapped value"),
-                                }
-                            }
-                        }
-                    }
-                    stack.push(if is_float { Val::Float(acc_f) } else { Val::Int(acc_i) });
-                }
-                Opcode::MapAvg(f) => {
-                    let recv = pop!(stack);
-                    let mut sum: f64 = 0.0;
-                    let mut n: usize = 0;
-                    if let Val::Arr(a) = &recv {
-                        if let Some(k) = trivial_field(&f.ops) {
-                            let mut idx: Option<usize> = None;
-                            for item in a.iter() {
-                                if let Val::Obj(m) = item {
-                                    match lookup_field_cached(m, &k, &mut idx) {
-                                        Some(Val::Int(x))   => { sum += *x as f64; n += 1; }
-                                        Some(Val::Float(x)) => { sum += *x;        n += 1; }
-                                        Some(Val::Null) | None => {}
-                                        _ => return err!("map(..).avg(): non-numeric mapped value"),
-                                    }
-                                }
-                            }
-                        } else {
-                            let mut scratch = env.clone();
-                            for item in a.iter() {
-                                let prev = scratch.swap_current(item.clone());
-                                let v = self.exec(f, &scratch)?;
-                                scratch.restore_current(prev);
-                                match v {
-                                    Val::Int(x)   => { sum += x as f64; n += 1; }
-                                    Val::Float(x) => { sum += x;        n += 1; }
-                                    Val::Null => {}
-                                    _ => return err!("map(..).avg(): non-numeric mapped value"),
-                                }
-                            }
-                        }
-                    }
-                    stack.push(if n == 0 { Val::Null } else { Val::Float(sum / n as f64) });
-                }
-                Opcode::MapMin(f) => {
-                    let recv = pop!(stack);
-                    let mut best_i: Option<i64> = None;
-                    let mut best_f: Option<f64> = None;
-                    macro_rules! fold_min {
-                        ($v:expr) => { match $v {
-                            Val::Int(n) => {
-                                let n = *n;
-                                if let Some(bf) = best_f { if (n as f64) < bf { best_f = Some(n as f64); } }
-                                else if let Some(bi) = best_i { if n < bi { best_i = Some(n); } }
-                                else { best_i = Some(n); }
-                            }
-                            Val::Float(x) => {
-                                let x = *x;
-                                if best_f.is_none() { best_f = Some(best_i.map(|i| i as f64).unwrap_or(x)); best_i = None; }
-                                if x < best_f.unwrap() { best_f = Some(x); }
-                            }
-                            Val::Null => {}
-                            _ => return err!("map(..).min(): non-numeric mapped value"),
-                        } }
-                    }
-                    if let Val::Arr(a) = &recv {
-                        if let Some(k) = trivial_field(&f.ops) {
-                            let mut idx: Option<usize> = None;
-                            for item in a.iter() {
-                                if let Val::Obj(m) = item {
-                                    if let Some(v) = lookup_field_cached(m, &k, &mut idx) { fold_min!(v); }
-                                }
-                            }
-                        } else {
-                            let mut scratch = env.clone();
-                            for item in a.iter() {
-                                let prev = scratch.swap_current(item.clone());
-                                let v = self.exec(f, &scratch)?;
-                                scratch.restore_current(prev);
-                                fold_min!(&v);
-                            }
-                        }
-                    }
-                    stack.push(match (best_i, best_f) {
-                        (_, Some(x)) => Val::Float(x),
-                        (Some(i), _) => Val::Int(i),
-                        _ => Val::Null,
-                    });
-                }
-                Opcode::MapMax(f) => {
-                    let recv = pop!(stack);
-                    let mut best_i: Option<i64> = None;
-                    let mut best_f: Option<f64> = None;
-                    macro_rules! fold_max {
-                        ($v:expr) => { match $v {
-                            Val::Int(n) => {
-                                let n = *n;
-                                if let Some(bf) = best_f { if (n as f64) > bf { best_f = Some(n as f64); } }
-                                else if let Some(bi) = best_i { if n > bi { best_i = Some(n); } }
-                                else { best_i = Some(n); }
-                            }
-                            Val::Float(x) => {
-                                let x = *x;
-                                if best_f.is_none() { best_f = Some(best_i.map(|i| i as f64).unwrap_or(x)); best_i = None; }
-                                if x > best_f.unwrap() { best_f = Some(x); }
-                            }
-                            Val::Null => {}
-                            _ => return err!("map(..).max(): non-numeric mapped value"),
-                        } }
-                    }
-                    if let Val::Arr(a) = &recv {
-                        if let Some(k) = trivial_field(&f.ops) {
-                            let mut idx: Option<usize> = None;
-                            for item in a.iter() {
-                                if let Val::Obj(m) = item {
-                                    if let Some(v) = lookup_field_cached(m, &k, &mut idx) { fold_max!(v); }
-                                }
-                            }
-                        } else {
-                            let mut scratch = env.clone();
-                            for item in a.iter() {
-                                let prev = scratch.swap_current(item.clone());
-                                let v = self.exec(f, &scratch)?;
-                                scratch.restore_current(prev);
-                                fold_max!(&v);
-                            }
-                        }
-                    }
-                    stack.push(match (best_i, best_f) {
-                        (_, Some(x)) => Val::Float(x),
-                        (Some(i), _) => Val::Int(i),
-                        _ => Val::Null,
-                    });
-                }
-
-                // ── Field-specialised fusions (Tier 3) ────────────────────
                 Opcode::MapField(k) => {
                     let recv = pop!(stack);
                     if let Val::Arr(a) = &recv {
@@ -5394,73 +5147,6 @@ impl VM {
                 // aggregate as two separate ops.
                 // FilterLast handler removed — pipeline.rs Sink::FilterLast
                 // covers `.filter(p).last()` for top-level queries.
-                Opcode::MapFirst(f) => {
-                    let recv = pop!(stack);
-                    let first = match recv {
-                        Val::Arr(a) => match Arc::try_unwrap(a) {
-                            Ok(mut v) if !v.is_empty() => Some(v.swap_remove(0)),
-                            Ok(_) => None,
-                            Err(a) => a.first().cloned(),
-                        },
-                        Val::Null => None,
-                        other => Some(other),
-                    };
-                    let out = match first {
-                        None => Val::Null,
-                        Some(item) => {
-                            let sub = env.with_current(item);
-                            self.exec(f, &sub)?
-                        }
-                    };
-                    stack.push(out);
-                }
-                Opcode::MapLast(f) => {
-                    let recv = pop!(stack);
-                    let last = match recv {
-                        Val::Arr(a) => match Arc::try_unwrap(a) {
-                            Ok(mut v) => v.pop(),
-                            Err(a) => a.last().cloned(),
-                        },
-                        Val::Null => None,
-                        other => Some(other),
-                    };
-                    let out = match last {
-                        None => Val::Null,
-                        Some(item) => {
-                            let sub = env.with_current(item);
-                            self.exec(f, &sub)?
-                        }
-                    };
-                    stack.push(out);
-                }
-                Opcode::MapFlatten(f) => {
-                    let recv = pop!(stack);
-                    let items = match recv {
-                        Val::Arr(a) => Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone()),
-                        Val::IntVec(a)   => a.iter().map(|n| Val::Int(*n)).collect(),
-                        Val::FloatVec(a) => a.iter().map(|f| Val::Float(*f)).collect(),
-                        Val::StrVec(a)   => a.iter().cloned().map(Val::Str).collect(),
-                        _ => Vec::new(),
-                    };
-                    let mut out = Vec::with_capacity(items.len());
-                    let mut scratch = env.clone();
-                    for item in items {
-                        let prev = scratch.swap_current(item);
-                        let mapped = self.exec(f, &scratch)?;
-                        scratch.restore_current(prev);
-                        match mapped {
-                            Val::Arr(a) => {
-                                let v = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
-                                out.extend(v);
-                            }
-                            Val::IntVec(a)   => out.extend(a.iter().map(|n| Val::Int(*n))),
-                            Val::FloatVec(a) => out.extend(a.iter().map(|f| Val::Float(*f))),
-                            Val::StrVec(a)   => out.extend(a.iter().cloned().map(Val::Str)),
-                            other => out.push(other),
-                        }
-                    }
-                    stack.push(Val::arr(out));
-                }
                 Opcode::EquiJoin { rhs, lhs_key, rhs_key } => {
                     use std::collections::HashMap;
                     let left_val = pop!(stack);

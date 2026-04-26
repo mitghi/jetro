@@ -612,20 +612,6 @@ fn classify_kv_method(
         {
             Some(ObjProjEntry::InnerLen { key: key.clone(), path })
         }
-        Opcode::MapSum(inner_prog) => {
-            let inner = BodyKernel::classify(inner_prog);
-            // Only path / arith inner kernels supported on tape.
-            if !matches!(inner,
-                BodyKernel::FieldRead(_)
-                | BodyKernel::FieldChain(_)
-                | BodyKernel::Arith(_, _, _))
-            { return None; }
-            Some(ObjProjEntry::InnerMapSum {
-                key: key.clone(),
-                path,
-                inner: Arc::new(inner),
-            })
-        }
         _ => None,
     }
 }

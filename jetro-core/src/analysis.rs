@@ -244,15 +244,6 @@ fn apply_op(op: &Opcode, stack: &mut Vec<AbstractVal>) {
             pop1!();
             stack.push(AbstractVal::UNKNOWN);
         }
-        Opcode::MapSum(_)
-        | Opcode::MapMin(_) | Opcode::MapMax(_) => {
-            pop1!();
-            stack.push(AbstractVal::scalar(VType::Num));
-        }
-        Opcode::MapAvg(_) => {
-            pop1!();
-            stack.push(AbstractVal::scalar(VType::Float));
-        }
         Opcode::StrSplitReverseJoin { .. } => {
             pop1!();
             stack.push(AbstractVal::scalar(VType::Str));
@@ -285,8 +276,7 @@ fn apply_op(op: &Opcode, stack: &mut Vec<AbstractVal>) {
             pop1!();
             stack.push(AbstractVal::scalar(VType::Int));
         }
-        Opcode::MapFlatten(_)
-            | Opcode::EquiJoin { .. }
+        Opcode::EquiJoin { .. }
             | Opcode::MapField(_) | Opcode::MapFieldChain(_) | Opcode::MapFieldUnique(_)
             | Opcode::MapFieldChainUnique(_)
             | Opcode::FlatMapChain(_)
@@ -306,10 +296,6 @@ fn apply_op(op: &Opcode, stack: &mut Vec<AbstractVal>) {
             | Opcode::UniqueByField(_) => {
             pop1!();
             stack.push(AbstractVal::array());
-        }
-        Opcode::MapFirst(_) | Opcode::MapLast(_) => {
-            pop1!();
-            stack.push(AbstractVal::UNKNOWN);
         }
         Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Mod => {
             let (l, r) = pop2!();
@@ -432,10 +418,6 @@ fn count_ident_uses_in_ops(ops: &[Opcode], name: &str, acc: &mut usize) {
                 | Opcode::InlineFilter(p) | Opcode::FilterCount(p)
                 | Opcode::FindFirst(p) | Opcode::FindOne(p)
                 | Opcode::DynIndex(p)
-                | Opcode::MapSum(p) | Opcode::MapAvg(p)
-                | Opcode::MapMin(p) | Opcode::MapMax(p)
-                | Opcode::MapFlatten(p)
-                | Opcode::MapFirst(p) | Opcode::MapLast(p)
                 => count_ident_uses_in_ops(&p.ops, name, acc),
             Opcode::IfElse { then_, else_ } => {
                 count_ident_uses_in_ops(&then_.ops, name, acc);
@@ -533,10 +515,6 @@ fn collect_fields_in_ops(ops: &[Opcode], acc: &mut Vec<Arc<str>>) {
                 | Opcode::InlineFilter(p) | Opcode::FilterCount(p)
                 | Opcode::FindFirst(p) | Opcode::FindOne(p)
                 | Opcode::DynIndex(p)
-                | Opcode::MapSum(p) | Opcode::MapAvg(p)
-                | Opcode::MapMin(p) | Opcode::MapMax(p)
-                | Opcode::MapFlatten(p)
-                | Opcode::MapFirst(p) | Opcode::MapLast(p)
                 => collect_fields_in_ops(&p.ops, acc),
             Opcode::IfElse { then_, else_ } => {
                 collect_fields_in_ops(&then_.ops, acc);
@@ -585,10 +563,6 @@ fn hash_ops(ops: &[Opcode], h: &mut impl std::hash::Hasher) {
                 | Opcode::InlineFilter(p) | Opcode::FilterCount(p)
                 | Opcode::FindFirst(p) | Opcode::FindOne(p)
                 | Opcode::DynIndex(p)
-                | Opcode::MapSum(p) | Opcode::MapAvg(p)
-                | Opcode::MapMin(p) | Opcode::MapMax(p)
-                | Opcode::MapFlatten(p)
-                | Opcode::MapFirst(p) | Opcode::MapLast(p)
                 => hash_ops(&p.ops, h),
             Opcode::IfElse { then_, else_ } => {
                 hash_ops(&then_.ops, h);
@@ -670,10 +644,6 @@ fn walk_subprograms(ops: &[Opcode], map: &mut HashMap<u64, usize>) {
                 | Opcode::InlineFilter(p) | Opcode::FilterCount(p)
                 | Opcode::FindFirst(p) | Opcode::FindOne(p)
                 | Opcode::DynIndex(p)
-                | Opcode::MapSum(p) | Opcode::MapAvg(p)
-                | Opcode::MapMin(p) | Opcode::MapMax(p)
-                | Opcode::MapFlatten(p)
-                | Opcode::MapFirst(p) | Opcode::MapLast(p)
                 => vec![p],
             Opcode::IfElse { then_, else_ } => vec![then_, else_],
             Opcode::CallMethod(c) | Opcode::CallOptMethod(c) =>
@@ -885,13 +855,6 @@ fn rewrite_op(op: &Opcode, cache: &mut HashMap<u64, Arc<Program>>) -> Opcode {
         },
         Opcode::InlineFilter(p) => Opcode::InlineFilter(dedup_rec(p, cache)),
         Opcode::FilterCount(p)  => Opcode::FilterCount(dedup_rec(p, cache)),
-        Opcode::MapSum(p)       => Opcode::MapSum(dedup_rec(p, cache)),
-        Opcode::MapAvg(p)       => Opcode::MapAvg(dedup_rec(p, cache)),
-        Opcode::MapMin(p)       => Opcode::MapMin(dedup_rec(p, cache)),
-        Opcode::MapMax(p)       => Opcode::MapMax(dedup_rec(p, cache)),
-        Opcode::MapFlatten(p)   => Opcode::MapFlatten(dedup_rec(p, cache)),
-        Opcode::MapFirst(p)     => Opcode::MapFirst(dedup_rec(p, cache)),
-        Opcode::MapLast(p)      => Opcode::MapLast(dedup_rec(p, cache)),
         Opcode::FindFirst(p)    => Opcode::FindFirst(dedup_rec(p, cache)),
         Opcode::FindOne(p)      => Opcode::FindOne(dedup_rec(p, cache)),
         Opcode::DynIndex(p)     => Opcode::DynIndex(dedup_rec(p, cache)),
@@ -1011,10 +974,6 @@ pub fn opcode_cost(op: &Opcode) -> u32 {
         Opcode::TryExpr { body, default } => 2 + program_cost(body) + program_cost(default),
         Opcode::InlineFilter(p) | Opcode::FilterCount(p)
             | Opcode::FindFirst(p) | Opcode::FindOne(p)
-            | Opcode::MapSum(p) | Opcode::MapAvg(p)
-            | Opcode::MapMin(p) | Opcode::MapMax(p)
-            | Opcode::MapFlatten(p)
-            | Opcode::MapFirst(p) | Opcode::MapLast(p)
             | Opcode::DynIndex(p) => 10 + program_cost(p),
         Opcode::EquiJoin { rhs, .. } => 25 + program_cost(rhs),
         Opcode::CallMethod(c) | Opcode::CallOptMethod(c) => {
