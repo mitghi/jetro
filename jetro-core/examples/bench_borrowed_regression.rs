@@ -149,7 +149,6 @@ fn bench_composed_borrow_loop() -> Stat {
     use jetro_core::eval::borrowed::{Arena, Val as BVal};
     println!("── composed_borrow Phase 1: StageB run loop (5000 elems) ──");
     let arena = Arena::with_capacity(1024 * 1024);
-    // Build 5000 small objects {n: i} once; reused across iterations.
     let mut items: Vec<BVal> = Vec::with_capacity(5000);
     for i in 0..5000i64 {
         let pairs = vec![(arena.alloc_str("n"), BVal::Int(i))];
@@ -174,6 +173,53 @@ fn bench_composed_borrow_loop() -> Stat {
         let out = run_pipeline_b::<SumSinkB>(&arena, items.as_slice(), &stages);
         std::hint::black_box(out);
     });
+    println!();
+    stat
+}
+
+fn bench_composed_borrow_phase2_sinks() -> Stat {
+    use jetro_core::composed_borrow::{
+        IdentityB, FirstSinkB, LastSinkB, CollectSinkB,
+        MinSinkB, MaxSinkB, AvgSinkB, MapFieldChainB, run_pipeline_b,
+    };
+    use jetro_core::eval::borrowed::{Arena, Val as BVal};
+    println!("── composed_borrow Phase 2: GAT-Acc sinks + chain stage ──");
+    let arena = Arena::with_capacity(1024 * 1024);
+    let mut items: Vec<BVal> = Vec::with_capacity(5000);
+    for i in 0..5000i64 {
+        // {addr: {city: "X", n: i}}
+        let inner_pairs = vec![
+            (arena.alloc_str("city"), BVal::Str(arena.alloc_str("NYC"))),
+            (arena.alloc_str("n"), BVal::Int(i)),
+        ];
+        let inner_slice = arena.alloc_slice_fill_iter(inner_pairs.into_iter());
+        let inner = BVal::Obj(&*inner_slice);
+        let outer_pairs = vec![(arena.alloc_str("addr"), inner)];
+        let outer_slice = arena.alloc_slice_fill_iter(outer_pairs.into_iter());
+        items.push(BVal::Obj(&*outer_slice));
+    }
+    let identity: Box<dyn jetro_core::composed_borrow::StageB> = Box::new(IdentityB);
+
+    let _ = time("  First/Last/Collect — 5000 elems via Identity",
+        N_ITERS, || {
+        let f = run_pipeline_b::<FirstSinkB>(&arena, items.as_slice(), &*identity);
+        let l = run_pipeline_b::<LastSinkB>(&arena, items.as_slice(), &*identity);
+        let c = run_pipeline_b::<CollectSinkB>(&arena, items.as_slice(), &*identity);
+        std::hint::black_box((f, l, c));
+    });
+
+    // Numeric sinks over MapFieldChain(addr.n)
+    let stat = time("  Min/Max/Avg ∘ MapFieldChain[addr.n] — 5000 elems",
+        N_ITERS, || {
+        let chain = MapFieldChainB {
+            chain: vec![std::sync::Arc::from("addr"), std::sync::Arc::from("n")],
+        };
+        let mn = run_pipeline_b::<MinSinkB>(&arena, items.as_slice(), &chain);
+        let mx = run_pipeline_b::<MaxSinkB>(&arena, items.as_slice(), &chain);
+        let av = run_pipeline_b::<AvgSinkB>(&arena, items.as_slice(), &chain);
+        std::hint::black_box((mn, mx, av));
+    });
+
     println!();
     stat
 }
@@ -216,6 +262,18 @@ fn main() {
         violations.push(format!(
             "composed_borrow run loop {} µs > budget {} µs",
             cb1.median, COMPOSED_B_BUDGET_US));
+    }
+    println!();
+
+    // ── composed_borrow Phase 2 (GAT sinks + chain stage) ──
+    let cb2 = bench_composed_borrow_phase2_sinks();
+    const COMPOSED_B_PHASE2_BUDGET_US: u128 = 500;
+    println!("  composed_borrow Phase 2 median: {} µs (gate ≤ {} µs)",
+        cb2.median, COMPOSED_B_PHASE2_BUDGET_US);
+    if cb2.median > COMPOSED_B_PHASE2_BUDGET_US {
+        violations.push(format!(
+            "composed_borrow Phase 2 sinks {} µs > budget {} µs",
+            cb2.median, COMPOSED_B_PHASE2_BUDGET_US));
     }
     println!();
 

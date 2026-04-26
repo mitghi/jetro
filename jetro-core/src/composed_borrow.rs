@@ -115,15 +115,16 @@ impl<A: StageB, B: StageB> StageB for ComposedB<A, B> {
     }
 }
 
-// ── Sink trait ──────────────────────────────────────────────────────
+// ── Sink trait (Phase 2: GAT-based lifetime-aware Acc) ─────────────
 
-/// Borrowed sink.  Folds `BVal<'a>` elements into `Acc`; finalise
-/// emits a `BVal<'a>` allocated in the arena.
+/// Borrowed sink.  Folds `BVal<'a>` elements into `Acc<'a>`; finalise
+/// emits a `BVal<'a>` allocated in the arena.  GAT-based so `Acc` can
+/// hold `BVal<'a>` (real Collect / First / Last semantics).
 pub trait SinkB {
-    type Acc;
-    fn init() -> Self::Acc;
-    fn fold<'a>(acc: Self::Acc, v: BVal<'a>) -> Self::Acc;
-    fn finalise<'a>(arena: &'a Arena, acc: Self::Acc) -> BVal<'a>;
+    type Acc<'a>;
+    fn init<'a>() -> Self::Acc<'a>;
+    fn fold<'a>(acc: Self::Acc<'a>, v: BVal<'a>) -> Self::Acc<'a>;
+    fn finalise<'a>(arena: &'a Arena, acc: Self::Acc<'a>) -> BVal<'a>;
 }
 
 // ── Generic outer loop ──────────────────────────────────────────────
@@ -136,7 +137,7 @@ pub fn run_pipeline_b<'a, S: SinkB>(
     arr: &[BVal<'a>],
     stages: &dyn StageB,
 ) -> BVal<'a> {
-    let mut acc = S::init();
+    let mut acc: S::Acc<'a> = S::init();
     for v in arr.iter().copied() {
         match stages.apply(arena, v) {
             StageOutputB::Pass(p) => acc = S::fold(acc, p),
@@ -150,21 +151,21 @@ pub fn run_pipeline_b<'a, S: SinkB>(
     S::finalise(arena, acc)
 }
 
-// ── Sinks (Phase 1: minimal set) ────────────────────────────────────
+// ── Sinks ──────────────────────────────────────────────────────────
 
 pub struct CountSinkB;
 impl SinkB for CountSinkB {
-    type Acc = i64;
-    #[inline] fn init() -> i64 { 0 }
-    #[inline] fn fold<'a>(acc: i64, _: BVal<'a>) -> i64 { acc + 1 }
-    #[inline] fn finalise<'a>(_: &'a Arena, acc: i64) -> BVal<'a> { BVal::Int(acc) }
+    type Acc<'a> = i64;
+    #[inline] fn init<'a>() -> Self::Acc<'a> { 0 }
+    #[inline] fn fold<'a>(acc: Self::Acc<'a>, _: BVal<'a>) -> Self::Acc<'a> { acc + 1 }
+    #[inline] fn finalise<'a>(_: &'a Arena, acc: Self::Acc<'a>) -> BVal<'a> { BVal::Int(acc) }
 }
 
 pub struct SumSinkB;
 impl SinkB for SumSinkB {
-    type Acc = (i64, f64, bool);
-    #[inline] fn init() -> Self::Acc { (0, 0.0, false) }
-    fn fold<'a>(mut acc: Self::Acc, v: BVal<'a>) -> Self::Acc {
+    type Acc<'a> = (i64, f64, bool);
+    #[inline] fn init<'a>() -> Self::Acc<'a> { (0, 0.0, false) }
+    fn fold<'a>(mut acc: Self::Acc<'a>, v: BVal<'a>) -> Self::Acc<'a> {
         match v {
             BVal::Int(i) => acc.0 = acc.0.wrapping_add(i),
             BVal::Float(f) => { acc.1 += f; acc.2 = true; }
@@ -173,36 +174,102 @@ impl SinkB for SumSinkB {
         }
         acc
     }
-    fn finalise<'a>(_: &'a Arena, acc: Self::Acc) -> BVal<'a> {
+    fn finalise<'a>(_: &'a Arena, acc: Self::Acc<'a>) -> BVal<'a> {
         if acc.2 { BVal::Float(acc.0 as f64 + acc.1) } else { BVal::Int(acc.0) }
+    }
+}
+
+pub struct MinSinkB;
+impl SinkB for MinSinkB {
+    type Acc<'a> = Option<f64>;
+    #[inline] fn init<'a>() -> Self::Acc<'a> { None }
+    fn fold<'a>(acc: Self::Acc<'a>, v: BVal<'a>) -> Self::Acc<'a> {
+        let n = match v {
+            BVal::Int(i) => i as f64,
+            BVal::Float(f) => f,
+            _ => return acc,
+        };
+        Some(match acc { Some(cur) => cur.min(n), None => n })
+    }
+    fn finalise<'a>(_: &'a Arena, acc: Self::Acc<'a>) -> BVal<'a> {
+        match acc {
+            Some(f) if f.fract() == 0.0 && f.abs() < (i64::MAX as f64) => BVal::Int(f as i64),
+            Some(f) => BVal::Float(f),
+            None => BVal::Null,
+        }
+    }
+}
+
+pub struct MaxSinkB;
+impl SinkB for MaxSinkB {
+    type Acc<'a> = Option<f64>;
+    #[inline] fn init<'a>() -> Self::Acc<'a> { None }
+    fn fold<'a>(acc: Self::Acc<'a>, v: BVal<'a>) -> Self::Acc<'a> {
+        let n = match v {
+            BVal::Int(i) => i as f64,
+            BVal::Float(f) => f,
+            _ => return acc,
+        };
+        Some(match acc { Some(cur) => cur.max(n), None => n })
+    }
+    fn finalise<'a>(_: &'a Arena, acc: Self::Acc<'a>) -> BVal<'a> {
+        match acc {
+            Some(f) if f.fract() == 0.0 && f.abs() < (i64::MAX as f64) => BVal::Int(f as i64),
+            Some(f) => BVal::Float(f),
+            None => BVal::Null,
+        }
+    }
+}
+
+pub struct AvgSinkB;
+impl SinkB for AvgSinkB {
+    type Acc<'a> = (f64, usize);  // (sum, count)
+    #[inline] fn init<'a>() -> Self::Acc<'a> { (0.0, 0) }
+    fn fold<'a>(mut acc: Self::Acc<'a>, v: BVal<'a>) -> Self::Acc<'a> {
+        let n = match v {
+            BVal::Int(i) => i as f64,
+            BVal::Float(f) => f,
+            _ => return acc,
+        };
+        acc.0 += n; acc.1 += 1; acc
+    }
+    fn finalise<'a>(_: &'a Arena, acc: Self::Acc<'a>) -> BVal<'a> {
+        if acc.1 == 0 { BVal::Null } else { BVal::Float(acc.0 / acc.1 as f64) }
     }
 }
 
 pub struct FirstSinkB;
 impl SinkB for FirstSinkB {
-    /// `Option<BVal<'static>>` would be the natural Acc but the
-    /// borrowed lifetime is per-call; box-erase via raw pointer-style
-    /// using `Option<BValStatic>` is unsafe.  Use a thread-local trick:
-    /// store as `Option<BVal<'a>>` — but Acc must be 'static.  Workaround:
-    /// keep payload inside a Cell<Option<...>> at run_pipeline level.
-    /// For Phase 1 we use a degenerate Acc that encodes only "saw any";
-    /// real First semantics live in `bytescan::run_with_sink_borrow`.
-    type Acc = bool;
-    #[inline] fn init() -> bool { false }
-    #[inline] fn fold<'a>(_: bool, _: BVal<'a>) -> bool { true }
-    #[inline] fn finalise<'a>(_: &'a Arena, _: bool) -> BVal<'a> { BVal::Null }
+    type Acc<'a> = Option<BVal<'a>>;
+    #[inline] fn init<'a>() -> Self::Acc<'a> { None }
+    #[inline] fn fold<'a>(acc: Self::Acc<'a>, v: BVal<'a>) -> Self::Acc<'a> {
+        if acc.is_some() { acc } else { Some(v) }
+    }
+    #[inline] fn finalise<'a>(_: &'a Arena, acc: Self::Acc<'a>) -> BVal<'a> {
+        acc.unwrap_or(BVal::Null)
+    }
+}
+
+pub struct LastSinkB;
+impl SinkB for LastSinkB {
+    type Acc<'a> = Option<BVal<'a>>;
+    #[inline] fn init<'a>() -> Self::Acc<'a> { None }
+    #[inline] fn fold<'a>(_: Self::Acc<'a>, v: BVal<'a>) -> Self::Acc<'a> { Some(v) }
+    #[inline] fn finalise<'a>(_: &'a Arena, acc: Self::Acc<'a>) -> BVal<'a> {
+        acc.unwrap_or(BVal::Null)
+    }
 }
 
 pub struct CollectSinkB;
 impl SinkB for CollectSinkB {
-    type Acc = Vec<i64>;  // placeholder — real Collect needs lifetime
-                          // gymnastics that GAT would solve; Phase 2
-                          // introduces a SinkBLifed trait variant.
-    #[inline] fn init() -> Vec<i64> { Vec::new() }
-    #[inline] fn fold<'a>(acc: Vec<i64>, _: BVal<'a>) -> Vec<i64> { acc }
-    #[inline] fn finalise<'a>(arena: &'a Arena, _: Vec<i64>) -> BVal<'a> {
-        let empty: &[BVal<'a>] = &[];
-        BVal::Arr(arena.alloc_slice_copy(empty))
+    type Acc<'a> = Vec<BVal<'a>>;
+    #[inline] fn init<'a>() -> Self::Acc<'a> { Vec::new() }
+    #[inline] fn fold<'a>(mut acc: Self::Acc<'a>, v: BVal<'a>) -> Self::Acc<'a> {
+        acc.push(v); acc
+    }
+    #[inline] fn finalise<'a>(arena: &'a Arena, acc: Self::Acc<'a>) -> BVal<'a> {
+        let slice = arena.alloc_slice_fill_iter(acc.into_iter());
+        BVal::Arr(&*slice)
     }
 }
 
@@ -260,6 +327,45 @@ impl StageB for TakeB {
         if s >= self.n { return StageOutputB::Done; }
         self.seen.set(s + 1);
         StageOutputB::Pass(x)
+    }
+}
+
+/// Multi-step path read.  Walks a chain of field names; emits Null
+/// when any intermediate is missing or non-Object.
+pub struct MapFieldChainB {
+    pub chain: Vec<std::sync::Arc<str>>,
+}
+
+impl StageB for MapFieldChainB {
+    #[inline]
+    fn apply<'a>(&self, _arena: &'a Arena, x: BVal<'a>) -> StageOutputB<'a> {
+        let chain_refs: Vec<&str> = self.chain.iter().map(|a| a.as_ref()).collect();
+        let v = x.walk_path(&chain_refs).unwrap_or(BVal::Null);
+        StageOutputB::Pass(v)
+    }
+}
+
+/// FlatMap by closure — for each input, expand into 0+ children.  Used
+/// when the FlatMap kernel is `BVal::Arr` flattener (downstream stages
+/// run per inner element).  Generic across kernels via the closure.
+pub struct FlatMapB<F: for<'a> Fn(&BVal<'a>) -> SmallVec<[BVal<'a>; 4]>> {
+    pub expand: F,
+}
+
+impl<F> StageB for FlatMapB<F>
+where
+    F: for<'a> Fn(&BVal<'a>) -> SmallVec<[BVal<'a>; 4]>,
+{
+    #[inline]
+    fn apply<'a>(&self, _arena: &'a Arena, x: BVal<'a>) -> StageOutputB<'a> {
+        let items = (self.expand)(&x);
+        if items.is_empty() {
+            StageOutputB::Filtered
+        } else if items.len() == 1 {
+            StageOutputB::Pass(items.into_iter().next().unwrap())
+        } else {
+            StageOutputB::Many(items)
+        }
     }
 }
 
@@ -409,6 +515,98 @@ mod tests {
         match out {
             BVal::Int(6) => {}
             _ => panic!("expected Int(6), got {:?}", out),
+        }
+    }
+
+    #[test]
+    fn first_sink_real() {
+        let arena = Arena::new();
+        let items: Vec<BVal> = (10..20).map(BVal::Int).collect();
+        let stages: Box<dyn StageB> = Box::new(IdentityB);
+        let out = run_pipeline_b::<FirstSinkB>(&arena, items.as_slice(), &*stages);
+        match out {
+            BVal::Int(10) => {}
+            _ => panic!("expected Int(10), got {:?}", out),
+        }
+    }
+
+    #[test]
+    fn last_sink_real() {
+        let arena = Arena::new();
+        let items: Vec<BVal> = (10..20).map(BVal::Int).collect();
+        let stages: Box<dyn StageB> = Box::new(IdentityB);
+        let out = run_pipeline_b::<LastSinkB>(&arena, items.as_slice(), &*stages);
+        match out {
+            BVal::Int(19) => {}
+            _ => panic!("expected Int(19), got {:?}", out),
+        }
+    }
+
+    #[test]
+    fn collect_sink_real() {
+        let arena = Arena::new();
+        let items: Vec<BVal> = (1..=5).map(BVal::Int).collect();
+        let stages: Box<dyn StageB> = Box::new(IdentityB);
+        let out = run_pipeline_b::<CollectSinkB>(&arena, items.as_slice(), &*stages);
+        match out {
+            BVal::Arr(arr) => {
+                assert_eq!(arr.len(), 5);
+                for (i, v) in arr.iter().enumerate() {
+                    match v {
+                        BVal::Int(n) => assert_eq!(*n, (i + 1) as i64),
+                        _ => panic!("expected Int"),
+                    }
+                }
+            }
+            _ => panic!("expected Arr"),
+        }
+    }
+
+    #[test]
+    fn min_max_sinks() {
+        let arena = Arena::new();
+        let items = vec![BVal::Int(7), BVal::Int(2), BVal::Int(9), BVal::Int(4)];
+        let stages: Box<dyn StageB> = Box::new(IdentityB);
+        let mn = run_pipeline_b::<MinSinkB>(&arena, items.as_slice(), &*stages);
+        let mx = run_pipeline_b::<MaxSinkB>(&arena, items.as_slice(), &*stages);
+        assert!(matches!(mn, BVal::Int(2)));
+        assert!(matches!(mx, BVal::Int(9)));
+    }
+
+    #[test]
+    fn avg_sink() {
+        let arena = Arena::new();
+        let items = vec![BVal::Int(2), BVal::Int(4), BVal::Int(6)];
+        let stages: Box<dyn StageB> = Box::new(IdentityB);
+        let out = run_pipeline_b::<AvgSinkB>(&arena, items.as_slice(), &*stages);
+        match out {
+            BVal::Float(f) => assert!((f - 4.0).abs() < 1e-9),
+            _ => panic!("expected Float(4.0), got {:?}", out),
+        }
+    }
+
+    #[test]
+    fn map_field_chain_walks() {
+        let arena = Arena::new();
+        // {addr: {city: "NYC"}}
+        let inner = obj_pair(&arena, "city", BVal::Str(arena.alloc_str("NYC")));
+        let outer = obj_pair(&arena, "addr", inner);
+        let items = vec![outer, outer, outer];
+        let stages = MapFieldChainB {
+            chain: vec![std::sync::Arc::from("addr"), std::sync::Arc::from("city")],
+        };
+        let out = run_pipeline_b::<CollectSinkB>(&arena, items.as_slice(), &stages);
+        match out {
+            BVal::Arr(arr) => {
+                assert_eq!(arr.len(), 3);
+                for v in arr.iter() {
+                    match v {
+                        BVal::Str(s) => assert_eq!(*s, "NYC"),
+                        _ => panic!("expected Str"),
+                    }
+                }
+            }
+            _ => panic!("expected Arr"),
         }
     }
 
