@@ -393,7 +393,6 @@ fn entry_extract_direct(
     if b.get(obj_start) != Some(&b'{') { return None; }
     let entry_end = skip_value(b, obj_start)?;
     let entry_range = &b[obj_start + 1 .. entry_end - 1];
-    // Reset slots for this row.
     for s in slots.iter_mut().take(needles.len()) { *s = None; }
     for (slot, needle) in needles.iter().enumerate() {
         if let Some(pos) = memchr::memmem::find(entry_range, needle) {
@@ -407,6 +406,11 @@ fn entry_extract_direct(
     }
     Some(entry_end)
 }
+
+// Aho-Corasick experiment removed — for typical 2-3 wanted-key counts
+// the per-row DFA traversal overhead exceeded the cost of N × direct
+// `memchr::memmem::find` calls.  AC wins for ~5+ needles; keep
+// `entry_extract_direct` as the default.
 
 /// Build pre-quoted needles for direct-memchr search: `"<key>":`.
 fn build_needles(wanted: &[&[u8]]) -> Vec<Vec<u8>> {
@@ -652,6 +656,8 @@ fn run_with_sink(
     if wanted.len() > SCALAR_BUF_CAP { return None; }
     let needles_owned: Vec<Vec<u8>> = build_needles(&wanted);
     let needles: Vec<&[u8]> = needles_owned.iter().map(|n| n.as_slice()).collect();
+    // Note: Aho-Corasick experiment slower than direct memmem for
+    // typical 2-3 wanted-key counts — overhead dominates.  Removed.
 
     // Resolve filter-stage kernels to slot indices ONCE — hoisted out
     // of the hot loop.  Filter kernels are pred-only; non-path bails.
