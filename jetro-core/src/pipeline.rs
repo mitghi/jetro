@@ -2142,6 +2142,98 @@ impl Pipeline {
         self.try_tape_aggregate(Some(cache))
     }
 
+    /// Decompose any fused Sink into a base `(stages, kernels, sink)`
+    /// triple. Pure function — does not mutate `self`. Lets every
+    /// downstream consumer (composed Val/tape runners, columnar fast
+    /// paths, bytescan) work on a single canonical view rather than
+    /// pattern-matching every fused variant separately.
+    ///
+    /// This is the bridge that makes the fused Sink variants
+    /// deletable: after every consumer migrates to `canonical()`, the
+    /// rewrite-time fusion can be turned off and the variants removed
+    /// without per-site sweeps.
+    pub fn canonical(&self) -> (Vec<Stage>, Vec<BodyKernel>, Sink) {
+        let mut stages = self.stages.clone();
+        let mut kernels = self.stage_kernels.clone();
+        let sink = match &self.sink {
+            Sink::NumMap(op, prog) => {
+                stages.push(Stage::Map(Arc::clone(prog)));
+                kernels.push(BodyKernel::classify(prog));
+                Sink::Numeric(*op)
+            }
+            Sink::NumFilterMap(op, pred, map) => {
+                stages.push(Stage::Filter(Arc::clone(pred)));
+                kernels.push(BodyKernel::classify(pred));
+                stages.push(Stage::Map(Arc::clone(map)));
+                kernels.push(BodyKernel::classify(map));
+                Sink::Numeric(*op)
+            }
+            Sink::CountIf(prog) => {
+                stages.push(Stage::Filter(Arc::clone(prog)));
+                kernels.push(BodyKernel::classify(prog));
+                Sink::Count
+            }
+            Sink::FilterFirst(prog) => {
+                stages.push(Stage::Filter(Arc::clone(prog)));
+                kernels.push(BodyKernel::classify(prog));
+                Sink::First
+            }
+            Sink::FilterLast(prog) => {
+                stages.push(Stage::Filter(Arc::clone(prog)));
+                kernels.push(BodyKernel::classify(prog));
+                Sink::Last
+            }
+            Sink::FirstMap(prog) => {
+                stages.push(Stage::Map(Arc::clone(prog)));
+                kernels.push(BodyKernel::classify(prog));
+                Sink::First
+            }
+            Sink::LastMap(prog) => {
+                stages.push(Stage::Map(Arc::clone(prog)));
+                kernels.push(BodyKernel::classify(prog));
+                Sink::Last
+            }
+            Sink::FlatMapCount(prog) => {
+                stages.push(Stage::FlatMap(Arc::clone(prog)));
+                kernels.push(BodyKernel::classify(prog));
+                Sink::Count
+            }
+            Sink::UniqueCount => {
+                stages.push(Stage::UniqueBy(None));
+                kernels.push(BodyKernel::Generic);
+                Sink::Count
+            }
+            Sink::MinBy(key) => {
+                stages.push(Stage::Sort(Some(Arc::clone(key))));
+                kernels.push(BodyKernel::classify(key));
+                Sink::First
+            }
+            Sink::MaxBy(key) => {
+                stages.push(Stage::Sort(Some(Arc::clone(key))));
+                kernels.push(BodyKernel::classify(key));
+                Sink::Last
+            }
+            Sink::TopN { n, asc, key } => {
+                if let Some(k) = key {
+                    stages.push(Stage::Sort(Some(Arc::clone(k))));
+                    kernels.push(BodyKernel::classify(k));
+                } else {
+                    stages.push(Stage::Sort(None));
+                    kernels.push(BodyKernel::Generic);
+                }
+                if !*asc {
+                    stages.push(Stage::Reverse);
+                    kernels.push(BodyKernel::Generic);
+                }
+                stages.push(Stage::Take(*n));
+                kernels.push(BodyKernel::Generic);
+                Sink::Collect
+            }
+            base => base.clone(),
+        };
+        (stages, kernels, sink)
+    }
+
     /// Step 3c — composed-tape runner. Decomposes fused Sinks at entry
     /// (same logic as `try_run_composed`), then dispatches via the
     /// `composed::tape` substrate when every stage classifies to a
@@ -2169,59 +2261,7 @@ impl Pipeline {
             _ => return None,
         };
 
-        // Decompose fused Sinks into base Stage + base Sink. Same
-        // mapping table as `try_run_composed`. Tier 3 deletes the
-        // fused variants and merges these decompositions away.
-        let (eff_stages, eff_kernels, eff_sink): (Vec<Stage>, Vec<BodyKernel>, Sink) = {
-            let mut stages = self.stages.clone();
-            let mut kernels = self.stage_kernels.clone();
-            let sink = match &self.sink {
-                Sink::NumMap(op, prog) => {
-                    stages.push(Stage::Map(Arc::clone(prog)));
-                    kernels.push(BodyKernel::classify(prog));
-                    Sink::Numeric(*op)
-                }
-                Sink::NumFilterMap(op, pred, map) => {
-                    stages.push(Stage::Filter(Arc::clone(pred)));
-                    kernels.push(BodyKernel::classify(pred));
-                    stages.push(Stage::Map(Arc::clone(map)));
-                    kernels.push(BodyKernel::classify(map));
-                    Sink::Numeric(*op)
-                }
-                Sink::CountIf(prog) => {
-                    stages.push(Stage::Filter(Arc::clone(prog)));
-                    kernels.push(BodyKernel::classify(prog));
-                    Sink::Count
-                }
-                Sink::FilterFirst(prog) => {
-                    stages.push(Stage::Filter(Arc::clone(prog)));
-                    kernels.push(BodyKernel::classify(prog));
-                    Sink::First
-                }
-                Sink::FilterLast(prog) => {
-                    stages.push(Stage::Filter(Arc::clone(prog)));
-                    kernels.push(BodyKernel::classify(prog));
-                    Sink::Last
-                }
-                Sink::FirstMap(prog) => {
-                    stages.push(Stage::Map(Arc::clone(prog)));
-                    kernels.push(BodyKernel::classify(prog));
-                    Sink::First
-                }
-                Sink::LastMap(prog) => {
-                    stages.push(Stage::Map(Arc::clone(prog)));
-                    kernels.push(BodyKernel::classify(prog));
-                    Sink::Last
-                }
-                Sink::FlatMapCount(prog) => {
-                    stages.push(Stage::FlatMap(Arc::clone(prog)));
-                    kernels.push(BodyKernel::classify(prog));
-                    Sink::Count
-                }
-                base => base.clone(),
-            };
-            (stages, kernels, sink)
-        };
+        let (eff_stages, eff_kernels, eff_sink) = self.canonical();
 
         // Sink mapping. Barriers (Sort/UniqueBy/GroupBy/Reverse)
         // and computed sinks bail — Val path handles them.
@@ -2311,93 +2351,7 @@ impl Pipeline {
         use std::cell::{Cell, RefCell};
         use std::rc::Rc;
 
-        // Decompose fused Sinks into base Stage chain + base Sink so
-        // the composed substrate runs them uniformly. One match arm
-        // per fused variant; result is a (stages, sink) pair that
-        // mirrors the pre-fusion form. No per-shape exec code — same
-        // generic pipeline handles every result. Tier 3 deletes the
-        // fused Sink variants + this decomposition together.
-        let (eff_stages, eff_kernels, eff_sink): (Vec<Stage>, Vec<BodyKernel>, Sink) = {
-            let mut stages = self.stages.clone();
-            let mut kernels = self.stage_kernels.clone();
-            let sink = match &self.sink {
-                Sink::NumMap(op, prog) => {
-                    stages.push(Stage::Map(Arc::clone(prog)));
-                    kernels.push(BodyKernel::classify(prog));
-                    Sink::Numeric(*op)
-                }
-                Sink::NumFilterMap(op, pred, map) => {
-                    stages.push(Stage::Filter(Arc::clone(pred)));
-                    kernels.push(BodyKernel::classify(pred));
-                    stages.push(Stage::Map(Arc::clone(map)));
-                    kernels.push(BodyKernel::classify(map));
-                    Sink::Numeric(*op)
-                }
-                Sink::CountIf(prog) => {
-                    stages.push(Stage::Filter(Arc::clone(prog)));
-                    kernels.push(BodyKernel::classify(prog));
-                    Sink::Count
-                }
-                Sink::FilterFirst(prog) => {
-                    stages.push(Stage::Filter(Arc::clone(prog)));
-                    kernels.push(BodyKernel::classify(prog));
-                    Sink::First
-                }
-                Sink::FilterLast(prog) => {
-                    stages.push(Stage::Filter(Arc::clone(prog)));
-                    kernels.push(BodyKernel::classify(prog));
-                    Sink::Last
-                }
-                Sink::FirstMap(prog) => {
-                    stages.push(Stage::Map(Arc::clone(prog)));
-                    kernels.push(BodyKernel::classify(prog));
-                    Sink::First
-                }
-                Sink::LastMap(prog) => {
-                    stages.push(Stage::Map(Arc::clone(prog)));
-                    kernels.push(BodyKernel::classify(prog));
-                    Sink::Last
-                }
-                Sink::FlatMapCount(prog) => {
-                    stages.push(Stage::FlatMap(Arc::clone(prog)));
-                    kernels.push(BodyKernel::classify(prog));
-                    Sink::Count
-                }
-                Sink::UniqueCount => {
-                    stages.push(Stage::UniqueBy(None));
-                    kernels.push(BodyKernel::Generic);
-                    Sink::Count
-                }
-                Sink::MinBy(key) => {
-                    stages.push(Stage::Sort(Some(Arc::clone(key))));
-                    kernels.push(BodyKernel::classify(key));
-                    Sink::First
-                }
-                Sink::MaxBy(key) => {
-                    stages.push(Stage::Sort(Some(Arc::clone(key))));
-                    kernels.push(BodyKernel::classify(key));
-                    Sink::Last
-                }
-                Sink::TopN { n, asc, key } => {
-                    if let Some(k) = key {
-                        stages.push(Stage::Sort(Some(Arc::clone(k))));
-                        kernels.push(BodyKernel::classify(k));
-                    } else {
-                        stages.push(Stage::Sort(None));
-                        kernels.push(BodyKernel::Generic);
-                    }
-                    if !*asc {
-                        stages.push(Stage::Reverse);
-                        kernels.push(BodyKernel::Generic);
-                    }
-                    stages.push(Stage::Take(*n));
-                    kernels.push(BodyKernel::Generic);
-                    Sink::Collect
-                }
-                base => base.clone(),
-            };
-            (stages, kernels, sink)
-        };
+        let (eff_stages, eff_kernels, eff_sink) = self.canonical();
 
         // Shared VM + Env for any Generic-kernel stage in the chain.
         // Constructed once per call so compile/path caches amortise.
