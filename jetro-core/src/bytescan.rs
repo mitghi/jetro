@@ -648,65 +648,253 @@ fn run_with_sink(
     raw: &[u8],
     arr_start: usize,
 ) -> Option<Result<Val, EvalError>> {
-    // Pre-cache wanted-name bytes — avoids per-row utf8 + Arc<str> compare.
     let wanted: Vec<&[u8]> = cat.fields.iter().map(|f| f.as_bytes()).collect();
-    if wanted.len() > SCALAR_BUF_CAP { return None; }  // bail; too many wanted
-    // Pre-build `"<key>":` needles for direct-memchr fast path.
+    if wanted.len() > SCALAR_BUF_CAP { return None; }
     let needles_owned: Vec<Vec<u8>> = build_needles(&wanted);
     let needles: Vec<&[u8]> = needles_owned.iter().map(|n| n.as_slice()).collect();
-    let mut i = arr_start;
-    if raw.get(i) != Some(&b'[') { return None; }
-    i = skip_ws(raw, i + 1);
-    let mut acc = Acc::new();
+
+    // Resolve filter-stage kernels to slot indices ONCE — hoisted out
+    // of the hot loop.  Filter kernels are pred-only; non-path bails.
+    let mut filter_slots: Vec<(usize, FilterCmp)> = Vec::new();
+    for (st, k) in p.stages.iter().zip(p.stage_kernels.iter()) {
+        if let Stage::Filter(_) = st {
+            let (slot, cmp) = resolve_pred_to_slot(k, cat)?;
+            filter_slots.push((slot, cmp));
+        }
+    }
+
+    // Sink-specific monomorphic loops — hoist Sink-variant match out
+    // of per-row.  Each branch resolves sink kernels to slot indices
+    // ONCE and runs a tight loop that does only:
+    //   1. extract entry slots
+    //   2. apply pre-resolved filters
+    //   3. read pre-resolved sink-slot values + accumulate
+    // No kernel-variant match per row, no Catalog lookup per row.
+    match &p.sink {
+        Sink::Count => {
+            let count = scan_loop_count(raw, arr_start, &needles, &filter_slots)?;
+            Some(Ok(Val::Int(count as i64)))
+        }
+        Sink::CountIf(_) => {
+            let pred_k = p.sink_kernels.get(0)?;
+            let (pred_slot, pred_cmp) = resolve_pred_to_slot(pred_k, cat)?;
+            let count = scan_loop_count_if(raw, arr_start, &needles, &filter_slots, pred_slot, pred_cmp)?;
+            Some(Ok(Val::Int(count as i64)))
+        }
+        Sink::NumMap(op, _) => {
+            let map_k = p.sink_kernels.get(0)?;
+            let map_slot = resolve_value_to_slot(map_k, cat)?;
+            let acc = scan_loop_num_map(raw, arr_start, &needles, &filter_slots, map_slot)?;
+            Some(Ok(acc.finalise(*op)))
+        }
+        Sink::NumFilterMap(op, _, _) => {
+            let pred_k = p.sink_kernels.get(0)?;
+            let map_k = p.sink_kernels.get(1)?;
+            let (pred_slot, pred_cmp) = resolve_pred_to_slot(pred_k, cat)?;
+            let map_slot = resolve_value_to_slot(map_k, cat)?;
+            let acc = scan_loop_num_filter_map(raw, arr_start, &needles, &filter_slots, pred_slot, pred_cmp, map_slot)?;
+            Some(Ok(acc.finalise(*op)))
+        }
+        _ => None,
+    }
+}
+
+/// Pre-resolved filter pred — operates on a single slot.
+#[derive(Debug, Clone, Copy)]
+enum FilterCmp {
+    Truthy,
+    Eq(LitNum),
+    Neq(LitNum),
+    Lt(LitNum),
+    Lte(LitNum),
+    Gt(LitNum),
+    Gte(LitNum),
+}
+
+#[derive(Debug, Clone, Copy)]
+enum LitNum { Int(i64), Float(f64), Bool(bool) }
+
+fn resolve_pred_to_slot(k: &BodyKernel, cat: &Catalog) -> Option<(usize, FilterCmp)> {
+    use crate::ast::BinOp;
+    let to_cmp = |op: BinOp, lit: LitNum| -> Option<FilterCmp> {
+        Some(match op {
+            BinOp::Eq => FilterCmp::Eq(lit),
+            BinOp::Neq => FilterCmp::Neq(lit),
+            BinOp::Lt => FilterCmp::Lt(lit),
+            BinOp::Lte => FilterCmp::Lte(lit),
+            BinOp::Gt => FilterCmp::Gt(lit),
+            BinOp::Gte => FilterCmp::Gte(lit),
+            _ => return None,
+        })
+    };
+    let to_lit = |v: &Val| -> Option<LitNum> {
+        match v {
+            Val::Int(n) => Some(LitNum::Int(*n)),
+            Val::Float(f) => Some(LitNum::Float(*f)),
+            Val::Bool(b) => Some(LitNum::Bool(*b)),
+            _ => None,
+        }
+    };
+    match k {
+        BodyKernel::FieldRead(name) => {
+            let s = cat.slot_lookup(name.as_ref())?;
+            Some((s, FilterCmp::Truthy))
+        }
+        BodyKernel::FieldChain(keys) if keys.len() == 1 => {
+            let s = cat.slot_lookup(keys[0].as_ref())?;
+            Some((s, FilterCmp::Truthy))
+        }
+        BodyKernel::FieldCmpLit(name, op, lit) => {
+            let s = cat.slot_lookup(name.as_ref())?;
+            Some((s, to_cmp(*op, to_lit(lit)?)?))
+        }
+        BodyKernel::FieldChainCmpLit(keys, op, lit) if keys.len() == 1 => {
+            let s = cat.slot_lookup(keys[0].as_ref())?;
+            Some((s, to_cmp(*op, to_lit(lit)?)?))
+        }
+        _ => None,
+    }
+}
+
+fn resolve_value_to_slot(k: &BodyKernel, cat: &Catalog) -> Option<usize> {
+    match k {
+        BodyKernel::FieldRead(name) => cat.slot_lookup(name.as_ref()),
+        BodyKernel::FieldChain(keys) if keys.len() == 1 => cat.slot_lookup(keys[0].as_ref()),
+        _ => None,
+    }
+}
+
+#[inline]
+fn check_pred(slot: Option<Scalar>, cmp: FilterCmp) -> bool {
+    match cmp {
+        FilterCmp::Truthy => slot.map_or(false, truthy),
+        FilterCmp::Eq(lit) | FilterCmp::Neq(lit) | FilterCmp::Lt(lit)
+        | FilterCmp::Lte(lit) | FilterCmp::Gt(lit) | FilterCmp::Gte(lit) => {
+            let v = match slot { Some(v) => v, None => return false };
+            let cmp_result = cmp_lit(v, lit);
+            match cmp {
+                FilterCmp::Eq(_) => cmp_result == Some(std::cmp::Ordering::Equal),
+                FilterCmp::Neq(_) => cmp_result.map_or(false, |o| o != std::cmp::Ordering::Equal),
+                FilterCmp::Lt(_) => cmp_result == Some(std::cmp::Ordering::Less),
+                FilterCmp::Lte(_) => cmp_result.map_or(false, |o| o != std::cmp::Ordering::Greater),
+                FilterCmp::Gt(_) => cmp_result == Some(std::cmp::Ordering::Greater),
+                FilterCmp::Gte(_) => cmp_result.map_or(false, |o| o != std::cmp::Ordering::Less),
+                _ => false,
+            }
+        }
+    }
+}
+
+fn cmp_lit(v: Scalar, lit: LitNum) -> Option<std::cmp::Ordering> {
+    match (v, lit) {
+        (Scalar::Int(a), LitNum::Int(b)) => Some(a.cmp(&b)),
+        (Scalar::Int(a), LitNum::Float(b)) => (a as f64).partial_cmp(&b),
+        (Scalar::Float(a), LitNum::Int(b)) => a.partial_cmp(&(b as f64)),
+        (Scalar::Float(a), LitNum::Float(b)) => a.partial_cmp(&b),
+        (Scalar::Bool(a), LitNum::Bool(b)) => Some((a as u8).cmp(&(b as u8))),
+        _ => None,
+    }
+}
+
+#[inline]
+fn entry_advance(raw: &[u8], next: usize) -> usize {
+    let mut i = skip_ws(raw, next);
+    if i < raw.len() && raw[i] == b',' { i = skip_ws(raw, i + 1); }
+    i
+}
+
+#[inline]
+fn check_filters(slots: &Slots, filters: &[(usize, FilterCmp)]) -> bool {
+    for &(s, cmp) in filters {
+        if !check_pred(slots[s], cmp) { return false; }
+    }
+    true
+}
+
+fn scan_loop_count(
+    raw: &[u8], arr_start: usize,
+    needles: &[&[u8]],
+    filters: &[(usize, FilterCmp)],
+) -> Option<u64> {
+    let mut i = arr_start + 1;
+    i = skip_ws(raw, i);
     let mut count: u64 = 0;
     let mut slots: Slots = [None; SCALAR_BUF_CAP];
-    while i < raw.len() {
-        if raw[i] == b']' { break; }
-        let next = entry_extract_direct(raw, i, &needles, &mut slots)?;
-        // Eval filters
-        let mut pass = true;
-        for (st, k) in p.stages.iter().zip(p.stage_kernels.iter()) {
-            if let Stage::Filter(_) = st {
-                if !eval_pred_kernel(k, &slots, cat, raw)? { pass = false; break; }
-            }
-        }
-        if pass {
-            match &p.sink {
-                Sink::Count => { count += 1; }
-                Sink::CountIf(_) => {
-                    let pred_k = p.sink_kernels.get(0)?;
-                    if eval_pred_kernel(pred_k, &slots, cat, raw)? { count += 1; }
-                }
-                Sink::Numeric(_) => {
-                    // Accumulate the entry value itself — only meaningful
-                    // when entry is a primitive (rare for byte path; stays
-                    // on tape).  Bail.
-                    return None;
-                }
-                Sink::NumMap(_, _) => {
-                    let map_k = p.sink_kernels.get(0)?;
-                    let v = eval_value_kernel(map_k, &slots, cat)?;
-                    if !acc.push(v) { return None; }
-                }
-                Sink::NumFilterMap(_, _, _) => {
-                    let pred_k = p.sink_kernels.get(0)?;
-                    let map_k = p.sink_kernels.get(1)?;
-                    if eval_pred_kernel(pred_k, &slots, cat, raw)? {
-                        let v = eval_value_kernel(map_k, &slots, cat)?;
-                        if !acc.push(v) { return None; }
-                    }
-                }
-                _ => return None,
-            }
-        }
-        i = next;
-        i = skip_ws(raw, i);
-        if i < raw.len() && raw[i] == b',' { i = skip_ws(raw, i + 1); }
+    while i < raw.len() && raw[i] != b']' {
+        let next = if filters.is_empty() {
+            count += 1;
+            skip_value(raw, i)?
+        } else {
+            let n = entry_extract_direct(raw, i, needles, &mut slots)?;
+            if check_filters(&slots, filters) { count += 1; }
+            n
+        };
+        i = entry_advance(raw, next);
     }
-    let result = match &p.sink {
-        Sink::Count | Sink::CountIf(_) => Val::Int(count as i64),
-        Sink::NumMap(op, _) | Sink::NumFilterMap(op, _, _) => acc.finalise(*op),
-        _ => return None,
-    };
-    Some(Ok(result))
+    Some(count)
+}
+
+fn scan_loop_count_if(
+    raw: &[u8], arr_start: usize,
+    needles: &[&[u8]],
+    filters: &[(usize, FilterCmp)],
+    pred_slot: usize, pred_cmp: FilterCmp,
+) -> Option<u64> {
+    let mut i = arr_start + 1;
+    i = skip_ws(raw, i);
+    let mut count: u64 = 0;
+    let mut slots: Slots = [None; SCALAR_BUF_CAP];
+    while i < raw.len() && raw[i] != b']' {
+        let next = entry_extract_direct(raw, i, needles, &mut slots)?;
+        if check_filters(&slots, filters) && check_pred(slots[pred_slot], pred_cmp) {
+            count += 1;
+        }
+        i = entry_advance(raw, next);
+    }
+    Some(count)
+}
+
+fn scan_loop_num_map(
+    raw: &[u8], arr_start: usize,
+    needles: &[&[u8]],
+    filters: &[(usize, FilterCmp)],
+    map_slot: usize,
+) -> Option<Acc> {
+    let mut i = arr_start + 1;
+    i = skip_ws(raw, i);
+    let mut acc = Acc::new();
+    let mut slots: Slots = [None; SCALAR_BUF_CAP];
+    while i < raw.len() && raw[i] != b']' {
+        let next = entry_extract_direct(raw, i, needles, &mut slots)?;
+        if check_filters(&slots, filters) {
+            if let Some(v) = slots[map_slot] {
+                if !acc.push(v) { return None; }
+            }
+        }
+        i = entry_advance(raw, next);
+    }
+    Some(acc)
+}
+
+fn scan_loop_num_filter_map(
+    raw: &[u8], arr_start: usize,
+    needles: &[&[u8]],
+    filters: &[(usize, FilterCmp)],
+    pred_slot: usize, pred_cmp: FilterCmp,
+    map_slot: usize,
+) -> Option<Acc> {
+    let mut i = arr_start + 1;
+    i = skip_ws(raw, i);
+    let mut acc = Acc::new();
+    let mut slots: Slots = [None; SCALAR_BUF_CAP];
+    while i < raw.len() && raw[i] != b']' {
+        let next = entry_extract_direct(raw, i, needles, &mut slots)?;
+        if check_filters(&slots, filters) && check_pred(slots[pred_slot], pred_cmp) {
+            if let Some(v) = slots[map_slot] {
+                if !acc.push(v) { return None; }
+            }
+        }
+        i = entry_advance(raw, next);
+    }
+    Some(acc)
 }
