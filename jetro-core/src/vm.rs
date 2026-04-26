@@ -452,11 +452,6 @@ pub enum Opcode {
     /// `map(-@)` — unary negation per element, preserves lane.
     MapNumVecNeg,
 
-    /// Fused equi-join: TOS is lhs array; `rhs` program evaluates
-    /// to rhs array; join by (lhs_key, rhs_key) string field names.
-    /// Produces array of merged objects (rhs wins on collision).
-    EquiJoin { rhs: Arc<Program>, lhs_key: Arc<str>, rhs_key: Arc<str> },
-
     // ── Ident lookup (var, then current field) ────────────────────────────────
     LoadIdent(Arc<str>),
 
@@ -1350,32 +1345,11 @@ impl Compiler {
         let ops = if cfg.method_const    { Self::pass_method_const_fold(ops)} else { ops };
         let ops = if cfg.const_fold      { Self::pass_const_fold(ops) }      else { ops };
         let ops = if cfg.nullness        { Self::pass_nullness_opt_field(ops)} else { ops };
-        let ops = if cfg.equi_join       { Self::pass_equi_join_fusion(ops) } else { ops };
         ops
     }
 
-    /// Rewrite `CallMethod(equi_join, [rhs, PushStr(lk), PushStr(rk)])`
-    /// to the fused `EquiJoin` opcode — removes runtime method dispatch
-    /// and extracts string keys into the opcode so the executor can
-    /// hash directly.
-    fn pass_equi_join_fusion(ops: Vec<Opcode>) -> Vec<Opcode> {
-        let mut out: Vec<Opcode> = Vec::with_capacity(ops.len());
-        for op in ops {
-            if let Opcode::CallMethod(c) = &op {
-                if c.method == BuiltinMethod::EquiJoin && c.sub_progs.len() == 3 {
-                    let rhs = Arc::clone(&c.sub_progs[0]);
-                    let lhs_key = const_str_program(&c.sub_progs[1]);
-                    let rhs_key = const_str_program(&c.sub_progs[2]);
-                    if let (Some(lk), Some(rk)) = (lhs_key, rhs_key) {
-                        out.push(Opcode::EquiJoin { rhs, lhs_key: lk, rhs_key: rk });
-                        continue;
-                    }
-                }
-            }
-            out.push(op);
-        }
-        out
-    }
+    // pass_equi_join_fusion deleted — composed substrate runs base
+    // CallMethod(equi_join, [rhs, lk, rk]) via dispatch_method.
 
     /// Nullness-driven: when the preceding op provably leaves a non-null
     /// receiver on the stack, rewrite `OptField(k)` → `GetField(k)`.
@@ -2634,7 +2608,6 @@ pub struct PassConfig {
     pub method_const:    bool,
     pub const_fold:      bool,
     pub nullness:        bool,
-    pub equi_join:       bool,
     pub reorder_and:     bool,
     pub dedup_subprogs:  bool,
 }
@@ -2645,7 +2618,7 @@ impl Default for PassConfig {
             root_chain: true, field_chain: true, filter_count: true, filter_fusion: true,
             find_quantifier: true, strength_reduce: true, redundant_ops: true,
             kind_check_fold: true, method_const: true, const_fold: true,
-            nullness: true, equi_join: true,
+            nullness: true,
             reorder_and: true, dedup_subprogs: true,
         }
     }
@@ -2658,7 +2631,7 @@ impl PassConfig {
             root_chain: false, field_chain: false, filter_count: false, filter_fusion: false,
             find_quantifier: false, strength_reduce: false, redundant_ops: false,
             kind_check_fold: false, method_const: false, const_fold: false,
-            nullness: false, equi_join: false,
+            nullness: false,
             reorder_and: false, dedup_subprogs: false,
         }
     }
@@ -2668,7 +2641,7 @@ impl PassConfig {
         for (i, b) in [self.root_chain, self.field_chain, self.filter_count, self.filter_fusion,
                        self.find_quantifier, self.strength_reduce, self.redundant_ops,
                        self.kind_check_fold, self.method_const, self.const_fold,
-                       self.nullness, self.equi_join,
+                       self.nullness,
                        self.reorder_and, self.dedup_subprogs].iter().enumerate() {
             if *b { bits |= 1u64 << i; }
         }
@@ -3986,51 +3959,8 @@ impl VM {
                 // aggregate as two separate ops.
                 // FilterLast handler removed — pipeline.rs Sink::FilterLast
                 // covers `.filter(p).last()` for top-level queries.
-                Opcode::EquiJoin { rhs, lhs_key, rhs_key } => {
-                    use std::collections::HashMap;
-                    let left_val = pop!(stack);
-                    let right_val = self.exec(rhs, env)?;
-                    let left = match left_val {
-                        Val::Arr(a) => Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone()),
-                        _ => Vec::new(),
-                    };
-                    let right = match right_val {
-                        Val::Arr(a) => Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone()),
-                        _ => Vec::new(),
-                    };
-                    let mut idx: HashMap<String, Vec<Val>> = HashMap::with_capacity(right.len());
-                    let mut r_slot: Option<usize> = None;
-                    for r in right {
-                        let key = match &r {
-                            Val::Obj(o) => lookup_field_cached(o, rhs_key, &mut r_slot)
-                                .map(super::eval::util::val_to_key),
-                            _ => None,
-                        };
-                        if let Some(k) = key { idx.entry(k).or_default().push(r); }
-                    }
-                    let mut out = Vec::with_capacity(left.len());
-                    let mut l_slot: Option<usize> = None;
-                    for l in left {
-                        let key = match &l {
-                            Val::Obj(o) => lookup_field_cached(o, lhs_key, &mut l_slot)
-                                .map(super::eval::util::val_to_key),
-                            _ => None,
-                        };
-                        let Some(k) = key else { continue };
-                        let Some(matches) = idx.get(&k) else { continue };
-                        for r in matches {
-                            match (&l, r) {
-                                (Val::Obj(lo), Val::Obj(ro)) => {
-                                    let mut m = (**lo).clone();
-                                    for (k, v) in ro.iter() { m.insert(k.clone(), v.clone()); }
-                                    out.push(Val::obj(m));
-                                }
-                                _ => out.push(l.clone()),
-                            }
-                        }
-                    }
-                    stack.push(Val::arr(out));
-                }
+                // EquiJoin handler removed — base CallMethod(equi_join)
+                // dispatch covers it via dispatch_method.
                 // TopN handler removed — pipeline.rs Sink::TopN covers
                 // sort()+take(n) for top-level Root-prefix queries.
                 // UniqueCount handler removed — pipeline.rs Sink::UniqueCount
@@ -6034,14 +5964,6 @@ fn apply_fmt_spec(val: &Val, spec: &str) -> String {
 // ── Opcode helpers ────────────────────────────────────────────────────────────
 
 // WrapVal removed alongside the TopN opcode.
-
-/// Extract a literal string from a single-op program `[PushStr(s)]`.
-fn const_str_program(p: &Arc<Program>) -> Option<Arc<str>> {
-    match p.ops.as_ref() {
-        [Opcode::PushStr(s)] => Some(s.clone()),
-        _ => None,
-    }
-}
 
 fn make_noarg_call(method: BuiltinMethod, name: &str) -> Opcode {
     Opcode::CallMethod(Arc::new(CompiledCall {

@@ -240,8 +240,7 @@ fn apply_op(op: &Opcode, stack: &mut Vec<AbstractVal>) {
             pop1!();
             stack.push(AbstractVal::scalar(VType::Int));
         }
-        Opcode::EquiJoin { .. }
-            | Opcode::MapField(_) | Opcode::MapFieldChain(_) | Opcode::MapFieldUnique(_)
+        Opcode::MapField(_) | Opcode::MapFieldChain(_) | Opcode::MapFieldUnique(_)
             | Opcode::MapFieldChainUnique(_)
             | Opcode::FlatMapChain(_)
             | Opcode::FilterFieldEqLit(_, _) | Opcode::FilterFieldCmpLit(_, _, _)
@@ -930,7 +929,6 @@ pub fn opcode_cost(op: &Opcode) -> u32 {
         Opcode::InlineFilter(p) 
              
             | Opcode::DynIndex(p) => 10 + program_cost(p),
-        Opcode::EquiJoin { rhs, .. } => 25 + program_cost(rhs),
         Opcode::CallMethod(c) | Opcode::CallOptMethod(c) => {
             let base = match c.method {
                 BuiltinMethod::Filter | BuiltinMethod::Map | BuiltinMethod::FlatMap => 10,
