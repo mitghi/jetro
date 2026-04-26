@@ -63,7 +63,6 @@ pub mod strref;
 pub mod pipeline;
 pub mod bytescan;
 pub mod composed;
-pub mod composed_borrow;
 pub mod pipeline_borrow;
 #[cfg(feature = "simd-json")]
 pub mod composed_tape;

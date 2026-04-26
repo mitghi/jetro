@@ -142,12 +142,11 @@ fn bench_phase2_arena_build(bytes: &[u8]) -> (Stat, Stat) {
 }
 
 fn bench_composed_borrow_loop() -> Stat {
-    use jetro_core::composed_borrow::{
-        ComposedB, FilterB, MapFieldB, SkipB, TakeB,
-        SumSinkB, run_pipeline_b,
-    };
     use jetro_core::eval::borrowed::{Arena, Val as BVal};
-    println!("── composed_borrow Phase 1: StageB run loop (5000 elems) ──");
+    use jetro_core::unified::{
+        Composed, Filter, MapField, Skip, Take, SumSink, run_pipeline,
+    };
+    println!("── unified BVal: run_pipeline (5000 elems) ──");
     let arena = Arena::with_capacity(1024 * 1024);
     let mut items: Vec<BVal> = Vec::with_capacity(5000);
     for i in 0..5000i64 {
@@ -157,20 +156,20 @@ fn bench_composed_borrow_loop() -> Stat {
     }
     let stat = time("  filter(n>=100).skip(100).take(1000).map(n).sum()",
         N_ITERS, || {
-        let stages = ComposedB {
-            a: FilterB { pred: |v: &BVal<'_>| {
+        let stages = Composed::<BVal, _, _>::new(
+            Filter::<BVal, _>::new(|v: &BVal<'_>| {
                 v.get_field("n").map_or(false,
                     |x| matches!(x, BVal::Int(n) if n >= 100))
-            }},
-            b: ComposedB {
-                a: SkipB::new(100),
-                b: ComposedB {
-                    a: TakeB::new(1000),
-                    b: MapFieldB { field: std::sync::Arc::from("n") },
-                },
-            },
-        };
-        let out = run_pipeline_b::<SumSinkB>(&arena, items.as_slice(), &stages);
+            }),
+            Composed::<BVal, _, _>::new(
+                Skip::<BVal>::new(100),
+                Composed::<BVal, _, _>::new(
+                    Take::<BVal>::new(1000),
+                    MapField::<BVal>::new(std::sync::Arc::from("n")),
+                ),
+            ),
+        );
+        let out = run_pipeline::<BVal, SumSink>(&arena, items.iter().copied(), &stages);
         std::hint::black_box(out);
     });
     println!();
@@ -196,16 +195,15 @@ fn bench_pipeline_borrow_direct(bytes: &[u8]) -> Stat {
 }
 
 fn bench_composed_borrow_phase2_sinks() -> Stat {
-    use jetro_core::composed_borrow::{
-        IdentityB, FirstSinkB, LastSinkB, CollectSinkB,
-        MinSinkB, MaxSinkB, AvgSinkB, MapFieldChainB, run_pipeline_b,
-    };
     use jetro_core::eval::borrowed::{Arena, Val as BVal};
-    println!("── composed_borrow Phase 2: GAT-Acc sinks + chain stage ──");
+    use jetro_core::unified::{
+        Identity, FirstSink, LastSink, CollectSink,
+        MinSink, MaxSink, AvgSink, MapFieldChain, run_pipeline,
+    };
+    println!("── unified BVal: GAT-Acc sinks + chain stage ──");
     let arena = Arena::with_capacity(1024 * 1024);
     let mut items: Vec<BVal> = Vec::with_capacity(5000);
     for i in 0..5000i64 {
-        // {addr: {city: "X", n: i}}
         let inner_pairs = vec![
             (arena.alloc_str("city"), BVal::Str(arena.alloc_str("NYC"))),
             (arena.alloc_str("n"), BVal::Int(i)),
@@ -216,25 +214,24 @@ fn bench_composed_borrow_phase2_sinks() -> Stat {
         let outer_slice = arena.alloc_slice_fill_iter(outer_pairs.into_iter());
         items.push(BVal::Obj(&*outer_slice));
     }
-    let identity: Box<dyn jetro_core::composed_borrow::StageB> = Box::new(IdentityB);
+    let identity: Identity<BVal> = Identity::new();
 
     let _ = time("  First/Last/Collect — 5000 elems via Identity",
         N_ITERS, || {
-        let f = run_pipeline_b::<FirstSinkB>(&arena, items.as_slice(), &*identity);
-        let l = run_pipeline_b::<LastSinkB>(&arena, items.as_slice(), &*identity);
-        let c = run_pipeline_b::<CollectSinkB>(&arena, items.as_slice(), &*identity);
+        let f = run_pipeline::<BVal, FirstSink>(&arena, items.iter().copied(), &identity);
+        let l = run_pipeline::<BVal, LastSink>(&arena, items.iter().copied(), &identity);
+        let c = run_pipeline::<BVal, CollectSink>(&arena, items.iter().copied(), &identity);
         std::hint::black_box((f, l, c));
     });
 
-    // Numeric sinks over MapFieldChain(addr.n)
     let stat = time("  Min/Max/Avg ∘ MapFieldChain[addr.n] — 5000 elems",
         N_ITERS, || {
-        let chain = MapFieldChainB {
-            chain: vec![std::sync::Arc::from("addr"), std::sync::Arc::from("n")],
-        };
-        let mn = run_pipeline_b::<MinSinkB>(&arena, items.as_slice(), &chain);
-        let mx = run_pipeline_b::<MaxSinkB>(&arena, items.as_slice(), &chain);
-        let av = run_pipeline_b::<AvgSinkB>(&arena, items.as_slice(), &chain);
+        let chain = MapFieldChain::<BVal>::new(
+            vec![std::sync::Arc::from("addr"), std::sync::Arc::from("n")],
+        );
+        let mn = run_pipeline::<BVal, MinSink>(&arena, items.iter().copied(), &chain);
+        let mx = run_pipeline::<BVal, MaxSink>(&arena, items.iter().copied(), &chain);
+        let av = run_pipeline::<BVal, AvgSink>(&arena, items.iter().copied(), &chain);
         std::hint::black_box((mn, mx, av));
     });
 

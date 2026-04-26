@@ -177,12 +177,11 @@ fn uncovered_shape_parity_fallback() {
 }
 
 #[test]
-fn composed_borrow_phase1_run_loop_under_budget() {
-    use jetro_core::composed_borrow::{
-        ComposedB, FilterB, MapFieldB, SkipB, TakeB,
-        SumSinkB, run_pipeline_b,
-    };
+fn unified_bval_run_loop_under_budget() {
     use jetro_core::eval::borrowed::{Arena, Val as BVal};
+    use jetro_core::unified::{
+        Composed, Filter, MapField, Skip, Take, SumSink, run_pipeline,
+    };
     let arena = Arena::with_capacity(1024 * 1024);
     let mut items: Vec<BVal> = Vec::with_capacity(5000);
     for i in 0..5000i64 {
@@ -191,35 +190,35 @@ fn composed_borrow_phase1_run_loop_under_budget() {
         items.push(BVal::Obj(&*slice));
     }
     let med = time_med(N_ITERS, || {
-        let stages = ComposedB {
-            a: FilterB { pred: |v: &BVal<'_>| {
+        let stages = Composed::<BVal, _, _>::new(
+            Filter::<BVal, _>::new(|v: &BVal<'_>| {
                 v.get_field("n").map_or(false,
                     |x| matches!(x, BVal::Int(n) if n >= 100))
-            }},
-            b: ComposedB {
-                a: SkipB::new(100),
-                b: ComposedB {
-                    a: TakeB::new(1000),
-                    b: MapFieldB { field: std::sync::Arc::from("n") },
-                },
-            },
-        };
-        let out = run_pipeline_b::<SumSinkB>(&arena, items.as_slice(), &stages);
+            }),
+            Composed::<BVal, _, _>::new(
+                Skip::<BVal>::new(100),
+                Composed::<BVal, _, _>::new(
+                    Take::<BVal>::new(1000),
+                    MapField::<BVal>::new(std::sync::Arc::from("n")),
+                ),
+            ),
+        );
+        let out = run_pipeline::<BVal, SumSink>(&arena, items.iter().copied(), &stages);
         std::hint::black_box(out);
     });
     assert!(
         med <= COMPOSED_B_PHASE1_BUDGET_US,
-        "composed_borrow Phase 1 run loop {} µs > budget {} µs",
+        "unified BVal run loop {} µs > budget {} µs",
         med, COMPOSED_B_PHASE1_BUDGET_US
     );
 }
 
 #[test]
-fn composed_borrow_phase2_sinks_under_budget() {
-    use jetro_core::composed_borrow::{
-        MinSinkB, MaxSinkB, AvgSinkB, MapFieldChainB, run_pipeline_b,
-    };
+fn unified_bval_chain_sinks_under_budget() {
     use jetro_core::eval::borrowed::{Arena, Val as BVal};
+    use jetro_core::unified::{
+        MapFieldChain, MinSink, MaxSink, AvgSink, run_pipeline,
+    };
     let arena = Arena::with_capacity(1024 * 1024);
     let mut items: Vec<BVal> = Vec::with_capacity(5000);
     for i in 0..5000i64 {
@@ -234,17 +233,17 @@ fn composed_borrow_phase2_sinks_under_budget() {
         items.push(BVal::Obj(&*outer_slice));
     }
     let med = time_med(N_ITERS, || {
-        let chain = MapFieldChainB {
-            chain: vec![std::sync::Arc::from("addr"), std::sync::Arc::from("n")],
-        };
-        let mn = run_pipeline_b::<MinSinkB>(&arena, items.as_slice(), &chain);
-        let mx = run_pipeline_b::<MaxSinkB>(&arena, items.as_slice(), &chain);
-        let av = run_pipeline_b::<AvgSinkB>(&arena, items.as_slice(), &chain);
+        let chain = MapFieldChain::<BVal>::new(
+            vec![std::sync::Arc::from("addr"), std::sync::Arc::from("n")],
+        );
+        let mn = run_pipeline::<BVal, MinSink>(&arena, items.iter().copied(), &chain);
+        let mx = run_pipeline::<BVal, MaxSink>(&arena, items.iter().copied(), &chain);
+        let av = run_pipeline::<BVal, AvgSink>(&arena, items.iter().copied(), &chain);
         std::hint::black_box((mn, mx, av));
     });
     assert!(
         med <= COMPOSED_B_PHASE2_BUDGET_US,
-        "composed_borrow Phase 2 sinks {} µs > budget {} µs",
+        "unified BVal chain sinks {} µs > budget {} µs",
         med, COMPOSED_B_PHASE2_BUDGET_US
     );
 }
