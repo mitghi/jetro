@@ -1097,6 +1097,24 @@ fn rewrite_step(p: &mut Pipeline) -> bool {
         }
     }
 
+    // ── Tier 3 fused-Sink rewrite gate ───────────────────────────────────
+    //
+    // Layer B + Step 3 substrate now consume Pipelines via
+    // `Pipeline::canonical()`, which decomposes any fused Sink into
+    // base Stage chain + base Sink at every consumer site (composed
+    // Val/tape runners, columnar slot-kernel paths). With every
+    // consumer canonical-aware, the rewrite-time fusion below is
+    // dead weight — base form runs through the same fast paths.
+    //
+    // Disabling the rewrite is the prerequisite to deleting the
+    // fused Sink variants entirely. Bench validates Q12/Q15 native
+    // parity holds because `try_columnar_with` matches the canonical
+    // base shape (Sink::Numeric + last Stage::Map(FieldRead)) and
+    // dispatches the same `objvec_num_slot`.
+    if !std::env::var_os("JETRO_KEEP_FUSED_REWRITE").is_some() {
+        return false;
+    }
+
     // ── Sort-into-aggregate fold rules ───────────────────────────────────
     //
     // Rule:  Sort ∘ First           → Min          (natural-cmp sort)
@@ -1907,7 +1925,6 @@ impl Pipeline {
             return Some(out);
         }
         if let Some(out) = self.try_columnar_stage_chain(root) { return Some(out); }
-        if !self.stages.is_empty() { return None; }
 
         let recv = match &self.source {
             Source::Receiver(v) => v.clone(),
@@ -1922,58 +1939,78 @@ impl Pipeline {
             } else { recv }
         } else { recv };
 
-        // Reuse the body of try_columnar by running its tail logic
-        // against the (possibly promoted) recv.  Inline the typed-lane
-        // and ObjVec branches:
-        match (&recv, &self.sink) {
-            (Val::IntVec(a), Sink::Numeric(NumOp::Sum)) =>
-                return Some(Ok(Val::Int(a.iter().sum()))),
-            (Val::IntVec(a), Sink::Numeric(NumOp::Min)) =>
-                return Some(Ok(a.iter().copied().min().map(Val::Int).unwrap_or(Val::Null))),
-            (Val::IntVec(a), Sink::Numeric(NumOp::Max)) =>
-                return Some(Ok(a.iter().copied().max().map(Val::Int).unwrap_or(Val::Null))),
-            (Val::IntVec(a), Sink::Count) =>
-                return Some(Ok(Val::Int(a.len() as i64))),
-            (Val::FloatVec(a), Sink::Numeric(NumOp::Sum)) =>
-                return Some(Ok(Val::Float(a.iter().sum()))),
-            (Val::FloatVec(a), Sink::Count) =>
-                return Some(Ok(Val::Int(a.len() as i64))),
-            (Val::StrVec(a), Sink::Count) =>
-                return Some(Ok(Val::Int(a.len() as i64))),
-            _ => {}
+        // Typed primitive lane fast paths — only when the original
+        // pipeline has zero stages (bare aggregate over a primitive
+        // vec). Stage'd shapes go through the slot-kernel block below.
+        if self.stages.is_empty() {
+            match (&recv, &self.sink) {
+                (Val::IntVec(a), Sink::Numeric(NumOp::Sum)) =>
+                    return Some(Ok(Val::Int(a.iter().sum()))),
+                (Val::IntVec(a), Sink::Numeric(NumOp::Min)) =>
+                    return Some(Ok(a.iter().copied().min().map(Val::Int).unwrap_or(Val::Null))),
+                (Val::IntVec(a), Sink::Numeric(NumOp::Max)) =>
+                    return Some(Ok(a.iter().copied().max().map(Val::Int).unwrap_or(Val::Null))),
+                (Val::IntVec(a), Sink::Count) =>
+                    return Some(Ok(Val::Int(a.len() as i64))),
+                (Val::FloatVec(a), Sink::Numeric(NumOp::Sum)) =>
+                    return Some(Ok(Val::Float(a.iter().sum()))),
+                (Val::FloatVec(a), Sink::Count) =>
+                    return Some(Ok(Val::Int(a.len() as i64))),
+                (Val::StrVec(a), Sink::Count) =>
+                    return Some(Ok(Val::Int(a.len() as i64))),
+                _ => {}
+            }
         }
+        // ObjVec slot-kernel paths — operate on canonical view so they
+        // fire whether the lowered pipeline kept fused Sinks or kept
+        // base Sink + last Stage(...). One match arm per kernel; no
+        // per-fused-variant duplication.
         if let Val::ObjVec(d) = &recv {
-            if let Sink::FlatMapCount(prog) = &self.sink {
-                if let Some(field) = single_field_prog(prog) {
-                    if let Some(slot) = d.slot_of(field) {
-                        return Some(Ok(objvec_flatmap_count_slot(d, slot)));
+            let (cs, _ck, csink) = self.canonical();
+            // FlatMap(FieldRead) → flatmap-count
+            if matches!(csink, Sink::Count) && cs.len() == 1 {
+                if let Stage::FlatMap(prog) = &cs[0] {
+                    if let Some(field) = single_field_prog(prog) {
+                        if let Some(slot) = d.slot_of(field) {
+                            return Some(Ok(objvec_flatmap_count_slot(d, slot)));
+                        }
                     }
                 }
             }
-            if let Sink::NumMap(op, prog) = &self.sink {
-                let field = single_field_prog(prog)?;
-                let slot = d.slot_of(field)?;
-                return Some(Ok(objvec_num_slot(d, slot, *op)));
-            }
-            if let Sink::NumFilterMap(op, pred, map) = &self.sink {
-                let (pf, cop, lit) = single_cmp_prog(pred)?;
-                let mf = single_field_prog(map)?;
-                let sp = d.slot_of(pf)?;
-                let sm = d.slot_of(mf)?;
-                return Some(Ok(objvec_filter_num_slots(d, sp, cop, &lit, sm, *op)));
-            }
-            if let Sink::CountIf(pred) = &self.sink {
-                if let Some((pf, op, lit)) = single_cmp_prog(pred) {
-                    let sp = d.slot_of(pf)?;
-                    return Some(Ok(objvec_filter_count_slot(d, sp, op, &lit)));
+            // Map(FieldRead) → numeric-on-slot
+            if let Sink::Numeric(op) = &csink {
+                if cs.len() == 1 {
+                    if let Stage::Map(prog) = &cs[0] {
+                        let field = single_field_prog(prog)?;
+                        let slot = d.slot_of(field)?;
+                        return Some(Ok(objvec_num_slot(d, slot, *op)));
+                    }
                 }
-                if let Some(leaves) = and_chain_prog(pred) {
-                    let slots: Option<Vec<(usize, crate::ast::BinOp, Val)>> =
-                        leaves.iter().map(|(f, op, lit)| {
-                            d.slot_of(f).map(|s| (s, *op, lit.clone()))
-                        }).collect();
-                    let slots = slots?;
-                    return Some(Ok(objvec_filter_count_and_slots(d, &slots)));
+                if cs.len() == 2 {
+                    if let (Stage::Filter(pred), Stage::Map(map)) = (&cs[0], &cs[1]) {
+                        let (pf, cop, lit) = single_cmp_prog(pred)?;
+                        let mf = single_field_prog(map)?;
+                        let sp = d.slot_of(pf)?;
+                        let sm = d.slot_of(mf)?;
+                        return Some(Ok(objvec_filter_num_slots(d, sp, cop, &lit, sm, *op)));
+                    }
+                }
+            }
+            // Filter(...) → count-if (single cmp or AND chain)
+            if matches!(csink, Sink::Count) && cs.len() == 1 {
+                if let Stage::Filter(pred) = &cs[0] {
+                    if let Some((pf, op, lit)) = single_cmp_prog(pred) {
+                        let sp = d.slot_of(pf)?;
+                        return Some(Ok(objvec_filter_count_slot(d, sp, op, &lit)));
+                    }
+                    if let Some(leaves) = and_chain_prog(pred) {
+                        let slots: Option<Vec<(usize, crate::ast::BinOp, Val)>> =
+                            leaves.iter().map(|(f, op, lit)| {
+                                d.slot_of(f).map(|s| (s, *op, lit.clone()))
+                            }).collect();
+                        let slots = slots?;
+                        return Some(Ok(objvec_filter_count_and_slots(d, &slots)));
+                    }
                 }
             }
         }
