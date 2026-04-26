@@ -294,12 +294,25 @@ pub enum BodyKernel {
     /// number of fields and any path depth — classifier-driven, no
     /// per-shape walker.
     ObjProject(Arc<[ObjProjEntry]>),
+    /// F-string interpolation body — list of literal chunks and path
+    /// interpolations.  Per-row eval builds a String by concatenating
+    /// literals + path-resolved values formatted as plain text.
+    /// Generic across any number of parts; classifier-driven.
+    FString(Arc<[FStrPart]>),
     /// Binary arithmetic over two operands (path or literal).  Covers
     /// `qty * price`, `score + 10`, `a - b`, `a / b`, `a % b`.  Per-row
     /// eval reads operands via tape, applies op, returns numeric
     /// TapeVal (Float if any operand is Float, else Int).  Generic
     /// across any (Path|Lit, ArithOp, Path|Lit) combo via one classifier.
     Arith(ArithOperand, ArithOp, ArithOperand),
+}
+
+/// One f-string part — literal chunk or path interpolation.
+#[derive(Debug, Clone)]
+pub enum FStrPart {
+    Lit(Arc<str>),
+    /// Interpolated path on current entry.  Empty path = current itself.
+    Path(Arc<[Arc<str>]>),
 }
 
 /// Arithmetic operand for `BodyKernel::Arith`.
@@ -412,6 +425,15 @@ impl BodyKernel {
                 }
             }
         }
+        // FString — single-opcode `FString(parts)` body.  Each Interp's
+        // sub-program is classified; supported when it's a path read.
+        if ops.len() == 1 {
+            if let Opcode::FString(parts) = &ops[0] {
+                if let Some(fk) = classify_fstring(parts) {
+                    return Self::FString(fk.into());
+                }
+            }
+        }
         // Arith — RPN-shaped binary arithmetic body.  Body shape
         // `<lhs> <rhs> <op>` covers `qty * price`, `score + 10`,
         // `a / b`, etc. Operands are paths (FieldRead/FieldChain) or
@@ -458,6 +480,35 @@ fn classify_arith(ops: &[crate::vm::Opcode]) -> Option<BodyKernel> {
         }
     }
     None
+}
+
+/// Classify CompiledFSPart list as an FString kernel.  Each Interp
+/// part's sub-program must be a path-shaped body (FieldRead /
+/// FieldChain — same shapes accepted by other path kernels).  Bails
+/// (returns None) on Generic interpolations or on parts that carry a
+/// non-default fmt spec.
+fn classify_fstring(
+    parts: &[crate::vm::CompiledFSPart],
+) -> Option<Vec<FStrPart>> {
+    use crate::vm::CompiledFSPart as P;
+    let mut out: Vec<FStrPart> = Vec::with_capacity(parts.len());
+    for p in parts {
+        match p {
+            P::Lit(s) => out.push(FStrPart::Lit(s.clone())),
+            P::Interp { prog, fmt: None } => {
+                let kernel = BodyKernel::classify(prog);
+                let path = match kernel {
+                    BodyKernel::FieldRead(k) =>
+                        Arc::from(vec![k].into_boxed_slice()),
+                    BodyKernel::FieldChain(keys) => keys,
+                    _ => return None,
+                };
+                out.push(FStrPart::Path(path));
+            }
+            P::Interp { fmt: Some(_), .. } => return None,
+        }
+    }
+    Some(out)
 }
 
 fn parse_arith_operand(ops: &[crate::vm::Opcode]) -> Option<ArithOperand> {
@@ -1558,7 +1609,8 @@ impl Pipeline {
                         BodyKernel::FieldRead(_)
                         | BodyKernel::FieldChain(_)
                         | BodyKernel::ObjProject(_)
-                        | BodyKernel::Arith(_, _, _))
+                        | BodyKernel::Arith(_, _, _)
+                        | BodyKernel::FString(_))
                     { return None; }
                     map_kernel = Some(k);
                 }
@@ -1732,7 +1784,7 @@ impl Pipeline {
                 if skipped < skip_n { skipped += 1; continue; }
                 if let Some(lim) = take_limit { if taken >= lim { break; } }
                 let row = match map_kernel {
-                    Some(mk) => RowSrc::Scalar(eval_kernel_value(mk, tape, entry_idx)?),
+                    Some(mk) => eval_kernel_to_row(mk, tape, entry_idx)?,
                     None => RowSrc::Entry(entry_idx),
                 };
                 taken += 1;
@@ -3072,6 +3124,50 @@ fn eval_kernel_to_row(
             }
             Some(RowSrc::Mat(Val::ObjSmall(Arc::from(pairs.into_boxed_slice()))))
         }
+        BodyKernel::FString(parts) => {
+            // Concatenate literal chunks + path-resolved values.
+            // Numbers / bools format via Display; strings emit as-is;
+            // null/missing emit empty.
+            use std::fmt::Write;
+            let mut out = String::new();
+            for p in parts.iter() {
+                match p {
+                    FStrPart::Lit(s) => out.push_str(s.as_ref()),
+                    FStrPart::Path(path) => {
+                        let key_strs: Vec<&str> = path.iter().map(|k| k.as_ref()).collect();
+                        let v_idx = if path.is_empty() {
+                            Some(entry_idx)
+                        } else {
+                            crate::strref::tape_walk_field_chain_from(
+                                tape, entry_idx, &key_strs)
+                        };
+                        if let Some(idx) = v_idx {
+                            match tape.nodes[idx] {
+                                crate::strref::TapeNode::StringRef { start, end } => {
+                                    out.push_str(tape.str_at_range(
+                                        start as usize, end as usize));
+                                }
+                                crate::strref::TapeNode::Static(simd_json::StaticNode::I64(n)) => {
+                                    let _ = write!(out, "{}", n);
+                                }
+                                crate::strref::TapeNode::Static(simd_json::StaticNode::U64(n)) => {
+                                    let _ = write!(out, "{}", n);
+                                }
+                                crate::strref::TapeNode::Static(simd_json::StaticNode::F64(f)) => {
+                                    let _ = write!(out, "{}", f);
+                                }
+                                crate::strref::TapeNode::Static(simd_json::StaticNode::Bool(b)) => {
+                                    let _ = write!(out, "{}", b);
+                                }
+                                crate::strref::TapeNode::Static(simd_json::StaticNode::Null) => {}
+                                _ => return None,  // container — bail
+                            }
+                        }
+                    }
+                }
+            }
+            Some(RowSrc::Mat(Val::Str(Arc::<str>::from(out))))
+        }
         _ => {
             let v = eval_kernel_value(kernel, tape, entry_idx)?;
             Some(RowSrc::Scalar(v))
@@ -3153,6 +3249,7 @@ fn eval_kernel_value(
         | BodyKernel::FieldChainCmpLit(_, _, _)
         | BodyKernel::CurrentCmpLit(_, _)
         | BodyKernel::ObjProject(_)
+        | BodyKernel::FString(_)
         | BodyKernel::Generic => None,
     }
 }
@@ -3272,7 +3369,7 @@ fn eval_kernel_pred(
         BodyKernel::ConstBool(b) => Some(*b),
         BodyKernel::CurrentCmpLit(_, _) | BodyKernel::FieldChain(_)
         | BodyKernel::Const(_) | BodyKernel::ObjProject(_)
-        | BodyKernel::Arith(_, _, _)
+        | BodyKernel::Arith(_, _, _) | BodyKernel::FString(_)
         | BodyKernel::Generic => None,
     }
 }
@@ -4363,7 +4460,8 @@ fn eval_kernel(
         }
         BodyKernel::CurrentCmpLit(op, lit) =>
             Ok(Val::Bool(eval_cmp_op(item, *op, lit))),
-        BodyKernel::ObjProject(_) | BodyKernel::Arith(_, _, _) | BodyKernel::Generic =>
+        BodyKernel::ObjProject(_) | BodyKernel::Arith(_, _, _)
+        | BodyKernel::FString(_) | BodyKernel::Generic =>
             apply_item_in_env(vm, env, item, fallback),
     }
 }
