@@ -368,7 +368,11 @@ pub enum BuiltinArgs {
     Str(Arc<str>),
     StrPair { first: Arc<str>, second: Arc<str> },
     StrVec(Vec<Arc<str>>),
+    I64(i64),
+    I64Opt { first: i64, second: Option<i64> },
     Usize(usize),
+    Val(Val),
+    ValVec(Vec<Val>),
     Pad { width: usize, fill: char },
 }
 
@@ -536,6 +540,8 @@ impl BuiltinCall {
             (BuiltinMethod::Keys, BuiltinArgs::None) => return Some(keys_apply(recv)),
             (BuiltinMethod::Values, BuiltinArgs::None) => return Some(values_apply(recv)),
             (BuiltinMethod::Entries, BuiltinArgs::None) => return Some(entries_apply(recv)),
+            (BuiltinMethod::Reverse, BuiltinArgs::None) => apply_or_recv!(reverse_any_apply(recv)),
+            (BuiltinMethod::Unique, BuiltinArgs::None) => apply_or_recv!(unique_arr_apply(recv)),
             (BuiltinMethod::Invert, BuiltinArgs::None) => apply_or_recv!(invert_apply(recv)),
             (BuiltinMethod::Type, BuiltinArgs::None) => apply_or_recv!(type_name_apply(recv)),
             (BuiltinMethod::ToString, BuiltinArgs::None) => apply_or_recv!(to_string_apply(recv)),
@@ -546,6 +552,50 @@ impl BuiltinCall {
             (BuiltinMethod::Compact, BuiltinArgs::None) => apply_or_recv!(compact_apply(recv)),
             (BuiltinMethod::Pairwise, BuiltinArgs::None) => apply_or_recv!(pairwise_apply(recv)),
             (BuiltinMethod::Schema, BuiltinArgs::None) => apply_or_recv!(schema_apply(recv)),
+            (BuiltinMethod::Flatten, BuiltinArgs::Usize(depth)) => {
+                apply_or_recv!(flatten_depth_apply(recv, *depth))
+            }
+            (BuiltinMethod::First, BuiltinArgs::I64(n)) => apply_or_recv!(first_apply(recv, *n)),
+            (BuiltinMethod::Last, BuiltinArgs::I64(n)) => apply_or_recv!(last_apply(recv, *n)),
+            (BuiltinMethod::Nth, BuiltinArgs::I64(n)) => apply_or_recv!(nth_any_apply(recv, *n)),
+            (BuiltinMethod::Append, BuiltinArgs::Val(item)) => {
+                apply_or_recv!(append_apply(recv, item))
+            }
+            (BuiltinMethod::Prepend, BuiltinArgs::Val(item)) => {
+                apply_or_recv!(prepend_apply(recv, item))
+            }
+            (BuiltinMethod::Diff, BuiltinArgs::ValVec(other)) => {
+                let arr_recv = recv.clone().into_vec().map(Val::arr)?;
+                apply_or_recv!(diff_apply(&arr_recv, other))
+            }
+            (BuiltinMethod::Intersect, BuiltinArgs::ValVec(other)) => {
+                let arr_recv = recv.clone().into_vec().map(Val::arr)?;
+                apply_or_recv!(intersect_apply(&arr_recv, other))
+            }
+            (BuiltinMethod::Union, BuiltinArgs::ValVec(other)) => {
+                let arr_recv = recv.clone().into_vec().map(Val::arr)?;
+                apply_or_recv!(union_apply(&arr_recv, other))
+            }
+            (BuiltinMethod::Window, BuiltinArgs::Usize(n)) => {
+                let arr_recv = recv.clone().into_vec().map(Val::arr)?;
+                apply_or_recv!(window_arr_apply(&arr_recv, *n))
+            }
+            (BuiltinMethod::Chunk, BuiltinArgs::Usize(n)) => {
+                let arr_recv = recv.clone().into_vec().map(Val::arr)?;
+                apply_or_recv!(chunk_arr_apply(&arr_recv, *n))
+            }
+            (BuiltinMethod::Merge, BuiltinArgs::Val(other)) => {
+                apply_or_recv!(merge_apply(recv, other))
+            }
+            (BuiltinMethod::DeepMerge, BuiltinArgs::Val(other)) => {
+                apply_or_recv!(deep_merge_apply(recv, other))
+            }
+            (BuiltinMethod::Defaults, BuiltinArgs::Val(other)) => {
+                apply_or_recv!(defaults_apply(recv, other))
+            }
+            (BuiltinMethod::Rename, BuiltinArgs::Val(other)) => {
+                apply_or_recv!(rename_apply(recv, other))
+            }
             (BuiltinMethod::Has, BuiltinArgs::Str(k)) => apply_or_recv!(has_apply(recv, k)),
             (BuiltinMethod::GetPath, BuiltinArgs::Str(p)) => {
                 apply_or_recv!(get_path_apply(recv, p))
@@ -555,6 +605,12 @@ impl BuiltinCall {
             }
             (BuiltinMethod::DelPath, BuiltinArgs::Str(p)) => {
                 apply_or_recv!(del_path_apply(recv, p))
+            }
+            (BuiltinMethod::FlattenKeys, BuiltinArgs::Str(p)) => {
+                apply_or_recv!(flatten_keys_apply(recv, p))
+            }
+            (BuiltinMethod::UnflattenKeys, BuiltinArgs::Str(p)) => {
+                apply_or_recv!(unflatten_keys_apply(recv, p))
             }
             (BuiltinMethod::StartsWith, BuiltinArgs::Str(p)) => {
                 apply_or_recv!(starts_with_apply(recv, p))
@@ -578,6 +634,16 @@ impl BuiltinCall {
                 apply_or_recv!(last_index_of_apply(recv, p))
             }
             (BuiltinMethod::Scan, BuiltinArgs::Str(p)) => apply_or_recv!(scan_apply(recv, p)),
+            (BuiltinMethod::Split, BuiltinArgs::Str(p)) => apply_or_recv!(split_apply(recv, p)),
+            (BuiltinMethod::Slice, BuiltinArgs::I64Opt { first, second }) => {
+                return Some(slice_apply(recv.clone(), *first, *second));
+            }
+            (BuiltinMethod::Replace, BuiltinArgs::StrPair { first, second }) => {
+                apply_or_recv!(replace_apply(recv.clone(), first, second, false))
+            }
+            (BuiltinMethod::ReplaceAll, BuiltinArgs::StrPair { first, second }) => {
+                apply_or_recv!(replace_apply(recv.clone(), first, second, true))
+            }
             (BuiltinMethod::ReMatch, BuiltinArgs::Str(p)) => {
                 apply_or_recv!(re_match_apply(recv, p))
             }
@@ -627,6 +693,26 @@ impl BuiltinCall {
         }
     }
 
+    pub fn try_apply(&self, recv: &Val) -> Result<Option<Val>, EvalError> {
+        match (self.method, &self.args) {
+            (BuiltinMethod::ReMatch, BuiltinArgs::Str(p)) => try_re_match_apply(recv, p),
+            (BuiltinMethod::ReMatchFirst, BuiltinArgs::Str(p)) => try_re_match_first_apply(recv, p),
+            (BuiltinMethod::ReMatchAll, BuiltinArgs::Str(p)) => try_re_match_all_apply(recv, p),
+            (BuiltinMethod::ReCaptures, BuiltinArgs::Str(p)) => try_re_captures_apply(recv, p),
+            (BuiltinMethod::ReCapturesAll, BuiltinArgs::Str(p)) => {
+                try_re_captures_all_apply(recv, p)
+            }
+            (BuiltinMethod::ReSplit, BuiltinArgs::Str(p)) => try_re_split_apply(recv, p),
+            (BuiltinMethod::ReReplace, BuiltinArgs::StrPair { first, second }) => {
+                try_re_replace_apply(recv, first, second)
+            }
+            (BuiltinMethod::ReReplaceAll, BuiltinArgs::StrPair { first, second }) => {
+                try_re_replace_all_apply(recv, first, second)
+            }
+            _ => Ok(self.apply(recv)),
+        }
+    }
+
     pub fn from_literal_ast_args(name: &str, args: &[crate::ast::Arg]) -> Option<Self> {
         use crate::ast::{Arg, Expr};
 
@@ -670,6 +756,8 @@ impl BuiltinCall {
                 BuiltinMethod::Keys
                 | BuiltinMethod::Values
                 | BuiltinMethod::Entries
+                | BuiltinMethod::Reverse
+                | BuiltinMethod::Unique
                 | BuiltinMethod::Upper
                 | BuiltinMethod::Lower
                 | BuiltinMethod::Trim
@@ -714,9 +802,14 @@ impl BuiltinCall {
                 BuiltinMethod::GetPath
                 | BuiltinMethod::HasPath
                 | BuiltinMethod::Has
-                | BuiltinMethod::DelPath,
+                | BuiltinMethod::DelPath
+                | BuiltinMethod::FlattenKeys
+                | BuiltinMethod::UnflattenKeys,
                 1,
             ) => Some(Self::new(method, BuiltinArgs::Str(str_arg(0)?))),
+            (BuiltinMethod::FlattenKeys | BuiltinMethod::UnflattenKeys, 0) => {
+                Some(Self::new(method, BuiltinArgs::Str(Arc::from("."))))
+            }
             (
                 BuiltinMethod::StartsWith
                 | BuiltinMethod::EndsWith
@@ -726,6 +819,7 @@ impl BuiltinCall {
                 | BuiltinMethod::IndexOf
                 | BuiltinMethod::LastIndexOf
                 | BuiltinMethod::Scan
+                | BuiltinMethod::Split
                 | BuiltinMethod::ReMatch
                 | BuiltinMethod::ReMatchFirst
                 | BuiltinMethod::ReMatchAll
@@ -734,6 +828,13 @@ impl BuiltinCall {
                 | BuiltinMethod::ReSplit,
                 1,
             ) => Some(Self::new(method, BuiltinArgs::Str(str_arg(0)?))),
+            (BuiltinMethod::Replace | BuiltinMethod::ReplaceAll, 2) => Some(Self::new(
+                method,
+                BuiltinArgs::StrPair {
+                    first: str_arg(0)?,
+                    second: str_arg(1)?,
+                },
+            )),
             (BuiltinMethod::ReReplace | BuiltinMethod::ReReplaceAll, 2) => Some(Self::new(
                 method,
                 BuiltinArgs::StrPair {
@@ -2057,17 +2158,14 @@ pub fn reverse_any_apply(recv: &Val) -> Option<Val> {
 /// `.unique()` / `.distinct()` — dedup Arr by val_to_key.
 #[inline]
 pub fn unique_arr_apply(recv: &Val) -> Option<Val> {
-    if let Val::Arr(a) = recv {
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let kept: Vec<Val> = a
-            .iter()
-            .filter(|v| seen.insert(crate::eval::util::val_to_key(v)))
-            .cloned()
-            .collect();
-        Some(Val::arr(kept))
-    } else {
-        None
-    }
+    let items_cow = recv.as_vals()?;
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let kept: Vec<Val> = items_cow
+        .iter()
+        .filter(|v| seen.insert(crate::eval::util::val_to_key(v)))
+        .cloned()
+        .collect();
+    Some(Val::arr(kept))
 }
 
 /// `.first(n)` — n==1 returns scalar, else Arr of first n.
@@ -2369,44 +2467,77 @@ pub fn unflatten_keys_apply(recv: &Val, sep: &str) -> Option<Val> {
 
 // ── Phase D batch 7: regex family ───────────────────────────────────
 
+#[inline]
+fn compile_regex_eval(pat: &str) -> Result<Arc<regex::Regex>, EvalError> {
+    crate::functions::compile_regex(pat).map_err(EvalError)
+}
+
 /// `.match(pat)` — Bool, regex match anywhere.
 #[inline]
 pub fn re_match_apply(recv: &Val, pat: &str) -> Option<Val> {
-    let s = recv.as_str_ref()?;
-    let re = crate::functions::compile_regex(pat).ok()?;
-    Some(Val::Bool(re.is_match(s)))
+    try_re_match_apply(recv, pat).ok().flatten()
+}
+
+#[inline]
+pub fn try_re_match_apply(recv: &Val, pat: &str) -> Result<Option<Val>, EvalError> {
+    let Some(s) = recv.as_str_ref() else {
+        return Ok(None);
+    };
+    let re = compile_regex_eval(pat)?;
+    Ok(Some(Val::Bool(re.is_match(s))))
 }
 
 /// `.match_first(pat)` — Str of first match or Null.
 #[inline]
 pub fn re_match_first_apply(recv: &Val, pat: &str) -> Option<Val> {
-    let s = recv.as_str_ref()?;
-    let re = crate::functions::compile_regex(pat).ok()?;
-    Some(
+    try_re_match_first_apply(recv, pat).ok().flatten()
+}
+
+#[inline]
+pub fn try_re_match_first_apply(recv: &Val, pat: &str) -> Result<Option<Val>, EvalError> {
+    let Some(s) = recv.as_str_ref() else {
+        return Ok(None);
+    };
+    let re = compile_regex_eval(pat)?;
+    Ok(Some(
         re.find(s)
             .map(|m| Val::Str(Arc::from(m.as_str())))
             .unwrap_or(Val::Null),
-    )
+    ))
 }
 
 /// `.match_all(pat)` — StrVec of all matches.
 #[inline]
 pub fn re_match_all_apply(recv: &Val, pat: &str) -> Option<Val> {
-    let s = recv.as_str_ref()?;
-    let re = crate::functions::compile_regex(pat).ok()?;
+    try_re_match_all_apply(recv, pat).ok().flatten()
+}
+
+#[inline]
+pub fn try_re_match_all_apply(recv: &Val, pat: &str) -> Result<Option<Val>, EvalError> {
+    let Some(s) = recv.as_str_ref() else {
+        return Ok(None);
+    };
+    let re = compile_regex_eval(pat)?;
     let out: Vec<Arc<str>> = re
         .find_iter(s)
         .map(|m| Arc::<str>::from(m.as_str()))
         .collect();
-    Some(Val::str_vec(out))
+    Ok(Some(Val::str_vec(out)))
 }
 
 /// `.captures(pat)` — Arr of capture groups (group 0 first); Null on miss.
 #[inline]
 pub fn re_captures_apply(recv: &Val, pat: &str) -> Option<Val> {
-    let s = recv.as_str_ref()?;
-    let re = crate::functions::compile_regex(pat).ok()?;
-    Some(match re.captures(s) {
+    try_re_captures_apply(recv, pat).ok().flatten()
+}
+
+#[inline]
+pub fn try_re_captures_apply(recv: &Val, pat: &str) -> Result<Option<Val>, EvalError> {
+    let Some(s) = recv.as_str_ref() else {
+        return Ok(None);
+    };
+    let re = compile_regex_eval(pat)?;
+    Ok(Some(match re.captures(s) {
         Some(c) => {
             let mut out: Vec<Val> = Vec::with_capacity(c.len());
             for i in 0..c.len() {
@@ -2419,14 +2550,21 @@ pub fn re_captures_apply(recv: &Val, pat: &str) -> Option<Val> {
             Val::arr(out)
         }
         None => Val::Null,
-    })
+    }))
 }
 
 /// `.captures_all(pat)` — Arr<Arr> of capture groups for every match.
 #[inline]
 pub fn re_captures_all_apply(recv: &Val, pat: &str) -> Option<Val> {
-    let s = recv.as_str_ref()?;
-    let re = crate::functions::compile_regex(pat).ok()?;
+    try_re_captures_all_apply(recv, pat).ok().flatten()
+}
+
+#[inline]
+pub fn try_re_captures_all_apply(recv: &Val, pat: &str) -> Result<Option<Val>, EvalError> {
+    let Some(s) = recv.as_str_ref() else {
+        return Ok(None);
+    };
+    let re = compile_regex_eval(pat)?;
     let mut all: Vec<Val> = Vec::new();
     for c in re.captures_iter(s) {
         let mut row: Vec<Val> = Vec::with_capacity(c.len());
@@ -2439,34 +2577,59 @@ pub fn re_captures_all_apply(recv: &Val, pat: &str) -> Option<Val> {
         }
         all.push(Val::arr(row));
     }
-    Some(Val::arr(all))
+    Ok(Some(Val::arr(all)))
 }
 
 /// `.replace_re(pat, with)` — single regex replacement.
 #[inline]
 pub fn re_replace_apply(recv: &Val, pat: &str, with: &str) -> Option<Val> {
-    let s = recv.as_str_ref()?;
-    let re = crate::functions::compile_regex(pat).ok()?;
+    try_re_replace_apply(recv, pat, with).ok().flatten()
+}
+
+#[inline]
+pub fn try_re_replace_apply(recv: &Val, pat: &str, with: &str) -> Result<Option<Val>, EvalError> {
+    let Some(s) = recv.as_str_ref() else {
+        return Ok(None);
+    };
+    let re = compile_regex_eval(pat)?;
     let out = re.replace(s, with);
-    Some(Val::Str(Arc::from(out.as_ref())))
+    Ok(Some(Val::Str(Arc::from(out.as_ref()))))
 }
 
 /// `.replace_all_re(pat, with)` — all regex replacements.
 #[inline]
 pub fn re_replace_all_apply(recv: &Val, pat: &str, with: &str) -> Option<Val> {
-    let s = recv.as_str_ref()?;
-    let re = crate::functions::compile_regex(pat).ok()?;
+    try_re_replace_all_apply(recv, pat, with).ok().flatten()
+}
+
+#[inline]
+pub fn try_re_replace_all_apply(
+    recv: &Val,
+    pat: &str,
+    with: &str,
+) -> Result<Option<Val>, EvalError> {
+    let Some(s) = recv.as_str_ref() else {
+        return Ok(None);
+    };
+    let re = compile_regex_eval(pat)?;
     let out = re.replace_all(s, with);
-    Some(Val::Str(Arc::from(out.as_ref())))
+    Ok(Some(Val::Str(Arc::from(out.as_ref()))))
 }
 
 /// `.split_re(pat)` — regex split into StrVec.
 #[inline]
 pub fn re_split_apply(recv: &Val, pat: &str) -> Option<Val> {
-    let s = recv.as_str_ref()?;
-    let re = crate::functions::compile_regex(pat).ok()?;
+    try_re_split_apply(recv, pat).ok().flatten()
+}
+
+#[inline]
+pub fn try_re_split_apply(recv: &Val, pat: &str) -> Result<Option<Val>, EvalError> {
+    let Some(s) = recv.as_str_ref() else {
+        return Ok(None);
+    };
+    let re = compile_regex_eval(pat)?;
     let out: Vec<Arc<str>> = re.split(s).map(Arc::<str>::from).collect();
-    Some(Val::str_vec(out))
+    Ok(Some(Val::str_vec(out)))
 }
 
 /// `.contains_any([needles])` — Bool, true if any needle appears.
@@ -2555,57 +2718,6 @@ pub fn to_json_apply(recv: &Val) -> Option<Val> {
         }
     };
     Some(Val::Str(Arc::from(out)))
-}
-
-/// Direct dispatcher for pure zero-argument builtins.
-///
-/// This is the shared fast path used by backend runtimes that already
-/// resolved a method name to `BuiltinMethod`. It intentionally excludes
-/// lambda methods and arg-bearing methods; those still need backend-specific
-/// argument evaluation.
-#[inline]
-pub fn apply_zero_arg_method(method: BuiltinMethod, recv: &Val) -> Option<Val> {
-    macro_rules! apply_or_recv {
-        ($f:expr) => {
-            return Some($f(recv).unwrap_or_else(|| recv.clone()))
-        };
-    }
-
-    match method {
-        BuiltinMethod::Upper => apply_or_recv!(upper_apply),
-        BuiltinMethod::Lower => apply_or_recv!(lower_apply),
-        BuiltinMethod::Trim => apply_or_recv!(trim_apply),
-        BuiltinMethod::TrimLeft => apply_or_recv!(trim_left_apply),
-        BuiltinMethod::TrimRight => apply_or_recv!(trim_right_apply),
-        BuiltinMethod::Capitalize => apply_or_recv!(capitalize_apply),
-        BuiltinMethod::TitleCase => apply_or_recv!(title_case_apply),
-        BuiltinMethod::Dedent => apply_or_recv!(dedent_apply),
-        BuiltinMethod::HtmlEscape => apply_or_recv!(html_escape_apply),
-        BuiltinMethod::HtmlUnescape => apply_or_recv!(html_unescape_apply),
-        BuiltinMethod::UrlEncode => apply_or_recv!(url_encode_apply),
-        BuiltinMethod::UrlDecode => apply_or_recv!(url_decode_apply),
-        BuiltinMethod::ToBase64 => apply_or_recv!(to_base64_apply),
-        BuiltinMethod::FromBase64 => apply_or_recv!(from_base64_apply),
-        BuiltinMethod::Lines => apply_or_recv!(lines_apply),
-        BuiltinMethod::Words => apply_or_recv!(words_apply),
-        BuiltinMethod::Chars => apply_or_recv!(chars_apply),
-        BuiltinMethod::ToNumber => apply_or_recv!(to_number_apply),
-        BuiltinMethod::ToBool => apply_or_recv!(to_bool_apply),
-        BuiltinMethod::Keys => return Some(keys_apply(recv)),
-        BuiltinMethod::Values => return Some(values_apply(recv)),
-        BuiltinMethod::Entries => return Some(entries_apply(recv)),
-        BuiltinMethod::Invert => apply_or_recv!(invert_apply),
-        BuiltinMethod::Compact => apply_or_recv!(compact_apply),
-        BuiltinMethod::Pairwise => apply_or_recv!(pairwise_apply),
-        BuiltinMethod::Type => apply_or_recv!(type_name_apply),
-        BuiltinMethod::ToString => apply_or_recv!(to_string_apply),
-        BuiltinMethod::ToJson => apply_or_recv!(to_json_apply),
-        BuiltinMethod::ToCsv => apply_or_recv!(to_csv_apply),
-        BuiltinMethod::ToTsv => apply_or_recv!(to_tsv_apply),
-        BuiltinMethod::ToPairs => apply_or_recv!(to_pairs_apply),
-        BuiltinMethod::Schema => apply_or_recv!(schema_apply),
-        _ => None,
-    }
 }
 
 /// `.schema()` — Val → schema Obj describing types/required/array shape.

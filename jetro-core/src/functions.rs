@@ -1,17 +1,11 @@
-//! Lifted built-in functions — single home for `lift_all_builtins.md` Stage bodies.
+//! Legacy lifted built-in Stage bodies and compatibility shims.
 //!
-//! This module is the migration target for built-in operator bodies
-//! moving out of `eval/func_*.rs` and previously interspersed in
-//! `composed.rs`.  Each lifted built-in becomes a `Stage`-trait struct
-//! with `apply<'a>(&Val) -> StageOutput<'a>` body living here as the
-//! canonical implementation.  `composed.rs` retains only the
-//! Stage/Sink trait substrate, the `Composed<A,B>` monoid, the generic
-//! `run_pipeline`, VM-driven Generic* stages, and barrier ops.
-//!
-//! Visibility: `composed.rs` re-exports everything from this module
-//! (`pub use crate::functions::*;`) so existing `crate::composed::Upper`
-//! / `crate::composed::shims::*` paths keep resolving.  Future lifts
-//! land here directly without going through composed.rs.
+//! Canonical builtin behavior now lives in `builtins.rs` as
+//! `BuiltinCall`. The shims here keep older eval/composed registration
+//! paths working by evaluating runtime arguments and delegating to that
+//! canonical builtin layer. The remaining `Stage` structs are legacy
+//! compatibility exports and should be deleted as their direct callers
+//! disappear.
 
 use std::borrow::Cow;
 
@@ -31,37 +25,19 @@ use crate::eval::value::Val;
 // Today only Upper is lifted as POC.  Future commits add the rest
 // family-by-family per the lift_all_builtins.md effort estimate.
 
-/// Run a single Stage and unwrap its single-Val result, or return
-/// None when the Stage filtered/done.  Used by Method-dispatch shims
-/// (`composed::shims::*`) that delegate to lifted Stages: the
-/// function body lives in the Stage, the dispatch shim is thin.
-#[inline]
-pub fn run_single<S: Stage>(stage: &S, recv: &Val) -> Option<Val> {
-    match stage.apply(recv) {
-        StageOutput::Pass(c) => Some(c.into_owned()),
-        _ => None,
-    }
-}
-
 /// Method-dispatch shims for lifted built-ins.
 ///
-/// Per `lift_all_builtins.md`: the `eval::builtins` registration
-/// table was previously the home of `Opcode::CallMethod` dispatch
-/// entry points (signature `fn(Val, &[Arg], &Env) -> Result<Val,
-/// EvalError>`).  As built-in bodies migrate into first-class
-/// `Stage` impls in this module, the dispatch entry points move
-/// here too.  Each shim does:
+/// The `eval::builtins` registration table still needs entry points
+/// with signature `fn(Val, &[Arg], &Env) -> Result<Val, EvalError>`.
+/// Each shim does:
 ///   1. validate receiver type (Val::Str / Val::Arr / etc.)
 ///   2. parse args (where applicable)
-///   3. delegate to the Stage's `apply` via `run_single`
-///   4. emit type-mismatch error if the Stage filters
-///
-/// `eval::func_*` then shrinks to ONLY the not-yet-lifted shims.
-/// Eventually `eval::func_*.rs` files delete entirely once every
-/// builtin lifts.
+///   3. delegate to `builtins::BuiltinCall`
+///   4. emit compatibility errors for old eval callers
 pub mod shims {
     use super::*;
     use crate::ast::{Arg, Expr};
+    use crate::builtins::{BuiltinArgs, BuiltinCall, BuiltinMethod};
     use crate::eval::{Env, EvalError};
 
     macro_rules! err { ($($t:tt)*) => { Err(EvalError(format!($($t)*))) }; }
@@ -86,50 +62,63 @@ pub mod shims {
         })
     }
 
-    macro_rules! delegate_str_stage {
-        ($shim:ident, $stage:expr, $err:expr) => {
+    fn run_builtin(call: BuiltinCall, recv: &Val, name: &str) -> Result<Val, EvalError> {
+        call.try_apply(recv)?
+            .ok_or_else(|| EvalError(format!("{}: builtin unsupported", name)))
+    }
+
+    macro_rules! delegate_str_builtin {
+        ($shim:ident, $method:ident, $err:expr) => {
             pub fn $shim(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
                 if !matches!(recv, Val::Str(_)) {
                     return err!($err);
                 }
-                run_single(&$stage, &recv).ok_or_else(|| EvalError($err.into()))
+                run_builtin(
+                    BuiltinCall::new(BuiltinMethod::$method, BuiltinArgs::None),
+                    &recv,
+                    stringify!($shim),
+                )
             }
         };
     }
 
-    delegate_str_stage!(upper, Upper, "upper: expected string");
-    delegate_str_stage!(lower, Lower, "lower: expected string");
-    delegate_str_stage!(capitalize, Capitalize, "capitalize: expected string");
-    delegate_str_stage!(title_case, TitleCase, "title_case: expected string");
-    delegate_str_stage!(trim, Trim, "trim: expected string");
-    delegate_str_stage!(trim_left, TrimLeft, "trim_left: expected string");
-    delegate_str_stage!(trim_right, TrimRight, "trim_right: expected string");
-    delegate_str_stage!(lines, Lines, "lines: expected string");
-    delegate_str_stage!(words, Words, "words: expected string");
-    delegate_str_stage!(chars, Chars, "chars: expected string");
-    delegate_str_stage!(to_number, ToNumber, "to_number: expected string");
-    delegate_str_stage!(to_base64, ToBase64, "to_base64: expected string");
-    delegate_str_stage!(url_encode, UrlEncode, "url_encode: expected string");
-    delegate_str_stage!(url_decode, UrlDecode, "url_decode: expected string");
-    delegate_str_stage!(html_escape, HtmlEscape, "html_escape: expected string");
-    delegate_str_stage!(
+    delegate_str_builtin!(upper, Upper, "upper: expected string");
+    delegate_str_builtin!(lower, Lower, "lower: expected string");
+    delegate_str_builtin!(capitalize, Capitalize, "capitalize: expected string");
+    delegate_str_builtin!(title_case, TitleCase, "title_case: expected string");
+    delegate_str_builtin!(trim, Trim, "trim: expected string");
+    delegate_str_builtin!(trim_left, TrimLeft, "trim_left: expected string");
+    delegate_str_builtin!(trim_right, TrimRight, "trim_right: expected string");
+    delegate_str_builtin!(lines, Lines, "lines: expected string");
+    delegate_str_builtin!(words, Words, "words: expected string");
+    delegate_str_builtin!(chars, Chars, "chars: expected string");
+    delegate_str_builtin!(to_number, ToNumber, "to_number: expected string");
+    delegate_str_builtin!(to_base64, ToBase64, "to_base64: expected string");
+    delegate_str_builtin!(url_encode, UrlEncode, "url_encode: expected string");
+    delegate_str_builtin!(url_decode, UrlDecode, "url_decode: expected string");
+    delegate_str_builtin!(html_escape, HtmlEscape, "html_escape: expected string");
+    delegate_str_builtin!(
         html_unescape,
         HtmlUnescape,
         "html_unescape: expected string"
     );
-    delegate_str_stage!(dedent, Dedent, "dedent: expected string");
-    delegate_str_stage!(snake_case, SnakeCase, "snake_case: expected string");
-    delegate_str_stage!(kebab_case, KebabCase, "kebab_case: expected string");
-    delegate_str_stage!(camel_case, CamelCase, "camel_case: expected string");
-    delegate_str_stage!(pascal_case, PascalCase, "pascal_case: expected string");
-    delegate_str_stage!(reverse_str, ReverseStr, "reverse: expected string");
+    delegate_str_builtin!(dedent, Dedent, "dedent: expected string");
+    delegate_str_builtin!(snake_case, SnakeCase, "snake_case: expected string");
+    delegate_str_builtin!(kebab_case, KebabCase, "kebab_case: expected string");
+    delegate_str_builtin!(camel_case, CamelCase, "camel_case: expected string");
+    delegate_str_builtin!(pascal_case, PascalCase, "pascal_case: expected string");
+    delegate_str_builtin!(reverse_str, ReverseStr, "reverse: expected string");
 
     pub fn scan(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
         if !matches!(recv, Val::Str(_)) {
             return err!("scan: expected string");
         }
         let pat = first_str_arg(args, env, "scan")?;
-        run_single(&Scan::new(pat), &recv).ok_or_else(|| EvalError("scan: stage filtered".into()))
+        run_builtin(
+            BuiltinCall::new(BuiltinMethod::Scan, BuiltinArgs::Str(pat)),
+            &recv,
+            "scan",
+        )
     }
 
     /// `to_bool` errors on non-recognised inputs (cannot use generic
@@ -198,8 +187,11 @@ pub mod shims {
             return err!("starts_with: expected string");
         }
         let prefix = first_str_arg(args, env, "starts_with")?;
-        run_single(&StartsWith::new(prefix), &recv)
-            .ok_or_else(|| EvalError("starts_with: stage filtered".into()))
+        run_builtin(
+            BuiltinCall::new(BuiltinMethod::StartsWith, BuiltinArgs::Str(prefix)),
+            &recv,
+            "starts_with",
+        )
     }
 
     pub fn ends_with(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
@@ -207,8 +199,11 @@ pub mod shims {
             return err!("ends_with: expected string");
         }
         let suffix = first_str_arg(args, env, "ends_with")?;
-        run_single(&EndsWith::new(suffix), &recv)
-            .ok_or_else(|| EvalError("ends_with: stage filtered".into()))
+        run_builtin(
+            BuiltinCall::new(BuiltinMethod::EndsWith, BuiltinArgs::Str(suffix)),
+            &recv,
+            "ends_with",
+        )
     }
 
     pub fn index_of(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
@@ -216,8 +211,11 @@ pub mod shims {
             return err!("index_of: expected string");
         }
         let needle = first_str_arg(args, env, "index_of")?;
-        run_single(&IndexOf::new(needle), &recv)
-            .ok_or_else(|| EvalError("index_of: stage filtered".into()))
+        run_builtin(
+            BuiltinCall::new(BuiltinMethod::IndexOf, BuiltinArgs::Str(needle)),
+            &recv,
+            "index_of",
+        )
     }
 
     pub fn last_index_of(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
@@ -225,8 +223,11 @@ pub mod shims {
             return err!("last_index_of: expected string");
         }
         let needle = first_str_arg(args, env, "last_index_of")?;
-        run_single(&LastIndexOf::new(needle), &recv)
-            .ok_or_else(|| EvalError("last_index_of: stage filtered".into()))
+        run_builtin(
+            BuiltinCall::new(BuiltinMethod::LastIndexOf, BuiltinArgs::Str(needle)),
+            &recv,
+            "last_index_of",
+        )
     }
 
     pub fn strip_prefix(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
@@ -234,8 +235,11 @@ pub mod shims {
             return err!("strip_prefix: expected string");
         }
         let pat = first_str_arg(args, env, "strip_prefix")?;
-        run_single(&StripPrefix::new(pat), &recv)
-            .ok_or_else(|| EvalError("strip_prefix: stage filtered".into()))
+        run_builtin(
+            BuiltinCall::new(BuiltinMethod::StripPrefix, BuiltinArgs::Str(pat)),
+            &recv,
+            "strip_prefix",
+        )
     }
 
     pub fn strip_suffix(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
@@ -243,8 +247,11 @@ pub mod shims {
             return err!("strip_suffix: expected string");
         }
         let pat = first_str_arg(args, env, "strip_suffix")?;
-        run_single(&StripSuffix::new(pat), &recv)
-            .ok_or_else(|| EvalError("strip_suffix: stage filtered".into()))
+        run_builtin(
+            BuiltinCall::new(BuiltinMethod::StripSuffix, BuiltinArgs::Str(pat)),
+            &recv,
+            "strip_suffix",
+        )
     }
 
     pub fn repeat(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
@@ -252,7 +259,11 @@ pub mod shims {
             return err!("repeat: expected string");
         }
         let n = first_i64_arg(args, env, "repeat").unwrap_or(1).max(0) as usize;
-        run_single(&Repeat::new(n), &recv).ok_or_else(|| EvalError("repeat: stage filtered".into()))
+        run_builtin(
+            BuiltinCall::new(BuiltinMethod::Repeat, BuiltinArgs::Usize(n)),
+            &recv,
+            "repeat",
+        )
     }
 
     pub fn pad_left(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
@@ -261,8 +272,11 @@ pub mod shims {
         }
         let width = first_i64_arg(args, env, "pad_left").unwrap_or(0).max(0) as usize;
         let fill = second_char_arg(args, env);
-        run_single(&PadLeft::new(width, fill), &recv)
-            .ok_or_else(|| EvalError("pad_left: stage filtered".into()))
+        run_builtin(
+            BuiltinCall::new(BuiltinMethod::PadLeft, BuiltinArgs::Pad { width, fill }),
+            &recv,
+            "pad_left",
+        )
     }
 
     pub fn pad_right(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
@@ -271,8 +285,11 @@ pub mod shims {
         }
         let width = first_i64_arg(args, env, "pad_right").unwrap_or(0).max(0) as usize;
         let fill = second_char_arg(args, env);
-        run_single(&PadRight::new(width, fill), &recv)
-            .ok_or_else(|| EvalError("pad_right: stage filtered".into()))
+        run_builtin(
+            BuiltinCall::new(BuiltinMethod::PadRight, BuiltinArgs::Pad { width, fill }),
+            &recv,
+            "pad_right",
+        )
     }
 
     pub fn indent(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
@@ -280,7 +297,11 @@ pub mod shims {
             return err!("indent: expected string");
         }
         let n = first_i64_arg(args, env, "indent").unwrap_or(2).max(0) as usize;
-        run_single(&Indent::new(n), &recv).ok_or_else(|| EvalError("indent: stage filtered".into()))
+        run_builtin(
+            BuiltinCall::new(BuiltinMethod::Indent, BuiltinArgs::Usize(n)),
+            &recv,
+            "indent",
+        )
     }
 
     pub fn str_matches(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
@@ -288,22 +309,25 @@ pub mod shims {
             return err!("matches: expected string");
         }
         let pat = first_str_arg(args, env, "matches")?;
-        run_single(&StrMatches::new(pat), &recv)
-            .ok_or_else(|| EvalError("matches: stage filtered".into()))
+        run_builtin(
+            BuiltinCall::new(BuiltinMethod::Matches, BuiltinArgs::Str(pat)),
+            &recv,
+            "matches",
+        )
     }
 
     // ── Newly-lifted shims (composed bodies) ─────────────────────────
 
-    delegate_str_stage!(chars_of, CharsOf, "chars: expected string");
-    delegate_str_stage!(bytes_of, BytesOf, "bytes: expected string");
-    delegate_str_stage!(byte_len, ByteLen, "byte_len: expected string");
-    delegate_str_stage!(is_blank, IsBlank, "is_blank: expected string");
-    delegate_str_stage!(is_numeric, IsNumeric, "is_numeric: expected string");
-    delegate_str_stage!(is_alpha, IsAlpha, "is_alpha: expected string");
-    delegate_str_stage!(is_ascii, IsAscii, "is_ascii: expected string");
-    delegate_str_stage!(parse_int, ParseInt, "parse_int: expected string");
-    delegate_str_stage!(parse_float, ParseFloat, "parse_float: expected string");
-    delegate_str_stage!(parse_bool, ParseBool, "parse_bool: expected string");
+    delegate_str_builtin!(chars_of, CharsOf, "chars: expected string");
+    delegate_str_builtin!(bytes_of, Bytes, "bytes: expected string");
+    delegate_str_builtin!(byte_len, ByteLen, "byte_len: expected string");
+    delegate_str_builtin!(is_blank, IsBlank, "is_blank: expected string");
+    delegate_str_builtin!(is_numeric, IsNumeric, "is_numeric: expected string");
+    delegate_str_builtin!(is_alpha, IsAlpha, "is_alpha: expected string");
+    delegate_str_builtin!(is_ascii, IsAscii, "is_ascii: expected string");
+    delegate_str_builtin!(parse_int, ParseInt, "parse_int: expected string");
+    delegate_str_builtin!(parse_float, ParseFloat, "parse_float: expected string");
+    delegate_str_builtin!(parse_bool, ParseBool, "parse_bool: expected string");
 
     /// `.from_base64()` — explicit error semantics (errs on bad input).
     pub fn from_base64(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
@@ -338,8 +362,11 @@ pub mod shims {
         }
         let width = first_i64_arg(args, env, "center").unwrap_or(0).max(0) as usize;
         let fill = pad_arg_char(args, 1, env)?;
-        run_single(&Center::new(width, fill), &recv)
-            .ok_or_else(|| EvalError("center: stage filtered".into()))
+        run_builtin(
+            BuiltinCall::new(BuiltinMethod::Center, BuiltinArgs::Pad { width, fill }),
+            &recv,
+            "center",
+        )
     }
 
     pub fn repeat_str(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
@@ -347,7 +374,11 @@ pub mod shims {
             return err!("repeat: expected string");
         }
         let n = first_i64_arg(args, env, "repeat").unwrap_or(0).max(0) as usize;
-        run_single(&Repeat::new(n), &recv).ok_or_else(|| EvalError("repeat: stage filtered".into()))
+        run_builtin(
+            BuiltinCall::new(BuiltinMethod::Repeat, BuiltinArgs::Usize(n)),
+            &recv,
+            "repeat",
+        )
     }
 
     fn collect_str_arg_list(
@@ -398,8 +429,11 @@ pub mod shims {
             return err!("contains_any: expected string");
         }
         let needles = collect_str_arg_list(args, env, "contains_any")?;
-        run_single(&ContainsAny::new(needles), &recv)
-            .ok_or_else(|| EvalError("contains_any: stage filtered".into()))
+        run_builtin(
+            BuiltinCall::new(BuiltinMethod::ContainsAny, BuiltinArgs::StrVec(needles)),
+            &recv,
+            "contains_any",
+        )
     }
 
     pub fn contains_all(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
@@ -407,25 +441,27 @@ pub mod shims {
             return err!("contains_all: expected string");
         }
         let needles = collect_str_arg_list(args, env, "contains_all")?;
-        run_single(&ContainsAll::new(needles), &recv)
-            .ok_or_else(|| EvalError("contains_all: stage filtered".into()))
+        run_builtin(
+            BuiltinCall::new(BuiltinMethod::ContainsAll, BuiltinArgs::StrVec(needles)),
+            &recv,
+            "contains_all",
+        )
     }
 
     // ── Regex shims ──────────────────────────────────────────────────
 
     macro_rules! delegate_re_pat {
-        ($shim:ident, $stage:ident, $name:literal) => {
+        ($shim:ident, $method:ident, $name:literal) => {
             pub fn $shim(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
                 if !matches!(recv, Val::Str(_)) {
                     return err!("{}: expected string", $name);
                 }
                 let pat = first_str_arg(args, env, $name)?;
-                // Eager compile so a bad pattern errs (consistent with prior shim).
-                if let Err(e) = super::compile_regex(pat.as_ref()) {
-                    return err!("{}: {}", $name, e);
-                }
-                run_single(&$stage::new(pat), &recv)
-                    .ok_or_else(|| EvalError(format!("{}: stage filtered", $name)))
+                run_builtin(
+                    BuiltinCall::new(BuiltinMethod::$method, BuiltinArgs::Str(pat)),
+                    &recv,
+                    $name,
+                )
             }
         };
     }
@@ -454,11 +490,17 @@ pub mod shims {
                 },
             }
         };
-        if let Err(e) = super::compile_regex(pat.as_ref()) {
-            return err!("replace_re: {}", e);
-        }
-        run_single(&ReReplace::new(pat, with), &recv)
-            .ok_or_else(|| EvalError("replace_re: stage filtered".into()))
+        run_builtin(
+            BuiltinCall::new(
+                BuiltinMethod::ReReplace,
+                BuiltinArgs::StrPair {
+                    first: pat,
+                    second: with,
+                },
+            ),
+            &recv,
+            "replace_re",
+        )
     }
 
     pub fn re_replace_all(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
@@ -478,11 +520,17 @@ pub mod shims {
                 },
             }
         };
-        if let Err(e) = super::compile_regex(pat.as_ref()) {
-            return err!("replace_all_re: {}", e);
-        }
-        run_single(&ReReplaceAll::new(pat, with), &recv)
-            .ok_or_else(|| EvalError("replace_all_re: stage filtered".into()))
+        run_builtin(
+            BuiltinCall::new(
+                BuiltinMethod::ReReplaceAll,
+                BuiltinArgs::StrPair {
+                    first: pat,
+                    second: with,
+                },
+            ),
+            &recv,
+            "replace_all_re",
+        )
     }
 
     // ── Array Stages (lifted bodies in composed.rs) ──────────────────
@@ -501,12 +549,20 @@ pub mod shims {
 
     pub fn compact(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
         let recv = coerce_arr(recv, "compact")?;
-        run_single(&Compact, &recv).ok_or_else(|| EvalError("compact: stage filtered".into()))
+        run_builtin(
+            BuiltinCall::new(BuiltinMethod::Compact, BuiltinArgs::None),
+            &recv,
+            "compact",
+        )
     }
 
     pub fn pairwise(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
         let recv = coerce_arr(recv, "pairwise")?;
-        run_single(&Pairwise, &recv).ok_or_else(|| EvalError("pairwise: stage filtered".into()))
+        run_builtin(
+            BuiltinCall::new(BuiltinMethod::Pairwise, BuiltinArgs::None),
+            &recv,
+            "pairwise",
+        )
     }
 
     fn vec_arg(args: &[Arg], env: &Env, who: &str) -> Result<Vec<Val>, EvalError> {
@@ -523,51 +579,83 @@ pub mod shims {
     pub fn diff(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
         let recv = coerce_arr(recv, "diff")?;
         let other = vec_arg(args, env, "diff")?;
-        run_single(&Diff::new(other), &recv).ok_or_else(|| EvalError("diff: stage filtered".into()))
+        run_builtin(
+            BuiltinCall::new(BuiltinMethod::Diff, BuiltinArgs::ValVec(other)),
+            &recv,
+            "diff",
+        )
     }
 
     pub fn intersect(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
         let recv = coerce_arr(recv, "intersect")?;
         let other = vec_arg(args, env, "intersect")?;
-        run_single(&Intersect::new(other), &recv)
-            .ok_or_else(|| EvalError("intersect: stage filtered".into()))
+        run_builtin(
+            BuiltinCall::new(BuiltinMethod::Intersect, BuiltinArgs::ValVec(other)),
+            &recv,
+            "intersect",
+        )
     }
 
     pub fn union(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
         let recv = coerce_arr(recv, "union")?;
         let other = vec_arg(args, env, "union")?;
-        run_single(&Union::new(other), &recv)
-            .ok_or_else(|| EvalError("union: stage filtered".into()))
+        run_builtin(
+            BuiltinCall::new(BuiltinMethod::Union, BuiltinArgs::ValVec(other)),
+            &recv,
+            "union",
+        )
     }
 
     pub fn flatten(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
         let recv = coerce_arr(recv, "flatten")?;
         let depth = first_i64_arg(args, env, "flatten").unwrap_or(1).max(0) as usize;
-        run_single(&FlattenDepth::new(depth), &recv)
-            .ok_or_else(|| EvalError("flatten: stage filtered".into()))
+        run_builtin(
+            BuiltinCall::new(BuiltinMethod::Flatten, BuiltinArgs::Usize(depth)),
+            &recv,
+            "flatten",
+        )
     }
 
     /// `.reverse()` — works on Arr / IntVec / FloatVec / StrVec / Str.
     /// No coerce_arr — Stage handles every supported variant directly.
     pub fn reverse(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-        run_single(&ReverseAny, &recv)
-            .ok_or_else(|| EvalError("reverse: expected array or string".into()))
+        if !matches!(
+            recv,
+            Val::Arr(_) | Val::IntVec(_) | Val::FloatVec(_) | Val::StrVec(_) | Val::Str(_)
+        ) {
+            return err!("reverse: expected array or string");
+        }
+        run_builtin(
+            BuiltinCall::new(BuiltinMethod::Reverse, BuiltinArgs::None),
+            &recv,
+            "reverse",
+        )
     }
 
     pub fn unique(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
         let recv = coerce_arr(recv, "unique")?;
-        run_single(&UniqueArr, &recv).ok_or_else(|| EvalError("unique: stage filtered".into()))
+        run_builtin(
+            BuiltinCall::new(BuiltinMethod::Unique, BuiltinArgs::None),
+            &recv,
+            "unique",
+        )
     }
 
     pub fn first(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
         // Default n=1; non-array receivers return Null (matches prior shim).
         let n = first_i64_arg(args, env, "first").unwrap_or(1);
         match recv {
-            Val::Arr(_) => run_single(&First::new(n), &recv)
-                .ok_or_else(|| EvalError("first: stage filtered".into())),
+            Val::Arr(_) => run_builtin(
+                BuiltinCall::new(BuiltinMethod::First, BuiltinArgs::I64(n)),
+                &recv,
+                "first",
+            ),
             other => match other.into_vec() {
-                Some(v) => run_single(&First::new(n), &Val::arr(v))
-                    .ok_or_else(|| EvalError("first: stage filtered".into())),
+                Some(v) => run_builtin(
+                    BuiltinCall::new(BuiltinMethod::First, BuiltinArgs::I64(n)),
+                    &Val::arr(v),
+                    "first",
+                ),
                 None => Ok(Val::Null),
             },
         }
@@ -576,11 +664,17 @@ pub mod shims {
     pub fn last(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
         let n = first_i64_arg(args, env, "last").unwrap_or(1);
         match recv {
-            Val::Arr(_) => run_single(&Last::new(n), &recv)
-                .ok_or_else(|| EvalError("last: stage filtered".into())),
+            Val::Arr(_) => run_builtin(
+                BuiltinCall::new(BuiltinMethod::Last, BuiltinArgs::I64(n)),
+                &recv,
+                "last",
+            ),
             other => match other.into_vec() {
-                Some(v) => run_single(&Last::new(n), &Val::arr(v))
-                    .ok_or_else(|| EvalError("last: stage filtered".into())),
+                Some(v) => run_builtin(
+                    BuiltinCall::new(BuiltinMethod::Last, BuiltinArgs::I64(n)),
+                    &Val::arr(v),
+                    "last",
+                ),
                 None => Ok(Val::Null),
             },
         }
@@ -588,7 +682,11 @@ pub mod shims {
 
     pub fn nth(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
         let i = first_i64_arg(args, env, "nth")?;
-        run_single(&NthAny::new(i), &recv).ok_or_else(|| EvalError("nth: stage filtered".into()))
+        run_builtin(
+            BuiltinCall::new(BuiltinMethod::Nth, BuiltinArgs::I64(i)),
+            &recv,
+            "nth",
+        )
     }
 
     pub fn append(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
@@ -599,8 +697,11 @@ pub mod shims {
             },
             None => Val::Null,
         };
-        run_single(&Append::new(item), &recv)
-            .ok_or_else(|| EvalError("append: stage filtered".into()))
+        run_builtin(
+            BuiltinCall::new(BuiltinMethod::Append, BuiltinArgs::Val(item)),
+            &recv,
+            "append",
+        )
     }
 
     pub fn prepend(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
@@ -611,8 +712,11 @@ pub mod shims {
             },
             None => Val::Null,
         };
-        run_single(&Prepend::new(item), &recv)
-            .ok_or_else(|| EvalError("prepend: stage filtered".into()))
+        run_builtin(
+            BuiltinCall::new(BuiltinMethod::Prepend, BuiltinArgs::Val(item)),
+            &recv,
+            "prepend",
+        )
     }
 
     // ── Object Stages ────────────────────────────────────────────────
@@ -623,7 +727,14 @@ pub mod shims {
     // Method-call fallback in `eval::builtins::{keys,values,entries}_dispatch`.
 
     pub fn invert(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-        run_single(&Invert, &recv).ok_or_else(|| EvalError("invert: expected object".into()))
+        if !matches!(recv, Val::Obj(_)) {
+            return err!("invert: expected object");
+        }
+        run_builtin(
+            BuiltinCall::new(BuiltinMethod::Invert, BuiltinArgs::None),
+            &recv,
+            "invert",
+        )
     }
 
     fn first_val_arg(args: &[Arg], env: &Env) -> Result<Val, EvalError> {
@@ -637,26 +748,47 @@ pub mod shims {
 
     pub fn merge(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
         let other = first_val_arg(args, env)?;
-        run_single(&Merge::new(other), &recv)
-            .ok_or_else(|| EvalError("merge: expected two objects".into()))
+        if !matches!(recv, Val::Obj(_)) || !matches!(other, Val::Obj(_)) {
+            return err!("merge: expected two objects");
+        }
+        run_builtin(
+            BuiltinCall::new(BuiltinMethod::Merge, BuiltinArgs::Val(other)),
+            &recv,
+            "merge",
+        )
     }
 
     pub fn deep_merge(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
         let other = first_val_arg(args, env)?;
-        run_single(&DeepMerge::new(other), &recv)
-            .ok_or_else(|| EvalError("deep_merge: stage filtered".into()))
+        run_builtin(
+            BuiltinCall::new(BuiltinMethod::DeepMerge, BuiltinArgs::Val(other)),
+            &recv,
+            "deep_merge",
+        )
     }
 
     pub fn defaults(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
         let other = first_val_arg(args, env)?;
-        run_single(&Defaults::new(other), &recv)
-            .ok_or_else(|| EvalError("defaults: expected two objects".into()))
+        if !matches!(recv, Val::Obj(_)) || !matches!(other, Val::Obj(_)) {
+            return err!("defaults: expected two objects");
+        }
+        run_builtin(
+            BuiltinCall::new(BuiltinMethod::Defaults, BuiltinArgs::Val(other)),
+            &recv,
+            "defaults",
+        )
     }
 
     pub fn rename(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
         let renames = first_val_arg(args, env)?;
-        run_single(&Rename::new(renames), &recv)
-            .ok_or_else(|| EvalError("rename: expected object and rename map".into()))
+        if !matches!(recv, Val::Obj(_)) || !matches!(renames, Val::Obj(_)) {
+            return err!("rename: expected object and rename map");
+        }
+        run_builtin(
+            BuiltinCall::new(BuiltinMethod::Rename, BuiltinArgs::Val(renames)),
+            &recv,
+            "rename",
+        )
     }
 }
 

@@ -35,6 +35,7 @@
 use smallvec::SmallVec;
 use std::borrow::Cow;
 
+use crate::builtins::BuiltinCall;
 use crate::eval::value::Val;
 
 // ── Stage ────────────────────────────────────────────────────────────────────
@@ -117,6 +118,32 @@ impl Stage for Identity {
     #[inline]
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         StageOutput::Pass(Cow::Borrowed(x))
+    }
+}
+
+/// Adapter that lets the composed runtime execute canonical builtins
+/// without defining one `Stage` struct per builtin.
+pub struct BuiltinStage {
+    call: BuiltinCall,
+}
+
+impl BuiltinStage {
+    pub fn new(call: BuiltinCall) -> Self {
+        Self { call }
+    }
+
+    pub fn call(&self) -> &BuiltinCall {
+        &self.call
+    }
+}
+
+impl Stage for BuiltinStage {
+    #[inline]
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        match self.call.apply(x) {
+            Some(v) => StageOutput::Pass(Cow::Owned(v)),
+            None => StageOutput::Filtered,
+        }
     }
 }
 
@@ -206,14 +233,12 @@ impl<A: Stage, B: Stage> Stage for Composed<A, B> {
     }
 }
 
-// ── Lifted built-in Stage bodies live in `crate::functions` ──────
+// ── Legacy lifted built-in Stage bodies live in `crate::functions` ─
 //
-// Per `lift_all_builtins.md`: all lifted built-in operator bodies
-// (`Upper`, `Lower`, `ToCsv`, `CumMax`, regex Stages, padding, etc.)
-// migrated into `jetro-core/src/functions.rs`.  Re-exported here so
-// existing `crate::composed::Upper` and `crate::composed::shims::*`
-// paths keep resolving — composed.rs stays the substrate (Stage trait,
-// Composed monoid, Sinks, run_pipeline, VM-driven Generic*, barriers).
+// Kept for compatibility with older tests and call sites. New composed
+// builtin execution should use `BuiltinStage`, which adapts the
+// canonical `builtins::BuiltinCall` implementation instead of adding
+// another per-builtin `Stage` struct here or in `functions.rs`.
 pub use crate::functions::*;
 
 // ── Sink ─────────────────────────────────────────────────────────────────────
@@ -2287,6 +2312,23 @@ mod tests {
     }
 
     #[test]
+    fn builtin_stage_adapts_canonical_builtin_call() {
+        let s = Val::Str(std::sync::Arc::from("hello world"));
+        let stage = BuiltinStage::new(crate::builtins::BuiltinCall::new(
+            crate::builtins::BuiltinMethod::EndsWith,
+            crate::builtins::BuiltinArgs::Str(std::sync::Arc::from("world")),
+        ));
+
+        match stage.apply(&s) {
+            StageOutput::Pass(Cow::Owned(Val::Bool(true))) => {}
+            other => panic!(
+                "expected owned true bool, got {:?}",
+                stage_output_kind(&other)
+            ),
+        };
+    }
+
+    #[test]
     fn upper_filters_non_string() {
         let v = Val::Int(42);
         let stage = Upper;
@@ -2317,6 +2359,15 @@ mod tests {
                 other => panic!("expected Str, got {:?}", other),
             },
             _ => panic!("expected Pass"),
+        }
+    }
+
+    fn stage_output_kind(out: &StageOutput<'_>) -> &'static str {
+        match out {
+            StageOutput::Pass(_) => "pass",
+            StageOutput::Filtered => "filtered",
+            StageOutput::Many(_) => "many",
+            StageOutput::Done => "done",
         }
     }
 
