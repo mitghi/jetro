@@ -13,11 +13,11 @@
 //! / `crate::composed::shims::*` paths keep resolving.  Future lifts
 //! land here directly without going through composed.rs.
 
-use std::borrow::Cow;
 use smallvec::SmallVec;
+use std::borrow::Cow;
 
-use crate::eval::value::Val;
 use crate::composed::{Stage, StageOutput};
+use crate::eval::value::Val;
 
 // ── Lifted built-in Stages (lift_all_builtins.md workstream) ─────
 //
@@ -62,8 +62,8 @@ pub fn run_single<S: Stage>(stage: &S, recv: &Val) -> Option<Val> {
 /// builtin lifts.
 pub mod shims {
     use super::*;
-    use crate::eval::{Env, EvalError};
     use crate::ast::{Arg, Expr};
+    use crate::eval::{Env, EvalError};
 
     macro_rules! err { ($($t:tt)*) => { Err(EvalError(format!($($t)*))) }; }
 
@@ -90,40 +90,47 @@ pub mod shims {
     macro_rules! delegate_str_stage {
         ($shim:ident, $stage:expr, $err:expr) => {
             pub fn $shim(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-                if !matches!(recv, Val::Str(_)) { return err!($err); }
+                if !matches!(recv, Val::Str(_)) {
+                    return err!($err);
+                }
                 run_single(&$stage, &recv).ok_or_else(|| EvalError($err.into()))
             }
         };
     }
 
-    delegate_str_stage!(upper,        Upper,        "upper: expected string");
-    delegate_str_stage!(lower,        Lower,        "lower: expected string");
-    delegate_str_stage!(capitalize,   Capitalize,   "capitalize: expected string");
-    delegate_str_stage!(title_case,   TitleCase,    "title_case: expected string");
-    delegate_str_stage!(trim,         Trim,         "trim: expected string");
-    delegate_str_stage!(trim_left,    TrimLeft,     "trim_left: expected string");
-    delegate_str_stage!(trim_right,   TrimRight,    "trim_right: expected string");
-    delegate_str_stage!(lines,        Lines,        "lines: expected string");
-    delegate_str_stage!(words,        Words,        "words: expected string");
-    delegate_str_stage!(chars,        Chars,        "chars: expected string");
-    delegate_str_stage!(to_number,    ToNumber,     "to_number: expected string");
-    delegate_str_stage!(to_base64,    ToBase64,     "to_base64: expected string");
-    delegate_str_stage!(url_encode,   UrlEncode,    "url_encode: expected string");
-    delegate_str_stage!(url_decode,   UrlDecode,    "url_decode: expected string");
-    delegate_str_stage!(html_escape,  HtmlEscape,   "html_escape: expected string");
-    delegate_str_stage!(html_unescape,HtmlUnescape, "html_unescape: expected string");
-    delegate_str_stage!(dedent,       Dedent,       "dedent: expected string");
-    delegate_str_stage!(snake_case,   SnakeCase,    "snake_case: expected string");
-    delegate_str_stage!(kebab_case,   KebabCase,    "kebab_case: expected string");
-    delegate_str_stage!(camel_case,   CamelCase,    "camel_case: expected string");
-    delegate_str_stage!(pascal_case,  PascalCase,   "pascal_case: expected string");
-    delegate_str_stage!(reverse_str,  ReverseStr,   "reverse: expected string");
+    delegate_str_stage!(upper, Upper, "upper: expected string");
+    delegate_str_stage!(lower, Lower, "lower: expected string");
+    delegate_str_stage!(capitalize, Capitalize, "capitalize: expected string");
+    delegate_str_stage!(title_case, TitleCase, "title_case: expected string");
+    delegate_str_stage!(trim, Trim, "trim: expected string");
+    delegate_str_stage!(trim_left, TrimLeft, "trim_left: expected string");
+    delegate_str_stage!(trim_right, TrimRight, "trim_right: expected string");
+    delegate_str_stage!(lines, Lines, "lines: expected string");
+    delegate_str_stage!(words, Words, "words: expected string");
+    delegate_str_stage!(chars, Chars, "chars: expected string");
+    delegate_str_stage!(to_number, ToNumber, "to_number: expected string");
+    delegate_str_stage!(to_base64, ToBase64, "to_base64: expected string");
+    delegate_str_stage!(url_encode, UrlEncode, "url_encode: expected string");
+    delegate_str_stage!(url_decode, UrlDecode, "url_decode: expected string");
+    delegate_str_stage!(html_escape, HtmlEscape, "html_escape: expected string");
+    delegate_str_stage!(
+        html_unescape,
+        HtmlUnescape,
+        "html_unescape: expected string"
+    );
+    delegate_str_stage!(dedent, Dedent, "dedent: expected string");
+    delegate_str_stage!(snake_case, SnakeCase, "snake_case: expected string");
+    delegate_str_stage!(kebab_case, KebabCase, "kebab_case: expected string");
+    delegate_str_stage!(camel_case, CamelCase, "camel_case: expected string");
+    delegate_str_stage!(pascal_case, PascalCase, "pascal_case: expected string");
+    delegate_str_stage!(reverse_str, ReverseStr, "reverse: expected string");
 
     pub fn scan(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-        if !matches!(recv, Val::Str(_)) { return err!("scan: expected string"); }
+        if !matches!(recv, Val::Str(_)) {
+            return err!("scan: expected string");
+        }
         let pat = first_str_arg(args, env, "scan")?;
-        run_single(&Scan::new(pat), &recv)
-            .ok_or_else(|| EvalError("scan: stage filtered".into()))
+        run_single(&Scan::new(pat), &recv).ok_or_else(|| EvalError("scan: stage filtered".into()))
     }
 
     /// `to_bool` errors on non-recognised inputs (cannot use generic
@@ -131,15 +138,23 @@ pub mod shims {
     pub fn to_bool(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
         if let Val::Str(s) = recv {
             match s.as_ref() {
-                "true"  => Ok(Val::Bool(true)),
+                "true" => Ok(Val::Bool(true)),
                 "false" => Ok(Val::Bool(false)),
-                _       => err!("to_bool: not a boolean: {}", s),
+                _ => err!("to_bool: not a boolean: {}", s),
             }
-        } else { err!("to_bool: expected string") }
+        } else {
+            err!("to_bool: expected string")
+        }
     }
 
-    fn first_str_arg(args: &[Arg], env: &Env, name: &str) -> Result<std::sync::Arc<str>, EvalError> {
-        let a = args.first().ok_or_else(|| EvalError(format!("{}: missing argument", name)))?;
+    fn first_str_arg(
+        args: &[Arg],
+        env: &Env,
+        name: &str,
+    ) -> Result<std::sync::Arc<str>, EvalError> {
+        let a = args
+            .first()
+            .ok_or_else(|| EvalError(format!("{}: missing argument", name)))?;
         let v = match a {
             Arg::Pos(Expr::Ident(s)) => return Ok(std::sync::Arc::from(s.as_str())),
             Arg::Pos(e) | Arg::Named(_, e) => vm_eval(e, env)?,
@@ -151,12 +166,14 @@ pub mod shims {
     }
 
     fn first_i64_arg(args: &[Arg], env: &Env, name: &str) -> Result<i64, EvalError> {
-        let a = args.first().ok_or_else(|| EvalError(format!("{}: missing argument", name)))?;
+        let a = args
+            .first()
+            .ok_or_else(|| EvalError(format!("{}: missing argument", name)))?;
         let v = match a {
             Arg::Pos(e) | Arg::Named(_, e) => vm_eval(e, env)?,
         };
         match v {
-            Val::Int(n)   => Ok(n),
+            Val::Int(n) => Ok(n),
             Val::Float(f) => Ok(f as i64),
             _ => err!("{}: expected number argument", name),
         }
@@ -167,61 +184,82 @@ pub mod shims {
             .and_then(|a| match a {
                 Arg::Pos(e) | Arg::Named(_, e) => vm_eval(e, env).ok(),
             })
-            .and_then(|v| if let Val::Str(s) = v { s.chars().next() } else { None })
+            .and_then(|v| {
+                if let Val::Str(s) = v {
+                    s.chars().next()
+                } else {
+                    None
+                }
+            })
             .unwrap_or(' ')
     }
 
     pub fn starts_with(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-        if !matches!(recv, Val::Str(_)) { return err!("starts_with: expected string"); }
+        if !matches!(recv, Val::Str(_)) {
+            return err!("starts_with: expected string");
+        }
         let prefix = first_str_arg(args, env, "starts_with")?;
         run_single(&StartsWith::new(prefix), &recv)
             .ok_or_else(|| EvalError("starts_with: stage filtered".into()))
     }
 
     pub fn ends_with(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-        if !matches!(recv, Val::Str(_)) { return err!("ends_with: expected string"); }
+        if !matches!(recv, Val::Str(_)) {
+            return err!("ends_with: expected string");
+        }
         let suffix = first_str_arg(args, env, "ends_with")?;
         run_single(&EndsWith::new(suffix), &recv)
             .ok_or_else(|| EvalError("ends_with: stage filtered".into()))
     }
 
     pub fn index_of(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-        if !matches!(recv, Val::Str(_)) { return err!("index_of: expected string"); }
+        if !matches!(recv, Val::Str(_)) {
+            return err!("index_of: expected string");
+        }
         let needle = first_str_arg(args, env, "index_of")?;
         run_single(&IndexOf::new(needle), &recv)
             .ok_or_else(|| EvalError("index_of: stage filtered".into()))
     }
 
     pub fn last_index_of(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-        if !matches!(recv, Val::Str(_)) { return err!("last_index_of: expected string"); }
+        if !matches!(recv, Val::Str(_)) {
+            return err!("last_index_of: expected string");
+        }
         let needle = first_str_arg(args, env, "last_index_of")?;
         run_single(&LastIndexOf::new(needle), &recv)
             .ok_or_else(|| EvalError("last_index_of: stage filtered".into()))
     }
 
     pub fn strip_prefix(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-        if !matches!(recv, Val::Str(_)) { return err!("strip_prefix: expected string"); }
+        if !matches!(recv, Val::Str(_)) {
+            return err!("strip_prefix: expected string");
+        }
         let pat = first_str_arg(args, env, "strip_prefix")?;
         run_single(&StripPrefix::new(pat), &recv)
             .ok_or_else(|| EvalError("strip_prefix: stage filtered".into()))
     }
 
     pub fn strip_suffix(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-        if !matches!(recv, Val::Str(_)) { return err!("strip_suffix: expected string"); }
+        if !matches!(recv, Val::Str(_)) {
+            return err!("strip_suffix: expected string");
+        }
         let pat = first_str_arg(args, env, "strip_suffix")?;
         run_single(&StripSuffix::new(pat), &recv)
             .ok_or_else(|| EvalError("strip_suffix: stage filtered".into()))
     }
 
     pub fn repeat(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-        if !matches!(recv, Val::Str(_)) { return err!("repeat: expected string"); }
+        if !matches!(recv, Val::Str(_)) {
+            return err!("repeat: expected string");
+        }
         let n = first_i64_arg(args, env, "repeat").unwrap_or(1).max(0) as usize;
-        run_single(&Repeat::new(n), &recv)
-            .ok_or_else(|| EvalError("repeat: stage filtered".into()))
+        run_single(&Repeat::new(n), &recv).ok_or_else(|| EvalError("repeat: stage filtered".into()))
     }
 
     pub fn pad_left(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-        if !matches!(recv, Val::Str(_)) { return err!("pad_left: expected string"); }
+        if !matches!(recv, Val::Str(_)) {
+            return err!("pad_left: expected string");
+        }
         let width = first_i64_arg(args, env, "pad_left").unwrap_or(0).max(0) as usize;
         let fill = second_char_arg(args, env);
         run_single(&PadLeft::new(width, fill), &recv)
@@ -229,7 +267,9 @@ pub mod shims {
     }
 
     pub fn pad_right(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-        if !matches!(recv, Val::Str(_)) { return err!("pad_right: expected string"); }
+        if !matches!(recv, Val::Str(_)) {
+            return err!("pad_right: expected string");
+        }
         let width = first_i64_arg(args, env, "pad_right").unwrap_or(0).max(0) as usize;
         let fill = second_char_arg(args, env);
         run_single(&PadRight::new(width, fill), &recv)
@@ -237,14 +277,17 @@ pub mod shims {
     }
 
     pub fn indent(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-        if !matches!(recv, Val::Str(_)) { return err!("indent: expected string"); }
+        if !matches!(recv, Val::Str(_)) {
+            return err!("indent: expected string");
+        }
         let n = first_i64_arg(args, env, "indent").unwrap_or(2).max(0) as usize;
-        run_single(&Indent::new(n), &recv)
-            .ok_or_else(|| EvalError("indent: stage filtered".into()))
+        run_single(&Indent::new(n), &recv).ok_or_else(|| EvalError("indent: stage filtered".into()))
     }
 
     pub fn str_matches(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-        if !matches!(recv, Val::Str(_)) { return err!("matches: expected string"); }
+        if !matches!(recv, Val::Str(_)) {
+            return err!("matches: expected string");
+        }
         let pat = first_str_arg(args, env, "matches")?;
         run_single(&StrMatches::new(pat), &recv)
             .ok_or_else(|| EvalError("matches: stage filtered".into()))
@@ -252,25 +295,27 @@ pub mod shims {
 
     // ── Newly-lifted shims (composed bodies) ─────────────────────────
 
-    delegate_str_stage!(chars_of,    CharsOf,    "chars: expected string");
-    delegate_str_stage!(bytes_of,    BytesOf,    "bytes: expected string");
-    delegate_str_stage!(byte_len,    ByteLen,    "byte_len: expected string");
-    delegate_str_stage!(is_blank,    IsBlank,    "is_blank: expected string");
-    delegate_str_stage!(is_numeric,  IsNumeric,  "is_numeric: expected string");
-    delegate_str_stage!(is_alpha,    IsAlpha,    "is_alpha: expected string");
-    delegate_str_stage!(is_ascii,    IsAscii,    "is_ascii: expected string");
-    delegate_str_stage!(parse_int,   ParseInt,   "parse_int: expected string");
+    delegate_str_stage!(chars_of, CharsOf, "chars: expected string");
+    delegate_str_stage!(bytes_of, BytesOf, "bytes: expected string");
+    delegate_str_stage!(byte_len, ByteLen, "byte_len: expected string");
+    delegate_str_stage!(is_blank, IsBlank, "is_blank: expected string");
+    delegate_str_stage!(is_numeric, IsNumeric, "is_numeric: expected string");
+    delegate_str_stage!(is_alpha, IsAlpha, "is_alpha: expected string");
+    delegate_str_stage!(is_ascii, IsAscii, "is_ascii: expected string");
+    delegate_str_stage!(parse_int, ParseInt, "parse_int: expected string");
     delegate_str_stage!(parse_float, ParseFloat, "parse_float: expected string");
-    delegate_str_stage!(parse_bool,  ParseBool,  "parse_bool: expected string");
+    delegate_str_stage!(parse_bool, ParseBool, "parse_bool: expected string");
 
     /// `.from_base64()` — explicit error semantics (errs on bad input).
     pub fn from_base64(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
         if let Val::Str(s) = recv {
             match super::from_base64_eager(&s) {
                 Ok(decoded) => Ok(Val::Str(std::sync::Arc::from(decoded.as_str()))),
-                Err(e)      => err!("from_base64: {}", e),
+                Err(e) => err!("from_base64: {}", e),
             }
-        } else { err!("from_base64: expected string") }
+        } else {
+            err!("from_base64: expected string")
+        }
     }
 
     fn pad_arg_char(args: &[Arg], idx: usize, env: &Env) -> Result<char, EvalError> {
@@ -289,7 +334,9 @@ pub mod shims {
     }
 
     pub fn center(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-        if !matches!(recv, Val::Str(_)) { return err!("center: expected string"); }
+        if !matches!(recv, Val::Str(_)) {
+            return err!("center: expected string");
+        }
         let width = first_i64_arg(args, env, "center").unwrap_or(0).max(0) as usize;
         let fill = pad_arg_char(args, 1, env)?;
         run_single(&Center::new(width, fill), &recv)
@@ -297,13 +344,18 @@ pub mod shims {
     }
 
     pub fn repeat_str(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-        if !matches!(recv, Val::Str(_)) { return err!("repeat: expected string"); }
+        if !matches!(recv, Val::Str(_)) {
+            return err!("repeat: expected string");
+        }
         let n = first_i64_arg(args, env, "repeat").unwrap_or(0).max(0) as usize;
-        run_single(&Repeat::new(n), &recv)
-            .ok_or_else(|| EvalError("repeat: stage filtered".into()))
+        run_single(&Repeat::new(n), &recv).ok_or_else(|| EvalError("repeat: stage filtered".into()))
     }
 
-    fn collect_str_arg_list(args: &[Arg], env: &Env, who: &str) -> Result<Vec<std::sync::Arc<str>>, EvalError> {
+    fn collect_str_arg_list(
+        args: &[Arg],
+        env: &Env,
+        who: &str,
+    ) -> Result<Vec<std::sync::Arc<str>>, EvalError> {
         if args.len() == 1 {
             let v = match &args[0] {
                 Arg::Pos(e) | Arg::Named(_, e) => vm_eval(e, env)?,
@@ -311,8 +363,11 @@ pub mod shims {
             if let Val::Arr(a) = v {
                 let mut out = Vec::with_capacity(a.len());
                 for item in a.iter() {
-                    if let Val::Str(s) = item { out.push(s.clone()); }
-                    else { return err!("{}: array elements must be strings", who); }
+                    if let Val::Str(s) = item {
+                        out.push(s.clone());
+                    } else {
+                        return err!("{}: array elements must be strings", who);
+                    }
                 }
                 return Ok(out);
             }
@@ -330,21 +385,28 @@ pub mod shims {
             let v = match a {
                 Arg::Pos(e) | Arg::Named(_, e) => vm_eval(e, env)?,
             };
-            if let Val::Str(s) = v { out.push(s); }
-            else { return err!("{}: arg must be string", who); }
+            if let Val::Str(s) = v {
+                out.push(s);
+            } else {
+                return err!("{}: arg must be string", who);
+            }
         }
         Ok(out)
     }
 
     pub fn contains_any(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-        if !matches!(recv, Val::Str(_)) { return err!("contains_any: expected string"); }
+        if !matches!(recv, Val::Str(_)) {
+            return err!("contains_any: expected string");
+        }
         let needles = collect_str_arg_list(args, env, "contains_any")?;
         run_single(&ContainsAny::new(needles), &recv)
             .ok_or_else(|| EvalError("contains_any: stage filtered".into()))
     }
 
     pub fn contains_all(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-        if !matches!(recv, Val::Str(_)) { return err!("contains_all: expected string"); }
+        if !matches!(recv, Val::Str(_)) {
+            return err!("contains_all: expected string");
+        }
         let needles = collect_str_arg_list(args, env, "contains_all")?;
         run_single(&ContainsAll::new(needles), &recv)
             .ok_or_else(|| EvalError("contains_all: stage filtered".into()))
@@ -355,7 +417,9 @@ pub mod shims {
     macro_rules! delegate_re_pat {
         ($shim:ident, $stage:ident, $name:literal) => {
             pub fn $shim(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-                if !matches!(recv, Val::Str(_)) { return err!("{}: expected string", $name); }
+                if !matches!(recv, Val::Str(_)) {
+                    return err!("{}: expected string", $name);
+                }
                 let pat = first_str_arg(args, env, $name)?;
                 // Eager compile so a bad pattern errs (consistent with prior shim).
                 if let Err(e) = super::compile_regex(pat.as_ref()) {
@@ -367,18 +431,22 @@ pub mod shims {
         };
     }
 
-    delegate_re_pat!(re_match,         ReMatch,       "match");
-    delegate_re_pat!(re_match_first,   ReMatchFirst,  "match_first");
-    delegate_re_pat!(re_match_all,     ReMatchAll,    "match_all");
-    delegate_re_pat!(re_captures,      ReCaptures,    "captures");
-    delegate_re_pat!(re_captures_all,  ReCapturesAll, "captures_all");
-    delegate_re_pat!(re_split,         ReSplit,       "split_re");
+    delegate_re_pat!(re_match, ReMatch, "match");
+    delegate_re_pat!(re_match_first, ReMatchFirst, "match_first");
+    delegate_re_pat!(re_match_all, ReMatchAll, "match_all");
+    delegate_re_pat!(re_captures, ReCaptures, "captures");
+    delegate_re_pat!(re_captures_all, ReCapturesAll, "captures_all");
+    delegate_re_pat!(re_split, ReSplit, "split_re");
 
     pub fn re_replace(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-        if !matches!(recv, Val::Str(_)) { return err!("replace_re: expected string"); }
+        if !matches!(recv, Val::Str(_)) {
+            return err!("replace_re: expected string");
+        }
         let pat = first_str_arg(args, env, "replace_re")?;
         let with = {
-            let a = args.get(1).ok_or_else(|| EvalError("replace_re: missing replacement".into()))?;
+            let a = args
+                .get(1)
+                .ok_or_else(|| EvalError("replace_re: missing replacement".into()))?;
             match a {
                 Arg::Pos(Expr::Ident(s)) => std::sync::Arc::from(s.as_str()),
                 Arg::Pos(e) | Arg::Named(_, e) => match vm_eval(e, env)? {
@@ -395,10 +463,14 @@ pub mod shims {
     }
 
     pub fn re_replace_all(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-        if !matches!(recv, Val::Str(_)) { return err!("replace_all_re: expected string"); }
+        if !matches!(recv, Val::Str(_)) {
+            return err!("replace_all_re: expected string");
+        }
         let pat = first_str_arg(args, env, "replace_all_re")?;
         let with = {
-            let a = args.get(1).ok_or_else(|| EvalError("replace_all_re: missing replacement".into()))?;
+            let a = args
+                .get(1)
+                .ok_or_else(|| EvalError("replace_all_re: missing replacement".into()))?;
             match a {
                 Arg::Pos(Expr::Ident(s)) => std::sync::Arc::from(s.as_str()),
                 Arg::Pos(e) | Arg::Named(_, e) => match vm_eval(e, env)? {
@@ -421,7 +493,8 @@ pub mod shims {
     fn coerce_arr(recv: Val, who: &str) -> Result<Val, EvalError> {
         match recv {
             Val::Arr(_) => Ok(recv),
-            other => other.into_vec()
+            other => other
+                .into_vec()
                 .map(Val::arr)
                 .ok_or_else(|| EvalError(format!("{}: expected array", who))),
         }
@@ -429,29 +502,29 @@ pub mod shims {
 
     pub fn compact(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
         let recv = coerce_arr(recv, "compact")?;
-        run_single(&Compact, &recv)
-            .ok_or_else(|| EvalError("compact: stage filtered".into()))
+        run_single(&Compact, &recv).ok_or_else(|| EvalError("compact: stage filtered".into()))
     }
 
     pub fn pairwise(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
         let recv = coerce_arr(recv, "pairwise")?;
-        run_single(&Pairwise, &recv)
-            .ok_or_else(|| EvalError("pairwise: stage filtered".into()))
+        run_single(&Pairwise, &recv).ok_or_else(|| EvalError("pairwise: stage filtered".into()))
     }
 
     fn vec_arg(args: &[Arg], env: &Env, who: &str) -> Result<Vec<Val>, EvalError> {
-        let a = args.first().ok_or_else(|| EvalError(format!("{}: requires arg", who)))?;
+        let a = args
+            .first()
+            .ok_or_else(|| EvalError(format!("{}: requires arg", who)))?;
         let v = match a {
             Arg::Pos(e) | Arg::Named(_, e) => vm_eval(e, env)?,
         };
-        v.into_vec().ok_or_else(|| EvalError(format!("{}: expected array arg", who)))
+        v.into_vec()
+            .ok_or_else(|| EvalError(format!("{}: expected array arg", who)))
     }
 
     pub fn diff(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
         let recv = coerce_arr(recv, "diff")?;
         let other = vec_arg(args, env, "diff")?;
-        run_single(&Diff::new(other), &recv)
-            .ok_or_else(|| EvalError("diff: stage filtered".into()))
+        run_single(&Diff::new(other), &recv).ok_or_else(|| EvalError("diff: stage filtered".into()))
     }
 
     pub fn intersect(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
@@ -484,8 +557,7 @@ pub mod shims {
 
     pub fn unique(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
         let recv = coerce_arr(recv, "unique")?;
-        run_single(&UniqueArr, &recv)
-            .ok_or_else(|| EvalError("unique: stage filtered".into()))
+        run_single(&UniqueArr, &recv).ok_or_else(|| EvalError("unique: stage filtered".into()))
     }
 
     pub fn first(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
@@ -517,8 +589,7 @@ pub mod shims {
 
     pub fn nth(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
         let i = first_i64_arg(args, env, "nth")?;
-        run_single(&NthAny::new(i), &recv)
-            .ok_or_else(|| EvalError("nth: stage filtered".into()))
+        run_single(&NthAny::new(i), &recv).ok_or_else(|| EvalError("nth: stage filtered".into()))
     }
 
     pub fn append(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
@@ -553,8 +624,7 @@ pub mod shims {
     // Method-call fallback in `eval::builtins::{keys,values,entries}_dispatch`.
 
     pub fn invert(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-        run_single(&Invert, &recv)
-            .ok_or_else(|| EvalError("invert: expected object".into()))
+        run_single(&Invert, &recv).ok_or_else(|| EvalError("invert: expected object".into()))
     }
 
     fn first_val_arg(args: &[Arg], env: &Env) -> Result<Val, EvalError> {
@@ -598,16 +668,23 @@ pub mod shims {
 macro_rules! lifted_str_stage {
     ($name:ident, $transform:expr) => {
         pub struct $name;
-        impl $name { pub fn new() -> Self { Self } }
-        impl Default for $name { fn default() -> Self { Self } }
+        impl $name {
+            pub fn new() -> Self {
+                Self
+            }
+        }
+        impl Default for $name {
+            fn default() -> Self {
+                Self
+            }
+        }
 
         impl Stage for $name {
             fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
                 if let Val::Str(s) = x {
                     let f: fn(&str) -> String = $transform;
                     let out = f(s.as_ref());
-                    return StageOutput::Pass(Cow::Owned(
-                        Val::Str(std::sync::Arc::from(out))));
+                    return StageOutput::Pass(Cow::Owned(Val::Str(std::sync::Arc::from(out))));
                 }
                 StageOutput::Filtered
             }
@@ -651,7 +728,9 @@ lifted_str_stage!(Capitalize, |s| {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars();
     if let Some(first) = chars.next() {
-        for c in first.to_uppercase() { out.push(c); }
+        for c in first.to_uppercase() {
+            out.push(c);
+        }
         out.push_str(&chars.as_str().to_lowercase());
     }
     out
@@ -666,10 +745,14 @@ lifted_str_stage!(TitleCase, |s| {
             out.push(c);
             at_start = true;
         } else if at_start {
-            for u in c.to_uppercase() { out.push(u); }
+            for u in c.to_uppercase() {
+                out.push(u);
+            }
             at_start = false;
         } else {
-            for l in c.to_lowercase() { out.push(l); }
+            for l in c.to_lowercase() {
+                out.push(l);
+            }
         }
     }
     out
@@ -697,8 +780,16 @@ lifted_str_stage!(HtmlEscape, |s| {
 macro_rules! lifted_str_to_val {
     ($name:ident, $transform:expr) => {
         pub struct $name;
-        impl $name { pub fn new() -> Self { Self } }
-        impl Default for $name { fn default() -> Self { Self } }
+        impl $name {
+            pub fn new() -> Self {
+                Self
+            }
+        }
+        impl Default for $name {
+            fn default() -> Self {
+                Self
+            }
+        }
 
         impl Stage for $name {
             fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
@@ -719,8 +810,9 @@ lifted_str_stage!(UrlEncode, |s| {
     for b in s.as_bytes() {
         let b = *b;
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9'
-                | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
             _ => {
                 use std::fmt::Write;
                 let _ = write!(out, "%{:02X}", b);
@@ -757,44 +849,59 @@ lifted_str_stage!(UrlDecode, |s| {
 
 // `.html_unescape()` — reverse the 5 entity replacements.
 lifted_str_stage!(HtmlUnescape, |s| {
-    s.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
-     .replace("&quot;", "\"").replace("&#39;", "'")
+    s.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
 });
 
 // ── Val-returning string Stages (lines / words / chars / casts) ───
 
 // `.lines()` — split into Val::Arr of Val::Str.
 lifted_str_to_val!(Lines, |s| {
-    Val::arr(s.lines().map(|l| Val::Str(std::sync::Arc::from(l))).collect())
+    Val::arr(
+        s.lines()
+            .map(|l| Val::Str(std::sync::Arc::from(l)))
+            .collect(),
+    )
 });
 
 // `.words()` — whitespace split into Val::Arr of Val::Str.
 lifted_str_to_val!(Words, |s| {
-    Val::arr(s.split_whitespace()
-        .map(|w| Val::Str(std::sync::Arc::from(w)))
-        .collect())
+    Val::arr(
+        s.split_whitespace()
+            .map(|w| Val::Str(std::sync::Arc::from(w)))
+            .collect(),
+    )
 });
 
 // `.chars()` — codepoint split into Val::Arr of Val::Str.
 lifted_str_to_val!(Chars, |s| {
-    Val::arr(s.chars()
-        .map(|c| Val::Str(std::sync::Arc::from(c.to_string())))
-        .collect())
+    Val::arr(
+        s.chars()
+            .map(|c| Val::Str(std::sync::Arc::from(c.to_string())))
+            .collect(),
+    )
 });
 
 // `.to_number()` — parse i64 or f64; null on parse failure.
 lifted_str_to_val!(ToNumber, |s| {
-    if let Ok(i) = s.parse::<i64>() { return Val::Int(i); }
-    if let Ok(f) = s.parse::<f64>() { return Val::Float(f); }
+    if let Ok(i) = s.parse::<i64>() {
+        return Val::Int(i);
+    }
+    if let Ok(f) = s.parse::<f64>() {
+        return Val::Float(f);
+    }
     Val::Null
 });
 
 // `.to_bool()` — recognised "true"/"false" → Val::Bool, else Null.
 lifted_str_to_val!(ToBool, |s| {
     match s {
-        "true"  => Val::Bool(true),
+        "true" => Val::Bool(true),
         "false" => Val::Bool(false),
-        _       => Val::Null,
+        _ => Val::Null,
     }
 });
 
@@ -807,7 +914,8 @@ lifted_str_stage!(ToBase64, |s| { base64_encode(s.as_bytes()) });
 lifted_str_to_val!(FromBase64, |s| {
     match base64_decode(s) {
         Ok(bytes) => Val::Str(std::sync::Arc::from(
-            String::from_utf8_lossy(&bytes).as_ref())),
+            String::from_utf8_lossy(&bytes).as_ref(),
+        )),
         Err(_) => Val::Null,
     }
 });
@@ -815,70 +923,91 @@ lifted_str_to_val!(FromBase64, |s| {
 // ── Single-arg string Stages ───────────────────────────────────────
 
 /// `.starts_with(prefix)` — returns Val::Bool.
-pub struct StartsWith { pub prefix: std::sync::Arc<str> }
+pub struct StartsWith {
+    pub prefix: std::sync::Arc<str>,
+}
 impl StartsWith {
-    pub fn new(prefix: std::sync::Arc<str>) -> Self { Self { prefix } }
+    pub fn new(prefix: std::sync::Arc<str>) -> Self {
+        Self { prefix }
+    }
 }
 impl Stage for StartsWith {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         if let Val::Str(s) = x {
-            return StageOutput::Pass(Cow::Owned(
-                Val::Bool(s.starts_with(self.prefix.as_ref()))));
+            return StageOutput::Pass(Cow::Owned(Val::Bool(s.starts_with(self.prefix.as_ref()))));
         }
         StageOutput::Filtered
     }
 }
 
 /// `.ends_with(suffix)` — returns Val::Bool.
-pub struct EndsWith { pub suffix: std::sync::Arc<str> }
+pub struct EndsWith {
+    pub suffix: std::sync::Arc<str>,
+}
 impl EndsWith {
-    pub fn new(suffix: std::sync::Arc<str>) -> Self { Self { suffix } }
+    pub fn new(suffix: std::sync::Arc<str>) -> Self {
+        Self { suffix }
+    }
 }
 impl Stage for EndsWith {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         if let Val::Str(s) = x {
-            return StageOutput::Pass(Cow::Owned(
-                Val::Bool(s.ends_with(self.suffix.as_ref()))));
+            return StageOutput::Pass(Cow::Owned(Val::Bool(s.ends_with(self.suffix.as_ref()))));
         }
         StageOutput::Filtered
     }
 }
 
 /// `.contains(needle)` — returns Val::Bool.
-pub struct Contains { pub needle: std::sync::Arc<str> }
+pub struct Contains {
+    pub needle: std::sync::Arc<str>,
+}
 impl Contains {
-    pub fn new(needle: std::sync::Arc<str>) -> Self { Self { needle } }
+    pub fn new(needle: std::sync::Arc<str>) -> Self {
+        Self { needle }
+    }
 }
 impl Stage for Contains {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         if let Val::Str(s) = x {
-            return StageOutput::Pass(Cow::Owned(
-                Val::Bool(s.contains(self.needle.as_ref()))));
+            return StageOutput::Pass(Cow::Owned(Val::Bool(s.contains(self.needle.as_ref()))));
         }
         StageOutput::Filtered
     }
 }
 
 /// `.repeat(n)` — repeat string n times.
-pub struct Repeat { pub n: usize }
-impl Repeat { pub fn new(n: usize) -> Self { Self { n } } }
+pub struct Repeat {
+    pub n: usize,
+}
+impl Repeat {
+    pub fn new(n: usize) -> Self {
+        Self { n }
+    }
+}
 impl Stage for Repeat {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         if let Val::Str(s) = x {
-            return StageOutput::Pass(Cow::Owned(
-                Val::Str(std::sync::Arc::from(s.repeat(self.n)))));
+            return StageOutput::Pass(Cow::Owned(Val::Str(std::sync::Arc::from(s.repeat(self.n)))));
         }
         StageOutput::Filtered
     }
 }
 
 /// `.split(sep)` — returns Val::Arr of Val::Str.
-pub struct Split { pub sep: std::sync::Arc<str> }
-impl Split { pub fn new(sep: std::sync::Arc<str>) -> Self { Self { sep } } }
+pub struct Split {
+    pub sep: std::sync::Arc<str>,
+}
+impl Split {
+    pub fn new(sep: std::sync::Arc<str>) -> Self {
+        Self { sep }
+    }
+}
 impl Stage for Split {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         if let Val::Str(s) = x {
-            let items: Vec<Val> = s.split(self.sep.as_ref())
+            let items: Vec<Val> = s
+                .split(self.sep.as_ref())
                 .map(|p| Val::Str(std::sync::Arc::from(p)))
                 .collect();
             return StageOutput::Pass(Cow::Owned(Val::arr(items)));
@@ -890,7 +1019,7 @@ impl Stage for Split {
 /// `.replace(needle, with)` — single substitution per match.
 pub struct Replace {
     pub needle: std::sync::Arc<str>,
-    pub with:   std::sync::Arc<str>,
+    pub with: std::sync::Arc<str>,
 }
 impl Replace {
     pub fn new(needle: std::sync::Arc<str>, with: std::sync::Arc<str>) -> Self {
@@ -901,22 +1030,26 @@ impl Stage for Replace {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         if let Val::Str(s) = x {
             let out = s.replace(self.needle.as_ref(), self.with.as_ref());
-            return StageOutput::Pass(Cow::Owned(
-                Val::Str(std::sync::Arc::from(out))));
+            return StageOutput::Pass(Cow::Owned(Val::Str(std::sync::Arc::from(out))));
         }
         StageOutput::Filtered
     }
 }
 
 /// `.strip_prefix(prefix)` — strip if present, else return original.
-pub struct StripPrefix { pub prefix: std::sync::Arc<str> }
+pub struct StripPrefix {
+    pub prefix: std::sync::Arc<str>,
+}
 impl StripPrefix {
-    pub fn new(prefix: std::sync::Arc<str>) -> Self { Self { prefix } }
+    pub fn new(prefix: std::sync::Arc<str>) -> Self {
+        Self { prefix }
+    }
 }
 impl Stage for StripPrefix {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         if let Val::Str(s) = x {
-            let out = s.strip_prefix(self.prefix.as_ref())
+            let out = s
+                .strip_prefix(self.prefix.as_ref())
                 .map(std::sync::Arc::<str>::from)
                 .unwrap_or_else(|| s.clone());
             return StageOutput::Pass(Cow::Owned(Val::Str(out)));
@@ -926,14 +1059,19 @@ impl Stage for StripPrefix {
 }
 
 /// `.strip_suffix(suffix)` — strip if present, else return original.
-pub struct StripSuffix { pub suffix: std::sync::Arc<str> }
+pub struct StripSuffix {
+    pub suffix: std::sync::Arc<str>,
+}
 impl StripSuffix {
-    pub fn new(suffix: std::sync::Arc<str>) -> Self { Self { suffix } }
+    pub fn new(suffix: std::sync::Arc<str>) -> Self {
+        Self { suffix }
+    }
 }
 impl Stage for StripSuffix {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         if let Val::Str(s) = x {
-            let out = s.strip_suffix(self.suffix.as_ref())
+            let out = s
+                .strip_suffix(self.suffix.as_ref())
                 .map(std::sync::Arc::<str>::from)
                 .unwrap_or_else(|| s.clone());
             return StageOutput::Pass(Cow::Owned(Val::Str(out)));
@@ -943,9 +1081,14 @@ impl Stage for StripSuffix {
 }
 
 /// `.pad_left(width, fill)` — left-pad to width with fill char.
-pub struct PadLeft { pub width: usize, pub fill: char }
+pub struct PadLeft {
+    pub width: usize,
+    pub fill: char,
+}
 impl PadLeft {
-    pub fn new(width: usize, fill: char) -> Self { Self { width, fill } }
+    pub fn new(width: usize, fill: char) -> Self {
+        Self { width, fill }
+    }
 }
 impl Stage for PadLeft {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
@@ -954,20 +1097,23 @@ impl Stage for PadLeft {
             if n >= self.width {
                 return StageOutput::Pass(Cow::Borrowed(x));
             }
-            let pad: String = std::iter::repeat(self.fill)
-                .take(self.width - n).collect();
+            let pad: String = std::iter::repeat(self.fill).take(self.width - n).collect();
             let out = pad + s.as_ref();
-            return StageOutput::Pass(Cow::Owned(
-                Val::Str(std::sync::Arc::from(out))));
+            return StageOutput::Pass(Cow::Owned(Val::Str(std::sync::Arc::from(out))));
         }
         StageOutput::Filtered
     }
 }
 
 /// `.pad_right(width, fill)` — right-pad to width with fill char.
-pub struct PadRight { pub width: usize, pub fill: char }
+pub struct PadRight {
+    pub width: usize,
+    pub fill: char,
+}
 impl PadRight {
-    pub fn new(width: usize, fill: char) -> Self { Self { width, fill } }
+    pub fn new(width: usize, fill: char) -> Self {
+        Self { width, fill }
+    }
 }
 impl Stage for PadRight {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
@@ -976,29 +1122,33 @@ impl Stage for PadRight {
             if n >= self.width {
                 return StageOutput::Pass(Cow::Borrowed(x));
             }
-            let pad: String = std::iter::repeat(self.fill)
-                .take(self.width - n).collect();
+            let pad: String = std::iter::repeat(self.fill).take(self.width - n).collect();
             let out = s.to_string() + &pad;
-            return StageOutput::Pass(Cow::Owned(
-                Val::Str(std::sync::Arc::from(out))));
+            return StageOutput::Pass(Cow::Owned(Val::Str(std::sync::Arc::from(out))));
         }
         StageOutput::Filtered
     }
 }
 
 /// `.indent(n)` — prepend n spaces to each line.
-pub struct Indent { pub n: usize }
-impl Indent { pub fn new(n: usize) -> Self { Self { n } } }
+pub struct Indent {
+    pub n: usize,
+}
+impl Indent {
+    pub fn new(n: usize) -> Self {
+        Self { n }
+    }
+}
 impl Stage for Indent {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         if let Val::Str(s) = x {
             let prefix: String = std::iter::repeat(' ').take(self.n).collect();
-            let out = s.lines()
+            let out = s
+                .lines()
                 .map(|l| format!("{}{}", prefix, l))
                 .collect::<Vec<_>>()
                 .join("\n");
-            return StageOutput::Pass(Cow::Owned(
-                Val::Str(std::sync::Arc::from(out))));
+            return StageOutput::Pass(Cow::Owned(Val::Str(std::sync::Arc::from(out))));
         }
         StageOutput::Filtered
     }
@@ -1006,42 +1156,57 @@ impl Stage for Indent {
 
 // `.dedent()` — strip common leading whitespace from all non-empty lines.
 lifted_str_stage!(Dedent, |s| {
-    let min_indent = s.lines()
+    let min_indent = s
+        .lines()
         .filter(|l| !l.trim().is_empty())
         .map(|l| l.len() - l.trim_start().len())
-        .min().unwrap_or(0);
+        .min()
+        .unwrap_or(0);
     s.lines()
-        .map(|l| if l.len() >= min_indent { &l[min_indent..] } else { l })
+        .map(|l| {
+            if l.len() >= min_indent {
+                &l[min_indent..]
+            } else {
+                l
+            }
+        })
         .collect::<Vec<_>>()
         .join("\n")
 });
 
 /// `.str_matches(needle)` — alias for contains; returns Val::Bool.
-pub struct StrMatches { pub needle: std::sync::Arc<str> }
+pub struct StrMatches {
+    pub needle: std::sync::Arc<str>,
+}
 impl StrMatches {
-    pub fn new(needle: std::sync::Arc<str>) -> Self { Self { needle } }
+    pub fn new(needle: std::sync::Arc<str>) -> Self {
+        Self { needle }
+    }
 }
 impl Stage for StrMatches {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         if let Val::Str(s) = x {
-            return StageOutput::Pass(Cow::Owned(
-                Val::Bool(s.contains(self.needle.as_ref()))));
+            return StageOutput::Pass(Cow::Owned(Val::Bool(s.contains(self.needle.as_ref()))));
         }
         StageOutput::Filtered
     }
 }
 
 /// `.index_of(needle)` — char-position of first match; -1 on miss.
-pub struct IndexOf { pub needle: std::sync::Arc<str> }
+pub struct IndexOf {
+    pub needle: std::sync::Arc<str>,
+}
 impl IndexOf {
-    pub fn new(needle: std::sync::Arc<str>) -> Self { Self { needle } }
+    pub fn new(needle: std::sync::Arc<str>) -> Self {
+        Self { needle }
+    }
 }
 impl Stage for IndexOf {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         if let Val::Str(s) = x {
             let r = match s.find(self.needle.as_ref()) {
                 Some(i) => Val::Int(s[..i].chars().count() as i64),
-                None    => Val::Int(-1),
+                None => Val::Int(-1),
             };
             return StageOutput::Pass(Cow::Owned(r));
         }
@@ -1059,18 +1224,27 @@ impl Stage for IndexOf {
 /// `.len()` / `.count()` — number of elements; works on Arr only
 /// in this lift (columnar lane support deferred).
 pub struct Len;
-impl Len { pub fn new() -> Self { Self } }
-impl Default for Len { fn default() -> Self { Self } }
+impl Len {
+    pub fn new() -> Self {
+        Self
+    }
+}
+impl Default for Len {
+    fn default() -> Self {
+        Self
+    }
+}
 impl Stage for Len {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         let n = match x {
-            Val::Arr(a)         => a.len(),
-            Val::IntVec(a)      => a.len(),
-            Val::FloatVec(a)    => a.len(),
-            Val::StrVec(a)      => a.len(),
+            Val::Arr(a) => a.len(),
+            Val::IntVec(a) => a.len(),
+            Val::FloatVec(a) => a.len(),
+            Val::StrVec(a) => a.len(),
             Val::StrSliceVec(a) => a.len(),
-            Val::Obj(m)         => m.len(),
-            Val::Str(s)         => s.chars().count(),
+            Val::Obj(m) => m.len(),
+            Val::Str(s) => s.chars().count(),
+            Val::StrSlice(r) => r.as_str().chars().count(),
             _ => return StageOutput::Filtered,
         };
         StageOutput::Pass(Cow::Owned(Val::Int(n as i64)))
@@ -1079,12 +1253,24 @@ impl Stage for Len {
 
 /// `.compact()` — drop Null entries from an Arr.
 pub struct Compact;
-impl Compact { pub fn new() -> Self { Self } }
-impl Default for Compact { fn default() -> Self { Self } }
+impl Compact {
+    pub fn new() -> Self {
+        Self
+    }
+}
+impl Default for Compact {
+    fn default() -> Self {
+        Self
+    }
+}
 impl Stage for Compact {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
-        let items_cow = match x.as_vals() { Some(c) => c, None => return StageOutput::Filtered };
-        let kept: Vec<Val> = items_cow.iter()
+        let items_cow = match x.as_vals() {
+            Some(c) => c,
+            None => return StageOutput::Filtered,
+        };
+        let kept: Vec<Val> = items_cow
+            .iter()
             .filter(|v| !matches!(v, Val::Null))
             .cloned()
             .collect();
@@ -1094,8 +1280,16 @@ impl Stage for Compact {
 
 /// `.flatten()` — one level of array flattening.
 pub struct FlattenOne;
-impl FlattenOne { pub fn new() -> Self { Self } }
-impl Default for FlattenOne { fn default() -> Self { Self } }
+impl FlattenOne {
+    pub fn new() -> Self {
+        Self
+    }
+}
+impl Default for FlattenOne {
+    fn default() -> Self {
+        Self
+    }
+}
 impl Stage for FlattenOne {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         if let Val::Arr(outer) = x {
@@ -1115,13 +1309,21 @@ impl Stage for FlattenOne {
 /// `.flatten(depth)` — recursively flatten up to `depth` levels of
 /// nested arrays.  Delegates to `eval::util::flatten_val` for the
 /// columnar fast path (Arr<IntVec> → IntVec etc.).
-pub struct FlattenDepth { pub depth: usize }
-impl FlattenDepth { pub fn new(depth: usize) -> Self { Self { depth } } }
+pub struct FlattenDepth {
+    pub depth: usize,
+}
+impl FlattenDepth {
+    pub fn new(depth: usize) -> Self {
+        Self { depth }
+    }
+}
 impl Stage for FlattenDepth {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         if matches!(x, Val::Arr(_)) {
-            return StageOutput::Pass(Cow::Owned(
-                crate::eval::util::flatten_val(x.clone(), self.depth)));
+            return StageOutput::Pass(Cow::Owned(crate::eval::util::flatten_val(
+                x.clone(),
+                self.depth,
+            )));
         }
         StageOutput::Filtered
     }
@@ -1129,8 +1331,16 @@ impl Stage for FlattenDepth {
 
 /// `.reverse()` — reverse Arr / IntVec / FloatVec / StrVec / Str.
 pub struct ReverseAny;
-impl ReverseAny { pub fn new() -> Self { Self } }
-impl Default for ReverseAny { fn default() -> Self { Self } }
+impl ReverseAny {
+    pub fn new() -> Self {
+        Self
+    }
+}
+impl Default for ReverseAny {
+    fn default() -> Self {
+        Self
+    }
+}
 impl Stage for ReverseAny {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         let out = match x {
@@ -1155,7 +1365,8 @@ impl Stage for ReverseAny {
                 Val::str_vec(v)
             }
             Val::Str(s) => Val::Str(std::sync::Arc::<str>::from(
-                s.chars().rev().collect::<String>())),
+                s.chars().rev().collect::<String>(),
+            )),
             _ => return StageOutput::Filtered,
         };
         StageOutput::Pass(Cow::Owned(out))
@@ -1164,13 +1375,22 @@ impl Stage for ReverseAny {
 
 /// `.unique()` / `.distinct()` — dedup by canonical key.
 pub struct UniqueArr;
-impl UniqueArr { pub fn new() -> Self { Self } }
-impl Default for UniqueArr { fn default() -> Self { Self } }
+impl UniqueArr {
+    pub fn new() -> Self {
+        Self
+    }
+}
+impl Default for UniqueArr {
+    fn default() -> Self {
+        Self
+    }
+}
 impl Stage for UniqueArr {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         if let Val::Arr(a) = x {
             let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-            let kept: Vec<Val> = a.iter()
+            let kept: Vec<Val> = a
+                .iter()
                 .filter(|v| seen.insert(crate::eval::util::val_to_key(v)))
                 .cloned()
                 .collect();
@@ -1181,8 +1401,14 @@ impl Stage for UniqueArr {
 }
 
 /// `.first(n)` — n==1 returns scalar (or Null), else Arr of first n.
-pub struct First { pub n: i64 }
-impl First { pub fn new(n: i64) -> Self { Self { n } } }
+pub struct First {
+    pub n: i64,
+}
+impl First {
+    pub fn new(n: i64) -> Self {
+        Self { n }
+    }
+}
 impl Stage for First {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         if let Val::Arr(a) = x {
@@ -1198,8 +1424,14 @@ impl Stage for First {
 }
 
 /// `.last(n)` — n==1 returns scalar (or Null), else Arr of last n.
-pub struct Last { pub n: i64 }
-impl Last { pub fn new(n: i64) -> Self { Self { n } } }
+pub struct Last {
+    pub n: i64,
+}
+impl Last {
+    pub fn new(n: i64) -> Self {
+        Self { n }
+    }
+}
 impl Stage for Last {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         if let Val::Arr(a) = x {
@@ -1217,8 +1449,14 @@ impl Stage for Last {
 
 /// `.nth(i)` — index lookup; supports Arr/IntVec/FloatVec/StrVec/ObjVec.
 /// Negative `i` indexes from the end.
-pub struct NthAny { pub i: i64 }
-impl NthAny { pub fn new(i: i64) -> Self { Self { i } } }
+pub struct NthAny {
+    pub i: i64,
+}
+impl NthAny {
+    pub fn new(i: i64) -> Self {
+        Self { i }
+    }
+}
 impl Stage for NthAny {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         StageOutput::Pass(Cow::Owned(x.get_index(self.i)))
@@ -1227,8 +1465,14 @@ impl Stage for NthAny {
 
 /// `.append(item)` — push item onto end.  Coerces typed vecs via
 /// `into_vec`.  Stage holds the item as owned Val.
-pub struct Append { pub item: Val }
-impl Append { pub fn new(item: Val) -> Self { Self { item } } }
+pub struct Append {
+    pub item: Val,
+}
+impl Append {
+    pub fn new(item: Val) -> Self {
+        Self { item }
+    }
+}
 impl Stage for Append {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         let mut v = match x.clone().into_vec() {
@@ -1241,8 +1485,14 @@ impl Stage for Append {
 }
 
 /// `.prepend(item)` — insert item at front.
-pub struct Prepend { pub item: Val }
-impl Prepend { pub fn new(item: Val) -> Self { Self { item } } }
+pub struct Prepend {
+    pub item: Val,
+}
+impl Prepend {
+    pub fn new(item: Val) -> Self {
+        Self { item }
+    }
+}
 impl Stage for Prepend {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         let mut v = match x.clone().into_vec() {
@@ -1256,12 +1506,22 @@ impl Stage for Prepend {
 
 /// `.enumerate()` — Arr → Arr of [index, item] pairs (as Val::Arr).
 pub struct Enumerate;
-impl Enumerate { pub fn new() -> Self { Self } }
-impl Default for Enumerate { fn default() -> Self { Self } }
+impl Enumerate {
+    pub fn new() -> Self {
+        Self
+    }
+}
+impl Default for Enumerate {
+    fn default() -> Self {
+        Self
+    }
+}
 impl Stage for Enumerate {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         if let Val::Arr(a) = x {
-            let pairs: Vec<Val> = a.iter().enumerate()
+            let pairs: Vec<Val> = a
+                .iter()
+                .enumerate()
                 .map(|(i, v)| Val::arr(vec![Val::Int(i as i64), v.clone()]))
                 .collect();
             return StageOutput::Pass(Cow::Owned(Val::arr(pairs)));
@@ -1272,11 +1532,22 @@ impl Stage for Enumerate {
 
 /// `.pairwise()` — Arr → Arr of [arr[i], arr[i+1]] adjacent pairs.
 pub struct Pairwise;
-impl Pairwise { pub fn new() -> Self { Self } }
-impl Default for Pairwise { fn default() -> Self { Self } }
+impl Pairwise {
+    pub fn new() -> Self {
+        Self
+    }
+}
+impl Default for Pairwise {
+    fn default() -> Self {
+        Self
+    }
+}
 impl Stage for Pairwise {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
-        let items_cow = match x.as_vals() { Some(c) => c, None => return StageOutput::Filtered };
+        let items_cow = match x.as_vals() {
+            Some(c) => c,
+            None => return StageOutput::Filtered,
+        };
         let a = items_cow.as_ref();
         let mut out: Vec<Val> = Vec::with_capacity(a.len().saturating_sub(1));
         for w in a.windows(2) {
@@ -1287,15 +1558,21 @@ impl Stage for Pairwise {
 }
 
 /// `.chunk(n)` — split into Arr of length-n Arrs (last may be shorter).
-pub struct Chunk { pub n: usize }
-impl Chunk { pub fn new(n: usize) -> Self { Self { n } } }
+pub struct Chunk {
+    pub n: usize,
+}
+impl Chunk {
+    pub fn new(n: usize) -> Self {
+        Self { n }
+    }
+}
 impl Stage for Chunk {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
-        if self.n == 0 { return StageOutput::Filtered; }
+        if self.n == 0 {
+            return StageOutput::Filtered;
+        }
         if let Val::Arr(a) = x {
-            let chunks: Vec<Val> = a.chunks(self.n)
-                .map(|c| Val::arr(c.to_vec()))
-                .collect();
+            let chunks: Vec<Val> = a.chunks(self.n).map(|c| Val::arr(c.to_vec())).collect();
             return StageOutput::Pass(Cow::Owned(Val::arr(chunks)));
         }
         StageOutput::Filtered
@@ -1303,15 +1580,21 @@ impl Stage for Chunk {
 }
 
 /// `.window(n)` — Arr → Arr of length-n sliding windows.
-pub struct Window { pub n: usize }
-impl Window { pub fn new(n: usize) -> Self { Self { n } } }
+pub struct Window {
+    pub n: usize,
+}
+impl Window {
+    pub fn new(n: usize) -> Self {
+        Self { n }
+    }
+}
 impl Stage for Window {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
-        if self.n == 0 { return StageOutput::Filtered; }
+        if self.n == 0 {
+            return StageOutput::Filtered;
+        }
         if let Val::Arr(a) = x {
-            let windows: Vec<Val> = a.windows(self.n)
-                .map(|w| Val::arr(w.to_vec()))
-                .collect();
+            let windows: Vec<Val> = a.windows(self.n).map(|w| Val::arr(w.to_vec())).collect();
             return StageOutput::Pass(Cow::Owned(Val::arr(windows)));
         }
         StageOutput::Filtered
@@ -1322,11 +1605,22 @@ impl Stage for Window {
 
 /// `.keys()` — Obj → Arr<Str>.
 pub struct Keys;
-impl Keys { pub fn new() -> Self { Self } }
-impl Default for Keys { fn default() -> Self { Self } }
+impl Keys {
+    pub fn new() -> Self {
+        Self
+    }
+}
+impl Default for Keys {
+    fn default() -> Self {
+        Self
+    }
+}
 impl Stage for Keys {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
-        let m = match x.as_object() { Some(m) => m, None => return StageOutput::Filtered };
+        let m = match x.as_object() {
+            Some(m) => m,
+            None => return StageOutput::Filtered,
+        };
         let items: Vec<Val> = m.keys().map(|k| Val::Str(k.clone())).collect();
         StageOutput::Pass(Cow::Owned(Val::arr(items)))
     }
@@ -1334,11 +1628,22 @@ impl Stage for Keys {
 
 /// `.values()` — Obj → Arr.
 pub struct Values;
-impl Values { pub fn new() -> Self { Self } }
-impl Default for Values { fn default() -> Self { Self } }
+impl Values {
+    pub fn new() -> Self {
+        Self
+    }
+}
+impl Default for Values {
+    fn default() -> Self {
+        Self
+    }
+}
 impl Stage for Values {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
-        let m = match x.as_object() { Some(m) => m, None => return StageOutput::Filtered };
+        let m = match x.as_object() {
+            Some(m) => m,
+            None => return StageOutput::Filtered,
+        };
         let items: Vec<Val> = m.values().cloned().collect();
         StageOutput::Pass(Cow::Owned(Val::arr(items)))
     }
@@ -1346,22 +1651,42 @@ impl Stage for Values {
 
 /// `.entries()` / `.to_pairs()` — Obj → Arr<[Str, Val]>.
 pub struct Entries;
-impl Entries { pub fn new() -> Self { Self } }
-impl Default for Entries { fn default() -> Self { Self } }
+impl Entries {
+    pub fn new() -> Self {
+        Self
+    }
+}
+impl Default for Entries {
+    fn default() -> Self {
+        Self
+    }
+}
 impl Stage for Entries {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
-        let m = match x.as_object() { Some(m) => m, None => return StageOutput::Filtered };
-        let pairs: Vec<Val> = m.iter().map(|(k, v)| {
-            Val::arr(vec![Val::Str(k.clone()), v.clone()])
-        }).collect();
+        let m = match x.as_object() {
+            Some(m) => m,
+            None => return StageOutput::Filtered,
+        };
+        let pairs: Vec<Val> = m
+            .iter()
+            .map(|(k, v)| Val::arr(vec![Val::Str(k.clone()), v.clone()]))
+            .collect();
         StageOutput::Pass(Cow::Owned(Val::arr(pairs)))
     }
 }
 
 /// `.from_pairs()` — Arr<[Str, Val]> → Obj.
 pub struct FromPairs;
-impl FromPairs { pub fn new() -> Self { Self } }
-impl Default for FromPairs { fn default() -> Self { Self } }
+impl FromPairs {
+    pub fn new() -> Self {
+        Self
+    }
+}
+impl Default for FromPairs {
+    fn default() -> Self {
+        Self
+    }
+}
 impl Stage for FromPairs {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         if let Val::Arr(pairs) = x {
@@ -1384,18 +1709,28 @@ impl Stage for FromPairs {
 
 /// `.invert()` — Obj{k → v} → Obj{v_str → k} (values stringified).
 pub struct Invert;
-impl Invert { pub fn new() -> Self { Self } }
-impl Default for Invert { fn default() -> Self { Self } }
+impl Invert {
+    pub fn new() -> Self {
+        Self
+    }
+}
+impl Default for Invert {
+    fn default() -> Self {
+        Self
+    }
+}
 impl Stage for Invert {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
-        let m = match x.as_object() { Some(m) => m, None => return StageOutput::Filtered };
+        let m = match x.as_object() {
+            Some(m) => m,
+            None => return StageOutput::Filtered,
+        };
         let mut out: indexmap::IndexMap<std::sync::Arc<str>, Val> =
             indexmap::IndexMap::with_capacity(m.len());
         for (k, v) in m.iter() {
             let new_key: std::sync::Arc<str> = match v {
                 Val::Str(s) => s.clone(),
-                other       => std::sync::Arc::<str>::from(
-                    crate::eval::util::val_to_key(other).as_str()),
+                other => std::sync::Arc::<str>::from(crate::eval::util::val_to_key(other).as_str()),
             };
             out.insert(new_key, Val::Str(k.clone()));
         }
@@ -1404,57 +1739,107 @@ impl Stage for Invert {
 }
 
 /// `.merge(other)` — shallow merge; keys in `other` override receiver.
-pub struct Merge { pub other: Val }
-impl Merge { pub fn new(other: Val) -> Self { Self { other } } }
+pub struct Merge {
+    pub other: Val,
+}
+impl Merge {
+    pub fn new(other: Val) -> Self {
+        Self { other }
+    }
+}
 impl Stage for Merge {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
-        let base = match x.as_object() { Some(m) => m, None => return StageOutput::Filtered };
-        let other = match self.other.as_object() { Some(m) => m, None => return StageOutput::Filtered };
+        let base = match x.as_object() {
+            Some(m) => m,
+            None => return StageOutput::Filtered,
+        };
+        let other = match self.other.as_object() {
+            Some(m) => m,
+            None => return StageOutput::Filtered,
+        };
         let mut out: indexmap::IndexMap<std::sync::Arc<str>, Val> = base.clone();
-        for (k, v) in other.iter() { out.insert(k.clone(), v.clone()); }
+        for (k, v) in other.iter() {
+            out.insert(k.clone(), v.clone());
+        }
         StageOutput::Pass(Cow::Owned(Val::Obj(std::sync::Arc::new(out))))
     }
 }
 
 /// `.deep_merge(other)` — recursive merge; nested objects merge by key.
-pub struct DeepMerge { pub other: Val }
-impl DeepMerge { pub fn new(other: Val) -> Self { Self { other } } }
+pub struct DeepMerge {
+    pub other: Val,
+}
+impl DeepMerge {
+    pub fn new(other: Val) -> Self {
+        Self { other }
+    }
+}
 impl Stage for DeepMerge {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
-        StageOutput::Pass(Cow::Owned(
-            crate::eval::util::deep_merge(x.clone(), self.other.clone())))
+        StageOutput::Pass(Cow::Owned(crate::eval::util::deep_merge(
+            x.clone(),
+            self.other.clone(),
+        )))
     }
 }
 
 /// `.defaults(other)` — fill null/missing keys from `other`.
-pub struct Defaults { pub other: Val }
-impl Defaults { pub fn new(other: Val) -> Self { Self { other } } }
+pub struct Defaults {
+    pub other: Val,
+}
+impl Defaults {
+    pub fn new(other: Val) -> Self {
+        Self { other }
+    }
+}
 impl Stage for Defaults {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
-        let base = match x.as_object() { Some(m) => m, None => return StageOutput::Filtered };
-        let defs = match self.other.as_object() { Some(m) => m, None => return StageOutput::Filtered };
+        let base = match x.as_object() {
+            Some(m) => m,
+            None => return StageOutput::Filtered,
+        };
+        let defs = match self.other.as_object() {
+            Some(m) => m,
+            None => return StageOutput::Filtered,
+        };
         let mut out: indexmap::IndexMap<std::sync::Arc<str>, Val> = base.clone();
         for (k, v) in defs.iter() {
             let entry = out.entry(k.clone()).or_insert(Val::Null);
-            if entry.is_null() { *entry = v.clone(); }
+            if entry.is_null() {
+                *entry = v.clone();
+            }
         }
         StageOutput::Pass(Cow::Owned(Val::Obj(std::sync::Arc::new(out))))
     }
 }
 
 /// `.rename({old: new, ...})` — rename keys per mapping object.
-pub struct Rename { pub renames: Val }
-impl Rename { pub fn new(renames: Val) -> Self { Self { renames } } }
+pub struct Rename {
+    pub renames: Val,
+}
+impl Rename {
+    pub fn new(renames: Val) -> Self {
+        Self { renames }
+    }
+}
 impl Stage for Rename {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
-        let base = match x.as_object() { Some(m) => m, None => return StageOutput::Filtered };
-        let renames = match self.renames.as_object() { Some(m) => m, None => return StageOutput::Filtered };
+        let base = match x.as_object() {
+            Some(m) => m,
+            None => return StageOutput::Filtered,
+        };
+        let renames = match self.renames.as_object() {
+            Some(m) => m,
+            None => return StageOutput::Filtered,
+        };
         let mut out: indexmap::IndexMap<std::sync::Arc<str>, Val> = base.clone();
         for (old, new_val) in renames.iter() {
             if let Some(v) = out.shift_remove(old.as_ref()) {
                 let new_key: std::sync::Arc<str> = if let Val::Str(s) = new_val {
                     s.clone()
-                } else { old.clone() };
+                } else {
+                    old.clone()
+                };
                 out.insert(new_key, v);
             }
         }
@@ -1469,14 +1854,24 @@ impl Stage for Rename {
 // repr (matches owned semantics).
 
 /// `.intersect(other)` — keep elements present in both arrays.
-pub struct Intersect { pub other: Vec<Val> }
-impl Intersect { pub fn new(other: Vec<Val>) -> Self { Self { other } } }
+pub struct Intersect {
+    pub other: Vec<Val>,
+}
+impl Intersect {
+    pub fn new(other: Vec<Val>) -> Self {
+        Self { other }
+    }
+}
 impl Stage for Intersect {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         if let Val::Arr(a) = x {
-            let other_keys: std::collections::HashSet<String> =
-                self.other.iter().map(crate::eval::util::val_to_key).collect();
-            let kept: Vec<Val> = a.iter()
+            let other_keys: std::collections::HashSet<String> = self
+                .other
+                .iter()
+                .map(crate::eval::util::val_to_key)
+                .collect();
+            let kept: Vec<Val> = a
+                .iter()
                 .filter(|v| other_keys.contains(&crate::eval::util::val_to_key(v)))
                 .cloned()
                 .collect();
@@ -1487,8 +1882,14 @@ impl Stage for Intersect {
 }
 
 /// `.union(other)` — combine, preserve order, dedup.
-pub struct Union { pub other: Vec<Val> }
-impl Union { pub fn new(other: Vec<Val>) -> Self { Self { other } } }
+pub struct Union {
+    pub other: Vec<Val>,
+}
+impl Union {
+    pub fn new(other: Vec<Val>) -> Self {
+        Self { other }
+    }
+}
 impl Stage for Union {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         if let Val::Arr(a) = x {
@@ -1507,14 +1908,24 @@ impl Stage for Union {
 }
 
 /// `.diff(other)` — keep elements present in self but not in other.
-pub struct Diff { pub other: Vec<Val> }
-impl Diff { pub fn new(other: Vec<Val>) -> Self { Self { other } } }
+pub struct Diff {
+    pub other: Vec<Val>,
+}
+impl Diff {
+    pub fn new(other: Vec<Val>) -> Self {
+        Self { other }
+    }
+}
 impl Stage for Diff {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         if let Val::Arr(a) = x {
-            let other_keys: std::collections::HashSet<String> =
-                self.other.iter().map(crate::eval::util::val_to_key).collect();
-            let kept: Vec<Val> = a.iter()
+            let other_keys: std::collections::HashSet<String> = self
+                .other
+                .iter()
+                .map(crate::eval::util::val_to_key)
+                .collect();
+            let kept: Vec<Val> = a
+                .iter()
                 .filter(|v| !other_keys.contains(&crate::eval::util::val_to_key(v)))
                 .cloned()
                 .collect();
@@ -1527,9 +1938,13 @@ impl Stage for Diff {
 // ── Path Stages (lift_all_builtins paths family) ───────────────────
 
 /// `.get_path(path)` — read leaf at dotted/bracket path.
-pub struct GetPath { pub path: std::sync::Arc<str> }
+pub struct GetPath {
+    pub path: std::sync::Arc<str>,
+}
 impl GetPath {
-    pub fn new(path: std::sync::Arc<str>) -> Self { Self { path } }
+    pub fn new(path: std::sync::Arc<str>) -> Self {
+        Self { path }
+    }
 }
 impl Stage for GetPath {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
@@ -1540,9 +1955,13 @@ impl Stage for GetPath {
 }
 
 /// `.has_path(path)` — does the path resolve to a non-null value?
-pub struct HasPath { pub path: std::sync::Arc<str> }
+pub struct HasPath {
+    pub path: std::sync::Arc<str>,
+}
 impl HasPath {
-    pub fn new(path: std::sync::Arc<str>) -> Self { Self { path } }
+    pub fn new(path: std::sync::Arc<str>) -> Self {
+        Self { path }
+    }
 }
 impl Stage for HasPath {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
@@ -1553,24 +1972,40 @@ impl Stage for HasPath {
 }
 
 /// `.has(key)` — does Obj contain `key`? Val::Bool.
-pub struct Has { pub key: std::sync::Arc<str> }
-impl Has { pub fn new(key: std::sync::Arc<str>) -> Self { Self { key } } }
+pub struct Has {
+    pub key: std::sync::Arc<str>,
+}
+impl Has {
+    pub fn new(key: std::sync::Arc<str>) -> Self {
+        Self { key }
+    }
+}
 impl Stage for Has {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
-        let m = match x.as_object() { Some(m) => m, None => return StageOutput::Filtered };
+        let m = match x.as_object() {
+            Some(m) => m,
+            None => return StageOutput::Filtered,
+        };
         let found = m.contains_key(self.key.as_ref());
         StageOutput::Pass(Cow::Owned(Val::Bool(found)))
     }
 }
 
 /// `.pick([keys])` — narrow Obj to selected keys (as-is, no rename).
-pub struct Pick { pub keys: Vec<std::sync::Arc<str>> }
+pub struct Pick {
+    pub keys: Vec<std::sync::Arc<str>>,
+}
 impl Pick {
-    pub fn new(keys: Vec<std::sync::Arc<str>>) -> Self { Self { keys } }
+    pub fn new(keys: Vec<std::sync::Arc<str>>) -> Self {
+        Self { keys }
+    }
 }
 impl Stage for Pick {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
-        let m = match x.as_object() { Some(m) => m, None => return StageOutput::Filtered };
+        let m = match x.as_object() {
+            Some(m) => m,
+            None => return StageOutput::Filtered,
+        };
         let mut out: indexmap::IndexMap<std::sync::Arc<str>, Val> =
             indexmap::IndexMap::with_capacity(self.keys.len());
         for k in &self.keys {
@@ -1583,15 +2018,21 @@ impl Stage for Pick {
 }
 
 /// `.omit([keys])` — drop selected keys from Obj.
-pub struct Omit { pub keys: Vec<std::sync::Arc<str>> }
+pub struct Omit {
+    pub keys: Vec<std::sync::Arc<str>>,
+}
 impl Omit {
-    pub fn new(keys: Vec<std::sync::Arc<str>>) -> Self { Self { keys } }
+    pub fn new(keys: Vec<std::sync::Arc<str>>) -> Self {
+        Self { keys }
+    }
 }
 impl Stage for Omit {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
-        let m = match x.as_object() { Some(m) => m, None => return StageOutput::Filtered };
-        let drop: std::collections::HashSet<&str> =
-            self.keys.iter().map(|k| k.as_ref()).collect();
+        let m = match x.as_object() {
+            Some(m) => m,
+            None => return StageOutput::Filtered,
+        };
+        let drop: std::collections::HashSet<&str> = self.keys.iter().map(|k| k.as_ref()).collect();
         let mut out: indexmap::IndexMap<std::sync::Arc<str>, Val> =
             indexmap::IndexMap::with_capacity(m.len());
         for (k, v) in m.iter() {
@@ -1604,17 +2045,24 @@ impl Stage for Omit {
 }
 
 /// `.nth(i)` — index into Arr; supports negative indexing.
-pub struct Nth { pub i: i64 }
-impl Nth { pub fn new(i: i64) -> Self { Self { i } } }
+pub struct Nth {
+    pub i: i64,
+}
+impl Nth {
+    pub fn new(i: i64) -> Self {
+        Self { i }
+    }
+}
 impl Stage for Nth {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         if let Val::Arr(a) = x {
             let len = a.len();
             let idx = if self.i < 0 {
                 len.saturating_sub(self.i.unsigned_abs() as usize)
-            } else { self.i as usize };
-            return StageOutput::Pass(Cow::Owned(
-                a.get(idx).cloned().unwrap_or(Val::Null)));
+            } else {
+                self.i as usize
+            };
+            return StageOutput::Pass(Cow::Owned(a.get(idx).cloned().unwrap_or(Val::Null)));
         }
         StageOutput::Filtered
     }
@@ -1632,43 +2080,56 @@ pub(crate) fn split_words_lower(s: &str) -> Vec<String> {
     for c in s.chars() {
         let is_sep = c == '_' || c == '-' || c.is_whitespace();
         if is_sep {
-            if !cur.is_empty() { out.push(std::mem::take(&mut cur)); }
+            if !cur.is_empty() {
+                out.push(std::mem::take(&mut cur));
+            }
             prev_lower = false;
             continue;
         }
         if c.is_uppercase() && prev_lower {
             out.push(std::mem::take(&mut cur));
         }
-        for d in c.to_lowercase() { cur.push(d); }
+        for d in c.to_lowercase() {
+            cur.push(d);
+        }
         prev_lower = c.is_lowercase();
     }
-    if !cur.is_empty() { out.push(cur); }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
     out
 }
 
 pub(crate) fn upper_first_into(p: &str, out: &mut String) {
     let mut chars = p.chars();
     if let Some(f) = chars.next() {
-        for u in f.to_uppercase() { out.push(u); }
+        for u in f.to_uppercase() {
+            out.push(u);
+        }
         out.push_str(chars.as_str());
     }
 }
 
-lifted_str_stage!(SnakeCase,  |s| split_words_lower(s).join("_"));
-lifted_str_stage!(KebabCase,  |s| split_words_lower(s).join("-"));
-lifted_str_stage!(CamelCase,  |s| {
+lifted_str_stage!(SnakeCase, |s| split_words_lower(s).join("_"));
+lifted_str_stage!(KebabCase, |s| split_words_lower(s).join("-"));
+lifted_str_stage!(CamelCase, |s| {
     let parts = split_words_lower(s);
     let mut out = String::with_capacity(s.len());
     for (i, p) in parts.iter().enumerate() {
-        if i == 0 { out.push_str(p); }
-        else { upper_first_into(p, &mut out); }
+        if i == 0 {
+            out.push_str(p);
+        } else {
+            upper_first_into(p, &mut out);
+        }
     }
     out
 });
 lifted_str_stage!(PascalCase, |s| {
     let parts = split_words_lower(s);
     let mut out = String::with_capacity(s.len());
-    for p in parts.iter() { upper_first_into(p, &mut out); }
+    for p in parts.iter() {
+        upper_first_into(p, &mut out);
+    }
     out
 });
 
@@ -1676,8 +2137,14 @@ lifted_str_stage!(PascalCase, |s| {
 lifted_str_stage!(ReverseStr, |s| s.chars().rev().collect::<String>());
 
 /// `.scan(pat)` — collect all occurrences of `pat` in `s`.
-pub struct Scan { pub pat: std::sync::Arc<str> }
-impl Scan { pub fn new(pat: std::sync::Arc<str>) -> Self { Self { pat } } }
+pub struct Scan {
+    pub pat: std::sync::Arc<str>,
+}
+impl Scan {
+    pub fn new(pat: std::sync::Arc<str>) -> Self {
+        Self { pat }
+    }
+}
 impl Stage for Scan {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         if let Val::Str(s) = x {
@@ -1704,13 +2171,29 @@ pub fn base64_encode(bytes: &[u8]) -> String {
     let mut i = 0;
     while i < bytes.len() {
         let b0 = bytes[i] as u32;
-        let b1 = if i + 1 < bytes.len() { bytes[i + 1] as u32 } else { 0 };
-        let b2 = if i + 2 < bytes.len() { bytes[i + 2] as u32 } else { 0 };
-        let n  = (b0 << 16) | (b1 << 8) | b2;
+        let b1 = if i + 1 < bytes.len() {
+            bytes[i + 1] as u32
+        } else {
+            0
+        };
+        let b2 = if i + 2 < bytes.len() {
+            bytes[i + 2] as u32
+        } else {
+            0
+        };
+        let n = (b0 << 16) | (b1 << 8) | b2;
         out.push(CHARS[((n >> 18) & 0x3f) as usize] as char);
         out.push(CHARS[((n >> 12) & 0x3f) as usize] as char);
-        out.push(if i + 1 < bytes.len() { CHARS[((n >> 6) & 0x3f) as usize] as char } else { '=' });
-        out.push(if i + 2 < bytes.len() { CHARS[(n & 0x3f) as usize] as char } else { '=' });
+        out.push(if i + 1 < bytes.len() {
+            CHARS[((n >> 6) & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if i + 2 < bytes.len() {
+            CHARS[(n & 0x3f) as usize] as char
+        } else {
+            '='
+        });
         i += 3;
     }
     out
@@ -1721,7 +2204,10 @@ pub fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
         let mut t = [-1i8; 128];
         let chars = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
         let mut i = 0usize;
-        while i < chars.len() { t[chars[i] as usize] = i as i8; i += 1; }
+        while i < chars.len() {
+            t[chars[i] as usize] = i as i8;
+            i += 1;
+        }
         t
     };
     let s = s.trim();
@@ -1730,7 +2216,9 @@ pub fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
     let mut i = 0;
     while i + 3 < bytes.len() {
         let dc = |c: u8| -> Result<u32, String> {
-            if c == b'=' { return Ok(0); }
+            if c == b'=' {
+                return Ok(0);
+            }
             if c as usize >= 128 || DECODE[c as usize] < 0 {
                 return Err(format!("invalid base64 char: {}", c as char));
             }
@@ -1740,10 +2228,14 @@ pub fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
         let b1 = dc(bytes[i + 1])?;
         let b2 = dc(bytes[i + 2])?;
         let b3 = dc(bytes[i + 3])?;
-        let n  = (b0 << 18) | (b1 << 12) | (b2 << 6) | b3;
+        let n = (b0 << 18) | (b1 << 12) | (b2 << 6) | b3;
         out.push(((n >> 16) & 0xff) as u8);
-        if bytes[i + 2] != b'=' { out.push(((n >> 8) & 0xff) as u8); }
-        if bytes[i + 3] != b'=' { out.push((n & 0xff) as u8); }
+        if bytes[i + 2] != b'=' {
+            out.push(((n >> 8) & 0xff) as u8);
+        }
+        if bytes[i + 3] != b'=' {
+            out.push((n & 0xff) as u8);
+        }
         i += 4;
     }
     Ok(out)
@@ -1752,20 +2244,33 @@ pub fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
 // ── Padding / repetition Stages ────────────────────────────────────
 
 /// `.center(width, fill)` — center-pad to width with fill char.
-pub struct Center { pub width: usize, pub fill: char }
-impl Center { pub fn new(width: usize, fill: char) -> Self { Self { width, fill } } }
+pub struct Center {
+    pub width: usize,
+    pub fill: char,
+}
+impl Center {
+    pub fn new(width: usize, fill: char) -> Self {
+        Self { width, fill }
+    }
+}
 impl Stage for Center {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         if let Val::Str(s) = x {
             let cur = s.chars().count();
-            if cur >= self.width { return StageOutput::Pass(Cow::Borrowed(x)); }
+            if cur >= self.width {
+                return StageOutput::Pass(Cow::Borrowed(x));
+            }
             let total = self.width - cur;
             let left = total / 2;
             let right = total - left;
             let mut out = String::with_capacity(s.len() + total);
-            for _ in 0..left { out.push(self.fill); }
+            for _ in 0..left {
+                out.push(self.fill);
+            }
             out.push_str(s.as_ref());
-            for _ in 0..right { out.push(self.fill); }
+            for _ in 0..right {
+                out.push(self.fill);
+            }
             return StageOutput::Pass(Cow::Owned(Val::Str(std::sync::Arc::from(out))));
         }
         StageOutput::Filtered
@@ -1799,18 +2304,33 @@ lifted_str_to_val!(ByteLen, |s| Val::Int(s.len() as i64));
 
 // ── Predicates / parsers ───────────────────────────────────────────
 
-lifted_str_to_val!(IsBlank,   |s| Val::Bool(s.chars().all(|c| c.is_whitespace())));
-lifted_str_to_val!(IsNumeric, |s| Val::Bool(!s.is_empty() && s.chars().all(|c| c.is_ascii_digit())));
-lifted_str_to_val!(IsAlpha,   |s| Val::Bool(!s.is_empty() && s.chars().all(|c| c.is_alphabetic())));
-lifted_str_to_val!(IsAscii,   |s| Val::Bool(s.is_ascii()));
+lifted_str_to_val!(IsBlank, |s| Val::Bool(s.chars().all(|c| c.is_whitespace())));
+lifted_str_to_val!(IsNumeric, |s| Val::Bool(
+    !s.is_empty() && s.chars().all(|c| c.is_ascii_digit())
+));
+lifted_str_to_val!(IsAlpha, |s| Val::Bool(
+    !s.is_empty() && s.chars().all(|c| c.is_alphabetic())
+));
+lifted_str_to_val!(IsAscii, |s| Val::Bool(s.is_ascii()));
 
-lifted_str_to_val!(ParseInt,   |s| s.trim().parse::<i64>().map(Val::Int).unwrap_or(Val::Null));
-lifted_str_to_val!(ParseFloat, |s| s.trim().parse::<f64>().map(Val::Float).unwrap_or(Val::Null));
-lifted_str_to_val!(ParseBool,  |s| match s.trim().to_ascii_lowercase().as_str() {
-    "true" | "yes" | "1" | "on"  => Val::Bool(true),
-    "false" | "no" | "0" | "off" => Val::Bool(false),
-    _ => Val::Null,
-});
+lifted_str_to_val!(ParseInt, |s| s
+    .trim()
+    .parse::<i64>()
+    .map(Val::Int)
+    .unwrap_or(Val::Null));
+lifted_str_to_val!(ParseFloat, |s| s
+    .trim()
+    .parse::<f64>()
+    .map(Val::Float)
+    .unwrap_or(Val::Null));
+lifted_str_to_val!(
+    ParseBool,
+    |s| match s.trim().to_ascii_lowercase().as_str() {
+        "true" | "yes" | "1" | "on" => Val::Bool(true),
+        "false" | "no" | "0" | "off" => Val::Bool(false),
+        _ => Val::Null,
+    }
+);
 
 // ── Lifted: zero-arg eval/func_* migrations ─────────────────────────
 //
@@ -1830,26 +2350,50 @@ fn csv_cell(v: &Val, sep: &str) -> String {
             format!("\"{}\"", s.replace('"', "\"\""))
         }
         Val::Str(s) => s.to_string(),
-        other       => val_to_string(other),
+        other => val_to_string(other),
     }
 }
 
 pub(crate) fn csv_emit(val: &Val, sep: &str) -> String {
     match val {
-        Val::Arr(rows) => rows.iter().map(|row| match row {
-            Val::Arr(cells) => cells.iter().map(|c| csv_cell(c, sep)).collect::<Vec<_>>().join(sep),
-            Val::Obj(m)     => m.values().map(|c| csv_cell(c, sep)).collect::<Vec<_>>().join(sep),
-            v               => csv_cell(v, sep),
-        }).collect::<Vec<_>>().join("\n"),
-        Val::Obj(m) => m.values().map(|c| csv_cell(c, sep)).collect::<Vec<_>>().join(sep),
+        Val::Arr(rows) => rows
+            .iter()
+            .map(|row| match row {
+                Val::Arr(cells) => cells
+                    .iter()
+                    .map(|c| csv_cell(c, sep))
+                    .collect::<Vec<_>>()
+                    .join(sep),
+                Val::Obj(m) => m
+                    .values()
+                    .map(|c| csv_cell(c, sep))
+                    .collect::<Vec<_>>()
+                    .join(sep),
+                v => csv_cell(v, sep),
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Val::Obj(m) => m
+            .values()
+            .map(|c| csv_cell(c, sep))
+            .collect::<Vec<_>>()
+            .join(sep),
         v => csv_cell(v, sep),
     }
 }
 
 /// `.to_csv()` — Val → Str (CSV emission).
 pub struct ToCsv;
-impl ToCsv { pub fn new() -> Self { Self } }
-impl Default for ToCsv { fn default() -> Self { Self } }
+impl ToCsv {
+    pub fn new() -> Self {
+        Self
+    }
+}
+impl Default for ToCsv {
+    fn default() -> Self {
+        Self
+    }
+}
 impl Stage for ToCsv {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         let s = csv_emit(x, ",");
@@ -1859,8 +2403,16 @@ impl Stage for ToCsv {
 
 /// `.to_tsv()` — Val → Str (TSV emission).
 pub struct ToTsv;
-impl ToTsv { pub fn new() -> Self { Self } }
-impl Default for ToTsv { fn default() -> Self { Self } }
+impl ToTsv {
+    pub fn new() -> Self {
+        Self
+    }
+}
+impl Default for ToTsv {
+    fn default() -> Self {
+        Self
+    }
+}
 impl Stage for ToTsv {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         let s = csv_emit(x, "\t");
@@ -1870,14 +2422,27 @@ impl Stage for ToTsv {
 
 /// `.to_pairs()` — Obj → Arr<{key, val}>.  Body lives here.
 pub struct ToPairs;
-impl ToPairs { pub fn new() -> Self { Self } }
-impl Default for ToPairs { fn default() -> Self { Self } }
+impl ToPairs {
+    pub fn new() -> Self {
+        Self
+    }
+}
+impl Default for ToPairs {
+    fn default() -> Self {
+        Self
+    }
+}
 impl Stage for ToPairs {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         use crate::eval::util::obj2;
-        let arr: Vec<Val> = x.as_object().map(|m| m.iter().map(|(k, v)| {
-            obj2("key", Val::Str(k.clone()), "val", v.clone())
-        }).collect()).unwrap_or_default();
+        let arr: Vec<Val> = x
+            .as_object()
+            .map(|m| {
+                m.iter()
+                    .map(|(k, v)| obj2("key", Val::Str(k.clone()), "val", v.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
         StageOutput::Pass(Cow::Owned(Val::arr(arr)))
     }
 }
@@ -1897,12 +2462,23 @@ impl Stage for ToPairs {
 macro_rules! lifted_num_arr_stage {
     ($name:ident, $body:expr) => {
         pub struct $name;
-        impl $name { pub fn new() -> Self { Self } }
-        impl Default for $name { fn default() -> Self { Self } }
+        impl $name {
+            pub fn new() -> Self {
+                Self
+            }
+        }
+        impl Default for $name {
+            fn default() -> Self {
+                Self
+            }
+        }
         impl Stage for $name {
             fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
-                use crate::eval::func_arrays::{to_floats, floats_to_val};
-                let xs = match to_floats(x) { Ok(v) => v, Err(_) => return StageOutput::Filtered };
+                use crate::eval::func_arrays::{floats_to_val, to_floats};
+                let xs = match to_floats(x) {
+                    Ok(v) => v,
+                    Err(_) => return StageOutput::Filtered,
+                };
                 let f: fn(&[Option<f64>]) -> Vec<Option<f64>> = $body;
                 StageOutput::Pass(Cow::Owned(floats_to_val(f(&xs))))
             }
@@ -1915,9 +2491,17 @@ lifted_num_arr_stage!(CumMax, |xs| {
     let mut best: Option<f64> = None;
     for v in xs.iter() {
         match (*v, best) {
-            (Some(x), Some(b)) => { best = Some(x.max(b)); out.push(best); }
-            (Some(x), None)    => { best = Some(x);        out.push(best); }
-            (None, _)          => { out.push(best); }
+            (Some(x), Some(b)) => {
+                best = Some(x.max(b));
+                out.push(best);
+            }
+            (Some(x), None) => {
+                best = Some(x);
+                out.push(best);
+            }
+            (None, _) => {
+                out.push(best);
+            }
         }
     }
     out
@@ -1928,9 +2512,17 @@ lifted_num_arr_stage!(CumMin, |xs| {
     let mut best: Option<f64> = None;
     for v in xs.iter() {
         match (*v, best) {
-            (Some(x), Some(b)) => { best = Some(x.min(b)); out.push(best); }
-            (Some(x), None)    => { best = Some(x);        out.push(best); }
-            (None, _)          => { out.push(best); }
+            (Some(x), Some(b)) => {
+                best = Some(x.min(b));
+                out.push(best);
+            }
+            (Some(x), None) => {
+                best = Some(x);
+                out.push(best);
+            }
+            (None, _) => {
+                out.push(best);
+            }
         }
     }
     out
@@ -1967,13 +2559,24 @@ lifted_num_arr_stage!(PctChange, |xs| {
 
 macro_rules! lifted_sized_num_stage {
     ($name:ident, $body:expr) => {
-        pub struct $name { pub n: usize }
-        impl $name { pub fn new(n: usize) -> Self { Self { n } } }
+        pub struct $name {
+            pub n: usize,
+        }
+        impl $name {
+            pub fn new(n: usize) -> Self {
+                Self { n }
+            }
+        }
         impl Stage for $name {
             fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
-                use crate::eval::func_arrays::{to_floats, floats_to_val};
-                if self.n == 0 { return StageOutput::Filtered; }
-                let xs = match to_floats(x) { Ok(v) => v, Err(_) => return StageOutput::Filtered };
+                use crate::eval::func_arrays::{floats_to_val, to_floats};
+                if self.n == 0 {
+                    return StageOutput::Filtered;
+                }
+                let xs = match to_floats(x) {
+                    Ok(v) => v,
+                    Err(_) => return StageOutput::Filtered,
+                };
                 let f: fn(&[Option<f64>], usize) -> Vec<Option<f64>> = $body;
                 StageOutput::Pass(Cow::Owned(floats_to_val(f(&xs, self.n))))
             }
@@ -1985,9 +2588,19 @@ lifted_sized_num_stage!(RollingSum, |xs, n| {
     let mut out: Vec<Option<f64>> = Vec::with_capacity(xs.len());
     let mut sum: f64 = 0.0;
     for (i, v) in xs.iter().enumerate() {
-        if let Some(x) = v { sum += x; }
-        if i >= n { if let Some(old) = xs[i - n] { sum -= old; } }
-        if i + 1 >= n { out.push(Some(sum)); } else { out.push(None); }
+        if let Some(x) = v {
+            sum += x;
+        }
+        if i >= n {
+            if let Some(old) = xs[i - n] {
+                sum -= old;
+            }
+        }
+        if i + 1 >= n {
+            out.push(Some(sum));
+        } else {
+            out.push(None);
+        }
     }
     out
 });
@@ -1997,8 +2610,16 @@ lifted_sized_num_stage!(RollingAvg, |xs, n| {
     let mut sum: f64 = 0.0;
     let mut count: usize = 0;
     for (i, v) in xs.iter().enumerate() {
-        if let Some(x) = v { sum += x; count += 1; }
-        if i >= n { if let Some(old) = xs[i - n] { sum -= old; count -= 1; } }
+        if let Some(x) = v {
+            sum += x;
+            count += 1;
+        }
+        if i >= n {
+            if let Some(old) = xs[i - n] {
+                sum -= old;
+                count -= 1;
+            }
+        }
         if i + 1 >= n && count > 0 {
             out.push(Some(sum / count as f64));
         } else {
@@ -2011,9 +2632,14 @@ lifted_sized_num_stage!(RollingAvg, |xs, n| {
 lifted_sized_num_stage!(RollingMin, |xs, n| {
     let mut out: Vec<Option<f64>> = Vec::with_capacity(xs.len());
     for i in 0..xs.len() {
-        if i + 1 < n { out.push(None); continue; }
+        if i + 1 < n {
+            out.push(None);
+            continue;
+        }
         let lo = i + 1 - n;
-        let m = xs[lo..=i].iter().filter_map(|v| *v)
+        let m = xs[lo..=i]
+            .iter()
+            .filter_map(|v| *v)
             .fold(f64::INFINITY, |a, b| a.min(b));
         out.push(if m.is_finite() { Some(m) } else { None });
     }
@@ -2023,9 +2649,14 @@ lifted_sized_num_stage!(RollingMin, |xs, n| {
 lifted_sized_num_stage!(RollingMax, |xs, n| {
     let mut out: Vec<Option<f64>> = Vec::with_capacity(xs.len());
     for i in 0..xs.len() {
-        if i + 1 < n { out.push(None); continue; }
+        if i + 1 < n {
+            out.push(None);
+            continue;
+        }
         let lo = i + 1 - n;
-        let m = xs[lo..=i].iter().filter_map(|v| *v)
+        let m = xs[lo..=i]
+            .iter()
+            .filter_map(|v| *v)
             .fold(f64::NEG_INFINITY, |a, b| a.max(b));
         out.push(if m.is_finite() { Some(m) } else { None });
     }
@@ -2035,12 +2666,21 @@ lifted_sized_num_stage!(RollingMax, |xs, n| {
 // Lag/Lead reuse the same macro shape but n=0 is valid (just identity)
 // so they need a tiny variant.
 
-pub struct Lag { pub n: usize }
-impl Lag { pub fn new(n: usize) -> Self { Self { n } } }
+pub struct Lag {
+    pub n: usize,
+}
+impl Lag {
+    pub fn new(n: usize) -> Self {
+        Self { n }
+    }
+}
 impl Stage for Lag {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
-        use crate::eval::func_arrays::{to_floats, floats_to_val};
-        let xs = match to_floats(x) { Ok(v) => v, Err(_) => return StageOutput::Filtered };
+        use crate::eval::func_arrays::{floats_to_val, to_floats};
+        let xs = match to_floats(x) {
+            Ok(v) => v,
+            Err(_) => return StageOutput::Filtered,
+        };
         let n = self.n;
         let mut out: Vec<Option<f64>> = Vec::with_capacity(xs.len());
         for i in 0..xs.len() {
@@ -2050,12 +2690,21 @@ impl Stage for Lag {
     }
 }
 
-pub struct Lead { pub n: usize }
-impl Lead { pub fn new(n: usize) -> Self { Self { n } } }
+pub struct Lead {
+    pub n: usize,
+}
+impl Lead {
+    pub fn new(n: usize) -> Self {
+        Self { n }
+    }
+}
 impl Stage for Lead {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
-        use crate::eval::func_arrays::{to_floats, floats_to_val};
-        let xs = match to_floats(x) { Ok(v) => v, Err(_) => return StageOutput::Filtered };
+        use crate::eval::func_arrays::{floats_to_val, to_floats};
+        let xs = match to_floats(x) {
+            Ok(v) => v,
+            Err(_) => return StageOutput::Filtered,
+        };
         let n = self.n;
         let mut out: Vec<Option<f64>> = Vec::with_capacity(xs.len());
         for i in 0..xs.len() {
@@ -2068,25 +2717,36 @@ impl Stage for Lead {
 
 /// `.zscore()` — Arr<num> → Arr<num> standardised.  Zero-arg.
 pub struct ZScore;
-impl ZScore { pub fn new() -> Self { Self } }
-impl Default for ZScore { fn default() -> Self { Self } }
+impl ZScore {
+    pub fn new() -> Self {
+        Self
+    }
+}
+impl Default for ZScore {
+    fn default() -> Self {
+        Self
+    }
+}
 impl Stage for ZScore {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
-        use crate::eval::func_arrays::{to_floats, floats_to_val};
-        let xs = match to_floats(x) { Ok(v) => v, Err(_) => return StageOutput::Filtered };
+        use crate::eval::func_arrays::{floats_to_val, to_floats};
+        let xs = match to_floats(x) {
+            Ok(v) => v,
+            Err(_) => return StageOutput::Filtered,
+        };
         let nums: Vec<f64> = xs.iter().filter_map(|v| *v).collect();
         if nums.is_empty() {
             return StageOutput::Pass(Cow::Owned(floats_to_val(vec![None; xs.len()])));
         }
         let mean = nums.iter().sum::<f64>() / nums.len() as f64;
-        let var  = nums.iter().map(|y| (y - mean).powi(2)).sum::<f64>() / nums.len() as f64;
-        let sd   = var.sqrt();
+        let var = nums.iter().map(|y| (y - mean).powi(2)).sum::<f64>() / nums.len() as f64;
+        let sd = var.sqrt();
         let mut out: Vec<Option<f64>> = Vec::with_capacity(xs.len());
         for v in xs.iter() {
             out.push(match v {
                 Some(y) if sd > 0.0 => Some((y - mean) / sd),
-                Some(_)             => Some(0.0),
-                None                => None,
+                Some(_) => Some(0.0),
+                None => None,
             });
         }
         StageOutput::Pass(Cow::Owned(floats_to_val(out)))
@@ -2097,13 +2757,26 @@ impl Stage for ZScore {
 
 /// `.enumerate()` (zero-arg) — Arr → Arr<{index, value}>.
 pub struct EnumerateZ;
-impl EnumerateZ { pub fn new() -> Self { Self } }
-impl Default for EnumerateZ { fn default() -> Self { Self } }
+impl EnumerateZ {
+    pub fn new() -> Self {
+        Self
+    }
+}
+impl Default for EnumerateZ {
+    fn default() -> Self {
+        Self
+    }
+}
 impl Stage for EnumerateZ {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         use crate::eval::util::obj2;
-        let items_cow = match x.as_vals() { Some(c) => c, None => return StageOutput::Filtered };
-        let out: Vec<Val> = items_cow.iter().enumerate()
+        let items_cow = match x.as_vals() {
+            Some(c) => c,
+            None => return StageOutput::Filtered,
+        };
+        let out: Vec<Val> = items_cow
+            .iter()
+            .enumerate()
             .map(|(i, v)| obj2("index", Val::Int(i as i64), "value", v.clone()))
             .collect();
         StageOutput::Pass(Cow::Owned(Val::arr(out)))
@@ -2111,29 +2784,43 @@ impl Stage for EnumerateZ {
 }
 
 /// `.join(sep)` — Arr<Val> → Str.
-pub struct Join { pub sep: std::sync::Arc<str> }
-impl Join { pub fn new(sep: std::sync::Arc<str>) -> Self { Self { sep } } }
+pub struct Join {
+    pub sep: std::sync::Arc<str>,
+}
+impl Join {
+    pub fn new(sep: std::sync::Arc<str>) -> Self {
+        Self { sep }
+    }
+}
 impl Stage for Join {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         use crate::eval::util::val_to_string;
         use std::fmt::Write as _;
-        let items_cow = match x.as_vals() { Some(c) => c, None => return StageOutput::Filtered };
+        let items_cow = match x.as_vals() {
+            Some(c) => c,
+            None => return StageOutput::Filtered,
+        };
         let items: &[Val] = items_cow.as_ref();
         if items.is_empty() {
             return StageOutput::Pass(Cow::Owned(Val::Str(std::sync::Arc::from(""))));
         }
         let sep = self.sep.as_ref();
         if items.iter().all(|v| matches!(v, Val::Str(_))) {
-            let total_len: usize = items.iter()
+            let total_len: usize = items
+                .iter()
                 .map(|v| if let Val::Str(s) = v { s.len() } else { 0 })
                 .sum::<usize>()
                 + sep.len() * (items.len() - 1);
             let mut out = String::with_capacity(total_len);
             let mut first = true;
             for v in items {
-                if !first { out.push_str(sep); }
+                if !first {
+                    out.push_str(sep);
+                }
                 first = false;
-                if let Val::Str(s) = v { out.push_str(s); }
+                if let Val::Str(s) = v {
+                    out.push_str(s);
+                }
             }
             return StageOutput::Pass(Cow::Owned(Val::Str(std::sync::Arc::from(out))));
         }
@@ -2141,15 +2828,21 @@ impl Stage for Join {
         let mut out = String::with_capacity(est_cap);
         let mut first = true;
         for v in items {
-            if !first { out.push_str(sep); }
+            if !first {
+                out.push_str(sep);
+            }
             first = false;
             match v {
-                Val::Str(s)   => out.push_str(s),
-                Val::Int(n)   => { let _ = write!(out, "{}", n); }
-                Val::Float(f) => { let _ = write!(out, "{}", f); }
-                Val::Bool(b)  => out.push_str(if *b { "true" } else { "false" }),
-                Val::Null     => out.push_str("null"),
-                other         => out.push_str(&val_to_string(other)),
+                Val::Str(s) => out.push_str(s),
+                Val::Int(n) => {
+                    let _ = write!(out, "{}", n);
+                }
+                Val::Float(f) => {
+                    let _ = write!(out, "{}", f);
+                }
+                Val::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+                Val::Null => out.push_str("null"),
+                other => out.push_str(&val_to_string(other)),
             }
         }
         StageOutput::Pass(Cow::Owned(Val::Str(std::sync::Arc::from(out))))
@@ -2157,11 +2850,20 @@ impl Stage for Join {
 }
 
 /// `.index_of_value(target)` — first index of literal target, else Null.
-pub struct IndexOfValue { pub target: Val }
-impl IndexOfValue { pub fn new(target: Val) -> Self { Self { target } } }
+pub struct IndexOfValue {
+    pub target: Val,
+}
+impl IndexOfValue {
+    pub fn new(target: Val) -> Self {
+        Self { target }
+    }
+}
 impl Stage for IndexOfValue {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
-        let items_cow = match x.as_vals() { Some(c) => c, None => return StageOutput::Filtered };
+        let items_cow = match x.as_vals() {
+            Some(c) => c,
+            None => return StageOutput::Filtered,
+        };
         for (i, item) in items_cow.iter().enumerate() {
             if crate::eval::util::vals_eq(item, &self.target) {
                 return StageOutput::Pass(Cow::Owned(Val::Int(i as i64)));
@@ -2172,12 +2874,23 @@ impl Stage for IndexOfValue {
 }
 
 /// `.indices_of(target)` — all indices of literal target.
-pub struct IndicesOf { pub target: Val }
-impl IndicesOf { pub fn new(target: Val) -> Self { Self { target } } }
+pub struct IndicesOf {
+    pub target: Val,
+}
+impl IndicesOf {
+    pub fn new(target: Val) -> Self {
+        Self { target }
+    }
+}
 impl Stage for IndicesOf {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
-        let items_cow = match x.as_vals() { Some(c) => c, None => return StageOutput::Filtered };
-        let out: Vec<i64> = items_cow.iter().enumerate()
+        let items_cow = match x.as_vals() {
+            Some(c) => c,
+            None => return StageOutput::Filtered,
+        };
+        let out: Vec<i64> = items_cow
+            .iter()
+            .enumerate()
             .filter(|(_, v)| crate::eval::util::vals_eq(v, &self.target))
             .map(|(i, _)| i as i64)
             .collect();
@@ -2188,11 +2901,20 @@ impl Stage for IndicesOf {
 /// `.explode(field)` — Arr<Obj> → Arr<Obj> with array-valued `field`
 /// expanded one row per element.  Body migrated from
 /// `func_aggregates::explode`.
-pub struct Explode { pub field: std::sync::Arc<str> }
-impl Explode { pub fn new(field: std::sync::Arc<str>) -> Self { Self { field } } }
+pub struct Explode {
+    pub field: std::sync::Arc<str>,
+}
+impl Explode {
+    pub fn new(field: std::sync::Arc<str>) -> Self {
+        Self { field }
+    }
+}
 impl Stage for Explode {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
-        let items_cow = match x.as_vals() { Some(c) => c, None => return StageOutput::Filtered };
+        let items_cow = match x.as_vals() {
+            Some(c) => c,
+            None => return StageOutput::Filtered,
+        };
         let items: &[Val] = items_cow.as_ref();
         let field = self.field.as_ref();
         let mut out = Vec::with_capacity(items.len());
@@ -2222,16 +2944,27 @@ impl Stage for Explode {
 /// `.implode(field)` — inverse of explode: groups rows by all-but-`field`,
 /// concatenating `field` values into an array.  Body migrated from
 /// `func_aggregates::implode`.
-pub struct Implode { pub field: std::sync::Arc<str> }
-impl Implode { pub fn new(field: std::sync::Arc<str>) -> Self { Self { field } } }
+pub struct Implode {
+    pub field: std::sync::Arc<str>,
+}
+impl Implode {
+    pub fn new(field: std::sync::Arc<str>) -> Self {
+        Self { field }
+    }
+}
 impl Stage for Implode {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         use crate::eval::util::val_to_key;
-        let items_cow = match x.as_vals() { Some(c) => c, None => return StageOutput::Filtered };
+        let items_cow = match x.as_vals() {
+            Some(c) => c,
+            None => return StageOutput::Filtered,
+        };
         let items: &[Val] = items_cow.as_ref();
         let field = self.field.as_ref();
-        let mut groups: indexmap::IndexMap<std::sync::Arc<str>,
-            (indexmap::IndexMap<std::sync::Arc<str>, Val>, Vec<Val>)> = indexmap::IndexMap::new();
+        let mut groups: indexmap::IndexMap<
+            std::sync::Arc<str>,
+            (indexmap::IndexMap<std::sync::Arc<str>, Val>, Vec<Val>),
+        > = indexmap::IndexMap::new();
         for item in items {
             let m = match item {
                 Val::Obj(m) => m,
@@ -2241,7 +2974,11 @@ impl Stage for Implode {
             let val = rest.shift_remove(field).unwrap_or(Val::Null);
             let key_src: indexmap::IndexMap<std::sync::Arc<str>, Val> = rest.clone();
             let key = std::sync::Arc::<str>::from(val_to_key(&Val::obj(key_src)));
-            groups.entry(key).or_insert_with(|| (rest, Vec::new())).1.push(val);
+            groups
+                .entry(key)
+                .or_insert_with(|| (rest, Vec::new()))
+                .1
+                .push(val);
         }
         let mut out = Vec::with_capacity(groups.len());
         for (_, (mut rest, vals)) in groups {
@@ -2257,29 +2994,49 @@ impl Stage for Implode {
 /// `.collect()` — Val → Arr.  Identity for arrays, [] for Null,
 /// [val] for scalars.  Body migrated from `func_search::collect`.
 pub struct CollectVal;
-impl CollectVal { pub fn new() -> Self { Self } }
-impl Default for CollectVal { fn default() -> Self { Self } }
+impl CollectVal {
+    pub fn new() -> Self {
+        Self
+    }
+}
+impl Default for CollectVal {
+    fn default() -> Self {
+        Self
+    }
+}
 impl Stage for CollectVal {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         match x {
-            Val::Arr(_) | Val::IntVec(_) | Val::FloatVec(_) | Val::StrVec(_) | Val::StrSliceVec(_) => {
-                StageOutput::Pass(Cow::Borrowed(x))
-            }
+            Val::Arr(_)
+            | Val::IntVec(_)
+            | Val::FloatVec(_)
+            | Val::StrVec(_)
+            | Val::StrSliceVec(_) => StageOutput::Pass(Cow::Borrowed(x)),
             Val::Null => StageOutput::Pass(Cow::Owned(Val::arr(Vec::new()))),
-            other     => StageOutput::Pass(Cow::Owned(Val::arr(vec![other.clone()]))),
+            other => StageOutput::Pass(Cow::Owned(Val::arr(vec![other.clone()]))),
         }
     }
 }
 
 /// `.remove(target)` — Arr → Arr without elements `vals_eq` to literal.
-pub struct RemoveVal { pub target: Val }
-impl RemoveVal { pub fn new(target: Val) -> Self { Self { target } } }
+pub struct RemoveVal {
+    pub target: Val,
+}
+impl RemoveVal {
+    pub fn new(target: Val) -> Self {
+        Self { target }
+    }
+}
 impl Stage for RemoveVal {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         use crate::eval::util::val_to_key;
-        let items_cow = match x.as_vals() { Some(c) => c, None => return StageOutput::Filtered };
+        let items_cow = match x.as_vals() {
+            Some(c) => c,
+            None => return StageOutput::Filtered,
+        };
         let key = val_to_key(&self.target);
-        let out: Vec<Val> = items_cow.iter()
+        let out: Vec<Val> = items_cow
+            .iter()
             .filter(|v| val_to_key(v) != key)
             .cloned()
             .collect();
@@ -2289,9 +3046,14 @@ impl Stage for RemoveVal {
 
 /// `.set_path(path, value)` — set leaf at path, COW spine clone.
 /// Body via `func_paths::set_path_impl`.
-pub struct SetPath { pub path: std::sync::Arc<str>, pub value: Val }
+pub struct SetPath {
+    pub path: std::sync::Arc<str>,
+    pub value: Val,
+}
 impl SetPath {
-    pub fn new(path: std::sync::Arc<str>, value: Val) -> Self { Self { path, value } }
+    pub fn new(path: std::sync::Arc<str>, value: Val) -> Self {
+        Self { path, value }
+    }
 }
 impl Stage for SetPath {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
@@ -2302,9 +3064,13 @@ impl Stage for SetPath {
 }
 
 /// `.del_paths(p1, p2, ...)` — multi-path delete (var-arg literal paths).
-pub struct DelPaths { pub paths: Vec<std::sync::Arc<str>> }
+pub struct DelPaths {
+    pub paths: Vec<std::sync::Arc<str>>,
+}
 impl DelPaths {
-    pub fn new(paths: Vec<std::sync::Arc<str>>) -> Self { Self { paths } }
+    pub fn new(paths: Vec<std::sync::Arc<str>>) -> Self {
+        Self { paths }
+    }
 }
 impl Stage for DelPaths {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
@@ -2319,13 +3085,20 @@ impl Stage for DelPaths {
 
 /// `.omit(k1, k2, ...)` — Obj → Obj minus listed keys.
 /// Body migrated from `func_objects::omit`.
-pub struct OmitKeys { pub keys: Vec<std::sync::Arc<str>> }
+pub struct OmitKeys {
+    pub keys: Vec<std::sync::Arc<str>>,
+}
 impl OmitKeys {
-    pub fn new(keys: Vec<std::sync::Arc<str>>) -> Self { Self { keys } }
+    pub fn new(keys: Vec<std::sync::Arc<str>>) -> Self {
+        Self { keys }
+    }
 }
 impl Stage for OmitKeys {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
-        let m = match x.as_object() { Some(m) => m, None => return StageOutput::Filtered };
+        let m = match x.as_object() {
+            Some(m) => m,
+            None => return StageOutput::Filtered,
+        };
         let mut out = m.clone();
         for k in &self.keys {
             out.shift_remove(k.as_ref());
@@ -2338,8 +3111,16 @@ impl Stage for OmitKeys {
 
 /// `.type()` — Val → Str (type name).
 pub struct TypeName;
-impl TypeName { pub fn new() -> Self { Self } }
-impl Default for TypeName { fn default() -> Self { Self } }
+impl TypeName {
+    pub fn new() -> Self {
+        Self
+    }
+}
+impl Default for TypeName {
+    fn default() -> Self {
+        Self
+    }
+}
 impl Stage for TypeName {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         StageOutput::Pass(Cow::Owned(Val::Str(std::sync::Arc::from(x.type_name()))))
@@ -2348,8 +3129,16 @@ impl Stage for TypeName {
 
 /// `.to_string()` — Val → Str (display form).
 pub struct ToString;
-impl ToString { pub fn new() -> Self { Self } }
-impl Default for ToString { fn default() -> Self { Self } }
+impl ToString {
+    pub fn new() -> Self {
+        Self
+    }
+}
+impl Default for ToString {
+    fn default() -> Self {
+        Self
+    }
+}
 impl Stage for ToString {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         let s = crate::eval::util::val_to_string(x);
@@ -2361,12 +3150,20 @@ impl Stage for ToString {
 /// primitives (avoid serde_json::Value detour) — match prior
 /// `b_to_json` behaviour.
 pub struct ToJson;
-impl ToJson { pub fn new() -> Self { Self } }
-impl Default for ToJson { fn default() -> Self { Self } }
+impl ToJson {
+    pub fn new() -> Self {
+        Self
+    }
+}
+impl Default for ToJson {
+    fn default() -> Self {
+        Self
+    }
+}
 impl Stage for ToJson {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         let out = match x {
-            Val::Int(n)  => n.to_string(),
+            Val::Int(n) => n.to_string(),
             Val::Float(f) => {
                 if f.is_finite() {
                     let v = serde_json::Value::from(*f);
@@ -2376,8 +3173,8 @@ impl Stage for ToJson {
                 }
             }
             Val::Bool(b) => (if *b { "true" } else { "false" }).to_string(),
-            Val::Null    => "null".to_string(),
-            Val::Str(s)  => {
+            Val::Null => "null".to_string(),
+            Val::Str(s) => {
                 let v = serde_json::Value::String(s.to_string());
                 serde_json::to_string(&v).unwrap_or_default()
             }
@@ -2394,8 +3191,14 @@ impl Stage for ToJson {
 
 /// `.del_path(path)` — remove value at dotted path.  Body via
 /// `func_paths::del_path_impl`.
-pub struct DelPath { pub path: std::sync::Arc<str> }
-impl DelPath { pub fn new(path: std::sync::Arc<str>) -> Self { Self { path } } }
+pub struct DelPath {
+    pub path: std::sync::Arc<str>,
+}
+impl DelPath {
+    pub fn new(path: std::sync::Arc<str>) -> Self {
+        Self { path }
+    }
+}
 impl Stage for DelPath {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         let segs = crate::eval::func_paths::parse_path_segs(self.path.as_ref());
@@ -2405,9 +3208,13 @@ impl Stage for DelPath {
 }
 
 /// `.flatten_keys(sep)` — Obj → flat-Obj with `sep`-joined keys.
-pub struct FlattenKeys { pub sep: std::sync::Arc<str> }
+pub struct FlattenKeys {
+    pub sep: std::sync::Arc<str>,
+}
 impl FlattenKeys {
-    pub fn new(sep: std::sync::Arc<str>) -> Self { Self { sep } }
+    pub fn new(sep: std::sync::Arc<str>) -> Self {
+        Self { sep }
+    }
 }
 impl Stage for FlattenKeys {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
@@ -2418,9 +3225,13 @@ impl Stage for FlattenKeys {
 }
 
 /// `.unflatten_keys(sep)` — flat-Obj → nested Obj.
-pub struct UnflattenKeys { pub sep: std::sync::Arc<str> }
+pub struct UnflattenKeys {
+    pub sep: std::sync::Arc<str>,
+}
 impl UnflattenKeys {
-    pub fn new(sep: std::sync::Arc<str>) -> Self { Self { sep } }
+    pub fn new(sep: std::sync::Arc<str>) -> Self {
+        Self { sep }
+    }
 }
 impl Stage for UnflattenKeys {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
@@ -2436,8 +3247,16 @@ impl Stage for UnflattenKeys {
 
 /// `.schema()` — Val → schema-Obj describing types/required fields/array shape.
 pub struct Schema;
-impl Schema { pub fn new() -> Self { Self } }
-impl Default for Schema { fn default() -> Self { Self } }
+impl Schema {
+    pub fn new() -> Self {
+        Self
+    }
+}
+impl Default for Schema {
+    fn default() -> Self {
+        Self
+    }
+}
 impl Stage for Schema {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         StageOutput::Pass(Cow::Owned(crate::eval::func_objects::schema_of(x)))
@@ -2448,9 +3267,13 @@ impl Stage for Schema {
 
 /// `.contains_any([needles])` — true if any needle appears in the
 /// receiver.
-pub struct ContainsAny { pub needles: Vec<std::sync::Arc<str>> }
+pub struct ContainsAny {
+    pub needles: Vec<std::sync::Arc<str>>,
+}
 impl ContainsAny {
-    pub fn new(needles: Vec<std::sync::Arc<str>>) -> Self { Self { needles } }
+    pub fn new(needles: Vec<std::sync::Arc<str>>) -> Self {
+        Self { needles }
+    }
 }
 impl Stage for ContainsAny {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
@@ -2463,9 +3286,13 @@ impl Stage for ContainsAny {
 }
 
 /// `.contains_all([needles])` — true if every needle appears.
-pub struct ContainsAll { pub needles: Vec<std::sync::Arc<str>> }
+pub struct ContainsAll {
+    pub needles: Vec<std::sync::Arc<str>>,
+}
 impl ContainsAll {
-    pub fn new(needles: Vec<std::sync::Arc<str>>) -> Self { Self { needles } }
+    pub fn new(needles: Vec<std::sync::Arc<str>>) -> Self {
+        Self { needles }
+    }
 }
 impl Stage for ContainsAll {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
@@ -2498,7 +3325,9 @@ thread_local! {
 pub(crate) fn compile_regex(pat: &str) -> Result<std::sync::Arc<regex::Regex>, String> {
     REGEX_CACHE.with(|cell| {
         let mut m = cell.borrow_mut();
-        if let Some(r) = m.get(pat) { return Ok(std::sync::Arc::clone(r)); }
+        if let Some(r) = m.get(pat) {
+            return Ok(std::sync::Arc::clone(r));
+        }
         let re = regex::Regex::new(pat).map_err(|e| format!("regex compile: {}", e))?;
         let arc = std::sync::Arc::new(re);
         m.insert(pat.to_string(), std::sync::Arc::clone(&arc));
@@ -2507,8 +3336,14 @@ pub(crate) fn compile_regex(pat: &str) -> Result<std::sync::Arc<regex::Regex>, S
 }
 
 /// `.match(pat)` — Bool, regex match anywhere.
-pub struct ReMatch { pub pat: std::sync::Arc<str> }
-impl ReMatch { pub fn new(pat: std::sync::Arc<str>) -> Self { Self { pat } } }
+pub struct ReMatch {
+    pub pat: std::sync::Arc<str>,
+}
+impl ReMatch {
+    pub fn new(pat: std::sync::Arc<str>) -> Self {
+        Self { pat }
+    }
+}
 impl Stage for ReMatch {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         if let Val::Str(s) = x {
@@ -2523,8 +3358,14 @@ impl Stage for ReMatch {
 }
 
 /// `.match_first(pat)` — Str of first match or Null.
-pub struct ReMatchFirst { pub pat: std::sync::Arc<str> }
-impl ReMatchFirst { pub fn new(pat: std::sync::Arc<str>) -> Self { Self { pat } } }
+pub struct ReMatchFirst {
+    pub pat: std::sync::Arc<str>,
+}
+impl ReMatchFirst {
+    pub fn new(pat: std::sync::Arc<str>) -> Self {
+        Self { pat }
+    }
+}
 impl Stage for ReMatchFirst {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         if let Val::Str(s) = x {
@@ -2532,7 +3373,8 @@ impl Stage for ReMatchFirst {
                 Ok(r) => r,
                 Err(_) => return StageOutput::Filtered,
             };
-            let v = re.find(s.as_ref())
+            let v = re
+                .find(s.as_ref())
                 .map(|m| Val::Str(std::sync::Arc::from(m.as_str())))
                 .unwrap_or(Val::Null);
             return StageOutput::Pass(Cow::Owned(v));
@@ -2542,8 +3384,14 @@ impl Stage for ReMatchFirst {
 }
 
 /// `.match_all(pat)` — Arr<Str> of all matches.
-pub struct ReMatchAll { pub pat: std::sync::Arc<str> }
-impl ReMatchAll { pub fn new(pat: std::sync::Arc<str>) -> Self { Self { pat } } }
+pub struct ReMatchAll {
+    pub pat: std::sync::Arc<str>,
+}
+impl ReMatchAll {
+    pub fn new(pat: std::sync::Arc<str>) -> Self {
+        Self { pat }
+    }
+}
 impl Stage for ReMatchAll {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         if let Val::Str(s) = x {
@@ -2551,8 +3399,10 @@ impl Stage for ReMatchAll {
                 Ok(r) => r,
                 Err(_) => return StageOutput::Filtered,
             };
-            let out: Vec<std::sync::Arc<str>> = re.find_iter(s.as_ref())
-                .map(|m| std::sync::Arc::<str>::from(m.as_str())).collect();
+            let out: Vec<std::sync::Arc<str>> = re
+                .find_iter(s.as_ref())
+                .map(|m| std::sync::Arc::<str>::from(m.as_str()))
+                .collect();
             return StageOutput::Pass(Cow::Owned(Val::str_vec(out)));
         }
         StageOutput::Filtered
@@ -2560,8 +3410,14 @@ impl Stage for ReMatchAll {
 }
 
 /// `.captures(pat)` — Arr of capture groups (group 0 first); Null on no match.
-pub struct ReCaptures { pub pat: std::sync::Arc<str> }
-impl ReCaptures { pub fn new(pat: std::sync::Arc<str>) -> Self { Self { pat } } }
+pub struct ReCaptures {
+    pub pat: std::sync::Arc<str>,
+}
+impl ReCaptures {
+    pub fn new(pat: std::sync::Arc<str>) -> Self {
+        Self { pat }
+    }
+}
 impl Stage for ReCaptures {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         if let Val::Str(s) = x {
@@ -2573,9 +3429,11 @@ impl Stage for ReCaptures {
                 Some(c) => {
                     let mut out: Vec<Val> = Vec::with_capacity(c.len());
                     for i in 0..c.len() {
-                        out.push(c.get(i)
-                            .map(|m| Val::Str(std::sync::Arc::from(m.as_str())))
-                            .unwrap_or(Val::Null));
+                        out.push(
+                            c.get(i)
+                                .map(|m| Val::Str(std::sync::Arc::from(m.as_str())))
+                                .unwrap_or(Val::Null),
+                        );
                     }
                     Val::arr(out)
                 }
@@ -2588,8 +3446,14 @@ impl Stage for ReCaptures {
 }
 
 /// `.captures_all(pat)` — Arr<Arr> of capture groups for every match.
-pub struct ReCapturesAll { pub pat: std::sync::Arc<str> }
-impl ReCapturesAll { pub fn new(pat: std::sync::Arc<str>) -> Self { Self { pat } } }
+pub struct ReCapturesAll {
+    pub pat: std::sync::Arc<str>,
+}
+impl ReCapturesAll {
+    pub fn new(pat: std::sync::Arc<str>) -> Self {
+        Self { pat }
+    }
+}
 impl Stage for ReCapturesAll {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         if let Val::Str(s) = x {
@@ -2601,9 +3465,11 @@ impl Stage for ReCapturesAll {
             for c in re.captures_iter(s.as_ref()) {
                 let mut row: Vec<Val> = Vec::with_capacity(c.len());
                 for i in 0..c.len() {
-                    row.push(c.get(i)
-                        .map(|m| Val::Str(std::sync::Arc::from(m.as_str())))
-                        .unwrap_or(Val::Null));
+                    row.push(
+                        c.get(i)
+                            .map(|m| Val::Str(std::sync::Arc::from(m.as_str())))
+                            .unwrap_or(Val::Null),
+                    );
                 }
                 all.push(Val::arr(row));
             }
@@ -2614,9 +3480,14 @@ impl Stage for ReCapturesAll {
 }
 
 /// `.replace_re(pat, with)` — single regex replacement.
-pub struct ReReplace { pub pat: std::sync::Arc<str>, pub with: std::sync::Arc<str> }
+pub struct ReReplace {
+    pub pat: std::sync::Arc<str>,
+    pub with: std::sync::Arc<str>,
+}
 impl ReReplace {
-    pub fn new(pat: std::sync::Arc<str>, with: std::sync::Arc<str>) -> Self { Self { pat, with } }
+    pub fn new(pat: std::sync::Arc<str>, with: std::sync::Arc<str>) -> Self {
+        Self { pat, with }
+    }
 }
 impl Stage for ReReplace {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
@@ -2626,17 +3497,21 @@ impl Stage for ReReplace {
                 Err(_) => return StageOutput::Filtered,
             };
             let out = re.replace(s.as_ref(), self.with.as_ref());
-            return StageOutput::Pass(Cow::Owned(
-                Val::Str(std::sync::Arc::from(out.as_ref()))));
+            return StageOutput::Pass(Cow::Owned(Val::Str(std::sync::Arc::from(out.as_ref()))));
         }
         StageOutput::Filtered
     }
 }
 
 /// `.replace_all_re(pat, with)` — all regex replacements.
-pub struct ReReplaceAll { pub pat: std::sync::Arc<str>, pub with: std::sync::Arc<str> }
+pub struct ReReplaceAll {
+    pub pat: std::sync::Arc<str>,
+    pub with: std::sync::Arc<str>,
+}
 impl ReReplaceAll {
-    pub fn new(pat: std::sync::Arc<str>, with: std::sync::Arc<str>) -> Self { Self { pat, with } }
+    pub fn new(pat: std::sync::Arc<str>, with: std::sync::Arc<str>) -> Self {
+        Self { pat, with }
+    }
 }
 impl Stage for ReReplaceAll {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
@@ -2646,16 +3521,21 @@ impl Stage for ReReplaceAll {
                 Err(_) => return StageOutput::Filtered,
             };
             let out = re.replace_all(s.as_ref(), self.with.as_ref());
-            return StageOutput::Pass(Cow::Owned(
-                Val::Str(std::sync::Arc::from(out.as_ref()))));
+            return StageOutput::Pass(Cow::Owned(Val::Str(std::sync::Arc::from(out.as_ref()))));
         }
         StageOutput::Filtered
     }
 }
 
 /// `.split_re(pat)` — regex split.
-pub struct ReSplit { pub pat: std::sync::Arc<str> }
-impl ReSplit { pub fn new(pat: std::sync::Arc<str>) -> Self { Self { pat } } }
+pub struct ReSplit {
+    pub pat: std::sync::Arc<str>,
+}
+impl ReSplit {
+    pub fn new(pat: std::sync::Arc<str>) -> Self {
+        Self { pat }
+    }
+}
 impl Stage for ReSplit {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         if let Val::Str(s) = x {
@@ -2663,8 +3543,10 @@ impl Stage for ReSplit {
                 Ok(r) => r,
                 Err(_) => return StageOutput::Filtered,
             };
-            let out: Vec<std::sync::Arc<str>> = re.split(s.as_ref())
-                .map(std::sync::Arc::<str>::from).collect();
+            let out: Vec<std::sync::Arc<str>> = re
+                .split(s.as_ref())
+                .map(std::sync::Arc::<str>::from)
+                .collect();
             return StageOutput::Pass(Cow::Owned(Val::str_vec(out)));
         }
         StageOutput::Filtered
@@ -2672,16 +3554,20 @@ impl Stage for ReSplit {
 }
 
 /// `.last_index_of(needle)` — char-position of last match; -1 on miss.
-pub struct LastIndexOf { pub needle: std::sync::Arc<str> }
+pub struct LastIndexOf {
+    pub needle: std::sync::Arc<str>,
+}
 impl LastIndexOf {
-    pub fn new(needle: std::sync::Arc<str>) -> Self { Self { needle } }
+    pub fn new(needle: std::sync::Arc<str>) -> Self {
+        Self { needle }
+    }
 }
 impl Stage for LastIndexOf {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         if let Val::Str(s) = x {
             let r = match s.rfind(self.needle.as_ref()) {
                 Some(i) => Val::Int(s[..i].chars().count() as i64),
-                None    => Val::Int(-1),
+                None => Val::Int(-1),
             };
             return StageOutput::Pass(Cow::Owned(r));
         }
@@ -2701,7 +3587,10 @@ pub struct Filter<R, F: Fn(&R) -> bool> {
 }
 impl<R, F: Fn(&R) -> bool> Filter<R, F> {
     pub fn new(pred: F) -> Self {
-        Self { pred, _marker: std::marker::PhantomData }
+        Self {
+            pred,
+            _marker: std::marker::PhantomData,
+        }
     }
 }
 /// Monoidal composition. `Composed { a, b }.apply(x) = b.apply(a.apply(x))`
@@ -2716,7 +3605,9 @@ pub struct Composed<A, B> {
 }
 
 impl<A, B> Composed<A, B> {
-    pub fn new(a: A, b: B) -> Self { Self { a, b } }
+    pub fn new(a: A, b: B) -> Self {
+        Self { a, b }
+    }
 }
 
 impl<A: Stage, B: Stage> Stage for Composed<A, B> {

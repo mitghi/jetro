@@ -8,13 +8,13 @@
 //! aggregates stringify the computed key via `val_key` so the result
 //! can be indexed by an `IndexMap` while preserving insertion order.
 
-use std::sync::Arc;
 use indexmap::IndexMap;
+use std::sync::Arc;
 
-use crate::ast::{Arg, Expr};
-use super::{Env, EvalError, apply_item_mut};
-use super::value::Val;
 use super::util::{is_truthy, val_to_key};
+use super::value::Val;
+use super::{apply_item_mut, Env, EvalError};
+use crate::ast::{Arg, Expr};
 
 macro_rules! err {
     ($($t:tt)*) => { Err(EvalError(format!($($t)*))) };
@@ -41,29 +41,48 @@ pub fn sum(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     let mut floated = false;
     for v in &nums {
         match v {
-            Val::Int(n)   if !floated => { i_acc += *n; }
-            Val::Int(n)              => { f_acc += *n as f64; }
-            Val::Float(f) if !floated => { f_acc = i_acc as f64 + *f; floated = true; }
-            Val::Float(f)            => { f_acc += *f; }
+            Val::Int(n) if !floated => {
+                i_acc += *n;
+            }
+            Val::Int(n) => {
+                f_acc += *n as f64;
+            }
+            Val::Float(f) if !floated => {
+                f_acc = i_acc as f64 + *f;
+                floated = true;
+            }
+            Val::Float(f) => {
+                f_acc += *f;
+            }
             _ => {}
         }
     }
-    Ok(if floated { Val::Float(f_acc) } else { Val::Int(i_acc) })
+    Ok(if floated {
+        Val::Float(f_acc)
+    } else {
+        Val::Int(i_acc)
+    })
 }
 
 pub fn avg(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     if args.is_empty() {
         if let Val::IntVec(a) = &recv {
-            if a.is_empty() { return Ok(Val::Null); }
+            if a.is_empty() {
+                return Ok(Val::Null);
+            }
             return Ok(Val::Float(simd_sum_i64(a) as f64 / a.len() as f64));
         }
         if let Val::FloatVec(a) = &recv {
-            if a.is_empty() { return Ok(Val::Null); }
+            if a.is_empty() {
+                return Ok(Val::Null);
+            }
             return Ok(Val::Float(simd_sum_f64(a) / a.len() as f64));
         }
     }
     let nums = collect_nums(recv, args, env)?;
-    if nums.is_empty() { return Ok(Val::Null); }
+    if nums.is_empty() {
+        return Ok(Val::Null);
+    }
     let n = nums.len();
     let mut acc: f64 = 0.0;
     for v in &nums {
@@ -89,13 +108,18 @@ pub fn minmax(recv: Val, args: &[Arg], env: &Env, want_max: bool) -> Result<Val,
     }
     let nums = collect_nums(recv, args, env)?;
     let mut iter = nums.into_iter();
-    let Some(first) = iter.next() else { return Ok(Val::Null); };
+    let Some(first) = iter.next() else {
+        return Ok(Val::Null);
+    };
     let mut best_f = first.as_f64().unwrap_or(0.0);
     let mut best = first;
     for v in iter {
         let vf = v.as_f64().unwrap_or(0.0);
         let replace = if want_max { vf > best_f } else { vf < best_f };
-        if replace { best_f = vf; best = v; }
+        if replace {
+            best_f = vf;
+            best = v;
+        }
     }
     Ok(best)
 }
@@ -116,8 +140,10 @@ pub fn minmax(recv: Val, args: &[Arg], env: &Env, want_max: bool) -> Result<Val,
 
 #[inline]
 fn simd_sum_i64(a: &[i64]) -> i64 {
-    let mut s0: i64 = 0; let mut s1: i64 = 0;
-    let mut s2: i64 = 0; let mut s3: i64 = 0;
+    let mut s0: i64 = 0;
+    let mut s1: i64 = 0;
+    let mut s2: i64 = 0;
+    let mut s3: i64 = 0;
     let chunks = a.chunks_exact(4);
     let rem = chunks.remainder();
     for c in chunks {
@@ -127,42 +153,84 @@ fn simd_sum_i64(a: &[i64]) -> i64 {
         s3 = s3.wrapping_add(c[3]);
     }
     let mut tail: i64 = 0;
-    for v in rem { tail = tail.wrapping_add(*v); }
-    s0.wrapping_add(s1).wrapping_add(s2).wrapping_add(s3).wrapping_add(tail)
+    for v in rem {
+        tail = tail.wrapping_add(*v);
+    }
+    s0.wrapping_add(s1)
+        .wrapping_add(s2)
+        .wrapping_add(s3)
+        .wrapping_add(tail)
 }
 
 #[inline]
 fn simd_sum_f64(a: &[f64]) -> f64 {
-    let mut s0: f64 = 0.0; let mut s1: f64 = 0.0;
-    let mut s2: f64 = 0.0; let mut s3: f64 = 0.0;
+    let mut s0: f64 = 0.0;
+    let mut s1: f64 = 0.0;
+    let mut s2: f64 = 0.0;
+    let mut s3: f64 = 0.0;
     let chunks = a.chunks_exact(4);
     let rem = chunks.remainder();
-    for c in chunks { s0 += c[0]; s1 += c[1]; s2 += c[2]; s3 += c[3]; }
+    for c in chunks {
+        s0 += c[0];
+        s1 += c[1];
+        s2 += c[2];
+        s3 += c[3];
+    }
     let mut tail: f64 = 0.0;
-    for v in rem { tail += *v; }
+    for v in rem {
+        tail += *v;
+    }
     s0 + s1 + s2 + s3 + tail
 }
 
 #[inline]
 fn simd_minmax_i64(a: &[i64], want_max: bool) -> Option<i64> {
-    if a.is_empty() { return None; }
+    if a.is_empty() {
+        return None;
+    }
     let mut best = a[0];
-    if want_max { for v in &a[1..] { if *v > best { best = *v; } } }
-    else        { for v in &a[1..] { if *v < best { best = *v; } } }
+    if want_max {
+        for v in &a[1..] {
+            if *v > best {
+                best = *v;
+            }
+        }
+    } else {
+        for v in &a[1..] {
+            if *v < best {
+                best = *v;
+            }
+        }
+    }
     Some(best)
 }
 
 #[inline]
 fn simd_minmax_f64(a: &[f64], want_max: bool) -> Option<f64> {
-    if a.is_empty() { return None; }
+    if a.is_empty() {
+        return None;
+    }
     let mut best = a[0];
-    if want_max { for v in &a[1..] { if *v > best { best = *v; } } }
-    else        { for v in &a[1..] { if *v < best { best = *v; } } }
+    if want_max {
+        for v in &a[1..] {
+            if *v > best {
+                best = *v;
+            }
+        }
+    } else {
+        for v in &a[1..] {
+            if *v < best {
+                best = *v;
+            }
+        }
+    }
     Some(best)
 }
 
 fn collect_nums(recv: Val, args: &[Arg], env: &Env) -> Result<Vec<Val>, EvalError> {
-    let items = recv.into_vec().ok_or_else(|| EvalError("expected array for numeric aggregate".into()))?;
+    let items = recv
+        .into_vec()
+        .ok_or_else(|| EvalError("expected array for numeric aggregate".into()))?;
     if args.is_empty() {
         Ok(items.into_iter().filter(|v| v.is_number()).collect())
     } else {
@@ -170,7 +238,9 @@ fn collect_nums(recv: Val, args: &[Arg], env: &Env) -> Result<Vec<Val>, EvalErro
         let mut out = Vec::with_capacity(items.len());
         for item in items {
             let v = apply_item_mut(item, &args[0], &mut env_mut)?;
-            if v.is_number() { out.push(v); }
+            if v.is_number() {
+                out.push(v);
+            }
         }
         Ok(out)
     }
@@ -181,22 +251,31 @@ fn collect_nums(recv: Val, args: &[Arg], env: &Env) -> Result<Vec<Val>, EvalErro
 pub fn count(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     match recv {
         Val::Arr(a) => {
-            if args.is_empty() { return Ok(Val::Int(a.len() as i64)); }
+            if args.is_empty() {
+                return Ok(Val::Int(a.len() as i64));
+            }
             let items = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
-            let Some(pred) = args.first() else { return Ok(Val::Int(0)); };
+            let Some(pred) = args.first() else {
+                return Ok(Val::Int(0));
+            };
             let mut env_mut = env.clone();
             let mut n: i64 = 0;
             for item in items {
-                if apply_item_mut(item, pred, &mut env_mut).map(|v| is_truthy(&v)).unwrap_or(false) {
+                if apply_item_mut(item, pred, &mut env_mut)
+                    .map(|v| is_truthy(&v))
+                    .unwrap_or(false)
+                {
                     n += 1;
                 }
             }
             Ok(Val::Int(n))
         }
-        Val::IntVec(a)   => Ok(Val::Int(a.len() as i64)),
+        Val::IntVec(a) => Ok(Val::Int(a.len() as i64)),
         Val::FloatVec(a) => Ok(Val::Int(a.len() as i64)),
-        Val::Str(s)  => Ok(Val::Int(s.chars().count() as i64)),
-        Val::Obj(m)  => Ok(Val::Int(m.len() as i64)),
+        Val::StrSliceVec(a) => Ok(Val::Int(a.len() as i64)),
+        Val::Str(s) => Ok(Val::Int(s.chars().count() as i64)),
+        Val::StrSlice(r) => Ok(Val::Int(r.as_str().chars().count() as i64)),
+        Val::Obj(m) => Ok(Val::Int(m.len() as i64)),
         _ => err!("count: unsupported type"),
     }
 }
@@ -204,23 +283,35 @@ pub fn count(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
 pub fn any_all(recv: Val, args: &[Arg], env: &Env, want_all: bool) -> Result<Val, EvalError> {
     match recv {
         Val::Arr(a) => {
-            if a.is_empty() { return Ok(Val::Bool(want_all)); }
-            if args.is_empty() { return Ok(Val::Bool(true)); }
+            if a.is_empty() {
+                return Ok(Val::Bool(want_all));
+            }
+            if args.is_empty() {
+                return Ok(Val::Bool(true));
+            }
             let pred = &args[0];
             let mut env_mut = env.clone();
             let result = if want_all {
                 let mut ok = true;
                 for item in a.iter() {
-                    if !apply_item_mut(item.clone(), pred, &mut env_mut).map(|v| is_truthy(&v)).unwrap_or(false) {
-                        ok = false; break;
+                    if !apply_item_mut(item.clone(), pred, &mut env_mut)
+                        .map(|v| is_truthy(&v))
+                        .unwrap_or(false)
+                    {
+                        ok = false;
+                        break;
                     }
                 }
                 ok
             } else {
                 let mut ok = false;
                 for item in a.iter() {
-                    if apply_item_mut(item.clone(), pred, &mut env_mut).map(|v| is_truthy(&v)).unwrap_or(false) {
-                        ok = true; break;
+                    if apply_item_mut(item.clone(), pred, &mut env_mut)
+                        .map(|v| is_truthy(&v))
+                        .unwrap_or(false)
+                    {
+                        ok = true;
+                        break;
                     }
                 }
                 ok
@@ -239,13 +330,17 @@ pub fn any_all(recv: Val, args: &[Arg], env: &Env, want_all: bool) -> Result<Val
 fn group_key_mut(item: &Val, key_arg: &Arg, env: &mut Env) -> Result<Arc<str>, EvalError> {
     Ok(match apply_item_mut(item.clone(), key_arg, env)? {
         Val::Str(s) => s,
-        other       => Arc::<str>::from(val_to_key(&other)),
+        other => Arc::<str>::from(val_to_key(&other)),
     })
 }
 
 pub fn group_by(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-    let key_arg = args.first().ok_or_else(|| EvalError("groupBy: requires key".into()))?;
-    let items = recv.into_vec().ok_or_else(|| EvalError("groupBy: expected array".into()))?;
+    let key_arg = args
+        .first()
+        .ok_or_else(|| EvalError("groupBy: requires key".into()))?;
+    let items = recv
+        .into_vec()
+        .ok_or_else(|| EvalError("groupBy: expected array".into()))?;
     let mut env_mut = env.clone();
     let mut map: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(items.len());
     for item in items {
@@ -257,21 +352,31 @@ pub fn group_by(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
 }
 
 pub fn count_by(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-    let key_arg = args.first().ok_or_else(|| EvalError("countBy: requires key".into()))?;
-    let items = recv.into_vec().ok_or_else(|| EvalError("countBy: expected array".into()))?;
+    let key_arg = args
+        .first()
+        .ok_or_else(|| EvalError("countBy: requires key".into()))?;
+    let items = recv
+        .into_vec()
+        .ok_or_else(|| EvalError("countBy: expected array".into()))?;
     let mut env_mut = env.clone();
     let mut map: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(items.len());
     for item in items {
         let k = group_key_mut(&item, key_arg, &mut env_mut)?;
         let counter = map.entry(k).or_insert(Val::Int(0));
-        if let Val::Int(n) = counter { *n += 1; }
+        if let Val::Int(n) = counter {
+            *n += 1;
+        }
     }
     Ok(Val::obj(map))
 }
 
 pub fn index_by(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-    let key_arg = args.first().ok_or_else(|| EvalError("indexBy: requires key".into()))?;
-    let items = recv.into_vec().ok_or_else(|| EvalError("indexBy: expected array".into()))?;
+    let key_arg = args
+        .first()
+        .ok_or_else(|| EvalError("indexBy: requires key".into()))?;
+    let items = recv
+        .into_vec()
+        .ok_or_else(|| EvalError("indexBy: expected array".into()))?;
     let mut env_mut = env.clone();
     let mut map: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(items.len());
     for item in items {
@@ -297,33 +402,50 @@ pub fn index_by(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
 fn field_name(arg: &Arg, who: &str) -> Result<Arc<str>, EvalError> {
     match arg {
         Arg::Pos(Expr::Ident(s)) | Arg::Named(_, Expr::Ident(s)) => Ok(Arc::from(s.as_str())),
-        Arg::Pos(Expr::Str(s))   | Arg::Named(_, Expr::Str(s))   => Ok(Arc::from(s.as_str())),
-        _ => Err(EvalError(format!("{}: field arg must be identifier or string literal", who))),
+        Arg::Pos(Expr::Str(s)) | Arg::Named(_, Expr::Str(s)) => Ok(Arc::from(s.as_str())),
+        _ => Err(EvalError(format!(
+            "{}: field arg must be identifier or string literal",
+            who
+        ))),
     }
 }
 
 pub fn explode(recv: Val, args: &[Arg], _env: &Env) -> Result<Val, EvalError> {
-    let field = field_name(args.first().ok_or_else(|| EvalError("explode: requires field".into()))?, "explode")?;
-    use crate::composed::{Stage as _, StageOutput, Explode};
+    let field = field_name(
+        args.first()
+            .ok_or_else(|| EvalError("explode: requires field".into()))?,
+        "explode",
+    )?;
+    use crate::composed::{Explode, Stage as _, StageOutput};
     match Explode::new(field).apply(&recv) {
         StageOutput::Pass(c) => Ok(c.into_owned()),
-        _                    => Err(EvalError("explode: expected array".into())),
+        _ => Err(EvalError("explode: expected array".into())),
     }
 }
 
 pub fn implode(recv: Val, args: &[Arg], _env: &Env) -> Result<Val, EvalError> {
-    let field = field_name(args.first().ok_or_else(|| EvalError("implode: requires field".into()))?, "implode")?;
-    use crate::composed::{Stage as _, StageOutput, Implode};
+    let field = field_name(
+        args.first()
+            .ok_or_else(|| EvalError("implode: requires field".into()))?,
+        "implode",
+    )?;
+    use crate::composed::{Implode, Stage as _, StageOutput};
     match Implode::new(field).apply(&recv) {
         StageOutput::Pass(c) => Ok(c.into_owned()),
-        _                    => Err(EvalError("implode: rows must be objects".into())),
+        _ => Err(EvalError("implode: rows must be objects".into())),
     }
 }
 
 pub fn group_shape(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-    let key_arg   = args.first().ok_or_else(|| EvalError("group_shape: requires key".into()))?;
-    let shape_arg = args.get(1).ok_or_else(|| EvalError("group_shape: requires shape".into()))?;
-    let items = recv.into_vec().ok_or_else(|| EvalError("group_shape: expected array".into()))?;
+    let key_arg = args
+        .first()
+        .ok_or_else(|| EvalError("group_shape: requires key".into()))?;
+    let shape_arg = args
+        .get(1)
+        .ok_or_else(|| EvalError("group_shape: requires shape".into()))?;
+    let items = recv
+        .into_vec()
+        .ok_or_else(|| EvalError("group_shape: expected array".into()))?;
     let mut env_mut = env.clone();
     let mut buckets: IndexMap<Arc<str>, Vec<Val>> = IndexMap::with_capacity(items.len());
     for item in items {

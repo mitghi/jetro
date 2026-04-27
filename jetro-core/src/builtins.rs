@@ -19,9 +19,9 @@
 //!
 //! Streaming consumers call `*_one`; barrier consumers call `*_apply`.
 
-use crate::eval::EvalError;
-use crate::eval::value::Val;
 use crate::eval::util::is_truthy;
+use crate::eval::value::Val;
+use crate::eval::EvalError;
 
 // ── filter ──────────────────────────────────────────────────────────
 
@@ -40,10 +40,7 @@ where
 /// Buffered filter — `Vec<Val> → Vec<Val>` form, built on
 /// `filter_one`.
 #[inline]
-pub fn filter_apply<F>(
-    items: Vec<Val>,
-    mut eval: F,
-) -> Result<Vec<Val>, EvalError>
+pub fn filter_apply<F>(items: Vec<Val>, mut eval: F) -> Result<Vec<Val>, EvalError>
 where
     F: FnMut(&Val) -> Result<Val, EvalError>,
 {
@@ -78,14 +75,16 @@ where
 {
     let cap = match max_keep {
         Some(n) => n.min(items.len()),
-        None    => items.len(),
+        None => items.len(),
     };
     let mut out = Vec::with_capacity(cap);
     for item in items {
         if filter_one(&item, &mut eval)? {
             out.push(item);
             if let Some(n) = max_keep {
-                if out.len() >= n { break; }
+                if out.len() >= n {
+                    break;
+                }
             }
         }
     }
@@ -105,10 +104,7 @@ where
 
 /// Buffered map — `Vec<Val> → Vec<Val>`.
 #[inline]
-pub fn map_apply<F>(
-    items: Vec<Val>,
-    mut eval: F,
-) -> Result<Vec<Val>, EvalError>
+pub fn map_apply<F>(items: Vec<Val>, mut eval: F) -> Result<Vec<Val>, EvalError>
 where
     F: FnMut(&Val) -> Result<Val, EvalError>,
 {
@@ -135,13 +131,15 @@ where
 {
     let cap = match max_emit {
         Some(n) => n.min(items.len()),
-        None    => items.len(),
+        None => items.len(),
     };
     let mut out = Vec::with_capacity(cap);
     for item in items {
         out.push(map_one(&item, &mut eval)?);
         if let Some(n) = max_emit {
-            if out.len() >= n { break; }
+            if out.len() >= n {
+                break;
+            }
         }
     }
     Ok(out)
@@ -153,8 +151,7 @@ where
 /// evaluator returns a single Val; if Arr, elements are flattened
 /// one level into the output stream.
 #[inline]
-pub fn flat_map_one<F>(item: &Val, mut eval: F)
-    -> Result<smallvec::SmallVec<[Val; 1]>, EvalError>
+pub fn flat_map_one<F>(item: &Val, mut eval: F) -> Result<smallvec::SmallVec<[Val; 1]>, EvalError>
 where
     F: FnMut(&Val) -> Result<Val, EvalError>,
 {
@@ -171,10 +168,7 @@ where
 
 /// Buffered flat_map — `Vec<Val> → Vec<Val>`.
 #[inline]
-pub fn flat_map_apply<F>(
-    items: Vec<Val>,
-    mut eval: F,
-) -> Result<Vec<Val>, EvalError>
+pub fn flat_map_apply<F>(items: Vec<Val>, mut eval: F) -> Result<Vec<Val>, EvalError>
 where
     F: FnMut(&Val) -> Result<Val, EvalError>,
 {
@@ -220,16 +214,15 @@ where
 /// Buffered take_while — keeps prefix while predicate holds, then
 /// stops.
 #[inline]
-pub fn take_while_apply<F>(
-    items: Vec<Val>,
-    mut eval: F,
-) -> Result<Vec<Val>, EvalError>
+pub fn take_while_apply<F>(items: Vec<Val>, mut eval: F) -> Result<Vec<Val>, EvalError>
 where
     F: FnMut(&Val) -> Result<Val, EvalError>,
 {
     let mut out = Vec::with_capacity(items.len());
     for item in items {
-        if !take_while_one(&item, &mut eval)? { break; }
+        if !take_while_one(&item, &mut eval)? {
+            break;
+        }
         out.push(item);
     }
     Ok(out)
@@ -238,10 +231,7 @@ where
 /// Buffered drop_while — drops prefix while predicate holds,
 /// keeps the rest unconditionally.
 #[inline]
-pub fn drop_while_apply<F>(
-    items: Vec<Val>,
-    mut eval: F,
-) -> Result<Vec<Val>, EvalError>
+pub fn drop_while_apply<F>(items: Vec<Val>, mut eval: F) -> Result<Vec<Val>, EvalError>
 where
     F: FnMut(&Val) -> Result<Val, EvalError>,
 {
@@ -249,7 +239,9 @@ where
     let mut out = Vec::with_capacity(items.len());
     for item in items {
         if dropping {
-            if filter_one(&item, &mut eval)? { continue; }
+            if filter_one(&item, &mut eval)? {
+                continue;
+            }
             dropping = false;
         }
         out.push(item);
@@ -261,18 +253,18 @@ where
 
 /// Buffered partition — splits items by predicate into (truthy, falsy).
 #[inline]
-pub fn partition_apply<F>(
-    items: Vec<Val>,
-    mut eval: F,
-) -> Result<(Vec<Val>, Vec<Val>), EvalError>
+pub fn partition_apply<F>(items: Vec<Val>, mut eval: F) -> Result<(Vec<Val>, Vec<Val>), EvalError>
 where
     F: FnMut(&Val) -> Result<Val, EvalError>,
 {
     let mut yes = Vec::with_capacity(items.len());
-    let mut no  = Vec::with_capacity(items.len());
+    let mut no = Vec::with_capacity(items.len());
     for item in items {
-        if filter_one(&item, &mut eval)? { yes.push(item); }
-        else                              { no.push(item); }
+        if filter_one(&item, &mut eval)? {
+            yes.push(item);
+        } else {
+            no.push(item);
+        }
     }
     Ok((yes, no))
 }
@@ -290,9 +282,7 @@ where
     use std::sync::Arc;
     let mut map: indexmap::IndexMap<Arc<str>, Val> = indexmap::IndexMap::new();
     for item in items {
-        let k: Arc<str> = Arc::from(
-            crate::eval::util::val_to_key(&eval(&item)?).as_str(),
-        );
+        let k: Arc<str> = Arc::from(crate::eval::util::val_to_key(&eval(&item)?).as_str());
         let bucket = map.entry(k).or_insert_with(|| Val::arr(Vec::new()));
         bucket.as_array_mut().unwrap().push(item);
     }
@@ -311,11 +301,11 @@ where
     use std::sync::Arc;
     let mut map: indexmap::IndexMap<Arc<str>, Val> = indexmap::IndexMap::new();
     for item in items {
-        let k: Arc<str> = Arc::from(
-            crate::eval::util::val_to_key(&eval(&item)?).as_str(),
-        );
+        let k: Arc<str> = Arc::from(crate::eval::util::val_to_key(&eval(&item)?).as_str());
         let counter = map.entry(k).or_insert(Val::Int(0));
-        if let Val::Int(n) = counter { *n += 1; }
+        if let Val::Int(n) = counter {
+            *n += 1;
+        }
     }
     Ok(map)
 }
@@ -332,9 +322,7 @@ where
     use std::sync::Arc;
     let mut map: indexmap::IndexMap<Arc<str>, Val> = indexmap::IndexMap::new();
     for item in items {
-        let k: Arc<str> = Arc::from(
-            crate::eval::util::val_to_key(&eval(&item)?).as_str(),
-        );
+        let k: Arc<str> = Arc::from(crate::eval::util::val_to_key(&eval(&item)?).as_str());
         map.insert(k, item);
     }
     Ok(map)
@@ -353,10 +341,11 @@ pub fn filter_object_apply<F>(
 where
     F: FnMut(&std::sync::Arc<str>, &Val) -> Result<bool, EvalError>,
 {
-    let mut out: indexmap::IndexMap<std::sync::Arc<str>, Val> =
-        indexmap::IndexMap::new();
+    let mut out: indexmap::IndexMap<std::sync::Arc<str>, Val> = indexmap::IndexMap::new();
     for (k, v) in map {
-        if keep(&k, &v)? { out.insert(k, v); }
+        if keep(&k, &v)? {
+            out.insert(k, v);
+        }
     }
     Ok(out)
 }
@@ -372,12 +361,9 @@ where
     F: FnMut(&std::sync::Arc<str>) -> Result<Val, EvalError>,
 {
     use std::sync::Arc;
-    let mut out: indexmap::IndexMap<Arc<str>, Val> =
-        indexmap::IndexMap::with_capacity(map.len());
+    let mut out: indexmap::IndexMap<Arc<str>, Val> = indexmap::IndexMap::with_capacity(map.len());
     for (k, v) in map {
-        let new_key: Arc<str> = Arc::from(
-            crate::eval::util::val_to_key(&eval(&k)?).as_str(),
-        );
+        let new_key: Arc<str> = Arc::from(crate::eval::util::val_to_key(&eval(&k)?).as_str());
         out.insert(new_key, v);
     }
     Ok(out)
@@ -398,27 +384,35 @@ use std::sync::Arc;
 /// empty array.
 #[inline]
 pub fn keys_apply(recv: &Val) -> Val {
-    Val::arr(recv.as_object()
-        .map(|m| m.keys().map(|k| Val::Str(k.clone())).collect())
-        .unwrap_or_default())
+    Val::arr(
+        recv.as_object()
+            .map(|m| m.keys().map(|k| Val::Str(k.clone())).collect())
+            .unwrap_or_default(),
+    )
 }
 
 /// Canonical `.values()` impl.
 #[inline]
 pub fn values_apply(recv: &Val) -> Val {
-    Val::arr(recv.as_object()
-        .map(|m| m.values().cloned().collect())
-        .unwrap_or_default())
+    Val::arr(
+        recv.as_object()
+            .map(|m| m.values().cloned().collect())
+            .unwrap_or_default(),
+    )
 }
 
 /// Canonical `.entries()` impl.  Each entry is `Val::arr([key, value])`.
 #[inline]
 pub fn entries_apply(recv: &Val) -> Val {
-    Val::arr(recv.as_object()
-        .map(|m| m.iter()
-            .map(|(k, v)| Val::arr(vec![Val::Str(k.clone()), v.clone()]))
-            .collect())
-        .unwrap_or_default())
+    Val::arr(
+        recv.as_object()
+            .map(|m| {
+                m.iter()
+                    .map(|(k, v)| Val::arr(vec![Val::Str(k.clone()), v.clone()]))
+                    .collect()
+            })
+            .unwrap_or_default(),
+    )
 }
 
 /// Canonical `.slice(start[, end])` impl shared by `Stage::Slice`
@@ -430,7 +424,10 @@ pub fn entries_apply(recv: &Val) -> Val {
 /// returns the value unchanged.
 pub fn slice_apply(recv: Val, start: i64, end: Option<i64>) -> Val {
     let (parent, base_off, view_len): (Arc<str>, usize, usize) = match recv {
-        Val::Str(s)      => { let l = s.len(); (s, 0, l) }
+        Val::Str(s) => {
+            let l = s.len();
+            (s, 0, l)
+        }
         Val::StrSlice(r) => {
             let parent = r.to_arc();
             let plen = parent.len();
@@ -438,20 +435,27 @@ pub fn slice_apply(recv: Val, start: i64, end: Option<i64>) -> Val {
         }
         other => return other,
     };
-    let view = &parent[base_off .. base_off + view_len];
+    let view = &parent[base_off..base_off + view_len];
     let blen = view.len();
     if view.is_ascii() {
-        let start_u = if start < 0 { blen.saturating_sub((-start) as usize) }
-                       else        { (start as usize).min(blen) };
+        let start_u = if start < 0 {
+            blen.saturating_sub((-start) as usize)
+        } else {
+            (start as usize).min(blen)
+        };
         let end_u = match end {
             Some(e) if e < 0 => blen.saturating_sub((-e) as usize),
-            Some(e)          => (e as usize).min(blen),
-            None             => blen,
+            Some(e) => (e as usize).min(blen),
+            None => blen,
         };
         let start_u = start_u.min(end_u);
-        if start_u == 0 && end_u == blen { return Val::Str(parent); }
+        if start_u == 0 && end_u == blen {
+            return Val::Str(parent);
+        }
         return Val::StrSlice(crate::strref::StrRef::slice(
-            parent, base_off + start_u, base_off + end_u,
+            parent,
+            base_off + start_u,
+            base_off + end_u,
         ));
     }
     let chars: Vec<(usize, char)> = view.char_indices().collect();
@@ -461,13 +465,20 @@ pub fn slice_apply(recv: Val, start: i64, end: Option<i64>) -> Val {
         r.clamp(0, n) as usize
     };
     let s_idx = resolve(start);
-    let e_idx = match end { Some(e) => resolve(e), None => n as usize };
+    let e_idx = match end {
+        Some(e) => resolve(e),
+        None => n as usize,
+    };
     let s_idx = s_idx.min(e_idx);
     let s_b = chars.get(s_idx).map(|c| c.0).unwrap_or(view.len());
     let e_b = chars.get(e_idx).map(|c| c.0).unwrap_or(view.len());
-    if s_b == 0 && e_b == view.len() { return Val::Str(parent); }
+    if s_b == 0 && e_b == view.len() {
+        return Val::Str(parent);
+    }
     Val::StrSlice(crate::strref::StrRef::slice(
-        parent, base_off + s_b, base_off + e_b,
+        parent,
+        base_off + s_b,
+        base_off + e_b,
     ))
 }
 
@@ -478,11 +489,15 @@ pub fn slice_apply(recv: Val, start: i64, end: Option<i64>) -> Val {
 #[inline]
 pub fn split_apply(recv: &Val, sep: &str) -> Option<Val> {
     let s: &str = match recv {
-        Val::Str(s)      => s.as_ref(),
+        Val::Str(s) => s.as_ref(),
         Val::StrSlice(r) => r.as_str(),
-        _                => return None,
+        _ => return None,
     };
-    Some(Val::arr(s.split(sep).map(|p| Val::Str(Arc::<str>::from(p))).collect()))
+    Some(Val::arr(
+        s.split(sep)
+            .map(|p| Val::Str(Arc::<str>::from(p)))
+            .collect(),
+    ))
 }
 
 /// Canonical `.chunk(n)` partition into chunks of size `n` (last may
@@ -510,13 +525,18 @@ pub fn window_apply(items: &[Val], n: usize) -> Vec<Val> {
 #[inline]
 pub fn replace_apply(recv: Val, needle: &str, replacement: &str, all: bool) -> Option<Val> {
     let s: Arc<str> = match recv {
-        Val::Str(s)      => s,
+        Val::Str(s) => s,
         Val::StrSlice(r) => r.to_arc(),
-        _                => return None,
+        _ => return None,
     };
-    if !s.contains(needle) { return Some(Val::Str(s)); }
-    let out = if all { s.replace(needle, replacement) }
-              else   { s.replacen(needle, replacement, 1) };
+    if !s.contains(needle) {
+        return Some(Val::Str(s));
+    }
+    let out = if all {
+        s.replace(needle, replacement)
+    } else {
+        s.replacen(needle, replacement, 1)
+    };
     Some(Val::Str(Arc::<str>::from(out)))
 }
 
@@ -529,16 +549,14 @@ pub fn replace_apply(recv: Val, needle: &str, replacement: &str, all: bool) -> O
 // (transitional — shim deletes in a later cleanup pass).
 //
 // Helper: lift any `&str → String` transform into a `&Val → Option<Val>`
-// kernel that filters non-string receivers (matches prior
-// `lifted_str_stage!` semantics: only `Val::Str` accepted).
+// kernel that filters non-string receivers. Accepts both owned strings
+// and tape-backed `StrSlice` views so simd-json materialisation can
+// share string storage without changing builtin semantics.
 
 #[inline]
 fn map_str_owned(recv: &Val, f: impl FnOnce(&str) -> String) -> Option<Val> {
-    if let Val::Str(s) = recv {
-        Some(Val::Str(Arc::<str>::from(f(s.as_ref()).as_str())))
-    } else {
-        None
-    }
+    let s = recv.as_str_ref()?;
+    Some(Val::Str(Arc::<str>::from(f(s).as_str())))
 }
 
 /// `.upper()` — ASCII fast path; full Unicode fallback.
@@ -594,7 +612,9 @@ pub fn capitalize_apply(recv: &Val) -> Option<Val> {
         let mut out = String::with_capacity(s.len());
         let mut chars = s.chars();
         if let Some(first) = chars.next() {
-            for c in first.to_uppercase() { out.push(c); }
+            for c in first.to_uppercase() {
+                out.push(c);
+            }
             out.push_str(&chars.as_str().to_lowercase());
         }
         out
@@ -612,10 +632,14 @@ pub fn title_case_apply(recv: &Val) -> Option<Val> {
                 out.push(c);
                 at_start = true;
             } else if at_start {
-                for u in c.to_uppercase() { out.push(u); }
+                for u in c.to_uppercase() {
+                    out.push(u);
+                }
                 at_start = false;
             } else {
-                for l in c.to_lowercase() { out.push(l); }
+                for l in c.to_lowercase() {
+                    out.push(l);
+                }
             }
         }
         out
@@ -629,12 +653,12 @@ pub fn html_escape_apply(recv: &Val) -> Option<Val> {
         let mut out = String::with_capacity(s.len());
         for c in s.chars() {
             match c {
-                '<'  => out.push_str("&lt;"),
-                '>'  => out.push_str("&gt;"),
-                '&'  => out.push_str("&amp;"),
-                '"'  => out.push_str("&quot;"),
+                '<' => out.push_str("&lt;"),
+                '>' => out.push_str("&gt;"),
+                '&' => out.push_str("&amp;"),
+                '"' => out.push_str("&quot;"),
                 '\'' => out.push_str("&#39;"),
-                _    => out.push(c),
+                _ => out.push(c),
             }
         }
         out
@@ -645,8 +669,11 @@ pub fn html_escape_apply(recv: &Val) -> Option<Val> {
 #[inline]
 pub fn html_unescape_apply(recv: &Val) -> Option<Val> {
     map_str_owned(recv, |s| {
-        s.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
-         .replace("&quot;", "\"").replace("&#39;", "'")
+        s.replace("&amp;", "&")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace("&#39;", "'")
     })
 }
 
@@ -658,8 +685,9 @@ pub fn url_encode_apply(recv: &Val) -> Option<Val> {
         for b in s.as_bytes() {
             let b = *b;
             match b {
-                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9'
-                    | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                    out.push(b as char)
+                }
                 _ => {
                     use std::fmt::Write;
                     let _ = write!(out, "%{:02X}", b);
@@ -708,12 +736,20 @@ pub fn to_base64_apply(recv: &Val) -> Option<Val> {
 #[inline]
 pub fn dedent_apply(recv: &Val) -> Option<Val> {
     map_str_owned(recv, |s| {
-        let min_indent = s.lines()
+        let min_indent = s
+            .lines()
             .filter(|l| !l.trim().is_empty())
             .map(|l| l.len() - l.trim_start().len())
-            .min().unwrap_or(0);
+            .min()
+            .unwrap_or(0);
         s.lines()
-            .map(|l| if l.len() >= min_indent { &l[min_indent..] } else { l })
+            .map(|l| {
+                if l.len() >= min_indent {
+                    &l[min_indent..]
+                } else {
+                    l
+                }
+            })
             .collect::<Vec<_>>()
             .join("\n")
     })
@@ -738,8 +774,11 @@ pub fn camel_case_apply(recv: &Val) -> Option<Val> {
         let parts = crate::functions::split_words_lower(s);
         let mut out = String::with_capacity(s.len());
         for (i, p) in parts.iter().enumerate() {
-            if i == 0 { out.push_str(p); }
-            else { crate::functions::upper_first_into(p, &mut out); }
+            if i == 0 {
+                out.push_str(p);
+            } else {
+                crate::functions::upper_first_into(p, &mut out);
+            }
         }
         out
     })
@@ -751,7 +790,9 @@ pub fn pascal_case_apply(recv: &Val) -> Option<Val> {
     map_str_owned(recv, |s| {
         let parts = crate::functions::split_words_lower(s);
         let mut out = String::with_capacity(s.len());
-        for p in parts.iter() { crate::functions::upper_first_into(p, &mut out); }
+        for p in parts.iter() {
+            crate::functions::upper_first_into(p, &mut out);
+        }
         out
     })
 }
@@ -767,11 +808,7 @@ pub fn reverse_str_apply(recv: &Val) -> Option<Val> {
 /// macro semantics).
 #[inline]
 fn map_str_val(recv: &Val, f: impl FnOnce(&str) -> Val) -> Option<Val> {
-    if let Val::Str(s) = recv {
-        Some(f(s.as_ref()))
-    } else {
-        None
-    }
+    Some(f(recv.as_str_ref()?))
 }
 
 // ── Phase D batch 2: string → Val transforms (was lifted_str_to_val!) ──
@@ -788,9 +825,11 @@ pub fn lines_apply(recv: &Val) -> Option<Val> {
 #[inline]
 pub fn words_apply(recv: &Val) -> Option<Val> {
     map_str_val(recv, |s| {
-        Val::arr(s.split_whitespace()
-            .map(|w| Val::Str(Arc::from(w)))
-            .collect())
+        Val::arr(
+            s.split_whitespace()
+                .map(|w| Val::Str(Arc::from(w)))
+                .collect(),
+        )
     })
 }
 
@@ -798,9 +837,11 @@ pub fn words_apply(recv: &Val) -> Option<Val> {
 #[inline]
 pub fn chars_apply(recv: &Val) -> Option<Val> {
     map_str_val(recv, |s| {
-        Val::arr(s.chars()
-            .map(|c| Val::Str(Arc::from(c.to_string())))
-            .collect())
+        Val::arr(
+            s.chars()
+                .map(|c| Val::Str(Arc::from(c.to_string())))
+                .collect(),
+        )
     })
 }
 
@@ -865,8 +906,12 @@ pub fn is_ascii_apply(recv: &Val) -> Option<Val> {
 #[inline]
 pub fn to_number_apply(recv: &Val) -> Option<Val> {
     map_str_val(recv, |s| {
-        if let Ok(i) = s.parse::<i64>() { return Val::Int(i); }
-        if let Ok(f) = s.parse::<f64>() { return Val::Float(f); }
+        if let Ok(i) = s.parse::<i64>() {
+            return Val::Int(i);
+        }
+        if let Ok(f) = s.parse::<f64>() {
+            return Val::Float(f);
+        }
         Val::Null
     })
 }
@@ -876,9 +921,9 @@ pub fn to_number_apply(recv: &Val) -> Option<Val> {
 #[inline]
 pub fn to_bool_apply(recv: &Val) -> Option<Val> {
     map_str_val(recv, |s| match s {
-        "true"  => Val::Bool(true),
+        "true" => Val::Bool(true),
         "false" => Val::Bool(false),
-        _       => Val::Null,
+        _ => Val::Null,
     })
 }
 
@@ -903,7 +948,7 @@ pub fn parse_float_apply(recv: &Val) -> Option<Val> {
 #[inline]
 pub fn parse_bool_apply(recv: &Val) -> Option<Val> {
     map_str_val(recv, |s| match s.trim().to_ascii_lowercase().as_str() {
-        "true" | "yes" | "1" | "on"  => Val::Bool(true),
+        "true" | "yes" | "1" | "on" => Val::Bool(true),
         "false" | "no" | "0" | "off" => Val::Bool(false),
         _ => Val::Null,
     })
@@ -914,7 +959,7 @@ pub fn parse_bool_apply(recv: &Val) -> Option<Val> {
 pub fn from_base64_apply(recv: &Val) -> Option<Val> {
     map_str_val(recv, |s| match crate::functions::base64_decode(s) {
         Ok(bytes) => Val::Str(Arc::from(String::from_utf8_lossy(&bytes).as_ref())),
-        Err(_)    => Val::Null,
+        Err(_) => Val::Null,
     })
 }
 
@@ -923,33 +968,25 @@ pub fn from_base64_apply(recv: &Val) -> Option<Val> {
 /// `.starts_with(prefix)` — returns Val::Bool.
 #[inline]
 pub fn starts_with_apply(recv: &Val, prefix: &str) -> Option<Val> {
-    if let Val::Str(s) = recv {
-        Some(Val::Bool(s.starts_with(prefix)))
-    } else { None }
+    Some(Val::Bool(recv.as_str_ref()?.starts_with(prefix)))
 }
 
 /// `.ends_with(suffix)` — returns Val::Bool.
 #[inline]
 pub fn ends_with_apply(recv: &Val, suffix: &str) -> Option<Val> {
-    if let Val::Str(s) = recv {
-        Some(Val::Bool(s.ends_with(suffix)))
-    } else { None }
+    Some(Val::Bool(recv.as_str_ref()?.ends_with(suffix)))
 }
 
 /// `.contains(needle)` / `.str_matches(needle)` — returns Val::Bool.
 #[inline]
 pub fn contains_apply(recv: &Val, needle: &str) -> Option<Val> {
-    if let Val::Str(s) = recv {
-        Some(Val::Bool(s.contains(needle)))
-    } else { None }
+    Some(Val::Bool(recv.as_str_ref()?.contains(needle)))
 }
 
 /// `.repeat(n)` — repeat string n times.
 #[inline]
 pub fn repeat_apply(recv: &Val, n: usize) -> Option<Val> {
-    if let Val::Str(s) = recv {
-        Some(Val::Str(Arc::from(s.repeat(n))))
-    } else { None }
+    Some(Val::Str(Arc::from(recv.as_str_ref()?.repeat(n))))
 }
 
 /// `.split(sep)` Stage form — fresh Val::Str segments. (Distinct from
@@ -958,12 +995,9 @@ pub fn repeat_apply(recv: &Val, n: usize) -> Option<Val> {
 /// the others.)
 #[inline]
 pub fn split_str_apply(recv: &Val, sep: &str) -> Option<Val> {
-    if let Val::Str(s) = recv {
-        let items: Vec<Val> = s.split(sep)
-            .map(|p| Val::Str(Arc::from(p)))
-            .collect();
-        Some(Val::arr(items))
-    } else { None }
+    let s = recv.as_str_ref()?;
+    let items: Vec<Val> = s.split(sep).map(|p| Val::Str(Arc::from(p))).collect();
+    Some(Val::arr(items))
 }
 
 /// `.replace(needle, with)` Stage form — single substitution per
@@ -972,119 +1006,123 @@ pub fn split_str_apply(recv: &Val, sep: &str) -> Option<Val> {
 /// `all` flag).
 #[inline]
 pub fn replace_str_apply(recv: &Val, needle: &str, with: &str) -> Option<Val> {
-    if let Val::Str(s) = recv {
-        Some(Val::Str(Arc::from(s.replace(needle, with))))
-    } else { None }
+    Some(Val::Str(Arc::from(
+        recv.as_str_ref()?.replace(needle, with),
+    )))
 }
 
 /// `.strip_prefix(prefix)` — strip if present, else return original.
 #[inline]
 pub fn strip_prefix_apply(recv: &Val, prefix: &str) -> Option<Val> {
-    if let Val::Str(s) = recv {
-        Some(Val::Str(s.strip_prefix(prefix)
-            .map(Arc::<str>::from)
-            .unwrap_or_else(|| s.clone())))
-    } else { None }
+    let s = recv.as_str_ref()?;
+    Some(match s.strip_prefix(prefix) {
+        Some(stripped) => Val::Str(Arc::<str>::from(stripped)),
+        None => recv.clone(),
+    })
 }
 
 /// `.strip_suffix(suffix)` — strip if present, else return original.
 #[inline]
 pub fn strip_suffix_apply(recv: &Val, suffix: &str) -> Option<Val> {
-    if let Val::Str(s) = recv {
-        Some(Val::Str(s.strip_suffix(suffix)
-            .map(Arc::<str>::from)
-            .unwrap_or_else(|| s.clone())))
-    } else { None }
+    let s = recv.as_str_ref()?;
+    Some(match s.strip_suffix(suffix) {
+        Some(stripped) => Val::Str(Arc::<str>::from(stripped)),
+        None => recv.clone(),
+    })
 }
 
 /// `.pad_left(width, fill)` — left-pad to width with fill char.
 #[inline]
 pub fn pad_left_apply(recv: &Val, width: usize, fill: char) -> Option<Val> {
-    if let Val::Str(s) = recv {
-        let n = s.chars().count();
-        if n >= width { return Some(Val::Str(s.clone())); }
-        let pad: String = std::iter::repeat(fill).take(width - n).collect();
-        Some(Val::Str(Arc::from(pad + s.as_ref())))
-    } else { None }
+    let s = recv.as_str_ref()?;
+    let n = s.chars().count();
+    if n >= width {
+        return Some(recv.clone());
+    }
+    let pad: String = std::iter::repeat(fill).take(width - n).collect();
+    Some(Val::Str(Arc::from(pad + s)))
 }
 
 /// `.pad_right(width, fill)` — right-pad to width with fill char.
 #[inline]
 pub fn pad_right_apply(recv: &Val, width: usize, fill: char) -> Option<Val> {
-    if let Val::Str(s) = recv {
-        let n = s.chars().count();
-        if n >= width { return Some(Val::Str(s.clone())); }
-        let pad: String = std::iter::repeat(fill).take(width - n).collect();
-        Some(Val::Str(Arc::from(s.to_string() + &pad)))
-    } else { None }
+    let s = recv.as_str_ref()?;
+    let n = s.chars().count();
+    if n >= width {
+        return Some(recv.clone());
+    }
+    let pad: String = std::iter::repeat(fill).take(width - n).collect();
+    Some(Val::Str(Arc::from(s.to_string() + &pad)))
 }
 
 /// `.center(width, fill)` — center-pad to width with fill char.
 #[inline]
 pub fn center_apply(recv: &Val, width: usize, fill: char) -> Option<Val> {
-    if let Val::Str(s) = recv {
-        let cur = s.chars().count();
-        if cur >= width { return Some(Val::Str(s.clone())); }
-        let total = width - cur;
-        let left = total / 2;
-        let right = total - left;
-        let mut out = String::with_capacity(s.len() + total);
-        for _ in 0..left { out.push(fill); }
-        out.push_str(s.as_ref());
-        for _ in 0..right { out.push(fill); }
-        Some(Val::Str(Arc::from(out)))
-    } else { None }
+    let s = recv.as_str_ref()?;
+    let cur = s.chars().count();
+    if cur >= width {
+        return Some(recv.clone());
+    }
+    let total = width - cur;
+    let left = total / 2;
+    let right = total - left;
+    let mut out = String::with_capacity(s.len() + total);
+    for _ in 0..left {
+        out.push(fill);
+    }
+    out.push_str(s);
+    for _ in 0..right {
+        out.push(fill);
+    }
+    Some(Val::Str(Arc::from(out)))
 }
 
 /// `.indent(n)` — prepend n spaces to each line.
 #[inline]
 pub fn indent_apply(recv: &Val, n: usize) -> Option<Val> {
-    if let Val::Str(s) = recv {
-        let prefix: String = std::iter::repeat(' ').take(n).collect();
-        let out = s.lines()
-            .map(|l| format!("{}{}", prefix, l))
-            .collect::<Vec<_>>()
-            .join("\n");
-        Some(Val::Str(Arc::from(out)))
-    } else { None }
+    let s = recv.as_str_ref()?;
+    let prefix: String = std::iter::repeat(' ').take(n).collect();
+    let out = s
+        .lines()
+        .map(|l| format!("{}{}", prefix, l))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(Val::Str(Arc::from(out)))
 }
 
 /// `.index_of(needle)` — char-position of first match; -1 on miss.
 #[inline]
 pub fn index_of_apply(recv: &Val, needle: &str) -> Option<Val> {
-    if let Val::Str(s) = recv {
-        Some(match s.find(needle) {
-            Some(i) => Val::Int(s[..i].chars().count() as i64),
-            None    => Val::Int(-1),
-        })
-    } else { None }
+    let s = recv.as_str_ref()?;
+    Some(match s.find(needle) {
+        Some(i) => Val::Int(s[..i].chars().count() as i64),
+        None => Val::Int(-1),
+    })
 }
 
 /// `.last_index_of(needle)` — char-position of last match; -1 on miss.
 #[inline]
 pub fn last_index_of_apply(recv: &Val, needle: &str) -> Option<Val> {
-    if let Val::Str(s) = recv {
-        Some(match s.rfind(needle) {
-            Some(i) => Val::Int(s[..i].chars().count() as i64),
-            None    => Val::Int(-1),
-        })
-    } else { None }
+    let s = recv.as_str_ref()?;
+    Some(match s.rfind(needle) {
+        Some(i) => Val::Int(s[..i].chars().count() as i64),
+        None => Val::Int(-1),
+    })
 }
 
 /// `.scan(pat)` — collect all occurrences of `pat` in `s`.
 #[inline]
 pub fn scan_apply(recv: &Val, pat: &str) -> Option<Val> {
-    if let Val::Str(s) = recv {
-        let mut out: Vec<Val> = Vec::new();
-        if !pat.is_empty() {
-            let mut start = 0usize;
-            while let Some(pos) = s[start..].find(pat) {
-                out.push(Val::Str(Arc::from(pat)));
-                start += pos + pat.len();
-            }
+    let s = recv.as_str_ref()?;
+    let mut out: Vec<Val> = Vec::new();
+    if !pat.is_empty() {
+        let mut start = 0usize;
+        while let Some(pos) = s[start..].find(pat) {
+            out.push(Val::Str(Arc::from(pat)));
+            start += pos + pat.len();
         }
-        Some(Val::arr(out))
-    } else { None }
+    }
+    Some(Val::arr(out))
 }
 
 // ── Phase D batch 4: array family ───────────────────────────────────
@@ -1094,13 +1132,14 @@ pub fn scan_apply(recv: &Val, pat: &str) -> Option<Val> {
 #[inline]
 pub fn len_apply(recv: &Val) -> Option<Val> {
     let n = match recv {
-        Val::Arr(a)         => a.len(),
-        Val::IntVec(a)      => a.len(),
-        Val::FloatVec(a)    => a.len(),
-        Val::StrVec(a)      => a.len(),
+        Val::Arr(a) => a.len(),
+        Val::IntVec(a) => a.len(),
+        Val::FloatVec(a) => a.len(),
+        Val::StrVec(a) => a.len(),
         Val::StrSliceVec(a) => a.len(),
-        Val::Obj(m)         => m.len(),
-        Val::Str(s)         => s.chars().count(),
+        Val::Obj(m) => m.len(),
+        Val::Str(s) => s.chars().count(),
+        Val::StrSlice(r) => r.as_str().chars().count(),
         _ => return None,
     };
     Some(Val::Int(n as i64))
@@ -1110,7 +1149,8 @@ pub fn len_apply(recv: &Val) -> Option<Val> {
 #[inline]
 pub fn compact_apply(recv: &Val) -> Option<Val> {
     let items_cow = recv.as_vals()?;
-    let kept: Vec<Val> = items_cow.iter()
+    let kept: Vec<Val> = items_cow
+        .iter()
         .filter(|v| !matches!(v, Val::Null))
         .cloned()
         .collect();
@@ -1129,7 +1169,9 @@ pub fn flatten_one_apply(recv: &Val) -> Option<Val> {
             }
         }
         Some(Val::arr(out))
-    } else { None }
+    } else {
+        None
+    }
 }
 
 /// `.flatten(depth)` — recursive flatten up to depth levels.
@@ -1137,7 +1179,9 @@ pub fn flatten_one_apply(recv: &Val) -> Option<Val> {
 pub fn flatten_depth_apply(recv: &Val, depth: usize) -> Option<Val> {
     if matches!(recv, Val::Arr(_)) {
         Some(crate::eval::util::flatten_val(recv.clone(), depth))
-    } else { None }
+    } else {
+        None
+    }
 }
 
 /// `.reverse()` — reverse Arr / IntVec / FloatVec / StrVec / Str.
@@ -1164,8 +1208,10 @@ pub fn reverse_any_apply(recv: &Val) -> Option<Val> {
             v.reverse();
             Val::str_vec(v)
         }
-        Val::Str(s) => Val::Str(Arc::<str>::from(
-            s.chars().rev().collect::<String>())),
+        Val::Str(s) => Val::Str(Arc::<str>::from(s.chars().rev().collect::<String>())),
+        Val::StrSlice(r) => Val::Str(Arc::<str>::from(
+            r.as_str().chars().rev().collect::<String>(),
+        )),
         _ => return None,
     })
 }
@@ -1175,12 +1221,15 @@ pub fn reverse_any_apply(recv: &Val) -> Option<Val> {
 pub fn unique_arr_apply(recv: &Val) -> Option<Val> {
     if let Val::Arr(a) = recv {
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let kept: Vec<Val> = a.iter()
+        let kept: Vec<Val> = a
+            .iter()
             .filter(|v| seen.insert(crate::eval::util::val_to_key(v)))
             .cloned()
             .collect();
         Some(Val::arr(kept))
-    } else { None }
+    } else {
+        None
+    }
 }
 
 /// `.first(n)` — n==1 returns scalar, else Arr of first n.
@@ -1238,11 +1287,15 @@ pub fn prepend_apply(recv: &Val, item: &Val) -> Option<Val> {
 #[inline]
 pub fn enumerate_apply(recv: &Val) -> Option<Val> {
     if let Val::Arr(a) = recv {
-        let pairs: Vec<Val> = a.iter().enumerate()
+        let pairs: Vec<Val> = a
+            .iter()
+            .enumerate()
             .map(|(i, v)| Val::arr(vec![Val::Int(i as i64), v.clone()]))
             .collect();
         Some(Val::arr(pairs))
-    } else { None }
+    } else {
+        None
+    }
 }
 
 /// `.pairwise()` — Arr → Arr<[arr[i], arr[i+1]]>.
@@ -1260,25 +1313,29 @@ pub fn pairwise_apply(recv: &Val) -> Option<Val> {
 /// `.chunk(n)` Stage — Val::Arr → Arr<Arr<n>>.
 #[inline]
 pub fn chunk_arr_apply(recv: &Val, n: usize) -> Option<Val> {
-    if n == 0 { return None; }
+    if n == 0 {
+        return None;
+    }
     if let Val::Arr(a) = recv {
-        let chunks: Vec<Val> = a.chunks(n)
-            .map(|c| Val::arr(c.to_vec()))
-            .collect();
+        let chunks: Vec<Val> = a.chunks(n).map(|c| Val::arr(c.to_vec())).collect();
         Some(Val::arr(chunks))
-    } else { None }
+    } else {
+        None
+    }
 }
 
 /// `.window(n)` Stage — Val::Arr → Arr<Arr<n>>.
 #[inline]
 pub fn window_arr_apply(recv: &Val, n: usize) -> Option<Val> {
-    if n == 0 { return None; }
+    if n == 0 {
+        return None;
+    }
     if let Val::Arr(a) = recv {
-        let windows: Vec<Val> = a.windows(n)
-            .map(|w| Val::arr(w.to_vec()))
-            .collect();
+        let windows: Vec<Val> = a.windows(n).map(|w| Val::arr(w.to_vec())).collect();
         Some(Val::arr(windows))
-    } else { None }
+    } else {
+        None
+    }
 }
 
 /// `.intersect(other)` — keep elements in both arrays.
@@ -1287,12 +1344,15 @@ pub fn intersect_apply(recv: &Val, other: &[Val]) -> Option<Val> {
     if let Val::Arr(a) = recv {
         let other_keys: std::collections::HashSet<String> =
             other.iter().map(crate::eval::util::val_to_key).collect();
-        let kept: Vec<Val> = a.iter()
+        let kept: Vec<Val> = a
+            .iter()
             .filter(|v| other_keys.contains(&crate::eval::util::val_to_key(v)))
             .cloned()
             .collect();
         Some(Val::arr(kept))
-    } else { None }
+    } else {
+        None
+    }
 }
 
 /// `.union(other)` — combine, preserve order, dedup.
@@ -1308,7 +1368,9 @@ pub fn union_apply(recv: &Val, other: &[Val]) -> Option<Val> {
             }
         }
         Some(Val::arr(out))
-    } else { None }
+    } else {
+        None
+    }
 }
 
 /// `.diff(other)` — keep elements in self but not other.
@@ -1317,12 +1379,15 @@ pub fn diff_apply(recv: &Val, other: &[Val]) -> Option<Val> {
     if let Val::Arr(a) = recv {
         let other_keys: std::collections::HashSet<String> =
             other.iter().map(crate::eval::util::val_to_key).collect();
-        let kept: Vec<Val> = a.iter()
+        let kept: Vec<Val> = a
+            .iter()
             .filter(|v| !other_keys.contains(&crate::eval::util::val_to_key(v)))
             .cloned()
             .collect();
         Some(Val::arr(kept))
-    } else { None }
+    } else {
+        None
+    }
 }
 
 // ── Phase D batch 5: object family ──────────────────────────────────
@@ -1336,25 +1401,27 @@ pub fn from_pairs_apply(recv: &Val) -> Option<Val> {
         for p in pairs.iter() {
             if let Val::Arr(kv) = p {
                 if kv.len() == 2 {
-                    if let Val::Str(k) = &kv[0] {
-                        m.insert(k.clone(), kv[1].clone());
+                    if let Some(k) = kv[0].as_str_ref() {
+                        m.insert(Arc::<str>::from(k), kv[1].clone());
                     }
                 }
             }
         }
         Some(Val::Obj(Arc::new(m)))
-    } else { None }
+    } else {
+        None
+    }
 }
 
 /// `.invert()` — Obj{k → v} → Obj{v_str → k}.
 #[inline]
 pub fn invert_apply(recv: &Val) -> Option<Val> {
     let m = recv.as_object()?;
-    let mut out: indexmap::IndexMap<Arc<str>, Val> =
-        indexmap::IndexMap::with_capacity(m.len());
+    let mut out: indexmap::IndexMap<Arc<str>, Val> = indexmap::IndexMap::with_capacity(m.len());
     for (k, v) in m.iter() {
         let new_key: Arc<str> = match v {
             Val::Str(s) => s.clone(),
+            Val::StrSlice(r) => Arc::<str>::from(r.as_str()),
             other => Arc::<str>::from(crate::eval::util::val_to_key(other).as_str()),
         };
         out.insert(new_key, Val::Str(k.clone()));
@@ -1368,7 +1435,9 @@ pub fn merge_apply(recv: &Val, other: &Val) -> Option<Val> {
     let base = recv.as_object()?;
     let other = other.as_object()?;
     let mut out: indexmap::IndexMap<Arc<str>, Val> = base.clone();
-    for (k, v) in other.iter() { out.insert(k.clone(), v.clone()); }
+    for (k, v) in other.iter() {
+        out.insert(k.clone(), v.clone());
+    }
     Some(Val::Obj(Arc::new(out)))
 }
 
@@ -1386,7 +1455,9 @@ pub fn defaults_apply(recv: &Val, other: &Val) -> Option<Val> {
     let mut out: indexmap::IndexMap<Arc<str>, Val> = base.clone();
     for (k, v) in defs.iter() {
         let entry = out.entry(k.clone()).or_insert(Val::Null);
-        if entry.is_null() { *entry = v.clone(); }
+        if entry.is_null() {
+            *entry = v.clone();
+        }
     }
     Some(Val::Obj(Arc::new(out)))
 }
@@ -1399,9 +1470,10 @@ pub fn rename_apply(recv: &Val, renames: &Val) -> Option<Val> {
     let mut out: indexmap::IndexMap<Arc<str>, Val> = base.clone();
     for (old, new_val) in renames.iter() {
         if let Some(v) = out.shift_remove(old.as_ref()) {
-            let new_key: Arc<str> = if let Val::Str(s) = new_val {
-                s.clone()
-            } else { old.clone() };
+            let new_key: Arc<str> = new_val
+                .as_str_ref()
+                .map(Arc::<str>::from)
+                .unwrap_or_else(|| old.clone());
             out.insert(new_key, v);
         }
     }
@@ -1452,7 +1524,9 @@ pub fn flatten_keys_apply(recv: &Val, sep: &str) -> Option<Val> {
 pub fn unflatten_keys_apply(recv: &Val, sep: &str) -> Option<Val> {
     if let Val::Obj(m) = recv {
         Some(crate::eval::func_paths::unflatten_keys_impl(m, sep))
-    } else { None }
+    } else {
+        None
+    }
 }
 
 // ── Phase D batch 7: regex family ───────────────────────────────────
@@ -1460,118 +1534,115 @@ pub fn unflatten_keys_apply(recv: &Val, sep: &str) -> Option<Val> {
 /// `.match(pat)` — Bool, regex match anywhere.
 #[inline]
 pub fn re_match_apply(recv: &Val, pat: &str) -> Option<Val> {
-    if let Val::Str(s) = recv {
-        let re = crate::functions::compile_regex(pat).ok()?;
-        Some(Val::Bool(re.is_match(s.as_ref())))
-    } else { None }
+    let s = recv.as_str_ref()?;
+    let re = crate::functions::compile_regex(pat).ok()?;
+    Some(Val::Bool(re.is_match(s)))
 }
 
 /// `.match_first(pat)` — Str of first match or Null.
 #[inline]
 pub fn re_match_first_apply(recv: &Val, pat: &str) -> Option<Val> {
-    if let Val::Str(s) = recv {
-        let re = crate::functions::compile_regex(pat).ok()?;
-        Some(re.find(s.as_ref())
+    let s = recv.as_str_ref()?;
+    let re = crate::functions::compile_regex(pat).ok()?;
+    Some(
+        re.find(s)
             .map(|m| Val::Str(Arc::from(m.as_str())))
-            .unwrap_or(Val::Null))
-    } else { None }
+            .unwrap_or(Val::Null),
+    )
 }
 
 /// `.match_all(pat)` — StrVec of all matches.
 #[inline]
 pub fn re_match_all_apply(recv: &Val, pat: &str) -> Option<Val> {
-    if let Val::Str(s) = recv {
-        let re = crate::functions::compile_regex(pat).ok()?;
-        let out: Vec<Arc<str>> = re.find_iter(s.as_ref())
-            .map(|m| Arc::<str>::from(m.as_str())).collect();
-        Some(Val::str_vec(out))
-    } else { None }
+    let s = recv.as_str_ref()?;
+    let re = crate::functions::compile_regex(pat).ok()?;
+    let out: Vec<Arc<str>> = re
+        .find_iter(s)
+        .map(|m| Arc::<str>::from(m.as_str()))
+        .collect();
+    Some(Val::str_vec(out))
 }
 
 /// `.captures(pat)` — Arr of capture groups (group 0 first); Null on miss.
 #[inline]
 pub fn re_captures_apply(recv: &Val, pat: &str) -> Option<Val> {
-    if let Val::Str(s) = recv {
-        let re = crate::functions::compile_regex(pat).ok()?;
-        Some(match re.captures(s.as_ref()) {
-            Some(c) => {
-                let mut out: Vec<Val> = Vec::with_capacity(c.len());
-                for i in 0..c.len() {
-                    out.push(c.get(i)
+    let s = recv.as_str_ref()?;
+    let re = crate::functions::compile_regex(pat).ok()?;
+    Some(match re.captures(s) {
+        Some(c) => {
+            let mut out: Vec<Val> = Vec::with_capacity(c.len());
+            for i in 0..c.len() {
+                out.push(
+                    c.get(i)
                         .map(|m| Val::Str(Arc::from(m.as_str())))
-                        .unwrap_or(Val::Null));
-                }
-                Val::arr(out)
+                        .unwrap_or(Val::Null),
+                );
             }
-            None => Val::Null,
-        })
-    } else { None }
+            Val::arr(out)
+        }
+        None => Val::Null,
+    })
 }
 
 /// `.captures_all(pat)` — Arr<Arr> of capture groups for every match.
 #[inline]
 pub fn re_captures_all_apply(recv: &Val, pat: &str) -> Option<Val> {
-    if let Val::Str(s) = recv {
-        let re = crate::functions::compile_regex(pat).ok()?;
-        let mut all: Vec<Val> = Vec::new();
-        for c in re.captures_iter(s.as_ref()) {
-            let mut row: Vec<Val> = Vec::with_capacity(c.len());
-            for i in 0..c.len() {
-                row.push(c.get(i)
+    let s = recv.as_str_ref()?;
+    let re = crate::functions::compile_regex(pat).ok()?;
+    let mut all: Vec<Val> = Vec::new();
+    for c in re.captures_iter(s) {
+        let mut row: Vec<Val> = Vec::with_capacity(c.len());
+        for i in 0..c.len() {
+            row.push(
+                c.get(i)
                     .map(|m| Val::Str(Arc::from(m.as_str())))
-                    .unwrap_or(Val::Null));
-            }
-            all.push(Val::arr(row));
+                    .unwrap_or(Val::Null),
+            );
         }
-        Some(Val::arr(all))
-    } else { None }
+        all.push(Val::arr(row));
+    }
+    Some(Val::arr(all))
 }
 
 /// `.replace_re(pat, with)` — single regex replacement.
 #[inline]
 pub fn re_replace_apply(recv: &Val, pat: &str, with: &str) -> Option<Val> {
-    if let Val::Str(s) = recv {
-        let re = crate::functions::compile_regex(pat).ok()?;
-        let out = re.replace(s.as_ref(), with);
-        Some(Val::Str(Arc::from(out.as_ref())))
-    } else { None }
+    let s = recv.as_str_ref()?;
+    let re = crate::functions::compile_regex(pat).ok()?;
+    let out = re.replace(s, with);
+    Some(Val::Str(Arc::from(out.as_ref())))
 }
 
 /// `.replace_all_re(pat, with)` — all regex replacements.
 #[inline]
 pub fn re_replace_all_apply(recv: &Val, pat: &str, with: &str) -> Option<Val> {
-    if let Val::Str(s) = recv {
-        let re = crate::functions::compile_regex(pat).ok()?;
-        let out = re.replace_all(s.as_ref(), with);
-        Some(Val::Str(Arc::from(out.as_ref())))
-    } else { None }
+    let s = recv.as_str_ref()?;
+    let re = crate::functions::compile_regex(pat).ok()?;
+    let out = re.replace_all(s, with);
+    Some(Val::Str(Arc::from(out.as_ref())))
 }
 
 /// `.split_re(pat)` — regex split into StrVec.
 #[inline]
 pub fn re_split_apply(recv: &Val, pat: &str) -> Option<Val> {
-    if let Val::Str(s) = recv {
-        let re = crate::functions::compile_regex(pat).ok()?;
-        let out: Vec<Arc<str>> = re.split(s.as_ref())
-            .map(Arc::<str>::from).collect();
-        Some(Val::str_vec(out))
-    } else { None }
+    let s = recv.as_str_ref()?;
+    let re = crate::functions::compile_regex(pat).ok()?;
+    let out: Vec<Arc<str>> = re.split(s).map(Arc::<str>::from).collect();
+    Some(Val::str_vec(out))
 }
 
 /// `.contains_any([needles])` — Bool, true if any needle appears.
 #[inline]
 pub fn contains_any_apply(recv: &Val, needles: &[Arc<str>]) -> Option<Val> {
-    if let Val::Str(s) = recv {
-        Some(Val::Bool(needles.iter().any(|n| s.contains(n.as_ref()))))
-    } else { None }
+    let s = recv.as_str_ref()?;
+    Some(Val::Bool(needles.iter().any(|n| s.contains(n.as_ref()))))
 }
 
 /// `.contains_all([needles])` — Bool, true if every needle appears.
 #[inline]
 pub fn contains_all_apply(recv: &Val, needles: &[Arc<str>]) -> Option<Val> {
-    if let Val::Str(s) = recv {
-        Some(Val::Bool(needles.iter().all(|n| s.contains(n.as_ref()))))
-    } else { None }
+    let s = recv.as_str_ref()?;
+    Some(Val::Bool(needles.iter().all(|n| s.contains(n.as_ref()))))
 }
 
 // ── Phase D batch 8: csv / cast / type-name ────────────────────────
@@ -1579,22 +1650,30 @@ pub fn contains_all_apply(recv: &Val, needles: &[Arc<str>]) -> Option<Val> {
 /// `.to_csv()` — Val → Str (comma sep).
 #[inline]
 pub fn to_csv_apply(recv: &Val) -> Option<Val> {
-    Some(Val::Str(Arc::from(crate::functions::csv_emit(recv, ",").as_str())))
+    Some(Val::Str(Arc::from(
+        crate::functions::csv_emit(recv, ",").as_str(),
+    )))
 }
 
 /// `.to_tsv()` — Val → Str (tab sep).
 #[inline]
 pub fn to_tsv_apply(recv: &Val) -> Option<Val> {
-    Some(Val::Str(Arc::from(crate::functions::csv_emit(recv, "\t").as_str())))
+    Some(Val::Str(Arc::from(
+        crate::functions::csv_emit(recv, "\t").as_str(),
+    )))
 }
 
 /// `.to_pairs()` — Obj → Arr<{key, val}> (named-obj form).
 #[inline]
 pub fn to_pairs_apply(recv: &Val) -> Option<Val> {
     use crate::eval::util::obj2;
-    let arr: Vec<Val> = recv.as_object()
-        .map(|m| m.iter().map(|(k, v)|
-            obj2("key", Val::Str(k.clone()), "val", v.clone())).collect())
+    let arr: Vec<Val> = recv
+        .as_object()
+        .map(|m| {
+            m.iter()
+                .map(|(k, v)| obj2("key", Val::Str(k.clone()), "val", v.clone()))
+                .collect()
+        })
         .unwrap_or_default();
     Some(Val::arr(arr))
 }
@@ -1608,14 +1687,16 @@ pub fn type_name_apply(recv: &Val) -> Option<Val> {
 /// `.to_string()` — Val → Str (display form).
 #[inline]
 pub fn to_string_apply(recv: &Val) -> Option<Val> {
-    Some(Val::Str(Arc::from(crate::eval::util::val_to_string(recv).as_str())))
+    Some(Val::Str(Arc::from(
+        crate::eval::util::val_to_string(recv).as_str(),
+    )))
 }
 
 /// `.to_json()` — Val → Str (JSON encoding). Inline fast paths for primitives.
 #[inline]
 pub fn to_json_apply(recv: &Val) -> Option<Val> {
     let out = match recv {
-        Val::Int(n)  => n.to_string(),
+        Val::Int(n) => n.to_string(),
         Val::Float(f) => {
             if f.is_finite() {
                 let v = serde_json::Value::from(*f);
@@ -1625,8 +1706,8 @@ pub fn to_json_apply(recv: &Val) -> Option<Val> {
             }
         }
         Val::Bool(b) => (if *b { "true" } else { "false" }).to_string(),
-        Val::Null    => "null".to_string(),
-        Val::Str(s)  => {
+        Val::Null => "null".to_string(),
+        Val::Str(s) => {
             let v = serde_json::Value::String(s.to_string());
             serde_json::to_string(&v).unwrap_or_default()
         }

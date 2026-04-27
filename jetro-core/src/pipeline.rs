@@ -50,17 +50,19 @@ fn build_typed_cols(
     use crate::eval::value::ObjVecCol;
     let mut out: Vec<ObjVecCol> = Vec::with_capacity(stride);
     if stride == 0 || nrows == 0 {
-        for _ in 0..stride { out.push(ObjVecCol::Mixed); }
+        for _ in 0..stride {
+            out.push(ObjVecCol::Mixed);
+        }
         return out;
     }
     for slot in 0..stride {
         // Inspect first row's value at this slot to choose target.
         let target_tag: u8 = match &cells[slot] {
-            Val::Int(_)   => 1,
+            Val::Int(_) => 1,
             Val::Float(_) => 2,
-            Val::Str(_)   => 3,
-            Val::Bool(_)  => 4,
-            _             => 0, // mixed / unsupported
+            Val::Str(_) => 3,
+            Val::Bool(_) => 4,
+            _ => 0, // mixed / unsupported
         };
         if target_tag == 0 {
             out.push(ObjVecCol::Mixed);
@@ -71,13 +73,16 @@ fn build_typed_cols(
         for r in 0..nrows {
             let v = &cells[r * stride + slot];
             let same = match (target_tag, v) {
-                (1, Val::Int(_))   => true,
+                (1, Val::Int(_)) => true,
                 (2, Val::Float(_)) => true,
-                (3, Val::Str(_))   => true,
-                (4, Val::Bool(_))  => true,
+                (3, Val::Str(_)) => true,
+                (4, Val::Bool(_)) => true,
                 _ => false,
             };
-            if !same { ok = false; break; }
+            if !same {
+                ok = false;
+                break;
+            }
         }
         if !ok {
             out.push(ObjVecCol::Mixed);
@@ -88,28 +93,36 @@ fn build_typed_cols(
             1 => {
                 let mut col: Vec<i64> = Vec::with_capacity(nrows);
                 for r in 0..nrows {
-                    if let Val::Int(n) = &cells[r * stride + slot] { col.push(*n); }
+                    if let Val::Int(n) = &cells[r * stride + slot] {
+                        col.push(*n);
+                    }
                 }
                 out.push(ObjVecCol::Ints(col));
             }
             2 => {
                 let mut col: Vec<f64> = Vec::with_capacity(nrows);
                 for r in 0..nrows {
-                    if let Val::Float(f) = &cells[r * stride + slot] { col.push(*f); }
+                    if let Val::Float(f) = &cells[r * stride + slot] {
+                        col.push(*f);
+                    }
                 }
                 out.push(ObjVecCol::Floats(col));
             }
             3 => {
                 let mut col: Vec<Arc<str>> = Vec::with_capacity(nrows);
                 for r in 0..nrows {
-                    if let Val::Str(s) = &cells[r * stride + slot] { col.push(Arc::clone(s)); }
+                    if let Val::Str(s) = &cells[r * stride + slot] {
+                        col.push(Arc::clone(s));
+                    }
                 }
                 out.push(ObjVecCol::Strs(col));
             }
             4 => {
                 let mut col: Vec<bool> = Vec::with_capacity(nrows);
                 for r in 0..nrows {
-                    if let Val::Bool(b) = &cells[r * stride + slot] { col.push(*b); }
+                    if let Val::Bool(b) = &cells[r * stride + slot] {
+                        col.push(*b);
+                    }
                 }
                 out.push(ObjVecCol::Bools(col));
             }
@@ -131,11 +144,15 @@ pub trait ObjVecPromoter {
     /// outperform tape walking, so this gate flips off after first
     /// `root_val()` call.
     #[cfg(feature = "simd-json")]
-    fn tape(&self) -> Option<&Arc<crate::strref::TapeData>> { None }
+    fn tape(&self) -> Option<&Arc<crate::strref::TapeData>> {
+        None
+    }
     /// True iff tape path is preferable to Val path right now.
     /// Implementations return true when Val tree hasn't been built
     /// yet AND tape is available.
-    fn prefer_tape(&self) -> bool { false }
+    fn prefer_tape(&self) -> bool {
+        false
+    }
     /// Called by the tape-aggregate path after a successful run so
     /// the impl can flip its preference toward Val/ObjVec for warm
     /// follow-up queries.  Default is a no-op.
@@ -157,7 +174,9 @@ static TRACE_INIT: AtomicU8 = AtomicU8::new(0); // 0 = unread, 1 = off, 2 = on
 #[inline]
 pub(crate) fn trace_enabled() -> bool {
     let v = TRACE_INIT.load(Ordering::Relaxed);
-    if v != 0 { return v == 2; }
+    if v != 0 {
+        return v == 2;
+    }
     let on = std::env::var_os("JETRO_PIPELINE_TRACE").is_some();
     TRACE_INIT.store(if on { 2 } else { 1 }, Ordering::Relaxed);
     on
@@ -172,7 +191,9 @@ static COMPOSED_INIT: AtomicU8 = AtomicU8::new(0);
 #[inline]
 pub(crate) fn composed_path_enabled() -> bool {
     let v = COMPOSED_INIT.load(Ordering::Relaxed);
-    if v != 0 { return v == 2; }
+    if v != 0 {
+        return v == 2;
+    }
     let off = match std::env::var("JETRO_COMPOSED") {
         Ok(s) => s == "0" || s.eq_ignore_ascii_case("off") || s.eq_ignore_ascii_case("false"),
         Err(_) => false,
@@ -280,7 +301,6 @@ pub enum Stage {
     //   2. apply_indexed override on Split lets IndexedDispatch compute
     //      `split(",").first()` via one memchr call instead of producing
     //      the full segment vector.
-
     /// `.split(sep)` — 1 string → many parts.  `Cardinality::Expanding`
     /// + `can_indexed=true` (kth segment via memchr).
     Split(Arc<str>),
@@ -291,7 +311,11 @@ pub enum Stage {
     /// `.replace(needle, replacement)` (`all=false`, replacen-1-style) and
     /// `.replace_all(needle, replacement)` (`all=true`) — 1 string → 1
     /// string.  `Cardinality::OneToOne` + `can_indexed=true`.
-    Replace { needle: Arc<str>, replacement: Arc<str>, all: bool },
+    Replace {
+        needle: Arc<str>,
+        replacement: Arc<str>,
+        all: bool,
+    },
 
     /// `.chunk(n)` — partitions the upstream stream into chunks of size n
     /// (last chunk may be shorter).  Barrier — needs the full stream.
@@ -317,7 +341,6 @@ pub enum Stage {
     // Lower at the chain classifier; canonical kernels live as
     // `*_apply` free fns below.  Per `lift_all_builtins.md`: built-ins
     // lower DIRECTLY to Stage::* variants, no CallMethod dispatch.
-
     /// `.keys()` — Obj → Arr<Str>.  `Cardinality::OneToOne`, pure.
     Keys,
     /// `.values()` — Obj → Arr<Val>.  `Cardinality::OneToOne`, pure.
@@ -332,7 +355,6 @@ pub enum Stage {
     // path + Unicode fallback).  Template for remaining ~30 string
     // Stages already living as `composed::Stage` impls but not yet
     // exposed as `pipeline::Stage` variants.
-
     /// `.upper()` — Str → Str (uppercase).  `Cardinality::OneToOne`,
     /// pure, idempotent (`upper ∘ upper = upper`), constant-foldable.
     Upper,
@@ -345,7 +367,6 @@ pub enum Stage {
     // Idempotent ones get merge_with `(X,X)→X`.  Inverse-pair ones
     // get cancels_with (ToBase64↔FromBase64, UrlEncode↔UrlDecode,
     // HtmlEscape↔HtmlUnescape).
-
     /// `.lower()` — Str → Str (lowercase).  Idempotent.
     Lower,
     /// `.trim()` — strip leading + trailing whitespace.  Idempotent.
@@ -388,7 +409,6 @@ pub enum Stage {
     // Zero-arg Str → Arr/Int/Bool/Number transforms.  None idempotent
     // (output type ≠ Str).  Bodies in composed.rs via
     // `lifted_str_to_val!` macro.
-
     /// `.lines()` — Str → Arr<Str> split on `\n`.
     Lines,
     /// `.words()` — Str → Arr<Str> split on whitespace.
@@ -443,9 +463,18 @@ pub enum Stage {
     Invert,
 
     // ── lift_all_builtins (two-arg padding) ──────────────────────────
-    PadLeft { width: usize, fill: char },
-    PadRight { width: usize, fill: char },
-    Center { width: usize, fill: char },
+    PadLeft {
+        width: usize,
+        fill: char,
+    },
+    PadRight {
+        width: usize,
+        fill: char,
+    },
+    Center {
+        width: usize,
+        fill: char,
+    },
 
     // ── lift_all_builtins (regex one-arg pat) ────────────────────────
     ReMatch(std::sync::Arc<str>),
@@ -456,8 +485,14 @@ pub enum Stage {
     ReSplit(std::sync::Arc<str>),
 
     // ── lift_all_builtins (regex two-arg replace) ────────────────────
-    ReReplace   { pat: std::sync::Arc<str>, with: std::sync::Arc<str> },
-    ReReplaceAll{ pat: std::sync::Arc<str>, with: std::sync::Arc<str> },
+    ReReplace {
+        pat: std::sync::Arc<str>,
+        with: std::sync::Arc<str>,
+    },
+    ReReplaceAll {
+        pat: std::sync::Arc<str>,
+        with: std::sync::Arc<str>,
+    },
 
     // ── lift_all_builtins (Vec<Arc<str>> bulk-needle predicates) ─────
     ContainsAny(Vec<std::sync::Arc<str>>),
@@ -610,7 +645,13 @@ pub enum ArithOperand {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ArithOp { Add, Sub, Mul, Div, Mod }
+pub enum ArithOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+}
 
 /// One field of an ObjProject kernel — output key + value shape.
 /// Three shapes:
@@ -621,9 +662,19 @@ pub enum ArithOp { Add, Sub, Mul, Div, Mod }
 ///     return Int/Float sum
 #[derive(Debug, Clone)]
 pub enum ObjProjEntry {
-    Path { key: Arc<str>, path: Arc<[Arc<str>]> },
-    InnerLen { key: Arc<str>, path: Arc<[Arc<str>]> },
-    InnerMapSum { key: Arc<str>, path: Arc<[Arc<str>]>, inner: Arc<BodyKernel> },
+    Path {
+        key: Arc<str>,
+        path: Arc<[Arc<str>]>,
+    },
+    InnerLen {
+        key: Arc<str>,
+        path: Arc<[Arc<str>]>,
+    },
+    InnerMapSum {
+        key: Arc<str>,
+        path: Arc<[Arc<str>]>,
+        inner: Arc<BodyKernel>,
+    },
 }
 
 impl ObjProjEntry {
@@ -659,20 +710,21 @@ impl BodyKernel {
         match ops {
             [Opcode::PushCurrent, Opcode::GetField(k)]
             | [Opcode::GetField(k)]
-            | [Opcode::LoadIdent(k)] =>
-                return Self::FieldRead(k.clone()),
-            [Opcode::PushCurrent, Opcode::FieldChain(fc)]
-            | [Opcode::FieldChain(fc)] =>
-                return Self::FieldChain(fc.keys.clone()),
+            | [Opcode::LoadIdent(k)] => return Self::FieldRead(k.clone()),
+            [Opcode::PushCurrent, Opcode::FieldChain(fc)] | [Opcode::FieldChain(fc)] => {
+                return Self::FieldChain(fc.keys.clone())
+            }
             // `LoadIdent(k1) + GetField(k2) [+ GetField(k3) …]` —
             // LoadIdent shorthand resolves to current.get_field(k1),
             // so the whole shape is a chain rooted at `current`.
-            [Opcode::LoadIdent(k1), rest @ ..] if rest.iter()
-                .all(|o| matches!(o, Opcode::GetField(_))) =>
+            [Opcode::LoadIdent(k1), rest @ ..]
+                if rest.iter().all(|o| matches!(o, Opcode::GetField(_))) =>
             {
                 let mut keys = vec![k1.clone()];
                 for o in rest {
-                    if let Opcode::GetField(k) = o { keys.push(k.clone()); }
+                    if let Opcode::GetField(k) = o {
+                        keys.push(k.clone());
+                    }
                 }
                 return Self::FieldChain(keys.into());
             }
@@ -682,7 +734,9 @@ impl BodyKernel {
             // rooted at current.
             [Opcode::LoadIdent(k1), Opcode::FieldChain(fc)] => {
                 let mut keys = vec![k1.clone()];
-                for k in fc.keys.iter() { keys.push(k.clone()); }
+                for k in fc.keys.iter() {
+                    keys.push(k.clone());
+                }
                 return Self::FieldChain(keys.into());
             }
             _ => {}
@@ -690,7 +744,9 @@ impl BodyKernel {
         // <field-read>, <lit>, <cmp>  →  FieldCmpLit / FieldChainCmpLit
         let rest: &[Opcode] = if matches!(ops.first(), Some(Opcode::PushCurrent)) {
             &ops[1..]
-        } else { ops };
+        } else {
+            ops
+        };
         if rest.len() == 3 {
             // Bare `@ <op> lit` — current as lhs, literal as rhs.
             // This shape matters for IntVec / FloatVec / StrVec
@@ -746,7 +802,9 @@ impl BodyKernel {
         // `<lhs> <rhs> <op>` covers `qty * price`, `score + 10`,
         // `a / b`, etc. Operands are paths (FieldRead/FieldChain) or
         // numeric literals.  Generic across all combos via classifier.
-        if let Some(arith) = classify_arith(ops) { return arith; }
+        if let Some(arith) = classify_arith(ops) {
+            return arith;
+        }
         Self::Generic
     }
 }
@@ -795,9 +853,7 @@ fn classify_arith(ops: &[crate::vm::Opcode]) -> Option<BodyKernel> {
 /// FieldChain — same shapes accepted by other path kernels).  Bails
 /// (returns None) on Generic interpolations or on parts that carry a
 /// non-default fmt spec.
-fn classify_fstring(
-    parts: &[crate::vm::CompiledFSPart],
-) -> Option<Vec<FStrPart>> {
+fn classify_fstring(parts: &[crate::vm::CompiledFSPart]) -> Option<Vec<FStrPart>> {
     use crate::vm::CompiledFSPart as P;
     let mut out: Vec<FStrPart> = Vec::with_capacity(parts.len());
     for p in parts {
@@ -806,8 +862,7 @@ fn classify_fstring(
             P::Interp { prog, fmt: None } => {
                 let kernel = BodyKernel::classify(prog);
                 let path = match kernel {
-                    BodyKernel::FieldRead(k) =>
-                        Arc::from(vec![k].into_boxed_slice()),
+                    BodyKernel::FieldRead(k) => Arc::from(vec![k].into_boxed_slice()),
                     BodyKernel::FieldChain(keys) => keys,
                     _ => return None,
                 };
@@ -824,12 +879,12 @@ fn parse_arith_operand(ops: &[crate::vm::Opcode]) -> Option<ArithOperand> {
     match ops {
         [Opcode::PushInt(n)] => Some(ArithOperand::LitInt(*n)),
         [Opcode::PushFloat(f)] => Some(ArithOperand::LitFloat(*f)),
-        [Opcode::LoadIdent(k)] | [Opcode::GetField(k)]
-        | [Opcode::PushCurrent, Opcode::GetField(k)] => {
-            Some(ArithOperand::Path(Arc::from(vec![k.clone()].into_boxed_slice())))
-        }
-        [Opcode::FieldChain(fc)]
-        | [Opcode::PushCurrent, Opcode::FieldChain(fc)] => {
+        [Opcode::LoadIdent(k)]
+        | [Opcode::GetField(k)]
+        | [Opcode::PushCurrent, Opcode::GetField(k)] => Some(ArithOperand::Path(Arc::from(
+            vec![k.clone()].into_boxed_slice(),
+        ))),
+        [Opcode::FieldChain(fc)] | [Opcode::PushCurrent, Opcode::FieldChain(fc)] => {
             Some(ArithOperand::Path(fc.keys.clone()))
         }
         _ => None,
@@ -840,9 +895,7 @@ fn parse_arith_operand(ops: &[crate::vm::Opcode]) -> Option<ArithOperand> {
 /// Returns `None` if any entry is non-path (Dynamic / Spread / KvPath
 /// with Index step / KvPath optional / KvPath cond / Kv with non-trivial
 /// sub-program).
-fn classify_obj_project(
-    entries: &[crate::vm::CompiledObjEntry],
-) -> Option<Vec<ObjProjEntry>> {
+fn classify_obj_project(entries: &[crate::vm::CompiledObjEntry]) -> Option<Vec<ObjProjEntry>> {
     use crate::vm::CompiledObjEntry as E;
     use crate::vm::KvStep;
     let mut out: Vec<ObjProjEntry> = Vec::with_capacity(entries.len());
@@ -852,7 +905,12 @@ fn classify_obj_project(
                 key: name.clone(),
                 path: Arc::from(vec![name.clone()].into_boxed_slice()),
             }),
-            E::KvPath { key, steps, optional: false, .. } => {
+            E::KvPath {
+                key,
+                steps,
+                optional: false,
+                ..
+            } => {
                 let mut path: Vec<Arc<str>> = Vec::with_capacity(steps.len());
                 for s in steps.iter() {
                     match s {
@@ -860,9 +918,17 @@ fn classify_obj_project(
                         KvStep::Index(_) => return None,
                     }
                 }
-                out.push(ObjProjEntry::Path { key: key.clone(), path: path.into() });
+                out.push(ObjProjEntry::Path {
+                    key: key.clone(),
+                    path: path.into(),
+                });
             }
-            E::Kv { key, prog, optional: false, cond: None } => {
+            E::Kv {
+                key,
+                prog,
+                optional: false,
+                cond: None,
+            } => {
                 if let Some(entry) = classify_kv_method(key, prog) {
                     out.push(entry);
                 } else {
@@ -887,11 +953,8 @@ fn classify_obj_project(
 /// inside `{id, name: user.name, score}` shape projections — which
 /// otherwise fall through to Generic and bypass byte-friendly
 /// classification entirely.
-fn classify_kv_method(
-    key: &Arc<str>,
-    prog: &crate::vm::Program,
-) -> Option<ObjProjEntry> {
-    use crate::vm::{Opcode, BuiltinMethod};
+fn classify_kv_method(key: &Arc<str>, prog: &crate::vm::Program) -> Option<ObjProjEntry> {
+    use crate::vm::{BuiltinMethod, Opcode};
     // Path projection shortcut — covers any prog that classifies as
     // a pure path read.  Wraps the chain into ObjProjEntry::Path.
     match BodyKernel::classify(prog) {
@@ -902,23 +965,28 @@ fn classify_kv_method(
             });
         }
         BodyKernel::FieldChain(keys) => {
-            return Some(ObjProjEntry::Path { key: key.clone(), path: keys });
+            return Some(ObjProjEntry::Path {
+                key: key.clone(),
+                path: keys,
+            });
         }
         _ => {}
     }
     let ops = prog.ops.as_ref();
-    if ops.len() != 2 { return None; }
+    if ops.len() != 2 {
+        return None;
+    }
     let path: Arc<[Arc<str>]> = match &ops[0] {
-        Opcode::LoadIdent(k) | Opcode::GetField(k) =>
-            Arc::from(vec![k.clone()].into_boxed_slice()),
+        Opcode::LoadIdent(k) | Opcode::GetField(k) => Arc::from(vec![k.clone()].into_boxed_slice()),
         Opcode::FieldChain(fc) => fc.keys.clone(),
         _ => return None,
     };
     match &ops[1] {
-        Opcode::CallMethod(c)
-            if c.method == BuiltinMethod::Len && c.sub_progs.is_empty() =>
-        {
-            Some(ObjProjEntry::InnerLen { key: key.clone(), path })
+        Opcode::CallMethod(c) if c.method == BuiltinMethod::Len && c.sub_progs.is_empty() => {
+            Some(ObjProjEntry::InnerLen {
+                key: key.clone(),
+                path,
+            })
         }
         _ => None,
     }
@@ -928,25 +996,25 @@ fn classify_kv_method(
 fn trivial_lit(op: &crate::vm::Opcode) -> Option<Val> {
     use crate::vm::Opcode;
     match op {
-        Opcode::PushInt(n)   => Some(Val::Int(*n)),
+        Opcode::PushInt(n) => Some(Val::Int(*n)),
         Opcode::PushFloat(f) => Some(Val::Float(*f)),
-        Opcode::PushStr(s)   => Some(Val::Str(s.clone())),
-        Opcode::PushBool(b)  => Some(Val::Bool(*b)),
-        Opcode::PushNull     => Some(Val::Null),
+        Opcode::PushStr(s) => Some(Val::Str(s.clone())),
+        Opcode::PushBool(b) => Some(Val::Bool(*b)),
+        Opcode::PushNull => Some(Val::Null),
         _ => None,
     }
 }
 
 #[inline]
 fn cmp_to_binop(op: &crate::vm::Opcode) -> Option<crate::ast::BinOp> {
-    use crate::vm::Opcode as O;
     use crate::ast::BinOp as B;
+    use crate::vm::Opcode as O;
     match op {
-        O::Eq  => Some(B::Eq),
+        O::Eq => Some(B::Eq),
         O::Neq => Some(B::Neq),
-        O::Lt  => Some(B::Lt),
+        O::Lt => Some(B::Lt),
         O::Lte => Some(B::Lte),
-        O::Gt  => Some(B::Gt),
+        O::Gt => Some(B::Gt),
         O::Gte => Some(B::Gte),
         _ => None,
     }
@@ -1020,16 +1088,23 @@ pub enum Bound {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Position { First, Last, Nth(usize) }
+pub enum Position {
+    First,
+    Last,
+    Nth(usize),
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct Demand {
     pub consumption: Bound,
-    pub positional:  Option<Position>,
+    pub positional: Option<Position>,
 }
 
 impl Demand {
-    pub const UNBOUNDED: Demand = Demand { consumption: Bound::Unbounded, positional: None };
+    pub const UNBOUNDED: Demand = Demand {
+        consumption: Bound::Unbounded,
+        positional: None,
+    };
 }
 
 impl Sink {
@@ -1040,14 +1115,15 @@ impl Sink {
         match self {
             Sink::First => Demand {
                 consumption: Bound::AtMost(1),
-                positional:  Some(Position::First),
+                positional: Some(Position::First),
             },
             Sink::Last => Demand {
                 consumption: Bound::AtMost(1),
-                positional:  Some(Position::Last),
+                positional: Some(Position::Last),
             },
-            Sink::Count | Sink::Numeric(_) | Sink::Collect
-            | Sink::ApproxCountDistinct => Demand::UNBOUNDED,
+            Sink::Count | Sink::Numeric(_) | Sink::Collect | Sink::ApproxCountDistinct => {
+                Demand::UNBOUNDED
+            }
         }
     }
 }
@@ -1084,7 +1160,7 @@ pub fn compute_strategies(stages: &[Stage], sink: &Sink) -> Vec<StageStrategy> {
             if let Bound::AtMost(k) = demand.consumption {
                 strategies[i] = match demand.positional {
                     Some(Position::Last) => StageStrategy::SortBottomK(k),
-                    _                    => StageStrategy::SortTopK(k),
+                    _ => StageStrategy::SortTopK(k),
                 };
             }
         }
@@ -1102,75 +1178,145 @@ fn upstream_demand(d: Demand, stage: &Stage) -> Demand {
         // can drop elements so downstream's "first" / "last" refers to
         // post-filter position — upstream demand is unbounded.
         Stage::Map(_) => d,
-        Stage::Filter(_) => Demand { consumption: d.consumption, positional: None },
+        Stage::Filter(_) => Demand {
+            consumption: d.consumption,
+            positional: None,
+        },
         // Take(n) caps upstream.
         Stage::Take(n) => {
             let cap = match d.consumption {
                 Bound::Unbounded => *n,
                 Bound::AtMost(k) => k.min(*n),
             };
-            Demand { consumption: Bound::AtMost(cap), positional: None }
+            Demand {
+                consumption: Bound::AtMost(cap),
+                positional: None,
+            }
         }
         // Skip + barriers + Expanding string Stages all need full
         // upstream stream (or its sole element, for Split: 1 string).
         Stage::Skip(_)
-            | Stage::FlatMap(_)
-            | Stage::Reverse
-            | Stage::Sort(_)
-            | Stage::UniqueBy(_)
-            | Stage::GroupBy(_)
-            | Stage::Split(_)
-            | Stage::Chunk(_)
-            | Stage::Window(_) => Demand::UNBOUNDED,
+        | Stage::FlatMap(_)
+        | Stage::Reverse
+        | Stage::Sort(_)
+        | Stage::UniqueBy(_)
+        | Stage::GroupBy(_)
+        | Stage::Split(_)
+        | Stage::Chunk(_)
+        | Stage::Window(_) => Demand::UNBOUNDED,
         // Slice / Replace / CompiledMap / Keys / Values / Entries are
         // 1:1 — preserve demand.  Keys/Values/Entries each consume one
         // object and emit one array; downstream demand passes through.
-        Stage::Slice(_, _) | Stage::Replace { .. } | Stage::CompiledMap(_)
-        | Stage::Keys | Stage::Values | Stage::Entries
+        Stage::Slice(_, _)
+        | Stage::Replace { .. }
+        | Stage::CompiledMap(_)
+        | Stage::Keys
+        | Stage::Values
+        | Stage::Entries
         | Stage::Upper
-        | Stage::Lower | Stage::Trim | Stage::TrimLeft | Stage::TrimRight
-        | Stage::Capitalize | Stage::TitleCase
-        | Stage::HtmlEscape | Stage::HtmlUnescape
-        | Stage::UrlEncode | Stage::UrlDecode
-        | Stage::ToBase64 | Stage::FromBase64
+        | Stage::Lower
+        | Stage::Trim
+        | Stage::TrimLeft
+        | Stage::TrimRight
+        | Stage::Capitalize
+        | Stage::TitleCase
+        | Stage::HtmlEscape
+        | Stage::HtmlUnescape
+        | Stage::UrlEncode
+        | Stage::UrlDecode
+        | Stage::ToBase64
+        | Stage::FromBase64
         | Stage::Dedent
-        | Stage::SnakeCase | Stage::KebabCase | Stage::CamelCase | Stage::PascalCase
+        | Stage::SnakeCase
+        | Stage::KebabCase
+        | Stage::CamelCase
+        | Stage::PascalCase
         | Stage::ReverseStr
-        | Stage::Lines | Stage::Words | Stage::Chars
-        | Stage::CharsOf | Stage::BytesOf | Stage::ByteLen
-        | Stage::IsBlank | Stage::IsNumeric | Stage::IsAlpha | Stage::IsAscii
-        | Stage::ToNumber | Stage::ToBool
-        | Stage::ParseInt | Stage::ParseFloat | Stage::ParseBool
-        | Stage::StartsWith(_) | Stage::EndsWith(_)
-        | Stage::StripPrefix(_) | Stage::StripSuffix(_)
-        | Stage::StrMatches(_) | Stage::IndexOf(_) | Stage::LastIndexOf(_)
+        | Stage::Lines
+        | Stage::Words
+        | Stage::Chars
+        | Stage::CharsOf
+        | Stage::BytesOf
+        | Stage::ByteLen
+        | Stage::IsBlank
+        | Stage::IsNumeric
+        | Stage::IsAlpha
+        | Stage::IsAscii
+        | Stage::ToNumber
+        | Stage::ToBool
+        | Stage::ParseInt
+        | Stage::ParseFloat
+        | Stage::ParseBool
+        | Stage::StartsWith(_)
+        | Stage::EndsWith(_)
+        | Stage::StripPrefix(_)
+        | Stage::StripSuffix(_)
+        | Stage::StrMatches(_)
+        | Stage::IndexOf(_)
+        | Stage::LastIndexOf(_)
         | Stage::Scan(_)
-        | Stage::Repeat(_) | Stage::Indent(_) | Stage::FlattenDepth(_)
-        | Stage::Compact | Stage::Pairwise | Stage::Invert
-        | Stage::PadLeft { .. } | Stage::PadRight { .. } | Stage::Center { .. }
-        | Stage::ReMatch(_) | Stage::ReMatchFirst(_) | Stage::ReMatchAll(_)
-        | Stage::ReCaptures(_) | Stage::ReCapturesAll(_) | Stage::ReSplit(_)
-        | Stage::ReReplace { .. } | Stage::ReReplaceAll { .. }
-        | Stage::ContainsAny(_) | Stage::ContainsAll(_)
-        | Stage::ToCsv | Stage::ToTsv | Stage::ToPairs
-        | Stage::CumMax | Stage::CumMin | Stage::DiffWindow | Stage::PctChange
+        | Stage::Repeat(_)
+        | Stage::Indent(_)
+        | Stage::FlattenDepth(_)
+        | Stage::Compact
+        | Stage::Pairwise
+        | Stage::Invert
+        | Stage::PadLeft { .. }
+        | Stage::PadRight { .. }
+        | Stage::Center { .. }
+        | Stage::ReMatch(_)
+        | Stage::ReMatchFirst(_)
+        | Stage::ReMatchAll(_)
+        | Stage::ReCaptures(_)
+        | Stage::ReCapturesAll(_)
+        | Stage::ReSplit(_)
+        | Stage::ReReplace { .. }
+        | Stage::ReReplaceAll { .. }
+        | Stage::ContainsAny(_)
+        | Stage::ContainsAll(_)
+        | Stage::ToCsv
+        | Stage::ToTsv
+        | Stage::ToPairs
+        | Stage::CumMax
+        | Stage::CumMin
+        | Stage::DiffWindow
+        | Stage::PctChange
         | Stage::ZScore
-        | Stage::RollingSum(_) | Stage::RollingAvg(_)
-        | Stage::RollingMin(_) | Stage::RollingMax(_)
-        | Stage::Lag(_) | Stage::Lead(_)
-        | Stage::GetPath(_) | Stage::HasPath(_) | Stage::Has(_)
-        | Stage::DelPath(_) | Stage::FlattenKeys(_) | Stage::UnflattenKeys(_)
+        | Stage::RollingSum(_)
+        | Stage::RollingAvg(_)
+        | Stage::RollingMin(_)
+        | Stage::RollingMax(_)
+        | Stage::Lag(_)
+        | Stage::Lead(_)
+        | Stage::GetPath(_)
+        | Stage::HasPath(_)
+        | Stage::Has(_)
+        | Stage::DelPath(_)
+        | Stage::FlattenKeys(_)
+        | Stage::UnflattenKeys(_)
         | Stage::Schema
-        | Stage::EnumerateZ | Stage::Join(_)
-        | Stage::IndexOfValue(_) | Stage::IndicesOf(_)
-        | Stage::Explode(_) | Stage::Implode(_)
-        | Stage::TypeName | Stage::ToString | Stage::ToJson
-        | Stage::TakeWhile(_) | Stage::DropWhile(_)
-        | Stage::IndicesWhere(_) | Stage::FindIndex(_)
-        | Stage::MaxBy(_) | Stage::MinBy(_) | Stage::Partition(_)
-        | Stage::TransformValues(_) | Stage::TransformKeys(_)
-        | Stage::FilterValues(_) | Stage::FilterKeys(_)
-        | Stage::CountBy(_) | Stage::IndexBy(_)
+        | Stage::EnumerateZ
+        | Stage::Join(_)
+        | Stage::IndexOfValue(_)
+        | Stage::IndicesOf(_)
+        | Stage::Explode(_)
+        | Stage::Implode(_)
+        | Stage::TypeName
+        | Stage::ToString
+        | Stage::ToJson
+        | Stage::TakeWhile(_)
+        | Stage::DropWhile(_)
+        | Stage::IndicesWhere(_)
+        | Stage::FindIndex(_)
+        | Stage::MaxBy(_)
+        | Stage::MinBy(_)
+        | Stage::Partition(_)
+        | Stage::TransformValues(_)
+        | Stage::TransformKeys(_)
+        | Stage::FilterValues(_)
+        | Stage::FilterKeys(_)
+        | Stage::CountBy(_)
+        | Stage::IndexBy(_)
         | Stage::SortedDedup(_) => d,
     }
 }
@@ -1217,10 +1363,10 @@ pub enum Boundedness {
 #[derive(Debug, Clone, Copy)]
 pub struct StageShape {
     pub cardinality: Cardinality,
-    pub order:       Order,
+    pub order: Order,
     /// Pure = no side effects, no MethodRegistry callouts.  Used by
     /// Phase 2 dead-stage elimination.
-    pub purity:      bool,
+    pub purity: bool,
     pub boundedness: Boundedness,
     /// True iff `apply(arr[idx])` suffices to compute element `idx` —
     /// i.e. Stage doesn't need to look at neighbours.  Map=true,
@@ -1228,7 +1374,7 @@ pub struct StageShape {
     pub can_indexed: bool,
     /// Phase 3 reorder heuristics — cost is per-element evaluation cost
     /// (relative; Generic VM round-trip ≈ 10, field-read ≈ 1).
-    pub cost:        f64,
+    pub cost: f64,
     /// Probability an input element passes through (for Filter).
     /// 0.0 = always reject, 1.0 = always pass; 0.5 = unknown.
     /// For non-Filter stages this is 1.0 (pass-through).
@@ -1246,94 +1392,95 @@ impl Stage {
         match self {
             Stage::Map(_) => StageShape {
                 cardinality: Cardinality::OneToOne,
-                order:       Order::Stateless,
-                purity:      true,
+                order: Order::Stateless,
+                purity: true,
                 boundedness: Boundedness::Always(1),
                 can_indexed: true,
-                cost:        10.0,
+                cost: 10.0,
                 selectivity: 1.0,
             },
             Stage::Filter(_) => StageShape {
                 cardinality: Cardinality::Filtering,
-                order:       Order::Stateless,
-                purity:      true,
+                order: Order::Stateless,
+                purity: true,
                 boundedness: Boundedness::AtMost(Bound::AtMost(1)),
                 can_indexed: false,
-                cost:        10.0,
+                cost: 10.0,
                 selectivity: 0.5,
             },
             Stage::FlatMap(_) => StageShape {
                 cardinality: Cardinality::Expanding,
-                order:       Order::Stateless,
-                purity:      true,
+                order: Order::Stateless,
+                purity: true,
                 boundedness: Boundedness::AtMost(Bound::Unbounded),
                 can_indexed: false,
-                cost:        10.0,
+                cost: 10.0,
                 selectivity: 1.0,
             },
             Stage::Take(_) | Stage::Skip(_) => StageShape {
                 cardinality: Cardinality::Filtering,
-                order:       Order::Stateful,
-                purity:      true,
+                order: Order::Stateful,
+                purity: true,
                 boundedness: Boundedness::AtMost(Bound::AtMost(1)),
                 can_indexed: false,
-                cost:        0.5,
+                cost: 0.5,
                 selectivity: 0.5,
             },
-            Stage::Reverse | Stage::Sort(_) | Stage::UniqueBy(_) | Stage::GroupBy(_)
-                => StageShape {
-                cardinality: Cardinality::Barrier,
-                order:       Order::Stateful,
-                purity:      true,
-                boundedness: Boundedness::AtMost(Bound::Unbounded),
-                can_indexed: false,
-                cost:        20.0,
-                selectivity: 1.0,
-            },
+            Stage::Reverse | Stage::Sort(_) | Stage::UniqueBy(_) | Stage::GroupBy(_) => {
+                StageShape {
+                    cardinality: Cardinality::Barrier,
+                    order: Order::Stateful,
+                    purity: true,
+                    boundedness: Boundedness::AtMost(Bound::Unbounded),
+                    can_indexed: false,
+                    cost: 20.0,
+                    selectivity: 1.0,
+                }
+            }
             // Step 3d-extension lifted Stages.
             Stage::Split(_) => StageShape {
                 cardinality: Cardinality::Expanding,
-                order:       Order::Stateless,
-                purity:      true,
+                order: Order::Stateless,
+                purity: true,
                 boundedness: Boundedness::AtMost(Bound::Unbounded),
                 can_indexed: true,
-                cost:        2.0,
+                cost: 2.0,
                 selectivity: 1.0,
             },
             Stage::Slice(_, _) => StageShape {
                 cardinality: Cardinality::OneToOne,
-                order:       Order::Stateless,
-                purity:      true,
+                order: Order::Stateless,
+                purity: true,
                 boundedness: Boundedness::Always(1),
                 can_indexed: true,
-                cost:        1.0,
+                cost: 1.0,
                 selectivity: 1.0,
             },
             Stage::Replace { .. } => StageShape {
                 cardinality: Cardinality::OneToOne,
-                order:       Order::Stateless,
-                purity:      true,
+                order: Order::Stateless,
+                purity: true,
                 boundedness: Boundedness::Always(1),
                 can_indexed: true,
-                cost:        2.0,
+                cost: 2.0,
                 selectivity: 1.0,
             },
             Stage::Chunk(_) | Stage::Window(_) => StageShape {
                 cardinality: Cardinality::Barrier,
-                order:       Order::Stateful,
-                purity:      true,
+                order: Order::Stateful,
+                purity: true,
                 boundedness: Boundedness::AtMost(Bound::Unbounded),
                 can_indexed: true,
-                cost:        2.0,
+                cost: 2.0,
                 selectivity: 1.0,
             },
             Stage::CompiledMap(_) => StageShape {
                 cardinality: Cardinality::OneToOne,
-                order:       Order::Stateless,
-                purity:      true,
+                order: Order::Stateless,
+                purity: true,
                 boundedness: Boundedness::Always(1),
                 can_indexed: true,
-                cost:        10.0,
+                cost: 10.0,
                 selectivity: 1.0,
             },
             // lift_all_builtins (object): zero-arg one-to-one ops.
@@ -1341,11 +1488,11 @@ impl Stage {
             // reorderable through other pure 1:1 stages.
             Stage::Keys | Stage::Values | Stage::Entries => StageShape {
                 cardinality: Cardinality::OneToOne,
-                order:       Order::Stateless,
-                purity:      true,
+                order: Order::Stateless,
+                purity: true,
                 boundedness: Boundedness::Always(1),
                 can_indexed: false,
-                cost:        1.0,
+                cost: 1.0,
                 selectivity: 1.0,
             },
             // lift_all_builtins (string + str-to-other family — full
@@ -1353,56 +1500,116 @@ impl Stage {
             // body cost ≈ 1.  Same shape covers ~32 Stages; planner
             // sees them uniformly via this single match arm.
             Stage::Upper
-            | Stage::Lower | Stage::Trim | Stage::TrimLeft | Stage::TrimRight
-            | Stage::Capitalize | Stage::TitleCase
-            | Stage::HtmlEscape | Stage::HtmlUnescape
-            | Stage::UrlEncode | Stage::UrlDecode
-            | Stage::ToBase64 | Stage::FromBase64
+            | Stage::Lower
+            | Stage::Trim
+            | Stage::TrimLeft
+            | Stage::TrimRight
+            | Stage::Capitalize
+            | Stage::TitleCase
+            | Stage::HtmlEscape
+            | Stage::HtmlUnescape
+            | Stage::UrlEncode
+            | Stage::UrlDecode
+            | Stage::ToBase64
+            | Stage::FromBase64
             | Stage::Dedent
-            | Stage::SnakeCase | Stage::KebabCase | Stage::CamelCase | Stage::PascalCase
+            | Stage::SnakeCase
+            | Stage::KebabCase
+            | Stage::CamelCase
+            | Stage::PascalCase
             | Stage::ReverseStr
-            | Stage::Lines | Stage::Words | Stage::Chars
-            | Stage::CharsOf | Stage::BytesOf | Stage::ByteLen
-            | Stage::IsBlank | Stage::IsNumeric | Stage::IsAlpha | Stage::IsAscii
-            | Stage::ToNumber | Stage::ToBool
-            | Stage::ParseInt | Stage::ParseFloat | Stage::ParseBool
-            | Stage::StartsWith(_) | Stage::EndsWith(_)
-            | Stage::StripPrefix(_) | Stage::StripSuffix(_)
-            | Stage::StrMatches(_) | Stage::IndexOf(_) | Stage::LastIndexOf(_)
+            | Stage::Lines
+            | Stage::Words
+            | Stage::Chars
+            | Stage::CharsOf
+            | Stage::BytesOf
+            | Stage::ByteLen
+            | Stage::IsBlank
+            | Stage::IsNumeric
+            | Stage::IsAlpha
+            | Stage::IsAscii
+            | Stage::ToNumber
+            | Stage::ToBool
+            | Stage::ParseInt
+            | Stage::ParseFloat
+            | Stage::ParseBool
+            | Stage::StartsWith(_)
+            | Stage::EndsWith(_)
+            | Stage::StripPrefix(_)
+            | Stage::StripSuffix(_)
+            | Stage::StrMatches(_)
+            | Stage::IndexOf(_)
+            | Stage::LastIndexOf(_)
             | Stage::Scan(_)
-            | Stage::Repeat(_) | Stage::Indent(_) | Stage::FlattenDepth(_)
-            | Stage::Compact | Stage::Pairwise | Stage::Invert
-            | Stage::PadLeft { .. } | Stage::PadRight { .. } | Stage::Center { .. }
-            | Stage::ReMatch(_) | Stage::ReMatchFirst(_) | Stage::ReMatchAll(_)
-            | Stage::ReCaptures(_) | Stage::ReCapturesAll(_) | Stage::ReSplit(_)
-            | Stage::ReReplace { .. } | Stage::ReReplaceAll { .. }
-            | Stage::ContainsAny(_) | Stage::ContainsAll(_)
-            | Stage::ToCsv | Stage::ToTsv | Stage::ToPairs
-            | Stage::CumMax | Stage::CumMin | Stage::DiffWindow | Stage::PctChange
+            | Stage::Repeat(_)
+            | Stage::Indent(_)
+            | Stage::FlattenDepth(_)
+            | Stage::Compact
+            | Stage::Pairwise
+            | Stage::Invert
+            | Stage::PadLeft { .. }
+            | Stage::PadRight { .. }
+            | Stage::Center { .. }
+            | Stage::ReMatch(_)
+            | Stage::ReMatchFirst(_)
+            | Stage::ReMatchAll(_)
+            | Stage::ReCaptures(_)
+            | Stage::ReCapturesAll(_)
+            | Stage::ReSplit(_)
+            | Stage::ReReplace { .. }
+            | Stage::ReReplaceAll { .. }
+            | Stage::ContainsAny(_)
+            | Stage::ContainsAll(_)
+            | Stage::ToCsv
+            | Stage::ToTsv
+            | Stage::ToPairs
+            | Stage::CumMax
+            | Stage::CumMin
+            | Stage::DiffWindow
+            | Stage::PctChange
             | Stage::ZScore
-            | Stage::RollingSum(_) | Stage::RollingAvg(_)
-            | Stage::RollingMin(_) | Stage::RollingMax(_)
-            | Stage::Lag(_) | Stage::Lead(_)
-            | Stage::GetPath(_) | Stage::HasPath(_) | Stage::Has(_)
-            | Stage::DelPath(_) | Stage::FlattenKeys(_) | Stage::UnflattenKeys(_)
+            | Stage::RollingSum(_)
+            | Stage::RollingAvg(_)
+            | Stage::RollingMin(_)
+            | Stage::RollingMax(_)
+            | Stage::Lag(_)
+            | Stage::Lead(_)
+            | Stage::GetPath(_)
+            | Stage::HasPath(_)
+            | Stage::Has(_)
+            | Stage::DelPath(_)
+            | Stage::FlattenKeys(_)
+            | Stage::UnflattenKeys(_)
             | Stage::Schema
-            | Stage::EnumerateZ | Stage::Join(_)
-            | Stage::IndexOfValue(_) | Stage::IndicesOf(_)
-            | Stage::Explode(_) | Stage::Implode(_)
-            | Stage::TypeName | Stage::ToString | Stage::ToJson
-            | Stage::TakeWhile(_) | Stage::DropWhile(_)
-            | Stage::IndicesWhere(_) | Stage::FindIndex(_)
-            | Stage::MaxBy(_) | Stage::MinBy(_) | Stage::Partition(_)
-            | Stage::TransformValues(_) | Stage::TransformKeys(_)
-            | Stage::FilterValues(_) | Stage::FilterKeys(_)
-            | Stage::CountBy(_) | Stage::IndexBy(_)
+            | Stage::EnumerateZ
+            | Stage::Join(_)
+            | Stage::IndexOfValue(_)
+            | Stage::IndicesOf(_)
+            | Stage::Explode(_)
+            | Stage::Implode(_)
+            | Stage::TypeName
+            | Stage::ToString
+            | Stage::ToJson
+            | Stage::TakeWhile(_)
+            | Stage::DropWhile(_)
+            | Stage::IndicesWhere(_)
+            | Stage::FindIndex(_)
+            | Stage::MaxBy(_)
+            | Stage::MinBy(_)
+            | Stage::Partition(_)
+            | Stage::TransformValues(_)
+            | Stage::TransformKeys(_)
+            | Stage::FilterValues(_)
+            | Stage::FilterKeys(_)
+            | Stage::CountBy(_)
+            | Stage::IndexBy(_)
             | Stage::SortedDedup(_) => StageShape {
                 cardinality: Cardinality::OneToOne,
-                order:       Order::Stateless,
-                purity:      true,
+                order: Order::Stateless,
+                purity: true,
                 boundedness: Boundedness::Always(1),
                 can_indexed: true,
-                cost:        1.0,
+                cost: 1.0,
                 selectivity: 1.0,
             },
         }
@@ -1439,7 +1646,9 @@ impl Stage {
             (Stage::UniqueBy(Some(a)), Stage::Sort(Some(b)))
             | (Stage::Sort(Some(a)), Stage::UniqueBy(Some(b)))
                 if Arc::ptr_eq(a, b) =>
-                Some(Stage::SortedDedup(Some(a.clone()))),
+            {
+                Some(Stage::SortedDedup(Some(a.clone())))
+            }
             // lift_all_builtins: idempotent str→str transforms collapse.
             (Stage::Upper, Stage::Upper) => Some(Stage::Upper),
             (Stage::Lower, Stage::Lower) => Some(Stage::Lower),
@@ -1467,7 +1676,8 @@ impl Stage {
     /// Today only Reverse self-cancels; remaining pairs land with their
     /// lifted Stage variants.
     pub fn cancels_with(&self, other: &Self) -> bool {
-        matches!((self, other),
+        matches!(
+            (self, other),
             (Stage::Reverse, Stage::Reverse)
             // lift_all_builtins inverse pairs (drop both; identity).
             | (Stage::ToBase64, Stage::FromBase64)
@@ -1476,7 +1686,8 @@ impl Stage {
             | (Stage::UrlDecode, Stage::UrlEncode)
             | (Stage::HtmlEscape, Stage::HtmlUnescape)
             | (Stage::HtmlUnescape, Stage::HtmlEscape)
-            | (Stage::ReverseStr, Stage::ReverseStr))
+            | (Stage::ReverseStr, Stage::ReverseStr)
+        )
     }
 
     /// Constant-folding hook — when source is a literal Val (or every
@@ -1516,10 +1727,10 @@ pub enum Strategy {
 
 #[derive(Debug, Clone)]
 pub struct Plan {
-    pub stages:     Vec<Stage>,
-    pub sink:       Sink,
+    pub stages: Vec<Stage>,
+    pub sink: Sink,
     pub strategies: Vec<StageStrategy>,
-    pub strategy:   Strategy,
+    pub strategy: Strategy,
 }
 
 /// Step 3d Phase 5 entry point — full planning over (stages, sink) → Plan.
@@ -1560,7 +1771,12 @@ pub fn plan_with_kernels(stages: Vec<Stage>, kernels: &[BodyKernel], sink: Sink)
     // Phase 5 — strategy selection.
     let strategy = select_strategy(&stages, &sink);
 
-    Plan { stages, sink, strategies, strategy }
+    Plan {
+        stages,
+        sink,
+        strategies,
+        strategy,
+    }
 }
 
 /// Cost + selectivity from a recognised BodyKernel.  Generic falls back
@@ -1573,19 +1789,19 @@ fn kernel_cost_selectivity(stage: &Stage, kernel: &BodyKernel) -> (f64, f64) {
         // from the operator (Eq/Neq are highly skewed; range ops ~50/50).
         (Stage::Filter(_), BodyKernel::FieldCmpLit(_, op, _)) => {
             let s = match op {
-                BinOp::Eq                       => 0.10,
-                BinOp::Neq                      => 0.90,
-                BinOp::Lt | BinOp::Gt           => 0.40,
-                BinOp::Lte | BinOp::Gte         => 0.50,
-                _                               => 0.50,
+                BinOp::Eq => 0.10,
+                BinOp::Neq => 0.90,
+                BinOp::Lt | BinOp::Gt => 0.40,
+                BinOp::Lte | BinOp::Gte => 0.50,
+                _ => 0.50,
             };
             (1.5, s)
         }
         (Stage::Filter(_), BodyKernel::FieldChainCmpLit(keys, op, _)) => {
             let s = match op {
-                BinOp::Eq  => 0.10,
+                BinOp::Eq => 0.10,
                 BinOp::Neq => 0.90,
-                BinOp::Lt | BinOp::Gt   => 0.40,
+                BinOp::Lt | BinOp::Gt => 0.40,
                 BinOp::Lte | BinOp::Gte => 0.50,
                 _ => 0.50,
             };
@@ -1593,17 +1809,16 @@ fn kernel_cost_selectivity(stage: &Stage, kernel: &BodyKernel) -> (f64, f64) {
         }
         (Stage::Filter(_), BodyKernel::CurrentCmpLit(op, _)) => {
             let s = match op {
-                BinOp::Eq  => 0.10,
+                BinOp::Eq => 0.10,
                 BinOp::Neq => 0.90,
-                BinOp::Lt | BinOp::Gt   => 0.40,
+                BinOp::Lt | BinOp::Gt => 0.40,
                 BinOp::Lte | BinOp::Gte => 0.50,
                 _ => 0.50,
             };
             (0.8, s)
         }
         (Stage::Filter(_), BodyKernel::FieldRead(_)) => (1.0, 0.7),
-        (Stage::Filter(_), BodyKernel::ConstBool(b)) =>
-            (0.1, if *b { 1.0 } else { 0.0 }),
+        (Stage::Filter(_), BodyKernel::ConstBool(b)) => (0.1, if *b { 1.0 } else { 0.0 }),
         // Generic / unrecognised — fall back to Stage::shape() defaults.
         _ => {
             let sh = stage.shape();
@@ -1663,13 +1878,17 @@ fn drop_dead_pure_stages_kernels(
     kernels: &mut Vec<BodyKernel>,
     sink: &Sink,
 ) {
-    if !matches!(sink, Sink::Count) { return; }
+    if !matches!(sink, Sink::Count) {
+        return;
+    }
     while let Some(last) = stages.last() {
         let s = last.shape();
         if matches!(s.cardinality, Cardinality::OneToOne) && s.purity {
             stages.pop();
             kernels.pop();
-        } else { break; }
+        } else {
+            break;
+        }
     }
 }
 
@@ -1706,7 +1925,9 @@ fn fold_merge_with_kernels(stages: &mut Vec<Stage>, kernels: &mut Vec<BodyKernel
         if stages[i].cancels_with(&stages[i + 1]) {
             stages.drain(i..=i + 1);
             kernels.drain(i..=i + 1);
-            if i > 0 { i -= 1; }
+            if i > 0 {
+                i -= 1;
+            }
             continue;
         }
         if let Some(merged) = stages[i].merge_with(&stages[i + 1]) {
@@ -1731,17 +1952,20 @@ fn fold_merge_with(stages: &mut Vec<Stage>) {
     while i + 1 < stages.len() {
         let merged = match (&stages[i], &stages[i + 1]) {
             (Stage::Reverse, Stage::Reverse) => Some(None),
-            (Stage::Skip(a), Stage::Skip(b)) =>
-                Some(Some(Stage::Skip(a.saturating_add(*b)))),
-            (Stage::Take(a), Stage::Take(b)) =>
-                Some(Some(Stage::Take((*a).min(*b)))),
+            (Stage::Skip(a), Stage::Skip(b)) => Some(Some(Stage::Skip(a.saturating_add(*b)))),
+            (Stage::Take(a), Stage::Take(b)) => Some(Some(Stage::Take((*a).min(*b)))),
             _ => None,
         };
         if let Some(replacement) = merged {
             stages.remove(i + 1);
             match replacement {
                 Some(s) => stages[i] = s,
-                None    => { stages.remove(i); if i > 0 { i -= 1; } }
+                None => {
+                    stages.remove(i);
+                    if i > 0 {
+                        i -= 1;
+                    }
+                }
             }
             continue;
         }
@@ -1752,14 +1976,21 @@ fn fold_merge_with(stages: &mut Vec<Stage>) {
 /// Phase 5: pick Strategy.
 pub fn select_strategy(stages: &[Stage], sink: &Sink) -> Strategy {
     let stages_can_indexed = stages.iter().all(|s| s.shape().can_indexed);
-    let sink_positional    = sink.demand().positional.is_some();
-    let has_barrier        = stages.iter().any(|s|
-        matches!(s.shape().cardinality, Cardinality::Barrier));
-    let has_short_circuit  = matches!(sink, Sink::First);
+    let sink_positional = sink.demand().positional.is_some();
+    let has_barrier = stages
+        .iter()
+        .any(|s| matches!(s.shape().cardinality, Cardinality::Barrier));
+    let has_short_circuit = matches!(sink, Sink::First);
 
-    if has_barrier { return Strategy::BarrierMaterialise; }
-    if stages_can_indexed && sink_positional { return Strategy::IndexedDispatch; }
-    if has_short_circuit { return Strategy::EarlyExit; }
+    if has_barrier {
+        return Strategy::BarrierMaterialise;
+    }
+    if stages_can_indexed && sink_positional {
+        return Strategy::IndexedDispatch;
+    }
+    if has_short_circuit {
+        return Strategy::EarlyExit;
+    }
     Strategy::PullLoop
 }
 
@@ -1767,7 +1998,7 @@ pub fn select_strategy(stages: &[Stage], sink: &Sink) -> Strategy {
 pub struct Pipeline {
     pub source: Source,
     pub stages: Vec<Stage>,
-    pub sink:   Sink,
+    pub sink: Sink,
     /// Phase A3 — per-Stage kernel hint, in 1:1 correspondence with
     /// `stages`.  Computed once at lowering by `BodyKernel::classify`
     /// over each stage's sub-program.  Run loop dispatches the
@@ -1778,7 +2009,7 @@ pub struct Pipeline {
     /// Sink kernel hint — same idea for the terminal program (NumMap,
     /// CountIf, NumFilterMap, FilterFirst, etc.).  Empty `Vec` when
     /// the sink has no sub-program.
-    pub sink_kernels:  Vec<BodyKernel>,
+    pub sink_kernels: Vec<BodyKernel>,
 }
 
 // ── Lowering ─────────────────────────────────────────────────────────────────
@@ -1808,11 +2039,9 @@ impl Pipeline {
                     sink_name(&pipe.sink),
                     source_name(&pipe.source),
                 ),
-                Err(reason) => eprintln!(
-                    "[pipeline] fallback: ({}) at {}",
-                    reason,
-                    expr_label(expr),
-                ),
+                Err(reason) => {
+                    eprintln!("[pipeline] fallback: ({}) at {}", reason, expr_label(expr),)
+                }
             }
         }
         p.ok()
@@ -1828,7 +2057,9 @@ impl Pipeline {
             Expr::Chain(b, s) => (b.as_ref(), s.as_slice()),
             _ => return None,
         };
-        if !matches!(base, Expr::Root) { return None; }
+        if !matches!(base, Expr::Root) {
+            return None;
+        }
 
         // Find where the field-chain prefix ends and stages begin.
         let mut field_end = 0;
@@ -1844,11 +2075,18 @@ impl Pipeline {
         // a generic pull-based pipeline for those.  Field-chain prefix
         // signals a "scan over a sub-array" intent — the pipeline's
         // sweet spot.
-        if field_end == 0 { return None; }
+        if field_end == 0 {
+            return None;
+        }
 
-        let keys: Arc<[Arc<str>]> = steps[..field_end].iter()
-            .map(|s| match s { Step::Field(k) => Arc::<str>::from(k.as_str()), _ => unreachable!() })
-            .collect::<Vec<_>>().into();
+        let keys: Arc<[Arc<str>]> = steps[..field_end]
+            .iter()
+            .map(|s| match s {
+                Step::Field(k) => Arc::<str>::from(k.as_str()),
+                _ => unreachable!(),
+            })
+            .collect::<Vec<_>>()
+            .into();
 
         // Decode the trailing methods into stages + a sink.
         // Compile each filter / map sub-Expr to a Program once so
@@ -1860,24 +2098,28 @@ impl Pipeline {
 
         let mut p = Pipeline {
             source: Source::FieldChain { keys },
-            stages, sink,
+            stages,
+            sink,
             stage_kernels: Vec::new(),
-            sink_kernels:  Vec::new(),
+            sink_kernels: Vec::new(),
         };
         rewrite(&mut p);
         // Phase A3 — classify per-stage sub-programs.  Per-row pull loop
         // reads these hints to choose a specialised inline path vs the
         // generic vm.exec fallback.  Also drives Step 3d Phase 3 reorder.
         let classify_kernels = |stages: &[Stage]| -> Vec<BodyKernel> {
-            stages.iter().map(|s| match s {
-                Stage::Filter(p)        => BodyKernel::classify(p),
-                Stage::Map(p)           => BodyKernel::classify(p),
-                Stage::FlatMap(p)       => BodyKernel::classify(p),
-                Stage::UniqueBy(Some(p))=> BodyKernel::classify(p),
-                Stage::GroupBy(p)       => BodyKernel::classify(p),
-                Stage::Sort(Some(p))    => BodyKernel::classify(p),
-                _                       => BodyKernel::Generic,
-            }).collect()
+            stages
+                .iter()
+                .map(|s| match s {
+                    Stage::Filter(p) => BodyKernel::classify(p),
+                    Stage::Map(p) => BodyKernel::classify(p),
+                    Stage::FlatMap(p) => BodyKernel::classify(p),
+                    Stage::UniqueBy(Some(p)) => BodyKernel::classify(p),
+                    Stage::GroupBy(p) => BodyKernel::classify(p),
+                    Stage::Sort(Some(p)) => BodyKernel::classify(p),
+                    _ => BodyKernel::Generic,
+                })
+                .collect()
         };
         let kernels = classify_kernels(&p.stages);
 
@@ -1887,7 +2129,7 @@ impl Pipeline {
         // selection) re-runs at exec time on the final shape.
         let plan_result = plan_with_kernels(p.stages.clone(), &kernels, p.sink.clone());
         p.stages = plan_result.stages;
-        p.sink   = plan_result.sink;
+        p.sink = plan_result.sink;
 
         // Re-classify post-plan since Phase 4 merges may have produced
         // new sub-programs (e.g. Map+Map → field-chain-Map).
@@ -1910,38 +2152,58 @@ impl Pipeline {
 /// effect) — caller falls back to `Stage::Map(opaque_program)`.
 fn try_decode_map_body(arg: &crate::ast::Arg) -> Option<Plan> {
     use crate::ast::{Arg, Step};
-    let expr = match arg { Arg::Pos(e) => e, _ => return None };
+    let expr = match arg {
+        Arg::Pos(e) => e,
+        _ => return None,
+    };
     let (base, steps) = match expr {
         Expr::Chain(b, s) => (b.as_ref(), s.as_slice()),
         _ => return None,
     };
-    if !matches!(base, Expr::Current) { return None; }
+    if !matches!(base, Expr::Current) {
+        return None;
+    }
 
     // Field-chain prefix walks @.a.b.c → seed.a.b.c.  Encoded as a
     // leading Map stage whose body is the FieldChain program over @.
     let mut field_end = 0;
     for s in steps {
-        match s { Step::Field(_) => field_end += 1, _ => break }
+        match s {
+            Step::Field(_) => field_end += 1,
+            _ => break,
+        }
     }
     let trailing = &steps[field_end..];
     // Require at least one trailing method — pure field access alone
     // is what plain Stage::Map(@.a.b.c) already handles.
-    if trailing.is_empty() { return None; }
+    if trailing.is_empty() {
+        return None;
+    }
 
     let mut stages: Vec<Stage> = Vec::new();
     if field_end > 0 {
         // Build a sub-program `[PushCurrent, FieldChain([...])]` that
         // walks the prefix from the seed.
-        let keys: Arc<[Arc<str>]> = steps[..field_end].iter()
-            .map(|s| match s { Step::Field(k) => Arc::<str>::from(k.as_str()), _ => unreachable!() })
-            .collect::<Vec<_>>().into();
+        let keys: Arc<[Arc<str>]> = steps[..field_end]
+            .iter()
+            .map(|s| match s {
+                Step::Field(k) => Arc::<str>::from(k.as_str()),
+                _ => unreachable!(),
+            })
+            .collect::<Vec<_>>()
+            .into();
         let n_keys = keys.len();
         let fcd = Arc::new(crate::vm::FieldChainData {
             keys,
-            ics: (0..n_keys).map(|_| std::sync::atomic::AtomicU64::new(0))
-                .collect::<Vec<_>>().into_boxed_slice(),
+            ics: (0..n_keys)
+                .map(|_| std::sync::atomic::AtomicU64::new(0))
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
         });
-        let ops = vec![crate::vm::Opcode::PushCurrent, crate::vm::Opcode::FieldChain(fcd)];
+        let ops = vec![
+            crate::vm::Opcode::PushCurrent,
+            crate::vm::Opcode::FieldChain(fcd),
+        ];
         let prog = Arc::new(crate::vm::Program::new(ops, "<compiled-map-prefix>"));
         stages.push(Stage::Map(prog));
     }
@@ -1950,15 +2212,18 @@ fn try_decode_map_body(arg: &crate::ast::Arg) -> Option<Plan> {
 
     // Run the same planning the outer pipeline does.  Kernel
     // classification feeds Phase 3 reorder + Phase 5 strategy select.
-    let kernels: Vec<BodyKernel> = stages.iter().map(|s| match s {
-        Stage::Filter(p)         => BodyKernel::classify(p),
-        Stage::Map(p)            => BodyKernel::classify(p),
-        Stage::FlatMap(p)        => BodyKernel::classify(p),
-        Stage::UniqueBy(Some(p)) => BodyKernel::classify(p),
-        Stage::GroupBy(p)        => BodyKernel::classify(p),
-        Stage::Sort(Some(p))     => BodyKernel::classify(p),
-        _                        => BodyKernel::Generic,
-    }).collect();
+    let kernels: Vec<BodyKernel> = stages
+        .iter()
+        .map(|s| match s {
+            Stage::Filter(p) => BodyKernel::classify(p),
+            Stage::Map(p) => BodyKernel::classify(p),
+            Stage::FlatMap(p) => BodyKernel::classify(p),
+            Stage::UniqueBy(Some(p)) => BodyKernel::classify(p),
+            Stage::GroupBy(p) => BodyKernel::classify(p),
+            Stage::Sort(Some(p)) => BodyKernel::classify(p),
+            _ => BodyKernel::Generic,
+        })
+        .collect();
     Some(plan_with_kernels(stages, &kernels, sink))
 }
 
@@ -1970,9 +2235,9 @@ fn run_compiled_map(plan: &Plan, seed: Val) -> Result<Val, EvalError> {
     let synth = Pipeline {
         source: Source::Receiver(Val::arr(vec![seed])),
         stages: plan.stages.clone(),
-        sink:   plan.sink.clone(),
+        sink: plan.sink.clone(),
         stage_kernels: Vec::new(),
-        sink_kernels:  Vec::new(),
+        sink_kernels: Vec::new(),
     };
     synth.run(&Val::Null)
 }
@@ -1982,7 +2247,7 @@ fn run_compiled_map(plan: &Plan, seed: Val) -> Result<Val, EvalError> {
 /// recursive sub-pipeline planning for `Map(@.<chain>)` bodies.
 /// Returns `None` if any method shape isn't recognised.
 fn decode_method_chain(trailing: &[crate::ast::Step]) -> Option<(Vec<Stage>, Sink)> {
-    use crate::ast::{Step, Arg};
+    use crate::ast::{Arg, Step};
     let mut stages: Vec<Stage> = Vec::new();
     let mut sink: Sink = Sink::Collect;
     for (i, s) in trailing.iter().enumerate() {
@@ -1991,23 +2256,31 @@ fn decode_method_chain(trailing: &[crate::ast::Step]) -> Option<(Vec<Stage>, Sin
             Step::Method(name, args) => {
                 match (name.as_str(), args.len(), is_last) {
                     // Lambda-bearing methods — pre-compile body as vm::Program.
-                    ("takewhile",       1, _) => stages.push(Stage::TakeWhile(compile_subexpr(&args[0])?)),
-                    ("take_while",      1, _) => stages.push(Stage::TakeWhile(compile_subexpr(&args[0])?)),
-                    ("dropwhile",       1, _) => stages.push(Stage::DropWhile(compile_subexpr(&args[0])?)),
-                    ("drop_while",      1, _) => stages.push(Stage::DropWhile(compile_subexpr(&args[0])?)),
-                    ("indices_where",   1, true) => {
+                    ("takewhile", 1, _) => {
+                        stages.push(Stage::TakeWhile(compile_subexpr(&args[0])?))
+                    }
+                    ("take_while", 1, _) => {
+                        stages.push(Stage::TakeWhile(compile_subexpr(&args[0])?))
+                    }
+                    ("dropwhile", 1, _) => {
+                        stages.push(Stage::DropWhile(compile_subexpr(&args[0])?))
+                    }
+                    ("drop_while", 1, _) => {
+                        stages.push(Stage::DropWhile(compile_subexpr(&args[0])?))
+                    }
+                    ("indices_where", 1, true) => {
                         stages.push(Stage::IndicesWhere(compile_subexpr(&args[0])?));
                         sink = Sink::First;
                     }
-                    ("find_index",      1, true) => {
+                    ("find_index", 1, true) => {
                         stages.push(Stage::FindIndex(compile_subexpr(&args[0])?));
                         sink = Sink::First;
                     }
-                    ("max_by",          1, true) => {
+                    ("max_by", 1, true) => {
                         stages.push(Stage::MaxBy(compile_subexpr(&args[0])?));
                         sink = Sink::First;
                     }
-                    ("min_by",          1, true) => {
+                    ("min_by", 1, true) => {
                         stages.push(Stage::MinBy(compile_subexpr(&args[0])?));
                         sink = Sink::First;
                     }
@@ -2017,13 +2290,21 @@ fn decode_method_chain(trailing: &[crate::ast::Step]) -> Option<(Vec<Stage>, Sin
                     // terminal, prefer to skip lowering and let tree-walker
                     // produce the canonical Obj shape.
                     // (no `partition` lower arm — falls back to dispatch_method.)
-                    ("transform_values",1, _) => stages.push(Stage::TransformValues(compile_subexpr(&args[0])?)),
-                    ("transform_keys",  1, _) => stages.push(Stage::TransformKeys(compile_subexpr(&args[0])?)),
-                    ("filter_values",   1, _) => stages.push(Stage::FilterValues(compile_subexpr(&args[0])?)),
-                    ("filter_keys",     1, _) => stages.push(Stage::FilterKeys(compile_subexpr(&args[0])?)),
+                    ("transform_values", 1, _) => {
+                        stages.push(Stage::TransformValues(compile_subexpr(&args[0])?))
+                    }
+                    ("transform_keys", 1, _) => {
+                        stages.push(Stage::TransformKeys(compile_subexpr(&args[0])?))
+                    }
+                    ("filter_values", 1, _) => {
+                        stages.push(Stage::FilterValues(compile_subexpr(&args[0])?))
+                    }
+                    ("filter_keys", 1, _) => {
+                        stages.push(Stage::FilterKeys(compile_subexpr(&args[0])?))
+                    }
                     ("filter", 1, _) => stages.push(Stage::Filter(compile_subexpr(&args[0])?)),
                     // find / find_all: filter-shaped (return all matching).
-                    ("find",     1, _) => stages.push(Stage::Filter(compile_subexpr(&args[0])?)),
+                    ("find", 1, _) => stages.push(Stage::Filter(compile_subexpr(&args[0])?)),
                     ("find_all", 1, _) => stages.push(Stage::Filter(compile_subexpr(&args[0])?)),
                     // find_first / find_one: terminal — first match or Null.
                     ("find_first", 1, true) | ("find_one", 1, true) => {
@@ -2035,18 +2316,20 @@ fn decode_method_chain(trailing: &[crate::ast::Step]) -> Option<(Vec<Stage>, Sin
                     }
                     // count_by / index_by: barrier reductions.  Trailing
                     // result is single Obj; force Sink::First when terminal.
-                    ("count_by",  1, true) | ("countBy", 1, true) => {
+                    ("count_by", 1, true) | ("countBy", 1, true) => {
                         stages.push(Stage::CountBy(compile_subexpr(&args[0])?));
                         sink = Sink::First;
                     }
-                    ("count_by",  1, false) | ("countBy", 1, false) =>
-                        stages.push(Stage::CountBy(compile_subexpr(&args[0])?)),
-                    ("index_by",  1, true) | ("indexBy", 1, true) => {
+                    ("count_by", 1, false) | ("countBy", 1, false) => {
+                        stages.push(Stage::CountBy(compile_subexpr(&args[0])?))
+                    }
+                    ("index_by", 1, true) | ("indexBy", 1, true) => {
                         stages.push(Stage::IndexBy(compile_subexpr(&args[0])?));
                         sink = Sink::First;
                     }
-                    ("index_by",  1, false) | ("indexBy", 1, false) =>
-                        stages.push(Stage::IndexBy(compile_subexpr(&args[0])?)),
+                    ("index_by", 1, false) | ("indexBy", 1, false) => {
+                        stages.push(Stage::IndexBy(compile_subexpr(&args[0])?))
+                    }
                     ("map", 1, _) => {
                         // A2: try recursive sub-pipeline planning first.
                         // Body shapes that decode as a chain of recognised
@@ -2054,16 +2337,18 @@ fn decode_method_chain(trailing: &[crate::ast::Step]) -> Option<(Vec<Stage>, Sin
                         // bodies (lambdas, custom methods) fall through.
                         match try_decode_map_body(&args[0]) {
                             Some(plan) => stages.push(Stage::CompiledMap(Arc::new(plan))),
-                            None       => stages.push(Stage::Map(compile_subexpr(&args[0])?)),
+                            None => stages.push(Stage::Map(compile_subexpr(&args[0])?)),
                         }
                     }
                     ("flat_map", 1, _) => stages.push(Stage::FlatMap(compile_subexpr(&args[0])?)),
                     ("reverse", 0, _) => stages.push(Stage::Reverse),
-                    ("unique", 0, _)  => stages.push(Stage::UniqueBy(None)),
-                    ("unique_by", 1, _) => stages.push(Stage::UniqueBy(Some(compile_subexpr(&args[0])?))),
-                    ("group_by", 1, _)  => stages.push(Stage::GroupBy(compile_subexpr(&args[0])?)),
-                    ("sort", 0, _)      => stages.push(Stage::Sort(None)),
-                    ("sort_by", 1, _)   => stages.push(Stage::Sort(Some(compile_subexpr(&args[0])?))),
+                    ("unique", 0, _) => stages.push(Stage::UniqueBy(None)),
+                    ("unique_by", 1, _) => {
+                        stages.push(Stage::UniqueBy(Some(compile_subexpr(&args[0])?)))
+                    }
+                    ("group_by", 1, _) => stages.push(Stage::GroupBy(compile_subexpr(&args[0])?)),
+                    ("sort", 0, _) => stages.push(Stage::Sort(None)),
+                    ("sort_by", 1, _) => stages.push(Stage::Sort(Some(compile_subexpr(&args[0])?))),
                     ("take", 1, _) => {
                         let n = match &args[0] {
                             Arg::Pos(Expr::Int(n)) if *n >= 0 => *n as usize,
@@ -2086,44 +2371,44 @@ fn decode_method_chain(trailing: &[crate::ast::Step]) -> Option<(Vec<Stage>, Sin
                         stages.push(Stage::Split(sep));
                     }
                     // lift_all_builtins (object family — zero-arg ops)
-                    ("keys",    0, _) => stages.push(Stage::Keys),
-                    ("values",  0, _) => stages.push(Stage::Values),
+                    ("keys", 0, _) => stages.push(Stage::Keys),
+                    ("values", 0, _) => stages.push(Stage::Values),
                     ("entries", 0, _) => stages.push(Stage::Entries),
                     // lift_all_builtins (string + str-to-other family — zero-arg).
-                    ("upper",        0, _) => stages.push(Stage::Upper),
-                    ("lower",        0, _) => stages.push(Stage::Lower),
-                    ("trim",         0, _) => stages.push(Stage::Trim),
-                    ("trim_left",    0, _) => stages.push(Stage::TrimLeft),
-                    ("trim_right",   0, _) => stages.push(Stage::TrimRight),
-                    ("capitalize",   0, _) => stages.push(Stage::Capitalize),
-                    ("title_case",   0, _) => stages.push(Stage::TitleCase),
-                    ("html_escape",  0, _) => stages.push(Stage::HtmlEscape),
-                    ("html_unescape",0, _) => stages.push(Stage::HtmlUnescape),
-                    ("url_encode",   0, _) => stages.push(Stage::UrlEncode),
-                    ("url_decode",   0, _) => stages.push(Stage::UrlDecode),
-                    ("to_base64",    0, _) => stages.push(Stage::ToBase64),
-                    ("from_base64",  0, _) => stages.push(Stage::FromBase64),
-                    ("dedent",       0, _) => stages.push(Stage::Dedent),
-                    ("snake_case",   0, _) => stages.push(Stage::SnakeCase),
-                    ("kebab_case",   0, _) => stages.push(Stage::KebabCase),
-                    ("camel_case",   0, _) => stages.push(Stage::CamelCase),
-                    ("pascal_case",  0, _) => stages.push(Stage::PascalCase),
-                    ("reverse_str",  0, _) => stages.push(Stage::ReverseStr),
-                    ("lines",        0, _) => stages.push(Stage::Lines),
-                    ("words",        0, _) => stages.push(Stage::Words),
-                    ("chars",        0, _) => stages.push(Stage::Chars),
-                    ("chars_of",     0, _) => stages.push(Stage::CharsOf),
-                    ("bytes",        0, _) => stages.push(Stage::BytesOf),
-                    ("byte_len",     0, _) => stages.push(Stage::ByteLen),
-                    ("is_blank",     0, _) => stages.push(Stage::IsBlank),
-                    ("is_numeric",   0, _) => stages.push(Stage::IsNumeric),
-                    ("is_alpha",     0, _) => stages.push(Stage::IsAlpha),
-                    ("is_ascii",     0, _) => stages.push(Stage::IsAscii),
-                    ("to_number",    0, _) => stages.push(Stage::ToNumber),
-                    ("to_bool",      0, _) => stages.push(Stage::ToBool),
-                    ("parse_int",    0, _) => stages.push(Stage::ParseInt),
-                    ("parse_float",  0, _) => stages.push(Stage::ParseFloat),
-                    ("parse_bool",   0, _) => stages.push(Stage::ParseBool),
+                    ("upper", 0, _) => stages.push(Stage::Upper),
+                    ("lower", 0, _) => stages.push(Stage::Lower),
+                    ("trim", 0, _) => stages.push(Stage::Trim),
+                    ("trim_left", 0, _) => stages.push(Stage::TrimLeft),
+                    ("trim_right", 0, _) => stages.push(Stage::TrimRight),
+                    ("capitalize", 0, _) => stages.push(Stage::Capitalize),
+                    ("title_case", 0, _) => stages.push(Stage::TitleCase),
+                    ("html_escape", 0, _) => stages.push(Stage::HtmlEscape),
+                    ("html_unescape", 0, _) => stages.push(Stage::HtmlUnescape),
+                    ("url_encode", 0, _) => stages.push(Stage::UrlEncode),
+                    ("url_decode", 0, _) => stages.push(Stage::UrlDecode),
+                    ("to_base64", 0, _) => stages.push(Stage::ToBase64),
+                    ("from_base64", 0, _) => stages.push(Stage::FromBase64),
+                    ("dedent", 0, _) => stages.push(Stage::Dedent),
+                    ("snake_case", 0, _) => stages.push(Stage::SnakeCase),
+                    ("kebab_case", 0, _) => stages.push(Stage::KebabCase),
+                    ("camel_case", 0, _) => stages.push(Stage::CamelCase),
+                    ("pascal_case", 0, _) => stages.push(Stage::PascalCase),
+                    ("reverse_str", 0, _) => stages.push(Stage::ReverseStr),
+                    ("lines", 0, _) => stages.push(Stage::Lines),
+                    ("words", 0, _) => stages.push(Stage::Words),
+                    ("chars", 0, _) => stages.push(Stage::Chars),
+                    ("chars_of", 0, _) => stages.push(Stage::CharsOf),
+                    ("bytes", 0, _) => stages.push(Stage::BytesOf),
+                    ("byte_len", 0, _) => stages.push(Stage::ByteLen),
+                    ("is_blank", 0, _) => stages.push(Stage::IsBlank),
+                    ("is_numeric", 0, _) => stages.push(Stage::IsNumeric),
+                    ("is_alpha", 0, _) => stages.push(Stage::IsAlpha),
+                    ("is_ascii", 0, _) => stages.push(Stage::IsAscii),
+                    ("to_number", 0, _) => stages.push(Stage::ToNumber),
+                    ("to_bool", 0, _) => stages.push(Stage::ToBool),
+                    ("parse_int", 0, _) => stages.push(Stage::ParseInt),
+                    ("parse_float", 0, _) => stages.push(Stage::ParseFloat),
+                    ("parse_bool", 0, _) => stages.push(Stage::ParseBool),
                     // Zero-arg per-element Stages (each elem is itself
                     // an Obj/Str etc.).  Whole-array Stages (compact,
                     // pairwise, invert, to_csv, to_tsv, to_pairs,
@@ -2136,20 +2421,26 @@ fn decode_method_chain(trailing: &[crate::ast::Step]) -> Option<(Vec<Stage>, Sin
                     // the whole array as recv.  Stage variants exist
                     // for VM static-dispatch + composed bodies; only
                     // pipeline-IR lowering skips them.
-                    ("get_path",     1, _) => match &args[0] {
-                        Arg::Pos(Expr::Str(s)) => stages.push(Stage::GetPath(Arc::from(s.as_str()))),
+                    ("get_path", 1, _) => match &args[0] {
+                        Arg::Pos(Expr::Str(s)) => {
+                            stages.push(Stage::GetPath(Arc::from(s.as_str())))
+                        }
                         _ => return None,
                     },
-                    ("has_path",     1, _) => match &args[0] {
-                        Arg::Pos(Expr::Str(s)) => stages.push(Stage::HasPath(Arc::from(s.as_str()))),
+                    ("has_path", 1, _) => match &args[0] {
+                        Arg::Pos(Expr::Str(s)) => {
+                            stages.push(Stage::HasPath(Arc::from(s.as_str())))
+                        }
                         _ => return None,
                     },
-                    ("has",          1, _) => match &args[0] {
+                    ("has", 1, _) => match &args[0] {
                         Arg::Pos(Expr::Str(s)) => stages.push(Stage::Has(Arc::from(s.as_str()))),
                         _ => return None,
                     },
-                    ("del_path",     1, _) => match &args[0] {
-                        Arg::Pos(Expr::Str(s)) => stages.push(Stage::DelPath(Arc::from(s.as_str()))),
+                    ("del_path", 1, _) => match &args[0] {
+                        Arg::Pos(Expr::Str(s)) => {
+                            stages.push(Stage::DelPath(Arc::from(s.as_str())))
+                        }
                         _ => return None,
                     },
                     // flatten_keys / unflatten_keys: per-element on Obj
@@ -2158,56 +2449,74 @@ fn decode_method_chain(trailing: &[crate::ast::Step]) -> Option<(Vec<Stage>, Sin
                     // already.  Stage variants kept for VM static-dispatch.
                     // No lower arms — fall back to dispatch_method.
                     // schema is per-Val (works per-element returning per-element schema).
-                    ("schema",       0, _) => stages.push(Stage::Schema),
+                    ("schema", 0, _) => stages.push(Stage::Schema),
                     // Per-element scalar transforms.
-                    ("type",         0, _) => stages.push(Stage::TypeName),
-                    ("to_string",    0, _) => stages.push(Stage::ToString),
-                    ("to_json",      0, _) => stages.push(Stage::ToJson),
+                    ("type", 0, _) => stages.push(Stage::TypeName),
+                    ("to_string", 0, _) => stages.push(Stage::ToString),
+                    ("to_json", 0, _) => stages.push(Stage::ToJson),
                     // (whole-array Stages — enumerate, join, index_of_value,
                     //  indices_of, explode, implode — NOT lowered; see note above.)
                     // One-arg Arc<str> string predicates/searches.
-                    ("starts_with",   1, _) => match &args[0] {
-                        Arg::Pos(Expr::Str(s)) => stages.push(Stage::StartsWith(Arc::from(s.as_str()))),
+                    ("starts_with", 1, _) => match &args[0] {
+                        Arg::Pos(Expr::Str(s)) => {
+                            stages.push(Stage::StartsWith(Arc::from(s.as_str())))
+                        }
                         _ => return None,
                     },
-                    ("ends_with",     1, _) => match &args[0] {
-                        Arg::Pos(Expr::Str(s)) => stages.push(Stage::EndsWith(Arc::from(s.as_str()))),
+                    ("ends_with", 1, _) => match &args[0] {
+                        Arg::Pos(Expr::Str(s)) => {
+                            stages.push(Stage::EndsWith(Arc::from(s.as_str())))
+                        }
                         _ => return None,
                     },
-                    ("strip_prefix",  1, _) => match &args[0] {
-                        Arg::Pos(Expr::Str(s)) => stages.push(Stage::StripPrefix(Arc::from(s.as_str()))),
+                    ("strip_prefix", 1, _) => match &args[0] {
+                        Arg::Pos(Expr::Str(s)) => {
+                            stages.push(Stage::StripPrefix(Arc::from(s.as_str())))
+                        }
                         _ => return None,
                     },
-                    ("strip_suffix",  1, _) => match &args[0] {
-                        Arg::Pos(Expr::Str(s)) => stages.push(Stage::StripSuffix(Arc::from(s.as_str()))),
+                    ("strip_suffix", 1, _) => match &args[0] {
+                        Arg::Pos(Expr::Str(s)) => {
+                            stages.push(Stage::StripSuffix(Arc::from(s.as_str())))
+                        }
                         _ => return None,
                     },
-                    ("matches",       1, _) => match &args[0] {
-                        Arg::Pos(Expr::Str(s)) => stages.push(Stage::StrMatches(Arc::from(s.as_str()))),
+                    ("matches", 1, _) => match &args[0] {
+                        Arg::Pos(Expr::Str(s)) => {
+                            stages.push(Stage::StrMatches(Arc::from(s.as_str())))
+                        }
                         _ => return None,
                     },
-                    ("index_of",      1, _) => match &args[0] {
-                        Arg::Pos(Expr::Str(s)) => stages.push(Stage::IndexOf(Arc::from(s.as_str()))),
+                    ("index_of", 1, _) => match &args[0] {
+                        Arg::Pos(Expr::Str(s)) => {
+                            stages.push(Stage::IndexOf(Arc::from(s.as_str())))
+                        }
                         _ => return None,
                     },
                     ("last_index_of", 1, _) => match &args[0] {
-                        Arg::Pos(Expr::Str(s)) => stages.push(Stage::LastIndexOf(Arc::from(s.as_str()))),
+                        Arg::Pos(Expr::Str(s)) => {
+                            stages.push(Stage::LastIndexOf(Arc::from(s.as_str())))
+                        }
                         _ => return None,
                     },
-                    ("scan",          1, _) => match &args[0] {
+                    ("scan", 1, _) => match &args[0] {
                         Arg::Pos(Expr::Str(s)) => stages.push(Stage::Scan(Arc::from(s.as_str()))),
                         _ => return None,
                     },
                     // One-arg usize string transforms.
-                    ("repeat",        1, _) | ("repeat_str", 1, _) => match &args[0] {
-                        Arg::Pos(Expr::Int(n)) if *n >= 0 => stages.push(Stage::Repeat(*n as usize)),
+                    ("repeat", 1, _) | ("repeat_str", 1, _) => match &args[0] {
+                        Arg::Pos(Expr::Int(n)) if *n >= 0 => {
+                            stages.push(Stage::Repeat(*n as usize))
+                        }
                         _ => return None,
                     },
-                    ("indent",        1, _) => match &args[0] {
-                        Arg::Pos(Expr::Int(n)) if *n >= 0 => stages.push(Stage::Indent(*n as usize)),
+                    ("indent", 1, _) => match &args[0] {
+                        Arg::Pos(Expr::Int(n)) if *n >= 0 => {
+                            stages.push(Stage::Indent(*n as usize))
+                        }
                         _ => return None,
                     },
-                    ("indent",        0, _) => stages.push(Stage::Indent(2)),
+                    ("indent", 0, _) => stages.push(Stage::Indent(2)),
                     // flatten() is whole-array (NOT per-element) — same
                     // category as compact/pairwise: removed from lower
                     // table so chain falls back to dispatch_method which
@@ -2215,79 +2524,112 @@ fn decode_method_chain(trailing: &[crate::ast::Step]) -> Option<(Vec<Stage>, Sin
                     // Stage::FlattenDepth variant kept for VM static
                     // dispatch + composed body single-source.
                     // Two-arg padding.
-                    ("pad_left",  2, _) => match (&args[0], &args[1]) {
+                    ("pad_left", 2, _) => match (&args[0], &args[1]) {
                         (Arg::Pos(Expr::Int(w)), Arg::Pos(Expr::Str(f))) if *w >= 0 => {
                             let fill = f.chars().next().unwrap_or(' ');
-                            stages.push(Stage::PadLeft { width: *w as usize, fill });
+                            stages.push(Stage::PadLeft {
+                                width: *w as usize,
+                                fill,
+                            });
                         }
                         _ => return None,
                     },
                     ("pad_right", 2, _) => match (&args[0], &args[1]) {
                         (Arg::Pos(Expr::Int(w)), Arg::Pos(Expr::Str(f))) if *w >= 0 => {
                             let fill = f.chars().next().unwrap_or(' ');
-                            stages.push(Stage::PadRight { width: *w as usize, fill });
+                            stages.push(Stage::PadRight {
+                                width: *w as usize,
+                                fill,
+                            });
                         }
                         _ => return None,
                     },
-                    ("center",    2, _) => match (&args[0], &args[1]) {
+                    ("center", 2, _) => match (&args[0], &args[1]) {
                         (Arg::Pos(Expr::Int(w)), Arg::Pos(Expr::Str(f))) if *w >= 0 => {
                             let fill = f.chars().next().unwrap_or(' ');
-                            stages.push(Stage::Center { width: *w as usize, fill });
+                            stages.push(Stage::Center {
+                                width: *w as usize,
+                                fill,
+                            });
                         }
                         _ => return None,
                     },
                     // Padding 1-arg fallback (default fill = ' ').
-                    ("pad_left",  1, _) => match &args[0] {
-                        Arg::Pos(Expr::Int(w)) if *w >= 0 =>
-                            stages.push(Stage::PadLeft { width: *w as usize, fill: ' ' }),
+                    ("pad_left", 1, _) => match &args[0] {
+                        Arg::Pos(Expr::Int(w)) if *w >= 0 => stages.push(Stage::PadLeft {
+                            width: *w as usize,
+                            fill: ' ',
+                        }),
                         _ => return None,
                     },
                     ("pad_right", 1, _) => match &args[0] {
-                        Arg::Pos(Expr::Int(w)) if *w >= 0 =>
-                            stages.push(Stage::PadRight { width: *w as usize, fill: ' ' }),
+                        Arg::Pos(Expr::Int(w)) if *w >= 0 => stages.push(Stage::PadRight {
+                            width: *w as usize,
+                            fill: ' ',
+                        }),
                         _ => return None,
                     },
-                    ("center",    1, _) => match &args[0] {
-                        Arg::Pos(Expr::Int(w)) if *w >= 0 =>
-                            stages.push(Stage::Center { width: *w as usize, fill: ' ' }),
+                    ("center", 1, _) => match &args[0] {
+                        Arg::Pos(Expr::Int(w)) if *w >= 0 => stages.push(Stage::Center {
+                            width: *w as usize,
+                            fill: ' ',
+                        }),
                         _ => return None,
                     },
                     // Regex one-arg pat (re_match / match_first / match_all / captures / captures_all / split_re).
-                    ("re_match",      1, _) => match &args[0] {
-                        Arg::Pos(Expr::Str(s)) => stages.push(Stage::ReMatch(Arc::from(s.as_str()))),
+                    ("re_match", 1, _) => match &args[0] {
+                        Arg::Pos(Expr::Str(s)) => {
+                            stages.push(Stage::ReMatch(Arc::from(s.as_str())))
+                        }
                         _ => return None,
                     },
-                    ("match_first",   1, _) => match &args[0] {
-                        Arg::Pos(Expr::Str(s)) => stages.push(Stage::ReMatchFirst(Arc::from(s.as_str()))),
+                    ("match_first", 1, _) => match &args[0] {
+                        Arg::Pos(Expr::Str(s)) => {
+                            stages.push(Stage::ReMatchFirst(Arc::from(s.as_str())))
+                        }
                         _ => return None,
                     },
-                    ("match_all",     1, _) => match &args[0] {
-                        Arg::Pos(Expr::Str(s)) => stages.push(Stage::ReMatchAll(Arc::from(s.as_str()))),
+                    ("match_all", 1, _) => match &args[0] {
+                        Arg::Pos(Expr::Str(s)) => {
+                            stages.push(Stage::ReMatchAll(Arc::from(s.as_str())))
+                        }
                         _ => return None,
                     },
-                    ("captures",      1, _) => match &args[0] {
-                        Arg::Pos(Expr::Str(s)) => stages.push(Stage::ReCaptures(Arc::from(s.as_str()))),
+                    ("captures", 1, _) => match &args[0] {
+                        Arg::Pos(Expr::Str(s)) => {
+                            stages.push(Stage::ReCaptures(Arc::from(s.as_str())))
+                        }
                         _ => return None,
                     },
-                    ("captures_all",  1, _) => match &args[0] {
-                        Arg::Pos(Expr::Str(s)) => stages.push(Stage::ReCapturesAll(Arc::from(s.as_str()))),
+                    ("captures_all", 1, _) => match &args[0] {
+                        Arg::Pos(Expr::Str(s)) => {
+                            stages.push(Stage::ReCapturesAll(Arc::from(s.as_str())))
+                        }
                         _ => return None,
                     },
-                    ("split_re",      1, _) => match &args[0] {
-                        Arg::Pos(Expr::Str(s)) => stages.push(Stage::ReSplit(Arc::from(s.as_str()))),
+                    ("split_re", 1, _) => match &args[0] {
+                        Arg::Pos(Expr::Str(s)) => {
+                            stages.push(Stage::ReSplit(Arc::from(s.as_str())))
+                        }
                         _ => return None,
                     },
                     // Regex two-arg replace.
-                    ("replace_re",     2, _) => match (&args[0], &args[1]) {
-                        (Arg::Pos(Expr::Str(p)), Arg::Pos(Expr::Str(w))) =>
+                    ("replace_re", 2, _) => match (&args[0], &args[1]) {
+                        (Arg::Pos(Expr::Str(p)), Arg::Pos(Expr::Str(w))) => {
                             stages.push(Stage::ReReplace {
-                                pat: Arc::from(p.as_str()), with: Arc::from(w.as_str()) }),
+                                pat: Arc::from(p.as_str()),
+                                with: Arc::from(w.as_str()),
+                            })
+                        }
                         _ => return None,
                     },
                     ("replace_all_re", 2, _) => match (&args[0], &args[1]) {
-                        (Arg::Pos(Expr::Str(p)), Arg::Pos(Expr::Str(w))) =>
+                        (Arg::Pos(Expr::Str(p)), Arg::Pos(Expr::Str(w))) => {
                             stages.push(Stage::ReReplaceAll {
-                                pat: Arc::from(p.as_str()), with: Arc::from(w.as_str()) }),
+                                pat: Arc::from(p.as_str()),
+                                with: Arc::from(w.as_str()),
+                            })
+                        }
                         _ => return None,
                     },
                     // Vec<Arc<str>> bulk-needle predicates.
@@ -2296,8 +2638,9 @@ fn decode_method_chain(trailing: &[crate::ast::Step]) -> Option<(Vec<Stage>, Sin
                             let mut needles: Vec<Arc<str>> = Vec::with_capacity(elems.len());
                             for e in elems {
                                 match e {
-                                    crate::ast::ArrayElem::Expr(Expr::Str(s)) =>
-                                        needles.push(Arc::from(s.as_str())),
+                                    crate::ast::ArrayElem::Expr(Expr::Str(s)) => {
+                                        needles.push(Arc::from(s.as_str()))
+                                    }
                                     _ => return None,
                                 }
                             }
@@ -2310,8 +2653,9 @@ fn decode_method_chain(trailing: &[crate::ast::Step]) -> Option<(Vec<Stage>, Sin
                             let mut needles: Vec<Arc<str>> = Vec::with_capacity(elems.len());
                             for e in elems {
                                 match e {
-                                    crate::ast::ArrayElem::Expr(Expr::Str(s)) =>
-                                        needles.push(Arc::from(s.as_str())),
+                                    crate::ast::ArrayElem::Expr(Expr::Str(s)) => {
+                                        needles.push(Arc::from(s.as_str()))
+                                    }
                                     _ => return None,
                                 }
                             }
@@ -2335,12 +2679,15 @@ fn decode_method_chain(trailing: &[crate::ast::Step]) -> Option<(Vec<Stage>, Sin
                     }
                     ("replace", 2, _) | ("replace_all", 2, _) => {
                         let (needle, replacement) = match (&args[0], &args[1]) {
-                            (Arg::Pos(Expr::Str(n)), Arg::Pos(Expr::Str(r))) =>
-                                (Arc::<str>::from(n.as_str()), Arc::<str>::from(r.as_str())),
+                            (Arg::Pos(Expr::Str(n)), Arg::Pos(Expr::Str(r))) => {
+                                (Arc::<str>::from(n.as_str()), Arc::<str>::from(r.as_str()))
+                            }
                             _ => return None,
                         };
                         stages.push(Stage::Replace {
-                            needle, replacement, all: name.as_str() == "replace_all",
+                            needle,
+                            replacement,
+                            all: name.as_str() == "replace_all",
                         });
                     }
                     ("chunk", 1, _) | ("batch", 1, _) => {
@@ -2364,7 +2711,7 @@ fn decode_method_chain(trailing: &[crate::ast::Step]) -> Option<(Vec<Stage>, Sin
                     ("max", 0, true) => sink = Sink::Numeric(NumOp::Max),
                     ("avg", 0, true) => sink = Sink::Numeric(NumOp::Avg),
                     ("first", 0, true) => sink = Sink::First,
-                    ("last", 0, true)  => sink = Sink::Last,
+                    ("last", 0, true) => sink = Sink::Last,
                     _ => return None,
                 }
             }
@@ -2397,7 +2744,9 @@ fn rewrite(p: &mut Pipeline) {
     let mut fuel = 16usize;
     while fuel > 0 {
         fuel -= 1;
-        if rewrite_step(p) { continue; }
+        if rewrite_step(p) {
+            continue;
+        }
         break;
     }
 }
@@ -2451,8 +2800,9 @@ fn rewrite_step(p: &mut Pipeline) -> bool {
                 let ka = BodyKernel::classify(a_prog);
                 let kb = BodyKernel::classify(b_prog);
                 let chain: Option<Vec<Arc<str>>> = match (&ka, &kb) {
-                    (BodyKernel::FieldRead(a), BodyKernel::FieldRead(b)) =>
-                        Some(vec![a.clone(), b.clone()]),
+                    (BodyKernel::FieldRead(a), BodyKernel::FieldRead(b)) => {
+                        Some(vec![a.clone(), b.clone()])
+                    }
                     (BodyKernel::FieldRead(a), BodyKernel::FieldChain(bs)) => {
                         let mut v = vec![a.clone()];
                         v.extend(bs.iter().cloned());
@@ -2473,9 +2823,10 @@ fn rewrite_step(p: &mut Pipeline) -> bool {
                 if let Some(keys) = chain {
                     let fcd = Arc::new(crate::vm::FieldChainData {
                         keys: keys.into(),
-                        ics: (0..0).map(|_|
-                            std::sync::atomic::AtomicU64::new(0)
-                        ).collect::<Vec<_>>().into_boxed_slice(),
+                        ics: (0..0)
+                            .map(|_| std::sync::atomic::AtomicU64::new(0))
+                            .collect::<Vec<_>>()
+                            .into_boxed_slice(),
                     });
                     let new_ops = vec![Opcode::PushCurrent, Opcode::FieldChain(fcd)];
                     let merged = Arc::new(crate::vm::Program::new(new_ops, "<map-fused>"));
@@ -2505,8 +2856,7 @@ fn rewrite_step(p: &mut Pipeline) -> bool {
     // Pushdown: Map(f) ∘ Take(n) → Take(n) ∘ Map(f).
     // Strict perf win — composed exec runs map only n times.
     for i in 0..p.stages.len().saturating_sub(1) {
-        if matches!(&p.stages[i], Stage::Map(_))
-            && matches!(&p.stages[i + 1], Stage::Take(_)) {
+        if matches!(&p.stages[i], Stage::Map(_)) && matches!(&p.stages[i + 1], Stage::Take(_)) {
             p.stages.swap(i, i + 1);
             return true;
         }
@@ -2521,7 +2871,9 @@ fn rewrite_step(p: &mut Pipeline) -> bool {
 fn prog_const_bool(prog: &crate::vm::Program) -> Option<bool> {
     use crate::vm::Opcode;
     let ops = prog.ops.as_ref();
-    if ops.len() != 1 { return None; }
+    if ops.len() != 1 {
+        return None;
+    }
     match &ops[0] {
         Opcode::PushBool(b) => Some(*b),
         _ => None,
@@ -2560,19 +2912,30 @@ impl Pipeline {
         // Promote to ObjVec via cache when available.  Unlocks the
         // typed-column stage-chain path below.
         let recv = if let (Some(c), Val::Arr(a)) = (cache, &recv) {
-            if let Some(d) = c.promote(a) { Val::ObjVec(d) } else { recv }
-        } else { recv };
+            if let Some(d) = c.promote(a) {
+                Val::ObjVec(d)
+            } else {
+                recv
+            }
+        } else {
+            recv
+        };
 
         // Typed-column ObjVec group_by: Stage::GroupBy(FieldRead) ∘
         // Sink::Collect over Strs / Ints / Floats / Bools key column.
         // Walks the typed key column directly, partitions row indices
         // per key, materialises Val::Obj { key → Vec<row> }.
-        if let (Some([Stage::GroupBy(_)]),
-                Some([BodyKernel::FieldRead(key)]),
-                Val::ObjVec(d),
-                Sink::Collect) =
-            (self.stages.get(..), self.stage_kernels.get(..), &recv, &self.sink)
-        {
+        if let (
+            Some([Stage::GroupBy(_)]),
+            Some([BodyKernel::FieldRead(key)]),
+            Val::ObjVec(d),
+            Sink::Collect,
+        ) = (
+            self.stages.get(..),
+            self.stage_kernels.get(..),
+            &recv,
+            &self.sink,
+        ) {
             if let Some(out) = objvec_typed_group_by(d, key) {
                 return Some(Ok(out));
             }
@@ -2580,12 +2943,14 @@ impl Pipeline {
 
         // Typed-column ObjVec stage-chain: Filter(FieldCmpLit) ∘
         // Map(FieldRead) ∘ Collect → primitive mask + typed gather.
-        if !matches!(self.sink, Sink::Collect) { return None; }
-        if let (Some([Stage::Filter(_), Stage::Map(_)]),
-                Some([BodyKernel::FieldCmpLit(pk, pop, plit),
-                      BodyKernel::FieldRead(mk)]),
-                Val::ObjVec(d)) =
-            (self.stages.get(..), self.stage_kernels.get(..), &recv)
+        if !matches!(self.sink, Sink::Collect) {
+            return None;
+        }
+        if let (
+            Some([Stage::Filter(_), Stage::Map(_)]),
+            Some([BodyKernel::FieldCmpLit(pk, pop, plit), BodyKernel::FieldRead(mk)]),
+            Val::ObjVec(d),
+        ) = (self.stages.get(..), self.stage_kernels.get(..), &recv)
         {
             return objvec_typed_filter_map_collect(d, pk, *pop, plit, mk);
         }
@@ -2610,7 +2975,9 @@ impl Pipeline {
                         let mut out: Vec<i64> = Vec::with_capacity(a.len());
                         for n in a.iter() {
                             let v = Val::Int(*n);
-                            if eval_cmp_op(&v, *op, lit) { out.push(*n); }
+                            if eval_cmp_op(&v, *op, lit) {
+                                out.push(*n);
+                            }
                         }
                         return Some(Ok(Val::int_vec(out)));
                     }
@@ -2618,7 +2985,9 @@ impl Pipeline {
                         let mut c = 0i64;
                         for n in a.iter() {
                             let v = Val::Int(*n);
-                            if eval_cmp_op(&v, *op, lit) { c += 1; }
+                            if eval_cmp_op(&v, *op, lit) {
+                                c += 1;
+                            }
                         }
                         return Some(Ok(Val::Int(c)));
                     }
@@ -2626,7 +2995,9 @@ impl Pipeline {
                         let mut out: Vec<f64> = Vec::with_capacity(a.len());
                         for f in a.iter() {
                             let v = Val::Float(*f);
-                            if eval_cmp_op(&v, *op, lit) { out.push(*f); }
+                            if eval_cmp_op(&v, *op, lit) {
+                                out.push(*f);
+                            }
                         }
                         return Some(Ok(Val::float_vec(out)));
                     }
@@ -2634,7 +3005,9 @@ impl Pipeline {
                         let mut c = 0i64;
                         for f in a.iter() {
                             let v = Val::Float(*f);
-                            if eval_cmp_op(&v, *op, lit) { c += 1; }
+                            if eval_cmp_op(&v, *op, lit) {
+                                c += 1;
+                            }
                         }
                         return Some(Ok(Val::Int(c)));
                     }
@@ -2643,13 +3016,20 @@ impl Pipeline {
             }
         }
 
-        if !matches!(self.sink, Sink::Collect) { return None; }
-        let arr = match &recv { Val::Arr(a) => Arc::clone(a), _ => return None };
+        if !matches!(self.sink, Sink::Collect) {
+            return None;
+        }
+        let arr = match &recv {
+            Val::Arr(a) => Arc::clone(a),
+            _ => return None,
+        };
 
         // Build a (kernel, prog) view of the stages.
         let stages = &self.stages;
         let kernels = &self.stage_kernels;
-        if stages.len() != kernels.len() { return None; }
+        if stages.len() != kernels.len() {
+            return None;
+        }
 
         match (stages.as_slice(), kernels.as_slice()) {
             // Single Map(FieldRead) → Collect: direct projection.
@@ -2676,15 +3056,19 @@ impl Pipeline {
                         let mut out = Vec::with_capacity(arr.len());
                         for v in arr.iter() {
                             let lhs = v.get_field(k.as_ref());
-                            if eval_cmp_op(&lhs, *op, lit) { out.push(v.clone()); }
+                            if eval_cmp_op(&lhs, *op, lit) {
+                                out.push(v.clone());
+                            }
                         }
                         Some(Ok(Val::arr(out)))
                     }
                 }
             }
             // Filter(FieldCmpLit) ∘ Map(FieldRead) → Collect: project filtered column.
-            ([Stage::Filter(_), Stage::Map(_)],
-             [BodyKernel::FieldCmpLit(pk, pop, plit), BodyKernel::FieldRead(mk)]) => {
+            (
+                [Stage::Filter(_), Stage::Map(_)],
+                [BodyKernel::FieldCmpLit(pk, pop, plit), BodyKernel::FieldRead(mk)],
+            ) => {
                 let mut out = Vec::with_capacity(arr.len());
                 for v in arr.iter() {
                     let lhs = v.get_field(pk.as_ref());
@@ -2706,15 +3090,19 @@ impl Pipeline {
                     let mut cur = v.clone();
                     for (i, k) in ks.iter().enumerate() {
                         cur = chain_step_ic(&cur, k.as_ref(), &mut slots[i]);
-                        if matches!(cur, Val::Null) { break; }
+                        if matches!(cur, Val::Null) {
+                            break;
+                        }
                     }
                     out.push(cur);
                 }
                 Some(Ok(Val::arr(out)))
             }
             // Filter(FieldCmpLit) ∘ Map(FieldChain) → Collect.
-            ([Stage::Filter(_), Stage::Map(_)],
-             [BodyKernel::FieldCmpLit(pk, pop, plit), BodyKernel::FieldChain(mks)]) => {
+            (
+                [Stage::Filter(_), Stage::Map(_)],
+                [BodyKernel::FieldCmpLit(pk, pop, plit), BodyKernel::FieldChain(mks)],
+            ) => {
                 let mut out = Vec::with_capacity(arr.len());
                 for v in arr.iter() {
                     let lhs = v.get_field(pk.as_ref());
@@ -2722,7 +3110,9 @@ impl Pipeline {
                         let mut cur = v.clone();
                         for k in mks.iter() {
                             cur = cur.get_field(k.as_ref());
-                            if matches!(cur, Val::Null) { break; }
+                            if matches!(cur, Val::Null) {
+                                break;
+                            }
                         }
                         out.push(cur);
                     }
@@ -2730,14 +3120,18 @@ impl Pipeline {
                 Some(Ok(Val::arr(out)))
             }
             // Filter(FieldChainCmpLit) ∘ Map(FieldRead) → Collect.
-            ([Stage::Filter(_), Stage::Map(_)],
-             [BodyKernel::FieldChainCmpLit(pks, pop, plit), BodyKernel::FieldRead(mk)]) => {
+            (
+                [Stage::Filter(_), Stage::Map(_)],
+                [BodyKernel::FieldChainCmpLit(pks, pop, plit), BodyKernel::FieldRead(mk)],
+            ) => {
                 let mut out = Vec::with_capacity(arr.len());
                 for v in arr.iter() {
                     let mut lhs = v.clone();
                     for k in pks.iter() {
                         lhs = lhs.get_field(k.as_ref());
-                        if matches!(lhs, Val::Null) { break; }
+                        if matches!(lhs, Val::Null) {
+                            break;
+                        }
                     }
                     if eval_cmp_op(&lhs, *pop, plit) {
                         out.push(v.get_field(mk.as_ref()));
@@ -2762,20 +3156,28 @@ impl Pipeline {
     /// run as O(N) slice walks instead of O(N) IndexMap probes.
     /// Wrapper that returns the promoted `ObjVecData` directly (for the
     /// memoised cache in `Jetro::get_or_promote_objvec`).
-    pub fn try_promote_objvec_arr(arr: &Arc<Vec<Val>>) -> Option<Arc<crate::eval::value::ObjVecData>> {
+    pub fn try_promote_objvec_arr(
+        arr: &Arc<Vec<Val>>,
+    ) -> Option<Arc<crate::eval::value::ObjVecData>> {
         if let Some(Val::ObjVec(d)) = Self::try_promote_objvec(arr) {
             Some(d)
-        } else { None }
+        } else {
+            None
+        }
     }
 
     fn try_promote_objvec(arr: &Arc<Vec<Val>>) -> Option<Val> {
-        if arr.is_empty() { return None; }
+        if arr.is_empty() {
+            return None;
+        }
         let first = match &arr[0] {
             Val::Obj(m) => m,
             _ => return None,
         };
         let keys: Vec<Arc<str>> = first.keys().cloned().collect();
-        if keys.is_empty() { return None; }
+        if keys.is_empty() {
+            return None;
+        }
         let stride = keys.len();
         let mut cells: Vec<Val> = Vec::with_capacity(arr.len() * stride);
         for v in arr.iter() {
@@ -2783,7 +3185,9 @@ impl Pipeline {
                 Val::Obj(m) => m,
                 _ => return None,
             };
-            if m.len() != stride { return None; }
+            if m.len() != stride {
+                return None;
+            }
             for (i, k) in keys.iter().enumerate() {
                 // Pointer-equal Arc check first (cheap path); fall back
                 // to hash lookup if Arc identity differs across rows.
@@ -2813,7 +3217,6 @@ impl Pipeline {
         })))
     }
 
-
     /// Cache-aware variant: when cache promotes the source array,
     /// recv is replaced with `Val::ObjVec` and the slot kernels fire.
     fn try_columnar_with(
@@ -2829,7 +3232,9 @@ impl Pipeline {
         if let Some(out) = self.try_columnar_stage_chain_with(root, cache) {
             return Some(out);
         }
-        if let Some(out) = self.try_columnar_stage_chain(root) { return Some(out); }
+        if let Some(out) = self.try_columnar_stage_chain(root) {
+            return Some(out);
+        }
 
         let recv = match &self.source {
             Source::Receiver(v) => v.clone(),
@@ -2841,28 +3246,44 @@ impl Pipeline {
         let recv = if let (Some(c), Val::Arr(a)) = (cache, &recv) {
             if let Some(d) = c.promote(a) {
                 Val::ObjVec(d)
-            } else { recv }
-        } else { recv };
+            } else {
+                recv
+            }
+        } else {
+            recv
+        };
 
         // Typed primitive lane fast paths — only when the original
         // pipeline has zero stages (bare aggregate over a primitive
         // vec). Stage'd shapes go through the slot-kernel block below.
         if self.stages.is_empty() {
             match (&recv, &self.sink) {
-                (Val::IntVec(a), Sink::Numeric(NumOp::Sum)) =>
-                    return Some(Ok(Val::Int(a.iter().sum()))),
-                (Val::IntVec(a), Sink::Numeric(NumOp::Min)) =>
-                    return Some(Ok(a.iter().copied().min().map(Val::Int).unwrap_or(Val::Null))),
-                (Val::IntVec(a), Sink::Numeric(NumOp::Max)) =>
-                    return Some(Ok(a.iter().copied().max().map(Val::Int).unwrap_or(Val::Null))),
-                (Val::IntVec(a), Sink::Count) =>
-                    return Some(Ok(Val::Int(a.len() as i64))),
-                (Val::FloatVec(a), Sink::Numeric(NumOp::Sum)) =>
-                    return Some(Ok(Val::Float(a.iter().sum()))),
-                (Val::FloatVec(a), Sink::Count) =>
-                    return Some(Ok(Val::Int(a.len() as i64))),
-                (Val::StrVec(a), Sink::Count) =>
-                    return Some(Ok(Val::Int(a.len() as i64))),
+                (Val::IntVec(a), Sink::Numeric(NumOp::Sum)) => {
+                    return Some(Ok(Val::Int(a.iter().sum())))
+                }
+                (Val::IntVec(a), Sink::Numeric(NumOp::Min)) => {
+                    return Some(Ok(a
+                        .iter()
+                        .copied()
+                        .min()
+                        .map(Val::Int)
+                        .unwrap_or(Val::Null)))
+                }
+                (Val::IntVec(a), Sink::Numeric(NumOp::Max)) => {
+                    return Some(Ok(a
+                        .iter()
+                        .copied()
+                        .max()
+                        .map(Val::Int)
+                        .unwrap_or(Val::Null)))
+                }
+                (Val::IntVec(a), Sink::Count) => return Some(Ok(Val::Int(a.len() as i64))),
+                (Val::FloatVec(a), Sink::Numeric(NumOp::Sum)) => {
+                    return Some(Ok(Val::Float(a.iter().sum())))
+                }
+                (Val::FloatVec(a), Sink::Count) => return Some(Ok(Val::Int(a.len() as i64))),
+                (Val::StrVec(a), Sink::Count) => return Some(Ok(Val::Int(a.len() as i64))),
+                (Val::StrSliceVec(a), Sink::Count) => return Some(Ok(Val::Int(a.len() as i64))),
                 _ => {}
             }
         }
@@ -2909,10 +3330,10 @@ impl Pipeline {
                         return Some(Ok(objvec_filter_count_slot(d, sp, op, &lit)));
                     }
                     if let Some(leaves) = and_chain_prog(pred) {
-                        let slots: Option<Vec<(usize, crate::ast::BinOp, Val)>> =
-                            leaves.iter().map(|(f, op, lit)| {
-                                d.slot_of(f).map(|s| (s, *op, lit.clone()))
-                            }).collect();
+                        let slots: Option<Vec<(usize, crate::ast::BinOp, Val)>> = leaves
+                            .iter()
+                            .map(|(f, op, lit)| d.slot_of(f).map(|s| (s, *op, lit.clone())))
+                            .collect();
                         let slots = slots?;
                         return Some(Ok(objvec_filter_count_and_slots(d, &slots)));
                     }
@@ -2927,9 +3348,13 @@ impl Pipeline {
         // Sink::Collect over Val::Arr (object rows): walk the column
         // directly via slot-known IndexMap probes, build typed output
         // vec.  No per-row vm.exec.
-        if let Some(out) = self.try_columnar_stage_chain(root) { return Some(out); }
+        if let Some(out) = self.try_columnar_stage_chain(root) {
+            return Some(out);
+        }
 
-        if !self.stages.is_empty() { return None; }
+        if !self.stages.is_empty() {
+            return None;
+        }
 
         let recv = match &self.source {
             Source::Receiver(v) => v.clone(),
@@ -2945,42 +3370,60 @@ impl Pipeline {
         // sink can read the slice directly with no per-row Val tag
         // dispatch.  Each branch is mechanical: same fold, lane-typed.
         match (&recv, &self.sink) {
-            (Val::IntVec(a), Sink::Numeric(NumOp::Sum)) =>
-                return Some(Ok(Val::Int(a.iter().sum()))),
-            (Val::IntVec(a), Sink::Numeric(NumOp::Min)) =>
-                return Some(Ok(a.iter().copied().min()
-                    .map(Val::Int).unwrap_or(Val::Null))),
-            (Val::IntVec(a), Sink::Numeric(NumOp::Max)) =>
-                return Some(Ok(a.iter().copied().max()
-                    .map(Val::Int).unwrap_or(Val::Null))),
+            (Val::IntVec(a), Sink::Numeric(NumOp::Sum)) => {
+                return Some(Ok(Val::Int(a.iter().sum())))
+            }
+            (Val::IntVec(a), Sink::Numeric(NumOp::Min)) => {
+                return Some(Ok(a
+                    .iter()
+                    .copied()
+                    .min()
+                    .map(Val::Int)
+                    .unwrap_or(Val::Null)))
+            }
+            (Val::IntVec(a), Sink::Numeric(NumOp::Max)) => {
+                return Some(Ok(a
+                    .iter()
+                    .copied()
+                    .max()
+                    .map(Val::Int)
+                    .unwrap_or(Val::Null)))
+            }
             (Val::IntVec(a), Sink::Numeric(NumOp::Avg)) => {
-                if a.is_empty() { return Some(Ok(Val::Null)); }
+                if a.is_empty() {
+                    return Some(Ok(Val::Null));
+                }
                 let s: i64 = a.iter().sum();
                 return Some(Ok(Val::Float(s as f64 / a.len() as f64)));
             }
-            (Val::IntVec(a), Sink::Count) =>
-                return Some(Ok(Val::Int(a.len() as i64))),
-            (Val::FloatVec(a), Sink::Numeric(NumOp::Sum)) =>
-                return Some(Ok(Val::Float(a.iter().sum()))),
+            (Val::IntVec(a), Sink::Count) => return Some(Ok(Val::Int(a.len() as i64))),
+            (Val::FloatVec(a), Sink::Numeric(NumOp::Sum)) => {
+                return Some(Ok(Val::Float(a.iter().sum())))
+            }
             (Val::FloatVec(a), Sink::Numeric(NumOp::Min)) => {
-                if a.is_empty() { return Some(Ok(Val::Null)); }
+                if a.is_empty() {
+                    return Some(Ok(Val::Null));
+                }
                 let m = a.iter().copied().fold(f64::INFINITY, f64::min);
                 return Some(Ok(Val::Float(m)));
             }
             (Val::FloatVec(a), Sink::Numeric(NumOp::Max)) => {
-                if a.is_empty() { return Some(Ok(Val::Null)); }
+                if a.is_empty() {
+                    return Some(Ok(Val::Null));
+                }
                 let m = a.iter().copied().fold(f64::NEG_INFINITY, f64::max);
                 return Some(Ok(Val::Float(m)));
             }
             (Val::FloatVec(a), Sink::Numeric(NumOp::Avg)) => {
-                if a.is_empty() { return Some(Ok(Val::Null)); }
+                if a.is_empty() {
+                    return Some(Ok(Val::Null));
+                }
                 let s: f64 = a.iter().sum();
                 return Some(Ok(Val::Float(s / a.len() as f64)));
             }
-            (Val::FloatVec(a), Sink::Count) =>
-                return Some(Ok(Val::Int(a.len() as i64))),
-            (Val::StrVec(a), Sink::Count) =>
-                return Some(Ok(Val::Int(a.len() as i64))),
+            (Val::FloatVec(a), Sink::Count) => return Some(Ok(Val::Int(a.len() as i64))),
+            (Val::StrVec(a), Sink::Count) => return Some(Ok(Val::Int(a.len() as i64))),
+            (Val::StrSliceVec(a), Sink::Count) => return Some(Ok(Val::Int(a.len() as i64))),
             _ => {}
         }
 
@@ -3007,11 +3450,23 @@ impl Pipeline {
     /// Critical for cold-start: lets callers skip lazy `root_val()`
     /// build when the query never touches the Val tree.
     #[cfg(feature = "simd-json")]
-    pub fn try_run_no_root(
-        &self,
-        cache: &dyn ObjVecPromoter,
-    ) -> Option<Result<Val, EvalError>> {
-        if !cache.prefer_tape() { return None; }
+    pub fn try_run_no_root(&self, cache: &dyn ObjVecPromoter) -> Option<Result<Val, EvalError>> {
+        if !cache.prefer_tape() {
+            return None;
+        }
+
+        if self.stages.is_empty() && matches!(self.sink, Sink::Count) {
+            use crate::strref::{tape_array_iter, tape_walk_field_chain};
+
+            let tape = cache.tape()?;
+            if let Source::FieldChain { keys } = &self.source {
+                let key_strs: Vec<&str> = keys.iter().map(|k| k.as_ref()).collect();
+                let arr_idx = tape_walk_field_chain(tape.as_ref(), &key_strs)?;
+                let n = tape_array_iter(tape.as_ref(), arr_idx)?.count();
+                cache.note_tape_run();
+                return Some(Ok(Val::Int(n as i64)));
+            }
+        }
 
         // Step 3c — composed tape route. Preferred over the legacy
         // `try_tape_aggregate` (which pattern-matches on fused Sink
@@ -3019,18 +3474,70 @@ impl Pipeline {
         // Sink substrate as the Val path. Returns None for shapes the
         // tape borrow stages don't yet cover (computed kernels, multi-
         // step bodies, barriers) — caller falls back to Val path.
-        self.try_run_composed_tape(cache)
+        if let Some(out) = self.try_run_composed_tape(cache) {
+            return Some(out);
+        }
+
+        // Fallback bridge for the rest of Pipeline IR: materialise only
+        // the tape-resolved source array, then reuse the existing Val
+        // runner for every lifted/composed builtin. This avoids a second
+        // builtin implementation for a tape-specific value type while
+        // still skipping full root Val construction on cold paths.
+        self.try_run_tape_materialized(cache)
+    }
+
+    /// Tape-to-Val bridge for pipeline shapes that the pure tape stage
+    /// chain does not cover. It materialises the resolved source array
+    /// entries, swaps the source to `Receiver`, and re-enters the normal
+    /// Val pipeline runner. This gives all current/future Val builtins
+    /// tape ingestion support without reimplementing them over tape.
+    #[cfg(feature = "simd-json")]
+    fn try_run_tape_materialized(
+        &self,
+        cache: &dyn ObjVecPromoter,
+    ) -> Option<Result<Val, EvalError>> {
+        use crate::composed::tape as ct;
+        use crate::strref::{tape_array_iter, tape_walk_field_chain};
+
+        let tape = cache.tape()?;
+        let arr_idx = match &self.source {
+            Source::FieldChain { keys } => {
+                let key_strs: Vec<&str> = keys.iter().map(|k| k.as_ref()).collect();
+                tape_walk_field_chain(tape.as_ref(), &key_strs)?
+            }
+            Source::Receiver(_) => return None,
+        };
+
+        let iter = tape_array_iter(tape.as_ref(), arr_idx)?;
+        let mut rows: Vec<Val> = Vec::new();
+        for idx in iter {
+            rows.push(ct::tape_to_val(tape.as_ref(), idx));
+        }
+
+        let synth = Pipeline {
+            source: Source::Receiver(Val::arr(rows)),
+            stages: self.stages.clone(),
+            sink: self.sink.clone(),
+            stage_kernels: self.stage_kernels.clone(),
+            sink_kernels: self.sink_kernels.clone(),
+        };
+
+        cache.note_tape_run();
+        Some(synth.run_with(&Val::Null, None))
     }
 
     /// Decompose any fused Sink into a base `(stages, kernels, sink)`
     /// triple. Pure function — does not mutate `self`. Lets every
     /// Identity view — fused Sink variants deleted in Tier 3, so
     /// every Pipeline is already in base form. Kept as a stable name
-    /// for downstream consumers (composed Val/tape runners, columnar
-    /// fast paths, bytescan) that built on the canonical-view
-    /// abstraction.
+    /// for downstream consumers (composed Val/tape runners and
+    /// columnar fast paths) that built on the canonical-view abstraction.
     pub fn canonical(&self) -> (Vec<Stage>, Vec<BodyKernel>, Sink) {
-        (self.stages.clone(), self.stage_kernels.clone(), self.sink.clone())
+        (
+            self.stages.clone(),
+            self.stage_kernels.clone(),
+            self.sink.clone(),
+        )
     }
 
     /// Step 3c — composed-tape runner. Decomposes fused Sinks at entry
@@ -3038,15 +3545,14 @@ impl Pipeline {
     /// `composed::tape` substrate when every stage classifies to a
     /// tape borrow stage.
     #[cfg(feature = "simd-json")]
-    fn try_run_composed_tape(
-        &self,
-        cache: &dyn ObjVecPromoter,
-    ) -> Option<Result<Val, EvalError>> {
+    fn try_run_composed_tape(&self, cache: &dyn ObjVecPromoter) -> Option<Result<Val, EvalError>> {
         use crate::composed::tape as ct;
         use crate::strref::tape_walk_field_chain;
         use std::cell::Cell;
 
-        if !composed_path_enabled() { return None; }
+        if !composed_path_enabled() {
+            return None;
+        }
         let tape = cache.tape()?;
 
         // Source must be a tape-resolvable field chain. Receiver-form
@@ -3064,7 +3570,16 @@ impl Pipeline {
 
         // Sink mapping. Barriers (Sort/UniqueBy/GroupBy/Reverse)
         // and computed sinks bail — Val path handles them.
-        enum SinkKind { Count, Sum, Min, Max, Avg, First, Last, Collect }
+        enum SinkKind {
+            Count,
+            Sum,
+            Min,
+            Max,
+            Avg,
+            First,
+            Last,
+            Collect,
+        }
         let sink_kind = match &eff_sink {
             Sink::Collect => SinkKind::Collect,
             Sink::Count => SinkKind::Count,
@@ -3074,13 +3589,12 @@ impl Pipeline {
             Sink::Numeric(NumOp::Avg) => SinkKind::Avg,
             Sink::First => SinkKind::First,
             Sink::Last => SinkKind::Last,
-            Sink::ApproxCountDistinct => return None,  // Val path handles
+            Sink::ApproxCountDistinct => return None, // Val path handles
         };
 
         // Build tape stage chain. Reject any Generic / barrier /
         // computed kernel — Val path handles those.
-        let build_tape_stage = |s: &Stage, k: &BodyKernel|
-            -> Option<Box<dyn ct::TapeStage>> {
+        let build_tape_stage = |s: &Stage, k: &BodyKernel| -> Option<Box<dyn ct::TapeStage>> {
             Some(match (s, k) {
                 (Stage::Filter(_), BodyKernel::FieldCmpLit(field, op, lit)) => {
                     let tape_op = binop_to_tape_cmp(*op)?;
@@ -3101,20 +3615,32 @@ impl Pipeline {
                     })
                 }
                 (Stage::Filter(_), BodyKernel::FieldRead(field)) => {
-                    Box::new(ct::TapeFilterTruthyAtField { field: Arc::clone(field) })
+                    Box::new(ct::TapeFilterTruthyAtField {
+                        field: Arc::clone(field),
+                    })
                 }
-                (Stage::Map(_), BodyKernel::FieldRead(field)) =>
-                    Box::new(ct::TapeMapField { field: Arc::clone(field) }),
-                (Stage::Map(_), BodyKernel::FieldChain(keys)) =>
-                    Box::new(ct::TapeMapFieldChain { keys: Arc::clone(keys) }),
-                (Stage::FlatMap(_), BodyKernel::FieldRead(field)) =>
-                    Box::new(ct::TapeFlatMapField { field: Arc::clone(field) }),
-                (Stage::FlatMap(_), BodyKernel::FieldChain(keys)) =>
-                    Box::new(ct::TapeFlatMapFieldChain { keys: Arc::clone(keys) }),
-                (Stage::Take(n), _) =>
-                    Box::new(ct::TapeTake { remaining: Cell::new(*n) }),
-                (Stage::Skip(n), _) =>
-                    Box::new(ct::TapeSkip { remaining: Cell::new(*n) }),
+                (Stage::Map(_), BodyKernel::FieldRead(field)) => Box::new(ct::TapeMapField {
+                    field: Arc::clone(field),
+                }),
+                (Stage::Map(_), BodyKernel::FieldChain(keys)) => Box::new(ct::TapeMapFieldChain {
+                    keys: Arc::clone(keys),
+                }),
+                (Stage::FlatMap(_), BodyKernel::FieldRead(field)) => {
+                    Box::new(ct::TapeFlatMapField {
+                        field: Arc::clone(field),
+                    })
+                }
+                (Stage::FlatMap(_), BodyKernel::FieldChain(keys)) => {
+                    Box::new(ct::TapeFlatMapFieldChain {
+                        keys: Arc::clone(keys),
+                    })
+                }
+                (Stage::Take(n), _) => Box::new(ct::TapeTake {
+                    remaining: Cell::new(*n),
+                }),
+                (Stage::Skip(n), _) => Box::new(ct::TapeSkip {
+                    remaining: Cell::new(*n),
+                }),
                 _ => return None,
             })
         };
@@ -3122,7 +3648,10 @@ impl Pipeline {
         // Reject barrier stages on tape route — they require buffered
         // Val materialisation. Composed Val path handles those.
         for s in &eff_stages {
-            if matches!(s, Stage::Reverse | Stage::Sort(_) | Stage::UniqueBy(_) | Stage::GroupBy(_)) {
+            if matches!(
+                s,
+                Stage::Reverse | Stage::Sort(_) | Stage::UniqueBy(_) | Stage::GroupBy(_)
+            ) {
                 return None;
             }
         }
@@ -3134,13 +3663,23 @@ impl Pipeline {
         }
 
         let result = match sink_kind {
-            SinkKind::Count   => ct::run_pipeline_tape::<ct::TapeCountSink>(tape, arr_idx, chain.as_ref()),
-            SinkKind::Sum     => ct::run_pipeline_tape::<ct::TapeSumSink>(tape, arr_idx, chain.as_ref()),
-            SinkKind::Min     => ct::run_pipeline_tape::<ct::TapeMinSink>(tape, arr_idx, chain.as_ref()),
-            SinkKind::Max     => ct::run_pipeline_tape::<ct::TapeMaxSink>(tape, arr_idx, chain.as_ref()),
-            SinkKind::Avg     => ct::run_pipeline_tape::<ct::TapeAvgSink>(tape, arr_idx, chain.as_ref()),
-            SinkKind::First   => ct::run_pipeline_tape_first(tape, arr_idx, chain.as_ref()),
-            SinkKind::Last    => ct::run_pipeline_tape_last(tape, arr_idx, chain.as_ref()),
+            SinkKind::Count => {
+                ct::run_pipeline_tape::<ct::TapeCountSink>(tape, arr_idx, chain.as_ref())
+            }
+            SinkKind::Sum => {
+                ct::run_pipeline_tape::<ct::TapeSumSink>(tape, arr_idx, chain.as_ref())
+            }
+            SinkKind::Min => {
+                ct::run_pipeline_tape::<ct::TapeMinSink>(tape, arr_idx, chain.as_ref())
+            }
+            SinkKind::Max => {
+                ct::run_pipeline_tape::<ct::TapeMaxSink>(tape, arr_idx, chain.as_ref())
+            }
+            SinkKind::Avg => {
+                ct::run_pipeline_tape::<ct::TapeAvgSink>(tape, arr_idx, chain.as_ref())
+            }
+            SinkKind::First => ct::run_pipeline_tape_first(tape, arr_idx, chain.as_ref()),
+            SinkKind::Last => ct::run_pipeline_tape_last(tape, arr_idx, chain.as_ref()),
             SinkKind::Collect => ct::run_pipeline_tape_collect(tape, arr_idx, chain.as_ref()),
         };
         let result = result?;
@@ -3176,7 +3715,9 @@ impl Pipeline {
     fn try_indexed_dispatch(&self, root: &Val) -> Option<Result<Val, EvalError>> {
         // Phase 5 strategy must be IndexedDispatch.
         let strategy = select_strategy(&self.stages, &self.sink);
-        if strategy != Strategy::IndexedDispatch { return None; }
+        if strategy != Strategy::IndexedDispatch {
+            return None;
+        }
 
         // Resolve source — same rules as the generic loop.
         let recv = match &self.source {
@@ -3185,20 +3726,20 @@ impl Pipeline {
         };
         // Only indexable shapes; bail otherwise.
         let len = match &recv {
-            Val::Arr(a)      => a.len(),
-            Val::IntVec(a)   => a.len(),
+            Val::Arr(a) => a.len(),
+            Val::IntVec(a) => a.len(),
             Val::FloatVec(a) => a.len(),
-            Val::StrVec(a)   => a.len(),
-            Val::ObjVec(d)   => d.nrows(),
+            Val::StrVec(a) => a.len(),
+            Val::ObjVec(d) => d.nrows(),
             _ => return None,
         };
 
         // Compute target index from sink demand.
         let demand = self.sink.demand();
         let idx = match demand.positional? {
-            Position::First    => 0,
-            Position::Last     => len.checked_sub(1)?,
-            Position::Nth(k)   => k,
+            Position::First => 0,
+            Position::Last => len.checked_sub(1)?,
+            Position::Nth(k) => k,
         };
         if idx >= len {
             // Out of bounds — sink::First/Last semantics return Null.
@@ -3207,14 +3748,14 @@ impl Pipeline {
 
         // Pull element[idx] from source.
         let elem = match &recv {
-            Val::Arr(a)      => a[idx].clone(),
-            Val::IntVec(a)   => Val::Int(a[idx]),
+            Val::Arr(a) => a[idx].clone(),
+            Val::IntVec(a) => Val::Int(a[idx]),
             Val::FloatVec(a) => Val::Float(a[idx]),
-            Val::StrVec(a)   => Val::Str(Arc::clone(&a[idx])),
-            Val::ObjVec(d)   => {
+            Val::StrVec(a) => Val::Str(Arc::clone(&a[idx])),
+            Val::ObjVec(d) => {
                 let stride = d.stride();
-                let mut m: indexmap::IndexMap<Arc<str>, Val>
-                    = indexmap::IndexMap::with_capacity(stride);
+                let mut m: indexmap::IndexMap<Arc<str>, Val> =
+                    indexmap::IndexMap::with_capacity(stride);
                 for (i, k) in d.keys.iter().enumerate() {
                     m.insert(Arc::clone(k), d.cells[idx * stride + i].clone());
                 }
@@ -3234,7 +3775,10 @@ impl Pipeline {
                     let prev = env.swap_current(cur);
                     cur = match vm.exec_in_env(prog, &mut env) {
                         Ok(v) => v,
-                        Err(e) => { env.restore_current(prev); return Some(Err(e)); }
+                        Err(e) => {
+                            env.restore_current(prev);
+                            return Some(Err(e));
+                        }
                     };
                     env.restore_current(prev);
                 }
@@ -3262,12 +3806,20 @@ impl Pipeline {
             let env = vm.make_loop_env(root.clone());
             Rc::new(RefCell::new(cmp::VmCtx { vm, env }))
         };
-        let get_ctx = || -> Rc<RefCell<cmp::VmCtx>> {
-            Rc::clone(vm_ctx.get_or_init(make_ctx))
-        };
+        let get_ctx = || -> Rc<RefCell<cmp::VmCtx>> { Rc::clone(vm_ctx.get_or_init(make_ctx)) };
 
         // Sink mapping — operates on the post-decomposition base sink.
-        enum SinkKind { Count, Sum, Min, Max, Avg, First, Last, Collect, GroupByOnly }
+        enum SinkKind {
+            Count,
+            Sum,
+            Min,
+            Max,
+            Avg,
+            First,
+            Last,
+            Collect,
+            GroupByOnly,
+        }
         let sink_kind = match &eff_sink {
             Sink::Collect => SinkKind::Collect,
             Sink::Count => SinkKind::Count,
@@ -3277,7 +3829,7 @@ impl Pipeline {
             Sink::Numeric(NumOp::Avg) => SinkKind::Avg,
             Sink::First => SinkKind::First,
             Sink::Last => SinkKind::Last,
-            Sink::ApproxCountDistinct => return None,  // legacy Val path
+            Sink::ApproxCountDistinct => return None, // legacy Val path
         };
         let _ = SinkKind::GroupByOnly;
 
@@ -3302,28 +3854,46 @@ impl Pipeline {
             Some(match (s, k) {
                 (Stage::Filter(_), BodyKernel::FieldCmpLit(field, op, lit))
                     if matches!(op, crate::ast::BinOp::Eq) =>
+                {
                     Box::new(cmp::FilterFieldEqLit {
                         field: Arc::clone(field),
                         target: lit.clone(),
-                    }),
-                (Stage::Map(_), BodyKernel::FieldRead(field)) =>
-                    Box::new(cmp::MapField { field: Arc::clone(field) }),
-                (Stage::Map(_), BodyKernel::FieldChain(keys)) =>
-                    Box::new(cmp::MapFieldChain { keys: Arc::clone(keys) }),
-                (Stage::FlatMap(_), BodyKernel::FieldRead(field)) =>
-                    Box::new(cmp::FlatMapField { field: Arc::clone(field) }),
-                (Stage::FlatMap(_), BodyKernel::FieldChain(keys)) =>
-                    Box::new(cmp::FlatMapFieldChain { keys: Arc::clone(keys) }),
-                (Stage::Take(n), _) => Box::new(cmp::Take { remaining: Cell::new(*n) }),
-                (Stage::Skip(n), _) => Box::new(cmp::Skip { remaining: Cell::new(*n) }),
+                    })
+                }
+                (Stage::Map(_), BodyKernel::FieldRead(field)) => Box::new(cmp::MapField {
+                    field: Arc::clone(field),
+                }),
+                (Stage::Map(_), BodyKernel::FieldChain(keys)) => Box::new(cmp::MapFieldChain {
+                    keys: Arc::clone(keys),
+                }),
+                (Stage::FlatMap(_), BodyKernel::FieldRead(field)) => Box::new(cmp::FlatMapField {
+                    field: Arc::clone(field),
+                }),
+                (Stage::FlatMap(_), BodyKernel::FieldChain(keys)) => {
+                    Box::new(cmp::FlatMapFieldChain {
+                        keys: Arc::clone(keys),
+                    })
+                }
+                (Stage::Take(n), _) => Box::new(cmp::Take {
+                    remaining: Cell::new(*n),
+                }),
+                (Stage::Skip(n), _) => Box::new(cmp::Skip {
+                    remaining: Cell::new(*n),
+                }),
                 // VM-fallback for any unrecognised body — Generic kernel,
                 // Arith, FString, FieldCmpLit non-Eq, custom lambdas.
-                (Stage::Filter(p), _) =>
-                    Box::new(cmp::GenericFilter { prog: Arc::clone(p), ctx: get_ctx() }),
-                (Stage::Map(p), _) =>
-                    Box::new(cmp::GenericMap { prog: Arc::clone(p), ctx: get_ctx() }),
-                (Stage::FlatMap(p), _) =>
-                    Box::new(cmp::GenericFlatMap { prog: Arc::clone(p), ctx: get_ctx() }),
+                (Stage::Filter(p), _) => Box::new(cmp::GenericFilter {
+                    prog: Arc::clone(p),
+                    ctx: get_ctx(),
+                }),
+                (Stage::Map(p), _) => Box::new(cmp::GenericMap {
+                    prog: Arc::clone(p),
+                    ctx: get_ctx(),
+                }),
+                (Stage::FlatMap(p), _) => Box::new(cmp::GenericFlatMap {
+                    prog: Arc::clone(p),
+                    ctx: get_ctx(),
+                }),
                 _ => return None,
             })
         };
@@ -3362,10 +3932,13 @@ impl Pipeline {
         // streaming segment; [barrier_idx] is the barrier op.
         let mut last_split = 0usize;
         for (i, s) in stages_ref.iter().enumerate() {
-            let is_barrier = matches!(s,
-                Stage::Reverse | Stage::Sort(_) | Stage::UniqueBy(_) |
-                Stage::GroupBy(_));
-            if !is_barrier { continue; }
+            let is_barrier = matches!(
+                s,
+                Stage::Reverse | Stage::Sort(_) | Stage::UniqueBy(_) | Stage::GroupBy(_)
+            );
+            if !is_barrier {
+                continue;
+            }
 
             // Build streaming chain over [last_split..i].
             if i > last_split {
@@ -3389,10 +3962,10 @@ impl Pipeline {
             buf = match s {
                 Stage::Reverse => cmp::barrier_reverse(buf),
                 Stage::Sort(None) => match strategy {
-                    StageStrategy::SortTopK(k) =>
-                        cmp::barrier_top_k(buf, &cmp::KeySource::None, k),
-                    StageStrategy::SortBottomK(k) =>
-                        cmp::barrier_bottom_k(buf, &cmp::KeySource::None, k),
+                    StageStrategy::SortTopK(k) => cmp::barrier_top_k(buf, &cmp::KeySource::None, k),
+                    StageStrategy::SortBottomK(k) => {
+                        cmp::barrier_bottom_k(buf, &cmp::KeySource::None, k)
+                    }
                     _ => cmp::barrier_sort(buf, &cmp::KeySource::None),
                 },
                 Stage::Sort(Some(_)) => {
@@ -3403,15 +3976,18 @@ impl Pipeline {
                         _ => cmp::barrier_sort(buf, &key),
                     }
                 }
-                Stage::UniqueBy(None) =>
-                    cmp::barrier_unique_by(buf, &cmp::KeySource::None),
+                Stage::UniqueBy(None) => cmp::barrier_unique_by(buf, &cmp::KeySource::None),
                 Stage::UniqueBy(Some(_)) => {
                     let key = key_from_kernel(kernel)?;
                     cmp::barrier_unique_by(buf, &key)
                 }
                 Stage::GroupBy(_) => {
-                    if !matches!(eff_sink, Sink::Collect) { return None; }
-                    if i + 1 != stages_ref.len() { return None; }
+                    if !matches!(eff_sink, Sink::Collect) {
+                        return None;
+                    }
+                    if i + 1 != stages_ref.len() {
+                        return None;
+                    }
                     let key = key_from_kernel(kernel)?;
                     let val = cmp::barrier_group_by(buf, &key);
                     let _ = i;
@@ -3433,13 +4009,13 @@ impl Pipeline {
         }
 
         let out = match sink_kind {
-            SinkKind::Count   => cmp::run_pipeline::<cmp::CountSink>(&buf, chain.as_ref()),
-            SinkKind::Sum     => cmp::run_pipeline::<cmp::SumSink>(&buf, chain.as_ref()),
-            SinkKind::Min     => cmp::run_pipeline::<cmp::MinSink>(&buf, chain.as_ref()),
-            SinkKind::Max     => cmp::run_pipeline::<cmp::MaxSink>(&buf, chain.as_ref()),
-            SinkKind::Avg     => cmp::run_pipeline::<cmp::AvgSink>(&buf, chain.as_ref()),
-            SinkKind::First   => cmp::run_pipeline::<cmp::FirstSink>(&buf, chain.as_ref()),
-            SinkKind::Last    => cmp::run_pipeline::<cmp::LastSink>(&buf, chain.as_ref()),
+            SinkKind::Count => cmp::run_pipeline::<cmp::CountSink>(&buf, chain.as_ref()),
+            SinkKind::Sum => cmp::run_pipeline::<cmp::SumSink>(&buf, chain.as_ref()),
+            SinkKind::Min => cmp::run_pipeline::<cmp::MinSink>(&buf, chain.as_ref()),
+            SinkKind::Max => cmp::run_pipeline::<cmp::MaxSink>(&buf, chain.as_ref()),
+            SinkKind::Avg => cmp::run_pipeline::<cmp::AvgSink>(&buf, chain.as_ref()),
+            SinkKind::First => cmp::run_pipeline::<cmp::FirstSink>(&buf, chain.as_ref()),
+            SinkKind::Last => cmp::run_pipeline::<cmp::LastSink>(&buf, chain.as_ref()),
             SinkKind::Collect => cmp::run_pipeline::<cmp::CollectSink>(&buf, chain.as_ref()),
             SinkKind::GroupByOnly => unreachable!(),
         };
@@ -3462,16 +4038,22 @@ impl Pipeline {
         // (`Map`, `Identity`) and sink is positional (First/Last), pull
         // the target element from the source by index, run chain once,
         // return.  O(1) work for `$.books.map(@.x).first()` shape.
-        if let Some(out) = self.try_indexed_dispatch(root) { return out; }
+        if let Some(out) = self.try_indexed_dispatch(root) {
+            return out;
+        }
 
         // Phase 3 columnar fast path — runs before per-row loop.
         // Critical for Q12/Q15-class queries: ObjVec promotion +
         // typed-column slot kernels reach native parity. Composed
         // path runs AFTER, as fallback for the per-row generic case.
-        if let Some(out) = self.try_columnar_with(root, cache) { return out; }
+        if let Some(out) = self.try_columnar_with(root, cache) {
+            return out;
+        }
         // Fall back to legacy try_columnar (no cache).
         if cache.is_none() {
-            if let Some(out) = self.try_columnar(root) { return out; }
+            if let Some(out) = self.try_columnar(root) {
+                return out;
+            }
         }
 
         // Layer B — composed-Cow Stage chain. Opt-in under
@@ -3480,7 +4062,9 @@ impl Pipeline {
         // Sinks (NumMap/NumFilterMap/CountIf/etc.) into base Stage +
         // base Sink at entry — composition handles the rest.
         if composed_path_enabled() {
-            if let Some(out) = self.try_run_composed(root) { return out; }
+            if let Some(out) = self.try_run_composed(root) {
+                return out;
+            }
         }
 
         // One VM owned by the pull loop — shared across stage program
@@ -3506,22 +4090,38 @@ impl Pipeline {
         let mut skipped: usize = 0;
 
         let iter: Box<dyn Iterator<Item = Val>> = match &recv {
-            Val::Arr(a)      => Box::new(a.as_ref().clone().into_iter()),
-            Val::IntVec(a)   => Box::new(a.iter().map(|n| Val::Int(*n)).collect::<Vec<_>>().into_iter()),
-            Val::FloatVec(a) => Box::new(a.iter().map(|f| Val::Float(*f)).collect::<Vec<_>>().into_iter()),
-            Val::StrVec(a)   => Box::new(a.iter().map(|s| Val::Str(Arc::clone(s))).collect::<Vec<_>>().into_iter()),
+            Val::Arr(a) => Box::new(a.as_ref().clone().into_iter()),
+            Val::IntVec(a) => Box::new(
+                a.iter()
+                    .map(|n| Val::Int(*n))
+                    .collect::<Vec<_>>()
+                    .into_iter(),
+            ),
+            Val::FloatVec(a) => Box::new(
+                a.iter()
+                    .map(|f| Val::Float(*f))
+                    .collect::<Vec<_>>()
+                    .into_iter(),
+            ),
+            Val::StrVec(a) => Box::new(
+                a.iter()
+                    .map(|s| Val::Str(Arc::clone(s)))
+                    .collect::<Vec<_>>()
+                    .into_iter(),
+            ),
             // ObjVec: materialise rows into Val::Obj for the per-row pull
             // path.  Slot-indexed columnar fast paths in `try_columnar`
             // handle the common SumMap / CountIf / SumFilterMap shapes
             // before this point — landing here means the sink is
             // Collect / take / skip / etc., which truly need Val::Obj
             // rows for downstream stages.
-            Val::ObjVec(d)   => {
+            Val::ObjVec(d) => {
                 let n = d.nrows();
                 let mut out: Vec<Val> = Vec::with_capacity(n);
                 let stride = d.stride();
                 for row in 0..n {
-                    let mut m: indexmap::IndexMap<Arc<str>, Val> = indexmap::IndexMap::with_capacity(stride);
+                    let mut m: indexmap::IndexMap<Arc<str>, Val> =
+                        indexmap::IndexMap::with_capacity(stride);
                     for (i, k) in d.keys.iter().enumerate() {
                         m.insert(Arc::clone(k), d.cells[row * stride + i].clone());
                     }
@@ -3535,34 +4135,47 @@ impl Pipeline {
 
         // Sink accumulators.
         let mut acc_collect: Vec<Val> = Vec::new();
-        let mut acc_count:   i64 = 0;
-        let mut acc_sum_i:   i64 = 0;
-        let mut acc_sum_f:   f64 = 0.0;
+        let mut acc_count: i64 = 0;
+        let mut acc_sum_i: i64 = 0;
+        let mut acc_sum_f: f64 = 0.0;
         let mut sum_floated: bool = false;
-        let mut acc_min_f:   f64 = f64::INFINITY;
-        let mut acc_max_f:   f64 = f64::NEG_INFINITY;
-        let mut acc_n_obs:   usize = 0;
-        let mut acc_first:   Option<Val> = None;
-        let mut acc_last:    Option<Val> = None;
+        let mut acc_min_f: f64 = f64::INFINITY;
+        let mut acc_max_f: f64 = f64::NEG_INFINITY;
+        let mut acc_n_obs: usize = 0;
+        let mut acc_first: Option<Val> = None;
+        let mut acc_last: Option<Val> = None;
         // Category E: HLL-12 register array (4096 × u8) — only used when
         // sink is ApproxCountDistinct.  Allocates ~4KB even when unused;
         // optimiser could box this when not needed.  Cheap relative to
         // typical query memory.
-        let mut acc_hll:     [u8; HLL_M] = [0u8; HLL_M];
+        let mut acc_hll: [u8; HLL_M] = [0u8; HLL_M];
 
         // Stages that materialise force a buffer; stages preceding
         // them run as streaming filter/map over the buffer.  Process
         // every stage in order so the pipeline semantics match the
         // surface query.
-        let needs_barrier = self.stages.iter().any(|s| matches!(s,
-            Stage::Reverse | Stage::Sort(_) | Stage::UniqueBy(_)
-                | Stage::FlatMap(_) | Stage::GroupBy(_)
-                | Stage::Split(_) | Stage::Chunk(_) | Stage::Window(_)
-                | Stage::DropWhile(_)
-                | Stage::IndicesWhere(_) | Stage::FindIndex(_)
-                | Stage::MaxBy(_) | Stage::MinBy(_) | Stage::Partition(_)
-                | Stage::CountBy(_) | Stage::IndexBy(_)
-                | Stage::SortedDedup(_)));
+        let needs_barrier = self.stages.iter().any(|s| {
+            matches!(
+                s,
+                Stage::Reverse
+                    | Stage::Sort(_)
+                    | Stage::UniqueBy(_)
+                    | Stage::FlatMap(_)
+                    | Stage::GroupBy(_)
+                    | Stage::Split(_)
+                    | Stage::Chunk(_)
+                    | Stage::Window(_)
+                    | Stage::DropWhile(_)
+                    | Stage::IndicesWhere(_)
+                    | Stage::FindIndex(_)
+                    | Stage::MaxBy(_)
+                    | Stage::MinBy(_)
+                    | Stage::Partition(_)
+                    | Stage::CountBy(_)
+                    | Stage::IndexBy(_)
+                    | Stage::SortedDedup(_)
+            )
+        });
         let pre_iter: Box<dyn Iterator<Item = Val>> = if needs_barrier {
             let mut buf: Vec<Val> = iter.collect();
             // Phase 1.2 — barrier-stage path now reads stage_kernels[i]
@@ -3570,7 +4183,9 @@ impl Pipeline {
             // variants too, not just streaming Filter/Map.  Extends
             // Layer A coverage to the keyed-barrier surface.
             for (stage_idx, stage) in self.stages.iter().enumerate() {
-                let kernel = self.stage_kernels.get(stage_idx)
+                let kernel = self
+                    .stage_kernels
+                    .get(stage_idx)
                     .unwrap_or(&BodyKernel::Generic);
                 match stage {
                     Stage::Filter(prog) => {
@@ -3584,7 +4199,11 @@ impl Pipeline {
                         })?;
                     }
                     Stage::Skip(n) => {
-                        if buf.len() <= *n { buf.clear(); } else { buf.drain(..*n); }
+                        if buf.len() <= *n {
+                            buf.clear();
+                        } else {
+                            buf.drain(..*n);
+                        }
                     }
                     Stage::Take(n) => {
                         buf.truncate(*n);
@@ -3614,7 +4233,11 @@ impl Pipeline {
                             keep.push(seen.insert(format!("{:?}", k)));
                         }
                         let mut out: Vec<Val> = Vec::with_capacity(buf.len());
-                        for (i, v) in buf.into_iter().enumerate() { if keep[i] { out.push(v); } }
+                        for (i, v) in buf.into_iter().enumerate() {
+                            if keep[i] {
+                                out.push(v);
+                            }
+                        }
                         buf = out;
                     }
                     Stage::FlatMap(prog) => {
@@ -3645,8 +4268,7 @@ impl Pipeline {
                         let mut out: Vec<Val> = Vec::with_capacity(buf.len());
                         for v in buf.into_iter() {
                             if let Some(Val::Arr(a)) = split_apply(&v, sep.as_ref()) {
-                                out.extend(Arc::try_unwrap(a)
-                                    .unwrap_or_else(|a| (*a).clone()));
+                                out.extend(Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone()));
                             }
                         }
                         buf = out;
@@ -3658,12 +4280,16 @@ impl Pipeline {
                         }
                         buf = out;
                     }
-                    Stage::Replace { needle, replacement, all } => {
+                    Stage::Replace {
+                        needle,
+                        replacement,
+                        all,
+                    } => {
                         let mut out: Vec<Val> = Vec::with_capacity(buf.len());
                         for v in buf.into_iter() {
                             match replace_apply(v.clone(), needle, replacement, *all) {
                                 Some(r) => out.push(r),
-                                None    => out.push(v),
+                                None => out.push(v),
                             }
                         }
                         buf = out;
@@ -3691,44 +4317,98 @@ impl Pipeline {
                         buf = buf.into_iter().map(|v| entries_apply(&v)).collect();
                     }
                     Stage::Upper
-                    | Stage::Lower | Stage::Trim | Stage::TrimLeft | Stage::TrimRight
-                    | Stage::Capitalize | Stage::TitleCase
-                    | Stage::HtmlEscape | Stage::HtmlUnescape
-                    | Stage::UrlEncode | Stage::UrlDecode
-                    | Stage::ToBase64 | Stage::FromBase64
+                    | Stage::Lower
+                    | Stage::Trim
+                    | Stage::TrimLeft
+                    | Stage::TrimRight
+                    | Stage::Capitalize
+                    | Stage::TitleCase
+                    | Stage::HtmlEscape
+                    | Stage::HtmlUnescape
+                    | Stage::UrlEncode
+                    | Stage::UrlDecode
+                    | Stage::ToBase64
+                    | Stage::FromBase64
                     | Stage::Dedent
-                    | Stage::SnakeCase | Stage::KebabCase | Stage::CamelCase | Stage::PascalCase
+                    | Stage::SnakeCase
+                    | Stage::KebabCase
+                    | Stage::CamelCase
+                    | Stage::PascalCase
                     | Stage::ReverseStr
-                    | Stage::Lines | Stage::Words | Stage::Chars
-                    | Stage::CharsOf | Stage::BytesOf | Stage::ByteLen
-                    | Stage::IsBlank | Stage::IsNumeric | Stage::IsAlpha | Stage::IsAscii
-                    | Stage::ToNumber | Stage::ToBool
-                    | Stage::ParseInt | Stage::ParseFloat | Stage::ParseBool
-                    | Stage::StartsWith(_) | Stage::EndsWith(_)
-                    | Stage::StripPrefix(_) | Stage::StripSuffix(_)
-                    | Stage::StrMatches(_) | Stage::IndexOf(_) | Stage::LastIndexOf(_)
+                    | Stage::Lines
+                    | Stage::Words
+                    | Stage::Chars
+                    | Stage::CharsOf
+                    | Stage::BytesOf
+                    | Stage::ByteLen
+                    | Stage::IsBlank
+                    | Stage::IsNumeric
+                    | Stage::IsAlpha
+                    | Stage::IsAscii
+                    | Stage::ToNumber
+                    | Stage::ToBool
+                    | Stage::ParseInt
+                    | Stage::ParseFloat
+                    | Stage::ParseBool
+                    | Stage::StartsWith(_)
+                    | Stage::EndsWith(_)
+                    | Stage::StripPrefix(_)
+                    | Stage::StripSuffix(_)
+                    | Stage::StrMatches(_)
+                    | Stage::IndexOf(_)
+                    | Stage::LastIndexOf(_)
                     | Stage::Scan(_)
-                    | Stage::Repeat(_) | Stage::Indent(_) | Stage::FlattenDepth(_)
-                    | Stage::Compact | Stage::Pairwise | Stage::Invert
-                    | Stage::PadLeft { .. } | Stage::PadRight { .. } | Stage::Center { .. }
-                    | Stage::ReMatch(_) | Stage::ReMatchFirst(_) | Stage::ReMatchAll(_)
-                    | Stage::ReCaptures(_) | Stage::ReCapturesAll(_) | Stage::ReSplit(_)
-                    | Stage::ReReplace { .. } | Stage::ReReplaceAll { .. }
-                    | Stage::ContainsAny(_) | Stage::ContainsAll(_)
-                    | Stage::ToCsv | Stage::ToTsv | Stage::ToPairs
-                    | Stage::CumMax | Stage::CumMin | Stage::DiffWindow | Stage::PctChange
+                    | Stage::Repeat(_)
+                    | Stage::Indent(_)
+                    | Stage::FlattenDepth(_)
+                    | Stage::Compact
+                    | Stage::Pairwise
+                    | Stage::Invert
+                    | Stage::PadLeft { .. }
+                    | Stage::PadRight { .. }
+                    | Stage::Center { .. }
+                    | Stage::ReMatch(_)
+                    | Stage::ReMatchFirst(_)
+                    | Stage::ReMatchAll(_)
+                    | Stage::ReCaptures(_)
+                    | Stage::ReCapturesAll(_)
+                    | Stage::ReSplit(_)
+                    | Stage::ReReplace { .. }
+                    | Stage::ReReplaceAll { .. }
+                    | Stage::ContainsAny(_)
+                    | Stage::ContainsAll(_)
+                    | Stage::ToCsv
+                    | Stage::ToTsv
+                    | Stage::ToPairs
+                    | Stage::CumMax
+                    | Stage::CumMin
+                    | Stage::DiffWindow
+                    | Stage::PctChange
                     | Stage::ZScore
-                    | Stage::RollingSum(_) | Stage::RollingAvg(_)
-                    | Stage::RollingMin(_) | Stage::RollingMax(_)
-                    | Stage::Lag(_) | Stage::Lead(_)
-                    | Stage::GetPath(_) | Stage::HasPath(_) | Stage::Has(_)
-                    | Stage::DelPath(_) | Stage::FlattenKeys(_) | Stage::UnflattenKeys(_)
+                    | Stage::RollingSum(_)
+                    | Stage::RollingAvg(_)
+                    | Stage::RollingMin(_)
+                    | Stage::RollingMax(_)
+                    | Stage::Lag(_)
+                    | Stage::Lead(_)
+                    | Stage::GetPath(_)
+                    | Stage::HasPath(_)
+                    | Stage::Has(_)
+                    | Stage::DelPath(_)
+                    | Stage::FlattenKeys(_)
+                    | Stage::UnflattenKeys(_)
                     | Stage::Schema
-                    | Stage::EnumerateZ | Stage::Join(_)
-                    | Stage::IndexOfValue(_) | Stage::IndicesOf(_)
-                    | Stage::Explode(_) | Stage::Implode(_)
-                    | Stage::TypeName | Stage::ToString | Stage::ToJson => {
-                        buf = buf.into_iter()
+                    | Stage::EnumerateZ
+                    | Stage::Join(_)
+                    | Stage::IndexOfValue(_)
+                    | Stage::IndicesOf(_)
+                    | Stage::Explode(_)
+                    | Stage::Implode(_)
+                    | Stage::TypeName
+                    | Stage::ToString
+                    | Stage::ToJson => {
+                        buf = buf
+                            .into_iter()
                             .map(|v| lifted_apply(stage, &v).unwrap_or(v))
                             .collect();
                     }
@@ -3772,7 +4452,8 @@ impl Pipeline {
                             buf = vec![Val::Null];
                         } else {
                             let mut best_idx = 0usize;
-                            let mut best_key = eval_kernel(kernel, &buf[0], &mut vm, &mut loop_env, prog)?;
+                            let mut best_key =
+                                eval_kernel(kernel, &buf[0], &mut vm, &mut loop_env, prog)?;
                             for i in 1..buf.len() {
                                 let k = eval_kernel(kernel, &buf[i], &mut vm, &mut loop_env, prog)?;
                                 let cmp = cmp_val_total(&k, &best_key);
@@ -3781,7 +4462,10 @@ impl Pipeline {
                                 } else {
                                     cmp == std::cmp::Ordering::Less
                                 };
-                                if take { best_idx = i; best_key = k; }
+                                if take {
+                                    best_idx = i;
+                                    best_key = k;
+                                }
                             }
                             buf = vec![buf.into_iter().nth(best_idx).unwrap()];
                         }
@@ -3803,9 +4487,7 @@ impl Pipeline {
                         match key_prog {
                             None => {
                                 buf.sort_by(|a, b| cmp_val_total(a, b));
-                                buf.dedup_by(|a, b| {
-                                    crate::eval::util::vals_eq(a, b)
-                                });
+                                buf.dedup_by(|a, b| crate::eval::util::vals_eq(a, b));
                             }
                             Some(prog) => {
                                 // Decorate-sort-undecorate via key prog.
@@ -3834,7 +4516,8 @@ impl Pipeline {
                     | Stage::FilterKeys(prog) => {
                         let mut out: Vec<Val> = Vec::with_capacity(buf.len());
                         for v in buf.into_iter() {
-                            let mapped = apply_lambda_obj(stage, &v, &mut vm, &mut loop_env, kernel, prog)?;
+                            let mapped =
+                                apply_lambda_obj(stage, &v, &mut vm, &mut loop_env, kernel, prog)?;
                             out.push(mapped);
                         }
                         buf = out;
@@ -3853,100 +4536,189 @@ impl Pipeline {
             // stages here.
             if !needs_barrier {
                 for (stage_idx, stage) in self.stages.iter().enumerate() {
-                    let kernel = self.stage_kernels.get(stage_idx)
+                    let kernel = self
+                        .stage_kernels
+                        .get(stage_idx)
                         .unwrap_or(&BodyKernel::Generic);
                     match stage {
                         Stage::Skip(n) => {
-                            if skipped < *n { skipped += 1; continue 'outer; }
+                            if skipped < *n {
+                                skipped += 1;
+                                continue 'outer;
+                            }
                         }
                         Stage::Take(n) => {
-                            if taken >= *n { break 'outer; }
+                            if taken >= *n {
+                                break 'outer;
+                            }
                         }
                         Stage::Filter(prog) => {
                             if !filter_one(&item, |v| {
                                 eval_kernel(kernel, v, &mut vm, &mut loop_env, prog)
-                            })? { continue 'outer; }
+                            })? {
+                                continue 'outer;
+                            }
                         }
                         Stage::Map(prog) => {
                             item = map_one(&item, |v| {
                                 eval_kernel(kernel, v, &mut vm, &mut loop_env, prog)
                             })?;
                         }
-                        Stage::Reverse | Stage::Sort(_) | Stage::UniqueBy(_)
-                        | Stage::FlatMap(_) | Stage::GroupBy(_) => {}
+                        Stage::Reverse
+                        | Stage::Sort(_)
+                        | Stage::UniqueBy(_)
+                        | Stage::FlatMap(_)
+                        | Stage::GroupBy(_) => {}
                         Stage::Split(_) | Stage::Chunk(_) | Stage::Window(_) => {} // forced into barrier path above
                         Stage::Slice(start, end) => {
                             item = slice_apply(item, *start, *end);
                         }
-                        Stage::Replace { needle, replacement, all } => {
-                            if let Some(r) = replace_apply(item.clone(), needle, replacement, *all) {
+                        Stage::Replace {
+                            needle,
+                            replacement,
+                            all,
+                        } => {
+                            if let Some(r) = replace_apply(item.clone(), needle, replacement, *all)
+                            {
                                 item = r;
                             }
                         }
                         Stage::CompiledMap(plan) => {
                             item = run_compiled_map(plan, item)?;
                         }
-                        Stage::Keys    => { item = keys_apply(&item); }
-                        Stage::Values  => { item = values_apply(&item); }
-                        Stage::Entries => { item = entries_apply(&item); }
+                        Stage::Keys => {
+                            item = keys_apply(&item);
+                        }
+                        Stage::Values => {
+                            item = values_apply(&item);
+                        }
+                        Stage::Entries => {
+                            item = entries_apply(&item);
+                        }
                         Stage::Upper
-                        | Stage::Lower | Stage::Trim | Stage::TrimLeft | Stage::TrimRight
-                        | Stage::Capitalize | Stage::TitleCase
-                        | Stage::HtmlEscape | Stage::HtmlUnescape
-                        | Stage::UrlEncode | Stage::UrlDecode
-                        | Stage::ToBase64 | Stage::FromBase64
+                        | Stage::Lower
+                        | Stage::Trim
+                        | Stage::TrimLeft
+                        | Stage::TrimRight
+                        | Stage::Capitalize
+                        | Stage::TitleCase
+                        | Stage::HtmlEscape
+                        | Stage::HtmlUnescape
+                        | Stage::UrlEncode
+                        | Stage::UrlDecode
+                        | Stage::ToBase64
+                        | Stage::FromBase64
                         | Stage::Dedent
-                        | Stage::SnakeCase | Stage::KebabCase | Stage::CamelCase | Stage::PascalCase
+                        | Stage::SnakeCase
+                        | Stage::KebabCase
+                        | Stage::CamelCase
+                        | Stage::PascalCase
                         | Stage::ReverseStr
-                        | Stage::Lines | Stage::Words | Stage::Chars
-                        | Stage::CharsOf | Stage::BytesOf | Stage::ByteLen
-                        | Stage::IsBlank | Stage::IsNumeric | Stage::IsAlpha | Stage::IsAscii
-                        | Stage::ToNumber | Stage::ToBool
-                        | Stage::ParseInt | Stage::ParseFloat | Stage::ParseBool
-                        | Stage::StartsWith(_) | Stage::EndsWith(_)
-                        | Stage::StripPrefix(_) | Stage::StripSuffix(_)
-                        | Stage::StrMatches(_) | Stage::IndexOf(_) | Stage::LastIndexOf(_)
+                        | Stage::Lines
+                        | Stage::Words
+                        | Stage::Chars
+                        | Stage::CharsOf
+                        | Stage::BytesOf
+                        | Stage::ByteLen
+                        | Stage::IsBlank
+                        | Stage::IsNumeric
+                        | Stage::IsAlpha
+                        | Stage::IsAscii
+                        | Stage::ToNumber
+                        | Stage::ToBool
+                        | Stage::ParseInt
+                        | Stage::ParseFloat
+                        | Stage::ParseBool
+                        | Stage::StartsWith(_)
+                        | Stage::EndsWith(_)
+                        | Stage::StripPrefix(_)
+                        | Stage::StripSuffix(_)
+                        | Stage::StrMatches(_)
+                        | Stage::IndexOf(_)
+                        | Stage::LastIndexOf(_)
                         | Stage::Scan(_)
-                        | Stage::Repeat(_) | Stage::Indent(_) | Stage::FlattenDepth(_)
-                        | Stage::Compact | Stage::Pairwise | Stage::Invert
-                        | Stage::PadLeft { .. } | Stage::PadRight { .. } | Stage::Center { .. }
-                        | Stage::ReMatch(_) | Stage::ReMatchFirst(_) | Stage::ReMatchAll(_)
-                        | Stage::ReCaptures(_) | Stage::ReCapturesAll(_) | Stage::ReSplit(_)
-                        | Stage::ReReplace { .. } | Stage::ReReplaceAll { .. }
-                        | Stage::ContainsAny(_) | Stage::ContainsAll(_)
-                        | Stage::ToCsv | Stage::ToTsv | Stage::ToPairs
-                        | Stage::CumMax | Stage::CumMin | Stage::DiffWindow | Stage::PctChange
-                    | Stage::ZScore
-                    | Stage::RollingSum(_) | Stage::RollingAvg(_)
-                    | Stage::RollingMin(_) | Stage::RollingMax(_)
-                    | Stage::Lag(_) | Stage::Lead(_)
-                    | Stage::GetPath(_) | Stage::HasPath(_) | Stage::Has(_)
-                    | Stage::DelPath(_) | Stage::FlattenKeys(_) | Stage::UnflattenKeys(_)
-                    | Stage::Schema
-                    | Stage::EnumerateZ | Stage::Join(_)
-                    | Stage::IndexOfValue(_) | Stage::IndicesOf(_)
-                    | Stage::Explode(_) | Stage::Implode(_)
-                    | Stage::TypeName | Stage::ToString | Stage::ToJson => {
+                        | Stage::Repeat(_)
+                        | Stage::Indent(_)
+                        | Stage::FlattenDepth(_)
+                        | Stage::Compact
+                        | Stage::Pairwise
+                        | Stage::Invert
+                        | Stage::PadLeft { .. }
+                        | Stage::PadRight { .. }
+                        | Stage::Center { .. }
+                        | Stage::ReMatch(_)
+                        | Stage::ReMatchFirst(_)
+                        | Stage::ReMatchAll(_)
+                        | Stage::ReCaptures(_)
+                        | Stage::ReCapturesAll(_)
+                        | Stage::ReSplit(_)
+                        | Stage::ReReplace { .. }
+                        | Stage::ReReplaceAll { .. }
+                        | Stage::ContainsAny(_)
+                        | Stage::ContainsAll(_)
+                        | Stage::ToCsv
+                        | Stage::ToTsv
+                        | Stage::ToPairs
+                        | Stage::CumMax
+                        | Stage::CumMin
+                        | Stage::DiffWindow
+                        | Stage::PctChange
+                        | Stage::ZScore
+                        | Stage::RollingSum(_)
+                        | Stage::RollingAvg(_)
+                        | Stage::RollingMin(_)
+                        | Stage::RollingMax(_)
+                        | Stage::Lag(_)
+                        | Stage::Lead(_)
+                        | Stage::GetPath(_)
+                        | Stage::HasPath(_)
+                        | Stage::Has(_)
+                        | Stage::DelPath(_)
+                        | Stage::FlattenKeys(_)
+                        | Stage::UnflattenKeys(_)
+                        | Stage::Schema
+                        | Stage::EnumerateZ
+                        | Stage::Join(_)
+                        | Stage::IndexOfValue(_)
+                        | Stage::IndicesOf(_)
+                        | Stage::Explode(_)
+                        | Stage::Implode(_)
+                        | Stage::TypeName
+                        | Stage::ToString
+                        | Stage::ToJson => {
                             item = lifted_apply(stage, &item).unwrap_or(item);
                         }
                         // Lambda-bearing streaming arm: TakeWhile.
                         Stage::TakeWhile(prog) => {
                             if !take_while_one(&item, |v| {
                                 eval_kernel(kernel, v, &mut vm, &mut loop_env, prog)
-                            })? { break 'outer; }
+                            })? {
+                                break 'outer;
+                            }
                         }
                         Stage::TransformValues(prog)
                         | Stage::TransformKeys(prog)
                         | Stage::FilterValues(prog)
                         | Stage::FilterKeys(prog) => {
-                            item = apply_lambda_obj(stage, &item, &mut vm, &mut loop_env, kernel, prog)?;
+                            item = apply_lambda_obj(
+                                stage,
+                                &item,
+                                &mut vm,
+                                &mut loop_env,
+                                kernel,
+                                prog,
+                            )?;
                         }
                         // Forced into barrier path above (DropWhile needs
                         // cross-row state; reductions consume full stream).
                         Stage::DropWhile(_)
-                        | Stage::IndicesWhere(_) | Stage::FindIndex(_)
-                        | Stage::MaxBy(_) | Stage::MinBy(_) | Stage::Partition(_)
-                        | Stage::CountBy(_) | Stage::IndexBy(_)
+                        | Stage::IndicesWhere(_)
+                        | Stage::FindIndex(_)
+                        | Stage::MaxBy(_)
+                        | Stage::MinBy(_)
+                        | Stage::Partition(_)
+                        | Stage::CountBy(_)
+                        | Stage::IndexBy(_)
                         | Stage::SortedDedup(_) => {}
                     }
                 }
@@ -3955,14 +4727,27 @@ impl Pipeline {
             // Sink.
             match &self.sink {
                 Sink::Collect => acc_collect.push(item),
-                Sink::Count   => acc_count += 1,
+                Sink::Count => acc_count += 1,
                 Sink::Numeric(op) => {
-                    num_fold(&mut acc_sum_i, &mut acc_sum_f, &mut sum_floated,
-                             &mut acc_min_f, &mut acc_max_f, &mut acc_n_obs,
-                             *op, &item);
+                    num_fold(
+                        &mut acc_sum_i,
+                        &mut acc_sum_f,
+                        &mut sum_floated,
+                        &mut acc_min_f,
+                        &mut acc_max_f,
+                        &mut acc_n_obs,
+                        *op,
+                        &item,
+                    );
                 }
-                Sink::First => { if acc_first.is_none() { acc_first = Some(item.clone()); } }
-                Sink::Last  => { acc_last = Some(item.clone()); }
+                Sink::First => {
+                    if acc_first.is_none() {
+                        acc_first = Some(item.clone());
+                    }
+                }
+                Sink::Last => {
+                    acc_last = Some(item.clone());
+                }
                 Sink::ApproxCountDistinct => {
                     hll_observe(&mut acc_hll, &item);
                 }
@@ -3984,17 +4769,20 @@ impl Pipeline {
                 } else {
                     Val::arr(acc_collect)
                 }
-            },
-            Sink::Count             => Val::Int(acc_count),
-            Sink::Numeric(op) =>
-                num_finalise(*op, acc_sum_i, acc_sum_f, sum_floated,
-                             acc_min_f, acc_max_f, acc_n_obs),
-            Sink::First =>
-                acc_first.unwrap_or(Val::Null),
-            Sink::Last =>
-                acc_last.unwrap_or(Val::Null),
-            Sink::ApproxCountDistinct =>
-                Val::Int(hll_estimate(&acc_hll) as i64),
+            }
+            Sink::Count => Val::Int(acc_count),
+            Sink::Numeric(op) => num_finalise(
+                *op,
+                acc_sum_i,
+                acc_sum_f,
+                sum_floated,
+                acc_min_f,
+                acc_max_f,
+                acc_n_obs,
+            ),
+            Sink::First => acc_first.unwrap_or(Val::Null),
+            Sink::Last => acc_last.unwrap_or(Val::Null),
+            Sink::ApproxCountDistinct => Val::Int(hll_estimate(&acc_hll) as i64),
         })
     }
 }
@@ -4017,9 +4805,9 @@ const HLL_M: usize = 1 << HLL_P; // 4096
 
 #[inline]
 fn hll_hash(v: &Val) -> u64 {
-    use std::hash::{Hasher, BuildHasher};
-    use std::collections::hash_map::RandomState;
     use crate::eval::util::val_to_key;
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
     // Re-use val_to_key for canonical string-form hashing — matches
     // UniqueBy semantics so `unique().count()` and
     // `approx_count_distinct()` agree on what counts as "distinct".
@@ -4036,7 +4824,9 @@ fn hll_observe(reg: &mut [u8; HLL_M], v: &Val) {
     let idx = (h >> (64 - HLL_P)) as usize;
     let w = (h << HLL_P) | (1u64 << (HLL_P - 1));
     let lz = w.leading_zeros() as u8 + 1;
-    if lz > reg[idx] { reg[idx] = lz; }
+    if lz > reg[idx] {
+        reg[idx] = lz;
+    }
 }
 
 fn hll_estimate(reg: &[u8; HLL_M]) -> f64 {
@@ -4045,7 +4835,9 @@ fn hll_estimate(reg: &[u8; HLL_M]) -> f64 {
     let mut zeros: usize = 0;
     for &r in reg.iter() {
         z += 1.0 / (1u64 << r) as f64;
-        if r == 0 { zeros += 1; }
+        if r == 0 {
+            zeros += 1;
+        }
     }
     let m = HLL_M as f64;
     let alpha_m = 0.7213 / (1.0 + 1.079 / m); // p=12 form
@@ -4069,8 +4861,12 @@ pub(crate) fn apply_lambda_obj(
     kernel: &BodyKernel,
     prog: &std::sync::Arc<crate::vm::Program>,
 ) -> Result<Val, EvalError> {
-    let m = match recv.as_object() { Some(m) => m, None => return Ok(recv.clone()) };
-    let mut out: indexmap::IndexMap<std::sync::Arc<str>, Val> = indexmap::IndexMap::with_capacity(m.len());
+    let m = match recv.as_object() {
+        Some(m) => m,
+        None => return Ok(recv.clone()),
+    };
+    let mut out: indexmap::IndexMap<std::sync::Arc<str>, Val> =
+        indexmap::IndexMap::with_capacity(m.len());
     for (k, v) in m.iter() {
         match stage {
             Stage::TransformKeys(_) => {
@@ -4078,7 +4874,9 @@ pub(crate) fn apply_lambda_obj(
                 let new_k = eval_kernel(kernel, &k_val, vm, loop_env, prog)?;
                 let new_k_arc = match new_k {
                     Val::Str(s) => s,
-                    other       => std::sync::Arc::from(crate::eval::util::val_to_string(&other).as_str()),
+                    other => {
+                        std::sync::Arc::from(crate::eval::util::val_to_string(&other).as_str())
+                    }
                 };
                 out.insert(new_k_arc, v.clone());
             }
@@ -4131,43 +4929,43 @@ pub fn vm_lift_zero_arg(method: crate::vm::BuiltinMethod, recv: &Val) -> Option<
     use crate::vm::BuiltinMethod as M;
     let stage = match method {
         // String → String (idempotent).
-        M::Upper      => Stage::Upper,
-        M::Lower      => Stage::Lower,
-        M::Trim       => Stage::Trim,
-        M::TrimLeft   => Stage::TrimLeft,
-        M::TrimRight  => Stage::TrimRight,
+        M::Upper => Stage::Upper,
+        M::Lower => Stage::Lower,
+        M::Trim => Stage::Trim,
+        M::TrimLeft => Stage::TrimLeft,
+        M::TrimRight => Stage::TrimRight,
         M::Capitalize => Stage::Capitalize,
-        M::TitleCase  => Stage::TitleCase,
-        M::Dedent     => Stage::Dedent,
+        M::TitleCase => Stage::TitleCase,
+        M::Dedent => Stage::Dedent,
         // String → String (other).
-        M::HtmlEscape   => Stage::HtmlEscape,
+        M::HtmlEscape => Stage::HtmlEscape,
         M::HtmlUnescape => Stage::HtmlUnescape,
-        M::UrlEncode    => Stage::UrlEncode,
-        M::UrlDecode    => Stage::UrlDecode,
-        M::ToBase64     => Stage::ToBase64,
-        M::FromBase64   => Stage::FromBase64,
+        M::UrlEncode => Stage::UrlEncode,
+        M::UrlDecode => Stage::UrlDecode,
+        M::ToBase64 => Stage::ToBase64,
+        M::FromBase64 => Stage::FromBase64,
         // String → other.
-        M::Lines    => Stage::Lines,
-        M::Words    => Stage::Words,
-        M::Chars    => Stage::Chars,
+        M::Lines => Stage::Lines,
+        M::Words => Stage::Words,
+        M::Chars => Stage::Chars,
         M::ToNumber => Stage::ToNumber,
-        M::ToBool   => Stage::ToBool,
+        M::ToBool => Stage::ToBool,
         // Object → other.
-        M::Keys    => Stage::Keys,
-        M::Values  => Stage::Values,
+        M::Keys => Stage::Keys,
+        M::Values => Stage::Values,
         M::Entries => Stage::Entries,
-        M::Invert  => Stage::Invert,
+        M::Invert => Stage::Invert,
         // Array → array.
-        M::Compact  => Stage::Compact,
+        M::Compact => Stage::Compact,
         M::Pairwise => Stage::Pairwise,
         // Scalar Val → Str / Int.
-        M::Type     => Stage::TypeName,
+        M::Type => Stage::TypeName,
         M::ToString => Stage::ToString,
-        M::ToJson   => Stage::ToJson,
+        M::ToJson => Stage::ToJson,
         // eval/func_* migrations — zero-arg pure.
-        M::ToCsv    => Stage::ToCsv,
-        M::ToTsv    => Stage::ToTsv,
-        M::ToPairs  => Stage::ToPairs,
+        M::ToCsv => Stage::ToCsv,
+        M::ToTsv => Stage::ToTsv,
+        M::ToPairs => Stage::ToPairs,
         // CumMax / CumMin / DiffWindow / PctChange not in BuiltinMethod
         // enum (they are in `eval/func_arrays` only with no compile-time
         // BuiltinMethod variant).  Their fast-path enables once enum
@@ -4185,190 +4983,350 @@ pub(crate) fn lifted_apply(stage: &Stage, recv: &Val) -> Option<Val> {
     // unchanged when kernel filters (matches prior `lifted_apply`
     // semantics: never None for Stage variants registered here).
     macro_rules! lift_to_kernel {
-        ($k:expr) => { return Some($k(recv).unwrap_or_else(|| recv.clone())) };
+        ($k:expr) => {
+            return Some($k(recv).unwrap_or_else(|| recv.clone()))
+        };
     }
     match stage {
-        Stage::Upper        => lift_to_kernel!(crate::builtins::upper_apply),
-        Stage::Lower        => lift_to_kernel!(crate::builtins::lower_apply),
-        Stage::Trim         => lift_to_kernel!(crate::builtins::trim_apply),
-        Stage::TrimLeft     => lift_to_kernel!(crate::builtins::trim_left_apply),
-        Stage::TrimRight    => lift_to_kernel!(crate::builtins::trim_right_apply),
-        Stage::Capitalize   => lift_to_kernel!(crate::builtins::capitalize_apply),
-        Stage::TitleCase    => lift_to_kernel!(crate::builtins::title_case_apply),
-        Stage::HtmlEscape   => lift_to_kernel!(crate::builtins::html_escape_apply),
+        Stage::Upper => lift_to_kernel!(crate::builtins::upper_apply),
+        Stage::Lower => lift_to_kernel!(crate::builtins::lower_apply),
+        Stage::Trim => lift_to_kernel!(crate::builtins::trim_apply),
+        Stage::TrimLeft => lift_to_kernel!(crate::builtins::trim_left_apply),
+        Stage::TrimRight => lift_to_kernel!(crate::builtins::trim_right_apply),
+        Stage::Capitalize => lift_to_kernel!(crate::builtins::capitalize_apply),
+        Stage::TitleCase => lift_to_kernel!(crate::builtins::title_case_apply),
+        Stage::HtmlEscape => lift_to_kernel!(crate::builtins::html_escape_apply),
         Stage::HtmlUnescape => lift_to_kernel!(crate::builtins::html_unescape_apply),
-        Stage::UrlEncode    => lift_to_kernel!(crate::builtins::url_encode_apply),
-        Stage::UrlDecode    => lift_to_kernel!(crate::builtins::url_decode_apply),
-        Stage::ToBase64     => lift_to_kernel!(crate::builtins::to_base64_apply),
-        Stage::Dedent       => lift_to_kernel!(crate::builtins::dedent_apply),
-        Stage::SnakeCase    => lift_to_kernel!(crate::builtins::snake_case_apply),
-        Stage::KebabCase    => lift_to_kernel!(crate::builtins::kebab_case_apply),
-        Stage::CamelCase    => lift_to_kernel!(crate::builtins::camel_case_apply),
-        Stage::PascalCase   => lift_to_kernel!(crate::builtins::pascal_case_apply),
-        Stage::ReverseStr   => lift_to_kernel!(crate::builtins::reverse_str_apply),
-        Stage::Lines        => lift_to_kernel!(crate::builtins::lines_apply),
-        Stage::Words        => lift_to_kernel!(crate::builtins::words_apply),
-        Stage::Chars        => lift_to_kernel!(crate::builtins::chars_apply),
-        Stage::CharsOf      => lift_to_kernel!(crate::builtins::chars_of_apply),
-        Stage::BytesOf      => lift_to_kernel!(crate::builtins::bytes_of_apply),
-        Stage::ByteLen      => lift_to_kernel!(crate::builtins::byte_len_apply),
-        Stage::IsBlank      => lift_to_kernel!(crate::builtins::is_blank_apply),
-        Stage::IsNumeric    => lift_to_kernel!(crate::builtins::is_numeric_apply),
-        Stage::IsAlpha      => lift_to_kernel!(crate::builtins::is_alpha_apply),
-        Stage::IsAscii      => lift_to_kernel!(crate::builtins::is_ascii_apply),
-        Stage::ToNumber     => lift_to_kernel!(crate::builtins::to_number_apply),
-        Stage::ToBool       => lift_to_kernel!(crate::builtins::to_bool_apply),
-        Stage::ParseInt     => lift_to_kernel!(crate::builtins::parse_int_apply),
-        Stage::ParseFloat   => lift_to_kernel!(crate::builtins::parse_float_apply),
-        Stage::ParseBool    => lift_to_kernel!(crate::builtins::parse_bool_apply),
-        Stage::FromBase64   => lift_to_kernel!(crate::builtins::from_base64_apply),
-        Stage::StartsWith(p)  => return Some(crate::builtins::starts_with_apply(recv, p.as_ref()).unwrap_or_else(|| recv.clone())),
-        Stage::EndsWith(p)    => return Some(crate::builtins::ends_with_apply(recv, p.as_ref()).unwrap_or_else(|| recv.clone())),
-        Stage::StripPrefix(p) => return Some(crate::builtins::strip_prefix_apply(recv, p.as_ref()).unwrap_or_else(|| recv.clone())),
-        Stage::StripSuffix(p) => return Some(crate::builtins::strip_suffix_apply(recv, p.as_ref()).unwrap_or_else(|| recv.clone())),
-        Stage::StrMatches(p)  => return Some(crate::builtins::contains_apply(recv, p.as_ref()).unwrap_or_else(|| recv.clone())),
-        Stage::IndexOf(p)     => return Some(crate::builtins::index_of_apply(recv, p.as_ref()).unwrap_or_else(|| recv.clone())),
-        Stage::LastIndexOf(p) => return Some(crate::builtins::last_index_of_apply(recv, p.as_ref()).unwrap_or_else(|| recv.clone())),
-        Stage::Scan(p)        => return Some(crate::builtins::scan_apply(recv, p.as_ref()).unwrap_or_else(|| recv.clone())),
-        Stage::Repeat(n)      => return Some(crate::builtins::repeat_apply(recv, *n).unwrap_or_else(|| recv.clone())),
-        Stage::Indent(n)      => return Some(crate::builtins::indent_apply(recv, *n).unwrap_or_else(|| recv.clone())),
-        Stage::PadLeft  { width, fill } => return Some(crate::builtins::pad_left_apply(recv, *width, *fill).unwrap_or_else(|| recv.clone())),
-        Stage::PadRight { width, fill } => return Some(crate::builtins::pad_right_apply(recv, *width, *fill).unwrap_or_else(|| recv.clone())),
-        Stage::Center   { width, fill } => return Some(crate::builtins::center_apply(recv, *width, *fill).unwrap_or_else(|| recv.clone())),
+        Stage::UrlEncode => lift_to_kernel!(crate::builtins::url_encode_apply),
+        Stage::UrlDecode => lift_to_kernel!(crate::builtins::url_decode_apply),
+        Stage::ToBase64 => lift_to_kernel!(crate::builtins::to_base64_apply),
+        Stage::Dedent => lift_to_kernel!(crate::builtins::dedent_apply),
+        Stage::SnakeCase => lift_to_kernel!(crate::builtins::snake_case_apply),
+        Stage::KebabCase => lift_to_kernel!(crate::builtins::kebab_case_apply),
+        Stage::CamelCase => lift_to_kernel!(crate::builtins::camel_case_apply),
+        Stage::PascalCase => lift_to_kernel!(crate::builtins::pascal_case_apply),
+        Stage::ReverseStr => lift_to_kernel!(crate::builtins::reverse_str_apply),
+        Stage::Lines => lift_to_kernel!(crate::builtins::lines_apply),
+        Stage::Words => lift_to_kernel!(crate::builtins::words_apply),
+        Stage::Chars => lift_to_kernel!(crate::builtins::chars_apply),
+        Stage::CharsOf => lift_to_kernel!(crate::builtins::chars_of_apply),
+        Stage::BytesOf => lift_to_kernel!(crate::builtins::bytes_of_apply),
+        Stage::ByteLen => lift_to_kernel!(crate::builtins::byte_len_apply),
+        Stage::IsBlank => lift_to_kernel!(crate::builtins::is_blank_apply),
+        Stage::IsNumeric => lift_to_kernel!(crate::builtins::is_numeric_apply),
+        Stage::IsAlpha => lift_to_kernel!(crate::builtins::is_alpha_apply),
+        Stage::IsAscii => lift_to_kernel!(crate::builtins::is_ascii_apply),
+        Stage::ToNumber => lift_to_kernel!(crate::builtins::to_number_apply),
+        Stage::ToBool => lift_to_kernel!(crate::builtins::to_bool_apply),
+        Stage::ParseInt => lift_to_kernel!(crate::builtins::parse_int_apply),
+        Stage::ParseFloat => lift_to_kernel!(crate::builtins::parse_float_apply),
+        Stage::ParseBool => lift_to_kernel!(crate::builtins::parse_bool_apply),
+        Stage::FromBase64 => lift_to_kernel!(crate::builtins::from_base64_apply),
+        Stage::StartsWith(p) => {
+            return Some(
+                crate::builtins::starts_with_apply(recv, p.as_ref())
+                    .unwrap_or_else(|| recv.clone()),
+            )
+        }
+        Stage::EndsWith(p) => {
+            return Some(
+                crate::builtins::ends_with_apply(recv, p.as_ref()).unwrap_or_else(|| recv.clone()),
+            )
+        }
+        Stage::StripPrefix(p) => {
+            return Some(
+                crate::builtins::strip_prefix_apply(recv, p.as_ref())
+                    .unwrap_or_else(|| recv.clone()),
+            )
+        }
+        Stage::StripSuffix(p) => {
+            return Some(
+                crate::builtins::strip_suffix_apply(recv, p.as_ref())
+                    .unwrap_or_else(|| recv.clone()),
+            )
+        }
+        Stage::StrMatches(p) => {
+            return Some(
+                crate::builtins::contains_apply(recv, p.as_ref()).unwrap_or_else(|| recv.clone()),
+            )
+        }
+        Stage::IndexOf(p) => {
+            return Some(
+                crate::builtins::index_of_apply(recv, p.as_ref()).unwrap_or_else(|| recv.clone()),
+            )
+        }
+        Stage::LastIndexOf(p) => {
+            return Some(
+                crate::builtins::last_index_of_apply(recv, p.as_ref())
+                    .unwrap_or_else(|| recv.clone()),
+            )
+        }
+        Stage::Scan(p) => {
+            return Some(
+                crate::builtins::scan_apply(recv, p.as_ref()).unwrap_or_else(|| recv.clone()),
+            )
+        }
+        Stage::Repeat(n) => {
+            return Some(crate::builtins::repeat_apply(recv, *n).unwrap_or_else(|| recv.clone()))
+        }
+        Stage::Indent(n) => {
+            return Some(crate::builtins::indent_apply(recv, *n).unwrap_or_else(|| recv.clone()))
+        }
+        Stage::PadLeft { width, fill } => {
+            return Some(
+                crate::builtins::pad_left_apply(recv, *width, *fill)
+                    .unwrap_or_else(|| recv.clone()),
+            )
+        }
+        Stage::PadRight { width, fill } => {
+            return Some(
+                crate::builtins::pad_right_apply(recv, *width, *fill)
+                    .unwrap_or_else(|| recv.clone()),
+            )
+        }
+        Stage::Center { width, fill } => {
+            return Some(
+                crate::builtins::center_apply(recv, *width, *fill).unwrap_or_else(|| recv.clone()),
+            )
+        }
         // Array family.
-        Stage::Compact         => lift_to_kernel!(crate::builtins::compact_apply),
-        Stage::Pairwise        => lift_to_kernel!(crate::builtins::pairwise_apply),
-        Stage::FlattenDepth(d) => return Some(crate::builtins::flatten_depth_apply(recv, *d).unwrap_or_else(|| recv.clone())),
+        Stage::Compact => lift_to_kernel!(crate::builtins::compact_apply),
+        Stage::Pairwise => lift_to_kernel!(crate::builtins::pairwise_apply),
+        Stage::FlattenDepth(d) => {
+            return Some(
+                crate::builtins::flatten_depth_apply(recv, *d).unwrap_or_else(|| recv.clone()),
+            )
+        }
         // Object family.
-        Stage::Invert          => lift_to_kernel!(crate::builtins::invert_apply),
+        Stage::Invert => lift_to_kernel!(crate::builtins::invert_apply),
         // Path family.
-        Stage::GetPath(p)      => return Some(crate::builtins::get_path_apply(recv, p.as_ref()).unwrap_or_else(|| recv.clone())),
-        Stage::HasPath(p)      => return Some(crate::builtins::has_path_apply(recv, p.as_ref()).unwrap_or_else(|| recv.clone())),
-        Stage::Has(k)          => return Some(crate::builtins::has_apply(recv, k.as_ref()).unwrap_or_else(|| recv.clone())),
-        Stage::DelPath(p)      => return Some(crate::builtins::del_path_apply(recv, p.as_ref()).unwrap_or_else(|| recv.clone())),
-        Stage::FlattenKeys(s)  => return Some(crate::builtins::flatten_keys_apply(recv, s.as_ref()).unwrap_or_else(|| recv.clone())),
-        Stage::UnflattenKeys(s)=> return Some(crate::builtins::unflatten_keys_apply(recv, s.as_ref()).unwrap_or_else(|| recv.clone())),
+        Stage::GetPath(p) => {
+            return Some(
+                crate::builtins::get_path_apply(recv, p.as_ref()).unwrap_or_else(|| recv.clone()),
+            )
+        }
+        Stage::HasPath(p) => {
+            return Some(
+                crate::builtins::has_path_apply(recv, p.as_ref()).unwrap_or_else(|| recv.clone()),
+            )
+        }
+        Stage::Has(k) => {
+            return Some(
+                crate::builtins::has_apply(recv, k.as_ref()).unwrap_or_else(|| recv.clone()),
+            )
+        }
+        Stage::DelPath(p) => {
+            return Some(
+                crate::builtins::del_path_apply(recv, p.as_ref()).unwrap_or_else(|| recv.clone()),
+            )
+        }
+        Stage::FlattenKeys(s) => {
+            return Some(
+                crate::builtins::flatten_keys_apply(recv, s.as_ref())
+                    .unwrap_or_else(|| recv.clone()),
+            )
+        }
+        Stage::UnflattenKeys(s) => {
+            return Some(
+                crate::builtins::unflatten_keys_apply(recv, s.as_ref())
+                    .unwrap_or_else(|| recv.clone()),
+            )
+        }
         // Regex family.
-        Stage::ReMatch(p)      => return Some(crate::builtins::re_match_apply(recv, p.as_ref()).unwrap_or_else(|| recv.clone())),
-        Stage::ReMatchFirst(p) => return Some(crate::builtins::re_match_first_apply(recv, p.as_ref()).unwrap_or_else(|| recv.clone())),
-        Stage::ReMatchAll(p)   => return Some(crate::builtins::re_match_all_apply(recv, p.as_ref()).unwrap_or_else(|| recv.clone())),
-        Stage::ReCaptures(p)   => return Some(crate::builtins::re_captures_apply(recv, p.as_ref()).unwrap_or_else(|| recv.clone())),
-        Stage::ReCapturesAll(p)=> return Some(crate::builtins::re_captures_all_apply(recv, p.as_ref()).unwrap_or_else(|| recv.clone())),
-        Stage::ReSplit(p)      => return Some(crate::builtins::re_split_apply(recv, p.as_ref()).unwrap_or_else(|| recv.clone())),
-        Stage::ReReplace    { pat, with } => return Some(crate::builtins::re_replace_apply(recv, pat.as_ref(), with.as_ref()).unwrap_or_else(|| recv.clone())),
-        Stage::ReReplaceAll { pat, with } => return Some(crate::builtins::re_replace_all_apply(recv, pat.as_ref(), with.as_ref()).unwrap_or_else(|| recv.clone())),
-        Stage::ContainsAny(ns) => return Some(crate::builtins::contains_any_apply(recv, ns.as_ref()).unwrap_or_else(|| recv.clone())),
-        Stage::ContainsAll(ns) => return Some(crate::builtins::contains_all_apply(recv, ns.as_ref()).unwrap_or_else(|| recv.clone())),
+        Stage::ReMatch(p) => {
+            return Some(
+                crate::builtins::re_match_apply(recv, p.as_ref()).unwrap_or_else(|| recv.clone()),
+            )
+        }
+        Stage::ReMatchFirst(p) => {
+            return Some(
+                crate::builtins::re_match_first_apply(recv, p.as_ref())
+                    .unwrap_or_else(|| recv.clone()),
+            )
+        }
+        Stage::ReMatchAll(p) => {
+            return Some(
+                crate::builtins::re_match_all_apply(recv, p.as_ref())
+                    .unwrap_or_else(|| recv.clone()),
+            )
+        }
+        Stage::ReCaptures(p) => {
+            return Some(
+                crate::builtins::re_captures_apply(recv, p.as_ref())
+                    .unwrap_or_else(|| recv.clone()),
+            )
+        }
+        Stage::ReCapturesAll(p) => {
+            return Some(
+                crate::builtins::re_captures_all_apply(recv, p.as_ref())
+                    .unwrap_or_else(|| recv.clone()),
+            )
+        }
+        Stage::ReSplit(p) => {
+            return Some(
+                crate::builtins::re_split_apply(recv, p.as_ref()).unwrap_or_else(|| recv.clone()),
+            )
+        }
+        Stage::ReReplace { pat, with } => {
+            return Some(
+                crate::builtins::re_replace_apply(recv, pat.as_ref(), with.as_ref())
+                    .unwrap_or_else(|| recv.clone()),
+            )
+        }
+        Stage::ReReplaceAll { pat, with } => {
+            return Some(
+                crate::builtins::re_replace_all_apply(recv, pat.as_ref(), with.as_ref())
+                    .unwrap_or_else(|| recv.clone()),
+            )
+        }
+        Stage::ContainsAny(ns) => {
+            return Some(
+                crate::builtins::contains_any_apply(recv, ns.as_ref())
+                    .unwrap_or_else(|| recv.clone()),
+            )
+        }
+        Stage::ContainsAll(ns) => {
+            return Some(
+                crate::builtins::contains_all_apply(recv, ns.as_ref())
+                    .unwrap_or_else(|| recv.clone()),
+            )
+        }
         // CSV / cast family.
-        Stage::ToCsv           => lift_to_kernel!(crate::builtins::to_csv_apply),
-        Stage::ToTsv           => lift_to_kernel!(crate::builtins::to_tsv_apply),
-        Stage::ToPairs         => lift_to_kernel!(crate::builtins::to_pairs_apply),
-        Stage::TypeName        => lift_to_kernel!(crate::builtins::type_name_apply),
-        Stage::ToString        => lift_to_kernel!(crate::builtins::to_string_apply),
-        Stage::ToJson          => lift_to_kernel!(crate::builtins::to_json_apply),
-        Stage::Schema          => lift_to_kernel!(crate::builtins::schema_apply),
+        Stage::ToCsv => lift_to_kernel!(crate::builtins::to_csv_apply),
+        Stage::ToTsv => lift_to_kernel!(crate::builtins::to_tsv_apply),
+        Stage::ToPairs => lift_to_kernel!(crate::builtins::to_pairs_apply),
+        Stage::TypeName => lift_to_kernel!(crate::builtins::type_name_apply),
+        Stage::ToString => lift_to_kernel!(crate::builtins::to_string_apply),
+        Stage::ToJson => lift_to_kernel!(crate::builtins::to_json_apply),
+        Stage::Schema => lift_to_kernel!(crate::builtins::schema_apply),
         _ => {}
     }
     let out = match stage {
         // String → String transforms (legacy composed::Stage trait
         // dispatch — pending Phase D native lift).
-        Stage::HtmlUnescape=> crate::composed::HtmlUnescape.apply(recv),
-        Stage::UrlEncode   => crate::composed::UrlEncode.apply(recv),
-        Stage::UrlDecode   => crate::composed::UrlDecode.apply(recv),
-        Stage::ToBase64    => crate::composed::ToBase64.apply(recv),
-        Stage::Dedent      => crate::composed::Dedent.apply(recv),
-        Stage::SnakeCase   => crate::composed::SnakeCase.apply(recv),
-        Stage::KebabCase   => crate::composed::KebabCase.apply(recv),
-        Stage::CamelCase   => crate::composed::CamelCase.apply(recv),
-        Stage::PascalCase  => crate::composed::PascalCase.apply(recv),
-        Stage::ReverseStr  => crate::composed::ReverseStr.apply(recv),
+        Stage::HtmlUnescape => crate::composed::HtmlUnescape.apply(recv),
+        Stage::UrlEncode => crate::composed::UrlEncode.apply(recv),
+        Stage::UrlDecode => crate::composed::UrlDecode.apply(recv),
+        Stage::ToBase64 => crate::composed::ToBase64.apply(recv),
+        Stage::Dedent => crate::composed::Dedent.apply(recv),
+        Stage::SnakeCase => crate::composed::SnakeCase.apply(recv),
+        Stage::KebabCase => crate::composed::KebabCase.apply(recv),
+        Stage::CamelCase => crate::composed::CamelCase.apply(recv),
+        Stage::PascalCase => crate::composed::PascalCase.apply(recv),
+        Stage::ReverseStr => crate::composed::ReverseStr.apply(recv),
         // String → other Val type.
-        Stage::Lines       => crate::composed::Lines.apply(recv),
-        Stage::Words       => crate::composed::Words.apply(recv),
-        Stage::Chars       => crate::composed::Chars.apply(recv),
-        Stage::CharsOf     => crate::composed::CharsOf.apply(recv),
-        Stage::BytesOf     => crate::composed::BytesOf.apply(recv),
-        Stage::ByteLen     => crate::composed::ByteLen.apply(recv),
-        Stage::IsBlank     => crate::composed::IsBlank.apply(recv),
-        Stage::IsNumeric   => crate::composed::IsNumeric.apply(recv),
-        Stage::IsAlpha     => crate::composed::IsAlpha.apply(recv),
-        Stage::IsAscii     => crate::composed::IsAscii.apply(recv),
-        Stage::ToNumber    => crate::composed::ToNumber.apply(recv),
-        Stage::ToBool      => crate::composed::ToBool.apply(recv),
-        Stage::FromBase64  => crate::composed::FromBase64.apply(recv),
-        Stage::ParseInt    => crate::composed::ParseInt.apply(recv),
-        Stage::ParseFloat  => crate::composed::ParseFloat.apply(recv),
-        Stage::ParseBool   => crate::composed::ParseBool.apply(recv),
+        Stage::Lines => crate::composed::Lines.apply(recv),
+        Stage::Words => crate::composed::Words.apply(recv),
+        Stage::Chars => crate::composed::Chars.apply(recv),
+        Stage::CharsOf => crate::composed::CharsOf.apply(recv),
+        Stage::BytesOf => crate::composed::BytesOf.apply(recv),
+        Stage::ByteLen => crate::composed::ByteLen.apply(recv),
+        Stage::IsBlank => crate::composed::IsBlank.apply(recv),
+        Stage::IsNumeric => crate::composed::IsNumeric.apply(recv),
+        Stage::IsAlpha => crate::composed::IsAlpha.apply(recv),
+        Stage::IsAscii => crate::composed::IsAscii.apply(recv),
+        Stage::ToNumber => crate::composed::ToNumber.apply(recv),
+        Stage::ToBool => crate::composed::ToBool.apply(recv),
+        Stage::FromBase64 => crate::composed::FromBase64.apply(recv),
+        Stage::ParseInt => crate::composed::ParseInt.apply(recv),
+        Stage::ParseFloat => crate::composed::ParseFloat.apply(recv),
+        Stage::ParseBool => crate::composed::ParseBool.apply(recv),
         // One-arg Arc<str> string predicates/searches.
-        Stage::StartsWith(p)   => crate::composed::StartsWith   { prefix: p.clone() }.apply(recv),
-        Stage::EndsWith(p)     => crate::composed::EndsWith     { suffix: p.clone() }.apply(recv),
-        Stage::StripPrefix(p)  => crate::composed::StripPrefix  { prefix: p.clone() }.apply(recv),
-        Stage::StripSuffix(p)  => crate::composed::StripSuffix  { suffix: p.clone() }.apply(recv),
-        Stage::StrMatches(p)   => crate::composed::StrMatches   { needle: p.clone() }.apply(recv),
-        Stage::IndexOf(p)      => crate::composed::IndexOf      { needle: p.clone() }.apply(recv),
-        Stage::LastIndexOf(p)  => crate::composed::LastIndexOf  { needle: p.clone() }.apply(recv),
-        Stage::Scan(p)         => crate::composed::Scan         { pat:    p.clone() }.apply(recv),
+        Stage::StartsWith(p) => crate::composed::StartsWith { prefix: p.clone() }.apply(recv),
+        Stage::EndsWith(p) => crate::composed::EndsWith { suffix: p.clone() }.apply(recv),
+        Stage::StripPrefix(p) => crate::composed::StripPrefix { prefix: p.clone() }.apply(recv),
+        Stage::StripSuffix(p) => crate::composed::StripSuffix { suffix: p.clone() }.apply(recv),
+        Stage::StrMatches(p) => crate::composed::StrMatches { needle: p.clone() }.apply(recv),
+        Stage::IndexOf(p) => crate::composed::IndexOf { needle: p.clone() }.apply(recv),
+        Stage::LastIndexOf(p) => crate::composed::LastIndexOf { needle: p.clone() }.apply(recv),
+        Stage::Scan(p) => crate::composed::Scan { pat: p.clone() }.apply(recv),
         // One-arg usize.
-        Stage::Repeat(n)       => crate::composed::Repeat       { n: *n }.apply(recv),
-        Stage::Indent(n)       => crate::composed::Indent       { n: *n }.apply(recv),
+        Stage::Repeat(n) => crate::composed::Repeat { n: *n }.apply(recv),
+        Stage::Indent(n) => crate::composed::Indent { n: *n }.apply(recv),
         Stage::FlattenDepth(d) => crate::composed::FlattenDepth { depth: *d }.apply(recv),
         // Zero-arg array/object.
-        Stage::Compact         => crate::composed::Compact.apply(recv),
-        Stage::Pairwise        => crate::composed::Pairwise.apply(recv),
-        Stage::Invert          => crate::composed::Invert.apply(recv),
+        Stage::Compact => crate::composed::Compact.apply(recv),
+        Stage::Pairwise => crate::composed::Pairwise.apply(recv),
+        Stage::Invert => crate::composed::Invert.apply(recv),
         // Two-arg padding.
-        Stage::PadLeft  { width, fill } => crate::composed::PadLeft  { width: *width, fill: *fill }.apply(recv),
-        Stage::PadRight { width, fill } => crate::composed::PadRight { width: *width, fill: *fill }.apply(recv),
-        Stage::Center   { width, fill } => crate::composed::Center   { width: *width, fill: *fill }.apply(recv),
+        Stage::PadLeft { width, fill } => crate::composed::PadLeft {
+            width: *width,
+            fill: *fill,
+        }
+        .apply(recv),
+        Stage::PadRight { width, fill } => crate::composed::PadRight {
+            width: *width,
+            fill: *fill,
+        }
+        .apply(recv),
+        Stage::Center { width, fill } => crate::composed::Center {
+            width: *width,
+            fill: *fill,
+        }
+        .apply(recv),
         // Regex one-arg pat.
-        Stage::ReMatch(p)        => crate::composed::ReMatch        { pat: p.clone() }.apply(recv),
-        Stage::ReMatchFirst(p)   => crate::composed::ReMatchFirst   { pat: p.clone() }.apply(recv),
-        Stage::ReMatchAll(p)     => crate::composed::ReMatchAll     { pat: p.clone() }.apply(recv),
-        Stage::ReCaptures(p)     => crate::composed::ReCaptures     { pat: p.clone() }.apply(recv),
-        Stage::ReCapturesAll(p)  => crate::composed::ReCapturesAll  { pat: p.clone() }.apply(recv),
-        Stage::ReSplit(p)        => crate::composed::ReSplit        { pat: p.clone() }.apply(recv),
+        Stage::ReMatch(p) => crate::composed::ReMatch { pat: p.clone() }.apply(recv),
+        Stage::ReMatchFirst(p) => crate::composed::ReMatchFirst { pat: p.clone() }.apply(recv),
+        Stage::ReMatchAll(p) => crate::composed::ReMatchAll { pat: p.clone() }.apply(recv),
+        Stage::ReCaptures(p) => crate::composed::ReCaptures { pat: p.clone() }.apply(recv),
+        Stage::ReCapturesAll(p) => crate::composed::ReCapturesAll { pat: p.clone() }.apply(recv),
+        Stage::ReSplit(p) => crate::composed::ReSplit { pat: p.clone() }.apply(recv),
         // Regex two-arg replace.
-        Stage::ReReplace    { pat, with } => crate::composed::ReReplace    { pat: pat.clone(), with: with.clone() }.apply(recv),
-        Stage::ReReplaceAll { pat, with } => crate::composed::ReReplaceAll { pat: pat.clone(), with: with.clone() }.apply(recv),
+        Stage::ReReplace { pat, with } => crate::composed::ReReplace {
+            pat: pat.clone(),
+            with: with.clone(),
+        }
+        .apply(recv),
+        Stage::ReReplaceAll { pat, with } => crate::composed::ReReplaceAll {
+            pat: pat.clone(),
+            with: with.clone(),
+        }
+        .apply(recv),
         // Vec<Arc<str>> bulk needles.
-        Stage::ContainsAny(ns) => crate::composed::ContainsAny { needles: ns.clone() }.apply(recv),
-        Stage::ContainsAll(ns) => crate::composed::ContainsAll { needles: ns.clone() }.apply(recv),
+        Stage::ContainsAny(ns) => crate::composed::ContainsAny {
+            needles: ns.clone(),
+        }
+        .apply(recv),
+        Stage::ContainsAll(ns) => crate::composed::ContainsAll {
+            needles: ns.clone(),
+        }
+        .apply(recv),
         // eval/func_* migrations.
-        Stage::ToCsv      => crate::composed::ToCsv.apply(recv),
-        Stage::ToTsv      => crate::composed::ToTsv.apply(recv),
-        Stage::ToPairs    => crate::composed::ToPairs.apply(recv),
-        Stage::CumMax     => crate::composed::CumMax.apply(recv),
-        Stage::CumMin     => crate::composed::CumMin.apply(recv),
+        Stage::ToCsv => crate::composed::ToCsv.apply(recv),
+        Stage::ToTsv => crate::composed::ToTsv.apply(recv),
+        Stage::ToPairs => crate::composed::ToPairs.apply(recv),
+        Stage::CumMax => crate::composed::CumMax.apply(recv),
+        Stage::CumMin => crate::composed::CumMin.apply(recv),
         Stage::DiffWindow => crate::composed::DiffWindow.apply(recv),
-        Stage::PctChange  => crate::composed::PctChange.apply(recv),
-        Stage::ZScore     => crate::composed::ZScore.apply(recv),
+        Stage::PctChange => crate::composed::PctChange.apply(recv),
+        Stage::ZScore => crate::composed::ZScore.apply(recv),
         Stage::RollingSum(n) => crate::composed::RollingSum::new(*n).apply(recv),
         Stage::RollingAvg(n) => crate::composed::RollingAvg::new(*n).apply(recv),
         Stage::RollingMin(n) => crate::composed::RollingMin::new(*n).apply(recv),
         Stage::RollingMax(n) => crate::composed::RollingMax::new(*n).apply(recv),
-        Stage::Lag(n)        => crate::composed::Lag::new(*n).apply(recv),
-        Stage::Lead(n)       => crate::composed::Lead::new(*n).apply(recv),
-        Stage::GetPath(p)    => crate::composed::GetPath::new(p.clone()).apply(recv),
-        Stage::HasPath(p)    => crate::composed::HasPath::new(p.clone()).apply(recv),
-        Stage::Has(k)        => crate::composed::Has::new(k.clone()).apply(recv),
-        Stage::DelPath(p)    => crate::composed::DelPath::new(p.clone()).apply(recv),
-        Stage::FlattenKeys(s)   => crate::composed::FlattenKeys::new(s.clone()).apply(recv),
+        Stage::Lag(n) => crate::composed::Lag::new(*n).apply(recv),
+        Stage::Lead(n) => crate::composed::Lead::new(*n).apply(recv),
+        Stage::GetPath(p) => crate::composed::GetPath::new(p.clone()).apply(recv),
+        Stage::HasPath(p) => crate::composed::HasPath::new(p.clone()).apply(recv),
+        Stage::Has(k) => crate::composed::Has::new(k.clone()).apply(recv),
+        Stage::DelPath(p) => crate::composed::DelPath::new(p.clone()).apply(recv),
+        Stage::FlattenKeys(s) => crate::composed::FlattenKeys::new(s.clone()).apply(recv),
         Stage::UnflattenKeys(s) => crate::composed::UnflattenKeys::new(s.clone()).apply(recv),
-        Stage::Schema        => crate::composed::Schema.apply(recv),
-        Stage::TypeName      => crate::composed::TypeName.apply(recv),
-        Stage::ToString      => crate::composed::ToString.apply(recv),
-        Stage::ToJson        => crate::composed::ToJson.apply(recv),
-        Stage::EnumerateZ    => crate::composed::EnumerateZ.apply(recv),
-        Stage::Join(s)       => crate::composed::Join::new(s.clone()).apply(recv),
+        Stage::Schema => crate::composed::Schema.apply(recv),
+        Stage::TypeName => crate::composed::TypeName.apply(recv),
+        Stage::ToString => crate::composed::ToString.apply(recv),
+        Stage::ToJson => crate::composed::ToJson.apply(recv),
+        Stage::EnumerateZ => crate::composed::EnumerateZ.apply(recv),
+        Stage::Join(s) => crate::composed::Join::new(s.clone()).apply(recv),
         Stage::IndexOfValue(t) => crate::composed::IndexOfValue::new(t.clone()).apply(recv),
-        Stage::IndicesOf(t)    => crate::composed::IndicesOf::new(t.clone()).apply(recv),
-        Stage::Explode(f)    => crate::composed::Explode::new(f.clone()).apply(recv),
-        Stage::Implode(f)    => crate::composed::Implode::new(f.clone()).apply(recv),
+        Stage::IndicesOf(t) => crate::composed::IndicesOf::new(t.clone()).apply(recv),
+        Stage::Explode(f) => crate::composed::Explode::new(f.clone()).apply(recv),
+        Stage::Implode(f) => crate::composed::Implode::new(f.clone()).apply(recv),
         _ => return None,
     };
     Some(match out {
         StageOutput::Pass(c) => c.into_owned(),
-        _                    => recv.clone(),
+        _ => recv.clone(),
     })
 }
 
@@ -4377,41 +5335,73 @@ pub(crate) fn lifted_apply(stage: &Stage, recv: &Val) -> Option<Val> {
 
 #[inline]
 fn num_fold(
-    acc_i: &mut i64, acc_f: &mut f64, floated: &mut bool,
-    min_f: &mut f64, max_f: &mut f64, n_obs: &mut usize,
-    op: NumOp, v: &Val,
+    acc_i: &mut i64,
+    acc_f: &mut f64,
+    floated: &mut bool,
+    min_f: &mut f64,
+    max_f: &mut f64,
+    n_obs: &mut usize,
+    op: NumOp,
+    v: &Val,
 ) {
     let f = match v {
-        Val::Int(n)   => *n as f64,
+        Val::Int(n) => *n as f64,
         Val::Float(x) => *x,
         _ => return,
     };
     *n_obs += 1;
     match op {
-        NumOp::Sum | NumOp::Avg => {
-            match v {
-                Val::Int(n)   => if *floated { *acc_f += *n as f64 } else { *acc_i += *n },
-                Val::Float(x) => {
-                    if !*floated { *acc_f = *acc_i as f64; *floated = true; }
-                    *acc_f += *x;
+        NumOp::Sum | NumOp::Avg => match v {
+            Val::Int(n) => {
+                if *floated {
+                    *acc_f += *n as f64
+                } else {
+                    *acc_i += *n
                 }
-                _ => {}
+            }
+            Val::Float(x) => {
+                if !*floated {
+                    *acc_f = *acc_i as f64;
+                    *floated = true;
+                }
+                *acc_f += *x;
+            }
+            _ => {}
+        },
+        NumOp::Min => {
+            if f < *min_f {
+                *min_f = f;
             }
         }
-        NumOp::Min => { if f < *min_f { *min_f = f; } }
-        NumOp::Max => { if f > *max_f { *max_f = f; } }
+        NumOp::Max => {
+            if f > *max_f {
+                *max_f = f;
+            }
+        }
     }
 }
 
 #[inline]
 fn num_finalise(
     op: NumOp,
-    acc_i: i64, acc_f: f64, floated: bool,
-    min_f: f64, max_f: f64, n_obs: usize,
+    acc_i: i64,
+    acc_f: f64,
+    floated: bool,
+    min_f: f64,
+    max_f: f64,
+    n_obs: usize,
 ) -> Val {
-    if n_obs == 0 { return op.empty(); }
+    if n_obs == 0 {
+        return op.empty();
+    }
     match op {
-        NumOp::Sum => if floated { Val::Float(acc_f) } else { Val::Int(acc_i) },
+        NumOp::Sum => {
+            if floated {
+                Val::Float(acc_f)
+            } else {
+                Val::Int(acc_i)
+            }
+        }
         NumOp::Avg => {
             let total = if floated { acc_f } else { acc_i as f64 };
             Val::Float(total / n_obs as f64)
@@ -4450,13 +5440,19 @@ fn single_field_prog(prog: &crate::vm::Program) -> Option<&str> {
 /// Accepts the shapes the compiler emits in practice:
 ///   2-way:  `[<cmp1>, AndOp(<cmp2>)]`
 ///   3-way:  `[<cmp1>, AndOp([<cmp2>, AndOp(<cmp3>)])]`
-fn and_chain_prog<'a>(prog: &'a crate::vm::Program) -> Option<Vec<(&'a str, crate::ast::BinOp, Val)>> {
+fn and_chain_prog<'a>(
+    prog: &'a crate::vm::Program,
+) -> Option<Vec<(&'a str, crate::ast::BinOp, Val)>> {
     use crate::vm::Opcode;
     let ops = prog.ops.as_ref();
     let (last, head) = ops.split_last()?;
-    let rhs = match last { Opcode::AndOp(rhs) => rhs, _ => return None };
+    let rhs = match last {
+        Opcode::AndOp(rhs) => rhs,
+        _ => return None,
+    };
     let head_leaf = decode_cmp_ops(head)?;
-    let mut rest = and_chain_prog(rhs).or_else(|| decode_cmp_ops(rhs.ops.as_ref()).map(|x| vec![x]))?;
+    let mut rest =
+        and_chain_prog(rhs).or_else(|| decode_cmp_ops(rhs.ops.as_ref()).map(|x| vec![x]))?;
     let mut out = Vec::with_capacity(1 + rest.len());
     out.push(head_leaf);
     out.append(&mut rest);
@@ -4465,8 +5461,8 @@ fn and_chain_prog<'a>(prog: &'a crate::vm::Program) -> Option<Vec<(&'a str, crat
 
 /// Match the single-cmp opcode prefix and return `(field, op, lit)`.
 fn decode_cmp_ops<'a>(ops: &'a [crate::vm::Opcode]) -> Option<(&'a str, crate::ast::BinOp, Val)> {
-    use crate::vm::Opcode;
     use crate::ast::BinOp;
+    use crate::vm::Opcode;
     let (field, lit_idx, cmp_idx) = match ops.len() {
         3 => match &ops[0] {
             Opcode::LoadIdent(k) => (k.as_ref(), 1, 2),
@@ -4479,19 +5475,19 @@ fn decode_cmp_ops<'a>(ops: &'a [crate::vm::Opcode]) -> Option<(&'a str, crate::a
         _ => return None,
     };
     let lit = match &ops[lit_idx] {
-        Opcode::PushInt(n)   => Val::Int(*n),
+        Opcode::PushInt(n) => Val::Int(*n),
         Opcode::PushFloat(f) => Val::Float(*f),
-        Opcode::PushStr(s)   => Val::Str(Arc::clone(s)),
-        Opcode::PushBool(b)  => Val::Bool(*b),
-        Opcode::PushNull     => Val::Null,
+        Opcode::PushStr(s) => Val::Str(Arc::clone(s)),
+        Opcode::PushBool(b) => Val::Bool(*b),
+        Opcode::PushNull => Val::Null,
         _ => return None,
     };
     let op = match &ops[cmp_idx] {
-        Opcode::Eq  => BinOp::Eq,
+        Opcode::Eq => BinOp::Eq,
         Opcode::Neq => BinOp::Neq,
-        Opcode::Lt  => BinOp::Lt,
+        Opcode::Lt => BinOp::Lt,
         Opcode::Lte => BinOp::Lte,
-        Opcode::Gt  => BinOp::Gt,
+        Opcode::Gt => BinOp::Gt,
         Opcode::Gte => BinOp::Gte,
         _ => return None,
     };
@@ -4522,13 +5518,13 @@ fn objvec_flatmap_count_slot(d: &Arc<crate::eval::value::ObjVecData>, slot: usiz
     for row in 0..nrows {
         let v = &d.cells[row * stride + slot];
         match v {
-            Val::Arr(a)         => count += a.len() as i64,
-            Val::IntVec(a)      => count += a.len() as i64,
-            Val::FloatVec(a)    => count += a.len() as i64,
-            Val::StrVec(a)      => count += a.len() as i64,
+            Val::Arr(a) => count += a.len() as i64,
+            Val::IntVec(a) => count += a.len() as i64,
+            Val::FloatVec(a) => count += a.len() as i64,
+            Val::StrVec(a) => count += a.len() as i64,
             Val::StrSliceVec(a) => count += a.len() as i64,
-            Val::ObjVec(ad)     => count += ad.nrows() as i64,
-            _                   => count += 1,
+            Val::ObjVec(ad) => count += ad.nrows() as i64,
+            _ => count += 1,
         }
     }
     Val::Int(count)
@@ -4588,19 +5584,28 @@ fn objvec_num_slot(d: &Arc<crate::eval::value::ObjVecData>, slot: usize, op: Num
     let mut n_obs: usize = 0;
     for row in 0..nrows {
         let v = &d.cells[row * stride + slot];
-        num_fold(&mut acc_i, &mut acc_f, &mut floated, &mut min_f, &mut max_f, &mut n_obs, op, v);
+        num_fold(
+            &mut acc_i,
+            &mut acc_f,
+            &mut floated,
+            &mut min_f,
+            &mut max_f,
+            &mut n_obs,
+            op,
+            v,
+        );
     }
     num_finalise(op, acc_i, acc_f, floated, min_f, max_f, n_obs)
 }
 
 fn objvec_filter_count_slot(
-    d:    &Arc<crate::eval::value::ObjVecData>,
+    d: &Arc<crate::eval::value::ObjVecData>,
     slot: usize,
-    op:   crate::ast::BinOp,
-    lit:  &Val,
+    op: crate::ast::BinOp,
+    lit: &Val,
 ) -> Val {
-    use crate::eval::value::ObjVecCol;
     use crate::ast::BinOp as B;
+    use crate::eval::value::ObjVecCol;
     // Typed-column fast path.  Direct slice scan with primitive
     // comparison; no Val tag check, no boxed unbox.
     if let Some(cols) = &d.typed_cols {
@@ -4610,15 +5615,17 @@ fn objvec_filter_count_slot(
                 let mut c: i64 = 0;
                 for &n in col.iter() {
                     let hit = match op {
-                        B::Eq  => n == r,
+                        B::Eq => n == r,
                         B::Neq => n != r,
-                        B::Lt  => n < r,
+                        B::Lt => n < r,
                         B::Lte => n <= r,
-                        B::Gt  => n > r,
+                        B::Gt => n > r,
                         B::Gte => n >= r,
                         _ => false,
                     };
-                    if hit { c += 1; }
+                    if hit {
+                        c += 1;
+                    }
                 }
                 return Val::Int(c);
             }
@@ -4627,15 +5634,17 @@ fn objvec_filter_count_slot(
                 let mut c: i64 = 0;
                 for &f in col.iter() {
                     let hit = match op {
-                        B::Eq  => f == r,
+                        B::Eq => f == r,
                         B::Neq => f != r,
-                        B::Lt  => f < r,
+                        B::Lt => f < r,
                         B::Lte => f <= r,
-                        B::Gt  => f > r,
+                        B::Gt => f > r,
                         B::Gte => f >= r,
                         _ => false,
                     };
-                    if hit { c += 1; }
+                    if hit {
+                        c += 1;
+                    }
                 }
                 return Val::Int(c);
             }
@@ -4644,11 +5653,13 @@ fn objvec_filter_count_slot(
                 let mut c: i64 = 0;
                 for s in col.iter() {
                     let hit = match op {
-                        B::Eq  => s.as_ref() == r,
+                        B::Eq => s.as_ref() == r,
                         B::Neq => s.as_ref() != r,
                         _ => false,
                     };
-                    if hit { c += 1; }
+                    if hit {
+                        c += 1;
+                    }
                 }
                 return Val::Int(c);
             }
@@ -4660,27 +5671,29 @@ fn objvec_filter_count_slot(
     let mut count: i64 = 0;
     for row in 0..nrows {
         let v = &d.cells[row * stride + slot];
-        if cmp_val_binop_local(v, op, lit) { count += 1; }
+        if cmp_val_binop_local(v, op, lit) {
+            count += 1;
+        }
     }
     Val::Int(count)
 }
 
 fn objvec_filter_num_slots(
-    d:        &Arc<crate::eval::value::ObjVecData>,
+    d: &Arc<crate::eval::value::ObjVecData>,
     pred_slot: usize,
-    cop:      crate::ast::BinOp,
-    lit:      &Val,
-    map_slot:  usize,
-    op:       NumOp,
+    cop: crate::ast::BinOp,
+    lit: &Val,
+    map_slot: usize,
+    op: NumOp,
 ) -> Val {
-    use crate::eval::value::ObjVecCol;
     use crate::ast::BinOp as B;
+    use crate::eval::value::ObjVecCol;
     // Typed-column fast path for filter+map slot pair: walk both
     // columns as raw slices, primitive cmp + primitive fold.
     if let Some(cols) = &d.typed_cols {
         // Int pred + Int map (covers `total > 100` then `map(total)`).
-        if let (Some(ObjVecCol::Ints(p)), Some(ObjVecCol::Ints(m)), Val::Int(rhs))
-            = (cols.get(pred_slot), cols.get(map_slot), lit)
+        if let (Some(ObjVecCol::Ints(p)), Some(ObjVecCol::Ints(m)), Val::Int(rhs)) =
+            (cols.get(pred_slot), cols.get(map_slot), lit)
         {
             let r = *rhs;
             let mut acc_i: i64 = 0;
@@ -4691,14 +5704,26 @@ fn objvec_filter_num_slots(
             let mut n_obs: usize = 0;
             for (i, &pv) in p.iter().enumerate() {
                 let hit = match cop {
-                    B::Eq  => pv == r, B::Neq => pv != r,
-                    B::Lt  => pv < r,  B::Lte => pv <= r,
-                    B::Gt  => pv > r,  B::Gte => pv >= r,
+                    B::Eq => pv == r,
+                    B::Neq => pv != r,
+                    B::Lt => pv < r,
+                    B::Lte => pv <= r,
+                    B::Gt => pv > r,
+                    B::Gte => pv >= r,
                     _ => false,
                 };
                 if hit {
                     let v = Val::Int(m[i]);
-                    num_fold(&mut acc_i, &mut acc_f, &mut floated, &mut min_f, &mut max_f, &mut n_obs, op, &v);
+                    num_fold(
+                        &mut acc_i,
+                        &mut acc_f,
+                        &mut floated,
+                        &mut min_f,
+                        &mut max_f,
+                        &mut n_obs,
+                        op,
+                        &v,
+                    );
                 }
             }
             return num_finalise(op, acc_i, acc_f, floated, min_f, max_f, n_obs);
@@ -4715,8 +5740,16 @@ fn objvec_filter_num_slots(
     for row in 0..nrows {
         let off = row * stride;
         if cmp_val_binop_local(&d.cells[off + pred_slot], cop, lit) {
-            num_fold(&mut acc_i, &mut acc_f, &mut floated, &mut min_f, &mut max_f, &mut n_obs,
-                     op, &d.cells[off + map_slot]);
+            num_fold(
+                &mut acc_i,
+                &mut acc_f,
+                &mut floated,
+                &mut min_f,
+                &mut max_f,
+                &mut n_obs,
+                op,
+                &d.cells[off + map_slot],
+            );
         }
     }
     num_finalise(op, acc_i, acc_f, floated, min_f, max_f, n_obs)
@@ -4727,34 +5760,37 @@ fn objvec_filter_num_slots(
 /// typed lanes, walk primitive columns directly: build typed output
 /// vec sized by predicate hit count; no Val tag check, no IndexMap probe.
 fn objvec_typed_filter_map_collect(
-    d:    &Arc<crate::eval::value::ObjVecData>,
-    pk:   &str,
-    pop:  crate::ast::BinOp,
+    d: &Arc<crate::eval::value::ObjVecData>,
+    pk: &str,
+    pop: crate::ast::BinOp,
     plit: &Val,
-    mk:   &str,
+    mk: &str,
 ) -> Option<Result<Val, EvalError>> {
-    use crate::eval::value::ObjVecCol;
     use crate::ast::BinOp as B;
+    use crate::eval::value::ObjVecCol;
     let cols = d.typed_cols.as_ref()?;
     let pred_slot = d.slot_of(pk)?;
-    let map_slot  = d.slot_of(mk)?;
-    let pred_col  = cols.get(pred_slot)?;
-    let map_col   = cols.get(map_slot)?;
+    let map_slot = d.slot_of(mk)?;
+    let pred_col = cols.get(pred_slot)?;
+    let map_col = cols.get(map_slot)?;
 
     // Int pred + Int map (e.g. `filter(total > 500).map(id)`).
-    if let (ObjVecCol::Ints(p), ObjVecCol::Ints(m), Val::Int(rhs)) =
-        (pred_col, map_col, plit)
-    {
+    if let (ObjVecCol::Ints(p), ObjVecCol::Ints(m), Val::Int(rhs)) = (pred_col, map_col, plit) {
         let r = *rhs;
         let mut out: Vec<i64> = Vec::with_capacity(p.len());
         for (i, &pv) in p.iter().enumerate() {
             let hit = match pop {
-                B::Eq  => pv == r, B::Neq => pv != r,
-                B::Lt  => pv < r,  B::Lte => pv <= r,
-                B::Gt  => pv > r,  B::Gte => pv >= r,
+                B::Eq => pv == r,
+                B::Neq => pv != r,
+                B::Lt => pv < r,
+                B::Lte => pv <= r,
+                B::Gt => pv > r,
+                B::Gte => pv >= r,
                 _ => false,
             };
-            if hit { out.push(m[i]); }
+            if hit {
+                out.push(m[i]);
+            }
         }
         return Some(Ok(Val::int_vec(out)));
     }
@@ -4764,7 +5800,7 @@ fn objvec_typed_filter_map_collect(
     {
         let pred_f64 = match (pred_col, plit) {
             (ObjVecCol::Floats(p), Val::Float(r)) => Some((p, *r)),
-            (ObjVecCol::Floats(p), Val::Int(r))   => Some((p, *r as f64)),
+            (ObjVecCol::Floats(p), Val::Int(r)) => Some((p, *r as f64)),
             _ => None,
         };
         if let Some((p, r)) = pred_f64 {
@@ -4773,12 +5809,17 @@ fn objvec_typed_filter_map_collect(
                 let mut out: Vec<i64> = Vec::with_capacity(p.len());
                 for (i, &pv) in p.iter().enumerate() {
                     let hit = match pop {
-                        B::Eq  => pv == r, B::Neq => pv != r,
-                        B::Lt  => pv < r,  B::Lte => pv <= r,
-                        B::Gt  => pv > r,  B::Gte => pv >= r,
+                        B::Eq => pv == r,
+                        B::Neq => pv != r,
+                        B::Lt => pv < r,
+                        B::Lte => pv <= r,
+                        B::Gt => pv > r,
+                        B::Gte => pv >= r,
                         _ => false,
                     };
-                    if hit { out.push(m[i]); }
+                    if hit {
+                        out.push(m[i]);
+                    }
                 }
                 return Some(Ok(Val::int_vec(out)));
             }
@@ -4786,12 +5827,17 @@ fn objvec_typed_filter_map_collect(
                 let mut out: Vec<f64> = Vec::with_capacity(p.len());
                 for (i, &pv) in p.iter().enumerate() {
                     let hit = match pop {
-                        B::Eq  => pv == r, B::Neq => pv != r,
-                        B::Lt  => pv < r,  B::Lte => pv <= r,
-                        B::Gt  => pv > r,  B::Gte => pv >= r,
+                        B::Eq => pv == r,
+                        B::Neq => pv != r,
+                        B::Lt => pv < r,
+                        B::Lte => pv <= r,
+                        B::Gt => pv > r,
+                        B::Gte => pv >= r,
                         _ => false,
                     };
-                    if hit { out.push(m[i]); }
+                    if hit {
+                        out.push(m[i]);
+                    }
                 }
                 return Some(Ok(Val::float_vec(out)));
             }
@@ -4799,31 +5845,39 @@ fn objvec_typed_filter_map_collect(
                 let mut out: Vec<Arc<str>> = Vec::with_capacity(p.len());
                 for (i, &pv) in p.iter().enumerate() {
                     let hit = match pop {
-                        B::Eq  => pv == r, B::Neq => pv != r,
-                        B::Lt  => pv < r,  B::Lte => pv <= r,
-                        B::Gt  => pv > r,  B::Gte => pv >= r,
+                        B::Eq => pv == r,
+                        B::Neq => pv != r,
+                        B::Lt => pv < r,
+                        B::Lte => pv <= r,
+                        B::Gt => pv > r,
+                        B::Gte => pv >= r,
                         _ => false,
                     };
-                    if hit { out.push(Arc::clone(&m[i])); }
+                    if hit {
+                        out.push(Arc::clone(&m[i]));
+                    }
                 }
                 return Some(Ok(Val::str_vec(out)));
             }
         }
     }
     // Int pred + Str map (e.g. `filter(total > 500).map(name)`).
-    if let (ObjVecCol::Ints(p), ObjVecCol::Strs(m), Val::Int(rhs)) =
-        (pred_col, map_col, plit)
-    {
+    if let (ObjVecCol::Ints(p), ObjVecCol::Strs(m), Val::Int(rhs)) = (pred_col, map_col, plit) {
         let r = *rhs;
         let mut out: Vec<Arc<str>> = Vec::with_capacity(p.len());
         for (i, &pv) in p.iter().enumerate() {
             let hit = match pop {
-                B::Eq  => pv == r, B::Neq => pv != r,
-                B::Lt  => pv < r,  B::Lte => pv <= r,
-                B::Gt  => pv > r,  B::Gte => pv >= r,
+                B::Eq => pv == r,
+                B::Neq => pv != r,
+                B::Lt => pv < r,
+                B::Lte => pv <= r,
+                B::Gt => pv > r,
+                B::Gte => pv >= r,
                 _ => false,
             };
-            if hit { out.push(Arc::clone(&m[i])); }
+            if hit {
+                out.push(Arc::clone(&m[i]));
+            }
         }
         return Some(Ok(Val::str_vec(out)));
     }
@@ -4833,11 +5887,13 @@ fn objvec_typed_filter_map_collect(
         let mut hits: Vec<usize> = Vec::with_capacity(p.len());
         for (i, ps) in p.iter().enumerate() {
             let hit = match pop {
-                B::Eq  => ps.as_ref() == r,
+                B::Eq => ps.as_ref() == r,
                 B::Neq => ps.as_ref() != r,
                 _ => false,
             };
-            if hit { hits.push(i); }
+            if hit {
+                hits.push(i);
+            }
         }
         return Some(Ok(materialise_typed_indices(map_col, &hits)));
     }
@@ -4849,10 +5905,7 @@ fn objvec_typed_filter_map_collect(
 /// (or a typed lane when all selected rows project the same shape).
 /// Avoids per-row IndexMap probe + per-row key Arc clone of the walker
 /// path.
-fn objvec_typed_group_by(
-    d: &Arc<crate::eval::value::ObjVecData>,
-    key_field: &str,
-) -> Option<Val> {
+fn objvec_typed_group_by(d: &Arc<crate::eval::value::ObjVecData>, key_field: &str) -> Option<Val> {
     use crate::eval::value::ObjVecCol;
     let cols = d.typed_cols.as_ref()?;
     let key_slot = d.slot_of(key_field)?;
@@ -4861,8 +5914,7 @@ fn objvec_typed_group_by(
     let nrows = d.nrows();
 
     // Partition row indices by key string.
-    let mut groups: indexmap::IndexMap<Arc<str>, Vec<usize>> =
-        indexmap::IndexMap::new();
+    let mut groups: indexmap::IndexMap<Arc<str>, Vec<usize>> = indexmap::IndexMap::new();
     match key_col {
         ObjVecCol::Strs(c) => {
             // Use Arc::clone for repeated keys (Arc is interned-ish).
@@ -4878,32 +5930,34 @@ fn objvec_typed_group_by(
         }
         ObjVecCol::Bools(c) => {
             for (i, b) in c.iter().enumerate() {
-                let k: Arc<str> = if *b { Arc::from("true") } else { Arc::from("false") };
+                let k: Arc<str> = if *b {
+                    Arc::from("true")
+                } else {
+                    Arc::from("false")
+                };
                 groups.entry(k).or_default().push(i);
             }
         }
         _ => return None,
     };
 
-    // Each group output as a sub-ObjVec sharing the parent key list +
-    // gathered cells.  No per-row IndexMap construction — group rows
-    // stay columnar, downstream pipeline ops can re-fire typed kernels
-    // on the sub-ObjVec.
-    use crate::eval::value::ObjVecData;
-    let mut out: indexmap::IndexMap<Arc<str>, Val> = indexmap::IndexMap::with_capacity(groups.len());
+    // Public group_by semantics expose each bucket as an array of
+    // objects. Keep the fast key partitioning, but materialise bucket
+    // rows to the same shape as the generic builtin path.
+    let mut out: indexmap::IndexMap<Arc<str>, Val> =
+        indexmap::IndexMap::with_capacity(groups.len());
     for (k, indices) in groups.into_iter() {
-        let mut sub_cells: Vec<Val> = Vec::with_capacity(indices.len() * stride);
+        let mut rows: Vec<Val> = Vec::with_capacity(indices.len());
         for r in indices {
             let off = r * stride;
+            let mut row: indexmap::IndexMap<Arc<str>, Val> =
+                indexmap::IndexMap::with_capacity(stride);
             for slot in 0..stride {
-                sub_cells.push(d.cells[off + slot].clone());
+                row.insert(Arc::clone(&d.keys[slot]), d.cells[off + slot].clone());
             }
+            rows.push(Val::Obj(Arc::new(row)));
         }
-        out.insert(k, Val::ObjVec(Arc::new(ObjVecData {
-            keys: Arc::clone(&d.keys),
-            cells: sub_cells,
-            typed_cols: None,
-        })));
+        out.insert(k, Val::arr(rows));
     }
     let _ = nrows;
     Some(Val::Obj(Arc::new(out)))
@@ -4934,40 +5988,44 @@ fn binop_to_tape_cmp(op: crate::ast::BinOp) -> Option<crate::strref::TapeCmp> {
 fn lit_to_tape_owned(v: &Val) -> Option<crate::composed::tape::TapeLitOwned> {
     use crate::composed::tape::TapeLitOwned;
     match v {
-        Val::Int(n)   => Some(TapeLitOwned::Int(*n)),
+        Val::Int(n) => Some(TapeLitOwned::Int(*n)),
         Val::Float(f) => Some(TapeLitOwned::Float(*f)),
-        Val::Str(s)   => Some(TapeLitOwned::Str(Arc::clone(s))),
-        Val::Bool(b)  => Some(TapeLitOwned::Bool(*b)),
-        Val::Null     => Some(TapeLitOwned::Null),
+        Val::Str(s) => Some(TapeLitOwned::Str(Arc::clone(s))),
+        Val::Bool(b) => Some(TapeLitOwned::Bool(*b)),
+        Val::Null => Some(TapeLitOwned::Null),
         _ => None,
     }
 }
 
-
-fn materialise_typed_indices(
-    col: &crate::eval::value::ObjVecCol,
-    indices: &[usize],
-) -> Val {
+fn materialise_typed_indices(col: &crate::eval::value::ObjVecCol, indices: &[usize]) -> Val {
     use crate::eval::value::ObjVecCol;
     match col {
         ObjVecCol::Ints(c) => {
             let mut o: Vec<i64> = Vec::with_capacity(indices.len());
-            for &i in indices { o.push(c[i]); }
+            for &i in indices {
+                o.push(c[i]);
+            }
             Val::int_vec(o)
         }
         ObjVecCol::Floats(c) => {
             let mut o: Vec<f64> = Vec::with_capacity(indices.len());
-            for &i in indices { o.push(c[i]); }
+            for &i in indices {
+                o.push(c[i]);
+            }
             Val::float_vec(o)
         }
         ObjVecCol::Strs(c) => {
             let mut o: Vec<Arc<str>> = Vec::with_capacity(indices.len());
-            for &i in indices { o.push(Arc::clone(&c[i])); }
+            for &i in indices {
+                o.push(Arc::clone(&c[i]));
+            }
             Val::str_vec(o)
         }
         ObjVecCol::Bools(c) => {
             let mut o: Vec<Val> = Vec::with_capacity(indices.len());
-            for &i in indices { o.push(Val::Bool(c[i])); }
+            for &i in indices {
+                o.push(Val::Bool(c[i]));
+            }
             Val::arr(o)
         }
         ObjVecCol::Mixed => Val::arr(Vec::new()),
@@ -4978,8 +6036,8 @@ fn objvec_filter_count_and_slots(
     d: &Arc<crate::eval::value::ObjVecData>,
     leaves: &[(usize, crate::ast::BinOp, Val)],
 ) -> Val {
-    use crate::eval::value::ObjVecCol;
     use crate::ast::BinOp as B;
+    use crate::eval::value::ObjVecCol;
     // Phase 7-typed-columns AND-chain path.  Pre-resolve each leaf to
     // a typed checker closure once; per row, run all checkers as
     // primitive comparisons over typed slices.  Skips per-leaf
@@ -5010,50 +6068,82 @@ fn objvec_filter_count_and_slots(
             #[inline]
             fn at(&self, i: usize) -> bool {
                 match *self {
-                    Checker::IntsEq(c, r)   => c[i] == r,
-                    Checker::IntsNeq(c, r)  => c[i] != r,
-                    Checker::IntsLt(c, r)   => c[i] < r,
-                    Checker::IntsLte(c, r)  => c[i] <= r,
-                    Checker::IntsGt(c, r)   => c[i] > r,
-                    Checker::IntsGte(c, r)  => c[i] >= r,
+                    Checker::IntsEq(c, r) => c[i] == r,
+                    Checker::IntsNeq(c, r) => c[i] != r,
+                    Checker::IntsLt(c, r) => c[i] < r,
+                    Checker::IntsLte(c, r) => c[i] <= r,
+                    Checker::IntsGt(c, r) => c[i] > r,
+                    Checker::IntsGte(c, r) => c[i] >= r,
                     Checker::FloatsEq(c, r) => c[i] == r,
-                    Checker::FloatsNeq(c, r)=> c[i] != r,
+                    Checker::FloatsNeq(c, r) => c[i] != r,
                     Checker::FloatsLt(c, r) => c[i] < r,
-                    Checker::FloatsLte(c, r)=> c[i] <= r,
+                    Checker::FloatsLte(c, r) => c[i] <= r,
                     Checker::FloatsGt(c, r) => c[i] > r,
-                    Checker::FloatsGte(c, r)=> c[i] >= r,
-                    Checker::StrsEq(c, r)   => c[i].as_ref() == r,
-                    Checker::StrsNeq(c, r)  => c[i].as_ref() != r,
-                    Checker::BoolsEq(c, r)  => c[i] == r,
+                    Checker::FloatsGte(c, r) => c[i] >= r,
+                    Checker::StrsEq(c, r) => c[i].as_ref() == r,
+                    Checker::StrsNeq(c, r) => c[i].as_ref() != r,
+                    Checker::BoolsEq(c, r) => c[i] == r,
                     Checker::BoolsNeq(c, r) => c[i] != r,
                 }
             }
         }
         let mut typed_checkers: Vec<Checker> = Vec::with_capacity(leaves.len());
         for (slot, op, lit) in leaves {
-            let col = match cols.get(*slot) { Some(c) => c, None => break };
+            let col = match cols.get(*slot) {
+                Some(c) => c,
+                None => break,
+            };
             let chk: Option<Checker> = match (col, lit, *op) {
-                (ObjVecCol::Ints(c), Val::Int(r), B::Eq)  => Some(Checker::IntsEq(c.as_slice(), *r)),
-                (ObjVecCol::Ints(c), Val::Int(r), B::Neq) => Some(Checker::IntsNeq(c.as_slice(), *r)),
-                (ObjVecCol::Ints(c), Val::Int(r), B::Lt)  => Some(Checker::IntsLt(c.as_slice(), *r)),
-                (ObjVecCol::Ints(c), Val::Int(r), B::Lte) => Some(Checker::IntsLte(c.as_slice(), *r)),
-                (ObjVecCol::Ints(c), Val::Int(r), B::Gt)  => Some(Checker::IntsGt(c.as_slice(), *r)),
-                (ObjVecCol::Ints(c), Val::Int(r), B::Gte) => Some(Checker::IntsGte(c.as_slice(), *r)),
-                (ObjVecCol::Floats(c), Val::Float(r), B::Eq)  => Some(Checker::FloatsEq(c.as_slice(), *r)),
-                (ObjVecCol::Floats(c), Val::Float(r), B::Neq) => Some(Checker::FloatsNeq(c.as_slice(), *r)),
-                (ObjVecCol::Floats(c), Val::Float(r), B::Lt)  => Some(Checker::FloatsLt(c.as_slice(), *r)),
-                (ObjVecCol::Floats(c), Val::Float(r), B::Lte) => Some(Checker::FloatsLte(c.as_slice(), *r)),
-                (ObjVecCol::Floats(c), Val::Float(r), B::Gt)  => Some(Checker::FloatsGt(c.as_slice(), *r)),
-                (ObjVecCol::Floats(c), Val::Float(r), B::Gte) => Some(Checker::FloatsGte(c.as_slice(), *r)),
-                (ObjVecCol::Strs(c), Val::Str(r), B::Eq)  => Some(Checker::StrsEq(c.as_slice(), r.as_ref())),
-                (ObjVecCol::Strs(c), Val::Str(r), B::Neq) => Some(Checker::StrsNeq(c.as_slice(), r.as_ref())),
-                (ObjVecCol::Bools(c), Val::Bool(r), B::Eq)  => Some(Checker::BoolsEq(c.as_slice(), *r)),
-                (ObjVecCol::Bools(c), Val::Bool(r), B::Neq) => Some(Checker::BoolsNeq(c.as_slice(), *r)),
+                (ObjVecCol::Ints(c), Val::Int(r), B::Eq) => Some(Checker::IntsEq(c.as_slice(), *r)),
+                (ObjVecCol::Ints(c), Val::Int(r), B::Neq) => {
+                    Some(Checker::IntsNeq(c.as_slice(), *r))
+                }
+                (ObjVecCol::Ints(c), Val::Int(r), B::Lt) => Some(Checker::IntsLt(c.as_slice(), *r)),
+                (ObjVecCol::Ints(c), Val::Int(r), B::Lte) => {
+                    Some(Checker::IntsLte(c.as_slice(), *r))
+                }
+                (ObjVecCol::Ints(c), Val::Int(r), B::Gt) => Some(Checker::IntsGt(c.as_slice(), *r)),
+                (ObjVecCol::Ints(c), Val::Int(r), B::Gte) => {
+                    Some(Checker::IntsGte(c.as_slice(), *r))
+                }
+                (ObjVecCol::Floats(c), Val::Float(r), B::Eq) => {
+                    Some(Checker::FloatsEq(c.as_slice(), *r))
+                }
+                (ObjVecCol::Floats(c), Val::Float(r), B::Neq) => {
+                    Some(Checker::FloatsNeq(c.as_slice(), *r))
+                }
+                (ObjVecCol::Floats(c), Val::Float(r), B::Lt) => {
+                    Some(Checker::FloatsLt(c.as_slice(), *r))
+                }
+                (ObjVecCol::Floats(c), Val::Float(r), B::Lte) => {
+                    Some(Checker::FloatsLte(c.as_slice(), *r))
+                }
+                (ObjVecCol::Floats(c), Val::Float(r), B::Gt) => {
+                    Some(Checker::FloatsGt(c.as_slice(), *r))
+                }
+                (ObjVecCol::Floats(c), Val::Float(r), B::Gte) => {
+                    Some(Checker::FloatsGte(c.as_slice(), *r))
+                }
+                (ObjVecCol::Strs(c), Val::Str(r), B::Eq) => {
+                    Some(Checker::StrsEq(c.as_slice(), r.as_ref()))
+                }
+                (ObjVecCol::Strs(c), Val::Str(r), B::Neq) => {
+                    Some(Checker::StrsNeq(c.as_slice(), r.as_ref()))
+                }
+                (ObjVecCol::Bools(c), Val::Bool(r), B::Eq) => {
+                    Some(Checker::BoolsEq(c.as_slice(), *r))
+                }
+                (ObjVecCol::Bools(c), Val::Bool(r), B::Neq) => {
+                    Some(Checker::BoolsNeq(c.as_slice(), *r))
+                }
                 _ => None,
             };
             match chk {
                 Some(c) => typed_checkers.push(c),
-                None => { typed_checkers.clear(); break; }
+                None => {
+                    typed_checkers.clear();
+                    break;
+                }
             }
         }
         if typed_checkers.len() == leaves.len() {
@@ -5061,7 +6151,9 @@ fn objvec_filter_count_and_slots(
             let mut count: i64 = 0;
             'rows_typed: for row in 0..nrows {
                 for c in &typed_checkers {
-                    if !c.at(row) { continue 'rows_typed; }
+                    if !c.at(row) {
+                        continue 'rows_typed;
+                    }
                 }
                 count += 1;
             }
@@ -5089,8 +6181,16 @@ fn objvec_filter_count_and_slots(
 /// not exposed.
 fn cmp_val_total(a: &Val, b: &Val) -> std::cmp::Ordering {
     use std::cmp::Ordering;
-    let af = match a { Val::Int(n) => Some(*n as f64), Val::Float(x) => Some(*x), _ => None };
-    let bf = match b { Val::Int(n) => Some(*n as f64), Val::Float(x) => Some(*x), _ => None };
+    let af = match a {
+        Val::Int(n) => Some(*n as f64),
+        Val::Float(x) => Some(*x),
+        _ => None,
+    };
+    let bf = match b {
+        Val::Int(n) => Some(*n as f64),
+        Val::Float(x) => Some(*x),
+        _ => None,
+    };
     match (af, bf) {
         (Some(x), Some(y)) => x.partial_cmp(&y).unwrap_or(Ordering::Equal),
         _ => match (a, b) {
@@ -5107,25 +6207,31 @@ fn cmp_val_total(a: &Val, b: &Val) -> std::cmp::Ordering {
 fn cmp_val_binop_local(a: &Val, op: crate::ast::BinOp, b: &Val) -> bool {
     use crate::ast::BinOp;
     match (a, b) {
-        (Val::Int(x), Val::Int(y))   => match op {
-            BinOp::Eq => x == y, BinOp::Neq => x != y,
-            BinOp::Lt => x <  y, BinOp::Lte => x <= y,
-            BinOp::Gt => x >  y, BinOp::Gte => x >= y,
+        (Val::Int(x), Val::Int(y)) => match op {
+            BinOp::Eq => x == y,
+            BinOp::Neq => x != y,
+            BinOp::Lt => x < y,
+            BinOp::Lte => x <= y,
+            BinOp::Gt => x > y,
+            BinOp::Gte => x >= y,
             _ => false,
         },
         (Val::Int(x), Val::Float(y)) => num_f_cmp(*x as f64, *y, op),
         (Val::Float(x), Val::Int(y)) => num_f_cmp(*x, *y as f64, op),
         (Val::Float(x), Val::Float(y)) => num_f_cmp(*x, *y, op),
         (Val::Str(x), Val::Str(y)) => match op {
-            BinOp::Eq => x == y, BinOp::Neq => x != y,
-            BinOp::Lt => x.as_ref() <  y.as_ref(),
+            BinOp::Eq => x == y,
+            BinOp::Neq => x != y,
+            BinOp::Lt => x.as_ref() < y.as_ref(),
             BinOp::Lte => x.as_ref() <= y.as_ref(),
-            BinOp::Gt => x.as_ref() >  y.as_ref(),
+            BinOp::Gt => x.as_ref() > y.as_ref(),
             BinOp::Gte => x.as_ref() >= y.as_ref(),
             _ => false,
         },
         (Val::Bool(x), Val::Bool(y)) => match op {
-            BinOp::Eq => x == y, BinOp::Neq => x != y, _ => false,
+            BinOp::Eq => x == y,
+            BinOp::Neq => x != y,
+            _ => false,
         },
         _ => false,
     }
@@ -5135,9 +6241,12 @@ fn cmp_val_binop_local(a: &Val, op: crate::ast::BinOp, b: &Val) -> bool {
 fn num_f_cmp(a: f64, b: f64, op: crate::ast::BinOp) -> bool {
     use crate::ast::BinOp;
     match op {
-        BinOp::Eq => a == b, BinOp::Neq => a != b,
-        BinOp::Lt => a <  b, BinOp::Lte => a <= b,
-        BinOp::Gt => a >  b, BinOp::Gte => a >= b,
+        BinOp::Eq => a == b,
+        BinOp::Neq => a != b,
+        BinOp::Lt => a < b,
+        BinOp::Lte => a <= b,
+        BinOp::Gt => a > b,
+        BinOp::Gte => a >= b,
         _ => false,
     }
 }
@@ -5163,12 +6272,20 @@ fn lookup_via_ic<'a>(
 ) -> Option<&'a Val> {
     if let Some(i) = *cached {
         if let Some((ki, vi)) = m.get_index(i) {
-            if ki.as_ref() == k { return Some(vi); }
+            if ki.as_ref() == k {
+                return Some(vi);
+            }
         }
     }
     match m.get_full(k) {
-        Some((i, _, v)) => { *cached = Some(i); Some(v) }
-        None => { *cached = None; None }
+        Some((i, _, v)) => {
+            *cached = Some(i);
+            Some(v)
+        }
+        None => {
+            *cached = None;
+            None
+        }
     }
 }
 
@@ -5180,13 +6297,13 @@ fn lookup_via_ic<'a>(
 /// explicit when emitting bytecode.
 fn compile_subexpr(arg: &crate::ast::Arg) -> Option<Arc<crate::vm::Program>> {
     use crate::ast::{Arg, Expr, Step};
-    let inner = match arg { Arg::Pos(e) => e, _ => return None };
+    let inner = match arg {
+        Arg::Pos(e) => e,
+        _ => return None,
+    };
     let rooted: Expr = match inner {
         // Bare ident `total` → `@.total`
-        Expr::Ident(name) => Expr::Chain(
-            Box::new(Expr::Current),
-            vec![Step::Field(name.clone())],
-        ),
+        Expr::Ident(name) => Expr::Chain(Box::new(Expr::Current), vec![Step::Field(name.clone())]),
         // `@…` chains: keep base = Current, accept as-is
         Expr::Chain(base, _) if matches!(base.as_ref(), Expr::Current) => inner.clone(),
         // Anything else: wrap as-is — VM will resolve `@` via Current refs.
@@ -5245,7 +6362,9 @@ fn eval_kernel(
             let mut v = item.clone();
             for k in ks.iter() {
                 v = v.get_field(k.as_ref());
-                if matches!(v, Val::Null) { break; }
+                if matches!(v, Val::Null) {
+                    break;
+                }
             }
             Ok(v)
         }
@@ -5259,15 +6378,17 @@ fn eval_kernel(
             let mut v = item.clone();
             for k in ks.iter() {
                 v = v.get_field(k.as_ref());
-                if matches!(v, Val::Null) { break; }
+                if matches!(v, Val::Null) {
+                    break;
+                }
             }
             Ok(Val::Bool(eval_cmp_op(&v, *op, lit)))
         }
-        BodyKernel::CurrentCmpLit(op, lit) =>
-            Ok(Val::Bool(eval_cmp_op(item, *op, lit))),
-        BodyKernel::ObjProject(_) | BodyKernel::Arith(_, _, _)
-        | BodyKernel::FString(_) | BodyKernel::Generic =>
-            apply_item_in_env(vm, env, item, fallback),
+        BodyKernel::CurrentCmpLit(op, lit) => Ok(Val::Bool(eval_cmp_op(item, *op, lit))),
+        BodyKernel::ObjProject(_)
+        | BodyKernel::Arith(_, _, _)
+        | BodyKernel::FString(_)
+        | BodyKernel::Generic => apply_item_in_env(vm, env, item, fallback),
     }
 }
 
@@ -5275,17 +6396,11 @@ fn eval_kernel(
 /// handlers; centralised so the kernel inline path matches semantics.
 #[inline]
 fn eval_cmp_op(lhs: &Val, op: crate::ast::BinOp, rhs: &Val) -> bool {
-    use crate::ast::BinOp as B;
-    use crate::eval::util::{vals_eq, cmp_vals};
-    match op {
-        B::Eq  => vals_eq(lhs, rhs),
-        B::Neq => !vals_eq(lhs, rhs),
-        B::Lt  => cmp_vals(lhs, rhs) == std::cmp::Ordering::Less,
-        B::Lte => cmp_vals(lhs, rhs) != std::cmp::Ordering::Greater,
-        B::Gt  => cmp_vals(lhs, rhs) == std::cmp::Ordering::Greater,
-        B::Gte => cmp_vals(lhs, rhs) != std::cmp::Ordering::Less,
-        _ => false,
-    }
+    crate::eval::util::json_cmp_binop(
+        crate::eval::util::JsonView::from_val(lhs),
+        op,
+        crate::eval::util::JsonView::from_val(rhs),
+    )
 }
 
 #[inline]
@@ -5298,15 +6413,9 @@ fn is_truthy(v: &Val) -> bool {
 // existing pipeline.rs callers (streaming arm, barrier arm) keep
 // using the short path.
 pub(crate) use crate::builtins::{
-    filter_one, filter_apply,
-    map_one, map_apply,
-    take_while_one, take_while_apply,
-    drop_while_apply,
-    partition_apply,
-    group_by_apply, count_by_apply, index_by_apply,
-    keys_apply, values_apply, entries_apply,
-    slice_apply, split_apply, chunk_apply, window_apply,
-    replace_apply,
+    chunk_apply, count_by_apply, drop_while_apply, entries_apply, filter_apply, filter_one,
+    group_by_apply, index_by_apply, keys_apply, map_apply, map_one, partition_apply, replace_apply,
+    slice_apply, split_apply, take_while_apply, take_while_one, values_apply, window_apply,
 };
 // ── Tests ────────────────────────────────────────────────────────────────────
 
@@ -5373,7 +6482,8 @@ mod tests {
         use serde_json::json;
         let doc: Val = (&json!({"orders":[
             {"total": 50}, {"total": 150}, {"total": 200}
-        ]})).into();
+        ]}))
+            .into();
         let p = lower_query("$.orders.filter(total > 100).count()").unwrap();
         let out = p.run(&doc).unwrap();
         assert_eq!(out, Val::Int(2));
@@ -5395,10 +6505,23 @@ mod tests {
             {"id": 1, "total": 50},
             {"id": 2, "total": 150},
             {"id": 3, "total": 200}
-        ]})).into();
+        ]}))
+            .into();
         let p = lower_query("$.orders.filter(total > 100).map(total).sum()").unwrap();
         let out = p.run(&doc).unwrap();
         assert_eq!(out, Val::Int(350));
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn tape_materialized_bridge_reuses_lifted_builtins() {
+        let raw = br#"{"items":[" alpha ","Beta","gamma"]}"#.to_vec();
+        let j = crate::Jetro::from_bytes(raw).unwrap();
+
+        let out = j.collect_val("$.items.trim().upper()").unwrap();
+
+        assert_eq!(out.to_json_vec(), br#"["ALPHA","BETA","GAMMA"]"#);
+        assert_eq!(j.tape_runs.load(std::sync::atomic::Ordering::Relaxed), 1,);
     }
 
     #[test]
@@ -5421,7 +6544,10 @@ mod tests {
         assert_eq!(p.stages.len(), 1);
         match &p.stages[0] {
             Stage::Filter(prog) => {
-                assert!(prog.ops.iter().any(|o| matches!(o, crate::vm::Opcode::AndOp(_))));
+                assert!(prog
+                    .ops
+                    .iter()
+                    .any(|o| matches!(o, crate::vm::Opcode::AndOp(_))));
             }
             _ => panic!("expected merged Filter"),
         }
@@ -5429,7 +6555,9 @@ mod tests {
 
     #[test]
     fn rewrite_map_then_count_drops_map() {
-        if skip_under_composed() { return; }
+        if skip_under_composed() {
+            return;
+        }
         let p = lower_query("$.orders.map(total).count()").unwrap();
         assert_eq!(p.stages.len(), 0);
         assert!(matches!(p.sink, Sink::Count));
@@ -5464,6 +6592,6 @@ mod tests {
         let doc: Val = (&json!({"xs":[10, 20, 30, 40, 50]})).into();
         let p = lower_query("$.xs.skip(1).take(2).sum()").unwrap();
         let out = p.run(&doc).unwrap();
-        assert_eq!(out, Val::Int(50));   // 20 + 30
+        assert_eq!(out, Val::Int(50)); // 20 + 30
     }
 }

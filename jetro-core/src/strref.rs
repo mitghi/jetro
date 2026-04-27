@@ -743,16 +743,22 @@ impl<'a> Iterator for TapeArrayIter<'a> {
 /// everything else truthy.  Mirrors Val-side `is_truthy`.
 #[cfg(feature = "simd-json")]
 pub fn tape_value_truthy(tape: &TapeData, idx: usize) -> bool {
+    tape_json_view(tape, idx).truthy()
+}
+
+#[cfg(feature = "simd-json")]
+#[inline]
+pub fn tape_json_view<'a>(tape: &'a TapeData, idx: usize) -> crate::eval::util::JsonView<'a> {
     use simd_json::StaticNode as SN;
     match tape.nodes[idx] {
-        TapeNode::Static(SN::Null) => false,
-        TapeNode::Static(SN::Bool(b)) => b,
-        TapeNode::Static(SN::I64(n)) => n != 0,
-        TapeNode::Static(SN::U64(n)) => n != 0,
-        TapeNode::Static(SN::F64(f)) => f != 0.0,
-        TapeNode::StringRef { start, end } => end > start,
-        TapeNode::Array { len, .. } => len > 0,
-        TapeNode::Object { len, .. } => len > 0,
+        TapeNode::Static(SN::Null) => crate::eval::util::JsonView::Null,
+        TapeNode::Static(SN::Bool(b)) => crate::eval::util::JsonView::Bool(b),
+        TapeNode::Static(SN::I64(n)) => crate::eval::util::JsonView::Int(n),
+        TapeNode::Static(SN::U64(n)) => crate::eval::util::JsonView::UInt(n),
+        TapeNode::Static(SN::F64(f)) => crate::eval::util::JsonView::Float(f),
+        TapeNode::StringRef { .. } => crate::eval::util::JsonView::Str(tape.str_at(idx)),
+        TapeNode::Array { len, .. } => crate::eval::util::JsonView::ArrayLen(len as usize),
+        TapeNode::Object { len, .. } => crate::eval::util::JsonView::ObjectLen(len as usize),
     }
 }
 
@@ -852,48 +858,36 @@ impl<'a> TapePred<'a> {
 /// promote i64↔f64.
 #[cfg(feature = "simd-json")]
 pub fn tape_value_cmp(tape: &TapeData, idx: usize, op: TapeCmp, lit: &TapeLit) -> bool {
-    use simd_json::StaticNode as SN;
-    match (tape.nodes[idx], lit) {
-        (TapeNode::Static(SN::I64(v)), TapeLit::Int(l)) => num_cmp_i(v, *l, op),
-        (TapeNode::Static(SN::U64(v)), TapeLit::Int(l)) if v <= i64::MAX as u64 =>
-            num_cmp_i(v as i64, *l, op),
-        (TapeNode::Static(SN::I64(v)), TapeLit::Float(l)) => num_cmp_f(v as f64, *l, op),
-        (TapeNode::Static(SN::U64(v)), TapeLit::Float(l)) if v <= i64::MAX as u64 =>
-            num_cmp_f(v as f64, *l, op),
-        (TapeNode::Static(SN::F64(v)), TapeLit::Float(l)) => num_cmp_f(v, *l, op),
-        (TapeNode::Static(SN::F64(v)), TapeLit::Int(l)) => num_cmp_f(v, *l as f64, op),
-        (TapeNode::StringRef { .. }, TapeLit::Str(s)) => str_cmp(tape.str_at(idx), s, op),
-        (TapeNode::Static(SN::Bool(v)), TapeLit::Bool(l)) => bool_cmp(v, *l, op),
-        (TapeNode::Static(SN::Null), TapeLit::Null) => matches!(op, TapeCmp::Eq),
-        _ => false,
+    crate::eval::util::json_cmp_binop(
+        tape_json_view(tape, idx),
+        tape_cmp_to_binop(op),
+        tape_lit_view(lit),
+    )
+}
+
+#[cfg(feature = "simd-json")]
+#[inline]
+fn tape_lit_view<'a>(lit: &'a TapeLit<'a>) -> crate::eval::util::JsonView<'a> {
+    match lit {
+        TapeLit::Int(n) => crate::eval::util::JsonView::Int(*n),
+        TapeLit::Float(f) => crate::eval::util::JsonView::Float(*f),
+        TapeLit::Str(s) => crate::eval::util::JsonView::Str(s),
+        TapeLit::Bool(b) => crate::eval::util::JsonView::Bool(*b),
+        TapeLit::Null => crate::eval::util::JsonView::Null,
     }
 }
 
 #[cfg(feature = "simd-json")]
 #[inline]
-fn num_cmp_i(a: i64, b: i64, op: TapeCmp) -> bool {
-    match op { TapeCmp::Eq => a == b, TapeCmp::Neq => a != b,
-               TapeCmp::Lt => a < b, TapeCmp::Lte => a <= b,
-               TapeCmp::Gt => a > b, TapeCmp::Gte => a >= b }
-}
-#[cfg(feature = "simd-json")]
-#[inline]
-fn num_cmp_f(a: f64, b: f64, op: TapeCmp) -> bool {
-    match op { TapeCmp::Eq => a == b, TapeCmp::Neq => a != b,
-               TapeCmp::Lt => a < b, TapeCmp::Lte => a <= b,
-               TapeCmp::Gt => a > b, TapeCmp::Gte => a >= b }
-}
-#[cfg(feature = "simd-json")]
-#[inline]
-fn str_cmp(a: &str, b: &str, op: TapeCmp) -> bool {
-    match op { TapeCmp::Eq => a == b, TapeCmp::Neq => a != b,
-               TapeCmp::Lt => a < b, TapeCmp::Lte => a <= b,
-               TapeCmp::Gt => a > b, TapeCmp::Gte => a >= b }
-}
-#[cfg(feature = "simd-json")]
-#[inline]
-fn bool_cmp(a: bool, b: bool, op: TapeCmp) -> bool {
-    match op { TapeCmp::Eq => a == b, TapeCmp::Neq => a != b, _ => false }
+fn tape_cmp_to_binop(op: TapeCmp) -> crate::ast::BinOp {
+    match op {
+        TapeCmp::Eq => crate::ast::BinOp::Eq,
+        TapeCmp::Neq => crate::ast::BinOp::Neq,
+        TapeCmp::Lt => crate::ast::BinOp::Lt,
+        TapeCmp::Lte => crate::ast::BinOp::Lte,
+        TapeCmp::Gt => crate::ast::BinOp::Gt,
+        TapeCmp::Gte => crate::ast::BinOp::Gte,
+    }
 }
 
 /// `$.<arr>.filter(<field> <op> <lit>).count()` — count Array entries

@@ -34,30 +34,28 @@
 //! 9. **Stack machine** — iterative `exec()` loop; no per-opcode stack-frame
 //!    overhead for simple navigation / arithmetic opcodes.
 
-use std::{
-    collections::{HashMap, VecDeque},
-    collections::hash_map::DefaultHasher,
-    hash::{Hash, Hasher},
-    sync::Arc,
-    sync::atomic::{AtomicU64, Ordering},
-};
 use indexmap::IndexMap;
 use smallvec::SmallVec;
+use std::{
+    collections::hash_map::DefaultHasher,
+    collections::{HashMap, VecDeque},
+    hash::{Hash, Hasher},
+    sync::atomic::{AtomicU64, Ordering},
+    sync::Arc,
+};
 
-use crate::ast::*;
-use super::eval::{
-    Env, EvalError, Val,
-    dispatch_method,
-};
-use super::eval::util::{
-    is_truthy, kind_matches, vals_eq, cmp_vals, val_to_key, val_to_string,
-    add_vals, num_op, obj2,
-};
 use super::eval::methods::MethodRegistry;
+use super::eval::util::{
+    add_vals, cmp_vals, is_truthy, kind_matches, num_op, obj2, val_to_key, val_to_string, vals_eq,
+};
+use super::eval::{dispatch_method, Env, EvalError, Val};
+use crate::ast::*;
 
 macro_rules! pop {
     ($stack:expr) => {
-        $stack.pop().ok_or_else(|| EvalError("stack underflow".into()))?
+        $stack
+            .pop()
+            .ok_or_else(|| EvalError("stack underflow".into()))?
     };
 }
 macro_rules! err {
@@ -71,32 +69,123 @@ macro_rules! err {
 #[repr(u8)]
 pub enum BuiltinMethod {
     // Navigation / basics
-    Len = 0, Keys, Values, Entries, ToPairs, FromPairs, Invert, Reverse, Type,
-    ToString, ToJson, FromJson,
+    Len = 0,
+    Keys,
+    Values,
+    Entries,
+    ToPairs,
+    FromPairs,
+    Invert,
+    Reverse,
+    Type,
+    ToString,
+    ToJson,
+    FromJson,
     // Aggregates
-    Sum, Avg, Min, Max, Count, Any, All,
-    GroupBy, CountBy, IndexBy,
+    Sum,
+    Avg,
+    Min,
+    Max,
+    Count,
+    Any,
+    All,
+    GroupBy,
+    CountBy,
+    IndexBy,
     // Array ops
-    Filter, Map, FlatMap, Sort, Unique, Flatten, Compact,
-    Join, First, Last, Nth, Append, Prepend, Remove,
-    Diff, Intersect, Union, Enumerate, Pairwise, Window, Chunk,
-    TakeWhile, DropWhile, Accumulate, Partition, Zip, ZipLongest,
+    Filter,
+    Map,
+    FlatMap,
+    Sort,
+    Unique,
+    Flatten,
+    Compact,
+    Join,
+    First,
+    Last,
+    Nth,
+    Append,
+    Prepend,
+    Remove,
+    Diff,
+    Intersect,
+    Union,
+    Enumerate,
+    Pairwise,
+    Window,
+    Chunk,
+    TakeWhile,
+    DropWhile,
+    Accumulate,
+    Partition,
+    Zip,
+    ZipLongest,
     // Object ops
-    Pick, Omit, Merge, DeepMerge, Defaults, Rename,
-    TransformKeys, TransformValues, FilterKeys, FilterValues, Pivot,
+    Pick,
+    Omit,
+    Merge,
+    DeepMerge,
+    Defaults,
+    Rename,
+    TransformKeys,
+    TransformValues,
+    FilterKeys,
+    FilterValues,
+    Pivot,
     // Path ops
-    GetPath, SetPath, DelPath, DelPaths, HasPath, FlattenKeys, UnflattenKeys,
+    GetPath,
+    SetPath,
+    DelPath,
+    DelPaths,
+    HasPath,
+    FlattenKeys,
+    UnflattenKeys,
     // CSV
-    ToCsv, ToTsv,
+    ToCsv,
+    ToTsv,
     // Null / predicate
-    Or, Has, Missing, Includes, Set, Update,
+    Or,
+    Has,
+    Missing,
+    Includes,
+    Set,
+    Update,
     // String methods
-    Upper, Lower, Capitalize, TitleCase, Trim, TrimLeft, TrimRight,
-    Lines, Words, Chars, ToNumber, ToBool, ToBase64, FromBase64,
-    UrlEncode, UrlDecode, HtmlEscape, HtmlUnescape,
-    Repeat, PadLeft, PadRight, StartsWith, EndsWith,
-    IndexOf, LastIndexOf, Replace, ReplaceAll, StripPrefix, StripSuffix,
-    Slice, Split, Indent, Dedent, Matches, Scan,
+    Upper,
+    Lower,
+    Capitalize,
+    TitleCase,
+    Trim,
+    TrimLeft,
+    TrimRight,
+    Lines,
+    Words,
+    Chars,
+    ToNumber,
+    ToBool,
+    ToBase64,
+    FromBase64,
+    UrlEncode,
+    UrlDecode,
+    HtmlEscape,
+    HtmlUnescape,
+    Repeat,
+    PadLeft,
+    PadRight,
+    StartsWith,
+    EndsWith,
+    IndexOf,
+    LastIndexOf,
+    Replace,
+    ReplaceAll,
+    StripPrefix,
+    StripSuffix,
+    Slice,
+    Split,
+    Indent,
+    Dedent,
+    Matches,
+    Scan,
     // Relational
     EquiJoin,
     // Sentinel for custom/unknown
@@ -106,130 +195,145 @@ pub enum BuiltinMethod {
 impl BuiltinMethod {
     pub fn from_name(name: &str) -> Self {
         match name {
-            "len"            => Self::Len,
-            "keys"           => Self::Keys,
-            "values"         => Self::Values,
-            "entries"        => Self::Entries,
-            "to_pairs"|"toPairs" => Self::ToPairs,
-            "from_pairs"|"fromPairs" => Self::FromPairs,
-            "invert"         => Self::Invert,
-            "reverse"        => Self::Reverse,
-            "type"           => Self::Type,
-            "to_string"|"toString" => Self::ToString,
-            "to_json"|"toJson" => Self::ToJson,
-            "from_json"|"fromJson" => Self::FromJson,
-            "sum"            => Self::Sum,
-            "avg"            => Self::Avg,
-            "min"            => Self::Min,
-            "max"            => Self::Max,
-            "count"          => Self::Count,
-            "any"            => Self::Any,
-            "all"            => Self::All,
-            "groupBy"|"group_by" => Self::GroupBy,
-            "countBy"|"count_by" => Self::CountBy,
-            "indexBy"|"index_by" => Self::IndexBy,
-            "filter"         => Self::Filter,
-            "map"            => Self::Map,
-            "flatMap"|"flat_map" => Self::FlatMap,
-            "sort"           => Self::Sort,
-            "unique"|"distinct" => Self::Unique,
-            "flatten"        => Self::Flatten,
-            "compact"        => Self::Compact,
-            "join"           => Self::Join,
-            "equi_join"|"equiJoin" => Self::EquiJoin,
-            "first"          => Self::First,
-            "last"           => Self::Last,
-            "nth"            => Self::Nth,
-            "append"         => Self::Append,
-            "prepend"        => Self::Prepend,
-            "remove"         => Self::Remove,
-            "diff"           => Self::Diff,
-            "intersect"      => Self::Intersect,
-            "union"          => Self::Union,
-            "enumerate"      => Self::Enumerate,
-            "pairwise"       => Self::Pairwise,
-            "window"         => Self::Window,
-            "chunk"|"batch"  => Self::Chunk,
-            "takewhile"|"take_while" => Self::TakeWhile,
-            "dropwhile"|"drop_while" => Self::DropWhile,
-            "accumulate"     => Self::Accumulate,
-            "partition"      => Self::Partition,
-            "zip"            => Self::Zip,
-            "zip_longest"|"zipLongest" => Self::ZipLongest,
-            "pick"           => Self::Pick,
-            "omit"           => Self::Omit,
-            "merge"          => Self::Merge,
-            "deep_merge"|"deepMerge" => Self::DeepMerge,
-            "defaults"       => Self::Defaults,
-            "rename"         => Self::Rename,
-            "transform_keys"|"transformKeys" => Self::TransformKeys,
-            "transform_values"|"transformValues" => Self::TransformValues,
-            "filter_keys"|"filterKeys" => Self::FilterKeys,
-            "filter_values"|"filterValues" => Self::FilterValues,
-            "pivot"          => Self::Pivot,
-            "get_path"|"getPath" => Self::GetPath,
-            "set_path"|"setPath" => Self::SetPath,
-            "del_path"|"delPath" => Self::DelPath,
-            "del_paths"|"delPaths" => Self::DelPaths,
-            "has_path"|"hasPath" => Self::HasPath,
-            "flatten_keys"|"flattenKeys" => Self::FlattenKeys,
-            "unflatten_keys"|"unflattenKeys" => Self::UnflattenKeys,
-            "to_csv"|"toCsv" => Self::ToCsv,
-            "to_tsv"|"toTsv" => Self::ToTsv,
-            "or"             => Self::Or,
-            "has"            => Self::Has,
-            "missing"        => Self::Missing,
-            "includes"|"contains" => Self::Includes,
-            "set"            => Self::Set,
-            "update"         => Self::Update,
-            "upper"          => Self::Upper,
-            "lower"          => Self::Lower,
-            "capitalize"     => Self::Capitalize,
-            "title_case"|"titleCase" => Self::TitleCase,
-            "trim"           => Self::Trim,
-            "trim_left"|"trimLeft"|"lstrip" => Self::TrimLeft,
-            "trim_right"|"trimRight"|"rstrip" => Self::TrimRight,
-            "lines"          => Self::Lines,
-            "words"          => Self::Words,
-            "chars"          => Self::Chars,
-            "to_number"|"toNumber" => Self::ToNumber,
-            "to_bool"|"toBool" => Self::ToBool,
-            "to_base64"|"toBase64" => Self::ToBase64,
-            "from_base64"|"fromBase64" => Self::FromBase64,
-            "url_encode"|"urlEncode" => Self::UrlEncode,
-            "url_decode"|"urlDecode" => Self::UrlDecode,
-            "html_escape"|"htmlEscape" => Self::HtmlEscape,
-            "html_unescape"|"htmlUnescape" => Self::HtmlUnescape,
-            "repeat"         => Self::Repeat,
-            "pad_left"|"padLeft" => Self::PadLeft,
-            "pad_right"|"padRight" => Self::PadRight,
-            "starts_with"|"startsWith" => Self::StartsWith,
-            "ends_with"|"endsWith" => Self::EndsWith,
-            "index_of"|"indexOf" => Self::IndexOf,
-            "last_index_of"|"lastIndexOf" => Self::LastIndexOf,
-            "replace"        => Self::Replace,
-            "replace_all"|"replaceAll" => Self::ReplaceAll,
-            "strip_prefix"|"stripPrefix" => Self::StripPrefix,
-            "strip_suffix"|"stripSuffix" => Self::StripSuffix,
-            "slice"          => Self::Slice,
-            "split"          => Self::Split,
-            "indent"         => Self::Indent,
-            "dedent"         => Self::Dedent,
-            "matches"        => Self::Matches,
-            "scan"           => Self::Scan,
-            _                => Self::Unknown,
+            "len" => Self::Len,
+            "keys" => Self::Keys,
+            "values" => Self::Values,
+            "entries" => Self::Entries,
+            "to_pairs" | "toPairs" => Self::ToPairs,
+            "from_pairs" | "fromPairs" => Self::FromPairs,
+            "invert" => Self::Invert,
+            "reverse" => Self::Reverse,
+            "type" => Self::Type,
+            "to_string" | "toString" => Self::ToString,
+            "to_json" | "toJson" => Self::ToJson,
+            "from_json" | "fromJson" => Self::FromJson,
+            "sum" => Self::Sum,
+            "avg" => Self::Avg,
+            "min" => Self::Min,
+            "max" => Self::Max,
+            "count" => Self::Count,
+            "any" => Self::Any,
+            "all" => Self::All,
+            "groupBy" | "group_by" => Self::GroupBy,
+            "countBy" | "count_by" => Self::CountBy,
+            "indexBy" | "index_by" => Self::IndexBy,
+            "filter" => Self::Filter,
+            "map" => Self::Map,
+            "flatMap" | "flat_map" => Self::FlatMap,
+            "sort" => Self::Sort,
+            "unique" | "distinct" => Self::Unique,
+            "flatten" => Self::Flatten,
+            "compact" => Self::Compact,
+            "join" => Self::Join,
+            "equi_join" | "equiJoin" => Self::EquiJoin,
+            "first" => Self::First,
+            "last" => Self::Last,
+            "nth" => Self::Nth,
+            "append" => Self::Append,
+            "prepend" => Self::Prepend,
+            "remove" => Self::Remove,
+            "diff" => Self::Diff,
+            "intersect" => Self::Intersect,
+            "union" => Self::Union,
+            "enumerate" => Self::Enumerate,
+            "pairwise" => Self::Pairwise,
+            "window" => Self::Window,
+            "chunk" | "batch" => Self::Chunk,
+            "takewhile" | "take_while" => Self::TakeWhile,
+            "dropwhile" | "drop_while" => Self::DropWhile,
+            "accumulate" => Self::Accumulate,
+            "partition" => Self::Partition,
+            "zip" => Self::Zip,
+            "zip_longest" | "zipLongest" => Self::ZipLongest,
+            "pick" => Self::Pick,
+            "omit" => Self::Omit,
+            "merge" => Self::Merge,
+            "deep_merge" | "deepMerge" => Self::DeepMerge,
+            "defaults" => Self::Defaults,
+            "rename" => Self::Rename,
+            "transform_keys" | "transformKeys" => Self::TransformKeys,
+            "transform_values" | "transformValues" => Self::TransformValues,
+            "filter_keys" | "filterKeys" => Self::FilterKeys,
+            "filter_values" | "filterValues" => Self::FilterValues,
+            "pivot" => Self::Pivot,
+            "get_path" | "getPath" => Self::GetPath,
+            "set_path" | "setPath" => Self::SetPath,
+            "del_path" | "delPath" => Self::DelPath,
+            "del_paths" | "delPaths" => Self::DelPaths,
+            "has_path" | "hasPath" => Self::HasPath,
+            "flatten_keys" | "flattenKeys" => Self::FlattenKeys,
+            "unflatten_keys" | "unflattenKeys" => Self::UnflattenKeys,
+            "to_csv" | "toCsv" => Self::ToCsv,
+            "to_tsv" | "toTsv" => Self::ToTsv,
+            "or" => Self::Or,
+            "has" => Self::Has,
+            "missing" => Self::Missing,
+            "includes" | "contains" => Self::Includes,
+            "set" => Self::Set,
+            "update" => Self::Update,
+            "upper" => Self::Upper,
+            "lower" => Self::Lower,
+            "capitalize" => Self::Capitalize,
+            "title_case" | "titleCase" => Self::TitleCase,
+            "trim" => Self::Trim,
+            "trim_left" | "trimLeft" | "lstrip" => Self::TrimLeft,
+            "trim_right" | "trimRight" | "rstrip" => Self::TrimRight,
+            "lines" => Self::Lines,
+            "words" => Self::Words,
+            "chars" => Self::Chars,
+            "to_number" | "toNumber" => Self::ToNumber,
+            "to_bool" | "toBool" => Self::ToBool,
+            "to_base64" | "toBase64" => Self::ToBase64,
+            "from_base64" | "fromBase64" => Self::FromBase64,
+            "url_encode" | "urlEncode" => Self::UrlEncode,
+            "url_decode" | "urlDecode" => Self::UrlDecode,
+            "html_escape" | "htmlEscape" => Self::HtmlEscape,
+            "html_unescape" | "htmlUnescape" => Self::HtmlUnescape,
+            "repeat" => Self::Repeat,
+            "pad_left" | "padLeft" => Self::PadLeft,
+            "pad_right" | "padRight" => Self::PadRight,
+            "starts_with" | "startsWith" => Self::StartsWith,
+            "ends_with" | "endsWith" => Self::EndsWith,
+            "index_of" | "indexOf" => Self::IndexOf,
+            "last_index_of" | "lastIndexOf" => Self::LastIndexOf,
+            "replace" => Self::Replace,
+            "replace_all" | "replaceAll" => Self::ReplaceAll,
+            "strip_prefix" | "stripPrefix" => Self::StripPrefix,
+            "strip_suffix" | "stripSuffix" => Self::StripSuffix,
+            "slice" => Self::Slice,
+            "split" => Self::Split,
+            "indent" => Self::Indent,
+            "dedent" => Self::Dedent,
+            "matches" => Self::Matches,
+            "scan" => Self::Scan,
+            _ => Self::Unknown,
         }
     }
 
     /// True for methods that receive a sub-program to run per item.
     fn is_lambda_method(self) -> bool {
-        matches!(self,
-            Self::Filter | Self::Map | Self::FlatMap | Self::Sort |
-            Self::Any | Self::All | Self::Count | Self::GroupBy |
-            Self::CountBy | Self::IndexBy | Self::TakeWhile |
-            Self::DropWhile | Self::Accumulate | Self::Partition |
-            Self::TransformKeys | Self::TransformValues |
-            Self::FilterKeys | Self::FilterValues | Self::Pivot | Self::Update
+        matches!(
+            self,
+            Self::Filter
+                | Self::Map
+                | Self::FlatMap
+                | Self::Sort
+                | Self::Any
+                | Self::All
+                | Self::Count
+                | Self::GroupBy
+                | Self::CountBy
+                | Self::IndexBy
+                | Self::TakeWhile
+                | Self::DropWhile
+                | Self::Accumulate
+                | Self::Partition
+                | Self::TransformKeys
+                | Self::TransformValues
+                | Self::FilterKeys
+                | Self::FilterValues
+                | Self::Pivot
+                | Self::Update
         )
     }
 }
@@ -239,8 +343,8 @@ impl BuiltinMethod {
 /// A compiled method call stored inside `Opcode::CallMethod`.
 #[derive(Debug, Clone)]
 pub struct CompiledCall {
-    pub method:   BuiltinMethod,
-    pub name:     Arc<str>,
+    pub method: BuiltinMethod,
+    pub name: Arc<str>,
     /// Compiled lambda/expression sub-programs (one per arg, in order).
     pub sub_progs: Arc<[Arc<Program>]>,
     /// Original AST args kept for non-lambda dispatch fallback.
@@ -260,8 +364,16 @@ pub enum CompiledObjEntry {
     /// (or a bound variable of that name).  `ic` is a per-entry inline
     /// cache hint so that repeated MakeObj calls over objects that share
     /// shape skip the IndexMap key-hash on hit.
-    Short { name: Arc<str>, ic: Arc<AtomicU64> },
-    Kv     { key: Arc<str>, prog: Arc<Program>, optional: bool, cond: Option<Arc<Program>> },
+    Short {
+        name: Arc<str>,
+        ic: Arc<AtomicU64>,
+    },
+    Kv {
+        key: Arc<str>,
+        prog: Arc<Program>,
+        optional: bool,
+        cond: Option<Arc<Program>>,
+    },
     /// Specialised `Kv` where the value is a pure path from current:
     /// `{ key: @.a.b[0] }` compiles to `KvPath` so `exec_make_obj` can
     /// walk `env.current` through the pre-resolved steps without a
@@ -269,8 +381,16 @@ pub enum CompiledObjEntry {
     /// the field is omitted when the walk lands on `Null`.
     /// `ics[i]` is an inline-cache slot for `steps[i]` — only used when
     /// the step is `Field`.
-    KvPath { key: Arc<str>, steps: Arc<[KvStep]>, optional: bool, ics: Arc<[AtomicU64]> },
-    Dynamic { key: Arc<Program>, val: Arc<Program> },
+    KvPath {
+        key: Arc<str>,
+        steps: Arc<[KvStep]>,
+        optional: bool,
+        ics: Arc<[AtomicU64]>,
+    },
+    Dynamic {
+        key: Arc<Program>,
+        val: Arc<Program>,
+    },
     Spread(Arc<Program>),
     SpreadDeep(Arc<Program>),
 }
@@ -286,14 +406,17 @@ pub enum KvStep {
 #[derive(Debug, Clone)]
 pub enum CompiledFSPart {
     Lit(Arc<str>),
-    Interp { prog: Arc<Program>, fmt: Option<FmtSpec> },
+    Interp {
+        prog: Arc<Program>,
+        fmt: Option<FmtSpec>,
+    },
 }
 
 /// Compiled bind-object destructure spec.
 #[derive(Debug, Clone)]
 pub struct BindObjSpec {
     pub fields: Arc<[Arc<str>]>,
-    pub rest:   Option<Arc<str>>,
+    pub rest: Option<Arc<str>>,
 }
 
 /// One step inside a `PipelineRun` opcode.  Forward-step evaluates
@@ -323,8 +446,8 @@ pub struct CompSpec {
 
 #[derive(Debug, Clone)]
 pub struct DictCompSpec {
-    pub key:  Arc<Program>,
-    pub val:  Arc<Program>,
+    pub key: Arc<Program>,
+    pub val: Arc<Program>,
     pub vars: Arc<[Arc<str>]>,
     pub iter: Arc<Program>,
     pub cond: Option<Arc<Program>>,
@@ -418,8 +541,20 @@ pub enum Opcode {
     LoadIdent(Arc<str>),
 
     // ── Binary / unary ops ────────────────────────────────────────────────────
-    Add, Sub, Mul, Div, Mod,
-    Eq, Neq, Lt, Lte, Gt, Gte, Fuzzy, Not, Neg,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    Eq,
+    Neq,
+    Lt,
+    Lte,
+    Gt,
+    Gte,
+    Fuzzy,
+    Not,
+    Neg,
 
     // ── Type cast (`as T`) ───────────────────────────────────────────────────
     CastOp(super::ast::CastType),
@@ -444,7 +579,10 @@ pub enum Opcode {
     FString(Arc<[CompiledFSPart]>),
 
     // ── Kind check ───────────────────────────────────────────────────────────
-    KindCheck { ty: KindType, negate: bool },
+    KindCheck {
+        ty: KindType,
+        negate: bool,
+    },
 
     // ── Pipeline helpers ──────────────────────────────────────────────────────
     /// Pop TOS → env.current, then push it back (pass-through with context update).
@@ -464,19 +602,28 @@ pub enum Opcode {
     /// / BindVar / Bind*Destructure no-op chain in the flat opcode
     /// stream.
     PipelineRun {
-        base:  Arc<Program>,
+        base: Arc<Program>,
         steps: Arc<[CompiledPipeStep]>,
     },
 
     // ── Complex (recursive sub-programs) ─────────────────────────────────────
-    LetExpr { name: Arc<str>, body: Arc<Program> },
+    LetExpr {
+        name: Arc<str>,
+        body: Arc<Program>,
+    },
     /// Python-style ternary: TOS is cond; branch into `then_` or `else_`.
     /// Short-circuits — only the taken branch is executed.
-    IfElse { then_: Arc<Program>, else_: Arc<Program> },
+    IfElse {
+        then_: Arc<Program>,
+        else_: Arc<Program>,
+    },
     /// `try BODY else DEFAULT` — execute `body`; on `EvalError` or
     /// `Val::Null` result, execute `default`.  Both subprograms are
     /// isolated; only one's value lands on the stack.
-    TryExpr { body: Arc<Program>, default: Arc<Program> },
+    TryExpr {
+        body: Arc<Program>,
+        default: Arc<Program>,
+    },
     ListComp(Arc<CompSpec>),
     DictComp(Arc<DictCompSpec>),
     SetComp(Arc<CompSpec>),
@@ -497,9 +644,9 @@ pub enum Opcode {
 /// A compiled, immutable v2 program.  Cheap to clone (`Arc` internals).
 #[derive(Debug, Clone)]
 pub struct Program {
-    pub ops:          Arc<[Opcode]>,
-    pub source:       Arc<str>,
-    pub id:           u64,
+    pub ops: Arc<[Opcode]>,
+    pub source: Arc<str>,
+    pub id: u64,
     /// True when the program contains only structural navigation opcodes
     /// (eligible for resolution caching).
     pub is_structural: bool,
@@ -512,19 +659,30 @@ pub struct Program {
     /// `Arc<IndexMap>` instances of the same shape, which is the common
     /// case for repeated queries over distinct docs and for shape-uniform
     /// array iteration reaching the opcode inside a sub-program.
-    pub ics:          Arc<[AtomicU64]>,
+    pub ics: Arc<[AtomicU64]>,
 }
 
 // ── Patch runtime helpers ──────────────────────────────────────────
 
 #[derive(Debug)]
-enum PatchResult { Replace(Val), Delete }
+enum PatchResult {
+    Replace(Val),
+    Delete,
+}
 
 #[inline]
 fn vm_resolve_idx(i: i64, len: i64) -> usize {
-    if len == 0 { return 0; }
+    if len == 0 {
+        return 0;
+    }
     let r = if i < 0 { len + i } else { i };
-    if r < 0 { 0 } else if r >= len { len as usize } else { r as usize }
+    if r < 0 {
+        0
+    } else if r >= len {
+        len as usize
+    } else {
+        r as usize
+    }
 }
 
 // ── Compiled patch (VM-native, no tree-walker) ─────────────────────
@@ -536,13 +694,13 @@ fn vm_resolve_idx(i: i64, len: i64) -> usize {
 #[derive(Debug, Clone)]
 pub struct CompiledPatch {
     pub root_prog: Arc<Program>,
-    pub ops:       Vec<CompiledPatchOp>,
+    pub ops: Vec<CompiledPatchOp>,
 }
 
 #[derive(Debug, Clone)]
 pub struct CompiledPatchOp {
     pub path: Vec<CompiledPathStep>,
-    pub val:  CompiledPatchVal,
+    pub val: CompiledPatchVal,
     pub cond: Option<Arc<Program>>,
 }
 
@@ -567,13 +725,20 @@ pub enum CompiledPathStep {
 impl Program {
     pub fn new(ops: Vec<Opcode>, source: &str) -> Self {
         let id = hash_str(source);
-        let is_structural = ops.iter().all(|op| matches!(op,
-            Opcode::PushRoot | Opcode::PushCurrent |
-            Opcode::GetField(_) | Opcode::GetIndex(_) |
-            Opcode::GetSlice(..) | Opcode::OptField(_) |
-            Opcode::RootChain(_) | Opcode::FieldChain(_) |
-            Opcode::GetPointer(_)
-        ));
+        let is_structural = ops.iter().all(|op| {
+            matches!(
+                op,
+                Opcode::PushRoot
+                    | Opcode::PushCurrent
+                    | Opcode::GetField(_)
+                    | Opcode::GetIndex(_)
+                    | Opcode::GetSlice(..)
+                    | Opcode::OptField(_)
+                    | Opcode::RootChain(_)
+                    | Opcode::FieldChain(_)
+                    | Opcode::GetPointer(_)
+            )
+        });
         let ics = fresh_ics(ops.len());
         Self {
             ops: ops.into(),
@@ -592,23 +757,37 @@ impl Program {
 #[derive(Debug)]
 pub struct FieldChainData {
     pub keys: Arc<[Arc<str>]>,
-    pub ics:  Box<[AtomicU64]>,
+    pub ics: Box<[AtomicU64]>,
 }
 
 impl FieldChainData {
     pub fn new(keys: Arc<[Arc<str>]>) -> Self {
         let n = keys.len();
         let mut ics = Vec::with_capacity(n);
-        for _ in 0..n { ics.push(AtomicU64::new(0)); }
-        Self { keys, ics: ics.into_boxed_slice() }
+        for _ in 0..n {
+            ics.push(AtomicU64::new(0));
+        }
+        Self {
+            keys,
+            ics: ics.into_boxed_slice(),
+        }
     }
-    #[inline] pub fn len(&self) -> usize { self.keys.len() }
-    #[inline] pub fn is_empty(&self) -> bool { self.keys.is_empty() }
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.keys.len()
+    }
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
 }
 
 impl std::ops::Deref for FieldChainData {
     type Target = [Arc<str>];
-    #[inline] fn deref(&self) -> &[Arc<str>] { &self.keys }
+    #[inline]
+    fn deref(&self) -> &[Arc<str>] {
+        &self.keys
+    }
 }
 
 /// Build a fresh IC side-table with one zeroed `AtomicU64` per opcode.
@@ -616,7 +795,9 @@ impl std::ops::Deref for FieldChainData {
 /// specialisation, analysis passes) can populate the field.
 pub fn fresh_ics(len: usize) -> Arc<[AtomicU64]> {
     let mut v = Vec::with_capacity(len);
-    for _ in 0..len { v.push(AtomicU64::new(0)); }
+    for _ in 0..len {
+        v.push(AtomicU64::new(0));
+    }
     v.into()
 }
 
@@ -646,7 +827,9 @@ fn ic_get_field(m: &Arc<IndexMap<Arc<str>, Val>>, key: &str, ic: &AtomicU64) -> 
     if cached != 0 {
         let slot = (cached - 1) as usize;
         if let Some((k, v)) = m.get_index(slot) {
-            if k.as_ref() == key { return v.clone(); }
+            if k.as_ref() == key {
+                return v.clone();
+            }
         }
     }
     if let Some((idx, _, v)) = m.get_full(key) {
@@ -659,7 +842,11 @@ fn ic_get_field(m: &Arc<IndexMap<Arc<str>, Val>>, key: &str, ic: &AtomicU64) -> 
 
 /// Accumulate lambda pattern tag — selects which fused binop to run.
 #[derive(Copy, Clone)]
-enum AccumOp { Add, Sub, Mul }
+enum AccumOp {
+    Add,
+    Sub,
+    Mul,
+}
 
 // ── Typed-numeric aggregate fast-paths ────────────────────────────────────────
 // Direct loops over `&[Val]` for mono-typed or mixed Int/Float arrays.  Used
@@ -674,8 +861,10 @@ enum AccumOp { Add, Sub, Mul }
 /// `chunks_exact(4)` over independent accumulators.
 #[inline]
 fn simd_sum_i64_slice(a: &[i64]) -> i64 {
-    let mut s0: i64 = 0; let mut s1: i64 = 0;
-    let mut s2: i64 = 0; let mut s3: i64 = 0;
+    let mut s0: i64 = 0;
+    let mut s1: i64 = 0;
+    let mut s2: i64 = 0;
+    let mut s3: i64 = 0;
     let chunks = a.chunks_exact(4);
     let rem = chunks.remainder();
     for c in chunks {
@@ -685,48 +874,86 @@ fn simd_sum_i64_slice(a: &[i64]) -> i64 {
         s3 = s3.wrapping_add(c[3]);
     }
     let mut tail: i64 = 0;
-    for v in rem { tail = tail.wrapping_add(*v); }
-    s0.wrapping_add(s1).wrapping_add(s2).wrapping_add(s3).wrapping_add(tail)
+    for v in rem {
+        tail = tail.wrapping_add(*v);
+    }
+    s0.wrapping_add(s1)
+        .wrapping_add(s2)
+        .wrapping_add(s3)
+        .wrapping_add(tail)
 }
 
 #[inline]
 fn simd_sum_f64_slice(a: &[f64]) -> f64 {
-    let mut s0: f64 = 0.0; let mut s1: f64 = 0.0;
-    let mut s2: f64 = 0.0; let mut s3: f64 = 0.0;
+    let mut s0: f64 = 0.0;
+    let mut s1: f64 = 0.0;
+    let mut s2: f64 = 0.0;
+    let mut s3: f64 = 0.0;
     let chunks = a.chunks_exact(4);
     let rem = chunks.remainder();
-    for c in chunks { s0 += c[0]; s1 += c[1]; s2 += c[2]; s3 += c[3]; }
+    for c in chunks {
+        s0 += c[0];
+        s1 += c[1];
+        s2 += c[2];
+        s3 += c[3];
+    }
     let mut tail: f64 = 0.0;
-    for v in rem { tail += *v; }
+    for v in rem {
+        tail += *v;
+    }
     s0 + s1 + s2 + s3 + tail
 }
 
 #[inline]
 fn simd_min_i64_slice(a: &[i64]) -> Option<i64> {
-    if a.is_empty() { return None; }
+    if a.is_empty() {
+        return None;
+    }
     let mut best = a[0];
-    for v in &a[1..] { if *v < best { best = *v; } }
+    for v in &a[1..] {
+        if *v < best {
+            best = *v;
+        }
+    }
     Some(best)
 }
 #[inline]
 fn simd_max_i64_slice(a: &[i64]) -> Option<i64> {
-    if a.is_empty() { return None; }
+    if a.is_empty() {
+        return None;
+    }
     let mut best = a[0];
-    for v in &a[1..] { if *v > best { best = *v; } }
+    for v in &a[1..] {
+        if *v > best {
+            best = *v;
+        }
+    }
     Some(best)
 }
 #[inline]
 fn simd_min_f64_slice(a: &[f64]) -> Option<f64> {
-    if a.is_empty() { return None; }
+    if a.is_empty() {
+        return None;
+    }
     let mut best = a[0];
-    for v in &a[1..] { if *v < best { best = *v; } }
+    for v in &a[1..] {
+        if *v < best {
+            best = *v;
+        }
+    }
     Some(best)
 }
 #[inline]
 fn simd_max_f64_slice(a: &[f64]) -> Option<f64> {
-    if a.is_empty() { return None; }
+    if a.is_empty() {
+        return None;
+    }
     let mut best = a[0];
-    for v in &a[1..] { if *v > best { best = *v; } }
+    for v in &a[1..] {
+        if *v > best {
+            best = *v;
+        }
+    }
     Some(best)
 }
 
@@ -741,7 +968,7 @@ fn agg_sum_typed(a: &[Val]) -> Val {
                 let mut f_acc = i_acc as f64 + *x;
                 for v in it {
                     match v {
-                        Val::Int(n)   => f_acc += *n as f64,
+                        Val::Int(n) => f_acc += *n as f64,
                         Val::Float(x) => f_acc += *x,
                         _ => {}
                     }
@@ -760,12 +987,22 @@ fn agg_avg_typed(a: &[Val]) -> Val {
     let mut n: usize = 0;
     for v in a {
         match v {
-            Val::Int(x)   => { sum += *x as f64; n += 1; }
-            Val::Float(x) => { sum += *x;        n += 1; }
+            Val::Int(x) => {
+                sum += *x as f64;
+                n += 1;
+            }
+            Val::Float(x) => {
+                sum += *x;
+                n += 1;
+            }
             _ => {}
         }
     }
-    if n == 0 { Val::Null } else { Val::Float(sum / n as f64) }
+    if n == 0 {
+        Val::Null
+    } else {
+        Val::Float(sum / n as f64)
+    }
 }
 
 #[inline]
@@ -776,7 +1013,7 @@ fn agg_minmax_typed(a: &[Val], want_max: bool) -> Val {
         match it.next() {
             Some(v) if v.is_number() => break v,
             Some(_) => continue,
-            None    => return Val::Null,
+            None => return Val::Null,
         }
     };
     match first {
@@ -787,25 +1024,53 @@ fn agg_minmax_typed(a: &[Val], want_max: bool) -> Val {
                 match v {
                     Val::Int(n) => {
                         let n = *n;
-                        if want_max { if n > best { best = n; } }
-                        else        { if n < best { best = n; } }
+                        if want_max {
+                            if n > best {
+                                best = n;
+                            }
+                        } else {
+                            if n < best {
+                                best = n;
+                            }
+                        }
                     }
                     Val::Float(x) => {
                         let x = *x;
                         let mut best_f = best as f64;
-                        if want_max { if x > best_f { best_f = x; } }
-                        else        { if x < best_f { best_f = x; } }
+                        if want_max {
+                            if x > best_f {
+                                best_f = x;
+                            }
+                        } else {
+                            if x < best_f {
+                                best_f = x;
+                            }
+                        }
                         for v in it {
                             match v {
                                 Val::Int(n) => {
                                     let n = *n as f64;
-                                    if want_max { if n > best_f { best_f = n; } }
-                                    else        { if n < best_f { best_f = n; } }
+                                    if want_max {
+                                        if n > best_f {
+                                            best_f = n;
+                                        }
+                                    } else {
+                                        if n < best_f {
+                                            best_f = n;
+                                        }
+                                    }
                                 }
                                 Val::Float(x) => {
                                     let x = *x;
-                                    if want_max { if x > best_f { best_f = x; } }
-                                    else        { if x < best_f { best_f = x; } }
+                                    if want_max {
+                                        if x > best_f {
+                                            best_f = x;
+                                        }
+                                    } else {
+                                        if x < best_f {
+                                            best_f = x;
+                                        }
+                                    }
                                 }
                                 _ => {}
                             }
@@ -823,13 +1088,27 @@ fn agg_minmax_typed(a: &[Val], want_max: bool) -> Val {
                 match v {
                     Val::Int(n) => {
                         let n = *n as f64;
-                        if want_max { if n > best_f { best_f = n; } }
-                        else        { if n < best_f { best_f = n; } }
+                        if want_max {
+                            if n > best_f {
+                                best_f = n;
+                            }
+                        } else {
+                            if n < best_f {
+                                best_f = n;
+                            }
+                        }
                     }
                     Val::Float(x) => {
                         let x = *x;
-                        if want_max { if x > best_f { best_f = x; } }
-                        else        { if x < best_f { best_f = x; } }
+                        if want_max {
+                            if x > best_f {
+                                best_f = x;
+                            }
+                        } else {
+                            if x < best_f {
+                                best_f = x;
+                            }
+                        }
                     }
                     _ => {}
                 }
@@ -886,9 +1165,9 @@ impl Compiler {
         let deduped = super::analysis::dedup_subprograms(&prog);
         let ics = fresh_ics(deduped.ops.len());
         Program {
-            ops:           deduped.ops.clone(),
-            source:        prog.source,
-            id:            prog.id,
+            ops: deduped.ops.clone(),
+            source: prog.source,
+            id: prog.id,
             is_structural: prog.is_structural,
             ics,
         }
@@ -911,8 +1190,9 @@ impl Compiler {
                 Self::reorder_and_operands(l);
                 Self::reorder_and_operands(r);
             }
-            Expr::UnaryNeg(e) | Expr::Not(e) | Expr::Kind { expr: e, .. } =>
-                Self::reorder_and_operands(e),
+            Expr::UnaryNeg(e) | Expr::Not(e) | Expr::Kind { expr: e, .. } => {
+                Self::reorder_and_operands(e)
+            }
             Expr::Coalesce(l, r) => {
                 Self::reorder_and_operands(l);
                 Self::reorder_and_operands(r);
@@ -921,13 +1201,19 @@ impl Compiler {
                 Self::reorder_and_operands(base);
                 for s in steps {
                     match s {
-                        super::ast::Step::DynIndex(e) | super::ast::Step::InlineFilter(e) =>
-                            Self::reorder_and_operands(e),
-                        super::ast::Step::Method(_, args) | super::ast::Step::OptMethod(_, args) =>
-                            for a in args { match a {
-                                super::ast::Arg::Pos(e) | super::ast::Arg::Named(_, e) =>
-                                    Self::reorder_and_operands(e),
-                            } },
+                        super::ast::Step::DynIndex(e) | super::ast::Step::InlineFilter(e) => {
+                            Self::reorder_and_operands(e)
+                        }
+                        super::ast::Step::Method(_, args)
+                        | super::ast::Step::OptMethod(_, args) => {
+                            for a in args {
+                                match a {
+                                    super::ast::Arg::Pos(e) | super::ast::Arg::Named(_, e) => {
+                                        Self::reorder_and_operands(e)
+                                    }
+                                }
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -944,54 +1230,84 @@ impl Compiler {
                     }
                 }
             }
-            Expr::Object(fields) => for f in fields { match f {
-                super::ast::ObjField::Kv { val, .. } => Self::reorder_and_operands(val),
-                super::ast::ObjField::Dynamic { key, val } => {
-                    Self::reorder_and_operands(key);
-                    Self::reorder_and_operands(val);
+            Expr::Object(fields) => {
+                for f in fields {
+                    match f {
+                        super::ast::ObjField::Kv { val, .. } => Self::reorder_and_operands(val),
+                        super::ast::ObjField::Dynamic { key, val } => {
+                            Self::reorder_and_operands(key);
+                            Self::reorder_and_operands(val);
+                        }
+                        super::ast::ObjField::Spread(e) => Self::reorder_and_operands(e),
+                        _ => {}
+                    }
                 }
-                super::ast::ObjField::Spread(e) => Self::reorder_and_operands(e),
-                _ => {}
-            } },
-            Expr::Array(elems) => for e in elems { match e {
-                super::ast::ArrayElem::Expr(e) | super::ast::ArrayElem::Spread(e) =>
-                    Self::reorder_and_operands(e),
-            } },
-            Expr::ListComp { expr, iter, cond, .. }
-            | Expr::SetComp  { expr, iter, cond, .. }
-            | Expr::GenComp  { expr, iter, cond, .. } => {
+            }
+            Expr::Array(elems) => {
+                for e in elems {
+                    match e {
+                        super::ast::ArrayElem::Expr(e) | super::ast::ArrayElem::Spread(e) => {
+                            Self::reorder_and_operands(e)
+                        }
+                    }
+                }
+            }
+            Expr::ListComp {
+                expr, iter, cond, ..
+            }
+            | Expr::SetComp {
+                expr, iter, cond, ..
+            }
+            | Expr::GenComp {
+                expr, iter, cond, ..
+            } => {
                 Self::reorder_and_operands(expr);
                 Self::reorder_and_operands(iter);
-                if let Some(c) = cond { Self::reorder_and_operands(c); }
+                if let Some(c) = cond {
+                    Self::reorder_and_operands(c);
+                }
             }
-            Expr::DictComp { key, val, iter, cond, .. } => {
+            Expr::DictComp {
+                key,
+                val,
+                iter,
+                cond,
+                ..
+            } => {
                 Self::reorder_and_operands(key);
                 Self::reorder_and_operands(val);
                 Self::reorder_and_operands(iter);
-                if let Some(c) = cond { Self::reorder_and_operands(c); }
+                if let Some(c) = cond {
+                    Self::reorder_and_operands(c);
+                }
             }
             Expr::Lambda { body, .. } => Self::reorder_and_operands(body),
-            Expr::GlobalCall { args, .. } => for a in args { match a {
-                super::ast::Arg::Pos(e) | super::ast::Arg::Named(_, e) =>
-                    Self::reorder_and_operands(e),
-            } },
+            Expr::GlobalCall { args, .. } => {
+                for a in args {
+                    match a {
+                        super::ast::Arg::Pos(e) | super::ast::Arg::Named(_, e) => {
+                            Self::reorder_and_operands(e)
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }
 
     pub fn compile_str(input: &str) -> Result<Program, EvalError> {
-        let expr = super::parser::parse(input)
-            .map_err(|e| EvalError(e.to_string()))?;
+        let expr = super::parser::parse(input).map_err(|e| EvalError(e.to_string()))?;
         Ok(Self::compile(&expr, input))
     }
 
     /// Compile with explicit pass configuration.  Cached by callers
     /// under `(config.hash(), expr)`.
     pub fn compile_str_with_config(input: &str, config: PassConfig) -> Result<Program, EvalError> {
-        let expr = super::parser::parse(input)
-            .map_err(|e| EvalError(e.to_string()))?;
+        let expr = super::parser::parse(input).map_err(|e| EvalError(e.to_string()))?;
         let mut e = expr.clone();
-        if config.reorder_and { Self::reorder_and_operands(&mut e); }
+        if config.reorder_and {
+            Self::reorder_and_operands(&mut e);
+        }
         let ctx = VarCtx::default();
         let ops = Self::optimize_with(Self::emit(&e, &ctx), config);
         let prog = Program::new(ops, input);
@@ -999,9 +1315,9 @@ impl Compiler {
             let deduped = super::analysis::dedup_subprograms(&prog);
             let ics = fresh_ics(deduped.ops.len());
             Ok(Program {
-                ops:           deduped.ops.clone(),
-                source:        prog.source,
-                id:            prog.id,
+                ops: deduped.ops.clone(),
+                source: prog.source,
+                id: prog.id,
                 is_structural: prog.is_structural,
                 ics,
             })
@@ -1025,20 +1341,64 @@ impl Compiler {
         // method dispatch fast-path not a chain fusion) keep running.
         // See `memory/project_opcode_migration.md`.
         let no_fusion = disable_opcode_fusion();
-        let ops = if cfg.root_chain      && !no_fusion { Self::pass_root_chain(ops) }      else { ops };
-        let ops = if cfg.field_chain     && !no_fusion { Self::pass_field_chain(ops) }     else { ops };
+        let ops = if cfg.root_chain && !no_fusion {
+            Self::pass_root_chain(ops)
+        } else {
+            ops
+        };
+        let ops = if cfg.field_chain && !no_fusion {
+            Self::pass_field_chain(ops)
+        } else {
+            ops
+        };
         // Tier 3: pass_filter_count / pass_find_quantifier / pass_filter_fusion
         // / pass_string_chain_fusion deleted — composed substrate handles
         // every chain shape via base CallMethod opcodes.
-        let ops = if cfg.filter_fusion   { Self::pass_field_specialise(ops) } else { ops };
-        let ops = if !no_fusion { Self::pass_list_comp_specialise(ops) } else { ops };
-        let ops = if cfg.strength_reduce { Self::pass_strength_reduce(ops) } else { ops };
-        let ops = if cfg.redundant_ops   { Self::pass_redundant_ops(ops) }   else { ops };
-        let ops = if cfg.kind_check_fold { Self::pass_kind_check_fold(ops) } else { ops };
-        let ops = if cfg.method_const    { Self::pass_method_const_fold(ops)} else { ops };
-        let ops = if cfg.const_fold      { Self::pass_const_fold(ops) }      else { ops };
-        let ops = if cfg.nullness        { Self::pass_nullness_opt_field(ops)} else { ops };
-        let ops = if !no_fusion { Self::pass_method_demand(ops) } else { ops };
+        let ops = if cfg.filter_fusion {
+            Self::pass_field_specialise(ops)
+        } else {
+            ops
+        };
+        let ops = if !no_fusion {
+            Self::pass_list_comp_specialise(ops)
+        } else {
+            ops
+        };
+        let ops = if cfg.strength_reduce {
+            Self::pass_strength_reduce(ops)
+        } else {
+            ops
+        };
+        let ops = if cfg.redundant_ops {
+            Self::pass_redundant_ops(ops)
+        } else {
+            ops
+        };
+        let ops = if cfg.kind_check_fold {
+            Self::pass_kind_check_fold(ops)
+        } else {
+            ops
+        };
+        let ops = if cfg.method_const {
+            Self::pass_method_const_fold(ops)
+        } else {
+            ops
+        };
+        let ops = if cfg.const_fold {
+            Self::pass_const_fold(ops)
+        } else {
+            ops
+        };
+        let ops = if cfg.nullness {
+            Self::pass_nullness_opt_field(ops)
+        } else {
+            ops
+        };
+        let ops = if !no_fusion {
+            Self::pass_method_demand(ops)
+        } else {
+            ops
+        };
         ops
     }
 
@@ -1057,8 +1417,12 @@ impl Compiler {
         // Extract `n` if `call` is `take(Int(n))` with no other args.
         fn take_const(call: &CompiledCall) -> Option<usize> {
             use crate::ast::{Arg, Expr};
-            if call.name.as_ref() != "take" { return None; }
-            if call.orig_args.len() != 1 { return None; }
+            if call.name.as_ref() != "take" {
+                return None;
+            }
+            if call.orig_args.len() != 1 {
+                return None;
+            }
             match &call.orig_args[0] {
                 Arg::Pos(Expr::Int(n)) if *n >= 0 => Some(*n as usize),
                 _ => None,
@@ -1073,12 +1437,8 @@ impl Compiler {
         let mut i = 0;
         while i < ops.len() {
             if i + 1 < ops.len() {
-                if let (Opcode::CallMethod(a), Opcode::CallMethod(b)) =
-                    (&ops[i], &ops[i + 1])
-                {
-                    if is_demand_aware(a.method)
-                        && a.demand_max_keep.is_none()
-                    {
+                if let (Opcode::CallMethod(a), Opcode::CallMethod(b)) = (&ops[i], &ops[i + 1]) {
+                    if is_demand_aware(a.method) && a.demand_max_keep.is_none() {
                         if let Some(n) = take_const(b) {
                             // Rewrite `a` with demand; drop `b`.
                             let mut new_call = (**a).clone();
@@ -1189,13 +1549,13 @@ impl Compiler {
         for op in ops {
             if let Opcode::KindCheck { ty, negate } = &op {
                 let prev_ty: Option<VType> = match out.last() {
-                    Some(Opcode::PushNull)     => Some(VType::Null),
-                    Some(Opcode::PushBool(_))  => Some(VType::Bool),
-                    Some(Opcode::PushInt(_))   => Some(VType::Int),
+                    Some(Opcode::PushNull) => Some(VType::Null),
+                    Some(Opcode::PushBool(_)) => Some(VType::Bool),
+                    Some(Opcode::PushInt(_)) => Some(VType::Int),
                     Some(Opcode::PushFloat(_)) => Some(VType::Float),
-                    Some(Opcode::PushStr(_))   => Some(VType::Str),
-                    Some(Opcode::MakeArr(_))   => Some(VType::Arr),
-                    Some(Opcode::MakeObj(_))   => Some(VType::Obj),
+                    Some(Opcode::PushStr(_)) => Some(VType::Str),
+                    Some(Opcode::MakeArr(_)) => Some(VType::Arr),
+                    Some(Opcode::MakeObj(_)) => Some(VType::Obj),
                     _ => None,
                 };
                 if let Some(vt) = prev_ty {
@@ -1222,7 +1582,9 @@ impl Compiler {
     /// Used to validate opcode → rule migration without permanently
     /// deleting code; see `memory/project_opcode_migration.md`.
     fn pass_field_specialise(ops: Vec<Opcode>) -> Vec<Opcode> {
-        if disable_opcode_fusion() { return ops; }
+        if disable_opcode_fusion() {
+            return ops;
+        }
         let mut out2: Vec<Opcode> = Vec::with_capacity(ops.len());
         for op in ops {
             match op {
@@ -1277,7 +1639,9 @@ impl Compiler {
     /// now-removed Opcode::MapField.  Base Opcode::ListComp handler
     /// covers the same shapes; pipeline IR can hoist the inner
     /// Filter+Map via Stage composition.
-    fn pass_list_comp_specialise(ops: Vec<Opcode>) -> Vec<Opcode> { ops }
+    fn pass_list_comp_specialise(ops: Vec<Opcode>) -> Vec<Opcode> {
+        ops
+    }
 
     // sort_lam_param helper removed alongside ArgExtreme opcode.
 
@@ -1296,19 +1660,25 @@ impl Compiler {
             if let Some(Opcode::CallMethod(prev)) = out.last().cloned() {
                 let replaced = match (prev.method, &op) {
                     // sort() + [0] → min()
-                    (BuiltinMethod::Sort, Opcode::GetIndex(0)) if prev.sub_progs.is_empty() =>
-                        Some(make_noarg_call(BuiltinMethod::Min, "min")),
+                    (BuiltinMethod::Sort, Opcode::GetIndex(0)) if prev.sub_progs.is_empty() => {
+                        Some(make_noarg_call(BuiltinMethod::Min, "min"))
+                    }
                     // sort() + [-1] → max()
-                    (BuiltinMethod::Sort, Opcode::GetIndex(-1)) if prev.sub_progs.is_empty() =>
-                        Some(make_noarg_call(BuiltinMethod::Max, "max")),
+                    (BuiltinMethod::Sort, Opcode::GetIndex(-1)) if prev.sub_progs.is_empty() => {
+                        Some(make_noarg_call(BuiltinMethod::Max, "max"))
+                    }
                     // sort() + first() → min()
                     (BuiltinMethod::Sort, Opcode::CallMethod(next))
                         if prev.sub_progs.is_empty() && next.method == BuiltinMethod::First =>
-                        Some(make_noarg_call(BuiltinMethod::Min, "min")),
+                    {
+                        Some(make_noarg_call(BuiltinMethod::Min, "min"))
+                    }
                     // sort() + last() → max()
                     (BuiltinMethod::Sort, Opcode::CallMethod(next))
                         if prev.sub_progs.is_empty() && next.method == BuiltinMethod::Last =>
-                        Some(make_noarg_call(BuiltinMethod::Max, "max")),
+                    {
+                        Some(make_noarg_call(BuiltinMethod::Max, "max"))
+                    }
                     // sort_by(k) + first() / + last() fusions migrated to
                     // pipeline.rs Sink::MinBy(k) / Sink::MaxBy(k).
                     // Sub-program path: unfused sort_by(k) followed by
@@ -1316,45 +1686,61 @@ impl Compiler {
                     // reverse() + first() → last()
                     (BuiltinMethod::Reverse, Opcode::CallMethod(next))
                         if next.method == BuiltinMethod::First =>
-                        Some(make_noarg_call(BuiltinMethod::Last, "last")),
+                    {
+                        Some(make_noarg_call(BuiltinMethod::Last, "last"))
+                    }
                     // reverse() + last() → first()
                     (BuiltinMethod::Reverse, Opcode::CallMethod(next))
                         if next.method == BuiltinMethod::Last =>
-                        Some(make_noarg_call(BuiltinMethod::First, "first")),
+                    {
+                        Some(make_noarg_call(BuiltinMethod::First, "first"))
+                    }
                     // sort() + [0:n] / take(n) fusion migrated to
                     // pipeline.rs Sink::TopN { n, asc }.
                     // Cardinality-preserving op + len/count → drop the first op.
                     // sort / reverse preserve length by definition; map is
                     // 1:1 so it also preserves length, and `count` only needs
                     // the input array length.
-                    (BuiltinMethod::Sort | BuiltinMethod::Reverse | BuiltinMethod::Map,
-                     Opcode::CallMethod(next))
-                        if next.sub_progs.is_empty()
-                           && (next.method == BuiltinMethod::Len
-                               || next.method == BuiltinMethod::Count) =>
-                        Some(Opcode::CallMethod(Arc::clone(next))),
+                    (
+                        BuiltinMethod::Sort | BuiltinMethod::Reverse | BuiltinMethod::Map,
+                        Opcode::CallMethod(next),
+                    ) if next.sub_progs.is_empty()
+                        && (next.method == BuiltinMethod::Len
+                            || next.method == BuiltinMethod::Count) =>
+                    {
+                        Some(Opcode::CallMethod(Arc::clone(next)))
+                    }
                     // Order-independent aggregate after sort/reverse → drop
                     // the reorder.  sum / avg / min / max only inspect the
                     // multiset of elements, not their order.
-                    (BuiltinMethod::Sort | BuiltinMethod::Reverse,
-                     Opcode::CallMethod(next))
+                    (BuiltinMethod::Sort | BuiltinMethod::Reverse, Opcode::CallMethod(next))
                         if prev.sub_progs.is_empty()
-                           && next.sub_progs.is_empty()
-                           && matches!(next.method,
-                                BuiltinMethod::Sum | BuiltinMethod::Avg
-                              | BuiltinMethod::Min | BuiltinMethod::Max) =>
-                        Some(Opcode::CallMethod(Arc::clone(next))),
+                            && next.sub_progs.is_empty()
+                            && matches!(
+                                next.method,
+                                BuiltinMethod::Sum
+                                    | BuiltinMethod::Avg
+                                    | BuiltinMethod::Min
+                                    | BuiltinMethod::Max
+                            ) =>
+                    {
+                        Some(Opcode::CallMethod(Arc::clone(next)))
+                    }
                     // Idempotent: f(f(x)) == f(x).  `sort(k)` is idempotent
                     // only when both calls use the same key, so we restrict
                     // the no-arg case; `unique()` dedup is always idempotent.
                     (BuiltinMethod::Sort, Opcode::CallMethod(next))
                         if prev.sub_progs.is_empty()
-                           && next.method == BuiltinMethod::Sort
-                           && next.sub_progs.is_empty() =>
-                        Some(Opcode::CallMethod(Arc::clone(next))),
+                            && next.method == BuiltinMethod::Sort
+                            && next.sub_progs.is_empty() =>
+                    {
+                        Some(Opcode::CallMethod(Arc::clone(next)))
+                    }
                     (BuiltinMethod::Unique, Opcode::CallMethod(next))
                         if next.method == BuiltinMethod::Unique =>
-                        Some(Opcode::CallMethod(Arc::clone(next))),
+                    {
+                        Some(Opcode::CallMethod(Arc::clone(next)))
+                    }
                     // UniqueCount removed; pipeline rule
                     // Unique ∘ Count → UniqueCount fuses at lower-time.
                     _ => None,
@@ -1403,7 +1789,9 @@ impl Compiler {
                         it.next();
                         chain.push(k);
                     }
-                    out.push(Opcode::FieldChain(Arc::new(FieldChainData::new(chain.into()))));
+                    out.push(Opcode::FieldChain(Arc::new(FieldChainData::new(
+                        chain.into(),
+                    ))));
                     continue;
                 }
                 out.push(op);
@@ -1458,9 +1846,10 @@ impl Compiler {
                 }
                 // idempotent method pairs: keep second only (drop first)
                 (Opcode::CallMethod(b), Some(Opcode::CallMethod(a)))
-                    if a.method == b.method && matches!(a.method,
-                        BuiltinMethod::Unique | BuiltinMethod::Compact)
-                        && a.sub_progs.is_empty() && b.sub_progs.is_empty() =>
+                    if a.method == b.method
+                        && matches!(a.method, BuiltinMethod::Unique | BuiltinMethod::Compact)
+                        && a.sub_progs.is_empty()
+                        && b.sub_progs.is_empty() =>
                 {
                     out.pop();
                     out.push(op);
@@ -1510,11 +1899,9 @@ impl Compiler {
             //   PushBool(false) + AndOp(_)  → PushBool(false)
             //   PushBool(true)  + OrOp(_)   → PushBool(true)
             if i + 1 < ops.len() {
-                let folded = match (&ops[i], &ops[i+1]) {
-                    (Opcode::PushBool(false), Opcode::AndOp(_)) =>
-                        Some(Opcode::PushBool(false)),
-                    (Opcode::PushBool(true),  Opcode::OrOp(_)) =>
-                        Some(Opcode::PushBool(true)),
+                let folded = match (&ops[i], &ops[i + 1]) {
+                    (Opcode::PushBool(false), Opcode::AndOp(_)) => Some(Opcode::PushBool(false)),
+                    (Opcode::PushBool(true), Opcode::OrOp(_)) => Some(Opcode::PushBool(true)),
                     _ => None,
                 };
                 if let Some(folded) = folded {
@@ -1525,13 +1912,10 @@ impl Compiler {
             }
             // 2-op unary folds
             if i + 1 < ops.len() {
-                let folded = match (&ops[i], &ops[i+1]) {
-                    (Opcode::PushBool(b), Opcode::Not) =>
-                        Some(Opcode::PushBool(!b)),
-                    (Opcode::PushInt(n), Opcode::Neg) =>
-                        Some(Opcode::PushInt(-n)),
-                    (Opcode::PushFloat(f), Opcode::Neg) =>
-                        Some(Opcode::PushFloat(-f)),
+                let folded = match (&ops[i], &ops[i + 1]) {
+                    (Opcode::PushBool(b), Opcode::Not) => Some(Opcode::PushBool(!b)),
+                    (Opcode::PushInt(n), Opcode::Neg) => Some(Opcode::PushInt(-n)),
+                    (Opcode::PushFloat(f), Opcode::Neg) => Some(Opcode::PushFloat(-f)),
                     _ => None,
                 };
                 if let Some(folded) = folded {
@@ -1542,96 +1926,139 @@ impl Compiler {
             }
             // 3-op arithmetic + comparison folds
             if i + 2 < ops.len() {
-                let folded = match (&ops[i], &ops[i+1], &ops[i+2]) {
-                    (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Add) =>
-                        Some(Opcode::PushInt(a + b)),
-                    (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Sub) =>
-                        Some(Opcode::PushInt(a - b)),
-                    (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Mul) =>
-                        Some(Opcode::PushInt(a * b)),
-                    (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Mod) if *b != 0 =>
-                        Some(Opcode::PushInt(a % b)),
-                    (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Div) if *b != 0 =>
-                        Some(Opcode::PushFloat(*a as f64 / *b as f64)),
-                    (Opcode::PushFloat(a), Opcode::PushFloat(b), Opcode::Add) =>
-                        Some(Opcode::PushFloat(a + b)),
-                    (Opcode::PushFloat(a), Opcode::PushFloat(b), Opcode::Sub) =>
-                        Some(Opcode::PushFloat(a - b)),
-                    (Opcode::PushFloat(a), Opcode::PushFloat(b), Opcode::Mul) =>
-                        Some(Opcode::PushFloat(a * b)),
-                    (Opcode::PushFloat(a), Opcode::PushFloat(b), Opcode::Div) if *b != 0.0 =>
-                        Some(Opcode::PushFloat(a / b)),
+                let folded = match (&ops[i], &ops[i + 1], &ops[i + 2]) {
+                    (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Add) => {
+                        Some(Opcode::PushInt(a + b))
+                    }
+                    (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Sub) => {
+                        Some(Opcode::PushInt(a - b))
+                    }
+                    (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Mul) => {
+                        Some(Opcode::PushInt(a * b))
+                    }
+                    (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Mod) if *b != 0 => {
+                        Some(Opcode::PushInt(a % b))
+                    }
+                    (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Div) if *b != 0 => {
+                        Some(Opcode::PushFloat(*a as f64 / *b as f64))
+                    }
+                    (Opcode::PushFloat(a), Opcode::PushFloat(b), Opcode::Add) => {
+                        Some(Opcode::PushFloat(a + b))
+                    }
+                    (Opcode::PushFloat(a), Opcode::PushFloat(b), Opcode::Sub) => {
+                        Some(Opcode::PushFloat(a - b))
+                    }
+                    (Opcode::PushFloat(a), Opcode::PushFloat(b), Opcode::Mul) => {
+                        Some(Opcode::PushFloat(a * b))
+                    }
+                    (Opcode::PushFloat(a), Opcode::PushFloat(b), Opcode::Div) if *b != 0.0 => {
+                        Some(Opcode::PushFloat(a / b))
+                    }
                     // Mixed int/float arithmetic
-                    (Opcode::PushInt(a), Opcode::PushFloat(b), Opcode::Add) =>
-                        Some(Opcode::PushFloat(*a as f64 + b)),
-                    (Opcode::PushFloat(a), Opcode::PushInt(b), Opcode::Add) =>
-                        Some(Opcode::PushFloat(a + *b as f64)),
-                    (Opcode::PushInt(a), Opcode::PushFloat(b), Opcode::Sub) =>
-                        Some(Opcode::PushFloat(*a as f64 - b)),
-                    (Opcode::PushFloat(a), Opcode::PushInt(b), Opcode::Sub) =>
-                        Some(Opcode::PushFloat(a - *b as f64)),
-                    (Opcode::PushInt(a), Opcode::PushFloat(b), Opcode::Mul) =>
-                        Some(Opcode::PushFloat(*a as f64 * b)),
-                    (Opcode::PushFloat(a), Opcode::PushInt(b), Opcode::Mul) =>
-                        Some(Opcode::PushFloat(a * *b as f64)),
-                    (Opcode::PushInt(a), Opcode::PushFloat(b), Opcode::Div) if *b != 0.0 =>
-                        Some(Opcode::PushFloat(*a as f64 / b)),
-                    (Opcode::PushFloat(a), Opcode::PushInt(b), Opcode::Div) if *b != 0 =>
-                        Some(Opcode::PushFloat(a / *b as f64)),
+                    (Opcode::PushInt(a), Opcode::PushFloat(b), Opcode::Add) => {
+                        Some(Opcode::PushFloat(*a as f64 + b))
+                    }
+                    (Opcode::PushFloat(a), Opcode::PushInt(b), Opcode::Add) => {
+                        Some(Opcode::PushFloat(a + *b as f64))
+                    }
+                    (Opcode::PushInt(a), Opcode::PushFloat(b), Opcode::Sub) => {
+                        Some(Opcode::PushFloat(*a as f64 - b))
+                    }
+                    (Opcode::PushFloat(a), Opcode::PushInt(b), Opcode::Sub) => {
+                        Some(Opcode::PushFloat(a - *b as f64))
+                    }
+                    (Opcode::PushInt(a), Opcode::PushFloat(b), Opcode::Mul) => {
+                        Some(Opcode::PushFloat(*a as f64 * b))
+                    }
+                    (Opcode::PushFloat(a), Opcode::PushInt(b), Opcode::Mul) => {
+                        Some(Opcode::PushFloat(a * *b as f64))
+                    }
+                    (Opcode::PushInt(a), Opcode::PushFloat(b), Opcode::Div) if *b != 0.0 => {
+                        Some(Opcode::PushFloat(*a as f64 / b))
+                    }
+                    (Opcode::PushFloat(a), Opcode::PushInt(b), Opcode::Div) if *b != 0 => {
+                        Some(Opcode::PushFloat(a / *b as f64))
+                    }
                     // Mixed int/float comparisons
-                    (Opcode::PushInt(a), Opcode::PushFloat(b), Opcode::Lt) =>
-                        Some(Opcode::PushBool((*a as f64) < *b)),
-                    (Opcode::PushFloat(a), Opcode::PushInt(b), Opcode::Lt) =>
-                        Some(Opcode::PushBool(*a < (*b as f64))),
-                    (Opcode::PushInt(a), Opcode::PushFloat(b), Opcode::Gt) =>
-                        Some(Opcode::PushBool((*a as f64) > *b)),
-                    (Opcode::PushFloat(a), Opcode::PushInt(b), Opcode::Gt) =>
-                        Some(Opcode::PushBool(*a > (*b as f64))),
-                    (Opcode::PushInt(a), Opcode::PushFloat(b), Opcode::Lte) =>
-                        Some(Opcode::PushBool((*a as f64) <= *b)),
-                    (Opcode::PushFloat(a), Opcode::PushInt(b), Opcode::Lte) =>
-                        Some(Opcode::PushBool(*a <= (*b as f64))),
-                    (Opcode::PushInt(a), Opcode::PushFloat(b), Opcode::Gte) =>
-                        Some(Opcode::PushBool((*a as f64) >= *b)),
-                    (Opcode::PushFloat(a), Opcode::PushInt(b), Opcode::Gte) =>
-                        Some(Opcode::PushBool(*a >= (*b as f64))),
+                    (Opcode::PushInt(a), Opcode::PushFloat(b), Opcode::Lt) => {
+                        Some(Opcode::PushBool((*a as f64) < *b))
+                    }
+                    (Opcode::PushFloat(a), Opcode::PushInt(b), Opcode::Lt) => {
+                        Some(Opcode::PushBool(*a < (*b as f64)))
+                    }
+                    (Opcode::PushInt(a), Opcode::PushFloat(b), Opcode::Gt) => {
+                        Some(Opcode::PushBool((*a as f64) > *b))
+                    }
+                    (Opcode::PushFloat(a), Opcode::PushInt(b), Opcode::Gt) => {
+                        Some(Opcode::PushBool(*a > (*b as f64)))
+                    }
+                    (Opcode::PushInt(a), Opcode::PushFloat(b), Opcode::Lte) => {
+                        Some(Opcode::PushBool((*a as f64) <= *b))
+                    }
+                    (Opcode::PushFloat(a), Opcode::PushInt(b), Opcode::Lte) => {
+                        Some(Opcode::PushBool(*a <= (*b as f64)))
+                    }
+                    (Opcode::PushInt(a), Opcode::PushFloat(b), Opcode::Gte) => {
+                        Some(Opcode::PushBool((*a as f64) >= *b))
+                    }
+                    (Opcode::PushFloat(a), Opcode::PushInt(b), Opcode::Gte) => {
+                        Some(Opcode::PushBool(*a >= (*b as f64)))
+                    }
                     // Float comparisons (parity with int)
-                    (Opcode::PushFloat(a), Opcode::PushFloat(b), Opcode::Lt) =>
-                        Some(Opcode::PushBool(a < b)),
-                    (Opcode::PushFloat(a), Opcode::PushFloat(b), Opcode::Lte) =>
-                        Some(Opcode::PushBool(a <= b)),
-                    (Opcode::PushFloat(a), Opcode::PushFloat(b), Opcode::Gt) =>
-                        Some(Opcode::PushBool(a > b)),
-                    (Opcode::PushFloat(a), Opcode::PushFloat(b), Opcode::Gte) =>
-                        Some(Opcode::PushBool(a >= b)),
-                    (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Eq) =>
-                        Some(Opcode::PushBool(a == b)),
-                    (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Neq) =>
-                        Some(Opcode::PushBool(a != b)),
-                    (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Lt) =>
-                        Some(Opcode::PushBool(a < b)),
-                    (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Lte) =>
-                        Some(Opcode::PushBool(a <= b)),
-                    (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Gt) =>
-                        Some(Opcode::PushBool(a > b)),
-                    (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Gte) =>
-                        Some(Opcode::PushBool(a >= b)),
-                    (Opcode::PushStr(a), Opcode::PushStr(b), Opcode::Eq) =>
-                        Some(Opcode::PushBool(a == b)),
-                    (Opcode::PushStr(a), Opcode::PushStr(b), Opcode::Neq) =>
-                        Some(Opcode::PushBool(a != b)),
-                    (Opcode::PushStr(a), Opcode::PushStr(b), Opcode::Lt) =>
-                        Some(Opcode::PushBool(a < b)),
-                    (Opcode::PushStr(a), Opcode::PushStr(b), Opcode::Lte) =>
-                        Some(Opcode::PushBool(a <= b)),
-                    (Opcode::PushStr(a), Opcode::PushStr(b), Opcode::Gt) =>
-                        Some(Opcode::PushBool(a > b)),
-                    (Opcode::PushStr(a), Opcode::PushStr(b), Opcode::Gte) =>
-                        Some(Opcode::PushBool(a >= b)),
-                    (Opcode::PushStr(a), Opcode::PushStr(b), Opcode::Add) =>
-                        Some(Opcode::PushStr(Arc::<str>::from(format!("{}{}", a, b)))),
-                    (Opcode::PushBool(a), Opcode::PushBool(b), Opcode::Eq) =>
-                        Some(Opcode::PushBool(a == b)),
+                    (Opcode::PushFloat(a), Opcode::PushFloat(b), Opcode::Lt) => {
+                        Some(Opcode::PushBool(a < b))
+                    }
+                    (Opcode::PushFloat(a), Opcode::PushFloat(b), Opcode::Lte) => {
+                        Some(Opcode::PushBool(a <= b))
+                    }
+                    (Opcode::PushFloat(a), Opcode::PushFloat(b), Opcode::Gt) => {
+                        Some(Opcode::PushBool(a > b))
+                    }
+                    (Opcode::PushFloat(a), Opcode::PushFloat(b), Opcode::Gte) => {
+                        Some(Opcode::PushBool(a >= b))
+                    }
+                    (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Eq) => {
+                        Some(Opcode::PushBool(a == b))
+                    }
+                    (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Neq) => {
+                        Some(Opcode::PushBool(a != b))
+                    }
+                    (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Lt) => {
+                        Some(Opcode::PushBool(a < b))
+                    }
+                    (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Lte) => {
+                        Some(Opcode::PushBool(a <= b))
+                    }
+                    (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Gt) => {
+                        Some(Opcode::PushBool(a > b))
+                    }
+                    (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Gte) => {
+                        Some(Opcode::PushBool(a >= b))
+                    }
+                    (Opcode::PushStr(a), Opcode::PushStr(b), Opcode::Eq) => {
+                        Some(Opcode::PushBool(a == b))
+                    }
+                    (Opcode::PushStr(a), Opcode::PushStr(b), Opcode::Neq) => {
+                        Some(Opcode::PushBool(a != b))
+                    }
+                    (Opcode::PushStr(a), Opcode::PushStr(b), Opcode::Lt) => {
+                        Some(Opcode::PushBool(a < b))
+                    }
+                    (Opcode::PushStr(a), Opcode::PushStr(b), Opcode::Lte) => {
+                        Some(Opcode::PushBool(a <= b))
+                    }
+                    (Opcode::PushStr(a), Opcode::PushStr(b), Opcode::Gt) => {
+                        Some(Opcode::PushBool(a > b))
+                    }
+                    (Opcode::PushStr(a), Opcode::PushStr(b), Opcode::Gte) => {
+                        Some(Opcode::PushBool(a >= b))
+                    }
+                    (Opcode::PushStr(a), Opcode::PushStr(b), Opcode::Add) => {
+                        Some(Opcode::PushStr(Arc::<str>::from(format!("{}{}", a, b))))
+                    }
+                    (Opcode::PushBool(a), Opcode::PushBool(b), Opcode::Eq) => {
+                        Some(Opcode::PushBool(a == b))
+                    }
                     _ => None,
                 };
                 if let Some(folded) = folded {
@@ -1656,22 +2083,25 @@ impl Compiler {
 
     fn emit_into(expr: &Expr, ctx: &VarCtx, ops: &mut Vec<Opcode>) {
         match expr {
-            Expr::Null    => ops.push(Opcode::PushNull),
+            Expr::Null => ops.push(Opcode::PushNull),
             Expr::Bool(b) => ops.push(Opcode::PushBool(*b)),
-            Expr::Int(n)  => ops.push(Opcode::PushInt(*n)),
-            Expr::Float(f)=> ops.push(Opcode::PushFloat(*f)),
-            Expr::Str(s)  => ops.push(Opcode::PushStr(Arc::from(s.as_str()))),
-            Expr::Root    => ops.push(Opcode::PushRoot),
+            Expr::Int(n) => ops.push(Opcode::PushInt(*n)),
+            Expr::Float(f) => ops.push(Opcode::PushFloat(*f)),
+            Expr::Str(s) => ops.push(Opcode::PushStr(Arc::from(s.as_str()))),
+            Expr::Root => ops.push(Opcode::PushRoot),
             Expr::Current => ops.push(Opcode::PushCurrent),
 
             Expr::FString(parts) => {
-                let compiled: Vec<CompiledFSPart> = parts.iter().map(|p| match p {
-                    FStringPart::Lit(s) => CompiledFSPart::Lit(Arc::from(s.as_str())),
-                    FStringPart::Interp { expr, fmt } => CompiledFSPart::Interp {
-                        prog: Arc::new(Self::compile_sub(expr, ctx)),
-                        fmt: fmt.clone(),
-                    },
-                }).collect();
+                let compiled: Vec<CompiledFSPart> = parts
+                    .iter()
+                    .map(|p| match p {
+                        FStringPart::Lit(s) => CompiledFSPart::Lit(Arc::from(s.as_str())),
+                        FStringPart::Interp { expr, fmt } => CompiledFSPart::Interp {
+                            prog: Arc::new(Self::compile_sub(expr, ctx)),
+                            fmt: fmt.clone(),
+                        },
+                    })
+                    .collect();
                 ops.push(Opcode::FString(compiled.into()));
             }
 
@@ -1703,48 +2133,62 @@ impl Compiler {
 
             Expr::Kind { expr, ty, negate } => {
                 Self::emit_into(expr, ctx, ops);
-                ops.push(Opcode::KindCheck { ty: *ty, negate: *negate });
+                ops.push(Opcode::KindCheck {
+                    ty: *ty,
+                    negate: *negate,
+                });
             }
 
             Expr::Object(fields) => {
-                let entries: Vec<CompiledObjEntry> = fields.iter().map(|f| match f {
-                    ObjField::Short(name) =>
-                        CompiledObjEntry::Short {
+                let entries: Vec<CompiledObjEntry> = fields
+                    .iter()
+                    .map(|f| match f {
+                        ObjField::Short(name) => CompiledObjEntry::Short {
                             name: Arc::from(name.as_str()),
                             ic: Arc::new(AtomicU64::new(0)),
                         },
-                    ObjField::Kv { key, val, optional, cond }
-                        if cond.is_none()
-                            && Self::try_kv_path_steps(val).is_some()
-                    => {
-                        let steps: Vec<KvStep> = Self::try_kv_path_steps(val).unwrap();
-                        let n = steps.len();
-                        let mut ics_vec: Vec<AtomicU64> = Vec::with_capacity(n);
-                        for _ in 0..n { ics_vec.push(AtomicU64::new(0)); }
-                        CompiledObjEntry::KvPath {
-                            key: Arc::from(key.as_str()),
-                            steps: steps.into(),
-                            optional: *optional,
-                            ics: ics_vec.into(),
+                        ObjField::Kv {
+                            key,
+                            val,
+                            optional,
+                            cond,
+                        } if cond.is_none() && Self::try_kv_path_steps(val).is_some() => {
+                            let steps: Vec<KvStep> = Self::try_kv_path_steps(val).unwrap();
+                            let n = steps.len();
+                            let mut ics_vec: Vec<AtomicU64> = Vec::with_capacity(n);
+                            for _ in 0..n {
+                                ics_vec.push(AtomicU64::new(0));
+                            }
+                            CompiledObjEntry::KvPath {
+                                key: Arc::from(key.as_str()),
+                                steps: steps.into(),
+                                optional: *optional,
+                                ics: ics_vec.into(),
+                            }
                         }
-                    }
-                    ObjField::Kv { key, val, optional, cond } =>
-                        CompiledObjEntry::Kv {
+                        ObjField::Kv {
+                            key,
+                            val,
+                            optional,
+                            cond,
+                        } => CompiledObjEntry::Kv {
                             key: Arc::from(key.as_str()),
                             prog: Arc::new(Self::compile_sub(val, ctx)),
                             optional: *optional,
                             cond: cond.as_ref().map(|c| Arc::new(Self::compile_sub(c, ctx))),
                         },
-                    ObjField::Dynamic { key, val } =>
-                        CompiledObjEntry::Dynamic {
+                        ObjField::Dynamic { key, val } => CompiledObjEntry::Dynamic {
                             key: Arc::new(Self::compile_sub(key, ctx)),
                             val: Arc::new(Self::compile_sub(val, ctx)),
                         },
-                    ObjField::Spread(e) =>
-                        CompiledObjEntry::Spread(Arc::new(Self::compile_sub(e, ctx))),
-                    ObjField::SpreadDeep(e) =>
-                        CompiledObjEntry::SpreadDeep(Arc::new(Self::compile_sub(e, ctx))),
-                }).collect();
+                        ObjField::Spread(e) => {
+                            CompiledObjEntry::Spread(Arc::new(Self::compile_sub(e, ctx)))
+                        }
+                        ObjField::SpreadDeep(e) => {
+                            CompiledObjEntry::SpreadDeep(Arc::new(Self::compile_sub(e, ctx)))
+                        }
+                    })
+                    .collect();
                 ops.push(Opcode::MakeObj(entries.into()));
             }
 
@@ -1752,10 +2196,13 @@ impl Compiler {
                 // Each entry: (sub-program, is_spread).  Spreads execute
                 // their program normally; the MakeArr handler flattens
                 // an iterable result into the output array.
-                let progs: Vec<(Arc<Program>, bool)> = elems.iter().map(|e| match e {
-                    ArrayElem::Expr(ex)   => (Arc::new(Self::compile_sub(ex, ctx)), false),
-                    ArrayElem::Spread(ex) => (Arc::new(Self::compile_sub(ex, ctx)), true),
-                }).collect();
+                let progs: Vec<(Arc<Program>, bool)> = elems
+                    .iter()
+                    .map(|e| match e {
+                        ArrayElem::Expr(ex) => (Arc::new(Self::compile_sub(ex, ctx)), false),
+                        ArrayElem::Spread(ex) => (Arc::new(Self::compile_sub(ex, ctx)), true),
+                    })
+                    .collect();
                 ops.push(Opcode::MakeArr(progs.into()));
             }
 
@@ -1763,35 +2210,74 @@ impl Compiler {
                 Self::emit_pipeline(base, steps, ctx, ops);
             }
 
-            Expr::ListComp { expr, vars, iter, cond } => {
+            Expr::ListComp {
+                expr,
+                vars,
+                iter,
+                cond,
+            } => {
                 let inner_ctx = ctx.with_vars(vars);
                 ops.push(Opcode::ListComp(Arc::new(CompSpec {
                     expr: Arc::new(Self::compile_sub(expr, &inner_ctx)),
-                    vars: vars.iter().map(|v| Arc::from(v.as_str())).collect::<Vec<_>>().into(),
+                    vars: vars
+                        .iter()
+                        .map(|v| Arc::from(v.as_str()))
+                        .collect::<Vec<_>>()
+                        .into(),
                     iter: Arc::new(Self::compile_sub(iter, ctx)),
-                    cond: cond.as_ref().map(|c| Arc::new(Self::compile_sub(c, &inner_ctx))),
+                    cond: cond
+                        .as_ref()
+                        .map(|c| Arc::new(Self::compile_sub(c, &inner_ctx))),
                 })));
             }
 
-            Expr::DictComp { key, val, vars, iter, cond } => {
+            Expr::DictComp {
+                key,
+                val,
+                vars,
+                iter,
+                cond,
+            } => {
                 let inner_ctx = ctx.with_vars(vars);
                 ops.push(Opcode::DictComp(Arc::new(DictCompSpec {
-                    key:  Arc::new(Self::compile_sub(key, &inner_ctx)),
-                    val:  Arc::new(Self::compile_sub(val, &inner_ctx)),
-                    vars: vars.iter().map(|v| Arc::from(v.as_str())).collect::<Vec<_>>().into(),
+                    key: Arc::new(Self::compile_sub(key, &inner_ctx)),
+                    val: Arc::new(Self::compile_sub(val, &inner_ctx)),
+                    vars: vars
+                        .iter()
+                        .map(|v| Arc::from(v.as_str()))
+                        .collect::<Vec<_>>()
+                        .into(),
                     iter: Arc::new(Self::compile_sub(iter, ctx)),
-                    cond: cond.as_ref().map(|c| Arc::new(Self::compile_sub(c, &inner_ctx))),
+                    cond: cond
+                        .as_ref()
+                        .map(|c| Arc::new(Self::compile_sub(c, &inner_ctx))),
                 })));
             }
 
-            Expr::SetComp { expr, vars, iter, cond } |
-            Expr::GenComp { expr, vars, iter, cond } => {
+            Expr::SetComp {
+                expr,
+                vars,
+                iter,
+                cond,
+            }
+            | Expr::GenComp {
+                expr,
+                vars,
+                iter,
+                cond,
+            } => {
                 let inner_ctx = ctx.with_vars(vars);
                 ops.push(Opcode::SetComp(Arc::new(CompSpec {
                     expr: Arc::new(Self::compile_sub(expr, &inner_ctx)),
-                    vars: vars.iter().map(|v| Arc::from(v.as_str())).collect::<Vec<_>>().into(),
+                    vars: vars
+                        .iter()
+                        .map(|v| Arc::from(v.as_str()))
+                        .collect::<Vec<_>>()
+                        .into(),
                     iter: Arc::new(Self::compile_sub(iter, ctx)),
-                    cond: cond.as_ref().map(|c| Arc::new(Self::compile_sub(c, &inner_ctx))),
+                    cond: cond
+                        .as_ref()
+                        .map(|c| Arc::new(Self::compile_sub(c, &inner_ctx))),
                 })));
             }
 
@@ -1804,26 +2290,37 @@ impl Compiler {
                 // Dead-let: if body never references `name` and init is pure,
                 // drop the binding entirely and emit body only.
                 if super::analysis::expr_is_pure(init)
-                    && !super::analysis::expr_uses_ident(body, name) {
+                    && !super::analysis::expr_uses_ident(body, name)
+                {
                     Self::emit_into(body, ctx, ops);
                 } else {
                     Self::emit_into(init, ctx, ops);
                     let body_ctx = ctx.with_var(name);
                     let body_prog = Arc::new(Self::compile_sub(body, &body_ctx));
-                    ops.push(Opcode::LetExpr { name: Arc::from(name.as_str()), body: body_prog });
+                    ops.push(Opcode::LetExpr {
+                        name: Arc::from(name.as_str()),
+                        body: body_prog,
+                    });
                 }
             }
 
             Expr::IfElse { cond, then_, else_ } => {
                 // Compile-time fold when cond is a literal bool.
                 match cond.as_ref() {
-                    Expr::Bool(true)  => { Self::emit_into(then_, ctx, ops); }
-                    Expr::Bool(false) => { Self::emit_into(else_, ctx, ops); }
+                    Expr::Bool(true) => {
+                        Self::emit_into(then_, ctx, ops);
+                    }
+                    Expr::Bool(false) => {
+                        Self::emit_into(else_, ctx, ops);
+                    }
                     _ => {
                         Self::emit_into(cond, ctx, ops);
                         let then_prog = Arc::new(Self::compile_sub(then_, ctx));
                         let else_prog = Arc::new(Self::compile_sub(else_, ctx));
-                        ops.push(Opcode::IfElse { then_: then_prog, else_: else_prog });
+                        ops.push(Opcode::IfElse {
+                            then_: then_prog,
+                            else_: else_prog,
+                        });
                     }
                 }
             }
@@ -1833,14 +2330,19 @@ impl Compiler {
                 // emit only the body. If body is null literal, emit only the
                 // default. Avoids TryExpr opcode overhead for trivial cases.
                 match body.as_ref() {
-                    Expr::Null => { Self::emit_into(default, ctx, ops); }
+                    Expr::Null => {
+                        Self::emit_into(default, ctx, ops);
+                    }
                     Expr::Bool(_) | Expr::Int(_) | Expr::Float(_) | Expr::Str(_) => {
                         Self::emit_into(body, ctx, ops);
                     }
                     _ => {
-                        let body_prog    = Arc::new(Self::compile_sub(body, ctx));
+                        let body_prog = Arc::new(Self::compile_sub(body, ctx));
                         let default_prog = Arc::new(Self::compile_sub(default, ctx));
-                        ops.push(Opcode::TryExpr { body: body_prog, default: default_prog });
+                        ops.push(Opcode::TryExpr {
+                            body: body_prog,
+                            default: default_prog,
+                        });
                     }
                 }
             }
@@ -1852,9 +2354,10 @@ impl Compiler {
                 // OTHER global names (`to_string(x)`, `to_bool(x)`, etc.),
                 // first arg is the receiver — equivalent to method-call form.
                 // No-args case: current is receiver.
-                let is_special = matches!(name.as_str(),
-                    "coalesce" | "chain" | "join" | "zip" | "zip_longest"
-                    | "product" | "range");
+                let is_special = matches!(
+                    name.as_str(),
+                    "coalesce" | "chain" | "join" | "zip" | "zip_longest" | "product" | "range"
+                );
                 if !is_special && !args.is_empty() {
                     // <first_arg> CallMethod(name, [args[1..]])
                     let first = match &args[0] {
@@ -1862,12 +2365,15 @@ impl Compiler {
                     };
                     Self::emit_into(&first, ctx, ops);
                     let rest_args: Vec<Arg> = args.iter().skip(1).cloned().collect();
-                    let sub_progs: Vec<Arc<Program>> = rest_args.iter().map(|a| match a {
-                        Arg::Pos(e) | Arg::Named(_, e) => Arc::new(Self::compile_sub(e, ctx)),
-                    }).collect();
+                    let sub_progs: Vec<Arc<Program>> = rest_args
+                        .iter()
+                        .map(|a| match a {
+                            Arg::Pos(e) | Arg::Named(_, e) => Arc::new(Self::compile_sub(e, ctx)),
+                        })
+                        .collect();
                     let call = Arc::new(CompiledCall {
-                        method:    BuiltinMethod::from_name(name.as_str()),
-                        name:      Arc::from(name.as_str()),
+                        method: BuiltinMethod::from_name(name.as_str()),
+                        name: Arc::from(name.as_str()),
                         sub_progs: sub_progs.into(),
                         orig_args: rest_args.into(),
                         demand_max_keep: None,
@@ -1875,12 +2381,15 @@ impl Compiler {
                     ops.push(Opcode::CallMethod(call));
                 } else {
                     // Special globals (or no-arg) — keep root-receiver path.
-                    let sub_progs: Vec<Arc<Program>> = args.iter().map(|a| match a {
-                        Arg::Pos(e) | Arg::Named(_, e) => Arc::new(Self::compile_sub(e, ctx)),
-                    }).collect();
+                    let sub_progs: Vec<Arc<Program>> = args
+                        .iter()
+                        .map(|a| match a {
+                            Arg::Pos(e) | Arg::Named(_, e) => Arc::new(Self::compile_sub(e, ctx)),
+                        })
+                        .collect();
                     let call = Arc::new(CompiledCall {
-                        method:    BuiltinMethod::Unknown,
-                        name:      Arc::from(name.as_str()),
+                        method: BuiltinMethod::Unknown,
+                        name: Arc::from(name.as_str()),
                         sub_progs: sub_progs.into(),
                         orig_args: args.iter().cloned().collect::<Vec<_>>().into(),
                         demand_max_keep: None,
@@ -1895,7 +2404,10 @@ impl Compiler {
                 ops.push(Opcode::CastOp(*ty));
             }
 
-            Expr::Patch { root, ops: patch_ops } => {
+            Expr::Patch {
+                root,
+                ops: patch_ops,
+            } => {
                 // Patch block — pre-compiled to CompiledPatch.  Every
                 // sub-expression (root, op.val, op.cond, dyn-index,
                 // wildcard-filter pred) lives as Arc<Program>; runtime
@@ -1914,13 +2426,13 @@ impl Compiler {
 
     fn emit_step(step: &Step, ctx: &VarCtx, ops: &mut Vec<Opcode>) {
         match step {
-            Step::Field(name)    => ops.push(Opcode::GetField(Arc::from(name.as_str()))),
+            Step::Field(name) => ops.push(Opcode::GetField(Arc::from(name.as_str()))),
             Step::OptField(name) => ops.push(Opcode::OptField(Arc::from(name.as_str()))),
-            Step::Descendant(n)  => ops.push(Opcode::Descendant(Arc::from(n.as_str()))),
-            Step::DescendAll     => ops.push(Opcode::DescendAll),
-            Step::Index(i)       => ops.push(Opcode::GetIndex(*i)),
-            Step::DynIndex(e)    => ops.push(Opcode::DynIndex(Arc::new(Self::compile_sub(e, ctx)))),
-            Step::Slice(a, b)    => ops.push(Opcode::GetSlice(*a, *b)),
+            Step::Descendant(n) => ops.push(Opcode::Descendant(Arc::from(n.as_str()))),
+            Step::DescendAll => ops.push(Opcode::DescendAll),
+            Step::Index(i) => ops.push(Opcode::GetIndex(*i)),
+            Step::DynIndex(e) => ops.push(Opcode::DynIndex(Arc::new(Self::compile_sub(e, ctx)))),
+            Step::Slice(a, b) => ops.push(Opcode::GetSlice(*a, *b)),
             Step::Method(name, method_args) => {
                 let call = Self::compile_call(name, method_args, ctx);
                 ops.push(Opcode::CallMethod(Arc::new(call)));
@@ -1938,9 +2450,12 @@ impl Compiler {
 
     fn compile_call(name: &str, args: &[Arg], ctx: &VarCtx) -> CompiledCall {
         let method = BuiltinMethod::from_name(name);
-        let sub_progs: Vec<Arc<Program>> = args.iter().map(|a| match a {
-            Arg::Pos(e) | Arg::Named(_, e) => Arc::new(Self::compile_lambda_or_expr(e, ctx)),
-        }).collect();
+        let sub_progs: Vec<Arc<Program>> = args
+            .iter()
+            .map(|a| match a {
+                Arg::Pos(e) | Arg::Named(_, e) => Arc::new(Self::compile_lambda_or_expr(e, ctx)),
+            })
+            .collect();
         CompiledCall {
             method,
             name: Arc::from(name),
@@ -1964,11 +2479,14 @@ impl Compiler {
                 let mut p = Self::compile_sub(body, &inner);
                 if params.len() == 1 {
                     let name = params[0].as_str();
-                    let new_ops: Vec<Opcode> = p.ops.iter().map(|op| match op {
-                        Opcode::LoadIdent(k) if k.as_ref() == name =>
-                            Opcode::PushCurrent,
-                        other => other.clone(),
-                    }).collect();
+                    let new_ops: Vec<Opcode> = p
+                        .ops
+                        .iter()
+                        .map(|op| match op {
+                            Opcode::LoadIdent(k) if k.as_ref() == name => Opcode::PushCurrent,
+                            other => other.clone(),
+                        })
+                        .collect();
                     p = Program::new(Self::optimize(new_ops), "<lam-body>");
                 }
                 p
@@ -1989,18 +2507,66 @@ impl Compiler {
                 let rhs_prog = Arc::new(Self::compile_sub(r, ctx));
                 ops.push(Opcode::OrOp(rhs_prog));
             }
-            BinOp::Add => { Self::emit_into(l, ctx, ops); Self::emit_into(r, ctx, ops); ops.push(Opcode::Add); }
-            BinOp::Sub => { Self::emit_into(l, ctx, ops); Self::emit_into(r, ctx, ops); ops.push(Opcode::Sub); }
-            BinOp::Mul => { Self::emit_into(l, ctx, ops); Self::emit_into(r, ctx, ops); ops.push(Opcode::Mul); }
-            BinOp::Div => { Self::emit_into(l, ctx, ops); Self::emit_into(r, ctx, ops); ops.push(Opcode::Div); }
-            BinOp::Mod => { Self::emit_into(l, ctx, ops); Self::emit_into(r, ctx, ops); ops.push(Opcode::Mod); }
-            BinOp::Eq  => { Self::emit_into(l, ctx, ops); Self::emit_into(r, ctx, ops); ops.push(Opcode::Eq); }
-            BinOp::Neq => { Self::emit_into(l, ctx, ops); Self::emit_into(r, ctx, ops); ops.push(Opcode::Neq); }
-            BinOp::Lt  => { Self::emit_into(l, ctx, ops); Self::emit_into(r, ctx, ops); ops.push(Opcode::Lt); }
-            BinOp::Lte => { Self::emit_into(l, ctx, ops); Self::emit_into(r, ctx, ops); ops.push(Opcode::Lte); }
-            BinOp::Gt  => { Self::emit_into(l, ctx, ops); Self::emit_into(r, ctx, ops); ops.push(Opcode::Gt); }
-            BinOp::Gte => { Self::emit_into(l, ctx, ops); Self::emit_into(r, ctx, ops); ops.push(Opcode::Gte); }
-            BinOp::Fuzzy => { Self::emit_into(l, ctx, ops); Self::emit_into(r, ctx, ops); ops.push(Opcode::Fuzzy); }
+            BinOp::Add => {
+                Self::emit_into(l, ctx, ops);
+                Self::emit_into(r, ctx, ops);
+                ops.push(Opcode::Add);
+            }
+            BinOp::Sub => {
+                Self::emit_into(l, ctx, ops);
+                Self::emit_into(r, ctx, ops);
+                ops.push(Opcode::Sub);
+            }
+            BinOp::Mul => {
+                Self::emit_into(l, ctx, ops);
+                Self::emit_into(r, ctx, ops);
+                ops.push(Opcode::Mul);
+            }
+            BinOp::Div => {
+                Self::emit_into(l, ctx, ops);
+                Self::emit_into(r, ctx, ops);
+                ops.push(Opcode::Div);
+            }
+            BinOp::Mod => {
+                Self::emit_into(l, ctx, ops);
+                Self::emit_into(r, ctx, ops);
+                ops.push(Opcode::Mod);
+            }
+            BinOp::Eq => {
+                Self::emit_into(l, ctx, ops);
+                Self::emit_into(r, ctx, ops);
+                ops.push(Opcode::Eq);
+            }
+            BinOp::Neq => {
+                Self::emit_into(l, ctx, ops);
+                Self::emit_into(r, ctx, ops);
+                ops.push(Opcode::Neq);
+            }
+            BinOp::Lt => {
+                Self::emit_into(l, ctx, ops);
+                Self::emit_into(r, ctx, ops);
+                ops.push(Opcode::Lt);
+            }
+            BinOp::Lte => {
+                Self::emit_into(l, ctx, ops);
+                Self::emit_into(r, ctx, ops);
+                ops.push(Opcode::Lte);
+            }
+            BinOp::Gt => {
+                Self::emit_into(l, ctx, ops);
+                Self::emit_into(r, ctx, ops);
+                ops.push(Opcode::Gt);
+            }
+            BinOp::Gte => {
+                Self::emit_into(l, ctx, ops);
+                Self::emit_into(r, ctx, ops);
+                ops.push(Opcode::Gte);
+            }
+            BinOp::Fuzzy => {
+                Self::emit_into(l, ctx, ops);
+                Self::emit_into(r, ctx, ops);
+                ops.push(Opcode::Fuzzy);
+            }
         }
     }
 
@@ -2037,33 +2603,39 @@ impl Compiler {
                 }
                 PipeStep::Bind(target) => match target {
                     BindTarget::Name(name) => {
-                        compiled_steps.push(
-                            CompiledPipeStep::BindName(Arc::from(name.as_str())));
+                        compiled_steps.push(CompiledPipeStep::BindName(Arc::from(name.as_str())));
                         cur_ctx = cur_ctx.with_var(name);
                     }
                     BindTarget::Obj { fields, rest } => {
                         let spec = BindObjSpec {
-                            fields: fields.iter().map(|f| Arc::from(f.as_str()))
-                                .collect::<Vec<_>>().into(),
+                            fields: fields
+                                .iter()
+                                .map(|f| Arc::from(f.as_str()))
+                                .collect::<Vec<_>>()
+                                .into(),
                             rest: rest.as_ref().map(|r| Arc::from(r.as_str())),
                         };
-                        compiled_steps.push(
-                            CompiledPipeStep::BindObj(Arc::new(spec)));
-                        for f in fields { cur_ctx = cur_ctx.with_var(f); }
-                        if let Some(r) = rest { cur_ctx = cur_ctx.with_var(r); }
+                        compiled_steps.push(CompiledPipeStep::BindObj(Arc::new(spec)));
+                        for f in fields {
+                            cur_ctx = cur_ctx.with_var(f);
+                        }
+                        if let Some(r) = rest {
+                            cur_ctx = cur_ctx.with_var(r);
+                        }
                     }
                     BindTarget::Arr(names) => {
-                        let ns: Vec<Arc<str>> = names.iter()
-                            .map(|n| Arc::from(n.as_str())).collect();
-                        compiled_steps.push(
-                            CompiledPipeStep::BindArr(ns.into()));
-                        for n in names { cur_ctx = cur_ctx.with_var(n); }
+                        let ns: Vec<Arc<str>> =
+                            names.iter().map(|n| Arc::from(n.as_str())).collect();
+                        compiled_steps.push(CompiledPipeStep::BindArr(ns.into()));
+                        for n in names {
+                            cur_ctx = cur_ctx.with_var(n);
+                        }
                     }
                 },
             }
         }
         ops.push(Opcode::PipelineRun {
-            base:  base_prog,
+            base: base_prog,
             steps: compiled_steps.into(),
         });
     }
@@ -2074,8 +2646,8 @@ impl Compiler {
                 // No-arg method call on the pipe value (env.current).
                 // Push current as the receiver so CallMethod's pop yields it.
                 let call = CompiledCall {
-                    method:    BuiltinMethod::from_name(name),
-                    name:      Arc::from(name.as_str()),
+                    method: BuiltinMethod::from_name(name),
+                    name: Arc::from(name.as_str()),
                     sub_progs: Arc::from(&[] as &[Arc<Program>]),
                     orig_args: Arc::from(&[] as &[Arg]),
                     demand_max_keep: None,
@@ -2088,15 +2660,17 @@ impl Compiler {
                     if !ctx.has(name) {
                         // method(args...) — base is method, steps are chained
                         let call = CompiledCall {
-                            method:    BuiltinMethod::from_name(name),
-                            name:      Arc::from(name.as_str()),
+                            method: BuiltinMethod::from_name(name),
+                            name: Arc::from(name.as_str()),
                             sub_progs: Arc::from(&[] as &[Arc<Program>]),
                             orig_args: Arc::from(&[] as &[Arg]),
                             demand_max_keep: None,
                         };
                         ops.push(Opcode::PushCurrent);
                         ops.push(Opcode::CallMethod(Arc::new(call)));
-                        for step in steps { Self::emit_step(step, ctx, ops); }
+                        for step in steps {
+                            Self::emit_step(step, ctx, ops);
+                        }
                         return;
                     }
                 }
@@ -2127,21 +2701,35 @@ impl Compiler {
         let root_prog = Arc::new(Self::compile_sub(root, ctx));
         let mut ops = Vec::with_capacity(patch_ops.len());
         for po in patch_ops {
-            let path: Vec<CompiledPathStep> = po.path.iter().map(|s| match s {
-                crate::ast::PathStep::Field(n)        => CompiledPathStep::Field(Arc::from(n.as_str())),
-                crate::ast::PathStep::Index(i)        => CompiledPathStep::Index(*i),
-                crate::ast::PathStep::DynIndex(e)     => CompiledPathStep::DynIndex(Arc::new(Self::compile_sub(e, ctx))),
-                crate::ast::PathStep::Wildcard        => CompiledPathStep::Wildcard,
-                crate::ast::PathStep::WildcardFilter(p) =>
-                    CompiledPathStep::WildcardFilter(Arc::new(Self::compile_sub(p, ctx))),
-                crate::ast::PathStep::Descendant(n)   => CompiledPathStep::Descendant(Arc::from(n.as_str())),
-            }).collect();
+            let path: Vec<CompiledPathStep> = po
+                .path
+                .iter()
+                .map(|s| match s {
+                    crate::ast::PathStep::Field(n) => {
+                        CompiledPathStep::Field(Arc::from(n.as_str()))
+                    }
+                    crate::ast::PathStep::Index(i) => CompiledPathStep::Index(*i),
+                    crate::ast::PathStep::DynIndex(e) => {
+                        CompiledPathStep::DynIndex(Arc::new(Self::compile_sub(e, ctx)))
+                    }
+                    crate::ast::PathStep::Wildcard => CompiledPathStep::Wildcard,
+                    crate::ast::PathStep::WildcardFilter(p) => {
+                        CompiledPathStep::WildcardFilter(Arc::new(Self::compile_sub(p, ctx)))
+                    }
+                    crate::ast::PathStep::Descendant(n) => {
+                        CompiledPathStep::Descendant(Arc::from(n.as_str()))
+                    }
+                })
+                .collect();
             let val = if matches!(&po.val, Expr::DeleteMark) {
                 CompiledPatchVal::Delete
             } else {
                 CompiledPatchVal::Replace(Arc::new(Self::compile_sub(&po.val, ctx)))
             };
-            let cond = po.cond.as_ref().map(|c| Arc::new(Self::compile_sub(c, ctx)));
+            let cond = po
+                .cond
+                .as_ref()
+                .map(|c| Arc::new(Self::compile_sub(c, ctx)));
             ops.push(CompiledPatchOp { path, val, cond });
         }
         CompiledPatch { root_prog, ops }
@@ -2157,13 +2745,17 @@ impl Compiler {
             Expr::Chain(b, s) => (&**b, s.as_slice()),
             _ => return None,
         };
-        if !matches!(base, Expr::Current) { return None; }
-        if steps.is_empty() { return None; }
+        if !matches!(base, Expr::Current) {
+            return None;
+        }
+        if steps.is_empty() {
+            return None;
+        }
         let mut out = Vec::with_capacity(steps.len());
         for s in steps {
             match s {
                 Step::Field(name) => out.push(KvStep::Field(Arc::from(name.as_str()))),
-                Step::Index(i)    => out.push(KvStep::Index(*i)),
+                Step::Index(i) => out.push(KvStep::Index(*i)),
                 _ => return None,
             }
         }
@@ -2189,17 +2781,17 @@ impl Compiler {
 
 struct PathCache {
     /// doc_hash → (pointer_string → Val)
-    docs:     HashMap<u64, HashMap<Arc<str>, Val>>,
+    docs: HashMap<u64, HashMap<Arc<str>, Val>>,
     /// FIFO eviction order
-    order:    VecDeque<(u64, Arc<str>)>,
+    order: VecDeque<(u64, Arc<str>)>,
     capacity: usize,
 }
 
 impl PathCache {
     fn new(cap: usize) -> Self {
         Self {
-            docs:     HashMap::new(),
-            order:    VecDeque::with_capacity(cap),
+            docs: HashMap::new(),
+            order: VecDeque::with_capacity(cap),
             capacity: cap,
         }
     }
@@ -2215,15 +2807,22 @@ impl PathCache {
             if let Some((old_hash, old_ptr)) = self.order.pop_front() {
                 if let Some(inner) = self.docs.get_mut(&old_hash) {
                     inner.remove(old_ptr.as_ref());
-                    if inner.is_empty() { self.docs.remove(&old_hash); }
+                    if inner.is_empty() {
+                        self.docs.remove(&old_hash);
+                    }
                 }
             }
         }
         self.order.push_back((doc_hash, ptr.clone()));
-        self.docs.entry(doc_hash).or_insert_with(HashMap::new).insert(ptr, val);
+        self.docs
+            .entry(doc_hash)
+            .or_insert_with(HashMap::new)
+            .insert(ptr, val);
     }
 
-    fn len(&self) -> usize { self.order.len() }
+    fn len(&self) -> usize {
+        self.order.len()
+    }
 }
 
 // ── VM ────────────────────────────────────────────────────────────────────────
@@ -2243,29 +2842,37 @@ impl PathCache {
 /// compilation by changing `hash()`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PassConfig {
-    pub root_chain:      bool,
-    pub field_chain:     bool,
-    pub filter_count:    bool,
-    pub filter_fusion:   bool,
+    pub root_chain: bool,
+    pub field_chain: bool,
+    pub filter_count: bool,
+    pub filter_fusion: bool,
     pub find_quantifier: bool,
     pub strength_reduce: bool,
-    pub redundant_ops:   bool,
+    pub redundant_ops: bool,
     pub kind_check_fold: bool,
-    pub method_const:    bool,
-    pub const_fold:      bool,
-    pub nullness:        bool,
-    pub reorder_and:     bool,
-    pub dedup_subprogs:  bool,
+    pub method_const: bool,
+    pub const_fold: bool,
+    pub nullness: bool,
+    pub reorder_and: bool,
+    pub dedup_subprogs: bool,
 }
 
 impl Default for PassConfig {
     fn default() -> Self {
         Self {
-            root_chain: true, field_chain: true, filter_count: true, filter_fusion: true,
-            find_quantifier: true, strength_reduce: true, redundant_ops: true,
-            kind_check_fold: true, method_const: true, const_fold: true,
+            root_chain: true,
+            field_chain: true,
+            filter_count: true,
+            filter_fusion: true,
+            find_quantifier: true,
+            strength_reduce: true,
+            redundant_ops: true,
+            kind_check_fold: true,
+            method_const: true,
+            const_fold: true,
             nullness: true,
-            reorder_and: true, dedup_subprogs: true,
+            reorder_and: true,
+            dedup_subprogs: true,
         }
     }
 }
@@ -2274,37 +2881,60 @@ impl PassConfig {
     /// Disable every pass — emit raw opcodes.
     pub fn none() -> Self {
         Self {
-            root_chain: false, field_chain: false, filter_count: false, filter_fusion: false,
-            find_quantifier: false, strength_reduce: false, redundant_ops: false,
-            kind_check_fold: false, method_const: false, const_fold: false,
+            root_chain: false,
+            field_chain: false,
+            filter_count: false,
+            filter_fusion: false,
+            find_quantifier: false,
+            strength_reduce: false,
+            redundant_ops: false,
+            kind_check_fold: false,
+            method_const: false,
+            const_fold: false,
             nullness: false,
-            reorder_and: false, dedup_subprogs: false,
+            reorder_and: false,
+            dedup_subprogs: false,
         }
     }
 
     pub fn hash(&self) -> u64 {
         let mut bits: u64 = 0;
-        for (i, b) in [self.root_chain, self.field_chain, self.filter_count, self.filter_fusion,
-                       self.find_quantifier, self.strength_reduce, self.redundant_ops,
-                       self.kind_check_fold, self.method_const, self.const_fold,
-                       self.nullness,
-                       self.reorder_and, self.dedup_subprogs].iter().enumerate() {
-            if *b { bits |= 1u64 << i; }
+        for (i, b) in [
+            self.root_chain,
+            self.field_chain,
+            self.filter_count,
+            self.filter_fusion,
+            self.find_quantifier,
+            self.strength_reduce,
+            self.redundant_ops,
+            self.kind_check_fold,
+            self.method_const,
+            self.const_fold,
+            self.nullness,
+            self.reorder_and,
+            self.dedup_subprogs,
+        ]
+        .iter()
+        .enumerate()
+        {
+            if *b {
+                bits |= 1u64 << i;
+            }
         }
         bits
     }
 }
 
 pub struct VM {
-    registry:      Arc<MethodRegistry>,
+    registry: Arc<MethodRegistry>,
     /// Cache key = (pass_config_hash, expr_string).  Changing `config`
     /// invalidates prior entries automatically via key divergence.
     compile_cache: HashMap<(u64, String), Arc<Program>>,
     /// LRU ordering for `compile_cache`; front = least recently used.
     /// Entries are moved to back on hit; oldest evicted when over cap.
-    compile_lru:   std::collections::VecDeque<(u64, String)>,
-    compile_cap:   usize,
-    path_cache:    PathCache,
+    compile_lru: std::collections::VecDeque<(u64, String)>,
+    compile_cap: usize,
+    path_cache: PathCache,
     /// Per-exec RootChain resolution cache.  Key = raw address of the
     /// `chain` Arc slice; value = resolved Val.  Cleared on every top-level
     /// `execute()` call so stale entries never outlive the doc they
@@ -2314,14 +2944,14 @@ pub struct VM {
     root_chain_cache: HashMap<usize, Val>,
     /// Hash of the document currently being executed — set once by `execute()`,
     /// reused by all recursive `exec()` calls within the same top-level call.
-    doc_hash:      u64,
+    doc_hash: u64,
     /// Cache of root Arc pointer → structural hash.  Lets repeated calls
     /// against the same cached root (e.g. via `Jetro::collect`) skip the
     /// O(doc) structural walk entirely.  Keyed on the inner Arc ptr of
     /// the root `Val::Obj`/`Val::Arr`.
     root_hash_cache: Option<(usize, u64)>,
     /// Optimiser pass toggles.  Default: all on.
-    config:        PassConfig,
+    config: PassConfig,
 }
 
 // AutoIndexCache + auto_index_key deleted in Tier 3 — they were only used
@@ -2329,23 +2959,27 @@ pub struct VM {
 // runs predicate without per-VM auto-index state.
 
 impl Default for VM {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl VM {
-    pub fn new() -> Self { Self::with_capacity(512, 4096) }
+    pub fn new() -> Self {
+        Self::with_capacity(512, 4096)
+    }
 
     pub fn with_capacity(compile_cap: usize, path_cap: usize) -> Self {
         Self {
-            registry:      Arc::new(MethodRegistry::new()),
+            registry: Arc::new(MethodRegistry::new()),
             compile_cache: HashMap::with_capacity(compile_cap),
-            compile_lru:   std::collections::VecDeque::with_capacity(compile_cap),
+            compile_lru: std::collections::VecDeque::with_capacity(compile_cap),
             compile_cap,
-            path_cache:    PathCache::new(path_cap),
+            path_cache: PathCache::new(path_cap),
             root_chain_cache: HashMap::new(),
-            doc_hash:      0,
+            doc_hash: 0,
             root_hash_cache: None,
-            config:        PassConfig::default(),
+            config: PassConfig::default(),
         }
     }
 
@@ -2364,19 +2998,31 @@ impl VM {
     /// Replace the pass configuration.  The compile cache is not purged,
     /// but future lookups key off the new config hash so old entries
     /// are effectively invalidated for the new regime.
-    pub fn set_pass_config(&mut self, config: PassConfig) { self.config = config; }
+    pub fn set_pass_config(&mut self, config: PassConfig) {
+        self.config = config;
+    }
 
-    pub fn pass_config(&self) -> PassConfig { self.config }
+    pub fn pass_config(&self) -> PassConfig {
+        self.config
+    }
 
     /// Register a custom method (callable via `.method_name(...)` in expressions).
-    pub fn register(&mut self, name: impl Into<String>, method: impl super::eval::methods::Method + 'static) {
+    pub fn register(
+        &mut self,
+        name: impl Into<String>,
+        method: impl super::eval::methods::Method + 'static,
+    ) {
         Arc::make_mut(&mut self.registry).register(name, method);
     }
 
     // ── Public entry-points ───────────────────────────────────────────────────
 
     /// Parse, compile (cached), and execute `expr` against `doc`.
-    pub fn run_str(&mut self, expr: &str, doc: &serde_json::Value) -> Result<serde_json::Value, EvalError> {
+    pub fn run_str(
+        &mut self,
+        expr: &str,
+        doc: &serde_json::Value,
+    ) -> Result<serde_json::Value, EvalError> {
         let prog = self.get_or_compile(expr)?;
         self.execute(&prog, doc)
     }
@@ -2395,7 +3041,11 @@ impl VM {
     }
 
     /// Execute a pre-compiled `Program` against `doc`.
-    pub fn execute(&mut self, program: &Program, doc: &serde_json::Value) -> Result<serde_json::Value, EvalError> {
+    pub fn execute(
+        &mut self,
+        program: &Program,
+        doc: &serde_json::Value,
+    ) -> Result<serde_json::Value, EvalError> {
         let root = Val::from(doc);
         self.doc_hash = self.compute_or_cache_root_hash(&root);
         // Per-exec RootChain cache: entries key off raw Arc addresses that
@@ -2411,15 +3061,17 @@ impl VM {
     /// Primitive roots bypass the cache (hashing is already O(1)).
     fn compute_or_cache_root_hash(&mut self, root: &Val) -> u64 {
         let ptr: Option<usize> = match root {
-            Val::Obj(m)      => Some(Arc::as_ptr(m) as *const () as usize),
-            Val::Arr(a)      => Some(Arc::as_ptr(a) as *const () as usize),
-            Val::IntVec(a)   => Some(Arc::as_ptr(a) as *const () as usize),
+            Val::Obj(m) => Some(Arc::as_ptr(m) as *const () as usize),
+            Val::Arr(a) => Some(Arc::as_ptr(a) as *const () as usize),
+            Val::IntVec(a) => Some(Arc::as_ptr(a) as *const () as usize),
             Val::FloatVec(a) => Some(Arc::as_ptr(a) as *const () as usize),
             _ => None,
         };
         if let Some(p) = ptr {
             if let Some((cp, h)) = self.root_hash_cache {
-                if cp == p { return h; }
+                if cp == p {
+                    return h;
+                }
             }
             let h = hash_val_structure(root);
             self.root_hash_cache = Some((p, h));
@@ -2477,11 +3129,7 @@ impl VM {
     /// no `serde_json::Value` materialisation.  Use when the caller will
     /// consume results structurally (further queries, custom walk) and
     /// wants to skip a potentially expensive `Val → Value` conversion.
-    pub fn execute_val_raw(
-        &mut self,
-        program: &Program,
-        root: Val,
-    ) -> Result<Val, EvalError> {
+    pub fn execute_val_raw(&mut self, program: &Program, root: Val) -> Result<Val, EvalError> {
         self.doc_hash = self.compute_or_cache_root_hash(&root);
         self.root_chain_cache.clear();
         let env = self.make_env(root);
@@ -2494,11 +3142,7 @@ impl VM {
     /// `swap_current` per row.  Used by `pipeline::Pipeline::run` and
     /// any per-element evaluator that knows the document hasn't changed.
     #[inline]
-    pub fn exec_in_env(
-        &mut self,
-        program: &Program,
-        env: &Env,
-    ) -> Result<Val, EvalError> {
+    pub fn exec_in_env(&mut self, program: &Program, env: &Env) -> Result<Val, EvalError> {
         self.exec(program, env)
     }
 
@@ -2561,7 +3205,6 @@ impl VM {
         Env::new_with_registry(root, Arc::clone(&self.registry))
     }
 
-
     // ── Core execution loop ───────────────────────────────────────────────────
 
     /// Execute `program` in environment `env`, returning the top-of-stack value.
@@ -2571,18 +3214,21 @@ impl VM {
         let mut skip_ahead: usize = 0;
 
         for (op_idx, op) in ops_slice.iter().enumerate() {
-            if skip_ahead > 0 { skip_ahead -= 1; continue; }
+            if skip_ahead > 0 {
+                skip_ahead -= 1;
+                continue;
+            }
             match op {
                 // ── Literals ──────────────────────────────────────────────────
-                Opcode::PushNull        => stack.push(Val::Null),
-                Opcode::PushBool(b)     => stack.push(Val::Bool(*b)),
-                Opcode::PushInt(n)      => stack.push(Val::Int(*n)),
-                Opcode::PushFloat(f)    => stack.push(Val::Float(*f)),
-                Opcode::PushStr(s)      => stack.push(Val::Str(s.clone())),
+                Opcode::PushNull => stack.push(Val::Null),
+                Opcode::PushBool(b) => stack.push(Val::Bool(*b)),
+                Opcode::PushInt(n) => stack.push(Val::Int(*n)),
+                Opcode::PushFloat(f) => stack.push(Val::Float(*f)),
+                Opcode::PushStr(s) => stack.push(Val::Str(s.clone())),
 
                 // ── Context ───────────────────────────────────────────────────
-                Opcode::PushRoot        => stack.push(env.root.clone()),
-                Opcode::PushCurrent     => stack.push(env.current.clone()),
+                Opcode::PushRoot => stack.push(env.root.clone()),
+                Opcode::PushCurrent => stack.push(env.current.clone()),
 
                 // ── Navigation ────────────────────────────────────────────────
                 Opcode::GetField(k) => {
@@ -2645,9 +3291,8 @@ impl VM {
                     // vs avoiding the tree walk entirely).
                     if from_root {
                         if let Some(bytes) = env.raw_bytes.as_ref() {
-                            let (val, extra) = byte_chain_exec(
-                                bytes, k.as_ref(), &ops_slice[op_idx + 1..]
-                            );
+                            let (val, extra) =
+                                byte_chain_exec(bytes, k.as_ref(), &ops_slice[op_idx + 1..]);
                             stack.push(val);
                             skip_ahead = extra;
                             continue;
@@ -2670,7 +3315,13 @@ impl VM {
                     if from_root {
                         let mut prefix = String::new();
                         let mut cached: Vec<(Arc<str>, Val)> = Vec::new();
-                        collect_desc_with_paths(&v, k.as_ref(), &mut prefix, &mut found, &mut cached);
+                        collect_desc_with_paths(
+                            &v,
+                            k.as_ref(),
+                            &mut prefix,
+                            &mut found,
+                            &mut cached,
+                        );
                         let doc_hash = self.doc_hash;
                         for (ptr, val) in cached {
                             self.path_cache.insert(doc_hash, ptr, val);
@@ -2698,7 +3349,9 @@ impl VM {
                         let prev = scratch.swap_current(item.clone());
                         let keep = is_truthy(&self.exec(pred, &scratch)?);
                         scratch.restore_current(prev);
-                        if keep { out.push(item); }
+                        if keep {
+                            out.push(item);
+                        }
                     }
                     stack.push(Val::arr(out));
                 }
@@ -2711,7 +3364,12 @@ impl VM {
                         },
                         QuantifierKind::One => match val {
                             Val::Arr(a) if a.len() == 1 => a[0].clone(),
-                            Val::Arr(a) => return err!("quantifier !: expected exactly one element, got {}", a.len()),
+                            Val::Arr(a) => {
+                                return err!(
+                                    "quantifier !: expected exactly one element, got {}",
+                                    a.len()
+                                )
+                            }
                             other => other,
                         },
                     });
@@ -2745,7 +3403,8 @@ impl VM {
                             resumed_from_cache = true;
                         }
                         current = current.get_field(k.as_ref());
-                        self.path_cache.insert(doc_hash, Arc::from(ptr.as_str()), current.clone());
+                        self.path_cache
+                            .insert(doc_hash, Arc::from(ptr.as_str()), current.clone());
                     }
 
                     self.root_chain_cache.insert(key, current.clone());
@@ -2799,6 +3458,18 @@ impl VM {
                 Opcode::LoadIdent(name) => {
                     let v = if let Some(v) = env.get_var(name.as_ref()) {
                         v.clone()
+                    } else if matches!(
+                        &env.current,
+                        Val::Arr(_)
+                            | Val::IntVec(_)
+                            | Val::FloatVec(_)
+                            | Val::StrVec(_)
+                            | Val::StrSliceVec(_)
+                            | Val::Str(_)
+                            | Val::StrSlice(_)
+                    ) && BuiltinMethod::from_name(name.as_ref()) != BuiltinMethod::Unknown
+                    {
+                        dispatch_method(env.current.clone(), name.as_ref(), &[], env)?
                     } else {
                         env.current.get_field(name.as_ref())
                     };
@@ -2806,30 +3477,83 @@ impl VM {
                 }
 
                 // ── Operators ─────────────────────────────────────────────────
-                Opcode::Add  => { let r = pop!(stack); let l = pop!(stack); stack.push(add_vals(l, r)?); }
-                Opcode::Sub  => { let r = pop!(stack); let l = pop!(stack); stack.push(num_op(l, r, |a,b|a-b, |a,b|a-b)?); }
-                Opcode::Mul  => { let r = pop!(stack); let l = pop!(stack); stack.push(num_op(l, r, |a,b|a*b, |a,b|a*b)?); }
-                Opcode::Div  => {
-                    let r = pop!(stack); let l = pop!(stack);
+                Opcode::Add => {
+                    let r = pop!(stack);
+                    let l = pop!(stack);
+                    stack.push(add_vals(l, r)?);
+                }
+                Opcode::Sub => {
+                    let r = pop!(stack);
+                    let l = pop!(stack);
+                    stack.push(num_op(l, r, |a, b| a - b, |a, b| a - b)?);
+                }
+                Opcode::Mul => {
+                    let r = pop!(stack);
+                    let l = pop!(stack);
+                    stack.push(num_op(l, r, |a, b| a * b, |a, b| a * b)?);
+                }
+                Opcode::Div => {
+                    let r = pop!(stack);
+                    let l = pop!(stack);
                     let b = r.as_f64().unwrap_or(0.0);
-                    if b == 0.0 { return err!("division by zero"); }
+                    if b == 0.0 {
+                        return err!("division by zero");
+                    }
                     stack.push(Val::Float(l.as_f64().unwrap_or(0.0) / b));
                 }
-                Opcode::Mod  => { let r = pop!(stack); let l = pop!(stack); stack.push(num_op(l, r, |a,b|a%b, |a,b|a%b)?); }
-                Opcode::Eq   => { let r = pop!(stack); let l = pop!(stack); stack.push(Val::Bool(vals_eq(&l,&r))); }
-                Opcode::Neq  => { let r = pop!(stack); let l = pop!(stack); stack.push(Val::Bool(!vals_eq(&l,&r))); }
-                Opcode::Lt   => { let r = pop!(stack); let l = pop!(stack); stack.push(Val::Bool(cmp_vals(&l,&r) == std::cmp::Ordering::Less)); }
-                Opcode::Lte  => { let r = pop!(stack); let l = pop!(stack); stack.push(Val::Bool(cmp_vals(&l,&r) != std::cmp::Ordering::Greater)); }
-                Opcode::Gt   => { let r = pop!(stack); let l = pop!(stack); stack.push(Val::Bool(cmp_vals(&l,&r) == std::cmp::Ordering::Greater)); }
-                Opcode::Gte  => { let r = pop!(stack); let l = pop!(stack); stack.push(Val::Bool(cmp_vals(&l,&r) != std::cmp::Ordering::Less)); }
+                Opcode::Mod => {
+                    let r = pop!(stack);
+                    let l = pop!(stack);
+                    stack.push(num_op(l, r, |a, b| a % b, |a, b| a % b)?);
+                }
+                Opcode::Eq => {
+                    let r = pop!(stack);
+                    let l = pop!(stack);
+                    stack.push(Val::Bool(vals_eq(&l, &r)));
+                }
+                Opcode::Neq => {
+                    let r = pop!(stack);
+                    let l = pop!(stack);
+                    stack.push(Val::Bool(!vals_eq(&l, &r)));
+                }
+                Opcode::Lt => {
+                    let r = pop!(stack);
+                    let l = pop!(stack);
+                    stack.push(Val::Bool(cmp_vals(&l, &r) == std::cmp::Ordering::Less));
+                }
+                Opcode::Lte => {
+                    let r = pop!(stack);
+                    let l = pop!(stack);
+                    stack.push(Val::Bool(cmp_vals(&l, &r) != std::cmp::Ordering::Greater));
+                }
+                Opcode::Gt => {
+                    let r = pop!(stack);
+                    let l = pop!(stack);
+                    stack.push(Val::Bool(cmp_vals(&l, &r) == std::cmp::Ordering::Greater));
+                }
+                Opcode::Gte => {
+                    let r = pop!(stack);
+                    let l = pop!(stack);
+                    stack.push(Val::Bool(cmp_vals(&l, &r) != std::cmp::Ordering::Less));
+                }
                 Opcode::Fuzzy => {
-                    let r = pop!(stack); let l = pop!(stack);
-                    let ls = match &l { Val::Str(s) => s.to_lowercase(), _ => val_to_string(&l).to_lowercase() };
-                    let rs = match &r { Val::Str(s) => s.to_lowercase(), _ => val_to_string(&r).to_lowercase() };
+                    let r = pop!(stack);
+                    let l = pop!(stack);
+                    let ls = match &l {
+                        Val::Str(s) => s.to_lowercase(),
+                        _ => val_to_string(&l).to_lowercase(),
+                    };
+                    let rs = match &r {
+                        Val::Str(s) => s.to_lowercase(),
+                        _ => val_to_string(&r).to_lowercase(),
+                    };
                     stack.push(Val::Bool(ls.contains(&rs) || rs.contains(&ls)));
                 }
-                Opcode::Not  => { let v = pop!(stack); stack.push(Val::Bool(!is_truthy(&v))); }
-                Opcode::Neg  => {
+                Opcode::Not => {
+                    let v = pop!(stack);
+                    stack.push(Val::Bool(!is_truthy(&v)));
+                }
+                Opcode::Neg => {
                     let v = pop!(stack);
                     stack.push(match v {
                         Val::Int(n) => Val::Int(-n),
@@ -2877,7 +3601,7 @@ impl VM {
                     // Catch EvalError AND Val::Null; panics propagate.
                     match self.exec(body, env) {
                         Ok(v) if !v.is_null() => stack.push(v),
-                        Ok(_) | Err(_)        => stack.push(self.exec(default, env)?),
+                        Ok(_) | Err(_) => stack.push(self.exec(default, env)?),
                     }
                 }
 
@@ -2903,16 +3627,17 @@ impl VM {
                                 {
                                     let spans = if conjuncts.len() == 1 {
                                         super::scan::find_enclosing_objects_eq(
-                                            bytes, &conjuncts[0].0, &conjuncts[0].1,
+                                            bytes,
+                                            &conjuncts[0].0,
+                                            &conjuncts[0].1,
                                         )
                                     } else {
                                         super::scan::find_enclosing_objects_eq_multi(
                                             bytes, &conjuncts,
                                         )
                                     };
-                                    let (arr, extra) = materialise_find_scan_spans(
-                                        bytes, &spans, tail,
-                                    );
+                                    let (arr, extra) =
+                                        materialise_find_scan_spans(bytes, &spans, tail);
                                     stack.push(arr);
                                     skip_ahead = extra;
                                     continue;
@@ -2920,8 +3645,7 @@ impl VM {
                                 // Single-conjunct numeric-range scan.
                                 if call.orig_args.len() == 1 {
                                     let e = match &call.orig_args[0] {
-                                        super::ast::Arg::Pos(e)
-                                        | super::ast::Arg::Named(_, e) => e,
+                                        super::ast::Arg::Pos(e) | super::ast::Arg::Named(_, e) => e,
                                     };
                                     if let Some((field, op, thresh)) =
                                         super::eval::canonical_field_cmp_literal(e)
@@ -2929,9 +3653,8 @@ impl VM {
                                         let spans = super::scan::find_enclosing_objects_cmp(
                                             bytes, &field, op, thresh,
                                         );
-                                        let (arr, extra) = materialise_find_scan_spans(
-                                            bytes, &spans, tail,
-                                        );
+                                        let (arr, extra) =
+                                            materialise_find_scan_spans(bytes, &spans, tail);
                                         stack.push(arr);
                                         skip_ahead = extra;
                                         continue;
@@ -2944,9 +3667,8 @@ impl VM {
                                     let spans = super::scan::find_enclosing_objects_mixed(
                                         bytes, &conjuncts,
                                     );
-                                    let (arr, extra) = materialise_find_scan_spans(
-                                        bytes, &spans, tail,
-                                    );
+                                    let (arr, extra) =
+                                        materialise_find_scan_spans(bytes, &spans, tail);
                                     stack.push(arr);
                                     skip_ahead = extra;
                                     continue;
@@ -2980,16 +3702,12 @@ impl VM {
                         if *is_spread {
                             match v {
                                 Val::Arr(a) => {
-                                    let items = Arc::try_unwrap(a)
-                                        .unwrap_or_else(|a| (*a).clone());
+                                    let items = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
                                     out.extend(items);
                                 }
-                                Val::IntVec(a) =>
-                                    out.extend(a.iter().map(|n| Val::Int(*n))),
-                                Val::FloatVec(a) =>
-                                    out.extend(a.iter().map(|f| Val::Float(*f))),
-                                Val::StrVec(a) =>
-                                    out.extend(a.iter().cloned().map(Val::Str)),
+                                Val::IntVec(a) => out.extend(a.iter().map(|n| Val::Int(*n))),
+                                Val::FloatVec(a) => out.extend(a.iter().map(|f| Val::Float(*f))),
+                                Val::StrVec(a) => out.extend(a.iter().cloned().map(Val::Str)),
                                 other => out.push(other),
                             }
                         } else {
@@ -3072,10 +3790,8 @@ impl VM {
                                                 rest_obj.insert(k.clone(), v.clone());
                                             }
                                         }
-                                        local_env = local_env.with_var(
-                                            rest.as_ref(),
-                                            Val::Obj(Arc::new(rest_obj)),
-                                        );
+                                        local_env = local_env
+                                            .with_var(rest.as_ref(), Val::Obj(Arc::new(rest_obj)));
                                     }
                                 }
                             }
@@ -3129,7 +3845,9 @@ impl VM {
                         for item in items {
                             let ie = bind_comp_vars(env, &spec.vars, item);
                             if let Some(cond) = &spec.cond {
-                                if !is_truthy(&self.exec(cond, &ie)?) { continue; }
+                                if !is_truthy(&self.exec(cond, &ie)?) {
+                                    continue;
+                                }
                             }
                             out.push(self.exec(&spec.expr, &ie)?);
                         }
@@ -3160,15 +3878,17 @@ impl VM {
                                 let k: Arc<str> = match shape {
                                     DictKeyShape::Ident => match &item {
                                         Val::Str(s) => s.clone(),
-                                        other       => Arc::<str>::from(val_to_key(other)),
+                                        other => Arc::<str>::from(val_to_key(other)),
                                     },
                                     DictKeyShape::IdentToString => match &item {
                                         Val::Str(s) => s.clone(),
-                                        Val::Int(n)   => Arc::<str>::from(n.to_string()),
+                                        Val::Int(n) => Arc::<str>::from(n.to_string()),
                                         Val::Float(f) => Arc::<str>::from(f.to_string()),
-                                        Val::Bool(b)  => Arc::<str>::from(if *b { "true" } else { "false" }),
-                                        Val::Null     => Arc::<str>::from("null"),
-                                        other         => Arc::<str>::from(val_to_key(other)),
+                                        Val::Bool(b) => {
+                                            Arc::<str>::from(if *b { "true" } else { "false" })
+                                        }
+                                        Val::Null => Arc::<str>::from("null"),
+                                        other => Arc::<str>::from(val_to_key(other)),
                                     },
                                 };
                                 map.insert(k, item);
@@ -3181,12 +3901,12 @@ impl VM {
                             let frame = scratch.push_lam(Some(vname.as_ref()), item);
                             let keep = match &spec.cond {
                                 Some(c) => is_truthy(&self.exec(c, &scratch)?),
-                                None    => true,
+                                None => true,
                             };
                             if keep {
                                 let k: Arc<str> = match self.exec(&spec.key, &scratch)? {
                                     Val::Str(s) => s,
-                                    other       => Arc::<str>::from(val_to_key(&other)),
+                                    other => Arc::<str>::from(val_to_key(&other)),
                                 };
                                 let v = self.exec(&spec.val, &scratch)?;
                                 map.insert(k, v);
@@ -3197,11 +3917,13 @@ impl VM {
                         for item in items {
                             let ie = bind_comp_vars(env, &spec.vars, item);
                             if let Some(cond) = &spec.cond {
-                                if !is_truthy(&self.exec(cond, &ie)?) { continue; }
+                                if !is_truthy(&self.exec(cond, &ie)?) {
+                                    continue;
+                                }
                             }
                             let k: Arc<str> = match self.exec(&spec.key, &ie)? {
                                 Val::Str(s) => s,
-                                other       => Arc::<str>::from(val_to_key(&other)),
+                                other => Arc::<str>::from(val_to_key(&other)),
                             };
                             let v = self.exec(&spec.val, &ie)?;
                             map.insert(k, v);
@@ -3222,12 +3944,14 @@ impl VM {
                             let frame = scratch.push_lam(Some(vname.as_ref()), item);
                             let keep = match &spec.cond {
                                 Some(c) => is_truthy(&self.exec(c, &scratch)?),
-                                None    => true,
+                                None => true,
                             };
                             if keep {
                                 let v = self.exec(&spec.expr, &scratch)?;
                                 let k = val_to_key(&v);
-                                if seen.insert(k) { out.push(v); }
+                                if seen.insert(k) {
+                                    out.push(v);
+                                }
                             }
                             scratch.pop_lam(frame);
                         }
@@ -3235,11 +3959,15 @@ impl VM {
                         for item in items {
                             let ie = bind_comp_vars(env, &spec.vars, item);
                             if let Some(cond) = &spec.cond {
-                                if !is_truthy(&self.exec(cond, &ie)?) { continue; }
+                                if !is_truthy(&self.exec(cond, &ie)?) {
+                                    continue;
+                                }
                             }
                             let v = self.exec(&spec.expr, &ie)?;
                             let k = val_to_key(&v);
-                            if seen.insert(k) { out.push(v); }
+                            if seen.insert(k) {
+                                out.push(v);
+                            }
                         }
                     }
                     stack.push(Val::arr(out));
@@ -3269,7 +3997,9 @@ impl VM {
             }
         }
 
-        stack.pop().ok_or_else(|| EvalError("program produced no value".into()))
+        stack
+            .pop()
+            .ok_or_else(|| EvalError("program produced no value".into()))
     }
 
     // filter_map_minmax helper removed alongside the FilterMapMin /
@@ -3283,8 +4013,8 @@ impl VM {
             // Custom registry or global function
             if !env.registry_is_empty() {
                 if let Some(method) = env.registry_get(call.name.as_ref()) {
-                    let evaled: Result<Vec<Val>, _> = call.sub_progs.iter()
-                        .map(|p| self.exec(p, env)).collect();
+                    let evaled: Result<Vec<Val>, _> =
+                        call.sub_progs.iter().map(|p| self.exec(p, env)).collect();
                     return method.call(recv, &evaled?);
                 }
             }
@@ -3292,10 +4022,9 @@ impl VM {
             // route through eval_global; unknown names fall back to method
             // dispatch on the pushed receiver.
             match call.name.as_ref() {
-                "coalesce" | "chain" | "join" | "zip" | "zip_longest"
-                | "product" | "range" =>
-                    return crate::eval::eval_global(
-                        call.name.as_ref(), &call.orig_args, env),
+                "coalesce" | "chain" | "join" | "zip" | "zip_longest" | "product" | "range" => {
+                    return crate::eval::eval_global(call.name.as_ref(), &call.orig_args, env)
+                }
                 _ => {}
             }
             return dispatch_method(recv, call.name.as_ref(), &call.orig_args, env);
@@ -3325,7 +4054,9 @@ impl VM {
                 match call.method {
                     BuiltinMethod::Sum => return Ok(Val::Int(simd_sum_i64_slice(a))),
                     BuiltinMethod::Avg => {
-                        if a.is_empty() { return Ok(Val::Null); }
+                        if a.is_empty() {
+                            return Ok(Val::Null);
+                        }
                         return Ok(Val::Float(simd_sum_i64_slice(a) as f64 / a.len() as f64));
                     }
                     BuiltinMethod::Min => {
@@ -3349,22 +4080,29 @@ impl VM {
                 if is_all_int && !a.is_empty() {
                     match call.method {
                         BuiltinMethod::Reverse => {
-                            let mut v: Vec<i64> = a.iter().map(|x|
-                                if let Val::Int(n) = x { *n } else { 0 }
-                            ).collect();
+                            let mut v: Vec<i64> = a
+                                .iter()
+                                .map(|x| if let Val::Int(n) = x { *n } else { 0 })
+                                .collect();
                             v.reverse();
                             return Ok(Val::int_vec(v));
                         }
                         BuiltinMethod::Sort => {
-                            let mut v: Vec<i64> = a.iter().map(|x|
-                                if let Val::Int(n) = x { *n } else { 0 }
-                            ).collect();
+                            let mut v: Vec<i64> = a
+                                .iter()
+                                .map(|x| if let Val::Int(n) = x { *n } else { 0 })
+                                .collect();
                             v.sort_unstable();
                             return Ok(Val::int_vec(v));
                         }
                         BuiltinMethod::Sum => {
-                            let s: i64 = a.iter().fold(0i64, |acc, v|
-                                if let Val::Int(n) = v { acc.wrapping_add(*n) } else { acc });
+                            let s: i64 = a.iter().fold(0i64, |acc, v| {
+                                if let Val::Int(n) = v {
+                                    acc.wrapping_add(*n)
+                                } else {
+                                    acc
+                                }
+                            });
                             return Ok(Val::Int(s));
                         }
                         _ => {}
@@ -3375,12 +4113,14 @@ impl VM {
             if let Val::IntVec(a) = &recv {
                 match call.method {
                     BuiltinMethod::Reverse => {
-                        let mut v: Vec<i64> = Arc::try_unwrap(a.clone()).unwrap_or_else(|a| (*a).clone());
+                        let mut v: Vec<i64> =
+                            Arc::try_unwrap(a.clone()).unwrap_or_else(|a| (*a).clone());
                         v.reverse();
                         return Ok(Val::int_vec(v));
                     }
                     BuiltinMethod::Sort => {
-                        let mut v: Vec<i64> = Arc::try_unwrap(a.clone()).unwrap_or_else(|a| (*a).clone());
+                        let mut v: Vec<i64> =
+                            Arc::try_unwrap(a.clone()).unwrap_or_else(|a| (*a).clone());
                         v.sort_unstable();
                         return Ok(Val::int_vec(v));
                     }
@@ -3391,11 +4131,17 @@ impl VM {
                 match call.method {
                     BuiltinMethod::Sum => return Ok(Val::Float(simd_sum_f64_slice(a))),
                     BuiltinMethod::Avg => {
-                        if a.is_empty() { return Ok(Val::Null); }
+                        if a.is_empty() {
+                            return Ok(Val::Null);
+                        }
                         return Ok(Val::Float(simd_sum_f64_slice(a) / a.len() as f64));
                     }
-                    BuiltinMethod::Min => return Ok(simd_min_f64_slice(a).map(Val::Float).unwrap_or(Val::Null)),
-                    BuiltinMethod::Max => return Ok(simd_max_f64_slice(a).map(Val::Float).unwrap_or(Val::Null)),
+                    BuiltinMethod::Min => {
+                        return Ok(simd_min_f64_slice(a).map(Val::Float).unwrap_or(Val::Null))
+                    }
+                    BuiltinMethod::Max => {
+                        return Ok(simd_max_f64_slice(a).map(Val::Float).unwrap_or(Val::Null))
+                    }
                     BuiltinMethod::Count | BuiltinMethod::Len => {
                         return Ok(Val::Int(a.len() as i64));
                     }
@@ -3414,45 +4160,62 @@ impl VM {
                         _ => false,
                     });
                     if all_int_inner {
-                        let cap: usize = a.iter().map(|it| match it {
-                            Val::IntVec(inner) => inner.len(),
-                            Val::Arr(inner)    => inner.len(),
-                            _ => 1,
-                        }).sum();
+                        let cap: usize = a
+                            .iter()
+                            .map(|it| match it {
+                                Val::IntVec(inner) => inner.len(),
+                                Val::Arr(inner) => inner.len(),
+                                _ => 1,
+                            })
+                            .sum();
                         let mut out: Vec<i64> = Vec::with_capacity(cap);
                         for item in a.iter() {
                             match item {
                                 Val::IntVec(inner) => out.extend(inner.iter().copied()),
-                                Val::Arr(inner)    => out.extend(inner.iter().filter_map(|v| v.as_i64())),
-                                Val::Int(n)        => out.push(*n),
+                                Val::Arr(inner) => {
+                                    out.extend(inner.iter().filter_map(|v| v.as_i64()))
+                                }
+                                Val::Int(n) => out.push(*n),
                                 _ => {}
                             }
                         }
                         return Ok(Val::int_vec(out));
                     }
-                    let cap: usize = a.iter().map(|it| match it {
-                        Val::Arr(inner)         => inner.len(),
-                        Val::IntVec(inner)      => inner.len(),
-                        Val::FloatVec(inner)    => inner.len(),
-                        Val::StrVec(inner)      => inner.len(),
-                        Val::StrSliceVec(inner) => inner.len(),
-                        _ => 1,
-                    }).sum();
+                    let cap: usize = a
+                        .iter()
+                        .map(|it| match it {
+                            Val::Arr(inner) => inner.len(),
+                            Val::IntVec(inner) => inner.len(),
+                            Val::FloatVec(inner) => inner.len(),
+                            Val::StrVec(inner) => inner.len(),
+                            Val::StrSliceVec(inner) => inner.len(),
+                            _ => 1,
+                        })
+                        .sum();
                     let mut out = Vec::with_capacity(cap);
                     for item in a.iter() {
                         match item {
-                            Val::Arr(inner)         => out.extend(inner.iter().cloned()),
-                            Val::IntVec(inner)      => out.extend(inner.iter().map(|n| Val::Int(*n))),
-                            Val::FloatVec(inner)    => out.extend(inner.iter().map(|f| Val::Float(*f))),
-                            Val::StrVec(inner)      => out.extend(inner.iter().map(|s| Val::Str(s.clone()))),
-                            Val::StrSliceVec(inner) => out.extend(inner.iter().map(|s| Val::StrSlice(s.clone()))),
+                            Val::Arr(inner) => out.extend(inner.iter().cloned()),
+                            Val::IntVec(inner) => out.extend(inner.iter().map(|n| Val::Int(*n))),
+                            Val::FloatVec(inner) => {
+                                out.extend(inner.iter().map(|f| Val::Float(*f)))
+                            }
+                            Val::StrVec(inner) => {
+                                out.extend(inner.iter().map(|s| Val::Str(s.clone())))
+                            }
+                            Val::StrSliceVec(inner) => {
+                                out.extend(inner.iter().map(|s| Val::StrSlice(s.clone())))
+                            }
                             other => out.push(other.clone()),
                         }
                     }
                     return Ok(Val::arr(out));
                 }
                 // Columnar receiver itself — already flat; return as-is.
-                if matches!(&recv, Val::IntVec(_) | Val::FloatVec(_) | Val::StrVec(_) | Val::StrSliceVec(_)) {
+                if matches!(
+                    &recv,
+                    Val::IntVec(_) | Val::FloatVec(_) | Val::StrVec(_) | Val::StrSliceVec(_)
+                ) {
                     return Ok(recv);
                 }
             }
@@ -3461,12 +4224,12 @@ impl VM {
             // does the same work without the dispatch + argslice copy.
             if call.method == BuiltinMethod::ToString {
                 let s: Arc<str> = match &recv {
-                    Val::Str(s)   => return Ok(Val::Str(s.clone())),
-                    Val::Int(n)   => Arc::from(n.to_string()),
+                    Val::Str(s) => return Ok(Val::Str(s.clone())),
+                    Val::Int(n) => Arc::from(n.to_string()),
                     Val::Float(f) => Arc::from(f.to_string()),
-                    Val::Bool(b)  => Arc::from(b.to_string()),
-                    Val::Null     => Arc::from("null"),
-                    other         => Arc::from(super::eval::util::val_to_string(other).as_str()),
+                    Val::Bool(b) => Arc::from(b.to_string()),
+                    Val::Null => Arc::from("null"),
+                    other => Arc::from(super::eval::util::val_to_string(other).as_str()),
                 };
                 return Ok(Val::Str(s));
             }
@@ -3475,13 +4238,19 @@ impl VM {
             // `.map(@.to_json())` in hot pipelines.
             if call.method == BuiltinMethod::ToJson {
                 match &recv {
-                    Val::Int(n)   => return Ok(Val::Str(Arc::from(n.to_string()))),
+                    Val::Int(n) => return Ok(Val::Str(Arc::from(n.to_string()))),
                     Val::Float(f) => {
-                        let s = if f.is_finite() { f.to_string() } else { "null".to_string() };
+                        let s = if f.is_finite() {
+                            f.to_string()
+                        } else {
+                            "null".to_string()
+                        };
                         return Ok(Val::Str(Arc::from(s)));
                     }
-                    Val::Bool(b)  => return Ok(Val::Str(Arc::from(if *b { "true" } else { "false" }))),
-                    Val::Null     => return Ok(Val::Str(Arc::from("null"))),
+                    Val::Bool(b) => {
+                        return Ok(Val::Str(Arc::from(if *b { "true" } else { "false" })))
+                    }
+                    Val::Null => return Ok(Val::Str(Arc::from("null"))),
                     Val::Str(s) => {
                         // JSON-escape — fall through for now; cheap escape
                         // added here to keep the fast-path.  Handles the
@@ -3489,11 +4258,16 @@ impl VM {
                         let src = s.as_ref();
                         let mut needs_escape = false;
                         for &b in src.as_bytes() {
-                            if b < 0x20 || b == b'"' || b == b'\\' { needs_escape = true; break; }
+                            if b < 0x20 || b == b'"' || b == b'\\' {
+                                needs_escape = true;
+                                break;
+                            }
                         }
                         if !needs_escape {
                             let mut out = String::with_capacity(src.len() + 2);
-                            out.push('"'); out.push_str(src); out.push('"');
+                            out.push('"');
+                            out.push_str(src);
+                            out.push('"');
                             return Ok(Val::Str(Arc::from(out)));
                         }
                         // Fall through to serde path for escape handling.
@@ -3522,13 +4296,19 @@ impl VM {
         dispatch_method(recv, call.name.as_ref(), &call.orig_args, env)
     }
 
-    fn exec_lambda_method(&mut self, recv: Val, call: &CompiledCall, env: &Env) -> Result<Val, EvalError> {
+    fn exec_lambda_method(
+        &mut self,
+        recv: Val,
+        call: &CompiledCall,
+        env: &Env,
+    ) -> Result<Val, EvalError> {
         let sub = call.sub_progs.first();
         // Hoist the lambda param name out of the per-item loop — otherwise
         // each iteration would re-scan `orig_args` for the Lambda pattern.
         let lam_param: Option<&str> = match call.orig_args.first() {
-            Some(Arg::Pos(Expr::Lambda { params, .. })) if !params.is_empty() =>
-                Some(params[0].as_str()),
+            Some(Arg::Pos(Expr::Lambda { params, .. })) if !params.is_empty() => {
+                Some(params[0].as_str())
+            }
             _ => None,
         };
         // Single scratch env per call — reused across every item iteration
@@ -3538,23 +4318,31 @@ impl VM {
         match call.method {
             BuiltinMethod::Filter => {
                 let pred = sub.ok_or_else(|| EvalError("filter: requires predicate".into()))?;
-                let items = recv.into_vec().ok_or_else(|| EvalError("filter: expected array".into()))?;
-                let out = crate::builtins::filter_apply_bounded(items, call.demand_max_keep, |item| {
-                    self.exec_lam_body_scratch(pred, item, lam_param, &mut scratch)
-                })?;
+                let items = recv
+                    .into_vec()
+                    .ok_or_else(|| EvalError("filter: expected array".into()))?;
+                let out =
+                    crate::builtins::filter_apply_bounded(items, call.demand_max_keep, |item| {
+                        self.exec_lam_body_scratch(pred, item, lam_param, &mut scratch)
+                    })?;
                 Ok(Val::arr(out))
             }
             BuiltinMethod::Map => {
                 let mapper = sub.ok_or_else(|| EvalError("map: requires mapper".into()))?;
-                let items = recv.into_vec().ok_or_else(|| EvalError("map: expected array".into()))?;
-                let out = crate::builtins::map_apply_bounded(items, call.demand_max_keep, |item| {
-                    self.exec_lam_body_scratch(mapper, item, lam_param, &mut scratch)
-                })?;
+                let items = recv
+                    .into_vec()
+                    .ok_or_else(|| EvalError("map: expected array".into()))?;
+                let out =
+                    crate::builtins::map_apply_bounded(items, call.demand_max_keep, |item| {
+                        self.exec_lam_body_scratch(mapper, item, lam_param, &mut scratch)
+                    })?;
                 Ok(Val::arr(out))
             }
             BuiltinMethod::FlatMap => {
                 let mapper = sub.ok_or_else(|| EvalError("flatMap: requires mapper".into()))?;
-                let items = recv.into_vec().ok_or_else(|| EvalError("flatMap: expected array".into()))?;
+                let items = recv
+                    .into_vec()
+                    .ok_or_else(|| EvalError("flatMap: expected array".into()))?;
                 let out = crate::builtins::flat_map_apply(items, |item| {
                     self.exec_lam_body_scratch(mapper, item, lam_param, &mut scratch)
                 })?;
@@ -3575,11 +4363,15 @@ impl VM {
                         }
                     }
                     Ok(Val::Bool(false))
-                } else { Ok(Val::Bool(false)) }
+                } else {
+                    Ok(Val::Bool(false))
+                }
             }
             BuiltinMethod::All => {
                 if let Val::Arr(a) = &recv {
-                    if a.is_empty() { return Ok(Val::Bool(true)); }
+                    if a.is_empty() {
+                        return Ok(Val::Bool(true));
+                    }
                     let pred = sub.ok_or_else(|| EvalError("all: requires predicate".into()))?;
                     for item in a.iter() {
                         if !crate::builtins::all_one(item, |v| {
@@ -3589,7 +4381,9 @@ impl VM {
                         }
                     }
                     Ok(Val::Bool(true))
-                } else { Ok(Val::Bool(false)) }
+                } else {
+                    Ok(Val::Bool(false))
+                }
             }
             BuiltinMethod::Count if !call.sub_progs.is_empty() => {
                 if let Val::Arr(a) = &recv {
@@ -3603,18 +4397,22 @@ impl VM {
                         }
                     }
                     Ok(Val::Int(n))
-                } else { Ok(Val::Int(0)) }
+                } else {
+                    Ok(Val::Int(0))
+                }
             }
             BuiltinMethod::GroupBy => {
                 let key_prog = sub.ok_or_else(|| EvalError("groupBy: requires key".into()))?;
-                let items = recv.into_vec().ok_or_else(|| EvalError("groupBy: expected array".into()))?;
+                let items = recv
+                    .into_vec()
+                    .ok_or_else(|| EvalError("groupBy: expected array".into()))?;
                 // Pattern specialisation: `lambda x: x % K` where K is a small
                 // positive Int.  Skips per-item exec + string-keying.  Uses a
                 // dense Vec<Vec<Val>> indexed by (n % K).rem_euclid — collapsed
                 // into an IndexMap<Arc<str>, Val> once at the end.
                 if let Some(param) = lam_param {
-                    if let [Opcode::LoadIdent(p), Opcode::PushInt(k_lit), Opcode::Mod]
-                        = key_prog.ops.as_ref()
+                    if let [Opcode::LoadIdent(p), Opcode::PushInt(k_lit), Opcode::Mod] =
+                        key_prog.ops.as_ref()
                     {
                         if p.as_ref() == param && *k_lit > 0 && *k_lit <= 4096 {
                             let k_lit = *k_lit;
@@ -3626,14 +4424,18 @@ impl VM {
                             // (matches tree-walker `x % K` dispatch).
                             for item in items {
                                 let idx = match &item {
-                                    Val::Int(n)   => n.rem_euclid(k_lit) as usize,
+                                    Val::Int(n) => n.rem_euclid(k_lit) as usize,
                                     Val::Float(x) => (x.trunc() as i64).rem_euclid(k_lit) as usize,
                                     _ => return err!("group_by(x % K): non-numeric item"),
                                 };
-                                if !seen[idx] { seen[idx] = true; order.push(idx); }
+                                if !seen[idx] {
+                                    seen[idx] = true;
+                                    order.push(idx);
+                                }
                                 buckets[idx].push(item);
                             }
-                            let mut map: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(order.len());
+                            let mut map: IndexMap<Arc<str>, Val> =
+                                IndexMap::with_capacity(order.len());
                             for idx in order {
                                 let k: Arc<str> = Arc::from(idx.to_string());
                                 let bucket = std::mem::take(&mut buckets[idx]);
@@ -3651,7 +4453,9 @@ impl VM {
             }
             BuiltinMethod::CountBy => {
                 let key_prog = sub.ok_or_else(|| EvalError("countBy: requires key".into()))?;
-                let items = recv.into_vec().ok_or_else(|| EvalError("countBy: expected array".into()))?;
+                let items = recv
+                    .into_vec()
+                    .ok_or_else(|| EvalError("countBy: expected array".into()))?;
                 let map = crate::builtins::count_by_apply(items, |item| {
                     self.exec_lam_body_scratch(key_prog, item, lam_param, &mut scratch)
                 })?;
@@ -3659,7 +4463,9 @@ impl VM {
             }
             BuiltinMethod::IndexBy => {
                 let key_prog = sub.ok_or_else(|| EvalError("indexBy: requires key".into()))?;
-                let items = recv.into_vec().ok_or_else(|| EvalError("indexBy: expected array".into()))?;
+                let items = recv
+                    .into_vec()
+                    .ok_or_else(|| EvalError("indexBy: expected array".into()))?;
                 let map = crate::builtins::index_by_apply(items, |item| {
                     self.exec_lam_body_scratch(key_prog, item, lam_param, &mut scratch)
                 })?;
@@ -3667,7 +4473,9 @@ impl VM {
             }
             BuiltinMethod::TakeWhile => {
                 let pred = sub.ok_or_else(|| EvalError("takeWhile: requires predicate".into()))?;
-                let items = recv.into_vec().ok_or_else(|| EvalError("takeWhile: expected array".into()))?;
+                let items = recv
+                    .into_vec()
+                    .ok_or_else(|| EvalError("takeWhile: expected array".into()))?;
                 let out = crate::builtins::take_while_apply(items, |item| {
                     self.exec_lam_body_scratch(pred, item, lam_param, &mut scratch)
                 })?;
@@ -3675,7 +4483,9 @@ impl VM {
             }
             BuiltinMethod::DropWhile => {
                 let pred = sub.ok_or_else(|| EvalError("dropWhile: requires predicate".into()))?;
-                let items = recv.into_vec().ok_or_else(|| EvalError("dropWhile: expected array".into()))?;
+                let items = recv
+                    .into_vec()
+                    .ok_or_else(|| EvalError("dropWhile: expected array".into()))?;
                 let out = crate::builtins::drop_while_apply(items, |item| {
                     self.exec_lam_body_scratch(pred, item, lam_param, &mut scratch)
                 })?;
@@ -3688,14 +4498,18 @@ impl VM {
                 // that the compiled bytecode would otherwise re-dispatch per
                 // iteration.  Other shapes fall through to a compiled-bytecode
                 // VM loop; unsupported shapes fall back to the tree-walker.
-                let lam_body = sub.ok_or_else(|| EvalError("accumulate: requires lambda".into()))?;
+                let lam_body =
+                    sub.ok_or_else(|| EvalError("accumulate: requires lambda".into()))?;
                 let (p1, p2) = match call.orig_args.first() {
-                    Some(Arg::Pos(Expr::Lambda { params, .. })) if params.len() >= 2 =>
-                        (params[0].as_str(), params[1].as_str()),
+                    Some(Arg::Pos(Expr::Lambda { params, .. })) if params.len() >= 2 => {
+                        (params[0].as_str(), params[1].as_str())
+                    }
                     _ => return dispatch_method(recv, call.name.as_ref(), &call.orig_args, env),
                 };
-                if call.orig_args.iter().any(|a|
-                    matches!(a, Arg::Named(n, _) if n.as_str() == "start"))
+                if call
+                    .orig_args
+                    .iter()
+                    .any(|a| matches!(a, Arg::Named(n, _) if n.as_str() == "start"))
                 {
                     return dispatch_method(recv, call.name.as_ref(), &call.orig_args, env);
                 }
@@ -3708,7 +4522,7 @@ impl VM {
                             Opcode::Add => Some(AccumOp::Add),
                             Opcode::Sub => Some(AccumOp::Sub),
                             Opcode::Mul => Some(AccumOp::Mul),
-                            _           => None,
+                            _ => None,
                         }
                     }
                     _ => None,
@@ -3719,32 +4533,42 @@ impl VM {
                     let mut acc: i64 = 0;
                     let mut first = true;
                     for &n in a.iter() {
-                        if first { acc = n; first = false; }
-                        else { acc = match bop {
-                            AccumOp::Add => acc.wrapping_add(n),
-                            AccumOp::Sub => acc.wrapping_sub(n),
-                            AccumOp::Mul => acc.wrapping_mul(n),
-                        }; }
+                        if first {
+                            acc = n;
+                            first = false;
+                        } else {
+                            acc = match bop {
+                                AccumOp::Add => acc.wrapping_add(n),
+                                AccumOp::Sub => acc.wrapping_sub(n),
+                                AccumOp::Mul => acc.wrapping_mul(n),
+                            };
+                        }
                         out.push(acc);
                     }
                     return Ok(Val::int_vec(out));
                 }
-                if let (Val::FloatVec(a), Some(bop)) = (&recv, specialised_binop.as_ref().copied()) {
+                if let (Val::FloatVec(a), Some(bop)) = (&recv, specialised_binop.as_ref().copied())
+                {
                     let mut out: Vec<f64> = Vec::with_capacity(a.len());
                     let mut acc: f64 = 0.0;
                     let mut first = true;
                     for &n in a.iter() {
-                        if first { acc = n; first = false; }
-                        else { acc = match bop {
-                            AccumOp::Add => acc + n,
-                            AccumOp::Sub => acc - n,
-                            AccumOp::Mul => acc * n,
-                        }; }
+                        if first {
+                            acc = n;
+                            first = false;
+                        } else {
+                            acc = match bop {
+                                AccumOp::Add => acc + n,
+                                AccumOp::Sub => acc - n,
+                                AccumOp::Mul => acc * n,
+                            };
+                        }
                         out.push(acc);
                     }
                     return Ok(Val::float_vec(out));
                 }
-                let items = recv.into_vec()
+                let items = recv
+                    .into_vec()
                     .ok_or_else(|| EvalError("accumulate: expected array".into()))?;
                 let mut out = Vec::with_capacity(items.len());
                 if let Some(bop) = specialised_binop {
@@ -3756,13 +4580,21 @@ impl VM {
                         let mut acc: i64 = 0;
                         let mut first = true;
                         for item in &items {
-                            let n = if let Val::Int(n) = item { *n } else { unreachable!() };
-                            if first { acc = n; first = false; }
-                            else { acc = match bop {
-                                AccumOp::Add => acc.wrapping_add(n),
-                                AccumOp::Sub => acc.wrapping_sub(n),
-                                AccumOp::Mul => acc.wrapping_mul(n),
-                            }; }
+                            let n = if let Val::Int(n) = item {
+                                *n
+                            } else {
+                                unreachable!()
+                            };
+                            if first {
+                                acc = n;
+                                first = false;
+                            } else {
+                                acc = match bop {
+                                    AccumOp::Add => acc.wrapping_add(n),
+                                    AccumOp::Sub => acc.wrapping_sub(n),
+                                    AccumOp::Mul => acc.wrapping_mul(n),
+                                };
+                            }
                             acc_out.push(acc);
                         }
                         return Ok(Val::int_vec(acc_out));
@@ -3773,13 +4605,21 @@ impl VM {
                         let mut acc: f64 = 0.0;
                         let mut first = true;
                         for item in &items {
-                            let n = if let Val::Float(n) = item { *n } else { unreachable!() };
-                            if first { acc = n; first = false; }
-                            else { acc = match bop {
-                                AccumOp::Add => acc + n,
-                                AccumOp::Sub => acc - n,
-                                AccumOp::Mul => acc * n,
-                            }; }
+                            let n = if let Val::Float(n) = item {
+                                *n
+                            } else {
+                                unreachable!()
+                            };
+                            if first {
+                                acc = n;
+                                first = false;
+                            } else {
+                                acc = match bop {
+                                    AccumOp::Add => acc + n,
+                                    AccumOp::Sub => acc - n,
+                                    AccumOp::Mul => acc * n,
+                                };
+                            }
                             acc_out.push(acc);
                         }
                         return Ok(Val::float_vec(acc_out));
@@ -3790,8 +4630,8 @@ impl VM {
                         let next = match running.take() {
                             Some(acc) => match bop {
                                 AccumOp::Add => add_vals(acc, item)?,
-                                AccumOp::Sub => num_op(acc, item, |a,b| a-b, |a,b| a-b)?,
-                                AccumOp::Mul => num_op(acc, item, |a,b| a*b, |a,b| a*b)?,
+                                AccumOp::Sub => num_op(acc, item, |a, b| a - b, |a, b| a - b)?,
+                                AccumOp::Mul => num_op(acc, item, |a, b| a * b, |a, b| a * b)?,
                             },
                             None => item,
                         };
@@ -3820,30 +4660,37 @@ impl VM {
             }
             BuiltinMethod::Partition => {
                 let pred = sub.ok_or_else(|| EvalError("partition: requires predicate".into()))?;
-                let items = recv.into_vec().ok_or_else(|| EvalError("partition: expected array".into()))?;
+                let items = recv
+                    .into_vec()
+                    .ok_or_else(|| EvalError("partition: expected array".into()))?;
                 let (yes, no) = crate::builtins::partition_apply(items, |item| {
                     self.exec_lam_body_scratch(pred, item, lam_param, &mut scratch)
                 })?;
                 let mut m: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(2);
-                m.insert(Arc::from("true"),  Val::arr(yes));
+                m.insert(Arc::from("true"), Val::arr(yes));
                 m.insert(Arc::from("false"), Val::arr(no));
                 Ok(Val::obj(m))
             }
             BuiltinMethod::TransformKeys => {
                 let lam = sub.ok_or_else(|| EvalError("transformKeys: requires lambda".into()))?;
-                let map = recv.into_map().ok_or_else(|| EvalError("transformKeys: expected object".into()))?;
+                let map = recv
+                    .into_map()
+                    .ok_or_else(|| EvalError("transformKeys: expected object".into()))?;
                 let out = crate::builtins::transform_keys_apply(map, |k| {
                     self.exec_lam_body_scratch(lam, &Val::Str(k.clone()), lam_param, &mut scratch)
                 })?;
                 Ok(Val::obj(out))
             }
             BuiltinMethod::TransformValues => {
-                let lam = sub.ok_or_else(|| EvalError("transformValues: requires lambda".into()))?;
+                let lam =
+                    sub.ok_or_else(|| EvalError("transformValues: requires lambda".into()))?;
                 // COW: if the receiver's Arc is unique we mutate in place,
                 // otherwise deep-clone once and mutate the clone.  Either
                 // way, no fresh IndexMap allocation and no key-Arc clone
                 // per entry (IndexMap::values_mut preserves slot identity).
-                let mut map = recv.into_map().ok_or_else(|| EvalError("transformValues: expected object".into()))?;
+                let mut map = recv
+                    .into_map()
+                    .ok_or_else(|| EvalError("transformValues: expected object".into()))?;
                 // Pattern-specialise `[PushCurrent, PushInt(K), <BinOp>]` —
                 // the body of `transform_values(@ + K)` / `(@ - K)` / `(@ * K)`.
                 let pat = match lam.ops.as_ref() {
@@ -3859,18 +4706,23 @@ impl VM {
                     let kf = k_lit as f64;
                     for v in map.values_mut() {
                         match v {
-                            Val::Int(n) => *n = match op {
-                                AccumOp::Add => n.wrapping_add(k_lit),
-                                AccumOp::Sub => n.wrapping_sub(k_lit),
-                                AccumOp::Mul => n.wrapping_mul(k_lit),
-                            },
-                            Val::Float(x) => *x = match op {
-                                AccumOp::Add => *x + kf,
-                                AccumOp::Sub => *x - kf,
-                                AccumOp::Mul => *x * kf,
-                            },
+                            Val::Int(n) => {
+                                *n = match op {
+                                    AccumOp::Add => n.wrapping_add(k_lit),
+                                    AccumOp::Sub => n.wrapping_sub(k_lit),
+                                    AccumOp::Mul => n.wrapping_mul(k_lit),
+                                }
+                            }
+                            Val::Float(x) => {
+                                *x = match op {
+                                    AccumOp::Add => *x + kf,
+                                    AccumOp::Sub => *x - kf,
+                                    AccumOp::Mul => *x * kf,
+                                }
+                            }
                             _ => {
-                                let new = self.exec_lam_body_scratch(lam, v, lam_param, &mut scratch)?;
+                                let new =
+                                    self.exec_lam_body_scratch(lam, v, lam_param, &mut scratch)?;
                                 *v = new;
                             }
                         }
@@ -3888,7 +4740,9 @@ impl VM {
             }
             BuiltinMethod::FilterKeys => {
                 let lam = sub.ok_or_else(|| EvalError("filterKeys: requires predicate".into()))?;
-                let map = recv.into_map().ok_or_else(|| EvalError("filterKeys: expected object".into()))?;
+                let map = recv
+                    .into_map()
+                    .ok_or_else(|| EvalError("filterKeys: expected object".into()))?;
                 let out = crate::builtins::filter_object_apply(map, |k, _v| {
                     crate::builtins::filter_one(&Val::Str(k.clone()), |item| {
                         self.exec_lam_body_scratch(lam, item, lam_param, &mut scratch)
@@ -3897,8 +4751,11 @@ impl VM {
                 Ok(Val::obj(out))
             }
             BuiltinMethod::FilterValues => {
-                let lam = sub.ok_or_else(|| EvalError("filterValues: requires predicate".into()))?;
-                let map = recv.into_map().ok_or_else(|| EvalError("filterValues: expected object".into()))?;
+                let lam =
+                    sub.ok_or_else(|| EvalError("filterValues: requires predicate".into()))?;
+                let map = recv
+                    .into_map()
+                    .ok_or_else(|| EvalError("filterValues: expected object".into()))?;
                 let out = crate::builtins::filter_object_apply(map, |_k, v| {
                     crate::builtins::filter_one(v, |item| {
                         self.exec_lam_body_scratch(lam, item, lam_param, &mut scratch)
@@ -3906,9 +4763,7 @@ impl VM {
                 })?;
                 Ok(Val::obj(out))
             }
-            BuiltinMethod::Pivot => {
-                dispatch_method(recv, call.name.as_ref(), &call.orig_args, env)
-            }
+            BuiltinMethod::Pivot => dispatch_method(recv, call.name.as_ref(), &call.orig_args, env),
             BuiltinMethod::Update => {
                 let lam = sub.ok_or_else(|| EvalError("update: requires lambda".into()))?;
                 self.exec_lam_body(lam, &recv, lam_param, env)
@@ -3920,29 +4775,31 @@ impl VM {
     /// Convenience wrapper: clones `env` once, runs the prog, discards
     /// the scratch.  Hot loops should use `exec_lam_body_scratch` to
     /// reuse a single scratch env instead.
-    fn exec_lam_body(&mut self, prog: &Program, item: &Val, lam_param: Option<&str>, env: &Env)
-        -> Result<Val, EvalError>
-    {
+    fn exec_lam_body(
+        &mut self,
+        prog: &Program,
+        item: &Val,
+        lam_param: Option<&str>,
+        env: &Env,
+    ) -> Result<Val, EvalError> {
         let mut scratch = env.clone();
         self.exec_lam_body_scratch(prog, item, lam_param, &mut scratch)
     }
 
     // ── Patch executor (VM-native, replaces tree-walker eval_patch) ──
 
-    fn exec_patch_compiled(
-        &mut self,
-        cp:  &CompiledPatch,
-        env: &Env,
-    ) -> Result<Val, EvalError> {
+    fn exec_patch_compiled(&mut self, cp: &CompiledPatch, env: &Env) -> Result<Val, EvalError> {
         let mut doc = self.exec(&cp.root_prog, env)?;
         for op in &cp.ops {
             if let Some(cond) = &op.cond {
                 let cenv = env.with_current(doc.clone());
-                if !is_truthy(&self.exec(cond, &cenv)?) { continue; }
+                if !is_truthy(&self.exec(cond, &cenv)?) {
+                    continue;
+                }
             }
             match self.apply_patch_step_compiled(doc, &op.path, 0, &op.val, env)? {
                 PatchResult::Replace(v) => doc = v,
-                PatchResult::Delete     => doc = Val::Null,
+                PatchResult::Delete => doc = Val::Null,
             }
         }
         Ok(doc)
@@ -3950,15 +4807,15 @@ impl VM {
 
     fn apply_patch_step_compiled(
         &mut self,
-        v:    Val,
+        v: Val,
         path: &[CompiledPathStep],
-        i:    usize,
-        val:  &CompiledPatchVal,
-        env:  &Env,
+        i: usize,
+        val: &CompiledPatchVal,
+        env: &Env,
     ) -> Result<PatchResult, EvalError> {
         if i == path.len() {
             return Ok(match val {
-                CompiledPatchVal::Delete           => PatchResult::Delete,
+                CompiledPatchVal::Delete => PatchResult::Delete,
                 CompiledPatchVal::Replace(prog) => {
                     let nv = self.exec(prog, &env.with_current(v))?;
                     PatchResult::Replace(nv)
@@ -3970,11 +4827,17 @@ impl VM {
                 let mut m = v.into_map().unwrap_or_default();
                 let existing = if let Some(slot) = m.get_mut(name.as_ref()) {
                     std::mem::replace(slot, Val::Null)
-                } else { Val::Null };
-                let child = self.apply_patch_step_compiled(existing, path, i+1, val, env)?;
+                } else {
+                    Val::Null
+                };
+                let child = self.apply_patch_step_compiled(existing, path, i + 1, val, env)?;
                 match child {
-                    PatchResult::Delete      => { m.shift_remove(name.as_ref()); }
-                    PatchResult::Replace(nv) => { m.insert(name.clone(), nv); }
+                    PatchResult::Delete => {
+                        m.shift_remove(name.as_ref());
+                    }
+                    PatchResult::Replace(nv) => {
+                        m.insert(name.clone(), nv);
+                    }
                 }
                 Ok(PatchResult::Replace(Val::obj(m)))
             }
@@ -3983,37 +4846,62 @@ impl VM {
                 let resolved = vm_resolve_idx(*idx, a.len() as i64);
                 let existing = if resolved < a.len() {
                     std::mem::replace(&mut a[resolved], Val::Null)
-                } else { Val::Null };
-                let child = self.apply_patch_step_compiled(existing, path, i+1, val, env)?;
+                } else {
+                    Val::Null
+                };
+                let child = self.apply_patch_step_compiled(existing, path, i + 1, val, env)?;
                 match child {
-                    PatchResult::Delete      => { if resolved < a.len() { a.remove(resolved); } }
-                    PatchResult::Replace(nv) => { if resolved < a.len() { a[resolved] = nv; } }
+                    PatchResult::Delete => {
+                        if resolved < a.len() {
+                            a.remove(resolved);
+                        }
+                    }
+                    PatchResult::Replace(nv) => {
+                        if resolved < a.len() {
+                            a[resolved] = nv;
+                        }
+                    }
                 }
                 Ok(PatchResult::Replace(Val::arr(a)))
             }
             CompiledPathStep::DynIndex(prog) => {
                 let idx_val = self.exec(prog, env)?;
                 let idx = idx_val.as_i64().ok_or_else(|| {
-                    EvalError(format!("patch dyn-index: expected integer, got {}", idx_val.type_name()))
+                    EvalError(format!(
+                        "patch dyn-index: expected integer, got {}",
+                        idx_val.type_name()
+                    ))
                 })?;
                 let mut a = v.into_vec().unwrap_or_default();
                 let resolved = vm_resolve_idx(idx, a.len() as i64);
                 let existing = if resolved < a.len() {
                     std::mem::replace(&mut a[resolved], Val::Null)
-                } else { Val::Null };
-                let child = self.apply_patch_step_compiled(existing, path, i+1, val, env)?;
+                } else {
+                    Val::Null
+                };
+                let child = self.apply_patch_step_compiled(existing, path, i + 1, val, env)?;
                 match child {
-                    PatchResult::Delete      => { if resolved < a.len() { a.remove(resolved); } }
-                    PatchResult::Replace(nv) => { if resolved < a.len() { a[resolved] = nv; } }
+                    PatchResult::Delete => {
+                        if resolved < a.len() {
+                            a.remove(resolved);
+                        }
+                    }
+                    PatchResult::Replace(nv) => {
+                        if resolved < a.len() {
+                            a[resolved] = nv;
+                        }
+                    }
                 }
                 Ok(PatchResult::Replace(Val::arr(a)))
             }
             CompiledPathStep::Wildcard => {
-                let mut arr = v.into_vec().ok_or_else(|| EvalError("patch [*]: expected array".into()))?;
+                let mut arr = v
+                    .into_vec()
+                    .ok_or_else(|| EvalError("patch [*]: expected array".into()))?;
                 let mut write_idx = 0usize;
                 for read_idx in 0..arr.len() {
                     let item = std::mem::replace(&mut arr[read_idx], Val::Null);
-                    match self.apply_patch_step_compiled(item, path, i+1, val, env)? {
+                    match self.apply_patch_step_compiled(item, path, i + 1, val, env)? {
                         PatchResult::Delete => {}
                         PatchResult::Replace(nv) => {
                             arr[write_idx] = nv;
@@ -4025,19 +4913,24 @@ impl VM {
                 Ok(PatchResult::Replace(Val::arr(arr)))
             }
             CompiledPathStep::WildcardFilter(pred) => {
-                let mut arr = v.into_vec().ok_or_else(|| EvalError("patch [* if]: expected array".into()))?;
+                let mut arr = v
+                    .into_vec()
+                    .ok_or_else(|| EvalError("patch [* if]: expected array".into()))?;
                 let mut env_mut = env.clone();
                 let mut write_idx = 0usize;
                 for read_idx in 0..arr.len() {
                     let item = std::mem::replace(&mut arr[read_idx], Val::Null);
                     let frame = env_mut.push_lam(None, item.clone());
                     let include = match self.exec(pred, &env_mut) {
-                        Ok(v)  => is_truthy(&v),
-                        Err(e) => { env_mut.pop_lam(frame); return Err(e); }
+                        Ok(v) => is_truthy(&v),
+                        Err(e) => {
+                            env_mut.pop_lam(frame);
+                            return Err(e);
+                        }
                     };
                     env_mut.pop_lam(frame);
                     if include {
-                        match self.apply_patch_step_compiled(item, path, i+1, val, env)? {
+                        match self.apply_patch_step_compiled(item, path, i + 1, val, env)? {
                             PatchResult::Delete => {}
                             PatchResult::Replace(nv) => {
                                 arr[write_idx] = nv;
@@ -4061,12 +4954,12 @@ impl VM {
 
     fn descend_apply_patch_compiled(
         &mut self,
-        v:    Val,
+        v: Val,
         name: &Arc<str>,
         path: &[CompiledPathStep],
-        i:    usize,
-        val:  &CompiledPatchVal,
-        env:  &Env,
+        i: usize,
+        val: &CompiledPatchVal,
+        env: &Env,
     ) -> Result<Val, EvalError> {
         match v {
             Val::Obj(m) => {
@@ -4075,16 +4968,25 @@ impl VM {
                 for idx in 0..n {
                     let child = if let Some((_, v)) = map.get_index_mut(idx) {
                         std::mem::replace(v, Val::Null)
-                    } else { continue };
-                    let replaced = self.descend_apply_patch_compiled(child, name, path, i, val, env)?;
-                    if let Some((_, slot)) = map.get_index_mut(idx) { *slot = replaced; }
+                    } else {
+                        continue;
+                    };
+                    let replaced =
+                        self.descend_apply_patch_compiled(child, name, path, i, val, env)?;
+                    if let Some((_, slot)) = map.get_index_mut(idx) {
+                        *slot = replaced;
+                    }
                 }
                 if map.contains_key(name.as_ref()) {
                     let existing = map.get(name.as_ref()).cloned().unwrap_or(Val::Null);
                     let r = self.apply_patch_step_compiled(existing, path, i + 1, val, env)?;
                     match r {
-                        PatchResult::Delete      => { map.shift_remove(name.as_ref()); }
-                        PatchResult::Replace(nv) => { map.insert(name.clone(), nv); }
+                        PatchResult::Delete => {
+                            map.shift_remove(name.as_ref());
+                        }
+                        PatchResult::Replace(nv) => {
+                            map.insert(name.clone(), nv);
+                        }
                     }
                 }
                 Ok(Val::obj(map))
@@ -4105,10 +5007,13 @@ impl VM {
     /// `Env::push_lam` / `Env::pop_lam` instead of cloning per item.
     /// The caller provides (and reuses) the scratch env across loop
     /// iterations.
-    fn exec_lam_body_scratch(&mut self, prog: &Program, item: &Val,
-                              lam_param: Option<&str>, scratch: &mut Env)
-        -> Result<Val, EvalError>
-    {
+    fn exec_lam_body_scratch(
+        &mut self,
+        prog: &Program,
+        item: &Val,
+        lam_param: Option<&str>,
+        scratch: &mut Env,
+    ) -> Result<Val, EvalError> {
         let frame = scratch.push_lam(lam_param, item.clone());
         let r = self.exec(prog, scratch);
         scratch.pop_lam(frame);
@@ -4129,17 +5034,33 @@ impl VM {
                     } else {
                         env.current.get_field(name.as_ref())
                     };
-                    if !v.is_null() { map.insert(name.clone(), v); }
+                    if !v.is_null() {
+                        map.insert(name.clone(), v);
+                    }
                 }
-                CompiledObjEntry::Kv { key, prog, optional, cond } => {
+                CompiledObjEntry::Kv {
+                    key,
+                    prog,
+                    optional,
+                    cond,
+                } => {
                     if let Some(c) = cond {
-                        if !super::eval::util::is_truthy(&self.exec(c, env)?) { continue; }
+                        if !super::eval::util::is_truthy(&self.exec(c, env)?) {
+                            continue;
+                        }
                     }
                     let v = self.exec(prog, env)?;
-                    if *optional && v.is_null() { continue; }
+                    if *optional && v.is_null() {
+                        continue;
+                    }
                     map.insert(key.clone(), v);
                 }
-                CompiledObjEntry::KvPath { key, steps, optional, ics } => {
+                CompiledObjEntry::KvPath {
+                    key,
+                    steps,
+                    optional,
+                    ics,
+                } => {
                     let mut v = env.current.clone();
                     for (i, st) in steps.iter().enumerate() {
                         v = match st {
@@ -4152,9 +5073,13 @@ impl VM {
                             }
                             KvStep::Index(i) => v.get_index(*i),
                         };
-                        if v.is_null() { break; }
+                        if v.is_null() {
+                            break;
+                        }
                     }
-                    if *optional && v.is_null() { continue; }
+                    if *optional && v.is_null() {
+                        continue;
+                    }
                     map.insert(key.clone(), v);
                 }
                 CompiledObjEntry::Dynamic { key, val } => {
@@ -4165,14 +5090,16 @@ impl VM {
                 CompiledObjEntry::Spread(prog) => {
                     if let Val::Obj(other) = self.exec(prog, env)? {
                         let entries = Arc::try_unwrap(other).unwrap_or_else(|m| (*m).clone());
-                        for (k, v) in entries { map.insert(k, v); }
+                        for (k, v) in entries {
+                            map.insert(k, v);
+                        }
                     }
                 }
                 CompiledObjEntry::SpreadDeep(prog) => {
                     if let Val::Obj(other) = self.exec(prog, env)? {
                         let base = std::mem::take(&mut map);
-                        let merged = super::eval::util::deep_merge_concat(
-                            Val::obj(base), Val::Obj(other));
+                        let merged =
+                            super::eval::util::deep_merge_concat(Val::obj(base), Val::Obj(other));
                         if let Val::Obj(m) = merged {
                             map = Arc::try_unwrap(m).unwrap_or_else(|m| (*m).clone());
                         }
@@ -4188,10 +5115,13 @@ impl VM {
     fn exec_fstring(&mut self, parts: &[CompiledFSPart], env: &Env) -> Result<Val, EvalError> {
         use std::fmt::Write as _;
         // Pre-size by summing literal lengths + rough 8 bytes per interp.
-        let lit_len: usize = parts.iter().map(|p| match p {
-            CompiledFSPart::Lit(s) => s.len(),
-            CompiledFSPart::Interp { .. } => 8,
-        }).sum();
+        let lit_len: usize = parts
+            .iter()
+            .map(|p| match p {
+                CompiledFSPart::Lit(s) => s.len(),
+                CompiledFSPart::Interp { .. } => 8,
+            })
+            .sum();
         let mut out = String::with_capacity(lit_len);
         for part in parts {
             match part {
@@ -4202,34 +5132,41 @@ impl VM {
                     // (stack alloc, ic vec, etc.) per row.
                     let val: Val = match &prog.ops[..] {
                         [Opcode::PushCurrent] => env.current.clone(),
-                        [Opcode::PushCurrent, Opcode::GetIndex(n)] => {
-                            match &env.current {
-                                Val::Arr(a) => {
-                                    let idx = if *n >= 0 { *n as usize }
-                                              else { a.len().saturating_sub((-*n) as usize) };
-                                    a.get(idx).cloned().unwrap_or(Val::Null)
-                                }
-                                _ => self.exec(prog, env)?,
+                        [Opcode::PushCurrent, Opcode::GetIndex(n)] => match &env.current {
+                            Val::Arr(a) => {
+                                let idx = if *n >= 0 {
+                                    *n as usize
+                                } else {
+                                    a.len().saturating_sub((-*n) as usize)
+                                };
+                                a.get(idx).cloned().unwrap_or(Val::Null)
                             }
+                            _ => self.exec(prog, env)?,
+                        },
+                        [Opcode::PushCurrent, Opcode::GetField(k)] => match &env.current {
+                            Val::Obj(m) => m.get(k.as_ref()).cloned().unwrap_or(Val::Null),
+                            _ => self.exec(prog, env)?,
+                        },
+                        [Opcode::LoadIdent(name)] => {
+                            env.get_var(name).cloned().unwrap_or(Val::Null)
                         }
-                        [Opcode::PushCurrent, Opcode::GetField(k)] => {
-                            match &env.current {
-                                Val::Obj(m) => m.get(k.as_ref()).cloned().unwrap_or(Val::Null),
-                                _ => self.exec(prog, env)?,
-                            }
-                        }
-                        [Opcode::LoadIdent(name)] => env.get_var(name).cloned().unwrap_or(Val::Null),
                         _ => self.exec(prog, env)?,
                     };
                     match fmt {
                         None => match &val {
                             // Fast paths: avoid val_to_string's temporary String.
-                            Val::Str(s)   => out.push_str(s.as_ref()),
-                            Val::Int(n)   => { let _ = write!(out, "{}", n); }
-                            Val::Float(f) => { let _ = write!(out, "{}", f); }
-                            Val::Bool(b)  => { let _ = write!(out, "{}", b); }
-                            Val::Null     => out.push_str("null"),
-                            _             => out.push_str(&val_to_string(&val)),
+                            Val::Str(s) => out.push_str(s.as_ref()),
+                            Val::Int(n) => {
+                                let _ = write!(out, "{}", n);
+                            }
+                            Val::Float(f) => {
+                                let _ = write!(out, "{}", f);
+                            }
+                            Val::Bool(b) => {
+                                let _ = write!(out, "{}", b);
+                            }
+                            Val::Null => out.push_str("null"),
+                            _ => out.push_str(&val_to_string(&val)),
                         },
                         Some(FmtSpec::Spec(spec)) => {
                             out.push_str(&apply_fmt_spec(&val, spec));
@@ -4237,12 +5174,18 @@ impl VM {
                         Some(FmtSpec::Pipe(method)) => {
                             let piped = dispatch_method(val, method, &[], env)?;
                             match &piped {
-                                Val::Str(s)   => out.push_str(s.as_ref()),
-                                Val::Int(n)   => { let _ = write!(out, "{}", n); }
-                                Val::Float(f) => { let _ = write!(out, "{}", f); }
-                                Val::Bool(b)  => { let _ = write!(out, "{}", b); }
-                                Val::Null     => out.push_str("null"),
-                                _             => out.push_str(&val_to_string(&piped)),
+                                Val::Str(s) => out.push_str(s.as_ref()),
+                                Val::Int(n) => {
+                                    let _ = write!(out, "{}", n);
+                                }
+                                Val::Float(f) => {
+                                    let _ = write!(out, "{}", f);
+                                }
+                                Val::Bool(b) => {
+                                    let _ = write!(out, "{}", b);
+                                }
+                                Val::Null => out.push_str("null"),
+                                _ => out.push_str(&val_to_string(&piped)),
                             }
                         }
                     }
@@ -4260,7 +5203,10 @@ impl VM {
             Val::Arr(a) => Ok(Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone())),
             Val::Obj(m) => {
                 let entries = Arc::try_unwrap(m).unwrap_or_else(|m| (*m).clone());
-                Ok(entries.into_iter().map(|(k, v)| obj2("key", Val::Str(k), "value", v)).collect())
+                Ok(entries
+                    .into_iter()
+                    .map(|(k, v)| obj2("key", Val::Str(k), "value", v))
+                    .collect())
             }
             other => Ok(vec![other]),
         }
@@ -4270,7 +5216,9 @@ impl VM {
 // ── Env extensions for VM ─────────────────────────────────────────────────────
 
 impl Env {
-    fn registry_is_empty(&self) -> bool { self.registry_ref().is_empty() }
+    fn registry_is_empty(&self) -> bool {
+        self.registry_ref().is_empty()
+    }
     fn registry_get(&self, name: &str) -> Option<Arc<dyn super::eval::methods::Method>> {
         self.registry_ref().get(name).cloned()
     }
@@ -4297,8 +5245,7 @@ impl Env {
 fn is_first_selector_op(op: &Opcode) -> bool {
     match op {
         Opcode::Quantifier(QuantifierKind::First) => true,
-        Opcode::CallMethod(c)
-            if c.sub_progs.is_empty() && c.method == BuiltinMethod::First => true,
+        Opcode::CallMethod(c) if c.sub_progs.is_empty() && c.method == BuiltinMethod::First => true,
         _ => false,
     }
 }
@@ -4340,9 +5287,7 @@ fn materialise_find_scan_spans_tail(
 ) -> (Val, usize) {
     // Trailing `.count()` / `.len()` — just the span count, no parse.
     if let Some(Opcode::CallMethod(c)) = tail.first() {
-        if c.sub_progs.is_empty()
-            && matches!(c.method, BuiltinMethod::Count | BuiltinMethod::Len)
-        {
+        if c.sub_progs.is_empty() && matches!(c.method, BuiltinMethod::Count | BuiltinMethod::Len) {
             return (Val::Int(spans.len() as i64), 1);
         }
     }
@@ -4366,29 +5311,44 @@ fn materialise_find_scan_spans_tail(
                         }
                         BuiltinMethod::Sum => {
                             let f = super::scan::fold_direct_field_nums(bytes, &spans2, k.as_ref());
-                            let v = if f.count == 0 { Val::Int(0) }
-                                    else if f.is_float { Val::Float(f.float_sum) }
-                                    else { Val::Int(f.int_sum) };
+                            let v = if f.count == 0 {
+                                Val::Int(0)
+                            } else if f.is_float {
+                                Val::Float(f.float_sum)
+                            } else {
+                                Val::Int(f.int_sum)
+                            };
                             return (v, 2);
                         }
                         BuiltinMethod::Avg => {
                             let f = super::scan::fold_direct_field_nums(bytes, &spans2, k.as_ref());
-                            let v = if f.count == 0 { Val::Null }
-                                    else { Val::Float(f.float_sum / f.count as f64) };
+                            let v = if f.count == 0 {
+                                Val::Null
+                            } else {
+                                Val::Float(f.float_sum / f.count as f64)
+                            };
                             return (v, 2);
                         }
                         BuiltinMethod::Min => {
                             let f = super::scan::fold_direct_field_nums(bytes, &spans2, k.as_ref());
-                            let v = if !f.any { Val::Null }
-                                    else if f.is_float { Val::Float(f.min_f) }
-                                    else { Val::Int(f.min_i) };
+                            let v = if !f.any {
+                                Val::Null
+                            } else if f.is_float {
+                                Val::Float(f.min_f)
+                            } else {
+                                Val::Int(f.min_i)
+                            };
                             return (v, 2);
                         }
                         BuiltinMethod::Max => {
                             let f = super::scan::fold_direct_field_nums(bytes, &spans2, k.as_ref());
-                            let v = if !f.any { Val::Null }
-                                    else if f.is_float { Val::Float(f.max_f) }
-                                    else { Val::Int(f.max_i) };
+                            let v = if !f.any {
+                                Val::Null
+                            } else if f.is_float {
+                                Val::Float(f.max_f)
+                            } else {
+                                Val::Int(f.max_i)
+                            };
                             return (v, 2);
                         }
                         _ => {}
@@ -4399,9 +5359,12 @@ fn materialise_find_scan_spans_tail(
             for s in &spans2 {
                 let obj_bytes = &bytes[s.start..s.end];
                 let v = match super::scan::find_direct_field(obj_bytes, k.as_ref()) {
-                    Some(vs) => serde_json::from_slice::<serde_json::Value>(
-                        &obj_bytes[vs.start..vs.end],
-                    ).ok().map(|sv| Val::from(&sv)).unwrap_or(Val::Null),
+                    Some(vs) => {
+                        serde_json::from_slice::<serde_json::Value>(&obj_bytes[vs.start..vs.end])
+                            .ok()
+                            .map(|sv| Val::from(&sv))
+                            .unwrap_or(Val::Null)
+                    }
                     None => Val::Null,
                 };
                 vals.push(v);
@@ -4414,25 +5377,20 @@ fn materialise_find_scan_spans_tail(
     // BodyKernel::FieldRead drives the same shape via composed substrate.
     let mut vals: Vec<Val> = Vec::with_capacity(spans.len());
     for s in spans {
-        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(
-            &bytes[s.start..s.end],
-        ) {
+        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes[s.start..s.end]) {
             vals.push(Val::from(&v));
         }
     }
     (Val::arr(vals), 0)
 }
 
-fn byte_chain_exec(
-    bytes: &[u8],
-    root_key: &str,
-    tail: &[Opcode],
-) -> (Val, usize) {
+fn byte_chain_exec(bytes: &[u8], root_key: &str, tail: &[Opcode]) -> (Val, usize) {
     // Early-exit: `$..key.first()` / `$..key!` needs only the first match.
     let first_after_initial = tail.first().map(is_first_selector_op).unwrap_or(false);
     let mut spans: Vec<super::scan::ValueSpan> = if first_after_initial {
         super::scan::find_first_key_value_span(bytes, root_key)
-            .into_iter().collect()
+            .into_iter()
+            .collect()
     } else {
         super::scan::find_key_value_spans(bytes, root_key)
     };
@@ -4442,8 +5400,7 @@ fn byte_chain_exec(
     for (idx, op) in tail.iter().enumerate() {
         match op {
             Opcode::Descendant(k) => {
-                let next_first = tail.get(idx + 1)
-                    .map(is_first_selector_op).unwrap_or(false);
+                let next_first = tail.get(idx + 1).map(is_first_selector_op).unwrap_or(false);
                 let mut next = Vec::with_capacity(spans.len());
                 for s in &spans {
                     let sub = &bytes[s.start..s.end];
@@ -4451,14 +5408,14 @@ fn byte_chain_exec(
                         if let Some(s2) = super::scan::find_first_key_value_span(sub, k.as_ref()) {
                             next.push(super::scan::ValueSpan {
                                 start: s.start + s2.start,
-                                end:   s.start + s2.end,
+                                end: s.start + s2.end,
                             });
                         }
                     } else {
                         for s2 in super::scan::find_key_value_spans(sub, k.as_ref()) {
                             next.push(super::scan::ValueSpan {
                                 start: s.start + s2.start,
-                                end:   s.start + s2.end,
+                                end: s.start + s2.end,
                             });
                         }
                     }
@@ -4471,44 +5428,42 @@ fn byte_chain_exec(
                 scalar = true;
             }
             Opcode::Quantifier(QuantifierKind::One) => {
-                if spans.len() != 1 { break; }
+                if spans.len() != 1 {
+                    break;
+                }
                 scalar = true;
             }
             // `.first()` / `.last()` compile to `CallMethod(First|Last)` not
             // `Quantifier`.  Handle them as scalar terminators.
-            Opcode::CallMethod(call) if call.sub_progs.is_empty() => {
-                match call.method {
-                    BuiltinMethod::First => {
-                        spans.truncate(1);
-                        scalar = true;
-                    }
-                    BuiltinMethod::Last => {
-                        if let Some(last) = spans.pop() { spans = vec![last]; }
-                        scalar = true;
-                    }
-                    _ => break,
+            Opcode::CallMethod(call) if call.sub_progs.is_empty() => match call.method {
+                BuiltinMethod::First => {
+                    spans.truncate(1);
+                    scalar = true;
                 }
-            }
-            Opcode::InlineFilter(prog) => {
-                match canonical_eq_literal_from_program(prog) {
-                    Some(lit) => {
-                        spans.retain(|s| {
-                            s.end - s.start == lit.len()
-                                && &bytes[s.start..s.end] == &lit[..]
-                        });
-                        scalar = false;
+                BuiltinMethod::Last => {
+                    if let Some(last) = spans.pop() {
+                        spans = vec![last];
                     }
-                    None => break,
+                    scalar = true;
                 }
-            }
+                _ => break,
+            },
+            Opcode::InlineFilter(prog) => match canonical_eq_literal_from_program(prog) {
+                Some(lit) => {
+                    spans.retain(|s| {
+                        s.end - s.start == lit.len() && &bytes[s.start..s.end] == &lit[..]
+                    });
+                    scalar = false;
+                }
+                None => break,
+            },
             Opcode::CallMethod(call)
                 if call.method == BuiltinMethod::Filter && call.sub_progs.len() == 1 =>
             {
                 match canonical_eq_literal_from_program(&call.sub_progs[0]) {
                     Some(lit) => {
                         spans.retain(|s| {
-                            s.end - s.start == lit.len()
-                                && &bytes[s.start..s.end] == &lit[..]
+                            s.end - s.start == lit.len() && &bytes[s.start..s.end] == &lit[..]
                         });
                         scalar = false;
                     }
@@ -4531,29 +5486,44 @@ fn byte_chain_exec(
                     }
                     BuiltinMethod::Sum => {
                         let f = super::scan::fold_nums(bytes, &spans);
-                        let v = if f.count == 0 { Val::Int(0) }
-                            else if f.is_float { Val::Float(f.float_sum) }
-                            else { Val::Int(f.int_sum) };
+                        let v = if f.count == 0 {
+                            Val::Int(0)
+                        } else if f.is_float {
+                            Val::Float(f.float_sum)
+                        } else {
+                            Val::Int(f.int_sum)
+                        };
                         return (v, consumed + 1);
                     }
                     BuiltinMethod::Avg => {
                         let f = super::scan::fold_nums(bytes, &spans);
-                        let v = if f.count == 0 { Val::Null }
-                            else { Val::Float(f.float_sum / f.count as f64) };
+                        let v = if f.count == 0 {
+                            Val::Null
+                        } else {
+                            Val::Float(f.float_sum / f.count as f64)
+                        };
                         return (v, consumed + 1);
                     }
                     BuiltinMethod::Min => {
                         let f = super::scan::fold_nums(bytes, &spans);
-                        let v = if !f.any { Val::Null }
-                            else if f.is_float { Val::Float(f.min_f) }
-                            else { Val::Int(f.min_i) };
+                        let v = if !f.any {
+                            Val::Null
+                        } else if f.is_float {
+                            Val::Float(f.min_f)
+                        } else {
+                            Val::Int(f.min_i)
+                        };
                         return (v, consumed + 1);
                     }
                     BuiltinMethod::Max => {
                         let f = super::scan::fold_nums(bytes, &spans);
-                        let v = if !f.any { Val::Null }
-                            else if f.is_float { Val::Float(f.max_f) }
-                            else { Val::Int(f.max_i) };
+                        let v = if !f.any {
+                            Val::Null
+                        } else if f.is_float {
+                            Val::Float(f.max_f)
+                        } else {
+                            Val::Int(f.max_i)
+                        };
                         return (v, consumed + 1);
                     }
                     _ => {}
@@ -4582,19 +5552,29 @@ fn byte_chain_exec(
 /// and returns the canonical-serialised literal bytes.  Floats rejected
 /// (representation variance vs `1` / `1.0`).
 fn canonical_eq_literal_from_program(prog: &Program) -> Option<Vec<u8>> {
-    if prog.ops.len() != 3 { return None; }
-    if !matches!(prog.ops[2], Opcode::Eq) { return None; }
+    if prog.ops.len() != 3 {
+        return None;
+    }
+    if !matches!(prog.ops[2], Opcode::Eq) {
+        return None;
+    }
     let (lit_op, has_current) = match (&prog.ops[0], &prog.ops[1]) {
         (Opcode::PushCurrent, lit) => (lit, true),
         (lit, Opcode::PushCurrent) => (lit, true),
         _ => (&prog.ops[0], false),
     };
-    if !has_current { return None; }
+    if !has_current {
+        return None;
+    }
     match lit_op {
-        Opcode::PushInt(n)  => Some(n.to_string().into_bytes()),
-        Opcode::PushBool(b) => Some(if *b { b"true".to_vec() } else { b"false".to_vec() }),
-        Opcode::PushNull    => Some(b"null".to_vec()),
-        Opcode::PushStr(s)  => serde_json::to_vec(&serde_json::Value::String(s.to_string())).ok(),
+        Opcode::PushInt(n) => Some(n.to_string().into_bytes()),
+        Opcode::PushBool(b) => Some(if *b {
+            b"true".to_vec()
+        } else {
+            b"false".to_vec()
+        }),
+        Opcode::PushNull => Some(b"null".to_vec()),
+        Opcode::PushStr(s) => serde_json::to_vec(&serde_json::Value::String(s.to_string())).ok(),
         _ => None,
     }
 }
@@ -4639,10 +5619,18 @@ fn resolve_idx(i: i64, len: i64) -> usize {
 fn collect_desc(v: &Val, name: &str, out: &mut Vec<Val>) {
     match v {
         Val::Obj(m) => {
-            if let Some(v) = m.get(name) { out.push(v.clone()); }
-            for v in m.values() { collect_desc(v, name, out); }
+            if let Some(v) = m.get(name) {
+                out.push(v.clone());
+            }
+            for v in m.values() {
+                collect_desc(v, name, out);
+            }
         }
-        Val::Arr(a) => { for item in a.as_ref() { collect_desc(item, name, out); } }
+        Val::Arr(a) => {
+            for item in a.as_ref() {
+                collect_desc(item, name, out);
+            }
+        }
         _ => {}
     }
 }
@@ -4654,15 +5642,21 @@ fn collect_desc(v: &Val, name: &str, out: &mut Vec<Val>) {
 fn find_desc_first(v: &Val, name: &str) -> Option<Val> {
     match v {
         Val::Obj(m) => {
-            if let Some(v) = m.get(name) { return Some(v.clone()); }
+            if let Some(v) = m.get(name) {
+                return Some(v.clone());
+            }
             for child in m.values() {
-                if let Some(hit) = find_desc_first(child, name) { return Some(hit); }
+                if let Some(hit) = find_desc_first(child, name) {
+                    return Some(hit);
+                }
             }
             None
         }
         Val::Arr(a) => {
             for item in a.as_ref() {
-                if let Some(hit) = find_desc_first(item, name) { return Some(hit); }
+                if let Some(hit) = find_desc_first(item, name) {
+                    return Some(hit);
+                }
             }
             None
         }
@@ -4674,10 +5668,14 @@ fn collect_all(v: &Val, out: &mut Vec<Val>) {
     match v {
         Val::Obj(m) => {
             out.push(v.clone());
-            for child in m.values() { collect_all(child, out); }
+            for child in m.values() {
+                collect_all(child, out);
+            }
         }
         Val::Arr(a) => {
-            for item in a.as_ref() { collect_all(item, out); }
+            for item in a.as_ref() {
+                collect_all(item, out);
+            }
         }
         other => out.push(other.clone()),
     }
@@ -4687,8 +5685,11 @@ fn collect_all(v: &Val, out: &mut Vec<Val>) {
 /// root-relative and can be cached for future `RootChain` lookups.
 /// `prefix` is mutated in-place (push/truncate) to avoid allocations.
 fn collect_desc_with_paths(
-    v: &Val, name: &str, prefix: &mut String,
-    out: &mut Vec<Val>, cached: &mut Vec<(Arc<str>, Val)>,
+    v: &Val,
+    name: &str,
+    prefix: &mut String,
+    out: &mut Vec<Val>,
+    cached: &mut Vec<(Arc<str>, Val)>,
 ) {
     match v {
         Val::Obj(m) => {
@@ -4745,7 +5746,9 @@ fn classify_dict_key(prog: &Program, vname: &str) -> Option<DictKeyShape> {
                 && call.method == BuiltinMethod::ToString
                 && call.sub_progs.is_empty()
                 && call.orig_args.is_empty() =>
-            Some(DictKeyShape::IdentToString),
+        {
+            Some(DictKeyShape::IdentToString)
+        }
         _ => None,
     }
 }
@@ -4753,11 +5756,17 @@ fn classify_dict_key(prog: &Program, vname: &str) -> Option<DictKeyShape> {
 fn bind_comp_vars(env: &Env, vars: &[Arc<str>], item: Val) -> Env {
     match vars {
         [] => env.with_current(item),
-        [v] => { let mut e = env.with_var(v.as_ref(), item.clone()); e.current = item; e }
+        [v] => {
+            let mut e = env.with_var(v.as_ref(), item.clone());
+            e.current = item;
+            e
+        }
         [v1, v2, ..] => {
             let idx = item.get("index").cloned().unwrap_or(Val::Null);
             let val = item.get("value").cloned().unwrap_or_else(|| item.clone());
-            let mut e = env.with_var(v1.as_ref(), idx).with_var(v2.as_ref(), val.clone());
+            let mut e = env
+                .with_var(v1.as_ref(), idx)
+                .with_var(v2.as_ref(), val.clone());
             e.current = val;
             e
         }
@@ -4767,57 +5776,64 @@ fn bind_comp_vars(env: &Env, vars: &[Arc<str>], item: Val) -> Env {
 fn exec_cast(v: &Val, ty: super::ast::CastType) -> Result<Val, EvalError> {
     use super::ast::CastType;
     match ty {
-        CastType::Str => Ok(Val::Str(Arc::from(match v {
-            Val::Null     => "null".to_string(),
-            Val::Bool(b)  => b.to_string(),
-            Val::Int(n)   => n.to_string(),
-            Val::Float(f) => f.to_string(),
-            Val::Str(s)   => s.to_string(),
-            other         => super::eval::util::val_to_string(other),
-        }.as_str()))),
+        CastType::Str => Ok(Val::Str(Arc::from(
+            match v {
+                Val::Null => "null".to_string(),
+                Val::Bool(b) => b.to_string(),
+                Val::Int(n) => n.to_string(),
+                Val::Float(f) => f.to_string(),
+                Val::Str(s) => s.to_string(),
+                other => super::eval::util::val_to_string(other),
+            }
+            .as_str(),
+        ))),
         CastType::Bool => Ok(Val::Bool(match v {
-            Val::Null         => false,
-            Val::Bool(b)      => *b,
-            Val::Int(n)       => *n != 0,
-            Val::Float(f)     => *f != 0.0,
-            Val::Str(s)       => !s.is_empty(),
-            Val::StrSlice(r)  => !r.is_empty(),
-            Val::Arr(a)       => !a.is_empty(),
-            Val::IntVec(a)    => !a.is_empty(),
-            Val::FloatVec(a)  => !a.is_empty(),
-            Val::StrVec(a)       => !a.is_empty(),
-            Val::StrSliceVec(a)  => !a.is_empty(),
-            Val::ObjVec(d)       => !d.cells.is_empty(),
-            Val::Obj(o)       => !o.is_empty(),
-            Val::ObjSmall(p)  => !p.is_empty(),
+            Val::Null => false,
+            Val::Bool(b) => *b,
+            Val::Int(n) => *n != 0,
+            Val::Float(f) => *f != 0.0,
+            Val::Str(s) => !s.is_empty(),
+            Val::StrSlice(r) => !r.is_empty(),
+            Val::Arr(a) => !a.is_empty(),
+            Val::IntVec(a) => !a.is_empty(),
+            Val::FloatVec(a) => !a.is_empty(),
+            Val::StrVec(a) => !a.is_empty(),
+            Val::StrSliceVec(a) => !a.is_empty(),
+            Val::ObjVec(d) => !d.cells.is_empty(),
+            Val::Obj(o) => !o.is_empty(),
+            Val::ObjSmall(p) => !p.is_empty(),
         })),
         CastType::Number | CastType::Float => match v {
-            Val::Int(n)   => Ok(Val::Float(*n as f64)),
+            Val::Int(n) => Ok(Val::Float(*n as f64)),
             Val::Float(_) => Ok(v.clone()),
-            Val::Str(s)   => s.parse::<f64>().map(Val::Float)
-                              .map_err(|e| EvalError(format!("as float: {}", e))),
-            Val::Bool(b)  => Ok(Val::Float(if *b { 1.0 } else { 0.0 })),
-            Val::Null     => Ok(Val::Float(0.0)),
-            _             => err!("as float: cannot convert"),
+            Val::Str(s) => s
+                .parse::<f64>()
+                .map(Val::Float)
+                .map_err(|e| EvalError(format!("as float: {}", e))),
+            Val::Bool(b) => Ok(Val::Float(if *b { 1.0 } else { 0.0 })),
+            Val::Null => Ok(Val::Float(0.0)),
+            _ => err!("as float: cannot convert"),
         },
         CastType::Int => match v {
-            Val::Int(_)   => Ok(v.clone()),
+            Val::Int(_) => Ok(v.clone()),
             Val::Float(f) => Ok(Val::Int(*f as i64)),
-            Val::Str(s)   => s.parse::<i64>().map(Val::Int)
-                              .or_else(|_| s.parse::<f64>().map(|f| Val::Int(f as i64)))
-                              .map_err(|e| EvalError(format!("as int: {}", e))),
-            Val::Bool(b)  => Ok(Val::Int(if *b { 1 } else { 0 })),
-            Val::Null     => Ok(Val::Int(0)),
-            _             => err!("as int: cannot convert"),
+            Val::Str(s) => s
+                .parse::<i64>()
+                .map(Val::Int)
+                .or_else(|_| s.parse::<f64>().map(|f| Val::Int(f as i64)))
+                .map_err(|e| EvalError(format!("as int: {}", e))),
+            Val::Bool(b) => Ok(Val::Int(if *b { 1 } else { 0 })),
+            Val::Null => Ok(Val::Int(0)),
+            _ => err!("as int: cannot convert"),
         },
         CastType::Array => match v {
-            Val::Arr(_)   => Ok(v.clone()),
-            Val::Null     => Ok(Val::arr(Vec::new())),
-            other         => Ok(Val::arr(vec![other.clone()])),
+            Val::Arr(_) => Ok(v.clone()),
+            Val::Null => Ok(Val::arr(Vec::new())),
+            other => Ok(Val::arr(vec![other.clone()])),
         },
         CastType::Object => match v {
-            Val::Obj(_)   => Ok(v.clone()),
-            _             => err!("as object: cannot convert non-object"),
+            Val::Obj(_) => Ok(v.clone()),
+            _ => err!("as object: cannot convert non-object"),
         },
         CastType::Null => Ok(Val::Null),
     }
@@ -4827,17 +5843,31 @@ fn apply_fmt_spec(val: &Val, spec: &str) -> String {
     if let Some(rest) = spec.strip_suffix('f') {
         if let Some(prec_str) = rest.strip_prefix('.') {
             if let Ok(prec) = prec_str.parse::<usize>() {
-                if let Some(f) = val.as_f64() { return format!("{:.prec$}", f); }
+                if let Some(f) = val.as_f64() {
+                    return format!("{:.prec$}", f);
+                }
             }
         }
     }
-    if spec == "d" { if let Some(i) = val.as_i64() { return format!("{}", i); } }
+    if spec == "d" {
+        if let Some(i) = val.as_i64() {
+            return format!("{}", i);
+        }
+    }
     let s = val_to_string(val);
-    if let Some(w) = spec.strip_prefix('>').and_then(|s| s.parse::<usize>().ok()) { return format!("{:>w$}", s); }
-    if let Some(w) = spec.strip_prefix('<').and_then(|s| s.parse::<usize>().ok()) { return format!("{:<w$}", s); }
-    if let Some(w) = spec.strip_prefix('^').and_then(|s| s.parse::<usize>().ok()) { return format!("{:^w$}", s); }
+    if let Some(w) = spec.strip_prefix('>').and_then(|s| s.parse::<usize>().ok()) {
+        return format!("{:>w$}", s);
+    }
+    if let Some(w) = spec.strip_prefix('<').and_then(|s| s.parse::<usize>().ok()) {
+        return format!("{:<w$}", s);
+    }
+    if let Some(w) = spec.strip_prefix('^').and_then(|s| s.parse::<usize>().ok()) {
+        return format!("{:^w$}", s);
+    }
     if let Some(w) = spec.strip_prefix('0').and_then(|s| s.parse::<usize>().ok()) {
-        if let Some(i) = val.as_i64() { return format!("{:0>w$}", i); }
+        if let Some(i) = val.as_i64() {
+            return format!("{:0>w$}", i);
+        }
     }
     s
 }
@@ -4849,7 +5879,7 @@ fn apply_fmt_spec(val: &Val, spec: &str) -> String {
 fn make_noarg_call(method: BuiltinMethod, name: &str) -> Opcode {
     Opcode::CallMethod(Arc::new(CompiledCall {
         method,
-        name:      Arc::from(name),
+        name: Arc::from(name),
         sub_progs: Arc::from(&[] as &[Arc<Program>]),
         orig_args: Arc::from(&[] as &[Arg]),
         demand_max_keep: None,
@@ -4874,21 +5904,92 @@ fn hash_val_structure(v: &Val) -> u64 {
 }
 
 fn hash_structure_into(v: &Val, h: &mut DefaultHasher, depth: usize) {
-    if depth > 8 { return; }
+    if depth > 8 {
+        return;
+    }
     match v {
-        Val::Null       => 0u8.hash(h),
-        Val::Bool(b)    => { 1u8.hash(h); b.hash(h); }
-        Val::Int(n)     => { 2u8.hash(h); n.hash(h); }
-        Val::Float(f)   => { 3u8.hash(h); f.to_bits().hash(h); }
-        Val::Str(s)       => { 4u8.hash(h); s.hash(h); }
-        Val::StrSlice(r)  => { 4u8.hash(h); r.as_str().hash(h); }
-        Val::Arr(a)     => { 5u8.hash(h); a.len().hash(h); for item in a.iter() { hash_structure_into(item, h, depth+1); } }
-        Val::IntVec(a)  => { 5u8.hash(h); a.len().hash(h); for n in a.iter() { 2u8.hash(h); n.hash(h); } }
-        Val::FloatVec(a) => { 5u8.hash(h); a.len().hash(h); for f in a.iter() { 3u8.hash(h); f.to_bits().hash(h); } }
-        Val::StrVec(a)  => { 5u8.hash(h); a.len().hash(h); for s in a.iter() { 4u8.hash(h); s.hash(h); } }
-        Val::StrSliceVec(a) => { 5u8.hash(h); a.len().hash(h); for r in a.iter() { 4u8.hash(h); r.as_str().hash(h); } }
-        Val::ObjVec(d)  => { 6u8.hash(h); d.nrows().hash(h); for k in d.keys.iter() { k.hash(h); } }
-        Val::Obj(m)     => { 6u8.hash(h); m.len().hash(h); for (k, v) in m.iter() { k.hash(h); hash_structure_into(v, h, depth+1); } }
-        Val::ObjSmall(p) => { 6u8.hash(h); p.len().hash(h); for (k, v) in p.iter() { k.hash(h); hash_structure_into(v, h, depth+1); } }
+        Val::Null => 0u8.hash(h),
+        Val::Bool(b) => {
+            1u8.hash(h);
+            b.hash(h);
+        }
+        Val::Int(n) => {
+            2u8.hash(h);
+            n.hash(h);
+        }
+        Val::Float(f) => {
+            3u8.hash(h);
+            f.to_bits().hash(h);
+        }
+        Val::Str(s) => {
+            4u8.hash(h);
+            s.hash(h);
+        }
+        Val::StrSlice(r) => {
+            4u8.hash(h);
+            r.as_str().hash(h);
+        }
+        Val::Arr(a) => {
+            5u8.hash(h);
+            a.len().hash(h);
+            for item in a.iter() {
+                hash_structure_into(item, h, depth + 1);
+            }
+        }
+        Val::IntVec(a) => {
+            5u8.hash(h);
+            a.len().hash(h);
+            for n in a.iter() {
+                2u8.hash(h);
+                n.hash(h);
+            }
+        }
+        Val::FloatVec(a) => {
+            5u8.hash(h);
+            a.len().hash(h);
+            for f in a.iter() {
+                3u8.hash(h);
+                f.to_bits().hash(h);
+            }
+        }
+        Val::StrVec(a) => {
+            5u8.hash(h);
+            a.len().hash(h);
+            for s in a.iter() {
+                4u8.hash(h);
+                s.hash(h);
+            }
+        }
+        Val::StrSliceVec(a) => {
+            5u8.hash(h);
+            a.len().hash(h);
+            for r in a.iter() {
+                4u8.hash(h);
+                r.as_str().hash(h);
+            }
+        }
+        Val::ObjVec(d) => {
+            6u8.hash(h);
+            d.nrows().hash(h);
+            for k in d.keys.iter() {
+                k.hash(h);
+            }
+        }
+        Val::Obj(m) => {
+            6u8.hash(h);
+            m.len().hash(h);
+            for (k, v) in m.iter() {
+                k.hash(h);
+                hash_structure_into(v, h, depth + 1);
+            }
+        }
+        Val::ObjSmall(p) => {
+            6u8.hash(h);
+            p.len().hash(h);
+            for (k, v) in p.iter() {
+                k.hash(h);
+                hash_structure_into(v, h, depth + 1);
+            }
+        }
     }
 }

@@ -32,8 +32,8 @@
 //! `pipeline.rs::run`. Day 2-3 lands the wiring under
 //! `JETRO_COMPOSED=1` and bench-gates against legacy fused.
 
-use std::borrow::Cow;
 use smallvec::SmallVec;
+use std::borrow::Cow;
 
 use crate::eval::value::Val;
 
@@ -76,12 +76,9 @@ pub trait Stage {
     fn apply_indexed<'a>(&self, x: &'a Val, k: usize) -> Option<Cow<'a, Val>> {
         match self.apply(x) {
             StageOutput::Pass(v) if k == 0 => Some(v),
-            StageOutput::Pass(_)           => None,
-            StageOutput::Many(mut items)
-                if k < items.len() => Some(items.swap_remove(k)),
-            StageOutput::Many(_)
-                | StageOutput::Filtered
-                | StageOutput::Done => None,
+            StageOutput::Pass(_) => None,
+            StageOutput::Many(mut items) if k < items.len() => Some(items.swap_remove(k)),
+            StageOutput::Many(_) | StageOutput::Filtered | StageOutput::Done => None,
         }
     }
 }
@@ -105,11 +102,15 @@ impl<T: Stage + ?Sized> Stage for Box<T> {
 pub struct Identity;
 
 impl Identity {
-    pub fn new() -> Self { Self }
+    pub fn new() -> Self {
+        Self
+    }
 }
 
 impl Default for Identity {
-    fn default() -> Self { Self }
+    fn default() -> Self {
+        Self
+    }
 }
 
 impl Stage for Identity {
@@ -128,7 +129,6 @@ impl Stage for Identity {
 // paths keep resolving — composed.rs stays the substrate (Stage trait,
 // Composed monoid, Sinks, run_pipeline, VM-driven Generic*, barriers).
 pub use crate::functions::*;
-
 
 // ── Sink ─────────────────────────────────────────────────────────────────────
 
@@ -169,40 +169,65 @@ pub fn run_pipeline<S: Sink>(arr: &[Val], stages: &dyn Stage) -> Val {
 pub struct CountSink;
 impl Sink for CountSink {
     type Acc = i64;
-    #[inline] fn init() -> i64 { 0 }
-    #[inline] fn fold(acc: i64, _: &Val) -> i64 { acc + 1 }
-    #[inline] fn finalise(acc: i64) -> Val { Val::Int(acc) }
+    #[inline]
+    fn init() -> i64 {
+        0
+    }
+    #[inline]
+    fn fold(acc: i64, _: &Val) -> i64 {
+        acc + 1
+    }
+    #[inline]
+    fn finalise(acc: i64) -> Val {
+        Val::Int(acc)
+    }
 }
 
 pub struct SumSink;
 impl Sink for SumSink {
     type Acc = (i64, f64, bool); // (int_sum, float_sum, any_float)
-    #[inline] fn init() -> Self::Acc { (0, 0.0, false) }
+    #[inline]
+    fn init() -> Self::Acc {
+        (0, 0.0, false)
+    }
     fn fold(mut acc: Self::Acc, v: &Val) -> Self::Acc {
         match v {
             Val::Int(i) => acc.0 += *i,
-            Val::Float(f) => { acc.1 += *f; acc.2 = true; }
+            Val::Float(f) => {
+                acc.1 += *f;
+                acc.2 = true;
+            }
             Val::Bool(b) => acc.0 += *b as i64,
             _ => {}
         }
         acc
     }
     fn finalise(acc: Self::Acc) -> Val {
-        if acc.2 { Val::Float(acc.0 as f64 + acc.1) } else { Val::Int(acc.0) }
+        if acc.2 {
+            Val::Float(acc.0 as f64 + acc.1)
+        } else {
+            Val::Int(acc.0)
+        }
     }
 }
 
 pub struct MinSink;
 impl Sink for MinSink {
     type Acc = Option<f64>;
-    #[inline] fn init() -> Self::Acc { None }
+    #[inline]
+    fn init() -> Self::Acc {
+        None
+    }
     fn fold(acc: Self::Acc, v: &Val) -> Self::Acc {
         let n = match v {
             Val::Int(i) => *i as f64,
             Val::Float(f) => *f,
             _ => return acc,
         };
-        Some(match acc { Some(cur) => cur.min(n), None => n })
+        Some(match acc {
+            Some(cur) => cur.min(n),
+            None => n,
+        })
     }
     fn finalise(acc: Self::Acc) -> Val {
         match acc {
@@ -216,14 +241,20 @@ impl Sink for MinSink {
 pub struct MaxSink;
 impl Sink for MaxSink {
     type Acc = Option<f64>;
-    #[inline] fn init() -> Self::Acc { None }
+    #[inline]
+    fn init() -> Self::Acc {
+        None
+    }
     fn fold(acc: Self::Acc, v: &Val) -> Self::Acc {
         let n = match v {
             Val::Int(i) => *i as f64,
             Val::Float(f) => *f,
             _ => return acc,
         };
-        Some(match acc { Some(cur) => cur.max(n), None => n })
+        Some(match acc {
+            Some(cur) => cur.max(n),
+            None => n,
+        })
     }
     fn finalise(acc: Self::Acc) -> Val {
         match acc {
@@ -237,7 +268,10 @@ impl Sink for MaxSink {
 pub struct AvgSink;
 impl Sink for AvgSink {
     type Acc = (f64, usize);
-    #[inline] fn init() -> Self::Acc { (0.0, 0) }
+    #[inline]
+    fn init() -> Self::Acc {
+        (0.0, 0)
+    }
     fn fold(mut acc: Self::Acc, v: &Val) -> Self::Acc {
         let n = match v {
             Val::Int(i) => *i as f64,
@@ -249,32 +283,55 @@ impl Sink for AvgSink {
         acc
     }
     fn finalise(acc: Self::Acc) -> Val {
-        if acc.1 == 0 { Val::Null } else { Val::Float(acc.0 / acc.1 as f64) }
+        if acc.1 == 0 {
+            Val::Null
+        } else {
+            Val::Float(acc.0 / acc.1 as f64)
+        }
     }
 }
 
 pub struct FirstSink;
 impl Sink for FirstSink {
     type Acc = Option<Val>;
-    #[inline] fn init() -> Self::Acc { None }
-    fn fold(acc: Self::Acc, v: &Val) -> Self::Acc {
-        if acc.is_some() { acc } else { Some(v.clone()) }
+    #[inline]
+    fn init() -> Self::Acc {
+        None
     }
-    fn finalise(acc: Self::Acc) -> Val { acc.unwrap_or(Val::Null) }
+    fn fold(acc: Self::Acc, v: &Val) -> Self::Acc {
+        if acc.is_some() {
+            acc
+        } else {
+            Some(v.clone())
+        }
+    }
+    fn finalise(acc: Self::Acc) -> Val {
+        acc.unwrap_or(Val::Null)
+    }
 }
 
 pub struct LastSink;
 impl Sink for LastSink {
     type Acc = Option<Val>;
-    #[inline] fn init() -> Self::Acc { None }
-    fn fold(_acc: Self::Acc, v: &Val) -> Self::Acc { Some(v.clone()) }
-    fn finalise(acc: Self::Acc) -> Val { acc.unwrap_or(Val::Null) }
+    #[inline]
+    fn init() -> Self::Acc {
+        None
+    }
+    fn fold(_acc: Self::Acc, v: &Val) -> Self::Acc {
+        Some(v.clone())
+    }
+    fn finalise(acc: Self::Acc) -> Val {
+        acc.unwrap_or(Val::Null)
+    }
 }
 
 pub struct CollectSink;
 impl Sink for CollectSink {
     type Acc = Vec<Val>;
-    #[inline] fn init() -> Self::Acc { Vec::new() }
+    #[inline]
+    fn init() -> Self::Acc {
+        Vec::new()
+    }
     fn fold(mut acc: Self::Acc, v: &Val) -> Self::Acc {
         acc.push(v.clone());
         acc
@@ -321,8 +378,8 @@ impl Stage for GenericFilter {
             r
         });
         match kept {
-            Ok(true)  => StageOutput::Pass(Cow::Borrowed(x)),
-            _         => StageOutput::Filtered,
+            Ok(true) => StageOutput::Pass(Cow::Borrowed(x)),
+            _ => StageOutput::Filtered,
         }
     }
 }
@@ -371,28 +428,58 @@ impl Stage for GenericFlatMap {
         let result: StageOutput<'a> = match &owned {
             Val::Arr(items) => {
                 let mut out: SmallVec<[Cow<'a, Val>; 4]> = SmallVec::with_capacity(items.len());
-                for it in items.iter() { out.push(Cow::Owned(it.clone())); }
-                if out.is_empty() { StageOutput::Filtered } else { StageOutput::Many(out) }
+                for it in items.iter() {
+                    out.push(Cow::Owned(it.clone()));
+                }
+                if out.is_empty() {
+                    StageOutput::Filtered
+                } else {
+                    StageOutput::Many(out)
+                }
             }
             Val::IntVec(items) => {
                 let mut out: SmallVec<[Cow<'a, Val>; 4]> = SmallVec::with_capacity(items.len());
-                for n in items.iter() { out.push(Cow::Owned(Val::Int(*n))); }
-                if out.is_empty() { StageOutput::Filtered } else { StageOutput::Many(out) }
+                for n in items.iter() {
+                    out.push(Cow::Owned(Val::Int(*n)));
+                }
+                if out.is_empty() {
+                    StageOutput::Filtered
+                } else {
+                    StageOutput::Many(out)
+                }
             }
             Val::FloatVec(items) => {
                 let mut out: SmallVec<[Cow<'a, Val>; 4]> = SmallVec::with_capacity(items.len());
-                for f in items.iter() { out.push(Cow::Owned(Val::Float(*f))); }
-                if out.is_empty() { StageOutput::Filtered } else { StageOutput::Many(out) }
+                for f in items.iter() {
+                    out.push(Cow::Owned(Val::Float(*f)));
+                }
+                if out.is_empty() {
+                    StageOutput::Filtered
+                } else {
+                    StageOutput::Many(out)
+                }
             }
             Val::StrVec(items) => {
                 let mut out: SmallVec<[Cow<'a, Val>; 4]> = SmallVec::with_capacity(items.len());
-                for s in items.iter() { out.push(Cow::Owned(Val::Str(std::sync::Arc::clone(s)))); }
-                if out.is_empty() { StageOutput::Filtered } else { StageOutput::Many(out) }
+                for s in items.iter() {
+                    out.push(Cow::Owned(Val::Str(std::sync::Arc::clone(s))));
+                }
+                if out.is_empty() {
+                    StageOutput::Filtered
+                } else {
+                    StageOutput::Many(out)
+                }
             }
             Val::StrSliceVec(items) => {
                 let mut out: SmallVec<[Cow<'a, Val>; 4]> = SmallVec::with_capacity(items.len());
-                for r in items.iter() { out.push(Cow::Owned(Val::StrSlice(r.clone()))); }
-                if out.is_empty() { StageOutput::Filtered } else { StageOutput::Many(out) }
+                for r in items.iter() {
+                    out.push(Cow::Owned(Val::StrSlice(r.clone())));
+                }
+                if out.is_empty() {
+                    StageOutput::Filtered
+                } else {
+                    StageOutput::Many(out)
+                }
             }
             _ => StageOutput::Filtered,
         };
@@ -485,28 +572,58 @@ fn flatten_iterable<'a>(v: &'a Val) -> StageOutput<'a> {
     match v {
         Val::Arr(items) => {
             let mut out: SmallVec<[Cow<'a, Val>; 4]> = SmallVec::with_capacity(items.len());
-            for it in items.iter() { out.push(Cow::Borrowed(it)); }
-            if out.is_empty() { StageOutput::Filtered } else { StageOutput::Many(out) }
+            for it in items.iter() {
+                out.push(Cow::Borrowed(it));
+            }
+            if out.is_empty() {
+                StageOutput::Filtered
+            } else {
+                StageOutput::Many(out)
+            }
         }
         Val::IntVec(items) => {
             let mut out: SmallVec<[Cow<'a, Val>; 4]> = SmallVec::with_capacity(items.len());
-            for n in items.iter() { out.push(Cow::Owned(Val::Int(*n))); }
-            if out.is_empty() { StageOutput::Filtered } else { StageOutput::Many(out) }
+            for n in items.iter() {
+                out.push(Cow::Owned(Val::Int(*n)));
+            }
+            if out.is_empty() {
+                StageOutput::Filtered
+            } else {
+                StageOutput::Many(out)
+            }
         }
         Val::FloatVec(items) => {
             let mut out: SmallVec<[Cow<'a, Val>; 4]> = SmallVec::with_capacity(items.len());
-            for f in items.iter() { out.push(Cow::Owned(Val::Float(*f))); }
-            if out.is_empty() { StageOutput::Filtered } else { StageOutput::Many(out) }
+            for f in items.iter() {
+                out.push(Cow::Owned(Val::Float(*f)));
+            }
+            if out.is_empty() {
+                StageOutput::Filtered
+            } else {
+                StageOutput::Many(out)
+            }
         }
         Val::StrVec(items) => {
             let mut out: SmallVec<[Cow<'a, Val>; 4]> = SmallVec::with_capacity(items.len());
-            for s in items.iter() { out.push(Cow::Owned(Val::Str(std::sync::Arc::clone(s)))); }
-            if out.is_empty() { StageOutput::Filtered } else { StageOutput::Many(out) }
+            for s in items.iter() {
+                out.push(Cow::Owned(Val::Str(std::sync::Arc::clone(s))));
+            }
+            if out.is_empty() {
+                StageOutput::Filtered
+            } else {
+                StageOutput::Many(out)
+            }
         }
         Val::StrSliceVec(items) => {
             let mut out: SmallVec<[Cow<'a, Val>; 4]> = SmallVec::with_capacity(items.len());
-            for r in items.iter() { out.push(Cow::Owned(Val::StrSlice(r.clone()))); }
-            if out.is_empty() { StageOutput::Filtered } else { StageOutput::Many(out) }
+            for r in items.iter() {
+                out.push(Cow::Owned(Val::StrSlice(r.clone())));
+            }
+            if out.is_empty() {
+                StageOutput::Filtered
+            } else {
+                StageOutput::Many(out)
+            }
         }
         _ => StageOutput::Filtered,
     }
@@ -542,12 +659,13 @@ pub struct Take {
 impl Stage for Take {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         let r = self.remaining.get();
-        if r == 0 { return StageOutput::Done; }
+        if r == 0 {
+            return StageOutput::Done;
+        }
         self.remaining.set(r - 1);
         StageOutput::Pass(Cow::Borrowed(x))
     }
 }
-
 
 /// `.skip(n)` — same shape as Take.
 pub struct Skip {
@@ -564,7 +682,6 @@ impl Stage for Skip {
         StageOutput::Pass(Cow::Borrowed(x))
     }
 }
-
 
 // ── Barrier ops ─────────────────────────────────────────────────────────────
 //
@@ -621,9 +738,7 @@ pub fn barrier_reverse(buf: Vec<Val>) -> Vec<Val> {
 /// Sort with optional key. Compares Val natural ordering via
 /// `cmp_val` — wraps `eval::util::cmp_val` for primitive Vals.
 pub fn barrier_sort(buf: Vec<Val>, key: &KeySource) -> Vec<Val> {
-    let mut indexed: Vec<(Val, Val)> = buf.into_iter()
-        .map(|v| (key.extract(&v), v))
-        .collect();
+    let mut indexed: Vec<(Val, Val)> = buf.into_iter().map(|v| (key.extract(&v), v)).collect();
     indexed.sort_by(|a, b| cmp_val(&a.0, &b.0));
     indexed.into_iter().map(|(_, v)| v).collect()
 }
@@ -643,7 +758,9 @@ pub fn barrier_bottom_k(buf: Vec<Val>, key: &KeySource, k: usize) -> Vec<Val> {
 }
 
 fn barrier_top_or_bottom_k(buf: Vec<Val>, key: &KeySource, k: usize, largest: bool) -> Vec<Val> {
-    if k == 0 { return Vec::new(); }
+    if k == 0 {
+        return Vec::new();
+    }
     if buf.len() <= k {
         // Smaller than budget — fall back to full sort (still O(N log N)
         // but N ≤ k so equivalent cost).
@@ -671,11 +788,13 @@ fn barrier_top_or_bottom_k(buf: Vec<Val>, key: &KeySource, k: usize, largest: bo
         for (i, (kk, _)) in top.iter().enumerate().skip(1) {
             let cmp = cmp_val(kk, &top[worst_idx].0);
             let displace = if largest {
-                cmp == std::cmp::Ordering::Less       // tracking smallest as worst
+                cmp == std::cmp::Ordering::Less // tracking smallest as worst
             } else {
-                cmp == std::cmp::Ordering::Greater    // tracking largest as worst
+                cmp == std::cmp::Ordering::Greater // tracking largest as worst
             };
-            if displace { worst_idx = i; }
+            if displace {
+                worst_idx = i;
+            }
         }
         let cmp = cmp_val(&kv, &top[worst_idx].0);
         let take = if largest {
@@ -683,7 +802,9 @@ fn barrier_top_or_bottom_k(buf: Vec<Val>, key: &KeySource, k: usize, largest: bo
         } else {
             cmp == std::cmp::Ordering::Less
         };
-        if take { top[worst_idx] = (kv, v); }
+        if take {
+            top[worst_idx] = (kv, v);
+        }
     }
     // Final sort of the kept elements (always ascending).
     top.sort_by(|a, b| cmp_val(&a.0, &b.0));
@@ -721,7 +842,8 @@ pub fn barrier_group_by(buf: Vec<Val>, key: &KeySource) -> Val {
         };
         groups.entry(ks).or_insert_with(Vec::new).push(v);
     }
-    let mut m: indexmap::IndexMap<std::sync::Arc<str>, Val> = indexmap::IndexMap::with_capacity(groups.len());
+    let mut m: indexmap::IndexMap<std::sync::Arc<str>, Val> =
+        indexmap::IndexMap::with_capacity(groups.len());
     for (k, vs) in groups {
         m.insert(k, Val::Arr(std::sync::Arc::new(vs)));
     }
@@ -738,7 +860,7 @@ enum KeyRepr {
     Null,
     Bool(bool),
     Int(i64),
-    Float(u64),    // f64::to_bits for total ordering
+    Float(u64), // f64::to_bits for total ordering
     Str(String),
 }
 
@@ -804,7 +926,9 @@ fn vals_eq(a: &Val, b: &Val) -> bool {
         (Val::Float(x), Val::Float(y)) => x == y,
         (Val::Int(x), Val::Float(y)) | (Val::Float(y), Val::Int(x)) => (*x as f64) == *y,
         (Val::Str(x), Val::Str(y)) => x == y,
-        (Val::Str(x), Val::StrSlice(r)) | (Val::StrSlice(r), Val::Str(x)) => x.as_ref() == r.as_str(),
+        (Val::Str(x), Val::StrSlice(r)) | (Val::StrSlice(r), Val::Str(x)) => {
+            x.as_ref() == r.as_str()
+        }
         (Val::StrSlice(x), Val::StrSlice(y)) => x.as_str() == y.as_str(),
         _ => false,
     }
@@ -830,8 +954,10 @@ fn vals_eq(a: &Val, b: &Val) -> bool {
 #[cfg(feature = "simd-json")]
 pub mod tape {
     use super::*;
-    use crate::strref::{TapeData, TapeLit, TapeCmp,
-        tape_object_field, tape_array_iter, tape_value_cmp, tape_value_truthy};
+    use crate::strref::{
+        tape_array_iter, tape_json_view, tape_object_field, tape_value_cmp, tape_value_truthy,
+        TapeCmp, TapeData, TapeLit,
+    };
 
     pub enum TapeOutput {
         Pass(usize),
@@ -1055,7 +1181,9 @@ pub mod tape {
     impl TapeStage for TapeTake {
         fn apply(&self, _tape: &TapeData, idx: usize) -> TapeOutput {
             let r = self.remaining.get();
-            if r == 0 { return TapeOutput::Done; }
+            if r == 0 {
+                return TapeOutput::Done;
+            }
             self.remaining.set(r - 1);
             TapeOutput::Pass(idx)
         }
@@ -1107,26 +1235,13 @@ pub mod tape {
     /// kind handler.
     #[inline]
     fn tape_num(tape: &TapeData, idx: usize) -> Option<f64> {
-        use crate::strref::TapeNode;
-        use simd_json::StaticNode as SN;
-        match tape.nodes[idx] {
-            TapeNode::Static(SN::I64(v)) => Some(v as f64),
-            TapeNode::Static(SN::U64(v)) if v <= i64::MAX as u64 => Some(v as f64),
-            TapeNode::Static(SN::F64(v)) => Some(v),
-            _ => None,
-        }
+        tape_json_view(tape, idx).as_f64_number()
     }
 
     /// Read a tape node as `i64` if exactly representable, else `None`.
     #[inline]
     fn tape_int(tape: &TapeData, idx: usize) -> Option<i64> {
-        use crate::strref::TapeNode;
-        use simd_json::StaticNode as SN;
-        match tape.nodes[idx] {
-            TapeNode::Static(SN::I64(v)) => Some(v),
-            TapeNode::Static(SN::U64(v)) if v <= i64::MAX as u64 => Some(v as i64),
-            _ => None,
-        }
+        tape_json_view(tape, idx).as_i64_exact()
     }
 
     /// Materialise a single tape value to `Val`. Used by terminal
@@ -1142,7 +1257,13 @@ pub mod tape {
             TapeNode::Static(SN::U64(u)) if u <= i64::MAX as u64 => Val::Int(u as i64),
             TapeNode::Static(SN::U64(u)) => Val::Float(u as f64),
             TapeNode::Static(SN::F64(f)) => Val::Float(f),
-            TapeNode::StringRef { .. } => Val::Str(std::sync::Arc::from(tape.str_at(idx))),
+            TapeNode::StringRef { start, end } => {
+                Val::StrSlice(crate::strref::StrRef::slice_bytes(
+                    std::sync::Arc::clone(&tape.bytes_buf),
+                    start as usize,
+                    end as usize,
+                ))
+            }
             TapeNode::Object { .. } | TapeNode::Array { .. } => {
                 // Build IndexMap / Vec via a recursive walk. Same shape
                 // as the eager parse path; only invoked at terminal.
@@ -1156,7 +1277,8 @@ pub mod tape {
         match tape.nodes[idx] {
             TapeNode::Object { len, .. } => {
                 let len = len as usize;
-                let mut m: indexmap::IndexMap<std::sync::Arc<str>, Val> = indexmap::IndexMap::with_capacity(len);
+                let mut m: indexmap::IndexMap<std::sync::Arc<str>, Val> =
+                    indexmap::IndexMap::with_capacity(len);
                 let mut cursor = idx + 1;
                 for _ in 0..len {
                     let key_idx = cursor;
@@ -1186,15 +1308,27 @@ pub mod tape {
     pub struct TapeCountSink;
     impl TapeSink for TapeCountSink {
         type Acc = i64;
-        #[inline] fn init() -> i64 { 0 }
-        #[inline] fn fold(acc: i64, _: &TapeData, _: usize) -> i64 { acc + 1 }
-        #[inline] fn finalise(acc: i64) -> Val { Val::Int(acc) }
+        #[inline]
+        fn init() -> i64 {
+            0
+        }
+        #[inline]
+        fn fold(acc: i64, _: &TapeData, _: usize) -> i64 {
+            acc + 1
+        }
+        #[inline]
+        fn finalise(acc: i64) -> Val {
+            Val::Int(acc)
+        }
     }
 
     pub struct TapeSumSink;
     impl TapeSink for TapeSumSink {
         type Acc = (i64, f64, bool);
-        #[inline] fn init() -> Self::Acc { (0, 0.0, false) }
+        #[inline]
+        fn init() -> Self::Acc {
+            (0, 0.0, false)
+        }
         fn fold(mut acc: Self::Acc, tape: &TapeData, idx: usize) -> Self::Acc {
             if let Some(i) = tape_int(tape, idx) {
                 acc.0 += i;
@@ -1205,14 +1339,21 @@ pub mod tape {
             acc
         }
         fn finalise(acc: Self::Acc) -> Val {
-            if acc.2 { Val::Float(acc.0 as f64 + acc.1) } else { Val::Int(acc.0) }
+            if acc.2 {
+                Val::Float(acc.0 as f64 + acc.1)
+            } else {
+                Val::Int(acc.0)
+            }
         }
     }
 
     pub struct TapeMinSink;
     impl TapeSink for TapeMinSink {
         type Acc = Option<f64>;
-        #[inline] fn init() -> Self::Acc { None }
+        #[inline]
+        fn init() -> Self::Acc {
+            None
+        }
         fn fold(acc: Self::Acc, tape: &TapeData, idx: usize) -> Self::Acc {
             match tape_num(tape, idx) {
                 Some(n) => Some(acc.map_or(n, |c| c.min(n))),
@@ -1231,7 +1372,10 @@ pub mod tape {
     pub struct TapeMaxSink;
     impl TapeSink for TapeMaxSink {
         type Acc = Option<f64>;
-        #[inline] fn init() -> Self::Acc { None }
+        #[inline]
+        fn init() -> Self::Acc {
+            None
+        }
         fn fold(acc: Self::Acc, tape: &TapeData, idx: usize) -> Self::Acc {
             match tape_num(tape, idx) {
                 Some(n) => Some(acc.map_or(n, |c| c.max(n))),
@@ -1250,7 +1394,10 @@ pub mod tape {
     pub struct TapeAvgSink;
     impl TapeSink for TapeAvgSink {
         type Acc = (f64, usize);
-        #[inline] fn init() -> Self::Acc { (0.0, 0) }
+        #[inline]
+        fn init() -> Self::Acc {
+            (0.0, 0)
+        }
         fn fold(mut acc: Self::Acc, tape: &TapeData, idx: usize) -> Self::Acc {
             if let Some(n) = tape_num(tape, idx) {
                 acc.0 += n;
@@ -1259,37 +1406,58 @@ pub mod tape {
             acc
         }
         fn finalise(acc: Self::Acc) -> Val {
-            if acc.1 == 0 { Val::Null } else { Val::Float(acc.0 / acc.1 as f64) }
+            if acc.1 == 0 {
+                Val::Null
+            } else {
+                Val::Float(acc.0 / acc.1 as f64)
+            }
         }
     }
 
     pub struct TapeFirstSink;
     impl TapeSink for TapeFirstSink {
         type Acc = Option<usize>;
-        #[inline] fn init() -> Self::Acc { None }
+        #[inline]
+        fn init() -> Self::Acc {
+            None
+        }
         fn fold(acc: Self::Acc, _: &TapeData, idx: usize) -> Self::Acc {
             acc.or(Some(idx))
         }
-        fn finalise(_: Self::Acc) -> Val { Val::Null }
+        fn finalise(_: Self::Acc) -> Val {
+            Val::Null
+        }
     }
 
     pub struct TapeLastSink;
     impl TapeSink for TapeLastSink {
         type Acc = Option<usize>;
-        #[inline] fn init() -> Self::Acc { None }
-        fn fold(_: Self::Acc, _: &TapeData, idx: usize) -> Self::Acc { Some(idx) }
-        fn finalise(_: Self::Acc) -> Val { Val::Null }
+        #[inline]
+        fn init() -> Self::Acc {
+            None
+        }
+        fn fold(_: Self::Acc, _: &TapeData, idx: usize) -> Self::Acc {
+            Some(idx)
+        }
+        fn finalise(_: Self::Acc) -> Val {
+            Val::Null
+        }
     }
 
     pub struct TapeCollectSink;
     impl TapeSink for TapeCollectSink {
         type Acc = Vec<usize>;
-        #[inline] fn init() -> Self::Acc { Vec::new() }
+        #[inline]
+        fn init() -> Self::Acc {
+            Vec::new()
+        }
         fn fold(mut acc: Self::Acc, _: &TapeData, idx: usize) -> Self::Acc {
             acc.push(idx);
             acc
         }
-        fn finalise(_: Self::Acc) -> Val { Val::Null }
+        fn finalise(_: Self::Acc) -> Val {
+            Val::Null
+        }
     }
 
     /// Outer loop — parameterised by `S: TapeSink`. Walks the source
@@ -1312,7 +1480,9 @@ pub mod tape {
                 TapeOutput::Pass(v) => acc = S::fold(acc, tape, v),
                 TapeOutput::Filtered => continue,
                 TapeOutput::Many(items) => {
-                    for it in items { acc = S::fold(acc, tape, it); }
+                    for it in items {
+                        acc = S::fold(acc, tape, it);
+                    }
                 }
                 TapeOutput::Done => break,
             }
@@ -1332,9 +1502,13 @@ pub mod tape {
         let iter = tape_array_iter(tape, arr_idx)?;
         let mut found: Option<usize> = None;
         for entry in iter {
-            if found.is_some() { break; }
+            if found.is_some() {
+                break;
+            }
             match stages.apply(tape, entry) {
-                TapeOutput::Pass(v) => { found = Some(v); }
+                TapeOutput::Pass(v) => {
+                    found = Some(v);
+                }
                 TapeOutput::Filtered => continue,
                 TapeOutput::Many(items) => {
                     if let Some(&first) = items.first() {
@@ -1359,7 +1533,9 @@ pub mod tape {
         let mut found: Option<usize> = None;
         for entry in iter {
             match stages.apply(tape, entry) {
-                TapeOutput::Pass(v) => { found = Some(v); }
+                TapeOutput::Pass(v) => {
+                    found = Some(v);
+                }
                 TapeOutput::Filtered => continue,
                 TapeOutput::Many(items) => {
                     if let Some(&last) = items.last() {
@@ -1387,7 +1563,9 @@ pub mod tape {
                 TapeOutput::Pass(v) => out.push(tape_to_val(tape, v)),
                 TapeOutput::Filtered => continue,
                 TapeOutput::Many(items) => {
-                    for it in items { out.push(tape_to_val(tape, it)); }
+                    for it in items {
+                        out.push(tape_to_val(tape, it));
+                    }
                 }
                 TapeOutput::Done => break,
             }
@@ -1401,8 +1579,8 @@ pub mod tape {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use indexmap::IndexMap;
+    use std::sync::Arc;
 
     fn obj(pairs: &[(&str, Val)]) -> Val {
         let mut m = IndexMap::new();
@@ -1421,8 +1599,13 @@ mod tests {
             obj(&[("a", Val::Int(1)), ("b", Val::Int(30))]),
         ];
         let stages = Composed {
-            a: FilterFieldEqLit { field: Arc::from("a"), target: Val::Int(1) },
-            b: MapField { field: Arc::from("b") },
+            a: FilterFieldEqLit {
+                field: Arc::from("a"),
+                target: Val::Int(1),
+            },
+            b: MapField {
+                field: Arc::from("b"),
+            },
         };
         let out = run_pipeline::<CountSink>(&arr, &stages);
         assert!(matches!(out, Val::Int(2)));
@@ -1436,8 +1619,13 @@ mod tests {
             obj(&[("a", Val::Int(1)), ("b", Val::Int(30))]),
         ];
         let stages = Composed {
-            a: FilterFieldEqLit { field: Arc::from("a"), target: Val::Int(1) },
-            b: MapField { field: Arc::from("b") },
+            a: FilterFieldEqLit {
+                field: Arc::from("a"),
+                target: Val::Int(1),
+            },
+            b: MapField {
+                field: Arc::from("b"),
+            },
         };
         let out = run_pipeline::<SumSink>(&arr, &stages);
         // 10 + 30 = 40
@@ -1451,10 +1639,7 @@ mod tests {
         let inner2 = obj(&[("c", Val::Str(Arc::from("LA")))]);
         let mid1 = obj(&[("a", inner1)]);
         let mid2 = obj(&[("a", inner2)]);
-        let arr = vec![
-            obj(&[("u", mid1)]),
-            obj(&[("u", mid2)]),
-        ];
+        let arr = vec![obj(&[("u", mid1)]), obj(&[("u", mid2)])];
         let keys: Arc<[Arc<str>]> = Arc::from(vec![Arc::from("u"), Arc::from("a"), Arc::from("c")]);
         let stages = MapFieldChain { keys };
         let out = run_pipeline::<CollectSink>(&arr, &stages);
@@ -1468,7 +1653,9 @@ mod tests {
     #[test]
     fn take_terminates_outer_loop() {
         let arr: Vec<Val> = (0..1000).map(Val::Int).collect();
-        let stages = Take { remaining: std::cell::Cell::new(3) };
+        let stages = Take {
+            remaining: std::cell::Cell::new(3),
+        };
         let out = run_pipeline::<CountSink>(&arr, &stages);
         assert!(matches!(out, Val::Int(3)));
     }
@@ -1476,7 +1663,9 @@ mod tests {
     #[test]
     fn skip_drops_prefix() {
         let arr: Vec<Val> = (0..10).map(Val::Int).collect();
-        let stages = Skip { remaining: std::cell::Cell::new(7) };
+        let stages = Skip {
+            remaining: std::cell::Cell::new(7),
+        };
         let out = run_pipeline::<CountSink>(&arr, &stages);
         assert!(matches!(out, Val::Int(3)));
     }
@@ -1484,8 +1673,14 @@ mod tests {
     #[test]
     fn min_max_avg_basic() {
         let arr: Vec<Val> = vec![Val::Int(5), Val::Int(2), Val::Int(9), Val::Int(3)];
-        assert!(matches!(run_pipeline::<MinSink>(&arr, &Identity), Val::Int(2)));
-        assert!(matches!(run_pipeline::<MaxSink>(&arr, &Identity), Val::Int(9)));
+        assert!(matches!(
+            run_pipeline::<MinSink>(&arr, &Identity),
+            Val::Int(2)
+        ));
+        assert!(matches!(
+            run_pipeline::<MaxSink>(&arr, &Identity),
+            Val::Int(9)
+        ));
         // (5+2+9+3)/4 = 4.75
         if let Val::Float(f) = run_pipeline::<AvgSink>(&arr, &Identity) {
             assert!((f - 4.75).abs() < 1e-9);
@@ -1497,15 +1692,21 @@ mod tests {
     #[test]
     fn first_last_basic() {
         let arr: Vec<Val> = vec![Val::Int(10), Val::Int(20), Val::Int(30)];
-        assert!(matches!(run_pipeline::<FirstSink>(&arr, &Identity), Val::Int(10)));
-        assert!(matches!(run_pipeline::<LastSink>(&arr, &Identity), Val::Int(30)));
+        assert!(matches!(
+            run_pipeline::<FirstSink>(&arr, &Identity),
+            Val::Int(10)
+        ));
+        assert!(matches!(
+            run_pipeline::<LastSink>(&arr, &Identity),
+            Val::Int(30)
+        ));
     }
 
     #[cfg(feature = "simd-json")]
     #[test]
     fn tape_sinks_smoke() {
         use crate::composed::tape::*;
-        use crate::strref::{TapeData, TapeCmp};
+        use crate::strref::{TapeCmp, TapeData};
         use std::sync::Arc;
 
         // [{a:1,b:10},{a:2,b:20},{a:1,b:30}].filter(a==1).map(b)
@@ -1519,7 +1720,9 @@ mod tests {
                 op: TapeCmp::Eq,
                 lit: TapeLitOwned::Int(1),
             },
-            b: TapeMapField { field: Arc::from("b") },
+            b: TapeMapField {
+                field: Arc::from("b"),
+            },
         };
 
         let chain = mk_chain();
@@ -1564,7 +1767,7 @@ mod tests {
     #[test]
     fn tape_borrow_stages_smoke() {
         use crate::composed::tape::*;
-        use crate::strref::{TapeData, TapeCmp, tape_array_iter};
+        use crate::strref::{tape_array_iter, TapeCmp, TapeData};
         use std::sync::Arc;
 
         let bytes = br#"[{"a":1,"b":10},{"a":2,"b":20},{"a":1,"b":30}]"#.to_vec();
@@ -1577,7 +1780,9 @@ mod tests {
                 op: TapeCmp::Eq,
                 lit: TapeLitOwned::Int(1),
             },
-            b: TapeMapField { field: Arc::from("b") },
+            b: TapeMapField {
+                field: Arc::from("b"),
+            },
         };
 
         let arr_idx = 0; // root is the array
@@ -1594,7 +1799,9 @@ mod tests {
         // FlatMapField on a row whose `b` is itself an array
         let bytes2 = br#"[{"items":[1,2,3]},{"items":[4,5]}]"#.to_vec();
         let tape2 = TapeData::parse(bytes2).expect("parse");
-        let stage = TapeFlatMapField { field: Arc::from("items") };
+        let stage = TapeFlatMapField {
+            field: Arc::from("items"),
+        };
         let mut total_passes = 0usize;
         let iter2 = tape_array_iter(&tape2, 0).expect("array");
         for entry in iter2 {
@@ -1621,7 +1828,10 @@ mod tests {
 
         let j = crate::Jetro::new(doc);
         assert_eq!(j.collect("$.books.map(price).sum()").unwrap(), json!(60));
-        assert_eq!(j.collect("$.books.filter(active == true).count()").unwrap(), json!(2));
+        assert_eq!(
+            j.collect("$.books.filter(active == true).count()").unwrap(),
+            json!(2)
+        );
         assert_eq!(j.collect("$.books.count()").unwrap(), json!(3));
     }
 
@@ -1732,18 +1942,21 @@ mod tests {
         // record.  Cardinality preserved (3 results), each computed
         // via inner Stage::Map(@.text) → Stage::Split(",") → Sink::First.
         assert_eq!(
-            j.collect("$.records.map(@.text.split(\",\").first())").unwrap(),
+            j.collect("$.records.map(@.text.split(\",\").first())")
+                .unwrap(),
             json!(["alice", "bob", "carol"])
         );
         // map(@.text.split(",").last()).
         assert_eq!(
-            j.collect("$.records.map(@.text.split(\",\").last())").unwrap(),
+            j.collect("$.records.map(@.text.split(\",\").last())")
+                .unwrap(),
             json!(["42", "17", "99"])
         );
         // map(@.text.split(",").count()) — Sink::Count inside body
         // returns one count per row.
         assert_eq!(
-            j.collect("$.records.map(@.text.split(\",\").count())").unwrap(),
+            j.collect("$.records.map(@.text.split(\",\").count())")
+                .unwrap(),
             json!([3, 3, 3])
         );
     }
@@ -1762,20 +1975,11 @@ mod tests {
             json!(["a", "b", "c", "d", "e"])
         );
         // .split(",").count() — Stage::Split + Sink::Count.
-        assert_eq!(
-            j.collect("$.s.split(\",\").count()").unwrap(),
-            json!(5)
-        );
+        assert_eq!(j.collect("$.s.split(\",\").count()").unwrap(), json!(5));
         // .split(",").first() — Stage::Split + Sink::First.
-        assert_eq!(
-            j.collect("$.s.split(\",\").first()").unwrap(),
-            json!("a")
-        );
+        assert_eq!(j.collect("$.s.split(\",\").first()").unwrap(), json!("a"));
         // .split(",").last() — Stage::Split + Sink::Last.
-        assert_eq!(
-            j.collect("$.s.split(\",\").last()").unwrap(),
-            json!("e")
-        );
+        assert_eq!(j.collect("$.s.split(\",\").last()").unwrap(), json!("e"));
     }
 
     #[test]
@@ -1783,8 +1987,8 @@ mod tests {
         // Phase 3: adjacent Filter runs reorder by cost / (1 - selectivity).
         // Cheaper, more-selective filter first — Eq (sel=0.10) before
         // Lt (sel=0.40).  Reorder must preserve overall set semantics.
-        use crate::pipeline::{Stage, Sink, BodyKernel, plan_with_kernels};
         use crate::ast::BinOp;
+        use crate::pipeline::{plan_with_kernels, BodyKernel, Sink, Stage};
         use std::sync::Arc;
         let dummy = Arc::new(crate::vm::Program::new(Vec::new(), ""));
         let stages = vec![
@@ -1795,9 +1999,15 @@ mod tests {
         ];
         let kernels = vec![
             BodyKernel::FieldCmpLit(
-                Arc::from("price"), BinOp::Lt, crate::eval::value::Val::Int(100)),
+                Arc::from("price"),
+                BinOp::Lt,
+                crate::eval::value::Val::Int(100),
+            ),
             BodyKernel::FieldCmpLit(
-                Arc::from("active"), BinOp::Eq, crate::eval::value::Val::Bool(true)),
+                Arc::from("active"),
+                BinOp::Eq,
+                crate::eval::value::Val::Bool(true),
+            ),
         ];
         let p = plan_with_kernels(stages, &kernels, Sink::Count);
         // Expect Eq filter first (rank ~ 1.5/0.9 = 1.67) before Lt
@@ -1827,19 +2037,21 @@ mod tests {
         // Result regardless of order: rows where b>15 AND tag=="x" =
         // {a:3,b:30,tag:"x"}, {a:5,b:50,tag:"x"} → count = 2.
         assert_eq!(
-            j.collect("$.rows.filter(b > 15).filter(tag == \"x\").count()").unwrap(),
+            j.collect("$.rows.filter(b > 15).filter(tag == \"x\").count()")
+                .unwrap(),
             json!(2)
         );
         // Sum after the same filters.
         assert_eq!(
-            j.collect("$.rows.filter(b > 15).filter(tag == \"x\").map(b).sum()").unwrap(),
+            j.collect("$.rows.filter(b > 15).filter(tag == \"x\").map(b).sum()")
+                .unwrap(),
             json!(80)
         );
     }
 
     #[test]
     fn step3d_phase4_merge_take_skip() {
-        use crate::pipeline::{Stage, Sink, plan};
+        use crate::pipeline::{plan, Sink, Stage};
         // Take(5) ∘ Take(3) → Take(3)
         let p = plan(vec![Stage::Take(5), Stage::Take(3)], Sink::Collect);
         assert_eq!(p.stages.len(), 1);
@@ -1857,7 +2069,7 @@ mod tests {
 
     #[test]
     fn step3d_phase5_strategy_selection() {
-        use crate::pipeline::{Stage, Sink, NumOp, Strategy, select_strategy};
+        use crate::pipeline::{select_strategy, NumOp, Sink, Stage, Strategy};
         use std::sync::Arc;
         let dummy = Arc::new(crate::vm::Program::new(Vec::new(), ""));
 
@@ -1878,14 +2090,17 @@ mod tests {
         );
         // Map + Sum → PullLoop (no positional, no barrier)
         assert_eq!(
-            select_strategy(&[Stage::Map(Arc::clone(&dummy))], &Sink::Numeric(NumOp::Sum)),
+            select_strategy(
+                &[Stage::Map(Arc::clone(&dummy))],
+                &Sink::Numeric(NumOp::Sum)
+            ),
             Strategy::PullLoop
         );
     }
 
     #[test]
     fn step3d_phase1_compute_strategies() {
-        use crate::pipeline::{Stage, Sink, NumOp, StageStrategy, compute_strategies};
+        use crate::pipeline::{compute_strategies, NumOp, Sink, Stage, StageStrategy};
         use std::sync::Arc;
 
         let dummy_prog = Arc::new(crate::vm::Program::new(Vec::new(), ""));
@@ -1896,10 +2111,7 @@ mod tests {
         assert!(matches!(strats[0], StageStrategy::SortTopK(1)));
 
         // [Sort, Take(5)] + Collect → SortTopK(5) at index 0
-        let stages = vec![
-            Stage::Sort(Some(Arc::clone(&dummy_prog))),
-            Stage::Take(5),
-        ];
+        let stages = vec![Stage::Sort(Some(Arc::clone(&dummy_prog))), Stage::Take(5)];
         let strats = compute_strategies(&stages, &Sink::Collect);
         assert!(matches!(strats[0], StageStrategy::SortTopK(5)));
         assert!(matches!(strats[1], StageStrategy::Default));
@@ -2150,10 +2362,18 @@ mod tests {
     #[test]
     fn starts_ends_contains() {
         let s = Val::Str(std::sync::Arc::from("hello world"));
-        assert!(extract_bool(StartsWith::new(std::sync::Arc::from("hello")).apply(&s)));
-        assert!(!extract_bool(StartsWith::new(std::sync::Arc::from("world")).apply(&s)));
-        assert!(extract_bool(EndsWith::new(std::sync::Arc::from("world")).apply(&s)));
-        assert!(extract_bool(Contains::new(std::sync::Arc::from("o w")).apply(&s)));
+        assert!(extract_bool(
+            StartsWith::new(std::sync::Arc::from("hello")).apply(&s)
+        ));
+        assert!(!extract_bool(
+            StartsWith::new(std::sync::Arc::from("world")).apply(&s)
+        ));
+        assert!(extract_bool(
+            EndsWith::new(std::sync::Arc::from("world")).apply(&s)
+        ));
+        assert!(extract_bool(
+            Contains::new(std::sync::Arc::from("o w")).apply(&s)
+        ));
     }
 
     #[test]
@@ -2162,11 +2382,13 @@ mod tests {
         assert_eq!(extract_str(Repeat::new(3).apply(&s)), "ababab");
 
         let csv = Val::Str(std::sync::Arc::from("a,b,c"));
-        assert_eq!(extract_arr_len(Split::new(std::sync::Arc::from(",")).apply(&csv)), 3);
+        assert_eq!(
+            extract_arr_len(Split::new(std::sync::Arc::from(",")).apply(&csv)),
+            3
+        );
 
         let s = Val::Str(std::sync::Arc::from("foo bar foo"));
-        let r = Replace::new(std::sync::Arc::from("foo"), std::sync::Arc::from("X"))
-            .apply(&s);
+        let r = Replace::new(std::sync::Arc::from("foo"), std::sync::Arc::from("X")).apply(&s);
         assert_eq!(extract_str(r), "X bar X");
     }
 
@@ -2189,12 +2411,16 @@ mod tests {
         );
     }
 
-    fn arr_of(items: Vec<Val>) -> Val { Val::arr(items) }
+    fn arr_of(items: Vec<Val>) -> Val {
+        Val::arr(items)
+    }
 
     fn obj_of(pairs: Vec<(&str, Val)>) -> Val {
         let mut m: indexmap::IndexMap<std::sync::Arc<str>, Val> =
             indexmap::IndexMap::with_capacity(pairs.len());
-        for (k, v) in pairs { m.insert(std::sync::Arc::from(k), v); }
+        for (k, v) in pairs {
+            m.insert(std::sync::Arc::from(k), v);
+        }
         Val::Obj(std::sync::Arc::new(m))
     }
 
@@ -2219,8 +2445,12 @@ mod tests {
             },
             _ => panic!(),
         }
-        assert!(extract_bool(HasPath::new(std::sync::Arc::from("addr.city")).apply(&outer)));
-        assert!(!extract_bool(HasPath::new(std::sync::Arc::from("addr.zip")).apply(&outer)));
+        assert!(extract_bool(
+            HasPath::new(std::sync::Arc::from("addr.city")).apply(&outer)
+        ));
+        assert!(!extract_bool(
+            HasPath::new(std::sync::Arc::from("addr.zip")).apply(&outer)
+        ));
     }
 
     #[test]
@@ -2255,8 +2485,10 @@ mod tests {
 
     #[test]
     fn invert_obj_swaps_kv() {
-        let o = obj_of(vec![("a", Val::Str(std::sync::Arc::from("X"))),
-                              ("b", Val::Str(std::sync::Arc::from("Y")))]);
+        let o = obj_of(vec![
+            ("a", Val::Str(std::sync::Arc::from("X"))),
+            ("b", Val::Str(std::sync::Arc::from("Y"))),
+        ]);
         let r = Invert.apply(&o);
         match r {
             StageOutput::Pass(cow) => match cow.into_owned() {
@@ -2273,13 +2505,14 @@ mod tests {
     #[test]
     fn has_pick_omit_obj() {
         let o = obj_of(vec![
-            ("a", Val::Int(1)), ("b", Val::Int(2)), ("c", Val::Int(3))
+            ("a", Val::Int(1)),
+            ("b", Val::Int(2)),
+            ("c", Val::Int(3)),
         ]);
         assert!(extract_bool(Has::new(std::sync::Arc::from("b")).apply(&o)));
         assert!(!extract_bool(Has::new(std::sync::Arc::from("z")).apply(&o)));
-        let picked = Pick::new(vec![
-            std::sync::Arc::from("a"), std::sync::Arc::from("c")
-        ]).apply(&o);
+        let picked =
+            Pick::new(vec![std::sync::Arc::from("a"), std::sync::Arc::from("c")]).apply(&o);
         match picked {
             StageOutput::Pass(cow) => match cow.into_owned() {
                 Val::Obj(m) => assert_eq!(m.len(), 2),
@@ -2321,7 +2554,13 @@ mod tests {
 
     #[test]
     fn compact_drops_nulls() {
-        let a = arr_of(vec![Val::Int(1), Val::Null, Val::Int(2), Val::Null, Val::Int(3)]);
+        let a = arr_of(vec![
+            Val::Int(1),
+            Val::Null,
+            Val::Int(2),
+            Val::Null,
+            Val::Int(3),
+        ]);
         assert_eq!(extract_arr_len(Compact.apply(&a)), 3);
     }
 
@@ -2347,7 +2586,9 @@ mod tests {
                         assert_eq!(first.len(), 2);
                         assert!(matches!(first[0], Val::Int(0)));
                         assert!(matches!(first[1], Val::Int(10)));
-                    } else { panic!("expected nested Arr"); }
+                    } else {
+                        panic!("expected nested Arr");
+                    }
                 }
                 other => panic!("got {:?}", other),
             },
@@ -2363,7 +2604,13 @@ mod tests {
 
     #[test]
     fn chunk_window_split() {
-        let a = arr_of(vec![Val::Int(1), Val::Int(2), Val::Int(3), Val::Int(4), Val::Int(5)]);
+        let a = arr_of(vec![
+            Val::Int(1),
+            Val::Int(2),
+            Val::Int(3),
+            Val::Int(4),
+            Val::Int(5),
+        ]);
         assert_eq!(extract_arr_len(Chunk::new(2).apply(&a)), 3);
         assert_eq!(extract_arr_len(Window::new(3).apply(&a)), 3);
     }
@@ -2416,7 +2663,9 @@ mod tests {
             },
             _ => panic!("expected Pass"),
         }
-        assert!(extract_bool(StrMatches::new(std::sync::Arc::from("world")).apply(&s)));
+        assert!(extract_bool(
+            StrMatches::new(std::sync::Arc::from("world")).apply(&s)
+        ));
     }
 
     #[test]
@@ -2450,9 +2699,21 @@ mod tests {
     #[test]
     fn empty_input_finalises_to_default() {
         let arr: Vec<Val> = vec![];
-        assert!(matches!(run_pipeline::<CountSink>(&arr, &Identity), Val::Int(0)));
-        assert!(matches!(run_pipeline::<SumSink>(&arr, &Identity), Val::Int(0)));
-        assert!(matches!(run_pipeline::<MinSink>(&arr, &Identity), Val::Null));
-        assert!(matches!(run_pipeline::<FirstSink>(&arr, &Identity), Val::Null));
+        assert!(matches!(
+            run_pipeline::<CountSink>(&arr, &Identity),
+            Val::Int(0)
+        ));
+        assert!(matches!(
+            run_pipeline::<SumSink>(&arr, &Identity),
+            Val::Int(0)
+        ));
+        assert!(matches!(
+            run_pipeline::<MinSink>(&arr, &Identity),
+            Val::Null
+        ));
+        assert!(matches!(
+            run_pipeline::<FirstSink>(&arr, &Identity),
+            Val::Null
+        ));
     }
 }

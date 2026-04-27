@@ -13,33 +13,159 @@
 //! - `val_str` / `val_to_string`: coercion helpers for string
 //!   methods and CSV emission.
 
+use std::cmp::Ordering;
 use std::sync::Arc;
 use indexmap::IndexMap;
 
 use super::value::Val;
 use super::EvalError;
 use super::super::ast::KindType;
+use super::super::ast::BinOp;
+
+// ── Scalar semantic kernel ───────────────────────────────────────────────────
+
+/// Borrowed JSON-scalar/container view used by both `Val` and simd-json tape
+/// execution. Tape adapters should only decode node shape into this view; the
+/// truthiness/comparison/numeric behavior lives here.
+#[derive(Debug, Clone, Copy)]
+pub enum JsonView<'a> {
+    Null,
+    Bool(bool),
+    Int(i64),
+    UInt(u64),
+    Float(f64),
+    Str(&'a str),
+    ArrayLen(usize),
+    ObjectLen(usize),
+}
+
+impl<'a> JsonView<'a> {
+    #[inline]
+    pub fn from_val(v: &'a Val) -> Self {
+        match v {
+            Val::Null => JsonView::Null,
+            Val::Bool(b) => JsonView::Bool(*b),
+            Val::Int(n) => JsonView::Int(*n),
+            Val::Float(f) => JsonView::Float(*f),
+            Val::Str(s) => JsonView::Str(s.as_ref()),
+            Val::StrSlice(r) => JsonView::Str(r.as_str()),
+            Val::Arr(a) => JsonView::ArrayLen(a.len()),
+            Val::IntVec(a) => JsonView::ArrayLen(a.len()),
+            Val::FloatVec(a) => JsonView::ArrayLen(a.len()),
+            Val::StrVec(a) => JsonView::ArrayLen(a.len()),
+            Val::StrSliceVec(a) => JsonView::ArrayLen(a.len()),
+            Val::ObjVec(d) => JsonView::ArrayLen(d.nrows()),
+            Val::Obj(m) => JsonView::ObjectLen(m.len()),
+            Val::ObjSmall(p) => JsonView::ObjectLen(p.len()),
+        }
+    }
+
+    #[inline]
+    pub fn truthy(self) -> bool {
+        match self {
+            JsonView::Null => false,
+            JsonView::Bool(b) => b,
+            JsonView::Int(n) => n != 0,
+            JsonView::UInt(n) => n != 0,
+            JsonView::Float(f) => f != 0.0,
+            JsonView::Str(s) => !s.is_empty(),
+            JsonView::ArrayLen(n) | JsonView::ObjectLen(n) => n != 0,
+        }
+    }
+
+    #[inline]
+    pub fn as_i64_exact(self) -> Option<i64> {
+        match self {
+            JsonView::Int(n) => Some(n),
+            JsonView::UInt(n) if n <= i64::MAX as u64 => Some(n as i64),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    pub fn as_f64_number(self) -> Option<f64> {
+        match self {
+            JsonView::Int(n) => Some(n as f64),
+            JsonView::UInt(n) => Some(n as f64),
+            JsonView::Float(f) => Some(f),
+            _ => None,
+        }
+    }
+}
+
+#[inline]
+pub fn json_vals_eq(a: JsonView<'_>, b: JsonView<'_>) -> bool {
+    match (a, b) {
+        (JsonView::Null, JsonView::Null) => true,
+        (JsonView::Bool(x), JsonView::Bool(y)) => x == y,
+        (JsonView::Str(x), JsonView::Str(y)) => x == y,
+        (JsonView::Int(x), JsonView::Int(y)) => x == y,
+        (JsonView::UInt(x), JsonView::UInt(y)) => x == y,
+        (JsonView::Float(x), JsonView::Float(y)) => x == y,
+        (JsonView::Int(x), JsonView::Float(y)) => (x as f64) == y,
+        (JsonView::Float(x), JsonView::Int(y)) => x == (y as f64),
+        (JsonView::UInt(x), JsonView::Float(y)) => (x as f64) == y,
+        (JsonView::Float(x), JsonView::UInt(y)) => x == (y as f64),
+        (JsonView::Int(x), JsonView::UInt(y)) => {
+            x >= 0 && (x as u64) == y
+        }
+        (JsonView::UInt(x), JsonView::Int(y)) => {
+            y >= 0 && x == (y as u64)
+        }
+        _ => false,
+    }
+}
+
+#[inline]
+pub fn json_cmp_vals(a: JsonView<'_>, b: JsonView<'_>) -> Ordering {
+    match (a, b) {
+        (JsonView::Int(x), JsonView::Int(y)) => x.cmp(&y),
+        (JsonView::UInt(x), JsonView::UInt(y)) => x.cmp(&y),
+        (JsonView::Float(x), JsonView::Float(y)) => {
+            x.partial_cmp(&y).unwrap_or(Ordering::Equal)
+        }
+        (JsonView::Int(x), JsonView::Float(y)) => {
+            (x as f64).partial_cmp(&y).unwrap_or(Ordering::Equal)
+        }
+        (JsonView::Float(x), JsonView::Int(y)) => {
+            x.partial_cmp(&(y as f64)).unwrap_or(Ordering::Equal)
+        }
+        (JsonView::UInt(x), JsonView::Float(y)) => {
+            (x as f64).partial_cmp(&y).unwrap_or(Ordering::Equal)
+        }
+        (JsonView::Float(x), JsonView::UInt(y)) => {
+            x.partial_cmp(&(y as f64)).unwrap_or(Ordering::Equal)
+        }
+        (JsonView::Int(x), JsonView::UInt(y)) => {
+            if x < 0 { Ordering::Less } else { (x as u64).cmp(&y) }
+        }
+        (JsonView::UInt(x), JsonView::Int(y)) => {
+            if y < 0 { Ordering::Greater } else { x.cmp(&(y as u64)) }
+        }
+        (JsonView::Str(x), JsonView::Str(y)) => x.cmp(y),
+        (JsonView::Bool(x), JsonView::Bool(y)) => x.cmp(&y),
+        _ => Ordering::Equal,
+    }
+}
+
+#[inline]
+pub fn json_cmp_binop(lhs: JsonView<'_>, op: BinOp, rhs: JsonView<'_>) -> bool {
+    match op {
+        BinOp::Eq => json_vals_eq(lhs, rhs),
+        BinOp::Neq => !json_vals_eq(lhs, rhs),
+        BinOp::Lt => json_cmp_vals(lhs, rhs) == Ordering::Less,
+        BinOp::Lte => json_cmp_vals(lhs, rhs) != Ordering::Greater,
+        BinOp::Gt => json_cmp_vals(lhs, rhs) == Ordering::Greater,
+        BinOp::Gte => json_cmp_vals(lhs, rhs) != Ordering::Less,
+        _ => false,
+    }
+}
 
 // ── Value predicates ──────────────────────────────────────────────────────────
 
 #[inline]
 pub fn is_truthy(v: &Val) -> bool {
-    match v {
-        Val::Null      => false,
-        Val::Bool(b)   => *b,
-        Val::Int(n)    => *n != 0,
-        Val::Float(f)  => *f != 0.0,
-        Val::Str(s)       => !s.is_empty(),
-        Val::StrSlice(r)  => !r.is_empty(),
-        Val::Arr(a)    => !a.is_empty(),
-        Val::IntVec(a) => !a.is_empty(),
-        Val::FloatVec(a) => !a.is_empty(),
-        Val::StrVec(a)       => !a.is_empty(),
-        Val::StrSliceVec(a)  => !a.is_empty(),
-        Val::ObjVec(d)       => !d.cells.is_empty(),
-        Val::Obj(m)       => !m.is_empty(),
-        Val::ObjSmall(p)  => !p.is_empty(),
-    }
+    JsonView::from_val(v).truthy()
 }
 
 #[inline]
@@ -59,29 +185,12 @@ pub fn kind_matches(v: &Val, ty: KindType) -> bool {
 
 #[inline]
 pub fn vals_eq(a: &Val, b: &Val) -> bool {
-    match (a, b) {
-        (Val::Null,     Val::Null)     => true,
-        (Val::Bool(x),  Val::Bool(y))  => x == y,
-        (Val::Str(x),   Val::Str(y))   => x == y,
-        (Val::Int(x),   Val::Int(y))   => x == y,
-        (Val::Float(x), Val::Float(y)) => x == y,
-        (Val::Int(x),   Val::Float(y)) => (*x as f64) == *y,
-        (Val::Float(x), Val::Int(y))   => *x == (*y as f64),
-        _ => false,
-    }
+    json_vals_eq(JsonView::from_val(a), JsonView::from_val(b))
 }
 
 #[inline]
 pub fn cmp_vals(a: &Val, b: &Val) -> std::cmp::Ordering {
-    match (a, b) {
-        (Val::Int(x),   Val::Int(y))   => x.cmp(y),
-        (Val::Float(x), Val::Float(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
-        (Val::Int(x),   Val::Float(y)) => (*x as f64).partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
-        (Val::Float(x), Val::Int(y))   => x.partial_cmp(&(*y as f64)).unwrap_or(std::cmp::Ordering::Equal),
-        (Val::Str(x),   Val::Str(y))   => x.cmp(y),
-        (Val::Bool(x),  Val::Bool(y))  => x.cmp(y),
-        _ => std::cmp::Ordering::Equal,
-    }
+    json_cmp_vals(JsonView::from_val(a), JsonView::from_val(b))
 }
 
 // ── Value conversions ─────────────────────────────────────────────────────────
