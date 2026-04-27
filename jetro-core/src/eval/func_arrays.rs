@@ -186,86 +186,25 @@ pub fn sort(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
 
 // ── Dedup / flatten ───────────────────────────────────────────────────────────
 
-pub fn unique(recv: Val) -> Result<Val, EvalError> {
-    let items = recv.into_vec().ok_or_else(|| EvalError("unique: expected array".into()))?;
-    let mut seen = std::collections::HashSet::new();
-    Ok(Val::arr(items.into_iter().filter(|v| seen.insert(val_to_key(v))).collect()))
-}
+// `.unique` / `.distinct` LIFTED to composed::UniqueArr; shim composed::shims::unique.
 
-pub fn flatten(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-    let depth = first_i64_arg(args, env).unwrap_or(1) as usize;
-    Ok(flatten_val(recv, depth))
-}
+// `.flatten` LIFTED to composed::FlattenDepth; shim composed::shims::flatten.
 
 // `.compact` LIFTED to composed::Compact; shim in composed::shims::compact.
 
 // ── Reorder ───────────────────────────────────────────────────────────────────
 
-pub fn reverse(recv: Val) -> Result<Val, EvalError> {
-    match recv {
-        Val::Arr(a) => {
-            let mut v = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
-            v.reverse();
-            Ok(Val::arr(v))
-        }
-        Val::IntVec(a) => {
-            let mut v = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
-            v.reverse();
-            Ok(Val::int_vec(v))
-        }
-        Val::FloatVec(a) => {
-            let mut v = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
-            v.reverse();
-            Ok(Val::float_vec(v))
-        }
-        Val::Str(s) => Ok(Val::Str(Arc::<str>::from(s.chars().rev().collect::<String>()))),
-        _ => err!("reverse: expected array or string"),
-    }
-}
+// `.reverse` LIFTED to composed::ReverseAny; shim composed::shims::reverse.
 
 // ── Access ────────────────────────────────────────────────────────────────────
 
-pub fn first(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-    let n = first_i64_arg(args, env)?;
-    match recv {
-        Val::Arr(a) if n == 1 => Ok(a.first().cloned().unwrap_or(Val::Null)),
-        Val::Arr(a)           => Ok(Val::arr(a.iter().take(n as usize).cloned().collect())),
-        _                     => Ok(Val::Null),
-    }
-}
-
-pub fn last(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-    let n = first_i64_arg(args, env)?;
-    match recv {
-        Val::Arr(a) if n == 1 => Ok(a.last().cloned().unwrap_or(Val::Null)),
-        Val::Arr(a) => {
-            let s = a.len().saturating_sub(n as usize);
-            Ok(Val::arr(a[s..].to_vec()))
-        }
-        _ => Ok(Val::Null),
-    }
-}
-
-pub fn nth(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-    let n = first_i64_arg(args, env)?;
-    Ok(recv.get_index(n))
-}
+// `.first` / `.last` / `.nth` LIFTED to composed::{First, Last, NthAny};
+// shims in composed::shims::{first, last, nth}.
 
 // ── Mutation ──────────────────────────────────────────────────────────────────
 
-pub fn append(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-    let item = args.first().map(|a| eval_pos(a, env)).transpose()?.unwrap_or(Val::Null);
-    let mut v = recv.into_vec().ok_or_else(|| EvalError("append: expected array".into()))?;
-    v.push(item);
-    Ok(Val::arr(v))
-}
-
-pub fn prepend(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-    let item = args.first().map(|a| eval_pos(a, env)).transpose()?.unwrap_or(Val::Null);
-    let mut v = recv.into_vec().ok_or_else(|| EvalError("prepend: expected array".into()))?;
-    v.insert(0, item);
-    Ok(Val::arr(v))
-}
+// `.append` / `.prepend` LIFTED to composed::{Append, Prepend};
+// shims in composed::shims::{append, prepend}.
 
 pub fn remove(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     let pred = args.first().ok_or_else(|| EvalError("remove: requires arg".into()))?;

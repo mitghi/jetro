@@ -536,6 +536,83 @@ pub mod shims {
         run_single(&Union::new(other), &recv)
             .ok_or_else(|| EvalError("union: stage filtered".into()))
     }
+
+    pub fn flatten(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+        let recv = coerce_arr(recv, "flatten")?;
+        let depth = first_i64_arg(args, env, "flatten").unwrap_or(1).max(0) as usize;
+        run_single(&FlattenDepth::new(depth), &recv)
+            .ok_or_else(|| EvalError("flatten: stage filtered".into()))
+    }
+
+    /// `.reverse()` — works on Arr / IntVec / FloatVec / StrVec / Str.
+    /// No coerce_arr — Stage handles every supported variant directly.
+    pub fn reverse(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
+        run_single(&ReverseAny, &recv)
+            .ok_or_else(|| EvalError("reverse: expected array or string".into()))
+    }
+
+    pub fn unique(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
+        let recv = coerce_arr(recv, "unique")?;
+        run_single(&UniqueArr, &recv)
+            .ok_or_else(|| EvalError("unique: stage filtered".into()))
+    }
+
+    pub fn first(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+        // Default n=1; non-array receivers return Null (matches prior shim).
+        let n = first_i64_arg(args, env, "first").unwrap_or(1);
+        match recv {
+            Val::Arr(_) => run_single(&First::new(n), &recv)
+                .ok_or_else(|| EvalError("first: stage filtered".into())),
+            other => match other.into_vec() {
+                Some(v) => run_single(&First::new(n), &Val::arr(v))
+                    .ok_or_else(|| EvalError("first: stage filtered".into())),
+                None => Ok(Val::Null),
+            },
+        }
+    }
+
+    pub fn last(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+        let n = first_i64_arg(args, env, "last").unwrap_or(1);
+        match recv {
+            Val::Arr(_) => run_single(&Last::new(n), &recv)
+                .ok_or_else(|| EvalError("last: stage filtered".into())),
+            other => match other.into_vec() {
+                Some(v) => run_single(&Last::new(n), &Val::arr(v))
+                    .ok_or_else(|| EvalError("last: stage filtered".into())),
+                None => Ok(Val::Null),
+            },
+        }
+    }
+
+    pub fn nth(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+        let i = first_i64_arg(args, env, "nth")?;
+        run_single(&NthAny::new(i), &recv)
+            .ok_or_else(|| EvalError("nth: stage filtered".into()))
+    }
+
+    pub fn append(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+        let recv = coerce_arr(recv, "append")?;
+        let item = match args.first() {
+            Some(a) => match a {
+                Arg::Pos(e) | Arg::Named(_, e) => crate::eval::eval(e, env)?,
+            },
+            None => Val::Null,
+        };
+        run_single(&Append::new(item), &recv)
+            .ok_or_else(|| EvalError("append: stage filtered".into()))
+    }
+
+    pub fn prepend(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+        let recv = coerce_arr(recv, "prepend")?;
+        let item = match args.first() {
+            Some(a) => match a {
+                Arg::Pos(e) | Arg::Named(_, e) => crate::eval::eval(e, env)?,
+            },
+            None => Val::Null,
+        };
+        run_single(&Prepend::new(item), &recv)
+            .ok_or_else(|| EvalError("prepend: stage filtered".into()))
+    }
 }
 
 // Helper macro — generates per-builtin owned Stage impl with the
@@ -1155,6 +1232,188 @@ impl Stage for FlattenOne {
     }
 }
 impl<R> crate::unified::Stage<R> for FlattenOne {
+    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
+        crate::unified::StageOutputU::Filtered
+    }
+}
+
+/// `.flatten(depth)` — recursively flatten up to `depth` levels of
+/// nested arrays.  Delegates to `eval::util::flatten_val` for the
+/// columnar fast path (Arr<IntVec> → IntVec etc.).
+pub struct FlattenDepth { pub depth: usize }
+impl FlattenDepth { pub fn new(depth: usize) -> Self { Self { depth } } }
+impl Stage for FlattenDepth {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        if matches!(x, Val::Arr(_)) {
+            return StageOutput::Pass(Cow::Owned(
+                crate::eval::util::flatten_val(x.clone(), self.depth)));
+        }
+        StageOutput::Filtered
+    }
+}
+impl<R> crate::unified::Stage<R> for FlattenDepth {
+    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
+        crate::unified::StageOutputU::Filtered
+    }
+}
+
+/// `.reverse()` — reverse Arr / IntVec / FloatVec / StrVec / Str.
+pub struct ReverseAny;
+impl ReverseAny { pub fn new() -> Self { Self } }
+impl Default for ReverseAny { fn default() -> Self { Self } }
+impl Stage for ReverseAny {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        let out = match x {
+            Val::Arr(a) => {
+                let mut v: Vec<Val> = a.as_ref().clone();
+                v.reverse();
+                Val::arr(v)
+            }
+            Val::IntVec(a) => {
+                let mut v: Vec<i64> = a.as_ref().clone();
+                v.reverse();
+                Val::int_vec(v)
+            }
+            Val::FloatVec(a) => {
+                let mut v: Vec<f64> = a.as_ref().clone();
+                v.reverse();
+                Val::float_vec(v)
+            }
+            Val::StrVec(a) => {
+                let mut v: Vec<std::sync::Arc<str>> = a.as_ref().clone();
+                v.reverse();
+                Val::str_vec(v)
+            }
+            Val::Str(s) => Val::Str(std::sync::Arc::<str>::from(
+                s.chars().rev().collect::<String>())),
+            _ => return StageOutput::Filtered,
+        };
+        StageOutput::Pass(Cow::Owned(out))
+    }
+}
+impl<R> crate::unified::Stage<R> for ReverseAny {
+    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
+        crate::unified::StageOutputU::Filtered
+    }
+}
+
+/// `.unique()` / `.distinct()` — dedup by canonical key.
+pub struct UniqueArr;
+impl UniqueArr { pub fn new() -> Self { Self } }
+impl Default for UniqueArr { fn default() -> Self { Self } }
+impl Stage for UniqueArr {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        if let Val::Arr(a) = x {
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let kept: Vec<Val> = a.iter()
+                .filter(|v| seen.insert(crate::eval::util::val_to_key(v)))
+                .cloned()
+                .collect();
+            return StageOutput::Pass(Cow::Owned(Val::arr(kept)));
+        }
+        StageOutput::Filtered
+    }
+}
+impl<R> crate::unified::Stage<R> for UniqueArr {
+    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
+        crate::unified::StageOutputU::Filtered
+    }
+}
+
+/// `.first(n)` — n==1 returns scalar (or Null), else Arr of first n.
+pub struct First { pub n: i64 }
+impl First { pub fn new(n: i64) -> Self { Self { n } } }
+impl Stage for First {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        if let Val::Arr(a) = x {
+            let out = if self.n == 1 {
+                a.first().cloned().unwrap_or(Val::Null)
+            } else {
+                Val::arr(a.iter().take(self.n.max(0) as usize).cloned().collect())
+            };
+            return StageOutput::Pass(Cow::Owned(out));
+        }
+        StageOutput::Pass(Cow::Owned(Val::Null))
+    }
+}
+impl<R> crate::unified::Stage<R> for First {
+    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
+        crate::unified::StageOutputU::Filtered
+    }
+}
+
+/// `.last(n)` — n==1 returns scalar (or Null), else Arr of last n.
+pub struct Last { pub n: i64 }
+impl Last { pub fn new(n: i64) -> Self { Self { n } } }
+impl Stage for Last {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        if let Val::Arr(a) = x {
+            let out = if self.n == 1 {
+                a.last().cloned().unwrap_or(Val::Null)
+            } else {
+                let s = a.len().saturating_sub(self.n.max(0) as usize);
+                Val::arr(a[s..].to_vec())
+            };
+            return StageOutput::Pass(Cow::Owned(out));
+        }
+        StageOutput::Pass(Cow::Owned(Val::Null))
+    }
+}
+impl<R> crate::unified::Stage<R> for Last {
+    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
+        crate::unified::StageOutputU::Filtered
+    }
+}
+
+/// `.nth(i)` — index lookup; supports Arr/IntVec/FloatVec/StrVec/ObjVec.
+/// Negative `i` indexes from the end.
+pub struct NthAny { pub i: i64 }
+impl NthAny { pub fn new(i: i64) -> Self { Self { i } } }
+impl Stage for NthAny {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        StageOutput::Pass(Cow::Owned(x.get_index(self.i)))
+    }
+}
+impl<R> crate::unified::Stage<R> for NthAny {
+    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
+        crate::unified::StageOutputU::Filtered
+    }
+}
+
+/// `.append(item)` — push item onto end.  Coerces typed vecs via
+/// `into_vec`.  Stage holds the item as owned Val.
+pub struct Append { pub item: Val }
+impl Append { pub fn new(item: Val) -> Self { Self { item } } }
+impl Stage for Append {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        let mut v = match x.clone().into_vec() {
+            Some(v) => v,
+            None => return StageOutput::Filtered,
+        };
+        v.push(self.item.clone());
+        StageOutput::Pass(Cow::Owned(Val::arr(v)))
+    }
+}
+impl<R> crate::unified::Stage<R> for Append {
+    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
+        crate::unified::StageOutputU::Filtered
+    }
+}
+
+/// `.prepend(item)` — insert item at front.
+pub struct Prepend { pub item: Val }
+impl Prepend { pub fn new(item: Val) -> Self { Self { item } } }
+impl Stage for Prepend {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        let mut v = match x.clone().into_vec() {
+            Some(v) => v,
+            None => return StageOutput::Filtered,
+        };
+        v.insert(0, self.item.clone());
+        StageOutput::Pass(Cow::Owned(Val::arr(v)))
+    }
+}
+impl<R> crate::unified::Stage<R> for Prepend {
     fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
         crate::unified::StageOutputU::Filtered
     }

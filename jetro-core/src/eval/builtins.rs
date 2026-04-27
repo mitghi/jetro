@@ -91,14 +91,14 @@ fn build() -> BuiltinRegistry {
     t.insert("map",       func_arrays::map);
     t.insert("flat_map",  func_arrays::flat_map);
     t.insert("sort",      func_arrays::sort);
-    t.insert("flatten",   func_arrays::flatten);
+    t.insert("flatten",   crate::composed::shims::flatten);
     t.insert("join",      func_arrays::join);
     t.insert("equi_join", func_arrays::equi_join);
-    t.insert("first",     func_arrays::first);
-    t.insert("last",      func_arrays::last);
-    t.insert("nth",       func_arrays::nth);
-    t.insert("append",    func_arrays::append);
-    t.insert("prepend",   func_arrays::prepend);
+    t.insert("first",     crate::composed::shims::first);
+    t.insert("last",      crate::composed::shims::last);
+    t.insert("nth",       crate::composed::shims::nth);
+    t.insert("append",    crate::composed::shims::append);
+    t.insert("prepend",   crate::composed::shims::prepend);
     t.insert("remove",    func_arrays::remove);
     t.insert("diff",      crate::composed::shims::diff);
     t.insert("intersect", crate::composed::shims::intersect);
@@ -118,10 +118,10 @@ fn build() -> BuiltinRegistry {
     t.insert("zip",       func_arrays::zip_method);
     t.insert("zip_longest",  func_arrays::zip_longest_method);
 
-    // Arrays — zero-extra-arg wrappers
-    t.insert("reverse",  b_reverse);
-    t.insert("unique",   b_unique);
-    t.insert("distinct", b_unique);
+    // Arrays — zero-extra-arg wrappers (lifted to composed Stages).
+    t.insert("reverse",  crate::composed::shims::reverse);
+    t.insert("unique",   crate::composed::shims::unique);
+    t.insert("distinct", crate::composed::shims::unique);
     t.insert("compact",  crate::composed::shims::compact);
     t.insert("pairwise", crate::composed::shims::pairwise);
 
@@ -392,14 +392,6 @@ fn b_from_pairs(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
 
 fn b_invert(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
     func_objects::invert(recv)
-}
-
-fn b_reverse(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    func_arrays::reverse(recv)
-}
-
-fn b_unique(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    func_arrays::unique(recv)
 }
 
 fn b_min(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
