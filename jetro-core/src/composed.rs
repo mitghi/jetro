@@ -233,6 +233,36 @@ lifted_str_stage!(HtmlEscape, |s| {
     out
 });
 
+// Generalised macro variant: transform takes &str, returns Val
+// directly (allows lines() → Arr, to_number() → Int/Float/Null,
+// to_bool() → Bool, base64 → Str, etc.).
+macro_rules! lifted_str_to_val {
+    ($name:ident, $transform:expr) => {
+        pub struct $name;
+        impl $name { pub fn new() -> Self { Self } }
+        impl Default for $name { fn default() -> Self { Self } }
+
+        impl Stage for $name {
+            fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+                if let Val::Str(s) = x {
+                    let f: fn(&str) -> Val = $transform;
+                    let out = f(s.as_ref());
+                    return StageOutput::Pass(Cow::Owned(out));
+                }
+                StageOutput::Filtered
+            }
+        }
+
+        impl<'a> crate::unified::Stage<crate::eval::borrowed::Val<'a>> for $name {
+            fn apply(&self, _x: crate::eval::borrowed::Val<'a>)
+                -> crate::unified::StageOutputU<crate::eval::borrowed::Val<'a>>
+            {
+                crate::unified::StageOutputU::Filtered
+            }
+        }
+    };
+}
+
 // `.url_encode()` — percent-encode per RFC 3986 unreserved set.
 lifted_str_stage!(UrlEncode, |s| {
     let mut out = String::with_capacity(s.len());
@@ -248,6 +278,74 @@ lifted_str_stage!(UrlEncode, |s| {
         }
     }
     out
+});
+
+// `.url_decode()` — percent-decode + plus-to-space.
+lifted_str_stage!(UrlDecode, |s| {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let h1 = char::from(bytes[i + 1]).to_digit(16);
+            let h2 = char::from(bytes[i + 2]).to_digit(16);
+            if let (Some(h1), Some(h2)) = (h1, h2) {
+                out.push((h1 * 16 + h2) as u8);
+                i += 3;
+                continue;
+            }
+        } else if bytes[i] == b'+' {
+            out.push(b' ');
+            i += 1;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+});
+
+// `.html_unescape()` — reverse the 5 entity replacements.
+lifted_str_stage!(HtmlUnescape, |s| {
+    s.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+     .replace("&quot;", "\"").replace("&#39;", "'")
+});
+
+// ── Val-returning string Stages (lines / words / chars / casts) ───
+
+// `.lines()` — split into Val::Arr of Val::Str.
+lifted_str_to_val!(Lines, |s| {
+    Val::arr(s.lines().map(|l| Val::Str(std::sync::Arc::from(l))).collect())
+});
+
+// `.words()` — whitespace split into Val::Arr of Val::Str.
+lifted_str_to_val!(Words, |s| {
+    Val::arr(s.split_whitespace()
+        .map(|w| Val::Str(std::sync::Arc::from(w)))
+        .collect())
+});
+
+// `.chars()` — codepoint split into Val::Arr of Val::Str.
+lifted_str_to_val!(Chars, |s| {
+    Val::arr(s.chars()
+        .map(|c| Val::Str(std::sync::Arc::from(c.to_string())))
+        .collect())
+});
+
+// `.to_number()` — parse i64 or f64; null on parse failure.
+lifted_str_to_val!(ToNumber, |s| {
+    if let Ok(i) = s.parse::<i64>() { return Val::Int(i); }
+    if let Ok(f) = s.parse::<f64>() { return Val::Float(f); }
+    Val::Null
+});
+
+// `.to_bool()` — recognised "true"/"false" → Val::Bool, else Null.
+lifted_str_to_val!(ToBool, |s| {
+    match s {
+        "true"  => Val::Bool(true),
+        "false" => Val::Bool(false),
+        _       => Val::Null,
+    }
 });
 
 /// Closure-based `.filter(pred)` — for the borrow runner where the
@@ -2308,6 +2406,75 @@ mod tests {
     fn url_encode_unreserved_passthrough() {
         let s = Val::Str(std::sync::Arc::from("hello world!"));
         assert_eq!(extract_str(UrlEncode.apply(&s)), "hello%20world%21");
+    }
+
+    #[test]
+    fn url_decode_roundtrip() {
+        let s = Val::Str(std::sync::Arc::from("hello%20world%21+a"));
+        assert_eq!(extract_str(UrlDecode.apply(&s)), "hello world! a");
+    }
+
+    #[test]
+    fn html_unescape_runs() {
+        let s = Val::Str(std::sync::Arc::from("a&lt;b&gt;&amp;&#39;&quot;c"));
+        assert_eq!(extract_str(HtmlUnescape.apply(&s)), "a<b>&'\"c");
+    }
+
+    fn extract_arr_len(out: StageOutput<'_>) -> usize {
+        match out {
+            StageOutput::Pass(cow) => match cow.into_owned() {
+                Val::Arr(a) => a.len(),
+                other => panic!("expected Arr, got {:?}", other),
+            },
+            _ => panic!("expected Pass"),
+        }
+    }
+
+    #[test]
+    fn lines_words_chars_split_correctly() {
+        let s = Val::Str(std::sync::Arc::from("hello world\nfoo bar"));
+        assert_eq!(extract_arr_len(Lines.apply(&s)), 2);
+        assert_eq!(extract_arr_len(Words.apply(&s)), 4);
+        let small = Val::Str(std::sync::Arc::from("ábc"));
+        assert_eq!(extract_arr_len(Chars.apply(&small)), 3);
+    }
+
+    #[test]
+    fn to_number_to_bool_dispatch() {
+        let i = Val::Str(std::sync::Arc::from("42"));
+        match ToNumber.apply(&i) {
+            StageOutput::Pass(cow) => match cow.into_owned() {
+                Val::Int(42) => {}
+                other => panic!("expected Int(42), got {:?}", other),
+            },
+            _ => panic!("expected Pass"),
+        }
+        let f = Val::Str(std::sync::Arc::from("3.14"));
+        match ToNumber.apply(&f) {
+            StageOutput::Pass(cow) => match cow.into_owned() {
+                Val::Float(_) => {}
+                other => panic!("expected Float, got {:?}", other),
+            },
+            _ => panic!("expected Pass"),
+        }
+        let bad = Val::Str(std::sync::Arc::from("nope"));
+        match ToNumber.apply(&bad) {
+            StageOutput::Pass(cow) => match cow.into_owned() {
+                Val::Null => {}
+                other => panic!("expected Null, got {:?}", other),
+            },
+            _ => panic!("expected Pass"),
+        }
+
+        let t = Val::Str(std::sync::Arc::from("true"));
+        let r = ToBool.apply(&t);
+        match r {
+            StageOutput::Pass(cow) => match cow.into_owned() {
+                Val::Bool(true) => {}
+                other => panic!("expected Bool(true), got {:?}", other),
+            },
+            _ => panic!("expected Pass"),
+        }
     }
 
     #[test]
