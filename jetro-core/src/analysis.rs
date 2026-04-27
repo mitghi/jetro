@@ -867,6 +867,7 @@ fn rewrite_call(c: &Arc<super::vm::CompiledCall>, cache: &mut HashMap<u64, Arc<P
         name:      c.name.clone(),
         sub_progs: new_subs.into(),
         orig_args: c.orig_args.clone(),
+        demand_max_keep: c.demand_max_keep,
     })
 }
 

@@ -446,7 +446,7 @@ fn b_has(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
 
 fn split_dispatch(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     let sep = str_arg(args, 0, env)?;
-    crate::pipeline::split_apply(&recv, sep.as_str())
+    crate::builtins::split_apply(&recv, sep.as_str())
         .ok_or_else(|| EvalError("split: expected string".into()))
 }
 
@@ -458,20 +458,20 @@ fn slice_dispatch(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> 
     let end = args.get(1)
         .and_then(|a| eval_pos(a, env).ok())
         .and_then(|v| v.as_i64());
-    Ok(crate::pipeline::slice_apply(recv, start, end))
+    Ok(crate::builtins::slice_apply(recv, start, end))
 }
 
 fn replace_dispatch(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     let needle = str_arg(args, 0, env)?;
     let replacement = str_arg(args, 1, env)?;
-    crate::pipeline::replace_apply(recv, needle.as_str(), replacement.as_str(), false)
+    crate::builtins::replace_apply(recv, needle.as_str(), replacement.as_str(), false)
         .ok_or_else(|| EvalError("replace: expected string".into()))
 }
 
 fn replace_all_dispatch(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     let needle = str_arg(args, 0, env)?;
     let replacement = str_arg(args, 1, env)?;
-    crate::pipeline::replace_apply(recv, needle.as_str(), replacement.as_str(), true)
+    crate::builtins::replace_apply(recv, needle.as_str(), replacement.as_str(), true)
         .ok_or_else(|| EvalError("replace_all: expected string".into()))
 }
 
@@ -479,29 +479,29 @@ fn chunk_dispatch(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> 
     let n = first_i64_arg(args, env).unwrap_or(1).max(1) as usize;
     let items = recv.into_vec()
         .ok_or_else(|| EvalError("chunk: expected array".into()))?;
-    Ok(Val::arr(crate::pipeline::chunk_apply(&items, n)))
+    Ok(Val::arr(crate::builtins::chunk_apply(&items, n)))
 }
 
 fn window_dispatch(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     let n = first_i64_arg(args, env).unwrap_or(2).max(1) as usize;
     let items = recv.into_vec()
         .ok_or_else(|| EvalError("window: expected array".into()))?;
-    Ok(Val::arr(crate::pipeline::window_apply(&items, n)))
+    Ok(Val::arr(crate::builtins::window_apply(&items, n)))
 }
 
 // lift_all_builtins (object family) — fallback dispatch for non-pipeline
 // contexts (e.g., method-call inside a Map sub-program body).  Shares
 // the canonical kernel with `Stage::Keys` / `Stage::Values` / `Stage::Entries`.
 fn keys_dispatch(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    Ok(crate::pipeline::keys_apply(&recv))
+    Ok(crate::builtins::keys_apply(&recv))
 }
 
 fn values_dispatch(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    Ok(crate::pipeline::values_apply(&recv))
+    Ok(crate::builtins::values_apply(&recv))
 }
 
 fn entries_dispatch(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    Ok(crate::pipeline::entries_apply(&recv))
+    Ok(crate::builtins::entries_apply(&recv))
 }
 
 fn b_missing(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {

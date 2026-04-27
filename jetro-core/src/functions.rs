@@ -1625,7 +1625,7 @@ impl Stage for Nth {
 /// Split into lowercased word tokens.  Tokens break on `[-_ \t]`,
 /// lower→upper transitions, and non-alphanumeric boundaries.  Used
 /// by SnakeCase / KebabCase / CamelCase / PascalCase.
-fn split_words_lower(s: &str) -> Vec<String> {
+pub(crate) fn split_words_lower(s: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut cur = String::new();
     let mut prev_lower = false;
@@ -1646,7 +1646,7 @@ fn split_words_lower(s: &str) -> Vec<String> {
     out
 }
 
-fn upper_first_into(p: &str, out: &mut String) {
+pub(crate) fn upper_first_into(p: &str, out: &mut String) {
     let mut chars = p.chars();
     if let Some(f) = chars.next() {
         for u in f.to_uppercase() { out.push(u); }
@@ -2495,7 +2495,7 @@ thread_local! {
         = std::cell::RefCell::new(std::collections::HashMap::with_capacity(32));
 }
 
-fn compile_regex(pat: &str) -> Result<std::sync::Arc<regex::Regex>, String> {
+pub(crate) fn compile_regex(pat: &str) -> Result<std::sync::Arc<regex::Regex>, String> {
     REGEX_CACHE.with(|cell| {
         let mut m = cell.borrow_mut();
         if let Some(r) = m.get(pat) { return Ok(std::sync::Arc::clone(r)); }

@@ -245,6 +245,12 @@ pub struct CompiledCall {
     pub sub_progs: Arc<[Arc<Program>]>,
     /// Original AST args kept for non-lambda dispatch fallback.
     pub orig_args: Arc<[Arg]>,
+    /// Demand hint set by `pass_method_demand` peephole pass when this
+    /// call is followed by a constant-arg `take(n)`. Filter / Map
+    /// handlers read this and dispatch to `*_apply_bounded(items,
+    /// Some(n), ...)` so the predicate / mapper stops after `n` keeps.
+    /// `None` = no demand; behave as before.
+    pub demand_max_keep: Option<usize>,
 }
 
 /// A compiled object field for `Opcode::MakeObj`.
@@ -1032,7 +1038,62 @@ impl Compiler {
         let ops = if cfg.method_const    { Self::pass_method_const_fold(ops)} else { ops };
         let ops = if cfg.const_fold      { Self::pass_const_fold(ops) }      else { ops };
         let ops = if cfg.nullness        { Self::pass_nullness_opt_field(ops)} else { ops };
+        let ops = if !no_fusion { Self::pass_method_demand(ops) } else { ops };
         ops
+    }
+
+    /// Demand propagation peephole — when an array-yielding CallMethod
+    /// (Filter / Map / FlatMap) is immediately followed by a CallMethod
+    /// to `take` with a constant `Int(n)` arg, fold the demand into
+    /// the producer's `demand_max_keep` field and drop the take call.
+    /// The producer's runtime handler then dispatches to
+    /// `*_apply_bounded(items, Some(n), ...)` and stops after `n`
+    /// items pass — no full-array materialisation.
+    ///
+    /// Generic algorithm: parameterised over (method, demand). No
+    /// per-shape `FilterTake` / `MapTake` opcode invented; the demand
+    /// hint travels in the existing `CompiledCall` struct.
+    fn pass_method_demand(ops: Vec<Opcode>) -> Vec<Opcode> {
+        // Extract `n` if `call` is `take(Int(n))` with no other args.
+        fn take_const(call: &CompiledCall) -> Option<usize> {
+            use crate::ast::{Arg, Expr};
+            if call.name.as_ref() != "take" { return None; }
+            if call.orig_args.len() != 1 { return None; }
+            match &call.orig_args[0] {
+                Arg::Pos(Expr::Int(n)) if *n >= 0 => Some(*n as usize),
+                _ => None,
+            }
+        }
+        // Producer must be a per-row 1:1 / filtering call whose handler
+        // honours `demand_max_keep`.
+        fn is_demand_aware(method: BuiltinMethod) -> bool {
+            matches!(method, BuiltinMethod::Filter | BuiltinMethod::Map)
+        }
+        let mut out = Vec::with_capacity(ops.len());
+        let mut i = 0;
+        while i < ops.len() {
+            if i + 1 < ops.len() {
+                if let (Opcode::CallMethod(a), Opcode::CallMethod(b)) =
+                    (&ops[i], &ops[i + 1])
+                {
+                    if is_demand_aware(a.method)
+                        && a.demand_max_keep.is_none()
+                    {
+                        if let Some(n) = take_const(b) {
+                            // Rewrite `a` with demand; drop `b`.
+                            let mut new_call = (**a).clone();
+                            new_call.demand_max_keep = Some(n);
+                            out.push(Opcode::CallMethod(Arc::new(new_call)));
+                            i += 2;
+                            continue;
+                        }
+                    }
+                }
+            }
+            out.push(ops[i].clone());
+            i += 1;
+        }
+        out
     }
 
     // pass_equi_join_fusion deleted — composed substrate runs base
@@ -1809,6 +1870,7 @@ impl Compiler {
                         name:      Arc::from(name.as_str()),
                         sub_progs: sub_progs.into(),
                         orig_args: rest_args.into(),
+                        demand_max_keep: None,
                     });
                     ops.push(Opcode::CallMethod(call));
                 } else {
@@ -1821,6 +1883,7 @@ impl Compiler {
                         name:      Arc::from(name.as_str()),
                         sub_progs: sub_progs.into(),
                         orig_args: args.iter().cloned().collect::<Vec<_>>().into(),
+                        demand_max_keep: None,
                     });
                     ops.push(Opcode::PushRoot);
                     ops.push(Opcode::CallMethod(call));
@@ -1883,6 +1946,7 @@ impl Compiler {
             name: Arc::from(name),
             sub_progs: sub_progs.into(),
             orig_args: args.iter().cloned().collect::<Vec<_>>().into(),
+            demand_max_keep: None,
         }
     }
 
@@ -2014,6 +2078,7 @@ impl Compiler {
                     name:      Arc::from(name.as_str()),
                     sub_progs: Arc::from(&[] as &[Arc<Program>]),
                     orig_args: Arc::from(&[] as &[Arg]),
+                    demand_max_keep: None,
                 };
                 ops.push(Opcode::PushCurrent);
                 ops.push(Opcode::CallMethod(Arc::new(call)));
@@ -2027,6 +2092,7 @@ impl Compiler {
                             name:      Arc::from(name.as_str()),
                             sub_progs: Arc::from(&[] as &[Arc<Program>]),
                             orig_args: Arc::from(&[] as &[Arg]),
+                            demand_max_keep: None,
                         };
                         ops.push(Opcode::PushCurrent);
                         ops.push(Opcode::CallMethod(Arc::new(call)));
@@ -3473,33 +3539,25 @@ impl VM {
             BuiltinMethod::Filter => {
                 let pred = sub.ok_or_else(|| EvalError("filter: requires predicate".into()))?;
                 let items = recv.into_vec().ok_or_else(|| EvalError("filter: expected array".into()))?;
-                let mut out = Vec::with_capacity(items.len());
-                for item in items {
-                    if is_truthy(&self.exec_lam_body_scratch(pred, &item, lam_param, &mut scratch)?) {
-                        out.push(item);
-                    }
-                }
+                let out = crate::builtins::filter_apply_bounded(items, call.demand_max_keep, |item| {
+                    self.exec_lam_body_scratch(pred, item, lam_param, &mut scratch)
+                })?;
                 Ok(Val::arr(out))
             }
             BuiltinMethod::Map => {
                 let mapper = sub.ok_or_else(|| EvalError("map: requires mapper".into()))?;
                 let items = recv.into_vec().ok_or_else(|| EvalError("map: expected array".into()))?;
-                let mut out = Vec::with_capacity(items.len());
-                for item in items {
-                    out.push(self.exec_lam_body_scratch(mapper, &item, lam_param, &mut scratch)?);
-                }
+                let out = crate::builtins::map_apply_bounded(items, call.demand_max_keep, |item| {
+                    self.exec_lam_body_scratch(mapper, item, lam_param, &mut scratch)
+                })?;
                 Ok(Val::arr(out))
             }
             BuiltinMethod::FlatMap => {
                 let mapper = sub.ok_or_else(|| EvalError("flatMap: requires mapper".into()))?;
                 let items = recv.into_vec().ok_or_else(|| EvalError("flatMap: expected array".into()))?;
-                let mut out = Vec::with_capacity(items.len());
-                for item in items {
-                    match self.exec_lam_body_scratch(mapper, &item, lam_param, &mut scratch)? {
-                        Val::Arr(a) => out.extend(Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone())),
-                        v => out.push(v),
-                    }
-                }
+                let out = crate::builtins::flat_map_apply(items, |item| {
+                    self.exec_lam_body_scratch(mapper, item, lam_param, &mut scratch)
+                })?;
                 Ok(Val::arr(out))
             }
             BuiltinMethod::Sort => {
@@ -3510,7 +3568,9 @@ impl VM {
                 if let Val::Arr(a) = &recv {
                     let pred = sub.ok_or_else(|| EvalError("any: requires predicate".into()))?;
                     for item in a.iter() {
-                        if is_truthy(&self.exec_lam_body_scratch(pred, item, lam_param, &mut scratch)?) {
+                        if crate::builtins::any_one(item, |v| {
+                            self.exec_lam_body_scratch(pred, v, lam_param, &mut scratch)
+                        })? {
                             return Ok(Val::Bool(true));
                         }
                     }
@@ -3522,7 +3582,9 @@ impl VM {
                     if a.is_empty() { return Ok(Val::Bool(true)); }
                     let pred = sub.ok_or_else(|| EvalError("all: requires predicate".into()))?;
                     for item in a.iter() {
-                        if !is_truthy(&self.exec_lam_body_scratch(pred, item, lam_param, &mut scratch)?) {
+                        if !crate::builtins::all_one(item, |v| {
+                            self.exec_lam_body_scratch(pred, v, lam_param, &mut scratch)
+                        })? {
                             return Ok(Val::Bool(false));
                         }
                     }
@@ -3534,7 +3596,9 @@ impl VM {
                     let pred = &call.sub_progs[0];
                     let mut n: i64 = 0;
                     for item in a.iter() {
-                        if is_truthy(&self.exec_lam_body_scratch(pred, item, lam_param, &mut scratch)?) {
+                        if crate::builtins::filter_one(item, |v| {
+                            self.exec_lam_body_scratch(pred, v, lam_param, &mut scratch)
+                        })? {
                             n += 1;
                         }
                     }
@@ -3580,58 +3644,41 @@ impl VM {
                     }
                 }
                 // General compiled-bytecode path.
-                let mut map: IndexMap<Arc<str>, Val> = IndexMap::new();
-                for item in items {
-                    let k: Arc<str> = Arc::from(val_to_key(&self.exec_lam_body_scratch(key_prog, &item, lam_param, &mut scratch)?).as_str());
-                    let bucket = map.entry(k).or_insert_with(|| Val::arr(Vec::new()));
-                    bucket.as_array_mut().unwrap().push(item);
-                }
+                let map = crate::builtins::group_by_apply(items, |item| {
+                    self.exec_lam_body_scratch(key_prog, item, lam_param, &mut scratch)
+                })?;
                 Ok(Val::obj(map))
             }
             BuiltinMethod::CountBy => {
                 let key_prog = sub.ok_or_else(|| EvalError("countBy: requires key".into()))?;
                 let items = recv.into_vec().ok_or_else(|| EvalError("countBy: expected array".into()))?;
-                let mut map: IndexMap<Arc<str>, Val> = IndexMap::new();
-                for item in items {
-                    let k: Arc<str> = Arc::from(val_to_key(&self.exec_lam_body_scratch(key_prog, &item, lam_param, &mut scratch)?).as_str());
-                    let counter = map.entry(k).or_insert(Val::Int(0));
-                    if let Val::Int(n) = counter { *n += 1; }
-                }
+                let map = crate::builtins::count_by_apply(items, |item| {
+                    self.exec_lam_body_scratch(key_prog, item, lam_param, &mut scratch)
+                })?;
                 Ok(Val::obj(map))
             }
             BuiltinMethod::IndexBy => {
                 let key_prog = sub.ok_or_else(|| EvalError("indexBy: requires key".into()))?;
                 let items = recv.into_vec().ok_or_else(|| EvalError("indexBy: expected array".into()))?;
-                let mut map: IndexMap<Arc<str>, Val> = IndexMap::new();
-                for item in items {
-                    let k: Arc<str> = Arc::from(val_to_key(&self.exec_lam_body_scratch(key_prog, &item, lam_param, &mut scratch)?).as_str());
-                    map.insert(k, item);
-                }
+                let map = crate::builtins::index_by_apply(items, |item| {
+                    self.exec_lam_body_scratch(key_prog, item, lam_param, &mut scratch)
+                })?;
                 Ok(Val::obj(map))
             }
             BuiltinMethod::TakeWhile => {
                 let pred = sub.ok_or_else(|| EvalError("takeWhile: requires predicate".into()))?;
                 let items = recv.into_vec().ok_or_else(|| EvalError("takeWhile: expected array".into()))?;
-                let mut out = Vec::with_capacity(items.len());
-                for item in items {
-                    if !is_truthy(&self.exec_lam_body_scratch(pred, &item, lam_param, &mut scratch)?) { break; }
-                    out.push(item);
-                }
+                let out = crate::builtins::take_while_apply(items, |item| {
+                    self.exec_lam_body_scratch(pred, item, lam_param, &mut scratch)
+                })?;
                 Ok(Val::arr(out))
             }
             BuiltinMethod::DropWhile => {
                 let pred = sub.ok_or_else(|| EvalError("dropWhile: requires predicate".into()))?;
                 let items = recv.into_vec().ok_or_else(|| EvalError("dropWhile: expected array".into()))?;
-                let mut dropping = true;
-                let mut out = Vec::with_capacity(items.len());
-                for item in items {
-                    if dropping {
-                        let still_drop = is_truthy(&self.exec_lam_body_scratch(pred, &item, lam_param, &mut scratch)?);
-                        if still_drop { continue; }
-                        dropping = false;
-                    }
-                    out.push(item);
-                }
+                let out = crate::builtins::drop_while_apply(items, |item| {
+                    self.exec_lam_body_scratch(pred, item, lam_param, &mut scratch)
+                })?;
                 Ok(Val::arr(out))
             }
             BuiltinMethod::Accumulate => {
@@ -3774,14 +3821,9 @@ impl VM {
             BuiltinMethod::Partition => {
                 let pred = sub.ok_or_else(|| EvalError("partition: requires predicate".into()))?;
                 let items = recv.into_vec().ok_or_else(|| EvalError("partition: expected array".into()))?;
-                let (mut yes, mut no) = (Vec::with_capacity(items.len()), Vec::with_capacity(items.len()));
-                for item in items {
-                    if is_truthy(&self.exec_lam_body_scratch(pred, &item, lam_param, &mut scratch)?) {
-                        yes.push(item);
-                    } else {
-                        no.push(item);
-                    }
-                }
+                let (yes, no) = crate::builtins::partition_apply(items, |item| {
+                    self.exec_lam_body_scratch(pred, item, lam_param, &mut scratch)
+                })?;
                 let mut m: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(2);
                 m.insert(Arc::from("true"),  Val::arr(yes));
                 m.insert(Arc::from("false"), Val::arr(no));
@@ -3790,11 +3832,9 @@ impl VM {
             BuiltinMethod::TransformKeys => {
                 let lam = sub.ok_or_else(|| EvalError("transformKeys: requires lambda".into()))?;
                 let map = recv.into_map().ok_or_else(|| EvalError("transformKeys: expected object".into()))?;
-                let mut out: IndexMap<Arc<str>, Val> = IndexMap::new();
-                for (k, v) in map {
-                    let new_key = Arc::from(val_to_key(&self.exec_lam_body_scratch(lam, &Val::Str(k), lam_param, &mut scratch)?).as_str());
-                    out.insert(new_key, v);
-                }
+                let out = crate::builtins::transform_keys_apply(map, |k| {
+                    self.exec_lam_body_scratch(lam, &Val::Str(k.clone()), lam_param, &mut scratch)
+                })?;
                 Ok(Val::obj(out))
             }
             BuiltinMethod::TransformValues => {
@@ -3840,31 +3880,30 @@ impl VM {
                 // General path — mutate in place via values_mut; no new map,
                 // no key reinsertion.
                 for v in map.values_mut() {
-                    let new = self.exec_lam_body_scratch(lam, v, lam_param, &mut scratch)?;
-                    *v = new;
+                    *v = crate::builtins::map_one(v, |item| {
+                        self.exec_lam_body_scratch(lam, item, lam_param, &mut scratch)
+                    })?;
                 }
                 Ok(Val::obj(map))
             }
             BuiltinMethod::FilterKeys => {
                 let lam = sub.ok_or_else(|| EvalError("filterKeys: requires predicate".into()))?;
                 let map = recv.into_map().ok_or_else(|| EvalError("filterKeys: expected object".into()))?;
-                let mut out: IndexMap<Arc<str>, Val> = IndexMap::new();
-                for (k, v) in map {
-                    if is_truthy(&self.exec_lam_body_scratch(lam, &Val::Str(k.clone()), lam_param, &mut scratch)?) {
-                        out.insert(k, v);
-                    }
-                }
+                let out = crate::builtins::filter_object_apply(map, |k, _v| {
+                    crate::builtins::filter_one(&Val::Str(k.clone()), |item| {
+                        self.exec_lam_body_scratch(lam, item, lam_param, &mut scratch)
+                    })
+                })?;
                 Ok(Val::obj(out))
             }
             BuiltinMethod::FilterValues => {
                 let lam = sub.ok_or_else(|| EvalError("filterValues: requires predicate".into()))?;
                 let map = recv.into_map().ok_or_else(|| EvalError("filterValues: expected object".into()))?;
-                let mut out: IndexMap<Arc<str>, Val> = IndexMap::new();
-                for (k, v) in map {
-                    if is_truthy(&self.exec_lam_body_scratch(lam, &v, lam_param, &mut scratch)?) {
-                        out.insert(k, v);
-                    }
-                }
+                let out = crate::builtins::filter_object_apply(map, |_k, v| {
+                    crate::builtins::filter_one(v, |item| {
+                        self.exec_lam_body_scratch(lam, item, lam_param, &mut scratch)
+                    })
+                })?;
                 Ok(Val::obj(out))
             }
             BuiltinMethod::Pivot => {
@@ -4813,6 +4852,7 @@ fn make_noarg_call(method: BuiltinMethod, name: &str) -> Opcode {
         name:      Arc::from(name),
         sub_progs: Arc::from(&[] as &[Arc<Program>]),
         orig_args: Arc::from(&[] as &[Arg]),
+        demand_max_keep: None,
     }))
 }
 

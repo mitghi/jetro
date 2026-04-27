@@ -64,6 +64,7 @@ pub mod pipeline;
 pub mod bytescan;
 pub mod composed;
 pub mod functions;
+pub mod builtins;
 
 #[cfg(test)]
 mod tests;

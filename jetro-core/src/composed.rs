@@ -311,12 +311,18 @@ impl Stage for GenericFilter {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         let mut c = self.ctx.borrow_mut();
         let VmCtx { vm, env } = &mut *c;
-        let prev = env.swap_current(x.clone());
-        let r = vm.exec_in_env(&self.prog, env);
-        env.restore_current(prev);
-        match r {
-            Ok(v) if crate::eval::util::is_truthy(&v) => StageOutput::Pass(Cow::Borrowed(x)),
-            _ => StageOutput::Filtered,
+        // Single source of truth for filter semantics: route the
+        // truthy-check through `crate::builtins::filter_one` so this
+        // backend shares its definition with vm.rs + pipeline.rs.
+        let kept = crate::builtins::filter_one(x, |item| {
+            let prev = env.swap_current(item.clone());
+            let r = vm.exec_in_env(&self.prog, env);
+            env.restore_current(prev);
+            r
+        });
+        match kept {
+            Ok(true)  => StageOutput::Pass(Cow::Borrowed(x)),
+            _         => StageOutput::Filtered,
         }
     }
 }
