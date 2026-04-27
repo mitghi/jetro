@@ -227,18 +227,18 @@ fn build() -> BuiltinRegistry {
     t.insert("indent",         crate::composed::shims::indent);
     t.insert("dedent",         crate::composed::shims::dedent);
     t.insert("matches",        crate::composed::shims::str_matches);
-    t.insert("scan",           func_strings::scan);  // not yet lifted
+    t.insert("scan",           crate::composed::shims::scan);
 
-    // Case-conversion family.
-    t.insert("snake_case",     func_strings::snake_case);
-    t.insert("kebab_case",     func_strings::kebab_case);
-    t.insert("camel_case",     func_strings::camel_case);
-    t.insert("pascal_case",    func_strings::pascal_case);
+    // Case-conversion family — lifted Stages.
+    t.insert("snake_case",     crate::composed::shims::snake_case);
+    t.insert("kebab_case",     crate::composed::shims::kebab_case);
+    t.insert("camel_case",     crate::composed::shims::camel_case);
+    t.insert("pascal_case",    crate::composed::shims::pascal_case);
 
     // Padding / repetition / reversal.
-    t.insert("center",         func_strings::center);
-    t.insert("repeat_str",     func_strings::repeat_str);
-    t.insert("reverse_str",    func_strings::reverse_str);
+    t.insert("center",         func_strings::center);     // not yet lifted
+    t.insert("repeat_str",     func_strings::repeat_str); // not yet lifted
+    t.insert("reverse_str",    crate::composed::shims::reverse_str);
 
     // Char / byte introspection.
     t.insert("chars_of",       func_strings::chars_of);

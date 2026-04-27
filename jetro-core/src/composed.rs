@@ -182,6 +182,18 @@ pub mod shims {
     delegate_str_stage!(html_escape,  HtmlEscape,   "html_escape: expected string");
     delegate_str_stage!(html_unescape,HtmlUnescape, "html_unescape: expected string");
     delegate_str_stage!(dedent,       Dedent,       "dedent: expected string");
+    delegate_str_stage!(snake_case,   SnakeCase,    "snake_case: expected string");
+    delegate_str_stage!(kebab_case,   KebabCase,    "kebab_case: expected string");
+    delegate_str_stage!(camel_case,   CamelCase,    "camel_case: expected string");
+    delegate_str_stage!(pascal_case,  PascalCase,   "pascal_case: expected string");
+    delegate_str_stage!(reverse_str,  ReverseStr,   "reverse: expected string");
+
+    pub fn scan(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+        if !matches!(recv, Val::Str(_)) { return err!("scan: expected string"); }
+        let pat = first_str_arg(args, env, "scan")?;
+        run_single(&Scan::new(pat), &recv)
+            .ok_or_else(|| EvalError("scan: stage filtered".into()))
+    }
 
     /// `to_bool` errors on non-recognised inputs (cannot use generic
     /// macro).
@@ -1328,6 +1340,87 @@ impl Stage for Nth {
     }
 }
 impl<R> crate::unified::Stage<R> for Nth {
+    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
+        crate::unified::StageOutputU::Filtered
+    }
+}
+
+// ── Case-conversion Stages ─────────────────────────────────────────
+
+/// Split into lowercased word tokens.  Tokens break on `[-_ \t]`,
+/// lower→upper transitions, and non-alphanumeric boundaries.  Used
+/// by SnakeCase / KebabCase / CamelCase / PascalCase.
+fn split_words_lower(s: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut prev_lower = false;
+    for c in s.chars() {
+        let is_sep = c == '_' || c == '-' || c.is_whitespace();
+        if is_sep {
+            if !cur.is_empty() { out.push(std::mem::take(&mut cur)); }
+            prev_lower = false;
+            continue;
+        }
+        if c.is_uppercase() && prev_lower {
+            out.push(std::mem::take(&mut cur));
+        }
+        for d in c.to_lowercase() { cur.push(d); }
+        prev_lower = c.is_lowercase();
+    }
+    if !cur.is_empty() { out.push(cur); }
+    out
+}
+
+fn upper_first_into(p: &str, out: &mut String) {
+    let mut chars = p.chars();
+    if let Some(f) = chars.next() {
+        for u in f.to_uppercase() { out.push(u); }
+        out.push_str(chars.as_str());
+    }
+}
+
+lifted_str_stage!(SnakeCase,  |s| split_words_lower(s).join("_"));
+lifted_str_stage!(KebabCase,  |s| split_words_lower(s).join("-"));
+lifted_str_stage!(CamelCase,  |s| {
+    let parts = split_words_lower(s);
+    let mut out = String::with_capacity(s.len());
+    for (i, p) in parts.iter().enumerate() {
+        if i == 0 { out.push_str(p); }
+        else { upper_first_into(p, &mut out); }
+    }
+    out
+});
+lifted_str_stage!(PascalCase, |s| {
+    let parts = split_words_lower(s);
+    let mut out = String::with_capacity(s.len());
+    for p in parts.iter() { upper_first_into(p, &mut out); }
+    out
+});
+
+// `.reverse()` on a string — char-reversed (Unicode-aware).
+lifted_str_stage!(ReverseStr, |s| s.chars().rev().collect::<String>());
+
+/// `.scan(pat)` — collect all occurrences of `pat` in `s`.
+pub struct Scan { pub pat: std::sync::Arc<str> }
+impl Scan { pub fn new(pat: std::sync::Arc<str>) -> Self { Self { pat } } }
+impl Stage for Scan {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        if let Val::Str(s) = x {
+            let pat = self.pat.as_ref();
+            let mut out: Vec<Val> = Vec::new();
+            if !pat.is_empty() {
+                let mut start = 0usize;
+                while let Some(pos) = s[start..].find(pat) {
+                    out.push(Val::Str(std::sync::Arc::from(pat)));
+                    start += pos + pat.len();
+                }
+            }
+            return StageOutput::Pass(Cow::Owned(Val::arr(out)));
+        }
+        StageOutput::Filtered
+    }
+}
+impl<R> crate::unified::Stage<R> for Scan {
     fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
         crate::unified::StageOutputU::Filtered
     }

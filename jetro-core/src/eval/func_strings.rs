@@ -46,23 +46,7 @@ pub fn from_base64(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
     } else { err!("from_base64: expected string") }
 }
 
-pub fn scan(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-    if let Val::Str(s) = recv {
-        let pat = str_arg(args, 0, env)?;
-        Ok(Val::arr(scan_raw(&s, &pat).into_iter().map(|p| val_str(&p)).collect()))
-    } else { err!("scan: expected string") }
-}
-
-fn scan_raw(s: &str, pat: &str) -> Vec<String> {
-    if pat.is_empty() { return vec![]; }
-    let mut out = Vec::new();
-    let mut start = 0;
-    while let Some(pos) = s[start..].find(pat) {
-        out.push(pat.to_string());
-        start += pos + pat.len();
-    }
-    out
-}
+// `scan` LIFTED to composed::Scan; shim in composed::shims::scan.
 
 // ── Base64 ────────────────────────────────────────────────────────────────────
 
@@ -117,78 +101,9 @@ pub fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-// ── Case-conversion family ────────────────────────────────────────────────────
-
-/// `"helloWorld" -> "hello_world"`. Splits on existing case
-/// transitions and `[-_ ]` separators; joins with `_`.
-pub fn snake_case(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    if let Val::Str(s) = recv {
-        return Ok(val_str(&split_words_lower(&s).join("_")));
-    }
-    err!("snake_case: expected string")
-}
-
-pub fn kebab_case(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    if let Val::Str(s) = recv {
-        return Ok(val_str(&split_words_lower(&s).join("-")));
-    }
-    err!("kebab_case: expected string")
-}
-
-pub fn camel_case(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    if let Val::Str(s) = recv {
-        let parts = split_words_lower(&s);
-        let mut out = String::with_capacity(s.len());
-        for (i, p) in parts.iter().enumerate() {
-            if i == 0 { out.push_str(p); }
-            else { upper_first_into(p, &mut out); }
-        }
-        return Ok(val_str(&out));
-    }
-    err!("camel_case: expected string")
-}
-
-pub fn pascal_case(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    if let Val::Str(s) = recv {
-        let parts = split_words_lower(&s);
-        let mut out = String::with_capacity(s.len());
-        for p in parts.iter() { upper_first_into(p, &mut out); }
-        return Ok(val_str(&out));
-    }
-    err!("pascal_case: expected string")
-}
-
-/// Split a string into lowercased word tokens.  Tokens break on
-/// `[-_ \t]`, on lower→upper transitions (`helloWorld`), and on
-/// non-alphanumeric boundaries.
-fn split_words_lower(s: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    let mut cur = String::new();
-    let mut prev_lower = false;
-    for c in s.chars() {
-        let is_sep = c == '_' || c == '-' || c.is_whitespace();
-        if is_sep {
-            if !cur.is_empty() { out.push(std::mem::take(&mut cur)); }
-            prev_lower = false;
-            continue;
-        }
-        if c.is_uppercase() && prev_lower {
-            out.push(std::mem::take(&mut cur));
-        }
-        for d in c.to_lowercase() { cur.push(d); }
-        prev_lower = c.is_lowercase();
-    }
-    if !cur.is_empty() { out.push(cur); }
-    out
-}
-
-fn upper_first_into(s: &str, out: &mut String) {
-    let mut chars = s.chars();
-    if let Some(c) = chars.next() {
-        for u in c.to_uppercase() { out.push(u); }
-        for c in chars { out.push(c); }
-    }
-}
+// Case-conversion family LIFTED to composed::{SnakeCase, KebabCase,
+// CamelCase, PascalCase}.  Helpers `split_words_lower` /
+// `upper_first_into` moved to composed.rs alongside the Stages.
 
 // ── Padding / repetition ──────────────────────────────────────────────────────
 
@@ -231,12 +146,8 @@ pub fn repeat_str(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> 
     err!("repeat: expected string")
 }
 
-pub fn reverse_str(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    if let Val::Str(s) = recv {
-        return Ok(val_str(&s.chars().rev().collect::<String>()));
-    }
-    err!("reverse: expected string")
-}
+// `reverse_str` LIFTED to composed::ReverseStr; shim in
+// composed::shims::reverse_str.
 
 // ── Char / byte introspection ─────────────────────────────────────────────────
 
