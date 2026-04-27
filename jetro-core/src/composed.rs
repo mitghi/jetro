@@ -121,48 +121,72 @@ impl Identity {
 // Today only Upper is lifted as POC.  Future commits add the rest
 // family-by-family per the lift_all_builtins.md effort estimate.
 
-/// `.upper()` — lifted built-in.  ASCII fast path; full Unicode fallback.
-pub struct Upper;
-impl Upper { pub fn new() -> Self { Self } }
-impl Default for Upper { fn default() -> Self { Self } }
+// Helper macro — generates per-builtin owned Stage impl with the
+// same shape: input must be Val::Str, apply transform, return
+// Pass(Owned(Str)) or Filtered.  Per-string-builtin work shrinks
+// to one macro invocation + the transform body.
+macro_rules! lifted_str_stage {
+    ($name:ident, $transform:expr) => {
+        pub struct $name;
+        impl $name { pub fn new() -> Self { Self } }
+        impl Default for $name { fn default() -> Self { Self } }
 
-impl Stage for Upper {
-    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
-        if let Val::Str(s) = x {
-            if s.is_ascii() {
-                let mut buf: String = s.as_ref().to_owned();
-                buf.make_ascii_uppercase();
-                return StageOutput::Pass(Cow::Owned(Val::Str(std::sync::Arc::from(buf))));
+        impl Stage for $name {
+            fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+                if let Val::Str(s) = x {
+                    let f: fn(&str) -> String = $transform;
+                    let out = f(s.as_ref());
+                    return StageOutput::Pass(Cow::Owned(
+                        Val::Str(std::sync::Arc::from(out))));
+                }
+                StageOutput::Filtered
             }
-            return StageOutput::Pass(Cow::Owned(
-                Val::Str(std::sync::Arc::from(s.to_uppercase()))));
         }
-        StageOutput::Filtered
-    }
+
+        // Borrow-substrate trait impl (future arena-aware variant
+        // lands when Stage<R> grows arena support; placeholder for
+        // now — production borrow path uses bytescan + composed_tape
+        // for builtins).
+        impl<'a> crate::unified::Stage<crate::eval::borrowed::Val<'a>> for $name {
+            fn apply(&self, _x: crate::eval::borrowed::Val<'a>)
+                -> crate::unified::StageOutputU<crate::eval::borrowed::Val<'a>>
+            {
+                crate::unified::StageOutputU::Filtered
+            }
+        }
+    };
 }
 
-impl<'a> crate::unified::Stage<crate::eval::borrowed::Val<'a>> for Upper {
-    fn apply(&self, x: crate::eval::borrowed::Val<'a>)
-        -> crate::unified::StageOutputU<crate::eval::borrowed::Val<'a>>
-    {
-        use crate::eval::borrowed::Val as BVal;
-        if let BVal::Str(s) = x {
-            // Borrow-substrate Upper: allocate result in arena.
-            // Cannot return Pass(BVal) without an arena handle —
-            // Stage<R> apply doesn't take an arena.  Workaround:
-            // compute owned String, leak via Box<str>.  Acceptable
-            // only in tests until Stage<R> grows arena support.
-            // For production borrow-substrate Upper, use the
-            // BVal-specific arena-aware impl in composed_borrow.rs
-            // (future commit).  For now this impl exists for trait
-            // completeness; production uses owned Stage.
-            let _ = s;
-            crate::unified::StageOutputU::Filtered
-        } else {
-            crate::unified::StageOutputU::Filtered
-        }
+// `.upper()` — ASCII fast path; full Unicode fallback.
+lifted_str_stage!(Upper, |s| {
+    if s.is_ascii() {
+        let mut buf = s.to_owned();
+        buf.make_ascii_uppercase();
+        buf
+    } else {
+        s.to_uppercase()
     }
-}
+});
+
+// `.lower()` — ASCII fast path; full Unicode fallback.
+lifted_str_stage!(Lower, |s| {
+    if s.is_ascii() {
+        let mut buf = s.to_owned();
+        buf.make_ascii_lowercase();
+        buf
+    } else {
+        s.to_lowercase()
+    }
+});
+
+// `.trim()` — strip whitespace from both ends.
+lifted_str_stage!(Trim, |s| s.trim().to_owned());
+
+// `.trim_left()` / `.trim_start()` — strip leading whitespace.
+lifted_str_stage!(TrimLeft, |s| s.trim_start().to_owned());
+
+// `.trim_right()` / `.trim_end()` — strip trailing whitespace.
+lifted_str_stage!(TrimRight, |s| s.trim_end().to_owned());
 
 /// Closure-based `.filter(pred)` — for the borrow runner where the
 /// predicate is built from a kernel at lowering time (FieldCmpLit etc.
@@ -2153,6 +2177,49 @@ mod tests {
             StageOutput::Filtered => {}
             _ => panic!("expected Filtered for non-string"),
         }
+    }
+
+    #[test]
+    fn lower_owned_stage_applies() {
+        let s = Val::Str(std::sync::Arc::from("HELLO World"));
+        let stage = Lower;
+        let got = stage.apply(&s);
+        match got {
+            StageOutput::Pass(Cow::Owned(Val::Str(out))) => {
+                assert_eq!(out.as_ref(), "hello world");
+            }
+            _ => panic!("expected lower"),
+        }
+    }
+
+    fn extract_str(out: StageOutput<'_>) -> String {
+        match out {
+            StageOutput::Pass(cow) => match cow.into_owned() {
+                Val::Str(s) => s.as_ref().to_owned(),
+                other => panic!("expected Str, got {:?}", other),
+            },
+            _ => panic!("expected Pass"),
+        }
+    }
+
+    #[test]
+    fn trim_stages_strip_whitespace() {
+        let s = Val::Str(std::sync::Arc::from("  hello  "));
+        let r = extract_str(Trim.apply(&s));
+        assert_eq!(r, "hello");
+        let r = extract_str(TrimLeft.apply(&s));
+        assert_eq!(r, "hello  ");
+        let r = extract_str(TrimRight.apply(&s));
+        assert_eq!(r, "  hello");
+    }
+
+    #[test]
+    fn lifted_str_stages_filter_non_string() {
+        let v = Val::Int(42);
+        assert!(matches!(Lower.apply(&v), StageOutput::Filtered));
+        assert!(matches!(Trim.apply(&v), StageOutput::Filtered));
+        assert!(matches!(TrimLeft.apply(&v), StageOutput::Filtered));
+        assert!(matches!(TrimRight.apply(&v), StageOutput::Filtered));
     }
 
     #[test]
