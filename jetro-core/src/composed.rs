@@ -666,6 +666,192 @@ impl<'a> crate::unified::Stage<crate::eval::borrowed::Val<'a>> for IndexOf {
     { crate::unified::StageOutputU::Filtered }
 }
 
+// ── Array / iterable Stages (lift_all_builtins arrays family) ─────
+//
+// Operate on Val::Arr inputs (columnar lanes IntVec/FloatVec/StrVec/
+// StrSliceVec defer to future per-stage lane-aware impls — for now
+// they Filter, matching the conservative semantics).  Each Stage
+// has owned composed::Stage impl + unified::Stage<BVal> placeholder.
+
+/// `.len()` / `.count()` — number of elements; works on Arr only
+/// in this lift (columnar lane support deferred).
+pub struct Len;
+impl Len { pub fn new() -> Self { Self } }
+impl Default for Len { fn default() -> Self { Self } }
+impl Stage for Len {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        let n = match x {
+            Val::Arr(a)         => a.len(),
+            Val::IntVec(a)      => a.len(),
+            Val::FloatVec(a)    => a.len(),
+            Val::StrVec(a)      => a.len(),
+            Val::StrSliceVec(a) => a.len(),
+            Val::Str(s)         => s.chars().count(),
+            _ => return StageOutput::Filtered,
+        };
+        StageOutput::Pass(Cow::Owned(Val::Int(n as i64)))
+    }
+}
+impl<R> crate::unified::Stage<R> for Len {
+    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
+        crate::unified::StageOutputU::Filtered
+    }
+}
+
+/// `.compact()` — drop Null entries from an Arr.
+pub struct Compact;
+impl Compact { pub fn new() -> Self { Self } }
+impl Default for Compact { fn default() -> Self { Self } }
+impl Stage for Compact {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        if let Val::Arr(a) = x {
+            let kept: Vec<Val> = a.iter()
+                .filter(|v| !matches!(v, Val::Null))
+                .cloned()
+                .collect();
+            return StageOutput::Pass(Cow::Owned(Val::arr(kept)));
+        }
+        StageOutput::Filtered
+    }
+}
+impl<R> crate::unified::Stage<R> for Compact {
+    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
+        crate::unified::StageOutputU::Filtered
+    }
+}
+
+/// `.flatten()` — one level of array flattening.
+pub struct FlattenOne;
+impl FlattenOne { pub fn new() -> Self { Self } }
+impl Default for FlattenOne { fn default() -> Self { Self } }
+impl Stage for FlattenOne {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        if let Val::Arr(outer) = x {
+            let mut out: Vec<Val> = Vec::new();
+            for v in outer.iter() {
+                match v {
+                    Val::Arr(inner) => out.extend(inner.iter().cloned()),
+                    other => out.push(other.clone()),
+                }
+            }
+            return StageOutput::Pass(Cow::Owned(Val::arr(out)));
+        }
+        StageOutput::Filtered
+    }
+}
+impl<R> crate::unified::Stage<R> for FlattenOne {
+    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
+        crate::unified::StageOutputU::Filtered
+    }
+}
+
+/// `.enumerate()` — Arr → Arr of [index, item] pairs (as Val::Arr).
+pub struct Enumerate;
+impl Enumerate { pub fn new() -> Self { Self } }
+impl Default for Enumerate { fn default() -> Self { Self } }
+impl Stage for Enumerate {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        if let Val::Arr(a) = x {
+            let pairs: Vec<Val> = a.iter().enumerate()
+                .map(|(i, v)| Val::arr(vec![Val::Int(i as i64), v.clone()]))
+                .collect();
+            return StageOutput::Pass(Cow::Owned(Val::arr(pairs)));
+        }
+        StageOutput::Filtered
+    }
+}
+impl<R> crate::unified::Stage<R> for Enumerate {
+    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
+        crate::unified::StageOutputU::Filtered
+    }
+}
+
+/// `.pairwise()` — Arr → Arr of [arr[i], arr[i+1]] adjacent pairs.
+pub struct Pairwise;
+impl Pairwise { pub fn new() -> Self { Self } }
+impl Default for Pairwise { fn default() -> Self { Self } }
+impl Stage for Pairwise {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        if let Val::Arr(a) = x {
+            let mut out: Vec<Val> = Vec::with_capacity(a.len().saturating_sub(1));
+            for w in a.windows(2) {
+                out.push(Val::arr(vec![w[0].clone(), w[1].clone()]));
+            }
+            return StageOutput::Pass(Cow::Owned(Val::arr(out)));
+        }
+        StageOutput::Filtered
+    }
+}
+impl<R> crate::unified::Stage<R> for Pairwise {
+    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
+        crate::unified::StageOutputU::Filtered
+    }
+}
+
+/// `.chunk(n)` — split into Arr of length-n Arrs (last may be shorter).
+pub struct Chunk { pub n: usize }
+impl Chunk { pub fn new(n: usize) -> Self { Self { n } } }
+impl Stage for Chunk {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        if self.n == 0 { return StageOutput::Filtered; }
+        if let Val::Arr(a) = x {
+            let chunks: Vec<Val> = a.chunks(self.n)
+                .map(|c| Val::arr(c.to_vec()))
+                .collect();
+            return StageOutput::Pass(Cow::Owned(Val::arr(chunks)));
+        }
+        StageOutput::Filtered
+    }
+}
+impl<R> crate::unified::Stage<R> for Chunk {
+    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
+        crate::unified::StageOutputU::Filtered
+    }
+}
+
+/// `.window(n)` — Arr → Arr of length-n sliding windows.
+pub struct Window { pub n: usize }
+impl Window { pub fn new(n: usize) -> Self { Self { n } } }
+impl Stage for Window {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        if self.n == 0 { return StageOutput::Filtered; }
+        if let Val::Arr(a) = x {
+            let windows: Vec<Val> = a.windows(self.n)
+                .map(|w| Val::arr(w.to_vec()))
+                .collect();
+            return StageOutput::Pass(Cow::Owned(Val::arr(windows)));
+        }
+        StageOutput::Filtered
+    }
+}
+impl<R> crate::unified::Stage<R> for Window {
+    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
+        crate::unified::StageOutputU::Filtered
+    }
+}
+
+/// `.nth(i)` — index into Arr; supports negative indexing.
+pub struct Nth { pub i: i64 }
+impl Nth { pub fn new(i: i64) -> Self { Self { i } } }
+impl Stage for Nth {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        if let Val::Arr(a) = x {
+            let len = a.len();
+            let idx = if self.i < 0 {
+                len.saturating_sub(self.i.unsigned_abs() as usize)
+            } else { self.i as usize };
+            return StageOutput::Pass(Cow::Owned(
+                a.get(idx).cloned().unwrap_or(Val::Null)));
+        }
+        StageOutput::Filtered
+    }
+}
+impl<R> crate::unified::Stage<R> for Nth {
+    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
+        crate::unified::StageOutputU::Filtered
+    }
+}
+
 /// `.last_index_of(needle)` — char-position of last match; -1 on miss.
 pub struct LastIndexOf { pub needle: std::sync::Arc<str> }
 impl LastIndexOf {
@@ -2868,6 +3054,99 @@ mod tests {
             extract_str(StripSuffix::new(std::sync::Arc::from(".txt")).apply(&s3)),
             "hello"
         );
+    }
+
+    fn arr_of(items: Vec<Val>) -> Val { Val::arr(items) }
+
+    #[test]
+    fn array_len_works() {
+        let a = arr_of(vec![Val::Int(1), Val::Int(2), Val::Int(3)]);
+        let r = Len.apply(&a);
+        match r {
+            StageOutput::Pass(cow) => match cow.into_owned() {
+                Val::Int(3) => {}
+                other => panic!("got {:?}", other),
+            },
+            _ => panic!("expected Pass"),
+        }
+        let s = Val::Str(std::sync::Arc::from("café"));
+        let r = Len.apply(&s);
+        match r {
+            StageOutput::Pass(cow) => match cow.into_owned() {
+                Val::Int(4) => {}
+                other => panic!("got {:?}", other),
+            },
+            _ => panic!("expected Pass"),
+        }
+    }
+
+    #[test]
+    fn compact_drops_nulls() {
+        let a = arr_of(vec![Val::Int(1), Val::Null, Val::Int(2), Val::Null, Val::Int(3)]);
+        assert_eq!(extract_arr_len(Compact.apply(&a)), 3);
+    }
+
+    #[test]
+    fn flatten_one_level() {
+        let a = arr_of(vec![
+            arr_of(vec![Val::Int(1), Val::Int(2)]),
+            arr_of(vec![Val::Int(3)]),
+            Val::Int(4),
+        ]);
+        assert_eq!(extract_arr_len(FlattenOne.apply(&a)), 4);
+    }
+
+    #[test]
+    fn enumerate_emits_pairs() {
+        let a = arr_of(vec![Val::Int(10), Val::Int(20), Val::Int(30)]);
+        let r = Enumerate.apply(&a);
+        match r {
+            StageOutput::Pass(cow) => match cow.into_owned() {
+                Val::Arr(arr) => {
+                    assert_eq!(arr.len(), 3);
+                    if let Val::Arr(first) = &arr[0] {
+                        assert_eq!(first.len(), 2);
+                        assert!(matches!(first[0], Val::Int(0)));
+                        assert!(matches!(first[1], Val::Int(10)));
+                    } else { panic!("expected nested Arr"); }
+                }
+                other => panic!("got {:?}", other),
+            },
+            _ => panic!("expected Pass"),
+        }
+    }
+
+    #[test]
+    fn pairwise_emits_adjacent() {
+        let a = arr_of(vec![Val::Int(1), Val::Int(2), Val::Int(3), Val::Int(4)]);
+        assert_eq!(extract_arr_len(Pairwise.apply(&a)), 3);
+    }
+
+    #[test]
+    fn chunk_window_split() {
+        let a = arr_of(vec![Val::Int(1), Val::Int(2), Val::Int(3), Val::Int(4), Val::Int(5)]);
+        assert_eq!(extract_arr_len(Chunk::new(2).apply(&a)), 3);
+        assert_eq!(extract_arr_len(Window::new(3).apply(&a)), 3);
+    }
+
+    #[test]
+    fn nth_with_neg_index() {
+        let a = arr_of(vec![Val::Int(10), Val::Int(20), Val::Int(30)]);
+        let r0 = Nth::new(0).apply(&a);
+        match r0 {
+            StageOutput::Pass(cow) => assert!(matches!(cow.into_owned(), Val::Int(10))),
+            _ => panic!(),
+        }
+        let r1 = Nth::new(-1).apply(&a);
+        match r1 {
+            StageOutput::Pass(cow) => assert!(matches!(cow.into_owned(), Val::Int(30))),
+            _ => panic!(),
+        }
+        let r2 = Nth::new(99).apply(&a);
+        match r2 {
+            StageOutput::Pass(cow) => assert!(matches!(cow.into_owned(), Val::Null)),
+            _ => panic!(),
+        }
     }
 
     #[test]
