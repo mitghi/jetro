@@ -47,12 +47,12 @@ pub mod util;
 pub mod methods;
 pub mod builtins;
 pub mod borrowed;
-mod func_arrays;
-mod func_objects;
+pub(crate) mod func_arrays;
+pub(crate) mod func_objects;
 pub mod func_paths;
-mod func_aggregates;
-mod func_csv;
-mod func_search;
+pub(crate) mod func_aggregates;
+pub(crate) mod func_csv;
+pub(crate) mod func_search;
 
 pub use value::Val;
 pub use methods::{Method, MethodRegistry};

@@ -19,7 +19,7 @@ use indexmap::IndexMap;
 use crate::ast::{Arg, Expr};
 use super::{Env, EvalError, eval, apply_item_mut, apply_item2_mut, eval_pos, first_i64_arg};
 use super::value::Val;
-use super::util::{is_truthy, val_to_key, val_to_string, flatten_val, zip_arrays, cartesian, cmp_vals, val_key, obj2};
+use super::util::{is_truthy, val_to_key, flatten_val, zip_arrays, cartesian, cmp_vals, val_key, obj2};
 
 macro_rules! err {
     ($($t:tt)*) => { Err(EvalError(format!($($t)*))) };
@@ -208,11 +208,12 @@ pub fn sort(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
 
 pub fn remove(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     let pred = args.first().ok_or_else(|| EvalError("remove: requires arg".into()))?;
-    let v = recv.into_vec().ok_or_else(|| EvalError("remove: expected array".into()))?;
     let is_lambda = matches!(pred,
         Arg::Pos(Expr::Lambda { .. }) | Arg::Named(_, Expr::Lambda { .. })
     );
     if is_lambda {
+        // Lambda branch: stays here (needs VM/env access).
+        let v = recv.into_vec().ok_or_else(|| EvalError("remove: expected array".into()))?;
         let mut env_mut = env.clone();
         let mut out = Vec::new();
         for item in v {
@@ -220,9 +221,13 @@ pub fn remove(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
         }
         Ok(Val::arr(out))
     } else {
+        // Literal-val branch: delegate to functions::RemoveVal.
         let item = eval_pos(pred, env)?;
-        let key  = val_to_key(&item);
-        Ok(Val::arr(v.into_iter().filter(|v| val_to_key(v) != key).collect()))
+        use crate::composed::{Stage as _, StageOutput, RemoveVal};
+        match RemoveVal::new(item).apply(&recv) {
+            StageOutput::Pass(c) => Ok(c.into_owned()),
+            _                    => Err(EvalError("remove: expected array".into())),
+        }
     }
 }
 
@@ -231,48 +236,13 @@ pub fn remove(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
 pub fn join(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     let sep = args.first()
         .map(|a| eval_pos(a, env)).transpose()?
-        .and_then(|v| if let Val::Str(s) = v { Some(s.to_string()) } else { None })
-        .unwrap_or_default();
-    let items = recv.into_vec().ok_or_else(|| EvalError("join: expected array".into()))?;
-    if items.is_empty() {
-        return Ok(Val::Str(Arc::<str>::from("")));
+        .and_then(|v| if let Val::Str(s) = v { Some(s) } else { None })
+        .unwrap_or_else(|| Arc::from(""));
+    use crate::composed::{Stage as _, StageOutput, Join};
+    match Join::new(sep).apply(&recv) {
+        StageOutput::Pass(c) => Ok(c.into_owned()),
+        _                    => Err(EvalError("join: expected array".into())),
     }
-    // Fast path: skip the `Vec<String>` intermediate — write straight into
-    // a single preallocated buffer.  Two sub-cases:
-    //   - all items already `Val::Str`: use exact capacity + push_str.
-    //   - general: `write!` via Display for primitives, fall back to
-    //     `val_to_string` only for compound vals.
-    if items.iter().all(|v| matches!(v, Val::Str(_))) {
-        let total_len: usize = items.iter()
-            .map(|v| if let Val::Str(s) = v { s.len() } else { 0 })
-            .sum::<usize>()
-            + sep.len() * (items.len() - 1);
-        let mut out = String::with_capacity(total_len);
-        let mut first = true;
-        for v in &items {
-            if !first { out.push_str(&sep); }
-            first = false;
-            if let Val::Str(s) = v { out.push_str(s); }
-        }
-        return Ok(Val::Str(Arc::<str>::from(out)));
-    }
-    use std::fmt::Write as _;
-    let est_cap = items.len() * 8 + sep.len() * items.len();
-    let mut out = String::with_capacity(est_cap);
-    let mut first = true;
-    for v in &items {
-        if !first { out.push_str(&sep); }
-        first = false;
-        match v {
-            Val::Str(s)   => out.push_str(s),
-            Val::Int(n)   => { let _ = write!(out, "{}", n); }
-            Val::Float(f) => { let _ = write!(out, "{}", f); }
-            Val::Bool(b)  => out.push_str(if *b { "true" } else { "false" }),
-            Val::Null     => out.push_str("null"),
-            other         => out.push_str(&val_to_string(other)),
-        }
-    }
-    Ok(Val::Str(Arc::<str>::from(out)))
 }
 
 /// Equi-join: `lhs.equi_join(rhs, lhs_key, rhs_key)`.
@@ -476,7 +446,7 @@ pub fn global_product(args: &[Arg], env: &Env) -> Result<Val, EvalError> {
 // with `Val::Null` for undefined positions (e.g. first `n-1`
 // rolling values).
 
-fn to_floats(recv: &Val) -> Result<Vec<Option<f64>>, EvalError> {
+pub(crate) fn to_floats(recv: &Val) -> Result<Vec<Option<f64>>, EvalError> {
     match recv {
         Val::IntVec(a)   => Ok(a.iter().map(|n| Some(*n as f64)).collect()),
         Val::FloatVec(a) => Ok(a.iter().map(|f| Some(*f)).collect()),
@@ -489,7 +459,7 @@ fn to_floats(recv: &Val) -> Result<Vec<Option<f64>>, EvalError> {
     }
 }
 
-fn floats_to_val(out: Vec<Option<f64>>) -> Val {
+pub(crate) fn floats_to_val(out: Vec<Option<f64>>) -> Val {
     if out.iter().all(|v| v.is_some()) {
         Val::float_vec(out.into_iter().map(|v| v.unwrap()).collect())
     } else {
@@ -500,144 +470,70 @@ fn floats_to_val(out: Vec<Option<f64>>) -> Val {
     }
 }
 
+// Bodies migrated to functions.rs as `RollingSum/Avg/Min/Max`,
+// `Lag`, `Lead` Stages.  Thin shims for legacy registry path.
+
 pub fn rolling_avg(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     let n = first_i64_arg(args, env)? as usize;
     if n == 0 { return err!("rolling_avg: window must be > 0"); }
-    let xs = to_floats(&recv)?;
-    let mut out: Vec<Option<f64>> = Vec::with_capacity(xs.len());
-    let mut sum: f64 = 0.0;
-    let mut count: usize = 0;
-    for (i, v) in xs.iter().enumerate() {
-        if let Some(x) = v { sum += x; count += 1; }
-        if i >= n {
-            if let Some(old) = xs[i - n] { sum -= old; count -= 1; }
-        }
-        if i + 1 >= n && count > 0 {
-            out.push(Some(sum / count as f64));
-        } else {
-            out.push(None);
-        }
-    }
-    Ok(floats_to_val(out))
+    delegate_num(recv, crate::functions::RollingAvg::new(n))
 }
 
 pub fn rolling_sum(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     let n = first_i64_arg(args, env)? as usize;
     if n == 0 { return err!("rolling_sum: window must be > 0"); }
-    let xs = to_floats(&recv)?;
-    let mut out: Vec<Option<f64>> = Vec::with_capacity(xs.len());
-    let mut sum: f64 = 0.0;
-    for (i, v) in xs.iter().enumerate() {
-        if let Some(x) = v { sum += x; }
-        if i >= n {
-            if let Some(old) = xs[i - n] { sum -= old; }
-        }
-        if i + 1 >= n { out.push(Some(sum)); } else { out.push(None); }
-    }
-    Ok(floats_to_val(out))
+    delegate_num(recv, crate::functions::RollingSum::new(n))
 }
 
 pub fn rolling_min(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     let n = first_i64_arg(args, env)? as usize;
     if n == 0 { return err!("rolling_min: window must be > 0"); }
-    let xs = to_floats(&recv)?;
-    let mut out: Vec<Option<f64>> = Vec::with_capacity(xs.len());
-    for i in 0..xs.len() {
-        if i + 1 < n { out.push(None); continue; }
-        let lo = i + 1 - n;
-        let m = xs[lo..=i].iter().filter_map(|v| *v)
-            .fold(f64::INFINITY, |a, b| a.min(b));
-        out.push(if m.is_finite() { Some(m) } else { None });
-    }
-    Ok(floats_to_val(out))
+    delegate_num(recv, crate::functions::RollingMin::new(n))
 }
 
 pub fn rolling_max(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     let n = first_i64_arg(args, env)? as usize;
     if n == 0 { return err!("rolling_max: window must be > 0"); }
-    let xs = to_floats(&recv)?;
-    let mut out: Vec<Option<f64>> = Vec::with_capacity(xs.len());
-    for i in 0..xs.len() {
-        if i + 1 < n { out.push(None); continue; }
-        let lo = i + 1 - n;
-        let m = xs[lo..=i].iter().filter_map(|v| *v)
-            .fold(f64::NEG_INFINITY, |a, b| a.max(b));
-        out.push(if m.is_finite() { Some(m) } else { None });
-    }
-    Ok(floats_to_val(out))
+    delegate_num(recv, crate::functions::RollingMax::new(n))
 }
 
 pub fn lag(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     let n = if args.is_empty() { 1 } else { first_i64_arg(args, env)?.max(0) as usize };
-    let xs = to_floats(&recv)?;
-    let mut out: Vec<Option<f64>> = Vec::with_capacity(xs.len());
-    for i in 0..xs.len() {
-        out.push(if i >= n { xs[i - n] } else { None });
-    }
-    Ok(floats_to_val(out))
+    delegate_num(recv, crate::functions::Lag::new(n))
 }
 
 pub fn lead(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     let n = if args.is_empty() { 1 } else { first_i64_arg(args, env)?.max(0) as usize };
-    let xs = to_floats(&recv)?;
-    let mut out: Vec<Option<f64>> = Vec::with_capacity(xs.len());
-    for i in 0..xs.len() {
-        let j = i + n;
-        out.push(if j < xs.len() { xs[j] } else { None });
+    delegate_num(recv, crate::functions::Lead::new(n))
+}
+
+// Bodies migrated to composed.rs as `CumMax` / `CumMin` / `DiffWindow`
+// / `PctChange` Stages.  Thin shims kept for legacy
+// `Opcode::CallMethod` registry entries in `eval/builtins.rs` until VM
+// static-dispatch covers them by `BuiltinMethod` enum variant.
+
+fn delegate_num<S: crate::composed::Stage>(recv: Val, stage: S) -> Result<Val, EvalError> {
+    use crate::composed::StageOutput;
+    match stage.apply(&recv) {
+        StageOutput::Pass(c) => Ok(c.into_owned()),
+        _                    => Err(EvalError("expected numeric array".into())),
     }
-    Ok(floats_to_val(out))
 }
 
 pub fn diff_window(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    let xs = to_floats(&recv)?;
-    let mut out: Vec<Option<f64>> = Vec::with_capacity(xs.len());
-    for i in 0..xs.len() {
-        out.push(match (i.checked_sub(1).and_then(|j| xs[j]), xs[i]) {
-            (Some(p), Some(c)) => Some(c - p),
-            _ => None,
-        });
-    }
-    Ok(floats_to_val(out))
+    delegate_num(recv, crate::composed::DiffWindow)
 }
 
 pub fn pct_change(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    let xs = to_floats(&recv)?;
-    let mut out: Vec<Option<f64>> = Vec::with_capacity(xs.len());
-    for i in 0..xs.len() {
-        out.push(match (i.checked_sub(1).and_then(|j| xs[j]), xs[i]) {
-            (Some(p), Some(c)) if p != 0.0 => Some((c - p) / p),
-            _ => None,
-        });
-    }
-    Ok(floats_to_val(out))
+    delegate_num(recv, crate::composed::PctChange)
 }
 
 pub fn cummax(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    let xs = to_floats(&recv)?;
-    let mut out: Vec<Option<f64>> = Vec::with_capacity(xs.len());
-    let mut best: Option<f64> = None;
-    for v in xs.iter() {
-        match (*v, best) {
-            (Some(x), Some(b)) => { best = Some(x.max(b)); out.push(best); }
-            (Some(x), None)    => { best = Some(x);        out.push(best); }
-            (None, _)          => { out.push(best); }
-        }
-    }
-    Ok(floats_to_val(out))
+    delegate_num(recv, crate::composed::CumMax)
 }
 
 pub fn cummin(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    let xs = to_floats(&recv)?;
-    let mut out: Vec<Option<f64>> = Vec::with_capacity(xs.len());
-    let mut best: Option<f64> = None;
-    for v in xs.iter() {
-        match (*v, best) {
-            (Some(x), Some(b)) => { best = Some(x.min(b)); out.push(best); }
-            (Some(x), None)    => { best = Some(x);        out.push(best); }
-            (None, _)          => { out.push(best); }
-        }
-    }
-    Ok(floats_to_val(out))
+    delegate_num(recv, crate::composed::CumMin)
 }
 
 // ── Index lookup family ──────────────────────────────────────────────────────
@@ -663,13 +559,11 @@ pub fn find_index(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> 
 pub fn index_of_value(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     if args.is_empty() { return err!("index: requires a target value"); }
     let target = eval_pos(&args[0], env)?;
-    let items = recv.into_vec().ok_or_else(|| EvalError("index: expected array".into()))?;
-    for (i, item) in items.iter().enumerate() {
-        if super::util::vals_eq(item, &target) {
-            return Ok(Val::Int(i as i64));
-        }
+    use crate::composed::{Stage as _, StageOutput, IndexOfValue};
+    match IndexOfValue::new(target).apply(&recv) {
+        StageOutput::Pass(c) => Ok(c.into_owned()),
+        _                    => err!("index: expected array"),
     }
-    Ok(Val::Null)
 }
 
 pub fn indices_where(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
@@ -692,12 +586,11 @@ pub fn indices_where(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalErro
 pub fn indices_of(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     if args.is_empty() { return err!("indices_of: requires a target value"); }
     let target = eval_pos(&args[0], env)?;
-    let items = recv.into_vec().ok_or_else(|| EvalError("indices_of: expected array".into()))?;
-    let out: Vec<i64> = items.iter().enumerate()
-        .filter(|(_, v)| super::util::vals_eq(v, &target))
-        .map(|(i, _)| i as i64)
-        .collect();
-    Ok(Val::int_vec(out))
+    use crate::composed::{Stage as _, StageOutput, IndicesOf};
+    match IndicesOf::new(target).apply(&recv) {
+        StageOutput::Pass(c) => Ok(c.into_owned()),
+        _                    => err!("indices_of: expected array"),
+    }
 }
 
 // ── max_by / min_by — single-pass argmax / argmin ────────────────────────────
@@ -734,21 +627,5 @@ pub fn min_by(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
 }
 
 pub fn zscore(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    let xs = to_floats(&recv)?;
-    let nums: Vec<f64> = xs.iter().filter_map(|v| *v).collect();
-    if nums.is_empty() {
-        return Ok(floats_to_val(vec![None; xs.len()]));
-    }
-    let mean = nums.iter().sum::<f64>() / nums.len() as f64;
-    let var  = nums.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / nums.len() as f64;
-    let sd   = var.sqrt();
-    let mut out: Vec<Option<f64>> = Vec::with_capacity(xs.len());
-    for v in xs.iter() {
-        out.push(match v {
-            Some(x) if sd > 0.0 => Some((x - mean) / sd),
-            Some(_)             => Some(0.0),
-            None                => None,
-        });
-    }
-    Ok(floats_to_val(out))
+    delegate_num(recv, crate::functions::ZScore)
 }

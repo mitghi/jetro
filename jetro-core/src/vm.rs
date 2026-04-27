@@ -3317,6 +3317,21 @@ impl VM {
             }
         }
 
+        // ── lift_all_builtins.md VM static-dispatch fast path ──────
+        // For zero-arg lifted built-ins (Upper, Lower, Trim, Keys,
+        // Values, Entries, Invert, Compact, Pairwise, ...), call the
+        // composed::*::apply body directly.  Skips:
+        //   * `BUILTINS::global().get(name)` HashMap lookup
+        //   * fn-pointer indirection through the shim
+        //   * shim's redundant arg-len + recv type checks
+        // Per-call overhead drops from ~3 indirections to ~1 match arm
+        // + direct call.  Unknown / arg-bearing methods fall through.
+        if call.orig_args.is_empty() && call.method != BuiltinMethod::Unknown {
+            if let Some(v) = crate::pipeline::vm_lift_zero_arg(call.method, &recv) {
+                return Ok(v);
+            }
+        }
+
         // Value methods — delegate to the existing dispatch with orig_args
         dispatch_method(recv, call.name.as_ref(), &call.orig_args, env)
     }

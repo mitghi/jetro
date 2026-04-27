@@ -304,51 +304,20 @@ fn field_name(arg: &Arg, who: &str) -> Result<Arc<str>, EvalError> {
 
 pub fn explode(recv: Val, args: &[Arg], _env: &Env) -> Result<Val, EvalError> {
     let field = field_name(args.first().ok_or_else(|| EvalError("explode: requires field".into()))?, "explode")?;
-    let items = recv.into_vec().ok_or_else(|| EvalError("explode: expected array".into()))?;
-    let mut out = Vec::with_capacity(items.len());
-    for item in items {
-        match item {
-            Val::Obj(ref m) => {
-                let sub = m.get(field.as_ref()).cloned();
-                match sub.as_ref().map(|v| v.is_array()).unwrap_or(false) {
-                    true => {
-                        let elts = sub.unwrap().into_vec().unwrap();
-                        for e in elts {
-                            let mut row = (**m).clone();
-                            row.insert(Arc::clone(&field), e);
-                            out.push(Val::obj(row));
-                        }
-                    }
-                    false => out.push(item),
-                }
-            }
-            other => out.push(other),
-        }
+    use crate::composed::{Stage as _, StageOutput, Explode};
+    match Explode::new(field).apply(&recv) {
+        StageOutput::Pass(c) => Ok(c.into_owned()),
+        _                    => Err(EvalError("explode: expected array".into())),
     }
-    Ok(Val::arr(out))
 }
 
 pub fn implode(recv: Val, args: &[Arg], _env: &Env) -> Result<Val, EvalError> {
     let field = field_name(args.first().ok_or_else(|| EvalError("implode: requires field".into()))?, "implode")?;
-    let items = recv.into_vec().ok_or_else(|| EvalError("implode: expected array".into()))?;
-    let mut groups: IndexMap<Arc<str>, (IndexMap<Arc<str>, Val>, Vec<Val>)> = IndexMap::new();
-    for item in items {
-        let m = match item {
-            Val::Obj(m) => m,
-            _ => return Err(EvalError("implode: rows must be objects".into())),
-        };
-        let mut rest = (*m).clone();
-        let val = rest.shift_remove(field.as_ref()).unwrap_or(Val::Null);
-        let key_src: IndexMap<Arc<str>, Val> = rest.clone();
-        let key = Arc::<str>::from(val_to_key(&Val::obj(key_src)));
-        groups.entry(key).or_insert_with(|| (rest, Vec::new())).1.push(val);
+    use crate::composed::{Stage as _, StageOutput, Implode};
+    match Implode::new(field).apply(&recv) {
+        StageOutput::Pass(c) => Ok(c.into_owned()),
+        _                    => Err(EvalError("implode: rows must be objects".into())),
     }
-    let mut out = Vec::with_capacity(groups.len());
-    for (_, (mut rest, vals)) in groups {
-        rest.insert(Arc::clone(&field), Val::arr(vals));
-        out.push(Val::obj(rest));
-    }
-    Ok(Val::arr(out))
 }
 
 pub fn group_shape(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {

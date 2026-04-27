@@ -47,16 +47,17 @@ pub enum SinkKind {
 
 impl SinkKind {
     fn from_pipeline_sink(s: &Sink) -> Option<Self> {
-        Some(match s {
-            Sink::Count               => SinkKind::Count,
-            Sink::Numeric(NumOp::Sum) => SinkKind::Sum,
-            Sink::Numeric(NumOp::Min) => SinkKind::Min,
-            Sink::Numeric(NumOp::Max) => SinkKind::Max,
-            Sink::Numeric(NumOp::Avg) => SinkKind::Avg,
-            Sink::First               => SinkKind::First,
-            Sink::Last                => SinkKind::Last,
-            Sink::Collect             => SinkKind::Collect,
-        })
+        match s {
+            Sink::Count               => Some(SinkKind::Count),
+            Sink::Numeric(NumOp::Sum) => Some(SinkKind::Sum),
+            Sink::Numeric(NumOp::Min) => Some(SinkKind::Min),
+            Sink::Numeric(NumOp::Max) => Some(SinkKind::Max),
+            Sink::Numeric(NumOp::Avg) => Some(SinkKind::Avg),
+            Sink::First               => Some(SinkKind::First),
+            Sink::Last                => Some(SinkKind::Last),
+            Sink::Collect             => Some(SinkKind::Collect),
+            Sink::ApproxCountDistinct => None,
+        }
     }
 }
 

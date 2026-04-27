@@ -129,13 +129,16 @@ pub fn pick(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
 }
 
 pub fn omit(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-    let keys: Vec<String> = args.iter()
+    let keys: Vec<Arc<str>> = args.iter()
         .filter_map(|a| eval_pos(a, env).ok())
-        .filter_map(|v| if let Val::Str(s) = v { Some(s.to_string()) } else { None })
+        .filter_map(|v| if let Val::Str(s) = v { Some(s) } else { None })
         .collect();
-    let mut map = recv.into_map().ok_or_else(|| EvalError("omit: expected object".into()))?;
-    for k in &keys { map.shift_remove(k.as_str()); }
-    Ok(Val::obj(map))
+    use crate::composed::{Stage as _, StageOutput, OmitKeys};
+    let owned: Option<Val> = match OmitKeys::new(keys).apply(&recv) {
+        StageOutput::Pass(c) => Some(c.into_owned()),
+        _                    => None,
+    };
+    Ok(owned.ok_or_else(|| EvalError("omit: expected object".into()))?)
 }
 
 // ── Merge / defaults ──────────────────────────────────────────────────────────
@@ -200,10 +203,12 @@ pub fn filter_values(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalErro
 // ── Pairs / pivot ─────────────────────────────────────────────────────────────
 
 pub fn to_pairs(recv: Val) -> Result<Val, EvalError> {
-    use super::util::obj2;
-    Ok(Val::arr(recv.as_object().map(|m| m.iter().map(|(k, v)| {
-        obj2("key", Val::Str(k.clone()), "val", v.clone())
-    }).collect()).unwrap_or_default()))
+    // Body migrated to `composed::ToPairs::apply`.  Thin shim.
+    use crate::composed::{Stage as _, StageOutput, ToPairs};
+    match ToPairs.apply(&recv) {
+        StageOutput::Pass(c) => Ok(c.into_owned()),
+        _                    => Ok(Val::arr(Vec::new())),
+    }
 }
 
 pub fn from_pairs(recv: Val) -> Result<Val, EvalError> {
@@ -308,10 +313,17 @@ pub fn zip_shape(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
 //   - fields sometimes-null get `nullable: true`
 
 pub fn schema(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    Ok(schema_of(&recv))
+    // Body migrated to functions::Schema.  Helpers (schema_of et al.)
+    // remain here as pub(crate) since they're recursive helpers used
+    // by the Stage body.
+    use crate::composed::{Stage as _, StageOutput, Schema};
+    match Schema.apply(&recv) {
+        StageOutput::Pass(c) => Ok(c.into_owned()),
+        _                    => Ok(Val::Null),
+    }
 }
 
-fn schema_of(v: &Val) -> Val {
+pub(crate) fn schema_of(v: &Val) -> Val {
     match v {
         Val::Null       => ty_obj("Null"),
         Val::Bool(_)    => ty_obj("Bool"),

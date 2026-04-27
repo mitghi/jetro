@@ -101,11 +101,12 @@ fn walk_impl(v: Val, fn_arg: &Arg, env: &mut super::Env, pre: bool) -> Result<Va
 // ── collect ──────────────────────────────────────────────────────────────────
 
 pub fn collect(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    match recv {
-        Val::Arr(_) | Val::IntVec(_) | Val::FloatVec(_) => Ok(recv),
-        Val::Null   => Ok(Val::arr(Vec::new())),
-        other       => Ok(Val::arr(vec![other])),
-    }
+    use crate::composed::{Stage as _, StageOutput, CollectVal};
+    let owned: Option<Val> = match CollectVal.apply(&recv) {
+        StageOutput::Pass(c) => Some(c.into_owned()),
+        _                    => None,
+    };
+    Ok(owned.unwrap_or(recv))
 }
 
 // ── Deep walk helper ─────────────────────────────────────────────────────────

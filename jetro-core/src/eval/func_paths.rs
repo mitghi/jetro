@@ -161,22 +161,35 @@ pub fn get_path(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
 pub fn set_path(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     let path    = str_arg(args, 0, env)?;
     let new_val = args.get(1).map(|a| eval_pos(a, env)).transpose()?.unwrap_or(Val::Null);
-    Ok(set_path_impl(recv, &parse_path_segs(&path), new_val))
+    use crate::composed::{Stage as _, StageOutput, SetPath};
+    let owned: Option<Val> = match SetPath::new(Arc::from(path.as_str()), new_val).apply(&recv) {
+        StageOutput::Pass(c) => Some(c.into_owned()),
+        _                    => None,
+    };
+    Ok(owned.unwrap_or(recv))
 }
 
 pub fn del_path(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+    // Body migrated to functions::DelPath.  Path arg may be runtime-
+    // evaluated; when it is, fall back to direct impl.  When literal,
+    // pipeline-IR lift handles it via Stage::DelPath.
     let path = str_arg(args, 0, env)?;
     Ok(del_path_impl(recv, &parse_path_segs(&path)))
 }
 
 pub fn del_paths(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-    let mut val = recv;
+    let mut paths: Vec<Arc<str>> = Vec::with_capacity(args.len());
     for a in args {
         if let Ok(path) = eval_pos(a, env).map(|v| val_to_string(&v)) {
-            val = del_path_impl(val, &parse_path_segs(&path));
+            paths.push(Arc::from(path.as_str()));
         }
     }
-    Ok(val)
+    use crate::composed::{Stage as _, StageOutput, DelPaths};
+    let owned: Option<Val> = match DelPaths::new(paths).apply(&recv) {
+        StageOutput::Pass(c) => Some(c.into_owned()),
+        _                    => None,
+    };
+    Ok(owned.unwrap_or(recv))
 }
 
 pub fn has_path(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
@@ -185,22 +198,27 @@ pub fn has_path(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
 }
 
 pub fn flatten_keys(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+    // Body migrated to functions::FlattenKeys.  Shim resolves runtime
+    // sep, delegates to Stage.
     let sep = args.first()
         .and_then(|a| eval_pos(a, env).ok())
-        .and_then(|v| if let Val::Str(s) = v { Some(s.to_string()) } else { None })
-        .unwrap_or_else(|| ".".to_string());
-    let mut out = IndexMap::new();
-    flatten_keys_impl("", &recv, &sep, &mut out);
-    Ok(Val::obj(out))
+        .and_then(|v| if let Val::Str(s) = v { Some(s) } else { None })
+        .unwrap_or_else(|| Arc::from("."));
+    use crate::composed::{Stage as _, StageOutput, FlattenKeys};
+    match FlattenKeys::new(sep).apply(&recv) {
+        StageOutput::Pass(c) => Ok(c.into_owned()),
+        _                    => err!("flatten_keys: expected object"),
+    }
 }
 
 pub fn unflatten_keys(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     let sep = args.first()
         .and_then(|a| eval_pos(a, env).ok())
-        .and_then(|v| if let Val::Str(s) = v { Some(s.to_string()) } else { None })
-        .unwrap_or_else(|| ".".to_string());
-    match &recv {
-        Val::Obj(m) => Ok(unflatten_keys_impl(m, &sep)),
-        _ => err!("unflatten_keys: expected object"),
+        .and_then(|v| if let Val::Str(s) = v { Some(s) } else { None })
+        .unwrap_or_else(|| Arc::from("."));
+    use crate::composed::{Stage as _, StageOutput, UnflattenKeys};
+    match UnflattenKeys::new(sep).apply(&recv) {
+        StageOutput::Pass(c) => Ok(c.into_owned()),
+        _                    => err!("unflatten_keys: expected object"),
     }
 }

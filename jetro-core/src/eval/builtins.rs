@@ -5,7 +5,6 @@
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
-use std::sync::Arc;
 
 use crate::ast::Arg;
 
@@ -297,48 +296,35 @@ fn build() -> BuiltinRegistry {
 // ── Wrapper functions ─────────────────────────────────────────────────────────
 
 fn b_len(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    Ok(Val::Int(match &recv {
-        Val::Arr(a) => a.len() as i64,
-        Val::IntVec(a) => a.len() as i64,
-        Val::FloatVec(a) => a.len() as i64,
-        Val::Obj(m) => m.len() as i64,
-        Val::Str(s) => s.chars().count() as i64,
-        _ => return err!("len: unsupported type"),
-    }))
+    use crate::composed::{Stage as _, StageOutput, Len};
+    match Len.apply(&recv) {
+        StageOutput::Pass(c) => Ok(c.into_owned()),
+        _                    => err!("len: unsupported type"),
+    }
 }
 
 fn b_type(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    Ok(Val::Str(Arc::from(recv.type_name())))
+    use crate::composed::{Stage as _, StageOutput, TypeName};
+    match TypeName.apply(&recv) {
+        StageOutput::Pass(c) => Ok(c.into_owned()),
+        _                    => err!("type: unsupported"),
+    }
 }
 
 fn b_to_string(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    Ok(val_str(&val_to_string(&recv)))
+    use crate::composed::{Stage as _, StageOutput};
+    match crate::composed::ToString.apply(&recv) {
+        StageOutput::Pass(c) => Ok(c.into_owned()),
+        _                    => err!("to_string: unsupported"),
+    }
 }
 
 fn b_to_json(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    // Fast path: primitive scalars serialise without a serde_json::Value
-    // detour.  to_json() gets called per-element in map pipelines, and the
-    // Val -> serde_json::Value conversion was the dominant cost there.
-    match &recv {
-        Val::Int(n)  => return Ok(val_str(&n.to_string())),
-        Val::Float(f) => {
-            if f.is_finite() {
-                let v = serde_json::Value::from(*f);
-                return Ok(val_str(&serde_json::to_string(&v).unwrap_or_default()));
-            } else {
-                return Ok(val_str("null"));
-            }
-        }
-        Val::Bool(b) => return Ok(val_str(if *b { "true" } else { "false" })),
-        Val::Null    => return Ok(val_str("null")),
-        Val::Str(s)  => {
-            let v = serde_json::Value::String(s.to_string());
-            return Ok(val_str(&serde_json::to_string(&v).unwrap_or_default()));
-        }
-        _ => {}
+    use crate::composed::{Stage as _, StageOutput};
+    match crate::composed::ToJson.apply(&recv) {
+        StageOutput::Pass(c) => Ok(c.into_owned()),
+        _                    => err!("to_json: unsupported"),
     }
-    let sv: serde_json::Value = recv.into();
-    Ok(val_str(&serde_json::to_string(&sv).unwrap_or_default()))
 }
 
 fn b_from_json(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
