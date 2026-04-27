@@ -121,6 +121,18 @@ impl Identity {
 // Today only Upper is lifted as POC.  Future commits add the rest
 // family-by-family per the lift_all_builtins.md effort estimate.
 
+/// Run a single Stage and unwrap its single-Val result, or return
+/// None when the Stage filtered/done.  Used by `eval::func_*` shims
+/// that delegate to lifted Stages: the function body lives in the
+/// Stage, the func entry point becomes a thin dispatch.
+#[inline]
+pub fn run_single<S: Stage>(stage: &S, recv: &Val) -> Option<Val> {
+    match stage.apply(recv) {
+        StageOutput::Pass(c) => Some(c.into_owned()),
+        _ => None,
+    }
+}
+
 // Helper macro — generates per-builtin owned Stage impl with the
 // same shape: input must be Val::Str, apply transform, return
 // Pass(Owned(Str)) or Filtered.  Per-string-builtin work shrinks

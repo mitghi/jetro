@@ -19,86 +19,31 @@ macro_rules! err {
 
 // ── Standard-signature string methods ─────────────────────────────────────────
 // All follow fn(Val, &[Arg], &Env) -> Result<Val, EvalError>.
+//
+// Bodies LIFTED to first-class Stages in `composed.rs` per
+// `lift_all_builtins.md`.  These shims dispatch Method-call
+// invocations to the same Stage kernel — single source of truth.
 
-pub fn upper(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    if let Val::Str(s) = recv {
-        if s.is_ascii() {
-            let mut buf: String = s.as_ref().to_owned();
-            buf.make_ascii_uppercase();
-            return Ok(Val::Str(Arc::<str>::from(buf)));
+macro_rules! delegate_str_stage {
+    ($shim:ident, $stage:expr, $err:expr) => {
+        pub fn $shim(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
+            if !matches!(recv, Val::Str(_)) { return err!($err); }
+            crate::composed::run_single(&$stage, &recv).ok_or_else(|| EvalError($err.into()))
         }
-        Ok(Val::Str(Arc::<str>::from(s.to_uppercase())))
-    } else { err!("upper: expected string") }
+    };
 }
 
-pub fn lower(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    if let Val::Str(s) = recv {
-        if s.is_ascii() {
-            let mut buf: String = s.as_ref().to_owned();
-            buf.make_ascii_lowercase();
-            return Ok(Val::Str(Arc::<str>::from(buf)));
-        }
-        Ok(Val::Str(Arc::<str>::from(s.to_lowercase())))
-    } else { err!("lower: expected string") }
-}
-
-pub fn capitalize(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    if let Val::Str(s) = recv { Ok(val_str(&capitalize_str(&s))) }
-    else { err!("capitalize: expected string") }
-}
-
-pub fn title_case(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    if let Val::Str(s) = recv { Ok(val_str(&title_case_raw(&s))) }
-    else { err!("title_case: expected string") }
-}
-
-pub fn trim(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    if let Val::Str(s) = recv {
-        let t = s.trim();
-        if t.len() == s.len() { return Ok(Val::Str(s)); }
-        Ok(Val::Str(Arc::from(t)))
-    } else { err!("trim: expected string") }
-}
-
-pub fn trim_left(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    if let Val::Str(s) = recv {
-        let t = s.trim_start();
-        if t.len() == s.len() { return Ok(Val::Str(s)); }
-        Ok(Val::Str(Arc::from(t)))
-    } else { err!("trim_left: expected string") }
-}
-
-pub fn trim_right(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    if let Val::Str(s) = recv {
-        let t = s.trim_end();
-        if t.len() == s.len() { return Ok(Val::Str(s)); }
-        Ok(Val::Str(Arc::from(t)))
-    } else { err!("trim_right: expected string") }
-}
-
-pub fn lines(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    if let Val::Str(s) = recv { Ok(Val::arr(s.lines().map(val_str).collect())) }
-    else { err!("lines: expected string") }
-}
-
-pub fn words(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    if let Val::Str(s) = recv { Ok(Val::arr(s.split_whitespace().map(val_str).collect())) }
-    else { err!("words: expected string") }
-}
-
-pub fn chars(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    if let Val::Str(s) = recv {
-        Ok(Val::arr(s.chars().map(|c| val_str(&c.to_string())).collect()))
-    } else { err!("chars: expected string") }
-}
-
-pub fn to_number(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    if let Val::Str(s) = recv {
-        if let Ok(i) = s.parse::<i64>()  { return Ok(Val::Int(i)); }
-        if let Ok(f) = s.parse::<f64>()  { return Ok(Val::Float(f)); }
-        Ok(Val::Null)
-    } else { err!("to_number: expected string") }
-}
+delegate_str_stage!(upper,        crate::composed::Upper,        "upper: expected string");
+delegate_str_stage!(lower,        crate::composed::Lower,        "lower: expected string");
+delegate_str_stage!(capitalize,   crate::composed::Capitalize,   "capitalize: expected string");
+delegate_str_stage!(title_case,   crate::composed::TitleCase,    "title_case: expected string");
+delegate_str_stage!(trim,         crate::composed::Trim,         "trim: expected string");
+delegate_str_stage!(trim_left,    crate::composed::TrimLeft,     "trim_left: expected string");
+delegate_str_stage!(trim_right,   crate::composed::TrimRight,    "trim_right: expected string");
+delegate_str_stage!(lines,        crate::composed::Lines,        "lines: expected string");
+delegate_str_stage!(words,        crate::composed::Words,        "words: expected string");
+delegate_str_stage!(chars,        crate::composed::Chars,        "chars: expected string");
+delegate_str_stage!(to_number,    crate::composed::ToNumber,     "to_number: expected string");
 
 pub fn to_bool(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
     if let Val::Str(s) = recv {
@@ -106,11 +51,14 @@ pub fn to_bool(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
     } else { err!("to_bool: expected string") }
 }
 
-pub fn to_base64(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    if let Val::Str(s) = recv { Ok(val_str(&base64_encode(s.as_bytes()))) }
-    else { err!("to_base64: expected string") }
-}
+delegate_str_stage!(to_base64,    crate::composed::ToBase64,     "to_base64: expected string");
+delegate_str_stage!(url_encode,   crate::composed::UrlEncode,    "url_encode: expected string");
+delegate_str_stage!(url_decode,   crate::composed::UrlDecode,    "url_decode: expected string");
+delegate_str_stage!(html_escape,  crate::composed::HtmlEscape,   "html_escape: expected string");
+delegate_str_stage!(html_unescape,crate::composed::HtmlUnescape, "html_unescape: expected string");
 
+// from_base64 has explicit error-on-bad-input semantics; cannot use
+// the generic delegate macro (which only collapses Filter → err).
 pub fn from_base64(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
     if let Val::Str(s) = recv {
         match base64_decode(&s) {
@@ -118,26 +66,6 @@ pub fn from_base64(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
             Err(e)    => err!("from_base64: {}", e),
         }
     } else { err!("from_base64: expected string") }
-}
-
-pub fn url_encode(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    if let Val::Str(s) = recv { Ok(val_str(&url_encode_raw(&s))) }
-    else { err!("url_encode: expected string") }
-}
-
-pub fn url_decode(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    if let Val::Str(s) = recv { Ok(val_str(&url_decode_raw(&s))) }
-    else { err!("url_decode: expected string") }
-}
-
-pub fn html_escape(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    if let Val::Str(s) = recv { Ok(val_str(&html_escape_raw(&s))) }
-    else { err!("html_escape: expected string") }
-}
-
-pub fn html_unescape(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    if let Val::Str(s) = recv { Ok(val_str(&html_unescape_raw(&s))) }
-    else { err!("html_unescape: expected string") }
 }
 
 pub fn repeat(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
@@ -269,17 +197,12 @@ fn fill_char(args: &[Arg], idx: usize, env: &Env) -> char {
         .unwrap_or(' ')
 }
 
-fn capitalize_str(s: &str) -> String {
-    let mut c = s.chars();
-    match c.next() {
-        None    => String::new(),
-        Some(f) => f.to_uppercase().collect::<String>() + &c.as_str().to_lowercase(),
-    }
-}
-
-fn title_case_raw(s: &str) -> String {
-    s.split_whitespace().map(capitalize_str).collect::<Vec<_>>().join(" ")
-}
+// `capitalize_str`, `title_case_raw`, `url_encode_raw`,
+// `url_decode_raw`, `html_escape_raw`, `html_unescape_raw` deleted —
+// bodies migrated into composed.rs Stage impls (Capitalize / TitleCase
+// / UrlEncode / UrlDecode / HtmlEscape / HtmlUnescape).
+//
+// `scan_raw` retained — used by str_matches.
 
 fn scan_raw(s: &str, pat: &str) -> Vec<String> {
     if pat.is_empty() { return vec![]; }
@@ -290,51 +213,6 @@ fn scan_raw(s: &str, pat: &str) -> Vec<String> {
         start += pos + pat.len();
     }
     out
-}
-
-fn url_encode_raw(s: &str) -> String {
-    s.bytes().flat_map(|b| {
-        if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b'~' {
-            vec![b as char]
-        } else {
-            format!("%{:02X}", b).chars().collect()
-        }
-    }).collect()
-}
-
-fn url_decode_raw(s: &str) -> String {
-    let mut out = Vec::new();
-    let bytes = s.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(h1), Some(h2)) = (
-                char::from(bytes[i + 1]).to_digit(16),
-                char::from(bytes[i + 2]).to_digit(16),
-            ) {
-                out.push((h1 * 16 + h2) as u8);
-                i += 3;
-                continue;
-            }
-        } else if bytes[i] == b'+' {
-            out.push(b' ');
-            i += 1;
-            continue;
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-fn html_escape_raw(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
-     .replace('"', "&quot;").replace('\'', "&#39;")
-}
-
-fn html_unescape_raw(s: &str) -> String {
-    s.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
-     .replace("&quot;", "\"").replace("&#39;", "'")
 }
 
 // ── Base64 ────────────────────────────────────────────────────────────────────
