@@ -1109,23 +1109,45 @@ impl Jetro {
     pub fn collect_val<S: AsRef<str>>(&self, expr: S) -> std::result::Result<JetroVal, EvalError> {
         let expr = expr.as_ref();
 
-        // Schema-aware projected parse — generic byte-walker over
-        // raw_bytes.  Always tried before tape parse so cold queries
-        // that match its supported Sink/Stage surface (Numeric/Count/
-        // First/Last/...) never trigger the full tape build.
+        // Owned bytescan fast path — schema-aware projected parse
+        // over raw_bytes.  Tried before tape parse so cold queries
+        // matching its Sink/Stage surface (Numeric/Count/First/Last/
+        // …) skip the full tape build.
         #[cfg(feature = "simd-json")]
-        if let Some((p, raw)) = self.fast_path_prereqs(expr) {
-            if let Some(out) = bytescan::try_run(&p, raw) {
+        let prereqs = self.fast_path_prereqs(expr);
+        #[cfg(feature = "simd-json")]
+        if let Some((p, raw)) = &prereqs {
+            if let Some(out) = bytescan::try_run(p, raw) {
                 return out;
             }
         }
+        // Slow paths run with the already-lowered Pipeline if we have
+        // it, falling back to a fresh parse only for non-bytescannable
+        // shapes (no raw_bytes / root_val already built).
+        #[cfg(feature = "simd-json")]
+        let prelowered = prereqs.map(|(p, _)| p);
+        #[cfg(not(feature = "simd-json"))]
+        let prelowered: Option<pipeline::Pipeline> = None;
 
-        // Re-parse + lower for the slow paths below.  Cheap relative
-        // to tape parse; alternative is plumbing the parsed expr
-        // through `fast_path_prereqs` which complicates lifetimes
-        // for marginal savings.
-        let parsed = parser::parse(expr).ok();
-        let lowered = parsed.as_ref().and_then(pipeline::Pipeline::lower);
+        self.collect_val_slow(expr, prelowered)
+    }
+
+    /// Slow-path tail of `collect_val` (tape-descend / Pipeline::run
+    /// / VM fallback).  `prelowered` carries the already-parsed
+    /// Pipeline from caller's bytescan stage so we don't re-parse.
+    /// Both `collect_val` (after owned bytescan declines) and
+    /// `collect_val_borrow` (after borrow fast paths decline) call
+    /// this to avoid re-running parse + lower + bytescan when
+    /// falling through to owned slow paths.
+    fn collect_val_slow(
+        &self,
+        expr: &str,
+        prelowered: Option<pipeline::Pipeline>,
+    ) -> std::result::Result<JetroVal, EvalError> {
+        let lowered: Option<pipeline::Pipeline> = match prelowered {
+            Some(p) => Some(p),
+            None => parser::parse(expr).ok().as_ref().and_then(pipeline::Pipeline::lower),
+        };
 
         // Tape descend-aggregate fast path for `$..k.<aggregate>`
         // shapes that bytescan does not handle.  Triggers tape parse
@@ -1182,36 +1204,40 @@ impl Jetro {
             self.arena.get_or_init(crate::eval::borrowed::Arena::new);
         let expr_s = expr.as_ref();
 
-        // Borrow-specific fast paths — share parse+lower+precheck
-        // with `collect_val` via `fast_path_prereqs`.
-        if let Some((p, raw)) = self.fast_path_prereqs(expr_s) {
-            if let Some(out) = bytescan::try_run_borrow(&p, raw, arena) {
+        // Borrow-specific fast paths share parse+lower+precheck with
+        // `collect_val` via `fast_path_prereqs`.  Pipeline reuse on
+        // fallback avoids re-parse + redundant bytescan attempts.
+        let prereqs = self.fast_path_prereqs(expr_s);
+        if let Some((p, raw)) = &prereqs {
+            if let Some(out) = bytescan::try_run_borrow(p, raw, arena) {
                 return out;
             }
-            // composed_tape path — runs after bytescan_borrow declines.
-            // Reuses cached tape (lazy_tape) so no re-parse cost; emits
-            // BVal<'a> directly without materialising a Val tree.
-            // Closes the gap pipeline_borrow couldn't: string-lit
-            // filters + Sink::Numeric/Count/First/Last/Collect on
-            // non-bytescannable shapes.
+            // composed_tape path runs after bytescan_borrow declines.
+            // Reuses cached tape (lazy_tape) so no re-parse cost;
+            // emits BVal<'a> directly without materialising a Val
+            // tree.  Closes the gap pipeline_borrow couldn't:
+            // string-lit filters + Sink::Numeric/Count/First/Last/
+            // Collect on non-bytescannable shapes.
             //
             // pipeline_borrow path NOT wired by default — its full
             // `from_json_simd_arena` parse (~3.7 ms on 1.1 MB) is
             // dominated by composed_tape's tape reuse.  Kept as
             // substrate for direct tests only.
             if let Some(tape) = self.lazy_tape() {
-                if let Some(out) = pipeline_tape_borrow::try_run_borrow_tape(&p, tape, arena) {
+                if let Some(out) = pipeline_tape_borrow::try_run_borrow_tape(p, tape, arena) {
                     return out;
                 }
             }
         }
 
-        // Fallback: delegate to `collect_val` (owned path: tape
-        // descend / run_with / VM), ingest result into arena via
-        // `from_owned`.  Same allocator cost as `collect_val`, but
-        // the result lives in the handle's arena (cheap downstream
-        // traversal, no Arc bumps on read).
-        let owned = self.collect_val(expr_s)?;
+        // Fallback: delegate to owned slow-path tail (tape-descend /
+        // run_with / VM) — pass the already-lowered Pipeline from
+        // `prereqs` so we don't re-parse and don't re-run owned
+        // bytescan (it has the same shape acceptance as
+        // try_run_borrow which already declined).  Result ingested
+        // into arena via `from_owned`.
+        let prelowered = prereqs.map(|(p, _)| p);
+        let owned = self.collect_val_slow(expr_s, prelowered)?;
         Ok(crate::eval::borrowed::from_owned(arena, &owned))
     }
 
