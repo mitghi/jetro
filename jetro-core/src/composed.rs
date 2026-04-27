@@ -830,6 +830,185 @@ impl<R> crate::unified::Stage<R> for Window {
     }
 }
 
+// ── Object Stages (lift_all_builtins objects family) ─────────────
+
+/// `.keys()` — Obj → Arr<Str>.
+pub struct Keys;
+impl Keys { pub fn new() -> Self { Self } }
+impl Default for Keys { fn default() -> Self { Self } }
+impl Stage for Keys {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        let m = match x.as_object() { Some(m) => m, None => return StageOutput::Filtered };
+        let items: Vec<Val> = m.keys().map(|k| Val::Str(k.clone())).collect();
+        StageOutput::Pass(Cow::Owned(Val::arr(items)))
+    }
+}
+impl<R> crate::unified::Stage<R> for Keys {
+    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
+        crate::unified::StageOutputU::Filtered
+    }
+}
+
+/// `.values()` — Obj → Arr.
+pub struct Values;
+impl Values { pub fn new() -> Self { Self } }
+impl Default for Values { fn default() -> Self { Self } }
+impl Stage for Values {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        let m = match x.as_object() { Some(m) => m, None => return StageOutput::Filtered };
+        let items: Vec<Val> = m.values().cloned().collect();
+        StageOutput::Pass(Cow::Owned(Val::arr(items)))
+    }
+}
+impl<R> crate::unified::Stage<R> for Values {
+    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
+        crate::unified::StageOutputU::Filtered
+    }
+}
+
+/// `.entries()` / `.to_pairs()` — Obj → Arr<[Str, Val]>.
+pub struct Entries;
+impl Entries { pub fn new() -> Self { Self } }
+impl Default for Entries { fn default() -> Self { Self } }
+impl Stage for Entries {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        let m = match x.as_object() { Some(m) => m, None => return StageOutput::Filtered };
+        let pairs: Vec<Val> = m.iter().map(|(k, v)| {
+            Val::arr(vec![Val::Str(k.clone()), v.clone()])
+        }).collect();
+        StageOutput::Pass(Cow::Owned(Val::arr(pairs)))
+    }
+}
+impl<R> crate::unified::Stage<R> for Entries {
+    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
+        crate::unified::StageOutputU::Filtered
+    }
+}
+
+/// `.from_pairs()` — Arr<[Str, Val]> → Obj.
+pub struct FromPairs;
+impl FromPairs { pub fn new() -> Self { Self } }
+impl Default for FromPairs { fn default() -> Self { Self } }
+impl Stage for FromPairs {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        if let Val::Arr(pairs) = x {
+            let mut m: indexmap::IndexMap<std::sync::Arc<str>, Val> =
+                indexmap::IndexMap::with_capacity(pairs.len());
+            for p in pairs.iter() {
+                if let Val::Arr(kv) = p {
+                    if kv.len() == 2 {
+                        if let Val::Str(k) = &kv[0] {
+                            m.insert(k.clone(), kv[1].clone());
+                        }
+                    }
+                }
+            }
+            return StageOutput::Pass(Cow::Owned(Val::Obj(std::sync::Arc::new(m))));
+        }
+        StageOutput::Filtered
+    }
+}
+impl<R> crate::unified::Stage<R> for FromPairs {
+    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
+        crate::unified::StageOutputU::Filtered
+    }
+}
+
+/// `.invert()` — Obj{k → v} → Obj{v_str → k} (values stringified).
+pub struct Invert;
+impl Invert { pub fn new() -> Self { Self } }
+impl Default for Invert { fn default() -> Self { Self } }
+impl Stage for Invert {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        let m = match x.as_object() { Some(m) => m, None => return StageOutput::Filtered };
+        let mut out: indexmap::IndexMap<std::sync::Arc<str>, Val> =
+            indexmap::IndexMap::with_capacity(m.len());
+        for (k, v) in m.iter() {
+            let new_key: std::sync::Arc<str> = match v {
+                Val::Str(s) => s.clone(),
+                Val::Int(n) => std::sync::Arc::from(n.to_string()),
+                Val::Float(f) => std::sync::Arc::from(f.to_string()),
+                Val::Bool(b) => std::sync::Arc::from(if *b { "true" } else { "false" }),
+                Val::Null    => std::sync::Arc::from("null"),
+                _ => continue,
+            };
+            out.insert(new_key, Val::Str(k.clone()));
+        }
+        StageOutput::Pass(Cow::Owned(Val::Obj(std::sync::Arc::new(out))))
+    }
+}
+impl<R> crate::unified::Stage<R> for Invert {
+    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
+        crate::unified::StageOutputU::Filtered
+    }
+}
+
+/// `.has(key)` — does Obj contain `key`? Val::Bool.
+pub struct Has { pub key: std::sync::Arc<str> }
+impl Has { pub fn new(key: std::sync::Arc<str>) -> Self { Self { key } } }
+impl Stage for Has {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        let m = match x.as_object() { Some(m) => m, None => return StageOutput::Filtered };
+        let found = m.contains_key(self.key.as_ref());
+        StageOutput::Pass(Cow::Owned(Val::Bool(found)))
+    }
+}
+impl<R> crate::unified::Stage<R> for Has {
+    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
+        crate::unified::StageOutputU::Filtered
+    }
+}
+
+/// `.pick([keys])` — narrow Obj to selected keys (as-is, no rename).
+pub struct Pick { pub keys: Vec<std::sync::Arc<str>> }
+impl Pick {
+    pub fn new(keys: Vec<std::sync::Arc<str>>) -> Self { Self { keys } }
+}
+impl Stage for Pick {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        let m = match x.as_object() { Some(m) => m, None => return StageOutput::Filtered };
+        let mut out: indexmap::IndexMap<std::sync::Arc<str>, Val> =
+            indexmap::IndexMap::with_capacity(self.keys.len());
+        for k in &self.keys {
+            if let Some(v) = m.get(k.as_ref()) {
+                out.insert(k.clone(), v.clone());
+            }
+        }
+        StageOutput::Pass(Cow::Owned(Val::Obj(std::sync::Arc::new(out))))
+    }
+}
+impl<R> crate::unified::Stage<R> for Pick {
+    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
+        crate::unified::StageOutputU::Filtered
+    }
+}
+
+/// `.omit([keys])` — drop selected keys from Obj.
+pub struct Omit { pub keys: Vec<std::sync::Arc<str>> }
+impl Omit {
+    pub fn new(keys: Vec<std::sync::Arc<str>>) -> Self { Self { keys } }
+}
+impl Stage for Omit {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        let m = match x.as_object() { Some(m) => m, None => return StageOutput::Filtered };
+        let drop: std::collections::HashSet<&str> =
+            self.keys.iter().map(|k| k.as_ref()).collect();
+        let mut out: indexmap::IndexMap<std::sync::Arc<str>, Val> =
+            indexmap::IndexMap::with_capacity(m.len());
+        for (k, v) in m.iter() {
+            if !drop.contains(k.as_ref()) {
+                out.insert(k.clone(), v.clone());
+            }
+        }
+        StageOutput::Pass(Cow::Owned(Val::Obj(std::sync::Arc::new(out))))
+    }
+}
+impl<R> crate::unified::Stage<R> for Omit {
+    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
+        crate::unified::StageOutputU::Filtered
+    }
+}
+
 /// `.nth(i)` — index into Arr; supports negative indexing.
 pub struct Nth { pub i: i64 }
 impl Nth { pub fn new(i: i64) -> Self { Self { i } } }
@@ -3057,6 +3236,87 @@ mod tests {
     }
 
     fn arr_of(items: Vec<Val>) -> Val { Val::arr(items) }
+
+    fn obj_of(pairs: Vec<(&str, Val)>) -> Val {
+        let mut m: indexmap::IndexMap<std::sync::Arc<str>, Val> =
+            indexmap::IndexMap::with_capacity(pairs.len());
+        for (k, v) in pairs { m.insert(std::sync::Arc::from(k), v); }
+        Val::Obj(std::sync::Arc::new(m))
+    }
+
+    #[test]
+    fn keys_values_entries_obj() {
+        let o = obj_of(vec![("a", Val::Int(1)), ("b", Val::Int(2))]);
+        assert_eq!(extract_arr_len(Keys.apply(&o)), 2);
+        assert_eq!(extract_arr_len(Values.apply(&o)), 2);
+        assert_eq!(extract_arr_len(Entries.apply(&o)), 2);
+    }
+
+    #[test]
+    fn from_pairs_round_trip() {
+        let o = obj_of(vec![("a", Val::Int(1)), ("b", Val::Int(2))]);
+        let r = Entries.apply(&o);
+        let pairs_val = match r {
+            StageOutput::Pass(cow) => cow.into_owned(),
+            _ => panic!(),
+        };
+        let r2 = FromPairs.apply(&pairs_val);
+        match r2 {
+            StageOutput::Pass(cow) => match cow.into_owned() {
+                Val::Obj(m) => {
+                    assert_eq!(m.len(), 2);
+                    assert!(matches!(m.get("a"), Some(Val::Int(1))));
+                    assert!(matches!(m.get("b"), Some(Val::Int(2))));
+                }
+                other => panic!("got {:?}", other),
+            },
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn invert_obj_swaps_kv() {
+        let o = obj_of(vec![("a", Val::Str(std::sync::Arc::from("X"))),
+                              ("b", Val::Str(std::sync::Arc::from("Y")))]);
+        let r = Invert.apply(&o);
+        match r {
+            StageOutput::Pass(cow) => match cow.into_owned() {
+                Val::Obj(m) => {
+                    assert!(matches!(m.get("X"), Some(Val::Str(s)) if s.as_ref() == "a"));
+                    assert!(matches!(m.get("Y"), Some(Val::Str(s)) if s.as_ref() == "b"));
+                }
+                other => panic!("got {:?}", other),
+            },
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn has_pick_omit_obj() {
+        let o = obj_of(vec![
+            ("a", Val::Int(1)), ("b", Val::Int(2)), ("c", Val::Int(3))
+        ]);
+        assert!(extract_bool(Has::new(std::sync::Arc::from("b")).apply(&o)));
+        assert!(!extract_bool(Has::new(std::sync::Arc::from("z")).apply(&o)));
+        let picked = Pick::new(vec![
+            std::sync::Arc::from("a"), std::sync::Arc::from("c")
+        ]).apply(&o);
+        match picked {
+            StageOutput::Pass(cow) => match cow.into_owned() {
+                Val::Obj(m) => assert_eq!(m.len(), 2),
+                _ => panic!(),
+            },
+            _ => panic!(),
+        }
+        let omitted = Omit::new(vec![std::sync::Arc::from("b")]).apply(&o);
+        match omitted {
+            StageOutput::Pass(cow) => match cow.into_owned() {
+                Val::Obj(m) => assert_eq!(m.len(), 2),
+                _ => panic!(),
+            },
+            _ => panic!(),
+        }
+    }
 
     #[test]
     fn array_len_works() {
