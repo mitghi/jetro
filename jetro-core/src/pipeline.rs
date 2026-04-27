@@ -309,6 +309,20 @@ pub enum Stage {
     /// like `map(@.text.split(",").first())` — inner Plan reduces via
     /// IndexedDispatch / EarlyExit etc., not full materialisation.
     CompiledMap(Arc<Plan>),
+
+    // ── lift_all_builtins (object family) ────────────────────────────
+    //
+    // First-class Pipeline IR variants for zero-arg object methods.
+    // Lower at the chain classifier; canonical kernels live as
+    // `*_apply` free fns below.  Per `lift_all_builtins.md`: built-ins
+    // lower DIRECTLY to Stage::* variants, no CallMethod dispatch.
+
+    /// `.keys()` — Obj → Arr<Str>.  `Cardinality::OneToOne`, pure.
+    Keys,
+    /// `.values()` — Obj → Arr<Val>.  `Cardinality::OneToOne`, pure.
+    Values,
+    /// `.entries()` — Obj → Arr<Arr[Str, Val]>.  `Cardinality::OneToOne`, pure.
+    Entries,
 }
 
 /// Phase A3 — sub-program "kernel" shape recognised at lower-time.
@@ -881,8 +895,11 @@ fn upstream_demand(d: Demand, stage: &Stage) -> Demand {
             | Stage::Split(_)
             | Stage::Chunk(_)
             | Stage::Window(_) => Demand::UNBOUNDED,
-        // Slice / Replace / CompiledMap are 1:1 — preserve.
-        Stage::Slice(_, _) | Stage::Replace { .. } | Stage::CompiledMap(_) => d,
+        // Slice / Replace / CompiledMap / Keys / Values / Entries are
+        // 1:1 — preserve demand.  Keys/Values/Entries each consume one
+        // object and emit one array; downstream demand passes through.
+        Stage::Slice(_, _) | Stage::Replace { .. } | Stage::CompiledMap(_)
+        | Stage::Keys | Stage::Values | Stage::Entries => d,
     }
 }
 
@@ -1045,6 +1062,18 @@ impl Stage {
                 boundedness: Boundedness::Always(1),
                 can_indexed: true,
                 cost:        10.0,
+                selectivity: 1.0,
+            },
+            // lift_all_builtins (object): zero-arg one-to-one ops.
+            // Cost ~1 (single IndexMap iteration).  Pure, stateless,
+            // reorderable through other pure 1:1 stages.
+            Stage::Keys | Stage::Values | Stage::Entries => StageShape {
+                cardinality: Cardinality::OneToOne,
+                order:       Order::Stateless,
+                purity:      true,
+                boundedness: Boundedness::Always(1),
+                can_indexed: false,
+                cost:        1.0,
                 selectivity: 1.0,
             },
         }
@@ -1628,6 +1657,10 @@ fn decode_method_chain(trailing: &[crate::ast::Step]) -> Option<(Vec<Stage>, Sin
                         };
                         stages.push(Stage::Split(sep));
                     }
+                    // lift_all_builtins (object family — zero-arg ops)
+                    ("keys",    0, _) => stages.push(Stage::Keys),
+                    ("values",  0, _) => stages.push(Stage::Values),
+                    ("entries", 0, _) => stages.push(Stage::Entries),
                     ("slice", 1, _) => {
                         let start = match &args[0] {
                             Arg::Pos(Expr::Int(n)) => *n,
@@ -2998,6 +3031,15 @@ impl Pipeline {
                         }
                         buf = out;
                     }
+                    Stage::Keys => {
+                        buf = buf.into_iter().map(|v| keys_apply(&v)).collect();
+                    }
+                    Stage::Values => {
+                        buf = buf.into_iter().map(|v| values_apply(&v)).collect();
+                    }
+                    Stage::Entries => {
+                        buf = buf.into_iter().map(|v| entries_apply(&v)).collect();
+                    }
                 }
             }
             Box::new(buf.into_iter())
@@ -3042,6 +3084,9 @@ impl Pipeline {
                         Stage::CompiledMap(plan) => {
                             item = run_compiled_map(plan, item)?;
                         }
+                        Stage::Keys    => { item = keys_apply(&item); }
+                        Stage::Values  => { item = values_apply(&item); }
+                        Stage::Entries => { item = entries_apply(&item); }
                     }
                 }
             }
@@ -3167,6 +3212,31 @@ pub(crate) fn chunk_apply(items: &[Val], n: usize) -> Vec<Val> {
 pub(crate) fn window_apply(items: &[Val], n: usize) -> Vec<Val> {
     let n = n.max(1);
     items.windows(n).map(|w| Val::arr(w.to_vec())).collect()
+}
+
+/// Canonical `.keys()` impl shared by `Stage::Keys` runtime arm and
+/// the `.keys` builtin dispatch shim.  Non-object receivers yield an
+/// empty array (matches prior owned semantics).
+pub(crate) fn keys_apply(recv: &Val) -> Val {
+    Val::arr(recv.as_object()
+        .map(|m| m.keys().map(|k| Val::Str(k.clone())).collect())
+        .unwrap_or_default())
+}
+
+/// Canonical `.values()` impl.
+pub(crate) fn values_apply(recv: &Val) -> Val {
+    Val::arr(recv.as_object()
+        .map(|m| m.values().cloned().collect())
+        .unwrap_or_default())
+}
+
+/// Canonical `.entries()` impl.  Each entry is a `Val::arr([key, value])`.
+pub(crate) fn entries_apply(recv: &Val) -> Val {
+    Val::arr(recv.as_object()
+        .map(|m| m.iter()
+            .map(|(k, v)| Val::arr(vec![Val::Str(k.clone()), v.clone()]))
+            .collect())
+        .unwrap_or_default())
 }
 
 /// Canonical `.replace(needle, repl)` (all=false, replacen-1) and

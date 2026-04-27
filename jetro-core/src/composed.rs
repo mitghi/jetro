@@ -615,18 +615,11 @@ pub mod shims {
     }
 
     // ── Object Stages ────────────────────────────────────────────────
-
-    pub fn keys(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-        Ok(run_single(&Keys, &recv).unwrap_or_else(|| Val::arr(vec![])))
-    }
-
-    pub fn values(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-        Ok(run_single(&Values, &recv).unwrap_or_else(|| Val::arr(vec![])))
-    }
-
-    pub fn entries(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-        Ok(run_single(&Entries, &recv).unwrap_or_else(|| Val::arr(vec![])))
-    }
+    //
+    // `keys` / `values` / `entries` LIFTED to native Pipeline IR
+    // `Stage::Keys` / `Stage::Values` / `Stage::Entries`.  Canonical
+    // kernels in `pipeline::{keys_apply, values_apply, entries_apply}`.
+    // Method-call fallback in `eval::builtins::{keys,values,entries}_dispatch`.
 
     pub fn invert(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
         run_single(&Invert, &recv)

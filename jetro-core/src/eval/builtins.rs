@@ -66,9 +66,9 @@ fn build() -> BuiltinRegistry {
     t.insert("from_json",  b_from_json);
 
     // Object
-    t.insert("keys",        crate::composed::shims::keys);
-    t.insert("values",      crate::composed::shims::values);
-    t.insert("entries",     crate::composed::shims::entries);
+    t.insert("keys",        keys_dispatch);
+    t.insert("values",      values_dispatch);
+    t.insert("entries",     entries_dispatch);
     t.insert("to_pairs",    b_to_pairs);
     t.insert("from_pairs",  b_from_pairs);
     t.insert("invert",      crate::composed::shims::invert);
@@ -501,6 +501,21 @@ fn window_dispatch(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError>
     let items = recv.into_vec()
         .ok_or_else(|| EvalError("window: expected array".into()))?;
     Ok(Val::arr(crate::pipeline::window_apply(&items, n)))
+}
+
+// lift_all_builtins (object family) — fallback dispatch for non-pipeline
+// contexts (e.g., method-call inside a Map sub-program body).  Shares
+// the canonical kernel with `Stage::Keys` / `Stage::Values` / `Stage::Entries`.
+fn keys_dispatch(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
+    Ok(crate::pipeline::keys_apply(&recv))
+}
+
+fn values_dispatch(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
+    Ok(crate::pipeline::values_apply(&recv))
+}
+
+fn entries_dispatch(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
+    Ok(crate::pipeline::entries_apply(&recv))
 }
 
 fn b_missing(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
