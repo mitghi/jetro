@@ -391,7 +391,7 @@ pub fn method_result_type(m: BuiltinMethod) -> AbstractVal {
     use BuiltinMethod::*;
     match m {
         // → Int
-        Len | Count | Sum | IndexOf | LastIndexOf | ByteLen | ParseInt => {
+        Len | Count | Sum | IndexOf | LastIndexOf | ByteLen | ParseInt | Ceil | Floor | Round => {
             AbstractVal::scalar(VType::Int)
         }
         // → Bool
@@ -408,27 +408,26 @@ pub fn method_result_type(m: BuiltinMethod) -> AbstractVal {
         // → Float
         Avg | ParseFloat => AbstractVal::scalar(VType::Float),
         // → Num (Min/Max depend on input; treat as unknown scalar)
-        Min | Max | ToNumber => AbstractVal::scalar(VType::Num),
+        Min | Max | ToNumber | Abs => AbstractVal::scalar(VType::Num),
         // → Bool (to_bool)
         ToBool => AbstractVal::scalar(VType::Bool),
         // → Arr
         Keys | Values | Entries | ToPairs | Reverse | Unique | Flatten | Compact | Chars
         | CharsOf | Lines | Words | Split | Sort | Filter | Map | FlatMap | Enumerate
         | Pairwise | Window | Chunk | TakeWhile | DropWhile | Accumulate | Zip | ZipLongest
-        | Diff | Intersect | Union | Append | Prepend | Remove | Matches | Scan | Slice | Bytes => {
-            AbstractVal::array()
-        }
+        | Diff | Intersect | Union | Append | Prepend | Remove | Matches | Scan | Slice | Bytes
+        | IndicesOf => AbstractVal::array(),
         // → Obj
         FromPairs | Invert | Pick | Omit | Merge | DeepMerge | Defaults | Rename
         | TransformKeys | TransformValues | FilterKeys | FilterValues | Pivot | GroupBy
         | CountBy | IndexBy | Partition | FlattenKeys | UnflattenKeys | SetPath | DelPath
-        | DelPaths | Set | Update | Schema => AbstractVal::object(),
+        | DelPaths | Update | Schema => AbstractVal::object(),
         // → various
         First | Last | Nth | GetPath | ReMatchFirst | ReCaptures => AbstractVal::UNKNOWN,
         HasPath => AbstractVal::scalar(VType::Bool),
         ReMatchAll | ReCapturesAll | ReSplit => AbstractVal::array(),
         ReReplace | ReReplaceAll => AbstractVal::scalar(VType::Str),
-        FromJson | Or => AbstractVal::UNKNOWN,
+        FromJson | Or | Set | Index => AbstractVal::UNKNOWN,
         EquiJoin => AbstractVal::array(),
         Unknown => AbstractVal::UNKNOWN,
     }

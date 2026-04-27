@@ -9,6 +9,9 @@
 
 use std::borrow::Cow;
 
+use crate::builtin_helpers::{
+    base64_decode, base64_encode, compile_regex, csv_emit, split_words_lower, upper_first_into,
+};
 use crate::composed::{Stage, StageOutput};
 use crate::eval::value::Val;
 
@@ -2201,46 +2204,6 @@ impl Stage for Nth {
 
 // ── Case-conversion Stages ─────────────────────────────────────────
 
-/// Split into lowercased word tokens.  Tokens break on `[-_ \t]`,
-/// lower→upper transitions, and non-alphanumeric boundaries.  Used
-/// by SnakeCase / KebabCase / CamelCase / PascalCase.
-pub(crate) fn split_words_lower(s: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    let mut cur = String::new();
-    let mut prev_lower = false;
-    for c in s.chars() {
-        let is_sep = c == '_' || c == '-' || c.is_whitespace();
-        if is_sep {
-            if !cur.is_empty() {
-                out.push(std::mem::take(&mut cur));
-            }
-            prev_lower = false;
-            continue;
-        }
-        if c.is_uppercase() && prev_lower {
-            out.push(std::mem::take(&mut cur));
-        }
-        for d in c.to_lowercase() {
-            cur.push(d);
-        }
-        prev_lower = c.is_lowercase();
-    }
-    if !cur.is_empty() {
-        out.push(cur);
-    }
-    out
-}
-
-pub(crate) fn upper_first_into(p: &str, out: &mut String) {
-    let mut chars = p.chars();
-    if let Some(f) = chars.next() {
-        for u in f.to_uppercase() {
-            out.push(u);
-        }
-        out.push_str(chars.as_str());
-    }
-}
-
 lifted_str_stage!(SnakeCase, |s| split_words_lower(s).join("_"));
 lifted_str_stage!(KebabCase, |s| split_words_lower(s).join("-"));
 lifted_str_stage!(CamelCase, |s| {
@@ -2292,84 +2255,6 @@ impl Stage for Scan {
         }
         StageOutput::Filtered
     }
-}
-
-/// ── Base64 helpers (moved from eval::func_strings) ─────────────────
-
-pub fn base64_encode(bytes: &[u8]) -> String {
-    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
-    let mut i = 0;
-    while i < bytes.len() {
-        let b0 = bytes[i] as u32;
-        let b1 = if i + 1 < bytes.len() {
-            bytes[i + 1] as u32
-        } else {
-            0
-        };
-        let b2 = if i + 2 < bytes.len() {
-            bytes[i + 2] as u32
-        } else {
-            0
-        };
-        let n = (b0 << 16) | (b1 << 8) | b2;
-        out.push(CHARS[((n >> 18) & 0x3f) as usize] as char);
-        out.push(CHARS[((n >> 12) & 0x3f) as usize] as char);
-        out.push(if i + 1 < bytes.len() {
-            CHARS[((n >> 6) & 0x3f) as usize] as char
-        } else {
-            '='
-        });
-        out.push(if i + 2 < bytes.len() {
-            CHARS[(n & 0x3f) as usize] as char
-        } else {
-            '='
-        });
-        i += 3;
-    }
-    out
-}
-
-pub fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
-    const DECODE: [i8; 128] = {
-        let mut t = [-1i8; 128];
-        let chars = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        let mut i = 0usize;
-        while i < chars.len() {
-            t[chars[i] as usize] = i as i8;
-            i += 1;
-        }
-        t
-    };
-    let s = s.trim();
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
-    let mut i = 0;
-    while i + 3 < bytes.len() {
-        let dc = |c: u8| -> Result<u32, String> {
-            if c == b'=' {
-                return Ok(0);
-            }
-            if c as usize >= 128 || DECODE[c as usize] < 0 {
-                return Err(format!("invalid base64 char: {}", c as char));
-            }
-            Ok(DECODE[c as usize] as u32)
-        };
-        let b0 = dc(bytes[i])?;
-        let b1 = dc(bytes[i + 1])?;
-        let b2 = dc(bytes[i + 2])?;
-        let b3 = dc(bytes[i + 3])?;
-        let n = (b0 << 18) | (b1 << 12) | (b2 << 6) | b3;
-        out.push(((n >> 16) & 0xff) as u8);
-        if bytes[i + 2] != b'=' {
-            out.push(((n >> 8) & 0xff) as u8);
-        }
-        if bytes[i + 3] != b'=' {
-            out.push((n & 0xff) as u8);
-        }
-        i += 4;
-    }
-    Ok(out)
 }
 
 // ── Padding / repetition Stages ────────────────────────────────────
@@ -2472,46 +2357,6 @@ lifted_str_to_val!(
 
 // CSV/TSV body — single source of truth here in composed.rs.
 // `eval/func_csv.rs` is now a thin re-export shim.
-
-#[inline]
-fn csv_cell(v: &Val, sep: &str) -> String {
-    use crate::eval::util::val_to_string;
-    match v {
-        Val::Str(s) if s.contains(sep) || s.contains('"') || s.contains('\n') => {
-            format!("\"{}\"", s.replace('"', "\"\""))
-        }
-        Val::Str(s) => s.to_string(),
-        other => val_to_string(other),
-    }
-}
-
-pub(crate) fn csv_emit(val: &Val, sep: &str) -> String {
-    match val {
-        Val::Arr(rows) => rows
-            .iter()
-            .map(|row| match row {
-                Val::Arr(cells) => cells
-                    .iter()
-                    .map(|c| csv_cell(c, sep))
-                    .collect::<Vec<_>>()
-                    .join(sep),
-                Val::Obj(m) => m
-                    .values()
-                    .map(|c| csv_cell(c, sep))
-                    .collect::<Vec<_>>()
-                    .join(sep),
-                v => csv_cell(v, sep),
-            })
-            .collect::<Vec<_>>()
-            .join("\n"),
-        Val::Obj(m) => m
-            .values()
-            .map(|c| csv_cell(c, sep))
-            .collect::<Vec<_>>()
-            .join(sep),
-        v => csv_cell(v, sep),
-    }
-}
 
 /// `.to_csv()` — Val → Str (CSV emission).
 pub struct ToCsv;
@@ -3445,26 +3290,6 @@ pub fn from_base64_eager(s: &str) -> Result<String, String> {
 }
 
 // ── Regex Stages ───────────────────────────────────────────────────
-//
-// Compile cache (thread-local).  Each unique pattern compiles once
-// per thread; subsequent uses reuse the same `Arc<Regex>`.
-thread_local! {
-    static REGEX_CACHE: std::cell::RefCell<std::collections::HashMap<String, std::sync::Arc<regex::Regex>>>
-        = std::cell::RefCell::new(std::collections::HashMap::with_capacity(32));
-}
-
-pub(crate) fn compile_regex(pat: &str) -> Result<std::sync::Arc<regex::Regex>, String> {
-    REGEX_CACHE.with(|cell| {
-        let mut m = cell.borrow_mut();
-        if let Some(r) = m.get(pat) {
-            return Ok(std::sync::Arc::clone(r));
-        }
-        let re = regex::Regex::new(pat).map_err(|e| format!("regex compile: {}", e))?;
-        let arc = std::sync::Arc::new(re);
-        m.insert(pat.to_string(), std::sync::Arc::clone(&arc));
-        Ok(arc)
-    })
-}
 
 /// `.match(pat)` — Bool, regex match anywhere.
 pub struct ReMatch {

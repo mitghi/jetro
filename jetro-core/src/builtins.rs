@@ -112,8 +112,15 @@ pub enum BuiltinMethod {
     Has,
     Missing,
     Includes,
+    Index,
+    IndicesOf,
     Set,
     Update,
+    // Numeric scalar ops
+    Ceil,
+    Floor,
+    Round,
+    Abs,
     // String methods
     Upper,
     Lower,
@@ -260,8 +267,14 @@ impl BuiltinMethod {
             "has" => Self::Has,
             "missing" => Self::Missing,
             "includes" | "contains" => Self::Includes,
+            "index" => Self::Index,
+            "indices_of" | "indicesOf" => Self::IndicesOf,
             "set" => Self::Set,
             "update" => Self::Update,
+            "ceil" => Self::Ceil,
+            "floor" => Self::Floor,
+            "round" => Self::Round,
+            "abs" => Self::Abs,
             "upper" => Self::Upper,
             "lower" => Self::Lower,
             "capitalize" => Self::Capitalize,
@@ -546,10 +559,30 @@ impl BuiltinCall {
             (BuiltinMethod::Type, BuiltinArgs::None) => apply_or_recv!(type_name_apply(recv)),
             (BuiltinMethod::ToString, BuiltinArgs::None) => apply_or_recv!(to_string_apply(recv)),
             (BuiltinMethod::ToJson, BuiltinArgs::None) => apply_or_recv!(to_json_apply(recv)),
+            (BuiltinMethod::FromJson, BuiltinArgs::None) => return from_json_apply(recv),
             (BuiltinMethod::ToCsv, BuiltinArgs::None) => apply_or_recv!(to_csv_apply(recv)),
             (BuiltinMethod::ToTsv, BuiltinArgs::None) => apply_or_recv!(to_tsv_apply(recv)),
             (BuiltinMethod::ToPairs, BuiltinArgs::None) => apply_or_recv!(to_pairs_apply(recv)),
+            (BuiltinMethod::FromPairs, BuiltinArgs::None) => {
+                apply_or_recv!(from_pairs_apply(recv))
+            }
+            (BuiltinMethod::Ceil, BuiltinArgs::None) => return ceil_apply(recv),
+            (BuiltinMethod::Floor, BuiltinArgs::None) => return floor_apply(recv),
+            (BuiltinMethod::Round, BuiltinArgs::None) => return round_apply(recv),
+            (BuiltinMethod::Abs, BuiltinArgs::None) => return abs_apply(recv),
+            (BuiltinMethod::Or, BuiltinArgs::Val(default)) => return Some(or_apply(recv, default)),
+            (BuiltinMethod::Missing, BuiltinArgs::Str(k)) => return Some(missing_apply(recv, k)),
+            (BuiltinMethod::Includes, BuiltinArgs::Val(item)) => {
+                return Some(includes_apply(recv, item))
+            }
+            (BuiltinMethod::Index, BuiltinArgs::Val(item)) => return index_value_apply(recv, item),
+            (BuiltinMethod::IndicesOf, BuiltinArgs::Val(item)) => {
+                return indices_of_apply(recv, item)
+            }
+            (BuiltinMethod::Set, BuiltinArgs::Val(item)) => return Some(item.clone()),
             (BuiltinMethod::Compact, BuiltinArgs::None) => apply_or_recv!(compact_apply(recv)),
+            (BuiltinMethod::Join, BuiltinArgs::Str(sep)) => return join_apply(recv, sep),
+            (BuiltinMethod::Enumerate, BuiltinArgs::None) => return enumerate_apply(recv),
             (BuiltinMethod::Pairwise, BuiltinArgs::None) => apply_or_recv!(pairwise_apply(recv)),
             (BuiltinMethod::Schema, BuiltinArgs::None) => apply_or_recv!(schema_apply(recv)),
             (BuiltinMethod::Flatten, BuiltinArgs::Usize(depth)) => {
@@ -709,6 +742,23 @@ impl BuiltinCall {
             (BuiltinMethod::ReReplaceAll, BuiltinArgs::StrPair { first, second }) => {
                 try_re_replace_all_apply(recv, first, second)
             }
+            (BuiltinMethod::FromJson, BuiltinArgs::None) => try_from_json_apply(recv),
+            (BuiltinMethod::Join, BuiltinArgs::Str(sep)) => join_apply(recv, sep)
+                .map(Some)
+                .ok_or_else(|| EvalError("join: expected array".into())),
+            (BuiltinMethod::Enumerate, BuiltinArgs::None) => enumerate_apply(recv)
+                .map(Some)
+                .ok_or_else(|| EvalError("enumerate: expected array".into())),
+            (BuiltinMethod::Index, BuiltinArgs::Val(item)) => index_value_apply(recv, item)
+                .map(Some)
+                .ok_or_else(|| EvalError("index: expected array".into())),
+            (BuiltinMethod::IndicesOf, BuiltinArgs::Val(item)) => indices_of_apply(recv, item)
+                .map(Some)
+                .ok_or_else(|| EvalError("indices_of: expected array".into())),
+            (BuiltinMethod::Ceil, BuiltinArgs::None) => try_ceil_apply(recv),
+            (BuiltinMethod::Floor, BuiltinArgs::None) => try_floor_apply(recv),
+            (BuiltinMethod::Round, BuiltinArgs::None) => try_round_apply(recv),
+            (BuiltinMethod::Abs, BuiltinArgs::None) => try_abs_apply(recv),
             _ => Ok(self.apply(recv)),
         }
     }
@@ -730,6 +780,16 @@ impl BuiltinCall {
         let usize_arg = |idx: usize| -> Option<usize> {
             match args.get(idx)? {
                 Arg::Pos(Expr::Int(n)) if *n >= 0 => Some(*n as usize),
+                _ => None,
+            }
+        };
+        let val_arg = |idx: usize| -> Option<Val> {
+            match args.get(idx)? {
+                Arg::Pos(Expr::Null) => Some(Val::Null),
+                Arg::Pos(Expr::Bool(b)) => Some(Val::Bool(*b)),
+                Arg::Pos(Expr::Int(n)) => Some(Val::Int(*n)),
+                Arg::Pos(Expr::Float(f)) => Some(Val::Float(*f)),
+                Arg::Pos(Expr::Str(s)) => Some(Val::Str(Arc::from(s.as_str()))),
                 _ => None,
             }
         };
@@ -758,6 +818,13 @@ impl BuiltinCall {
                 | BuiltinMethod::Entries
                 | BuiltinMethod::Reverse
                 | BuiltinMethod::Unique
+                | BuiltinMethod::FromJson
+                | BuiltinMethod::FromPairs
+                | BuiltinMethod::Enumerate
+                | BuiltinMethod::Ceil
+                | BuiltinMethod::Floor
+                | BuiltinMethod::Round
+                | BuiltinMethod::Abs
                 | BuiltinMethod::Upper
                 | BuiltinMethod::Lower
                 | BuiltinMethod::Trim
@@ -792,12 +859,23 @@ impl BuiltinCall {
                 | BuiltinMethod::ParseInt
                 | BuiltinMethod::ParseFloat
                 | BuiltinMethod::ParseBool
+                | BuiltinMethod::Or
                 | BuiltinMethod::Type
                 | BuiltinMethod::ToString
                 | BuiltinMethod::ToJson
                 | BuiltinMethod::Schema,
                 0,
             ) => Some(Self::new(method, BuiltinArgs::None)),
+            (BuiltinMethod::Or, 1) => Some(Self::new(method, BuiltinArgs::Val(val_arg(0)?))),
+            (BuiltinMethod::Set, 0) => Some(Self::new(method, BuiltinArgs::Val(Val::Null))),
+            (BuiltinMethod::Set, 1) => Some(Self::new(method, BuiltinArgs::Val(val_arg(0)?))),
+            (BuiltinMethod::Missing, 1) => Some(Self::new(method, BuiltinArgs::Str(str_arg(0)?))),
+            (BuiltinMethod::Includes, 1) => Some(Self::new(method, BuiltinArgs::Val(val_arg(0)?))),
+            (BuiltinMethod::Index | BuiltinMethod::IndicesOf, 1) => {
+                Some(Self::new(method, BuiltinArgs::Val(val_arg(0)?)))
+            }
+            (BuiltinMethod::Join, 0) => Some(Self::new(method, BuiltinArgs::Str(Arc::from("")))),
+            (BuiltinMethod::Join, 1) => Some(Self::new(method, BuiltinArgs::Str(str_arg(0)?))),
             (
                 BuiltinMethod::GetPath
                 | BuiltinMethod::HasPath
@@ -924,6 +1002,10 @@ impl BuiltinMethod {
                 | Self::IsNumeric
                 | Self::IsAlpha
                 | Self::IsAscii
+                | Self::Ceil
+                | Self::Floor
+                | Self::Round
+                | Self::Abs
                 | Self::ToNumber
                 | Self::ToBool
                 | Self::ParseInt
@@ -1668,7 +1750,9 @@ pub fn url_decode_apply(recv: &Val) -> Option<Val> {
 /// `.to_base64()` — RFC 4648 base64 encoding.
 #[inline]
 pub fn to_base64_apply(recv: &Val) -> Option<Val> {
-    map_str_owned(recv, |s| crate::functions::base64_encode(s.as_bytes()))
+    map_str_owned(recv, |s| {
+        crate::builtin_helpers::base64_encode(s.as_bytes())
+    })
 }
 
 /// `.dedent()` — strip common leading whitespace from all non-empty lines.
@@ -1697,26 +1781,30 @@ pub fn dedent_apply(recv: &Val) -> Option<Val> {
 /// `.snake_case()` — lower-case words joined by `_`.
 #[inline]
 pub fn snake_case_apply(recv: &Val) -> Option<Val> {
-    map_str_owned(recv, |s| crate::functions::split_words_lower(s).join("_"))
+    map_str_owned(recv, |s| {
+        crate::builtin_helpers::split_words_lower(s).join("_")
+    })
 }
 
 /// `.kebab_case()` — lower-case words joined by `-`.
 #[inline]
 pub fn kebab_case_apply(recv: &Val) -> Option<Val> {
-    map_str_owned(recv, |s| crate::functions::split_words_lower(s).join("-"))
+    map_str_owned(recv, |s| {
+        crate::builtin_helpers::split_words_lower(s).join("-")
+    })
 }
 
 /// `.camel_case()` — first word lower, rest capitalised, no separator.
 #[inline]
 pub fn camel_case_apply(recv: &Val) -> Option<Val> {
     map_str_owned(recv, |s| {
-        let parts = crate::functions::split_words_lower(s);
+        let parts = crate::builtin_helpers::split_words_lower(s);
         let mut out = String::with_capacity(s.len());
         for (i, p) in parts.iter().enumerate() {
             if i == 0 {
                 out.push_str(p);
             } else {
-                crate::functions::upper_first_into(p, &mut out);
+                crate::builtin_helpers::upper_first_into(p, &mut out);
             }
         }
         out
@@ -1727,10 +1815,10 @@ pub fn camel_case_apply(recv: &Val) -> Option<Val> {
 #[inline]
 pub fn pascal_case_apply(recv: &Val) -> Option<Val> {
     map_str_owned(recv, |s| {
-        let parts = crate::functions::split_words_lower(s);
+        let parts = crate::builtin_helpers::split_words_lower(s);
         let mut out = String::with_capacity(s.len());
         for p in parts.iter() {
-            crate::functions::upper_first_into(p, &mut out);
+            crate::builtin_helpers::upper_first_into(p, &mut out);
         }
         out
     })
@@ -1841,6 +1929,74 @@ pub fn is_ascii_apply(recv: &Val) -> Option<Val> {
     map_str_val(recv, |s| Val::Bool(s.is_ascii()))
 }
 
+/// `.ceil()` — numeric ceiling as Int.
+#[inline]
+pub fn ceil_apply(recv: &Val) -> Option<Val> {
+    match recv {
+        Val::Int(n) => Some(Val::Int(*n)),
+        Val::Float(f) => Some(Val::Int(f.ceil() as i64)),
+        _ => None,
+    }
+}
+
+#[inline]
+pub fn try_ceil_apply(recv: &Val) -> Result<Option<Val>, EvalError> {
+    ceil_apply(recv)
+        .map(Some)
+        .ok_or_else(|| EvalError("ceil: expected number".into()))
+}
+
+/// `.floor()` — numeric floor as Int.
+#[inline]
+pub fn floor_apply(recv: &Val) -> Option<Val> {
+    match recv {
+        Val::Int(n) => Some(Val::Int(*n)),
+        Val::Float(f) => Some(Val::Int(f.floor() as i64)),
+        _ => None,
+    }
+}
+
+#[inline]
+pub fn try_floor_apply(recv: &Val) -> Result<Option<Val>, EvalError> {
+    floor_apply(recv)
+        .map(Some)
+        .ok_or_else(|| EvalError("floor: expected number".into()))
+}
+
+/// `.round()` — numeric round as Int.
+#[inline]
+pub fn round_apply(recv: &Val) -> Option<Val> {
+    match recv {
+        Val::Int(n) => Some(Val::Int(*n)),
+        Val::Float(f) => Some(Val::Int(f.round() as i64)),
+        _ => None,
+    }
+}
+
+#[inline]
+pub fn try_round_apply(recv: &Val) -> Result<Option<Val>, EvalError> {
+    round_apply(recv)
+        .map(Some)
+        .ok_or_else(|| EvalError("round: expected number".into()))
+}
+
+/// `.abs()` — numeric absolute value.
+#[inline]
+pub fn abs_apply(recv: &Val) -> Option<Val> {
+    match recv {
+        Val::Int(n) => Some(Val::Int(n.wrapping_abs())),
+        Val::Float(f) => Some(Val::Float(f.abs())),
+        _ => None,
+    }
+}
+
+#[inline]
+pub fn try_abs_apply(recv: &Val) -> Result<Option<Val>, EvalError> {
+    abs_apply(recv)
+        .map(Some)
+        .ok_or_else(|| EvalError("abs: expected number".into()))
+}
+
 /// `.to_number()` — parse i64 or f64; null on parse failure.
 #[inline]
 pub fn to_number_apply(recv: &Val) -> Option<Val> {
@@ -1896,7 +2052,7 @@ pub fn parse_bool_apply(recv: &Val) -> Option<Val> {
 /// `.from_base64()` — decode; lossy UTF-8 conversion. Null on decode failure.
 #[inline]
 pub fn from_base64_apply(recv: &Val) -> Option<Val> {
-    map_str_val(recv, |s| match crate::functions::base64_decode(s) {
+    map_str_val(recv, |s| match crate::builtin_helpers::base64_decode(s) {
         Ok(bytes) => Val::Str(Arc::from(String::from_utf8_lossy(&bytes).as_ref())),
         Err(_) => Val::Null,
     })
@@ -2168,6 +2324,186 @@ pub fn unique_arr_apply(recv: &Val) -> Option<Val> {
     Some(Val::arr(kept))
 }
 
+fn numeric_options(recv: &Val) -> Option<Vec<Option<f64>>> {
+    match recv {
+        Val::IntVec(a) => Some(a.iter().map(|n| Some(*n as f64)).collect()),
+        Val::FloatVec(a) => Some(a.iter().map(|f| Some(*f)).collect()),
+        Val::Arr(a) => Some(
+            a.iter()
+                .map(|v| match v {
+                    Val::Int(n) => Some(*n as f64),
+                    Val::Float(f) => Some(*f),
+                    _ => None,
+                })
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
+fn numeric_options_to_val(out: Vec<Option<f64>>) -> Val {
+    if out.iter().all(|v| v.is_some()) {
+        Val::float_vec(out.into_iter().map(|v| v.unwrap()).collect())
+    } else {
+        Val::arr(
+            out.into_iter()
+                .map(|v| match v {
+                    Some(f) => Val::Float(f),
+                    None => Val::Null,
+                })
+                .collect(),
+        )
+    }
+}
+
+/// `.rolling_sum(n)` — rolling numeric sum.
+#[inline]
+pub fn rolling_sum_apply(recv: &Val, n: usize) -> Option<Val> {
+    if n == 0 {
+        return None;
+    }
+    let xs = numeric_options(recv)?;
+    let mut out: Vec<Option<f64>> = Vec::with_capacity(xs.len());
+    let mut sum: f64 = 0.0;
+    for (i, v) in xs.iter().enumerate() {
+        if let Some(x) = v {
+            sum += x;
+        }
+        if i >= n {
+            if let Some(old) = xs[i - n] {
+                sum -= old;
+            }
+        }
+        if i + 1 >= n {
+            out.push(Some(sum));
+        } else {
+            out.push(None);
+        }
+    }
+    Some(numeric_options_to_val(out))
+}
+
+/// `.rolling_avg(n)` — rolling numeric average over present values.
+#[inline]
+pub fn rolling_avg_apply(recv: &Val, n: usize) -> Option<Val> {
+    if n == 0 {
+        return None;
+    }
+    let xs = numeric_options(recv)?;
+    let mut out: Vec<Option<f64>> = Vec::with_capacity(xs.len());
+    let mut sum: f64 = 0.0;
+    let mut count: usize = 0;
+    for (i, v) in xs.iter().enumerate() {
+        if let Some(x) = v {
+            sum += x;
+            count += 1;
+        }
+        if i >= n {
+            if let Some(old) = xs[i - n] {
+                sum -= old;
+                count -= 1;
+            }
+        }
+        if i + 1 >= n && count > 0 {
+            out.push(Some(sum / count as f64));
+        } else {
+            out.push(None);
+        }
+    }
+    Some(numeric_options_to_val(out))
+}
+
+/// `.rolling_min(n)` — rolling numeric min.
+#[inline]
+pub fn rolling_min_apply(recv: &Val, n: usize) -> Option<Val> {
+    if n == 0 {
+        return None;
+    }
+    let xs = numeric_options(recv)?;
+    let mut out: Vec<Option<f64>> = Vec::with_capacity(xs.len());
+    for i in 0..xs.len() {
+        if i + 1 < n {
+            out.push(None);
+            continue;
+        }
+        let lo = i + 1 - n;
+        let m = xs[lo..=i]
+            .iter()
+            .filter_map(|v| *v)
+            .fold(f64::INFINITY, |a, b| a.min(b));
+        out.push(if m.is_finite() { Some(m) } else { None });
+    }
+    Some(numeric_options_to_val(out))
+}
+
+/// `.rolling_max(n)` — rolling numeric max.
+#[inline]
+pub fn rolling_max_apply(recv: &Val, n: usize) -> Option<Val> {
+    if n == 0 {
+        return None;
+    }
+    let xs = numeric_options(recv)?;
+    let mut out: Vec<Option<f64>> = Vec::with_capacity(xs.len());
+    for i in 0..xs.len() {
+        if i + 1 < n {
+            out.push(None);
+            continue;
+        }
+        let lo = i + 1 - n;
+        let m = xs[lo..=i]
+            .iter()
+            .filter_map(|v| *v)
+            .fold(f64::NEG_INFINITY, |a, b| a.max(b));
+        out.push(if m.is_finite() { Some(m) } else { None });
+    }
+    Some(numeric_options_to_val(out))
+}
+
+/// `.lag(n)` — shift numeric values backward, filling leading nulls.
+#[inline]
+pub fn lag_apply(recv: &Val, n: usize) -> Option<Val> {
+    let xs = numeric_options(recv)?;
+    let mut out: Vec<Option<f64>> = Vec::with_capacity(xs.len());
+    for i in 0..xs.len() {
+        out.push(if i >= n { xs[i - n] } else { None });
+    }
+    Some(numeric_options_to_val(out))
+}
+
+/// `.lead(n)` — shift numeric values forward, filling trailing nulls.
+#[inline]
+pub fn lead_apply(recv: &Val, n: usize) -> Option<Val> {
+    let xs = numeric_options(recv)?;
+    let mut out: Vec<Option<f64>> = Vec::with_capacity(xs.len());
+    for i in 0..xs.len() {
+        let j = i + n;
+        out.push(if j < xs.len() { xs[j] } else { None });
+    }
+    Some(numeric_options_to_val(out))
+}
+
+/// `.zscore()` — numeric standard score.
+#[inline]
+pub fn zscore_apply(recv: &Val) -> Option<Val> {
+    let xs = numeric_options(recv)?;
+    let nums: Vec<f64> = xs.iter().filter_map(|v| *v).collect();
+    if nums.is_empty() {
+        return Some(numeric_options_to_val(vec![None; xs.len()]));
+    }
+    let mean = nums.iter().sum::<f64>() / nums.len() as f64;
+    let var = nums.iter().map(|y| (y - mean).powi(2)).sum::<f64>() / nums.len() as f64;
+    let sd = var.sqrt();
+    let mut out: Vec<Option<f64>> = Vec::with_capacity(xs.len());
+    for v in xs.iter() {
+        out.push(match v {
+            Some(y) if sd > 0.0 => Some((y - mean) / sd),
+            Some(_) => Some(0.0),
+            None => None,
+        });
+    }
+    Some(numeric_options_to_val(out))
+}
+
 /// `.first(n)` — n==1 returns scalar, else Arr of first n.
 #[inline]
 pub fn first_apply(recv: &Val, n: i64) -> Option<Val> {
@@ -2219,19 +2555,91 @@ pub fn prepend_apply(recv: &Val, item: &Val) -> Option<Val> {
     Some(Val::arr(v))
 }
 
-/// `.enumerate()` — Arr → Arr<[index, item]>.
+/// `.enumerate()` — Arr → Arr<{index, value}>.
 #[inline]
 pub fn enumerate_apply(recv: &Val) -> Option<Val> {
-    if let Val::Arr(a) = recv {
-        let pairs: Vec<Val> = a
-            .iter()
-            .enumerate()
-            .map(|(i, v)| Val::arr(vec![Val::Int(i as i64), v.clone()]))
-            .collect();
-        Some(Val::arr(pairs))
-    } else {
-        None
+    let items_cow = recv.as_vals()?;
+    let out: Vec<Val> = items_cow
+        .iter()
+        .enumerate()
+        .map(|(i, v)| crate::eval::util::obj2("index", Val::Int(i as i64), "value", v.clone()))
+        .collect();
+    Some(Val::arr(out))
+}
+
+/// `.join(sep)` — array-like receiver to string.
+#[inline]
+pub fn join_apply(recv: &Val, sep: &str) -> Option<Val> {
+    use crate::eval::util::val_to_string;
+    use std::fmt::Write as _;
+
+    let items_cow = recv.as_vals()?;
+    let items: &[Val] = items_cow.as_ref();
+    if items.is_empty() {
+        return Some(Val::Str(Arc::from("")));
     }
+    if items.iter().all(|v| matches!(v, Val::Str(_))) {
+        let total_len: usize = items
+            .iter()
+            .map(|v| if let Val::Str(s) = v { s.len() } else { 0 })
+            .sum::<usize>()
+            + sep.len() * (items.len() - 1);
+        let mut out = String::with_capacity(total_len);
+        for (idx, v) in items.iter().enumerate() {
+            if idx > 0 {
+                out.push_str(sep);
+            }
+            if let Val::Str(s) = v {
+                out.push_str(s);
+            }
+        }
+        return Some(Val::Str(Arc::from(out)));
+    }
+
+    let mut out = String::with_capacity(items.len() * 8 + sep.len() * items.len());
+    for (idx, v) in items.iter().enumerate() {
+        if idx > 0 {
+            out.push_str(sep);
+        }
+        match v {
+            Val::Str(s) => out.push_str(s),
+            Val::Int(n) => {
+                let _ = write!(out, "{}", n);
+            }
+            Val::Float(f) => {
+                let _ = write!(out, "{}", f);
+            }
+            Val::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+            Val::Null => out.push_str("null"),
+            other => out.push_str(&val_to_string(other)),
+        }
+    }
+    Some(Val::Str(Arc::from(out)))
+}
+
+/// `.index(target)` — first index of target, else null.
+#[inline]
+pub fn index_value_apply(recv: &Val, target: &Val) -> Option<Val> {
+    let items_cow = recv.as_vals()?;
+    for (i, item) in items_cow.iter().enumerate() {
+        if crate::eval::util::vals_eq(item, target) {
+            return Some(Val::Int(i as i64));
+        }
+    }
+    Some(Val::Null)
+}
+
+/// `.indices_of(target)` — all indices of target.
+#[inline]
+pub fn indices_of_apply(recv: &Val, target: &Val) -> Option<Val> {
+    let items_cow = recv.as_vals()?;
+    let out: Vec<i64> = items_cow
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| crate::eval::util::vals_eq(v, target))
+        .map(|(i, _)| i as i64)
+        .collect();
+    Some(Val::int_vec(out))
 }
 
 /// `.pairwise()` — Arr → Arr<[arr[i], arr[i+1]]>.
@@ -2328,25 +2736,37 @@ pub fn diff_apply(recv: &Val, other: &[Val]) -> Option<Val> {
 
 // ── Phase D batch 5: object family ──────────────────────────────────
 
-/// `.from_pairs()` — Arr<[Str, Val]> → Obj.
+/// `.from_pairs()` — Arr<{key,val}> or Arr<[Str, Val]> → Obj.
 #[inline]
 pub fn from_pairs_apply(recv: &Val) -> Option<Val> {
-    if let Val::Arr(pairs) = recv {
-        let mut m: indexmap::IndexMap<Arc<str>, Val> =
-            indexmap::IndexMap::with_capacity(pairs.len());
-        for p in pairs.iter() {
-            if let Val::Arr(kv) = p {
-                if kv.len() == 2 {
-                    if let Some(k) = kv[0].as_str_ref() {
-                        m.insert(Arc::<str>::from(k), kv[1].clone());
-                    }
+    let items = recv.as_vals()?;
+    let mut m: indexmap::IndexMap<Arc<str>, Val> = indexmap::IndexMap::with_capacity(items.len());
+    for item in items.iter() {
+        match item {
+            Val::Arr(kv) if kv.len() == 2 => {
+                if let Some(k) = kv[0].as_str_ref() {
+                    m.insert(Arc::<str>::from(k), kv[1].clone());
+                }
+            }
+            _ => {
+                let k_val = item
+                    .get("key")
+                    .or_else(|| item.get("k"))
+                    .cloned()
+                    .unwrap_or(Val::Null);
+                let v = item
+                    .get("val")
+                    .or_else(|| item.get("value"))
+                    .or_else(|| item.get("v"))
+                    .cloned()
+                    .unwrap_or(Val::Null);
+                if let Val::Str(k) = k_val {
+                    m.insert(k, v);
                 }
             }
         }
-        Some(Val::Obj(Arc::new(m)))
-    } else {
-        None
     }
+    Some(Val::Obj(Arc::new(m)))
 }
 
 /// `.invert()` — Obj{k → v} → Obj{v_str → k}.
@@ -2469,7 +2889,7 @@ pub fn unflatten_keys_apply(recv: &Val, sep: &str) -> Option<Val> {
 
 #[inline]
 fn compile_regex_eval(pat: &str) -> Result<Arc<regex::Regex>, EvalError> {
-    crate::functions::compile_regex(pat).map_err(EvalError)
+    crate::builtin_helpers::compile_regex(pat).map_err(EvalError)
 }
 
 /// `.match(pat)` — Bool, regex match anywhere.
@@ -2652,7 +3072,7 @@ pub fn contains_all_apply(recv: &Val, needles: &[Arc<str>]) -> Option<Val> {
 #[inline]
 pub fn to_csv_apply(recv: &Val) -> Option<Val> {
     Some(Val::Str(Arc::from(
-        crate::functions::csv_emit(recv, ",").as_str(),
+        crate::builtin_helpers::csv_emit(recv, ",").as_str(),
     )))
 }
 
@@ -2660,7 +3080,7 @@ pub fn to_csv_apply(recv: &Val) -> Option<Val> {
 #[inline]
 pub fn to_tsv_apply(recv: &Val) -> Option<Val> {
     Some(Val::Str(Arc::from(
-        crate::functions::csv_emit(recv, "\t").as_str(),
+        crate::builtin_helpers::csv_emit(recv, "\t").as_str(),
     )))
 }
 
@@ -2718,6 +3138,84 @@ pub fn to_json_apply(recv: &Val) -> Option<Val> {
         }
     };
     Some(Val::Str(Arc::from(out)))
+}
+
+/// `.from_json()` — parse receiver as JSON.
+#[inline]
+pub fn from_json_apply(recv: &Val) -> Option<Val> {
+    try_from_json_apply(recv).ok().flatten()
+}
+
+#[inline]
+pub fn try_from_json_apply(recv: &Val) -> Result<Option<Val>, EvalError> {
+    #[cfg(feature = "simd-json")]
+    {
+        let bytes_owned: Vec<u8> = match recv {
+            Val::Str(s) => s.as_bytes().to_vec(),
+            _ => crate::eval::util::val_to_string(recv).into_bytes(),
+        };
+        let mut bytes = bytes_owned;
+        return Val::from_json_simd(&mut bytes)
+            .map(Some)
+            .map_err(|e| EvalError(format!("from_json: {}", e)));
+    }
+    #[cfg(not(feature = "simd-json"))]
+    {
+        match recv {
+            Val::Str(s) => Val::from_json_str(s.as_ref())
+                .map(Some)
+                .map_err(|e| EvalError(format!("from_json: {}", e))),
+            _ => {
+                let s = crate::eval::util::val_to_string(recv);
+                Val::from_json_str(&s)
+                    .map(Some)
+                    .map_err(|e| EvalError(format!("from_json: {}", e)))
+            }
+        }
+    }
+}
+
+/// `.or(default)` — default only when receiver is null.
+#[inline]
+pub fn or_apply(recv: &Val, default: &Val) -> Val {
+    if recv.is_null() {
+        default.clone()
+    } else {
+        recv.clone()
+    }
+}
+
+/// `.missing(key)` — negated nested field existence test.
+#[inline]
+pub fn missing_apply(recv: &Val, key: &str) -> Val {
+    Val::Bool(!crate::eval::util::field_exists_nested(recv, key))
+}
+
+/// `.includes(item)` / `.contains(item)` — membership or substring check.
+#[inline]
+pub fn includes_apply(recv: &Val, item: &Val) -> Val {
+    use crate::eval::util::val_to_key;
+    let key = val_to_key(item);
+    Val::Bool(match recv {
+        Val::Arr(a) => a.iter().any(|v| val_to_key(v) == key),
+        Val::IntVec(a) => a.iter().any(|n| val_to_key(&Val::Int(*n)) == key),
+        Val::FloatVec(a) => a.iter().any(|f| val_to_key(&Val::Float(*f)) == key),
+        Val::StrVec(a) => match item.as_str() {
+            Some(needle) => a.iter().any(|s| s.as_ref() == needle),
+            None => false,
+        },
+        Val::Str(s) => s.contains(item.as_str().unwrap_or_default()),
+        Val::StrSlice(s) => s.as_str().contains(item.as_str().unwrap_or_default()),
+        Val::Obj(m) => match item.as_str() {
+            Some(k) => m.contains_key(k),
+            None => false,
+        },
+        Val::ObjSmall(p) => match item.as_str() {
+            Some(k) => p.iter().any(|(kk, _)| kk.as_ref() == k),
+            None => false,
+        },
+        _ => false,
+    })
 }
 
 /// `.schema()` — Val → schema Obj describing types/required/array shape.

@@ -52,6 +52,7 @@
 
 pub mod analysis;
 pub mod ast;
+pub(crate) mod builtin_helpers;
 pub mod builtins;
 pub mod composed;
 pub mod engine;

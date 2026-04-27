@@ -16,9 +16,7 @@
 use indexmap::IndexMap;
 use std::sync::Arc;
 
-use super::util::{
-    cartesian, cmp_vals, flatten_val, is_truthy, obj2, val_key, val_to_key, zip_arrays,
-};
+use super::util::{cartesian, cmp_vals, flatten_val, is_truthy, val_key, val_to_key, zip_arrays};
 use super::value::Val;
 use super::{apply_item2_mut, apply_item_mut, eval_pos, first_i64_arg, vm_eval, Env, EvalError};
 use crate::ast::{Arg, Expr};
@@ -297,11 +295,7 @@ pub fn join(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
         .transpose()?
         .and_then(|v| if let Val::Str(s) = v { Some(s) } else { None })
         .unwrap_or_else(|| Arc::from(""));
-    use crate::composed::{Join, Stage as _, StageOutput};
-    match Join::new(sep).apply(&recv) {
-        StageOutput::Pass(c) => Ok(c.into_owned()),
-        _ => Err(EvalError("join: expected array".into())),
-    }
+    crate::builtins::join_apply(&recv, &sep).ok_or_else(|| EvalError("join: expected array".into()))
 }
 
 /// Equi-join: `lhs.equi_join(rhs, lhs_key, rhs_key)`.
@@ -387,13 +381,8 @@ pub fn enumerate(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
         }
         Ok(Val::arr(out))
     } else {
-        Ok(Val::arr(
-            items
-                .into_iter()
-                .enumerate()
-                .map(|(i, v)| obj2("index", Val::Int(i as i64), "value", v))
-                .collect(),
-        ))
+        crate::builtins::enumerate_apply(&Val::arr(items))
+            .ok_or_else(|| EvalError("enumerate: expected array".into()))
     }
 }
 
@@ -636,15 +625,15 @@ pub(crate) fn floats_to_val(out: Vec<Option<f64>>) -> Val {
     }
 }
 
-// Bodies migrated to functions.rs as `RollingSum/Avg/Min/Max`,
-// `Lag`, `Lead` Stages.  Thin shims for legacy registry path.
+// Thin shims for legacy registry path; numeric kernels live in builtins.rs.
 
 pub fn rolling_avg(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     let n = first_i64_arg(args, env)? as usize;
     if n == 0 {
         return err!("rolling_avg: window must be > 0");
     }
-    delegate_num(recv, crate::functions::RollingAvg::new(n))
+    crate::builtins::rolling_avg_apply(&recv, n)
+        .ok_or_else(|| EvalError("expected numeric array".into()))
 }
 
 pub fn rolling_sum(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
@@ -652,7 +641,8 @@ pub fn rolling_sum(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError>
     if n == 0 {
         return err!("rolling_sum: window must be > 0");
     }
-    delegate_num(recv, crate::functions::RollingSum::new(n))
+    crate::builtins::rolling_sum_apply(&recv, n)
+        .ok_or_else(|| EvalError("expected numeric array".into()))
 }
 
 pub fn rolling_min(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
@@ -660,7 +650,8 @@ pub fn rolling_min(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError>
     if n == 0 {
         return err!("rolling_min: window must be > 0");
     }
-    delegate_num(recv, crate::functions::RollingMin::new(n))
+    crate::builtins::rolling_min_apply(&recv, n)
+        .ok_or_else(|| EvalError("expected numeric array".into()))
 }
 
 pub fn rolling_max(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
@@ -668,7 +659,8 @@ pub fn rolling_max(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError>
     if n == 0 {
         return err!("rolling_max: window must be > 0");
     }
-    delegate_num(recv, crate::functions::RollingMax::new(n))
+    crate::builtins::rolling_max_apply(&recv, n)
+        .ok_or_else(|| EvalError("expected numeric array".into()))
 }
 
 pub fn lag(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
@@ -677,7 +669,7 @@ pub fn lag(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     } else {
         first_i64_arg(args, env)?.max(0) as usize
     };
-    delegate_num(recv, crate::functions::Lag::new(n))
+    crate::builtins::lag_apply(&recv, n).ok_or_else(|| EvalError("expected numeric array".into()))
 }
 
 pub fn lead(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
@@ -686,7 +678,7 @@ pub fn lead(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     } else {
         first_i64_arg(args, env)?.max(0) as usize
     };
-    delegate_num(recv, crate::functions::Lead::new(n))
+    crate::builtins::lead_apply(&recv, n).ok_or_else(|| EvalError("expected numeric array".into()))
 }
 
 // Bodies migrated to composed.rs as `CumMax` / `CumMin` / `DiffWindow`
@@ -750,11 +742,8 @@ pub fn index_of_value(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalErr
         return err!("index: requires a target value");
     }
     let target = eval_pos(&args[0], env)?;
-    use crate::composed::{IndexOfValue, Stage as _, StageOutput};
-    match IndexOfValue::new(target).apply(&recv) {
-        StageOutput::Pass(c) => Ok(c.into_owned()),
-        _ => err!("index: expected array"),
-    }
+    crate::builtins::index_value_apply(&recv, &target)
+        .ok_or_else(|| EvalError("index: expected array".into()))
 }
 
 pub fn indices_where(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
@@ -786,11 +775,8 @@ pub fn indices_of(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> 
         return err!("indices_of: requires a target value");
     }
     let target = eval_pos(&args[0], env)?;
-    use crate::composed::{IndicesOf, Stage as _, StageOutput};
-    match IndicesOf::new(target).apply(&recv) {
-        StageOutput::Pass(c) => Ok(c.into_owned()),
-        _ => err!("indices_of: expected array"),
-    }
+    crate::builtins::indices_of_apply(&recv, &target)
+        .ok_or_else(|| EvalError("indices_of: expected array".into()))
 }
 
 // ── max_by / min_by — single-pass argmax / argmin ────────────────────────────
@@ -845,5 +831,5 @@ pub fn min_by(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
 }
 
 pub fn zscore(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    delegate_num(recv, crate::functions::ZScore)
+    crate::builtins::zscore_apply(&recv).ok_or_else(|| EvalError("expected numeric array".into()))
 }

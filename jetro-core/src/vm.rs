@@ -4055,7 +4055,19 @@ impl VM {
                 let n = self.static_arg_i64(call, env, 0, "nth")?;
                 BuiltinCall::new(call.method, BuiltinArgs::I64(n))
             }
-            BuiltinMethod::Append | BuiltinMethod::Prepend => {
+            BuiltinMethod::Append | BuiltinMethod::Prepend | BuiltinMethod::Set => {
+                let item = self.static_arg_val(call, env, 0)?.unwrap_or(Val::Null);
+                BuiltinCall::new(call.method, BuiltinArgs::Val(item))
+            }
+            BuiltinMethod::Or => {
+                let default = self.static_arg_val(call, env, 0)?.unwrap_or(Val::Null);
+                BuiltinCall::new(call.method, BuiltinArgs::Val(default))
+            }
+            BuiltinMethod::Includes => {
+                let item = self.static_arg_val(call, env, 0)?.unwrap_or(Val::Null);
+                BuiltinCall::new(call.method, BuiltinArgs::Val(item))
+            }
+            BuiltinMethod::Index | BuiltinMethod::IndicesOf => {
                 let item = self.static_arg_val(call, env, 0)?.unwrap_or(Val::Null);
                 BuiltinCall::new(call.method, BuiltinArgs::Val(item))
             }
@@ -4093,9 +4105,11 @@ impl VM {
             BuiltinMethod::GetPath
             | BuiltinMethod::HasPath
             | BuiltinMethod::Has
+            | BuiltinMethod::Join
             | BuiltinMethod::DelPath
             | BuiltinMethod::FlattenKeys
             | BuiltinMethod::UnflattenKeys
+            | BuiltinMethod::Missing
             | BuiltinMethod::StartsWith
             | BuiltinMethod::EndsWith
             | BuiltinMethod::IndexOf
@@ -4113,6 +4127,7 @@ impl VM {
             | BuiltinMethod::ReSplit => {
                 let s = match call.orig_args.first() {
                     Some(_) => self.static_arg_str(call, env, 0, call.name.as_ref())?,
+                    None if matches!(call.method, BuiltinMethod::Join) => Arc::from(""),
                     None if matches!(
                         call.method,
                         BuiltinMethod::FlattenKeys | BuiltinMethod::UnflattenKeys
