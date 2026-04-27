@@ -188,47 +188,46 @@ fn build() -> BuiltinRegistry {
     t.insert("set",    b_set);
     t.insert("update", b_update);
 
-    // String methods
-    t.insert("upper",          func_strings::upper);
-    t.insert("lower",          func_strings::lower);
-    t.insert("capitalize",     func_strings::capitalize);
-    t.insert("title_case",     func_strings::title_case);
-    t.insert("trim",           func_strings::trim);
-    t.insert("trim_left",      func_strings::trim_left);
-    t.insert("trim_right",     func_strings::trim_right);
-    t.insert("lines",          func_strings::lines);
-    t.insert("words",          func_strings::words);
-    t.insert("chars",          func_strings::chars);
-    t.insert("to_number",      func_strings::to_number);
-    t.insert("to_bool",        func_strings::to_bool);
-    t.insert("to_base64",      func_strings::to_base64);
-    t.insert("from_base64",    func_strings::from_base64);
-    t.insert("url_encode",     func_strings::url_encode);
-    t.insert("url_decode",     func_strings::url_decode);
-    t.insert("html_escape",    func_strings::html_escape);
-    t.insert("html_unescape",  func_strings::html_unescape);
-    t.insert("repeat",         func_strings::repeat);
-    t.insert("pad_left",       func_strings::pad_left);
-    t.insert("pad_right",      func_strings::pad_right);
-    t.insert("starts_with",    func_strings::starts_with);
-    t.insert("ends_with",      func_strings::ends_with);
-    t.insert("index_of",       func_strings::index_of);
-    t.insert("last_index_of",  func_strings::last_index_of);
+    // String methods — bodies in `composed.rs` Stages, dispatched
+    // via `composed::shims` per `lift_all_builtins.md`.  Anything
+    // not yet lifted (e.g. snake_case) still routes via func_strings.
+    t.insert("upper",          crate::composed::shims::upper);
+    t.insert("lower",          crate::composed::shims::lower);
+    t.insert("capitalize",     crate::composed::shims::capitalize);
+    t.insert("title_case",     crate::composed::shims::title_case);
+    t.insert("trim",           crate::composed::shims::trim);
+    t.insert("trim_left",      crate::composed::shims::trim_left);
+    t.insert("trim_right",     crate::composed::shims::trim_right);
+    t.insert("lines",          crate::composed::shims::lines);
+    t.insert("words",          crate::composed::shims::words);
+    t.insert("chars",          crate::composed::shims::chars);
+    t.insert("to_number",      crate::composed::shims::to_number);
+    t.insert("to_bool",        crate::composed::shims::to_bool);
+    t.insert("to_base64",      crate::composed::shims::to_base64);
+    t.insert("from_base64",    func_strings::from_base64);  // explicit error semantics
+    t.insert("url_encode",     crate::composed::shims::url_encode);
+    t.insert("url_decode",     crate::composed::shims::url_decode);
+    t.insert("html_escape",    crate::composed::shims::html_escape);
+    t.insert("html_unescape",  crate::composed::shims::html_unescape);
+    t.insert("repeat",         crate::composed::shims::repeat);
+    t.insert("pad_left",       crate::composed::shims::pad_left);
+    t.insert("pad_right",      crate::composed::shims::pad_right);
+    t.insert("starts_with",    crate::composed::shims::starts_with);
+    t.insert("ends_with",      crate::composed::shims::ends_with);
+    t.insert("index_of",       crate::composed::shims::index_of);
+    t.insert("last_index_of",  crate::composed::shims::last_index_of);
     // .replace / .replace_all lifted to pipeline::Stage::Replace.
     t.insert("replace",        replace_dispatch);
     t.insert("replace_all",    replace_all_dispatch);
-    t.insert("strip_prefix",   func_strings::strip_prefix);
-    t.insert("strip_suffix",   func_strings::strip_suffix);
+    t.insert("strip_prefix",   crate::composed::shims::strip_prefix);
+    t.insert("strip_suffix",   crate::composed::shims::strip_suffix);
     // .slice / .split lifted to pipeline::Stage::Slice / Stage::Split.
-    // Dispatch shim parses args + delegates to the canonical pipeline
-    // helper.  Stage::apply (per-element) and the dispatch path share
-    // a single implementation — see lift_all_builtins.md.
     t.insert("slice",          slice_dispatch);
     t.insert("split",          split_dispatch);
-    t.insert("indent",         func_strings::indent);
-    t.insert("dedent",         func_strings::dedent);
-    t.insert("matches",        func_strings::str_matches);
-    t.insert("scan",           func_strings::scan);
+    t.insert("indent",         crate::composed::shims::indent);
+    t.insert("dedent",         crate::composed::shims::dedent);
+    t.insert("matches",        crate::composed::shims::str_matches);
+    t.insert("scan",           func_strings::scan);  // not yet lifted
 
     // Case-conversion family.
     t.insert("snake_case",     func_strings::snake_case);

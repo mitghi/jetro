@@ -17,48 +17,26 @@ macro_rules! err {
     ($($t:tt)*) => { Err(EvalError(format!($($t)*))) };
 }
 
-// ── Standard-signature string methods ─────────────────────────────────────────
-// All follow fn(Val, &[Arg], &Env) -> Result<Val, EvalError>.
+// ── Lifted built-ins (bodies live in `composed.rs`) ──────────────────────────
 //
-// Bodies LIFTED to first-class Stages in `composed.rs` per
-// `lift_all_builtins.md`.  These shims dispatch Method-call
-// invocations to the same Stage kernel — single source of truth.
+// All standard-signature string methods (upper/lower/trim/.../pad_*/
+// index_of/...) were lifted to first-class Stages in `composed.rs`.
+// Dispatch shims live in `composed::shims::*` and are registered
+// directly by `eval::builtins.rs` — `eval::func_strings::*` no
+// longer holds those entry points.
+//
+// What remains in this file:
+//   - `from_base64`           — explicit error-on-bad-input semantics
+//                               (cannot use the generic Stage filter →
+//                               err shim macro)
+//   - `scan`                  — not yet lifted
+//   - case-conversion (snake/kebab/camel/pascal/screaming/title) —
+//                               not yet lifted
+//   - `base64_encode/decode`  — public helper used by composed::ToBase64
+//                               and explicit from_base64 shim
+//
+// Everything else delete-able once the remaining shims migrate.
 
-macro_rules! delegate_str_stage {
-    ($shim:ident, $stage:expr, $err:expr) => {
-        pub fn $shim(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-            if !matches!(recv, Val::Str(_)) { return err!($err); }
-            crate::composed::run_single(&$stage, &recv).ok_or_else(|| EvalError($err.into()))
-        }
-    };
-}
-
-delegate_str_stage!(upper,        crate::composed::Upper,        "upper: expected string");
-delegate_str_stage!(lower,        crate::composed::Lower,        "lower: expected string");
-delegate_str_stage!(capitalize,   crate::composed::Capitalize,   "capitalize: expected string");
-delegate_str_stage!(title_case,   crate::composed::TitleCase,    "title_case: expected string");
-delegate_str_stage!(trim,         crate::composed::Trim,         "trim: expected string");
-delegate_str_stage!(trim_left,    crate::composed::TrimLeft,     "trim_left: expected string");
-delegate_str_stage!(trim_right,   crate::composed::TrimRight,    "trim_right: expected string");
-delegate_str_stage!(lines,        crate::composed::Lines,        "lines: expected string");
-delegate_str_stage!(words,        crate::composed::Words,        "words: expected string");
-delegate_str_stage!(chars,        crate::composed::Chars,        "chars: expected string");
-delegate_str_stage!(to_number,    crate::composed::ToNumber,     "to_number: expected string");
-
-pub fn to_bool(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    if let Val::Str(s) = recv {
-        Ok(Val::Bool(matches!(s.to_lowercase().as_str(), "true" | "1" | "yes" | "on")))
-    } else { err!("to_bool: expected string") }
-}
-
-delegate_str_stage!(to_base64,    crate::composed::ToBase64,     "to_base64: expected string");
-delegate_str_stage!(url_encode,   crate::composed::UrlEncode,    "url_encode: expected string");
-delegate_str_stage!(url_decode,   crate::composed::UrlDecode,    "url_decode: expected string");
-delegate_str_stage!(html_escape,  crate::composed::HtmlEscape,   "html_escape: expected string");
-delegate_str_stage!(html_unescape,crate::composed::HtmlUnescape, "html_unescape: expected string");
-
-// from_base64 has explicit error-on-bad-input semantics; cannot use
-// the generic delegate macro (which only collapses Filter → err).
 pub fn from_base64(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
     if let Val::Str(s) = recv {
         match base64_decode(&s) {
@@ -68,141 +46,12 @@ pub fn from_base64(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
     } else { err!("from_base64: expected string") }
 }
 
-pub fn repeat(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-    if let Val::Str(s) = recv {
-        let n = first_i64_arg(args, env).unwrap_or(1).max(0) as usize;
-        Ok(val_str(&s.repeat(n)))
-    } else { err!("repeat: expected string") }
-}
-
-pub fn pad_left(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-    if let Val::Str(s) = recv {
-        let width = first_i64_arg(args, env).unwrap_or(0) as usize;
-        let fill  = fill_char(args, 1, env);
-        let n = s.chars().count();
-        if n >= width { return Ok(Val::Str(s)); }
-        let pad: String = std::iter::repeat(fill).take(width - n).collect();
-        Ok(val_str(&(pad + &s)))
-    } else { err!("pad_left: expected string") }
-}
-
-pub fn pad_right(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-    if let Val::Str(s) = recv {
-        let width = first_i64_arg(args, env).unwrap_or(0) as usize;
-        let fill  = fill_char(args, 1, env);
-        let n = s.chars().count();
-        if n >= width { return Ok(Val::Str(s)); }
-        let pad: String = std::iter::repeat(fill).take(width - n).collect();
-        Ok(val_str(&(s.to_string() + &pad)))
-    } else { err!("pad_right: expected string") }
-}
-
-pub fn starts_with(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-    if let Val::Str(s) = recv {
-        Ok(Val::Bool(s.starts_with(str_arg(args, 0, env)?.as_str())))
-    } else { err!("starts_with: expected string") }
-}
-
-pub fn ends_with(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-    if let Val::Str(s) = recv {
-        Ok(Val::Bool(s.ends_with(str_arg(args, 0, env)?.as_str())))
-    } else { err!("ends_with: expected string") }
-}
-
-pub fn index_of(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-    if let Val::Str(s) = recv {
-        let pat = str_arg(args, 0, env)?;
-        Ok(match s.find(pat.as_str()) {
-            Some(i) => Val::Int(s[..i].chars().count() as i64),
-            None    => Val::Int(-1),
-        })
-    } else { err!("index_of: expected string") }
-}
-
-pub fn last_index_of(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-    if let Val::Str(s) = recv {
-        let pat = str_arg(args, 0, env)?;
-        Ok(match s.rfind(pat.as_str()) {
-            Some(i) => Val::Int(s[..i].chars().count() as i64),
-            None    => Val::Int(-1),
-        })
-    } else { err!("last_index_of: expected string") }
-}
-
-// `.replace` and `.replace_all` lifted to `pipeline::Stage::Replace`.
-// Canonical impl in `pipeline::replace_apply`; dispatch shims in
-// `eval/builtins.rs::{replace_dispatch, replace_all_dispatch}`.
-
-pub fn strip_prefix(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-    if let Val::Str(s) = recv {
-        let pat = str_arg(args, 0, env)?;
-        Ok(Val::Str(Arc::from(s.strip_prefix(pat.as_str()).unwrap_or(&s))))
-    } else { err!("strip_prefix: expected string") }
-}
-
-pub fn strip_suffix(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-    if let Val::Str(s) = recv {
-        let pat = str_arg(args, 0, env)?;
-        Ok(Val::Str(Arc::from(s.strip_suffix(pat.as_str()).unwrap_or(&s))))
-    } else { err!("strip_suffix: expected string") }
-}
-
-// `.slice` and `.split` lifted to `pipeline::Stage::Slice` / `Stage::Split`
-// in v2.4 (Step 3d-extension C). Canonical impls live in `pipeline.rs`
-// (`slice_apply` / `split_apply`); dispatch shims in `eval/builtins.rs`
-// (`slice_dispatch` / `split_dispatch`) parse positional args and delegate.
-
-pub fn indent(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-    if let Val::Str(s) = recv {
-        let n = first_i64_arg(args, env).unwrap_or(2) as usize;
-        let prefix: String = std::iter::repeat(' ').take(n).collect();
-        Ok(val_str(&s.lines()
-            .map(|l| format!("{}{}", prefix, l))
-            .collect::<Vec<_>>().join("\n")))
-    } else { err!("indent: expected string") }
-}
-
-pub fn dedent(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    if let Val::Str(s) = recv {
-        let min_indent = s.lines()
-            .filter(|l| !l.trim().is_empty())
-            .map(|l| l.len() - l.trim_start().len())
-            .min().unwrap_or(0);
-        Ok(val_str(&s.lines()
-            .map(|l| if l.len() >= min_indent { &l[min_indent..] } else { l })
-            .collect::<Vec<_>>().join("\n")))
-    } else { err!("dedent: expected string") }
-}
-
-pub fn str_matches(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-    if let Val::Str(s) = recv {
-        let pat = str_arg(args, 0, env)?;
-        Ok(Val::Bool(s.contains(pat.as_str())))
-    } else { err!("matches: expected string") }
-}
-
 pub fn scan(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     if let Val::Str(s) = recv {
         let pat = str_arg(args, 0, env)?;
         Ok(Val::arr(scan_raw(&s, &pat).into_iter().map(|p| val_str(&p)).collect()))
     } else { err!("scan: expected string") }
 }
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-fn fill_char(args: &[Arg], idx: usize, env: &Env) -> char {
-    args.get(idx)
-        .and_then(|a| eval_pos(a, env).ok())
-        .and_then(|v| if let Val::Str(s) = v { s.chars().next() } else { None })
-        .unwrap_or(' ')
-}
-
-// `capitalize_str`, `title_case_raw`, `url_encode_raw`,
-// `url_decode_raw`, `html_escape_raw`, `html_unescape_raw` deleted —
-// bodies migrated into composed.rs Stage impls (Capitalize / TitleCase
-// / UrlEncode / UrlDecode / HtmlEscape / HtmlUnescape).
-//
-// `scan_raw` retained — used by str_matches.
 
 fn scan_raw(s: &str, pat: &str) -> Vec<String> {
     if pat.is_empty() { return vec![]; }

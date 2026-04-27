@@ -122,14 +122,189 @@ impl Identity {
 // family-by-family per the lift_all_builtins.md effort estimate.
 
 /// Run a single Stage and unwrap its single-Val result, or return
-/// None when the Stage filtered/done.  Used by `eval::func_*` shims
-/// that delegate to lifted Stages: the function body lives in the
-/// Stage, the func entry point becomes a thin dispatch.
+/// None when the Stage filtered/done.  Used by Method-dispatch shims
+/// (`composed::shims::*`) that delegate to lifted Stages: the
+/// function body lives in the Stage, the dispatch shim is thin.
 #[inline]
 pub fn run_single<S: Stage>(stage: &S, recv: &Val) -> Option<Val> {
     match stage.apply(recv) {
         StageOutput::Pass(c) => Some(c.into_owned()),
         _ => None,
+    }
+}
+
+/// Method-dispatch shims for lifted built-ins.
+///
+/// Per `lift_all_builtins.md`: the `eval::builtins` registration
+/// table was previously the home of `Opcode::CallMethod` dispatch
+/// entry points (signature `fn(Val, &[Arg], &Env) -> Result<Val,
+/// EvalError>`).  As built-in bodies migrate into first-class
+/// `Stage` impls in this module, the dispatch entry points move
+/// here too.  Each shim does:
+///   1. validate receiver type (Val::Str / Val::Arr / etc.)
+///   2. parse args (where applicable)
+///   3. delegate to the Stage's `apply` via `run_single`
+///   4. emit type-mismatch error if the Stage filters
+///
+/// `eval::func_*` then shrinks to ONLY the not-yet-lifted shims.
+/// Eventually `eval::func_*.rs` files delete entirely once every
+/// builtin lifts.
+pub mod shims {
+    use super::*;
+    use crate::eval::{Env, EvalError};
+    use crate::ast::{Arg, Expr};
+
+    macro_rules! err { ($($t:tt)*) => { Err(EvalError(format!($($t)*))) }; }
+
+    macro_rules! delegate_str_stage {
+        ($shim:ident, $stage:expr, $err:expr) => {
+            pub fn $shim(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
+                if !matches!(recv, Val::Str(_)) { return err!($err); }
+                run_single(&$stage, &recv).ok_or_else(|| EvalError($err.into()))
+            }
+        };
+    }
+
+    delegate_str_stage!(upper,        Upper,        "upper: expected string");
+    delegate_str_stage!(lower,        Lower,        "lower: expected string");
+    delegate_str_stage!(capitalize,   Capitalize,   "capitalize: expected string");
+    delegate_str_stage!(title_case,   TitleCase,    "title_case: expected string");
+    delegate_str_stage!(trim,         Trim,         "trim: expected string");
+    delegate_str_stage!(trim_left,    TrimLeft,     "trim_left: expected string");
+    delegate_str_stage!(trim_right,   TrimRight,    "trim_right: expected string");
+    delegate_str_stage!(lines,        Lines,        "lines: expected string");
+    delegate_str_stage!(words,        Words,        "words: expected string");
+    delegate_str_stage!(chars,        Chars,        "chars: expected string");
+    delegate_str_stage!(to_number,    ToNumber,     "to_number: expected string");
+    delegate_str_stage!(to_base64,    ToBase64,     "to_base64: expected string");
+    delegate_str_stage!(url_encode,   UrlEncode,    "url_encode: expected string");
+    delegate_str_stage!(url_decode,   UrlDecode,    "url_decode: expected string");
+    delegate_str_stage!(html_escape,  HtmlEscape,   "html_escape: expected string");
+    delegate_str_stage!(html_unescape,HtmlUnescape, "html_unescape: expected string");
+    delegate_str_stage!(dedent,       Dedent,       "dedent: expected string");
+
+    /// `to_bool` errors on non-recognised inputs (cannot use generic
+    /// macro).
+    pub fn to_bool(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
+        if let Val::Str(s) = recv {
+            match s.as_ref() {
+                "true"  => Ok(Val::Bool(true)),
+                "false" => Ok(Val::Bool(false)),
+                _       => err!("to_bool: not a boolean: {}", s),
+            }
+        } else { err!("to_bool: expected string") }
+    }
+
+    fn first_str_arg(args: &[Arg], env: &Env, name: &str) -> Result<std::sync::Arc<str>, EvalError> {
+        let a = args.first().ok_or_else(|| EvalError(format!("{}: missing argument", name)))?;
+        let v = match a {
+            Arg::Pos(Expr::Ident(s)) => return Ok(std::sync::Arc::from(s.as_str())),
+            Arg::Pos(e) | Arg::Named(_, e) => crate::eval::eval(e, env)?,
+        };
+        match v {
+            Val::Str(s) => Ok(s),
+            _ => err!("{}: expected string argument", name),
+        }
+    }
+
+    fn first_i64_arg(args: &[Arg], env: &Env, name: &str) -> Result<i64, EvalError> {
+        let a = args.first().ok_or_else(|| EvalError(format!("{}: missing argument", name)))?;
+        let v = match a {
+            Arg::Pos(e) | Arg::Named(_, e) => crate::eval::eval(e, env)?,
+        };
+        match v {
+            Val::Int(n)   => Ok(n),
+            Val::Float(f) => Ok(f as i64),
+            _ => err!("{}: expected number argument", name),
+        }
+    }
+
+    fn second_char_arg(args: &[Arg], env: &Env) -> char {
+        args.get(1)
+            .and_then(|a| match a {
+                Arg::Pos(e) | Arg::Named(_, e) => crate::eval::eval(e, env).ok(),
+            })
+            .and_then(|v| if let Val::Str(s) = v { s.chars().next() } else { None })
+            .unwrap_or(' ')
+    }
+
+    pub fn starts_with(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+        if !matches!(recv, Val::Str(_)) { return err!("starts_with: expected string"); }
+        let prefix = first_str_arg(args, env, "starts_with")?;
+        run_single(&StartsWith::new(prefix), &recv)
+            .ok_or_else(|| EvalError("starts_with: stage filtered".into()))
+    }
+
+    pub fn ends_with(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+        if !matches!(recv, Val::Str(_)) { return err!("ends_with: expected string"); }
+        let suffix = first_str_arg(args, env, "ends_with")?;
+        run_single(&EndsWith::new(suffix), &recv)
+            .ok_or_else(|| EvalError("ends_with: stage filtered".into()))
+    }
+
+    pub fn index_of(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+        if !matches!(recv, Val::Str(_)) { return err!("index_of: expected string"); }
+        let needle = first_str_arg(args, env, "index_of")?;
+        run_single(&IndexOf::new(needle), &recv)
+            .ok_or_else(|| EvalError("index_of: stage filtered".into()))
+    }
+
+    pub fn last_index_of(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+        if !matches!(recv, Val::Str(_)) { return err!("last_index_of: expected string"); }
+        let needle = first_str_arg(args, env, "last_index_of")?;
+        run_single(&LastIndexOf::new(needle), &recv)
+            .ok_or_else(|| EvalError("last_index_of: stage filtered".into()))
+    }
+
+    pub fn strip_prefix(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+        if !matches!(recv, Val::Str(_)) { return err!("strip_prefix: expected string"); }
+        let pat = first_str_arg(args, env, "strip_prefix")?;
+        run_single(&StripPrefix::new(pat), &recv)
+            .ok_or_else(|| EvalError("strip_prefix: stage filtered".into()))
+    }
+
+    pub fn strip_suffix(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+        if !matches!(recv, Val::Str(_)) { return err!("strip_suffix: expected string"); }
+        let pat = first_str_arg(args, env, "strip_suffix")?;
+        run_single(&StripSuffix::new(pat), &recv)
+            .ok_or_else(|| EvalError("strip_suffix: stage filtered".into()))
+    }
+
+    pub fn repeat(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+        if !matches!(recv, Val::Str(_)) { return err!("repeat: expected string"); }
+        let n = first_i64_arg(args, env, "repeat").unwrap_or(1).max(0) as usize;
+        run_single(&Repeat::new(n), &recv)
+            .ok_or_else(|| EvalError("repeat: stage filtered".into()))
+    }
+
+    pub fn pad_left(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+        if !matches!(recv, Val::Str(_)) { return err!("pad_left: expected string"); }
+        let width = first_i64_arg(args, env, "pad_left").unwrap_or(0).max(0) as usize;
+        let fill = second_char_arg(args, env);
+        run_single(&PadLeft::new(width, fill), &recv)
+            .ok_or_else(|| EvalError("pad_left: stage filtered".into()))
+    }
+
+    pub fn pad_right(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+        if !matches!(recv, Val::Str(_)) { return err!("pad_right: expected string"); }
+        let width = first_i64_arg(args, env, "pad_right").unwrap_or(0).max(0) as usize;
+        let fill = second_char_arg(args, env);
+        run_single(&PadRight::new(width, fill), &recv)
+            .ok_or_else(|| EvalError("pad_right: stage filtered".into()))
+    }
+
+    pub fn indent(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+        if !matches!(recv, Val::Str(_)) { return err!("indent: expected string"); }
+        let n = first_i64_arg(args, env, "indent").unwrap_or(2).max(0) as usize;
+        run_single(&Indent::new(n), &recv)
+            .ok_or_else(|| EvalError("indent: stage filtered".into()))
+    }
+
+    pub fn str_matches(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+        if !matches!(recv, Val::Str(_)) { return err!("matches: expected string"); }
+        let pat = first_str_arg(args, env, "matches")?;
+        run_single(&StrMatches::new(pat), &recv)
+            .ok_or_else(|| EvalError("matches: stage filtered".into()))
     }
 }
 
