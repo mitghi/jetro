@@ -47,7 +47,6 @@ pub mod util;
 pub mod methods;
 pub mod builtins;
 pub mod borrowed;
-pub mod func_strings;
 mod func_arrays;
 mod func_objects;
 pub mod func_paths;

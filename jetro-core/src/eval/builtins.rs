@@ -12,7 +12,7 @@ use crate::ast::Arg;
 use super::{Env, EvalError, eval_pos, apply_item, str_arg, first_i64_arg};
 use super::value::Val;
 use super::util::{val_to_string, val_str, field_exists_nested};
-use super::{func_strings, func_arrays, func_objects, func_paths, func_aggregates, func_csv, func_search};
+use super::{func_arrays, func_objects, func_paths, func_aggregates, func_csv, func_search};
 
 macro_rules! err {
     ($($t:tt)*) => { Err(EvalError(format!($($t)*))) };
@@ -188,9 +188,9 @@ fn build() -> BuiltinRegistry {
     t.insert("set",    b_set);
     t.insert("update", b_update);
 
-    // String methods — bodies in `composed.rs` Stages, dispatched
-    // via `composed::shims` per `lift_all_builtins.md`.  Anything
-    // not yet lifted (e.g. snake_case) still routes via func_strings.
+    // String methods — every body lives in `composed.rs` as a
+    // first-class Stage; dispatch shims live in `composed::shims`.
+    // (`eval/func_strings.rs` was deleted.)
     t.insert("upper",          crate::composed::shims::upper);
     t.insert("lower",          crate::composed::shims::lower);
     t.insert("capitalize",     crate::composed::shims::capitalize);
@@ -204,7 +204,7 @@ fn build() -> BuiltinRegistry {
     t.insert("to_number",      crate::composed::shims::to_number);
     t.insert("to_bool",        crate::composed::shims::to_bool);
     t.insert("to_base64",      crate::composed::shims::to_base64);
-    t.insert("from_base64",    func_strings::from_base64);  // explicit error semantics
+    t.insert("from_base64",    crate::composed::shims::from_base64);
     t.insert("url_encode",     crate::composed::shims::url_encode);
     t.insert("url_decode",     crate::composed::shims::url_decode);
     t.insert("html_escape",    crate::composed::shims::html_escape);
@@ -236,27 +236,27 @@ fn build() -> BuiltinRegistry {
     t.insert("pascal_case",    crate::composed::shims::pascal_case);
 
     // Padding / repetition / reversal.
-    t.insert("center",         func_strings::center);     // not yet lifted
-    t.insert("repeat_str",     func_strings::repeat_str); // not yet lifted
+    t.insert("center",         crate::composed::shims::center);
+    t.insert("repeat_str",     crate::composed::shims::repeat_str);
     t.insert("reverse_str",    crate::composed::shims::reverse_str);
 
     // Char / byte introspection.
-    t.insert("chars_of",       func_strings::chars_of);
-    t.insert("bytes",          func_strings::bytes_of);
-    t.insert("byte_len",       func_strings::byte_len);
+    t.insert("chars_of",       crate::composed::shims::chars_of);
+    t.insert("bytes",          crate::composed::shims::bytes_of);
+    t.insert("byte_len",       crate::composed::shims::byte_len);
 
     // Predicates / parsers.
-    t.insert("is_blank",       func_strings::is_blank);
-    t.insert("is_numeric",     func_strings::is_numeric);
-    t.insert("is_alpha",       func_strings::is_alpha);
-    t.insert("is_ascii",       func_strings::is_ascii);
-    t.insert("parse_int",      func_strings::parse_int);
-    t.insert("parse_float",    func_strings::parse_float);
-    t.insert("parse_bool",     func_strings::parse_bool);
+    t.insert("is_blank",       crate::composed::shims::is_blank);
+    t.insert("is_numeric",     crate::composed::shims::is_numeric);
+    t.insert("is_alpha",       crate::composed::shims::is_alpha);
+    t.insert("is_ascii",       crate::composed::shims::is_ascii);
+    t.insert("parse_int",      crate::composed::shims::parse_int);
+    t.insert("parse_float",    crate::composed::shims::parse_float);
+    t.insert("parse_bool",     crate::composed::shims::parse_bool);
 
     // Substring set predicates.
-    t.insert("contains_any",   func_strings::contains_any);
-    t.insert("contains_all",   func_strings::contains_all);
+    t.insert("contains_any",   crate::composed::shims::contains_any);
+    t.insert("contains_all",   crate::composed::shims::contains_all);
 
     // Index lookup family.
     t.insert("find_index",     func_arrays::find_index);
@@ -282,14 +282,14 @@ fn build() -> BuiltinRegistry {
     t.insert("zscore",         func_arrays::zscore);
 
     // Regex family.
-    t.insert("re_match",       func_strings::re_match);
-    t.insert("match_first",    func_strings::re_match_first);
-    t.insert("match_all",      func_strings::re_match_all);
-    t.insert("captures",       func_strings::re_captures);
-    t.insert("captures_all",   func_strings::re_captures_all);
-    t.insert("replace_re",     func_strings::re_replace);
-    t.insert("replace_all_re", func_strings::re_replace_all);
-    t.insert("split_re",       func_strings::re_split);
+    t.insert("re_match",       crate::composed::shims::re_match);
+    t.insert("match_first",    crate::composed::shims::re_match_first);
+    t.insert("match_all",      crate::composed::shims::re_match_all);
+    t.insert("captures",       crate::composed::shims::re_captures);
+    t.insert("captures_all",   crate::composed::shims::re_captures_all);
+    t.insert("replace_re",     crate::composed::shims::re_replace);
+    t.insert("replace_all_re", crate::composed::shims::re_replace_all);
+    t.insert("split_re",       crate::composed::shims::re_split);
 
     BuiltinRegistry { table: t }
 }

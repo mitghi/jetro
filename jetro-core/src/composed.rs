@@ -318,6 +318,170 @@ pub mod shims {
         run_single(&StrMatches::new(pat), &recv)
             .ok_or_else(|| EvalError("matches: stage filtered".into()))
     }
+
+    // ── Newly-lifted shims (composed bodies) ─────────────────────────
+
+    delegate_str_stage!(chars_of,    CharsOf,    "chars: expected string");
+    delegate_str_stage!(bytes_of,    BytesOf,    "bytes: expected string");
+    delegate_str_stage!(byte_len,    ByteLen,    "byte_len: expected string");
+    delegate_str_stage!(is_blank,    IsBlank,    "is_blank: expected string");
+    delegate_str_stage!(is_numeric,  IsNumeric,  "is_numeric: expected string");
+    delegate_str_stage!(is_alpha,    IsAlpha,    "is_alpha: expected string");
+    delegate_str_stage!(is_ascii,    IsAscii,    "is_ascii: expected string");
+    delegate_str_stage!(parse_int,   ParseInt,   "parse_int: expected string");
+    delegate_str_stage!(parse_float, ParseFloat, "parse_float: expected string");
+    delegate_str_stage!(parse_bool,  ParseBool,  "parse_bool: expected string");
+
+    /// `.from_base64()` — explicit error semantics (errs on bad input).
+    pub fn from_base64(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
+        if let Val::Str(s) = recv {
+            match super::from_base64_eager(&s) {
+                Ok(decoded) => Ok(Val::Str(std::sync::Arc::from(decoded.as_str()))),
+                Err(e)      => err!("from_base64: {}", e),
+            }
+        } else { err!("from_base64: expected string") }
+    }
+
+    fn pad_arg_char(args: &[Arg], idx: usize, env: &Env) -> Result<char, EvalError> {
+        match args.get(idx) {
+            None => Ok(' '),
+            Some(a) => {
+                let v = match a {
+                    Arg::Pos(e) | Arg::Named(_, e) => crate::eval::eval(e, env)?,
+                };
+                match v {
+                    Val::Str(s) if s.chars().count() == 1 => Ok(s.chars().next().unwrap()),
+                    _ => err!("pad: filler must be a single-char string"),
+                }
+            }
+        }
+    }
+
+    pub fn center(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+        if !matches!(recv, Val::Str(_)) { return err!("center: expected string"); }
+        let width = first_i64_arg(args, env, "center").unwrap_or(0).max(0) as usize;
+        let fill = pad_arg_char(args, 1, env)?;
+        run_single(&Center::new(width, fill), &recv)
+            .ok_or_else(|| EvalError("center: stage filtered".into()))
+    }
+
+    pub fn repeat_str(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+        if !matches!(recv, Val::Str(_)) { return err!("repeat: expected string"); }
+        let n = first_i64_arg(args, env, "repeat").unwrap_or(0).max(0) as usize;
+        run_single(&Repeat::new(n), &recv)
+            .ok_or_else(|| EvalError("repeat: stage filtered".into()))
+    }
+
+    fn collect_str_arg_list(args: &[Arg], env: &Env, who: &str) -> Result<Vec<std::sync::Arc<str>>, EvalError> {
+        if args.len() == 1 {
+            let v = match &args[0] {
+                Arg::Pos(e) | Arg::Named(_, e) => crate::eval::eval(e, env)?,
+            };
+            if let Val::Arr(a) = v {
+                let mut out = Vec::with_capacity(a.len());
+                for item in a.iter() {
+                    if let Val::Str(s) = item { out.push(s.clone()); }
+                    else { return err!("{}: array elements must be strings", who); }
+                }
+                return Ok(out);
+            }
+            // re-evaluate not needed; if it wasn't an array fall through to N-arg branch
+            // by re-entering with the single arg.
+            if let Val::Str(s) = match &args[0] {
+                Arg::Pos(e) | Arg::Named(_, e) => crate::eval::eval(e, env)?,
+            } {
+                return Ok(vec![s]);
+            }
+            return err!("{}: arg must be string or array of strings", who);
+        }
+        let mut out = Vec::with_capacity(args.len());
+        for a in args {
+            let v = match a {
+                Arg::Pos(e) | Arg::Named(_, e) => crate::eval::eval(e, env)?,
+            };
+            if let Val::Str(s) = v { out.push(s); }
+            else { return err!("{}: arg must be string", who); }
+        }
+        Ok(out)
+    }
+
+    pub fn contains_any(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+        if !matches!(recv, Val::Str(_)) { return err!("contains_any: expected string"); }
+        let needles = collect_str_arg_list(args, env, "contains_any")?;
+        run_single(&ContainsAny::new(needles), &recv)
+            .ok_or_else(|| EvalError("contains_any: stage filtered".into()))
+    }
+
+    pub fn contains_all(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+        if !matches!(recv, Val::Str(_)) { return err!("contains_all: expected string"); }
+        let needles = collect_str_arg_list(args, env, "contains_all")?;
+        run_single(&ContainsAll::new(needles), &recv)
+            .ok_or_else(|| EvalError("contains_all: stage filtered".into()))
+    }
+
+    // ── Regex shims ──────────────────────────────────────────────────
+
+    macro_rules! delegate_re_pat {
+        ($shim:ident, $stage:ident, $name:literal) => {
+            pub fn $shim(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+                if !matches!(recv, Val::Str(_)) { return err!("{}: expected string", $name); }
+                let pat = first_str_arg(args, env, $name)?;
+                // Eager compile so a bad pattern errs (consistent with prior shim).
+                if let Err(e) = super::compile_regex(pat.as_ref()) {
+                    return err!("{}: {}", $name, e);
+                }
+                run_single(&$stage::new(pat), &recv)
+                    .ok_or_else(|| EvalError(format!("{}: stage filtered", $name)))
+            }
+        };
+    }
+
+    delegate_re_pat!(re_match,         ReMatch,       "match");
+    delegate_re_pat!(re_match_first,   ReMatchFirst,  "match_first");
+    delegate_re_pat!(re_match_all,     ReMatchAll,    "match_all");
+    delegate_re_pat!(re_captures,      ReCaptures,    "captures");
+    delegate_re_pat!(re_captures_all,  ReCapturesAll, "captures_all");
+    delegate_re_pat!(re_split,         ReSplit,       "split_re");
+
+    pub fn re_replace(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+        if !matches!(recv, Val::Str(_)) { return err!("replace_re: expected string"); }
+        let pat = first_str_arg(args, env, "replace_re")?;
+        let with = {
+            let a = args.get(1).ok_or_else(|| EvalError("replace_re: missing replacement".into()))?;
+            match a {
+                Arg::Pos(Expr::Ident(s)) => std::sync::Arc::from(s.as_str()),
+                Arg::Pos(e) | Arg::Named(_, e) => match crate::eval::eval(e, env)? {
+                    Val::Str(s) => s,
+                    _ => return err!("replace_re: replacement must be string"),
+                },
+            }
+        };
+        if let Err(e) = super::compile_regex(pat.as_ref()) {
+            return err!("replace_re: {}", e);
+        }
+        run_single(&ReReplace::new(pat, with), &recv)
+            .ok_or_else(|| EvalError("replace_re: stage filtered".into()))
+    }
+
+    pub fn re_replace_all(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+        if !matches!(recv, Val::Str(_)) { return err!("replace_all_re: expected string"); }
+        let pat = first_str_arg(args, env, "replace_all_re")?;
+        let with = {
+            let a = args.get(1).ok_or_else(|| EvalError("replace_all_re: missing replacement".into()))?;
+            match a {
+                Arg::Pos(Expr::Ident(s)) => std::sync::Arc::from(s.as_str()),
+                Arg::Pos(e) | Arg::Named(_, e) => match crate::eval::eval(e, env)? {
+                    Val::Str(s) => s,
+                    _ => return err!("replace_all_re: replacement must be string"),
+                },
+            }
+        };
+        if let Err(e) = super::compile_regex(pat.as_ref()) {
+            return err!("replace_all_re: {}", e);
+        }
+        run_single(&ReReplaceAll::new(pat, with), &recv)
+            .ok_or_else(|| EvalError("replace_all_re: stage filtered".into()))
+    }
 }
 
 // Helper macro — generates per-builtin owned Stage impl with the
@@ -548,15 +712,13 @@ lifted_str_to_val!(ToBool, |s| {
 });
 
 // `.to_base64()` — RFC 4648 base64 encoding.
-lifted_str_stage!(ToBase64, |s| {
-    crate::eval::func_strings::base64_encode(s.as_bytes())
-});
+lifted_str_stage!(ToBase64, |s| { base64_encode(s.as_bytes()) });
 
 // `.from_base64()` — decode; non-UTF-8 bytes are lossy-converted.
 // Returns Val::Null on decode failure (matches owned semantics
 // for chain composition; owned form errs).
 lifted_str_to_val!(FromBase64, |s| {
-    match crate::eval::func_strings::base64_decode(s) {
+    match base64_decode(s) {
         Ok(bytes) => Val::Str(std::sync::Arc::from(
             String::from_utf8_lossy(&bytes).as_ref())),
         Err(_) => Val::Null,
@@ -1421,6 +1583,404 @@ impl Stage for Scan {
     }
 }
 impl<R> crate::unified::Stage<R> for Scan {
+    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
+        crate::unified::StageOutputU::Filtered
+    }
+}
+
+/// ── Base64 helpers (moved from eval::func_strings) ─────────────────
+
+pub fn base64_encode(bytes: &[u8]) -> String {
+    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
+    let mut i = 0;
+    while i < bytes.len() {
+        let b0 = bytes[i] as u32;
+        let b1 = if i + 1 < bytes.len() { bytes[i + 1] as u32 } else { 0 };
+        let b2 = if i + 2 < bytes.len() { bytes[i + 2] as u32 } else { 0 };
+        let n  = (b0 << 16) | (b1 << 8) | b2;
+        out.push(CHARS[((n >> 18) & 0x3f) as usize] as char);
+        out.push(CHARS[((n >> 12) & 0x3f) as usize] as char);
+        out.push(if i + 1 < bytes.len() { CHARS[((n >> 6) & 0x3f) as usize] as char } else { '=' });
+        out.push(if i + 2 < bytes.len() { CHARS[(n & 0x3f) as usize] as char } else { '=' });
+        i += 3;
+    }
+    out
+}
+
+pub fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
+    const DECODE: [i8; 128] = {
+        let mut t = [-1i8; 128];
+        let chars = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut i = 0usize;
+        while i < chars.len() { t[chars[i] as usize] = i as i8; i += 1; }
+        t
+    };
+    let s = s.trim();
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
+    let mut i = 0;
+    while i + 3 < bytes.len() {
+        let dc = |c: u8| -> Result<u32, String> {
+            if c == b'=' { return Ok(0); }
+            if c as usize >= 128 || DECODE[c as usize] < 0 {
+                return Err(format!("invalid base64 char: {}", c as char));
+            }
+            Ok(DECODE[c as usize] as u32)
+        };
+        let b0 = dc(bytes[i])?;
+        let b1 = dc(bytes[i + 1])?;
+        let b2 = dc(bytes[i + 2])?;
+        let b3 = dc(bytes[i + 3])?;
+        let n  = (b0 << 18) | (b1 << 12) | (b2 << 6) | b3;
+        out.push(((n >> 16) & 0xff) as u8);
+        if bytes[i + 2] != b'=' { out.push(((n >> 8) & 0xff) as u8); }
+        if bytes[i + 3] != b'=' { out.push((n & 0xff) as u8); }
+        i += 4;
+    }
+    Ok(out)
+}
+
+// ── Padding / repetition Stages ────────────────────────────────────
+
+/// `.center(width, fill)` — center-pad to width with fill char.
+pub struct Center { pub width: usize, pub fill: char }
+impl Center { pub fn new(width: usize, fill: char) -> Self { Self { width, fill } } }
+impl Stage for Center {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        if let Val::Str(s) = x {
+            let cur = s.chars().count();
+            if cur >= self.width { return StageOutput::Pass(Cow::Borrowed(x)); }
+            let total = self.width - cur;
+            let left = total / 2;
+            let right = total - left;
+            let mut out = String::with_capacity(s.len() + total);
+            for _ in 0..left { out.push(self.fill); }
+            out.push_str(s.as_ref());
+            for _ in 0..right { out.push(self.fill); }
+            return StageOutput::Pass(Cow::Owned(Val::Str(std::sync::Arc::from(out))));
+        }
+        StageOutput::Filtered
+    }
+}
+impl<R> crate::unified::Stage<R> for Center {
+    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
+        crate::unified::StageOutputU::Filtered
+    }
+}
+
+/// `.repeat_str(n)` — alias of `.repeat(n)`; same as `Repeat`.
+pub use Repeat as RepeatStr;
+
+// ── Char / byte introspection Stages ───────────────────────────────
+
+// `.chars_of()` — Str → Arr<Str> (one Str per Unicode char).
+lifted_str_to_val!(CharsOf, |s| {
+    let mut out: Vec<Val> = Vec::new();
+    let mut tmp = [0u8; 4];
+    for c in s.chars() {
+        let utf8 = c.encode_utf8(&mut tmp);
+        out.push(Val::Str(std::sync::Arc::from(utf8.as_ref())));
+    }
+    Val::arr(out)
+});
+
+// `.bytes()` — Str → IntVec of byte values.
+lifted_str_to_val!(BytesOf, |s| {
+    let v: Vec<i64> = s.as_bytes().iter().map(|&b| b as i64).collect();
+    Val::int_vec(v)
+});
+
+// `.byte_len()` — Str → Int byte count.
+lifted_str_to_val!(ByteLen, |s| Val::Int(s.len() as i64));
+
+// ── Predicates / parsers ───────────────────────────────────────────
+
+lifted_str_to_val!(IsBlank,   |s| Val::Bool(s.chars().all(|c| c.is_whitespace())));
+lifted_str_to_val!(IsNumeric, |s| Val::Bool(!s.is_empty() && s.chars().all(|c| c.is_ascii_digit())));
+lifted_str_to_val!(IsAlpha,   |s| Val::Bool(!s.is_empty() && s.chars().all(|c| c.is_alphabetic())));
+lifted_str_to_val!(IsAscii,   |s| Val::Bool(s.is_ascii()));
+
+lifted_str_to_val!(ParseInt,   |s| s.trim().parse::<i64>().map(Val::Int).unwrap_or(Val::Null));
+lifted_str_to_val!(ParseFloat, |s| s.trim().parse::<f64>().map(Val::Float).unwrap_or(Val::Null));
+lifted_str_to_val!(ParseBool,  |s| match s.trim().to_ascii_lowercase().as_str() {
+    "true" | "yes" | "1" | "on"  => Val::Bool(true),
+    "false" | "no" | "0" | "off" => Val::Bool(false),
+    _ => Val::Null,
+});
+
+// ── Substring set predicates ───────────────────────────────────────
+
+/// `.contains_any([needles])` — true if any needle appears in the
+/// receiver.
+pub struct ContainsAny { pub needles: Vec<std::sync::Arc<str>> }
+impl ContainsAny {
+    pub fn new(needles: Vec<std::sync::Arc<str>>) -> Self { Self { needles } }
+}
+impl Stage for ContainsAny {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        if let Val::Str(s) = x {
+            let any = self.needles.iter().any(|n| s.contains(n.as_ref()));
+            return StageOutput::Pass(Cow::Owned(Val::Bool(any)));
+        }
+        StageOutput::Filtered
+    }
+}
+impl<R> crate::unified::Stage<R> for ContainsAny {
+    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
+        crate::unified::StageOutputU::Filtered
+    }
+}
+
+/// `.contains_all([needles])` — true if every needle appears.
+pub struct ContainsAll { pub needles: Vec<std::sync::Arc<str>> }
+impl ContainsAll {
+    pub fn new(needles: Vec<std::sync::Arc<str>>) -> Self { Self { needles } }
+}
+impl Stage for ContainsAll {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        if let Val::Str(s) = x {
+            let all = self.needles.iter().all(|n| s.contains(n.as_ref()));
+            return StageOutput::Pass(Cow::Owned(Val::Bool(all)));
+        }
+        StageOutput::Filtered
+    }
+}
+impl<R> crate::unified::Stage<R> for ContainsAll {
+    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
+        crate::unified::StageOutputU::Filtered
+    }
+}
+
+// ── FromBase64 (with explicit error semantics) ─────────────────────
+
+/// `.from_base64()` — decode; returns Err on invalid input (cannot
+/// use the generic Stage filter→err shim because Stage::Filtered
+/// doesn't carry an error message).
+pub fn from_base64_eager(s: &str) -> Result<String, String> {
+    base64_decode(s).map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+}
+
+// ── Regex Stages ───────────────────────────────────────────────────
+//
+// Compile cache (thread-local).  Each unique pattern compiles once
+// per thread; subsequent uses reuse the same `Arc<Regex>`.
+thread_local! {
+    static REGEX_CACHE: std::cell::RefCell<std::collections::HashMap<String, std::sync::Arc<regex::Regex>>>
+        = std::cell::RefCell::new(std::collections::HashMap::with_capacity(32));
+}
+
+fn compile_regex(pat: &str) -> Result<std::sync::Arc<regex::Regex>, String> {
+    REGEX_CACHE.with(|cell| {
+        let mut m = cell.borrow_mut();
+        if let Some(r) = m.get(pat) { return Ok(std::sync::Arc::clone(r)); }
+        let re = regex::Regex::new(pat).map_err(|e| format!("regex compile: {}", e))?;
+        let arc = std::sync::Arc::new(re);
+        m.insert(pat.to_string(), std::sync::Arc::clone(&arc));
+        Ok(arc)
+    })
+}
+
+/// `.match(pat)` — Bool, regex match anywhere.
+pub struct ReMatch { pub pat: std::sync::Arc<str> }
+impl ReMatch { pub fn new(pat: std::sync::Arc<str>) -> Self { Self { pat } } }
+impl Stage for ReMatch {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        if let Val::Str(s) = x {
+            let re = match compile_regex(self.pat.as_ref()) {
+                Ok(r) => r,
+                Err(_) => return StageOutput::Filtered,
+            };
+            return StageOutput::Pass(Cow::Owned(Val::Bool(re.is_match(s.as_ref()))));
+        }
+        StageOutput::Filtered
+    }
+}
+impl<R> crate::unified::Stage<R> for ReMatch {
+    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
+        crate::unified::StageOutputU::Filtered
+    }
+}
+
+/// `.match_first(pat)` — Str of first match or Null.
+pub struct ReMatchFirst { pub pat: std::sync::Arc<str> }
+impl ReMatchFirst { pub fn new(pat: std::sync::Arc<str>) -> Self { Self { pat } } }
+impl Stage for ReMatchFirst {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        if let Val::Str(s) = x {
+            let re = match compile_regex(self.pat.as_ref()) {
+                Ok(r) => r,
+                Err(_) => return StageOutput::Filtered,
+            };
+            let v = re.find(s.as_ref())
+                .map(|m| Val::Str(std::sync::Arc::from(m.as_str())))
+                .unwrap_or(Val::Null);
+            return StageOutput::Pass(Cow::Owned(v));
+        }
+        StageOutput::Filtered
+    }
+}
+impl<R> crate::unified::Stage<R> for ReMatchFirst {
+    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
+        crate::unified::StageOutputU::Filtered
+    }
+}
+
+/// `.match_all(pat)` — Arr<Str> of all matches.
+pub struct ReMatchAll { pub pat: std::sync::Arc<str> }
+impl ReMatchAll { pub fn new(pat: std::sync::Arc<str>) -> Self { Self { pat } } }
+impl Stage for ReMatchAll {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        if let Val::Str(s) = x {
+            let re = match compile_regex(self.pat.as_ref()) {
+                Ok(r) => r,
+                Err(_) => return StageOutput::Filtered,
+            };
+            let out: Vec<std::sync::Arc<str>> = re.find_iter(s.as_ref())
+                .map(|m| std::sync::Arc::<str>::from(m.as_str())).collect();
+            return StageOutput::Pass(Cow::Owned(Val::str_vec(out)));
+        }
+        StageOutput::Filtered
+    }
+}
+impl<R> crate::unified::Stage<R> for ReMatchAll {
+    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
+        crate::unified::StageOutputU::Filtered
+    }
+}
+
+/// `.captures(pat)` — Arr of capture groups (group 0 first); Null on no match.
+pub struct ReCaptures { pub pat: std::sync::Arc<str> }
+impl ReCaptures { pub fn new(pat: std::sync::Arc<str>) -> Self { Self { pat } } }
+impl Stage for ReCaptures {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        if let Val::Str(s) = x {
+            let re = match compile_regex(self.pat.as_ref()) {
+                Ok(r) => r,
+                Err(_) => return StageOutput::Filtered,
+            };
+            let v = match re.captures(s.as_ref()) {
+                Some(c) => {
+                    let mut out: Vec<Val> = Vec::with_capacity(c.len());
+                    for i in 0..c.len() {
+                        out.push(c.get(i)
+                            .map(|m| Val::Str(std::sync::Arc::from(m.as_str())))
+                            .unwrap_or(Val::Null));
+                    }
+                    Val::arr(out)
+                }
+                None => Val::Null,
+            };
+            return StageOutput::Pass(Cow::Owned(v));
+        }
+        StageOutput::Filtered
+    }
+}
+impl<R> crate::unified::Stage<R> for ReCaptures {
+    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
+        crate::unified::StageOutputU::Filtered
+    }
+}
+
+/// `.captures_all(pat)` — Arr<Arr> of capture groups for every match.
+pub struct ReCapturesAll { pub pat: std::sync::Arc<str> }
+impl ReCapturesAll { pub fn new(pat: std::sync::Arc<str>) -> Self { Self { pat } } }
+impl Stage for ReCapturesAll {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        if let Val::Str(s) = x {
+            let re = match compile_regex(self.pat.as_ref()) {
+                Ok(r) => r,
+                Err(_) => return StageOutput::Filtered,
+            };
+            let mut all: Vec<Val> = Vec::new();
+            for c in re.captures_iter(s.as_ref()) {
+                let mut row: Vec<Val> = Vec::with_capacity(c.len());
+                for i in 0..c.len() {
+                    row.push(c.get(i)
+                        .map(|m| Val::Str(std::sync::Arc::from(m.as_str())))
+                        .unwrap_or(Val::Null));
+                }
+                all.push(Val::arr(row));
+            }
+            return StageOutput::Pass(Cow::Owned(Val::arr(all)));
+        }
+        StageOutput::Filtered
+    }
+}
+impl<R> crate::unified::Stage<R> for ReCapturesAll {
+    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
+        crate::unified::StageOutputU::Filtered
+    }
+}
+
+/// `.replace_re(pat, with)` — single regex replacement.
+pub struct ReReplace { pub pat: std::sync::Arc<str>, pub with: std::sync::Arc<str> }
+impl ReReplace {
+    pub fn new(pat: std::sync::Arc<str>, with: std::sync::Arc<str>) -> Self { Self { pat, with } }
+}
+impl Stage for ReReplace {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        if let Val::Str(s) = x {
+            let re = match compile_regex(self.pat.as_ref()) {
+                Ok(r) => r,
+                Err(_) => return StageOutput::Filtered,
+            };
+            let out = re.replace(s.as_ref(), self.with.as_ref());
+            return StageOutput::Pass(Cow::Owned(
+                Val::Str(std::sync::Arc::from(out.as_ref()))));
+        }
+        StageOutput::Filtered
+    }
+}
+impl<R> crate::unified::Stage<R> for ReReplace {
+    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
+        crate::unified::StageOutputU::Filtered
+    }
+}
+
+/// `.replace_all_re(pat, with)` — all regex replacements.
+pub struct ReReplaceAll { pub pat: std::sync::Arc<str>, pub with: std::sync::Arc<str> }
+impl ReReplaceAll {
+    pub fn new(pat: std::sync::Arc<str>, with: std::sync::Arc<str>) -> Self { Self { pat, with } }
+}
+impl Stage for ReReplaceAll {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        if let Val::Str(s) = x {
+            let re = match compile_regex(self.pat.as_ref()) {
+                Ok(r) => r,
+                Err(_) => return StageOutput::Filtered,
+            };
+            let out = re.replace_all(s.as_ref(), self.with.as_ref());
+            return StageOutput::Pass(Cow::Owned(
+                Val::Str(std::sync::Arc::from(out.as_ref()))));
+        }
+        StageOutput::Filtered
+    }
+}
+impl<R> crate::unified::Stage<R> for ReReplaceAll {
+    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
+        crate::unified::StageOutputU::Filtered
+    }
+}
+
+/// `.split_re(pat)` — regex split.
+pub struct ReSplit { pub pat: std::sync::Arc<str> }
+impl ReSplit { pub fn new(pat: std::sync::Arc<str>) -> Self { Self { pat } } }
+impl Stage for ReSplit {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        if let Val::Str(s) = x {
+            let re = match compile_regex(self.pat.as_ref()) {
+                Ok(r) => r,
+                Err(_) => return StageOutput::Filtered,
+            };
+            let out: Vec<std::sync::Arc<str>> = re.split(s.as_ref())
+                .map(std::sync::Arc::<str>::from).collect();
+            return StageOutput::Pass(Cow::Owned(Val::str_vec(out)));
+        }
+        StageOutput::Filtered
+    }
+}
+impl<R> crate::unified::Stage<R> for ReSplit {
     fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
         crate::unified::StageOutputU::Filtered
     }
