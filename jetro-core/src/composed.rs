@@ -534,6 +534,161 @@ impl<'a> crate::unified::Stage<crate::eval::borrowed::Val<'a>> for StripSuffix {
     { crate::unified::StageOutputU::Filtered }
 }
 
+/// `.pad_left(width, fill)` — left-pad to width with fill char.
+pub struct PadLeft { pub width: usize, pub fill: char }
+impl PadLeft {
+    pub fn new(width: usize, fill: char) -> Self { Self { width, fill } }
+}
+impl Stage for PadLeft {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        if let Val::Str(s) = x {
+            let n = s.chars().count();
+            if n >= self.width {
+                return StageOutput::Pass(Cow::Borrowed(x));
+            }
+            let pad: String = std::iter::repeat(self.fill)
+                .take(self.width - n).collect();
+            let out = pad + s.as_ref();
+            return StageOutput::Pass(Cow::Owned(
+                Val::Str(std::sync::Arc::from(out))));
+        }
+        StageOutput::Filtered
+    }
+}
+impl<'a> crate::unified::Stage<crate::eval::borrowed::Val<'a>> for PadLeft {
+    fn apply(&self, _x: crate::eval::borrowed::Val<'a>)
+        -> crate::unified::StageOutputU<crate::eval::borrowed::Val<'a>>
+    { crate::unified::StageOutputU::Filtered }
+}
+
+/// `.pad_right(width, fill)` — right-pad to width with fill char.
+pub struct PadRight { pub width: usize, pub fill: char }
+impl PadRight {
+    pub fn new(width: usize, fill: char) -> Self { Self { width, fill } }
+}
+impl Stage for PadRight {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        if let Val::Str(s) = x {
+            let n = s.chars().count();
+            if n >= self.width {
+                return StageOutput::Pass(Cow::Borrowed(x));
+            }
+            let pad: String = std::iter::repeat(self.fill)
+                .take(self.width - n).collect();
+            let out = s.to_string() + &pad;
+            return StageOutput::Pass(Cow::Owned(
+                Val::Str(std::sync::Arc::from(out))));
+        }
+        StageOutput::Filtered
+    }
+}
+impl<'a> crate::unified::Stage<crate::eval::borrowed::Val<'a>> for PadRight {
+    fn apply(&self, _x: crate::eval::borrowed::Val<'a>)
+        -> crate::unified::StageOutputU<crate::eval::borrowed::Val<'a>>
+    { crate::unified::StageOutputU::Filtered }
+}
+
+/// `.indent(n)` — prepend n spaces to each line.
+pub struct Indent { pub n: usize }
+impl Indent { pub fn new(n: usize) -> Self { Self { n } } }
+impl Stage for Indent {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        if let Val::Str(s) = x {
+            let prefix: String = std::iter::repeat(' ').take(self.n).collect();
+            let out = s.lines()
+                .map(|l| format!("{}{}", prefix, l))
+                .collect::<Vec<_>>()
+                .join("\n");
+            return StageOutput::Pass(Cow::Owned(
+                Val::Str(std::sync::Arc::from(out))));
+        }
+        StageOutput::Filtered
+    }
+}
+impl<'a> crate::unified::Stage<crate::eval::borrowed::Val<'a>> for Indent {
+    fn apply(&self, _x: crate::eval::borrowed::Val<'a>)
+        -> crate::unified::StageOutputU<crate::eval::borrowed::Val<'a>>
+    { crate::unified::StageOutputU::Filtered }
+}
+
+// `.dedent()` — strip common leading whitespace from all non-empty lines.
+lifted_str_stage!(Dedent, |s| {
+    let min_indent = s.lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.len() - l.trim_start().len())
+        .min().unwrap_or(0);
+    s.lines()
+        .map(|l| if l.len() >= min_indent { &l[min_indent..] } else { l })
+        .collect::<Vec<_>>()
+        .join("\n")
+});
+
+/// `.str_matches(needle)` — alias for contains; returns Val::Bool.
+pub struct StrMatches { pub needle: std::sync::Arc<str> }
+impl StrMatches {
+    pub fn new(needle: std::sync::Arc<str>) -> Self { Self { needle } }
+}
+impl Stage for StrMatches {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        if let Val::Str(s) = x {
+            return StageOutput::Pass(Cow::Owned(
+                Val::Bool(s.contains(self.needle.as_ref()))));
+        }
+        StageOutput::Filtered
+    }
+}
+impl<'a> crate::unified::Stage<crate::eval::borrowed::Val<'a>> for StrMatches {
+    fn apply(&self, _x: crate::eval::borrowed::Val<'a>)
+        -> crate::unified::StageOutputU<crate::eval::borrowed::Val<'a>>
+    { crate::unified::StageOutputU::Filtered }
+}
+
+/// `.index_of(needle)` — char-position of first match; -1 on miss.
+pub struct IndexOf { pub needle: std::sync::Arc<str> }
+impl IndexOf {
+    pub fn new(needle: std::sync::Arc<str>) -> Self { Self { needle } }
+}
+impl Stage for IndexOf {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        if let Val::Str(s) = x {
+            let r = match s.find(self.needle.as_ref()) {
+                Some(i) => Val::Int(s[..i].chars().count() as i64),
+                None    => Val::Int(-1),
+            };
+            return StageOutput::Pass(Cow::Owned(r));
+        }
+        StageOutput::Filtered
+    }
+}
+impl<'a> crate::unified::Stage<crate::eval::borrowed::Val<'a>> for IndexOf {
+    fn apply(&self, _x: crate::eval::borrowed::Val<'a>)
+        -> crate::unified::StageOutputU<crate::eval::borrowed::Val<'a>>
+    { crate::unified::StageOutputU::Filtered }
+}
+
+/// `.last_index_of(needle)` — char-position of last match; -1 on miss.
+pub struct LastIndexOf { pub needle: std::sync::Arc<str> }
+impl LastIndexOf {
+    pub fn new(needle: std::sync::Arc<str>) -> Self { Self { needle } }
+}
+impl Stage for LastIndexOf {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        if let Val::Str(s) = x {
+            let r = match s.rfind(self.needle.as_ref()) {
+                Some(i) => Val::Int(s[..i].chars().count() as i64),
+                None    => Val::Int(-1),
+            };
+            return StageOutput::Pass(Cow::Owned(r));
+        }
+        StageOutput::Filtered
+    }
+}
+impl<'a> crate::unified::Stage<crate::eval::borrowed::Val<'a>> for LastIndexOf {
+    fn apply(&self, _x: crate::eval::borrowed::Val<'a>)
+        -> crate::unified::StageOutputU<crate::eval::borrowed::Val<'a>>
+    { crate::unified::StageOutputU::Filtered }
+}
+
 /// Closure-based `.filter(pred)` — for the borrow runner where the
 /// predicate is built from a kernel at lowering time (FieldCmpLit etc.
 /// → owned literal compare).  composed.rs's `GenericFilter` uses VM
@@ -2713,6 +2868,37 @@ mod tests {
             extract_str(StripSuffix::new(std::sync::Arc::from(".txt")).apply(&s3)),
             "hello"
         );
+    }
+
+    #[test]
+    fn pad_left_right_indent_dedent() {
+        let s = Val::Str(std::sync::Arc::from("hi"));
+        assert_eq!(extract_str(PadLeft::new(5, '-').apply(&s)), "---hi");
+        assert_eq!(extract_str(PadRight::new(5, '-').apply(&s)), "hi---");
+        let lines = Val::Str(std::sync::Arc::from("foo\nbar"));
+        assert_eq!(extract_str(Indent::new(2).apply(&lines)), "  foo\n  bar");
+        let block = Val::Str(std::sync::Arc::from("    foo\n    bar"));
+        assert_eq!(extract_str(Dedent.apply(&block)), "foo\nbar");
+    }
+
+    #[test]
+    fn index_of_and_matches() {
+        let s = Val::Str(std::sync::Arc::from("hello world"));
+        match IndexOf::new(std::sync::Arc::from("world")).apply(&s) {
+            StageOutput::Pass(cow) => match cow.into_owned() {
+                Val::Int(6) => {}
+                other => panic!("got {:?}", other),
+            },
+            _ => panic!("expected Pass"),
+        }
+        match LastIndexOf::new(std::sync::Arc::from("o")).apply(&s) {
+            StageOutput::Pass(cow) => match cow.into_owned() {
+                Val::Int(7) => {}
+                other => panic!("got {:?}", other),
+            },
+            _ => panic!("expected Pass"),
+        }
+        assert!(extract_bool(StrMatches::new(std::sync::Arc::from("world")).apply(&s)));
     }
 
     #[test]
