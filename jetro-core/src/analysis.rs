@@ -294,6 +294,7 @@ fn apply_op(op: &Opcode, stack: &mut Vec<AbstractVal>) {
             stack.push(av);
         }
         Opcode::PipelineRun { .. } => stack.push(AbstractVal::UNKNOWN),
+        Opcode::DeleteMarkErr      => stack.push(AbstractVal::UNKNOWN),
     }
 }
 
@@ -936,6 +937,7 @@ pub fn opcode_cost(op: &Opcode) -> u32 {
         Opcode::Quantifier(_) => 2,
         Opcode::CastOp(_) => 2,
         Opcode::PatchEval(_) => 50,
+        Opcode::DeleteMarkErr => 1,
         Opcode::PipelineRun { base, steps } => {
             program_cost(base) + steps.iter().map(|s| match s {
                 CompiledPipeStep::Forward(p) => program_cost(p),

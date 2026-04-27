@@ -17,7 +17,7 @@ use std::sync::Arc;
 use indexmap::IndexMap;
 
 use crate::ast::{Arg, Expr};
-use super::{Env, EvalError, eval, apply_item_mut, apply_item2_mut, eval_pos, first_i64_arg};
+use super::{Env, EvalError, vm_eval, apply_item_mut, apply_item2_mut, eval_pos, first_i64_arg};
 use super::value::Val;
 use super::util::{is_truthy, val_to_key, flatten_val, zip_arrays, cartesian, cmp_vals, val_key, obj2};
 
@@ -39,7 +39,7 @@ pub fn filter(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
         let mut scratch = env.clone();
         for item in items {
             scratch.current = item.clone();
-            if is_truthy(&eval(expr, &scratch)?) { out.push(item); }
+            if is_truthy(&vm_eval(expr, &scratch)?) { out.push(item); }
         }
     } else {
         let mut env_mut = env.clone();
@@ -69,7 +69,7 @@ pub fn find(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
         'outer: for item in items {
             scratch.current = item.clone();
             for e in &exprs {
-                if !is_truthy(&eval(e, &scratch)?) { continue 'outer; }
+                if !is_truthy(&vm_eval(e, &scratch)?) { continue 'outer; }
             }
             out.push(item);
         }
@@ -133,7 +133,7 @@ pub fn sort(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
                     if err_cell.is_some() { return std::cmp::Ordering::Equal; }
                     let f1 = env_mut.push_lam(Some(&p1), x.clone());
                     let f2 = env_mut.push_lam(Some(&p2), y.clone());
-                    let r = eval(body, &env_mut);
+                    let r = vm_eval(body, &env_mut);
                     env_mut.pop_lam(f2);
                     env_mut.pop_lam(f1);
                     match r {
@@ -164,7 +164,7 @@ pub fn sort(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
         let mut ks = Vec::with_capacity(keys.len());
         let frame = env_mut.push_lam(None, item.clone());
         for (key_expr, _) in &keys {
-            match eval(key_expr, &env_mut) {
+            match vm_eval(key_expr, &env_mut) {
                 Ok(v)  => ks.push(v),
                 Err(e) => { env_mut.pop_lam(frame); return Err(e); }
             }
@@ -357,7 +357,7 @@ pub fn accumulate(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> 
     let lam   = args.first().ok_or_else(|| EvalError("accumulate: requires lambda".into()))?;
     let start = args.iter().find_map(|a| {
         if let Arg::Named(n, e) = a {
-            if n == "start" { eval(e, env).ok() } else { None }
+            if n == "start" { vm_eval(e, env).ok() } else { None }
         } else { None }
     });
     let items = recv.into_vec().ok_or_else(|| EvalError("accumulate: expected array".into()))?;
@@ -395,7 +395,7 @@ pub fn zip_method(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> 
 
 pub fn zip_longest_method(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     let fill = args.iter().find_map(|a| {
-        if let Arg::Named(n, e) = a { if n == "fill" { eval(e, env).ok() } else { None } } else { None }
+        if let Arg::Named(n, e) = a { if n == "fill" { vm_eval(e, env).ok() } else { None } } else { None }
     }).unwrap_or(Val::Null);
     let other = args.iter().find(|a| matches!(a, Arg::Pos(_)))
         .map(|a| eval_pos(a, env)).transpose()?.unwrap_or(Val::arr(vec![]));
@@ -415,7 +415,7 @@ pub fn global_zip(args: &[Arg], env: &Env) -> Result<Val, EvalError> {
 
 pub fn global_zip_longest(args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     let fill = args.iter().find_map(|a| {
-        if let Arg::Named(n, e) = a { if n == "fill" { eval(e, env).ok() } else { None } } else { None }
+        if let Arg::Named(n, e) = a { if n == "fill" { vm_eval(e, env).ok() } else { None } } else { None }
     }).unwrap_or(Val::Null);
     let arrs: Result<Vec<_>, _> = args.iter()
         .filter(|a| matches!(a, Arg::Pos(_)))

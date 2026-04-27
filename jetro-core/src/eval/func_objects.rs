@@ -41,7 +41,7 @@ fn pick_arg(a: &Arg, env: &Env) -> Result<Option<(Arc<str>, String)>, EvalError>
     match a {
         Arg::Pos(Expr::Ident(s)) => Ok(Some((Arc::from(s.as_str()), s.clone()))),
         Arg::Pos(e) => {
-            let v = super::eval(e, env)?;
+            let v = super::vm_eval(e, env)?;
             match v {
                 Val::Str(s) => {
                     let top: Arc<str> = if s.contains('.') || s.contains('[') {
@@ -60,7 +60,7 @@ fn pick_arg(a: &Arg, env: &Env) -> Result<Option<(Arc<str>, String)>, EvalError>
             Ok(Some((Arc::from(alias.as_str()), src.clone())))
         }
         Arg::Named(alias, e) => {
-            let v = super::eval(e, env)?;
+            let v = super::vm_eval(e, env)?;
             match v {
                 Val::Str(s) => Ok(Some((Arc::from(alias.as_str()), s.to_string()))),
                 _ => Ok(None),

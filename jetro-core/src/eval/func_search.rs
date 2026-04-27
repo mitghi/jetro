@@ -14,7 +14,7 @@
 use std::sync::Arc;
 
 use crate::ast::{Arg, Expr, ObjField};
-use super::{Env, EvalError, apply_item_mut, eval};
+use super::{Env, EvalError, apply_item_mut, vm_eval};
 use super::value::Val;
 use super::util::{is_truthy, val_to_key, vals_eq};
 
@@ -144,7 +144,7 @@ pub fn deep_find(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
             if err_cell.is_some() { return; }
             scratch.current = node.clone();
             for e in &exprs {
-                match eval(e, &scratch) {
+                match vm_eval(e, &scratch) {
                     Ok(v)  => if !is_truthy(&v) { return; }
                     Err(err) => { err_cell = Some(err); return; }
                 }
@@ -204,11 +204,11 @@ fn pattern_key_literals(arg: &Arg, env: &Env) -> Result<Vec<(Arc<str>, Val)>, Ev
     for f in fields {
         match f {
             ObjField::Kv { key, val, .. } => {
-                let v = eval(val, env)?;
+                let v = vm_eval(val, env)?;
                 out.push((Arc::from(key.as_str()), v));
             }
             ObjField::Short(k) => {
-                let v = eval(&Expr::Ident(k.clone()), env)?;
+                let v = vm_eval(&Expr::Ident(k.clone()), env)?;
                 out.push((Arc::from(k.as_str()), v));
             }
             _ => return err!("like: unsupported pattern field"),

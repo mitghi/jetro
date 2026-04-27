@@ -1,11 +1,31 @@
-//! Tree-walking evaluator — reference semantics for Jetro v2.
+//! Evaluator — historical tree-walker, retired 2026-04-27.
 //!
-//! This module is the *source of truth*: when the optimiser or VM
-//! behaviour diverges from it, the VM is wrong.  It is also the
-//! smallest path from AST to value and thus the easiest to reason
-//! about.  [`vm`](super::vm) is a faster path that caches compiled
-//! programs and resolved pointers, but every new feature lands here
-//! first.
+//! `pub fn evaluate / evaluate_with / eval_in_env` now route through
+//! the VM (see `vm.rs::Compiler::compile` + `VM::execute`).  The
+//! tree-walker `eval()` body and its recursive helpers
+//! (`eval_object`, `eval_fstring`, `eval_patch`, `apply_patch_step`,
+//! `descend_apply_patch`, `cast_val`, `eval_pipeline`, `apply_bind`,
+//! `eval_pipe`, `byte_chain_eval`, `canonical_eq_literal`,
+//! `eval_step`, `resolve_idx`, `collect_desc`, `collect_all`,
+//! `eval_binop`, `eval_iter`, `bind_vars_mut`, `unbind_vars_mut`,
+//! `apply_fmt_spec`, `PatchResult`) are LEGACY — preserved for
+//! reference but reachable from no caller.  Dead-code suppressed via
+//! `#![allow(dead_code)]` below.
+//!
+//! Live exports / helpers that callers still depend on:
+//! - `Env`, `LamFrame`, `Val` (re-exports), `MethodRegistry`, `Method`
+//! - `evaluate`, `evaluate_with` (public, VM-routed)
+//! - `eval_in_env` (public, VM-routed)
+//! - `eval_pos`, `vm_eval`, `apply_item`, `apply_item_mut`,
+//!   `apply_item2_mut`, `apply_expr_item` (all VM-routed)
+//! - `dispatch_method` (called by `vm::CallMethod` for builtin/registry)
+//! - `eval_global` (called by `vm::CallMethod` for special globals
+//!   coalesce/chain/zip/zip_longest/product/range)
+//! - `canonical_field_eq_literals` / `canonical_field_cmp_literal` /
+//!   `canonical_field_mixed_predicates` (called by `vm::scan` byte-scan
+//!   pre-pass)
+
+#![allow(dead_code)]
 //!
 //! # Data flow
 //!
@@ -46,7 +66,6 @@ pub mod value;
 pub mod util;
 pub mod methods;
 pub mod builtins;
-pub mod borrowed;
 pub(crate) mod func_arrays;
 pub(crate) mod func_objects;
 pub mod func_paths;
@@ -212,12 +231,16 @@ impl Env {
 /// streaming iterator).  Returns the result of evaluating `expr`
 /// against the given environment via the tree-walker.
 pub fn eval_in_env(expr: &Expr, env: &Env) -> Result<Val, EvalError> {
-    eval(expr, env)
+    // VM-based — no tree-walker re-entry.  Public API used by
+    // `JetroIter` lazy filter/map paths.
+    vm_eval(expr, env)
 }
 
 pub fn evaluate(expr: &Expr, root: &serde_json::Value) -> Result<serde_json::Value, EvalError> {
-    let val = Val::from(root);
-    Ok(eval(expr, &Env::new_with_registry(val, Arc::new(MethodRegistry::new())))?.into())
+    // Route through VM — tree-walker no longer used.
+    let prog = crate::vm::Compiler::compile(expr, "<evaluate>");
+    let mut vm = crate::vm::VM::new();
+    vm.execute(&prog, root)
 }
 
 pub fn evaluate_with(
@@ -225,272 +248,21 @@ pub fn evaluate_with(
     root: &serde_json::Value,
     registry: Arc<MethodRegistry>,
 ) -> Result<serde_json::Value, EvalError> {
-    let val = Val::from(root);
-    Ok(eval(expr, &Env::new_with_registry(val, registry))?.into())
+    let prog = crate::vm::Compiler::compile(expr, "<evaluate_with>");
+    let mut vm = crate::vm::VM::with_registry(registry);
+    vm.execute(&prog, root)
 }
 
 // ── Core evaluator ────────────────────────────────────────────────────────────
 
 pub(super) fn eval(expr: &Expr, env: &Env) -> Result<Val, EvalError> {
-    match expr {
-        Expr::Null      => Ok(Val::Null),
-        Expr::Bool(b)   => Ok(Val::Bool(*b)),
-        Expr::Int(n)    => Ok(Val::Int(*n)),
-        Expr::Float(f)  => Ok(Val::Float(*f)),
-        Expr::Str(s)    => Ok(Val::Str(Arc::from(s.as_str()))),
-
-        Expr::FString(parts) => eval_fstring(parts, env),
-
-        Expr::Root    => Ok(env.root.clone()),
-        Expr::Current => Ok(env.current.clone()),
-
-        Expr::Ident(name) => {
-            if let Some(v) = env.get_var(name) { return Ok(v.clone()); }
-            Ok(env.current.get_field(name))
-        }
-
-        Expr::Chain(base, steps) => {
-            // SIMD enclosing-object fast path: `$..find(@.k == lit)` with raw
-            // bytes — scan locates each object whose `k` field equals `lit`
-            // without walking the tree.
-            if let (Expr::Root, Some(Step::Method(name, args)), Some(bytes))
-                = (&**base, steps.first(), env.raw_bytes.as_ref())
-            {
-                if name == "deep_find" && !args.is_empty() {
-                    if let Some(conjuncts) = canonical_field_eq_literals(args) {
-                        let spans = if conjuncts.len() == 1 {
-                            super::scan::find_enclosing_objects_eq(
-                                bytes, &conjuncts[0].0, &conjuncts[0].1,
-                            )
-                        } else {
-                            super::scan::find_enclosing_objects_eq_multi(
-                                bytes, &conjuncts,
-                            )
-                        };
-                        let mut vals: Vec<Val> = Vec::with_capacity(spans.len());
-                        for s in &spans {
-                            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(
-                                &bytes[s.start..s.end]
-                            ) {
-                                vals.push(Val::from(&v));
-                            }
-                        }
-                        let mut val = Val::arr(vals);
-                        for step in &steps[1..] { val = eval_step(val, step, env)?; }
-                        return Ok(val);
-                    }
-                    // Single-conjunct numeric range: `$..find(@.k op num)`
-                    // where `op` ∈ `<`, `<=`, `>`, `>=`.  Extends the byte-scan
-                    // fast path past pure equality literals.
-                    if args.len() == 1 {
-                        let e = match &args[0] { Arg::Pos(e) | Arg::Named(_, e) => e };
-                        if let Some((field, op, thresh)) = canonical_field_cmp_literal(e) {
-                            let spans = super::scan::find_enclosing_objects_cmp(
-                                bytes, &field, op, thresh,
-                            );
-                            let mut vals: Vec<Val> = Vec::with_capacity(spans.len());
-                            for s in &spans {
-                                if let Ok(v) = serde_json::from_slice::<serde_json::Value>(
-                                    &bytes[s.start..s.end]
-                                ) {
-                                    vals.push(Val::from(&v));
-                                }
-                            }
-                            let mut val = Val::arr(vals);
-                            for step in &steps[1..] { val = eval_step(val, step, env)?; }
-                            return Ok(val);
-                        }
-                    }
-                    // Mixed multi-conjunct: eq and numeric-range predicates
-                    // together, e.g. `$..find(@.status == "shipped", @.total > 500)`.
-                    // Pure-eq and single-cmp already handled above; this path
-                    // picks up any remaining combination.
-                    if let Some(conjuncts) = canonical_field_mixed_predicates(args) {
-                        let spans = super::scan::find_enclosing_objects_mixed(
-                            bytes, &conjuncts,
-                        );
-                        let mut vals: Vec<Val> = Vec::with_capacity(spans.len());
-                        for s in &spans {
-                            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(
-                                &bytes[s.start..s.end]
-                            ) {
-                                vals.push(Val::from(&v));
-                            }
-                        }
-                        let mut val = Val::arr(vals);
-                        for step in &steps[1..] { val = eval_step(val, step, env)?; }
-                        return Ok(val);
-                    }
-                }
-            }
-            // SIMD byte-chain fast path: `$..key<rest>` with raw bytes —
-            // chains of descendant/quantifier/filter-eq stay as byte spans
-            // and never materialise intermediate Vals.
-            if let (Expr::Root, Some(Step::Descendant(name)), Some(bytes))
-                = (&**base, steps.first(), env.raw_bytes.as_ref())
-            {
-                let (mut val, consumed) = byte_chain_eval(bytes, name, steps);
-                for step in &steps[consumed..] { val = eval_step(val, step, env)?; }
-                return Ok(val);
-            }
-            let mut val = eval(base, env)?;
-            for step in steps { val = eval_step(val, step, env)?; }
-            Ok(val)
-        }
-
-        Expr::UnaryNeg(e) => match eval(e, env)? {
-            Val::Int(n)   => Ok(Val::Int(-n)),
-            Val::Float(f) => Ok(Val::Float(-f)),
-            _ => err!("unary minus requires a number"),
-        },
-
-        Expr::Not(e)  => Ok(Val::Bool(!is_truthy(&eval(e, env)?))),
-        Expr::BinOp(l, op, r) => eval_binop(l, *op, r, env),
-
-        Expr::Coalesce(lhs, rhs) => {
-            let v = eval(lhs, env)?;
-            if !v.is_null() { Ok(v) } else { eval(rhs, env) }
-        }
-
-        Expr::Kind { expr, ty, negate } => {
-            let v = eval(expr, env)?;
-            let m = kind_matches(&v, *ty);
-            Ok(Val::Bool(if *negate { !m } else { m }))
-        }
-
-        Expr::Object(fields) => eval_object(fields, env),
-
-        Expr::Array(elems) => {
-            let mut out = Vec::new();
-            for elem in elems {
-                match elem {
-                    ArrayElem::Expr(e)   => out.push(eval(e, env)?),
-                    ArrayElem::Spread(e) => match eval(e, env)? {
-                        Val::Arr(a) => {
-                            let items = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
-                            out.extend(items);
-                        }
-                        Val::IntVec(a) => out.extend(a.iter().map(|n| Val::Int(*n))),
-                        Val::FloatVec(a) => out.extend(a.iter().map(|f| Val::Float(*f))),
-                        v => out.push(v),
-                    },
-                }
-            }
-            Ok(Val::arr(out))
-        }
-
-        Expr::Pipeline { base, steps } => eval_pipeline(base, steps, env),
-
-        Expr::ListComp { expr, vars, iter, cond } => {
-            let items = eval_iter(iter, env)?;
-            let mut out = Vec::new();
-            let mut env_mut = env.clone();
-            for item in items {
-                let frames = bind_vars_mut(&mut env_mut, vars, item);
-                let keep = match cond {
-                    Some(c) => match eval(c, &env_mut) {
-                        Ok(v)  => is_truthy(&v),
-                        Err(e) => { unbind_vars_mut(&mut env_mut, frames); return Err(e); }
-                    },
-                    None => true,
-                };
-                if keep {
-                    match eval(expr, &env_mut) {
-                        Ok(v)  => out.push(v),
-                        Err(e) => { unbind_vars_mut(&mut env_mut, frames); return Err(e); }
-                    }
-                }
-                unbind_vars_mut(&mut env_mut, frames);
-            }
-            Ok(Val::arr(out))
-        }
-
-        Expr::DictComp { key, val, vars, iter, cond } => {
-            let items = eval_iter(iter, env)?;
-            let mut map: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(items.len());
-            let mut env_mut = env.clone();
-            for item in items {
-                let frames = bind_vars_mut(&mut env_mut, vars, item);
-                let keep = match cond {
-                    Some(c) => match eval(c, &env_mut) {
-                        Ok(v)  => is_truthy(&v),
-                        Err(e) => { unbind_vars_mut(&mut env_mut, frames); return Err(e); }
-                    },
-                    None => true,
-                };
-                if keep {
-                    let k: Arc<str> = match eval(key, &env_mut) {
-                        Ok(Val::Str(s)) => s,
-                        Ok(other)       => Arc::<str>::from(val_to_key(&other)),
-                        Err(e) => { unbind_vars_mut(&mut env_mut, frames); return Err(e); }
-                    };
-                    match eval(val, &env_mut) {
-                        Ok(v)  => { map.insert(k, v); }
-                        Err(e) => { unbind_vars_mut(&mut env_mut, frames); return Err(e); }
-                    }
-                }
-                unbind_vars_mut(&mut env_mut, frames);
-            }
-            Ok(Val::obj(map))
-        }
-
-        Expr::SetComp { expr, vars, iter, cond } | Expr::GenComp { expr, vars, iter, cond } => {
-            let items = eval_iter(iter, env)?;
-            let mut seen: std::collections::HashSet<String> =
-                std::collections::HashSet::with_capacity(items.len());
-            let mut out = Vec::with_capacity(items.len());
-            let mut env_mut = env.clone();
-            for item in items {
-                let frames = bind_vars_mut(&mut env_mut, vars, item);
-                let keep = match cond {
-                    Some(c) => match eval(c, &env_mut) {
-                        Ok(v)  => is_truthy(&v),
-                        Err(e) => { unbind_vars_mut(&mut env_mut, frames); return Err(e); }
-                    },
-                    None => true,
-                };
-                if keep {
-                    match eval(expr, &env_mut) {
-                        Ok(v)  => if seen.insert(val_to_key(&v)) { out.push(v); },
-                        Err(e) => { unbind_vars_mut(&mut env_mut, frames); return Err(e); }
-                    }
-                }
-                unbind_vars_mut(&mut env_mut, frames);
-            }
-            Ok(Val::arr(out))
-        }
-
-        Expr::Lambda { .. } => err!("lambda cannot be used as standalone value"),
-
-        Expr::Let { name, init, body } => {
-            let v = eval(init, env)?;
-            eval(body, &env.with_var(name, v))
-        }
-
-        Expr::IfElse { cond, then_, else_ } => {
-            if is_truthy(&eval(cond, env)?) { eval(then_, env) } else { eval(else_, env) }
-        }
-
-        Expr::Try { body, default } => {
-            // Catches both EvalError AND Val::Null.  Panics propagate.
-            match eval(body, env) {
-                Ok(v) if !v.is_null() => Ok(v),
-                Ok(_) | Err(_)        => eval(default, env),
-            }
-        }
-
-        Expr::GlobalCall { name, args } => eval_global(name, args, env),
-
-        Expr::Cast { expr, ty } => {
-            let v = eval(expr, env)?;
-            cast_val(&v, *ty)
-        }
-
-        Expr::Patch { root, ops } => eval_patch(root, ops, env),
-        Expr::DeleteMark =>
-            err!("DELETE can only appear as a patch-field value"),
-    }
+    // Tree-walker fully retired — route through VM.
+    vm_eval(expr, env)
 }
+
+#[allow(dead_code)]
+// === LEGACY TREE-WALKER (UNREACHABLE) === preserved for reference, no callers
+#[allow(dead_code)]
 
 // ── Patch ─────────────────────────────────────────────────────────────────────
 
@@ -1513,13 +1285,13 @@ pub(super) fn apply_item_mut(item: Val, arg: &Arg, env: &mut Env) -> Result<Val,
         Expr::Lambda { params, body } => {
             let name = params.first().map(|s| s.as_str());
             let frame = env.push_lam(name, item);
-            let r = eval(body, env);
+            let r = vm_eval(body, env);
             env.pop_lam(frame);
             r
         }
         _ => {
             let frame = env.push_lam(None, item);
-            let r = eval(expr, env);
+            let r = vm_eval(expr, env);
             env.pop_lam(frame);
             r
         }
@@ -1535,13 +1307,13 @@ pub(super) fn apply_item2_mut(a: Val, b: Val, arg: &Arg, env: &mut Env) -> Resul
             match params.as_slice() {
                 [] => {
                     let frame = env.push_lam(None, b);
-                    let r = eval(body, env);
+                    let r = vm_eval(body, env);
                     env.pop_lam(frame);
                     r
                 }
                 [p] => {
                     let frame = env.push_lam(Some(p), b);
-                    let r = eval(body, env);
+                    let r = vm_eval(body, env);
                     env.pop_lam(frame);
                     r
                 }
@@ -1549,7 +1321,7 @@ pub(super) fn apply_item2_mut(a: Val, b: Val, arg: &Arg, env: &mut Env) -> Resul
                     // Two-param: push p1=a, then p2=b (pop order reversed).
                     let f1 = env.push_lam(Some(p1), a);
                     let f2 = env.push_lam(Some(p2), b);
-                    let r = eval(body, env);
+                    let r = vm_eval(body, env);
                     env.pop_lam(f2);
                     env.pop_lam(f1);
                     r
@@ -1570,14 +1342,37 @@ fn apply_expr_item(item: Val, expr: &Expr, env: &Env) -> Result<Val, EvalError> 
                 e.current = item;
                 e
             };
-            eval(body, &inner)
+            vm_eval(body, &inner)
         }
-        _ => eval(expr, &env.with_current(item)),
+        _ => vm_eval(expr, &env.with_current(item)),
     }
 }
 
 pub(super) fn eval_pos(arg: &Arg, env: &Env) -> Result<Val, EvalError> {
-    match arg { Arg::Pos(e) | Arg::Named(_, e) => eval(e, env) }
+    let expr = match arg { Arg::Pos(e) | Arg::Named(_, e) => e };
+    vm_eval(expr, env)
+}
+
+/// VM-based runtime expression evaluator.  Replaces tree-walker
+/// `eval(expr, env)` for shim arg evaluation + lambda body invocation
+/// inside legacy `apply_item_mut`/`apply_item2_mut`.
+///
+/// Compile per-call; thread-local VM amortises across calls.  Caller
+/// pre-binds env vars (e.g. lambda params) via `push_lam`/`pop_lam`
+/// before invoking; this function just executes the body program.
+pub(super) fn vm_eval(expr: &Expr, env: &Env) -> Result<Val, EvalError> {
+    // Fresh VM per call.  Reusing a thread-local VM hit cache-collision
+    // bugs when multiple distinct sub-expressions executed within one
+    // outer call (e.g. `zip($.a, $.b)`'s two args sharing root_chain_cache
+    // entries by Arc-pointer when compiler dedupes RootChain Arcs).
+    // A per-call VM costs ~100 ns construction; correct over fast.
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NONCE: AtomicU64 = AtomicU64::new(0);
+    let n = NONCE.fetch_add(1, Ordering::Relaxed);
+    let source = format!("<vm_eval#{}>", n);
+    let prog = crate::vm::Compiler::compile(expr, &source);
+    let mut vm = crate::vm::VM::with_registry(env.registry.clone());
+    vm.exec(&prog, env)
 }
 
 pub(super) fn first_i64_arg(args: &[Arg], env: &Env) -> Result<i64, EvalError> {

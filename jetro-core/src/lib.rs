@@ -64,13 +64,6 @@ pub mod pipeline;
 pub mod bytescan;
 pub mod composed;
 pub mod functions;
-pub mod pipeline_borrow;
-#[cfg(feature = "simd-json")]
-pub mod composed_tape;
-#[cfg(feature = "simd-json")]
-pub mod pipeline_tape_borrow;
-pub mod row;
-pub mod unified;
 
 #[cfg(test)]
 mod tests;
@@ -145,9 +138,13 @@ impl From<ParseError> for Error { fn from(e: ParseError) -> Self { Error::Parse(
 impl From<EvalError>  for Error { fn from(e: EvalError)  -> Self { Error::Eval(e)  } }
 
 /// Evaluate a Jetro expression against a JSON value.
+///
+/// Routes through the VM (parse → compile → execute).
 pub fn query(expr: &str, doc: &Value) -> Result<Value> {
     let ast = parser::parse(expr)?;
-    Ok(eval::evaluate(&ast, doc)?)
+    let program = vm::Compiler::compile(&ast, expr);
+    let mut vm = VM::new();
+    Ok(vm.execute(&program, doc)?)
 }
 
 /// A pre-compiled Jetro query.  Compile once, run against many
@@ -257,7 +254,9 @@ impl CompiledQuery {
 /// Evaluate a Jetro expression with a custom method registry.
 pub fn query_with(expr: &str, doc: &Value, registry: Arc<MethodRegistry>) -> Result<Value> {
     let ast = parser::parse(expr)?;
-    Ok(eval::evaluate_with(&ast, doc, registry)?)
+    let program = vm::Compiler::compile(&ast, expr);
+    let mut vm = VM::with_registry(registry);
+    Ok(vm.execute(&program, doc)?)
 }
 
 // ── Jetro ─────────────────────────────────────────────────────────────────────
@@ -323,11 +322,6 @@ pub struct Jetro {
     /// re-walking the tape on every repeat query when ObjVec would
     /// be ~5× faster after the first Val build.
     pub(crate) tape_runs: std::sync::atomic::AtomicU32,
-    /// Per-handle bumpalo arena for borrowed `Val<'a>` results.  Lazily
-    /// initialised on first call to `collect_val_borrow` (Phase 4 API).
-    /// Zero overhead on owned-API path.  Lifetime of returned
-    /// `borrowed::Val<'h>` is tied to `&self` via this arena.
-    pub(crate) arena: OnceCell<crate::eval::borrowed::Arena>,
 }
 
 /// Extract an implicit-current-item field name from a `.map(arg)` /
@@ -808,7 +802,7 @@ impl Jetro {
     }
 
     pub fn new(document: Value) -> Self {
-        Self { document, root_val: OnceCell::new(), objvec_cache: Default::default(), tape_runs: std::sync::atomic::AtomicU32::new(0), raw_bytes: None, tape: OnceCell::new(), arena: OnceCell::new() }
+        Self { document, root_val: OnceCell::new(), objvec_cache: Default::default(), tape_runs: std::sync::atomic::AtomicU32::new(0), raw_bytes: None, tape: OnceCell::new() }
     }
 
     /// Parse JSON bytes and retain them alongside the parsed document.
@@ -834,7 +828,6 @@ impl Jetro {
                         root_val: OnceCell::new(), objvec_cache: Default::default(), tape_runs: std::sync::atomic::AtomicU32::new(0),
                         raw_bytes: Some(raw),
                         tape: { let c = OnceCell::new(); let _ = c.set(tape); c },
-                        arena: OnceCell::new(),
                     });
                 }
                 Err(_) => {
@@ -844,7 +837,6 @@ impl Jetro {
                         root_val: OnceCell::new(), objvec_cache: Default::default(), tape_runs: std::sync::atomic::AtomicU32::new(0),
                         raw_bytes: Some(raw),
                         tape: OnceCell::new(),
-                        arena: OnceCell::new(),
                     });
                 }
             }
@@ -857,7 +849,6 @@ impl Jetro {
                 root_val: OnceCell::new(), objvec_cache: Default::default(), tape_runs: std::sync::atomic::AtomicU32::new(0),
                 raw_bytes: Some(Arc::from(bytes.into_boxed_slice())),
                 tape: OnceCell::new(),
-                arena: OnceCell::new(),
             })
         }
     }
@@ -897,7 +888,6 @@ impl Jetro {
             tape_runs: std::sync::atomic::AtomicU32::new(0),
             raw_bytes: Some(raw),
             tape: OnceCell::new(),
-            arena: OnceCell::new(),
         })
     }
 
@@ -935,7 +925,6 @@ impl Jetro {
             root_val: OnceCell::new(), objvec_cache: Default::default(), tape_runs: std::sync::atomic::AtomicU32::new(0),
             raw_bytes: Some(raw),
             tape: { let c = OnceCell::new(); let _ = c.set(tape); c },
-            arena: OnceCell::new(),
         })
     }
 
@@ -981,7 +970,6 @@ impl Jetro {
             root_val: cell, objvec_cache: Default::default(), tape_runs: std::sync::atomic::AtomicU32::new(0),
             raw_bytes: None,
             tape: OnceCell::new(),
-            arena: OnceCell::new(),
         })
     }
 
@@ -1174,72 +1162,6 @@ impl Jetro {
             let prog = vm.get_or_compile(expr)?;
             vm.execute_val_raw(&prog, self.root_val())
         })
-    }
-
-    /// Borrowed-result API (Phase 4).  Returns a `borrowed::Val<'h>`
-    /// allocated in the handle's per-handle bumpalo arena.  Avoids the
-    /// Arc + IndexMap allocations of the owned `Val` builder — every
-    /// string content + every object slice + every array slice lives
-    /// in a single bump-pointer arena, freed in O(1) when the handle
-    /// drops.
-    ///
-    /// Lifetime contract: returned `Val<'h>` borrows from `&self`; it
-    /// must not outlive the `Jetro` handle.
-    ///
-    /// Coverage today: byte-scannable Sink::Collect shapes (e.g.
-    /// `$.array.filter(...).map(...).collect()`,
-    /// `$.array.map(field).unique()`).  Other shapes fall back to the
-    /// owned `collect_val` path then ingest into the arena via
-    /// `borrowed::from_owned` — same allocator cost as the owned API
-    /// but the handle still owns the arena, useful for downstream
-    /// borrowed consumers.
-    ///
-    /// Requires `simd-json` for the borrowed bytescan path; non-feature
-    /// builds always go through the owned-then-ingest fallback.
-    #[cfg(feature = "simd-json")]
-    pub fn collect_val_borrow<'h, S: AsRef<str>>(
-        &'h self,
-        expr: S,
-    ) -> std::result::Result<crate::eval::borrowed::Val<'h>, EvalError> {
-        let arena: &'h crate::eval::borrowed::Arena =
-            self.arena.get_or_init(crate::eval::borrowed::Arena::new);
-        let expr_s = expr.as_ref();
-
-        // Borrow-specific fast paths share parse+lower+precheck with
-        // `collect_val` via `fast_path_prereqs`.  Pipeline reuse on
-        // fallback avoids re-parse + redundant bytescan attempts.
-        let prereqs = self.fast_path_prereqs(expr_s);
-        if let Some((p, raw)) = &prereqs {
-            if let Some(out) = bytescan::try_run_borrow(p, raw, arena) {
-                return out;
-            }
-            // composed_tape path runs after bytescan_borrow declines.
-            // Reuses cached tape (lazy_tape) so no re-parse cost;
-            // emits BVal<'a> directly without materialising a Val
-            // tree.  Closes the gap pipeline_borrow couldn't:
-            // string-lit filters + Sink::Numeric/Count/First/Last/
-            // Collect on non-bytescannable shapes.
-            //
-            // pipeline_borrow path NOT wired by default — its full
-            // `from_json_simd_arena` parse (~3.7 ms on 1.1 MB) is
-            // dominated by composed_tape's tape reuse.  Kept as
-            // substrate for direct tests only.
-            if let Some(tape) = self.lazy_tape() {
-                if let Some(out) = pipeline_tape_borrow::try_run_borrow_tape(p, tape, arena) {
-                    return out;
-                }
-            }
-        }
-
-        // Fallback: delegate to owned slow-path tail (tape-descend /
-        // run_with / VM) — pass the already-lowered Pipeline from
-        // `prereqs` so we don't re-parse and don't re-run owned
-        // bytescan (it has the same shape acceptance as
-        // try_run_borrow which already declined).  Result ingested
-        // into arena via `from_owned`.
-        let prelowered = prereqs.map(|(p, _)| p);
-        let owned = self.collect_val_slow(expr_s, prelowered)?;
-        Ok(crate::eval::borrowed::from_owned(arena, &owned))
     }
 
     /// Streaming iterator over a query result.

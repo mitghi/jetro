@@ -47,7 +47,7 @@ use smallvec::SmallVec;
 use crate::ast::*;
 use super::eval::{
     Env, EvalError, Val,
-    dispatch_method, eval,
+    dispatch_method,
 };
 use super::eval::util::{
     is_truthy, kind_matches, vals_eq, cmp_vals, val_to_key, val_to_string,
@@ -479,7 +479,11 @@ pub enum Opcode {
     GetPointer(Arc<str>),
 
     // ── Patch block (delegates to tree-walker eval) ──────────────────────────
-    PatchEval(Arc<super::ast::Expr>),
+    /// Patch block — pre-compiled form.  Tree-walker no longer used;
+    /// all sub-expressions live as `Arc<Program>` and run via VM.
+    PatchEval(Arc<CompiledPatch>),
+    /// Sentinel for `DELETE` outside a patch — runtime raises error.
+    DeleteMarkErr,
 }
 
 // ── Program ───────────────────────────────────────────────────────────────────
@@ -503,6 +507,55 @@ pub struct Program {
     /// case for repeated queries over distinct docs and for shape-uniform
     /// array iteration reaching the opcode inside a sub-program.
     pub ics:          Arc<[AtomicU64]>,
+}
+
+// ── Patch runtime helpers ──────────────────────────────────────────
+
+#[derive(Debug)]
+enum PatchResult { Replace(Val), Delete }
+
+#[inline]
+fn vm_resolve_idx(i: i64, len: i64) -> usize {
+    if len == 0 { return 0; }
+    let r = if i < 0 { len + i } else { i };
+    if r < 0 { 0 } else if r >= len { len as usize } else { r as usize }
+}
+
+// ── Compiled patch (VM-native, no tree-walker) ─────────────────────
+
+/// Pre-compiled form of `Expr::Patch`.  Every sub-expression is a
+/// `vm::Program`; the runtime patch executor uses `self.exec` to
+/// evaluate them.  Replaces the historical `PatchEval(Arc<Expr>)`
+/// runtime delegation to tree-walker.
+#[derive(Debug, Clone)]
+pub struct CompiledPatch {
+    pub root_prog: Arc<Program>,
+    pub ops:       Vec<CompiledPatchOp>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CompiledPatchOp {
+    pub path: Vec<CompiledPathStep>,
+    pub val:  CompiledPatchVal,
+    pub cond: Option<Arc<Program>>,
+}
+
+#[derive(Debug, Clone)]
+pub enum CompiledPatchVal {
+    /// Replace leaf with the value produced by `prog` (with `@` = leaf).
+    Replace(Arc<Program>),
+    /// Sentinel: delete the leaf entry.
+    Delete,
+}
+
+#[derive(Debug, Clone)]
+pub enum CompiledPathStep {
+    Field(Arc<str>),
+    Index(i64),
+    DynIndex(Arc<Program>),
+    Wildcard,
+    WildcardFilter(Arc<Program>),
+    Descendant(Arc<str>),
 }
 
 impl Program {
@@ -1732,18 +1785,46 @@ impl Compiler {
             }
 
             Expr::GlobalCall { name, args } => {
-                // Compile as a sequence of sub-progs + a special dispatch
-                let sub_progs: Vec<Arc<Program>> = args.iter().map(|a| match a {
-                    Arg::Pos(e) | Arg::Named(_, e) => Arc::new(Self::compile_sub(e, ctx)),
-                }).collect();
-                let call = Arc::new(CompiledCall {
-                    method:    BuiltinMethod::Unknown,
-                    name:      Arc::from(name.as_str()),
-                    sub_progs: sub_progs.into(),
-                    orig_args: args.iter().cloned().collect::<Vec<_>>().into(),
-                });
-                ops.push(Opcode::PushRoot); // global calls need root pushed first
-                ops.push(Opcode::CallMethod(call));
+                // Match tree-walker `eval_global` semantics: special-case
+                // `coalesce/chain/join/zip/zip_longest/product/range` compile
+                // through their existing handlers via root receiver; for all
+                // OTHER global names (`to_string(x)`, `to_bool(x)`, etc.),
+                // first arg is the receiver — equivalent to method-call form.
+                // No-args case: current is receiver.
+                let is_special = matches!(name.as_str(),
+                    "coalesce" | "chain" | "join" | "zip" | "zip_longest"
+                    | "product" | "range");
+                if !is_special && !args.is_empty() {
+                    // <first_arg> CallMethod(name, [args[1..]])
+                    let first = match &args[0] {
+                        Arg::Pos(e) | Arg::Named(_, e) => e.clone(),
+                    };
+                    Self::emit_into(&first, ctx, ops);
+                    let rest_args: Vec<Arg> = args.iter().skip(1).cloned().collect();
+                    let sub_progs: Vec<Arc<Program>> = rest_args.iter().map(|a| match a {
+                        Arg::Pos(e) | Arg::Named(_, e) => Arc::new(Self::compile_sub(e, ctx)),
+                    }).collect();
+                    let call = Arc::new(CompiledCall {
+                        method:    BuiltinMethod::from_name(name.as_str()),
+                        name:      Arc::from(name.as_str()),
+                        sub_progs: sub_progs.into(),
+                        orig_args: rest_args.into(),
+                    });
+                    ops.push(Opcode::CallMethod(call));
+                } else {
+                    // Special globals (or no-arg) — keep root-receiver path.
+                    let sub_progs: Vec<Arc<Program>> = args.iter().map(|a| match a {
+                        Arg::Pos(e) | Arg::Named(_, e) => Arc::new(Self::compile_sub(e, ctx)),
+                    }).collect();
+                    let call = Arc::new(CompiledCall {
+                        method:    BuiltinMethod::Unknown,
+                        name:      Arc::from(name.as_str()),
+                        sub_progs: sub_progs.into(),
+                        orig_args: args.iter().cloned().collect::<Vec<_>>().into(),
+                    });
+                    ops.push(Opcode::PushRoot);
+                    ops.push(Opcode::CallMethod(call));
+                }
             }
 
             Expr::Cast { expr, ty } => {
@@ -1751,19 +1832,19 @@ impl Compiler {
                 ops.push(Opcode::CastOp(*ty));
             }
 
-            Expr::Patch { .. } => {
-                // Patch block: structural transform with COW writes, conditional
-                // leaves, DELETE sentinel.  Emit opaque opcode; the VM delegates
-                // to the tree-walker at runtime (patch is rare enough that the
-                // opcode compile pays no dividend here).
-                ops.push(Opcode::PatchEval(Arc::new(expr.clone())));
+            Expr::Patch { root, ops: patch_ops } => {
+                // Patch block — pre-compiled to CompiledPatch.  Every
+                // sub-expression (root, op.val, op.cond, dyn-index,
+                // wildcard-filter pred) lives as Arc<Program>; runtime
+                // patch executor uses self.exec, no tree-walker.
+                let compiled = Self::compile_patch(root, patch_ops, ctx);
+                ops.push(Opcode::PatchEval(Arc::new(compiled)));
             }
 
             Expr::DeleteMark => {
-                // DELETE outside a patch-field value is a static error; the
-                // tree-walker raises it at runtime, so emit a sentinel that
-                // triggers the same path.
-                ops.push(Opcode::PatchEval(Arc::new(Expr::DeleteMark)));
+                // DELETE outside a patch-field value is a static error
+                // raised at runtime via `Opcode::DeleteMarkErr` sentinel.
+                ops.push(Opcode::DeleteMarkErr);
             }
         }
     }
@@ -1967,6 +2048,37 @@ impl Compiler {
     fn compile_sub(expr: &Expr, ctx: &VarCtx) -> Program {
         let ops = Self::optimize(Self::emit(expr, ctx));
         Program::new(ops, "<sub>")
+    }
+
+    /// Compile `Expr::Patch` into VM-native `CompiledPatch`.  Every
+    /// sub-expression becomes an `Arc<Program>` so the runtime patch
+    /// executor never re-enters the tree-walker.
+    fn compile_patch(
+        root: &Expr,
+        patch_ops: &[crate::ast::PatchOp],
+        ctx: &VarCtx,
+    ) -> CompiledPatch {
+        let root_prog = Arc::new(Self::compile_sub(root, ctx));
+        let mut ops = Vec::with_capacity(patch_ops.len());
+        for po in patch_ops {
+            let path: Vec<CompiledPathStep> = po.path.iter().map(|s| match s {
+                crate::ast::PathStep::Field(n)        => CompiledPathStep::Field(Arc::from(n.as_str())),
+                crate::ast::PathStep::Index(i)        => CompiledPathStep::Index(*i),
+                crate::ast::PathStep::DynIndex(e)     => CompiledPathStep::DynIndex(Arc::new(Self::compile_sub(e, ctx))),
+                crate::ast::PathStep::Wildcard        => CompiledPathStep::Wildcard,
+                crate::ast::PathStep::WildcardFilter(p) =>
+                    CompiledPathStep::WildcardFilter(Arc::new(Self::compile_sub(p, ctx))),
+                crate::ast::PathStep::Descendant(n)   => CompiledPathStep::Descendant(Arc::from(n.as_str())),
+            }).collect();
+            let val = if matches!(&po.val, Expr::DeleteMark) {
+                CompiledPatchVal::Delete
+            } else {
+                CompiledPatchVal::Replace(Arc::new(Self::compile_sub(&po.val, ctx)))
+            };
+            let cond = po.cond.as_ref().map(|c| Arc::new(Self::compile_sub(c, ctx)));
+            ops.push(CompiledPatchOp { path, val, cond });
+        }
+        CompiledPatch { root_prog, ops }
     }
 
     /// Classify an object-value expression as a pure path on `current`:
@@ -3081,8 +3193,12 @@ impl VM {
                 }
 
                 // ── Patch block ───────────────────────────────────────────────
-                Opcode::PatchEval(e) => {
-                    stack.push(eval(e, env)?);
+                Opcode::PatchEval(cp) => {
+                    let result = self.exec_patch_compiled(cp, env)?;
+                    stack.push(result);
+                }
+                Opcode::DeleteMarkErr => {
+                    return err!("DELETE: only valid inside a patch-field value");
                 }
             }
         }
@@ -3249,24 +3365,28 @@ impl VM {
                         return Ok(Val::int_vec(out));
                     }
                     let cap: usize = a.iter().map(|it| match it {
-                        Val::Arr(inner) => inner.len(),
-                        Val::IntVec(inner) => inner.len(),
-                        Val::FloatVec(inner) => inner.len(),
+                        Val::Arr(inner)         => inner.len(),
+                        Val::IntVec(inner)      => inner.len(),
+                        Val::FloatVec(inner)    => inner.len(),
+                        Val::StrVec(inner)      => inner.len(),
+                        Val::StrSliceVec(inner) => inner.len(),
                         _ => 1,
                     }).sum();
                     let mut out = Vec::with_capacity(cap);
                     for item in a.iter() {
                         match item {
-                            Val::Arr(inner) => out.extend(inner.iter().cloned()),
-                            Val::IntVec(inner) => out.extend(inner.iter().map(|n| Val::Int(*n))),
-                            Val::FloatVec(inner) => out.extend(inner.iter().map(|f| Val::Float(*f))),
+                            Val::Arr(inner)         => out.extend(inner.iter().cloned()),
+                            Val::IntVec(inner)      => out.extend(inner.iter().map(|n| Val::Int(*n))),
+                            Val::FloatVec(inner)    => out.extend(inner.iter().map(|f| Val::Float(*f))),
+                            Val::StrVec(inner)      => out.extend(inner.iter().map(|s| Val::Str(s.clone()))),
+                            Val::StrSliceVec(inner) => out.extend(inner.iter().map(|s| Val::StrSlice(s.clone()))),
                             other => out.push(other.clone()),
                         }
                     }
                     return Ok(Val::arr(out));
                 }
                 // Columnar receiver itself — already flat; return as-is.
-                if matches!(&recv, Val::IntVec(_) | Val::FloatVec(_)) {
+                if matches!(&recv, Val::IntVec(_) | Val::FloatVec(_) | Val::StrVec(_) | Val::StrSliceVec(_)) {
                     return Ok(recv);
                 }
             }
@@ -3766,6 +3886,180 @@ impl VM {
     {
         let mut scratch = env.clone();
         self.exec_lam_body_scratch(prog, item, lam_param, &mut scratch)
+    }
+
+    // ── Patch executor (VM-native, replaces tree-walker eval_patch) ──
+
+    fn exec_patch_compiled(
+        &mut self,
+        cp:  &CompiledPatch,
+        env: &Env,
+    ) -> Result<Val, EvalError> {
+        let mut doc = self.exec(&cp.root_prog, env)?;
+        for op in &cp.ops {
+            if let Some(cond) = &op.cond {
+                let cenv = env.with_current(doc.clone());
+                if !is_truthy(&self.exec(cond, &cenv)?) { continue; }
+            }
+            match self.apply_patch_step_compiled(doc, &op.path, 0, &op.val, env)? {
+                PatchResult::Replace(v) => doc = v,
+                PatchResult::Delete     => doc = Val::Null,
+            }
+        }
+        Ok(doc)
+    }
+
+    fn apply_patch_step_compiled(
+        &mut self,
+        v:    Val,
+        path: &[CompiledPathStep],
+        i:    usize,
+        val:  &CompiledPatchVal,
+        env:  &Env,
+    ) -> Result<PatchResult, EvalError> {
+        if i == path.len() {
+            return Ok(match val {
+                CompiledPatchVal::Delete           => PatchResult::Delete,
+                CompiledPatchVal::Replace(prog) => {
+                    let nv = self.exec(prog, &env.with_current(v))?;
+                    PatchResult::Replace(nv)
+                }
+            });
+        }
+        match &path[i] {
+            CompiledPathStep::Field(name) => {
+                let mut m = v.into_map().unwrap_or_default();
+                let existing = if let Some(slot) = m.get_mut(name.as_ref()) {
+                    std::mem::replace(slot, Val::Null)
+                } else { Val::Null };
+                let child = self.apply_patch_step_compiled(existing, path, i+1, val, env)?;
+                match child {
+                    PatchResult::Delete      => { m.shift_remove(name.as_ref()); }
+                    PatchResult::Replace(nv) => { m.insert(name.clone(), nv); }
+                }
+                Ok(PatchResult::Replace(Val::obj(m)))
+            }
+            CompiledPathStep::Index(idx) => {
+                let mut a = v.into_vec().unwrap_or_default();
+                let resolved = vm_resolve_idx(*idx, a.len() as i64);
+                let existing = if resolved < a.len() {
+                    std::mem::replace(&mut a[resolved], Val::Null)
+                } else { Val::Null };
+                let child = self.apply_patch_step_compiled(existing, path, i+1, val, env)?;
+                match child {
+                    PatchResult::Delete      => { if resolved < a.len() { a.remove(resolved); } }
+                    PatchResult::Replace(nv) => { if resolved < a.len() { a[resolved] = nv; } }
+                }
+                Ok(PatchResult::Replace(Val::arr(a)))
+            }
+            CompiledPathStep::DynIndex(prog) => {
+                let idx_val = self.exec(prog, env)?;
+                let idx = idx_val.as_i64().ok_or_else(|| {
+                    EvalError(format!("patch dyn-index: expected integer, got {}", idx_val.type_name()))
+                })?;
+                let mut a = v.into_vec().unwrap_or_default();
+                let resolved = vm_resolve_idx(idx, a.len() as i64);
+                let existing = if resolved < a.len() {
+                    std::mem::replace(&mut a[resolved], Val::Null)
+                } else { Val::Null };
+                let child = self.apply_patch_step_compiled(existing, path, i+1, val, env)?;
+                match child {
+                    PatchResult::Delete      => { if resolved < a.len() { a.remove(resolved); } }
+                    PatchResult::Replace(nv) => { if resolved < a.len() { a[resolved] = nv; } }
+                }
+                Ok(PatchResult::Replace(Val::arr(a)))
+            }
+            CompiledPathStep::Wildcard => {
+                let mut arr = v.into_vec().ok_or_else(|| EvalError("patch [*]: expected array".into()))?;
+                let mut write_idx = 0usize;
+                for read_idx in 0..arr.len() {
+                    let item = std::mem::replace(&mut arr[read_idx], Val::Null);
+                    match self.apply_patch_step_compiled(item, path, i+1, val, env)? {
+                        PatchResult::Delete => {}
+                        PatchResult::Replace(nv) => {
+                            arr[write_idx] = nv;
+                            write_idx += 1;
+                        }
+                    }
+                }
+                arr.truncate(write_idx);
+                Ok(PatchResult::Replace(Val::arr(arr)))
+            }
+            CompiledPathStep::WildcardFilter(pred) => {
+                let mut arr = v.into_vec().ok_or_else(|| EvalError("patch [* if]: expected array".into()))?;
+                let mut env_mut = env.clone();
+                let mut write_idx = 0usize;
+                for read_idx in 0..arr.len() {
+                    let item = std::mem::replace(&mut arr[read_idx], Val::Null);
+                    let frame = env_mut.push_lam(None, item.clone());
+                    let include = match self.exec(pred, &env_mut) {
+                        Ok(v)  => is_truthy(&v),
+                        Err(e) => { env_mut.pop_lam(frame); return Err(e); }
+                    };
+                    env_mut.pop_lam(frame);
+                    if include {
+                        match self.apply_patch_step_compiled(item, path, i+1, val, env)? {
+                            PatchResult::Delete => {}
+                            PatchResult::Replace(nv) => {
+                                arr[write_idx] = nv;
+                                write_idx += 1;
+                            }
+                        }
+                    } else {
+                        arr[write_idx] = item;
+                        write_idx += 1;
+                    }
+                }
+                arr.truncate(write_idx);
+                Ok(PatchResult::Replace(Val::arr(arr)))
+            }
+            CompiledPathStep::Descendant(name) => {
+                let v2 = self.descend_apply_patch_compiled(v, name, path, i, val, env)?;
+                Ok(PatchResult::Replace(v2))
+            }
+        }
+    }
+
+    fn descend_apply_patch_compiled(
+        &mut self,
+        v:    Val,
+        name: &Arc<str>,
+        path: &[CompiledPathStep],
+        i:    usize,
+        val:  &CompiledPatchVal,
+        env:  &Env,
+    ) -> Result<Val, EvalError> {
+        match v {
+            Val::Obj(m) => {
+                let mut map = Arc::try_unwrap(m).unwrap_or_else(|m| (*m).clone());
+                let n = map.len();
+                for idx in 0..n {
+                    let child = if let Some((_, v)) = map.get_index_mut(idx) {
+                        std::mem::replace(v, Val::Null)
+                    } else { continue };
+                    let replaced = self.descend_apply_patch_compiled(child, name, path, i, val, env)?;
+                    if let Some((_, slot)) = map.get_index_mut(idx) { *slot = replaced; }
+                }
+                if map.contains_key(name.as_ref()) {
+                    let existing = map.get(name.as_ref()).cloned().unwrap_or(Val::Null);
+                    let r = self.apply_patch_step_compiled(existing, path, i + 1, val, env)?;
+                    match r {
+                        PatchResult::Delete      => { map.shift_remove(name.as_ref()); }
+                        PatchResult::Replace(nv) => { map.insert(name.clone(), nv); }
+                    }
+                }
+                Ok(Val::obj(map))
+            }
+            Val::Arr(a) => {
+                let mut vec = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
+                for slot in vec.iter_mut() {
+                    let old = std::mem::replace(slot, Val::Null);
+                    *slot = self.descend_apply_patch_compiled(old, name, path, i, val, env)?;
+                }
+                Ok(Val::arr(vec))
+            }
+            other => Ok(other),
+        }
     }
 
     /// Scratch-reusing variant: mutates `scratch` in place via

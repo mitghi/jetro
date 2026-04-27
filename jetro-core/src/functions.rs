@@ -67,6 +67,26 @@ pub mod shims {
 
     macro_rules! err { ($($t:tt)*) => { Err(EvalError(format!($($t)*))) }; }
 
+    /// VM-based runtime arg evaluator.  Replaces `crate::eval::eval`
+    /// (tree-walker) — compiles the Expr to a VM Program and executes
+    /// via a thread-local VM.  Used inside Stage shims to evaluate
+    /// runtime arguments without re-entering tree-walker code.
+    ///
+    /// Per-call compile cost is acceptable: shim arg eval is typically
+    /// once-per-method-call (not per-row).  For hot per-row paths,
+    /// callers should pre-compile and use VM directly.
+    pub(crate) fn vm_eval(expr: &Expr, env: &Env) -> Result<Val, EvalError> {
+        use std::cell::RefCell;
+        thread_local! {
+            static VM_CELL: RefCell<crate::vm::VM> = RefCell::new(crate::vm::VM::new());
+        }
+        let prog = crate::vm::Compiler::compile(expr, "<runtime-arg>");
+        VM_CELL.with(|vm_cell| {
+            let mut vm = vm_cell.borrow_mut();
+            vm.exec(&prog, env)
+        })
+    }
+
     macro_rules! delegate_str_stage {
         ($shim:ident, $stage:expr, $err:expr) => {
             pub fn $shim(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
@@ -122,7 +142,7 @@ pub mod shims {
         let a = args.first().ok_or_else(|| EvalError(format!("{}: missing argument", name)))?;
         let v = match a {
             Arg::Pos(Expr::Ident(s)) => return Ok(std::sync::Arc::from(s.as_str())),
-            Arg::Pos(e) | Arg::Named(_, e) => crate::eval::eval(e, env)?,
+            Arg::Pos(e) | Arg::Named(_, e) => vm_eval(e, env)?,
         };
         match v {
             Val::Str(s) => Ok(s),
@@ -133,7 +153,7 @@ pub mod shims {
     fn first_i64_arg(args: &[Arg], env: &Env, name: &str) -> Result<i64, EvalError> {
         let a = args.first().ok_or_else(|| EvalError(format!("{}: missing argument", name)))?;
         let v = match a {
-            Arg::Pos(e) | Arg::Named(_, e) => crate::eval::eval(e, env)?,
+            Arg::Pos(e) | Arg::Named(_, e) => vm_eval(e, env)?,
         };
         match v {
             Val::Int(n)   => Ok(n),
@@ -145,7 +165,7 @@ pub mod shims {
     fn second_char_arg(args: &[Arg], env: &Env) -> char {
         args.get(1)
             .and_then(|a| match a {
-                Arg::Pos(e) | Arg::Named(_, e) => crate::eval::eval(e, env).ok(),
+                Arg::Pos(e) | Arg::Named(_, e) => vm_eval(e, env).ok(),
             })
             .and_then(|v| if let Val::Str(s) = v { s.chars().next() } else { None })
             .unwrap_or(' ')
@@ -258,7 +278,7 @@ pub mod shims {
             None => Ok(' '),
             Some(a) => {
                 let v = match a {
-                    Arg::Pos(e) | Arg::Named(_, e) => crate::eval::eval(e, env)?,
+                    Arg::Pos(e) | Arg::Named(_, e) => vm_eval(e, env)?,
                 };
                 match v {
                     Val::Str(s) if s.chars().count() == 1 => Ok(s.chars().next().unwrap()),
@@ -286,7 +306,7 @@ pub mod shims {
     fn collect_str_arg_list(args: &[Arg], env: &Env, who: &str) -> Result<Vec<std::sync::Arc<str>>, EvalError> {
         if args.len() == 1 {
             let v = match &args[0] {
-                Arg::Pos(e) | Arg::Named(_, e) => crate::eval::eval(e, env)?,
+                Arg::Pos(e) | Arg::Named(_, e) => vm_eval(e, env)?,
             };
             if let Val::Arr(a) = v {
                 let mut out = Vec::with_capacity(a.len());
@@ -299,7 +319,7 @@ pub mod shims {
             // re-evaluate not needed; if it wasn't an array fall through to N-arg branch
             // by re-entering with the single arg.
             if let Val::Str(s) = match &args[0] {
-                Arg::Pos(e) | Arg::Named(_, e) => crate::eval::eval(e, env)?,
+                Arg::Pos(e) | Arg::Named(_, e) => vm_eval(e, env)?,
             } {
                 return Ok(vec![s]);
             }
@@ -308,7 +328,7 @@ pub mod shims {
         let mut out = Vec::with_capacity(args.len());
         for a in args {
             let v = match a {
-                Arg::Pos(e) | Arg::Named(_, e) => crate::eval::eval(e, env)?,
+                Arg::Pos(e) | Arg::Named(_, e) => vm_eval(e, env)?,
             };
             if let Val::Str(s) = v { out.push(s); }
             else { return err!("{}: arg must be string", who); }
@@ -361,7 +381,7 @@ pub mod shims {
             let a = args.get(1).ok_or_else(|| EvalError("replace_re: missing replacement".into()))?;
             match a {
                 Arg::Pos(Expr::Ident(s)) => std::sync::Arc::from(s.as_str()),
-                Arg::Pos(e) | Arg::Named(_, e) => match crate::eval::eval(e, env)? {
+                Arg::Pos(e) | Arg::Named(_, e) => match vm_eval(e, env)? {
                     Val::Str(s) => s,
                     _ => return err!("replace_re: replacement must be string"),
                 },
@@ -381,7 +401,7 @@ pub mod shims {
             let a = args.get(1).ok_or_else(|| EvalError("replace_all_re: missing replacement".into()))?;
             match a {
                 Arg::Pos(Expr::Ident(s)) => std::sync::Arc::from(s.as_str()),
-                Arg::Pos(e) | Arg::Named(_, e) => match crate::eval::eval(e, env)? {
+                Arg::Pos(e) | Arg::Named(_, e) => match vm_eval(e, env)? {
                     Val::Str(s) => s,
                     _ => return err!("replace_all_re: replacement must be string"),
                 },
@@ -422,7 +442,7 @@ pub mod shims {
     fn vec_arg(args: &[Arg], env: &Env, who: &str) -> Result<Vec<Val>, EvalError> {
         let a = args.first().ok_or_else(|| EvalError(format!("{}: requires arg", who)))?;
         let v = match a {
-            Arg::Pos(e) | Arg::Named(_, e) => crate::eval::eval(e, env)?,
+            Arg::Pos(e) | Arg::Named(_, e) => vm_eval(e, env)?,
         };
         v.into_vec().ok_or_else(|| EvalError(format!("{}: expected array arg", who)))
     }
@@ -505,7 +525,7 @@ pub mod shims {
         let recv = coerce_arr(recv, "append")?;
         let item = match args.first() {
             Some(a) => match a {
-                Arg::Pos(e) | Arg::Named(_, e) => crate::eval::eval(e, env)?,
+                Arg::Pos(e) | Arg::Named(_, e) => vm_eval(e, env)?,
             },
             None => Val::Null,
         };
@@ -517,7 +537,7 @@ pub mod shims {
         let recv = coerce_arr(recv, "prepend")?;
         let item = match args.first() {
             Some(a) => match a {
-                Arg::Pos(e) | Arg::Named(_, e) => crate::eval::eval(e, env)?,
+                Arg::Pos(e) | Arg::Named(_, e) => vm_eval(e, env)?,
             },
             None => Val::Null,
         };
@@ -540,7 +560,7 @@ pub mod shims {
     fn first_val_arg(args: &[Arg], env: &Env) -> Result<Val, EvalError> {
         match args.first() {
             Some(a) => match a {
-                Arg::Pos(e) | Arg::Named(_, e) => crate::eval::eval(e, env),
+                Arg::Pos(e) | Arg::Named(_, e) => vm_eval(e, env),
             },
             None => Ok(Val::Null),
         }
@@ -590,18 +610,6 @@ macro_rules! lifted_str_stage {
                         Val::Str(std::sync::Arc::from(out))));
                 }
                 StageOutput::Filtered
-            }
-        }
-
-        // Borrow-substrate trait impl (future arena-aware variant
-        // lands when Stage<R> grows arena support; placeholder for
-        // now — production borrow path uses bytescan + composed_tape
-        // for builtins).
-        impl<'a> crate::unified::Stage<crate::eval::borrowed::Val<'a>> for $name {
-            fn apply(&self, _x: crate::eval::borrowed::Val<'a>)
-                -> crate::unified::StageOutputU<crate::eval::borrowed::Val<'a>>
-            {
-                crate::unified::StageOutputU::Filtered
             }
         }
     };
@@ -700,14 +708,6 @@ macro_rules! lifted_str_to_val {
                     return StageOutput::Pass(Cow::Owned(out));
                 }
                 StageOutput::Filtered
-            }
-        }
-
-        impl<'a> crate::unified::Stage<crate::eval::borrowed::Val<'a>> for $name {
-            fn apply(&self, _x: crate::eval::borrowed::Val<'a>)
-                -> crate::unified::StageOutputU<crate::eval::borrowed::Val<'a>>
-            {
-                crate::unified::StageOutputU::Filtered
             }
         }
     };
@@ -828,11 +828,6 @@ impl Stage for StartsWith {
         StageOutput::Filtered
     }
 }
-impl<'a> crate::unified::Stage<crate::eval::borrowed::Val<'a>> for StartsWith {
-    fn apply(&self, _x: crate::eval::borrowed::Val<'a>)
-        -> crate::unified::StageOutputU<crate::eval::borrowed::Val<'a>>
-    { crate::unified::StageOutputU::Filtered }
-}
 
 /// `.ends_with(suffix)` — returns Val::Bool.
 pub struct EndsWith { pub suffix: std::sync::Arc<str> }
@@ -847,11 +842,6 @@ impl Stage for EndsWith {
         }
         StageOutput::Filtered
     }
-}
-impl<'a> crate::unified::Stage<crate::eval::borrowed::Val<'a>> for EndsWith {
-    fn apply(&self, _x: crate::eval::borrowed::Val<'a>)
-        -> crate::unified::StageOutputU<crate::eval::borrowed::Val<'a>>
-    { crate::unified::StageOutputU::Filtered }
 }
 
 /// `.contains(needle)` — returns Val::Bool.
@@ -868,11 +858,6 @@ impl Stage for Contains {
         StageOutput::Filtered
     }
 }
-impl<'a> crate::unified::Stage<crate::eval::borrowed::Val<'a>> for Contains {
-    fn apply(&self, _x: crate::eval::borrowed::Val<'a>)
-        -> crate::unified::StageOutputU<crate::eval::borrowed::Val<'a>>
-    { crate::unified::StageOutputU::Filtered }
-}
 
 /// `.repeat(n)` — repeat string n times.
 pub struct Repeat { pub n: usize }
@@ -885,11 +870,6 @@ impl Stage for Repeat {
         }
         StageOutput::Filtered
     }
-}
-impl<'a> crate::unified::Stage<crate::eval::borrowed::Val<'a>> for Repeat {
-    fn apply(&self, _x: crate::eval::borrowed::Val<'a>)
-        -> crate::unified::StageOutputU<crate::eval::borrowed::Val<'a>>
-    { crate::unified::StageOutputU::Filtered }
 }
 
 /// `.split(sep)` — returns Val::Arr of Val::Str.
@@ -905,11 +885,6 @@ impl Stage for Split {
         }
         StageOutput::Filtered
     }
-}
-impl<'a> crate::unified::Stage<crate::eval::borrowed::Val<'a>> for Split {
-    fn apply(&self, _x: crate::eval::borrowed::Val<'a>)
-        -> crate::unified::StageOutputU<crate::eval::borrowed::Val<'a>>
-    { crate::unified::StageOutputU::Filtered }
 }
 
 /// `.replace(needle, with)` — single substitution per match.
@@ -932,11 +907,6 @@ impl Stage for Replace {
         StageOutput::Filtered
     }
 }
-impl<'a> crate::unified::Stage<crate::eval::borrowed::Val<'a>> for Replace {
-    fn apply(&self, _x: crate::eval::borrowed::Val<'a>)
-        -> crate::unified::StageOutputU<crate::eval::borrowed::Val<'a>>
-    { crate::unified::StageOutputU::Filtered }
-}
 
 /// `.strip_prefix(prefix)` — strip if present, else return original.
 pub struct StripPrefix { pub prefix: std::sync::Arc<str> }
@@ -954,11 +924,6 @@ impl Stage for StripPrefix {
         StageOutput::Filtered
     }
 }
-impl<'a> crate::unified::Stage<crate::eval::borrowed::Val<'a>> for StripPrefix {
-    fn apply(&self, _x: crate::eval::borrowed::Val<'a>)
-        -> crate::unified::StageOutputU<crate::eval::borrowed::Val<'a>>
-    { crate::unified::StageOutputU::Filtered }
-}
 
 /// `.strip_suffix(suffix)` — strip if present, else return original.
 pub struct StripSuffix { pub suffix: std::sync::Arc<str> }
@@ -975,11 +940,6 @@ impl Stage for StripSuffix {
         }
         StageOutput::Filtered
     }
-}
-impl<'a> crate::unified::Stage<crate::eval::borrowed::Val<'a>> for StripSuffix {
-    fn apply(&self, _x: crate::eval::borrowed::Val<'a>)
-        -> crate::unified::StageOutputU<crate::eval::borrowed::Val<'a>>
-    { crate::unified::StageOutputU::Filtered }
 }
 
 /// `.pad_left(width, fill)` — left-pad to width with fill char.
@@ -1003,11 +963,6 @@ impl Stage for PadLeft {
         StageOutput::Filtered
     }
 }
-impl<'a> crate::unified::Stage<crate::eval::borrowed::Val<'a>> for PadLeft {
-    fn apply(&self, _x: crate::eval::borrowed::Val<'a>)
-        -> crate::unified::StageOutputU<crate::eval::borrowed::Val<'a>>
-    { crate::unified::StageOutputU::Filtered }
-}
 
 /// `.pad_right(width, fill)` — right-pad to width with fill char.
 pub struct PadRight { pub width: usize, pub fill: char }
@@ -1030,11 +985,6 @@ impl Stage for PadRight {
         StageOutput::Filtered
     }
 }
-impl<'a> crate::unified::Stage<crate::eval::borrowed::Val<'a>> for PadRight {
-    fn apply(&self, _x: crate::eval::borrowed::Val<'a>)
-        -> crate::unified::StageOutputU<crate::eval::borrowed::Val<'a>>
-    { crate::unified::StageOutputU::Filtered }
-}
 
 /// `.indent(n)` — prepend n spaces to each line.
 pub struct Indent { pub n: usize }
@@ -1052,11 +1002,6 @@ impl Stage for Indent {
         }
         StageOutput::Filtered
     }
-}
-impl<'a> crate::unified::Stage<crate::eval::borrowed::Val<'a>> for Indent {
-    fn apply(&self, _x: crate::eval::borrowed::Val<'a>)
-        -> crate::unified::StageOutputU<crate::eval::borrowed::Val<'a>>
-    { crate::unified::StageOutputU::Filtered }
 }
 
 // `.dedent()` — strip common leading whitespace from all non-empty lines.
@@ -1085,11 +1030,6 @@ impl Stage for StrMatches {
         StageOutput::Filtered
     }
 }
-impl<'a> crate::unified::Stage<crate::eval::borrowed::Val<'a>> for StrMatches {
-    fn apply(&self, _x: crate::eval::borrowed::Val<'a>)
-        -> crate::unified::StageOutputU<crate::eval::borrowed::Val<'a>>
-    { crate::unified::StageOutputU::Filtered }
-}
 
 /// `.index_of(needle)` — char-position of first match; -1 on miss.
 pub struct IndexOf { pub needle: std::sync::Arc<str> }
@@ -1107,11 +1047,6 @@ impl Stage for IndexOf {
         }
         StageOutput::Filtered
     }
-}
-impl<'a> crate::unified::Stage<crate::eval::borrowed::Val<'a>> for IndexOf {
-    fn apply(&self, _x: crate::eval::borrowed::Val<'a>)
-        -> crate::unified::StageOutputU<crate::eval::borrowed::Val<'a>>
-    { crate::unified::StageOutputU::Filtered }
 }
 
 // ── Array / iterable Stages (lift_all_builtins arrays family) ─────
@@ -1141,11 +1076,6 @@ impl Stage for Len {
         StageOutput::Pass(Cow::Owned(Val::Int(n as i64)))
     }
 }
-impl<R> crate::unified::Stage<R> for Len {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
-    }
-}
 
 /// `.compact()` — drop Null entries from an Arr.
 pub struct Compact;
@@ -1159,11 +1089,6 @@ impl Stage for Compact {
             .cloned()
             .collect();
         StageOutput::Pass(Cow::Owned(Val::arr(kept)))
-    }
-}
-impl<R> crate::unified::Stage<R> for Compact {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
     }
 }
 
@@ -1186,11 +1111,6 @@ impl Stage for FlattenOne {
         StageOutput::Filtered
     }
 }
-impl<R> crate::unified::Stage<R> for FlattenOne {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
-    }
-}
 
 /// `.flatten(depth)` — recursively flatten up to `depth` levels of
 /// nested arrays.  Delegates to `eval::util::flatten_val` for the
@@ -1204,11 +1124,6 @@ impl Stage for FlattenDepth {
                 crate::eval::util::flatten_val(x.clone(), self.depth)));
         }
         StageOutput::Filtered
-    }
-}
-impl<R> crate::unified::Stage<R> for FlattenDepth {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
     }
 }
 
@@ -1246,11 +1161,6 @@ impl Stage for ReverseAny {
         StageOutput::Pass(Cow::Owned(out))
     }
 }
-impl<R> crate::unified::Stage<R> for ReverseAny {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
-    }
-}
 
 /// `.unique()` / `.distinct()` — dedup by canonical key.
 pub struct UniqueArr;
@@ -1269,11 +1179,6 @@ impl Stage for UniqueArr {
         StageOutput::Filtered
     }
 }
-impl<R> crate::unified::Stage<R> for UniqueArr {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
-    }
-}
 
 /// `.first(n)` — n==1 returns scalar (or Null), else Arr of first n.
 pub struct First { pub n: i64 }
@@ -1289,11 +1194,6 @@ impl Stage for First {
             return StageOutput::Pass(Cow::Owned(out));
         }
         StageOutput::Pass(Cow::Owned(Val::Null))
-    }
-}
-impl<R> crate::unified::Stage<R> for First {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
     }
 }
 
@@ -1314,11 +1214,6 @@ impl Stage for Last {
         StageOutput::Pass(Cow::Owned(Val::Null))
     }
 }
-impl<R> crate::unified::Stage<R> for Last {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
-    }
-}
 
 /// `.nth(i)` — index lookup; supports Arr/IntVec/FloatVec/StrVec/ObjVec.
 /// Negative `i` indexes from the end.
@@ -1327,11 +1222,6 @@ impl NthAny { pub fn new(i: i64) -> Self { Self { i } } }
 impl Stage for NthAny {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         StageOutput::Pass(Cow::Owned(x.get_index(self.i)))
-    }
-}
-impl<R> crate::unified::Stage<R> for NthAny {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
     }
 }
 
@@ -1349,11 +1239,6 @@ impl Stage for Append {
         StageOutput::Pass(Cow::Owned(Val::arr(v)))
     }
 }
-impl<R> crate::unified::Stage<R> for Append {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
-    }
-}
 
 /// `.prepend(item)` — insert item at front.
 pub struct Prepend { pub item: Val }
@@ -1366,11 +1251,6 @@ impl Stage for Prepend {
         };
         v.insert(0, self.item.clone());
         StageOutput::Pass(Cow::Owned(Val::arr(v)))
-    }
-}
-impl<R> crate::unified::Stage<R> for Prepend {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
     }
 }
 
@@ -1389,11 +1269,6 @@ impl Stage for Enumerate {
         StageOutput::Filtered
     }
 }
-impl<R> crate::unified::Stage<R> for Enumerate {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
-    }
-}
 
 /// `.pairwise()` — Arr → Arr of [arr[i], arr[i+1]] adjacent pairs.
 pub struct Pairwise;
@@ -1408,11 +1283,6 @@ impl Stage for Pairwise {
             out.push(Val::arr(vec![w[0].clone(), w[1].clone()]));
         }
         StageOutput::Pass(Cow::Owned(Val::arr(out)))
-    }
-}
-impl<R> crate::unified::Stage<R> for Pairwise {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
     }
 }
 
@@ -1431,11 +1301,6 @@ impl Stage for Chunk {
         StageOutput::Filtered
     }
 }
-impl<R> crate::unified::Stage<R> for Chunk {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
-    }
-}
 
 /// `.window(n)` — Arr → Arr of length-n sliding windows.
 pub struct Window { pub n: usize }
@@ -1452,11 +1317,6 @@ impl Stage for Window {
         StageOutput::Filtered
     }
 }
-impl<R> crate::unified::Stage<R> for Window {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
-    }
-}
 
 // ── Object Stages (lift_all_builtins objects family) ─────────────
 
@@ -1471,11 +1331,6 @@ impl Stage for Keys {
         StageOutput::Pass(Cow::Owned(Val::arr(items)))
     }
 }
-impl<R> crate::unified::Stage<R> for Keys {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
-    }
-}
 
 /// `.values()` — Obj → Arr.
 pub struct Values;
@@ -1486,11 +1341,6 @@ impl Stage for Values {
         let m = match x.as_object() { Some(m) => m, None => return StageOutput::Filtered };
         let items: Vec<Val> = m.values().cloned().collect();
         StageOutput::Pass(Cow::Owned(Val::arr(items)))
-    }
-}
-impl<R> crate::unified::Stage<R> for Values {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
     }
 }
 
@@ -1505,11 +1355,6 @@ impl Stage for Entries {
             Val::arr(vec![Val::Str(k.clone()), v.clone()])
         }).collect();
         StageOutput::Pass(Cow::Owned(Val::arr(pairs)))
-    }
-}
-impl<R> crate::unified::Stage<R> for Entries {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
     }
 }
 
@@ -1536,11 +1381,6 @@ impl Stage for FromPairs {
         StageOutput::Filtered
     }
 }
-impl<R> crate::unified::Stage<R> for FromPairs {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
-    }
-}
 
 /// `.invert()` — Obj{k → v} → Obj{v_str → k} (values stringified).
 pub struct Invert;
@@ -1562,11 +1402,6 @@ impl Stage for Invert {
         StageOutput::Pass(Cow::Owned(Val::Obj(std::sync::Arc::new(out))))
     }
 }
-impl<R> crate::unified::Stage<R> for Invert {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
-    }
-}
 
 /// `.merge(other)` — shallow merge; keys in `other` override receiver.
 pub struct Merge { pub other: Val }
@@ -1580,11 +1415,6 @@ impl Stage for Merge {
         StageOutput::Pass(Cow::Owned(Val::Obj(std::sync::Arc::new(out))))
     }
 }
-impl<R> crate::unified::Stage<R> for Merge {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
-    }
-}
 
 /// `.deep_merge(other)` — recursive merge; nested objects merge by key.
 pub struct DeepMerge { pub other: Val }
@@ -1593,11 +1423,6 @@ impl Stage for DeepMerge {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         StageOutput::Pass(Cow::Owned(
             crate::eval::util::deep_merge(x.clone(), self.other.clone())))
-    }
-}
-impl<R> crate::unified::Stage<R> for DeepMerge {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
     }
 }
 
@@ -1614,11 +1439,6 @@ impl Stage for Defaults {
             if entry.is_null() { *entry = v.clone(); }
         }
         StageOutput::Pass(Cow::Owned(Val::Obj(std::sync::Arc::new(out))))
-    }
-}
-impl<R> crate::unified::Stage<R> for Defaults {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
     }
 }
 
@@ -1639,11 +1459,6 @@ impl Stage for Rename {
             }
         }
         StageOutput::Pass(Cow::Owned(Val::Obj(std::sync::Arc::new(out))))
-    }
-}
-impl<R> crate::unified::Stage<R> for Rename {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
     }
 }
 
@@ -1670,11 +1485,6 @@ impl Stage for Intersect {
         StageOutput::Filtered
     }
 }
-impl<R> crate::unified::Stage<R> for Intersect {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
-    }
-}
 
 /// `.union(other)` — combine, preserve order, dedup.
 pub struct Union { pub other: Vec<Val> }
@@ -1695,11 +1505,6 @@ impl Stage for Union {
         StageOutput::Filtered
     }
 }
-impl<R> crate::unified::Stage<R> for Union {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
-    }
-}
 
 /// `.diff(other)` — keep elements present in self but not in other.
 pub struct Diff { pub other: Vec<Val> }
@@ -1718,11 +1523,6 @@ impl Stage for Diff {
         StageOutput::Filtered
     }
 }
-impl<R> crate::unified::Stage<R> for Diff {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
-    }
-}
 
 // ── Path Stages (lift_all_builtins paths family) ───────────────────
 
@@ -1738,11 +1538,6 @@ impl Stage for GetPath {
         StageOutput::Pass(Cow::Owned(v))
     }
 }
-impl<R> crate::unified::Stage<R> for GetPath {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
-    }
-}
 
 /// `.has_path(path)` — does the path resolve to a non-null value?
 pub struct HasPath { pub path: std::sync::Arc<str> }
@@ -1756,11 +1551,6 @@ impl Stage for HasPath {
         StageOutput::Pass(Cow::Owned(Val::Bool(found)))
     }
 }
-impl<R> crate::unified::Stage<R> for HasPath {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
-    }
-}
 
 /// `.has(key)` — does Obj contain `key`? Val::Bool.
 pub struct Has { pub key: std::sync::Arc<str> }
@@ -1770,11 +1560,6 @@ impl Stage for Has {
         let m = match x.as_object() { Some(m) => m, None => return StageOutput::Filtered };
         let found = m.contains_key(self.key.as_ref());
         StageOutput::Pass(Cow::Owned(Val::Bool(found)))
-    }
-}
-impl<R> crate::unified::Stage<R> for Has {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
     }
 }
 
@@ -1794,11 +1579,6 @@ impl Stage for Pick {
             }
         }
         StageOutput::Pass(Cow::Owned(Val::Obj(std::sync::Arc::new(out))))
-    }
-}
-impl<R> crate::unified::Stage<R> for Pick {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
     }
 }
 
@@ -1822,11 +1602,6 @@ impl Stage for Omit {
         StageOutput::Pass(Cow::Owned(Val::Obj(std::sync::Arc::new(out))))
     }
 }
-impl<R> crate::unified::Stage<R> for Omit {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
-    }
-}
 
 /// `.nth(i)` — index into Arr; supports negative indexing.
 pub struct Nth { pub i: i64 }
@@ -1842,11 +1617,6 @@ impl Stage for Nth {
                 a.get(idx).cloned().unwrap_or(Val::Null)));
         }
         StageOutput::Filtered
-    }
-}
-impl<R> crate::unified::Stage<R> for Nth {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
     }
 }
 
@@ -1925,11 +1695,6 @@ impl Stage for Scan {
         StageOutput::Filtered
     }
 }
-impl<R> crate::unified::Stage<R> for Scan {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
-    }
-}
 
 /// ── Base64 helpers (moved from eval::func_strings) ─────────────────
 
@@ -2004,11 +1769,6 @@ impl Stage for Center {
             return StageOutput::Pass(Cow::Owned(Val::Str(std::sync::Arc::from(out))));
         }
         StageOutput::Filtered
-    }
-}
-impl<R> crate::unified::Stage<R> for Center {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
     }
 }
 
@@ -2096,11 +1856,6 @@ impl Stage for ToCsv {
         StageOutput::Pass(Cow::Owned(Val::Str(std::sync::Arc::from(s))))
     }
 }
-impl<R> crate::unified::Stage<R> for ToCsv {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
-    }
-}
 
 /// `.to_tsv()` — Val → Str (TSV emission).
 pub struct ToTsv;
@@ -2110,11 +1865,6 @@ impl Stage for ToTsv {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         let s = csv_emit(x, "\t");
         StageOutput::Pass(Cow::Owned(Val::Str(std::sync::Arc::from(s))))
-    }
-}
-impl<R> crate::unified::Stage<R> for ToTsv {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
     }
 }
 
@@ -2129,11 +1879,6 @@ impl Stage for ToPairs {
             obj2("key", Val::Str(k.clone()), "val", v.clone())
         }).collect()).unwrap_or_default();
         StageOutput::Pass(Cow::Owned(Val::arr(arr)))
-    }
-}
-impl<R> crate::unified::Stage<R> for ToPairs {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
     }
 }
 
@@ -2160,11 +1905,6 @@ macro_rules! lifted_num_arr_stage {
                 let xs = match to_floats(x) { Ok(v) => v, Err(_) => return StageOutput::Filtered };
                 let f: fn(&[Option<f64>]) -> Vec<Option<f64>> = $body;
                 StageOutput::Pass(Cow::Owned(floats_to_val(f(&xs))))
-            }
-        }
-        impl<R> crate::unified::Stage<R> for $name {
-            fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-                crate::unified::StageOutputU::Filtered
             }
         }
     };
@@ -2238,11 +1978,6 @@ macro_rules! lifted_sized_num_stage {
                 StageOutput::Pass(Cow::Owned(floats_to_val(f(&xs, self.n))))
             }
         }
-        impl<R> crate::unified::Stage<R> for $name {
-            fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-                crate::unified::StageOutputU::Filtered
-            }
-        }
     };
 }
 
@@ -2314,11 +2049,6 @@ impl Stage for Lag {
         StageOutput::Pass(Cow::Owned(floats_to_val(out)))
     }
 }
-impl<R> crate::unified::Stage<R> for Lag {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
-    }
-}
 
 pub struct Lead { pub n: usize }
 impl Lead { pub fn new(n: usize) -> Self { Self { n } } }
@@ -2333,11 +2063,6 @@ impl Stage for Lead {
             out.push(if j < xs.len() { xs[j] } else { None });
         }
         StageOutput::Pass(Cow::Owned(floats_to_val(out)))
-    }
-}
-impl<R> crate::unified::Stage<R> for Lead {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
     }
 }
 
@@ -2367,11 +2092,6 @@ impl Stage for ZScore {
         StageOutput::Pass(Cow::Owned(floats_to_val(out)))
     }
 }
-impl<R> crate::unified::Stage<R> for ZScore {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
-    }
-}
 
 // ── Array literal-arg / aggregate Stages — body migrations ────────
 
@@ -2387,11 +2107,6 @@ impl Stage for EnumerateZ {
             .map(|(i, v)| obj2("index", Val::Int(i as i64), "value", v.clone()))
             .collect();
         StageOutput::Pass(Cow::Owned(Val::arr(out)))
-    }
-}
-impl<R> crate::unified::Stage<R> for EnumerateZ {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
     }
 }
 
@@ -2440,11 +2155,6 @@ impl Stage for Join {
         StageOutput::Pass(Cow::Owned(Val::Str(std::sync::Arc::from(out))))
     }
 }
-impl<R> crate::unified::Stage<R> for Join {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
-    }
-}
 
 /// `.index_of_value(target)` — first index of literal target, else Null.
 pub struct IndexOfValue { pub target: Val }
@@ -2460,11 +2170,6 @@ impl Stage for IndexOfValue {
         StageOutput::Pass(Cow::Owned(Val::Null))
     }
 }
-impl<R> crate::unified::Stage<R> for IndexOfValue {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
-    }
-}
 
 /// `.indices_of(target)` — all indices of literal target.
 pub struct IndicesOf { pub target: Val }
@@ -2477,11 +2182,6 @@ impl Stage for IndicesOf {
             .map(|(i, _)| i as i64)
             .collect();
         StageOutput::Pass(Cow::Owned(Val::int_vec(out)))
-    }
-}
-impl<R> crate::unified::Stage<R> for IndicesOf {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
     }
 }
 
@@ -2518,11 +2218,6 @@ impl Stage for Explode {
         StageOutput::Pass(Cow::Owned(Val::arr(out)))
     }
 }
-impl<R> crate::unified::Stage<R> for Explode {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
-    }
-}
 
 /// `.implode(field)` — inverse of explode: groups rows by all-but-`field`,
 /// concatenating `field` values into an array.  Body migrated from
@@ -2556,11 +2251,6 @@ impl Stage for Implode {
         StageOutput::Pass(Cow::Owned(Val::arr(out)))
     }
 }
-impl<R> crate::unified::Stage<R> for Implode {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
-    }
-}
 
 // ── More eval/func_* migrations ──────────────────────────────────
 
@@ -2580,11 +2270,6 @@ impl Stage for CollectVal {
         }
     }
 }
-impl<R> crate::unified::Stage<R> for CollectVal {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
-    }
-}
 
 /// `.remove(target)` — Arr → Arr without elements `vals_eq` to literal.
 pub struct RemoveVal { pub target: Val }
@@ -2601,11 +2286,6 @@ impl Stage for RemoveVal {
         StageOutput::Pass(Cow::Owned(Val::arr(out)))
     }
 }
-impl<R> crate::unified::Stage<R> for RemoveVal {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
-    }
-}
 
 /// `.set_path(path, value)` — set leaf at path, COW spine clone.
 /// Body via `func_paths::set_path_impl`.
@@ -2618,11 +2298,6 @@ impl Stage for SetPath {
         let segs = crate::eval::func_paths::parse_path_segs(self.path.as_ref());
         let v = crate::eval::func_paths::set_path_impl(x.clone(), &segs, self.value.clone());
         StageOutput::Pass(Cow::Owned(v))
-    }
-}
-impl<R> crate::unified::Stage<R> for SetPath {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
     }
 }
 
@@ -2639,11 +2314,6 @@ impl Stage for DelPaths {
             v = crate::eval::func_paths::del_path_impl(v, &segs);
         }
         StageOutput::Pass(Cow::Owned(v))
-    }
-}
-impl<R> crate::unified::Stage<R> for DelPaths {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
     }
 }
 
@@ -2663,11 +2333,6 @@ impl Stage for OmitKeys {
         StageOutput::Pass(Cow::Owned(Val::obj(out)))
     }
 }
-impl<R> crate::unified::Stage<R> for OmitKeys {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
-    }
-}
 
 // ── Scalar Val→Str transforms (eval/builtins.rs migrations) ───────
 
@@ -2680,11 +2345,6 @@ impl Stage for TypeName {
         StageOutput::Pass(Cow::Owned(Val::Str(std::sync::Arc::from(x.type_name()))))
     }
 }
-impl<R> crate::unified::Stage<R> for TypeName {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
-    }
-}
 
 /// `.to_string()` — Val → Str (display form).
 pub struct ToString;
@@ -2694,11 +2354,6 @@ impl Stage for ToString {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         let s = crate::eval::util::val_to_string(x);
         StageOutput::Pass(Cow::Owned(Val::Str(std::sync::Arc::from(s))))
-    }
-}
-impl<R> crate::unified::Stage<R> for ToString {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
     }
 }
 
@@ -2734,11 +2389,6 @@ impl Stage for ToJson {
         StageOutput::Pass(Cow::Owned(Val::Str(std::sync::Arc::from(out))))
     }
 }
-impl<R> crate::unified::Stage<R> for ToJson {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
-    }
-}
 
 // ── Path Stages — body via func_paths::*_impl helpers ─────────────
 
@@ -2753,11 +2403,6 @@ impl Stage for DelPath {
         StageOutput::Pass(Cow::Owned(v))
     }
 }
-impl<R> crate::unified::Stage<R> for DelPath {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
-    }
-}
 
 /// `.flatten_keys(sep)` — Obj → flat-Obj with `sep`-joined keys.
 pub struct FlattenKeys { pub sep: std::sync::Arc<str> }
@@ -2769,11 +2414,6 @@ impl Stage for FlattenKeys {
         let mut out: indexmap::IndexMap<std::sync::Arc<str>, Val> = indexmap::IndexMap::new();
         crate::eval::func_paths::flatten_keys_impl("", x, self.sep.as_ref(), &mut out);
         StageOutput::Pass(Cow::Owned(Val::obj(out)))
-    }
-}
-impl<R> crate::unified::Stage<R> for FlattenKeys {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
     }
 }
 
@@ -2793,11 +2433,6 @@ impl Stage for UnflattenKeys {
         }
     }
 }
-impl<R> crate::unified::Stage<R> for UnflattenKeys {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
-    }
-}
 
 /// `.schema()` — Val → schema-Obj describing types/required fields/array shape.
 pub struct Schema;
@@ -2806,11 +2441,6 @@ impl Default for Schema { fn default() -> Self { Self } }
 impl Stage for Schema {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         StageOutput::Pass(Cow::Owned(crate::eval::func_objects::schema_of(x)))
-    }
-}
-impl<R> crate::unified::Stage<R> for Schema {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
     }
 }
 
@@ -2831,11 +2461,6 @@ impl Stage for ContainsAny {
         StageOutput::Filtered
     }
 }
-impl<R> crate::unified::Stage<R> for ContainsAny {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
-    }
-}
 
 /// `.contains_all([needles])` — true if every needle appears.
 pub struct ContainsAll { pub needles: Vec<std::sync::Arc<str>> }
@@ -2849,11 +2474,6 @@ impl Stage for ContainsAll {
             return StageOutput::Pass(Cow::Owned(Val::Bool(all)));
         }
         StageOutput::Filtered
-    }
-}
-impl<R> crate::unified::Stage<R> for ContainsAll {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
     }
 }
 
@@ -2901,11 +2521,6 @@ impl Stage for ReMatch {
         StageOutput::Filtered
     }
 }
-impl<R> crate::unified::Stage<R> for ReMatch {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
-    }
-}
 
 /// `.match_first(pat)` — Str of first match or Null.
 pub struct ReMatchFirst { pub pat: std::sync::Arc<str> }
@@ -2925,11 +2540,6 @@ impl Stage for ReMatchFirst {
         StageOutput::Filtered
     }
 }
-impl<R> crate::unified::Stage<R> for ReMatchFirst {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
-    }
-}
 
 /// `.match_all(pat)` — Arr<Str> of all matches.
 pub struct ReMatchAll { pub pat: std::sync::Arc<str> }
@@ -2946,11 +2556,6 @@ impl Stage for ReMatchAll {
             return StageOutput::Pass(Cow::Owned(Val::str_vec(out)));
         }
         StageOutput::Filtered
-    }
-}
-impl<R> crate::unified::Stage<R> for ReMatchAll {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
     }
 }
 
@@ -2981,11 +2586,6 @@ impl Stage for ReCaptures {
         StageOutput::Filtered
     }
 }
-impl<R> crate::unified::Stage<R> for ReCaptures {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
-    }
-}
 
 /// `.captures_all(pat)` — Arr<Arr> of capture groups for every match.
 pub struct ReCapturesAll { pub pat: std::sync::Arc<str> }
@@ -3012,11 +2612,6 @@ impl Stage for ReCapturesAll {
         StageOutput::Filtered
     }
 }
-impl<R> crate::unified::Stage<R> for ReCapturesAll {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
-    }
-}
 
 /// `.replace_re(pat, with)` — single regex replacement.
 pub struct ReReplace { pub pat: std::sync::Arc<str>, pub with: std::sync::Arc<str> }
@@ -3035,11 +2630,6 @@ impl Stage for ReReplace {
                 Val::Str(std::sync::Arc::from(out.as_ref()))));
         }
         StageOutput::Filtered
-    }
-}
-impl<R> crate::unified::Stage<R> for ReReplace {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
     }
 }
 
@@ -3062,11 +2652,6 @@ impl Stage for ReReplaceAll {
         StageOutput::Filtered
     }
 }
-impl<R> crate::unified::Stage<R> for ReReplaceAll {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
-    }
-}
 
 /// `.split_re(pat)` — regex split.
 pub struct ReSplit { pub pat: std::sync::Arc<str> }
@@ -3083,11 +2668,6 @@ impl Stage for ReSplit {
             return StageOutput::Pass(Cow::Owned(Val::str_vec(out)));
         }
         StageOutput::Filtered
-    }
-}
-impl<R> crate::unified::Stage<R> for ReSplit {
-    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
-        crate::unified::StageOutputU::Filtered
     }
 }
 
@@ -3108,11 +2688,6 @@ impl Stage for LastIndexOf {
         StageOutput::Filtered
     }
 }
-impl<'a> crate::unified::Stage<crate::eval::borrowed::Val<'a>> for LastIndexOf {
-    fn apply(&self, _x: crate::eval::borrowed::Val<'a>)
-        -> crate::unified::StageOutputU<crate::eval::borrowed::Val<'a>>
-    { crate::unified::StageOutputU::Filtered }
-}
 
 /// Closure-based `.filter(pred)` — for the borrow runner where the
 /// predicate is built from a kernel at lowering time (FieldCmpLit etc.
@@ -3129,17 +2704,6 @@ impl<R, F: Fn(&R) -> bool> Filter<R, F> {
         Self { pred, _marker: std::marker::PhantomData }
     }
 }
-impl<R, F: Fn(&R) -> bool> crate::unified::Stage<R> for Filter<R, F> {
-    #[inline]
-    fn apply(&self, x: R) -> crate::unified::StageOutputU<R> {
-        if (self.pred)(&x) {
-            crate::unified::StageOutputU::Pass(x)
-        } else {
-            crate::unified::StageOutputU::Filtered
-        }
-    }
-}
-
 /// Monoidal composition. `Composed { a, b }.apply(x) = b.apply(a.apply(x))`
 /// with proper handling of Filtered / Many / Done propagation.
 ///

@@ -2025,6 +2025,14 @@ fn decode_method_chain(trailing: &[crate::ast::Step]) -> Option<(Vec<Stage>, Sin
                     // find / find_all: filter-shaped (return all matching).
                     ("find",     1, _) => stages.push(Stage::Filter(compile_subexpr(&args[0])?)),
                     ("find_all", 1, _) => stages.push(Stage::Filter(compile_subexpr(&args[0])?)),
+                    // find_first / find_one: terminal — first match or Null.
+                    ("find_first", 1, true) | ("find_one", 1, true) => {
+                        stages.push(Stage::Filter(compile_subexpr(&args[0])?));
+                        sink = Sink::First;
+                    }
+                    ("find_first", 1, false) | ("find_one", 1, false) => {
+                        stages.push(Stage::Filter(compile_subexpr(&args[0])?));
+                    }
                     // count_by / index_by: barrier reductions.  Trailing
                     // result is single Obj; force Sink::First when terminal.
                     ("count_by",  1, true) | ("countBy", 1, true) => {
@@ -2200,11 +2208,12 @@ fn decode_method_chain(trailing: &[crate::ast::Step]) -> Option<(Vec<Stage>, Sin
                         _ => return None,
                     },
                     ("indent",        0, _) => stages.push(Stage::Indent(2)),
-                    ("flatten",       0, _) => stages.push(Stage::FlattenDepth(1)),
-                    ("flatten",       1, _) => match &args[0] {
-                        Arg::Pos(Expr::Int(n)) if *n >= 0 => stages.push(Stage::FlattenDepth(*n as usize)),
-                        _ => return None,
-                    },
+                    // flatten() is whole-array (NOT per-element) — same
+                    // category as compact/pairwise: removed from lower
+                    // table so chain falls back to dispatch_method which
+                    // hands the WHOLE receiver to the flatten kernel.
+                    // Stage::FlattenDepth variant kept for VM static
+                    // dispatch + composed body single-source.
                     // Two-arg padding.
                     ("pad_left",  2, _) => match (&args[0], &args[1]) {
                         (Arg::Pos(Expr::Int(w)), Arg::Pos(Expr::Str(f))) if *w >= 0 => {
