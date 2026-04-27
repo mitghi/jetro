@@ -197,10 +197,7 @@ pub fn flatten(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     Ok(flatten_val(recv, depth))
 }
 
-pub fn compact(recv: Val) -> Result<Val, EvalError> {
-    let items = recv.into_vec().ok_or_else(|| EvalError("compact: expected array".into()))?;
-    Ok(Val::arr(items.into_iter().filter(|v| !v.is_null()).collect()))
-}
+// `.compact` LIFTED to composed::Compact; shim in composed::shims::compact.
 
 // ── Reorder ───────────────────────────────────────────────────────────────────
 
@@ -393,30 +390,8 @@ fn merge_pair(l: &Val, r: &Val) -> Val {
 
 // ── Set operations ────────────────────────────────────────────────────────────
 
-pub fn diff(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-    let other = eval_pos(args.first().ok_or_else(|| EvalError("diff: requires arg".into()))?, env)?;
-    let a = recv.into_vec().ok_or_else(|| EvalError("diff: expected arrays".into()))?;
-    let b = other.into_vec().ok_or_else(|| EvalError("diff: expected arrays".into()))?;
-    let b_keys: std::collections::HashSet<String> = b.iter().map(val_to_key).collect();
-    Ok(Val::arr(a.into_iter().filter(|v| !b_keys.contains(&val_to_key(v))).collect()))
-}
-
-pub fn intersect(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-    let other = eval_pos(args.first().ok_or_else(|| EvalError("intersect: requires arg".into()))?, env)?;
-    let a = recv.into_vec().ok_or_else(|| EvalError("intersect: expected arrays".into()))?;
-    let b = other.into_vec().ok_or_else(|| EvalError("intersect: expected arrays".into()))?;
-    let b_keys: std::collections::HashSet<String> = b.iter().map(val_to_key).collect();
-    Ok(Val::arr(a.into_iter().filter(|v| b_keys.contains(&val_to_key(v))).collect()))
-}
-
-pub fn union(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-    let other = eval_pos(args.first().ok_or_else(|| EvalError("union: requires arg".into()))?, env)?;
-    let mut a = recv.into_vec().ok_or_else(|| EvalError("union: expected arrays".into()))?;
-    let b     = other.into_vec().ok_or_else(|| EvalError("union: expected arrays".into()))?;
-    let a_keys: std::collections::HashSet<String> = a.iter().map(val_to_key).collect();
-    for v in b { if !a_keys.contains(&val_to_key(&v)) { a.push(v); } }
-    Ok(Val::arr(a))
-}
+// .diff / .intersect / .union LIFTED to composed::{Diff, Intersect,
+// Union}; shims in composed::shims::{diff, intersect, union}.
 
 // ── Itertools ─────────────────────────────────────────────────────────────────
 
@@ -436,10 +411,7 @@ pub fn enumerate(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     }
 }
 
-pub fn pairwise(recv: Val) -> Result<Val, EvalError> {
-    let items = recv.into_vec().ok_or_else(|| EvalError("pairwise: expected array".into()))?;
-    Ok(Val::arr(items.windows(2).map(|w| Val::arr(w.to_vec())).collect()))
-}
+// `.pairwise` LIFTED to composed::Pairwise; shim in composed::shims::pairwise.
 
 // `.window` and `.chunk` (alias `.batch`) lifted to
 // `pipeline::Stage::Window` / `pipeline::Stage::Chunk`.  Canonical impls

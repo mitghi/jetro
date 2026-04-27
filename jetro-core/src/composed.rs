@@ -482,6 +482,60 @@ pub mod shims {
         run_single(&ReReplaceAll::new(pat, with), &recv)
             .ok_or_else(|| EvalError("replace_all_re: stage filtered".into()))
     }
+
+    // ── Array Stages (lifted bodies in composed.rs) ──────────────────
+
+    /// Coerce typed vec receivers (IntVec/FloatVec/StrVec) into Val::Arr
+    /// so Arr-only Stages apply.  Owned Val::Arr passes through via Arc clone.
+    fn coerce_arr(recv: Val, who: &str) -> Result<Val, EvalError> {
+        match recv {
+            Val::Arr(_) => Ok(recv),
+            other => other.into_vec()
+                .map(Val::arr)
+                .ok_or_else(|| EvalError(format!("{}: expected array", who))),
+        }
+    }
+
+    pub fn compact(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
+        let recv = coerce_arr(recv, "compact")?;
+        run_single(&Compact, &recv)
+            .ok_or_else(|| EvalError("compact: stage filtered".into()))
+    }
+
+    pub fn pairwise(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
+        let recv = coerce_arr(recv, "pairwise")?;
+        run_single(&Pairwise, &recv)
+            .ok_or_else(|| EvalError("pairwise: stage filtered".into()))
+    }
+
+    fn vec_arg(args: &[Arg], env: &Env, who: &str) -> Result<Vec<Val>, EvalError> {
+        let a = args.first().ok_or_else(|| EvalError(format!("{}: requires arg", who)))?;
+        let v = match a {
+            Arg::Pos(e) | Arg::Named(_, e) => crate::eval::eval(e, env)?,
+        };
+        v.into_vec().ok_or_else(|| EvalError(format!("{}: expected array arg", who)))
+    }
+
+    pub fn diff(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+        let recv = coerce_arr(recv, "diff")?;
+        let other = vec_arg(args, env, "diff")?;
+        run_single(&Diff::new(other), &recv)
+            .ok_or_else(|| EvalError("diff: stage filtered".into()))
+    }
+
+    pub fn intersect(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+        let recv = coerce_arr(recv, "intersect")?;
+        let other = vec_arg(args, env, "intersect")?;
+        run_single(&Intersect::new(other), &recv)
+            .ok_or_else(|| EvalError("intersect: stage filtered".into()))
+    }
+
+    pub fn union(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+        let recv = coerce_arr(recv, "union")?;
+        let other = vec_arg(args, env, "union")?;
+        run_single(&Union::new(other), &recv)
+            .ok_or_else(|| EvalError("union: stage filtered".into()))
+    }
 }
 
 // Helper macro — generates per-builtin owned Stage impl with the

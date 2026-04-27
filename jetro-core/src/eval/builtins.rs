@@ -100,9 +100,9 @@ fn build() -> BuiltinRegistry {
     t.insert("append",    func_arrays::append);
     t.insert("prepend",   func_arrays::prepend);
     t.insert("remove",    func_arrays::remove);
-    t.insert("diff",      func_arrays::diff);
-    t.insert("intersect", func_arrays::intersect);
-    t.insert("union",     func_arrays::union);
+    t.insert("diff",      crate::composed::shims::diff);
+    t.insert("intersect", crate::composed::shims::intersect);
+    t.insert("union",     crate::composed::shims::union);
     t.insert("enumerate", func_arrays::enumerate);
     // .window / .chunk / .batch lifted to pipeline::Stage::Window /
     // Stage::Chunk (batch alias).
@@ -122,8 +122,8 @@ fn build() -> BuiltinRegistry {
     t.insert("reverse",  b_reverse);
     t.insert("unique",   b_unique);
     t.insert("distinct", b_unique);
-    t.insert("compact",  b_compact);
-    t.insert("pairwise", b_pairwise);
+    t.insert("compact",  crate::composed::shims::compact);
+    t.insert("pairwise", crate::composed::shims::pairwise);
 
     // Tier 1 search / match / collect
     t.insert("unique_by", func_search::unique_by);
@@ -400,14 +400,6 @@ fn b_reverse(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
 
 fn b_unique(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
     func_arrays::unique(recv)
-}
-
-fn b_compact(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    func_arrays::compact(recv)
-}
-
-fn b_pairwise(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    func_arrays::pairwise(recv)
 }
 
 fn b_min(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
