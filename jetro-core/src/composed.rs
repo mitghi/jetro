@@ -348,6 +348,192 @@ lifted_str_to_val!(ToBool, |s| {
     }
 });
 
+// `.to_base64()` — RFC 4648 base64 encoding.
+lifted_str_stage!(ToBase64, |s| {
+    crate::eval::func_strings::base64_encode(s.as_bytes())
+});
+
+// `.from_base64()` — decode; non-UTF-8 bytes are lossy-converted.
+// Returns Val::Null on decode failure (matches owned semantics
+// for chain composition; owned form errs).
+lifted_str_to_val!(FromBase64, |s| {
+    match crate::eval::func_strings::base64_decode(s) {
+        Ok(bytes) => Val::Str(std::sync::Arc::from(
+            String::from_utf8_lossy(&bytes).as_ref())),
+        Err(_) => Val::Null,
+    }
+});
+
+// ── Single-arg string Stages ───────────────────────────────────────
+
+/// `.starts_with(prefix)` — returns Val::Bool.
+pub struct StartsWith { pub prefix: std::sync::Arc<str> }
+impl StartsWith {
+    pub fn new(prefix: std::sync::Arc<str>) -> Self { Self { prefix } }
+}
+impl Stage for StartsWith {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        if let Val::Str(s) = x {
+            return StageOutput::Pass(Cow::Owned(
+                Val::Bool(s.starts_with(self.prefix.as_ref()))));
+        }
+        StageOutput::Filtered
+    }
+}
+impl<'a> crate::unified::Stage<crate::eval::borrowed::Val<'a>> for StartsWith {
+    fn apply(&self, _x: crate::eval::borrowed::Val<'a>)
+        -> crate::unified::StageOutputU<crate::eval::borrowed::Val<'a>>
+    { crate::unified::StageOutputU::Filtered }
+}
+
+/// `.ends_with(suffix)` — returns Val::Bool.
+pub struct EndsWith { pub suffix: std::sync::Arc<str> }
+impl EndsWith {
+    pub fn new(suffix: std::sync::Arc<str>) -> Self { Self { suffix } }
+}
+impl Stage for EndsWith {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        if let Val::Str(s) = x {
+            return StageOutput::Pass(Cow::Owned(
+                Val::Bool(s.ends_with(self.suffix.as_ref()))));
+        }
+        StageOutput::Filtered
+    }
+}
+impl<'a> crate::unified::Stage<crate::eval::borrowed::Val<'a>> for EndsWith {
+    fn apply(&self, _x: crate::eval::borrowed::Val<'a>)
+        -> crate::unified::StageOutputU<crate::eval::borrowed::Val<'a>>
+    { crate::unified::StageOutputU::Filtered }
+}
+
+/// `.contains(needle)` — returns Val::Bool.
+pub struct Contains { pub needle: std::sync::Arc<str> }
+impl Contains {
+    pub fn new(needle: std::sync::Arc<str>) -> Self { Self { needle } }
+}
+impl Stage for Contains {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        if let Val::Str(s) = x {
+            return StageOutput::Pass(Cow::Owned(
+                Val::Bool(s.contains(self.needle.as_ref()))));
+        }
+        StageOutput::Filtered
+    }
+}
+impl<'a> crate::unified::Stage<crate::eval::borrowed::Val<'a>> for Contains {
+    fn apply(&self, _x: crate::eval::borrowed::Val<'a>)
+        -> crate::unified::StageOutputU<crate::eval::borrowed::Val<'a>>
+    { crate::unified::StageOutputU::Filtered }
+}
+
+/// `.repeat(n)` — repeat string n times.
+pub struct Repeat { pub n: usize }
+impl Repeat { pub fn new(n: usize) -> Self { Self { n } } }
+impl Stage for Repeat {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        if let Val::Str(s) = x {
+            return StageOutput::Pass(Cow::Owned(
+                Val::Str(std::sync::Arc::from(s.repeat(self.n)))));
+        }
+        StageOutput::Filtered
+    }
+}
+impl<'a> crate::unified::Stage<crate::eval::borrowed::Val<'a>> for Repeat {
+    fn apply(&self, _x: crate::eval::borrowed::Val<'a>)
+        -> crate::unified::StageOutputU<crate::eval::borrowed::Val<'a>>
+    { crate::unified::StageOutputU::Filtered }
+}
+
+/// `.split(sep)` — returns Val::Arr of Val::Str.
+pub struct Split { pub sep: std::sync::Arc<str> }
+impl Split { pub fn new(sep: std::sync::Arc<str>) -> Self { Self { sep } } }
+impl Stage for Split {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        if let Val::Str(s) = x {
+            let items: Vec<Val> = s.split(self.sep.as_ref())
+                .map(|p| Val::Str(std::sync::Arc::from(p)))
+                .collect();
+            return StageOutput::Pass(Cow::Owned(Val::arr(items)));
+        }
+        StageOutput::Filtered
+    }
+}
+impl<'a> crate::unified::Stage<crate::eval::borrowed::Val<'a>> for Split {
+    fn apply(&self, _x: crate::eval::borrowed::Val<'a>)
+        -> crate::unified::StageOutputU<crate::eval::borrowed::Val<'a>>
+    { crate::unified::StageOutputU::Filtered }
+}
+
+/// `.replace(needle, with)` — single substitution per match.
+pub struct Replace {
+    pub needle: std::sync::Arc<str>,
+    pub with:   std::sync::Arc<str>,
+}
+impl Replace {
+    pub fn new(needle: std::sync::Arc<str>, with: std::sync::Arc<str>) -> Self {
+        Self { needle, with }
+    }
+}
+impl Stage for Replace {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        if let Val::Str(s) = x {
+            let out = s.replace(self.needle.as_ref(), self.with.as_ref());
+            return StageOutput::Pass(Cow::Owned(
+                Val::Str(std::sync::Arc::from(out))));
+        }
+        StageOutput::Filtered
+    }
+}
+impl<'a> crate::unified::Stage<crate::eval::borrowed::Val<'a>> for Replace {
+    fn apply(&self, _x: crate::eval::borrowed::Val<'a>)
+        -> crate::unified::StageOutputU<crate::eval::borrowed::Val<'a>>
+    { crate::unified::StageOutputU::Filtered }
+}
+
+/// `.strip_prefix(prefix)` — strip if present, else return original.
+pub struct StripPrefix { pub prefix: std::sync::Arc<str> }
+impl StripPrefix {
+    pub fn new(prefix: std::sync::Arc<str>) -> Self { Self { prefix } }
+}
+impl Stage for StripPrefix {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        if let Val::Str(s) = x {
+            let out = s.strip_prefix(self.prefix.as_ref())
+                .map(std::sync::Arc::<str>::from)
+                .unwrap_or_else(|| s.clone());
+            return StageOutput::Pass(Cow::Owned(Val::Str(out)));
+        }
+        StageOutput::Filtered
+    }
+}
+impl<'a> crate::unified::Stage<crate::eval::borrowed::Val<'a>> for StripPrefix {
+    fn apply(&self, _x: crate::eval::borrowed::Val<'a>)
+        -> crate::unified::StageOutputU<crate::eval::borrowed::Val<'a>>
+    { crate::unified::StageOutputU::Filtered }
+}
+
+/// `.strip_suffix(suffix)` — strip if present, else return original.
+pub struct StripSuffix { pub suffix: std::sync::Arc<str> }
+impl StripSuffix {
+    pub fn new(suffix: std::sync::Arc<str>) -> Self { Self { suffix } }
+}
+impl Stage for StripSuffix {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        if let Val::Str(s) = x {
+            let out = s.strip_suffix(self.suffix.as_ref())
+                .map(std::sync::Arc::<str>::from)
+                .unwrap_or_else(|| s.clone());
+            return StageOutput::Pass(Cow::Owned(Val::Str(out)));
+        }
+        StageOutput::Filtered
+    }
+}
+impl<'a> crate::unified::Stage<crate::eval::borrowed::Val<'a>> for StripSuffix {
+    fn apply(&self, _x: crate::eval::borrowed::Val<'a>)
+        -> crate::unified::StageOutputU<crate::eval::borrowed::Val<'a>>
+    { crate::unified::StageOutputU::Filtered }
+}
+
 /// Closure-based `.filter(pred)` — for the borrow runner where the
 /// predicate is built from a kernel at lowering time (FieldCmpLit etc.
 /// → owned literal compare).  composed.rs's `GenericFilter` uses VM
@@ -2472,6 +2658,73 @@ mod tests {
             StageOutput::Pass(cow) => match cow.into_owned() {
                 Val::Bool(true) => {}
                 other => panic!("expected Bool(true), got {:?}", other),
+            },
+            _ => panic!("expected Pass"),
+        }
+    }
+
+    fn extract_bool(out: StageOutput<'_>) -> bool {
+        match out {
+            StageOutput::Pass(cow) => match cow.into_owned() {
+                Val::Bool(b) => b,
+                other => panic!("expected Bool, got {:?}", other),
+            },
+            _ => panic!("expected Pass"),
+        }
+    }
+
+    #[test]
+    fn starts_ends_contains() {
+        let s = Val::Str(std::sync::Arc::from("hello world"));
+        assert!(extract_bool(StartsWith::new(std::sync::Arc::from("hello")).apply(&s)));
+        assert!(!extract_bool(StartsWith::new(std::sync::Arc::from("world")).apply(&s)));
+        assert!(extract_bool(EndsWith::new(std::sync::Arc::from("world")).apply(&s)));
+        assert!(extract_bool(Contains::new(std::sync::Arc::from("o w")).apply(&s)));
+    }
+
+    #[test]
+    fn repeat_split_replace() {
+        let s = Val::Str(std::sync::Arc::from("ab"));
+        assert_eq!(extract_str(Repeat::new(3).apply(&s)), "ababab");
+
+        let csv = Val::Str(std::sync::Arc::from("a,b,c"));
+        assert_eq!(extract_arr_len(Split::new(std::sync::Arc::from(",")).apply(&csv)), 3);
+
+        let s = Val::Str(std::sync::Arc::from("foo bar foo"));
+        let r = Replace::new(std::sync::Arc::from("foo"), std::sync::Arc::from("X"))
+            .apply(&s);
+        assert_eq!(extract_str(r), "X bar X");
+    }
+
+    #[test]
+    fn strip_prefix_suffix_passthrough() {
+        let s = Val::Str(std::sync::Arc::from("foobar"));
+        assert_eq!(
+            extract_str(StripPrefix::new(std::sync::Arc::from("foo")).apply(&s)),
+            "bar"
+        );
+        let s2 = Val::Str(std::sync::Arc::from("xyz"));
+        assert_eq!(
+            extract_str(StripPrefix::new(std::sync::Arc::from("foo")).apply(&s2)),
+            "xyz"
+        );
+        let s3 = Val::Str(std::sync::Arc::from("hello.txt"));
+        assert_eq!(
+            extract_str(StripSuffix::new(std::sync::Arc::from(".txt")).apply(&s3)),
+            "hello"
+        );
+    }
+
+    #[test]
+    fn base64_round_trip() {
+        let s = Val::Str(std::sync::Arc::from("hello"));
+        let enc = extract_str(ToBase64.apply(&s));
+        let enc_val = Val::Str(std::sync::Arc::from(enc));
+        let r = FromBase64.apply(&enc_val);
+        match r {
+            StageOutput::Pass(cow) => match cow.into_owned() {
+                Val::Str(out) => assert_eq!(out.as_ref(), "hello"),
+                other => panic!("expected Str, got {:?}", other),
             },
             _ => panic!("expected Pass"),
         }
