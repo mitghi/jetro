@@ -26,9 +26,9 @@ pub enum Expr {
     FString(Vec<FStringPart>),
 
     // References
-    Root,           // $
-    Current,        // @
-    Ident(String),  // variable or implicit current-item field
+    Root,          // $
+    Current,       // @
+    Ident(String), // variable or implicit current-item field
 
     // Navigation chain: base followed by postfix steps
     Chain(Box<Expr>, Vec<Step>),
@@ -40,8 +40,8 @@ pub enum Expr {
 
     // Kind check: expr kind [not] type
     Kind {
-        expr:   Box<Expr>,
-        ty:     KindType,
+        expr: Box<Expr>,
+        ty: KindType,
         negate: bool,
     },
 
@@ -54,7 +54,7 @@ pub enum Expr {
 
     // Pipeline: base | step1 | step2  or  base -> name | ...
     Pipeline {
-        base:  Box<Expr>,
+        base: Box<Expr>,
         steps: Vec<PipeStep>,
     },
 
@@ -66,8 +66,8 @@ pub enum Expr {
         cond: Option<Box<Expr>>,
     },
     DictComp {
-        key:  Box<Expr>,
-        val:  Box<Expr>,
+        key: Box<Expr>,
+        val: Box<Expr>,
         vars: Vec<String>,
         iter: Box<Expr>,
         cond: Option<Box<Expr>>,
@@ -88,7 +88,7 @@ pub enum Expr {
     // Lambda: lambda x, y: body
     Lambda {
         params: Vec<String>,
-        body:   Box<Expr>,
+        body: Box<Expr>,
     },
 
     // Let binding: let x = init in body
@@ -101,7 +101,7 @@ pub enum Expr {
     // Python-style conditional: `then_ if cond else else_`.
     // Short-circuits — only the taken branch is evaluated.
     IfElse {
-        cond:  Box<Expr>,
+        cond: Box<Expr>,
         then_: Box<Expr>,
         else_: Box<Expr>,
     },
@@ -111,7 +111,7 @@ pub enum Expr {
     // DEFAULT can be arbitrary expressions; chains right-associative
     // (`try a else try b else c` parses as `try a else (try b else c)`).
     Try {
-        body:    Box<Expr>,
+        body: Box<Expr>,
         default: Box<Expr>,
     },
 
@@ -125,7 +125,7 @@ pub enum Expr {
     // of existing `.to_int()` / `.to_string()` methods — semantics identical.
     Cast {
         expr: Box<Expr>,
-        ty:   CastType,
+        ty: CastType,
     },
 
     // Declarative patch block: `patch root { path1: val1, path2: val2, ... }`.
@@ -133,7 +133,7 @@ pub enum Expr {
     // COW semantics — unchanged subtrees are shared.
     Patch {
         root: Box<Expr>,
-        ops:  Vec<PatchOp>,
+        ops: Vec<PatchOp>,
     },
 
     // Sentinel: `DELETE` inside a patch-field value removes the key.
@@ -146,7 +146,7 @@ pub enum Expr {
 #[derive(Debug, Clone)]
 pub struct PatchOp {
     pub path: Vec<PathStep>,
-    pub val:  Expr,
+    pub val: Expr,
     pub cond: Option<Expr>,
 }
 
@@ -164,7 +164,14 @@ pub enum PathStep {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CastType {
-    Int, Float, Number, Str, Bool, Array, Object, Null,
+    Int,
+    Float,
+    Number,
+    Str,
+    Bool,
+    Array,
+    Object,
+    Null,
 }
 
 // ── Pipeline step ─────────────────────────────────────────────────────────────
@@ -180,7 +187,10 @@ pub enum PipeStep {
 #[derive(Debug, Clone)]
 pub enum BindTarget {
     Name(String),
-    Obj { fields: Vec<String>, rest: Option<String> },
+    Obj {
+        fields: Vec<String>,
+        rest: Option<String>,
+    },
     Arr(Vec<String>),
 }
 
@@ -194,8 +204,8 @@ pub enum FStringPart {
 
 #[derive(Debug, Clone)]
 pub enum FmtSpec {
-    Spec(String),   // :.2f  :>10  etc.
-    Pipe(String),   // |upper  |trim  etc.
+    Spec(String), // :.2f  :>10  etc.
+    Pipe(String), // |upper  |trim  etc.
 }
 
 // ── Array element ─────────────────────────────────────────────────────────────
@@ -218,17 +228,17 @@ pub enum QuantifierKind {
 
 #[derive(Debug, Clone)]
 pub enum Step {
-    Field(String),                     // .field
-    OptField(String),                  // ?.field
-    Descendant(String),                // ..field
-    DescendAll,                        // ..  (all descendants)
-    Index(i64),                        // [n]
-    DynIndex(Box<Expr>),               // [expr]
-    Slice(Option<i64>, Option<i64>),   // [n:m]
-    Method(String, Vec<Arg>),          // .method(args)
-    OptMethod(String, Vec<Arg>),       // ?.method(args)
-    InlineFilter(Box<Expr>),           // {pred}
-    Quantifier(QuantifierKind),        // ? or !
+    Field(String),                   // .field
+    OptField(String),                // ?.field
+    Descendant(String),              // ..field
+    DescendAll,                      // ..  (all descendants)
+    Index(i64),                      // [n]
+    DynIndex(Box<Expr>),             // [expr]
+    Slice(Option<i64>, Option<i64>), // [n:m]
+    Method(String, Vec<Arg>),        // .method(args)
+    OptMethod(String, Vec<Arg>),     // ?.method(args)
+    InlineFilter(Box<Expr>),         // {pred}
+    Quantifier(QuantifierKind),      // ? or !
 }
 
 // ── Function arguments ────────────────────────────────────────────────────────
@@ -244,7 +254,12 @@ pub enum Arg {
 #[derive(Debug, Clone)]
 pub enum ObjField {
     /// `key: expr` (optionally `key: expr when cond`)
-    Kv { key: String, val: Expr, optional: bool, cond: Option<Expr> },
+    Kv {
+        key: String,
+        val: Expr,
+        optional: bool,
+        cond: Option<Expr>,
+    },
     /// `key` — shorthand for `key: key`
     Short(String),
     /// `[expr]: expr` — dynamic key
@@ -260,17 +275,32 @@ pub enum ObjField {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinOp {
-    Add, Sub, Mul, Div, Mod,
-    Eq, Neq, Lt, Lte, Gt, Gte,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    Eq,
+    Neq,
+    Lt,
+    Lte,
+    Gt,
+    Gte,
     Fuzzy,
-    And, Or,
+    And,
+    Or,
 }
 
 // ── Kind types ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KindType {
-    Null, Bool, Number, Str, Array, Object,
+    Null,
+    Bool,
+    Number,
+    Str,
+    Array,
+    Object,
 }
 
 // ── Sort key ──────────────────────────────────────────────────────────────────
@@ -284,7 +314,11 @@ pub struct SortKey {
 impl Expr {
     /// Wrap in a Chain if steps is non-empty, otherwise return self.
     pub fn maybe_chain(self, steps: Vec<Step>) -> Self {
-        if steps.is_empty() { self } else { Expr::Chain(Box::new(self), steps) }
+        if steps.is_empty() {
+            self
+        } else {
+            Expr::Chain(Box::new(self), steps)
+        }
     }
 }
 

@@ -1,8 +1,8 @@
 //! Isolate time spent in each sub-scan of a chained-descendant query.
 
-use std::time::Instant;
-use jetro_core::{Jetro, VM, scan};
+use jetro_core::{scan, Jetro, VM};
 use serde_json::{json, Value};
+use std::time::Instant;
 
 fn synth(n_groups: usize, per_group: usize) -> Value {
     let mut groups = Vec::with_capacity(n_groups);
@@ -29,7 +29,9 @@ fn time<T, F: FnMut() -> T>(name: &str, iters: usize, mut f: F) -> T {
         let t = Instant::now();
         let out = f();
         let e = t.elapsed().as_micros();
-        if e < best { best = e; }
+        if e < best {
+            best = e;
+        }
         last = Some(out);
     }
     println!("  {:<56} best {:>10}µs", name, best);
@@ -42,21 +44,30 @@ fn main() {
     println!("doc: {:.2} MB\n", bytes.len() as f64 / 1_048_576.0);
 
     println!("Layer-by-layer byte-scan cost:");
-    let groups_spans = time("scan groups (doc)", 3, || scan::find_key_value_spans(&bytes, "groups"));
+    let groups_spans = time("scan groups (doc)", 3, || {
+        scan::find_key_value_spans(&bytes, "groups")
+    });
     println!("  groups spans: {}", groups_spans.len());
 
     let g0 = groups_spans[0];
     let groups_sub = &bytes[g0.start..g0.end];
-    println!("  groups sub len: {:.2} MB", groups_sub.len() as f64 / 1_048_576.0);
+    println!(
+        "  groups sub len: {:.2} MB",
+        groups_sub.len() as f64 / 1_048_576.0
+    );
 
-    let rows_spans = time("scan rows (within groups span)", 3, || scan::find_key_value_spans(groups_sub, "rows"));
+    let rows_spans = time("scan rows (within groups span)", 3, || {
+        scan::find_key_value_spans(groups_sub, "rows")
+    });
     println!("  rows spans: {}", rows_spans.len());
 
     let r0 = rows_spans[0];
     let rows_sub = &groups_sub[r0.start..r0.end];
     println!("  first rows sub len: {} bytes", rows_sub.len());
 
-    let tag_spans = time("scan tag (within first rows span)", 3, || scan::find_key_value_spans(rows_sub, "tag"));
+    let tag_spans = time("scan tag (within first rows span)", 3, || {
+        scan::find_key_value_spans(rows_sub, "tag")
+    });
     println!("  tag spans: {}", tag_spans.len());
 
     println!("\nManual byte-chain simulation:");

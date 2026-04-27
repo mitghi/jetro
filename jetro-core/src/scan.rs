@@ -44,7 +44,9 @@ pub fn find_key_positions(bytes: &[u8], key: &str) -> Vec<usize> {
         s
     };
     let needle_b = needle.as_bytes();
-    if needle_b.len() > bytes.len() { return Vec::new(); }
+    if needle_b.len() > bytes.len() {
+        return Vec::new();
+    }
 
     let mut out = Vec::new();
     let mut i = 0usize;
@@ -65,9 +67,15 @@ pub fn find_key_positions(bytes: &[u8], key: &str) -> Vec<usize> {
                 Some(off) => {
                     i += off;
                     match bytes[i] {
-                        b'\\' => { escape = true;     i += 1; }
-                        b'"'  => { in_string = false; i += 1; }
-                        _     => unreachable!(),
+                        b'\\' => {
+                            escape = true;
+                            i += 1;
+                        }
+                        b'"' => {
+                            in_string = false;
+                            i += 1;
+                        }
+                        _ => unreachable!(),
                     }
                 }
                 None => break,
@@ -80,7 +88,8 @@ pub fn find_key_positions(bytes: &[u8], key: &str) -> Vec<usize> {
                 Some(off) => {
                     let q = i + off;
                     if q + needle_b.len() <= bytes.len()
-                        && &bytes[q..q + needle_b.len()] == needle_b {
+                        && &bytes[q..q + needle_b.len()] == needle_b
+                    {
                         out.push(q);
                         // Past `"key":` we remain outside any string,
                         // pointing at the start of the value.
@@ -110,13 +119,13 @@ pub fn extract_values(bytes: &[u8], key: &str) -> Vec<Value> {
     let prefix_len = key.len() + 3; // `"key":`
     for pos in positions {
         let mut start = pos + prefix_len;
-        while start < bytes.len()
-            && matches!(bytes[start], b' ' | b'\t' | b'\n' | b'\r') {
+        while start < bytes.len() && matches!(bytes[start], b' ' | b'\t' | b'\n' | b'\r') {
             start += 1;
         }
-        if start >= bytes.len() { continue; }
-        let mut stream = serde_json::Deserializer::from_slice(&bytes[start..])
-            .into_iter::<Value>();
+        if start >= bytes.len() {
+            continue;
+        }
+        let mut stream = serde_json::Deserializer::from_slice(&bytes[start..]).into_iter::<Value>();
         if let Some(Ok(v)) = stream.next() {
             out.push(v);
         }
@@ -130,7 +139,7 @@ pub fn extract_values(bytes: &[u8], key: &str) -> Vec<Value> {
 #[derive(Debug, Clone, Copy)]
 pub struct ValueSpan {
     pub start: usize,
-    pub end:   usize,
+    pub end: usize,
 }
 
 /// Early-exit variant of `find_key_value_spans` — returns the first
@@ -147,7 +156,9 @@ pub fn find_first_key_value_span(bytes: &[u8], key: &str) -> Option<ValueSpan> {
         s
     };
     let needle_b = needle.as_bytes();
-    if needle_b.len() > bytes.len() { return None; }
+    if needle_b.len() > bytes.len() {
+        return None;
+    }
     let prefix_len = needle_b.len();
 
     let mut i = 0usize;
@@ -155,16 +166,26 @@ pub fn find_first_key_value_span(bytes: &[u8], key: &str) -> Option<ValueSpan> {
     let mut escape = false;
 
     while i < bytes.len() {
-        if escape { escape = false; i += 1; continue; }
+        if escape {
+            escape = false;
+            i += 1;
+            continue;
+        }
         if in_string {
             let rest = &bytes[i..];
             match memchr2(b'\\', b'"', rest) {
                 Some(off) => {
                     i += off;
                     match bytes[i] {
-                        b'\\' => { escape = true;     i += 1; }
-                        b'"'  => { in_string = false; i += 1; }
-                        _     => unreachable!(),
+                        b'\\' => {
+                            escape = true;
+                            i += 1;
+                        }
+                        b'"' => {
+                            in_string = false;
+                            i += 1;
+                        }
+                        _ => unreachable!(),
                     }
                 }
                 None => return None,
@@ -174,16 +195,17 @@ pub fn find_first_key_value_span(bytes: &[u8], key: &str) -> Option<ValueSpan> {
             match memchr(b'"', rest) {
                 Some(off) => {
                     let q = i + off;
-                    if q + prefix_len <= bytes.len()
-                        && &bytes[q..q + prefix_len] == needle_b
-                    {
+                    if q + prefix_len <= bytes.len() && &bytes[q..q + prefix_len] == needle_b {
                         let mut start = q + prefix_len;
                         while start < bytes.len()
                             && matches!(bytes[start], b' ' | b'\t' | b'\n' | b'\r')
-                        { start += 1; }
-                        if start >= bytes.len() { return None; }
-                        return value_end(bytes, start)
-                            .map(|end| ValueSpan { start, end });
+                        {
+                            start += 1;
+                        }
+                        if start >= bytes.len() {
+                            return None;
+                        }
+                        return value_end(bytes, start).map(|end| ValueSpan { start, end });
                     } else {
                         in_string = true;
                         i = q + 1;
@@ -206,11 +228,12 @@ pub fn find_key_value_spans(bytes: &[u8], key: &str) -> Vec<ValueSpan> {
     let mut out = Vec::with_capacity(positions.len());
     for pos in positions {
         let mut start = pos + prefix_len;
-        while start < bytes.len()
-            && matches!(bytes[start], b' ' | b'\t' | b'\n' | b'\r') {
+        while start < bytes.len() && matches!(bytes[start], b' ' | b'\t' | b'\n' | b'\r') {
             start += 1;
         }
-        if start >= bytes.len() { continue; }
+        if start >= bytes.len() {
+            continue;
+        }
         if let Some(end) = value_end(bytes, start) {
             out.push(ValueSpan { start, end });
         }
@@ -226,9 +249,7 @@ pub fn find_key_value_spans(bytes: &[u8], key: &str) -> Vec<ValueSpan> {
 pub fn extract_values_eq(bytes: &[u8], key: &str, lit: &[u8]) -> Vec<Value> {
     let mut out = Vec::new();
     for span in find_key_value_spans(bytes, key) {
-        if span.end - span.start == lit.len()
-            && &bytes[span.start..span.end] == lit
-        {
+        if span.end - span.start == lit.len() && &bytes[span.start..span.end] == lit {
             if let Ok(v) = serde_json::from_slice::<Value>(&bytes[span.start..span.end]) {
                 out.push(v);
             }
@@ -247,9 +268,7 @@ pub fn extract_values_eq(bytes: &[u8], key: &str, lit: &[u8]) -> Vec<Value> {
 pub fn count_key_value_eq(bytes: &[u8], key: &str, lit: &[u8]) -> usize {
     let mut n = 0;
     for span in find_key_value_spans(bytes, key) {
-        if span.end - span.start == lit.len()
-            && &bytes[span.start..span.end] == lit
-        {
+        if span.end - span.start == lit.len() && &bytes[span.start..span.end] == lit {
             n += 1;
         }
     }
@@ -287,16 +306,26 @@ pub fn find_enclosing_objects_eq(bytes: &[u8], key: &str, lit: &[u8]) -> Vec<Val
     let mut escape = false;
 
     while i < bytes.len() {
-        if escape { escape = false; i += 1; continue; }
+        if escape {
+            escape = false;
+            i += 1;
+            continue;
+        }
         if in_string {
             let rest = &bytes[i..];
             match memchr2(b'\\', b'"', rest) {
                 Some(off) => {
                     i += off;
                     match bytes[i] {
-                        b'\\' => { escape = true;     i += 1; }
-                        b'"'  => { in_string = false; i += 1; }
-                        _     => unreachable!(),
+                        b'\\' => {
+                            escape = true;
+                            i += 1;
+                        }
+                        b'"' => {
+                            in_string = false;
+                            i += 1;
+                        }
+                        _ => unreachable!(),
                     }
                 }
                 None => break,
@@ -304,24 +333,29 @@ pub fn find_enclosing_objects_eq(bytes: &[u8], key: &str, lit: &[u8]) -> Vec<Val
             continue;
         }
         match bytes[i] {
-            b'{' => { stack.push((i, false)); i += 1; }
+            b'{' => {
+                stack.push((i, false));
+                i += 1;
+            }
             b'}' => {
                 if let Some((start, matched)) = stack.pop() {
-                    if matched { out.push(ValueSpan { start, end: i + 1 }); }
+                    if matched {
+                        out.push(ValueSpan { start, end: i + 1 });
+                    }
                 }
                 i += 1;
             }
             b'"' => {
-                if i + needle_b.len() <= bytes.len()
-                    && &bytes[i..i + needle_b.len()] == needle_b
-                {
+                if i + needle_b.len() <= bytes.len() && &bytes[i..i + needle_b.len()] == needle_b {
                     let mut vs = i + needle_b.len();
-                    while vs < bytes.len()
-                        && matches!(bytes[vs], b' ' | b'\t' | b'\n' | b'\r')
-                    { vs += 1; }
+                    while vs < bytes.len() && matches!(bytes[vs], b' ' | b'\t' | b'\n' | b'\r') {
+                        vs += 1;
+                    }
                     if let Some(ve) = value_end(bytes, vs) {
                         if ve - vs == lit.len() && &bytes[vs..ve] == lit {
-                            if let Some(top) = stack.last_mut() { top.1 = true; }
+                            if let Some(top) = stack.last_mut() {
+                                top.1 = true;
+                            }
                         }
                         i = ve;
                     } else {
@@ -349,19 +383,27 @@ pub fn find_enclosing_objects_eq_multi(
     conjuncts: &[(String, Vec<u8>)],
 ) -> Vec<ValueSpan> {
     assert!(conjuncts.len() <= 64, "at most 64 conjuncts supported");
-    if conjuncts.is_empty() { return Vec::new(); }
+    if conjuncts.is_empty() {
+        return Vec::new();
+    }
 
     // Pre-build each needle as `"<key>":` so we compare against a
     // contiguous slice at the current cursor.
-    let needles: Vec<Vec<u8>> = conjuncts.iter().map(|(k, _)| {
-        let mut s = Vec::with_capacity(k.len() + 3);
-        s.push(b'"');
-        s.extend_from_slice(k.as_bytes());
-        s.extend_from_slice(b"\":");
-        s
-    }).collect();
-    let full_mask: u64 = if conjuncts.len() == 64 { u64::MAX }
-                         else { (1u64 << conjuncts.len()) - 1 };
+    let needles: Vec<Vec<u8>> = conjuncts
+        .iter()
+        .map(|(k, _)| {
+            let mut s = Vec::with_capacity(k.len() + 3);
+            s.push(b'"');
+            s.extend_from_slice(k.as_bytes());
+            s.extend_from_slice(b"\":");
+            s
+        })
+        .collect();
+    let full_mask: u64 = if conjuncts.len() == 64 {
+        u64::MAX
+    } else {
+        (1u64 << conjuncts.len()) - 1
+    };
 
     let mut out = Vec::new();
     let mut stack: Vec<(usize, u64)> = Vec::new();
@@ -370,16 +412,26 @@ pub fn find_enclosing_objects_eq_multi(
     let mut escape = false;
 
     while i < bytes.len() {
-        if escape { escape = false; i += 1; continue; }
+        if escape {
+            escape = false;
+            i += 1;
+            continue;
+        }
         if in_string {
             let rest = &bytes[i..];
             match memchr2(b'\\', b'"', rest) {
                 Some(off) => {
                     i += off;
                     match bytes[i] {
-                        b'\\' => { escape = true;     i += 1; }
-                        b'"'  => { in_string = false; i += 1; }
-                        _     => unreachable!(),
+                        b'\\' => {
+                            escape = true;
+                            i += 1;
+                        }
+                        b'"' => {
+                            in_string = false;
+                            i += 1;
+                        }
+                        _ => unreachable!(),
                     }
                 }
                 None => break,
@@ -387,7 +439,10 @@ pub fn find_enclosing_objects_eq_multi(
             continue;
         }
         match bytes[i] {
-            b'{' => { stack.push((i, 0u64)); i += 1; }
+            b'{' => {
+                stack.push((i, 0u64));
+                i += 1;
+            }
             b'}' => {
                 if let Some((start, mask)) = stack.pop() {
                     if mask == full_mask {
@@ -407,9 +462,9 @@ pub fn find_enclosing_objects_eq_multi(
                 if let Some(idx) = matched_idx {
                     let nb = &needles[idx];
                     let mut vs = i + nb.len();
-                    while vs < bytes.len()
-                        && matches!(bytes[vs], b' ' | b'\t' | b'\n' | b'\r')
-                    { vs += 1; }
+                    while vs < bytes.len() && matches!(bytes[vs], b' ' | b'\t' | b'\n' | b'\r') {
+                        vs += 1;
+                    }
                     if let Some(ve) = value_end(bytes, vs) {
                         let lit = &conjuncts[idx].1;
                         if ve - vs == lit.len() && &bytes[vs..ve] == &lit[..] {
@@ -437,15 +492,20 @@ pub fn find_enclosing_objects_eq_multi(
 /// Comparison operator for numeric-range byte scans.  Mirrors the subset of
 /// `ast::BinOp` that makes sense against a canonical JSON number literal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ScanCmp { Lt, Lte, Gt, Gte }
+pub enum ScanCmp {
+    Lt,
+    Lte,
+    Gt,
+    Gte,
+}
 
 impl ScanCmp {
     #[inline]
     fn holds(self, lhs: f64, rhs: f64) -> bool {
         match self {
-            ScanCmp::Lt  => lhs <  rhs,
+            ScanCmp::Lt => lhs < rhs,
             ScanCmp::Lte => lhs <= rhs,
-            ScanCmp::Gt  => lhs >  rhs,
+            ScanCmp::Gt => lhs > rhs,
             ScanCmp::Gte => lhs >= rhs,
         }
     }
@@ -494,16 +554,26 @@ pub fn find_enclosing_objects_cmp(
     let mut escape = false;
 
     while i < bytes.len() {
-        if escape { escape = false; i += 1; continue; }
+        if escape {
+            escape = false;
+            i += 1;
+            continue;
+        }
         if in_string {
             let rest = &bytes[i..];
             match memchr2(b'\\', b'"', rest) {
                 Some(off) => {
                     i += off;
                     match bytes[i] {
-                        b'\\' => { escape = true;     i += 1; }
-                        b'"'  => { in_string = false; i += 1; }
-                        _     => unreachable!(),
+                        b'\\' => {
+                            escape = true;
+                            i += 1;
+                        }
+                        b'"' => {
+                            in_string = false;
+                            i += 1;
+                        }
+                        _ => unreachable!(),
                     }
                 }
                 None => break,
@@ -511,25 +581,30 @@ pub fn find_enclosing_objects_cmp(
             continue;
         }
         match bytes[i] {
-            b'{' => { stack.push((i, false)); i += 1; }
+            b'{' => {
+                stack.push((i, false));
+                i += 1;
+            }
             b'}' => {
                 if let Some((start, matched)) = stack.pop() {
-                    if matched { out.push(ValueSpan { start, end: i + 1 }); }
+                    if matched {
+                        out.push(ValueSpan { start, end: i + 1 });
+                    }
                 }
                 i += 1;
             }
             b'"' => {
-                if i + needle_b.len() <= bytes.len()
-                    && &bytes[i..i + needle_b.len()] == needle_b
-                {
+                if i + needle_b.len() <= bytes.len() && &bytes[i..i + needle_b.len()] == needle_b {
                     let mut vs = i + needle_b.len();
-                    while vs < bytes.len()
-                        && matches!(bytes[vs], b' ' | b'\t' | b'\n' | b'\r')
-                    { vs += 1; }
+                    while vs < bytes.len() && matches!(bytes[vs], b' ' | b'\t' | b'\n' | b'\r') {
+                        vs += 1;
+                    }
                     if let Some(ve) = value_end(bytes, vs) {
                         if let Some((_, as_f, _)) = parse_num_span(&bytes[vs..ve]) {
                             if op.holds(as_f, threshold) {
-                                if let Some(top) = stack.last_mut() { top.1 = true; }
+                                if let Some(top) = stack.last_mut() {
+                                    top.1 = true;
+                                }
                             }
                         }
                         i = ve;
@@ -554,7 +629,9 @@ pub fn find_enclosing_objects_cmp(
 /// only keys at the top level of the object, not keys nested inside
 /// arrays or sub-objects.  Returned span is relative to `obj_bytes`.
 pub fn find_direct_field(obj_bytes: &[u8], key: &str) -> Option<ValueSpan> {
-    if obj_bytes.is_empty() || obj_bytes[0] != b'{' { return None; }
+    if obj_bytes.is_empty() || obj_bytes[0] != b'{' {
+        return None;
+    }
     let needle = {
         let mut s = String::with_capacity(key.len() + 3);
         s.push('"');
@@ -568,15 +645,25 @@ pub fn find_direct_field(obj_bytes: &[u8], key: &str) -> Option<ValueSpan> {
     let mut in_string = false;
     let mut escape = false;
     while i < obj_bytes.len() {
-        if escape { escape = false; i += 1; continue; }
+        if escape {
+            escape = false;
+            i += 1;
+            continue;
+        }
         if in_string {
             match memchr2(b'\\', b'"', &obj_bytes[i..]) {
                 Some(off) => {
                     i += off;
                     match obj_bytes[i] {
-                        b'\\' => { escape = true;     i += 1; }
-                        b'"'  => { in_string = false; i += 1; }
-                        _     => unreachable!(),
+                        b'\\' => {
+                            escape = true;
+                            i += 1;
+                        }
+                        b'"' => {
+                            in_string = false;
+                            i += 1;
+                        }
+                        _ => unreachable!(),
                     }
                 }
                 None => return None,
@@ -584,9 +671,14 @@ pub fn find_direct_field(obj_bytes: &[u8], key: &str) -> Option<ValueSpan> {
             continue;
         }
         match obj_bytes[i] {
-            b'{' | b'[' => { depth += 1; i += 1; }
+            b'{' | b'[' => {
+                depth += 1;
+                i += 1;
+            }
             b'}' | b']' => {
-                if depth == 0 { return None; }
+                if depth == 0 {
+                    return None;
+                }
                 depth -= 1;
                 i += 1;
             }
@@ -598,9 +690,10 @@ pub fn find_direct_field(obj_bytes: &[u8], key: &str) -> Option<ValueSpan> {
                     let mut vs = i + needle_b.len();
                     while vs < obj_bytes.len()
                         && matches!(obj_bytes[vs], b' ' | b'\t' | b'\n' | b'\r')
-                    { vs += 1; }
-                    return value_end(obj_bytes, vs)
-                        .map(|end| ValueSpan { start: vs, end });
+                    {
+                        vs += 1;
+                    }
+                    return value_end(obj_bytes, vs).map(|end| ValueSpan { start: vs, end });
                 }
                 in_string = true;
                 i += 1;
@@ -621,17 +714,25 @@ pub fn find_enclosing_objects_mixed(
     conjuncts: &[(String, ScanPred)],
 ) -> Vec<ValueSpan> {
     assert!(conjuncts.len() <= 64, "at most 64 conjuncts supported");
-    if conjuncts.is_empty() { return Vec::new(); }
+    if conjuncts.is_empty() {
+        return Vec::new();
+    }
 
-    let needles: Vec<Vec<u8>> = conjuncts.iter().map(|(k, _)| {
-        let mut s = Vec::with_capacity(k.len() + 3);
-        s.push(b'"');
-        s.extend_from_slice(k.as_bytes());
-        s.extend_from_slice(b"\":");
-        s
-    }).collect();
-    let full_mask: u64 = if conjuncts.len() == 64 { u64::MAX }
-                         else { (1u64 << conjuncts.len()) - 1 };
+    let needles: Vec<Vec<u8>> = conjuncts
+        .iter()
+        .map(|(k, _)| {
+            let mut s = Vec::with_capacity(k.len() + 3);
+            s.push(b'"');
+            s.extend_from_slice(k.as_bytes());
+            s.extend_from_slice(b"\":");
+            s
+        })
+        .collect();
+    let full_mask: u64 = if conjuncts.len() == 64 {
+        u64::MAX
+    } else {
+        (1u64 << conjuncts.len()) - 1
+    };
 
     let mut out = Vec::new();
     let mut stack: Vec<(usize, u64)> = Vec::new();
@@ -640,16 +741,26 @@ pub fn find_enclosing_objects_mixed(
     let mut escape = false;
 
     while i < bytes.len() {
-        if escape { escape = false; i += 1; continue; }
+        if escape {
+            escape = false;
+            i += 1;
+            continue;
+        }
         if in_string {
             let rest = &bytes[i..];
             match memchr2(b'\\', b'"', rest) {
                 Some(off) => {
                     i += off;
                     match bytes[i] {
-                        b'\\' => { escape = true;     i += 1; }
-                        b'"'  => { in_string = false; i += 1; }
-                        _     => unreachable!(),
+                        b'\\' => {
+                            escape = true;
+                            i += 1;
+                        }
+                        b'"' => {
+                            in_string = false;
+                            i += 1;
+                        }
+                        _ => unreachable!(),
                     }
                 }
                 None => break,
@@ -657,7 +768,10 @@ pub fn find_enclosing_objects_mixed(
             continue;
         }
         match bytes[i] {
-            b'{' => { stack.push((i, 0u64)); i += 1; }
+            b'{' => {
+                stack.push((i, 0u64));
+                i += 1;
+            }
             b'}' => {
                 if let Some((start, mask)) = stack.pop() {
                     if mask == full_mask {
@@ -677,17 +791,15 @@ pub fn find_enclosing_objects_mixed(
                 if let Some(idx) = matched_idx {
                     let nb = &needles[idx];
                     let mut vs = i + nb.len();
-                    while vs < bytes.len()
-                        && matches!(bytes[vs], b' ' | b'\t' | b'\n' | b'\r')
-                    { vs += 1; }
+                    while vs < bytes.len() && matches!(bytes[vs], b' ' | b'\t' | b'\n' | b'\r') {
+                        vs += 1;
+                    }
                     if let Some(ve) = value_end(bytes, vs) {
                         let fires = match &conjuncts[idx].1 {
-                            ScanPred::Eq(lit) =>
-                                ve - vs == lit.len() && &bytes[vs..ve] == &lit[..],
-                            ScanPred::Cmp(op, thresh) =>
-                                parse_num_span(&bytes[vs..ve])
-                                    .map(|(_, f, _)| op.holds(f, *thresh))
-                                    .unwrap_or(false),
+                            ScanPred::Eq(lit) => ve - vs == lit.len() && &bytes[vs..ve] == &lit[..],
+                            ScanPred::Cmp(op, thresh) => parse_num_span(&bytes[vs..ve])
+                                .map(|(_, f, _)| op.holds(f, *thresh))
+                                .unwrap_or(false),
                         };
                         if fires {
                             if let Some(top) = stack.last_mut() {
@@ -717,15 +829,15 @@ pub fn find_enclosing_objects_mixed(
 /// Spans that don't parse as numbers are skipped.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NumFold {
-    pub int_sum:   i64,
+    pub int_sum: i64,
     pub float_sum: f64,
-    pub is_float:  bool,
-    pub count:     usize,
-    pub min_i:     i64,
-    pub max_i:     i64,
-    pub min_f:     f64,
-    pub max_f:     f64,
-    pub any:       bool,
+    pub is_float: bool,
+    pub count: usize,
+    pub min_i: i64,
+    pub max_i: i64,
+    pub min_f: f64,
+    pub max_f: f64,
+    pub any: bool,
 }
 
 /// Parse a span of JSON numeric bytes. Returns Some((as_i64, as_f64, is_int))
@@ -749,23 +861,38 @@ pub fn fold_nums(bytes: &[u8], spans: &[ValueSpan]) -> NumFold {
     let mut f = NumFold::default();
     for s in spans {
         let slice = &bytes[s.start..s.end];
-        let Some((i, x, is_int)) = parse_num_span(slice) else { continue };
+        let Some((i, x, is_int)) = parse_num_span(slice) else {
+            continue;
+        };
         f.count += 1;
         if !f.any {
             f.any = true;
-            f.min_i = i; f.max_i = i;
-            f.min_f = x; f.max_f = x;
+            f.min_i = i;
+            f.max_i = i;
+            f.min_f = x;
+            f.max_f = x;
         } else {
-            if i < f.min_i { f.min_i = i; }
-            if i > f.max_i { f.max_i = i; }
-            if x < f.min_f { f.min_f = x; }
-            if x > f.max_f { f.max_f = x; }
+            if i < f.min_i {
+                f.min_i = i;
+            }
+            if i > f.max_i {
+                f.max_i = i;
+            }
+            if x < f.min_f {
+                f.min_f = x;
+            }
+            if x > f.max_f {
+                f.max_f = x;
+            }
         }
         if is_int && !f.is_float {
             f.int_sum = f.int_sum.wrapping_add(i);
             f.float_sum += x;
         } else {
-            if !f.is_float { f.float_sum = f.int_sum as f64; f.is_float = true; }
+            if !f.is_float {
+                f.float_sum = f.int_sum as f64;
+                f.is_float = true;
+            }
             f.float_sum += x;
         }
     }
@@ -776,31 +903,45 @@ pub fn fold_nums(bytes: &[u8], spans: &[ValueSpan]) -> NumFold {
 /// into a single `NumFold`.  Combines `find_direct_field` +
 /// `parse_num_span` without materialising any intermediate `Val`.
 /// Spans missing the key or whose value is non-numeric are skipped.
-pub fn fold_direct_field_nums(
-    bytes: &[u8], spans: &[ValueSpan], key: &str,
-) -> NumFold {
+pub fn fold_direct_field_nums(bytes: &[u8], spans: &[ValueSpan], key: &str) -> NumFold {
     let mut f = NumFold::default();
     for s in spans {
         let obj_bytes = &bytes[s.start..s.end];
-        let Some(vs) = find_direct_field(obj_bytes, key) else { continue };
-        let Some((i, x, is_int)) = parse_num_span(&obj_bytes[vs.start..vs.end])
-            else { continue };
+        let Some(vs) = find_direct_field(obj_bytes, key) else {
+            continue;
+        };
+        let Some((i, x, is_int)) = parse_num_span(&obj_bytes[vs.start..vs.end]) else {
+            continue;
+        };
         f.count += 1;
         if !f.any {
             f.any = true;
-            f.min_i = i; f.max_i = i;
-            f.min_f = x; f.max_f = x;
+            f.min_i = i;
+            f.max_i = i;
+            f.min_f = x;
+            f.max_f = x;
         } else {
-            if i < f.min_i { f.min_i = i; }
-            if i > f.max_i { f.max_i = i; }
-            if x < f.min_f { f.min_f = x; }
-            if x > f.max_f { f.max_f = x; }
+            if i < f.min_i {
+                f.min_i = i;
+            }
+            if i > f.max_i {
+                f.max_i = i;
+            }
+            if x < f.min_f {
+                f.min_f = x;
+            }
+            if x > f.max_f {
+                f.max_f = x;
+            }
         }
         if is_int && !f.is_float {
             f.int_sum = f.int_sum.wrapping_add(i);
             f.float_sum += x;
         } else {
-            if !f.is_float { f.float_sum = f.int_sum as f64; f.is_float = true; }
+            if !f.is_float {
+                f.float_sum = f.int_sum as f64;
+                f.is_float = true;
+            }
             f.float_sum += x;
         }
     }
@@ -810,18 +951,27 @@ pub fn fold_direct_field_nums(
 /// Walk a JSON value starting at `start`, return the exclusive end offset.
 /// Returns `None` on malformed input (missing close, truncated literal).
 fn value_end(bytes: &[u8], start: usize) -> Option<usize> {
-    if start >= bytes.len() { return None; }
+    if start >= bytes.len() {
+        return None;
+    }
     match bytes[start] {
         b'"' => {
             // Walk the string respecting escapes.
             let mut i = start + 1;
             let mut escape = false;
             while i < bytes.len() {
-                if escape { escape = false; i += 1; continue; }
+                if escape {
+                    escape = false;
+                    i += 1;
+                    continue;
+                }
                 match bytes[i] {
-                    b'\\' => { escape = true; i += 1; }
-                    b'"'  => return Some(i + 1),
-                    _     => i += 1,
+                    b'\\' => {
+                        escape = true;
+                        i += 1;
+                    }
+                    b'"' => return Some(i + 1),
+                    _ => i += 1,
                 }
             }
             None
@@ -835,22 +985,28 @@ fn value_end(bytes: &[u8], start: usize) -> Option<usize> {
             let mut escape = false;
             while i < bytes.len() {
                 let b = bytes[i];
-                if escape { escape = false; i += 1; continue; }
+                if escape {
+                    escape = false;
+                    i += 1;
+                    continue;
+                }
                 if in_string {
                     match b {
                         b'\\' => escape = true,
-                        b'"'  => in_string = false,
-                        _     => {}
+                        b'"' => in_string = false,
+                        _ => {}
                     }
                     i += 1;
                     continue;
                 }
                 match b {
                     b'"' => in_string = true,
-                    c if c == open  => depth += 1,
+                    c if c == open => depth += 1,
                     c if c == close => {
                         depth -= 1;
-                        if depth == 0 { return Some(i + 1); }
+                        if depth == 0 {
+                            return Some(i + 1);
+                        }
                     }
                     _ => {}
                 }
@@ -867,7 +1023,11 @@ fn value_end(bytes: &[u8], start: usize) -> Option<usize> {
                     _ => i += 1,
                 }
             }
-            if i == start { None } else { Some(i) }
+            if i == start {
+                None
+            } else {
+                Some(i)
+            }
         }
     }
 }
@@ -931,11 +1091,14 @@ mod tests {
     fn extracts_all_nested_hits_in_order() {
         let doc = br#"{"a":{"test":1},"b":[{"test":2},{"test":3}]}"#;
         let vals = extract_values(doc, "test");
-        assert_eq!(vals, vec![
-            serde_json::json!(1),
-            serde_json::json!(2),
-            serde_json::json!(3),
-        ]);
+        assert_eq!(
+            vals,
+            vec![
+                serde_json::json!(1),
+                serde_json::json!(2),
+                serde_json::json!(3),
+            ]
+        );
     }
 
     #[test]
@@ -983,7 +1146,8 @@ mod tests {
         let doc = br#"{"events":[{"type":"action","id":1},{"type":"idle","id":2},{"type":"action","id":3}]}"#;
         let spans = find_enclosing_objects_eq(doc, "type", br#""action""#);
         assert_eq!(spans.len(), 2);
-        let objs: Vec<_> = spans.iter()
+        let objs: Vec<_> = spans
+            .iter()
             .map(|s| serde_json::from_slice::<serde_json::Value>(&doc[s.start..s.end]).unwrap())
             .collect();
         assert_eq!(objs[0], serde_json::json!({"type":"action","id":1}));

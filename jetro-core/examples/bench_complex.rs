@@ -12,9 +12,9 @@
 //! warmed once then timed over ITERS repetitions; best / median / mean
 //! reported.
 
-use std::time::Instant;
 use jetro_core::Jetro;
 use serde_json::{json, Value};
+use std::time::Instant;
 
 const ITERS: usize = 10;
 
@@ -24,10 +24,23 @@ const ITERS: usize = 10;
 /// Each order has nested customer, items[], shipping.address, metadata.
 /// Shape is stable across orders → exercises inline-cache hit path.
 fn synth_doc(n_orders: usize, items_per_order: usize) -> Value {
-    let regions = ["us-east", "us-west", "eu-central", "ap-southeast", "sa-south"];
+    let regions = [
+        "us-east",
+        "us-west",
+        "eu-central",
+        "ap-southeast",
+        "sa-south",
+    ];
     let statuses = ["pending", "shipped", "delivered", "cancelled", "refunded"];
     let priorities = ["low", "normal", "high", "urgent"];
-    let categories = ["electronics", "books", "apparel", "grocery", "toys", "tools"];
+    let categories = [
+        "electronics",
+        "books",
+        "apparel",
+        "grocery",
+        "toys",
+        "tools",
+    ];
 
     let mut orders = Vec::with_capacity(n_orders);
     for i in 0..n_orders {
@@ -88,11 +101,15 @@ fn synth_doc(n_orders: usize, items_per_order: usize) -> Value {
         }));
     }
 
-    let customers: Vec<Value> = (0..500).map(|c| json!({
-        "id": 10_000 + c,
-        "tier": match c % 4 { 0 => "bronze", 1 => "silver", 2 => "gold", _ => "platinum" },
-        "lifetime_value": (c * 123 % 50_000) as f64,
-    })).collect();
+    let customers: Vec<Value> = (0..500)
+        .map(|c| {
+            json!({
+                "id": 10_000 + c,
+                "tier": match c % 4 { 0 => "bronze", 1 => "silver", 2 => "gold", _ => "platinum" },
+                "lifetime_value": (c * 123 % 50_000) as f64,
+            })
+        })
+        .collect();
 
     json!({
         "orders": orders,
@@ -103,7 +120,11 @@ fn synth_doc(n_orders: usize, items_per_order: usize) -> Value {
 
 #[derive(Clone, Copy)]
 #[allow(dead_code)]
-struct Stats { best: u128, median: u128, mean: u128 }
+struct Stats {
+    best: u128,
+    median: u128,
+    mean: u128,
+}
 
 fn run<F: FnMut() -> Value>(label: &str, mut f: F) -> Stats {
     // Warmup — compile cache + IC population happen here.
@@ -118,8 +139,10 @@ fn run<F: FnMut() -> Value>(label: &str, mut f: F) -> Stats {
     let best = samples[0];
     let median = samples[samples.len() / 2];
     let mean = samples.iter().sum::<u128>() / samples.len() as u128;
-    println!("  {:<38} best {:>8}µs  median {:>8}µs  mean {:>8}µs",
-             label, best, median, mean);
+    println!(
+        "  {:<38} best {:>8}µs  median {:>8}µs  mean {:>8}µs",
+        label, best, median, mean
+    );
     Stats { best, median, mean }
 }
 
@@ -134,84 +157,115 @@ fn main() {
     let doc = synth_doc(n_orders, items_per_order);
     let bytes = serde_json::to_vec(&doc).unwrap();
     let mb = bytes.len() as f64 / 1_048_576.0;
-    println!("payload: {} orders × {} items = {} items, {:.2} MB",
-             n_orders, items_per_order, n_orders * items_per_order, mb);
-    println!("iters: {} (first run warms; cache-hot numbers follow)\n", ITERS);
+    println!(
+        "payload: {} orders × {} items = {} items, {:.2} MB",
+        n_orders,
+        items_per_order,
+        n_orders * items_per_order,
+        mb
+    );
+    println!(
+        "iters: {} (first run warms; cache-hot numbers follow)\n",
+        ITERS
+    );
 
     let j_tree = Jetro::new(doc.clone());
     let j_scan = Jetro::from_bytes(bytes.clone()).unwrap();
 
     // ── Repeat-shape field access (IC hot path) ──────────────────────────
     println!("Q1  $.orders.map(customer.address.city)    (repeat-shape; IC sweet spot)");
-    run("tree_walker", || j_tree.collect("$.orders.map(customer.address.city)").unwrap());
+    run("tree_walker", || {
+        j_tree
+            .collect("$.orders.map(customer.address.city)")
+            .unwrap()
+    });
 
     println!("\nQ2  $.orders.map(customer.address.country_code).unique()");
     run("tree_walker", || {
-        j_tree.collect("$.orders.map(customer.address.country_code).unique()").unwrap()
+        j_tree
+            .collect("$.orders.map(customer.address.country_code).unique()")
+            .unwrap()
     });
 
     // ── Filter chain ─────────────────────────────────────────────────────
     println!("\nQ3  $.orders.filter(total > 500).map(id)   (bare-pred filter → scratch-Env)");
     run("tree_walker", || {
-        j_tree.collect("$.orders.filter(total > 500).map(id)").unwrap()
+        j_tree
+            .collect("$.orders.filter(total > 500).map(id)")
+            .unwrap()
     });
 
     println!("\nQ4  $.orders.filter(status == \"shipped\" and priority == \"high\").count()");
     run("tree_walker", || {
-        j_tree.collect(r#"$.orders.filter(status == "shipped" and priority == "high").count()"#).unwrap()
+        j_tree
+            .collect(r#"$.orders.filter(status == "shipped" and priority == "high").count()"#)
+            .unwrap()
     });
 
     // ── Multi-predicate find (SIMD byte-scan) ────────────────────────────
     println!("\nQ5  $..find(@.status == \"shipped\")   (deep enclosing-object scan)");
     let q = r#"$..find(@.status == "shipped")"#;
     let a = run("tree_walker", || j_tree.collect(q).unwrap());
-    let b = run("byte_scan",   || j_scan.collect(q).unwrap());
+    let b = run("byte_scan", || j_scan.collect(q).unwrap());
     speedup(a, b);
 
     println!("\nQ6  $..find(@.sku == \"SKU-00042\")    (deep, narrow match)");
     let q = r#"$..find(@.sku == "SKU-00042")"#;
     let a = run("tree_walker", || j_tree.collect(q).unwrap());
-    let b = run("byte_scan",   || j_scan.collect(q).unwrap());
+    let b = run("byte_scan", || j_scan.collect(q).unwrap());
     speedup(a, b);
 
     println!("\nQ7  $..find(@.status==\"shipped\", @.priority==\"urgent\")   (multi-pred AND)");
     let q = r#"$..find(@.status == "shipped", @.priority == "urgent")"#;
     let a = run("tree_walker", || j_tree.collect(q).unwrap());
-    let b = run("byte_scan",   || j_scan.collect(q).unwrap());
+    let b = run("byte_scan", || j_scan.collect(q).unwrap());
     speedup(a, b);
 
     // ── Deep descendant keys (byte-scan extract) ─────────────────────────
     println!("\nQ8  $..total.sum()   (deep key + aggregate; scan route C)");
     let q = "$..total.sum()";
     let a = run("tree_walker", || j_tree.collect(q).unwrap());
-    let b = run("byte_scan",   || j_scan.collect(q).unwrap());
+    let b = run("byte_scan", || j_scan.collect(q).unwrap());
     speedup(a, b);
 
-    println!("\nQ9  $..sku         (deep leaf extract, {} values)", n_orders * items_per_order);
+    println!(
+        "\nQ9  $..sku         (deep leaf extract, {} values)",
+        n_orders * items_per_order
+    );
     let q = "$..sku";
     let a = run("tree_walker", || j_tree.collect(q).unwrap());
-    let b = run("byte_scan",   || j_scan.collect(q).unwrap());
+    let b = run("byte_scan", || j_scan.collect(q).unwrap());
     speedup(a, b);
 
     // ── Aggregates + grouping ────────────────────────────────────────────
     println!("\nQ10 $.orders.group_by(status)         (group-by count_by-like)");
-    run("tree_walker", || j_tree.collect("$.orders.group_by(status)").unwrap());
+    run("tree_walker", || {
+        j_tree.collect("$.orders.group_by(status)").unwrap()
+    });
 
     println!("\nQ11 $.orders.count_by(region)");
-    run("tree_walker", || j_tree.collect("$.orders.count_by(region)").unwrap());
+    run("tree_walker", || {
+        j_tree.collect("$.orders.count_by(region)").unwrap()
+    });
 
     println!("\nQ12 $.orders.map(total).sum()");
-    run("tree_walker", || j_tree.collect("$.orders.map(total).sum()").unwrap());
+    run("tree_walker", || {
+        j_tree.collect("$.orders.map(total).sum()").unwrap()
+    });
 
     // ── Comprehension / pick ─────────────────────────────────────────────
     println!("\nQ13 [o.id for o in $.orders if o.total > 1000]   (list comp)");
     run("tree_walker", || {
-        j_tree.collect("[o.id for o in $.orders if o.total > 1000]").unwrap()
+        j_tree
+            .collect("[o.id for o in $.orders if o.total > 1000]")
+            .unwrap()
     });
 
     println!("\nQ14 $.orders.pick(id, who: customer.name, city: customer.address.city)");
     run("tree_walker", || {
-        j_tree.collect("$.orders.pick(id, who: customer.name, city: customer.address.city)").unwrap()
+        j_tree
+            .collect("$.orders.pick(id, who: customer.name, city: customer.address.city)")
+            .unwrap()
     });
 
     // ── Sort + first strength-reduction ──────────────────────────────────
@@ -228,7 +282,9 @@ fn main() {
 
     println!("\nQ17 $.orders[0].metadata.score.modify(@ * 2)   (nested path modify)");
     run("tree_walker", || {
-        j_tree.collect("$.orders[0].metadata.score.modify(@ * 2)").unwrap()
+        j_tree
+            .collect("$.orders[0].metadata.score.modify(@ * 2)")
+            .unwrap()
     });
 
     println!("\nQ18 $.orders[0].items[0].tags.set([])   (deep array-in-obj reset)");

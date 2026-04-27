@@ -5,7 +5,7 @@
 //!
 
 pub use crate::{Error, Result};
-pub use crate::{Jetro, Graph, VM, Expr, Engine};
+pub use crate::{Engine, Expr, Jetro, VM};
 pub use crate::{Method, MethodRegistry};
 pub use crate::{query, query_with};
 pub use serde_json::{json, Value};

@@ -7,5 +7,9 @@
 
 use super::value::Val;
 
-pub fn to_csv(recv: &Val) -> String { crate::composed::csv_emit(recv, ",") }
-pub fn to_tsv(recv: &Val) -> String { crate::composed::csv_emit(recv, "\t") }
+pub fn to_csv(recv: &Val) -> String {
+    crate::composed::csv_emit(recv, ",")
+}
+pub fn to_tsv(recv: &Val) -> String {
+    crate::composed::csv_emit(recv, "\t")
+}

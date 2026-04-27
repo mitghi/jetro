@@ -62,9 +62,19 @@ pub fn parse(input: &str) -> Result<Expr, ParseError> {
 fn is_kw(rule: Rule) -> bool {
     matches!(
         rule,
-        Rule::kw_and | Rule::kw_or | Rule::kw_not | Rule::kw_for
-            | Rule::kw_in | Rule::kw_if | Rule::kw_else | Rule::kw_let | Rule::kw_lambda | Rule::kw_kind
-            | Rule::kw_is | Rule::kw_as | Rule::kw_try
+        Rule::kw_and
+            | Rule::kw_or
+            | Rule::kw_not
+            | Rule::kw_for
+            | Rule::kw_in
+            | Rule::kw_if
+            | Rule::kw_else
+            | Rule::kw_let
+            | Rule::kw_lambda
+            | Rule::kw_kind
+            | Rule::kw_is
+            | Rule::kw_as
+            | Rule::kw_try
     )
 }
 
@@ -72,22 +82,22 @@ fn is_kw(rule: Rule) -> bool {
 
 fn parse_expr(pair: Pair<Rule>) -> Expr {
     match pair.as_rule() {
-        Rule::expr          => parse_expr(pair.into_inner().next().unwrap()),
-        Rule::cond_expr     => parse_cond(pair),
-        Rule::pipe_expr     => parse_pipeline(pair),
+        Rule::expr => parse_expr(pair.into_inner().next().unwrap()),
+        Rule::cond_expr => parse_cond(pair),
+        Rule::pipe_expr => parse_pipeline(pair),
         Rule::coalesce_expr => parse_coalesce(pair),
-        Rule::or_expr       => parse_or(pair),
-        Rule::and_expr      => parse_and(pair),
-        Rule::not_expr      => parse_not(pair),
-        Rule::kind_expr     => parse_kind(pair),
+        Rule::or_expr => parse_or(pair),
+        Rule::and_expr => parse_and(pair),
+        Rule::not_expr => parse_not(pair),
+        Rule::kind_expr => parse_kind(pair),
         Rule::contains_expr => parse_contains(pair),
-        Rule::cmp_expr      => parse_cmp(pair),
-        Rule::add_expr      => parse_add(pair),
-        Rule::mul_expr      => parse_mul(pair),
-        Rule::cast_expr     => parse_cast(pair),
-        Rule::unary_expr    => parse_unary(pair),
-        Rule::postfix_expr  => parse_postfix_expr(pair),
-        Rule::primary       => parse_primary(pair),
+        Rule::cmp_expr => parse_cmp(pair),
+        Rule::add_expr => parse_add(pair),
+        Rule::mul_expr => parse_mul(pair),
+        Rule::cast_expr => parse_cast(pair),
+        Rule::unary_expr => parse_unary(pair),
+        Rule::postfix_expr => parse_postfix_expr(pair),
+        Rule::primary => parse_primary(pair),
         r => panic!("unexpected rule in parse_expr: {:?}", r),
     }
 }
@@ -109,11 +119,11 @@ fn parse_cond(pair: Pair<Rule>) -> Expr {
     let then_ = parse_expr(head);
     let cond = match inner.next() {
         Some(p) => parse_expr(p),
-        None    => return then_,
+        None => return then_,
     };
     let else_ = parse_expr(inner.next().unwrap());
     Expr::IfElse {
-        cond:  Box::new(cond),
+        cond: Box::new(cond),
         then_: Box::new(then_),
         else_: Box::new(else_),
     }
@@ -132,7 +142,7 @@ fn parse_try(pair: Pair<Rule>) -> Expr {
     };
     let default = parse_expr(inner.next().unwrap());
     Expr::Try {
-        body:    Box::new(body),
+        body: Box::new(body),
         default: Box::new(default),
     }
 }
@@ -166,7 +176,14 @@ fn parse_pipeline(pair: Pair<Rule>) -> Expr {
             r => panic!("unexpected pipe_step inner: {:?}", r),
         }
     }
-    if steps.is_empty() { base } else { Expr::Pipeline { base: Box::new(base), steps } }
+    if steps.is_empty() {
+        base
+    } else {
+        Expr::Pipeline {
+            base: Box::new(base),
+            steps,
+        }
+    }
 }
 
 fn parse_bind_target(pair: Pair<Rule>) -> BindTarget {
@@ -183,10 +200,10 @@ fn parse_bind_target(pair: Pair<Rule>) -> BindTarget {
                     Rule::bind_rest => {
                         rest = Some(
                             p.into_inner()
-                             .find(|x| x.as_rule() == Rule::ident)
-                             .unwrap()
-                             .as_str()
-                             .to_string()
+                                .find(|x| x.as_rule() == Rule::ident)
+                                .unwrap()
+                                .as_str()
+                                .to_string(),
                         );
                     }
                     _ => {}
@@ -195,7 +212,8 @@ fn parse_bind_target(pair: Pair<Rule>) -> BindTarget {
             BindTarget::Obj { fields, rest }
         }
         Rule::bind_arr => {
-            let fields: Vec<String> = inner.into_inner()
+            let fields: Vec<String> = inner
+                .into_inner()
                 .filter(|p| p.as_rule() == Rule::ident)
                 .map(|p| p.as_str().to_string())
                 .collect();
@@ -259,15 +277,19 @@ fn parse_kind(pair: Pair<Rule>) -> Expr {
                 (false, next.as_str())
             };
             let ty = match kind_type_str {
-                "null"   => KindType::Null,
-                "bool"   => KindType::Bool,
+                "null" => KindType::Null,
+                "bool" => KindType::Bool,
                 "number" => KindType::Number,
                 "string" => KindType::Str,
-                "array"  => KindType::Array,
+                "array" => KindType::Array,
                 "object" => KindType::Object,
-                other    => panic!("unknown kind type: {}", other),
+                other => panic!("unknown kind type: {}", other),
             };
-            Expr::Kind { expr: Box::new(cmp), ty, negate }
+            Expr::Kind {
+                expr: Box::new(cmp),
+                ty,
+                negate,
+            }
         }
         _ => cmp,
     }
@@ -286,10 +308,7 @@ fn parse_contains(pair: Pair<Rule>) -> Expr {
             let rhs = parse_expr(inner.next().unwrap());
             Expr::Chain(
                 Box::new(lhs),
-                vec![Step::Method(
-                    "includes".to_string(),
-                    vec![Arg::Pos(rhs)],
-                )],
+                vec![Step::Method("includes".to_string(), vec![Arg::Pos(rhs)])],
             )
         }
     }
@@ -302,11 +321,14 @@ fn parse_cmp(pair: Pair<Rule>) -> Expr {
     let lhs = parse_expr(inner.next().unwrap());
     if let Some(op_pair) = inner.next() {
         let op = match op_pair.as_str() {
-            "==" => BinOp::Eq,  "!=" => BinOp::Neq,
-            "<"  => BinOp::Lt,  "<=" => BinOp::Lte,
-            ">"  => BinOp::Gt,  ">=" => BinOp::Gte,
+            "==" => BinOp::Eq,
+            "!=" => BinOp::Neq,
+            "<" => BinOp::Lt,
+            "<=" => BinOp::Lte,
+            ">" => BinOp::Gt,
+            ">=" => BinOp::Gte,
             "~=" => BinOp::Fuzzy,
-            o    => panic!("unknown cmp op: {}", o),
+            o => panic!("unknown cmp op: {}", o),
         };
         let rhs = parse_expr(inner.next().unwrap());
         Expr::BinOp(Box::new(lhs), op, Box::new(rhs))
@@ -319,13 +341,18 @@ fn parse_cmp(pair: Pair<Rule>) -> Expr {
 
 fn parse_add(pair: Pair<Rule>) -> Expr {
     parse_left_assoc(pair, |s| match s {
-        "+" => Some(BinOp::Add), "-" => Some(BinOp::Sub), _ => None,
+        "+" => Some(BinOp::Add),
+        "-" => Some(BinOp::Sub),
+        _ => None,
     })
 }
 
 fn parse_mul(pair: Pair<Rule>) -> Expr {
     parse_left_assoc(pair, |s| match s {
-        "*" => Some(BinOp::Mul), "/" => Some(BinOp::Div), "%" => Some(BinOp::Mod), _ => None,
+        "*" => Some(BinOp::Mul),
+        "/" => Some(BinOp::Div),
+        "%" => Some(BinOp::Mod),
+        _ => None,
     })
 }
 
@@ -357,17 +384,20 @@ fn parse_cast(pair: Pair<Rule>) -> Expr {
         debug_assert_eq!(kw.as_rule(), Rule::kw_as);
         let ty_pair = inner.next().unwrap();
         let ty = match ty_pair.as_str() {
-            "int"    => CastType::Int,
-            "float"  => CastType::Float,
+            "int" => CastType::Int,
+            "float" => CastType::Float,
             "number" => CastType::Number,
             "string" => CastType::Str,
-            "bool"   => CastType::Bool,
-            "array"  => CastType::Array,
+            "bool" => CastType::Bool,
+            "array" => CastType::Array,
             "object" => CastType::Object,
-            "null"   => CastType::Null,
-            o        => panic!("unknown cast type: {}", o),
+            "null" => CastType::Null,
+            o => panic!("unknown cast type: {}", o),
         };
-        acc = Expr::Cast { expr: Box::new(acc), ty };
+        acc = Expr::Cast {
+            expr: Box::new(acc),
+            ty,
+        };
     }
     acc
 }
@@ -442,37 +472,50 @@ fn parse_postfix_expr(pair: Pair<Rule>) -> Expr {
 // avoided: non-root chains (e.g. `@.set(...)`) are *not* rewritten — they
 // keep their method-call semantics.
 fn classify_chain_write(base: &Expr, steps: &[Step]) -> Option<Expr> {
-    if !matches!(base, Expr::Root) { return None; }
+    if !matches!(base, Expr::Root) {
+        return None;
+    }
     let last = steps.last()?;
-    let (name, args) = match last { Step::Method(n, a) => (n.as_str(), a), _ => return None };
-    if !is_terminal_write(name) { return None; }
+    let (name, args) = match last {
+        Step::Method(n, a) => (n.as_str(), a),
+        _ => return None,
+    };
+    if !is_terminal_write(name) {
+        return None;
+    }
 
     let prefix = &steps[..steps.len() - 1];
     let path = match steps_to_path(prefix) {
-        Ok(p)  => p,
-        Err(_) => return None,  // not a valid traversal — leave as method call
+        Ok(p) => p,
+        Err(_) => return None, // not a valid traversal — leave as method call
     };
 
     let op = build_write_op(name, args, path)?;
-    Some(Expr::Patch { root: Box::new(Expr::Root), ops: vec![op] })
+    Some(Expr::Patch {
+        root: Box::new(Expr::Root),
+        ops: vec![op],
+    })
 }
 
 fn is_terminal_write(name: &str) -> bool {
     // `.replace` deliberately omitted — it would clash with the 2-arg
     // string `.replace(needle, with)` builtin.  Use `.set(v)` for full
     // value replacement.
-    matches!(name, "set" | "modify" | "delete" | "unset" | "merge" | "deep_merge" | "deepMerge")
+    matches!(
+        name,
+        "set" | "modify" | "delete" | "unset" | "merge" | "deep_merge" | "deepMerge"
+    )
 }
 
 fn steps_to_path(steps: &[Step]) -> Result<Vec<PathStep>, String> {
     let mut out = Vec::with_capacity(steps.len());
     for s in steps {
         match s {
-            Step::Field(f)        => out.push(PathStep::Field(f.clone())),
-            Step::Index(i)        => out.push(PathStep::Index(*i)),
-            Step::OptField(f)     => out.push(PathStep::Field(f.clone())),
-            Step::Descendant(f)   => out.push(PathStep::Descendant(f.clone())),
-            Step::DynIndex(e)     => {
+            Step::Field(f) => out.push(PathStep::Field(f.clone())),
+            Step::Index(i) => out.push(PathStep::Index(*i)),
+            Step::OptField(f) => out.push(PathStep::Field(f.clone())),
+            Step::Descendant(f) => out.push(PathStep::Descendant(f.clone())),
+            Step::DynIndex(e) => {
                 // Defer resolution to apply time — PathStep carries the
                 // boxed expression, evaluated against the root doc then.
                 out.push(PathStep::DynIndex((**e).clone()));
@@ -487,7 +530,11 @@ fn build_write_op(name: &str, args: &[Arg], path: Vec<PathStep>) -> Option<Patch
     match name {
         "set" => {
             let v = arg_expr(args.first()?).clone();
-            Some(PatchOp { path, val: v, cond: None })
+            Some(PatchOp {
+                path,
+                val: v,
+                cond: None,
+            })
         }
         // `.modify(expr)` — expr sees `@` bound to the current value at the path
         // (patch semantics already bind `@` at the leaf).  Lambda form
@@ -497,47 +544,75 @@ fn build_write_op(name: &str, args: &[Arg], path: Vec<PathStep>) -> Option<Patch
             let v = match arg_expr(args.first()?).clone() {
                 Expr::Lambda { params, body } => {
                     if let Some(p) = params.into_iter().next() {
-                        Expr::Let { name: p, init: Box::new(Expr::Current), body }
+                        Expr::Let {
+                            name: p,
+                            init: Box::new(Expr::Current),
+                            body,
+                        }
                     } else {
                         *body
                     }
                 }
                 other => other,
             };
-            Some(PatchOp { path, val: v, cond: None })
+            Some(PatchOp {
+                path,
+                val: v,
+                cond: None,
+            })
         }
         "delete" => {
-            if !args.is_empty() { return None; }
-            Some(PatchOp { path, val: Expr::DeleteMark, cond: None })
+            if !args.is_empty() {
+                return None;
+            }
+            Some(PatchOp {
+                path,
+                val: Expr::DeleteMark,
+                cond: None,
+            })
         }
         // `.merge(obj)` / `.deep_merge(obj)` — desugar to `.modify(@.merge(arg))`
         // so the patch leaf evaluates against the bound `@`.
         "merge" | "deep_merge" | "deepMerge" => {
             let arg = arg_expr(args.first()?).clone();
-            let method = if name == "merge" { "merge".to_string() } else { "deep_merge".to_string() };
+            let method = if name == "merge" {
+                "merge".to_string()
+            } else {
+                "deep_merge".to_string()
+            };
             let v = Expr::Chain(
                 Box::new(Expr::Current),
                 vec![Step::Method(method, vec![Arg::Pos(arg)])],
             );
-            Some(PatchOp { path, val: v, cond: None })
+            Some(PatchOp {
+                path,
+                val: v,
+                cond: None,
+            })
         }
         // `.unset(key)` — append the key onto the path and delete it.
         "unset" => {
             let key = match arg_expr(args.first()?) {
-                Expr::Str(s)     => s.clone(),
-                Expr::Ident(s)   => s.clone(),
-                _                => return None,
+                Expr::Str(s) => s.clone(),
+                Expr::Ident(s) => s.clone(),
+                _ => return None,
             };
             let mut p = path;
             p.push(PathStep::Field(key));
-            Some(PatchOp { path: p, val: Expr::DeleteMark, cond: None })
+            Some(PatchOp {
+                path: p,
+                val: Expr::DeleteMark,
+                cond: None,
+            })
         }
         _ => None,
     }
 }
 
 fn arg_expr(a: &Arg) -> &Expr {
-    match a { Arg::Pos(e) | Arg::Named(_, e) => e }
+    match a {
+        Arg::Pos(e) | Arg::Named(_, e) => e,
+    }
 }
 
 fn parse_postfix_step(pair: Pair<Rule>) -> Vec<Step> {
@@ -551,7 +626,7 @@ fn parse_postfix_step(pair: Pair<Rule>) -> Vec<Step> {
             let mut di = inner_pair.into_inner();
             match di.next() {
                 Some(p) => vec![Step::Descendant(p.as_str().to_string())],
-                None    => vec![Step::DescendAll],
+                None => vec![Step::DescendAll],
             }
         }
         Rule::deep_method => {
@@ -560,10 +635,10 @@ fn parse_postfix_step(pair: Pair<Rule>) -> Vec<Step> {
             let name = mi.next().unwrap().as_str().to_string();
             let args = mi.next().map(parse_arg_list).unwrap_or_default();
             let mapped = match name.as_str() {
-                "find"  | "find_all" | "findAll" => "deep_find".to_string(),
-                "shape"                          => "deep_shape".to_string(),
-                "like"                           => "deep_like".to_string(),
-                other                            => format!("deep_{}", other),
+                "find" | "find_all" | "findAll" => "deep_find".to_string(),
+                "shape" => "deep_shape".to_string(),
+                "like" => "deep_like".to_string(),
+                other => format!("deep_{}", other),
             };
             vec![Step::Method(mapped, args)]
         }
@@ -573,8 +648,11 @@ fn parse_postfix_step(pair: Pair<Rule>) -> Vec<Step> {
         }
         Rule::quantifier => {
             let s = inner_pair.as_str();
-            if s.starts_with('!') { vec![Step::Quantifier(QuantifierKind::One)] }
-            else                  { vec![Step::Quantifier(QuantifierKind::First)] }
+            if s.starts_with('!') {
+                vec![Step::Quantifier(QuantifierKind::One)]
+            } else {
+                vec![Step::Quantifier(QuantifierKind::First)]
+            }
         }
         Rule::method_call => {
             let mut mi = inner_pair.into_inner();
@@ -595,14 +673,17 @@ fn parse_postfix_step(pair: Pair<Rule>) -> Vec<Step> {
             // Desugar: with guard  → .filter(g).map(body)
             //          no guard    → .map(body)
             let mut guard: Option<Expr> = None;
-            let mut body:  Option<Expr> = None;
+            let mut body: Option<Expr> = None;
             let mut saw_if = false;
             for p in inner_pair.into_inner() {
                 match p.as_rule() {
                     Rule::kw_if => saw_if = true,
-                    Rule::expr  => {
-                        if saw_if && guard.is_none() { guard = Some(parse_expr(p)); }
-                        else                         { body  = Some(parse_expr(p)); }
+                    Rule::expr => {
+                        if saw_if && guard.is_none() {
+                            guard = Some(parse_expr(p));
+                        } else {
+                            body = Some(parse_expr(p));
+                        }
                     }
                     _ => {}
                 }
@@ -622,7 +703,7 @@ fn parse_postfix_step(pair: Pair<Rule>) -> Vec<Step> {
 fn parse_bracket(pair: Pair<Rule>) -> Step {
     let inner = pair.into_inner().next().unwrap();
     match inner.as_rule() {
-        Rule::idx_only   => Step::Index(inner.as_str().parse().unwrap()),
+        Rule::idx_only => Step::Index(inner.as_str().parse().unwrap()),
         Rule::slice_full => {
             let mut i = inner.into_inner();
             let a = i.next().unwrap().as_str().parse().ok();
@@ -651,23 +732,23 @@ fn parse_primary(pair: Pair<Rule>) -> Expr {
         pair
     };
     match inner.as_rule() {
-        Rule::literal       => parse_literal(inner),
-        Rule::root          => Expr::Root,
-        Rule::current       => Expr::Current,
-        Rule::ident         => Expr::Ident(inner.as_str().to_string()),
-        Rule::let_expr      => parse_let(inner),
-        Rule::lambda_expr   => parse_lambda(inner),
-        Rule::arrow_lambda  => parse_arrow_lambda(inner),
-        Rule::list_comp     => parse_list_comp(inner),
-        Rule::dict_comp     => parse_dict_comp(inner),
-        Rule::set_comp      => parse_set_comp(inner),
-        Rule::gen_comp      => parse_gen_comp(inner),
+        Rule::literal => parse_literal(inner),
+        Rule::root => Expr::Root,
+        Rule::current => Expr::Current,
+        Rule::ident => Expr::Ident(inner.as_str().to_string()),
+        Rule::let_expr => parse_let(inner),
+        Rule::lambda_expr => parse_lambda(inner),
+        Rule::arrow_lambda => parse_arrow_lambda(inner),
+        Rule::list_comp => parse_list_comp(inner),
+        Rule::dict_comp => parse_dict_comp(inner),
+        Rule::set_comp => parse_set_comp(inner),
+        Rule::gen_comp => parse_gen_comp(inner),
         Rule::obj_construct => parse_obj(inner),
         Rule::arr_construct => parse_arr(inner),
-        Rule::global_call   => parse_global_call(inner),
-        Rule::expr          => parse_expr(inner),
-        Rule::patch_block   => parse_patch(inner),
-        Rule::kw_delete     => Expr::DeleteMark,
+        Rule::global_call => parse_global_call(inner),
+        Rule::expr => parse_expr(inner),
+        Rule::patch_block => parse_patch(inner),
+        Rule::kw_delete => Expr::DeleteMark,
         r => panic!("unexpected primary rule: {:?}", r),
     }
 }
@@ -677,11 +758,11 @@ fn parse_primary(pair: Pair<Rule>) -> Expr {
 fn parse_literal(pair: Pair<Rule>) -> Expr {
     let inner = pair.into_inner().next().unwrap();
     match inner.as_rule() {
-        Rule::lit_null    => Expr::Null,
-        Rule::lit_true    => Expr::Bool(true),
-        Rule::lit_false   => Expr::Bool(false),
-        Rule::lit_int     => Expr::Int(inner.as_str().parse().unwrap()),
-        Rule::lit_float   => Expr::Float(inner.as_str().parse().unwrap()),
+        Rule::lit_null => Expr::Null,
+        Rule::lit_true => Expr::Bool(true),
+        Rule::lit_false => Expr::Bool(false),
+        Rule::lit_int => Expr::Int(inner.as_str().parse().unwrap()),
+        Rule::lit_float => Expr::Float(inner.as_str().parse().unwrap()),
         Rule::lit_fstring => {
             let raw = inner.as_str();
             let content = &raw[2..raw.len() - 1]; // strip f" and "
@@ -692,7 +773,7 @@ fn parse_literal(pair: Pair<Rule>) -> Expr {
             let s = inner.into_inner().next().unwrap();
             let raw = s.as_str();
             // Strip surrounding quotes (now atomic rules, so as_str includes them)
-            Expr::Str(raw[1..raw.len()-1].to_string())
+            Expr::Str(raw[1..raw.len() - 1].to_string())
         }
         r => panic!("unexpected literal rule: {:?}", r),
     }
@@ -719,10 +800,15 @@ fn parse_fstring_content(raw: &str) -> Vec<FStringPart> {
                     let mut depth = 1usize;
                     for c2 in chars.by_ref() {
                         match c2 {
-                            '{' => { depth += 1; inner.push(c2); }
+                            '{' => {
+                                depth += 1;
+                                inner.push(c2);
+                            }
                             '}' => {
                                 depth -= 1;
-                                if depth == 0 { break; }
+                                if depth == 0 {
+                                    break;
+                                }
                                 inner.push(c2);
                             }
                             _ => inner.push(c2),
@@ -755,14 +841,21 @@ fn split_fstring_interp(inner: &str) -> (&str, Option<FmtSpec>) {
     for (i, c) in inner.char_indices() {
         match c {
             '(' | '[' | '{' => depth += 1,
-            ')' | ']' | '}' => { if depth > 0 { depth -= 1; } }
+            ')' | ']' | '}' => {
+                if depth > 0 {
+                    depth -= 1;
+                }
+            }
             '|' if depth == 0 && pipe_pos.is_none() => pipe_pos = Some(i),
             ':' if depth == 0 && colon_pos.is_none() => colon_pos = Some(i),
             _ => {}
         }
     }
     if let Some(p) = pipe_pos {
-        return (&inner[..p], Some(FmtSpec::Pipe(inner[p + 1..].trim().to_string())));
+        return (
+            &inner[..p],
+            Some(FmtSpec::Pipe(inner[p + 1..].trim().to_string())),
+        );
     }
     if let Some(c) = colon_pos {
         return (&inner[..c], Some(FmtSpec::Spec(inner[c + 1..].to_string())));
@@ -775,7 +868,8 @@ fn split_fstring_interp(inner: &str) -> (&str, Option<FmtSpec>) {
 fn parse_let(pair: Pair<Rule>) -> Expr {
     // let_expr = { kw_let ~ let_binding ~ ("," ~ let_binding)* ~ kw_in ~ expr }
     // Desugar multi-binding into nested Let: `let a=x, b=y in body` → Let a x (Let b y body)
-    let inner: Vec<Pair<Rule>> = pair.into_inner()
+    let inner: Vec<Pair<Rule>> = pair
+        .into_inner()
         .filter(|p| !matches!(p.as_rule(), Rule::kw_let | Rule::kw_in))
         .collect();
     let (bindings, body_pair) = inner.split_at(inner.len() - 1);
@@ -784,15 +878,18 @@ fn parse_let(pair: Pair<Rule>) -> Expr {
         let mut bi = b.clone().into_inner();
         let name = bi.next().unwrap().as_str().to_string();
         let init = parse_expr(bi.next().unwrap());
-        Expr::Let { name, init: Box::new(init), body: Box::new(acc) }
+        Expr::Let {
+            name,
+            init: Box::new(init),
+            body: Box::new(acc),
+        }
     })
 }
 
 // ── Lambda ────────────────────────────────────────────────────────────────────
 
 fn parse_lambda(pair: Pair<Rule>) -> Expr {
-    let mut inner = pair.into_inner()
-        .filter(|p| p.as_rule() != Rule::kw_lambda);
+    let mut inner = pair.into_inner().filter(|p| p.as_rule() != Rule::kw_lambda);
     let params_pair = inner.next().unwrap();
     let params: Vec<String> = params_pair
         .into_inner()
@@ -800,7 +897,10 @@ fn parse_lambda(pair: Pair<Rule>) -> Expr {
         .map(|p| p.as_str().to_string())
         .collect();
     let body = parse_expr(inner.next().unwrap());
-    Expr::Lambda { params, body: Box::new(body) }
+    Expr::Lambda {
+        params,
+        body: Box::new(body),
+    }
 }
 
 /// Arrow lambda: `x => body` or `(x, y) => body`.  Lowered to same
@@ -814,7 +914,10 @@ fn parse_arrow_lambda(pair: Pair<Rule>) -> Expr {
         .map(|p| p.as_str().to_string())
         .collect();
     let body = parse_expr(inner.next().unwrap());
-    Expr::Lambda { params, body: Box::new(body) }
+    Expr::Lambda {
+        params,
+        body: Box::new(body),
+    }
 }
 
 // ── Comprehensions ────────────────────────────────────────────────────────────
@@ -837,17 +940,28 @@ fn parse_list_comp(pair: Pair<Rule>) -> Expr {
     let vars = parse_comp_vars(inner.next().unwrap());
     let iter = parse_expr(inner.next().unwrap());
     let cond = inner.next().map(|p| Box::new(parse_expr(p)));
-    Expr::ListComp { expr: Box::new(expr), vars, iter: Box::new(iter), cond }
+    Expr::ListComp {
+        expr: Box::new(expr),
+        vars,
+        iter: Box::new(iter),
+        cond,
+    }
 }
 
 fn parse_dict_comp(pair: Pair<Rule>) -> Expr {
     let mut inner = comp_inner_filter(pair);
-    let key  = parse_expr(inner.next().unwrap());
-    let val  = parse_expr(inner.next().unwrap());
+    let key = parse_expr(inner.next().unwrap());
+    let val = parse_expr(inner.next().unwrap());
     let vars = parse_comp_vars(inner.next().unwrap());
     let iter = parse_expr(inner.next().unwrap());
     let cond = inner.next().map(|p| Box::new(parse_expr(p)));
-    Expr::DictComp { key: Box::new(key), val: Box::new(val), vars, iter: Box::new(iter), cond }
+    Expr::DictComp {
+        key: Box::new(key),
+        val: Box::new(val),
+        vars,
+        iter: Box::new(iter),
+        cond,
+    }
 }
 
 fn parse_set_comp(pair: Pair<Rule>) -> Expr {
@@ -856,7 +970,12 @@ fn parse_set_comp(pair: Pair<Rule>) -> Expr {
     let vars = parse_comp_vars(inner.next().unwrap());
     let iter = parse_expr(inner.next().unwrap());
     let cond = inner.next().map(|p| Box::new(parse_expr(p)));
-    Expr::SetComp { expr: Box::new(expr), vars, iter: Box::new(iter), cond }
+    Expr::SetComp {
+        expr: Box::new(expr),
+        vars,
+        iter: Box::new(iter),
+        cond,
+    }
 }
 
 fn parse_gen_comp(pair: Pair<Rule>) -> Expr {
@@ -865,13 +984,19 @@ fn parse_gen_comp(pair: Pair<Rule>) -> Expr {
     let vars = parse_comp_vars(inner.next().unwrap());
     let iter = parse_expr(inner.next().unwrap());
     let cond = inner.next().map(|p| Box::new(parse_expr(p)));
-    Expr::GenComp { expr: Box::new(expr), vars, iter: Box::new(iter), cond }
+    Expr::GenComp {
+        expr: Box::new(expr),
+        vars,
+        iter: Box::new(iter),
+        cond,
+    }
 }
 
 // ── Object / array construction ────────────────────────────────────────────────
 
 fn parse_obj(pair: Pair<Rule>) -> Expr {
-    let fields = pair.into_inner()
+    let fields = pair
+        .into_inner()
         .filter(|p| p.as_rule() == Rule::obj_field)
         .map(parse_obj_field)
         .collect();
@@ -891,11 +1016,21 @@ fn parse_obj_field(pair: Pair<Rule>) -> ObjField {
             let mut i = inner.into_inner();
             let key = obj_key_str(i.next().unwrap());
             let val = parse_expr(i.next().unwrap());
-            ObjField::Kv { key, val, optional: true, cond: None }
+            ObjField::Kv {
+                key,
+                val,
+                optional: true,
+                cond: None,
+            }
         }
         Rule::obj_field_opt => {
             let key = obj_key_str(inner.into_inner().next().unwrap());
-            ObjField::Kv { key: key.clone(), val: Expr::Ident(key), optional: true, cond: None }
+            ObjField::Kv {
+                key: key.clone(),
+                val: Expr::Ident(key),
+                optional: true,
+                cond: None,
+            }
         }
         Rule::obj_field_spread => {
             let expr = parse_expr(inner.into_inner().next().unwrap());
@@ -915,15 +1050,18 @@ fn parse_obj_field(pair: Pair<Rule>) -> ObjField {
                     Rule::kw_when => saw_when = true,
                     Rule::obj_key_expr => key = Some(obj_key_str(p)),
                     Rule::expr => {
-                        if saw_when { cond = Some(parse_expr(p)); }
-                        else        { val  = Some(parse_expr(p)); }
+                        if saw_when {
+                            cond = Some(parse_expr(p));
+                        } else {
+                            val = Some(parse_expr(p));
+                        }
                     }
                     _ => {}
                 }
             }
             ObjField::Kv {
-                key:      key.expect("obj_field_kv missing key"),
-                val:      val.expect("obj_field_kv missing val"),
+                key: key.expect("obj_field_kv missing key"),
+                val: val.expect("obj_field_kv missing val"),
                 optional: false,
                 cond,
             }
@@ -943,14 +1081,15 @@ fn obj_key_str(pair: Pair<Rule>) -> String {
         Rule::lit_str => {
             let s = inner.into_inner().next().unwrap();
             let raw = s.as_str();
-            raw[1..raw.len()-1].to_string()
+            raw[1..raw.len() - 1].to_string()
         }
         r => panic!("unexpected obj_key_expr rule: {:?}", r),
     }
 }
 
 fn parse_arr(pair: Pair<Rule>) -> Expr {
-    let elems = pair.into_inner()
+    let elems = pair
+        .into_inner()
         .filter(|p| p.as_rule() == Rule::arr_elem)
         .map(|elem| {
             let inner = elem.into_inner().next().unwrap();
@@ -982,12 +1121,14 @@ fn parse_patch(pair: Pair<Rule>) -> Expr {
     let mut ops: Vec<PatchOp> = Vec::new();
     for p in pair.into_inner() {
         match p.as_rule() {
-            Rule::kw_patch   => {}
+            Rule::kw_patch => {}
             Rule::patch_field => ops.push(parse_patch_field(p)),
             _ => {
                 // This branch handles the root expression (coalesce_expr and
                 // any of its descendants that parse_expr accepts).
-                if root.is_none() { root = Some(parse_expr(p)); }
+                if root.is_none() {
+                    root = Some(parse_expr(p));
+                }
             }
         }
     }
@@ -999,23 +1140,26 @@ fn parse_patch(pair: Pair<Rule>) -> Expr {
 
 fn parse_patch_field(pair: Pair<Rule>) -> PatchOp {
     let mut path: Vec<PathStep> = Vec::new();
-    let mut val:  Option<Expr> = None;
+    let mut val: Option<Expr> = None;
     let mut cond: Option<Expr> = None;
     let mut saw_when = false;
     for p in pair.into_inner() {
         match p.as_rule() {
             Rule::patch_key => path = parse_patch_key(p),
-            Rule::kw_when   => saw_when = true,
+            Rule::kw_when => saw_when = true,
             Rule::expr => {
-                if saw_when { cond = Some(parse_expr(p)); }
-                else        { val  = Some(parse_expr(p)); }
+                if saw_when {
+                    cond = Some(parse_expr(p));
+                } else {
+                    val = Some(parse_expr(p));
+                }
             }
             _ => {}
         }
     }
     PatchOp {
         path,
-        val:  val.expect("patch_field missing val"),
+        val: val.expect("patch_field missing val"),
         cond,
     }
 }
@@ -1052,7 +1196,9 @@ fn parse_patch_step(pair: Pair<Rule>) -> PathStep {
             // `[* if expr]`
             let mut e: Option<Expr> = None;
             for p in inner.into_inner() {
-                if p.as_rule() == Rule::expr { e = Some(parse_expr(p)); }
+                if p.as_rule() == Rule::expr {
+                    e = Some(parse_expr(p));
+                }
             }
             PathStep::WildcardFilter(Box::new(e.expect("pp_wild_filter missing expr")))
         }
@@ -1079,12 +1225,10 @@ fn parse_arg(pair: Pair<Rule>) -> Arg {
         Rule::named_arg => {
             let mut i = inner.into_inner();
             let name = i.next().unwrap().as_str().to_string();
-            let val  = parse_expr(i.next().unwrap());
+            let val = parse_expr(i.next().unwrap());
             Arg::Named(name, val)
         }
-        Rule::pos_arg => {
-            Arg::Pos(parse_expr(inner.into_inner().next().unwrap()))
-        }
+        Rule::pos_arg => Arg::Pos(parse_expr(inner.into_inner().next().unwrap())),
         r => panic!("unexpected arg rule: {:?}", r),
     }
 }

@@ -13,10 +13,10 @@
 
 use std::sync::Arc;
 
-use crate::ast::{Arg, Expr, ObjField};
-use super::{Env, EvalError, apply_item_mut, vm_eval};
-use super::value::Val;
 use super::util::{is_truthy, val_to_key, vals_eq};
+use super::value::Val;
+use super::{apply_item_mut, vm_eval, Env, EvalError};
+use crate::ast::{Arg, Expr, ObjField};
 
 macro_rules! err {
     ($($t:tt)*) => { Err(EvalError(format!($($t)*))) };
@@ -25,14 +25,20 @@ macro_rules! err {
 // ── unique_by ────────────────────────────────────────────────────────────────
 
 pub fn unique_by(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-    let keyfn = args.first().ok_or_else(|| EvalError("unique_by: requires key fn".into()))?;
-    let items = recv.into_vec().ok_or_else(|| EvalError("unique_by: expected array".into()))?;
+    let keyfn = args
+        .first()
+        .ok_or_else(|| EvalError("unique_by: requires key fn".into()))?;
+    let items = recv
+        .into_vec()
+        .ok_or_else(|| EvalError("unique_by: expected array".into()))?;
     let mut seen = std::collections::HashSet::new();
-    let mut out  = Vec::with_capacity(items.len());
+    let mut out = Vec::with_capacity(items.len());
     let mut env_mut = env.clone();
     for item in items {
         let k = apply_item_mut(item.clone(), keyfn, &mut env_mut)?;
-        if seen.insert(val_to_key(&k)) { out.push(item); }
+        if seen.insert(val_to_key(&k)) {
+            out.push(item);
+        }
     }
     Ok(Val::arr(out))
 }
@@ -47,15 +53,19 @@ pub fn unique_by(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
 // their children are already normalised when they see a composite node.
 
 pub fn walk(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-    let fn_arg = args.first().ok_or_else(|| EvalError("walk: requires fn".into()))?;
+    let fn_arg = args
+        .first()
+        .ok_or_else(|| EvalError("walk: requires fn".into()))?;
     let mut env_mut = env.clone();
-    walk_impl(recv, fn_arg, &mut env_mut, /*pre=*/false)
+    walk_impl(recv, fn_arg, &mut env_mut, /*pre=*/ false)
 }
 
 pub fn walk_pre_fn(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-    let fn_arg = args.first().ok_or_else(|| EvalError("walk_pre: requires fn".into()))?;
+    let fn_arg = args
+        .first()
+        .ok_or_else(|| EvalError("walk_pre: requires fn".into()))?;
     let mut env_mut = env.clone();
-    walk_impl(recv, fn_arg, &mut env_mut, /*pre=*/true)
+    walk_impl(recv, fn_arg, &mut env_mut, /*pre=*/ true)
 }
 
 fn walk_impl(v: Val, fn_arg: &Arg, env: &mut super::Env, pre: bool) -> Result<Val, EvalError> {
@@ -68,17 +78,23 @@ fn walk_impl(v: Val, fn_arg: &Arg, env: &mut super::Env, pre: bool) -> Result<Va
         Val::Arr(a) => {
             let items = Arc::try_unwrap(a).unwrap_or_else(|arc| (*arc).clone());
             let mut out = Vec::with_capacity(items.len());
-            for child in items { out.push(walk_impl(child, fn_arg, env, pre)?); }
+            for child in items {
+                out.push(walk_impl(child, fn_arg, env, pre)?);
+            }
             Val::arr(out)
         }
         Val::IntVec(a) => {
             let mut out = Vec::with_capacity(a.len());
-            for n in a.iter() { out.push(walk_impl(Val::Int(*n), fn_arg, env, pre)?); }
+            for n in a.iter() {
+                out.push(walk_impl(Val::Int(*n), fn_arg, env, pre)?);
+            }
             Val::arr(out)
         }
         Val::FloatVec(a) => {
             let mut out = Vec::with_capacity(a.len());
-            for f in a.iter() { out.push(walk_impl(Val::Float(*f), fn_arg, env, pre)?); }
+            for f in a.iter() {
+                out.push(walk_impl(Val::Float(*f), fn_arg, env, pre)?);
+            }
             Val::arr(out)
         }
         Val::Obj(m) => {
@@ -101,10 +117,10 @@ fn walk_impl(v: Val, fn_arg: &Arg, env: &mut super::Env, pre: bool) -> Result<Va
 // ── collect ──────────────────────────────────────────────────────────────────
 
 pub fn collect(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    use crate::composed::{Stage as _, StageOutput, CollectVal};
+    use crate::composed::{CollectVal, Stage as _, StageOutput};
     let owned: Option<Val> = match CollectVal.apply(&recv) {
         StageOutput::Pass(c) => Some(c.into_owned()),
-        _                    => None,
+        _ => None,
     };
     Ok(owned.unwrap_or(recv))
 }
@@ -114,8 +130,16 @@ pub fn collect(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
 fn walk_pre<F: FnMut(&Val)>(v: &Val, f: &mut F) {
     f(v);
     match v {
-        Val::Arr(a) => for c in a.iter() { walk_pre(c, f); },
-        Val::Obj(m) => for (_, c) in m.iter() { walk_pre(c, f); },
+        Val::Arr(a) => {
+            for c in a.iter() {
+                walk_pre(c, f);
+            }
+        }
+        Val::Obj(m) => {
+            for (_, c) in m.iter() {
+                walk_pre(c, f);
+            }
+        }
         _ => {}
     }
 }
@@ -131,22 +155,37 @@ pub fn deep_find(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     // place, skip the SmallVec clone inside `with_current`.  For lambdas
     // fall back to `apply_item`.
     let all_bare = args.iter().all(|a| {
-        !matches!(a, Arg::Pos(Expr::Lambda { .. }) | Arg::Named(_, Expr::Lambda { .. }))
+        !matches!(
+            a,
+            Arg::Pos(Expr::Lambda { .. }) | Arg::Named(_, Expr::Lambda { .. })
+        )
     });
     let mut out = Vec::new();
     let mut err_cell: Option<EvalError> = None;
     if all_bare {
         let mut scratch = env.clone();
-        let exprs: Vec<&Expr> = args.iter().map(|a| match a {
-            Arg::Pos(e) | Arg::Named(_, e) => e,
-        }).collect();
+        let exprs: Vec<&Expr> = args
+            .iter()
+            .map(|a| match a {
+                Arg::Pos(e) | Arg::Named(_, e) => e,
+            })
+            .collect();
         walk_pre(&recv, &mut |node| {
-            if err_cell.is_some() { return; }
+            if err_cell.is_some() {
+                return;
+            }
             scratch.current = node.clone();
             for e in &exprs {
                 match vm_eval(e, &scratch) {
-                    Ok(v)  => if !is_truthy(&v) { return; }
-                    Err(err) => { err_cell = Some(err); return; }
+                    Ok(v) => {
+                        if !is_truthy(&v) {
+                            return;
+                        }
+                    }
+                    Err(err) => {
+                        err_cell = Some(err);
+                        return;
+                    }
                 }
             }
             out.push(node.clone());
@@ -154,34 +193,49 @@ pub fn deep_find(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     } else {
         let mut env_mut = env.clone();
         walk_pre(&recv, &mut |node| {
-            if err_cell.is_some() { return; }
+            if err_cell.is_some() {
+                return;
+            }
             for p in args {
                 match apply_item_mut(node.clone(), p, &mut env_mut) {
-                    Ok(v)  => if !is_truthy(&v) { return; }
-                    Err(e) => { err_cell = Some(e); return; }
+                    Ok(v) => {
+                        if !is_truthy(&v) {
+                            return;
+                        }
+                    }
+                    Err(e) => {
+                        err_cell = Some(e);
+                        return;
+                    }
                 }
             }
             out.push(node.clone());
         });
     }
-    if let Some(e) = err_cell { return Err(e); }
+    if let Some(e) = err_cell {
+        return Err(e);
+    }
     Ok(Val::arr(out))
 }
 
 // ── Pattern extraction from object-literal arg ───────────────────────────────
 
 fn pattern_keys_only(arg: &Arg) -> Result<Vec<Arc<str>>, EvalError> {
-    let e = match arg { Arg::Pos(e) | Arg::Named(_, e) => e };
+    let e = match arg {
+        Arg::Pos(e) | Arg::Named(_, e) => e,
+    };
     let fields = match e {
         Expr::Object(fs) => fs,
         _ => return err!("shape: expected `{{k1, k2, ...}}` object pattern"),
     };
-    if fields.is_empty() { return err!("shape: empty pattern"); }
+    if fields.is_empty() {
+        return err!("shape: empty pattern");
+    }
     let mut keys = Vec::with_capacity(fields.len());
     for f in fields {
         match f {
-            ObjField::Short(k)             => keys.push(Arc::from(k.as_str())),
-            ObjField::Kv { key, val, .. }  => {
+            ObjField::Short(k) => keys.push(Arc::from(k.as_str())),
+            ObjField::Kv { key, val, .. } => {
                 if !matches!(val, Expr::Ident(n) if n == key) {
                     return err!("shape: pattern fields must be bare identifiers");
                 }
@@ -194,12 +248,16 @@ fn pattern_keys_only(arg: &Arg) -> Result<Vec<Arc<str>>, EvalError> {
 }
 
 fn pattern_key_literals(arg: &Arg, env: &Env) -> Result<Vec<(Arc<str>, Val)>, EvalError> {
-    let e = match arg { Arg::Pos(e) | Arg::Named(_, e) => e };
+    let e = match arg {
+        Arg::Pos(e) | Arg::Named(_, e) => e,
+    };
     let fields = match e {
         Expr::Object(fs) => fs,
         _ => return err!("like: expected `{{k: lit, ...}}` object pattern"),
     };
-    if fields.is_empty() { return err!("like: empty pattern"); }
+    if fields.is_empty() {
+        return err!("like: empty pattern");
+    }
     let mut out = Vec::with_capacity(fields.len());
     for f in fields {
         match f {
@@ -221,12 +279,16 @@ fn pattern_key_literals(arg: &Arg, env: &Env) -> Result<Vec<(Arc<str>, Val)>, Ev
 
 pub fn deep_shape(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     let _ = env;
-    let arg = args.first().ok_or_else(|| EvalError("shape: requires pattern".into()))?;
+    let arg = args
+        .first()
+        .ok_or_else(|| EvalError("shape: requires pattern".into()))?;
     let keys = pattern_keys_only(arg)?;
     let mut out = Vec::new();
     walk_pre(&recv, &mut |node| {
         if let Val::Obj(m) = node {
-            if keys.iter().all(|k| m.contains_key(k.as_ref())) { out.push(node.clone()); }
+            if keys.iter().all(|k| m.contains_key(k.as_ref())) {
+                out.push(node.clone());
+            }
         }
     });
     Ok(Val::arr(out))
@@ -239,12 +301,16 @@ pub fn deep_shape(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> 
 // steps instead of hanging.
 
 pub fn rec(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-    let step = args.first().ok_or_else(|| EvalError("rec: requires step expression".into()))?;
+    let step = args
+        .first()
+        .ok_or_else(|| EvalError("rec: requires step expression".into()))?;
     let mut env_mut = env.clone();
     let mut cur = recv;
     for _ in 0..10_000 {
         let next = apply_item_mut(cur.clone(), step, &mut env_mut)?;
-        if vals_eq(&cur, &next) { return Ok(next); }
+        if vals_eq(&cur, &next) {
+            return Ok(next);
+        }
         cur = next;
     }
     err!("rec: exceeded 10000 iterations without reaching fixpoint")
@@ -257,7 +323,9 @@ pub fn rec(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
 // received value.
 
 pub fn trace_path(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-    let pred = args.first().ok_or_else(|| EvalError("trace_path: requires predicate".into()))?;
+    let pred = args
+        .first()
+        .ok_or_else(|| EvalError("trace_path: requires predicate".into()))?;
     let mut env_mut = env.clone();
     let mut out = Vec::new();
     trace_walk(&recv, String::from("$"), pred, &mut env_mut, &mut out)?;
@@ -271,7 +339,9 @@ fn trace_walk(
     env: &mut super::Env,
     out: &mut Vec<Val>,
 ) -> Result<(), EvalError> {
-    let matched = apply_item_mut(v.clone(), pred, env).map(|r| is_truthy(&r)).unwrap_or(false);
+    let matched = apply_item_mut(v.clone(), pred, env)
+        .map(|r| is_truthy(&r))
+        .unwrap_or(false);
     if matched {
         let mut row = indexmap::IndexMap::with_capacity(2);
         row.insert(Arc::from("path"), Val::Str(Arc::from(path.as_str())));
@@ -307,17 +377,22 @@ fn trace_walk(
 // ── deep_like ────────────────────────────────────────────────────────────────
 
 pub fn deep_like(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-    let arg  = args.first().ok_or_else(|| EvalError("like: requires pattern".into()))?;
+    let arg = args
+        .first()
+        .ok_or_else(|| EvalError("like: requires pattern".into()))?;
     let pats = pattern_key_literals(arg, env)?;
     let mut out = Vec::new();
     walk_pre(&recv, &mut |node| {
         if let Val::Obj(m) = node {
             let ok = pats.iter().all(|(k, want)| {
-                m.get(k.as_ref()).map(|got| vals_eq(got, want)).unwrap_or(false)
+                m.get(k.as_ref())
+                    .map(|got| vals_eq(got, want))
+                    .unwrap_or(false)
             });
-            if ok { out.push(node.clone()); }
+            if ok {
+                out.push(node.clone());
+            }
         }
     });
     Ok(Val::arr(out))
 }
-

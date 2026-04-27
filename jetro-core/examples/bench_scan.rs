@@ -7,9 +7,9 @@
 //! committing to further SIMD work.  Each query is warmed once and then
 //! timed over `ITERS` repetitions; we report best + median + mean.
 
-use std::time::Instant;
 use jetro_core::Jetro;
 use serde_json::{json, Value};
+use std::time::Instant;
 
 const ITERS: usize = 5;
 
@@ -43,7 +43,11 @@ fn synth_doc(n_groups: usize, per_group: usize) -> Value {
 }
 
 #[allow(dead_code)]
-struct Stats { best: u128, median: u128, mean: u128 }
+struct Stats {
+    best: u128,
+    median: u128,
+    mean: u128,
+}
 
 fn run<F: FnMut() -> Value>(name: &str, mut f: F) -> Stats {
     // Warmup.
@@ -58,7 +62,10 @@ fn run<F: FnMut() -> Value>(name: &str, mut f: F) -> Stats {
     let best = samples[0];
     let median = samples[samples.len() / 2];
     let mean = samples.iter().sum::<u128>() / samples.len() as u128;
-    println!("  {:<34} best {:>8}µs  median {:>8}µs  mean {:>8}µs", name, best, median, mean);
+    println!(
+        "  {:<34} best {:>8}µs  median {:>8}µs  mean {:>8}µs",
+        name, best, median, mean
+    );
     Stats { best, median, mean }
 }
 
@@ -69,7 +76,10 @@ fn main() {
     let doc = synth_doc(n_groups, per_group);
     let bytes = serde_json::to_vec(&doc).unwrap();
     let mb = bytes.len() as f64 / 1_048_576.0;
-    println!("doc: {} groups × {} rows = {} rows, {:.2} MB", n_groups, per_group, n_rows, mb);
+    println!(
+        "doc: {} groups × {} rows = {} rows, {:.2} MB",
+        n_groups, per_group, n_rows, mb
+    );
     println!("iters: {} (best/median/mean across repetitions)\n", ITERS);
 
     let j_tree = Jetro::new(doc.clone());
@@ -77,56 +87,64 @@ fn main() {
 
     println!("Q1  $..id                          (collect all leaf ids)");
     let a = run("tree_walker", || j_tree.collect("$..id").unwrap());
-    let b = run("byte_scan",   || j_scan.collect("$..id").unwrap());
+    let b = run("byte_scan", || j_scan.collect("$..id").unwrap());
     speedup(&a, &b);
 
     println!("\nQ2  $..id.sum()                    (scan + aggregate)");
     let a = run("tree_walker", || j_tree.collect("$..id.sum()").unwrap());
-    let b = run("byte_scan",   || j_scan.collect("$..id.sum()").unwrap());
+    let b = run("byte_scan", || j_scan.collect("$..id.sum()").unwrap());
     speedup(&a, &b);
 
     println!("\nQ3  $..type.filter(@ == \"action\")  (literal-match path, string)");
-    let a = run("tree_walker", || j_tree.collect(r#"$..type.filter(@ == "action")"#).unwrap());
-    let b = run("byte_scan",   || j_scan.collect(r#"$..type.filter(@ == "action")"#).unwrap());
+    let a = run("tree_walker", || {
+        j_tree.collect(r#"$..type.filter(@ == "action")"#).unwrap()
+    });
+    let b = run("byte_scan", || {
+        j_scan.collect(r#"$..type.filter(@ == "action")"#).unwrap()
+    });
     speedup(&a, &b);
 
     println!("\nQ4  $..value.filter(@ == 42)       (literal-match path, int)");
-    let a = run("tree_walker", || j_tree.collect("$..value.filter(@ == 42)").unwrap());
-    let b = run("byte_scan",   || j_scan.collect("$..value.filter(@ == 42)").unwrap());
+    let a = run("tree_walker", || {
+        j_tree.collect("$..value.filter(@ == 42)").unwrap()
+    });
+    let b = run("byte_scan", || {
+        j_scan.collect("$..value.filter(@ == 42)").unwrap()
+    });
     speedup(&a, &b);
 
     println!("\nQ5  $..tag                         (deeply nested key)");
     let a = run("tree_walker", || j_tree.collect("$..tag").unwrap());
-    let b = run("byte_scan",   || j_scan.collect("$..tag").unwrap());
+    let b = run("byte_scan", || j_scan.collect("$..tag").unwrap());
     speedup(&a, &b);
 
     println!("\nQ6  $..missing_key                 (zero hits — early exit behaviour)");
     let a = run("tree_walker", || j_tree.collect("$..missing_key").unwrap());
-    let b = run("byte_scan",   || j_scan.collect("$..missing_key").unwrap());
+    let b = run("byte_scan", || j_scan.collect("$..missing_key").unwrap());
     speedup(&a, &b);
 
     println!("\nQ7a $..find(@.type == \"action\")   (enclosing-obj SIMD scan)");
     let q = r#"$..find(@.type == "action")"#;
     let a = run("tree_walker", || j_tree.collect(q).unwrap());
-    let b = run("byte_scan",   || j_scan.collect(q).unwrap());
+    let b = run("byte_scan", || j_scan.collect(q).unwrap());
     speedup(&a, &b);
 
     println!("\nQ7b $..find(@.id == 100)            (enclosing-obj SIMD scan, int)");
     let q = "$..find(@.id == 100)";
     let a = run("tree_walker", || j_tree.collect(q).unwrap());
-    let b = run("byte_scan",   || j_scan.collect(q).unwrap());
+    let b = run("byte_scan", || j_scan.collect(q).unwrap());
     speedup(&a, &b);
 
     println!("\nQ7c $..find(@.type==\"action\", @.device==\"mobile\")  (multi-pred AND scan)");
     let q = r#"$..find(@.type == "action", @.device == "mobile")"#;
     let a = run("tree_walker", || j_tree.collect(q).unwrap());
-    let b = run("byte_scan",   || j_scan.collect(q).unwrap());
+    let b = run("byte_scan", || j_scan.collect(q).unwrap());
     speedup(&a, &b);
 
     println!("\nQ7  $..groups.first()..rows.first()..tag   (Route C byte chain)");
     let q = "$..groups.first()..rows.first()..tag";
     let a = run("tree_walker", || j_tree.collect(q).unwrap());
-    let b = run("byte_scan",   || j_scan.collect(q).unwrap());
+    let b = run("byte_scan", || j_scan.collect(q).unwrap());
     speedup(&a, &b);
 
     // Baseline: raw serde_json parse of the same doc.

@@ -96,58 +96,6 @@ pub enum ObjVecCol {
     Bools(Vec<bool>),
 }
 
-/// Probe an Array of Objects in a `TapeData` for uniform shape (same
-/// `len`, same key sequence in same order).  Returns the shared key
-/// list as borrowed `&str` slices into `tape.bytes_buf` when promotion
-/// is safe; `None` otherwise.
-#[cfg(feature = "simd-json")]
-pub fn probe_obj_shape_tape<'a>(
-    tape: &'a std::sync::Arc<crate::strref::TapeData>,
-    start: usize,
-    n_entries: usize,
-    first_len: usize,
-) -> Option<Vec<&'a str>> {
-    use crate::strref::TapeNode;
-    let mut keys: Vec<&'a str> = Vec::with_capacity(first_len);
-    if !matches!(tape.nodes[start], TapeNode::Object { len, .. } if len as usize == first_len) {
-        return None;
-    }
-    let mut idx = start + 1;
-    for _ in 0..first_len {
-        match tape.nodes[idx] {
-            TapeNode::StringRef { start, end } => {
-                keys.push(tape.str_at_range(start as usize, end as usize))
-            }
-            _ => return None,
-        }
-        idx += 1;
-        idx += tape.span(idx);
-    }
-    let mut entry_start = idx;
-    for _ in 1..n_entries {
-        match tape.nodes[entry_start] {
-            TapeNode::Object { len, .. } if len as usize == first_len => {}
-            _ => return None,
-        }
-        let mut j = entry_start + 1;
-        for k in 0..first_len {
-            match tape.nodes[j] {
-                TapeNode::StringRef { start, end } => {
-                    let s = tape.str_at_range(start as usize, end as usize);
-                    if s != keys[k] {
-                        return None;
-                    }
-                }
-                _ => return None,
-            }
-            j += 1;
-            j += tape.span(j);
-        }
-        entry_start = j;
-    }
-    Some(keys)
-}
-
 /// Build typed-column mirror from a row-major Val cells matrix.
 /// Same logic as the pipeline-side helper; lives here so the simd-json
 /// promotion path (`from_simd_tape`) can light up typed kernels at
@@ -297,19 +245,6 @@ impl Val {
             _ => None,
         }
     }
-
-    /// Extract an owning `Arc<str>` — cheap Arc bump for `Val::Str` /
-    /// `Val::StrSlice` covering the full parent, allocates a fresh
-    /// buffer for a partial `StrSlice`.  Returns `None` for non-string
-    /// variants.
-    #[inline]
-    pub fn to_arc_str(&self) -> Option<Arc<str>> {
-        match self {
-            Val::Str(s) => Some(Arc::clone(s)),
-            Val::StrSlice(r) => Some(r.to_arc()),
-            _ => None,
-        }
-    }
 }
 
 // ── Constants (avoid heap allocation for common nulls) ────────────────────────
@@ -422,10 +357,6 @@ impl Val {
         matches!(self, Val::Null)
     }
     #[inline]
-    pub fn is_bool(&self) -> bool {
-        matches!(self, Val::Bool(_))
-    }
-    #[inline]
     pub fn is_number(&self) -> bool {
         matches!(self, Val::Int(_) | Val::Float(_))
     }
@@ -440,10 +371,6 @@ impl Val {
             Val::Arr(_) | Val::IntVec(_) | Val::FloatVec(_) | Val::StrVec(_) | Val::StrSliceVec(_)
         )
     }
-    #[inline]
-    pub fn is_object(&self) -> bool {
-        matches!(self, Val::Obj(_) | Val::ObjSmall(_))
-    }
 
     /// Array length — also works on columnar variants.
     #[inline]
@@ -456,15 +383,6 @@ impl Val {
             Val::StrSliceVec(a) => Some(a.len()),
             Val::ObjVec(d) => Some(d.nrows()),
             _ => None,
-        }
-    }
-
-    #[inline]
-    pub fn as_bool(&self) -> Option<bool> {
-        if let Val::Bool(b) = self {
-            Some(*b)
-        } else {
-            None
         }
     }
 
@@ -524,37 +442,6 @@ impl Val {
         }
     }
 
-    /// Force-materialize a columnar variant to `Val::Arr`.  No-op for `Arr`.
-    pub fn into_arr(self) -> Val {
-        match self {
-            Val::IntVec(a) => {
-                let v: Vec<Val> = a.iter().map(|n| Val::Int(*n)).collect();
-                Val::arr(v)
-            }
-            Val::FloatVec(a) => {
-                let v: Vec<Val> = a.iter().map(|f| Val::Float(*f)).collect();
-                Val::arr(v)
-            }
-            Val::StrVec(a) => {
-                let v: Vec<Val> = a.iter().map(|s| Val::Str(s.clone())).collect();
-                Val::arr(v)
-            }
-            Val::ObjVec(d) => {
-                let n = d.nrows();
-                let mut out: Vec<Val> = Vec::with_capacity(n);
-                for row in 0..n {
-                    let mut m: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(d.keys.len());
-                    for (i, k) in d.keys.iter().enumerate() {
-                        m.insert(Arc::clone(k), d.cell(row, i).clone());
-                    }
-                    out.push(Val::Obj(Arc::new(m)));
-                }
-                Val::arr(out)
-            }
-            other => other,
-        }
-    }
-
     pub fn as_array_mut(&mut self) -> Option<&mut Vec<Val>> {
         if let Val::Arr(a) = self {
             Some(Arc::make_mut(a))
@@ -567,14 +454,6 @@ impl Val {
     pub fn as_object(&self) -> Option<&IndexMap<Arc<str>, Val>> {
         if let Val::Obj(m) = self {
             Some(m)
-        } else {
-            None
-        }
-    }
-
-    pub fn as_object_mut(&mut self) -> Option<&mut IndexMap<Arc<str>, Val>> {
-        if let Val::Obj(m) = self {
-            Some(Arc::make_mut(m))
         } else {
             None
         }
@@ -961,24 +840,12 @@ impl Val {
         serde_json::to_vec(&ValRef(self)).unwrap_or_default()
     }
 
-    /// Stream `self` as JSON into an `io::Write` sink.
-    pub fn write_json<W: std::io::Write>(&self, w: W) -> serde_json::Result<()> {
-        serde_json::to_writer(w, &ValRef(self))
-    }
-
     /// Parse JSON text into `Val` directly — one pass, no intermediate
     /// `serde_json::Value` tree.  Preferred over the
     /// `serde_json::from_str -> serde_json::Value -> Val::from` round-trip
     /// for hot `from_json` paths.
     pub fn from_json_str(s: &str) -> serde_json::Result<Val> {
         let mut de = serde_json::Deserializer::from_str(s);
-        let v = Val::deserialize(&mut de)?;
-        de.end()?;
-        Ok(v)
-    }
-
-    pub fn from_json_slice(b: &[u8]) -> serde_json::Result<Val> {
-        let mut de = serde_json::Deserializer::from_slice(b);
         let v = Val::deserialize(&mut de)?;
         de.end()?;
         Ok(v)
@@ -1399,168 +1266,6 @@ impl Val {
         }
     }
 
-    /// Build a `Val` for a single tape subtree rooted at `start`.
-    /// Generic-purpose tape→Val materialiser used by tape-only sink
-    /// paths (e.g. FilterFirst) that need the matching entry as a Val
-    /// without walking the rest of the document.  Recursive walker;
-    /// per-subtree cost proportional to its node count.
-    #[cfg(feature = "simd-json")]
-    pub fn from_tape_node(tape: &std::sync::Arc<crate::strref::TapeData>, start: usize) -> Val {
-        let mut idx = start;
-        Self::tape_walk_subtree(tape, &mut idx)
-    }
-
-    #[cfg(feature = "simd-json")]
-    fn tape_walk_subtree(tape: &std::sync::Arc<crate::strref::TapeData>, idx: &mut usize) -> Val {
-        use crate::strref::TapeNode;
-        use simd_json::StaticNode as SN;
-        let here = tape.nodes[*idx];
-        *idx += 1;
-        match here {
-            TapeNode::Static(SN::Null) => Val::Null,
-            TapeNode::Static(SN::Bool(b)) => Val::Bool(b),
-            TapeNode::Static(SN::I64(n)) => Val::Int(n),
-            TapeNode::Static(SN::U64(n)) => {
-                if n <= i64::MAX as u64 {
-                    Val::Int(n as i64)
-                } else {
-                    Val::Float(n as f64)
-                }
-            }
-            TapeNode::Static(SN::F64(f)) => Val::Float(f),
-            TapeNode::StringRef { start, end } => {
-                Val::StrSlice(crate::strref::StrRef::slice_bytes(
-                    Arc::clone(&tape.bytes_buf),
-                    start as usize,
-                    end as usize,
-                ))
-            }
-            TapeNode::Array { len, .. } => {
-                let len = len as usize;
-                if len == 0 {
-                    return Val::arr(Vec::new());
-                }
-                let first_idx = *idx;
-                let first = tape.nodes[first_idx];
-                let mut try_int = matches!(
-                    first,
-                    TapeNode::Static(SN::I64(_)) | TapeNode::Static(SN::U64(_))
-                );
-                let mut try_float = matches!(
-                    first,
-                    TapeNode::Static(SN::I64(_))
-                        | TapeNode::Static(SN::U64(_))
-                        | TapeNode::Static(SN::F64(_))
-                );
-                let mut try_str = matches!(first, TapeNode::StringRef { .. });
-                let mut probe = first_idx;
-                let mut counted = 0usize;
-                while counted < len && (try_int || try_float || try_str) {
-                    match tape.nodes[probe] {
-                        TapeNode::Static(SN::I64(_)) => {
-                            try_str = false;
-                            probe += 1;
-                        }
-                        TapeNode::Static(SN::U64(n)) => {
-                            if n > i64::MAX as u64 {
-                                try_int = false;
-                            }
-                            try_str = false;
-                            probe += 1;
-                        }
-                        TapeNode::Static(SN::F64(_)) => {
-                            try_int = false;
-                            try_str = false;
-                            probe += 1;
-                        }
-                        TapeNode::StringRef { .. } => {
-                            try_int = false;
-                            try_float = false;
-                            probe += 1;
-                        }
-                        TapeNode::Static(_) => {
-                            try_int = false;
-                            try_float = false;
-                            try_str = false;
-                            probe += 1;
-                        }
-                        TapeNode::Array { .. } | TapeNode::Object { .. } => {
-                            try_int = false;
-                            try_float = false;
-                            try_str = false;
-                            probe += tape.span(probe);
-                        }
-                    }
-                    counted += 1;
-                }
-                if try_int {
-                    let mut out: Vec<i64> = Vec::with_capacity(len);
-                    for _ in 0..len {
-                        match tape.nodes[*idx] {
-                            TapeNode::Static(SN::I64(n)) => out.push(n),
-                            TapeNode::Static(SN::U64(n)) if n <= i64::MAX as u64 => {
-                                out.push(n as i64)
-                            }
-                            _ => unreachable!("homogeneity check"),
-                        }
-                        *idx += 1;
-                    }
-                    return Val::IntVec(Arc::new(out));
-                }
-                if try_float {
-                    let mut out: Vec<f64> = Vec::with_capacity(len);
-                    for _ in 0..len {
-                        match tape.nodes[*idx] {
-                            TapeNode::Static(SN::I64(n)) => out.push(n as f64),
-                            TapeNode::Static(SN::U64(n)) => out.push(n as f64),
-                            TapeNode::Static(SN::F64(f)) => out.push(f),
-                            _ => unreachable!("homogeneity check"),
-                        }
-                        *idx += 1;
-                    }
-                    return Val::FloatVec(Arc::new(out));
-                }
-                if try_str {
-                    let mut out: Vec<crate::strref::StrRef> = Vec::with_capacity(len);
-                    for _ in 0..len {
-                        if let TapeNode::StringRef { start, end } = tape.nodes[*idx] {
-                            out.push(crate::strref::StrRef::slice_bytes(
-                                Arc::clone(&tape.bytes_buf),
-                                start as usize,
-                                end as usize,
-                            ));
-                        }
-                        *idx += 1;
-                    }
-                    return Val::StrSliceVec(Arc::new(out));
-                }
-                let mut out: Vec<Val> = Vec::with_capacity(len);
-                for _ in 0..len {
-                    out.push(Self::tape_walk_subtree(tape, idx));
-                }
-                Val::Arr(Arc::new(out))
-            }
-            TapeNode::Object { len, .. } => {
-                let len = len as usize;
-                let mut out: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(len);
-                for _ in 0..len {
-                    let key = match tape.nodes[*idx] {
-                        TapeNode::StringRef { start, end } => unsafe {
-                            std::str::from_utf8_unchecked(
-                                &tape.bytes_buf[start as usize..end as usize],
-                            )
-                        },
-                        _ => unreachable!("object key must be string"),
-                    };
-                    *idx += 1;
-                    let v = Self::tape_walk_subtree(tape, idx);
-                    out.insert(intern_key(key), v);
-                }
-                Val::Obj(Arc::new(out))
-            }
-        }
-    }
-
     /// Walk a `simd_json::BorrowedValue` into a `Val`.
     /// Mirrors `From<&serde_json::Value>` with columnar all-int / all-str
     /// fast paths, but skips the serde_json::Value materialisation step.
@@ -1816,19 +1521,6 @@ mod valref_tests {
         }
         let nested = obj.get("nested").unwrap().as_object().unwrap();
         assert!(matches!(nested.get("name"), Some(Val::StrSlice(_))));
-    }
-
-    #[cfg(feature = "simd-json")]
-    #[test]
-    fn from_tape_node_uses_borrowed_string_slices() {
-        let js = br#"{"outer":{"name":"borrowed"}}"#.to_vec();
-        let tape = crate::strref::TapeData::parse(js).unwrap();
-        let outer_idx = crate::strref::tape_walk_field_chain(&tape, &["outer"]).unwrap();
-        let val = Val::from_tape_node(&tape, outer_idx);
-
-        let obj = val.as_object().unwrap();
-        assert!(matches!(obj.get("name"), Some(Val::StrSlice(_))));
-        assert_eq!(val.to_json_vec(), br#"{"name":"borrowed"}"#);
     }
 
     #[cfg(feature = "simd-json")]

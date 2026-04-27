@@ -34,15 +34,21 @@ pub struct Engine {
 
 impl Engine {
     pub fn new() -> Arc<Self> {
-        Arc::new(Self { vm: Mutex::new(VM::new()) })
+        Arc::new(Self {
+            vm: Mutex::new(VM::new()),
+        })
     }
 
     pub fn with_capacity(compile_cap: usize, path_cap: usize) -> Arc<Self> {
-        Arc::new(Self { vm: Mutex::new(VM::with_capacity(compile_cap, path_cap)) })
+        Arc::new(Self {
+            vm: Mutex::new(VM::with_capacity(compile_cap, path_cap)),
+        })
     }
 
     pub fn with_methods(registry: Arc<MethodRegistry>) -> Arc<Self> {
-        Arc::new(Self { vm: Mutex::new(VM::with_registry(registry)) })
+        Arc::new(Self {
+            vm: Mutex::new(VM::with_registry(registry)),
+        })
     }
 
     /// Parse, compile (cached), and execute `expr` against `doc`.

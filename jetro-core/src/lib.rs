@@ -1,7 +1,7 @@
 //! Jetro core — parser, compiler, and VM for the Jetro JSON query language.
 //!
 //! This crate is storage-free.  For the embedded B+ tree store, named
-//! expressions, graph queries, joins, and [`Session`](../jetrodb/struct.Session.html),
+//! expressions, joins, and [`Session`](../jetrodb/struct.Session.html),
 //! depend on the sibling `jetrodb` crate, or pull the umbrella `jetro` crate
 //! which re-exports both.
 //!
@@ -58,7 +58,6 @@ pub mod engine;
 pub mod eval;
 pub mod expr;
 pub mod functions;
-pub mod graph;
 pub mod parser;
 pub mod pipeline;
 pub mod scan;
@@ -79,7 +78,6 @@ pub use engine::Engine;
 pub use eval::EvalError;
 pub use eval::{Method, MethodRegistry, Val as JetroVal};
 pub use expr::Expr;
-pub use graph::Graph;
 pub use parser::ParseError;
 pub use vm::{Compiler, Program, VM};
 

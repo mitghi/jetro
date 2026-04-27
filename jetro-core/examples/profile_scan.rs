@@ -2,9 +2,9 @@
 //!
 //! Isolates: raw serde parse, bare scan, scan+extract, full Jetro::collect.
 
-use std::time::Instant;
-use jetro_core::{Jetro, scan};
+use jetro_core::{scan, Jetro};
 use serde_json::{json, Value};
+use std::time::Instant;
 
 fn synth(n_groups: usize, per_group: usize) -> Value {
     let mut groups = Vec::with_capacity(n_groups);
@@ -60,8 +60,16 @@ fn main() {
     // warmup
     let _ = j_scan.collect("$..id").unwrap();
     let _ = j_tree.collect("$..id").unwrap();
-    let _ = time("Jetro(scan)::collect('$..id')",      || j_scan.collect("$..id").unwrap());
-    let _ = time("Jetro(tree)::collect('$..id')",      || j_tree.collect("$..id").unwrap());
-    let _ = time("Jetro(scan)::collect('$..missing')", || j_scan.collect("$..missing").unwrap());
-    let _ = time("Jetro(tree)::collect('$..missing')", || j_tree.collect("$..missing").unwrap());
+    let _ = time("Jetro(scan)::collect('$..id')", || {
+        j_scan.collect("$..id").unwrap()
+    });
+    let _ = time("Jetro(tree)::collect('$..id')", || {
+        j_tree.collect("$..id").unwrap()
+    });
+    let _ = time("Jetro(scan)::collect('$..missing')", || {
+        j_scan.collect("$..missing").unwrap()
+    });
+    let _ = time("Jetro(tree)::collect('$..missing')", || {
+        j_tree.collect("$..missing").unwrap()
+    });
 }

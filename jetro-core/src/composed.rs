@@ -120,6 +120,92 @@ impl Stage for Identity {
     }
 }
 
+/// Monoidal composition. `Composed { a, b }.apply(x) = b.apply(a.apply(x))`
+/// with proper handling of Filtered / Many / Done propagation.
+pub struct Composed<A, B> {
+    pub a: A,
+    pub b: B,
+}
+
+impl<A, B> Composed<A, B> {
+    pub fn new(a: A, b: B) -> Self {
+        Self { a, b }
+    }
+}
+
+impl<A: Stage, B: Stage> Stage for Composed<A, B> {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        match self.a.apply(x) {
+            StageOutput::Pass(Cow::Borrowed(v)) => self.b.apply(v),
+            StageOutput::Pass(Cow::Owned(v)) => {
+                // `b` may borrow from v, but v dies at scope end. Force
+                // owned result so the returned lifetime is independent of v.
+                let owned = match self.b.apply(&v) {
+                    StageOutput::Pass(c) => Cow::Owned(c.into_owned()),
+                    StageOutput::Filtered => return StageOutput::Filtered,
+                    StageOutput::Many(items) => {
+                        let mut out: SmallVec<[Cow<'a, Val>; 4]> = SmallVec::new();
+                        for it in items {
+                            out.push(Cow::Owned(it.into_owned()));
+                        }
+                        return StageOutput::Many(out);
+                    }
+                    StageOutput::Done => return StageOutput::Done,
+                };
+                StageOutput::Pass(owned)
+            }
+            StageOutput::Filtered => StageOutput::Filtered,
+            StageOutput::Many(items) => {
+                let mut out: SmallVec<[Cow<'a, Val>; 4]> = SmallVec::new();
+                for it in items {
+                    match it {
+                        Cow::Borrowed(v) => match self.b.apply(v) {
+                            StageOutput::Pass(c) => out.push(c),
+                            StageOutput::Filtered => continue,
+                            StageOutput::Many(more) => out.extend(more),
+                            StageOutput::Done => {
+                                return if out.is_empty() {
+                                    StageOutput::Done
+                                } else {
+                                    StageOutput::Many(out)
+                                };
+                            }
+                        },
+                        Cow::Owned(v) => {
+                            // `v` dies at end of this arm, so promote any
+                            // borrow returned by `b` to an owned value.
+                            match self.b.apply(&v) {
+                                StageOutput::Pass(c) => out.push(Cow::Owned(c.into_owned())),
+                                StageOutput::Filtered => continue,
+                                StageOutput::Many(more) => {
+                                    for m in more {
+                                        out.push(Cow::Owned(m.into_owned()));
+                                    }
+                                }
+                                StageOutput::Done => {
+                                    return if out.is_empty() {
+                                        StageOutput::Done
+                                    } else {
+                                        StageOutput::Many(out)
+                                    };
+                                }
+                            }
+                        }
+                    }
+                }
+                if out.is_empty() {
+                    StageOutput::Filtered
+                } else if out.len() == 1 {
+                    StageOutput::Pass(out.into_iter().next().unwrap())
+                } else {
+                    StageOutput::Many(out)
+                }
+            }
+            StageOutput::Done => StageOutput::Done,
+        }
+    }
+}
+
 // ── Lifted built-in Stage bodies live in `crate::functions` ──────
 //
 // Per `lift_all_builtins.md`: all lifted built-in operator bodies

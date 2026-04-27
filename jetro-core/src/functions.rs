@@ -13,7 +13,6 @@
 //! / `crate::composed::shims::*` paths keep resolving.  Future lifts
 //! land here directly without going through composed.rs.
 
-use smallvec::SmallVec;
 use std::borrow::Cow;
 
 use crate::composed::{Stage, StageOutput};
@@ -3590,98 +3589,6 @@ impl<R, F: Fn(&R) -> bool> Filter<R, F> {
         Self {
             pred,
             _marker: std::marker::PhantomData,
-        }
-    }
-}
-/// Monoidal composition. `Composed { a, b }.apply(x) = b.apply(a.apply(x))`
-/// with proper handling of Filtered / Many / Done propagation.
-///
-/// Trait bounds live on the impl blocks rather than the struct so the
-/// SAME `Composed<A, B>` can chain stages under either the owned
-/// `Stage` trait or the substrate-generic `unified::Stage<R>` trait.
-pub struct Composed<A, B> {
-    pub a: A,
-    pub b: B,
-}
-
-impl<A, B> Composed<A, B> {
-    pub fn new(a: A, b: B) -> Self {
-        Self { a, b }
-    }
-}
-
-impl<A: Stage, B: Stage> Stage for Composed<A, B> {
-    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
-        match self.a.apply(x) {
-            StageOutput::Pass(Cow::Borrowed(v)) => self.b.apply(v),
-            StageOutput::Pass(Cow::Owned(v)) => {
-                // `b` may borrow from v — but v dies at scope end. Force
-                // owned result so lifetime is independent of `v`. The
-                // computed-then-borrow case is rare; common case is
-                // borrow-borrow which is zero-cost above.
-                let owned = match self.b.apply(&v) {
-                    StageOutput::Pass(c) => Cow::Owned(c.into_owned()),
-                    StageOutput::Filtered => return StageOutput::Filtered,
-                    StageOutput::Many(items) => {
-                        let mut out: SmallVec<[Cow<'a, Val>; 4]> = SmallVec::new();
-                        for it in items {
-                            out.push(Cow::Owned(it.into_owned()));
-                        }
-                        return StageOutput::Many(out);
-                    }
-                    StageOutput::Done => return StageOutput::Done,
-                };
-                StageOutput::Pass(owned)
-            }
-            StageOutput::Filtered => StageOutput::Filtered,
-            StageOutput::Many(items) => {
-                let mut out: SmallVec<[Cow<'a, Val>; 4]> = SmallVec::new();
-                for it in items {
-                    match it {
-                        Cow::Borrowed(v) => match self.b.apply(v) {
-                            StageOutput::Pass(c) => out.push(c),
-                            StageOutput::Filtered => continue,
-                            StageOutput::Many(more) => out.extend(more),
-                            StageOutput::Done => {
-                                return if out.is_empty() {
-                                    StageOutput::Done
-                                } else {
-                                    StageOutput::Many(out)
-                                };
-                            }
-                        },
-                        Cow::Owned(v) => {
-                            // `v` is owned and dies at end of this arm; any
-                            // borrow returned by `b.apply(&v)` must be
-                            // promoted to owned so `out` outlives `v`.
-                            match self.b.apply(&v) {
-                                StageOutput::Pass(c) => out.push(Cow::Owned(c.into_owned())),
-                                StageOutput::Filtered => continue,
-                                StageOutput::Many(more) => {
-                                    for m in more {
-                                        out.push(Cow::Owned(m.into_owned()));
-                                    }
-                                }
-                                StageOutput::Done => {
-                                    return if out.is_empty() {
-                                        StageOutput::Done
-                                    } else {
-                                        StageOutput::Many(out)
-                                    };
-                                }
-                            }
-                        }
-                    }
-                }
-                if out.is_empty() {
-                    StageOutput::Filtered
-                } else if out.len() == 1 {
-                    StageOutput::Pass(out.into_iter().next().unwrap())
-                } else {
-                    StageOutput::Many(out)
-                }
-            }
-            StageOutput::Done => StageOutput::Done,
         }
     }
 }

@@ -37,7 +37,7 @@ use crate::Error;
 /// deserialisation error.
 #[derive(Debug, Clone)]
 pub struct Expr<T> {
-    src:     String,
+    src: String,
     _marker: PhantomData<fn() -> T>,
 }
 
@@ -47,21 +47,31 @@ impl<T> Expr<T> {
     pub fn new<S: Into<String>>(src: S) -> Result<Self, Error> {
         let src = src.into();
         parser::parse(&src)?;
-        Ok(Self { src, _marker: PhantomData })
+        Ok(Self {
+            src,
+            _marker: PhantomData,
+        })
     }
 
     /// Raw source text — useful for storing in an [`ExprBucket`] or
     /// for debugging.
-    pub fn as_str(&self) -> &str { &self.src }
+    pub fn as_str(&self) -> &str {
+        &self.src
+    }
 
     /// Discard the phantom output type.  Rarely needed; `cast::<U>`
     /// is usually what callers want.
-    pub fn into_string(self) -> String { self.src }
+    pub fn into_string(self) -> String {
+        self.src
+    }
 
     /// Re-tag the expression with a different phantom output type.
     /// No reparse; cheap.
     pub fn cast<U>(self) -> Expr<U> {
-        Expr { src: self.src, _marker: PhantomData }
+        Expr {
+            src: self.src,
+            _marker: PhantomData,
+        }
     }
 }
 
@@ -96,14 +106,16 @@ impl<T, U> BitOr<Expr<U>> for Expr<T> {
     type Output = Expr<U>;
     fn bitor(self, rhs: Expr<U>) -> Expr<U> {
         Expr {
-            src:     format!("({}) | ({})", self.src, rhs.src),
+            src: format!("({}) | ({})", self.src, rhs.src),
             _marker: PhantomData,
         }
     }
 }
 
 impl<T> AsRef<str> for Expr<T> {
-    fn as_ref(&self) -> &str { &self.src }
+    fn as_ref(&self) -> &str {
+        &self.src
+    }
 }
 
 impl<T> std::fmt::Display for Expr<T> {
@@ -141,15 +153,17 @@ mod tests {
     #[test]
     fn eval_vec() {
         let e: Expr<Vec<String>> = Expr::new("$.users.map(name)").unwrap();
-        let names = e.eval(&json!({
-            "users": [{"name":"a"}, {"name":"b"}]
-        })).unwrap();
+        let names = e
+            .eval(&json!({
+                "users": [{"name":"a"}, {"name":"b"}]
+            }))
+            .unwrap();
         assert_eq!(names, vec!["a", "b"]);
     }
 
     #[test]
     fn pipe_compose() {
-        let a: Expr<Value>    = Expr::new("$.books").unwrap();
+        let a: Expr<Value> = Expr::new("$.books").unwrap();
         let b: Expr<Vec<Value>> = Expr::new("@.filter(price > 10)").unwrap();
         let piped = a | b;
         assert_eq!(piped.as_str(), "($.books) | (@.filter(price > 10))");

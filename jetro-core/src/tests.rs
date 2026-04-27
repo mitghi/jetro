@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
     use crate::query;
+    use serde_json::json;
 
     fn books() -> serde_json::Value {
         json!({
@@ -171,8 +171,14 @@ mod tests {
     #[test]
     fn first_last() {
         let doc = books();
-        assert_eq!(query("$.store.books.first().title", &doc).unwrap(), json!("Dune"));
-        assert_eq!(query("$.store.books.last().title",  &doc).unwrap(), json!("1984"));
+        assert_eq!(
+            query("$.store.books.first().title", &doc).unwrap(),
+            json!("Dune")
+        );
+        assert_eq!(
+            query("$.store.books.last().title", &doc).unwrap(),
+            json!("1984")
+        );
     }
 
     #[test]
@@ -201,7 +207,10 @@ mod tests {
     #[test]
     fn or_default() {
         let doc = json!({"user": {}});
-        assert_eq!(query("$.user.name.or(\"anon\")", &doc).unwrap(), json!("anon"));
+        assert_eq!(
+            query("$.user.name.or(\"anon\")", &doc).unwrap(),
+            json!("anon")
+        );
     }
 
     #[test]
@@ -214,7 +223,10 @@ mod tests {
     #[test]
     fn missing_field() {
         let doc = json!({"user": {"name": "Alice"}});
-        assert_eq!(query("$.user.missing(\"phone\")", &doc).unwrap(), json!(true));
+        assert_eq!(
+            query("$.user.missing(\"phone\")", &doc).unwrap(),
+            json!(true)
+        );
     }
 
     #[test]
@@ -265,7 +277,8 @@ mod tests {
 
     #[test]
     fn set_comp_unique() {
-        let doc = json!({"items": [{"genre": "sci-fi"}, {"genre": "sci-fi"}, {"genre": "dystopia"}]});
+        let doc =
+            json!({"items": [{"genre": "sci-fi"}, {"genre": "sci-fi"}, {"genre": "dystopia"}]});
         let r = query("{item.genre for item in $.items}", &doc).unwrap();
         let arr = r.as_array().unwrap();
         assert_eq!(arr.len(), 2);
@@ -287,8 +300,9 @@ mod tests {
         let doc = books();
         let r = query(
             "let expensive = $.store.books.filter(price > 10) in expensive.len()",
-            &doc
-        ).unwrap();
+            &doc,
+        )
+        .unwrap();
         assert_eq!(r, json!(2));
     }
 
@@ -347,7 +361,7 @@ mod tests {
     fn partition() {
         let doc = json!({"nums": [1, 2, 3, 4, 5, 6]});
         let r = query("$.nums.partition(lambda n: n % 2 == 0)", &doc).unwrap();
-        assert_eq!(r["true"],  json!([2, 4, 6]));
+        assert_eq!(r["true"], json!([2, 4, 6]));
         assert_eq!(r["false"], json!([1, 3, 5]));
     }
 
@@ -368,7 +382,11 @@ mod tests {
     #[test]
     fn fused_filter_drop_while() {
         let doc = json!({"vals": [1, 2, 3, 4, 5, 6]});
-        let r = query("$.vals.filter(lambda v: v > 1).dropwhile(lambda v: v < 4)", &doc).unwrap();
+        let r = query(
+            "$.vals.filter(lambda v: v > 1).dropwhile(lambda v: v < 4)",
+            &doc,
+        )
+        .unwrap();
         assert_eq!(r, json!([4, 5, 6]));
     }
 
@@ -415,7 +433,11 @@ mod tests {
     #[test]
     fn object_construction() {
         let doc = books();
-        let r = query("{total: $.store.books.sum(price), count: $.store.books.len()}", &doc).unwrap();
+        let r = query(
+            "{total: $.store.books.sum(price), count: $.store.books.len()}",
+            &doc,
+        )
+        .unwrap();
         assert_eq!(r["count"], json!(4));
     }
 
@@ -428,7 +450,11 @@ mod tests {
         });
         let r = query("{a: $.books, b: {c: $.another.field}}", &doc).unwrap();
         assert_eq!(r, json!({"a":[{"t":"x"},{"t":"y"}],"b":{"c":42}}));
-        let r2 = query("{x: {y: {z: $.deep.a.b.c, arr: [1, $.another.field, {w: $.books[0].t}]}}}", &doc).unwrap();
+        let r2 = query(
+            "{x: {y: {z: $.deep.a.b.c, arr: [1, $.another.field, {w: $.books[0].t}]}}}",
+            &doc,
+        )
+        .unwrap();
         assert_eq!(r2, json!({"x":{"y":{"z":"leaf","arr":[1,42,{"w":"x"}]}}}));
     }
 
@@ -454,7 +480,11 @@ mod tests {
     #[test]
     fn gen_comp_pipe() {
         let doc = books();
-        let r = query("(b.price for b in $.store.books if b.price > 10) | len", &doc).unwrap();
+        let r = query(
+            "(b.price for b in $.store.books if b.price > 10) | len",
+            &doc,
+        )
+        .unwrap();
         assert_eq!(r, json!(2));
     }
 
@@ -484,7 +514,11 @@ mod tests {
     fn bind_simple_name() {
         let doc = books();
         // bind labels current value as `books`, then use it twice
-        let r = query("$.store.books -> books | {count: books.len(), first: books[0].title}", &doc).unwrap();
+        let r = query(
+            "$.store.books -> books | {count: books.len(), first: books[0].title}",
+            &doc,
+        )
+        .unwrap();
         assert_eq!(r["count"], json!(4));
         assert_eq!(r["first"], json!("Dune"));
     }
@@ -591,29 +625,50 @@ mod tests {
         let doc = json!({"s": "hi"});
         assert_eq!(query("$.s.pad_left(5)", &doc).unwrap(), json!("   hi"));
         assert_eq!(query("$.s.pad_right(5)", &doc).unwrap(), json!("hi   "));
-        assert_eq!(query("$.s.pad_left(5, \"0\")", &doc).unwrap(), json!("000hi"));
+        assert_eq!(
+            query("$.s.pad_left(5, \"0\")", &doc).unwrap(),
+            json!("000hi")
+        );
     }
 
     #[test]
     fn str_starts_ends_with() {
         let doc = json!({"s": "hello world"});
-        assert_eq!(query("$.s.starts_with(\"hello\")", &doc).unwrap(), json!(true));
-        assert_eq!(query("$.s.ends_with(\"world\")", &doc).unwrap(), json!(true));
-        assert_eq!(query("$.s.starts_with(\"world\")", &doc).unwrap(), json!(false));
+        assert_eq!(
+            query("$.s.starts_with(\"hello\")", &doc).unwrap(),
+            json!(true)
+        );
+        assert_eq!(
+            query("$.s.ends_with(\"world\")", &doc).unwrap(),
+            json!(true)
+        );
+        assert_eq!(
+            query("$.s.starts_with(\"world\")", &doc).unwrap(),
+            json!(false)
+        );
     }
 
     #[test]
     fn str_replace() {
         let doc = json!({"s": "foo foo foo"});
         // 2-arg string replace — untouched by the v2 chain-write classifier
-        assert_eq!(query("$.s.replace(\"foo\", \"bar\")", &doc).unwrap(), json!("bar foo foo"));
-        assert_eq!(query("$.s.replace_all(\"foo\", \"bar\")", &doc).unwrap(), json!("bar bar bar"));
+        assert_eq!(
+            query("$.s.replace(\"foo\", \"bar\")", &doc).unwrap(),
+            json!("bar foo foo")
+        );
+        assert_eq!(
+            query("$.s.replace_all(\"foo\", \"bar\")", &doc).unwrap(),
+            json!("bar bar bar")
+        );
     }
 
     #[test]
     fn str_split() {
         let doc = json!({"s": "a,b,c"});
-        assert_eq!(query("$.s.split(\",\")", &doc).unwrap(), json!(["a", "b", "c"]));
+        assert_eq!(
+            query("$.s.split(\",\")", &doc).unwrap(),
+            json!(["a", "b", "c"])
+        );
     }
 
     #[test]
@@ -639,8 +694,14 @@ mod tests {
     #[test]
     fn str_strip_prefix_suffix() {
         let doc = json!({"s": "foobar"});
-        assert_eq!(query("$.s.strip_prefix(\"foo\")", &doc).unwrap(), json!("bar"));
-        assert_eq!(query("$.s.strip_suffix(\"bar\")", &doc).unwrap(), json!("foo"));
+        assert_eq!(
+            query("$.s.strip_prefix(\"foo\")", &doc).unwrap(),
+            json!("bar")
+        );
+        assert_eq!(
+            query("$.s.strip_suffix(\"bar\")", &doc).unwrap(),
+            json!("foo")
+        );
     }
 
     #[test]
@@ -662,7 +723,9 @@ mod tests {
     fn str_url_encode_decode() {
         let doc = json!({"s": "hello world&foo=bar"});
         let encoded = query("$.s.url_encode()", &doc).unwrap();
-        assert!(encoded.as_str().unwrap().contains("%20") || encoded.as_str().unwrap().contains("+"));
+        assert!(
+            encoded.as_str().unwrap().contains("%20") || encoded.as_str().unwrap().contains("+")
+        );
         let encoded_doc = json!({"s": encoded});
         let decoded = query("$.s.url_decode()", &encoded_doc).unwrap();
         assert_eq!(decoded, json!("hello world&foo=bar"));
@@ -687,13 +750,19 @@ mod tests {
     #[test]
     fn str_capitalize() {
         let doc = json!({"s": "hello world"});
-        assert_eq!(query("$.s.capitalize()", &doc).unwrap(), json!("Hello world"));
+        assert_eq!(
+            query("$.s.capitalize()", &doc).unwrap(),
+            json!("Hello world")
+        );
     }
 
     #[test]
     fn str_title_case() {
         let doc = json!({"s": "hello world"});
-        assert_eq!(query("$.s.title_case()", &doc).unwrap(), json!("Hello World"));
+        assert_eq!(
+            query("$.s.title_case()", &doc).unwrap(),
+            json!("Hello World")
+        );
     }
 
     // ── JSON field manipulation ───────────────────────────────────────────────
@@ -768,7 +837,11 @@ mod tests {
     #[test]
     fn filter_keys_test() {
         let doc = json!({"obj": {"name": "Alice", "_private": "x", "_secret": "y"}});
-        let r = query("$.obj.filter_keys(lambda k: not k.starts_with(\"_\"))", &doc).unwrap();
+        let r = query(
+            "$.obj.filter_keys(lambda k: not k.starts_with(\"_\"))",
+            &doc,
+        )
+        .unwrap();
         assert!(r.get("name").is_some());
         assert!(r.get("_private").is_none());
     }
@@ -955,18 +1028,33 @@ mod tests {
 
     #[test]
     fn fusion_drop_noop_before_len() {
-        use crate::vm::{Compiler, Opcode, BuiltinMethod};
+        use crate::builtins::BuiltinMethod;
+        use crate::vm::{Compiler, Opcode};
         // sort → len: sort is dropped (sort preserves length)
         let p1 = Compiler::compile_str("$.xs.sort().len()").unwrap();
-        let sort_ct = p1.ops.iter().filter(|o|
-            matches!(o, Opcode::CallMethod(c) if c.method == BuiltinMethod::Sort)).count();
-        assert_eq!(sort_ct, 0, "sort should be dropped before length; ops: {:?}", p1.ops);
+        let sort_ct = p1
+            .ops
+            .iter()
+            .filter(|o| matches!(o, Opcode::CallMethod(c) if c.method == BuiltinMethod::Sort))
+            .count();
+        assert_eq!(
+            sort_ct, 0,
+            "sort should be dropped before length; ops: {:?}",
+            p1.ops
+        );
 
         // map → count: map is dropped
         let p2 = Compiler::compile_str("$.xs.map(@ * 2).count()").unwrap();
-        let map_ct = p2.ops.iter().filter(|o|
-            matches!(o, Opcode::CallMethod(c) if c.method == BuiltinMethod::Map)).count();
-        assert_eq!(map_ct, 0, "map should be dropped before count; ops: {:?}", p2.ops);
+        let map_ct = p2
+            .ops
+            .iter()
+            .filter(|o| matches!(o, Opcode::CallMethod(c) if c.method == BuiltinMethod::Map))
+            .count();
+        assert_eq!(
+            map_ct, 0,
+            "map should be dropped before count; ops: {:?}",
+            p2.ops
+        );
     }
 
     #[test]
@@ -986,8 +1074,11 @@ mod tests {
         use crate::vm::Compiler;
         let prog = Compiler::compile_str("$.xs.map(@ * 2).filter(@ > 5)").unwrap();
         let dbg = format!("{:?}", prog.ops);
-        assert!(!dbg.contains("MapFilter"),
-            "MapFilter should not appear after deletion; ops: {}", dbg);
+        assert!(
+            !dbg.contains("MapFilter"),
+            "MapFilter should not appear after deletion; ops: {}",
+            dbg
+        );
     }
 
     #[test]
@@ -1003,10 +1094,21 @@ mod tests {
         // `.first()` returns object; `.a.b.c` mid-program can't become RootChain
         // because of the intervening method call.  Expect FieldChain instead.
         let prog = Compiler::compile_str("$.items.first().a.b.c").unwrap();
-        let has_fc = prog.ops.iter().any(|o| matches!(o, Opcode::FieldChain(c) if c.len() == 3));
-        let get_field_count = prog.ops.iter().filter(|o| matches!(o, Opcode::GetField(_))).count();
+        let has_fc = prog
+            .ops
+            .iter()
+            .any(|o| matches!(o, Opcode::FieldChain(c) if c.len() == 3));
+        let get_field_count = prog
+            .ops
+            .iter()
+            .filter(|o| matches!(o, Opcode::GetField(_)))
+            .count();
         assert!(has_fc, "FieldChain not emitted; ops: {:?}", prog.ops);
-        assert_eq!(get_field_count, 0, "residual GetField after fusion: {:?}", prog.ops);
+        assert_eq!(
+            get_field_count, 0,
+            "residual GetField after fusion: {:?}",
+            prog.ops
+        );
     }
 
     #[test]
@@ -1016,9 +1118,15 @@ mod tests {
         // analyzer can't prove the shape) should still collapse into one
         // FieldChain — null propagates through `get_field` correctly.
         let prog = Compiler::compile_str("$.items.first()?.a?.b?.c").unwrap();
-        let has_fc = prog.ops.iter().any(|o| matches!(o, Opcode::FieldChain(c) if c.len() >= 2));
-        let residual = prog.ops.iter().filter(|o|
-            matches!(o, Opcode::OptField(_) | Opcode::GetField(_))).count();
+        let has_fc = prog
+            .ops
+            .iter()
+            .any(|o| matches!(o, Opcode::FieldChain(c) if c.len() >= 2));
+        let residual = prog
+            .ops
+            .iter()
+            .filter(|o| matches!(o, Opcode::OptField(_) | Opcode::GetField(_)))
+            .count();
         assert!(has_fc, "FieldChain not emitted; ops: {:?}", prog.ops);
         assert_eq!(residual, 0, "residual per-step field ops: {:?}", prog.ops);
     }
@@ -1072,12 +1180,10 @@ mod tests {
     #[test]
     fn try_chain_right_associative() {
         // try a else try b else 'c'  -->  picks b when a is missing.
-        let r = query("try $.a else try $.b else 'c'",
-            &json!({"b": "B"})).unwrap();
+        let r = query("try $.a else try $.b else 'c'", &json!({"b": "B"})).unwrap();
         assert_eq!(r, json!("B"));
         // both missing -> falls to literal.
-        let r = query("try $.a else try $.b else 'c'",
-            &json!({})).unwrap();
+        let r = query("try $.a else try $.b else 'c'", &json!({})).unwrap();
         assert_eq!(r, json!("c"));
     }
 
@@ -1088,10 +1194,13 @@ mod tests {
             {"id": 2}
         ]);
         let r = query(r#"$.map({id, name: try name else 'anon'})"#, &doc).unwrap();
-        assert_eq!(r, json!([
-            {"id": 1, "name": "A"},
-            {"id": 2, "name": "anon"}
-        ]));
+        assert_eq!(
+            r,
+            json!([
+                {"id": 1, "name": "A"},
+                {"id": 2, "name": "anon"}
+            ])
+        );
     }
 
     #[test]
@@ -1119,12 +1228,20 @@ mod tests {
         use crate::vm::{Compiler, Opcode};
         // Non-null literal body -> only body emitted, no TryExpr.
         let prog = Compiler::compile_str("try 42 else 0").unwrap();
-        let has_try = prog.ops.iter().any(|o| matches!(o, Opcode::TryExpr{..}));
-        assert!(!has_try, "constant non-null try should fold; ops: {:?}", prog.ops);
+        let has_try = prog.ops.iter().any(|o| matches!(o, Opcode::TryExpr { .. }));
+        assert!(
+            !has_try,
+            "constant non-null try should fold; ops: {:?}",
+            prog.ops
+        );
         // Null body -> only default emitted.
         let prog = Compiler::compile_str("try null else 7").unwrap();
-        let has_try = prog.ops.iter().any(|o| matches!(o, Opcode::TryExpr{..}));
-        assert!(!has_try, "null body try should fold to default; ops: {:?}", prog.ops);
+        let has_try = prog.ops.iter().any(|o| matches!(o, Opcode::TryExpr { .. }));
+        assert!(
+            !has_try,
+            "null body try should fold to default; ops: {:?}",
+            prog.ops
+        );
     }
 
     // FindFirst/FindOne fusion-shape tests removed — opcodes deleted
@@ -1133,21 +1250,35 @@ mod tests {
 
     #[test]
     fn redundant_reverse_eliminated() {
-        use crate::vm::{Compiler, Opcode, BuiltinMethod};
+        use crate::builtins::BuiltinMethod;
+        use crate::vm::{Compiler, Opcode};
         let prog = Compiler::compile_str("$.books.reverse().reverse()").unwrap();
-        let reverse_count = prog.ops.iter().filter(|o| matches!(o,
-            Opcode::CallMethod(c) if c.method == BuiltinMethod::Reverse
-        )).count();
+        let reverse_count = prog
+            .ops
+            .iter()
+            .filter(|o| {
+                matches!(o,
+                    Opcode::CallMethod(c) if c.method == BuiltinMethod::Reverse
+                )
+            })
+            .count();
         assert_eq!(reverse_count, 0, "adjacent reverse+reverse should cancel");
     }
 
     #[test]
     fn redundant_unique_collapsed() {
-        use crate::vm::{Compiler, Opcode, BuiltinMethod};
+        use crate::builtins::BuiltinMethod;
+        use crate::vm::{Compiler, Opcode};
         let prog = Compiler::compile_str("$.books.unique().unique()").unwrap();
-        let unique_count = prog.ops.iter().filter(|o| matches!(o,
-            Opcode::CallMethod(c) if c.method == BuiltinMethod::Unique
-        )).count();
+        let unique_count = prog
+            .ops
+            .iter()
+            .filter(|o| {
+                matches!(o,
+                    Opcode::CallMethod(c) if c.method == BuiltinMethod::Unique
+                )
+            })
+            .count();
         assert_eq!(unique_count, 1, "duplicate unique() should collapse");
     }
 
@@ -1190,7 +1321,10 @@ mod tests {
     fn kind_check_literal_fold_int() {
         use crate::vm::{Compiler, Opcode};
         let prog = Compiler::compile_str("42 kind number").unwrap();
-        let has_kind = prog.ops.iter().any(|o| matches!(o, Opcode::KindCheck { .. }));
+        let has_kind = prog
+            .ops
+            .iter()
+            .any(|o| matches!(o, Opcode::KindCheck { .. }));
         assert!(!has_kind, "literal kind check should fold away");
         assert!(matches!(prog.ops.first(), Some(Opcode::PushBool(true))));
     }
@@ -1200,7 +1334,10 @@ mod tests {
         use crate::vm::{Compiler, Opcode};
         let prog = Compiler::compile_str("\"hi\" kind number").unwrap();
         assert!(matches!(prog.ops.first(), Some(Opcode::PushBool(false))));
-        assert!(!prog.ops.iter().any(|o| matches!(o, Opcode::KindCheck { .. })));
+        assert!(!prog
+            .ops
+            .iter()
+            .any(|o| matches!(o, Opcode::KindCheck { .. })));
     }
 
     #[test]
@@ -1208,7 +1345,10 @@ mod tests {
         use crate::vm::{Compiler, Opcode};
         let prog = Compiler::compile_str("42 kind not string").unwrap();
         assert!(matches!(prog.ops.first(), Some(Opcode::PushBool(true))));
-        assert!(!prog.ops.iter().any(|o| matches!(o, Opcode::KindCheck { .. })));
+        assert!(!prog
+            .ops
+            .iter()
+            .any(|o| matches!(o, Opcode::KindCheck { .. })));
     }
 
     #[test]
@@ -1287,8 +1427,11 @@ mod tests {
     fn const_fold_mixed_int_float_arith() {
         use crate::vm::{Compiler, Opcode};
         let prog = Compiler::compile_str("1 + 2.5").unwrap();
-        assert!(matches!(prog.ops.as_ref(), [Opcode::PushFloat(f)] if (*f - 3.5).abs() < 1e-9),
-                "1 + 2.5 should fold to 3.5; got {:?}", prog.ops);
+        assert!(
+            matches!(prog.ops.as_ref(), [Opcode::PushFloat(f)] if (*f - 3.5).abs() < 1e-9),
+            "1 + 2.5 should fold to 3.5; got {:?}",
+            prog.ops
+        );
         let prog = Compiler::compile_str("2.0 * 3").unwrap();
         assert!(matches!(prog.ops.as_ref(), [Opcode::PushFloat(f)] if (*f - 6.0).abs() < 1e-9));
         let prog = Compiler::compile_str("10 / 4.0").unwrap();
@@ -1322,7 +1465,10 @@ mod tests {
         use crate::vm::{Compiler, Opcode};
         let prog = Compiler::compile_str("$.nums.sort()[0:3]").unwrap();
         let has_slice = prog.ops.iter().any(|o| matches!(o, Opcode::GetSlice(_, _)));
-        assert!(has_slice, "sort+[0:n] should still emit GetSlice in opcode path");
+        assert!(
+            has_slice,
+            "sort+[0:n] should still emit GetSlice in opcode path"
+        );
     }
 
     #[test]
@@ -1347,7 +1493,8 @@ mod tests {
         use crate::analysis::program_cost;
         use crate::vm::Compiler;
         let cheap = Compiler::compile_str("42").unwrap();
-        let expensive = Compiler::compile_str("$.books.filter(@.price > 10).map(@.title).sort()").unwrap();
+        let expensive =
+            Compiler::compile_str("$.books.filter(@.price > 10).map(@.title).sort()").unwrap();
         assert!(program_cost(&cheap) < program_cost(&expensive));
     }
 
@@ -1357,7 +1504,7 @@ mod tests {
         use crate::parser::parse;
         let eq = parse("x == 1").unwrap();
         let lt = parse("x < 1").unwrap();
-        let t  = parse("true").unwrap();
+        let t = parse("true").unwrap();
         assert!(selectivity_score(&eq) < selectivity_score(&lt));
         assert!(selectivity_score(&lt) < selectivity_score(&t));
     }
@@ -1392,34 +1539,38 @@ mod tests {
         // Sink::NumFilterMap.  Opcode stream no longer carries
         // FilterMap or FilterMapSum.
         use crate::vm::Compiler;
-        let prog = Compiler::compile_str(
-            "$.books.filter(@.price > 10).map(@.price).sum()"
-        ).unwrap();
+        let prog =
+            Compiler::compile_str("$.books.filter(@.price > 10).map(@.price).sum()").unwrap();
         let dbg = format!("{:?}", prog.ops);
-        assert!(!dbg.contains("FilterMap"),
-            "FilterMap should not appear after deletion; ops: {}", dbg);
+        assert!(
+            !dbg.contains("FilterMap"),
+            "FilterMap should not appear after deletion; ops: {}",
+            dbg
+        );
     }
 
     #[test]
     fn fusion_filter_map_avg_opcode() {
         use crate::vm::Compiler;
-        let prog = Compiler::compile_str(
-            "$.books.filter(@.price > 10).map(@.price).avg()"
-        ).unwrap();
+        let prog =
+            Compiler::compile_str("$.books.filter(@.price > 10).map(@.price).avg()").unwrap();
         let dbg = format!("{:?}", prog.ops);
-        assert!(!dbg.contains("FilterMap"),
-            "FilterMap should not appear after deletion; ops: {}", dbg);
+        assert!(
+            !dbg.contains("FilterMap"),
+            "FilterMap should not appear after deletion; ops: {}",
+            dbg
+        );
     }
 
     #[test]
     fn fusion_filter_map_sum_semantics() {
         let doc = books();
         let fused = query(
-            "$.store.books.filter(@.price > 10).map(@.price).sum()", &doc
-        ).unwrap();
-        let plain = query(
-            "$.store.books.filter(@.price > 10).sum(price)", &doc
-        ).unwrap();
+            "$.store.books.filter(@.price > 10).map(@.price).sum()",
+            &doc,
+        )
+        .unwrap();
+        let plain = query("$.store.books.filter(@.price > 10).sum(price)", &doc).unwrap();
         assert_eq!(fused, plain);
     }
 
@@ -1427,11 +1578,11 @@ mod tests {
     fn fusion_filter_map_avg_semantics() {
         let doc = books();
         let fused = query(
-            "$.store.books.filter(@.price > 10).map(@.price).avg()", &doc
-        ).unwrap();
-        let plain = query(
-            "$.store.books.filter(@.price > 10).avg(price)", &doc
-        ).unwrap();
+            "$.store.books.filter(@.price > 10).map(@.price).avg()",
+            &doc,
+        )
+        .unwrap();
+        let plain = query("$.store.books.filter(@.price > 10).avg(price)", &doc).unwrap();
         assert_eq!(fused, plain);
     }
 
@@ -1442,8 +1593,8 @@ mod tests {
     fn fusion_map_first_last_semantics() {
         let doc = books();
         let f = query("$.store.books.map(@.price).first()", &doc).unwrap();
-        let l = query("$.store.books.map(@.price).last()",  &doc).unwrap();
-        let all = query("$.store.books.map(@.price)",       &doc).unwrap();
+        let l = query("$.store.books.map(@.price).last()", &doc).unwrap();
+        let all = query("$.store.books.map(@.price)", &doc).unwrap();
         let arr = all.as_array().unwrap();
         assert_eq!(f, arr[0]);
         assert_eq!(l, arr[arr.len() - 1]);
@@ -1458,12 +1609,14 @@ mod tests {
         // FilterMap deleted; filter().map().first() routes through
         // pipeline (Sink::FilterFirst when applicable).
         use crate::vm::Compiler;
-        let prog = Compiler::compile_str(
-            "$.books.filter(@.price > 10).map(@.title).first()"
-        ).unwrap();
+        let prog =
+            Compiler::compile_str("$.books.filter(@.price > 10).map(@.title).first()").unwrap();
         let dbg = format!("{:?}", prog.ops);
-        assert!(!dbg.contains("FilterMap"),
-            "FilterMap should not appear after deletion; ops: {}", dbg);
+        assert!(
+            !dbg.contains("FilterMap"),
+            "FilterMap should not appear after deletion; ops: {}",
+            dbg
+        );
     }
 
     #[test]
@@ -1472,11 +1625,9 @@ mod tests {
         let fused = query(
             "$.store.books.filter(@.price > 10).map(@.title).first()",
             &doc,
-        ).unwrap();
-        let plain = query(
-            "$.store.books.filter(@.price > 10).map(@.title)",
-            &doc,
-        ).unwrap();
+        )
+        .unwrap();
+        let plain = query("$.store.books.filter(@.price > 10).map(@.title)", &doc).unwrap();
         let arr = plain.as_array().unwrap();
         if arr.is_empty() {
             assert!(fused.is_null());
@@ -1491,7 +1642,7 @@ mod tests {
 
     #[test]
     fn const_fold_string_concat_and_cmp() {
-        use crate::vm::{Compiler, Opcode, CompiledPipeStep};
+        use crate::vm::{CompiledPipeStep, Compiler, Opcode};
         // Helper: walk top-level ops + descend into PipelineRun forward
         // sub-programs.  Pipelines now compile to a single PipelineRun
         // opcode that encloses the per-step sub-programs.
@@ -1509,19 +1660,32 @@ mod tests {
             }
         }
         let p1 = Compiler::compile_str(r#"$ | "a" + "bc""#).unwrap();
-        let mut all1 = Vec::new(); collect_all_ops(&p1.ops, &mut all1);
-        assert!(all1.iter().any(|o| matches!(o, Opcode::PushStr(s) if s.as_ref() == "abc")),
-                "\"a\" + \"bc\" should fold to PushStr(\"abc\"): {:?}", p1.ops);
+        let mut all1 = Vec::new();
+        collect_all_ops(&p1.ops, &mut all1);
+        assert!(
+            all1.iter()
+                .any(|o| matches!(o, Opcode::PushStr(s) if s.as_ref() == "abc")),
+            "\"a\" + \"bc\" should fold to PushStr(\"abc\"): {:?}",
+            p1.ops
+        );
 
         let p2 = Compiler::compile_str(r#"$ | "a" < "b""#).unwrap();
-        let mut all2 = Vec::new(); collect_all_ops(&p2.ops, &mut all2);
-        assert!(all2.iter().any(|o| matches!(o, Opcode::PushBool(true))),
-                "\"a\" < \"b\" should fold to PushBool(true): {:?}", p2.ops);
+        let mut all2 = Vec::new();
+        collect_all_ops(&p2.ops, &mut all2);
+        assert!(
+            all2.iter().any(|o| matches!(o, Opcode::PushBool(true))),
+            "\"a\" < \"b\" should fold to PushBool(true): {:?}",
+            p2.ops
+        );
 
         let p3 = Compiler::compile_str(r#"$ | "zz" >= "aa""#).unwrap();
-        let mut all3 = Vec::new(); collect_all_ops(&p3.ops, &mut all3);
-        assert!(all3.iter().any(|o| matches!(o, Opcode::PushBool(true))),
-                "\"zz\" >= \"aa\" should fold: {:?}", p3.ops);
+        let mut all3 = Vec::new();
+        collect_all_ops(&p3.ops, &mut all3);
+        assert!(
+            all3.iter().any(|o| matches!(o, Opcode::PushBool(true))),
+            "\"zz\" >= \"aa\" should fold: {:?}",
+            p3.ops
+        );
     }
 
     #[test]
@@ -1531,15 +1695,19 @@ mod tests {
         // FilterLast migrated to pipeline.rs Sink::FilterLast; opcode
         // path keeps unfused CallMethod(Filter) + CallMethod(Last).
         let has = prog.ops.iter().any(|o|
-            matches!(o, Opcode::CallMethod(c) if c.method == crate::vm::BuiltinMethod::Last));
-        assert!(has, "expected CallMethod(Last) in unfused form: {:?}", prog.ops);
+            matches!(o, Opcode::CallMethod(c) if c.method == crate::builtins::BuiltinMethod::Last));
+        assert!(
+            has,
+            "expected CallMethod(Last) in unfused form: {:?}",
+            prog.ops
+        );
     }
 
     #[test]
     fn fusion_filter_last_semantics() {
         let doc = books();
         let fused = query("$.store.books.filter(@.price > 10).last()", &doc).unwrap();
-        let plain = query("$.store.books.filter(@.price > 10)",        &doc).unwrap();
+        let plain = query("$.store.books.filter(@.price > 10)", &doc).unwrap();
         let arr = plain.as_array().unwrap();
         if arr.is_empty() {
             assert!(fused.is_null());
@@ -1554,30 +1722,59 @@ mod tests {
 
     #[test]
     fn fusion_sort_sort_idempotent_collapse() {
-        use crate::vm::{Compiler, Opcode, BuiltinMethod};
+        use crate::builtins::BuiltinMethod;
+        use crate::vm::{Compiler, Opcode};
         let prog = Compiler::compile_str("$.books.sort().sort().first()").unwrap();
-        let sorts = prog.ops.iter().filter(|o| matches!(o,
-            Opcode::CallMethod(c) if c.method == BuiltinMethod::Sort)).count();
+        let sorts = prog
+            .ops
+            .iter()
+            .filter(|o| {
+                matches!(o,
+            Opcode::CallMethod(c) if c.method == BuiltinMethod::Sort)
+            })
+            .count();
         // Doubled sort collapses to one; sort()+first() then strength-reduces to min().
         assert_eq!(sorts, 0, "sort().sort() should collapse: {:?}", prog.ops);
     }
 
     #[test]
     fn fusion_unique_unique_collapse() {
-        use crate::vm::{Compiler, Opcode, BuiltinMethod};
+        use crate::builtins::BuiltinMethod;
+        use crate::vm::{Compiler, Opcode};
         let prog = Compiler::compile_str("$.items.unique().unique()").unwrap();
-        let uniqs = prog.ops.iter().filter(|o| matches!(o,
-            Opcode::CallMethod(c) if c.method == BuiltinMethod::Unique)).count();
-        assert_eq!(uniqs, 1, "unique().unique() should collapse: {:?}", prog.ops);
+        let uniqs = prog
+            .ops
+            .iter()
+            .filter(|o| {
+                matches!(o,
+            Opcode::CallMethod(c) if c.method == BuiltinMethod::Unique)
+            })
+            .count();
+        assert_eq!(
+            uniqs, 1,
+            "unique().unique() should collapse: {:?}",
+            prog.ops
+        );
     }
 
     #[test]
     fn fusion_reverse_reverse_dropped() {
-        use crate::vm::{Compiler, Opcode, BuiltinMethod};
+        use crate::builtins::BuiltinMethod;
+        use crate::vm::{Compiler, Opcode};
         let prog = Compiler::compile_str("$.items.reverse().reverse()").unwrap();
-        let revs = prog.ops.iter().filter(|o| matches!(o,
-            Opcode::CallMethod(c) if c.method == BuiltinMethod::Reverse)).count();
-        assert_eq!(revs, 0, "reverse().reverse() should be dropped: {:?}", prog.ops);
+        let revs = prog
+            .ops
+            .iter()
+            .filter(|o| {
+                matches!(o,
+            Opcode::CallMethod(c) if c.method == BuiltinMethod::Reverse)
+            })
+            .count();
+        assert_eq!(
+            revs, 0,
+            "reverse().reverse() should be dropped: {:?}",
+            prog.ops
+        );
     }
 
     #[test]
@@ -1629,7 +1826,11 @@ mod tests {
         });
         let early = query("$..k.first()", &doc).unwrap();
         let all = query("$..k", &doc).unwrap();
-        let first_of_all = all.as_array().and_then(|a| a.first()).cloned().unwrap_or(json!(null));
+        let first_of_all = all
+            .as_array()
+            .and_then(|a| a.first())
+            .cloned()
+            .unwrap_or(json!(null));
         assert_eq!(early, first_of_all);
     }
 
@@ -1655,20 +1856,34 @@ mod tests {
     fn fusion_sort_by_first_emits_argextreme() {
         // ArgExtreme migrated to pipeline.rs Sink::MinBy.  Opcode path
         // executes unfused Sort + First.
-        use crate::vm::{Compiler, Opcode, BuiltinMethod};
+        use crate::builtins::BuiltinMethod;
+        use crate::vm::{Compiler, Opcode};
         let prog = Compiler::compile_str("$.books.sort(price).first()").unwrap();
-        let has_first = prog.ops.iter().any(|o| matches!(o,
-            Opcode::CallMethod(c) if c.method == BuiltinMethod::First));
-        assert!(has_first, "sort(k).first() should retain First call: {:?}", prog.ops);
+        let has_first = prog.ops.iter().any(|o| {
+            matches!(o,
+            Opcode::CallMethod(c) if c.method == BuiltinMethod::First)
+        });
+        assert!(
+            has_first,
+            "sort(k).first() should retain First call: {:?}",
+            prog.ops
+        );
     }
 
     #[test]
     fn fusion_sort_by_last_emits_argextreme_max() {
-        use crate::vm::{Compiler, Opcode, BuiltinMethod};
+        use crate::builtins::BuiltinMethod;
+        use crate::vm::{Compiler, Opcode};
         let prog = Compiler::compile_str("$.books.sort(price).last()").unwrap();
-        let has_last = prog.ops.iter().any(|o| matches!(o,
-            Opcode::CallMethod(c) if c.method == BuiltinMethod::Last));
-        assert!(has_last, "sort(k).last() should retain Last call: {:?}", prog.ops);
+        let has_last = prog.ops.iter().any(|o| {
+            matches!(o,
+            Opcode::CallMethod(c) if c.method == BuiltinMethod::Last)
+        });
+        assert!(
+            has_last,
+            "sort(k).last() should retain Last call: {:?}",
+            prog.ops
+        );
     }
 
     #[test]
@@ -1706,7 +1921,7 @@ mod tests {
 
     #[test]
     fn argextreme_vm_path_matches_tree() {
-        use crate::vm::{VM, Compiler};
+        use crate::vm::{Compiler, VM};
         let doc = json!({"xs": [
             {"n": 2, "id": 1},
             {"n": -1, "id": 2},
@@ -1725,28 +1940,40 @@ mod tests {
 
         // ArgExtreme migrated to pipeline.rs MinBy/MaxBy; opcode path
         // keeps unfused Sort + First/Last.
-        use crate::vm::{Opcode, BuiltinMethod};
-        let has_sort = prog.ops.iter().any(|o| matches!(o,
-            Opcode::CallMethod(c) if c.method == BuiltinMethod::Sort));
+        use crate::builtins::BuiltinMethod;
+        use crate::vm::Opcode;
+        let has_sort = prog.ops.iter().any(|o| {
+            matches!(o,
+            Opcode::CallMethod(c) if c.method == BuiltinMethod::Sort)
+        });
         assert!(has_sort, "expected Sort in compiled program");
     }
 
     #[test]
     fn fusion_sort_sum_drops_sort() {
-        use crate::vm::{Compiler, Opcode, BuiltinMethod};
+        use crate::builtins::BuiltinMethod;
+        use crate::vm::{Compiler, Opcode};
         let prog = Compiler::compile_str("$.books.sort().sum()").unwrap();
-        let has_sort = prog.ops.iter().any(|o| matches!(o,
-            Opcode::CallMethod(c) if c.method == BuiltinMethod::Sort));
+        let has_sort = prog.ops.iter().any(|o| {
+            matches!(o,
+            Opcode::CallMethod(c) if c.method == BuiltinMethod::Sort)
+        });
         assert!(!has_sort, "sort before sum should be strength-reduced away");
     }
 
     #[test]
     fn fusion_reverse_max_drops_reverse() {
-        use crate::vm::{Compiler, Opcode, BuiltinMethod};
+        use crate::builtins::BuiltinMethod;
+        use crate::vm::{Compiler, Opcode};
         let prog = Compiler::compile_str("$.books.reverse().max()").unwrap();
-        let has_rev = prog.ops.iter().any(|o| matches!(o,
-            Opcode::CallMethod(c) if c.method == BuiltinMethod::Reverse));
-        assert!(!has_rev, "reverse before max should be strength-reduced away");
+        let has_rev = prog.ops.iter().any(|o| {
+            matches!(o,
+            Opcode::CallMethod(c) if c.method == BuiltinMethod::Reverse)
+        });
+        assert!(
+            !has_rev,
+            "reverse before max should be strength-reduced away"
+        );
     }
 
     #[test]
@@ -1754,10 +1981,10 @@ mod tests {
         let doc = books();
         // `min` / `max` are exact — no FP summation order to worry about.
         let a = query("$.store.books.sort(price).min(price)", &doc).unwrap();
-        let b = query("$.store.books.min(price)",             &doc).unwrap();
+        let b = query("$.store.books.min(price)", &doc).unwrap();
         assert_eq!(a, b);
-        let c = query("$.store.books.reverse().max(price)",   &doc).unwrap();
-        let d = query("$.store.books.max(price)",             &doc).unwrap();
+        let c = query("$.store.books.reverse().max(price)", &doc).unwrap();
+        let d = query("$.store.books.max(price)", &doc).unwrap();
         assert_eq!(c, d);
     }
 
@@ -1787,13 +2014,21 @@ mod tests {
         // Extract MakeArr sub-progs and confirm Arc identity.
         use crate::vm::Opcode;
         use std::sync::Arc;
-        let arcs: Vec<Arc<crate::vm::Program>> = deduped.ops.iter().flat_map(|o| match o {
-            Opcode::MakeArr(progs) => progs.iter().map(|(p, _)| Arc::clone(p)).collect::<Vec<_>>(),
-            _ => vec![],
-        }).collect();
+        let arcs: Vec<Arc<crate::vm::Program>> = deduped
+            .ops
+            .iter()
+            .flat_map(|o| match o {
+                Opcode::MakeArr(progs) => {
+                    progs.iter().map(|(p, _)| Arc::clone(p)).collect::<Vec<_>>()
+                }
+                _ => vec![],
+            })
+            .collect();
         assert_eq!(arcs.len(), 2);
-        assert!(std::sync::Arc::ptr_eq(&arcs[0], &arcs[1]),
-                "identical sub-progs should share Arc");
+        assert!(
+            std::sync::Arc::ptr_eq(&arcs[0], &arcs[1]),
+            "identical sub-progs should share Arc"
+        );
     }
 
     #[test]
@@ -1802,7 +2037,10 @@ mod tests {
         use crate::vm::Compiler;
         let prog = Compiler::compile_str("[$.x.y, $.x.y, $.z]").unwrap();
         let cs = find_common_subexprs(&prog);
-        assert!(!cs.is_empty(), "should find at least one repeated sub-program");
+        assert!(
+            !cs.is_empty(),
+            "should find at least one repeated sub-program"
+        );
     }
 
     #[test]
@@ -1841,9 +2079,18 @@ mod tests {
     fn analysis_fold_kind_check_helper() {
         use crate::analysis::{fold_kind_check, VType};
         use crate::ast::KindType;
-        assert_eq!(fold_kind_check(VType::Int, KindType::Number, false), Some(true));
-        assert_eq!(fold_kind_check(VType::Str, KindType::Number, false), Some(false));
-        assert_eq!(fold_kind_check(VType::Str, KindType::Str, true),    Some(false));
+        assert_eq!(
+            fold_kind_check(VType::Int, KindType::Number, false),
+            Some(true)
+        );
+        assert_eq!(
+            fold_kind_check(VType::Str, KindType::Number, false),
+            Some(false)
+        );
+        assert_eq!(
+            fold_kind_check(VType::Str, KindType::Str, true),
+            Some(false)
+        );
         assert_eq!(fold_kind_check(VType::Unknown, KindType::Str, false), None);
     }
 
@@ -1924,9 +2171,14 @@ mod tests {
         let total = r.as_f64().unwrap();
         // Hand-tally of the 12 sci-fi prices (Neuromancer + Snow Crash
         // are cyberpunk, not sci-fi).
-        let expected = 12.99 + 9.99 + 13.25 + 8.75 + 9.25 + 8.00
-                     + 7.50 + 9.00 + 10.00 + 8.25 + 12.00 + 14.50;
-        assert!((total - expected).abs() < 0.001, "got {} want {}", total, expected);
+        let expected =
+            12.99 + 9.99 + 13.25 + 8.75 + 9.25 + 8.00 + 7.50 + 9.00 + 10.00 + 8.25 + 12.00 + 14.50;
+        assert!(
+            (total - expected).abs() < 0.001,
+            "got {} want {}",
+            total,
+            expected
+        );
     }
 
     #[test]
@@ -1984,7 +2236,9 @@ mod tests {
         assert!(arr.len() >= 3); // sci-fi, dystopia, cyberpunk
         let genres: Vec<&str> = arr.iter().map(|v| v["genre"].as_str().unwrap()).collect();
         // All distinct.
-        let mut u = genres.clone(); u.sort(); u.dedup();
+        let mut u = genres.clone();
+        u.sort();
+        u.dedup();
         assert_eq!(u.len(), genres.len());
     }
 
@@ -1998,7 +2252,9 @@ mod tests {
         let tags = r.as_array().unwrap();
         // All distinct and sorted.
         let strs: Vec<&str> = tags.iter().map(|v| v.as_str().unwrap()).collect();
-        let mut s = strs.clone(); s.sort(); s.dedup();
+        let mut s = strs.clone();
+        s.sort();
+        s.dedup();
         assert_eq!(s, strs);
         // Must include well-known tags.
         assert!(strs.contains(&"sci-fi"));
@@ -2082,8 +2338,12 @@ mod tests {
                  .map(title) \
                  .sort()";
         let r = query(q, &doc).unwrap();
-        let titles: Vec<String> = r.as_array().unwrap().iter()
-            .map(|v| v.as_str().unwrap().to_string()).collect();
+        let titles: Vec<String> = r
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
         assert!(titles.iter().any(|t| t == "Dune"));
         assert!(titles.iter().any(|t| t == "Project Hail Mary"));
     }
@@ -2097,12 +2357,12 @@ mod tests {
     #[test]
     #[ignore]
     fn bench_fusion_vs_naive() {
-        use crate::vm::{VM, PassConfig};
+        use crate::vm::{PassConfig, VM};
         use std::time::Instant;
 
         // Synthesize a large store (2000 books).
         let mut books = Vec::with_capacity(2000);
-        let genres = ["sci-fi","dystopia","cyberpunk","classic"];
+        let genres = ["sci-fi", "dystopia", "cyberpunk", "classic"];
         for i in 0..2000 {
             let g = genres[i % 4];
             books.push(json!({
@@ -2131,25 +2391,31 @@ mod tests {
             let mut vm = VM::new();
             vm.set_pass_config(PassConfig::default());
             let start = Instant::now();
-            for _ in 0..iters { let _ = vm.run_str(q, &doc).unwrap(); }
+            for _ in 0..iters {
+                let _ = vm.run_str(q, &doc).unwrap();
+            }
             let fused = start.elapsed();
 
             // Naive
             let mut vm = VM::new();
             vm.set_pass_config(PassConfig::none());
             let start = Instant::now();
-            for _ in 0..iters { let _ = vm.run_str(q, &doc).unwrap(); }
+            for _ in 0..iters {
+                let _ = vm.run_str(q, &doc).unwrap();
+            }
             let naive = start.elapsed();
 
             let ratio = naive.as_secs_f64() / fused.as_secs_f64();
-            println!("[bench] iters={:<3} fused={:>8.2?} naive={:>8.2?}  speedup={:.2}x  q={}",
-                     iters, fused, naive, ratio, q);
+            println!(
+                "[bench] iters={:<3} fused={:>8.2?} naive={:>8.2?}  speedup={:.2}x  q={}",
+                iters, fused, naive, ratio, q
+            );
         }
     }
 
     #[test]
     fn pass_config_cache_isolation() {
-        use crate::vm::{VM, PassConfig};
+        use crate::vm::{PassConfig, VM};
         let mut vm = VM::new();
         let doc = big_store();
         let q = "$.store.books.filter(price > 10).map(title).sort()";
@@ -2319,7 +2585,7 @@ mod tests {
     fn arrow_lambda_paren_params() {
         let doc = json!({"nums": [1,2,3,4]});
         let r = query("$.nums.map((x) => x * 2)", &doc).unwrap();
-        assert_eq!(r, json!([2,4,6,8]));
+        assert_eq!(r, json!([2, 4, 6, 8]));
     }
 
     #[test]
@@ -2431,10 +2697,13 @@ mod tests {
             ]
         });
         let r = query("$.groups[*] => {name, ns: items[*] => n}", &doc).unwrap();
-        assert_eq!(r, json!([
-            {"name": "A", "ns": [1, 2]},
-            {"name": "B", "ns": [3]},
-        ]));
+        assert_eq!(
+            r,
+            json!([
+                {"name": "A", "ns": [1, 2]},
+                {"name": "B", "ns": [3]},
+            ])
+        );
     }
 
     #[test]
@@ -2484,10 +2753,13 @@ mod tests {
         });
         // Inside map, `@` is current item — `role` (bare ident) reads from current.
         let r = query("$.users[*] => {name, role: role when active}", &doc).unwrap();
-        assert_eq!(r, json!([
-            {"name": "A", "role": "admin"},
-            {"name": "B"},
-        ]));
+        assert_eq!(
+            r,
+            json!([
+                {"name": "A", "role": "admin"},
+                {"name": "B"},
+            ])
+        );
     }
 
     #[test]
@@ -2507,11 +2779,14 @@ mod tests {
         });
         // Shallow spread would overwrite `x` entirely; deep-spread merges nested.
         let r = query("{...**$.base, ...**$.over}", &doc).unwrap();
-        assert_eq!(r, json!({
-            "x": {"p": 1, "q": 99, "r": 3},
-            "y": 10,
-            "z": 20,
-        }));
+        assert_eq!(
+            r,
+            json!({
+                "x": {"p": 1, "q": 99, "r": 3},
+                "y": 10,
+                "z": 20,
+            })
+        );
     }
 
     #[test]
@@ -2521,10 +2796,10 @@ mod tests {
             "over": {"x": {"q": 2}},
         });
         let shallow = query("{...$.base, ...$.over}", &doc).unwrap();
-        let deep    = query("{...**$.base, ...**$.over}", &doc).unwrap();
+        let deep = query("{...**$.base, ...**$.over}", &doc).unwrap();
         // Shallow: x is just {q:2} (replaced). Deep: x is {p:1, q:2} (merged).
         assert_eq!(shallow, json!({"x": {"q": 2}}));
-        assert_eq!(deep,    json!({"x": {"p": 1, "q": 2}}));
+        assert_eq!(deep, json!({"x": {"p": 1, "q": 2}}));
     }
 
     #[test]
@@ -2584,10 +2859,13 @@ mod tests {
             {"name": "Bob",   "seen": false},
         ]});
         let r = query(r#"patch $ { users[*].seen: true }"#, &doc).unwrap();
-        assert_eq!(r, json!({"users": [
-            {"name": "Alice", "seen": true},
-            {"name": "Bob",   "seen": true},
-        ]}));
+        assert_eq!(
+            r,
+            json!({"users": [
+                {"name": "Alice", "seen": true},
+                {"name": "Bob",   "seen": true},
+            ]})
+        );
     }
 
     #[test]
@@ -2598,11 +2876,14 @@ mod tests {
             {"name": "Cara",  "active": true,  "role": "user"},
         ]});
         let r = query(r#"patch $ { users[* if active].role: "admin" }"#, &doc).unwrap();
-        assert_eq!(r, json!({"users": [
-            {"name": "Alice", "active": true,  "role": "admin"},
-            {"name": "Bob",   "active": false, "role": "user"},
-            {"name": "Cara",  "active": true,  "role": "admin"},
-        ]}));
+        assert_eq!(
+            r,
+            json!({"users": [
+                {"name": "Alice", "active": true,  "role": "admin"},
+                {"name": "Bob",   "active": false, "role": "user"},
+                {"name": "Cara",  "active": true,  "role": "admin"},
+            ]})
+        );
     }
 
     #[test]
@@ -2612,10 +2893,13 @@ mod tests {
             {"name": "Bob",   "email": "BOB@X"},
         ]});
         let r = query(r#"patch $ { users[*].email: @.lower() }"#, &doc).unwrap();
-        assert_eq!(r, json!({"users": [
-            {"name": "Alice", "email": "alice@x"},
-            {"name": "Bob",   "email": "bob@x"},
-        ]}));
+        assert_eq!(
+            r,
+            json!({"users": [
+                {"name": "Alice", "email": "alice@x"},
+                {"name": "Bob",   "email": "bob@x"},
+            ]})
+        );
     }
 
     #[test]
@@ -2654,10 +2938,13 @@ mod tests {
             {"name": "Cara",  "active": true},
         ]});
         let r = query(r#"patch $ { users[* if not active]: DELETE }"#, &doc).unwrap();
-        assert_eq!(r, json!({"users": [
-            {"name": "Alice", "active": true},
-            {"name": "Cara",  "active": true},
-        ]}));
+        assert_eq!(
+            r,
+            json!({"users": [
+                {"name": "Alice", "active": true},
+                {"name": "Cara",  "active": true},
+            ]})
+        );
     }
 
     #[test]
@@ -2769,7 +3056,8 @@ mod tests {
         let r = query(
             r#"$.teams.flat_map(lambda t: t.members).unique_by(lambda m: m.email).map(email)"#,
             &doc,
-        ).unwrap();
+        )
+        .unwrap();
         let emails = r.as_array().unwrap();
         assert_eq!(emails.len(), 3);
         assert!(emails.contains(&json!("a@acme.io")));
@@ -2844,10 +3132,13 @@ mod tests {
     fn tier1_pick_alias_over_array() {
         let doc = saas();
         let r = query(r#"$.teams[0].members.pick(addr: email, role)"#, &doc).unwrap();
-        assert_eq!(r, json!([
-            {"addr": "a@acme.io", "role": "lead"},
-            {"addr": "b@acme.io", "role": "eng"}
-        ]));
+        assert_eq!(
+            r,
+            json!([
+                {"addr": "a@acme.io", "role": "lead"},
+                {"addr": "b@acme.io", "role": "eng"}
+            ])
+        );
     }
 
     #[test]
@@ -2895,9 +3186,15 @@ mod tests {
     fn tier1_chain_set_deep() {
         let doc = saas();
         let r = query(r#"$.teams[0].projects[0].name.set("API")"#, &doc).unwrap();
-        assert_eq!(r.pointer("/teams/0/projects/0/name").unwrap(), &json!("API"));
+        assert_eq!(
+            r.pointer("/teams/0/projects/0/name").unwrap(),
+            &json!("API")
+        );
         // untouched siblings still present
-        assert_eq!(r.pointer("/teams/0/projects/1/name").unwrap(), &json!("runtime"));
+        assert_eq!(
+            r.pointer("/teams/0/projects/1/name").unwrap(),
+            &json!("runtime")
+        );
         assert_eq!(r.pointer("/org").unwrap(), &json!("acme"));
     }
 
@@ -2934,8 +3231,12 @@ mod tests {
         let doc = saas();
         // every `status` anywhere under the doc flips to "closed"
         let r = query(r#"$..status.set("closed")"#, &doc).unwrap();
-        let statuses: Vec<&serde_json::Value> = r.pointer("/teams/0/projects/0/tasks").unwrap()
-            .as_array().unwrap().iter()
+        let statuses: Vec<&serde_json::Value> = r
+            .pointer("/teams/0/projects/0/tasks")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
             .map(|t| t.get("status").unwrap())
             .collect();
         assert!(statuses.iter().all(|s| *s == &json!("closed")));
@@ -2959,7 +3260,10 @@ mod tests {
     fn tier1_chain_merge() {
         let doc = json!({"config": {"host": "a", "port": 80}});
         let r = query(r#"$.config.merge({port: 443, tls: true})"#, &doc).unwrap();
-        assert_eq!(r, json!({"config": {"host": "a", "port": 443, "tls": true}}));
+        assert_eq!(
+            r,
+            json!({"config": {"host": "a", "port": 443, "tls": true}})
+        );
     }
 
     #[test]
@@ -2998,15 +3302,18 @@ mod tests {
         use crate::Jetro;
         let raw = br#"{"a":{"test":1},"b":[{"test":2},{"other":9},{"test":3}],"comment":"the \"test\": lie"}"#.to_vec();
         let j_bytes = Jetro::from_bytes(raw.clone()).unwrap();
-        let j_tree  = Jetro::new(serde_json::from_slice(&raw).unwrap());
-        assert_eq!(j_bytes.collect("$..test").unwrap(),
-                   j_tree.collect("$..test").unwrap());
+        let j_tree = Jetro::new(serde_json::from_slice(&raw).unwrap());
+        assert_eq!(
+            j_bytes.collect("$..test").unwrap(),
+            j_tree.collect("$..test").unwrap()
+        );
     }
 
     #[test]
     fn simd_scan_chains_further_steps() {
         use crate::Jetro;
-        let raw = br#"{"users":[{"id":1,"name":"a"},{"id":2,"name":"b"},{"id":3,"name":"c"}]}"#.to_vec();
+        let raw =
+            br#"{"users":[{"id":1,"name":"a"},{"id":2,"name":"b"},{"id":3,"name":"c"}]}"#.to_vec();
         let j = Jetro::from_bytes(raw).unwrap();
         let r = j.collect("$..id.sum()").unwrap();
         assert_eq!(r, json!(6));
@@ -3060,7 +3367,10 @@ mod tests {
         });
         let raw = serde_json::to_vec(&doc).unwrap();
         let j = Jetro::from_bytes(raw).unwrap();
-        assert_eq!(j.collect(r#"$..type.filter(@ == "action")"#).unwrap(), json!(["action", "action"]));
+        assert_eq!(
+            j.collect(r#"$..type.filter(@ == "action")"#).unwrap(),
+            json!(["action", "action"])
+        );
     }
 
     #[test]
@@ -3069,7 +3379,10 @@ mod tests {
         let doc = json!({"xs":[{"v":true},{"v":false},{"v":true},{"v":null}]});
         let raw = serde_json::to_vec(&doc).unwrap();
         let j = Jetro::from_bytes(raw.clone()).unwrap();
-        assert_eq!(j.collect("$..v.filter(@ == true)").unwrap(), json!([true, true]));
+        assert_eq!(
+            j.collect("$..v.filter(@ == true)").unwrap(),
+            json!([true, true])
+        );
 
         let j2 = Jetro::from_bytes(raw).unwrap();
         assert_eq!(j2.collect("$..v.filter(@ == null)").unwrap(), json!([null]));
@@ -3341,25 +3654,31 @@ mod tests {
     #[test]
     fn range_one_arg() {
         let doc = json!({});
-        assert_eq!(query("range(5)", &doc).unwrap(), json!([0,1,2,3,4]));
+        assert_eq!(query("range(5)", &doc).unwrap(), json!([0, 1, 2, 3, 4]));
     }
 
     #[test]
     fn range_two_args() {
         let doc = json!({});
-        assert_eq!(query("range(2, 5)", &doc).unwrap(), json!([2,3,4]));
+        assert_eq!(query("range(2, 5)", &doc).unwrap(), json!([2, 3, 4]));
     }
 
     #[test]
     fn range_three_args_positive_step() {
         let doc = json!({});
-        assert_eq!(query("range(0, 10, 2)", &doc).unwrap(), json!([0,2,4,6,8]));
+        assert_eq!(
+            query("range(0, 10, 2)", &doc).unwrap(),
+            json!([0, 2, 4, 6, 8])
+        );
     }
 
     #[test]
     fn range_three_args_negative_step() {
         let doc = json!({});
-        assert_eq!(query("range(10, 0, -2)", &doc).unwrap(), json!([10,8,6,4,2]));
+        assert_eq!(
+            query("range(10, 0, -2)", &doc).unwrap(),
+            json!([10, 8, 6, 4, 2])
+        );
     }
 
     #[test]
@@ -3378,19 +3697,19 @@ mod tests {
     #[test]
     fn ceil_floor_round_floats() {
         let doc = json!({"x": 3.3, "y": 3.7, "z": 3.5, "n": -2.4});
-        assert_eq!(query("$.x.ceil()",  &doc).unwrap(), json!(4));
+        assert_eq!(query("$.x.ceil()", &doc).unwrap(), json!(4));
         assert_eq!(query("$.x.floor()", &doc).unwrap(), json!(3));
         assert_eq!(query("$.y.floor()", &doc).unwrap(), json!(3));
         assert_eq!(query("$.y.round()", &doc).unwrap(), json!(4));
         assert_eq!(query("$.z.round()", &doc).unwrap(), json!(4));
-        assert_eq!(query("$.n.ceil()",  &doc).unwrap(), json!(-2));
+        assert_eq!(query("$.n.ceil()", &doc).unwrap(), json!(-2));
         assert_eq!(query("$.n.floor()", &doc).unwrap(), json!(-3));
     }
 
     #[test]
     fn ceil_floor_round_int_identity() {
         let doc = json!({"x": 42});
-        assert_eq!(query("$.x.ceil()",  &doc).unwrap(), json!(42));
+        assert_eq!(query("$.x.ceil()", &doc).unwrap(), json!(42));
         assert_eq!(query("$.x.floor()", &doc).unwrap(), json!(42));
         assert_eq!(query("$.x.round()", &doc).unwrap(), json!(42));
     }

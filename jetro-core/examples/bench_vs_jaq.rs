@@ -18,9 +18,9 @@
 //! - For jetro we execute via `Jetro::collect` which routes through the
 //!   thread-local VM with compile-cache + IC hot.
 
-use std::time::Instant;
 use jetro_core::Jetro;
 use serde_json::{json, Value};
+use std::time::Instant;
 
 use jaq_core::load::{Arena, File, Loader};
 use jaq_core::{data, unwrap_valr, Compiler, Ctx, Vars};
@@ -29,10 +29,23 @@ use jaq_json::{read as jaq_read, Val as JaqVal};
 const ITERS: usize = 10;
 
 fn synth_doc(n_orders: usize, items_per_order: usize) -> Value {
-    let regions = ["us-east", "us-west", "eu-central", "ap-southeast", "sa-south"];
+    let regions = [
+        "us-east",
+        "us-west",
+        "eu-central",
+        "ap-southeast",
+        "sa-south",
+    ];
     let statuses = ["pending", "shipped", "delivered", "cancelled", "refunded"];
     let priorities = ["low", "normal", "high", "urgent"];
-    let categories = ["electronics", "books", "apparel", "grocery", "toys", "tools"];
+    let categories = [
+        "electronics",
+        "books",
+        "apparel",
+        "grocery",
+        "toys",
+        "tools",
+    ];
 
     let mut orders = Vec::with_capacity(n_orders);
     for i in 0..n_orders {
@@ -79,7 +92,11 @@ fn synth_doc(n_orders: usize, items_per_order: usize) -> Value {
 }
 
 #[derive(Clone, Copy)]
-struct Stats { best: u128, median: u128, mean: u128 }
+struct Stats {
+    best: u128,
+    median: u128,
+    mean: u128,
+}
 
 fn sample<F: FnMut()>(mut f: F) -> Stats {
     let _ = f(); // warmup
@@ -97,13 +114,17 @@ fn sample<F: FnMut()>(mut f: F) -> Stats {
 }
 
 fn show(label: &str, s: Stats) {
-    println!("  {:<14} best {:>8}µs  median {:>8}µs  mean {:>8}µs",
-             label, s.best, s.median, s.mean);
+    println!(
+        "  {:<14} best {:>8}µs  median {:>8}µs  mean {:>8}µs",
+        label, s.best, s.median, s.mean
+    );
 }
 
 // ── jaq in-process runner ────────────────────────────────────────────────────
 
-fn compile_jaq(code: &str) -> &'static jaq_core::compile::Filter<jaq_core::Native<data::JustLut<JaqVal>>> {
+fn compile_jaq(
+    code: &str,
+) -> &'static jaq_core::compile::Filter<jaq_core::Native<data::JustLut<JaqVal>>> {
     let arena: &'static Arena = Box::leak(Box::new(Arena::default()));
     let defs = jaq_core::defs()
         .chain(jaq_std::defs())
@@ -120,7 +141,10 @@ fn compile_jaq(code: &str) -> &'static jaq_core::compile::Filter<jaq_core::Nativ
     Box::leak(Box::new(filter))
 }
 
-fn run_jaq(filter: &'static jaq_core::compile::Filter<jaq_core::Native<data::JustLut<JaqVal>>>, input: &JaqVal) -> usize {
+fn run_jaq(
+    filter: &'static jaq_core::compile::Filter<jaq_core::Native<data::JustLut<JaqVal>>>,
+    input: &JaqVal,
+) -> usize {
     let ctx = Ctx::<data::JustLut<JaqVal>>::new(&filter.lut, Vars::new([]));
     filter.id.run((ctx, input.clone())).map(unwrap_valr).count()
 }
@@ -144,23 +168,34 @@ fn bench(
     // `serde_json::Value`.  `collect` would add a deep Arc<str>→String
     // clone of every key + a full tree rebuild, which dominates structural
     // results like `group_by` on 20k items and unfairly penalises jetro.
-    let t = sample(|| { let _ = jetro_tree.collect_val(jetro_q).unwrap(); });
+    let t = sample(|| {
+        let _ = jetro_tree.collect_val(jetro_q).unwrap();
+    });
     show("jetro-tree", t);
 
     if let Some(js) = jetro_scan {
-        let s = sample(|| { let _ = js.collect_val(jetro_q).unwrap(); });
+        let s = sample(|| {
+            let _ = js.collect_val(jetro_q).unwrap();
+        });
         show("jetro-scan", s);
     }
 
     let compiled = compile_jaq(jaq_q);
-    let j = sample(|| { let _ = run_jaq(compiled, jaq_input); });
+    let j = sample(|| {
+        let _ = run_jaq(compiled, jaq_input);
+    });
     show("jaq", j);
 
     let ratio = j.median as f64 / t.median.max(1) as f64;
-    println!("  jetro-tree median vs jaq: {:.2}x (jetro {} times faster)",
-             ratio, if ratio >= 1.0 { "" } else { "slower —" });
+    println!(
+        "  jetro-tree median vs jaq: {:.2}x (jetro {} times faster)",
+        ratio,
+        if ratio >= 1.0 { "" } else { "slower —" }
+    );
     if let Some(js) = jetro_scan {
-        let s = sample(|| { let _ = js.collect_val(jetro_q).unwrap(); });
+        let s = sample(|| {
+            let _ = js.collect_val(jetro_q).unwrap();
+        });
         let r = j.median as f64 / s.median.max(1) as f64;
         println!("  jetro-scan median vs jaq: {:.2}x", r);
     }
@@ -172,8 +207,14 @@ fn main() {
     let doc = synth_doc(n_orders, items_per_order);
     let bytes = serde_json::to_vec(&doc).unwrap();
     let mb = bytes.len() as f64 / 1_048_576.0;
-    println!("payload: {} orders × {} items = {} items, {:.2} MB, iters: {}",
-             n_orders, items_per_order, n_orders * items_per_order, mb, ITERS);
+    println!(
+        "payload: {} orders × {} items = {} items, {:.2} MB, iters: {}",
+        n_orders,
+        items_per_order,
+        n_orders * items_per_order,
+        mb,
+        ITERS
+    );
 
     let j_tree = Jetro::new(doc.clone());
     let j_scan = Jetro::from_bytes(bytes.clone()).unwrap();
@@ -183,7 +224,8 @@ fn main() {
 
     bench(
         "Q1  shallow field projection (shape-repeat)",
-        &j_tree, None,
+        &j_tree,
+        None,
         "$.orders.map(customer.address.city)",
         "[.orders[] | .customer.address.city]",
         &jaq_input,
@@ -191,7 +233,8 @@ fn main() {
 
     bench(
         "Q2  projection + unique",
-        &j_tree, None,
+        &j_tree,
+        None,
         "$.orders.map(customer.address.country_code).unique()",
         "[.orders[].customer.address.country_code] | unique",
         &jaq_input,
@@ -199,7 +242,8 @@ fn main() {
 
     bench(
         "Q3  filter + project",
-        &j_tree, None,
+        &j_tree,
+        None,
         "$.orders.filter(total > 500).map(id)",
         "[.orders[] | select(.total > 500) | .id]",
         &jaq_input,
@@ -207,7 +251,8 @@ fn main() {
 
     bench(
         "Q4  multi-condition filter + count",
-        &j_tree, None,
+        &j_tree,
+        None,
         r#"$.orders.filter(status == "shipped" and priority == "high").count()"#,
         r#"[.orders[] | select(.status == "shipped" and .priority == "high")] | length"#,
         &jaq_input,
@@ -215,7 +260,8 @@ fn main() {
 
     bench(
         "Q5  deep find: broad match",
-        &j_tree, Some(&j_scan),
+        &j_tree,
+        Some(&j_scan),
         r#"$..find(@.status == "shipped")"#,
         r#"[.. | objects | select(.status? == "shipped")]"#,
         &jaq_input,
@@ -223,7 +269,8 @@ fn main() {
 
     bench(
         "Q6  deep find: narrow (1 hit)",
-        &j_tree, Some(&j_scan),
+        &j_tree,
+        Some(&j_scan),
         r#"$..find(@.sku == "SKU-00042")"#,
         r#"[.. | objects | select(.sku? == "SKU-00042")]"#,
         &jaq_input,
@@ -231,7 +278,8 @@ fn main() {
 
     bench(
         "Q7  deep find: multi-predicate AND",
-        &j_tree, Some(&j_scan),
+        &j_tree,
+        Some(&j_scan),
         r#"$..find(@.status == "shipped", @.priority == "urgent")"#,
         r#"[.. | objects | select(.status? == "shipped" and .priority? == "urgent")]"#,
         &jaq_input,
@@ -239,7 +287,8 @@ fn main() {
 
     bench(
         "Q8  deep key extract + aggregate",
-        &j_tree, Some(&j_scan),
+        &j_tree,
+        Some(&j_scan),
         "$..total.sum()",
         "[.. | objects | .total? // empty] | add",
         &jaq_input,
@@ -247,7 +296,8 @@ fn main() {
 
     bench(
         "Q9  deep key extract (120k values)",
-        &j_tree, Some(&j_scan),
+        &j_tree,
+        Some(&j_scan),
         "$..sku",
         "[.. | .sku? // empty]",
         &jaq_input,
@@ -255,7 +305,8 @@ fn main() {
 
     bench(
         "Q10 group_by(status)",
-        &j_tree, None,
+        &j_tree,
+        None,
         "$.orders.group_by(status)",
         ".orders | group_by(.status)",
         &jaq_input,
@@ -263,7 +314,8 @@ fn main() {
 
     bench(
         "Q11 map(total).sum()",
-        &j_tree, None,
+        &j_tree,
+        None,
         "$.orders.map(total).sum()",
         "[.orders[].total] | add",
         &jaq_input,
@@ -271,7 +323,8 @@ fn main() {
 
     bench(
         "Q12 max over mapped field",
-        &j_tree, None,
+        &j_tree,
+        None,
         "$.orders.map(total).max()",
         "[.orders[].total] | max",
         &jaq_input,
@@ -279,7 +332,8 @@ fn main() {
 
     bench(
         "Q13 list-comp equivalent",
-        &j_tree, None,
+        &j_tree,
+        None,
         "[o.id for o in $.orders if o.total > 1000]",
         "[.orders[] | select(.total > 1000) | .id]",
         &jaq_input,

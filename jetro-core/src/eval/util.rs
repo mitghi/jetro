@@ -13,14 +13,14 @@
 //! - `val_str` / `val_to_string`: coercion helpers for string
 //!   methods and CSV emission.
 
+use indexmap::IndexMap;
 use std::cmp::Ordering;
 use std::sync::Arc;
-use indexmap::IndexMap;
 
+use super::super::ast::BinOp;
+use super::super::ast::KindType;
 use super::value::Val;
 use super::EvalError;
-use super::super::ast::KindType;
-use super::super::ast::BinOp;
 
 // ── Scalar semantic kernel ───────────────────────────────────────────────────
 
@@ -106,12 +106,8 @@ pub fn json_vals_eq(a: JsonView<'_>, b: JsonView<'_>) -> bool {
         (JsonView::Float(x), JsonView::Int(y)) => x == (y as f64),
         (JsonView::UInt(x), JsonView::Float(y)) => (x as f64) == y,
         (JsonView::Float(x), JsonView::UInt(y)) => x == (y as f64),
-        (JsonView::Int(x), JsonView::UInt(y)) => {
-            x >= 0 && (x as u64) == y
-        }
-        (JsonView::UInt(x), JsonView::Int(y)) => {
-            y >= 0 && x == (y as u64)
-        }
+        (JsonView::Int(x), JsonView::UInt(y)) => x >= 0 && (x as u64) == y,
+        (JsonView::UInt(x), JsonView::Int(y)) => y >= 0 && x == (y as u64),
         _ => false,
     }
 }
@@ -121,9 +117,7 @@ pub fn json_cmp_vals(a: JsonView<'_>, b: JsonView<'_>) -> Ordering {
     match (a, b) {
         (JsonView::Int(x), JsonView::Int(y)) => x.cmp(&y),
         (JsonView::UInt(x), JsonView::UInt(y)) => x.cmp(&y),
-        (JsonView::Float(x), JsonView::Float(y)) => {
-            x.partial_cmp(&y).unwrap_or(Ordering::Equal)
-        }
+        (JsonView::Float(x), JsonView::Float(y)) => x.partial_cmp(&y).unwrap_or(Ordering::Equal),
         (JsonView::Int(x), JsonView::Float(y)) => {
             (x as f64).partial_cmp(&y).unwrap_or(Ordering::Equal)
         }
@@ -137,10 +131,18 @@ pub fn json_cmp_vals(a: JsonView<'_>, b: JsonView<'_>) -> Ordering {
             x.partial_cmp(&(y as f64)).unwrap_or(Ordering::Equal)
         }
         (JsonView::Int(x), JsonView::UInt(y)) => {
-            if x < 0 { Ordering::Less } else { (x as u64).cmp(&y) }
+            if x < 0 {
+                Ordering::Less
+            } else {
+                (x as u64).cmp(&y)
+            }
         }
         (JsonView::UInt(x), JsonView::Int(y)) => {
-            if y < 0 { Ordering::Greater } else { x.cmp(&(y as u64)) }
+            if y < 0 {
+                Ordering::Greater
+            } else {
+                x.cmp(&(y as u64))
+            }
         }
         (JsonView::Str(x), JsonView::Str(y)) => x.cmp(y),
         (JsonView::Bool(x), JsonView::Bool(y)) => x.cmp(&y),
@@ -170,16 +172,17 @@ pub fn is_truthy(v: &Val) -> bool {
 
 #[inline]
 pub fn kind_matches(v: &Val, ty: KindType) -> bool {
-    matches!((v, ty),
-        (Val::Null,         KindType::Null)   |
-        (Val::Bool(_),      KindType::Bool)   |
-        (Val::Int(_),       KindType::Number) |
-        (Val::Float(_),     KindType::Number) |
-        (Val::Str(_),       KindType::Str)    |
-        (Val::Arr(_),       KindType::Array)  |
-        (Val::IntVec(_),    KindType::Array)  |
-        (Val::FloatVec(_),  KindType::Array)  |
-        (Val::Obj(_),       KindType::Object)
+    matches!(
+        (v, ty),
+        (Val::Null, KindType::Null)
+            | (Val::Bool(_), KindType::Bool)
+            | (Val::Int(_), KindType::Number)
+            | (Val::Float(_), KindType::Number)
+            | (Val::Str(_), KindType::Str)
+            | (Val::Arr(_), KindType::Array)
+            | (Val::IntVec(_), KindType::Array)
+            | (Val::FloatVec(_), KindType::Array)
+            | (Val::Obj(_), KindType::Object)
     )
 }
 
@@ -199,26 +202,26 @@ pub fn cmp_vals(a: &Val, b: &Val) -> std::cmp::Ordering {
 #[inline]
 pub fn val_to_key(v: &Val) -> String {
     match v {
-        Val::Str(s)      => s.to_string(),
+        Val::Str(s) => s.to_string(),
         Val::StrSlice(r) => r.as_str().to_string(),
-        Val::Int(n)      => n.to_string(),
-        Val::Float(f)    => f.to_string(),
-        Val::Bool(b)     => b.to_string(),
-        Val::Null        => "null".to_string(),
-        other            => val_to_string(other),
+        Val::Int(n) => n.to_string(),
+        Val::Float(f) => f.to_string(),
+        Val::Bool(b) => b.to_string(),
+        Val::Null => "null".to_string(),
+        other => val_to_string(other),
     }
 }
 
 #[inline]
 pub fn val_to_string(v: &Val) -> String {
     match v {
-        Val::Str(s)      => s.to_string(),
+        Val::Str(s) => s.to_string(),
         Val::StrSlice(r) => r.as_str().to_string(),
-        Val::Int(n)      => n.to_string(),
-        Val::Float(f)    => f.to_string(),
-        Val::Bool(b)     => b.to_string(),
-        Val::Null        => "null".to_string(),
-        other          => {
+        Val::Int(n) => n.to_string(),
+        Val::Float(f) => f.to_string(),
+        Val::Bool(b) => b.to_string(),
+        Val::Null => "null".to_string(),
+        other => {
             let sv: serde_json::Value = other.clone().into();
             serde_json::to_string(&sv).unwrap_or_default()
         }
@@ -227,19 +230,31 @@ pub fn val_to_string(v: &Val) -> String {
 
 // ── Constructors ──────────────────────────────────────────────────────────────
 
-#[inline] pub fn val_int(n: i64)  -> Val { Val::Int(n) }
-#[inline] pub fn val_float(f: f64) -> Val { Val::Float(f) }
-#[inline] pub fn val_str(s: &str) -> Val { Val::Str(Arc::from(s)) }
-#[inline] pub fn val_key(s: &str) -> Arc<str> { Arc::from(s) }
+#[inline]
+pub fn val_int(n: i64) -> Val {
+    Val::Int(n)
+}
+#[inline]
+pub fn val_float(f: f64) -> Val {
+    Val::Float(f)
+}
+#[inline]
+pub fn val_str(s: &str) -> Val {
+    Val::Str(Arc::from(s))
+}
+#[inline]
+pub fn val_key(s: &str) -> Arc<str> {
+    Arc::from(s)
+}
 
 // ── Arithmetic ────────────────────────────────────────────────────────────────
 
 pub fn add_vals(a: Val, b: Val) -> Result<Val, EvalError> {
     match (a, b) {
-        (Val::Int(x),   Val::Int(y))   => Ok(Val::Int(x + y)),
+        (Val::Int(x), Val::Int(y)) => Ok(Val::Int(x + y)),
         (Val::Float(x), Val::Float(y)) => Ok(Val::Float(x + y)),
-        (Val::Int(x),   Val::Float(y)) => Ok(Val::Float(x as f64 + y)),
-        (Val::Float(x), Val::Int(y))   => Ok(Val::Float(x + y as f64)),
+        (Val::Int(x), Val::Float(y)) => Ok(Val::Float(x as f64 + y)),
+        (Val::Float(x), Val::Int(y)) => Ok(Val::Float(x + y as f64)),
         (Val::Str(x), Val::Str(y)) => {
             // `format!` would allocate a temporary `String` for argument
             // formatting, on top of the `Arc::<str>::from` allocation.
@@ -264,10 +279,10 @@ where
     Ff: Fn(f64, f64) -> f64,
 {
     match (a, b) {
-        (Val::Int(x),   Val::Int(y))   => Ok(Val::Int(fi(x, y))),
+        (Val::Int(x), Val::Int(y)) => Ok(Val::Int(fi(x, y))),
         (Val::Float(x), Val::Float(y)) => Ok(Val::Float(ff(x, y))),
-        (Val::Int(x),   Val::Float(y)) => Ok(Val::Float(ff(x as f64, y))),
-        (Val::Float(x), Val::Int(y))   => Ok(Val::Float(ff(x, y as f64))),
+        (Val::Int(x), Val::Float(y)) => Ok(Val::Float(ff(x as f64, y))),
+        (Val::Float(x), Val::Int(y)) => Ok(Val::Float(ff(x, y as f64))),
         _ => Err(EvalError("arithmetic on non-numbers".into())),
     }
 }
@@ -281,38 +296,46 @@ pub fn flatten_val(v: Val, depth: usize) -> Val {
             // Columnar fast-path: Arr of IntVec (or Int scalars) → IntVec out.
             // Skips per-item Val::Int allocation and keeps the result in the
             // typed lane for downstream aggregates / accumulate.
-            let all_int_children = !items.is_empty() && items.iter().all(|it| matches!(it,
-                Val::IntVec(_) | Val::Int(_)
-            ));
+            let all_int_children = !items.is_empty()
+                && items
+                    .iter()
+                    .all(|it| matches!(it, Val::IntVec(_) | Val::Int(_)));
             if all_int_children {
-                let cap: usize = items.iter().map(|it| match it {
-                    Val::IntVec(inner) => inner.len(),
-                    _ => 1,
-                }).sum();
+                let cap: usize = items
+                    .iter()
+                    .map(|it| match it {
+                        Val::IntVec(inner) => inner.len(),
+                        _ => 1,
+                    })
+                    .sum();
                 let mut out: Vec<i64> = Vec::with_capacity(cap);
                 for item in items {
                     match item {
                         Val::IntVec(inner) => out.extend(inner.iter().copied()),
-                        Val::Int(n)        => out.push(n),
+                        Val::Int(n) => out.push(n),
                         _ => unreachable!(),
                     }
                 }
                 return Val::int_vec(out);
             }
-            let all_float_children = !items.is_empty() && items.iter().all(|it| matches!(it,
-                Val::FloatVec(_) | Val::Float(_) | Val::Int(_)
-            ));
+            let all_float_children = !items.is_empty()
+                && items
+                    .iter()
+                    .all(|it| matches!(it, Val::FloatVec(_) | Val::Float(_) | Val::Int(_)));
             if all_float_children {
-                let cap: usize = items.iter().map(|it| match it {
-                    Val::FloatVec(inner) => inner.len(),
-                    _ => 1,
-                }).sum();
+                let cap: usize = items
+                    .iter()
+                    .map(|it| match it {
+                        Val::FloatVec(inner) => inner.len(),
+                        _ => 1,
+                    })
+                    .sum();
                 let mut out: Vec<f64> = Vec::with_capacity(cap);
                 for item in items {
                     match item {
                         Val::FloatVec(inner) => out.extend(inner.iter().copied()),
-                        Val::Float(f)        => out.push(f),
-                        Val::Int(n)          => out.push(n as f64),
+                        Val::Float(f) => out.push(f),
+                        Val::Int(n) => out.push(n as f64),
                         _ => unreachable!(),
                     }
                 }
@@ -321,13 +344,16 @@ pub fn flatten_val(v: Val, depth: usize) -> Val {
             // Precompute exact capacity in one pass — eliminates Vec doubling
             // reallocations on the hot `$.flatten()` / `.map(...).flatten()`
             // paths.
-            let cap: usize = items.iter().map(|it| match it {
-                Val::Arr(inner) => inner.len(),
-                Val::IntVec(inner) => inner.len(),
-                Val::FloatVec(inner) => inner.len(),
-                Val::StrVec(inner) => inner.len(),
-                _ => 1,
-            }).sum();
+            let cap: usize = items
+                .iter()
+                .map(|it| match it {
+                    Val::Arr(inner) => inner.len(),
+                    Val::IntVec(inner) => inner.len(),
+                    Val::FloatVec(inner) => inner.len(),
+                    Val::StrVec(inner) => inner.len(),
+                    _ => 1,
+                })
+                .sum();
             let mut out = Vec::with_capacity(cap);
             for item in items {
                 match item {
@@ -370,22 +396,36 @@ pub fn flatten_val(v: Val, depth: usize) -> Val {
 pub fn zip_arrays(a: Val, b: Val, longest: bool, fill: Val) -> Result<Val, EvalError> {
     let av = a.as_vals().map(|c| c.into_owned()).unwrap_or_default();
     let bv = b.as_vals().map(|c| c.into_owned()).unwrap_or_default();
-    let len = if longest { av.len().max(bv.len()) } else { av.len().min(bv.len()) };
-    Ok(Val::arr((0..len).map(|i| Val::arr(vec![
-        av.get(i).cloned().unwrap_or_else(|| fill.clone()),
-        bv.get(i).cloned().unwrap_or_else(|| fill.clone()),
-    ])).collect()))
+    let len = if longest {
+        av.len().max(bv.len())
+    } else {
+        av.len().min(bv.len())
+    };
+    Ok(Val::arr(
+        (0..len)
+            .map(|i| {
+                Val::arr(vec![
+                    av.get(i).cloned().unwrap_or_else(|| fill.clone()),
+                    bv.get(i).cloned().unwrap_or_else(|| fill.clone()),
+                ])
+            })
+            .collect(),
+    ))
 }
 
 pub fn cartesian(arrays: &[Vec<Val>]) -> Vec<Vec<Val>> {
     arrays.iter().fold(vec![vec![]], |acc, arr| {
-        acc.into_iter().flat_map(|prefix| {
-            arr.iter().map(move |item| {
-                let mut row = prefix.clone();
-                row.push(item.clone());
-                row
-            }).collect::<Vec<_>>()
-        }).collect()
+        acc.into_iter()
+            .flat_map(|prefix| {
+                arr.iter()
+                    .map(move |item| {
+                        let mut row = prefix.clone();
+                        row.push(item.clone());
+                        row
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect()
     })
 }
 
@@ -396,9 +436,9 @@ pub fn field_exists_nested(v: &Val, path: &str) -> bool {
     let first = parts.next().unwrap_or("");
     match (v.get(first), parts.next()) {
         (Some(v), _) if v.is_null() => false,
-        (Some(_), None)             => true,
-        (Some(child), Some(rest))   => field_exists_nested(child, rest),
-        (None, _)                   => false,
+        (Some(_), None) => true,
+        (Some(child), Some(rest)) => field_exists_nested(child, rest),
+        (None, _) => false,
     }
 }
 
@@ -410,10 +450,13 @@ pub fn deep_merge(base: Val, other: Val) -> Val {
             let mut map = Arc::try_unwrap(bm).unwrap_or_else(|m| (*m).clone());
             for (k, v) in Arc::try_unwrap(om).unwrap_or_else(|m| (*m).clone()) {
                 let existing = map.shift_remove(&k);
-                map.insert(k, match existing {
-                    Some(e) => deep_merge(e, v),
-                    None    => v,
-                });
+                map.insert(
+                    k,
+                    match existing {
+                        Some(e) => deep_merge(e, v),
+                        None => v,
+                    },
+                );
             }
             Val::obj(map)
         }
@@ -429,25 +472,32 @@ pub fn deep_merge_concat(base: Val, other: Val) -> Val {
             let mut map = Arc::try_unwrap(bm).unwrap_or_else(|m| (*m).clone());
             for (k, v) in Arc::try_unwrap(om).unwrap_or_else(|m| (*m).clone()) {
                 let existing = map.shift_remove(&k);
-                map.insert(k, match existing {
-                    Some(e) => deep_merge_concat(e, v),
-                    None    => v,
-                });
+                map.insert(
+                    k,
+                    match existing {
+                        Some(e) => deep_merge_concat(e, v),
+                        None => v,
+                    },
+                );
             }
             Val::obj(map)
         }
         (Val::Arr(ba), Val::Arr(oa)) => {
             let mut a = Arc::try_unwrap(ba).unwrap_or_else(|a| (*a).clone());
-            for v in Arc::try_unwrap(oa).unwrap_or_else(|a| (*a).clone()) { a.push(v); }
+            for v in Arc::try_unwrap(oa).unwrap_or_else(|a| (*a).clone()) {
+                a.push(v);
+            }
             Val::arr(a)
         }
         (base, other)
             if (base.is_array() && other.is_array())
-            && (matches!(&base, Val::StrVec(_) | Val::IntVec(_) | Val::FloatVec(_))
-                || matches!(&other, Val::StrVec(_) | Val::IntVec(_) | Val::FloatVec(_))) =>
+                && (matches!(&base, Val::StrVec(_) | Val::IntVec(_) | Val::FloatVec(_))
+                    || matches!(&other, Val::StrVec(_) | Val::IntVec(_) | Val::FloatVec(_))) =>
         {
             let mut a = base.into_vec().unwrap_or_default();
-            if let Some(v) = other.into_vec() { a.extend(v); }
+            if let Some(v) = other.into_vec() {
+                a.extend(v);
+            }
             Val::arr(a)
         }
         (_, other) => other,

@@ -13,11 +13,24 @@ const N_ORDERS: usize = 2_000;
 const ITEMS_PER_ORDER: usize = 6;
 
 fn synth_doc() -> Value {
-    let regions   = ["us-east", "us-west", "eu-central", "ap-southeast", "sa-south"];
-    let statuses  = ["pending", "shipped", "delivered", "cancelled", "refunded"];
+    let regions = [
+        "us-east",
+        "us-west",
+        "eu-central",
+        "ap-southeast",
+        "sa-south",
+    ];
+    let statuses = ["pending", "shipped", "delivered", "cancelled", "refunded"];
     let priorities = ["low", "normal", "high", "urgent"];
-    let cities    = ["Tokyo", "Berlin", "São Paulo", "Nairobi", "Austin", "Toronto"];
-    let country   = ["JP", "DE", "BR", "KE", "US", "CA"];
+    let cities = [
+        "Tokyo",
+        "Berlin",
+        "São Paulo",
+        "Nairobi",
+        "Austin",
+        "Toronto",
+    ];
+    let country = ["JP", "DE", "BR", "KE", "US", "CA"];
 
     let mut orders = Vec::with_capacity(N_ORDERS);
     for i in 0..N_ORDERS {
@@ -25,7 +38,7 @@ fn synth_doc() -> Value {
         let mut total: f64 = 0.0;
         for j in 0..ITEMS_PER_ORDER {
             let price = ((i * 7 + j * 13) % 500) as f64 + 9.99;
-            let qty   = ((i + j) % 5 + 1) as i64;
+            let qty = ((i + j) % 5 + 1) as i64;
             total += price * qty as f64;
             items.push(json!({
                 "sku":   format!("SKU-{:05}", (i * ITEMS_PER_ORDER + j) % 9973),
@@ -67,7 +80,14 @@ fn q1_project_nested_field() {
     let arr = as_array(&out);
     assert_eq!(arr.len(), N_ORDERS);
     // Every element must be one of the six city strings.
-    let cities = ["Tokyo", "Berlin", "São Paulo", "Nairobi", "Austin", "Toronto"];
+    let cities = [
+        "Tokyo",
+        "Berlin",
+        "São Paulo",
+        "Nairobi",
+        "Austin",
+        "Toronto",
+    ];
     for v in arr {
         let s = v.as_str().unwrap();
         assert!(cities.contains(&s), "unexpected city: {}", s);
@@ -77,7 +97,9 @@ fn q1_project_nested_field() {
 #[test]
 fn q2_project_then_unique() {
     let j = Jetro::new(synth_doc());
-    let out = j.collect("$.orders.map(customer.address.country_code).unique()").unwrap();
+    let out = j
+        .collect("$.orders.map(customer.address.country_code).unique()")
+        .unwrap();
     let arr = as_array(&out);
     assert_eq!(arr.len(), 6); // 6 country codes in the generator
 }
@@ -99,11 +121,16 @@ fn q3_filter_then_map_id() {
 #[test]
 fn q4_multi_cond_filter_count_matches_naive() {
     let doc = synth_doc();
-    let naive: usize = doc["orders"].as_array().unwrap().iter()
+    let naive: usize = doc["orders"]
+        .as_array()
+        .unwrap()
+        .iter()
         .filter(|o| o["status"] == "shipped" && o["priority"] == "high")
         .count();
     let j = Jetro::new(doc);
-    let out = j.collect(r#"$.orders.filter(status == "shipped" and priority == "high").count()"#).unwrap();
+    let out = j
+        .collect(r#"$.orders.filter(status == "shipped" and priority == "high").count()"#)
+        .unwrap();
     assert_eq!(out.as_i64().unwrap() as usize, naive);
 }
 
@@ -208,10 +235,12 @@ fn q10_group_by_status_collect_val_matches() {
     let total: usize = match v {
         JetroVal::Obj(m) => {
             assert_eq!(m.len(), 5);
-            m.values().map(|b| match b {
-                JetroVal::Arr(a) => a.len(),
-                _ => panic!("bucket is not an array"),
-            }).sum()
+            m.values()
+                .map(|b| match b {
+                    JetroVal::Arr(a) => a.len(),
+                    _ => panic!("bucket is not an array"),
+                })
+                .sum()
         }
         _ => panic!("group_by did not return an object"),
     };
@@ -231,8 +260,12 @@ fn q11_count_by_region() {
 #[test]
 fn q12_sum_of_totals_matches_naive() {
     let doc = synth_doc();
-    let naive: f64 = doc["orders"].as_array().unwrap().iter()
-        .map(|o| o["total"].as_f64().unwrap()).sum();
+    let naive: f64 = doc["orders"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["total"].as_f64().unwrap())
+        .sum();
     let j = Jetro::new(doc);
     let out = j.collect("$.orders.map(total).sum()").unwrap();
     let got = out.as_f64().unwrap();
@@ -242,7 +275,10 @@ fn q12_sum_of_totals_matches_naive() {
 #[test]
 fn q15_max_matches_naive() {
     let doc = synth_doc();
-    let naive = doc["orders"].as_array().unwrap().iter()
+    let naive = doc["orders"]
+        .as_array()
+        .unwrap()
+        .iter()
         .map(|o| o["total"].as_f64().unwrap())
         .fold(f64::MIN, f64::max);
     let j = Jetro::new(doc);
@@ -256,7 +292,9 @@ fn q15_max_matches_naive() {
 fn q13_list_comp_equivalent_to_filter_map() {
     let doc = synth_doc();
     let j = Jetro::new(doc);
-    let a = j.collect("[o.id for o in $.orders if o.total > 1000]").unwrap();
+    let a = j
+        .collect("[o.id for o in $.orders if o.total > 1000]")
+        .unwrap();
     let b = j.collect("$.orders.filter(total > 1000).map(id)").unwrap();
     assert_eq!(a, b);
 }
@@ -267,7 +305,9 @@ fn q14_pick_projects_and_renames() {
     // (not a dotted path).  Apply pick on the already-flattened customer
     // level to test alias + rename.
     let j = Jetro::new(synth_doc());
-    let out = j.collect("$.orders.map(customer).pick(uid: id, who: name)").unwrap();
+    let out = j
+        .collect("$.orders.map(customer).pick(uid: id, who: name)")
+        .unwrap();
     let arr = as_array(&out);
     assert_eq!(arr.len(), N_ORDERS);
     let first = arr[0].as_object().unwrap();
@@ -330,16 +370,24 @@ fn route_c_scan_agrees_with_tree_walker_on_chained_find() {
 #[test]
 fn find_count_fusion_yields_same_integer_as_filter_count() {
     let j = Jetro::new(synth_doc());
-    let a = j.collect(r#"$.orders.find(status == "shipped").count()"#).unwrap();
-    let b = j.collect(r#"$.orders.filter(status == "shipped").count()"#).unwrap();
+    let a = j
+        .collect(r#"$.orders.find(status == "shipped").count()"#)
+        .unwrap();
+    let b = j
+        .collect(r#"$.orders.filter(status == "shipped").count()"#)
+        .unwrap();
     assert_eq!(a, b);
 }
 
 #[test]
 fn filter_map_min_max_match_unfused_pipeline() {
     let j = Jetro::new(synth_doc());
-    let fused_min = j.collect(r#"$.orders.filter(status == "shipped").map(total).min()"#).unwrap();
-    let fused_max = j.collect(r#"$.orders.filter(status == "shipped").map(total).max()"#).unwrap();
+    let fused_min = j
+        .collect(r#"$.orders.filter(status == "shipped").map(total).min()"#)
+        .unwrap();
+    let fused_max = j
+        .collect(r#"$.orders.filter(status == "shipped").map(total).max()"#)
+        .unwrap();
     let arr: Vec<f64> = j
         .collect(r#"$.orders.filter(status == "shipped").map(total)"#)
         .unwrap()
@@ -377,20 +425,25 @@ fn deep_find_numeric_range_tree_eq_scan() {
     }
     // Inclusive `>=` / `<=` : verify scan against naive ground truth.
     let orders = doc["orders"].as_array().unwrap();
-    let naive_total_gte_500 = orders.iter()
-        .filter(|o| o["total"].as_f64().unwrap() >= 500.0).count();
-    let scan_total_gte_500 = as_array(
-        &j_scan.collect("$..find(@.total >= 500)").unwrap()
-    ).len();
+    let naive_total_gte_500 = orders
+        .iter()
+        .filter(|o| o["total"].as_f64().unwrap() >= 500.0)
+        .count();
+    let scan_total_gte_500 = as_array(&j_scan.collect("$..find(@.total >= 500)").unwrap()).len();
     assert_eq!(scan_total_gte_500, naive_total_gte_500);
 
-    let naive_qty_lte_2: usize = orders.iter().map(|o| {
-        o["items"].as_array().unwrap().iter()
-            .filter(|it| it["qty"].as_i64().unwrap() <= 2).count()
-    }).sum();
-    let scan_qty_lte_2 = as_array(
-        &j_scan.collect("$..find(@.qty <= 2)").unwrap()
-    ).len();
+    let naive_qty_lte_2: usize = orders
+        .iter()
+        .map(|o| {
+            o["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|it| it["qty"].as_i64().unwrap() <= 2)
+                .count()
+        })
+        .sum();
+    let scan_qty_lte_2 = as_array(&j_scan.collect("$..find(@.qty <= 2)").unwrap()).len();
     assert_eq!(scan_qty_lte_2, naive_qty_lte_2);
 }
 
@@ -417,8 +470,13 @@ fn deep_find_then_count_and_aggregate_projection() {
         let tf = t.as_f64();
         let sf = s.as_f64();
         match (tf, sf) {
-            (Some(a), Some(b)) => assert!((a - b).abs() < eps.max(a.abs() * 1e-9),
-                "query {}: tree {} vs scan {}", q, a, b),
+            (Some(a), Some(b)) => assert!(
+                (a - b).abs() < eps.max(a.abs() * 1e-9),
+                "query {}: tree {} vs scan {}",
+                q,
+                a,
+                b
+            ),
             _ => assert_eq!(t, s, "query {}", q),
         }
     }
@@ -466,10 +524,10 @@ fn deep_find_mixed_eq_cmp_tree_eq_scan() {
     let s = as_array(&j_scan.collect(q).unwrap()).len();
     assert_eq!(t, s, "tree {} vs scan {}", t, s);
     let orders = doc["orders"].as_array().unwrap();
-    let naive = orders.iter().filter(|o| {
-        o["status"].as_str() == Some("shipped")
-            && o["total"].as_f64().unwrap() > 500.0
-    }).count();
+    let naive = orders
+        .iter()
+        .filter(|o| o["status"].as_str() == Some("shipped") && o["total"].as_f64().unwrap() > 500.0)
+        .count();
     assert_eq!(s, naive);
     assert!(s > 0);
 }
@@ -494,8 +552,12 @@ fn descendant_first_early_exit_matches_tree() {
         "$..qty.first()",
         "$..items.first()..sku.first()",
     ] {
-        assert_eq!(j_scan.collect(q).unwrap(), j_tree.collect(q).unwrap(),
-            "query {}", q);
+        assert_eq!(
+            j_scan.collect(q).unwrap(),
+            j_tree.collect(q).unwrap(),
+            "query {}",
+            q
+        );
     }
     // Sanity: the early-exit scan still resolves a real value from the
     // document — not `Null` from a missed match.
@@ -506,8 +568,8 @@ fn descendant_first_early_exit_matches_tree() {
 #[test]
 fn unique_count_fusion_matches_dedup_then_count() {
     let j = Jetro::new(synth_doc());
-    let fused  = j.collect("$.orders.map(status).unique().count()").unwrap();
-    let plain  = j.collect("$.orders.map(status).unique().len()").unwrap();
+    let fused = j.collect("$.orders.map(status).unique().count()").unwrap();
+    let plain = j.collect("$.orders.map(status).unique().len()").unwrap();
     let manual = {
         let arr = j.collect("$.orders.map(status).unique()").unwrap();
         serde_json::Value::from(arr.as_array().unwrap().len() as i64)

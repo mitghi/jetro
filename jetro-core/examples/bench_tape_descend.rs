@@ -7,10 +7,15 @@ fn make_doc(n: usize) -> Vec<u8> {
     let mut s = String::with_capacity(n * 100);
     s.push_str("{\"orders\":[");
     for i in 0..n {
-        if i > 0 { s.push(','); }
+        if i > 0 {
+            s.push(',');
+        }
         s.push_str(&format!(
             "{{\"id\":{},\"items\":[{{\"price\":{}}},{{\"price\":{}}}]}}",
-            i, i * 2, i * 3));
+            i,
+            i * 2,
+            i * 3
+        ));
     }
     s.push_str("]}");
     s.into_bytes()
@@ -20,19 +25,37 @@ fn bench<F: FnMut() -> u64>(name: &str, iters: usize, mut f: F) {
     let _ = f();
     let t = Instant::now();
     let mut acc: u64 = 0;
-    for _ in 0..iters { acc = acc.wrapping_add(f()); }
+    for _ in 0..iters {
+        acc = acc.wrapping_add(f());
+    }
     let per = t.elapsed() / iters as u32;
-    println!("{:<40} {:>9.2} µs / iter   (acc {})", name, per.as_secs_f64() * 1_000_000.0, acc);
+    println!(
+        "{:<40} {:>9.2} µs / iter   (acc {})",
+        name,
+        per.as_secs_f64() * 1_000_000.0,
+        acc
+    );
 }
 
 fn main() {
-    let n: usize = std::env::var("N").ok().and_then(|s| s.parse().ok()).unwrap_or(20_000);
-    let iters: usize = std::env::var("ITERS").ok().and_then(|s| s.parse().ok()).unwrap_or(50);
+    let n: usize = std::env::var("N")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(20_000);
+    let iters: usize = std::env::var("ITERS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(50);
     let bytes = make_doc(n);
-    println!("doc = {} orders, {:.2} MB; iters = {}\n", n, bytes.len() as f64 / 1_000_000.0, iters);
+    println!(
+        "doc = {} orders, {:.2} MB; iters = {}\n",
+        n,
+        bytes.len() as f64 / 1_000_000.0,
+        iters
+    );
 
     // from_slice (Val tree) vs from_simd_lazy (tape).
-    let j_val  = Jetro::from_slice(&bytes).unwrap();
+    let j_val = Jetro::from_slice(&bytes).unwrap();
     let j_tape = Jetro::from_simd_lazy(bytes.clone()).unwrap();
     // Warm both root_val + tape compile cache.
     let _ = j_val.collect("$..price.sum()").unwrap();
@@ -82,13 +105,15 @@ fn main() {
     let mut s = String::with_capacity(n * 60);
     s.push_str("{\"orders\":[");
     for i in 0..n {
-        if i > 0 { s.push(','); }
+        if i > 0 {
+            s.push(',');
+        }
         s.push_str(&format!("{{\"id\":{},\"total\":{}}}", i, i));
     }
     s.push_str("]}");
     let arr_bytes = s.into_bytes();
 
-    let j_val_arr  = Jetro::from_slice(&arr_bytes).unwrap();
+    let j_val_arr = Jetro::from_slice(&arr_bytes).unwrap();
     let j_tape_arr = Jetro::from_simd_lazy(arr_bytes.clone()).unwrap();
     let _ = j_val_arr.collect("$.orders.map(total).sum()").unwrap();
     let _ = j_tape_arr.collect("$.orders.map(total).sum()").unwrap();
@@ -111,55 +136,98 @@ fn main() {
     });
 
     // filter+count tape path
-    let _ = j_val_arr.collect("$.orders.filter(total > 100).count()").unwrap();
-    let _ = j_tape_arr.collect("$.orders.filter(total > 100).count()").unwrap();
-    bench("Val tree     $.orders.filter(total>100).count()", iters, || {
-        let r = j_val_arr.collect("$.orders.filter(total > 100).count()").unwrap();
-        r.as_i64().unwrap_or(0) as u64
-    });
-    bench("tape walker  $.orders.filter(total>100).count()", iters, || {
-        let r = j_tape_arr.collect("$.orders.filter(total > 100).count()").unwrap();
-        r.as_i64().unwrap_or(0) as u64
-    });
+    let _ = j_val_arr
+        .collect("$.orders.filter(total > 100).count()")
+        .unwrap();
+    let _ = j_tape_arr
+        .collect("$.orders.filter(total > 100).count()")
+        .unwrap();
+    bench(
+        "Val tree     $.orders.filter(total>100).count()",
+        iters,
+        || {
+            let r = j_val_arr
+                .collect("$.orders.filter(total > 100).count()")
+                .unwrap();
+            r.as_i64().unwrap_or(0) as u64
+        },
+    );
+    bench(
+        "tape walker  $.orders.filter(total>100).count()",
+        iters,
+        || {
+            let r = j_tape_arr
+                .collect("$.orders.filter(total > 100).count()")
+                .unwrap();
+            r.as_i64().unwrap_or(0) as u64
+        },
+    );
 
-    let _ = j_val_arr.collect("$.orders.filter(total > 100).map(total).sum()").unwrap();
-    let _ = j_tape_arr.collect("$.orders.filter(total > 100).map(total).sum()").unwrap();
-    bench("Val tree     $.orders.filter(total>100).map(total).sum()", iters, || {
-        let r = j_val_arr.collect("$.orders.filter(total > 100).map(total).sum()").unwrap();
-        r.as_i64().unwrap_or(0) as u64
-    });
-    bench("tape walker  $.orders.filter(total>100).map(total).sum()", iters, || {
-        let r = j_tape_arr.collect("$.orders.filter(total > 100).map(total).sum()").unwrap();
-        r.as_i64().unwrap_or(0) as u64
-    });
+    let _ = j_val_arr
+        .collect("$.orders.filter(total > 100).map(total).sum()")
+        .unwrap();
+    let _ = j_tape_arr
+        .collect("$.orders.filter(total > 100).map(total).sum()")
+        .unwrap();
+    bench(
+        "Val tree     $.orders.filter(total>100).map(total).sum()",
+        iters,
+        || {
+            let r = j_val_arr
+                .collect("$.orders.filter(total > 100).map(total).sum()")
+                .unwrap();
+            r.as_i64().unwrap_or(0) as u64
+        },
+    );
+    bench(
+        "tape walker  $.orders.filter(total>100).map(total).sum()",
+        iters,
+        || {
+            let r = j_tape_arr
+                .collect("$.orders.filter(total > 100).map(total).sum()")
+                .unwrap();
+            r.as_i64().unwrap_or(0) as u64
+        },
+    );
 
     // bench_complex Q4 shape: compound AND predicate.  Build a richer doc
     // with `status` and `priority` keys.
     let mut s = String::with_capacity(n * 80);
     s.push_str("{\"orders\":[");
     for i in 0..n {
-        if i > 0 { s.push(','); }
+        if i > 0 {
+            s.push(',');
+        }
         let status = if i % 3 == 0 { "shipped" } else { "pending" };
-        let pri    = if i % 5 == 0 { "high" } else { "low" };
+        let pri = if i % 5 == 0 { "high" } else { "low" };
         s.push_str(&format!(
             "{{\"id\":{},\"total\":{},\"status\":\"{}\",\"priority\":\"{}\"}}",
-            i, i, status, pri));
+            i, i, status, pri
+        ));
     }
     s.push_str("]}");
     let q4_bytes = s.into_bytes();
-    let j_val_q4  = Jetro::from_slice(&q4_bytes).unwrap();
+    let j_val_q4 = Jetro::from_slice(&q4_bytes).unwrap();
     let j_tape_q4 = Jetro::from_simd_lazy(q4_bytes.clone()).unwrap();
     let q4 = r#"$.orders.filter(status == "shipped" and priority == "high").count()"#;
     let _ = j_val_q4.collect(q4).unwrap();
     let _ = j_tape_q4.collect(q4).unwrap();
-    bench("Val tree     Q4 status==shipped AND prio==high count", iters, || {
-        let r = j_val_q4.collect(q4).unwrap();
-        r.as_i64().unwrap_or(0) as u64
-    });
-    bench("tape walker  Q4 status==shipped AND prio==high count", iters, || {
-        let r = j_tape_q4.collect(q4).unwrap();
-        r.as_i64().unwrap_or(0) as u64
-    });
+    bench(
+        "Val tree     Q4 status==shipped AND prio==high count",
+        iters,
+        || {
+            let r = j_val_q4.collect(q4).unwrap();
+            r.as_i64().unwrap_or(0) as u64
+        },
+    );
+    bench(
+        "tape walker  Q4 status==shipped AND prio==high count",
+        iters,
+        || {
+            let r = j_tape_q4.collect(q4).unwrap();
+            r.as_i64().unwrap_or(0) as u64
+        },
+    );
 
     // ObjVec slot-indexed path — `Jetro::from_simd` promotes
     // homogeneous-shape arrays at parse time; pipeline columnar
@@ -167,23 +235,37 @@ fn main() {
     let mut sj_arr = q4_bytes.clone();
     let j_simd_q4 = Jetro::from_simd(sj_arr).unwrap();
     let _ = j_simd_q4.collect(q4).unwrap();
-    bench("ObjVec slots Q4 status==shipped AND prio==high count", iters, || {
-        let r = j_simd_q4.collect(q4).unwrap();
-        r.as_i64().unwrap_or(0) as u64
-    });
+    bench(
+        "ObjVec slots Q4 status==shipped AND prio==high count",
+        iters,
+        || {
+            let r = j_simd_q4.collect(q4).unwrap();
+            r.as_i64().unwrap_or(0) as u64
+        },
+    );
     let mut sj_arr2 = arr_bytes.clone();
     let j_simd_arr = Jetro::from_simd(sj_arr2).unwrap();
-    let _ = j_simd_arr.collect("$.orders.filter(total > 100).map(total).sum()").unwrap();
-    bench("ObjVec slots filter(total>100).map(total).sum()", iters, || {
-        let r = j_simd_arr.collect("$.orders.filter(total > 100).map(total).sum()").unwrap();
-        r.as_i64().unwrap_or(0) as u64
-    });
+    let _ = j_simd_arr
+        .collect("$.orders.filter(total > 100).map(total).sum()")
+        .unwrap();
+    bench(
+        "ObjVec slots filter(total>100).map(total).sum()",
+        iters,
+        || {
+            let r = j_simd_arr
+                .collect("$.orders.filter(total > 100).map(total).sum()")
+                .unwrap();
+            r.as_i64().unwrap_or(0) as u64
+        },
+    );
     bench("ObjVec slots map(total).sum()", iters, || {
         let r = j_simd_arr.collect("$.orders.map(total).sum()").unwrap();
         r.as_i64().unwrap_or(0) as u64
     });
     bench("ObjVec slots filter(total>100).count()", iters, || {
-        let r = j_simd_arr.collect("$.orders.filter(total > 100).count()").unwrap();
+        let r = j_simd_arr
+            .collect("$.orders.filter(total > 100).count()")
+            .unwrap();
         r.as_i64().unwrap_or(0) as u64
     });
 
@@ -193,14 +275,17 @@ fn main() {
     let mut s = String::with_capacity(n * 80);
     s.push_str("{\"orders\":[");
     for i in 0..n {
-        if i > 0 { s.push(','); }
+        if i > 0 {
+            s.push(',');
+        }
         s.push_str(&format!(
             "{{\"id\":{},\"items\":[{{\"k\":1}},{{\"k\":2}}]}}",
-            i));
+            i
+        ));
     }
     s.push_str("]}");
     let fm_bytes = s.into_bytes();
-    let j_simd_fm  = Jetro::from_simd(fm_bytes.clone()).unwrap();
+    let j_simd_fm = Jetro::from_simd(fm_bytes.clone()).unwrap();
     let j_slice_fm = Jetro::from_slice(&fm_bytes).unwrap();
     let q_fm = "$.orders.flat_map(items).count()";
     let _ = j_simd_fm.collect(q_fm).unwrap();
@@ -213,5 +298,6 @@ fn main() {
         let r = j_simd_fm.collect(q_fm).unwrap();
         r.as_i64().unwrap_or(0) as u64
     });
-    let _ = sj_arr; let _ = sj_arr2;  // moved out by from_simd
+    let _ = sj_arr;
+    let _ = sj_arr2; // moved out by from_simd
 }

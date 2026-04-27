@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 const WARMUP: usize = 3;
-const ITERS:  usize = 20;
+const ITERS: usize = 20;
 /// Relative tolerance.  Laptop variance routinely hits ±15-20% between
 /// runs even with warmup; 1.25x catches real regressions without false
 /// positives.  Set lower on a dedicated bench machine.
@@ -40,26 +40,51 @@ const TOLERANCE: f64 = 1.25;
 const NOISE_FLOOR_US: u128 = 500;
 
 const QUERIES: &[(&str, &str)] = &[
-    ("Q1_project_deep",        "$.orders.map(customer.address.city)"),
-    ("Q2_project_unique",      "$.orders.map(customer.address.country_code).unique()"),
-    ("Q3_filter_project",      "$.orders.filter(total > 500).map(id)"),
-    ("Q4_multi_cond_count",    r#"$.orders.filter(status == "shipped" and priority == "high").count()"#),
-    ("Q5_deep_find_broad",     r#"$..find(@.status == "shipped")"#),
-    ("Q6_deep_find_narrow",    r#"$..find(@.sku == "SKU-00042")"#),
-    ("Q7_deep_multi_pred",     r#"$..find(@.status == "shipped", @.priority == "urgent")"#),
-    ("Q8_deep_total_sum",      "$..total.sum()"),
-    ("Q9_deep_sku",            "$..sku"),
-    ("Q10_group_by",           "$.orders.group_by(status)"),
-    ("Q11_map_total_sum",      "$.orders.map(total).sum()"),
-    ("Q12_map_total_max",      "$.orders.map(total).max()"),
-    ("Q13_list_comp",          "[o.id for o in $.orders if o.total > 1000]"),
+    ("Q1_project_deep", "$.orders.map(customer.address.city)"),
+    (
+        "Q2_project_unique",
+        "$.orders.map(customer.address.country_code).unique()",
+    ),
+    ("Q3_filter_project", "$.orders.filter(total > 500).map(id)"),
+    (
+        "Q4_multi_cond_count",
+        r#"$.orders.filter(status == "shipped" and priority == "high").count()"#,
+    ),
+    ("Q5_deep_find_broad", r#"$..find(@.status == "shipped")"#),
+    ("Q6_deep_find_narrow", r#"$..find(@.sku == "SKU-00042")"#),
+    (
+        "Q7_deep_multi_pred",
+        r#"$..find(@.status == "shipped", @.priority == "urgent")"#,
+    ),
+    ("Q8_deep_total_sum", "$..total.sum()"),
+    ("Q9_deep_sku", "$..sku"),
+    ("Q10_group_by", "$.orders.group_by(status)"),
+    ("Q11_map_total_sum", "$.orders.map(total).sum()"),
+    ("Q12_map_total_max", "$.orders.map(total).max()"),
+    (
+        "Q13_list_comp",
+        "[o.id for o in $.orders if o.total > 1000]",
+    ),
 ];
 
 fn synth_doc(n_orders: usize, items_per_order: usize) -> Value {
-    let regions = ["us-east", "us-west", "eu-central", "ap-southeast", "sa-south"];
+    let regions = [
+        "us-east",
+        "us-west",
+        "eu-central",
+        "ap-southeast",
+        "sa-south",
+    ];
     let statuses = ["pending", "shipped", "delivered", "cancelled", "refunded"];
     let priorities = ["low", "normal", "high", "urgent"];
-    let categories = ["electronics", "books", "apparel", "grocery", "toys", "tools"];
+    let categories = [
+        "electronics",
+        "books",
+        "apparel",
+        "grocery",
+        "toys",
+        "tools",
+    ];
 
     let mut orders = Vec::with_capacity(n_orders);
     for i in 0..n_orders {
@@ -116,7 +141,9 @@ fn result_hash(v: &Value) -> u64 {
 
 fn measure_us<F: FnMut() -> Value>(mut f: F) -> (u128, u64) {
     let mut last: Value = Value::Null;
-    for _ in 0..WARMUP { last = f(); }
+    for _ in 0..WARMUP {
+        last = f();
+    }
     let hash = result_hash(&last);
     let mut samples = Vec::with_capacity(ITERS);
     for _ in 0..ITERS {
@@ -130,7 +157,11 @@ fn measure_us<F: FnMut() -> Value>(mut f: F) -> (u128, u64) {
 }
 
 #[derive(Serialize, Deserialize, Clone)]
-struct Entry { query: String, best_us: u128, result_hash: u64 }
+struct Entry {
+    query: String,
+    best_us: u128,
+    result_hash: u64,
+}
 
 #[derive(Serialize, Deserialize)]
 struct Baseline {
@@ -148,7 +179,7 @@ fn baseline_path() -> PathBuf {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let update    = args.iter().any(|a| a == "--update");
+    let update = args.iter().any(|a| a == "--update");
     let hash_only = args.iter().any(|a| a == "--hash-only");
 
     let n_orders = 20_000usize;
@@ -157,11 +188,15 @@ fn main() {
     let j = Jetro::new(doc);
 
     if hash_only {
-        println!("bench_lock --hash-only: {} orders x {} items (correctness gate, no timing)",
-                 n_orders, items_per_order);
+        println!(
+            "bench_lock --hash-only: {} orders x {} items (correctness gate, no timing)",
+            n_orders, items_per_order
+        );
     } else {
-        println!("bench_lock: {} orders x {} items, warmup {}, iters {}",
-                 n_orders, items_per_order, WARMUP, ITERS);
+        println!(
+            "bench_lock: {} orders x {} items, warmup {}, iters {}",
+            n_orders, items_per_order, WARMUP, ITERS
+        );
     }
 
     let mut entries = Vec::with_capacity(QUERIES.len());
@@ -177,13 +212,21 @@ fn main() {
         } else {
             println!("  {:28} {:>7}µs  hash={:016x}", name, med, hash);
         }
-        entries.push(Entry { query: (*q).into(), best_us: med, result_hash: hash });
+        entries.push(Entry {
+            query: (*q).into(),
+            best_us: med,
+            result_hash: hash,
+        });
     }
 
     let path = baseline_path();
 
     if update {
-        let b = Baseline { n_orders, items_per_order, entries };
+        let b = Baseline {
+            n_orders,
+            items_per_order,
+            entries,
+        };
         let json = serde_json::to_string_pretty(&b).unwrap();
         fs::write(&path, json).unwrap();
         println!("\nbaseline written → {}", path.display());
@@ -191,9 +234,12 @@ fn main() {
     }
 
     let baseline: Baseline = match fs::read_to_string(&path) {
-        Ok(s)  => serde_json::from_str(&s).expect("baseline parse"),
+        Ok(s) => serde_json::from_str(&s).expect("baseline parse"),
         Err(_) => {
-            eprintln!("\nbaseline missing at {}.  run with --update to create.", path.display());
+            eprintln!(
+                "\nbaseline missing at {}.  run with --update to create.",
+                path.display()
+            );
             std::process::exit(2);
         }
     };
@@ -205,9 +251,15 @@ fn main() {
 
     let mut fails: Vec<String> = Vec::new();
     if hash_only {
-        println!("\n{:<30} {:>18} {:>18}  result", "query", "baseline", "current");
+        println!(
+            "\n{:<30} {:>18} {:>18}  result",
+            "query", "baseline", "current"
+        );
     } else {
-        println!("\n{:<30} {:>9} {:>9} {:>7}  hash", "query", "base_µs", "cur_µs", "ratio");
+        println!(
+            "\n{:<30} {:>9} {:>9} {:>7}  hash",
+            "query", "base_µs", "cur_µs", "ratio"
+        );
     }
     for (i, e) in entries.iter().enumerate() {
         let b = &baseline.entries[i];
@@ -218,34 +270,56 @@ fn main() {
         // In hash-only mode, skip perf check entirely.
         let perf_ok = hash_only || ratio <= TOLERANCE || abs_delta < NOISE_FLOOR_US;
         let flag = match (perf_ok, hash_ok) {
-            (true, true)  => "  ok",
+            (true, true) => "  ok",
             (false, true) => " SLOW",
             (true, false) => " HASH",
             (false, false) => " BOTH",
         };
         let name = QUERIES[i].0;
         if hash_only {
-            println!("{:<30} {:>18x} {:>18x}  {}",
-                     name, b.result_hash, e.result_hash,
-                     if hash_ok { "ok" } else { "MISMATCH" });
+            println!(
+                "{:<30} {:>18x} {:>18x}  {}",
+                name,
+                b.result_hash,
+                e.result_hash,
+                if hash_ok { "ok" } else { "MISMATCH" }
+            );
         } else {
-            println!("{:<30} {:>9} {:>9} {:>6.2}x  {}{}",
-                     name, b.best_us, e.best_us, ratio,
-                     if hash_ok { "ok" } else { "MISMATCH" }, flag);
+            println!(
+                "{:<30} {:>9} {:>9} {:>6.2}x  {}{}",
+                name,
+                b.best_us,
+                e.best_us,
+                ratio,
+                if hash_ok { "ok" } else { "MISMATCH" },
+                flag
+            );
         }
         if !perf_ok {
-            fails.push(format!("{}: {:.2}x slower ({}µs → {}µs)", name, ratio, b.best_us, e.best_us));
+            fails.push(format!(
+                "{}: {:.2}x slower ({}µs → {}µs)",
+                name, ratio, b.best_us, e.best_us
+            ));
         }
         if !hash_ok {
-            fails.push(format!("{}: result hash changed ({:016x} → {:016x})", name, b.result_hash, e.result_hash));
+            fails.push(format!(
+                "{}: result hash changed ({:016x} → {:016x})",
+                name, b.result_hash, e.result_hash
+            ));
         }
     }
 
     if fails.is_empty() {
-        println!("\nall {} queries within tolerance (≤{:.2}x)", entries.len(), TOLERANCE);
+        println!(
+            "\nall {} queries within tolerance (≤{:.2}x)",
+            entries.len(),
+            TOLERANCE
+        );
     } else {
         eprintln!("\nregressions:");
-        for f in &fails { eprintln!("  - {}", f); }
+        for f in &fails {
+            eprintln!("  - {}", f);
+        }
         std::process::exit(1);
     }
 }

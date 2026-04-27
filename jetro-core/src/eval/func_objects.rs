@@ -9,14 +9,14 @@
 //! everywhere (never `remove`) to preserve insertion order — callers
 //! depend on that for deterministic serialisation.
 
-use std::sync::Arc;
 use indexmap::IndexMap;
+use std::sync::Arc;
 
-use crate::ast::{Arg, Expr};
-use super::{Env, EvalError, apply_item, apply_item_mut, eval_pos};
-use super::value::Val;
+use super::func_paths::{get_path_impl, parse_path_segs, PathSeg};
 use super::util::{is_truthy, val_to_key};
-use super::func_paths::{parse_path_segs, get_path_impl, PathSeg};
+use super::value::Val;
+use super::{apply_item, apply_item_mut, eval_pos, Env, EvalError};
+use crate::ast::{Arg, Expr};
 
 macro_rules! err {
     ($($t:tt)*) => { Err(EvalError(format!($($t)*))) };
@@ -50,15 +50,15 @@ fn pick_arg(a: &Arg, env: &Env) -> Result<Option<(Arc<str>, String)>, EvalError>
                             Some(PathSeg::Index(i)) => Arc::from(i.to_string().as_str()),
                             None => Arc::from(s.as_ref()),
                         }
-                    } else { s.clone() };
+                    } else {
+                        s.clone()
+                    };
                     Ok(Some((top, s.to_string())))
                 }
                 _ => Ok(None),
             }
         }
-        Arg::Named(alias, Expr::Ident(src)) => {
-            Ok(Some((Arc::from(alias.as_str()), src.clone())))
-        }
+        Arg::Named(alias, Expr::Ident(src)) => Ok(Some((Arc::from(alias.as_str()), src.clone()))),
         Arg::Named(alias, e) => {
             let v = super::vm_eval(e, env)?;
             match v {
@@ -89,7 +89,9 @@ fn pick_one(
             }
             PickKind::Path(segs) => {
                 let v = get_path_impl(wrapped, segs);
-                if !v.is_null() { out.insert(out_key.clone(), v); }
+                if !v.is_null() {
+                    out.insert(out_key.clone(), v);
+                }
             }
         }
     }
@@ -108,20 +110,33 @@ pub fn pick(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
             resolved.push((k, s, kind));
         }
     }
-    let has_path = resolved.iter().any(|(_, _, k)| matches!(k, PickKind::Path(_)));
+    let has_path = resolved
+        .iter()
+        .any(|(_, _, k)| matches!(k, PickKind::Path(_)));
     match recv {
         Val::Obj(m) => {
-            let wrapped = if has_path { Val::Obj(m.clone()) } else { Val::Null };
+            let wrapped = if has_path {
+                Val::Obj(m.clone())
+            } else {
+                Val::Null
+            };
             Ok(Val::obj(pick_one(&m, &resolved, &wrapped)))
         }
         Val::Arr(a) => {
-            let out: Vec<Val> = a.iter().map(|el| match el {
-                Val::Obj(m) => {
-                    let wrapped = if has_path { Val::Obj(m.clone()) } else { Val::Null };
-                    Val::obj(pick_one(m, &resolved, &wrapped))
-                }
-                other => other.clone(),
-            }).collect();
+            let out: Vec<Val> = a
+                .iter()
+                .map(|el| match el {
+                    Val::Obj(m) => {
+                        let wrapped = if has_path {
+                            Val::Obj(m.clone())
+                        } else {
+                            Val::Null
+                        };
+                        Val::obj(pick_one(m, &resolved, &wrapped))
+                    }
+                    other => other.clone(),
+                })
+                .collect();
             Ok(Val::arr(out))
         }
         _ => err!("pick: expected object or array of objects"),
@@ -129,14 +144,15 @@ pub fn pick(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
 }
 
 pub fn omit(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-    let keys: Vec<Arc<str>> = args.iter()
+    let keys: Vec<Arc<str>> = args
+        .iter()
         .filter_map(|a| eval_pos(a, env).ok())
         .filter_map(|v| if let Val::Str(s) = v { Some(s) } else { None })
         .collect();
-    use crate::composed::{Stage as _, StageOutput, OmitKeys};
+    use crate::composed::{OmitKeys, Stage as _, StageOutput};
     let owned: Option<Val> = match OmitKeys::new(keys).apply(&recv) {
         StageOutput::Pass(c) => Some(c.into_owned()),
-        _                    => None,
+        _ => None,
     };
     Ok(owned.ok_or_else(|| EvalError("omit: expected object".into()))?)
 }
@@ -155,14 +171,18 @@ pub fn omit(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
 // ── Transform ─────────────────────────────────────────────────────────────────
 
 pub fn transform_keys(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-    let lam = args.first().ok_or_else(|| EvalError("transform_keys: requires lambda".into()))?;
-    let map = recv.into_map().ok_or_else(|| EvalError("transform_keys: expected object".into()))?;
+    let lam = args
+        .first()
+        .ok_or_else(|| EvalError("transform_keys: requires lambda".into()))?;
+    let map = recv
+        .into_map()
+        .ok_or_else(|| EvalError("transform_keys: expected object".into()))?;
     let mut env_mut = env.clone();
     let mut out = IndexMap::with_capacity(map.len());
     for (k, v) in map {
         let new_key: Arc<str> = match apply_item_mut(Val::Str(k), lam, &mut env_mut)? {
             Val::Str(s) => s,
-            other       => Arc::<str>::from(val_to_key(&other)),
+            other => Arc::<str>::from(val_to_key(&other)),
         };
         out.insert(new_key, v);
     }
@@ -170,32 +190,50 @@ pub fn transform_keys(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalErr
 }
 
 pub fn transform_values(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-    let lam = args.first().ok_or_else(|| EvalError("transform_values: requires lambda".into()))?;
-    let map = recv.into_map().ok_or_else(|| EvalError("transform_values: expected object".into()))?;
+    let lam = args
+        .first()
+        .ok_or_else(|| EvalError("transform_values: requires lambda".into()))?;
+    let map = recv
+        .into_map()
+        .ok_or_else(|| EvalError("transform_values: expected object".into()))?;
     let mut env_mut = env.clone();
     let mut out = IndexMap::with_capacity(map.len());
-    for (k, v) in map { out.insert(k, apply_item_mut(v, lam, &mut env_mut)?); }
+    for (k, v) in map {
+        out.insert(k, apply_item_mut(v, lam, &mut env_mut)?);
+    }
     Ok(Val::obj(out))
 }
 
 pub fn filter_keys(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-    let lam = args.first().ok_or_else(|| EvalError("filter_keys: requires predicate".into()))?;
-    let map = recv.into_map().ok_or_else(|| EvalError("filter_keys: expected object".into()))?;
+    let lam = args
+        .first()
+        .ok_or_else(|| EvalError("filter_keys: requires predicate".into()))?;
+    let map = recv
+        .into_map()
+        .ok_or_else(|| EvalError("filter_keys: expected object".into()))?;
     let mut env_mut = env.clone();
     let mut out = IndexMap::with_capacity(map.len());
     for (k, v) in map {
-        if is_truthy(&apply_item_mut(Val::Str(k.clone()), lam, &mut env_mut)?) { out.insert(k, v); }
+        if is_truthy(&apply_item_mut(Val::Str(k.clone()), lam, &mut env_mut)?) {
+            out.insert(k, v);
+        }
     }
     Ok(Val::obj(out))
 }
 
 pub fn filter_values(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-    let lam = args.first().ok_or_else(|| EvalError("filter_values: requires predicate".into()))?;
-    let map = recv.into_map().ok_or_else(|| EvalError("filter_values: expected object".into()))?;
+    let lam = args
+        .first()
+        .ok_or_else(|| EvalError("filter_values: requires predicate".into()))?;
+    let map = recv
+        .into_map()
+        .ok_or_else(|| EvalError("filter_values: expected object".into()))?;
     let mut env_mut = env.clone();
     let mut out = IndexMap::with_capacity(map.len());
     for (k, v) in map {
-        if is_truthy(&apply_item_mut(v.clone(), lam, &mut env_mut)?) { out.insert(k, v); }
+        if is_truthy(&apply_item_mut(v.clone(), lam, &mut env_mut)?) {
+            out.insert(k, v);
+        }
     }
     Ok(Val::obj(out))
 }
@@ -207,18 +245,30 @@ pub fn to_pairs(recv: Val) -> Result<Val, EvalError> {
     use crate::composed::{Stage as _, StageOutput, ToPairs};
     match ToPairs.apply(&recv) {
         StageOutput::Pass(c) => Ok(c.into_owned()),
-        _                    => Ok(Val::arr(Vec::new())),
+        _ => Ok(Val::arr(Vec::new())),
     }
 }
 
 pub fn from_pairs(recv: Val) -> Result<Val, EvalError> {
-    let items = recv.into_vec().ok_or_else(|| EvalError("from_pairs: expected array".into()))?;
+    let items = recv
+        .into_vec()
+        .ok_or_else(|| EvalError("from_pairs: expected array".into()))?;
     let mut map = IndexMap::with_capacity(items.len());
     for item in items {
-        let k_val = item.get("key").or_else(|| item.get("k")).cloned().unwrap_or(Val::Null);
-        let v     = item.get("val").or_else(|| item.get("value")).or_else(|| item.get("v"))
-                        .cloned().unwrap_or(Val::Null);
-        if let Val::Str(k) = k_val { map.insert(k, v); }
+        let k_val = item
+            .get("key")
+            .or_else(|| item.get("k"))
+            .cloned()
+            .unwrap_or(Val::Null);
+        let v = item
+            .get("val")
+            .or_else(|| item.get("value"))
+            .or_else(|| item.get("v"))
+            .cloned()
+            .unwrap_or(Val::Null);
+        if let Val::Str(k) = k_val {
+            map.insert(k, v);
+        }
     }
     Ok(Val::obj(map))
 }
@@ -231,10 +281,15 @@ fn pivot_field(item: &Val, arg: &Arg, env: &Env) -> Result<Val, EvalError> {
 }
 
 pub fn pivot(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-    let items = recv.into_vec().ok_or_else(|| EvalError("pivot: expected array".into()))?;
+    let items = recv
+        .into_vec()
+        .ok_or_else(|| EvalError("pivot: expected array".into()))?;
     #[inline]
     fn to_arc(v: Val) -> Arc<str> {
-        match v { Val::Str(s) => s, other => Arc::<str>::from(val_to_key(&other)) }
+        match v {
+            Val::Str(s) => s,
+            other => Arc::<str>::from(val_to_key(&other)),
+        }
     }
     if args.len() >= 3 {
         // 3-arg: pivot(row_field, col_field, val_field) → {row: {col: val}}
@@ -242,16 +297,21 @@ pub fn pivot(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
         for item in &items {
             let row = to_arc(pivot_field(item, &args[0], env)?);
             let col = to_arc(pivot_field(item, &args[1], env)?);
-            let v   = pivot_field(item, &args[2], env)?;
+            let v = pivot_field(item, &args[2], env)?;
             map.entry(row).or_insert_with(IndexMap::new).insert(col, v);
         }
-        let out: IndexMap<Arc<str>, Val> = map.into_iter()
+        let out: IndexMap<Arc<str>, Val> = map
+            .into_iter()
             .map(|(k, inner)| (k, Val::obj(inner)))
             .collect();
         return Ok(Val::obj(out));
     }
-    let key_arg = args.first().ok_or_else(|| EvalError("pivot: requires key arg".into()))?;
-    let val_arg = args.get(1).ok_or_else(|| EvalError("pivot: requires value arg".into()))?;
+    let key_arg = args
+        .first()
+        .ok_or_else(|| EvalError("pivot: requires key arg".into()))?;
+    let val_arg = args
+        .get(1)
+        .ok_or_else(|| EvalError("pivot: requires value arg".into()))?;
     let mut map = IndexMap::with_capacity(items.len());
     for item in &items {
         let k = to_arc(pivot_field(item, key_arg, env)?);
@@ -273,7 +333,9 @@ pub fn pivot(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
 // simple; order is preserved for serialisation only).
 
 pub fn fanout(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-    if args.is_empty() { return err!("fanout: requires at least one expression"); }
+    if args.is_empty() {
+        return err!("fanout: requires at least one expression");
+    }
     let mut env_mut = env.clone();
     let mut out = Vec::with_capacity(args.len());
     for a in args {
@@ -283,13 +345,15 @@ pub fn fanout(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
 }
 
 pub fn zip_shape(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-    if args.is_empty() { return err!("zip_shape: requires at least one field"); }
+    if args.is_empty() {
+        return err!("zip_shape: requires at least one field");
+    }
     let mut env_mut = env.clone();
     let mut out: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(args.len());
     for a in args {
         let name: Arc<str> = match a {
-            Arg::Named(n, _)           => Arc::from(n.as_str()),
-            Arg::Pos(Expr::Ident(n))   => Arc::from(n.as_str()),
+            Arg::Named(n, _) => Arc::from(n.as_str()),
+            Arg::Pos(Expr::Ident(n)) => Arc::from(n.as_str()),
             _ => return err!("zip_shape: args must be `name = expr` or bare identifier"),
         };
         let v = apply_item_mut(recv.clone(), a, &mut env_mut)?;
@@ -316,25 +380,25 @@ pub fn schema(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
     // Body migrated to functions::Schema.  Helpers (schema_of et al.)
     // remain here as pub(crate) since they're recursive helpers used
     // by the Stage body.
-    use crate::composed::{Stage as _, StageOutput, Schema};
+    use crate::composed::{Schema, Stage as _, StageOutput};
     match Schema.apply(&recv) {
         StageOutput::Pass(c) => Ok(c.into_owned()),
-        _                    => Ok(Val::Null),
+        _ => Ok(Val::Null),
     }
 }
 
 pub(crate) fn schema_of(v: &Val) -> Val {
     match v {
-        Val::Null       => ty_obj("Null"),
-        Val::Bool(_)    => ty_obj("Bool"),
-        Val::Int(_)     => ty_obj("Int"),
-        Val::Float(_)   => ty_obj("Float"),
+        Val::Null => ty_obj("Null"),
+        Val::Bool(_) => ty_obj("Bool"),
+        Val::Int(_) => ty_obj("Int"),
+        Val::Float(_) => ty_obj("Float"),
         Val::Str(_) | Val::StrSlice(_) => ty_obj("String"),
-        Val::IntVec(a)  => array_schema(a.len(), ty_obj("Int")),
-        Val::FloatVec(a)=> array_schema(a.len(), ty_obj("Float")),
-        Val::StrVec(a)       => array_schema(a.len(), ty_obj("String")),
-        Val::StrSliceVec(a)  => array_schema(a.len(), ty_obj("String")),
-        Val::ObjVec(d)       => array_schema(d.nrows(), ty_obj("Object")),
+        Val::IntVec(a) => array_schema(a.len(), ty_obj("Int")),
+        Val::FloatVec(a) => array_schema(a.len(), ty_obj("Float")),
+        Val::StrVec(a) => array_schema(a.len(), ty_obj("String")),
+        Val::StrSliceVec(a) => array_schema(a.len(), ty_obj("String")),
+        Val::ObjVec(d) => array_schema(d.nrows(), ty_obj("Object")),
         Val::Arr(a) => {
             let items = if a.is_empty() {
                 ty_obj("Unknown")
@@ -412,7 +476,9 @@ fn set_field(obj: Val, key: &str, v: Val) -> Val {
 
 fn get_type(v: &Val) -> Option<&str> {
     if let Val::Obj(m) = v {
-        if let Some(Val::Str(s)) = m.get("type") { return Some(s.as_ref()); }
+        if let Some(Val::Str(s)) = m.get("type") {
+            return Some(s.as_ref());
+        }
     }
     None
 }
@@ -420,13 +486,11 @@ fn get_type(v: &Val) -> Option<&str> {
 fn unify_schema(a: Val, b: Val) -> Val {
     let (ta, tb) = (get_type(&a), get_type(&b));
     match (ta, tb) {
-        (Some(x), Some(y)) if x == y => {
-            match x {
-                "Object" => unify_object_schemas(a, b),
-                "Array" => unify_array_schemas(a, b),
-                _ => mark_nullable_if_either(a, b),
-            }
-        }
+        (Some(x), Some(y)) if x == y => match x {
+            "Object" => unify_object_schemas(a, b),
+            "Array" => unify_array_schemas(a, b),
+            _ => mark_nullable_if_either(a, b),
+        },
         (Some("Null"), _) => set_field(b, "nullable", Val::Bool(true)),
         (_, Some("Null")) => set_field(a, "nullable", Val::Bool(true)),
         _ => ty_obj("Mixed"),
@@ -436,13 +500,19 @@ fn unify_schema(a: Val, b: Val) -> Val {
 fn mark_nullable_if_either(a: Val, b: Val) -> Val {
     let a_null = is_nullable(&a);
     let b_null = is_nullable(&b);
-    if a_null || b_null { set_field(a, "nullable", Val::Bool(true)) } else { a }
+    if a_null || b_null {
+        set_field(a, "nullable", Val::Bool(true))
+    } else {
+        a
+    }
 }
 
 fn is_nullable(v: &Val) -> bool {
     if let Val::Obj(m) = v {
         matches!(m.get("nullable"), Some(Val::Bool(true)))
-    } else { false }
+    } else {
+        false
+    }
 }
 
 fn unify_array_schemas(a: Val, b: Val) -> Val {
@@ -450,9 +520,9 @@ fn unify_array_schemas(a: Val, b: Val) -> Val {
     let b_items = extract_field(&b, "items");
     let items = match (a_items, b_items) {
         (Some(x), Some(y)) => unify_schema(x, y),
-        (Some(x), None)    => x,
-        (None,    Some(y)) => y,
-        (None,    None)    => ty_obj("Unknown"),
+        (Some(x), None) => x,
+        (None, Some(y)) => y,
+        (None, None) => ty_obj("Unknown"),
     };
     let la = extract_int(&a, "len").unwrap_or(0);
     let lb = extract_int(&b, "len").unwrap_or(0);
@@ -460,11 +530,19 @@ fn unify_array_schemas(a: Val, b: Val) -> Val {
 }
 
 fn extract_field(v: &Val, key: &str) -> Option<Val> {
-    if let Val::Obj(m) = v { m.get(key).cloned() } else { None }
+    if let Val::Obj(m) = v {
+        m.get(key).cloned()
+    } else {
+        None
+    }
 }
 
 fn extract_int(v: &Val, key: &str) -> Option<i64> {
-    if let Some(Val::Int(n)) = extract_field(v, key) { Some(n) } else { None }
+    if let Some(Val::Int(n)) = extract_field(v, key) {
+        Some(n)
+    } else {
+        None
+    }
 }
 
 fn unify_object_schemas(a: Val, b: Val) -> Val {
@@ -480,10 +558,17 @@ fn unify_object_schemas(a: Val, b: Val) -> Val {
     let a_req = extract_required_set(&a);
     let b_req = extract_required_set(&b);
 
-    let mut out_fields: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(a_map.len().max(b_map.len()));
+    let mut out_fields: IndexMap<Arc<str>, Val> =
+        IndexMap::with_capacity(a_map.len().max(b_map.len()));
     let mut all_keys: Vec<Arc<str>> = Vec::with_capacity(a_map.len() + b_map.len());
-    for (k, _) in &a_map { all_keys.push(k.clone()); }
-    for (k, _) in &b_map { if !a_map.contains_key(k) { all_keys.push(k.clone()); } }
+    for (k, _) in &a_map {
+        all_keys.push(k.clone());
+    }
+    for (k, _) in &b_map {
+        if !a_map.contains_key(k) {
+            all_keys.push(k.clone());
+        }
+    }
 
     let mut required: Vec<Val> = Vec::new();
     for k in all_keys {
@@ -491,12 +576,14 @@ fn unify_object_schemas(a: Val, b: Val) -> Val {
         let bv = b_map.get(&k).cloned();
         let field = match (av, bv) {
             (Some(x), Some(y)) => unify_schema(x, y),
-            (Some(x), None)    => set_field(x, "optional", Val::Bool(true)),
-            (None,    Some(y)) => set_field(y, "optional", Val::Bool(true)),
-            _                  => ty_obj("Unknown"),
+            (Some(x), None) => set_field(x, "optional", Val::Bool(true)),
+            (None, Some(y)) => set_field(y, "optional", Val::Bool(true)),
+            _ => ty_obj("Unknown"),
         };
         let both_required = a_req.contains(k.as_ref()) && b_req.contains(k.as_ref());
-        if both_required { required.push(Val::Str(k.clone())); }
+        if both_required {
+            required.push(Val::Str(k.clone()));
+        }
         out_fields.insert(k, field);
     }
 
@@ -511,7 +598,9 @@ fn extract_required_set(v: &Val) -> std::collections::HashSet<String> {
     let mut s = std::collections::HashSet::new();
     if let Some(Val::Arr(a)) = extract_field(v, "required") {
         for el in a.iter() {
-            if let Val::Str(k) = el { s.insert(k.to_string()); }
+            if let Val::Str(k) = el {
+                s.insert(k.to_string());
+            }
         }
     }
     s

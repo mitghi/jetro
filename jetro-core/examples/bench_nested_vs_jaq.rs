@@ -17,9 +17,9 @@
 //! Run:
 //!   cargo run --release --example bench_nested_vs_jaq -p jetro-core
 
-use std::time::Instant;
 use jetro_core::Jetro;
 use serde_json::{json, Value};
+use std::time::Instant;
 
 use jaq_core::load::{Arena, File, Loader};
 use jaq_core::{data, unwrap_valr, Compiler, Ctx, Vars};
@@ -30,15 +30,34 @@ const ITERS: usize = 8;
 // ── Synthetic deeply-nested corpus ──────────────────────────────────────────
 
 fn build_corpus(
-    n_regions: usize, offices_per: usize, teams_per: usize,
-    members_per: usize, projects_per: usize, tasks_per: usize, events_per: usize,
+    n_regions: usize,
+    offices_per: usize,
+    teams_per: usize,
+    members_per: usize,
+    projects_per: usize,
+    tasks_per: usize,
+    events_per: usize,
 ) -> Value {
-    let regions_n = ["us-east","us-west","eu-central","ap-southeast","sa-south","af-south"];
-    let skills    = ["rust","go","python","ts","cpp","sql","ml","infra"];
-    let statuses  = ["open","in_progress","blocked","in_review","done","cancelled"];
-    let severities = ["low","medium","high","critical"];
-    let kinds     = ["bug","feature","chore","incident","research"];
-    let event_kinds = ["commit","review","comment","ci","deploy"];
+    let regions_n = [
+        "us-east",
+        "us-west",
+        "eu-central",
+        "ap-southeast",
+        "sa-south",
+        "af-south",
+    ];
+    let skills = ["rust", "go", "python", "ts", "cpp", "sql", "ml", "infra"];
+    let statuses = [
+        "open",
+        "in_progress",
+        "blocked",
+        "in_review",
+        "done",
+        "cancelled",
+    ];
+    let severities = ["low", "medium", "high", "critical"];
+    let kinds = ["bug", "feature", "chore", "incident", "research"];
+    let event_kinds = ["commit", "review", "comment", "ci", "deploy"];
 
     let mut regions = Vec::with_capacity(n_regions);
     for r in 0..n_regions {
@@ -55,7 +74,10 @@ fn build_corpus(
                             let mut events = Vec::with_capacity(events_per);
                             let mut task_total: f64 = 0.0;
                             for e in 0..events_per {
-                                let cost = ((r*13 + o*7 + t*11 + m*17 + p*19 + k*23 + e*29) % 500) as f64 + 1.5;
+                                let cost =
+                                    ((r * 13 + o * 7 + t * 11 + m * 17 + p * 19 + k * 23 + e * 29)
+                                        % 500) as f64
+                                        + 1.5;
                                 task_total += cost;
                                 events.push(json!({
                                     "id": format!("EV-{}-{}-{}-{}-{}-{}-{}", r,o,t,m,p,k,e),
@@ -90,9 +112,8 @@ fn build_corpus(
                             "tasks": tasks,
                         }));
                     }
-                    let member_skills: Vec<&str> = (0..3)
-                        .map(|i| skills[(m + t + i) % skills.len()])
-                        .collect();
+                    let member_skills: Vec<&str> =
+                        (0..3).map(|i| skills[(m + t + i) % skills.len()]).collect();
                     members.push(json!({
                         "id": format!("M-{}-{}-{}-{}", r,o,t,m),
                         "name": format!("member-{}-{}-{}-{}", r,o,t,m),
@@ -142,7 +163,11 @@ fn build_corpus(
 // ── timing ──────────────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy)]
-struct Stats { best: u128, median: u128, mean: u128 }
+struct Stats {
+    best: u128,
+    median: u128,
+    mean: u128,
+}
 
 fn sample<F: FnMut()>(mut f: F) -> Stats {
     let _ = f(); // warmup
@@ -161,23 +186,37 @@ fn sample<F: FnMut()>(mut f: F) -> Stats {
 }
 
 fn show(label: &str, s: Stats) {
-    println!("  {:<14} best {:>9}µs  median {:>9}µs  mean {:>9}µs",
-             label, s.best, s.median, s.mean);
+    println!(
+        "  {:<14} best {:>9}µs  median {:>9}µs  mean {:>9}µs",
+        label, s.best, s.median, s.mean
+    );
 }
 
 // ── jaq runner (compile once, reuse) ────────────────────────────────────────
 
-fn compile_jaq(code: &str) -> &'static jaq_core::compile::Filter<jaq_core::Native<data::JustLut<JaqVal>>> {
+fn compile_jaq(
+    code: &str,
+) -> &'static jaq_core::compile::Filter<jaq_core::Native<data::JustLut<JaqVal>>> {
     let arena: &'static Arena = Box::leak(Box::new(Arena::default()));
-    let defs = jaq_core::defs().chain(jaq_std::defs()).chain(jaq_json::defs());
+    let defs = jaq_core::defs()
+        .chain(jaq_std::defs())
+        .chain(jaq_json::defs());
     let loader = Loader::new(defs);
     let modules = loader.load(arena, File { code, path: () }).unwrap();
-    let funs = jaq_core::funs().chain(jaq_std::funs()).chain(jaq_json::funs());
-    let filter = Compiler::default().with_funs(funs).compile(modules).unwrap();
+    let funs = jaq_core::funs()
+        .chain(jaq_std::funs())
+        .chain(jaq_json::funs());
+    let filter = Compiler::default()
+        .with_funs(funs)
+        .compile(modules)
+        .unwrap();
     Box::leak(Box::new(filter))
 }
 
-fn run_jaq(filter: &'static jaq_core::compile::Filter<jaq_core::Native<data::JustLut<JaqVal>>>, input: &JaqVal) -> usize {
+fn run_jaq(
+    filter: &'static jaq_core::compile::Filter<jaq_core::Native<data::JustLut<JaqVal>>>,
+    input: &JaqVal,
+) -> usize {
     let ctx = Ctx::<data::JustLut<JaqVal>>::new(&filter.lut, Vars::new([]));
     filter.id.run((ctx, input.clone())).map(unwrap_valr).count()
 }
@@ -185,9 +224,13 @@ fn run_jaq(filter: &'static jaq_core::compile::Filter<jaq_core::Native<data::Jus
 // ── bench harness ───────────────────────────────────────────────────────────
 
 fn bench(
-    label: &str, desc: &str,
-    jetro_tree: &Jetro, jetro_scan: Option<&Jetro>,
-    jetro_q: &str, jaq_q: &str, jaq_input: &JaqVal,
+    label: &str,
+    desc: &str,
+    jetro_tree: &Jetro,
+    jetro_scan: Option<&Jetro>,
+    jetro_q: &str,
+    jaq_q: &str,
+    jaq_input: &JaqVal,
 ) {
     println!("\n{}", label);
     println!("  {}", desc);
@@ -197,21 +240,36 @@ fn bench(
     // `collect_val` — keep result as jetro's native `Val` for parity with
     // jaq (which returns its own `Val` iterator without materialising to
     // `serde_json::Value`).
-    let t = sample(|| { let _ = jetro_tree.collect_val(jetro_q).unwrap(); });
+    let t = sample(|| {
+        let _ = jetro_tree.collect_val(jetro_q).unwrap();
+    });
     show("jetro-tree", t);
     if let Some(js) = jetro_scan {
-        let s = sample(|| { let _ = js.collect_val(jetro_q).unwrap(); });
+        let s = sample(|| {
+            let _ = js.collect_val(jetro_q).unwrap();
+        });
         show("jetro-scan", s);
     }
     let compiled = compile_jaq(jaq_q);
-    let j = sample(|| { let _ = run_jaq(compiled, jaq_input); });
+    let j = sample(|| {
+        let _ = run_jaq(compiled, jaq_input);
+    });
     show("jaq", j);
 
     let ratio = j.median as f64 / t.median.max(1) as f64;
-    println!("  jetro-tree vs jaq (median): {:.2}x {}",
-             ratio, if ratio >= 1.0 { "(jetro faster)" } else { "(jaq faster)" });
+    println!(
+        "  jetro-tree vs jaq (median): {:.2}x {}",
+        ratio,
+        if ratio >= 1.0 {
+            "(jetro faster)"
+        } else {
+            "(jaq faster)"
+        }
+    );
     if let Some(js) = jetro_scan {
-        let s = sample(|| { let _ = js.collect_val(jetro_q).unwrap(); });
+        let s = sample(|| {
+            let _ = js.collect_val(jetro_q).unwrap();
+        });
         let r = j.median as f64 / s.median.max(1) as f64;
         println!("  jetro-scan vs jaq (median): {:.2}x", r);
     }
@@ -233,7 +291,8 @@ fn main() {
     bench(
         "Q1  4-level shape projection — region → office → team → name",
         "Project team names across every region/office without any filter.",
-        &j_tree, None,
+        &j_tree,
+        None,
         "$.org.regions.map(offices).flatten().map(teams).flatten().map(name)",
         "[.org.regions[].offices[].teams[].name]",
         &jaq_input,
@@ -243,7 +302,8 @@ fn main() {
     bench(
         "Q2  multi-level filter chain (open office → active project → critical task)",
         "Only open offices, only active projects, only critical tasks — project task ids.",
-        &j_tree, None,
+        &j_tree,
+        None,
         r#"$.org.regions.map(offices).flatten().filter(open == true).map(teams).flatten().map(members).flatten().map(projects).flatten().filter(active == true).map(tasks).flatten().filter(severity == "critical").map(id)"#,
         r#"[.org.regions[].offices[] | select(.open == true) | .teams[].members[].projects[] | select(.active == true) | .tasks[] | select(.severity == "critical") | .id]"#,
         &jaq_input,
@@ -253,7 +313,8 @@ fn main() {
     bench(
         "Q3  deep $..find with two predicates",
         "Every descendant object whose status==in_review AND severity==high.",
-        &j_tree, Some(&j_scan),
+        &j_tree,
+        Some(&j_scan),
         r#"$..find(@.status == "in_review", @.severity == "high")"#,
         r#"[.. | objects | select((.status? == "in_review") and (.severity? == "high"))]"#,
         &jaq_input,
@@ -263,7 +324,8 @@ fn main() {
     bench(
         "Q4  deep key sum — every `cost` anywhere in tree",
         "Fold every numeric `cost` leaf. Heavy recursion for jaq.",
-        &j_tree, Some(&j_scan),
+        &j_tree,
+        Some(&j_scan),
         "$..cost.sum()",
         "[.. | objects | .cost? // empty] | add",
         &jaq_input,
@@ -293,7 +355,8 @@ fn main() {
     bench(
         "Q7  5-level filter + count blocked tasks in active projects",
         "Counts blocked tasks belonging to active projects — FilterCount fusion path.",
-        &j_tree, None,
+        &j_tree,
+        None,
         r#"$.org.regions.map(offices).flatten().map(teams).flatten().map(members).flatten().map(projects).flatten().filter(active == true).map(tasks).flatten().filter(status == "blocked").count()"#,
         r#"[.org.regions[].offices[].teams[].members[].projects[] | select(.active == true) | .tasks[] | select(.status == "blocked")] | length"#,
         &jaq_input,
@@ -313,7 +376,8 @@ fn main() {
     bench(
         "Q9  group regions by continent",
         "group_by over regions.continent — partitioning test.",
-        &j_tree, None,
+        &j_tree,
+        None,
         "$.org.regions.group_by(continent)",
         ".org.regions | group_by(.continent)",
         &jaq_input,
@@ -333,7 +397,8 @@ fn main() {
     bench(
         "Q11 deep extract `kind` unique across tree",
         "Collect every `kind` leaf anywhere, dedup. Hits DescendantChain + unique.",
-        &j_tree, Some(&j_scan),
+        &j_tree,
+        Some(&j_scan),
         "$..kind.unique()",
         "[.. | objects | .kind? // empty] | unique",
         &jaq_input,
@@ -353,7 +418,8 @@ fn main() {
     bench(
         "Q13 deep $..find narrow (single-hit)",
         "Pick one specific task id anywhere in tree.",
-        &j_tree, Some(&j_scan),
+        &j_tree,
+        Some(&j_scan),
         r#"$..find(@.id == "T-3-2-1-3-1-2")"#,
         r#"[.. | objects | select(.id? == "T-3-2-1-3-1-2")]"#,
         &jaq_input,

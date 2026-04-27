@@ -56,26 +56,26 @@
 //! and is itself `Clone` (via derive) so threading it through
 //! recursive calls is free.
 
-use std::sync::Arc;
 use indexmap::IndexMap;
 use smallvec::SmallVec;
+use std::sync::Arc;
 
 use super::ast::*;
 
-pub mod value;
-pub mod util;
-pub mod methods;
 pub mod builtins;
+pub(crate) mod func_aggregates;
 pub(crate) mod func_arrays;
+pub(crate) mod func_csv;
 pub(crate) mod func_objects;
 pub mod func_paths;
-pub(crate) mod func_aggregates;
-pub(crate) mod func_csv;
 pub(crate) mod func_search;
+pub mod methods;
+pub mod util;
+pub mod value;
 
-pub use value::Val;
 pub use methods::{Method, MethodRegistry};
 use util::*;
+pub use value::Val;
 
 // ── Error ─────────────────────────────────────────────────────────────────────
 
@@ -102,7 +102,7 @@ macro_rules! err {
 /// `current` without cloning the whole Env per iteration.
 pub struct LamFrame {
     prev_current: Val,
-    prev_var:     LamVarPrev,
+    prev_var: LamVarPrev,
 }
 
 enum LamVarPrev {
@@ -113,8 +113,8 @@ enum LamVarPrev {
 
 #[derive(Clone)]
 pub struct Env {
-    vars:     SmallVec<[(Arc<str>, Val); 4]>,
-    pub root:    Val,
+    vars: SmallVec<[(Arc<str>, Val); 4]>,
+    pub root: Val,
     pub current: Val,
     registry: Arc<MethodRegistry>,
     /// Raw JSON bytes the `root` was parsed from, when available.  Enables
@@ -125,16 +125,18 @@ pub struct Env {
 
 impl Env {
     pub fn new_with_registry(root: Val, registry: Arc<MethodRegistry>) -> Self {
-        Self { vars: SmallVec::new(), root: root.clone(), current: root, registry, raw_bytes: None }
+        Self {
+            vars: SmallVec::new(),
+            root: root.clone(),
+            current: root,
+            registry,
+            raw_bytes: None,
+        }
     }
 
     /// Build an `Env` that carries the original JSON source bytes so that
     /// SIMD byte-scan can short-circuit deep-descendant queries.
-    pub fn new_with_raw(
-        root: Val,
-        registry: Arc<MethodRegistry>,
-        raw_bytes: Arc<[u8]>,
-    ) -> Self {
+    pub fn new_with_raw(root: Val, registry: Arc<MethodRegistry>, raw_bytes: Arc<[u8]>) -> Self {
         Self {
             vars: SmallVec::new(),
             root: root.clone(),
@@ -145,7 +147,9 @@ impl Env {
     }
 
     #[inline]
-    pub(super) fn registry_ref(&self) -> &MethodRegistry { &self.registry }
+    pub(super) fn registry_ref(&self) -> &MethodRegistry {
+        &self.registry
+    }
 
     #[inline]
     pub fn with_current(&self, current: Val) -> Self {
@@ -173,7 +177,11 @@ impl Env {
 
     #[inline]
     pub fn get_var(&self, name: &str) -> Option<&Val> {
-        self.vars.iter().rev().find(|(k, _)| k.as_ref() == name).map(|(_, v)| v)
+        self.vars
+            .iter()
+            .rev()
+            .find(|(k, _)| k.as_ref() == name)
+            .map(|(_, v)| v)
     }
 
     #[inline]
@@ -188,7 +196,13 @@ impl Env {
         } else {
             vars.push((Arc::from(name), val));
         }
-        Self { vars, root: self.root.clone(), current: self.current.clone(), registry: self.registry.clone(), raw_bytes: self.raw_bytes.clone() }
+        Self {
+            vars,
+            root: self.root.clone(),
+            current: self.current.clone(),
+            registry: self.registry.clone(),
+            raw_bytes: self.raw_bytes.clone(),
+        }
     }
 
     /// Hot-loop helper: bind `name → val` and swap `current`, returning
@@ -210,7 +224,10 @@ impl Env {
                 }
             }
         };
-        LamFrame { prev_current, prev_var }
+        LamFrame {
+            prev_current,
+            prev_var,
+        }
     }
 
     #[inline]
@@ -218,11 +235,14 @@ impl Env {
         self.current = frame.prev_current;
         match frame.prev_var {
             LamVarPrev::None => {}
-            LamVarPrev::Pushed => { self.vars.pop(); }
-            LamVarPrev::Replaced(pos, prev) => { self.vars[pos].1 = prev; }
+            LamVarPrev::Pushed => {
+                self.vars.pop();
+            }
+            LamVarPrev::Replaced(pos, prev) => {
+                self.vars[pos].1 = prev;
+            }
         }
     }
-
 }
 
 // ── Public entry points ───────────────────────────────────────────────────────
@@ -263,34 +283,37 @@ pub(super) fn eval(expr: &Expr, env: &Env) -> Result<Val, EvalError> {
 #[allow(dead_code)]
 // === LEGACY TREE-WALKER (UNREACHABLE) === preserved for reference, no callers
 #[allow(dead_code)]
-
 // ── Patch ─────────────────────────────────────────────────────────────────────
-
 use super::ast::{PatchOp, PathStep};
 
-enum PatchResult { Replace(Val), Delete }
+enum PatchResult {
+    Replace(Val),
+    Delete,
+}
 
 fn eval_patch(root: &Expr, ops: &[PatchOp], env: &Env) -> Result<Val, EvalError> {
     let mut doc = eval(root, env)?;
     for op in ops {
         if let Some(c) = &op.cond {
             let cenv = env.with_current(doc.clone());
-            if !is_truthy(&eval(c, &cenv)?) { continue; }
+            if !is_truthy(&eval(c, &cenv)?) {
+                continue;
+            }
         }
         match apply_patch_step(doc, &op.path, 0, &op.val, env)? {
             PatchResult::Replace(v) => doc = v,
-            PatchResult::Delete     => doc = Val::Null,
+            PatchResult::Delete => doc = Val::Null,
         }
     }
     Ok(doc)
 }
 
 fn apply_patch_step(
-    v:        Val,
-    path:     &[PathStep],
-    i:        usize,
+    v: Val,
+    path: &[PathStep],
+    i: usize,
     val_expr: &Expr,
-    env:      &Env,
+    env: &Env,
 ) -> Result<PatchResult, EvalError> {
     if i == path.len() {
         if matches!(val_expr, Expr::DeleteMark) {
@@ -307,11 +330,17 @@ fn apply_patch_step(
             let mut m = v.into_map().unwrap_or_default();
             let existing = if let Some(slot) = m.get_mut(name.as_str()) {
                 std::mem::replace(slot, Val::Null)
-            } else { Val::Null };
-            let child = apply_patch_step(existing, path, i+1, val_expr, env)?;
+            } else {
+                Val::Null
+            };
+            let child = apply_patch_step(existing, path, i + 1, val_expr, env)?;
             match child {
-                PatchResult::Delete => { m.shift_remove(name.as_str()); }
-                PatchResult::Replace(nv) => { m.insert(Arc::from(name.as_str()), nv); }
+                PatchResult::Delete => {
+                    m.shift_remove(name.as_str());
+                }
+                PatchResult::Replace(nv) => {
+                    m.insert(Arc::from(name.as_str()), nv);
+                }
             }
             Ok(PatchResult::Replace(Val::obj(m)))
         }
@@ -320,14 +349,20 @@ fn apply_patch_step(
             let resolved = resolve_idx(*idx, a.len() as i64);
             let existing = if resolved < a.len() {
                 std::mem::replace(&mut a[resolved], Val::Null)
-            } else { Val::Null };
-            let child = apply_patch_step(existing, path, i+1, val_expr, env)?;
+            } else {
+                Val::Null
+            };
+            let child = apply_patch_step(existing, path, i + 1, val_expr, env)?;
             match child {
                 PatchResult::Delete => {
-                    if resolved < a.len() { a.remove(resolved); }
+                    if resolved < a.len() {
+                        a.remove(resolved);
+                    }
                 }
                 PatchResult::Replace(nv) => {
-                    if resolved < a.len() { a[resolved] = nv; }
+                    if resolved < a.len() {
+                        a[resolved] = nv;
+                    }
                 }
             }
             Ok(PatchResult::Replace(Val::arr(a)))
@@ -335,33 +370,44 @@ fn apply_patch_step(
         PathStep::DynIndex(expr) => {
             let idx_val = eval(expr, env)?;
             let idx = idx_val.as_i64().ok_or_else(|| {
-                EvalError(format!("patch dyn-index: expected integer, got {}", idx_val.type_name()))
+                EvalError(format!(
+                    "patch dyn-index: expected integer, got {}",
+                    idx_val.type_name()
+                ))
             })?;
             let mut a = v.into_vec().unwrap_or_default();
             let resolved = resolve_idx(idx, a.len() as i64);
             let existing = if resolved < a.len() {
                 std::mem::replace(&mut a[resolved], Val::Null)
-            } else { Val::Null };
-            let child = apply_patch_step(existing, path, i+1, val_expr, env)?;
+            } else {
+                Val::Null
+            };
+            let child = apply_patch_step(existing, path, i + 1, val_expr, env)?;
             match child {
                 PatchResult::Delete => {
-                    if resolved < a.len() { a.remove(resolved); }
+                    if resolved < a.len() {
+                        a.remove(resolved);
+                    }
                 }
                 PatchResult::Replace(nv) => {
-                    if resolved < a.len() { a[resolved] = nv; }
+                    if resolved < a.len() {
+                        a[resolved] = nv;
+                    }
                 }
             }
             Ok(PatchResult::Replace(Val::arr(a)))
         }
         PathStep::Wildcard => {
-            let mut arr = v.into_vec().ok_or_else(|| EvalError("patch [*]: expected array".into()))?;
+            let mut arr = v
+                .into_vec()
+                .ok_or_else(|| EvalError("patch [*]: expected array".into()))?;
             // Two-pointer in-place compact: read each slot, mutate/skip,
             // write kept results back at `write_idx`.  Reuses `arr`'s
             // allocation instead of building a fresh Vec.
             let mut write_idx = 0usize;
             for read_idx in 0..arr.len() {
                 let item = std::mem::replace(&mut arr[read_idx], Val::Null);
-                match apply_patch_step(item, path, i+1, val_expr, env)? {
+                match apply_patch_step(item, path, i + 1, val_expr, env)? {
                     PatchResult::Delete => {}
                     PatchResult::Replace(nv) => {
                         arr[write_idx] = nv;
@@ -373,19 +419,24 @@ fn apply_patch_step(
             Ok(PatchResult::Replace(Val::arr(arr)))
         }
         PathStep::WildcardFilter(pred) => {
-            let mut arr = v.into_vec().ok_or_else(|| EvalError("patch [* if]: expected array".into()))?;
+            let mut arr = v
+                .into_vec()
+                .ok_or_else(|| EvalError("patch [* if]: expected array".into()))?;
             let mut env_mut = env.clone();
             let mut write_idx = 0usize;
             for read_idx in 0..arr.len() {
                 let item = std::mem::replace(&mut arr[read_idx], Val::Null);
                 let frame = env_mut.push_lam(None, item.clone());
                 let include = match eval(pred, &env_mut) {
-                    Ok(v)  => is_truthy(&v),
-                    Err(e) => { env_mut.pop_lam(frame); return Err(e); }
+                    Ok(v) => is_truthy(&v),
+                    Err(e) => {
+                        env_mut.pop_lam(frame);
+                        return Err(e);
+                    }
                 };
                 env_mut.pop_lam(frame);
                 if include {
-                    match apply_patch_step(item, path, i+1, val_expr, env)? {
+                    match apply_patch_step(item, path, i + 1, val_expr, env)? {
                         PatchResult::Delete => {}
                         PatchResult::Replace(nv) => {
                             arr[write_idx] = nv;
@@ -413,12 +464,12 @@ fn apply_patch_step(
 /// values are not re-walked (avoids runaway rewrites when the new value
 /// itself contains `name`).
 fn descend_apply_patch(
-    v:        Val,
-    name:     &str,
-    path:     &[PathStep],
-    i:        usize,
+    v: Val,
+    name: &str,
+    path: &[PathStep],
+    i: usize,
     val_expr: &Expr,
-    env:      &Env,
+    env: &Env,
 ) -> Result<Val, EvalError> {
     match v {
         Val::Obj(m) => {
@@ -430,17 +481,25 @@ fn descend_apply_patch(
             for idx in 0..n {
                 let child = if let Some((_, v)) = map.get_index_mut(idx) {
                     std::mem::replace(v, Val::Null)
-                } else { continue };
+                } else {
+                    continue;
+                };
                 let replaced = descend_apply_patch(child, name, path, i, val_expr, env)?;
-                if let Some((_, slot)) = map.get_index_mut(idx) { *slot = replaced; }
+                if let Some((_, slot)) = map.get_index_mut(idx) {
+                    *slot = replaced;
+                }
             }
             // Apply at this level.
             if map.contains_key(name) {
                 let existing = map.get(name).cloned().unwrap_or(Val::Null);
                 let r = apply_patch_step(existing, path, i + 1, val_expr, env)?;
                 match r {
-                    PatchResult::Delete      => { map.shift_remove(name); }
-                    PatchResult::Replace(nv) => { map.insert(Arc::from(name), nv); }
+                    PatchResult::Delete => {
+                        map.shift_remove(name);
+                    }
+                    PatchResult::Replace(nv) => {
+                        map.insert(Arc::from(name), nv);
+                    }
                 }
             }
             Ok(Val::obj(map))
@@ -464,57 +523,64 @@ fn descend_apply_patch(
 fn cast_val(v: &Val, ty: super::ast::CastType) -> Result<Val, EvalError> {
     use super::ast::CastType;
     match ty {
-        CastType::Str => Ok(Val::Str(Arc::from(match v {
-            Val::Null       => "null".to_string(),
-            Val::Bool(b)    => b.to_string(),
-            Val::Int(n)     => n.to_string(),
-            Val::Float(f)   => f.to_string(),
-            Val::Str(s)     => s.to_string(),
-            other           => super::eval::util::val_to_string(other),
-        }.as_str()))),
+        CastType::Str => Ok(Val::Str(Arc::from(
+            match v {
+                Val::Null => "null".to_string(),
+                Val::Bool(b) => b.to_string(),
+                Val::Int(n) => n.to_string(),
+                Val::Float(f) => f.to_string(),
+                Val::Str(s) => s.to_string(),
+                other => super::eval::util::val_to_string(other),
+            }
+            .as_str(),
+        ))),
         CastType::Bool => Ok(Val::Bool(match v {
-            Val::Null       => false,
-            Val::Bool(b)    => *b,
-            Val::Int(n)     => *n != 0,
-            Val::Float(f)   => *f != 0.0,
-            Val::Str(s)       => !s.is_empty(),
-            Val::StrSlice(r)  => !r.is_empty(),
-            Val::Arr(a)       => !a.is_empty(),
-            Val::IntVec(a)    => !a.is_empty(),
-            Val::FloatVec(a)  => !a.is_empty(),
-            Val::StrVec(a)       => !a.is_empty(),
-            Val::StrSliceVec(a)  => !a.is_empty(),
-            Val::ObjVec(d)       => !d.cells.is_empty(),
-            Val::Obj(o)       => !o.is_empty(),
-            Val::ObjSmall(p)  => !p.is_empty(),
+            Val::Null => false,
+            Val::Bool(b) => *b,
+            Val::Int(n) => *n != 0,
+            Val::Float(f) => *f != 0.0,
+            Val::Str(s) => !s.is_empty(),
+            Val::StrSlice(r) => !r.is_empty(),
+            Val::Arr(a) => !a.is_empty(),
+            Val::IntVec(a) => !a.is_empty(),
+            Val::FloatVec(a) => !a.is_empty(),
+            Val::StrVec(a) => !a.is_empty(),
+            Val::StrSliceVec(a) => !a.is_empty(),
+            Val::ObjVec(d) => !d.cells.is_empty(),
+            Val::Obj(o) => !o.is_empty(),
+            Val::ObjSmall(p) => !p.is_empty(),
         })),
         CastType::Number | CastType::Float => match v {
-            Val::Int(n)     => Ok(Val::Float(*n as f64)),
-            Val::Float(_)   => Ok(v.clone()),
-            Val::Str(s)     => s.parse::<f64>().map(Val::Float)
-                                .map_err(|e| EvalError(format!("as float: {}", e))),
-            Val::Bool(b)    => Ok(Val::Float(if *b { 1.0 } else { 0.0 })),
-            Val::Null       => Ok(Val::Float(0.0)),
-            _               => err!("as float: cannot convert"),
+            Val::Int(n) => Ok(Val::Float(*n as f64)),
+            Val::Float(_) => Ok(v.clone()),
+            Val::Str(s) => s
+                .parse::<f64>()
+                .map(Val::Float)
+                .map_err(|e| EvalError(format!("as float: {}", e))),
+            Val::Bool(b) => Ok(Val::Float(if *b { 1.0 } else { 0.0 })),
+            Val::Null => Ok(Val::Float(0.0)),
+            _ => err!("as float: cannot convert"),
         },
         CastType::Int => match v {
-            Val::Int(_)     => Ok(v.clone()),
-            Val::Float(f)   => Ok(Val::Int(*f as i64)),
-            Val::Str(s)     => s.parse::<i64>().map(Val::Int)
-                                .or_else(|_| s.parse::<f64>().map(|f| Val::Int(f as i64)))
-                                .map_err(|e| EvalError(format!("as int: {}", e))),
-            Val::Bool(b)    => Ok(Val::Int(if *b { 1 } else { 0 })),
-            Val::Null       => Ok(Val::Int(0)),
-            _               => err!("as int: cannot convert"),
+            Val::Int(_) => Ok(v.clone()),
+            Val::Float(f) => Ok(Val::Int(*f as i64)),
+            Val::Str(s) => s
+                .parse::<i64>()
+                .map(Val::Int)
+                .or_else(|_| s.parse::<f64>().map(|f| Val::Int(f as i64)))
+                .map_err(|e| EvalError(format!("as int: {}", e))),
+            Val::Bool(b) => Ok(Val::Int(if *b { 1 } else { 0 })),
+            Val::Null => Ok(Val::Int(0)),
+            _ => err!("as int: cannot convert"),
         },
         CastType::Array => match v {
-            Val::Arr(_)     => Ok(v.clone()),
-            Val::Null       => Ok(Val::arr(Vec::new())),
-            other           => Ok(Val::arr(vec![other.clone()])),
+            Val::Arr(_) => Ok(v.clone()),
+            Val::Null => Ok(Val::arr(Vec::new())),
+            other => Ok(Val::arr(vec![other.clone()])),
         },
         CastType::Object => match v {
-            Val::Obj(_)     => Ok(v.clone()),
-            _               => err!("as object: cannot convert non-object"),
+            Val::Obj(_) => Ok(v.clone()),
+            _ => err!("as object: cannot convert non-object"),
         },
         CastType::Null => Ok(Val::Null),
     }
@@ -538,7 +604,8 @@ fn apply_bind(target: &BindTarget, val: &Val, env: Env) -> Result<Env, EvalError
     match target {
         BindTarget::Name(name) => Ok(env.with_var(name, val.clone())),
         BindTarget::Obj { fields, rest } => {
-            let obj = val.as_object()
+            let obj = val
+                .as_object()
                 .ok_or_else(|| EvalError("bind destructure: expected object".into()))?;
             let mut e = env;
             for f in fields {
@@ -556,11 +623,16 @@ fn apply_bind(target: &BindTarget, val: &Val, env: Env) -> Result<Env, EvalError
             Ok(e)
         }
         BindTarget::Arr(names) => {
-            let len = val.arr_len()
+            let len = val
+                .arr_len()
                 .ok_or_else(|| EvalError("bind destructure: expected array".into()))?;
             let mut e = env;
             for (i, name) in names.iter().enumerate() {
-                let v = if i < len { val.get_index(i as i64) } else { Val::Null };
+                let v = if i < len {
+                    val.get_index(i as i64)
+                } else {
+                    Val::Null
+                };
                 e = e.with_var(name, v);
             }
             Ok(e)
@@ -581,7 +653,9 @@ fn eval_pipe(left: Val, rhs: &Expr, env: &Env) -> Result<Val, EvalError> {
             if let Expr::Ident(name) = base.as_ref() {
                 if !env.has_var(name) {
                     let mut v = dispatch_method(left, name, &[], env)?;
-                    for step in steps { v = eval_step(v, step, env)?; }
+                    for step in steps {
+                        v = eval_step(v, step, env)?;
+                    }
                     return Ok(v);
                 }
             }
@@ -612,16 +686,13 @@ fn is_first_selector(step: &Step) -> bool {
     }
 }
 
-fn byte_chain_eval(
-    bytes: &[u8],
-    root_key: &str,
-    steps: &[Step],
-) -> (Val, usize) {
+fn byte_chain_eval(bytes: &[u8], root_key: &str, steps: &[Step]) -> (Val, usize) {
     // Early-exit: `$..key.first()` / `$..key!` only needs the first match.
     let first_after_initial = steps.get(1).map(is_first_selector).unwrap_or(false);
     let mut spans: Vec<super::scan::ValueSpan> = if first_after_initial {
         super::scan::find_first_key_value_span(bytes, root_key)
-            .into_iter().collect()
+            .into_iter()
+            .collect()
     } else {
         super::scan::find_key_value_spans(bytes, root_key)
     };
@@ -633,8 +704,7 @@ fn byte_chain_eval(
             Step::Descendant(k) => {
                 // Early-exit when the very next step is a first-selector:
                 // only find one inner match per outer span, skip the rest.
-                let next_first = steps.get(idx + 1)
-                    .map(is_first_selector).unwrap_or(false);
+                let next_first = steps.get(idx + 1).map(is_first_selector).unwrap_or(false);
                 let mut next = Vec::with_capacity(spans.len());
                 for s in &spans {
                     let sub = &bytes[s.start..s.end];
@@ -642,14 +712,14 @@ fn byte_chain_eval(
                         if let Some(s2) = super::scan::find_first_key_value_span(sub, k) {
                             next.push(super::scan::ValueSpan {
                                 start: s.start + s2.start,
-                                end:   s.start + s2.end,
+                                end: s.start + s2.end,
                             });
                         }
                     } else {
                         for s2 in super::scan::find_key_value_spans(sub, k) {
                             next.push(super::scan::ValueSpan {
                                 start: s.start + s2.start,
-                                end:   s.start + s2.end,
+                                end: s.start + s2.end,
                             });
                         }
                     }
@@ -662,7 +732,9 @@ fn byte_chain_eval(
                 scalar = true;
             }
             Step::Quantifier(QuantifierKind::One) => {
-                if spans.len() != 1 { break; }
+                if spans.len() != 1 {
+                    break;
+                }
                 scalar = true;
             }
             // `.first()` / `.last()` arrive as method calls (no `!` / `?` syntax).
@@ -671,28 +743,28 @@ fn byte_chain_eval(
                 scalar = true;
             }
             Step::Method(name, args) if args.is_empty() && name == "last" => {
-                if let Some(last) = spans.pop() { spans = vec![last]; }
+                if let Some(last) = spans.pop() {
+                    spans = vec![last];
+                }
                 scalar = true;
             }
             Step::InlineFilter(pred) => match canonical_eq_literal(pred) {
                 Some(lit) => {
                     spans.retain(|s| {
-                        s.end - s.start == lit.len()
-                            && &bytes[s.start..s.end] == &lit[..]
+                        s.end - s.start == lit.len() && &bytes[s.start..s.end] == &lit[..]
                     });
                     scalar = false;
                 }
                 None => break,
             },
-            Step::Method(name, args)
-                if name == "filter" && args.len() == 1 =>
-            {
-                let pred = match &args[0] { Arg::Pos(e) | Arg::Named(_, e) => e };
+            Step::Method(name, args) if name == "filter" && args.len() == 1 => {
+                let pred = match &args[0] {
+                    Arg::Pos(e) | Arg::Named(_, e) => e,
+                };
                 match canonical_eq_literal(pred) {
                     Some(lit) => {
                         spans.retain(|s| {
-                            s.end - s.start == lit.len()
-                                && &bytes[s.start..s.end] == &lit[..]
+                            s.end - s.start == lit.len() && &bytes[s.start..s.end] == &lit[..]
                         });
                         scalar = false;
                     }
@@ -717,29 +789,44 @@ fn byte_chain_eval(
                         }
                         "sum" => {
                             let f = super::scan::fold_nums(bytes, &spans);
-                            let v = if f.count == 0 { Val::Int(0) }
-                                else if f.is_float { Val::Float(f.float_sum) }
-                                else { Val::Int(f.int_sum) };
+                            let v = if f.count == 0 {
+                                Val::Int(0)
+                            } else if f.is_float {
+                                Val::Float(f.float_sum)
+                            } else {
+                                Val::Int(f.int_sum)
+                            };
                             return (v, consumed + 1);
                         }
                         "avg" => {
                             let f = super::scan::fold_nums(bytes, &spans);
-                            let v = if f.count == 0 { Val::Null }
-                                else { Val::Float(f.float_sum / f.count as f64) };
+                            let v = if f.count == 0 {
+                                Val::Null
+                            } else {
+                                Val::Float(f.float_sum / f.count as f64)
+                            };
                             return (v, consumed + 1);
                         }
                         "min" => {
                             let f = super::scan::fold_nums(bytes, &spans);
-                            let v = if !f.any { Val::Null }
-                                else if f.is_float { Val::Float(f.min_f) }
-                                else { Val::Int(f.min_i) };
+                            let v = if !f.any {
+                                Val::Null
+                            } else if f.is_float {
+                                Val::Float(f.min_f)
+                            } else {
+                                Val::Int(f.min_i)
+                            };
                             return (v, consumed + 1);
                         }
                         "max" => {
                             let f = super::scan::fold_nums(bytes, &spans);
-                            let v = if !f.any { Val::Null }
-                                else if f.is_float { Val::Float(f.max_f) }
-                                else { Val::Int(f.max_i) };
+                            let v = if !f.any {
+                                Val::Null
+                            } else if f.is_float {
+                                Val::Float(f.max_f)
+                            } else {
+                                Val::Int(f.max_i)
+                            };
                             return (v, consumed + 1);
                         }
                         _ => {}
@@ -781,10 +868,14 @@ fn canonical_eq_literal(pred: &Expr) -> Option<Vec<u8>> {
         _ => return None,
     };
     match lit {
-        Expr::Int(n)  => Some(n.to_string().into_bytes()),
-        Expr::Bool(b) => Some(if *b { b"true".to_vec() } else { b"false".to_vec() }),
-        Expr::Null    => Some(b"null".to_vec()),
-        Expr::Str(s)  => serde_json::to_vec(&serde_json::Value::String(s.clone())).ok(),
+        Expr::Int(n) => Some(n.to_string().into_bytes()),
+        Expr::Bool(b) => Some(if *b {
+            b"true".to_vec()
+        } else {
+            b"false".to_vec()
+        }),
+        Expr::Null => Some(b"null".to_vec()),
+        Expr::Str(s) => serde_json::to_vec(&serde_json::Value::String(s.clone())).ok(),
         _ => None,
     }
 }
@@ -797,10 +888,14 @@ fn canonical_eq_literal(pred: &Expr) -> Option<Vec<u8>> {
 /// N-conjunct version: every arg must be a canonical `@.k == lit` predicate,
 /// else returns None.  Empty input returns None.
 pub(crate) fn canonical_field_eq_literals(args: &[Arg]) -> Option<Vec<(String, Vec<u8>)>> {
-    if args.is_empty() || args.len() > 64 { return None; }
+    if args.is_empty() || args.len() > 64 {
+        return None;
+    }
     let mut out = Vec::with_capacity(args.len());
     for a in args {
-        let e = match a { Arg::Pos(e) | Arg::Named(_, e) => e };
+        let e = match a {
+            Arg::Pos(e) | Arg::Named(_, e) => e,
+        };
         out.push(canonical_field_eq_literal(e)?);
     }
     Some(out)
@@ -816,22 +911,31 @@ pub(crate) fn canonical_field_cmp_literal(
 ) -> Option<(String, super::scan::ScanCmp, f64)> {
     use super::scan::ScanCmp;
     let (l, op, r) = match pred {
-        Expr::BinOp(l, op @ (BinOp::Lt | BinOp::Lte | BinOp::Gt | BinOp::Gte), r) =>
-            (&**l, *op, &**r),
+        Expr::BinOp(l, op @ (BinOp::Lt | BinOp::Lte | BinOp::Gt | BinOp::Gte), r) => {
+            (&**l, *op, &**r)
+        }
         _ => return None,
     };
     fn as_current_field(e: &Expr) -> Option<String> {
         if let Expr::Chain(base, steps) = e {
             if matches!(**base, Expr::Current) && steps.len() == 1 {
-                if let Step::Field(name) = &steps[0] { return Some(name.clone()); }
+                if let Step::Field(name) = &steps[0] {
+                    return Some(name.clone());
+                }
             }
         }
         None
     }
     fn as_num(e: &Expr) -> Option<f64> {
         match e {
-            Expr::Int(n)   => Some(*n as f64),
-            Expr::Float(f) => if f.is_finite() { Some(*f) } else { None },
+            Expr::Int(n) => Some(*n as f64),
+            Expr::Float(f) => {
+                if f.is_finite() {
+                    Some(*f)
+                } else {
+                    None
+                }
+            }
             _ => None,
         }
     }
@@ -843,10 +947,10 @@ pub(crate) fn canonical_field_cmp_literal(
         },
     };
     let scan_op = match (op, flip) {
-        (BinOp::Lt,  false) | (BinOp::Gt,  true)  => ScanCmp::Lt,
-        (BinOp::Lte, false) | (BinOp::Gte, true)  => ScanCmp::Lte,
-        (BinOp::Gt,  false) | (BinOp::Lt,  true)  => ScanCmp::Gt,
-        (BinOp::Gte, false) | (BinOp::Lte, true)  => ScanCmp::Gte,
+        (BinOp::Lt, false) | (BinOp::Gt, true) => ScanCmp::Lt,
+        (BinOp::Lte, false) | (BinOp::Gte, true) => ScanCmp::Lte,
+        (BinOp::Gt, false) | (BinOp::Lt, true) => ScanCmp::Gt,
+        (BinOp::Gte, false) | (BinOp::Lte, true) => ScanCmp::Gte,
         _ => return None,
     };
     Some((field, scan_op, thresh))
@@ -860,10 +964,14 @@ pub(crate) fn canonical_field_mixed_predicates(
     args: &[Arg],
 ) -> Option<Vec<(String, super::scan::ScanPred)>> {
     use super::scan::ScanPred;
-    if args.is_empty() || args.len() > 64 { return None; }
+    if args.is_empty() || args.len() > 64 {
+        return None;
+    }
     let mut out = Vec::with_capacity(args.len());
     for a in args {
-        let e = match a { Arg::Pos(e) | Arg::Named(_, e) => e };
+        let e = match a {
+            Arg::Pos(e) | Arg::Named(_, e) => e,
+        };
         if let Some((k, lit)) = canonical_field_eq_literal(e) {
             out.push((k, ScanPred::Eq(lit)));
         } else if let Some((k, op, n)) = canonical_field_cmp_literal(e) {
@@ -890,14 +998,24 @@ pub(crate) fn canonical_field_eq_literal(pred: &Expr) -> Option<(String, Vec<u8>
         }
         None
     }
-    let (field, lit) = if let Some(f) = as_current_field(l) { (f, r) }
-                       else if let Some(f) = as_current_field(r) { (f, l) }
-                       else { return None };
+    let (field, lit) = if let Some(f) = as_current_field(l) {
+        (f, r)
+    } else if let Some(f) = as_current_field(r) {
+        (f, l)
+    } else {
+        return None;
+    };
     let bytes = match lit {
-        Expr::Int(n)  => n.to_string().into_bytes(),
-        Expr::Bool(b) => if *b { b"true".to_vec() } else { b"false".to_vec() },
-        Expr::Null    => b"null".to_vec(),
-        Expr::Str(s)  => serde_json::to_vec(&serde_json::Value::String(s.clone())).ok()?,
+        Expr::Int(n) => n.to_string().into_bytes(),
+        Expr::Bool(b) => {
+            if *b {
+                b"true".to_vec()
+            } else {
+                b"false".to_vec()
+            }
+        }
+        Expr::Null => b"null".to_vec(),
+        Expr::Str(s) => serde_json::to_vec(&serde_json::Value::String(s.clone())).ok()?,
         _ => return None,
     };
     Some((field, bytes))
@@ -907,9 +1025,13 @@ pub(crate) fn canonical_field_eq_literal(pred: &Expr) -> Option<(String, Vec<u8>
 
 fn eval_step(val: Val, step: &Step, env: &Env) -> Result<Val, EvalError> {
     match step {
-        Step::Field(name)    => Ok(val.get_field(name)),
+        Step::Field(name) => Ok(val.get_field(name)),
         Step::OptField(name) => {
-            if val.is_null() { Ok(Val::Null) } else { Ok(val.get_field(name)) }
+            if val.is_null() {
+                Ok(Val::Null)
+            } else {
+                Ok(val.get_field(name))
+            }
         }
         Step::Descendant(name) => {
             let mut found = Vec::new();
@@ -931,76 +1053,82 @@ fn eval_step(val: Val, step: &Step, env: &Env) -> Result<Val, EvalError> {
             for item in items {
                 let frame = env_mut.push_lam(None, item.clone());
                 let truthy = match eval(pred, &env_mut) {
-                    Ok(v)  => is_truthy(&v),
-                    Err(e) => { env_mut.pop_lam(frame); return Err(e); }
+                    Ok(v) => is_truthy(&v),
+                    Err(e) => {
+                        env_mut.pop_lam(frame);
+                        return Err(e);
+                    }
                 };
                 env_mut.pop_lam(frame);
-                if truthy { out.push(item); }
+                if truthy {
+                    out.push(item);
+                }
             }
             Ok(Val::arr(out))
         }
         Step::Quantifier(kind) => {
             use super::ast::QuantifierKind;
             match kind {
-                QuantifierKind::First => {
-                    Ok(match val {
-                        Val::Arr(a) => a.first().cloned().unwrap_or(Val::Null),
-                        other => other,
-                    })
-                }
-                QuantifierKind::One => {
-                    match val {
-                        Val::Arr(a) if a.len() == 1 => Ok(a[0].clone()),
-                        Val::Arr(a) => err!("quantifier !: expected exactly one element, got {}", a.len()),
-                        other => Ok(other),
-                    }
-                }
+                QuantifierKind::First => Ok(match val {
+                    Val::Arr(a) => a.first().cloned().unwrap_or(Val::Null),
+                    other => other,
+                }),
+                QuantifierKind::One => match val {
+                    Val::Arr(a) if a.len() == 1 => Ok(a[0].clone()),
+                    Val::Arr(a) => err!(
+                        "quantifier !: expected exactly one element, got {}",
+                        a.len()
+                    ),
+                    other => Ok(other),
+                },
             }
         }
         Step::Index(i) => Ok(val.get_index(*i)),
         Step::DynIndex(expr) => {
             let key = eval(expr, env)?;
             match key {
-                Val::Int(i)  => Ok(val.get_index(i)),
-                Val::Str(s)  => Ok(val.get_field(s.as_ref())),
+                Val::Int(i) => Ok(val.get_index(i)),
+                Val::Str(s) => Ok(val.get_field(s.as_ref())),
                 _ => err!("dynamic index must be a number or string"),
             }
         }
-        Step::Slice(from, to) => {
-            match val {
-                Val::Arr(a) => {
-                    let len = a.len() as i64;
-                    let s = resolve_idx(from.unwrap_or(0), len);
-                    let e = resolve_idx(to.unwrap_or(len), len);
-                    let items = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
-                    let s = s.min(items.len());
-                    let e = e.min(items.len());
-                    Ok(Val::arr(items[s..e].to_vec()))
-                }
-                Val::IntVec(a) => {
-                    let len = a.len() as i64;
-                    let s = resolve_idx(from.unwrap_or(0), len);
-                    let e = resolve_idx(to.unwrap_or(len), len);
-                    let items = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
-                    let s = s.min(items.len());
-                    let e = e.min(items.len());
-                    Ok(Val::int_vec(items[s..e].to_vec()))
-                }
-                Val::FloatVec(a) => {
-                    let len = a.len() as i64;
-                    let s = resolve_idx(from.unwrap_or(0), len);
-                    let e = resolve_idx(to.unwrap_or(len), len);
-                    let items = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
-                    let s = s.min(items.len());
-                    let e = e.min(items.len());
-                    Ok(Val::float_vec(items[s..e].to_vec()))
-                }
-                _ => Ok(Val::Null),
+        Step::Slice(from, to) => match val {
+            Val::Arr(a) => {
+                let len = a.len() as i64;
+                let s = resolve_idx(from.unwrap_or(0), len);
+                let e = resolve_idx(to.unwrap_or(len), len);
+                let items = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
+                let s = s.min(items.len());
+                let e = e.min(items.len());
+                Ok(Val::arr(items[s..e].to_vec()))
             }
-        }
-        Step::Method(name, args)    => dispatch_method(val, name, args, env),
+            Val::IntVec(a) => {
+                let len = a.len() as i64;
+                let s = resolve_idx(from.unwrap_or(0), len);
+                let e = resolve_idx(to.unwrap_or(len), len);
+                let items = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
+                let s = s.min(items.len());
+                let e = e.min(items.len());
+                Ok(Val::int_vec(items[s..e].to_vec()))
+            }
+            Val::FloatVec(a) => {
+                let len = a.len() as i64;
+                let s = resolve_idx(from.unwrap_or(0), len);
+                let e = resolve_idx(to.unwrap_or(len), len);
+                let items = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
+                let s = s.min(items.len());
+                let e = e.min(items.len());
+                Ok(Val::float_vec(items[s..e].to_vec()))
+            }
+            _ => Ok(Val::Null),
+        },
+        Step::Method(name, args) => dispatch_method(val, name, args, env),
         Step::OptMethod(name, args) => {
-            if val.is_null() { Ok(Val::Null) } else { dispatch_method(val, name, args, env) }
+            if val.is_null() {
+                Ok(Val::Null)
+            } else {
+                dispatch_method(val, name, args, env)
+            }
         }
     }
 }
@@ -1012,10 +1140,18 @@ fn resolve_idx(i: i64, len: i64) -> usize {
 fn collect_desc(v: &Val, name: &str, out: &mut Vec<Val>) {
     match v {
         Val::Obj(m) => {
-            if let Some(v) = m.get(name) { out.push(v.clone()); }
-            for v in m.values() { collect_desc(v, name, out); }
+            if let Some(v) = m.get(name) {
+                out.push(v.clone());
+            }
+            for v in m.values() {
+                collect_desc(v, name, out);
+            }
         }
-        Val::Arr(a) => { for item in a.as_ref() { collect_desc(item, name, out); } }
+        Val::Arr(a) => {
+            for item in a.as_ref() {
+                collect_desc(item, name, out);
+            }
+        }
         _ => {}
     }
 }
@@ -1024,10 +1160,14 @@ fn collect_all(v: &Val, out: &mut Vec<Val>) {
     match v {
         Val::Obj(m) => {
             out.push(v.clone());
-            for child in m.values() { collect_all(child, out); }
+            for child in m.values() {
+                collect_all(child, out);
+            }
         }
         Val::Arr(a) => {
-            for item in a.as_ref() { collect_all(item, out); }
+            for item in a.as_ref() {
+                collect_all(item, out);
+            }
         }
         other => out.push(other.clone()),
     }
@@ -1035,7 +1175,12 @@ fn collect_all(v: &Val, out: &mut Vec<Val>) {
 
 // ── Method dispatch ───────────────────────────────────────────────────────────
 
-pub(super) fn dispatch_method(recv: Val, name: &str, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+pub(super) fn dispatch_method(
+    recv: Val,
+    name: &str,
+    args: &[Arg],
+    env: &Env,
+) -> Result<Val, EvalError> {
     if let Some(f) = builtins::global().get(name) {
         return f(recv, args, env);
     }
@@ -1056,29 +1201,45 @@ fn eval_object(fields: &[ObjField], env: &Env) -> Result<Val, EvalError> {
     for field in fields {
         match field {
             ObjField::Short(name) => {
-                let v = if let Some(v) = env.get_var(name) { v.clone() }
-                        else { env.current.get_field(name) };
-                if !v.is_null() { map.insert(Arc::from(name.as_str()), v); }
+                let v = if let Some(v) = env.get_var(name) {
+                    v.clone()
+                } else {
+                    env.current.get_field(name)
+                };
+                if !v.is_null() {
+                    map.insert(Arc::from(name.as_str()), v);
+                }
             }
-            ObjField::Kv { key, val, optional, cond } => {
+            ObjField::Kv {
+                key,
+                val,
+                optional,
+                cond,
+            } => {
                 if let Some(c) = cond {
-                    if !is_truthy(&eval(c, env)?) { continue; }
+                    if !is_truthy(&eval(c, env)?) {
+                        continue;
+                    }
                 }
                 let v = eval(val, env)?;
-                if *optional && v.is_null() { continue; }
+                if *optional && v.is_null() {
+                    continue;
+                }
                 map.insert(Arc::from(key.as_str()), v);
             }
             ObjField::Dynamic { key, val } => {
                 let k: Arc<str> = match eval(key, env)? {
                     Val::Str(s) => s,
-                    other       => Arc::<str>::from(val_to_key(&other)),
+                    other => Arc::<str>::from(val_to_key(&other)),
                 };
                 map.insert(k, eval(val, env)?);
             }
             ObjField::Spread(expr) => {
                 if let Val::Obj(other) = eval(expr, env)? {
                     let entries = Arc::try_unwrap(other).unwrap_or_else(|m| (*m).clone());
-                    for (k, v) in entries { map.insert(k, v); }
+                    for (k, v) in entries {
+                        map.insert(k, v);
+                    }
                 }
             }
             ObjField::SpreadDeep(expr) => {
@@ -1105,7 +1266,7 @@ fn eval_fstring(parts: &[FStringPart], env: &Env) -> Result<Val, EvalError> {
             FStringPart::Interp { expr, fmt } => {
                 let val = eval(expr, env)?;
                 let s = match fmt {
-                    None                     => val_to_string(&val),
+                    None => val_to_string(&val),
                     Some(FmtSpec::Spec(spec)) => apply_fmt_spec(&val, spec),
                     Some(FmtSpec::Pipe(method)) => {
                         val_to_string(&dispatch_method(val, method, &[], env)?)
@@ -1122,19 +1283,31 @@ fn apply_fmt_spec(val: &Val, spec: &str) -> String {
     if let Some(rest) = spec.strip_suffix('f') {
         if let Some(prec_str) = rest.strip_prefix('.') {
             if let Ok(prec) = prec_str.parse::<usize>() {
-                if let Some(f) = val.as_f64() { return format!("{:.prec$}", f); }
+                if let Some(f) = val.as_f64() {
+                    return format!("{:.prec$}", f);
+                }
             }
         }
     }
     if spec == "d" {
-        if let Some(i) = val.as_i64() { return format!("{}", i); }
+        if let Some(i) = val.as_i64() {
+            return format!("{}", i);
+        }
     }
     let s = val_to_string(val);
-    if let Some(w) = spec.strip_prefix('>').and_then(|s| s.parse::<usize>().ok()) { return format!("{:>w$}", s); }
-    if let Some(w) = spec.strip_prefix('<').and_then(|s| s.parse::<usize>().ok()) { return format!("{:<w$}", s); }
-    if let Some(w) = spec.strip_prefix('^').and_then(|s| s.parse::<usize>().ok()) { return format!("{:^w$}", s); }
+    if let Some(w) = spec.strip_prefix('>').and_then(|s| s.parse::<usize>().ok()) {
+        return format!("{:>w$}", s);
+    }
+    if let Some(w) = spec.strip_prefix('<').and_then(|s| s.parse::<usize>().ok()) {
+        return format!("{:<w$}", s);
+    }
+    if let Some(w) = spec.strip_prefix('^').and_then(|s| s.parse::<usize>().ok()) {
+        return format!("{:^w$}", s);
+    }
     if let Some(w) = spec.strip_prefix('0').and_then(|s| s.parse::<usize>().ok()) {
-        if let Some(i) = val.as_i64() { return format!("{:0>w$}", i); }
+        if let Some(i) = val.as_i64() {
+            return format!("{:0>w$}", i);
+        }
     }
     s
 }
@@ -1145,36 +1318,48 @@ fn eval_binop(l: &Expr, op: BinOp, r: &Expr, env: &Env) -> Result<Val, EvalError
     match op {
         BinOp::And => {
             let lv = eval(l, env)?;
-            if !is_truthy(&lv) { return Ok(Val::Bool(false)); }
+            if !is_truthy(&lv) {
+                return Ok(Val::Bool(false));
+            }
             Ok(Val::Bool(is_truthy(&eval(r, env)?)))
         }
         BinOp::Or => {
             let lv = eval(l, env)?;
-            if is_truthy(&lv) { return Ok(lv); }
+            if is_truthy(&lv) {
+                return Ok(lv);
+            }
             eval(r, env)
         }
         _ => {
             let lv = eval(l, env)?;
             let rv = eval(r, env)?;
             match op {
-                BinOp::Add  => add_vals(lv, rv),
-                BinOp::Sub  => num_op(lv, rv, |a, b| a - b, |a, b| a - b),
-                BinOp::Mul  => num_op(lv, rv, |a, b| a * b, |a, b| a * b),
-                BinOp::Div  => {
+                BinOp::Add => add_vals(lv, rv),
+                BinOp::Sub => num_op(lv, rv, |a, b| a - b, |a, b| a - b),
+                BinOp::Mul => num_op(lv, rv, |a, b| a * b, |a, b| a * b),
+                BinOp::Div => {
                     let b = rv.as_f64().unwrap_or(0.0);
-                    if b == 0.0 { return err!("division by zero"); }
+                    if b == 0.0 {
+                        return err!("division by zero");
+                    }
                     Ok(Val::Float(lv.as_f64().unwrap_or(0.0) / b))
                 }
-                BinOp::Mod   => num_op(lv, rv, |a, b| a % b, |a, b| a % b),
-                BinOp::Eq    => Ok(Val::Bool(vals_eq(&lv, &rv))),
-                BinOp::Neq   => Ok(Val::Bool(!vals_eq(&lv, &rv))),
-                BinOp::Lt    => Ok(Val::Bool(cmp_vals(&lv, &rv) == std::cmp::Ordering::Less)),
-                BinOp::Lte   => Ok(Val::Bool(cmp_vals(&lv, &rv) != std::cmp::Ordering::Greater)),
-                BinOp::Gt    => Ok(Val::Bool(cmp_vals(&lv, &rv) == std::cmp::Ordering::Greater)),
-                BinOp::Gte   => Ok(Val::Bool(cmp_vals(&lv, &rv) != std::cmp::Ordering::Less)),
+                BinOp::Mod => num_op(lv, rv, |a, b| a % b, |a, b| a % b),
+                BinOp::Eq => Ok(Val::Bool(vals_eq(&lv, &rv))),
+                BinOp::Neq => Ok(Val::Bool(!vals_eq(&lv, &rv))),
+                BinOp::Lt => Ok(Val::Bool(cmp_vals(&lv, &rv) == std::cmp::Ordering::Less)),
+                BinOp::Lte => Ok(Val::Bool(cmp_vals(&lv, &rv) != std::cmp::Ordering::Greater)),
+                BinOp::Gt => Ok(Val::Bool(cmp_vals(&lv, &rv) == std::cmp::Ordering::Greater)),
+                BinOp::Gte => Ok(Val::Bool(cmp_vals(&lv, &rv) != std::cmp::Ordering::Less)),
                 BinOp::Fuzzy => {
-                    let ls = match &lv { Val::Str(s) => s.to_lowercase(), _ => val_to_string(&lv).to_lowercase() };
-                    let rs = match &rv { Val::Str(s) => s.to_lowercase(), _ => val_to_string(&rv).to_lowercase() };
+                    let ls = match &lv {
+                        Val::Str(s) => s.to_lowercase(),
+                        _ => val_to_string(&lv).to_lowercase(),
+                    };
+                    let rs = match &rv {
+                        Val::Str(s) => s.to_lowercase(),
+                        _ => val_to_string(&rv).to_lowercase(),
+                    };
                     Ok(Val::Bool(ls.contains(&rs) || rs.contains(&ls)))
                 }
                 BinOp::And | BinOp::Or => unreachable!(),
@@ -1190,7 +1375,9 @@ pub(crate) fn eval_global(name: &str, args: &[Arg], env: &Env) -> Result<Val, Ev
         "coalesce" => {
             for arg in args {
                 let v = eval_pos(arg, env)?;
-                if !v.is_null() { return Ok(v); }
+                if !v.is_null() {
+                    return Ok(v);
+                }
             }
             Ok(Val::Null)
         }
@@ -1209,10 +1396,10 @@ pub(crate) fn eval_global(name: &str, args: &[Arg], env: &Env) -> Result<Val, Ev
             }
             Ok(Val::arr(out))
         }
-        "zip"         => func_arrays::global_zip(args, env),
+        "zip" => func_arrays::global_zip(args, env),
         "zip_longest" => func_arrays::global_zip_longest(args, env),
-        "product"     => func_arrays::global_product(args, env),
-        "range"       => eval_range(args, env),
+        "product" => func_arrays::global_product(args, env),
+        "range" => eval_range(args, env),
         other => {
             if let Some(first) = args.first() {
                 let recv = eval_pos(first, env)?;
@@ -1242,27 +1429,39 @@ fn eval_range(args: &[Arg], env: &Env) -> Result<Val, EvalError> {
     let mut nums = Vec::with_capacity(n);
     for a in args {
         let v = eval_pos(a, env)?;
-        let i = v.as_i64().ok_or_else(|| EvalError("range: expected integer arg".into()))?;
+        let i = v
+            .as_i64()
+            .ok_or_else(|| EvalError("range: expected integer arg".into()))?;
         nums.push(i);
     }
     let (from, upto, step) = match nums.as_slice() {
-        [n]          => (0, *n, 1i64),
-        [f, u]       => (*f, *u, 1i64),
-        [f, u, s]    => (*f, *u, *s),
-        _            => unreachable!(),
+        [n] => (0, *n, 1i64),
+        [f, u] => (*f, *u, 1i64),
+        [f, u, s] => (*f, *u, *s),
+        _ => unreachable!(),
     };
-    if step == 0 { return Ok(Val::int_vec(Vec::new())); }
+    if step == 0 {
+        return Ok(Val::int_vec(Vec::new()));
+    }
     let len_hint: usize = if step > 0 && upto > from {
         (((upto - from) + step - 1) / step).max(0) as usize
     } else if step < 0 && upto < from {
         (((from - upto) + (-step) - 1) / (-step)).max(0) as usize
-    } else { 0 };
+    } else {
+        0
+    };
     let mut out: Vec<i64> = Vec::with_capacity(len_hint);
     let mut i = from;
     if step > 0 {
-        while i < upto { out.push(i); i += step; }
+        while i < upto {
+            out.push(i);
+            i += step;
+        }
     } else {
-        while i > upto { out.push(i); i += step; }
+        while i > upto {
+            out.push(i);
+            i += step;
+        }
     }
     Ok(Val::int_vec(out))
 }
@@ -1280,7 +1479,9 @@ pub(super) fn apply_item(item: Val, arg: &Arg, env: &Env) -> Result<Val, EvalErr
 /// per call.  Caller clones the Env once before the loop.
 #[inline]
 pub(super) fn apply_item_mut(item: Val, arg: &Arg, env: &mut Env) -> Result<Val, EvalError> {
-    let expr = match arg { Arg::Pos(e) | Arg::Named(_, e) => e };
+    let expr = match arg {
+        Arg::Pos(e) | Arg::Named(_, e) => e,
+    };
     match expr {
         Expr::Lambda { params, body } => {
             let name = params.first().map(|s| s.as_str());
@@ -1349,7 +1550,9 @@ fn apply_expr_item(item: Val, expr: &Expr, env: &Env) -> Result<Val, EvalError> 
 }
 
 pub(super) fn eval_pos(arg: &Arg, env: &Env) -> Result<Val, EvalError> {
-    let expr = match arg { Arg::Pos(e) | Arg::Named(_, e) => e };
+    let expr = match arg {
+        Arg::Pos(e) | Arg::Named(_, e) => e,
+    };
     vm_eval(expr, env)
 }
 
@@ -1377,7 +1580,11 @@ pub(super) fn vm_eval(expr: &Expr, env: &Env) -> Result<Val, EvalError> {
 
 pub(super) fn first_i64_arg(args: &[Arg], env: &Env) -> Result<i64, EvalError> {
     args.first()
-        .map(|a| eval_pos(a, env)?.as_i64().ok_or_else(|| EvalError("expected integer arg".into())))
+        .map(|a| {
+            eval_pos(a, env)?
+                .as_i64()
+                .ok_or_else(|| EvalError("expected integer arg".into()))
+        })
         .transpose()
         .map(|v| v.unwrap_or(1))
 }
@@ -1397,12 +1604,15 @@ fn eval_iter(iter: &Expr, env: &Env) -> Result<Vec<Val>, EvalError> {
         Val::Arr(a) => Ok(Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone())),
         Val::Obj(m) => {
             let entries = Arc::try_unwrap(m).unwrap_or_else(|m| (*m).clone());
-            Ok(entries.into_iter().map(|(k, v)| {
-                let mut o: IndexMap<Arc<str>, Val> = IndexMap::new();
-                o.insert(Arc::from("key"),   Val::Str(k));
-                o.insert(Arc::from("value"), v);
-                Val::obj(o)
-            }).collect())
+            Ok(entries
+                .into_iter()
+                .map(|(k, v)| {
+                    let mut o: IndexMap<Arc<str>, Val> = IndexMap::new();
+                    o.insert(Arc::from("key"), Val::Str(k));
+                    o.insert(Arc::from("value"), v);
+                    Val::obj(o)
+                })
+                .collect())
         }
         other => Ok(vec![other]),
     }
@@ -1429,6 +1639,8 @@ fn bind_vars_mut(env: &mut Env, vars: &[String], item: Val) -> (LamFrame, Option
 
 #[inline]
 fn unbind_vars_mut(env: &mut Env, frames: (LamFrame, Option<LamFrame>)) {
-    if let Some(f2) = frames.1 { env.pop_lam(f2); }
+    if let Some(f2) = frames.1 {
+        env.pop_lam(f2);
+    }
     env.pop_lam(frames.0);
 }

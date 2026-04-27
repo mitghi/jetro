@@ -1,9 +1,9 @@
+use indexmap::IndexMap;
 /// v2 custom method registry — similar to v1's `Callable` / `FuncRegistry`.
 ///
 /// Users implement [`Method`] (or pass a closure) and register it by name.
 /// Registered methods are checked after all built-ins in `dispatch_method`.
 use std::sync::Arc;
-use indexmap::IndexMap;
 
 use super::value::Val;
 use super::EvalError;
@@ -38,7 +38,9 @@ pub struct MethodRegistry {
 
 impl MethodRegistry {
     pub fn new() -> Self {
-        Self { methods: IndexMap::new() }
+        Self {
+            methods: IndexMap::new(),
+        }
     }
 
     /// Register a named method. Accepts anything that implements [`Method`],
@@ -53,7 +55,9 @@ impl MethodRegistry {
         self.methods.get(name)
     }
 
-    pub fn is_empty(&self) -> bool { self.methods.is_empty() }
+    pub fn is_empty(&self) -> bool {
+        self.methods.is_empty()
+    }
 
     /// Iterate every registered `(name, method)` pair.
     pub fn iter(&self) -> impl Iterator<Item = (&str, &Arc<dyn Method>)> {
@@ -68,5 +72,7 @@ impl MethodRegistry {
 }
 
 impl Default for MethodRegistry {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }

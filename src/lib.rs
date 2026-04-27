@@ -21,8 +21,8 @@ pub mod prelude;
 
 // Engine surface.
 pub use jetro_core::{
-    CompiledQuery, Compiler, Engine, EvalError, Expr, Graph, Jetro, JetroSchema, Method,
-    MethodRegistry, ParseError, Program, VM,
+    CompiledQuery, Compiler, Engine, EvalError, Expr, Jetro, JetroSchema, Method, MethodRegistry,
+    ParseError, Program, VM,
 };
 
 // Module re-exports for callers that reach into submodules.

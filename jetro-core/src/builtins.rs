@@ -22,6 +22,846 @@
 use crate::eval::util::is_truthy;
 use crate::eval::value::Val;
 use crate::eval::EvalError;
+use std::sync::Arc;
+
+// ── BuiltinMethod ─────────────────────────────────────────────────────────────
+
+/// Pre-resolved method identifier shared by VM, pipeline analysis, and
+/// builtin dispatch. Keeps method name resolution out of backend-specific
+/// modules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum BuiltinMethod {
+    // Navigation / basics
+    Len = 0,
+    Keys,
+    Values,
+    Entries,
+    ToPairs,
+    FromPairs,
+    Invert,
+    Reverse,
+    Type,
+    ToString,
+    ToJson,
+    FromJson,
+    // Aggregates
+    Sum,
+    Avg,
+    Min,
+    Max,
+    Count,
+    Any,
+    All,
+    GroupBy,
+    CountBy,
+    IndexBy,
+    // Array ops
+    Filter,
+    Map,
+    FlatMap,
+    Sort,
+    Unique,
+    Flatten,
+    Compact,
+    Join,
+    First,
+    Last,
+    Nth,
+    Append,
+    Prepend,
+    Remove,
+    Diff,
+    Intersect,
+    Union,
+    Enumerate,
+    Pairwise,
+    Window,
+    Chunk,
+    TakeWhile,
+    DropWhile,
+    Accumulate,
+    Partition,
+    Zip,
+    ZipLongest,
+    // Object ops
+    Pick,
+    Omit,
+    Merge,
+    DeepMerge,
+    Defaults,
+    Rename,
+    TransformKeys,
+    TransformValues,
+    FilterKeys,
+    FilterValues,
+    Pivot,
+    // Path ops
+    GetPath,
+    SetPath,
+    DelPath,
+    DelPaths,
+    HasPath,
+    FlattenKeys,
+    UnflattenKeys,
+    // CSV
+    ToCsv,
+    ToTsv,
+    // Null / predicate
+    Or,
+    Has,
+    Missing,
+    Includes,
+    Set,
+    Update,
+    // String methods
+    Upper,
+    Lower,
+    Capitalize,
+    TitleCase,
+    Trim,
+    TrimLeft,
+    TrimRight,
+    SnakeCase,
+    KebabCase,
+    CamelCase,
+    PascalCase,
+    ReverseStr,
+    Lines,
+    Words,
+    Chars,
+    CharsOf,
+    Bytes,
+    ByteLen,
+    IsBlank,
+    IsNumeric,
+    IsAlpha,
+    IsAscii,
+    ToNumber,
+    ToBool,
+    ParseInt,
+    ParseFloat,
+    ParseBool,
+    ToBase64,
+    FromBase64,
+    UrlEncode,
+    UrlDecode,
+    HtmlEscape,
+    HtmlUnescape,
+    Repeat,
+    PadLeft,
+    PadRight,
+    Center,
+    StartsWith,
+    EndsWith,
+    IndexOf,
+    LastIndexOf,
+    Replace,
+    ReplaceAll,
+    StripPrefix,
+    StripSuffix,
+    Slice,
+    Split,
+    Indent,
+    Dedent,
+    Matches,
+    Scan,
+    ReMatch,
+    ReMatchFirst,
+    ReMatchAll,
+    ReCaptures,
+    ReCapturesAll,
+    ReSplit,
+    ReReplace,
+    ReReplaceAll,
+    ContainsAny,
+    ContainsAll,
+    Schema,
+    // Relational
+    EquiJoin,
+    // Sentinel for custom/unknown
+    Unknown,
+}
+
+impl BuiltinMethod {
+    pub fn from_name(name: &str) -> Self {
+        match name {
+            "len" => Self::Len,
+            "keys" => Self::Keys,
+            "values" => Self::Values,
+            "entries" => Self::Entries,
+            "to_pairs" | "toPairs" => Self::ToPairs,
+            "from_pairs" | "fromPairs" => Self::FromPairs,
+            "invert" => Self::Invert,
+            "reverse" => Self::Reverse,
+            "type" => Self::Type,
+            "to_string" | "toString" => Self::ToString,
+            "to_json" | "toJson" => Self::ToJson,
+            "from_json" | "fromJson" => Self::FromJson,
+            "sum" => Self::Sum,
+            "avg" => Self::Avg,
+            "min" => Self::Min,
+            "max" => Self::Max,
+            "count" => Self::Count,
+            "any" => Self::Any,
+            "all" => Self::All,
+            "groupBy" | "group_by" => Self::GroupBy,
+            "countBy" | "count_by" => Self::CountBy,
+            "indexBy" | "index_by" => Self::IndexBy,
+            "filter" => Self::Filter,
+            "map" => Self::Map,
+            "flatMap" | "flat_map" => Self::FlatMap,
+            "sort" => Self::Sort,
+            "unique" | "distinct" => Self::Unique,
+            "flatten" => Self::Flatten,
+            "compact" => Self::Compact,
+            "join" => Self::Join,
+            "equi_join" | "equiJoin" => Self::EquiJoin,
+            "first" => Self::First,
+            "last" => Self::Last,
+            "nth" => Self::Nth,
+            "append" => Self::Append,
+            "prepend" => Self::Prepend,
+            "remove" => Self::Remove,
+            "diff" => Self::Diff,
+            "intersect" => Self::Intersect,
+            "union" => Self::Union,
+            "enumerate" => Self::Enumerate,
+            "pairwise" => Self::Pairwise,
+            "window" => Self::Window,
+            "chunk" | "batch" => Self::Chunk,
+            "takewhile" | "take_while" => Self::TakeWhile,
+            "dropwhile" | "drop_while" => Self::DropWhile,
+            "accumulate" => Self::Accumulate,
+            "partition" => Self::Partition,
+            "zip" => Self::Zip,
+            "zip_longest" | "zipLongest" => Self::ZipLongest,
+            "pick" => Self::Pick,
+            "omit" => Self::Omit,
+            "merge" => Self::Merge,
+            "deep_merge" | "deepMerge" => Self::DeepMerge,
+            "defaults" => Self::Defaults,
+            "rename" => Self::Rename,
+            "transform_keys" | "transformKeys" => Self::TransformKeys,
+            "transform_values" | "transformValues" => Self::TransformValues,
+            "filter_keys" | "filterKeys" => Self::FilterKeys,
+            "filter_values" | "filterValues" => Self::FilterValues,
+            "pivot" => Self::Pivot,
+            "get_path" | "getPath" => Self::GetPath,
+            "set_path" | "setPath" => Self::SetPath,
+            "del_path" | "delPath" => Self::DelPath,
+            "del_paths" | "delPaths" => Self::DelPaths,
+            "has_path" | "hasPath" => Self::HasPath,
+            "flatten_keys" | "flattenKeys" => Self::FlattenKeys,
+            "unflatten_keys" | "unflattenKeys" => Self::UnflattenKeys,
+            "to_csv" | "toCsv" => Self::ToCsv,
+            "to_tsv" | "toTsv" => Self::ToTsv,
+            "or" => Self::Or,
+            "has" => Self::Has,
+            "missing" => Self::Missing,
+            "includes" | "contains" => Self::Includes,
+            "set" => Self::Set,
+            "update" => Self::Update,
+            "upper" => Self::Upper,
+            "lower" => Self::Lower,
+            "capitalize" => Self::Capitalize,
+            "title_case" | "titleCase" => Self::TitleCase,
+            "trim" => Self::Trim,
+            "trim_left" | "trimLeft" | "lstrip" => Self::TrimLeft,
+            "trim_right" | "trimRight" | "rstrip" => Self::TrimRight,
+            "snake_case" | "snakeCase" => Self::SnakeCase,
+            "kebab_case" | "kebabCase" => Self::KebabCase,
+            "camel_case" | "camelCase" => Self::CamelCase,
+            "pascal_case" | "pascalCase" => Self::PascalCase,
+            "reverse_str" | "reverseStr" => Self::ReverseStr,
+            "lines" => Self::Lines,
+            "words" => Self::Words,
+            "chars" => Self::Chars,
+            "chars_of" | "charsOf" => Self::CharsOf,
+            "bytes" => Self::Bytes,
+            "byte_len" | "byteLen" => Self::ByteLen,
+            "is_blank" | "isBlank" => Self::IsBlank,
+            "is_numeric" | "isNumeric" => Self::IsNumeric,
+            "is_alpha" | "isAlpha" => Self::IsAlpha,
+            "is_ascii" | "isAscii" => Self::IsAscii,
+            "to_number" | "toNumber" => Self::ToNumber,
+            "to_bool" | "toBool" => Self::ToBool,
+            "parse_int" | "parseInt" => Self::ParseInt,
+            "parse_float" | "parseFloat" => Self::ParseFloat,
+            "parse_bool" | "parseBool" => Self::ParseBool,
+            "to_base64" | "toBase64" => Self::ToBase64,
+            "from_base64" | "fromBase64" => Self::FromBase64,
+            "url_encode" | "urlEncode" => Self::UrlEncode,
+            "url_decode" | "urlDecode" => Self::UrlDecode,
+            "html_escape" | "htmlEscape" => Self::HtmlEscape,
+            "html_unescape" | "htmlUnescape" => Self::HtmlUnescape,
+            "repeat" => Self::Repeat,
+            "pad_left" | "padLeft" => Self::PadLeft,
+            "pad_right" | "padRight" => Self::PadRight,
+            "center" => Self::Center,
+            "starts_with" | "startsWith" => Self::StartsWith,
+            "ends_with" | "endsWith" => Self::EndsWith,
+            "index_of" | "indexOf" => Self::IndexOf,
+            "last_index_of" | "lastIndexOf" => Self::LastIndexOf,
+            "replace" => Self::Replace,
+            "replace_all" | "replaceAll" => Self::ReplaceAll,
+            "strip_prefix" | "stripPrefix" => Self::StripPrefix,
+            "strip_suffix" | "stripSuffix" => Self::StripSuffix,
+            "slice" => Self::Slice,
+            "split" => Self::Split,
+            "indent" => Self::Indent,
+            "dedent" => Self::Dedent,
+            "matches" => Self::Matches,
+            "scan" => Self::Scan,
+            "re_match" | "reMatch" => Self::ReMatch,
+            "match_first" | "matchFirst" => Self::ReMatchFirst,
+            "match_all" | "matchAll" => Self::ReMatchAll,
+            "captures" => Self::ReCaptures,
+            "captures_all" | "capturesAll" => Self::ReCapturesAll,
+            "split_re" | "splitRe" => Self::ReSplit,
+            "replace_re" | "replaceRe" => Self::ReReplace,
+            "replace_all_re" | "replaceAllRe" => Self::ReReplaceAll,
+            "contains_any" | "containsAny" => Self::ContainsAny,
+            "contains_all" | "containsAll" => Self::ContainsAll,
+            "schema" => Self::Schema,
+            _ => Self::Unknown,
+        }
+    }
+
+    /// True for methods that receive a sub-program to run per item.
+    pub(crate) fn is_lambda_method(self) -> bool {
+        matches!(
+            self,
+            Self::Filter
+                | Self::Map
+                | Self::FlatMap
+                | Self::Sort
+                | Self::Any
+                | Self::All
+                | Self::Count
+                | Self::GroupBy
+                | Self::CountBy
+                | Self::IndexBy
+                | Self::TakeWhile
+                | Self::DropWhile
+                | Self::Accumulate
+                | Self::Partition
+                | Self::TransformKeys
+                | Self::TransformValues
+                | Self::FilterKeys
+                | Self::FilterValues
+                | Self::Pivot
+                | Self::Update
+        )
+    }
+}
+
+// ── Resolved builtin calls ──────────────────────────────────────────────────
+
+/// Literal arguments attached to a resolved builtin call.
+///
+/// Backends that can only lower compile-time literal arguments use this
+/// carrier instead of keeping their own per-runtime argument enum.
+#[derive(Debug, Clone)]
+pub enum BuiltinArgs {
+    None,
+    Str(Arc<str>),
+    StrPair { first: Arc<str>, second: Arc<str> },
+    StrVec(Vec<Arc<str>>),
+    Usize(usize),
+    Pad { width: usize, fill: char },
+}
+
+#[derive(Debug, Clone)]
+pub struct BuiltinCall {
+    pub method: BuiltinMethod,
+    pub args: BuiltinArgs,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct BuiltinSpec {
+    pub pure: bool,
+    pub one_to_one: bool,
+    pub can_indexed: bool,
+    pub cost: f64,
+}
+
+impl BuiltinCall {
+    #[inline]
+    pub fn new(method: BuiltinMethod, args: BuiltinArgs) -> Self {
+        Self { method, args }
+    }
+
+    #[inline]
+    pub fn spec(&self) -> BuiltinSpec {
+        let (cost, can_indexed) = match self.method {
+            BuiltinMethod::Keys | BuiltinMethod::Values | BuiltinMethod::Entries => (1.0, false),
+            BuiltinMethod::Repeat
+            | BuiltinMethod::Indent
+            | BuiltinMethod::PadLeft
+            | BuiltinMethod::PadRight
+            | BuiltinMethod::Center => (2.0, true),
+            BuiltinMethod::IndexOf
+            | BuiltinMethod::LastIndexOf
+            | BuiltinMethod::Scan
+            | BuiltinMethod::StartsWith
+            | BuiltinMethod::EndsWith
+            | BuiltinMethod::StripPrefix
+            | BuiltinMethod::StripSuffix
+            | BuiltinMethod::Matches
+            | BuiltinMethod::ReMatch
+            | BuiltinMethod::ReMatchFirst
+            | BuiltinMethod::ReMatchAll
+            | BuiltinMethod::ReCaptures
+            | BuiltinMethod::ReCapturesAll
+            | BuiltinMethod::ReSplit
+            | BuiltinMethod::ReReplace
+            | BuiltinMethod::ReReplaceAll
+            | BuiltinMethod::ContainsAny
+            | BuiltinMethod::ContainsAll => (2.0, true),
+            _ => (1.0, true),
+        };
+        BuiltinSpec {
+            pure: true,
+            one_to_one: true,
+            can_indexed,
+            cost,
+        }
+    }
+
+    #[inline]
+    pub fn is_idempotent(&self) -> bool {
+        matches!(
+            self.method,
+            BuiltinMethod::Upper
+                | BuiltinMethod::Lower
+                | BuiltinMethod::Trim
+                | BuiltinMethod::TrimLeft
+                | BuiltinMethod::TrimRight
+                | BuiltinMethod::Capitalize
+                | BuiltinMethod::TitleCase
+                | BuiltinMethod::SnakeCase
+                | BuiltinMethod::KebabCase
+                | BuiltinMethod::CamelCase
+                | BuiltinMethod::PascalCase
+                | BuiltinMethod::Dedent
+        )
+    }
+
+    #[inline]
+    pub fn cancels_with(&self, other: &Self) -> bool {
+        matches!(
+            (self.method, other.method),
+            (BuiltinMethod::ToBase64, BuiltinMethod::FromBase64)
+                | (BuiltinMethod::FromBase64, BuiltinMethod::ToBase64)
+                | (BuiltinMethod::UrlEncode, BuiltinMethod::UrlDecode)
+                | (BuiltinMethod::UrlDecode, BuiltinMethod::UrlEncode)
+                | (BuiltinMethod::HtmlEscape, BuiltinMethod::HtmlUnescape)
+                | (BuiltinMethod::HtmlUnescape, BuiltinMethod::HtmlEscape)
+                | (BuiltinMethod::ReverseStr, BuiltinMethod::ReverseStr)
+        )
+    }
+
+    pub fn apply(&self, recv: &Val) -> Option<Val> {
+        macro_rules! apply_or_recv {
+            ($expr:expr) => {
+                return Some($expr.unwrap_or_else(|| recv.clone()))
+            };
+        }
+        match (self.method, &self.args) {
+            (BuiltinMethod::Upper, BuiltinArgs::None) => apply_or_recv!(upper_apply(recv)),
+            (BuiltinMethod::Lower, BuiltinArgs::None) => apply_or_recv!(lower_apply(recv)),
+            (BuiltinMethod::Trim, BuiltinArgs::None) => apply_or_recv!(trim_apply(recv)),
+            (BuiltinMethod::TrimLeft, BuiltinArgs::None) => apply_or_recv!(trim_left_apply(recv)),
+            (BuiltinMethod::TrimRight, BuiltinArgs::None) => {
+                apply_or_recv!(trim_right_apply(recv))
+            }
+            (BuiltinMethod::Capitalize, BuiltinArgs::None) => {
+                apply_or_recv!(capitalize_apply(recv))
+            }
+            (BuiltinMethod::TitleCase, BuiltinArgs::None) => {
+                apply_or_recv!(title_case_apply(recv))
+            }
+            (BuiltinMethod::SnakeCase, BuiltinArgs::None) => apply_or_recv!(snake_case_apply(recv)),
+            (BuiltinMethod::KebabCase, BuiltinArgs::None) => apply_or_recv!(kebab_case_apply(recv)),
+            (BuiltinMethod::CamelCase, BuiltinArgs::None) => apply_or_recv!(camel_case_apply(recv)),
+            (BuiltinMethod::PascalCase, BuiltinArgs::None) => {
+                apply_or_recv!(pascal_case_apply(recv))
+            }
+            (BuiltinMethod::ReverseStr, BuiltinArgs::None) => {
+                apply_or_recv!(reverse_str_apply(recv))
+            }
+            (BuiltinMethod::HtmlEscape, BuiltinArgs::None) => {
+                apply_or_recv!(html_escape_apply(recv))
+            }
+            (BuiltinMethod::HtmlUnescape, BuiltinArgs::None) => {
+                apply_or_recv!(html_unescape_apply(recv))
+            }
+            (BuiltinMethod::UrlEncode, BuiltinArgs::None) => {
+                apply_or_recv!(url_encode_apply(recv))
+            }
+            (BuiltinMethod::UrlDecode, BuiltinArgs::None) => {
+                apply_or_recv!(url_decode_apply(recv))
+            }
+            (BuiltinMethod::ToBase64, BuiltinArgs::None) => {
+                apply_or_recv!(to_base64_apply(recv))
+            }
+            (BuiltinMethod::FromBase64, BuiltinArgs::None) => {
+                apply_or_recv!(from_base64_apply(recv))
+            }
+            (BuiltinMethod::Dedent, BuiltinArgs::None) => apply_or_recv!(dedent_apply(recv)),
+            (BuiltinMethod::Lines, BuiltinArgs::None) => apply_or_recv!(lines_apply(recv)),
+            (BuiltinMethod::Words, BuiltinArgs::None) => apply_or_recv!(words_apply(recv)),
+            (BuiltinMethod::Chars, BuiltinArgs::None) => apply_or_recv!(chars_apply(recv)),
+            (BuiltinMethod::CharsOf, BuiltinArgs::None) => apply_or_recv!(chars_of_apply(recv)),
+            (BuiltinMethod::Bytes, BuiltinArgs::None) => apply_or_recv!(bytes_of_apply(recv)),
+            (BuiltinMethod::ByteLen, BuiltinArgs::None) => apply_or_recv!(byte_len_apply(recv)),
+            (BuiltinMethod::IsBlank, BuiltinArgs::None) => apply_or_recv!(is_blank_apply(recv)),
+            (BuiltinMethod::IsNumeric, BuiltinArgs::None) => {
+                apply_or_recv!(is_numeric_apply(recv))
+            }
+            (BuiltinMethod::IsAlpha, BuiltinArgs::None) => apply_or_recv!(is_alpha_apply(recv)),
+            (BuiltinMethod::IsAscii, BuiltinArgs::None) => apply_or_recv!(is_ascii_apply(recv)),
+            (BuiltinMethod::ToNumber, BuiltinArgs::None) => {
+                apply_or_recv!(to_number_apply(recv))
+            }
+            (BuiltinMethod::ToBool, BuiltinArgs::None) => apply_or_recv!(to_bool_apply(recv)),
+            (BuiltinMethod::ParseInt, BuiltinArgs::None) => apply_or_recv!(parse_int_apply(recv)),
+            (BuiltinMethod::ParseFloat, BuiltinArgs::None) => {
+                apply_or_recv!(parse_float_apply(recv))
+            }
+            (BuiltinMethod::ParseBool, BuiltinArgs::None) => {
+                apply_or_recv!(parse_bool_apply(recv))
+            }
+            (BuiltinMethod::Keys, BuiltinArgs::None) => return Some(keys_apply(recv)),
+            (BuiltinMethod::Values, BuiltinArgs::None) => return Some(values_apply(recv)),
+            (BuiltinMethod::Entries, BuiltinArgs::None) => return Some(entries_apply(recv)),
+            (BuiltinMethod::Invert, BuiltinArgs::None) => apply_or_recv!(invert_apply(recv)),
+            (BuiltinMethod::Type, BuiltinArgs::None) => apply_or_recv!(type_name_apply(recv)),
+            (BuiltinMethod::ToString, BuiltinArgs::None) => apply_or_recv!(to_string_apply(recv)),
+            (BuiltinMethod::ToJson, BuiltinArgs::None) => apply_or_recv!(to_json_apply(recv)),
+            (BuiltinMethod::ToCsv, BuiltinArgs::None) => apply_or_recv!(to_csv_apply(recv)),
+            (BuiltinMethod::ToTsv, BuiltinArgs::None) => apply_or_recv!(to_tsv_apply(recv)),
+            (BuiltinMethod::ToPairs, BuiltinArgs::None) => apply_or_recv!(to_pairs_apply(recv)),
+            (BuiltinMethod::Compact, BuiltinArgs::None) => apply_or_recv!(compact_apply(recv)),
+            (BuiltinMethod::Pairwise, BuiltinArgs::None) => apply_or_recv!(pairwise_apply(recv)),
+            (BuiltinMethod::Schema, BuiltinArgs::None) => apply_or_recv!(schema_apply(recv)),
+            (BuiltinMethod::Has, BuiltinArgs::Str(k)) => apply_or_recv!(has_apply(recv, k)),
+            (BuiltinMethod::GetPath, BuiltinArgs::Str(p)) => {
+                apply_or_recv!(get_path_apply(recv, p))
+            }
+            (BuiltinMethod::HasPath, BuiltinArgs::Str(p)) => {
+                apply_or_recv!(has_path_apply(recv, p))
+            }
+            (BuiltinMethod::DelPath, BuiltinArgs::Str(p)) => {
+                apply_or_recv!(del_path_apply(recv, p))
+            }
+            (BuiltinMethod::StartsWith, BuiltinArgs::Str(p)) => {
+                apply_or_recv!(starts_with_apply(recv, p))
+            }
+            (BuiltinMethod::EndsWith, BuiltinArgs::Str(p)) => {
+                apply_or_recv!(ends_with_apply(recv, p))
+            }
+            (BuiltinMethod::StripPrefix, BuiltinArgs::Str(p)) => {
+                apply_or_recv!(strip_prefix_apply(recv, p))
+            }
+            (BuiltinMethod::StripSuffix, BuiltinArgs::Str(p)) => {
+                apply_or_recv!(strip_suffix_apply(recv, p))
+            }
+            (BuiltinMethod::Matches, BuiltinArgs::Str(p)) => {
+                apply_or_recv!(contains_apply(recv, p))
+            }
+            (BuiltinMethod::IndexOf, BuiltinArgs::Str(p)) => {
+                apply_or_recv!(index_of_apply(recv, p))
+            }
+            (BuiltinMethod::LastIndexOf, BuiltinArgs::Str(p)) => {
+                apply_or_recv!(last_index_of_apply(recv, p))
+            }
+            (BuiltinMethod::Scan, BuiltinArgs::Str(p)) => apply_or_recv!(scan_apply(recv, p)),
+            (BuiltinMethod::ReMatch, BuiltinArgs::Str(p)) => {
+                apply_or_recv!(re_match_apply(recv, p))
+            }
+            (BuiltinMethod::ReMatchFirst, BuiltinArgs::Str(p)) => {
+                apply_or_recv!(re_match_first_apply(recv, p))
+            }
+            (BuiltinMethod::ReMatchAll, BuiltinArgs::Str(p)) => {
+                apply_or_recv!(re_match_all_apply(recv, p))
+            }
+            (BuiltinMethod::ReCaptures, BuiltinArgs::Str(p)) => {
+                apply_or_recv!(re_captures_apply(recv, p))
+            }
+            (BuiltinMethod::ReCapturesAll, BuiltinArgs::Str(p)) => {
+                apply_or_recv!(re_captures_all_apply(recv, p))
+            }
+            (BuiltinMethod::ReSplit, BuiltinArgs::Str(p)) => {
+                apply_or_recv!(re_split_apply(recv, p))
+            }
+            (BuiltinMethod::ReReplace, BuiltinArgs::StrPair { first, second }) => {
+                apply_or_recv!(re_replace_apply(recv, first, second))
+            }
+            (BuiltinMethod::ReReplaceAll, BuiltinArgs::StrPair { first, second }) => {
+                apply_or_recv!(re_replace_all_apply(recv, first, second))
+            }
+            (BuiltinMethod::ContainsAny, BuiltinArgs::StrVec(ns)) => {
+                apply_or_recv!(contains_any_apply(recv, ns))
+            }
+            (BuiltinMethod::ContainsAll, BuiltinArgs::StrVec(ns)) => {
+                apply_or_recv!(contains_all_apply(recv, ns))
+            }
+            (BuiltinMethod::Repeat, BuiltinArgs::Usize(n)) => {
+                apply_or_recv!(repeat_apply(recv, *n))
+            }
+            (BuiltinMethod::Indent, BuiltinArgs::Usize(n)) => {
+                apply_or_recv!(indent_apply(recv, *n))
+            }
+            (BuiltinMethod::PadLeft, BuiltinArgs::Pad { width, fill }) => {
+                apply_or_recv!(pad_left_apply(recv, *width, *fill))
+            }
+            (BuiltinMethod::PadRight, BuiltinArgs::Pad { width, fill }) => {
+                apply_or_recv!(pad_right_apply(recv, *width, *fill))
+            }
+            (BuiltinMethod::Center, BuiltinArgs::Pad { width, fill }) => {
+                apply_or_recv!(center_apply(recv, *width, *fill))
+            }
+            _ => None,
+        }
+    }
+
+    pub fn from_literal_ast_args(name: &str, args: &[crate::ast::Arg]) -> Option<Self> {
+        use crate::ast::{Arg, Expr};
+
+        let method = BuiltinMethod::from_name(name);
+        if method == BuiltinMethod::Unknown {
+            return None;
+        }
+
+        let str_arg = |idx: usize| -> Option<Arc<str>> {
+            match args.get(idx)? {
+                Arg::Pos(Expr::Str(s)) => Some(Arc::from(s.as_str())),
+                _ => None,
+            }
+        };
+        let usize_arg = |idx: usize| -> Option<usize> {
+            match args.get(idx)? {
+                Arg::Pos(Expr::Int(n)) if *n >= 0 => Some(*n as usize),
+                _ => None,
+            }
+        };
+        let str_vec_arg = |idx: usize| -> Option<Vec<Arc<str>>> {
+            match args.get(idx)? {
+                Arg::Pos(Expr::Array(elems)) => {
+                    let mut out = Vec::with_capacity(elems.len());
+                    for elem in elems {
+                        match elem {
+                            crate::ast::ArrayElem::Expr(Expr::Str(s)) => {
+                                out.push(Arc::from(s.as_str()));
+                            }
+                            _ => return None,
+                        }
+                    }
+                    Some(out)
+                }
+                _ => None,
+            }
+        };
+
+        match (method, args.len()) {
+            (
+                BuiltinMethod::Keys
+                | BuiltinMethod::Values
+                | BuiltinMethod::Entries
+                | BuiltinMethod::Upper
+                | BuiltinMethod::Lower
+                | BuiltinMethod::Trim
+                | BuiltinMethod::TrimLeft
+                | BuiltinMethod::TrimRight
+                | BuiltinMethod::Capitalize
+                | BuiltinMethod::TitleCase
+                | BuiltinMethod::SnakeCase
+                | BuiltinMethod::KebabCase
+                | BuiltinMethod::CamelCase
+                | BuiltinMethod::PascalCase
+                | BuiltinMethod::ReverseStr
+                | BuiltinMethod::HtmlEscape
+                | BuiltinMethod::HtmlUnescape
+                | BuiltinMethod::UrlEncode
+                | BuiltinMethod::UrlDecode
+                | BuiltinMethod::ToBase64
+                | BuiltinMethod::FromBase64
+                | BuiltinMethod::Dedent
+                | BuiltinMethod::Lines
+                | BuiltinMethod::Words
+                | BuiltinMethod::Chars
+                | BuiltinMethod::CharsOf
+                | BuiltinMethod::Bytes
+                | BuiltinMethod::ByteLen
+                | BuiltinMethod::IsBlank
+                | BuiltinMethod::IsNumeric
+                | BuiltinMethod::IsAlpha
+                | BuiltinMethod::IsAscii
+                | BuiltinMethod::ToNumber
+                | BuiltinMethod::ToBool
+                | BuiltinMethod::ParseInt
+                | BuiltinMethod::ParseFloat
+                | BuiltinMethod::ParseBool
+                | BuiltinMethod::Type
+                | BuiltinMethod::ToString
+                | BuiltinMethod::ToJson
+                | BuiltinMethod::Schema,
+                0,
+            ) => Some(Self::new(method, BuiltinArgs::None)),
+            (
+                BuiltinMethod::GetPath
+                | BuiltinMethod::HasPath
+                | BuiltinMethod::Has
+                | BuiltinMethod::DelPath,
+                1,
+            ) => Some(Self::new(method, BuiltinArgs::Str(str_arg(0)?))),
+            (
+                BuiltinMethod::StartsWith
+                | BuiltinMethod::EndsWith
+                | BuiltinMethod::StripPrefix
+                | BuiltinMethod::StripSuffix
+                | BuiltinMethod::Matches
+                | BuiltinMethod::IndexOf
+                | BuiltinMethod::LastIndexOf
+                | BuiltinMethod::Scan
+                | BuiltinMethod::ReMatch
+                | BuiltinMethod::ReMatchFirst
+                | BuiltinMethod::ReMatchAll
+                | BuiltinMethod::ReCaptures
+                | BuiltinMethod::ReCapturesAll
+                | BuiltinMethod::ReSplit,
+                1,
+            ) => Some(Self::new(method, BuiltinArgs::Str(str_arg(0)?))),
+            (BuiltinMethod::ReReplace | BuiltinMethod::ReReplaceAll, 2) => Some(Self::new(
+                method,
+                BuiltinArgs::StrPair {
+                    first: str_arg(0)?,
+                    second: str_arg(1)?,
+                },
+            )),
+            (BuiltinMethod::ContainsAny | BuiltinMethod::ContainsAll, 1) => {
+                Some(Self::new(method, BuiltinArgs::StrVec(str_vec_arg(0)?)))
+            }
+            (BuiltinMethod::Repeat, 1) => {
+                Some(Self::new(method, BuiltinArgs::Usize(usize_arg(0)?)))
+            }
+            (BuiltinMethod::Indent, 0) => Some(Self::new(method, BuiltinArgs::Usize(2))),
+            (BuiltinMethod::Indent, 1) => {
+                Some(Self::new(method, BuiltinArgs::Usize(usize_arg(0)?)))
+            }
+            (BuiltinMethod::PadLeft | BuiltinMethod::PadRight | BuiltinMethod::Center, 1) => {
+                Some(Self::new(
+                    method,
+                    BuiltinArgs::Pad {
+                        width: usize_arg(0)?,
+                        fill: ' ',
+                    },
+                ))
+            }
+            (BuiltinMethod::PadLeft | BuiltinMethod::PadRight | BuiltinMethod::Center, 2) => {
+                let fill = str_arg(1)?.chars().next().unwrap_or(' ');
+                Some(Self::new(
+                    method,
+                    BuiltinArgs::Pad {
+                        width: usize_arg(0)?,
+                        fill,
+                    },
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    /// Lower a method call into a pure per-element pipeline builtin.
+    ///
+    /// This intentionally excludes whole-receiver methods such as `compact`,
+    /// `flatten`, `join`, `rolling_*`, etc.  Pipeline lowering applies stages
+    /// to each row yielded by the source stream, so only methods whose
+    /// semantics are valid per input value belong here.
+    pub fn from_pipeline_literal_args(name: &str, args: &[crate::ast::Arg]) -> Option<Self> {
+        let call = Self::from_literal_ast_args(name, args)?;
+        call.method.is_pipeline_element_method().then_some(call)
+    }
+}
+
+impl BuiltinMethod {
+    #[inline]
+    pub fn is_pipeline_element_method(self) -> bool {
+        matches!(
+            self,
+            Self::Keys
+                | Self::Values
+                | Self::Entries
+                | Self::Upper
+                | Self::Lower
+                | Self::Trim
+                | Self::TrimLeft
+                | Self::TrimRight
+                | Self::Capitalize
+                | Self::TitleCase
+                | Self::SnakeCase
+                | Self::KebabCase
+                | Self::CamelCase
+                | Self::PascalCase
+                | Self::ReverseStr
+                | Self::HtmlEscape
+                | Self::HtmlUnescape
+                | Self::UrlEncode
+                | Self::UrlDecode
+                | Self::ToBase64
+                | Self::FromBase64
+                | Self::Dedent
+                | Self::Lines
+                | Self::Words
+                | Self::Chars
+                | Self::CharsOf
+                | Self::Bytes
+                | Self::ByteLen
+                | Self::IsBlank
+                | Self::IsNumeric
+                | Self::IsAlpha
+                | Self::IsAscii
+                | Self::ToNumber
+                | Self::ToBool
+                | Self::ParseInt
+                | Self::ParseFloat
+                | Self::ParseBool
+                | Self::Type
+                | Self::ToString
+                | Self::ToJson
+                | Self::Schema
+                | Self::GetPath
+                | Self::HasPath
+                | Self::Has
+                | Self::DelPath
+                | Self::StartsWith
+                | Self::EndsWith
+                | Self::StripPrefix
+                | Self::StripSuffix
+                | Self::Matches
+                | Self::IndexOf
+                | Self::LastIndexOf
+                | Self::Scan
+                | Self::ReMatch
+                | Self::ReMatchFirst
+                | Self::ReMatchAll
+                | Self::ReCaptures
+                | Self::ReCapturesAll
+                | Self::ReSplit
+                | Self::ReReplace
+                | Self::ReReplaceAll
+                | Self::ContainsAny
+                | Self::ContainsAll
+                | Self::Repeat
+                | Self::Indent
+                | Self::PadLeft
+                | Self::PadRight
+                | Self::Center
+        )
+    }
+}
 
 // ── filter ──────────────────────────────────────────────────────────
 
@@ -376,8 +1216,6 @@ where
 // `lift_native_pattern.md`. Called from BOTH the Pipeline runtime arm
 // AND the `eval/builtins.rs` dispatch fn (for nested sub-program
 // invocation via `Opcode::CallMethod`).
-
-use std::sync::Arc;
 
 /// Canonical `.keys()` impl shared by `Stage::Keys` runtime arm and
 /// the `.keys` builtin dispatch shim.  Non-object receivers yield an
@@ -1717,6 +2555,57 @@ pub fn to_json_apply(recv: &Val) -> Option<Val> {
         }
     };
     Some(Val::Str(Arc::from(out)))
+}
+
+/// Direct dispatcher for pure zero-argument builtins.
+///
+/// This is the shared fast path used by backend runtimes that already
+/// resolved a method name to `BuiltinMethod`. It intentionally excludes
+/// lambda methods and arg-bearing methods; those still need backend-specific
+/// argument evaluation.
+#[inline]
+pub fn apply_zero_arg_method(method: BuiltinMethod, recv: &Val) -> Option<Val> {
+    macro_rules! apply_or_recv {
+        ($f:expr) => {
+            return Some($f(recv).unwrap_or_else(|| recv.clone()))
+        };
+    }
+
+    match method {
+        BuiltinMethod::Upper => apply_or_recv!(upper_apply),
+        BuiltinMethod::Lower => apply_or_recv!(lower_apply),
+        BuiltinMethod::Trim => apply_or_recv!(trim_apply),
+        BuiltinMethod::TrimLeft => apply_or_recv!(trim_left_apply),
+        BuiltinMethod::TrimRight => apply_or_recv!(trim_right_apply),
+        BuiltinMethod::Capitalize => apply_or_recv!(capitalize_apply),
+        BuiltinMethod::TitleCase => apply_or_recv!(title_case_apply),
+        BuiltinMethod::Dedent => apply_or_recv!(dedent_apply),
+        BuiltinMethod::HtmlEscape => apply_or_recv!(html_escape_apply),
+        BuiltinMethod::HtmlUnescape => apply_or_recv!(html_unescape_apply),
+        BuiltinMethod::UrlEncode => apply_or_recv!(url_encode_apply),
+        BuiltinMethod::UrlDecode => apply_or_recv!(url_decode_apply),
+        BuiltinMethod::ToBase64 => apply_or_recv!(to_base64_apply),
+        BuiltinMethod::FromBase64 => apply_or_recv!(from_base64_apply),
+        BuiltinMethod::Lines => apply_or_recv!(lines_apply),
+        BuiltinMethod::Words => apply_or_recv!(words_apply),
+        BuiltinMethod::Chars => apply_or_recv!(chars_apply),
+        BuiltinMethod::ToNumber => apply_or_recv!(to_number_apply),
+        BuiltinMethod::ToBool => apply_or_recv!(to_bool_apply),
+        BuiltinMethod::Keys => return Some(keys_apply(recv)),
+        BuiltinMethod::Values => return Some(values_apply(recv)),
+        BuiltinMethod::Entries => return Some(entries_apply(recv)),
+        BuiltinMethod::Invert => apply_or_recv!(invert_apply),
+        BuiltinMethod::Compact => apply_or_recv!(compact_apply),
+        BuiltinMethod::Pairwise => apply_or_recv!(pairwise_apply),
+        BuiltinMethod::Type => apply_or_recv!(type_name_apply),
+        BuiltinMethod::ToString => apply_or_recv!(to_string_apply),
+        BuiltinMethod::ToJson => apply_or_recv!(to_json_apply),
+        BuiltinMethod::ToCsv => apply_or_recv!(to_csv_apply),
+        BuiltinMethod::ToTsv => apply_or_recv!(to_tsv_apply),
+        BuiltinMethod::ToPairs => apply_or_recv!(to_pairs_apply),
+        BuiltinMethod::Schema => apply_or_recv!(schema_apply),
+        _ => None,
+    }
 }
 
 /// `.schema()` — Val → schema Obj describing types/required/array shape.

@@ -14,9 +14,9 @@
 //! Per-iteration: each iteration builds a fresh Jetro, runs ONE query,
 //! discards.  No reuse — measures pure cold-start cost.
 
-use std::time::Instant;
-use serde_json::json;
 use jetro_core::Jetro;
+use serde_json::json;
+use std::time::Instant;
 
 fn make_doc() -> Vec<u8> {
     // Same shape as bench_complex: 5000 records with nested fields.
@@ -63,7 +63,11 @@ fn time<F: FnMut()>(label: &str, n: usize, mut f: F) {
 
 fn main() {
     let bytes = make_doc();
-    println!("doc size = {} bytes ({:.2} MB)", bytes.len(), bytes.len() as f64 / 1.0e6);
+    println!(
+        "doc size = {} bytes ({:.2} MB)",
+        bytes.len(),
+        bytes.len() as f64 / 1.0e6
+    );
     println!();
 
     // Each cold iteration: build Jetro fresh, run one query, drop.
@@ -76,7 +80,7 @@ fn main() {
         let j = Jetro::new(v);
         let _ = j.collect(q_simple).unwrap();
     });
-    time("simd-direct: from_bytes",  30, || {
+    time("simd-direct: from_bytes", 30, || {
         let j = Jetro::from_bytes(bytes.clone()).unwrap();
         let _ = j.collect(q_simple).unwrap();
     });
@@ -88,7 +92,7 @@ fn main() {
         let j = Jetro::new(v);
         let _ = j.collect(q_filter).unwrap();
     });
-    time("simd-direct: from_bytes",  30, || {
+    time("simd-direct: from_bytes", 30, || {
         let j = Jetro::from_bytes(bytes.clone()).unwrap();
         let _ = j.collect(q_filter).unwrap();
     });
@@ -113,14 +117,18 @@ fn main() {
     for n in [1usize, 5, 10, 100] {
         let t0 = Instant::now();
         let j = Jetro::from_bytes(bytes.clone()).unwrap();
-        let _ = j.collect(q_simple).unwrap();  // warm caches
+        let _ = j.collect(q_simple).unwrap(); // warm caches
         for _ in 0..n {
             let _ = j.collect(q_simple).unwrap();
             let _ = j.collect(q_filter).unwrap();
             let _ = j.collect("$.orders.map(total).max()").unwrap();
         }
         let total = t0.elapsed().as_micros();
-        println!("{} queries  total {:>7} µs  per-query {:>5} µs",
-            n * 3, total, total / (n as u128 * 3));
+        println!(
+            "{} queries  total {:>7} µs  per-query {:>5} µs",
+            n * 3,
+            total,
+            total / (n as u128 * 3)
+        );
     }
 }

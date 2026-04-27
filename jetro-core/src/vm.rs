@@ -50,6 +50,7 @@ use super::eval::util::{
 };
 use super::eval::{dispatch_method, Env, EvalError, Val};
 use crate::ast::*;
+pub use crate::builtins::BuiltinMethod;
 
 macro_rules! pop {
     ($stack:expr) => {
@@ -60,282 +61,6 @@ macro_rules! pop {
 }
 macro_rules! err {
     ($($t:tt)*) => { Err(EvalError(format!($($t)*))) };
-}
-
-// ── BuiltinMethod ─────────────────────────────────────────────────────────────
-
-/// Pre-resolved method identifier — eliminates string comparison at dispatch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum BuiltinMethod {
-    // Navigation / basics
-    Len = 0,
-    Keys,
-    Values,
-    Entries,
-    ToPairs,
-    FromPairs,
-    Invert,
-    Reverse,
-    Type,
-    ToString,
-    ToJson,
-    FromJson,
-    // Aggregates
-    Sum,
-    Avg,
-    Min,
-    Max,
-    Count,
-    Any,
-    All,
-    GroupBy,
-    CountBy,
-    IndexBy,
-    // Array ops
-    Filter,
-    Map,
-    FlatMap,
-    Sort,
-    Unique,
-    Flatten,
-    Compact,
-    Join,
-    First,
-    Last,
-    Nth,
-    Append,
-    Prepend,
-    Remove,
-    Diff,
-    Intersect,
-    Union,
-    Enumerate,
-    Pairwise,
-    Window,
-    Chunk,
-    TakeWhile,
-    DropWhile,
-    Accumulate,
-    Partition,
-    Zip,
-    ZipLongest,
-    // Object ops
-    Pick,
-    Omit,
-    Merge,
-    DeepMerge,
-    Defaults,
-    Rename,
-    TransformKeys,
-    TransformValues,
-    FilterKeys,
-    FilterValues,
-    Pivot,
-    // Path ops
-    GetPath,
-    SetPath,
-    DelPath,
-    DelPaths,
-    HasPath,
-    FlattenKeys,
-    UnflattenKeys,
-    // CSV
-    ToCsv,
-    ToTsv,
-    // Null / predicate
-    Or,
-    Has,
-    Missing,
-    Includes,
-    Set,
-    Update,
-    // String methods
-    Upper,
-    Lower,
-    Capitalize,
-    TitleCase,
-    Trim,
-    TrimLeft,
-    TrimRight,
-    Lines,
-    Words,
-    Chars,
-    ToNumber,
-    ToBool,
-    ToBase64,
-    FromBase64,
-    UrlEncode,
-    UrlDecode,
-    HtmlEscape,
-    HtmlUnescape,
-    Repeat,
-    PadLeft,
-    PadRight,
-    StartsWith,
-    EndsWith,
-    IndexOf,
-    LastIndexOf,
-    Replace,
-    ReplaceAll,
-    StripPrefix,
-    StripSuffix,
-    Slice,
-    Split,
-    Indent,
-    Dedent,
-    Matches,
-    Scan,
-    // Relational
-    EquiJoin,
-    // Sentinel for custom/unknown
-    Unknown,
-}
-
-impl BuiltinMethod {
-    pub fn from_name(name: &str) -> Self {
-        match name {
-            "len" => Self::Len,
-            "keys" => Self::Keys,
-            "values" => Self::Values,
-            "entries" => Self::Entries,
-            "to_pairs" | "toPairs" => Self::ToPairs,
-            "from_pairs" | "fromPairs" => Self::FromPairs,
-            "invert" => Self::Invert,
-            "reverse" => Self::Reverse,
-            "type" => Self::Type,
-            "to_string" | "toString" => Self::ToString,
-            "to_json" | "toJson" => Self::ToJson,
-            "from_json" | "fromJson" => Self::FromJson,
-            "sum" => Self::Sum,
-            "avg" => Self::Avg,
-            "min" => Self::Min,
-            "max" => Self::Max,
-            "count" => Self::Count,
-            "any" => Self::Any,
-            "all" => Self::All,
-            "groupBy" | "group_by" => Self::GroupBy,
-            "countBy" | "count_by" => Self::CountBy,
-            "indexBy" | "index_by" => Self::IndexBy,
-            "filter" => Self::Filter,
-            "map" => Self::Map,
-            "flatMap" | "flat_map" => Self::FlatMap,
-            "sort" => Self::Sort,
-            "unique" | "distinct" => Self::Unique,
-            "flatten" => Self::Flatten,
-            "compact" => Self::Compact,
-            "join" => Self::Join,
-            "equi_join" | "equiJoin" => Self::EquiJoin,
-            "first" => Self::First,
-            "last" => Self::Last,
-            "nth" => Self::Nth,
-            "append" => Self::Append,
-            "prepend" => Self::Prepend,
-            "remove" => Self::Remove,
-            "diff" => Self::Diff,
-            "intersect" => Self::Intersect,
-            "union" => Self::Union,
-            "enumerate" => Self::Enumerate,
-            "pairwise" => Self::Pairwise,
-            "window" => Self::Window,
-            "chunk" | "batch" => Self::Chunk,
-            "takewhile" | "take_while" => Self::TakeWhile,
-            "dropwhile" | "drop_while" => Self::DropWhile,
-            "accumulate" => Self::Accumulate,
-            "partition" => Self::Partition,
-            "zip" => Self::Zip,
-            "zip_longest" | "zipLongest" => Self::ZipLongest,
-            "pick" => Self::Pick,
-            "omit" => Self::Omit,
-            "merge" => Self::Merge,
-            "deep_merge" | "deepMerge" => Self::DeepMerge,
-            "defaults" => Self::Defaults,
-            "rename" => Self::Rename,
-            "transform_keys" | "transformKeys" => Self::TransformKeys,
-            "transform_values" | "transformValues" => Self::TransformValues,
-            "filter_keys" | "filterKeys" => Self::FilterKeys,
-            "filter_values" | "filterValues" => Self::FilterValues,
-            "pivot" => Self::Pivot,
-            "get_path" | "getPath" => Self::GetPath,
-            "set_path" | "setPath" => Self::SetPath,
-            "del_path" | "delPath" => Self::DelPath,
-            "del_paths" | "delPaths" => Self::DelPaths,
-            "has_path" | "hasPath" => Self::HasPath,
-            "flatten_keys" | "flattenKeys" => Self::FlattenKeys,
-            "unflatten_keys" | "unflattenKeys" => Self::UnflattenKeys,
-            "to_csv" | "toCsv" => Self::ToCsv,
-            "to_tsv" | "toTsv" => Self::ToTsv,
-            "or" => Self::Or,
-            "has" => Self::Has,
-            "missing" => Self::Missing,
-            "includes" | "contains" => Self::Includes,
-            "set" => Self::Set,
-            "update" => Self::Update,
-            "upper" => Self::Upper,
-            "lower" => Self::Lower,
-            "capitalize" => Self::Capitalize,
-            "title_case" | "titleCase" => Self::TitleCase,
-            "trim" => Self::Trim,
-            "trim_left" | "trimLeft" | "lstrip" => Self::TrimLeft,
-            "trim_right" | "trimRight" | "rstrip" => Self::TrimRight,
-            "lines" => Self::Lines,
-            "words" => Self::Words,
-            "chars" => Self::Chars,
-            "to_number" | "toNumber" => Self::ToNumber,
-            "to_bool" | "toBool" => Self::ToBool,
-            "to_base64" | "toBase64" => Self::ToBase64,
-            "from_base64" | "fromBase64" => Self::FromBase64,
-            "url_encode" | "urlEncode" => Self::UrlEncode,
-            "url_decode" | "urlDecode" => Self::UrlDecode,
-            "html_escape" | "htmlEscape" => Self::HtmlEscape,
-            "html_unescape" | "htmlUnescape" => Self::HtmlUnescape,
-            "repeat" => Self::Repeat,
-            "pad_left" | "padLeft" => Self::PadLeft,
-            "pad_right" | "padRight" => Self::PadRight,
-            "starts_with" | "startsWith" => Self::StartsWith,
-            "ends_with" | "endsWith" => Self::EndsWith,
-            "index_of" | "indexOf" => Self::IndexOf,
-            "last_index_of" | "lastIndexOf" => Self::LastIndexOf,
-            "replace" => Self::Replace,
-            "replace_all" | "replaceAll" => Self::ReplaceAll,
-            "strip_prefix" | "stripPrefix" => Self::StripPrefix,
-            "strip_suffix" | "stripSuffix" => Self::StripSuffix,
-            "slice" => Self::Slice,
-            "split" => Self::Split,
-            "indent" => Self::Indent,
-            "dedent" => Self::Dedent,
-            "matches" => Self::Matches,
-            "scan" => Self::Scan,
-            _ => Self::Unknown,
-        }
-    }
-
-    /// True for methods that receive a sub-program to run per item.
-    fn is_lambda_method(self) -> bool {
-        matches!(
-            self,
-            Self::Filter
-                | Self::Map
-                | Self::FlatMap
-                | Self::Sort
-                | Self::Any
-                | Self::All
-                | Self::Count
-                | Self::GroupBy
-                | Self::CountBy
-                | Self::IndexBy
-                | Self::TakeWhile
-                | Self::DropWhile
-                | Self::Accumulate
-                | Self::Partition
-                | Self::TransformKeys
-                | Self::TransformValues
-                | Self::FilterKeys
-                | Self::FilterValues
-                | Self::Pivot
-                | Self::Update
-        )
-    }
 }
 
 // ── Compiled sub-structures ───────────────────────────────────────────────────
@@ -4277,23 +4002,393 @@ impl VM {
             }
         }
 
-        // ── lift_all_builtins.md VM static-dispatch fast path ──────
-        // For zero-arg lifted built-ins (Upper, Lower, Trim, Keys,
-        // Values, Entries, Invert, Compact, Pairwise, ...), call the
-        // composed::*::apply body directly.  Skips:
-        //   * `BUILTINS::global().get(name)` HashMap lookup
-        //   * fn-pointer indirection through the shim
-        //   * shim's redundant arg-len + recv type checks
-        // Per-call overhead drops from ~3 indirections to ~1 match arm
-        // + direct call.  Unknown / arg-bearing methods fall through.
+        // Shared zero-arg builtin fast path. VM owns stack / argument
+        // evaluation; the builtin module owns pure method bodies.
         if call.orig_args.is_empty() && call.method != BuiltinMethod::Unknown {
-            if let Some(v) = crate::pipeline::vm_lift_zero_arg(call.method, &recv) {
+            if let Some(v) = crate::builtins::apply_zero_arg_method(call.method, &recv) {
                 return Ok(v);
             }
         }
 
+        if let Some(v) = self.exec_static_builtin_call(&recv, call, env)? {
+            return Ok(v);
+        }
+
         // Value methods — delegate to the existing dispatch with orig_args
         dispatch_method(recv, call.name.as_ref(), &call.orig_args, env)
+    }
+
+    fn exec_static_builtin_call(
+        &mut self,
+        recv: &Val,
+        call: &CompiledCall,
+        env: &Env,
+    ) -> Result<Option<Val>, EvalError> {
+        if call.method == BuiltinMethod::Unknown || call.method.is_lambda_method() {
+            return Ok(None);
+        }
+
+        macro_rules! apply_or_recv {
+            ($expr:expr) => {
+                return Ok(Some($expr.unwrap_or_else(|| recv.clone())))
+            };
+        }
+        macro_rules! need_str {
+            ($idx:expr, $name:literal) => {
+                self.static_arg_str(call, env, $idx, $name)?
+            };
+        }
+        macro_rules! need_i64 {
+            ($idx:expr, $name:literal) => {
+                self.static_arg_i64(call, env, $idx, $name)?
+            };
+        }
+        macro_rules! opt_i64 {
+            ($idx:expr, $default:expr) => {
+                match call.orig_args.get($idx) {
+                    Some(_) => self.static_arg_i64(call, env, $idx, call.name.as_ref())?,
+                    None => $default,
+                }
+            };
+        }
+
+        if let Some(shared_call) = self.static_shared_builtin_call(call, env)? {
+            if let Some(v) = shared_call.apply(recv) {
+                return Ok(Some(v));
+            }
+        }
+
+        match call.method {
+            BuiltinMethod::Flatten => {
+                let depth = opt_i64!(0, 1).max(0) as usize;
+                apply_or_recv!(crate::builtins::flatten_depth_apply(recv, depth));
+            }
+            BuiltinMethod::First => {
+                let n = opt_i64!(0, 1);
+                apply_or_recv!(crate::builtins::first_apply(recv, n));
+            }
+            BuiltinMethod::Last => {
+                let n = opt_i64!(0, 1);
+                apply_or_recv!(crate::builtins::last_apply(recv, n));
+            }
+            BuiltinMethod::Nth => {
+                let n = need_i64!(0, "nth");
+                apply_or_recv!(crate::builtins::nth_any_apply(recv, n));
+            }
+            BuiltinMethod::Append => {
+                let item = self.static_arg_val(call, env, 0)?.unwrap_or(Val::Null);
+                apply_or_recv!(crate::builtins::append_apply(recv, &item));
+            }
+            BuiltinMethod::Prepend => {
+                let item = self.static_arg_val(call, env, 0)?.unwrap_or(Val::Null);
+                apply_or_recv!(crate::builtins::prepend_apply(recv, &item));
+            }
+            BuiltinMethod::Diff => {
+                let other = self.static_arg_vec(call, env, 0, "diff")?;
+                if let Some(arr_recv) = Self::static_recv_arr(recv) {
+                    apply_or_recv!(crate::builtins::diff_apply(&arr_recv, &other));
+                }
+                return Ok(None);
+            }
+            BuiltinMethod::Intersect => {
+                let other = self.static_arg_vec(call, env, 0, "intersect")?;
+                if let Some(arr_recv) = Self::static_recv_arr(recv) {
+                    apply_or_recv!(crate::builtins::intersect_apply(&arr_recv, &other));
+                }
+                return Ok(None);
+            }
+            BuiltinMethod::Union => {
+                let other = self.static_arg_vec(call, env, 0, "union")?;
+                if let Some(arr_recv) = Self::static_recv_arr(recv) {
+                    apply_or_recv!(crate::builtins::union_apply(&arr_recv, &other));
+                }
+                return Ok(None);
+            }
+            BuiltinMethod::Window => {
+                let n = need_i64!(0, "window").max(0) as usize;
+                if let Some(arr_recv) = Self::static_recv_arr(recv) {
+                    apply_or_recv!(crate::builtins::window_arr_apply(&arr_recv, n));
+                }
+                return Ok(None);
+            }
+            BuiltinMethod::Chunk => {
+                let n = need_i64!(0, "chunk").max(0) as usize;
+                if let Some(arr_recv) = Self::static_recv_arr(recv) {
+                    apply_or_recv!(crate::builtins::chunk_arr_apply(&arr_recv, n));
+                }
+                return Ok(None);
+            }
+            BuiltinMethod::Merge => {
+                let other = self.static_arg_val(call, env, 0)?.unwrap_or(Val::Null);
+                apply_or_recv!(crate::builtins::merge_apply(recv, &other));
+            }
+            BuiltinMethod::DeepMerge => {
+                let other = self.static_arg_val(call, env, 0)?.unwrap_or(Val::Null);
+                apply_or_recv!(crate::builtins::deep_merge_apply(recv, &other));
+            }
+            BuiltinMethod::Defaults => {
+                let other = self.static_arg_val(call, env, 0)?.unwrap_or(Val::Null);
+                apply_or_recv!(crate::builtins::defaults_apply(recv, &other));
+            }
+            BuiltinMethod::Rename => {
+                let renames = self.static_arg_val(call, env, 0)?.unwrap_or(Val::Null);
+                apply_or_recv!(crate::builtins::rename_apply(recv, &renames));
+            }
+            BuiltinMethod::GetPath => {
+                let path = need_str!(0, "get_path");
+                apply_or_recv!(crate::builtins::get_path_apply(recv, path.as_ref()));
+            }
+            BuiltinMethod::HasPath => {
+                let path = need_str!(0, "has_path");
+                apply_or_recv!(crate::builtins::has_path_apply(recv, path.as_ref()));
+            }
+            BuiltinMethod::Has => {
+                let key = need_str!(0, "has");
+                apply_or_recv!(crate::builtins::has_apply(recv, key.as_ref()));
+            }
+            BuiltinMethod::DelPath => {
+                let path = need_str!(0, "del_path");
+                apply_or_recv!(crate::builtins::del_path_apply(recv, path.as_ref()));
+            }
+            BuiltinMethod::FlattenKeys => {
+                let sep = match call.orig_args.first() {
+                    Some(_) => need_str!(0, "flatten_keys"),
+                    None => Arc::from("."),
+                };
+                apply_or_recv!(crate::builtins::flatten_keys_apply(recv, sep.as_ref()));
+            }
+            BuiltinMethod::UnflattenKeys => {
+                let sep = match call.orig_args.first() {
+                    Some(_) => need_str!(0, "unflatten_keys"),
+                    None => Arc::from("."),
+                };
+                apply_or_recv!(crate::builtins::unflatten_keys_apply(recv, sep.as_ref()));
+            }
+            BuiltinMethod::Repeat => {
+                let n = opt_i64!(0, 1).max(0) as usize;
+                apply_or_recv!(crate::builtins::repeat_apply(recv, n));
+            }
+            BuiltinMethod::PadLeft => {
+                let width = need_i64!(0, "pad_left").max(0) as usize;
+                let fill = self.static_arg_char(call, env, 1)?;
+                apply_or_recv!(crate::builtins::pad_left_apply(recv, width, fill));
+            }
+            BuiltinMethod::PadRight => {
+                let width = need_i64!(0, "pad_right").max(0) as usize;
+                let fill = self.static_arg_char(call, env, 1)?;
+                apply_or_recv!(crate::builtins::pad_right_apply(recv, width, fill));
+            }
+            BuiltinMethod::StartsWith => {
+                let prefix = need_str!(0, "starts_with");
+                apply_or_recv!(crate::builtins::starts_with_apply(recv, prefix.as_ref()));
+            }
+            BuiltinMethod::EndsWith => {
+                let suffix = need_str!(0, "ends_with");
+                apply_or_recv!(crate::builtins::ends_with_apply(recv, suffix.as_ref()));
+            }
+            BuiltinMethod::IndexOf => {
+                let needle = need_str!(0, "index_of");
+                apply_or_recv!(crate::builtins::index_of_apply(recv, needle.as_ref()));
+            }
+            BuiltinMethod::LastIndexOf => {
+                let needle = need_str!(0, "last_index_of");
+                apply_or_recv!(crate::builtins::last_index_of_apply(recv, needle.as_ref()));
+            }
+            BuiltinMethod::Replace => {
+                let needle = need_str!(0, "replace");
+                let with = need_str!(1, "replace");
+                apply_or_recv!(crate::builtins::replace_apply(
+                    recv.clone(),
+                    needle.as_ref(),
+                    with.as_ref(),
+                    false
+                ));
+            }
+            BuiltinMethod::ReplaceAll => {
+                let needle = need_str!(0, "replace_all");
+                let with = need_str!(1, "replace_all");
+                apply_or_recv!(crate::builtins::replace_apply(
+                    recv.clone(),
+                    needle.as_ref(),
+                    with.as_ref(),
+                    true
+                ));
+            }
+            BuiltinMethod::StripPrefix => {
+                let prefix = need_str!(0, "strip_prefix");
+                apply_or_recv!(crate::builtins::strip_prefix_apply(recv, prefix.as_ref()));
+            }
+            BuiltinMethod::StripSuffix => {
+                let suffix = need_str!(0, "strip_suffix");
+                apply_or_recv!(crate::builtins::strip_suffix_apply(recv, suffix.as_ref()));
+            }
+            BuiltinMethod::Slice => {
+                let start = need_i64!(0, "slice");
+                let end = match call.orig_args.get(1) {
+                    Some(_) => Some(need_i64!(1, "slice")),
+                    None => None,
+                };
+                return Ok(Some(crate::builtins::slice_apply(recv.clone(), start, end)));
+            }
+            BuiltinMethod::Split => {
+                let sep = need_str!(0, "split");
+                apply_or_recv!(crate::builtins::split_apply(recv, sep.as_ref()));
+            }
+            BuiltinMethod::Indent => {
+                let n = opt_i64!(0, 2).max(0) as usize;
+                apply_or_recv!(crate::builtins::indent_apply(recv, n));
+            }
+            BuiltinMethod::Matches => {
+                let needle = need_str!(0, "matches");
+                apply_or_recv!(crate::builtins::contains_apply(recv, needle.as_ref()));
+            }
+            BuiltinMethod::Scan => {
+                let pat = need_str!(0, "scan");
+                apply_or_recv!(crate::builtins::scan_apply(recv, pat.as_ref()));
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn static_shared_builtin_call(
+        &mut self,
+        call: &CompiledCall,
+        env: &Env,
+    ) -> Result<Option<crate::builtins::BuiltinCall>, EvalError> {
+        use crate::builtins::{BuiltinArgs, BuiltinCall};
+
+        let out = match call.method {
+            BuiltinMethod::GetPath
+            | BuiltinMethod::HasPath
+            | BuiltinMethod::Has
+            | BuiltinMethod::DelPath
+            | BuiltinMethod::StartsWith
+            | BuiltinMethod::EndsWith
+            | BuiltinMethod::IndexOf
+            | BuiltinMethod::LastIndexOf
+            | BuiltinMethod::StripPrefix
+            | BuiltinMethod::StripSuffix
+            | BuiltinMethod::Matches
+            | BuiltinMethod::Scan => {
+                let s = self.static_arg_str(call, env, 0, call.name.as_ref())?;
+                BuiltinCall::new(call.method, BuiltinArgs::Str(s))
+            }
+            BuiltinMethod::Repeat => {
+                let n = match call.orig_args.first() {
+                    Some(_) => self.static_arg_i64(call, env, 0, "repeat")?,
+                    None => 1,
+                };
+                BuiltinCall::new(call.method, BuiltinArgs::Usize(n.max(0) as usize))
+            }
+            BuiltinMethod::Indent => {
+                let n = match call.orig_args.first() {
+                    Some(_) => self.static_arg_i64(call, env, 0, "indent")?,
+                    None => 2,
+                };
+                BuiltinCall::new(call.method, BuiltinArgs::Usize(n.max(0) as usize))
+            }
+            BuiltinMethod::PadLeft | BuiltinMethod::PadRight => {
+                let width = self.static_arg_i64(call, env, 0, call.name.as_ref())?;
+                let fill = self.static_arg_char(call, env, 1)?;
+                BuiltinCall::new(
+                    call.method,
+                    BuiltinArgs::Pad {
+                        width: width.max(0) as usize,
+                        fill,
+                    },
+                )
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(out))
+    }
+
+    fn static_arg_val(
+        &mut self,
+        call: &CompiledCall,
+        env: &Env,
+        idx: usize,
+    ) -> Result<Option<Val>, EvalError> {
+        match call.sub_progs.get(idx) {
+            Some(prog) => self.exec(prog, env).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    fn static_arg_str(
+        &mut self,
+        call: &CompiledCall,
+        env: &Env,
+        idx: usize,
+        name: &str,
+    ) -> Result<Arc<str>, EvalError> {
+        match call.orig_args.get(idx) {
+            Some(Arg::Pos(Expr::Ident(s))) => return Ok(Arc::from(s.as_str())),
+            Some(Arg::Pos(_)) | Some(Arg::Named(_, _)) => {}
+            None => return Err(EvalError(format!("{}: missing argument", name))),
+        }
+        match self
+            .static_arg_val(call, env, idx)?
+            .ok_or_else(|| EvalError(format!("{}: missing argument", name)))?
+        {
+            Val::Str(s) => Ok(s),
+            other => Ok(Arc::from(super::eval::util::val_to_string(&other).as_str())),
+        }
+    }
+
+    fn static_arg_i64(
+        &mut self,
+        call: &CompiledCall,
+        env: &Env,
+        idx: usize,
+        name: &str,
+    ) -> Result<i64, EvalError> {
+        match self
+            .static_arg_val(call, env, idx)?
+            .ok_or_else(|| EvalError(format!("{}: missing argument", name)))?
+        {
+            Val::Int(n) => Ok(n),
+            Val::Float(f) => Ok(f as i64),
+            _ => Err(EvalError(format!("{}: expected number argument", name))),
+        }
+    }
+
+    fn static_arg_char(
+        &mut self,
+        call: &CompiledCall,
+        env: &Env,
+        idx: usize,
+    ) -> Result<char, EvalError> {
+        match call.orig_args.get(idx) {
+            None => Ok(' '),
+            Some(_) => match self.static_arg_str(call, env, idx, call.name.as_ref())? {
+                s if s.chars().count() == 1 => Ok(s.chars().next().unwrap()),
+                _ => Err(EvalError(format!(
+                    "{}: filler must be a single-char string",
+                    call.name
+                ))),
+            },
+        }
+    }
+
+    fn static_arg_vec(
+        &mut self,
+        call: &CompiledCall,
+        env: &Env,
+        idx: usize,
+        name: &str,
+    ) -> Result<Vec<Val>, EvalError> {
+        self.static_arg_val(call, env, idx)?
+            .ok_or_else(|| EvalError(format!("{}: requires arg", name)))?
+            .into_vec()
+            .ok_or_else(|| EvalError(format!("{}: expected array arg", name)))
+    }
+
+    fn static_recv_arr(recv: &Val) -> Option<Val> {
+        match recv {
+            Val::Arr(_) => Some(recv.clone()),
+            other => other.clone().into_vec().map(Val::arr),
+        }
     }
 
     fn exec_lambda_method(

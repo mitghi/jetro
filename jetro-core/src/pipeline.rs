@@ -258,6 +258,8 @@ pub enum Source {
     FieldChain { keys: Arc<[Arc<str>]> },
 }
 
+pub type PipelineBuiltinCall = crate::builtins::BuiltinCall;
+
 /// A pull-based stage.  Streaming stages (Filter / Map / FlatMap /
 /// Take / Skip) flow elements through one at a time; barrier stages
 /// (Reverse / Sort / UniqueBy) require the full input materialised.
@@ -289,6 +291,8 @@ pub enum Stage {
     /// this is a sink-shaped operation; placed under Stage so
     /// downstream `.values()` / `.map(@.len())` can compose.
     GroupBy(Arc<crate::vm::Program>),
+    /// Pure per-element builtin lowered through `BuiltinMethod`.
+    Builtin(PipelineBuiltinCall),
 
     // ── Step 3d-extension (C): lifted string Stages ──────────────────────────
     //
@@ -335,203 +339,6 @@ pub enum Stage {
     /// IndexedDispatch / EarlyExit etc., not full materialisation.
     CompiledMap(Arc<Plan>),
 
-    // ── lift_all_builtins (object family) ────────────────────────────
-    //
-    // First-class Pipeline IR variants for zero-arg object methods.
-    // Lower at the chain classifier; canonical kernels live as
-    // `*_apply` free fns below.  Per `lift_all_builtins.md`: built-ins
-    // lower DIRECTLY to Stage::* variants, no CallMethod dispatch.
-    /// `.keys()` — Obj → Arr<Str>.  `Cardinality::OneToOne`, pure.
-    Keys,
-    /// `.values()` — Obj → Arr<Val>.  `Cardinality::OneToOne`, pure.
-    Values,
-    /// `.entries()` — Obj → Arr<Arr[Str, Val]>.  `Cardinality::OneToOne`, pure.
-    Entries,
-
-    // ── lift_all_builtins (string family) — POC ──────────────────────
-    //
-    // First-class Pipeline IR variant for `.upper()` zero-arg string
-    // method.  Body delegates to `composed::Upper::apply` (ASCII fast
-    // path + Unicode fallback).  Template for remaining ~30 string
-    // Stages already living as `composed::Stage` impls but not yet
-    // exposed as `pipeline::Stage` variants.
-    /// `.upper()` — Str → Str (uppercase).  `Cardinality::OneToOne`,
-    /// pure, idempotent (`upper ∘ upper = upper`), constant-foldable.
-    Upper,
-
-    // ── lift_all_builtins (string family — full sweep) ───────────────
-    //
-    // All zero-arg Str→Str transforms.  Bodies in `composed.rs::*`
-    // (single source of truth via `lifted_str_stage!` macro).  Each
-    // variant routes to its `composed::*::apply` via `lifted_apply`.
-    // Idempotent ones get merge_with `(X,X)→X`.  Inverse-pair ones
-    // get cancels_with (ToBase64↔FromBase64, UrlEncode↔UrlDecode,
-    // HtmlEscape↔HtmlUnescape).
-    /// `.lower()` — Str → Str (lowercase).  Idempotent.
-    Lower,
-    /// `.trim()` — strip leading + trailing whitespace.  Idempotent.
-    Trim,
-    /// `.trim_left()` — strip leading whitespace.  Idempotent.
-    TrimLeft,
-    /// `.trim_right()` — strip trailing whitespace.  Idempotent.
-    TrimRight,
-    /// `.capitalize()` — uppercase first char.  Idempotent.
-    Capitalize,
-    /// `.title_case()` — title-case each word.  Idempotent.
-    TitleCase,
-    /// `.html_escape()` — escape HTML metacharacters.  NOT idempotent
-    /// (escaping `&` produces `&amp;`, re-escaping makes `&amp;amp;`).
-    HtmlEscape,
-    /// `.html_unescape()` — inverse of html_escape.  Cancels with it.
-    HtmlUnescape,
-    /// `.url_encode()` — percent-encode URL-unsafe bytes.  NOT idempotent.
-    UrlEncode,
-    /// `.url_decode()` — inverse of url_encode.  Cancels with it.
-    UrlDecode,
-    /// `.to_base64()` — base64 encode UTF-8 bytes.  NOT idempotent.
-    ToBase64,
-    /// `.dedent()` — strip common leading indent.  Idempotent.
-    Dedent,
-    /// `.snake_case()` — convert to snake_case.  Idempotent.
-    SnakeCase,
-    /// `.kebab_case()` — convert to kebab-case.  Idempotent.
-    KebabCase,
-    /// `.camel_case()` — convert to camelCase.  Idempotent.
-    CamelCase,
-    /// `.pascal_case()` — convert to PascalCase.  Idempotent.
-    PascalCase,
-    /// `.reverse_str()` — reverse char sequence.  Self-cancelling
-    /// (`reverse_str ∘ reverse_str = identity`).
-    ReverseStr,
-
-    // ── lift_all_builtins (string-to-other family) ───────────────────
-    //
-    // Zero-arg Str → Arr/Int/Bool/Number transforms.  None idempotent
-    // (output type ≠ Str).  Bodies in composed.rs via
-    // `lifted_str_to_val!` macro.
-    /// `.lines()` — Str → Arr<Str> split on `\n`.
-    Lines,
-    /// `.words()` — Str → Arr<Str> split on whitespace.
-    Words,
-    /// `.chars()` — Str → Arr<Str> per character.
-    Chars,
-    /// `.chars_of()` — alias of chars (some legacy callers).
-    CharsOf,
-    /// `.bytes()` — Str → Arr<Int> per byte.
-    BytesOf,
-    /// `.byte_len()` — Str → Int (byte length).
-    ByteLen,
-    /// `.is_blank()` — Str → Bool (all whitespace).
-    IsBlank,
-    /// `.is_numeric()` — Str → Bool (all ASCII digits).
-    IsNumeric,
-    /// `.is_alpha()` — Str → Bool (all alphabetic).
-    IsAlpha,
-    /// `.is_ascii()` — Str → Bool.
-    IsAscii,
-    /// `.to_number()` — Str → Number (parse).
-    ToNumber,
-    /// `.to_bool()` — Str → Bool (`"true"`/`"false"`).
-    ToBool,
-    /// `.from_base64()` — Str → Str (decode).  Cancels with ToBase64.
-    FromBase64,
-    /// `.parse_int()` — Str → Int or Null.
-    ParseInt,
-    /// `.parse_float()` — Str → Float or Null.
-    ParseFloat,
-    /// `.parse_bool()` — Str → Bool or Null.
-    ParseBool,
-
-    // ── lift_all_builtins (one-arg Arc<str> string predicates/searches) ──
-    StartsWith(std::sync::Arc<str>),
-    EndsWith(std::sync::Arc<str>),
-    StripPrefix(std::sync::Arc<str>),
-    StripSuffix(std::sync::Arc<str>),
-    StrMatches(std::sync::Arc<str>),
-    IndexOf(std::sync::Arc<str>),
-    LastIndexOf(std::sync::Arc<str>),
-    Scan(std::sync::Arc<str>),
-
-    // ── lift_all_builtins (one-arg usize string transforms) ──────────
-    Repeat(usize),
-    Indent(usize),
-    FlattenDepth(usize),
-
-    // ── lift_all_builtins (zero-arg array/object Stages) ─────────────
-    Compact,
-    Pairwise,
-    Invert,
-
-    // ── lift_all_builtins (two-arg padding) ──────────────────────────
-    PadLeft {
-        width: usize,
-        fill: char,
-    },
-    PadRight {
-        width: usize,
-        fill: char,
-    },
-    Center {
-        width: usize,
-        fill: char,
-    },
-
-    // ── lift_all_builtins (regex one-arg pat) ────────────────────────
-    ReMatch(std::sync::Arc<str>),
-    ReMatchFirst(std::sync::Arc<str>),
-    ReMatchAll(std::sync::Arc<str>),
-    ReCaptures(std::sync::Arc<str>),
-    ReCapturesAll(std::sync::Arc<str>),
-    ReSplit(std::sync::Arc<str>),
-
-    // ── lift_all_builtins (regex two-arg replace) ────────────────────
-    ReReplace {
-        pat: std::sync::Arc<str>,
-        with: std::sync::Arc<str>,
-    },
-    ReReplaceAll {
-        pat: std::sync::Arc<str>,
-        with: std::sync::Arc<str>,
-    },
-
-    // ── lift_all_builtins (Vec<Arc<str>> bulk-needle predicates) ─────
-    ContainsAny(Vec<std::sync::Arc<str>>),
-    ContainsAll(Vec<std::sync::Arc<str>>),
-
-    // ── lift_all_builtins (eval/func_* migrations — zero-arg pure) ───
-    ToCsv,
-    ToTsv,
-    ToPairs,
-    CumMax,
-    CumMin,
-    DiffWindow,
-    PctChange,
-    ZScore,
-
-    // ── lift_all_builtins (numeric windowed — usize arg) ─────────────
-    RollingSum(usize),
-    RollingAvg(usize),
-    RollingMin(usize),
-    RollingMax(usize),
-    Lag(usize),
-    Lead(usize),
-
-    // ── lift_all_builtins (path Stages — Arc<str> arg) ───────────────
-    GetPath(std::sync::Arc<str>),
-    HasPath(std::sync::Arc<str>),
-    Has(std::sync::Arc<str>),
-    DelPath(std::sync::Arc<str>),
-    FlattenKeys(std::sync::Arc<str>),
-    UnflattenKeys(std::sync::Arc<str>),
-
-    // ── lift_all_builtins (introspection) ────────────────────────────
-    Schema,
-
-    // ── lift_all_builtins (scalar Val→Str transforms — per-element) ──
-    TypeName,
-    ToString,
-    ToJson,
-
     // ── lift_all_builtins (lambda-bearing — Pipeline IR samples) ─────
     //
     // These mirror Filter/Map/FlatMap: carry a pre-compiled
@@ -571,14 +378,6 @@ pub enum Stage {
     /// avoids HashSet allocation).  Per
     /// `algorithmic_optimization_cold_only.md` Category F.
     SortedDedup(Option<Arc<crate::vm::Program>>),
-
-    // ── lift_all_builtins (literal-arg / aggregate Stages) ───────────
-    EnumerateZ,
-    Join(std::sync::Arc<str>),
-    IndexOfValue(Val),
-    IndicesOf(Val),
-    Explode(std::sync::Arc<str>),
-    Implode(std::sync::Arc<str>),
 }
 
 /// Phase A3 — sub-program "kernel" shape recognised at lower-time.
@@ -954,7 +753,8 @@ fn classify_obj_project(entries: &[crate::vm::CompiledObjEntry]) -> Option<Vec<O
 /// otherwise fall through to Generic and bypass byte-friendly
 /// classification entirely.
 fn classify_kv_method(key: &Arc<str>, prog: &crate::vm::Program) -> Option<ObjProjEntry> {
-    use crate::vm::{BuiltinMethod, Opcode};
+    use crate::builtins::BuiltinMethod;
+    use crate::vm::Opcode;
     // Path projection shortcut — covers any prog that classifies as
     // a pure path read.  Wraps the chain into ObjProjEntry::Path.
     match BodyKernel::classify(prog) {
@@ -1204,106 +1004,11 @@ fn upstream_demand(d: Demand, stage: &Stage) -> Demand {
         | Stage::Split(_)
         | Stage::Chunk(_)
         | Stage::Window(_) => Demand::UNBOUNDED,
-        // Slice / Replace / CompiledMap / Keys / Values / Entries are
-        // 1:1 — preserve demand.  Keys/Values/Entries each consume one
-        // object and emit one array; downstream demand passes through.
+        // Pure 1:1 stages preserve demand.
         Stage::Slice(_, _)
         | Stage::Replace { .. }
         | Stage::CompiledMap(_)
-        | Stage::Keys
-        | Stage::Values
-        | Stage::Entries
-        | Stage::Upper
-        | Stage::Lower
-        | Stage::Trim
-        | Stage::TrimLeft
-        | Stage::TrimRight
-        | Stage::Capitalize
-        | Stage::TitleCase
-        | Stage::HtmlEscape
-        | Stage::HtmlUnescape
-        | Stage::UrlEncode
-        | Stage::UrlDecode
-        | Stage::ToBase64
-        | Stage::FromBase64
-        | Stage::Dedent
-        | Stage::SnakeCase
-        | Stage::KebabCase
-        | Stage::CamelCase
-        | Stage::PascalCase
-        | Stage::ReverseStr
-        | Stage::Lines
-        | Stage::Words
-        | Stage::Chars
-        | Stage::CharsOf
-        | Stage::BytesOf
-        | Stage::ByteLen
-        | Stage::IsBlank
-        | Stage::IsNumeric
-        | Stage::IsAlpha
-        | Stage::IsAscii
-        | Stage::ToNumber
-        | Stage::ToBool
-        | Stage::ParseInt
-        | Stage::ParseFloat
-        | Stage::ParseBool
-        | Stage::StartsWith(_)
-        | Stage::EndsWith(_)
-        | Stage::StripPrefix(_)
-        | Stage::StripSuffix(_)
-        | Stage::StrMatches(_)
-        | Stage::IndexOf(_)
-        | Stage::LastIndexOf(_)
-        | Stage::Scan(_)
-        | Stage::Repeat(_)
-        | Stage::Indent(_)
-        | Stage::FlattenDepth(_)
-        | Stage::Compact
-        | Stage::Pairwise
-        | Stage::Invert
-        | Stage::PadLeft { .. }
-        | Stage::PadRight { .. }
-        | Stage::Center { .. }
-        | Stage::ReMatch(_)
-        | Stage::ReMatchFirst(_)
-        | Stage::ReMatchAll(_)
-        | Stage::ReCaptures(_)
-        | Stage::ReCapturesAll(_)
-        | Stage::ReSplit(_)
-        | Stage::ReReplace { .. }
-        | Stage::ReReplaceAll { .. }
-        | Stage::ContainsAny(_)
-        | Stage::ContainsAll(_)
-        | Stage::ToCsv
-        | Stage::ToTsv
-        | Stage::ToPairs
-        | Stage::CumMax
-        | Stage::CumMin
-        | Stage::DiffWindow
-        | Stage::PctChange
-        | Stage::ZScore
-        | Stage::RollingSum(_)
-        | Stage::RollingAvg(_)
-        | Stage::RollingMin(_)
-        | Stage::RollingMax(_)
-        | Stage::Lag(_)
-        | Stage::Lead(_)
-        | Stage::GetPath(_)
-        | Stage::HasPath(_)
-        | Stage::Has(_)
-        | Stage::DelPath(_)
-        | Stage::FlattenKeys(_)
-        | Stage::UnflattenKeys(_)
-        | Stage::Schema
-        | Stage::EnumerateZ
-        | Stage::Join(_)
-        | Stage::IndexOfValue(_)
-        | Stage::IndicesOf(_)
-        | Stage::Explode(_)
-        | Stage::Implode(_)
-        | Stage::TypeName
-        | Stage::ToString
-        | Stage::ToJson
+        | Stage::Builtin(_)
         | Stage::TakeWhile(_)
         | Stage::DropWhile(_)
         | Stage::IndicesWhere(_)
@@ -1483,114 +1188,20 @@ impl Stage {
                 cost: 10.0,
                 selectivity: 1.0,
             },
-            // lift_all_builtins (object): zero-arg one-to-one ops.
-            // Cost ~1 (single IndexMap iteration).  Pure, stateless,
-            // reorderable through other pure 1:1 stages.
-            Stage::Keys | Stage::Values | Stage::Entries => StageShape {
-                cardinality: Cardinality::OneToOne,
-                order: Order::Stateless,
-                purity: true,
-                boundedness: Boundedness::Always(1),
-                can_indexed: false,
-                cost: 1.0,
-                selectivity: 1.0,
-            },
-            // lift_all_builtins (string + str-to-other family — full
-            // sweep).  All zero-arg pure 1:1 transforms with byte-loop
-            // body cost ≈ 1.  Same shape covers ~32 Stages; planner
-            // sees them uniformly via this single match arm.
-            Stage::Upper
-            | Stage::Lower
-            | Stage::Trim
-            | Stage::TrimLeft
-            | Stage::TrimRight
-            | Stage::Capitalize
-            | Stage::TitleCase
-            | Stage::HtmlEscape
-            | Stage::HtmlUnescape
-            | Stage::UrlEncode
-            | Stage::UrlDecode
-            | Stage::ToBase64
-            | Stage::FromBase64
-            | Stage::Dedent
-            | Stage::SnakeCase
-            | Stage::KebabCase
-            | Stage::CamelCase
-            | Stage::PascalCase
-            | Stage::ReverseStr
-            | Stage::Lines
-            | Stage::Words
-            | Stage::Chars
-            | Stage::CharsOf
-            | Stage::BytesOf
-            | Stage::ByteLen
-            | Stage::IsBlank
-            | Stage::IsNumeric
-            | Stage::IsAlpha
-            | Stage::IsAscii
-            | Stage::ToNumber
-            | Stage::ToBool
-            | Stage::ParseInt
-            | Stage::ParseFloat
-            | Stage::ParseBool
-            | Stage::StartsWith(_)
-            | Stage::EndsWith(_)
-            | Stage::StripPrefix(_)
-            | Stage::StripSuffix(_)
-            | Stage::StrMatches(_)
-            | Stage::IndexOf(_)
-            | Stage::LastIndexOf(_)
-            | Stage::Scan(_)
-            | Stage::Repeat(_)
-            | Stage::Indent(_)
-            | Stage::FlattenDepth(_)
-            | Stage::Compact
-            | Stage::Pairwise
-            | Stage::Invert
-            | Stage::PadLeft { .. }
-            | Stage::PadRight { .. }
-            | Stage::Center { .. }
-            | Stage::ReMatch(_)
-            | Stage::ReMatchFirst(_)
-            | Stage::ReMatchAll(_)
-            | Stage::ReCaptures(_)
-            | Stage::ReCapturesAll(_)
-            | Stage::ReSplit(_)
-            | Stage::ReReplace { .. }
-            | Stage::ReReplaceAll { .. }
-            | Stage::ContainsAny(_)
-            | Stage::ContainsAll(_)
-            | Stage::ToCsv
-            | Stage::ToTsv
-            | Stage::ToPairs
-            | Stage::CumMax
-            | Stage::CumMin
-            | Stage::DiffWindow
-            | Stage::PctChange
-            | Stage::ZScore
-            | Stage::RollingSum(_)
-            | Stage::RollingAvg(_)
-            | Stage::RollingMin(_)
-            | Stage::RollingMax(_)
-            | Stage::Lag(_)
-            | Stage::Lead(_)
-            | Stage::GetPath(_)
-            | Stage::HasPath(_)
-            | Stage::Has(_)
-            | Stage::DelPath(_)
-            | Stage::FlattenKeys(_)
-            | Stage::UnflattenKeys(_)
-            | Stage::Schema
-            | Stage::EnumerateZ
-            | Stage::Join(_)
-            | Stage::IndexOfValue(_)
-            | Stage::IndicesOf(_)
-            | Stage::Explode(_)
-            | Stage::Implode(_)
-            | Stage::TypeName
-            | Stage::ToString
-            | Stage::ToJson
-            | Stage::TakeWhile(_)
+            Stage::Builtin(call) => {
+                let spec = call.spec();
+                StageShape {
+                    cardinality: Cardinality::OneToOne,
+                    order: Order::Stateless,
+                    purity: spec.pure,
+                    boundedness: Boundedness::Always(1),
+                    can_indexed: spec.can_indexed,
+                    cost: spec.cost,
+                    selectivity: 1.0,
+                }
+            }
+            // lift_all_builtins (remaining legacy variants).
+            Stage::TakeWhile(_)
             | Stage::DropWhile(_)
             | Stage::IndicesWhere(_)
             | Stage::FindIndex(_)
@@ -1649,19 +1260,9 @@ impl Stage {
             {
                 Some(Stage::SortedDedup(Some(a.clone())))
             }
-            // lift_all_builtins: idempotent str→str transforms collapse.
-            (Stage::Upper, Stage::Upper) => Some(Stage::Upper),
-            (Stage::Lower, Stage::Lower) => Some(Stage::Lower),
-            (Stage::Trim, Stage::Trim) => Some(Stage::Trim),
-            (Stage::TrimLeft, Stage::TrimLeft) => Some(Stage::TrimLeft),
-            (Stage::TrimRight, Stage::TrimRight) => Some(Stage::TrimRight),
-            (Stage::Capitalize, Stage::Capitalize) => Some(Stage::Capitalize),
-            (Stage::TitleCase, Stage::TitleCase) => Some(Stage::TitleCase),
-            (Stage::Dedent, Stage::Dedent) => Some(Stage::Dedent),
-            (Stage::SnakeCase, Stage::SnakeCase) => Some(Stage::SnakeCase),
-            (Stage::KebabCase, Stage::KebabCase) => Some(Stage::KebabCase),
-            (Stage::CamelCase, Stage::CamelCase) => Some(Stage::CamelCase),
-            (Stage::PascalCase, Stage::PascalCase) => Some(Stage::PascalCase),
+            (Stage::Builtin(a), Stage::Builtin(b)) if a.method == b.method && a.is_idempotent() => {
+                Some(Stage::Builtin(a.clone()))
+            }
             // Casts: type-stable predicates idempotent on Bool input
             // (re-applying is_blank to a Bool returns... actually no,
             // these emit non-Str — Stage runs only on Str input, so
@@ -1676,18 +1277,10 @@ impl Stage {
     /// Today only Reverse self-cancels; remaining pairs land with their
     /// lifted Stage variants.
     pub fn cancels_with(&self, other: &Self) -> bool {
-        matches!(
-            (self, other),
-            (Stage::Reverse, Stage::Reverse)
-            // lift_all_builtins inverse pairs (drop both; identity).
-            | (Stage::ToBase64, Stage::FromBase64)
-            | (Stage::FromBase64, Stage::ToBase64)
-            | (Stage::UrlEncode, Stage::UrlDecode)
-            | (Stage::UrlDecode, Stage::UrlEncode)
-            | (Stage::HtmlEscape, Stage::HtmlUnescape)
-            | (Stage::HtmlUnescape, Stage::HtmlEscape)
-            | (Stage::ReverseStr, Stage::ReverseStr)
-        )
+        if let (Stage::Builtin(a), Stage::Builtin(b)) = (self, other) {
+            return a.cancels_with(b);
+        }
+        matches!((self, other), (Stage::Reverse, Stage::Reverse))
     }
 
     /// Constant-folding hook — when source is a literal Val (or every
@@ -2254,6 +1847,12 @@ fn decode_method_chain(trailing: &[crate::ast::Step]) -> Option<(Vec<Stage>, Sin
         let is_last = i == trailing.len() - 1;
         match s {
             Step::Method(name, args) => {
+                if let Some(call) =
+                    crate::builtins::BuiltinCall::from_pipeline_literal_args(name.as_str(), args)
+                {
+                    stages.push(Stage::Builtin(call));
+                    continue;
+                }
                 match (name.as_str(), args.len(), is_last) {
                     // Lambda-bearing methods — pre-compile body as vm::Program.
                     ("takewhile", 1, _) => {
@@ -2370,299 +1969,9 @@ fn decode_method_chain(trailing: &[crate::ast::Step]) -> Option<(Vec<Stage>, Sin
                         };
                         stages.push(Stage::Split(sep));
                     }
-                    // lift_all_builtins (object family — zero-arg ops)
-                    ("keys", 0, _) => stages.push(Stage::Keys),
-                    ("values", 0, _) => stages.push(Stage::Values),
-                    ("entries", 0, _) => stages.push(Stage::Entries),
-                    // lift_all_builtins (string + str-to-other family — zero-arg).
-                    ("upper", 0, _) => stages.push(Stage::Upper),
-                    ("lower", 0, _) => stages.push(Stage::Lower),
-                    ("trim", 0, _) => stages.push(Stage::Trim),
-                    ("trim_left", 0, _) => stages.push(Stage::TrimLeft),
-                    ("trim_right", 0, _) => stages.push(Stage::TrimRight),
-                    ("capitalize", 0, _) => stages.push(Stage::Capitalize),
-                    ("title_case", 0, _) => stages.push(Stage::TitleCase),
-                    ("html_escape", 0, _) => stages.push(Stage::HtmlEscape),
-                    ("html_unescape", 0, _) => stages.push(Stage::HtmlUnescape),
-                    ("url_encode", 0, _) => stages.push(Stage::UrlEncode),
-                    ("url_decode", 0, _) => stages.push(Stage::UrlDecode),
-                    ("to_base64", 0, _) => stages.push(Stage::ToBase64),
-                    ("from_base64", 0, _) => stages.push(Stage::FromBase64),
-                    ("dedent", 0, _) => stages.push(Stage::Dedent),
-                    ("snake_case", 0, _) => stages.push(Stage::SnakeCase),
-                    ("kebab_case", 0, _) => stages.push(Stage::KebabCase),
-                    ("camel_case", 0, _) => stages.push(Stage::CamelCase),
-                    ("pascal_case", 0, _) => stages.push(Stage::PascalCase),
-                    ("reverse_str", 0, _) => stages.push(Stage::ReverseStr),
-                    ("lines", 0, _) => stages.push(Stage::Lines),
-                    ("words", 0, _) => stages.push(Stage::Words),
-                    ("chars", 0, _) => stages.push(Stage::Chars),
-                    ("chars_of", 0, _) => stages.push(Stage::CharsOf),
-                    ("bytes", 0, _) => stages.push(Stage::BytesOf),
-                    ("byte_len", 0, _) => stages.push(Stage::ByteLen),
-                    ("is_blank", 0, _) => stages.push(Stage::IsBlank),
-                    ("is_numeric", 0, _) => stages.push(Stage::IsNumeric),
-                    ("is_alpha", 0, _) => stages.push(Stage::IsAlpha),
-                    ("is_ascii", 0, _) => stages.push(Stage::IsAscii),
-                    ("to_number", 0, _) => stages.push(Stage::ToNumber),
-                    ("to_bool", 0, _) => stages.push(Stage::ToBool),
-                    ("parse_int", 0, _) => stages.push(Stage::ParseInt),
-                    ("parse_float", 0, _) => stages.push(Stage::ParseFloat),
-                    ("parse_bool", 0, _) => stages.push(Stage::ParseBool),
-                    // Zero-arg per-element Stages (each elem is itself
-                    // an Obj/Str etc.).  Whole-array Stages (compact,
-                    // pairwise, invert, to_csv, to_tsv, to_pairs,
-                    // cummax, cummin, diff_window, pct_change, zscore,
-                    // rolling_*, lag, lead, enumerate, join,
-                    // index_of_value, indices_of, explode, implode,
-                    // flatten_keys, unflatten_keys) do NOT lower —
-                    // they need the full receiver Val and stay on the
-                    // tree-walker / VM CallMethod path which passes
-                    // the whole array as recv.  Stage variants exist
-                    // for VM static-dispatch + composed bodies; only
-                    // pipeline-IR lowering skips them.
-                    ("get_path", 1, _) => match &args[0] {
-                        Arg::Pos(Expr::Str(s)) => {
-                            stages.push(Stage::GetPath(Arc::from(s.as_str())))
-                        }
-                        _ => return None,
-                    },
-                    ("has_path", 1, _) => match &args[0] {
-                        Arg::Pos(Expr::Str(s)) => {
-                            stages.push(Stage::HasPath(Arc::from(s.as_str())))
-                        }
-                        _ => return None,
-                    },
-                    ("has", 1, _) => match &args[0] {
-                        Arg::Pos(Expr::Str(s)) => stages.push(Stage::Has(Arc::from(s.as_str()))),
-                        _ => return None,
-                    },
-                    ("del_path", 1, _) => match &args[0] {
-                        Arg::Pos(Expr::Str(s)) => {
-                            stages.push(Stage::DelPath(Arc::from(s.as_str())))
-                        }
-                        _ => return None,
-                    },
-                    // flatten_keys / unflatten_keys: per-element on Obj
-                    // is reasonable but `$.config.flatten_keys()` (single Obj
-                    // source) is more typical; pipeline-IR rejects Obj sources
-                    // already.  Stage variants kept for VM static-dispatch.
-                    // No lower arms — fall back to dispatch_method.
-                    // schema is per-Val (works per-element returning per-element schema).
-                    ("schema", 0, _) => stages.push(Stage::Schema),
-                    // Per-element scalar transforms.
-                    ("type", 0, _) => stages.push(Stage::TypeName),
-                    ("to_string", 0, _) => stages.push(Stage::ToString),
-                    ("to_json", 0, _) => stages.push(Stage::ToJson),
-                    // (whole-array Stages — enumerate, join, index_of_value,
-                    //  indices_of, explode, implode — NOT lowered; see note above.)
-                    // One-arg Arc<str> string predicates/searches.
-                    ("starts_with", 1, _) => match &args[0] {
-                        Arg::Pos(Expr::Str(s)) => {
-                            stages.push(Stage::StartsWith(Arc::from(s.as_str())))
-                        }
-                        _ => return None,
-                    },
-                    ("ends_with", 1, _) => match &args[0] {
-                        Arg::Pos(Expr::Str(s)) => {
-                            stages.push(Stage::EndsWith(Arc::from(s.as_str())))
-                        }
-                        _ => return None,
-                    },
-                    ("strip_prefix", 1, _) => match &args[0] {
-                        Arg::Pos(Expr::Str(s)) => {
-                            stages.push(Stage::StripPrefix(Arc::from(s.as_str())))
-                        }
-                        _ => return None,
-                    },
-                    ("strip_suffix", 1, _) => match &args[0] {
-                        Arg::Pos(Expr::Str(s)) => {
-                            stages.push(Stage::StripSuffix(Arc::from(s.as_str())))
-                        }
-                        _ => return None,
-                    },
-                    ("matches", 1, _) => match &args[0] {
-                        Arg::Pos(Expr::Str(s)) => {
-                            stages.push(Stage::StrMatches(Arc::from(s.as_str())))
-                        }
-                        _ => return None,
-                    },
-                    ("index_of", 1, _) => match &args[0] {
-                        Arg::Pos(Expr::Str(s)) => {
-                            stages.push(Stage::IndexOf(Arc::from(s.as_str())))
-                        }
-                        _ => return None,
-                    },
-                    ("last_index_of", 1, _) => match &args[0] {
-                        Arg::Pos(Expr::Str(s)) => {
-                            stages.push(Stage::LastIndexOf(Arc::from(s.as_str())))
-                        }
-                        _ => return None,
-                    },
-                    ("scan", 1, _) => match &args[0] {
-                        Arg::Pos(Expr::Str(s)) => stages.push(Stage::Scan(Arc::from(s.as_str()))),
-                        _ => return None,
-                    },
-                    // One-arg usize string transforms.
-                    ("repeat", 1, _) | ("repeat_str", 1, _) => match &args[0] {
-                        Arg::Pos(Expr::Int(n)) if *n >= 0 => {
-                            stages.push(Stage::Repeat(*n as usize))
-                        }
-                        _ => return None,
-                    },
-                    ("indent", 1, _) => match &args[0] {
-                        Arg::Pos(Expr::Int(n)) if *n >= 0 => {
-                            stages.push(Stage::Indent(*n as usize))
-                        }
-                        _ => return None,
-                    },
-                    ("indent", 0, _) => stages.push(Stage::Indent(2)),
-                    // flatten() is whole-array (NOT per-element) — same
-                    // category as compact/pairwise: removed from lower
-                    // table so chain falls back to dispatch_method which
-                    // hands the WHOLE receiver to the flatten kernel.
-                    // Stage::FlattenDepth variant kept for VM static
-                    // dispatch + composed body single-source.
-                    // Two-arg padding.
-                    ("pad_left", 2, _) => match (&args[0], &args[1]) {
-                        (Arg::Pos(Expr::Int(w)), Arg::Pos(Expr::Str(f))) if *w >= 0 => {
-                            let fill = f.chars().next().unwrap_or(' ');
-                            stages.push(Stage::PadLeft {
-                                width: *w as usize,
-                                fill,
-                            });
-                        }
-                        _ => return None,
-                    },
-                    ("pad_right", 2, _) => match (&args[0], &args[1]) {
-                        (Arg::Pos(Expr::Int(w)), Arg::Pos(Expr::Str(f))) if *w >= 0 => {
-                            let fill = f.chars().next().unwrap_or(' ');
-                            stages.push(Stage::PadRight {
-                                width: *w as usize,
-                                fill,
-                            });
-                        }
-                        _ => return None,
-                    },
-                    ("center", 2, _) => match (&args[0], &args[1]) {
-                        (Arg::Pos(Expr::Int(w)), Arg::Pos(Expr::Str(f))) if *w >= 0 => {
-                            let fill = f.chars().next().unwrap_or(' ');
-                            stages.push(Stage::Center {
-                                width: *w as usize,
-                                fill,
-                            });
-                        }
-                        _ => return None,
-                    },
-                    // Padding 1-arg fallback (default fill = ' ').
-                    ("pad_left", 1, _) => match &args[0] {
-                        Arg::Pos(Expr::Int(w)) if *w >= 0 => stages.push(Stage::PadLeft {
-                            width: *w as usize,
-                            fill: ' ',
-                        }),
-                        _ => return None,
-                    },
-                    ("pad_right", 1, _) => match &args[0] {
-                        Arg::Pos(Expr::Int(w)) if *w >= 0 => stages.push(Stage::PadRight {
-                            width: *w as usize,
-                            fill: ' ',
-                        }),
-                        _ => return None,
-                    },
-                    ("center", 1, _) => match &args[0] {
-                        Arg::Pos(Expr::Int(w)) if *w >= 0 => stages.push(Stage::Center {
-                            width: *w as usize,
-                            fill: ' ',
-                        }),
-                        _ => return None,
-                    },
-                    // Regex one-arg pat (re_match / match_first / match_all / captures / captures_all / split_re).
-                    ("re_match", 1, _) => match &args[0] {
-                        Arg::Pos(Expr::Str(s)) => {
-                            stages.push(Stage::ReMatch(Arc::from(s.as_str())))
-                        }
-                        _ => return None,
-                    },
-                    ("match_first", 1, _) => match &args[0] {
-                        Arg::Pos(Expr::Str(s)) => {
-                            stages.push(Stage::ReMatchFirst(Arc::from(s.as_str())))
-                        }
-                        _ => return None,
-                    },
-                    ("match_all", 1, _) => match &args[0] {
-                        Arg::Pos(Expr::Str(s)) => {
-                            stages.push(Stage::ReMatchAll(Arc::from(s.as_str())))
-                        }
-                        _ => return None,
-                    },
-                    ("captures", 1, _) => match &args[0] {
-                        Arg::Pos(Expr::Str(s)) => {
-                            stages.push(Stage::ReCaptures(Arc::from(s.as_str())))
-                        }
-                        _ => return None,
-                    },
-                    ("captures_all", 1, _) => match &args[0] {
-                        Arg::Pos(Expr::Str(s)) => {
-                            stages.push(Stage::ReCapturesAll(Arc::from(s.as_str())))
-                        }
-                        _ => return None,
-                    },
-                    ("split_re", 1, _) => match &args[0] {
-                        Arg::Pos(Expr::Str(s)) => {
-                            stages.push(Stage::ReSplit(Arc::from(s.as_str())))
-                        }
-                        _ => return None,
-                    },
-                    // Regex two-arg replace.
-                    ("replace_re", 2, _) => match (&args[0], &args[1]) {
-                        (Arg::Pos(Expr::Str(p)), Arg::Pos(Expr::Str(w))) => {
-                            stages.push(Stage::ReReplace {
-                                pat: Arc::from(p.as_str()),
-                                with: Arc::from(w.as_str()),
-                            })
-                        }
-                        _ => return None,
-                    },
-                    ("replace_all_re", 2, _) => match (&args[0], &args[1]) {
-                        (Arg::Pos(Expr::Str(p)), Arg::Pos(Expr::Str(w))) => {
-                            stages.push(Stage::ReReplaceAll {
-                                pat: Arc::from(p.as_str()),
-                                with: Arc::from(w.as_str()),
-                            })
-                        }
-                        _ => return None,
-                    },
-                    // Vec<Arc<str>> bulk-needle predicates.
-                    ("contains_any", 1, _) => match &args[0] {
-                        Arg::Pos(Expr::Array(elems)) => {
-                            let mut needles: Vec<Arc<str>> = Vec::with_capacity(elems.len());
-                            for e in elems {
-                                match e {
-                                    crate::ast::ArrayElem::Expr(Expr::Str(s)) => {
-                                        needles.push(Arc::from(s.as_str()))
-                                    }
-                                    _ => return None,
-                                }
-                            }
-                            stages.push(Stage::ContainsAny(needles));
-                        }
-                        _ => return None,
-                    },
-                    ("contains_all", 1, _) => match &args[0] {
-                        Arg::Pos(Expr::Array(elems)) => {
-                            let mut needles: Vec<Arc<str>> = Vec::with_capacity(elems.len());
-                            for e in elems {
-                                match e {
-                                    crate::ast::ArrayElem::Expr(Expr::Str(s)) => {
-                                        needles.push(Arc::from(s.as_str()))
-                                    }
-                                    _ => return None,
-                                }
-                            }
-                            stages.push(Stage::ContainsAll(needles));
-                        }
-                        _ => return None,
-                    },
+                    // Whole-receiver builtins intentionally stay out of
+                    // pipeline lowering; `builtins::BuiltinCall` owns the
+                    // per-element allowlist used above.
                     ("slice", 1, _) => {
                         let start = match &args[0] {
                             Arg::Pos(Expr::Int(n)) => *n,
@@ -3782,6 +3091,9 @@ impl Pipeline {
                     };
                     env.restore_current(prev);
                 }
+                Stage::Builtin(call) => {
+                    cur = call.apply(&cur).unwrap_or(cur);
+                }
                 _ => return None, // shape-check should have rejected; defensive.
             }
         }
@@ -4307,109 +3619,10 @@ impl Pipeline {
                         }
                         buf = out;
                     }
-                    Stage::Keys => {
-                        buf = buf.into_iter().map(|v| keys_apply(&v)).collect();
-                    }
-                    Stage::Values => {
-                        buf = buf.into_iter().map(|v| values_apply(&v)).collect();
-                    }
-                    Stage::Entries => {
-                        buf = buf.into_iter().map(|v| entries_apply(&v)).collect();
-                    }
-                    Stage::Upper
-                    | Stage::Lower
-                    | Stage::Trim
-                    | Stage::TrimLeft
-                    | Stage::TrimRight
-                    | Stage::Capitalize
-                    | Stage::TitleCase
-                    | Stage::HtmlEscape
-                    | Stage::HtmlUnescape
-                    | Stage::UrlEncode
-                    | Stage::UrlDecode
-                    | Stage::ToBase64
-                    | Stage::FromBase64
-                    | Stage::Dedent
-                    | Stage::SnakeCase
-                    | Stage::KebabCase
-                    | Stage::CamelCase
-                    | Stage::PascalCase
-                    | Stage::ReverseStr
-                    | Stage::Lines
-                    | Stage::Words
-                    | Stage::Chars
-                    | Stage::CharsOf
-                    | Stage::BytesOf
-                    | Stage::ByteLen
-                    | Stage::IsBlank
-                    | Stage::IsNumeric
-                    | Stage::IsAlpha
-                    | Stage::IsAscii
-                    | Stage::ToNumber
-                    | Stage::ToBool
-                    | Stage::ParseInt
-                    | Stage::ParseFloat
-                    | Stage::ParseBool
-                    | Stage::StartsWith(_)
-                    | Stage::EndsWith(_)
-                    | Stage::StripPrefix(_)
-                    | Stage::StripSuffix(_)
-                    | Stage::StrMatches(_)
-                    | Stage::IndexOf(_)
-                    | Stage::LastIndexOf(_)
-                    | Stage::Scan(_)
-                    | Stage::Repeat(_)
-                    | Stage::Indent(_)
-                    | Stage::FlattenDepth(_)
-                    | Stage::Compact
-                    | Stage::Pairwise
-                    | Stage::Invert
-                    | Stage::PadLeft { .. }
-                    | Stage::PadRight { .. }
-                    | Stage::Center { .. }
-                    | Stage::ReMatch(_)
-                    | Stage::ReMatchFirst(_)
-                    | Stage::ReMatchAll(_)
-                    | Stage::ReCaptures(_)
-                    | Stage::ReCapturesAll(_)
-                    | Stage::ReSplit(_)
-                    | Stage::ReReplace { .. }
-                    | Stage::ReReplaceAll { .. }
-                    | Stage::ContainsAny(_)
-                    | Stage::ContainsAll(_)
-                    | Stage::ToCsv
-                    | Stage::ToTsv
-                    | Stage::ToPairs
-                    | Stage::CumMax
-                    | Stage::CumMin
-                    | Stage::DiffWindow
-                    | Stage::PctChange
-                    | Stage::ZScore
-                    | Stage::RollingSum(_)
-                    | Stage::RollingAvg(_)
-                    | Stage::RollingMin(_)
-                    | Stage::RollingMax(_)
-                    | Stage::Lag(_)
-                    | Stage::Lead(_)
-                    | Stage::GetPath(_)
-                    | Stage::HasPath(_)
-                    | Stage::Has(_)
-                    | Stage::DelPath(_)
-                    | Stage::FlattenKeys(_)
-                    | Stage::UnflattenKeys(_)
-                    | Stage::Schema
-                    | Stage::EnumerateZ
-                    | Stage::Join(_)
-                    | Stage::IndexOfValue(_)
-                    | Stage::IndicesOf(_)
-                    | Stage::Explode(_)
-                    | Stage::Implode(_)
-                    | Stage::TypeName
-                    | Stage::ToString
-                    | Stage::ToJson => {
+                    Stage::Builtin(call) => {
                         buf = buf
                             .into_iter()
-                            .map(|v| lifted_apply(stage, &v).unwrap_or(v))
+                            .map(|v| call.apply(&v).unwrap_or(v))
                             .collect();
                     }
                     // Lambda-bearing barrier-mode stages.
@@ -4586,107 +3799,8 @@ impl Pipeline {
                         Stage::CompiledMap(plan) => {
                             item = run_compiled_map(plan, item)?;
                         }
-                        Stage::Keys => {
-                            item = keys_apply(&item);
-                        }
-                        Stage::Values => {
-                            item = values_apply(&item);
-                        }
-                        Stage::Entries => {
-                            item = entries_apply(&item);
-                        }
-                        Stage::Upper
-                        | Stage::Lower
-                        | Stage::Trim
-                        | Stage::TrimLeft
-                        | Stage::TrimRight
-                        | Stage::Capitalize
-                        | Stage::TitleCase
-                        | Stage::HtmlEscape
-                        | Stage::HtmlUnescape
-                        | Stage::UrlEncode
-                        | Stage::UrlDecode
-                        | Stage::ToBase64
-                        | Stage::FromBase64
-                        | Stage::Dedent
-                        | Stage::SnakeCase
-                        | Stage::KebabCase
-                        | Stage::CamelCase
-                        | Stage::PascalCase
-                        | Stage::ReverseStr
-                        | Stage::Lines
-                        | Stage::Words
-                        | Stage::Chars
-                        | Stage::CharsOf
-                        | Stage::BytesOf
-                        | Stage::ByteLen
-                        | Stage::IsBlank
-                        | Stage::IsNumeric
-                        | Stage::IsAlpha
-                        | Stage::IsAscii
-                        | Stage::ToNumber
-                        | Stage::ToBool
-                        | Stage::ParseInt
-                        | Stage::ParseFloat
-                        | Stage::ParseBool
-                        | Stage::StartsWith(_)
-                        | Stage::EndsWith(_)
-                        | Stage::StripPrefix(_)
-                        | Stage::StripSuffix(_)
-                        | Stage::StrMatches(_)
-                        | Stage::IndexOf(_)
-                        | Stage::LastIndexOf(_)
-                        | Stage::Scan(_)
-                        | Stage::Repeat(_)
-                        | Stage::Indent(_)
-                        | Stage::FlattenDepth(_)
-                        | Stage::Compact
-                        | Stage::Pairwise
-                        | Stage::Invert
-                        | Stage::PadLeft { .. }
-                        | Stage::PadRight { .. }
-                        | Stage::Center { .. }
-                        | Stage::ReMatch(_)
-                        | Stage::ReMatchFirst(_)
-                        | Stage::ReMatchAll(_)
-                        | Stage::ReCaptures(_)
-                        | Stage::ReCapturesAll(_)
-                        | Stage::ReSplit(_)
-                        | Stage::ReReplace { .. }
-                        | Stage::ReReplaceAll { .. }
-                        | Stage::ContainsAny(_)
-                        | Stage::ContainsAll(_)
-                        | Stage::ToCsv
-                        | Stage::ToTsv
-                        | Stage::ToPairs
-                        | Stage::CumMax
-                        | Stage::CumMin
-                        | Stage::DiffWindow
-                        | Stage::PctChange
-                        | Stage::ZScore
-                        | Stage::RollingSum(_)
-                        | Stage::RollingAvg(_)
-                        | Stage::RollingMin(_)
-                        | Stage::RollingMax(_)
-                        | Stage::Lag(_)
-                        | Stage::Lead(_)
-                        | Stage::GetPath(_)
-                        | Stage::HasPath(_)
-                        | Stage::Has(_)
-                        | Stage::DelPath(_)
-                        | Stage::FlattenKeys(_)
-                        | Stage::UnflattenKeys(_)
-                        | Stage::Schema
-                        | Stage::EnumerateZ
-                        | Stage::Join(_)
-                        | Stage::IndexOfValue(_)
-                        | Stage::IndicesOf(_)
-                        | Stage::Explode(_)
-                        | Stage::Implode(_)
-                        | Stage::TypeName
-                        | Stage::ToString
-                        | Stage::ToJson => {
-                            item = lifted_apply(stage, &item).unwrap_or(item);
+                        Stage::Builtin(call) => {
+                            item = call.apply(&item).unwrap_or(item);
                         }
                         // Lambda-bearing streaming arm: TakeWhile.
                         Stage::TakeWhile(prog) => {
@@ -4913,421 +4027,11 @@ pub(crate) fn apply_lambda_obj(
 /// VM programs, barriers).  Returns `Some(recv.clone())` for type-
 /// mismatched inputs to preserve "pass-through on wrong type"
 /// semantics — caller-side decides whether to keep or drop.
-/// VM static-dispatch shortcut — given a `BuiltinMethod` enum (resolved
-/// at compile-time by `vm::BuiltinMethod::from_name`) and a receiver,
-/// directly invoke the lifted `composed::*::apply` body without going
-/// through `BUILTINS` HashMap or `dispatch_method`.  Zero-arg builtins
-/// only — arg-bearing ones (StartsWith, Replace, Repeat, ...) still
-/// require argument evaluation and stay on the legacy path until a
-/// future patch wires per-method arg-extraction here.
-///
-/// Returns `Some(val)` when the call resolves; `None` to signal "not
-/// lifted, fall back to `dispatch_method`".  Type-mismatched receivers
-/// (e.g. `.upper()` on Int) get `Some(recv.clone())` — caller-side
-/// error semantics match prior shim behaviour for non-string inputs.
-pub fn vm_lift_zero_arg(method: crate::vm::BuiltinMethod, recv: &Val) -> Option<Val> {
-    use crate::vm::BuiltinMethod as M;
-    let stage = match method {
-        // String → String (idempotent).
-        M::Upper => Stage::Upper,
-        M::Lower => Stage::Lower,
-        M::Trim => Stage::Trim,
-        M::TrimLeft => Stage::TrimLeft,
-        M::TrimRight => Stage::TrimRight,
-        M::Capitalize => Stage::Capitalize,
-        M::TitleCase => Stage::TitleCase,
-        M::Dedent => Stage::Dedent,
-        // String → String (other).
-        M::HtmlEscape => Stage::HtmlEscape,
-        M::HtmlUnescape => Stage::HtmlUnescape,
-        M::UrlEncode => Stage::UrlEncode,
-        M::UrlDecode => Stage::UrlDecode,
-        M::ToBase64 => Stage::ToBase64,
-        M::FromBase64 => Stage::FromBase64,
-        // String → other.
-        M::Lines => Stage::Lines,
-        M::Words => Stage::Words,
-        M::Chars => Stage::Chars,
-        M::ToNumber => Stage::ToNumber,
-        M::ToBool => Stage::ToBool,
-        // Object → other.
-        M::Keys => Stage::Keys,
-        M::Values => Stage::Values,
-        M::Entries => Stage::Entries,
-        M::Invert => Stage::Invert,
-        // Array → array.
-        M::Compact => Stage::Compact,
-        M::Pairwise => Stage::Pairwise,
-        // Scalar Val → Str / Int.
-        M::Type => Stage::TypeName,
-        M::ToString => Stage::ToString,
-        M::ToJson => Stage::ToJson,
-        // eval/func_* migrations — zero-arg pure.
-        M::ToCsv => Stage::ToCsv,
-        M::ToTsv => Stage::ToTsv,
-        M::ToPairs => Stage::ToPairs,
-        // CumMax / CumMin / DiffWindow / PctChange not in BuiltinMethod
-        // enum (they are in `eval/func_arrays` only with no compile-time
-        // BuiltinMethod variant).  Their fast-path enables once enum
-        // variants land — for now they hit dispatch_method via name.
-        // Not lifted (or arg-bearing) — fall back to dispatch_method.
-        _ => return None,
-    };
-    lifted_apply(&stage, recv)
-}
-
 pub(crate) fn lifted_apply(stage: &Stage, recv: &Val) -> Option<Val> {
-    use crate::composed::{Stage as ComposedStage, StageOutput};
-    // Native-lifted builtins (`lift_native_pattern.md` Phase D) — body
-    // lives in `crate::builtins::*_apply` as a free fn. Returns receiver
-    // unchanged when kernel filters (matches prior `lifted_apply`
-    // semantics: never None for Stage variants registered here).
-    macro_rules! lift_to_kernel {
-        ($k:expr) => {
-            return Some($k(recv).unwrap_or_else(|| recv.clone()))
-        };
-    }
     match stage {
-        Stage::Upper => lift_to_kernel!(crate::builtins::upper_apply),
-        Stage::Lower => lift_to_kernel!(crate::builtins::lower_apply),
-        Stage::Trim => lift_to_kernel!(crate::builtins::trim_apply),
-        Stage::TrimLeft => lift_to_kernel!(crate::builtins::trim_left_apply),
-        Stage::TrimRight => lift_to_kernel!(crate::builtins::trim_right_apply),
-        Stage::Capitalize => lift_to_kernel!(crate::builtins::capitalize_apply),
-        Stage::TitleCase => lift_to_kernel!(crate::builtins::title_case_apply),
-        Stage::HtmlEscape => lift_to_kernel!(crate::builtins::html_escape_apply),
-        Stage::HtmlUnescape => lift_to_kernel!(crate::builtins::html_unescape_apply),
-        Stage::UrlEncode => lift_to_kernel!(crate::builtins::url_encode_apply),
-        Stage::UrlDecode => lift_to_kernel!(crate::builtins::url_decode_apply),
-        Stage::ToBase64 => lift_to_kernel!(crate::builtins::to_base64_apply),
-        Stage::Dedent => lift_to_kernel!(crate::builtins::dedent_apply),
-        Stage::SnakeCase => lift_to_kernel!(crate::builtins::snake_case_apply),
-        Stage::KebabCase => lift_to_kernel!(crate::builtins::kebab_case_apply),
-        Stage::CamelCase => lift_to_kernel!(crate::builtins::camel_case_apply),
-        Stage::PascalCase => lift_to_kernel!(crate::builtins::pascal_case_apply),
-        Stage::ReverseStr => lift_to_kernel!(crate::builtins::reverse_str_apply),
-        Stage::Lines => lift_to_kernel!(crate::builtins::lines_apply),
-        Stage::Words => lift_to_kernel!(crate::builtins::words_apply),
-        Stage::Chars => lift_to_kernel!(crate::builtins::chars_apply),
-        Stage::CharsOf => lift_to_kernel!(crate::builtins::chars_of_apply),
-        Stage::BytesOf => lift_to_kernel!(crate::builtins::bytes_of_apply),
-        Stage::ByteLen => lift_to_kernel!(crate::builtins::byte_len_apply),
-        Stage::IsBlank => lift_to_kernel!(crate::builtins::is_blank_apply),
-        Stage::IsNumeric => lift_to_kernel!(crate::builtins::is_numeric_apply),
-        Stage::IsAlpha => lift_to_kernel!(crate::builtins::is_alpha_apply),
-        Stage::IsAscii => lift_to_kernel!(crate::builtins::is_ascii_apply),
-        Stage::ToNumber => lift_to_kernel!(crate::builtins::to_number_apply),
-        Stage::ToBool => lift_to_kernel!(crate::builtins::to_bool_apply),
-        Stage::ParseInt => lift_to_kernel!(crate::builtins::parse_int_apply),
-        Stage::ParseFloat => lift_to_kernel!(crate::builtins::parse_float_apply),
-        Stage::ParseBool => lift_to_kernel!(crate::builtins::parse_bool_apply),
-        Stage::FromBase64 => lift_to_kernel!(crate::builtins::from_base64_apply),
-        Stage::StartsWith(p) => {
-            return Some(
-                crate::builtins::starts_with_apply(recv, p.as_ref())
-                    .unwrap_or_else(|| recv.clone()),
-            )
-        }
-        Stage::EndsWith(p) => {
-            return Some(
-                crate::builtins::ends_with_apply(recv, p.as_ref()).unwrap_or_else(|| recv.clone()),
-            )
-        }
-        Stage::StripPrefix(p) => {
-            return Some(
-                crate::builtins::strip_prefix_apply(recv, p.as_ref())
-                    .unwrap_or_else(|| recv.clone()),
-            )
-        }
-        Stage::StripSuffix(p) => {
-            return Some(
-                crate::builtins::strip_suffix_apply(recv, p.as_ref())
-                    .unwrap_or_else(|| recv.clone()),
-            )
-        }
-        Stage::StrMatches(p) => {
-            return Some(
-                crate::builtins::contains_apply(recv, p.as_ref()).unwrap_or_else(|| recv.clone()),
-            )
-        }
-        Stage::IndexOf(p) => {
-            return Some(
-                crate::builtins::index_of_apply(recv, p.as_ref()).unwrap_or_else(|| recv.clone()),
-            )
-        }
-        Stage::LastIndexOf(p) => {
-            return Some(
-                crate::builtins::last_index_of_apply(recv, p.as_ref())
-                    .unwrap_or_else(|| recv.clone()),
-            )
-        }
-        Stage::Scan(p) => {
-            return Some(
-                crate::builtins::scan_apply(recv, p.as_ref()).unwrap_or_else(|| recv.clone()),
-            )
-        }
-        Stage::Repeat(n) => {
-            return Some(crate::builtins::repeat_apply(recv, *n).unwrap_or_else(|| recv.clone()))
-        }
-        Stage::Indent(n) => {
-            return Some(crate::builtins::indent_apply(recv, *n).unwrap_or_else(|| recv.clone()))
-        }
-        Stage::PadLeft { width, fill } => {
-            return Some(
-                crate::builtins::pad_left_apply(recv, *width, *fill)
-                    .unwrap_or_else(|| recv.clone()),
-            )
-        }
-        Stage::PadRight { width, fill } => {
-            return Some(
-                crate::builtins::pad_right_apply(recv, *width, *fill)
-                    .unwrap_or_else(|| recv.clone()),
-            )
-        }
-        Stage::Center { width, fill } => {
-            return Some(
-                crate::builtins::center_apply(recv, *width, *fill).unwrap_or_else(|| recv.clone()),
-            )
-        }
-        // Array family.
-        Stage::Compact => lift_to_kernel!(crate::builtins::compact_apply),
-        Stage::Pairwise => lift_to_kernel!(crate::builtins::pairwise_apply),
-        Stage::FlattenDepth(d) => {
-            return Some(
-                crate::builtins::flatten_depth_apply(recv, *d).unwrap_or_else(|| recv.clone()),
-            )
-        }
-        // Object family.
-        Stage::Invert => lift_to_kernel!(crate::builtins::invert_apply),
-        // Path family.
-        Stage::GetPath(p) => {
-            return Some(
-                crate::builtins::get_path_apply(recv, p.as_ref()).unwrap_or_else(|| recv.clone()),
-            )
-        }
-        Stage::HasPath(p) => {
-            return Some(
-                crate::builtins::has_path_apply(recv, p.as_ref()).unwrap_or_else(|| recv.clone()),
-            )
-        }
-        Stage::Has(k) => {
-            return Some(
-                crate::builtins::has_apply(recv, k.as_ref()).unwrap_or_else(|| recv.clone()),
-            )
-        }
-        Stage::DelPath(p) => {
-            return Some(
-                crate::builtins::del_path_apply(recv, p.as_ref()).unwrap_or_else(|| recv.clone()),
-            )
-        }
-        Stage::FlattenKeys(s) => {
-            return Some(
-                crate::builtins::flatten_keys_apply(recv, s.as_ref())
-                    .unwrap_or_else(|| recv.clone()),
-            )
-        }
-        Stage::UnflattenKeys(s) => {
-            return Some(
-                crate::builtins::unflatten_keys_apply(recv, s.as_ref())
-                    .unwrap_or_else(|| recv.clone()),
-            )
-        }
-        // Regex family.
-        Stage::ReMatch(p) => {
-            return Some(
-                crate::builtins::re_match_apply(recv, p.as_ref()).unwrap_or_else(|| recv.clone()),
-            )
-        }
-        Stage::ReMatchFirst(p) => {
-            return Some(
-                crate::builtins::re_match_first_apply(recv, p.as_ref())
-                    .unwrap_or_else(|| recv.clone()),
-            )
-        }
-        Stage::ReMatchAll(p) => {
-            return Some(
-                crate::builtins::re_match_all_apply(recv, p.as_ref())
-                    .unwrap_or_else(|| recv.clone()),
-            )
-        }
-        Stage::ReCaptures(p) => {
-            return Some(
-                crate::builtins::re_captures_apply(recv, p.as_ref())
-                    .unwrap_or_else(|| recv.clone()),
-            )
-        }
-        Stage::ReCapturesAll(p) => {
-            return Some(
-                crate::builtins::re_captures_all_apply(recv, p.as_ref())
-                    .unwrap_or_else(|| recv.clone()),
-            )
-        }
-        Stage::ReSplit(p) => {
-            return Some(
-                crate::builtins::re_split_apply(recv, p.as_ref()).unwrap_or_else(|| recv.clone()),
-            )
-        }
-        Stage::ReReplace { pat, with } => {
-            return Some(
-                crate::builtins::re_replace_apply(recv, pat.as_ref(), with.as_ref())
-                    .unwrap_or_else(|| recv.clone()),
-            )
-        }
-        Stage::ReReplaceAll { pat, with } => {
-            return Some(
-                crate::builtins::re_replace_all_apply(recv, pat.as_ref(), with.as_ref())
-                    .unwrap_or_else(|| recv.clone()),
-            )
-        }
-        Stage::ContainsAny(ns) => {
-            return Some(
-                crate::builtins::contains_any_apply(recv, ns.as_ref())
-                    .unwrap_or_else(|| recv.clone()),
-            )
-        }
-        Stage::ContainsAll(ns) => {
-            return Some(
-                crate::builtins::contains_all_apply(recv, ns.as_ref())
-                    .unwrap_or_else(|| recv.clone()),
-            )
-        }
-        // CSV / cast family.
-        Stage::ToCsv => lift_to_kernel!(crate::builtins::to_csv_apply),
-        Stage::ToTsv => lift_to_kernel!(crate::builtins::to_tsv_apply),
-        Stage::ToPairs => lift_to_kernel!(crate::builtins::to_pairs_apply),
-        Stage::TypeName => lift_to_kernel!(crate::builtins::type_name_apply),
-        Stage::ToString => lift_to_kernel!(crate::builtins::to_string_apply),
-        Stage::ToJson => lift_to_kernel!(crate::builtins::to_json_apply),
-        Stage::Schema => lift_to_kernel!(crate::builtins::schema_apply),
-        _ => {}
+        Stage::Builtin(call) => call.apply(recv),
+        _ => None,
     }
-    let out = match stage {
-        // String → String transforms (legacy composed::Stage trait
-        // dispatch — pending Phase D native lift).
-        Stage::HtmlUnescape => crate::composed::HtmlUnescape.apply(recv),
-        Stage::UrlEncode => crate::composed::UrlEncode.apply(recv),
-        Stage::UrlDecode => crate::composed::UrlDecode.apply(recv),
-        Stage::ToBase64 => crate::composed::ToBase64.apply(recv),
-        Stage::Dedent => crate::composed::Dedent.apply(recv),
-        Stage::SnakeCase => crate::composed::SnakeCase.apply(recv),
-        Stage::KebabCase => crate::composed::KebabCase.apply(recv),
-        Stage::CamelCase => crate::composed::CamelCase.apply(recv),
-        Stage::PascalCase => crate::composed::PascalCase.apply(recv),
-        Stage::ReverseStr => crate::composed::ReverseStr.apply(recv),
-        // String → other Val type.
-        Stage::Lines => crate::composed::Lines.apply(recv),
-        Stage::Words => crate::composed::Words.apply(recv),
-        Stage::Chars => crate::composed::Chars.apply(recv),
-        Stage::CharsOf => crate::composed::CharsOf.apply(recv),
-        Stage::BytesOf => crate::composed::BytesOf.apply(recv),
-        Stage::ByteLen => crate::composed::ByteLen.apply(recv),
-        Stage::IsBlank => crate::composed::IsBlank.apply(recv),
-        Stage::IsNumeric => crate::composed::IsNumeric.apply(recv),
-        Stage::IsAlpha => crate::composed::IsAlpha.apply(recv),
-        Stage::IsAscii => crate::composed::IsAscii.apply(recv),
-        Stage::ToNumber => crate::composed::ToNumber.apply(recv),
-        Stage::ToBool => crate::composed::ToBool.apply(recv),
-        Stage::FromBase64 => crate::composed::FromBase64.apply(recv),
-        Stage::ParseInt => crate::composed::ParseInt.apply(recv),
-        Stage::ParseFloat => crate::composed::ParseFloat.apply(recv),
-        Stage::ParseBool => crate::composed::ParseBool.apply(recv),
-        // One-arg Arc<str> string predicates/searches.
-        Stage::StartsWith(p) => crate::composed::StartsWith { prefix: p.clone() }.apply(recv),
-        Stage::EndsWith(p) => crate::composed::EndsWith { suffix: p.clone() }.apply(recv),
-        Stage::StripPrefix(p) => crate::composed::StripPrefix { prefix: p.clone() }.apply(recv),
-        Stage::StripSuffix(p) => crate::composed::StripSuffix { suffix: p.clone() }.apply(recv),
-        Stage::StrMatches(p) => crate::composed::StrMatches { needle: p.clone() }.apply(recv),
-        Stage::IndexOf(p) => crate::composed::IndexOf { needle: p.clone() }.apply(recv),
-        Stage::LastIndexOf(p) => crate::composed::LastIndexOf { needle: p.clone() }.apply(recv),
-        Stage::Scan(p) => crate::composed::Scan { pat: p.clone() }.apply(recv),
-        // One-arg usize.
-        Stage::Repeat(n) => crate::composed::Repeat { n: *n }.apply(recv),
-        Stage::Indent(n) => crate::composed::Indent { n: *n }.apply(recv),
-        Stage::FlattenDepth(d) => crate::composed::FlattenDepth { depth: *d }.apply(recv),
-        // Zero-arg array/object.
-        Stage::Compact => crate::composed::Compact.apply(recv),
-        Stage::Pairwise => crate::composed::Pairwise.apply(recv),
-        Stage::Invert => crate::composed::Invert.apply(recv),
-        // Two-arg padding.
-        Stage::PadLeft { width, fill } => crate::composed::PadLeft {
-            width: *width,
-            fill: *fill,
-        }
-        .apply(recv),
-        Stage::PadRight { width, fill } => crate::composed::PadRight {
-            width: *width,
-            fill: *fill,
-        }
-        .apply(recv),
-        Stage::Center { width, fill } => crate::composed::Center {
-            width: *width,
-            fill: *fill,
-        }
-        .apply(recv),
-        // Regex one-arg pat.
-        Stage::ReMatch(p) => crate::composed::ReMatch { pat: p.clone() }.apply(recv),
-        Stage::ReMatchFirst(p) => crate::composed::ReMatchFirst { pat: p.clone() }.apply(recv),
-        Stage::ReMatchAll(p) => crate::composed::ReMatchAll { pat: p.clone() }.apply(recv),
-        Stage::ReCaptures(p) => crate::composed::ReCaptures { pat: p.clone() }.apply(recv),
-        Stage::ReCapturesAll(p) => crate::composed::ReCapturesAll { pat: p.clone() }.apply(recv),
-        Stage::ReSplit(p) => crate::composed::ReSplit { pat: p.clone() }.apply(recv),
-        // Regex two-arg replace.
-        Stage::ReReplace { pat, with } => crate::composed::ReReplace {
-            pat: pat.clone(),
-            with: with.clone(),
-        }
-        .apply(recv),
-        Stage::ReReplaceAll { pat, with } => crate::composed::ReReplaceAll {
-            pat: pat.clone(),
-            with: with.clone(),
-        }
-        .apply(recv),
-        // Vec<Arc<str>> bulk needles.
-        Stage::ContainsAny(ns) => crate::composed::ContainsAny {
-            needles: ns.clone(),
-        }
-        .apply(recv),
-        Stage::ContainsAll(ns) => crate::composed::ContainsAll {
-            needles: ns.clone(),
-        }
-        .apply(recv),
-        // eval/func_* migrations.
-        Stage::ToCsv => crate::composed::ToCsv.apply(recv),
-        Stage::ToTsv => crate::composed::ToTsv.apply(recv),
-        Stage::ToPairs => crate::composed::ToPairs.apply(recv),
-        Stage::CumMax => crate::composed::CumMax.apply(recv),
-        Stage::CumMin => crate::composed::CumMin.apply(recv),
-        Stage::DiffWindow => crate::composed::DiffWindow.apply(recv),
-        Stage::PctChange => crate::composed::PctChange.apply(recv),
-        Stage::ZScore => crate::composed::ZScore.apply(recv),
-        Stage::RollingSum(n) => crate::composed::RollingSum::new(*n).apply(recv),
-        Stage::RollingAvg(n) => crate::composed::RollingAvg::new(*n).apply(recv),
-        Stage::RollingMin(n) => crate::composed::RollingMin::new(*n).apply(recv),
-        Stage::RollingMax(n) => crate::composed::RollingMax::new(*n).apply(recv),
-        Stage::Lag(n) => crate::composed::Lag::new(*n).apply(recv),
-        Stage::Lead(n) => crate::composed::Lead::new(*n).apply(recv),
-        Stage::GetPath(p) => crate::composed::GetPath::new(p.clone()).apply(recv),
-        Stage::HasPath(p) => crate::composed::HasPath::new(p.clone()).apply(recv),
-        Stage::Has(k) => crate::composed::Has::new(k.clone()).apply(recv),
-        Stage::DelPath(p) => crate::composed::DelPath::new(p.clone()).apply(recv),
-        Stage::FlattenKeys(s) => crate::composed::FlattenKeys::new(s.clone()).apply(recv),
-        Stage::UnflattenKeys(s) => crate::composed::UnflattenKeys::new(s.clone()).apply(recv),
-        Stage::Schema => crate::composed::Schema.apply(recv),
-        Stage::TypeName => crate::composed::TypeName.apply(recv),
-        Stage::ToString => crate::composed::ToString.apply(recv),
-        Stage::ToJson => crate::composed::ToJson.apply(recv),
-        Stage::EnumerateZ => crate::composed::EnumerateZ.apply(recv),
-        Stage::Join(s) => crate::composed::Join::new(s.clone()).apply(recv),
-        Stage::IndexOfValue(t) => crate::composed::IndexOfValue::new(t.clone()).apply(recv),
-        Stage::IndicesOf(t) => crate::composed::IndicesOf::new(t.clone()).apply(recv),
-        Stage::Explode(f) => crate::composed::Explode::new(f.clone()).apply(recv),
-        Stage::Implode(f) => crate::composed::Implode::new(f.clone()).apply(recv),
-        _ => return None,
-    };
-    Some(match out {
-        StageOutput::Pass(c) => c.into_owned(),
-        _ => recv.clone(),
-    })
 }
 
 // keys_apply / values_apply / entries_apply / replace_apply moved to
@@ -6413,9 +5117,9 @@ fn is_truthy(v: &Val) -> bool {
 // existing pipeline.rs callers (streaming arm, barrier arm) keep
 // using the short path.
 pub(crate) use crate::builtins::{
-    chunk_apply, count_by_apply, drop_while_apply, entries_apply, filter_apply, filter_one,
-    group_by_apply, index_by_apply, keys_apply, map_apply, map_one, partition_apply, replace_apply,
-    slice_apply, split_apply, take_while_apply, take_while_one, values_apply, window_apply,
+    chunk_apply, count_by_apply, drop_while_apply, filter_apply, filter_one, group_by_apply,
+    index_by_apply, map_apply, map_one, partition_apply, replace_apply, slice_apply, split_apply,
+    take_while_apply, take_while_one, window_apply,
 };
 // ── Tests ────────────────────────────────────────────────────────────────────
 
@@ -6456,6 +5160,46 @@ mod tests {
         assert!(matches!(p.stages[0], Stage::Skip(2)));
         assert!(matches!(p.stages[1], Stage::Take(5)));
         assert!(matches!(p.sink, Sink::Numeric(NumOp::Sum)));
+    }
+
+    #[test]
+    fn lower_pure_builtin_uses_generic_builtin_stage() {
+        let p = lower_query("$.names.upper().starts_with(\"A\")").unwrap();
+        assert_eq!(p.stages.len(), 2);
+        assert!(matches!(
+            p.stages[0],
+            Stage::Builtin(PipelineBuiltinCall {
+                method: crate::builtins::BuiltinMethod::Upper,
+                ..
+            })
+        ));
+        assert!(matches!(
+            p.stages[1],
+            Stage::Builtin(PipelineBuiltinCall {
+                method: crate::builtins::BuiltinMethod::StartsWith,
+                ..
+            })
+        ));
+        assert!(matches!(p.sink, Sink::Collect));
+    }
+
+    #[test]
+    fn lower_pipeline_builtin_uses_builtin_owned_allowlist() {
+        let p = lower_query("$.items.schema()").unwrap();
+        assert_eq!(p.stages.len(), 1);
+        assert!(matches!(
+            p.stages[0],
+            Stage::Builtin(PipelineBuiltinCall {
+                method: crate::builtins::BuiltinMethod::Schema,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn lower_whole_receiver_builtin_not_as_per_element_stage() {
+        assert!(lower_query("$.items.compact()").is_none());
+        assert!(lower_query("$.items.join(\",\")").is_none());
     }
 
     #[test]

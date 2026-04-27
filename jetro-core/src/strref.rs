@@ -30,7 +30,11 @@ impl StrRef {
     #[inline]
     pub fn from_arc(parent: Arc<str>) -> Self {
         let end = parent.len() as u32;
-        Self { parent, start: 0, end }
+        Self {
+            parent,
+            start: 0,
+            end,
+        }
     }
 
     /// Byte-range view into `parent`.  Caller must ensure the range is
@@ -63,9 +67,7 @@ impl StrRef {
         // Reinterpret the fat pointer: Arc<[u8]> and Arc<str> have
         // identical layout (pointer + length).  UTF-8 validity is the
         // caller's contract.
-        let parent_str: Arc<str> = unsafe {
-            Arc::from_raw(Arc::into_raw(parent) as *const str)
-        };
+        let parent_str: Arc<str> = unsafe { Arc::from_raw(Arc::into_raw(parent) as *const str) };
         Self {
             parent: parent_str,
             start: start as u32,
@@ -73,12 +75,19 @@ impl StrRef {
         }
     }
 
-    #[inline] pub fn as_str(&self) -> &str {
-        &self.parent[self.start as usize .. self.end as usize]
+    #[inline]
+    pub fn as_str(&self) -> &str {
+        &self.parent[self.start as usize..self.end as usize]
     }
 
-    #[inline] pub fn len(&self) -> usize { (self.end - self.start) as usize }
-    #[inline] pub fn is_empty(&self) -> bool { self.end == self.start }
+    #[inline]
+    pub fn len(&self) -> usize {
+        (self.end - self.start) as usize
+    }
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.end == self.start
+    }
 
     /// Produce an owning `Arc<str>` — allocates a fresh buffer containing
     /// the view contents.  Use only when an owning Arc is required (e.g.
@@ -94,49 +103,78 @@ impl StrRef {
 }
 
 impl AsRef<str> for StrRef {
-    #[inline] fn as_ref(&self) -> &str { self.as_str() }
+    #[inline]
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
 }
 
 impl std::ops::Deref for StrRef {
     type Target = str;
-    #[inline] fn deref(&self) -> &str { self.as_str() }
+    #[inline]
+    fn deref(&self) -> &str {
+        self.as_str()
+    }
 }
 
 impl std::fmt::Display for StrRef {
-    #[inline] fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    #[inline]
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
 }
 
 impl PartialEq for StrRef {
-    #[inline] fn eq(&self, other: &Self) -> bool { self.as_str() == other.as_str() }
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        self.as_str() == other.as_str()
+    }
 }
 impl Eq for StrRef {}
 
 impl PartialEq<str> for StrRef {
-    #[inline] fn eq(&self, other: &str) -> bool { self.as_str() == other }
+    #[inline]
+    fn eq(&self, other: &str) -> bool {
+        self.as_str() == other
+    }
 }
 impl PartialEq<&str> for StrRef {
-    #[inline] fn eq(&self, other: &&str) -> bool { self.as_str() == *other }
+    #[inline]
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
 }
 impl PartialEq<Arc<str>> for StrRef {
-    #[inline] fn eq(&self, other: &Arc<str>) -> bool { self.as_str() == other.as_ref() }
+    #[inline]
+    fn eq(&self, other: &Arc<str>) -> bool {
+        self.as_str() == other.as_ref()
+    }
 }
 
 impl std::hash::Hash for StrRef {
-    #[inline] fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+    #[inline]
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.as_str().hash(state)
     }
 }
 
 impl From<Arc<str>> for StrRef {
-    #[inline] fn from(a: Arc<str>) -> Self { Self::from_arc(a) }
+    #[inline]
+    fn from(a: Arc<str>) -> Self {
+        Self::from_arc(a)
+    }
 }
 impl From<&str> for StrRef {
-    #[inline] fn from(s: &str) -> Self { Self::from_arc(Arc::<str>::from(s)) }
+    #[inline]
+    fn from(s: &str) -> Self {
+        Self::from_arc(Arc::<str>::from(s))
+    }
 }
 impl From<String> for StrRef {
-    #[inline] fn from(s: String) -> Self { Self::from_arc(Arc::<str>::from(s)) }
+    #[inline]
+    fn from(s: String) -> Self {
+        Self::from_arc(Arc::<str>::from(s))
+    }
 }
 
 // ── Tape-backed lane (simd-json, opt-in via Jetro::from_simd_lazy) ───────────
@@ -155,12 +193,21 @@ impl From<String> for StrRef {
 pub enum TapeNode {
     Static(simd_json::StaticNode),
     /// String stored as `[start..end]` byte slice into `TapeData.bytes_buf`.
-    StringRef { start: u32, end: u32 },
+    StringRef {
+        start: u32,
+        end: u32,
+    },
     /// Object with `len` key/value pairs; `count` total nested nodes
     /// (including children) for fast skip-ahead.
-    Object { len: u32, count: u32 },
+    Object {
+        len: u32,
+        count: u32,
+    },
     /// Array with `len` entries; `count` total nested nodes.
-    Array  { len: u32, count: u32 },
+    Array {
+        len: u32,
+        count: u32,
+    },
 }
 
 #[cfg(feature = "simd-json")]
@@ -171,7 +218,7 @@ pub struct TapeData {
     /// can borrow `&str` slices for the lifetime of the handle.
     pub bytes_buf: Arc<[u8]>,
     /// Flat node sequence; same length as `simd_json::Tape.0`.
-    pub nodes:     Vec<TapeNode>,
+    pub nodes: Vec<TapeNode>,
 }
 
 #[cfg(feature = "simd-json")]
@@ -214,10 +261,14 @@ impl TapeData {
                         }
                     }
                 }
-                simd_json::Node::Object { len, count } =>
-                    TapeNode::Object { len: *len as u32, count: *count as u32 },
-                simd_json::Node::Array  { len, count } =>
-                    TapeNode::Array  { len: *len as u32, count: *count as u32 },
+                simd_json::Node::Object { len, count } => TapeNode::Object {
+                    len: *len as u32,
+                    count: *count as u32,
+                },
+                simd_json::Node::Array { len, count } => TapeNode::Array {
+                    len: *len as u32,
+                    count: *count as u32,
+                },
             });
         }
         drop(tape);
@@ -228,10 +279,7 @@ impl TapeData {
             combined.extend_from_slice(&extra_buf);
             Arc::from(combined.into_boxed_slice())
         };
-        Ok(Arc::new(Self {
-            bytes_buf,
-            nodes,
-        }))
+        Ok(Arc::new(Self { bytes_buf, nodes }))
     }
 
     /// Borrow string contents in `bytes_buf` at the given byte range.
@@ -249,8 +297,7 @@ impl TapeData {
     pub fn str_at(&self, i: usize) -> &str {
         match self.nodes[i] {
             TapeNode::StringRef { start, end } => unsafe {
-                std::str::from_utf8_unchecked(
-                    &self.bytes_buf[start as usize .. end as usize])
+                std::str::from_utf8_unchecked(&self.bytes_buf[start as usize..end as usize])
             },
             _ => unreachable!("str_at: node {} is not a string", i),
         }
@@ -260,8 +307,7 @@ impl TapeData {
     /// root, or 0 for primitive roots.
     pub fn root_len(&self) -> usize {
         match self.nodes.first() {
-            Some(TapeNode::Object { len, .. }) | Some(TapeNode::Array { len, .. }) =>
-                *len as usize,
+            Some(TapeNode::Object { len, .. }) | Some(TapeNode::Array { len, .. }) => *len as usize,
             _ => 0,
         }
     }
@@ -271,8 +317,7 @@ impl TapeData {
     #[inline]
     pub fn span(&self, i: usize) -> usize {
         match self.nodes[i] {
-            TapeNode::Object { count, .. } | TapeNode::Array { count, .. } =>
-                count as usize + 1,
+            TapeNode::Object { count, .. } | TapeNode::Array { count, .. } => count as usize + 1,
             _ => 1,
         }
     }
@@ -293,9 +338,13 @@ pub fn tape_array_numeric_fold(
         _ => return None,
     };
     let mut acc = NumAcc {
-        sum_i: 0, sum_f: 0.0, count: 0,
-        min_f: f64::INFINITY, max_f: f64::NEG_INFINITY,
-        is_float: false, mixed: false,
+        sum_i: 0,
+        sum_f: 0.0,
+        count: 0,
+        min_f: f64::INFINITY,
+        max_f: f64::NEG_INFINITY,
+        is_float: false,
+        mixed: false,
     };
     let mut j = arr_idx + 1;
     for _ in 0..len {
@@ -305,13 +354,21 @@ pub fn tape_array_numeric_fold(
                 if acc.is_float {
                     let f = n as f64;
                     acc.sum_f += f;
-                    if f < acc.min_f { acc.min_f = f; }
-                    if f > acc.max_f { acc.max_f = f; }
+                    if f < acc.min_f {
+                        acc.min_f = f;
+                    }
+                    if f > acc.max_f {
+                        acc.max_f = f;
+                    }
                 } else {
                     acc.sum_i = acc.sum_i.wrapping_add(n);
                     let f = n as f64;
-                    if f < acc.min_f { acc.min_f = f; }
-                    if f > acc.max_f { acc.max_f = f; }
+                    if f < acc.min_f {
+                        acc.min_f = f;
+                    }
+                    if f > acc.max_f {
+                        acc.max_f = f;
+                    }
                 }
             }
             TapeNode::Static(simd_json::StaticNode::U64(u)) => {
@@ -320,13 +377,21 @@ pub fn tape_array_numeric_fold(
                 if acc.is_float {
                     let f = u as f64;
                     acc.sum_f += f;
-                    if f < acc.min_f { acc.min_f = f; }
-                    if f > acc.max_f { acc.max_f = f; }
+                    if f < acc.min_f {
+                        acc.min_f = f;
+                    }
+                    if f > acc.max_f {
+                        acc.max_f = f;
+                    }
                 } else {
                     acc.sum_i = acc.sum_i.wrapping_add(n);
                     let f = u as f64;
-                    if f < acc.min_f { acc.min_f = f; }
-                    if f > acc.max_f { acc.max_f = f; }
+                    if f < acc.min_f {
+                        acc.min_f = f;
+                    }
+                    if f > acc.max_f {
+                        acc.max_f = f;
+                    }
                 }
             }
             TapeNode::Static(simd_json::StaticNode::F64(f)) => {
@@ -336,14 +401,25 @@ pub fn tape_array_numeric_fold(
                     acc.is_float = true;
                 }
                 acc.sum_f += f;
-                if f < acc.min_f { acc.min_f = f; }
-                if f > acc.max_f { acc.max_f = f; }
+                if f < acc.min_f {
+                    acc.min_f = f;
+                }
+                if f > acc.max_f {
+                    acc.max_f = f;
+                }
             }
             _ => return None,
         }
         j += tape.span(j);
     }
-    Some((acc.sum_i, acc.sum_f, acc.count, acc.min_f, acc.max_f, acc.is_float))
+    Some((
+        acc.sum_i,
+        acc.sum_f,
+        acc.count,
+        acc.min_f,
+        acc.max_f,
+        acc.is_float,
+    ))
 }
 
 /// Element count of an array node on the tape — used for `.len()` /
@@ -379,9 +455,13 @@ fn _tape_array_project_numeric_fold_unused(
         _ => return None,
     };
     let mut acc = NumAcc {
-        sum_i: 0, sum_f: 0.0, count: 0,
-        min_f: f64::INFINITY, max_f: f64::NEG_INFINITY,
-        is_float: false, mixed: false,
+        sum_i: 0,
+        sum_f: 0.0,
+        count: 0,
+        min_f: f64::INFINITY,
+        max_f: f64::NEG_INFINITY,
+        is_float: false,
+        mixed: false,
     };
     let mut j = arr_idx + 1;
     for _ in 0..len {
@@ -407,13 +487,21 @@ fn _tape_array_project_numeric_fold_unused(
                             if acc.is_float {
                                 let f = n as f64;
                                 acc.sum_f += f;
-                                if f < acc.min_f { acc.min_f = f; }
-                                if f > acc.max_f { acc.max_f = f; }
+                                if f < acc.min_f {
+                                    acc.min_f = f;
+                                }
+                                if f > acc.max_f {
+                                    acc.max_f = f;
+                                }
                             } else {
                                 acc.sum_i = acc.sum_i.wrapping_add(n);
                                 let f = n as f64;
-                                if f < acc.min_f { acc.min_f = f; }
-                                if f > acc.max_f { acc.max_f = f; }
+                                if f < acc.min_f {
+                                    acc.min_f = f;
+                                }
+                                if f > acc.max_f {
+                                    acc.max_f = f;
+                                }
                             }
                         }
                         TapeNode::Static(simd_json::StaticNode::U64(u)) => {
@@ -424,8 +512,12 @@ fn _tape_array_project_numeric_fold_unused(
                             } else {
                                 acc.sum_i = acc.sum_i.wrapping_add(u as i64);
                             }
-                            if f < acc.min_f { acc.min_f = f; }
-                            if f > acc.max_f { acc.max_f = f; }
+                            if f < acc.min_f {
+                                acc.min_f = f;
+                            }
+                            if f > acc.max_f {
+                                acc.max_f = f;
+                            }
                         }
                         TapeNode::Static(simd_json::StaticNode::F64(f)) => {
                             acc.count += 1;
@@ -434,8 +526,12 @@ fn _tape_array_project_numeric_fold_unused(
                                 acc.is_float = true;
                             }
                             acc.sum_f += f;
-                            if f < acc.min_f { acc.min_f = f; }
-                            if f > acc.max_f { acc.max_f = f; }
+                            if f < acc.min_f {
+                                acc.min_f = f;
+                            }
+                            if f > acc.max_f {
+                                acc.max_f = f;
+                            }
                         }
                         _ => return None,
                     }
@@ -445,7 +541,14 @@ fn _tape_array_project_numeric_fold_unused(
         }
         j += elem_span;
     }
-    Some((acc.sum_i, acc.sum_f, acc.count, acc.min_f, acc.max_f, acc.is_float))
+    Some((
+        acc.sum_i,
+        acc.sum_f,
+        acc.count,
+        acc.min_f,
+        acc.max_f,
+        acc.is_float,
+    ))
 }
 
 /// Tape-aware aggregator over `$..key`-style descendant queries.
@@ -463,13 +566,26 @@ pub fn tape_descend_numeric_fold(
     key: &str,
 ) -> Option<(i64, f64, usize, f64, f64, bool)> {
     let mut acc = NumAcc {
-        sum_i: 0, sum_f: 0.0, count: 0,
-        min_f: f64::INFINITY, max_f: f64::NEG_INFINITY,
-        is_float: false, mixed: false,
+        sum_i: 0,
+        sum_f: 0.0,
+        count: 0,
+        min_f: f64::INFINITY,
+        max_f: f64::NEG_INFINITY,
+        is_float: false,
+        mixed: false,
     };
     walk(tape, key, 0, &mut acc);
-    if acc.mixed { return None; }
-    Some((acc.sum_i, acc.sum_f, acc.count, acc.min_f, acc.max_f, acc.is_float))
+    if acc.mixed {
+        return None;
+    }
+    Some((
+        acc.sum_i,
+        acc.sum_f,
+        acc.count,
+        acc.min_f,
+        acc.max_f,
+        acc.is_float,
+    ))
 }
 
 /// Type-agnostic count of every value matched by `key` at any depth.
@@ -490,7 +606,9 @@ fn walk_count(tape: &TapeData, key: &str, i: usize, count: &mut usize) -> usize 
             for _ in 0..len {
                 let k = tape.str_at(j);
                 j += 1;
-                if k == key { *count += 1; }
+                if k == key {
+                    *count += 1;
+                }
                 j = walk_count(tape, key, j, count);
             }
             j
@@ -523,26 +641,51 @@ fn accumulate(n: TapeNode, acc: &mut NumAcc) {
     match n {
         TapeNode::Static(SN::I64(v)) => {
             acc.count += 1;
-            if acc.is_float { acc.sum_f += v as f64; } else { acc.sum_i += v; }
+            if acc.is_float {
+                acc.sum_f += v as f64;
+            } else {
+                acc.sum_i += v;
+            }
             let f = v as f64;
-            if f < acc.min_f { acc.min_f = f; }
-            if f > acc.max_f { acc.max_f = f; }
+            if f < acc.min_f {
+                acc.min_f = f;
+            }
+            if f > acc.max_f {
+                acc.max_f = f;
+            }
         }
         TapeNode::Static(SN::U64(v)) if v <= i64::MAX as u64 => {
             acc.count += 1;
-            if acc.is_float { acc.sum_f += v as f64; } else { acc.sum_i += v as i64; }
+            if acc.is_float {
+                acc.sum_f += v as f64;
+            } else {
+                acc.sum_i += v as i64;
+            }
             let f = v as f64;
-            if f < acc.min_f { acc.min_f = f; }
-            if f > acc.max_f { acc.max_f = f; }
+            if f < acc.min_f {
+                acc.min_f = f;
+            }
+            if f > acc.max_f {
+                acc.max_f = f;
+            }
         }
         TapeNode::Static(SN::F64(v)) => {
-            if !acc.is_float { acc.sum_f = acc.sum_i as f64; acc.is_float = true; }
+            if !acc.is_float {
+                acc.sum_f = acc.sum_i as f64;
+                acc.is_float = true;
+            }
             acc.count += 1;
             acc.sum_f += v;
-            if v < acc.min_f { acc.min_f = v; }
-            if v > acc.max_f { acc.max_f = v; }
+            if v < acc.min_f {
+                acc.min_f = v;
+            }
+            if v > acc.max_f {
+                acc.max_f = v;
+            }
         }
-        _ => { acc.mixed = true; }
+        _ => {
+            acc.mixed = true;
+        }
     }
 }
 
@@ -567,16 +710,18 @@ pub fn tape_descend_collect_numeric(
         mixed: false,
     };
     walk_collect(tape, key, 0, &mut acc);
-    if acc.mixed { return None; }
+    if acc.mixed {
+        return None;
+    }
     Some((acc.ints, acc.floats, acc.is_float))
 }
 
 #[cfg(feature = "simd-json")]
 struct NumCol {
-    ints:     Vec<i64>,
-    floats:   Vec<f64>,
+    ints: Vec<i64>,
+    floats: Vec<f64>,
     is_float: bool,
-    mixed:    bool,
+    mixed: bool,
 }
 
 #[cfg(feature = "simd-json")]
@@ -584,12 +729,18 @@ fn collect_value(n: TapeNode, acc: &mut NumCol) {
     use simd_json::StaticNode as SN;
     match n {
         TapeNode::Static(SN::I64(v)) => {
-            if acc.is_float { acc.floats.push(v as f64); }
-            else            { acc.ints.push(v); }
+            if acc.is_float {
+                acc.floats.push(v as f64);
+            } else {
+                acc.ints.push(v);
+            }
         }
         TapeNode::Static(SN::U64(v)) if v <= i64::MAX as u64 => {
-            if acc.is_float { acc.floats.push(v as f64); }
-            else            { acc.ints.push(v as i64); }
+            if acc.is_float {
+                acc.floats.push(v as f64);
+            } else {
+                acc.ints.push(v as i64);
+            }
         }
         TapeNode::Static(SN::F64(v)) => {
             if !acc.is_float {
@@ -599,7 +750,9 @@ fn collect_value(n: TapeNode, acc: &mut NumCol) {
             }
             acc.floats.push(v);
         }
-        _ => { acc.mixed = true; }
+        _ => {
+            acc.mixed = true;
+        }
     }
 }
 
@@ -672,7 +825,9 @@ pub fn tape_object_field(tape: &TapeData, i: usize, key: &str) -> Option<usize> 
         for _ in 0..len {
             let k = tape.str_at(j);
             j += 1;
-            if k == key { return Some(j); }
+            if k == key {
+                return Some(j);
+            }
             j += tape.span(j);
         }
     }
@@ -730,7 +885,9 @@ impl<'a> Iterator for TapeArrayIter<'a> {
     type Item = usize;
     #[inline]
     fn next(&mut self) -> Option<usize> {
-        if self.remaining == 0 { return None; }
+        if self.remaining == 0 {
+            return None;
+        }
         let entry = self.cursor;
         self.cursor += self.tape.span(entry);
         self.remaining -= 1;
@@ -778,9 +935,13 @@ pub fn tape_array_field_numeric_fold(
         _ => return None,
     };
     let mut acc = NumAcc {
-        sum_i: 0, sum_f: 0.0, count: 0,
-        min_f: f64::INFINITY, max_f: f64::NEG_INFINITY,
-        is_float: false, mixed: false,
+        sum_i: 0,
+        sum_f: 0.0,
+        count: 0,
+        min_f: f64::INFINITY,
+        max_f: f64::NEG_INFINITY,
+        is_float: false,
+        mixed: false,
     };
     let mut ic: Option<ShapeIC> = None;
     let mut j = arr_idx + 1;
@@ -791,19 +952,37 @@ pub fn tape_array_field_numeric_fold(
         }
         let cached = ic.as_ref().filter(|c| shape_ic_check(tape, entry, c));
         let v: Option<usize> = if let Some(c) = cached {
-            if c.rel_offs[0] == u32::MAX { None } else { Some(entry + c.rel_offs[0] as usize) }
+            if c.rel_offs[0] == u32::MAX {
+                None
+            } else {
+                Some(entry + c.rel_offs[0] as usize)
+            }
         } else {
             ic = shape_ic_build(tape, entry, [field, ""]);
-            ic.as_ref().and_then(|c| if c.rel_offs[0] == u32::MAX { None }
-                                     else { Some(entry + c.rel_offs[0] as usize) })
+            ic.as_ref().and_then(|c| {
+                if c.rel_offs[0] == u32::MAX {
+                    None
+                } else {
+                    Some(entry + c.rel_offs[0] as usize)
+                }
+            })
         };
         if let Some(v) = v {
             accumulate(tape.nodes[v], &mut acc);
-            if acc.mixed { return None; }
+            if acc.mixed {
+                return None;
+            }
         }
         j += tape.span(entry);
     }
-    Some((acc.sum_i, acc.sum_f, acc.count, acc.min_f, acc.max_f, acc.is_float))
+    Some((
+        acc.sum_i,
+        acc.sum_f,
+        acc.count,
+        acc.min_f,
+        acc.max_f,
+        acc.is_float,
+    ))
 }
 
 /// Comparable literal kind for tape-side filter predicates.
@@ -820,7 +999,14 @@ pub enum TapeLit<'a> {
 /// 6-way comparison op encoded as a small enum the tape executor uses.
 #[cfg(feature = "simd-json")]
 #[derive(Debug, Clone, Copy)]
-pub enum TapeCmp { Eq, Neq, Lt, Lte, Gt, Gte }
+pub enum TapeCmp {
+    Eq,
+    Neq,
+    Lt,
+    Lte,
+    Gt,
+    Gte,
+}
 
 /// Predicate tree for tape-side filters.  Compositions over `Cmp`
 /// leaves via boolean conjunction/disjunction.  Negation is folded into
@@ -829,7 +1015,11 @@ pub enum TapeCmp { Eq, Neq, Lt, Lte, Gt, Gte }
 #[cfg(feature = "simd-json")]
 #[derive(Debug, Clone)]
 pub enum TapePred<'a> {
-    Cmp { field: &'a str, op: TapeCmp, lit: TapeLit<'a> },
+    Cmp {
+        field: &'a str,
+        op: TapeCmp,
+        lit: TapeLit<'a>,
+    },
     And(Vec<TapePred<'a>>),
     Or(Vec<TapePred<'a>>),
 }
@@ -840,17 +1030,14 @@ impl<'a> TapePred<'a> {
     /// fields are treated as not-matching.
     pub fn eval(&self, tape: &TapeData, entry: usize) -> bool {
         match self {
-            TapePred::Cmp { field, op, lit } => {
-                match tape_object_field(tape, entry, field) {
-                    Some(v) => tape_value_cmp(tape, v, *op, lit),
-                    None => false,
-                }
-            }
+            TapePred::Cmp { field, op, lit } => match tape_object_field(tape, entry, field) {
+                Some(v) => tape_value_cmp(tape, v, *op, lit),
+                None => false,
+            },
             TapePred::And(xs) => xs.iter().all(|p| p.eval(tape, entry)),
-            TapePred::Or (xs) => xs.iter().any(|p| p.eval(tape, entry)),
+            TapePred::Or(xs) => xs.iter().any(|p| p.eval(tape, entry)),
         }
     }
-
 }
 
 /// Compare a tape value at node `idx` against a literal.  Returns
@@ -911,7 +1098,9 @@ pub fn tape_array_filter_count(
         let entry = j;
         if let TapeNode::Object { .. } = tape.nodes[entry] {
             if let Some(v) = tape_object_field(tape, entry, field) {
-                if tape_value_cmp(tape, v, op, lit) { count += 1; }
+                if tape_value_cmp(tape, v, op, lit) {
+                    count += 1;
+                }
             }
         }
         j += tape.span(entry);
@@ -947,17 +1136,28 @@ pub fn tape_array_filter_pred_count(
             if let TapeNode::Object { .. } = tape.nodes[entry] {
                 let cached = ic.as_ref().filter(|c| shape_ic_check(tape, entry, c));
                 let pred_v: Option<usize> = if let Some(c) = cached {
-                    if c.rel_offs[0] == u32::MAX { None } else { Some(entry + c.rel_offs[0] as usize) }
+                    if c.rel_offs[0] == u32::MAX {
+                        None
+                    } else {
+                        Some(entry + c.rel_offs[0] as usize)
+                    }
                 } else {
                     ic = shape_ic_build(tape, entry, [pf, ""]);
-                    ic.as_ref().and_then(|c| if c.rel_offs[0] == u32::MAX { None }
-                                             else { Some(entry + c.rel_offs[0] as usize) })
+                    ic.as_ref().and_then(|c| {
+                        if c.rel_offs[0] == u32::MAX {
+                            None
+                        } else {
+                            Some(entry + c.rel_offs[0] as usize)
+                        }
+                    })
                 };
                 let pass = match pred_v {
                     Some(v) => tape_value_cmp(tape, v, *op, lit),
                     None => false,
                 };
-                if pass { count += 1; }
+                if pass {
+                    count += 1;
+                }
             }
             j += tape.span(entry);
         }
@@ -972,7 +1172,9 @@ pub fn tape_array_filter_pred_count(
     for _ in 0..len {
         let entry = j;
         if let TapeNode::Object { .. } = tape.nodes[entry] {
-            if pred.eval(tape, entry) { count += 1; }
+            if pred.eval(tape, entry) {
+                count += 1;
+            }
         }
         j += tape.span(entry);
     }
@@ -996,9 +1198,13 @@ pub fn tape_array_filter_pred_map_numeric_fold(
         _ => return None,
     };
     let mut acc = NumAcc {
-        sum_i: 0, sum_f: 0.0, count: 0,
-        min_f: f64::INFINITY, max_f: f64::NEG_INFINITY,
-        is_float: false, mixed: false,
+        sum_i: 0,
+        sum_f: 0.0,
+        count: 0,
+        min_f: f64::INFINITY,
+        max_f: f64::NEG_INFINITY,
+        is_float: false,
+        mixed: false,
     };
 
     if let TapePred::Cmp { field: pf, op, lit } = pred {
@@ -1006,46 +1212,82 @@ pub fn tape_array_filter_pred_map_numeric_fold(
         let mut j = arr_idx + 1;
         for _ in 0..len {
             let entry = j;
-            if !matches!(tape.nodes[entry], TapeNode::Object { .. }) { return None; }
+            if !matches!(tape.nodes[entry], TapeNode::Object { .. }) {
+                return None;
+            }
             let cached = ic.as_ref().filter(|c| shape_ic_check(tape, entry, c));
             let pred_v: Option<usize> = if let Some(c) = cached {
-                if c.rel_offs[0] == u32::MAX { None } else { Some(entry + c.rel_offs[0] as usize) }
+                if c.rel_offs[0] == u32::MAX {
+                    None
+                } else {
+                    Some(entry + c.rel_offs[0] as usize)
+                }
             } else {
                 ic = shape_ic_build(tape, entry, [pf, map_field]);
-                ic.as_ref().and_then(|c| if c.rel_offs[0] == u32::MAX { None }
-                                         else { Some(entry + c.rel_offs[0] as usize) })
+                ic.as_ref().and_then(|c| {
+                    if c.rel_offs[0] == u32::MAX {
+                        None
+                    } else {
+                        Some(entry + c.rel_offs[0] as usize)
+                    }
+                })
             };
             let pass = match pred_v {
                 Some(v) => tape_value_cmp(tape, v, *op, lit),
                 None => false,
             };
             if pass {
-                let mv = ic.as_ref().and_then(|c| if c.rel_offs[1] == u32::MAX { None }
-                                                  else { Some(entry + c.rel_offs[1] as usize) });
+                let mv = ic.as_ref().and_then(|c| {
+                    if c.rel_offs[1] == u32::MAX {
+                        None
+                    } else {
+                        Some(entry + c.rel_offs[1] as usize)
+                    }
+                });
                 if let Some(mv) = mv {
                     accumulate(tape.nodes[mv], &mut acc);
-                    if acc.mixed { return None; }
+                    if acc.mixed {
+                        return None;
+                    }
                 }
             }
             j += tape.span(entry);
         }
-        return Some((acc.sum_i, acc.sum_f, acc.count, acc.min_f, acc.max_f, acc.is_float));
+        return Some((
+            acc.sum_i,
+            acc.sum_f,
+            acc.count,
+            acc.min_f,
+            acc.max_f,
+            acc.is_float,
+        ));
     }
 
     // Compound pred — name-based per-entry eval (see filter_pred_count).
     let mut j = arr_idx + 1;
     for _ in 0..len {
         let entry = j;
-        if !matches!(tape.nodes[entry], TapeNode::Object { .. }) { return None; }
+        if !matches!(tape.nodes[entry], TapeNode::Object { .. }) {
+            return None;
+        }
         if pred.eval(tape, entry) {
             if let Some(mv) = tape_object_field(tape, entry, map_field) {
                 accumulate(tape.nodes[mv], &mut acc);
-                if acc.mixed { return None; }
+                if acc.mixed {
+                    return None;
+                }
             }
         }
         j += tape.span(entry);
     }
-    Some((acc.sum_i, acc.sum_f, acc.count, acc.min_f, acc.max_f, acc.is_float))
+    Some((
+        acc.sum_i,
+        acc.sum_f,
+        acc.count,
+        acc.min_f,
+        acc.max_f,
+        acc.is_float,
+    ))
 }
 
 /// Filter+map+collect variant accepting an arbitrary `TapePred`.
@@ -1061,32 +1303,55 @@ pub fn tape_array_filter_pred_map_collect_numeric(
         TapeNode::Array { len, .. } => len as usize,
         _ => return None,
     };
-    let mut acc = NumCol { ints: Vec::new(), floats: Vec::new(), is_float: false, mixed: false };
+    let mut acc = NumCol {
+        ints: Vec::new(),
+        floats: Vec::new(),
+        is_float: false,
+        mixed: false,
+    };
 
     if let TapePred::Cmp { field: pf, op, lit } = pred {
         let mut ic: Option<ShapeIC> = None;
         let mut j = arr_idx + 1;
         for _ in 0..len {
             let entry = j;
-            if !matches!(tape.nodes[entry], TapeNode::Object { .. }) { return None; }
+            if !matches!(tape.nodes[entry], TapeNode::Object { .. }) {
+                return None;
+            }
             let cached = ic.as_ref().filter(|c| shape_ic_check(tape, entry, c));
             let pred_v: Option<usize> = if let Some(c) = cached {
-                if c.rel_offs[0] == u32::MAX { None } else { Some(entry + c.rel_offs[0] as usize) }
+                if c.rel_offs[0] == u32::MAX {
+                    None
+                } else {
+                    Some(entry + c.rel_offs[0] as usize)
+                }
             } else {
                 ic = shape_ic_build(tape, entry, [pf, map_field]);
-                ic.as_ref().and_then(|c| if c.rel_offs[0] == u32::MAX { None }
-                                         else { Some(entry + c.rel_offs[0] as usize) })
+                ic.as_ref().and_then(|c| {
+                    if c.rel_offs[0] == u32::MAX {
+                        None
+                    } else {
+                        Some(entry + c.rel_offs[0] as usize)
+                    }
+                })
             };
             let pass = match pred_v {
                 Some(v) => tape_value_cmp(tape, v, *op, lit),
                 None => false,
             };
             if pass {
-                let mv = ic.as_ref().and_then(|c| if c.rel_offs[1] == u32::MAX { None }
-                                                  else { Some(entry + c.rel_offs[1] as usize) });
+                let mv = ic.as_ref().and_then(|c| {
+                    if c.rel_offs[1] == u32::MAX {
+                        None
+                    } else {
+                        Some(entry + c.rel_offs[1] as usize)
+                    }
+                });
                 if let Some(mv) = mv {
                     collect_value(tape.nodes[mv], &mut acc);
-                    if acc.mixed { return None; }
+                    if acc.mixed {
+                        return None;
+                    }
                 }
             }
             j += tape.span(entry);
@@ -1098,11 +1363,15 @@ pub fn tape_array_filter_pred_map_collect_numeric(
     let mut j = arr_idx + 1;
     for _ in 0..len {
         let entry = j;
-        if !matches!(tape.nodes[entry], TapeNode::Object { .. }) { return None; }
+        if !matches!(tape.nodes[entry], TapeNode::Object { .. }) {
+            return None;
+        }
         if pred.eval(tape, entry) {
             if let Some(mv) = tape_object_field(tape, entry, map_field) {
                 collect_value(tape.nodes[mv], &mut acc);
-                if acc.mixed { return None; }
+                if acc.mixed {
+                    return None;
+                }
             }
         }
         j += tape.span(entry);
@@ -1124,26 +1393,30 @@ pub fn tape_array_filter_pred_map_collect_numeric(
 /// linear key scan when the Object has 4+ keys.
 #[cfg(feature = "simd-json")]
 struct ShapeIC {
-    obj_len:    u32,
-    first_key_len: u32,      // cached length to short-circuit memcmp
+    obj_len: u32,
+    first_key_len: u32, // cached length to short-circuit memcmp
     first_key_off: (u32, u32),
     /// Relative tape-node offset from the entry header to the field's
     /// VALUE node (so `entry + rel_off` is the value's index).  `u32::MAX`
     /// = field absent in the cached shape.
-    rel_offs:   [u32; 2],
+    rel_offs: [u32; 2],
 }
 
 #[cfg(feature = "simd-json")]
 #[inline]
 fn shape_ic_check(tape: &TapeData, entry: usize, ic: &ShapeIC) -> bool {
     if let TapeNode::Object { len, .. } = tape.nodes[entry] {
-        if len != ic.obj_len { return false; }
+        if len != ic.obj_len {
+            return false;
+        }
         if let TapeNode::StringRef { start, end } = tape.nodes[entry + 1] {
             let this_len = end - start;
-            if this_len != ic.first_key_len { return false; }
+            if this_len != ic.first_key_len {
+                return false;
+            }
             // Compare bytes: both ranges live in the same bytes_buf.
-            let a = &tape.bytes_buf[start as usize .. end as usize];
-            let b = &tape.bytes_buf[ic.first_key_off.0 as usize .. ic.first_key_off.1 as usize];
+            let a = &tape.bytes_buf[start as usize..end as usize];
+            let b = &tape.bytes_buf[ic.first_key_off.0 as usize..ic.first_key_off.1 as usize];
             return a == b;
         }
     }
@@ -1210,9 +1483,13 @@ pub fn tape_array_filter_map_numeric_fold(
         _ => return None,
     };
     let mut acc = NumAcc {
-        sum_i: 0, sum_f: 0.0, count: 0,
-        min_f: f64::INFINITY, max_f: f64::NEG_INFINITY,
-        is_float: false, mixed: false,
+        sum_i: 0,
+        sum_f: 0.0,
+        count: 0,
+        min_f: f64::INFINITY,
+        max_f: f64::NEG_INFINITY,
+        is_float: false,
+        mixed: false,
     };
     let mut j = arr_idx + 1;
     for _ in 0..len {
@@ -1227,12 +1504,21 @@ pub fn tape_array_filter_map_numeric_fold(
         if pass {
             if let Some(mv) = tape_object_field(tape, entry, map_field) {
                 accumulate(tape.nodes[mv], &mut acc);
-                if acc.mixed { return None; }
+                if acc.mixed {
+                    return None;
+                }
             }
         }
         j += tape.span(entry);
     }
-    Some((acc.sum_i, acc.sum_f, acc.count, acc.min_f, acc.max_f, acc.is_float))
+    Some((
+        acc.sum_i,
+        acc.sum_f,
+        acc.count,
+        acc.min_f,
+        acc.max_f,
+        acc.is_float,
+    ))
 }
 
 /// `$.<arr>.filter(<pf> <op> <lit>).map(<mf>)` — collect projected
@@ -1250,7 +1536,12 @@ pub fn tape_array_filter_map_collect_numeric(
         TapeNode::Array { len, .. } => len as usize,
         _ => return None,
     };
-    let mut acc = NumCol { ints: Vec::new(), floats: Vec::new(), is_float: false, mixed: false };
+    let mut acc = NumCol {
+        ints: Vec::new(),
+        floats: Vec::new(),
+        is_float: false,
+        mixed: false,
+    };
     let mut j = arr_idx + 1;
     for _ in 0..len {
         let entry = j;
@@ -1264,7 +1555,9 @@ pub fn tape_array_filter_map_collect_numeric(
         if pass {
             if let Some(mv) = tape_object_field(tape, entry, map_field) {
                 collect_value(tape.nodes[mv], &mut acc);
-                if acc.mixed { return None; }
+                if acc.mixed {
+                    return None;
+                }
             }
         }
         j += tape.span(entry);
@@ -1284,7 +1577,12 @@ pub fn tape_array_field_collect_numeric(
         TapeNode::Array { len, .. } => len as usize,
         _ => return None,
     };
-    let mut acc = NumCol { ints: Vec::with_capacity(len), floats: Vec::new(), is_float: false, mixed: false };
+    let mut acc = NumCol {
+        ints: Vec::with_capacity(len),
+        floats: Vec::new(),
+        is_float: false,
+        mixed: false,
+    };
     let mut ic: Option<ShapeIC> = None;
     let mut j = arr_idx + 1;
     for _ in 0..len {
@@ -1294,15 +1592,26 @@ pub fn tape_array_field_collect_numeric(
         }
         let cached = ic.as_ref().filter(|c| shape_ic_check(tape, entry, c));
         let v: Option<usize> = if let Some(c) = cached {
-            if c.rel_offs[0] == u32::MAX { None } else { Some(entry + c.rel_offs[0] as usize) }
+            if c.rel_offs[0] == u32::MAX {
+                None
+            } else {
+                Some(entry + c.rel_offs[0] as usize)
+            }
         } else {
             ic = shape_ic_build(tape, entry, [field, ""]);
-            ic.as_ref().and_then(|c| if c.rel_offs[0] == u32::MAX { None }
-                                     else { Some(entry + c.rel_offs[0] as usize) })
+            ic.as_ref().and_then(|c| {
+                if c.rel_offs[0] == u32::MAX {
+                    None
+                } else {
+                    Some(entry + c.rel_offs[0] as usize)
+                }
+            })
         };
         if let Some(v) = v {
             collect_value(tape.nodes[v], &mut acc);
-            if acc.mixed { return None; }
+            if acc.mixed {
+                return None;
+            }
         }
         j += tape.span(entry);
     }
