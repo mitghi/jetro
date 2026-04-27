@@ -188,6 +188,68 @@ lifted_str_stage!(TrimLeft, |s| s.trim_start().to_owned());
 // `.trim_right()` / `.trim_end()` — strip trailing whitespace.
 lifted_str_stage!(TrimRight, |s| s.trim_end().to_owned());
 
+// `.capitalize()` — uppercase first char, lowercase rest (per Unicode).
+lifted_str_stage!(Capitalize, |s| {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    if let Some(first) = chars.next() {
+        for c in first.to_uppercase() { out.push(c); }
+        out.push_str(&chars.as_str().to_lowercase());
+    }
+    out
+});
+
+// `.title_case()` — uppercase first char of each word, lowercase rest.
+lifted_str_stage!(TitleCase, |s| {
+    let mut out = String::with_capacity(s.len());
+    let mut at_start = true;
+    for c in s.chars() {
+        if c.is_whitespace() {
+            out.push(c);
+            at_start = true;
+        } else if at_start {
+            for u in c.to_uppercase() { out.push(u); }
+            at_start = false;
+        } else {
+            for l in c.to_lowercase() { out.push(l); }
+        }
+    }
+    out
+});
+
+// `.html_escape()` — replace HTML special chars with entities.
+lifted_str_stage!(HtmlEscape, |s| {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '&' => out.push_str("&amp;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
+});
+
+// `.url_encode()` — percent-encode per RFC 3986 unreserved set.
+lifted_str_stage!(UrlEncode, |s| {
+    let mut out = String::with_capacity(s.len());
+    for b in s.as_bytes() {
+        let b = *b;
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9'
+                | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            _ => {
+                use std::fmt::Write;
+                let _ = write!(out, "%{:02X}", b);
+            }
+        }
+    }
+    out
+});
+
 /// Closure-based `.filter(pred)` — for the borrow runner where the
 /// predicate is built from a kernel at lowering time (FieldCmpLit etc.
 /// → owned literal compare).  composed.rs's `GenericFilter` uses VM
@@ -2220,6 +2282,32 @@ mod tests {
         assert!(matches!(Trim.apply(&v), StageOutput::Filtered));
         assert!(matches!(TrimLeft.apply(&v), StageOutput::Filtered));
         assert!(matches!(TrimRight.apply(&v), StageOutput::Filtered));
+        assert!(matches!(Capitalize.apply(&v), StageOutput::Filtered));
+        assert!(matches!(TitleCase.apply(&v), StageOutput::Filtered));
+        assert!(matches!(HtmlEscape.apply(&v), StageOutput::Filtered));
+        assert!(matches!(UrlEncode.apply(&v), StageOutput::Filtered));
+    }
+
+    #[test]
+    fn capitalize_and_title_case() {
+        let s = Val::Str(std::sync::Arc::from("hello world"));
+        assert_eq!(extract_str(Capitalize.apply(&s)), "Hello world");
+        assert_eq!(extract_str(TitleCase.apply(&s)), "Hello World");
+    }
+
+    #[test]
+    fn html_escape_runs() {
+        let s = Val::Str(std::sync::Arc::from("a<b>&'\"c"));
+        assert_eq!(
+            extract_str(HtmlEscape.apply(&s)),
+            "a&lt;b&gt;&amp;&#39;&quot;c"
+        );
+    }
+
+    #[test]
+    fn url_encode_unreserved_passthrough() {
+        let s = Val::Str(std::sync::Arc::from("hello world!"));
+        assert_eq!(extract_str(UrlEncode.apply(&s)), "hello%20world%21");
     }
 
     #[test]
