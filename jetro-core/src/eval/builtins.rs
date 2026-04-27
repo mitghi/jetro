@@ -66,18 +66,18 @@ fn build() -> BuiltinRegistry {
     t.insert("from_json",  b_from_json);
 
     // Object
-    t.insert("keys",        b_keys);
-    t.insert("values",      b_values);
-    t.insert("entries",     b_entries);
+    t.insert("keys",        crate::composed::shims::keys);
+    t.insert("values",      crate::composed::shims::values);
+    t.insert("entries",     crate::composed::shims::entries);
     t.insert("to_pairs",    b_to_pairs);
     t.insert("from_pairs",  b_from_pairs);
-    t.insert("invert",      b_invert);
+    t.insert("invert",      crate::composed::shims::invert);
     t.insert("pick",        func_objects::pick);
     t.insert("omit",        func_objects::omit);
-    t.insert("merge",       func_objects::merge);
-    t.insert("deep_merge",  func_objects::deep_merge_method);
-    t.insert("defaults",    func_objects::defaults);
-    t.insert("rename",      func_objects::rename);
+    t.insert("merge",       crate::composed::shims::merge);
+    t.insert("deep_merge",  crate::composed::shims::deep_merge);
+    t.insert("defaults",    crate::composed::shims::defaults);
+    t.insert("rename",      crate::composed::shims::rename);
     t.insert("transform_keys",   func_objects::transform_keys);
     t.insert("transform_values", func_objects::transform_values);
     t.insert("filter_keys",   func_objects::filter_keys);
@@ -370,28 +370,12 @@ fn b_from_json(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
     }
 }
 
-fn b_keys(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    func_objects::keys(recv)
-}
-
-fn b_values(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    func_objects::values(recv)
-}
-
-fn b_entries(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    func_objects::entries(recv)
-}
-
 fn b_to_pairs(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
     func_objects::to_pairs(recv)
 }
 
 fn b_from_pairs(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
     func_objects::from_pairs(recv)
-}
-
-fn b_invert(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
-    func_objects::invert(recv)
 }
 
 fn b_min(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {

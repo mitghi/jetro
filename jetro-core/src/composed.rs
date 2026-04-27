@@ -613,6 +613,58 @@ pub mod shims {
         run_single(&Prepend::new(item), &recv)
             .ok_or_else(|| EvalError("prepend: stage filtered".into()))
     }
+
+    // ── Object Stages ────────────────────────────────────────────────
+
+    pub fn keys(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
+        Ok(run_single(&Keys, &recv).unwrap_or_else(|| Val::arr(vec![])))
+    }
+
+    pub fn values(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
+        Ok(run_single(&Values, &recv).unwrap_or_else(|| Val::arr(vec![])))
+    }
+
+    pub fn entries(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
+        Ok(run_single(&Entries, &recv).unwrap_or_else(|| Val::arr(vec![])))
+    }
+
+    pub fn invert(recv: Val, _: &[Arg], _: &Env) -> Result<Val, EvalError> {
+        run_single(&Invert, &recv)
+            .ok_or_else(|| EvalError("invert: expected object".into()))
+    }
+
+    fn first_val_arg(args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+        match args.first() {
+            Some(a) => match a {
+                Arg::Pos(e) | Arg::Named(_, e) => crate::eval::eval(e, env),
+            },
+            None => Ok(Val::Null),
+        }
+    }
+
+    pub fn merge(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+        let other = first_val_arg(args, env)?;
+        run_single(&Merge::new(other), &recv)
+            .ok_or_else(|| EvalError("merge: expected two objects".into()))
+    }
+
+    pub fn deep_merge(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+        let other = first_val_arg(args, env)?;
+        run_single(&DeepMerge::new(other), &recv)
+            .ok_or_else(|| EvalError("deep_merge: stage filtered".into()))
+    }
+
+    pub fn defaults(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+        let other = first_val_arg(args, env)?;
+        run_single(&Defaults::new(other), &recv)
+            .ok_or_else(|| EvalError("defaults: expected two objects".into()))
+    }
+
+    pub fn rename(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+        let renames = first_val_arg(args, env)?;
+        run_single(&Rename::new(renames), &recv)
+            .ok_or_else(|| EvalError("rename: expected object and rename map".into()))
+    }
 }
 
 // Helper macro — generates per-builtin owned Stage impl with the
@@ -1600,11 +1652,8 @@ impl Stage for Invert {
         for (k, v) in m.iter() {
             let new_key: std::sync::Arc<str> = match v {
                 Val::Str(s) => s.clone(),
-                Val::Int(n) => std::sync::Arc::from(n.to_string()),
-                Val::Float(f) => std::sync::Arc::from(f.to_string()),
-                Val::Bool(b) => std::sync::Arc::from(if *b { "true" } else { "false" }),
-                Val::Null    => std::sync::Arc::from("null"),
-                _ => continue,
+                other       => std::sync::Arc::<str>::from(
+                    crate::eval::util::val_to_key(other).as_str()),
             };
             out.insert(new_key, Val::Str(k.clone()));
         }
@@ -1612,6 +1661,85 @@ impl Stage for Invert {
     }
 }
 impl<R> crate::unified::Stage<R> for Invert {
+    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
+        crate::unified::StageOutputU::Filtered
+    }
+}
+
+/// `.merge(other)` — shallow merge; keys in `other` override receiver.
+pub struct Merge { pub other: Val }
+impl Merge { pub fn new(other: Val) -> Self { Self { other } } }
+impl Stage for Merge {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        let base = match x.as_object() { Some(m) => m, None => return StageOutput::Filtered };
+        let other = match self.other.as_object() { Some(m) => m, None => return StageOutput::Filtered };
+        let mut out: indexmap::IndexMap<std::sync::Arc<str>, Val> = base.clone();
+        for (k, v) in other.iter() { out.insert(k.clone(), v.clone()); }
+        StageOutput::Pass(Cow::Owned(Val::Obj(std::sync::Arc::new(out))))
+    }
+}
+impl<R> crate::unified::Stage<R> for Merge {
+    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
+        crate::unified::StageOutputU::Filtered
+    }
+}
+
+/// `.deep_merge(other)` — recursive merge; nested objects merge by key.
+pub struct DeepMerge { pub other: Val }
+impl DeepMerge { pub fn new(other: Val) -> Self { Self { other } } }
+impl Stage for DeepMerge {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        StageOutput::Pass(Cow::Owned(
+            crate::eval::util::deep_merge(x.clone(), self.other.clone())))
+    }
+}
+impl<R> crate::unified::Stage<R> for DeepMerge {
+    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
+        crate::unified::StageOutputU::Filtered
+    }
+}
+
+/// `.defaults(other)` — fill null/missing keys from `other`.
+pub struct Defaults { pub other: Val }
+impl Defaults { pub fn new(other: Val) -> Self { Self { other } } }
+impl Stage for Defaults {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        let base = match x.as_object() { Some(m) => m, None => return StageOutput::Filtered };
+        let defs = match self.other.as_object() { Some(m) => m, None => return StageOutput::Filtered };
+        let mut out: indexmap::IndexMap<std::sync::Arc<str>, Val> = base.clone();
+        for (k, v) in defs.iter() {
+            let entry = out.entry(k.clone()).or_insert(Val::Null);
+            if entry.is_null() { *entry = v.clone(); }
+        }
+        StageOutput::Pass(Cow::Owned(Val::Obj(std::sync::Arc::new(out))))
+    }
+}
+impl<R> crate::unified::Stage<R> for Defaults {
+    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
+        crate::unified::StageOutputU::Filtered
+    }
+}
+
+/// `.rename({old: new, ...})` — rename keys per mapping object.
+pub struct Rename { pub renames: Val }
+impl Rename { pub fn new(renames: Val) -> Self { Self { renames } } }
+impl Stage for Rename {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        let base = match x.as_object() { Some(m) => m, None => return StageOutput::Filtered };
+        let renames = match self.renames.as_object() { Some(m) => m, None => return StageOutput::Filtered };
+        let mut out: indexmap::IndexMap<std::sync::Arc<str>, Val> = base.clone();
+        for (old, new_val) in renames.iter() {
+            if let Some(v) = out.shift_remove(old.as_ref()) {
+                let new_key: std::sync::Arc<str> = if let Val::Str(s) = new_val {
+                    s.clone()
+                } else { old.clone() };
+                out.insert(new_key, v);
+            }
+        }
+        StageOutput::Pass(Cow::Owned(Val::Obj(std::sync::Arc::new(out))))
+    }
+}
+impl<R> crate::unified::Stage<R> for Rename {
     fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
         crate::unified::StageOutputU::Filtered
     }

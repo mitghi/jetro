@@ -15,7 +15,7 @@ use indexmap::IndexMap;
 use crate::ast::{Arg, Expr};
 use super::{Env, EvalError, apply_item, apply_item_mut, eval_pos};
 use super::value::Val;
-use super::util::{is_truthy, val_to_key, deep_merge};
+use super::util::{is_truthy, val_to_key};
 use super::func_paths::{parse_path_segs, get_path_impl, PathSeg};
 
 macro_rules! err {
@@ -24,21 +24,8 @@ macro_rules! err {
 
 // ── Field access ──────────────────────────────────────────────────────────────
 
-pub fn keys(recv: Val) -> Result<Val, EvalError> {
-    Ok(Val::arr(
-        recv.as_object().map(|m| m.keys().map(|k| Val::Str(k.clone())).collect()).unwrap_or_default()
-    ))
-}
-
-pub fn values(recv: Val) -> Result<Val, EvalError> {
-    Ok(Val::arr(recv.as_object().map(|m| m.values().cloned().collect()).unwrap_or_default()))
-}
-
-pub fn entries(recv: Val) -> Result<Val, EvalError> {
-    Ok(Val::arr(recv.as_object().map(|m| m.iter().map(|(k, v)| {
-        Val::arr(vec![Val::Str(k.clone()), v.clone()])
-    }).collect()).unwrap_or_default()))
-}
+// `.keys` / `.values` / `.entries` LIFTED to composed::{Keys, Values,
+// Entries}; shims composed::shims::{keys, values, entries}.
 
 // ── Field selection ───────────────────────────────────────────────────────────
 
@@ -153,69 +140,14 @@ pub fn omit(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
 
 // ── Merge / defaults ──────────────────────────────────────────────────────────
 
-pub fn merge(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-    let other = args.first().map(|a| eval_pos(a, env)).transpose()?.unwrap_or(Val::Null);
-    match (recv.into_map(), other.into_map()) {
-        (Some(mut base), Some(other)) => {
-            for (k, v) in other { base.insert(k, v); }
-            Ok(Val::obj(base))
-        }
-        _ => err!("merge: expected two objects"),
-    }
-}
-
-pub fn deep_merge_method(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-    let other = args.first().map(|a| eval_pos(a, env)).transpose()?.unwrap_or(Val::Null);
-    Ok(deep_merge(recv, other))
-}
-
-pub fn defaults(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-    let other = args.first().map(|a| eval_pos(a, env)).transpose()?.unwrap_or(Val::Null);
-    match (recv.into_map(), other.into_map()) {
-        (Some(mut base), Some(defs)) => {
-            for (k, v) in defs {
-                let entry = base.entry(k).or_insert(Val::Null);
-                if entry.is_null() { *entry = v; }
-            }
-            Ok(Val::obj(base))
-        }
-        _ => err!("defaults: expected two objects"),
-    }
-}
+// `.merge` / `.deep_merge` / `.defaults` LIFTED to composed::{Merge,
+// DeepMerge, Defaults}; shims composed::shims::{merge, deep_merge, defaults}.
 
 // ── Rename / invert ───────────────────────────────────────────────────────────
 
-pub fn rename(recv: Val, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
-    let renames = args.first().map(|a| eval_pos(a, env)).transpose()?.unwrap_or(Val::Null);
-    match (recv.into_map(), renames.into_map()) {
-        (Some(mut obj), Some(renames)) => {
-            for (old, new_val) in renames {
-                if let Some(v) = obj.shift_remove(old.as_ref()) {
-                    let new_key: Arc<str> = if let Val::Str(s) = &new_val {
-                        s.clone()
-                    } else { old.clone() };
-                    obj.insert(new_key, v);
-                }
-            }
-            Ok(Val::obj(obj))
-        }
-        _ => err!("rename: expected object and rename map"),
-    }
-}
+// `.rename` LIFTED to composed::Rename; shim composed::shims::rename.
 
-pub fn invert(recv: Val) -> Result<Val, EvalError> {
-    let map = recv.into_map().ok_or_else(|| EvalError("invert: expected object".into()))?;
-    let out: IndexMap<Arc<str>, Val> = map.into_iter()
-        .map(|(k, v)| {
-            let nk = match v {
-                Val::Str(s) => s,
-                other       => Arc::<str>::from(val_to_key(&other)),
-            };
-            (nk, Val::Str(k))
-        })
-        .collect();
-    Ok(Val::obj(out))
-}
+// `.invert` LIFTED to composed::Invert; shim composed::shims::invert.
 
 // ── Transform ─────────────────────────────────────────────────────────────────
 
