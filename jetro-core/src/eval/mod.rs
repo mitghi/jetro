@@ -50,7 +50,7 @@ pub mod borrowed;
 pub mod func_strings;
 mod func_arrays;
 mod func_objects;
-mod func_paths;
+pub mod func_paths;
 mod func_aggregates;
 mod func_csv;
 mod func_search;

@@ -943,6 +943,121 @@ impl<R> crate::unified::Stage<R> for Invert {
     }
 }
 
+// ── Set Stages (lift_all_builtins sets family) ─────────────────────
+//
+// Take a `other: Vec<Val>` set parameter and produce a new Arr.
+// Reuses `eval::util::val_to_key` for hashable canonical-string
+// repr (matches owned semantics).
+
+/// `.intersect(other)` — keep elements present in both arrays.
+pub struct Intersect { pub other: Vec<Val> }
+impl Intersect { pub fn new(other: Vec<Val>) -> Self { Self { other } } }
+impl Stage for Intersect {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        if let Val::Arr(a) = x {
+            let other_keys: std::collections::HashSet<String> =
+                self.other.iter().map(crate::eval::util::val_to_key).collect();
+            let kept: Vec<Val> = a.iter()
+                .filter(|v| other_keys.contains(&crate::eval::util::val_to_key(v)))
+                .cloned()
+                .collect();
+            return StageOutput::Pass(Cow::Owned(Val::arr(kept)));
+        }
+        StageOutput::Filtered
+    }
+}
+impl<R> crate::unified::Stage<R> for Intersect {
+    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
+        crate::unified::StageOutputU::Filtered
+    }
+}
+
+/// `.union(other)` — combine, preserve order, dedup.
+pub struct Union { pub other: Vec<Val> }
+impl Union { pub fn new(other: Vec<Val>) -> Self { Self { other } } }
+impl Stage for Union {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        if let Val::Arr(a) = x {
+            let mut out: Vec<Val> = a.as_ref().clone();
+            let a_keys: std::collections::HashSet<String> =
+                a.iter().map(crate::eval::util::val_to_key).collect();
+            for v in &self.other {
+                if !a_keys.contains(&crate::eval::util::val_to_key(v)) {
+                    out.push(v.clone());
+                }
+            }
+            return StageOutput::Pass(Cow::Owned(Val::arr(out)));
+        }
+        StageOutput::Filtered
+    }
+}
+impl<R> crate::unified::Stage<R> for Union {
+    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
+        crate::unified::StageOutputU::Filtered
+    }
+}
+
+/// `.diff(other)` — keep elements present in self but not in other.
+pub struct Diff { pub other: Vec<Val> }
+impl Diff { pub fn new(other: Vec<Val>) -> Self { Self { other } } }
+impl Stage for Diff {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        if let Val::Arr(a) = x {
+            let other_keys: std::collections::HashSet<String> =
+                self.other.iter().map(crate::eval::util::val_to_key).collect();
+            let kept: Vec<Val> = a.iter()
+                .filter(|v| !other_keys.contains(&crate::eval::util::val_to_key(v)))
+                .cloned()
+                .collect();
+            return StageOutput::Pass(Cow::Owned(Val::arr(kept)));
+        }
+        StageOutput::Filtered
+    }
+}
+impl<R> crate::unified::Stage<R> for Diff {
+    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
+        crate::unified::StageOutputU::Filtered
+    }
+}
+
+// ── Path Stages (lift_all_builtins paths family) ───────────────────
+
+/// `.get_path(path)` — read leaf at dotted/bracket path.
+pub struct GetPath { pub path: std::sync::Arc<str> }
+impl GetPath {
+    pub fn new(path: std::sync::Arc<str>) -> Self { Self { path } }
+}
+impl Stage for GetPath {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        let segs = crate::eval::func_paths::parse_path_segs(self.path.as_ref());
+        let v = crate::eval::func_paths::get_path_impl(x, &segs);
+        StageOutput::Pass(Cow::Owned(v))
+    }
+}
+impl<R> crate::unified::Stage<R> for GetPath {
+    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
+        crate::unified::StageOutputU::Filtered
+    }
+}
+
+/// `.has_path(path)` — does the path resolve to a non-null value?
+pub struct HasPath { pub path: std::sync::Arc<str> }
+impl HasPath {
+    pub fn new(path: std::sync::Arc<str>) -> Self { Self { path } }
+}
+impl Stage for HasPath {
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        let segs = crate::eval::func_paths::parse_path_segs(self.path.as_ref());
+        let found = !crate::eval::func_paths::get_path_impl(x, &segs).is_null();
+        StageOutput::Pass(Cow::Owned(Val::Bool(found)))
+    }
+}
+impl<R> crate::unified::Stage<R> for HasPath {
+    fn apply(&self, _x: R) -> crate::unified::StageOutputU<R> {
+        crate::unified::StageOutputU::Filtered
+    }
+}
+
 /// `.has(key)` — does Obj contain `key`? Val::Bool.
 pub struct Has { pub key: std::sync::Arc<str> }
 impl Has { pub fn new(key: std::sync::Arc<str>) -> Self { Self { key } } }
@@ -3242,6 +3357,31 @@ mod tests {
             indexmap::IndexMap::with_capacity(pairs.len());
         for (k, v) in pairs { m.insert(std::sync::Arc::from(k), v); }
         Val::Obj(std::sync::Arc::new(m))
+    }
+
+    #[test]
+    fn intersect_union_diff_sets() {
+        let a = arr_of(vec![Val::Int(1), Val::Int(2), Val::Int(3), Val::Int(4)]);
+        let b = vec![Val::Int(2), Val::Int(4), Val::Int(5)];
+        assert_eq!(extract_arr_len(Intersect::new(b.clone()).apply(&a)), 2);
+        assert_eq!(extract_arr_len(Union::new(b.clone()).apply(&a)), 5);
+        assert_eq!(extract_arr_len(Diff::new(b).apply(&a)), 2);
+    }
+
+    #[test]
+    fn get_path_has_path() {
+        let inner = obj_of(vec![("city", Val::Str(std::sync::Arc::from("NYC")))]);
+        let outer = obj_of(vec![("addr", inner)]);
+        let r = GetPath::new(std::sync::Arc::from("addr.city")).apply(&outer);
+        match r {
+            StageOutput::Pass(cow) => match cow.into_owned() {
+                Val::Str(s) => assert_eq!(s.as_ref(), "NYC"),
+                other => panic!("got {:?}", other),
+            },
+            _ => panic!(),
+        }
+        assert!(extract_bool(HasPath::new(std::sync::Arc::from("addr.city")).apply(&outer)));
+        assert!(!extract_bool(HasPath::new(std::sync::Arc::from("addr.zip")).apply(&outer)));
     }
 
     #[test]
