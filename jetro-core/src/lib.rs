@@ -54,6 +54,7 @@ pub(crate) mod analysis;
 pub(crate) mod ast;
 pub(crate) mod builtin_helpers;
 pub(crate) mod builtins;
+pub(crate) mod chain_ir;
 pub(crate) mod composed;
 pub(crate) mod context;
 pub(crate) mod executor;
