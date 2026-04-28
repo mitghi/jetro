@@ -1,7 +1,14 @@
 #[cfg(test)]
 mod tests {
-    use crate::query;
+    use crate::{parser, vm};
     use serde_json::json;
+
+    fn vm_query(expr: &str, doc: &serde_json::Value) -> Result<serde_json::Value, crate::Error> {
+        let ast = parser::parse(expr)?;
+        let program = vm::Compiler::compile(&ast, expr);
+        let mut vm = vm::VM::new();
+        Ok(vm.execute(&program, doc)?)
+    }
 
     fn books() -> serde_json::Value {
         json!({
@@ -22,42 +29,42 @@ mod tests {
     #[test]
     fn field_access() {
         let doc = books();
-        let r = query("$.user.name", &doc).unwrap();
+        let r = vm_query("$.user.name", &doc).unwrap();
         assert_eq!(r, json!("Alice"));
     }
 
     #[test]
     fn test_playground() {
         let doc = books();
-        let r = query("$..books[0].filter(title == \"1984\")[0].title", &doc).unwrap();
+        let r = vm_query("$..books[0].filter(title == \"1984\")[0].title", &doc).unwrap();
         assert_eq!(r, json!("1984"));
     }
 
     #[test]
     fn nested_field() {
         let doc = books();
-        let r = query("$.store.books[0].title", &doc).unwrap();
+        let r = vm_query("$.store.books[0].title", &doc).unwrap();
         assert_eq!(r, json!("Dune"));
     }
 
     #[test]
     fn negative_index() {
         let doc = books();
-        let r = query("$.store.books[-1].title", &doc).unwrap();
+        let r = vm_query("$.store.books[-1].title", &doc).unwrap();
         assert_eq!(r, json!("1984"));
     }
 
     #[test]
     fn slice() {
         let doc = books();
-        let r = query("$.store.books[0:2].map(title)", &doc).unwrap();
+        let r = vm_query("$.store.books[0:2].map(title)", &doc).unwrap();
         assert_eq!(r, json!(["Dune", "Foundation"]));
     }
 
     #[test]
     fn descendant() {
         let doc = books();
-        let r = query("$..title", &doc).unwrap();
+        let r = vm_query("$..title", &doc).unwrap();
         let titles = r.as_array().unwrap();
         assert!(titles.contains(&json!("Dune")));
         assert!(titles.contains(&json!("1984")));
@@ -66,14 +73,14 @@ mod tests {
     #[test]
     fn optional_field_null_safe() {
         let doc = json!({"user": {"name": "Bob"}});
-        let r = query("$.user?.email", &doc).unwrap();
+        let r = vm_query("$.user?.email", &doc).unwrap();
         assert_eq!(r, json!(null));
     }
 
     #[test]
     fn optional_field_chain() {
         let doc = json!({"user": null});
-        let r = query("$.user?.name", &doc).unwrap();
+        let r = vm_query("$.user?.name", &doc).unwrap();
         assert_eq!(r, json!(null));
     }
 
@@ -82,7 +89,7 @@ mod tests {
     #[test]
     fn filter_simple() {
         let doc = books();
-        let r = query("$.store.books.filter(price > 10)", &doc).unwrap();
+        let r = vm_query("$.store.books.filter(price > 10)", &doc).unwrap();
         let arr = r.as_array().unwrap();
         assert_eq!(arr.len(), 2);
     }
@@ -90,7 +97,7 @@ mod tests {
     #[test]
     fn filter_and() {
         let doc = books();
-        let r = query("$.store.books.filter(price > 10 and rating >= 4.5)", &doc).unwrap();
+        let r = vm_query("$.store.books.filter(price > 10 and rating >= 4.5)", &doc).unwrap();
         let arr = r.as_array().unwrap();
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["title"], json!("Dune"));
@@ -99,7 +106,7 @@ mod tests {
     #[test]
     fn filter_lambda() {
         let doc = books();
-        let r = query("$.store.books.filter(lambda b: b.price > 10)", &doc).unwrap();
+        let r = vm_query("$.store.books.filter(lambda b: b.price > 10)", &doc).unwrap();
         let arr = r.as_array().unwrap();
         assert_eq!(arr.len(), 2);
     }
@@ -107,7 +114,7 @@ mod tests {
     #[test]
     fn filter_not() {
         let doc = books();
-        let r = query("$.store.books.filter(not price > 10)", &doc).unwrap();
+        let r = vm_query("$.store.books.filter(not price > 10)", &doc).unwrap();
         let arr = r.as_array().unwrap();
         assert_eq!(arr.len(), 2);
     }
@@ -117,14 +124,14 @@ mod tests {
     #[test]
     fn map_pluck() {
         let doc = books();
-        let r = query("$.store.books.map(title)", &doc).unwrap();
+        let r = vm_query("$.store.books.map(title)", &doc).unwrap();
         assert_eq!(r, json!(["Dune", "Foundation", "Neuromancer", "1984"]));
     }
 
     #[test]
     fn map_object_shorthand() {
         let doc = books();
-        let r = query("$.store.books.map({title, price})", &doc).unwrap();
+        let r = vm_query("$.store.books.map({title, price})", &doc).unwrap();
         let arr = r.as_array().unwrap();
         assert_eq!(arr[0]["title"], json!("Dune"));
         assert_eq!(arr[0]["price"], json!(12.99));
@@ -133,7 +140,7 @@ mod tests {
     #[test]
     fn map_rename() {
         let doc = books();
-        let r = query("$.store.books.map({name: title, cost: price})", &doc).unwrap();
+        let r = vm_query("$.store.books.map({name: title, cost: price})", &doc).unwrap();
         let arr = r.as_array().unwrap();
         assert_eq!(arr[0]["name"], json!("Dune"));
         assert_eq!(arr[0]["cost"], json!(12.99));
@@ -142,7 +149,7 @@ mod tests {
     #[test]
     fn map_computed_field() {
         let doc = books();
-        let r = query("$.store.books.map({title, expensive: price > 10})", &doc).unwrap();
+        let r = vm_query("$.store.books.map({title, expensive: price > 10})", &doc).unwrap();
         let arr = r.as_array().unwrap();
         assert_eq!(arr[0]["expensive"], json!(true));
         assert_eq!(arr[1]["expensive"], json!(false));
@@ -153,30 +160,30 @@ mod tests {
     #[test]
     fn len() {
         let doc = books();
-        assert_eq!(query("$.store.books.len()", &doc).unwrap(), json!(4));
+        assert_eq!(vm_query("$.store.books.len()", &doc).unwrap(), json!(4));
     }
 
     #[test]
     fn sum() {
         let doc = json!({"nums": [1, 2, 3, 4]});
-        assert_eq!(query("$.nums.sum()", &doc).unwrap(), json!(10));
+        assert_eq!(vm_query("$.nums.sum()", &doc).unwrap(), json!(10));
     }
 
     #[test]
     fn sum_field() {
         let doc = json!({"items": [{"v": 1}, {"v": 2}, {"v": 3}]});
-        assert_eq!(query("$.items.sum(v)", &doc).unwrap(), json!(6));
+        assert_eq!(vm_query("$.items.sum(v)", &doc).unwrap(), json!(6));
     }
 
     #[test]
     fn first_last() {
         let doc = books();
         assert_eq!(
-            query("$.store.books.first().title", &doc).unwrap(),
+            vm_query("$.store.books.first().title", &doc).unwrap(),
             json!("Dune")
         );
         assert_eq!(
-            query("$.store.books.last().title", &doc).unwrap(),
+            vm_query("$.store.books.last().title", &doc).unwrap(),
             json!("1984")
         );
     }
@@ -184,21 +191,21 @@ mod tests {
     #[test]
     fn first_n() {
         let doc = books();
-        let r = query("$.store.books.first(2).map(title)", &doc).unwrap();
+        let r = vm_query("$.store.books.first(2).map(title)", &doc).unwrap();
         assert_eq!(r, json!(["Dune", "Foundation"]));
     }
 
     #[test]
     fn sort_asc() {
         let doc = books();
-        let r = query("$.store.books.sort(price).map(title)", &doc).unwrap();
+        let r = vm_query("$.store.books.sort(price).map(title)", &doc).unwrap();
         assert_eq!(r.as_array().unwrap()[0], json!("1984"));
     }
 
     #[test]
     fn sort_desc() {
         let doc = books();
-        let r = query("$.store.books.sort(-price).map(title)", &doc).unwrap();
+        let r = vm_query("$.store.books.sort(-price).map(title)", &doc).unwrap();
         assert_eq!(r.as_array().unwrap()[0], json!("Dune"));
     }
 
@@ -208,7 +215,7 @@ mod tests {
     fn or_default() {
         let doc = json!({"user": {}});
         assert_eq!(
-            query("$.user.name.or(\"anon\")", &doc).unwrap(),
+            vm_query("$.user.name.or(\"anon\")", &doc).unwrap(),
             json!("anon")
         );
     }
@@ -216,15 +223,21 @@ mod tests {
     #[test]
     fn has_field() {
         let doc = json!({"user": {"name": "Alice", "email": "a@b.com"}});
-        assert_eq!(query("$.user.has(\"email\")", &doc).unwrap(), json!(true));
-        assert_eq!(query("$.user.has(\"phone\")", &doc).unwrap(), json!(false));
+        assert_eq!(
+            vm_query("$.user.has(\"email\")", &doc).unwrap(),
+            json!(true)
+        );
+        assert_eq!(
+            vm_query("$.user.has(\"phone\")", &doc).unwrap(),
+            json!(false)
+        );
     }
 
     #[test]
     fn missing_field() {
         let doc = json!({"user": {"name": "Alice"}});
         assert_eq!(
-            query("$.user.missing(\"phone\")", &doc).unwrap(),
+            vm_query("$.user.missing(\"phone\")", &doc).unwrap(),
             json!(true)
         );
     }
@@ -232,7 +245,10 @@ mod tests {
     #[test]
     fn compact() {
         let doc = json!({"vals": [1, null, 2, null, 3]});
-        assert_eq!(query("$.vals.compact()", &doc).unwrap(), json!([1, 2, 3]));
+        assert_eq!(
+            vm_query("$.vals.compact()", &doc).unwrap(),
+            json!([1, 2, 3])
+        );
     }
 
     // ── Kind checks ───────────────────────────────────────────────────────────
@@ -240,14 +256,14 @@ mod tests {
     #[test]
     fn kind_number() {
         let doc = json!({"items": [{"v": 1}, {"v": "x"}, {"v": null}]});
-        let r = query("$.items.filter(v kind number)", &doc).unwrap();
+        let r = vm_query("$.items.filter(v kind number)", &doc).unwrap();
         assert_eq!(r, json!([{"v": 1}]));
     }
 
     #[test]
     fn kind_not_null() {
         let doc = json!({"items": [{"v": 1}, {"v": null}]});
-        let r = query("$.items.filter(v kind not null)", &doc).unwrap();
+        let r = vm_query("$.items.filter(v kind not null)", &doc).unwrap();
         assert_eq!(r, json!([{"v": 1}]));
     }
 
@@ -256,21 +272,21 @@ mod tests {
     #[test]
     fn list_comp_basic() {
         let doc = books();
-        let r = query("[b.title for b in $.store.books]", &doc).unwrap();
+        let r = vm_query("[b.title for b in $.store.books]", &doc).unwrap();
         assert_eq!(r, json!(["Dune", "Foundation", "Neuromancer", "1984"]));
     }
 
     #[test]
     fn list_comp_with_cond() {
         let doc = books();
-        let r = query("[b.title for b in $.store.books if b.price > 10]", &doc).unwrap();
+        let r = vm_query("[b.title for b in $.store.books if b.price > 10]", &doc).unwrap();
         assert_eq!(r, json!(["Dune", "Neuromancer"]));
     }
 
     #[test]
     fn dict_comp() {
         let doc = json!({"users": [{"id": "a1", "name": "Alice"}, {"id": "b2", "name": "Bob"}]});
-        let r = query("{u.id: u.name for u in $.users}", &doc).unwrap();
+        let r = vm_query("{u.id: u.name for u in $.users}", &doc).unwrap();
         assert_eq!(r["a1"], json!("Alice"));
         assert_eq!(r["b2"], json!("Bob"));
     }
@@ -279,7 +295,7 @@ mod tests {
     fn set_comp_unique() {
         let doc =
             json!({"items": [{"genre": "sci-fi"}, {"genre": "sci-fi"}, {"genre": "dystopia"}]});
-        let r = query("{item.genre for item in $.items}", &doc).unwrap();
+        let r = vm_query("{item.genre for item in $.items}", &doc).unwrap();
         let arr = r.as_array().unwrap();
         assert_eq!(arr.len(), 2);
     }
@@ -289,7 +305,7 @@ mod tests {
     #[test]
     fn lambda_update() {
         let doc = json!({"prices": [10, 20, 30]});
-        let r = query("$.prices.map(lambda p: p * 2)", &doc).unwrap();
+        let r = vm_query("$.prices.map(lambda p: p * 2)", &doc).unwrap();
         assert_eq!(r, json!([20, 40, 60]));
     }
 
@@ -298,7 +314,7 @@ mod tests {
     #[test]
     fn let_binding() {
         let doc = books();
-        let r = query(
+        let r = vm_query(
             "let expensive = $.store.books.filter(price > 10) in expensive.len()",
             &doc,
         )
@@ -309,7 +325,7 @@ mod tests {
     #[test]
     fn let_nested() {
         let doc = books();
-        let r = query(
+        let r = vm_query(
             "let top = $.store.books.sort(-rating).first(2) in let titles = top.map(title) in titles",
             &doc
         ).unwrap();
@@ -323,7 +339,7 @@ mod tests {
     #[test]
     fn enumerate() {
         let doc = json!({"items": ["a", "b", "c"]});
-        let r = query("$.items.enumerate()", &doc).unwrap();
+        let r = vm_query("$.items.enumerate()", &doc).unwrap();
         let arr = r.as_array().unwrap();
         assert_eq!(arr[0]["index"], json!(0));
         assert_eq!(arr[0]["value"], json!("a"));
@@ -332,35 +348,35 @@ mod tests {
     #[test]
     fn pairwise() {
         let doc = json!({"vals": [1, 2, 3, 4]});
-        let r = query("$.vals.pairwise()", &doc).unwrap();
+        let r = vm_query("$.vals.pairwise()", &doc).unwrap();
         assert_eq!(r, json!([[1, 2], [2, 3], [3, 4]]));
     }
 
     #[test]
     fn window() {
         let doc = json!({"vals": [1, 2, 3, 4, 5]});
-        let r = query("$.vals.window(3)", &doc).unwrap();
+        let r = vm_query("$.vals.window(3)", &doc).unwrap();
         assert_eq!(r, json!([[1, 2, 3], [2, 3, 4], [3, 4, 5]]));
     }
 
     #[test]
     fn chunk() {
         let doc = json!({"vals": [1, 2, 3, 4, 5]});
-        let r = query("$.vals.chunk(2)", &doc).unwrap();
+        let r = vm_query("$.vals.chunk(2)", &doc).unwrap();
         assert_eq!(r, json!([[1, 2], [3, 4], [5]]));
     }
 
     #[test]
     fn accumulate() {
         let doc = json!({"vals": [1, 2, 3, 4]});
-        let r = query("$.vals.accumulate(lambda acc, x: acc + x)", &doc).unwrap();
+        let r = vm_query("$.vals.accumulate(lambda acc, x: acc + x)", &doc).unwrap();
         assert_eq!(r, json!([1, 3, 6, 10]));
     }
 
     #[test]
     fn partition() {
         let doc = json!({"nums": [1, 2, 3, 4, 5, 6]});
-        let r = query("$.nums.partition(lambda n: n % 2 == 0)", &doc).unwrap();
+        let r = vm_query("$.nums.partition(lambda n: n % 2 == 0)", &doc).unwrap();
         assert_eq!(r["true"], json!([2, 4, 6]));
         assert_eq!(r["false"], json!([1, 3, 5]));
     }
@@ -368,21 +384,21 @@ mod tests {
     #[test]
     fn takewhile() {
         let doc = json!({"vals": [1, 2, 3, 4, 5]});
-        let r = query("$.vals.takewhile(lambda v: v < 4)", &doc).unwrap();
+        let r = vm_query("$.vals.takewhile(lambda v: v < 4)", &doc).unwrap();
         assert_eq!(r, json!([1, 2, 3]));
     }
 
     #[test]
     fn dropwhile() {
         let doc = json!({"vals": [1, 2, 3, 4, 5]});
-        let r = query("$.vals.dropwhile(lambda v: v < 3)", &doc).unwrap();
+        let r = vm_query("$.vals.dropwhile(lambda v: v < 3)", &doc).unwrap();
         assert_eq!(r, json!([3, 4, 5]));
     }
 
     #[test]
     fn fused_filter_drop_while() {
         let doc = json!({"vals": [1, 2, 3, 4, 5, 6]});
-        let r = query(
+        let r = vm_query(
             "$.vals.filter(lambda v: v > 1).dropwhile(lambda v: v < 4)",
             &doc,
         )
@@ -393,7 +409,7 @@ mod tests {
     #[test]
     fn fused_map_unique() {
         let doc = json!({"xs": [1, 2, 2, 3, 3, 3]});
-        let r = query("$.xs.map(lambda v: v * 2).unique()", &doc).unwrap();
+        let r = vm_query("$.xs.map(lambda v: v * 2).unique()", &doc).unwrap();
         assert_eq!(r, json!([2, 4, 6]));
     }
 
@@ -402,28 +418,31 @@ mod tests {
     #[test]
     fn coalesce() {
         let doc = json!({"a": null, "b": null, "c": 42});
-        assert_eq!(query("coalesce($.a, $.b, $.c)", &doc).unwrap(), json!(42));
-        assert_eq!(query("coalesce($.a, $.b, 99)", &doc).unwrap(), json!(99));
+        assert_eq!(
+            vm_query("coalesce($.a, $.b, $.c)", &doc).unwrap(),
+            json!(42)
+        );
+        assert_eq!(vm_query("coalesce($.a, $.b, 99)", &doc).unwrap(), json!(99));
     }
 
     #[test]
     fn chain_arrays() {
         let doc = json!({"a": [1, 2], "b": [3, 4]});
-        let r = query("chain($.a, $.b)", &doc).unwrap();
+        let r = vm_query("chain($.a, $.b)", &doc).unwrap();
         assert_eq!(r, json!([1, 2, 3, 4]));
     }
 
     #[test]
     fn zip_arrays() {
         let doc = json!({"a": [1, 2, 3], "b": ["x", "y", "z"]});
-        let r = query("zip($.a, $.b)", &doc).unwrap();
+        let r = vm_query("zip($.a, $.b)", &doc).unwrap();
         assert_eq!(r, json!([[1, "x"], [2, "y"], [3, "z"]]));
     }
 
     #[test]
     fn product() {
         let doc = json!({"colors": ["red", "blue"], "sizes": ["S", "M"]});
-        let r = query("product($.colors, $.sizes)", &doc).unwrap();
+        let r = vm_query("product($.colors, $.sizes)", &doc).unwrap();
         let arr = r.as_array().unwrap();
         assert_eq!(arr.len(), 4);
     }
@@ -433,7 +452,7 @@ mod tests {
     #[test]
     fn object_construction() {
         let doc = books();
-        let r = query(
+        let r = vm_query(
             "{total: $.store.books.sum(price), count: $.store.books.len()}",
             &doc,
         )
@@ -448,9 +467,9 @@ mod tests {
             "another": {"field": 42},
             "deep": {"a": {"b": {"c": "leaf"}}}
         });
-        let r = query("{a: $.books, b: {c: $.another.field}}", &doc).unwrap();
+        let r = vm_query("{a: $.books, b: {c: $.another.field}}", &doc).unwrap();
         assert_eq!(r, json!({"a":[{"t":"x"},{"t":"y"}],"b":{"c":42}}));
-        let r2 = query(
+        let r2 = vm_query(
             "{x: {y: {z: $.deep.a.b.c, arr: [1, $.another.field, {w: $.books[0].t}]}}}",
             &doc,
         )
@@ -461,9 +480,9 @@ mod tests {
     #[test]
     fn optional_field_omitted() {
         let doc = json!({"user": {"name": "Alice"}});
-        let _r = query("$.user.map({name, email?})", &doc);
+        let _r = vm_query("$.user.map({name, email?})", &doc);
         // map on non-array returns error, but test optional field in object directly
-        let r2 = query("{name: $.user.name, email?: $.user.email}", &doc).unwrap();
+        let r2 = vm_query("{name: $.user.name, email?: $.user.email}", &doc).unwrap();
         assert!(r2.get("email").is_none());
         assert_eq!(r2["name"], json!("Alice"));
     }
@@ -473,14 +492,14 @@ mod tests {
     #[test]
     fn pipe_to_method() {
         let doc = books();
-        let r = query("$.store.books | len", &doc).unwrap();
+        let r = vm_query("$.store.books | len", &doc).unwrap();
         assert_eq!(r, json!(4));
     }
 
     #[test]
     fn gen_comp_pipe() {
         let doc = books();
-        let r = query(
+        let r = vm_query(
             "(b.price for b in $.store.books if b.price > 10) | len",
             &doc,
         )
@@ -493,19 +512,19 @@ mod tests {
     #[test]
     fn null_coalesce_basic() {
         let doc = json!({"a": null, "b": 42});
-        assert_eq!(query("$.a ?| $.b", &doc).unwrap(), json!(42));
+        assert_eq!(vm_query("$.a ?| $.b", &doc).unwrap(), json!(42));
     }
 
     #[test]
     fn null_coalesce_non_null_short_circuits() {
         let doc = json!({"a": 1, "b": 99});
-        assert_eq!(query("$.a ?| $.b", &doc).unwrap(), json!(1));
+        assert_eq!(vm_query("$.a ?| $.b", &doc).unwrap(), json!(1));
     }
 
     #[test]
     fn null_coalesce_chain() {
         let doc = json!({"a": null, "b": null, "c": "found"});
-        assert_eq!(query("$.a ?| $.b ?| $.c", &doc).unwrap(), json!("found"));
+        assert_eq!(vm_query("$.a ?| $.b ?| $.c", &doc).unwrap(), json!("found"));
     }
 
     // ── Bind operator (->) ────────────────────────────────────────────────────
@@ -514,7 +533,7 @@ mod tests {
     fn bind_simple_name() {
         let doc = books();
         // bind labels current value as `books`, then use it twice
-        let r = query(
+        let r = vm_query(
             "$.store.books -> books | {count: books.len(), first: books[0].title}",
             &doc,
         )
@@ -526,7 +545,7 @@ mod tests {
     #[test]
     fn bind_object_destructure() {
         let doc = json!({"user": {"name": "Alice", "age": 30, "role": "admin"}});
-        let r = query("$.user -> {name, age} | {greeting: name, years: age}", &doc).unwrap();
+        let r = vm_query("$.user -> {name, age} | {greeting: name, years: age}", &doc).unwrap();
         assert_eq!(r["greeting"], json!("Alice"));
         assert_eq!(r["years"], json!(30));
     }
@@ -534,14 +553,14 @@ mod tests {
     #[test]
     fn bind_object_rest() {
         let doc = json!({"obj": {"a": 1, "b": 2, "c": 3}});
-        let r = query("$.obj -> {a, ...rest} | rest.len()", &doc).unwrap();
+        let r = vm_query("$.obj -> {a, ...rest} | rest.len()", &doc).unwrap();
         assert_eq!(r, json!(2));
     }
 
     #[test]
     fn bind_array_destructure() {
         let doc = json!({"nums": [10, 20, 30]});
-        let r = query("$.nums -> [x, y, z] | x + y + z", &doc).unwrap();
+        let r = vm_query("$.nums -> [x, y, z] | x + y + z", &doc).unwrap();
         assert_eq!(r, json!(60));
     }
 
@@ -550,7 +569,7 @@ mod tests {
     #[test]
     fn object_spread() {
         let doc = json!({"base": {"a": 1, "b": 2}, "extra": {"c": 3}});
-        let r = query("{...$.base, ...$.extra}", &doc).unwrap();
+        let r = vm_query("{...$.base, ...$.extra}", &doc).unwrap();
         assert_eq!(r["a"], json!(1));
         assert_eq!(r["b"], json!(2));
         assert_eq!(r["c"], json!(3));
@@ -559,7 +578,7 @@ mod tests {
     #[test]
     fn object_spread_override() {
         let doc = json!({"base": {"a": 1, "b": 2}});
-        let r = query("{...$.base, b: 99}", &doc).unwrap();
+        let r = vm_query("{...$.base, b: 99}", &doc).unwrap();
         assert_eq!(r["a"], json!(1));
         assert_eq!(r["b"], json!(99));
     }
@@ -569,14 +588,14 @@ mod tests {
     #[test]
     fn array_spread() {
         let doc = json!({"a": [1, 2], "b": [3, 4]});
-        let r = query("[...$.a, ...$.b]", &doc).unwrap();
+        let r = vm_query("[...$.a, ...$.b]", &doc).unwrap();
         assert_eq!(r, json!([1, 2, 3, 4]));
     }
 
     #[test]
     fn array_spread_with_literal() {
         let doc = json!({"items": [2, 3]});
-        let r = query("[1, ...$.items, 4]", &doc).unwrap();
+        let r = vm_query("[1, ...$.items, 4]", &doc).unwrap();
         assert_eq!(r, json!([1, 2, 3, 4]));
     }
 
@@ -585,21 +604,21 @@ mod tests {
     #[test]
     fn fstring_basic() {
         let doc = json!({"user": {"name": "Alice", "age": 30}});
-        let r = query("f\"Hello {$.user.name}!\"", &doc).unwrap();
+        let r = vm_query("f\"Hello {$.user.name}!\"", &doc).unwrap();
         assert_eq!(r, json!("Hello Alice!"));
     }
 
     #[test]
     fn fstring_multiple_interp() {
         let doc = json!({"user": {"name": "Bob", "score": 95}});
-        let r = query("f\"{$.user.name} scored {$.user.score}\"", &doc).unwrap();
+        let r = vm_query("f\"{$.user.name} scored {$.user.score}\"", &doc).unwrap();
         assert_eq!(r, json!("Bob scored 95"));
     }
 
     #[test]
     fn fstring_pipe_method() {
         let doc = json!({"name": "alice"});
-        let r = query("f\"Hello {$.name|upper}!\"", &doc).unwrap();
+        let r = vm_query("f\"Hello {$.name|upper}!\"", &doc).unwrap();
         assert_eq!(r, json!("Hello ALICE!"));
     }
 
@@ -608,25 +627,28 @@ mod tests {
     #[test]
     fn str_upper_lower() {
         let doc = json!({"s": "Hello World"});
-        assert_eq!(query("$.s.upper()", &doc).unwrap(), json!("HELLO WORLD"));
-        assert_eq!(query("$.s.lower()", &doc).unwrap(), json!("hello world"));
+        assert_eq!(vm_query("$.s.upper()", &doc).unwrap(), json!("HELLO WORLD"));
+        assert_eq!(vm_query("$.s.lower()", &doc).unwrap(), json!("hello world"));
     }
 
     #[test]
     fn str_trim() {
         let doc = json!({"s": "  hello  "});
-        assert_eq!(query("$.s.trim()", &doc).unwrap(), json!("hello"));
-        assert_eq!(query("$.s.trim_left()", &doc).unwrap(), json!("hello  "));
-        assert_eq!(query("$.s.trim_right()", &doc).unwrap(), json!("  hello"));
+        assert_eq!(vm_query("$.s.trim()", &doc).unwrap(), json!("hello"));
+        assert_eq!(vm_query("$.s.trim_left()", &doc).unwrap(), json!("hello  "));
+        assert_eq!(
+            vm_query("$.s.trim_right()", &doc).unwrap(),
+            json!("  hello")
+        );
     }
 
     #[test]
     fn str_pad() {
         let doc = json!({"s": "hi"});
-        assert_eq!(query("$.s.pad_left(5)", &doc).unwrap(), json!("   hi"));
-        assert_eq!(query("$.s.pad_right(5)", &doc).unwrap(), json!("hi   "));
+        assert_eq!(vm_query("$.s.pad_left(5)", &doc).unwrap(), json!("   hi"));
+        assert_eq!(vm_query("$.s.pad_right(5)", &doc).unwrap(), json!("hi   "));
         assert_eq!(
-            query("$.s.pad_left(5, \"0\")", &doc).unwrap(),
+            vm_query("$.s.pad_left(5, \"0\")", &doc).unwrap(),
             json!("000hi")
         );
     }
@@ -635,15 +657,15 @@ mod tests {
     fn str_starts_ends_with() {
         let doc = json!({"s": "hello world"});
         assert_eq!(
-            query("$.s.starts_with(\"hello\")", &doc).unwrap(),
+            vm_query("$.s.starts_with(\"hello\")", &doc).unwrap(),
             json!(true)
         );
         assert_eq!(
-            query("$.s.ends_with(\"world\")", &doc).unwrap(),
+            vm_query("$.s.ends_with(\"world\")", &doc).unwrap(),
             json!(true)
         );
         assert_eq!(
-            query("$.s.starts_with(\"world\")", &doc).unwrap(),
+            vm_query("$.s.starts_with(\"world\")", &doc).unwrap(),
             json!(false)
         );
     }
@@ -653,11 +675,11 @@ mod tests {
         let doc = json!({"s": "foo foo foo"});
         // 2-arg string replace — untouched by the v2 chain-write classifier
         assert_eq!(
-            query("$.s.replace(\"foo\", \"bar\")", &doc).unwrap(),
+            vm_query("$.s.replace(\"foo\", \"bar\")", &doc).unwrap(),
             json!("bar foo foo")
         );
         assert_eq!(
-            query("$.s.replace_all(\"foo\", \"bar\")", &doc).unwrap(),
+            vm_query("$.s.replace_all(\"foo\", \"bar\")", &doc).unwrap(),
             json!("bar bar bar")
         );
     }
@@ -666,7 +688,7 @@ mod tests {
     fn str_split() {
         let doc = json!({"s": "a,b,c"});
         assert_eq!(
-            query("$.s.split(\",\")", &doc).unwrap(),
+            vm_query("$.s.split(\",\")", &doc).unwrap(),
             json!(["a", "b", "c"])
         );
     }
@@ -674,32 +696,32 @@ mod tests {
     #[test]
     fn str_index_of() {
         let doc = json!({"s": "hello world"});
-        assert_eq!(query("$.s.index_of(\"world\")", &doc).unwrap(), json!(6));
-        assert_eq!(query("$.s.index_of(\"xyz\")", &doc).unwrap(), json!(-1));
+        assert_eq!(vm_query("$.s.index_of(\"world\")", &doc).unwrap(), json!(6));
+        assert_eq!(vm_query("$.s.index_of(\"xyz\")", &doc).unwrap(), json!(-1));
     }
 
     #[test]
     fn str_slice() {
         let doc = json!({"s": "hello"});
-        assert_eq!(query("$.s.slice(1, 4)", &doc).unwrap(), json!("ell"));
-        assert_eq!(query("$.s.slice(2)", &doc).unwrap(), json!("llo"));
+        assert_eq!(vm_query("$.s.slice(1, 4)", &doc).unwrap(), json!("ell"));
+        assert_eq!(vm_query("$.s.slice(2)", &doc).unwrap(), json!("llo"));
     }
 
     #[test]
     fn str_repeat() {
         let doc = json!({"s": "ab"});
-        assert_eq!(query("$.s.repeat(3)", &doc).unwrap(), json!("ababab"));
+        assert_eq!(vm_query("$.s.repeat(3)", &doc).unwrap(), json!("ababab"));
     }
 
     #[test]
     fn str_strip_prefix_suffix() {
         let doc = json!({"s": "foobar"});
         assert_eq!(
-            query("$.s.strip_prefix(\"foo\")", &doc).unwrap(),
+            vm_query("$.s.strip_prefix(\"foo\")", &doc).unwrap(),
             json!("bar")
         );
         assert_eq!(
-            query("$.s.strip_suffix(\"bar\")", &doc).unwrap(),
+            vm_query("$.s.strip_suffix(\"bar\")", &doc).unwrap(),
             json!("foo")
         );
     }
@@ -707,43 +729,43 @@ mod tests {
     #[test]
     fn str_to_number() {
         let doc = json!({"s": "42"});
-        assert_eq!(query("$.s.to_number()", &doc).unwrap(), json!(42));
+        assert_eq!(vm_query("$.s.to_number()", &doc).unwrap(), json!(42));
     }
 
     #[test]
     fn str_base64_roundtrip() {
         let doc = json!({"s": "hello world"});
-        let encoded = query("$.s.to_base64()", &doc).unwrap();
+        let encoded = vm_query("$.s.to_base64()", &doc).unwrap();
         let decoded_doc = json!({"s": encoded});
-        let r = query("$.s.from_base64()", &decoded_doc).unwrap();
+        let r = vm_query("$.s.from_base64()", &decoded_doc).unwrap();
         assert_eq!(r, json!("hello world"));
     }
 
     #[test]
     fn str_url_encode_decode() {
         let doc = json!({"s": "hello world&foo=bar"});
-        let encoded = query("$.s.url_encode()", &doc).unwrap();
+        let encoded = vm_query("$.s.url_encode()", &doc).unwrap();
         assert!(
             encoded.as_str().unwrap().contains("%20") || encoded.as_str().unwrap().contains("+")
         );
         let encoded_doc = json!({"s": encoded});
-        let decoded = query("$.s.url_decode()", &encoded_doc).unwrap();
+        let decoded = vm_query("$.s.url_decode()", &encoded_doc).unwrap();
         assert_eq!(decoded, json!("hello world&foo=bar"));
     }
 
     #[test]
     fn str_html_escape() {
         let doc = json!({"s": "<b>Hello & World</b>"});
-        let r = query("$.s.html_escape()", &doc).unwrap();
+        let r = vm_query("$.s.html_escape()", &doc).unwrap();
         assert_eq!(r, json!("&lt;b&gt;Hello &amp; World&lt;/b&gt;"));
     }
 
     #[test]
     fn str_lines_words_chars() {
         let doc = json!({"s": "a b\nc d"});
-        let lines = query("$.s.lines()", &doc).unwrap();
+        let lines = vm_query("$.s.lines()", &doc).unwrap();
         assert_eq!(lines, json!(["a b", "c d"]));
-        let words = query("$.s.words()", &doc).unwrap();
+        let words = vm_query("$.s.words()", &doc).unwrap();
         assert_eq!(words, json!(["a", "b", "c", "d"]));
     }
 
@@ -751,7 +773,7 @@ mod tests {
     fn str_capitalize() {
         let doc = json!({"s": "hello world"});
         assert_eq!(
-            query("$.s.capitalize()", &doc).unwrap(),
+            vm_query("$.s.capitalize()", &doc).unwrap(),
             json!("Hello world")
         );
     }
@@ -760,7 +782,7 @@ mod tests {
     fn str_title_case() {
         let doc = json!({"s": "hello world"});
         assert_eq!(
-            query("$.s.title_case()", &doc).unwrap(),
+            vm_query("$.s.title_case()", &doc).unwrap(),
             json!("Hello World")
         );
     }
@@ -770,7 +792,7 @@ mod tests {
     #[test]
     fn pick_fields() {
         let doc = json!({"user": {"name": "Alice", "age": 30, "password": "secret"}});
-        let r = query("$.user.pick(\"name\", \"age\")", &doc).unwrap();
+        let r = vm_query("$.user.pick(\"name\", \"age\")", &doc).unwrap();
         assert_eq!(r["name"], json!("Alice"));
         assert_eq!(r["age"], json!(30));
         assert!(r.get("password").is_none());
@@ -779,7 +801,7 @@ mod tests {
     #[test]
     fn omit_fields() {
         let doc = json!({"user": {"name": "Alice", "password": "secret"}});
-        let r = query("$.user.omit(\"password\")", &doc).unwrap();
+        let r = vm_query("$.user.omit(\"password\")", &doc).unwrap();
         assert_eq!(r["name"], json!("Alice"));
         assert!(r.get("password").is_none());
     }
@@ -787,7 +809,7 @@ mod tests {
     #[test]
     fn rename_fields() {
         let doc = json!({"obj": {"old_name": "value"}});
-        let r = query("$.obj.rename({old_name: \"new_name\"})", &doc).unwrap();
+        let r = vm_query("$.obj.rename({old_name: \"new_name\"})", &doc).unwrap();
         assert_eq!(r["new_name"], json!("value"));
         assert!(r.get("old_name").is_none());
     }
@@ -796,7 +818,7 @@ mod tests {
     fn merge_objects() {
         // chain form is a write terminal now — pipe form preserves old semantics
         let doc = json!({"a": {"x": 1}, "b": {"y": 2}});
-        let r = query("$.a | merge($.b)", &doc).unwrap();
+        let r = vm_query("$.a | merge($.b)", &doc).unwrap();
         assert_eq!(r["x"], json!(1));
         assert_eq!(r["y"], json!(2));
     }
@@ -804,7 +826,7 @@ mod tests {
     #[test]
     fn deep_merge_objects() {
         let doc = json!({"a": {"x": {"p": 1}}, "b": {"x": {"q": 2}, "y": 3}});
-        let r = query("$.a | deep_merge($.b)", &doc).unwrap();
+        let r = vm_query("$.a | deep_merge($.b)", &doc).unwrap();
         assert_eq!(r["x"]["p"], json!(1));
         assert_eq!(r["x"]["q"], json!(2));
         assert_eq!(r["y"], json!(3));
@@ -813,7 +835,7 @@ mod tests {
     #[test]
     fn defaults_fill_nulls() {
         let doc = json!({"obj": {"a": 1, "b": null}, "defs": {"b": 99, "c": 100}});
-        let r = query("$.obj.defaults($.defs)", &doc).unwrap();
+        let r = vm_query("$.obj.defaults($.defs)", &doc).unwrap();
         assert_eq!(r["a"], json!(1));
         assert_eq!(r["b"], json!(99));
         assert_eq!(r["c"], json!(100));
@@ -822,14 +844,14 @@ mod tests {
     #[test]
     fn transform_keys() {
         let doc = json!({"obj": {"foo_bar": 1, "baz_qux": 2}});
-        let r = query("$.obj.transform_keys(lambda k: k.upper())", &doc).unwrap();
+        let r = vm_query("$.obj.transform_keys(lambda k: k.upper())", &doc).unwrap();
         assert!(r.get("FOO_BAR").is_some() || r.get("BAZ_QUX").is_some());
     }
 
     #[test]
     fn transform_values() {
         let doc = json!({"obj": {"a": 1, "b": 2, "c": 3}});
-        let r = query("$.obj.transform_values(lambda v: v * 10)", &doc).unwrap();
+        let r = vm_query("$.obj.transform_values(lambda v: v * 10)", &doc).unwrap();
         assert_eq!(r["a"], json!(10));
         assert_eq!(r["b"], json!(20));
     }
@@ -837,7 +859,7 @@ mod tests {
     #[test]
     fn filter_keys_test() {
         let doc = json!({"obj": {"name": "Alice", "_private": "x", "_secret": "y"}});
-        let r = query(
+        let r = vm_query(
             "$.obj.filter_keys(lambda k: not k.starts_with(\"_\"))",
             &doc,
         )
@@ -849,7 +871,7 @@ mod tests {
     #[test]
     fn filter_values_test() {
         let doc = json!({"obj": {"a": 1, "b": null, "c": 3}});
-        let r = query("$.obj.filter_values(lambda v: v kind not null)", &doc).unwrap();
+        let r = vm_query("$.obj.filter_values(lambda v: v kind not null)", &doc).unwrap();
         assert!(r.get("a").is_some());
         assert!(r.get("b").is_none());
         assert!(r.get("c").is_some());
@@ -858,7 +880,7 @@ mod tests {
     #[test]
     fn invert_object() {
         let doc = json!({"obj": {"a": "x", "b": "y"}});
-        let r = query("$.obj.invert()", &doc).unwrap();
+        let r = vm_query("$.obj.invert()", &doc).unwrap();
         assert_eq!(r["x"], json!("a"));
         assert_eq!(r["y"], json!("b"));
     }
@@ -866,12 +888,12 @@ mod tests {
     #[test]
     fn to_pairs_from_pairs() {
         let doc = json!({"obj": {"a": 1, "b": 2}});
-        let pairs = query("$.obj.to_pairs()", &doc).unwrap();
+        let pairs = vm_query("$.obj.to_pairs()", &doc).unwrap();
         let arr = pairs.as_array().unwrap();
         assert_eq!(arr.len(), 2);
         // round-trip
         let pairs_doc = json!({"pairs": pairs});
-        let restored = query("$.pairs.from_pairs()", &pairs_doc).unwrap();
+        let restored = vm_query("$.pairs.from_pairs()", &pairs_doc).unwrap();
         assert_eq!(restored["a"], json!(1));
         assert_eq!(restored["b"], json!(2));
     }
@@ -881,20 +903,20 @@ mod tests {
     #[test]
     fn get_path_op() {
         let doc = json!({"a": {"b": {"c": 42}}});
-        assert_eq!(query("$.get_path(\"a.b.c\")", &doc).unwrap(), json!(42));
+        assert_eq!(vm_query("$.get_path(\"a.b.c\")", &doc).unwrap(), json!(42));
     }
 
     #[test]
     fn set_path_op() {
         let doc = json!({"a": {"b": 1}});
-        let r = query("$.set_path(\"a.b\", 99)", &doc).unwrap();
+        let r = vm_query("$.set_path(\"a.b\", 99)", &doc).unwrap();
         assert_eq!(r["a"]["b"], json!(99));
     }
 
     #[test]
     fn del_path_op() {
         let doc = json!({"a": {"b": 1, "c": 2}});
-        let r = query("$.del_path(\"a.b\")", &doc).unwrap();
+        let r = vm_query("$.del_path(\"a.b\")", &doc).unwrap();
         assert!(r["a"].get("b").is_none());
         assert_eq!(r["a"]["c"], json!(2));
     }
@@ -902,14 +924,20 @@ mod tests {
     #[test]
     fn has_path_op() {
         let doc = json!({"a": {"b": {"c": 1}}});
-        assert_eq!(query("$.has_path(\"a.b.c\")", &doc).unwrap(), json!(true));
-        assert_eq!(query("$.has_path(\"a.x.y\")", &doc).unwrap(), json!(false));
+        assert_eq!(
+            vm_query("$.has_path(\"a.b.c\")", &doc).unwrap(),
+            json!(true)
+        );
+        assert_eq!(
+            vm_query("$.has_path(\"a.x.y\")", &doc).unwrap(),
+            json!(false)
+        );
     }
 
     #[test]
     fn flatten_keys_op() {
         let doc = json!({"a": {"b": {"c": 1}, "d": 2}});
-        let r = query("$.flatten_keys()", &doc).unwrap();
+        let r = vm_query("$.flatten_keys()", &doc).unwrap();
         assert_eq!(r["a.b.c"], json!(1));
         assert_eq!(r["a.d"], json!(2));
     }
@@ -917,7 +945,7 @@ mod tests {
     #[test]
     fn unflatten_keys_op() {
         let doc = json!({"flat": {"a.b.c": 1, "a.d": 2}});
-        let r = query("$.flat.unflatten_keys()", &doc).unwrap();
+        let r = vm_query("$.flat.unflatten_keys()", &doc).unwrap();
         assert_eq!(r["a"]["b"]["c"], json!(1));
         assert_eq!(r["a"]["d"], json!(2));
     }
@@ -927,21 +955,21 @@ mod tests {
     #[test]
     fn set_diff() {
         let doc = json!({"a": [1, 2, 3, 4], "b": [2, 4]});
-        let r = query("$.a.diff($.b)", &doc).unwrap();
+        let r = vm_query("$.a.diff($.b)", &doc).unwrap();
         assert_eq!(r, json!([1, 3]));
     }
 
     #[test]
     fn set_intersect() {
         let doc = json!({"a": [1, 2, 3], "b": [2, 3, 4]});
-        let r = query("$.a.intersect($.b)", &doc).unwrap();
+        let r = vm_query("$.a.intersect($.b)", &doc).unwrap();
         assert_eq!(r, json!([2, 3]));
     }
 
     #[test]
     fn set_union() {
         let doc = json!({"a": [1, 2, 3], "b": [3, 4, 5]});
-        let r = query("$.a.union($.b)", &doc).unwrap();
+        let r = vm_query("$.a.union($.b)", &doc).unwrap();
         let arr = r.as_array().unwrap();
         assert_eq!(arr.len(), 5);
         assert!(arr.contains(&json!(1)));
@@ -953,20 +981,20 @@ mod tests {
     #[test]
     fn type_method() {
         let doc = json!({"n": 42, "s": "hello", "a": [1], "o": {}, "b": true, "z": null});
-        assert_eq!(query("$.n.type()", &doc).unwrap(), json!("number"));
-        assert_eq!(query("$.s.type()", &doc).unwrap(), json!("string"));
-        assert_eq!(query("$.a.type()", &doc).unwrap(), json!("array"));
-        assert_eq!(query("$.o.type()", &doc).unwrap(), json!("object"));
-        assert_eq!(query("$.b.type()", &doc).unwrap(), json!("bool"));
-        assert_eq!(query("$.z.type()", &doc).unwrap(), json!("null"));
+        assert_eq!(vm_query("$.n.type()", &doc).unwrap(), json!("number"));
+        assert_eq!(vm_query("$.s.type()", &doc).unwrap(), json!("string"));
+        assert_eq!(vm_query("$.a.type()", &doc).unwrap(), json!("array"));
+        assert_eq!(vm_query("$.o.type()", &doc).unwrap(), json!("object"));
+        assert_eq!(vm_query("$.b.type()", &doc).unwrap(), json!("bool"));
+        assert_eq!(vm_query("$.z.type()", &doc).unwrap(), json!("null"));
     }
 
     #[test]
     fn from_json_to_json() {
         let doc = json!({"s": "{\"x\":1}"});
-        let parsed = query("$.s.from_json()", &doc).unwrap();
+        let parsed = vm_query("$.s.from_json()", &doc).unwrap();
         assert_eq!(parsed["x"], json!(1));
-        let serialized = query("$.s.from_json().to_json()", &doc).unwrap();
+        let serialized = vm_query("$.s.from_json().to_json()", &doc).unwrap();
         assert!(serialized.as_str().unwrap().contains("\"x\""));
     }
 
@@ -976,7 +1004,7 @@ mod tests {
     fn inline_filter_basic() {
         let doc = books();
         // $.store.books{price > 10} — filter books array inline
-        let r = query("$.store.books{price > 10}", &doc).unwrap();
+        let r = vm_query("$.store.books{price > 10}", &doc).unwrap();
         let arr = r.as_array().unwrap();
         assert_eq!(arr.len(), 2);
         assert!(arr.iter().all(|b| b["price"].as_f64().unwrap() > 10.0));
@@ -987,14 +1015,14 @@ mod tests {
         let doc = books();
         // first book over $10 — postfix `?` is null-safety only; use
         // `.first()` explicitly to take the first element of an array.
-        let r = query("$.store.books{price > 10}.first()", &doc).unwrap();
+        let r = vm_query("$.store.books{price > 10}.first()", &doc).unwrap();
         assert_eq!(r["title"], json!("Dune"));
     }
 
     #[test]
     fn quantifier_one_ok() {
         let doc = books();
-        let r = query("$.store.books{title == \"1984\"}!", &doc).unwrap();
+        let r = vm_query("$.store.books{title == \"1984\"}!", &doc).unwrap();
         assert_eq!(r["title"], json!("1984"));
     }
 
@@ -1002,7 +1030,7 @@ mod tests {
     fn quantifier_one_error() {
         let doc = books();
         // more than one match → error
-        let r = query("$.store.books{price > 10}!", &doc);
+        let r = vm_query("$.store.books{price > 10}!", &doc);
         assert!(r.is_err());
     }
 
@@ -1010,7 +1038,7 @@ mod tests {
     fn descend_all_inline_filter() {
         let doc = books();
         // $..{title == "1984"}!.title — the clean recursive-descent style
-        let r = query("$.store..{title == \"1984\"}!.title", &doc).unwrap();
+        let r = vm_query("$.store..{title == \"1984\"}!.title", &doc).unwrap();
         assert_eq!(r, json!("1984"));
     }
 
@@ -1018,7 +1046,7 @@ mod tests {
     fn descend_all_collect() {
         let doc = json!({"a": {"b": 1, "c": 2}, "d": 3});
         // $.. collects all values
-        let r = query("$..", &doc).unwrap();
+        let r = vm_query("$..", &doc).unwrap();
         let arr = r.as_array().unwrap();
         // should include objects and scalars
         assert!(arr.len() > 1);
@@ -1060,9 +1088,9 @@ mod tests {
     #[test]
     fn fusion_drop_noop_before_len_semantics() {
         let doc = json!({"xs": [3, 1, 4, 1, 5, 9, 2, 6]});
-        assert_eq!(query("$.xs.sort().len()", &doc).unwrap(), json!(8));
-        assert_eq!(query("$.xs.reverse().count()", &doc).unwrap(), json!(8));
-        assert_eq!(query("$.xs.map(@ * 2).len()", &doc).unwrap(), json!(8));
+        assert_eq!(vm_query("$.xs.sort().len()", &doc).unwrap(), json!(8));
+        assert_eq!(vm_query("$.xs.reverse().count()", &doc).unwrap(), json!(8));
+        assert_eq!(vm_query("$.xs.map(@ * 2).len()", &doc).unwrap(), json!(8));
     }
 
     #[test]
@@ -1084,7 +1112,7 @@ mod tests {
     #[test]
     fn fusion_map_filter_semantics() {
         let doc = json!({"xs": [1, 2, 3, 4, 5]});
-        let r = query("$.xs.map(@ * 2).filter(@ > 5)", &doc).unwrap();
+        let r = vm_query("$.xs.map(@ * 2).filter(@ > 5)", &doc).unwrap();
         assert_eq!(r, json!([6, 8, 10]));
     }
 
@@ -1134,17 +1162,17 @@ mod tests {
     #[test]
     fn fusion_opt_field_chain_semantics() {
         let doc = json!({"items": [{"a": {"b": {"c": 42}}}]});
-        let r = query("$.items.first()?.a?.b?.c", &doc).unwrap();
+        let r = vm_query("$.items.first()?.a?.b?.c", &doc).unwrap();
         assert_eq!(r, json!(42));
         let missing = json!({"items": [{"a": null}]});
-        let r2 = query("$.items.first()?.a?.b?.c", &missing).unwrap();
+        let r2 = vm_query("$.items.first()?.a?.b?.c", &missing).unwrap();
         assert!(r2.is_null());
     }
 
     #[test]
     fn fusion_field_chain_semantics() {
         let doc = json!({"items": [{"a": {"b": {"c": 42}}}]});
-        let r = query("$.items.first().a.b.c", &doc).unwrap();
+        let r = vm_query("$.items.first().a.b.c", &doc).unwrap();
         assert_eq!(r, json!(42));
     }
 
@@ -1152,38 +1180,38 @@ mod tests {
 
     #[test]
     fn try_bare_missing_field_uses_default() {
-        let r = query("try $.a.b.c else 0", &json!({})).unwrap();
+        let r = vm_query("try $.a.b.c else 0", &json!({})).unwrap();
         assert_eq!(r, json!(0));
     }
 
     #[test]
     fn try_bare_present_returns_body() {
-        let r = query("try $.a else 0", &json!({"a": 42})).unwrap();
+        let r = vm_query("try $.a else 0", &json!({"a": 42})).unwrap();
         assert_eq!(r, json!(42));
     }
 
     #[test]
     fn try_paren_form() {
-        let r = query("try ($.a.b.c) else 0", &json!({})).unwrap();
+        let r = vm_query("try ($.a.b.c) else 0", &json!({})).unwrap();
         assert_eq!(r, json!(0));
-        let r = query("try ($.a) else 0", &json!({"a": 42})).unwrap();
+        let r = vm_query("try ($.a) else 0", &json!({"a": 42})).unwrap();
         assert_eq!(r, json!(42));
     }
 
     #[test]
     fn try_catches_eval_error() {
         // bad JSON inside from_json — body errors, default fires.
-        let r = query(r#"try ('bad' | from_json) else null"#, &json!(null)).unwrap();
+        let r = vm_query(r#"try ('bad' | from_json) else null"#, &json!(null)).unwrap();
         assert!(r.is_null());
     }
 
     #[test]
     fn try_chain_right_associative() {
         // try a else try b else 'c'  -->  picks b when a is missing.
-        let r = query("try $.a else try $.b else 'c'", &json!({"b": "B"})).unwrap();
+        let r = vm_query("try $.a else try $.b else 'c'", &json!({"b": "B"})).unwrap();
         assert_eq!(r, json!("B"));
         // both missing -> falls to literal.
-        let r = query("try $.a else try $.b else 'c'", &json!({})).unwrap();
+        let r = vm_query("try $.a else try $.b else 'c'", &json!({})).unwrap();
         assert_eq!(r, json!("c"));
     }
 
@@ -1193,7 +1221,7 @@ mod tests {
             {"id": 1, "name": "A"},
             {"id": 2}
         ]);
-        let r = query(r#"$.map({id, name: try name else 'anon'})"#, &doc).unwrap();
+        let r = vm_query(r#"$.map({id, name: try name else 'anon'})"#, &doc).unwrap();
         assert_eq!(
             r,
             json!([
@@ -1206,20 +1234,20 @@ mod tests {
     #[test]
     fn try_zero_is_not_null() {
         // Body produces 0 (non-null) — default must NOT run.
-        let r = query("try 0 else 99", &json!(null)).unwrap();
+        let r = vm_query("try 0 else 99", &json!(null)).unwrap();
         assert_eq!(r, json!(0));
     }
 
     #[test]
     fn try_paren_required_for_ternary_inside() {
-        let r = query("try (1 if false else 2) else 99", &json!(null)).unwrap();
+        let r = vm_query("try (1 if false else 2) else 99", &json!(null)).unwrap();
         assert_eq!(r, json!(2));
     }
 
     #[test]
     fn try_inside_list_comp() {
         let doc = json!([{"tags":["a"]}, {}]);
-        let r = query("[try x.tags else [] for x in $]", &doc).unwrap();
+        let r = vm_query("[try x.tags else [] for x in $]", &doc).unwrap();
         assert_eq!(r, json!([["a"], []]));
     }
 
@@ -1297,21 +1325,21 @@ mod tests {
     fn find_first_matches_semantics() {
         let doc = books();
         // inline filter + .first() matches first result.
-        let fused = query("$.store.books{price > 10}.first()", &doc).unwrap();
+        let fused = vm_query("$.store.books{price > 10}.first()", &doc).unwrap();
         assert_eq!(fused["title"], json!("Dune"));
     }
 
     #[test]
     fn find_one_error_on_multiple() {
         let doc = books();
-        let r = query("$.store.books{price > 10}!", &doc);
+        let r = vm_query("$.store.books{price > 10}!", &doc);
         assert!(r.is_err());
     }
 
     #[test]
     fn find_one_error_on_zero() {
         let doc = books();
-        let r = query("$.store.books{price > 9999}!", &doc);
+        let r = vm_query("$.store.books{price > 9999}!", &doc);
         assert!(r.is_err());
     }
 
@@ -1474,7 +1502,7 @@ mod tests {
     #[test]
     fn fusion_topn_semantics() {
         let doc = json!({"nums": [5, 3, 1, 4, 2, 9, 7]});
-        let r = query("$.nums.sort()[0:3]", &doc).unwrap();
+        let r = vm_query("$.nums.sort()[0:3]", &doc).unwrap();
         assert_eq!(r, json!([1, 2, 3]));
     }
 
@@ -1528,8 +1556,8 @@ mod tests {
     #[test]
     fn fusion_filter_first_semantics() {
         let doc = books();
-        let fused = query("$.store.books.filter(@.price > 10).first()", &doc).unwrap();
-        let plain = query("$.store.books.filter(@.price > 10) | first()", &doc).unwrap();
+        let fused = vm_query("$.store.books.filter(@.price > 10).first()", &doc).unwrap();
+        let plain = vm_query("$.store.books.filter(@.price > 10) | first()", &doc).unwrap();
         assert_eq!(fused, plain);
     }
 
@@ -1565,24 +1593,24 @@ mod tests {
     #[test]
     fn fusion_filter_map_sum_semantics() {
         let doc = books();
-        let fused = query(
+        let fused = vm_query(
             "$.store.books.filter(@.price > 10).map(@.price).sum()",
             &doc,
         )
         .unwrap();
-        let plain = query("$.store.books.filter(@.price > 10).sum(price)", &doc).unwrap();
+        let plain = vm_query("$.store.books.filter(@.price > 10).sum(price)", &doc).unwrap();
         assert_eq!(fused, plain);
     }
 
     #[test]
     fn fusion_filter_map_avg_semantics() {
         let doc = books();
-        let fused = query(
+        let fused = vm_query(
             "$.store.books.filter(@.price > 10).map(@.price).avg()",
             &doc,
         )
         .unwrap();
-        let plain = query("$.store.books.filter(@.price > 10).avg(price)", &doc).unwrap();
+        let plain = vm_query("$.store.books.filter(@.price > 10).avg(price)", &doc).unwrap();
         assert_eq!(fused, plain);
     }
 
@@ -1592,15 +1620,15 @@ mod tests {
     #[test]
     fn fusion_map_first_last_semantics() {
         let doc = books();
-        let f = query("$.store.books.map(@.price).first()", &doc).unwrap();
-        let l = query("$.store.books.map(@.price).last()", &doc).unwrap();
-        let all = query("$.store.books.map(@.price)", &doc).unwrap();
+        let f = vm_query("$.store.books.map(@.price).first()", &doc).unwrap();
+        let l = vm_query("$.store.books.map(@.price).last()", &doc).unwrap();
+        let all = vm_query("$.store.books.map(@.price)", &doc).unwrap();
         let arr = all.as_array().unwrap();
         assert_eq!(f, arr[0]);
         assert_eq!(l, arr[arr.len() - 1]);
 
         let empty_doc: serde_json::Value = serde_json::from_str(r#"{"xs":[]}"#).unwrap();
-        let f_empty = query("$.xs.map(@.price).first()", &empty_doc).unwrap();
+        let f_empty = vm_query("$.xs.map(@.price).first()", &empty_doc).unwrap();
         assert!(f_empty.is_null());
     }
 
@@ -1622,12 +1650,12 @@ mod tests {
     #[test]
     fn fusion_filter_map_first_semantics() {
         let doc = books();
-        let fused = query(
+        let fused = vm_query(
             "$.store.books.filter(@.price > 10).map(@.title).first()",
             &doc,
         )
         .unwrap();
-        let plain = query("$.store.books.filter(@.price > 10).map(@.title)", &doc).unwrap();
+        let plain = vm_query("$.store.books.filter(@.price > 10).map(@.title)", &doc).unwrap();
         let arr = plain.as_array().unwrap();
         if arr.is_empty() {
             assert!(fused.is_null());
@@ -1636,7 +1664,7 @@ mod tests {
         }
 
         let empty_doc: serde_json::Value = serde_json::from_str(r#"{"xs":[]}"#).unwrap();
-        let e = query("$.xs.filter(@.price > 0).map(@.title).first()", &empty_doc).unwrap();
+        let e = vm_query("$.xs.filter(@.price > 0).map(@.title).first()", &empty_doc).unwrap();
         assert!(e.is_null());
     }
 
@@ -1706,8 +1734,8 @@ mod tests {
     #[test]
     fn fusion_filter_last_semantics() {
         let doc = books();
-        let fused = query("$.store.books.filter(@.price > 10).last()", &doc).unwrap();
-        let plain = query("$.store.books.filter(@.price > 10)", &doc).unwrap();
+        let fused = vm_query("$.store.books.filter(@.price > 10).last()", &doc).unwrap();
+        let plain = vm_query("$.store.books.filter(@.price > 10)", &doc).unwrap();
         let arr = plain.as_array().unwrap();
         if arr.is_empty() {
             assert!(fused.is_null());
@@ -1716,7 +1744,7 @@ mod tests {
         }
 
         let empty_doc: serde_json::Value = serde_json::from_str(r#"{"xs":[]}"#).unwrap();
-        let e = query("$.xs.filter(@.price > 0).last()", &empty_doc).unwrap();
+        let e = vm_query("$.xs.filter(@.price > 0).last()", &empty_doc).unwrap();
         assert!(e.is_null());
     }
 
@@ -1780,10 +1808,10 @@ mod tests {
     #[test]
     fn fusion_idempotent_semantics() {
         let doc = json!({"xs": [3, 1, 2, 1, 3]});
-        let a = query("$.xs.unique().unique()", &doc).unwrap();
-        let b = query("$.xs.unique()", &doc).unwrap();
+        let a = vm_query("$.xs.unique().unique()", &doc).unwrap();
+        let b = vm_query("$.xs.unique()", &doc).unwrap();
         assert_eq!(a, b);
-        let c = query("$.xs.reverse().reverse()", &doc).unwrap();
+        let c = vm_query("$.xs.reverse().reverse()", &doc).unwrap();
         assert_eq!(c, json!([3, 1, 2, 1, 3]));
     }
 
@@ -1801,7 +1829,7 @@ mod tests {
                 {"a": {"b": {"c": 4}}, "tag": "k"},
             ]
         });
-        let r = query("$.xs.filter(tag == 'k').map(a.b.c)", &doc).unwrap();
+        let r = vm_query("$.xs.filter(tag == 'k').map(a.b.c)", &doc).unwrap();
         assert_eq!(r, json!([1, 2, 4]));
     }
 
@@ -1813,7 +1841,7 @@ mod tests {
             "child": {"id": 2, "grand": {"id": 3}},
             "siblings": [{"id": 4}, {"id": 5}]
         });
-        let r = query("$..id.first()", &doc).unwrap();
+        let r = vm_query("$..id.first()", &doc).unwrap();
         assert_eq!(r, json!(1));
     }
 
@@ -1824,8 +1852,8 @@ mod tests {
             "b": {"c": {"k": "nested"}},
             "xs": [{"k": "in_array"}, {"k": "late"}]
         });
-        let early = query("$..k.first()", &doc).unwrap();
-        let all = query("$..k", &doc).unwrap();
+        let early = vm_query("$..k.first()", &doc).unwrap();
+        let all = vm_query("$..k", &doc).unwrap();
         let first_of_all = all
             .as_array()
             .and_then(|a| a.first())
@@ -1837,7 +1865,7 @@ mod tests {
     #[test]
     fn descendant_first_missing_key_is_null() {
         let doc = json!({"a": 1, "b": {"c": 2}});
-        let r = query("$..missing.first()", &doc).unwrap();
+        let r = vm_query("$..missing.first()", &doc).unwrap();
         assert!(r.is_null());
     }
 
@@ -1846,7 +1874,7 @@ mod tests {
         // `!` quantifier compiles to Quantifier(First) in some paths;
         // is_first_selector_op covers both forms.
         let doc = json!({"id": 1, "nested": {"id": 2}});
-        let r = query("$..id!", &doc);
+        let r = vm_query("$..id!", &doc);
         if let Ok(v) = r {
             assert_eq!(v, json!(1));
         }
@@ -1894,7 +1922,7 @@ mod tests {
             {"title": "c", "price": 5},
             {"title": "d", "price": 3},
         ]});
-        let r = query("$.books.sort(price).first()", &doc).unwrap();
+        let r = vm_query("$.books.sort(price).first()", &doc).unwrap();
         assert_eq!(r, json!({"title": "b", "price": 3}));
     }
 
@@ -1906,16 +1934,16 @@ mod tests {
             {"title": "c", "price": 9},
             {"title": "d", "price": 5},
         ]});
-        let r = query("$.books.sort(price).last()", &doc).unwrap();
+        let r = vm_query("$.books.sort(price).last()", &doc).unwrap();
         assert_eq!(r, json!({"title": "c", "price": 9}));
     }
 
     #[test]
     fn argextreme_empty_array_is_null() {
         let doc = json!({"empty": []});
-        let r = query("$.empty.sort(price).first()", &doc).unwrap();
+        let r = vm_query("$.empty.sort(price).first()", &doc).unwrap();
         assert!(r.is_null());
-        let r = query("$.empty.sort(price).last()", &doc).unwrap();
+        let r = vm_query("$.empty.sort(price).last()", &doc).unwrap();
         assert!(r.is_null());
     }
 
@@ -1980,27 +2008,27 @@ mod tests {
     fn fusion_reorder_aggregate_semantics() {
         let doc = books();
         // `min` / `max` are exact — no FP summation order to worry about.
-        let a = query("$.store.books.sort(price).min(price)", &doc).unwrap();
-        let b = query("$.store.books.min(price)", &doc).unwrap();
+        let a = vm_query("$.store.books.sort(price).min(price)", &doc).unwrap();
+        let b = vm_query("$.store.books.min(price)", &doc).unwrap();
         assert_eq!(a, b);
-        let c = query("$.store.books.reverse().max(price)", &doc).unwrap();
-        let d = query("$.store.books.max(price)", &doc).unwrap();
+        let c = vm_query("$.store.books.reverse().max(price)", &doc).unwrap();
+        let d = vm_query("$.store.books.max(price)", &doc).unwrap();
         assert_eq!(c, d);
     }
 
     #[test]
     fn fusion_map_sum_semantics() {
         let doc = books();
-        let r = query("$.store.books.map(@.price).sum()", &doc).unwrap();
-        let plain = query("$.store.books.sum(price)", &doc).unwrap();
+        let r = vm_query("$.store.books.map(@.price).sum()", &doc).unwrap();
+        let plain = vm_query("$.store.books.sum(price)", &doc).unwrap();
         assert_eq!(r, plain);
     }
 
     #[test]
     fn fusion_map_avg_semantics() {
         let doc = books();
-        let r = query("$.store.books.map(@.price).avg()", &doc).unwrap();
-        let plain = query("$.store.books.avg(price)", &doc).unwrap();
+        let r = vm_query("$.store.books.map(@.price).avg()", &doc).unwrap();
+        let plain = vm_query("$.store.books.avg(price)", &doc).unwrap();
         assert_eq!(r, plain);
     }
 
@@ -2146,7 +2174,7 @@ mod tests {
                  .map({title: title, cost: price, score: rating}) \
                  .map({label: title, gross: cost}) \
                  .sort(gross)[0:3]";
-        let r = query(q, &doc).unwrap();
+        let r = vm_query(q, &doc).unwrap();
         let arr = r.as_array().unwrap();
         assert_eq!(arr.len(), 3);
         // Lowest three prices in the allowed band, sorted asc.
@@ -2167,7 +2195,7 @@ mod tests {
         let q = "$.store.books \
                  .filter(price kind number and genre == \"sci-fi\") \
                  .sum(price)";
-        let r = query(q, &doc).unwrap();
+        let r = vm_query(q, &doc).unwrap();
         let total = r.as_f64().unwrap();
         // Hand-tally of the 12 sci-fi prices (Neuromancer + Snow Crash
         // are cyberpunk, not sci-fi).
@@ -2195,7 +2223,7 @@ mod tests {
                     avg_rating: sci.avg(rating), \
                     top_rated:  sci.sort(rating).reverse()[0:3].map(title)\
                  }";
-        let r = query(q, &doc).unwrap();
+        let r = vm_query(q, &doc).unwrap();
         assert_eq!(r["count"], json!(12));
         assert!(r["avg_price"].as_f64().unwrap() > 8.0);
         assert!(r["avg_rating"].as_f64().unwrap() > 4.0);
@@ -2213,7 +2241,7 @@ mod tests {
         // though it appears second in source.
         let doc = big_store();
         let q = "$.store.books.filter(rating > 4.5 and id == 19).first()";
-        let r = query(q, &doc).unwrap();
+        let r = vm_query(q, &doc).unwrap();
         assert_eq!(r["title"], json!("The Martian"));
         assert_eq!(r["id"], json!(19));
     }
@@ -2231,7 +2259,7 @@ mod tests {
                  .map({genre: @[0], count: @[1].len(), avg_price: @[1].avg(price)}) \
                  .sort(avg_price) \
                  .reverse()";
-        let r = query(q, &doc).unwrap();
+        let r = vm_query(q, &doc).unwrap();
         let arr = r.as_array().unwrap();
         assert!(arr.len() >= 3); // sci-fi, dystopia, cyberpunk
         let genres: Vec<&str> = arr.iter().map(|v| v["genre"].as_str().unwrap()).collect();
@@ -2248,7 +2276,7 @@ mod tests {
         // Then map(f).unique() → MapUnique (streaming dedup).
         let doc = big_store();
         let q = "$.store.books.map(tags).flatten().unique().sort()";
-        let r = query(q, &doc).unwrap();
+        let r = vm_query(q, &doc).unwrap();
         let tags = r.as_array().unwrap();
         // All distinct and sorted.
         let strs: Vec<&str> = tags.iter().map(|v| v.as_str().unwrap()).collect();
@@ -2270,7 +2298,7 @@ mod tests {
         let doc = big_store();
         // Books in order, priced > 5; take while price < 12.
         let q = "$.store.books.filter(price > 5.0).takewhile(price < 12.0).map(title)";
-        let r = query(q, &doc).unwrap();
+        let r = vm_query(q, &doc).unwrap();
         let titles = r.as_array().unwrap();
         // Dune (12.99) breaks the scan immediately — result should be empty.
         // Actually Dune is first and its price > 12, so scan stops at 0.
@@ -2288,7 +2316,7 @@ mod tests {
                  for b in $.store.books \
                  if b.rating >= 4.5 and b.genre == \"sci-fi\" \
                  and b.author.born >= 1940]";
-        let r = query(q, &doc).unwrap();
+        let r = vm_query(q, &doc).unwrap();
         let items = r.as_array().unwrap();
         // Hyperion, Ender's Game, The Martian, Project Hail Mary.
         assert!(items.len() >= 3);
@@ -2317,7 +2345,7 @@ mod tests {
                     price_range: books.max(price) - books.min(price), \
                     top_author: books.sort(rating).reverse()[0].author.name\
                  }";
-        let r = query(q, &doc).unwrap();
+        let r = vm_query(q, &doc).unwrap();
         assert_eq!(r["total"], json!(20));
         assert!(r["cheap_count"].as_i64().unwrap() > 0);
         assert!(r["expensive_count"].as_i64().unwrap() > 0);
@@ -2337,7 +2365,7 @@ mod tests {
                  .filter((1 + 2) * 3 == 9 and not (5 < 3) and price > 11.0) \
                  .map(title) \
                  .sort()";
-        let r = query(q, &doc).unwrap();
+        let r = vm_query(q, &doc).unwrap();
         let titles: Vec<String> = r
             .as_array()
             .unwrap()
@@ -2472,7 +2500,7 @@ mod tests {
             ]
         });
         let q = "$.books.equi_join($.authors, \"author_name\", \"name\")";
-        let r = query(q, &doc).unwrap();
+        let r = vm_query(q, &doc).unwrap();
         let rows = r.as_array().unwrap();
         assert_eq!(rows.len(), 3); // "Unknown" has no match
         for row in rows {
@@ -2499,7 +2527,7 @@ mod tests {
                  .reverse() \
                  .map({title, price}) \
                  [0:5]";
-        let r = query(q, &doc).unwrap();
+        let r = vm_query(q, &doc).unwrap();
         let arr = r.as_array().unwrap();
         assert_eq!(arr.len(), 5);
         // Must all have title/price keys, price descending.
@@ -2517,8 +2545,8 @@ mod tests {
     #[test]
     fn pipe_alias_long() {
         let doc = books();
-        let a = query("$.store.books | count()", &doc).unwrap();
-        let b = query("$.store.books |> count()", &doc).unwrap();
+        let a = vm_query("$.store.books | count()", &doc).unwrap();
+        let b = vm_query("$.store.books |> count()", &doc).unwrap();
         assert_eq!(a, b);
         assert_eq!(a, json!(4));
     }
@@ -2526,8 +2554,8 @@ mod tests {
     #[test]
     fn coalesce_double_q() {
         let doc = json!({"a": null, "b": 5});
-        let a = query("$.a ?| $.b", &doc).unwrap();
-        let b = query("$.a ?? $.b", &doc).unwrap();
+        let a = vm_query("$.a ?| $.b", &doc).unwrap();
+        let b = vm_query("$.a ?? $.b", &doc).unwrap();
         assert_eq!(a, b);
         assert_eq!(a, json!(5));
     }
@@ -2535,15 +2563,15 @@ mod tests {
     #[test]
     fn coalesce_double_q_chain() {
         let doc = json!({"a": null, "b": null, "c": 7});
-        let r = query("$.a ?? $.b ?? $.c", &doc).unwrap();
+        let r = vm_query("$.a ?? $.b ?? $.c", &doc).unwrap();
         assert_eq!(r, json!(7));
     }
 
     #[test]
     fn is_kind_alias() {
         let doc = json!({"x": 42});
-        let a = query("$.x kind number", &doc).unwrap();
-        let b = query("$.x is number", &doc).unwrap();
+        let a = vm_query("$.x kind number", &doc).unwrap();
+        let b = vm_query("$.x is number", &doc).unwrap();
         assert_eq!(a, b);
         assert_eq!(a, json!(true));
     }
@@ -2551,8 +2579,8 @@ mod tests {
     #[test]
     fn is_not_kind_alias() {
         let doc = json!({"x": "hello"});
-        let a = query("$.x kind not number", &doc).unwrap();
-        let b = query("$.x is not number", &doc).unwrap();
+        let a = vm_query("$.x kind not number", &doc).unwrap();
+        let b = vm_query("$.x is not number", &doc).unwrap();
         assert_eq!(a, b);
         assert_eq!(a, json!(true));
     }
@@ -2560,7 +2588,7 @@ mod tests {
     #[test]
     fn multi_binding_let() {
         let doc = books();
-        let r = query("let a = 2, b = 3 in a + b", &doc).unwrap();
+        let r = vm_query("let a = 2, b = 3 in a + b", &doc).unwrap();
         assert_eq!(r, json!(5));
     }
 
@@ -2568,14 +2596,14 @@ mod tests {
     fn multi_binding_let_nested_ref() {
         let doc = books();
         // Second binding may refer to first (nested desugar).
-        let r = query("let a = 10, b = a * 2 in b", &doc).unwrap();
+        let r = vm_query("let a = 10, b = a * 2 in b", &doc).unwrap();
         assert_eq!(r, json!(20));
     }
 
     #[test]
     fn arrow_lambda_single_param() {
         let doc = books();
-        let r = query("$.store.books.map(b => b.price)", &doc).unwrap();
+        let r = vm_query("$.store.books.map(b => b.price)", &doc).unwrap();
         let arr = r.as_array().unwrap();
         assert_eq!(arr.len(), 4);
         assert_eq!(arr[0], json!(12.99));
@@ -2584,7 +2612,7 @@ mod tests {
     #[test]
     fn arrow_lambda_paren_params() {
         let doc = json!({"nums": [1,2,3,4]});
-        let r = query("$.nums.map((x) => x * 2)", &doc).unwrap();
+        let r = vm_query("$.nums.map((x) => x * 2)", &doc).unwrap();
         assert_eq!(r, json!([2, 4, 6, 8]));
     }
 
@@ -2593,35 +2621,35 @@ mod tests {
         // Sort supports a 2-param lambda comparator `lambda a,b: a<b`.
         // Test arrow-form `(a,b) => a < b` desugars identically.
         let doc = json!({"nums": [3, 1, 4, 1, 5, 9, 2, 6]});
-        let r = query("$.nums.sort((a, b) => a < b)", &doc).unwrap();
+        let r = vm_query("$.nums.sort((a, b) => a < b)", &doc).unwrap();
         assert_eq!(r, json!([1, 1, 2, 3, 4, 5, 6, 9]));
     }
 
     #[test]
     fn cast_int_from_str() {
         let doc = json!({"s": "42"});
-        let r = query("$.s as int", &doc).unwrap();
+        let r = vm_query("$.s as int", &doc).unwrap();
         assert_eq!(r, json!(42));
     }
 
     #[test]
     fn cast_float_from_int() {
         let doc = json!({"n": 3});
-        let r = query("$.n as float", &doc).unwrap();
+        let r = vm_query("$.n as float", &doc).unwrap();
         assert_eq!(r, json!(3.0));
     }
 
     #[test]
     fn cast_str_from_number() {
         let doc = json!({"n": 42});
-        let r = query("$.n as string", &doc).unwrap();
+        let r = vm_query("$.n as string", &doc).unwrap();
         assert_eq!(r, json!("42"));
     }
 
     #[test]
     fn cast_bool_from_int() {
         let doc = json!({"n": 1});
-        let r = query("$.n as bool", &doc).unwrap();
+        let r = vm_query("$.n as bool", &doc).unwrap();
         assert_eq!(r, json!(true));
     }
 
@@ -2629,7 +2657,7 @@ mod tests {
     fn cast_chain_with_arithmetic() {
         let doc = json!({"s": "10"});
         // `as` tighter than *, so `$.s as int * 2` == `($.s as int) * 2` == 20.
-        let r = query("$.s as int * 2", &doc).unwrap();
+        let r = vm_query("$.s as int * 2", &doc).unwrap();
         assert_eq!(r, json!(20));
     }
 
@@ -2637,29 +2665,29 @@ mod tests {
     fn dyn_field_string_key() {
         let doc = json!({"user": {"name": "Alice", "age": 30}});
         // `.{expr}` picks a key dynamically — same semantics as [expr].
-        let r = query("let k = \"name\" in $.user.{k}", &doc).unwrap();
+        let r = vm_query("let k = \"name\" in $.user.{k}", &doc).unwrap();
         assert_eq!(r, json!("Alice"));
     }
 
     #[test]
     fn dyn_field_int_index() {
         let doc = json!({"items": [10, 20, 30]});
-        let r = query("let i = 1 in $.items.{i}", &doc).unwrap();
+        let r = vm_query("let i = 1 in $.items.{i}", &doc).unwrap();
         assert_eq!(r, json!(20));
     }
 
     #[test]
     fn dyn_field_computed_key() {
         let doc = json!({"prefix_name": "hello", "key": "name"});
-        let r = query("$.{\"prefix_\" + $.key}", &doc).unwrap();
+        let r = vm_query("$.{\"prefix_\" + $.key}", &doc).unwrap();
         assert_eq!(r, json!("hello"));
     }
 
     #[test]
     fn dyn_field_equivalent_to_bracket() {
         let doc = json!({"user": {"name": "Bob"}});
-        let a = query("$.user[\"name\"]", &doc).unwrap();
-        let b = query("$.user.{\"name\"}", &doc).unwrap();
+        let a = vm_query("$.user[\"name\"]", &doc).unwrap();
+        let b = vm_query("$.user.{\"name\"}", &doc).unwrap();
         assert_eq!(a, b);
     }
 
@@ -2668,8 +2696,8 @@ mod tests {
     #[test]
     fn map_shape_basic() {
         let doc = books();
-        let a = query("$.store.books.map({title})", &doc).unwrap();
-        let b = query("$.store.books[*] => {title}", &doc).unwrap();
+        let a = vm_query("$.store.books.map({title})", &doc).unwrap();
+        let b = vm_query("$.store.books[*] => {title}", &doc).unwrap();
         assert_eq!(a, b);
         assert_eq!(a.as_array().unwrap().len(), 4);
     }
@@ -2677,8 +2705,8 @@ mod tests {
     #[test]
     fn map_shape_with_guard() {
         let doc = books();
-        let a = query("$.store.books.filter(price > 10).map({title, price})", &doc).unwrap();
-        let b = query("$.store.books[* if price > 10] => {title, price}", &doc).unwrap();
+        let a = vm_query("$.store.books.filter(price > 10).map({title, price})", &doc).unwrap();
+        let b = vm_query("$.store.books[* if price > 10] => {title, price}", &doc).unwrap();
         assert_eq!(a, b);
         let arr = b.as_array().unwrap();
         assert!(arr.len() >= 2);
@@ -2696,7 +2724,7 @@ mod tests {
                 {"name": "B", "items": [{"n": 3}]},
             ]
         });
-        let r = query("$.groups[*] => {name, ns: items[*] => n}", &doc).unwrap();
+        let r = vm_query("$.groups[*] => {name, ns: items[*] => n}", &doc).unwrap();
         assert_eq!(
             r,
             json!([
@@ -2709,7 +2737,7 @@ mod tests {
     #[test]
     fn map_shape_projection_subset() {
         let doc = books();
-        let r = query("$.store.books[*] => {title, price}", &doc).unwrap();
+        let r = vm_query("$.store.books[*] => {title, price}", &doc).unwrap();
         let arr = r.as_array().unwrap();
         assert_eq!(arr.len(), 4);
         for it in arr {
@@ -2725,21 +2753,21 @@ mod tests {
     #[test]
     fn when_field_included_true() {
         let doc = json!({"name": "Alice", "email": "a@x.com", "verified": true});
-        let r = query("{name, email: $.email when $.verified}", &doc).unwrap();
+        let r = vm_query("{name, email: $.email when $.verified}", &doc).unwrap();
         assert_eq!(r, json!({"name": "Alice", "email": "a@x.com"}));
     }
 
     #[test]
     fn when_field_excluded_false() {
         let doc = json!({"name": "Alice", "email": "a@x.com", "verified": false});
-        let r = query("{name, email: $.email when $.verified}", &doc).unwrap();
+        let r = vm_query("{name, email: $.email when $.verified}", &doc).unwrap();
         assert_eq!(r, json!({"name": "Alice"}));
     }
 
     #[test]
     fn when_field_excluded_null_guard() {
         let doc = json!({"name": "Bob"});
-        let r = query("{name, email: \"default\" when $.verified}", &doc).unwrap();
+        let r = vm_query("{name, email: \"default\" when $.verified}", &doc).unwrap();
         assert_eq!(r, json!({"name": "Bob"}));
     }
 
@@ -2752,7 +2780,7 @@ mod tests {
             ]
         });
         // Inside map, `@` is current item — `role` (bare ident) reads from current.
-        let r = query("$.users[*] => {name, role: role when active}", &doc).unwrap();
+        let r = vm_query("$.users[*] => {name, role: role when active}", &doc).unwrap();
         assert_eq!(
             r,
             json!([
@@ -2765,7 +2793,7 @@ mod tests {
     #[test]
     fn when_field_guard_uses_other_fields() {
         let doc = json!({"score": 85, "threshold": 70});
-        let r = query("{grade: \"pass\" when score > threshold}", &doc).unwrap();
+        let r = vm_query("{grade: \"pass\" when score > threshold}", &doc).unwrap();
         assert_eq!(r, json!({"grade": "pass"}));
     }
 
@@ -2778,7 +2806,7 @@ mod tests {
             "over": {"x": {"q": 99, "r": 3}, "z": 20},
         });
         // Shallow spread would overwrite `x` entirely; deep-spread merges nested.
-        let r = query("{...**$.base, ...**$.over}", &doc).unwrap();
+        let r = vm_query("{...**$.base, ...**$.over}", &doc).unwrap();
         assert_eq!(
             r,
             json!({
@@ -2795,8 +2823,8 @@ mod tests {
             "base": {"x": {"p": 1}},
             "over": {"x": {"q": 2}},
         });
-        let shallow = query("{...$.base, ...$.over}", &doc).unwrap();
-        let deep = query("{...**$.base, ...**$.over}", &doc).unwrap();
+        let shallow = vm_query("{...$.base, ...$.over}", &doc).unwrap();
+        let deep = vm_query("{...**$.base, ...**$.over}", &doc).unwrap();
         // Shallow: x is just {q:2} (replaced). Deep: x is {p:1, q:2} (merged).
         assert_eq!(shallow, json!({"x": {"q": 2}}));
         assert_eq!(deep, json!({"x": {"p": 1, "q": 2}}));
@@ -2808,7 +2836,7 @@ mod tests {
             "a": {"tags": ["one", "two"]},
             "b": {"tags": ["three"]},
         });
-        let r = query("{...**$.a, ...**$.b}", &doc).unwrap();
+        let r = vm_query("{...**$.a, ...**$.b}", &doc).unwrap();
         assert_eq!(r, json!({"tags": ["one", "two", "three"]}));
     }
 
@@ -2818,7 +2846,7 @@ mod tests {
             "a": {"name": "Alice", "info": {"nested": 1}},
             "b": {"name": "Bob"},
         });
-        let r = query("{...**$.a, ...**$.b}", &doc).unwrap();
+        let r = vm_query("{...**$.a, ...**$.b}", &doc).unwrap();
         assert_eq!(r, json!({"name": "Bob", "info": {"nested": 1}}));
     }
 
@@ -2827,28 +2855,28 @@ mod tests {
     #[test]
     fn patch_simple_field_replace() {
         let doc = json!({"name": "Alice", "age": 30});
-        let r = query(r#"patch $ { name: "Bob" }"#, &doc).unwrap();
+        let r = vm_query(r#"patch $ { name: "Bob" }"#, &doc).unwrap();
         assert_eq!(r, json!({"name": "Bob", "age": 30}));
     }
 
     #[test]
     fn patch_nested_field_replace() {
         let doc = json!({"user": {"name": "Alice", "age": 30}});
-        let r = query(r#"patch $ { user.name: "Bob" }"#, &doc).unwrap();
+        let r = vm_query(r#"patch $ { user.name: "Bob" }"#, &doc).unwrap();
         assert_eq!(r, json!({"user": {"name": "Bob", "age": 30}}));
     }
 
     #[test]
     fn patch_delete_field() {
         let doc = json!({"name": "Alice", "tmp": "remove-me", "age": 30});
-        let r = query(r#"patch $ { tmp: DELETE }"#, &doc).unwrap();
+        let r = vm_query(r#"patch $ { tmp: DELETE }"#, &doc).unwrap();
         assert_eq!(r, json!({"name": "Alice", "age": 30}));
     }
 
     #[test]
     fn patch_add_new_field() {
         let doc = json!({"name": "Alice"});
-        let r = query(r#"patch $ { age: 42 }"#, &doc).unwrap();
+        let r = vm_query(r#"patch $ { age: 42 }"#, &doc).unwrap();
         assert_eq!(r, json!({"name": "Alice", "age": 42}));
     }
 
@@ -2858,7 +2886,7 @@ mod tests {
             {"name": "Alice", "seen": false},
             {"name": "Bob",   "seen": false},
         ]});
-        let r = query(r#"patch $ { users[*].seen: true }"#, &doc).unwrap();
+        let r = vm_query(r#"patch $ { users[*].seen: true }"#, &doc).unwrap();
         assert_eq!(
             r,
             json!({"users": [
@@ -2875,7 +2903,7 @@ mod tests {
             {"name": "Bob",   "active": false, "role": "user"},
             {"name": "Cara",  "active": true,  "role": "user"},
         ]});
-        let r = query(r#"patch $ { users[* if active].role: "admin" }"#, &doc).unwrap();
+        let r = vm_query(r#"patch $ { users[* if active].role: "admin" }"#, &doc).unwrap();
         assert_eq!(
             r,
             json!({"users": [
@@ -2892,7 +2920,7 @@ mod tests {
             {"name": "Alice", "email": "ALICE@X"},
             {"name": "Bob",   "email": "BOB@X"},
         ]});
-        let r = query(r#"patch $ { users[*].email: @.lower() }"#, &doc).unwrap();
+        let r = vm_query(r#"patch $ { users[*].email: @.lower() }"#, &doc).unwrap();
         assert_eq!(
             r,
             json!({"users": [
@@ -2905,28 +2933,28 @@ mod tests {
     #[test]
     fn patch_conditional_when_truthy() {
         let doc = json!({"count": 5, "enabled": true});
-        let r = query(r#"patch $ { count: @ + 1 when $.enabled }"#, &doc).unwrap();
+        let r = vm_query(r#"patch $ { count: @ + 1 when $.enabled }"#, &doc).unwrap();
         assert_eq!(r, json!({"count": 6, "enabled": true}));
     }
 
     #[test]
     fn patch_conditional_when_falsy_skips() {
         let doc = json!({"count": 5, "enabled": false});
-        let r = query(r#"patch $ { count: @ + 1 when $.enabled }"#, &doc).unwrap();
+        let r = vm_query(r#"patch $ { count: @ + 1 when $.enabled }"#, &doc).unwrap();
         assert_eq!(r, json!({"count": 5, "enabled": false}));
     }
 
     #[test]
     fn patch_multiple_ops_in_order() {
         let doc = json!({"a": 1, "b": 2, "c": 3});
-        let r = query(r#"patch $ { a: 10, b: DELETE, c: 30 }"#, &doc).unwrap();
+        let r = vm_query(r#"patch $ { a: 10, b: DELETE, c: 30 }"#, &doc).unwrap();
         assert_eq!(r, json!({"a": 10, "c": 30}));
     }
 
     #[test]
     fn patch_index_access() {
         let doc = json!({"items": [10, 20, 30]});
-        let r = query(r#"patch $ { items[1]: 99 }"#, &doc).unwrap();
+        let r = vm_query(r#"patch $ { items[1]: 99 }"#, &doc).unwrap();
         assert_eq!(r, json!({"items": [10, 99, 30]}));
     }
 
@@ -2937,7 +2965,7 @@ mod tests {
             {"name": "Bob",   "active": false},
             {"name": "Cara",  "active": true},
         ]});
-        let r = query(r#"patch $ { users[* if not active]: DELETE }"#, &doc).unwrap();
+        let r = vm_query(r#"patch $ { users[* if not active]: DELETE }"#, &doc).unwrap();
         assert_eq!(
             r,
             json!({"users": [
@@ -2950,14 +2978,14 @@ mod tests {
     #[test]
     fn patch_composes_pipe() {
         let doc = json!({"name": "Alice", "age": 30});
-        let r = query(r#"patch $ { name: "Bob" } | @.name"#, &doc).unwrap();
+        let r = vm_query(r#"patch $ { name: "Bob" } | @.name"#, &doc).unwrap();
         assert_eq!(r, json!("Bob"));
     }
 
     #[test]
     fn patch_composes_method_chain() {
         let doc = json!({"name": "Alice", "age": 30});
-        let r = query(r#"patch $ { name: "Bob" }.keys()"#, &doc).unwrap();
+        let r = vm_query(r#"patch $ { name: "Bob" }.keys()"#, &doc).unwrap();
         let mut keys = r.as_array().unwrap().clone();
         keys.sort_by(|a, b| a.as_str().unwrap().cmp(b.as_str().unwrap()));
         assert_eq!(keys, vec![json!("age"), json!("name")]);
@@ -2966,35 +2994,35 @@ mod tests {
     #[test]
     fn patch_composes_nested_in_object() {
         let doc = json!({"name": "Alice"});
-        let r = query(r#"{result: patch $ { name: "Bob" }}"#, &doc).unwrap();
+        let r = vm_query(r#"{result: patch $ { name: "Bob" }}"#, &doc).unwrap();
         assert_eq!(r, json!({"result": {"name": "Bob"}}));
     }
 
     #[test]
     fn patch_composes_let_binding() {
         let doc = json!({"name": "Alice", "age": 30});
-        let r = query(r#"let x = patch $ { name: "Bob" } in x.name"#, &doc).unwrap();
+        let r = vm_query(r#"let x = patch $ { name: "Bob" } in x.name"#, &doc).unwrap();
         assert_eq!(r, json!("Bob"));
     }
 
     #[test]
     fn patch_composes_nested_patch() {
         let doc = json!({"name": "Alice", "age": 30});
-        let r = query(r#"patch (patch $ { name: "Bob" }) { age: 99 }"#, &doc).unwrap();
+        let r = vm_query(r#"patch (patch $ { name: "Bob" }) { age: 99 }"#, &doc).unwrap();
         assert_eq!(r, json!({"name": "Bob", "age": 99}));
     }
 
     #[test]
     fn patch_composes_inside_map() {
         let doc = json!({"users": [{"n": 1}, {"n": 2}, {"n": 3}]});
-        let r = query(r#"$.users.map(patch @ { n: @ * 10 })"#, &doc).unwrap();
+        let r = vm_query(r#"$.users.map(patch @ { n: @ * 10 })"#, &doc).unwrap();
         assert_eq!(r, json!([{"n": 10}, {"n": 20}, {"n": 30}]));
     }
 
     #[test]
     fn patch_delete_mark_outside_patch_errors() {
         let doc = json!({});
-        let r = query(r#"DELETE"#, &doc);
+        let r = vm_query(r#"DELETE"#, &doc);
         assert!(r.is_err());
     }
 
@@ -3037,14 +3065,14 @@ mod tests {
     #[test]
     fn tier1_find_alias() {
         let doc = books();
-        let r = query(r#"$.store.books.find(price > 10).map(title)"#, &doc).unwrap();
+        let r = vm_query(r#"$.store.books.find(price > 10).map(title)"#, &doc).unwrap();
         assert_eq!(r, json!(["Dune", "Neuromancer"]));
     }
 
     #[test]
     fn tier1_find_all_alias() {
         let doc = books();
-        let r = query(r#"$.store.books.find_all(rating > 4.5).map(title)"#, &doc).unwrap();
+        let r = vm_query(r#"$.store.books.find_all(rating > 4.5).map(title)"#, &doc).unwrap();
         let titles = r.as_array().unwrap();
         assert!(titles.contains(&json!("Dune")));
         assert!(titles.contains(&json!("1984")));
@@ -3053,7 +3081,7 @@ mod tests {
     #[test]
     fn tier1_unique_by_lambda() {
         let doc = saas();
-        let r = query(
+        let r = vm_query(
             r#"$.teams.flat_map(lambda t: t.members).unique_by(lambda m: m.email).map(email)"#,
             &doc,
         )
@@ -3068,21 +3096,21 @@ mod tests {
     #[test]
     fn tier1_collect_scalar() {
         let doc = json!({"x": 42});
-        let r = query(r#"$.x.collect()"#, &doc).unwrap();
+        let r = vm_query(r#"$.x.collect()"#, &doc).unwrap();
         assert_eq!(r, json!([42]));
     }
 
     #[test]
     fn tier1_collect_array_identity() {
         let doc = json!({"xs": [1,2,3]});
-        let r = query(r#"$.xs.collect()"#, &doc).unwrap();
+        let r = vm_query(r#"$.xs.collect()"#, &doc).unwrap();
         assert_eq!(r, json!([1, 2, 3]));
     }
 
     #[test]
     fn tier1_collect_null_to_empty() {
         let doc = json!({"x": null});
-        let r = query(r#"$.x.collect()"#, &doc).unwrap();
+        let r = vm_query(r#"$.x.collect()"#, &doc).unwrap();
         assert_eq!(r, json!([]));
     }
 
@@ -3090,7 +3118,7 @@ mod tests {
     fn tier1_deep_shape_email_keys() {
         let doc = saas();
         // any object carrying `email` anywhere — members + invoices
-        let r = query(r#"$.deep_shape({email})"#, &doc).unwrap();
+        let r = vm_query(r#"$.deep_shape({email})"#, &doc).unwrap();
         let arr = r.as_array().unwrap();
         // 4 members across teams + 1 invoice = 5
         assert_eq!(arr.len(), 5);
@@ -3099,7 +3127,7 @@ mod tests {
     #[test]
     fn tier1_deep_like_role_lead() {
         let doc = saas();
-        let r = query(r#"$.deep_like({role: "lead"})"#, &doc).unwrap();
+        let r = vm_query(r#"$.deep_like({role: "lead"})"#, &doc).unwrap();
         let arr = r.as_array().unwrap();
         assert_eq!(arr.len(), 2);
         for item in arr {
@@ -3110,28 +3138,28 @@ mod tests {
     #[test]
     fn tier1_pick_ident_keys() {
         let doc = json!({"user": {"name": "Alice", "age": 30, "score": 85}});
-        let r = query(r#"$.user.pick(name, age)"#, &doc).unwrap();
+        let r = vm_query(r#"$.user.pick(name, age)"#, &doc).unwrap();
         assert_eq!(r, json!({"name": "Alice", "age": 30}));
     }
 
     #[test]
     fn tier1_pick_alias() {
         let doc = json!({"user": {"name": "Alice", "age": 30}});
-        let r = query(r#"$.user.pick(name, years: age)"#, &doc).unwrap();
+        let r = vm_query(r#"$.user.pick(name, years: age)"#, &doc).unwrap();
         assert_eq!(r, json!({"name": "Alice", "years": 30}));
     }
 
     #[test]
     fn tier1_pick_over_array() {
         let doc = saas();
-        let r = query(r#"$.teams[0].members.pick(email)"#, &doc).unwrap();
+        let r = vm_query(r#"$.teams[0].members.pick(email)"#, &doc).unwrap();
         assert_eq!(r, json!([{"email": "a@acme.io"}, {"email": "b@acme.io"}]));
     }
 
     #[test]
     fn tier1_pick_alias_over_array() {
         let doc = saas();
-        let r = query(r#"$.teams[0].members.pick(addr: email, role)"#, &doc).unwrap();
+        let r = vm_query(r#"$.teams[0].members.pick(addr: email, role)"#, &doc).unwrap();
         assert_eq!(
             r,
             json!([
@@ -3144,7 +3172,7 @@ mod tests {
     #[test]
     fn tier1_deep_find_status_open() {
         let doc = saas();
-        let r = query(r#"$.deep_find(@ kind object and status == "open")"#, &doc).unwrap();
+        let r = vm_query(r#"$.deep_find(@ kind object and status == "open")"#, &doc).unwrap();
         let arr = r.as_array().unwrap();
         assert_eq!(arr.len(), 2);
     }
@@ -3152,7 +3180,7 @@ mod tests {
     #[test]
     fn tier1_dotdot_find_sugar() {
         let doc = saas();
-        let r = query(r#"$..find(@ kind object and status == "open")"#, &doc).unwrap();
+        let r = vm_query(r#"$..find(@ kind object and status == "open")"#, &doc).unwrap();
         let arr = r.as_array().unwrap();
         assert_eq!(arr.len(), 2);
     }
@@ -3160,7 +3188,7 @@ mod tests {
     #[test]
     fn tier1_dotdot_shape_sugar() {
         let doc = saas();
-        let r = query(r#"$..shape({email})"#, &doc).unwrap();
+        let r = vm_query(r#"$..shape({email})"#, &doc).unwrap();
         let arr = r.as_array().unwrap();
         assert_eq!(arr.len(), 5);
     }
@@ -3168,7 +3196,7 @@ mod tests {
     #[test]
     fn tier1_dotdot_like_sugar() {
         let doc = saas();
-        let r = query(r#"$..like({role: "lead"})"#, &doc).unwrap();
+        let r = vm_query(r#"$..like({role: "lead"})"#, &doc).unwrap();
         let arr = r.as_array().unwrap();
         assert_eq!(arr.len(), 2);
     }
@@ -3178,14 +3206,14 @@ mod tests {
     #[test]
     fn tier1_chain_set_field() {
         let doc = json!({"user": {"name": "Alice", "age": 30}});
-        let r = query(r#"$.user.name.set("Bob")"#, &doc).unwrap();
+        let r = vm_query(r#"$.user.name.set("Bob")"#, &doc).unwrap();
         assert_eq!(r, json!({"user": {"name": "Bob", "age": 30}}));
     }
 
     #[test]
     fn tier1_chain_set_deep() {
         let doc = saas();
-        let r = query(r#"$.teams[0].projects[0].name.set("API")"#, &doc).unwrap();
+        let r = vm_query(r#"$.teams[0].projects[0].name.set("API")"#, &doc).unwrap();
         assert_eq!(
             r.pointer("/teams/0/projects/0/name").unwrap(),
             &json!("API")
@@ -3201,28 +3229,28 @@ mod tests {
     #[test]
     fn tier1_chain_modify_using_current() {
         let doc = json!({"counts": {"n": 5}});
-        let r = query(r#"$.counts.n.modify(@ * 2)"#, &doc).unwrap();
+        let r = vm_query(r#"$.counts.n.modify(@ * 2)"#, &doc).unwrap();
         assert_eq!(r, json!({"counts": {"n": 10}}));
     }
 
     #[test]
     fn tier1_chain_delete_field() {
         let doc = json!({"user": {"name": "Alice", "age": 30}});
-        let r = query(r#"$.user.age.delete()"#, &doc).unwrap();
+        let r = vm_query(r#"$.user.age.delete()"#, &doc).unwrap();
         assert_eq!(r, json!({"user": {"name": "Alice"}}));
     }
 
     #[test]
     fn tier1_chain_unset_key() {
         let doc = json!({"user": {"name": "Alice", "age": 30}});
-        let r = query(r#"$.user.unset("age")"#, &doc).unwrap();
+        let r = vm_query(r#"$.user.unset("age")"#, &doc).unwrap();
         assert_eq!(r, json!({"user": {"name": "Alice"}}));
     }
 
     #[test]
     fn tier1_chain_set_subtree() {
         let doc = json!({"a": {"b": {"c": 1}}});
-        let r = query(r#"$.a.b.set({x: 42})"#, &doc).unwrap();
+        let r = vm_query(r#"$.a.b.set({x: 42})"#, &doc).unwrap();
         assert_eq!(r, json!({"a": {"b": {"x": 42}}}));
     }
 
@@ -3230,7 +3258,7 @@ mod tests {
     fn tier1_chain_descendant_set() {
         let doc = saas();
         // every `status` anywhere under the doc flips to "closed"
-        let r = query(r#"$..status.set("closed")"#, &doc).unwrap();
+        let r = vm_query(r#"$..status.set("closed")"#, &doc).unwrap();
         let statuses: Vec<&serde_json::Value> = r
             .pointer("/teams/0/projects/0/tasks")
             .unwrap()
@@ -3245,21 +3273,21 @@ mod tests {
     #[test]
     fn tier1_chain_descendant_delete() {
         let doc = json!({"a": {"id": 1, "b": {"id": 2, "c": {"id": 3}}}});
-        let r = query(r#"$..id.delete()"#, &doc).unwrap();
+        let r = vm_query(r#"$..id.delete()"#, &doc).unwrap();
         assert_eq!(r, json!({"a": {"b": {"c": {}}}}));
     }
 
     #[test]
     fn tier1_chain_dyn_index() {
         let doc = json!({"xs": [10, 20, 30, 40], "i": 2});
-        let r = query(r#"$.xs[$.i].set(99)"#, &doc).unwrap();
+        let r = vm_query(r#"$.xs[$.i].set(99)"#, &doc).unwrap();
         assert_eq!(r.pointer("/xs").unwrap(), &json!([10, 20, 99, 40]));
     }
 
     #[test]
     fn tier1_chain_merge() {
         let doc = json!({"config": {"host": "a", "port": 80}});
-        let r = query(r#"$.config.merge({port: 443, tls: true})"#, &doc).unwrap();
+        let r = vm_query(r#"$.config.merge({port: 443, tls: true})"#, &doc).unwrap();
         assert_eq!(
             r,
             json!({"config": {"host": "a", "port": 443, "tls": true}})
@@ -3269,14 +3297,14 @@ mod tests {
     #[test]
     fn tier1_chain_deep_merge() {
         let doc = json!({"a": {"b": {"x": 1}}});
-        let r = query(r#"$.a.deep_merge({b: {y: 2}})"#, &doc).unwrap();
+        let r = vm_query(r#"$.a.deep_merge({b: {y: 2}})"#, &doc).unwrap();
         assert_eq!(r, json!({"a": {"b": {"x": 1, "y": 2}}}));
     }
 
     #[test]
     fn tier1_chain_modify_lambda() {
         let doc = json!({"counts": {"n": 5}});
-        let r = query(r#"$.counts.n.modify(lambda x: x * 3)"#, &doc).unwrap();
+        let r = vm_query(r#"$.counts.n.modify(lambda x: x * 3)"#, &doc).unwrap();
         assert_eq!(r, json!({"counts": {"n": 15}}));
     }
 
@@ -3284,7 +3312,7 @@ mod tests {
     fn tier1_non_root_set_is_method_call() {
         // `.set` without `$` prefix is the old builtin: returns arg, ignoring recv
         let doc = json!({"x": 1});
-        let r = query(r#"$.x | set(99)"#, &doc).unwrap();
+        let r = vm_query(r#"$.x | set(99)"#, &doc).unwrap();
         assert_eq!(r, json!(99));
     }
 
@@ -3292,7 +3320,7 @@ mod tests {
     fn tier1_descendant_still_works() {
         // `..field` (no parens) should still be a descendant lookup, not a deep method
         let doc = books();
-        let r = query("$..title", &doc).unwrap();
+        let r = vm_query("$..title", &doc).unwrap();
         let titles = r.as_array().unwrap();
         assert!(titles.contains(&json!("Dune")));
     }
@@ -3654,20 +3682,20 @@ mod tests {
     #[test]
     fn range_one_arg() {
         let doc = json!({});
-        assert_eq!(query("range(5)", &doc).unwrap(), json!([0, 1, 2, 3, 4]));
+        assert_eq!(vm_query("range(5)", &doc).unwrap(), json!([0, 1, 2, 3, 4]));
     }
 
     #[test]
     fn range_two_args() {
         let doc = json!({});
-        assert_eq!(query("range(2, 5)", &doc).unwrap(), json!([2, 3, 4]));
+        assert_eq!(vm_query("range(2, 5)", &doc).unwrap(), json!([2, 3, 4]));
     }
 
     #[test]
     fn range_three_args_positive_step() {
         let doc = json!({});
         assert_eq!(
-            query("range(0, 10, 2)", &doc).unwrap(),
+            vm_query("range(0, 10, 2)", &doc).unwrap(),
             json!([0, 2, 4, 6, 8])
         );
     }
@@ -3676,7 +3704,7 @@ mod tests {
     fn range_three_args_negative_step() {
         let doc = json!({});
         assert_eq!(
-            query("range(10, 0, -2)", &doc).unwrap(),
+            vm_query("range(10, 0, -2)", &doc).unwrap(),
             json!([10, 8, 6, 4, 2])
         );
     }
@@ -3684,47 +3712,47 @@ mod tests {
     #[test]
     fn range_empty_when_step_wrong_direction() {
         let doc = json!({});
-        assert_eq!(query("range(5, 0, 1)", &doc).unwrap(), json!([]));
-        assert_eq!(query("range(0, 5, -1)", &doc).unwrap(), json!([]));
+        assert_eq!(vm_query("range(5, 0, 1)", &doc).unwrap(), json!([]));
+        assert_eq!(vm_query("range(0, 5, -1)", &doc).unwrap(), json!([]));
     }
 
     #[test]
     fn range_zero_step_empty() {
         let doc = json!({});
-        assert_eq!(query("range(0, 5, 0)", &doc).unwrap(), json!([]));
+        assert_eq!(vm_query("range(0, 5, 0)", &doc).unwrap(), json!([]));
     }
 
     #[test]
     fn ceil_floor_round_floats() {
         let doc = json!({"x": 3.3, "y": 3.7, "z": 3.5, "n": -2.4});
-        assert_eq!(query("$.x.ceil()", &doc).unwrap(), json!(4));
-        assert_eq!(query("$.x.floor()", &doc).unwrap(), json!(3));
-        assert_eq!(query("$.y.floor()", &doc).unwrap(), json!(3));
-        assert_eq!(query("$.y.round()", &doc).unwrap(), json!(4));
-        assert_eq!(query("$.z.round()", &doc).unwrap(), json!(4));
-        assert_eq!(query("$.n.ceil()", &doc).unwrap(), json!(-2));
-        assert_eq!(query("$.n.floor()", &doc).unwrap(), json!(-3));
+        assert_eq!(vm_query("$.x.ceil()", &doc).unwrap(), json!(4));
+        assert_eq!(vm_query("$.x.floor()", &doc).unwrap(), json!(3));
+        assert_eq!(vm_query("$.y.floor()", &doc).unwrap(), json!(3));
+        assert_eq!(vm_query("$.y.round()", &doc).unwrap(), json!(4));
+        assert_eq!(vm_query("$.z.round()", &doc).unwrap(), json!(4));
+        assert_eq!(vm_query("$.n.ceil()", &doc).unwrap(), json!(-2));
+        assert_eq!(vm_query("$.n.floor()", &doc).unwrap(), json!(-3));
     }
 
     #[test]
     fn ceil_floor_round_int_identity() {
         let doc = json!({"x": 42});
-        assert_eq!(query("$.x.ceil()", &doc).unwrap(), json!(42));
-        assert_eq!(query("$.x.floor()", &doc).unwrap(), json!(42));
-        assert_eq!(query("$.x.round()", &doc).unwrap(), json!(42));
+        assert_eq!(vm_query("$.x.ceil()", &doc).unwrap(), json!(42));
+        assert_eq!(vm_query("$.x.floor()", &doc).unwrap(), json!(42));
+        assert_eq!(vm_query("$.x.round()", &doc).unwrap(), json!(42));
     }
 
     #[test]
     fn abs_number() {
         let doc = json!({"a": -3.5, "b": 7});
-        assert_eq!(query("$.a.abs()", &doc).unwrap(), json!(3.5));
-        assert_eq!(query("$.b.abs()", &doc).unwrap(), json!(7));
+        assert_eq!(vm_query("$.a.abs()", &doc).unwrap(), json!(3.5));
+        assert_eq!(vm_query("$.b.abs()", &doc).unwrap(), json!(7));
     }
 
     #[test]
     fn range_composes_with_map_sum() {
         let doc = json!({});
         // 1 + 2 + ... + 9 = 45
-        assert_eq!(query("range(1, 10).sum()", &doc).unwrap(), json!(45));
+        assert_eq!(vm_query("range(1, 10).sum()", &doc).unwrap(), json!(45));
     }
 }

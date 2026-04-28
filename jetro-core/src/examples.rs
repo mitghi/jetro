@@ -10,8 +10,15 @@
 
 #[cfg(test)]
 mod examples {
-    use crate::{query, vm::VM};
+    use crate::{parser, vm, vm::VM};
     use serde_json::{json, Value};
+
+    fn vm_query(expr: &str, doc: &Value) -> Result<Value, crate::Error> {
+        let ast = parser::parse(expr)?;
+        let program = vm::Compiler::compile(&ast, expr);
+        let mut vm = vm::VM::new();
+        Ok(vm.execute(&program, doc)?)
+    }
 
     // ── Fixture ───────────────────────────────────────────────────────────────
 
@@ -118,7 +125,7 @@ mod examples {
     }
 
     fn q(expr: &str) -> Value {
-        query(expr, &world()).expect(expr)
+        vm_query(expr, &world()).expect(expr)
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -169,16 +176,16 @@ mod examples {
     fn nav_optional_field_null_safe() {
         // ?.field — returns null instead of error when parent is null
         let doc = json!({"user": null});
-        assert_eq!(query("$.user?.name", &doc).unwrap(), json!(null));
+        assert_eq!(vm_query("$.user?.name", &doc).unwrap(), json!(null));
     }
 
     #[test]
     fn nav_optional_chain() {
         let doc = json!({"users": [{"id": 1}, {"id": 2, "profile": {"bio": "hi"}}]});
         // Missing field on first user — null, not error
-        let r = query("$.users[0].profile?.bio", &doc).unwrap();
+        let r = vm_query("$.users[0].profile?.bio", &doc).unwrap();
         assert_eq!(r, json!(null));
-        let r2 = query("$.users[1].profile?.bio", &doc).unwrap();
+        let r2 = vm_query("$.users[1].profile?.bio", &doc).unwrap();
         assert_eq!(r2, json!("hi"));
     }
 
@@ -448,14 +455,14 @@ mod examples {
     #[test]
     fn arr_flatten() {
         let doc = json!({"x": [[1, 2], [3, [4, 5]]]});
-        let r = query("$.x.flatten()", &doc).unwrap();
+        let r = vm_query("$.x.flatten()", &doc).unwrap();
         assert_eq!(r, json!([1, 2, 3, [4, 5]]));
     }
 
     #[test]
     fn arr_flatten_deep() {
         let doc = json!({"x": [[1, [2, [3]]]]});
-        let r = query("$.x.flatten(10)", &doc).unwrap();
+        let r = vm_query("$.x.flatten(10)", &doc).unwrap();
         assert_eq!(r, json!([1, 2, 3]));
     }
 
@@ -492,14 +499,20 @@ mod examples {
     #[test]
     fn arr_append_prepend() {
         let doc = json!({"vals": [2, 3]});
-        assert_eq!(query("$.vals.append(4)", &doc).unwrap(), json!([2, 3, 4]));
-        assert_eq!(query("$.vals.prepend(1)", &doc).unwrap(), json!([1, 2, 3]));
+        assert_eq!(
+            vm_query("$.vals.append(4)", &doc).unwrap(),
+            json!([2, 3, 4])
+        );
+        assert_eq!(
+            vm_query("$.vals.prepend(1)", &doc).unwrap(),
+            json!([1, 2, 3])
+        );
     }
 
     #[test]
     fn arr_remove_by_predicate() {
         let doc = json!({"vals": [1, 2, 3, 4, 5]});
-        let r = query("$.vals.remove(lambda v: v % 2 == 0)", &doc).unwrap();
+        let r = vm_query("$.vals.remove(lambda v: v % 2 == 0)", &doc).unwrap();
         assert_eq!(r, json!([1, 3, 5]));
     }
 
@@ -507,7 +520,7 @@ mod examples {
     fn arr_join() {
         let doc = json!({"words": ["hello", "world"]});
         assert_eq!(
-            query("$.words.join(\", \")", &doc).unwrap(),
+            vm_query("$.words.join(\", \")", &doc).unwrap(),
             json!("hello, world")
         );
     }
@@ -528,21 +541,21 @@ mod examples {
     #[test]
     fn iter_pairwise() {
         let doc = json!({"v": [1, 2, 3, 4]});
-        let r = query("$.v.pairwise()", &doc).unwrap();
+        let r = vm_query("$.v.pairwise()", &doc).unwrap();
         assert_eq!(r, json!([[1, 2], [2, 3], [3, 4]]));
     }
 
     #[test]
     fn iter_window() {
         let doc = json!({"v": [1, 2, 3, 4, 5]});
-        let r = query("$.v.window(3)", &doc).unwrap();
+        let r = vm_query("$.v.window(3)", &doc).unwrap();
         assert_eq!(r, json!([[1, 2, 3], [2, 3, 4], [3, 4, 5]]));
     }
 
     #[test]
     fn iter_chunk() {
         let doc = json!({"v": [1, 2, 3, 4, 5]});
-        let r = query("$.v.chunk(2)", &doc).unwrap();
+        let r = vm_query("$.v.chunk(2)", &doc).unwrap();
         assert_eq!(r, json!([[1, 2], [3, 4], [5]]));
     }
 
@@ -550,11 +563,11 @@ mod examples {
     fn iter_takewhile_dropwhile() {
         let doc = json!({"v": [1, 2, 3, 4, 5]});
         assert_eq!(
-            query("$.v.takewhile(lambda x: x < 4)", &doc).unwrap(),
+            vm_query("$.v.takewhile(lambda x: x < 4)", &doc).unwrap(),
             json!([1, 2, 3])
         );
         assert_eq!(
-            query("$.v.dropwhile(lambda x: x < 3)", &doc).unwrap(),
+            vm_query("$.v.dropwhile(lambda x: x < 3)", &doc).unwrap(),
             json!([3, 4, 5])
         );
     }
@@ -562,14 +575,14 @@ mod examples {
     #[test]
     fn iter_accumulate() {
         let doc = json!({"v": [1, 2, 3, 4]});
-        let r = query("$.v.accumulate(lambda acc, x: acc + x)", &doc).unwrap();
+        let r = vm_query("$.v.accumulate(lambda acc, x: acc + x)", &doc).unwrap();
         assert_eq!(r, json!([1, 3, 6, 10]));
     }
 
     #[test]
     fn iter_partition() {
         let doc = json!({"v": [1, 2, 3, 4, 5, 6]});
-        let r = query("$.v.partition(lambda n: n % 2 == 0)", &doc).unwrap();
+        let r = vm_query("$.v.partition(lambda n: n % 2 == 0)", &doc).unwrap();
         assert_eq!(r["true"], json!([2, 4, 6]));
         assert_eq!(r["false"], json!([1, 3, 5]));
     }
@@ -577,14 +590,14 @@ mod examples {
     #[test]
     fn iter_zip_method() {
         let doc = json!({"a": [1,2,3], "b": ["x","y","z"]});
-        let r = query("$.a.zip($.b)", &doc).unwrap();
+        let r = vm_query("$.a.zip($.b)", &doc).unwrap();
         assert_eq!(r, json!([[1, "x"], [2, "y"], [3, "z"]]));
     }
 
     #[test]
     fn iter_zip_longest() {
         let doc = json!({"a": [1,2,3], "b": ["x","y"]});
-        let r = query("$.a.zip_longest($.b)", &doc).unwrap();
+        let r = vm_query("$.a.zip_longest($.b)", &doc).unwrap();
         assert_eq!(r.as_array().unwrap().len(), 3);
         assert_eq!(r[2][1], json!(null)); // padded
     }
@@ -650,7 +663,7 @@ mod examples {
     fn obj_merge() {
         // chain form now writes back — pipe form preserves pure merge
         let doc = json!({"a": {"x": 1, "y": 2}, "b": {"y": 99, "z": 3}});
-        let r = query("$.a | merge($.b)", &doc).unwrap();
+        let r = vm_query("$.a | merge($.b)", &doc).unwrap();
         assert_eq!(r["y"], json!(99));
         assert_eq!(r["z"], json!(3));
     }
@@ -658,7 +671,7 @@ mod examples {
     #[test]
     fn obj_deep_merge() {
         let doc = json!({"a": {"x": {"p": 1}}, "b": {"x": {"q": 2}, "y": 3}});
-        let r = query("$.a | deep_merge($.b)", &doc).unwrap();
+        let r = vm_query("$.a | deep_merge($.b)", &doc).unwrap();
         assert_eq!(r["x"]["p"], json!(1));
         assert_eq!(r["x"]["q"], json!(2));
     }
@@ -666,7 +679,7 @@ mod examples {
     #[test]
     fn obj_defaults() {
         let doc = json!({"obj": {"a": 1, "b": null}, "defs": {"b": 99, "c": 100}});
-        let r = query("$.obj.defaults($.defs)", &doc).unwrap();
+        let r = vm_query("$.obj.defaults($.defs)", &doc).unwrap();
         assert_eq!(r["b"], json!(99));
         assert_eq!(r["c"], json!(100));
         assert_eq!(r["a"], json!(1));
@@ -675,7 +688,7 @@ mod examples {
     #[test]
     fn obj_rename() {
         let doc = json!({"obj": {"old_key": "value", "keep": 1}});
-        let r = query("$.obj.rename({old_key: \"new_key\"})", &doc).unwrap();
+        let r = vm_query("$.obj.rename({old_key: \"new_key\"})", &doc).unwrap();
         assert!(r.get("old_key").is_none());
         assert_eq!(r["new_key"], json!("value"));
     }
@@ -690,7 +703,7 @@ mod examples {
     #[test]
     fn obj_transform_values() {
         let doc = json!({"m": {"a": 1, "b": 2, "c": 3}});
-        let r = query("$.m.transform_values(lambda v: v * 10)", &doc).unwrap();
+        let r = vm_query("$.m.transform_values(lambda v: v * 10)", &doc).unwrap();
         assert_eq!(r["a"], json!(10));
         assert_eq!(r["b"], json!(20));
     }
@@ -714,7 +727,7 @@ mod examples {
     #[test]
     fn obj_invert() {
         let doc = json!({"m": {"a": "x", "b": "y"}});
-        let r = query("$.m.invert()", &doc).unwrap();
+        let r = vm_query("$.m.invert()", &doc).unwrap();
         assert_eq!(r["x"], json!("a"));
     }
 
@@ -725,7 +738,7 @@ mod examples {
         assert_eq!(arr.len(), 3);
 
         let doc = json!({"pairs": r});
-        let restored = query("$.pairs.from_pairs()", &doc).unwrap();
+        let restored = vm_query("$.pairs.from_pairs()", &doc).unwrap();
         assert_eq!(restored["new_ui"], json!(true));
     }
 
@@ -811,9 +824,9 @@ mod examples {
     #[test]
     fn str_split_join() {
         let doc = json!({"s": "a,b,c"});
-        let split = query("$.s.split(\",\")", &doc).unwrap();
+        let split = vm_query("$.s.split(\",\")", &doc).unwrap();
         assert_eq!(split, json!(["a", "b", "c"]));
-        let joined = query("$.s.split(\",\").join(\" | \")", &doc).unwrap();
+        let joined = vm_query("$.s.split(\",\").join(\" | \")", &doc).unwrap();
         assert_eq!(joined, json!("a | b | c"));
     }
 
@@ -821,11 +834,11 @@ mod examples {
     fn str_replace_all() {
         let doc = json!({"s": "foo foo foo"});
         assert_eq!(
-            query("$.s.replace(\"foo\", \"bar\")", &doc).unwrap(),
+            vm_query("$.s.replace(\"foo\", \"bar\")", &doc).unwrap(),
             json!("bar foo foo")
         );
         assert_eq!(
-            query("$.s.replace_all(\"foo\", \"bar\")", &doc).unwrap(),
+            vm_query("$.s.replace_all(\"foo\", \"bar\")", &doc).unwrap(),
             json!("bar bar bar")
         );
     }
@@ -834,16 +847,19 @@ mod examples {
     fn str_starts_ends_strip() {
         let doc = json!({"s": "foobar"});
         assert_eq!(
-            query("$.s.starts_with(\"foo\")", &doc).unwrap(),
+            vm_query("$.s.starts_with(\"foo\")", &doc).unwrap(),
             json!(true)
         );
-        assert_eq!(query("$.s.ends_with(\"bar\")", &doc).unwrap(), json!(true));
         assert_eq!(
-            query("$.s.strip_prefix(\"foo\")", &doc).unwrap(),
+            vm_query("$.s.ends_with(\"bar\")", &doc).unwrap(),
+            json!(true)
+        );
+        assert_eq!(
+            vm_query("$.s.strip_prefix(\"foo\")", &doc).unwrap(),
             json!("bar")
         );
         assert_eq!(
-            query("$.s.strip_suffix(\"bar\")", &doc).unwrap(),
+            vm_query("$.s.strip_suffix(\"bar\")", &doc).unwrap(),
             json!("foo")
         );
     }
@@ -852,51 +868,63 @@ mod examples {
     fn str_pad_repeat() {
         let doc = json!({"s": "hi"});
         assert_eq!(
-            query("$.s.pad_left(5, \"0\")", &doc).unwrap(),
+            vm_query("$.s.pad_left(5, \"0\")", &doc).unwrap(),
             json!("000hi")
         );
         assert_eq!(
-            query("$.s.pad_right(5, \".\")", &doc).unwrap(),
+            vm_query("$.s.pad_right(5, \".\")", &doc).unwrap(),
             json!("hi...")
         );
-        assert_eq!(query("$.s.repeat(3)", &doc).unwrap(), json!("hihihi"));
+        assert_eq!(vm_query("$.s.repeat(3)", &doc).unwrap(), json!("hihihi"));
     }
 
     #[test]
     fn str_index_slice() {
         let doc = json!({"s": "hello world"});
-        assert_eq!(query("$.s.index_of(\"world\")", &doc).unwrap(), json!(6));
-        assert_eq!(query("$.s.last_index_of(\"l\")", &doc).unwrap(), json!(9));
-        assert_eq!(query("$.s.slice(6, 11)", &doc).unwrap(), json!("world"));
-        assert_eq!(query("$.s.slice(0, 5)", &doc).unwrap(), json!("hello"));
+        assert_eq!(vm_query("$.s.index_of(\"world\")", &doc).unwrap(), json!(6));
+        assert_eq!(
+            vm_query("$.s.last_index_of(\"l\")", &doc).unwrap(),
+            json!(9)
+        );
+        assert_eq!(vm_query("$.s.slice(6, 11)", &doc).unwrap(), json!("world"));
+        assert_eq!(vm_query("$.s.slice(0, 5)", &doc).unwrap(), json!("hello"));
     }
 
     #[test]
     fn str_lines_words_chars() {
         let doc = json!({"s": "a b\nc d"});
-        assert_eq!(query("$.s.lines()", &doc).unwrap(), json!(["a b", "c d"]));
         assert_eq!(
-            query("$.s.words()", &doc).unwrap(),
+            vm_query("$.s.lines()", &doc).unwrap(),
+            json!(["a b", "c d"])
+        );
+        assert_eq!(
+            vm_query("$.s.words()", &doc).unwrap(),
             json!(["a", "b", "c", "d"])
         );
-        assert_eq!(query("$.s.chars().len()", &doc).unwrap(), json!(7));
+        assert_eq!(vm_query("$.s.chars().len()", &doc).unwrap(), json!(7));
     }
 
     #[test]
     fn str_indent_dedent() {
         let doc = json!({"s": "line one\nline two"});
-        let indented = query("$.s.indent(4)", &doc).unwrap();
+        let indented = vm_query("$.s.indent(4)", &doc).unwrap();
         assert!(indented.as_str().unwrap().starts_with("    line"));
-        let dedented = query("$.strings.multiline.dedent()", &world()).unwrap();
+        let dedented = vm_query("$.strings.multiline.dedent()", &world()).unwrap();
         assert!(dedented.as_str().unwrap().starts_with("line"));
     }
 
     #[test]
     fn str_matches_scan() {
         let doc = json!({"s": "hello world"});
-        assert_eq!(query("$.s.matches(\"world\")", &doc).unwrap(), json!(true));
-        assert_eq!(query("$.s.matches(\"xyz\")", &doc).unwrap(), json!(false));
-        let r = query("$.s.scan(\"l\")", &doc).unwrap();
+        assert_eq!(
+            vm_query("$.s.matches(\"world\")", &doc).unwrap(),
+            json!(true)
+        );
+        assert_eq!(
+            vm_query("$.s.matches(\"xyz\")", &doc).unwrap(),
+            json!(false)
+        );
+        let r = vm_query("$.s.scan(\"l\")", &doc).unwrap();
         // "l" appears 3 times in "hello world"
         assert_eq!(r.as_array().unwrap().len(), 3);
     }
@@ -904,9 +932,9 @@ mod examples {
     #[test]
     fn str_to_number_to_bool() {
         let doc = json!({"n": "42", "f": "3.14", "b": "true"});
-        assert_eq!(query("$.n.to_number()", &doc).unwrap(), json!(42));
-        assert_eq!(query("$.f.to_number()", &doc).unwrap(), json!(3.14));
-        assert_eq!(query("$.b.to_bool()", &doc).unwrap(), json!(true));
+        assert_eq!(vm_query("$.n.to_number()", &doc).unwrap(), json!(42));
+        assert_eq!(vm_query("$.f.to_number()", &doc).unwrap(), json!(3.14));
+        assert_eq!(vm_query("$.b.to_bool()", &doc).unwrap(), json!(true));
     }
 
     #[test]
@@ -915,7 +943,7 @@ mod examples {
         assert_eq!(q("$.strings.b64.from_base64()"), json!("hello world"));
         let doc = json!({"s": "hello world"});
         assert_eq!(
-            query("$.s.to_base64()", &doc).unwrap(),
+            vm_query("$.s.to_base64()", &doc).unwrap(),
             json!("aGVsbG8gd29ybGQ=")
         );
     }
@@ -923,9 +951,9 @@ mod examples {
     #[test]
     fn str_url_encode_decode() {
         let doc = json!({"s": "hello world"});
-        let enc = query("$.s.url_encode()", &doc).unwrap();
+        let enc = vm_query("$.s.url_encode()", &doc).unwrap();
         let enc_doc = json!({"s": enc});
-        let dec = query("$.s.url_decode()", &enc_doc).unwrap();
+        let dec = vm_query("$.s.url_decode()", &enc_doc).unwrap();
         assert_eq!(dec, json!("hello world"));
     }
 
@@ -939,10 +967,10 @@ mod examples {
     #[test]
     fn str_to_string_to_json_from_json() {
         let doc = json!({"n": 42, "s": "{\"x\":1}"});
-        assert_eq!(query("$.n.to_string()", &doc).unwrap(), json!("42"));
-        let parsed = query("$.s.from_json()", &doc).unwrap();
+        assert_eq!(vm_query("$.n.to_string()", &doc).unwrap(), json!("42"));
+        let parsed = vm_query("$.s.from_json()", &doc).unwrap();
         assert_eq!(parsed["x"], json!(1));
-        let round = query("$.s.from_json().to_json()", &doc).unwrap();
+        let round = vm_query("$.s.from_json().to_json()", &doc).unwrap();
         assert!(round.as_str().unwrap().contains("\"x\""));
     }
 
@@ -968,11 +996,11 @@ mod examples {
     fn null_or_default() {
         let doc = json!({"user": {"name": "Alice", "phone": null}});
         assert_eq!(
-            query("$.user.phone.or(\"n/a\")", &doc).unwrap(),
+            vm_query("$.user.phone.or(\"n/a\")", &doc).unwrap(),
             json!("n/a")
         );
         assert_eq!(
-            query("$.user.name.or(\"n/a\")", &doc).unwrap(),
+            vm_query("$.user.name.or(\"n/a\")", &doc).unwrap(),
             json!("Alice")
         );
     }
@@ -988,8 +1016,8 @@ mod examples {
     fn null_coalesce_operator() {
         // ?| — short-circuit null coalesce
         let doc = json!({"a": null, "b": null, "c": 42});
-        assert_eq!(query("$.a ?| $.b ?| $.c", &doc).unwrap(), json!(42));
-        assert_eq!(query("$.c ?| $.a", &doc).unwrap(), json!(42));
+        assert_eq!(vm_query("$.a ?| $.b ?| $.c", &doc).unwrap(), json!(42));
+        assert_eq!(vm_query("$.c ?| $.a", &doc).unwrap(), json!(42));
     }
 
     #[test]
@@ -1123,14 +1151,14 @@ mod examples {
     #[test]
     fn bind_object_destructure() {
         let doc = json!({"u": {"name": "Alice", "age": 30, "role": "admin"}});
-        let r = query("$.u -> {name, age} | f\"{name} is {age}\"", &doc).unwrap();
+        let r = vm_query("$.u -> {name, age} | f\"{name} is {age}\"", &doc).unwrap();
         assert_eq!(r, json!("Alice is 30"));
     }
 
     #[test]
     fn bind_object_rest() {
         let doc = json!({"obj": {"a": 1, "b": 2, "c": 3}});
-        let r = query("$.obj -> {a, ...rest} | rest", &doc).unwrap();
+        let r = vm_query("$.obj -> {a, ...rest} | rest", &doc).unwrap();
         assert_eq!(r["b"], json!(2));
         assert_eq!(r["c"], json!(3));
         assert!(r.get("a").is_none());
@@ -1139,7 +1167,7 @@ mod examples {
     #[test]
     fn bind_array_destructure() {
         let doc = json!({"nums": [10, 20, 30]});
-        let r = query("$.nums -> [x, y, z] | x + y + z", &doc).unwrap();
+        let r = vm_query("$.nums -> [x, y, z] | x + y + z", &doc).unwrap();
         assert_eq!(r, json!(60));
     }
 
@@ -1164,7 +1192,7 @@ mod examples {
     fn obj_optional_field() {
         // Trailing ? — omit key when value is null
         let doc = json!({"user": {"name": "Alice"}});
-        let r = query("{name: $.user.name, email?: $.user.email}", &doc).unwrap();
+        let r = vm_query("{name: $.user.name, email?: $.user.email}", &doc).unwrap();
         assert_eq!(r["name"], json!("Alice"));
         assert!(r.get("email").is_none());
     }
@@ -1173,14 +1201,14 @@ mod examples {
     fn obj_dynamic_key() {
         // [expr]: val — computed key
         let doc = json!({"prefix": "user", "val": 42});
-        let r = query("{[$.prefix]: $.val}", &doc).unwrap();
+        let r = vm_query("{[$.prefix]: $.val}", &doc).unwrap();
         assert_eq!(r["user"], json!(42));
     }
 
     #[test]
     fn obj_spread() {
         let doc = json!({"base": {"a": 1, "b": 2}, "extra": {"c": 3}});
-        let r = query("{...$.base, ...$.extra, d: 4}", &doc).unwrap();
+        let r = vm_query("{...$.base, ...$.extra, d: 4}", &doc).unwrap();
         assert_eq!(r["a"], json!(1));
         assert_eq!(r["c"], json!(3));
         assert_eq!(r["d"], json!(4));
@@ -1189,7 +1217,7 @@ mod examples {
     #[test]
     fn arr_spread() {
         let doc = json!({"a": [1, 2], "b": [3, 4]});
-        let r = query("[0, ...$.a, ...$.b, 5]", &doc).unwrap();
+        let r = vm_query("[0, ...$.a, ...$.b, 5]", &doc).unwrap();
         assert_eq!(r, json!([0, 1, 2, 3, 4, 5]));
     }
 
@@ -1200,35 +1228,35 @@ mod examples {
     #[test]
     fn fstring_basic() {
         let doc = json!({"u": {"name": "Alice", "score": 95}});
-        let r = query("f\"Hello {$.u.name}, your score is {$.u.score}\"", &doc).unwrap();
+        let r = vm_query("f\"Hello {$.u.name}, your score is {$.u.score}\"", &doc).unwrap();
         assert_eq!(r, json!("Hello Alice, your score is 95"));
     }
 
     #[test]
     fn fstring_pipe_method() {
         let doc = json!({"name": "alice"});
-        let r = query("f\"Hello {$.name|upper}!\"", &doc).unwrap();
+        let r = vm_query("f\"Hello {$.name|upper}!\"", &doc).unwrap();
         assert_eq!(r, json!("Hello ALICE!"));
     }
 
     #[test]
     fn fstring_format_spec_float() {
         let doc = json!({"v": 3.14159});
-        let r = query("f\"{$.v:.2f}\"", &doc).unwrap();
+        let r = vm_query("f\"{$.v:.2f}\"", &doc).unwrap();
         assert_eq!(r, json!("3.14"));
     }
 
     #[test]
     fn fstring_format_spec_padding() {
         let doc = json!({"n": 42});
-        let r = query("f\"{$.n:>6}\"", &doc).unwrap();
+        let r = vm_query("f\"{$.n:>6}\"", &doc).unwrap();
         assert_eq!(r, json!("    42"));
     }
 
     #[test]
     fn fstring_expression() {
         let doc = json!({"a": 3, "b": 4});
-        let r = query("f\"sum = {$.a + $.b}\"", &doc).unwrap();
+        let r = vm_query("f\"sum = {$.a + $.b}\"", &doc).unwrap();
         assert_eq!(r, json!("sum = 7"));
     }
 
@@ -1240,11 +1268,11 @@ mod examples {
     fn global_coalesce() {
         let doc = json!({"a": null, "b": null, "c": "found"});
         assert_eq!(
-            query("coalesce($.a, $.b, $.c)", &doc).unwrap(),
+            vm_query("coalesce($.a, $.b, $.c)", &doc).unwrap(),
             json!("found")
         );
         assert_eq!(
-            query("coalesce($.a, \"default\")", &doc).unwrap(),
+            vm_query("coalesce($.a, \"default\")", &doc).unwrap(),
             json!("default")
         );
     }
@@ -1252,21 +1280,21 @@ mod examples {
     #[test]
     fn global_chain() {
         let doc = json!({"a": [1, 2], "b": [3, 4], "c": [5]});
-        let r = query("chain($.a, $.b, $.c)", &doc).unwrap();
+        let r = vm_query("chain($.a, $.b, $.c)", &doc).unwrap();
         assert_eq!(r, json!([1, 2, 3, 4, 5]));
     }
 
     #[test]
     fn global_zip() {
         let doc = json!({"a": [1, 2, 3], "b": ["x", "y", "z"]});
-        let r = query("zip($.a, $.b)", &doc).unwrap();
+        let r = vm_query("zip($.a, $.b)", &doc).unwrap();
         assert_eq!(r, json!([[1, "x"], [2, "y"], [3, "z"]]));
     }
 
     #[test]
     fn global_zip_longest() {
         let doc = json!({"a": [1, 2, 3], "b": ["x"]});
-        let r = query("zip_longest($.a, $.b)", &doc).unwrap();
+        let r = vm_query("zip_longest($.a, $.b)", &doc).unwrap();
         let arr = r.as_array().unwrap();
         assert_eq!(arr.len(), 3);
         assert_eq!(arr[1][1], json!(null));
@@ -1275,7 +1303,7 @@ mod examples {
     #[test]
     fn global_product() {
         let doc = json!({"colors": ["red", "blue"], "sizes": ["S", "M"]});
-        let r = query("product($.colors, $.sizes)", &doc).unwrap();
+        let r = vm_query("product($.colors, $.sizes)", &doc).unwrap();
         assert_eq!(r.as_array().unwrap().len(), 4);
     }
 
@@ -1289,8 +1317,8 @@ mod examples {
         // (chain-style terminal write).  For a scalar-returning rewrite use
         // the pipe form instead.
         let doc = json!({"v": 1});
-        assert_eq!(query("$.v.set(42)", &doc).unwrap(), json!({"v": 42}));
-        assert_eq!(query("$.v | set(42)", &doc).unwrap(), json!(42));
+        assert_eq!(vm_query("$.v.set(42)", &doc).unwrap(), json!({"v": 42}));
+        assert_eq!(vm_query("$.v | set(42)", &doc).unwrap(), json!(42));
     }
 
     #[test]
@@ -1298,7 +1326,7 @@ mod examples {
         // .update(lambda) — transform receiver with lambda
         let doc = json!({"v": 10});
         assert_eq!(
-            query("$.v.update(lambda x: x * 3)", &doc).unwrap(),
+            vm_query("$.v.update(lambda x: x * 3)", &doc).unwrap(),
             json!(30)
         );
     }
@@ -1310,20 +1338,20 @@ mod examples {
     #[test]
     fn arith_ops() {
         let doc = json!({"a": 10, "b": 3});
-        assert_eq!(query("$.a + $.b", &doc).unwrap(), json!(13));
-        assert_eq!(query("$.a - $.b", &doc).unwrap(), json!(7));
-        assert_eq!(query("$.a * $.b", &doc).unwrap(), json!(30));
+        assert_eq!(vm_query("$.a + $.b", &doc).unwrap(), json!(13));
+        assert_eq!(vm_query("$.a - $.b", &doc).unwrap(), json!(7));
+        assert_eq!(vm_query("$.a * $.b", &doc).unwrap(), json!(30));
         assert_eq!(
-            query("$.a / $.b", &doc).unwrap(),
+            vm_query("$.a / $.b", &doc).unwrap(),
             serde_json::to_value(10.0 / 3.0).unwrap()
         );
-        assert_eq!(query("$.a % $.b", &doc).unwrap(), json!(1));
+        assert_eq!(vm_query("$.a % $.b", &doc).unwrap(), json!(1));
     }
 
     #[test]
     fn string_concat() {
         let doc = json!({"a": "Hello", "b": " World"});
-        assert_eq!(query("$.a + $.b", &doc).unwrap(), json!("Hello World"));
+        assert_eq!(vm_query("$.a + $.b", &doc).unwrap(), json!("Hello World"));
     }
 
     #[test]

@@ -7,6 +7,9 @@
 //!        │  parser::parse()
 //!        ▼
 //!     Expr (AST)
+//!        │  planner::plan_query()
+//!        ├─ Pipeline IR when the expression shape allows it
+//!        │
 //!        │  Compiler::compile()
 //!        ▼
 //!     Program              ← flat Arc<[Opcode]>  (cached: compile_cache)
@@ -15,7 +18,7 @@
 //!      Val                 ← result              (structural: resolution_cache)
 //! ```
 //!
-//! # Optimisations over the tree-walker
+//! # Scalar VM responsibilities
 //!
 //! 1. **Compile cache** — parse + compile once per unique expression string.
 //! 2. **Val type** — `Arc`-wrapped compound nodes; every clone is O(1).
@@ -26,9 +29,9 @@
 //!    pointer path after the first traversal; subsequent calls skip traversal.
 //! 6. **Peephole pass 1 — RootChain** — `PushRoot + GetField+` fused into a
 //!    single pointer-resolve opcode.
-//! 7. **Peephole pass 2 — FilterCount** — `CallMethod(filter) +
-//!    CallMethod(len/count)` fused; counts matches without materialising the
-//!    intermediate filtered array.
+//! 7. **Pipeline handoff** — streamable chains are planned by `planner.rs`
+//!    and executed by `pipeline.rs` / `composed.rs`; the VM remains the
+//!    general scalar fallback.
 //! 8. **Peephole pass 3 — ConstFold** — arithmetic on adjacent integer literals
 //!    folded at compile time.
 //! 9. **Stack machine** — iterative `exec()` loop; no per-opcode stack-frame
@@ -47,9 +50,10 @@ use std::{
 use crate::ast::*;
 pub use crate::builtins::BuiltinMethod;
 use crate::context::{Env, EvalError};
-use crate::runtime::call_builtin_method;
+use crate::runtime::call_builtin_method_compiled;
 use crate::util::{
-    add_vals, cmp_vals, is_truthy, kind_matches, num_op, obj2, val_to_key, val_to_string, vals_eq,
+    add_vals, cmp_vals_binop, is_truthy, kind_matches, num_op, obj2, val_to_key, val_to_string,
+    vals_eq,
 };
 use crate::value::Val;
 
@@ -357,7 +361,7 @@ pub enum Opcode {
     // ── Resolution cache fast-path ────────────────────────────────────────────
     GetPointer(Arc<str>),
 
-    // ── Patch block (delegates to tree-walker eval) ──────────────────────────
+    // ── Patch block ──────────────────────────────────────────────────────────
     /// Patch block — pre-compiled form.  Tree-walker no longer used;
     /// all sub-expressions live as `Arc<Program>` and run via VM.
     PatchEval(Arc<CompiledPatch>),
@@ -411,12 +415,11 @@ fn vm_resolve_idx(i: i64, len: i64) -> usize {
     }
 }
 
-// ── Compiled patch (VM-native, no tree-walker) ─────────────────────
+// ── Compiled patch (VM-native) ─────────────────────────────────────
 
 /// Pre-compiled form of `Expr::Patch`.  Every sub-expression is a
 /// `vm::Program`; the runtime patch executor uses `self.exec` to
-/// evaluate them.  Replaces the historical `PatchEval(Arc<Expr>)`
-/// runtime delegation to tree-walker.
+/// evaluate them.
 #[derive(Debug, Clone)]
 pub struct CompiledPatch {
     pub root_prog: Arc<Program>,
@@ -2074,7 +2077,7 @@ impl Compiler {
             }
 
             Expr::GlobalCall { name, args } => {
-                // Match tree-walker `eval_global` semantics: special-case
+                // Match runtime `eval_global` semantics: special-case
                 // `coalesce/chain/join/zip/zip_longest/product/range` compile
                 // through their existing handlers via root receiver; for all
                 // OTHER global names (`to_string(x)`, `to_bool(x)`, etc.),
@@ -2137,7 +2140,7 @@ impl Compiler {
                 // Patch block — pre-compiled to CompiledPatch.  Every
                 // sub-expression (root, op.val, op.cond, dyn-index,
                 // wildcard-filter pred) lives as Arc<Program>; runtime
-                // patch executor uses self.exec, no tree-walker.
+                // patch executor uses self.exec.
                 let compiled = Self::compile_patch(root, patch_ops, ctx);
                 ops.push(Opcode::PatchEval(Arc::new(compiled)));
             }
@@ -2418,7 +2421,7 @@ impl Compiler {
 
     /// Compile `Expr::Patch` into VM-native `CompiledPatch`.  Every
     /// sub-expression becomes an `Arc<Program>` so the runtime patch
-    /// executor never re-enters the tree-walker.
+    /// executor stays inside the VM.
     fn compile_patch(
         root: &Expr,
         patch_ops: &[crate::ast::PatchOp],
@@ -2730,19 +2733,6 @@ impl VM {
         self.execute(&prog, doc)
     }
 
-    /// Parse, compile, and execute with raw JSON source bytes retained so
-    /// that SIMD byte-scan can short-circuit `Opcode::Descendant` at the
-    /// document root.
-    pub fn run_str_with_raw(
-        &mut self,
-        expr: &str,
-        doc: &serde_json::Value,
-        raw_bytes: Arc<[u8]>,
-    ) -> Result<serde_json::Value, EvalError> {
-        let prog = self.get_or_compile(expr)?;
-        self.execute_with_raw(&prog, doc, raw_bytes)
-    }
-
     /// Execute a pre-compiled `Program` against `doc`.
     pub fn execute(
         &mut self,
@@ -2782,39 +2772,6 @@ impl VM {
         } else {
             hash_val_structure(root)
         }
-    }
-
-    /// Execute with raw JSON source bytes retained on the environment so
-    /// that descendant opcodes at document root can take the SIMD byte-scan
-    /// fast path instead of walking the tree.
-    pub fn execute_with_raw(
-        &mut self,
-        program: &Program,
-        doc: &serde_json::Value,
-        raw_bytes: Arc<[u8]>,
-    ) -> Result<serde_json::Value, EvalError> {
-        let root = Val::from(doc);
-        self.execute_val_with_raw(program, root, raw_bytes)
-    }
-
-    /// Execute against a pre-built `Val` root (skips the `Val::from(&Value)`
-    /// conversion on every call).  With raw bytes, the `doc_hash` pointer-
-    /// cache path is also skipped — byte-scan handles descendants directly
-    /// and `RootChain` reads are O(chain length) against the already-built
-    /// tree.
-    pub fn execute_val_with_raw(
-        &mut self,
-        program: &Program,
-        root: Val,
-        raw_bytes: Arc<[u8]>,
-    ) -> Result<serde_json::Value, EvalError> {
-        // doc_hash seeds the path cache; on the scan fast path we bypass the
-        // cache entirely, so skip the O(doc) structural hash walk.
-        self.doc_hash = 0;
-        self.root_chain_cache.clear();
-        let env = Env::new_with_raw(root, raw_bytes);
-        let result = self.exec(program, &env)?;
-        Ok(result.into())
     }
 
     /// Execute against a pre-built `Val` root without raw bytes.  Skips the
@@ -2987,24 +2944,10 @@ impl VM {
                         (Val::Arr(a), Val::Arr(b)) => Arc::ptr_eq(a, b),
                         _ => matches!((&v, &env.root), (Val::Null, Val::Null)),
                     };
-                    // SIMD fast path: descending from root with raw JSON bytes
-                    // retained → byte-scan instead of walking the tree.  Path
-                    // cache is skipped on this path (cost/benefit unfavorable
-                    // vs avoiding the tree walk entirely).
-                    if from_root {
-                        if let Some(bytes) = env.raw_bytes.as_ref() {
-                            let (val, extra) =
-                                byte_chain_exec(bytes, k.as_ref(), &ops_slice[op_idx + 1..]);
-                            stack.push(val);
-                            skip_ahead = extra;
-                            continue;
-                        }
-                    }
-                    // Tree-walker early exit: `$..k.first()` / `$..k!` materialises
-                    // only the first self-first DFS hit.  SIMD byte_chain_exec
-                    // already covers the raw-bytes case; this catches tree-only
-                    // receivers.  Skips pointer-cache population (single-hit
-                    // caller doesn't benefit from storing siblings).
+                    // Early exit: `$..k.first()` / `$..k!` materialises only
+                    // the first self-first DFS hit. Skips pointer-cache
+                    // population since single-hit callers do not benefit from
+                    // storing siblings.
                     if let Some(next) = ops_slice.get(op_idx + 1) {
                         if is_first_selector_op(next) {
                             let hit = find_desc_first(&v, k.as_ref()).unwrap_or(Val::Null);
@@ -3171,7 +3114,7 @@ impl VM {
                             | Val::StrSlice(_)
                     ) && BuiltinMethod::from_name(name.as_ref()) != BuiltinMethod::Unknown
                     {
-                        call_builtin_method(env.current.clone(), name.as_ref(), &[], env)?
+                        crate::builtins::eval_builtin_no_args(env.current.clone(), name.as_ref())?
                     } else {
                         env.current.get_field(name.as_ref())
                     };
@@ -3221,22 +3164,22 @@ impl VM {
                 Opcode::Lt => {
                     let r = pop!(stack);
                     let l = pop!(stack);
-                    stack.push(Val::Bool(cmp_vals(&l, &r) == std::cmp::Ordering::Less));
+                    stack.push(Val::Bool(cmp_vals_binop(&l, BinOp::Lt, &r)));
                 }
                 Opcode::Lte => {
                     let r = pop!(stack);
                     let l = pop!(stack);
-                    stack.push(Val::Bool(cmp_vals(&l, &r) != std::cmp::Ordering::Greater));
+                    stack.push(Val::Bool(cmp_vals_binop(&l, BinOp::Lte, &r)));
                 }
                 Opcode::Gt => {
                     let r = pop!(stack);
                     let l = pop!(stack);
-                    stack.push(Val::Bool(cmp_vals(&l, &r) == std::cmp::Ordering::Greater));
+                    stack.push(Val::Bool(cmp_vals_binop(&l, BinOp::Gt, &r)));
                 }
                 Opcode::Gte => {
                     let r = pop!(stack);
                     let l = pop!(stack);
-                    stack.push(Val::Bool(cmp_vals(&l, &r) != std::cmp::Ordering::Less));
+                    stack.push(Val::Bool(cmp_vals_binop(&l, BinOp::Gte, &r)));
                 }
                 Opcode::Fuzzy => {
                     let r = pop!(stack);
@@ -3310,75 +3253,6 @@ impl VM {
                 // ── Method calls ──────────────────────────────────────────────
                 Opcode::CallMethod(call) => {
                     let recv = pop!(stack);
-                    // SIMD fast path: `$..find(@.k == lit)` on root with raw
-                    // bytes → scan enclosing objects, skip tree walk.
-                    if call.name.as_ref() == "deep_find" && !call.orig_args.is_empty() {
-                        if let Some(bytes) = env.raw_bytes.as_ref() {
-                            let recv_is_root = match (&recv, &env.root) {
-                                (Val::Obj(a), Val::Obj(b)) => Arc::ptr_eq(a, b),
-                                (Val::Arr(a), Val::Arr(b)) => Arc::ptr_eq(a, b),
-                                _ => false,
-                            };
-                            if recv_is_root {
-                                let tail = &ops_slice[op_idx + 1..];
-                                if let Some(conjuncts) =
-                                    crate::scan_predicates::canonical_field_eq_literals(
-                                        &call.orig_args,
-                                    )
-                                {
-                                    let spans = if conjuncts.len() == 1 {
-                                        super::scan::find_enclosing_objects_eq(
-                                            bytes,
-                                            &conjuncts[0].0,
-                                            &conjuncts[0].1,
-                                        )
-                                    } else {
-                                        super::scan::find_enclosing_objects_eq_multi(
-                                            bytes, &conjuncts,
-                                        )
-                                    };
-                                    let (arr, extra) =
-                                        materialise_find_scan_spans(bytes, &spans, tail);
-                                    stack.push(arr);
-                                    skip_ahead = extra;
-                                    continue;
-                                }
-                                // Single-conjunct numeric-range scan.
-                                if call.orig_args.len() == 1 {
-                                    let e = match &call.orig_args[0] {
-                                        super::ast::Arg::Pos(e) | super::ast::Arg::Named(_, e) => e,
-                                    };
-                                    if let Some((field, op, thresh)) =
-                                        crate::scan_predicates::canonical_field_cmp_literal(e)
-                                    {
-                                        let spans = super::scan::find_enclosing_objects_cmp(
-                                            bytes, &field, op, thresh,
-                                        );
-                                        let (arr, extra) =
-                                            materialise_find_scan_spans(bytes, &spans, tail);
-                                        stack.push(arr);
-                                        skip_ahead = extra;
-                                        continue;
-                                    }
-                                }
-                                // Mixed multi-conjunct (eq + numeric-range).
-                                if let Some(conjuncts) =
-                                    crate::scan_predicates::canonical_field_mixed_predicates(
-                                        &call.orig_args,
-                                    )
-                                {
-                                    let spans = super::scan::find_enclosing_objects_mixed(
-                                        bytes, &conjuncts,
-                                    );
-                                    let (arr, extra) =
-                                        materialise_find_scan_spans(bytes, &spans, tail);
-                                    stack.push(arr);
-                                    skip_ahead = extra;
-                                    continue;
-                                }
-                            }
-                        }
-                    }
                     let result = self.exec_call(recv, call, env)?;
                     stack.push(result);
                 }
@@ -3718,11 +3592,11 @@ impl VM {
             // dispatch on the pushed receiver.
             match call.name.as_ref() {
                 "coalesce" | "chain" | "join" | "zip" | "zip_longest" | "product" | "range" => {
-                    return crate::runtime::eval_global(call.name.as_ref(), &call.orig_args, env)
+                    return crate::runtime::eval_global_compiled(self, call, env);
                 }
                 _ => {}
             }
-            return call_builtin_method(recv, call.name.as_ref(), &call.orig_args, env);
+            return call_builtin_method_compiled(self, recv, call, env);
         }
 
         if call.method == BuiltinMethod::Count && call.orig_args.is_empty() {
@@ -4003,8 +3877,9 @@ impl VM {
             return Ok(v);
         }
 
-        // Value methods — delegate to the existing dispatch with orig_args
-        call_builtin_method(recv, call.name.as_ref(), &call.orig_args, env)
+        // Value methods — delegate to the builtin dispatcher using the
+        // compiled argument programs already stored on the call.
+        call_builtin_method_compiled(self, recv, call, env)
     }
 
     fn exec_static_builtin_call(
@@ -4346,8 +4221,43 @@ impl VM {
                 Ok(Val::arr(out))
             }
             BuiltinMethod::Sort => {
-                // Delegate to func_arrays::sort which already handles lambda args
-                call_builtin_method(recv, call.name.as_ref(), &call.orig_args, env)
+                if call.sub_progs.is_empty() {
+                    return crate::builtins::sort_apply(recv);
+                }
+                if matches!(
+                    call.orig_args.first(),
+                    Some(Arg::Pos(Expr::Lambda { params, .. }))
+                        | Some(Arg::Named(_, Expr::Lambda { params, .. }))
+                        if params.len() == 2
+                ) {
+                    let cmp = call
+                        .sub_progs
+                        .first()
+                        .ok_or_else(|| EvalError("sort: requires comparator".into()))?
+                        .clone();
+                    return crate::builtins::sort_comparator_apply(recv, |left, right| {
+                        self.exec_pair_lam_body(&cmp, left, right, &call.orig_args[0], env)
+                    });
+                }
+
+                let desc = vec![false; call.sub_progs.len()];
+                let progs = call.sub_progs.clone();
+                crate::builtins::sort_by_apply(recv, &desc, |item, idx| {
+                    let arg = call
+                        .orig_args
+                        .get(idx)
+                        .ok_or_else(|| EvalError("sort: missing key".into()))?;
+                    let lam_param = match arg {
+                        Arg::Pos(Expr::Lambda { params, .. })
+                        | Arg::Named(_, Expr::Lambda { params, .. })
+                            if !params.is_empty() =>
+                        {
+                            Some(params[0].as_str())
+                        }
+                        _ => None,
+                    };
+                    self.exec_lam_body_scratch(&progs[idx], item, lam_param, &mut scratch)
+                })
             }
             BuiltinMethod::Any => {
                 if let Val::Arr(a) = &recv {
@@ -4417,8 +4327,7 @@ impl VM {
                             let mut buckets: Vec<Vec<Val>> = vec![Vec::new(); k_u];
                             let mut seen: Vec<bool> = vec![false; k_u];
                             let mut order: Vec<usize> = Vec::new();
-                            // All-numeric fast path; error on non-numeric
-                            // (matches tree-walker `x % K` dispatch).
+                            // All-numeric fast path; error on non-numeric.
                             for item in items {
                                 let idx = match &item {
                                     Val::Int(n) => n.rem_euclid(k_lit) as usize,
@@ -4493,24 +4402,22 @@ impl VM {
                 // with no `start:` named arg.  Pattern-specialise for a handful
                 // of tight-loop shapes (`a + x`, `a - x`, `a * x`, `max/min`)
                 // that the compiled bytecode would otherwise re-dispatch per
-                // iteration.  Other shapes fall through to a compiled-bytecode
-                // VM loop; unsupported shapes fall back to the tree-walker.
+                // iteration. Other shapes fall through to a compiled-bytecode
+                // VM loop.
                 let lam_body =
                     sub.ok_or_else(|| EvalError("accumulate: requires lambda".into()))?;
                 let (p1, p2) = match call.orig_args.first() {
                     Some(Arg::Pos(Expr::Lambda { params, .. })) if params.len() >= 2 => {
                         (params[0].as_str(), params[1].as_str())
                     }
-                    _ => {
-                        return call_builtin_method(recv, call.name.as_ref(), &call.orig_args, env)
-                    }
+                    _ => return call_builtin_method_compiled(self, recv, call, env),
                 };
                 if call
                     .orig_args
                     .iter()
                     .any(|a| matches!(a, Arg::Named(n, _) if n.as_str() == "start"))
                 {
-                    return call_builtin_method(recv, call.name.as_ref(), &call.orig_args, env);
+                    return call_builtin_method_compiled(self, recv, call, env);
                 }
                 // Try pattern specialisation: `LoadIdent(p1), LoadIdent(p2), <BinOp>`.
                 let specialised_binop = match lam_body.ops.as_ref() {
@@ -4762,14 +4669,12 @@ impl VM {
                 })?;
                 Ok(Val::obj(out))
             }
-            BuiltinMethod::Pivot => {
-                call_builtin_method(recv, call.name.as_ref(), &call.orig_args, env)
-            }
+            BuiltinMethod::Pivot => call_builtin_method_compiled(self, recv, call, env),
             BuiltinMethod::Update => {
                 let lam = sub.ok_or_else(|| EvalError("update: requires lambda".into()))?;
                 self.exec_lam_body(lam, &recv, lam_param, env)
             }
-            _ => call_builtin_method(recv, call.name.as_ref(), &call.orig_args, env),
+            _ => call_builtin_method_compiled(self, recv, call, env),
         }
     }
 
@@ -4787,7 +4692,45 @@ impl VM {
         self.exec_lam_body_scratch(prog, item, lam_param, &mut scratch)
     }
 
-    // ── Patch executor (VM-native, replaces tree-walker eval_patch) ──
+    fn exec_pair_lam_body(
+        &mut self,
+        prog: &Program,
+        left: &Val,
+        right: &Val,
+        arg: &Arg,
+        env: &Env,
+    ) -> Result<Val, EvalError> {
+        let mut scratch = env.clone();
+        match arg {
+            Arg::Pos(Expr::Lambda { params, .. }) | Arg::Named(_, Expr::Lambda { params, .. }) => {
+                match params.as_slice() {
+                    [] => {
+                        let frame = scratch.push_lam(None, right.clone());
+                        let result = self.exec(prog, &scratch);
+                        scratch.pop_lam(frame);
+                        result
+                    }
+                    [param] => {
+                        let frame = scratch.push_lam(Some(param), right.clone());
+                        let result = self.exec(prog, &scratch);
+                        scratch.pop_lam(frame);
+                        result
+                    }
+                    [left_name, right_name, ..] => {
+                        let left_frame = scratch.push_lam(Some(left_name), left.clone());
+                        let right_frame = scratch.push_lam(Some(right_name), right.clone());
+                        let result = self.exec(prog, &scratch);
+                        scratch.pop_lam(right_frame);
+                        scratch.pop_lam(left_frame);
+                        result
+                    }
+                }
+            }
+            _ => self.exec_lam_body_scratch(prog, right, None, &mut scratch),
+        }
+    }
+
+    // ── Patch executor (VM-native) ──────────────────────────────────
 
     fn exec_patch_compiled(&mut self, cp: &CompiledPatch, env: &Env) -> Result<Val, EvalError> {
         let mut doc = self.exec(&cp.root_prog, env)?;
@@ -5173,7 +5116,7 @@ impl VM {
                             out.push_str(&apply_fmt_spec(&val, spec));
                         }
                         Some(FmtSpec::Pipe(method)) => {
-                            let piped = call_builtin_method(val, method, &[], env)?;
+                            let piped = crate::builtins::eval_builtin_no_args(val, method)?;
                             match &piped {
                                 Val::Str(s) => out.push_str(s.as_ref()),
                                 Val::Int(n) => {
@@ -5240,335 +5183,6 @@ fn is_first_selector_op(op: &Opcode) -> bool {
     }
 }
 
-/// Materialise byte-scan `spans` into a `Val::Arr`, peeking at `tail`
-/// for a trailing `.map(<field>)` (compiled to `Opcode::MapField`).
-/// When present the direct child is extracted from each span without
-/// paying a full `serde_json::from_slice` on the enclosing object.
-/// Returned `skip` tells the caller how many opcodes were consumed
-/// beyond the current `CallMethod`.
-///
-/// Outlined (`#[cold] #[inline(never)]`) to keep the `exec` dispatch
-/// match compact — inlining the span loop here was enough to cost
-/// Q4/Q13 icache footprint in `bench_lock`.
-#[cold]
-#[inline(never)]
-fn materialise_find_scan_spans(
-    bytes: &[u8],
-    spans: &[super::scan::ValueSpan],
-    tail: &[Opcode],
-) -> (Val, usize) {
-    // Span-refiner tail-ops (FilterFieldEqLit / FilterFieldCmpLit) deleted
-    // in Tier 3 along with the underlying opcodes.  Pipeline IR drives
-    // filter narrowing through composed substrate; raw_bytes route just
-    // materialises spans here, falling through to map/aggregate dispatch.
-    let (val, inner) = materialise_find_scan_spans_tail(bytes, spans, tail);
-    (val, inner)
-}
-
-// val_to_canonical_lit_bytes deleted in Tier 3 — only consumer was the
-// FilterFieldEqLit byte-scan refiner loop, removed alongside the opcode.
-
-#[cold]
-#[inline(never)]
-fn materialise_find_scan_spans_tail(
-    bytes: &[u8],
-    spans: &[super::scan::ValueSpan],
-    tail: &[Opcode],
-) -> (Val, usize) {
-    // Trailing `.count()` / `.len()` — just the span count, no parse.
-    if let Some(Opcode::CallMethod(c)) = tail.first() {
-        if c.sub_progs.is_empty() && matches!(c.method, BuiltinMethod::Count | BuiltinMethod::Len) {
-            return (Val::Int(spans.len() as i64), 1);
-        }
-    }
-    // Trailing fused `.filter(@.kp op lit).map(kproj)` — byte-scan
-    // refinement for the migrated FilterField*MapField opcodes was
-    // removed alongside the opcodes themselves.  Pipeline.rs
-    // Sink::NumFilterMap covers these shapes for tape / Val tree
-    // queries; the byte-scan refinement here was a duplicate path
-    // for the rarer raw_bytes route.  None branch falls through
-    // to the post-tail count/len check below.
-    if let Some(_op) = tail.first() {
-        let refined: Option<(Vec<crate::scan::ValueSpan>, Arc<str>)> = None;
-        if let Some((spans2, k)) = refined {
-            // Aggregate fold on the projection without materialising.
-            if let Some(Opcode::CallMethod(c)) = tail.get(1) {
-                if c.sub_progs.is_empty() {
-                    match c.method {
-                        BuiltinMethod::Count | BuiltinMethod::Len => {
-                            let f = super::scan::fold_direct_field_nums(bytes, &spans2, k.as_ref());
-                            return (Val::Int(f.count as i64), 2);
-                        }
-                        BuiltinMethod::Sum => {
-                            let f = super::scan::fold_direct_field_nums(bytes, &spans2, k.as_ref());
-                            let v = if f.count == 0 {
-                                Val::Int(0)
-                            } else if f.is_float {
-                                Val::Float(f.float_sum)
-                            } else {
-                                Val::Int(f.int_sum)
-                            };
-                            return (v, 2);
-                        }
-                        BuiltinMethod::Avg => {
-                            let f = super::scan::fold_direct_field_nums(bytes, &spans2, k.as_ref());
-                            let v = if f.count == 0 {
-                                Val::Null
-                            } else {
-                                Val::Float(f.float_sum / f.count as f64)
-                            };
-                            return (v, 2);
-                        }
-                        BuiltinMethod::Min => {
-                            let f = super::scan::fold_direct_field_nums(bytes, &spans2, k.as_ref());
-                            let v = if !f.any {
-                                Val::Null
-                            } else if f.is_float {
-                                Val::Float(f.min_f)
-                            } else {
-                                Val::Int(f.min_i)
-                            };
-                            return (v, 2);
-                        }
-                        BuiltinMethod::Max => {
-                            let f = super::scan::fold_direct_field_nums(bytes, &spans2, k.as_ref());
-                            let v = if !f.any {
-                                Val::Null
-                            } else if f.is_float {
-                                Val::Float(f.max_f)
-                            } else {
-                                Val::Int(f.max_i)
-                            };
-                            return (v, 2);
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            let mut vals: Vec<Val> = Vec::with_capacity(spans2.len());
-            for s in &spans2 {
-                let obj_bytes = &bytes[s.start..s.end];
-                let v = match super::scan::find_direct_field(obj_bytes, k.as_ref()) {
-                    Some(vs) => {
-                        serde_json::from_slice::<serde_json::Value>(&obj_bytes[vs.start..vs.end])
-                            .ok()
-                            .map(|sv| Val::from(&sv))
-                            .unwrap_or(Val::Null)
-                    }
-                    None => Val::Null,
-                };
-                vals.push(v);
-            }
-            return (Val::arr(vals), 1);
-        }
-    }
-    // Trailing `.map(<field>)` byte-scan tail-peek removed — depended on
-    // Opcode::MapField (deleted in Tier 3).  Pipeline IR Stage::Map +
-    // BodyKernel::FieldRead drives the same shape via composed substrate.
-    let mut vals: Vec<Val> = Vec::with_capacity(spans.len());
-    for s in spans {
-        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes[s.start..s.end]) {
-            vals.push(Val::from(&v));
-        }
-    }
-    (Val::arr(vals), 0)
-}
-
-fn byte_chain_exec(bytes: &[u8], root_key: &str, tail: &[Opcode]) -> (Val, usize) {
-    // Early-exit: `$..key.first()` / `$..key!` needs only the first match.
-    let first_after_initial = tail.first().map(is_first_selector_op).unwrap_or(false);
-    let mut spans: Vec<super::scan::ValueSpan> = if first_after_initial {
-        super::scan::find_first_key_value_span(bytes, root_key)
-            .into_iter()
-            .collect()
-    } else {
-        super::scan::find_key_value_spans(bytes, root_key)
-    };
-    let mut scalar = false;
-    let mut consumed = 0usize;
-
-    for (idx, op) in tail.iter().enumerate() {
-        match op {
-            Opcode::Descendant(k) => {
-                let next_first = tail.get(idx + 1).map(is_first_selector_op).unwrap_or(false);
-                let mut next = Vec::with_capacity(spans.len());
-                for s in &spans {
-                    let sub = &bytes[s.start..s.end];
-                    if next_first {
-                        if let Some(s2) = super::scan::find_first_key_value_span(sub, k.as_ref()) {
-                            next.push(super::scan::ValueSpan {
-                                start: s.start + s2.start,
-                                end: s.start + s2.end,
-                            });
-                        }
-                    } else {
-                        for s2 in super::scan::find_key_value_spans(sub, k.as_ref()) {
-                            next.push(super::scan::ValueSpan {
-                                start: s.start + s2.start,
-                                end: s.start + s2.end,
-                            });
-                        }
-                    }
-                }
-                spans = next;
-                scalar = false;
-            }
-            Opcode::Quantifier(QuantifierKind::First) => {
-                spans.truncate(1);
-                scalar = true;
-            }
-            Opcode::Quantifier(QuantifierKind::One) => {
-                if spans.len() != 1 {
-                    break;
-                }
-                scalar = true;
-            }
-            // `.first()` / `.last()` compile to `CallMethod(First|Last)` not
-            // `Quantifier`.  Handle them as scalar terminators.
-            Opcode::CallMethod(call) if call.sub_progs.is_empty() => match call.method {
-                BuiltinMethod::First => {
-                    spans.truncate(1);
-                    scalar = true;
-                }
-                BuiltinMethod::Last => {
-                    if let Some(last) = spans.pop() {
-                        spans = vec![last];
-                    }
-                    scalar = true;
-                }
-                _ => break,
-            },
-            Opcode::InlineFilter(prog) => match canonical_eq_literal_from_program(prog) {
-                Some(lit) => {
-                    spans.retain(|s| {
-                        s.end - s.start == lit.len() && &bytes[s.start..s.end] == &lit[..]
-                    });
-                    scalar = false;
-                }
-                None => break,
-            },
-            Opcode::CallMethod(call)
-                if call.method == BuiltinMethod::Filter && call.sub_progs.len() == 1 =>
-            {
-                match canonical_eq_literal_from_program(&call.sub_progs[0]) {
-                    Some(lit) => {
-                        spans.retain(|s| {
-                            s.end - s.start == lit.len() && &bytes[s.start..s.end] == &lit[..]
-                        });
-                        scalar = false;
-                    }
-                    None => break,
-                }
-            }
-            _ => break,
-        }
-        consumed += 1;
-    }
-
-    // Numeric-fold fast path: trailing `.sum()/.avg()/.min()/.max()/.count()/.len()`
-    // — skip Val materialisation, parse numbers inline from byte spans.
-    if !scalar {
-        if let Some(Opcode::CallMethod(call)) = tail.get(consumed) {
-            if call.sub_progs.is_empty() && tail.len() == consumed + 1 {
-                match call.method {
-                    BuiltinMethod::Count | BuiltinMethod::Len => {
-                        return (Val::Int(spans.len() as i64), consumed + 1);
-                    }
-                    BuiltinMethod::Sum => {
-                        let f = super::scan::fold_nums(bytes, &spans);
-                        let v = if f.count == 0 {
-                            Val::Int(0)
-                        } else if f.is_float {
-                            Val::Float(f.float_sum)
-                        } else {
-                            Val::Int(f.int_sum)
-                        };
-                        return (v, consumed + 1);
-                    }
-                    BuiltinMethod::Avg => {
-                        let f = super::scan::fold_nums(bytes, &spans);
-                        let v = if f.count == 0 {
-                            Val::Null
-                        } else {
-                            Val::Float(f.float_sum / f.count as f64)
-                        };
-                        return (v, consumed + 1);
-                    }
-                    BuiltinMethod::Min => {
-                        let f = super::scan::fold_nums(bytes, &spans);
-                        let v = if !f.any {
-                            Val::Null
-                        } else if f.is_float {
-                            Val::Float(f.min_f)
-                        } else {
-                            Val::Int(f.min_i)
-                        };
-                        return (v, consumed + 1);
-                    }
-                    BuiltinMethod::Max => {
-                        let f = super::scan::fold_nums(bytes, &spans);
-                        let v = if !f.any {
-                            Val::Null
-                        } else if f.is_float {
-                            Val::Float(f.max_f)
-                        } else {
-                            Val::Int(f.max_i)
-                        };
-                        return (v, consumed + 1);
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    let mut materialised: Vec<Val> = Vec::with_capacity(spans.len());
-    for s in &spans {
-        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes[s.start..s.end]) {
-            materialised.push(Val::from(&v));
-        }
-    }
-
-    let out = if scalar {
-        materialised.into_iter().next().unwrap_or(Val::Null)
-    } else {
-        Val::arr(materialised)
-    };
-    (out, consumed)
-}
-
-/// Recognise `@ == lit` / `lit == @` compiled to a sub-program.  Matches
-/// the shape `[PushCurrent, Push<Lit>, Eq]` or `[Push<Lit>, PushCurrent, Eq]`
-/// and returns the canonical-serialised literal bytes.  Floats rejected
-/// (representation variance vs `1` / `1.0`).
-fn canonical_eq_literal_from_program(prog: &Program) -> Option<Vec<u8>> {
-    if prog.ops.len() != 3 {
-        return None;
-    }
-    if !matches!(prog.ops[2], Opcode::Eq) {
-        return None;
-    }
-    let (lit_op, has_current) = match (&prog.ops[0], &prog.ops[1]) {
-        (Opcode::PushCurrent, lit) => (lit, true),
-        (lit, Opcode::PushCurrent) => (lit, true),
-        _ => (&prog.ops[0], false),
-    };
-    if !has_current {
-        return None;
-    }
-    match lit_op {
-        Opcode::PushInt(n) => Some(n.to_string().into_bytes()),
-        Opcode::PushBool(b) => Some(if *b {
-            b"true".to_vec()
-        } else {
-            b"false".to_vec()
-        }),
-        Opcode::PushNull => Some(b"null".to_vec()),
-        Opcode::PushStr(s) => serde_json::to_vec(&serde_json::Value::String(s.to_string())).ok(),
-        _ => None,
-    }
-}
-
 fn exec_slice(v: Val, from: Option<i64>, to: Option<i64>) -> Val {
     match v {
         Val::Arr(a) => {
@@ -5627,8 +5241,7 @@ fn collect_desc(v: &Val, name: &str, out: &mut Vec<Val>) {
 
 /// Early-exit variant of `collect_desc`: returns the first self-first DFS
 /// hit for `name`, matching the order that `collect_desc` would produce.
-/// Powers the `$..key.first()` fast path when raw JSON bytes aren't
-/// available (SIMD `byte_chain_exec` handles the raw-bytes case).
+/// Powers the `$..key.first()` fast path.
 fn find_desc_first(v: &Val, name: &str) -> Option<Val> {
     match v {
         Val::Obj(m) => {

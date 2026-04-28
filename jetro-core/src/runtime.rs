@@ -3,53 +3,56 @@ use std::sync::Arc;
 use crate::ast::{Arg, Expr};
 use crate::context::{Env, EvalError};
 use crate::value::Val;
+use crate::vm::{CompiledCall, VM};
 
-pub fn eval_in_env(expr: &Expr, env: &Env) -> Result<Val, EvalError> {
-    vm_eval(expr, env)
-}
-
-pub fn evaluate(expr: &Expr, root: &serde_json::Value) -> Result<serde_json::Value, EvalError> {
-    let prog = crate::vm::Compiler::compile(expr, "<evaluate>");
-    let mut vm = crate::vm::VM::new();
-    vm.execute(&prog, root)
-}
-
-pub fn evaluate_with(
-    expr: &Expr,
-    root: &serde_json::Value,
-) -> Result<serde_json::Value, EvalError> {
-    let prog = crate::vm::Compiler::compile(expr, "<evaluate_with>");
-    let mut vm = crate::vm::VM::new();
-    vm.execute(&prog, root)
-}
-
-pub(crate) fn call_builtin_method(
+pub(crate) fn call_builtin_method_compiled(
+    vm: &mut VM,
     recv: Val,
-    name: &str,
-    args: &[Arg],
+    call: &CompiledCall,
     env: &Env,
 ) -> Result<Val, EvalError> {
+    use std::cell::RefCell;
+
+    let vm = RefCell::new(vm);
     crate::builtins::eval_builtin_method(
         recv,
-        name,
-        args,
-        |arg| eval_pos(arg, env),
+        call.name.as_ref(),
+        &call.orig_args,
+        |arg| {
+            let mut vm = vm.borrow_mut();
+            eval_compiled_arg(&mut vm, call, arg, env)
+        },
         |item, arg| {
+            let mut vm = vm.borrow_mut();
             let mut scratch = env.clone();
-            apply_item_mut(item.clone(), arg, &mut scratch)
+            apply_compiled_item(&mut vm, call, item.clone(), arg, &mut scratch)
         },
         |left, right, arg| {
+            let mut vm = vm.borrow_mut();
             let mut scratch = env.clone();
-            apply_item2_mut(left.clone(), right.clone(), arg, &mut scratch)
+            apply_compiled_pair(
+                &mut vm,
+                call,
+                left.clone(),
+                right.clone(),
+                arg,
+                &mut scratch,
+            )
         },
     )
 }
 
-pub(crate) fn eval_global(name: &str, args: &[Arg], env: &Env) -> Result<Val, EvalError> {
+pub(crate) fn eval_global_compiled(
+    vm: &mut VM,
+    call: &CompiledCall,
+    env: &Env,
+) -> Result<Val, EvalError> {
+    let name = call.name.as_ref();
+    let args = call.orig_args.as_ref();
     match name {
         "coalesce" => {
-            for arg in args {
-                let value = eval_pos(arg, env)?;
+            for (idx, _) in args.iter().enumerate() {
+                let value = eval_compiled_arg_at(vm, call, idx, env)?;
                 if !value.is_null() {
                     return Ok(value);
                 }
@@ -58,8 +61,8 @@ pub(crate) fn eval_global(name: &str, args: &[Arg], env: &Env) -> Result<Val, Ev
         }
         "chain" | "join" => {
             let mut out = Vec::new();
-            for arg in args {
-                match eval_pos(arg, env)? {
+            for idx in 0..args.len() {
+                match eval_compiled_arg_at(vm, call, idx, env)? {
                     Val::Arr(items) => {
                         out.extend(Arc::try_unwrap(items).unwrap_or_else(|items| (*items).clone()));
                     }
@@ -71,119 +74,159 @@ pub(crate) fn eval_global(name: &str, args: &[Arg], env: &Env) -> Result<Val, Ev
             Ok(Val::arr(out))
         }
         "zip" => {
-            let arrs: Result<Vec<_>, _> = args.iter().map(|arg| eval_pos(arg, env)).collect();
+            let arrs: Result<Vec<_>, _> = (0..args.len())
+                .map(|idx| eval_compiled_arg_at(vm, call, idx, env))
+                .collect();
             Ok(crate::builtins::global_zip_apply(&arrs?))
         }
         "zip_longest" => {
-            let fill = args
-                .iter()
-                .find_map(|arg| match arg {
-                    Arg::Named(name, expr) if name == "fill" => vm_eval(expr, env).ok(),
-                    _ => None,
-                })
-                .unwrap_or(Val::Null);
-            let arrs: Result<Vec<_>, _> = args
-                .iter()
-                .filter(|arg| matches!(arg, Arg::Pos(_)))
-                .map(|arg| eval_pos(arg, env))
-                .collect();
-            Ok(crate::builtins::global_zip_longest_apply(&arrs?, &fill))
+            let mut fill = Val::Null;
+            let mut arrs = Vec::new();
+            for (idx, arg) in args.iter().enumerate() {
+                match arg {
+                    Arg::Named(name, _) if name == "fill" => {
+                        fill = eval_compiled_arg_at(vm, call, idx, env)?;
+                    }
+                    Arg::Pos(_) => arrs.push(eval_compiled_arg_at(vm, call, idx, env)?),
+                    _ => {}
+                }
+            }
+            Ok(crate::builtins::global_zip_longest_apply(&arrs, &fill))
         }
         "product" => {
-            let arrs: Result<Vec<_>, _> = args.iter().map(|arg| eval_pos(arg, env)).collect();
+            let arrs: Result<Vec<_>, _> = (0..args.len())
+                .map(|idx| eval_compiled_arg_at(vm, call, idx, env))
+                .collect();
             Ok(crate::builtins::global_product_apply(&arrs?))
         }
         "range" => {
             let mut nums = Vec::with_capacity(args.len());
-            for arg in args {
-                let n = eval_pos(arg, env)?
+            for idx in 0..args.len() {
+                let n = eval_compiled_arg_at(vm, call, idx, env)?
                     .as_i64()
                     .ok_or_else(|| EvalError("range: expected integer arg".into()))?;
                 nums.push(n);
             }
             crate::builtins::range_apply(&nums)
         }
-        other => {
-            if let Some(first) = args.first() {
-                let recv = eval_pos(first, env)?;
-                call_builtin_method(recv, other, args.get(1..).unwrap_or(&[]), env)
-            } else {
-                call_builtin_method(env.current.clone(), other, &[], env)
-            }
+        other => if !args.is_empty() {
+            let recv = eval_compiled_arg_at(vm, call, 0, env)?;
+            call_builtin_method_compiled(vm, recv, call, env)
+        } else {
+            call_builtin_method_compiled(vm, env.current.clone(), call, env)
         }
+        .map_err(|e| EvalError(format!("{}: {}", other, e.0))),
     }
 }
 
-pub(crate) fn apply_item_mut(item: Val, arg: &Arg, env: &mut Env) -> Result<Val, EvalError> {
+fn arg_index(args: &[Arg], needle: &Arg) -> Option<usize> {
+    args.iter().position(|arg| std::ptr::eq(arg, needle))
+}
+
+fn eval_compiled_arg(
+    vm: &mut VM,
+    call: &CompiledCall,
+    arg: &Arg,
+    env: &Env,
+) -> Result<Val, EvalError> {
+    if let Some(idx) = arg_index(call.orig_args.as_ref(), arg) {
+        return eval_compiled_arg_at(vm, call, idx, env);
+    }
+
+    // Some builtin adapters construct a static synthetic Arg while decoding
+    // richer argument syntax, e.g. `deep_like({k: lit})` evaluates each object
+    // field literal independently. Those are not in `CompiledCall::sub_progs`;
+    // compile them once for this call rather than failing back to the old
+    // tree-walker path.
     let expr = match arg {
         Arg::Pos(expr) | Arg::Named(_, expr) => expr,
     };
-    match expr {
-        Expr::Lambda { params, body } => {
+    let prog = crate::vm::Compiler::compile(expr, "<synthetic-arg>");
+    vm.exec_in_env(&prog, env)
+}
+
+fn eval_compiled_arg_at(
+    vm: &mut VM,
+    call: &CompiledCall,
+    idx: usize,
+    env: &Env,
+) -> Result<Val, EvalError> {
+    let prog = call
+        .sub_progs
+        .get(idx)
+        .ok_or_else(|| EvalError(format!("{}: missing compiled argument", call.name)))?;
+    vm.exec_in_env(prog, env)
+}
+
+fn apply_compiled_item(
+    vm: &mut VM,
+    call: &CompiledCall,
+    item: Val,
+    arg: &Arg,
+    env: &mut Env,
+) -> Result<Val, EvalError> {
+    let idx = arg_index(call.orig_args.as_ref(), arg)
+        .ok_or_else(|| EvalError(format!("{}: argument lookup failed", call.name)))?;
+    let prog = call
+        .sub_progs
+        .get(idx)
+        .ok_or_else(|| EvalError(format!("{}: missing compiled argument", call.name)))?;
+    match arg {
+        Arg::Pos(Expr::Lambda { params, .. }) | Arg::Named(_, Expr::Lambda { params, .. }) => {
             let name = params.first().map(|s| s.as_str());
             let frame = env.push_lam(name, item);
-            let result = vm_eval(body, env);
+            let result = vm.exec_in_env(prog, env);
             env.pop_lam(frame);
             result
         }
         _ => {
             let frame = env.push_lam(None, item);
-            let result = vm_eval(expr, env);
+            let result = vm.exec_in_env(prog, env);
             env.pop_lam(frame);
             result
         }
     }
 }
 
-pub(crate) fn apply_item2_mut(
+fn apply_compiled_pair(
+    vm: &mut VM,
+    call: &CompiledCall,
     first: Val,
     second: Val,
     arg: &Arg,
     env: &mut Env,
 ) -> Result<Val, EvalError> {
+    let idx = arg_index(call.orig_args.as_ref(), arg)
+        .ok_or_else(|| EvalError(format!("{}: argument lookup failed", call.name)))?;
+    let prog = call
+        .sub_progs
+        .get(idx)
+        .ok_or_else(|| EvalError(format!("{}: missing compiled argument", call.name)))?;
     match arg {
-        Arg::Pos(Expr::Lambda { params, body }) | Arg::Named(_, Expr::Lambda { params, body }) => {
+        Arg::Pos(Expr::Lambda { params, .. }) | Arg::Named(_, Expr::Lambda { params, .. }) => {
             match params.as_slice() {
                 [] => {
                     let frame = env.push_lam(None, second);
-                    let result = vm_eval(body, env);
+                    let result = vm.exec_in_env(prog, env);
                     env.pop_lam(frame);
                     result
                 }
                 [param] => {
                     let frame = env.push_lam(Some(param), second);
-                    let result = vm_eval(body, env);
+                    let result = vm.exec_in_env(prog, env);
                     env.pop_lam(frame);
                     result
                 }
                 [left, right, ..] => {
                     let left_frame = env.push_lam(Some(left), first);
                     let right_frame = env.push_lam(Some(right), second);
-                    let result = vm_eval(body, env);
+                    let result = vm.exec_in_env(prog, env);
                     env.pop_lam(right_frame);
                     env.pop_lam(left_frame);
                     result
                 }
             }
         }
-        _ => apply_item_mut(second, arg, env),
+        _ => apply_compiled_item(vm, call, second, arg, env),
     }
-}
-
-pub(crate) fn eval_pos(arg: &Arg, env: &Env) -> Result<Val, EvalError> {
-    let expr = match arg {
-        Arg::Pos(expr) | Arg::Named(_, expr) => expr,
-    };
-    vm_eval(expr, env)
-}
-
-pub(crate) fn vm_eval(expr: &Expr, env: &Env) -> Result<Val, EvalError> {
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static NONCE: AtomicU64 = AtomicU64::new(0);
-    let n = NONCE.fetch_add(1, Ordering::Relaxed);
-    let source = format!("<vm_eval#{}>", n);
-    let prog = crate::vm::Compiler::compile(expr, &source);
-    let mut vm = crate::vm::VM::new();
-    vm.exec(&prog, env)
 }

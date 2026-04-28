@@ -163,19 +163,19 @@ fn bench(
     println!("  jetro: {}", jetro_q);
     println!("  jq   : {}", jaq_q);
 
-    // `collect_val` keeps the result as jetro's native `Val` — parity with
+    // `collect` keeps the result as jetro's `serde_json::Value` — parity with
     // jaq, which returns its own `Val` iterator without materialising to
     // `serde_json::Value`.  `collect` would add a deep Arc<str>→String
     // clone of every key + a full tree rebuild, which dominates structural
     // results like `group_by` on 20k items and unfairly penalises jetro.
     let t = sample(|| {
-        let _ = jetro_tree.collect_val(jetro_q).unwrap();
+        let _ = jetro_tree.collect(jetro_q).unwrap();
     });
     show("jetro-tree", t);
 
     if let Some(js) = jetro_scan {
         let s = sample(|| {
-            let _ = js.collect_val(jetro_q).unwrap();
+            let _ = js.collect(jetro_q).unwrap();
         });
         show("jetro-scan", s);
     }
@@ -194,7 +194,7 @@ fn bench(
     );
     if let Some(js) = jetro_scan {
         let s = sample(|| {
-            let _ = js.collect_val(jetro_q).unwrap();
+            let _ = js.collect(jetro_q).unwrap();
         });
         let r = j.median as f64 / s.median.max(1) as f64;
         println!("  jetro-scan median vs jaq: {:.2}x", r);
@@ -216,7 +216,7 @@ fn main() {
         ITERS
     );
 
-    let j_tree = Jetro::new(doc.clone());
+    let j_tree = Jetro::from_bytes(serde_json::to_vec(&doc).unwrap()).unwrap();
     let j_scan = Jetro::from_bytes(bytes.clone()).unwrap();
 
     // Build jaq input once from the JSON bytes.

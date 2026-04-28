@@ -1,4 +1,4 @@
-//! Shared helpers used across eval / vm:
+//! Shared helpers used across builtins, pipeline, and VM:
 //!
 //! - `cmp_vals`: total ordering on `Val` (null < bool < num < str <
 //!   arr < obj), used by sort, min, max, top-N, distinct.  Unlike
@@ -6,7 +6,7 @@
 //!   fallback when types are incomparable, which is essential for
 //!   heap-based partial sorts.
 //! - `add_vals` / `num_op`: numeric widening + arithmetic dispatch
-//!   shared by the tree-walker and the VM so both semantics match.
+//!   shared by all execution paths so semantics match.
 //! - `val_key`: canonical string key for grouping / dedup.
 //! - `flatten_val` / `zip_arrays` / `cartesian` / `deep_merge`:
 //!   array / object combinators reused by builtins.
@@ -72,25 +72,6 @@ impl<'a> JsonView<'a> {
             JsonView::ArrayLen(n) | JsonView::ObjectLen(n) => n != 0,
         }
     }
-
-    #[inline]
-    pub fn as_i64_exact(self) -> Option<i64> {
-        match self {
-            JsonView::Int(n) => Some(n),
-            JsonView::UInt(n) if n <= i64::MAX as u64 => Some(n as i64),
-            _ => None,
-        }
-    }
-
-    #[inline]
-    pub fn as_f64_number(self) -> Option<f64> {
-        match self {
-            JsonView::Int(n) => Some(n as f64),
-            JsonView::UInt(n) => Some(n as f64),
-            JsonView::Float(f) => Some(f),
-            _ => None,
-        }
-    }
 }
 
 #[inline]
@@ -152,9 +133,28 @@ pub fn json_cmp_vals(a: JsonView<'_>, b: JsonView<'_>) -> Ordering {
 
 #[inline]
 pub fn json_cmp_binop(lhs: JsonView<'_>, op: BinOp, rhs: JsonView<'_>) -> bool {
+    #[inline]
+    fn comparable(lhs: &JsonView<'_>, rhs: &JsonView<'_>) -> bool {
+        matches!(
+            (lhs, rhs),
+            (JsonView::Int(_), JsonView::Int(_))
+                | (JsonView::UInt(_), JsonView::UInt(_))
+                | (JsonView::Float(_), JsonView::Float(_))
+                | (JsonView::Int(_), JsonView::Float(_))
+                | (JsonView::Float(_), JsonView::Int(_))
+                | (JsonView::UInt(_), JsonView::Float(_))
+                | (JsonView::Float(_), JsonView::UInt(_))
+                | (JsonView::Int(_), JsonView::UInt(_))
+                | (JsonView::UInt(_), JsonView::Int(_))
+                | (JsonView::Str(_), JsonView::Str(_))
+                | (JsonView::Bool(_), JsonView::Bool(_))
+        )
+    }
+
     match op {
         BinOp::Eq => json_vals_eq(lhs, rhs),
         BinOp::Neq => !json_vals_eq(lhs, rhs),
+        BinOp::Lt | BinOp::Lte | BinOp::Gt | BinOp::Gte if !comparable(&lhs, &rhs) => false,
         BinOp::Lt => json_cmp_vals(lhs, rhs) == Ordering::Less,
         BinOp::Lte => json_cmp_vals(lhs, rhs) != Ordering::Greater,
         BinOp::Gt => json_cmp_vals(lhs, rhs) == Ordering::Greater,
@@ -196,6 +196,11 @@ pub fn cmp_vals(a: &Val, b: &Val) -> std::cmp::Ordering {
     json_cmp_vals(JsonView::from_val(a), JsonView::from_val(b))
 }
 
+#[inline]
+pub fn cmp_vals_binop(a: &Val, op: BinOp, b: &Val) -> bool {
+    json_cmp_binop(JsonView::from_val(a), op, JsonView::from_val(b))
+}
+
 // ── Value conversions ─────────────────────────────────────────────────────────
 
 /// Canonical string key for use in HashSets / dedup (never allocates for Str).
@@ -230,18 +235,6 @@ pub fn val_to_string(v: &Val) -> String {
 
 // ── Constructors ──────────────────────────────────────────────────────────────
 
-#[inline]
-pub fn val_int(n: i64) -> Val {
-    Val::Int(n)
-}
-#[inline]
-pub fn val_float(f: f64) -> Val {
-    Val::Float(f)
-}
-#[inline]
-pub fn val_str(s: &str) -> Val {
-    Val::Str(Arc::from(s))
-}
 #[inline]
 pub fn val_key(s: &str) -> Arc<str> {
     Arc::from(s)

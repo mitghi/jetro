@@ -6,10 +6,7 @@ Entry points:
 
 | Call | Notes |
 |------|-------|
-| `jetro::query(expr, &doc)` | One-shot static builtin evaluation |
-| `Jetro::new(doc).collect(expr)` | Thread-local cached VM |
-| `Engine::new().run(expr, &doc)` | Shared-cache VM (multi-thread) |
-| `jetro!("expr")` | Compile-time checked `Expr<Value>` (feature `macros`) |
+| `Jetro::from_bytes(bytes).collect(expr)` | Byte-oriented query API; SIMD JSON by default |
 
 ---
 
@@ -538,60 +535,7 @@ missing(obj, "key")          // negated existence
 
 ---
 
-## 19. `jetro!` Macro (`features = ["macros"]`)
-
-Compile-time checked expression literal.
-
-```rust
-use jetro::prelude::*;
-use jetro::jetro;
-
-let e = jetro!("$.books.filter(price > 10).map(title)");
-let out = e.eval(&doc)?;
-```
-
-Checks at compile time:
-- Balanced `()`, `[]`, `{}`
-- Balanced `"` / `'` (escape-aware)
-- Non-empty body
-
-Full parse runs at first eval.
-
----
-
-## 20. `#[derive(JetroSchema)]` (`features = ["macros"]`)
-
-Attach a fixed set of named expressions to a type.
-
-```rust
-use jetro::prelude::*;
-use jetro::JetroSchema;
-
-#[derive(JetroSchema)]
-#[expr(titles = "$.books.map(title)")]
-#[expr(count  = "$.books.len()")]
-#[expr(top    = "$.books.filter(price > 10)")]
-struct BookView;
-
-for (name, src) in BookView::exprs() {
-    session.register_expr(name, src)?;
-}
-```
-
-Generated:
-```rust
-impl JetroSchema for BookView {
-    const EXPRS: &'static [(&'static str, &'static str)] = &[...];
-    fn exprs() -> &'static [(&'static str, &'static str)] { Self::EXPRS }
-    fn names() -> &'static [&'static str] { ... }
-}
-```
-
-Each `#[expr(name = "src")]` is lex-checked at compile time (same rules as `jetro!`).
-
----
-
-## 21. Method Catalog
+## 19. Method Catalog
 
 Every snake_case method has a camelCase alias (e.g. `group_by` ≡ `groupBy`). Listed once here.
 

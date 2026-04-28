@@ -185,7 +185,7 @@ fn main() {
     let n_orders = 20_000usize;
     let items_per_order = 6usize;
     let doc = synth_doc(n_orders, items_per_order);
-    let j = Jetro::new(doc);
+    let j = Jetro::from_bytes(serde_json::to_vec(&doc).unwrap()).unwrap();
 
     if hash_only {
         println!(

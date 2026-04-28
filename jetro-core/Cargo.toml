@@ -15,7 +15,6 @@ serde_json = "1.0.102"
 pest = "2.7.0"
 pest_derive = "2.7.0"
 serde = { version = "1.0.171", features = ["derive"] }
-parking_lot = "0.12"
 smallvec = { version = "1", features = ["union"] }
 indexmap = "2"
 memchr = "2"

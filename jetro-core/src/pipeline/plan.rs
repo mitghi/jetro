@@ -1,0 +1,447 @@
+use std::sync::Arc;
+
+use super::{BodyKernel, Sink, Stage};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Bound {
+    Unbounded,
+    AtMost(usize),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Position {
+    First,
+    Last,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Demand {
+    pub consumption: Bound,
+    pub positional: Option<Position>,
+}
+
+impl Demand {
+    pub const UNBOUNDED: Demand = Demand {
+        consumption: Bound::Unbounded,
+        positional: None,
+    };
+}
+
+impl Sink {
+    pub fn demand(&self) -> Demand {
+        match self {
+            Sink::First => Demand {
+                consumption: Bound::AtMost(1),
+                positional: Some(Position::First),
+            },
+            Sink::Last => Demand {
+                consumption: Bound::AtMost(1),
+                positional: Some(Position::Last),
+            },
+            Sink::Count | Sink::Numeric(_) | Sink::Collect | Sink::ApproxCountDistinct => {
+                Demand::UNBOUNDED
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum StageStrategy {
+    Default,
+    SortTopK(usize),
+    SortBottomK(usize),
+}
+
+pub fn compute_strategies(stages: &[Stage], sink: &Sink) -> Vec<StageStrategy> {
+    let mut strategies: Vec<StageStrategy> = vec![StageStrategy::Default; stages.len()];
+    let mut demand = sink.demand();
+    for (i, stage) in stages.iter().enumerate().rev() {
+        if let Stage::Sort(_) = stage {
+            if let Bound::AtMost(k) = demand.consumption {
+                strategies[i] = match demand.positional {
+                    Some(Position::Last) => StageStrategy::SortBottomK(k),
+                    _ => StageStrategy::SortTopK(k),
+                };
+            }
+        }
+        demand = upstream_demand(demand, stage);
+    }
+    strategies
+}
+
+#[inline]
+fn upstream_demand(d: Demand, stage: &Stage) -> Demand {
+    match stage {
+        Stage::Map(_) => d,
+        Stage::Filter(_) => Demand {
+            consumption: d.consumption,
+            positional: None,
+        },
+        Stage::Take(n) => {
+            let cap = match d.consumption {
+                Bound::Unbounded => *n,
+                Bound::AtMost(k) => k.min(*n),
+            };
+            Demand {
+                consumption: Bound::AtMost(cap),
+                positional: None,
+            }
+        }
+        Stage::Skip(_)
+        | Stage::FlatMap(_)
+        | Stage::Reverse
+        | Stage::Sort(_)
+        | Stage::UniqueBy(_)
+        | Stage::GroupBy(_)
+        | Stage::Split(_)
+        | Stage::Chunk(_)
+        | Stage::Window(_) => Demand::UNBOUNDED,
+        Stage::Slice(_, _)
+        | Stage::Replace { .. }
+        | Stage::CompiledMap(_)
+        | Stage::Builtin(_)
+        | Stage::TakeWhile(_)
+        | Stage::DropWhile(_)
+        | Stage::IndicesWhere(_)
+        | Stage::FindIndex(_)
+        | Stage::MaxBy(_)
+        | Stage::MinBy(_)
+        | Stage::TransformValues(_)
+        | Stage::TransformKeys(_)
+        | Stage::FilterValues(_)
+        | Stage::FilterKeys(_)
+        | Stage::CountBy(_)
+        | Stage::IndexBy(_)
+        | Stage::SortedDedup(_) => d,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cardinality {
+    OneToOne,
+    Filtering,
+    Expanding,
+    Barrier,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct StageShape {
+    pub cardinality: Cardinality,
+    pub purity: bool,
+    pub can_indexed: bool,
+    pub cost: f64,
+    pub selectivity: f64,
+}
+
+impl Stage {
+    pub fn shape(&self) -> StageShape {
+        match self {
+            Stage::Map(_) => StageShape {
+                cardinality: Cardinality::OneToOne,
+                purity: true,
+                can_indexed: true,
+                cost: 10.0,
+                selectivity: 1.0,
+            },
+            Stage::Filter(_) => StageShape {
+                cardinality: Cardinality::Filtering,
+                purity: true,
+                can_indexed: false,
+                cost: 10.0,
+                selectivity: 0.5,
+            },
+            Stage::FlatMap(_) => StageShape {
+                cardinality: Cardinality::Expanding,
+                purity: true,
+                can_indexed: false,
+                cost: 10.0,
+                selectivity: 1.0,
+            },
+            Stage::Take(_) | Stage::Skip(_) => StageShape {
+                cardinality: Cardinality::Filtering,
+                purity: true,
+                can_indexed: false,
+                cost: 0.5,
+                selectivity: 0.5,
+            },
+            Stage::Reverse | Stage::Sort(_) | Stage::UniqueBy(_) | Stage::GroupBy(_) => {
+                StageShape {
+                    cardinality: Cardinality::Barrier,
+                    purity: true,
+                    can_indexed: false,
+                    cost: 20.0,
+                    selectivity: 1.0,
+                }
+            }
+            Stage::Split(_) => StageShape {
+                cardinality: Cardinality::Expanding,
+                purity: true,
+                can_indexed: true,
+                cost: 2.0,
+                selectivity: 1.0,
+            },
+            Stage::Slice(_, _) => StageShape {
+                cardinality: Cardinality::OneToOne,
+                purity: true,
+                can_indexed: true,
+                cost: 1.0,
+                selectivity: 1.0,
+            },
+            Stage::Replace { .. } => StageShape {
+                cardinality: Cardinality::OneToOne,
+                purity: true,
+                can_indexed: true,
+                cost: 2.0,
+                selectivity: 1.0,
+            },
+            Stage::Chunk(_) | Stage::Window(_) => StageShape {
+                cardinality: Cardinality::Barrier,
+                purity: true,
+                can_indexed: true,
+                cost: 2.0,
+                selectivity: 1.0,
+            },
+            Stage::CompiledMap(_) => StageShape {
+                cardinality: Cardinality::OneToOne,
+                purity: true,
+                can_indexed: true,
+                cost: 10.0,
+                selectivity: 1.0,
+            },
+            Stage::Builtin(call) => {
+                let spec = call.spec();
+                StageShape {
+                    cardinality: Cardinality::OneToOne,
+                    purity: spec.pure,
+                    can_indexed: spec.can_indexed,
+                    cost: spec.cost,
+                    selectivity: 1.0,
+                }
+            }
+            Stage::TakeWhile(_)
+            | Stage::DropWhile(_)
+            | Stage::IndicesWhere(_)
+            | Stage::FindIndex(_)
+            | Stage::MaxBy(_)
+            | Stage::MinBy(_)
+            | Stage::TransformValues(_)
+            | Stage::TransformKeys(_)
+            | Stage::FilterValues(_)
+            | Stage::FilterKeys(_)
+            | Stage::CountBy(_)
+            | Stage::IndexBy(_)
+            | Stage::SortedDedup(_) => StageShape {
+                cardinality: Cardinality::OneToOne,
+                purity: true,
+                can_indexed: true,
+                cost: 1.0,
+                selectivity: 1.0,
+            },
+        }
+    }
+
+    pub fn merge_with(&self, other: &Self) -> Option<Self> {
+        match (self, other) {
+            (Stage::Take(a), Stage::Take(b)) => Some(Stage::Take((*a).min(*b))),
+            (Stage::Skip(a), Stage::Skip(b)) => Some(Stage::Skip((*a).saturating_add(*b))),
+            (Stage::Sort(_), Stage::Sort(b)) => Some(Stage::Sort(b.clone())),
+            (Stage::UniqueBy(_), Stage::UniqueBy(b)) => Some(Stage::UniqueBy(b.clone())),
+            (Stage::UniqueBy(None), Stage::Sort(None))
+            | (Stage::Sort(None), Stage::UniqueBy(None)) => Some(Stage::SortedDedup(None)),
+            (Stage::UniqueBy(Some(a)), Stage::Sort(Some(b)))
+            | (Stage::Sort(Some(a)), Stage::UniqueBy(Some(b)))
+                if Arc::ptr_eq(a, b) =>
+            {
+                Some(Stage::SortedDedup(Some(a.clone())))
+            }
+            (Stage::Builtin(a), Stage::Builtin(b)) if a.method == b.method && a.is_idempotent() => {
+                Some(Stage::Builtin(a.clone()))
+            }
+            _ => None,
+        }
+    }
+
+    pub fn cancels_with(&self, other: &Self) -> bool {
+        if let (Stage::Builtin(a), Stage::Builtin(b)) = (self, other) {
+            return a.cancels_with(b);
+        }
+        matches!((self, other), (Stage::Reverse, Stage::Reverse))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Strategy {
+    IndexedDispatch,
+    BarrierMaterialise,
+    EarlyExit,
+    PullLoop,
+}
+
+#[derive(Debug, Clone)]
+pub struct Plan {
+    pub stages: Vec<Stage>,
+    pub sink: Sink,
+}
+
+#[cfg(test)]
+pub fn plan(stages: Vec<Stage>, sink: Sink) -> Plan {
+    plan_with_kernels(stages, &[], sink)
+}
+
+pub fn plan_with_kernels(stages: Vec<Stage>, kernels: &[BodyKernel], sink: Sink) -> Plan {
+    let mut stages = stages;
+    let mut k_buf: Vec<BodyKernel> = if kernels.len() == stages.len() {
+        kernels.to_vec()
+    } else {
+        vec![BodyKernel::Generic; stages.len()]
+    };
+
+    drop_dead_pure_stages_kernels(&mut stages, &mut k_buf, &sink);
+    reorder_filter_runs(&mut stages, &mut k_buf);
+    fold_merge_with_kernels(&mut stages, &mut k_buf);
+
+    Plan { stages, sink }
+}
+
+fn kernel_cost_selectivity(stage: &Stage, kernel: &BodyKernel) -> (f64, f64) {
+    use crate::ast::BinOp;
+    match (stage, kernel) {
+        (Stage::Filter(_), BodyKernel::FieldCmpLit(_, op, _)) => {
+            let s = match op {
+                BinOp::Eq => 0.10,
+                BinOp::Neq => 0.90,
+                BinOp::Lt | BinOp::Gt => 0.40,
+                BinOp::Lte | BinOp::Gte => 0.50,
+                _ => 0.50,
+            };
+            (1.5, s)
+        }
+        (Stage::Filter(_), BodyKernel::FieldChainCmpLit(keys, op, _)) => {
+            let s = match op {
+                BinOp::Eq => 0.10,
+                BinOp::Neq => 0.90,
+                BinOp::Lt | BinOp::Gt => 0.40,
+                BinOp::Lte | BinOp::Gte => 0.50,
+                _ => 0.50,
+            };
+            (1.0 + keys.len() as f64, s)
+        }
+        (Stage::Filter(_), BodyKernel::CurrentCmpLit(op, _)) => {
+            let s = match op {
+                BinOp::Eq => 0.10,
+                BinOp::Neq => 0.90,
+                BinOp::Lt | BinOp::Gt => 0.40,
+                BinOp::Lte | BinOp::Gte => 0.50,
+                _ => 0.50,
+            };
+            (0.8, s)
+        }
+        (Stage::Filter(_), BodyKernel::FieldRead(_)) => (1.0, 0.7),
+        (Stage::Filter(_), BodyKernel::ConstBool(b)) => (0.1, if *b { 1.0 } else { 0.0 }),
+        _ => {
+            let sh = stage.shape();
+            (sh.cost, sh.selectivity)
+        }
+    }
+}
+
+fn reorder_filter_runs(stages: &mut Vec<Stage>, kernels: &mut Vec<BodyKernel>) {
+    let mut i = 0;
+    while i < stages.len() {
+        let mut j = i;
+        while j < stages.len()
+            && matches!(stages[j], Stage::Filter(_))
+            && !matches!(kernels.get(j), Some(BodyKernel::Generic) | None)
+        {
+            j += 1;
+        }
+        if j - i >= 2 {
+            let mut run: Vec<(Stage, BodyKernel)> = Vec::with_capacity(j - i);
+            for idx in i..j {
+                run.push((stages[idx].clone(), kernels[idx].clone()));
+            }
+            run.sort_by(|a, b| {
+                let (ca, sa) = kernel_cost_selectivity(&a.0, &a.1);
+                let (cb, sb) = kernel_cost_selectivity(&b.0, &b.1);
+                let ra = ca / (1.0 - sa).max(1e-6);
+                let rb = cb / (1.0 - sb).max(1e-6);
+                ra.partial_cmp(&rb).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            for (idx, (s, k)) in run.into_iter().enumerate() {
+                stages[i + idx] = s;
+                kernels[i + idx] = k;
+            }
+        }
+        i = j.max(i + 1);
+    }
+}
+
+fn drop_dead_pure_stages_kernels(
+    stages: &mut Vec<Stage>,
+    kernels: &mut Vec<BodyKernel>,
+    sink: &Sink,
+) {
+    if !matches!(sink, Sink::Count) {
+        return;
+    }
+    while let Some(last) = stages.last() {
+        let s = last.shape();
+        if matches!(s.cardinality, Cardinality::OneToOne) && s.purity {
+            stages.pop();
+            kernels.pop();
+        } else {
+            break;
+        }
+    }
+}
+
+fn fold_merge_with_kernels(stages: &mut Vec<Stage>, kernels: &mut Vec<BodyKernel>) {
+    let mut i = 0;
+    while i < stages.len() {
+        if matches!(&stages[i], Stage::Filter(_))
+            && matches!(kernels.get(i), Some(BodyKernel::ConstBool(true)))
+        {
+            stages.remove(i);
+            kernels.remove(i);
+        } else {
+            i += 1;
+        }
+    }
+
+    let mut i = 0;
+    while i + 1 < stages.len() {
+        if stages[i].cancels_with(&stages[i + 1]) {
+            stages.drain(i..=i + 1);
+            kernels.drain(i..=i + 1);
+            i = i.saturating_sub(1);
+            continue;
+        }
+        if let Some(merged) = stages[i].merge_with(&stages[i + 1]) {
+            stages[i] = merged;
+            stages.remove(i + 1);
+            kernels.remove(i + 1);
+            continue;
+        }
+        i += 1;
+    }
+}
+
+pub fn select_strategy(stages: &[Stage], sink: &Sink) -> Strategy {
+    let stages_can_indexed = stages.iter().all(|s| s.shape().can_indexed);
+    let sink_positional = sink.demand().positional.is_some();
+    let has_barrier = stages
+        .iter()
+        .any(|s| matches!(s.shape().cardinality, Cardinality::Barrier));
+    let has_short_circuit = matches!(sink, Sink::First);
+
+    if has_barrier {
+        return Strategy::BarrierMaterialise;
+    }
+    if stages_can_indexed && sink_positional {
+        return Strategy::IndexedDispatch;
+    }
+    if has_short_circuit {
+        return Strategy::EarlyExit;
+    }
+    Strategy::PullLoop
+}

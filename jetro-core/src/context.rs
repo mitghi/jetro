@@ -32,9 +32,6 @@ pub struct Env {
     vars: SmallVec<[(Arc<str>, Val); 4]>,
     pub root: Val,
     pub current: Val,
-    /// Raw JSON bytes the `root` was parsed from, when available. Enables
-    /// SIMD byte-scan fast paths for root-based descendant queries.
-    pub(crate) raw_bytes: Option<Arc<[u8]>>,
 }
 
 impl Env {
@@ -43,16 +40,6 @@ impl Env {
             vars: SmallVec::new(),
             root: root.clone(),
             current: root,
-            raw_bytes: None,
-        }
-    }
-
-    pub fn new_with_raw(root: Val, raw_bytes: Arc<[u8]>) -> Self {
-        Self {
-            vars: SmallVec::new(),
-            root: root.clone(),
-            current: root,
-            raw_bytes: Some(raw_bytes),
         }
     }
 
@@ -62,7 +49,6 @@ impl Env {
             vars: self.vars.clone(),
             root: self.root.clone(),
             current,
-            raw_bytes: self.raw_bytes.clone(),
         }
     }
 
@@ -85,11 +71,6 @@ impl Env {
             .map(|(_, v)| v)
     }
 
-    #[inline]
-    pub fn has_var(&self, name: &str) -> bool {
-        self.vars.iter().any(|(k, _)| k.as_ref() == name)
-    }
-
     pub fn with_var(&self, name: &str, val: Val) -> Self {
         let mut vars = self.vars.clone();
         if let Some(pos) = vars.iter().position(|(k, _)| k.as_ref() == name) {
@@ -101,7 +82,6 @@ impl Env {
             vars,
             root: self.root.clone(),
             current: self.current.clone(),
-            raw_bytes: self.raw_bytes.clone(),
         }
     }
 

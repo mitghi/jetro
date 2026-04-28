@@ -3,10 +3,8 @@
 //! the cost a CLI invocation, MCP server cold call, or test fixture
 //! pays each time.
 //!
-//! Compares two paths:
-//!   1. legacy: `serde_json::from_slice` → `Jetro::new(value)` → `collect`
-//!   2. simd-direct: `Jetro::from_bytes(bytes)` (routes through simd-json
-//!      direct bytes→Val parser via the cold_start_direct_parse plan)
+//! Uses the public byte API:
+//!   `Jetro::from_bytes(bytes)` → `collect`
 //!
 //! Run:
 //!   cargo run --release --example bench_cold --features simd-json
@@ -75,9 +73,8 @@ fn main() {
     let q_filter = "$.orders.filter(total > 500).map(id)";
 
     println!("Cold-start, 1 query ('map(total).sum()')");
-    time("legacy: from_slice + new", 30, || {
-        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        let j = Jetro::new(v);
+    time("default: from_bytes", 30, || {
+        let j = Jetro::from_bytes(bytes.clone()).unwrap();
         let _ = j.collect(q_simple).unwrap();
     });
     time("simd-direct: from_bytes", 30, || {
@@ -87,9 +84,8 @@ fn main() {
 
     println!();
     println!("Cold-start, 1 query ('filter+map')");
-    time("legacy: from_slice + new", 30, || {
-        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        let j = Jetro::new(v);
+    time("default: from_bytes", 30, || {
+        let j = Jetro::from_bytes(bytes.clone()).unwrap();
         let _ = j.collect(q_filter).unwrap();
     });
     time("simd-direct: from_bytes", 30, || {

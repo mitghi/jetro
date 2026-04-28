@@ -33,7 +33,7 @@ fn main() {
         }
     });
 
-    let j = Jetro::new(doc);
+    let j = Jetro::from_bytes(serde_json::to_vec(&doc).unwrap()).unwrap();
 
     // ── Shallow search (Tier 1) ──────────────────────────────────────────────
 

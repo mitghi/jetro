@@ -5,7 +5,7 @@
 //!
 //! Exercises a mix of query shapes that stress different parts of the
 //! engine: repeat-shape field access (IC), deep chains, multi-predicate
-//! find (SIMD scan), aggregates, comprehensions, and chain-style writes
+//! find, aggregates, comprehensions, and chain-style writes
 //! (patch walker COW fast-path).
 //!
 //! Not a rigorous harness — directional numbers only.  Each query is
@@ -146,9 +146,9 @@ fn run<F: FnMut() -> Value>(label: &str, mut f: F) -> Stats {
     Stats { best, median, mean }
 }
 
-fn speedup(tree: Stats, scan: Stats) {
-    let ratio = tree.median as f64 / scan.median.max(1) as f64;
-    println!("  -> scan/tree median: {:.2}x", ratio);
+fn compare(tree: Stats, bytes: Stats) {
+    let ratio = tree.median as f64 / bytes.median.max(1) as f64;
+    println!("  -> bytes/tree median: {:.2}x", ratio);
 }
 
 fn main() {
@@ -169,8 +169,8 @@ fn main() {
         ITERS
     );
 
-    let j_tree = Jetro::new(doc.clone());
-    let j_scan = Jetro::from_bytes(bytes.clone()).unwrap();
+    let j_tree = Jetro::from_bytes(serde_json::to_vec(&doc).unwrap()).unwrap();
+    let j_bytes = Jetro::from_bytes(bytes.clone()).unwrap();
 
     // ── Repeat-shape field access (IC hot path) ──────────────────────────
     println!("Q1  $.orders.map(customer.address.city)    (repeat-shape; IC sweet spot)");
@@ -202,31 +202,31 @@ fn main() {
             .unwrap()
     });
 
-    // ── Multi-predicate find (SIMD byte-scan) ────────────────────────────
-    println!("\nQ5  $..find(@.status == \"shipped\")   (deep enclosing-object scan)");
+    // ── Multi-predicate find ────────────────────────────────────────────
+    println!("\nQ5  $..find(@.status == \"shipped\")   (deep enclosing-object search)");
     let q = r#"$..find(@.status == "shipped")"#;
     let a = run("tree_walker", || j_tree.collect(q).unwrap());
-    let b = run("byte_scan", || j_scan.collect(q).unwrap());
-    speedup(a, b);
+    let b = run("from_bytes", || j_bytes.collect(q).unwrap());
+    compare(a, b);
 
     println!("\nQ6  $..find(@.sku == \"SKU-00042\")    (deep, narrow match)");
     let q = r#"$..find(@.sku == "SKU-00042")"#;
     let a = run("tree_walker", || j_tree.collect(q).unwrap());
-    let b = run("byte_scan", || j_scan.collect(q).unwrap());
-    speedup(a, b);
+    let b = run("from_bytes", || j_bytes.collect(q).unwrap());
+    compare(a, b);
 
     println!("\nQ7  $..find(@.status==\"shipped\", @.priority==\"urgent\")   (multi-pred AND)");
     let q = r#"$..find(@.status == "shipped", @.priority == "urgent")"#;
     let a = run("tree_walker", || j_tree.collect(q).unwrap());
-    let b = run("byte_scan", || j_scan.collect(q).unwrap());
-    speedup(a, b);
+    let b = run("from_bytes", || j_bytes.collect(q).unwrap());
+    compare(a, b);
 
-    // ── Deep descendant keys (byte-scan extract) ─────────────────────────
-    println!("\nQ8  $..total.sum()   (deep key + aggregate; scan route C)");
+    // ── Deep descendant keys ────────────────────────────────────────────
+    println!("\nQ8  $..total.sum()   (deep key + aggregate)");
     let q = "$..total.sum()";
     let a = run("tree_walker", || j_tree.collect(q).unwrap());
-    let b = run("byte_scan", || j_scan.collect(q).unwrap());
-    speedup(a, b);
+    let b = run("from_bytes", || j_bytes.collect(q).unwrap());
+    compare(a, b);
 
     println!(
         "\nQ9  $..sku         (deep leaf extract, {} values)",
@@ -234,8 +234,8 @@ fn main() {
     );
     let q = "$..sku";
     let a = run("tree_walker", || j_tree.collect(q).unwrap());
-    let b = run("byte_scan", || j_scan.collect(q).unwrap());
-    speedup(a, b);
+    let b = run("from_bytes", || j_bytes.collect(q).unwrap());
+    compare(a, b);
 
     // ── Aggregates + grouping ────────────────────────────────────────────
     println!("\nQ10 $.orders.group_by(status)         (group-by count_by-like)");

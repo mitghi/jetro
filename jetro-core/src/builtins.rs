@@ -461,7 +461,6 @@ pub struct BuiltinCall {
 #[derive(Debug, Clone, Copy)]
 pub struct BuiltinSpec {
     pub pure: bool,
-    pub one_to_one: bool,
     pub can_indexed: bool,
     pub cost: f64,
 }
@@ -503,7 +502,6 @@ impl BuiltinCall {
         };
         BuiltinSpec {
             pure: true,
-            one_to_one: true,
             can_indexed,
             cost,
         }
@@ -1731,6 +1729,22 @@ where
 
     call.try_apply(&recv)?
         .ok_or_else(|| EvalError(format!("{}: builtin unsupported", name)))
+}
+
+pub(crate) fn eval_builtin_no_args(recv: Val, name: &str) -> Result<Val, EvalError> {
+    eval_builtin_method(
+        recv,
+        name,
+        &[],
+        |_| {
+            Err(EvalError(format!(
+                "{}: unexpected argument evaluation",
+                name
+            )))
+        },
+        |_, _| Err(EvalError(format!("{}: unexpected item evaluation", name))),
+        |_, _, _| Err(EvalError(format!("{}: unexpected pair evaluation", name))),
+    )
 }
 
 impl BuiltinMethod {
@@ -3532,28 +3546,6 @@ pub fn repeat_apply(recv: &Val, n: usize) -> Option<Val> {
     Some(Val::Str(Arc::from(recv.as_str_ref()?.repeat(n))))
 }
 
-/// `.split(sep)` Stage form — fresh Val::Str segments. (Distinct from
-/// `split_apply` above which is the canonical Stage::Split runtime
-/// kernel; this variant takes Arc<str> sep — kept for symmetry with
-/// the others.)
-#[inline]
-pub fn split_str_apply(recv: &Val, sep: &str) -> Option<Val> {
-    let s = recv.as_str_ref()?;
-    let items: Vec<Val> = s.split(sep).map(|p| Val::Str(Arc::from(p))).collect();
-    Some(Val::arr(items))
-}
-
-/// `.replace(needle, with)` Stage form — single substitution per
-/// match (matches `lifted_apply Stage::Replace` semantics — different
-/// from the chain-Replace which uses `replace_apply` with a `bool`
-/// `all` flag).
-#[inline]
-pub fn replace_str_apply(recv: &Val, needle: &str, with: &str) -> Option<Val> {
-    Some(Val::Str(Arc::from(
-        recv.as_str_ref()?.replace(needle, with),
-    )))
-}
-
 /// `.strip_prefix(prefix)` — strip if present, else return original.
 #[inline]
 pub fn strip_prefix_apply(recv: &Val, prefix: &str) -> Option<Val> {
@@ -3853,23 +3845,6 @@ pub fn compact_apply(recv: &Val) -> Option<Val> {
         .cloned()
         .collect();
     Some(Val::arr(kept))
-}
-
-/// `.flatten()` — one level of array flattening.
-#[inline]
-pub fn flatten_one_apply(recv: &Val) -> Option<Val> {
-    if let Val::Arr(outer) = recv {
-        let mut out: Vec<Val> = Vec::new();
-        for v in outer.iter() {
-            match v {
-                Val::Arr(inner) => out.extend(inner.iter().cloned()),
-                other => out.push(other.clone()),
-            }
-        }
-        Some(Val::arr(out))
-    } else {
-        None
-    }
 }
 
 /// `.flatten(depth)` — recursive flatten up to depth levels.

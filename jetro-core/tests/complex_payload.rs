@@ -12,6 +12,10 @@ use serde_json::{json, Value};
 const N_ORDERS: usize = 2_000;
 const ITEMS_PER_ORDER: usize = 6;
 
+fn j(document: Value) -> Jetro {
+    Jetro::from_bytes(serde_json::to_vec(&document).unwrap()).unwrap()
+}
+
 fn synth_doc() -> Value {
     let regions = [
         "us-east",
@@ -75,7 +79,7 @@ fn as_array(v: &Value) -> &Vec<Value> {
 
 #[test]
 fn q1_project_nested_field() {
-    let j = Jetro::new(synth_doc());
+    let j = j(synth_doc());
     let out = j.collect("$.orders.map(customer.address.city)").unwrap();
     let arr = as_array(&out);
     assert_eq!(arr.len(), N_ORDERS);
@@ -96,7 +100,7 @@ fn q1_project_nested_field() {
 
 #[test]
 fn q2_project_then_unique() {
-    let j = Jetro::new(synth_doc());
+    let j = j(synth_doc());
     let out = j
         .collect("$.orders.map(customer.address.country_code).unique()")
         .unwrap();
@@ -108,7 +112,7 @@ fn q2_project_then_unique() {
 
 #[test]
 fn q3_filter_then_map_id() {
-    let j = Jetro::new(synth_doc());
+    let j = j(synth_doc());
     let out = j.collect("$.orders.filter(total > 500).map(id)").unwrap();
     // Every id returned must belong to an order whose total > 500.
     let arr = as_array(&out);
@@ -127,7 +131,7 @@ fn q4_multi_cond_filter_count_matches_naive() {
         .iter()
         .filter(|o| o["status"] == "shipped" && o["priority"] == "high")
         .count();
-    let j = Jetro::new(doc);
+    let j = j(doc);
     let out = j
         .collect(r#"$.orders.filter(status == "shipped" and priority == "high").count()"#)
         .unwrap();
@@ -140,7 +144,7 @@ fn q4_multi_cond_filter_count_matches_naive() {
 fn q5_deep_find_broad_tree_eq_scan() {
     let doc = synth_doc();
     let bytes = serde_json::to_vec(&doc).unwrap();
-    let j_tree = Jetro::new(doc);
+    let j_tree = j(doc);
     let j_scan = Jetro::from_bytes(bytes).unwrap();
     let q = r#"$..find(@.status == "shipped")"#;
     let t = j_tree.collect(q).unwrap();
@@ -154,7 +158,7 @@ fn q5_deep_find_broad_tree_eq_scan() {
 fn q6_deep_find_narrow_single_hit() {
     let doc = synth_doc();
     let bytes = serde_json::to_vec(&doc).unwrap();
-    let j_tree = Jetro::new(doc);
+    let j_tree = j(doc);
     let j_scan = Jetro::from_bytes(bytes).unwrap();
     let q = r#"$..find(@.sku == "SKU-00042")"#;
     let t = as_array(&j_tree.collect(q).unwrap()).len();
@@ -166,7 +170,7 @@ fn q6_deep_find_narrow_single_hit() {
 fn q7_deep_find_multi_predicate_and() {
     let doc = synth_doc();
     let bytes = serde_json::to_vec(&doc).unwrap();
-    let j_tree = Jetro::new(doc);
+    let j_tree = j(doc);
     let j_scan = Jetro::from_bytes(bytes).unwrap();
     let q = r#"$..find(@.status == "shipped", @.priority == "urgent")"#;
     let t = as_array(&j_tree.collect(q).unwrap()).len();
@@ -184,7 +188,7 @@ fn q7_deep_find_multi_predicate_and() {
 fn q8_deep_key_sum_tree_eq_scan() {
     let doc = synth_doc();
     let bytes = serde_json::to_vec(&doc).unwrap();
-    let j_tree = Jetro::new(doc);
+    let j_tree = j(doc);
     let j_scan = Jetro::from_bytes(bytes).unwrap();
     let q = "$..total.sum()";
     let t = j_tree.collect(q).unwrap();
@@ -199,7 +203,7 @@ fn q8_deep_key_sum_tree_eq_scan() {
 fn q9_deep_key_extract_sku_count() {
     let doc = synth_doc();
     let bytes = serde_json::to_vec(&doc).unwrap();
-    let j_tree = Jetro::new(doc);
+    let j_tree = j(doc);
     let j_scan = Jetro::from_bytes(bytes).unwrap();
     let q = "$..sku";
     let t_len = as_array(&j_tree.collect(q).unwrap()).len();
@@ -212,7 +216,7 @@ fn q9_deep_key_extract_sku_count() {
 
 #[test]
 fn q10_group_by_status_partition() {
-    let j = Jetro::new(synth_doc());
+    let j = j(synth_doc());
     let out = j.collect("$.orders.group_by(status)").unwrap();
     // group_by returns { groupKey: [items...] }; sum of per-bucket sizes
     // equals N_ORDERS and keys are the five status values.
@@ -226,30 +230,21 @@ fn q10_group_by_status_partition() {
 }
 
 #[test]
-fn q10_group_by_status_collect_val_matches() {
-    // collect_val returns the raw Val — no serde_json::Value materialisation.
-    // Verifies parity of structure with the standard collect() path.
-    use jetro_core::JetroVal;
-    let j = Jetro::new(synth_doc());
-    let v = j.collect_val("$.orders.group_by(status)").unwrap();
-    let total: usize = match v {
-        JetroVal::Obj(m) => {
-            assert_eq!(m.len(), 5);
-            m.values()
-                .map(|b| match b {
-                    JetroVal::Arr(a) => a.len(),
-                    _ => panic!("bucket is not an array"),
-                })
-                .sum()
-        }
-        _ => panic!("group_by did not return an object"),
-    };
+fn q10_group_by_status_collect_matches() {
+    let j = j(synth_doc());
+    let v = j.collect("$.orders.group_by(status)").unwrap();
+    let obj = v.as_object().expect("group_by did not return an object");
+    assert_eq!(obj.len(), 5);
+    let total: usize = obj
+        .values()
+        .map(|b| b.as_array().expect("bucket is not an array").len())
+        .sum();
     assert_eq!(total, N_ORDERS);
 }
 
 #[test]
 fn q11_count_by_region() {
-    let j = Jetro::new(synth_doc());
+    let j = j(synth_doc());
     let out = j.collect("$.orders.count_by(region)").unwrap();
     let obj = out.as_object().expect("object");
     let total: i64 = obj.values().map(|v| v.as_i64().unwrap()).sum();
@@ -266,7 +261,7 @@ fn q12_sum_of_totals_matches_naive() {
         .iter()
         .map(|o| o["total"].as_f64().unwrap())
         .sum();
-    let j = Jetro::new(doc);
+    let j = j(doc);
     let out = j.collect("$.orders.map(total).sum()").unwrap();
     let got = out.as_f64().unwrap();
     assert!((got - naive).abs() < 1e-3, "got {} vs naive {}", got, naive);
@@ -281,7 +276,7 @@ fn q15_max_matches_naive() {
         .iter()
         .map(|o| o["total"].as_f64().unwrap())
         .fold(f64::MIN, f64::max);
-    let j = Jetro::new(doc);
+    let j = j(doc);
     let out = j.collect("$.orders.map(total).max()").unwrap();
     assert!((out.as_f64().unwrap() - naive).abs() < 1e-6);
 }
@@ -291,7 +286,7 @@ fn q15_max_matches_naive() {
 #[test]
 fn q13_list_comp_equivalent_to_filter_map() {
     let doc = synth_doc();
-    let j = Jetro::new(doc);
+    let j = j(doc);
     let a = j
         .collect("[o.id for o in $.orders if o.total > 1000]")
         .unwrap();
@@ -304,7 +299,7 @@ fn q14_pick_projects_and_renames() {
     // Alias form `alias: src` expects `src` to be a single field name
     // (not a dotted path).  Apply pick on the already-flattened customer
     // level to test alias + rename.
-    let j = Jetro::new(synth_doc());
+    let j = j(synth_doc());
     let out = j
         .collect("$.orders.map(customer).pick(uid: id, who: name)")
         .unwrap();
@@ -322,7 +317,7 @@ fn q14_pick_projects_and_renames() {
 
 #[test]
 fn q16_set_deep_address_replaces_leaf_obj() {
-    let j = Jetro::new(synth_doc());
+    let j = j(synth_doc());
     let out = j.collect(
         r#"$.orders[0].customer.address.set({"city": "Remote", "zip": "00000", "country_code": "XX", "street": "N/A"})"#
     ).unwrap();
@@ -337,7 +332,7 @@ fn q16_set_deep_address_replaces_leaf_obj() {
 fn q17_modify_nested_numeric_field() {
     let doc = synth_doc();
     let before = doc["orders"][0]["total"].as_f64().unwrap();
-    let j = Jetro::new(doc);
+    let j = j(doc);
     let out = j.collect("$.orders[0].total.modify(@ * 2)").unwrap();
     let after = out["orders"][0]["total"].as_f64().unwrap();
     assert!((after - before * 2.0).abs() < 1e-6);
@@ -345,7 +340,7 @@ fn q17_modify_nested_numeric_field() {
 
 #[test]
 fn q18_set_deep_items_array_resets() {
-    let j = Jetro::new(synth_doc());
+    let j = j(synth_doc());
     let out = j.collect("$.orders[0].items[0].price.set(0)").unwrap();
     assert_eq!(out["orders"][0]["items"][0]["price"].as_i64(), Some(0));
     // Neighbouring slot untouched.
@@ -358,7 +353,7 @@ fn q18_set_deep_items_array_resets() {
 fn route_c_scan_agrees_with_tree_walker_on_chained_find() {
     let doc = synth_doc();
     let bytes = serde_json::to_vec(&doc).unwrap();
-    let j_tree = Jetro::new(doc);
+    let j_tree = j(doc);
     let j_scan = Jetro::from_bytes(bytes).unwrap();
     // Route C: chained descendants + aggregate at leaf.
     let q = "$..total.sum()";
@@ -369,7 +364,7 @@ fn route_c_scan_agrees_with_tree_walker_on_chained_find() {
 
 #[test]
 fn find_count_fusion_yields_same_integer_as_filter_count() {
-    let j = Jetro::new(synth_doc());
+    let j = j(synth_doc());
     let a = j
         .collect(r#"$.orders.find(status == "shipped").count()"#)
         .unwrap();
@@ -381,7 +376,7 @@ fn find_count_fusion_yields_same_integer_as_filter_count() {
 
 #[test]
 fn filter_map_min_max_match_unfused_pipeline() {
-    let j = Jetro::new(synth_doc());
+    let j = j(synth_doc());
     let fused_min = j
         .collect(r#"$.orders.filter(status == "shipped").map(total).min()"#)
         .unwrap();
@@ -406,7 +401,7 @@ fn filter_map_min_max_match_unfused_pipeline() {
 fn deep_find_numeric_range_tree_eq_scan() {
     let doc = synth_doc();
     let bytes = serde_json::to_vec(&doc).unwrap();
-    let j_tree = Jetro::new(doc.clone());
+    let j_tree = j(doc.clone());
     let j_scan = Jetro::from_bytes(bytes).unwrap();
     // Strict `<` / `>` agree between tree walker and scan.  Inclusive ops
     // diverge because tree's `cmp_vals` returns `Equal` for null-vs-number,
@@ -453,7 +448,7 @@ fn deep_find_then_count_and_aggregate_projection() {
     // directly -- no full-object parse, no intermediate array.
     let doc = synth_doc();
     let bytes = serde_json::to_vec(&doc).unwrap();
-    let j_tree = Jetro::new(doc.clone());
+    let j_tree = j(doc.clone());
     let j_scan = Jetro::from_bytes(bytes).unwrap();
     for q in [
         r#"$..find(@.status == "shipped").count()"#,
@@ -490,7 +485,7 @@ fn deep_find_then_map_field_direct_extract() {
     // parsing the full object.
     let doc = synth_doc();
     let bytes = serde_json::to_vec(&doc).unwrap();
-    let j_tree = Jetro::new(doc.clone());
+    let j_tree = j(doc.clone());
     let j_scan = Jetro::from_bytes(bytes).unwrap();
     for q in [
         r#"$..find(@.status == "shipped").map(total)"#,
@@ -517,7 +512,7 @@ fn deep_find_mixed_eq_cmp_tree_eq_scan() {
     // ground truth over the orders slice.
     let doc = synth_doc();
     let bytes = serde_json::to_vec(&doc).unwrap();
-    let j_tree = Jetro::new(doc.clone());
+    let j_tree = j(doc.clone());
     let j_scan = Jetro::from_bytes(bytes).unwrap();
     let q = r#"$..find(@.status == "shipped", @.total > 500)"#;
     let t = as_array(&j_tree.collect(q).unwrap()).len();
@@ -545,7 +540,7 @@ fn descendant_first_early_exit_matches_tree() {
     // multiple depths and are intentionally avoided.
     let doc = synth_doc();
     let bytes = serde_json::to_vec(&doc).unwrap();
-    let j_tree = Jetro::new(doc.clone());
+    let j_tree = j(doc.clone());
     let j_scan = Jetro::from_bytes(bytes).unwrap();
     for q in [
         "$..sku.first()",
@@ -567,7 +562,7 @@ fn descendant_first_early_exit_matches_tree() {
 
 #[test]
 fn unique_count_fusion_matches_dedup_then_count() {
-    let j = Jetro::new(synth_doc());
+    let j = j(synth_doc());
     let fused = j.collect("$.orders.map(status).unique().count()").unwrap();
     let plain = j.collect("$.orders.map(status).unique().len()").unwrap();
     let manual = {

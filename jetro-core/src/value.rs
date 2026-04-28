@@ -112,7 +112,7 @@ pub fn build_typed_cols_from_cells(cells: &[Val], stride: usize, nrows: usize) -
         let target_tag: u8 = match &cells[slot] {
             Val::Int(_) => 1,
             Val::Float(_) => 2,
-            Val::Str(_) => 3,
+            Val::Str(_) | Val::StrSlice(_) => 3,
             Val::Bool(_) => 4,
             _ => 0,
         };
@@ -125,7 +125,11 @@ pub fn build_typed_cols_from_cells(cells: &[Val], stride: usize, nrows: usize) -
             let v = &cells[r * stride + slot];
             let same = matches!(
                 (target_tag, v),
-                (1, Val::Int(_)) | (2, Val::Float(_)) | (3, Val::Str(_)) | (4, Val::Bool(_))
+                (1, Val::Int(_))
+                    | (2, Val::Float(_))
+                    | (3, Val::Str(_))
+                    | (3, Val::StrSlice(_))
+                    | (4, Val::Bool(_))
             );
             if !same {
                 ok = false;
@@ -158,8 +162,10 @@ pub fn build_typed_cols_from_cells(cells: &[Val], stride: usize, nrows: usize) -
             3 => {
                 let mut col: Vec<Arc<str>> = Vec::with_capacity(nrows);
                 for r in 0..nrows {
-                    if let Val::Str(s) = &cells[r * stride + slot] {
-                        col.push(Arc::clone(s));
+                    match &cells[r * stride + slot] {
+                        Val::Str(s) => col.push(Arc::clone(s)),
+                        Val::StrSlice(s) => col.push(s.to_arc()),
+                        _ => {}
                     }
                 }
                 out.push(ObjVecCol::Strs(col));
@@ -934,7 +940,7 @@ impl Val {
         Some(keys)
     }
 
-    /// Recursive tape walker.  `idx` advances as nodes are consumed.
+    /// Recursive tape materializer. `idx` advances as nodes are consumed.
     /// Honours the same columnar all-i64 / all-string lane fast paths as
     /// `from_simd_borrowed` and `From<&serde_json::Value>`.
     #[cfg(feature = "simd-json")]

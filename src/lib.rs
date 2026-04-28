@@ -1,86 +1,34 @@
-//! Jetro — transform, query, and compare JSON.
+//! Jetro — query JSON bytes.
 //!
 //! ```rust
 //! use jetro::Jetro;
-//! use serde_json::json;
 //!
-//! let j = Jetro::new(json!({
-//!     "store": {
-//!         "books": [
-//!             {"title": "Dune",        "price": 12.99},
-//!             {"title": "Foundation",  "price":  9.99}
-//!         ]
-//!     }
-//! }));
+//! let j = Jetro::from_bytes(br#"{"store":{"books":[
+//!   {"title":"Dune","price":12.99},
+//!   {"title":"Foundation","price":9.99}
+//! ]}}"#.to_vec()).unwrap();
 //!
 //! let count = j.collect("$.store.books.len()").unwrap();
-//! assert_eq!(count, json!(2));
+//! assert_eq!(count, serde_json::json!(2));
 //! ```
 
-pub mod prelude;
+pub use jetro_core::EvalError;
 
-// Engine surface.
-pub use jetro_core::{
-    CompiledQuery, Compiler, Engine, EvalError, Expr, Jetro, JetroSchema, ParseError, Program, VM,
-};
-
-// Module re-exports for callers that reach into submodules.
-pub use jetro_core::ast;
-pub use jetro_core::parser;
-pub use jetro_core::vm;
-
-#[cfg(feature = "macros")]
-pub use jetro_macros::{jetro, JetroSchema};
-
-use serde_json::Value;
-
-/// Engine-side error type.  Either a parse failure or an evaluation failure.
-#[derive(Debug)]
-pub enum Error {
-    Parse(ParseError),
-    Eval(EvalError),
+/// Byte-oriented Jetro query handle.
+pub struct Jetro {
+    inner: jetro_core::Jetro,
 }
 
-pub type Result<T> = std::result::Result<T, Error>;
-
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Error::Parse(e) => write!(f, "{}", e),
-            Error::Eval(e) => write!(f, "{}", e),
-        }
+impl Jetro {
+    /// Parse JSON bytes and build a query handle.
+    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, serde_json::Error> {
+        Ok(Self {
+            inner: jetro_core::Jetro::from_bytes(bytes)?,
+        })
     }
-}
-impl std::error::Error for Error {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Error::Parse(e) => Some(e),
-            Error::Eval(_) => None,
-        }
-    }
-}
 
-impl From<ParseError> for Error {
-    fn from(e: ParseError) -> Self {
-        Error::Parse(e)
+    /// Evaluate a Jetro expression and return a `serde_json::Value`.
+    pub fn collect<S: AsRef<str>>(&self, expr: S) -> Result<serde_json::Value, EvalError> {
+        self.inner.collect(expr)
     }
-}
-impl From<EvalError> for Error {
-    fn from(e: EvalError) -> Self {
-        Error::Eval(e)
-    }
-}
-
-impl From<jetro_core::Error> for Error {
-    fn from(e: jetro_core::Error) -> Self {
-        match e {
-            jetro_core::Error::Parse(p) => Error::Parse(p),
-            jetro_core::Error::Eval(v) => Error::Eval(v),
-        }
-    }
-}
-
-/// Evaluate a Jetro expression against a JSON value.
-pub fn query(expr: &str, doc: &Value) -> Result<Value> {
-    Ok(jetro_core::query(expr, doc)?)
 }

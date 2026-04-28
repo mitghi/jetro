@@ -18,7 +18,8 @@ source string
      │  Compiler::optimize   10 peephole passes
   Program                    Arc<[Opcode]>, cheap to clone
      │
-     ▼  VM::execute          stack machine over &serde_json::Value
+     ▼  planner::plan_query  chooses Pipeline/tape fast path or VM fallback
+     ▼  VM::execute          scalar stack-machine fallback
   serde_json::Value
 ```
 
@@ -108,9 +109,12 @@ Let-bindings and comprehension variables push onto `vars`; scope exit truncates.
 
 ---
 
-## Layer 3 — bytecode VM (`vm.rs`)
+## Layer 3 — planner and bytecode VM
 
-The VM is an accelerated path on top of the tree-walker. It uses:
+`planner.rs` is the explicit routing point. It classifies each query as a
+Pipeline candidate or VM fallback, and exposes SIMD-tape fast paths that can
+answer a query before root `Val` materialisation. The VM remains the general
+scalar executor. It uses:
 
 1. A **compile cache** — parse + compile happen once per unique expression string.
 2. A **pointer cache** — purely structural programs (`$.a.b[0]`) cache their resolved pointer path keyed by `(doc_hash, program_id)` and skip traversal on re-run.
@@ -162,7 +166,7 @@ pub enum Opcode {
     MapFieldChainUnique(Arc<[Arc<str>]>),// map(x => x.k1.…).unique()
     FilterFieldEqLit(Arc<str>, Val),     // filter(@.k == lit)
     FilterFieldCmpLit(Arc<str>, CmpOp, Val),
-    FilterFieldEqLitMapField(…),         // fused scan + project
+    FilterFieldEqLitMapField(…),         // fused filter + project
     TopN { n: usize, asc: bool },        // sort()[0:n]
     FilterTakeWhile { pred, stop },
     FilterDropWhile { pred, drop },
@@ -185,7 +189,7 @@ pub enum Opcode {
     BindObjDestructure(Arc<BindObjSpec>), BindArrDestructure(Arc<[Arc<str>]>),
     LetExpr { name, body }, ListComp(Arc<CompSpec>), DictComp(…), SetComp(…),
     GetPointer(Arc<str>),                // resolution-cache fast-path
-    PatchEval(Arc<Expr>),                // delegates to tree-walker
+    PatchEval(Arc<Expr>),                // patch expression payload
 }
 ```
 
@@ -268,51 +272,36 @@ The analyses operate on `Program`, not `Expr` — they observe the already-lower
 
 ## Public API
 
-```rust
-// One-shot tree-walker.
-pub fn query(expr: &str, doc: &Value) -> Result<Value>;
+`jetro-core` now exposes the same narrow document-bound surface as the root crate:
 
-// Persistent VM (thread-local in the umbrella; fresh in this crate).
+```rust
 pub struct Jetro { … }
 impl Jetro {
-    pub fn new(doc: Value) -> Self;
+    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, serde_json::Error>;
     pub fn collect<S: AsRef<str>>(&self, expr: S) -> Result<Value, EvalError>;
 }
-
-// Lower-level building blocks.
-pub use vm::{VM, Compiler, Program};
-pub use expr::Expr;              // typed-phantom wrapper for compile-time expression literals
-pub use context::EvalError;
-pub use parser::{parse, ParseError};
-pub use engine::Engine;          // high-level wrapper
 ```
+
+Parser, planner, pipeline, VM, tape, and builtin modules are crate-internal implementation details.
 
 ### `Jetro` — document-bound convenience
 
 ```rust
 use jetro_core::Jetro;
-use serde_json::json;
 
-let j = Jetro::new(json!({
-    "store": { "books": [
-        {"title": "Dune",       "price": 12.99},
-        {"title": "Foundation", "price":  9.99},
-    ]}
-}));
+let j = Jetro::from_bytes(br#"{
+  "store": { "books": [
+    {"title": "Dune",       "price": 12.99},
+    {"title": "Foundation", "price":  9.99}
+  ]}
+}"#.to_vec()).unwrap();
 
 let titles = j.collect("$.store.books.filter(price > 10).map(title)").unwrap();
 assert_eq!(titles, serde_json::json!(["Dune"]));
 ```
 
+`Jetro::from_bytes` uses SIMD JSON when the feature is enabled, which is the default.
 `Jetro::collect` uses a thread-local VM so the compile cache accumulates across calls on the same thread.
-
-### `query` — one-shot
-
-```rust
-let n = jetro_core::query("$.store.books.len()", &doc).unwrap();
-```
-
-Uses the static builtin runtime directly. Use `Jetro` or `VM` for repeated queries.
 
 ---
 

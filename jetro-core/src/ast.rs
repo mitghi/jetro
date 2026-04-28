@@ -11,8 +11,6 @@
 //! sub-expressions are `Box<Expr>` — owned, not shared — since the
 //! compiler rewrites the AST in-place (see `reorder_and_operands`).
 
-use std::sync::Arc;
-
 // ── AST nodes ─────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -303,14 +301,6 @@ pub enum KindType {
     Object,
 }
 
-// ── Sort key ──────────────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone)]
-pub struct SortKey {
-    pub expr: Expr,
-    pub desc: bool,
-}
-
 impl Expr {
     /// Wrap in a Chain if steps is non-empty, otherwise return self.
     pub fn maybe_chain(self, steps: Vec<Step>) -> Self {
@@ -321,6 +311,3 @@ impl Expr {
         }
     }
 }
-
-/// Shared reference to an expression (for lambdas stored in closures).
-pub type ExprRef = Arc<Expr>;

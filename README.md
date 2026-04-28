@@ -16,12 +16,12 @@ of hand-written Rust + `serde_json`**, and on several specialized ones it's
 use jetro::Jetro;
 use serde_json::json;
 
-let j = Jetro::new(json!({
-    "store": { "books": [
-        {"title": "Dune",       "price": 12.99},
-        {"title": "Foundation", "price":  9.99},
-    ]}
-}));
+let j = Jetro::from_bytes(br#"{
+  "store": { "books": [
+    {"title": "Dune",       "price": 12.99},
+    {"title": "Foundation", "price":  9.99}
+  ]}
+}"#.to_vec()).unwrap();
 
 let titles = j.collect("$.store.books.filter(price > 10).map(title)")?;
 assert_eq!(titles, json!(["Dune"]));
@@ -55,16 +55,12 @@ assert_eq!(titles, json!(["Dune"]));
   `StrSliceVec` / `ObjVec` run homogeneous arrays as packed vectors,
   not tagged unions — tight loops beat enum dispatch.
 
-- **SIMD byte-scan for deep-search queries.** `$..id`, `$..k == lit`, chained
-  `$..a..b..c` — memchr-accelerated scans over raw document bytes
-  when it beats walking the tree.
-
 - **Zero-copy string views.** `slice`, `substring`, `split.first` and
   friends return borrowed slices into the parent `Arc<str>` — no
   per-row allocation on the hot path.
 
-- **Safety.** A tree-walker reference implementation runs
-  every query the VM does; 540+ unit tests, Miri-audited `unsafe`
+- **Safety.** Static builtin semantics are shared by the VM, pipeline,
+  and composed executors; 540+ unit tests, Miri-audited `unsafe`
   invariants ([SAFETY.md](SAFETY.md)). Every optimization is a
   specialization on the same semantics.
 
@@ -94,12 +90,6 @@ Full syntax reference: [jetro-core/src/SYNTAX.md](jetro-core/src/SYNTAX.md)
 ```toml
 [dependencies]
 jetro = "0.4"
-```
-
-One-shot without the VM:
-
-```rust
-let result = jetro::query("$.store.books.len()", &doc)?;
 ```
 
 Give [Jetro CLI](https://github.com/mitghi/jetrocli) a try for an interactive experience.
@@ -132,8 +122,8 @@ jetro's fusion passes collapse these to single opcodes, while interpreted
 **vs idiomatic Go (`encoding/json` + `strings`).** Jetro **matches or beats
 the Go standard library** on string-heavy workloads — for example, on
 `upper + trim` jetro is about 1.3× faster than Go, on `split + reverse +
-join` roughly 4× faster, and on `replace_all` about 3.8× faster. Parity or
-better on the simple scans, with the string-method fusions pulling ahead.
+join` roughly 4× faster, and on `replace_all` about 3.8× faster, with the
+string-method fusions pulling ahead.
 
 ---
 
