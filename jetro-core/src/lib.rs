@@ -58,6 +58,8 @@ pub(crate) mod composed;
 pub(crate) mod context;
 pub(crate) mod executor;
 pub(crate) mod parser;
+pub(crate) mod physical;
+pub(crate) mod physical_eval;
 pub(crate) mod pipeline;
 pub(crate) mod planner;
 pub(crate) mod runtime;
