@@ -1,14 +1,9 @@
 use std::sync::Arc;
 
 use crate::ast::Expr;
+use crate::chain_ir::{ChainOp, Demand as ChainDemand, PullDemand, ValueNeed};
 
 use super::{normalize::normalize_symbolic, BodyKernel, Sink, Stage};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Bound {
-    Unbounded,
-    AtMost(usize),
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Position {
@@ -17,32 +12,50 @@ pub enum Position {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct Demand {
-    pub consumption: Bound,
+pub struct SinkDemand {
+    pub chain: ChainDemand,
     pub positional: Option<Position>,
 }
 
-impl Demand {
-    pub const UNBOUNDED: Demand = Demand {
-        consumption: Bound::Unbounded,
+impl SinkDemand {
+    pub const RESULT: SinkDemand = SinkDemand {
+        chain: ChainDemand::RESULT,
         positional: None,
     };
 }
 
 impl Sink {
-    pub fn demand(&self) -> Demand {
+    pub fn demand(&self) -> SinkDemand {
         match self {
-            Sink::First => Demand {
-                consumption: Bound::AtMost(1),
+            Sink::First => SinkDemand {
+                chain: ChainDemand::first(ValueNeed::Whole),
                 positional: Some(Position::First),
             },
-            Sink::Last => Demand {
-                consumption: Bound::AtMost(1),
+            Sink::Last => SinkDemand {
+                chain: ChainDemand {
+                    pull: PullDemand::All,
+                    value: ValueNeed::Whole,
+                    order: true,
+                },
                 positional: Some(Position::Last),
             },
-            Sink::Count | Sink::Numeric(_) | Sink::Collect | Sink::ApproxCountDistinct => {
-                Demand::UNBOUNDED
-            }
+            Sink::Count => SinkDemand {
+                chain: ChainDemand {
+                    pull: PullDemand::All,
+                    value: ValueNeed::None,
+                    order: false,
+                },
+                positional: None,
+            },
+            Sink::Numeric(_) => SinkDemand {
+                chain: ChainDemand {
+                    pull: PullDemand::All,
+                    value: ValueNeed::Numeric,
+                    order: false,
+                },
+                positional: None,
+            },
+            Sink::Collect | Sink::ApproxCountDistinct => SinkDemand::RESULT,
         }
     }
 }
@@ -59,83 +72,58 @@ pub fn compute_strategies(stages: &[Stage], sink: &Sink) -> Vec<StageStrategy> {
     let mut demand = sink.demand();
     for (i, stage) in stages.iter().enumerate().rev() {
         if let Stage::Sort(_) = stage {
-            if let Bound::AtMost(k) = demand.consumption {
+            if let PullDemand::AtMost(k) = demand.chain.pull {
                 strategies[i] = match demand.positional {
                     Some(Position::Last) => StageStrategy::SortBottomK(k),
                     _ => StageStrategy::SortTopK(k),
                 };
             }
         }
-        demand = upstream_demand(demand, stage);
+        demand = stage.upstream_demand(demand);
     }
     strategies
 }
 
-#[inline]
-fn upstream_demand(d: Demand, stage: &Stage) -> Demand {
-    match stage {
-        Stage::Map(_) => d,
-        Stage::Filter(_) => Demand {
-            consumption: d.consumption,
-            positional: None,
-        },
-        Stage::Take(n) => {
-            let cap = match d.consumption {
-                Bound::Unbounded => *n,
-                Bound::AtMost(k) => k.min(*n),
-            };
-            Demand {
-                consumption: Bound::AtMost(cap),
-                positional: None,
-            }
-        }
-        Stage::Skip(_)
-        | Stage::FlatMap(_)
-        | Stage::Reverse
-        | Stage::Sort(_)
-        | Stage::UniqueBy(_)
-        | Stage::GroupBy(_)
-        | Stage::Split(_)
-        | Stage::Chunk(_)
-        | Stage::Window(_) => Demand::UNBOUNDED,
-        Stage::Slice(_, _)
-        | Stage::Replace { .. }
-        | Stage::CompiledMap(_)
-        | Stage::Builtin(_)
-        | Stage::TakeWhile(_)
-        | Stage::DropWhile(_)
-        | Stage::IndicesWhere(_)
-        | Stage::FindIndex(_)
-        | Stage::MaxBy(_)
-        | Stage::MinBy(_)
-        | Stage::TransformValues(_)
-        | Stage::TransformKeys(_)
-        | Stage::FilterValues(_)
-        | Stage::FilterKeys(_)
-        | Stage::CountBy(_)
-        | Stage::IndexBy(_)
-        | Stage::SortedDedup(_) => d,
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Cardinality {
-    OneToOne,
-    Filtering,
-    Expanding,
-    Barrier,
-}
-
 #[derive(Debug, Clone, Copy)]
 pub struct StageShape {
-    pub cardinality: Cardinality,
+    pub cardinality: crate::chain_ir::Cardinality,
     pub can_indexed: bool,
     pub cost: f64,
     pub selectivity: f64,
 }
 
 impl Stage {
+    pub fn chain_op(&self) -> Option<ChainOp> {
+        match self {
+            Stage::Filter(_) => Some(ChainOp::Filter),
+            Stage::Map(_) | Stage::CompiledMap(_) => Some(ChainOp::Map),
+            Stage::FlatMap(_) | Stage::Split(_) => Some(ChainOp::FlatMap),
+            Stage::Take(n) => Some(ChainOp::Take(*n)),
+            Stage::Skip(n) => Some(ChainOp::Skip(*n)),
+            Stage::Builtin(call) => Some(ChainOp::Builtin(call.method)),
+            Stage::Slice(_, _) | Stage::Replace { .. } => Some(ChainOp::Map),
+            _ => None,
+        }
+    }
+
+    pub fn upstream_demand(&self, demand: SinkDemand) -> SinkDemand {
+        let chain = match self.chain_op() {
+            Some(op) => op.propagate_demand(demand.chain),
+            None => ChainDemand::RESULT,
+        };
+        let positional = if matches!(
+            self.shape().cardinality,
+            crate::chain_ir::Cardinality::OneToOne
+        ) {
+            demand.positional
+        } else {
+            None
+        };
+        SinkDemand { chain, positional }
+    }
+
     pub fn shape(&self) -> StageShape {
+        use crate::chain_ir::Cardinality;
         match self {
             Stage::Map(_) => StageShape {
                 cardinality: Cardinality::OneToOne,
@@ -156,7 +144,7 @@ impl Stage {
                 selectivity: 1.0,
             },
             Stage::Take(_) | Stage::Skip(_) => StageShape {
-                cardinality: Cardinality::Filtering,
+                cardinality: Cardinality::Bounded,
                 can_indexed: false,
                 cost: 0.5,
                 selectivity: 0.5,
@@ -433,6 +421,8 @@ fn fold_merge_with_kernels(
 }
 
 pub fn select_strategy(stages: &[Stage], sink: &Sink) -> Strategy {
+    use crate::chain_ir::Cardinality;
+
     let stages_can_indexed = stages.iter().all(|s| s.shape().can_indexed);
     let sink_positional = sink.demand().positional.is_some();
     let has_barrier = stages
