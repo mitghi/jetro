@@ -5,7 +5,7 @@ use jetro::{jetro, JetroSchema};
 
 #[derive(JetroSchema)]
 #[expr(titles = "$.books.map(title)")]
-#[expr(count  = "$.books.len()")]
+#[expr(count = "$.books.len()")]
 struct BookView;
 
 #[test]

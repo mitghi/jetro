@@ -44,13 +44,14 @@ use std::{
     sync::Arc,
 };
 
-use super::eval::methods::MethodRegistry;
-use super::eval::util::{
-    add_vals, cmp_vals, is_truthy, kind_matches, num_op, obj2, val_to_key, val_to_string, vals_eq,
-};
-use super::eval::{dispatch_method, Env, EvalError, Val};
 use crate::ast::*;
 pub use crate::builtins::BuiltinMethod;
+use crate::context::{Env, EvalError};
+use crate::runtime::call_builtin_method;
+use crate::util::{
+    add_vals, cmp_vals, is_truthy, kind_matches, num_op, obj2, val_to_key, val_to_string, vals_eq,
+};
+use crate::value::Val;
 
 macro_rules! pop {
     ($stack:expr) => {
@@ -576,7 +577,7 @@ enum AccumOp {
 // ── Typed-numeric aggregate fast-paths ────────────────────────────────────────
 // Direct loops over `&[Val]` for mono-typed or mixed Int/Float arrays.  Used
 // by the bare `.sum()/.min()/.max()/.avg()` no-arg method-call fast path in
-// `exec_call` — skips registry dispatch, `into_vec()` clone, and the extra
+// `exec_call` — skips fallback dispatch, `into_vec()` clone, and the extra
 // `.filter().collect()` that `func_aggregates::collect_nums` performs.
 //
 // Semantics match `func_aggregates`: non-numeric items are skipped; Int-only
@@ -1182,7 +1183,7 @@ impl Compiler {
     }
 
     // pass_equi_join_fusion deleted — composed substrate runs base
-    // CallMethod(equi_join, [rhs, lk, rk]) via dispatch_method.
+    // CallMethod(equi_join, [rhs, lk, rk]) via the builtin call path.
 
     /// Nullness-driven: when the preceding op provably leaves a non-null
     /// receiver on the stack, rewrite `OptField(k)` → `GetField(k)`.
@@ -2651,7 +2652,6 @@ impl PassConfig {
 }
 
 pub struct VM {
-    registry: Arc<MethodRegistry>,
     /// Cache key = (pass_config_hash, expr_string).  Changing `config`
     /// invalidates prior entries automatically via key divergence.
     compile_cache: HashMap<(u64, String), Arc<Program>>,
@@ -2696,7 +2696,6 @@ impl VM {
 
     pub fn with_capacity(compile_cap: usize, path_cap: usize) -> Self {
         Self {
-            registry: Arc::new(MethodRegistry::new()),
             compile_cache: HashMap::with_capacity(compile_cap),
             compile_lru: std::collections::VecDeque::with_capacity(compile_cap),
             compile_cap,
@@ -2708,18 +2707,6 @@ impl VM {
         }
     }
 
-    /// Build a VM that shares an existing method registry.
-    pub fn with_registry(registry: Arc<MethodRegistry>) -> Self {
-        let mut vm = Self::new();
-        vm.registry = registry;
-        vm
-    }
-
-    /// Register a method already wrapped in `Arc`.
-    pub fn register_arc(&mut self, name: &str, method: Arc<dyn crate::eval::methods::Method>) {
-        Arc::make_mut(&mut self.registry).register_arc(name, method);
-    }
-
     /// Replace the pass configuration.  The compile cache is not purged,
     /// but future lookups key off the new config hash so old entries
     /// are effectively invalidated for the new regime.
@@ -2729,15 +2716,6 @@ impl VM {
 
     pub fn pass_config(&self) -> PassConfig {
         self.config
-    }
-
-    /// Register a custom method (callable via `.method_name(...)` in expressions).
-    pub fn register(
-        &mut self,
-        name: impl Into<String>,
-        method: impl super::eval::methods::Method + 'static,
-    ) {
-        Arc::make_mut(&mut self.registry).register(name, method);
     }
 
     // ── Public entry-points ───────────────────────────────────────────────────
@@ -2834,7 +2812,7 @@ impl VM {
         // cache entirely, so skip the O(doc) structural hash walk.
         self.doc_hash = 0;
         self.root_chain_cache.clear();
-        let env = Env::new_with_raw(root, Arc::clone(&self.registry), raw_bytes);
+        let env = Env::new_with_raw(root, raw_bytes);
         let result = self.exec(program, &env)?;
         Ok(result.into())
     }
@@ -2871,8 +2849,7 @@ impl VM {
         self.exec(program, env)
     }
 
-    /// Make an Env for the given root reusing the VM's current registry.
-    /// Public so the pipeline can build one Env per pull loop and rebind
+    /// Make an Env for the given root. Public so the pipeline can build one Env per pull loop and rebind
     /// `current` per row instead of per-row Env construction.
     pub fn make_loop_env(&self, root: Val) -> Env {
         self.make_env(root)
@@ -2927,7 +2904,7 @@ impl VM {
     // ── Internal helpers ──────────────────────────────────────────────────────
 
     fn make_env(&self, root: Val) -> Env {
-        Env::new_with_registry(root, Arc::clone(&self.registry))
+        Env::new(root)
     }
 
     // ── Core execution loop ───────────────────────────────────────────────────
@@ -3148,7 +3125,7 @@ impl VM {
                 // typed-lane fast paths.
                 // FilterStrVec* + MapStrVec* + MapNumVec* handlers deleted in Tier 3.
                 // Pipeline IR Stage::Filter / Stage::Map + composed substrate runs
-                // base CallMethod chain via dispatch_method on StrVec/IntVec/FloatVec
+                // base CallMethod chain via the builtin call path on StrVec/IntVec/FloatVec
                 // typed-lane receivers.  Loses the autovectoriser-friendly tight
                 // loops here in exchange for a single generic execution path.
                 // FilterFieldEqLitMapField / FilterFieldCmpLitMapField
@@ -3170,7 +3147,7 @@ impl VM {
                 // FilterLast handler removed — pipeline.rs Sink::FilterLast
                 // covers `.filter(p).last()` for top-level queries.
                 // EquiJoin handler removed — base CallMethod(equi_join)
-                // dispatch covers it via dispatch_method.
+                // dispatch covers it via the builtin call path.
                 // TopN handler removed — pipeline.rs Sink::TopN covers
                 // sort()+take(n) for top-level Root-prefix queries.
                 // UniqueCount handler removed — pipeline.rs Sink::UniqueCount
@@ -3194,7 +3171,7 @@ impl VM {
                             | Val::StrSlice(_)
                     ) && BuiltinMethod::from_name(name.as_ref()) != BuiltinMethod::Unknown
                     {
-                        dispatch_method(env.current.clone(), name.as_ref(), &[], env)?
+                        call_builtin_method(env.current.clone(), name.as_ref(), &[], env)?
                     } else {
                         env.current.get_field(name.as_ref())
                     };
@@ -3335,10 +3312,7 @@ impl VM {
                     let recv = pop!(stack);
                     // SIMD fast path: `$..find(@.k == lit)` on root with raw
                     // bytes → scan enclosing objects, skip tree walk.
-                    if call.method == BuiltinMethod::Unknown
-                        && call.name.as_ref() == "deep_find"
-                        && !call.orig_args.is_empty()
-                    {
+                    if call.name.as_ref() == "deep_find" && !call.orig_args.is_empty() {
                         if let Some(bytes) = env.raw_bytes.as_ref() {
                             let recv_is_root = match (&recv, &env.root) {
                                 (Val::Obj(a), Val::Obj(b)) => Arc::ptr_eq(a, b),
@@ -3348,7 +3322,9 @@ impl VM {
                             if recv_is_root {
                                 let tail = &ops_slice[op_idx + 1..];
                                 if let Some(conjuncts) =
-                                    super::eval::canonical_field_eq_literals(&call.orig_args)
+                                    crate::scan_predicates::canonical_field_eq_literals(
+                                        &call.orig_args,
+                                    )
                                 {
                                     let spans = if conjuncts.len() == 1 {
                                         super::scan::find_enclosing_objects_eq(
@@ -3373,7 +3349,7 @@ impl VM {
                                         super::ast::Arg::Pos(e) | super::ast::Arg::Named(_, e) => e,
                                     };
                                     if let Some((field, op, thresh)) =
-                                        super::eval::canonical_field_cmp_literal(e)
+                                        crate::scan_predicates::canonical_field_cmp_literal(e)
                                     {
                                         let spans = super::scan::find_enclosing_objects_cmp(
                                             bytes, &field, op, thresh,
@@ -3387,7 +3363,9 @@ impl VM {
                                 }
                                 // Mixed multi-conjunct (eq + numeric-range).
                                 if let Some(conjuncts) =
-                                    super::eval::canonical_field_mixed_predicates(&call.orig_args)
+                                    crate::scan_predicates::canonical_field_mixed_predicates(
+                                        &call.orig_args,
+                                    )
                                 {
                                     let spans = super::scan::find_enclosing_objects_mixed(
                                         bytes, &conjuncts,
@@ -3735,24 +3713,43 @@ impl VM {
     fn exec_call(&mut self, recv: Val, call: &CompiledCall, env: &Env) -> Result<Val, EvalError> {
         // Global-call opcodes push Root before calling; handle them
         if call.method == BuiltinMethod::Unknown {
-            // Custom registry or global function
-            if !env.registry_is_empty() {
-                if let Some(method) = env.registry_get(call.name.as_ref()) {
-                    let evaled: Result<Vec<Val>, _> =
-                        call.sub_progs.iter().map(|p| self.exec(p, env)).collect();
-                    return method.call(recv, &evaled?);
-                }
-            }
             // Global function (coalesce, zip, range, etc.) — known globals
             // route through eval_global; unknown names fall back to method
             // dispatch on the pushed receiver.
             match call.name.as_ref() {
                 "coalesce" | "chain" | "join" | "zip" | "zip_longest" | "product" | "range" => {
-                    return crate::eval::eval_global(call.name.as_ref(), &call.orig_args, env)
+                    return crate::runtime::eval_global(call.name.as_ref(), &call.orig_args, env)
                 }
                 _ => {}
             }
-            return dispatch_method(recv, call.name.as_ref(), &call.orig_args, env);
+            return call_builtin_method(recv, call.name.as_ref(), &call.orig_args, env);
+        }
+
+        if call.method == BuiltinMethod::Count && call.orig_args.is_empty() {
+            return Ok(crate::builtins::len_apply(&recv).unwrap_or(Val::Int(0)));
+        }
+
+        if matches!(
+            call.method,
+            BuiltinMethod::Sum | BuiltinMethod::Avg | BuiltinMethod::Min | BuiltinMethod::Max
+        ) && !call.orig_args.is_empty()
+        {
+            let proj = call
+                .sub_progs
+                .first()
+                .ok_or_else(|| EvalError(format!("{}: requires projection", call.name)))?;
+            let lam_param: Option<&str> = match call.orig_args.first() {
+                Some(Arg::Pos(Expr::Lambda { params, .. })) if !params.is_empty() => {
+                    Some(params[0].as_str())
+                }
+                _ => None,
+            };
+            let mut scratch = env.clone();
+            return crate::builtins::numeric_aggregate_projected_apply(
+                &recv,
+                call.method,
+                |item| self.exec_lam_body_scratch(proj, item, lam_param, &mut scratch),
+            );
         }
 
         // Lambda methods — VM handles iteration, running sub-programs per item
@@ -3761,7 +3758,7 @@ impl VM {
         }
 
         // Typed-numeric aggregate fast-path: bare `.sum()/.min()/.max()/.avg()`
-        // on an array.  Skips registry dispatch + `collect_nums` extra Vec.
+        // on an array.  Skips fallback dispatch + `collect_nums` extra Vec.
         if call.sub_progs.is_empty() && call.orig_args.is_empty() {
             if let Val::Arr(a) = &recv {
                 match call.method {
@@ -3874,7 +3871,7 @@ impl VM {
                 }
             }
             // Bare `.flatten()` (depth=1) — inline depth-1 flatten with exact
-            // preallocation.  Skips `dispatch_method` + its arg-parse path.
+            // preallocation.  Skips fallback builtin arg parsing.
             if call.method == BuiltinMethod::Flatten {
                 if let Val::Arr(a) = &recv {
                     // Columnar fast-path: all inners Int-only → emit Val::IntVec.
@@ -3944,7 +3941,7 @@ impl VM {
                     return Ok(recv);
                 }
             }
-            // Scalar `.to_string()` — inline the conversion.  The registry
+            // Scalar `.to_string()` — inline the conversion.  The fallback
             // path allocates a fresh `Val::Str` via `val_to_string`; this
             // does the same work without the dispatch + argslice copy.
             if call.method == BuiltinMethod::ToString {
@@ -3954,7 +3951,7 @@ impl VM {
                     Val::Float(f) => Arc::from(f.to_string()),
                     Val::Bool(b) => Arc::from(b.to_string()),
                     Val::Null => Arc::from("null"),
-                    other => Arc::from(super::eval::util::val_to_string(other).as_str()),
+                    other => Arc::from(crate::util::val_to_string(other).as_str()),
                 };
                 return Ok(Val::Str(s));
             }
@@ -4007,7 +4004,7 @@ impl VM {
         }
 
         // Value methods — delegate to the existing dispatch with orig_args
-        dispatch_method(recv, call.name.as_ref(), &call.orig_args, env)
+        call_builtin_method(recv, call.name.as_ref(), &call.orig_args, env)
     }
 
     fn exec_static_builtin_call(
@@ -4075,10 +4072,24 @@ impl VM {
                 let other = self.static_arg_vec(call, env, 0, call.name.as_ref())?;
                 BuiltinCall::new(call.method, BuiltinArgs::ValVec(other))
             }
-            BuiltinMethod::Window | BuiltinMethod::Chunk => {
+            BuiltinMethod::Window
+            | BuiltinMethod::Chunk
+            | BuiltinMethod::RollingSum
+            | BuiltinMethod::RollingAvg
+            | BuiltinMethod::RollingMin
+            | BuiltinMethod::RollingMax => {
                 let n = self
                     .static_arg_i64(call, env, 0, call.name.as_ref())?
                     .max(0) as usize;
+                BuiltinCall::new(call.method, BuiltinArgs::Usize(n))
+            }
+            BuiltinMethod::Lag | BuiltinMethod::Lead => {
+                let n = match call.orig_args.first() {
+                    Some(_) => self
+                        .static_arg_i64(call, env, 0, call.name.as_ref())?
+                        .max(0) as usize,
+                    None => 1,
+                };
                 BuiltinCall::new(call.method, BuiltinArgs::Usize(n))
             }
             BuiltinMethod::Merge
@@ -4106,6 +4117,8 @@ impl VM {
             | BuiltinMethod::HasPath
             | BuiltinMethod::Has
             | BuiltinMethod::Join
+            | BuiltinMethod::Explode
+            | BuiltinMethod::Implode
             | BuiltinMethod::DelPath
             | BuiltinMethod::FlattenKeys
             | BuiltinMethod::UnflattenKeys
@@ -4211,7 +4224,7 @@ impl VM {
             .ok_or_else(|| EvalError(format!("{}: missing argument", name)))?
         {
             Val::Str(s) => Ok(s),
-            other => Ok(Arc::from(super::eval::util::val_to_string(&other).as_str())),
+            other => Ok(Arc::from(crate::util::val_to_string(&other).as_str())),
         }
     }
 
@@ -4275,7 +4288,7 @@ impl VM {
             .iter()
             .map(|v| match v {
                 Val::Str(s) => s.clone(),
-                other => Arc::from(super::eval::util::val_to_string(other).as_str()),
+                other => Arc::from(crate::util::val_to_string(other).as_str()),
             })
             .collect())
     }
@@ -4334,7 +4347,7 @@ impl VM {
             }
             BuiltinMethod::Sort => {
                 // Delegate to func_arrays::sort which already handles lambda args
-                dispatch_method(recv, call.name.as_ref(), &call.orig_args, env)
+                call_builtin_method(recv, call.name.as_ref(), &call.orig_args, env)
             }
             BuiltinMethod::Any => {
                 if let Val::Arr(a) = &recv {
@@ -4488,14 +4501,16 @@ impl VM {
                     Some(Arg::Pos(Expr::Lambda { params, .. })) if params.len() >= 2 => {
                         (params[0].as_str(), params[1].as_str())
                     }
-                    _ => return dispatch_method(recv, call.name.as_ref(), &call.orig_args, env),
+                    _ => {
+                        return call_builtin_method(recv, call.name.as_ref(), &call.orig_args, env)
+                    }
                 };
                 if call
                     .orig_args
                     .iter()
                     .any(|a| matches!(a, Arg::Named(n, _) if n.as_str() == "start"))
                 {
-                    return dispatch_method(recv, call.name.as_ref(), &call.orig_args, env);
+                    return call_builtin_method(recv, call.name.as_ref(), &call.orig_args, env);
                 }
                 // Try pattern specialisation: `LoadIdent(p1), LoadIdent(p2), <BinOp>`.
                 let specialised_binop = match lam_body.ops.as_ref() {
@@ -4747,12 +4762,14 @@ impl VM {
                 })?;
                 Ok(Val::obj(out))
             }
-            BuiltinMethod::Pivot => dispatch_method(recv, call.name.as_ref(), &call.orig_args, env),
+            BuiltinMethod::Pivot => {
+                call_builtin_method(recv, call.name.as_ref(), &call.orig_args, env)
+            }
             BuiltinMethod::Update => {
                 let lam = sub.ok_or_else(|| EvalError("update: requires lambda".into()))?;
                 self.exec_lam_body(lam, &recv, lam_param, env)
             }
-            _ => dispatch_method(recv, call.name.as_ref(), &call.orig_args, env),
+            _ => call_builtin_method(recv, call.name.as_ref(), &call.orig_args, env),
         }
     }
 
@@ -5029,7 +5046,7 @@ impl VM {
                     cond,
                 } => {
                     if let Some(c) = cond {
-                        if !super::eval::util::is_truthy(&self.exec(c, env)?) {
+                        if !crate::util::is_truthy(&self.exec(c, env)?) {
                             continue;
                         }
                     }
@@ -5083,7 +5100,7 @@ impl VM {
                     if let Val::Obj(other) = self.exec(prog, env)? {
                         let base = std::mem::take(&mut map);
                         let merged =
-                            super::eval::util::deep_merge_concat(Val::obj(base), Val::Obj(other));
+                            crate::util::deep_merge_concat(Val::obj(base), Val::Obj(other));
                         if let Val::Obj(m) = merged {
                             map = Arc::try_unwrap(m).unwrap_or_else(|m| (*m).clone());
                         }
@@ -5156,7 +5173,7 @@ impl VM {
                             out.push_str(&apply_fmt_spec(&val, spec));
                         }
                         Some(FmtSpec::Pipe(method)) => {
-                            let piped = dispatch_method(val, method, &[], env)?;
+                            let piped = call_builtin_method(val, method, &[], env)?;
                             match &piped {
                                 Val::Str(s) => out.push_str(s.as_ref()),
                                 Val::Int(n) => {
@@ -5194,17 +5211,6 @@ impl VM {
             }
             other => Ok(vec![other]),
         }
-    }
-}
-
-// ── Env extensions for VM ─────────────────────────────────────────────────────
-
-impl Env {
-    fn registry_is_empty(&self) -> bool {
-        self.registry_ref().is_empty()
-    }
-    fn registry_get(&self, name: &str) -> Option<Arc<dyn super::eval::methods::Method>> {
-        self.registry_ref().get(name).cloned()
     }
 }
 
@@ -5767,7 +5773,7 @@ fn exec_cast(v: &Val, ty: super::ast::CastType) -> Result<Val, EvalError> {
                 Val::Int(n) => n.to_string(),
                 Val::Float(f) => f.to_string(),
                 Val::Str(s) => s.to_string(),
-                other => super::eval::util::val_to_string(other),
+                other => crate::util::val_to_string(other),
             }
             .as_str(),
         ))),

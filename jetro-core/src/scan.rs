@@ -15,8 +15,8 @@
 //!
 //! ## When not to use
 //!
-//! - Document already parsed; raw bytes discarded — fall back to the
-//!   tree walker in `eval/mod.rs::collect_desc`.
+//! - Document already parsed; raw bytes discarded — fall back to VM
+//!   value traversal.
 //! - Document is tiny (< a few KB): `serde_json` per-hit parse cost
 //!   overtakes the scan win.
 //!

@@ -412,18 +412,22 @@ pub fn method_result_type(m: BuiltinMethod) -> AbstractVal {
         // → Bool (to_bool)
         ToBool => AbstractVal::scalar(VType::Bool),
         // → Arr
-        Keys | Values | Entries | ToPairs | Reverse | Unique | Flatten | Compact | Chars
-        | CharsOf | Lines | Words | Split | Sort | Filter | Map | FlatMap | Enumerate
-        | Pairwise | Window | Chunk | TakeWhile | DropWhile | Accumulate | Zip | ZipLongest
-        | Diff | Intersect | Union | Append | Prepend | Remove | Matches | Scan | Slice | Bytes
-        | IndicesOf => AbstractVal::array(),
+        Keys | Values | Entries | ToPairs | Reverse | Unique | Collect | Flatten | Compact
+        | Chars | CharsOf | Lines | Words | Split | Sort | Filter | Map | FlatMap | Find
+        | FindAll | UniqueBy | DeepFind | DeepShape | DeepLike | IndicesWhere | Fanout
+        | TracePath | Enumerate | Pairwise | Window | Chunk | TakeWhile | DropWhile
+        | Accumulate | Zip | ZipLongest | Diff | Intersect | Union | Append | Prepend | Remove
+        | Matches | Scan | Slice | Bytes | IndicesOf | Explode | Implode | RollingSum
+        | RollingAvg | RollingMin | RollingMax | Lag | Lead | DiffWindow | PctChange | CumMax
+        | CumMin | Zscore => AbstractVal::array(),
         // → Obj
         FromPairs | Invert | Pick | Omit | Merge | DeepMerge | Defaults | Rename
         | TransformKeys | TransformValues | FilterKeys | FilterValues | Pivot | GroupBy
-        | CountBy | IndexBy | Partition | FlattenKeys | UnflattenKeys | SetPath | DelPath
-        | DelPaths | Update | Schema => AbstractVal::object(),
+        | CountBy | IndexBy | GroupShape | ZipShape | Partition | FlattenKeys | UnflattenKeys
+        | SetPath | DelPath | DelPaths | Update | Schema => AbstractVal::object(),
         // → various
-        First | Last | Nth | GetPath | ReMatchFirst | ReCaptures => AbstractVal::UNKNOWN,
+        First | Last | Nth | FindIndex | MaxBy | MinBy | Walk | WalkPre | Rec | GetPath
+        | ReMatchFirst | ReCaptures => AbstractVal::UNKNOWN,
         HasPath => AbstractVal::scalar(VType::Bool),
         ReMatchAll | ReCapturesAll | ReSplit => AbstractVal::array(),
         ReReplace | ReReplaceAll => AbstractVal::scalar(VType::Str),

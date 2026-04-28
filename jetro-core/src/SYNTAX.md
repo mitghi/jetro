@@ -1,13 +1,12 @@
 # Jetro Syntax Reference
 
-Complete reference for the Jetro v2 expression language. Grammar source: `src/grammar.pest`. Builtin catalog: `src/eval/builtins.rs`.
+Complete reference for the Jetro v2 expression language. Grammar source: `src/grammar.pest`. Builtin catalog: `src/builtins.rs`.
 
 Entry points:
 
 | Call | Notes |
 |------|-------|
-| `jetro::query(expr, &doc)` | One-shot, tree-walker |
-| `jetro::query_with(expr, &doc, registry)` | With custom methods |
+| `jetro::query(expr, &doc)` | One-shot static builtin evaluation |
 | `Jetro::new(doc).collect(expr)` | Thread-local cached VM |
 | `Engine::new().run(expr, &doc)` | Shared-cache VM (multi-thread) |
 | `jetro!("expr")` | Compile-time checked `Expr<Value>` (feature `macros`) |

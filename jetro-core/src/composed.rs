@@ -36,7 +36,7 @@ use smallvec::SmallVec;
 use std::borrow::Cow;
 
 use crate::builtins::BuiltinCall;
-use crate::eval::value::Val;
+use crate::value::Val;
 
 // ── Stage ────────────────────────────────────────────────────────────────────
 
@@ -232,14 +232,6 @@ impl<A: Stage, B: Stage> Stage for Composed<A, B> {
         }
     }
 }
-
-// ── Legacy lifted built-in Stage bodies live in `crate::functions` ─
-//
-// Kept for compatibility with older tests and call sites. New composed
-// builtin execution should use `BuiltinStage`, which adapts the
-// canonical `builtins::BuiltinCall` implementation instead of adding
-// another per-builtin `Stage` struct here or in `functions.rs`.
-pub use crate::functions::*;
 
 // ── Sink ─────────────────────────────────────────────────────────────────────
 
@@ -465,7 +457,7 @@ impl Sink for CollectSink {
 
 pub struct VmCtx {
     pub vm: crate::vm::VM,
-    pub env: crate::eval::Env,
+    pub env: crate::context::Env,
 }
 
 /// `.filter(pred)` with arbitrary pred — VM evaluates per row, result
@@ -847,7 +839,7 @@ pub fn barrier_reverse(buf: Vec<Val>) -> Vec<Val> {
 }
 
 /// Sort with optional key. Compares Val natural ordering via
-/// `cmp_val` — wraps `eval::util::cmp_val` for primitive Vals.
+/// `cmp_val` — wraps `util::cmp_val` for primitive Vals.
 pub fn barrier_sort(buf: Vec<Val>, key: &KeySource) -> Vec<Val> {
     let mut indexed: Vec<(Val, Val)> = buf.into_iter().map(|v| (key.extract(&v), v)).collect();
     indexed.sort_by(|a, b| cmp_val(&a.0, &b.0));
@@ -1690,8 +1682,54 @@ pub mod tape {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::builtins::{BuiltinArgs, BuiltinCall, BuiltinMethod};
     use indexmap::IndexMap;
     use std::sync::Arc;
+
+    fn builtin(method: BuiltinMethod, args: BuiltinArgs) -> BuiltinStage {
+        BuiltinStage::new(BuiltinCall::new(method, args))
+    }
+
+    fn builtin0(method: BuiltinMethod) -> BuiltinStage {
+        builtin(method, BuiltinArgs::None)
+    }
+
+    fn builtin_str(method: BuiltinMethod, s: &str) -> BuiltinStage {
+        builtin(method, BuiltinArgs::Str(Arc::from(s)))
+    }
+
+    fn builtin_pair(method: BuiltinMethod, first: &str, second: &str) -> BuiltinStage {
+        builtin(
+            method,
+            BuiltinArgs::StrPair {
+                first: Arc::from(first),
+                second: Arc::from(second),
+            },
+        )
+    }
+
+    fn builtin_usize(method: BuiltinMethod, n: usize) -> BuiltinStage {
+        builtin(method, BuiltinArgs::Usize(n))
+    }
+
+    fn builtin_i64(method: BuiltinMethod, n: i64) -> BuiltinStage {
+        builtin(method, BuiltinArgs::I64(n))
+    }
+
+    fn builtin_pad(method: BuiltinMethod, width: usize, fill: char) -> BuiltinStage {
+        builtin(method, BuiltinArgs::Pad { width, fill })
+    }
+
+    fn builtin_valvec(method: BuiltinMethod, values: Vec<Val>) -> BuiltinStage {
+        builtin(method, BuiltinArgs::ValVec(values))
+    }
+
+    fn builtin_strvec(method: BuiltinMethod, values: &[&str]) -> BuiltinStage {
+        builtin(
+            method,
+            BuiltinArgs::StrVec(values.iter().map(|s| Arc::from(*s)).collect()),
+        )
+    }
 
     fn obj(pairs: &[(&str, Val)]) -> Val {
         let mut m = IndexMap::new();
@@ -2109,15 +2147,11 @@ mod tests {
             Stage::Filter(Arc::clone(&dummy)),
         ];
         let kernels = vec![
-            BodyKernel::FieldCmpLit(
-                Arc::from("price"),
-                BinOp::Lt,
-                crate::eval::value::Val::Int(100),
-            ),
+            BodyKernel::FieldCmpLit(Arc::from("price"), BinOp::Lt, crate::value::Val::Int(100)),
             BodyKernel::FieldCmpLit(
                 Arc::from("active"),
                 BinOp::Eq,
-                crate::eval::value::Val::Bool(true),
+                crate::value::Val::Bool(true),
             ),
         ];
         let p = plan_with_kernels(stages, &kernels, Sink::Count);
@@ -2301,7 +2335,7 @@ mod tests {
     #[test]
     fn upper_owned_stage_applies() {
         let s = Val::Str(std::sync::Arc::from("hello"));
-        let stage = Upper;
+        let stage = builtin0(BuiltinMethod::Upper);
         let got = stage.apply(&s);
         match got {
             StageOutput::Pass(Cow::Owned(Val::Str(out))) => {
@@ -2331,18 +2365,18 @@ mod tests {
     #[test]
     fn upper_filters_non_string() {
         let v = Val::Int(42);
-        let stage = Upper;
+        let stage = builtin0(BuiltinMethod::Upper);
         let got = stage.apply(&v);
         match got {
-            StageOutput::Filtered => {}
-            _ => panic!("expected Filtered for non-string"),
+            StageOutput::Pass(cow) => assert!(matches!(cow.into_owned(), Val::Int(42))),
+            _ => panic!("expected pass-through for non-string"),
         }
     }
 
     #[test]
     fn lower_owned_stage_applies() {
         let s = Val::Str(std::sync::Arc::from("HELLO World"));
-        let stage = Lower;
+        let stage = builtin0(BuiltinMethod::Lower);
         let got = stage.apply(&s);
         match got {
             StageOutput::Pass(Cow::Owned(Val::Str(out))) => {
@@ -2374,39 +2408,69 @@ mod tests {
     #[test]
     fn trim_stages_strip_whitespace() {
         let s = Val::Str(std::sync::Arc::from("  hello  "));
-        let r = extract_str(Trim.apply(&s));
+        let r = extract_str(builtin0(BuiltinMethod::Trim).apply(&s));
         assert_eq!(r, "hello");
-        let r = extract_str(TrimLeft.apply(&s));
+        let r = extract_str(builtin0(BuiltinMethod::TrimLeft).apply(&s));
         assert_eq!(r, "hello  ");
-        let r = extract_str(TrimRight.apply(&s));
+        let r = extract_str(builtin0(BuiltinMethod::TrimRight).apply(&s));
         assert_eq!(r, "  hello");
     }
 
     #[test]
     fn lifted_str_stages_filter_non_string() {
         let v = Val::Int(42);
-        assert!(matches!(Lower.apply(&v), StageOutput::Filtered));
-        assert!(matches!(Trim.apply(&v), StageOutput::Filtered));
-        assert!(matches!(TrimLeft.apply(&v), StageOutput::Filtered));
-        assert!(matches!(TrimRight.apply(&v), StageOutput::Filtered));
-        assert!(matches!(Capitalize.apply(&v), StageOutput::Filtered));
-        assert!(matches!(TitleCase.apply(&v), StageOutput::Filtered));
-        assert!(matches!(HtmlEscape.apply(&v), StageOutput::Filtered));
-        assert!(matches!(UrlEncode.apply(&v), StageOutput::Filtered));
+        assert!(matches!(
+            builtin0(BuiltinMethod::Lower).apply(&v),
+            StageOutput::Pass(_)
+        ));
+        assert!(matches!(
+            builtin0(BuiltinMethod::Trim).apply(&v),
+            StageOutput::Pass(_)
+        ));
+        assert!(matches!(
+            builtin0(BuiltinMethod::TrimLeft).apply(&v),
+            StageOutput::Pass(_)
+        ));
+        assert!(matches!(
+            builtin0(BuiltinMethod::TrimRight).apply(&v),
+            StageOutput::Pass(_)
+        ));
+        assert!(matches!(
+            builtin0(BuiltinMethod::Capitalize).apply(&v),
+            StageOutput::Pass(_)
+        ));
+        assert!(matches!(
+            builtin0(BuiltinMethod::TitleCase).apply(&v),
+            StageOutput::Pass(_)
+        ));
+        assert!(matches!(
+            builtin0(BuiltinMethod::HtmlEscape).apply(&v),
+            StageOutput::Pass(_)
+        ));
+        assert!(matches!(
+            builtin0(BuiltinMethod::UrlEncode).apply(&v),
+            StageOutput::Pass(_)
+        ));
     }
 
     #[test]
     fn capitalize_and_title_case() {
         let s = Val::Str(std::sync::Arc::from("hello world"));
-        assert_eq!(extract_str(Capitalize.apply(&s)), "Hello world");
-        assert_eq!(extract_str(TitleCase.apply(&s)), "Hello World");
+        assert_eq!(
+            extract_str(builtin0(BuiltinMethod::Capitalize).apply(&s)),
+            "Hello world"
+        );
+        assert_eq!(
+            extract_str(builtin0(BuiltinMethod::TitleCase).apply(&s)),
+            "Hello World"
+        );
     }
 
     #[test]
     fn html_escape_runs() {
         let s = Val::Str(std::sync::Arc::from("a<b>&'\"c"));
         assert_eq!(
-            extract_str(HtmlEscape.apply(&s)),
+            extract_str(builtin0(BuiltinMethod::HtmlEscape).apply(&s)),
             "a&lt;b&gt;&amp;&#39;&quot;c"
         );
     }
@@ -2414,19 +2478,28 @@ mod tests {
     #[test]
     fn url_encode_unreserved_passthrough() {
         let s = Val::Str(std::sync::Arc::from("hello world!"));
-        assert_eq!(extract_str(UrlEncode.apply(&s)), "hello%20world%21");
+        assert_eq!(
+            extract_str(builtin0(BuiltinMethod::UrlEncode).apply(&s)),
+            "hello%20world%21"
+        );
     }
 
     #[test]
     fn url_decode_roundtrip() {
         let s = Val::Str(std::sync::Arc::from("hello%20world%21+a"));
-        assert_eq!(extract_str(UrlDecode.apply(&s)), "hello world! a");
+        assert_eq!(
+            extract_str(builtin0(BuiltinMethod::UrlDecode).apply(&s)),
+            "hello world! a"
+        );
     }
 
     #[test]
     fn html_unescape_runs() {
         let s = Val::Str(std::sync::Arc::from("a&lt;b&gt;&amp;&#39;&quot;c"));
-        assert_eq!(extract_str(HtmlUnescape.apply(&s)), "a<b>&'\"c");
+        assert_eq!(
+            extract_str(builtin0(BuiltinMethod::HtmlUnescape).apply(&s)),
+            "a<b>&'\"c"
+        );
     }
 
     fn extract_arr_len(out: StageOutput<'_>) -> usize {
@@ -2442,16 +2515,19 @@ mod tests {
     #[test]
     fn lines_words_chars_split_correctly() {
         let s = Val::Str(std::sync::Arc::from("hello world\nfoo bar"));
-        assert_eq!(extract_arr_len(Lines.apply(&s)), 2);
-        assert_eq!(extract_arr_len(Words.apply(&s)), 4);
+        assert_eq!(extract_arr_len(builtin0(BuiltinMethod::Lines).apply(&s)), 2);
+        assert_eq!(extract_arr_len(builtin0(BuiltinMethod::Words).apply(&s)), 4);
         let small = Val::Str(std::sync::Arc::from("ábc"));
-        assert_eq!(extract_arr_len(Chars.apply(&small)), 3);
+        assert_eq!(
+            extract_arr_len(builtin0(BuiltinMethod::Chars).apply(&small)),
+            3
+        );
     }
 
     #[test]
     fn to_number_to_bool_dispatch() {
         let i = Val::Str(std::sync::Arc::from("42"));
-        match ToNumber.apply(&i) {
+        match builtin0(BuiltinMethod::ToNumber).apply(&i) {
             StageOutput::Pass(cow) => match cow.into_owned() {
                 Val::Int(42) => {}
                 other => panic!("expected Int(42), got {:?}", other),
@@ -2459,7 +2535,7 @@ mod tests {
             _ => panic!("expected Pass"),
         }
         let f = Val::Str(std::sync::Arc::from("3.14"));
-        match ToNumber.apply(&f) {
+        match builtin0(BuiltinMethod::ToNumber).apply(&f) {
             StageOutput::Pass(cow) => match cow.into_owned() {
                 Val::Float(_) => {}
                 other => panic!("expected Float, got {:?}", other),
@@ -2467,7 +2543,7 @@ mod tests {
             _ => panic!("expected Pass"),
         }
         let bad = Val::Str(std::sync::Arc::from("nope"));
-        match ToNumber.apply(&bad) {
+        match builtin0(BuiltinMethod::ToNumber).apply(&bad) {
             StageOutput::Pass(cow) => match cow.into_owned() {
                 Val::Null => {}
                 other => panic!("expected Null, got {:?}", other),
@@ -2476,7 +2552,7 @@ mod tests {
         }
 
         let t = Val::Str(std::sync::Arc::from("true"));
-        let r = ToBool.apply(&t);
+        let r = builtin0(BuiltinMethod::ToBool).apply(&t);
         match r {
             StageOutput::Pass(cow) => match cow.into_owned() {
                 Val::Bool(true) => {}
@@ -2500,32 +2576,35 @@ mod tests {
     fn starts_ends_contains() {
         let s = Val::Str(std::sync::Arc::from("hello world"));
         assert!(extract_bool(
-            StartsWith::new(std::sync::Arc::from("hello")).apply(&s)
+            builtin_str(BuiltinMethod::StartsWith, "hello").apply(&s)
         ));
         assert!(!extract_bool(
-            StartsWith::new(std::sync::Arc::from("world")).apply(&s)
+            builtin_str(BuiltinMethod::StartsWith, "world").apply(&s)
         ));
         assert!(extract_bool(
-            EndsWith::new(std::sync::Arc::from("world")).apply(&s)
+            builtin_str(BuiltinMethod::EndsWith, "world").apply(&s)
         ));
         assert!(extract_bool(
-            Contains::new(std::sync::Arc::from("o w")).apply(&s)
+            builtin_str(BuiltinMethod::Matches, "o w").apply(&s)
         ));
     }
 
     #[test]
     fn repeat_split_replace() {
         let s = Val::Str(std::sync::Arc::from("ab"));
-        assert_eq!(extract_str(Repeat::new(3).apply(&s)), "ababab");
+        assert_eq!(
+            extract_str(builtin_usize(BuiltinMethod::Repeat, 3).apply(&s)),
+            "ababab"
+        );
 
         let csv = Val::Str(std::sync::Arc::from("a,b,c"));
         assert_eq!(
-            extract_arr_len(Split::new(std::sync::Arc::from(",")).apply(&csv)),
+            extract_arr_len(builtin_str(BuiltinMethod::Split, ",").apply(&csv)),
             3
         );
 
         let s = Val::Str(std::sync::Arc::from("foo bar foo"));
-        let r = Replace::new(std::sync::Arc::from("foo"), std::sync::Arc::from("X")).apply(&s);
+        let r = builtin_pair(BuiltinMethod::ReplaceAll, "foo", "X").apply(&s);
         assert_eq!(extract_str(r), "X bar X");
     }
 
@@ -2533,17 +2612,17 @@ mod tests {
     fn strip_prefix_suffix_passthrough() {
         let s = Val::Str(std::sync::Arc::from("foobar"));
         assert_eq!(
-            extract_str(StripPrefix::new(std::sync::Arc::from("foo")).apply(&s)),
+            extract_str(builtin_str(BuiltinMethod::StripPrefix, "foo").apply(&s)),
             "bar"
         );
         let s2 = Val::Str(std::sync::Arc::from("xyz"));
         assert_eq!(
-            extract_str(StripPrefix::new(std::sync::Arc::from("foo")).apply(&s2)),
+            extract_str(builtin_str(BuiltinMethod::StripPrefix, "foo").apply(&s2)),
             "xyz"
         );
         let s3 = Val::Str(std::sync::Arc::from("hello.txt"));
         assert_eq!(
-            extract_str(StripSuffix::new(std::sync::Arc::from(".txt")).apply(&s3)),
+            extract_str(builtin_str(BuiltinMethod::StripSuffix, ".txt").apply(&s3)),
             "hello"
         );
     }
@@ -2565,16 +2644,25 @@ mod tests {
     fn intersect_union_diff_sets() {
         let a = arr_of(vec![Val::Int(1), Val::Int(2), Val::Int(3), Val::Int(4)]);
         let b = vec![Val::Int(2), Val::Int(4), Val::Int(5)];
-        assert_eq!(extract_arr_len(Intersect::new(b.clone()).apply(&a)), 2);
-        assert_eq!(extract_arr_len(Union::new(b.clone()).apply(&a)), 5);
-        assert_eq!(extract_arr_len(Diff::new(b).apply(&a)), 2);
+        assert_eq!(
+            extract_arr_len(builtin_valvec(BuiltinMethod::Intersect, b.clone()).apply(&a)),
+            2
+        );
+        assert_eq!(
+            extract_arr_len(builtin_valvec(BuiltinMethod::Union, b.clone()).apply(&a)),
+            5
+        );
+        assert_eq!(
+            extract_arr_len(builtin_valvec(BuiltinMethod::Diff, b).apply(&a)),
+            2
+        );
     }
 
     #[test]
     fn get_path_has_path() {
         let inner = obj_of(vec![("city", Val::Str(std::sync::Arc::from("NYC")))]);
         let outer = obj_of(vec![("addr", inner)]);
-        let r = GetPath::new(std::sync::Arc::from("addr.city")).apply(&outer);
+        let r = builtin_str(BuiltinMethod::GetPath, "addr.city").apply(&outer);
         match r {
             StageOutput::Pass(cow) => match cow.into_owned() {
                 Val::Str(s) => assert_eq!(s.as_ref(), "NYC"),
@@ -2583,30 +2671,36 @@ mod tests {
             _ => panic!(),
         }
         assert!(extract_bool(
-            HasPath::new(std::sync::Arc::from("addr.city")).apply(&outer)
+            builtin_str(BuiltinMethod::HasPath, "addr.city").apply(&outer)
         ));
         assert!(!extract_bool(
-            HasPath::new(std::sync::Arc::from("addr.zip")).apply(&outer)
+            builtin_str(BuiltinMethod::HasPath, "addr.zip").apply(&outer)
         ));
     }
 
     #[test]
     fn keys_values_entries_obj() {
         let o = obj_of(vec![("a", Val::Int(1)), ("b", Val::Int(2))]);
-        assert_eq!(extract_arr_len(Keys.apply(&o)), 2);
-        assert_eq!(extract_arr_len(Values.apply(&o)), 2);
-        assert_eq!(extract_arr_len(Entries.apply(&o)), 2);
+        assert_eq!(extract_arr_len(builtin0(BuiltinMethod::Keys).apply(&o)), 2);
+        assert_eq!(
+            extract_arr_len(builtin0(BuiltinMethod::Values).apply(&o)),
+            2
+        );
+        assert_eq!(
+            extract_arr_len(builtin0(BuiltinMethod::Entries).apply(&o)),
+            2
+        );
     }
 
     #[test]
     fn from_pairs_round_trip() {
         let o = obj_of(vec![("a", Val::Int(1)), ("b", Val::Int(2))]);
-        let r = Entries.apply(&o);
+        let r = builtin0(BuiltinMethod::Entries).apply(&o);
         let pairs_val = match r {
             StageOutput::Pass(cow) => cow.into_owned(),
             _ => panic!(),
         };
-        let r2 = FromPairs.apply(&pairs_val);
+        let r2 = builtin0(BuiltinMethod::FromPairs).apply(&pairs_val);
         match r2 {
             StageOutput::Pass(cow) => match cow.into_owned() {
                 Val::Obj(m) => {
@@ -2626,7 +2720,7 @@ mod tests {
             ("a", Val::Str(std::sync::Arc::from("X"))),
             ("b", Val::Str(std::sync::Arc::from("Y"))),
         ]);
-        let r = Invert.apply(&o);
+        let r = builtin0(BuiltinMethod::Invert).apply(&o);
         match r {
             StageOutput::Pass(cow) => match cow.into_owned() {
                 Val::Obj(m) => {
@@ -2646,10 +2740,11 @@ mod tests {
             ("b", Val::Int(2)),
             ("c", Val::Int(3)),
         ]);
-        assert!(extract_bool(Has::new(std::sync::Arc::from("b")).apply(&o)));
-        assert!(!extract_bool(Has::new(std::sync::Arc::from("z")).apply(&o)));
-        let picked =
-            Pick::new(vec![std::sync::Arc::from("a"), std::sync::Arc::from("c")]).apply(&o);
+        assert!(extract_bool(builtin_str(BuiltinMethod::Has, "b").apply(&o)));
+        assert!(!extract_bool(
+            builtin_str(BuiltinMethod::Has, "z").apply(&o)
+        ));
+        let picked = builtin_strvec(BuiltinMethod::Pick, &["a", "c"]).apply(&o);
         match picked {
             StageOutput::Pass(cow) => match cow.into_owned() {
                 Val::Obj(m) => assert_eq!(m.len(), 2),
@@ -2657,7 +2752,7 @@ mod tests {
             },
             _ => panic!(),
         }
-        let omitted = Omit::new(vec![std::sync::Arc::from("b")]).apply(&o);
+        let omitted = builtin_strvec(BuiltinMethod::Omit, &["b"]).apply(&o);
         match omitted {
             StageOutput::Pass(cow) => match cow.into_owned() {
                 Val::Obj(m) => assert_eq!(m.len(), 2),
@@ -2670,7 +2765,7 @@ mod tests {
     #[test]
     fn array_len_works() {
         let a = arr_of(vec![Val::Int(1), Val::Int(2), Val::Int(3)]);
-        let r = Len.apply(&a);
+        let r = builtin0(BuiltinMethod::Len).apply(&a);
         match r {
             StageOutput::Pass(cow) => match cow.into_owned() {
                 Val::Int(3) => {}
@@ -2679,7 +2774,7 @@ mod tests {
             _ => panic!("expected Pass"),
         }
         let s = Val::Str(std::sync::Arc::from("café"));
-        let r = Len.apply(&s);
+        let r = builtin0(BuiltinMethod::Len).apply(&s);
         match r {
             StageOutput::Pass(cow) => match cow.into_owned() {
                 Val::Int(4) => {}
@@ -2698,7 +2793,10 @@ mod tests {
             Val::Null,
             Val::Int(3),
         ]);
-        assert_eq!(extract_arr_len(Compact.apply(&a)), 3);
+        assert_eq!(
+            extract_arr_len(builtin0(BuiltinMethod::Compact).apply(&a)),
+            3
+        );
     }
 
     #[test]
@@ -2708,23 +2806,25 @@ mod tests {
             arr_of(vec![Val::Int(3)]),
             Val::Int(4),
         ]);
-        assert_eq!(extract_arr_len(FlattenOne.apply(&a)), 4);
+        assert_eq!(
+            extract_arr_len(builtin(BuiltinMethod::Flatten, BuiltinArgs::Usize(1)).apply(&a)),
+            4
+        );
     }
 
     #[test]
     fn enumerate_emits_pairs() {
         let a = arr_of(vec![Val::Int(10), Val::Int(20), Val::Int(30)]);
-        let r = Enumerate.apply(&a);
+        let r = builtin0(BuiltinMethod::Enumerate).apply(&a);
         match r {
             StageOutput::Pass(cow) => match cow.into_owned() {
                 Val::Arr(arr) => {
                     assert_eq!(arr.len(), 3);
-                    if let Val::Arr(first) = &arr[0] {
-                        assert_eq!(first.len(), 2);
-                        assert!(matches!(first[0], Val::Int(0)));
-                        assert!(matches!(first[1], Val::Int(10)));
+                    if let Val::Obj(first) = &arr[0] {
+                        assert!(matches!(first.get("index"), Some(Val::Int(0))));
+                        assert!(matches!(first.get("value"), Some(Val::Int(10))));
                     } else {
-                        panic!("expected nested Arr");
+                        panic!("expected object pair");
                     }
                 }
                 other => panic!("got {:?}", other),
@@ -2736,7 +2836,10 @@ mod tests {
     #[test]
     fn pairwise_emits_adjacent() {
         let a = arr_of(vec![Val::Int(1), Val::Int(2), Val::Int(3), Val::Int(4)]);
-        assert_eq!(extract_arr_len(Pairwise.apply(&a)), 3);
+        assert_eq!(
+            extract_arr_len(builtin0(BuiltinMethod::Pairwise).apply(&a)),
+            3
+        );
     }
 
     #[test]
@@ -2748,24 +2851,30 @@ mod tests {
             Val::Int(4),
             Val::Int(5),
         ]);
-        assert_eq!(extract_arr_len(Chunk::new(2).apply(&a)), 3);
-        assert_eq!(extract_arr_len(Window::new(3).apply(&a)), 3);
+        assert_eq!(
+            extract_arr_len(builtin_usize(BuiltinMethod::Chunk, 2).apply(&a)),
+            3
+        );
+        assert_eq!(
+            extract_arr_len(builtin_usize(BuiltinMethod::Window, 3).apply(&a)),
+            3
+        );
     }
 
     #[test]
     fn nth_with_neg_index() {
         let a = arr_of(vec![Val::Int(10), Val::Int(20), Val::Int(30)]);
-        let r0 = Nth::new(0).apply(&a);
+        let r0 = builtin_i64(BuiltinMethod::Nth, 0).apply(&a);
         match r0 {
             StageOutput::Pass(cow) => assert!(matches!(cow.into_owned(), Val::Int(10))),
             _ => panic!(),
         }
-        let r1 = Nth::new(-1).apply(&a);
+        let r1 = builtin_i64(BuiltinMethod::Nth, -1).apply(&a);
         match r1 {
             StageOutput::Pass(cow) => assert!(matches!(cow.into_owned(), Val::Int(30))),
             _ => panic!(),
         }
-        let r2 = Nth::new(99).apply(&a);
+        let r2 = builtin_i64(BuiltinMethod::Nth, 99).apply(&a);
         match r2 {
             StageOutput::Pass(cow) => assert!(matches!(cow.into_owned(), Val::Null)),
             _ => panic!(),
@@ -2775,25 +2884,37 @@ mod tests {
     #[test]
     fn pad_left_right_indent_dedent() {
         let s = Val::Str(std::sync::Arc::from("hi"));
-        assert_eq!(extract_str(PadLeft::new(5, '-').apply(&s)), "---hi");
-        assert_eq!(extract_str(PadRight::new(5, '-').apply(&s)), "hi---");
+        assert_eq!(
+            extract_str(builtin_pad(BuiltinMethod::PadLeft, 5, '-').apply(&s)),
+            "---hi"
+        );
+        assert_eq!(
+            extract_str(builtin_pad(BuiltinMethod::PadRight, 5, '-').apply(&s)),
+            "hi---"
+        );
         let lines = Val::Str(std::sync::Arc::from("foo\nbar"));
-        assert_eq!(extract_str(Indent::new(2).apply(&lines)), "  foo\n  bar");
+        assert_eq!(
+            extract_str(builtin_usize(BuiltinMethod::Indent, 2).apply(&lines)),
+            "  foo\n  bar"
+        );
         let block = Val::Str(std::sync::Arc::from("    foo\n    bar"));
-        assert_eq!(extract_str(Dedent.apply(&block)), "foo\nbar");
+        assert_eq!(
+            extract_str(builtin0(BuiltinMethod::Dedent).apply(&block)),
+            "foo\nbar"
+        );
     }
 
     #[test]
     fn index_of_and_matches() {
         let s = Val::Str(std::sync::Arc::from("hello world"));
-        match IndexOf::new(std::sync::Arc::from("world")).apply(&s) {
+        match builtin_str(BuiltinMethod::IndexOf, "world").apply(&s) {
             StageOutput::Pass(cow) => match cow.into_owned() {
                 Val::Int(6) => {}
                 other => panic!("got {:?}", other),
             },
             _ => panic!("expected Pass"),
         }
-        match LastIndexOf::new(std::sync::Arc::from("o")).apply(&s) {
+        match builtin_str(BuiltinMethod::LastIndexOf, "o").apply(&s) {
             StageOutput::Pass(cow) => match cow.into_owned() {
                 Val::Int(7) => {}
                 other => panic!("got {:?}", other),
@@ -2801,16 +2922,16 @@ mod tests {
             _ => panic!("expected Pass"),
         }
         assert!(extract_bool(
-            StrMatches::new(std::sync::Arc::from("world")).apply(&s)
+            builtin_str(BuiltinMethod::Matches, "world").apply(&s)
         ));
     }
 
     #[test]
     fn base64_round_trip() {
         let s = Val::Str(std::sync::Arc::from("hello"));
-        let enc = extract_str(ToBase64.apply(&s));
+        let enc = extract_str(builtin0(BuiltinMethod::ToBase64).apply(&s));
         let enc_val = Val::Str(std::sync::Arc::from(enc));
-        let r = FromBase64.apply(&enc_val);
+        let r = builtin0(BuiltinMethod::FromBase64).apply(&enc_val);
         match r {
             StageOutput::Pass(cow) => match cow.into_owned() {
                 Val::Str(out) => assert_eq!(out.as_ref(), "hello"),
@@ -2823,7 +2944,7 @@ mod tests {
     #[test]
     fn upper_unicode_fallback() {
         let s = Val::Str(std::sync::Arc::from("café"));
-        let stage = Upper;
+        let stage = builtin0(BuiltinMethod::Upper);
         let got = stage.apply(&s);
         match got {
             StageOutput::Pass(Cow::Owned(Val::Str(out))) => {

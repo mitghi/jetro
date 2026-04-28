@@ -17,10 +17,10 @@ use indexmap::IndexMap;
 use std::cmp::Ordering;
 use std::sync::Arc;
 
-use super::super::ast::BinOp;
-use super::super::ast::KindType;
-use super::value::Val;
-use super::EvalError;
+use crate::ast::BinOp;
+use crate::ast::KindType;
+use crate::context::EvalError;
+use crate::value::Val;
 
 // ── Scalar semantic kernel ───────────────────────────────────────────────────
 

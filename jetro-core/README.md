@@ -22,7 +22,7 @@ source string
   serde_json::Value
 ```
 
-The tree-walker in `eval/` is the *reference implementation*: when VM behaviour diverges from it, the VM is wrong. Every new language feature lands in the tree-walker first, then is mirrored in the compiler and opcode set.
+Builtin behavior is centralized in `builtins.rs`; the VM, composed pipeline, and runtime adapter call that same static builtin surface instead of routing through a dynamic registry.
 
 ---
 
@@ -72,9 +72,9 @@ Variants are orthogonal — each maps to one language concept. Subtrees are `Box
 
 ---
 
-## Layer 2 — tree-walker (`eval/`)
+## Layer 2 — values and runtime adapter
 
-`eval::evaluate(&ast, &doc)` is the shortest path from AST to result.
+`runtime::evaluate(&ast, &doc)` is the shortest path from AST to result.
 
 ### `Val`
 
@@ -101,23 +101,10 @@ struct Env {
     root:     Val,
     current:  Val,
     vars:     SmallVec<[(Arc<str>, Val); 4]>,
-    registry: Arc<MethodRegistry>,
 }
 ```
 
-Let-bindings and comprehension variables push onto `vars`; scope exit truncates. The inline capacity of 4 covers every realistic query, and the linear lookup is faster than any hashmap at that size.
-
-### `MethodRegistry`
-
-A `HashMap<&'static str, Arc<dyn Method>>` that the user can extend with custom methods. `Method` is:
-
-```rust
-pub trait Method: Send + Sync + 'static {
-    fn call(&self, recv: &Val, args: &[Val], env: &Env) -> Result<Val, EvalError>;
-}
-```
-
-The registry itself is `Clone` (all entries are `Arc<dyn Method>`), so threading it through recursive calls is free.
+Let-bindings and comprehension variables push onto `vars`; scope exit truncates. The inline capacity of 4 covers every realistic query, and the linear lookup is faster than any hashmap at that size. Methods are statically resolved to builtins in `builtins.rs`; user-registered method dispatch is intentionally not part of the runtime.
 
 ---
 
@@ -239,7 +226,6 @@ Each pass has a `PassConfig` toggle; `VM::set_pass_config` lets you disable any 
 
 ```rust
 pub struct VM {
-    registry:      Arc<MethodRegistry>,
     compile_cache: HashMap<(u64, String), Arc<Program>>,
     compile_lru:   VecDeque<(u64, String)>,
     compile_cap:   usize,
@@ -285,7 +271,6 @@ The analyses operate on `Program`, not `Expr` — they observe the already-lower
 ```rust
 // One-shot tree-walker.
 pub fn query(expr: &str, doc: &Value) -> Result<Value>;
-pub fn query_with(expr: &str, doc: &Value, registry: Arc<MethodRegistry>) -> Result<Value>;
 
 // Persistent VM (thread-local in the umbrella; fresh in this crate).
 pub struct Jetro { … }
@@ -297,9 +282,8 @@ impl Jetro {
 // Lower-level building blocks.
 pub use vm::{VM, Compiler, Program};
 pub use expr::Expr;              // typed-phantom wrapper for compile-time expression literals
-pub use eval::{Method, MethodRegistry, EvalError};
+pub use context::EvalError;
 pub use parser::{parse, ParseError};
-pub use graph::Graph;            // multi-document queries
 pub use engine::Engine;          // high-level wrapper
 ```
 
@@ -328,32 +312,7 @@ assert_eq!(titles, serde_json::json!(["Dune"]));
 let n = jetro_core::query("$.store.books.len()", &doc).unwrap();
 ```
 
-Uses the tree-walker directly — no compile/resolution caches. Use `Jetro` or `VM` for repeated queries.
-
-### Custom methods
-
-```rust
-use jetro_core::{VM, Method, Val, Env, EvalError};
-
-struct Shout;
-impl Method for Shout {
-    fn call(&self, recv: &Val, _: &[Val], _: &Env) -> Result<Val, EvalError> {
-        match recv {
-            Val::Str(s) => Ok(Val::Str(s.to_uppercase().into())),
-            _           => Err(EvalError("shout: expected string".into())),
-        }
-    }
-}
-
-let mut vm = VM::new();
-vm.register("shout", Shout);
-let r = vm.run_str(r#""hello".shout()"#, &serde_json::json!(null)).unwrap();
-assert_eq!(r, serde_json::json!("HELLO"));
-```
-
-### `Graph` — multi-document queries
-
-`Graph::new({node: Value, …})` merges named documents into a virtual root and evaluates an expression against the combined object. Joins are expressed inside the query (`.#join('orders', 'customer_id', 'id')`). The `jetrodb` crate's `GraphBucket` is a storage-backed orchestrator on top of this primitive.
+Uses the static builtin runtime directly. Use `Jetro` or `VM` for repeated queries.
 
 ---
 

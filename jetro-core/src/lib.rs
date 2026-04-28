@@ -55,14 +55,17 @@ pub mod ast;
 pub(crate) mod builtin_helpers;
 pub mod builtins;
 pub mod composed;
+pub mod context;
 pub mod engine;
-pub mod eval;
 pub mod expr;
-pub mod functions;
 pub mod parser;
 pub mod pipeline;
+pub mod runtime;
 pub mod scan;
+pub(crate) mod scan_predicates;
 pub mod strref;
+pub mod util;
+pub mod value;
 pub mod vm;
 
 #[cfg(test)]
@@ -70,16 +73,16 @@ mod examples;
 #[cfg(test)]
 mod tests;
 
-use eval::Val;
 use serde_json::Value;
 use std::cell::{OnceCell, RefCell};
 use std::sync::Arc;
+use value::Val;
 
+pub use context::EvalError;
 pub use engine::Engine;
-pub use eval::EvalError;
-pub use eval::{Method, MethodRegistry, Val as JetroVal};
 pub use expr::Expr;
 pub use parser::ParseError;
+pub use value::Val as JetroVal;
 pub use vm::{Compiler, Program, VM};
 
 /// Trait implemented by `#[derive(JetroSchema)]` — pairs a type with a
@@ -265,14 +268,6 @@ impl CompiledQuery {
     }
 }
 
-/// Evaluate a Jetro expression with a custom method registry.
-pub fn query_with(expr: &str, doc: &Value, registry: Arc<MethodRegistry>) -> Result<Value> {
-    let ast = parser::parse(expr)?;
-    let program = vm::Compiler::compile(&ast, expr);
-    let mut vm = VM::with_registry(registry);
-    Ok(vm.execute(&program, doc)?)
-}
-
 // ── Jetro ─────────────────────────────────────────────────────────────────────
 
 // Thread-local VM with lazy init.  `VM::new()` allocates compile/path
@@ -328,7 +323,7 @@ pub struct Jetro {
     /// cached columnar layout.  Cost amortised across the lifetime of
     /// the Jetro handle.
     pub(crate) objvec_cache:
-        std::sync::Mutex<std::collections::HashMap<usize, Arc<crate::eval::value::ObjVecData>>>,
+        std::sync::Mutex<std::collections::HashMap<usize, Arc<crate::value::ObjVecData>>>,
     /// Tape-path cooldown counter — counts tape-only runs.  After a
     /// small number of tape runs the handle switches to ObjVec
     /// memoised typed columns (slower cold, faster warm).  Avoids
@@ -854,7 +849,7 @@ fn trim_ascii(b: &[u8]) -> &[u8] {
 }
 
 impl pipeline::ObjVecPromoter for Jetro {
-    fn promote(&self, arr: &Arc<Vec<Val>>) -> Option<Arc<crate::eval::value::ObjVecData>> {
+    fn promote(&self, arr: &Arc<Vec<Val>>) -> Option<Arc<crate::value::ObjVecData>> {
         self.get_or_promote_objvec(arr)
     }
     #[cfg(feature = "simd-json")]
@@ -909,7 +904,7 @@ impl Jetro {
     pub(crate) fn get_or_promote_objvec(
         &self,
         arr: &Arc<Vec<Val>>,
-    ) -> Option<Arc<crate::eval::value::ObjVecData>> {
+    ) -> Option<Arc<crate::value::ObjVecData>> {
         let key = Arc::as_ptr(arr) as usize;
         if let Ok(cache) = self.objvec_cache.lock() {
             if let Some(d) = cache.get(&key) {
@@ -1325,7 +1320,7 @@ enum JetroIterInner {
 struct LazyState {
     items: std::vec::IntoIter<Val>,
     ops: Vec<LazyOp>,
-    env: eval::Env,
+    env: context::Env,
 }
 
 enum LazyOp {
@@ -1358,8 +1353,7 @@ impl JetroIter {
                 Val::Null => Vec::new(),
                 other => vec![other], // singleton — yields once
             };
-            let env =
-                eval::Env::new_with_registry(j.root_val(), Arc::new(eval::MethodRegistry::new()));
+            let env = context::Env::new(j.root_val());
             return Ok(JetroIter {
                 inner: JetroIterInner::Lazy(Box::new(LazyState {
                     items: items.into_iter(),
@@ -1421,17 +1415,17 @@ impl LazyState {
                     }
                     LazyOp::Filter(e) => {
                         let prev = self.env.swap_current(cur.clone());
-                        let r = eval::eval_in_env(e, &self.env);
+                        let r = runtime::eval_in_env(e, &self.env);
                         let _ = self.env.swap_current(prev);
                         match r {
-                            Ok(v) if eval::util::is_truthy(&v) => {}
+                            Ok(v) if util::is_truthy(&v) => {}
                             Ok(_) => continue 'pull,
                             Err(err) => return Some(Err(err)),
                         }
                     }
                     LazyOp::Map(e) => {
                         let prev = self.env.swap_current(cur.clone());
-                        let r = eval::eval_in_env(e, &self.env);
+                        let r = runtime::eval_in_env(e, &self.env);
                         let _ = self.env.swap_current(prev);
                         match r {
                             Ok(v) => cur = v,

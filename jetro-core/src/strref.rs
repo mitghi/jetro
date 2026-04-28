@@ -905,17 +905,17 @@ pub fn tape_value_truthy(tape: &TapeData, idx: usize) -> bool {
 
 #[cfg(feature = "simd-json")]
 #[inline]
-pub fn tape_json_view<'a>(tape: &'a TapeData, idx: usize) -> crate::eval::util::JsonView<'a> {
+pub fn tape_json_view<'a>(tape: &'a TapeData, idx: usize) -> crate::util::JsonView<'a> {
     use simd_json::StaticNode as SN;
     match tape.nodes[idx] {
-        TapeNode::Static(SN::Null) => crate::eval::util::JsonView::Null,
-        TapeNode::Static(SN::Bool(b)) => crate::eval::util::JsonView::Bool(b),
-        TapeNode::Static(SN::I64(n)) => crate::eval::util::JsonView::Int(n),
-        TapeNode::Static(SN::U64(n)) => crate::eval::util::JsonView::UInt(n),
-        TapeNode::Static(SN::F64(f)) => crate::eval::util::JsonView::Float(f),
-        TapeNode::StringRef { .. } => crate::eval::util::JsonView::Str(tape.str_at(idx)),
-        TapeNode::Array { len, .. } => crate::eval::util::JsonView::ArrayLen(len as usize),
-        TapeNode::Object { len, .. } => crate::eval::util::JsonView::ObjectLen(len as usize),
+        TapeNode::Static(SN::Null) => crate::util::JsonView::Null,
+        TapeNode::Static(SN::Bool(b)) => crate::util::JsonView::Bool(b),
+        TapeNode::Static(SN::I64(n)) => crate::util::JsonView::Int(n),
+        TapeNode::Static(SN::U64(n)) => crate::util::JsonView::UInt(n),
+        TapeNode::Static(SN::F64(f)) => crate::util::JsonView::Float(f),
+        TapeNode::StringRef { .. } => crate::util::JsonView::Str(tape.str_at(idx)),
+        TapeNode::Array { len, .. } => crate::util::JsonView::ArrayLen(len as usize),
+        TapeNode::Object { len, .. } => crate::util::JsonView::ObjectLen(len as usize),
     }
 }
 
@@ -1045,7 +1045,7 @@ impl<'a> TapePred<'a> {
 /// promote i64↔f64.
 #[cfg(feature = "simd-json")]
 pub fn tape_value_cmp(tape: &TapeData, idx: usize, op: TapeCmp, lit: &TapeLit) -> bool {
-    crate::eval::util::json_cmp_binop(
+    crate::util::json_cmp_binop(
         tape_json_view(tape, idx),
         tape_cmp_to_binop(op),
         tape_lit_view(lit),
@@ -1054,13 +1054,13 @@ pub fn tape_value_cmp(tape: &TapeData, idx: usize, op: TapeCmp, lit: &TapeLit) -
 
 #[cfg(feature = "simd-json")]
 #[inline]
-fn tape_lit_view<'a>(lit: &'a TapeLit<'a>) -> crate::eval::util::JsonView<'a> {
+fn tape_lit_view<'a>(lit: &'a TapeLit<'a>) -> crate::util::JsonView<'a> {
     match lit {
-        TapeLit::Int(n) => crate::eval::util::JsonView::Int(*n),
-        TapeLit::Float(f) => crate::eval::util::JsonView::Float(*f),
-        TapeLit::Str(s) => crate::eval::util::JsonView::Str(s),
-        TapeLit::Bool(b) => crate::eval::util::JsonView::Bool(*b),
-        TapeLit::Null => crate::eval::util::JsonView::Null,
+        TapeLit::Int(n) => crate::util::JsonView::Int(*n),
+        TapeLit::Float(f) => crate::util::JsonView::Float(*f),
+        TapeLit::Str(s) => crate::util::JsonView::Str(s),
+        TapeLit::Bool(b) => crate::util::JsonView::Bool(*b),
+        TapeLit::Null => crate::util::JsonView::Null,
     }
 }
 

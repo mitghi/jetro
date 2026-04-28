@@ -1,4 +1,4 @@
-use crate::eval::value::Val;
+use crate::value::Val;
 
 pub(crate) fn split_words_lower(s: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
@@ -115,7 +115,7 @@ pub(crate) fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
 
 #[inline]
 fn csv_cell(v: &Val, sep: &str) -> String {
-    use crate::eval::util::val_to_string;
+    use crate::util::val_to_string;
     match v {
         Val::Str(s) if s.contains(sep) || s.contains('"') || s.contains('\n') => {
             format!("\"{}\"", s.replace('"', "\"\""))

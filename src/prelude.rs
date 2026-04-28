@@ -4,8 +4,7 @@
 //! don't need a dozen individual `use` lines.
 //!
 
-pub use crate::{Error, Result};
+pub use crate::query;
 pub use crate::{Engine, Expr, Jetro, VM};
-pub use crate::{Method, MethodRegistry};
-pub use crate::{query, query_with};
+pub use crate::{Error, Result};
 pub use serde_json::{json, Value};

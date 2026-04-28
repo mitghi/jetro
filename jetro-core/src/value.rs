@@ -1026,7 +1026,7 @@ impl Val {
                 //
                 // The probe + promotion code below is correct but the
                 // engine's filter/map/sort/group_by/etc. handlers in
-                // eval/mod.rs and vm.rs only accept `Val::Arr`/`Val::IntVec`/`Val::StrVec`
+                // runtime.rs and vm.rs only accept `Val::Arr`/`Val::IntVec`/`Val::StrVec`
                 // receivers — they do not match `Val::ObjVec`, so promotion
                 // here breaks every downstream operation.  Real Phase 7
                 // requires migrating ~30-50 match sites to handle ObjVec

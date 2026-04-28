@@ -35,19 +35,15 @@
 use std::sync::Arc;
 
 use crate::ast::Expr;
-use crate::eval::value::Val;
-use crate::eval::EvalError;
+use crate::context::EvalError;
+use crate::value::Val;
 
 /// Build per-slot typed columns from a row-major Val cells matrix.
 /// First-row inspection picks the candidate type per slot; subsequent
 /// rows must match or that slot falls back to `Mixed`.  Cost O(N×K)
 /// — already paid by the cells walk in `try_promote_objvec`.
-fn build_typed_cols(
-    cells: &[Val],
-    stride: usize,
-    nrows: usize,
-) -> Vec<crate::eval::value::ObjVecCol> {
-    use crate::eval::value::ObjVecCol;
+fn build_typed_cols(cells: &[Val], stride: usize, nrows: usize) -> Vec<crate::value::ObjVecCol> {
+    use crate::value::ObjVecCol;
     let mut out: Vec<ObjVecCol> = Vec::with_capacity(stride);
     if stride == 0 || nrows == 0 {
         for _ in 0..stride {
@@ -136,7 +132,7 @@ fn build_typed_cols(
 /// Implemented by `Jetro::get_or_promote_objvec` which memoises the result.
 /// Trait so pipeline doesn't need to depend on the `Jetro` concrete type.
 pub trait ObjVecPromoter {
-    fn promote(&self, arr: &Arc<Vec<Val>>) -> Option<Arc<crate::eval::value::ObjVecData>>;
+    fn promote(&self, arr: &Arc<Vec<Val>>) -> Option<Arc<crate::value::ObjVecData>>;
     /// Optional tape access — when present AND Val tree not yet
     /// materialised (`prefer_tape()` true), enables the tape-only
     /// query path (skip Val build entirely for tape-friendly shapes).
@@ -296,7 +292,7 @@ pub enum Stage {
 
     // ── Step 3d-extension (C): lifted string Stages ──────────────────────────
     //
-    // Lifts `.split(sep)` / `.slice(a, b)` from MethodRegistry-dispatched
+    // Lifts `.split(sep)` / `.slice(a, b)` from method-call
     // method calls inside Map/Filter sub-program bodies into first-class
     // Stage variants.  Two wins:
     //   1. Chain flattening (Step 3d-extension A) can hoist them out of
@@ -1069,7 +1065,7 @@ pub enum Boundedness {
 pub struct StageShape {
     pub cardinality: Cardinality,
     pub order: Order,
-    /// Pure = no side effects, no MethodRegistry callouts.  Used by
+    /// Pure = no side effects or external callouts.  Used by
     /// Phase 2 dead-stage elimination.
     pub purity: bool,
     pub boundedness: Boundedness,
@@ -1741,8 +1737,8 @@ impl Pipeline {
 /// `plan_with_kernels` so it picks IndexedDispatch / BarrierMaterialise /
 /// EarlyExit / DoneTerminating / PullLoop strategies recursively.
 ///
-/// Returns None when the body is opaque (lambda, custom method, side
-/// effect) — caller falls back to `Stage::Map(opaque_program)`.
+/// Returns None when the body is opaque (lambda or side effect) — caller
+/// falls back to `Stage::Map(opaque_program)`.
 fn try_decode_map_body(arg: &crate::ast::Arg) -> Option<Plan> {
     use crate::ast::{Arg, Step};
     let expr = match arg {
@@ -1888,7 +1884,7 @@ fn decode_method_chain(trailing: &[crate::ast::Step]) -> Option<(Vec<Stage>, Sin
                     // exists for chained-with-trailer cases (rare); when
                     // terminal, prefer to skip lowering and let tree-walker
                     // produce the canonical Obj shape.
-                    // (no `partition` lower arm — falls back to dispatch_method.)
+                    // (no `partition` lower arm — falls back to the VM builtin call path.)
                     ("transform_values", 1, _) => {
                         stages.push(Stage::TransformValues(compile_subexpr(&args[0])?))
                     }
@@ -1933,7 +1929,7 @@ fn decode_method_chain(trailing: &[crate::ast::Step]) -> Option<(Vec<Stage>, Sin
                         // A2: try recursive sub-pipeline planning first.
                         // Body shapes that decode as a chain of recognised
                         // methods over @ become Stage::CompiledMap; opaque
-                        // bodies (lambdas, custom methods) fall through.
+                        // bodies (lambdas or side effects) fall through.
                         match try_decode_map_body(&args[0]) {
                             Some(plan) => stages.push(Stage::CompiledMap(Arc::new(plan))),
                             None => stages.push(Stage::Map(compile_subexpr(&args[0])?)),
@@ -2465,9 +2461,7 @@ impl Pipeline {
     /// run as O(N) slice walks instead of O(N) IndexMap probes.
     /// Wrapper that returns the promoted `ObjVecData` directly (for the
     /// memoised cache in `Jetro::get_or_promote_objvec`).
-    pub fn try_promote_objvec_arr(
-        arr: &Arc<Vec<Val>>,
-    ) -> Option<Arc<crate::eval::value::ObjVecData>> {
+    pub fn try_promote_objvec_arr(arr: &Arc<Vec<Val>>) -> Option<Arc<crate::value::ObjVecData>> {
         if let Some(Val::ObjVec(d)) = Self::try_promote_objvec(arr) {
             Some(d)
         } else {
@@ -2519,7 +2513,7 @@ impl Pipeline {
         let nrows = if stride == 0 { 0 } else { cells.len() / stride };
         let typed_cols = build_typed_cols(&cells, stride, nrows);
 
-        Some(Val::ObjVec(Arc::new(crate::eval::value::ObjVecData {
+        Some(Val::ObjVec(Arc::new(crate::value::ObjVecData {
             keys: keys.into(),
             cells,
             typed_cols: Some(Arc::new(typed_cols)),
@@ -3700,7 +3694,7 @@ impl Pipeline {
                         match key_prog {
                             None => {
                                 buf.sort_by(|a, b| cmp_val_total(a, b));
-                                buf.dedup_by(|a, b| crate::eval::util::vals_eq(a, b));
+                                buf.dedup_by(|a, b| crate::util::vals_eq(a, b));
                             }
                             Some(prog) => {
                                 // Decorate-sort-undecorate via key prog.
@@ -3710,7 +3704,7 @@ impl Pipeline {
                                     keyed.push((k, v.clone()));
                                 }
                                 keyed.sort_by(|a, b| cmp_val_total(&a.0, &b.0));
-                                keyed.dedup_by(|a, b| crate::eval::util::vals_eq(&a.0, &b.0));
+                                keyed.dedup_by(|a, b| crate::util::vals_eq(&a.0, &b.0));
                                 buf = keyed.into_iter().map(|(_, v)| v).collect();
                             }
                         }
@@ -3919,7 +3913,7 @@ const HLL_M: usize = 1 << HLL_P; // 4096
 
 #[inline]
 fn hll_hash(v: &Val) -> u64 {
-    use crate::eval::util::val_to_key;
+    use crate::util::val_to_key;
     use std::collections::hash_map::RandomState;
     use std::hash::{BuildHasher, Hasher};
     // Re-use val_to_key for canonical string-form hashing — matches
@@ -3971,7 +3965,7 @@ pub(crate) fn apply_lambda_obj(
     stage: &Stage,
     recv: &Val,
     vm: &mut crate::vm::VM,
-    loop_env: &mut crate::eval::Env,
+    loop_env: &mut crate::context::Env,
     kernel: &BodyKernel,
     prog: &std::sync::Arc<crate::vm::Program>,
 ) -> Result<Val, EvalError> {
@@ -3988,9 +3982,7 @@ pub(crate) fn apply_lambda_obj(
                 let new_k = eval_kernel(kernel, &k_val, vm, loop_env, prog)?;
                 let new_k_arc = match new_k {
                     Val::Str(s) => s,
-                    other => {
-                        std::sync::Arc::from(crate::eval::util::val_to_string(&other).as_str())
-                    }
+                    other => std::sync::Arc::from(crate::util::val_to_string(&other).as_str()),
                 };
                 out.insert(new_k_arc, v.clone());
             }
@@ -4215,7 +4207,7 @@ fn single_cmp_prog<'a>(prog: &'a crate::vm::Program) -> Option<(&'a str, crate::
 
 /// Columnar `$.<arr>.flat_map(<field>).count()` — sums lengths of the
 /// inner sequences without materialising the flattened result.
-fn objvec_flatmap_count_slot(d: &Arc<crate::eval::value::ObjVecData>, slot: usize) -> Val {
+fn objvec_flatmap_count_slot(d: &Arc<crate::value::ObjVecData>, slot: usize) -> Val {
     let stride = d.stride();
     let nrows = d.nrows();
     let mut count: i64 = 0;
@@ -4234,8 +4226,8 @@ fn objvec_flatmap_count_slot(d: &Arc<crate::eval::value::ObjVecData>, slot: usiz
     Val::Int(count)
 }
 
-fn objvec_num_slot(d: &Arc<crate::eval::value::ObjVecData>, slot: usize, op: NumOp) -> Val {
-    use crate::eval::value::ObjVecCol;
+fn objvec_num_slot(d: &Arc<crate::value::ObjVecData>, slot: usize, op: NumOp) -> Val {
+    use crate::value::ObjVecCol;
     // Phase 7-typed-columns fast path: typed lane → direct slice walk,
     // no per-row Val tag check.  Closes the boxed-Val tax on numeric
     // aggregates (~3-4× win measured on bench_complex Q12).
@@ -4303,13 +4295,13 @@ fn objvec_num_slot(d: &Arc<crate::eval::value::ObjVecData>, slot: usize, op: Num
 }
 
 fn objvec_filter_count_slot(
-    d: &Arc<crate::eval::value::ObjVecData>,
+    d: &Arc<crate::value::ObjVecData>,
     slot: usize,
     op: crate::ast::BinOp,
     lit: &Val,
 ) -> Val {
     use crate::ast::BinOp as B;
-    use crate::eval::value::ObjVecCol;
+    use crate::value::ObjVecCol;
     // Typed-column fast path.  Direct slice scan with primitive
     // comparison; no Val tag check, no boxed unbox.
     if let Some(cols) = &d.typed_cols {
@@ -4383,7 +4375,7 @@ fn objvec_filter_count_slot(
 }
 
 fn objvec_filter_num_slots(
-    d: &Arc<crate::eval::value::ObjVecData>,
+    d: &Arc<crate::value::ObjVecData>,
     pred_slot: usize,
     cop: crate::ast::BinOp,
     lit: &Val,
@@ -4391,7 +4383,7 @@ fn objvec_filter_num_slots(
     op: NumOp,
 ) -> Val {
     use crate::ast::BinOp as B;
-    use crate::eval::value::ObjVecCol;
+    use crate::value::ObjVecCol;
     // Typed-column fast path for filter+map slot pair: walk both
     // columns as raw slices, primitive cmp + primitive fold.
     if let Some(cols) = &d.typed_cols {
@@ -4464,14 +4456,14 @@ fn objvec_filter_num_slots(
 /// typed lanes, walk primitive columns directly: build typed output
 /// vec sized by predicate hit count; no Val tag check, no IndexMap probe.
 fn objvec_typed_filter_map_collect(
-    d: &Arc<crate::eval::value::ObjVecData>,
+    d: &Arc<crate::value::ObjVecData>,
     pk: &str,
     pop: crate::ast::BinOp,
     plit: &Val,
     mk: &str,
 ) -> Option<Result<Val, EvalError>> {
     use crate::ast::BinOp as B;
-    use crate::eval::value::ObjVecCol;
+    use crate::value::ObjVecCol;
     let cols = d.typed_cols.as_ref()?;
     let pred_slot = d.slot_of(pk)?;
     let map_slot = d.slot_of(mk)?;
@@ -4609,8 +4601,8 @@ fn objvec_typed_filter_map_collect(
 /// (or a typed lane when all selected rows project the same shape).
 /// Avoids per-row IndexMap probe + per-row key Arc clone of the walker
 /// path.
-fn objvec_typed_group_by(d: &Arc<crate::eval::value::ObjVecData>, key_field: &str) -> Option<Val> {
-    use crate::eval::value::ObjVecCol;
+fn objvec_typed_group_by(d: &Arc<crate::value::ObjVecData>, key_field: &str) -> Option<Val> {
+    use crate::value::ObjVecCol;
     let cols = d.typed_cols.as_ref()?;
     let key_slot = d.slot_of(key_field)?;
     let key_col = cols.get(key_slot)?;
@@ -4701,8 +4693,8 @@ fn lit_to_tape_owned(v: &Val) -> Option<crate::composed::tape::TapeLitOwned> {
     }
 }
 
-fn materialise_typed_indices(col: &crate::eval::value::ObjVecCol, indices: &[usize]) -> Val {
-    use crate::eval::value::ObjVecCol;
+fn materialise_typed_indices(col: &crate::value::ObjVecCol, indices: &[usize]) -> Val {
+    use crate::value::ObjVecCol;
     match col {
         ObjVecCol::Ints(c) => {
             let mut o: Vec<i64> = Vec::with_capacity(indices.len());
@@ -4737,11 +4729,11 @@ fn materialise_typed_indices(col: &crate::eval::value::ObjVecCol, indices: &[usi
 }
 
 fn objvec_filter_count_and_slots(
-    d: &Arc<crate::eval::value::ObjVecData>,
+    d: &Arc<crate::value::ObjVecData>,
     leaves: &[(usize, crate::ast::BinOp, Val)],
 ) -> Val {
     use crate::ast::BinOp as B;
-    use crate::eval::value::ObjVecCol;
+    use crate::value::ObjVecCol;
     // Phase 7-typed-columns AND-chain path.  Pre-resolve each leaf to
     // a typed checker closure once; per row, run all checkers as
     // primitive comparisons over typed slices.  Skips per-leaf
@@ -5038,7 +5030,7 @@ fn walk_field_chain(root: &Val, keys: &[Arc<str>]) -> Val {
 #[inline]
 fn apply_item_in_env(
     vm: &mut crate::vm::VM,
-    env: &mut crate::eval::Env,
+    env: &mut crate::context::Env,
     item: &Val,
     prog: &crate::vm::Program,
 ) -> Result<Val, EvalError> {
@@ -5057,7 +5049,7 @@ fn eval_kernel(
     kernel: &BodyKernel,
     item: &Val,
     vm: &mut crate::vm::VM,
-    env: &mut crate::eval::Env,
+    env: &mut crate::context::Env,
     fallback: &crate::vm::Program,
 ) -> Result<Val, EvalError> {
     match kernel {
@@ -5100,16 +5092,16 @@ fn eval_kernel(
 /// handlers; centralised so the kernel inline path matches semantics.
 #[inline]
 fn eval_cmp_op(lhs: &Val, op: crate::ast::BinOp, rhs: &Val) -> bool {
-    crate::eval::util::json_cmp_binop(
-        crate::eval::util::JsonView::from_val(lhs),
+    crate::util::json_cmp_binop(
+        crate::util::JsonView::from_val(lhs),
         op,
-        crate::eval::util::JsonView::from_val(rhs),
+        crate::util::JsonView::from_val(rhs),
     )
 }
 
 #[inline]
 fn is_truthy(v: &Val) -> bool {
-    crate::eval::util::is_truthy(v)
+    crate::util::is_truthy(v)
 }
 
 // Builtin algorithm kernels moved to `crate::builtins` — single home

@@ -115,7 +115,11 @@ pub fn derive_jetro_schema(input: TokenStream) -> TokenStream {
         if let Err(msg) = grammar_check(&src) {
             return syn::Error::new(
                 src_lit.span(),
-                format!("invalid jetro expression for {:?}: {}", name_lit.value(), msg),
+                format!(
+                    "invalid jetro expression for {:?}: {}",
+                    name_lit.value(),
+                    msg
+                ),
             )
             .to_compile_error()
             .into();
@@ -178,7 +182,9 @@ impl Parse for ExprAttr {
             };
             // RHS: string literal.
             let rhs = match *assign.right {
-                Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) => s,
+                Expr::Lit(ExprLit {
+                    lit: Lit::Str(s), ..
+                }) => s,
                 other => {
                     return Err(syn::Error::new_spanned(
                         other,

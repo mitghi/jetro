@@ -19,9 +19,10 @@
 //!
 //! Streaming consumers call `*_one`; barrier consumers call `*_apply`.
 
-use crate::eval::util::is_truthy;
-use crate::eval::value::Val;
-use crate::eval::EvalError;
+use crate::context::EvalError;
+use crate::util::{cmp_vals, is_truthy, val_key, zip_arrays};
+use crate::value::Val;
+use indexmap::IndexMap;
 use std::sync::Arc;
 
 // ── BuiltinMethod ─────────────────────────────────────────────────────────────
@@ -53,15 +54,33 @@ pub enum BuiltinMethod {
     Count,
     Any,
     All,
+    FindIndex,
+    IndicesWhere,
+    MaxBy,
+    MinBy,
     GroupBy,
     CountBy,
     IndexBy,
+    GroupShape,
+    Explode,
+    Implode,
     // Array ops
     Filter,
     Map,
     FlatMap,
+    Find,
+    FindAll,
     Sort,
     Unique,
+    UniqueBy,
+    Collect,
+    DeepFind,
+    DeepShape,
+    DeepLike,
+    Walk,
+    WalkPre,
+    Rec,
+    TracePath,
     Flatten,
     Compact,
     Join,
@@ -84,6 +103,8 @@ pub enum BuiltinMethod {
     Partition,
     Zip,
     ZipLongest,
+    Fanout,
+    ZipShape,
     // Object ops
     Pick,
     Omit,
@@ -121,6 +142,17 @@ pub enum BuiltinMethod {
     Floor,
     Round,
     Abs,
+    RollingSum,
+    RollingAvg,
+    RollingMin,
+    RollingMax,
+    Lag,
+    Lead,
+    DiffWindow,
+    PctChange,
+    CumMax,
+    CumMin,
+    Zscore,
     // String methods
     Upper,
     Lower,
@@ -210,16 +242,34 @@ impl BuiltinMethod {
             "min" => Self::Min,
             "max" => Self::Max,
             "count" => Self::Count,
-            "any" => Self::Any,
+            "any" | "exists" => Self::Any,
             "all" => Self::All,
+            "find_index" | "findIndex" => Self::FindIndex,
+            "indices_where" | "indicesWhere" => Self::IndicesWhere,
+            "max_by" | "maxBy" => Self::MaxBy,
+            "min_by" | "minBy" => Self::MinBy,
             "groupBy" | "group_by" => Self::GroupBy,
             "countBy" | "count_by" => Self::CountBy,
             "indexBy" | "index_by" => Self::IndexBy,
+            "group_shape" | "groupShape" => Self::GroupShape,
+            "explode" => Self::Explode,
+            "implode" => Self::Implode,
             "filter" => Self::Filter,
             "map" => Self::Map,
             "flatMap" | "flat_map" => Self::FlatMap,
+            "find" => Self::Find,
+            "find_all" | "findAll" => Self::FindAll,
             "sort" => Self::Sort,
             "unique" | "distinct" => Self::Unique,
+            "unique_by" | "uniqueBy" => Self::UniqueBy,
+            "collect" => Self::Collect,
+            "deep_find" | "deepFind" => Self::DeepFind,
+            "deep_shape" | "deepShape" => Self::DeepShape,
+            "deep_like" | "deepLike" => Self::DeepLike,
+            "walk" => Self::Walk,
+            "walk_pre" | "walkPre" => Self::WalkPre,
+            "rec" => Self::Rec,
+            "trace_path" | "tracePath" => Self::TracePath,
             "flatten" => Self::Flatten,
             "compact" => Self::Compact,
             "join" => Self::Join,
@@ -243,6 +293,8 @@ impl BuiltinMethod {
             "partition" => Self::Partition,
             "zip" => Self::Zip,
             "zip_longest" | "zipLongest" => Self::ZipLongest,
+            "fanout" => Self::Fanout,
+            "zip_shape" | "zipShape" => Self::ZipShape,
             "pick" => Self::Pick,
             "omit" => Self::Omit,
             "merge" => Self::Merge,
@@ -275,6 +327,17 @@ impl BuiltinMethod {
             "floor" => Self::Floor,
             "round" => Self::Round,
             "abs" => Self::Abs,
+            "rolling_sum" | "rollingSum" => Self::RollingSum,
+            "rolling_avg" | "rollingAvg" => Self::RollingAvg,
+            "rolling_min" | "rollingMin" => Self::RollingMin,
+            "rolling_max" | "rollingMax" => Self::RollingMax,
+            "lag" => Self::Lag,
+            "lead" => Self::Lead,
+            "diff_window" | "diffWindow" => Self::DiffWindow,
+            "pct_change" | "pctChange" => Self::PctChange,
+            "cummax" => Self::CumMax,
+            "cummin" => Self::CumMin,
+            "zscore" => Self::Zscore,
             "upper" => Self::Upper,
             "lower" => Self::Lower,
             "capitalize" => Self::Capitalize,
@@ -308,7 +371,7 @@ impl BuiltinMethod {
             "url_decode" | "urlDecode" => Self::UrlDecode,
             "html_escape" | "htmlEscape" => Self::HtmlEscape,
             "html_unescape" | "htmlUnescape" => Self::HtmlUnescape,
-            "repeat" => Self::Repeat,
+            "repeat" | "repeat_str" | "repeatStr" => Self::Repeat,
             "pad_left" | "padLeft" => Self::PadLeft,
             "pad_right" | "padRight" => Self::PadRight,
             "center" => Self::Center,
@@ -550,11 +613,21 @@ impl BuiltinCall {
             (BuiltinMethod::ParseBool, BuiltinArgs::None) => {
                 apply_or_recv!(parse_bool_apply(recv))
             }
+            (BuiltinMethod::Sum, BuiltinArgs::None)
+            | (BuiltinMethod::Avg, BuiltinArgs::None)
+            | (BuiltinMethod::Min, BuiltinArgs::None)
+            | (BuiltinMethod::Max, BuiltinArgs::None) => {
+                return Some(numeric_aggregate_apply(recv, self.method));
+            }
+            (BuiltinMethod::Len, BuiltinArgs::None) | (BuiltinMethod::Count, BuiltinArgs::None) => {
+                apply_or_recv!(len_apply(recv))
+            }
             (BuiltinMethod::Keys, BuiltinArgs::None) => return Some(keys_apply(recv)),
             (BuiltinMethod::Values, BuiltinArgs::None) => return Some(values_apply(recv)),
             (BuiltinMethod::Entries, BuiltinArgs::None) => return Some(entries_apply(recv)),
             (BuiltinMethod::Reverse, BuiltinArgs::None) => apply_or_recv!(reverse_any_apply(recv)),
             (BuiltinMethod::Unique, BuiltinArgs::None) => apply_or_recv!(unique_arr_apply(recv)),
+            (BuiltinMethod::Collect, BuiltinArgs::None) => return Some(collect_apply(recv)),
             (BuiltinMethod::Invert, BuiltinArgs::None) => apply_or_recv!(invert_apply(recv)),
             (BuiltinMethod::Type, BuiltinArgs::None) => apply_or_recv!(type_name_apply(recv)),
             (BuiltinMethod::ToString, BuiltinArgs::None) => apply_or_recv!(to_string_apply(recv)),
@@ -597,6 +670,9 @@ impl BuiltinCall {
             (BuiltinMethod::Prepend, BuiltinArgs::Val(item)) => {
                 apply_or_recv!(prepend_apply(recv, item))
             }
+            (BuiltinMethod::Remove, BuiltinArgs::Val(item)) => {
+                apply_or_recv!(remove_value_apply(recv, item))
+            }
             (BuiltinMethod::Diff, BuiltinArgs::ValVec(other)) => {
                 let arr_recv = recv.clone().into_vec().map(Val::arr)?;
                 apply_or_recv!(diff_apply(&arr_recv, other))
@@ -617,6 +693,29 @@ impl BuiltinCall {
                 let arr_recv = recv.clone().into_vec().map(Val::arr)?;
                 apply_or_recv!(chunk_arr_apply(&arr_recv, *n))
             }
+            (BuiltinMethod::RollingSum, BuiltinArgs::Usize(n)) => {
+                apply_or_recv!(rolling_sum_apply(recv, *n))
+            }
+            (BuiltinMethod::RollingAvg, BuiltinArgs::Usize(n)) => {
+                apply_or_recv!(rolling_avg_apply(recv, *n))
+            }
+            (BuiltinMethod::RollingMin, BuiltinArgs::Usize(n)) => {
+                apply_or_recv!(rolling_min_apply(recv, *n))
+            }
+            (BuiltinMethod::RollingMax, BuiltinArgs::Usize(n)) => {
+                apply_or_recv!(rolling_max_apply(recv, *n))
+            }
+            (BuiltinMethod::Lag, BuiltinArgs::Usize(n)) => apply_or_recv!(lag_apply(recv, *n)),
+            (BuiltinMethod::Lead, BuiltinArgs::Usize(n)) => apply_or_recv!(lead_apply(recv, *n)),
+            (BuiltinMethod::DiffWindow, BuiltinArgs::None) => {
+                apply_or_recv!(diff_window_apply(recv))
+            }
+            (BuiltinMethod::PctChange, BuiltinArgs::None) => {
+                apply_or_recv!(pct_change_apply(recv))
+            }
+            (BuiltinMethod::CumMax, BuiltinArgs::None) => apply_or_recv!(cummax_apply(recv)),
+            (BuiltinMethod::CumMin, BuiltinArgs::None) => apply_or_recv!(cummin_apply(recv)),
+            (BuiltinMethod::Zscore, BuiltinArgs::None) => apply_or_recv!(zscore_apply(recv)),
             (BuiltinMethod::Merge, BuiltinArgs::Val(other)) => {
                 apply_or_recv!(merge_apply(recv, other))
             }
@@ -628,6 +727,12 @@ impl BuiltinCall {
             }
             (BuiltinMethod::Rename, BuiltinArgs::Val(other)) => {
                 apply_or_recv!(rename_apply(recv, other))
+            }
+            (BuiltinMethod::Explode, BuiltinArgs::Str(field)) => {
+                apply_or_recv!(explode_apply(recv, field))
+            }
+            (BuiltinMethod::Implode, BuiltinArgs::Str(field)) => {
+                apply_or_recv!(implode_apply(recv, field))
             }
             (BuiltinMethod::Has, BuiltinArgs::Str(k)) => apply_or_recv!(has_apply(recv, k)),
             (BuiltinMethod::GetPath, BuiltinArgs::Str(p)) => {
@@ -707,6 +812,12 @@ impl BuiltinCall {
             (BuiltinMethod::ContainsAll, BuiltinArgs::StrVec(ns)) => {
                 apply_or_recv!(contains_all_apply(recv, ns))
             }
+            (BuiltinMethod::Pick, BuiltinArgs::StrVec(keys)) => {
+                apply_or_recv!(pick_apply(recv, keys))
+            }
+            (BuiltinMethod::Omit, BuiltinArgs::StrVec(keys)) => {
+                apply_or_recv!(omit_apply(recv, keys))
+            }
             (BuiltinMethod::Repeat, BuiltinArgs::Usize(n)) => {
                 apply_or_recv!(repeat_apply(recv, *n))
             }
@@ -759,6 +870,32 @@ impl BuiltinCall {
             (BuiltinMethod::Floor, BuiltinArgs::None) => try_floor_apply(recv),
             (BuiltinMethod::Round, BuiltinArgs::None) => try_round_apply(recv),
             (BuiltinMethod::Abs, BuiltinArgs::None) => try_abs_apply(recv),
+            (BuiltinMethod::RollingSum, BuiltinArgs::Usize(0)) => {
+                Err(EvalError("rolling_sum: window must be > 0".into()))
+            }
+            (BuiltinMethod::RollingAvg, BuiltinArgs::Usize(0)) => {
+                Err(EvalError("rolling_avg: window must be > 0".into()))
+            }
+            (BuiltinMethod::RollingMin, BuiltinArgs::Usize(0)) => {
+                Err(EvalError("rolling_min: window must be > 0".into()))
+            }
+            (BuiltinMethod::RollingMax, BuiltinArgs::Usize(0)) => {
+                Err(EvalError("rolling_max: window must be > 0".into()))
+            }
+            (BuiltinMethod::RollingSum, BuiltinArgs::Usize(_))
+            | (BuiltinMethod::RollingAvg, BuiltinArgs::Usize(_))
+            | (BuiltinMethod::RollingMin, BuiltinArgs::Usize(_))
+            | (BuiltinMethod::RollingMax, BuiltinArgs::Usize(_))
+            | (BuiltinMethod::Lag, BuiltinArgs::Usize(_))
+            | (BuiltinMethod::Lead, BuiltinArgs::Usize(_))
+            | (BuiltinMethod::DiffWindow, BuiltinArgs::None)
+            | (BuiltinMethod::PctChange, BuiltinArgs::None)
+            | (BuiltinMethod::CumMax, BuiltinArgs::None)
+            | (BuiltinMethod::CumMin, BuiltinArgs::None)
+            | (BuiltinMethod::Zscore, BuiltinArgs::None) => self
+                .apply(recv)
+                .map(Some)
+                .ok_or_else(|| EvalError("expected numeric array".into())),
             _ => Ok(self.apply(recv)),
         }
     }
@@ -825,6 +962,11 @@ impl BuiltinCall {
                 | BuiltinMethod::Floor
                 | BuiltinMethod::Round
                 | BuiltinMethod::Abs
+                | BuiltinMethod::DiffWindow
+                | BuiltinMethod::PctChange
+                | BuiltinMethod::CumMax
+                | BuiltinMethod::CumMin
+                | BuiltinMethod::Zscore
                 | BuiltinMethod::Upper
                 | BuiltinMethod::Lower
                 | BuiltinMethod::Trim
@@ -880,6 +1022,8 @@ impl BuiltinCall {
                 BuiltinMethod::GetPath
                 | BuiltinMethod::HasPath
                 | BuiltinMethod::Has
+                | BuiltinMethod::Explode
+                | BuiltinMethod::Implode
                 | BuiltinMethod::DelPath
                 | BuiltinMethod::FlattenKeys
                 | BuiltinMethod::UnflattenKeys,
@@ -926,6 +1070,19 @@ impl BuiltinCall {
             (BuiltinMethod::Repeat, 1) => {
                 Some(Self::new(method, BuiltinArgs::Usize(usize_arg(0)?)))
             }
+            (
+                BuiltinMethod::RollingSum
+                | BuiltinMethod::RollingAvg
+                | BuiltinMethod::RollingMin
+                | BuiltinMethod::RollingMax,
+                1,
+            ) => Some(Self::new(method, BuiltinArgs::Usize(usize_arg(0)?))),
+            (BuiltinMethod::Lag | BuiltinMethod::Lead, 0) => {
+                Some(Self::new(method, BuiltinArgs::Usize(1)))
+            }
+            (BuiltinMethod::Lag | BuiltinMethod::Lead, 1) => {
+                Some(Self::new(method, BuiltinArgs::Usize(usize_arg(0)?)))
+            }
             (BuiltinMethod::Indent, 0) => Some(Self::new(method, BuiltinArgs::Usize(2))),
             (BuiltinMethod::Indent, 1) => {
                 Some(Self::new(method, BuiltinArgs::Usize(usize_arg(0)?)))
@@ -963,6 +1120,617 @@ impl BuiltinCall {
         let call = Self::from_literal_ast_args(name, args)?;
         call.method.is_pipeline_element_method().then_some(call)
     }
+}
+
+/// Direct VM fallback adapter for builtins with AST arguments.
+///
+/// This replaces the old dynamic builtin hash table. It resolves by
+/// `BuiltinMethod`, evaluates only the arguments needed for the resolved
+/// builtin, then executes the canonical `BuiltinCall` implementation in this
+/// module.
+pub(crate) fn eval_builtin_method<F, G, H>(
+    recv: Val,
+    name: &str,
+    args: &[crate::ast::Arg],
+    mut eval_arg: F,
+    mut eval_item: G,
+    mut eval_pair: H,
+) -> Result<Val, EvalError>
+where
+    F: FnMut(&crate::ast::Arg) -> Result<Val, EvalError>,
+    G: FnMut(&Val, &crate::ast::Arg) -> Result<Val, EvalError>,
+    H: FnMut(&Val, &Val, &crate::ast::Arg) -> Result<Val, EvalError>,
+{
+    use crate::ast::{Arg, Expr, ObjField};
+
+    let method = BuiltinMethod::from_name(name);
+    if method == BuiltinMethod::Unknown {
+        return Err(EvalError(format!("unknown method '{}'", name)));
+    }
+
+    macro_rules! arg_val {
+        ($idx:expr) => {{
+            let arg = args
+                .get($idx)
+                .ok_or_else(|| EvalError(format!("{}: missing argument", name)))?;
+            eval_arg(arg)
+        }};
+    }
+
+    macro_rules! str_arg {
+        ($idx:expr) => {{
+            match args.get($idx) {
+                Some(Arg::Pos(Expr::Ident(s))) => Ok(Arc::from(s.as_str())),
+                Some(_) => match arg_val!($idx)? {
+                    Val::Str(s) => Ok(s),
+                    other => Ok(Arc::from(crate::util::val_to_string(&other).as_str())),
+                },
+                None => Err(EvalError(format!("{}: missing argument", name))),
+            }
+        }};
+    }
+
+    macro_rules! i64_arg {
+        ($idx:expr) => {{
+            match arg_val!($idx)? {
+                Val::Int(n) => Ok(n),
+                Val::Float(f) => Ok(f as i64),
+                _ => Err(EvalError(format!("{}: expected number argument", name))),
+            }
+        }};
+    }
+
+    macro_rules! vec_arg {
+        ($idx:expr) => {{
+            arg_val!($idx)?
+                .into_vec()
+                .ok_or_else(|| EvalError(format!("{}: expected array arg", name)))
+        }};
+    }
+
+    macro_rules! str_vec_arg {
+        ($idx:expr) => {{
+            Ok(vec_arg!($idx)?
+                .iter()
+                .map(|v| match v {
+                    Val::Str(s) => s.clone(),
+                    other => Arc::from(crate::util::val_to_string(other).as_str()),
+                })
+                .collect())
+        }};
+    }
+
+    macro_rules! fill_arg {
+        ($idx:expr) => {{
+            match args.get($idx) {
+                None => Ok(' '),
+                Some(_) => {
+                    let s = str_arg!($idx)?;
+                    if s.chars().count() == 1 {
+                        Ok(s.chars().next().unwrap())
+                    } else {
+                        Err(EvalError(format!(
+                            "{}: filler must be a single-char string",
+                            name
+                        )))
+                    }
+                }
+            }
+        }};
+    }
+
+    let call = match method {
+        BuiltinMethod::Len
+        | BuiltinMethod::Count
+        | BuiltinMethod::Sum
+        | BuiltinMethod::Avg
+        | BuiltinMethod::Min
+        | BuiltinMethod::Max
+        | BuiltinMethod::Keys
+        | BuiltinMethod::Values
+        | BuiltinMethod::Entries
+        | BuiltinMethod::Reverse
+        | BuiltinMethod::Unique
+        | BuiltinMethod::Collect
+        | BuiltinMethod::Compact
+        | BuiltinMethod::FromJson
+        | BuiltinMethod::FromPairs
+        | BuiltinMethod::ToPairs
+        | BuiltinMethod::Invert
+        | BuiltinMethod::Enumerate
+        | BuiltinMethod::Pairwise
+        | BuiltinMethod::Ceil
+        | BuiltinMethod::Floor
+        | BuiltinMethod::Round
+        | BuiltinMethod::Abs
+        | BuiltinMethod::DiffWindow
+        | BuiltinMethod::PctChange
+        | BuiltinMethod::CumMax
+        | BuiltinMethod::CumMin
+        | BuiltinMethod::Zscore
+        | BuiltinMethod::Upper
+        | BuiltinMethod::Lower
+        | BuiltinMethod::Trim
+        | BuiltinMethod::TrimLeft
+        | BuiltinMethod::TrimRight
+        | BuiltinMethod::Capitalize
+        | BuiltinMethod::TitleCase
+        | BuiltinMethod::SnakeCase
+        | BuiltinMethod::KebabCase
+        | BuiltinMethod::CamelCase
+        | BuiltinMethod::PascalCase
+        | BuiltinMethod::ReverseStr
+        | BuiltinMethod::HtmlEscape
+        | BuiltinMethod::HtmlUnescape
+        | BuiltinMethod::UrlEncode
+        | BuiltinMethod::UrlDecode
+        | BuiltinMethod::ToBase64
+        | BuiltinMethod::FromBase64
+        | BuiltinMethod::Dedent
+        | BuiltinMethod::Lines
+        | BuiltinMethod::Words
+        | BuiltinMethod::Chars
+        | BuiltinMethod::CharsOf
+        | BuiltinMethod::Bytes
+        | BuiltinMethod::ByteLen
+        | BuiltinMethod::IsBlank
+        | BuiltinMethod::IsNumeric
+        | BuiltinMethod::IsAlpha
+        | BuiltinMethod::IsAscii
+        | BuiltinMethod::ToNumber
+        | BuiltinMethod::ToBool
+        | BuiltinMethod::ParseInt
+        | BuiltinMethod::ParseFloat
+        | BuiltinMethod::ParseBool
+        | BuiltinMethod::Type
+        | BuiltinMethod::ToString
+        | BuiltinMethod::ToJson
+        | BuiltinMethod::ToCsv
+        | BuiltinMethod::ToTsv
+        | BuiltinMethod::Schema
+            if args.is_empty() =>
+        {
+            BuiltinCall::new(method, BuiltinArgs::None)
+        }
+        BuiltinMethod::Sum | BuiltinMethod::Avg | BuiltinMethod::Min | BuiltinMethod::Max => {
+            return numeric_aggregate_projected_apply(&recv, method, |item| {
+                eval_item(item, &args[0])
+            });
+        }
+        BuiltinMethod::Count => {
+            let items = recv
+                .as_vals()
+                .ok_or_else(|| EvalError("count: expected array".into()))?;
+            let mut n: i64 = 0;
+            for item in items.iter() {
+                if crate::util::is_truthy(&eval_item(item, &args[0])?) {
+                    n += 1;
+                }
+            }
+            return Ok(Val::Int(n));
+        }
+        BuiltinMethod::Find | BuiltinMethod::FindAll => {
+            return find_apply(recv, args.len(), |item, idx| eval_item(item, &args[idx]));
+        }
+        BuiltinMethod::FindIndex => {
+            return find_index_apply(recv, args.len(), |item, idx| eval_item(item, &args[idx]));
+        }
+        BuiltinMethod::IndicesWhere => {
+            return indices_where_apply(recv, args.len(), |item, idx| eval_item(item, &args[idx]));
+        }
+        BuiltinMethod::UniqueBy => {
+            let key_arg = args
+                .first()
+                .ok_or_else(|| EvalError("unique_by: requires key fn".into()))?;
+            return unique_by_apply(recv, |item| eval_item(item, key_arg));
+        }
+        BuiltinMethod::MaxBy | BuiltinMethod::MinBy => {
+            let key_arg = args
+                .first()
+                .ok_or_else(|| EvalError(format!("{}: requires a key expression", name)))?;
+            return extreme_by_apply(recv, method == BuiltinMethod::MaxBy, |item| {
+                eval_item(item, key_arg)
+            });
+        }
+        BuiltinMethod::DeepFind => {
+            return deep_find_apply(recv, args.len(), |item, idx| eval_item(item, &args[idx]));
+        }
+        BuiltinMethod::DeepShape => {
+            let arg = args
+                .first()
+                .ok_or_else(|| EvalError("shape: requires pattern".into()))?;
+            let expr = match arg {
+                Arg::Pos(e) | Arg::Named(_, e) => e,
+            };
+            let Expr::Object(fields) = expr else {
+                return Err(EvalError(
+                    "shape: expected `{k1, k2, ...}` object pattern".into(),
+                ));
+            };
+            let mut keys = Vec::with_capacity(fields.len());
+            for field in fields {
+                match field {
+                    ObjField::Short(k) => keys.push(Arc::from(k.as_str())),
+                    ObjField::Kv { key, val, .. } if matches!(val, Expr::Ident(n) if n == key) => {
+                        keys.push(Arc::from(key.as_str()));
+                    }
+                    _ => return Err(EvalError("shape: unsupported pattern field".into())),
+                }
+            }
+            return deep_shape_apply(recv, &keys);
+        }
+        BuiltinMethod::DeepLike => {
+            let arg = args
+                .first()
+                .ok_or_else(|| EvalError("like: requires pattern".into()))?;
+            let expr = match arg {
+                Arg::Pos(e) | Arg::Named(_, e) => e,
+            };
+            let Expr::Object(fields) = expr else {
+                return Err(EvalError(
+                    "like: expected `{k: lit, ...}` object pattern".into(),
+                ));
+            };
+            let mut pats = Vec::with_capacity(fields.len());
+            for field in fields {
+                match field {
+                    ObjField::Kv { key, val, .. } => {
+                        pats.push((Arc::from(key.as_str()), eval_arg(&Arg::Pos(val.clone()))?));
+                    }
+                    ObjField::Short(k) => {
+                        pats.push((
+                            Arc::from(k.as_str()),
+                            eval_arg(&Arg::Pos(Expr::Ident(k.clone())))?,
+                        ));
+                    }
+                    _ => return Err(EvalError("like: unsupported pattern field".into())),
+                }
+            }
+            return deep_like_apply(recv, &pats);
+        }
+        BuiltinMethod::Walk | BuiltinMethod::WalkPre => {
+            let arg = args
+                .first()
+                .ok_or_else(|| EvalError("walk: requires fn".into()))?;
+            let pre = method == BuiltinMethod::WalkPre;
+            let mut eval = |value: Val| eval_item(&value, arg);
+            return walk_apply(recv, pre, &mut eval);
+        }
+        BuiltinMethod::Rec => {
+            let arg = args
+                .first()
+                .ok_or_else(|| EvalError("rec: requires step expression".into()))?;
+            return rec_apply(recv, |value| eval_item(&value, arg));
+        }
+        BuiltinMethod::TracePath => {
+            let arg = args
+                .first()
+                .ok_or_else(|| EvalError("trace_path: requires predicate".into()))?;
+            return trace_path_apply(recv, |value| eval_item(value, arg));
+        }
+        BuiltinMethod::Fanout => {
+            return fanout_apply(&recv, args.len(), |value, idx| eval_item(value, &args[idx]));
+        }
+        BuiltinMethod::ZipShape => {
+            let mut names = Vec::with_capacity(args.len());
+            for arg in args {
+                let name: Arc<str> = match arg {
+                    Arg::Named(n, _) => Arc::from(n.as_str()),
+                    Arg::Pos(Expr::Ident(n)) => Arc::from(n.as_str()),
+                    _ => {
+                        return Err(EvalError(
+                            "zip_shape: args must be `name = expr` or bare identifier".into(),
+                        ))
+                    }
+                };
+                names.push(name);
+            }
+            return zip_shape_apply(&recv, &names, |value, idx| eval_item(value, &args[idx]));
+        }
+        BuiltinMethod::GroupShape => {
+            let key_arg = args
+                .first()
+                .ok_or_else(|| EvalError("group_shape: requires key".into()))?;
+            let shape_arg = args
+                .get(1)
+                .ok_or_else(|| EvalError("group_shape: requires shape".into()))?;
+            return group_shape_apply(recv, |value, idx| {
+                if idx == 0 {
+                    eval_item(&value, key_arg)
+                } else {
+                    eval_item(&value, shape_arg)
+                }
+            });
+        }
+        BuiltinMethod::Sort => {
+            if args.is_empty() {
+                return sort_apply(recv);
+            }
+            let mut key_args = Vec::with_capacity(args.len());
+            let mut desc = Vec::with_capacity(args.len());
+            for arg in args {
+                match arg {
+                    Arg::Pos(Expr::Lambda { params, .. })
+                    | Arg::Named(_, Expr::Lambda { params, .. })
+                        if params.len() == 2 =>
+                    {
+                        return sort_comparator_apply(recv, |left, right| {
+                            eval_pair(left, right, arg)
+                        });
+                    }
+                    Arg::Pos(Expr::UnaryNeg(inner)) => {
+                        desc.push(true);
+                        key_args.push(Arg::Pos((**inner).clone()));
+                    }
+                    Arg::Pos(e) => {
+                        desc.push(false);
+                        key_args.push(Arg::Pos(e.clone()));
+                    }
+                    Arg::Named(name, Expr::UnaryNeg(inner)) => {
+                        desc.push(true);
+                        key_args.push(Arg::Named(name.clone(), (**inner).clone()));
+                    }
+                    Arg::Named(name, e) => {
+                        desc.push(false);
+                        key_args.push(Arg::Named(name.clone(), e.clone()));
+                    }
+                }
+            }
+            return sort_by_apply(recv, &desc, |item, idx| eval_item(item, &key_args[idx]));
+        }
+        BuiltinMethod::Flatten => {
+            let depth = if args.is_empty() {
+                1
+            } else {
+                i64_arg!(0)?.max(0) as usize
+            };
+            BuiltinCall::new(method, BuiltinArgs::Usize(depth))
+        }
+        BuiltinMethod::First | BuiltinMethod::Last => {
+            let n = if args.is_empty() { 1 } else { i64_arg!(0)? };
+            BuiltinCall::new(method, BuiltinArgs::I64(n))
+        }
+        BuiltinMethod::Nth => BuiltinCall::new(method, BuiltinArgs::I64(i64_arg!(0)?)),
+        BuiltinMethod::Append | BuiltinMethod::Prepend | BuiltinMethod::Set => {
+            let item = if args.is_empty() {
+                Val::Null
+            } else {
+                arg_val!(0)?
+            };
+            BuiltinCall::new(method, BuiltinArgs::Val(item))
+        }
+        BuiltinMethod::Or => {
+            let default = if args.is_empty() {
+                Val::Null
+            } else {
+                arg_val!(0)?
+            };
+            BuiltinCall::new(method, BuiltinArgs::Val(default))
+        }
+        BuiltinMethod::Includes | BuiltinMethod::Index | BuiltinMethod::IndicesOf => {
+            BuiltinCall::new(method, BuiltinArgs::Val(arg_val!(0)?))
+        }
+        BuiltinMethod::Diff | BuiltinMethod::Intersect | BuiltinMethod::Union => {
+            BuiltinCall::new(method, BuiltinArgs::ValVec(vec_arg!(0)?))
+        }
+        BuiltinMethod::Window
+        | BuiltinMethod::Chunk
+        | BuiltinMethod::RollingSum
+        | BuiltinMethod::RollingAvg
+        | BuiltinMethod::RollingMin
+        | BuiltinMethod::RollingMax => {
+            BuiltinCall::new(method, BuiltinArgs::Usize(i64_arg!(0)?.max(0) as usize))
+        }
+        BuiltinMethod::Lag | BuiltinMethod::Lead => {
+            let n = if args.is_empty() {
+                1
+            } else {
+                i64_arg!(0)?.max(0) as usize
+            };
+            BuiltinCall::new(method, BuiltinArgs::Usize(n))
+        }
+        BuiltinMethod::Merge
+        | BuiltinMethod::DeepMerge
+        | BuiltinMethod::Defaults
+        | BuiltinMethod::Rename => BuiltinCall::new(method, BuiltinArgs::Val(arg_val!(0)?)),
+        BuiltinMethod::Remove => match args.first() {
+            Some(Arg::Pos(Expr::Lambda { .. })) | Some(Arg::Named(_, Expr::Lambda { .. })) => {
+                return remove_predicate_apply(recv, |item| eval_item(item, &args[0]));
+            }
+            Some(_) => BuiltinCall::new(method, BuiltinArgs::Val(arg_val!(0)?)),
+            None => return Err(EvalError("remove: requires arg".into())),
+        },
+        BuiltinMethod::Zip => {
+            let other = args
+                .first()
+                .map(|arg| eval_arg(arg))
+                .transpose()?
+                .unwrap_or_else(|| Val::arr(Vec::new()));
+            return zip_apply(recv, other);
+        }
+        BuiltinMethod::ZipLongest => {
+            let mut other = Val::arr(Vec::new());
+            let mut fill = Val::Null;
+            for arg in args {
+                match arg {
+                    Arg::Pos(_) => other = eval_arg(arg)?,
+                    Arg::Named(n, _) if n == "fill" => fill = eval_arg(arg)?,
+                    Arg::Named(_, _) => {}
+                }
+            }
+            return zip_longest_apply(recv, other, fill);
+        }
+        BuiltinMethod::EquiJoin => {
+            let other = arg_val!(0)?;
+            let lhs_key = str_arg!(1)?;
+            let rhs_key = str_arg!(2)?;
+            return equi_join_apply(recv, other, &lhs_key, &rhs_key);
+        }
+        BuiltinMethod::Pivot => {
+            return pivot_apply(recv, args.len(), |item, idx| match &args[idx] {
+                Arg::Pos(Expr::Str(s)) | Arg::Named(_, Expr::Str(s)) => {
+                    Ok(item.get_field(s.as_str()))
+                }
+                arg => eval_item(item, arg),
+            });
+        }
+        BuiltinMethod::Slice => {
+            let start = i64_arg!(0)?;
+            let end = if args.len() > 1 {
+                Some(i64_arg!(1)?)
+            } else {
+                None
+            };
+            BuiltinCall::new(
+                method,
+                BuiltinArgs::I64Opt {
+                    first: start,
+                    second: end,
+                },
+            )
+        }
+        BuiltinMethod::Join => {
+            let sep = if args.is_empty() {
+                Arc::from("")
+            } else {
+                str_arg!(0)?
+            };
+            BuiltinCall::new(method, BuiltinArgs::Str(sep))
+        }
+        BuiltinMethod::FlattenKeys | BuiltinMethod::UnflattenKeys if args.is_empty() => {
+            BuiltinCall::new(method, BuiltinArgs::Str(Arc::from(".")))
+        }
+        BuiltinMethod::GetPath
+        | BuiltinMethod::HasPath
+        | BuiltinMethod::Has
+        | BuiltinMethod::Missing
+        | BuiltinMethod::Explode
+        | BuiltinMethod::Implode
+        | BuiltinMethod::DelPath
+        | BuiltinMethod::FlattenKeys
+        | BuiltinMethod::UnflattenKeys
+        | BuiltinMethod::StartsWith
+        | BuiltinMethod::EndsWith
+        | BuiltinMethod::IndexOf
+        | BuiltinMethod::LastIndexOf
+        | BuiltinMethod::StripPrefix
+        | BuiltinMethod::StripSuffix
+        | BuiltinMethod::Matches
+        | BuiltinMethod::Scan
+        | BuiltinMethod::Split
+        | BuiltinMethod::ReMatch
+        | BuiltinMethod::ReMatchFirst
+        | BuiltinMethod::ReMatchAll
+        | BuiltinMethod::ReCaptures
+        | BuiltinMethod::ReCapturesAll
+        | BuiltinMethod::ReSplit => BuiltinCall::new(method, BuiltinArgs::Str(str_arg!(0)?)),
+        BuiltinMethod::Replace
+        | BuiltinMethod::ReplaceAll
+        | BuiltinMethod::ReReplace
+        | BuiltinMethod::ReReplaceAll => BuiltinCall::new(
+            method,
+            BuiltinArgs::StrPair {
+                first: str_arg!(0)?,
+                second: str_arg!(1)?,
+            },
+        ),
+        BuiltinMethod::ContainsAny | BuiltinMethod::ContainsAll => {
+            BuiltinCall::new(method, BuiltinArgs::StrVec(str_vec_arg!(0)?))
+        }
+        BuiltinMethod::Pick => {
+            let mut specs = Vec::with_capacity(args.len());
+            for arg in args {
+                let resolved: Option<(Arc<str>, Arc<str>)> = match arg {
+                    Arg::Pos(Expr::Ident(s)) => {
+                        let key: Arc<str> = Arc::from(s.as_str());
+                        Some((key.clone(), key))
+                    }
+                    Arg::Pos(_) => match eval_arg(arg)? {
+                        Val::Str(s) => {
+                            let out_key: Arc<str> = if s.contains('.') || s.contains('[') {
+                                match parse_path_segs(&s).first() {
+                                    Some(PathSeg::Field(f)) => Arc::from(f.as_str()),
+                                    Some(PathSeg::Index(i)) => Arc::from(i.to_string().as_str()),
+                                    None => s.clone(),
+                                }
+                            } else {
+                                s.clone()
+                            };
+                            Some((out_key, s))
+                        }
+                        _ => None,
+                    },
+                    Arg::Named(alias, Expr::Ident(src)) => {
+                        Some((Arc::from(alias.as_str()), Arc::from(src.as_str())))
+                    }
+                    Arg::Named(alias, _) => match eval_arg(arg)? {
+                        Val::Str(s) => Some((Arc::from(alias.as_str()), s)),
+                        _ => None,
+                    },
+                };
+                let Some((out_key, src)) = resolved else {
+                    continue;
+                };
+                let source = if src.contains('.') || src.contains('[') {
+                    PickSource::Path(parse_path_segs(&src))
+                } else {
+                    PickSource::Field(src)
+                };
+                specs.push(PickSpec { out_key, source });
+            }
+            return pick_specs_apply(&recv, &specs)
+                .ok_or_else(|| EvalError("pick: expected object or array of objects".into()));
+        }
+        BuiltinMethod::Omit => {
+            let mut keys = Vec::with_capacity(args.len());
+            for idx in 0..args.len() {
+                keys.push(str_arg!(idx)?);
+            }
+            BuiltinCall::new(method, BuiltinArgs::StrVec(keys))
+        }
+        BuiltinMethod::Repeat | BuiltinMethod::Indent => {
+            let n = if args.is_empty() {
+                if matches!(method, BuiltinMethod::Indent) {
+                    2
+                } else {
+                    1
+                }
+            } else {
+                i64_arg!(0)?.max(0) as usize
+            };
+            BuiltinCall::new(method, BuiltinArgs::Usize(n))
+        }
+        BuiltinMethod::PadLeft | BuiltinMethod::PadRight | BuiltinMethod::Center => {
+            BuiltinCall::new(
+                method,
+                BuiltinArgs::Pad {
+                    width: i64_arg!(0)?.max(0) as usize,
+                    fill: fill_arg!(1)?,
+                },
+            )
+        }
+        BuiltinMethod::SetPath => {
+            return set_path_apply(&recv, &str_arg!(0)?, &arg_val!(1)?)
+                .ok_or_else(|| EvalError("set_path: builtin unsupported".into()));
+        }
+        BuiltinMethod::DelPaths => {
+            let mut paths = Vec::with_capacity(args.len());
+            for idx in 0..args.len() {
+                paths.push(str_arg!(idx)?);
+            }
+            return del_paths_apply(&recv, &paths)
+                .ok_or_else(|| EvalError("del_paths: builtin unsupported".into()));
+        }
+        _ => {
+            return Err(EvalError(format!(
+                "{}: builtin not migrated to builtins.rs AST adapter",
+                name
+            )));
+        }
+    };
+
+    call.try_apply(&recv)?
+        .ok_or_else(|| EvalError(format!("{}: builtin unsupported", name)))
 }
 
 impl BuiltinMethod {
@@ -1006,6 +1774,11 @@ impl BuiltinMethod {
                 | Self::Floor
                 | Self::Round
                 | Self::Abs
+                | Self::DiffWindow
+                | Self::PctChange
+                | Self::CumMax
+                | Self::CumMin
+                | Self::Zscore
                 | Self::ToNumber
                 | Self::ToBool
                 | Self::ParseInt
@@ -1202,6 +1975,683 @@ where
     Ok(out)
 }
 
+// ── sort ───────────────────────────────────────────────────────────
+
+#[inline]
+pub fn sort_apply(recv: Val) -> Result<Val, EvalError> {
+    match recv {
+        Val::IntVec(a) => {
+            let mut v = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
+            v.sort();
+            Ok(Val::int_vec(v))
+        }
+        Val::FloatVec(a) => {
+            let mut v = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
+            v.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+            Ok(Val::float_vec(v))
+        }
+        other => {
+            let mut items = other
+                .into_vec()
+                .ok_or_else(|| EvalError("sort: expected array".into()))?;
+            items.sort_by(cmp_vals);
+            Ok(Val::arr(items))
+        }
+    }
+}
+
+#[inline]
+pub fn sort_by_apply<F>(recv: Val, desc: &[bool], mut eval: F) -> Result<Val, EvalError>
+where
+    F: FnMut(&Val, usize) -> Result<Val, EvalError>,
+{
+    let items = recv
+        .into_vec()
+        .ok_or_else(|| EvalError("sort: expected array".into()))?;
+    let mut keyed: Vec<(Vec<Val>, Val)> = Vec::with_capacity(items.len());
+    for item in items {
+        let mut keys = Vec::with_capacity(desc.len());
+        for idx in 0..desc.len() {
+            keys.push(eval(&item, idx)?);
+        }
+        keyed.push((keys, item));
+    }
+    keyed.sort_by(|(xk, _), (yk, _)| {
+        for (idx, is_desc) in desc.iter().enumerate() {
+            let ord = cmp_vals(&xk[idx], &yk[idx]);
+            if ord != std::cmp::Ordering::Equal {
+                return if *is_desc { ord.reverse() } else { ord };
+            }
+        }
+        std::cmp::Ordering::Equal
+    });
+    Ok(Val::arr(keyed.into_iter().map(|(_, v)| v).collect()))
+}
+
+#[inline]
+pub fn sort_comparator_apply<F>(recv: Val, mut eval_pair: F) -> Result<Val, EvalError>
+where
+    F: FnMut(&Val, &Val) -> Result<Val, EvalError>,
+{
+    let mut items = recv
+        .into_vec()
+        .ok_or_else(|| EvalError("sort: expected array".into()))?;
+    let mut err_cell: Option<EvalError> = None;
+    items.sort_by(|x, y| {
+        if err_cell.is_some() {
+            return std::cmp::Ordering::Equal;
+        }
+        match eval_pair(x, y) {
+            Ok(Val::Bool(true)) => std::cmp::Ordering::Less,
+            Ok(_) => std::cmp::Ordering::Greater,
+            Err(e) => {
+                err_cell = Some(e);
+                std::cmp::Ordering::Equal
+            }
+        }
+    });
+    if let Some(e) = err_cell {
+        Err(e)
+    } else {
+        Ok(Val::arr(items))
+    }
+}
+
+#[inline]
+pub fn remove_predicate_apply<F>(recv: Val, mut eval: F) -> Result<Val, EvalError>
+where
+    F: FnMut(&Val) -> Result<Val, EvalError>,
+{
+    let items = recv
+        .into_vec()
+        .ok_or_else(|| EvalError("remove: expected array".into()))?;
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        if !is_truthy(&eval(&item)?) {
+            out.push(item);
+        }
+    }
+    Ok(Val::arr(out))
+}
+
+#[inline]
+pub fn find_apply<F>(recv: Val, pred_count: usize, mut eval: F) -> Result<Val, EvalError>
+where
+    F: FnMut(&Val, usize) -> Result<Val, EvalError>,
+{
+    if pred_count == 0 {
+        return Err(EvalError("find: requires at least one predicate".into()));
+    }
+    let items = recv
+        .into_vec()
+        .ok_or_else(|| EvalError("find: expected array".into()))?;
+    let mut out = Vec::with_capacity(items.len());
+    'outer: for item in items {
+        for idx in 0..pred_count {
+            if !is_truthy(&eval(&item, idx)?) {
+                continue 'outer;
+            }
+        }
+        out.push(item);
+    }
+    Ok(Val::arr(out))
+}
+
+#[inline]
+pub fn unique_by_apply<F>(recv: Val, mut eval: F) -> Result<Val, EvalError>
+where
+    F: FnMut(&Val) -> Result<Val, EvalError>,
+{
+    let items = recv
+        .into_vec()
+        .ok_or_else(|| EvalError("unique_by: expected array".into()))?;
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        let key = eval(&item)?;
+        if seen.insert(crate::util::val_to_key(&key)) {
+            out.push(item);
+        }
+    }
+    Ok(Val::arr(out))
+}
+
+#[inline]
+pub fn find_index_apply<F>(recv: Val, pred_count: usize, mut eval: F) -> Result<Val, EvalError>
+where
+    F: FnMut(&Val, usize) -> Result<Val, EvalError>,
+{
+    if pred_count == 0 {
+        return Err(EvalError("find_index: requires a predicate".into()));
+    }
+    let items = recv
+        .into_vec()
+        .ok_or_else(|| EvalError("find_index: expected array".into()))?;
+    'outer: for (idx, item) in items.iter().enumerate() {
+        for pred_idx in 0..pred_count {
+            if !is_truthy(&eval(item, pred_idx)?) {
+                continue 'outer;
+            }
+        }
+        return Ok(Val::Int(idx as i64));
+    }
+    Ok(Val::Null)
+}
+
+#[inline]
+pub fn indices_where_apply<F>(recv: Val, pred_count: usize, mut eval: F) -> Result<Val, EvalError>
+where
+    F: FnMut(&Val, usize) -> Result<Val, EvalError>,
+{
+    if pred_count == 0 {
+        return Err(EvalError("indices_where: requires a predicate".into()));
+    }
+    let items = recv
+        .into_vec()
+        .ok_or_else(|| EvalError("indices_where: expected array".into()))?;
+    let mut out = Vec::new();
+    'outer: for (idx, item) in items.iter().enumerate() {
+        for pred_idx in 0..pred_count {
+            if !is_truthy(&eval(item, pred_idx)?) {
+                continue 'outer;
+            }
+        }
+        out.push(idx as i64);
+    }
+    Ok(Val::int_vec(out))
+}
+
+#[inline]
+pub fn extreme_by_apply<F>(recv: Val, want_max: bool, mut eval: F) -> Result<Val, EvalError>
+where
+    F: FnMut(&Val) -> Result<Val, EvalError>,
+{
+    let items = recv
+        .into_vec()
+        .ok_or_else(|| EvalError("max_by/min_by: expected array".into()))?;
+    if items.is_empty() {
+        return Ok(Val::Null);
+    }
+    let mut best_idx = 0usize;
+    let mut best_key: Option<Val> = None;
+    for (idx, item) in items.iter().enumerate() {
+        let key = eval(item)?;
+        let take = match &best_key {
+            None => true,
+            Some(best) => {
+                let ord = cmp_vals(&key, best);
+                if want_max {
+                    ord == std::cmp::Ordering::Greater
+                } else {
+                    ord == std::cmp::Ordering::Less
+                }
+            }
+        };
+        if take {
+            best_idx = idx;
+            best_key = Some(key);
+        }
+    }
+    Ok(items.into_iter().nth(best_idx).unwrap_or(Val::Null))
+}
+
+#[inline]
+pub fn collect_apply(recv: &Val) -> Val {
+    match recv {
+        Val::Null => Val::arr(Vec::new()),
+        Val::Arr(_) | Val::IntVec(_) | Val::FloatVec(_) | Val::StrVec(_) | Val::StrSliceVec(_) => {
+            recv.clone()
+        }
+        other => Val::arr(vec![other.clone()]),
+    }
+}
+
+#[inline]
+pub fn zip_apply(recv: Val, other: Val) -> Result<Val, EvalError> {
+    zip_arrays(recv, other, false, Val::Null)
+}
+
+#[inline]
+pub fn zip_longest_apply(recv: Val, other: Val, fill: Val) -> Result<Val, EvalError> {
+    zip_arrays(recv, other, true, fill)
+}
+
+#[inline]
+pub fn global_zip_apply(arrs: &[Val]) -> Val {
+    let len = arrs.iter().filter_map(|a| a.arr_len()).min().unwrap_or(0);
+    Val::arr(
+        (0..len)
+            .map(|i| Val::arr(arrs.iter().map(|a| a.get_index(i as i64)).collect()))
+            .collect(),
+    )
+}
+
+#[inline]
+pub fn global_zip_longest_apply(arrs: &[Val], fill: &Val) -> Val {
+    let len = arrs.iter().filter_map(|a| a.arr_len()).max().unwrap_or(0);
+    Val::arr(
+        (0..len)
+            .map(|i| {
+                Val::arr(
+                    arrs.iter()
+                        .map(|a| {
+                            if (i as usize) < a.arr_len().unwrap_or(0) {
+                                a.get_index(i as i64)
+                            } else {
+                                fill.clone()
+                            }
+                        })
+                        .collect(),
+                )
+            })
+            .collect(),
+    )
+}
+
+#[inline]
+pub fn global_product_apply(arrs: &[Val]) -> Val {
+    let arrays: Vec<Vec<Val>> = arrs
+        .iter()
+        .map(|v| v.clone().into_vec().unwrap_or_default())
+        .collect();
+    Val::arr(
+        crate::util::cartesian(&arrays)
+            .into_iter()
+            .map(Val::arr)
+            .collect(),
+    )
+}
+
+#[inline]
+pub fn range_apply(nums: &[i64]) -> Result<Val, EvalError> {
+    if nums.is_empty() || nums.len() > 3 {
+        return Err(EvalError(format!(
+            "range: expected 1..3 args, got {}",
+            nums.len()
+        )));
+    }
+    let (from, upto, step) = match nums {
+        [n] => (0, *n, 1i64),
+        [f, u] => (*f, *u, 1i64),
+        [f, u, s] => (*f, *u, *s),
+        _ => unreachable!(),
+    };
+    if step == 0 {
+        return Ok(Val::int_vec(Vec::new()));
+    }
+    let len_hint = if step > 0 && upto > from {
+        (((upto - from) + step - 1) / step).max(0) as usize
+    } else if step < 0 && upto < from {
+        (((from - upto) + (-step) - 1) / (-step)).max(0) as usize
+    } else {
+        0
+    };
+    let mut out = Vec::with_capacity(len_hint);
+    let mut i = from;
+    if step > 0 {
+        while i < upto {
+            out.push(i);
+            i += step;
+        }
+    } else {
+        while i > upto {
+            out.push(i);
+            i += step;
+        }
+    }
+    Ok(Val::int_vec(out))
+}
+
+#[inline]
+pub fn equi_join_apply(
+    recv: Val,
+    other: Val,
+    lhs_key: &str,
+    rhs_key: &str,
+) -> Result<Val, EvalError> {
+    use std::collections::HashMap;
+
+    let left = recv
+        .into_vec()
+        .ok_or_else(|| EvalError("equi_join: lhs not array".into()))?;
+    let right = other
+        .into_vec()
+        .ok_or_else(|| EvalError("equi_join: rhs not array".into()))?;
+    let mut idx: HashMap<String, Vec<Val>> = HashMap::new();
+    for r in right {
+        let key = match &r {
+            Val::Obj(o) => o.get(rhs_key).map(crate::util::val_to_key),
+            _ => None,
+        };
+        if let Some(k) = key {
+            idx.entry(k).or_default().push(r);
+        }
+    }
+
+    let mut out = Vec::new();
+    for l in left {
+        let key = match &l {
+            Val::Obj(o) => o.get(lhs_key).map(crate::util::val_to_key),
+            _ => None,
+        };
+        let Some(k) = key else {
+            continue;
+        };
+        let Some(matches) = idx.get(&k) else {
+            continue;
+        };
+        for r in matches {
+            out.push(merge_pair(&l, r));
+        }
+    }
+    Ok(Val::arr(out))
+}
+
+fn merge_pair(left: &Val, right: &Val) -> Val {
+    match (left, right) {
+        (Val::Obj(lo), Val::Obj(ro)) => {
+            let mut out = (**lo).clone();
+            for (k, v) in ro.iter() {
+                out.insert(k.clone(), v.clone());
+            }
+            Val::obj(out)
+        }
+        _ => left.clone(),
+    }
+}
+
+#[inline]
+pub fn pivot_apply<F>(recv: Val, arg_count: usize, mut eval: F) -> Result<Val, EvalError>
+where
+    F: FnMut(&Val, usize) -> Result<Val, EvalError>,
+{
+    let items = recv
+        .into_vec()
+        .ok_or_else(|| EvalError("pivot: expected array".into()))?;
+
+    #[inline]
+    fn to_key(v: Val) -> Arc<str> {
+        match v {
+            Val::Str(s) => s,
+            other => Arc::<str>::from(crate::util::val_to_key(&other)),
+        }
+    }
+
+    if arg_count >= 3 {
+        let mut map: IndexMap<Arc<str>, IndexMap<Arc<str>, Val>> = IndexMap::new();
+        for item in &items {
+            let row = to_key(eval(item, 0)?);
+            let col = to_key(eval(item, 1)?);
+            let value = eval(item, 2)?;
+            map.entry(row).or_default().insert(col, value);
+        }
+        let out = map
+            .into_iter()
+            .map(|(k, inner)| (k, Val::obj(inner)))
+            .collect();
+        return Ok(Val::obj(out));
+    }
+
+    if arg_count < 2 {
+        return Err(EvalError("pivot: requires key arg and value arg".into()));
+    }
+
+    let mut map = IndexMap::with_capacity(items.len());
+    for item in &items {
+        let key = to_key(eval(item, 0)?);
+        let value = eval(item, 1)?;
+        map.insert(key, value);
+    }
+    Ok(Val::obj(map))
+}
+
+fn walk_pre<F: FnMut(&Val)>(value: &Val, f: &mut F) {
+    f(value);
+    match value {
+        Val::Arr(items) => {
+            for child in items.iter() {
+                walk_pre(child, f);
+            }
+        }
+        Val::Obj(map) => {
+            for (_, child) in map.iter() {
+                walk_pre(child, f);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[inline]
+pub fn deep_find_apply<F>(recv: Val, pred_count: usize, mut eval: F) -> Result<Val, EvalError>
+where
+    F: FnMut(&Val, usize) -> Result<Val, EvalError>,
+{
+    if pred_count == 0 {
+        return Err(EvalError("find: requires at least one predicate".into()));
+    }
+    let mut out = Vec::new();
+    let mut err_cell: Option<EvalError> = None;
+    walk_pre(&recv, &mut |node| {
+        if err_cell.is_some() {
+            return;
+        }
+        for idx in 0..pred_count {
+            match eval(node, idx) {
+                Ok(v) if is_truthy(&v) => {}
+                Ok(_) => return,
+                Err(e) => {
+                    err_cell = Some(e);
+                    return;
+                }
+            }
+        }
+        out.push(node.clone());
+    });
+    if let Some(e) = err_cell {
+        Err(e)
+    } else {
+        Ok(Val::arr(out))
+    }
+}
+
+#[inline]
+pub fn deep_shape_apply(recv: Val, keys: &[Arc<str>]) -> Result<Val, EvalError> {
+    if keys.is_empty() {
+        return Err(EvalError("shape: empty pattern".into()));
+    }
+    let mut out = Vec::new();
+    walk_pre(&recv, &mut |node| {
+        if let Val::Obj(map) = node {
+            if keys.iter().all(|k| map.contains_key(k.as_ref())) {
+                out.push(node.clone());
+            }
+        }
+    });
+    Ok(Val::arr(out))
+}
+
+#[inline]
+pub fn deep_like_apply(recv: Val, pats: &[(Arc<str>, Val)]) -> Result<Val, EvalError> {
+    if pats.is_empty() {
+        return Err(EvalError("like: empty pattern".into()));
+    }
+    let mut out = Vec::new();
+    walk_pre(&recv, &mut |node| {
+        if let Val::Obj(map) = node {
+            let ok = pats.iter().all(|(key, want)| {
+                map.get(key.as_ref())
+                    .map(|got| crate::util::vals_eq(got, want))
+                    .unwrap_or(false)
+            });
+            if ok {
+                out.push(node.clone());
+            }
+        }
+    });
+    Ok(Val::arr(out))
+}
+
+pub fn walk_apply<F>(recv: Val, pre: bool, eval: &mut F) -> Result<Val, EvalError>
+where
+    F: FnMut(Val) -> Result<Val, EvalError>,
+{
+    let transformed = if pre { eval(recv)? } else { recv };
+    let after_children = match transformed {
+        Val::Arr(a) => {
+            let items = Arc::try_unwrap(a).unwrap_or_else(|arc| (*arc).clone());
+            let mut out = Vec::with_capacity(items.len());
+            for child in items {
+                out.push(walk_apply(child, pre, eval)?);
+            }
+            Val::arr(out)
+        }
+        Val::IntVec(a) => {
+            let mut out = Vec::with_capacity(a.len());
+            for n in a.iter() {
+                out.push(walk_apply(Val::Int(*n), pre, eval)?);
+            }
+            Val::arr(out)
+        }
+        Val::FloatVec(a) => {
+            let mut out = Vec::with_capacity(a.len());
+            for n in a.iter() {
+                out.push(walk_apply(Val::Float(*n), pre, eval)?);
+            }
+            Val::arr(out)
+        }
+        Val::Obj(m) => {
+            let items = Arc::try_unwrap(m).unwrap_or_else(|arc| (*arc).clone());
+            let mut out = IndexMap::with_capacity(items.len());
+            for (k, child) in items {
+                out.insert(k, walk_apply(child, pre, eval)?);
+            }
+            Val::obj(out)
+        }
+        other => other,
+    };
+    if pre {
+        Ok(after_children)
+    } else {
+        eval(after_children)
+    }
+}
+
+#[inline]
+pub fn rec_apply<F>(mut recv: Val, mut eval: F) -> Result<Val, EvalError>
+where
+    F: FnMut(Val) -> Result<Val, EvalError>,
+{
+    for _ in 0..10_000 {
+        let next = eval(recv.clone())?;
+        if crate::util::vals_eq(&recv, &next) {
+            return Ok(next);
+        }
+        recv = next;
+    }
+    Err(EvalError(
+        "rec: exceeded 10000 iterations without reaching fixpoint".into(),
+    ))
+}
+
+pub fn trace_path_apply<F>(recv: Val, mut eval: F) -> Result<Val, EvalError>
+where
+    F: FnMut(&Val) -> Result<Val, EvalError>,
+{
+    fn walk<F>(value: &Val, path: String, eval: &mut F, out: &mut Vec<Val>) -> Result<(), EvalError>
+    where
+        F: FnMut(&Val) -> Result<Val, EvalError>,
+    {
+        if is_truthy(&eval(value)?) {
+            let mut row = IndexMap::with_capacity(2);
+            row.insert(Arc::from("path"), Val::Str(Arc::from(path.as_str())));
+            row.insert(Arc::from("value"), value.clone());
+            out.push(Val::obj(row));
+        }
+        match value {
+            Val::Arr(items) => {
+                for (idx, child) in items.iter().enumerate() {
+                    walk(child, format!("{}[{}]", path, idx), eval, out)?;
+                }
+            }
+            Val::IntVec(items) => {
+                for (idx, n) in items.iter().enumerate() {
+                    walk(&Val::Int(*n), format!("{}[{}]", path, idx), eval, out)?;
+                }
+            }
+            Val::FloatVec(items) => {
+                for (idx, n) in items.iter().enumerate() {
+                    walk(&Val::Float(*n), format!("{}[{}]", path, idx), eval, out)?;
+                }
+            }
+            Val::Obj(map) => {
+                for (key, child) in map.iter() {
+                    walk(child, format!("{}.{}", path, key), eval, out)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    let mut out = Vec::new();
+    walk(&recv, String::from("$"), &mut eval, &mut out)?;
+    Ok(Val::arr(out))
+}
+
+#[inline]
+pub fn fanout_apply<F>(recv: &Val, count: usize, mut eval: F) -> Result<Val, EvalError>
+where
+    F: FnMut(&Val, usize) -> Result<Val, EvalError>,
+{
+    if count == 0 {
+        return Err(EvalError("fanout: requires at least one expression".into()));
+    }
+    let mut out = Vec::with_capacity(count);
+    for idx in 0..count {
+        out.push(eval(recv, idx)?);
+    }
+    Ok(Val::arr(out))
+}
+
+#[inline]
+pub fn zip_shape_apply<F>(recv: &Val, names: &[Arc<str>], mut eval: F) -> Result<Val, EvalError>
+where
+    F: FnMut(&Val, usize) -> Result<Val, EvalError>,
+{
+    if names.is_empty() {
+        return Err(EvalError("zip_shape: requires at least one field".into()));
+    }
+    let mut out = IndexMap::with_capacity(names.len());
+    for (idx, name) in names.iter().enumerate() {
+        out.insert(name.clone(), eval(recv, idx)?);
+    }
+    Ok(Val::obj(out))
+}
+
+#[inline]
+pub fn group_shape_apply<F>(recv: Val, mut eval: F) -> Result<Val, EvalError>
+where
+    F: FnMut(Val, usize) -> Result<Val, EvalError>,
+{
+    let items = recv
+        .into_vec()
+        .ok_or_else(|| EvalError("group_shape: expected array".into()))?;
+    let mut buckets: IndexMap<Arc<str>, Vec<Val>> = IndexMap::with_capacity(items.len());
+    for item in items {
+        let key = match eval(item.clone(), 0)? {
+            Val::Str(s) => s,
+            other => Arc::<str>::from(crate::util::val_to_key(&other)),
+        };
+        buckets.entry(key).or_default().push(item);
+    }
+    let mut out = IndexMap::with_capacity(buckets.len());
+    for (key, group) in buckets {
+        out.insert(key, eval(Val::arr(group), 1)?);
+    }
+    Ok(Val::obj(out))
+}
+
 // ── take_while / drop_while / any / all ─────────────────────────────
 
 /// Per-row take_while decision — `Ok(true)` continue, `Ok(false)`
@@ -1305,7 +2755,7 @@ where
     use std::sync::Arc;
     let mut map: indexmap::IndexMap<Arc<str>, Val> = indexmap::IndexMap::new();
     for item in items {
-        let k: Arc<str> = Arc::from(crate::eval::util::val_to_key(&eval(&item)?).as_str());
+        let k: Arc<str> = Arc::from(crate::util::val_to_key(&eval(&item)?).as_str());
         let bucket = map.entry(k).or_insert_with(|| Val::arr(Vec::new()));
         bucket.as_array_mut().unwrap().push(item);
     }
@@ -1324,7 +2774,7 @@ where
     use std::sync::Arc;
     let mut map: indexmap::IndexMap<Arc<str>, Val> = indexmap::IndexMap::new();
     for item in items {
-        let k: Arc<str> = Arc::from(crate::eval::util::val_to_key(&eval(&item)?).as_str());
+        let k: Arc<str> = Arc::from(crate::util::val_to_key(&eval(&item)?).as_str());
         let counter = map.entry(k).or_insert(Val::Int(0));
         if let Val::Int(n) = counter {
             *n += 1;
@@ -1345,7 +2795,7 @@ where
     use std::sync::Arc;
     let mut map: indexmap::IndexMap<Arc<str>, Val> = indexmap::IndexMap::new();
     for item in items {
-        let k: Arc<str> = Arc::from(crate::eval::util::val_to_key(&eval(&item)?).as_str());
+        let k: Arc<str> = Arc::from(crate::util::val_to_key(&eval(&item)?).as_str());
         map.insert(k, item);
     }
     Ok(map)
@@ -1386,7 +2836,7 @@ where
     use std::sync::Arc;
     let mut out: indexmap::IndexMap<Arc<str>, Val> = indexmap::IndexMap::with_capacity(map.len());
     for (k, v) in map {
-        let new_key: Arc<str> = Arc::from(crate::eval::util::val_to_key(&eval(&k)?).as_str());
+        let new_key: Arc<str> = Arc::from(crate::util::val_to_key(&eval(&k)?).as_str());
         out.insert(new_key, v);
     }
     Ok(out)
@@ -1397,11 +2847,11 @@ where
 // `&Val → Val` shape — these are the canonical bodies for built-ins
 // that lifted natively to Pipeline IR `Stage::*` enum variants per
 // `lift_native_pattern.md`. Called from BOTH the Pipeline runtime arm
-// AND the `eval/builtins.rs` dispatch fn (for nested sub-program
-// invocation via `Opcode::CallMethod`).
+// AND the VM fallback adapter (for nested sub-program invocation via
+// `Opcode::CallMethod`).
 
 /// Canonical `.keys()` impl shared by `Stage::Keys` runtime arm and
-/// the `.keys` builtin dispatch shim.  Non-object receivers yield an
+/// the `.keys` VM adapter.  Non-object receivers yield an
 /// empty array.
 #[inline]
 pub fn keys_apply(recv: &Val) -> Val {
@@ -1565,9 +3015,7 @@ pub fn replace_apply(recv: Val, needle: &str, replacement: &str, all: bool) -> O
 //
 // Per `lift_native_pattern.md` — each builtin's body lives here as a
 // `pub fn *_apply(recv: &Val) -> Option<Val>` free fn. Pipeline IR
-// runtime arm calls these directly via `lifted_apply` dispatch;
-// `eval::builtins` dispatch shim calls them via `composed::shims::*`
-// (transitional — shim deletes in a later cleanup pass).
+// runtime arm calls these directly via `lifted_apply` dispatch.
 //
 // Helper: lift any `&str → String` transform into a `&Val → Option<Val>`
 // kernel that filters non-string receivers. Accepts both owned strings
@@ -2222,6 +3670,161 @@ pub fn scan_apply(recv: &Val, pat: &str) -> Option<Val> {
 
 // ── Phase D batch 4: array family ───────────────────────────────────
 
+/// Numeric aggregate over a receiver without projection. Typed vectors stay on
+/// slice loops; mixed arrays skip non-numeric values.
+#[inline]
+pub fn numeric_aggregate_apply(recv: &Val, method: BuiltinMethod) -> Val {
+    match recv {
+        Val::IntVec(a) => return numeric_aggregate_i64(a, method),
+        Val::FloatVec(a) => return numeric_aggregate_f64(a, method),
+        Val::Arr(a) => numeric_aggregate_values(a, method),
+        _ => Val::Null,
+    }
+}
+
+/// Numeric aggregate with per-item projection. This path is used for
+/// `.sum(field)` / `.avg(lambda ...)`; bare `.sum()` stays on the typed
+/// no-projection kernel above.
+#[inline]
+pub fn numeric_aggregate_projected_apply<F>(
+    recv: &Val,
+    method: BuiltinMethod,
+    mut eval: F,
+) -> Result<Val, EvalError>
+where
+    F: FnMut(&Val) -> Result<Val, EvalError>,
+{
+    let items = recv
+        .as_vals()
+        .ok_or_else(|| EvalError("expected array for numeric aggregate".into()))?;
+
+    let mut vals = Vec::with_capacity(items.len());
+    for item in items.iter() {
+        let v = eval(item)?;
+        if v.is_number() {
+            vals.push(v);
+        }
+    }
+    Ok(numeric_aggregate_values(&vals, method))
+}
+
+#[inline]
+fn numeric_aggregate_i64(a: &[i64], method: BuiltinMethod) -> Val {
+    match method {
+        BuiltinMethod::Sum => Val::Int(a.iter().fold(0i64, |acc, n| acc.wrapping_add(*n))),
+        BuiltinMethod::Avg => {
+            if a.is_empty() {
+                Val::Null
+            } else {
+                let s = a.iter().fold(0i64, |acc, n| acc.wrapping_add(*n));
+                Val::Float(s as f64 / a.len() as f64)
+            }
+        }
+        BuiltinMethod::Min => a.iter().min().copied().map(Val::Int).unwrap_or(Val::Null),
+        BuiltinMethod::Max => a.iter().max().copied().map(Val::Int).unwrap_or(Val::Null),
+        _ => Val::Null,
+    }
+}
+
+#[inline]
+fn numeric_aggregate_f64(a: &[f64], method: BuiltinMethod) -> Val {
+    match method {
+        BuiltinMethod::Sum => Val::Float(a.iter().sum()),
+        BuiltinMethod::Avg => {
+            if a.is_empty() {
+                Val::Null
+            } else {
+                Val::Float(a.iter().sum::<f64>() / a.len() as f64)
+            }
+        }
+        BuiltinMethod::Min => a
+            .iter()
+            .copied()
+            .reduce(f64::min)
+            .map(Val::Float)
+            .unwrap_or(Val::Null),
+        BuiltinMethod::Max => a
+            .iter()
+            .copied()
+            .reduce(f64::max)
+            .map(Val::Float)
+            .unwrap_or(Val::Null),
+        _ => Val::Null,
+    }
+}
+
+#[inline]
+fn numeric_aggregate_values(a: &[Val], method: BuiltinMethod) -> Val {
+    match method {
+        BuiltinMethod::Sum => {
+            let mut i_acc: i64 = 0;
+            let mut f_acc: f64 = 0.0;
+            let mut floated = false;
+            for v in a {
+                match v {
+                    Val::Int(n) if !floated => i_acc = i_acc.wrapping_add(*n),
+                    Val::Int(n) => f_acc += *n as f64,
+                    Val::Float(f) if !floated => {
+                        f_acc = i_acc as f64 + *f;
+                        floated = true;
+                    }
+                    Val::Float(f) => f_acc += *f,
+                    _ => {}
+                }
+            }
+            if floated {
+                Val::Float(f_acc)
+            } else {
+                Val::Int(i_acc)
+            }
+        }
+        BuiltinMethod::Avg => {
+            let mut sum = 0.0;
+            let mut n = 0usize;
+            for v in a {
+                match v {
+                    Val::Int(i) => {
+                        sum += *i as f64;
+                        n += 1;
+                    }
+                    Val::Float(f) => {
+                        sum += *f;
+                        n += 1;
+                    }
+                    _ => {}
+                }
+            }
+            if n == 0 {
+                Val::Null
+            } else {
+                Val::Float(sum / n as f64)
+            }
+        }
+        BuiltinMethod::Min | BuiltinMethod::Max => {
+            let want_max = method == BuiltinMethod::Max;
+            let mut best: Option<Val> = None;
+            let mut best_f = 0.0;
+            for v in a {
+                if !v.is_number() {
+                    continue;
+                }
+                let vf = v.as_f64().unwrap_or(0.0);
+                let replace = match best {
+                    None => true,
+                    Some(_) if want_max => vf > best_f,
+                    Some(_) => vf < best_f,
+                };
+                if replace {
+                    best_f = vf;
+                    best = Some(v.clone());
+                }
+            }
+            best.unwrap_or(Val::Null)
+        }
+        _ => Val::Null,
+    }
+}
+
 /// `.len()` / `.count()` — element count for Arr / typed vecs / Obj /
 /// Str (chars).
 #[inline]
@@ -2273,7 +3876,7 @@ pub fn flatten_one_apply(recv: &Val) -> Option<Val> {
 #[inline]
 pub fn flatten_depth_apply(recv: &Val, depth: usize) -> Option<Val> {
     if matches!(recv, Val::Arr(_)) {
-        Some(crate::eval::util::flatten_val(recv.clone(), depth))
+        Some(crate::util::flatten_val(recv.clone(), depth))
     } else {
         None
     }
@@ -2318,7 +3921,7 @@ pub fn unique_arr_apply(recv: &Val) -> Option<Val> {
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let kept: Vec<Val> = items_cow
         .iter()
-        .filter(|v| seen.insert(crate::eval::util::val_to_key(v)))
+        .filter(|v| seen.insert(crate::util::val_to_key(v)))
         .cloned()
         .collect();
     Some(Val::arr(kept))
@@ -2482,6 +4085,78 @@ pub fn lead_apply(recv: &Val, n: usize) -> Option<Val> {
     Some(numeric_options_to_val(out))
 }
 
+/// `.diff_window()` — current numeric value minus previous numeric value.
+#[inline]
+pub fn diff_window_apply(recv: &Val) -> Option<Val> {
+    let xs = numeric_options(recv)?;
+    let mut out: Vec<Option<f64>> = Vec::with_capacity(xs.len());
+    for i in 0..xs.len() {
+        out.push(match (i.checked_sub(1).and_then(|j| xs[j]), xs[i]) {
+            (Some(p), Some(c)) => Some(c - p),
+            _ => None,
+        });
+    }
+    Some(numeric_options_to_val(out))
+}
+
+/// `.pct_change()` — fractional change from previous numeric value.
+#[inline]
+pub fn pct_change_apply(recv: &Val) -> Option<Val> {
+    let xs = numeric_options(recv)?;
+    let mut out: Vec<Option<f64>> = Vec::with_capacity(xs.len());
+    for i in 0..xs.len() {
+        out.push(match (i.checked_sub(1).and_then(|j| xs[j]), xs[i]) {
+            (Some(p), Some(c)) if p != 0.0 => Some((c - p) / p),
+            _ => None,
+        });
+    }
+    Some(numeric_options_to_val(out))
+}
+
+/// `.cummax()` — cumulative numeric maximum, carrying previous best over nulls.
+#[inline]
+pub fn cummax_apply(recv: &Val) -> Option<Val> {
+    let xs = numeric_options(recv)?;
+    let mut out: Vec<Option<f64>> = Vec::with_capacity(xs.len());
+    let mut best: Option<f64> = None;
+    for v in xs.iter() {
+        match (*v, best) {
+            (Some(x), Some(b)) => {
+                best = Some(x.max(b));
+                out.push(best);
+            }
+            (Some(x), None) => {
+                best = Some(x);
+                out.push(best);
+            }
+            (None, _) => out.push(best),
+        }
+    }
+    Some(numeric_options_to_val(out))
+}
+
+/// `.cummin()` — cumulative numeric minimum, carrying previous best over nulls.
+#[inline]
+pub fn cummin_apply(recv: &Val) -> Option<Val> {
+    let xs = numeric_options(recv)?;
+    let mut out: Vec<Option<f64>> = Vec::with_capacity(xs.len());
+    let mut best: Option<f64> = None;
+    for v in xs.iter() {
+        match (*v, best) {
+            (Some(x), Some(b)) => {
+                best = Some(x.min(b));
+                out.push(best);
+            }
+            (Some(x), None) => {
+                best = Some(x);
+                out.push(best);
+            }
+            (None, _) => out.push(best),
+        }
+    }
+    Some(numeric_options_to_val(out))
+}
+
 /// `.zscore()` — numeric standard score.
 #[inline]
 pub fn zscore_apply(recv: &Val) -> Option<Val> {
@@ -2555,6 +4230,20 @@ pub fn prepend_apply(recv: &Val, item: &Val) -> Option<Val> {
     Some(Val::arr(v))
 }
 
+/// `.remove(target)` — array-like receiver without values equal to target.
+#[inline]
+pub fn remove_value_apply(recv: &Val, target: &Val) -> Option<Val> {
+    use crate::util::val_to_key;
+    let items_cow = recv.as_vals()?;
+    let key = val_to_key(target);
+    let out: Vec<Val> = items_cow
+        .iter()
+        .filter(|v| val_to_key(v) != key)
+        .cloned()
+        .collect();
+    Some(Val::arr(out))
+}
+
 /// `.enumerate()` — Arr → Arr<{index, value}>.
 #[inline]
 pub fn enumerate_apply(recv: &Val) -> Option<Val> {
@@ -2562,7 +4251,7 @@ pub fn enumerate_apply(recv: &Val) -> Option<Val> {
     let out: Vec<Val> = items_cow
         .iter()
         .enumerate()
-        .map(|(i, v)| crate::eval::util::obj2("index", Val::Int(i as i64), "value", v.clone()))
+        .map(|(i, v)| crate::util::obj2("index", Val::Int(i as i64), "value", v.clone()))
         .collect();
     Some(Val::arr(out))
 }
@@ -2570,7 +4259,7 @@ pub fn enumerate_apply(recv: &Val) -> Option<Val> {
 /// `.join(sep)` — array-like receiver to string.
 #[inline]
 pub fn join_apply(recv: &Val, sep: &str) -> Option<Val> {
-    use crate::eval::util::val_to_string;
+    use crate::util::val_to_string;
     use std::fmt::Write as _;
 
     let items_cow = recv.as_vals()?;
@@ -2622,7 +4311,7 @@ pub fn join_apply(recv: &Val, sep: &str) -> Option<Val> {
 pub fn index_value_apply(recv: &Val, target: &Val) -> Option<Val> {
     let items_cow = recv.as_vals()?;
     for (i, item) in items_cow.iter().enumerate() {
-        if crate::eval::util::vals_eq(item, target) {
+        if crate::util::vals_eq(item, target) {
             return Some(Val::Int(i as i64));
         }
     }
@@ -2636,10 +4325,68 @@ pub fn indices_of_apply(recv: &Val, target: &Val) -> Option<Val> {
     let out: Vec<i64> = items_cow
         .iter()
         .enumerate()
-        .filter(|(_, v)| crate::eval::util::vals_eq(v, target))
+        .filter(|(_, v)| crate::util::vals_eq(v, target))
         .map(|(i, _)| i as i64)
         .collect();
     Some(Val::int_vec(out))
+}
+
+/// `.explode(field)` — expand array-valued object field into one row per element.
+#[inline]
+pub fn explode_apply(recv: &Val, field: &str) -> Option<Val> {
+    let items_cow = recv.as_vals()?;
+    let items: &[Val] = items_cow.as_ref();
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        match item {
+            Val::Obj(m) => {
+                let sub = m.get(field).cloned();
+                if sub.as_ref().map(|v| v.is_array()).unwrap_or(false) {
+                    let elts = sub.unwrap().into_vec().unwrap();
+                    for e in elts {
+                        let mut row = (**m).clone();
+                        row.insert(Arc::from(field), e);
+                        out.push(Val::obj(row));
+                    }
+                } else {
+                    out.push(item.clone());
+                }
+            }
+            other => out.push(other.clone()),
+        }
+    }
+    Some(Val::arr(out))
+}
+
+/// `.implode(field)` — inverse of explode, grouping rows by all non-field values.
+#[inline]
+pub fn implode_apply(recv: &Val, field: &str) -> Option<Val> {
+    use crate::util::val_to_key;
+    let items_cow = recv.as_vals()?;
+    let items: &[Val] = items_cow.as_ref();
+    let mut groups: indexmap::IndexMap<Arc<str>, (indexmap::IndexMap<Arc<str>, Val>, Vec<Val>)> =
+        indexmap::IndexMap::new();
+    for item in items {
+        let m = match item {
+            Val::Obj(m) => m,
+            _ => return None,
+        };
+        let mut rest = (**m).clone();
+        let val = rest.shift_remove(field).unwrap_or(Val::Null);
+        let key_src: indexmap::IndexMap<Arc<str>, Val> = rest.clone();
+        let key = Arc::<str>::from(val_to_key(&Val::obj(key_src)));
+        groups
+            .entry(key)
+            .or_insert_with(|| (rest, Vec::new()))
+            .1
+            .push(val);
+    }
+    let mut out = Vec::with_capacity(groups.len());
+    for (_, (mut rest, vals)) in groups {
+        rest.insert(Arc::from(field), Val::arr(vals));
+        out.push(Val::obj(rest));
+    }
+    Some(Val::arr(out))
 }
 
 /// `.pairwise()` — Arr → Arr<[arr[i], arr[i+1]]>.
@@ -2687,10 +4434,10 @@ pub fn window_arr_apply(recv: &Val, n: usize) -> Option<Val> {
 pub fn intersect_apply(recv: &Val, other: &[Val]) -> Option<Val> {
     if let Val::Arr(a) = recv {
         let other_keys: std::collections::HashSet<String> =
-            other.iter().map(crate::eval::util::val_to_key).collect();
+            other.iter().map(crate::util::val_to_key).collect();
         let kept: Vec<Val> = a
             .iter()
-            .filter(|v| other_keys.contains(&crate::eval::util::val_to_key(v)))
+            .filter(|v| other_keys.contains(&crate::util::val_to_key(v)))
             .cloned()
             .collect();
         Some(Val::arr(kept))
@@ -2705,9 +4452,9 @@ pub fn union_apply(recv: &Val, other: &[Val]) -> Option<Val> {
     if let Val::Arr(a) = recv {
         let mut out: Vec<Val> = a.as_ref().clone();
         let a_keys: std::collections::HashSet<String> =
-            a.iter().map(crate::eval::util::val_to_key).collect();
+            a.iter().map(crate::util::val_to_key).collect();
         for v in other {
-            if !a_keys.contains(&crate::eval::util::val_to_key(v)) {
+            if !a_keys.contains(&crate::util::val_to_key(v)) {
                 out.push(v.clone());
             }
         }
@@ -2722,10 +4469,10 @@ pub fn union_apply(recv: &Val, other: &[Val]) -> Option<Val> {
 pub fn diff_apply(recv: &Val, other: &[Val]) -> Option<Val> {
     if let Val::Arr(a) = recv {
         let other_keys: std::collections::HashSet<String> =
-            other.iter().map(crate::eval::util::val_to_key).collect();
+            other.iter().map(crate::util::val_to_key).collect();
         let kept: Vec<Val> = a
             .iter()
-            .filter(|v| !other_keys.contains(&crate::eval::util::val_to_key(v)))
+            .filter(|v| !other_keys.contains(&crate::util::val_to_key(v)))
             .cloned()
             .collect();
         Some(Val::arr(kept))
@@ -2778,7 +4525,7 @@ pub fn invert_apply(recv: &Val) -> Option<Val> {
         let new_key: Arc<str> = match v {
             Val::Str(s) => s.clone(),
             Val::StrSlice(r) => Arc::<str>::from(r.as_str()),
-            other => Arc::<str>::from(crate::eval::util::val_to_key(other).as_str()),
+            other => Arc::<str>::from(crate::util::val_to_key(other).as_str()),
         };
         out.insert(new_key, Val::Str(k.clone()));
     }
@@ -2800,7 +4547,7 @@ pub fn merge_apply(recv: &Val, other: &Val) -> Option<Val> {
 /// `.deep_merge(other)` — recursive merge.
 #[inline]
 pub fn deep_merge_apply(recv: &Val, other: &Val) -> Option<Val> {
-    Some(crate::eval::util::deep_merge(recv.clone(), other.clone()))
+    Some(crate::util::deep_merge(recv.clone(), other.clone()))
 }
 
 /// `.defaults(other)` — fill null/missing keys from other.
@@ -2838,18 +4585,195 @@ pub fn rename_apply(recv: &Val, renames: &Val) -> Option<Val> {
 
 // ── Phase D batch 6: path family ────────────────────────────────────
 
+pub(crate) enum PathSeg {
+    Field(String),
+    Index(i64),
+}
+
+pub(crate) enum PickSource {
+    Field(Arc<str>),
+    Path(Vec<PathSeg>),
+}
+
+pub(crate) struct PickSpec {
+    pub out_key: Arc<str>,
+    pub source: PickSource,
+}
+
+pub(crate) fn parse_path_segs(path: &str) -> Vec<PathSeg> {
+    let mut segs = Vec::new();
+    let mut cur = String::new();
+    let mut chars = path.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '.' => {
+                if !cur.is_empty() {
+                    segs.push(PathSeg::Field(std::mem::take(&mut cur)));
+                }
+            }
+            '[' => {
+                if !cur.is_empty() {
+                    segs.push(PathSeg::Field(std::mem::take(&mut cur)));
+                }
+                let mut idx = String::new();
+                for c2 in chars.by_ref() {
+                    if c2 == ']' {
+                        break;
+                    }
+                    idx.push(c2);
+                }
+                segs.push(PathSeg::Index(idx.parse().unwrap_or(0)));
+            }
+            _ => cur.push(c),
+        }
+    }
+    if !cur.is_empty() {
+        segs.push(PathSeg::Field(cur));
+    }
+    segs
+}
+
+pub(crate) fn get_path_impl(val: &Val, segs: &[PathSeg]) -> Val {
+    if segs.is_empty() {
+        return val.clone();
+    }
+    let next = match &segs[0] {
+        PathSeg::Field(f) => val.get(f).cloned().unwrap_or(Val::Null),
+        PathSeg::Index(i) => val.get_index(*i),
+    };
+    get_path_impl(&next, &segs[1..])
+}
+
+pub(crate) fn set_path_impl(val: Val, segs: &[PathSeg], new_val: Val) -> Val {
+    if segs.is_empty() {
+        return new_val;
+    }
+    match (&segs[0], val) {
+        (PathSeg::Field(f), Val::Obj(m)) => {
+            let mut map = Arc::try_unwrap(m).unwrap_or_else(|m| (*m).clone());
+            let child = map.shift_remove(f.as_str()).unwrap_or(Val::Null);
+            map.insert(
+                Arc::from(f.as_str()),
+                set_path_impl(child, &segs[1..], new_val),
+            );
+            Val::obj(map)
+        }
+        (PathSeg::Index(i), Val::Arr(a)) => {
+            let mut arr = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
+            let idx = resolve_path_idx(*i, arr.len() as i64);
+            if idx < arr.len() {
+                let child = arr[idx].clone();
+                arr[idx] = set_path_impl(child, &segs[1..], new_val);
+            }
+            Val::arr(arr)
+        }
+        (PathSeg::Field(f), _) => {
+            let mut m = IndexMap::new();
+            m.insert(
+                Arc::from(f.as_str()),
+                set_path_impl(Val::Null, &segs[1..], new_val),
+            );
+            Val::obj(m)
+        }
+        (_, v) => v,
+    }
+}
+
+pub(crate) fn del_path_impl(val: Val, segs: &[PathSeg]) -> Val {
+    if segs.is_empty() {
+        return Val::Null;
+    }
+    match (&segs[0], val) {
+        (PathSeg::Field(f), Val::Obj(m)) => {
+            let mut map = Arc::try_unwrap(m).unwrap_or_else(|m| (*m).clone());
+            if segs.len() == 1 {
+                map.shift_remove(f.as_str());
+            } else if let Some(child) = map.shift_remove(f.as_str()) {
+                map.insert(Arc::from(f.as_str()), del_path_impl(child, &segs[1..]));
+            }
+            Val::obj(map)
+        }
+        (PathSeg::Index(i), Val::Arr(a)) => {
+            let mut arr = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
+            let idx = resolve_path_idx(*i, arr.len() as i64);
+            if segs.len() == 1 {
+                if idx < arr.len() {
+                    arr.remove(idx);
+                }
+            } else if idx < arr.len() {
+                let child = arr[idx].clone();
+                arr[idx] = del_path_impl(child, &segs[1..]);
+            }
+            Val::arr(arr)
+        }
+        (_, v) => v,
+    }
+}
+
+fn resolve_path_idx(i: i64, len: i64) -> usize {
+    (if i < 0 { (len + i).max(0) } else { i }) as usize
+}
+
+pub(crate) fn flatten_keys_impl(
+    prefix: &str,
+    val: &Val,
+    sep: &str,
+    out: &mut IndexMap<Arc<str>, Val>,
+) {
+    match val {
+        Val::Obj(m) => {
+            for (k, v) in m.iter() {
+                let full = if prefix.is_empty() {
+                    k.to_string()
+                } else {
+                    format!("{}{}{}", prefix, sep, k)
+                };
+                flatten_keys_impl(&full, v, sep, out);
+            }
+        }
+        _ => {
+            out.insert(Arc::from(prefix), val.clone());
+        }
+    }
+}
+
+pub(crate) fn unflatten_keys_impl(m: &IndexMap<Arc<str>, Val>, sep: &str) -> Val {
+    let mut root: IndexMap<Arc<str>, Val> = IndexMap::new();
+    for (key, val) in m {
+        let parts: Vec<&str> = key.split(sep).collect();
+        insert_nested(&mut root, &parts, val.clone());
+    }
+    Val::obj(root)
+}
+
+fn insert_nested(obj: &mut IndexMap<Arc<str>, Val>, parts: &[&str], val: Val) {
+    if parts.is_empty() {
+        return;
+    }
+    if parts.len() == 1 {
+        obj.insert(val_key(parts[0]), val);
+        return;
+    }
+    let entry = obj
+        .entry(val_key(parts[0]))
+        .or_insert_with(|| Val::obj(IndexMap::new()));
+    if let Val::Obj(child) = entry {
+        insert_nested(Arc::make_mut(child), &parts[1..], val);
+    }
+}
+
 /// `.get_path(path)` — read leaf at dotted/bracket path.
 #[inline]
 pub fn get_path_apply(recv: &Val, path: &str) -> Option<Val> {
-    let segs = crate::eval::func_paths::parse_path_segs(path);
-    Some(crate::eval::func_paths::get_path_impl(recv, &segs))
+    let segs = parse_path_segs(path);
+    Some(get_path_impl(recv, &segs))
 }
 
 /// `.has_path(path)` — Val::Bool, true if path resolves non-null.
 #[inline]
 pub fn has_path_apply(recv: &Val, path: &str) -> Option<Val> {
-    let segs = crate::eval::func_paths::parse_path_segs(path);
-    let found = !crate::eval::func_paths::get_path_impl(recv, &segs).is_null();
+    let segs = parse_path_segs(path);
+    let found = !get_path_impl(recv, &segs).is_null();
     Some(Val::Bool(found))
 }
 
@@ -2860,18 +4784,129 @@ pub fn has_apply(recv: &Val, key: &str) -> Option<Val> {
     Some(Val::Bool(m.contains_key(key)))
 }
 
+/// `.pick(keys...)` — keep selected object keys. For array receivers, applies
+/// the projection to each object element.
+#[inline]
+pub fn pick_apply(recv: &Val, keys: &[Arc<str>]) -> Option<Val> {
+    use indexmap::IndexMap;
+
+    fn pick_obj(m: &IndexMap<Arc<str>, Val>, keys: &[Arc<str>]) -> Val {
+        let mut out = IndexMap::with_capacity(keys.len());
+        for key in keys {
+            if let Some(v) = m.get(key.as_ref()) {
+                out.insert(key.clone(), v.clone());
+            }
+        }
+        Val::obj(out)
+    }
+
+    match recv {
+        Val::Obj(m) => Some(pick_obj(m, keys)),
+        Val::Arr(a) => Some(Val::arr(
+            a.iter()
+                .filter_map(|v| match v {
+                    Val::Obj(m) => Some(pick_obj(m, keys)),
+                    _ => None,
+                })
+                .collect(),
+        )),
+        _ => None,
+    }
+}
+
+#[inline]
+pub(crate) fn pick_specs_apply(recv: &Val, specs: &[PickSpec]) -> Option<Val> {
+    fn pick_obj(m: &IndexMap<Arc<str>, Val>, specs: &[PickSpec]) -> Val {
+        let mut out = IndexMap::with_capacity(specs.len());
+        let wrapped = Val::Obj(Arc::new(m.clone()));
+        for spec in specs {
+            match &spec.source {
+                PickSource::Field(src) => {
+                    if let Some(v) = m.get(src.as_ref()) {
+                        out.insert(spec.out_key.clone(), v.clone());
+                    }
+                }
+                PickSource::Path(segs) => {
+                    let v = get_path_impl(&wrapped, segs);
+                    if !v.is_null() {
+                        out.insert(spec.out_key.clone(), v);
+                    }
+                }
+            }
+        }
+        Val::obj(out)
+    }
+
+    match recv {
+        Val::Obj(m) => Some(pick_obj(m, specs)),
+        Val::Arr(a) => Some(Val::arr(
+            a.iter()
+                .filter_map(|v| match v {
+                    Val::Obj(m) => Some(pick_obj(m, specs)),
+                    _ => None,
+                })
+                .collect(),
+        )),
+        _ => None,
+    }
+}
+
+/// `.omit(keys...)` — drop selected object keys. For array receivers, applies
+/// the projection to each object element.
+#[inline]
+pub fn omit_apply(recv: &Val, keys: &[Arc<str>]) -> Option<Val> {
+    fn omit_obj(m: &indexmap::IndexMap<Arc<str>, Val>, keys: &[Arc<str>]) -> Val {
+        let mut out = m.clone();
+        for key in keys {
+            out.shift_remove(key.as_ref());
+        }
+        Val::obj(out)
+    }
+
+    match recv {
+        Val::Obj(m) => Some(omit_obj(m, keys)),
+        Val::Arr(a) => Some(Val::arr(
+            a.iter()
+                .filter_map(|v| match v {
+                    Val::Obj(m) => Some(omit_obj(m, keys)),
+                    _ => None,
+                })
+                .collect(),
+        )),
+        _ => None,
+    }
+}
+
 /// `.del_path(path)` — remove value at dotted path.
 #[inline]
 pub fn del_path_apply(recv: &Val, path: &str) -> Option<Val> {
-    let segs = crate::eval::func_paths::parse_path_segs(path);
-    Some(crate::eval::func_paths::del_path_impl(recv.clone(), &segs))
+    let segs = parse_path_segs(path);
+    Some(del_path_impl(recv.clone(), &segs))
+}
+
+/// `.set_path(path, value)` — set value at dotted path.
+#[inline]
+pub fn set_path_apply(recv: &Val, path: &str, value: &Val) -> Option<Val> {
+    let segs = parse_path_segs(path);
+    Some(set_path_impl(recv.clone(), &segs, value.clone()))
+}
+
+/// `.del_paths(p1, p2, ...)` — remove multiple dotted paths.
+#[inline]
+pub fn del_paths_apply(recv: &Val, paths: &[Arc<str>]) -> Option<Val> {
+    let mut out = recv.clone();
+    for path in paths {
+        let segs = parse_path_segs(path.as_ref());
+        out = del_path_impl(out, &segs);
+    }
+    Some(out)
 }
 
 /// `.flatten_keys(sep)` — Obj → flat-Obj with `sep`-joined keys.
 #[inline]
 pub fn flatten_keys_apply(recv: &Val, sep: &str) -> Option<Val> {
     let mut out: indexmap::IndexMap<Arc<str>, Val> = indexmap::IndexMap::new();
-    crate::eval::func_paths::flatten_keys_impl("", recv, sep, &mut out);
+    flatten_keys_impl("", recv, sep, &mut out);
     Some(Val::obj(out))
 }
 
@@ -2879,7 +4914,7 @@ pub fn flatten_keys_apply(recv: &Val, sep: &str) -> Option<Val> {
 #[inline]
 pub fn unflatten_keys_apply(recv: &Val, sep: &str) -> Option<Val> {
     if let Val::Obj(m) = recv {
-        Some(crate::eval::func_paths::unflatten_keys_impl(m, sep))
+        Some(unflatten_keys_impl(m, sep))
     } else {
         None
     }
@@ -3087,7 +5122,7 @@ pub fn to_tsv_apply(recv: &Val) -> Option<Val> {
 /// `.to_pairs()` — Obj → Arr<{key, val}> (named-obj form).
 #[inline]
 pub fn to_pairs_apply(recv: &Val) -> Option<Val> {
-    use crate::eval::util::obj2;
+    use crate::util::obj2;
     let arr: Vec<Val> = recv
         .as_object()
         .map(|m| {
@@ -3109,7 +5144,7 @@ pub fn type_name_apply(recv: &Val) -> Option<Val> {
 #[inline]
 pub fn to_string_apply(recv: &Val) -> Option<Val> {
     Some(Val::Str(Arc::from(
-        crate::eval::util::val_to_string(recv).as_str(),
+        crate::util::val_to_string(recv).as_str(),
     )))
 }
 
@@ -3152,7 +5187,7 @@ pub fn try_from_json_apply(recv: &Val) -> Result<Option<Val>, EvalError> {
     {
         let bytes_owned: Vec<u8> = match recv {
             Val::Str(s) => s.as_bytes().to_vec(),
-            _ => crate::eval::util::val_to_string(recv).into_bytes(),
+            _ => crate::util::val_to_string(recv).into_bytes(),
         };
         let mut bytes = bytes_owned;
         return Val::from_json_simd(&mut bytes)
@@ -3166,7 +5201,7 @@ pub fn try_from_json_apply(recv: &Val) -> Result<Option<Val>, EvalError> {
                 .map(Some)
                 .map_err(|e| EvalError(format!("from_json: {}", e))),
             _ => {
-                let s = crate::eval::util::val_to_string(recv);
+                let s = crate::util::val_to_string(recv);
                 Val::from_json_str(&s)
                     .map(Some)
                     .map_err(|e| EvalError(format!("from_json: {}", e)))
@@ -3188,13 +5223,13 @@ pub fn or_apply(recv: &Val, default: &Val) -> Val {
 /// `.missing(key)` — negated nested field existence test.
 #[inline]
 pub fn missing_apply(recv: &Val, key: &str) -> Val {
-    Val::Bool(!crate::eval::util::field_exists_nested(recv, key))
+    Val::Bool(!crate::util::field_exists_nested(recv, key))
 }
 
 /// `.includes(item)` / `.contains(item)` — membership or substring check.
 #[inline]
 pub fn includes_apply(recv: &Val, item: &Val) -> Val {
-    use crate::eval::util::val_to_key;
+    use crate::util::val_to_key;
     let key = val_to_key(item);
     Val::Bool(match recv {
         Val::Arr(a) => a.iter().any(|v| val_to_key(v) == key),
@@ -3218,8 +5253,207 @@ pub fn includes_apply(recv: &Val, item: &Val) -> Val {
     })
 }
 
+pub(crate) fn schema_of(v: &Val) -> Val {
+    match v {
+        Val::Null => ty_obj("Null"),
+        Val::Bool(_) => ty_obj("Bool"),
+        Val::Int(_) => ty_obj("Int"),
+        Val::Float(_) => ty_obj("Float"),
+        Val::Str(_) | Val::StrSlice(_) => ty_obj("String"),
+        Val::IntVec(a) => array_schema(a.len(), ty_obj("Int")),
+        Val::FloatVec(a) => array_schema(a.len(), ty_obj("Float")),
+        Val::StrVec(a) => array_schema(a.len(), ty_obj("String")),
+        Val::StrSliceVec(a) => array_schema(a.len(), ty_obj("String")),
+        Val::ObjVec(d) => array_schema(d.nrows(), ty_obj("Object")),
+        Val::Arr(a) => {
+            let items = if a.is_empty() {
+                ty_obj("Unknown")
+            } else {
+                let mut acc = schema_of(&a[0]);
+                for el in a.iter().skip(1) {
+                    acc = unify_schema(acc, schema_of(el));
+                }
+                acc
+            };
+            array_schema(a.len(), items)
+        }
+        Val::Obj(m) => schema_object(m.iter().map(|(k, v)| (k.clone(), v))),
+        Val::ObjSmall(pairs) => schema_object(pairs.iter().map(|(k, v)| (k.clone(), v))),
+    }
+}
+
+fn schema_object<'a>(pairs: impl Iterator<Item = (Arc<str>, &'a Val)>) -> Val {
+    let mut required = Vec::new();
+    let mut fields = IndexMap::new();
+    for (k, child) in pairs {
+        let mut field = schema_of(child);
+        if matches!(child, Val::Null) {
+            field = set_schema_field(field, "nullable", Val::Bool(true));
+        } else {
+            required.push(Val::Str(k.clone()));
+        }
+        fields.insert(k, field);
+    }
+    let mut out: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(3);
+    out.insert(Arc::from("type"), Val::Str(Arc::from("Object")));
+    out.insert(Arc::from("required"), Val::arr(required));
+    out.insert(Arc::from("fields"), Val::obj(fields));
+    Val::obj(out)
+}
+
+fn ty_obj(name: &str) -> Val {
+    let mut m: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(1);
+    m.insert(Arc::from("type"), Val::Str(Arc::from(name)));
+    Val::obj(m)
+}
+
+fn array_schema(len: usize, items: Val) -> Val {
+    let mut m: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(3);
+    m.insert(Arc::from("type"), Val::Str(Arc::from("Array")));
+    m.insert(Arc::from("len"), Val::Int(len as i64));
+    m.insert(Arc::from("items"), items);
+    Val::obj(m)
+}
+
+fn set_schema_field(obj: Val, key: &str, v: Val) -> Val {
+    if let Val::Obj(m) = obj {
+        let mut m = Arc::try_unwrap(m).unwrap_or_else(|arc| (*arc).clone());
+        m.insert(Arc::from(key), v);
+        Val::obj(m)
+    } else {
+        obj
+    }
+}
+
+fn schema_type(v: &Val) -> Option<&str> {
+    if let Val::Obj(m) = v {
+        if let Some(Val::Str(s)) = m.get("type") {
+            return Some(s.as_ref());
+        }
+    }
+    None
+}
+
+fn unify_schema(a: Val, b: Val) -> Val {
+    match (schema_type(&a), schema_type(&b)) {
+        (Some(x), Some(y)) if x == y => match x {
+            "Object" => unify_object_schemas(a, b),
+            "Array" => unify_array_schemas(a, b),
+            _ => mark_nullable_if_either(a, b),
+        },
+        (Some("Null"), _) => set_schema_field(b, "nullable", Val::Bool(true)),
+        (_, Some("Null")) => set_schema_field(a, "nullable", Val::Bool(true)),
+        _ => ty_obj("Mixed"),
+    }
+}
+
+fn mark_nullable_if_either(a: Val, b: Val) -> Val {
+    if is_schema_nullable(&a) || is_schema_nullable(&b) {
+        set_schema_field(a, "nullable", Val::Bool(true))
+    } else {
+        a
+    }
+}
+
+fn is_schema_nullable(v: &Val) -> bool {
+    matches!(
+        v,
+        Val::Obj(m) if matches!(m.get("nullable"), Some(Val::Bool(true)))
+    )
+}
+
+fn unify_array_schemas(a: Val, b: Val) -> Val {
+    let items = match (
+        extract_schema_field(&a, "items"),
+        extract_schema_field(&b, "items"),
+    ) {
+        (Some(x), Some(y)) => unify_schema(x, y),
+        (Some(x), None) => x,
+        (None, Some(y)) => y,
+        (None, None) => ty_obj("Unknown"),
+    };
+    let la = extract_schema_int(&a, "len").unwrap_or(0);
+    let lb = extract_schema_int(&b, "len").unwrap_or(0);
+    array_schema((la + lb) as usize, items)
+}
+
+fn extract_schema_field(v: &Val, key: &str) -> Option<Val> {
+    if let Val::Obj(m) = v {
+        m.get(key).cloned()
+    } else {
+        None
+    }
+}
+
+fn extract_schema_int(v: &Val, key: &str) -> Option<i64> {
+    if let Some(Val::Int(n)) = extract_schema_field(v, key) {
+        Some(n)
+    } else {
+        None
+    }
+}
+
+fn unify_object_schemas(a: Val, b: Val) -> Val {
+    let (Some(Val::Obj(a_fields)), Some(Val::Obj(b_fields))) = (
+        extract_schema_field(&a, "fields"),
+        extract_schema_field(&b, "fields"),
+    ) else {
+        return ty_obj("Object");
+    };
+    let a_map = Arc::try_unwrap(a_fields).unwrap_or_else(|arc| (*arc).clone());
+    let b_map = Arc::try_unwrap(b_fields).unwrap_or_else(|arc| (*arc).clone());
+    let a_req = extract_required_set(&a);
+    let b_req = extract_required_set(&b);
+
+    let mut out_fields: IndexMap<Arc<str>, Val> =
+        IndexMap::with_capacity(a_map.len().max(b_map.len()));
+    let mut all_keys: Vec<Arc<str>> = Vec::with_capacity(a_map.len() + b_map.len());
+    for (k, _) in &a_map {
+        all_keys.push(k.clone());
+    }
+    for (k, _) in &b_map {
+        if !a_map.contains_key(k) {
+            all_keys.push(k.clone());
+        }
+    }
+
+    let mut required = Vec::new();
+    for k in all_keys {
+        let av = a_map.get(&k).cloned();
+        let bv = b_map.get(&k).cloned();
+        let field = match (av, bv) {
+            (Some(x), Some(y)) => unify_schema(x, y),
+            (Some(x), None) => set_schema_field(x, "optional", Val::Bool(true)),
+            (None, Some(y)) => set_schema_field(y, "optional", Val::Bool(true)),
+            _ => ty_obj("Unknown"),
+        };
+        if a_req.contains(k.as_ref()) && b_req.contains(k.as_ref()) {
+            required.push(Val::Str(k.clone()));
+        }
+        out_fields.insert(k, field);
+    }
+
+    let mut out: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(3);
+    out.insert(Arc::from("type"), Val::Str(Arc::from("Object")));
+    out.insert(Arc::from("required"), Val::arr(required));
+    out.insert(Arc::from("fields"), Val::obj(out_fields));
+    Val::obj(out)
+}
+
+fn extract_required_set(v: &Val) -> std::collections::HashSet<String> {
+    let mut set = std::collections::HashSet::new();
+    if let Some(Val::Arr(a)) = extract_schema_field(v, "required") {
+        for el in a.iter() {
+            if let Val::Str(k) = el {
+                set.insert(k.to_string());
+            }
+        }
+    }
+    set
+}
+
 /// `.schema()` — Val → schema Obj describing types/required/array shape.
 #[inline]
 pub fn schema_apply(recv: &Val) -> Option<Val> {
-    Some(crate::eval::func_objects::schema_of(recv))
+    Some(schema_of(recv))
 }

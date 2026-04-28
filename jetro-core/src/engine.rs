@@ -18,7 +18,6 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use serde_json::Value;
 
-use crate::eval::methods::MethodRegistry;
 use crate::vm::{PassConfig, VM};
 use crate::{Error, Result};
 
@@ -45,23 +44,9 @@ impl Engine {
         })
     }
 
-    pub fn with_methods(registry: Arc<MethodRegistry>) -> Arc<Self> {
-        Arc::new(Self {
-            vm: Mutex::new(VM::with_registry(registry)),
-        })
-    }
-
     /// Parse, compile (cached), and execute `expr` against `doc`.
     pub fn run(&self, expr: &str, doc: &Value) -> Result<Value> {
         self.vm.lock().run_str(expr, doc).map_err(Error::from)
-    }
-
-    pub fn register(
-        &self,
-        name: impl Into<String>,
-        method: impl crate::eval::methods::Method + 'static,
-    ) {
-        self.vm.lock().register(name, method);
     }
 
     pub fn set_pass_config(&self, config: PassConfig) {

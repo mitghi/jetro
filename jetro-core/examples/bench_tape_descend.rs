@@ -232,7 +232,7 @@ fn main() {
     // ObjVec slot-indexed path — `Jetro::from_simd` promotes
     // homogeneous-shape arrays at parse time; pipeline columnar
     // kernels then read fields via flat-cell slot offsets.
-    let mut sj_arr = q4_bytes.clone();
+    let sj_arr = q4_bytes.clone();
     let j_simd_q4 = Jetro::from_simd(sj_arr).unwrap();
     let _ = j_simd_q4.collect(q4).unwrap();
     bench(
@@ -243,7 +243,7 @@ fn main() {
             r.as_i64().unwrap_or(0) as u64
         },
     );
-    let mut sj_arr2 = arr_bytes.clone();
+    let sj_arr2 = arr_bytes.clone();
     let j_simd_arr = Jetro::from_simd(sj_arr2).unwrap();
     let _ = j_simd_arr
         .collect("$.orders.filter(total > 100).map(total).sum()")

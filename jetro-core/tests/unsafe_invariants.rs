@@ -4,7 +4,7 @@
 //!     cargo +nightly miri test -p jetro-core --test unsafe_invariants
 //!
 //! Each test exercises one `unsafe` block from `vm.rs` /
-//! `eval/func_strings.rs`. If Miri accepts these, the documented
+//! `builtins.rs`. If Miri accepts these, the documented
 //! invariants hold (no OOB write, no uninit read, no Arc layout
 //! mismatch, no UTF-8 corruption).
 
