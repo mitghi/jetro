@@ -174,10 +174,13 @@ impl Pipeline {
         let sink_kind = match &eff_sink {
             Sink::Collect => SinkKind::Collect,
             Sink::Count => SinkKind::Count,
-            Sink::Numeric(NumOp::Sum) => SinkKind::Sum,
-            Sink::Numeric(NumOp::Min) => SinkKind::Min,
-            Sink::Numeric(NumOp::Max) => SinkKind::Max,
-            Sink::Numeric(NumOp::Avg) => SinkKind::Avg,
+            Sink::Numeric(n) if n.project.is_some() => return None,
+            Sink::Numeric(n) => match n.op {
+                NumOp::Sum => SinkKind::Sum,
+                NumOp::Min => SinkKind::Min,
+                NumOp::Max => SinkKind::Max,
+                NumOp::Avg => SinkKind::Avg,
+            },
             Sink::First => SinkKind::First,
             Sink::Last => SinkKind::Last,
             Sink::ApproxCountDistinct => return None, // legacy Val path
@@ -903,7 +906,15 @@ impl Pipeline {
             match &self.sink {
                 Sink::Collect => acc_collect.push(item),
                 Sink::Count => acc_count += 1,
-                Sink::Numeric(op) => {
+                Sink::Numeric(n) => {
+                    let numeric_item = if let Some(project) = &n.project {
+                        let kernel = self.sink_kernels.first().unwrap_or(&BodyKernel::Generic);
+                        eval_kernel(kernel, &item, |item| {
+                            apply_item_in_env(&mut vm, &mut loop_env, item, project)
+                        })?
+                    } else {
+                        item
+                    };
                     num_fold(
                         &mut acc_sum_i,
                         &mut acc_sum_f,
@@ -911,13 +922,14 @@ impl Pipeline {
                         &mut acc_min_f,
                         &mut acc_max_f,
                         &mut acc_n_obs,
-                        *op,
-                        &item,
+                        n.op,
+                        &numeric_item,
                     );
                 }
                 Sink::First => {
                     if acc_first.is_none() {
                         acc_first = Some(item.clone());
+                        break 'outer;
                     }
                 }
                 Sink::Last => {
@@ -946,8 +958,8 @@ impl Pipeline {
                 }
             }
             Sink::Count => Val::Int(acc_count),
-            Sink::Numeric(op) => num_finalise(
-                *op,
+            Sink::Numeric(n) => num_finalise(
+                n.op,
                 acc_sum_i,
                 acc_sum_f,
                 sum_floated,

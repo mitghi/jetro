@@ -3,8 +3,8 @@ use std::sync::Arc;
 use crate::{ast::Expr, context::EvalError, value::Val};
 
 use super::{
-    expr_label, plan_with_kernels, sink_name, source_name, trace_enabled, BodyKernel, NumOp,
-    Pipeline, Plan, Sink, Source, Stage,
+    expr_label, plan_with_exprs, plan_with_kernels, sink_name, source_name, trace_enabled,
+    BodyKernel, NumOp, NumericSink, Pipeline, Plan, Sink, Source, Stage,
 };
 
 impl Pipeline {
@@ -87,11 +87,12 @@ impl Pipeline {
         // the current item bound as the VM's root, so `@.field` and
         // `@` references resolve to the row.
         let trailing = &steps[field_end..];
-        let (stages, sink) = decode_method_chain(trailing)?;
+        let (stages, stage_exprs, sink) = decode_method_chain(trailing)?;
 
         let mut p = Pipeline {
             source: Source::FieldChain { keys },
             stages,
+            stage_exprs,
             sink,
             stage_kernels: Vec::new(),
             sink_kernels: Vec::new(),
@@ -120,15 +121,28 @@ impl Pipeline {
         // cost/selectivity.  Result.stages / Result.sink replace the
         // pre-plan values.  Phase 1 + Phase 5 (demand prop, strategy
         // selection) re-runs at exec time on the final shape.
-        let plan_result = plan_with_kernels(p.stages.clone(), &kernels, p.sink.clone());
+        let plan_result = plan_with_exprs(
+            p.stages.clone(),
+            p.stage_exprs.clone(),
+            &kernels,
+            p.sink.clone(),
+        );
         p.stages = plan_result.stages;
+        p.stage_exprs = plan_result.stage_exprs;
         p.sink = plan_result.sink;
 
         // Re-classify post-plan since Phase 4 merges may have produced
-        // new sub-programs (e.g. Map+Map → field-chain-Map).
+        // new sub-programs (e.g. Map+Map → field-chain-Map), or demand
+        // planning may have absorbed a projection into a numeric sink.
         p.stage_kernels = classify_kernels(&p.stages);
-        // No fused-Sink kernels — base sinks have no sub-programs.
-        p.sink_kernels = Vec::new();
+        p.sink_kernels = match &p.sink {
+            Sink::Numeric(n) => n
+                .project
+                .as_ref()
+                .map(|p| vec![BodyKernel::classify(p)])
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
         Some(p)
     }
 }
@@ -200,7 +214,7 @@ fn try_decode_map_body(arg: &crate::ast::Arg) -> Option<Plan> {
         let prog = Arc::new(crate::vm::Program::new(ops, "<compiled-map-prefix>"));
         stages.push(Stage::Map(prog));
     }
-    let (mut more_stages, sink) = decode_method_chain(trailing)?;
+    let (mut more_stages, _more_exprs, sink) = decode_method_chain(trailing)?;
     stages.append(&mut more_stages);
 
     // Run the same planning the outer pipeline does.  Kernel
@@ -228,6 +242,7 @@ pub(super) fn run_compiled_map(plan: &Plan, seed: Val) -> Result<Val, EvalError>
     let synth = Pipeline {
         source: Source::Receiver(Val::arr(vec![seed])),
         stages: plan.stages.clone(),
+        stage_exprs: Vec::new(),
         sink: plan.sink.clone(),
         stage_kernels: Vec::new(),
         sink_kernels: Vec::new(),
@@ -239,9 +254,12 @@ pub(super) fn run_compiled_map(plan: &Plan, seed: Val) -> Result<Val, EvalError>
 /// Shared by top-level `lower_inner` and Step 3d-extension (A2)
 /// recursive sub-pipeline planning for `Map(@.<chain>)` bodies.
 /// Returns `None` if any method shape isn't recognised.
-fn decode_method_chain(trailing: &[crate::ast::Step]) -> Option<(Vec<Stage>, Sink)> {
+fn decode_method_chain(
+    trailing: &[crate::ast::Step],
+) -> Option<(Vec<Stage>, Vec<Option<Arc<Expr>>>, Sink)> {
     use crate::ast::{Arg, Step};
     let mut stages: Vec<Stage> = Vec::new();
+    let mut stage_exprs: Vec<Option<Arc<Expr>>> = Vec::new();
     let mut sink: Sink = Sink::Collect;
     for (i, s) in trailing.iter().enumerate() {
         let is_last = i == trailing.len() - 1;
@@ -251,77 +269,105 @@ fn decode_method_chain(trailing: &[crate::ast::Step]) -> Option<(Vec<Stage>, Sin
                     crate::builtins::BuiltinCall::from_pipeline_literal_args(name.as_str(), args)
                 {
                     stages.push(Stage::Builtin(call));
+                    stage_exprs.push(None);
                     continue;
                 }
                 match (name.as_str(), args.len(), is_last) {
                     // Lambda-bearing methods — pre-compile body as vm::Program.
                     ("takewhile", 1, _) => {
-                        stages.push(Stage::TakeWhile(compile_subexpr(&args[0])?))
+                        stages.push(Stage::TakeWhile(compile_subexpr(&args[0])?));
+                        stage_exprs.push(arg_expr(&args[0]));
                     }
                     ("take_while", 1, _) => {
-                        stages.push(Stage::TakeWhile(compile_subexpr(&args[0])?))
+                        stages.push(Stage::TakeWhile(compile_subexpr(&args[0])?));
+                        stage_exprs.push(arg_expr(&args[0]));
                     }
                     ("dropwhile", 1, _) => {
-                        stages.push(Stage::DropWhile(compile_subexpr(&args[0])?))
+                        stages.push(Stage::DropWhile(compile_subexpr(&args[0])?));
+                        stage_exprs.push(arg_expr(&args[0]));
                     }
                     ("drop_while", 1, _) => {
-                        stages.push(Stage::DropWhile(compile_subexpr(&args[0])?))
+                        stages.push(Stage::DropWhile(compile_subexpr(&args[0])?));
+                        stage_exprs.push(arg_expr(&args[0]));
                     }
                     ("indices_where", 1, true) => {
                         stages.push(Stage::IndicesWhere(compile_subexpr(&args[0])?));
+                        stage_exprs.push(arg_expr(&args[0]));
                         sink = Sink::First;
                     }
                     ("find_index", 1, true) => {
                         stages.push(Stage::FindIndex(compile_subexpr(&args[0])?));
+                        stage_exprs.push(arg_expr(&args[0]));
                         sink = Sink::First;
                     }
                     ("max_by", 1, true) => {
                         stages.push(Stage::MaxBy(compile_subexpr(&args[0])?));
+                        stage_exprs.push(arg_expr(&args[0]));
                         sink = Sink::First;
                     }
                     ("min_by", 1, true) => {
                         stages.push(Stage::MinBy(compile_subexpr(&args[0])?));
+                        stage_exprs.push(arg_expr(&args[0]));
                         sink = Sink::First;
                     }
                     ("transform_values", 1, _) => {
-                        stages.push(Stage::TransformValues(compile_subexpr(&args[0])?))
+                        stages.push(Stage::TransformValues(compile_subexpr(&args[0])?));
+                        stage_exprs.push(arg_expr(&args[0]));
                     }
                     ("transform_keys", 1, _) => {
-                        stages.push(Stage::TransformKeys(compile_subexpr(&args[0])?))
+                        stages.push(Stage::TransformKeys(compile_subexpr(&args[0])?));
+                        stage_exprs.push(arg_expr(&args[0]));
                     }
                     ("filter_values", 1, _) => {
-                        stages.push(Stage::FilterValues(compile_subexpr(&args[0])?))
+                        stages.push(Stage::FilterValues(compile_subexpr(&args[0])?));
+                        stage_exprs.push(arg_expr(&args[0]));
                     }
                     ("filter_keys", 1, _) => {
-                        stages.push(Stage::FilterKeys(compile_subexpr(&args[0])?))
+                        stages.push(Stage::FilterKeys(compile_subexpr(&args[0])?));
+                        stage_exprs.push(arg_expr(&args[0]));
                     }
-                    ("filter", 1, _) => stages.push(Stage::Filter(compile_subexpr(&args[0])?)),
+                    ("filter", 1, _) => {
+                        stages.push(Stage::Filter(compile_subexpr(&args[0])?));
+                        stage_exprs.push(arg_expr(&args[0]));
+                    }
                     // find / find_all: filter-shaped (return all matching).
-                    ("find", 1, _) => stages.push(Stage::Filter(compile_subexpr(&args[0])?)),
-                    ("find_all", 1, _) => stages.push(Stage::Filter(compile_subexpr(&args[0])?)),
+                    ("find", 1, _) => {
+                        stages.push(Stage::Filter(compile_subexpr(&args[0])?));
+                        stage_exprs.push(arg_expr(&args[0]));
+                    }
+                    ("find_all", 1, _) => {
+                        stages.push(Stage::Filter(compile_subexpr(&args[0])?));
+                        stage_exprs.push(arg_expr(&args[0]));
+                    }
                     // find_first / find_one: terminal — first match or Null.
                     ("find_first", 1, true) | ("find_one", 1, true) => {
                         stages.push(Stage::Filter(compile_subexpr(&args[0])?));
+                        stage_exprs.push(arg_expr(&args[0]));
                         sink = Sink::First;
                     }
                     ("find_first", 1, false) | ("find_one", 1, false) => {
                         stages.push(Stage::Filter(compile_subexpr(&args[0])?));
+                        stage_exprs.push(arg_expr(&args[0]));
                     }
                     // count_by / index_by: barrier reductions.  Trailing
                     // result is single Obj; force Sink::First when terminal.
                     ("count_by", 1, true) | ("countBy", 1, true) => {
                         stages.push(Stage::CountBy(compile_subexpr(&args[0])?));
+                        stage_exprs.push(arg_expr(&args[0]));
                         sink = Sink::First;
                     }
                     ("count_by", 1, false) | ("countBy", 1, false) => {
-                        stages.push(Stage::CountBy(compile_subexpr(&args[0])?))
+                        stages.push(Stage::CountBy(compile_subexpr(&args[0])?));
+                        stage_exprs.push(arg_expr(&args[0]));
                     }
                     ("index_by", 1, true) | ("indexBy", 1, true) => {
                         stages.push(Stage::IndexBy(compile_subexpr(&args[0])?));
+                        stage_exprs.push(arg_expr(&args[0]));
                         sink = Sink::First;
                     }
                     ("index_by", 1, false) | ("indexBy", 1, false) => {
-                        stages.push(Stage::IndexBy(compile_subexpr(&args[0])?))
+                        stages.push(Stage::IndexBy(compile_subexpr(&args[0])?));
+                        stage_exprs.push(arg_expr(&args[0]));
                     }
                     ("map", 1, _) => {
                         // A2: try recursive sub-pipeline planning first.
@@ -329,25 +375,51 @@ fn decode_method_chain(trailing: &[crate::ast::Step]) -> Option<(Vec<Stage>, Sin
                         // methods over @ become Stage::CompiledMap; opaque
                         // bodies (lambdas or side effects) fall through.
                         match try_decode_map_body(&args[0]) {
-                            Some(plan) => stages.push(Stage::CompiledMap(Arc::new(plan))),
-                            None => stages.push(Stage::Map(compile_subexpr(&args[0])?)),
+                            Some(plan) => {
+                                stages.push(Stage::CompiledMap(Arc::new(plan)));
+                                stage_exprs.push(arg_expr(&args[0]));
+                            }
+                            None => {
+                                stages.push(Stage::Map(compile_subexpr(&args[0])?));
+                                stage_exprs.push(arg_expr(&args[0]));
+                            }
                         }
                     }
-                    ("flat_map", 1, _) => stages.push(Stage::FlatMap(compile_subexpr(&args[0])?)),
-                    ("reverse", 0, _) => stages.push(Stage::Reverse),
-                    ("unique", 0, _) => stages.push(Stage::UniqueBy(None)),
-                    ("unique_by", 1, _) => {
-                        stages.push(Stage::UniqueBy(Some(compile_subexpr(&args[0])?)))
+                    ("flat_map", 1, _) => {
+                        stages.push(Stage::FlatMap(compile_subexpr(&args[0])?));
+                        stage_exprs.push(arg_expr(&args[0]));
                     }
-                    ("group_by", 1, _) => stages.push(Stage::GroupBy(compile_subexpr(&args[0])?)),
-                    ("sort", 0, _) => stages.push(Stage::Sort(None)),
-                    ("sort_by", 1, _) => stages.push(Stage::Sort(Some(compile_subexpr(&args[0])?))),
+                    ("reverse", 0, _) => {
+                        stages.push(Stage::Reverse);
+                        stage_exprs.push(None);
+                    }
+                    ("unique", 0, _) => {
+                        stages.push(Stage::UniqueBy(None));
+                        stage_exprs.push(None);
+                    }
+                    ("unique_by", 1, _) => {
+                        stages.push(Stage::UniqueBy(Some(compile_subexpr(&args[0])?)));
+                        stage_exprs.push(arg_expr(&args[0]));
+                    }
+                    ("group_by", 1, _) => {
+                        stages.push(Stage::GroupBy(compile_subexpr(&args[0])?));
+                        stage_exprs.push(arg_expr(&args[0]));
+                    }
+                    ("sort", 0, _) => {
+                        stages.push(Stage::Sort(None));
+                        stage_exprs.push(None);
+                    }
+                    ("sort_by", 1, _) => {
+                        stages.push(Stage::Sort(Some(compile_subexpr(&args[0])?)));
+                        stage_exprs.push(arg_expr(&args[0]));
+                    }
                     ("take", 1, _) => {
                         let n = match &args[0] {
                             Arg::Pos(Expr::Int(n)) if *n >= 0 => *n as usize,
                             _ => return None,
                         };
                         stages.push(Stage::Take(n));
+                        stage_exprs.push(None);
                     }
                     ("skip", 1, _) => {
                         let n = match &args[0] {
@@ -355,6 +427,7 @@ fn decode_method_chain(trailing: &[crate::ast::Step]) -> Option<(Vec<Stage>, Sin
                             _ => return None,
                         };
                         stages.push(Stage::Skip(n));
+                        stage_exprs.push(None);
                     }
                     ("split", 1, _) => {
                         let sep = match &args[0] {
@@ -362,6 +435,7 @@ fn decode_method_chain(trailing: &[crate::ast::Step]) -> Option<(Vec<Stage>, Sin
                             _ => return None,
                         };
                         stages.push(Stage::Split(sep));
+                        stage_exprs.push(None);
                     }
                     // Whole-receiver builtins intentionally stay out of
                     // pipeline lowering; `builtins::BuiltinCall` owns the
@@ -372,6 +446,7 @@ fn decode_method_chain(trailing: &[crate::ast::Step]) -> Option<(Vec<Stage>, Sin
                             _ => return None,
                         };
                         stages.push(Stage::Slice(start, None));
+                        stage_exprs.push(None);
                     }
                     ("slice", 2, _) => {
                         let (start, end) = match (&args[0], &args[1]) {
@@ -379,6 +454,7 @@ fn decode_method_chain(trailing: &[crate::ast::Step]) -> Option<(Vec<Stage>, Sin
                             _ => return None,
                         };
                         stages.push(Stage::Slice(start, end));
+                        stage_exprs.push(None);
                     }
                     ("replace", 2, _) | ("replace_all", 2, _) => {
                         let (needle, replacement) = match (&args[0], &args[1]) {
@@ -392,6 +468,7 @@ fn decode_method_chain(trailing: &[crate::ast::Step]) -> Option<(Vec<Stage>, Sin
                             replacement,
                             all: name.as_str() == "replace_all",
                         });
+                        stage_exprs.push(None);
                     }
                     ("chunk", 1, _) | ("batch", 1, _) => {
                         let n = match &args[0] {
@@ -399,6 +476,7 @@ fn decode_method_chain(trailing: &[crate::ast::Step]) -> Option<(Vec<Stage>, Sin
                             _ => return None,
                         };
                         stages.push(Stage::Chunk(n));
+                        stage_exprs.push(None);
                     }
                     ("window", 1, _) => {
                         let n = match &args[0] {
@@ -406,13 +484,14 @@ fn decode_method_chain(trailing: &[crate::ast::Step]) -> Option<(Vec<Stage>, Sin
                             _ => return None,
                         };
                         stages.push(Stage::Window(n));
+                        stage_exprs.push(None);
                     }
                     ("count", 0, true) | ("len", 0, true) => sink = Sink::Count,
                     ("approx_count_distinct", 0, true) => sink = Sink::ApproxCountDistinct,
-                    ("sum", 0, true) => sink = Sink::Numeric(NumOp::Sum),
-                    ("min", 0, true) => sink = Sink::Numeric(NumOp::Min),
-                    ("max", 0, true) => sink = Sink::Numeric(NumOp::Max),
-                    ("avg", 0, true) => sink = Sink::Numeric(NumOp::Avg),
+                    ("sum", 0, true) => sink = Sink::Numeric(NumericSink::identity(NumOp::Sum)),
+                    ("min", 0, true) => sink = Sink::Numeric(NumericSink::identity(NumOp::Min)),
+                    ("max", 0, true) => sink = Sink::Numeric(NumericSink::identity(NumOp::Max)),
+                    ("avg", 0, true) => sink = Sink::Numeric(NumericSink::identity(NumOp::Avg)),
                     ("first", 0, true) => sink = Sink::First,
                     ("last", 0, true) => sink = Sink::Last,
                     _ => return None,
@@ -421,7 +500,7 @@ fn decode_method_chain(trailing: &[crate::ast::Step]) -> Option<(Vec<Stage>, Sin
             _ => return None,
         }
     }
-    Some((stages, sink))
+    Some((stages, stage_exprs, sink))
 }
 
 /// Apply algebraic rewrite rules until fixed point or a fuel limit
@@ -490,6 +569,7 @@ fn rewrite_step(p: &mut Pipeline) -> bool {
         // Empty input: existing accumulators in run() yield Int(0) /
         // Float(0.0) / Val::arr([]) — clearing stages suffices.
         p.stages.clear();
+        p.stage_exprs.clear();
         return true;
     }
 
@@ -534,7 +614,9 @@ fn rewrite_step(p: &mut Pipeline) -> bool {
                     let new_ops = vec![Opcode::PushCurrent, Opcode::FieldChain(fcd)];
                     let merged = Arc::new(crate::vm::Program::new(new_ops, "<map-fused>"));
                     p.stages[i] = Stage::Map(merged);
+                    p.stage_exprs[i] = None;
                     p.stages.remove(i + 1);
+                    p.stage_exprs.remove(i + 1);
                     return true;
                 }
             }
@@ -549,7 +631,9 @@ fn rewrite_step(p: &mut Pipeline) -> bool {
                     ics: p_prog.ics.clone(),
                 });
                 p.stages[i] = Stage::Filter(merged);
+                p.stage_exprs[i] = None;
                 p.stages.remove(i + 1);
+                p.stage_exprs.remove(i + 1);
                 return true;
             }
             _ => {}
@@ -561,6 +645,7 @@ fn rewrite_step(p: &mut Pipeline) -> bool {
     for i in 0..p.stages.len().saturating_sub(1) {
         if matches!(&p.stages[i], Stage::Map(_)) && matches!(&p.stages[i + 1], Stage::Take(_)) {
             p.stages.swap(i, i + 1);
+            p.stage_exprs.swap(i, i + 1);
             return true;
         }
     }
@@ -604,4 +689,11 @@ fn compile_subexpr(arg: &crate::ast::Arg) -> Option<Arc<crate::vm::Program>> {
         other => other.clone(),
     };
     Some(Arc::new(crate::vm::Compiler::compile(&rooted, "")))
+}
+
+fn arg_expr(arg: &crate::ast::Arg) -> Option<Arc<Expr>> {
+    match arg {
+        crate::ast::Arg::Pos(e) => Some(Arc::new(e.clone())),
+        _ => None,
+    }
 }

@@ -470,10 +470,10 @@ impl Pipeline {
         // vec). Stage'd shapes go through the slot-kernel block below.
         if self.stages.is_empty() {
             match (&recv, &self.sink) {
-                (Val::IntVec(a), Sink::Numeric(NumOp::Sum)) => {
+                (Val::IntVec(a), Sink::Numeric(n)) if n.is_identity() && n.op == NumOp::Sum => {
                     return Some(Ok(Val::Int(a.iter().sum())))
                 }
-                (Val::IntVec(a), Sink::Numeric(NumOp::Min)) => {
+                (Val::IntVec(a), Sink::Numeric(n)) if n.is_identity() && n.op == NumOp::Min => {
                     return Some(Ok(a
                         .iter()
                         .copied()
@@ -481,7 +481,7 @@ impl Pipeline {
                         .map(Val::Int)
                         .unwrap_or(Val::Null)))
                 }
-                (Val::IntVec(a), Sink::Numeric(NumOp::Max)) => {
+                (Val::IntVec(a), Sink::Numeric(n)) if n.is_identity() && n.op == NumOp::Max => {
                     return Some(Ok(a
                         .iter()
                         .copied()
@@ -490,7 +490,7 @@ impl Pipeline {
                         .unwrap_or(Val::Null)))
                 }
                 (Val::IntVec(a), Sink::Count) => return Some(Ok(Val::Int(a.len() as i64))),
-                (Val::FloatVec(a), Sink::Numeric(NumOp::Sum)) => {
+                (Val::FloatVec(a), Sink::Numeric(n)) if n.is_identity() && n.op == NumOp::Sum => {
                     return Some(Ok(Val::Float(a.iter().sum())))
                 }
                 (Val::FloatVec(a), Sink::Count) => return Some(Ok(Val::Int(a.len() as i64))),
@@ -516,12 +516,26 @@ impl Pipeline {
                 }
             }
             // Map(FieldRead) → numeric-on-slot
-            if let Sink::Numeric(op) = &csink {
+            if let Sink::Numeric(n) = &csink {
+                if let Some(project) = &n.project {
+                    let mf = single_field_prog(project)?;
+                    let sm = d.slot_of(mf)?;
+                    if cs.is_empty() {
+                        return Some(Ok(objvec_num_slot(d, sm, n.op)));
+                    }
+                    if cs.len() == 1 {
+                        if let Stage::Filter(pred) = &cs[0] {
+                            let (pf, cop, lit) = single_cmp_prog(pred)?;
+                            let sp = d.slot_of(pf)?;
+                            return Some(Ok(objvec_filter_num_slots(d, sp, cop, &lit, sm, n.op)));
+                        }
+                    }
+                }
                 if cs.len() == 1 {
                     if let Stage::Map(prog) = &cs[0] {
                         let field = single_field_prog(prog)?;
                         let slot = d.slot_of(field)?;
-                        return Some(Ok(objvec_num_slot(d, slot, *op)));
+                        return Some(Ok(objvec_num_slot(d, slot, n.op)));
                     }
                 }
                 if cs.len() == 2 {
@@ -530,7 +544,7 @@ impl Pipeline {
                         let mf = single_field_prog(map)?;
                         let sp = d.slot_of(pf)?;
                         let sm = d.slot_of(mf)?;
-                        return Some(Ok(objvec_filter_num_slots(d, sp, cop, &lit, sm, *op)));
+                        return Some(Ok(objvec_filter_num_slots(d, sp, cop, &lit, sm, n.op)));
                     }
                 }
             }
@@ -582,10 +596,10 @@ impl Pipeline {
         // sink can read the slice directly with no per-row Val tag
         // dispatch.  Each branch is mechanical: same fold, lane-typed.
         match (&recv, &self.sink) {
-            (Val::IntVec(a), Sink::Numeric(NumOp::Sum)) => {
+            (Val::IntVec(a), Sink::Numeric(n)) if n.is_identity() && n.op == NumOp::Sum => {
                 return Some(Ok(Val::Int(a.iter().sum())))
             }
-            (Val::IntVec(a), Sink::Numeric(NumOp::Min)) => {
+            (Val::IntVec(a), Sink::Numeric(n)) if n.is_identity() && n.op == NumOp::Min => {
                 return Some(Ok(a
                     .iter()
                     .copied()
@@ -593,7 +607,7 @@ impl Pipeline {
                     .map(Val::Int)
                     .unwrap_or(Val::Null)))
             }
-            (Val::IntVec(a), Sink::Numeric(NumOp::Max)) => {
+            (Val::IntVec(a), Sink::Numeric(n)) if n.is_identity() && n.op == NumOp::Max => {
                 return Some(Ok(a
                     .iter()
                     .copied()
@@ -601,7 +615,7 @@ impl Pipeline {
                     .map(Val::Int)
                     .unwrap_or(Val::Null)))
             }
-            (Val::IntVec(a), Sink::Numeric(NumOp::Avg)) => {
+            (Val::IntVec(a), Sink::Numeric(n)) if n.is_identity() && n.op == NumOp::Avg => {
                 if a.is_empty() {
                     return Some(Ok(Val::Null));
                 }
@@ -609,24 +623,24 @@ impl Pipeline {
                 return Some(Ok(Val::Float(s as f64 / a.len() as f64)));
             }
             (Val::IntVec(a), Sink::Count) => return Some(Ok(Val::Int(a.len() as i64))),
-            (Val::FloatVec(a), Sink::Numeric(NumOp::Sum)) => {
+            (Val::FloatVec(a), Sink::Numeric(n)) if n.is_identity() && n.op == NumOp::Sum => {
                 return Some(Ok(Val::Float(a.iter().sum())))
             }
-            (Val::FloatVec(a), Sink::Numeric(NumOp::Min)) => {
+            (Val::FloatVec(a), Sink::Numeric(n)) if n.is_identity() && n.op == NumOp::Min => {
                 if a.is_empty() {
                     return Some(Ok(Val::Null));
                 }
                 let m = a.iter().copied().fold(f64::INFINITY, f64::min);
                 return Some(Ok(Val::Float(m)));
             }
-            (Val::FloatVec(a), Sink::Numeric(NumOp::Max)) => {
+            (Val::FloatVec(a), Sink::Numeric(n)) if n.is_identity() && n.op == NumOp::Max => {
                 if a.is_empty() {
                     return Some(Ok(Val::Null));
                 }
                 let m = a.iter().copied().fold(f64::NEG_INFINITY, f64::max);
                 return Some(Ok(Val::Float(m)));
             }
-            (Val::FloatVec(a), Sink::Numeric(NumOp::Avg)) => {
+            (Val::FloatVec(a), Sink::Numeric(n)) if n.is_identity() && n.op == NumOp::Avg => {
                 if a.is_empty() {
                     return Some(Ok(Val::Null));
                 }

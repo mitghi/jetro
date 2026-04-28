@@ -42,6 +42,7 @@ mod common;
 mod exec;
 mod kernels;
 mod lower;
+mod normalize;
 mod plan;
 pub(crate) use common::{
     apply_item_in_env, cmp_val_total, is_truthy, num_finalise, num_fold, walk_field_chain,
@@ -50,7 +51,8 @@ pub use kernels::{eval_cmp_op, eval_kernel, BodyKernel};
 #[cfg(test)]
 pub use plan::plan;
 pub use plan::{
-    compute_strategies, plan_with_kernels, select_strategy, Plan, Position, StageStrategy, Strategy,
+    compute_strategies, plan_with_exprs, plan_with_kernels, select_strategy, Plan, Position,
+    StageStrategy, Strategy,
 };
 
 /// Data capabilities supplied by the owning `Jetro` handle to pipeline
@@ -108,10 +110,12 @@ fn sink_name(s: &Sink) -> &'static str {
     match s {
         Sink::Collect => "collect",
         Sink::Count => "count",
-        Sink::Numeric(NumOp::Sum) => "sum",
-        Sink::Numeric(NumOp::Min) => "min",
-        Sink::Numeric(NumOp::Max) => "max",
-        Sink::Numeric(NumOp::Avg) => "avg",
+        Sink::Numeric(n) => match n.op {
+            NumOp::Sum => "sum",
+            NumOp::Min => "min",
+            NumOp::Max => "max",
+            NumOp::Avg => "avg",
+        },
         Sink::First => "first",
         Sink::Last => "last",
         Sink::ApproxCountDistinct => "approx_count_distinct",
@@ -303,6 +307,34 @@ impl NumOp {
     }
 }
 
+/// Numeric aggregate sink. `project` lets lowering represent
+/// `map(expr).sum()` as `sum(project=expr)` instead of a separate map stage.
+/// This is a general aggregate-input projection, not a per-shape fused
+/// builtin: filter/take/skip remain normal stages and all numeric aggregates
+/// share the same sink representation.
+#[derive(Debug, Clone)]
+pub struct NumericSink {
+    pub op: NumOp,
+    pub project: Option<Arc<crate::vm::Program>>,
+}
+
+impl NumericSink {
+    pub fn identity(op: NumOp) -> Self {
+        Self { op, project: None }
+    }
+
+    pub fn projected(op: NumOp, project: Arc<crate::vm::Program>) -> Self {
+        Self {
+            op,
+            project: Some(project),
+        }
+    }
+
+    pub fn is_identity(&self) -> bool {
+        self.project.is_none()
+    }
+}
+
 /// Where pipeline output lands.  Determines the result type.
 ///
 /// Single mechanism per terminal kind. Fused variants (NumMap,
@@ -317,7 +349,7 @@ pub enum Sink {
     /// reached the sink as a `Val::Int`.
     Count,
     /// `.sum()`/`.min()`/`.max()`/`.avg()` over numerics.
-    Numeric(NumOp),
+    Numeric(NumericSink),
     /// `.first()` / `.last()` — yield the first/last element or
     /// `Val::Null`.
     First,
@@ -332,6 +364,10 @@ pub enum Sink {
 pub struct Pipeline {
     pub source: Source,
     pub stages: Vec<Stage>,
+    /// Original AST bodies for expression-bearing stages, aligned with
+    /// `stages`. Present for optimizer-only semantic rewrites; execution
+    /// still uses compiled programs and kernel hints.
+    pub stage_exprs: Vec<Option<Arc<Expr>>>,
     pub sink: Sink,
     /// Phase A3 — per-Stage kernel hint, in 1:1 correspondence with
     /// `stages`.  Computed once at lowering by `BodyKernel::classify`
@@ -351,6 +387,7 @@ pub struct Pipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::{BinOp, Expr};
     use crate::parser;
 
     /// Skip body when JETRO_COMPOSED=1 — the rewrite-shape tests below
@@ -365,6 +402,67 @@ mod tests {
     fn lower_query(q: &str) -> Option<Pipeline> {
         let expr = parser::parse(q).ok()?;
         Pipeline::lower(&expr)
+    }
+
+    fn only_stage_expr(p: &Pipeline) -> &Expr {
+        assert_eq!(p.stage_exprs.len(), p.stages.len());
+        p.stage_exprs[0]
+            .as_ref()
+            .expect("expected optimized stage expression")
+            .as_ref()
+    }
+
+    fn assert_price_qty_gt_100(expr: &Expr) {
+        match expr {
+            Expr::BinOp(lhs, BinOp::Gt, rhs) => {
+                assert_price_qty_mul(lhs);
+                assert!(matches!(rhs.as_ref(), Expr::Int(100)), "{expr:#?}");
+            }
+            _ => panic!("expected `(price * qty) > 100`, got {expr:#?}"),
+        }
+    }
+
+    fn assert_price_qty_mul(expr: &Expr) {
+        match expr {
+            Expr::BinOp(lhs, BinOp::Mul, rhs) => {
+                assert!(
+                    matches!(lhs.as_ref(), Expr::Ident(name) if name == "price"),
+                    "{expr:#?}"
+                );
+                assert!(
+                    matches!(rhs.as_ref(), Expr::Ident(name) if name == "qty"),
+                    "{expr:#?}"
+                );
+            }
+            _ => panic!("expected `price * qty`, got {expr:#?}"),
+        }
+    }
+
+    fn assert_pipeline_matches_vm(query: &str, doc: serde_json::Value) {
+        assert_pipeline_matches_vm_query(query, query, doc);
+    }
+
+    fn assert_pipeline_matches_vm_query(
+        pipeline_query: &str,
+        vm_query: &str,
+        doc: serde_json::Value,
+    ) {
+        let pipeline = lower_query(pipeline_query).expect("query should lower to pipeline");
+        let root = Val::from(&doc);
+        let actual: serde_json::Value = pipeline
+            .run(&root)
+            .expect("pipeline execution should succeed")
+            .into();
+
+        let mut vm = crate::vm::VM::new();
+        let expected = vm
+            .run_str(vm_query, &doc)
+            .expect("VM execution should succeed");
+
+        assert_eq!(
+            actual, expected,
+            "pipeline diverged from VM for {pipeline_query}"
+        );
     }
 
     #[test]
@@ -384,7 +482,7 @@ mod tests {
         assert_eq!(p.stages.len(), 2);
         assert!(matches!(p.stages[0], Stage::Skip(2)));
         assert!(matches!(p.stages[1], Stage::Take(5)));
-        assert!(matches!(p.sink, Sink::Numeric(NumOp::Sum)));
+        assert!(matches!(&p.sink, Sink::Numeric(n) if n.op == NumOp::Sum));
     }
 
     #[test]
@@ -520,6 +618,163 @@ mod tests {
         assert!(matches!(p.sink, Sink::Count));
     }
 
+    #[test]
+    fn demand_optimizer_drops_value_only_work_for_count() {
+        let p = lower_query("$.orders.map(total).upper().count()").unwrap();
+        assert!(p.stages.is_empty());
+        assert!(matches!(p.sink, Sink::Count));
+    }
+
+    #[test]
+    fn demand_optimizer_pulls_filter_through_map_for_count() {
+        let p = lower_query("$.orders.map(total).filter(@ > 10).count()").unwrap();
+        assert_eq!(p.stages.len(), 1);
+        assert!(matches!(p.stages[0], Stage::Filter(_)));
+        assert!(matches!(p.sink, Sink::Count));
+    }
+
+    #[test]
+    fn demand_optimizer_pulls_filter_through_computed_map_for_count() {
+        let p = lower_query("$.orders.map(price * qty).filter(@ > 100).count()").unwrap();
+        assert_eq!(p.stages.len(), 1);
+        assert!(matches!(p.stages[0], Stage::Filter(_)));
+        assert_price_qty_gt_100(only_stage_expr(&p));
+        assert!(matches!(p.sink, Sink::Count));
+    }
+
+    #[test]
+    fn demand_optimizer_pulls_filter_through_method_chain_map_for_count() {
+        let p =
+            lower_query("$.users.map(name.trim().upper()).filter(@ == \"ADA\").count()").unwrap();
+        assert_eq!(p.stages.len(), 1);
+        assert!(matches!(p.stages[0], Stage::Filter(_)));
+        assert!(matches!(p.sink, Sink::Count));
+    }
+
+    #[test]
+    fn demand_optimizer_simplifies_object_projection_after_substitution() {
+        let p = lower_query("$.orders.map({v: price * qty, id: id}).filter(@.v > 100).count()")
+            .unwrap();
+        assert_eq!(p.stages.len(), 1);
+        assert!(matches!(p.stages[0], Stage::Filter(_)));
+        assert_price_qty_gt_100(only_stage_expr(&p));
+        assert!(matches!(p.sink, Sink::Count));
+    }
+
+    #[test]
+    fn demand_optimizer_simplifies_array_projection_after_substitution() {
+        let p = lower_query("$.orders.map([price * qty, id]).filter(@[0] > 100).count()").unwrap();
+        assert_eq!(p.stages.len(), 1);
+        assert!(matches!(p.stages[0], Stage::Filter(_)));
+        assert_price_qty_gt_100(only_stage_expr(&p));
+        assert!(matches!(p.sink, Sink::Count));
+    }
+
+    #[test]
+    fn demand_optimizer_pulls_filter_through_map_but_keeps_map_for_collect() {
+        let p = lower_query("$.orders.map(total).filter(@ > 10)").unwrap();
+        assert_eq!(p.stages.len(), 2);
+        assert!(matches!(p.stages[0], Stage::Filter(_)));
+        assert!(matches!(p.stages[1], Stage::Map(_)));
+        assert!(matches!(p.sink, Sink::Collect));
+    }
+
+    #[test]
+    fn demand_optimizer_removes_order_only_work_for_numeric_sink() {
+        let p = lower_query("$.orders.sort().reverse().map(total).sum()").unwrap();
+        assert!(p.stages.is_empty());
+        assert!(matches!(&p.sink, Sink::Numeric(n) if n.op == NumOp::Sum && n.project.is_some()));
+    }
+
+    #[test]
+    fn demand_optimizer_keeps_membership_work_for_numeric_sink() {
+        let p = lower_query("$.orders.take(2).map(total).sum()").unwrap();
+        assert_eq!(p.stages.len(), 1);
+        assert!(matches!(p.stages[0], Stage::Take(2)));
+        assert!(matches!(&p.sink, Sink::Numeric(n) if n.op == NumOp::Sum && n.project.is_some()));
+    }
+
+    #[test]
+    fn demand_optimizer_computed_map_filter_count_matches_vm() {
+        use serde_json::json;
+        assert_pipeline_matches_vm(
+            "$.orders.map(price * qty).filter(@ > 100).count()",
+            json!({
+                "orders": [
+                    {"price": 10, "qty": 3},
+                    {"price": 25, "qty": 5},
+                    {"price": 8, "qty": 20},
+                    {"price": 50, "qty": 1}
+                ]
+            }),
+        );
+    }
+
+    #[test]
+    fn demand_optimizer_object_projection_filter_count_matches_vm() {
+        use serde_json::json;
+        assert_pipeline_matches_vm(
+            "$.orders.map({v: price * qty, id: id}).filter(@.v > 100).count()",
+            json!({
+                "orders": [
+                    {"id": "a", "price": 10, "qty": 3},
+                    {"id": "b", "price": 25, "qty": 5},
+                    {"id": "c", "price": 8, "qty": 20},
+                    {"id": "d", "price": 50, "qty": 1}
+                ]
+            }),
+        );
+    }
+
+    #[test]
+    fn demand_optimizer_array_projection_filter_count_matches_vm() {
+        use serde_json::json;
+        assert_pipeline_matches_vm(
+            "$.orders.map([price * qty, id]).filter(@[0] > 100).count()",
+            json!({
+                "orders": [
+                    {"id": "a", "price": 10, "qty": 3},
+                    {"id": "b", "price": 25, "qty": 5},
+                    {"id": "c", "price": 8, "qty": 20},
+                    {"id": "d", "price": 50, "qty": 1}
+                ]
+            }),
+        );
+    }
+
+    #[test]
+    fn demand_optimizer_order_removal_numeric_sink_matches_vm() {
+        use serde_json::json;
+        assert_pipeline_matches_vm(
+            "$.orders.sort().reverse().map(total).sum()",
+            json!({
+                "orders": [
+                    {"id": 1, "total": 7},
+                    {"id": 2, "total": 40},
+                    {"id": 3, "total": -2},
+                    {"id": 4, "total": 9}
+                ]
+            }),
+        );
+    }
+
+    #[test]
+    fn demand_optimizer_projected_numeric_sink_with_take_matches_vm() {
+        use serde_json::json;
+        assert_pipeline_matches_vm_query(
+            "$.orders.take(2).map(total).sum()",
+            "$.orders.first(2).map(total).sum()",
+            json!({
+                "orders": [
+                    {"id": 1, "total": 7},
+                    {"id": 2, "total": 40},
+                    {"id": 3, "total": -2},
+                    {"id": 4, "total": 9}
+                ]
+            }),
+        );
+    }
+
     // `rewrite_take_after_map_pushdown`, `rewrite_sort_take_to_topn`,
     // `rewrite_sort_by_first_to_minby`, `rewrite_sort_by_last_to_maxby`
     // removed — fused Sink::NumMap/TopN/MinBy/MaxBy variants deleted.
@@ -533,6 +788,22 @@ mod tests {
         // Compare via JSON to avoid Val::Arr vs Val::IntVec variant mismatch.
         let out_json: serde_json::Value = out.into();
         assert_eq!(out_json, json!([1, 2, 3]));
+    }
+
+    #[test]
+    fn first_sink_stops_after_first_passing_filter_row() {
+        use serde_json::json;
+        let doc: Val = (&json!({
+            "data": [
+                {"score": 901, "bad": 0},
+                {"score": 1, "bad": "not a number"}
+            ]
+        }))
+            .into();
+        let p = lower_query("$.data.filter(score > 900 or bad + 1 > 0).first()").unwrap();
+        let out = p.run(&doc).unwrap();
+        let out_json: serde_json::Value = out.into();
+        assert_eq!(out_json, json!({"score": 901, "bad": 0}));
     }
 
     #[test]

@@ -9,7 +9,50 @@ use crate::value::Val;
 use crate::vm::Program;
 
 #[derive(Clone)]
-pub enum PhysicalExpr {
+pub struct QueryPlan {
+    root: QueryRoot,
+    nodes: Vec<PlanNode>,
+}
+
+impl QueryPlan {
+    #[inline]
+    pub(crate) fn from_nodes(root: NodeId, nodes: Vec<PlanNode>) -> Self {
+        Self {
+            root: QueryRoot::Node(root),
+            nodes,
+        }
+    }
+
+    #[inline]
+    pub fn source_vm(expr: &str) -> Self {
+        Self {
+            root: QueryRoot::SourceVm(Arc::from(expr)),
+            nodes: Vec::new(),
+        }
+    }
+
+    #[inline]
+    pub fn root(&self) -> &QueryRoot {
+        &self.root
+    }
+
+    #[inline]
+    pub(crate) fn node(&self, id: NodeId) -> &PlanNode {
+        &self.nodes[id.0]
+    }
+}
+
+#[derive(Clone)]
+pub enum QueryRoot {
+    Node(NodeId),
+    SourceVm(Arc<str>),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NodeId(pub(crate) usize);
+
+#[derive(Clone)]
+pub enum PlanNode {
     Literal(Val),
     Root,
     Current,
@@ -17,40 +60,45 @@ pub enum PhysicalExpr {
     Pipeline(Pipeline),
     RootPath(Vec<PhysicalPathStep>),
     Chain {
-        base: Box<PhysicalExpr>,
+        base: NodeId,
         steps: Vec<PhysicalChainStep>,
     },
-    UnaryNeg(Box<PhysicalExpr>),
-    Not(Box<PhysicalExpr>),
+    Call {
+        receiver: NodeId,
+        call: BuiltinCall,
+        optional: bool,
+    },
+    UnaryNeg(NodeId),
+    Not(NodeId),
     Binary {
-        lhs: Box<PhysicalExpr>,
+        lhs: NodeId,
         op: BinOp,
-        rhs: Box<PhysicalExpr>,
+        rhs: NodeId,
     },
     Kind {
-        expr: Box<PhysicalExpr>,
+        expr: NodeId,
         ty: KindType,
         negate: bool,
     },
     Coalesce {
-        lhs: Box<PhysicalExpr>,
-        rhs: Box<PhysicalExpr>,
+        lhs: NodeId,
+        rhs: NodeId,
     },
     IfElse {
-        cond: Box<PhysicalExpr>,
-        then_: Box<PhysicalExpr>,
-        else_: Box<PhysicalExpr>,
+        cond: NodeId,
+        then_: NodeId,
+        else_: NodeId,
     },
     Try {
-        body: Box<PhysicalExpr>,
-        default: Box<PhysicalExpr>,
+        body: NodeId,
+        default: NodeId,
     },
     Object(Vec<PhysicalObjField>),
     Array(Vec<PhysicalArrayElem>),
     Let {
         name: Arc<str>,
-        init: Box<PhysicalExpr>,
-        body: Box<PhysicalExpr>,
+        init: NodeId,
+        body: NodeId,
     },
     Vm(Arc<Program>),
 }
@@ -65,29 +113,28 @@ pub enum PhysicalPathStep {
 pub enum PhysicalChainStep {
     Field(Arc<str>),
     Index(i64),
-    DynIndex(PhysicalExpr),
-    Method { call: BuiltinCall, optional: bool },
+    DynIndex(NodeId),
 }
 
 #[derive(Clone)]
 pub enum PhysicalObjField {
     Kv {
         key: Arc<str>,
-        val: PhysicalExpr,
+        val: NodeId,
         optional: bool,
-        cond: Option<PhysicalExpr>,
+        cond: Option<NodeId>,
     },
     Short(Arc<str>),
     Dynamic {
-        key: PhysicalExpr,
-        val: PhysicalExpr,
+        key: NodeId,
+        val: NodeId,
     },
-    Spread(PhysicalExpr),
-    SpreadDeep(PhysicalExpr),
+    Spread(NodeId),
+    SpreadDeep(NodeId),
 }
 
 #[derive(Clone)]
 pub enum PhysicalArrayElem {
-    Expr(PhysicalExpr),
-    Spread(PhysicalExpr),
+    Expr(NodeId),
+    Spread(NodeId),
 }

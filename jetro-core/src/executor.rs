@@ -1,40 +1,24 @@
 //! Top-level query execution routing.
 //!
-//! `planner.rs` classifies the expression. This module owns the runtime
-//! decision flow for a `Jetro` handle: pipeline first when planned, scalar VM
-//! fallback otherwise. Keeping this out of `lib.rs` makes data flow explicit
-//! without changing the physical loops in `pipeline.rs` or `vm.rs`.
+//! `planner.rs` builds a single-use `QueryPlan`. This module only chooses
+//! between a parsed plan root and the source-level VM fallback used when
+//! parsing fails.
 
 use serde_json::Value;
 
 use crate::context::EvalError;
+use crate::physical::QueryRoot;
 use crate::physical_eval;
-use crate::pipeline;
 use crate::planner;
-use crate::value::Val;
 use crate::{with_vm, Jetro, VM};
 
 pub(crate) fn collect_json(j: &Jetro, expr: &str) -> Result<Value, EvalError> {
     let plan = planner::plan_query(expr);
 
-    match &plan {
-        planner::ExecutionPlan::Pipeline(_) => {
-            if let Some(out) = run_pipeline(j, &plan) {
-                return out.map(Value::from);
-            }
-        }
-        planner::ExecutionPlan::Expr(expr) => {
-            return physical_eval::run(j, expr).map(Value::from);
-        }
-        planner::ExecutionPlan::Vm => {}
+    match plan.root() {
+        QueryRoot::Node(root) => physical_eval::run(j, &plan, *root).map(Value::from),
+        QueryRoot::SourceVm(source) => run_vm_json(j, source.as_ref()),
     }
-
-    run_vm_json(j, expr)
-}
-
-fn run_pipeline(j: &Jetro, plan: &planner::ExecutionPlan) -> Option<Result<Val, EvalError>> {
-    let p = plan.pipeline()?;
-    Some(p.run_with(&j.root_val(), Some(j as &dyn pipeline::PipelineData)))
 }
 
 fn run_vm_json(j: &Jetro, expr: &str) -> Result<Value, EvalError> {
@@ -51,80 +35,83 @@ fn run_vm_json(j: &Jetro, expr: &str) -> Result<Value, EvalError> {
 mod tests {
     use serde_json::json;
 
-    use crate::physical::{PhysicalArrayElem, PhysicalChainStep, PhysicalExpr, PhysicalObjField};
-    use crate::planner::{self, ExecutionPlan};
+    use crate::physical::QueryRoot;
+    use crate::physical::{
+        NodeId, PhysicalArrayElem, PhysicalChainStep, PhysicalObjField, PlanNode,
+    };
+    use crate::pipeline::{NumOp, Sink, Source, Stage};
+    use crate::planner;
     use crate::Jetro;
 
-    fn assert_no_vm_fallback(expr: &PhysicalExpr) {
-        match expr {
-            PhysicalExpr::Vm(_) => panic!("unexpected VM fallback in physical plan"),
-            PhysicalExpr::Literal(_)
-            | PhysicalExpr::Root
-            | PhysicalExpr::Current
-            | PhysicalExpr::Ident(_)
-            | PhysicalExpr::Pipeline(_)
-            | PhysicalExpr::RootPath(_) => {}
-            PhysicalExpr::Chain { base, steps } => {
-                assert_no_vm_fallback(base);
+    fn assert_no_vm_fallback(plan: &crate::physical::QueryPlan, id: NodeId) {
+        match plan.node(id) {
+            PlanNode::Vm(_) => panic!("unexpected VM fallback in physical plan"),
+            PlanNode::Literal(_)
+            | PlanNode::Root
+            | PlanNode::Current
+            | PlanNode::Ident(_)
+            | PlanNode::Pipeline(_)
+            | PlanNode::RootPath(_) => {}
+            PlanNode::Call { receiver, .. } => assert_no_vm_fallback(plan, *receiver),
+            PlanNode::Chain { base, steps } => {
+                assert_no_vm_fallback(plan, *base);
                 for step in steps {
                     if let PhysicalChainStep::DynIndex(expr) = step {
-                        assert_no_vm_fallback(expr);
+                        assert_no_vm_fallback(plan, *expr);
                     }
                 }
             }
-            PhysicalExpr::UnaryNeg(inner) | PhysicalExpr::Not(inner) => {
-                assert_no_vm_fallback(inner)
+            PlanNode::UnaryNeg(inner) | PlanNode::Not(inner) => assert_no_vm_fallback(plan, *inner),
+            PlanNode::Binary { lhs, rhs, .. } => {
+                assert_no_vm_fallback(plan, *lhs);
+                assert_no_vm_fallback(plan, *rhs);
             }
-            PhysicalExpr::Binary { lhs, rhs, .. } => {
-                assert_no_vm_fallback(lhs);
-                assert_no_vm_fallback(rhs);
+            PlanNode::Kind { expr, .. } => assert_no_vm_fallback(plan, *expr),
+            PlanNode::Coalesce { lhs, rhs } => {
+                assert_no_vm_fallback(plan, *lhs);
+                assert_no_vm_fallback(plan, *rhs);
             }
-            PhysicalExpr::Kind { expr, .. } => assert_no_vm_fallback(expr),
-            PhysicalExpr::Coalesce { lhs, rhs } => {
-                assert_no_vm_fallback(lhs);
-                assert_no_vm_fallback(rhs);
+            PlanNode::IfElse { cond, then_, else_ } => {
+                assert_no_vm_fallback(plan, *cond);
+                assert_no_vm_fallback(plan, *then_);
+                assert_no_vm_fallback(plan, *else_);
             }
-            PhysicalExpr::IfElse { cond, then_, else_ } => {
-                assert_no_vm_fallback(cond);
-                assert_no_vm_fallback(then_);
-                assert_no_vm_fallback(else_);
+            PlanNode::Try { body, default } => {
+                assert_no_vm_fallback(plan, *body);
+                assert_no_vm_fallback(plan, *default);
             }
-            PhysicalExpr::Try { body, default } => {
-                assert_no_vm_fallback(body);
-                assert_no_vm_fallback(default);
-            }
-            PhysicalExpr::Object(fields) => {
+            PlanNode::Object(fields) => {
                 for field in fields {
                     match field {
                         PhysicalObjField::Kv { val, cond, .. } => {
-                            assert_no_vm_fallback(val);
+                            assert_no_vm_fallback(plan, *val);
                             if let Some(cond) = cond {
-                                assert_no_vm_fallback(cond);
+                                assert_no_vm_fallback(plan, *cond);
                             }
                         }
                         PhysicalObjField::Short(_) => {}
                         PhysicalObjField::Dynamic { key, val } => {
-                            assert_no_vm_fallback(key);
-                            assert_no_vm_fallback(val);
+                            assert_no_vm_fallback(plan, *key);
+                            assert_no_vm_fallback(plan, *val);
                         }
                         PhysicalObjField::Spread(expr) | PhysicalObjField::SpreadDeep(expr) => {
-                            assert_no_vm_fallback(expr);
+                            assert_no_vm_fallback(plan, *expr);
                         }
                     }
                 }
             }
-            PhysicalExpr::Array(elems) => {
+            PlanNode::Array(elems) => {
                 for elem in elems {
                     match elem {
                         PhysicalArrayElem::Expr(expr) | PhysicalArrayElem::Spread(expr) => {
-                            assert_no_vm_fallback(expr);
+                            assert_no_vm_fallback(plan, *expr);
                         }
                     }
                 }
             }
-            PhysicalExpr::Let { init, body, .. } => {
-                assert_no_vm_fallback(init);
-                assert_no_vm_fallback(body);
+            PlanNode::Let { init, body, .. } => {
+                assert_no_vm_fallback(plan, *init);
+                assert_no_vm_fallback(plan, *body);
             }
         }
     }
@@ -148,6 +135,86 @@ mod tests {
     }
 
     #[test]
+    fn object_shape_lowers_filter_map_sum_and_runs_map() {
+        let expr = r#"{"total": $.data.filter(active).map(score).sum()}"#;
+        let plan = planner::plan_query(expr);
+        let QueryRoot::Node(root) = plan.root() else {
+            panic!("expected physical expression plan");
+        };
+        let PlanNode::Object(fields) = plan.node(*root) else {
+            panic!("expected object root");
+        };
+        let PhysicalObjField::Kv { val, .. } = &fields[0] else {
+            panic!("expected object key/value field");
+        };
+        let PlanNode::Pipeline(pipeline) = plan.node(*val) else {
+            panic!("expected pipeline child");
+        };
+
+        match &pipeline.source {
+            Source::FieldChain { keys } => {
+                let keys: Vec<&str> = keys.iter().map(|k| k.as_ref()).collect();
+                assert_eq!(keys, vec!["data"]);
+            }
+            Source::Receiver(_) => panic!("expected $.data field-chain source"),
+        }
+        assert_eq!(pipeline.stages.len(), 1);
+        assert!(matches!(pipeline.stages[0], Stage::Filter(_)));
+        assert!(
+            matches!(&pipeline.sink, Sink::Numeric(n) if n.op == NumOp::Sum && n.project.is_some())
+        );
+
+        let j = Jetro::from(json!({
+            "data": [
+                {"active": true, "score": 10},
+                {"active": false, "score": 1000},
+                {"active": true, "score": 15}
+            ]
+        }));
+
+        let out = j.collect(expr).unwrap();
+
+        assert_eq!(out, json!({"total": 25}));
+    }
+
+    #[test]
+    fn top_level_lowers_filter_map_sum_and_runs_map() {
+        let expr = "$.data.filter(active).map(score).sum()";
+        let plan = planner::plan_query(expr);
+        let QueryRoot::Node(root) = plan.root() else {
+            panic!("expected physical expression plan");
+        };
+        let PlanNode::Pipeline(pipeline) = plan.node(*root) else {
+            panic!("expected pipeline root");
+        };
+
+        match &pipeline.source {
+            Source::FieldChain { keys } => {
+                let keys: Vec<&str> = keys.iter().map(|k| k.as_ref()).collect();
+                assert_eq!(keys, vec!["data"]);
+            }
+            Source::Receiver(_) => panic!("expected $.data field-chain source"),
+        }
+        assert_eq!(pipeline.stages.len(), 1);
+        assert!(matches!(pipeline.stages[0], Stage::Filter(_)));
+        assert!(
+            matches!(&pipeline.sink, Sink::Numeric(n) if n.op == NumOp::Sum && n.project.is_some())
+        );
+
+        let j = Jetro::from(json!({
+            "data": [
+                {"active": true, "score": 10},
+                {"active": false, "score": 1000},
+                {"active": true, "score": 15}
+            ]
+        }));
+
+        let out = j.collect(expr).unwrap();
+
+        assert_eq!(out, json!(25));
+    }
+
+    #[test]
     fn object_shape_executes_scalar_root_path_without_collecting() {
         let j = Jetro::from(json!({
             "a": {"b": [{"c": "ok"}]}
@@ -161,10 +228,11 @@ mod tests {
     #[test]
     fn object_shape_executes_common_scalar_nodes_without_vm() {
         let expr = r#"{"gt": $.a > 1, "sum": $.a + 4, "picked": "yes" if $.ok else "no"}"#;
-        let ExecutionPlan::Expr(plan) = planner::plan_query(expr) else {
+        let plan = planner::plan_query(expr);
+        let QueryRoot::Node(root) = plan.root() else {
             panic!("expected physical expression plan");
         };
-        assert_no_vm_fallback(&plan);
+        assert_no_vm_fallback(&plan, *root);
 
         let j = Jetro::from(json!({
             "a": 3,
@@ -179,10 +247,11 @@ mod tests {
     #[test]
     fn object_shape_executes_scalar_chains_without_vm() {
         let expr = r#"let k = "name" in {"current": @.user.name, "ident": user.name, "dyn": user[k], "method": user.name.upper().trim()}"#;
-        let ExecutionPlan::Expr(plan) = planner::plan_query(expr) else {
+        let plan = planner::plan_query(expr);
+        let QueryRoot::Node(root) = plan.root() else {
             panic!("expected physical expression plan");
         };
-        assert_no_vm_fallback(&plan);
+        assert_no_vm_fallback(&plan, *root);
 
         let j = Jetro::from(json!({
             "user": {"name": " ada "}

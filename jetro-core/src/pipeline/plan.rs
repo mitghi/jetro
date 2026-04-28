@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use super::{BodyKernel, Sink, Stage};
+use crate::ast::Expr;
+
+use super::{normalize::normalize_symbolic, BodyKernel, Sink, Stage};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Bound {
@@ -127,7 +129,6 @@ pub enum Cardinality {
 #[derive(Debug, Clone, Copy)]
 pub struct StageShape {
     pub cardinality: Cardinality,
-    pub purity: bool,
     pub can_indexed: bool,
     pub cost: f64,
     pub selectivity: f64,
@@ -138,28 +139,24 @@ impl Stage {
         match self {
             Stage::Map(_) => StageShape {
                 cardinality: Cardinality::OneToOne,
-                purity: true,
                 can_indexed: true,
                 cost: 10.0,
                 selectivity: 1.0,
             },
             Stage::Filter(_) => StageShape {
                 cardinality: Cardinality::Filtering,
-                purity: true,
                 can_indexed: false,
                 cost: 10.0,
                 selectivity: 0.5,
             },
             Stage::FlatMap(_) => StageShape {
                 cardinality: Cardinality::Expanding,
-                purity: true,
                 can_indexed: false,
                 cost: 10.0,
                 selectivity: 1.0,
             },
             Stage::Take(_) | Stage::Skip(_) => StageShape {
                 cardinality: Cardinality::Filtering,
-                purity: true,
                 can_indexed: false,
                 cost: 0.5,
                 selectivity: 0.5,
@@ -167,7 +164,6 @@ impl Stage {
             Stage::Reverse | Stage::Sort(_) | Stage::UniqueBy(_) | Stage::GroupBy(_) => {
                 StageShape {
                     cardinality: Cardinality::Barrier,
-                    purity: true,
                     can_indexed: false,
                     cost: 20.0,
                     selectivity: 1.0,
@@ -175,35 +171,30 @@ impl Stage {
             }
             Stage::Split(_) => StageShape {
                 cardinality: Cardinality::Expanding,
-                purity: true,
                 can_indexed: true,
                 cost: 2.0,
                 selectivity: 1.0,
             },
             Stage::Slice(_, _) => StageShape {
                 cardinality: Cardinality::OneToOne,
-                purity: true,
                 can_indexed: true,
                 cost: 1.0,
                 selectivity: 1.0,
             },
             Stage::Replace { .. } => StageShape {
                 cardinality: Cardinality::OneToOne,
-                purity: true,
                 can_indexed: true,
                 cost: 2.0,
                 selectivity: 1.0,
             },
             Stage::Chunk(_) | Stage::Window(_) => StageShape {
                 cardinality: Cardinality::Barrier,
-                purity: true,
                 can_indexed: true,
                 cost: 2.0,
                 selectivity: 1.0,
             },
             Stage::CompiledMap(_) => StageShape {
                 cardinality: Cardinality::OneToOne,
-                purity: true,
                 can_indexed: true,
                 cost: 10.0,
                 selectivity: 1.0,
@@ -212,7 +203,6 @@ impl Stage {
                 let spec = call.spec();
                 StageShape {
                     cardinality: Cardinality::OneToOne,
-                    purity: spec.pure,
                     can_indexed: spec.can_indexed,
                     cost: spec.cost,
                     selectivity: 1.0,
@@ -232,7 +222,6 @@ impl Stage {
             | Stage::IndexBy(_)
             | Stage::SortedDedup(_) => StageShape {
                 cardinality: Cardinality::OneToOne,
-                purity: true,
                 can_indexed: true,
                 cost: 1.0,
                 selectivity: 1.0,
@@ -280,6 +269,7 @@ pub enum Strategy {
 #[derive(Debug, Clone)]
 pub struct Plan {
     pub stages: Vec<Stage>,
+    pub stage_exprs: Vec<Option<Arc<Expr>>>,
     pub sink: Sink,
 }
 
@@ -289,18 +279,36 @@ pub fn plan(stages: Vec<Stage>, sink: Sink) -> Plan {
 }
 
 pub fn plan_with_kernels(stages: Vec<Stage>, kernels: &[BodyKernel], sink: Sink) -> Plan {
+    plan_with_exprs(stages, Vec::new(), kernels, sink)
+}
+
+pub fn plan_with_exprs(
+    stages: Vec<Stage>,
+    stage_exprs: Vec<Option<Arc<Expr>>>,
+    kernels: &[BodyKernel],
+    mut sink: Sink,
+) -> Plan {
     let mut stages = stages;
+    let mut e_buf: Vec<Option<Arc<Expr>>> = if stage_exprs.len() == stages.len() {
+        stage_exprs
+    } else {
+        vec![None; stages.len()]
+    };
     let mut k_buf: Vec<BodyKernel> = if kernels.len() == stages.len() {
         kernels.to_vec()
     } else {
         vec![BodyKernel::Generic; stages.len()]
     };
 
-    drop_dead_pure_stages_kernels(&mut stages, &mut k_buf, &sink);
-    reorder_filter_runs(&mut stages, &mut k_buf);
-    fold_merge_with_kernels(&mut stages, &mut k_buf);
+    normalize_symbolic(&mut stages, &mut e_buf, &mut k_buf, &mut sink);
+    reorder_filter_runs(&mut stages, &mut e_buf, &mut k_buf);
+    fold_merge_with_kernels(&mut stages, &mut e_buf, &mut k_buf);
 
-    Plan { stages, sink }
+    Plan {
+        stages,
+        stage_exprs: e_buf,
+        sink,
+    }
 }
 
 fn kernel_cost_selectivity(stage: &Stage, kernel: &BodyKernel) -> (f64, f64) {
@@ -345,7 +353,11 @@ fn kernel_cost_selectivity(stage: &Stage, kernel: &BodyKernel) -> (f64, f64) {
     }
 }
 
-fn reorder_filter_runs(stages: &mut Vec<Stage>, kernels: &mut Vec<BodyKernel>) {
+fn reorder_filter_runs(
+    stages: &mut Vec<Stage>,
+    exprs: &mut Vec<Option<Arc<Expr>>>,
+    kernels: &mut Vec<BodyKernel>,
+) {
     let mut i = 0;
     while i < stages.len() {
         let mut j = i;
@@ -356,19 +368,24 @@ fn reorder_filter_runs(stages: &mut Vec<Stage>, kernels: &mut Vec<BodyKernel>) {
             j += 1;
         }
         if j - i >= 2 {
-            let mut run: Vec<(Stage, BodyKernel)> = Vec::with_capacity(j - i);
+            let mut run: Vec<(Stage, Option<Arc<Expr>>, BodyKernel)> = Vec::with_capacity(j - i);
             for idx in i..j {
-                run.push((stages[idx].clone(), kernels[idx].clone()));
+                run.push((
+                    stages[idx].clone(),
+                    exprs[idx].clone(),
+                    kernels[idx].clone(),
+                ));
             }
             run.sort_by(|a, b| {
-                let (ca, sa) = kernel_cost_selectivity(&a.0, &a.1);
-                let (cb, sb) = kernel_cost_selectivity(&b.0, &b.1);
+                let (ca, sa) = kernel_cost_selectivity(&a.0, &a.2);
+                let (cb, sb) = kernel_cost_selectivity(&b.0, &b.2);
                 let ra = ca / (1.0 - sa).max(1e-6);
                 let rb = cb / (1.0 - sb).max(1e-6);
                 ra.partial_cmp(&rb).unwrap_or(std::cmp::Ordering::Equal)
             });
-            for (idx, (s, k)) in run.into_iter().enumerate() {
+            for (idx, (s, e, k)) in run.into_iter().enumerate() {
                 stages[i + idx] = s;
+                exprs[i + idx] = e;
                 kernels[i + idx] = k;
             }
         }
@@ -376,32 +393,18 @@ fn reorder_filter_runs(stages: &mut Vec<Stage>, kernels: &mut Vec<BodyKernel>) {
     }
 }
 
-fn drop_dead_pure_stages_kernels(
+fn fold_merge_with_kernels(
     stages: &mut Vec<Stage>,
+    exprs: &mut Vec<Option<Arc<Expr>>>,
     kernels: &mut Vec<BodyKernel>,
-    sink: &Sink,
 ) {
-    if !matches!(sink, Sink::Count) {
-        return;
-    }
-    while let Some(last) = stages.last() {
-        let s = last.shape();
-        if matches!(s.cardinality, Cardinality::OneToOne) && s.purity {
-            stages.pop();
-            kernels.pop();
-        } else {
-            break;
-        }
-    }
-}
-
-fn fold_merge_with_kernels(stages: &mut Vec<Stage>, kernels: &mut Vec<BodyKernel>) {
     let mut i = 0;
     while i < stages.len() {
         if matches!(&stages[i], Stage::Filter(_))
             && matches!(kernels.get(i), Some(BodyKernel::ConstBool(true)))
         {
             stages.remove(i);
+            exprs.remove(i);
             kernels.remove(i);
         } else {
             i += 1;
@@ -412,6 +415,7 @@ fn fold_merge_with_kernels(stages: &mut Vec<Stage>, kernels: &mut Vec<BodyKernel
     while i + 1 < stages.len() {
         if stages[i].cancels_with(&stages[i + 1]) {
             stages.drain(i..=i + 1);
+            exprs.drain(i..=i + 1);
             kernels.drain(i..=i + 1);
             i = i.saturating_sub(1);
             continue;
@@ -419,6 +423,8 @@ fn fold_merge_with_kernels(stages: &mut Vec<Stage>, kernels: &mut Vec<BodyKernel
         if let Some(merged) = stages[i].merge_with(&stages[i + 1]) {
             stages[i] = merged;
             stages.remove(i + 1);
+            exprs[i] = None;
+            exprs.remove(i + 1);
             kernels.remove(i + 1);
             continue;
         }

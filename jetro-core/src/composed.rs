@@ -239,6 +239,10 @@ pub trait Sink {
     type Acc;
     fn init() -> Self::Acc;
     fn fold(acc: Self::Acc, v: &Val) -> Self::Acc;
+    #[inline]
+    fn done(_acc: &Self::Acc) -> bool {
+        false
+    }
     fn finalise(acc: Self::Acc) -> Val;
 }
 
@@ -251,11 +255,22 @@ pub fn run_pipeline<S: Sink>(arr: &[Val], stages: &dyn Stage) -> Val {
     let mut acc = S::init();
     for v in arr.iter() {
         match stages.apply(v) {
-            StageOutput::Pass(cow) => acc = S::fold(acc, cow.as_ref()),
+            StageOutput::Pass(cow) => {
+                acc = S::fold(acc, cow.as_ref());
+                if S::done(&acc) {
+                    break;
+                }
+            }
             StageOutput::Filtered => continue,
             StageOutput::Many(items) => {
                 for it in items {
                     acc = S::fold(acc, it.as_ref());
+                    if S::done(&acc) {
+                        break;
+                    }
+                }
+                if S::done(&acc) {
+                    break;
                 }
             }
             StageOutput::Done => break,
@@ -404,6 +419,10 @@ impl Sink for FirstSink {
         } else {
             Some(v.clone())
         }
+    }
+    #[inline]
+    fn done(acc: &Self::Acc) -> bool {
+        acc.is_some()
     }
     fn finalise(acc: Self::Acc) -> Val {
         acc.unwrap_or(Val::Null)
@@ -1209,6 +1228,24 @@ mod tests {
     }
 
     #[test]
+    fn first_sink_terminates_outer_loop() {
+        struct CountingPass<'a>(&'a std::cell::Cell<usize>);
+
+        impl Stage for CountingPass<'_> {
+            fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+                self.0.set(self.0.get() + 1);
+                StageOutput::Pass(Cow::Borrowed(x))
+            }
+        }
+
+        let seen = std::cell::Cell::new(0);
+        let arr: Vec<Val> = (0..1000).map(Val::Int).collect();
+        let out = run_pipeline::<FirstSink>(&arr, &CountingPass(&seen));
+        assert!(matches!(out, Val::Int(0)));
+        assert_eq!(seen.get(), 1);
+    }
+
+    #[test]
     fn integration_via_jetro() {
         use serde_json::json;
 
@@ -1459,7 +1496,7 @@ mod tests {
 
     #[test]
     fn step3d_phase5_strategy_selection() {
-        use crate::pipeline::{select_strategy, NumOp, Sink, Stage, Strategy};
+        use crate::pipeline::{select_strategy, NumOp, NumericSink, Sink, Stage, Strategy};
         use std::sync::Arc;
         let dummy = Arc::new(crate::vm::Program::new(Vec::new(), ""));
 
@@ -1482,7 +1519,7 @@ mod tests {
         assert_eq!(
             select_strategy(
                 &[Stage::Map(Arc::clone(&dummy))],
-                &Sink::Numeric(NumOp::Sum)
+                &Sink::Numeric(NumericSink::identity(NumOp::Sum))
             ),
             Strategy::PullLoop
         );
@@ -1490,7 +1527,7 @@ mod tests {
 
     #[test]
     fn step3d_phase1_compute_strategies() {
-        use crate::pipeline::{compute_strategies, NumOp, Sink, Stage, StageStrategy};
+        use crate::pipeline::{compute_strategies, NumOp, NumericSink, Sink, Stage, StageStrategy};
         use std::sync::Arc;
 
         let dummy_prog = Arc::new(crate::vm::Program::new(Vec::new(), ""));
@@ -1508,7 +1545,7 @@ mod tests {
 
         // [Sort] + Sum → unbounded → Default (full sort)
         let stages = vec![Stage::Sort(None)];
-        let strats = compute_strategies(&stages, &Sink::Numeric(NumOp::Sum));
+        let strats = compute_strategies(&stages, &Sink::Numeric(NumericSink::identity(NumOp::Sum)));
         assert!(matches!(strats[0], StageStrategy::Default));
 
         // [Sort, Filter] + First → demand becomes unbounded above Filter
