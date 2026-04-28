@@ -14,6 +14,7 @@ use crate::builtins::{
     index_by_apply, map_apply, map_one, replace_apply, slice_apply, split_apply, take_while_apply,
     take_while_one, window_apply,
 };
+use crate::chain_ir::PullDemand;
 
 impl Pipeline {
     /// Execute the pipeline against `root`, returning the sink.s
@@ -435,8 +436,19 @@ impl Pipeline {
         // Pull-based stage chain.  At Phase 1 the inner loop materialises
         // elements one at a time as `Val`; Phase 3 will switch this to a
         // per-batch pull over columnar lanes.
-        let mut taken: usize = 0;
-        let mut skipped: usize = 0;
+        let source_demand = self
+            .stages
+            .iter()
+            .rev()
+            .fold(self.sink.demand(), |demand, stage| {
+                stage.upstream_demand(demand)
+            })
+            .chain
+            .pull;
+        let mut pulled_inputs: usize = 0;
+        let mut emitted_outputs: usize = 0;
+        let mut stage_taken: Vec<usize> = vec![0; self.stages.len()];
+        let mut stage_skipped: Vec<usize> = vec![0; self.stages.len()];
 
         let iter: Box<dyn Iterator<Item = Val>> = match &recv {
             Val::Arr(a) => Box::new(a.as_ref().clone().into_iter()),
@@ -802,6 +814,11 @@ impl Pipeline {
         };
 
         'outer: for mut item in pre_iter {
+            if matches!(source_demand, PullDemand::AtMost(n) if pulled_inputs >= n) {
+                break 'outer;
+            }
+            pulled_inputs += 1;
+
             // When barriers ran above, stages have already been
             // applied — `pre_iter` yields the post-pipeline rows
             // directly.  When no barriers are present, run streaming
@@ -814,15 +831,16 @@ impl Pipeline {
                         .unwrap_or(&BodyKernel::Generic);
                     match stage {
                         Stage::Skip(n) => {
-                            if skipped < *n {
-                                skipped += 1;
+                            if stage_skipped[stage_idx] < *n {
+                                stage_skipped[stage_idx] += 1;
                                 continue 'outer;
                             }
                         }
                         Stage::Take(n) => {
-                            if taken >= *n {
+                            if stage_taken[stage_idx] >= *n {
                                 break 'outer;
                             }
+                            stage_taken[stage_idx] += 1;
                         }
                         Stage::Filter(prog) => {
                             if !filter_one(&item, |v| {
@@ -939,7 +957,10 @@ impl Pipeline {
                     hll_observe(&mut acc_hll, &item);
                 }
             }
-            taken += 1;
+            emitted_outputs += 1;
+            if matches!(source_demand, PullDemand::UntilOutput(n) if emitted_outputs >= n) {
+                break 'outer;
+            }
         }
 
         Ok(match &self.sink {

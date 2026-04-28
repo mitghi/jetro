@@ -800,10 +800,89 @@ mod tests {
             ]
         }))
             .into();
-        let p = lower_query("$.data.filter(score > 900 or bad + 1 > 0).first()").unwrap();
+        let p = lower_query("$.data.filter(score > 900 or 1 / 0 > 0).first()").unwrap();
         let out = p.run(&doc).unwrap();
         let out_json: serde_json::Value = out.into();
         assert_eq!(out_json, json!({"score": 901, "bad": 0}));
+    }
+
+    #[test]
+    fn take_before_filter_caps_upstream_inputs() {
+        use serde_json::json;
+        let doc: Val = (&json!({
+            "data": [
+                {"score": 1},
+                {"score": 2},
+                {"score": 901}
+            ]
+        }))
+            .into();
+        let p = lower_query("$.data.take(2).filter(score > 900).first()").unwrap();
+        let demand = p
+            .stages
+            .iter()
+            .rev()
+            .fold(p.sink.demand(), |demand, stage| {
+                stage.upstream_demand(demand)
+            });
+        assert_eq!(demand.chain.pull, crate::chain_ir::PullDemand::AtMost(2));
+        let out = p.run(&doc).unwrap();
+        assert_eq!(out, Val::Null);
+    }
+
+    #[test]
+    fn filter_take_collect_stops_after_required_outputs() {
+        use serde_json::json;
+        let doc: Val = (&json!({
+            "data": [
+                {"score": 901, "bad": 0},
+                {"score": 902, "bad": 0},
+                {"score": 1, "bad": "not a number"}
+            ]
+        }))
+            .into();
+        let p = lower_query("$.data.filter(score > 900 or 1 / 0 > 0).take(2)").unwrap();
+        let demand = p
+            .stages
+            .iter()
+            .rev()
+            .fold(p.sink.demand(), |demand, stage| {
+                stage.upstream_demand(demand)
+            });
+        assert_eq!(
+            demand.chain.pull,
+            crate::chain_ir::PullDemand::UntilOutput(2)
+        );
+        let out = p.run(&doc).unwrap();
+        let out_json: serde_json::Value = out.into();
+        assert_eq!(
+            out_json,
+            json!([{"score": 901, "bad": 0}, {"score": 902, "bad": 0}])
+        );
+    }
+
+    #[test]
+    fn last_sink_keeps_full_scan_requirement() {
+        use serde_json::json;
+        let doc: Val = (&json!({
+            "data": [
+                {"score": 901},
+                {"score": 902}
+            ]
+        }))
+            .into();
+        let p = lower_query("$.data.filter(score > 900).last()").unwrap();
+        let demand = p
+            .stages
+            .iter()
+            .rev()
+            .fold(p.sink.demand(), |demand, stage| {
+                stage.upstream_demand(demand)
+            });
+        assert_eq!(demand.chain.pull, crate::chain_ir::PullDemand::All);
+        let out = p.run(&doc).unwrap();
+        let out_json: serde_json::Value = out.into();
+        assert_eq!(out_json, json!({"score": 902}));
     }
 
     #[test]
