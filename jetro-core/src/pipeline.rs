@@ -49,6 +49,7 @@ mod composed_sink;
 mod composed_source;
 mod composed_stage;
 mod exec;
+mod indexed_exec;
 mod kernels;
 mod legacy_exec;
 mod lower;
