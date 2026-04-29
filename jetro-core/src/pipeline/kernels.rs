@@ -83,6 +83,13 @@ impl BodyKernel {
         !matches!(self, Self::Generic)
     }
 
+    pub(crate) fn collect_layout(&self) -> CollectLayout<'_> {
+        match self {
+            Self::Object(object) if object.len() > 0 => CollectLayout::UniformObject(object),
+            _ => CollectLayout::Values,
+        }
+    }
+
     pub fn classify(prog: &crate::vm::Program) -> Self {
         use crate::vm::Opcode;
         let ops = prog.ops.as_ref();
@@ -226,6 +233,11 @@ impl BodyKernel {
         }
         Self::Generic
     }
+}
+
+pub(crate) enum CollectLayout<'a> {
+    Values,
+    UniformObject(&'a ObjectKernel),
 }
 
 fn classify_kv_path(steps: &[crate::vm::KvStep]) -> Option<BodyKernel> {
