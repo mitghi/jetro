@@ -26,6 +26,12 @@ pub(crate) struct ViewPipelineCapabilities {
     pub sink: ViewSinkCapability,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct ViewPrefixCapabilities {
+    pub stages: Vec<ViewStageCapability>,
+    pub consumed_stages: usize,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ViewStageCapability {
     Filter { kernel: usize },
@@ -86,6 +92,26 @@ pub(crate) fn view_capabilities(body: &PipelineBody) -> Option<ViewPipelineCapab
     })
 }
 
+pub(crate) fn view_prefix_capabilities(body: &PipelineBody) -> Option<ViewPrefixCapabilities> {
+    let mut stages = Vec::new();
+    for (idx, stage) in body.stages.iter().enumerate() {
+        let Some(capability) = view_stage_capability(body, idx, stage) else {
+            break;
+        };
+        if !matches!(capability.materialization(), ViewMaterialization::Never) {
+            break;
+        }
+        stages.push(capability);
+    }
+    if stages.is_empty() {
+        return None;
+    }
+    Some(ViewPrefixCapabilities {
+        consumed_stages: stages.len(),
+        stages,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -97,7 +123,7 @@ mod tests {
     };
     use crate::value::Val;
 
-    use super::view_capabilities;
+    use super::{view_capabilities, view_prefix_capabilities};
 
     #[test]
     fn view_stage_metadata_describes_borrowing_and_materialization() {
@@ -177,24 +203,59 @@ mod tests {
             ViewMaterialization::SinkNumericInput
         );
     }
+
+    #[test]
+    fn view_prefix_stops_at_first_non_view_stage() {
+        let body = PipelineBody {
+            stages: vec![
+                Stage::Filter(Arc::new(crate::vm::Program::new(Vec::new(), ""))),
+                Stage::Map(Arc::new(crate::vm::Program::new(Vec::new(), ""))),
+                Stage::Builtin(crate::pipeline::PipelineBuiltinCall {
+                    method: crate::builtins::BuiltinMethod::Upper,
+                    args: crate::builtins::BuiltinArgs::None,
+                }),
+            ],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![
+                BodyKernel::FieldCmpLit(Arc::from("score"), BinOp::Gt, Val::Int(10)),
+                BodyKernel::FieldRead(Arc::from("name")),
+                BodyKernel::Generic,
+            ],
+            sink_kernels: Vec::new(),
+        };
+
+        assert!(view_capabilities(&body).is_none());
+        let prefix = view_prefix_capabilities(&body).unwrap();
+        assert_eq!(prefix.consumed_stages, 2);
+        assert_eq!(prefix.stages.len(), 2);
+    }
 }
 
 fn view_stage_capabilities(body: &PipelineBody) -> Option<Vec<ViewStageCapability>> {
     let mut out = Vec::with_capacity(body.stages.len());
     for (idx, stage) in body.stages.iter().enumerate() {
-        out.push(match stage {
-            Stage::Filter(_) if body.stage_kernels.get(idx)?.is_view_native() => {
-                ViewStageCapability::Filter { kernel: idx }
-            }
-            Stage::Map(_) if body.stage_kernels.get(idx)?.is_view_native() => {
-                ViewStageCapability::Map { kernel: idx }
-            }
-            Stage::Take(n) => ViewStageCapability::Take(*n),
-            Stage::Skip(n) => ViewStageCapability::Skip(*n),
-            _ => return None,
-        });
+        out.push(view_stage_capability(body, idx, stage)?);
     }
     Some(out)
+}
+
+fn view_stage_capability(
+    body: &PipelineBody,
+    idx: usize,
+    stage: &Stage,
+) -> Option<ViewStageCapability> {
+    match stage {
+        Stage::Filter(_) if body.stage_kernels.get(idx)?.is_view_native() => {
+            Some(ViewStageCapability::Filter { kernel: idx })
+        }
+        Stage::Map(_) if body.stage_kernels.get(idx)?.is_view_native() => {
+            Some(ViewStageCapability::Map { kernel: idx })
+        }
+        Stage::Take(n) => Some(ViewStageCapability::Take(*n)),
+        Stage::Skip(n) => Some(ViewStageCapability::Skip(*n)),
+        _ => None,
+    }
 }
 
 fn view_sink_capability(body: &PipelineBody) -> Option<ViewSinkCapability> {

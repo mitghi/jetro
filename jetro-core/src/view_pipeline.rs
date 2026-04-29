@@ -2,14 +2,10 @@
 
 use std::sync::Arc;
 
-use crate::context::EvalError;
+use crate::context::{Env, EvalError};
 use crate::pipeline;
 use crate::value::Val;
 use crate::value_view::ValueView;
-
-pub(crate) fn supports(body: &pipeline::PipelineBody) -> bool {
-    pipeline::view_capabilities(body).is_some()
-}
 
 pub(crate) fn walk_fields<'a, V>(mut cur: V, keys: &[Arc<str>]) -> V
 where
@@ -21,7 +17,21 @@ where
     cur
 }
 
-pub(crate) fn run<'a, V>(source: V, body: &pipeline::PipelineBody) -> Option<Result<Val, EvalError>>
+pub(crate) fn run<'a, V>(
+    source: V,
+    body: &pipeline::PipelineBody,
+    cache: Option<&dyn pipeline::PipelineData>,
+) -> Option<Result<Val, EvalError>>
+where
+    V: ValueView<'a>,
+{
+    if let Some(result) = run_full(source.clone(), body) {
+        return Some(result);
+    }
+    run_prefix_then_materialized_suffix(source, body, cache)
+}
+
+fn run_full<'a, V>(source: V, body: &pipeline::PipelineBody) -> Option<Result<Val, EvalError>>
 where
     V: ValueView<'a>,
 {
@@ -166,6 +176,112 @@ where
         pipeline::ViewSinkCapability::First => acc_first.unwrap_or(Val::Null),
         pipeline::ViewSinkCapability::Last => acc_last.unwrap_or(Val::Null),
     }))
+}
+
+fn run_prefix_then_materialized_suffix<'a, V>(
+    source: V,
+    body: &pipeline::PipelineBody,
+    cache: Option<&dyn pipeline::PipelineData>,
+) -> Option<Result<Val, EvalError>>
+where
+    V: ValueView<'a>,
+{
+    let prefix = pipeline::view_prefix_capabilities(body)?;
+    if prefix.consumed_stages >= body.stages.len() && !suffix_sink_can_run_without_outer_env(body) {
+        return None;
+    }
+    if !suffix_stages_can_run_without_outer_env(&body.stages[prefix.consumed_stages..])
+        || !suffix_sink_can_run_without_outer_env(body)
+    {
+        return None;
+    }
+
+    let items = source.array_items()?;
+    let mut boundary_rows = Vec::new();
+    let mut op_state: Vec<usize> = vec![0; prefix.stages.len()];
+
+    'outer: for row in items {
+        let mut item = row;
+        for (op_idx, stage) in prefix.stages.iter().enumerate() {
+            match *stage {
+                pipeline::ViewStageCapability::Skip(n) => {
+                    if op_state[op_idx] < n {
+                        op_state[op_idx] += 1;
+                        continue 'outer;
+                    }
+                }
+                pipeline::ViewStageCapability::Take(n) => {
+                    if op_state[op_idx] >= n {
+                        break 'outer;
+                    }
+                    op_state[op_idx] += 1;
+                }
+                pipeline::ViewStageCapability::Filter { kernel } => {
+                    let kernel = body.stage_kernels.get(kernel)?;
+                    let keep = eval_filter_kernel(&item, kernel)?;
+                    if !keep {
+                        continue 'outer;
+                    }
+                }
+                pipeline::ViewStageCapability::Map { kernel } => {
+                    let kernel = body.stage_kernels.get(kernel)?;
+                    item = eval_map_kernel(&item, kernel)?;
+                }
+            }
+        }
+        boundary_rows.push(item.materialize());
+    }
+
+    let suffix = suffix_body(body, prefix.consumed_stages)
+        .with_source(pipeline::Source::Receiver(Val::arr(boundary_rows)));
+    let root = Val::Null;
+    let env = Env::new(Val::Null);
+    Some(suffix.run_with_env(&root, &env, cache))
+}
+
+fn suffix_body(body: &pipeline::PipelineBody, consumed_stages: usize) -> pipeline::PipelineBody {
+    let stage_exprs = if body.stage_exprs.len() == body.stages.len() {
+        body.stage_exprs[consumed_stages..].to_vec()
+    } else {
+        Vec::new()
+    };
+    pipeline::PipelineBody {
+        stages: body.stages[consumed_stages..].to_vec(),
+        stage_exprs,
+        sink: body.sink.clone(),
+        stage_kernels: body.stage_kernels[consumed_stages..].to_vec(),
+        sink_kernels: body.sink_kernels.clone(),
+    }
+}
+
+fn suffix_stages_can_run_without_outer_env(stages: &[pipeline::Stage]) -> bool {
+    stages.iter().all(|stage| {
+        matches!(
+            stage,
+            pipeline::Stage::Take(_)
+                | pipeline::Stage::Skip(_)
+                | pipeline::Stage::Reverse
+                | pipeline::Stage::Sort(None)
+                | pipeline::Stage::UniqueBy(None)
+                | pipeline::Stage::Builtin(_)
+                | pipeline::Stage::Split(_)
+                | pipeline::Stage::Slice(_, _)
+                | pipeline::Stage::Replace { .. }
+                | pipeline::Stage::Chunk(_)
+                | pipeline::Stage::Window(_)
+        )
+    })
+}
+
+fn suffix_sink_can_run_without_outer_env(body: &pipeline::PipelineBody) -> bool {
+    match &body.sink {
+        pipeline::Sink::Collect
+        | pipeline::Sink::Count
+        | pipeline::Sink::First
+        | pipeline::Sink::Last
+        | pipeline::Sink::ApproxCountDistinct => true,
+        pipeline::Sink::Numeric(n) => n.project.is_none(),
+    }
 }
 
 fn eval_filter_kernel<'a, V>(item: &V, kernel: &pipeline::BodyKernel) -> Option<bool>

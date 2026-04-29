@@ -90,11 +90,8 @@ fn eval_view_pipeline<'a, V>(
 where
     V: ValueView<'a>,
 {
-    if !view_pipeline::supports(body) {
-        return None;
-    }
     let source = view_pipeline::walk_fields(root.clone(), keys);
-    if let Some(result) = view_pipeline::run(source.clone(), body) {
+    if let Some(result) = view_pipeline::run(source.clone(), body, cache) {
         return Some(result);
     }
 

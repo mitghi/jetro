@@ -419,6 +419,22 @@ mod tests {
         assert!(!j.root_val_is_materialized());
     }
 
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn view_prefix_materializes_boundary_rows_not_root_for_suffix_builtin() {
+        let j = Jetro::from_bytes(
+            br#"{"people":[{"name":"low","score":1},{"name":"ada","score":901},{"name":"bob","score":902}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+
+        let out = j
+            .collect(r#"$.people.filter(score > 900).map(name).upper()"#)
+            .unwrap();
+
+        assert_eq!(out, json!(["ADA", "BOB"]));
+        assert!(!j.root_val_is_materialized());
+    }
+
     #[test]
     fn object_shape_executes_common_scalar_nodes_without_vm() {
         let expr = r#"{"gt": $.a > 1, "sum": $.a + 4, "picked": "yes" if $.ok else "no"}"#;
