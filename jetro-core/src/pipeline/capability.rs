@@ -10,6 +10,7 @@ pub(crate) enum ViewInputMode {
 pub(crate) enum ViewOutputMode {
     PreservesInputView,
     BorrowedSubview,
+    BorrowedSubviews,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +37,7 @@ pub(crate) struct ViewPrefixCapabilities {
 pub(crate) enum ViewStageCapability {
     Filter { kernel: usize },
     Map { kernel: usize },
+    FlatMap { kernel: usize },
     Take(usize),
     Skip(usize),
 }
@@ -43,7 +45,9 @@ pub(crate) enum ViewStageCapability {
 impl ViewStageCapability {
     pub(crate) fn input_mode(self) -> ViewInputMode {
         match self {
-            Self::Filter { .. } | Self::Map { .. } => ViewInputMode::ReadsView,
+            Self::Filter { .. } | Self::Map { .. } | Self::FlatMap { .. } => {
+                ViewInputMode::ReadsView
+            }
             Self::Take(_) | Self::Skip(_) => ViewInputMode::SkipsViewRead,
         }
     }
@@ -51,6 +55,7 @@ impl ViewStageCapability {
     pub(crate) fn output_mode(self) -> ViewOutputMode {
         match self {
             Self::Map { .. } => ViewOutputMode::BorrowedSubview,
+            Self::FlatMap { .. } => ViewOutputMode::BorrowedSubviews,
             Self::Filter { .. } | Self::Take(_) | Self::Skip(_) => {
                 ViewOutputMode::PreservesInputView
             }
@@ -137,6 +142,11 @@ mod tests {
         assert_eq!(map.output_mode(), ViewOutputMode::BorrowedSubview);
         assert_eq!(map.materialization(), ViewMaterialization::Never);
 
+        let flat_map = ViewStageCapability::FlatMap { kernel: 0 };
+        assert_eq!(flat_map.input_mode(), ViewInputMode::ReadsView);
+        assert_eq!(flat_map.output_mode(), ViewOutputMode::BorrowedSubviews);
+        assert_eq!(flat_map.materialization(), ViewMaterialization::Never);
+
         let take = ViewStageCapability::Take(2);
         assert_eq!(take.input_mode(), ViewInputMode::SkipsViewRead);
         assert_eq!(take.output_mode(), ViewOutputMode::PreservesInputView);
@@ -152,10 +162,14 @@ mod tests {
         let map = Stage::Map(prog)
             .view_capability(5, Some(&BodyKernel::FieldRead(Arc::<str>::from("name"))))
             .unwrap();
+        let flat_map = Stage::FlatMap(Arc::new(crate::vm::Program::new(Vec::new(), "")))
+            .view_capability(6, Some(&BodyKernel::FieldRead(Arc::<str>::from("items"))))
+            .unwrap();
 
         assert!(matches!(filter, ViewStageCapability::Filter { kernel: 4 }));
         assert_eq!(map.output_mode(), ViewOutputMode::BorrowedSubview);
-        assert!(Stage::Reverse.view_capability(6, None).is_none());
+        assert_eq!(flat_map.output_mode(), ViewOutputMode::BorrowedSubviews);
+        assert!(Stage::Reverse.view_capability(7, None).is_none());
     }
 
     #[test]

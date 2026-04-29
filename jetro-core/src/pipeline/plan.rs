@@ -160,6 +160,9 @@ impl Stage {
             Stage::Map(_) if kernel?.is_view_native() => {
                 Some(ViewStageCapability::Map { kernel: idx })
             }
+            Stage::FlatMap(_) if kernel?.is_view_native() => {
+                Some(ViewStageCapability::FlatMap { kernel: idx })
+            }
             Stage::Take(n) => Some(ViewStageCapability::Take(*n)),
             Stage::Skip(n) => Some(ViewStageCapability::Skip(*n)),
             _ => None,

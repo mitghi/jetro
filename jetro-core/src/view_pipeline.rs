@@ -15,6 +15,11 @@ enum ViewStageFlow<V> {
     Stop,
 }
 
+enum ViewFrontierFlow<V> {
+    Keep(Vec<V>),
+    Stop(Vec<V>),
+}
+
 pub(crate) fn walk_fields<'a, V>(mut cur: V, keys: &[Arc<str>]) -> V
 where
     V: ValueView<'a>,
@@ -80,71 +85,87 @@ where
         }
         pulled_inputs += 1;
 
-        let mut item = row;
+        let mut frontier = vec![row];
+        let mut stop_after_frontier = false;
         for (op_idx, stage) in capabilities.stages.iter().enumerate() {
-            match apply_view_stage(item, *stage, op_idx, &mut op_state, &body.stage_kernels)? {
-                ViewStageFlow::Keep(next) => item = next,
-                ViewStageFlow::Drop => continue 'outer,
-                ViewStageFlow::Stop => break 'outer,
+            match apply_view_stage_frontier(
+                frontier,
+                *stage,
+                op_idx,
+                &mut op_state,
+                &body.stage_kernels,
+            )? {
+                ViewFrontierFlow::Keep(next) if next.is_empty() => continue 'outer,
+                ViewFrontierFlow::Keep(next) => frontier = next,
+                ViewFrontierFlow::Stop(next) if next.is_empty() => break 'outer,
+                ViewFrontierFlow::Stop(next) => {
+                    frontier = next;
+                    stop_after_frontier = true;
+                }
             }
         }
 
-        match capabilities.sink {
-            pipeline::ViewSinkCapability::Collect => {
-                debug_assert_eq!(
-                    capabilities.sink.materialization(),
-                    pipeline::ViewMaterialization::SinkOutputRows
-                );
-                acc_collect.push(item.materialize());
+        for item in frontier {
+            match capabilities.sink {
+                pipeline::ViewSinkCapability::Collect => {
+                    debug_assert_eq!(
+                        capabilities.sink.materialization(),
+                        pipeline::ViewMaterialization::SinkOutputRows
+                    );
+                    acc_collect.push(item.materialize());
+                }
+                pipeline::ViewSinkCapability::Count => {
+                    debug_assert_eq!(
+                        capabilities.sink.materialization(),
+                        pipeline::ViewMaterialization::Never
+                    );
+                    acc_count += 1;
+                }
+                pipeline::ViewSinkCapability::Numeric { op, project_kernel } => {
+                    debug_assert_eq!(
+                        capabilities.sink.materialization(),
+                        pipeline::ViewMaterialization::SinkNumericInput
+                    );
+                    let numeric_item = if let Some(kernel) = project_kernel {
+                        let kernel = body.sink_kernels.get(kernel)?;
+                        eval_value_kernel(&item, kernel)?
+                    } else {
+                        item.materialize()
+                    };
+                    pipeline::num_fold(
+                        &mut acc_sum_i,
+                        &mut acc_sum_f,
+                        &mut sum_floated,
+                        &mut acc_min_f,
+                        &mut acc_max_f,
+                        &mut acc_n_obs,
+                        op,
+                        &numeric_item,
+                    );
+                }
+                pipeline::ViewSinkCapability::First => {
+                    debug_assert_eq!(
+                        capabilities.sink.materialization(),
+                        pipeline::ViewMaterialization::SinkFinalRow
+                    );
+                    acc_first = Some(item.materialize());
+                    break 'outer;
+                }
+                pipeline::ViewSinkCapability::Last => {
+                    debug_assert_eq!(
+                        capabilities.sink.materialization(),
+                        pipeline::ViewMaterialization::SinkFinalRow
+                    );
+                    acc_last = Some(item.materialize());
+                }
             }
-            pipeline::ViewSinkCapability::Count => {
-                debug_assert_eq!(
-                    capabilities.sink.materialization(),
-                    pipeline::ViewMaterialization::Never
-                );
-                acc_count += 1;
-            }
-            pipeline::ViewSinkCapability::Numeric { op, project_kernel } => {
-                debug_assert_eq!(
-                    capabilities.sink.materialization(),
-                    pipeline::ViewMaterialization::SinkNumericInput
-                );
-                let numeric_item = if let Some(kernel) = project_kernel {
-                    let kernel = body.sink_kernels.get(kernel)?;
-                    eval_value_kernel(&item, kernel)?
-                } else {
-                    item.materialize()
-                };
-                pipeline::num_fold(
-                    &mut acc_sum_i,
-                    &mut acc_sum_f,
-                    &mut sum_floated,
-                    &mut acc_min_f,
-                    &mut acc_max_f,
-                    &mut acc_n_obs,
-                    op,
-                    &numeric_item,
-                );
-            }
-            pipeline::ViewSinkCapability::First => {
-                debug_assert_eq!(
-                    capabilities.sink.materialization(),
-                    pipeline::ViewMaterialization::SinkFinalRow
-                );
-                acc_first = Some(item.materialize());
+
+            emitted_outputs += 1;
+            if matches!(source_demand, PullDemand::UntilOutput(n) if emitted_outputs >= n) {
                 break 'outer;
             }
-            pipeline::ViewSinkCapability::Last => {
-                debug_assert_eq!(
-                    capabilities.sink.materialization(),
-                    pipeline::ViewMaterialization::SinkFinalRow
-                );
-                acc_last = Some(item.materialize());
-            }
         }
-
-        emitted_outputs += 1;
-        if matches!(source_demand, PullDemand::UntilOutput(n) if emitted_outputs >= n) {
+        if stop_after_frontier {
             break 'outer;
         }
     }
@@ -201,17 +222,33 @@ where
         }
         pulled_inputs += 1;
 
-        let mut item = row;
+        let mut frontier = vec![row];
+        let mut stop_after_frontier = false;
         for (op_idx, stage) in prefix.stages.iter().enumerate() {
-            match apply_view_stage(item, *stage, op_idx, &mut op_state, &body.stage_kernels)? {
-                ViewStageFlow::Keep(next) => item = next,
-                ViewStageFlow::Drop => continue 'outer,
-                ViewStageFlow::Stop => break 'outer,
+            match apply_view_stage_frontier(
+                frontier,
+                *stage,
+                op_idx,
+                &mut op_state,
+                &body.stage_kernels,
+            )? {
+                ViewFrontierFlow::Keep(next) if next.is_empty() => continue 'outer,
+                ViewFrontierFlow::Keep(next) => frontier = next,
+                ViewFrontierFlow::Stop(next) if next.is_empty() => break 'outer,
+                ViewFrontierFlow::Stop(next) => {
+                    frontier = next;
+                    stop_after_frontier = true;
+                }
             }
         }
-        boundary_rows.push(item.materialize());
-        emitted_outputs += 1;
-        if matches!(source_demand, PullDemand::UntilOutput(n) if emitted_outputs >= n) {
+        for item in frontier {
+            boundary_rows.push(item.materialize());
+            emitted_outputs += 1;
+            if matches!(source_demand, PullDemand::UntilOutput(n) if emitted_outputs >= n) {
+                break 'outer;
+            }
+        }
+        if stop_after_frontier {
             break 'outer;
         }
     }
@@ -380,6 +417,53 @@ where
             let kernel = stage_kernels.get(kernel)?;
             Some(ViewStageFlow::Keep(eval_map_kernel(&item, kernel)?))
         }
+        pipeline::ViewStageCapability::FlatMap { .. } => None,
+    }
+}
+
+fn apply_view_stage_frontier<'a, V>(
+    frontier: Vec<V>,
+    stage: pipeline::ViewStageCapability,
+    op_idx: usize,
+    op_state: &mut [usize],
+    stage_kernels: &[pipeline::BodyKernel],
+) -> Option<ViewFrontierFlow<V>>
+where
+    V: ValueView<'a>,
+{
+    if !matches!(
+        stage.materialization(),
+        pipeline::ViewMaterialization::Never
+    ) {
+        return None;
+    }
+
+    match stage {
+        pipeline::ViewStageCapability::FlatMap { kernel } => {
+            debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::ReadsView);
+            debug_assert_eq!(
+                stage.output_mode(),
+                pipeline::ViewOutputMode::BorrowedSubviews
+            );
+            let kernel = stage_kernels.get(kernel)?;
+            let mut out = Vec::new();
+            for item in frontier {
+                let iter = eval_flat_map_kernel(&item, kernel)?;
+                out.extend(iter);
+            }
+            Some(ViewFrontierFlow::Keep(out))
+        }
+        _ => {
+            let mut out = Vec::with_capacity(frontier.len());
+            for item in frontier {
+                match apply_view_stage(item, stage, op_idx, op_state, stage_kernels)? {
+                    ViewStageFlow::Keep(next) => out.push(next),
+                    ViewStageFlow::Drop => {}
+                    ViewStageFlow::Stop => return Some(ViewFrontierFlow::Stop(out)),
+                }
+            }
+            Some(ViewFrontierFlow::Keep(out))
+        }
     }
 }
 
@@ -518,6 +602,19 @@ where
 {
     match pipeline::eval_view_kernel(kernel, item)? {
         pipeline::ViewKernelValue::View(view) => Some(view),
+        pipeline::ViewKernelValue::Owned(_) => None,
+    }
+}
+
+fn eval_flat_map_kernel<'a, V>(
+    item: &V,
+    kernel: &pipeline::BodyKernel,
+) -> Option<Box<dyn Iterator<Item = V> + 'a>>
+where
+    V: ValueView<'a>,
+{
+    match pipeline::eval_view_kernel(kernel, item)? {
+        pipeline::ViewKernelValue::View(view) => view.array_iter(),
         pipeline::ViewKernelValue::Owned(_) => None,
     }
 }
