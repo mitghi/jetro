@@ -461,8 +461,150 @@ pub struct BuiltinCall {
 #[derive(Debug, Clone, Copy)]
 pub struct BuiltinSpec {
     pub pure: bool,
+    pub category: BuiltinCategory,
+    pub cardinality: BuiltinCardinality,
     pub can_indexed: bool,
+    pub view_native: bool,
     pub cost: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinCategory {
+    Scalar,
+    StreamingOneToOne,
+    StreamingFilter,
+    StreamingExpand,
+    Reducer,
+    Positional,
+    Barrier,
+    Object,
+    Path,
+    Deep,
+    Serialization,
+    Relational,
+    Mutation,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinCardinality {
+    OneToOne,
+    Filtering,
+    Expanding,
+    Bounded,
+    Reducing,
+    Barrier,
+}
+
+impl BuiltinMethod {
+    #[inline]
+    pub fn spec(self) -> BuiltinSpec {
+        use BuiltinCardinality as Card;
+        use BuiltinCategory as Cat;
+
+        let (category, cardinality, can_indexed, view_native, cost) = match self {
+            Self::Filter | Self::Find | Self::FindAll | Self::Compact | Self::Remove => {
+                (Cat::StreamingFilter, Card::Filtering, false, false, 10.0)
+            }
+            Self::Map | Self::Enumerate | Self::Pairwise => {
+                (Cat::StreamingOneToOne, Card::OneToOne, true, false, 10.0)
+            }
+            Self::FlatMap
+            | Self::Flatten
+            | Self::Explode
+            | Self::Split
+            | Self::Lines
+            | Self::Words
+            | Self::Chars
+            | Self::CharsOf
+            | Self::Bytes => (Cat::StreamingExpand, Card::Expanding, false, false, 10.0),
+            Self::TakeWhile | Self::DropWhile => {
+                (Cat::StreamingFilter, Card::Filtering, false, false, 10.0)
+            }
+            Self::First | Self::Last | Self::Nth | Self::Collect => {
+                (Cat::Positional, Card::Bounded, false, true, 1.0)
+            }
+            Self::Sum
+            | Self::Avg
+            | Self::Min
+            | Self::Max
+            | Self::Count
+            | Self::Any
+            | Self::All
+            | Self::FindIndex
+            | Self::IndicesWhere
+            | Self::MaxBy
+            | Self::MinBy => (Cat::Reducer, Card::Reducing, false, true, 10.0),
+            Self::Sort
+            | Self::Unique
+            | Self::UniqueBy
+            | Self::GroupBy
+            | Self::CountBy
+            | Self::IndexBy
+            | Self::GroupShape
+            | Self::Partition
+            | Self::Window
+            | Self::Chunk
+            | Self::RollingSum
+            | Self::RollingAvg
+            | Self::RollingMin
+            | Self::RollingMax
+            | Self::Accumulate => (Cat::Barrier, Card::Barrier, false, false, 20.0),
+            Self::Keys
+            | Self::Values
+            | Self::Entries
+            | Self::ToPairs
+            | Self::FromPairs
+            | Self::Invert
+            | Self::Pick
+            | Self::Omit
+            | Self::Merge
+            | Self::DeepMerge
+            | Self::Defaults
+            | Self::Rename
+            | Self::TransformKeys
+            | Self::TransformValues
+            | Self::FilterKeys
+            | Self::FilterValues
+            | Self::Pivot
+            | Self::Implode => (Cat::Object, Card::OneToOne, false, false, 1.0),
+            Self::GetPath
+            | Self::SetPath
+            | Self::DelPath
+            | Self::DelPaths
+            | Self::HasPath
+            | Self::FlattenKeys
+            | Self::UnflattenKeys => (Cat::Path, Card::OneToOne, true, false, 1.0),
+            Self::DeepFind
+            | Self::DeepShape
+            | Self::DeepLike
+            | Self::Walk
+            | Self::WalkPre
+            | Self::Rec
+            | Self::TracePath => (Cat::Deep, Card::Expanding, false, false, 20.0),
+            Self::ToCsv | Self::ToTsv => (Cat::Serialization, Card::OneToOne, true, false, 20.0),
+            Self::EquiJoin => (Cat::Relational, Card::Barrier, false, false, 20.0),
+            Self::Set | Self::Update => (Cat::Mutation, Card::OneToOne, true, false, 1.0),
+            Self::Lag
+            | Self::Lead
+            | Self::DiffWindow
+            | Self::PctChange
+            | Self::CumMax
+            | Self::CumMin
+            | Self::Zscore => (Cat::StreamingOneToOne, Card::OneToOne, true, false, 10.0),
+            Self::Unknown => (Cat::Unknown, Card::OneToOne, false, false, 1.0),
+            _ => (Cat::Scalar, Card::OneToOne, true, true, 1.0),
+        };
+
+        BuiltinSpec {
+            pure: self != Self::Unknown,
+            category,
+            cardinality,
+            can_indexed,
+            view_native,
+            cost,
+        }
+    }
 }
 
 impl BuiltinCall {
@@ -473,6 +615,7 @@ impl BuiltinCall {
 
     #[inline]
     pub fn spec(&self) -> BuiltinSpec {
+        let mut spec = self.method.spec();
         let (cost, can_indexed) = match self.method {
             BuiltinMethod::Keys | BuiltinMethod::Values | BuiltinMethod::Entries => (1.0, false),
             BuiltinMethod::Repeat
@@ -498,13 +641,11 @@ impl BuiltinCall {
             | BuiltinMethod::ReReplaceAll
             | BuiltinMethod::ContainsAny
             | BuiltinMethod::ContainsAll => (2.0, true),
-            _ => (1.0, true),
+            _ => (spec.cost, spec.can_indexed),
         };
-        BuiltinSpec {
-            pure: true,
-            can_indexed,
-            cost,
-        }
+        spec.cost = cost;
+        spec.can_indexed = can_indexed;
+        spec
     }
 
     #[inline]
@@ -5431,4 +5572,28 @@ fn extract_required_set(v: &Val) -> std::collections::HashSet<String> {
 #[inline]
 pub fn schema_apply(recv: &Val) -> Option<Val> {
     Some(schema_of(recv))
+}
+
+#[cfg(test)]
+mod spec_tests {
+    use super::{BuiltinCardinality, BuiltinCategory, BuiltinMethod};
+
+    #[test]
+    fn builtin_specs_describe_execution_shape() {
+        let map = BuiltinMethod::Map.spec();
+        assert_eq!(map.category, BuiltinCategory::StreamingOneToOne);
+        assert_eq!(map.cardinality, BuiltinCardinality::OneToOne);
+
+        let flat_map = BuiltinMethod::FlatMap.spec();
+        assert_eq!(flat_map.category, BuiltinCategory::StreamingExpand);
+        assert_eq!(flat_map.cardinality, BuiltinCardinality::Expanding);
+
+        let sum = BuiltinMethod::Sum.spec();
+        assert_eq!(sum.category, BuiltinCategory::Reducer);
+        assert_eq!(sum.cardinality, BuiltinCardinality::Reducing);
+
+        let sort = BuiltinMethod::Sort.spec();
+        assert_eq!(sort.category, BuiltinCategory::Barrier);
+        assert_eq!(sort.cardinality, BuiltinCardinality::Barrier);
+    }
 }

@@ -27,6 +27,19 @@ pub enum Cardinality {
     Barrier,
 }
 
+impl From<crate::builtins::BuiltinCardinality> for Cardinality {
+    fn from(value: crate::builtins::BuiltinCardinality) -> Self {
+        match value {
+            crate::builtins::BuiltinCardinality::OneToOne => Self::OneToOne,
+            crate::builtins::BuiltinCardinality::Filtering => Self::Filtering,
+            crate::builtins::BuiltinCardinality::Expanding => Self::Expanding,
+            crate::builtins::BuiltinCardinality::Bounded => Self::Bounded,
+            crate::builtins::BuiltinCardinality::Reducing => Self::Reducing,
+            crate::builtins::BuiltinCardinality::Barrier => Self::Barrier,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValueNeed {
     None,
@@ -167,12 +180,38 @@ impl ChainOp {
                 cardinality: Reducing,
                 preserves_order: true,
             },
-            Builtin(_) => OpSpec {
-                input: ValueKind::Any,
-                output: ValueKind::Any,
-                cardinality: OneToOne,
-                preserves_order: true,
-            },
+            Builtin(method) => {
+                use crate::builtins::BuiltinCategory as Cat;
+
+                let spec = method.spec();
+                let input = match spec.category {
+                    Cat::StreamingOneToOne
+                    | Cat::StreamingFilter
+                    | Cat::StreamingExpand
+                    | Cat::Reducer
+                    | Cat::Positional
+                    | Cat::Barrier
+                    | Cat::Relational => ValueKind::Stream,
+                    _ => ValueKind::Any,
+                };
+                let output = match spec.category {
+                    Cat::Reducer | Cat::Positional => ValueKind::Scalar,
+                    Cat::StreamingOneToOne | Cat::StreamingFilter | Cat::StreamingExpand => {
+                        ValueKind::Stream
+                    }
+                    _ => ValueKind::Any,
+                };
+                OpSpec {
+                    input,
+                    output,
+                    cardinality: spec.cardinality.into(),
+                    preserves_order: spec.view_native
+                        || !matches!(
+                            spec.cardinality,
+                            crate::builtins::BuiltinCardinality::Barrier
+                        ),
+                }
+            }
         }
     }
 

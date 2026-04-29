@@ -306,12 +306,18 @@ impl Stage {
                 selectivity: 1.0,
             },
             Stage::Builtin(call) => {
+                use crate::builtins::BuiltinCategory;
+
                 let spec = call.spec();
                 StageShape {
-                    cardinality: Cardinality::OneToOne,
+                    cardinality: spec.cardinality.into(),
                     can_indexed: spec.can_indexed,
                     cost: spec.cost,
-                    selectivity: 1.0,
+                    selectivity: if matches!(spec.category, BuiltinCategory::StreamingFilter) {
+                        0.5
+                    } else {
+                        1.0
+                    },
                 }
             }
             Stage::TakeWhile(_)
