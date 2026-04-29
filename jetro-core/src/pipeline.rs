@@ -42,6 +42,7 @@ mod capability;
 mod collector;
 mod columnar;
 mod common;
+mod composed_stage;
 mod exec;
 mod kernels;
 mod lower;
