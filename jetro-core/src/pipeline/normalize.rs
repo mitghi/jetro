@@ -221,7 +221,7 @@ fn stage_kernel(stage: &Stage) -> BodyKernel {
         | Stage::CountBy(p)
         | Stage::IndexBy(p)
         | Stage::GroupBy(p)
-        | Stage::Sort(Some(p))
+        | Stage::Sort(crate::pipeline::SortSpec { key: Some(p), .. })
         | Stage::UniqueBy(Some(p)) => BodyKernel::classify(p),
         _ => BodyKernel::Generic,
     }
@@ -249,7 +249,7 @@ fn suffix_consumes_value(stages: &[Stage]) -> bool {
                 | Stage::UniqueBy(_)
                 | Stage::GroupBy(_)
                 | Stage::FlatMap(_)
-                | Stage::Sort(Some(_))
+                | Stage::Sort(crate::pipeline::SortSpec { key: Some(_), .. })
                 | Stage::TakeWhile(_)
                 | Stage::DropWhile(_)
                 | Stage::IndicesWhere(_)

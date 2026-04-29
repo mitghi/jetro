@@ -1575,7 +1575,9 @@ mod tests {
 
     #[test]
     fn step3d_phase5_strategy_selection() {
-        use crate::pipeline::{select_strategy, NumOp, NumericSink, Sink, Stage, Strategy};
+        use crate::pipeline::{
+            select_strategy, NumOp, NumericSink, Sink, SortSpec, Stage, Strategy,
+        };
         use std::sync::Arc;
         let dummy = Arc::new(crate::vm::Program::new(Vec::new(), ""));
 
@@ -1591,7 +1593,7 @@ mod tests {
         );
         // Sort + First → BarrierMaterialise
         assert_eq!(
-            select_strategy(&[Stage::Sort(None)], &Sink::First),
+            select_strategy(&[Stage::Sort(SortSpec::identity())], &Sink::First),
             Strategy::BarrierMaterialise
         );
         // Map + Sum → PullLoop (no positional, no barrier)
@@ -1606,31 +1608,36 @@ mod tests {
 
     #[test]
     fn step3d_phase1_compute_strategies() {
-        use crate::pipeline::{compute_strategies, NumOp, NumericSink, Sink, Stage, StageStrategy};
+        use crate::pipeline::{
+            compute_strategies, NumOp, NumericSink, Sink, SortSpec, Stage, StageStrategy,
+        };
         use std::sync::Arc;
 
         let dummy_prog = Arc::new(crate::vm::Program::new(Vec::new(), ""));
 
         // [Sort] + First → SortTopK(1)
-        let stages = vec![Stage::Sort(Some(Arc::clone(&dummy_prog)))];
+        let stages = vec![Stage::Sort(SortSpec::keyed(Arc::clone(&dummy_prog), false))];
         let strats = compute_strategies(&stages, &Sink::First);
         assert!(matches!(strats[0], StageStrategy::SortTopK(1)));
 
         // [Sort, Take(5)] + Collect → SortTopK(5) at index 0
-        let stages = vec![Stage::Sort(Some(Arc::clone(&dummy_prog))), Stage::Take(5)];
+        let stages = vec![
+            Stage::Sort(SortSpec::keyed(Arc::clone(&dummy_prog), false)),
+            Stage::Take(5),
+        ];
         let strats = compute_strategies(&stages, &Sink::Collect);
         assert!(matches!(strats[0], StageStrategy::SortTopK(5)));
         assert!(matches!(strats[1], StageStrategy::Default));
 
         // [Sort] + Sum → unbounded → Default (full sort)
-        let stages = vec![Stage::Sort(None)];
+        let stages = vec![Stage::Sort(SortSpec::identity())];
         let strats = compute_strategies(&stages, &Sink::Numeric(NumericSink::identity(NumOp::Sum)));
         assert!(matches!(strats[0], StageStrategy::Default));
 
         // [Sort, Filter] + First → demand becomes unbounded above Filter
         // (Filter loses positional info upstream)
         let stages = vec![
-            Stage::Sort(Some(Arc::clone(&dummy_prog))),
+            Stage::Sort(SortSpec::keyed(Arc::clone(&dummy_prog), false)),
             Stage::Filter(Arc::clone(&dummy_prog)),
         ];
         let strats = compute_strategies(&stages, &Sink::First);

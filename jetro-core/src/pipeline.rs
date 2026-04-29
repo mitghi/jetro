@@ -169,6 +169,34 @@ pub enum Source {
 
 pub type PipelineBuiltinCall = crate::builtins::BuiltinCall;
 
+/// Canonical internal sort description.
+///
+/// Surface spellings such as `.sort()`, `.sort(score)`,
+/// `.sort(-score)`, and `.sort_by(score)` lower to this single shape.
+/// `descending` is part of the sort metadata, so common descending key
+/// queries do not need to evaluate unary negation for every input row.
+#[derive(Debug, Clone)]
+pub struct SortSpec {
+    pub key: Option<Arc<crate::vm::Program>>,
+    pub descending: bool,
+}
+
+impl SortSpec {
+    pub fn identity() -> Self {
+        Self {
+            key: None,
+            descending: false,
+        }
+    }
+
+    pub fn keyed(key: Arc<crate::vm::Program>, descending: bool) -> Self {
+        Self {
+            key: Some(key),
+            descending,
+        }
+    }
+}
+
 /// A pull-based stage.  Streaming stages (Filter / Map / FlatMap /
 /// Take / Skip) flow elements through one at a time; barrier stages
 /// (Reverse / Sort / UniqueBy) require the full input materialised.
@@ -192,9 +220,10 @@ pub enum Stage {
     /// `.unique()` (None) / `.unique_by(key)` (Some) — barrier;
     /// materialises, dedupes by key (or by full value if `None`).
     UniqueBy(Option<Arc<crate::vm::Program>>),
-    /// `.sort()` (None) / `.sort_by(key)` (Some) — barrier;
-    /// materialises and sorts.
-    Sort(Option<Arc<crate::vm::Program>>),
+    /// `.sort()` / `.sort(key)` / `.sort_by(key)` — barrier; the
+    /// planner may choose full sort, bounded top-k, or drop it when the
+    /// downstream demand is order-insensitive.
+    Sort(SortSpec),
     /// `.group_by(key)` — barrier; partitions rows by key,
     /// produces `Val::Obj { key_str → Vec<row> }`.  As a Stage
     /// this is a sink-shaped operation; placed under Stage so
@@ -840,6 +869,42 @@ mod tests {
         // Compare via JSON to avoid Val::Arr vs Val::IntVec variant mismatch.
         let out_json: serde_json::Value = out.into();
         assert_eq!(out_json, json!([1, 2, 3]));
+    }
+
+    #[test]
+    fn sort_key_spellings_lower_to_canonical_sort_spec() {
+        let p = lower_query("$.rows.sort(-score).take(10)").unwrap();
+        assert!(matches!(&p.stages[0], Stage::Sort(spec) if spec.key.is_some() && spec.descending));
+        assert!(
+            matches!(p.stage_kernels[0], BodyKernel::FieldRead(ref k) if k.as_ref() == "score")
+        );
+
+        let p = lower_query("$.rows.sort_by(-score).take(10)").unwrap();
+        assert!(matches!(&p.stages[0], Stage::Sort(spec) if spec.key.is_some() && spec.descending));
+        assert!(
+            matches!(p.stage_kernels[0], BodyKernel::FieldRead(ref k) if k.as_ref() == "score")
+        );
+    }
+
+    #[test]
+    fn descending_sort_take_uses_bounded_topk_strategy_and_matches_vm() {
+        use serde_json::json;
+
+        let p = lower_query("$.rows.sort_by(-score).take(2)").unwrap();
+        let strategies = compute_strategies(&p.stages, &p.sink);
+        assert!(matches!(strategies[0], StageStrategy::SortTopK(2)));
+
+        assert_pipeline_matches_vm_query(
+            "$.rows.sort_by(-score).take(2)",
+            "$.rows.sort(-score).first(2)",
+            json!({
+                "rows": [
+                    {"id": 1, "score": 10},
+                    {"id": 2, "score": 30},
+                    {"id": 3, "score": 20}
+                ]
+            }),
+        );
     }
 
     #[test]

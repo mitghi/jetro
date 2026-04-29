@@ -4,7 +4,7 @@ use crate::{ast::Expr, context::EvalError, value::Val};
 
 use super::{
     expr_label, plan_with_exprs, plan_with_kernels, sink_name, source_name, trace_enabled,
-    BodyKernel, NumOp, NumericSink, Pipeline, PipelineBody, Plan, Sink, Source, Stage,
+    BodyKernel, NumOp, NumericSink, Pipeline, PipelineBody, Plan, Sink, SortSpec, Source, Stage,
 };
 
 impl Pipeline {
@@ -119,7 +119,11 @@ impl Pipeline {
                     Stage::FlatMap(p) => BodyKernel::classify(p),
                     Stage::UniqueBy(Some(p)) => BodyKernel::classify(p),
                     Stage::GroupBy(p) => BodyKernel::classify(p),
-                    Stage::Sort(Some(p)) => BodyKernel::classify(p),
+                    Stage::Sort(spec) => spec
+                        .key
+                        .as_ref()
+                        .map(|p| BodyKernel::classify(p))
+                        .unwrap_or(BodyKernel::Generic),
                     _ => BodyKernel::Generic,
                 })
                 .collect()
@@ -187,6 +191,7 @@ impl Pipeline {
                 | ("unique_by", 1)
                 | ("group_by", 1)
                 | ("sort_by", 1)
+                | ("sort", 1)
                 | ("chunk", 1)
                 | ("batch", 1)
                 | ("window", 1)
@@ -286,7 +291,11 @@ fn try_decode_map_body(arg: &crate::ast::Arg) -> Option<Plan> {
             Stage::FlatMap(p) => BodyKernel::classify(p),
             Stage::UniqueBy(Some(p)) => BodyKernel::classify(p),
             Stage::GroupBy(p) => BodyKernel::classify(p),
-            Stage::Sort(Some(p)) => BodyKernel::classify(p),
+            Stage::Sort(spec) => spec
+                .key
+                .as_ref()
+                .map(|p| BodyKernel::classify(p))
+                .unwrap_or(BodyKernel::Generic),
             _ => BodyKernel::Generic,
         })
         .collect();
@@ -465,12 +474,18 @@ fn decode_method_chain(
                         stage_exprs.push(arg_expr(&args[0]));
                     }
                     ("sort", 0, _) => {
-                        stages.push(Stage::Sort(None));
+                        stages.push(Stage::Sort(SortSpec::identity()));
                         stage_exprs.push(None);
                     }
+                    ("sort", 1, _) => {
+                        let (spec, expr) = compile_sort_spec(&args[0])?;
+                        stages.push(Stage::Sort(spec));
+                        stage_exprs.push(expr);
+                    }
                     ("sort_by", 1, _) => {
-                        stages.push(Stage::Sort(Some(compile_subexpr(&args[0])?)));
-                        stage_exprs.push(arg_expr(&args[0]));
+                        let (spec, expr) = compile_sort_spec(&args[0])?;
+                        stages.push(Stage::Sort(spec));
+                        stage_exprs.push(expr);
                     }
                     ("take", 1, _) => {
                         let n = match &args[0] {
@@ -748,6 +763,23 @@ fn compile_subexpr(arg: &crate::ast::Arg) -> Option<Arc<crate::vm::Program>> {
         other => other.clone(),
     };
     Some(Arc::new(crate::vm::Compiler::compile(&rooted, "")))
+}
+
+fn compile_sort_spec(arg: &crate::ast::Arg) -> Option<(SortSpec, Option<Arc<Expr>>)> {
+    use crate::ast::{Arg, Expr};
+    let expr = match arg {
+        Arg::Pos(e) => e,
+        _ => return None,
+    };
+    let (key_expr, descending) = match expr {
+        Expr::UnaryNeg(inner) => (inner.as_ref().clone(), true),
+        other => (other.clone(), false),
+    };
+    let key_arg = Arg::Pos(key_expr.clone());
+    Some((
+        SortSpec::keyed(compile_subexpr(&key_arg)?, descending),
+        Some(Arc::new(expr.clone())),
+    ))
 }
 
 fn arg_expr(arg: &crate::ast::Arg) -> Option<Arc<Expr>> {

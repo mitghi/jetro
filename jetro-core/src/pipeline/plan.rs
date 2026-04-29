@@ -174,7 +174,9 @@ impl Stage {
             Stage::Filter(prog)
             | Stage::Map(prog)
             | Stage::FlatMap(prog)
-            | Stage::Sort(Some(prog))
+            | Stage::Sort(super::SortSpec {
+                key: Some(prog), ..
+            })
             | Stage::UniqueBy(Some(prog))
             | Stage::GroupBy(prog)
             | Stage::TakeWhile(prog)
@@ -193,7 +195,7 @@ impl Stage {
             Stage::Take(_)
             | Stage::Skip(_)
             | Stage::Reverse
-            | Stage::Sort(None)
+            | Stage::Sort(super::SortSpec { key: None, .. })
             | Stage::UniqueBy(None)
             | Stage::Builtin(_)
             | Stage::Split(_)
@@ -336,10 +338,12 @@ impl Stage {
             (Stage::Skip(a), Stage::Skip(b)) => Some(Stage::Skip((*a).saturating_add(*b))),
             (Stage::Sort(_), Stage::Sort(b)) => Some(Stage::Sort(b.clone())),
             (Stage::UniqueBy(_), Stage::UniqueBy(b)) => Some(Stage::UniqueBy(b.clone())),
-            (Stage::UniqueBy(None), Stage::Sort(None))
-            | (Stage::Sort(None), Stage::UniqueBy(None)) => Some(Stage::SortedDedup(None)),
-            (Stage::UniqueBy(Some(a)), Stage::Sort(Some(b)))
-            | (Stage::Sort(Some(a)), Stage::UniqueBy(Some(b)))
+            (Stage::UniqueBy(None), Stage::Sort(super::SortSpec { key: None, .. }))
+            | (Stage::Sort(super::SortSpec { key: None, .. }), Stage::UniqueBy(None)) => {
+                Some(Stage::SortedDedup(None))
+            }
+            (Stage::UniqueBy(Some(a)), Stage::Sort(super::SortSpec { key: Some(b), .. }))
+            | (Stage::Sort(super::SortSpec { key: Some(a), .. }), Stage::UniqueBy(Some(b)))
                 if Arc::ptr_eq(a, b) =>
             {
                 Some(Stage::SortedDedup(Some(a.clone())))

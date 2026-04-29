@@ -19,6 +19,75 @@ use crate::builtins::{
 };
 use crate::chain_ir::PullDemand;
 
+fn sort_buffer_by_key<F>(
+    buf: Vec<Val>,
+    descending: bool,
+    strategy: StageStrategy,
+    mut key_of: F,
+) -> Result<Vec<Val>, EvalError>
+where
+    F: FnMut(&Val) -> Result<Val, EvalError>,
+{
+    let k = match strategy {
+        StageStrategy::SortTopK(k) | StageStrategy::SortBottomK(k) => Some(k),
+        StageStrategy::Default => None,
+    };
+    let keep_largest = match strategy {
+        StageStrategy::SortTopK(_) => descending,
+        StageStrategy::SortBottomK(_) => !descending,
+        StageStrategy::Default => false,
+    };
+
+    let mut keyed: Vec<(Val, Val)> = match k {
+        Some(0) => return Ok(Vec::new()),
+        Some(limit) if buf.len() > limit => {
+            let mut top: Vec<(Val, Val)> = Vec::with_capacity(limit + 1);
+            for v in buf.into_iter() {
+                let key = key_of(&v)?;
+                if top.len() < limit {
+                    top.push((key, v));
+                    continue;
+                }
+                let mut worst_idx = 0usize;
+                for (i, (candidate, _)) in top.iter().enumerate().skip(1) {
+                    let ord = cmp_val_total(candidate, &top[worst_idx].0);
+                    let displace = if keep_largest {
+                        ord == std::cmp::Ordering::Less
+                    } else {
+                        ord == std::cmp::Ordering::Greater
+                    };
+                    if displace {
+                        worst_idx = i;
+                    }
+                }
+                let ord = cmp_val_total(&key, &top[worst_idx].0);
+                let take = if keep_largest {
+                    ord == std::cmp::Ordering::Greater
+                } else {
+                    ord == std::cmp::Ordering::Less
+                };
+                if take {
+                    top[worst_idx] = (key, v);
+                }
+            }
+            top
+        }
+        _ => {
+            let mut keyed = Vec::with_capacity(buf.len());
+            for v in buf.into_iter() {
+                keyed.push((key_of(&v)?, v));
+            }
+            keyed
+        }
+    };
+
+    keyed.sort_by(|a, b| cmp_val_total(&a.0, &b.0));
+    if descending {
+        keyed.reverse();
+    }
+    Ok(keyed.into_iter().map(|(_, v)| v).collect())
+}
+
 impl Pipeline {
     /// Execute the pipeline against `root`, returning the sink.s
     /// produced [`Val`].
@@ -318,20 +387,25 @@ impl Pipeline {
             let strategy = strategies.get(i).copied().unwrap_or(StageStrategy::Default);
             buf = match s {
                 Stage::Reverse => cmp::barrier_reverse(buf),
-                Stage::Sort(None) => match strategy {
-                    StageStrategy::SortTopK(k) => cmp::barrier_top_k(buf, &cmp::KeySource::None, k),
-                    StageStrategy::SortBottomK(k) => {
-                        cmp::barrier_bottom_k(buf, &cmp::KeySource::None, k)
+                Stage::Sort(spec) => {
+                    let key = match &spec.key {
+                        None => cmp::KeySource::None,
+                        Some(_) => key_from_kernel(kernel)?,
+                    };
+                    let mut out = match (strategy, spec.descending) {
+                        (StageStrategy::SortTopK(k), false)
+                        | (StageStrategy::SortBottomK(k), true) => cmp::barrier_top_k(buf, &key, k),
+                        (StageStrategy::SortTopK(k), true)
+                        | (StageStrategy::SortBottomK(k), false) => {
+                            cmp::barrier_bottom_k(buf, &key, k)
+                        }
+                        (_, false) => cmp::barrier_sort(buf, &key),
+                        (_, true) => cmp::barrier_sort(buf, &key),
+                    };
+                    if spec.descending {
+                        out.reverse();
                     }
-                    _ => cmp::barrier_sort(buf, &cmp::KeySource::None),
-                },
-                Stage::Sort(Some(_)) => {
-                    let key = key_from_kernel(kernel)?;
-                    match strategy {
-                        StageStrategy::SortTopK(k) => cmp::barrier_top_k(buf, &key, k),
-                        StageStrategy::SortBottomK(k) => cmp::barrier_bottom_k(buf, &key, k),
-                        _ => cmp::barrier_sort(buf, &key),
-                    }
+                    out
                 }
                 Stage::UniqueBy(None) => cmp::barrier_unique_by(buf, &cmp::KeySource::None),
                 Stage::UniqueBy(Some(_)) => {
@@ -567,6 +641,7 @@ impl Pipeline {
         });
         let pre_iter: Box<dyn Iterator<Item = Val>> = if needs_barrier {
             let mut buf: Vec<Val> = iter.collect();
+            let strategies = compute_strategies(&self.stages, &self.sink);
             // Phase 1.2 — barrier-stage path now reads stage_kernels[i]
             // and dispatches the inline kernel for Sort/UniqueBy keyed
             // variants too, not just streaming Filter/Map.  Extends
@@ -602,19 +677,29 @@ impl Pipeline {
                         buf.truncate(*n);
                     }
                     Stage::Reverse => buf.reverse(),
-                    Stage::Sort(None) => buf.sort_by(|a, b| cmp_val_total(a, b)),
-                    Stage::Sort(Some(prog)) => {
-                        let mut keyed: Vec<(Val, Val)> = Vec::with_capacity(buf.len());
-                        for v in buf.into_iter() {
-                            let k = eval_kernel(kernel, &v, |item| {
-                                apply_item_in_env(&mut vm, &mut loop_env, item, prog)
-                            })
-                            .unwrap_or(Val::Null);
-                            keyed.push((k, v));
+                    Stage::Sort(spec) => match &spec.key {
+                        None => {
+                            let strategy = strategies
+                                .get(stage_idx)
+                                .copied()
+                                .unwrap_or(StageStrategy::Default);
+                            buf = sort_buffer_by_key(buf, spec.descending, strategy, |v| {
+                                Ok(v.clone())
+                            })?;
                         }
-                        keyed.sort_by(|a, b| cmp_val_total(&a.0, &b.0));
-                        buf = keyed.into_iter().map(|(_, v)| v).collect();
-                    }
+                        Some(prog) => {
+                            let strategy = strategies
+                                .get(stage_idx)
+                                .copied()
+                                .unwrap_or(StageStrategy::Default);
+                            buf = sort_buffer_by_key(buf, spec.descending, strategy, |v| {
+                                Ok(eval_kernel(kernel, v, |item| {
+                                    apply_item_in_env(&mut vm, &mut loop_env, item, prog)
+                                })
+                                .unwrap_or(Val::Null))
+                            })?;
+                        }
+                    },
                     Stage::UniqueBy(None) => {
                         let mut seen: std::collections::HashSet<String> = Default::default();
                         buf.retain(|v| seen.insert(format!("{:?}", v)));
