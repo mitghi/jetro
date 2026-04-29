@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::builtins::{BuiltinMethod, BuiltinViewSink};
+use crate::builtins::{BuiltinCategory, BuiltinMethod, BuiltinViewSink};
 use crate::{ast::Expr, context::EvalError, value::Val};
 
 use super::{
@@ -166,50 +166,69 @@ impl Pipeline {
         let Step::Method(name, args) = step else {
             return false;
         };
-        matches!(
-            (name.as_str(), args.len()),
-            ("filter", 1)
-                | ("find", 1)
-                | ("find_all", 1)
-                | ("find_first", 1)
-                | ("find_one", 1)
-                | ("map", 1)
-                | ("flat_map", 1)
-                | ("take", 1)
-                | ("skip", 1)
-                | ("takewhile", 1)
-                | ("take_while", 1)
-                | ("dropwhile", 1)
-                | ("drop_while", 1)
-                | ("indices_where", 1)
-                | ("find_index", 1)
-                | ("max_by", 1)
-                | ("min_by", 1)
-                | ("count_by", 1)
-                | ("countBy", 1)
-                | ("index_by", 1)
-                | ("indexBy", 1)
-                | ("unique_by", 1)
-                | ("group_by", 1)
-                | ("sort_by", 1)
-                | ("sort", 1)
-                | ("chunk", 1)
-                | ("batch", 1)
-                | ("window", 1)
-                | ("reverse", 0)
-                | ("unique", 0)
-                | ("sort", 0)
-                | ("count", 0)
-                | ("len", 0)
-                | ("approx_count_distinct", 0)
-                | ("sum", 0)
-                | ("min", 0)
-                | ("max", 0)
-                | ("avg", 0)
-                | ("first", 0)
-                | ("last", 0)
-        )
+        is_receiver_pipeline_start_method(name.as_str(), args.len())
     }
+}
+
+fn is_receiver_pipeline_start_method(name: &str, arity: usize) -> bool {
+    if matches!(
+        (name, arity),
+        ("take" | "skip", 1) | ("approx_count_distinct", 0)
+    ) {
+        return true;
+    }
+
+    let method = BuiltinMethod::from_name(name);
+    if method == BuiltinMethod::Unknown {
+        return matches!(
+            (name, arity),
+            ("find_first" | "find_one", 1) | ("sort_by", 1)
+        );
+    }
+
+    let spec = method.spec();
+    match arity {
+        0 => {
+            spec.view_sink.is_some()
+                || matches!(
+                    method,
+                    BuiltinMethod::Reverse | BuiltinMethod::Unique | BuiltinMethod::Sort
+                )
+        }
+        1 => {
+            spec.view_stage.is_some()
+                || supports_pipeline_lambda_stage(method)
+                || supports_pipeline_barrier_stage(method)
+        }
+        _ => false,
+    }
+}
+
+fn supports_pipeline_lambda_stage(method: BuiltinMethod) -> bool {
+    matches!(
+        method,
+        BuiltinMethod::TakeWhile
+            | BuiltinMethod::DropWhile
+            | BuiltinMethod::IndicesWhere
+            | BuiltinMethod::FindIndex
+            | BuiltinMethod::MaxBy
+            | BuiltinMethod::MinBy
+            | BuiltinMethod::CountBy
+            | BuiltinMethod::IndexBy
+    )
+}
+
+fn supports_pipeline_barrier_stage(method: BuiltinMethod) -> bool {
+    let spec = method.spec();
+    matches!(spec.category, BuiltinCategory::Barrier)
+        && matches!(
+            method,
+            BuiltinMethod::UniqueBy
+                | BuiltinMethod::GroupBy
+                | BuiltinMethod::Sort
+                | BuiltinMethod::Chunk
+                | BuiltinMethod::Window
+        )
 }
 
 /// Step 3d-extension (A2): try to decode the body of a Map(...) call as

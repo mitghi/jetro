@@ -481,7 +481,7 @@ impl Pipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{BinOp, Expr};
+    use crate::ast::{Arg, BinOp, Expr, Step};
     use crate::parser;
 
     /// Skip body when JETRO_COMPOSED=1 — the rewrite-shape tests below
@@ -565,6 +565,31 @@ mod tests {
         assert!(matches!(p.source, Source::FieldChain { .. }));
         assert!(p.stages.is_empty());
         assert!(matches!(p.sink, Sink::Collect));
+    }
+
+    #[test]
+    fn receiver_pipeline_start_uses_builtin_metadata() {
+        assert!(Pipeline::is_receiver_pipeline_start(&Step::Method(
+            "filter".into(),
+            vec![Arg::Pos(Expr::Bool(true))]
+        )));
+        assert!(Pipeline::is_receiver_pipeline_start(&Step::Method(
+            "sum".into(),
+            Vec::new()
+        )));
+        assert!(Pipeline::is_receiver_pipeline_start(&Step::Method(
+            "first".into(),
+            Vec::new()
+        )));
+        assert!(Pipeline::is_receiver_pipeline_start(&Step::Method(
+            "countBy".into(),
+            vec![Arg::Pos(Expr::Ident("kind".into()))]
+        )));
+
+        assert!(!Pipeline::is_receiver_pipeline_start(&Step::Method(
+            "from_json".into(),
+            Vec::new()
+        )));
     }
 
     // `lower_filter_map_count` removed — fused Sink::CountIf variant
