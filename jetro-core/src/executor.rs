@@ -179,6 +179,87 @@ mod tests {
     }
 
     #[test]
+    fn array_shape_executes_pipeline_children() {
+        let expr = r#"[$.books.filter(score > 900).take(2).map(title), {"first": $.books.filter(score > 900).first()}, $.meta.version]"#;
+        let plan = planner::plan_query(expr);
+        let QueryRoot::Node(root) = plan.root() else {
+            panic!("expected physical expression plan");
+        };
+        let PlanNode::Array(elems) = plan.node(*root) else {
+            panic!("expected array root");
+        };
+        let PhysicalArrayElem::Expr(first) = &elems[0] else {
+            panic!("expected array expr");
+        };
+        assert!(matches!(plan.node(*first), PlanNode::Pipeline(_)));
+        let PhysicalArrayElem::Expr(second) = &elems[1] else {
+            panic!("expected array expr");
+        };
+        let PlanNode::Object(fields) = plan.node(*second) else {
+            panic!("expected nested object");
+        };
+        let PhysicalObjField::Kv { val, .. } = &fields[0] else {
+            panic!("expected nested kv field");
+        };
+        assert!(matches!(plan.node(*val), PlanNode::Pipeline(_)));
+        let PhysicalArrayElem::Expr(third) = &elems[2] else {
+            panic!("expected array expr");
+        };
+        assert!(matches!(plan.node(*third), PlanNode::RootPath(_)));
+
+        let j = Jetro::from(json!({
+            "books": [
+                {"title": "low", "score": 1},
+                {"title": "a", "score": 901},
+                {"title": "b", "score": 902},
+                {"title": "c", "score": 903}
+            ],
+            "meta": {"version": 7}
+        }));
+
+        let out = j.collect(expr).unwrap();
+
+        assert_eq!(
+            out,
+            json!([
+                ["a", "b"],
+                {"first": {"title": "a", "score": 901}},
+                7
+            ])
+        );
+    }
+
+    #[test]
+    fn nested_structural_shapes_execute_pipeline_children() {
+        let expr = r#"{"groups": [{"top": $.books.filter(score > 900).take(2).map(title)}], "meta": [$.meta.version]}"#;
+        let plan = planner::plan_query(expr);
+        let QueryRoot::Node(root) = plan.root() else {
+            panic!("expected physical expression plan");
+        };
+        assert_no_vm_fallback(&plan, *root);
+
+        let j = Jetro::from(json!({
+            "books": [
+                {"title": "low", "score": 1},
+                {"title": "a", "score": 901},
+                {"title": "b", "score": 902},
+                {"title": "c", "score": 903}
+            ],
+            "meta": {"version": 7}
+        }));
+
+        let out = j.collect(expr).unwrap();
+
+        assert_eq!(
+            out,
+            json!({
+                "groups": [{"top": ["a", "b"]}],
+                "meta": [7]
+            })
+        );
+    }
+
+    #[test]
     fn object_shape_lowers_filter_map_sum_and_runs_map() {
         let expr = r#"{"total": $.data.filter(active).map(score).sum()}"#;
         let plan = planner::plan_query(expr);

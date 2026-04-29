@@ -328,6 +328,77 @@ mod tests {
     }
 
     #[test]
+    fn array_shape_keeps_pipeline_children() {
+        let plan = plan_query(
+            r#"[$.books.filter(score > 900).take(2).map(title), {"first": $.books.filter(score > 900).first()}, $.meta.version]"#,
+        );
+        let PlanNode::Array(elems) = root_node(&plan) else {
+            panic!("expected physical array plan");
+        };
+        assert_eq!(elems.len(), 3);
+
+        let PhysicalArrayElem::Expr(first) = &elems[0] else {
+            panic!("expected array expr");
+        };
+        assert!(matches!(plan.node(*first), PlanNode::Pipeline(_)));
+
+        let PhysicalArrayElem::Expr(second) = &elems[1] else {
+            panic!("expected array expr");
+        };
+        let PlanNode::Object(fields) = plan.node(*second) else {
+            panic!("expected nested object");
+        };
+        let PhysicalObjField::Kv { val, .. } = &fields[0] else {
+            panic!("expected nested object kv field");
+        };
+        assert!(matches!(plan.node(*val), PlanNode::Pipeline(_)));
+
+        let PhysicalArrayElem::Expr(third) = &elems[2] else {
+            panic!("expected array expr");
+        };
+        assert!(matches!(plan.node(*third), PlanNode::RootPath(_)));
+    }
+
+    #[test]
+    fn nested_structural_shapes_keep_pipeline_children() {
+        let plan = plan_query(
+            r#"{"groups": [{"top": $.books.filter(score > 900).take(2).map(title)}], "meta": [$.meta.version]}"#,
+        );
+        let PlanNode::Object(fields) = root_node(&plan) else {
+            panic!("expected physical object plan");
+        };
+        assert_eq!(fields.len(), 2);
+
+        let PhysicalObjField::Kv { val: groups, .. } = &fields[0] else {
+            panic!("expected groups kv field");
+        };
+        let PlanNode::Array(items) = plan.node(*groups) else {
+            panic!("expected groups array");
+        };
+        let PhysicalArrayElem::Expr(item) = &items[0] else {
+            panic!("expected groups array expr");
+        };
+        let PlanNode::Object(group_fields) = plan.node(*item) else {
+            panic!("expected nested group object");
+        };
+        let PhysicalObjField::Kv { val, .. } = &group_fields[0] else {
+            panic!("expected top kv field");
+        };
+        assert!(matches!(plan.node(*val), PlanNode::Pipeline(_)));
+
+        let PhysicalObjField::Kv { val: meta, .. } = &fields[1] else {
+            panic!("expected meta kv field");
+        };
+        let PlanNode::Array(meta_items) = plan.node(*meta) else {
+            panic!("expected meta array");
+        };
+        let PhysicalArrayElem::Expr(version) = &meta_items[0] else {
+            panic!("expected meta version expr");
+        };
+        assert!(matches!(plan.node(*version), PlanNode::RootPath(_)));
+    }
+
+    #[test]
     fn object_shape_uses_scalar_root_path_for_simple_field_chain() {
         let plan = plan_query(r#"{"b": $.a.b[0]}"#);
         let PlanNode::Object(fields) = root_node(&plan) else {
