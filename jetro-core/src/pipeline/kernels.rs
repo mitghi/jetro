@@ -4,6 +4,7 @@ use crate::context::EvalError;
 use crate::util::JsonView;
 use crate::value::Val;
 use crate::value_view::ValueView;
+use indexmap::IndexMap;
 
 #[derive(Debug, Clone)]
 pub enum BodyKernel {
@@ -16,6 +17,7 @@ pub enum BodyKernel {
     ConstBool(bool),
     Const(Val),
     FString(FStringKernel),
+    Object(ObjectKernel),
 }
 
 #[derive(Debug, Clone)]
@@ -28,6 +30,19 @@ pub struct FStringKernel {
 pub enum FStringKernelPart {
     Lit(Arc<str>),
     Interp(BodyKernel),
+}
+
+#[derive(Debug, Clone)]
+pub struct ObjectKernel {
+    entries: Arc<[ObjectKernelEntry]>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ObjectKernelEntry {
+    key: Arc<str>,
+    value: BodyKernel,
+    optional: bool,
+    omit_null: bool,
 }
 
 impl BodyKernel {
@@ -47,6 +62,52 @@ impl BodyKernel {
             }
         }
         match ops {
+            [Opcode::MakeObj(entries)] => {
+                let mut out = Vec::with_capacity(entries.len());
+                for entry in entries.iter() {
+                    let (key, value, optional, omit_null) = match entry {
+                        crate::vm::CompiledObjEntry::Short { name, .. } => (
+                            Arc::clone(name),
+                            BodyKernel::FieldRead(Arc::clone(name)),
+                            false,
+                            true,
+                        ),
+                        crate::vm::CompiledObjEntry::Kv {
+                            key,
+                            prog,
+                            optional,
+                            cond: None,
+                        } => {
+                            let value = BodyKernel::classify(prog);
+                            if matches!(value, BodyKernel::Generic) {
+                                return Self::Generic;
+                            }
+                            (Arc::clone(key), value, *optional, false)
+                        }
+                        crate::vm::CompiledObjEntry::KvPath {
+                            key,
+                            steps,
+                            optional,
+                            ..
+                        } => {
+                            let Some(value) = classify_kv_path(steps) else {
+                                return Self::Generic;
+                            };
+                            (Arc::clone(key), value, *optional, false)
+                        }
+                        _ => return Self::Generic,
+                    };
+                    out.push(ObjectKernelEntry {
+                        key,
+                        value,
+                        optional,
+                        omit_null,
+                    });
+                }
+                return Self::Object(ObjectKernel {
+                    entries: out.into(),
+                });
+            }
             [Opcode::FString(parts)] => {
                 let mut out = Vec::with_capacity(parts.len());
                 let mut base_capacity = 0usize;
@@ -134,6 +195,24 @@ impl BodyKernel {
     }
 }
 
+fn classify_kv_path(steps: &[crate::vm::KvStep]) -> Option<BodyKernel> {
+    if steps.is_empty() {
+        return None;
+    }
+    let mut keys = Vec::with_capacity(steps.len());
+    for step in steps {
+        match step {
+            crate::vm::KvStep::Field(key) => keys.push(Arc::clone(key)),
+            crate::vm::KvStep::Index(_) => return None,
+        }
+    }
+    match keys.len() {
+        0 => None,
+        1 => Some(BodyKernel::FieldRead(keys.pop().unwrap())),
+        _ => Some(BodyKernel::FieldChain(keys.into())),
+    }
+}
+
 #[inline]
 fn trivial_lit(op: &crate::vm::Opcode) -> Option<Val> {
     use crate::vm::Opcode;
@@ -191,6 +270,9 @@ fn eval_native_kernel(kernel: &BodyKernel, item: &Val) -> Result<Val, EvalError>
         BodyKernel::FString(fstring) => {
             eval_fstring_kernel(fstring, |kernel| eval_native_kernel(kernel, item))
         }
+        BodyKernel::Object(object) => {
+            eval_object_kernel(object, |kernel| eval_native_kernel(kernel, item))
+        }
         BodyKernel::FieldCmpLit(k, op, lit) => {
             let lhs = item.get_field(k.as_ref());
             Ok(Val::Bool(eval_cmp_op(&lhs, *op, lit)))
@@ -208,6 +290,21 @@ fn eval_native_kernel(kernel: &BodyKernel, item: &Val) -> Result<Val, EvalError>
         BodyKernel::CurrentCmpLit(op, lit) => Ok(Val::Bool(eval_cmp_op(item, *op, lit))),
         BodyKernel::Generic => unreachable!("generic body kernels are handled by eval_kernel"),
     }
+}
+
+fn eval_object_kernel<F>(object: &ObjectKernel, mut eval: F) -> Result<Val, EvalError>
+where
+    F: FnMut(&BodyKernel) -> Result<Val, EvalError>,
+{
+    let mut map = IndexMap::with_capacity(object.entries.len());
+    for entry in object.entries.iter() {
+        let value = eval(&entry.value)?;
+        if (entry.optional || entry.omit_null) && value.is_null() {
+            continue;
+        }
+        map.insert(Arc::clone(&entry.key), value);
+    }
+    Ok(Val::obj(map))
 }
 
 fn eval_fstring_kernel<F>(fstring: &FStringKernel, mut eval: F) -> Result<Val, EvalError>
@@ -295,6 +392,20 @@ where
                 }
             }
             Some(ViewKernelValue::Owned(Val::Str(Arc::from(out))))
+        }
+        BodyKernel::Object(object) => {
+            let mut map = IndexMap::with_capacity(object.entries.len());
+            for entry in object.entries.iter() {
+                let value = match eval_view_kernel(&entry.value, item)? {
+                    ViewKernelValue::View(view) => view.materialize(),
+                    ViewKernelValue::Owned(value) => value,
+                };
+                if (entry.optional || entry.omit_null) && value.is_null() {
+                    continue;
+                }
+                map.insert(Arc::clone(&entry.key), value);
+            }
+            Some(ViewKernelValue::Owned(Val::obj(map)))
         }
         BodyKernel::FieldCmpLit(key, op, lit) => {
             let lhs = item.field(key);
