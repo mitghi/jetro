@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::builtins::{BuiltinCategory, BuiltinMethod, BuiltinViewSink};
+use crate::builtins::{BuiltinMethod, BuiltinPipelineStage, BuiltinViewSink};
 use crate::{ast::Expr, context::EvalError, value::Val};
 
 use super::{
@@ -188,47 +188,10 @@ fn is_receiver_pipeline_start_method(name: &str, arity: usize) -> bool {
 
     let spec = method.spec();
     match arity {
-        0 => {
-            spec.view_sink.is_some()
-                || matches!(
-                    method,
-                    BuiltinMethod::Reverse | BuiltinMethod::Unique | BuiltinMethod::Sort
-                )
-        }
-        1 => {
-            spec.view_stage.is_some()
-                || supports_pipeline_lambda_stage(method)
-                || supports_pipeline_barrier_stage(method)
-        }
+        0 => spec.view_sink.is_some() || spec.pipeline_stage == Some(BuiltinPipelineStage::Nullary),
+        1 => spec.pipeline_stage == Some(BuiltinPipelineStage::Unary),
         _ => false,
     }
-}
-
-fn supports_pipeline_lambda_stage(method: BuiltinMethod) -> bool {
-    matches!(
-        method,
-        BuiltinMethod::TakeWhile
-            | BuiltinMethod::DropWhile
-            | BuiltinMethod::IndicesWhere
-            | BuiltinMethod::FindIndex
-            | BuiltinMethod::MaxBy
-            | BuiltinMethod::MinBy
-            | BuiltinMethod::CountBy
-            | BuiltinMethod::IndexBy
-    )
-}
-
-fn supports_pipeline_barrier_stage(method: BuiltinMethod) -> bool {
-    let spec = method.spec();
-    matches!(spec.category, BuiltinCategory::Barrier)
-        && matches!(
-            method,
-            BuiltinMethod::UniqueBy
-                | BuiltinMethod::GroupBy
-                | BuiltinMethod::Sort
-                | BuiltinMethod::Chunk
-                | BuiltinMethod::Window
-        )
 }
 
 /// Step 3d-extension (A2): try to decode the body of a Map(...) call as

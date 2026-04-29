@@ -467,6 +467,7 @@ pub struct BuiltinSpec {
     pub view_native: bool,
     pub view_stage: Option<BuiltinViewStage>,
     pub view_sink: Option<BuiltinViewSink>,
+    pub pipeline_stage: Option<BuiltinPipelineStage>,
     pub pipeline_element: bool,
     pub cost: f64,
 }
@@ -484,6 +485,12 @@ pub enum BuiltinViewSink {
     Numeric,
     First,
     Last,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinPipelineStage {
+    Nullary,
+    Unary,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -541,6 +548,7 @@ impl BuiltinSpec {
             view_native: false,
             view_stage: None,
             view_sink: None,
+            pipeline_stage: None,
             pipeline_element: false,
             cost: 1.0,
         }
@@ -558,6 +566,11 @@ impl BuiltinSpec {
 
     fn view_stage(mut self, stage: BuiltinViewStage) -> Self {
         self.view_stage = Some(stage);
+        self
+    }
+
+    fn pipeline_stage(mut self, stage: BuiltinPipelineStage) -> Self {
+        self.pipeline_stage = Some(stage);
         self
     }
 
@@ -587,6 +600,7 @@ impl BuiltinMethod {
             Self::Filter | Self::Find | Self::FindAll => {
                 BuiltinSpec::new(Cat::StreamingFilter, Card::Filtering)
                     .view_stage(BuiltinViewStage::Filter)
+                    .pipeline_stage(BuiltinPipelineStage::Unary)
                     .cost(10.0)
             }
             Self::Compact | Self::Remove => {
@@ -595,6 +609,7 @@ impl BuiltinMethod {
             Self::Map => BuiltinSpec::new(Cat::StreamingOneToOne, Card::OneToOne)
                 .indexed()
                 .view_stage(BuiltinViewStage::Map)
+                .pipeline_stage(BuiltinPipelineStage::Unary)
                 .pipeline_element()
                 .cost(10.0),
             Self::Enumerate | Self::Pairwise => {
@@ -605,6 +620,7 @@ impl BuiltinMethod {
             }
             Self::FlatMap => BuiltinSpec::new(Cat::StreamingExpand, Card::Expanding)
                 .view_stage(BuiltinViewStage::FlatMap)
+                .pipeline_stage(BuiltinPipelineStage::Unary)
                 .cost(10.0),
             Self::Flatten | Self::Explode | Self::Split => {
                 BuiltinSpec::new(Cat::StreamingExpand, Card::Expanding).cost(10.0)
@@ -615,7 +631,9 @@ impl BuiltinMethod {
                     .cost(10.0)
             }
             Self::TakeWhile | Self::DropWhile => {
-                BuiltinSpec::new(Cat::StreamingFilter, Card::Filtering).cost(10.0)
+                BuiltinSpec::new(Cat::StreamingFilter, Card::Filtering)
+                    .pipeline_stage(BuiltinPipelineStage::Unary)
+                    .cost(10.0)
             }
             Self::First => BuiltinSpec::new(Cat::Positional, Card::Bounded)
                 .view_native()
@@ -645,9 +663,17 @@ impl BuiltinMethod {
             | Self::FindIndex
             | Self::IndicesWhere
             | Self::MaxBy
-            | Self::MinBy => BuiltinSpec::new(Cat::Reducer, Card::Reducing)
-                .view_native()
-                .cost(10.0),
+            | Self::MinBy => {
+                let spec = BuiltinSpec::new(Cat::Reducer, Card::Reducing)
+                    .view_native()
+                    .cost(10.0);
+                match self {
+                    Self::FindIndex | Self::IndicesWhere | Self::MaxBy | Self::MinBy => {
+                        spec.pipeline_stage(BuiltinPipelineStage::Unary)
+                    }
+                    _ => spec,
+                }
+            }
             Self::Sort
             | Self::Unique
             | Self::UniqueBy
@@ -662,7 +688,19 @@ impl BuiltinMethod {
             | Self::RollingAvg
             | Self::RollingMin
             | Self::RollingMax
-            | Self::Accumulate => BuiltinSpec::new(Cat::Barrier, Card::Barrier).cost(20.0),
+            | Self::Accumulate => {
+                let spec = BuiltinSpec::new(Cat::Barrier, Card::Barrier).cost(20.0);
+                match self {
+                    Self::Sort | Self::Unique => spec.pipeline_stage(BuiltinPipelineStage::Nullary),
+                    Self::UniqueBy
+                    | Self::GroupBy
+                    | Self::CountBy
+                    | Self::IndexBy
+                    | Self::Chunk
+                    | Self::Window => spec.pipeline_stage(BuiltinPipelineStage::Unary),
+                    _ => spec,
+                }
+            }
             Self::Reverse
             | Self::Append
             | Self::Prepend
@@ -673,7 +711,13 @@ impl BuiltinMethod {
             | Self::Zip
             | Self::ZipLongest
             | Self::Fanout
-            | Self::ZipShape => BuiltinSpec::new(Cat::Barrier, Card::Barrier).cost(10.0),
+            | Self::ZipShape => {
+                let spec = BuiltinSpec::new(Cat::Barrier, Card::Barrier).cost(10.0);
+                match self {
+                    Self::Reverse => spec.pipeline_stage(BuiltinPipelineStage::Nullary),
+                    _ => spec,
+                }
+            }
             Self::Keys | Self::Values | Self::Entries => {
                 BuiltinSpec::new(Cat::Object, Card::OneToOne).pipeline_element()
             }
@@ -5700,8 +5744,8 @@ pub fn schema_apply(recv: &Val) -> Option<Val> {
 #[cfg(test)]
 mod spec_tests {
     use super::{
-        BuiltinCardinality, BuiltinCategory, BuiltinMethod, BuiltinViewMaterialization,
-        BuiltinViewSink, BuiltinViewStage,
+        BuiltinCardinality, BuiltinCategory, BuiltinMethod, BuiltinPipelineStage,
+        BuiltinViewMaterialization, BuiltinViewSink, BuiltinViewStage,
     };
 
     #[test]
@@ -5786,5 +5830,28 @@ mod spec_tests {
             BuiltinViewMaterialization::SinkNumericInput
         );
         assert_eq!(BuiltinMethod::Sort.spec().view_sink, None);
+    }
+
+    #[test]
+    fn builtin_specs_drive_pipeline_stage_lowering() {
+        assert_eq!(
+            BuiltinMethod::Filter.spec().pipeline_stage,
+            Some(BuiltinPipelineStage::Unary)
+        );
+        assert_eq!(
+            BuiltinMethod::CountBy.spec().pipeline_stage,
+            Some(BuiltinPipelineStage::Unary)
+        );
+        assert_eq!(
+            BuiltinMethod::Sort.spec().pipeline_stage,
+            Some(BuiltinPipelineStage::Nullary)
+        );
+        assert_eq!(
+            BuiltinMethod::Reverse.spec().pipeline_stage,
+            Some(BuiltinPipelineStage::Nullary)
+        );
+
+        assert_eq!(BuiltinMethod::Len.spec().pipeline_stage, None);
+        assert_eq!(BuiltinMethod::FromJson.spec().pipeline_stage, None);
     }
 }
