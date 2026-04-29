@@ -54,7 +54,7 @@ pub(crate) use common::{
     num_finalise, num_fold, walk_field_chain,
 };
 pub use kernels::{eval_cmp_op, eval_kernel, BodyKernel};
-pub(crate) use kernels::{eval_view_kernel, ViewKernelValue};
+pub(crate) use kernels::{eval_view_kernel, ObjectKernel, ViewKernelValue};
 #[cfg(test)]
 pub use plan::plan;
 pub use plan::{

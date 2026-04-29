@@ -4,7 +4,6 @@ use crate::context::EvalError;
 use crate::util::JsonView;
 use crate::value::Val;
 use crate::value_view::ValueView;
-use indexmap::IndexMap;
 
 #[derive(Debug, Clone)]
 pub enum BodyKernel {
@@ -43,6 +42,40 @@ pub struct ObjectKernelEntry {
     value: BodyKernel,
     optional: bool,
     omit_null: bool,
+}
+
+impl ObjectKernel {
+    #[inline]
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub(crate) fn keys(&self) -> Arc<[Arc<str>]> {
+        self.entries
+            .iter()
+            .map(|entry| Arc::clone(&entry.key))
+            .collect::<Vec<_>>()
+            .into()
+    }
+
+    pub(crate) fn eval_view_row_cells<'a, V>(&self, item: &V, cells: &mut Vec<Val>) -> Option<bool>
+    where
+        V: ValueView<'a>,
+    {
+        let start = cells.len();
+        for entry in self.entries.iter() {
+            let value = match eval_view_kernel(&entry.value, item)? {
+                ViewKernelValue::View(view) => view.materialize(),
+                ViewKernelValue::Owned(value) => value,
+            };
+            if (entry.optional || entry.omit_null) && value.is_null() {
+                cells.truncate(start);
+                return Some(false);
+            }
+            cells.push(value);
+        }
+        Some(true)
+    }
 }
 
 impl BodyKernel {
@@ -296,15 +329,15 @@ fn eval_object_kernel<F>(object: &ObjectKernel, mut eval: F) -> Result<Val, Eval
 where
     F: FnMut(&BodyKernel) -> Result<Val, EvalError>,
 {
-    let mut map = IndexMap::with_capacity(object.entries.len());
+    let mut pairs = Vec::with_capacity(object.entries.len());
     for entry in object.entries.iter() {
         let value = eval(&entry.value)?;
         if (entry.optional || entry.omit_null) && value.is_null() {
             continue;
         }
-        map.insert(Arc::clone(&entry.key), value);
+        pairs.push((Arc::clone(&entry.key), value));
     }
-    Ok(Val::obj(map))
+    Ok(Val::ObjSmall(pairs.into()))
 }
 
 fn eval_fstring_kernel<F>(fstring: &FStringKernel, mut eval: F) -> Result<Val, EvalError>
@@ -394,7 +427,7 @@ where
             Some(ViewKernelValue::Owned(Val::Str(Arc::from(out))))
         }
         BodyKernel::Object(object) => {
-            let mut map = IndexMap::with_capacity(object.entries.len());
+            let mut pairs = Vec::with_capacity(object.entries.len());
             for entry in object.entries.iter() {
                 let value = match eval_view_kernel(&entry.value, item)? {
                     ViewKernelValue::View(view) => view.materialize(),
@@ -403,9 +436,9 @@ where
                 if (entry.optional || entry.omit_null) && value.is_null() {
                     continue;
                 }
-                map.insert(Arc::clone(&entry.key), value);
+                pairs.push((Arc::clone(&entry.key), value));
             }
-            Some(ViewKernelValue::Owned(Val::obj(map)))
+            Some(ViewKernelValue::Owned(Val::ObjSmall(pairs.into())))
         }
         BodyKernel::FieldCmpLit(key, op, lit) => {
             let lhs = item.field(key);

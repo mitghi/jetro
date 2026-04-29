@@ -5,6 +5,7 @@ use std::sync::Arc;
 use crate::chain_ir::PullDemand;
 use crate::context::{Env, EvalError};
 use crate::pipeline;
+use crate::value::ObjVecData;
 use crate::value::Val;
 use crate::value_view::ValueView;
 use crate::vm::{CompiledObjEntry, Opcode, Program};
@@ -247,6 +248,11 @@ where
     for (idx, stage) in body.stages[..map_idx].iter().enumerate() {
         stage.view_capability(idx, body.stage_kernels.get(idx))?;
     }
+    if let pipeline::BodyKernel::Object(object) = map_kernel {
+        if object.len() > 0 {
+            return run_terminal_object_map_collect(source, body, map_idx, object);
+        }
+    }
 
     let items = source.array_iter()?;
     let mut out = Vec::new();
@@ -269,6 +275,79 @@ where
     }
 
     Some(Ok(Val::arr(out)))
+}
+
+fn run_terminal_object_map_collect<'a, V>(
+    source: V,
+    body: &pipeline::PipelineBody,
+    map_idx: usize,
+    object: &pipeline::ObjectKernel,
+) -> Option<Result<Val, EvalError>>
+where
+    V: ValueView<'a>,
+{
+    let items = source.array_iter()?;
+    let keys = object.keys();
+    let mut cells = Vec::new();
+    let mut rows: Option<Vec<Val>> = None;
+    let mut op_state: Vec<usize> = vec![0; map_idx];
+
+    'outer: for row in items {
+        let mut item = row;
+        for (op_idx, stage) in body.stages[..map_idx].iter().enumerate() {
+            let capability = stage.view_capability(op_idx, body.stage_kernels.get(op_idx))?;
+            match apply_view_stage(item, capability, op_idx, &mut op_state, &body.stage_kernels)? {
+                ViewStageFlow::Keep(next) => item = next,
+                ViewStageFlow::Drop => continue 'outer,
+                ViewStageFlow::Stop => break 'outer,
+            }
+        }
+
+        if let Some(rows) = rows.as_mut() {
+            match eval_value_kernel(&item, &pipeline::BodyKernel::Object(object.clone())) {
+                Some(value) => rows.push(value),
+                None => return None,
+            }
+            continue;
+        }
+
+        match object.eval_view_row_cells(&item, &mut cells)? {
+            true => {}
+            false => {
+                let mut materialized_rows =
+                    Vec::with_capacity(cells.len() / object.len().max(1) + 1);
+                for row_cells in cells.chunks_exact(object.len()) {
+                    materialized_rows.push(row_small_object(&keys, row_cells));
+                }
+                cells.clear();
+                match eval_value_kernel(&item, &pipeline::BodyKernel::Object(object.clone())) {
+                    Some(value) => materialized_rows.push(value),
+                    None => return None,
+                }
+                rows = Some(materialized_rows);
+            }
+        }
+    }
+
+    if let Some(rows) = rows {
+        return Some(Ok(Val::arr(rows)));
+    }
+
+    Some(Ok(Val::ObjVec(Arc::new(ObjVecData {
+        keys,
+        cells,
+        typed_cols: None,
+    }))))
+}
+
+fn row_small_object(keys: &[Arc<str>], cells: &[Val]) -> Val {
+    Val::ObjSmall(
+        keys.iter()
+            .zip(cells.iter())
+            .map(|(key, value)| (Arc::clone(key), value.clone()))
+            .collect::<Vec<_>>()
+            .into(),
+    )
 }
 
 fn run_sort_prefix_then_materialized_suffix<'a, V>(
