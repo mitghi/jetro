@@ -1,6 +1,9 @@
+use std::cell::{Cell, OnceCell, RefCell};
+use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::{
+    composed as cmp,
     context::{Env, EvalError},
     value::Val,
 };
@@ -19,6 +22,84 @@ use crate::builtins::{
     take_while_one, window_apply,
 };
 use crate::chain_ir::PullDemand;
+
+struct ComposedStageBuilder<'a> {
+    base_env: &'a Env,
+    vm_ctx: OnceCell<Rc<RefCell<cmp::VmCtx>>>,
+}
+
+impl<'a> ComposedStageBuilder<'a> {
+    fn new(base_env: &'a Env) -> Self {
+        Self {
+            base_env,
+            vm_ctx: OnceCell::new(),
+        }
+    }
+
+    fn build(&self, stage: &Stage, kernel: &BodyKernel) -> Option<Box<dyn cmp::Stage>> {
+        Some(match (stage, kernel) {
+            (Stage::Filter(_), BodyKernel::FieldCmpLit(field, op, lit))
+                if matches!(op, crate::ast::BinOp::Eq) =>
+            {
+                Box::new(cmp::FilterFieldEqLit {
+                    field: Arc::clone(field),
+                    target: lit.clone(),
+                })
+            }
+            (Stage::Map(_), BodyKernel::FieldRead(field)) => Box::new(cmp::MapField {
+                field: Arc::clone(field),
+            }),
+            (Stage::Map(_), BodyKernel::FieldChain(keys)) => Box::new(cmp::MapFieldChain {
+                keys: Arc::clone(keys),
+            }),
+            (Stage::FlatMap(_), BodyKernel::FieldRead(field)) => Box::new(cmp::FlatMapField {
+                field: Arc::clone(field),
+            }),
+            (Stage::FlatMap(_), BodyKernel::FieldChain(keys)) => Box::new(cmp::FlatMapFieldChain {
+                keys: Arc::clone(keys),
+            }),
+            (Stage::Take(n), _) => Box::new(cmp::Take {
+                remaining: Cell::new(*n),
+            }),
+            (Stage::Skip(n), _) => Box::new(cmp::Skip {
+                remaining: Cell::new(*n),
+            }),
+            (Stage::Builtin(call), _) => Box::new(cmp::BuiltinStage::new(call.clone())),
+            // VM-fallback for any unrecognised body — Generic kernel,
+            // FieldCmpLit non-Eq, custom lambdas.
+            (Stage::Filter(p), _) => Box::new(cmp::GenericFilter {
+                prog: Arc::clone(p),
+                ctx: self.vm_ctx(),
+            }),
+            (Stage::Map(p), _) => Box::new(cmp::GenericMap {
+                prog: Arc::clone(p),
+                ctx: self.vm_ctx(),
+            }),
+            (Stage::FlatMap(p), _) => Box::new(cmp::GenericFlatMap {
+                prog: Arc::clone(p),
+                ctx: self.vm_ctx(),
+            }),
+            _ => return None,
+        })
+    }
+
+    fn vm_ctx(&self) -> Rc<RefCell<cmp::VmCtx>> {
+        Rc::clone(self.vm_ctx.get_or_init(|| {
+            Rc::new(RefCell::new(cmp::VmCtx {
+                vm: crate::vm::VM::new(),
+                env: self.base_env.clone(),
+            }))
+        }))
+    }
+}
+
+fn composed_key_from_kernel(kernel: &BodyKernel) -> Option<cmp::KeySource> {
+    match kernel {
+        BodyKernel::FieldRead(field) => Some(cmp::KeySource::Field(Arc::clone(field))),
+        BodyKernel::FieldChain(keys) => Some(cmp::KeySource::Chain(Arc::clone(keys))),
+        _ => None,
+    }
+}
 
 impl Pipeline {
     /// Execute the pipeline against `root`, returning the sink.s
@@ -146,23 +227,7 @@ impl Pipeline {
     }
 
     fn try_run_composed(&self, root: &Val, base_env: &Env) -> Option<Result<Val, EvalError>> {
-        use crate::composed as cmp;
-        use crate::composed::Stage as ComposedStage;
-        use std::cell::{Cell, RefCell};
-        use std::rc::Rc;
-
         let (eff_stages, eff_kernels, eff_sink) = self.canonical();
-
-        // Shared VM + Env for any Generic-kernel stage in the chain.
-        // Constructed once per call so compile/path caches amortise.
-        // Lazy: only built if a Generic stage actually appears.
-        let vm_ctx: std::cell::OnceCell<Rc<RefCell<cmp::VmCtx>>> = std::cell::OnceCell::new();
-        let make_ctx = || -> Rc<RefCell<cmp::VmCtx>> {
-            let vm = crate::vm::VM::new();
-            let env = base_env.clone();
-            Rc::new(RefCell::new(cmp::VmCtx { vm, env }))
-        };
-        let get_ctx = || -> Rc<RefCell<cmp::VmCtx>> { Rc::clone(vm_ctx.get_or_init(make_ctx)) };
 
         // Sink mapping — operates on the post-decomposition base sink.
         enum SinkKind {
@@ -191,71 +256,7 @@ impl Pipeline {
             Sink::ApproxCountDistinct => return None, // legacy Val path
         };
         let _ = SinkKind::GroupByOnly;
-
-        // Build a `KeySource` from a barrier-style kernel. Returns None
-        // when the kernel is computed or generic — caller bails to legacy.
-        fn key_from_kernel(k: &BodyKernel) -> Option<cmp::KeySource> {
-            match k {
-                BodyKernel::FieldRead(f) => Some(cmp::KeySource::Field(Arc::clone(f))),
-                BodyKernel::FieldChain(keys) => Some(cmp::KeySource::Chain(Arc::clone(keys))),
-                _ => None,
-            }
-        }
-
-        // Build a streaming Stage from (Stage, BodyKernel). Recognised
-        // borrow kernels (FieldRead / FieldChain / FieldCmpLit Eq)
-        // dispatch to zero-clone borrow stages; everything else falls
-        // through to the Generic VM-fallback stage that re-enters
-        // `vm.exec_in_env` per row using the shared `vm_ctx`. One arm
-        // per kernel pattern; one mechanism for every body shape.
-        let build_stream_stage = |s: &Stage, k: &BodyKernel| -> Option<Box<dyn ComposedStage>> {
-            Some(match (s, k) {
-                (Stage::Filter(_), BodyKernel::FieldCmpLit(field, op, lit))
-                    if matches!(op, crate::ast::BinOp::Eq) =>
-                {
-                    Box::new(cmp::FilterFieldEqLit {
-                        field: Arc::clone(field),
-                        target: lit.clone(),
-                    })
-                }
-                (Stage::Map(_), BodyKernel::FieldRead(field)) => Box::new(cmp::MapField {
-                    field: Arc::clone(field),
-                }),
-                (Stage::Map(_), BodyKernel::FieldChain(keys)) => Box::new(cmp::MapFieldChain {
-                    keys: Arc::clone(keys),
-                }),
-                (Stage::FlatMap(_), BodyKernel::FieldRead(field)) => Box::new(cmp::FlatMapField {
-                    field: Arc::clone(field),
-                }),
-                (Stage::FlatMap(_), BodyKernel::FieldChain(keys)) => {
-                    Box::new(cmp::FlatMapFieldChain {
-                        keys: Arc::clone(keys),
-                    })
-                }
-                (Stage::Take(n), _) => Box::new(cmp::Take {
-                    remaining: Cell::new(*n),
-                }),
-                (Stage::Skip(n), _) => Box::new(cmp::Skip {
-                    remaining: Cell::new(*n),
-                }),
-                (Stage::Builtin(call), _) => Box::new(cmp::BuiltinStage::new(call.clone())),
-                // VM-fallback for any unrecognised body — Generic kernel,
-                // FieldCmpLit non-Eq, custom lambdas.
-                (Stage::Filter(p), _) => Box::new(cmp::GenericFilter {
-                    prog: Arc::clone(p),
-                    ctx: get_ctx(),
-                }),
-                (Stage::Map(p), _) => Box::new(cmp::GenericMap {
-                    prog: Arc::clone(p),
-                    ctx: get_ctx(),
-                }),
-                (Stage::FlatMap(p), _) => Box::new(cmp::GenericFlatMap {
-                    prog: Arc::clone(p),
-                    ctx: get_ctx(),
-                }),
-                _ => return None,
-            })
-        };
+        let stage_builder = ComposedStageBuilder::new(base_env);
 
         // Resolve source to an owned Vec<Val>. Future: avoid clone on
         // pure Arr by holding Arc<Vec<Val>> for the first segment.
@@ -301,11 +302,11 @@ impl Pipeline {
 
             // Build streaming chain over [last_split..i].
             if i > last_split {
-                let mut chain: Box<dyn ComposedStage> = Box::new(cmp::Identity);
+                let mut chain: Box<dyn cmp::Stage> = Box::new(cmp::Identity);
                 for j in last_split..i {
                     let stage = &stages_ref[j];
                     let kernel = kernels.get(j).unwrap_or(&BodyKernel::Generic);
-                    let next = build_stream_stage(stage, kernel)?;
+                    let next = stage_builder.build(stage, kernel)?;
                     chain = Box::new(cmp::Composed { a: chain, b: next });
                 }
                 let out = cmp::run_pipeline::<cmp::CollectSink>(&buf, chain.as_ref());
@@ -323,7 +324,7 @@ impl Pipeline {
                 Stage::Sort(spec) => {
                     let key = match &spec.key {
                         None => cmp::KeySource::None,
-                        Some(_) => key_from_kernel(kernel)?,
+                        Some(_) => composed_key_from_kernel(kernel)?,
                     };
                     let mut out = match (strategy, spec.descending) {
                         (StageStrategy::SortTopK(k), false)
@@ -342,7 +343,7 @@ impl Pipeline {
                 }
                 Stage::UniqueBy(None) => cmp::barrier_unique_by(buf, &cmp::KeySource::None),
                 Stage::UniqueBy(Some(_)) => {
-                    let key = key_from_kernel(kernel)?;
+                    let key = composed_key_from_kernel(kernel)?;
                     cmp::barrier_unique_by(buf, &key)
                 }
                 Stage::GroupBy(_) => {
@@ -352,7 +353,7 @@ impl Pipeline {
                     if i + 1 != stages_ref.len() {
                         return None;
                     }
-                    let key = key_from_kernel(kernel)?;
+                    let key = composed_key_from_kernel(kernel)?;
                     let val = cmp::barrier_group_by(buf, &key);
                     let _ = i;
                     return Some(Ok(val));
@@ -364,11 +365,11 @@ impl Pipeline {
         }
 
         // Final streaming segment + sink.
-        let mut chain: Box<dyn ComposedStage> = Box::new(cmp::Identity);
+        let mut chain: Box<dyn cmp::Stage> = Box::new(cmp::Identity);
         for j in last_split..stages_ref.len() {
             let stage = &stages_ref[j];
             let kernel = kernels.get(j).unwrap_or(&BodyKernel::Generic);
-            let next = build_stream_stage(stage, kernel)?;
+            let next = stage_builder.build(stage, kernel)?;
             chain = Box::new(cmp::Composed { a: chain, b: next });
         }
         let final_demand = Self::segment_source_demand(&stages_ref[last_split..], &eff_sink)
