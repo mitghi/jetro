@@ -81,16 +81,22 @@ impl Pipeline {
             .collect::<Vec<_>>()
             .into();
 
+        let trailing = &steps[field_end..];
+        Self::lower_from_source(Source::FieldChain { keys }, trailing)
+    }
+
+    pub(crate) fn lower_from_source(
+        source: Source,
+        trailing: &[crate::ast::Step],
+    ) -> Option<Pipeline> {
         // Decode the trailing methods into stages + a sink.
         // Compile each filter / map sub-Expr to a Program once so
         // Pipeline::run can reuse it per row.  Sub-programs run against
         // the current item bound as the VM's root, so `@.field` and
         // `@` references resolve to the row.
-        let trailing = &steps[field_end..];
         let (stages, stage_exprs, sink) = decode_method_chain(trailing)?;
-
         let mut p = Pipeline {
-            source: Source::FieldChain { keys },
+            source,
             stages,
             stage_exprs,
             sink,

@@ -52,6 +52,7 @@ mod tests {
             | PlanNode::Ident(_)
             | PlanNode::Pipeline(_)
             | PlanNode::RootPath(_) => {}
+            PlanNode::PipelineSource { source, .. } => assert_no_vm_fallback(plan, *source),
             PlanNode::Call { receiver, .. } => assert_no_vm_fallback(plan, *receiver),
             PlanNode::Chain { base, steps } => {
                 assert_no_vm_fallback(plan, *base);
@@ -449,5 +450,35 @@ mod tests {
                 "first": {"title": "a", "score": 901}
             })
         );
+    }
+
+    #[test]
+    fn let_bound_receiver_chain_executes_as_pipeline_source() {
+        let expr = r#"let books = $.books in books.filter(score > 900).take(2).map(title)"#;
+        let plan = planner::plan_query(expr);
+        let QueryRoot::Node(root) = plan.root() else {
+            panic!("expected physical expression plan");
+        };
+        let PlanNode::Let { body, .. } = plan.node(*root) else {
+            panic!("expected let root");
+        };
+        let PlanNode::PipelineSource { source, pipeline } = plan.node(*body) else {
+            panic!("expected receiver pipeline source");
+        };
+        assert!(matches!(plan.node(*source), PlanNode::Ident(name) if name.as_ref() == "books"));
+        assert!(matches!(pipeline.source, Source::Receiver(_)));
+
+        let j = Jetro::from(json!({
+            "books": [
+                {"title": "low", "score": 1},
+                {"title": "a", "score": 901},
+                {"title": "b", "score": 902},
+                {"title": "c", "score": 903}
+            ]
+        }));
+
+        let out = j.collect(expr).unwrap();
+
+        assert_eq!(out, json!(["a", "b"]));
     }
 }

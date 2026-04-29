@@ -58,6 +58,10 @@ pub enum PlanNode {
     Current,
     Ident(Arc<str>),
     Pipeline(Pipeline),
+    PipelineSource {
+        source: NodeId,
+        pipeline: Pipeline,
+    },
     RootPath(Vec<PhysicalPathStep>),
     Chain {
         base: NodeId,

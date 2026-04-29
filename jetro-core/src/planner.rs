@@ -14,6 +14,7 @@ use crate::physical::{
     QueryPlan,
 };
 use crate::pipeline::Pipeline;
+use crate::pipeline::Source;
 use crate::value::Val;
 use crate::vm::Compiler;
 
@@ -41,6 +42,7 @@ fn lower_expr(builder: &mut PlanBuilder, expr: &Expr) -> NodeId {
     try_lower_pipeline(expr)
         .map(|node| builder.push(node))
         .or_else(|| try_lower_root_path(expr).map(|node| builder.push(node)))
+        .or_else(|| try_lower_receiver_pipeline(builder, expr))
         .or_else(|| try_lower_chain(builder, expr))
         .or_else(|| try_lower_scalar(builder, expr))
         .or_else(|| try_lower_structural(builder, expr))
@@ -54,6 +56,27 @@ fn try_lower_pipeline(expr: &Expr) -> Option<PlanNode> {
 
 fn is_trivial_collect_pipeline(pipeline: &Pipeline) -> bool {
     pipeline.stages.is_empty() && matches!(pipeline.sink, crate::pipeline::Sink::Collect)
+}
+
+fn try_lower_receiver_pipeline(builder: &mut PlanBuilder, expr: &Expr) -> Option<NodeId> {
+    let Expr::Chain(base, steps) = expr else {
+        return None;
+    };
+    if matches!(base.as_ref(), Expr::Root) {
+        return None;
+    }
+
+    let method_start = steps
+        .iter()
+        .position(|step| matches!(step, Step::Method(_, _)))?;
+    let source_expr = base
+        .as_ref()
+        .clone()
+        .maybe_chain(steps[..method_start].to_vec());
+    let source = lower_expr(builder, &source_expr);
+    let pipeline =
+        Pipeline::lower_from_source(Source::Receiver(Val::Null), &steps[method_start..])?;
+    Some(builder.push(PlanNode::PipelineSource { source, pipeline }))
 }
 
 fn try_lower_root_path(expr: &Expr) -> Option<PlanNode> {
@@ -450,5 +473,20 @@ mod tests {
             panic!("expected trim call");
         };
         assert!(matches!(plan.node(*receiver), PlanNode::Call { .. }));
+    }
+
+    #[test]
+    fn let_bound_receiver_chain_lowers_to_pipeline_source() {
+        let plan =
+            plan_query(r#"let books = $.books in books.filter(score > 900).take(2).map(title)"#);
+        let PlanNode::Let { body, .. } = root_node(&plan) else {
+            panic!("expected let plan");
+        };
+        let PlanNode::PipelineSource { source, pipeline } = plan.node(*body) else {
+            panic!("expected receiver pipeline source");
+        };
+        assert!(matches!(plan.node(*source), PlanNode::Ident(name) if name.as_ref() == "books"));
+        assert!(matches!(pipeline.source, Source::Receiver(_)));
+        assert_eq!(pipeline.stages.len(), 3);
     }
 }
