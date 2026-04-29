@@ -267,31 +267,14 @@ fn run_terminal_map_collect<'a, V>(
 where
     V: ValueView<'a>,
 {
-    if !matches!(body.sink, pipeline::Sink::Collect) {
-        return None;
-    }
-    let map_idx = body
-        .stages
-        .iter()
-        .position(|stage| matches!(stage, pipeline::Stage::Map(_)))?;
-    if map_idx + 1 != body.stages.len() {
-        return None;
-    }
-    let map_kernel = body.stage_kernels.get(map_idx)?;
-    if !map_kernel.is_view_native() {
-        return None;
-    }
-    for (idx, stage) in body.stages[..map_idx].iter().enumerate() {
-        stage.view_capability(idx, body.stage_kernels.get(idx))?;
-    }
+    let (map_idx, map_kernel, prefix) = terminal_map_collect_plan(body)?;
     let items = source.array_iter()?;
     let mut collector = pipeline::TerminalMapCollector::new(map_kernel);
     let mut op_state: Vec<usize> = vec![0; map_idx];
 
     'outer: for row in items {
         let mut item = row;
-        for (op_idx, stage) in body.stages[..map_idx].iter().enumerate() {
-            let capability = stage.view_capability(op_idx, body.stage_kernels.get(op_idx))?;
+        for (op_idx, capability) in prefix.iter().copied().enumerate() {
             match apply_view_stage(item, capability, op_idx, &mut op_state, &body.stage_kernels)? {
                 ViewStageFlow::Keep(next) => item = next,
                 ViewStageFlow::Drop => continue 'outer,
@@ -302,6 +285,40 @@ where
     }
 
     Some(Ok(collector.finish()))
+}
+
+fn terminal_map_collect_plan(
+    body: &pipeline::PipelineBody,
+) -> Option<(
+    usize,
+    &pipeline::BodyKernel,
+    Vec<pipeline::ViewStageCapability>,
+)> {
+    if !matches!(
+        body.sink.view_capability(&body.sink_kernels)?,
+        pipeline::ViewSinkCapability::Collect
+    ) {
+        return None;
+    }
+    let mut prefix = Vec::new();
+    let mut terminal_map: Option<(usize, &pipeline::BodyKernel)> = None;
+
+    for (idx, stage) in body.stages.iter().enumerate() {
+        let capability = stage.view_capability(idx, body.stage_kernels.get(idx))?;
+        if idx + 1 == body.stages.len() {
+            let pipeline::ViewStageCapability::Map { kernel } = capability else {
+                return None;
+            };
+            terminal_map = Some((idx, body.stage_kernels.get(kernel)?));
+        } else {
+            prefix.push(capability);
+        }
+    }
+
+    let (map_idx, map_kernel) = terminal_map?;
+    map_kernel
+        .is_view_native()
+        .then_some((map_idx, map_kernel, prefix))
 }
 
 fn run_sort_prefix_then_materialized_suffix<'a, V>(
