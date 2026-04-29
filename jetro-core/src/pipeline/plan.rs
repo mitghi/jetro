@@ -58,6 +58,18 @@ impl Sink {
             Sink::Collect | Sink::ApproxCountDistinct => SinkDemand::RESULT,
         }
     }
+
+    pub(crate) fn can_run_with_receiver_only<F>(&self, mut program_ok: F) -> bool
+    where
+        F: FnMut(&crate::vm::Program) -> bool,
+    {
+        match self {
+            Sink::Collect | Sink::Count | Sink::First | Sink::Last | Sink::ApproxCountDistinct => {
+                true
+            }
+            Sink::Numeric(n) => n.project.as_ref().is_none_or(|prog| program_ok(prog)),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -109,6 +121,46 @@ pub struct StageShape {
 }
 
 impl Stage {
+    pub(crate) fn can_run_with_receiver_only<F>(&self, mut program_ok: F) -> bool
+    where
+        F: FnMut(&crate::vm::Program) -> bool,
+    {
+        match self {
+            Stage::Filter(prog)
+            | Stage::Map(prog)
+            | Stage::FlatMap(prog)
+            | Stage::Sort(Some(prog))
+            | Stage::UniqueBy(Some(prog))
+            | Stage::GroupBy(prog)
+            | Stage::TakeWhile(prog)
+            | Stage::DropWhile(prog)
+            | Stage::IndicesWhere(prog)
+            | Stage::FindIndex(prog)
+            | Stage::MaxBy(prog)
+            | Stage::MinBy(prog)
+            | Stage::TransformValues(prog)
+            | Stage::TransformKeys(prog)
+            | Stage::FilterValues(prog)
+            | Stage::FilterKeys(prog)
+            | Stage::CountBy(prog)
+            | Stage::IndexBy(prog)
+            | Stage::SortedDedup(Some(prog)) => program_ok(prog),
+            Stage::Take(_)
+            | Stage::Skip(_)
+            | Stage::Reverse
+            | Stage::Sort(None)
+            | Stage::UniqueBy(None)
+            | Stage::Builtin(_)
+            | Stage::Split(_)
+            | Stage::Slice(_, _)
+            | Stage::Replace { .. }
+            | Stage::Chunk(_)
+            | Stage::Window(_)
+            | Stage::SortedDedup(None) => true,
+            Stage::CompiledMap(_) => false,
+        }
+    }
+
     pub fn chain_op(&self) -> Option<ChainOp> {
         match self {
             Stage::Filter(_) => Some(ChainOp::Filter),

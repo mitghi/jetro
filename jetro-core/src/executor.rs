@@ -453,6 +453,22 @@ mod tests {
 
     #[cfg(feature = "simd-json")]
     #[test]
+    fn view_prefix_uses_stage_metadata_for_materialized_suffix_barriers() {
+        let j = Jetro::from_bytes(
+            br#"{"people":[{"name":"low","score":1},{"name":"bob","score":902},{"name":"ada","score":901},{"name":"bob","score":903}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+
+        let out = j
+            .collect(r#"$.people.filter(score > 900).map(name).sort().unique().count()"#)
+            .unwrap();
+
+        assert_eq!(out, json!(2));
+        assert!(!j.root_val_is_materialized());
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
     fn view_prefix_rejects_root_dependent_generic_suffix() {
         let j = Jetro::from_bytes(
             br#"{"people":[{"name":"low","score":1},{"name":"ada","score":901},{"name":"bob","score":902}],"target":"ada"}"#.to_vec(),

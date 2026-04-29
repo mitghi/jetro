@@ -19,8 +19,8 @@ where
 }
 
 pub(crate) fn can_run_materialized_receiver(body: &pipeline::PipelineBody) -> bool {
-    suffix_stages_can_run_without_outer_env(&body.stages)
-        && suffix_sink_can_run_without_outer_env(body)
+    stages_can_run_with_materialized_receiver(&body.stages)
+        && sink_can_run_with_materialized_receiver(&body.sink)
 }
 
 pub(crate) fn run<'a, V>(
@@ -193,11 +193,13 @@ where
     V: ValueView<'a>,
 {
     let prefix = pipeline::view_prefix_capabilities(body)?;
-    if prefix.consumed_stages >= body.stages.len() && !suffix_sink_can_run_without_outer_env(body) {
+    if prefix.consumed_stages >= body.stages.len()
+        && !sink_can_run_with_materialized_receiver(&body.sink)
+    {
         return None;
     }
-    if !suffix_stages_can_run_without_outer_env(&body.stages[prefix.consumed_stages..])
-        || !suffix_sink_can_run_without_outer_env(body)
+    if !stages_can_run_with_materialized_receiver(&body.stages[prefix.consumed_stages..])
+        || !sink_can_run_with_materialized_receiver(&body.sink)
     {
         return None;
     }
@@ -260,54 +262,14 @@ fn suffix_body(body: &pipeline::PipelineBody, consumed_stages: usize) -> pipelin
     }
 }
 
-fn suffix_stages_can_run_without_outer_env(stages: &[pipeline::Stage]) -> bool {
-    stages.iter().all(|stage| match stage {
-        pipeline::Stage::Take(_)
-        | pipeline::Stage::Skip(_)
-        | pipeline::Stage::Reverse
-        | pipeline::Stage::Sort(None)
-        | pipeline::Stage::UniqueBy(None)
-        | pipeline::Stage::Builtin(_)
-        | pipeline::Stage::Split(_)
-        | pipeline::Stage::Slice(_, _)
-        | pipeline::Stage::Replace { .. }
-        | pipeline::Stage::Chunk(_)
-        | pipeline::Stage::Window(_) => true,
-        pipeline::Stage::Filter(prog)
-        | pipeline::Stage::Map(prog)
-        | pipeline::Stage::FlatMap(prog)
-        | pipeline::Stage::Sort(Some(prog))
-        | pipeline::Stage::UniqueBy(Some(prog))
-        | pipeline::Stage::GroupBy(prog)
-        | pipeline::Stage::TakeWhile(prog)
-        | pipeline::Stage::DropWhile(prog)
-        | pipeline::Stage::IndicesWhere(prog)
-        | pipeline::Stage::FindIndex(prog)
-        | pipeline::Stage::MaxBy(prog)
-        | pipeline::Stage::MinBy(prog)
-        | pipeline::Stage::TransformValues(prog)
-        | pipeline::Stage::TransformKeys(prog)
-        | pipeline::Stage::FilterValues(prog)
-        | pipeline::Stage::FilterKeys(prog)
-        | pipeline::Stage::CountBy(prog)
-        | pipeline::Stage::IndexBy(prog)
-        | pipeline::Stage::SortedDedup(Some(prog)) => program_is_current_only(prog),
-        pipeline::Stage::CompiledMap(_) | pipeline::Stage::SortedDedup(None) => false,
-    })
+fn stages_can_run_with_materialized_receiver(stages: &[pipeline::Stage]) -> bool {
+    stages
+        .iter()
+        .all(|stage| stage.can_run_with_receiver_only(program_is_current_only))
 }
 
-fn suffix_sink_can_run_without_outer_env(body: &pipeline::PipelineBody) -> bool {
-    match &body.sink {
-        pipeline::Sink::Collect
-        | pipeline::Sink::Count
-        | pipeline::Sink::First
-        | pipeline::Sink::Last
-        | pipeline::Sink::ApproxCountDistinct => true,
-        pipeline::Sink::Numeric(n) => n
-            .project
-            .as_ref()
-            .is_none_or(|project| program_is_current_only(project)),
-    }
+fn sink_can_run_with_materialized_receiver(sink: &pipeline::Sink) -> bool {
+    sink.can_run_with_receiver_only(program_is_current_only)
 }
 
 fn program_is_current_only(program: &Program) -> bool {
