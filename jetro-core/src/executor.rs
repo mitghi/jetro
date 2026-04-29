@@ -469,6 +469,26 @@ mod tests {
 
     #[cfg(feature = "simd-json")]
     #[test]
+    fn view_prefix_and_full_execution_share_stage_semantics() {
+        let data = br#"{"people":[{"name":"low","score":1},{"name":"ada","score":901},{"name":"bob","score":902},{"name":"cat","score":903},{"name":"dan","score":904}],"unused":{"large":[1,2,3,4]}}"#.to_vec();
+        let full = Jetro::from_bytes(data.clone()).unwrap();
+        let prefix = Jetro::from_bytes(data).unwrap();
+
+        let full_out = full
+            .collect(r#"$.people.skip(1).take(3).filter(score > 901).map(name).count()"#)
+            .unwrap();
+        let prefix_out = prefix
+            .collect(r#"$.people.skip(1).take(3).filter(score > 901).map(name).upper().count()"#)
+            .unwrap();
+
+        assert_eq!(full_out, prefix_out);
+        assert_eq!(full_out, json!(2));
+        assert!(!full.root_val_is_materialized());
+        assert!(!prefix.root_val_is_materialized());
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
     fn view_prefix_rejects_root_dependent_generic_suffix() {
         let j = Jetro::from_bytes(
             br#"{"people":[{"name":"low","score":1},{"name":"ada","score":901},{"name":"bob","score":902}],"target":"ada"}"#.to_vec(),

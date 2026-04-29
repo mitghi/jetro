@@ -8,6 +8,12 @@ use crate::value::Val;
 use crate::value_view::ValueView;
 use crate::vm::{Opcode, Program};
 
+enum ViewStageFlow<V> {
+    Keep(V),
+    Drop,
+    Stop,
+}
+
 pub(crate) fn walk_fields<'a, V>(mut cur: V, keys: &[Arc<str>]) -> V
 where
     V: ValueView<'a>,
@@ -59,56 +65,10 @@ where
     'outer: for row in items {
         let mut item = row;
         for (op_idx, stage) in capabilities.stages.iter().enumerate() {
-            if !matches!(
-                stage.materialization(),
-                pipeline::ViewMaterialization::Never
-            ) {
-                return None;
-            }
-            match *stage {
-                pipeline::ViewStageCapability::Skip(n) => {
-                    debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::SkipsViewRead);
-                    debug_assert_eq!(
-                        stage.output_mode(),
-                        pipeline::ViewOutputMode::PreservesInputView
-                    );
-                    if op_state[op_idx] < n {
-                        op_state[op_idx] += 1;
-                        continue 'outer;
-                    }
-                }
-                pipeline::ViewStageCapability::Take(n) => {
-                    debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::SkipsViewRead);
-                    debug_assert_eq!(
-                        stage.output_mode(),
-                        pipeline::ViewOutputMode::PreservesInputView
-                    );
-                    if op_state[op_idx] >= n {
-                        break 'outer;
-                    }
-                    op_state[op_idx] += 1;
-                }
-                pipeline::ViewStageCapability::Filter { kernel } => {
-                    debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::ReadsView);
-                    debug_assert_eq!(
-                        stage.output_mode(),
-                        pipeline::ViewOutputMode::PreservesInputView
-                    );
-                    let kernel = body.stage_kernels.get(kernel)?;
-                    let keep = eval_filter_kernel(&item, kernel)?;
-                    if !keep {
-                        continue 'outer;
-                    }
-                }
-                pipeline::ViewStageCapability::Map { kernel } => {
-                    debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::ReadsView);
-                    debug_assert_eq!(
-                        stage.output_mode(),
-                        pipeline::ViewOutputMode::BorrowedSubview
-                    );
-                    let kernel = body.stage_kernels.get(kernel)?;
-                    item = eval_map_kernel(&item, kernel)?;
-                }
+            match apply_view_stage(item, *stage, op_idx, &mut op_state, &body.stage_kernels)? {
+                ViewStageFlow::Keep(next) => item = next,
+                ViewStageFlow::Drop => continue 'outer,
+                ViewStageFlow::Stop => break 'outer,
             }
         }
 
@@ -211,30 +171,10 @@ where
     'outer: for row in items {
         let mut item = row;
         for (op_idx, stage) in prefix.stages.iter().enumerate() {
-            match *stage {
-                pipeline::ViewStageCapability::Skip(n) => {
-                    if op_state[op_idx] < n {
-                        op_state[op_idx] += 1;
-                        continue 'outer;
-                    }
-                }
-                pipeline::ViewStageCapability::Take(n) => {
-                    if op_state[op_idx] >= n {
-                        break 'outer;
-                    }
-                    op_state[op_idx] += 1;
-                }
-                pipeline::ViewStageCapability::Filter { kernel } => {
-                    let kernel = body.stage_kernels.get(kernel)?;
-                    let keep = eval_filter_kernel(&item, kernel)?;
-                    if !keep {
-                        continue 'outer;
-                    }
-                }
-                pipeline::ViewStageCapability::Map { kernel } => {
-                    let kernel = body.stage_kernels.get(kernel)?;
-                    item = eval_map_kernel(&item, kernel)?;
-                }
+            match apply_view_stage(item, *stage, op_idx, &mut op_state, &body.stage_kernels)? {
+                ViewStageFlow::Keep(next) => item = next,
+                ViewStageFlow::Drop => continue 'outer,
+                ViewStageFlow::Stop => break 'outer,
             }
         }
         boundary_rows.push(item.materialize());
@@ -245,6 +185,75 @@ where
     let root = Val::Null;
     let env = Env::new(Val::Null);
     Some(suffix.run_with_env(&root, &env, cache))
+}
+
+fn apply_view_stage<'a, V>(
+    item: V,
+    stage: pipeline::ViewStageCapability,
+    op_idx: usize,
+    op_state: &mut [usize],
+    stage_kernels: &[pipeline::BodyKernel],
+) -> Option<ViewStageFlow<V>>
+where
+    V: ValueView<'a>,
+{
+    if !matches!(
+        stage.materialization(),
+        pipeline::ViewMaterialization::Never
+    ) {
+        return None;
+    }
+
+    match stage {
+        pipeline::ViewStageCapability::Skip(n) => {
+            debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::SkipsViewRead);
+            debug_assert_eq!(
+                stage.output_mode(),
+                pipeline::ViewOutputMode::PreservesInputView
+            );
+            if op_state[op_idx] < n {
+                op_state[op_idx] += 1;
+                Some(ViewStageFlow::Drop)
+            } else {
+                Some(ViewStageFlow::Keep(item))
+            }
+        }
+        pipeline::ViewStageCapability::Take(n) => {
+            debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::SkipsViewRead);
+            debug_assert_eq!(
+                stage.output_mode(),
+                pipeline::ViewOutputMode::PreservesInputView
+            );
+            if op_state[op_idx] >= n {
+                Some(ViewStageFlow::Stop)
+            } else {
+                op_state[op_idx] += 1;
+                Some(ViewStageFlow::Keep(item))
+            }
+        }
+        pipeline::ViewStageCapability::Filter { kernel } => {
+            debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::ReadsView);
+            debug_assert_eq!(
+                stage.output_mode(),
+                pipeline::ViewOutputMode::PreservesInputView
+            );
+            let kernel = stage_kernels.get(kernel)?;
+            if eval_filter_kernel(&item, kernel)? {
+                Some(ViewStageFlow::Keep(item))
+            } else {
+                Some(ViewStageFlow::Drop)
+            }
+        }
+        pipeline::ViewStageCapability::Map { kernel } => {
+            debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::ReadsView);
+            debug_assert_eq!(
+                stage.output_mode(),
+                pipeline::ViewOutputMode::BorrowedSubview
+            );
+            let kernel = stage_kernels.get(kernel)?;
+            Some(ViewStageFlow::Keep(eval_map_kernel(&item, kernel)?))
+        }
+    }
 }
 
 fn suffix_body(body: &pipeline::PipelineBody, consumed_stages: usize) -> pipeline::PipelineBody {
