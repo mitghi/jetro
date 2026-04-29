@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
 use crate::{
-    composed as cmp,
     context::{Env, EvalError},
     value::Val,
 };
 
 use super::composed_barrier::{self, BarrierOutput};
+use super::composed_segment;
 use super::composed_sink;
 use super::composed_stage::ComposedStageBuilder;
 use super::lower::run_compiled_map;
@@ -197,18 +197,13 @@ impl Pipeline {
 
             // Build streaming chain over [last_split..i].
             if i > last_split {
-                let mut chain: Box<dyn cmp::Stage> = Box::new(cmp::Identity);
-                for j in last_split..i {
-                    let stage = &stages_ref[j];
-                    let kernel = kernels.get(j).unwrap_or(&BodyKernel::Generic);
-                    let next = stage_builder.build(stage, kernel)?;
-                    chain = Box::new(cmp::Composed { a: chain, b: next });
-                }
-                let out = cmp::run_pipeline::<cmp::CollectSink>(&buf, chain.as_ref());
-                buf = match out {
-                    Val::Arr(a) => a.as_ref().clone(),
-                    _ => return None,
-                };
+                let chain = composed_segment::build_chain(
+                    stages_ref,
+                    kernels,
+                    last_split..i,
+                    &stage_builder,
+                )?;
+                buf = composed_segment::collect(&buf, chain.as_ref())?;
             }
 
             // Apply barrier.
@@ -230,13 +225,12 @@ impl Pipeline {
         }
 
         // Final streaming segment + sink.
-        let mut chain: Box<dyn cmp::Stage> = Box::new(cmp::Identity);
-        for j in last_split..stages_ref.len() {
-            let stage = &stages_ref[j];
-            let kernel = kernels.get(j).unwrap_or(&BodyKernel::Generic);
-            let next = stage_builder.build(stage, kernel)?;
-            chain = Box::new(cmp::Composed { a: chain, b: next });
-        }
+        let chain = composed_segment::build_chain(
+            stages_ref,
+            kernels,
+            last_split..stages_ref.len(),
+            &stage_builder,
+        )?;
         let final_demand = Self::segment_source_demand(&stages_ref[last_split..], &eff_sink)
             .chain
             .pull;
