@@ -43,20 +43,41 @@ where
     'outer: for row in items {
         let mut item = row;
         for (op_idx, stage) in capabilities.stages.iter().enumerate() {
+            if !matches!(
+                stage.materialization(),
+                pipeline::ViewMaterialization::Never
+            ) {
+                return None;
+            }
             match *stage {
                 pipeline::ViewStageCapability::Skip(n) => {
+                    debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::SkipsViewRead);
+                    debug_assert_eq!(
+                        stage.output_mode(),
+                        pipeline::ViewOutputMode::PreservesInputView
+                    );
                     if op_state[op_idx] < n {
                         op_state[op_idx] += 1;
                         continue 'outer;
                     }
                 }
                 pipeline::ViewStageCapability::Take(n) => {
+                    debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::SkipsViewRead);
+                    debug_assert_eq!(
+                        stage.output_mode(),
+                        pipeline::ViewOutputMode::PreservesInputView
+                    );
                     if op_state[op_idx] >= n {
                         break 'outer;
                     }
                     op_state[op_idx] += 1;
                 }
                 pipeline::ViewStageCapability::Filter { kernel } => {
+                    debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::ReadsView);
+                    debug_assert_eq!(
+                        stage.output_mode(),
+                        pipeline::ViewOutputMode::PreservesInputView
+                    );
                     let kernel = body.stage_kernels.get(kernel)?;
                     let keep = eval_filter_kernel(&item, kernel)?;
                     if !keep {
@@ -64,6 +85,11 @@ where
                     }
                 }
                 pipeline::ViewStageCapability::Map { kernel } => {
+                    debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::ReadsView);
+                    debug_assert_eq!(
+                        stage.output_mode(),
+                        pipeline::ViewOutputMode::BorrowedSubview
+                    );
                     let kernel = body.stage_kernels.get(kernel)?;
                     item = eval_map_kernel(&item, kernel)?;
                 }
@@ -71,9 +97,25 @@ where
         }
 
         match capabilities.sink {
-            pipeline::ViewSinkCapability::Collect => acc_collect.push(item.materialize()),
-            pipeline::ViewSinkCapability::Count => acc_count += 1,
+            pipeline::ViewSinkCapability::Collect => {
+                debug_assert_eq!(
+                    capabilities.sink.materialization(),
+                    pipeline::ViewMaterialization::SinkOutputRows
+                );
+                acc_collect.push(item.materialize());
+            }
+            pipeline::ViewSinkCapability::Count => {
+                debug_assert_eq!(
+                    capabilities.sink.materialization(),
+                    pipeline::ViewMaterialization::Never
+                );
+                acc_count += 1;
+            }
             pipeline::ViewSinkCapability::Numeric { op, project_kernel } => {
+                debug_assert_eq!(
+                    capabilities.sink.materialization(),
+                    pipeline::ViewMaterialization::SinkNumericInput
+                );
                 let numeric_item = if let Some(kernel) = project_kernel {
                     let kernel = body.sink_kernels.get(kernel)?;
                     eval_value_kernel(&item, kernel)?
@@ -92,10 +134,18 @@ where
                 );
             }
             pipeline::ViewSinkCapability::First => {
+                debug_assert_eq!(
+                    capabilities.sink.materialization(),
+                    pipeline::ViewMaterialization::SinkFinalRow
+                );
                 acc_first = Some(item.materialize());
                 break 'outer;
             }
             pipeline::ViewSinkCapability::Last => {
+                debug_assert_eq!(
+                    capabilities.sink.materialization(),
+                    pipeline::ViewMaterialization::SinkFinalRow
+                );
                 acc_last = Some(item.materialize());
             }
         }

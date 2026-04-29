@@ -45,7 +45,10 @@ mod kernels;
 mod lower;
 mod normalize;
 mod plan;
-pub(crate) use capability::{view_capabilities, ViewSinkCapability, ViewStageCapability};
+pub(crate) use capability::{
+    view_capabilities, ViewInputMode, ViewMaterialization, ViewOutputMode, ViewSinkCapability,
+    ViewStageCapability,
+};
 pub(crate) use common::{
     apply_item_in_env, cmp_val_total, is_truthy, num_finalise, num_fold, walk_field_chain,
 };

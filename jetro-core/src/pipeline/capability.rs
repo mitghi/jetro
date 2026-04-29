@@ -1,5 +1,25 @@
 use super::{NumOp, PipelineBody, Sink, Stage};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ViewInputMode {
+    ReadsView,
+    SkipsViewRead,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ViewOutputMode {
+    PreservesInputView,
+    BorrowedSubview,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ViewMaterialization {
+    Never,
+    SinkOutputRows,
+    SinkFinalRow,
+    SinkNumericInput,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ViewPipelineCapabilities {
     pub stages: Vec<ViewStageCapability>,
@@ -14,6 +34,28 @@ pub(crate) enum ViewStageCapability {
     Skip(usize),
 }
 
+impl ViewStageCapability {
+    pub(crate) fn input_mode(self) -> ViewInputMode {
+        match self {
+            Self::Filter { .. } | Self::Map { .. } => ViewInputMode::ReadsView,
+            Self::Take(_) | Self::Skip(_) => ViewInputMode::SkipsViewRead,
+        }
+    }
+
+    pub(crate) fn output_mode(self) -> ViewOutputMode {
+        match self {
+            Self::Map { .. } => ViewOutputMode::BorrowedSubview,
+            Self::Filter { .. } | Self::Take(_) | Self::Skip(_) => {
+                ViewOutputMode::PreservesInputView
+            }
+        }
+    }
+
+    pub(crate) fn materialization(self) -> ViewMaterialization {
+        ViewMaterialization::Never
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ViewSinkCapability {
     Collect,
@@ -26,11 +68,115 @@ pub(crate) enum ViewSinkCapability {
     Last,
 }
 
+impl ViewSinkCapability {
+    pub(crate) fn materialization(self) -> ViewMaterialization {
+        match self {
+            Self::Collect => ViewMaterialization::SinkOutputRows,
+            Self::Count => ViewMaterialization::Never,
+            Self::Numeric { .. } => ViewMaterialization::SinkNumericInput,
+            Self::First | Self::Last => ViewMaterialization::SinkFinalRow,
+        }
+    }
+}
+
 pub(crate) fn view_capabilities(body: &PipelineBody) -> Option<ViewPipelineCapabilities> {
     Some(ViewPipelineCapabilities {
         stages: view_stage_capabilities(body)?,
         sink: view_sink_capability(body)?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use crate::ast::BinOp;
+    use crate::pipeline::{
+        BodyKernel, NumOp, NumericSink, PipelineBody, Sink, Stage, ViewInputMode,
+        ViewMaterialization, ViewOutputMode, ViewSinkCapability, ViewStageCapability,
+    };
+    use crate::value::Val;
+
+    use super::view_capabilities;
+
+    #[test]
+    fn view_stage_metadata_describes_borrowing_and_materialization() {
+        let filter = ViewStageCapability::Filter { kernel: 0 };
+        assert_eq!(filter.input_mode(), ViewInputMode::ReadsView);
+        assert_eq!(filter.output_mode(), ViewOutputMode::PreservesInputView);
+        assert_eq!(filter.materialization(), ViewMaterialization::Never);
+
+        let map = ViewStageCapability::Map { kernel: 0 };
+        assert_eq!(map.input_mode(), ViewInputMode::ReadsView);
+        assert_eq!(map.output_mode(), ViewOutputMode::BorrowedSubview);
+        assert_eq!(map.materialization(), ViewMaterialization::Never);
+
+        let take = ViewStageCapability::Take(2);
+        assert_eq!(take.input_mode(), ViewInputMode::SkipsViewRead);
+        assert_eq!(take.output_mode(), ViewOutputMode::PreservesInputView);
+        assert_eq!(take.materialization(), ViewMaterialization::Never);
+    }
+
+    #[test]
+    fn view_sink_metadata_describes_materialization_policy() {
+        assert_eq!(
+            ViewSinkCapability::Collect.materialization(),
+            ViewMaterialization::SinkOutputRows
+        );
+        assert_eq!(
+            ViewSinkCapability::Count.materialization(),
+            ViewMaterialization::Never
+        );
+        assert_eq!(
+            ViewSinkCapability::Numeric {
+                op: NumOp::Sum,
+                project_kernel: Some(0)
+            }
+            .materialization(),
+            ViewMaterialization::SinkNumericInput
+        );
+        assert_eq!(
+            ViewSinkCapability::First.materialization(),
+            ViewMaterialization::SinkFinalRow
+        );
+    }
+
+    #[test]
+    fn view_capabilities_preserve_expected_metadata() {
+        let body = PipelineBody {
+            stages: vec![
+                Stage::Filter(Arc::new(crate::vm::Program::new(Vec::new(), ""))),
+                Stage::Map(Arc::new(crate::vm::Program::new(Vec::new(), ""))),
+                Stage::Take(2),
+            ],
+            stage_exprs: Vec::new(),
+            sink: Sink::Numeric(NumericSink::projected(
+                NumOp::Sum,
+                Arc::new(crate::vm::Program::new(Vec::new(), "")),
+            )),
+            stage_kernels: vec![
+                BodyKernel::FieldCmpLit(Arc::from("score"), BinOp::Gt, Val::Int(10)),
+                BodyKernel::FieldRead(Arc::from("score")),
+                BodyKernel::Generic,
+            ],
+            sink_kernels: vec![BodyKernel::FieldRead(Arc::from("score"))],
+        };
+
+        let capabilities = view_capabilities(&body).unwrap();
+        assert_eq!(capabilities.stages.len(), 3);
+        assert_eq!(
+            capabilities.stages[0].output_mode(),
+            ViewOutputMode::PreservesInputView
+        );
+        assert_eq!(
+            capabilities.stages[1].output_mode(),
+            ViewOutputMode::BorrowedSubview
+        );
+        assert_eq!(
+            capabilities.sink.materialization(),
+            ViewMaterialization::SinkNumericInput
+        );
+    }
 }
 
 fn view_stage_capabilities(body: &PipelineBody) -> Option<Vec<ViewStageCapability>> {
