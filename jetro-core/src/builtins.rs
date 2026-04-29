@@ -531,144 +531,123 @@ pub enum BuiltinCardinality {
     Barrier,
 }
 
+impl BuiltinSpec {
+    fn new(category: BuiltinCategory, cardinality: BuiltinCardinality) -> Self {
+        Self {
+            pure: true,
+            category,
+            cardinality,
+            can_indexed: false,
+            view_native: false,
+            view_stage: None,
+            view_sink: None,
+            pipeline_element: false,
+            cost: 1.0,
+        }
+    }
+
+    fn indexed(mut self) -> Self {
+        self.can_indexed = true;
+        self
+    }
+
+    fn view_native(mut self) -> Self {
+        self.view_native = true;
+        self
+    }
+
+    fn view_stage(mut self, stage: BuiltinViewStage) -> Self {
+        self.view_stage = Some(stage);
+        self
+    }
+
+    fn view_sink(mut self, sink: BuiltinViewSink) -> Self {
+        self.view_sink = Some(sink);
+        self
+    }
+
+    fn pipeline_element(mut self) -> Self {
+        self.pipeline_element = true;
+        self
+    }
+
+    fn cost(mut self, cost: f64) -> Self {
+        self.cost = cost;
+        self
+    }
+}
+
 impl BuiltinMethod {
     #[inline]
     pub fn spec(self) -> BuiltinSpec {
         use BuiltinCardinality as Card;
         use BuiltinCategory as Cat;
 
-        type SpecParts = (
-            BuiltinCategory,
-            BuiltinCardinality,
-            bool,
-            bool,
-            Option<BuiltinViewStage>,
-            Option<BuiltinViewSink>,
-            bool,
-            f64,
-        );
-
-        let spec: SpecParts = match self {
-            Self::Filter | Self::Find | Self::FindAll | Self::Compact | Self::Remove => (
-                Cat::StreamingFilter,
-                Card::Filtering,
-                false,
-                false,
-                if matches!(self, Self::Filter | Self::Find | Self::FindAll) {
-                    Some(BuiltinViewStage::Filter)
-                } else {
-                    None
-                },
-                None,
-                false,
-                10.0,
-            ),
-            Self::Map | Self::Enumerate | Self::Pairwise => (
-                Cat::StreamingOneToOne,
-                Card::OneToOne,
-                true,
-                false,
-                if matches!(self, Self::Map) {
-                    Some(BuiltinViewStage::Map)
-                } else {
-                    None
-                },
-                None,
-                true,
-                10.0,
-            ),
-            Self::FlatMap
-            | Self::Flatten
-            | Self::Explode
-            | Self::Split
-            | Self::Lines
-            | Self::Words
-            | Self::Chars
-            | Self::CharsOf
-            | Self::Bytes => {
-                let pipeline_element = matches!(
-                    self,
-                    Self::Lines | Self::Words | Self::Chars | Self::CharsOf | Self::Bytes
-                );
-                (
-                    Cat::StreamingExpand,
-                    Card::Expanding,
-                    false,
-                    false,
-                    if matches!(self, Self::FlatMap) {
-                        Some(BuiltinViewStage::FlatMap)
-                    } else {
-                        None
-                    },
-                    None,
-                    pipeline_element,
-                    10.0,
-                )
+        let spec = match self {
+            Self::Filter | Self::Find | Self::FindAll => {
+                BuiltinSpec::new(Cat::StreamingFilter, Card::Filtering)
+                    .view_stage(BuiltinViewStage::Filter)
+                    .cost(10.0)
             }
-            Self::TakeWhile | Self::DropWhile => (
-                Cat::StreamingFilter,
-                Card::Filtering,
-                false,
-                false,
-                None,
-                None,
-                false,
-                10.0,
-            ),
-            Self::First | Self::Last | Self::Nth | Self::Collect => {
-                let view_sink = match self {
-                    Self::First => Some(BuiltinViewSink::First),
-                    Self::Last => Some(BuiltinViewSink::Last),
-                    _ => None,
-                };
-                (
-                    Cat::Positional,
-                    Card::Bounded,
-                    false,
-                    true,
-                    None,
-                    view_sink,
-                    false,
-                    1.0,
-                )
+            Self::Compact | Self::Remove => {
+                BuiltinSpec::new(Cat::StreamingFilter, Card::Filtering).cost(10.0)
             }
-            Self::Len => (
-                Cat::Reducer,
-                Card::Reducing,
-                true,
-                true,
-                None,
-                Some(BuiltinViewSink::Count),
-                false,
-                1.0,
-            ),
-            Self::Sum
-            | Self::Avg
-            | Self::Min
-            | Self::Max
-            | Self::Count
-            | Self::Any
+            Self::Map => BuiltinSpec::new(Cat::StreamingOneToOne, Card::OneToOne)
+                .indexed()
+                .view_stage(BuiltinViewStage::Map)
+                .pipeline_element()
+                .cost(10.0),
+            Self::Enumerate | Self::Pairwise => {
+                BuiltinSpec::new(Cat::StreamingOneToOne, Card::OneToOne)
+                    .indexed()
+                    .pipeline_element()
+                    .cost(10.0)
+            }
+            Self::FlatMap => BuiltinSpec::new(Cat::StreamingExpand, Card::Expanding)
+                .view_stage(BuiltinViewStage::FlatMap)
+                .cost(10.0),
+            Self::Flatten | Self::Explode | Self::Split => {
+                BuiltinSpec::new(Cat::StreamingExpand, Card::Expanding).cost(10.0)
+            }
+            Self::Lines | Self::Words | Self::Chars | Self::CharsOf | Self::Bytes => {
+                BuiltinSpec::new(Cat::StreamingExpand, Card::Expanding)
+                    .pipeline_element()
+                    .cost(10.0)
+            }
+            Self::TakeWhile | Self::DropWhile => {
+                BuiltinSpec::new(Cat::StreamingFilter, Card::Filtering).cost(10.0)
+            }
+            Self::First => BuiltinSpec::new(Cat::Positional, Card::Bounded)
+                .view_native()
+                .view_sink(BuiltinViewSink::First),
+            Self::Last => BuiltinSpec::new(Cat::Positional, Card::Bounded)
+                .view_native()
+                .view_sink(BuiltinViewSink::Last),
+            Self::Nth | Self::Collect => {
+                BuiltinSpec::new(Cat::Positional, Card::Bounded).view_native()
+            }
+            Self::Len => BuiltinSpec::new(Cat::Reducer, Card::Reducing)
+                .indexed()
+                .view_native()
+                .view_sink(BuiltinViewSink::Count),
+            Self::Sum | Self::Avg | Self::Min | Self::Max => {
+                BuiltinSpec::new(Cat::Reducer, Card::Reducing)
+                    .view_native()
+                    .view_sink(BuiltinViewSink::Numeric)
+                    .cost(10.0)
+            }
+            Self::Count => BuiltinSpec::new(Cat::Reducer, Card::Reducing)
+                .view_native()
+                .view_sink(BuiltinViewSink::Count)
+                .cost(10.0),
+            Self::Any
             | Self::All
             | Self::FindIndex
             | Self::IndicesWhere
             | Self::MaxBy
-            | Self::MinBy => {
-                let view_sink = match self {
-                    Self::Sum | Self::Avg | Self::Min | Self::Max => Some(BuiltinViewSink::Numeric),
-                    Self::Count => Some(BuiltinViewSink::Count),
-                    _ => None,
-                };
-                (
-                    Cat::Reducer,
-                    Card::Reducing,
-                    false,
-                    true,
-                    None,
-                    view_sink,
-                    false,
-                    10.0,
-                )
-            }
+            | Self::MinBy => BuiltinSpec::new(Cat::Reducer, Card::Reducing)
+                .view_native()
+                .cost(10.0),
             Self::Sort
             | Self::Unique
             | Self::UniqueBy
@@ -683,16 +662,7 @@ impl BuiltinMethod {
             | Self::RollingAvg
             | Self::RollingMin
             | Self::RollingMax
-            | Self::Accumulate => (
-                Cat::Barrier,
-                Card::Barrier,
-                false,
-                false,
-                None,
-                None,
-                false,
-                20.0,
-            ),
+            | Self::Accumulate => BuiltinSpec::new(Cat::Barrier, Card::Barrier).cost(20.0),
             Self::Reverse
             | Self::Append
             | Self::Prepend
@@ -703,20 +673,11 @@ impl BuiltinMethod {
             | Self::Zip
             | Self::ZipLongest
             | Self::Fanout
-            | Self::ZipShape => (
-                Cat::Barrier,
-                Card::Barrier,
-                false,
-                false,
-                None,
-                None,
-                false,
-                10.0,
-            ),
-            Self::Keys
-            | Self::Values
-            | Self::Entries
-            | Self::ToPairs
+            | Self::ZipShape => BuiltinSpec::new(Cat::Barrier, Card::Barrier).cost(10.0),
+            Self::Keys | Self::Values | Self::Entries => {
+                BuiltinSpec::new(Cat::Object, Card::OneToOne).pipeline_element()
+            }
+            Self::ToPairs
             | Self::FromPairs
             | Self::Invert
             | Self::Pick
@@ -730,38 +691,14 @@ impl BuiltinMethod {
             | Self::FilterKeys
             | Self::FilterValues
             | Self::Pivot
-            | Self::Implode => {
-                let pipeline_element = matches!(self, Self::Keys | Self::Values | Self::Entries);
-                (
-                    Cat::Object,
-                    Card::OneToOne,
-                    false,
-                    false,
-                    None,
-                    None,
-                    pipeline_element,
-                    1.0,
-                )
+            | Self::Implode => BuiltinSpec::new(Cat::Object, Card::OneToOne),
+            Self::GetPath | Self::DelPath | Self::HasPath => {
+                BuiltinSpec::new(Cat::Path, Card::OneToOne)
+                    .indexed()
+                    .pipeline_element()
             }
-            Self::GetPath
-            | Self::SetPath
-            | Self::DelPath
-            | Self::DelPaths
-            | Self::HasPath
-            | Self::FlattenKeys
-            | Self::UnflattenKeys => {
-                let pipeline_element =
-                    matches!(self, Self::GetPath | Self::HasPath | Self::DelPath);
-                (
-                    Cat::Path,
-                    Card::OneToOne,
-                    true,
-                    false,
-                    None,
-                    None,
-                    pipeline_element,
-                    1.0,
-                )
+            Self::SetPath | Self::DelPaths | Self::FlattenKeys | Self::UnflattenKeys => {
+                BuiltinSpec::new(Cat::Path, Card::OneToOne).indexed()
             }
             Self::DeepFind
             | Self::DeepShape
@@ -769,75 +706,29 @@ impl BuiltinMethod {
             | Self::Walk
             | Self::WalkPre
             | Self::Rec
-            | Self::TracePath => (
-                Cat::Deep,
-                Card::Expanding,
-                false,
-                false,
-                None,
-                None,
-                false,
-                20.0,
-            ),
-            Self::ToCsv | Self::ToTsv => (
-                Cat::Serialization,
-                Card::OneToOne,
-                true,
-                false,
-                None,
-                None,
-                false,
-                20.0,
-            ),
-            Self::EquiJoin => (
-                Cat::Relational,
-                Card::Barrier,
-                false,
-                false,
-                None,
-                None,
-                false,
-                20.0,
-            ),
-            Self::Set | Self::Update => {
-                let pipeline_element = matches!(self, Self::Set);
-                (
-                    Cat::Mutation,
-                    Card::OneToOne,
-                    true,
-                    false,
-                    None,
-                    None,
-                    pipeline_element,
-                    1.0,
-                )
-            }
+            | Self::TracePath => BuiltinSpec::new(Cat::Deep, Card::Expanding).cost(20.0),
+            Self::ToCsv | Self::ToTsv => BuiltinSpec::new(Cat::Serialization, Card::OneToOne)
+                .indexed()
+                .cost(20.0),
+            Self::EquiJoin => BuiltinSpec::new(Cat::Relational, Card::Barrier).cost(20.0),
+            Self::Set => BuiltinSpec::new(Cat::Mutation, Card::OneToOne)
+                .indexed()
+                .pipeline_element(),
+            Self::Update => BuiltinSpec::new(Cat::Mutation, Card::OneToOne).indexed(),
             Self::Lag
             | Self::Lead
             | Self::DiffWindow
             | Self::PctChange
             | Self::CumMax
             | Self::CumMin
-            | Self::Zscore => (
-                Cat::StreamingOneToOne,
-                Card::OneToOne,
-                true,
-                false,
-                None,
-                None,
-                true,
-                10.0,
-            ),
-            Self::Unknown => (
-                Cat::Unknown,
-                Card::OneToOne,
-                false,
-                false,
-                None,
-                None,
-                false,
-                1.0,
-            ),
+            | Self::Zscore => BuiltinSpec::new(Cat::StreamingOneToOne, Card::OneToOne)
+                .indexed()
+                .pipeline_element()
+                .cost(10.0),
+            Self::Unknown => BuiltinSpec {
+                pure: false,
+                ..BuiltinSpec::new(Cat::Unknown, Card::OneToOne)
+            },
             _ => {
                 let pipeline_element = matches!(
                     self,
@@ -904,40 +795,17 @@ impl BuiltinMethod {
                         | Self::PadRight
                         | Self::Center
                 );
-                (
-                    Cat::Scalar,
-                    Card::OneToOne,
-                    true,
-                    true,
-                    None,
-                    None,
-                    pipeline_element,
-                    1.0,
-                )
+                let spec = BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                    .indexed()
+                    .view_native();
+                if pipeline_element {
+                    spec.pipeline_element()
+                } else {
+                    spec
+                }
             }
         };
-        let (
-            category,
-            cardinality,
-            can_indexed,
-            view_native,
-            view_stage,
-            view_sink,
-            pipeline_element,
-            cost,
-        ) = spec;
-
-        BuiltinSpec {
-            pure: self != Self::Unknown,
-            category,
-            cardinality,
-            can_indexed,
-            view_native,
-            view_stage,
-            view_sink,
-            pipeline_element,
-            cost,
-        }
+        spec
     }
 }
 
