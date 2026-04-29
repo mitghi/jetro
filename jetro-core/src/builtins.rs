@@ -465,6 +465,7 @@ pub struct BuiltinSpec {
     pub cardinality: BuiltinCardinality,
     pub can_indexed: bool,
     pub view_native: bool,
+    pub pipeline_element: bool,
     pub cost: f64,
 }
 
@@ -502,13 +503,23 @@ impl BuiltinMethod {
         use BuiltinCardinality as Card;
         use BuiltinCategory as Cat;
 
-        let (category, cardinality, can_indexed, view_native, cost) = match self {
-            Self::Filter | Self::Find | Self::FindAll | Self::Compact | Self::Remove => {
-                (Cat::StreamingFilter, Card::Filtering, false, false, 10.0)
-            }
-            Self::Map | Self::Enumerate | Self::Pairwise => {
-                (Cat::StreamingOneToOne, Card::OneToOne, true, false, 10.0)
-            }
+        let (category, cardinality, can_indexed, view_native, pipeline_element, cost) = match self {
+            Self::Filter | Self::Find | Self::FindAll | Self::Compact | Self::Remove => (
+                Cat::StreamingFilter,
+                Card::Filtering,
+                false,
+                false,
+                false,
+                10.0,
+            ),
+            Self::Map | Self::Enumerate | Self::Pairwise => (
+                Cat::StreamingOneToOne,
+                Card::OneToOne,
+                true,
+                false,
+                true,
+                10.0,
+            ),
             Self::FlatMap
             | Self::Flatten
             | Self::Explode
@@ -517,13 +528,32 @@ impl BuiltinMethod {
             | Self::Words
             | Self::Chars
             | Self::CharsOf
-            | Self::Bytes => (Cat::StreamingExpand, Card::Expanding, false, false, 10.0),
-            Self::TakeWhile | Self::DropWhile => {
-                (Cat::StreamingFilter, Card::Filtering, false, false, 10.0)
+            | Self::Bytes => {
+                let pipeline_element = matches!(
+                    self,
+                    Self::Lines | Self::Words | Self::Chars | Self::CharsOf | Self::Bytes
+                );
+                (
+                    Cat::StreamingExpand,
+                    Card::Expanding,
+                    false,
+                    false,
+                    pipeline_element,
+                    10.0,
+                )
             }
+            Self::TakeWhile | Self::DropWhile => (
+                Cat::StreamingFilter,
+                Card::Filtering,
+                false,
+                false,
+                false,
+                10.0,
+            ),
             Self::First | Self::Last | Self::Nth | Self::Collect => {
-                (Cat::Positional, Card::Bounded, false, true, 1.0)
+                (Cat::Positional, Card::Bounded, false, true, false, 1.0)
             }
+            Self::Len => (Cat::Reducer, Card::Reducing, true, true, false, 1.0),
             Self::Sum
             | Self::Avg
             | Self::Min
@@ -534,7 +564,7 @@ impl BuiltinMethod {
             | Self::FindIndex
             | Self::IndicesWhere
             | Self::MaxBy
-            | Self::MinBy => (Cat::Reducer, Card::Reducing, false, true, 10.0),
+            | Self::MinBy => (Cat::Reducer, Card::Reducing, false, true, false, 10.0),
             Self::Sort
             | Self::Unique
             | Self::UniqueBy
@@ -549,7 +579,18 @@ impl BuiltinMethod {
             | Self::RollingAvg
             | Self::RollingMin
             | Self::RollingMax
-            | Self::Accumulate => (Cat::Barrier, Card::Barrier, false, false, 20.0),
+            | Self::Accumulate => (Cat::Barrier, Card::Barrier, false, false, false, 20.0),
+            Self::Reverse
+            | Self::Append
+            | Self::Prepend
+            | Self::Diff
+            | Self::Intersect
+            | Self::Union
+            | Self::Join
+            | Self::Zip
+            | Self::ZipLongest
+            | Self::Fanout
+            | Self::ZipShape => (Cat::Barrier, Card::Barrier, false, false, false, 10.0),
             Self::Keys
             | Self::Values
             | Self::Entries
@@ -567,33 +608,147 @@ impl BuiltinMethod {
             | Self::FilterKeys
             | Self::FilterValues
             | Self::Pivot
-            | Self::Implode => (Cat::Object, Card::OneToOne, false, false, 1.0),
+            | Self::Implode => {
+                let pipeline_element = matches!(self, Self::Keys | Self::Values | Self::Entries);
+                (
+                    Cat::Object,
+                    Card::OneToOne,
+                    false,
+                    false,
+                    pipeline_element,
+                    1.0,
+                )
+            }
             Self::GetPath
             | Self::SetPath
             | Self::DelPath
             | Self::DelPaths
             | Self::HasPath
             | Self::FlattenKeys
-            | Self::UnflattenKeys => (Cat::Path, Card::OneToOne, true, false, 1.0),
+            | Self::UnflattenKeys => {
+                let pipeline_element =
+                    matches!(self, Self::GetPath | Self::HasPath | Self::DelPath);
+                (
+                    Cat::Path,
+                    Card::OneToOne,
+                    true,
+                    false,
+                    pipeline_element,
+                    1.0,
+                )
+            }
             Self::DeepFind
             | Self::DeepShape
             | Self::DeepLike
             | Self::Walk
             | Self::WalkPre
             | Self::Rec
-            | Self::TracePath => (Cat::Deep, Card::Expanding, false, false, 20.0),
-            Self::ToCsv | Self::ToTsv => (Cat::Serialization, Card::OneToOne, true, false, 20.0),
-            Self::EquiJoin => (Cat::Relational, Card::Barrier, false, false, 20.0),
-            Self::Set | Self::Update => (Cat::Mutation, Card::OneToOne, true, false, 1.0),
+            | Self::TracePath => (Cat::Deep, Card::Expanding, false, false, false, 20.0),
+            Self::ToCsv | Self::ToTsv => {
+                (Cat::Serialization, Card::OneToOne, true, false, false, 20.0)
+            }
+            Self::EquiJoin => (Cat::Relational, Card::Barrier, false, false, false, 20.0),
+            Self::Set | Self::Update => {
+                let pipeline_element = matches!(self, Self::Set);
+                (
+                    Cat::Mutation,
+                    Card::OneToOne,
+                    true,
+                    false,
+                    pipeline_element,
+                    1.0,
+                )
+            }
             Self::Lag
             | Self::Lead
             | Self::DiffWindow
             | Self::PctChange
             | Self::CumMax
             | Self::CumMin
-            | Self::Zscore => (Cat::StreamingOneToOne, Card::OneToOne, true, false, 10.0),
-            Self::Unknown => (Cat::Unknown, Card::OneToOne, false, false, 1.0),
-            _ => (Cat::Scalar, Card::OneToOne, true, true, 1.0),
+            | Self::Zscore => (
+                Cat::StreamingOneToOne,
+                Card::OneToOne,
+                true,
+                false,
+                true,
+                10.0,
+            ),
+            Self::Unknown => (Cat::Unknown, Card::OneToOne, false, false, false, 1.0),
+            _ => {
+                let pipeline_element = matches!(
+                    self,
+                    Self::Upper
+                        | Self::Lower
+                        | Self::Trim
+                        | Self::TrimLeft
+                        | Self::TrimRight
+                        | Self::Capitalize
+                        | Self::TitleCase
+                        | Self::SnakeCase
+                        | Self::KebabCase
+                        | Self::CamelCase
+                        | Self::PascalCase
+                        | Self::ReverseStr
+                        | Self::HtmlEscape
+                        | Self::HtmlUnescape
+                        | Self::UrlEncode
+                        | Self::UrlDecode
+                        | Self::ToBase64
+                        | Self::FromBase64
+                        | Self::Dedent
+                        | Self::ByteLen
+                        | Self::IsBlank
+                        | Self::IsNumeric
+                        | Self::IsAlpha
+                        | Self::IsAscii
+                        | Self::Ceil
+                        | Self::Floor
+                        | Self::Round
+                        | Self::Abs
+                        | Self::ToNumber
+                        | Self::ToBool
+                        | Self::ParseInt
+                        | Self::ParseFloat
+                        | Self::ParseBool
+                        | Self::Or
+                        | Self::Type
+                        | Self::ToString
+                        | Self::ToJson
+                        | Self::Schema
+                        | Self::Has
+                        | Self::StartsWith
+                        | Self::EndsWith
+                        | Self::StripPrefix
+                        | Self::StripSuffix
+                        | Self::Matches
+                        | Self::IndexOf
+                        | Self::LastIndexOf
+                        | Self::Scan
+                        | Self::ReMatch
+                        | Self::ReMatchFirst
+                        | Self::ReMatchAll
+                        | Self::ReCaptures
+                        | Self::ReCapturesAll
+                        | Self::ReSplit
+                        | Self::ReReplace
+                        | Self::ReReplaceAll
+                        | Self::ContainsAny
+                        | Self::ContainsAll
+                        | Self::Repeat
+                        | Self::Indent
+                        | Self::PadLeft
+                        | Self::PadRight
+                        | Self::Center
+                );
+                (
+                    Cat::Scalar,
+                    Card::OneToOne,
+                    true,
+                    true,
+                    pipeline_element,
+                    1.0,
+                )
+            }
         };
 
         BuiltinSpec {
@@ -602,6 +757,7 @@ impl BuiltinMethod {
             cardinality,
             can_indexed,
             view_native,
+            pipeline_element,
             cost,
         }
     }
@@ -1891,86 +2047,7 @@ pub(crate) fn eval_builtin_no_args(recv: Val, name: &str) -> Result<Val, EvalErr
 impl BuiltinMethod {
     #[inline]
     pub fn is_pipeline_element_method(self) -> bool {
-        matches!(
-            self,
-            Self::Keys
-                | Self::Values
-                | Self::Entries
-                | Self::Upper
-                | Self::Lower
-                | Self::Trim
-                | Self::TrimLeft
-                | Self::TrimRight
-                | Self::Capitalize
-                | Self::TitleCase
-                | Self::SnakeCase
-                | Self::KebabCase
-                | Self::CamelCase
-                | Self::PascalCase
-                | Self::ReverseStr
-                | Self::HtmlEscape
-                | Self::HtmlUnescape
-                | Self::UrlEncode
-                | Self::UrlDecode
-                | Self::ToBase64
-                | Self::FromBase64
-                | Self::Dedent
-                | Self::Lines
-                | Self::Words
-                | Self::Chars
-                | Self::CharsOf
-                | Self::Bytes
-                | Self::ByteLen
-                | Self::IsBlank
-                | Self::IsNumeric
-                | Self::IsAlpha
-                | Self::IsAscii
-                | Self::Ceil
-                | Self::Floor
-                | Self::Round
-                | Self::Abs
-                | Self::DiffWindow
-                | Self::PctChange
-                | Self::CumMax
-                | Self::CumMin
-                | Self::Zscore
-                | Self::ToNumber
-                | Self::ToBool
-                | Self::ParseInt
-                | Self::ParseFloat
-                | Self::ParseBool
-                | Self::Type
-                | Self::ToString
-                | Self::ToJson
-                | Self::Schema
-                | Self::GetPath
-                | Self::HasPath
-                | Self::Has
-                | Self::DelPath
-                | Self::StartsWith
-                | Self::EndsWith
-                | Self::StripPrefix
-                | Self::StripSuffix
-                | Self::Matches
-                | Self::IndexOf
-                | Self::LastIndexOf
-                | Self::Scan
-                | Self::ReMatch
-                | Self::ReMatchFirst
-                | Self::ReMatchAll
-                | Self::ReCaptures
-                | Self::ReCapturesAll
-                | Self::ReSplit
-                | Self::ReReplace
-                | Self::ReReplaceAll
-                | Self::ContainsAny
-                | Self::ContainsAll
-                | Self::Repeat
-                | Self::Indent
-                | Self::PadLeft
-                | Self::PadRight
-                | Self::Center
-        )
+        self.spec().pipeline_element
     }
 }
 
@@ -5595,5 +5672,17 @@ mod spec_tests {
         let sort = BuiltinMethod::Sort.spec();
         assert_eq!(sort.category, BuiltinCategory::Barrier);
         assert_eq!(sort.cardinality, BuiltinCardinality::Barrier);
+    }
+
+    #[test]
+    fn builtin_specs_drive_pipeline_element_lowering() {
+        assert!(BuiltinMethod::Upper.spec().pipeline_element);
+        assert!(BuiltinMethod::Lines.spec().pipeline_element);
+        assert!(BuiltinMethod::GetPath.spec().pipeline_element);
+
+        assert!(!BuiltinMethod::Len.spec().pipeline_element);
+        assert!(!BuiltinMethod::FromJson.spec().pipeline_element);
+        assert!(!BuiltinMethod::Sort.spec().pipeline_element);
+        assert!(!BuiltinMethod::Flatten.spec().pipeline_element);
     }
 }
