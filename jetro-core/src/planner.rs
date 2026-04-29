@@ -302,6 +302,32 @@ mod tests {
     }
 
     #[test]
+    fn object_shape_keeps_multiple_nested_pipeline_children() {
+        let plan = plan_query(
+            r#"{"top": $.books.filter(score > 900).take(2).map(title), "first": $.books.filter(score > 900).first(), "meta": $.meta.version}"#,
+        );
+        let PlanNode::Object(fields) = root_node(&plan) else {
+            panic!("expected physical object plan");
+        };
+        assert_eq!(fields.len(), 3);
+
+        let PhysicalObjField::Kv { val, .. } = &fields[0] else {
+            panic!("expected top kv field");
+        };
+        assert!(matches!(plan.node(*val), PlanNode::Pipeline(_)));
+
+        let PhysicalObjField::Kv { val, .. } = &fields[1] else {
+            panic!("expected first kv field");
+        };
+        assert!(matches!(plan.node(*val), PlanNode::Pipeline(_)));
+
+        let PhysicalObjField::Kv { val, .. } = &fields[2] else {
+            panic!("expected meta kv field");
+        };
+        assert!(matches!(plan.node(*val), PlanNode::RootPath(_)));
+    }
+
+    #[test]
     fn object_shape_uses_scalar_root_path_for_simple_field_chain() {
         let plan = plan_query(r#"{"b": $.a.b[0]}"#);
         let PlanNode::Object(fields) = root_node(&plan) else {

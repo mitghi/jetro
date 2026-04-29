@@ -135,6 +135,50 @@ mod tests {
     }
 
     #[test]
+    fn object_shape_executes_multiple_pipeline_children() {
+        let expr = r#"{"top": $.books.filter(score > 900).take(2).map(title), "first": $.books.filter(score > 900).first(), "meta": $.meta.version}"#;
+        let plan = planner::plan_query(expr);
+        let QueryRoot::Node(root) = plan.root() else {
+            panic!("expected physical expression plan");
+        };
+        let PlanNode::Object(fields) = plan.node(*root) else {
+            panic!("expected object root");
+        };
+        assert_eq!(fields.len(), 3);
+        for idx in [0usize, 1] {
+            let PhysicalObjField::Kv { val, .. } = &fields[idx] else {
+                panic!("expected pipeline kv field");
+            };
+            assert!(matches!(plan.node(*val), PlanNode::Pipeline(_)));
+        }
+        let PhysicalObjField::Kv { val, .. } = &fields[2] else {
+            panic!("expected scalar kv field");
+        };
+        assert!(matches!(plan.node(*val), PlanNode::RootPath(_)));
+
+        let j = Jetro::from(json!({
+            "books": [
+                {"title": "low", "score": 1},
+                {"title": "a", "score": 901},
+                {"title": "b", "score": 902},
+                {"title": "c", "score": 903}
+            ],
+            "meta": {"version": 7}
+        }));
+
+        let out = j.collect(expr).unwrap();
+
+        assert_eq!(
+            out,
+            json!({
+                "top": ["a", "b"],
+                "first": {"title": "a", "score": 901},
+                "meta": 7
+            })
+        );
+    }
+
+    #[test]
     fn object_shape_lowers_filter_map_sum_and_runs_map() {
         let expr = r#"{"total": $.data.filter(active).map(score).sum()}"#;
         let plan = planner::plan_query(expr);
