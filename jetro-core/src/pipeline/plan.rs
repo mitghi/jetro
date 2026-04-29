@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::ast::Expr;
-use crate::builtins::{BuiltinMethod, BuiltinViewStage};
+use crate::builtins::{BuiltinMethod, BuiltinViewSink, BuiltinViewStage};
 use crate::chain_ir::{ChainOp, Demand as ChainDemand, PullDemand, ValueNeed};
 
 use super::{
@@ -81,10 +81,10 @@ impl Sink {
     ) -> Option<ViewSinkCapability> {
         match self {
             Sink::Collect => Some(ViewSinkCapability::Collect),
-            Sink::Count => Some(ViewSinkCapability::Count),
-            Sink::First => Some(ViewSinkCapability::First),
-            Sink::Last => Some(ViewSinkCapability::Last),
             Sink::Numeric(n) => {
+                if n.method().spec().view_sink != Some(BuiltinViewSink::Numeric) {
+                    return None;
+                }
                 let project_kernel = if n.project.is_some() {
                     Some(sink_kernels.first()?.is_view_native().then_some(0)?)
                 } else {
@@ -95,7 +95,19 @@ impl Sink {
                     project_kernel,
                 })
             }
+            Sink::Count | Sink::First | Sink::Last => {
+                ViewSinkCapability::from_builtin_sink(self.view_sink_method()?.spec().view_sink?)
+            }
             Sink::ApproxCountDistinct => None,
+        }
+    }
+
+    fn view_sink_method(&self) -> Option<BuiltinMethod> {
+        match self {
+            Sink::Count => Some(BuiltinMethod::Count),
+            Sink::First => Some(BuiltinMethod::First),
+            Sink::Last => Some(BuiltinMethod::Last),
+            _ => None,
         }
     }
 }

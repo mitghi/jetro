@@ -35,6 +35,7 @@
 use std::sync::Arc;
 
 use crate::ast::Expr;
+use crate::builtins::BuiltinMethod;
 use crate::value::Val;
 
 mod capability;
@@ -370,6 +371,15 @@ impl NumericSink {
 
     pub fn is_identity(&self) -> bool {
         self.project.is_none()
+    }
+
+    pub(crate) fn method(&self) -> BuiltinMethod {
+        match self.op {
+            NumOp::Sum => BuiltinMethod::Sum,
+            NumOp::Min => BuiltinMethod::Min,
+            NumOp::Max => BuiltinMethod::Max,
+            NumOp::Avg => BuiltinMethod::Avg,
+        }
     }
 }
 

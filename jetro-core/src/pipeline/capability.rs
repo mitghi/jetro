@@ -1,3 +1,5 @@
+use crate::builtins::{BuiltinViewMaterialization, BuiltinViewSink};
+
 use super::{NumOp, PipelineBody, Stage};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,13 +82,33 @@ pub(crate) enum ViewSinkCapability {
 }
 
 impl ViewSinkCapability {
+    pub(crate) fn from_builtin_sink(sink: BuiltinViewSink) -> Option<Self> {
+        match sink {
+            BuiltinViewSink::Count => Some(Self::Count),
+            BuiltinViewSink::First => Some(Self::First),
+            BuiltinViewSink::Last => Some(Self::Last),
+            BuiltinViewSink::Numeric => None,
+        }
+    }
+
     pub(crate) fn materialization(self) -> ViewMaterialization {
         match self {
             Self::Collect => ViewMaterialization::SinkOutputRows,
-            Self::Count => ViewMaterialization::Never,
-            Self::Numeric { .. } => ViewMaterialization::SinkNumericInput,
-            Self::First | Self::Last => ViewMaterialization::SinkFinalRow,
+            Self::Count => view_materialization(BuiltinViewSink::Count.materialization()),
+            Self::Numeric { .. } => {
+                view_materialization(BuiltinViewSink::Numeric.materialization())
+            }
+            Self::First => view_materialization(BuiltinViewSink::First.materialization()),
+            Self::Last => view_materialization(BuiltinViewSink::Last.materialization()),
         }
+    }
+}
+
+fn view_materialization(materialization: BuiltinViewMaterialization) -> ViewMaterialization {
+    match materialization {
+        BuiltinViewMaterialization::Never => ViewMaterialization::Never,
+        BuiltinViewMaterialization::SinkFinalRow => ViewMaterialization::SinkFinalRow,
+        BuiltinViewMaterialization::SinkNumericInput => ViewMaterialization::SinkNumericInput,
     }
 }
 

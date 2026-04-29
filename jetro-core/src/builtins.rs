@@ -466,6 +466,7 @@ pub struct BuiltinSpec {
     pub can_indexed: bool,
     pub view_native: bool,
     pub view_stage: Option<BuiltinViewStage>,
+    pub view_sink: Option<BuiltinViewSink>,
     pub pipeline_element: bool,
     pub cost: f64,
 }
@@ -475,6 +476,31 @@ pub enum BuiltinViewStage {
     Filter,
     Map,
     FlatMap,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinViewSink {
+    Count,
+    Numeric,
+    First,
+    Last,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinViewMaterialization {
+    Never,
+    SinkFinalRow,
+    SinkNumericInput,
+}
+
+impl BuiltinViewSink {
+    pub fn materialization(self) -> BuiltinViewMaterialization {
+        match self {
+            Self::Count => BuiltinViewMaterialization::Never,
+            Self::Numeric => BuiltinViewMaterialization::SinkNumericInput,
+            Self::First | Self::Last => BuiltinViewMaterialization::SinkFinalRow,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -517,6 +543,7 @@ impl BuiltinMethod {
             bool,
             bool,
             Option<BuiltinViewStage>,
+            Option<BuiltinViewSink>,
             bool,
             f64,
         );
@@ -532,6 +559,7 @@ impl BuiltinMethod {
                 } else {
                     None
                 },
+                None,
                 false,
                 10.0,
             ),
@@ -545,6 +573,7 @@ impl BuiltinMethod {
                 } else {
                     None
                 },
+                None,
                 true,
                 10.0,
             ),
@@ -571,6 +600,7 @@ impl BuiltinMethod {
                     } else {
                         None
                     },
+                    None,
                     pipeline_element,
                     10.0,
                 )
@@ -581,19 +611,37 @@ impl BuiltinMethod {
                 false,
                 false,
                 None,
+                None,
                 false,
                 10.0,
             ),
-            Self::First | Self::Last | Self::Nth | Self::Collect => (
-                Cat::Positional,
-                Card::Bounded,
-                false,
+            Self::First | Self::Last | Self::Nth | Self::Collect => {
+                let view_sink = match self {
+                    Self::First => Some(BuiltinViewSink::First),
+                    Self::Last => Some(BuiltinViewSink::Last),
+                    _ => None,
+                };
+                (
+                    Cat::Positional,
+                    Card::Bounded,
+                    false,
+                    true,
+                    None,
+                    view_sink,
+                    false,
+                    1.0,
+                )
+            }
+            Self::Len => (
+                Cat::Reducer,
+                Card::Reducing,
+                true,
                 true,
                 None,
+                Some(BuiltinViewSink::Count),
                 false,
                 1.0,
             ),
-            Self::Len => (Cat::Reducer, Card::Reducing, true, true, None, false, 1.0),
             Self::Sum
             | Self::Avg
             | Self::Min
@@ -604,7 +652,23 @@ impl BuiltinMethod {
             | Self::FindIndex
             | Self::IndicesWhere
             | Self::MaxBy
-            | Self::MinBy => (Cat::Reducer, Card::Reducing, false, true, None, false, 10.0),
+            | Self::MinBy => {
+                let view_sink = match self {
+                    Self::Sum | Self::Avg | Self::Min | Self::Max => Some(BuiltinViewSink::Numeric),
+                    Self::Count => Some(BuiltinViewSink::Count),
+                    _ => None,
+                };
+                (
+                    Cat::Reducer,
+                    Card::Reducing,
+                    false,
+                    true,
+                    None,
+                    view_sink,
+                    false,
+                    10.0,
+                )
+            }
             Self::Sort
             | Self::Unique
             | Self::UniqueBy
@@ -619,7 +683,16 @@ impl BuiltinMethod {
             | Self::RollingAvg
             | Self::RollingMin
             | Self::RollingMax
-            | Self::Accumulate => (Cat::Barrier, Card::Barrier, false, false, None, false, 20.0),
+            | Self::Accumulate => (
+                Cat::Barrier,
+                Card::Barrier,
+                false,
+                false,
+                None,
+                None,
+                false,
+                20.0,
+            ),
             Self::Reverse
             | Self::Append
             | Self::Prepend
@@ -630,7 +703,16 @@ impl BuiltinMethod {
             | Self::Zip
             | Self::ZipLongest
             | Self::Fanout
-            | Self::ZipShape => (Cat::Barrier, Card::Barrier, false, false, None, false, 10.0),
+            | Self::ZipShape => (
+                Cat::Barrier,
+                Card::Barrier,
+                false,
+                false,
+                None,
+                None,
+                false,
+                10.0,
+            ),
             Self::Keys
             | Self::Values
             | Self::Entries
@@ -656,6 +738,7 @@ impl BuiltinMethod {
                     false,
                     false,
                     None,
+                    None,
                     pipeline_element,
                     1.0,
                 )
@@ -675,6 +758,7 @@ impl BuiltinMethod {
                     true,
                     false,
                     None,
+                    None,
                     pipeline_element,
                     1.0,
                 )
@@ -685,12 +769,22 @@ impl BuiltinMethod {
             | Self::Walk
             | Self::WalkPre
             | Self::Rec
-            | Self::TracePath => (Cat::Deep, Card::Expanding, false, false, None, false, 20.0),
+            | Self::TracePath => (
+                Cat::Deep,
+                Card::Expanding,
+                false,
+                false,
+                None,
+                None,
+                false,
+                20.0,
+            ),
             Self::ToCsv | Self::ToTsv => (
                 Cat::Serialization,
                 Card::OneToOne,
                 true,
                 false,
+                None,
                 None,
                 false,
                 20.0,
@@ -700,6 +794,7 @@ impl BuiltinMethod {
                 Card::Barrier,
                 false,
                 false,
+                None,
                 None,
                 false,
                 20.0,
@@ -711,6 +806,7 @@ impl BuiltinMethod {
                     Card::OneToOne,
                     true,
                     false,
+                    None,
                     None,
                     pipeline_element,
                     1.0,
@@ -728,10 +824,20 @@ impl BuiltinMethod {
                 true,
                 false,
                 None,
+                None,
                 true,
                 10.0,
             ),
-            Self::Unknown => (Cat::Unknown, Card::OneToOne, false, false, None, false, 1.0),
+            Self::Unknown => (
+                Cat::Unknown,
+                Card::OneToOne,
+                false,
+                false,
+                None,
+                None,
+                false,
+                1.0,
+            ),
             _ => {
                 let pipeline_element = matches!(
                     self,
@@ -804,13 +910,22 @@ impl BuiltinMethod {
                     true,
                     true,
                     None,
+                    None,
                     pipeline_element,
                     1.0,
                 )
             }
         };
-        let (category, cardinality, can_indexed, view_native, view_stage, pipeline_element, cost) =
-            spec;
+        let (
+            category,
+            cardinality,
+            can_indexed,
+            view_native,
+            view_stage,
+            view_sink,
+            pipeline_element,
+            cost,
+        ) = spec;
 
         BuiltinSpec {
             pure: self != Self::Unknown,
@@ -819,6 +934,7 @@ impl BuiltinMethod {
             can_indexed,
             view_native,
             view_stage,
+            view_sink,
             pipeline_element,
             cost,
         }
@@ -5715,7 +5831,10 @@ pub fn schema_apply(recv: &Val) -> Option<Val> {
 
 #[cfg(test)]
 mod spec_tests {
-    use super::{BuiltinCardinality, BuiltinCategory, BuiltinMethod, BuiltinViewStage};
+    use super::{
+        BuiltinCardinality, BuiltinCategory, BuiltinMethod, BuiltinViewMaterialization,
+        BuiltinViewSink, BuiltinViewStage,
+    };
 
     #[test]
     fn builtin_specs_describe_execution_shape() {
@@ -5765,5 +5884,39 @@ mod spec_tests {
 
         assert_eq!(BuiltinMethod::Sort.spec().view_stage, None);
         assert_eq!(BuiltinMethod::Upper.spec().view_stage, None);
+    }
+
+    #[test]
+    fn builtin_specs_drive_view_sink_lowering() {
+        assert_eq!(
+            BuiltinMethod::Count.spec().view_sink,
+            Some(BuiltinViewSink::Count)
+        );
+        assert_eq!(
+            BuiltinMethod::Len.spec().view_sink,
+            Some(BuiltinViewSink::Count)
+        );
+        assert_eq!(
+            BuiltinMethod::Sum.spec().view_sink,
+            Some(BuiltinViewSink::Numeric)
+        );
+        assert_eq!(
+            BuiltinMethod::First.spec().view_sink,
+            Some(BuiltinViewSink::First)
+        );
+        assert_eq!(
+            BuiltinMethod::Last.spec().view_sink,
+            Some(BuiltinViewSink::Last)
+        );
+
+        assert_eq!(
+            BuiltinViewSink::Count.materialization(),
+            BuiltinViewMaterialization::Never
+        );
+        assert_eq!(
+            BuiltinViewSink::Numeric.materialization(),
+            BuiltinViewMaterialization::SinkNumericInput
+        );
+        assert_eq!(BuiltinMethod::Sort.spec().view_sink, None);
     }
 }
