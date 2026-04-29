@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::builtins::{BuiltinMethod, BuiltinPipelineStage, BuiltinViewSink};
+use crate::builtins::{BuiltinMethod, BuiltinPipelineSink, BuiltinPipelineStage, BuiltinViewSink};
 use crate::{ast::Expr, context::EvalError, value::Val};
 
 use super::{
@@ -171,21 +171,18 @@ impl Pipeline {
 }
 
 fn is_receiver_pipeline_start_method(name: &str, arity: usize) -> bool {
-    if matches!(
-        (name, arity),
-        ("take" | "skip", 1) | ("approx_count_distinct", 0)
-    ) {
-        return true;
-    }
-
     let method = BuiltinMethod::from_name(name);
     if method == BuiltinMethod::Unknown {
-        return matches!((name, arity), ("find_first" | "find_one", 1));
+        return false;
     }
 
     let spec = method.spec();
     match arity {
-        0 => spec.view_sink.is_some() || spec.pipeline_stage == Some(BuiltinPipelineStage::Nullary),
+        0 => {
+            spec.view_sink.is_some()
+                || spec.pipeline_sink.is_some()
+                || spec.pipeline_stage == Some(BuiltinPipelineStage::Nullary)
+        }
         1 => spec.pipeline_stage == Some(BuiltinPipelineStage::Unary),
         _ => false,
     }
@@ -376,16 +373,12 @@ fn decode_method_chain(
                         stage_exprs.push(arg_expr(&args[0]));
                     }
                     // find_first / find_one: terminal — first match or Null.
-                    (BuiltinMethod::Unknown, 1, true)
-                        if matches!(name.as_str(), "find_first" | "find_one") =>
-                    {
+                    (BuiltinMethod::FindFirst | BuiltinMethod::FindOne, 1, true) => {
                         stages.push(Stage::Filter(compile_subexpr(&args[0])?));
                         stage_exprs.push(arg_expr(&args[0]));
                         sink = Sink::First;
                     }
-                    (BuiltinMethod::Unknown, 1, false)
-                        if matches!(name.as_str(), "find_first" | "find_one") =>
-                    {
+                    (BuiltinMethod::FindFirst | BuiltinMethod::FindOne, 1, false) => {
                         stages.push(Stage::Filter(compile_subexpr(&args[0])?));
                         stage_exprs.push(arg_expr(&args[0]));
                     }
@@ -454,7 +447,7 @@ fn decode_method_chain(
                         stages.push(Stage::Sort(spec));
                         stage_exprs.push(expr);
                     }
-                    (BuiltinMethod::Unknown, 1, _) if name.as_str() == "take" => {
+                    (BuiltinMethod::Take, 1, _) => {
                         let n = match &args[0] {
                             Arg::Pos(Expr::Int(n)) if *n >= 0 => *n as usize,
                             _ => return None,
@@ -462,7 +455,7 @@ fn decode_method_chain(
                         stages.push(Stage::Take(n));
                         stage_exprs.push(None);
                     }
-                    (BuiltinMethod::Unknown, 1, _) if name.as_str() == "skip" => {
+                    (BuiltinMethod::Skip, 1, _) => {
                         let n = match &args[0] {
                             Arg::Pos(Expr::Int(n)) if *n >= 0 => *n as usize,
                             _ => return None,
@@ -527,9 +520,7 @@ fn decode_method_chain(
                         stages.push(Stage::Window(n));
                         stage_exprs.push(None);
                     }
-                    (BuiltinMethod::Unknown, 0, true)
-                        if name.as_str() == "approx_count_distinct" =>
-                    {
+                    (BuiltinMethod::ApproxCountDistinct, 0, true) => {
                         sink = Sink::ApproxCountDistinct;
                     }
                     (_, 0, true) => {
@@ -545,6 +536,11 @@ fn decode_method_chain(
 }
 
 fn terminal_sink_for_method(method: BuiltinMethod) -> Option<Sink> {
+    match method.spec().pipeline_sink {
+        Some(BuiltinPipelineSink::ApproxCountDistinct) => return Some(Sink::ApproxCountDistinct),
+        None => {}
+    }
+
     match method.spec().view_sink? {
         BuiltinViewSink::Count => Some(Sink::Count),
         BuiltinViewSink::Numeric => Some(Sink::Numeric(NumericSink::identity(num_op_for_method(

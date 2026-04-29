@@ -391,9 +391,8 @@ pub fn method_result_type(m: BuiltinMethod) -> AbstractVal {
     use BuiltinMethod::*;
     match m {
         // → Int
-        Len | Count | Sum | IndexOf | LastIndexOf | ByteLen | ParseInt | Ceil | Floor | Round => {
-            AbstractVal::scalar(VType::Int)
-        }
+        Len | Count | Sum | ApproxCountDistinct | IndexOf | LastIndexOf | ByteLen | ParseInt
+        | Ceil | Floor | Round => AbstractVal::scalar(VType::Int),
         // → Bool
         Any | All | Has | Missing | Includes | StartsWith | EndsWith | IsBlank | IsNumeric
         | IsAlpha | IsAscii | ParseBool | ReMatch | ContainsAny | ContainsAll => {
@@ -415,9 +414,9 @@ pub fn method_result_type(m: BuiltinMethod) -> AbstractVal {
         Keys | Values | Entries | ToPairs | Reverse | Unique | Collect | Flatten | Compact
         | Chars | CharsOf | Lines | Words | Split | Sort | Filter | Map | FlatMap | Find
         | FindAll | UniqueBy | DeepFind | DeepShape | DeepLike | IndicesWhere | Fanout
-        | TracePath | Enumerate | Pairwise | Window | Chunk | TakeWhile | DropWhile
-        | Accumulate | Zip | ZipLongest | Diff | Intersect | Union | Append | Prepend | Remove
-        | Matches | Scan | Slice | Bytes | IndicesOf | Explode | Implode | RollingSum
+        | TracePath | Enumerate | Pairwise | Window | Chunk | TakeWhile | DropWhile | Take
+        | Skip | Accumulate | Zip | ZipLongest | Diff | Intersect | Union | Append | Prepend
+        | Remove | Matches | Scan | Slice | Bytes | IndicesOf | Explode | Implode | RollingSum
         | RollingAvg | RollingMin | RollingMax | Lag | Lead | DiffWindow | PctChange | CumMax
         | CumMin | Zscore => AbstractVal::array(),
         // → Obj
@@ -426,8 +425,8 @@ pub fn method_result_type(m: BuiltinMethod) -> AbstractVal {
         | CountBy | IndexBy | GroupShape | ZipShape | Partition | FlattenKeys | UnflattenKeys
         | SetPath | DelPath | DelPaths | Update | Schema => AbstractVal::object(),
         // → various
-        First | Last | Nth | FindIndex | MaxBy | MinBy | Walk | WalkPre | Rec | GetPath
-        | ReMatchFirst | ReCaptures => AbstractVal::UNKNOWN,
+        First | Last | Nth | FindFirst | FindOne | FindIndex | MaxBy | MinBy | Walk | WalkPre
+        | Rec | GetPath | ReMatchFirst | ReCaptures => AbstractVal::UNKNOWN,
         HasPath => AbstractVal::scalar(VType::Bool),
         ReMatchAll | ReCapturesAll | ReSplit => AbstractVal::array(),
         ReReplace | ReReplaceAll => AbstractVal::scalar(VType::Str),

@@ -87,6 +87,8 @@ pub enum BuiltinMethod {
     First,
     Last,
     Nth,
+    Take,
+    Skip,
     Append,
     Prepend,
     Remove,
@@ -99,6 +101,9 @@ pub enum BuiltinMethod {
     Chunk,
     TakeWhile,
     DropWhile,
+    FindFirst,
+    FindOne,
+    ApproxCountDistinct,
     Accumulate,
     Partition,
     Zip,
@@ -277,6 +282,8 @@ impl BuiltinMethod {
             "first" => Self::First,
             "last" => Self::Last,
             "nth" => Self::Nth,
+            "take" => Self::Take,
+            "skip" | "drop" => Self::Skip,
             "append" => Self::Append,
             "prepend" => Self::Prepend,
             "remove" => Self::Remove,
@@ -289,6 +296,9 @@ impl BuiltinMethod {
             "chunk" | "batch" => Self::Chunk,
             "takewhile" | "take_while" => Self::TakeWhile,
             "dropwhile" | "drop_while" => Self::DropWhile,
+            "find_first" | "findFirst" => Self::FindFirst,
+            "find_one" | "findOne" => Self::FindOne,
+            "approx_count_distinct" | "approxCountDistinct" => Self::ApproxCountDistinct,
             "accumulate" => Self::Accumulate,
             "partition" => Self::Partition,
             "zip" => Self::Zip,
@@ -468,6 +478,7 @@ pub struct BuiltinSpec {
     pub view_stage: Option<BuiltinViewStage>,
     pub view_sink: Option<BuiltinViewSink>,
     pub pipeline_stage: Option<BuiltinPipelineStage>,
+    pub pipeline_sink: Option<BuiltinPipelineSink>,
     pub pipeline_element: bool,
     pub cost: f64,
 }
@@ -491,6 +502,11 @@ pub enum BuiltinViewSink {
 pub enum BuiltinPipelineStage {
     Nullary,
     Unary,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinPipelineSink {
+    ApproxCountDistinct,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -549,6 +565,7 @@ impl BuiltinSpec {
             view_stage: None,
             view_sink: None,
             pipeline_stage: None,
+            pipeline_sink: None,
             pipeline_element: false,
             cost: 1.0,
         }
@@ -571,6 +588,11 @@ impl BuiltinSpec {
 
     fn pipeline_stage(mut self, stage: BuiltinPipelineStage) -> Self {
         self.pipeline_stage = Some(stage);
+        self
+    }
+
+    fn pipeline_sink(mut self, sink: BuiltinPipelineSink) -> Self {
+        self.pipeline_sink = Some(sink);
         self
     }
 
@@ -635,6 +657,14 @@ impl BuiltinMethod {
                     .pipeline_stage(BuiltinPipelineStage::Unary)
                     .cost(10.0)
             }
+            Self::FindFirst | Self::FindOne => {
+                BuiltinSpec::new(Cat::StreamingFilter, Card::Filtering)
+                    .pipeline_stage(BuiltinPipelineStage::Unary)
+                    .cost(10.0)
+            }
+            Self::Take | Self::Skip => BuiltinSpec::new(Cat::Positional, Card::Bounded)
+                .view_native()
+                .pipeline_stage(BuiltinPipelineStage::Unary),
             Self::First => BuiltinSpec::new(Cat::Positional, Card::Bounded)
                 .view_native()
                 .view_sink(BuiltinViewSink::First),
@@ -657,6 +687,9 @@ impl BuiltinMethod {
             Self::Count => BuiltinSpec::new(Cat::Reducer, Card::Reducing)
                 .view_native()
                 .view_sink(BuiltinViewSink::Count)
+                .cost(10.0),
+            Self::ApproxCountDistinct => BuiltinSpec::new(Cat::Reducer, Card::Reducing)
+                .pipeline_sink(BuiltinPipelineSink::ApproxCountDistinct)
                 .cost(10.0),
             Self::Any
             | Self::All
@@ -5744,8 +5777,8 @@ pub fn schema_apply(recv: &Val) -> Option<Val> {
 #[cfg(test)]
 mod spec_tests {
     use super::{
-        BuiltinCardinality, BuiltinCategory, BuiltinMethod, BuiltinPipelineStage,
-        BuiltinViewMaterialization, BuiltinViewSink, BuiltinViewStage,
+        BuiltinCardinality, BuiltinCategory, BuiltinMethod, BuiltinPipelineSink,
+        BuiltinPipelineStage, BuiltinViewMaterialization, BuiltinViewSink, BuiltinViewStage,
     };
 
     #[test]
@@ -5850,8 +5883,25 @@ mod spec_tests {
             BuiltinMethod::Reverse.spec().pipeline_stage,
             Some(BuiltinPipelineStage::Nullary)
         );
+        assert_eq!(
+            BuiltinMethod::Take.spec().pipeline_stage,
+            Some(BuiltinPipelineStage::Unary)
+        );
+        assert_eq!(
+            BuiltinMethod::FindFirst.spec().pipeline_stage,
+            Some(BuiltinPipelineStage::Unary)
+        );
 
         assert_eq!(BuiltinMethod::Len.spec().pipeline_stage, None);
         assert_eq!(BuiltinMethod::FromJson.spec().pipeline_stage, None);
+    }
+
+    #[test]
+    fn builtin_specs_drive_pipeline_sink_lowering() {
+        assert_eq!(
+            BuiltinMethod::ApproxCountDistinct.spec().pipeline_sink,
+            Some(BuiltinPipelineSink::ApproxCountDistinct)
+        );
+        assert_eq!(BuiltinMethod::Count.spec().pipeline_sink, None);
     }
 }
