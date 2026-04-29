@@ -7,12 +7,13 @@ use crate::{
 };
 
 use super::composed_barrier::{self, BarrierOutput};
+use super::composed_sink;
 use super::composed_stage::ComposedStageBuilder;
 use super::lower::run_compiled_map;
 use super::{
     apply_item_in_env, bounded_sort_by_key, cmp_val_total, composed_path_enabled,
     compute_strategies, eval_kernel, is_truthy, num_finalise, num_fold, select_strategy,
-    walk_field_chain, BodyKernel, NumOp, Pipeline, PipelineData, Position, Sink, Source, Stage,
+    walk_field_chain, BodyKernel, Pipeline, PipelineData, Position, Sink, Source, Stage,
     StageStrategy, Strategy, TerminalMapCollector,
 };
 
@@ -150,34 +151,6 @@ impl Pipeline {
 
     fn try_run_composed(&self, root: &Val, base_env: &Env) -> Option<Result<Val, EvalError>> {
         let (eff_stages, eff_kernels, eff_sink) = self.canonical();
-
-        // Sink mapping — operates on the post-decomposition base sink.
-        enum SinkKind {
-            Count,
-            Sum,
-            Min,
-            Max,
-            Avg,
-            First,
-            Last,
-            Collect,
-            GroupByOnly,
-        }
-        let sink_kind = match &eff_sink {
-            Sink::Collect => SinkKind::Collect,
-            Sink::Count => SinkKind::Count,
-            Sink::Numeric(n) if n.project.is_some() => return None,
-            Sink::Numeric(n) => match n.op {
-                NumOp::Sum => SinkKind::Sum,
-                NumOp::Min => SinkKind::Min,
-                NumOp::Max => SinkKind::Max,
-                NumOp::Avg => SinkKind::Avg,
-            },
-            Sink::First => SinkKind::First,
-            Sink::Last => SinkKind::Last,
-            Sink::ApproxCountDistinct => return None, // legacy Val path
-        };
-        let _ = SinkKind::GroupByOnly;
         let stage_builder = ComposedStageBuilder::new(base_env);
 
         // Resolve source to an owned Vec<Val>. Future: avoid clone on
@@ -268,35 +241,7 @@ impl Pipeline {
             .chain
             .pull;
 
-        let out = match sink_kind {
-            SinkKind::Count => {
-                cmp::run_pipeline_with_demand::<cmp::CountSink>(&buf, chain.as_ref(), final_demand)
-            }
-            SinkKind::Sum => {
-                cmp::run_pipeline_with_demand::<cmp::SumSink>(&buf, chain.as_ref(), final_demand)
-            }
-            SinkKind::Min => {
-                cmp::run_pipeline_with_demand::<cmp::MinSink>(&buf, chain.as_ref(), final_demand)
-            }
-            SinkKind::Max => {
-                cmp::run_pipeline_with_demand::<cmp::MaxSink>(&buf, chain.as_ref(), final_demand)
-            }
-            SinkKind::Avg => {
-                cmp::run_pipeline_with_demand::<cmp::AvgSink>(&buf, chain.as_ref(), final_demand)
-            }
-            SinkKind::First => {
-                cmp::run_pipeline_with_demand::<cmp::FirstSink>(&buf, chain.as_ref(), final_demand)
-            }
-            SinkKind::Last => {
-                cmp::run_pipeline_with_demand::<cmp::LastSink>(&buf, chain.as_ref(), final_demand)
-            }
-            SinkKind::Collect => cmp::run_pipeline_with_demand::<cmp::CollectSink>(
-                &buf,
-                chain.as_ref(),
-                final_demand,
-            ),
-            SinkKind::GroupByOnly => unreachable!(),
-        };
+        let out = composed_sink::run(&eff_sink, &buf, chain.as_ref(), final_demand)?;
 
         Some(Ok(out))
     }
