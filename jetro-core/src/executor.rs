@@ -355,6 +355,18 @@ mod tests {
         assert_eq!(out, json!({"value": "ok"}));
     }
 
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn object_shape_root_paths_read_from_tape_without_materializing_root_val() {
+        let j =
+            Jetro::from_bytes(br#"{"a":{"b":[{"c":"ok"},{"c":"next"}]},"n":7}"#.to_vec()).unwrap();
+
+        let out = j.collect(r#"{"value": $.a.b[1].c, "n": $.n}"#).unwrap();
+
+        assert_eq!(out, json!({"value": "next", "n": 7}));
+        assert!(!j.root_val_is_materialized());
+    }
+
     #[test]
     fn object_shape_executes_common_scalar_nodes_without_vm() {
         let expr = r#"{"gt": $.a > 1, "sum": $.a + 4, "picked": "yes" if $.ok else "no"}"#;

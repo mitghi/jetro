@@ -327,6 +327,11 @@ impl Jetro {
             .clone()
     }
 
+    #[cfg(test)]
+    pub(crate) fn root_val_is_materialized(&self) -> bool {
+        self.root_val.get().is_some()
+    }
+
     /// Evaluate `expr` against the document. Routes through the planner and
     /// then either Pipeline IR or the thread-local VM.
     pub fn collect<S: AsRef<str>>(&self, expr: S) -> std::result::Result<Value, EvalError> {

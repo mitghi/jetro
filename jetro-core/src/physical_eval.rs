@@ -11,10 +11,24 @@ use crate::physical::{
 use crate::pipeline;
 use crate::runtime::{PipelineSourceResolver, ResolvedPipelineSource};
 use crate::value::Val;
+use crate::value_view::{ValView, ValueView};
 use crate::{Jetro, VM};
 
 pub(crate) fn run(j: &Jetro, plan: &QueryPlan, root_id: NodeId) -> Result<Val, EvalError> {
+    #[cfg(feature = "simd-json")]
+    if let Some(tape) = j.lazy_tape() {
+        if let Some(result) =
+            try_run_view_plan(plan, root_id, crate::value_view::TapeView::root(tape))
+        {
+            return result;
+        }
+    }
+
     let root = j.root_val();
+    if let Some(result) = try_run_view_plan(plan, root_id, ValView::new(&root)) {
+        return result;
+    }
+
     let mut ctx = ExecCtx {
         j,
         plan,
@@ -23,6 +37,151 @@ pub(crate) fn run(j: &Jetro, plan: &QueryPlan, root_id: NodeId) -> Result<Val, E
         vm: VM::new(),
     };
     ctx.eval(root_id)
+}
+
+fn try_run_view_plan<'a, V>(
+    plan: &QueryPlan,
+    root_id: NodeId,
+    root: V,
+) -> Option<Result<Val, EvalError>>
+where
+    V: ValueView<'a>,
+{
+    eval_view_val(plan, root_id, &root, &root)
+}
+
+fn eval_view_val<'a, V>(
+    plan: &QueryPlan,
+    id: NodeId,
+    root: &V,
+    current: &V,
+) -> Option<Result<Val, EvalError>>
+where
+    V: ValueView<'a>,
+{
+    if let Some(view) = eval_view_ref(plan, id, root, current) {
+        return Some(view.map(|view| view.materialize()));
+    }
+
+    match plan.node(id) {
+        PlanNode::Literal(value) => Some(Ok(value.clone())),
+        PlanNode::Object(fields) => eval_view_object(plan, fields, root, current),
+        PlanNode::Array(elems) => eval_view_array(plan, elems, root, current),
+        _ => None,
+    }
+}
+
+fn eval_view_ref<'a, V>(
+    plan: &QueryPlan,
+    id: NodeId,
+    root: &V,
+    current: &V,
+) -> Option<Result<V, EvalError>>
+where
+    V: ValueView<'a>,
+{
+    match plan.node(id) {
+        PlanNode::Root => Some(Ok(root.clone())),
+        PlanNode::Current => Some(Ok(current.clone())),
+        PlanNode::RootPath(steps) => Some(Ok(walk_path_view(root.clone(), steps))),
+        PlanNode::Chain { base, steps } => {
+            let base = match eval_view_ref(plan, *base, root, current)? {
+                Ok(base) => base,
+                Err(err) => return Some(Err(err)),
+            };
+            Some(Ok(walk_chain_view(base, steps)?))
+        }
+        _ => None,
+    }
+}
+
+fn eval_view_object<'a, V>(
+    plan: &QueryPlan,
+    fields: &[PhysicalObjField],
+    root: &V,
+    current: &V,
+) -> Option<Result<Val, EvalError>>
+where
+    V: ValueView<'a>,
+{
+    let mut map: indexmap::IndexMap<Arc<str>, Val> =
+        indexmap::IndexMap::with_capacity(fields.len());
+    for field in fields {
+        match field {
+            PhysicalObjField::Kv {
+                key,
+                val,
+                optional,
+                cond,
+            } => {
+                if cond.is_some() {
+                    return None;
+                }
+                let value = match eval_view_val(plan, *val, root, current)? {
+                    Ok(value) => value,
+                    Err(err) => return Some(Err(err)),
+                };
+                if *optional && value.is_null() {
+                    continue;
+                }
+                map.insert(Arc::clone(key), value);
+            }
+            PhysicalObjField::Short(_)
+            | PhysicalObjField::Dynamic { .. }
+            | PhysicalObjField::Spread(_)
+            | PhysicalObjField::SpreadDeep(_) => return None,
+        }
+    }
+    Some(Ok(Val::obj(map)))
+}
+
+fn eval_view_array<'a, V>(
+    plan: &QueryPlan,
+    elems: &[PhysicalArrayElem],
+    root: &V,
+    current: &V,
+) -> Option<Result<Val, EvalError>>
+where
+    V: ValueView<'a>,
+{
+    let mut out = Vec::with_capacity(elems.len());
+    for elem in elems {
+        match elem {
+            PhysicalArrayElem::Expr(expr) => match eval_view_val(plan, *expr, root, current)? {
+                Ok(value) => out.push(value),
+                Err(err) => return Some(Err(err)),
+            },
+            PhysicalArrayElem::Spread(_) => return None,
+        }
+    }
+    Some(Ok(Val::arr(out)))
+}
+
+fn walk_path_view<'a, V>(mut cur: V, steps: &[PhysicalPathStep]) -> V
+where
+    V: ValueView<'a>,
+{
+    for step in steps {
+        cur = match step {
+            PhysicalPathStep::Field(key) => cur.field(key.as_ref()),
+            PhysicalPathStep::Index(idx) => cur.index(*idx),
+        };
+    }
+    cur
+}
+
+fn walk_chain_view<'a, V>(mut cur: V, steps: &[PhysicalChainStep]) -> Option<V>
+where
+    V: ValueView<'a>,
+{
+    for step in steps {
+        cur = match step {
+            PhysicalChainStep::Field(key) => cur.field(key.as_ref()),
+            PhysicalChainStep::Index(idx) => cur.index(*idx),
+            PhysicalChainStep::DynIndex(_) => return None,
+        };
+    }
+    Some(cur)
 }
 
 struct ExecCtx<'a> {
