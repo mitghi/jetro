@@ -7,7 +7,7 @@ use crate::context::{Env, EvalError};
 use crate::pipeline;
 use crate::value::Val;
 use crate::value_view::ValueView;
-use crate::vm::{Opcode, Program};
+use crate::vm::{CompiledObjEntry, Opcode, Program};
 
 enum ViewStageFlow<V> {
     Keep(V),
@@ -39,6 +39,9 @@ where
     V: ValueView<'a>,
 {
     if let Some(result) = run_full(source.clone(), body) {
+        return Some(result);
+    }
+    if let Some(result) = run_sort_prefix_then_materialized_suffix(source.clone(), body, cache) {
         return Some(result);
     }
     run_prefix_then_materialized_suffix(source, body, cache)
@@ -217,6 +220,89 @@ where
     Some(suffix.run_with_env(&root, &env, cache))
 }
 
+fn run_sort_prefix_then_materialized_suffix<'a, V>(
+    source: V,
+    body: &pipeline::PipelineBody,
+    cache: Option<&dyn pipeline::PipelineData>,
+) -> Option<Result<Val, EvalError>>
+where
+    V: ValueView<'a>,
+{
+    let pipeline::Stage::Sort(spec) = body.stages.first()? else {
+        return None;
+    };
+    let strategies = pipeline::compute_strategies(&body.stages, &body.sink);
+    let strategy = strategies.first().copied()?;
+    let limit = match strategy {
+        pipeline::StageStrategy::SortTopK(k) | pipeline::StageStrategy::SortBottomK(k) => k,
+        pipeline::StageStrategy::Default => return None,
+    };
+    if !stages_can_run_with_materialized_receiver(&body.stages[1..])
+        || !sink_can_run_with_materialized_receiver(&body.sink)
+    {
+        return None;
+    }
+
+    let key_kernel = match spec.key.as_ref() {
+        Some(_) => body.stage_kernels.first()?,
+        None => return None,
+    };
+    if !key_kernel.is_view_native() {
+        return None;
+    }
+
+    let items = source.array_iter()?;
+    let keep_largest = match strategy {
+        pipeline::StageStrategy::SortTopK(_) => spec.descending,
+        pipeline::StageStrategy::SortBottomK(_) => !spec.descending,
+        pipeline::StageStrategy::Default => unreachable!(),
+    };
+
+    let mut top: Vec<(Val, V)> = Vec::with_capacity(limit.saturating_add(1));
+    if limit > 0 {
+        for row in items {
+            let key = eval_value_kernel(&row, key_kernel)?;
+            if top.len() < limit {
+                top.push((key, row));
+                continue;
+            }
+            let mut worst_idx = 0usize;
+            for (idx, (candidate, _)) in top.iter().enumerate().skip(1) {
+                let ord = pipeline::cmp_val_total(candidate, &top[worst_idx].0);
+                let displace = if keep_largest {
+                    ord == std::cmp::Ordering::Less
+                } else {
+                    ord == std::cmp::Ordering::Greater
+                };
+                if displace {
+                    worst_idx = idx;
+                }
+            }
+            let ord = pipeline::cmp_val_total(&key, &top[worst_idx].0);
+            let take = if keep_largest {
+                ord == std::cmp::Ordering::Greater
+            } else {
+                ord == std::cmp::Ordering::Less
+            };
+            if take {
+                top[worst_idx] = (key, row);
+            }
+        }
+    }
+
+    top.sort_by(|a, b| pipeline::cmp_val_total(&a.0, &b.0));
+    if spec.descending {
+        top.reverse();
+    }
+    let boundary_rows: Vec<Val> = top.into_iter().map(|(_, row)| row.materialize()).collect();
+
+    let suffix =
+        suffix_body(body, 1).with_source(pipeline::Source::Receiver(Val::arr(boundary_rows)));
+    let root = Val::Null;
+    let env = Env::new(Val::Null);
+    Some(suffix.run_with_env(&root, &env, cache))
+}
+
 fn apply_view_stage<'a, V>(
     item: V,
     stage: pipeline::ViewStageCapability,
@@ -350,7 +436,7 @@ fn opcode_is_current_only(opcode: &Opcode) -> bool {
             crate::vm::CompiledFSPart::Lit(_) => true,
             crate::vm::CompiledFSPart::Interp { prog, .. } => program_is_current_only(prog),
         }),
-        Opcode::MakeObj(_) => false,
+        Opcode::MakeObj(entries) => entries.iter().all(obj_entry_is_current_only),
         Opcode::PushNull
         | Opcode::PushBool(_)
         | Opcode::PushInt(_)
@@ -384,6 +470,24 @@ fn opcode_is_current_only(opcode: &Opcode) -> bool {
         | Opcode::KindCheck { .. }
         | Opcode::SetCurrent
         | Opcode::DeleteMarkErr => true,
+    }
+}
+
+fn obj_entry_is_current_only(entry: &CompiledObjEntry) -> bool {
+    match entry {
+        CompiledObjEntry::Short { .. } | CompiledObjEntry::KvPath { .. } => true,
+        CompiledObjEntry::Kv { prog, cond, .. } => {
+            program_is_current_only(prog)
+                && cond
+                    .as_ref()
+                    .is_none_or(|cond| program_is_current_only(cond))
+        }
+        CompiledObjEntry::Dynamic { key, val } => {
+            program_is_current_only(key) && program_is_current_only(val)
+        }
+        CompiledObjEntry::Spread(prog) | CompiledObjEntry::SpreadDeep(prog) => {
+            program_is_current_only(prog)
+        }
     }
 }
 

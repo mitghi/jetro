@@ -469,6 +469,28 @@ mod tests {
 
     #[cfg(feature = "simd-json")]
     #[test]
+    fn view_sort_topk_materializes_only_winners_for_current_projection_suffix() {
+        let j = Jetro::from_bytes(
+            br#"{"data":[{"id":1,"score":10,"user":{"name":"low"}},{"id":2,"score":30,"user":{"name":"top"}},{"id":3,"score":20,"user":{"name":"mid"}}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+
+        let out = j
+            .collect(r#"$.data.sort_by(-score).take(2).map({id, name: user.name, score})"#)
+            .unwrap();
+
+        assert_eq!(
+            out,
+            json!([
+                {"id": 2, "name": "top", "score": 30},
+                {"id": 3, "name": "mid", "score": 20}
+            ])
+        );
+        assert!(!j.root_val_is_materialized());
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
     fn view_prefix_and_full_execution_share_stage_semantics() {
         let data = br#"{"people":[{"name":"low","score":1},{"name":"ada","score":901},{"name":"bob","score":902},{"name":"cat","score":903},{"name":"dan","score":904}],"unused":{"large":[1,2,3,4]}}"#.to_vec();
         let full = Jetro::from_bytes(data.clone()).unwrap();
