@@ -1,6 +1,9 @@
 use std::sync::Arc;
 
-use crate::{context::EvalError, value::Val};
+use crate::{
+    context::{Env, EvalError},
+    value::Val,
+};
 
 use super::lower::run_compiled_map;
 use super::{
@@ -62,7 +65,7 @@ impl Pipeline {
     /// - source is not an indexable Val::Arr / typed-vec lane,
     /// - chain target index is out of bounds (returns Null via the
     ///   normal fallback so error semantics match).
-    fn try_indexed_dispatch(&self, root: &Val) -> Option<Result<Val, EvalError>> {
+    fn try_indexed_dispatch(&self, root: &Val, base_env: &Env) -> Option<Result<Val, EvalError>> {
         // Phase 5 strategy must be IndexedDispatch.
         let strategy = select_strategy(&self.stages, &self.sink);
         if strategy != Strategy::IndexedDispatch {
@@ -116,7 +119,7 @@ impl Pipeline {
         // Run chain on the single element.  All stages are 1:1 (Map),
         // so each apply produces exactly one Val.
         let mut vm = crate::vm::VM::new();
-        let mut env = vm.make_loop_env(root.clone());
+        let mut env = base_env.clone();
         let mut cur = elem;
         for stage in &self.stages {
             match stage {
@@ -141,7 +144,7 @@ impl Pipeline {
         Some(Ok(cur))
     }
 
-    fn try_run_composed(&self, root: &Val) -> Option<Result<Val, EvalError>> {
+    fn try_run_composed(&self, root: &Val, base_env: &Env) -> Option<Result<Val, EvalError>> {
         use crate::composed as cmp;
         use crate::composed::Stage as ComposedStage;
         use std::cell::{Cell, RefCell};
@@ -155,7 +158,7 @@ impl Pipeline {
         let vm_ctx: std::cell::OnceCell<Rc<RefCell<cmp::VmCtx>>> = std::cell::OnceCell::new();
         let make_ctx = || -> Rc<RefCell<cmp::VmCtx>> {
             let vm = crate::vm::VM::new();
-            let env = vm.make_loop_env(root.clone());
+            let env = base_env.clone();
             Rc::new(RefCell::new(cmp::VmCtx { vm, env }))
         };
         let get_ctx = || -> Rc<RefCell<cmp::VmCtx>> { Rc::clone(vm_ctx.get_or_init(make_ctx)) };
@@ -405,11 +408,24 @@ impl Pipeline {
     /// O(N×K) on first promotion, O(1) on hit.  Empty cache (`None`)
     /// matches legacy `run` semantics.
     pub fn run_with(&self, root: &Val, cache: Option<&dyn PipelineData>) -> Result<Val, EvalError> {
+        let env = Env::new(root.clone());
+        self.run_with_env(root, &env, cache)
+    }
+
+    /// Execute with caller-provided lexical environment. This is used
+    /// by physical `let` / object plans so pipeline stage programs can
+    /// see variables bound outside the pipeline.
+    pub fn run_with_env(
+        &self,
+        root: &Val,
+        base_env: &Env,
+        cache: Option<&dyn PipelineData>,
+    ) -> Result<Val, EvalError> {
         // Step 3d Phase 5 — IndexedDispatch.  When stages are all 1:1
         // (`Map`, `Identity`) and sink is positional (First/Last), pull
         // the target element from the source by index, run chain once,
         // return.  O(1) work for `$.books.map(@.x).first()` shape.
-        if let Some(out) = self.try_indexed_dispatch(root) {
+        if let Some(out) = self.try_indexed_dispatch(root, base_env) {
             return out;
         }
 
@@ -433,7 +449,7 @@ impl Pipeline {
         // Sinks (NumMap/NumFilterMap/CountIf/etc.) into base Stage +
         // base Sink at entry — composition handles the rest.
         if composed_path_enabled() {
-            if let Some(out) = self.try_run_composed(root) {
+            if let Some(out) = self.try_run_composed(root, base_env) {
                 return out;
             }
         }
@@ -446,7 +462,7 @@ impl Pipeline {
         // `swap_current` instead of full Env construction + doc-hash
         // recompute + cache clear (those add ~80 ns/row of pure
         // overhead in execute_val_raw).
-        let mut loop_env = vm.make_loop_env(root.clone());
+        let mut loop_env = base_env.clone();
 
         // Resolve source to an iterable Val::Arr-like sequence.
         let recv = match &self.source {

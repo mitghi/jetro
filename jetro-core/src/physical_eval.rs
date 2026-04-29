@@ -43,9 +43,11 @@ impl ExecCtx<'_> {
                 .get_var(name.as_ref())
                 .cloned()
                 .unwrap_or_else(|| self.env.current.get_field(name.as_ref()))),
-            PlanNode::Pipeline(pipeline) => {
-                pipeline.run_with(&self.root, Some(self.j as &dyn pipeline::PipelineData))
-            }
+            PlanNode::Pipeline(pipeline) => pipeline.run_with_env(
+                &self.root,
+                &self.env,
+                Some(self.j as &dyn pipeline::PipelineData),
+            ),
             PlanNode::RootPath(steps) => Ok(run_root_path(&self.root, steps)),
             PlanNode::Chain { base, steps } => self.eval_chain(*base, steps),
             PlanNode::Call {

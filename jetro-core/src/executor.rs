@@ -329,4 +329,44 @@ mod tests {
 
         assert_eq!(out, json!({"ids": [2], "x": 1}));
     }
+
+    #[test]
+    fn let_bound_values_are_visible_inside_pipeline_children() {
+        let expr = r#"let min_score = 900 in {"top": $.books.filter(score > min_score).take(2).map(title), "first": $.books.filter(score > min_score).first()}"#;
+        let plan = planner::plan_query(expr);
+        let QueryRoot::Node(root) = plan.root() else {
+            panic!("expected physical expression plan");
+        };
+        let PlanNode::Let { body, .. } = plan.node(*root) else {
+            panic!("expected let root");
+        };
+        let PlanNode::Object(fields) = plan.node(*body) else {
+            panic!("expected object body");
+        };
+        for idx in [0usize, 1] {
+            let PhysicalObjField::Kv { val, .. } = &fields[idx] else {
+                panic!("expected pipeline kv field");
+            };
+            assert!(matches!(plan.node(*val), PlanNode::Pipeline(_)));
+        }
+
+        let j = Jetro::from(json!({
+            "books": [
+                {"title": "low", "score": 1},
+                {"title": "a", "score": 901},
+                {"title": "b", "score": 902},
+                {"title": "c", "score": 903}
+            ]
+        }));
+
+        let out = j.collect(expr).unwrap();
+
+        assert_eq!(
+            out,
+            json!({
+                "top": ["a", "b"],
+                "first": {"title": "a", "score": 901}
+            })
+        );
+    }
 }
