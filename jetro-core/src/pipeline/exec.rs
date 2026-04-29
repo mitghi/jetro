@@ -10,7 +10,7 @@ use super::{
     apply_item_in_env, bounded_sort_by_key, cmp_val_total, composed_path_enabled,
     compute_strategies, eval_kernel, is_truthy, num_finalise, num_fold, select_strategy,
     walk_field_chain, BodyKernel, NumOp, Pipeline, PipelineData, Position, Sink, Source, Stage,
-    StageStrategy, Strategy,
+    StageStrategy, Strategy, TerminalMapCollector,
 };
 
 use crate::builtins::{
@@ -571,6 +571,17 @@ impl Pipeline {
                     | Stage::SortedDedup(_)
             )
         });
+        let terminal_map_idx = if !needs_barrier && matches!(self.sink, Sink::Collect) {
+            match self.stages.last() {
+                Some(Stage::Map(_)) => self.stages.len().checked_sub(1),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let terminal_map_kernel =
+            terminal_map_idx.map(|idx| self.stage_kernels.get(idx).unwrap_or(&BodyKernel::Generic));
+        let mut terminal_map_collect = terminal_map_kernel.map(TerminalMapCollector::new);
         let pre_iter: Box<dyn Iterator<Item = Val>> = if needs_barrier {
             let mut buf: Vec<Val> = iter.collect();
             let strategies = compute_strategies(&self.stages, &self.sink);
@@ -898,6 +909,20 @@ impl Pipeline {
                             }
                         }
                         Stage::Map(prog) => {
+                            if Some(stage_idx) == terminal_map_idx {
+                                terminal_map_collect
+                                    .as_mut()
+                                    .expect("terminal map collector")
+                                    .push_val_row(&item, kernel, |item| {
+                                        apply_item_in_env(&mut vm, &mut loop_env, item, prog)
+                                    })?;
+                                emitted_outputs += 1;
+                                if matches!(source_demand, PullDemand::UntilOutput(n) if emitted_outputs >= n)
+                                {
+                                    break 'outer;
+                                }
+                                continue 'outer;
+                            }
                             item = map_one(&item, |v| {
                                 eval_kernel(kernel, v, |item| {
                                     apply_item_in_env(&mut vm, &mut loop_env, item, prog)
@@ -1011,6 +1036,9 @@ impl Pipeline {
 
         Ok(match &self.sink {
             Sink::Collect => {
+                if let Some(collector) = terminal_map_collect {
+                    return Ok(collector.finish());
+                }
                 // GroupBy is a barrier that produces a single Val::Obj
                 // which Sink::Collect would otherwise wrap as
                 // [obj].  When the last stage is GroupBy, return the

@@ -76,6 +76,23 @@ impl ObjectKernel {
         }
         Some(true)
     }
+
+    pub(crate) fn eval_val_row_cells(&self, item: &Val, cells: &mut Vec<Val>) -> bool {
+        let start = cells.len();
+        for entry in self.entries.iter() {
+            let value = eval_native_kernel(&entry.value, item).unwrap_or(Val::Null);
+            if (entry.optional || entry.omit_null) && value.is_null() {
+                cells.truncate(start);
+                return false;
+            }
+            cells.push(value);
+        }
+        true
+    }
+
+    pub(crate) fn eval_val(&self, item: &Val) -> Val {
+        eval_object_kernel(self, |kernel| eval_native_kernel(kernel, item)).unwrap_or(Val::Null)
+    }
 }
 
 impl BodyKernel {

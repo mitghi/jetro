@@ -38,6 +38,7 @@ use crate::ast::Expr;
 use crate::value::Val;
 
 mod capability;
+mod collector;
 mod columnar;
 mod common;
 mod exec;
@@ -49,6 +50,7 @@ pub(crate) use capability::{
     view_capabilities, view_prefix_capabilities, ViewInputMode, ViewMaterialization,
     ViewOutputMode, ViewSinkCapability, ViewStageCapability,
 };
+pub(crate) use collector::TerminalMapCollector;
 pub(crate) use common::{
     apply_item_in_env, bounded_sort_by_key, bounded_sort_by_key_cmp, cmp_val_total, is_truthy,
     num_finalise, num_fold, walk_field_chain,
