@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::util::JsonView;
 use crate::value::Val;
 
@@ -5,7 +7,7 @@ pub(crate) trait ValueView<'a>: Clone {
     fn scalar(&self) -> JsonView<'_>;
     fn field(&self, key: &str) -> Self;
     fn index(&self, idx: i64) -> Self;
-    fn array_items(&self) -> Option<Vec<Self>>;
+    fn array_iter(&self) -> Option<Box<dyn Iterator<Item = Self> + 'a>>;
     fn materialize(&self) -> Val;
 }
 
@@ -85,76 +87,62 @@ impl<'a> ValueView<'a> for ValView<'a> {
     }
 
     #[inline]
-    fn array_items(&self) -> Option<Vec<Self>> {
+    fn array_iter(&self) -> Option<Box<dyn Iterator<Item = Self> + 'a>> {
         match self {
-            Self::Borrowed(Val::Arr(items)) => Some(items.iter().map(Self::Borrowed).collect()),
-            Self::Borrowed(Val::IntVec(items)) => Some(
-                items
-                    .iter()
-                    .copied()
-                    .map(Val::Int)
-                    .map(Self::Owned)
-                    .collect(),
-            ),
-            Self::Borrowed(Val::FloatVec(items)) => Some(
-                items
-                    .iter()
-                    .copied()
-                    .map(Val::Float)
-                    .map(Self::Owned)
-                    .collect(),
-            ),
-            Self::Borrowed(Val::StrVec(items)) => Some(
-                items
-                    .iter()
-                    .cloned()
-                    .map(Val::Str)
-                    .map(Self::Owned)
-                    .collect(),
-            ),
-            Self::Borrowed(Val::StrSliceVec(items)) => Some(
-                items
-                    .iter()
-                    .cloned()
-                    .map(Val::StrSlice)
-                    .map(Self::Owned)
-                    .collect(),
-            ),
+            Self::Borrowed(Val::Arr(items)) => Some(Box::new(items.iter().map(Self::Borrowed))),
+            Self::Borrowed(Val::IntVec(items)) => Some(Box::new(
+                items.iter().copied().map(Val::Int).map(Self::Owned),
+            )),
+            Self::Borrowed(Val::FloatVec(items)) => Some(Box::new(
+                items.iter().copied().map(Val::Float).map(Self::Owned),
+            )),
+            Self::Borrowed(Val::StrVec(items)) => Some(Box::new(
+                items.iter().cloned().map(Val::Str).map(Self::Owned),
+            )),
+            Self::Borrowed(Val::StrSliceVec(items)) => Some(Box::new(
+                items.iter().cloned().map(Val::StrSlice).map(Self::Owned),
+            )),
             Self::Borrowed(_) => None,
             Self::Owned(value) => match value {
-                Val::Arr(items) => Some(items.iter().cloned().map(Self::Owned).collect()),
-                Val::IntVec(items) => Some(
-                    items
-                        .iter()
-                        .copied()
+                Val::Arr(items) => Some(Box::new(
+                    Arc::clone(items)
+                        .as_ref()
+                        .clone()
+                        .into_iter()
+                        .map(Self::Owned),
+                )),
+                Val::IntVec(items) => Some(Box::new(
+                    Arc::clone(items)
+                        .as_ref()
+                        .clone()
+                        .into_iter()
                         .map(Val::Int)
-                        .map(Self::Owned)
-                        .collect(),
-                ),
-                Val::FloatVec(items) => Some(
-                    items
-                        .iter()
-                        .copied()
+                        .map(Self::Owned),
+                )),
+                Val::FloatVec(items) => Some(Box::new(
+                    Arc::clone(items)
+                        .as_ref()
+                        .clone()
+                        .into_iter()
                         .map(Val::Float)
-                        .map(Self::Owned)
-                        .collect(),
-                ),
-                Val::StrVec(items) => Some(
-                    items
-                        .iter()
-                        .cloned()
+                        .map(Self::Owned),
+                )),
+                Val::StrVec(items) => Some(Box::new(
+                    Arc::clone(items)
+                        .as_ref()
+                        .clone()
+                        .into_iter()
                         .map(Val::Str)
-                        .map(Self::Owned)
-                        .collect(),
-                ),
-                Val::StrSliceVec(items) => Some(
-                    items
-                        .iter()
-                        .cloned()
+                        .map(Self::Owned),
+                )),
+                Val::StrSliceVec(items) => Some(Box::new(
+                    Arc::clone(items)
+                        .as_ref()
+                        .clone()
+                        .into_iter()
                         .map(Val::StrSlice)
-                        .map(Self::Owned)
-                        .collect(),
-                ),
+                        .map(Self::Owned),
+                )),
                 _ => None,
             },
         }
@@ -301,7 +289,7 @@ impl<'a> ValueView<'a> for TapeView<'a> {
     }
 
     #[inline]
-    fn array_items(&self) -> Option<Vec<Self>> {
+    fn array_iter(&self) -> Option<Box<dyn Iterator<Item = Self> + 'a>> {
         use crate::strref::TapeNode;
 
         let Self::Node { tape, idx } = self else {
@@ -311,13 +299,11 @@ impl<'a> ValueView<'a> for TapeView<'a> {
             return None;
         };
 
-        let mut out = Vec::with_capacity(len as usize);
-        let mut cur = *idx + 1;
-        for _ in 0..len {
-            out.push(Self::Node { tape, idx: cur });
-            cur += tape.span(cur);
-        }
-        Some(out)
+        Some(Box::new(TapeArrayIter {
+            tape,
+            remaining: len as usize,
+            cur: *idx + 1,
+        }))
     }
 
     #[inline]
@@ -329,6 +315,32 @@ impl<'a> ValueView<'a> for TapeView<'a> {
             }
             Self::Missing => Val::Null,
         }
+    }
+}
+
+#[cfg(feature = "simd-json")]
+struct TapeArrayIter<'a> {
+    tape: &'a crate::strref::TapeData,
+    remaining: usize,
+    cur: usize,
+}
+
+#[cfg(feature = "simd-json")]
+impl<'a> Iterator for TapeArrayIter<'a> {
+    type Item = TapeView<'a>;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+        let idx = self.cur;
+        self.remaining -= 1;
+        self.cur += self.tape.span(self.cur);
+        Some(TapeView::Node {
+            tape: self.tape,
+            idx,
+        })
     }
 }
 

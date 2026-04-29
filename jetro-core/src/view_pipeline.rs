@@ -49,7 +49,7 @@ where
     V: ValueView<'a>,
 {
     let capabilities = pipeline::view_capabilities(body)?;
-    let items = source.array_items()?;
+    let items = source.array_iter()?;
 
     let mut acc_collect: Vec<Val> = Vec::new();
     let mut acc_count: i64 = 0;
@@ -180,7 +180,7 @@ where
         return None;
     }
 
-    let items = source.array_items()?;
+    let items = source.array_iter()?;
     let mut boundary_rows = Vec::new();
     let mut op_state: Vec<usize> = vec![0; prefix.stages.len()];
     let source_demand = pipeline::Pipeline::segment_source_demand(&body.stages, &body.sink)
@@ -476,16 +476,17 @@ mod tests {
             }
         }
 
-        fn array_items(&self) -> Option<Vec<Self>> {
-            self.idx.is_none().then(|| {
-                (0..self.rows.len())
-                    .map(|idx| Self {
-                        rows: Arc::clone(&self.rows),
-                        idx: Some(idx),
-                        scalar_reads: Rc::clone(&self.scalar_reads),
-                    })
-                    .collect()
-            })
+        fn array_iter(&self) -> Option<Box<dyn Iterator<Item = Self> + 'a>> {
+            if self.idx.is_some() {
+                return None;
+            }
+            let rows = Arc::clone(&self.rows);
+            let scalar_reads = Rc::clone(&self.scalar_reads);
+            Some(Box::new((0..rows.len()).map(move |idx| Self {
+                rows: Arc::clone(&rows),
+                idx: Some(idx),
+                scalar_reads: Rc::clone(&scalar_reads),
+            })))
         }
 
         fn materialize(&self) -> Val {
