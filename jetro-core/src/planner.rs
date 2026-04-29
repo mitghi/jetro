@@ -10,10 +10,10 @@ use crate::ast::{ArrayElem, Expr, ObjField, Step};
 use crate::builtins::BuiltinCall;
 use crate::parser;
 use crate::physical::{
-    NodeId, PhysicalArrayElem, PhysicalChainStep, PhysicalObjField, PhysicalPathStep, PlanNode,
-    QueryPlan,
+    NodeId, PhysicalArrayElem, PhysicalChainStep, PhysicalObjField, PhysicalPathStep,
+    PipelinePlanSource, PlanNode, QueryPlan,
 };
-use crate::pipeline::Pipeline;
+use crate::pipeline::{Pipeline, Source};
 use crate::value::Val;
 use crate::vm::Compiler;
 
@@ -50,7 +50,19 @@ fn lower_expr(builder: &mut PlanBuilder, expr: &Expr) -> NodeId {
 
 fn try_lower_pipeline(expr: &Expr) -> Option<PlanNode> {
     let pipeline = Pipeline::lower(expr)?;
-    (!is_trivial_collect_pipeline(&pipeline)).then_some(PlanNode::Pipeline(pipeline))
+    if is_trivial_collect_pipeline(&pipeline) {
+        return None;
+    }
+    pipeline_to_plan_node(pipeline)
+}
+
+fn pipeline_to_plan_node(pipeline: Pipeline) -> Option<PlanNode> {
+    let (source, body) = pipeline.into_source_body();
+    let source = match source {
+        Source::FieldChain { keys } => PipelinePlanSource::FieldChain { keys },
+        Source::Receiver(_) => return None,
+    };
+    Some(PlanNode::Pipeline { source, body })
 }
 
 fn is_trivial_collect_pipeline(pipeline: &Pipeline) -> bool {
@@ -77,7 +89,10 @@ fn try_lower_receiver_pipeline(builder: &mut PlanBuilder, expr: &Expr) -> Option
         .maybe_chain(steps[..method_start].to_vec());
     let source = lower_expr(builder, &source_expr);
     let body = Pipeline::lower_body_from_steps(&steps[method_start..])?;
-    Some(builder.push(PlanNode::PipelineSource { source, body }))
+    Some(builder.push(PlanNode::Pipeline {
+        source: PipelinePlanSource::Expr(source),
+        body,
+    }))
 }
 
 fn try_lower_root_path(expr: &Expr) -> Option<PlanNode> {
@@ -283,8 +298,10 @@ pub fn plan_query(expr: &str) -> QueryPlan {
     };
     let mut builder = PlanBuilder::default();
     if let Some(pipeline) = Pipeline::lower(&ast) {
-        let root = builder.push(PlanNode::Pipeline(pipeline));
-        return builder.finish(root);
+        if let Some(node) = pipeline_to_plan_node(pipeline) {
+            let root = builder.push(node);
+            return builder.finish(root);
+        }
     }
     let root = match &ast {
         Expr::Object(_) | Expr::Array(_) | Expr::Let { .. } => lower_expr(&mut builder, &ast),
@@ -297,7 +314,7 @@ pub fn plan_query(expr: &str) -> QueryPlan {
 mod tests {
     use super::*;
     use crate::ast::BinOp;
-    use crate::physical::{PhysicalObjField, PlanNode, QueryRoot};
+    use crate::physical::{PhysicalObjField, PipelinePlanSource, PlanNode, QueryRoot};
 
     fn root_node(plan: &QueryPlan) -> &PlanNode {
         let QueryRoot::Node(root) = plan.root() else {
@@ -315,7 +332,7 @@ mod tests {
         assert_eq!(fields.len(), 2);
         match &fields[0] {
             PhysicalObjField::Kv { val, .. } => {
-                assert!(matches!(plan.node(*val), PlanNode::Pipeline(_)));
+                assert!(matches!(plan.node(*val), PlanNode::Pipeline { .. }));
             }
             _ => panic!("expected kv field"),
         }
@@ -338,12 +355,12 @@ mod tests {
         let PhysicalObjField::Kv { val, .. } = &fields[0] else {
             panic!("expected top kv field");
         };
-        assert!(matches!(plan.node(*val), PlanNode::Pipeline(_)));
+        assert!(matches!(plan.node(*val), PlanNode::Pipeline { .. }));
 
         let PhysicalObjField::Kv { val, .. } = &fields[1] else {
             panic!("expected first kv field");
         };
-        assert!(matches!(plan.node(*val), PlanNode::Pipeline(_)));
+        assert!(matches!(plan.node(*val), PlanNode::Pipeline { .. }));
 
         let PhysicalObjField::Kv { val, .. } = &fields[2] else {
             panic!("expected meta kv field");
@@ -364,7 +381,7 @@ mod tests {
         let PhysicalArrayElem::Expr(first) = &elems[0] else {
             panic!("expected array expr");
         };
-        assert!(matches!(plan.node(*first), PlanNode::Pipeline(_)));
+        assert!(matches!(plan.node(*first), PlanNode::Pipeline { .. }));
 
         let PhysicalArrayElem::Expr(second) = &elems[1] else {
             panic!("expected array expr");
@@ -375,7 +392,7 @@ mod tests {
         let PhysicalObjField::Kv { val, .. } = &fields[0] else {
             panic!("expected nested object kv field");
         };
-        assert!(matches!(plan.node(*val), PlanNode::Pipeline(_)));
+        assert!(matches!(plan.node(*val), PlanNode::Pipeline { .. }));
 
         let PhysicalArrayElem::Expr(third) = &elems[2] else {
             panic!("expected array expr");
@@ -408,7 +425,7 @@ mod tests {
         let PhysicalObjField::Kv { val, .. } = &group_fields[0] else {
             panic!("expected top kv field");
         };
-        assert!(matches!(plan.node(*val), PlanNode::Pipeline(_)));
+        assert!(matches!(plan.node(*val), PlanNode::Pipeline { .. }));
 
         let PhysicalObjField::Kv { val: meta, .. } = &fields[1] else {
             panic!("expected meta kv field");
@@ -483,7 +500,11 @@ mod tests {
         let PlanNode::Let { body, .. } = root_node(&plan) else {
             panic!("expected let plan");
         };
-        let PlanNode::PipelineSource { source, body } = plan.node(*body) else {
+        let PlanNode::Pipeline {
+            source: PipelinePlanSource::Expr(source),
+            body,
+        } = plan.node(*body)
+        else {
             panic!("expected receiver pipeline source");
         };
         assert!(matches!(plan.node(*source), PlanNode::Ident(name) if name.as_ref() == "books"));
@@ -507,7 +528,11 @@ mod tests {
             let PhysicalObjField::Kv { val, .. } = &fields[idx] else {
                 panic!("expected kv field");
             };
-            let PlanNode::PipelineSource { source, body } = plan.node(*val) else {
+            let PlanNode::Pipeline {
+                source: PipelinePlanSource::Expr(source),
+                body,
+            } = plan.node(*val)
+            else {
                 panic!("expected receiver pipeline source");
             };
             assert!(
@@ -534,7 +559,11 @@ mod tests {
             let PhysicalArrayElem::Expr(val) = &elems[idx] else {
                 panic!("expected array expr");
             };
-            let PlanNode::PipelineSource { source, body } = plan.node(*val) else {
+            let PlanNode::Pipeline {
+                source: PipelinePlanSource::Expr(source),
+                body,
+            } = plan.node(*val)
+            else {
                 panic!("expected receiver pipeline source");
             };
             assert!(

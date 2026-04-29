@@ -5,8 +5,8 @@ use std::sync::Arc;
 use crate::ast::BinOp;
 use crate::context::{Env, EvalError};
 use crate::physical::{
-    NodeId, PhysicalArrayElem, PhysicalChainStep, PhysicalObjField, PhysicalPathStep, PlanNode,
-    QueryPlan,
+    NodeId, PhysicalArrayElem, PhysicalChainStep, PhysicalObjField, PhysicalPathStep,
+    PipelinePlanSource, PlanNode, QueryPlan,
 };
 use crate::pipeline;
 use crate::value::Val;
@@ -43,16 +43,16 @@ impl ExecCtx<'_> {
                 .get_var(name.as_ref())
                 .cloned()
                 .unwrap_or_else(|| self.env.current.get_field(name.as_ref()))),
-            PlanNode::Pipeline(pipeline) => pipeline.run_with_env(
-                &self.root,
-                &self.env,
-                Some(self.j as &dyn pipeline::PipelineData),
-            ),
-            PlanNode::PipelineSource { source, body } => {
-                let source_val = self.eval(*source)?;
-                let pipeline = body
-                    .clone()
-                    .with_source(pipeline::Source::Receiver(source_val));
+            PlanNode::Pipeline { source, body } => {
+                let source = match source {
+                    PipelinePlanSource::FieldChain { keys } => {
+                        pipeline::Source::FieldChain { keys: keys.clone() }
+                    }
+                    PipelinePlanSource::Expr(source) => {
+                        pipeline::Source::Receiver(self.eval(*source)?)
+                    }
+                };
+                let pipeline = body.clone().with_source(source);
                 pipeline.run_with_env(
                     &self.root,
                     &self.env,

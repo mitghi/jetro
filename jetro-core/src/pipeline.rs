@@ -414,6 +414,20 @@ impl PipelineBody {
     }
 }
 
+impl Pipeline {
+    #[inline]
+    pub fn into_source_body(self) -> (Source, PipelineBody) {
+        let body = PipelineBody {
+            stages: self.stages,
+            stage_exprs: self.stage_exprs,
+            sink: self.sink,
+            stage_kernels: self.stage_kernels,
+            sink_kernels: self.sink_kernels,
+        };
+        (self.source, body)
+    }
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

@@ -37,9 +37,10 @@ mod tests {
 
     use crate::physical::QueryRoot;
     use crate::physical::{
-        NodeId, PhysicalArrayElem, PhysicalChainStep, PhysicalObjField, PlanNode,
+        NodeId, PhysicalArrayElem, PhysicalChainStep, PhysicalObjField, PipelinePlanSource,
+        PlanNode,
     };
-    use crate::pipeline::{NumOp, Sink, Source, Stage};
+    use crate::pipeline::{NumOp, Sink, Stage};
     use crate::planner;
     use crate::Jetro;
 
@@ -50,9 +51,12 @@ mod tests {
             | PlanNode::Root
             | PlanNode::Current
             | PlanNode::Ident(_)
-            | PlanNode::Pipeline(_)
             | PlanNode::RootPath(_) => {}
-            PlanNode::PipelineSource { source, .. } => assert_no_vm_fallback(plan, *source),
+            PlanNode::Pipeline { source, .. } => {
+                if let PipelinePlanSource::Expr(source) = source {
+                    assert_no_vm_fallback(plan, *source);
+                }
+            }
             PlanNode::Call { receiver, .. } => assert_no_vm_fallback(plan, *receiver),
             PlanNode::Chain { base, steps } => {
                 assert_no_vm_fallback(plan, *base);
@@ -150,7 +154,7 @@ mod tests {
             let PhysicalObjField::Kv { val, .. } = &fields[idx] else {
                 panic!("expected pipeline kv field");
             };
-            assert!(matches!(plan.node(*val), PlanNode::Pipeline(_)));
+            assert!(matches!(plan.node(*val), PlanNode::Pipeline { .. }));
         }
         let PhysicalObjField::Kv { val, .. } = &fields[2] else {
             panic!("expected scalar kv field");
@@ -192,7 +196,7 @@ mod tests {
         let PhysicalArrayElem::Expr(first) = &elems[0] else {
             panic!("expected array expr");
         };
-        assert!(matches!(plan.node(*first), PlanNode::Pipeline(_)));
+        assert!(matches!(plan.node(*first), PlanNode::Pipeline { .. }));
         let PhysicalArrayElem::Expr(second) = &elems[1] else {
             panic!("expected array expr");
         };
@@ -202,7 +206,7 @@ mod tests {
         let PhysicalObjField::Kv { val, .. } = &fields[0] else {
             panic!("expected nested kv field");
         };
-        assert!(matches!(plan.node(*val), PlanNode::Pipeline(_)));
+        assert!(matches!(plan.node(*val), PlanNode::Pipeline { .. }));
         let PhysicalArrayElem::Expr(third) = &elems[2] else {
             panic!("expected array expr");
         };
@@ -273,21 +277,21 @@ mod tests {
         let PhysicalObjField::Kv { val, .. } = &fields[0] else {
             panic!("expected object key/value field");
         };
-        let PlanNode::Pipeline(pipeline) = plan.node(*val) else {
+        let PlanNode::Pipeline { source, body } = plan.node(*val) else {
             panic!("expected pipeline child");
         };
 
-        match &pipeline.source {
-            Source::FieldChain { keys } => {
+        match source {
+            PipelinePlanSource::FieldChain { keys } => {
                 let keys: Vec<&str> = keys.iter().map(|k| k.as_ref()).collect();
                 assert_eq!(keys, vec!["data"]);
             }
-            Source::Receiver(_) => panic!("expected $.data field-chain source"),
+            PipelinePlanSource::Expr(_) => panic!("expected $.data field-chain source"),
         }
-        assert_eq!(pipeline.stages.len(), 1);
-        assert!(matches!(pipeline.stages[0], Stage::Filter(_)));
+        assert_eq!(body.stages.len(), 1);
+        assert!(matches!(body.stages[0], Stage::Filter(_)));
         assert!(
-            matches!(&pipeline.sink, Sink::Numeric(n) if n.op == NumOp::Sum && n.project.is_some())
+            matches!(&body.sink, Sink::Numeric(n) if n.op == NumOp::Sum && n.project.is_some())
         );
 
         let j = Jetro::from(json!({
@@ -310,21 +314,21 @@ mod tests {
         let QueryRoot::Node(root) = plan.root() else {
             panic!("expected physical expression plan");
         };
-        let PlanNode::Pipeline(pipeline) = plan.node(*root) else {
+        let PlanNode::Pipeline { source, body } = plan.node(*root) else {
             panic!("expected pipeline root");
         };
 
-        match &pipeline.source {
-            Source::FieldChain { keys } => {
+        match source {
+            PipelinePlanSource::FieldChain { keys } => {
                 let keys: Vec<&str> = keys.iter().map(|k| k.as_ref()).collect();
                 assert_eq!(keys, vec!["data"]);
             }
-            Source::Receiver(_) => panic!("expected $.data field-chain source"),
+            PipelinePlanSource::Expr(_) => panic!("expected $.data field-chain source"),
         }
-        assert_eq!(pipeline.stages.len(), 1);
-        assert!(matches!(pipeline.stages[0], Stage::Filter(_)));
+        assert_eq!(body.stages.len(), 1);
+        assert!(matches!(body.stages[0], Stage::Filter(_)));
         assert!(
-            matches!(&pipeline.sink, Sink::Numeric(n) if n.op == NumOp::Sum && n.project.is_some())
+            matches!(&body.sink, Sink::Numeric(n) if n.op == NumOp::Sum && n.project.is_some())
         );
 
         let j = Jetro::from(json!({
@@ -429,7 +433,7 @@ mod tests {
             let PhysicalObjField::Kv { val, .. } = &fields[idx] else {
                 panic!("expected pipeline kv field");
             };
-            assert!(matches!(plan.node(*val), PlanNode::Pipeline(_)));
+            assert!(matches!(plan.node(*val), PlanNode::Pipeline { .. }));
         }
 
         let j = Jetro::from(json!({
@@ -462,7 +466,11 @@ mod tests {
         let PlanNode::Let { body, .. } = plan.node(*root) else {
             panic!("expected let root");
         };
-        let PlanNode::PipelineSource { source, body } = plan.node(*body) else {
+        let PlanNode::Pipeline {
+            source: PipelinePlanSource::Expr(source),
+            body,
+        } = plan.node(*body)
+        else {
             panic!("expected receiver pipeline source");
         };
         assert!(matches!(plan.node(*source), PlanNode::Ident(name) if name.as_ref() == "books"));
@@ -499,7 +507,7 @@ mod tests {
             let PhysicalObjField::Kv { val, .. } = &fields[idx] else {
                 panic!("expected kv field");
             };
-            assert!(matches!(plan.node(*val), PlanNode::PipelineSource { .. }));
+            assert!(matches!(plan.node(*val), PlanNode::Pipeline { .. }));
         }
 
         let j = Jetro::from(json!({
@@ -539,7 +547,7 @@ mod tests {
             let PhysicalArrayElem::Expr(val) = &elems[idx] else {
                 panic!("expected array expr");
             };
-            assert!(matches!(plan.node(*val), PlanNode::PipelineSource { .. }));
+            assert!(matches!(plan.node(*val), PlanNode::Pipeline { .. }));
         }
 
         let j = Jetro::from(json!({
