@@ -67,6 +67,8 @@ pub(crate) mod runtime;
 pub(crate) mod strref;
 pub(crate) mod util;
 pub(crate) mod value;
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) mod value_view;
 pub(crate) mod vm;
 
 #[cfg(test)]
