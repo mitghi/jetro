@@ -37,6 +37,7 @@ use std::sync::Arc;
 use crate::ast::Expr;
 use crate::value::Val;
 
+mod capability;
 mod columnar;
 mod common;
 mod exec;
@@ -44,6 +45,9 @@ mod kernels;
 mod lower;
 mod normalize;
 mod plan;
+pub(crate) use capability::{
+    view_capabilities, ViewPipelineCapabilities, ViewSinkCapability, ViewStageCapability,
+};
 pub(crate) use common::{
     apply_item_in_env, cmp_val_total, is_truthy, num_finalise, num_fold, walk_field_chain,
 };

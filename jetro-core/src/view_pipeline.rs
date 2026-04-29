@@ -8,7 +8,7 @@ use crate::value::Val;
 use crate::value_view::ValueView;
 
 pub(crate) fn supports(body: &pipeline::PipelineBody) -> bool {
-    classify(body).is_some()
+    pipeline::view_capabilities(body).is_some()
 }
 
 pub(crate) fn walk_fields<'a, V>(mut cur: V, keys: &[Arc<str>]) -> V
@@ -121,9 +121,10 @@ struct ViewPlan<'a> {
 }
 
 fn classify(body: &pipeline::PipelineBody) -> Option<ViewPlan<'_>> {
+    let capabilities = pipeline::view_capabilities(body)?;
     Some(ViewPlan {
-        ops: view_ops_for_body(body)?,
-        sink: classify_sink(body)?,
+        ops: view_ops_for_body(body, &capabilities)?,
+        sink: view_sink_for_body(body, &capabilities)?,
     })
 }
 
@@ -135,47 +136,27 @@ enum ViewOp<'a> {
     Skip(usize),
 }
 
-fn view_ops_for_body(body: &pipeline::PipelineBody) -> Option<Vec<ViewOp<'_>>> {
-    let mut ops = Vec::with_capacity(body.stages.len());
-    for (idx, stage) in body.stages.iter().enumerate() {
-        let op = match view_stage_shape(stage)? {
-            ViewStageShape::Filter => {
-                let kernel = body.stage_kernels.get(idx)?;
-                if matches!(kernel, pipeline::BodyKernel::Generic) {
-                    return None;
-                }
+fn view_ops_for_body<'a>(
+    body: &'a pipeline::PipelineBody,
+    capabilities: &pipeline::ViewPipelineCapabilities,
+) -> Option<Vec<ViewOp<'a>>> {
+    let mut ops = Vec::with_capacity(capabilities.stages.len());
+    for capability in &capabilities.stages {
+        let op = match *capability {
+            pipeline::ViewStageCapability::Filter { kernel } => {
+                let kernel = body.stage_kernels.get(kernel)?;
                 ViewOp::Filter(kernel)
             }
-            ViewStageShape::Map => {
-                let kernel = body.stage_kernels.get(idx)?;
-                if matches!(kernel, pipeline::BodyKernel::Generic) {
-                    return None;
-                }
+            pipeline::ViewStageCapability::Map { kernel } => {
+                let kernel = body.stage_kernels.get(kernel)?;
                 ViewOp::Map(kernel)
             }
-            ViewStageShape::Take(n) => ViewOp::Take(n),
-            ViewStageShape::Skip(n) => ViewOp::Skip(n),
+            pipeline::ViewStageCapability::Take(n) => ViewOp::Take(n),
+            pipeline::ViewStageCapability::Skip(n) => ViewOp::Skip(n),
         };
         ops.push(op);
     }
     Some(ops)
-}
-
-enum ViewStageShape {
-    Filter,
-    Map,
-    Take(usize),
-    Skip(usize),
-}
-
-fn view_stage_shape(stage: &pipeline::Stage) -> Option<ViewStageShape> {
-    match stage {
-        pipeline::Stage::Filter(_) => Some(ViewStageShape::Filter),
-        pipeline::Stage::Map(_) => Some(ViewStageShape::Map),
-        pipeline::Stage::Take(n) => Some(ViewStageShape::Take(*n)),
-        pipeline::Stage::Skip(n) => Some(ViewStageShape::Skip(*n)),
-        _ => None,
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -190,25 +171,22 @@ enum ViewSink<'a> {
     Last,
 }
 
-fn classify_sink(body: &pipeline::PipelineBody) -> Option<ViewSink<'_>> {
-    match &body.sink {
-        pipeline::Sink::Collect => Some(ViewSink::Collect),
-        pipeline::Sink::Count => Some(ViewSink::Count),
-        pipeline::Sink::First => Some(ViewSink::First),
-        pipeline::Sink::Last => Some(ViewSink::Last),
-        pipeline::Sink::Numeric(n) => {
-            let project = if n.project.is_some() {
-                let kernel = body.sink_kernels.first()?;
-                if matches!(kernel, pipeline::BodyKernel::Generic) {
-                    return None;
-                }
-                Some(kernel)
-            } else {
-                None
+fn view_sink_for_body<'a>(
+    body: &'a pipeline::PipelineBody,
+    capabilities: &pipeline::ViewPipelineCapabilities,
+) -> Option<ViewSink<'a>> {
+    match capabilities.sink {
+        pipeline::ViewSinkCapability::Collect => Some(ViewSink::Collect),
+        pipeline::ViewSinkCapability::Count => Some(ViewSink::Count),
+        pipeline::ViewSinkCapability::First => Some(ViewSink::First),
+        pipeline::ViewSinkCapability::Last => Some(ViewSink::Last),
+        pipeline::ViewSinkCapability::Numeric { op, project_kernel } => {
+            let project = match project_kernel {
+                Some(kernel) => Some(body.sink_kernels.get(kernel)?),
+                None => None,
             };
-            Some(ViewSink::Numeric { op: n.op, project })
+            Some(ViewSink::Numeric { op, project })
         }
-        pipeline::Sink::ApproxCountDistinct => None,
     }
 }
 

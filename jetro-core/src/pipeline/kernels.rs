@@ -16,6 +16,10 @@ pub enum BodyKernel {
 }
 
 impl BodyKernel {
+    pub(crate) fn is_view_native(&self) -> bool {
+        !matches!(self, Self::Generic)
+    }
+
     pub fn classify(prog: &crate::vm::Program) -> Self {
         use crate::vm::Opcode;
         let ops = prog.ops.as_ref();
