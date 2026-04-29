@@ -3,7 +3,10 @@ use std::sync::Arc;
 use crate::ast::Expr;
 use crate::chain_ir::{ChainOp, Demand as ChainDemand, PullDemand, ValueNeed};
 
-use super::{normalize::normalize_symbolic, BodyKernel, Pipeline, Sink, Stage};
+use super::{
+    normalize::normalize_symbolic, BodyKernel, Pipeline, Sink, Stage, ViewSinkCapability,
+    ViewStageCapability,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Position {
@@ -70,6 +73,30 @@ impl Sink {
             Sink::Numeric(n) => n.project.as_ref().is_none_or(|prog| program_ok(prog)),
         }
     }
+
+    pub(crate) fn view_capability(
+        &self,
+        sink_kernels: &[BodyKernel],
+    ) -> Option<ViewSinkCapability> {
+        match self {
+            Sink::Collect => Some(ViewSinkCapability::Collect),
+            Sink::Count => Some(ViewSinkCapability::Count),
+            Sink::First => Some(ViewSinkCapability::First),
+            Sink::Last => Some(ViewSinkCapability::Last),
+            Sink::Numeric(n) => {
+                let project_kernel = if n.project.is_some() {
+                    Some(sink_kernels.first()?.is_view_native().then_some(0)?)
+                } else {
+                    None
+                };
+                Some(ViewSinkCapability::Numeric {
+                    op: n.op,
+                    project_kernel,
+                })
+            }
+            Sink::ApproxCountDistinct => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -121,6 +148,24 @@ pub struct StageShape {
 }
 
 impl Stage {
+    pub(crate) fn view_capability(
+        &self,
+        idx: usize,
+        kernel: Option<&BodyKernel>,
+    ) -> Option<ViewStageCapability> {
+        match self {
+            Stage::Filter(_) if kernel?.is_view_native() => {
+                Some(ViewStageCapability::Filter { kernel: idx })
+            }
+            Stage::Map(_) if kernel?.is_view_native() => {
+                Some(ViewStageCapability::Map { kernel: idx })
+            }
+            Stage::Take(n) => Some(ViewStageCapability::Take(*n)),
+            Stage::Skip(n) => Some(ViewStageCapability::Skip(*n)),
+            _ => None,
+        }
+    }
+
     pub(crate) fn can_run_with_receiver_only<F>(&self, mut program_ok: F) -> bool
     where
         F: FnMut(&crate::vm::Program) -> bool,

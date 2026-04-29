@@ -1,4 +1,4 @@
-use super::{NumOp, PipelineBody, Sink, Stage};
+use super::{NumOp, PipelineBody, Stage};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ViewInputMode {
@@ -144,6 +144,21 @@ mod tests {
     }
 
     #[test]
+    fn stage_view_capability_comes_from_stage_metadata() {
+        let prog = Arc::new(crate::vm::Program::new(Vec::new(), ""));
+        let filter = Stage::Filter(prog.clone())
+            .view_capability(4, Some(&BodyKernel::FieldRead(Arc::<str>::from("score"))))
+            .unwrap();
+        let map = Stage::Map(prog)
+            .view_capability(5, Some(&BodyKernel::FieldRead(Arc::<str>::from("name"))))
+            .unwrap();
+
+        assert!(matches!(filter, ViewStageCapability::Filter { kernel: 4 }));
+        assert_eq!(map.output_mode(), ViewOutputMode::BorrowedSubview);
+        assert!(Stage::Reverse.view_capability(6, None).is_none());
+    }
+
+    #[test]
     fn view_sink_metadata_describes_materialization_policy() {
         assert_eq!(
             ViewSinkCapability::Collect.materialization(),
@@ -245,40 +260,9 @@ fn view_stage_capability(
     idx: usize,
     stage: &Stage,
 ) -> Option<ViewStageCapability> {
-    match stage {
-        Stage::Filter(_) if body.stage_kernels.get(idx)?.is_view_native() => {
-            Some(ViewStageCapability::Filter { kernel: idx })
-        }
-        Stage::Map(_) if body.stage_kernels.get(idx)?.is_view_native() => {
-            Some(ViewStageCapability::Map { kernel: idx })
-        }
-        Stage::Take(n) => Some(ViewStageCapability::Take(*n)),
-        Stage::Skip(n) => Some(ViewStageCapability::Skip(*n)),
-        _ => None,
-    }
+    stage.view_capability(idx, body.stage_kernels.get(idx))
 }
 
 fn view_sink_capability(body: &PipelineBody) -> Option<ViewSinkCapability> {
-    match &body.sink {
-        Sink::Collect => Some(ViewSinkCapability::Collect),
-        Sink::Count => Some(ViewSinkCapability::Count),
-        Sink::First => Some(ViewSinkCapability::First),
-        Sink::Last => Some(ViewSinkCapability::Last),
-        Sink::Numeric(n) => {
-            let project_kernel = if n.project.is_some() {
-                if body.sink_kernels.first()?.is_view_native() {
-                    Some(0)
-                } else {
-                    return None;
-                }
-            } else {
-                None
-            };
-            Some(ViewSinkCapability::Numeric {
-                op: n.op,
-                project_kernel,
-            })
-        }
-        Sink::ApproxCountDistinct => None,
-    }
+    body.sink.view_capability(&body.sink_kernels)
 }
