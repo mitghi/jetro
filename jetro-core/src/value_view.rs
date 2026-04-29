@@ -89,6 +89,152 @@ impl<'a> ValueView<'a> for ValView<'a> {
     }
 }
 
+#[cfg(feature = "simd-json")]
+#[derive(Clone, Copy)]
+pub(crate) enum TapeView<'a> {
+    Node {
+        tape: &'a crate::strref::TapeData,
+        idx: usize,
+    },
+    Missing,
+}
+
+#[cfg(feature = "simd-json")]
+impl<'a> TapeView<'a> {
+    #[inline]
+    pub(crate) fn root(tape: &'a crate::strref::TapeData) -> Self {
+        if tape.nodes.is_empty() {
+            Self::Missing
+        } else {
+            Self::Node { tape, idx: 0 }
+        }
+    }
+
+    #[inline]
+    fn materialize_at(tape: &'a crate::strref::TapeData, idx: &mut usize) -> Val {
+        use crate::strref::TapeNode;
+        use simd_json::StaticNode as SN;
+
+        let here = tape.nodes[*idx];
+        *idx += 1;
+        match here {
+            TapeNode::Static(SN::Null) => Val::Null,
+            TapeNode::Static(SN::Bool(b)) => Val::Bool(b),
+            TapeNode::Static(SN::I64(n)) => Val::Int(n),
+            TapeNode::Static(SN::U64(n)) => {
+                if n <= i64::MAX as u64 {
+                    Val::Int(n as i64)
+                } else {
+                    Val::Float(n as f64)
+                }
+            }
+            TapeNode::Static(SN::F64(f)) => Val::Float(f),
+            TapeNode::StringRef { start, end } => {
+                Val::StrSlice(crate::strref::StrRef::slice_bytes(
+                    std::sync::Arc::clone(&tape.bytes_buf),
+                    start as usize,
+                    end as usize,
+                ))
+            }
+            TapeNode::Array { len, .. } => {
+                let mut out = Vec::with_capacity(len as usize);
+                for _ in 0..len {
+                    out.push(Self::materialize_at(tape, idx));
+                }
+                Val::arr(out)
+            }
+            TapeNode::Object { len, .. } => {
+                let mut out = indexmap::IndexMap::with_capacity(len as usize);
+                for _ in 0..len {
+                    let key = tape.str_at(*idx);
+                    *idx += 1;
+                    let value = Self::materialize_at(tape, idx);
+                    out.insert(crate::value::intern_key(key), value);
+                }
+                Val::Obj(std::sync::Arc::new(out))
+            }
+        }
+    }
+}
+
+#[cfg(feature = "simd-json")]
+impl<'a> ValueView<'a> for TapeView<'a> {
+    #[inline]
+    fn scalar(&self) -> JsonView<'_> {
+        use crate::strref::TapeNode;
+        use simd_json::StaticNode as SN;
+
+        let Self::Node { tape, idx } = self else {
+            return JsonView::Null;
+        };
+        match tape.nodes[*idx] {
+            TapeNode::Static(SN::Null) => JsonView::Null,
+            TapeNode::Static(SN::Bool(b)) => JsonView::Bool(b),
+            TapeNode::Static(SN::I64(n)) => JsonView::Int(n),
+            TapeNode::Static(SN::U64(n)) => JsonView::UInt(n),
+            TapeNode::Static(SN::F64(f)) => JsonView::Float(f),
+            TapeNode::StringRef { .. } => JsonView::Str(tape.str_at(*idx)),
+            TapeNode::Array { len, .. } => JsonView::ArrayLen(len as usize),
+            TapeNode::Object { len, .. } => JsonView::ObjectLen(len as usize),
+        }
+    }
+
+    #[inline]
+    fn field(&self, key: &str) -> Self {
+        use crate::strref::TapeNode;
+
+        let Self::Node { tape, idx } = self else {
+            return Self::Missing;
+        };
+        let TapeNode::Object { len, .. } = tape.nodes[*idx] else {
+            return Self::Missing;
+        };
+
+        let mut cur = *idx + 1;
+        for _ in 0..len {
+            let current_key = tape.str_at(cur);
+            cur += 1;
+            if current_key == key {
+                return Self::Node { tape, idx: cur };
+            }
+            cur += tape.span(cur);
+        }
+        Self::Missing
+    }
+
+    #[inline]
+    fn index(&self, idx: i64) -> Self {
+        use crate::strref::TapeNode;
+
+        let Self::Node { tape, idx: node } = self else {
+            return Self::Missing;
+        };
+        let TapeNode::Array { len, .. } = tape.nodes[*node] else {
+            return Self::Missing;
+        };
+        let Some(target) = normalize_index(len as usize, idx) else {
+            return Self::Missing;
+        };
+
+        let mut cur = *node + 1;
+        for _ in 0..target {
+            cur += tape.span(cur);
+        }
+        Self::Node { tape, idx: cur }
+    }
+
+    #[inline]
+    fn materialize(&self) -> Val {
+        match self {
+            Self::Node { tape, idx } => {
+                let mut idx = *idx;
+                Self::materialize_at(tape, &mut idx)
+            }
+            Self::Missing => Val::Null,
+        }
+    }
+}
+
 #[inline]
 fn normalize_index(len: usize, idx: i64) -> Option<usize> {
     let idx = if idx < 0 {
@@ -142,6 +288,44 @@ mod tests {
     fn val_view_materializes_current_view_only() {
         let value = Val::from(&json!({"items": [{"id": 1}, {"id": 2}]}));
         let item = ValView::new(&value).field("items").index(1);
+
+        assert_eq!(
+            serde_json::Value::from(item.materialize()),
+            json!({"id": 2})
+        );
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn tape_view_matches_val_view_for_field_index_scalar_reads() {
+        use super::TapeView;
+
+        let bytes =
+            br#"{"books":[{"title":"low","score":1},{"title":"Dune","score":901}]}"#.to_vec();
+        let tape = crate::strref::TapeData::parse(bytes).unwrap();
+        let val = Val::from_tape_data(&tape);
+
+        let tape_score_view = TapeView::root(&tape).field("books").index(1).field("score");
+        let tape_score = tape_score_view.scalar();
+        let val_score_view = ValView::new(&val).field("books").index(1).field("score");
+        let val_score = val_score_view.scalar();
+
+        assert!(matches!(
+            (tape_score, val_score),
+            (JsonView::Int(901), JsonView::Int(901))
+        ));
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn tape_view_materializes_current_subtree_only() {
+        use super::TapeView;
+
+        let tape = crate::strref::TapeData::parse(
+            br#"{"items":[{"id":1},{"id":2}],"unused":[0]}"#.to_vec(),
+        )
+        .unwrap();
+        let item = TapeView::root(&tape).field("items").index(1);
 
         assert_eq!(
             serde_json::Value::from(item.materialize()),
