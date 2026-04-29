@@ -401,6 +401,24 @@ mod tests {
         assert!(!j.root_val_is_materialized());
     }
 
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn view_pipeline_count_and_sum_read_from_tape_without_materializing_root_val() {
+        let j = Jetro::from_bytes(
+            br#"{"books":[{"score":1},{"score":901},{"score":902},{"score":2}]}"#.to_vec(),
+        )
+        .unwrap();
+
+        let count = j.collect(r#"$.books.filter(score > 900).count()"#).unwrap();
+        let sum = j
+            .collect(r#"$.books.filter(score > 900).map(score).sum()"#)
+            .unwrap();
+
+        assert_eq!(count, json!(2));
+        assert_eq!(sum, json!(1803));
+        assert!(!j.root_val_is_materialized());
+    }
+
     #[test]
     fn object_shape_executes_common_scalar_nodes_without_vm() {
         let expr = r#"{"gt": $.a > 1, "sum": $.a + 4, "picked": "yes" if $.ok else "no"}"#;

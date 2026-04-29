@@ -93,12 +93,208 @@ where
         return None;
     }
     let source = walk_view_fields(root.clone(), keys);
+    if let Some(result) = run_view_pipeline(source.clone(), body) {
+        return Some(result);
+    }
+
     let pipeline = body
         .clone()
         .with_source(pipeline::Source::Receiver(source.materialize()));
     let root = Val::Null;
     let env = Env::new(Val::Null);
     Some(pipeline.run_with_env(&root, &env, cache))
+}
+
+fn run_view_pipeline<'a, V>(
+    source: V,
+    body: &pipeline::PipelineBody,
+) -> Option<Result<Val, EvalError>>
+where
+    V: ValueView<'a>,
+{
+    let items = match source.array_items() {
+        Some(items) => items,
+        None => return None,
+    };
+
+    let mut acc_collect: Vec<Val> = Vec::new();
+    let mut acc_count: i64 = 0;
+    let mut acc_sum_i: i64 = 0;
+    let mut acc_sum_f: f64 = 0.0;
+    let mut sum_floated = false;
+    let mut acc_min_f = f64::INFINITY;
+    let mut acc_max_f = f64::NEG_INFINITY;
+    let mut acc_n_obs = 0usize;
+    let mut acc_first: Option<Val> = None;
+    let mut acc_last: Option<Val> = None;
+    let mut stage_taken: Vec<usize> = vec![0; body.stages.len()];
+    let mut stage_skipped: Vec<usize> = vec![0; body.stages.len()];
+
+    'outer: for row in items {
+        let mut item = row;
+        for (stage_idx, stage) in body.stages.iter().enumerate() {
+            let kernel = body
+                .stage_kernels
+                .get(stage_idx)
+                .unwrap_or(&pipeline::BodyKernel::Generic);
+            match stage {
+                pipeline::Stage::Skip(n) => {
+                    if stage_skipped[stage_idx] < *n {
+                        stage_skipped[stage_idx] += 1;
+                        continue 'outer;
+                    }
+                }
+                pipeline::Stage::Take(n) => {
+                    if stage_taken[stage_idx] >= *n {
+                        break 'outer;
+                    }
+                    stage_taken[stage_idx] += 1;
+                }
+                pipeline::Stage::Filter(_) => {
+                    let Some(keep) = eval_view_filter_kernel(&item, kernel) else {
+                        return None;
+                    };
+                    if !keep {
+                        continue 'outer;
+                    }
+                }
+                pipeline::Stage::Map(_) => {
+                    let Some(mapped) = eval_view_map_kernel(&item, kernel) else {
+                        return None;
+                    };
+                    item = mapped;
+                }
+                _ => return None,
+            }
+        }
+
+        match &body.sink {
+            pipeline::Sink::Collect => acc_collect.push(item.materialize()),
+            pipeline::Sink::Count => acc_count += 1,
+            pipeline::Sink::Numeric(n) => {
+                let numeric_item = if let Some(_project) = &n.project {
+                    let kernel = body
+                        .sink_kernels
+                        .first()
+                        .unwrap_or(&pipeline::BodyKernel::Generic);
+                    let Some(value) = eval_view_value_kernel(&item, kernel) else {
+                        return None;
+                    };
+                    value
+                } else {
+                    item.materialize()
+                };
+                pipeline::num_fold(
+                    &mut acc_sum_i,
+                    &mut acc_sum_f,
+                    &mut sum_floated,
+                    &mut acc_min_f,
+                    &mut acc_max_f,
+                    &mut acc_n_obs,
+                    n.op,
+                    &numeric_item,
+                );
+            }
+            pipeline::Sink::First => {
+                acc_first = Some(item.materialize());
+                break 'outer;
+            }
+            pipeline::Sink::Last => {
+                acc_last = Some(item.materialize());
+            }
+            pipeline::Sink::ApproxCountDistinct => return None,
+        }
+    }
+
+    Some(Ok(match &body.sink {
+        pipeline::Sink::Collect => Val::arr(acc_collect),
+        pipeline::Sink::Count => Val::Int(acc_count),
+        pipeline::Sink::Numeric(n) => pipeline::num_finalise(
+            n.op,
+            acc_sum_i,
+            acc_sum_f,
+            sum_floated,
+            acc_min_f,
+            acc_max_f,
+            acc_n_obs,
+        ),
+        pipeline::Sink::First => acc_first.unwrap_or(Val::Null),
+        pipeline::Sink::Last => acc_last.unwrap_or(Val::Null),
+        pipeline::Sink::ApproxCountDistinct => return None,
+    }))
+}
+
+fn eval_view_filter_kernel<'a, V>(item: &V, kernel: &pipeline::BodyKernel) -> Option<bool>
+where
+    V: ValueView<'a>,
+{
+    match eval_view_kernel(item, kernel)? {
+        ViewKernelValue::View(view) => Some(view.scalar().truthy()),
+        ViewKernelValue::Owned(value) => Some(crate::util::is_truthy(&value)),
+    }
+}
+
+fn eval_view_map_kernel<'a, V>(item: &V, kernel: &pipeline::BodyKernel) -> Option<V>
+where
+    V: ValueView<'a>,
+{
+    match eval_view_kernel(item, kernel)? {
+        ViewKernelValue::View(view) => Some(view),
+        ViewKernelValue::Owned(_) => None,
+    }
+}
+
+fn eval_view_value_kernel<'a, V>(item: &V, kernel: &pipeline::BodyKernel) -> Option<Val>
+where
+    V: ValueView<'a>,
+{
+    match eval_view_kernel(item, kernel)? {
+        ViewKernelValue::View(view) => Some(view.materialize()),
+        ViewKernelValue::Owned(value) => Some(value),
+    }
+}
+
+enum ViewKernelValue<V> {
+    View(V),
+    Owned(Val),
+}
+
+fn eval_view_kernel<'a, V>(item: &V, kernel: &pipeline::BodyKernel) -> Option<ViewKernelValue<V>>
+where
+    V: ValueView<'a>,
+{
+    match kernel {
+        pipeline::BodyKernel::FieldRead(key) => Some(ViewKernelValue::View(item.field(key))),
+        pipeline::BodyKernel::FieldChain(keys) => {
+            Some(ViewKernelValue::View(walk_view_fields(item.clone(), keys)))
+        }
+        pipeline::BodyKernel::ConstBool(value) => Some(ViewKernelValue::Owned(Val::Bool(*value))),
+        pipeline::BodyKernel::Const(value) => Some(ViewKernelValue::Owned(value.clone())),
+        pipeline::BodyKernel::FieldCmpLit(key, op, lit) => {
+            let lhs = item.field(key);
+            Some(ViewKernelValue::Owned(Val::Bool(
+                crate::util::json_cmp_binop(
+                    lhs.scalar(),
+                    *op,
+                    crate::util::JsonView::from_val(lit),
+                ),
+            )))
+        }
+        pipeline::BodyKernel::FieldChainCmpLit(keys, op, lit) => {
+            let lhs = walk_view_fields(item.clone(), keys);
+            Some(ViewKernelValue::Owned(Val::Bool(
+                crate::util::json_cmp_binop(
+                    lhs.scalar(),
+                    *op,
+                    crate::util::JsonView::from_val(lit),
+                ),
+            )))
+        }
+        pipeline::BodyKernel::CurrentCmpLit(op, lit) => Some(ViewKernelValue::Owned(Val::Bool(
+            crate::util::json_cmp_binop(item.scalar(), *op, crate::util::JsonView::from_val(lit)),
+        ))),
+        pipeline::BodyKernel::Generic => None,
+    }
 }
 
 fn eval_view_ref<'a, V>(

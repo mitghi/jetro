@@ -5,6 +5,7 @@ pub(crate) trait ValueView<'a>: Clone {
     fn scalar(&self) -> JsonView<'_>;
     fn field(&self, key: &str) -> Self;
     fn index(&self, idx: i64) -> Self;
+    fn array_items(&self) -> Option<Vec<Self>>;
     fn materialize(&self) -> Val;
 }
 
@@ -80,6 +81,82 @@ impl<'a> ValueView<'a> for ValView<'a> {
                 .unwrap_or_else(|| Self::Owned(Val::Null)),
             Self::Borrowed(_) => Self::Owned(Val::Null),
             Self::Owned(value) => Self::Owned(value.get_index(idx)),
+        }
+    }
+
+    #[inline]
+    fn array_items(&self) -> Option<Vec<Self>> {
+        match self {
+            Self::Borrowed(Val::Arr(items)) => Some(items.iter().map(Self::Borrowed).collect()),
+            Self::Borrowed(Val::IntVec(items)) => Some(
+                items
+                    .iter()
+                    .copied()
+                    .map(Val::Int)
+                    .map(Self::Owned)
+                    .collect(),
+            ),
+            Self::Borrowed(Val::FloatVec(items)) => Some(
+                items
+                    .iter()
+                    .copied()
+                    .map(Val::Float)
+                    .map(Self::Owned)
+                    .collect(),
+            ),
+            Self::Borrowed(Val::StrVec(items)) => Some(
+                items
+                    .iter()
+                    .cloned()
+                    .map(Val::Str)
+                    .map(Self::Owned)
+                    .collect(),
+            ),
+            Self::Borrowed(Val::StrSliceVec(items)) => Some(
+                items
+                    .iter()
+                    .cloned()
+                    .map(Val::StrSlice)
+                    .map(Self::Owned)
+                    .collect(),
+            ),
+            Self::Borrowed(_) => None,
+            Self::Owned(value) => match value {
+                Val::Arr(items) => Some(items.iter().cloned().map(Self::Owned).collect()),
+                Val::IntVec(items) => Some(
+                    items
+                        .iter()
+                        .copied()
+                        .map(Val::Int)
+                        .map(Self::Owned)
+                        .collect(),
+                ),
+                Val::FloatVec(items) => Some(
+                    items
+                        .iter()
+                        .copied()
+                        .map(Val::Float)
+                        .map(Self::Owned)
+                        .collect(),
+                ),
+                Val::StrVec(items) => Some(
+                    items
+                        .iter()
+                        .cloned()
+                        .map(Val::Str)
+                        .map(Self::Owned)
+                        .collect(),
+                ),
+                Val::StrSliceVec(items) => Some(
+                    items
+                        .iter()
+                        .cloned()
+                        .map(Val::StrSlice)
+                        .map(Self::Owned)
+                        .collect(),
+                ),
+                _ => None,
+            },
         }
     }
 
@@ -221,6 +298,26 @@ impl<'a> ValueView<'a> for TapeView<'a> {
             cur += tape.span(cur);
         }
         Self::Node { tape, idx: cur }
+    }
+
+    #[inline]
+    fn array_items(&self) -> Option<Vec<Self>> {
+        use crate::strref::TapeNode;
+
+        let Self::Node { tape, idx } = self else {
+            return None;
+        };
+        let TapeNode::Array { len, .. } = tape.nodes[*idx] else {
+            return None;
+        };
+
+        let mut out = Vec::with_capacity(len as usize);
+        let mut cur = *idx + 1;
+        for _ in 0..len {
+            out.push(Self::Node { tape, idx: cur });
+            cur += tape.span(cur);
+        }
+        Some(out)
     }
 
     #[inline]
