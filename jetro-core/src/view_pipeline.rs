@@ -41,6 +41,9 @@ where
     if let Some(result) = run_full(source.clone(), body) {
         return Some(result);
     }
+    if let Some(result) = run_terminal_map_collect(source.clone(), body) {
+        return Some(result);
+    }
     if let Some(result) = run_sort_prefix_then_materialized_suffix(source.clone(), body, cache) {
         return Some(result);
     }
@@ -218,6 +221,54 @@ where
     let root = Val::Null;
     let env = Env::new(Val::Null);
     Some(suffix.run_with_env(&root, &env, cache))
+}
+
+fn run_terminal_map_collect<'a, V>(
+    source: V,
+    body: &pipeline::PipelineBody,
+) -> Option<Result<Val, EvalError>>
+where
+    V: ValueView<'a>,
+{
+    if !matches!(body.sink, pipeline::Sink::Collect) {
+        return None;
+    }
+    let map_idx = body
+        .stages
+        .iter()
+        .position(|stage| matches!(stage, pipeline::Stage::Map(_)))?;
+    if map_idx + 1 != body.stages.len() {
+        return None;
+    }
+    let map_kernel = body.stage_kernels.get(map_idx)?;
+    if !map_kernel.is_view_native() {
+        return None;
+    }
+    for (idx, stage) in body.stages[..map_idx].iter().enumerate() {
+        stage.view_capability(idx, body.stage_kernels.get(idx))?;
+    }
+
+    let items = source.array_iter()?;
+    let mut out = Vec::new();
+    let mut op_state: Vec<usize> = vec![0; map_idx];
+
+    'outer: for row in items {
+        let mut item = row;
+        for (op_idx, stage) in body.stages[..map_idx].iter().enumerate() {
+            let capability = stage.view_capability(op_idx, body.stage_kernels.get(op_idx))?;
+            match apply_view_stage(item, capability, op_idx, &mut op_state, &body.stage_kernels)? {
+                ViewStageFlow::Keep(next) => item = next,
+                ViewStageFlow::Drop => continue 'outer,
+                ViewStageFlow::Stop => break 'outer,
+            }
+        }
+        match eval_value_kernel(&item, map_kernel) {
+            Some(value) => out.push(value),
+            None => return None,
+        }
+    }
+
+    Some(Ok(Val::arr(out)))
 }
 
 fn run_sort_prefix_then_materialized_suffix<'a, V>(

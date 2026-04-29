@@ -385,6 +385,22 @@ mod tests {
 
     #[cfg(feature = "simd-json")]
     #[test]
+    fn view_fstring_map_reads_from_tape_without_materializing_root_val() {
+        let j = Jetro::from_bytes(
+            br#"{"data":[{"id":1,"score":10,"user":{"name":"ada","addr":{"city":"NYC"}}},{"id":2,"score":20,"user":{"name":"bob","addr":{"city":"LA"}}}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+
+        let out = j
+            .collect(r##"$.data.map(f"#{id} {user.name} ({user.addr.city}) ${score}")"##)
+            .unwrap();
+
+        assert_eq!(out, json!(["#1 ada (NYC) $10", "#2 bob (LA) $20"]));
+        assert!(!j.root_val_is_materialized());
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
     fn object_shape_pipeline_child_reads_from_tape_without_materializing_root_val() {
         let j = Jetro::from_bytes(
             br#"{"books":[{"title":"low","score":1},{"title":"a","score":901},{"title":"b","score":902}],"meta":{"version":3}}"#.to_vec(),
