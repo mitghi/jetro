@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::ast::{Arg, Expr};
 use crate::context::{Env, EvalError};
 use crate::physical::PipelinePlanSource;
-use crate::pipeline;
+use crate::pipeline::{self, PipelineBody};
 use crate::value::Val;
 use crate::vm::{CompiledCall, VM};
 
@@ -11,6 +11,7 @@ pub(crate) trait PipelineSourceResolver {
     fn resolve_pipeline_source(
         &mut self,
         source: &PipelinePlanSource,
+        body: &PipelineBody,
     ) -> Result<ResolvedPipelineSource, EvalError>;
 }
 

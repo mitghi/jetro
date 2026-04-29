@@ -45,7 +45,7 @@ impl ExecCtx<'_> {
                 .cloned()
                 .unwrap_or_else(|| self.env.current.get_field(name.as_ref()))),
             PlanNode::Pipeline { source, body } => {
-                let source = self.resolve_pipeline_source(source)?;
+                let source = self.resolve_pipeline_source(source, body)?;
                 let pipeline = body.clone().with_source(source.into_pipeline_source());
                 pipeline.run_with_env(
                     &self.root,
@@ -275,6 +275,7 @@ impl PipelineSourceResolver for ExecCtx<'_> {
     fn resolve_pipeline_source(
         &mut self,
         source: &PipelinePlanSource,
+        _body: &pipeline::PipelineBody,
     ) -> Result<ResolvedPipelineSource, EvalError> {
         match source {
             PipelinePlanSource::FieldChain { keys } => {
