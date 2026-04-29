@@ -9,6 +9,7 @@ use crate::physical::{
     PipelinePlanSource, PlanNode, QueryPlan,
 };
 use crate::pipeline;
+use crate::runtime::{PipelineSourceResolver, ResolvedPipelineSource};
 use crate::value::Val;
 use crate::{Jetro, VM};
 
@@ -113,20 +114,6 @@ impl ExecCtx<'_> {
                 result
             }
             PlanNode::Vm(program) => self.vm.exec_in_env(program, &mut self.env),
-        }
-    }
-
-    fn resolve_pipeline_source(
-        &mut self,
-        source: &PipelinePlanSource,
-    ) -> Result<ResolvedPipelineSource, EvalError> {
-        match source {
-            PipelinePlanSource::FieldChain { keys } => {
-                Ok(ResolvedPipelineSource::FieldChain { keys: keys.clone() })
-            }
-            PipelinePlanSource::Expr(source) => {
-                Ok(ResolvedPipelineSource::Receiver(self.eval(*source)?))
-            }
         }
     }
 
@@ -284,16 +271,18 @@ impl ExecCtx<'_> {
     }
 }
 
-enum ResolvedPipelineSource {
-    FieldChain { keys: Arc<[Arc<str>]> },
-    Receiver(Val),
-}
-
-impl ResolvedPipelineSource {
-    fn into_pipeline_source(self) -> pipeline::Source {
-        match self {
-            Self::FieldChain { keys } => pipeline::Source::FieldChain { keys },
-            Self::Receiver(value) => pipeline::Source::Receiver(value),
+impl PipelineSourceResolver for ExecCtx<'_> {
+    fn resolve_pipeline_source(
+        &mut self,
+        source: &PipelinePlanSource,
+    ) -> Result<ResolvedPipelineSource, EvalError> {
+        match source {
+            PipelinePlanSource::FieldChain { keys } => {
+                Ok(ResolvedPipelineSource::ValFieldChain { keys: keys.clone() })
+            }
+            PipelinePlanSource::Expr(source) => {
+                Ok(ResolvedPipelineSource::ValReceiver(self.eval(*source)?))
+            }
         }
     }
 }

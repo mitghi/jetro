@@ -2,8 +2,31 @@ use std::sync::Arc;
 
 use crate::ast::{Arg, Expr};
 use crate::context::{Env, EvalError};
+use crate::physical::PipelinePlanSource;
+use crate::pipeline;
 use crate::value::Val;
 use crate::vm::{CompiledCall, VM};
+
+pub(crate) trait PipelineSourceResolver {
+    fn resolve_pipeline_source(
+        &mut self,
+        source: &PipelinePlanSource,
+    ) -> Result<ResolvedPipelineSource, EvalError>;
+}
+
+pub(crate) enum ResolvedPipelineSource {
+    ValFieldChain { keys: Arc<[Arc<str>]> },
+    ValReceiver(Val),
+}
+
+impl ResolvedPipelineSource {
+    pub(crate) fn into_pipeline_source(self) -> pipeline::Source {
+        match self {
+            Self::ValFieldChain { keys } => pipeline::Source::FieldChain { keys },
+            Self::ValReceiver(value) => pipeline::Source::Receiver(value),
+        }
+    }
+}
 
 pub(crate) fn call_builtin_method_compiled(
     vm: &mut VM,
