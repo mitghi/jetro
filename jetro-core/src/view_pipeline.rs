@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use crate::chain_ir::PullDemand;
 use crate::context::{Env, EvalError};
 use crate::pipeline;
 use crate::value::Val;
@@ -61,8 +62,18 @@ where
     let mut acc_first: Option<Val> = None;
     let mut acc_last: Option<Val> = None;
     let mut op_state: Vec<usize> = vec![0; capabilities.stages.len()];
+    let source_demand = pipeline::Pipeline::segment_source_demand(&body.stages, &body.sink)
+        .chain
+        .pull;
+    let mut pulled_inputs = 0usize;
+    let mut emitted_outputs = 0usize;
 
     'outer: for row in items {
+        if matches!(source_demand, PullDemand::AtMost(n) if pulled_inputs >= n) {
+            break 'outer;
+        }
+        pulled_inputs += 1;
+
         let mut item = row;
         for (op_idx, stage) in capabilities.stages.iter().enumerate() {
             match apply_view_stage(item, *stage, op_idx, &mut op_state, &body.stage_kernels)? {
@@ -125,6 +136,11 @@ where
                 acc_last = Some(item.materialize());
             }
         }
+
+        emitted_outputs += 1;
+        if matches!(source_demand, PullDemand::UntilOutput(n) if emitted_outputs >= n) {
+            break 'outer;
+        }
     }
 
     Some(Ok(match capabilities.sink {
@@ -167,8 +183,18 @@ where
     let items = source.array_items()?;
     let mut boundary_rows = Vec::new();
     let mut op_state: Vec<usize> = vec![0; prefix.stages.len()];
+    let source_demand = pipeline::Pipeline::segment_source_demand(&body.stages, &body.sink)
+        .chain
+        .pull;
+    let mut pulled_inputs = 0usize;
+    let mut emitted_outputs = 0usize;
 
     'outer: for row in items {
+        if matches!(source_demand, PullDemand::AtMost(n) if pulled_inputs >= n) {
+            break 'outer;
+        }
+        pulled_inputs += 1;
+
         let mut item = row;
         for (op_idx, stage) in prefix.stages.iter().enumerate() {
             match apply_view_stage(item, *stage, op_idx, &mut op_state, &body.stage_kernels)? {
@@ -178,6 +204,10 @@ where
             }
         }
         boundary_rows.push(item.materialize());
+        emitted_outputs += 1;
+        if matches!(source_demand, PullDemand::UntilOutput(n) if emitted_outputs >= n) {
+            break 'outer;
+        }
     }
 
     let suffix = suffix_body(body, prefix.consumed_stages)
@@ -384,5 +414,109 @@ where
     match pipeline::eval_view_kernel(kernel, item)? {
         pipeline::ViewKernelValue::View(view) => Some(view.materialize()),
         pipeline::ViewKernelValue::Owned(value) => Some(value),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+    use std::rc::Rc;
+    use std::sync::Arc;
+
+    use crate::ast::BinOp;
+    use crate::pipeline::{BodyKernel, PipelineBody, Sink, Stage};
+    use crate::util::JsonView;
+    use crate::value::Val;
+    use crate::value_view::ValueView;
+
+    #[derive(Clone)]
+    struct CountingView {
+        rows: Arc<[i64]>,
+        idx: Option<usize>,
+        scalar_reads: Rc<Cell<usize>>,
+    }
+
+    impl CountingView {
+        fn root(rows: &[i64]) -> Self {
+            Self {
+                rows: rows.iter().copied().collect::<Vec<_>>().into(),
+                idx: None,
+                scalar_reads: Rc::new(Cell::new(0)),
+            }
+        }
+
+        fn scalar_reads(&self) -> usize {
+            self.scalar_reads.get()
+        }
+    }
+
+    impl<'a> ValueView<'a> for CountingView {
+        fn scalar(&self) -> JsonView<'_> {
+            self.scalar_reads.set(self.scalar_reads.get() + 1);
+            self.idx
+                .and_then(|idx| self.rows.get(idx).copied())
+                .map(JsonView::Int)
+                .unwrap_or(JsonView::Null)
+        }
+
+        fn field(&self, _key: &str) -> Self {
+            Self {
+                rows: Arc::clone(&self.rows),
+                idx: None,
+                scalar_reads: Rc::clone(&self.scalar_reads),
+            }
+        }
+
+        fn index(&self, idx: i64) -> Self {
+            let idx = if idx >= 0 { Some(idx as usize) } else { None };
+            Self {
+                rows: Arc::clone(&self.rows),
+                idx,
+                scalar_reads: Rc::clone(&self.scalar_reads),
+            }
+        }
+
+        fn array_items(&self) -> Option<Vec<Self>> {
+            self.idx.is_none().then(|| {
+                (0..self.rows.len())
+                    .map(|idx| Self {
+                        rows: Arc::clone(&self.rows),
+                        idx: Some(idx),
+                        scalar_reads: Rc::clone(&self.scalar_reads),
+                    })
+                    .collect()
+            })
+        }
+
+        fn materialize(&self) -> Val {
+            self.idx
+                .and_then(|idx| self.rows.get(idx).copied())
+                .map(Val::Int)
+                .unwrap_or(Val::Null)
+        }
+    }
+
+    #[test]
+    fn view_full_runner_stops_after_until_output_demand_is_met() {
+        let source = CountingView::root(&[1, 2, 3]);
+        let body = PipelineBody {
+            stages: vec![
+                Stage::Filter(Arc::new(crate::vm::Program::new(Vec::new(), ""))),
+                Stage::Take(2),
+            ],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![
+                BodyKernel::CurrentCmpLit(BinOp::Gt, Val::Int(0)),
+                BodyKernel::Generic,
+            ],
+            sink_kernels: Vec::new(),
+        };
+
+        let out = super::run_full(source.clone(), &body).unwrap().unwrap();
+
+        let out_json: serde_json::Value = out.into();
+        assert_eq!(out_json, serde_json::json!([1, 2]));
+        assert_eq!(source.scalar_reads(), 2);
     }
 }
