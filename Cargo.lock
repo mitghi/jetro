@@ -266,6 +266,7 @@ name = "jetro-core"
 version = "0.4.0"
 dependencies = [
  "indexmap",
+ "itoa",
  "jaq-core",
  "jaq-json",
  "jaq-std",
@@ -273,6 +274,7 @@ dependencies = [
  "pest",
  "pest_derive",
  "regex",
+ "ryu",
  "serde",
  "serde_json",
  "simd-json",

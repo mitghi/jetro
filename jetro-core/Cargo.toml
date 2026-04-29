@@ -19,6 +19,8 @@ smallvec = { version = "1", features = ["union"] }
 indexmap = "2"
 memchr = "2"
 regex = "1.10"
+itoa = "1"
+ryu = "1"
 simd-json = { version = "0.13", optional = true }
 
 [features]

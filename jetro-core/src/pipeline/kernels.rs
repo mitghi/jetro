@@ -15,7 +15,13 @@ pub enum BodyKernel {
     CurrentCmpLit(crate::ast::BinOp, Val),
     ConstBool(bool),
     Const(Val),
-    FString(Arc<[FStringKernelPart]>),
+    FString(FStringKernel),
+}
+
+#[derive(Debug, Clone)]
+pub struct FStringKernel {
+    parts: Arc<[FStringKernelPart]>,
+    base_capacity: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -43,9 +49,11 @@ impl BodyKernel {
         match ops {
             [Opcode::FString(parts)] => {
                 let mut out = Vec::with_capacity(parts.len());
+                let mut base_capacity = 0usize;
                 for part in parts.iter() {
                     match part {
                         crate::vm::CompiledFSPart::Lit(value) => {
+                            base_capacity += value.len();
                             out.push(FStringKernelPart::Lit(Arc::clone(value)));
                         }
                         crate::vm::CompiledFSPart::Interp { prog, fmt } if fmt.is_none() => {
@@ -53,12 +61,16 @@ impl BodyKernel {
                             if matches!(kernel, BodyKernel::Generic | BodyKernel::FString(_)) {
                                 return Self::Generic;
                             }
+                            base_capacity += 8;
                             out.push(FStringKernelPart::Interp(kernel));
                         }
                         crate::vm::CompiledFSPart::Interp { .. } => return Self::Generic,
                     }
                 }
-                return Self::FString(out.into());
+                return Self::FString(FStringKernel {
+                    parts: out.into(),
+                    base_capacity,
+                });
             }
             [Opcode::PushCurrent, Opcode::GetField(k)]
             | [Opcode::GetField(k)]
@@ -176,8 +188,8 @@ fn eval_native_kernel(kernel: &BodyKernel, item: &Val) -> Result<Val, EvalError>
         }
         BodyKernel::ConstBool(b) => Ok(Val::Bool(*b)),
         BodyKernel::Const(v) => Ok(v.clone()),
-        BodyKernel::FString(parts) => {
-            eval_fstring_kernel(parts, |kernel| eval_native_kernel(kernel, item))
+        BodyKernel::FString(fstring) => {
+            eval_fstring_kernel(fstring, |kernel| eval_native_kernel(kernel, item))
         }
         BodyKernel::FieldCmpLit(k, op, lit) => {
             let lhs = item.get_field(k.as_ref());
@@ -198,19 +210,12 @@ fn eval_native_kernel(kernel: &BodyKernel, item: &Val) -> Result<Val, EvalError>
     }
 }
 
-fn eval_fstring_kernel<F>(parts: &[FStringKernelPart], mut eval: F) -> Result<Val, EvalError>
+fn eval_fstring_kernel<F>(fstring: &FStringKernel, mut eval: F) -> Result<Val, EvalError>
 where
     F: FnMut(&BodyKernel) -> Result<Val, EvalError>,
 {
-    let cap = parts
-        .iter()
-        .map(|part| match part {
-            FStringKernelPart::Lit(value) => value.len(),
-            FStringKernelPart::Interp(_) => 8,
-        })
-        .sum();
-    let mut out = String::with_capacity(cap);
-    for part in parts {
+    let mut out = String::with_capacity(fstring.base_capacity);
+    for part in fstring.parts.iter() {
         match part {
             FStringKernelPart::Lit(value) => out.push_str(value),
             FStringKernelPart::Interp(kernel) => append_val_to_string(&mut out, &eval(kernel)?)?,
@@ -220,14 +225,13 @@ where
 }
 
 fn append_val_to_string(out: &mut String, value: &Val) -> Result<(), EvalError> {
-    use std::fmt::Write as _;
-
     match value {
         Val::Str(value) => out.push_str(value),
         Val::StrSlice(value) => out.push_str(value.as_str()),
-        Val::Int(value) => write!(out, "{value}").map_err(|err| EvalError(err.to_string()))?,
-        Val::Float(value) => write!(out, "{value}").map_err(|err| EvalError(err.to_string()))?,
-        Val::Bool(value) => write!(out, "{value}").map_err(|err| EvalError(err.to_string()))?,
+        Val::Int(value) => out.push_str(itoa::Buffer::new().format(*value)),
+        Val::Float(value) => out.push_str(ryu::Buffer::new().format(*value)),
+        Val::Bool(true) => out.push_str("true"),
+        Val::Bool(false) => out.push_str("false"),
         Val::Null => out.push_str("null"),
         other => out.push_str(&crate::util::val_to_string(other)),
     }
@@ -242,20 +246,13 @@ fn append_json_view_to_string<'a, V>(
 where
     V: ValueView<'a>,
 {
-    use std::fmt::Write as _;
-
     match scalar {
         JsonView::Null => out.push_str("null"),
-        JsonView::Bool(value) => {
-            write!(out, "{value}").map_err(|err| EvalError(err.to_string()))?
-        }
-        JsonView::Int(value) => write!(out, "{value}").map_err(|err| EvalError(err.to_string()))?,
-        JsonView::UInt(value) => {
-            write!(out, "{value}").map_err(|err| EvalError(err.to_string()))?
-        }
-        JsonView::Float(value) => {
-            write!(out, "{value}").map_err(|err| EvalError(err.to_string()))?
-        }
+        JsonView::Bool(true) => out.push_str("true"),
+        JsonView::Bool(false) => out.push_str("false"),
+        JsonView::Int(value) => out.push_str(itoa::Buffer::new().format(value)),
+        JsonView::UInt(value) => out.push_str(itoa::Buffer::new().format(value)),
+        JsonView::Float(value) => out.push_str(ryu::Buffer::new().format(value)),
         JsonView::Str(value) => out.push_str(value),
         JsonView::ArrayLen(_) | JsonView::ObjectLen(_) => {
             out.push_str(&crate::util::val_to_string(&view.materialize()));
@@ -282,16 +279,9 @@ where
         ))),
         BodyKernel::ConstBool(value) => Some(ViewKernelValue::Owned(Val::Bool(*value))),
         BodyKernel::Const(value) => Some(ViewKernelValue::Owned(value.clone())),
-        BodyKernel::FString(parts) => {
-            let cap = parts
-                .iter()
-                .map(|part| match part {
-                    FStringKernelPart::Lit(value) => value.len(),
-                    FStringKernelPart::Interp(_) => 8,
-                })
-                .sum();
-            let mut out = String::with_capacity(cap);
-            for part in parts.iter() {
+        BodyKernel::FString(fstring) => {
+            let mut out = String::with_capacity(fstring.base_capacity);
+            for part in fstring.parts.iter() {
                 match part {
                     FStringKernelPart::Lit(value) => out.push_str(value),
                     FStringKernelPart::Interp(kernel) => match eval_view_kernel(kernel, item)? {
