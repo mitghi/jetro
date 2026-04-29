@@ -88,13 +88,15 @@ pub fn compute_strategies(stages: &[Stage], sink: &Sink) -> Vec<StageStrategy> {
 }
 
 impl Pipeline {
-    pub fn source_demand(&self) -> SinkDemand {
-        self.stages
+    pub fn segment_source_demand(stages: &[Stage], sink: &Sink) -> SinkDemand {
+        stages
             .iter()
             .rev()
-            .fold(self.sink.demand(), |demand, stage| {
-                stage.upstream_demand(demand)
-            })
+            .fold(sink.demand(), |demand, stage| stage.upstream_demand(demand))
+    }
+
+    pub fn source_demand(&self) -> SinkDemand {
+        Self::segment_source_demand(&self.stages, &self.sink)
     }
 }
 

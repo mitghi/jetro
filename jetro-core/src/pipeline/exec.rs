@@ -361,12 +361,7 @@ impl Pipeline {
             let next = build_stream_stage(stage, kernel)?;
             chain = Box::new(cmp::Composed { a: chain, b: next });
         }
-        let final_demand = stages_ref[last_split..]
-            .iter()
-            .rev()
-            .fold(eff_sink.demand(), |demand, stage| {
-                stage.upstream_demand(demand)
-            })
+        let final_demand = Self::segment_source_demand(&stages_ref[last_split..], &eff_sink)
             .chain
             .pull;
 
