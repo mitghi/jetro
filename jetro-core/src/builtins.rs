@@ -465,8 +465,16 @@ pub struct BuiltinSpec {
     pub cardinality: BuiltinCardinality,
     pub can_indexed: bool,
     pub view_native: bool,
+    pub view_stage: Option<BuiltinViewStage>,
     pub pipeline_element: bool,
     pub cost: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinViewStage {
+    Filter,
+    Map,
+    FlatMap,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -503,12 +511,27 @@ impl BuiltinMethod {
         use BuiltinCardinality as Card;
         use BuiltinCategory as Cat;
 
-        let (category, cardinality, can_indexed, view_native, pipeline_element, cost) = match self {
+        type SpecParts = (
+            BuiltinCategory,
+            BuiltinCardinality,
+            bool,
+            bool,
+            Option<BuiltinViewStage>,
+            bool,
+            f64,
+        );
+
+        let spec: SpecParts = match self {
             Self::Filter | Self::Find | Self::FindAll | Self::Compact | Self::Remove => (
                 Cat::StreamingFilter,
                 Card::Filtering,
                 false,
                 false,
+                if matches!(self, Self::Filter | Self::Find | Self::FindAll) {
+                    Some(BuiltinViewStage::Filter)
+                } else {
+                    None
+                },
                 false,
                 10.0,
             ),
@@ -517,6 +540,11 @@ impl BuiltinMethod {
                 Card::OneToOne,
                 true,
                 false,
+                if matches!(self, Self::Map) {
+                    Some(BuiltinViewStage::Map)
+                } else {
+                    None
+                },
                 true,
                 10.0,
             ),
@@ -538,6 +566,11 @@ impl BuiltinMethod {
                     Card::Expanding,
                     false,
                     false,
+                    if matches!(self, Self::FlatMap) {
+                        Some(BuiltinViewStage::FlatMap)
+                    } else {
+                        None
+                    },
                     pipeline_element,
                     10.0,
                 )
@@ -547,13 +580,20 @@ impl BuiltinMethod {
                 Card::Filtering,
                 false,
                 false,
+                None,
                 false,
                 10.0,
             ),
-            Self::First | Self::Last | Self::Nth | Self::Collect => {
-                (Cat::Positional, Card::Bounded, false, true, false, 1.0)
-            }
-            Self::Len => (Cat::Reducer, Card::Reducing, true, true, false, 1.0),
+            Self::First | Self::Last | Self::Nth | Self::Collect => (
+                Cat::Positional,
+                Card::Bounded,
+                false,
+                true,
+                None,
+                false,
+                1.0,
+            ),
+            Self::Len => (Cat::Reducer, Card::Reducing, true, true, None, false, 1.0),
             Self::Sum
             | Self::Avg
             | Self::Min
@@ -564,7 +604,7 @@ impl BuiltinMethod {
             | Self::FindIndex
             | Self::IndicesWhere
             | Self::MaxBy
-            | Self::MinBy => (Cat::Reducer, Card::Reducing, false, true, false, 10.0),
+            | Self::MinBy => (Cat::Reducer, Card::Reducing, false, true, None, false, 10.0),
             Self::Sort
             | Self::Unique
             | Self::UniqueBy
@@ -579,7 +619,7 @@ impl BuiltinMethod {
             | Self::RollingAvg
             | Self::RollingMin
             | Self::RollingMax
-            | Self::Accumulate => (Cat::Barrier, Card::Barrier, false, false, false, 20.0),
+            | Self::Accumulate => (Cat::Barrier, Card::Barrier, false, false, None, false, 20.0),
             Self::Reverse
             | Self::Append
             | Self::Prepend
@@ -590,7 +630,7 @@ impl BuiltinMethod {
             | Self::Zip
             | Self::ZipLongest
             | Self::Fanout
-            | Self::ZipShape => (Cat::Barrier, Card::Barrier, false, false, false, 10.0),
+            | Self::ZipShape => (Cat::Barrier, Card::Barrier, false, false, None, false, 10.0),
             Self::Keys
             | Self::Values
             | Self::Entries
@@ -615,6 +655,7 @@ impl BuiltinMethod {
                     Card::OneToOne,
                     false,
                     false,
+                    None,
                     pipeline_element,
                     1.0,
                 )
@@ -633,6 +674,7 @@ impl BuiltinMethod {
                     Card::OneToOne,
                     true,
                     false,
+                    None,
                     pipeline_element,
                     1.0,
                 )
@@ -643,11 +685,25 @@ impl BuiltinMethod {
             | Self::Walk
             | Self::WalkPre
             | Self::Rec
-            | Self::TracePath => (Cat::Deep, Card::Expanding, false, false, false, 20.0),
-            Self::ToCsv | Self::ToTsv => {
-                (Cat::Serialization, Card::OneToOne, true, false, false, 20.0)
-            }
-            Self::EquiJoin => (Cat::Relational, Card::Barrier, false, false, false, 20.0),
+            | Self::TracePath => (Cat::Deep, Card::Expanding, false, false, None, false, 20.0),
+            Self::ToCsv | Self::ToTsv => (
+                Cat::Serialization,
+                Card::OneToOne,
+                true,
+                false,
+                None,
+                false,
+                20.0,
+            ),
+            Self::EquiJoin => (
+                Cat::Relational,
+                Card::Barrier,
+                false,
+                false,
+                None,
+                false,
+                20.0,
+            ),
             Self::Set | Self::Update => {
                 let pipeline_element = matches!(self, Self::Set);
                 (
@@ -655,6 +711,7 @@ impl BuiltinMethod {
                     Card::OneToOne,
                     true,
                     false,
+                    None,
                     pipeline_element,
                     1.0,
                 )
@@ -670,10 +727,11 @@ impl BuiltinMethod {
                 Card::OneToOne,
                 true,
                 false,
+                None,
                 true,
                 10.0,
             ),
-            Self::Unknown => (Cat::Unknown, Card::OneToOne, false, false, false, 1.0),
+            Self::Unknown => (Cat::Unknown, Card::OneToOne, false, false, None, false, 1.0),
             _ => {
                 let pipeline_element = matches!(
                     self,
@@ -745,11 +803,14 @@ impl BuiltinMethod {
                     Card::OneToOne,
                     true,
                     true,
+                    None,
                     pipeline_element,
                     1.0,
                 )
             }
         };
+        let (category, cardinality, can_indexed, view_native, view_stage, pipeline_element, cost) =
+            spec;
 
         BuiltinSpec {
             pure: self != Self::Unknown,
@@ -757,6 +818,7 @@ impl BuiltinMethod {
             cardinality,
             can_indexed,
             view_native,
+            view_stage,
             pipeline_element,
             cost,
         }
@@ -5653,7 +5715,7 @@ pub fn schema_apply(recv: &Val) -> Option<Val> {
 
 #[cfg(test)]
 mod spec_tests {
-    use super::{BuiltinCardinality, BuiltinCategory, BuiltinMethod};
+    use super::{BuiltinCardinality, BuiltinCategory, BuiltinMethod, BuiltinViewStage};
 
     #[test]
     fn builtin_specs_describe_execution_shape() {
@@ -5684,5 +5746,24 @@ mod spec_tests {
         assert!(!BuiltinMethod::FromJson.spec().pipeline_element);
         assert!(!BuiltinMethod::Sort.spec().pipeline_element);
         assert!(!BuiltinMethod::Flatten.spec().pipeline_element);
+    }
+
+    #[test]
+    fn builtin_specs_drive_view_stage_lowering() {
+        assert_eq!(
+            BuiltinMethod::Filter.spec().view_stage,
+            Some(BuiltinViewStage::Filter)
+        );
+        assert_eq!(
+            BuiltinMethod::Map.spec().view_stage,
+            Some(BuiltinViewStage::Map)
+        );
+        assert_eq!(
+            BuiltinMethod::FlatMap.spec().view_stage,
+            Some(BuiltinViewStage::FlatMap)
+        );
+
+        assert_eq!(BuiltinMethod::Sort.spec().view_stage, None);
+        assert_eq!(BuiltinMethod::Upper.spec().view_stage, None);
     }
 }

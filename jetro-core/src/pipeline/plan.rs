@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::ast::Expr;
+use crate::builtins::{BuiltinMethod, BuiltinViewStage};
 use crate::chain_ir::{ChainOp, Demand as ChainDemand, PullDemand, ValueNeed};
 
 use super::{
@@ -153,18 +154,34 @@ impl Stage {
         idx: usize,
         kernel: Option<&BodyKernel>,
     ) -> Option<ViewStageCapability> {
+        match self
+            .view_stage_method()
+            .and_then(|method| method.spec().view_stage)
+        {
+            Some(BuiltinViewStage::Filter) if kernel?.is_view_native() => {
+                return Some(ViewStageCapability::Filter { kernel: idx });
+            }
+            Some(BuiltinViewStage::Map) if kernel?.is_view_native() => {
+                return Some(ViewStageCapability::Map { kernel: idx });
+            }
+            Some(BuiltinViewStage::FlatMap) if kernel?.is_view_native() => {
+                return Some(ViewStageCapability::FlatMap { kernel: idx });
+            }
+            _ => {}
+        }
+
         match self {
-            Stage::Filter(_) if kernel?.is_view_native() => {
-                Some(ViewStageCapability::Filter { kernel: idx })
-            }
-            Stage::Map(_) if kernel?.is_view_native() => {
-                Some(ViewStageCapability::Map { kernel: idx })
-            }
-            Stage::FlatMap(_) if kernel?.is_view_native() => {
-                Some(ViewStageCapability::FlatMap { kernel: idx })
-            }
             Stage::Take(n) => Some(ViewStageCapability::Take(*n)),
             Stage::Skip(n) => Some(ViewStageCapability::Skip(*n)),
+            _ => None,
+        }
+    }
+
+    fn view_stage_method(&self) -> Option<BuiltinMethod> {
+        match self {
+            Stage::Filter(_) => Some(BuiltinMethod::Filter),
+            Stage::Map(_) => Some(BuiltinMethod::Map),
+            Stage::FlatMap(_) => Some(BuiltinMethod::FlatMap),
             _ => None,
         }
     }
