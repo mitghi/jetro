@@ -112,6 +112,7 @@ fn run_view_pipeline<'a, V>(
 where
     V: ValueView<'a>,
 {
+    let ops = view_ops_for_body(body)?;
     let items = match source.array_items() {
         Some(items) => items,
         None => return None,
@@ -127,30 +128,25 @@ where
     let mut acc_n_obs = 0usize;
     let mut acc_first: Option<Val> = None;
     let mut acc_last: Option<Val> = None;
-    let mut stage_taken: Vec<usize> = vec![0; body.stages.len()];
-    let mut stage_skipped: Vec<usize> = vec![0; body.stages.len()];
+    let mut op_state: Vec<usize> = vec![0; ops.len()];
 
     'outer: for row in items {
         let mut item = row;
-        for (stage_idx, stage) in body.stages.iter().enumerate() {
-            let kernel = body
-                .stage_kernels
-                .get(stage_idx)
-                .unwrap_or(&pipeline::BodyKernel::Generic);
-            match stage {
-                pipeline::Stage::Skip(n) => {
-                    if stage_skipped[stage_idx] < *n {
-                        stage_skipped[stage_idx] += 1;
+        for (op_idx, op) in ops.iter().enumerate() {
+            match op {
+                ViewOp::Skip(n) => {
+                    if op_state[op_idx] < *n {
+                        op_state[op_idx] += 1;
                         continue 'outer;
                     }
                 }
-                pipeline::Stage::Take(n) => {
-                    if stage_taken[stage_idx] >= *n {
+                ViewOp::Take(n) => {
+                    if op_state[op_idx] >= *n {
                         break 'outer;
                     }
-                    stage_taken[stage_idx] += 1;
+                    op_state[op_idx] += 1;
                 }
-                pipeline::Stage::Filter(_) => {
+                ViewOp::Filter(kernel) => {
                     let Some(keep) = eval_view_filter_kernel(&item, kernel) else {
                         return None;
                     };
@@ -158,13 +154,12 @@ where
                         continue 'outer;
                     }
                 }
-                pipeline::Stage::Map(_) => {
+                ViewOp::Map(kernel) => {
                     let Some(mapped) = eval_view_map_kernel(&item, kernel) else {
                         return None;
                     };
                     item = mapped;
                 }
-                _ => return None,
             }
         }
 
@@ -222,6 +217,60 @@ where
         pipeline::Sink::Last => acc_last.unwrap_or(Val::Null),
         pipeline::Sink::ApproxCountDistinct => return None,
     }))
+}
+
+enum ViewOp<'a> {
+    Filter(&'a pipeline::BodyKernel),
+    Map(&'a pipeline::BodyKernel),
+    Take(usize),
+    Skip(usize),
+}
+
+fn view_ops_for_body(body: &pipeline::PipelineBody) -> Option<Vec<ViewOp<'_>>> {
+    let mut ops = Vec::with_capacity(body.stages.len());
+    for (idx, stage) in body.stages.iter().enumerate() {
+        let kernel = body
+            .stage_kernels
+            .get(idx)
+            .unwrap_or(&pipeline::BodyKernel::Generic);
+        let op = classify_view_stage(stage, kernel)?;
+        ops.push(op);
+    }
+    Some(ops)
+}
+
+fn classify_view_stage<'a>(
+    stage: &pipeline::Stage,
+    kernel: &'a pipeline::BodyKernel,
+) -> Option<ViewOp<'a>> {
+    match view_stage_shape(stage)? {
+        ViewStageShape::Filter if !matches!(kernel, pipeline::BodyKernel::Generic) => {
+            Some(ViewOp::Filter(kernel))
+        }
+        ViewStageShape::Map if !matches!(kernel, pipeline::BodyKernel::Generic) => {
+            Some(ViewOp::Map(kernel))
+        }
+        ViewStageShape::Take(n) => Some(ViewOp::Take(n)),
+        ViewStageShape::Skip(n) => Some(ViewOp::Skip(n)),
+        ViewStageShape::Filter | ViewStageShape::Map => None,
+    }
+}
+
+enum ViewStageShape {
+    Filter,
+    Map,
+    Take(usize),
+    Skip(usize),
+}
+
+fn view_stage_shape(stage: &pipeline::Stage) -> Option<ViewStageShape> {
+    match stage {
+        pipeline::Stage::Filter(_) => Some(ViewStageShape::Filter),
+        pipeline::Stage::Map(_) => Some(ViewStageShape::Map),
+        pipeline::Stage::Take(n) => Some(ViewStageShape::Take(*n)),
+        pipeline::Stage::Skip(n) => Some(ViewStageShape::Skip(*n)),
+        _ => None,
+    }
 }
 
 fn eval_view_filter_kernel<'a, V>(item: &V, kernel: &pipeline::BodyKernel) -> Option<bool>
@@ -388,20 +437,8 @@ where
 }
 
 fn pipeline_body_is_view_safe(body: &pipeline::PipelineBody) -> bool {
-    for (idx, stage) in body.stages.iter().enumerate() {
-        let kernel = body
-            .stage_kernels
-            .get(idx)
-            .unwrap_or(&pipeline::BodyKernel::Generic);
-        match stage {
-            pipeline::Stage::Filter(_) | pipeline::Stage::Map(_) => {
-                if matches!(kernel, pipeline::BodyKernel::Generic) {
-                    return false;
-                }
-            }
-            pipeline::Stage::Skip(_) | pipeline::Stage::Take(_) => {}
-            _ => return false,
-        }
+    if view_ops_for_body(body).is_none() {
+        return false;
     }
 
     match &body.sink {
