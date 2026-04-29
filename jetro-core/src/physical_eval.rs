@@ -44,15 +44,8 @@ impl ExecCtx<'_> {
                 .cloned()
                 .unwrap_or_else(|| self.env.current.get_field(name.as_ref()))),
             PlanNode::Pipeline { source, body } => {
-                let source = match source {
-                    PipelinePlanSource::FieldChain { keys } => {
-                        pipeline::Source::FieldChain { keys: keys.clone() }
-                    }
-                    PipelinePlanSource::Expr(source) => {
-                        pipeline::Source::Receiver(self.eval(*source)?)
-                    }
-                };
-                let pipeline = body.clone().with_source(source);
+                let source = self.resolve_pipeline_source(source)?;
+                let pipeline = body.clone().with_source(source.into_pipeline_source());
                 pipeline.run_with_env(
                     &self.root,
                     &self.env,
@@ -120,6 +113,20 @@ impl ExecCtx<'_> {
                 result
             }
             PlanNode::Vm(program) => self.vm.exec_in_env(program, &mut self.env),
+        }
+    }
+
+    fn resolve_pipeline_source(
+        &mut self,
+        source: &PipelinePlanSource,
+    ) -> Result<ResolvedPipelineSource, EvalError> {
+        match source {
+            PipelinePlanSource::FieldChain { keys } => {
+                Ok(ResolvedPipelineSource::FieldChain { keys: keys.clone() })
+            }
+            PipelinePlanSource::Expr(source) => {
+                Ok(ResolvedPipelineSource::Receiver(self.eval(*source)?))
+            }
         }
     }
 
@@ -274,6 +281,20 @@ impl ExecCtx<'_> {
             }
         }
         Ok(Val::arr(out))
+    }
+}
+
+enum ResolvedPipelineSource {
+    FieldChain { keys: Arc<[Arc<str>]> },
+    Receiver(Val),
+}
+
+impl ResolvedPipelineSource {
+    fn into_pipeline_source(self) -> pipeline::Source {
+        match self {
+            Self::FieldChain { keys } => pipeline::Source::FieldChain { keys },
+            Self::Receiver(value) => pipeline::Source::Receiver(value),
+        }
     }
 }
 
