@@ -8,6 +8,7 @@ use crate::{
 use super::composed_barrier::{self, BarrierOutput};
 use super::composed_segment;
 use super::composed_sink;
+use super::composed_source;
 use super::composed_stage::ComposedStageBuilder;
 use super::lower::run_compiled_map;
 use super::{
@@ -153,19 +154,7 @@ impl Pipeline {
         let (eff_stages, eff_kernels, eff_sink) = self.canonical();
         let stage_builder = ComposedStageBuilder::new(base_env);
 
-        // Resolve source to an owned Vec<Val>. Future: avoid clone on
-        // pure Arr by holding Arc<Vec<Val>> for the first segment.
-        let recv = match &self.source {
-            Source::Receiver(v) => v.clone(),
-            Source::FieldChain { keys } => walk_field_chain(root, keys),
-        };
-        let mut buf: Vec<Val> = match recv {
-            Val::Arr(a) => a.as_ref().clone(),
-            Val::IntVec(a) => a.iter().map(|n| Val::Int(*n)).collect(),
-            Val::FloatVec(a) => a.iter().map(|f| Val::Float(*f)).collect(),
-            Val::StrVec(a) => a.iter().map(|s| Val::Str(Arc::clone(s))).collect(),
-            _ => return None,
-        };
+        let mut buf = composed_source::rows(&self.source, root)?;
 
         // Walk stages, splitting at barriers. Each streaming run uses
         // a composed-Cow chain into a CollectSink to materialise the

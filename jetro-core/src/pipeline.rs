@@ -45,6 +45,7 @@ mod common;
 mod composed_barrier;
 mod composed_segment;
 mod composed_sink;
+mod composed_source;
 mod composed_stage;
 mod exec;
 mod kernels;
