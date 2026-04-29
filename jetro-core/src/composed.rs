@@ -33,6 +33,7 @@ use smallvec::SmallVec;
 use std::borrow::Cow;
 
 use crate::builtins::BuiltinCall;
+use crate::chain_ir::PullDemand;
 use crate::value::Val;
 
 // ── Stage ────────────────────────────────────────────────────────────────────
@@ -252,12 +253,34 @@ pub trait Sink {
 /// element through the composed `stages`, accumulating into `S::Acc`.
 /// Stages composed once at lower-time, used N× here.
 pub fn run_pipeline<S: Sink>(arr: &[Val], stages: &dyn Stage) -> Val {
+    run_pipeline_with_demand::<S>(arr, stages, PullDemand::All)
+}
+
+/// Demand-aware variant of [`run_pipeline`]. `AtMost(n)` is a hard cap
+/// on upstream inputs pulled from `arr`; `UntilOutput(n)` stops after n
+/// values have reached the sink, regardless of how many inputs filters
+/// had to inspect to produce them.
+pub fn run_pipeline_with_demand<S: Sink>(
+    arr: &[Val],
+    stages: &dyn Stage,
+    demand: PullDemand,
+) -> Val {
     let mut acc = S::init();
+    let mut pulled_inputs = 0usize;
+    let mut emitted_outputs = 0usize;
     for v in arr.iter() {
+        if matches!(demand, PullDemand::AtMost(n) if pulled_inputs >= n) {
+            break;
+        }
+        pulled_inputs += 1;
         match stages.apply(v) {
             StageOutput::Pass(cow) => {
                 acc = S::fold(acc, cow.as_ref());
+                emitted_outputs += 1;
                 if S::done(&acc) {
+                    break;
+                }
+                if matches!(demand, PullDemand::UntilOutput(n) if emitted_outputs >= n) {
                     break;
                 }
             }
@@ -265,11 +288,17 @@ pub fn run_pipeline<S: Sink>(arr: &[Val], stages: &dyn Stage) -> Val {
             StageOutput::Many(items) => {
                 for it in items {
                     acc = S::fold(acc, it.as_ref());
+                    emitted_outputs += 1;
                     if S::done(&acc) {
                         break;
                     }
+                    if matches!(demand, PullDemand::UntilOutput(n) if emitted_outputs >= n) {
+                        break;
+                    }
                 }
-                if S::done(&acc) {
+                if S::done(&acc)
+                    || matches!(demand, PullDemand::UntilOutput(n) if emitted_outputs >= n)
+                {
                     break;
                 }
             }
@@ -1243,6 +1272,56 @@ mod tests {
         let out = run_pipeline::<FirstSink>(&arr, &CountingPass(&seen));
         assert!(matches!(out, Val::Int(0)));
         assert_eq!(seen.get(), 1);
+    }
+
+    #[test]
+    fn demand_at_most_caps_composed_inputs() {
+        struct CountingPass<'a>(&'a std::cell::Cell<usize>);
+
+        impl Stage for CountingPass<'_> {
+            fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+                self.0.set(self.0.get() + 1);
+                StageOutput::Pass(Cow::Borrowed(x))
+            }
+        }
+
+        let seen = std::cell::Cell::new(0);
+        let arr: Vec<Val> = (0..1000).map(Val::Int).collect();
+        let out = run_pipeline_with_demand::<CountSink>(
+            &arr,
+            &CountingPass(&seen),
+            PullDemand::AtMost(3),
+        );
+        assert!(matches!(out, Val::Int(3)));
+        assert_eq!(seen.get(), 3);
+    }
+
+    #[test]
+    fn demand_until_output_counts_emitted_values() {
+        struct CountingEven<'a>(&'a std::cell::Cell<usize>);
+
+        impl Stage for CountingEven<'_> {
+            fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+                self.0.set(self.0.get() + 1);
+                match x {
+                    Val::Int(n) if n % 2 == 0 => StageOutput::Pass(Cow::Borrowed(x)),
+                    _ => StageOutput::Filtered,
+                }
+            }
+        }
+
+        let seen = std::cell::Cell::new(0);
+        let arr: Vec<Val> = (1..1000).map(Val::Int).collect();
+        let out = run_pipeline_with_demand::<CollectSink>(
+            &arr,
+            &CountingEven(&seen),
+            PullDemand::UntilOutput(2),
+        );
+        let Val::Arr(items) = out else {
+            panic!("expected Arr");
+        };
+        assert_eq!(items.as_ref(), &vec![Val::Int(2), Val::Int(4)]);
+        assert_eq!(seen.get(), 4);
     }
 
     #[test]

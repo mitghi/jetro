@@ -361,16 +361,42 @@ impl Pipeline {
             let next = build_stream_stage(stage, kernel)?;
             chain = Box::new(cmp::Composed { a: chain, b: next });
         }
+        let final_demand = stages_ref[last_split..]
+            .iter()
+            .rev()
+            .fold(eff_sink.demand(), |demand, stage| {
+                stage.upstream_demand(demand)
+            })
+            .chain
+            .pull;
 
         let out = match sink_kind {
-            SinkKind::Count => cmp::run_pipeline::<cmp::CountSink>(&buf, chain.as_ref()),
-            SinkKind::Sum => cmp::run_pipeline::<cmp::SumSink>(&buf, chain.as_ref()),
-            SinkKind::Min => cmp::run_pipeline::<cmp::MinSink>(&buf, chain.as_ref()),
-            SinkKind::Max => cmp::run_pipeline::<cmp::MaxSink>(&buf, chain.as_ref()),
-            SinkKind::Avg => cmp::run_pipeline::<cmp::AvgSink>(&buf, chain.as_ref()),
-            SinkKind::First => cmp::run_pipeline::<cmp::FirstSink>(&buf, chain.as_ref()),
-            SinkKind::Last => cmp::run_pipeline::<cmp::LastSink>(&buf, chain.as_ref()),
-            SinkKind::Collect => cmp::run_pipeline::<cmp::CollectSink>(&buf, chain.as_ref()),
+            SinkKind::Count => {
+                cmp::run_pipeline_with_demand::<cmp::CountSink>(&buf, chain.as_ref(), final_demand)
+            }
+            SinkKind::Sum => {
+                cmp::run_pipeline_with_demand::<cmp::SumSink>(&buf, chain.as_ref(), final_demand)
+            }
+            SinkKind::Min => {
+                cmp::run_pipeline_with_demand::<cmp::MinSink>(&buf, chain.as_ref(), final_demand)
+            }
+            SinkKind::Max => {
+                cmp::run_pipeline_with_demand::<cmp::MaxSink>(&buf, chain.as_ref(), final_demand)
+            }
+            SinkKind::Avg => {
+                cmp::run_pipeline_with_demand::<cmp::AvgSink>(&buf, chain.as_ref(), final_demand)
+            }
+            SinkKind::First => {
+                cmp::run_pipeline_with_demand::<cmp::FirstSink>(&buf, chain.as_ref(), final_demand)
+            }
+            SinkKind::Last => {
+                cmp::run_pipeline_with_demand::<cmp::LastSink>(&buf, chain.as_ref(), final_demand)
+            }
+            SinkKind::Collect => cmp::run_pipeline_with_demand::<cmp::CollectSink>(
+                &buf,
+                chain.as_ref(),
+                final_demand,
+            ),
             SinkKind::GroupByOnly => unreachable!(),
         };
 

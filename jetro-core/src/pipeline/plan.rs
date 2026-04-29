@@ -72,11 +72,14 @@ pub fn compute_strategies(stages: &[Stage], sink: &Sink) -> Vec<StageStrategy> {
     let mut demand = sink.demand();
     for (i, stage) in stages.iter().enumerate().rev() {
         if let Stage::Sort(_) = stage {
-            if let PullDemand::AtMost(k) = demand.chain.pull {
-                strategies[i] = match demand.positional {
-                    Some(Position::Last) => StageStrategy::SortBottomK(k),
-                    _ => StageStrategy::SortTopK(k),
-                };
+            match demand.chain.pull {
+                PullDemand::AtMost(k) | PullDemand::UntilOutput(k) => {
+                    strategies[i] = match demand.positional {
+                        Some(Position::Last) => StageStrategy::SortBottomK(k),
+                        _ => StageStrategy::SortTopK(k),
+                    };
+                }
+                PullDemand::All => {}
             }
         }
         demand = stage.upstream_demand(demand);
