@@ -367,6 +367,40 @@ mod tests {
         assert!(!j.root_val_is_materialized());
     }
 
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn top_level_pipeline_source_reads_from_tape_without_materializing_root_val() {
+        let j = Jetro::from_bytes(
+            br#"{"books":[{"title":"low","score":1},{"title":"a","score":901},{"title":"b","score":902}],"unused":{"large":[1,2,3]}}"#.to_vec(),
+        )
+        .unwrap();
+
+        let out = j
+            .collect(r#"$.books.filter(score > 900).take(1).map(title)"#)
+            .unwrap();
+
+        assert_eq!(out, json!(["a"]));
+        assert!(!j.root_val_is_materialized());
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn object_shape_pipeline_child_reads_from_tape_without_materializing_root_val() {
+        let j = Jetro::from_bytes(
+            br#"{"books":[{"title":"low","score":1},{"title":"a","score":901},{"title":"b","score":902}],"meta":{"version":3}}"#.to_vec(),
+        )
+        .unwrap();
+
+        let out = j
+            .collect(
+                r#"{"top": $.books.filter(score > 900).take(1).map(title), "v": $.meta.version}"#,
+            )
+            .unwrap();
+
+        assert_eq!(out, json!({"top": ["a"], "v": 3}));
+        assert!(!j.root_val_is_materialized());
+    }
+
     #[test]
     fn object_shape_executes_common_scalar_nodes_without_vm() {
         let expr = r#"{"gt": $.a > 1, "sum": $.a + 4, "picked": "yes" if $.ok else "no"}"#;

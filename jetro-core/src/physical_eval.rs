@@ -17,15 +17,18 @@ use crate::{Jetro, VM};
 pub(crate) fn run(j: &Jetro, plan: &QueryPlan, root_id: NodeId) -> Result<Val, EvalError> {
     #[cfg(feature = "simd-json")]
     if let Some(tape) = j.lazy_tape() {
-        if let Some(result) =
-            try_run_view_plan(plan, root_id, crate::value_view::TapeView::root(tape))
-        {
+        if let Some(result) = try_run_view_plan(
+            plan,
+            root_id,
+            crate::value_view::TapeView::root(tape),
+            Some(j),
+        ) {
             return result;
         }
     }
 
     let root = j.root_val();
-    if let Some(result) = try_run_view_plan(plan, root_id, ValView::new(&root)) {
+    if let Some(result) = try_run_view_plan(plan, root_id, ValView::new(&root), Some(j)) {
         return result;
     }
 
@@ -43,11 +46,12 @@ fn try_run_view_plan<'a, V>(
     plan: &QueryPlan,
     root_id: NodeId,
     root: V,
+    cache: Option<&dyn pipeline::PipelineData>,
 ) -> Option<Result<Val, EvalError>>
 where
     V: ValueView<'a>,
 {
-    eval_view_val(plan, root_id, &root, &root)
+    eval_view_val(plan, root_id, &root, &root, cache)
 }
 
 fn eval_view_val<'a, V>(
@@ -55,6 +59,7 @@ fn eval_view_val<'a, V>(
     id: NodeId,
     root: &V,
     current: &V,
+    cache: Option<&dyn pipeline::PipelineData>,
 ) -> Option<Result<Val, EvalError>>
 where
     V: ValueView<'a>,
@@ -65,10 +70,35 @@ where
 
     match plan.node(id) {
         PlanNode::Literal(value) => Some(Ok(value.clone())),
-        PlanNode::Object(fields) => eval_view_object(plan, fields, root, current),
-        PlanNode::Array(elems) => eval_view_array(plan, elems, root, current),
+        PlanNode::Pipeline {
+            source: PipelinePlanSource::FieldChain { keys },
+            body,
+        } => eval_view_pipeline(root, keys, body, cache),
+        PlanNode::Object(fields) => eval_view_object(plan, fields, root, current, cache),
+        PlanNode::Array(elems) => eval_view_array(plan, elems, root, current, cache),
         _ => None,
     }
+}
+
+fn eval_view_pipeline<'a, V>(
+    root: &V,
+    keys: &[Arc<str>],
+    body: &pipeline::PipelineBody,
+    cache: Option<&dyn pipeline::PipelineData>,
+) -> Option<Result<Val, EvalError>>
+where
+    V: ValueView<'a>,
+{
+    if !pipeline_body_is_view_safe(body) {
+        return None;
+    }
+    let source = walk_view_fields(root.clone(), keys);
+    let pipeline = body
+        .clone()
+        .with_source(pipeline::Source::Receiver(source.materialize()));
+    let root = Val::Null;
+    let env = Env::new(Val::Null);
+    Some(pipeline.run_with_env(&root, &env, cache))
 }
 
 fn eval_view_ref<'a, V>(
@@ -100,6 +130,7 @@ fn eval_view_object<'a, V>(
     fields: &[PhysicalObjField],
     root: &V,
     current: &V,
+    cache: Option<&dyn pipeline::PipelineData>,
 ) -> Option<Result<Val, EvalError>>
 where
     V: ValueView<'a>,
@@ -117,7 +148,7 @@ where
                 if cond.is_some() {
                     return None;
                 }
-                let value = match eval_view_val(plan, *val, root, current)? {
+                let value = match eval_view_val(plan, *val, root, current, cache)? {
                     Ok(value) => value,
                     Err(err) => return Some(Err(err)),
                 };
@@ -140,6 +171,7 @@ fn eval_view_array<'a, V>(
     elems: &[PhysicalArrayElem],
     root: &V,
     current: &V,
+    cache: Option<&dyn pipeline::PipelineData>,
 ) -> Option<Result<Val, EvalError>>
 where
     V: ValueView<'a>,
@@ -147,14 +179,49 @@ where
     let mut out = Vec::with_capacity(elems.len());
     for elem in elems {
         match elem {
-            PhysicalArrayElem::Expr(expr) => match eval_view_val(plan, *expr, root, current)? {
-                Ok(value) => out.push(value),
-                Err(err) => return Some(Err(err)),
-            },
+            PhysicalArrayElem::Expr(expr) => {
+                match eval_view_val(plan, *expr, root, current, cache)? {
+                    Ok(value) => out.push(value),
+                    Err(err) => return Some(Err(err)),
+                }
+            }
             PhysicalArrayElem::Spread(_) => return None,
         }
     }
     Some(Ok(Val::arr(out)))
+}
+
+fn pipeline_body_is_view_safe(body: &pipeline::PipelineBody) -> bool {
+    for (idx, stage) in body.stages.iter().enumerate() {
+        let kernel = body
+            .stage_kernels
+            .get(idx)
+            .unwrap_or(&pipeline::BodyKernel::Generic);
+        match stage {
+            pipeline::Stage::Filter(_) | pipeline::Stage::Map(_) => {
+                if matches!(kernel, pipeline::BodyKernel::Generic) {
+                    return false;
+                }
+            }
+            pipeline::Stage::Skip(_) | pipeline::Stage::Take(_) => {}
+            _ => return false,
+        }
+    }
+
+    match &body.sink {
+        pipeline::Sink::Collect
+        | pipeline::Sink::Count
+        | pipeline::Sink::First
+        | pipeline::Sink::Last => true,
+        pipeline::Sink::Numeric(n) => {
+            n.project.is_none()
+                || body
+                    .sink_kernels
+                    .iter()
+                    .all(|kernel| !matches!(kernel, pipeline::BodyKernel::Generic))
+        }
+        pipeline::Sink::ApproxCountDistinct => false,
+    }
 }
 
 fn walk_path_view<'a, V>(mut cur: V, steps: &[PhysicalPathStep]) -> V
@@ -166,6 +233,16 @@ where
             PhysicalPathStep::Field(key) => cur.field(key.as_ref()),
             PhysicalPathStep::Index(idx) => cur.index(*idx),
         };
+    }
+    cur
+}
+
+fn walk_view_fields<'a, V>(mut cur: V, keys: &[Arc<str>]) -> V
+where
+    V: ValueView<'a>,
+{
+    for key in keys {
+        cur = cur.field(key.as_ref());
     }
     cur
 }
