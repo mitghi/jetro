@@ -5,11 +5,7 @@ use crate::{
     value::Val,
 };
 
-use super::composed_barrier::{self, BarrierOutput};
-use super::composed_segment;
-use super::composed_sink;
-use super::composed_source;
-use super::composed_stage::ComposedStageBuilder;
+use super::composed_exec;
 use super::lower::run_compiled_map;
 use super::{
     apply_item_in_env, bounded_sort_by_key, cmp_val_total, composed_path_enabled,
@@ -150,85 +146,6 @@ impl Pipeline {
         Some(Ok(cur))
     }
 
-    fn try_run_composed(&self, root: &Val, base_env: &Env) -> Option<Result<Val, EvalError>> {
-        let (eff_stages, eff_kernels, eff_sink) = self.canonical();
-        let stage_builder = ComposedStageBuilder::new(base_env);
-
-        let mut buf = composed_source::rows(&self.source, root)?;
-
-        // Walk stages, splitting at barriers. Each streaming run uses
-        // a composed-Cow chain into a CollectSink to materialise the
-        // intermediate Vec<Val>; each barrier consumes Vec, returns
-        // Vec. Final segment uses the actual sink. GroupBy is treated
-        // as a barrier whose output Val replaces the buffer (used
-        // only when followed by no further stages + Sink::Collect).
-        let kernels = &eff_kernels;
-        let stages_ref = &eff_stages;
-
-        // Step 3d Phase 1: demand propagation.  Each stage sees the
-        // demand its downstream wants, picks an algorithm, and exposes
-        // upstream demand.  Sort under bounded downstream demand picks
-        // top-k instead of full sort — generic mechanism, no rewrite
-        // rule.
-        let strategies = compute_strategies(stages_ref, &eff_sink);
-
-        // Find barrier positions. Each [last_split..barrier_idx] is a
-        // streaming segment; [barrier_idx] is the barrier op.
-        let mut last_split = 0usize;
-        for (i, s) in stages_ref.iter().enumerate() {
-            let is_barrier = matches!(
-                s,
-                Stage::Reverse | Stage::Sort(_) | Stage::UniqueBy(_) | Stage::GroupBy(_)
-            );
-            if !is_barrier {
-                continue;
-            }
-
-            // Build streaming chain over [last_split..i].
-            if i > last_split {
-                let chain = composed_segment::build_chain(
-                    stages_ref,
-                    kernels,
-                    last_split..i,
-                    &stage_builder,
-                )?;
-                buf = composed_segment::collect(&buf, chain.as_ref())?;
-            }
-
-            // Apply barrier.
-            let kernel = kernels.get(i).unwrap_or(&BodyKernel::Generic);
-            let strategy = strategies.get(i).copied().unwrap_or(StageStrategy::Default);
-            match composed_barrier::run(
-                s,
-                kernel,
-                strategy,
-                &eff_sink,
-                i + 1 == stages_ref.len(),
-                buf,
-            )? {
-                BarrierOutput::Rows(rows) => buf = rows,
-                BarrierOutput::Done(val) => return Some(Ok(val)),
-            };
-
-            last_split = i + 1;
-        }
-
-        // Final streaming segment + sink.
-        let chain = composed_segment::build_chain(
-            stages_ref,
-            kernels,
-            last_split..stages_ref.len(),
-            &stage_builder,
-        )?;
-        let final_demand = Self::segment_source_demand(&stages_ref[last_split..], &eff_sink)
-            .chain
-            .pull;
-
-        let out = composed_sink::run(&eff_sink, &buf, chain.as_ref(), final_demand)?;
-
-        Some(Ok(out))
-    }
-
     /// Execute with an optional ObjVec promotion cache.  When `cache`
     /// is `Some`, the pipeline consults it before resolving sources;
     /// uniform-shape `Val::Arr<Val::Obj>` arrays are promoted to
@@ -277,7 +194,7 @@ impl Pipeline {
         // Sinks (NumMap/NumFilterMap/CountIf/etc.) into base Stage +
         // base Sink at entry — composition handles the rest.
         if composed_path_enabled() {
-            if let Some(out) = self.try_run_composed(root, base_env) {
+            if let Some(out) = composed_exec::run(self, root, base_env) {
                 return out;
             }
         }

@@ -43,6 +43,7 @@ mod collector;
 mod columnar;
 mod common;
 mod composed_barrier;
+mod composed_exec;
 mod composed_segment;
 mod composed_sink;
 mod composed_source;
