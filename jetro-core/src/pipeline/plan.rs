@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::ast::Expr;
 use crate::chain_ir::{ChainOp, Demand as ChainDemand, PullDemand, ValueNeed};
 
-use super::{normalize::normalize_symbolic, BodyKernel, Sink, Stage};
+use super::{normalize::normalize_symbolic, BodyKernel, Pipeline, Sink, Stage};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Position {
@@ -82,6 +82,17 @@ pub fn compute_strategies(stages: &[Stage], sink: &Sink) -> Vec<StageStrategy> {
         demand = stage.upstream_demand(demand);
     }
     strategies
+}
+
+impl Pipeline {
+    pub fn source_demand(&self) -> SinkDemand {
+        self.stages
+            .iter()
+            .rev()
+            .fold(self.sink.demand(), |demand, stage| {
+                stage.upstream_demand(demand)
+            })
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

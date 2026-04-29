@@ -436,15 +436,7 @@ impl Pipeline {
         // Pull-based stage chain.  At Phase 1 the inner loop materialises
         // elements one at a time as `Val`; Phase 3 will switch this to a
         // per-batch pull over columnar lanes.
-        let source_demand = self
-            .stages
-            .iter()
-            .rev()
-            .fold(self.sink.demand(), |demand, stage| {
-                stage.upstream_demand(demand)
-            })
-            .chain
-            .pull;
+        let source_demand = self.source_demand().chain.pull;
         let mut pulled_inputs: usize = 0;
         let mut emitted_outputs: usize = 0;
         let mut stage_taken: Vec<usize> = vec![0; self.stages.len()];

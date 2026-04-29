@@ -818,13 +818,7 @@ mod tests {
         }))
             .into();
         let p = lower_query("$.data.take(2).filter(score > 900).first()").unwrap();
-        let demand = p
-            .stages
-            .iter()
-            .rev()
-            .fold(p.sink.demand(), |demand, stage| {
-                stage.upstream_demand(demand)
-            });
+        let demand = p.source_demand();
         assert_eq!(demand.chain.pull, crate::chain_ir::PullDemand::AtMost(2));
         let out = p.run(&doc).unwrap();
         assert_eq!(out, Val::Null);
@@ -842,13 +836,7 @@ mod tests {
         }))
             .into();
         let p = lower_query("$.data.filter(score > 900 or 1 / 0 > 0).take(2)").unwrap();
-        let demand = p
-            .stages
-            .iter()
-            .rev()
-            .fold(p.sink.demand(), |demand, stage| {
-                stage.upstream_demand(demand)
-            });
+        let demand = p.source_demand();
         assert_eq!(
             demand.chain.pull,
             crate::chain_ir::PullDemand::UntilOutput(2)
@@ -872,13 +860,7 @@ mod tests {
         }))
             .into();
         let p = lower_query("$.data.filter(score > 900).last()").unwrap();
-        let demand = p
-            .stages
-            .iter()
-            .rev()
-            .fold(p.sink.demand(), |demand, stage| {
-                stage.upstream_demand(demand)
-            });
+        let demand = p.source_demand();
         assert_eq!(demand.chain.pull, crate::chain_ir::PullDemand::All);
         let out = p.run(&doc).unwrap();
         let out_json: serde_json::Value = out.into();
