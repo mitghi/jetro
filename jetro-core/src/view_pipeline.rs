@@ -6,6 +6,7 @@ use crate::context::{Env, EvalError};
 use crate::pipeline;
 use crate::value::Val;
 use crate::value_view::ValueView;
+use crate::vm::{Opcode, Program};
 
 pub(crate) fn walk_fields<'a, V>(mut cur: V, keys: &[Arc<str>]) -> V
 where
@@ -15,6 +16,11 @@ where
         cur = cur.field(key.as_ref());
     }
     cur
+}
+
+pub(crate) fn can_run_materialized_receiver(body: &pipeline::PipelineBody) -> bool {
+    suffix_stages_can_run_without_outer_env(&body.stages)
+        && suffix_sink_can_run_without_outer_env(body)
 }
 
 pub(crate) fn run<'a, V>(
@@ -255,21 +261,38 @@ fn suffix_body(body: &pipeline::PipelineBody, consumed_stages: usize) -> pipelin
 }
 
 fn suffix_stages_can_run_without_outer_env(stages: &[pipeline::Stage]) -> bool {
-    stages.iter().all(|stage| {
-        matches!(
-            stage,
-            pipeline::Stage::Take(_)
-                | pipeline::Stage::Skip(_)
-                | pipeline::Stage::Reverse
-                | pipeline::Stage::Sort(None)
-                | pipeline::Stage::UniqueBy(None)
-                | pipeline::Stage::Builtin(_)
-                | pipeline::Stage::Split(_)
-                | pipeline::Stage::Slice(_, _)
-                | pipeline::Stage::Replace { .. }
-                | pipeline::Stage::Chunk(_)
-                | pipeline::Stage::Window(_)
-        )
+    stages.iter().all(|stage| match stage {
+        pipeline::Stage::Take(_)
+        | pipeline::Stage::Skip(_)
+        | pipeline::Stage::Reverse
+        | pipeline::Stage::Sort(None)
+        | pipeline::Stage::UniqueBy(None)
+        | pipeline::Stage::Builtin(_)
+        | pipeline::Stage::Split(_)
+        | pipeline::Stage::Slice(_, _)
+        | pipeline::Stage::Replace { .. }
+        | pipeline::Stage::Chunk(_)
+        | pipeline::Stage::Window(_) => true,
+        pipeline::Stage::Filter(prog)
+        | pipeline::Stage::Map(prog)
+        | pipeline::Stage::FlatMap(prog)
+        | pipeline::Stage::Sort(Some(prog))
+        | pipeline::Stage::UniqueBy(Some(prog))
+        | pipeline::Stage::GroupBy(prog)
+        | pipeline::Stage::TakeWhile(prog)
+        | pipeline::Stage::DropWhile(prog)
+        | pipeline::Stage::IndicesWhere(prog)
+        | pipeline::Stage::FindIndex(prog)
+        | pipeline::Stage::MaxBy(prog)
+        | pipeline::Stage::MinBy(prog)
+        | pipeline::Stage::TransformValues(prog)
+        | pipeline::Stage::TransformKeys(prog)
+        | pipeline::Stage::FilterValues(prog)
+        | pipeline::Stage::FilterKeys(prog)
+        | pipeline::Stage::CountBy(prog)
+        | pipeline::Stage::IndexBy(prog)
+        | pipeline::Stage::SortedDedup(Some(prog)) => program_is_current_only(prog),
+        pipeline::Stage::CompiledMap(_) | pipeline::Stage::SortedDedup(None) => false,
     })
 }
 
@@ -280,7 +303,86 @@ fn suffix_sink_can_run_without_outer_env(body: &pipeline::PipelineBody) -> bool 
         | pipeline::Sink::First
         | pipeline::Sink::Last
         | pipeline::Sink::ApproxCountDistinct => true,
-        pipeline::Sink::Numeric(n) => n.project.is_none(),
+        pipeline::Sink::Numeric(n) => n
+            .project
+            .as_ref()
+            .is_none_or(|project| program_is_current_only(project)),
+    }
+}
+
+fn program_is_current_only(program: &Program) -> bool {
+    program.ops.iter().all(opcode_is_current_only)
+}
+
+fn opcode_is_current_only(opcode: &Opcode) -> bool {
+    match opcode {
+        Opcode::PushRoot | Opcode::RootChain(_) | Opcode::GetPointer(_) => false,
+        Opcode::BindVar(_)
+        | Opcode::StoreVar(_)
+        | Opcode::BindObjDestructure(_)
+        | Opcode::BindArrDestructure(_)
+        | Opcode::PipelineRun { .. }
+        | Opcode::LetExpr { .. }
+        | Opcode::ListComp(_)
+        | Opcode::DictComp(_)
+        | Opcode::SetComp(_)
+        | Opcode::PatchEval(_) => false,
+        Opcode::DynIndex(prog)
+        | Opcode::InlineFilter(prog)
+        | Opcode::AndOp(prog)
+        | Opcode::OrOp(prog)
+        | Opcode::CoalesceOp(prog) => program_is_current_only(prog),
+        Opcode::CallMethod(call) | Opcode::CallOptMethod(call) => call
+            .sub_progs
+            .iter()
+            .all(|prog| program_is_current_only(prog)),
+        Opcode::IfElse { then_, else_ } => {
+            program_is_current_only(then_) && program_is_current_only(else_)
+        }
+        Opcode::TryExpr { body, default } => {
+            program_is_current_only(body) && program_is_current_only(default)
+        }
+        Opcode::MakeArr(items) => items
+            .iter()
+            .all(|(prog, _spread)| program_is_current_only(prog)),
+        Opcode::FString(parts) => parts.iter().all(|part| match part {
+            crate::vm::CompiledFSPart::Lit(_) => true,
+            crate::vm::CompiledFSPart::Interp { prog, .. } => program_is_current_only(prog),
+        }),
+        Opcode::MakeObj(_) => false,
+        Opcode::PushNull
+        | Opcode::PushBool(_)
+        | Opcode::PushInt(_)
+        | Opcode::PushFloat(_)
+        | Opcode::PushStr(_)
+        | Opcode::PushCurrent
+        | Opcode::LoadIdent(_)
+        | Opcode::GetField(_)
+        | Opcode::GetIndex(_)
+        | Opcode::GetSlice(_, _)
+        | Opcode::OptField(_)
+        | Opcode::Descendant(_)
+        | Opcode::DescendAll
+        | Opcode::Quantifier(_)
+        | Opcode::FieldChain(_)
+        | Opcode::Add
+        | Opcode::Sub
+        | Opcode::Mul
+        | Opcode::Div
+        | Opcode::Mod
+        | Opcode::Eq
+        | Opcode::Neq
+        | Opcode::Lt
+        | Opcode::Lte
+        | Opcode::Gt
+        | Opcode::Gte
+        | Opcode::Fuzzy
+        | Opcode::Not
+        | Opcode::Neg
+        | Opcode::CastOp(_)
+        | Opcode::KindCheck { .. }
+        | Opcode::SetCurrent
+        | Opcode::DeleteMarkErr => true,
     }
 }
 

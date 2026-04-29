@@ -435,6 +435,38 @@ mod tests {
         assert!(!j.root_val_is_materialized());
     }
 
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn view_prefix_allows_current_only_generic_suffix_without_materializing_root() {
+        let j = Jetro::from_bytes(
+            br#"{"people":[{"name":"low","score":1},{"name":"ada","score":901},{"name":"bob","score":902}],"target":"ada"}"#.to_vec(),
+        )
+        .unwrap();
+
+        let out = j
+            .collect(r#"$.people.filter(score > 900).map(name).take(10).filter(@.len() == 3)"#)
+            .unwrap();
+
+        assert_eq!(out, json!(["ada", "bob"]));
+        assert!(!j.root_val_is_materialized());
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn view_prefix_rejects_root_dependent_generic_suffix() {
+        let j = Jetro::from_bytes(
+            br#"{"people":[{"name":"low","score":1},{"name":"ada","score":901},{"name":"bob","score":902}],"target":"ada"}"#.to_vec(),
+        )
+        .unwrap();
+
+        let out = j
+            .collect(r#"$.people.filter(score > 900).map(name).take(10).filter(@ == $.target)"#)
+            .unwrap();
+
+        assert_eq!(out, json!(["ada"]));
+        assert!(j.root_val_is_materialized());
+    }
+
     #[test]
     fn object_shape_executes_common_scalar_nodes_without_vm() {
         let expr = r#"{"gt": $.a > 1, "sum": $.a + 4, "picked": "yes" if $.ok else "no"}"#;

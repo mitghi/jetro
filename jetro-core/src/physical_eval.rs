@@ -94,6 +94,9 @@ where
     if let Some(result) = view_pipeline::run(source.clone(), body, cache) {
         return Some(result);
     }
+    if !view_pipeline::can_run_materialized_receiver(body) {
+        return None;
+    }
 
     let pipeline = body
         .clone()
