@@ -7,6 +7,18 @@ use super::{
     PipelineData, Sink, Source, Stage,
 };
 
+pub(super) fn run_cached(
+    pipeline: &Pipeline,
+    root: &Val,
+    cache: Option<&dyn PipelineData>,
+) -> Option<Result<Val, EvalError>> {
+    pipeline.try_columnar_with(root, cache)
+}
+
+pub(super) fn run_uncached(pipeline: &Pipeline, root: &Val) -> Option<Result<Val, EvalError>> {
+    pipeline.try_columnar(root)
+}
+
 /// Build per-slot typed columns from a row-major Val cells matrix.
 /// First-row inspection picks the candidate type per slot; subsequent
 /// rows must match or that slot falls back to `Mixed`.  Cost O(N×K)

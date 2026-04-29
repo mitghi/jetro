@@ -3,6 +3,7 @@ use crate::{
     value::Val,
 };
 
+use super::columnar;
 use super::composed_exec;
 use super::indexed_exec;
 use super::legacy_exec;
@@ -61,12 +62,12 @@ impl Pipeline {
         // Critical for Q12/Q15-class queries: ObjVec promotion +
         // typed-column slot kernels reach native parity. Composed
         // path runs AFTER, as fallback for the per-row generic case.
-        if let Some(out) = self.try_columnar_with(root, cache) {
+        if let Some(out) = columnar::run_cached(self, root, cache) {
             return out;
         }
         // Fall back to legacy try_columnar (no cache).
         if cache.is_none() {
-            if let Some(out) = self.try_columnar(root) {
+            if let Some(out) = columnar::run_uncached(self, root) {
                 return out;
             }
         }
