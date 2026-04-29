@@ -50,6 +50,7 @@ mod composed_source;
 mod composed_stage;
 mod exec;
 mod kernels;
+mod legacy_exec;
 mod lower;
 mod normalize;
 mod plan;
