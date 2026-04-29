@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use crate::context::EvalError;
 use crate::value::Val;
+use crate::value_view::ValueView;
 
 #[derive(Debug, Clone)]
 pub enum BodyKernel {
@@ -158,6 +159,62 @@ where
         BodyKernel::CurrentCmpLit(op, lit) => Ok(Val::Bool(eval_cmp_op(item, *op, lit))),
         BodyKernel::Generic => fallback(item),
     }
+}
+
+pub(crate) enum ViewKernelValue<V> {
+    View(V),
+    Owned(Val),
+}
+
+#[inline]
+pub(crate) fn eval_view_kernel<'a, V>(kernel: &BodyKernel, item: &V) -> Option<ViewKernelValue<V>>
+where
+    V: ValueView<'a>,
+{
+    match kernel {
+        BodyKernel::FieldRead(key) => Some(ViewKernelValue::View(item.field(key))),
+        BodyKernel::FieldChain(keys) => Some(ViewKernelValue::View(walk_view_fields(
+            item.clone(),
+            keys.as_ref(),
+        ))),
+        BodyKernel::ConstBool(value) => Some(ViewKernelValue::Owned(Val::Bool(*value))),
+        BodyKernel::Const(value) => Some(ViewKernelValue::Owned(value.clone())),
+        BodyKernel::FieldCmpLit(key, op, lit) => {
+            let lhs = item.field(key);
+            Some(ViewKernelValue::Owned(Val::Bool(
+                crate::util::json_cmp_binop(
+                    lhs.scalar(),
+                    *op,
+                    crate::util::JsonView::from_val(lit),
+                ),
+            )))
+        }
+        BodyKernel::FieldChainCmpLit(keys, op, lit) => {
+            let lhs = walk_view_fields(item.clone(), keys.as_ref());
+            Some(ViewKernelValue::Owned(Val::Bool(
+                crate::util::json_cmp_binop(
+                    lhs.scalar(),
+                    *op,
+                    crate::util::JsonView::from_val(lit),
+                ),
+            )))
+        }
+        BodyKernel::CurrentCmpLit(op, lit) => Some(ViewKernelValue::Owned(Val::Bool(
+            crate::util::json_cmp_binop(item.scalar(), *op, crate::util::JsonView::from_val(lit)),
+        ))),
+        BodyKernel::Generic => None,
+    }
+}
+
+#[inline]
+fn walk_view_fields<'a, V>(mut cur: V, keys: &[Arc<str>]) -> V
+where
+    V: ValueView<'a>,
+{
+    for key in keys {
+        cur = cur.field(key.as_ref());
+    }
+    cur
 }
 
 #[inline]

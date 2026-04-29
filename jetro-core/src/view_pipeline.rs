@@ -194,9 +194,9 @@ fn eval_filter_kernel<'a, V>(item: &V, kernel: &pipeline::BodyKernel) -> Option<
 where
     V: ValueView<'a>,
 {
-    match eval_kernel(item, kernel)? {
-        ViewKernelValue::View(view) => Some(view.scalar().truthy()),
-        ViewKernelValue::Owned(value) => Some(crate::util::is_truthy(&value)),
+    match pipeline::eval_view_kernel(kernel, item)? {
+        pipeline::ViewKernelValue::View(view) => Some(view.scalar().truthy()),
+        pipeline::ViewKernelValue::Owned(value) => Some(crate::util::is_truthy(&value)),
     }
 }
 
@@ -204,9 +204,9 @@ fn eval_map_kernel<'a, V>(item: &V, kernel: &pipeline::BodyKernel) -> Option<V>
 where
     V: ValueView<'a>,
 {
-    match eval_kernel(item, kernel)? {
-        ViewKernelValue::View(view) => Some(view),
-        ViewKernelValue::Owned(_) => None,
+    match pipeline::eval_view_kernel(kernel, item)? {
+        pipeline::ViewKernelValue::View(view) => Some(view),
+        pipeline::ViewKernelValue::Owned(_) => None,
     }
 }
 
@@ -214,51 +214,8 @@ fn eval_value_kernel<'a, V>(item: &V, kernel: &pipeline::BodyKernel) -> Option<V
 where
     V: ValueView<'a>,
 {
-    match eval_kernel(item, kernel)? {
-        ViewKernelValue::View(view) => Some(view.materialize()),
-        ViewKernelValue::Owned(value) => Some(value),
-    }
-}
-
-enum ViewKernelValue<V> {
-    View(V),
-    Owned(Val),
-}
-
-fn eval_kernel<'a, V>(item: &V, kernel: &pipeline::BodyKernel) -> Option<ViewKernelValue<V>>
-where
-    V: ValueView<'a>,
-{
-    match kernel {
-        pipeline::BodyKernel::FieldRead(key) => Some(ViewKernelValue::View(item.field(key))),
-        pipeline::BodyKernel::FieldChain(keys) => {
-            Some(ViewKernelValue::View(walk_fields(item.clone(), keys)))
-        }
-        pipeline::BodyKernel::ConstBool(value) => Some(ViewKernelValue::Owned(Val::Bool(*value))),
-        pipeline::BodyKernel::Const(value) => Some(ViewKernelValue::Owned(value.clone())),
-        pipeline::BodyKernel::FieldCmpLit(key, op, lit) => {
-            let lhs = item.field(key);
-            Some(ViewKernelValue::Owned(Val::Bool(
-                crate::util::json_cmp_binop(
-                    lhs.scalar(),
-                    *op,
-                    crate::util::JsonView::from_val(lit),
-                ),
-            )))
-        }
-        pipeline::BodyKernel::FieldChainCmpLit(keys, op, lit) => {
-            let lhs = walk_fields(item.clone(), keys);
-            Some(ViewKernelValue::Owned(Val::Bool(
-                crate::util::json_cmp_binop(
-                    lhs.scalar(),
-                    *op,
-                    crate::util::JsonView::from_val(lit),
-                ),
-            )))
-        }
-        pipeline::BodyKernel::CurrentCmpLit(op, lit) => Some(ViewKernelValue::Owned(Val::Bool(
-            crate::util::json_cmp_binop(item.scalar(), *op, crate::util::JsonView::from_val(lit)),
-        ))),
-        pipeline::BodyKernel::Generic => None,
+    match pipeline::eval_view_kernel(kernel, item)? {
+        pipeline::ViewKernelValue::View(view) => Some(view.materialize()),
+        pipeline::ViewKernelValue::Owned(value) => Some(value),
     }
 }
