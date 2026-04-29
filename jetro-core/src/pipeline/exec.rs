@@ -6,7 +6,8 @@ use crate::{
     value::Val,
 };
 
-use super::composed_stage::{key_from_kernel as composed_key_from_kernel, ComposedStageBuilder};
+use super::composed_barrier::{self, BarrierOutput};
+use super::composed_stage::ComposedStageBuilder;
 use super::lower::run_compiled_map;
 use super::{
     apply_item_in_env, bounded_sort_by_key, cmp_val_total, composed_path_enabled,
@@ -240,46 +241,16 @@ impl Pipeline {
             // Apply barrier.
             let kernel = kernels.get(i).unwrap_or(&BodyKernel::Generic);
             let strategy = strategies.get(i).copied().unwrap_or(StageStrategy::Default);
-            buf = match s {
-                Stage::Reverse => cmp::barrier_reverse(buf),
-                Stage::Sort(spec) => {
-                    let key = match &spec.key {
-                        None => cmp::KeySource::None,
-                        Some(_) => composed_key_from_kernel(kernel)?,
-                    };
-                    let mut out = match (strategy, spec.descending) {
-                        (StageStrategy::SortTopK(k), false)
-                        | (StageStrategy::SortBottomK(k), true) => cmp::barrier_top_k(buf, &key, k),
-                        (StageStrategy::SortTopK(k), true)
-                        | (StageStrategy::SortBottomK(k), false) => {
-                            cmp::barrier_bottom_k(buf, &key, k)
-                        }
-                        (_, false) => cmp::barrier_sort(buf, &key),
-                        (_, true) => cmp::barrier_sort(buf, &key),
-                    };
-                    if spec.descending {
-                        out.reverse();
-                    }
-                    out
-                }
-                Stage::UniqueBy(None) => cmp::barrier_unique_by(buf, &cmp::KeySource::None),
-                Stage::UniqueBy(Some(_)) => {
-                    let key = composed_key_from_kernel(kernel)?;
-                    cmp::barrier_unique_by(buf, &key)
-                }
-                Stage::GroupBy(_) => {
-                    if !matches!(eff_sink, Sink::Collect) {
-                        return None;
-                    }
-                    if i + 1 != stages_ref.len() {
-                        return None;
-                    }
-                    let key = composed_key_from_kernel(kernel)?;
-                    let val = cmp::barrier_group_by(buf, &key);
-                    let _ = i;
-                    return Some(Ok(val));
-                }
-                _ => unreachable!(),
+            match composed_barrier::run(
+                s,
+                kernel,
+                strategy,
+                &eff_sink,
+                i + 1 == stages_ref.len(),
+                buf,
+            )? {
+                BarrierOutput::Rows(rows) => buf = rows,
+                BarrierOutput::Done(val) => return Some(Ok(val)),
             };
 
             last_split = i + 1;
