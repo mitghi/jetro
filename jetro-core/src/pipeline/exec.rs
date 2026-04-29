@@ -238,6 +238,7 @@ impl Pipeline {
                 (Stage::Skip(n), _) => Box::new(cmp::Skip {
                     remaining: Cell::new(*n),
                 }),
+                (Stage::Builtin(call), _) => Box::new(cmp::BuiltinStage::new(call.clone())),
                 // VM-fallback for any unrecognised body — Generic kernel,
                 // FieldCmpLit non-Eq, custom lambdas.
                 (Stage::Filter(p), _) => Box::new(cmp::GenericFilter {

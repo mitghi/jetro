@@ -244,9 +244,8 @@ pub enum Stage {
     //   1. Chain flattening (Step 3d-extension A) can hoist them out of
     //      Map bodies — `map(@.text.split(",").first())` becomes
     //      `[Map(@.text), Split(","), Sink::First]`.
-    //   2. apply_indexed override on Split lets IndexedDispatch compute
-    //      `split(",").first()` via one memchr call instead of producing
-    //      the full segment vector.
+    //   2. IndexedDispatch can compute `split(",").first()` directly
+    //      instead of producing the full segment vector.
     /// `.split(sep)` — 1 string → many parts.  `Cardinality::Expanding`
     /// + `can_indexed=true` (kth segment via memchr).
     Split(Arc<str>),

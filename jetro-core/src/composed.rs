@@ -63,23 +63,6 @@ pub enum StageOutput<'a> {
 /// place via `Cell<usize>` reset at lower-time.
 pub trait Stage {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a>;
-
-    /// Step 3d-extension (B) — produce only the kth output for input `x`.
-    /// Default impl materialises via `apply` and indexes; Expanding
-    /// stages with `can_indexed=true` (Split, Range, FlatMap when inner
-    /// is bounded) override with direct computation — e.g. memchr-based
-    /// kth-segment lookup for Split — to convert O(N) work into O(k).
-    /// Used by the planner's IndexedDispatch kernel for `Cardinality::
-    /// Expanding` stages preceded by all 1:1 stages and followed by a
-    /// positional sink.
-    fn apply_indexed<'a>(&self, x: &'a Val, k: usize) -> Option<Cow<'a, Val>> {
-        match self.apply(x) {
-            StageOutput::Pass(v) if k == 0 => Some(v),
-            StageOutput::Pass(_) => None,
-            StageOutput::Many(mut items) if k < items.len() => Some(items.swap_remove(k)),
-            StageOutput::Many(_) | StageOutput::Filtered | StageOutput::Done => None,
-        }
-    }
 }
 
 /// Blanket impl so `Box<dyn Stage>` itself implements `Stage`. Lets a
@@ -90,21 +73,11 @@ impl<T: Stage + ?Sized> Stage for Box<T> {
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         (**self).apply(x)
     }
-    #[inline]
-    fn apply_indexed<'a>(&self, x: &'a Val, k: usize) -> Option<Cow<'a, Val>> {
-        (**self).apply_indexed(x, k)
-    }
 }
 
 /// Identity stage — pass-through. Used as the fold seed when composing
 /// a chain of stages.
 pub struct Identity;
-
-impl Identity {
-    pub fn new() -> Self {
-        Self
-    }
-}
 
 impl Default for Identity {
     fn default() -> Self {
@@ -129,10 +102,6 @@ impl BuiltinStage {
     pub fn new(call: BuiltinCall) -> Self {
         Self { call }
     }
-
-    pub fn call(&self) -> &BuiltinCall {
-        &self.call
-    }
 }
 
 impl Stage for BuiltinStage {
@@ -150,12 +119,6 @@ impl Stage for BuiltinStage {
 pub struct Composed<A, B> {
     pub a: A,
     pub b: B,
-}
-
-impl<A, B> Composed<A, B> {
-    pub fn new(a: A, b: B) -> Self {
-        Self { a, b }
-    }
 }
 
 impl<A: Stage, B: Stage> Stage for Composed<A, B> {
