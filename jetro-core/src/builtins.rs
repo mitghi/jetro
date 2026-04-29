@@ -259,7 +259,7 @@ impl BuiltinMethod {
             "flatMap" | "flat_map" => Self::FlatMap,
             "find" => Self::Find,
             "find_all" | "findAll" => Self::FindAll,
-            "sort" => Self::Sort,
+            "sort" | "sort_by" | "sortBy" => Self::Sort,
             "unique" | "distinct" => Self::Unique,
             "unique_by" | "uniqueBy" => Self::UniqueBy,
             "collect" => Self::Collect,

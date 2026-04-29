@@ -180,10 +180,7 @@ fn is_receiver_pipeline_start_method(name: &str, arity: usize) -> bool {
 
     let method = BuiltinMethod::from_name(name);
     if method == BuiltinMethod::Unknown {
-        return matches!(
-            (name, arity),
-            ("find_first" | "find_one", 1) | ("sort_by", 1)
-        );
+        return matches!((name, arity), ("find_first" | "find_one", 1));
     }
 
     let spec = method.spec();
@@ -323,104 +320,96 @@ fn decode_method_chain(
                     stage_exprs.push(None);
                     continue;
                 }
-                match (name.as_str(), args.len(), is_last) {
+                let method = BuiltinMethod::from_name(name.as_str());
+                match (method, args.len(), is_last) {
                     // Lambda-bearing methods — pre-compile body as vm::Program.
-                    ("takewhile", 1, _) => {
+                    (BuiltinMethod::TakeWhile, 1, _) => {
                         stages.push(Stage::TakeWhile(compile_subexpr(&args[0])?));
                         stage_exprs.push(arg_expr(&args[0]));
                     }
-                    ("take_while", 1, _) => {
-                        stages.push(Stage::TakeWhile(compile_subexpr(&args[0])?));
-                        stage_exprs.push(arg_expr(&args[0]));
-                    }
-                    ("dropwhile", 1, _) => {
+                    (BuiltinMethod::DropWhile, 1, _) => {
                         stages.push(Stage::DropWhile(compile_subexpr(&args[0])?));
                         stage_exprs.push(arg_expr(&args[0]));
                     }
-                    ("drop_while", 1, _) => {
-                        stages.push(Stage::DropWhile(compile_subexpr(&args[0])?));
-                        stage_exprs.push(arg_expr(&args[0]));
-                    }
-                    ("indices_where", 1, true) => {
+                    (BuiltinMethod::IndicesWhere, 1, true) => {
                         stages.push(Stage::IndicesWhere(compile_subexpr(&args[0])?));
                         stage_exprs.push(arg_expr(&args[0]));
                         sink = Sink::First;
                     }
-                    ("find_index", 1, true) => {
+                    (BuiltinMethod::FindIndex, 1, true) => {
                         stages.push(Stage::FindIndex(compile_subexpr(&args[0])?));
                         stage_exprs.push(arg_expr(&args[0]));
                         sink = Sink::First;
                     }
-                    ("max_by", 1, true) => {
+                    (BuiltinMethod::MaxBy, 1, true) => {
                         stages.push(Stage::MaxBy(compile_subexpr(&args[0])?));
                         stage_exprs.push(arg_expr(&args[0]));
                         sink = Sink::First;
                     }
-                    ("min_by", 1, true) => {
+                    (BuiltinMethod::MinBy, 1, true) => {
                         stages.push(Stage::MinBy(compile_subexpr(&args[0])?));
                         stage_exprs.push(arg_expr(&args[0]));
                         sink = Sink::First;
                     }
-                    ("transform_values", 1, _) => {
+                    (BuiltinMethod::TransformValues, 1, _) => {
                         stages.push(Stage::TransformValues(compile_subexpr(&args[0])?));
                         stage_exprs.push(arg_expr(&args[0]));
                     }
-                    ("transform_keys", 1, _) => {
+                    (BuiltinMethod::TransformKeys, 1, _) => {
                         stages.push(Stage::TransformKeys(compile_subexpr(&args[0])?));
                         stage_exprs.push(arg_expr(&args[0]));
                     }
-                    ("filter_values", 1, _) => {
+                    (BuiltinMethod::FilterValues, 1, _) => {
                         stages.push(Stage::FilterValues(compile_subexpr(&args[0])?));
                         stage_exprs.push(arg_expr(&args[0]));
                     }
-                    ("filter_keys", 1, _) => {
+                    (BuiltinMethod::FilterKeys, 1, _) => {
                         stages.push(Stage::FilterKeys(compile_subexpr(&args[0])?));
                         stage_exprs.push(arg_expr(&args[0]));
                     }
-                    ("filter", 1, _) => {
-                        stages.push(Stage::Filter(compile_subexpr(&args[0])?));
-                        stage_exprs.push(arg_expr(&args[0]));
-                    }
-                    // find / find_all: filter-shaped (return all matching).
-                    ("find", 1, _) => {
-                        stages.push(Stage::Filter(compile_subexpr(&args[0])?));
-                        stage_exprs.push(arg_expr(&args[0]));
-                    }
-                    ("find_all", 1, _) => {
+                    (
+                        BuiltinMethod::Filter | BuiltinMethod::Find | BuiltinMethod::FindAll,
+                        1,
+                        _,
+                    ) => {
                         stages.push(Stage::Filter(compile_subexpr(&args[0])?));
                         stage_exprs.push(arg_expr(&args[0]));
                     }
                     // find_first / find_one: terminal — first match or Null.
-                    ("find_first", 1, true) | ("find_one", 1, true) => {
+                    (BuiltinMethod::Unknown, 1, true)
+                        if matches!(name.as_str(), "find_first" | "find_one") =>
+                    {
                         stages.push(Stage::Filter(compile_subexpr(&args[0])?));
                         stage_exprs.push(arg_expr(&args[0]));
                         sink = Sink::First;
                     }
-                    ("find_first", 1, false) | ("find_one", 1, false) => {
+                    (BuiltinMethod::Unknown, 1, false)
+                        if matches!(name.as_str(), "find_first" | "find_one") =>
+                    {
                         stages.push(Stage::Filter(compile_subexpr(&args[0])?));
                         stage_exprs.push(arg_expr(&args[0]));
                     }
                     // count_by / index_by: barrier reductions.  Trailing
                     // result is single Obj; force Sink::First when terminal.
-                    ("count_by", 1, true) | ("countBy", 1, true) => {
+                    (BuiltinMethod::CountBy, 1, true) => {
                         stages.push(Stage::CountBy(compile_subexpr(&args[0])?));
                         stage_exprs.push(arg_expr(&args[0]));
                         sink = Sink::First;
                     }
-                    ("count_by", 1, false) | ("countBy", 1, false) => {
+                    (BuiltinMethod::CountBy, 1, false) => {
                         stages.push(Stage::CountBy(compile_subexpr(&args[0])?));
                         stage_exprs.push(arg_expr(&args[0]));
                     }
-                    ("index_by", 1, true) | ("indexBy", 1, true) => {
+                    (BuiltinMethod::IndexBy, 1, true) => {
                         stages.push(Stage::IndexBy(compile_subexpr(&args[0])?));
                         stage_exprs.push(arg_expr(&args[0]));
                         sink = Sink::First;
                     }
-                    ("index_by", 1, false) | ("indexBy", 1, false) => {
+                    (BuiltinMethod::IndexBy, 1, false) => {
                         stages.push(Stage::IndexBy(compile_subexpr(&args[0])?));
                         stage_exprs.push(arg_expr(&args[0]));
                     }
-                    ("map", 1, _) => {
+                    (BuiltinMethod::Map, 1, _) => {
                         // A2: try recursive sub-pipeline planning first.
                         // Body shapes that decode as a chain of recognised
                         // methods over @ become Stage::CompiledMap; opaque
@@ -436,41 +425,36 @@ fn decode_method_chain(
                             }
                         }
                     }
-                    ("flat_map", 1, _) => {
+                    (BuiltinMethod::FlatMap, 1, _) => {
                         stages.push(Stage::FlatMap(compile_subexpr(&args[0])?));
                         stage_exprs.push(arg_expr(&args[0]));
                     }
-                    ("reverse", 0, _) => {
+                    (BuiltinMethod::Reverse, 0, _) => {
                         stages.push(Stage::Reverse);
                         stage_exprs.push(None);
                     }
-                    ("unique", 0, _) => {
+                    (BuiltinMethod::Unique, 0, _) => {
                         stages.push(Stage::UniqueBy(None));
                         stage_exprs.push(None);
                     }
-                    ("unique_by", 1, _) => {
+                    (BuiltinMethod::UniqueBy, 1, _) => {
                         stages.push(Stage::UniqueBy(Some(compile_subexpr(&args[0])?)));
                         stage_exprs.push(arg_expr(&args[0]));
                     }
-                    ("group_by", 1, _) => {
+                    (BuiltinMethod::GroupBy, 1, _) => {
                         stages.push(Stage::GroupBy(compile_subexpr(&args[0])?));
                         stage_exprs.push(arg_expr(&args[0]));
                     }
-                    ("sort", 0, _) => {
+                    (BuiltinMethod::Sort, 0, _) => {
                         stages.push(Stage::Sort(SortSpec::identity()));
                         stage_exprs.push(None);
                     }
-                    ("sort", 1, _) => {
+                    (BuiltinMethod::Sort, 1, _) => {
                         let (spec, expr) = compile_sort_spec(&args[0])?;
                         stages.push(Stage::Sort(spec));
                         stage_exprs.push(expr);
                     }
-                    ("sort_by", 1, _) => {
-                        let (spec, expr) = compile_sort_spec(&args[0])?;
-                        stages.push(Stage::Sort(spec));
-                        stage_exprs.push(expr);
-                    }
-                    ("take", 1, _) => {
+                    (BuiltinMethod::Unknown, 1, _) if name.as_str() == "take" => {
                         let n = match &args[0] {
                             Arg::Pos(Expr::Int(n)) if *n >= 0 => *n as usize,
                             _ => return None,
@@ -478,7 +462,7 @@ fn decode_method_chain(
                         stages.push(Stage::Take(n));
                         stage_exprs.push(None);
                     }
-                    ("skip", 1, _) => {
+                    (BuiltinMethod::Unknown, 1, _) if name.as_str() == "skip" => {
                         let n = match &args[0] {
                             Arg::Pos(Expr::Int(n)) if *n >= 0 => *n as usize,
                             _ => return None,
@@ -486,7 +470,7 @@ fn decode_method_chain(
                         stages.push(Stage::Skip(n));
                         stage_exprs.push(None);
                     }
-                    ("split", 1, _) => {
+                    (BuiltinMethod::Split, 1, _) => {
                         let sep = match &args[0] {
                             Arg::Pos(Expr::Str(s)) => Arc::<str>::from(s.as_str()),
                             _ => return None,
@@ -497,7 +481,7 @@ fn decode_method_chain(
                     // Whole-receiver builtins intentionally stay out of
                     // pipeline lowering; `builtins::BuiltinCall` owns the
                     // per-element allowlist used above.
-                    ("slice", 1, _) => {
+                    (BuiltinMethod::Slice, 1, _) => {
                         let start = match &args[0] {
                             Arg::Pos(Expr::Int(n)) => *n,
                             _ => return None,
@@ -505,7 +489,7 @@ fn decode_method_chain(
                         stages.push(Stage::Slice(start, None));
                         stage_exprs.push(None);
                     }
-                    ("slice", 2, _) => {
+                    (BuiltinMethod::Slice, 2, _) => {
                         let (start, end) = match (&args[0], &args[1]) {
                             (Arg::Pos(Expr::Int(s)), Arg::Pos(Expr::Int(e))) => (*s, Some(*e)),
                             _ => return None,
@@ -513,7 +497,7 @@ fn decode_method_chain(
                         stages.push(Stage::Slice(start, end));
                         stage_exprs.push(None);
                     }
-                    ("replace", 2, _) | ("replace_all", 2, _) => {
+                    (BuiltinMethod::Replace | BuiltinMethod::ReplaceAll, 2, _) => {
                         let (needle, replacement) = match (&args[0], &args[1]) {
                             (Arg::Pos(Expr::Str(n)), Arg::Pos(Expr::Str(r))) => {
                                 (Arc::<str>::from(n.as_str()), Arc::<str>::from(r.as_str()))
@@ -523,11 +507,11 @@ fn decode_method_chain(
                         stages.push(Stage::Replace {
                             needle,
                             replacement,
-                            all: name.as_str() == "replace_all",
+                            all: method == BuiltinMethod::ReplaceAll,
                         });
                         stage_exprs.push(None);
                     }
-                    ("chunk", 1, _) | ("batch", 1, _) => {
+                    (BuiltinMethod::Chunk, 1, _) => {
                         let n = match &args[0] {
                             Arg::Pos(Expr::Int(n)) if *n >= 1 => *n as usize,
                             _ => return None,
@@ -535,7 +519,7 @@ fn decode_method_chain(
                         stages.push(Stage::Chunk(n));
                         stage_exprs.push(None);
                     }
-                    ("window", 1, _) => {
+                    (BuiltinMethod::Window, 1, _) => {
                         let n = match &args[0] {
                             Arg::Pos(Expr::Int(n)) if *n >= 1 => *n as usize,
                             _ => return None,
@@ -543,9 +527,12 @@ fn decode_method_chain(
                         stages.push(Stage::Window(n));
                         stage_exprs.push(None);
                     }
-                    ("approx_count_distinct", 0, true) => sink = Sink::ApproxCountDistinct,
+                    (BuiltinMethod::Unknown, 0, true)
+                        if name.as_str() == "approx_count_distinct" =>
+                    {
+                        sink = Sink::ApproxCountDistinct;
+                    }
                     (_, 0, true) => {
-                        let method = BuiltinMethod::from_name(name.as_str());
                         sink = terminal_sink_for_method(method)?;
                     }
                     _ => return None,
