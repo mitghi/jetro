@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::builtins::{BuiltinMethod, BuiltinViewSink};
 use crate::{ast::Expr, context::EvalError, value::Val};
 
 use super::{
@@ -560,14 +561,11 @@ fn decode_method_chain(
                         stages.push(Stage::Window(n));
                         stage_exprs.push(None);
                     }
-                    ("count", 0, true) | ("len", 0, true) => sink = Sink::Count,
                     ("approx_count_distinct", 0, true) => sink = Sink::ApproxCountDistinct,
-                    ("sum", 0, true) => sink = Sink::Numeric(NumericSink::identity(NumOp::Sum)),
-                    ("min", 0, true) => sink = Sink::Numeric(NumericSink::identity(NumOp::Min)),
-                    ("max", 0, true) => sink = Sink::Numeric(NumericSink::identity(NumOp::Max)),
-                    ("avg", 0, true) => sink = Sink::Numeric(NumericSink::identity(NumOp::Avg)),
-                    ("first", 0, true) => sink = Sink::First,
-                    ("last", 0, true) => sink = Sink::Last,
+                    (_, 0, true) => {
+                        let method = BuiltinMethod::from_name(name.as_str());
+                        sink = terminal_sink_for_method(method)?;
+                    }
                     _ => return None,
                 }
             }
@@ -575,6 +573,27 @@ fn decode_method_chain(
         }
     }
     Some((stages, stage_exprs, sink))
+}
+
+fn terminal_sink_for_method(method: BuiltinMethod) -> Option<Sink> {
+    match method.spec().view_sink? {
+        BuiltinViewSink::Count => Some(Sink::Count),
+        BuiltinViewSink::Numeric => Some(Sink::Numeric(NumericSink::identity(num_op_for_method(
+            method,
+        )?))),
+        BuiltinViewSink::First => Some(Sink::First),
+        BuiltinViewSink::Last => Some(Sink::Last),
+    }
+}
+
+fn num_op_for_method(method: BuiltinMethod) -> Option<NumOp> {
+    match method {
+        BuiltinMethod::Sum => Some(NumOp::Sum),
+        BuiltinMethod::Min => Some(NumOp::Min),
+        BuiltinMethod::Max => Some(NumOp::Max),
+        BuiltinMethod::Avg => Some(NumOp::Avg),
+        _ => None,
+    }
 }
 
 /// Apply algebraic rewrite rules until fixed point or a fuel limit
