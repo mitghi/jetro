@@ -906,57 +906,13 @@ pub fn barrier_bottom_k(buf: Vec<Val>, key: &KeySource, k: usize) -> Vec<Val> {
 }
 
 fn barrier_top_or_bottom_k(buf: Vec<Val>, key: &KeySource, k: usize, largest: bool) -> Vec<Val> {
-    if k == 0 {
-        return Vec::new();
-    }
-    if buf.len() <= k {
-        // Smaller than budget — fall back to full sort (still O(N log N)
-        // but N ≤ k so equivalent cost).
-        return barrier_sort(buf, key);
-    }
-
-    // Simple Vec + linear-extremum approach.  Avoids the `Ord` bound
-    // that a BinaryHeap would require on `Val` — we only have `cmp_val`
-    // total order.  For small k this is fine; larger k a heap with a
-    // `Reverse<KeyHash>` wrapper would beat it.
-    //
-    // `largest=false` keeps the smallest-k (top-k);
-    // `largest=true`  keeps the largest-k (bottom-k for `.last()`).
-    let mut top: Vec<(Val, Val)> = Vec::with_capacity(k + 1);
-    for v in buf.into_iter() {
-        let kv = key.extract(&v);
-        if top.len() < k {
-            top.push((kv, v));
-            continue;
-        }
-        // Find current "worst" element in `top` — the one most likely
-        // to be displaced.  For top-k that's the maximum; for bottom-k
-        // that's the minimum.
-        let mut worst_idx = 0;
-        for (i, (kk, _)) in top.iter().enumerate().skip(1) {
-            let cmp = cmp_val(kk, &top[worst_idx].0);
-            let displace = if largest {
-                cmp == std::cmp::Ordering::Less // tracking smallest as worst
-            } else {
-                cmp == std::cmp::Ordering::Greater // tracking largest as worst
-            };
-            if displace {
-                worst_idx = i;
-            }
-        }
-        let cmp = cmp_val(&kv, &top[worst_idx].0);
-        let take = if largest {
-            cmp == std::cmp::Ordering::Greater
-        } else {
-            cmp == std::cmp::Ordering::Less
-        };
-        if take {
-            top[worst_idx] = (kv, v);
-        }
-    }
-    // Final sort of the kept elements (always ascending).
-    top.sort_by(|a, b| cmp_val(&a.0, &b.0));
-    top.into_iter().map(|(_, v)| v).collect()
+    let strategy = if largest {
+        crate::pipeline::StageStrategy::SortBottomK(k)
+    } else {
+        crate::pipeline::StageStrategy::SortTopK(k)
+    };
+    crate::pipeline::bounded_sort_by_key_cmp(buf, false, strategy, |v| Ok(key.extract(v)), cmp_val)
+        .unwrap_or_default()
 }
 
 /// Dedup by key. Uses a linear-probe HashSet on hashable keys; for

@@ -7,9 +7,10 @@ use crate::{
 
 use super::lower::run_compiled_map;
 use super::{
-    apply_item_in_env, cmp_val_total, composed_path_enabled, compute_strategies, eval_kernel,
-    is_truthy, num_finalise, num_fold, select_strategy, walk_field_chain, BodyKernel, NumOp,
-    Pipeline, PipelineData, Position, Sink, Source, Stage, StageStrategy, Strategy,
+    apply_item_in_env, bounded_sort_by_key, cmp_val_total, composed_path_enabled,
+    compute_strategies, eval_kernel, is_truthy, num_finalise, num_fold, select_strategy,
+    walk_field_chain, BodyKernel, NumOp, Pipeline, PipelineData, Position, Sink, Source, Stage,
+    StageStrategy, Strategy,
 };
 
 use crate::builtins::{
@@ -18,75 +19,6 @@ use crate::builtins::{
     take_while_one, window_apply,
 };
 use crate::chain_ir::PullDemand;
-
-fn sort_buffer_by_key<F>(
-    buf: Vec<Val>,
-    descending: bool,
-    strategy: StageStrategy,
-    mut key_of: F,
-) -> Result<Vec<Val>, EvalError>
-where
-    F: FnMut(&Val) -> Result<Val, EvalError>,
-{
-    let k = match strategy {
-        StageStrategy::SortTopK(k) | StageStrategy::SortBottomK(k) => Some(k),
-        StageStrategy::Default => None,
-    };
-    let keep_largest = match strategy {
-        StageStrategy::SortTopK(_) => descending,
-        StageStrategy::SortBottomK(_) => !descending,
-        StageStrategy::Default => false,
-    };
-
-    let mut keyed: Vec<(Val, Val)> = match k {
-        Some(0) => return Ok(Vec::new()),
-        Some(limit) if buf.len() > limit => {
-            let mut top: Vec<(Val, Val)> = Vec::with_capacity(limit + 1);
-            for v in buf.into_iter() {
-                let key = key_of(&v)?;
-                if top.len() < limit {
-                    top.push((key, v));
-                    continue;
-                }
-                let mut worst_idx = 0usize;
-                for (i, (candidate, _)) in top.iter().enumerate().skip(1) {
-                    let ord = cmp_val_total(candidate, &top[worst_idx].0);
-                    let displace = if keep_largest {
-                        ord == std::cmp::Ordering::Less
-                    } else {
-                        ord == std::cmp::Ordering::Greater
-                    };
-                    if displace {
-                        worst_idx = i;
-                    }
-                }
-                let ord = cmp_val_total(&key, &top[worst_idx].0);
-                let take = if keep_largest {
-                    ord == std::cmp::Ordering::Greater
-                } else {
-                    ord == std::cmp::Ordering::Less
-                };
-                if take {
-                    top[worst_idx] = (key, v);
-                }
-            }
-            top
-        }
-        _ => {
-            let mut keyed = Vec::with_capacity(buf.len());
-            for v in buf.into_iter() {
-                keyed.push((key_of(&v)?, v));
-            }
-            keyed
-        }
-    };
-
-    keyed.sort_by(|a, b| cmp_val_total(&a.0, &b.0));
-    if descending {
-        keyed.reverse();
-    }
-    Ok(keyed.into_iter().map(|(_, v)| v).collect())
-}
 
 impl Pipeline {
     /// Execute the pipeline against `root`, returning the sink.s
@@ -683,7 +615,7 @@ impl Pipeline {
                                 .get(stage_idx)
                                 .copied()
                                 .unwrap_or(StageStrategy::Default);
-                            buf = sort_buffer_by_key(buf, spec.descending, strategy, |v| {
+                            buf = bounded_sort_by_key(buf, spec.descending, strategy, |v| {
                                 Ok(v.clone())
                             })?;
                         }
@@ -692,7 +624,7 @@ impl Pipeline {
                                 .get(stage_idx)
                                 .copied()
                                 .unwrap_or(StageStrategy::Default);
-                            buf = sort_buffer_by_key(buf, spec.descending, strategy, |v| {
+                            buf = bounded_sort_by_key(buf, spec.descending, strategy, |v| {
                                 Ok(eval_kernel(kernel, v, |item| {
                                     apply_item_in_env(&mut vm, &mut loop_env, item, prog)
                                 })

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::{context::EvalError, value::Val};
 
-use super::NumOp;
+use super::{NumOp, StageStrategy};
 
 #[inline]
 pub(crate) fn num_fold(
@@ -107,6 +107,90 @@ pub(crate) fn cmp_val_total(a: &Val, b: &Val) -> std::cmp::Ordering {
             _ => format!("{:?}", a).cmp(&format!("{:?}", b)),
         },
     }
+}
+
+pub(crate) fn bounded_sort_by_key<T, I, F>(
+    items: I,
+    descending: bool,
+    strategy: StageStrategy,
+    key_of: F,
+) -> Result<Vec<T>, EvalError>
+where
+    I: IntoIterator<Item = T>,
+    F: FnMut(&T) -> Result<Val, EvalError>,
+{
+    bounded_sort_by_key_cmp(items, descending, strategy, key_of, cmp_val_total)
+}
+
+pub(crate) fn bounded_sort_by_key_cmp<T, I, F>(
+    items: I,
+    descending: bool,
+    strategy: StageStrategy,
+    mut key_of: F,
+    cmp: fn(&Val, &Val) -> std::cmp::Ordering,
+) -> Result<Vec<T>, EvalError>
+where
+    I: IntoIterator<Item = T>,
+    F: FnMut(&T) -> Result<Val, EvalError>,
+{
+    let k = match strategy {
+        StageStrategy::SortTopK(k) | StageStrategy::SortBottomK(k) => Some(k),
+        StageStrategy::Default => None,
+    };
+    let keep_largest = match strategy {
+        StageStrategy::SortTopK(_) => descending,
+        StageStrategy::SortBottomK(_) => !descending,
+        StageStrategy::Default => false,
+    };
+
+    let mut keyed: Vec<(Val, T)> = match k {
+        Some(0) => return Ok(Vec::new()),
+        Some(limit) => {
+            let mut top: Vec<(Val, T)> = Vec::with_capacity(limit.saturating_add(1));
+            for item in items {
+                let key = key_of(&item)?;
+                if top.len() < limit {
+                    top.push((key, item));
+                    continue;
+                }
+                let mut worst_idx = 0usize;
+                for (idx, (candidate, _)) in top.iter().enumerate().skip(1) {
+                    let ord = cmp(candidate, &top[worst_idx].0);
+                    let displace = if keep_largest {
+                        ord == std::cmp::Ordering::Less
+                    } else {
+                        ord == std::cmp::Ordering::Greater
+                    };
+                    if displace {
+                        worst_idx = idx;
+                    }
+                }
+                let ord = cmp(&key, &top[worst_idx].0);
+                let take = if keep_largest {
+                    ord == std::cmp::Ordering::Greater
+                } else {
+                    ord == std::cmp::Ordering::Less
+                };
+                if take {
+                    top[worst_idx] = (key, item);
+                }
+            }
+            top
+        }
+        None => {
+            let mut keyed = Vec::new();
+            for item in items {
+                keyed.push((key_of(&item)?, item));
+            }
+            keyed
+        }
+    };
+
+    keyed.sort_by(|a, b| cmp(&a.0, &b.0));
+    if descending {
+        keyed.reverse();
+    }
+    Ok(keyed.into_iter().map(|(_, item)| item).collect())
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
