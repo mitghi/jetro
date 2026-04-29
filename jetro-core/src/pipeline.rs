@@ -382,6 +382,38 @@ pub struct Pipeline {
     pub sink_kernels: Vec<BodyKernel>,
 }
 
+/// Source-free executable pipeline body.
+///
+/// Physical plans use this for receiver pipelines whose input value is produced
+/// by another physical node at runtime. Keeping the source separate avoids fake
+/// placeholder receivers in planned IR while preserving the same executable
+/// `Pipeline` representation once the receiver is known.
+#[derive(Debug, Clone)]
+pub struct PipelineBody {
+    pub stages: Vec<Stage>,
+    /// Original AST bodies for expression-bearing stages, aligned with
+    /// `stages`. Present for optimizer-only semantic rewrites; execution
+    /// still uses compiled programs and kernel hints.
+    pub stage_exprs: Vec<Option<Arc<Expr>>>,
+    pub sink: Sink,
+    pub stage_kernels: Vec<BodyKernel>,
+    pub sink_kernels: Vec<BodyKernel>,
+}
+
+impl PipelineBody {
+    #[inline]
+    pub fn with_source(self, source: Source) -> Pipeline {
+        Pipeline {
+            source,
+            stages: self.stages,
+            stage_exprs: self.stage_exprs,
+            sink: self.sink,
+            stage_kernels: self.stage_kernels,
+            sink_kernels: self.sink_kernels,
+        }
+    }
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

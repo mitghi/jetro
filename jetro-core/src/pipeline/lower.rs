@@ -4,7 +4,7 @@ use crate::{ast::Expr, context::EvalError, value::Val};
 
 use super::{
     expr_label, plan_with_exprs, plan_with_kernels, sink_name, source_name, trace_enabled,
-    BodyKernel, NumOp, NumericSink, Pipeline, Plan, Sink, Source, Stage,
+    BodyKernel, NumOp, NumericSink, Pipeline, PipelineBody, Plan, Sink, Source, Stage,
 };
 
 impl Pipeline {
@@ -89,14 +89,17 @@ impl Pipeline {
         source: Source,
         trailing: &[crate::ast::Step],
     ) -> Option<Pipeline> {
+        Some(Self::lower_body_from_steps(trailing)?.with_source(source))
+    }
+
+    pub(crate) fn lower_body_from_steps(trailing: &[crate::ast::Step]) -> Option<PipelineBody> {
         // Decode the trailing methods into stages + a sink.
         // Compile each filter / map sub-Expr to a Program once so
         // Pipeline::run can reuse it per row.  Sub-programs run against
         // the current item bound as the VM's root, so `@.field` and
         // `@` references resolve to the row.
         let (stages, stage_exprs, sink) = decode_method_chain(trailing)?;
-        let mut p = Pipeline {
-            source,
+        let mut p = PipelineBody {
             stages,
             stage_exprs,
             sink,
@@ -150,6 +153,56 @@ impl Pipeline {
             _ => Vec::new(),
         };
         Some(p)
+    }
+
+    pub(crate) fn is_receiver_pipeline_start(step: &crate::ast::Step) -> bool {
+        use crate::ast::Step;
+
+        let Step::Method(name, args) = step else {
+            return false;
+        };
+        matches!(
+            (name.as_str(), args.len()),
+            ("filter", 1)
+                | ("find", 1)
+                | ("find_all", 1)
+                | ("find_first", 1)
+                | ("find_one", 1)
+                | ("map", 1)
+                | ("flat_map", 1)
+                | ("take", 1)
+                | ("skip", 1)
+                | ("takewhile", 1)
+                | ("take_while", 1)
+                | ("dropwhile", 1)
+                | ("drop_while", 1)
+                | ("indices_where", 1)
+                | ("find_index", 1)
+                | ("max_by", 1)
+                | ("min_by", 1)
+                | ("count_by", 1)
+                | ("countBy", 1)
+                | ("index_by", 1)
+                | ("indexBy", 1)
+                | ("unique_by", 1)
+                | ("group_by", 1)
+                | ("sort_by", 1)
+                | ("chunk", 1)
+                | ("batch", 1)
+                | ("window", 1)
+                | ("reverse", 0)
+                | ("unique", 0)
+                | ("sort", 0)
+                | ("count", 0)
+                | ("len", 0)
+                | ("approx_count_distinct", 0)
+                | ("sum", 0)
+                | ("min", 0)
+                | ("max", 0)
+                | ("avg", 0)
+                | ("first", 0)
+                | ("last", 0)
+        )
     }
 }
 
@@ -528,7 +581,7 @@ fn decode_method_chain(
 /// Each rule is monotonic — strictly reduces stage count or rewrites
 /// to a structurally smaller form — so a fuel limit of 16 protects
 /// against pathological loops without affecting correctness.
-fn rewrite(p: &mut Pipeline) {
+fn rewrite(p: &mut PipelineBody) {
     let mut fuel = 16usize;
     while fuel > 0 {
         fuel -= 1;
@@ -558,7 +611,7 @@ fn rewrite(p: &mut Pipeline) {
 ///     fusion — both build new `vm::Program`s, which the Phase 4
 ///     stage-only API can't do without a wider rewrite.  Kept here.
 ///   - Map ∘ Take pushdown: still strictly correct + a perf win, kept.
-fn rewrite_step(p: &mut Pipeline) -> bool {
+fn rewrite_step(p: &mut PipelineBody) -> bool {
     use crate::vm::Opcode;
 
     // Filter(false) → empty pipeline.  Filter(true) handled by Phase 4.

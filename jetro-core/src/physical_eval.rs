@@ -48,10 +48,11 @@ impl ExecCtx<'_> {
                 &self.env,
                 Some(self.j as &dyn pipeline::PipelineData),
             ),
-            PlanNode::PipelineSource { source, pipeline } => {
+            PlanNode::PipelineSource { source, body } => {
                 let source_val = self.eval(*source)?;
-                let mut pipeline = pipeline.clone();
-                pipeline.source = pipeline::Source::Receiver(source_val);
+                let pipeline = body
+                    .clone()
+                    .with_source(pipeline::Source::Receiver(source_val));
                 pipeline.run_with_env(
                     &self.root,
                     &self.env,

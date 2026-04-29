@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::ast::{BinOp, KindType};
 use crate::builtins::BuiltinCall;
-use crate::pipeline::Pipeline;
+use crate::pipeline::{Pipeline, PipelineBody};
 use crate::value::Val;
 use crate::vm::Program;
 
@@ -60,7 +60,7 @@ pub enum PlanNode {
     Pipeline(Pipeline),
     PipelineSource {
         source: NodeId,
-        pipeline: Pipeline,
+        body: PipelineBody,
     },
     RootPath(Vec<PhysicalPathStep>),
     Chain {

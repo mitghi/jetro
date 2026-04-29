@@ -14,7 +14,6 @@ use crate::physical::{
     QueryPlan,
 };
 use crate::pipeline::Pipeline;
-use crate::pipeline::Source;
 use crate::value::Val;
 use crate::vm::Compiler;
 
@@ -69,14 +68,16 @@ fn try_lower_receiver_pipeline(builder: &mut PlanBuilder, expr: &Expr) -> Option
     let method_start = steps
         .iter()
         .position(|step| matches!(step, Step::Method(_, _)))?;
+    if !Pipeline::is_receiver_pipeline_start(&steps[method_start]) {
+        return None;
+    }
     let source_expr = base
         .as_ref()
         .clone()
         .maybe_chain(steps[..method_start].to_vec());
     let source = lower_expr(builder, &source_expr);
-    let pipeline =
-        Pipeline::lower_from_source(Source::Receiver(Val::Null), &steps[method_start..])?;
-    Some(builder.push(PlanNode::PipelineSource { source, pipeline }))
+    let body = Pipeline::lower_body_from_steps(&steps[method_start..])?;
+    Some(builder.push(PlanNode::PipelineSource { source, body }))
 }
 
 fn try_lower_root_path(expr: &Expr) -> Option<PlanNode> {
@@ -482,12 +483,11 @@ mod tests {
         let PlanNode::Let { body, .. } = root_node(&plan) else {
             panic!("expected let plan");
         };
-        let PlanNode::PipelineSource { source, pipeline } = plan.node(*body) else {
+        let PlanNode::PipelineSource { source, body } = plan.node(*body) else {
             panic!("expected receiver pipeline source");
         };
         assert!(matches!(plan.node(*source), PlanNode::Ident(name) if name.as_ref() == "books"));
-        assert!(matches!(pipeline.source, Source::Receiver(_)));
-        assert_eq!(pipeline.stages.len(), 3);
+        assert_eq!(body.stages.len(), 3);
     }
 
     #[test]
@@ -507,13 +507,13 @@ mod tests {
             let PhysicalObjField::Kv { val, .. } = &fields[idx] else {
                 panic!("expected kv field");
             };
-            let PlanNode::PipelineSource { source, pipeline } = plan.node(*val) else {
+            let PlanNode::PipelineSource { source, body } = plan.node(*val) else {
                 panic!("expected receiver pipeline source");
             };
             assert!(
                 matches!(plan.node(*source), PlanNode::Ident(name) if name.as_ref() == "books")
             );
-            assert!(matches!(pipeline.source, Source::Receiver(_)));
+            assert!(!body.stages.is_empty());
         }
     }
 
@@ -534,13 +534,13 @@ mod tests {
             let PhysicalArrayElem::Expr(val) = &elems[idx] else {
                 panic!("expected array expr");
             };
-            let PlanNode::PipelineSource { source, pipeline } = plan.node(*val) else {
+            let PlanNode::PipelineSource { source, body } = plan.node(*val) else {
                 panic!("expected receiver pipeline source");
             };
             assert!(
                 matches!(plan.node(*source), PlanNode::Ident(name) if name.as_ref() == "books")
             );
-            assert!(matches!(pipeline.source, Source::Receiver(_)));
+            assert!(!body.stages.is_empty());
         }
     }
 }

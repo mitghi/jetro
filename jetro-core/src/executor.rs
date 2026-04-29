@@ -462,11 +462,11 @@ mod tests {
         let PlanNode::Let { body, .. } = plan.node(*root) else {
             panic!("expected let root");
         };
-        let PlanNode::PipelineSource { source, pipeline } = plan.node(*body) else {
+        let PlanNode::PipelineSource { source, body } = plan.node(*body) else {
             panic!("expected receiver pipeline source");
         };
         assert!(matches!(plan.node(*source), PlanNode::Ident(name) if name.as_ref() == "books"));
-        assert!(matches!(pipeline.source, Source::Receiver(_)));
+        assert_eq!(body.stages.len(), 3);
 
         let j = Jetro::from(json!({
             "books": [
