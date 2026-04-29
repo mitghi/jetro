@@ -489,4 +489,58 @@ mod tests {
         assert!(matches!(pipeline.source, Source::Receiver(_)));
         assert_eq!(pipeline.stages.len(), 3);
     }
+
+    #[test]
+    fn object_shape_keeps_receiver_pipeline_children() {
+        let plan = plan_query(
+            r#"let books = $.books in {"top": books.filter(score > 900).take(2).map(title), "first": books.filter(score > 900).first()}"#,
+        );
+        let PlanNode::Let { body, .. } = root_node(&plan) else {
+            panic!("expected let plan");
+        };
+        let PlanNode::Object(fields) = plan.node(*body) else {
+            panic!("expected object body");
+        };
+        assert_eq!(fields.len(), 2);
+
+        for idx in [0usize, 1] {
+            let PhysicalObjField::Kv { val, .. } = &fields[idx] else {
+                panic!("expected kv field");
+            };
+            let PlanNode::PipelineSource { source, pipeline } = plan.node(*val) else {
+                panic!("expected receiver pipeline source");
+            };
+            assert!(
+                matches!(plan.node(*source), PlanNode::Ident(name) if name.as_ref() == "books")
+            );
+            assert!(matches!(pipeline.source, Source::Receiver(_)));
+        }
+    }
+
+    #[test]
+    fn array_shape_keeps_receiver_pipeline_children() {
+        let plan = plan_query(
+            r#"let books = $.books in [books.filter(score > 900).take(2).map(title), books.filter(score > 900).first()]"#,
+        );
+        let PlanNode::Let { body, .. } = root_node(&plan) else {
+            panic!("expected let plan");
+        };
+        let PlanNode::Array(elems) = plan.node(*body) else {
+            panic!("expected array body");
+        };
+        assert_eq!(elems.len(), 2);
+
+        for idx in [0usize, 1] {
+            let PhysicalArrayElem::Expr(val) = &elems[idx] else {
+                panic!("expected array expr");
+            };
+            let PlanNode::PipelineSource { source, pipeline } = plan.node(*val) else {
+                panic!("expected receiver pipeline source");
+            };
+            assert!(
+                matches!(plan.node(*source), PlanNode::Ident(name) if name.as_ref() == "books")
+            );
+            assert!(matches!(pipeline.source, Source::Receiver(_)));
+        }
+    }
 }

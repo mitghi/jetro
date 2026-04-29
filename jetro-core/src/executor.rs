@@ -481,4 +481,84 @@ mod tests {
 
         assert_eq!(out, json!(["a", "b"]));
     }
+
+    #[test]
+    fn object_shape_executes_receiver_pipeline_children() {
+        let expr = r#"let books = $.books in {"top": books.filter(score > 900).take(2).map(title), "first": books.filter(score > 900).first()}"#;
+        let plan = planner::plan_query(expr);
+        let QueryRoot::Node(root) = plan.root() else {
+            panic!("expected physical expression plan");
+        };
+        let PlanNode::Let { body, .. } = plan.node(*root) else {
+            panic!("expected let root");
+        };
+        let PlanNode::Object(fields) = plan.node(*body) else {
+            panic!("expected object body");
+        };
+        for idx in [0usize, 1] {
+            let PhysicalObjField::Kv { val, .. } = &fields[idx] else {
+                panic!("expected kv field");
+            };
+            assert!(matches!(plan.node(*val), PlanNode::PipelineSource { .. }));
+        }
+
+        let j = Jetro::from(json!({
+            "books": [
+                {"title": "low", "score": 1},
+                {"title": "a", "score": 901},
+                {"title": "b", "score": 902},
+                {"title": "c", "score": 903}
+            ]
+        }));
+
+        let out = j.collect(expr).unwrap();
+
+        assert_eq!(
+            out,
+            json!({
+                "top": ["a", "b"],
+                "first": {"title": "a", "score": 901}
+            })
+        );
+    }
+
+    #[test]
+    fn array_shape_executes_receiver_pipeline_children() {
+        let expr = r#"let books = $.books in [books.filter(score > 900).take(2).map(title), books.filter(score > 900).first()]"#;
+        let plan = planner::plan_query(expr);
+        let QueryRoot::Node(root) = plan.root() else {
+            panic!("expected physical expression plan");
+        };
+        let PlanNode::Let { body, .. } = plan.node(*root) else {
+            panic!("expected let root");
+        };
+        let PlanNode::Array(elems) = plan.node(*body) else {
+            panic!("expected array body");
+        };
+        for idx in [0usize, 1] {
+            let PhysicalArrayElem::Expr(val) = &elems[idx] else {
+                panic!("expected array expr");
+            };
+            assert!(matches!(plan.node(*val), PlanNode::PipelineSource { .. }));
+        }
+
+        let j = Jetro::from(json!({
+            "books": [
+                {"title": "low", "score": 1},
+                {"title": "a", "score": 901},
+                {"title": "b", "score": 902},
+                {"title": "c", "score": 903}
+            ]
+        }));
+
+        let out = j.collect(expr).unwrap();
+
+        assert_eq!(
+            out,
+            json!([
+                ["a", "b"],
+                {"title": "a", "score": 901}
+            ])
+        );
+    }
 }
