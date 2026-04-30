@@ -18,15 +18,15 @@ use crate::{Jetro, VM};
 pub(crate) fn run(j: &Jetro, plan: &QueryPlan, root_id: NodeId) -> Result<Val, EvalError> {
     #[cfg(feature = "simd-json")]
     if let Some(tape) = j.lazy_tape() {
-        if let Some(result) = try_run_tape_row_plan(plan, root_id, tape) {
-            return result;
-        }
         if let Some(result) = try_run_view_plan(
             plan,
             root_id,
             crate::value_view::TapeView::root(tape),
             Some(j),
         ) {
+            return result;
+        }
+        if let Some(result) = try_run_tape_row_plan(plan, root_id, tape) {
             return result;
         }
     }
