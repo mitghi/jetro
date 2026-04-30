@@ -146,7 +146,7 @@ mod tests {
     use crate::ast::BinOp;
     use crate::builtins::{BuiltinStageMerge, BuiltinViewSink, BuiltinViewStage};
     use crate::pipeline::{
-        BodyKernel, NumOp, NumericSink, PipelineBody, Sink, Stage, ViewInputMode,
+        BodyKernel, NumOp, PipelineBody, ReducerOp, ReducerSpec, Sink, Stage, ViewInputMode,
         ViewMaterialization, ViewOutputMode, ViewSinkCapability, ViewStageCapability,
     };
     use crate::value::Val;
@@ -241,7 +241,7 @@ mod tests {
     #[test]
     fn sink_view_capability_uses_carried_metadata() {
         assert!(matches!(
-            Sink::Count(BuiltinViewSink::Count).view_capability(&[]),
+            Sink::Reducer(ReducerSpec::count()).view_capability(&[]),
             Some(ViewSinkCapability::Count)
         ));
         assert!(matches!(
@@ -273,10 +273,11 @@ mod tests {
                 ),
             ],
             stage_exprs: Vec::new(),
-            sink: Sink::Numeric(NumericSink::projected(
-                NumOp::Sum,
-                Arc::new(crate::vm::Program::new(Vec::new(), "")),
-            )),
+            sink: Sink::Reducer(ReducerSpec {
+                op: ReducerOp::Numeric(NumOp::Sum),
+                predicate: None,
+                projection: Some(Arc::new(crate::vm::Program::new(Vec::new(), ""))),
+            }),
             stage_kernels: vec![
                 BodyKernel::FieldCmpLit(Arc::from("score"), BinOp::Gt, Val::Int(10)),
                 BodyKernel::FieldRead(Arc::from("score")),

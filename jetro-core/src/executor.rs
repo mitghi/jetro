@@ -40,7 +40,7 @@ mod tests {
         NodeId, PhysicalArrayElem, PhysicalChainStep, PhysicalObjField, PipelinePlanSource,
         PlanNode,
     };
-    use crate::pipeline::{NumOp, Sink, Stage};
+    use crate::pipeline::{NumOp, ReducerOp, Sink, Stage};
     use crate::planner;
     use crate::Jetro;
 
@@ -291,7 +291,7 @@ mod tests {
         assert_eq!(body.stages.len(), 1);
         assert!(matches!(body.stages[0], Stage::Filter(_, _)));
         assert!(
-            matches!(&body.sink, Sink::Numeric(n) if n.op == NumOp::Sum && n.project.is_some())
+            matches!(&body.sink, Sink::Reducer(spec) if spec.op == ReducerOp::Numeric(NumOp::Sum) && spec.projection.is_some())
         );
 
         let j = Jetro::from(json!({
@@ -328,7 +328,7 @@ mod tests {
         assert_eq!(body.stages.len(), 1);
         assert!(matches!(body.stages[0], Stage::Filter(_, _)));
         assert!(
-            matches!(&body.sink, Sink::Numeric(n) if n.op == NumOp::Sum && n.project.is_some())
+            matches!(&body.sink, Sink::Reducer(spec) if spec.op == ReducerOp::Numeric(NumOp::Sum) && spec.projection.is_some())
         );
 
         let j = Jetro::from(json!({

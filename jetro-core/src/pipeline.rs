@@ -11,7 +11,7 @@
 //!         Stage::Filter(<prog: total > 100>),
 //!         Stage::Map(<prog: id>),
 //!     ],
-//!     sink: Sink::Count,
+//!     sink: Sink::Reducer(count),
 //! }
 //! ```
 //!
@@ -129,12 +129,12 @@ pub(crate) fn trace_enabled() -> bool {
 fn sink_name(s: &Sink) -> &'static str {
     match s {
         Sink::Collect => "collect",
-        Sink::Count(_) => "count",
-        Sink::Numeric(n) => match n.op {
-            NumOp::Sum => "sum",
-            NumOp::Min => "min",
-            NumOp::Max => "max",
-            NumOp::Avg => "avg",
+        Sink::Reducer(spec) => match spec.op {
+            ReducerOp::Count => "count",
+            ReducerOp::Numeric(NumOp::Sum) => "sum",
+            ReducerOp::Numeric(NumOp::Min) => "min",
+            ReducerOp::Numeric(NumOp::Max) => "max",
+            ReducerOp::Numeric(NumOp::Avg) => "avg",
         },
         Sink::First(_) => "first",
         Sink::Last(_) => "last",
@@ -373,43 +373,10 @@ impl NumOp {
     }
 }
 
-/// Numeric aggregate sink. `project` lets lowering represent
-/// `map(expr).sum()` as `sum(project=expr)` instead of a separate map stage.
-/// This is a general aggregate-input projection, not a per-shape fused
-/// builtin: filter/take/skip remain normal stages and all numeric aggregates
-/// share the same sink representation.
-#[derive(Debug, Clone)]
-pub struct NumericSink {
-    pub op: NumOp,
-    pub project: Option<Arc<crate::vm::Program>>,
-}
-
-impl NumericSink {
-    pub fn identity(op: NumOp) -> Self {
-        Self { op, project: None }
-    }
-
-    pub fn projected(op: NumOp, project: Arc<crate::vm::Program>) -> Self {
-        Self {
-            op,
-            project: Some(project),
-        }
-    }
-
-    pub fn is_identity(&self) -> bool {
-        self.project.is_none()
-    }
-}
-
 impl Sink {
     pub(crate) fn reducer_spec(&self) -> Option<ReducerSpec> {
         match self {
-            Sink::Count(_) => Some(ReducerSpec::count()),
-            Sink::Numeric(n) => Some(ReducerSpec {
-                op: ReducerOp::Numeric(n.op),
-                predicate: None,
-                projection: n.project.clone(),
-            }),
+            Sink::Reducer(spec) => Some(spec.clone()),
             _ => None,
         }
     }
@@ -425,11 +392,9 @@ impl Sink {
 pub enum Sink {
     /// Materialise every element into a `Val::Arr`.
     Collect,
-    /// `.count()` / `.len()` — yield the number of elements that
-    /// reached the sink as a `Val::Int`.
-    Count(BuiltinViewSink),
-    /// `.sum()`/`.min()`/`.max()`/`.avg()` over numerics.
-    Numeric(NumericSink),
+    /// Canonical reducer sink for count/sum/min/max/avg and future
+    /// predicate/projection reducers.
+    Reducer(ReducerSpec),
     /// `.first()` / `.last()` — yield the first/last element or
     /// `Val::Null`.
     First(BuiltinViewSink),
@@ -662,8 +627,8 @@ mod tests {
         )));
     }
 
-    // `lower_filter_map_count` removed — fused Sink::CountIf variant
-    // deleted in Tier 3. Lowered shape is now [Filter] + Sink::Count.
+    // `lower_filter_map_count` removed — fused CountIf variant deleted
+    // in Tier 3. Lowered shape is now [Filter] + Sink::Reducer(count).
 
     #[test]
     fn lower_take_skip_sum() {
@@ -671,7 +636,9 @@ mod tests {
         assert_eq!(p.stages.len(), 2);
         assert!(matches!(p.stages[0], Stage::Skip(2, _, _)));
         assert!(matches!(p.stages[1], Stage::Take(5, _, _)));
-        assert!(matches!(&p.sink, Sink::Numeric(n) if n.op == NumOp::Sum));
+        assert!(
+            matches!(&p.sink, Sink::Reducer(spec) if spec.op == ReducerOp::Numeric(NumOp::Sum))
+        );
     }
 
     #[test]
@@ -877,7 +844,7 @@ mod tests {
     }
 
     // `debug_compound_pipeline_lower` and `debug_full_pipeline_lower`
-    // removed — referenced fused Sink::CountIf / Sink::NumFilterMap.
+    // removed — referenced deleted fused CountIf / NumFilterMap sinks.
 
     #[test]
     fn run_count_on_simple_array() {
@@ -947,14 +914,14 @@ mod tests {
     fn rewrite_map_then_count_drops_map() {
         let p = lower_query("$.orders.map(total).count()").unwrap();
         assert_eq!(p.stages.len(), 0);
-        assert!(matches!(p.sink, Sink::Count(_)));
+        assert!(matches!(p.sink, Sink::Reducer(ref spec) if spec.op == ReducerOp::Count));
     }
 
     #[test]
     fn demand_optimizer_drops_value_only_work_for_count() {
         let p = lower_query("$.orders.map(total).upper().count()").unwrap();
         assert!(p.stages.is_empty());
-        assert!(matches!(p.sink, Sink::Count(_)));
+        assert!(matches!(p.sink, Sink::Reducer(ref spec) if spec.op == ReducerOp::Count));
     }
 
     #[test]
@@ -962,7 +929,7 @@ mod tests {
         let p = lower_query("$.orders.map(total).filter(@ > 10).count()").unwrap();
         assert_eq!(p.stages.len(), 1);
         assert!(matches!(p.stages[0], Stage::Filter(_, _)));
-        assert!(matches!(p.sink, Sink::Count(_)));
+        assert!(matches!(p.sink, Sink::Reducer(ref spec) if spec.op == ReducerOp::Count));
     }
 
     #[test]
@@ -971,7 +938,7 @@ mod tests {
         assert_eq!(p.stages.len(), 1);
         assert!(matches!(p.stages[0], Stage::Filter(_, _)));
         assert_price_qty_gt_100(only_stage_expr(&p));
-        assert!(matches!(p.sink, Sink::Count(_)));
+        assert!(matches!(p.sink, Sink::Reducer(ref spec) if spec.op == ReducerOp::Count));
     }
 
     #[test]
@@ -980,7 +947,7 @@ mod tests {
             lower_query("$.users.map(name.trim().upper()).filter(@ == \"ADA\").count()").unwrap();
         assert_eq!(p.stages.len(), 1);
         assert!(matches!(p.stages[0], Stage::Filter(_, _)));
-        assert!(matches!(p.sink, Sink::Count(_)));
+        assert!(matches!(p.sink, Sink::Reducer(ref spec) if spec.op == ReducerOp::Count));
     }
 
     #[test]
@@ -990,7 +957,7 @@ mod tests {
         assert_eq!(p.stages.len(), 1);
         assert!(matches!(p.stages[0], Stage::Filter(_, _)));
         assert_price_qty_gt_100(only_stage_expr(&p));
-        assert!(matches!(p.sink, Sink::Count(_)));
+        assert!(matches!(p.sink, Sink::Reducer(ref spec) if spec.op == ReducerOp::Count));
     }
 
     #[test]
@@ -999,7 +966,7 @@ mod tests {
         assert_eq!(p.stages.len(), 1);
         assert!(matches!(p.stages[0], Stage::Filter(_, _)));
         assert_price_qty_gt_100(only_stage_expr(&p));
-        assert!(matches!(p.sink, Sink::Count(_)));
+        assert!(matches!(p.sink, Sink::Reducer(ref spec) if spec.op == ReducerOp::Count));
     }
 
     #[test]
@@ -1015,7 +982,9 @@ mod tests {
     fn demand_optimizer_removes_order_only_work_for_numeric_sink() {
         let p = lower_query("$.orders.sort().reverse().map(total).sum()").unwrap();
         assert!(p.stages.is_empty());
-        assert!(matches!(&p.sink, Sink::Numeric(n) if n.op == NumOp::Sum && n.project.is_some()));
+        assert!(
+            matches!(&p.sink, Sink::Reducer(spec) if spec.op == ReducerOp::Numeric(NumOp::Sum) && spec.projection.is_some())
+        );
     }
 
     #[test]
@@ -1023,7 +992,9 @@ mod tests {
         let p = lower_query("$.orders.take(2).map(total).sum()").unwrap();
         assert_eq!(p.stages.len(), 1);
         assert!(matches!(p.stages[0], Stage::Take(2, _, _)));
-        assert!(matches!(&p.sink, Sink::Numeric(n) if n.op == NumOp::Sum && n.project.is_some()));
+        assert!(
+            matches!(&p.sink, Sink::Reducer(spec) if spec.op == ReducerOp::Numeric(NumOp::Sum) && spec.projection.is_some())
+        );
     }
 
     #[test]
@@ -1284,7 +1255,7 @@ mod tests {
         // `true` literal — Filter(true) collapses to id.
         let p = lower_query("$.xs.filter(true).count()").unwrap();
         assert_eq!(p.stages.len(), 0);
-        assert!(matches!(p.sink, Sink::Count(_)));
+        assert!(matches!(p.sink, Sink::Reducer(ref spec) if spec.op == ReducerOp::Count));
     }
 
     #[test]

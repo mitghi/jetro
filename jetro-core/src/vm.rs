@@ -1325,7 +1325,7 @@ impl Compiler {
                 // lower (sub-programs, non-Root chains).
                 // FilterFieldsAllEqLitCount / FilterFieldsAllCmpLitCount
                 // (compound-AND filter+count specialisations) migrated to
-                // pipeline.rs Sink::CountIf with and_chain_prog decoder.
+                // pipeline.rs count reducer with and_chain_prog decoder.
                 Opcode::CallMethod(ref b) => {
                     // MapField / MapFieldChain fusion deleted in Tier 3 —
                     // pipeline IR Stage::Map + BodyKernel::FieldRead /
@@ -1351,8 +1351,8 @@ impl Compiler {
         let mut out3: Vec<Opcode> = Vec::with_capacity(out2.len());
         for op in out2 {
             // FilterFieldEqLit/CmpLit + count() fusion migrated to
-            // pipeline.rs Sink::CountIf.  FilterFieldCmpField + count()
-            // fusion deleted in Tier 3 — base Stage::Filter + Sink::Count.
+            // pipeline.rs count reducer. FilterFieldCmpField + count()
+            // fusion deleted in Tier 3 — base Stage::Filter + count reducer.
             // FilterField* + MapField(k) fusion migrated to pipeline.rs
             // Sink::NumFilterMap (and the columnar fast path) — covered
             // for top-level Root-prefix queries.  Sub-program path falls

@@ -354,16 +354,16 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
         // Barrier stages have already been applied; `pre_iter` yields
         // the post-pipeline rows directly, so only the sink remains.
         let sink_done = match &pipeline.sink {
-            Sink::Numeric(n) => {
-                if let Some(project) = &n.project {
+            Sink::Reducer(spec) => {
+                if let Some(project) = &spec.projection {
                     let kernel = pipeline
                         .sink_kernels
                         .first()
                         .unwrap_or(&BodyKernel::Generic);
-                    let numeric_item = eval_kernel(kernel, &item, |item| {
+                    let reducer_item = eval_kernel(kernel, &item, |item| {
                         apply_item_in_env(&mut vm, &mut loop_env, item, project)
                     })?;
-                    sink_acc.push_projected_numeric(&numeric_item);
+                    sink_acc.push_projected_numeric(&reducer_item);
                 } else {
                     sink_acc.push(item);
                 }
@@ -552,16 +552,16 @@ where
         }
 
         let sink_done = match &pipeline.sink {
-            Sink::Numeric(n) => {
-                if let Some(project) = &n.project {
+            Sink::Reducer(spec) => {
+                if let Some(project) = &spec.projection {
                     let kernel = pipeline
                         .sink_kernels
                         .first()
                         .unwrap_or(&BodyKernel::Generic);
-                    let numeric_item = eval_kernel(kernel, &item, |item| {
+                    let reducer_item = eval_kernel(kernel, &item, |item| {
                         apply_item_in_env(&mut vm, &mut loop_env, item, project)
                     })?;
-                    sink_acc.push_projected_numeric(&numeric_item);
+                    sink_acc.push_projected_numeric(&reducer_item);
                 } else {
                     sink_acc.push(item);
                 }

@@ -1322,7 +1322,7 @@ mod tests {
                 .unwrap(),
             json!(["42", "17", "99"])
         );
-        // map(@.text.split(",").count()) — Sink::Count inside body
+        // map(@.text.split(",").count()) — count reducer inside body
         // returns one count per row.
         assert_eq!(
             j.collect("$.records.map(@.text.split(\",\").count())")
@@ -1344,7 +1344,7 @@ mod tests {
             j.collect("$.s.split(\",\")").unwrap(),
             json!(["a", "b", "c", "d", "e"])
         );
-        // .split(",").count() — Stage::Split + Sink::Count.
+        // .split(",").count() — Stage::Split + count reducer.
         assert_eq!(j.collect("$.s.split(\",\").count()").unwrap(), json!(5));
         // .split(",").first() — Stage::Split + Sink::First.
         assert_eq!(j.collect("$.s.split(\",\").first()").unwrap(), json!("a"));
@@ -1358,7 +1358,6 @@ mod tests {
         // Cheaper, more-selective filter first — Eq (sel=0.10) before
         // Lt (sel=0.40).  Reorder must preserve overall set semantics.
         use crate::ast::BinOp;
-        use crate::builtins::BuiltinViewSink;
         use crate::pipeline::{plan_with_kernels, BodyKernel, Sink, Stage};
         use std::sync::Arc;
         let dummy = Arc::new(crate::vm::Program::new(Vec::new(), ""));
@@ -1382,7 +1381,11 @@ mod tests {
                 crate::value::Val::Bool(true),
             ),
         ];
-        let p = plan_with_kernels(stages, &kernels, Sink::Count(BuiltinViewSink::Count));
+        let p = plan_with_kernels(
+            stages,
+            &kernels,
+            Sink::Reducer(crate::pipeline::ReducerSpec::count()),
+        );
         // Expect Eq filter first (rank ~ 1.5/0.9 = 1.67) before Lt
         // (rank ~ 1.5/0.6 = 2.5).
         assert_eq!(p.stages.len(), 2);
@@ -1471,7 +1474,7 @@ mod tests {
     #[test]
     fn step3d_phase5_strategy_selection() {
         use crate::pipeline::{
-            select_strategy, NumOp, NumericSink, Sink, SortSpec, Stage, Strategy,
+            select_strategy, NumOp, ReducerOp, ReducerSpec, Sink, SortSpec, Stage, Strategy,
         };
         let first_sink = Sink::First(crate::builtins::BuiltinViewSink::First);
         use std::sync::Arc;
@@ -1511,7 +1514,11 @@ mod tests {
                     Arc::clone(&dummy),
                     crate::builtins::BuiltinViewStage::Map
                 )],
-                &Sink::Numeric(NumericSink::identity(NumOp::Sum))
+                &Sink::Reducer(ReducerSpec {
+                    op: ReducerOp::Numeric(NumOp::Sum),
+                    predicate: None,
+                    projection: None,
+                })
             ),
             Strategy::PullLoop
         );
@@ -1520,7 +1527,7 @@ mod tests {
     #[test]
     fn step3d_phase1_compute_strategies() {
         use crate::pipeline::{
-            compute_strategies, NumOp, NumericSink, Sink, SortSpec, Stage, StageStrategy,
+            compute_strategies, NumOp, ReducerOp, ReducerSpec, Sink, SortSpec, Stage, StageStrategy,
         };
         use std::sync::Arc;
 
@@ -1547,7 +1554,14 @@ mod tests {
 
         // [Sort] + Sum → unbounded → Default (full sort)
         let stages = vec![Stage::Sort(SortSpec::identity())];
-        let strats = compute_strategies(&stages, &Sink::Numeric(NumericSink::identity(NumOp::Sum)));
+        let strats = compute_strategies(
+            &stages,
+            &Sink::Reducer(ReducerSpec {
+                op: ReducerOp::Numeric(NumOp::Sum),
+                predicate: None,
+                projection: None,
+            }),
+        );
         assert!(matches!(strats[0], StageStrategy::Default));
 
         // [Sort, Filter] + First cannot use fixed top-k without a

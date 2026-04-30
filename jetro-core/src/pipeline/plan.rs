@@ -44,9 +44,7 @@ impl Sink {
                 },
                 positional: Some(Position::Last),
             },
-            Sink::Count(_) | Sink::Numeric(_) => {
-                reducer_demand(self.reducer_spec().expect("count/numeric are reducers").op)
-            }
+            Sink::Reducer(spec) => reducer_demand(spec.op),
             Sink::Collect | Sink::ApproxCountDistinct => SinkDemand::RESULT,
         }
     }
@@ -57,8 +55,7 @@ impl Sink {
     {
         match self {
             Sink::Collect | Sink::First(_) | Sink::Last(_) | Sink::ApproxCountDistinct => true,
-            Sink::Count(_) => true,
-            Sink::Numeric(n) => n.project.as_ref().is_none_or(|prog| program_ok(prog)),
+            Sink::Reducer(spec) => spec.projection.as_ref().is_none_or(|prog| program_ok(prog)),
         }
     }
 
@@ -68,7 +65,7 @@ impl Sink {
     ) -> Option<ViewSinkCapability> {
         match self {
             Sink::Collect => Some(ViewSinkCapability::Collect),
-            Sink::Numeric(_) => {
+            Sink::Reducer(spec) if spec.numeric_op().is_some() => {
                 let spec = self.reducer_spec()?;
                 if spec.method()?.spec().view_sink != Some(BuiltinViewSink::Numeric) {
                     return None;
@@ -83,8 +80,8 @@ impl Sink {
                     project_kernel,
                 })
             }
-            Sink::Count(sink) if *sink == BuiltinViewSink::Count => {
-                ViewSinkCapability::from_builtin_sink(*sink)
+            Sink::Reducer(spec) if spec.op == super::ReducerOp::Count => {
+                ViewSinkCapability::from_builtin_sink(BuiltinViewSink::Count)
             }
             Sink::First(sink) if *sink == BuiltinViewSink::First => {
                 ViewSinkCapability::from_builtin_sink(*sink)
@@ -92,7 +89,7 @@ impl Sink {
             Sink::Last(sink) if *sink == BuiltinViewSink::Last => {
                 ViewSinkCapability::from_builtin_sink(*sink)
             }
-            Sink::Count(_) | Sink::First(_) | Sink::Last(_) => None,
+            Sink::Reducer(_) | Sink::First(_) | Sink::Last(_) => None,
             Sink::ApproxCountDistinct => None,
         }
     }

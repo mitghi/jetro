@@ -26,7 +26,7 @@ impl<'a> SinkAccumulator<'a> {
     pub(crate) fn push(&mut self, item: Val) -> bool {
         match self.sink {
             Sink::Collect => self.observe_collect(item),
-            Sink::Count(_) | Sink::Numeric(_) => self.observe_reducer(&item),
+            Sink::Reducer(_) => self.observe_reducer(&item),
             Sink::First(_) => return self.observe_first(item),
             Sink::Last(_) => self.observe_last(item),
             Sink::ApproxCountDistinct => self.observe_approx_distinct(&item),
@@ -85,9 +85,9 @@ impl<'a> SinkAccumulator<'a> {
                     Val::arr(self.collect)
                 }
             }
-            Sink::Count(_) | Sink::Numeric(_) => self
+            Sink::Reducer(_) => self
                 .reducer
-                .expect("count/numeric sinks construct reducer")
+                .expect("reducer sinks construct reducer")
                 .finish(),
             Sink::First(_) => self.first.unwrap_or(Val::Null),
             Sink::Last(_) => self.last.unwrap_or(Val::Null),

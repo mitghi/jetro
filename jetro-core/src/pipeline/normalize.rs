@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::ast::{Arg, ArrayElem, Expr, FStringPart, ObjField, PatchOp, PathStep, PipeStep, Step};
 
-use super::{BodyKernel, NumericSink, Sink, Stage};
+use super::{BodyKernel, ReducerOp, Sink, Stage};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ValueDemand {
@@ -19,7 +19,7 @@ struct RuntimeDemand {
 
 fn sink_runtime_demand(sink: &Sink) -> RuntimeDemand {
     match sink {
-        Sink::Count(_) => RuntimeDemand {
+        Sink::Reducer(spec) if spec.op == ReducerOp::Count => RuntimeDemand {
             value: ValueDemand::None,
             order: false,
         },
@@ -27,8 +27,12 @@ fn sink_runtime_demand(sink: &Sink) -> RuntimeDemand {
             value: ValueDemand::Whole,
             order: false,
         },
-        Sink::Numeric(_) => RuntimeDemand {
+        Sink::Reducer(spec) if matches!(spec.op, ReducerOp::Numeric(_)) => RuntimeDemand {
             value: ValueDemand::Numeric,
+            order: false,
+        },
+        Sink::Reducer(_) => RuntimeDemand {
+            value: ValueDemand::Whole,
             order: false,
         },
         Sink::Collect | Sink::First(_) | Sink::Last(_) => RuntimeDemand {
@@ -184,10 +188,14 @@ impl SymbolicEmitter {
     fn finish(&mut self, sink: &mut Sink) {
         self.flush_predicate();
         match sink {
-            Sink::Count(_) => {}
-            Sink::Numeric(n) if n.is_identity() && !matches!(self.item, Expr::Current) => {
+            Sink::Reducer(spec) if spec.op == ReducerOp::Count => {}
+            Sink::Reducer(spec)
+                if matches!(spec.op, ReducerOp::Numeric(_))
+                    && spec.projection.is_none()
+                    && !matches!(self.item, Expr::Current) =>
+            {
                 let item = simplify_expr(std::mem::replace(&mut self.item, Expr::Current));
-                *sink = Sink::Numeric(NumericSink::projected(n.op, compile_stage_expr(&item)));
+                spec.projection = Some(compile_stage_expr(&item));
             }
             _ if self.demand.value == ValueDemand::Whole && !matches!(self.item, Expr::Current) => {
                 self.flush_item();

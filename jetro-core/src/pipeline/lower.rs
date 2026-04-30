@@ -7,7 +7,8 @@ use crate::{ast::Expr, context::EvalError, value::Val};
 
 use super::{
     expr_label, plan_with_exprs, plan_with_kernels, sink_name, source_name, trace_enabled,
-    BodyKernel, NumOp, NumericSink, Pipeline, PipelineBody, Plan, Sink, SortSpec, Source, Stage,
+    BodyKernel, NumOp, Pipeline, PipelineBody, Plan, ReducerOp, ReducerSpec, Sink, SortSpec,
+    Source, Stage,
 };
 
 impl Pipeline {
@@ -152,14 +153,11 @@ impl Pipeline {
         // new sub-programs (e.g. Map+Map → field-chain-Map), or demand
         // planning may have absorbed a projection into a numeric sink.
         p.stage_kernels = classify_kernels(&p.stages);
-        p.sink_kernels = match &p.sink {
-            Sink::Numeric(n) => n
-                .project
-                .as_ref()
-                .map(|p| vec![BodyKernel::classify(p)])
-                .unwrap_or_default(),
-            _ => Vec::new(),
-        };
+        p.sink_kernels = p
+            .sink
+            .reducer_spec()
+            .and_then(|spec| spec.projection.map(|p| vec![BodyKernel::classify(&p)]))
+            .unwrap_or_default();
         Some(p)
     }
 
@@ -577,10 +575,12 @@ fn terminal_sink_for_method(method: BuiltinMethod) -> Option<Sink> {
     }
 
     match spec.view_sink? {
-        BuiltinViewSink::Count => Some(Sink::Count(BuiltinViewSink::Count)),
-        BuiltinViewSink::Numeric => Some(Sink::Numeric(NumericSink::identity(
-            NumOp::from_builtin_reducer(spec.numeric_reducer?),
-        ))),
+        BuiltinViewSink::Count => Some(Sink::Reducer(ReducerSpec::count())),
+        BuiltinViewSink::Numeric => Some(Sink::Reducer(ReducerSpec {
+            op: ReducerOp::Numeric(NumOp::from_builtin_reducer(spec.numeric_reducer?)),
+            predicate: None,
+            projection: None,
+        })),
         BuiltinViewSink::First => Some(Sink::First(BuiltinViewSink::First)),
         BuiltinViewSink::Last => Some(Sink::Last(BuiltinViewSink::Last)),
     }
