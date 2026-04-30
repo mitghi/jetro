@@ -769,6 +769,9 @@ pub enum BuiltinPipelineExecutor {
     ElementBuiltin,
     ExpandingBuiltin,
     ObjectLambda,
+    RowFilter,
+    RowMap,
+    RowFlatMap,
     Position { take: bool },
     Reverse,
     Sort,
@@ -1165,6 +1168,7 @@ impl BuiltinMethod {
                     .pipeline_demand(BuiltinPipelineDemand::Filter)
                     .pipeline_order_effect(BuiltinPipelineOrderEffect::PredicatePrefix)
                     .columnar_stage(BuiltinColumnarStage::Filter)
+                    .pipeline_executor(BuiltinPipelineExecutor::RowFilter)
                     .cost(10.0)
             }
             Self::Compact | Self::Remove => {
@@ -1179,6 +1183,7 @@ impl BuiltinMethod {
                 .pipeline_order_effect(BuiltinPipelineOrderEffect::Preserves)
                 .columnar_stage(BuiltinColumnarStage::Map)
                 .pipeline_element()
+                .pipeline_executor(BuiltinPipelineExecutor::RowMap)
                 .cost(10.0),
             Self::Enumerate | Self::Pairwise => {
                 BuiltinSpec::new(Cat::StreamingOneToOne, Card::OneToOne)
@@ -1195,6 +1200,7 @@ impl BuiltinMethod {
                 .pipeline_materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
                 .pipeline_demand(BuiltinPipelineDemand::FlatMap)
                 .columnar_stage(BuiltinColumnarStage::FlatMap)
+                .pipeline_executor(BuiltinPipelineExecutor::RowFlatMap)
                 .cost(10.0),
             Self::Flatten | Self::Explode => {
                 BuiltinSpec::new(Cat::StreamingExpand, Card::Expanding).cost(10.0)
@@ -6816,6 +6822,18 @@ mod spec_tests {
         assert_eq!(
             BuiltinMethod::TransformValues.spec().pipeline_executor,
             Some(BuiltinPipelineExecutor::ObjectLambda)
+        );
+        assert_eq!(
+            BuiltinMethod::Filter.spec().pipeline_executor,
+            Some(BuiltinPipelineExecutor::RowFilter)
+        );
+        assert_eq!(
+            BuiltinMethod::Map.spec().pipeline_executor,
+            Some(BuiltinPipelineExecutor::RowMap)
+        );
+        assert_eq!(
+            BuiltinMethod::FlatMap.spec().pipeline_executor,
+            Some(BuiltinPipelineExecutor::RowFlatMap)
         );
         assert_eq!(
             BuiltinMethod::Take.spec().pipeline_executor,

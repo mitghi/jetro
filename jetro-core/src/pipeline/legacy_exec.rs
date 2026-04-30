@@ -88,19 +88,8 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
                 continue;
             }
             match stage {
-                Stage::Filter(prog, _) => {
-                    buf = filter_apply(buf, |v| {
-                        eval_kernel(kernel, v, |item| {
-                            apply_item_in_env(&mut vm, &mut loop_env, item, prog)
-                        })
-                    })?;
-                }
-                Stage::Map(prog, _) => {
-                    buf = map_apply(buf, |v| {
-                        eval_kernel(kernel, v, |item| {
-                            apply_item_in_env(&mut vm, &mut loop_env, item, prog)
-                        })
-                    })?;
+                Stage::Filter(_, _) | Stage::Map(_, _) => {
+                    unreachable!("adapter-backed stage was not handled by adapter")
                 }
                 Stage::Skip(_, _, _)
                 | Stage::Take(_, _, _)
@@ -111,19 +100,8 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
                 Stage::UniqueBy(_) => {
                     unreachable!("adapter-backed stage was not handled by adapter")
                 }
-                Stage::FlatMap(prog, _) => {
-                    let mut out: Vec<Val> = Vec::new();
-                    for v in &buf {
-                        let inner = eval_kernel(kernel, v, |item| {
-                            apply_item_in_env(&mut vm, &mut loop_env, item, prog)
-                        })?;
-                        if let Some(arr) = inner.as_vals() {
-                            out.extend(arr.iter().cloned());
-                        } else {
-                            out.push(inner);
-                        }
-                    }
-                    buf = out;
+                Stage::FlatMap(_, _) => {
+                    unreachable!("adapter-backed stage was not handled by adapter")
                 }
                 Stage::GroupBy(_) => {
                     unreachable!("adapter-backed stage was not handled by adapter")
@@ -488,6 +466,53 @@ fn apply_adapter_materialized(
             *buf = out;
             Some(Ok(()))
         }
+        BuiltinPipelineExecutor::RowFilter => {
+            let prog = row_stage_program(stage)?;
+            match filter_apply(std::mem::take(buf), |v| {
+                eval_kernel(kernel, v, |item| {
+                    apply_item_in_env(vm, loop_env, item, prog)
+                })
+            }) {
+                Ok(out) => {
+                    *buf = out;
+                    Some(Ok(()))
+                }
+                Err(err) => Some(Err(err)),
+            }
+        }
+        BuiltinPipelineExecutor::RowMap => {
+            let prog = row_stage_program(stage)?;
+            match map_apply(std::mem::take(buf), |v| {
+                eval_kernel(kernel, v, |item| {
+                    apply_item_in_env(vm, loop_env, item, prog)
+                })
+            }) {
+                Ok(out) => {
+                    *buf = out;
+                    Some(Ok(()))
+                }
+                Err(err) => Some(Err(err)),
+            }
+        }
+        BuiltinPipelineExecutor::RowFlatMap => {
+            let prog = row_stage_program(stage)?;
+            let mut out: Vec<Val> = Vec::new();
+            for v in buf.iter() {
+                let inner = match eval_kernel(kernel, v, |item| {
+                    apply_item_in_env(vm, loop_env, item, prog)
+                }) {
+                    Ok(inner) => inner,
+                    Err(err) => return Some(Err(err)),
+                };
+                if let Some(arr) = inner.as_vals() {
+                    out.extend(arr.iter().cloned());
+                } else {
+                    out.push(inner);
+                }
+            }
+            *buf = out;
+            Some(Ok(()))
+        }
         BuiltinPipelineExecutor::UniqueBy => {
             match keyed_stage_program(stage) {
                 None => {
@@ -709,6 +734,9 @@ fn apply_adapter_streaming(
         }
         Some(
             BuiltinPipelineExecutor::ExpandingBuiltin
+            | BuiltinPipelineExecutor::RowFilter
+            | BuiltinPipelineExecutor::RowMap
+            | BuiltinPipelineExecutor::RowFlatMap
             | BuiltinPipelineExecutor::Position { .. }
             | BuiltinPipelineExecutor::Reverse
             | BuiltinPipelineExecutor::Sort
@@ -755,6 +783,13 @@ fn object_lambda_program(stage: &Stage) -> Option<&Arc<crate::vm::Program>> {
         | Stage::TransformKeys(prog)
         | Stage::FilterValues(prog)
         | Stage::FilterKeys(prog) => Some(prog),
+        _ => None,
+    }
+}
+
+fn row_stage_program(stage: &Stage) -> Option<&Arc<crate::vm::Program>> {
+    match stage {
+        Stage::Filter(prog, _) | Stage::Map(prog, _) | Stage::FlatMap(prog, _) => Some(prog),
         _ => None,
     }
 }
