@@ -30,7 +30,7 @@
 //! reusable per-element operators and sinks for those plans.
 
 use smallvec::SmallVec;
-use std::borrow::Cow;
+use std::borrow::{Borrow, Cow};
 
 use crate::builtins::BuiltinCall;
 use crate::chain_ir::PullDemand;
@@ -228,15 +228,36 @@ pub fn run_pipeline_with_demand<S: Sink>(
     stages: &dyn Stage,
     demand: PullDemand,
 ) -> Val {
+    run_pipeline_iter_with_demand::<S, _>(arr.iter(), stages, demand)
+}
+
+pub fn run_pipeline_owned_iter_with_demand<S, I>(
+    rows: I,
+    stages: &dyn Stage,
+    demand: PullDemand,
+) -> Val
+where
+    S: Sink,
+    I: IntoIterator<Item = Val>,
+{
+    run_pipeline_iter_with_demand::<S, _>(rows.into_iter(), stages, demand)
+}
+
+fn run_pipeline_iter_with_demand<'a, S, I>(rows: I, stages: &dyn Stage, demand: PullDemand) -> Val
+where
+    S: Sink,
+    I: IntoIterator,
+    I::Item: std::borrow::Borrow<Val>,
+{
     let mut acc = S::init();
     let mut pulled_inputs = 0usize;
     let mut emitted_outputs = 0usize;
-    for v in arr.iter() {
+    for v in rows {
         if matches!(demand, PullDemand::FirstInput(n) if pulled_inputs >= n) {
             break;
         }
         pulled_inputs += 1;
-        match stages.apply(v) {
+        match stages.apply(v.borrow()) {
             StageOutput::Pass(cow) => {
                 acc = S::fold(acc, cow.as_ref());
                 emitted_outputs += 1;
@@ -883,7 +904,7 @@ impl<'a> std::fmt::Display for DisplayKey<'a> {
 
 /// Total ordering on Val keys; mirrors the legacy sort comparator
 /// shape used in `pipeline::run_with`.
-fn cmp_val(a: &Val, b: &Val) -> std::cmp::Ordering {
+pub(crate) fn cmp_val(a: &Val, b: &Val) -> std::cmp::Ordering {
     use std::cmp::Ordering::*;
     match (a, b) {
         (Val::Null, Val::Null) => Equal,
@@ -1530,8 +1551,8 @@ mod tests {
         assert!(matches!(strats[0], StageStrategy::Default));
 
         // [Sort, Filter] + First cannot use fixed top-k without a
-        // monotonic predicate proof: filter may skip the sorted prefix
-        // and still need later ordered rows.
+        // monotonic predicate proof, but it can use a lazy ordered
+        // producer that keeps popping sorted rows until First is done.
         let stages = vec![
             Stage::Sort(SortSpec::keyed(Arc::clone(&dummy_prog), false)),
             Stage::Filter(
@@ -1540,7 +1561,7 @@ mod tests {
             ),
         ];
         let strats = compute_strategies(&stages, &first_sink);
-        assert!(matches!(strats[0], StageStrategy::Default));
+        assert!(matches!(strats[0], StageStrategy::SortUntilOutput(1)));
     }
 
     #[test]

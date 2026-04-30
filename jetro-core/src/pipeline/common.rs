@@ -1,3 +1,5 @@
+use std::cmp::Ordering;
+use std::collections::BinaryHeap;
 use std::sync::Arc;
 
 use crate::{context::EvalError, value::Val};
@@ -135,12 +137,12 @@ where
 {
     let k = match strategy {
         StageStrategy::SortTopK(k) | StageStrategy::SortBottomK(k) => Some(k),
-        StageStrategy::Default => None,
+        StageStrategy::Default | StageStrategy::SortUntilOutput(_) => None,
     };
     let keep_largest = match strategy {
         StageStrategy::SortTopK(_) => descending,
         StageStrategy::SortBottomK(_) => !descending,
-        StageStrategy::Default => false,
+        StageStrategy::Default | StageStrategy::SortUntilOutput(_) => false,
     };
 
     let mut keyed: Vec<(Val, T)> = match k {
@@ -191,6 +193,75 @@ where
         keyed.reverse();
     }
     Ok(keyed.into_iter().map(|(_, item)| item).collect())
+}
+
+pub(crate) fn ordered_by_key_cmp<T, I, F>(
+    items: I,
+    descending: bool,
+    mut key_of: F,
+    cmp: fn(&Val, &Val) -> Ordering,
+) -> Result<OrderedByKey<T>, EvalError>
+where
+    I: IntoIterator<Item = T>,
+    F: FnMut(&T) -> Result<Val, EvalError>,
+{
+    let mut heap = BinaryHeap::new();
+    for (seq, item) in items.into_iter().enumerate() {
+        heap.push(OrderedEntry {
+            key: key_of(&item)?,
+            item,
+            seq,
+            descending,
+            cmp,
+        });
+    }
+    Ok(OrderedByKey { heap })
+}
+
+pub(crate) struct OrderedByKey<T> {
+    heap: BinaryHeap<OrderedEntry<T>>,
+}
+
+impl<T> Iterator for OrderedByKey<T> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.heap.pop().map(|entry| entry.item)
+    }
+}
+
+struct OrderedEntry<T> {
+    key: Val,
+    item: T,
+    seq: usize,
+    descending: bool,
+    cmp: fn(&Val, &Val) -> Ordering,
+}
+
+impl<T> PartialEq for OrderedEntry<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.seq == other.seq && (self.cmp)(&self.key, &other.key) == Ordering::Equal
+    }
+}
+
+impl<T> Eq for OrderedEntry<T> {}
+
+impl<T> PartialOrd for OrderedEntry<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<T> Ord for OrderedEntry<T> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let key_order = (self.cmp)(&self.key, &other.key);
+        let priority = if self.descending {
+            key_order
+        } else {
+            key_order.reverse()
+        };
+        priority.then_with(|| other.seq.cmp(&self.seq))
+    }
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────

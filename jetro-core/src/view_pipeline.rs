@@ -306,7 +306,10 @@ where
     let strategies =
         pipeline::compute_strategies_with_kernels(&body.stages, &body.stage_kernels, &body.sink);
     let strategy = strategies.first().copied()?;
-    if matches!(strategy, pipeline::StageStrategy::Default) {
+    if !matches!(
+        strategy,
+        pipeline::StageStrategy::SortTopK(_) | pipeline::StageStrategy::SortBottomK(_)
+    ) {
         return None;
     }
     if !body.suffix_can_run_with_materialized_receiver(1) {

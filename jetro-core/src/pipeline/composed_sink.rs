@@ -27,3 +27,46 @@ pub(super) fn run(
 
     Some(out)
 }
+
+pub(super) fn run_owned_iter<I>(
+    sink: &Sink,
+    rows: I,
+    chain: &dyn cmp::Stage,
+    demand: PullDemand,
+) -> Option<Val>
+where
+    I: IntoIterator<Item = Val>,
+{
+    let out = match sink {
+        Sink::Collect => {
+            cmp::run_pipeline_owned_iter_with_demand::<cmp::CollectSink, _>(rows, chain, demand)
+        }
+        Sink::Count(_) => {
+            cmp::run_pipeline_owned_iter_with_demand::<cmp::CountSink, _>(rows, chain, demand)
+        }
+        Sink::Numeric(numeric) if numeric.project.is_some() => return None,
+        Sink::Numeric(numeric) => match numeric.op {
+            NumOp::Sum => {
+                cmp::run_pipeline_owned_iter_with_demand::<cmp::SumSink, _>(rows, chain, demand)
+            }
+            NumOp::Min => {
+                cmp::run_pipeline_owned_iter_with_demand::<cmp::MinSink, _>(rows, chain, demand)
+            }
+            NumOp::Max => {
+                cmp::run_pipeline_owned_iter_with_demand::<cmp::MaxSink, _>(rows, chain, demand)
+            }
+            NumOp::Avg => {
+                cmp::run_pipeline_owned_iter_with_demand::<cmp::AvgSink, _>(rows, chain, demand)
+            }
+        },
+        Sink::First(_) => {
+            cmp::run_pipeline_owned_iter_with_demand::<cmp::FirstSink, _>(rows, chain, demand)
+        }
+        Sink::Last(_) => {
+            cmp::run_pipeline_owned_iter_with_demand::<cmp::LastSink, _>(rows, chain, demand)
+        }
+        Sink::ApproxCountDistinct => return None,
+    };
+
+    Some(out)
+}

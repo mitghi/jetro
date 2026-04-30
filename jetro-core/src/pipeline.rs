@@ -69,7 +69,7 @@ pub(crate) use capability::{
 pub(crate) use collector::TerminalMapCollector;
 pub(crate) use common::{
     apply_item_in_env, bounded_sort_by_key, bounded_sort_by_key_cmp, cmp_val_total, is_truthy,
-    num_finalise, num_fold, walk_field_chain,
+    num_finalise, num_fold, ordered_by_key_cmp, walk_field_chain,
 };
 pub use kernels::{eval_cmp_op, eval_kernel, BodyKernel};
 pub(crate) use kernels::{eval_view_kernel, CollectLayout, ObjectKernel, ViewKernelValue};
@@ -1156,7 +1156,29 @@ mod tests {
 
         let p = lower_query("$.rows.sort_by(-score).filter(price > 10).take(2)").unwrap();
         let strategies = compute_strategies_with_kernels(&p.stages, &p.stage_kernels, &p.sink);
-        assert!(matches!(strategies[0], StageStrategy::Default));
+        assert!(matches!(strategies[0], StageStrategy::SortUntilOutput(2)));
+    }
+
+    #[test]
+    fn sort_filter_take_uses_lazy_ordered_until_output_and_matches_vm() {
+        use serde_json::json;
+
+        let p = lower_query("$.rows.sort_by(-price).filter(test > 10).take(2)").unwrap();
+        let strategies = compute_strategies_with_kernels(&p.stages, &p.stage_kernels, &p.sink);
+        assert!(matches!(strategies[0], StageStrategy::SortUntilOutput(2)));
+
+        assert_pipeline_matches_vm_query(
+            "$.rows.sort_by(-price).filter(test > 10).take(2)",
+            "$.rows.sort(-price).filter(test > 10).first(2)",
+            json!({
+                "rows": [
+                    {"id": 1, "price": 100, "test": 0},
+                    {"id": 2, "price": 90, "test": 20},
+                    {"id": 3, "price": 80, "test": 0},
+                    {"id": 4, "price": 70, "test": 30}
+                ]
+            }),
+        );
     }
 
     #[test]

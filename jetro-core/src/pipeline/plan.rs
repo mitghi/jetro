@@ -118,6 +118,7 @@ pub enum StageStrategy {
     Default,
     SortTopK(usize),
     SortBottomK(usize),
+    SortUntilOutput(usize),
 }
 
 #[cfg(test)]
@@ -158,6 +159,8 @@ pub fn compute_strategies_with_kernels(
                             Some(Position::Last) => StageStrategy::SortBottomK(k),
                             _ => StageStrategy::SortTopK(k),
                         };
+                    } else {
+                        strategies[i] = StageStrategy::SortUntilOutput(k);
                     }
                 }
                 PullDemand::All => {}

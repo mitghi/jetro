@@ -8,7 +8,9 @@ use super::composed_segment;
 use super::composed_sink;
 use super::composed_source;
 use super::composed_stage::ComposedStageBuilder;
-use super::{compute_strategies_with_kernels, BodyKernel, Pipeline, StageStrategy};
+use super::{
+    compute_strategies_with_kernels, ordered_by_key_cmp, BodyKernel, Pipeline, Stage, StageStrategy,
+};
 
 pub(super) fn run(
     pipeline: &Pipeline,
@@ -47,6 +49,22 @@ pub(super) fn run(
 
         let kernel = kernels.get(i).unwrap_or(&BodyKernel::Generic);
         let strategy = strategies.get(i).copied().unwrap_or(StageStrategy::Default);
+        if let StageStrategy::SortUntilOutput(target_outputs) = strategy {
+            let _ = target_outputs;
+            if let Some(out) = run_lazy_ordered_suffix(
+                stage,
+                kernel,
+                &eff_sink,
+                stages_ref,
+                kernels,
+                i,
+                &stage_builder,
+                buf.into_vec(),
+            ) {
+                return Some(out);
+            }
+            return None;
+        }
         match composed_barrier::run(
             stage,
             kernel,
@@ -74,4 +92,45 @@ pub(super) fn run(
     let out = composed_sink::run(&eff_sink, buf.as_slice(), chain.as_ref(), final_demand)?;
 
     Some(Ok(out))
+}
+
+fn run_lazy_ordered_suffix(
+    stage: &Stage,
+    kernel: &BodyKernel,
+    sink: &super::Sink,
+    stages: &[Stage],
+    kernels: &[BodyKernel],
+    sort_idx: usize,
+    stage_builder: &ComposedStageBuilder<'_>,
+    rows: Vec<Val>,
+) -> Option<Result<Val, EvalError>> {
+    let Stage::Sort(spec) = stage else {
+        return None;
+    };
+    if stages[sort_idx + 1..]
+        .iter()
+        .any(Stage::is_composed_barrier)
+    {
+        return None;
+    }
+
+    let key = match &spec.key {
+        None => crate::composed::KeySource::None,
+        Some(_) => super::composed_stage::key_from_kernel(kernel)?,
+    };
+    let ordered = match ordered_by_key_cmp(
+        rows,
+        spec.descending,
+        |v| Ok(key.extract(v)),
+        crate::composed::cmp_val,
+    ) {
+        Ok(ordered) => ordered,
+        Err(err) => return Some(Err(err)),
+    };
+    let chain =
+        composed_segment::build_chain(stages, kernels, sort_idx + 1..stages.len(), stage_builder)?;
+    let final_demand = Pipeline::segment_source_demand(&stages[sort_idx + 1..], sink)
+        .chain
+        .pull;
+    composed_sink::run_owned_iter(sink, ordered, chain.as_ref(), final_demand).map(Ok)
 }
