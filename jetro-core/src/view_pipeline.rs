@@ -60,16 +60,7 @@ where
     let capabilities = pipeline::view_capabilities(body)?;
     let items = source.array_iter()?;
 
-    let mut acc_collect: Vec<Val> = Vec::new();
-    let mut acc_count: i64 = 0;
-    let mut acc_sum_i: i64 = 0;
-    let mut acc_sum_f: f64 = 0.0;
-    let mut sum_floated = false;
-    let mut acc_min_f = f64::INFINITY;
-    let mut acc_max_f = f64::NEG_INFINITY;
-    let mut acc_n_obs = 0usize;
-    let mut acc_first: Option<Val> = None;
-    let mut acc_last: Option<Val> = None;
+    let mut sink_acc = pipeline::SinkAccumulator::new(&body.sink);
     let mut op_state: Vec<usize> = vec![0; capabilities.stages.len()];
     let source_demand = pipeline::Pipeline::segment_source_demand(&body.stages, &body.sink)
         .chain
@@ -104,22 +95,23 @@ where
         }
 
         for item in frontier {
-            match capabilities.sink {
+            let sink_done = match capabilities.sink {
                 pipeline::ViewSinkCapability::Collect => {
                     debug_assert_eq!(
                         capabilities.sink.materialization(),
                         pipeline::ViewMaterialization::SinkOutputRows
                     );
-                    acc_collect.push(item.materialize());
+                    sink_acc.push(item.materialize())
                 }
                 pipeline::ViewSinkCapability::Count => {
                     debug_assert_eq!(
                         capabilities.sink.materialization(),
                         pipeline::ViewMaterialization::Never
                     );
-                    acc_count += 1;
+                    sink_acc.push(Val::Null)
                 }
                 pipeline::ViewSinkCapability::Numeric { op, project_kernel } => {
+                    let _ = op;
                     debug_assert_eq!(
                         capabilities.sink.materialization(),
                         pipeline::ViewMaterialization::SinkNumericInput
@@ -130,34 +122,28 @@ where
                     } else {
                         item.materialize()
                     };
-                    pipeline::num_fold(
-                        &mut acc_sum_i,
-                        &mut acc_sum_f,
-                        &mut sum_floated,
-                        &mut acc_min_f,
-                        &mut acc_max_f,
-                        &mut acc_n_obs,
-                        op,
-                        &numeric_item,
-                    );
+                    sink_acc.push_projected_numeric(&numeric_item);
+                    false
                 }
                 pipeline::ViewSinkCapability::First => {
                     debug_assert_eq!(
                         capabilities.sink.materialization(),
                         pipeline::ViewMaterialization::SinkFinalRow
                     );
-                    acc_first = Some(item.materialize());
-                    break 'outer;
+                    sink_acc.push(item.materialize())
                 }
                 pipeline::ViewSinkCapability::Last => {
                     debug_assert_eq!(
                         capabilities.sink.materialization(),
                         pipeline::ViewMaterialization::SinkFinalRow
                     );
-                    acc_last = Some(item.materialize());
+                    sink_acc.push(item.materialize())
                 }
-            }
+            };
 
+            if sink_done {
+                break 'outer;
+            }
             emitted_outputs += 1;
             if matches!(source_demand, PullDemand::UntilOutput(n) if emitted_outputs >= n) {
                 break 'outer;
@@ -168,21 +154,7 @@ where
         }
     }
 
-    Some(Ok(match capabilities.sink {
-        pipeline::ViewSinkCapability::Collect => Val::arr(acc_collect),
-        pipeline::ViewSinkCapability::Count => Val::Int(acc_count),
-        pipeline::ViewSinkCapability::Numeric { op, .. } => pipeline::num_finalise(
-            op,
-            acc_sum_i,
-            acc_sum_f,
-            sum_floated,
-            acc_min_f,
-            acc_max_f,
-            acc_n_obs,
-        ),
-        pipeline::ViewSinkCapability::First => acc_first.unwrap_or(Val::Null),
-        pipeline::ViewSinkCapability::Last => acc_last.unwrap_or(Val::Null),
-    }))
+    Some(Ok(sink_acc.finish(false)))
 }
 
 fn run_prefix_then_materialized_suffix<'a, V>(

@@ -2,7 +2,7 @@ use crate::value::Val;
 
 use super::{num_finalise, num_fold, Sink};
 
-pub(super) struct SinkAccumulator<'a> {
+pub(crate) struct SinkAccumulator<'a> {
     sink: &'a Sink,
     collect: Vec<Val>,
     count: i64,
@@ -18,7 +18,7 @@ pub(super) struct SinkAccumulator<'a> {
 }
 
 impl<'a> SinkAccumulator<'a> {
-    pub(super) fn new(sink: &'a Sink) -> Self {
+    pub(crate) fn new(sink: &'a Sink) -> Self {
         Self {
             sink,
             collect: Vec::new(),
@@ -35,7 +35,7 @@ impl<'a> SinkAccumulator<'a> {
         }
     }
 
-    pub(super) fn push(&mut self, item: Val) -> bool {
+    pub(crate) fn push(&mut self, item: Val) -> bool {
         match self.sink {
             Sink::Collect => self.collect.push(item),
             Sink::Count => self.count += 1,
@@ -54,13 +54,13 @@ impl<'a> SinkAccumulator<'a> {
         false
     }
 
-    pub(super) fn push_projected_numeric(&mut self, numeric_item: &Val) {
+    pub(crate) fn push_projected_numeric(&mut self, numeric_item: &Val) {
         if let Sink::Numeric(numeric) = self.sink {
             self.push_numeric(numeric.op, numeric_item);
         }
     }
 
-    pub(super) fn finish(self, unwrap_single_collect_obj: bool) -> Val {
+    pub(crate) fn finish(self, unwrap_single_collect_obj: bool) -> Val {
         match self.sink {
             Sink::Collect => {
                 if unwrap_single_collect_obj

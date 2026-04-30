@@ -74,6 +74,7 @@ pub use plan::{
     compute_strategies, plan_with_exprs, plan_with_kernels, select_strategy, Plan, Position,
     StageStrategy, Strategy,
 };
+pub(crate) use sink_accumulator::SinkAccumulator;
 
 /// Data capabilities supplied by the owning `Jetro` handle to pipeline
 /// execution. The pipeline remains independent of `Jetro` itself, but can ask
