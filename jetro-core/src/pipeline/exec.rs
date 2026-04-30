@@ -36,39 +36,31 @@ impl Pipeline {
         base_env: &Env,
         cache: Option<&dyn PipelineData>,
     ) -> Result<Val, EvalError> {
-        // Step 3d Phase 5 — IndexedDispatch.  When stages are all 1:1
-        // (`Map`, `Identity`) and sink is positional (First/Last), pull
-        // the target element from the source by index, run chain once,
-        // return.  O(1) work for `$.books.map(@.x).first()` shape.
+        // O(1) route for positional sinks over indexable 1:1 chains.
         if let Some(out) = indexed_exec::run(self, root, base_env) {
             return out;
         }
 
-        // Phase 3 columnar fast path — runs before per-row loop.
-        // Critical for Q12/Q15-class queries: ObjVec promotion +
-        // typed-column slot kernels reach native parity. Composed
-        // path runs AFTER, as fallback for the per-row generic case.
+        // Columnar route for typed lanes and promoted ObjVec slot kernels.
         if let Some(out) = columnar::run_cached(self, root, cache) {
             return out;
         }
-        // Fall back to legacy try_columnar (no cache).
+
+        // Uncached columnar route for already-columnar sources.
         if cache.is_none() {
             if let Some(out) = columnar::run_uncached(self, root) {
                 return out;
             }
         }
 
-        // Layer B — composed-Cow Stage chain. Opt-in under
-        // `JETRO_COMPOSED=1`. Replaces the legacy per-row loop for
-        // pipelines whose shape composed handles. Decomposes fused
-        // Sinks (NumMap/NumFilterMap/CountIf/etc.) into base Stage +
-        // base Sink at entry — composition handles the rest.
+        // Generic composed route for supported streaming/barrier chains.
         if composed_path_enabled() {
             if let Some(out) = composed_exec::run(self, root, base_env) {
                 return out;
             }
         }
 
+        // Semantic fallback for every shape not handled above.
         legacy_exec::run(self, root, base_env)
     }
 }
