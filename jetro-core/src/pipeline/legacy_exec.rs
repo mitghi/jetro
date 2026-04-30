@@ -162,18 +162,8 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
                     }
                     buf = out;
                 }
-                Stage::GroupBy(prog) => {
-                    // GroupBy is a barrier that yields one Val::Obj.
-                    // Place it as a single-element buf so downstream
-                    // stages see the grouped object.  Sink::Collect
-                    // will return Val::arr([this_obj]); a separate
-                    // shortcut below converts that to the bare obj.
-                    let out_obj = group_by_apply(buf, |v| {
-                        eval_kernel(kernel, v, |item| {
-                            apply_item_in_env(&mut vm, &mut loop_env, item, prog)
-                        })
-                    })?;
-                    buf = vec![Val::Obj(Arc::new(out_obj))];
+                Stage::GroupBy(_) => {
+                    unreachable!("adapter-backed stage was not handled by adapter")
                 }
                 Stage::Chunk(n) => {
                     buf = chunk_apply(&buf, *n);
@@ -203,67 +193,12 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
                         })
                     })?;
                 }
-                Stage::IndicesWhere(prog) => {
-                    let mut out: Vec<i64> = Vec::new();
-                    for (i, v) in buf.iter().enumerate() {
-                        if filter_one(v, |item| {
-                            eval_kernel(kernel, item, |item| {
-                                apply_item_in_env(&mut vm, &mut loop_env, item, prog)
-                            })
-                        })? {
-                            out.push(i as i64);
-                        }
-                    }
-                    buf = vec![Val::int_vec(out)];
-                }
-                Stage::FindIndex(prog) => {
-                    let mut found: Val = Val::Null;
-                    for (i, v) in buf.iter().enumerate() {
-                        if filter_one(v, |item| {
-                            eval_kernel(kernel, item, |item| {
-                                apply_item_in_env(&mut vm, &mut loop_env, item, prog)
-                            })
-                        })? {
-                            found = Val::Int(i as i64);
-                            break;
-                        }
-                    }
-                    buf = vec![found];
-                }
-                Stage::MaxBy(prog) | Stage::MinBy(prog) => {
-                    let want_max = matches!(stage, Stage::MaxBy(_));
-                    if buf.is_empty() {
-                        buf = vec![Val::Null];
-                    } else {
-                        let mut best_idx = 0usize;
-                        let mut best_key = eval_kernel(kernel, &buf[0], |item| {
-                            apply_item_in_env(&mut vm, &mut loop_env, item, prog)
-                        })?;
-                        for i in 1..buf.len() {
-                            let k = eval_kernel(kernel, &buf[i], |item| {
-                                apply_item_in_env(&mut vm, &mut loop_env, item, prog)
-                            })?;
-                            let cmp = cmp_val_total(&k, &best_key);
-                            let take = if want_max {
-                                cmp == std::cmp::Ordering::Greater
-                            } else {
-                                cmp == std::cmp::Ordering::Less
-                            };
-                            if take {
-                                best_idx = i;
-                                best_key = k;
-                            }
-                        }
-                        buf = vec![buf.into_iter().nth(best_idx).unwrap()];
-                    }
-                }
-                Stage::CountBy(prog) => {
-                    let map = count_by_apply(buf, |v| {
-                        eval_kernel(kernel, v, |item| {
-                            apply_item_in_env(&mut vm, &mut loop_env, item, prog)
-                        })
-                    })?;
-                    buf = vec![Val::obj(map)];
+                Stage::IndicesWhere(_)
+                | Stage::FindIndex(_)
+                | Stage::MaxBy(_)
+                | Stage::MinBy(_)
+                | Stage::CountBy(_) => {
+                    unreachable!("adapter-backed stage was not handled by adapter")
                 }
                 Stage::SortedDedup(key_prog) => {
                     // Category F: combined sort + dedup-consecutive.
@@ -287,13 +222,8 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
                         }
                     }
                 }
-                Stage::IndexBy(prog) => {
-                    let map = index_by_apply(buf, |v| {
-                        eval_kernel(kernel, v, |item| {
-                            apply_item_in_env(&mut vm, &mut loop_env, item, prog)
-                        })
-                    })?;
-                    buf = vec![Val::obj(map)];
+                Stage::IndexBy(_) => {
+                    unreachable!("adapter-backed stage was not handled by adapter")
                 }
                 Stage::Split(_)
                 | Stage::Slice(_, _)
@@ -578,6 +508,119 @@ fn apply_adapter_materialized(
             *buf = out;
             Some(Ok(()))
         }
+        BuiltinPipelineExecutor::GroupBy => {
+            let prog = keyed_stage_program(stage)?;
+            let out_obj = match group_by_apply(std::mem::take(buf), |v| {
+                eval_kernel(kernel, v, |item| {
+                    apply_item_in_env(vm, loop_env, item, prog)
+                })
+            }) {
+                Ok(out_obj) => out_obj,
+                Err(err) => return Some(Err(err)),
+            };
+            *buf = vec![Val::Obj(Arc::new(out_obj))];
+            Some(Ok(()))
+        }
+        BuiltinPipelineExecutor::CountBy => {
+            let prog = keyed_stage_program(stage)?;
+            let map = match count_by_apply(std::mem::take(buf), |v| {
+                eval_kernel(kernel, v, |item| {
+                    apply_item_in_env(vm, loop_env, item, prog)
+                })
+            }) {
+                Ok(map) => map,
+                Err(err) => return Some(Err(err)),
+            };
+            *buf = vec![Val::obj(map)];
+            Some(Ok(()))
+        }
+        BuiltinPipelineExecutor::IndexBy => {
+            let prog = keyed_stage_program(stage)?;
+            let map = match index_by_apply(std::mem::take(buf), |v| {
+                eval_kernel(kernel, v, |item| {
+                    apply_item_in_env(vm, loop_env, item, prog)
+                })
+            }) {
+                Ok(map) => map,
+                Err(err) => return Some(Err(err)),
+            };
+            *buf = vec![Val::obj(map)];
+            Some(Ok(()))
+        }
+        BuiltinPipelineExecutor::IndicesWhere => {
+            let prog = keyed_stage_program(stage)?;
+            let mut out: Vec<i64> = Vec::new();
+            for (i, v) in buf.iter().enumerate() {
+                match filter_one(v, |item| {
+                    eval_kernel(kernel, item, |item| {
+                        apply_item_in_env(vm, loop_env, item, prog)
+                    })
+                }) {
+                    Ok(true) => out.push(i as i64),
+                    Ok(false) => {}
+                    Err(err) => return Some(Err(err)),
+                }
+            }
+            *buf = vec![Val::int_vec(out)];
+            Some(Ok(()))
+        }
+        BuiltinPipelineExecutor::FindIndex => {
+            let prog = keyed_stage_program(stage)?;
+            let mut found: Val = Val::Null;
+            for (i, v) in buf.iter().enumerate() {
+                match filter_one(v, |item| {
+                    eval_kernel(kernel, item, |item| {
+                        apply_item_in_env(vm, loop_env, item, prog)
+                    })
+                }) {
+                    Ok(true) => {
+                        found = Val::Int(i as i64);
+                        break;
+                    }
+                    Ok(false) => {}
+                    Err(err) => return Some(Err(err)),
+                }
+            }
+            *buf = vec![found];
+            Some(Ok(()))
+        }
+        BuiltinPipelineExecutor::ArgExtreme { max } => {
+            let prog = keyed_stage_program(stage)?;
+            if buf.is_empty() {
+                *buf = vec![Val::Null];
+                return Some(Ok(()));
+            }
+
+            let mut best_idx = 0usize;
+            let mut best_key = match eval_kernel(kernel, &buf[0], |item| {
+                apply_item_in_env(vm, loop_env, item, prog)
+            }) {
+                Ok(key) => key,
+                Err(err) => return Some(Err(err)),
+            };
+            for i in 1..buf.len() {
+                let key = match eval_kernel(kernel, &buf[i], |item| {
+                    apply_item_in_env(vm, loop_env, item, prog)
+                }) {
+                    Ok(key) => key,
+                    Err(err) => return Some(Err(err)),
+                };
+                let cmp = cmp_val_total(&key, &best_key);
+                let take = if max {
+                    cmp == std::cmp::Ordering::Greater
+                } else {
+                    cmp == std::cmp::Ordering::Less
+                };
+                if take {
+                    best_idx = i;
+                    best_key = key;
+                }
+            }
+
+            let best = std::mem::take(buf).into_iter().nth(best_idx).unwrap();
+            *buf = vec![best];
+            Some(Ok(()))
+        }
     }
 }
 
@@ -595,7 +638,16 @@ fn apply_adapter_streaming(
                 .expect("object lambda executor must be attached to object lambda stage");
             apply_lambda_obj(stage, &item, vm, loop_env, kernel, prog)
         }
-        Some(BuiltinPipelineExecutor::ExpandingBuiltin) | None => Ok(item),
+        Some(
+            BuiltinPipelineExecutor::ExpandingBuiltin
+            | BuiltinPipelineExecutor::GroupBy
+            | BuiltinPipelineExecutor::CountBy
+            | BuiltinPipelineExecutor::IndexBy
+            | BuiltinPipelineExecutor::FindIndex
+            | BuiltinPipelineExecutor::IndicesWhere
+            | BuiltinPipelineExecutor::ArgExtreme { .. },
+        )
+        | None => Ok(item),
     }
 }
 
@@ -626,6 +678,19 @@ fn object_lambda_program(stage: &Stage) -> Option<&Arc<crate::vm::Program>> {
         | Stage::TransformKeys(prog)
         | Stage::FilterValues(prog)
         | Stage::FilterKeys(prog) => Some(prog),
+        _ => None,
+    }
+}
+
+fn keyed_stage_program(stage: &Stage) -> Option<&Arc<crate::vm::Program>> {
+    match stage {
+        Stage::GroupBy(prog)
+        | Stage::CountBy(prog)
+        | Stage::IndexBy(prog)
+        | Stage::FindIndex(prog)
+        | Stage::IndicesWhere(prog)
+        | Stage::MaxBy(prog)
+        | Stage::MinBy(prog) => Some(prog),
         _ => None,
     }
 }

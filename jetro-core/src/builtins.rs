@@ -769,6 +769,12 @@ pub enum BuiltinPipelineExecutor {
     ElementBuiltin,
     ExpandingBuiltin,
     ObjectLambda,
+    GroupBy,
+    CountBy,
+    IndexBy,
+    FindIndex,
+    IndicesWhere,
+    ArgExtreme { max: bool },
 }
 
 impl BuiltinPipelineShape {
@@ -1318,7 +1324,14 @@ impl BuiltinMethod {
                         .pipeline_materialization(
                             BuiltinPipelineMaterialization::LegacyMaterialized,
                         )
-                        .pipeline_shape(BuiltinPipelineShape::new(Card::OneToOne, true, 1.0, 1.0)),
+                        .pipeline_shape(BuiltinPipelineShape::new(Card::OneToOne, true, 1.0, 1.0))
+                        .pipeline_executor(match self {
+                            Self::FindIndex => BuiltinPipelineExecutor::FindIndex,
+                            Self::IndicesWhere => BuiltinPipelineExecutor::IndicesWhere,
+                            Self::MaxBy => BuiltinPipelineExecutor::ArgExtreme { max: true },
+                            Self::MinBy => BuiltinPipelineExecutor::ArgExtreme { max: false },
+                            _ => unreachable!(),
+                        }),
                     _ => spec,
                 }
             }
@@ -1361,7 +1374,8 @@ impl BuiltinMethod {
                             BuiltinExprStage::GroupBy,
                         ))
                         .pipeline_materialization(BuiltinPipelineMaterialization::ComposedBarrier)
-                        .columnar_stage(BuiltinColumnarStage::GroupBy),
+                        .columnar_stage(BuiltinColumnarStage::GroupBy)
+                        .pipeline_executor(BuiltinPipelineExecutor::GroupBy),
                     Self::CountBy => spec
                         .pipeline_stage(BuiltinPipelineStage::Unary)
                         .pipeline_lowering(BuiltinPipelineLowering::TerminalExprStage {
@@ -1371,7 +1385,8 @@ impl BuiltinMethod {
                         .pipeline_materialization(
                             BuiltinPipelineMaterialization::LegacyMaterialized,
                         )
-                        .pipeline_shape(BuiltinPipelineShape::new(Card::OneToOne, true, 1.0, 1.0)),
+                        .pipeline_shape(BuiltinPipelineShape::new(Card::OneToOne, true, 1.0, 1.0))
+                        .pipeline_executor(BuiltinPipelineExecutor::CountBy),
                     Self::IndexBy => spec
                         .pipeline_stage(BuiltinPipelineStage::Unary)
                         .pipeline_lowering(BuiltinPipelineLowering::TerminalExprStage {
@@ -1381,7 +1396,8 @@ impl BuiltinMethod {
                         .pipeline_materialization(
                             BuiltinPipelineMaterialization::LegacyMaterialized,
                         )
-                        .pipeline_shape(BuiltinPipelineShape::new(Card::OneToOne, true, 1.0, 1.0)),
+                        .pipeline_shape(BuiltinPipelineShape::new(Card::OneToOne, true, 1.0, 1.0))
+                        .pipeline_executor(BuiltinPipelineExecutor::IndexBy),
                     Self::Chunk => spec
                         .pipeline_stage(BuiltinPipelineStage::Unary)
                         .pipeline_lowering(BuiltinPipelineLowering::UsizeStage {
@@ -6782,6 +6798,22 @@ mod spec_tests {
         assert_eq!(
             BuiltinMethod::TransformValues.spec().pipeline_executor,
             Some(BuiltinPipelineExecutor::ObjectLambda)
+        );
+        assert_eq!(
+            BuiltinMethod::GroupBy.spec().pipeline_executor,
+            Some(BuiltinPipelineExecutor::GroupBy)
+        );
+        assert_eq!(
+            BuiltinMethod::CountBy.spec().pipeline_executor,
+            Some(BuiltinPipelineExecutor::CountBy)
+        );
+        assert_eq!(
+            BuiltinMethod::MaxBy.spec().pipeline_executor,
+            Some(BuiltinPipelineExecutor::ArgExtreme { max: true })
+        );
+        assert_eq!(
+            BuiltinMethod::FindIndex.spec().pipeline_executor,
+            Some(BuiltinPipelineExecutor::FindIndex)
         );
     }
 
