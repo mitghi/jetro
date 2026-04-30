@@ -6,10 +6,11 @@ use crate::{
 };
 
 use super::lower::run_compiled_map;
+use super::sink_accumulator::SinkAccumulator;
 use super::{
     apply_item_in_env, bounded_sort_by_key, cmp_val_total, compute_strategies, eval_kernel,
-    is_truthy, num_finalise, num_fold, walk_field_chain, BodyKernel, Pipeline, Sink, Source, Stage,
-    StageStrategy, TerminalMapCollector,
+    is_truthy, walk_field_chain, BodyKernel, Pipeline, Sink, Source, Stage, StageStrategy,
+    TerminalMapCollector,
 };
 
 use crate::builtins::{
@@ -89,22 +90,7 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
         _ => Box::new(std::iter::once(recv.clone())),
     };
 
-    // Sink accumulators.
-    let mut acc_collect: Vec<Val> = Vec::new();
-    let mut acc_count: i64 = 0;
-    let mut acc_sum_i: i64 = 0;
-    let mut acc_sum_f: f64 = 0.0;
-    let mut sum_floated: bool = false;
-    let mut acc_min_f: f64 = f64::INFINITY;
-    let mut acc_max_f: f64 = f64::NEG_INFINITY;
-    let mut acc_n_obs: usize = 0;
-    let mut acc_first: Option<Val> = None;
-    let mut acc_last: Option<Val> = None;
-    // Category E: HLL-12 register array (4096 × u8) — only used when
-    // sink is ApproxCountDistinct.  Allocates ~4KB even when unused;
-    // optimiser could box this when not needed.  Cheap relative to
-    // typical query memory.
-    let mut acc_hll: [u8; HLL_M] = [0u8; HLL_M];
+    let mut sink_acc = SinkAccumulator::new(&pipeline.sink);
 
     // Stages that materialise force a buffer; stages preceding
     // them run as streaming filter/map over the buffer.  Process
@@ -531,44 +517,26 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
         }
 
         // Sink.
-        match &pipeline.sink {
-            Sink::Collect => acc_collect.push(item),
-            Sink::Count => acc_count += 1,
+        let sink_done = match &pipeline.sink {
             Sink::Numeric(n) => {
-                let numeric_item = if let Some(project) = &n.project {
+                if let Some(project) = &n.project {
                     let kernel = pipeline
                         .sink_kernels
                         .first()
                         .unwrap_or(&BodyKernel::Generic);
-                    eval_kernel(kernel, &item, |item| {
+                    let numeric_item = eval_kernel(kernel, &item, |item| {
                         apply_item_in_env(&mut vm, &mut loop_env, item, project)
-                    })?
+                    })?;
+                    sink_acc.push_projected_numeric(&numeric_item);
                 } else {
-                    item
-                };
-                num_fold(
-                    &mut acc_sum_i,
-                    &mut acc_sum_f,
-                    &mut sum_floated,
-                    &mut acc_min_f,
-                    &mut acc_max_f,
-                    &mut acc_n_obs,
-                    n.op,
-                    &numeric_item,
-                );
-            }
-            Sink::First => {
-                if acc_first.is_none() {
-                    acc_first = Some(item.clone());
-                    break 'outer;
+                    sink_acc.push(item);
                 }
+                false
             }
-            Sink::Last => {
-                acc_last = Some(item.clone());
-            }
-            Sink::ApproxCountDistinct => {
-                hll_observe(&mut acc_hll, &item);
-            }
+            _ => sink_acc.push(item),
+        };
+        if sink_done {
+            break 'outer;
         }
         emitted_outputs += 1;
         if matches!(source_demand, PullDemand::UntilOutput(n) if emitted_outputs >= n) {
@@ -576,95 +544,16 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
         }
     }
 
-    Ok(match &pipeline.sink {
-        Sink::Collect => {
-            if let Some(collector) = terminal_map_collect {
-                return Ok(collector.finish());
-            }
-            // GroupBy is a barrier that produces a single Val::Obj
-            // which Sink::Collect would otherwise wrap as
-            // [obj].  When the last stage is GroupBy, return the
-            // bare object to match walker semantics.
-            if matches!(pipeline.stages.last(), Some(Stage::GroupBy(_)))
-                && acc_collect.len() == 1
-                && matches!(acc_collect[0], Val::Obj(_))
-            {
-                acc_collect.into_iter().next().unwrap()
-            } else {
-                Val::arr(acc_collect)
-            }
-        }
-        Sink::Count => Val::Int(acc_count),
-        Sink::Numeric(n) => num_finalise(
-            n.op,
-            acc_sum_i,
-            acc_sum_f,
-            sum_floated,
-            acc_min_f,
-            acc_max_f,
-            acc_n_obs,
-        ),
-        Sink::First => acc_first.unwrap_or(Val::Null),
-        Sink::Last => acc_last.unwrap_or(Val::Null),
-        Sink::ApproxCountDistinct => Val::Int(hll_estimate(&acc_hll) as i64),
-    })
-}
-// ── Algorithmic Category E: HyperLogLog ──────────────────────────
-//
-// HLL-12: precision p=12, m=2^12=4096 registers, ±2% std error.
-// 4 KB state.  Hash via FxHasher (jetro already uses); top 12 bits
-// pick register, remaining 52 bits + 1 give leading-zero count + 1.
-// Estimate: harmonic mean × m^2 × αm correction.
-//
-// Per `algorithmic_optimization_cold_only.md` Category E.
-
-const HLL_P: u32 = 12;
-const HLL_M: usize = 1 << HLL_P; // 4096
-
-#[inline]
-fn hll_hash(v: &Val) -> u64 {
-    use crate::util::val_to_key;
-    use std::collections::hash_map::RandomState;
-    use std::hash::{BuildHasher, Hasher};
-    // Re-use val_to_key for canonical string-form hashing — matches
-    // UniqueBy semantics so `unique().count()` and
-    // `approx_count_distinct()` agree on what counts as "distinct".
-    static STATE: std::sync::OnceLock<RandomState> = std::sync::OnceLock::new();
-    let bs = STATE.get_or_init(RandomState::new);
-    let s = val_to_key(v);
-    let mut h = bs.build_hasher();
-    h.write(s.as_bytes());
-    h.finish()
-}
-
-fn hll_observe(reg: &mut [u8; HLL_M], v: &Val) {
-    let h = hll_hash(v);
-    let idx = (h >> (64 - HLL_P)) as usize;
-    let w = (h << HLL_P) | (1u64 << (HLL_P - 1));
-    let lz = w.leading_zeros() as u8 + 1;
-    if lz > reg[idx] {
-        reg[idx] = lz;
+    if let Some(collector) = terminal_map_collect {
+        return Ok(collector.finish());
     }
-}
 
-fn hll_estimate(reg: &[u8; HLL_M]) -> f64 {
-    // Harmonic mean of 2^(-reg[i]).
-    let mut z: f64 = 0.0;
-    let mut zeros: usize = 0;
-    for &r in reg.iter() {
-        z += 1.0 / (1u64 << r) as f64;
-        if r == 0 {
-            zeros += 1;
-        }
-    }
-    let m = HLL_M as f64;
-    let alpha_m = 0.7213 / (1.0 + 1.079 / m); // p=12 form
-    let raw = alpha_m * m * m / z;
-    // Small-range correction.
-    if raw <= 2.5 * m && zeros > 0 {
-        return m * (m / zeros as f64).ln();
-    }
-    raw
+    // GroupBy is a barrier that produces a single Val::Obj which
+    // Sink::Collect would otherwise wrap as [obj]. When the last
+    // stage is GroupBy, return the bare object to match walker
+    // semantics.
+    let unwrap_single_collect_obj = matches!(pipeline.stages.last(), Some(Stage::GroupBy(_)));
+    Ok(sink_acc.finish(unwrap_single_collect_obj))
 }
 
 /// Per-Obj lambda dispatch helper for `TransformKeys` /
