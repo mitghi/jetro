@@ -730,7 +730,7 @@ impl BuiltinMethod {
     }
 
     #[inline]
-    fn is_scalar_pipeline_element(self) -> bool {
+    fn is_string_transform_pipeline_element(self) -> bool {
         matches!(
             self,
             Self::Upper
@@ -752,33 +752,15 @@ impl BuiltinMethod {
                 | Self::ToBase64
                 | Self::FromBase64
                 | Self::Dedent
-                | Self::ByteLen
-                | Self::IsBlank
-                | Self::IsNumeric
-                | Self::IsAlpha
-                | Self::IsAscii
-                | Self::Ceil
-                | Self::Floor
-                | Self::Round
-                | Self::Abs
-                | Self::ToNumber
-                | Self::ToBool
-                | Self::ParseInt
-                | Self::ParseFloat
-                | Self::ParseBool
-                | Self::Or
-                | Self::Type
-                | Self::ToString
-                | Self::ToJson
-                | Self::Schema
-                | Self::Has
-                | Self::StartsWith
-                | Self::EndsWith
-                | Self::StripPrefix
+        )
+    }
+
+    #[inline]
+    fn is_string_arg_transform_pipeline_element(self) -> bool {
+        matches!(
+            self,
+            Self::StripPrefix
                 | Self::StripSuffix
-                | Self::Matches
-                | Self::IndexOf
-                | Self::LastIndexOf
                 | Self::Scan
                 | Self::ReMatch
                 | Self::ReMatchFirst
@@ -796,6 +778,33 @@ impl BuiltinMethod {
                 | Self::PadRight
                 | Self::Center
         )
+    }
+
+    #[inline]
+    fn is_cast_or_type_pipeline_element(self) -> bool {
+        matches!(
+            self,
+            Self::ParseInt
+                | Self::ParseFloat
+                | Self::ParseBool
+                | Self::Type
+                | Self::ToString
+                | Self::ToJson
+        )
+    }
+
+    #[inline]
+    fn is_misc_scalar_pipeline_element(self) -> bool {
+        matches!(self, Self::Or | Self::Schema | Self::Has)
+    }
+
+    #[inline]
+    fn is_scalar_pipeline_element(self) -> bool {
+        self.is_view_scalar_method()
+            || self.is_string_transform_pipeline_element()
+            || self.is_string_arg_transform_pipeline_element()
+            || self.is_cast_or_type_pipeline_element()
+            || self.is_misc_scalar_pipeline_element()
     }
 
     #[inline]
@@ -5963,6 +5972,11 @@ mod spec_tests {
     #[test]
     fn builtin_specs_drive_pipeline_element_lowering() {
         assert!(BuiltinMethod::Upper.spec().pipeline_element);
+        assert!(BuiltinMethod::StripPrefix.spec().pipeline_element);
+        assert!(BuiltinMethod::IsNumeric.spec().pipeline_element);
+        assert!(BuiltinMethod::Abs.spec().pipeline_element);
+        assert!(BuiltinMethod::ParseInt.spec().pipeline_element);
+        assert!(BuiltinMethod::Has.spec().pipeline_element);
         assert!(BuiltinMethod::Lines.spec().pipeline_element);
         assert!(BuiltinMethod::GetPath.spec().pipeline_element);
 
