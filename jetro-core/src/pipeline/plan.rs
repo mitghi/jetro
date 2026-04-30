@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use crate::ast::{BinOp, Expr};
 use crate::builtins::{
-    BuiltinMethod, BuiltinPipelineMaterialization, BuiltinViewSink, BuiltinViewStage,
+    BuiltinMethod, BuiltinPipelineDemand, BuiltinPipelineMaterialization,
+    BuiltinPipelineOrderEffect, BuiltinViewSink, BuiltinViewStage,
 };
 use crate::chain_ir::{ChainOp, Demand as ChainDemand, PullDemand, ValueNeed};
 use crate::vm::{CompiledObjEntry, Opcode, Program};
@@ -590,15 +591,30 @@ impl Stage {
 
     pub fn chain_op(&self) -> Option<ChainOp> {
         match self {
-            Stage::Filter(_, _) => Some(ChainOp::Filter),
-            Stage::Map(_, _) | Stage::CompiledMap(_) => Some(ChainOp::Map),
-            Stage::FlatMap(_, _) | Stage::Split(_) => Some(ChainOp::FlatMap),
-            Stage::Take(n, _, _) => Some(ChainOp::Take(*n)),
-            Stage::Skip(n, _, _) => Some(ChainOp::Skip(*n)),
-            Stage::Builtin(call) => Some(ChainOp::Builtin(call.method)),
-            Stage::TakeWhile(_) => Some(ChainOp::TakeWhile),
-            Stage::Slice(_, _) | Stage::Replace { .. } => Some(ChainOp::Map),
-            _ => None,
+            Stage::CompiledMap(_) => Some(ChainOp::Map),
+            Stage::SortedDedup(_) => None,
+            _ => self.pipeline_demand_op(),
+        }
+    }
+
+    fn pipeline_demand_op(&self) -> Option<ChainOp> {
+        let method = self.builtin_method_metadata()?;
+        let Some(demand) = method.spec().pipeline_demand else {
+            return matches!(self, Stage::Builtin(_)).then_some(ChainOp::Builtin(method));
+        };
+        match demand {
+            BuiltinPipelineDemand::Filter => Some(ChainOp::Filter),
+            BuiltinPipelineDemand::Map => Some(ChainOp::Map),
+            BuiltinPipelineDemand::FlatMap => Some(ChainOp::FlatMap),
+            BuiltinPipelineDemand::TakeWhile => Some(ChainOp::TakeWhile),
+            BuiltinPipelineDemand::Take => match self {
+                Stage::Take(n, _, _) => Some(ChainOp::Take(*n)),
+                _ => None,
+            },
+            BuiltinPipelineDemand::Skip => match self {
+                Stage::Skip(n, _, _) => Some(ChainOp::Skip(*n)),
+                _ => None,
+            },
         }
     }
 
@@ -624,21 +640,34 @@ impl Stage {
         sort_kernel: &BodyKernel,
         kernel: &BodyKernel,
     ) -> bool {
-        match self {
-            Stage::Take(_, _, _) | Stage::Skip(_, _, _) => true,
-            Stage::Map(_, _)
-            | Stage::CompiledMap(_)
-            | Stage::Slice(_, _)
-            | Stage::Replace { .. } => true,
-            Stage::Builtin(call) => {
-                let shape = self.shape();
-                shape.cardinality == crate::chain_ir::Cardinality::OneToOne
-                    && call.spec().cardinality == crate::builtins::BuiltinCardinality::OneToOne
-            }
-            Stage::Filter(_, _) | Stage::TakeWhile(_) => {
+        match self.pipeline_order_effect() {
+            BuiltinPipelineOrderEffect::Preserves => true,
+            BuiltinPipelineOrderEffect::PredicatePrefix => {
                 predicate_is_order_prefix(sort, sort_kernel, kernel)
             }
-            _ => false,
+            BuiltinPipelineOrderEffect::Blocks => false,
+        }
+    }
+
+    fn pipeline_order_effect(&self) -> BuiltinPipelineOrderEffect {
+        match self {
+            Stage::CompiledMap(_) => BuiltinPipelineOrderEffect::Preserves,
+            Stage::SortedDedup(_) => BuiltinPipelineOrderEffect::Blocks,
+            _ => {
+                let Some(method) = self.builtin_method_metadata() else {
+                    return BuiltinPipelineOrderEffect::Blocks;
+                };
+                let spec = method.spec();
+                if let Some(effect) = spec.pipeline_order_effect {
+                    return effect;
+                }
+                if matches!(self, Stage::Builtin(_))
+                    && spec.cardinality == crate::builtins::BuiltinCardinality::OneToOne
+                {
+                    return BuiltinPipelineOrderEffect::Preserves;
+                }
+                BuiltinPipelineOrderEffect::Blocks
+            }
         }
     }
 
