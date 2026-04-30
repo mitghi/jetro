@@ -769,12 +769,17 @@ pub enum BuiltinPipelineExecutor {
     ElementBuiltin,
     ExpandingBuiltin,
     ObjectLambda,
+    UniqueBy,
     GroupBy,
     CountBy,
     IndexBy,
     FindIndex,
     IndicesWhere,
     ArgExtreme { max: bool },
+    Chunk,
+    Window,
+    PrefixWhile { take: bool },
+    SortedDedup,
 }
 
 impl BuiltinPipelineShape {
@@ -1214,6 +1219,7 @@ impl BuiltinMethod {
                 .pipeline_shape(BuiltinPipelineShape::new(Card::Filtering, true, 10.0, 0.5))
                 .pipeline_demand(BuiltinPipelineDemand::TakeWhile)
                 .pipeline_order_effect(BuiltinPipelineOrderEffect::PredicatePrefix)
+                .pipeline_executor(BuiltinPipelineExecutor::PrefixWhile { take: true })
                 .cost(10.0),
             Self::DropWhile => BuiltinSpec::new(Cat::StreamingFilter, Card::Filtering)
                 .pipeline_stage(BuiltinPipelineStage::Unary)
@@ -1223,6 +1229,7 @@ impl BuiltinMethod {
                 .pipeline_materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
                 .pipeline_shape(BuiltinPipelineShape::new(Card::Filtering, true, 10.0, 0.5))
                 .pipeline_order_effect(BuiltinPipelineOrderEffect::Blocks)
+                .pipeline_executor(BuiltinPipelineExecutor::PrefixWhile { take: false })
                 .cost(10.0),
             Self::FindFirst | Self::FindOne => {
                 BuiltinSpec::new(Cat::StreamingFilter, Card::Filtering)
@@ -1361,13 +1368,15 @@ impl BuiltinMethod {
                         .pipeline_lowering(BuiltinPipelineLowering::NullaryStage(
                             BuiltinNullaryStage::Unique,
                         ))
-                        .pipeline_materialization(BuiltinPipelineMaterialization::ComposedBarrier),
+                        .pipeline_materialization(BuiltinPipelineMaterialization::ComposedBarrier)
+                        .pipeline_executor(BuiltinPipelineExecutor::UniqueBy),
                     Self::UniqueBy => spec
                         .pipeline_stage(BuiltinPipelineStage::Unary)
                         .pipeline_lowering(BuiltinPipelineLowering::ExprStage(
                             BuiltinExprStage::UniqueBy,
                         ))
-                        .pipeline_materialization(BuiltinPipelineMaterialization::ComposedBarrier),
+                        .pipeline_materialization(BuiltinPipelineMaterialization::ComposedBarrier)
+                        .pipeline_executor(BuiltinPipelineExecutor::UniqueBy),
                     Self::GroupBy => spec
                         .pipeline_stage(BuiltinPipelineStage::Unary)
                         .pipeline_lowering(BuiltinPipelineLowering::ExprStage(
@@ -1407,7 +1416,8 @@ impl BuiltinMethod {
                         .pipeline_materialization(
                             BuiltinPipelineMaterialization::LegacyMaterialized,
                         )
-                        .pipeline_shape(BuiltinPipelineShape::new(Card::Barrier, true, 2.0, 1.0)),
+                        .pipeline_shape(BuiltinPipelineShape::new(Card::Barrier, true, 2.0, 1.0))
+                        .pipeline_executor(BuiltinPipelineExecutor::Chunk),
                     Self::Window => spec
                         .pipeline_stage(BuiltinPipelineStage::Unary)
                         .pipeline_lowering(BuiltinPipelineLowering::UsizeStage {
@@ -1417,7 +1427,8 @@ impl BuiltinMethod {
                         .pipeline_materialization(
                             BuiltinPipelineMaterialization::LegacyMaterialized,
                         )
-                        .pipeline_shape(BuiltinPipelineShape::new(Card::Barrier, true, 2.0, 1.0)),
+                        .pipeline_shape(BuiltinPipelineShape::new(Card::Barrier, true, 2.0, 1.0))
+                        .pipeline_executor(BuiltinPipelineExecutor::Window),
                     _ => spec,
                 }
             }
@@ -6814,6 +6825,26 @@ mod spec_tests {
         assert_eq!(
             BuiltinMethod::FindIndex.spec().pipeline_executor,
             Some(BuiltinPipelineExecutor::FindIndex)
+        );
+        assert_eq!(
+            BuiltinMethod::UniqueBy.spec().pipeline_executor,
+            Some(BuiltinPipelineExecutor::UniqueBy)
+        );
+        assert_eq!(
+            BuiltinMethod::Chunk.spec().pipeline_executor,
+            Some(BuiltinPipelineExecutor::Chunk)
+        );
+        assert_eq!(
+            BuiltinMethod::Window.spec().pipeline_executor,
+            Some(BuiltinPipelineExecutor::Window)
+        );
+        assert_eq!(
+            BuiltinMethod::TakeWhile.spec().pipeline_executor,
+            Some(BuiltinPipelineExecutor::PrefixWhile { take: true })
+        );
+        assert_eq!(
+            BuiltinMethod::DropWhile.spec().pipeline_executor,
+            Some(BuiltinPipelineExecutor::PrefixWhile { take: false })
         );
     }
 

@@ -126,27 +126,8 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
                         })?;
                     }
                 },
-                Stage::UniqueBy(None) => {
-                    let mut seen: std::collections::HashSet<String> = Default::default();
-                    buf.retain(|v| seen.insert(format!("{:?}", v)));
-                }
-                Stage::UniqueBy(Some(prog)) => {
-                    let mut seen: std::collections::HashSet<String> = Default::default();
-                    let mut keep: Vec<bool> = Vec::with_capacity(buf.len());
-                    for v in &buf {
-                        let k = eval_kernel(kernel, v, |item| {
-                            apply_item_in_env(&mut vm, &mut loop_env, item, prog)
-                        })
-                        .unwrap_or(Val::Null);
-                        keep.push(seen.insert(format!("{:?}", k)));
-                    }
-                    let mut out: Vec<Val> = Vec::with_capacity(buf.len());
-                    for (i, v) in buf.into_iter().enumerate() {
-                        if keep[i] {
-                            out.push(v);
-                        }
-                    }
-                    buf = out;
+                Stage::UniqueBy(_) => {
+                    unreachable!("adapter-backed stage was not handled by adapter")
                 }
                 Stage::FlatMap(prog, _) => {
                     let mut out: Vec<Val> = Vec::new();
@@ -165,11 +146,8 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
                 Stage::GroupBy(_) => {
                     unreachable!("adapter-backed stage was not handled by adapter")
                 }
-                Stage::Chunk(n) => {
-                    buf = chunk_apply(&buf, *n);
-                }
-                Stage::Window(n) => {
-                    buf = window_apply(&buf, *n);
+                Stage::Chunk(_) | Stage::Window(_) => {
+                    unreachable!("adapter-backed stage was not handled by adapter")
                 }
                 Stage::CompiledMap(plan) => {
                     let mut out: Vec<Val> = Vec::with_capacity(buf.len());
@@ -179,19 +157,8 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
                     buf = out;
                 }
                 // Lambda-bearing barrier-mode stages.
-                Stage::TakeWhile(prog) => {
-                    buf = take_while_apply(buf, |v| {
-                        eval_kernel(kernel, v, |item| {
-                            apply_item_in_env(&mut vm, &mut loop_env, item, prog)
-                        })
-                    })?;
-                }
-                Stage::DropWhile(prog) => {
-                    buf = drop_while_apply(buf, |v| {
-                        eval_kernel(kernel, v, |item| {
-                            apply_item_in_env(&mut vm, &mut loop_env, item, prog)
-                        })
-                    })?;
+                Stage::TakeWhile(_) | Stage::DropWhile(_) => {
+                    unreachable!("adapter-backed stage was not handled by adapter")
                 }
                 Stage::IndicesWhere(_)
                 | Stage::FindIndex(_)
@@ -200,27 +167,8 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
                 | Stage::CountBy(_) => {
                     unreachable!("adapter-backed stage was not handled by adapter")
                 }
-                Stage::SortedDedup(key_prog) => {
-                    // Category F: combined sort + dedup-consecutive.
-                    match key_prog {
-                        None => {
-                            buf.sort_by(|a, b| cmp_val_total(a, b));
-                            buf.dedup_by(|a, b| crate::util::vals_eq(a, b));
-                        }
-                        Some(prog) => {
-                            // Decorate-sort-undecorate via key prog.
-                            let mut keyed: Vec<(Val, Val)> = Vec::with_capacity(buf.len());
-                            for v in buf.iter() {
-                                let k = eval_kernel(kernel, v, |item| {
-                                    apply_item_in_env(&mut vm, &mut loop_env, item, prog)
-                                })?;
-                                keyed.push((k, v.clone()));
-                            }
-                            keyed.sort_by(|a, b| cmp_val_total(&a.0, &b.0));
-                            keyed.dedup_by(|a, b| crate::util::vals_eq(&a.0, &b.0));
-                            buf = keyed.into_iter().map(|(_, v)| v).collect();
-                        }
-                    }
+                Stage::SortedDedup(_) => {
+                    unreachable!("adapter-backed stage was not handled by adapter")
                 }
                 Stage::IndexBy(_) => {
                     unreachable!("adapter-backed stage was not handled by adapter")
@@ -465,7 +413,13 @@ fn stage_executor(stage: &Stage) -> Option<BuiltinPipelineExecutor> {
         .builtin_method_metadata()
         .and_then(|method| method.spec().pipeline_executor)
         .or_else(|| {
-            matches!(stage, Stage::Builtin(_)).then_some(BuiltinPipelineExecutor::ElementBuiltin)
+            if matches!(stage, Stage::Builtin(_)) {
+                Some(BuiltinPipelineExecutor::ElementBuiltin)
+            } else if matches!(stage, Stage::SortedDedup(_)) {
+                Some(BuiltinPipelineExecutor::SortedDedup)
+            } else {
+                None
+            }
         })
 }
 
@@ -506,6 +460,33 @@ fn apply_adapter_materialized(
                 }
             }
             *buf = out;
+            Some(Ok(()))
+        }
+        BuiltinPipelineExecutor::UniqueBy => {
+            match keyed_stage_program(stage) {
+                None => {
+                    let mut seen: std::collections::HashSet<String> = Default::default();
+                    buf.retain(|v| seen.insert(format!("{:?}", v)));
+                }
+                Some(prog) => {
+                    let mut seen: std::collections::HashSet<String> = Default::default();
+                    let mut keep: Vec<bool> = Vec::with_capacity(buf.len());
+                    for v in buf.iter() {
+                        let key = eval_kernel(kernel, v, |item| {
+                            apply_item_in_env(vm, loop_env, item, prog)
+                        })
+                        .unwrap_or(Val::Null);
+                        keep.push(seen.insert(format!("{:?}", key)));
+                    }
+                    let mut out: Vec<Val> = Vec::with_capacity(buf.len());
+                    for (i, v) in std::mem::take(buf).into_iter().enumerate() {
+                        if keep[i] {
+                            out.push(v);
+                        }
+                    }
+                    *buf = out;
+                }
+            }
             Some(Ok(()))
         }
         BuiltinPipelineExecutor::GroupBy => {
@@ -621,6 +602,68 @@ fn apply_adapter_materialized(
             *buf = vec![best];
             Some(Ok(()))
         }
+        BuiltinPipelineExecutor::Chunk => {
+            let Stage::Chunk(n) = stage else {
+                return None;
+            };
+            *buf = chunk_apply(buf, *n);
+            Some(Ok(()))
+        }
+        BuiltinPipelineExecutor::Window => {
+            let Stage::Window(n) = stage else {
+                return None;
+            };
+            *buf = window_apply(buf, *n);
+            Some(Ok(()))
+        }
+        BuiltinPipelineExecutor::PrefixWhile { take } => {
+            let prog = keyed_stage_program(stage)?;
+            let input = std::mem::take(buf);
+            let out = if take {
+                take_while_apply(input, |v| {
+                    eval_kernel(kernel, v, |item| {
+                        apply_item_in_env(vm, loop_env, item, prog)
+                    })
+                })
+            } else {
+                drop_while_apply(input, |v| {
+                    eval_kernel(kernel, v, |item| {
+                        apply_item_in_env(vm, loop_env, item, prog)
+                    })
+                })
+            };
+            match out {
+                Ok(out) => {
+                    *buf = out;
+                    Some(Ok(()))
+                }
+                Err(err) => Some(Err(err)),
+            }
+        }
+        BuiltinPipelineExecutor::SortedDedup => {
+            match keyed_stage_program(stage) {
+                None => {
+                    buf.sort_by(cmp_val_total);
+                    buf.dedup_by(|a, b| crate::util::vals_eq(a, b));
+                }
+                Some(prog) => {
+                    let mut keyed: Vec<(Val, Val)> = Vec::with_capacity(buf.len());
+                    for v in buf.iter() {
+                        let key = match eval_kernel(kernel, v, |item| {
+                            apply_item_in_env(vm, loop_env, item, prog)
+                        }) {
+                            Ok(key) => key,
+                            Err(err) => return Some(Err(err)),
+                        };
+                        keyed.push((key, v.clone()));
+                    }
+                    keyed.sort_by(|a, b| cmp_val_total(&a.0, &b.0));
+                    keyed.dedup_by(|a, b| crate::util::vals_eq(&a.0, &b.0));
+                    *buf = keyed.into_iter().map(|(_, v)| v).collect();
+                }
+            }
+            Some(Ok(()))
+        }
     }
 }
 
@@ -640,12 +683,17 @@ fn apply_adapter_streaming(
         }
         Some(
             BuiltinPipelineExecutor::ExpandingBuiltin
+            | BuiltinPipelineExecutor::UniqueBy
             | BuiltinPipelineExecutor::GroupBy
             | BuiltinPipelineExecutor::CountBy
             | BuiltinPipelineExecutor::IndexBy
             | BuiltinPipelineExecutor::FindIndex
             | BuiltinPipelineExecutor::IndicesWhere
-            | BuiltinPipelineExecutor::ArgExtreme { .. },
+            | BuiltinPipelineExecutor::ArgExtreme { .. }
+            | BuiltinPipelineExecutor::Chunk
+            | BuiltinPipelineExecutor::Window
+            | BuiltinPipelineExecutor::PrefixWhile { .. }
+            | BuiltinPipelineExecutor::SortedDedup,
         )
         | None => Ok(item),
     }
@@ -685,12 +733,16 @@ fn object_lambda_program(stage: &Stage) -> Option<&Arc<crate::vm::Program>> {
 fn keyed_stage_program(stage: &Stage) -> Option<&Arc<crate::vm::Program>> {
     match stage {
         Stage::GroupBy(prog)
+        | Stage::UniqueBy(Some(prog))
         | Stage::CountBy(prog)
         | Stage::IndexBy(prog)
         | Stage::FindIndex(prog)
         | Stage::IndicesWhere(prog)
         | Stage::MaxBy(prog)
-        | Stage::MinBy(prog) => Some(prog),
+        | Stage::MinBy(prog)
+        | Stage::TakeWhile(prog)
+        | Stage::DropWhile(prog)
+        | Stage::SortedDedup(Some(prog)) => Some(prog),
         _ => None,
     }
 }
