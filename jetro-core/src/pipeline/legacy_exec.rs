@@ -510,7 +510,7 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
 }
 
 enum LegacyPreIter<'a> {
-    Source(row_source::SourceIter<'a>),
+    Source(row_source::ValRowsIter<'a>),
     Owned(std::vec::IntoIter<Val>),
 }
 

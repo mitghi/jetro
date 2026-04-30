@@ -17,13 +17,19 @@ pub(super) enum RowsIter<'a> {
     Owned(std::vec::IntoIter<Val>),
 }
 
-pub(super) enum SourceIter<'a> {
+pub(super) enum ValRowSource<'a> {
+    ObjVec(Arc<ObjVecData>),
+    Rows(Rows<'a>),
+    Single(Val),
+}
+
+pub(super) enum ValRowsIter<'a> {
     Rows(RowsIter<'a>),
     ObjVec { data: Arc<ObjVecData>, index: usize },
     Single(std::option::IntoIter<Val>),
 }
 
-impl Iterator for SourceIter<'_> {
+impl Iterator for ValRowsIter<'_> {
     type Item = Val;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -84,6 +90,37 @@ impl<'a> Rows<'a> {
     }
 }
 
+impl<'a> ValRowSource<'a> {
+    pub(super) fn from_receiver(recv: &'a Val) -> Self {
+        match recv {
+            Val::ObjVec(data) => Self::ObjVec(Arc::clone(data)),
+            _ => array_like_rows(recv)
+                .map(Self::Rows)
+                .unwrap_or_else(|| Self::Single(recv.clone())),
+        }
+    }
+
+    pub(super) fn iter(self) -> ValRowsIter<'a> {
+        match self {
+            Self::ObjVec(data) => ValRowsIter::ObjVec { data, index: 0 },
+            Self::Rows(rows) => ValRowsIter::Rows(rows.iter_cloned()),
+            Self::Single(value) => ValRowsIter::Single(Some(value).into_iter()),
+        }
+    }
+
+    pub(super) fn materialize(self) -> Vec<Val> {
+        match self {
+            Self::Rows(rows) => rows.into_vec(),
+            other => other.iter().collect(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn is_objvec_streaming(&self) -> bool {
+        matches!(self, Self::ObjVec(_))
+    }
+}
+
 pub(super) fn resolve(source: &Source, root: &Val) -> Val {
     match source {
         Source::Receiver(v) => v.clone(),
@@ -98,29 +135,12 @@ pub(super) fn array_like_rows(recv: &Val) -> Option<Rows<'_>> {
     }
 }
 
-pub(super) fn source_iter(recv: &Val) -> SourceIter<'_> {
-    match recv {
-        Val::ObjVec(data) => SourceIter::ObjVec {
-            data: Arc::clone(data),
-            index: 0,
-        },
-        _ => {
-            if let Some(rows) = array_like_rows(recv) {
-                SourceIter::Rows(rows.iter_cloned())
-            } else {
-                SourceIter::Single(Some(recv.clone()).into_iter())
-            }
-        }
-    }
+pub(super) fn source_iter(recv: &Val) -> ValRowsIter<'_> {
+    ValRowSource::from_receiver(recv).iter()
 }
 
 pub(super) fn materialize_source(recv: &Val) -> Vec<Val> {
-    match recv {
-        Val::ObjVec(_) => source_iter(recv).collect(),
-        _ => array_like_rows(recv)
-            .map(Rows::into_vec)
-            .unwrap_or_else(|| source_iter(recv).collect()),
-    }
+    ValRowSource::from_receiver(recv).materialize()
 }
 
 pub(super) fn row_count(recv: &Val) -> Option<usize> {

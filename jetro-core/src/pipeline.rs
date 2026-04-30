@@ -549,6 +549,27 @@ mod tests {
     }
 
     #[test]
+    fn row_source_keeps_objvec_as_streaming_provider() {
+        let keys: std::sync::Arc<[std::sync::Arc<str>]> =
+            vec![std::sync::Arc::<str>::from("id")].into();
+        let data = std::sync::Arc::new(crate::value::ObjVecData {
+            keys,
+            cells: vec![Val::Int(1), Val::Int(2)],
+            typed_cols: None,
+        });
+        let recv = Val::ObjVec(std::sync::Arc::clone(&data));
+
+        let source = row_source::ValRowSource::from_receiver(&recv);
+        assert!(source.is_objvec_streaming());
+
+        let mut iter = source.iter();
+        assert!(matches!(iter, row_source::ValRowsIter::ObjVec { .. }));
+        assert_eq!(iter.next().unwrap().get_field("id"), Val::Int(1));
+        assert_eq!(iter.next().unwrap().get_field("id"), Val::Int(2));
+        assert!(iter.next().is_none());
+    }
+
+    #[test]
     fn receiver_pipeline_start_uses_builtin_metadata() {
         assert!(Pipeline::is_receiver_pipeline_start(&Step::Method(
             "filter".into(),
