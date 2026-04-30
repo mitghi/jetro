@@ -10,12 +10,42 @@ pub(super) enum Rows<'a> {
     Owned(Vec<Val>),
 }
 
-impl Rows<'_> {
+pub(super) enum RowsIter<'a> {
+    Borrowed(std::slice::Iter<'a, Val>),
+    Shared { rows: Arc<Vec<Val>>, index: usize },
+    Owned(std::vec::IntoIter<Val>),
+}
+
+impl Iterator for RowsIter<'_> {
+    type Item = Val;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Borrowed(iter) => iter.next().cloned(),
+            Self::Shared { rows, index } => {
+                let item = rows.get(*index)?.clone();
+                *index += 1;
+                Some(item)
+            }
+            Self::Owned(iter) => iter.next(),
+        }
+    }
+}
+
+impl<'a> Rows<'a> {
     pub(super) fn as_slice(&self) -> &[Val] {
         match self {
             Self::Borrowed(rows) => rows,
             Self::Shared(rows) => rows.as_ref(),
             Self::Owned(rows) => rows.as_slice(),
+        }
+    }
+
+    pub(super) fn iter_cloned(self) -> RowsIter<'a> {
+        match self {
+            Self::Borrowed(rows) => RowsIter::Borrowed(rows.iter()),
+            Self::Shared(rows) => RowsIter::Shared { rows, index: 0 },
+            Self::Owned(rows) => RowsIter::Owned(rows.into_iter()),
         }
     }
 

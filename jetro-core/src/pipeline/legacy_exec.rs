@@ -43,34 +43,6 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
     let mut stage_taken: Vec<usize> = vec![0; pipeline.stages.len()];
     let mut stage_skipped: Vec<usize> = vec![0; pipeline.stages.len()];
 
-    let iter: Box<dyn Iterator<Item = Val>> = if let Some(rows) = row_source::array_like_rows(&recv)
-    {
-        Box::new(rows.into_vec().into_iter())
-    } else {
-        match &recv {
-            // ObjVec: materialise rows into Val::Obj for the per-row pull
-            // path.  Slot-indexed columnar fast paths handle common aggregate
-            // shapes before this point; landing here means downstream stages
-            // need Val::Obj rows.
-            Val::ObjVec(d) => {
-                let n = d.nrows();
-                let mut out: Vec<Val> = Vec::with_capacity(n);
-                let stride = d.stride();
-                for row in 0..n {
-                    let mut m: indexmap::IndexMap<Arc<str>, Val> =
-                        indexmap::IndexMap::with_capacity(stride);
-                    for (i, k) in d.keys.iter().enumerate() {
-                        m.insert(Arc::clone(k), d.cells[row * stride + i].clone());
-                    }
-                    out.push(Val::Obj(Arc::new(m)));
-                }
-                Box::new(out.into_iter())
-            }
-            // Anything else (scalar, Obj, ...): single-element iterator.
-            _ => Box::new(std::iter::once(recv.clone())),
-        }
-    };
-
     let mut sink_acc = SinkAccumulator::new(&pipeline.sink);
 
     // Stages that materialise force a buffer; stages preceding
@@ -96,8 +68,12 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
             .unwrap_or(&BodyKernel::Generic)
     });
     let mut terminal_map_collect = terminal_map_kernel.map(TerminalMapCollector::new);
-    let pre_iter: Box<dyn Iterator<Item = Val>> = if needs_barrier {
-        let mut buf: Vec<Val> = iter.collect();
+    let pre_iter: Box<dyn Iterator<Item = Val> + '_> = if needs_barrier {
+        let mut buf: Vec<Val> = if let Some(rows) = row_source::array_like_rows(&recv) {
+            rows.into_vec()
+        } else {
+            legacy_source_iter(&recv).collect()
+        };
         let strategies = compute_strategies(&pipeline.stages, &pipeline.sink);
         // Phase 1.2 — barrier-stage path now reads stage_kernels[i]
         // and dispatches the inline kernel for Sort/UniqueBy keyed
@@ -380,7 +356,7 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
         }
         Box::new(buf.into_iter())
     } else {
-        iter
+        legacy_source_iter(&recv)
     };
 
     'outer: for mut item in pre_iter {
@@ -535,6 +511,35 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
     // semantics.
     let unwrap_single_collect_obj = matches!(pipeline.stages.last(), Some(Stage::GroupBy(_)));
     Ok(sink_acc.finish(unwrap_single_collect_obj))
+}
+
+fn legacy_source_iter<'a>(recv: &'a Val) -> Box<dyn Iterator<Item = Val> + 'a> {
+    if let Some(rows) = row_source::array_like_rows(recv) {
+        return Box::new(rows.iter_cloned());
+    }
+
+    match recv {
+        // ObjVec: materialise rows into Val::Obj for the per-row pull
+        // path. Slot-indexed columnar fast paths handle common aggregate
+        // shapes before this point; landing here means downstream stages
+        // need Val::Obj rows.
+        Val::ObjVec(d) => {
+            let n = d.nrows();
+            let mut out: Vec<Val> = Vec::with_capacity(n);
+            let stride = d.stride();
+            for row in 0..n {
+                let mut m: indexmap::IndexMap<Arc<str>, Val> =
+                    indexmap::IndexMap::with_capacity(stride);
+                for (i, k) in d.keys.iter().enumerate() {
+                    m.insert(Arc::clone(k), d.cells[row * stride + i].clone());
+                }
+                out.push(Val::Obj(Arc::new(m)));
+            }
+            Box::new(out.into_iter())
+        }
+        // Anything else (scalar, Obj, ...): single-element iterator.
+        _ => Box::new(std::iter::once(recv.clone())),
+    }
 }
 
 /// Per-Obj lambda dispatch helper for `TransformKeys` /
