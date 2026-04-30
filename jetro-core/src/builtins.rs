@@ -961,7 +961,14 @@ impl BuiltinMethod {
                     | Self::EndsWith
                     | Self::Matches
                     | Self::IndexOf
-                    | Self::LastIndexOf => spec.view_scalar(),
+                    | Self::LastIndexOf
+                    | Self::ByteLen
+                    | Self::IsBlank
+                    | Self::IsNumeric
+                    | Self::IsAlpha
+                    | Self::IsAscii
+                    | Self::ToNumber
+                    | Self::ToBool => spec.view_scalar(),
                     _ => spec,
                 };
                 if pipeline_element {
@@ -1102,17 +1109,15 @@ impl BuiltinCall {
             (BuiltinMethod::Chars, BuiltinArgs::None) => apply_or_recv!(chars_apply(recv)),
             (BuiltinMethod::CharsOf, BuiltinArgs::None) => apply_or_recv!(chars_of_apply(recv)),
             (BuiltinMethod::Bytes, BuiltinArgs::None) => apply_or_recv!(bytes_of_apply(recv)),
-            (BuiltinMethod::ByteLen, BuiltinArgs::None) => apply_or_recv!(byte_len_apply(recv)),
-            (BuiltinMethod::IsBlank, BuiltinArgs::None) => apply_or_recv!(is_blank_apply(recv)),
-            (BuiltinMethod::IsNumeric, BuiltinArgs::None) => {
-                apply_or_recv!(is_numeric_apply(recv))
+            (BuiltinMethod::ByteLen, BuiltinArgs::None)
+            | (BuiltinMethod::IsBlank, BuiltinArgs::None)
+            | (BuiltinMethod::IsNumeric, BuiltinArgs::None)
+            | (BuiltinMethod::IsAlpha, BuiltinArgs::None)
+            | (BuiltinMethod::IsAscii, BuiltinArgs::None)
+            | (BuiltinMethod::ToNumber, BuiltinArgs::None)
+            | (BuiltinMethod::ToBool, BuiltinArgs::None) => {
+                apply_or_recv!(str_no_arg_scalar_val_apply(self.method, recv))
             }
-            (BuiltinMethod::IsAlpha, BuiltinArgs::None) => apply_or_recv!(is_alpha_apply(recv)),
-            (BuiltinMethod::IsAscii, BuiltinArgs::None) => apply_or_recv!(is_ascii_apply(recv)),
-            (BuiltinMethod::ToNumber, BuiltinArgs::None) => {
-                apply_or_recv!(to_number_apply(recv))
-            }
-            (BuiltinMethod::ToBool, BuiltinArgs::None) => apply_or_recv!(to_bool_apply(recv)),
             (BuiltinMethod::ParseInt, BuiltinArgs::None) => apply_or_recv!(parse_int_apply(recv)),
             (BuiltinMethod::ParseFloat, BuiltinArgs::None) => {
                 apply_or_recv!(parse_float_apply(recv))
@@ -1626,6 +1631,19 @@ impl BuiltinCall {
         match (self.method, &self.args) {
             (BuiltinMethod::Len, BuiltinArgs::None) => json_view_len(recv).map(Val::Int),
             (
+                BuiltinMethod::ByteLen
+                | BuiltinMethod::IsBlank
+                | BuiltinMethod::IsNumeric
+                | BuiltinMethod::IsAlpha
+                | BuiltinMethod::IsAscii
+                | BuiltinMethod::ToNumber
+                | BuiltinMethod::ToBool,
+                BuiltinArgs::None,
+            ) => {
+                let value = json_view_str(recv)?;
+                str_no_arg_scalar_apply(self.method, value)
+            }
+            (
                 BuiltinMethod::StartsWith
                 | BuiltinMethod::EndsWith
                 | BuiltinMethod::Matches
@@ -1639,6 +1657,41 @@ impl BuiltinCall {
             _ => None,
         }
     }
+}
+
+#[inline]
+fn str_no_arg_scalar_apply(method: BuiltinMethod, value: &str) -> Option<Val> {
+    match method {
+        BuiltinMethod::ByteLen => Some(Val::Int(value.len() as i64)),
+        BuiltinMethod::IsBlank => Some(Val::Bool(value.chars().all(|c| c.is_whitespace()))),
+        BuiltinMethod::IsNumeric => Some(Val::Bool(
+            !value.is_empty() && value.chars().all(|c| c.is_ascii_digit()),
+        )),
+        BuiltinMethod::IsAlpha => Some(Val::Bool(
+            !value.is_empty() && value.chars().all(|c| c.is_alphabetic()),
+        )),
+        BuiltinMethod::IsAscii => Some(Val::Bool(value.is_ascii())),
+        BuiltinMethod::ToNumber => {
+            if let Ok(i) = value.parse::<i64>() {
+                return Some(Val::Int(i));
+            }
+            if let Ok(f) = value.parse::<f64>() {
+                return Some(Val::Float(f));
+            }
+            Some(Val::Null)
+        }
+        BuiltinMethod::ToBool => Some(match value {
+            "true" => Val::Bool(true),
+            "false" => Val::Bool(false),
+            _ => Val::Null,
+        }),
+        _ => None,
+    }
+}
+
+#[inline]
+fn str_no_arg_scalar_val_apply(method: BuiltinMethod, recv: &Val) -> Option<Val> {
+    str_no_arg_scalar_apply(method, recv.as_str_ref()?)
 }
 
 #[inline]
@@ -3846,40 +3899,6 @@ pub fn bytes_of_apply(recv: &Val) -> Option<Val> {
     })
 }
 
-/// `.byte_len()` — Str → Int byte count.
-#[inline]
-pub fn byte_len_apply(recv: &Val) -> Option<Val> {
-    map_str_val(recv, |s| Val::Int(s.len() as i64))
-}
-
-/// `.is_blank()` — all whitespace.
-#[inline]
-pub fn is_blank_apply(recv: &Val) -> Option<Val> {
-    map_str_val(recv, |s| Val::Bool(s.chars().all(|c| c.is_whitespace())))
-}
-
-/// `.is_numeric()` — all ASCII digits, non-empty.
-#[inline]
-pub fn is_numeric_apply(recv: &Val) -> Option<Val> {
-    map_str_val(recv, |s| {
-        Val::Bool(!s.is_empty() && s.chars().all(|c| c.is_ascii_digit()))
-    })
-}
-
-/// `.is_alpha()` — all alphabetic, non-empty.
-#[inline]
-pub fn is_alpha_apply(recv: &Val) -> Option<Val> {
-    map_str_val(recv, |s| {
-        Val::Bool(!s.is_empty() && s.chars().all(|c| c.is_alphabetic()))
-    })
-}
-
-/// `.is_ascii()` — all ASCII bytes.
-#[inline]
-pub fn is_ascii_apply(recv: &Val) -> Option<Val> {
-    map_str_val(recv, |s| Val::Bool(s.is_ascii()))
-}
-
 /// `.ceil()` — numeric ceiling as Int.
 #[inline]
 pub fn ceil_apply(recv: &Val) -> Option<Val> {
@@ -3946,31 +3965,6 @@ pub fn try_abs_apply(recv: &Val) -> Result<Option<Val>, EvalError> {
     abs_apply(recv)
         .map(Some)
         .ok_or_else(|| EvalError("abs: expected number".into()))
-}
-
-/// `.to_number()` — parse i64 or f64; null on parse failure.
-#[inline]
-pub fn to_number_apply(recv: &Val) -> Option<Val> {
-    map_str_val(recv, |s| {
-        if let Ok(i) = s.parse::<i64>() {
-            return Val::Int(i);
-        }
-        if let Ok(f) = s.parse::<f64>() {
-            return Val::Float(f);
-        }
-        Val::Null
-    })
-}
-
-/// `.to_bool()` — recognise "true"/"false" (Stage form). Errs on
-/// non-recognised in dispatch fn; here we yield Null.
-#[inline]
-pub fn to_bool_apply(recv: &Val) -> Option<Val> {
-    map_str_val(recv, |s| match s {
-        "true" => Val::Bool(true),
-        "false" => Val::Bool(false),
-        _ => Val::Null,
-    })
 }
 
 /// `.parse_int()` — trim + parse i64; Null on failure.
@@ -5983,6 +5977,9 @@ mod spec_tests {
         assert!(BuiltinMethod::Matches.spec().view_scalar);
         assert!(BuiltinMethod::IndexOf.spec().view_scalar);
         assert!(BuiltinMethod::LastIndexOf.spec().view_scalar);
+        assert!(BuiltinMethod::ByteLen.spec().view_scalar);
+        assert!(BuiltinMethod::IsNumeric.spec().view_scalar);
+        assert!(BuiltinMethod::ToNumber.spec().view_scalar);
         assert!(!BuiltinMethod::Sort.spec().view_scalar);
         assert!(!BuiltinMethod::FromJson.spec().view_scalar);
     }

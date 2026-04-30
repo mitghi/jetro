@@ -587,6 +587,44 @@ mod tests {
 
     #[cfg(feature = "simd-json")]
     #[test]
+    fn tape_no_arg_string_scalar_filter_preserves_output_demand() {
+        let j = Jetro::from_bytes(
+            br#"{"people":[{"code":"abc"},{"code":"123"},{"code":"456"}],"unused":{"large":[1,2,3,4]}}"#
+                .to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j
+            .collect(r#"$.people.filter(code.is_numeric()).take(1).map(code)"#)
+            .unwrap();
+
+        assert_eq!(out, json!(["123"]));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 1);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn tape_no_arg_numeric_string_scalar_filter_preserves_output_demand() {
+        let j = Jetro::from_bytes(
+            br#"{"people":[{"code":"xx"},{"code":"abc"},{"code":"def"}],"unused":{"large":[1,2,3,4]}}"#
+                .to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j
+            .collect(r#"$.people.filter(code.byte_len() == 3).take(1).map(code)"#)
+            .unwrap();
+
+        assert_eq!(out, json!(["abc"]));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 1);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
     fn object_shape_tape_pipeline_generic_first_stage_uses_row_bridge() {
         let j = Jetro::from_bytes(
             br#"{"people":[{"name":"al"},{"name":"ada"},{"name":"bob"},{"name":"carol"}],"meta":{"version":3}}"#.to_vec(),
