@@ -110,27 +110,10 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
     // them run as streaming filter/map over the buffer.  Process
     // every stage in order so the pipeline semantics match the
     // surface query.
-    let needs_barrier = pipeline.stages.iter().any(|s| {
-        matches!(
-            s,
-            Stage::Reverse
-                | Stage::Sort(_)
-                | Stage::UniqueBy(_)
-                | Stage::FlatMap(_)
-                | Stage::GroupBy(_)
-                | Stage::Split(_)
-                | Stage::Chunk(_)
-                | Stage::Window(_)
-                | Stage::DropWhile(_)
-                | Stage::IndicesWhere(_)
-                | Stage::FindIndex(_)
-                | Stage::MaxBy(_)
-                | Stage::MinBy(_)
-                | Stage::CountBy(_)
-                | Stage::IndexBy(_)
-                | Stage::SortedDedup(_)
-        )
-    });
+    let needs_barrier = pipeline
+        .stages
+        .iter()
+        .any(Stage::requires_legacy_materialization);
     let terminal_map_idx = if !needs_barrier && matches!(pipeline.sink, Sink::Collect) {
         match pipeline.stages.last() {
             Some(Stage::Map(_)) => pipeline.stages.len().checked_sub(1),

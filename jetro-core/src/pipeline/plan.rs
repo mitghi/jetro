@@ -279,6 +279,32 @@ pub struct StageShape {
 }
 
 impl Stage {
+    pub(crate) fn is_composed_barrier(&self) -> bool {
+        matches!(
+            self,
+            Stage::Reverse | Stage::Sort(_) | Stage::UniqueBy(_) | Stage::GroupBy(_)
+        )
+    }
+
+    pub(crate) fn requires_legacy_materialization(&self) -> bool {
+        self.is_composed_barrier()
+            || matches!(
+                self,
+                Stage::FlatMap(_)
+                    | Stage::Split(_)
+                    | Stage::Chunk(_)
+                    | Stage::Window(_)
+                    | Stage::DropWhile(_)
+                    | Stage::IndicesWhere(_)
+                    | Stage::FindIndex(_)
+                    | Stage::MaxBy(_)
+                    | Stage::MinBy(_)
+                    | Stage::CountBy(_)
+                    | Stage::IndexBy(_)
+                    | Stage::SortedDedup(_)
+            )
+    }
+
     pub(crate) fn view_capability(
         &self,
         idx: usize,

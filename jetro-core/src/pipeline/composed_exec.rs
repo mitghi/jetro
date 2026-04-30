@@ -8,7 +8,7 @@ use super::composed_segment;
 use super::composed_sink;
 use super::composed_source;
 use super::composed_stage::ComposedStageBuilder;
-use super::{compute_strategies, BodyKernel, Pipeline, Stage, StageStrategy};
+use super::{compute_strategies, BodyKernel, Pipeline, StageStrategy};
 
 pub(super) fn run(
     pipeline: &Pipeline,
@@ -32,11 +32,7 @@ pub(super) fn run(
 
     let mut last_split = 0usize;
     for (i, stage) in stages_ref.iter().enumerate() {
-        let is_barrier = matches!(
-            stage,
-            Stage::Reverse | Stage::Sort(_) | Stage::UniqueBy(_) | Stage::GroupBy(_)
-        );
-        if !is_barrier {
+        if !stage.is_composed_barrier() {
             continue;
         }
 
