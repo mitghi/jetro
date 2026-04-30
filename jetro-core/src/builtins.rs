@@ -957,7 +957,11 @@ impl BuiltinMethod {
                     .indexed()
                     .view_native();
                 let spec = match self {
-                    Self::StartsWith | Self::EndsWith => spec.view_scalar(),
+                    Self::StartsWith
+                    | Self::EndsWith
+                    | Self::Matches
+                    | Self::IndexOf
+                    | Self::LastIndexOf => spec.view_scalar(),
                     _ => spec,
                 };
                 if pipeline_element {
@@ -1253,26 +1257,18 @@ impl BuiltinCall {
             (BuiltinMethod::UnflattenKeys, BuiltinArgs::Str(p)) => {
                 apply_or_recv!(unflatten_keys_apply(recv, p))
             }
-            (BuiltinMethod::StartsWith, BuiltinArgs::Str(p)) => {
-                apply_or_recv!(starts_with_apply(recv, p))
-            }
-            (BuiltinMethod::EndsWith, BuiltinArgs::Str(p)) => {
-                apply_or_recv!(ends_with_apply(recv, p))
+            (BuiltinMethod::StartsWith, BuiltinArgs::Str(p))
+            | (BuiltinMethod::EndsWith, BuiltinArgs::Str(p))
+            | (BuiltinMethod::Matches, BuiltinArgs::Str(p))
+            | (BuiltinMethod::IndexOf, BuiltinArgs::Str(p))
+            | (BuiltinMethod::LastIndexOf, BuiltinArgs::Str(p)) => {
+                apply_or_recv!(str_arg_scalar_val_apply(self.method, recv, p))
             }
             (BuiltinMethod::StripPrefix, BuiltinArgs::Str(p)) => {
                 apply_or_recv!(strip_prefix_apply(recv, p))
             }
             (BuiltinMethod::StripSuffix, BuiltinArgs::Str(p)) => {
                 apply_or_recv!(strip_suffix_apply(recv, p))
-            }
-            (BuiltinMethod::Matches, BuiltinArgs::Str(p)) => {
-                apply_or_recv!(contains_apply(recv, p))
-            }
-            (BuiltinMethod::IndexOf, BuiltinArgs::Str(p)) => {
-                apply_or_recv!(index_of_apply(recv, p))
-            }
-            (BuiltinMethod::LastIndexOf, BuiltinArgs::Str(p)) => {
-                apply_or_recv!(last_index_of_apply(recv, p))
             }
             (BuiltinMethod::Scan, BuiltinArgs::Str(p)) => apply_or_recv!(scan_apply(recv, p)),
             (BuiltinMethod::Split, BuiltinArgs::Str(p)) => apply_or_recv!(split_apply(recv, p)),
@@ -1629,14 +1625,49 @@ impl BuiltinCall {
         }
         match (self.method, &self.args) {
             (BuiltinMethod::Len, BuiltinArgs::None) => json_view_len(recv).map(Val::Int),
-            (BuiltinMethod::StartsWith, BuiltinArgs::Str(prefix)) => {
-                json_view_str(recv).map(|value| Val::Bool(value.starts_with(prefix.as_ref())))
-            }
-            (BuiltinMethod::EndsWith, BuiltinArgs::Str(suffix)) => {
-                json_view_str(recv).map(|value| Val::Bool(value.ends_with(suffix.as_ref())))
+            (
+                BuiltinMethod::StartsWith
+                | BuiltinMethod::EndsWith
+                | BuiltinMethod::Matches
+                | BuiltinMethod::IndexOf
+                | BuiltinMethod::LastIndexOf,
+                BuiltinArgs::Str(arg),
+            ) => {
+                let value = json_view_str(recv)?;
+                str_arg_scalar_apply(self.method, value, arg.as_ref())
             }
             _ => None,
         }
+    }
+}
+
+#[inline]
+fn str_arg_scalar_apply(method: BuiltinMethod, value: &str, arg: &str) -> Option<Val> {
+    match method {
+        BuiltinMethod::StartsWith => Some(Val::Bool(value.starts_with(arg))),
+        BuiltinMethod::EndsWith => Some(Val::Bool(value.ends_with(arg))),
+        BuiltinMethod::Matches => Some(Val::Bool(value.contains(arg))),
+        BuiltinMethod::IndexOf => Some(str_index_of(value, arg, false)),
+        BuiltinMethod::LastIndexOf => Some(str_index_of(value, arg, true)),
+        _ => None,
+    }
+}
+
+#[inline]
+fn str_arg_scalar_val_apply(method: BuiltinMethod, recv: &Val, arg: &str) -> Option<Val> {
+    str_arg_scalar_apply(method, recv.as_str_ref()?, arg)
+}
+
+#[inline]
+fn str_index_of(value: &str, needle: &str, last: bool) -> Val {
+    let offset = if last {
+        value.rfind(needle)
+    } else {
+        value.find(needle)
+    };
+    match offset {
+        Some(i) => Val::Int(value[..i].chars().count() as i64),
+        None => Val::Int(-1),
     }
 }
 
@@ -3980,24 +4011,6 @@ pub fn from_base64_apply(recv: &Val) -> Option<Val> {
 
 // ── Phase D batch 3: string args (one-arg / two-arg search/transform) ──
 
-/// `.starts_with(prefix)` — returns Val::Bool.
-#[inline]
-pub fn starts_with_apply(recv: &Val, prefix: &str) -> Option<Val> {
-    Some(Val::Bool(recv.as_str_ref()?.starts_with(prefix)))
-}
-
-/// `.ends_with(suffix)` — returns Val::Bool.
-#[inline]
-pub fn ends_with_apply(recv: &Val, suffix: &str) -> Option<Val> {
-    Some(Val::Bool(recv.as_str_ref()?.ends_with(suffix)))
-}
-
-/// `.contains(needle)` / `.str_matches(needle)` — returns Val::Bool.
-#[inline]
-pub fn contains_apply(recv: &Val, needle: &str) -> Option<Val> {
-    Some(Val::Bool(recv.as_str_ref()?.contains(needle)))
-}
-
 /// `.repeat(n)` — repeat string n times.
 #[inline]
 pub fn repeat_apply(recv: &Val, n: usize) -> Option<Val> {
@@ -4081,26 +4094,6 @@ pub fn indent_apply(recv: &Val, n: usize) -> Option<Val> {
         .collect::<Vec<_>>()
         .join("\n");
     Some(Val::Str(Arc::from(out)))
-}
-
-/// `.index_of(needle)` — char-position of first match; -1 on miss.
-#[inline]
-pub fn index_of_apply(recv: &Val, needle: &str) -> Option<Val> {
-    let s = recv.as_str_ref()?;
-    Some(match s.find(needle) {
-        Some(i) => Val::Int(s[..i].chars().count() as i64),
-        None => Val::Int(-1),
-    })
-}
-
-/// `.last_index_of(needle)` — char-position of last match; -1 on miss.
-#[inline]
-pub fn last_index_of_apply(recv: &Val, needle: &str) -> Option<Val> {
-    let s = recv.as_str_ref()?;
-    Some(match s.rfind(needle) {
-        Some(i) => Val::Int(s[..i].chars().count() as i64),
-        None => Val::Int(-1),
-    })
 }
 
 /// `.scan(pat)` — collect all occurrences of `pat` in `s`.
@@ -5987,6 +5980,9 @@ mod spec_tests {
         assert!(BuiltinMethod::Len.spec().view_scalar);
         assert!(BuiltinMethod::StartsWith.spec().view_scalar);
         assert!(BuiltinMethod::EndsWith.spec().view_scalar);
+        assert!(BuiltinMethod::Matches.spec().view_scalar);
+        assert!(BuiltinMethod::IndexOf.spec().view_scalar);
+        assert!(BuiltinMethod::LastIndexOf.spec().view_scalar);
         assert!(!BuiltinMethod::Sort.spec().view_scalar);
         assert!(!BuiltinMethod::FromJson.spec().view_scalar);
     }

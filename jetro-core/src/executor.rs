@@ -549,6 +549,44 @@ mod tests {
 
     #[cfg(feature = "simd-json")]
     #[test]
+    fn tape_string_predicate_scalar_filter_stays_view_native() {
+        let j = Jetro::from_bytes(
+            br#"{"people":[{"name":"bob"},{"name":"ada"},{"name":"amy"}],"unused":{"large":[1,2,3,4]}}"#
+                .to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j
+            .collect(r#"$.people.filter(name.matches("ad")).take(1).map(name)"#)
+            .unwrap();
+
+        assert_eq!(out, json!(["ada"]));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 1);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn tape_string_index_scalar_filter_stays_view_native() {
+        let j = Jetro::from_bytes(
+            br#"{"people":[{"name":"bob"},{"name":"ada"},{"name":"amy"}],"unused":{"large":[1,2,3,4]}}"#
+                .to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j
+            .collect(r#"$.people.filter(name.index_of("d") >= 1).take(1).map(name)"#)
+            .unwrap();
+
+        assert_eq!(out, json!(["ada"]));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 1);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
     fn object_shape_tape_pipeline_generic_first_stage_uses_row_bridge() {
         let j = Jetro::from_bytes(
             br#"{"people":[{"name":"al"},{"name":"ada"},{"name":"bob"},{"name":"carol"}],"meta":{"version":3}}"#.to_vec(),
