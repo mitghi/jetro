@@ -156,7 +156,11 @@ impl Pipeline {
         p.sink_kernels = p
             .sink
             .reducer_spec()
-            .and_then(|spec| spec.projection.map(|p| vec![BodyKernel::classify(&p)]))
+            .map(|spec| {
+                spec.sink_programs()
+                    .map(|p| BodyKernel::classify(p))
+                    .collect()
+            })
             .unwrap_or_default();
         Some(p)
     }
@@ -555,8 +559,8 @@ fn decode_method_chain(
                     (BuiltinMethod::ApproxCountDistinct, 0, true) => {
                         sink = Sink::ApproxCountDistinct;
                     }
-                    (_, 0, true) => {
-                        sink = terminal_sink_for_method(method)?;
+                    (_, _, true) => {
+                        sink = terminal_sink_for_method(method, args)?;
                     }
                     _ => return None,
                 }
@@ -567,22 +571,38 @@ fn decode_method_chain(
     Some((stages, stage_exprs, sink))
 }
 
-fn terminal_sink_for_method(method: BuiltinMethod) -> Option<Sink> {
+fn terminal_sink_for_method(method: BuiltinMethod, args: &[crate::ast::Arg]) -> Option<Sink> {
     let spec = method.spec();
     match spec.pipeline_sink {
-        Some(BuiltinPipelineSink::ApproxCountDistinct) => return Some(Sink::ApproxCountDistinct),
+        Some(BuiltinPipelineSink::ApproxCountDistinct) if args.is_empty() => {
+            return Some(Sink::ApproxCountDistinct);
+        }
         None => {}
+        _ => return None,
     }
 
     match spec.view_sink? {
-        BuiltinViewSink::Count => Some(Sink::Reducer(ReducerSpec::count())),
+        BuiltinViewSink::Count => match args {
+            [] => Some(Sink::Reducer(ReducerSpec::count())),
+            [arg] if method == BuiltinMethod::Count => Some(Sink::Reducer(ReducerSpec {
+                op: ReducerOp::Count,
+                predicate: Some(compile_subexpr(arg)?),
+                projection: None,
+            })),
+            _ => None,
+        },
         BuiltinViewSink::Numeric => Some(Sink::Reducer(ReducerSpec {
             op: ReducerOp::Numeric(NumOp::from_builtin_reducer(spec.numeric_reducer?)),
             predicate: None,
-            projection: None,
+            projection: match args {
+                [] => None,
+                [arg] => Some(compile_subexpr(arg)?),
+                _ => return None,
+            },
         })),
-        BuiltinViewSink::First => Some(Sink::First(BuiltinViewSink::First)),
-        BuiltinViewSink::Last => Some(Sink::Last(BuiltinViewSink::Last)),
+        BuiltinViewSink::First if args.is_empty() => Some(Sink::First(BuiltinViewSink::First)),
+        BuiltinViewSink::Last if args.is_empty() => Some(Sink::Last(BuiltinViewSink::Last)),
+        _ => None,
     }
 }
 

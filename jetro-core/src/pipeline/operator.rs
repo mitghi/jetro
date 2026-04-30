@@ -34,6 +34,10 @@ impl ReducerSpec {
         }
     }
 
+    pub(crate) fn sink_programs(&self) -> impl Iterator<Item = &Arc<Program>> {
+        self.predicate.iter().chain(self.projection.iter())
+    }
+
     pub fn method(&self) -> Option<BuiltinMethod> {
         match self.op {
             ReducerOp::Count => Some(BuiltinMethod::Count),

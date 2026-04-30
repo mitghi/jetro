@@ -882,6 +882,30 @@ mod tests {
     }
 
     #[test]
+    fn run_terminal_count_predicate() {
+        use serde_json::json;
+        let doc: Val = (&json!({"orders":[
+            {"total": 50}, {"total": 150}, {"total": 200}
+        ]}))
+            .into();
+        let p = lower_query("$.orders.count(total > 100)").unwrap();
+        let out = p.run(&doc).unwrap();
+        assert_eq!(out, Val::Int(2));
+    }
+
+    #[test]
+    fn run_terminal_numeric_projection() {
+        use serde_json::json;
+        let doc: Val = (&json!({"orders":[
+            {"total": 50}, {"total": 150}, {"total": 200}
+        ]}))
+            .into();
+        let p = lower_query("$.orders.sum(total)").unwrap();
+        let out = p.run(&doc).unwrap();
+        assert_eq!(out, Val::Int(400));
+    }
+
+    #[test]
     fn rewrite_skip_skip_merges() {
         let p = lower_query("$.xs.skip(2).skip(3).sum()").unwrap();
         assert_eq!(p.stages.len(), 1);
@@ -922,6 +946,24 @@ mod tests {
         let p = lower_query("$.orders.map(total).upper().count()").unwrap();
         assert!(p.stages.is_empty());
         assert!(matches!(p.sink, Sink::Reducer(ref spec) if spec.op == ReducerOp::Count));
+    }
+
+    #[test]
+    fn terminal_count_predicate_lowers_to_reducer_predicate() {
+        let p = lower_query("$.orders.count(total > 10)").unwrap();
+        assert!(p.stages.is_empty());
+        assert!(
+            matches!(&p.sink, Sink::Reducer(spec) if spec.op == ReducerOp::Count && spec.predicate.is_some())
+        );
+    }
+
+    #[test]
+    fn terminal_numeric_projection_lowers_to_reducer_projection() {
+        let p = lower_query("$.orders.sum(total)").unwrap();
+        assert!(p.stages.is_empty());
+        assert!(
+            matches!(&p.sink, Sink::Reducer(spec) if spec.op == ReducerOp::Numeric(NumOp::Sum) && spec.projection.is_some())
+        );
     }
 
     #[test]

@@ -29,10 +29,6 @@ impl ReducerAccumulator {
     }
 
     pub(crate) fn push(&mut self, item: &Val) {
-        debug_assert!(
-            self.spec.predicate.is_none(),
-            "predicate reducers must evaluate predicates before fold"
-        );
         match self.spec.op {
             ReducerOp::Count => {
                 self.count += 1;

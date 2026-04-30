@@ -355,10 +355,23 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
         // the post-pipeline rows directly, so only the sink remains.
         let sink_done = match &pipeline.sink {
             Sink::Reducer(spec) => {
-                if let Some(project) = &spec.projection {
+                if let Some(predicate) = &spec.predicate {
                     let kernel = pipeline
                         .sink_kernels
                         .first()
+                        .unwrap_or(&BodyKernel::Generic);
+                    let keep = eval_kernel(kernel, &item, |item| {
+                        apply_item_in_env(&mut vm, &mut loop_env, item, predicate)
+                    })?;
+                    if !crate::util::is_truthy(&keep) {
+                        continue 'outer;
+                    }
+                }
+                if let Some(project) = &spec.projection {
+                    let project_kernel_idx = usize::from(spec.predicate.is_some());
+                    let kernel = pipeline
+                        .sink_kernels
+                        .get(project_kernel_idx)
                         .unwrap_or(&BodyKernel::Generic);
                     let reducer_item = eval_kernel(kernel, &item, |item| {
                         apply_item_in_env(&mut vm, &mut loop_env, item, project)
@@ -553,10 +566,23 @@ where
 
         let sink_done = match &pipeline.sink {
             Sink::Reducer(spec) => {
-                if let Some(project) = &spec.projection {
+                if let Some(predicate) = &spec.predicate {
                     let kernel = pipeline
                         .sink_kernels
                         .first()
+                        .unwrap_or(&BodyKernel::Generic);
+                    let keep = eval_kernel(kernel, &item, |item| {
+                        apply_item_in_env(&mut vm, &mut loop_env, item, predicate)
+                    })?;
+                    if !crate::util::is_truthy(&keep) {
+                        continue 'outer;
+                    }
+                }
+                if let Some(project) = &spec.projection {
+                    let project_kernel_idx = usize::from(spec.predicate.is_some());
+                    let kernel = pipeline
+                        .sink_kernels
+                        .get(project_kernel_idx)
                         .unwrap_or(&BodyKernel::Generic);
                     let reducer_item = eval_kernel(kernel, &item, |item| {
                         apply_item_in_env(&mut vm, &mut loop_env, item, project)

@@ -55,7 +55,7 @@ impl Sink {
     {
         match self {
             Sink::Collect | Sink::First(_) | Sink::Last(_) | Sink::ApproxCountDistinct => true,
-            Sink::Reducer(spec) => spec.projection.as_ref().is_none_or(|prog| program_ok(prog)),
+            Sink::Reducer(spec) => spec.sink_programs().all(|prog| program_ok(prog)),
         }
     }
 
@@ -66,6 +66,9 @@ impl Sink {
         match self {
             Sink::Collect => Some(ViewSinkCapability::Collect),
             Sink::Reducer(spec) if spec.numeric_op().is_some() => {
+                if spec.predicate.is_some() {
+                    return None;
+                }
                 let spec = self.reducer_spec()?;
                 if spec.method()?.spec().view_sink != Some(BuiltinViewSink::Numeric) {
                     return None;
