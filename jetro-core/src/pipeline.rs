@@ -38,6 +38,7 @@ use crate::ast::Expr;
 use crate::builtins::BuiltinMethod;
 use crate::value::Val;
 
+mod canonical;
 mod capability;
 mod collector;
 mod columnar;

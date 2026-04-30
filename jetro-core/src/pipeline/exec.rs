@@ -7,27 +7,13 @@ use super::columnar;
 use super::composed_exec;
 use super::indexed_exec;
 use super::legacy_exec;
-use super::{composed_path_enabled, BodyKernel, Pipeline, PipelineData, Sink, Stage};
+use super::{composed_path_enabled, Pipeline, PipelineData};
 
 impl Pipeline {
     /// Execute the pipeline against `root`, returning the sink.s
     /// produced [`Val`].
     pub fn run(&self, root: &Val) -> Result<Val, EvalError> {
         self.run_with(root, None)
-    }
-
-    /// Decompose any fused Sink into a base `(stages, kernels, sink)`
-    /// triple. Pure function — does not mutate `self`. Lets every
-    /// Identity view — fused Sink variants deleted in Tier 3, so
-    /// every Pipeline is already in base form. Kept as a stable name
-    /// for downstream consumers (composed Val/tape runners and
-    /// columnar fast paths) that built on the canonical-view abstraction.
-    pub fn canonical(&self) -> (Vec<Stage>, Vec<BodyKernel>, Sink) {
-        (
-            self.stages.clone(),
-            self.stage_kernels.clone(),
-            self.sink.clone(),
-        )
     }
 
     /// Execute with an optional ObjVec promotion cache.  When `cache`
