@@ -7,6 +7,14 @@ use super::{
     PipelineData, Sink, Source, Stage,
 };
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ColumnarStageKind {
+    Filter,
+    Map,
+    FlatMap,
+    GroupBy,
+}
+
 pub(super) fn run_cached(
     pipeline: &Pipeline,
     root: &Val,
@@ -17,6 +25,81 @@ pub(super) fn run_cached(
 
 pub(super) fn run_uncached(pipeline: &Pipeline, root: &Val) -> Option<Result<Val, EvalError>> {
     pipeline.run_uncached_columnar_impl(root)
+}
+
+fn stage_kind(stage: &Stage) -> Option<ColumnarStageKind> {
+    match stage {
+        Stage::Filter(_, _) => Some(ColumnarStageKind::Filter),
+        Stage::Map(_, _) => Some(ColumnarStageKind::Map),
+        Stage::FlatMap(_, _) => Some(ColumnarStageKind::FlatMap),
+        Stage::GroupBy(_) => Some(ColumnarStageKind::GroupBy),
+        _ => None,
+    }
+}
+
+fn stage_kernel<'a>(
+    stages: &[Stage],
+    kernels: &'a [BodyKernel],
+    kind: ColumnarStageKind,
+) -> Option<&'a BodyKernel> {
+    let [stage] = stages else {
+        return None;
+    };
+    let [kernel] = kernels else {
+        return None;
+    };
+    (stage_kind(stage)? == kind).then_some(kernel)
+}
+
+fn stage_kernel_pair<'a>(
+    stages: &[Stage],
+    kernels: &'a [BodyKernel],
+    first: ColumnarStageKind,
+    second: ColumnarStageKind,
+) -> Option<(&'a BodyKernel, &'a BodyKernel)> {
+    let [first_stage, second_stage] = stages else {
+        return None;
+    };
+    let [first_kernel, second_kernel] = kernels else {
+        return None;
+    };
+    (stage_kind(first_stage)? == first && stage_kind(second_stage)? == second)
+        .then_some((first_kernel, second_kernel))
+}
+
+fn stage_program<'a>(stage: &'a Stage, kind: ColumnarStageKind) -> Option<&'a crate::vm::Program> {
+    if stage_kind(stage)? != kind {
+        return None;
+    }
+    match stage {
+        Stage::Filter(prog, _) | Stage::Map(prog, _) | Stage::FlatMap(prog, _) => Some(prog),
+        Stage::GroupBy(prog) => Some(prog),
+        _ => None,
+    }
+}
+
+fn single_stage_program<'a>(
+    stages: &'a [Stage],
+    kind: ColumnarStageKind,
+) -> Option<&'a crate::vm::Program> {
+    let [stage] = stages else {
+        return None;
+    };
+    stage_program(stage, kind)
+}
+
+fn stage_program_pair<'a>(
+    stages: &'a [Stage],
+    first: ColumnarStageKind,
+    second: ColumnarStageKind,
+) -> Option<(&'a crate::vm::Program, &'a crate::vm::Program)> {
+    let [first_stage, second_stage] = stages else {
+        return None;
+    };
+    Some((
+        stage_program(first_stage, first)?,
+        stage_program(second_stage, second)?,
+    ))
 }
 
 /// Build per-slot typed columns from a row-major Val cells matrix.
@@ -154,19 +237,18 @@ impl Pipeline {
         // Sink::Collect over Strs / Ints / Floats / Bools key column.
         // Walks the typed key column directly, partitions row indices
         // per key, materialises Val::Obj { key → Vec<row> }.
-        if let (
-            Some([Stage::GroupBy(_)]),
-            Some([BodyKernel::FieldRead(key)]),
-            Val::ObjVec(d),
-            Sink::Collect,
-        ) = (
-            self.stages.get(..),
-            self.stage_kernels.get(..),
-            &recv,
-            &self.sink,
-        ) {
-            if let Some(out) = objvec_typed_group_by(d, key) {
-                return Some(Ok(out));
+        if matches!(self.sink, Sink::Collect) {
+            if let (Some(BodyKernel::FieldRead(key)), Val::ObjVec(d)) = (
+                stage_kernel(
+                    &self.stages,
+                    &self.stage_kernels,
+                    ColumnarStageKind::GroupBy,
+                ),
+                &recv,
+            ) {
+                if let Some(out) = objvec_typed_group_by(d, key) {
+                    return Some(Ok(out));
+                }
             }
         }
 
@@ -175,13 +257,17 @@ impl Pipeline {
         if !matches!(self.sink, Sink::Collect) {
             return None;
         }
-        if let (
-            Some([Stage::Filter(_, _), Stage::Map(_, _)]),
-            Some([BodyKernel::FieldCmpLit(pk, pop, plit), BodyKernel::FieldRead(mk)]),
-            Val::ObjVec(d),
-        ) = (self.stages.get(..), self.stage_kernels.get(..), &recv)
+        if let Some((BodyKernel::FieldCmpLit(pk, pop, plit), BodyKernel::FieldRead(mk))) =
+            stage_kernel_pair(
+                &self.stages,
+                &self.stage_kernels,
+                ColumnarStageKind::Filter,
+                ColumnarStageKind::Map,
+            )
         {
-            return objvec_typed_filter_map_collect(d, pk, *pop, plit, mk);
+            if let Val::ObjVec(d) = &recv {
+                return objvec_typed_filter_map_collect(d, pk, *pop, plit, mk);
+            }
         }
         None
     }
@@ -197,51 +283,51 @@ impl Pipeline {
         // StrVec receivers.  Stage::Filter(CurrentCmpLit) over a
         // primitive vec → walk slice directly, build typed output.
         // Sinks: Collect / Count.
-        if let [Stage::Filter(_, _)] = self.stages.as_slice() {
-            if let [BodyKernel::CurrentCmpLit(op, lit)] = self.stage_kernels.as_slice() {
-                match (&recv, &self.sink) {
-                    (Val::IntVec(a), Sink::Collect) => {
-                        let mut out: Vec<i64> = Vec::with_capacity(a.len());
-                        for n in a.iter() {
-                            let v = Val::Int(*n);
-                            if eval_cmp_op(&v, *op, lit) {
-                                out.push(*n);
-                            }
+        if let Some(BodyKernel::CurrentCmpLit(op, lit)) =
+            stage_kernel(&self.stages, &self.stage_kernels, ColumnarStageKind::Filter)
+        {
+            match (&recv, &self.sink) {
+                (Val::IntVec(a), Sink::Collect) => {
+                    let mut out: Vec<i64> = Vec::with_capacity(a.len());
+                    for n in a.iter() {
+                        let v = Val::Int(*n);
+                        if eval_cmp_op(&v, *op, lit) {
+                            out.push(*n);
                         }
-                        return Some(Ok(Val::int_vec(out)));
                     }
-                    (Val::IntVec(a), Sink::Count(_)) => {
-                        let mut c = 0i64;
-                        for n in a.iter() {
-                            let v = Val::Int(*n);
-                            if eval_cmp_op(&v, *op, lit) {
-                                c += 1;
-                            }
-                        }
-                        return Some(Ok(Val::Int(c)));
-                    }
-                    (Val::FloatVec(a), Sink::Collect) => {
-                        let mut out: Vec<f64> = Vec::with_capacity(a.len());
-                        for f in a.iter() {
-                            let v = Val::Float(*f);
-                            if eval_cmp_op(&v, *op, lit) {
-                                out.push(*f);
-                            }
-                        }
-                        return Some(Ok(Val::float_vec(out)));
-                    }
-                    (Val::FloatVec(a), Sink::Count(_)) => {
-                        let mut c = 0i64;
-                        for f in a.iter() {
-                            let v = Val::Float(*f);
-                            if eval_cmp_op(&v, *op, lit) {
-                                c += 1;
-                            }
-                        }
-                        return Some(Ok(Val::Int(c)));
-                    }
-                    _ => {}
+                    return Some(Ok(Val::int_vec(out)));
                 }
+                (Val::IntVec(a), Sink::Count(_)) => {
+                    let mut c = 0i64;
+                    for n in a.iter() {
+                        let v = Val::Int(*n);
+                        if eval_cmp_op(&v, *op, lit) {
+                            c += 1;
+                        }
+                    }
+                    return Some(Ok(Val::Int(c)));
+                }
+                (Val::FloatVec(a), Sink::Collect) => {
+                    let mut out: Vec<f64> = Vec::with_capacity(a.len());
+                    for f in a.iter() {
+                        let v = Val::Float(*f);
+                        if eval_cmp_op(&v, *op, lit) {
+                            out.push(*f);
+                        }
+                    }
+                    return Some(Ok(Val::float_vec(out)));
+                }
+                (Val::FloatVec(a), Sink::Count(_)) => {
+                    let mut c = 0i64;
+                    for f in a.iter() {
+                        let v = Val::Float(*f);
+                        if eval_cmp_op(&v, *op, lit) {
+                            c += 1;
+                        }
+                    }
+                    return Some(Ok(Val::Int(c)));
+                }
+                _ => {}
             }
         }
 
@@ -253,123 +339,130 @@ impl Pipeline {
             _ => return None,
         };
 
-        // Build a (kernel, prog) view of the stages.
-        let stages = &self.stages;
-        let kernels = &self.stage_kernels;
-        if stages.len() != kernels.len() {
-            return None;
+        // Single Map(FieldRead) → Collect: direct projection.
+        if let Some(BodyKernel::FieldRead(k)) =
+            stage_kernel(&self.stages, &self.stage_kernels, ColumnarStageKind::Map)
+        {
+            let mut out = Vec::with_capacity(arr.len());
+            for v in arr.iter() {
+                out.push(v.get_field(k.as_ref()));
+            }
+            return Some(Ok(Val::arr(out)));
         }
 
-        match (stages.as_slice(), kernels.as_slice()) {
-            // Single Map(FieldRead) → Collect: direct projection.
-            ([Stage::Map(_, _)], [BodyKernel::FieldRead(k)]) => {
-                let mut out = Vec::with_capacity(arr.len());
-                for v in arr.iter() {
-                    out.push(v.get_field(k.as_ref()));
+        // Single Filter(FieldCmpLit) → Collect: predicate mask copy.
+        // Phase C1 — when Arc is uniquely held (refcount 1), take
+        // ownership and retain-in-place; saves N Val clones.
+        if let Some(BodyKernel::FieldCmpLit(k, op, lit)) =
+            stage_kernel(&self.stages, &self.stage_kernels, ColumnarStageKind::Filter)
+        {
+            return match Arc::try_unwrap(arr) {
+                Ok(mut owned) => {
+                    owned.retain(|v| {
+                        let lhs = v.get_field(k.as_ref());
+                        eval_cmp_op(&lhs, *op, lit)
+                    });
+                    Some(Ok(Val::arr(owned)))
                 }
-                Some(Ok(Val::arr(out)))
-            }
-            // Single Filter(FieldCmpLit) → Collect: predicate mask copy.
-            // Phase C1 — when Arc is uniquely held (refcount 1), take
-            // ownership and retain-in-place; saves N Val clones.
-            ([Stage::Filter(_, _)], [BodyKernel::FieldCmpLit(k, op, lit)]) => {
-                match Arc::try_unwrap(arr) {
-                    Ok(mut owned) => {
-                        owned.retain(|v| {
-                            let lhs = v.get_field(k.as_ref());
-                            eval_cmp_op(&lhs, *op, lit)
-                        });
-                        Some(Ok(Val::arr(owned)))
-                    }
-                    Err(arr) => {
-                        let mut out = Vec::with_capacity(arr.len());
-                        for v in arr.iter() {
-                            let lhs = v.get_field(k.as_ref());
-                            if eval_cmp_op(&lhs, *op, lit) {
-                                out.push(v.clone());
-                            }
+                Err(arr) => {
+                    let mut out = Vec::with_capacity(arr.len());
+                    for v in arr.iter() {
+                        let lhs = v.get_field(k.as_ref());
+                        if eval_cmp_op(&lhs, *op, lit) {
+                            out.push(v.clone());
                         }
-                        Some(Ok(Val::arr(out)))
                     }
+                    Some(Ok(Val::arr(out)))
+                }
+            };
+        }
+
+        let filter_map = stage_kernel_pair(
+            &self.stages,
+            &self.stage_kernels,
+            ColumnarStageKind::Filter,
+            ColumnarStageKind::Map,
+        );
+
+        // Filter(FieldCmpLit) ∘ Map(FieldRead) → Collect: project filtered column.
+        if let Some((BodyKernel::FieldCmpLit(pk, pop, plit), BodyKernel::FieldRead(mk))) =
+            filter_map
+        {
+            let mut out = Vec::with_capacity(arr.len());
+            for v in arr.iter() {
+                let lhs = v.get_field(pk.as_ref());
+                if eval_cmp_op(&lhs, *pop, plit) {
+                    out.push(v.get_field(mk.as_ref()));
                 }
             }
-            // Filter(FieldCmpLit) ∘ Map(FieldRead) → Collect: project filtered column.
-            (
-                [Stage::Filter(_, _), Stage::Map(_, _)],
-                [BodyKernel::FieldCmpLit(pk, pop, plit), BodyKernel::FieldRead(mk)],
-            ) => {
-                let mut out = Vec::with_capacity(arr.len());
-                for v in arr.iter() {
-                    let lhs = v.get_field(pk.as_ref());
-                    if eval_cmp_op(&lhs, *pop, plit) {
-                        out.push(v.get_field(mk.as_ref()));
+            return Some(Ok(Val::arr(out)));
+        }
+
+        // Single Map(FieldChain) → Collect: walk chain per item.
+        // IC-cached probe: first item resolves each chain step via
+        // IndexMap.get_full (returns slot index); subsequent items
+        // try the cached slot first, fall back to hash on miss.
+        // Saves ~half the probe cost on uniform-shape arrays.
+        if let Some(BodyKernel::FieldChain(ks)) =
+            stage_kernel(&self.stages, &self.stage_kernels, ColumnarStageKind::Map)
+        {
+            let mut out = Vec::with_capacity(arr.len());
+            let mut slots: Vec<Option<usize>> = vec![None; ks.len()];
+            for v in arr.iter() {
+                let mut cur = v.clone();
+                for (i, k) in ks.iter().enumerate() {
+                    cur = chain_step_ic(&cur, k.as_ref(), &mut slots[i]);
+                    if matches!(cur, Val::Null) {
+                        break;
                     }
                 }
-                Some(Ok(Val::arr(out)))
+                out.push(cur);
             }
-            // Single Map(FieldChain) → Collect: walk chain per item.
-            // IC-cached probe: first item resolves each chain step via
-            // IndexMap.get_full (returns slot index); subsequent items
-            // try the cached slot first, fall back to hash on miss.
-            // Saves ~half the probe cost on uniform-shape arrays.
-            ([Stage::Map(_, _)], [BodyKernel::FieldChain(ks)]) => {
-                let mut out = Vec::with_capacity(arr.len());
-                let mut slots: Vec<Option<usize>> = vec![None; ks.len()];
-                for v in arr.iter() {
+            return Some(Ok(Val::arr(out)));
+        }
+
+        // Filter(FieldCmpLit) ∘ Map(FieldChain) → Collect.
+        if let Some((BodyKernel::FieldCmpLit(pk, pop, plit), BodyKernel::FieldChain(mks))) =
+            filter_map
+        {
+            let mut out = Vec::with_capacity(arr.len());
+            for v in arr.iter() {
+                let lhs = v.get_field(pk.as_ref());
+                if eval_cmp_op(&lhs, *pop, plit) {
                     let mut cur = v.clone();
-                    for (i, k) in ks.iter().enumerate() {
-                        cur = chain_step_ic(&cur, k.as_ref(), &mut slots[i]);
+                    for k in mks.iter() {
+                        cur = cur.get_field(k.as_ref());
                         if matches!(cur, Val::Null) {
                             break;
                         }
                     }
                     out.push(cur);
                 }
-                Some(Ok(Val::arr(out)))
             }
-            // Filter(FieldCmpLit) ∘ Map(FieldChain) → Collect.
-            (
-                [Stage::Filter(_, _), Stage::Map(_, _)],
-                [BodyKernel::FieldCmpLit(pk, pop, plit), BodyKernel::FieldChain(mks)],
-            ) => {
-                let mut out = Vec::with_capacity(arr.len());
-                for v in arr.iter() {
-                    let lhs = v.get_field(pk.as_ref());
-                    if eval_cmp_op(&lhs, *pop, plit) {
-                        let mut cur = v.clone();
-                        for k in mks.iter() {
-                            cur = cur.get_field(k.as_ref());
-                            if matches!(cur, Val::Null) {
-                                break;
-                            }
-                        }
-                        out.push(cur);
-                    }
-                }
-                Some(Ok(Val::arr(out)))
-            }
-            // Filter(FieldChainCmpLit) ∘ Map(FieldRead) → Collect.
-            (
-                [Stage::Filter(_, _), Stage::Map(_, _)],
-                [BodyKernel::FieldChainCmpLit(pks, pop, plit), BodyKernel::FieldRead(mk)],
-            ) => {
-                let mut out = Vec::with_capacity(arr.len());
-                for v in arr.iter() {
-                    let mut lhs = v.clone();
-                    for k in pks.iter() {
-                        lhs = lhs.get_field(k.as_ref());
-                        if matches!(lhs, Val::Null) {
-                            break;
-                        }
-                    }
-                    if eval_cmp_op(&lhs, *pop, plit) {
-                        out.push(v.get_field(mk.as_ref()));
-                    }
-                }
-                Some(Ok(Val::arr(out)))
-            }
-            _ => None,
+            return Some(Ok(Val::arr(out)));
         }
+
+        // Filter(FieldChainCmpLit) ∘ Map(FieldRead) → Collect.
+        if let Some((BodyKernel::FieldChainCmpLit(pks, pop, plit), BodyKernel::FieldRead(mk))) =
+            filter_map
+        {
+            let mut out = Vec::with_capacity(arr.len());
+            for v in arr.iter() {
+                let mut lhs = v.clone();
+                for k in pks.iter() {
+                    lhs = lhs.get_field(k.as_ref());
+                    if matches!(lhs, Val::Null) {
+                        break;
+                    }
+                }
+                if eval_cmp_op(&lhs, *pop, plit) {
+                    out.push(v.get_field(mk.as_ref()));
+                }
+            }
+            return Some(Ok(Val::arr(out)));
+        }
+
+        None
     }
 
     /// Phase 7-lite — speculative ObjVec promotion at pipeline source.
@@ -518,8 +611,8 @@ impl Pipeline {
         if let Val::ObjVec(d) = &recv {
             let (cs, _ck, csink) = self.canonical();
             // FlatMap(FieldRead) → flatmap-count
-            if matches!(csink, Sink::Count(_)) && cs.len() == 1 {
-                if let Stage::FlatMap(prog, _) = &cs[0] {
+            if matches!(csink, Sink::Count(_)) {
+                if let Some(prog) = single_stage_program(&cs, ColumnarStageKind::FlatMap) {
                     if let Some(field) = single_field_prog(prog) {
                         if let Some(slot) = d.slot_of(field) {
                             return Some(Ok(objvec_flatmap_count_slot(d, slot)));
@@ -535,34 +628,30 @@ impl Pipeline {
                     if cs.is_empty() {
                         return Some(Ok(objvec_num_slot(d, sm, n.op)));
                     }
-                    if cs.len() == 1 {
-                        if let Stage::Filter(pred, _) = &cs[0] {
-                            let (pf, cop, lit) = single_cmp_prog(pred)?;
-                            let sp = d.slot_of(pf)?;
-                            return Some(Ok(objvec_filter_num_slots(d, sp, cop, &lit, sm, n.op)));
-                        }
-                    }
-                }
-                if cs.len() == 1 {
-                    if let Stage::Map(prog, _) = &cs[0] {
-                        let field = single_field_prog(prog)?;
-                        let slot = d.slot_of(field)?;
-                        return Some(Ok(objvec_num_slot(d, slot, n.op)));
-                    }
-                }
-                if cs.len() == 2 {
-                    if let (Stage::Filter(pred, _), Stage::Map(map, _)) = (&cs[0], &cs[1]) {
+                    if let Some(pred) = single_stage_program(&cs, ColumnarStageKind::Filter) {
                         let (pf, cop, lit) = single_cmp_prog(pred)?;
-                        let mf = single_field_prog(map)?;
                         let sp = d.slot_of(pf)?;
-                        let sm = d.slot_of(mf)?;
                         return Some(Ok(objvec_filter_num_slots(d, sp, cop, &lit, sm, n.op)));
                     }
                 }
+                if let Some(prog) = single_stage_program(&cs, ColumnarStageKind::Map) {
+                    let field = single_field_prog(prog)?;
+                    let slot = d.slot_of(field)?;
+                    return Some(Ok(objvec_num_slot(d, slot, n.op)));
+                }
+                if let Some((pred, map)) =
+                    stage_program_pair(&cs, ColumnarStageKind::Filter, ColumnarStageKind::Map)
+                {
+                    let (pf, cop, lit) = single_cmp_prog(pred)?;
+                    let mf = single_field_prog(map)?;
+                    let sp = d.slot_of(pf)?;
+                    let sm = d.slot_of(mf)?;
+                    return Some(Ok(objvec_filter_num_slots(d, sp, cop, &lit, sm, n.op)));
+                }
             }
             // Filter(...) → count-if (single cmp or AND chain)
-            if matches!(csink, Sink::Count(_)) && cs.len() == 1 {
-                if let Stage::Filter(pred, _) = &cs[0] {
+            if matches!(csink, Sink::Count(_)) {
+                if let Some(pred) = single_stage_program(&cs, ColumnarStageKind::Filter) {
                     if let Some((pf, op, lit)) = single_cmp_prog(pred) {
                         let sp = d.slot_of(pf)?;
                         return Some(Ok(objvec_filter_count_slot(d, sp, op, &lit)));
