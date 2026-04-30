@@ -571,6 +571,19 @@ pub enum BuiltinViewStage {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinViewInputMode {
+    ReadsView,
+    SkipsViewRead,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinViewOutputMode {
+    PreservesInputView,
+    BorrowedSubview,
+    BorrowedSubviews,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinViewSink {
     Count,
     Numeric,
@@ -639,6 +652,28 @@ impl BuiltinStageMerge {
 }
 
 impl BuiltinViewStage {
+    #[inline]
+    pub fn input_mode(self) -> BuiltinViewInputMode {
+        match self {
+            Self::Filter | Self::Map | Self::FlatMap => BuiltinViewInputMode::ReadsView,
+            Self::Take | Self::Skip => BuiltinViewInputMode::SkipsViewRead,
+        }
+    }
+
+    #[inline]
+    pub fn output_mode(self) -> BuiltinViewOutputMode {
+        match self {
+            Self::Map => BuiltinViewOutputMode::BorrowedSubview,
+            Self::FlatMap => BuiltinViewOutputMode::BorrowedSubviews,
+            Self::Filter | Self::Take | Self::Skip => BuiltinViewOutputMode::PreservesInputView,
+        }
+    }
+
+    #[inline]
+    pub fn materialization(self) -> BuiltinViewMaterialization {
+        BuiltinViewMaterialization::Never
+    }
+
     #[inline]
     pub fn cardinality(self) -> BuiltinCardinality {
         match self {
@@ -6275,7 +6310,8 @@ mod spec_tests {
         BuiltinCardinality, BuiltinCategory, BuiltinExprStage, BuiltinMethod, BuiltinNullaryStage,
         BuiltinNumericReducer, BuiltinPipelineLowering, BuiltinPipelineSink, BuiltinPipelineStage,
         BuiltinStageMerge, BuiltinStringPairStage, BuiltinStringStage, BuiltinUsizeStage,
-        BuiltinViewMaterialization, BuiltinViewSink, BuiltinViewStage,
+        BuiltinViewInputMode, BuiltinViewMaterialization, BuiltinViewOutputMode, BuiltinViewSink,
+        BuiltinViewStage,
     };
 
     #[test]
@@ -6347,6 +6383,34 @@ mod spec_tests {
 
         assert_eq!(BuiltinMethod::Sort.spec().view_stage, None);
         assert_eq!(BuiltinMethod::Upper.spec().view_stage, None);
+    }
+
+    #[test]
+    fn builtin_view_stage_metadata_describes_view_flow() {
+        assert_eq!(
+            BuiltinViewStage::Filter.input_mode(),
+            BuiltinViewInputMode::ReadsView
+        );
+        assert_eq!(
+            BuiltinViewStage::Take.input_mode(),
+            BuiltinViewInputMode::SkipsViewRead
+        );
+        assert_eq!(
+            BuiltinViewStage::Map.output_mode(),
+            BuiltinViewOutputMode::BorrowedSubview
+        );
+        assert_eq!(
+            BuiltinViewStage::FlatMap.output_mode(),
+            BuiltinViewOutputMode::BorrowedSubviews
+        );
+        assert_eq!(
+            BuiltinViewStage::Skip.output_mode(),
+            BuiltinViewOutputMode::PreservesInputView
+        );
+        assert_eq!(
+            BuiltinViewStage::Filter.materialization(),
+            BuiltinViewMaterialization::Never
+        );
     }
 
     #[test]

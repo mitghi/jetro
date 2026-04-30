@@ -1,4 +1,7 @@
-use crate::builtins::{BuiltinViewMaterialization, BuiltinViewSink};
+use crate::builtins::{
+    BuiltinViewInputMode, BuiltinViewMaterialization, BuiltinViewOutputMode, BuiltinViewSink,
+    BuiltinViewStage,
+};
 
 use super::{NumOp, PipelineBody, Stage};
 
@@ -45,27 +48,26 @@ pub(crate) enum ViewStageCapability {
 }
 
 impl ViewStageCapability {
-    pub(crate) fn input_mode(self) -> ViewInputMode {
+    pub(crate) fn view_stage(self) -> BuiltinViewStage {
         match self {
-            Self::Filter { .. } | Self::Map { .. } | Self::FlatMap { .. } => {
-                ViewInputMode::ReadsView
-            }
-            Self::Take(_) | Self::Skip(_) => ViewInputMode::SkipsViewRead,
+            Self::Filter { .. } => BuiltinViewStage::Filter,
+            Self::Map { .. } => BuiltinViewStage::Map,
+            Self::FlatMap { .. } => BuiltinViewStage::FlatMap,
+            Self::Take(_) => BuiltinViewStage::Take,
+            Self::Skip(_) => BuiltinViewStage::Skip,
         }
+    }
+
+    pub(crate) fn input_mode(self) -> ViewInputMode {
+        view_input_mode(self.view_stage().input_mode())
     }
 
     pub(crate) fn output_mode(self) -> ViewOutputMode {
-        match self {
-            Self::Map { .. } => ViewOutputMode::BorrowedSubview,
-            Self::FlatMap { .. } => ViewOutputMode::BorrowedSubviews,
-            Self::Filter { .. } | Self::Take(_) | Self::Skip(_) => {
-                ViewOutputMode::PreservesInputView
-            }
-        }
+        view_output_mode(self.view_stage().output_mode())
     }
 
     pub(crate) fn materialization(self) -> ViewMaterialization {
-        ViewMaterialization::Never
+        view_materialization(self.view_stage().materialization())
     }
 }
 
@@ -114,6 +116,21 @@ fn view_materialization(materialization: BuiltinViewMaterialization) -> ViewMate
         BuiltinViewMaterialization::Never => ViewMaterialization::Never,
         BuiltinViewMaterialization::SinkFinalRow => ViewMaterialization::SinkFinalRow,
         BuiltinViewMaterialization::SinkNumericInput => ViewMaterialization::SinkNumericInput,
+    }
+}
+
+fn view_input_mode(mode: BuiltinViewInputMode) -> ViewInputMode {
+    match mode {
+        BuiltinViewInputMode::ReadsView => ViewInputMode::ReadsView,
+        BuiltinViewInputMode::SkipsViewRead => ViewInputMode::SkipsViewRead,
+    }
+}
+
+fn view_output_mode(mode: BuiltinViewOutputMode) -> ViewOutputMode {
+    match mode {
+        BuiltinViewOutputMode::PreservesInputView => ViewOutputMode::PreservesInputView,
+        BuiltinViewOutputMode::BorrowedSubview => ViewOutputMode::BorrowedSubview,
+        BuiltinViewOutputMode::BorrowedSubviews => ViewOutputMode::BorrowedSubviews,
     }
 }
 
