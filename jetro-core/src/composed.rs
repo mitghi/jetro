@@ -1569,7 +1569,7 @@ mod tests {
     fn integration_generic_kernels() {
         // Body shapes the borrow stages don't recognise — should
         // still run via the GenericFilter / GenericMap / GenericFlatMap
-        // VM-fallback path, both default and JETRO_COMPOSED=1.
+        // VM-fallback path.
         use serde_json::json;
 
         let doc = json!({

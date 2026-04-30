@@ -7,7 +7,7 @@ use super::columnar;
 use super::composed_exec;
 use super::indexed_exec;
 use super::legacy_exec;
-use super::{composed_path_enabled, Pipeline, PipelineData};
+use super::{Pipeline, PipelineData};
 
 impl Pipeline {
     /// Execute the pipeline against `root`, returning the sink.s
@@ -54,10 +54,8 @@ impl Pipeline {
         }
 
         // Generic composed route for supported streaming/barrier chains.
-        if composed_path_enabled() {
-            if let Some(out) = composed_exec::run(self, root, base_env) {
-                return out;
-            }
+        if let Some(out) = composed_exec::run(self, root, base_env) {
+            return out;
         }
 
         // Semantic fallback for every shape not handled above.

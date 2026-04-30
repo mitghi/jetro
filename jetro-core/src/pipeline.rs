@@ -104,27 +104,6 @@ pub(crate) fn trace_enabled() -> bool {
     on
 }
 
-// Layer B is on by default after bench validation. `JETRO_COMPOSED=0`
-// opts out for diagnostic comparison against legacy. Cached after
-// first read. Tier 3 step 2 deletes the gate entirely along with
-// the fused Sink variants + ~30 fused vm.rs opcodes.
-static COMPOSED_INIT: AtomicU8 = AtomicU8::new(0);
-
-#[inline]
-pub(crate) fn composed_path_enabled() -> bool {
-    let v = COMPOSED_INIT.load(Ordering::Relaxed);
-    if v != 0 {
-        return v == 2;
-    }
-    let off = match std::env::var("JETRO_COMPOSED") {
-        Ok(s) => s == "0" || s.eq_ignore_ascii_case("off") || s.eq_ignore_ascii_case("false"),
-        Err(_) => false,
-    };
-    let on = !off;
-    COMPOSED_INIT.store(if on { 2 } else { 1 }, Ordering::Relaxed);
-    on
-}
-
 fn sink_name(s: &Sink) -> &'static str {
     match s {
         Sink::Collect => "collect",
@@ -492,15 +471,6 @@ mod tests {
     use crate::ast::{Arg, BinOp, Expr, Step};
     use crate::parser;
 
-    /// Skip body when JETRO_COMPOSED=1 — the rewrite-shape tests below
-    /// assert on fused-Sink output, which the composed gate disables
-    /// by design. Tier 3 deletes both the fused sinks and these
-    /// shape-asserting tests; until then they only run in the default
-    /// (legacy) configuration.
-    fn skip_under_composed() -> bool {
-        super::composed_path_enabled()
-    }
-
     fn lower_query(q: &str) -> Option<Pipeline> {
         let expr = parser::parse(q).ok()?;
         Pipeline::lower(&expr)
@@ -737,9 +707,6 @@ mod tests {
 
     #[test]
     fn rewrite_map_then_count_drops_map() {
-        if skip_under_composed() {
-            return;
-        }
         let p = lower_query("$.orders.map(total).count()").unwrap();
         assert_eq!(p.stages.len(), 0);
         assert!(matches!(p.sink, Sink::Count));
