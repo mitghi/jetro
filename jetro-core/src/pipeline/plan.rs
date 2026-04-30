@@ -310,10 +310,7 @@ impl Stage {
         idx: usize,
         kernel: Option<&BodyKernel>,
     ) -> Option<ViewStageCapability> {
-        match self
-            .view_stage_method()
-            .and_then(|method| method.spec().view_stage)
-        {
+        match self.view_stage_metadata() {
             Some(BuiltinViewStage::Filter) if kernel?.is_view_native() => {
                 return Some(ViewStageCapability::Filter { kernel: idx });
             }
@@ -323,21 +320,29 @@ impl Stage {
             Some(BuiltinViewStage::FlatMap) if kernel?.is_view_native() => {
                 return Some(ViewStageCapability::FlatMap { kernel: idx });
             }
+            Some(BuiltinViewStage::Take) => {
+                let Stage::Take(n, _) = self else {
+                    return None;
+                };
+                return Some(ViewStageCapability::Take(*n));
+            }
+            Some(BuiltinViewStage::Skip) => {
+                let Stage::Skip(n, _) = self else {
+                    return None;
+                };
+                return Some(ViewStageCapability::Skip(*n));
+            }
             _ => {}
         }
-
-        match self {
-            Stage::Take(n) => Some(ViewStageCapability::Take(*n)),
-            Stage::Skip(n) => Some(ViewStageCapability::Skip(*n)),
-            _ => None,
-        }
+        None
     }
 
-    fn view_stage_method(&self) -> Option<BuiltinMethod> {
+    fn view_stage_metadata(&self) -> Option<BuiltinViewStage> {
         match self {
-            Stage::Filter(_) => Some(BuiltinMethod::Filter),
-            Stage::Map(_) => Some(BuiltinMethod::Map),
-            Stage::FlatMap(_) => Some(BuiltinMethod::FlatMap),
+            Stage::Filter(_) => BuiltinMethod::Filter.spec().view_stage,
+            Stage::Map(_) => BuiltinMethod::Map.spec().view_stage,
+            Stage::FlatMap(_) => BuiltinMethod::FlatMap.spec().view_stage,
+            Stage::Take(_, stage) | Stage::Skip(_, stage) => Some(*stage),
             _ => None,
         }
     }
@@ -368,8 +373,8 @@ impl Stage {
             | Stage::CountBy(prog)
             | Stage::IndexBy(prog)
             | Stage::SortedDedup(Some(prog)) => program_ok(prog),
-            Stage::Take(_)
-            | Stage::Skip(_)
+            Stage::Take(_, _)
+            | Stage::Skip(_, _)
             | Stage::Reverse
             | Stage::Sort(super::SortSpec { key: None, .. })
             | Stage::UniqueBy(None)
@@ -389,8 +394,8 @@ impl Stage {
             Stage::Filter(_) => Some(ChainOp::Filter),
             Stage::Map(_) | Stage::CompiledMap(_) => Some(ChainOp::Map),
             Stage::FlatMap(_) | Stage::Split(_) => Some(ChainOp::FlatMap),
-            Stage::Take(n) => Some(ChainOp::Take(*n)),
-            Stage::Skip(n) => Some(ChainOp::Skip(*n)),
+            Stage::Take(n, _) => Some(ChainOp::Take(*n)),
+            Stage::Skip(n, _) => Some(ChainOp::Skip(*n)),
             Stage::Builtin(call) => Some(ChainOp::Builtin(call.method)),
             Stage::Slice(_, _) | Stage::Replace { .. } => Some(ChainOp::Map),
             _ => None,
@@ -434,7 +439,7 @@ impl Stage {
                 cost: 10.0,
                 selectivity: 1.0,
             },
-            Stage::Take(_) | Stage::Skip(_) => StageShape {
+            Stage::Take(_, _) | Stage::Skip(_, _) => StageShape {
                 cardinality: Cardinality::Bounded,
                 can_indexed: false,
                 cost: 0.5,
@@ -516,8 +521,10 @@ impl Stage {
 
     pub fn merge_with(&self, other: &Self) -> Option<Self> {
         match (self, other) {
-            (Stage::Take(a), Stage::Take(b)) => Some(Stage::Take((*a).min(*b))),
-            (Stage::Skip(a), Stage::Skip(b)) => Some(Stage::Skip((*a).saturating_add(*b))),
+            (Stage::Take(a, meta), Stage::Take(b, _)) => Some(Stage::Take((*a).min(*b), *meta)),
+            (Stage::Skip(a, meta), Stage::Skip(b, _)) => {
+                Some(Stage::Skip((*a).saturating_add(*b), *meta))
+            }
             (Stage::Sort(_), Stage::Sort(b)) => Some(Stage::Sort(b.clone())),
             (Stage::UniqueBy(_), Stage::UniqueBy(b)) => Some(Stage::UniqueBy(b.clone())),
             (Stage::UniqueBy(None), Stage::Sort(super::SortSpec { key: None, .. }))

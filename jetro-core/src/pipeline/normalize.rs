@@ -74,7 +74,7 @@ pub(super) fn normalize_symbolic(
                     out.push_stage(stage, expr);
                 }
             }
-            Stage::Take(_) | Stage::Skip(_) => {
+            Stage::Take(_, _) | Stage::Skip(_, _) => {
                 out.flush_predicate();
                 out.push_stage(stage, expr);
             }
@@ -238,7 +238,7 @@ fn and_expr(lhs: Expr, rhs: Expr) -> Expr {
 fn suffix_needs_order(stages: &[Stage]) -> bool {
     stages
         .iter()
-        .any(|s| matches!(s, Stage::Take(_) | Stage::Skip(_)))
+        .any(|s| matches!(s, Stage::Take(_, _) | Stage::Skip(_, _)))
 }
 
 fn suffix_consumes_value(stages: &[Stage]) -> bool {

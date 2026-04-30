@@ -35,7 +35,7 @@
 use std::sync::Arc;
 
 use crate::ast::Expr;
-use crate::builtins::{BuiltinMethod, BuiltinNumericReducer, BuiltinViewSink};
+use crate::builtins::{BuiltinMethod, BuiltinNumericReducer, BuiltinViewSink, BuiltinViewStage};
 use crate::context::EvalError;
 use crate::value::Val;
 
@@ -217,9 +217,9 @@ pub enum Stage {
     /// level into the pull stream.
     FlatMap(Arc<crate::vm::Program>),
     /// `.take(n)` — yields at most `n` elements, then completes.
-    Take(usize),
+    Take(usize, BuiltinViewStage),
     /// `.skip(n)` — drops the first `n` elements.
-    Skip(usize),
+    Skip(usize, BuiltinViewStage),
     /// `.reverse()` — barrier; materialises and reverses.
     Reverse,
     /// `.unique()` (None) / `.unique_by(key)` (Some) — barrier;
@@ -646,8 +646,8 @@ mod tests {
     fn lower_take_skip_sum() {
         let p = lower_query("$.xs.skip(2).take(5).sum()").unwrap();
         assert_eq!(p.stages.len(), 2);
-        assert!(matches!(p.stages[0], Stage::Skip(2)));
-        assert!(matches!(p.stages[1], Stage::Take(5)));
+        assert!(matches!(p.stages[0], Stage::Skip(2, _)));
+        assert!(matches!(p.stages[1], Stage::Take(5, _)));
         assert!(matches!(&p.sink, Sink::Numeric(n) if n.op == NumOp::Sum));
     }
 
@@ -895,14 +895,14 @@ mod tests {
     fn rewrite_skip_skip_merges() {
         let p = lower_query("$.xs.skip(2).skip(3).sum()").unwrap();
         assert_eq!(p.stages.len(), 1);
-        assert!(matches!(p.stages[0], Stage::Skip(5)));
+        assert!(matches!(p.stages[0], Stage::Skip(5, _)));
     }
 
     #[test]
     fn rewrite_take_take_merges_min() {
         let p = lower_query("$.xs.take(10).take(3).sum()").unwrap();
         assert_eq!(p.stages.len(), 1);
-        assert!(matches!(p.stages[0], Stage::Take(3)));
+        assert!(matches!(p.stages[0], Stage::Take(3, _)));
     }
 
     #[test]
@@ -999,7 +999,7 @@ mod tests {
     fn demand_optimizer_keeps_membership_work_for_numeric_sink() {
         let p = lower_query("$.orders.take(2).map(total).sum()").unwrap();
         assert_eq!(p.stages.len(), 1);
-        assert!(matches!(p.stages[0], Stage::Take(2)));
+        assert!(matches!(p.stages[0], Stage::Take(2, _)));
         assert!(matches!(&p.sink, Sink::Numeric(n) if n.op == NumOp::Sum && n.project.is_some()));
     }
 

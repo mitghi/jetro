@@ -563,6 +563,8 @@ pub enum BuiltinViewStage {
     Filter,
     Map,
     FlatMap,
+    Take,
+    Skip,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -872,8 +874,13 @@ impl BuiltinMethod {
                     .pipeline_stage(BuiltinPipelineStage::Unary)
                     .cost(10.0)
             }
-            Self::Take | Self::Skip => BuiltinSpec::new(Cat::Positional, Card::Bounded)
+            Self::Take => BuiltinSpec::new(Cat::Positional, Card::Bounded)
                 .view_native()
+                .view_stage(BuiltinViewStage::Take)
+                .pipeline_stage(BuiltinPipelineStage::Unary),
+            Self::Skip => BuiltinSpec::new(Cat::Positional, Card::Bounded)
+                .view_native()
+                .view_stage(BuiltinViewStage::Skip)
                 .pipeline_stage(BuiltinPipelineStage::Unary),
             Self::First => BuiltinSpec::new(Cat::Positional, Card::Bounded)
                 .view_native()
@@ -6026,6 +6033,14 @@ mod spec_tests {
         assert_eq!(
             BuiltinMethod::FlatMap.spec().view_stage,
             Some(BuiltinViewStage::FlatMap)
+        );
+        assert_eq!(
+            BuiltinMethod::Take.spec().view_stage,
+            Some(BuiltinViewStage::Take)
+        );
+        assert_eq!(
+            BuiltinMethod::Skip.spec().view_stage,
+            Some(BuiltinViewStage::Skip)
         );
 
         assert_eq!(BuiltinMethod::Sort.spec().view_stage, None);

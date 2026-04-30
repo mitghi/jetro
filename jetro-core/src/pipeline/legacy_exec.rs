@@ -83,14 +83,14 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
                         })
                     })?;
                 }
-                Stage::Skip(n) => {
+                Stage::Skip(n, _) => {
                     if buf.len() <= *n {
                         buf.clear();
                     } else {
                         buf.drain(..*n);
                     }
                 }
-                Stage::Take(n) => {
+                Stage::Take(n, _) => {
                     buf.truncate(*n);
                 }
                 Stage::Reverse => buf.reverse(),
@@ -453,13 +453,13 @@ where
                 .get(stage_idx)
                 .unwrap_or(&BodyKernel::Generic);
             match stage {
-                Stage::Skip(n) => {
+                Stage::Skip(n, _) => {
                     if stage_skipped[stage_idx] < *n {
                         stage_skipped[stage_idx] += 1;
                         continue 'outer;
                     }
                 }
-                Stage::Take(n) => {
+                Stage::Take(n, _) => {
                     if stage_taken[stage_idx] >= *n {
                         break 'outer;
                     }

@@ -1397,16 +1397,29 @@ mod tests {
 
     #[test]
     fn step3d_phase4_merge_take_skip() {
+        use crate::builtins::BuiltinViewStage;
         use crate::pipeline::{plan, Sink, Stage};
         // Take(5) ∘ Take(3) → Take(3)
-        let p = plan(vec![Stage::Take(5), Stage::Take(3)], Sink::Collect);
+        let p = plan(
+            vec![
+                Stage::Take(5, BuiltinViewStage::Take),
+                Stage::Take(3, BuiltinViewStage::Take),
+            ],
+            Sink::Collect,
+        );
         assert_eq!(p.stages.len(), 1);
-        assert!(matches!(p.stages[0], Stage::Take(3)));
+        assert!(matches!(p.stages[0], Stage::Take(3, _)));
 
         // Skip(2) ∘ Skip(3) → Skip(5)
-        let p = plan(vec![Stage::Skip(2), Stage::Skip(3)], Sink::Collect);
+        let p = plan(
+            vec![
+                Stage::Skip(2, BuiltinViewStage::Skip),
+                Stage::Skip(3, BuiltinViewStage::Skip),
+            ],
+            Sink::Collect,
+        );
         assert_eq!(p.stages.len(), 1);
-        assert!(matches!(p.stages[0], Stage::Skip(5)));
+        assert!(matches!(p.stages[0], Stage::Skip(5, _)));
 
         // Reverse ∘ Reverse → identity (drops both)
         let p = plan(vec![Stage::Reverse, Stage::Reverse], Sink::Collect);
@@ -1465,7 +1478,7 @@ mod tests {
         // [Sort, Take(5)] + Collect → SortTopK(5) at index 0
         let stages = vec![
             Stage::Sort(SortSpec::keyed(Arc::clone(&dummy_prog), false)),
-            Stage::Take(5),
+            Stage::Take(5, crate::builtins::BuiltinViewStage::Take),
         ];
         let strats = compute_strategies(&stages, &Sink::Collect);
         assert!(matches!(strats[0], StageStrategy::SortTopK(5)));

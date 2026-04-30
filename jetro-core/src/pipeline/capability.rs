@@ -144,7 +144,7 @@ mod tests {
     use std::sync::Arc;
 
     use crate::ast::BinOp;
-    use crate::builtins::BuiltinViewSink;
+    use crate::builtins::{BuiltinViewSink, BuiltinViewStage};
     use crate::pipeline::{
         BodyKernel, NumOp, NumericSink, PipelineBody, Sink, Stage, ViewInputMode,
         ViewMaterialization, ViewOutputMode, ViewSinkCapability, ViewStageCapability,
@@ -188,11 +188,19 @@ mod tests {
         let flat_map = Stage::FlatMap(Arc::new(crate::vm::Program::new(Vec::new(), "")))
             .view_capability(6, Some(&BodyKernel::FieldRead(Arc::<str>::from("items"))))
             .unwrap();
+        let take = Stage::Take(2, BuiltinViewStage::Take)
+            .view_capability(7, None)
+            .unwrap();
+        let skip = Stage::Skip(1, BuiltinViewStage::Skip)
+            .view_capability(8, None)
+            .unwrap();
 
         assert!(matches!(filter, ViewStageCapability::Filter { kernel: 4 }));
         assert_eq!(map.output_mode(), ViewOutputMode::BorrowedSubview);
         assert_eq!(flat_map.output_mode(), ViewOutputMode::BorrowedSubviews);
-        assert!(Stage::Reverse.view_capability(7, None).is_none());
+        assert!(matches!(take, ViewStageCapability::Take(2)));
+        assert!(matches!(skip, ViewStageCapability::Skip(1)));
+        assert!(Stage::Reverse.view_capability(9, None).is_none());
     }
 
     #[test]
@@ -241,7 +249,7 @@ mod tests {
             stages: vec![
                 Stage::Filter(Arc::new(crate::vm::Program::new(Vec::new(), ""))),
                 Stage::Map(Arc::new(crate::vm::Program::new(Vec::new(), ""))),
-                Stage::Take(2),
+                Stage::Take(2, crate::builtins::BuiltinViewStage::Take),
             ],
             stage_exprs: Vec::new(),
             sink: Sink::Numeric(NumericSink::projected(
