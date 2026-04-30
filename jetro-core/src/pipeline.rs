@@ -590,10 +590,18 @@ mod tests {
         let source = row_source::TapeRowSource::from_field_chain(&tape, &keys);
         assert!(source.is_array_provider());
 
-        let mut iter = source.iter();
+        use crate::value_view::ValueView;
+
+        let mut iter = source.iter_views();
         assert!(matches!(iter, row_source::TapeRowsIter::Array { .. }));
-        assert_eq!(iter.next().unwrap().get_field("id"), Val::Int(1));
-        assert_eq!(iter.next().unwrap().get_field("id"), Val::Int(2));
+        assert_eq!(
+            iter.next().unwrap().materialize().get_field("id"),
+            Val::Int(1)
+        );
+        assert_eq!(
+            iter.next().unwrap().materialize().get_field("id"),
+            Val::Int(2)
+        );
         assert!(iter.next().is_none());
     }
 

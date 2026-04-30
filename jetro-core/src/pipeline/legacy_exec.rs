@@ -406,7 +406,11 @@ pub(super) fn run_tape_field_chain(
     }
     let pipeline = body.clone().with_source(Source::Receiver(Val::Null));
     let env = Env::new(Val::Null);
-    Some(run_streaming_rows(&pipeline, &env, source.iter()))
+    Some(run_streaming_rows(
+        &pipeline,
+        &env,
+        source.iter_materialized(),
+    ))
 }
 
 fn run_streaming_rows<I>(pipeline: &Pipeline, base_env: &Env, iter: I) -> Result<Val, EvalError>

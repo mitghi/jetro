@@ -53,6 +53,10 @@ pub(super) enum TapeRowsIter<'a> {
     Empty,
 }
 
+#[cfg(feature = "simd-json")]
+#[allow(dead_code)]
+pub(super) struct TapeMaterializedRowsIter<'a>(TapeRowsIter<'a>);
+
 impl Iterator for ValRowsIter<'_> {
     type Item = Val;
 
@@ -73,11 +77,11 @@ impl Iterator for ValRowsIter<'_> {
 }
 
 #[cfg(feature = "simd-json")]
-impl Iterator for TapeRowsIter<'_> {
-    type Item = Val;
+impl<'a> Iterator for TapeRowsIter<'a> {
+    type Item = crate::value_view::TapeView<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        use crate::value_view::{TapeView, ValueView};
+        use crate::value_view::TapeView;
 
         match self {
             Self::Array {
@@ -91,11 +95,22 @@ impl Iterator for TapeRowsIter<'_> {
                 let idx = *cur;
                 *remaining -= 1;
                 *cur += tape.span(idx);
-                Some(TapeView::Node { tape, idx }.materialize())
+                Some(TapeView::Node { tape, idx })
             }
-            Self::Single(iter) => iter.next().map(|view| view.materialize()),
+            Self::Single(iter) => iter.next(),
             Self::Empty => None,
         }
+    }
+}
+
+#[cfg(feature = "simd-json")]
+impl Iterator for TapeMaterializedRowsIter<'_> {
+    type Item = Val;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        use crate::value_view::ValueView;
+
+        self.0.next().map(|view| view.materialize())
     }
 }
 
@@ -194,7 +209,7 @@ impl<'a> TapeRowSource<'a> {
         }
     }
 
-    pub(super) fn iter(self) -> TapeRowsIter<'a> {
+    pub(super) fn iter_views(self) -> TapeRowsIter<'a> {
         match self {
             Self::Array { tape, first, len } => TapeRowsIter::Array {
                 tape,
@@ -206,8 +221,12 @@ impl<'a> TapeRowSource<'a> {
         }
     }
 
+    pub(super) fn iter_materialized(self) -> TapeMaterializedRowsIter<'a> {
+        TapeMaterializedRowsIter(self.iter_views())
+    }
+
     pub(super) fn materialize(self) -> Vec<Val> {
-        self.iter().collect()
+        self.iter_materialized().collect()
     }
 
     pub(super) fn is_array_provider(&self) -> bool {
