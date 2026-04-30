@@ -55,6 +55,7 @@ pub(super) fn run(
                 stage,
                 kernel,
                 &eff_sink,
+                &pipeline.sink_kernels,
                 stages_ref,
                 kernels,
                 i,
@@ -89,7 +90,9 @@ pub(super) fn run(
     let final_demand = Pipeline::segment_source_demand(&stages_ref[last_split..], &eff_sink)
         .chain
         .pull;
-    let out = composed_sink::run(&eff_sink, buf.as_slice(), chain.as_ref(), final_demand)?;
+    let (sink, chain) =
+        append_reducer_sink_stages(&eff_sink, &pipeline.sink_kernels, &stage_builder, chain)?;
+    let out = composed_sink::run(&sink, buf.as_slice(), chain.as_ref(), final_demand)?;
 
     Some(Ok(out))
 }
@@ -98,6 +101,7 @@ fn run_lazy_ordered_suffix(
     stage: &Stage,
     kernel: &BodyKernel,
     sink: &super::Sink,
+    sink_kernels: &[BodyKernel],
     stages: &[Stage],
     kernels: &[BodyKernel],
     sort_idx: usize,
@@ -132,5 +136,40 @@ fn run_lazy_ordered_suffix(
     let final_demand = Pipeline::segment_source_demand(&stages[sort_idx + 1..], sink)
         .chain
         .pull;
-    composed_sink::run_owned_iter(sink, ordered, chain.as_ref(), final_demand).map(Ok)
+    let (sink, chain) = append_reducer_sink_stages(sink, sink_kernels, stage_builder, chain)?;
+    composed_sink::run_owned_iter(&sink, ordered, chain.as_ref(), final_demand).map(Ok)
+}
+
+fn append_reducer_sink_stages(
+    sink: &super::Sink,
+    sink_kernels: &[BodyKernel],
+    stage_builder: &ComposedStageBuilder<'_>,
+    mut chain: Box<dyn crate::composed::Stage>,
+) -> Option<(super::Sink, Box<dyn crate::composed::Stage>)> {
+    let super::Sink::Reducer(spec) = sink else {
+        return Some((sink.clone(), chain));
+    };
+
+    let mut sink = sink.clone();
+    let super::Sink::Reducer(out_spec) = &mut sink else {
+        unreachable!("cloned reducer sink changed variant");
+    };
+
+    if let Some(predicate) = &spec.predicate {
+        let idx = spec.predicate_kernel_index()?;
+        let kernel = sink_kernels.get(idx).unwrap_or(&BodyKernel::Generic);
+        let stage = stage_builder.build_filter_program(predicate, kernel);
+        chain = Box::new(crate::composed::Composed { a: chain, b: stage });
+        out_spec.predicate = None;
+    }
+
+    if let Some(projection) = &spec.projection {
+        let idx = spec.projection_kernel_index()?;
+        let kernel = sink_kernels.get(idx).unwrap_or(&BodyKernel::Generic);
+        let stage = stage_builder.build_map_program(projection, kernel);
+        chain = Box::new(crate::composed::Composed { a: chain, b: stage });
+        out_spec.projection = None;
+    }
+
+    Some((sink, chain))
 }

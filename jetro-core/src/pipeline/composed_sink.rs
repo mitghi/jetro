@@ -12,9 +12,6 @@ pub(super) fn run(
 ) -> Option<Val> {
     let out = match sink {
         Sink::Collect => cmp::run_pipeline_with_demand::<cmp::CollectSink>(rows, chain, demand),
-        Sink::Reducer(spec) if spec.predicate.is_some() || spec.projection.is_some() => {
-            return None;
-        }
         Sink::Reducer(spec) => match spec.op {
             ReducerOp::Count => {
                 cmp::run_pipeline_with_demand::<cmp::CountSink>(rows, chain, demand)
@@ -52,9 +49,6 @@ where
     let out = match sink {
         Sink::Collect => {
             cmp::run_pipeline_owned_iter_with_demand::<cmp::CollectSink, _>(rows, chain, demand)
-        }
-        Sink::Reducer(spec) if spec.predicate.is_some() || spec.projection.is_some() => {
-            return None;
         }
         Sink::Reducer(spec) => match spec.op {
             ReducerOp::Count => {

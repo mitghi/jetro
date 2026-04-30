@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use crate::composed as cmp;
 use crate::context::Env;
+use crate::vm::Program;
 
 use super::{BodyKernel, Stage};
 
@@ -67,6 +68,44 @@ impl<'a> ComposedStageBuilder<'a> {
             }),
             _ => return None,
         })
+    }
+
+    pub(super) fn build_filter_program(
+        &self,
+        prog: &Arc<Program>,
+        kernel: &BodyKernel,
+    ) -> Box<dyn cmp::Stage> {
+        match kernel {
+            BodyKernel::FieldCmpLit(field, op, lit) if matches!(op, crate::ast::BinOp::Eq) => {
+                Box::new(cmp::FilterFieldEqLit {
+                    field: Arc::clone(field),
+                    target: lit.clone(),
+                })
+            }
+            _ => Box::new(cmp::GenericFilter {
+                prog: Arc::clone(prog),
+                ctx: self.vm_ctx(),
+            }),
+        }
+    }
+
+    pub(super) fn build_map_program(
+        &self,
+        prog: &Arc<Program>,
+        kernel: &BodyKernel,
+    ) -> Box<dyn cmp::Stage> {
+        match kernel {
+            BodyKernel::FieldRead(field) => Box::new(cmp::MapField {
+                field: Arc::clone(field),
+            }),
+            BodyKernel::FieldChain(keys) => Box::new(cmp::MapFieldChain {
+                keys: Arc::clone(keys),
+            }),
+            _ => Box::new(cmp::GenericMap {
+                prog: Arc::clone(prog),
+                ctx: self.vm_ctx(),
+            }),
+        }
     }
 
     fn vm_ctx(&self) -> Rc<RefCell<cmp::VmCtx>> {
