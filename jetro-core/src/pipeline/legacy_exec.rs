@@ -17,7 +17,7 @@ use super::{
 use crate::builtins::{
     chunk_apply, count_by_apply, drop_while_apply, filter_apply, filter_one, group_by_apply,
     index_by_apply, map_apply, map_one, replace_apply, slice_apply, split_apply, take_while_apply,
-    take_while_one, window_apply,
+    take_while_one, window_apply, BuiltinPipelineExecutor,
 };
 use crate::chain_ir::PullDemand;
 
@@ -72,6 +72,12 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
                 .stage_kernels
                 .get(stage_idx)
                 .unwrap_or(&BodyKernel::Generic);
+            if let Some(applied) =
+                apply_adapter_materialized(stage, &mut buf, &mut vm, &mut loop_env, kernel)
+            {
+                applied?;
+                continue;
+            }
             match stage {
                 Stage::Filter(prog, _) => {
                     buf = filter_apply(buf, |v| {
@@ -169,37 +175,6 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
                     })?;
                     buf = vec![Val::Obj(Arc::new(out_obj))];
                 }
-                Stage::Split(sep) => {
-                    // Step 3d-extension (C): Expanding string Stage.
-                    let mut out: Vec<Val> = Vec::with_capacity(buf.len());
-                    for v in buf.into_iter() {
-                        if let Some(Val::Arr(a)) = split_apply(&v, sep.as_ref()) {
-                            out.extend(Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone()));
-                        }
-                    }
-                    buf = out;
-                }
-                Stage::Slice(start, end) => {
-                    let mut out: Vec<Val> = Vec::with_capacity(buf.len());
-                    for v in buf.into_iter() {
-                        out.push(slice_apply(v, *start, *end));
-                    }
-                    buf = out;
-                }
-                Stage::Replace {
-                    needle,
-                    replacement,
-                    all,
-                } => {
-                    let mut out: Vec<Val> = Vec::with_capacity(buf.len());
-                    for v in buf.into_iter() {
-                        match replace_apply(v.clone(), needle, replacement, *all) {
-                            Some(r) => out.push(r),
-                            None => out.push(v),
-                        }
-                    }
-                    buf = out;
-                }
                 Stage::Chunk(n) => {
                     buf = chunk_apply(&buf, *n);
                 }
@@ -212,12 +187,6 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
                         out.push(run_compiled_map(plan, v)?);
                     }
                     buf = out;
-                }
-                Stage::Builtin(call) => {
-                    buf = buf
-                        .into_iter()
-                        .map(|v| call.apply(&v).unwrap_or(v))
-                        .collect();
                 }
                 // Lambda-bearing barrier-mode stages.
                 Stage::TakeWhile(prog) => {
@@ -326,19 +295,15 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
                     })?;
                     buf = vec![Val::obj(map)];
                 }
-                // Per-Obj lambda-bearing (works on each row that
-                // happens to be an Obj).  Uses VM eval per (k, v).
-                Stage::TransformValues(prog)
-                | Stage::TransformKeys(prog)
-                | Stage::FilterValues(prog)
-                | Stage::FilterKeys(prog) => {
-                    let mut out: Vec<Val> = Vec::with_capacity(buf.len());
-                    for v in buf.into_iter() {
-                        let mapped =
-                            apply_lambda_obj(stage, &v, &mut vm, &mut loop_env, kernel, prog)?;
-                        out.push(mapped);
-                    }
-                    buf = out;
+                Stage::Split(_)
+                | Stage::Slice(_, _)
+                | Stage::Replace { .. }
+                | Stage::Builtin(_)
+                | Stage::TransformValues(_)
+                | Stage::TransformKeys(_)
+                | Stage::FilterValues(_)
+                | Stage::FilterKeys(_) => {
+                    unreachable!("adapter-backed stage was not handled by adapter")
                 }
             }
         }
@@ -490,23 +455,8 @@ where
                         })
                     })?;
                 }
-                Stage::Slice(start, end) => {
-                    item = slice_apply(item, *start, *end);
-                }
-                Stage::Replace {
-                    needle,
-                    replacement,
-                    all,
-                } => {
-                    if let Some(r) = replace_apply(item.clone(), needle, replacement, *all) {
-                        item = r;
-                    }
-                }
                 Stage::CompiledMap(plan) => {
                     item = run_compiled_map(plan, item)?;
-                }
-                Stage::Builtin(call) => {
-                    item = call.apply(&item).unwrap_or(item);
                 }
                 Stage::TakeWhile(prog) => {
                     if !take_while_one(&item, |v| {
@@ -517,18 +467,18 @@ where
                         break 'outer;
                     }
                 }
-                Stage::TransformValues(prog)
-                | Stage::TransformKeys(prog)
-                | Stage::FilterValues(prog)
-                | Stage::FilterKeys(prog) => {
-                    item = apply_lambda_obj(stage, &item, &mut vm, &mut loop_env, kernel, prog)?;
+                _ if stage
+                    .builtin_method_metadata()
+                    .and_then(|method| method.spec().pipeline_executor)
+                    .is_some() =>
+                {
+                    item = apply_adapter_streaming(stage, item, &mut vm, &mut loop_env, kernel)?;
                 }
                 Stage::Reverse(_)
                 | Stage::Sort(_)
                 | Stage::UniqueBy(_)
                 | Stage::FlatMap(_, _)
                 | Stage::GroupBy(_)
-                | Stage::Split(_)
                 | Stage::Chunk(_)
                 | Stage::Window(_)
                 | Stage::DropWhile(_)
@@ -539,6 +489,16 @@ where
                 | Stage::CountBy(_)
                 | Stage::IndexBy(_)
                 | Stage::SortedDedup(_) => {}
+                Stage::Split(_)
+                | Stage::Slice(_, _)
+                | Stage::Replace { .. }
+                | Stage::Builtin(_)
+                | Stage::TransformValues(_)
+                | Stage::TransformKeys(_)
+                | Stage::FilterValues(_)
+                | Stage::FilterKeys(_) => {
+                    unreachable!("adapter-backed stage was not handled by adapter")
+                }
             }
         }
 
@@ -568,6 +528,106 @@ where
 
 enum LegacyPreIter {
     Owned(std::vec::IntoIter<Val>),
+}
+
+fn stage_executor(stage: &Stage) -> Option<BuiltinPipelineExecutor> {
+    stage
+        .builtin_method_metadata()
+        .and_then(|method| method.spec().pipeline_executor)
+        .or_else(|| {
+            matches!(stage, Stage::Builtin(_)).then_some(BuiltinPipelineExecutor::ElementBuiltin)
+        })
+}
+
+fn apply_adapter_materialized(
+    stage: &Stage,
+    buf: &mut Vec<Val>,
+    vm: &mut crate::vm::VM,
+    loop_env: &mut Env,
+    kernel: &BodyKernel,
+) -> Option<Result<(), EvalError>> {
+    match stage_executor(stage)? {
+        BuiltinPipelineExecutor::ElementBuiltin => {
+            let mut out: Vec<Val> = Vec::with_capacity(buf.len());
+            for v in std::mem::take(buf) {
+                out.push(apply_element_adapter(stage, v));
+            }
+            *buf = out;
+            Some(Ok(()))
+        }
+        BuiltinPipelineExecutor::ExpandingBuiltin => {
+            let mut out: Vec<Val> = Vec::with_capacity(buf.len());
+            for v in std::mem::take(buf) {
+                apply_expanding_adapter(stage, &v, &mut out);
+            }
+            *buf = out;
+            Some(Ok(()))
+        }
+        BuiltinPipelineExecutor::ObjectLambda => {
+            let prog = object_lambda_program(stage)?;
+            let mut out: Vec<Val> = Vec::with_capacity(buf.len());
+            for v in std::mem::take(buf) {
+                match apply_lambda_obj(stage, &v, vm, loop_env, kernel, prog) {
+                    Ok(mapped) => out.push(mapped),
+                    Err(err) => {
+                        *buf = out;
+                        return Some(Err(err));
+                    }
+                }
+            }
+            *buf = out;
+            Some(Ok(()))
+        }
+    }
+}
+
+fn apply_adapter_streaming(
+    stage: &Stage,
+    item: Val,
+    vm: &mut crate::vm::VM,
+    loop_env: &mut Env,
+    kernel: &BodyKernel,
+) -> Result<Val, EvalError> {
+    match stage_executor(stage) {
+        Some(BuiltinPipelineExecutor::ElementBuiltin) => Ok(apply_element_adapter(stage, item)),
+        Some(BuiltinPipelineExecutor::ObjectLambda) => {
+            let prog = object_lambda_program(stage)
+                .expect("object lambda executor must be attached to object lambda stage");
+            apply_lambda_obj(stage, &item, vm, loop_env, kernel, prog)
+        }
+        Some(BuiltinPipelineExecutor::ExpandingBuiltin) | None => Ok(item),
+    }
+}
+
+fn apply_element_adapter(stage: &Stage, v: Val) -> Val {
+    match stage {
+        Stage::Slice(start, end) => slice_apply(v, *start, *end),
+        Stage::Replace {
+            needle,
+            replacement,
+            all,
+        } => replace_apply(v.clone(), needle, replacement, *all).unwrap_or(v),
+        Stage::Builtin(call) => call.apply(&v).unwrap_or(v),
+        _ => v,
+    }
+}
+
+fn apply_expanding_adapter(stage: &Stage, v: &Val, out: &mut Vec<Val>) {
+    if let Stage::Split(sep) = stage {
+        if let Some(Val::Arr(a)) = split_apply(v, sep.as_ref()) {
+            out.extend(Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone()));
+        }
+    }
+}
+
+fn object_lambda_program(stage: &Stage) -> Option<&Arc<crate::vm::Program>> {
+    match stage {
+        Stage::TransformValues(prog)
+        | Stage::TransformKeys(prog)
+        | Stage::FilterValues(prog)
+        | Stage::FilterKeys(prog) => Some(prog),
+        _ => None,
+    }
 }
 
 impl Iterator for LegacyPreIter {

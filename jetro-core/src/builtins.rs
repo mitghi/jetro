@@ -562,6 +562,7 @@ pub struct BuiltinSpec {
     pub pipeline_demand: Option<BuiltinPipelineDemand>,
     pub pipeline_order_effect: Option<BuiltinPipelineOrderEffect>,
     pub columnar_stage: Option<BuiltinColumnarStage>,
+    pub pipeline_executor: Option<BuiltinPipelineExecutor>,
     pub pipeline_element: bool,
     pub cost: f64,
 }
@@ -763,6 +764,13 @@ pub enum BuiltinColumnarStage {
     GroupBy,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinPipelineExecutor {
+    ElementBuiltin,
+    ExpandingBuiltin,
+    ObjectLambda,
+}
+
 impl BuiltinPipelineShape {
     #[inline]
     pub fn new(
@@ -911,6 +919,7 @@ impl BuiltinSpec {
             pipeline_demand: None,
             pipeline_order_effect: None,
             columnar_stage: None,
+            pipeline_executor: None,
             pipeline_element: false,
             cost: 1.0,
         }
@@ -974,6 +983,11 @@ impl BuiltinSpec {
 
     fn columnar_stage(mut self, stage: BuiltinColumnarStage) -> Self {
         self.columnar_stage = Some(stage);
+        self
+    }
+
+    fn pipeline_executor(mut self, executor: BuiltinPipelineExecutor) -> Self {
+        self.pipeline_executor = Some(executor);
         self
     }
 
@@ -1178,6 +1192,7 @@ impl BuiltinMethod {
                 .pipeline_materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
                 .pipeline_shape(BuiltinPipelineShape::new(Card::Expanding, true, 2.0, 1.0))
                 .pipeline_demand(BuiltinPipelineDemand::FlatMap)
+                .pipeline_executor(BuiltinPipelineExecutor::ExpandingBuiltin)
                 .cost(10.0),
             Self::Lines | Self::Words | Self::Chars | Self::CharsOf | Self::Bytes => {
                 BuiltinSpec::new(Cat::StreamingExpand, Card::Expanding)
@@ -1440,6 +1455,7 @@ impl BuiltinMethod {
                     }))
                     .pipeline_shape(BuiltinPipelineShape::new(Card::OneToOne, true, 1.0, 1.0))
                     .pipeline_order_effect(BuiltinPipelineOrderEffect::Preserves)
+                    .pipeline_executor(BuiltinPipelineExecutor::ObjectLambda)
             }
             Self::GetPath | Self::DelPath | Self::HasPath => {
                 BuiltinSpec::new(Cat::Path, Card::OneToOne)
@@ -1484,7 +1500,8 @@ impl BuiltinMethod {
                 .pipeline_lowering(BuiltinPipelineLowering::Slice)
                 .pipeline_shape(BuiltinPipelineShape::new(Card::OneToOne, true, 1.0, 1.0))
                 .pipeline_demand(BuiltinPipelineDemand::Map)
-                .pipeline_order_effect(BuiltinPipelineOrderEffect::Preserves),
+                .pipeline_order_effect(BuiltinPipelineOrderEffect::Preserves)
+                .pipeline_executor(BuiltinPipelineExecutor::ElementBuiltin),
             Self::Replace | Self::ReplaceAll => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
                 .indexed()
                 .view_native()
@@ -1495,7 +1512,8 @@ impl BuiltinMethod {
                 ))
                 .pipeline_shape(BuiltinPipelineShape::new(Card::OneToOne, true, 2.0, 1.0))
                 .pipeline_demand(BuiltinPipelineDemand::Map)
-                .pipeline_order_effect(BuiltinPipelineOrderEffect::Preserves),
+                .pipeline_order_effect(BuiltinPipelineOrderEffect::Preserves)
+                .pipeline_executor(BuiltinPipelineExecutor::ElementBuiltin),
             _ => {
                 let spec = BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
                     .indexed()
@@ -6458,11 +6476,11 @@ pub fn schema_apply(recv: &Val) -> Option<Val> {
 mod spec_tests {
     use super::{
         BuiltinCardinality, BuiltinCategory, BuiltinColumnarStage, BuiltinExprStage, BuiltinMethod,
-        BuiltinNullaryStage, BuiltinNumericReducer, BuiltinPipelineDemand, BuiltinPipelineLowering,
-        BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect, BuiltinPipelineSink,
-        BuiltinPipelineStage, BuiltinStageMerge, BuiltinStringPairStage, BuiltinStringStage,
-        BuiltinUsizeStage, BuiltinViewInputMode, BuiltinViewMaterialization, BuiltinViewOutputMode,
-        BuiltinViewSink, BuiltinViewStage,
+        BuiltinNullaryStage, BuiltinNumericReducer, BuiltinPipelineDemand, BuiltinPipelineExecutor,
+        BuiltinPipelineLowering, BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect,
+        BuiltinPipelineSink, BuiltinPipelineStage, BuiltinStageMerge, BuiltinStringPairStage,
+        BuiltinStringStage, BuiltinUsizeStage, BuiltinViewInputMode, BuiltinViewMaterialization,
+        BuiltinViewOutputMode, BuiltinViewSink, BuiltinViewStage,
     };
 
     #[test]
@@ -6745,6 +6763,26 @@ mod spec_tests {
             Some(BuiltinColumnarStage::GroupBy)
         );
         assert_eq!(BuiltinMethod::Sort.spec().columnar_stage, None);
+    }
+
+    #[test]
+    fn builtin_specs_drive_pipeline_executor_metadata() {
+        assert_eq!(
+            BuiltinMethod::Slice.spec().pipeline_executor,
+            Some(BuiltinPipelineExecutor::ElementBuiltin)
+        );
+        assert_eq!(
+            BuiltinMethod::Replace.spec().pipeline_executor,
+            Some(BuiltinPipelineExecutor::ElementBuiltin)
+        );
+        assert_eq!(
+            BuiltinMethod::Split.spec().pipeline_executor,
+            Some(BuiltinPipelineExecutor::ExpandingBuiltin)
+        );
+        assert_eq!(
+            BuiltinMethod::TransformValues.spec().pipeline_executor,
+            Some(BuiltinPipelineExecutor::ObjectLambda)
+        );
     }
 
     #[test]
