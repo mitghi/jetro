@@ -3,10 +3,11 @@ use std::sync::Arc;
 use crate::ast::Expr;
 use crate::builtins::{BuiltinMethod, BuiltinViewSink, BuiltinViewStage};
 use crate::chain_ir::{ChainOp, Demand as ChainDemand, PullDemand, ValueNeed};
+use crate::vm::{CompiledObjEntry, Opcode, Program};
 
 use super::{
-    normalize::normalize_symbolic, BodyKernel, Pipeline, Sink, Stage, ViewSinkCapability,
-    ViewStageCapability,
+    normalize::normalize_symbolic, BodyKernel, Pipeline, PipelineBody, Sink, Stage,
+    ViewSinkCapability, ViewStageCapability,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,6 +150,123 @@ impl Pipeline {
 
     pub fn source_demand(&self) -> SinkDemand {
         Self::segment_source_demand(&self.stages, &self.sink)
+    }
+}
+
+impl PipelineBody {
+    pub(crate) fn can_run_with_materialized_receiver(&self) -> bool {
+        stages_can_run_with_materialized_receiver(&self.stages)
+            && self
+                .sink
+                .can_run_with_receiver_only(program_is_current_only)
+    }
+
+    pub(crate) fn suffix_can_run_with_materialized_receiver(&self, consumed_stages: usize) -> bool {
+        consumed_stages <= self.stages.len()
+            && stages_can_run_with_materialized_receiver(&self.stages[consumed_stages..])
+            && self
+                .sink
+                .can_run_with_receiver_only(program_is_current_only)
+    }
+}
+
+fn stages_can_run_with_materialized_receiver(stages: &[Stage]) -> bool {
+    stages
+        .iter()
+        .all(|stage| stage.can_run_with_receiver_only(program_is_current_only))
+}
+
+fn program_is_current_only(program: &Program) -> bool {
+    program.ops.iter().all(opcode_is_current_only)
+}
+
+fn opcode_is_current_only(opcode: &Opcode) -> bool {
+    match opcode {
+        Opcode::PushRoot | Opcode::RootChain(_) | Opcode::GetPointer(_) => false,
+        Opcode::BindVar(_)
+        | Opcode::StoreVar(_)
+        | Opcode::BindObjDestructure(_)
+        | Opcode::BindArrDestructure(_)
+        | Opcode::PipelineRun { .. }
+        | Opcode::LetExpr { .. }
+        | Opcode::ListComp(_)
+        | Opcode::DictComp(_)
+        | Opcode::SetComp(_)
+        | Opcode::PatchEval(_) => false,
+        Opcode::DynIndex(prog)
+        | Opcode::InlineFilter(prog)
+        | Opcode::AndOp(prog)
+        | Opcode::OrOp(prog)
+        | Opcode::CoalesceOp(prog) => program_is_current_only(prog),
+        Opcode::CallMethod(call) | Opcode::CallOptMethod(call) => call
+            .sub_progs
+            .iter()
+            .all(|prog| program_is_current_only(prog)),
+        Opcode::IfElse { then_, else_ } => {
+            program_is_current_only(then_) && program_is_current_only(else_)
+        }
+        Opcode::TryExpr { body, default } => {
+            program_is_current_only(body) && program_is_current_only(default)
+        }
+        Opcode::MakeArr(items) => items
+            .iter()
+            .all(|(prog, _spread)| program_is_current_only(prog)),
+        Opcode::FString(parts) => parts.iter().all(|part| match part {
+            crate::vm::CompiledFSPart::Lit(_) => true,
+            crate::vm::CompiledFSPart::Interp { prog, .. } => program_is_current_only(prog),
+        }),
+        Opcode::MakeObj(entries) => entries.iter().all(obj_entry_is_current_only),
+        Opcode::PushNull
+        | Opcode::PushBool(_)
+        | Opcode::PushInt(_)
+        | Opcode::PushFloat(_)
+        | Opcode::PushStr(_)
+        | Opcode::PushCurrent
+        | Opcode::LoadIdent(_)
+        | Opcode::GetField(_)
+        | Opcode::GetIndex(_)
+        | Opcode::GetSlice(_, _)
+        | Opcode::OptField(_)
+        | Opcode::Descendant(_)
+        | Opcode::DescendAll
+        | Opcode::Quantifier(_)
+        | Opcode::FieldChain(_)
+        | Opcode::Add
+        | Opcode::Sub
+        | Opcode::Mul
+        | Opcode::Div
+        | Opcode::Mod
+        | Opcode::Eq
+        | Opcode::Neq
+        | Opcode::Lt
+        | Opcode::Lte
+        | Opcode::Gt
+        | Opcode::Gte
+        | Opcode::Fuzzy
+        | Opcode::Not
+        | Opcode::Neg
+        | Opcode::CastOp(_)
+        | Opcode::KindCheck { .. }
+        | Opcode::SetCurrent
+        | Opcode::DeleteMarkErr => true,
+    }
+}
+
+fn obj_entry_is_current_only(entry: &CompiledObjEntry) -> bool {
+    match entry {
+        CompiledObjEntry::Short { .. } | CompiledObjEntry::KvPath { .. } => true,
+        CompiledObjEntry::Kv { prog, cond, .. } => {
+            program_is_current_only(prog)
+                && cond
+                    .as_ref()
+                    .is_none_or(|cond| program_is_current_only(cond))
+        }
+        CompiledObjEntry::Dynamic { key, val } => {
+            program_is_current_only(key) && program_is_current_only(val)
+        }
+        CompiledObjEntry::Spread(prog) | CompiledObjEntry::SpreadDeep(prog) => {
+            program_is_current_only(prog)
+        }
     }
 }
 
