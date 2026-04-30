@@ -238,6 +238,18 @@ impl ObjVecData {
         let off = row * s;
         &self.cells[off..off + s]
     }
+
+    /// Reconstruct row `i` as a regular object. This is the single
+    /// compatibility materialization point for generic row consumers.
+    #[inline]
+    pub fn row_val(&self, row: usize) -> Val {
+        let stride = self.stride();
+        let mut m: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(stride);
+        for (i, k) in self.keys.iter().enumerate() {
+            m.insert(Arc::clone(k), self.cell(row, i).clone());
+        }
+        Val::Obj(Arc::new(m))
+    }
 }
 
 impl Val {
@@ -432,19 +444,40 @@ impl Val {
             Val::IntVec(a) => Some(Cow::Owned(a.iter().map(|n| Val::Int(*n)).collect())),
             Val::FloatVec(a) => Some(Cow::Owned(a.iter().map(|f| Val::Float(*f)).collect())),
             Val::StrVec(a) => Some(Cow::Owned(a.iter().map(|s| Val::Str(s.clone())).collect())),
+            Val::StrSliceVec(a) => Some(Cow::Owned(
+                a.iter().map(|s| Val::StrSlice(s.clone())).collect(),
+            )),
             Val::ObjVec(d) => {
                 let n = d.nrows();
                 let mut out: Vec<Val> = Vec::with_capacity(n);
                 for row in 0..n {
-                    let mut m: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(d.keys.len());
-                    for (i, k) in d.keys.iter().enumerate() {
-                        m.insert(Arc::clone(k), d.cell(row, i).clone());
-                    }
-                    out.push(Val::Obj(Arc::new(m)));
+                    out.push(d.row_val(row));
                 }
                 Some(Cow::Owned(out))
             }
             _ => None,
+        }
+    }
+
+    /// Move or materialize any array-like value into a `Vec<Val>`.
+    /// `Arr` preserves its allocation when uniquely owned; typed lanes
+    /// and ObjVec materialize only at this compatibility boundary.
+    pub fn into_vals(self) -> Result<Vec<Val>, Val> {
+        match self {
+            Val::Arr(a) => Ok(Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone())),
+            Val::IntVec(a) => Ok(a.iter().map(|n| Val::Int(*n)).collect()),
+            Val::FloatVec(a) => Ok(a.iter().map(|f| Val::Float(*f)).collect()),
+            Val::StrVec(a) => Ok(a.iter().map(|s| Val::Str(Arc::clone(s))).collect()),
+            Val::StrSliceVec(a) => Ok(a.iter().map(|s| Val::StrSlice(s.clone())).collect()),
+            Val::ObjVec(d) => {
+                let n = d.nrows();
+                let mut out = Vec::with_capacity(n);
+                for row in 0..n {
+                    out.push(d.row_val(row));
+                }
+                Ok(out)
+            }
+            other => Err(other),
         }
     }
 

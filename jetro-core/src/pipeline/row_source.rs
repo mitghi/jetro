@@ -168,10 +168,5 @@ pub(super) fn resolved_array_like_rows(recv: Val) -> Option<Rows<'static>> {
 }
 
 fn objvec_row(data: &ObjVecData, row: usize) -> Val {
-    let stride = data.stride();
-    let mut m: indexmap::IndexMap<Arc<str>, Val> = indexmap::IndexMap::with_capacity(stride);
-    for (i, k) in data.keys.iter().enumerate() {
-        m.insert(Arc::clone(k), data.cells[row * stride + i].clone());
-    }
-    Val::Obj(Arc::new(m))
+    data.row_val(row)
 }

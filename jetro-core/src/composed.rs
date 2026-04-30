@@ -536,63 +536,9 @@ impl Stage for GenericFlatMap {
         // `owned` lives in this scope; any borrow against it must be
         // promoted to owned before returning. Materialise in a way
         // that doesn't outlive `owned`.
-        let result: StageOutput<'a> = match &owned {
-            Val::Arr(items) => {
-                let mut out: SmallVec<[Cow<'a, Val>; 4]> = SmallVec::with_capacity(items.len());
-                for it in items.iter() {
-                    out.push(Cow::Owned(it.clone()));
-                }
-                if out.is_empty() {
-                    StageOutput::Filtered
-                } else {
-                    StageOutput::Many(out)
-                }
-            }
-            Val::IntVec(items) => {
-                let mut out: SmallVec<[Cow<'a, Val>; 4]> = SmallVec::with_capacity(items.len());
-                for n in items.iter() {
-                    out.push(Cow::Owned(Val::Int(*n)));
-                }
-                if out.is_empty() {
-                    StageOutput::Filtered
-                } else {
-                    StageOutput::Many(out)
-                }
-            }
-            Val::FloatVec(items) => {
-                let mut out: SmallVec<[Cow<'a, Val>; 4]> = SmallVec::with_capacity(items.len());
-                for f in items.iter() {
-                    out.push(Cow::Owned(Val::Float(*f)));
-                }
-                if out.is_empty() {
-                    StageOutput::Filtered
-                } else {
-                    StageOutput::Many(out)
-                }
-            }
-            Val::StrVec(items) => {
-                let mut out: SmallVec<[Cow<'a, Val>; 4]> = SmallVec::with_capacity(items.len());
-                for s in items.iter() {
-                    out.push(Cow::Owned(Val::Str(std::sync::Arc::clone(s))));
-                }
-                if out.is_empty() {
-                    StageOutput::Filtered
-                } else {
-                    StageOutput::Many(out)
-                }
-            }
-            Val::StrSliceVec(items) => {
-                let mut out: SmallVec<[Cow<'a, Val>; 4]> = SmallVec::with_capacity(items.len());
-                for r in items.iter() {
-                    out.push(Cow::Owned(Val::StrSlice(r.clone())));
-                }
-                if out.is_empty() {
-                    StageOutput::Filtered
-                } else {
-                    StageOutput::Many(out)
-                }
-            }
-            _ => StageOutput::Filtered,
+        let result: StageOutput<'a> = match owned.into_vals() {
+            Ok(items) => many_from_owned_vals(items),
+            Err(_) => StageOutput::Filtered,
         };
         result
     }
@@ -674,17 +620,23 @@ impl Stage for FlatMapFieldChain {
     }
 }
 
-/// Generic flatten dispatch — yields each element of any iterable Val
-/// lane (Arr borrowed; IntVec/FloatVec/StrVec/StrSliceVec materialised
-/// owned). One algorithm covers every lane. New lane types add one
-/// arm here, no per-shape FlatMap variants.
+/// Generic flatten dispatch. `Val::as_vals()` is the single lane
+/// adapter: Arr rows stay borrowed, typed lanes and ObjVec materialize
+/// only at this compatibility boundary.
 #[inline]
 fn flatten_iterable<'a>(v: &'a Val) -> StageOutput<'a> {
-    match v {
-        Val::Arr(items) => {
+    match v.as_vals() {
+        Some(items) => many_from_vals(items, true),
+        None => StageOutput::Filtered,
+    }
+}
+
+fn many_from_vals<'a>(items: Cow<'a, [Val]>, allow_borrow: bool) -> StageOutput<'a> {
+    match items {
+        Cow::Borrowed(items) if allow_borrow => {
             let mut out: SmallVec<[Cow<'a, Val>; 4]> = SmallVec::with_capacity(items.len());
-            for it in items.iter() {
-                out.push(Cow::Borrowed(it));
+            for item in items {
+                out.push(Cow::Borrowed(item));
             }
             if out.is_empty() {
                 StageOutput::Filtered
@@ -692,51 +644,19 @@ fn flatten_iterable<'a>(v: &'a Val) -> StageOutput<'a> {
                 StageOutput::Many(out)
             }
         }
-        Val::IntVec(items) => {
-            let mut out: SmallVec<[Cow<'a, Val>; 4]> = SmallVec::with_capacity(items.len());
-            for n in items.iter() {
-                out.push(Cow::Owned(Val::Int(*n)));
-            }
-            if out.is_empty() {
-                StageOutput::Filtered
-            } else {
-                StageOutput::Many(out)
-            }
-        }
-        Val::FloatVec(items) => {
-            let mut out: SmallVec<[Cow<'a, Val>; 4]> = SmallVec::with_capacity(items.len());
-            for f in items.iter() {
-                out.push(Cow::Owned(Val::Float(*f)));
-            }
-            if out.is_empty() {
-                StageOutput::Filtered
-            } else {
-                StageOutput::Many(out)
-            }
-        }
-        Val::StrVec(items) => {
-            let mut out: SmallVec<[Cow<'a, Val>; 4]> = SmallVec::with_capacity(items.len());
-            for s in items.iter() {
-                out.push(Cow::Owned(Val::Str(std::sync::Arc::clone(s))));
-            }
-            if out.is_empty() {
-                StageOutput::Filtered
-            } else {
-                StageOutput::Many(out)
-            }
-        }
-        Val::StrSliceVec(items) => {
-            let mut out: SmallVec<[Cow<'a, Val>; 4]> = SmallVec::with_capacity(items.len());
-            for r in items.iter() {
-                out.push(Cow::Owned(Val::StrSlice(r.clone())));
-            }
-            if out.is_empty() {
-                StageOutput::Filtered
-            } else {
-                StageOutput::Many(out)
-            }
-        }
-        _ => StageOutput::Filtered,
+        items => many_from_owned_vals(items.into_owned()),
+    }
+}
+
+fn many_from_owned_vals<'a>(items: Vec<Val>) -> StageOutput<'a> {
+    let mut out: SmallVec<[Cow<'a, Val>; 4]> = SmallVec::with_capacity(items.len());
+    for item in items {
+        out.push(Cow::Owned(item));
+    }
+    if out.is_empty() {
+        StageOutput::Filtered
+    } else {
+        StageOutput::Many(out)
     }
 }
 

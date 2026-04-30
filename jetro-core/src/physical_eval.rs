@@ -452,17 +452,13 @@ impl ExecCtx<'_> {
         for elem in elems {
             match elem {
                 PhysicalArrayElem::Expr(expr) => out.push(self.eval(*expr)?),
-                PhysicalArrayElem::Spread(expr) => match self.eval(*expr)? {
-                    Val::Arr(items) => {
-                        let items = Arc::try_unwrap(items).unwrap_or_else(|items| (*items).clone());
-                        out.extend(items);
+                PhysicalArrayElem::Spread(expr) => {
+                    let value = self.eval(*expr)?;
+                    match value.into_vals() {
+                        Ok(items) => out.extend(items),
+                        Err(value) => out.push(value),
                     }
-                    Val::IntVec(items) => out.extend(items.iter().map(|n| Val::Int(*n))),
-                    Val::FloatVec(items) => out.extend(items.iter().map(|f| Val::Float(*f))),
-                    Val::StrVec(items) => out.extend(items.iter().cloned().map(Val::Str)),
-                    Val::StrSliceVec(items) => out.extend(items.iter().cloned().map(Val::StrSlice)),
-                    other => out.push(other),
-                },
+                }
             }
         }
         Ok(Val::arr(out))
