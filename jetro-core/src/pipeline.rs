@@ -59,7 +59,9 @@ mod kernels;
 mod legacy_exec;
 mod lower;
 mod normalize;
+mod operator;
 mod plan;
+mod reducer;
 mod row_source;
 mod sink_accumulator;
 pub(crate) use capability::{
@@ -73,6 +75,7 @@ pub(crate) use common::{
 };
 pub use kernels::{eval_cmp_op, eval_kernel, BodyKernel};
 pub(crate) use kernels::{eval_view_kernel, CollectLayout, ObjectKernel, ViewKernelValue};
+pub use operator::{ReducerOp, ReducerSpec};
 #[cfg(test)]
 pub use plan::compute_strategies;
 #[cfg(test)]
@@ -81,6 +84,7 @@ pub use plan::{
     compute_strategies_with_kernels, plan_with_exprs, plan_with_kernels, select_strategy, Plan,
     Position, StageStrategy, Strategy,
 };
+pub(crate) use reducer::ReducerAccumulator;
 pub(crate) use sink_accumulator::SinkAccumulator;
 
 #[cfg(feature = "simd-json")]
@@ -347,6 +351,15 @@ impl NumOp {
         }
     }
 
+    pub(crate) fn method(self) -> BuiltinMethod {
+        match self {
+            NumOp::Sum => BuiltinMethod::Sum,
+            NumOp::Min => BuiltinMethod::Min,
+            NumOp::Max => BuiltinMethod::Max,
+            NumOp::Avg => BuiltinMethod::Avg,
+        }
+    }
+
     /// Render the bare-aggregate result for the bench's start state
     /// (zero-element fold).  Sum/Avg → 0/Null; Min/Max → Null when
     /// no element observed.
@@ -386,13 +399,18 @@ impl NumericSink {
     pub fn is_identity(&self) -> bool {
         self.project.is_none()
     }
+}
 
-    pub(crate) fn method(&self) -> BuiltinMethod {
-        match self.op {
-            NumOp::Sum => BuiltinMethod::Sum,
-            NumOp::Min => BuiltinMethod::Min,
-            NumOp::Max => BuiltinMethod::Max,
-            NumOp::Avg => BuiltinMethod::Avg,
+impl Sink {
+    pub(crate) fn reducer_spec(&self) -> Option<ReducerSpec> {
+        match self {
+            Sink::Count(_) => Some(ReducerSpec::count()),
+            Sink::Numeric(n) => Some(ReducerSpec {
+                op: ReducerOp::Numeric(n.op),
+                predicate: None,
+                projection: n.project.clone(),
+            }),
+            _ => None,
         }
     }
 }

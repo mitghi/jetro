@@ -1,17 +1,11 @@
 use crate::value::Val;
 
-use super::{num_finalise, num_fold, Sink};
+use super::{ReducerAccumulator, Sink};
 
 pub(crate) struct SinkAccumulator<'a> {
     sink: &'a Sink,
     collect: Vec<Val>,
-    count: i64,
-    sum_i: i64,
-    sum_f: f64,
-    sum_floated: bool,
-    min_f: f64,
-    max_f: f64,
-    n_obs: usize,
+    reducer: Option<ReducerAccumulator>,
     first: Option<Val>,
     last: Option<Val>,
     hll: [u8; HLL_M],
@@ -22,13 +16,7 @@ impl<'a> SinkAccumulator<'a> {
         Self {
             sink,
             collect: Vec::new(),
-            count: 0,
-            sum_i: 0,
-            sum_f: 0.0,
-            sum_floated: false,
-            min_f: f64::INFINITY,
-            max_f: f64::NEG_INFINITY,
-            n_obs: 0,
+            reducer: sink.reducer_spec().map(ReducerAccumulator::new),
             first: None,
             last: None,
             hll: [0; HLL_M],
@@ -38,8 +26,7 @@ impl<'a> SinkAccumulator<'a> {
     pub(crate) fn push(&mut self, item: Val) -> bool {
         match self.sink {
             Sink::Collect => self.observe_collect(item),
-            Sink::Count(_) => self.observe_count(),
-            Sink::Numeric(_) => self.observe_numeric(&item),
+            Sink::Count(_) | Sink::Numeric(_) => self.observe_reducer(&item),
             Sink::First(_) => return self.observe_first(item),
             Sink::Last(_) => self.observe_last(item),
             Sink::ApproxCountDistinct => self.observe_approx_distinct(&item),
@@ -47,18 +34,22 @@ impl<'a> SinkAccumulator<'a> {
         false
     }
 
-    pub(crate) fn observe_count(&mut self) {
-        self.count += 1;
-    }
-
     pub(crate) fn observe_collect(&mut self, item: Val) {
         self.collect.push(item);
     }
 
-    pub(crate) fn observe_numeric(&mut self, item: &Val) {
-        if let Sink::Numeric(numeric) = self.sink {
-            self.push_numeric(numeric.op, item);
+    pub(crate) fn observe_reducer(&mut self, item: &Val) {
+        if let Some(reducer) = &mut self.reducer {
+            reducer.push(item);
         }
+    }
+
+    pub(crate) fn observe_count(&mut self) {
+        self.observe_reducer(&Val::Null);
+    }
+
+    pub(crate) fn observe_numeric(&mut self, item: &Val) {
+        self.observe_reducer(item);
     }
 
     pub(crate) fn observe_first(&mut self, item: Val) -> bool {
@@ -79,7 +70,7 @@ impl<'a> SinkAccumulator<'a> {
     }
 
     pub(crate) fn push_projected_numeric(&mut self, numeric_item: &Val) {
-        self.observe_numeric(numeric_item);
+        self.observe_reducer(numeric_item);
     }
 
     pub(crate) fn finish(self, unwrap_single_collect_obj: bool) -> Val {
@@ -94,33 +85,14 @@ impl<'a> SinkAccumulator<'a> {
                     Val::arr(self.collect)
                 }
             }
-            Sink::Count(_) => Val::Int(self.count),
-            Sink::Numeric(numeric) => num_finalise(
-                numeric.op,
-                self.sum_i,
-                self.sum_f,
-                self.sum_floated,
-                self.min_f,
-                self.max_f,
-                self.n_obs,
-            ),
+            Sink::Count(_) | Sink::Numeric(_) => self
+                .reducer
+                .expect("count/numeric sinks construct reducer")
+                .finish(),
             Sink::First(_) => self.first.unwrap_or(Val::Null),
             Sink::Last(_) => self.last.unwrap_or(Val::Null),
             Sink::ApproxCountDistinct => Val::Int(hll_estimate(&self.hll) as i64),
         }
-    }
-
-    fn push_numeric(&mut self, op: super::NumOp, item: &Val) {
-        num_fold(
-            &mut self.sum_i,
-            &mut self.sum_f,
-            &mut self.sum_floated,
-            &mut self.min_f,
-            &mut self.max_f,
-            &mut self.n_obs,
-            op,
-            item,
-        );
     }
 }
 

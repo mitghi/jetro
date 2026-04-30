@@ -44,22 +44,9 @@ impl Sink {
                 },
                 positional: Some(Position::Last),
             },
-            Sink::Count(_) => SinkDemand {
-                chain: ChainDemand {
-                    pull: PullDemand::All,
-                    value: ValueNeed::None,
-                    order: false,
-                },
-                positional: None,
-            },
-            Sink::Numeric(_) => SinkDemand {
-                chain: ChainDemand {
-                    pull: PullDemand::All,
-                    value: ValueNeed::Numeric,
-                    order: false,
-                },
-                positional: None,
-            },
+            Sink::Count(_) | Sink::Numeric(_) => {
+                reducer_demand(self.reducer_spec().expect("count/numeric are reducers").op)
+            }
             Sink::Collect | Sink::ApproxCountDistinct => SinkDemand::RESULT,
         }
     }
@@ -69,11 +56,8 @@ impl Sink {
         F: FnMut(&crate::vm::Program) -> bool,
     {
         match self {
-            Sink::Collect
-            | Sink::Count(_)
-            | Sink::First(_)
-            | Sink::Last(_)
-            | Sink::ApproxCountDistinct => true,
+            Sink::Collect | Sink::First(_) | Sink::Last(_) | Sink::ApproxCountDistinct => true,
+            Sink::Count(_) => true,
             Sink::Numeric(n) => n.project.as_ref().is_none_or(|prog| program_ok(prog)),
         }
     }
@@ -84,17 +68,18 @@ impl Sink {
     ) -> Option<ViewSinkCapability> {
         match self {
             Sink::Collect => Some(ViewSinkCapability::Collect),
-            Sink::Numeric(n) => {
-                if n.method().spec().view_sink != Some(BuiltinViewSink::Numeric) {
+            Sink::Numeric(_) => {
+                let spec = self.reducer_spec()?;
+                if spec.method()?.spec().view_sink != Some(BuiltinViewSink::Numeric) {
                     return None;
                 }
-                let project_kernel = if n.project.is_some() {
+                let project_kernel = if spec.projection.is_some() {
                     Some(sink_kernels.first()?.is_view_native().then_some(0)?)
                 } else {
                     None
                 };
                 Some(ViewSinkCapability::Numeric {
-                    op: n.op,
+                    op: spec.numeric_op()?,
                     project_kernel,
                 })
             }
@@ -110,6 +95,21 @@ impl Sink {
             Sink::Count(_) | Sink::First(_) | Sink::Last(_) => None,
             Sink::ApproxCountDistinct => None,
         }
+    }
+}
+
+fn reducer_demand(op: super::ReducerOp) -> SinkDemand {
+    let value = match op {
+        super::ReducerOp::Count => ValueNeed::None,
+        super::ReducerOp::Numeric(_) => ValueNeed::Numeric,
+    };
+    SinkDemand {
+        chain: ChainDemand {
+            pull: PullDemand::All,
+            value,
+            order: false,
+        },
+        positional: None,
     }
 }
 
