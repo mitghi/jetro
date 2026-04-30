@@ -101,14 +101,16 @@ where
                         capabilities.sink.materialization(),
                         pipeline::ViewMaterialization::SinkOutputRows
                     );
-                    sink_acc.push(item.materialize())
+                    sink_acc.observe_collect(item.materialize());
+                    false
                 }
                 pipeline::ViewSinkCapability::Count => {
                     debug_assert_eq!(
                         capabilities.sink.materialization(),
                         pipeline::ViewMaterialization::Never
                     );
-                    sink_acc.push(Val::Null)
+                    sink_acc.observe_count();
+                    false
                 }
                 pipeline::ViewSinkCapability::Numeric { op, project_kernel } => {
                     let _ = op;
@@ -122,7 +124,7 @@ where
                     } else {
                         item.materialize()
                     };
-                    sink_acc.push_projected_numeric(&numeric_item);
+                    sink_acc.observe_numeric(&numeric_item);
                     false
                 }
                 pipeline::ViewSinkCapability::First => {
@@ -130,14 +132,15 @@ where
                         capabilities.sink.materialization(),
                         pipeline::ViewMaterialization::SinkFinalRow
                     );
-                    sink_acc.push(item.materialize())
+                    sink_acc.observe_first(item.materialize())
                 }
                 pipeline::ViewSinkCapability::Last => {
                     debug_assert_eq!(
                         capabilities.sink.materialization(),
                         pipeline::ViewMaterialization::SinkFinalRow
                     );
-                    sink_acc.push(item.materialize())
+                    sink_acc.observe_last(item.materialize());
+                    false
                 }
             };
 

@@ -37,27 +37,49 @@ impl<'a> SinkAccumulator<'a> {
 
     pub(crate) fn push(&mut self, item: Val) -> bool {
         match self.sink {
-            Sink::Collect => self.collect.push(item),
-            Sink::Count => self.count += 1,
-            Sink::Numeric(numeric) => self.push_numeric(numeric.op, &item),
-            Sink::First => {
-                if self.first.is_none() {
-                    self.first = Some(item);
-                    return true;
-                }
-            }
-            Sink::Last => {
-                self.last = Some(item);
-            }
-            Sink::ApproxCountDistinct => hll_observe(&mut self.hll, &item),
+            Sink::Collect => self.observe_collect(item),
+            Sink::Count => self.observe_count(),
+            Sink::Numeric(_) => self.observe_numeric(&item),
+            Sink::First => return self.observe_first(item),
+            Sink::Last => self.observe_last(item),
+            Sink::ApproxCountDistinct => self.observe_approx_distinct(&item),
         }
         false
     }
 
-    pub(crate) fn push_projected_numeric(&mut self, numeric_item: &Val) {
+    pub(crate) fn observe_count(&mut self) {
+        self.count += 1;
+    }
+
+    pub(crate) fn observe_collect(&mut self, item: Val) {
+        self.collect.push(item);
+    }
+
+    pub(crate) fn observe_numeric(&mut self, item: &Val) {
         if let Sink::Numeric(numeric) = self.sink {
-            self.push_numeric(numeric.op, numeric_item);
+            self.push_numeric(numeric.op, item);
         }
+    }
+
+    pub(crate) fn observe_first(&mut self, item: Val) -> bool {
+        if self.first.is_none() {
+            self.first = Some(item);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn observe_last(&mut self, item: Val) {
+        self.last = Some(item);
+    }
+
+    pub(crate) fn observe_approx_distinct(&mut self, item: &Val) {
+        hll_observe(&mut self.hll, item);
+    }
+
+    pub(crate) fn push_projected_numeric(&mut self, numeric_item: &Val) {
+        self.observe_numeric(numeric_item);
     }
 
     pub(crate) fn finish(self, unwrap_single_collect_obj: bool) -> Val {
