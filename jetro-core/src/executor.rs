@@ -691,9 +691,13 @@ mod tests {
         let sum = j
             .collect(r#"$.books.filter(score > 900).map(score).sum()"#)
             .unwrap();
+        let direct_count = j.collect(r#"$.books.count(score > 900)"#).unwrap();
+        let direct_sum = j.collect(r#"$.books.sum(score)"#).unwrap();
 
         assert_eq!(count, json!(2));
         assert_eq!(sum, json!(1803));
+        assert_eq!(direct_count, json!(2));
+        assert_eq!(direct_sum, json!(1806));
         assert!(!j.root_val_is_materialized());
     }
 

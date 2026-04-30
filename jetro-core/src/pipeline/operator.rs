@@ -38,6 +38,16 @@ impl ReducerSpec {
         self.predicate.iter().chain(self.projection.iter())
     }
 
+    pub(crate) fn predicate_kernel_index(&self) -> Option<usize> {
+        self.predicate.as_ref().map(|_| 0)
+    }
+
+    pub(crate) fn projection_kernel_index(&self) -> Option<usize> {
+        self.projection
+            .as_ref()
+            .map(|_| usize::from(self.predicate.is_some()))
+    }
+
     pub fn method(&self) -> Option<BuiltinMethod> {
         match self.op {
             ReducerOp::Count => Some(BuiltinMethod::Count),

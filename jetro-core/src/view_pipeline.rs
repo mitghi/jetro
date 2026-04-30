@@ -104,20 +104,30 @@ where
                     sink_acc.observe_collect(item.materialize());
                     false
                 }
-                pipeline::ViewSinkCapability::Count => {
+                pipeline::ViewSinkCapability::Count { predicate_kernel } => {
                     debug_assert_eq!(
                         capabilities.sink.materialization(),
                         pipeline::ViewMaterialization::Never
                     );
+                    if !view_sink_predicate_matches(&item, predicate_kernel, &body.sink_kernels)? {
+                        continue;
+                    }
                     sink_acc.observe_count();
                     false
                 }
-                pipeline::ViewSinkCapability::Numeric { op, project_kernel } => {
+                pipeline::ViewSinkCapability::Numeric {
+                    op,
+                    predicate_kernel,
+                    project_kernel,
+                } => {
                     let _ = op;
                     debug_assert_eq!(
                         capabilities.sink.materialization(),
                         pipeline::ViewMaterialization::SinkNumericInput
                     );
+                    if !view_sink_predicate_matches(&item, predicate_kernel, &body.sink_kernels)? {
+                        continue;
+                    }
                     let numeric_item = if let Some(kernel) = project_kernel {
                         let kernel = body.sink_kernels.get(kernel)?;
                         eval_value_kernel(&item, kernel)?
@@ -158,6 +168,21 @@ where
     }
 
     Some(Ok(sink_acc.finish(false)))
+}
+
+fn view_sink_predicate_matches<'a, V>(
+    item: &V,
+    predicate_kernel: Option<usize>,
+    sink_kernels: &[pipeline::BodyKernel],
+) -> Option<bool>
+where
+    V: ValueView<'a>,
+{
+    let Some(kernel_idx) = predicate_kernel else {
+        return Some(true);
+    };
+    let kernel = sink_kernels.get(kernel_idx)?;
+    eval_filter_kernel(item, kernel)
 }
 
 fn run_prefix_then_materialized_suffix<'a, V>(

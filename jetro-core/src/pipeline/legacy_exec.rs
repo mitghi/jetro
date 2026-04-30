@@ -354,33 +354,11 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
         // Barrier stages have already been applied; `pre_iter` yields
         // the post-pipeline rows directly, so only the sink remains.
         let sink_done = match &pipeline.sink {
-            Sink::Reducer(spec) => {
-                if let Some(predicate) = &spec.predicate {
-                    let kernel = pipeline
-                        .sink_kernels
-                        .first()
-                        .unwrap_or(&BodyKernel::Generic);
-                    let keep = eval_kernel(kernel, &item, |item| {
-                        apply_item_in_env(&mut vm, &mut loop_env, item, predicate)
-                    })?;
-                    if !crate::util::is_truthy(&keep) {
-                        continue 'outer;
-                    }
+            Sink::Reducer(_) => {
+                match observe_reducer_item(pipeline, item, &mut sink_acc, &mut vm, &mut loop_env)? {
+                    ReducerItemFlow::Observed => false,
+                    ReducerItemFlow::Skipped => continue 'outer,
                 }
-                if let Some(project) = &spec.projection {
-                    let project_kernel_idx = usize::from(spec.predicate.is_some());
-                    let kernel = pipeline
-                        .sink_kernels
-                        .get(project_kernel_idx)
-                        .unwrap_or(&BodyKernel::Generic);
-                    let reducer_item = eval_kernel(kernel, &item, |item| {
-                        apply_item_in_env(&mut vm, &mut loop_env, item, project)
-                    })?;
-                    sink_acc.push_projected_numeric(&reducer_item);
-                } else {
-                    sink_acc.push(item);
-                }
-                false
             }
             _ => sink_acc.push(item),
         };
@@ -565,33 +543,11 @@ where
         }
 
         let sink_done = match &pipeline.sink {
-            Sink::Reducer(spec) => {
-                if let Some(predicate) = &spec.predicate {
-                    let kernel = pipeline
-                        .sink_kernels
-                        .first()
-                        .unwrap_or(&BodyKernel::Generic);
-                    let keep = eval_kernel(kernel, &item, |item| {
-                        apply_item_in_env(&mut vm, &mut loop_env, item, predicate)
-                    })?;
-                    if !crate::util::is_truthy(&keep) {
-                        continue 'outer;
-                    }
+            Sink::Reducer(_) => {
+                match observe_reducer_item(pipeline, item, &mut sink_acc, &mut vm, &mut loop_env)? {
+                    ReducerItemFlow::Observed => false,
+                    ReducerItemFlow::Skipped => continue 'outer,
                 }
-                if let Some(project) = &spec.projection {
-                    let project_kernel_idx = usize::from(spec.predicate.is_some());
-                    let kernel = pipeline
-                        .sink_kernels
-                        .get(project_kernel_idx)
-                        .unwrap_or(&BodyKernel::Generic);
-                    let reducer_item = eval_kernel(kernel, &item, |item| {
-                        apply_item_in_env(&mut vm, &mut loop_env, item, project)
-                    })?;
-                    sink_acc.push_projected_numeric(&reducer_item);
-                } else {
-                    sink_acc.push(item);
-                }
-                false
             }
             _ => sink_acc.push(item),
         };
@@ -622,6 +578,54 @@ impl Iterator for LegacyPreIter {
             Self::Owned(iter) => iter.next(),
         }
     }
+}
+
+enum ReducerItemFlow {
+    Observed,
+    Skipped,
+}
+
+fn observe_reducer_item(
+    pipeline: &Pipeline,
+    item: Val,
+    sink_acc: &mut SinkAccumulator<'_>,
+    vm: &mut crate::vm::VM,
+    loop_env: &mut Env,
+) -> Result<ReducerItemFlow, EvalError> {
+    let Sink::Reducer(spec) = &pipeline.sink else {
+        sink_acc.push(item);
+        return Ok(ReducerItemFlow::Observed);
+    };
+
+    if let Some(predicate) = &spec.predicate {
+        let kernel_idx = spec.predicate_kernel_index().expect("predicate exists");
+        let kernel = pipeline
+            .sink_kernels
+            .get(kernel_idx)
+            .unwrap_or(&BodyKernel::Generic);
+        let keep = eval_kernel(kernel, &item, |item| {
+            apply_item_in_env(vm, loop_env, item, predicate)
+        })?;
+        if !crate::util::is_truthy(&keep) {
+            return Ok(ReducerItemFlow::Skipped);
+        }
+    }
+
+    if let Some(project) = &spec.projection {
+        let project_kernel_idx = spec.projection_kernel_index().expect("projection exists");
+        let kernel = pipeline
+            .sink_kernels
+            .get(project_kernel_idx)
+            .unwrap_or(&BodyKernel::Generic);
+        let reducer_item = eval_kernel(kernel, &item, |item| {
+            apply_item_in_env(vm, loop_env, item, project)
+        })?;
+        sink_acc.push_projected_numeric(&reducer_item);
+    } else {
+        sink_acc.push(item);
+    }
+
+    Ok(ReducerItemFlow::Observed)
 }
 
 /// Per-Obj lambda dispatch helper for `TransformKeys` /

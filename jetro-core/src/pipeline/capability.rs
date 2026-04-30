@@ -72,9 +72,12 @@ impl ViewStageCapability {
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ViewSinkCapability {
     Collect,
-    Count,
+    Count {
+        predicate_kernel: Option<usize>,
+    },
     Numeric {
         op: NumOp,
+        predicate_kernel: Option<usize>,
         project_kernel: Option<usize>,
     },
     First,
@@ -84,7 +87,9 @@ pub(crate) enum ViewSinkCapability {
 impl ViewSinkCapability {
     pub(crate) fn from_builtin_sink(sink: BuiltinViewSink) -> Option<Self> {
         match sink {
-            BuiltinViewSink::Count => Some(Self::Count),
+            BuiltinViewSink::Count => Some(Self::Count {
+                predicate_kernel: None,
+            }),
             BuiltinViewSink::First => Some(Self::First),
             BuiltinViewSink::Last => Some(Self::Last),
             BuiltinViewSink::Numeric => None,
@@ -94,7 +99,7 @@ impl ViewSinkCapability {
     pub(crate) fn materialization(self) -> ViewMaterialization {
         match self {
             Self::Collect => ViewMaterialization::SinkOutputRows,
-            Self::Count => view_materialization(BuiltinViewSink::Count.materialization()),
+            Self::Count { .. } => view_materialization(BuiltinViewSink::Count.materialization()),
             Self::Numeric { .. } => {
                 view_materialization(BuiltinViewSink::Numeric.materialization())
             }
@@ -221,12 +226,16 @@ mod tests {
             ViewMaterialization::SinkOutputRows
         );
         assert_eq!(
-            ViewSinkCapability::Count.materialization(),
+            ViewSinkCapability::Count {
+                predicate_kernel: None
+            }
+            .materialization(),
             ViewMaterialization::Never
         );
         assert_eq!(
             ViewSinkCapability::Numeric {
                 op: NumOp::Sum,
+                predicate_kernel: None,
                 project_kernel: Some(0)
             }
             .materialization(),
@@ -242,7 +251,9 @@ mod tests {
     fn sink_view_capability_uses_carried_metadata() {
         assert!(matches!(
             Sink::Reducer(ReducerSpec::count()).view_capability(&[]),
-            Some(ViewSinkCapability::Count)
+            Some(ViewSinkCapability::Count {
+                predicate_kernel: None
+            })
         ));
         assert!(matches!(
             Sink::First(BuiltinViewSink::First).view_capability(&[]),
