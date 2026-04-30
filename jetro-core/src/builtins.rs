@@ -695,6 +695,110 @@ impl BuiltinSpec {
 
 impl BuiltinMethod {
     #[inline]
+    pub(crate) fn is_string_arg_view_scalar(self) -> bool {
+        matches!(
+            self,
+            Self::StartsWith | Self::EndsWith | Self::Matches | Self::IndexOf | Self::LastIndexOf
+        )
+    }
+
+    #[inline]
+    pub(crate) fn is_string_no_arg_view_scalar(self) -> bool {
+        matches!(
+            self,
+            Self::ByteLen
+                | Self::IsBlank
+                | Self::IsNumeric
+                | Self::IsAlpha
+                | Self::IsAscii
+                | Self::ToNumber
+                | Self::ToBool
+        )
+    }
+
+    #[inline]
+    pub(crate) fn is_numeric_no_arg_view_scalar(self) -> bool {
+        matches!(self, Self::Ceil | Self::Floor | Self::Round | Self::Abs)
+    }
+
+    #[inline]
+    pub(crate) fn is_view_scalar_method(self) -> bool {
+        self == Self::Len
+            || self.is_string_arg_view_scalar()
+            || self.is_string_no_arg_view_scalar()
+            || self.is_numeric_no_arg_view_scalar()
+    }
+
+    #[inline]
+    fn is_scalar_pipeline_element(self) -> bool {
+        matches!(
+            self,
+            Self::Upper
+                | Self::Lower
+                | Self::Trim
+                | Self::TrimLeft
+                | Self::TrimRight
+                | Self::Capitalize
+                | Self::TitleCase
+                | Self::SnakeCase
+                | Self::KebabCase
+                | Self::CamelCase
+                | Self::PascalCase
+                | Self::ReverseStr
+                | Self::HtmlEscape
+                | Self::HtmlUnescape
+                | Self::UrlEncode
+                | Self::UrlDecode
+                | Self::ToBase64
+                | Self::FromBase64
+                | Self::Dedent
+                | Self::ByteLen
+                | Self::IsBlank
+                | Self::IsNumeric
+                | Self::IsAlpha
+                | Self::IsAscii
+                | Self::Ceil
+                | Self::Floor
+                | Self::Round
+                | Self::Abs
+                | Self::ToNumber
+                | Self::ToBool
+                | Self::ParseInt
+                | Self::ParseFloat
+                | Self::ParseBool
+                | Self::Or
+                | Self::Type
+                | Self::ToString
+                | Self::ToJson
+                | Self::Schema
+                | Self::Has
+                | Self::StartsWith
+                | Self::EndsWith
+                | Self::StripPrefix
+                | Self::StripSuffix
+                | Self::Matches
+                | Self::IndexOf
+                | Self::LastIndexOf
+                | Self::Scan
+                | Self::ReMatch
+                | Self::ReMatchFirst
+                | Self::ReMatchAll
+                | Self::ReCaptures
+                | Self::ReCapturesAll
+                | Self::ReSplit
+                | Self::ReReplace
+                | Self::ReReplaceAll
+                | Self::ContainsAny
+                | Self::ContainsAll
+                | Self::Repeat
+                | Self::Indent
+                | Self::PadLeft
+                | Self::PadRight
+                | Self::Center
+        )
+    }
+
+    #[inline]
     pub fn spec(self) -> BuiltinSpec {
         use BuiltinCardinality as Card;
         use BuiltinCategory as Cat;
@@ -888,94 +992,15 @@ impl BuiltinMethod {
                 ..BuiltinSpec::new(Cat::Unknown, Card::OneToOne)
             },
             _ => {
-                let pipeline_element = matches!(
-                    self,
-                    Self::Upper
-                        | Self::Lower
-                        | Self::Trim
-                        | Self::TrimLeft
-                        | Self::TrimRight
-                        | Self::Capitalize
-                        | Self::TitleCase
-                        | Self::SnakeCase
-                        | Self::KebabCase
-                        | Self::CamelCase
-                        | Self::PascalCase
-                        | Self::ReverseStr
-                        | Self::HtmlEscape
-                        | Self::HtmlUnescape
-                        | Self::UrlEncode
-                        | Self::UrlDecode
-                        | Self::ToBase64
-                        | Self::FromBase64
-                        | Self::Dedent
-                        | Self::ByteLen
-                        | Self::IsBlank
-                        | Self::IsNumeric
-                        | Self::IsAlpha
-                        | Self::IsAscii
-                        | Self::Ceil
-                        | Self::Floor
-                        | Self::Round
-                        | Self::Abs
-                        | Self::ToNumber
-                        | Self::ToBool
-                        | Self::ParseInt
-                        | Self::ParseFloat
-                        | Self::ParseBool
-                        | Self::Or
-                        | Self::Type
-                        | Self::ToString
-                        | Self::ToJson
-                        | Self::Schema
-                        | Self::Has
-                        | Self::StartsWith
-                        | Self::EndsWith
-                        | Self::StripPrefix
-                        | Self::StripSuffix
-                        | Self::Matches
-                        | Self::IndexOf
-                        | Self::LastIndexOf
-                        | Self::Scan
-                        | Self::ReMatch
-                        | Self::ReMatchFirst
-                        | Self::ReMatchAll
-                        | Self::ReCaptures
-                        | Self::ReCapturesAll
-                        | Self::ReSplit
-                        | Self::ReReplace
-                        | Self::ReReplaceAll
-                        | Self::ContainsAny
-                        | Self::ContainsAll
-                        | Self::Repeat
-                        | Self::Indent
-                        | Self::PadLeft
-                        | Self::PadRight
-                        | Self::Center
-                );
                 let spec = BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
                     .indexed()
                     .view_native();
-                let spec = match self {
-                    Self::StartsWith
-                    | Self::EndsWith
-                    | Self::Matches
-                    | Self::IndexOf
-                    | Self::LastIndexOf
-                    | Self::ByteLen
-                    | Self::IsBlank
-                    | Self::IsNumeric
-                    | Self::IsAlpha
-                    | Self::IsAscii
-                    | Self::ToNumber
-                    | Self::ToBool
-                    | Self::Ceil
-                    | Self::Floor
-                    | Self::Round
-                    | Self::Abs => spec.view_scalar(),
-                    _ => spec,
+                let spec = if self.is_view_scalar_method() {
+                    spec.view_scalar()
+                } else {
+                    spec
                 };
-                if pipeline_element {
+                if self.is_scalar_pipeline_element() {
                     spec.pipeline_element()
                 } else {
                     spec
@@ -1636,36 +1661,16 @@ impl BuiltinCall {
         }
         match (self.method, &self.args) {
             (BuiltinMethod::Len, BuiltinArgs::None) => json_view_len(recv).map(Val::Int),
-            (
-                BuiltinMethod::ByteLen
-                | BuiltinMethod::IsBlank
-                | BuiltinMethod::IsNumeric
-                | BuiltinMethod::IsAlpha
-                | BuiltinMethod::IsAscii
-                | BuiltinMethod::ToNumber
-                | BuiltinMethod::ToBool,
-                BuiltinArgs::None,
-            ) => {
+            (method, BuiltinArgs::None) if method.is_string_no_arg_view_scalar() => {
                 let value = json_view_str(recv)?;
-                str_no_arg_scalar_apply(self.method, value)
+                str_no_arg_scalar_apply(method, value)
             }
-            (
-                BuiltinMethod::Ceil
-                | BuiltinMethod::Floor
-                | BuiltinMethod::Round
-                | BuiltinMethod::Abs,
-                BuiltinArgs::None,
-            ) => numeric_no_arg_scalar_apply(self.method, recv),
-            (
-                BuiltinMethod::StartsWith
-                | BuiltinMethod::EndsWith
-                | BuiltinMethod::Matches
-                | BuiltinMethod::IndexOf
-                | BuiltinMethod::LastIndexOf,
-                BuiltinArgs::Str(arg),
-            ) => {
+            (method, BuiltinArgs::None) if method.is_numeric_no_arg_view_scalar() => {
+                numeric_no_arg_scalar_apply(method, recv)
+            }
+            (method, BuiltinArgs::Str(arg)) if method.is_string_arg_view_scalar() => {
                 let value = json_view_str(recv)?;
-                str_arg_scalar_apply(self.method, value, arg.as_ref())
+                str_arg_scalar_apply(method, value, arg.as_ref())
             }
             _ => None,
         }
@@ -6022,17 +6027,29 @@ mod spec_tests {
 
     #[test]
     fn builtin_specs_drive_view_scalar_kernels() {
-        assert!(BuiltinMethod::Len.spec().view_scalar);
-        assert!(BuiltinMethod::StartsWith.spec().view_scalar);
-        assert!(BuiltinMethod::EndsWith.spec().view_scalar);
-        assert!(BuiltinMethod::Matches.spec().view_scalar);
-        assert!(BuiltinMethod::IndexOf.spec().view_scalar);
-        assert!(BuiltinMethod::LastIndexOf.spec().view_scalar);
-        assert!(BuiltinMethod::ByteLen.spec().view_scalar);
-        assert!(BuiltinMethod::IsNumeric.spec().view_scalar);
-        assert!(BuiltinMethod::ToNumber.spec().view_scalar);
-        assert!(BuiltinMethod::Abs.spec().view_scalar);
-        assert!(BuiltinMethod::Round.spec().view_scalar);
+        let supported = [
+            BuiltinMethod::Len,
+            BuiltinMethod::StartsWith,
+            BuiltinMethod::EndsWith,
+            BuiltinMethod::Matches,
+            BuiltinMethod::IndexOf,
+            BuiltinMethod::LastIndexOf,
+            BuiltinMethod::ByteLen,
+            BuiltinMethod::IsBlank,
+            BuiltinMethod::IsNumeric,
+            BuiltinMethod::IsAlpha,
+            BuiltinMethod::IsAscii,
+            BuiltinMethod::ToNumber,
+            BuiltinMethod::ToBool,
+            BuiltinMethod::Ceil,
+            BuiltinMethod::Floor,
+            BuiltinMethod::Round,
+            BuiltinMethod::Abs,
+        ];
+        for method in supported {
+            assert!(method.is_view_scalar_method());
+            assert!(method.spec().view_scalar);
+        }
         assert!(!BuiltinMethod::Sort.spec().view_scalar);
         assert!(!BuiltinMethod::FromJson.spec().view_scalar);
     }
