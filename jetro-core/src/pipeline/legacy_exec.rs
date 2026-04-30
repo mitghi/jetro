@@ -72,9 +72,18 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
                 .stage_kernels
                 .get(stage_idx)
                 .unwrap_or(&BodyKernel::Generic);
-            if let Some(applied) =
-                apply_adapter_materialized(stage, &mut buf, &mut vm, &mut loop_env, kernel)
-            {
+            let strategy = strategies
+                .get(stage_idx)
+                .copied()
+                .unwrap_or(StageStrategy::Default);
+            if let Some(applied) = apply_adapter_materialized(
+                stage,
+                &mut buf,
+                &mut vm,
+                &mut loop_env,
+                kernel,
+                strategy,
+            ) {
                 applied?;
                 continue;
             }
@@ -93,39 +102,12 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
                         })
                     })?;
                 }
-                Stage::Skip(n, _, _) => {
-                    if buf.len() <= *n {
-                        buf.clear();
-                    } else {
-                        buf.drain(..*n);
-                    }
+                Stage::Skip(_, _, _)
+                | Stage::Take(_, _, _)
+                | Stage::Reverse(_)
+                | Stage::Sort(_) => {
+                    unreachable!("adapter-backed stage was not handled by adapter")
                 }
-                Stage::Take(n, _, _) => {
-                    buf.truncate(*n);
-                }
-                Stage::Reverse(_) => buf.reverse(),
-                Stage::Sort(spec) => match &spec.key {
-                    None => {
-                        let strategy = strategies
-                            .get(stage_idx)
-                            .copied()
-                            .unwrap_or(StageStrategy::Default);
-                        buf =
-                            bounded_sort_by_key(buf, spec.descending, strategy, |v| Ok(v.clone()))?;
-                    }
-                    Some(prog) => {
-                        let strategy = strategies
-                            .get(stage_idx)
-                            .copied()
-                            .unwrap_or(StageStrategy::Default);
-                        buf = bounded_sort_by_key(buf, spec.descending, strategy, |v| {
-                            Ok(eval_kernel(kernel, v, |item| {
-                                apply_item_in_env(&mut vm, &mut loop_env, item, prog)
-                            })
-                            .unwrap_or(Val::Null))
-                        })?;
-                    }
-                },
                 Stage::UniqueBy(_) => {
                     unreachable!("adapter-backed stage was not handled by adapter")
                 }
@@ -429,6 +411,7 @@ fn apply_adapter_materialized(
     vm: &mut crate::vm::VM,
     loop_env: &mut Env,
     kernel: &BodyKernel,
+    strategy: StageStrategy,
 ) -> Option<Result<(), EvalError>> {
     match stage_executor(stage)? {
         BuiltinPipelineExecutor::ElementBuiltin => {
@@ -446,6 +429,49 @@ fn apply_adapter_materialized(
             }
             *buf = out;
             Some(Ok(()))
+        }
+        BuiltinPipelineExecutor::Position { take } => {
+            let n = match stage {
+                Stage::Take(n, _, _) | Stage::Skip(n, _, _) => *n,
+                _ => return None,
+            };
+            if take {
+                buf.truncate(n);
+            } else if buf.len() <= n {
+                buf.clear();
+            } else {
+                buf.drain(..n);
+            }
+            Some(Ok(()))
+        }
+        BuiltinPipelineExecutor::Reverse => {
+            buf.reverse();
+            Some(Ok(()))
+        }
+        BuiltinPipelineExecutor::Sort => {
+            let Stage::Sort(spec) = stage else {
+                return None;
+            };
+            let sorted = match &spec.key {
+                None => bounded_sort_by_key(std::mem::take(buf), spec.descending, strategy, |v| {
+                    Ok(v.clone())
+                }),
+                Some(prog) => {
+                    bounded_sort_by_key(std::mem::take(buf), spec.descending, strategy, |v| {
+                        Ok(eval_kernel(kernel, v, |item| {
+                            apply_item_in_env(vm, loop_env, item, prog)
+                        })
+                        .unwrap_or(Val::Null))
+                    })
+                }
+            };
+            match sorted {
+                Ok(sorted) => {
+                    *buf = sorted;
+                    Some(Ok(()))
+                }
+                Err(err) => Some(Err(err)),
+            }
         }
         BuiltinPipelineExecutor::ObjectLambda => {
             let prog = object_lambda_program(stage)?;
@@ -683,6 +709,9 @@ fn apply_adapter_streaming(
         }
         Some(
             BuiltinPipelineExecutor::ExpandingBuiltin
+            | BuiltinPipelineExecutor::Position { .. }
+            | BuiltinPipelineExecutor::Reverse
+            | BuiltinPipelineExecutor::Sort
             | BuiltinPipelineExecutor::UniqueBy
             | BuiltinPipelineExecutor::GroupBy
             | BuiltinPipelineExecutor::CountBy

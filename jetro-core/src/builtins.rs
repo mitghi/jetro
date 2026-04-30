@@ -769,6 +769,9 @@ pub enum BuiltinPipelineExecutor {
     ElementBuiltin,
     ExpandingBuiltin,
     ObjectLambda,
+    Position { take: bool },
+    Reverse,
+    Sort,
     UniqueBy,
     GroupBy,
     CountBy,
@@ -1250,7 +1253,8 @@ impl BuiltinMethod {
                 })
                 .pipeline_demand(BuiltinPipelineDemand::Take)
                 .pipeline_order_effect(BuiltinPipelineOrderEffect::Preserves)
-                .pipeline_stage(BuiltinPipelineStage::Unary),
+                .pipeline_stage(BuiltinPipelineStage::Unary)
+                .pipeline_executor(BuiltinPipelineExecutor::Position { take: true }),
             Self::Skip => BuiltinSpec::new(Cat::Positional, Card::Bounded)
                 .view_native()
                 .view_stage(BuiltinViewStage::Skip)
@@ -1261,7 +1265,8 @@ impl BuiltinMethod {
                 })
                 .pipeline_demand(BuiltinPipelineDemand::Skip)
                 .pipeline_order_effect(BuiltinPipelineOrderEffect::Preserves)
-                .pipeline_stage(BuiltinPipelineStage::Unary),
+                .pipeline_stage(BuiltinPipelineStage::Unary)
+                .pipeline_executor(BuiltinPipelineExecutor::Position { take: false }),
             Self::First => BuiltinSpec::new(Cat::Positional, Card::Bounded)
                 .view_native()
                 .view_sink(BuiltinViewSink::First)
@@ -1362,7 +1367,8 @@ impl BuiltinMethod {
                     Self::Sort => spec
                         .pipeline_stage(BuiltinPipelineStage::Nullary)
                         .pipeline_lowering(BuiltinPipelineLowering::Sort)
-                        .pipeline_materialization(BuiltinPipelineMaterialization::ComposedBarrier),
+                        .pipeline_materialization(BuiltinPipelineMaterialization::ComposedBarrier)
+                        .pipeline_executor(BuiltinPipelineExecutor::Sort),
                     Self::Unique => spec
                         .pipeline_stage(BuiltinPipelineStage::Nullary)
                         .pipeline_lowering(BuiltinPipelineLowering::NullaryStage(
@@ -1453,7 +1459,8 @@ impl BuiltinMethod {
                         .pipeline_lowering(BuiltinPipelineLowering::NullaryStage(
                             BuiltinNullaryStage::Reverse,
                         ))
-                        .pipeline_materialization(BuiltinPipelineMaterialization::ComposedBarrier),
+                        .pipeline_materialization(BuiltinPipelineMaterialization::ComposedBarrier)
+                        .pipeline_executor(BuiltinPipelineExecutor::Reverse),
                     _ => spec,
                 }
             }
@@ -6809,6 +6816,22 @@ mod spec_tests {
         assert_eq!(
             BuiltinMethod::TransformValues.spec().pipeline_executor,
             Some(BuiltinPipelineExecutor::ObjectLambda)
+        );
+        assert_eq!(
+            BuiltinMethod::Take.spec().pipeline_executor,
+            Some(BuiltinPipelineExecutor::Position { take: true })
+        );
+        assert_eq!(
+            BuiltinMethod::Skip.spec().pipeline_executor,
+            Some(BuiltinPipelineExecutor::Position { take: false })
+        );
+        assert_eq!(
+            BuiltinMethod::Reverse.spec().pipeline_executor,
+            Some(BuiltinPipelineExecutor::Reverse)
+        );
+        assert_eq!(
+            BuiltinMethod::Sort.spec().pipeline_executor,
+            Some(BuiltinPipelineExecutor::Sort)
         );
         assert_eq!(
             BuiltinMethod::GroupBy.spec().pipeline_executor,
