@@ -12,11 +12,11 @@ pub(super) fn run_cached(
     root: &Val,
     cache: Option<&dyn PipelineData>,
 ) -> Option<Result<Val, EvalError>> {
-    pipeline.try_columnar_with(root, cache)
+    pipeline.run_cached_columnar_impl(root, cache)
 }
 
 pub(super) fn run_uncached(pipeline: &Pipeline, root: &Val) -> Option<Result<Val, EvalError>> {
-    pipeline.try_columnar(root)
+    pipeline.run_uncached_columnar_impl(root)
 }
 
 /// Build per-slot typed columns from a row-major Val cells matrix.
@@ -446,7 +446,7 @@ impl Pipeline {
 
     /// Cache-aware variant: when cache promotes the source array,
     /// recv is replaced with `Val::ObjVec` and the slot kernels fire.
-    pub(super) fn try_columnar_with(
+    fn run_cached_columnar_impl(
         &self,
         root: &Val,
         cache: Option<&dyn PipelineData>,
@@ -581,7 +581,7 @@ impl Pipeline {
         None
     }
 
-    pub(super) fn try_columnar(&self, root: &Val) -> Option<Result<Val, EvalError>> {
+    fn run_uncached_columnar_impl(&self, root: &Val) -> Option<Result<Val, EvalError>> {
         // Phase A2 — Stage::Filter(FieldCmpLit) + Stage::Map(FieldRead) +
         // Sink::Collect over Val::Arr (object rows): walk the column
         // directly via slot-known IndexMap probes, build typed output
@@ -667,7 +667,7 @@ impl Pipeline {
 
         // ObjVec slot-kernel paths and Val::Arr columnar paths
         // previously dispatched on fused Sink variants. All gone post
-        // fusion-off. Canonical-view consumer in `try_columnar_with`
+        // fusion-off. Canonical-view consumer in run_cached_columnar_impl
         // covers the ObjVec shape; primitive-lane fast paths above
         // (IntVec / FloatVec / StrVec) cover Val::Arr-of-primitives.
         let _ = recv;
