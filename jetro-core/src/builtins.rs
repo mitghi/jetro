@@ -551,6 +551,7 @@ pub struct BuiltinSpec {
     pub view_scalar: bool,
     pub view_stage: Option<BuiltinViewStage>,
     pub view_sink: Option<BuiltinViewSink>,
+    pub numeric_reducer: Option<BuiltinNumericReducer>,
     pub pipeline_stage: Option<BuiltinPipelineStage>,
     pub pipeline_sink: Option<BuiltinPipelineSink>,
     pub pipeline_element: bool,
@@ -570,6 +571,14 @@ pub enum BuiltinViewSink {
     Numeric,
     First,
     Last,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinNumericReducer {
+    Sum,
+    Avg,
+    Min,
+    Max,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -639,6 +648,7 @@ impl BuiltinSpec {
             view_scalar: false,
             view_stage: None,
             view_sink: None,
+            numeric_reducer: None,
             pipeline_stage: None,
             pipeline_sink: None,
             pipeline_element: false,
@@ -679,6 +689,12 @@ impl BuiltinSpec {
 
     fn view_sink(mut self, sink: BuiltinViewSink) -> Self {
         self.view_sink = Some(sink);
+        self
+    }
+
+    fn numeric_view_sink(mut self, reducer: BuiltinNumericReducer) -> Self {
+        self.view_sink = Some(BuiltinViewSink::Numeric);
+        self.numeric_reducer = Some(reducer);
         self
     }
 
@@ -872,12 +888,22 @@ impl BuiltinMethod {
                 .indexed()
                 .view_scalar()
                 .view_sink(BuiltinViewSink::Count),
-            Self::Sum | Self::Avg | Self::Min | Self::Max => {
-                BuiltinSpec::new(Cat::Reducer, Card::Reducing)
-                    .view_native()
-                    .view_sink(BuiltinViewSink::Numeric)
-                    .cost(10.0)
-            }
+            Self::Sum => BuiltinSpec::new(Cat::Reducer, Card::Reducing)
+                .view_native()
+                .numeric_view_sink(BuiltinNumericReducer::Sum)
+                .cost(10.0),
+            Self::Avg => BuiltinSpec::new(Cat::Reducer, Card::Reducing)
+                .view_native()
+                .numeric_view_sink(BuiltinNumericReducer::Avg)
+                .cost(10.0),
+            Self::Min => BuiltinSpec::new(Cat::Reducer, Card::Reducing)
+                .view_native()
+                .numeric_view_sink(BuiltinNumericReducer::Min)
+                .cost(10.0),
+            Self::Max => BuiltinSpec::new(Cat::Reducer, Card::Reducing)
+                .view_native()
+                .numeric_view_sink(BuiltinNumericReducer::Max)
+                .cost(10.0),
             Self::Count => BuiltinSpec::new(Cat::Reducer, Card::Reducing)
                 .view_native()
                 .view_sink(BuiltinViewSink::Count)
@@ -5946,8 +5972,9 @@ pub fn schema_apply(recv: &Val) -> Option<Val> {
 #[cfg(test)]
 mod spec_tests {
     use super::{
-        BuiltinCardinality, BuiltinCategory, BuiltinMethod, BuiltinPipelineSink,
-        BuiltinPipelineStage, BuiltinViewMaterialization, BuiltinViewSink, BuiltinViewStage,
+        BuiltinCardinality, BuiltinCategory, BuiltinMethod, BuiltinNumericReducer,
+        BuiltinPipelineSink, BuiltinPipelineStage, BuiltinViewMaterialization, BuiltinViewSink,
+        BuiltinViewStage,
     };
 
     #[test]
@@ -6018,6 +6045,22 @@ mod spec_tests {
         assert_eq!(
             BuiltinMethod::Sum.spec().view_sink,
             Some(BuiltinViewSink::Numeric)
+        );
+        assert_eq!(
+            BuiltinMethod::Sum.spec().numeric_reducer,
+            Some(BuiltinNumericReducer::Sum)
+        );
+        assert_eq!(
+            BuiltinMethod::Avg.spec().numeric_reducer,
+            Some(BuiltinNumericReducer::Avg)
+        );
+        assert_eq!(
+            BuiltinMethod::Min.spec().numeric_reducer,
+            Some(BuiltinNumericReducer::Min)
+        );
+        assert_eq!(
+            BuiltinMethod::Max.spec().numeric_reducer,
+            Some(BuiltinNumericReducer::Max)
         );
         assert_eq!(
             BuiltinMethod::First.spec().view_sink,

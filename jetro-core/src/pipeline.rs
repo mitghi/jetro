@@ -35,7 +35,7 @@
 use std::sync::Arc;
 
 use crate::ast::Expr;
-use crate::builtins::BuiltinMethod;
+use crate::builtins::{BuiltinMethod, BuiltinNumericReducer};
 use crate::context::EvalError;
 use crate::value::Val;
 
@@ -333,6 +333,15 @@ pub enum NumOp {
 }
 
 impl NumOp {
+    pub(crate) fn from_builtin_reducer(reducer: BuiltinNumericReducer) -> Self {
+        match reducer {
+            BuiltinNumericReducer::Sum => NumOp::Sum,
+            BuiltinNumericReducer::Avg => NumOp::Avg,
+            BuiltinNumericReducer::Min => NumOp::Min,
+            BuiltinNumericReducer::Max => NumOp::Max,
+        }
+    }
+
     /// Render the bare-aggregate result for the bench's start state
     /// (zero-element fold).  Sum/Avg → 0/Null; Min/Max → Null when
     /// no element observed.

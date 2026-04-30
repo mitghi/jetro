@@ -536,28 +536,19 @@ fn decode_method_chain(
 }
 
 fn terminal_sink_for_method(method: BuiltinMethod) -> Option<Sink> {
-    match method.spec().pipeline_sink {
+    let spec = method.spec();
+    match spec.pipeline_sink {
         Some(BuiltinPipelineSink::ApproxCountDistinct) => return Some(Sink::ApproxCountDistinct),
         None => {}
     }
 
-    match method.spec().view_sink? {
+    match spec.view_sink? {
         BuiltinViewSink::Count => Some(Sink::Count),
-        BuiltinViewSink::Numeric => Some(Sink::Numeric(NumericSink::identity(num_op_for_method(
-            method,
-        )?))),
+        BuiltinViewSink::Numeric => Some(Sink::Numeric(NumericSink::identity(
+            NumOp::from_builtin_reducer(spec.numeric_reducer?),
+        ))),
         BuiltinViewSink::First => Some(Sink::First),
         BuiltinViewSink::Last => Some(Sink::Last),
-    }
-}
-
-fn num_op_for_method(method: BuiltinMethod) -> Option<NumOp> {
-    match method {
-        BuiltinMethod::Sum => Some(NumOp::Sum),
-        BuiltinMethod::Min => Some(NumOp::Min),
-        BuiltinMethod::Max => Some(NumOp::Max),
-        BuiltinMethod::Avg => Some(NumOp::Avg),
-        _ => None,
     }
 }
 
