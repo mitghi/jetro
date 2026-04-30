@@ -29,6 +29,30 @@ pub(super) enum ValRowsIter<'a> {
     Single(std::option::IntoIter<Val>),
 }
 
+#[cfg(feature = "simd-json")]
+#[allow(dead_code)]
+pub(super) enum TapeRowSource<'a> {
+    Array {
+        tape: &'a crate::strref::TapeData,
+        first: usize,
+        len: usize,
+    },
+    Single(crate::value_view::TapeView<'a>),
+    Missing,
+}
+
+#[cfg(feature = "simd-json")]
+#[allow(dead_code)]
+pub(super) enum TapeRowsIter<'a> {
+    Array {
+        tape: &'a crate::strref::TapeData,
+        remaining: usize,
+        cur: usize,
+    },
+    Single(std::option::IntoIter<crate::value_view::TapeView<'a>>),
+    Empty,
+}
+
 impl Iterator for ValRowsIter<'_> {
     type Item = Val;
 
@@ -44,6 +68,33 @@ impl Iterator for ValRowsIter<'_> {
                 Some(row)
             }
             Self::Single(iter) => iter.next(),
+        }
+    }
+}
+
+#[cfg(feature = "simd-json")]
+impl Iterator for TapeRowsIter<'_> {
+    type Item = Val;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        use crate::value_view::{TapeView, ValueView};
+
+        match self {
+            Self::Array {
+                tape,
+                remaining,
+                cur,
+            } => {
+                if *remaining == 0 {
+                    return None;
+                }
+                let idx = *cur;
+                *remaining -= 1;
+                *cur += tape.span(idx);
+                Some(TapeView::Node { tape, idx }.materialize())
+            }
+            Self::Single(iter) => iter.next().map(|view| view.materialize()),
+            Self::Empty => None,
         }
     }
 }
@@ -121,6 +172,50 @@ impl<'a> ValRowSource<'a> {
     }
 }
 
+#[cfg(feature = "simd-json")]
+#[allow(dead_code)]
+impl<'a> TapeRowSource<'a> {
+    pub(super) fn from_field_chain(tape: &'a crate::strref::TapeData, keys: &[Arc<str>]) -> Self {
+        let Some(idx) = tape_walk_field_chain(tape, keys) else {
+            return Self::Missing;
+        };
+        Self::from_tape_index(tape, idx)
+    }
+
+    pub(super) fn from_tape_index(tape: &'a crate::strref::TapeData, idx: usize) -> Self {
+        match tape.nodes.get(idx) {
+            Some(crate::strref::TapeNode::Array { len, .. }) => Self::Array {
+                tape,
+                first: idx + 1,
+                len: *len as usize,
+            },
+            Some(_) => Self::Single(crate::value_view::TapeView::Node { tape, idx }),
+            None => Self::Missing,
+        }
+    }
+
+    pub(super) fn iter(self) -> TapeRowsIter<'a> {
+        match self {
+            Self::Array { tape, first, len } => TapeRowsIter::Array {
+                tape,
+                remaining: len,
+                cur: first,
+            },
+            Self::Single(view) => TapeRowsIter::Single(Some(view).into_iter()),
+            Self::Missing => TapeRowsIter::Empty,
+        }
+    }
+
+    pub(super) fn materialize(self) -> Vec<Val> {
+        self.iter().collect()
+    }
+
+    #[cfg(test)]
+    pub(super) fn is_array_provider(&self) -> bool {
+        matches!(self, Self::Array { .. })
+    }
+}
+
 pub(super) fn resolve(source: &Source, root: &Val) -> Val {
     match source {
         Source::Receiver(v) => v.clone(),
@@ -164,4 +259,31 @@ pub(super) fn resolved_array_like_rows(recv: Val) -> Option<Rows<'static>> {
 
 fn objvec_row(data: &ObjVecData, row: usize) -> Val {
     data.row_val(row)
+}
+
+#[cfg(feature = "simd-json")]
+#[allow(dead_code)]
+fn tape_walk_field_chain(tape: &crate::strref::TapeData, keys: &[Arc<str>]) -> Option<usize> {
+    let mut cur = 0usize;
+    for key in keys {
+        cur = tape_field(tape, cur, key.as_ref())?;
+    }
+    Some(cur)
+}
+
+#[cfg(feature = "simd-json")]
+#[allow(dead_code)]
+fn tape_field(tape: &crate::strref::TapeData, idx: usize, key: &str) -> Option<usize> {
+    let crate::strref::TapeNode::Object { len, .. } = *tape.nodes.get(idx)? else {
+        return None;
+    };
+    let mut cur = idx + 1;
+    for _ in 0..len {
+        if tape.str_at(cur) == key {
+            return Some(cur + 1);
+        }
+        cur += 1;
+        cur += tape.span(cur);
+    }
+    None
 }

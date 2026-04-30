@@ -569,6 +569,24 @@ mod tests {
         assert!(iter.next().is_none());
     }
 
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn tape_row_source_walks_field_chain_array_lazily() {
+        let tape =
+            crate::strref::TapeData::parse(br#"{"books":[{"id":1},{"id":2}],"skip":[3]}"#.to_vec())
+                .unwrap();
+        let keys = vec![std::sync::Arc::<str>::from("books")];
+
+        let source = row_source::TapeRowSource::from_field_chain(&tape, &keys);
+        assert!(source.is_array_provider());
+
+        let mut iter = source.iter();
+        assert!(matches!(iter, row_source::TapeRowsIter::Array { .. }));
+        assert_eq!(iter.next().unwrap().get_field("id"), Val::Int(1));
+        assert_eq!(iter.next().unwrap().get_field("id"), Val::Int(2));
+        assert!(iter.next().is_none());
+    }
+
     #[test]
     fn receiver_pipeline_start_uses_builtin_metadata() {
         assert!(Pipeline::is_receiver_pipeline_start(&Step::Method(
