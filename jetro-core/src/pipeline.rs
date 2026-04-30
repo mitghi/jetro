@@ -212,12 +212,12 @@ impl SortSpec {
 #[derive(Debug, Clone)]
 pub enum Stage {
     /// `.filter(pred)` — drops elements where `pred` is falsy.
-    Filter(Arc<crate::vm::Program>),
+    Filter(Arc<crate::vm::Program>, BuiltinViewStage),
     /// `.map(f)` — replaces each element with `f(@)`.
-    Map(Arc<crate::vm::Program>),
+    Map(Arc<crate::vm::Program>, BuiltinViewStage),
     /// `.flat_map(f)` — `f(@)` must yield an iterable; flattens one
     /// level into the pull stream.
-    FlatMap(Arc<crate::vm::Program>),
+    FlatMap(Arc<crate::vm::Program>, BuiltinViewStage),
     /// `.take(n)` — yields at most `n` elements, then completes.
     Take(usize, BuiltinViewStage, BuiltinStageMerge),
     /// `.skip(n)` — drops the first `n` elements.
@@ -912,7 +912,7 @@ mod tests {
         let p = lower_query("$.orders.filter(total > 100).filter(qty > 0).sum()").unwrap();
         assert_eq!(p.stages.len(), 1);
         match &p.stages[0] {
-            Stage::Filter(prog) => {
+            Stage::Filter(prog, _) => {
                 assert!(prog
                     .ops
                     .iter()
@@ -940,7 +940,7 @@ mod tests {
     fn demand_optimizer_pulls_filter_through_map_for_count() {
         let p = lower_query("$.orders.map(total).filter(@ > 10).count()").unwrap();
         assert_eq!(p.stages.len(), 1);
-        assert!(matches!(p.stages[0], Stage::Filter(_)));
+        assert!(matches!(p.stages[0], Stage::Filter(_, _)));
         assert!(matches!(p.sink, Sink::Count(_)));
     }
 
@@ -948,7 +948,7 @@ mod tests {
     fn demand_optimizer_pulls_filter_through_computed_map_for_count() {
         let p = lower_query("$.orders.map(price * qty).filter(@ > 100).count()").unwrap();
         assert_eq!(p.stages.len(), 1);
-        assert!(matches!(p.stages[0], Stage::Filter(_)));
+        assert!(matches!(p.stages[0], Stage::Filter(_, _)));
         assert_price_qty_gt_100(only_stage_expr(&p));
         assert!(matches!(p.sink, Sink::Count(_)));
     }
@@ -958,7 +958,7 @@ mod tests {
         let p =
             lower_query("$.users.map(name.trim().upper()).filter(@ == \"ADA\").count()").unwrap();
         assert_eq!(p.stages.len(), 1);
-        assert!(matches!(p.stages[0], Stage::Filter(_)));
+        assert!(matches!(p.stages[0], Stage::Filter(_, _)));
         assert!(matches!(p.sink, Sink::Count(_)));
     }
 
@@ -967,7 +967,7 @@ mod tests {
         let p = lower_query("$.orders.map({v: price * qty, id: id}).filter(@.v > 100).count()")
             .unwrap();
         assert_eq!(p.stages.len(), 1);
-        assert!(matches!(p.stages[0], Stage::Filter(_)));
+        assert!(matches!(p.stages[0], Stage::Filter(_, _)));
         assert_price_qty_gt_100(only_stage_expr(&p));
         assert!(matches!(p.sink, Sink::Count(_)));
     }
@@ -976,7 +976,7 @@ mod tests {
     fn demand_optimizer_simplifies_array_projection_after_substitution() {
         let p = lower_query("$.orders.map([price * qty, id]).filter(@[0] > 100).count()").unwrap();
         assert_eq!(p.stages.len(), 1);
-        assert!(matches!(p.stages[0], Stage::Filter(_)));
+        assert!(matches!(p.stages[0], Stage::Filter(_, _)));
         assert_price_qty_gt_100(only_stage_expr(&p));
         assert!(matches!(p.sink, Sink::Count(_)));
     }
@@ -985,8 +985,8 @@ mod tests {
     fn demand_optimizer_pulls_filter_through_map_but_keeps_map_for_collect() {
         let p = lower_query("$.orders.map(total).filter(@ > 10)").unwrap();
         assert_eq!(p.stages.len(), 2);
-        assert!(matches!(p.stages[0], Stage::Filter(_)));
-        assert!(matches!(p.stages[1], Stage::Map(_)));
+        assert!(matches!(p.stages[0], Stage::Filter(_, _)));
+        assert!(matches!(p.stages[1], Stage::Map(_, _)));
         assert!(matches!(p.sink, Sink::Collect));
     }
 

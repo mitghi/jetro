@@ -117,9 +117,9 @@ impl Pipeline {
             stages
                 .iter()
                 .map(|s| match s {
-                    Stage::Filter(p) => BodyKernel::classify(p),
-                    Stage::Map(p) => BodyKernel::classify(p),
-                    Stage::FlatMap(p) => BodyKernel::classify(p),
+                    Stage::Filter(p, _) => BodyKernel::classify(p),
+                    Stage::Map(p, _) => BodyKernel::classify(p),
+                    Stage::FlatMap(p, _) => BodyKernel::classify(p),
                     Stage::UniqueBy(Some(p)) => BodyKernel::classify(p),
                     Stage::GroupBy(p) => BodyKernel::classify(p),
                     Stage::Sort(spec) => spec
@@ -255,7 +255,7 @@ fn try_decode_map_body(arg: &crate::ast::Arg) -> Option<Plan> {
             crate::vm::Opcode::FieldChain(fcd),
         ];
         let prog = Arc::new(crate::vm::Program::new(ops, "<compiled-map-prefix>"));
-        stages.push(Stage::Map(prog));
+        stages.push(Stage::Map(prog, BuiltinViewStage::Map));
     }
     let (mut more_stages, _more_exprs, sink) = decode_method_chain(trailing)?;
     stages.append(&mut more_stages);
@@ -265,9 +265,9 @@ fn try_decode_map_body(arg: &crate::ast::Arg) -> Option<Plan> {
     let kernels: Vec<BodyKernel> = stages
         .iter()
         .map(|s| match s {
-            Stage::Filter(p) => BodyKernel::classify(p),
-            Stage::Map(p) => BodyKernel::classify(p),
-            Stage::FlatMap(p) => BodyKernel::classify(p),
+            Stage::Filter(p, _) => BodyKernel::classify(p),
+            Stage::Map(p, _) => BodyKernel::classify(p),
+            Stage::FlatMap(p, _) => BodyKernel::classify(p),
             Stage::UniqueBy(Some(p)) => BodyKernel::classify(p),
             Stage::GroupBy(p) => BodyKernel::classify(p),
             Stage::Sort(spec) => spec
@@ -371,17 +371,26 @@ fn decode_method_chain(
                         1,
                         _,
                     ) => {
-                        stages.push(Stage::Filter(compile_subexpr(&args[0])?));
+                        stages.push(Stage::Filter(
+                            compile_subexpr(&args[0])?,
+                            BuiltinViewStage::Filter,
+                        ));
                         stage_exprs.push(arg_expr(&args[0]));
                     }
                     // find_first / find_one: terminal — first match or Null.
                     (BuiltinMethod::FindFirst | BuiltinMethod::FindOne, 1, true) => {
-                        stages.push(Stage::Filter(compile_subexpr(&args[0])?));
+                        stages.push(Stage::Filter(
+                            compile_subexpr(&args[0])?,
+                            BuiltinViewStage::Filter,
+                        ));
                         stage_exprs.push(arg_expr(&args[0]));
                         sink = Sink::First(BuiltinViewSink::First);
                     }
                     (BuiltinMethod::FindFirst | BuiltinMethod::FindOne, 1, false) => {
-                        stages.push(Stage::Filter(compile_subexpr(&args[0])?));
+                        stages.push(Stage::Filter(
+                            compile_subexpr(&args[0])?,
+                            BuiltinViewStage::Filter,
+                        ));
                         stage_exprs.push(arg_expr(&args[0]));
                     }
                     // count_by / index_by: barrier reductions.  Trailing
@@ -415,13 +424,19 @@ fn decode_method_chain(
                                 stage_exprs.push(arg_expr(&args[0]));
                             }
                             None => {
-                                stages.push(Stage::Map(compile_subexpr(&args[0])?));
+                                stages.push(Stage::Map(
+                                    compile_subexpr(&args[0])?,
+                                    BuiltinViewStage::Map,
+                                ));
                                 stage_exprs.push(arg_expr(&args[0]));
                             }
                         }
                     }
                     (BuiltinMethod::FlatMap, 1, _) => {
-                        stages.push(Stage::FlatMap(compile_subexpr(&args[0])?));
+                        stages.push(Stage::FlatMap(
+                            compile_subexpr(&args[0])?,
+                            BuiltinViewStage::FlatMap,
+                        ));
                         stage_exprs.push(arg_expr(&args[0]));
                     }
                     (BuiltinMethod::Reverse, 0, _) => {
@@ -619,7 +634,7 @@ fn rewrite_step(p: &mut PipelineBody) -> bool {
     // Filter(false) → empty pipeline.  Filter(true) handled by Phase 4.
     let mut const_false_at: Option<usize> = None;
     for (i, s) in p.stages.iter().enumerate() {
-        if let Stage::Filter(prog) = s {
+        if let Stage::Filter(prog, _) = s {
             if let Some(false) = prog_const_bool(prog) {
                 const_false_at = Some(i);
                 break;
@@ -640,7 +655,7 @@ fn rewrite_step(p: &mut PipelineBody) -> bool {
     // program-building API.
     for i in 0..p.stages.len().saturating_sub(1) {
         match (&p.stages[i], &p.stages[i + 1]) {
-            (Stage::Map(a_prog), Stage::Map(b_prog)) => {
+            (Stage::Map(a_prog, _), Stage::Map(b_prog, _)) => {
                 let ka = BodyKernel::classify(a_prog);
                 let kb = BodyKernel::classify(b_prog);
                 let chain: Option<Vec<Arc<str>>> = match (&ka, &kb) {
@@ -674,14 +689,14 @@ fn rewrite_step(p: &mut PipelineBody) -> bool {
                     });
                     let new_ops = vec![Opcode::PushCurrent, Opcode::FieldChain(fcd)];
                     let merged = Arc::new(crate::vm::Program::new(new_ops, "<map-fused>"));
-                    p.stages[i] = Stage::Map(merged);
+                    p.stages[i] = Stage::Map(merged, BuiltinViewStage::Map);
                     p.stage_exprs[i] = None;
                     p.stages.remove(i + 1);
                     p.stage_exprs.remove(i + 1);
                     return true;
                 }
             }
-            (Stage::Filter(p_prog), Stage::Filter(q_prog)) => {
+            (Stage::Filter(p_prog, _), Stage::Filter(q_prog, _)) => {
                 let mut ops: Vec<Opcode> = p_prog.ops.as_ref().to_vec();
                 ops.push(Opcode::AndOp(Arc::clone(q_prog)));
                 let merged = Arc::new(crate::vm::Program {
@@ -691,7 +706,7 @@ fn rewrite_step(p: &mut PipelineBody) -> bool {
                     is_structural: false,
                     ics: p_prog.ics.clone(),
                 });
-                p.stages[i] = Stage::Filter(merged);
+                p.stages[i] = Stage::Filter(merged, BuiltinViewStage::Filter);
                 p.stage_exprs[i] = None;
                 p.stages.remove(i + 1);
                 p.stage_exprs.remove(i + 1);
@@ -704,7 +719,8 @@ fn rewrite_step(p: &mut PipelineBody) -> bool {
     // Pushdown: Map(f) ∘ Take(n) → Take(n) ∘ Map(f).
     // Strict perf win — composed exec runs map only n times.
     for i in 0..p.stages.len().saturating_sub(1) {
-        if matches!(&p.stages[i], Stage::Map(_)) && matches!(&p.stages[i + 1], Stage::Take(_, _, _))
+        if matches!(&p.stages[i], Stage::Map(_, _))
+            && matches!(&p.stages[i + 1], Stage::Take(_, _, _))
         {
             p.stages.swap(i, i + 1);
             p.stage_exprs.swap(i, i + 1);

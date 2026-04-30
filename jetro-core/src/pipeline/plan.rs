@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::ast::Expr;
-use crate::builtins::{BuiltinMethod, BuiltinViewSink, BuiltinViewStage};
+use crate::builtins::{BuiltinViewSink, BuiltinViewStage};
 use crate::chain_ir::{ChainOp, Demand as ChainDemand, PullDemand, ValueNeed};
 use crate::vm::{CompiledObjEntry, Opcode, Program};
 
@@ -290,7 +290,7 @@ impl Stage {
         self.is_composed_barrier()
             || matches!(
                 self,
-                Stage::FlatMap(_)
+                Stage::FlatMap(_, _)
                     | Stage::Split(_)
                     | Stage::Chunk(_)
                     | Stage::Window(_)
@@ -339,9 +339,9 @@ impl Stage {
 
     fn view_stage_metadata(&self) -> Option<BuiltinViewStage> {
         match self {
-            Stage::Filter(_) => BuiltinMethod::Filter.spec().view_stage,
-            Stage::Map(_) => BuiltinMethod::Map.spec().view_stage,
-            Stage::FlatMap(_) => BuiltinMethod::FlatMap.spec().view_stage,
+            Stage::Filter(_, stage) | Stage::Map(_, stage) | Stage::FlatMap(_, stage) => {
+                Some(*stage)
+            }
             Stage::Take(_, stage, _) | Stage::Skip(_, stage, _) => Some(*stage),
             _ => None,
         }
@@ -352,9 +352,9 @@ impl Stage {
         F: FnMut(&crate::vm::Program) -> bool,
     {
         match self {
-            Stage::Filter(prog)
-            | Stage::Map(prog)
-            | Stage::FlatMap(prog)
+            Stage::Filter(prog, _)
+            | Stage::Map(prog, _)
+            | Stage::FlatMap(prog, _)
             | Stage::Sort(super::SortSpec {
                 key: Some(prog), ..
             })
@@ -391,9 +391,9 @@ impl Stage {
 
     pub fn chain_op(&self) -> Option<ChainOp> {
         match self {
-            Stage::Filter(_) => Some(ChainOp::Filter),
-            Stage::Map(_) | Stage::CompiledMap(_) => Some(ChainOp::Map),
-            Stage::FlatMap(_) | Stage::Split(_) => Some(ChainOp::FlatMap),
+            Stage::Filter(_, _) => Some(ChainOp::Filter),
+            Stage::Map(_, _) | Stage::CompiledMap(_) => Some(ChainOp::Map),
+            Stage::FlatMap(_, _) | Stage::Split(_) => Some(ChainOp::FlatMap),
             Stage::Take(n, _, _) => Some(ChainOp::Take(*n)),
             Stage::Skip(n, _, _) => Some(ChainOp::Skip(*n)),
             Stage::Builtin(call) => Some(ChainOp::Builtin(call.method)),
@@ -421,19 +421,19 @@ impl Stage {
     pub fn shape(&self) -> StageShape {
         use crate::chain_ir::Cardinality;
         match self {
-            Stage::Map(_) => StageShape {
+            Stage::Map(_, _) => StageShape {
                 cardinality: Cardinality::OneToOne,
                 can_indexed: true,
                 cost: 10.0,
                 selectivity: 1.0,
             },
-            Stage::Filter(_) => StageShape {
+            Stage::Filter(_, _) => StageShape {
                 cardinality: Cardinality::Filtering,
                 can_indexed: false,
                 cost: 10.0,
                 selectivity: 0.5,
             },
-            Stage::FlatMap(_) => StageShape {
+            Stage::FlatMap(_, _) => StageShape {
                 cardinality: Cardinality::Expanding,
                 can_indexed: false,
                 cost: 10.0,
@@ -644,7 +644,7 @@ pub fn plan_with_exprs(
 fn kernel_cost_selectivity(stage: &Stage, kernel: &BodyKernel) -> (f64, f64) {
     use crate::ast::BinOp;
     match (stage, kernel) {
-        (Stage::Filter(_), BodyKernel::FieldCmpLit(_, op, _)) => {
+        (Stage::Filter(_, _), BodyKernel::FieldCmpLit(_, op, _)) => {
             let s = match op {
                 BinOp::Eq => 0.10,
                 BinOp::Neq => 0.90,
@@ -654,7 +654,7 @@ fn kernel_cost_selectivity(stage: &Stage, kernel: &BodyKernel) -> (f64, f64) {
             };
             (1.5, s)
         }
-        (Stage::Filter(_), BodyKernel::FieldChainCmpLit(keys, op, _)) => {
+        (Stage::Filter(_, _), BodyKernel::FieldChainCmpLit(keys, op, _)) => {
             let s = match op {
                 BinOp::Eq => 0.10,
                 BinOp::Neq => 0.90,
@@ -664,7 +664,7 @@ fn kernel_cost_selectivity(stage: &Stage, kernel: &BodyKernel) -> (f64, f64) {
             };
             (1.0 + keys.len() as f64, s)
         }
-        (Stage::Filter(_), BodyKernel::CurrentCmpLit(op, _)) => {
+        (Stage::Filter(_, _), BodyKernel::CurrentCmpLit(op, _)) => {
             let s = match op {
                 BinOp::Eq => 0.10,
                 BinOp::Neq => 0.90,
@@ -674,8 +674,8 @@ fn kernel_cost_selectivity(stage: &Stage, kernel: &BodyKernel) -> (f64, f64) {
             };
             (0.8, s)
         }
-        (Stage::Filter(_), BodyKernel::FieldRead(_)) => (1.0, 0.7),
-        (Stage::Filter(_), BodyKernel::ConstBool(b)) => (0.1, if *b { 1.0 } else { 0.0 }),
+        (Stage::Filter(_, _), BodyKernel::FieldRead(_)) => (1.0, 0.7),
+        (Stage::Filter(_, _), BodyKernel::ConstBool(b)) => (0.1, if *b { 1.0 } else { 0.0 }),
         _ => {
             let sh = stage.shape();
             (sh.cost, sh.selectivity)
@@ -692,7 +692,7 @@ fn reorder_filter_runs(
     while i < stages.len() {
         let mut j = i;
         while j < stages.len()
-            && matches!(stages[j], Stage::Filter(_))
+            && matches!(stages[j], Stage::Filter(_, _))
             && !matches!(kernels.get(j), Some(BodyKernel::Generic) | None)
         {
             j += 1;
@@ -730,7 +730,7 @@ fn fold_merge_with_kernels(
 ) {
     let mut i = 0;
     while i < stages.len() {
-        if matches!(&stages[i], Stage::Filter(_))
+        if matches!(&stages[i], Stage::Filter(_, _))
             && matches!(kernels.get(i), Some(BodyKernel::ConstBool(true)))
         {
             stages.remove(i);

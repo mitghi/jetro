@@ -37,7 +37,7 @@ pub(super) fn run(
     let mut cur = elem;
     for stage in &pipeline.stages {
         match stage {
-            Stage::Map(prog) => {
+            Stage::Map(prog, _) => {
                 let prev = env.swap_current(cur);
                 cur = match vm.exec_in_env(prog, &mut env) {
                     Ok(v) => v,

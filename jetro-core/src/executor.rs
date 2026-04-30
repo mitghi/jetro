@@ -289,7 +289,7 @@ mod tests {
             PipelinePlanSource::Expr(_) => panic!("expected $.data field-chain source"),
         }
         assert_eq!(body.stages.len(), 1);
-        assert!(matches!(body.stages[0], Stage::Filter(_)));
+        assert!(matches!(body.stages[0], Stage::Filter(_, _)));
         assert!(
             matches!(&body.sink, Sink::Numeric(n) if n.op == NumOp::Sum && n.project.is_some())
         );
@@ -326,7 +326,7 @@ mod tests {
             PipelinePlanSource::Expr(_) => panic!("expected $.data field-chain source"),
         }
         assert_eq!(body.stages.len(), 1);
-        assert!(matches!(body.stages[0], Stage::Filter(_)));
+        assert!(matches!(body.stages[0], Stage::Filter(_, _)));
         assert!(
             matches!(&body.sink, Sink::Numeric(n) if n.op == NumOp::Sum && n.project.is_some())
         );

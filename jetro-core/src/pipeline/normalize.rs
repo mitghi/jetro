@@ -54,7 +54,7 @@ pub(super) fn normalize_symbolic(
         let stage = in_stages[idx].clone();
         let expr = in_exprs.get(idx).cloned().unwrap_or(None);
         match stage {
-            Stage::Map(_) | Stage::CompiledMap(_) => {
+            Stage::Map(_, _) | Stage::CompiledMap(_) => {
                 if let Some(expr) = expr.as_ref().filter(|e| is_pure_expr(e)) {
                     out.item = simplify_expr(substitute_current(expr, &out.item));
                 } else {
@@ -62,7 +62,7 @@ pub(super) fn normalize_symbolic(
                     out.push_stage(stage, expr);
                 }
             }
-            Stage::Filter(_) => {
+            Stage::Filter(_, _) => {
                 if let Some(expr) = expr.as_ref().filter(|e| is_pure_expr(e)) {
                     let pred = simplify_expr(substitute_current(expr, &out.item));
                     out.predicate = Some(match out.predicate.take() {
@@ -153,8 +153,8 @@ impl SymbolicEmitter {
         let prog = compile_stage_expr(&expr);
         let kernel = BodyKernel::classify(&prog);
         let stage = match kind {
-            ExprStageKind::Filter => Stage::Filter(prog),
-            ExprStageKind::Map => Stage::Map(prog),
+            ExprStageKind::Filter => Stage::Filter(prog, crate::builtins::BuiltinViewStage::Filter),
+            ExprStageKind::Map => Stage::Map(prog, crate::builtins::BuiltinViewStage::Map),
         };
         self.out_stages.push(stage);
         self.out_exprs.push(Some(Arc::new(expr)));
@@ -205,9 +205,9 @@ enum ExprStageKind {
 
 fn stage_kernel(stage: &Stage) -> BodyKernel {
     match stage {
-        Stage::Filter(p)
-        | Stage::Map(p)
-        | Stage::FlatMap(p)
+        Stage::Filter(p, _)
+        | Stage::Map(p, _)
+        | Stage::FlatMap(p, _)
         | Stage::TakeWhile(p)
         | Stage::DropWhile(p)
         | Stage::IndicesWhere(p)
@@ -245,10 +245,10 @@ fn suffix_consumes_value(stages: &[Stage]) -> bool {
     stages.iter().any(|s| {
         matches!(
             s,
-            Stage::Filter(_)
+            Stage::Filter(_, _)
                 | Stage::UniqueBy(_)
                 | Stage::GroupBy(_)
-                | Stage::FlatMap(_)
+                | Stage::FlatMap(_, _)
                 | Stage::Sort(crate::pipeline::SortSpec { key: Some(_), .. })
                 | Stage::TakeWhile(_)
                 | Stage::DropWhile(_)

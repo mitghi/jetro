@@ -179,15 +179,18 @@ mod tests {
     #[test]
     fn stage_view_capability_comes_from_stage_metadata() {
         let prog = Arc::new(crate::vm::Program::new(Vec::new(), ""));
-        let filter = Stage::Filter(prog.clone())
+        let filter = Stage::Filter(prog.clone(), BuiltinViewStage::Filter)
             .view_capability(4, Some(&BodyKernel::FieldRead(Arc::<str>::from("score"))))
             .unwrap();
-        let map = Stage::Map(prog)
+        let map = Stage::Map(prog, BuiltinViewStage::Map)
             .view_capability(5, Some(&BodyKernel::FieldRead(Arc::<str>::from("name"))))
             .unwrap();
-        let flat_map = Stage::FlatMap(Arc::new(crate::vm::Program::new(Vec::new(), "")))
-            .view_capability(6, Some(&BodyKernel::FieldRead(Arc::<str>::from("items"))))
-            .unwrap();
+        let flat_map = Stage::FlatMap(
+            Arc::new(crate::vm::Program::new(Vec::new(), "")),
+            BuiltinViewStage::FlatMap,
+        )
+        .view_capability(6, Some(&BodyKernel::FieldRead(Arc::<str>::from("items"))))
+        .unwrap();
         let take = Stage::Take(2, BuiltinViewStage::Take, BuiltinStageMerge::UsizeMin)
             .view_capability(7, None)
             .unwrap();
@@ -251,8 +254,14 @@ mod tests {
     fn view_capabilities_preserve_expected_metadata() {
         let body = PipelineBody {
             stages: vec![
-                Stage::Filter(Arc::new(crate::vm::Program::new(Vec::new(), ""))),
-                Stage::Map(Arc::new(crate::vm::Program::new(Vec::new(), ""))),
+                Stage::Filter(
+                    Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                    BuiltinViewStage::Filter,
+                ),
+                Stage::Map(
+                    Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                    BuiltinViewStage::Map,
+                ),
                 Stage::Take(
                     2,
                     crate::builtins::BuiltinViewStage::Take,
@@ -292,8 +301,14 @@ mod tests {
     fn view_prefix_stops_at_first_non_view_stage() {
         let body = PipelineBody {
             stages: vec![
-                Stage::Filter(Arc::new(crate::vm::Program::new(Vec::new(), ""))),
-                Stage::Map(Arc::new(crate::vm::Program::new(Vec::new(), ""))),
+                Stage::Filter(
+                    Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                    BuiltinViewStage::Filter,
+                ),
+                Stage::Map(
+                    Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                    BuiltinViewStage::Map,
+                ),
                 Stage::Builtin(crate::pipeline::PipelineBuiltinCall {
                     method: crate::builtins::BuiltinMethod::Upper,
                     args: crate::builtins::BuiltinArgs::None,

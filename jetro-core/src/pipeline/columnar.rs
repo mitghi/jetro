@@ -176,7 +176,7 @@ impl Pipeline {
             return None;
         }
         if let (
-            Some([Stage::Filter(_), Stage::Map(_)]),
+            Some([Stage::Filter(_, _), Stage::Map(_, _)]),
             Some([BodyKernel::FieldCmpLit(pk, pop, plit), BodyKernel::FieldRead(mk)]),
             Val::ObjVec(d),
         ) = (self.stages.get(..), self.stage_kernels.get(..), &recv)
@@ -197,7 +197,7 @@ impl Pipeline {
         // StrVec receivers.  Stage::Filter(CurrentCmpLit) over a
         // primitive vec → walk slice directly, build typed output.
         // Sinks: Collect / Count.
-        if let [Stage::Filter(_)] = self.stages.as_slice() {
+        if let [Stage::Filter(_, _)] = self.stages.as_slice() {
             if let [BodyKernel::CurrentCmpLit(op, lit)] = self.stage_kernels.as_slice() {
                 match (&recv, &self.sink) {
                     (Val::IntVec(a), Sink::Collect) => {
@@ -262,7 +262,7 @@ impl Pipeline {
 
         match (stages.as_slice(), kernels.as_slice()) {
             // Single Map(FieldRead) → Collect: direct projection.
-            ([Stage::Map(_)], [BodyKernel::FieldRead(k)]) => {
+            ([Stage::Map(_, _)], [BodyKernel::FieldRead(k)]) => {
                 let mut out = Vec::with_capacity(arr.len());
                 for v in arr.iter() {
                     out.push(v.get_field(k.as_ref()));
@@ -272,7 +272,7 @@ impl Pipeline {
             // Single Filter(FieldCmpLit) → Collect: predicate mask copy.
             // Phase C1 — when Arc is uniquely held (refcount 1), take
             // ownership and retain-in-place; saves N Val clones.
-            ([Stage::Filter(_)], [BodyKernel::FieldCmpLit(k, op, lit)]) => {
+            ([Stage::Filter(_, _)], [BodyKernel::FieldCmpLit(k, op, lit)]) => {
                 match Arc::try_unwrap(arr) {
                     Ok(mut owned) => {
                         owned.retain(|v| {
@@ -295,7 +295,7 @@ impl Pipeline {
             }
             // Filter(FieldCmpLit) ∘ Map(FieldRead) → Collect: project filtered column.
             (
-                [Stage::Filter(_), Stage::Map(_)],
+                [Stage::Filter(_, _), Stage::Map(_, _)],
                 [BodyKernel::FieldCmpLit(pk, pop, plit), BodyKernel::FieldRead(mk)],
             ) => {
                 let mut out = Vec::with_capacity(arr.len());
@@ -312,7 +312,7 @@ impl Pipeline {
             // IndexMap.get_full (returns slot index); subsequent items
             // try the cached slot first, fall back to hash on miss.
             // Saves ~half the probe cost on uniform-shape arrays.
-            ([Stage::Map(_)], [BodyKernel::FieldChain(ks)]) => {
+            ([Stage::Map(_, _)], [BodyKernel::FieldChain(ks)]) => {
                 let mut out = Vec::with_capacity(arr.len());
                 let mut slots: Vec<Option<usize>> = vec![None; ks.len()];
                 for v in arr.iter() {
@@ -329,7 +329,7 @@ impl Pipeline {
             }
             // Filter(FieldCmpLit) ∘ Map(FieldChain) → Collect.
             (
-                [Stage::Filter(_), Stage::Map(_)],
+                [Stage::Filter(_, _), Stage::Map(_, _)],
                 [BodyKernel::FieldCmpLit(pk, pop, plit), BodyKernel::FieldChain(mks)],
             ) => {
                 let mut out = Vec::with_capacity(arr.len());
@@ -350,7 +350,7 @@ impl Pipeline {
             }
             // Filter(FieldChainCmpLit) ∘ Map(FieldRead) → Collect.
             (
-                [Stage::Filter(_), Stage::Map(_)],
+                [Stage::Filter(_, _), Stage::Map(_, _)],
                 [BodyKernel::FieldChainCmpLit(pks, pop, plit), BodyKernel::FieldRead(mk)],
             ) => {
                 let mut out = Vec::with_capacity(arr.len());
@@ -519,7 +519,7 @@ impl Pipeline {
             let (cs, _ck, csink) = self.canonical();
             // FlatMap(FieldRead) → flatmap-count
             if matches!(csink, Sink::Count(_)) && cs.len() == 1 {
-                if let Stage::FlatMap(prog) = &cs[0] {
+                if let Stage::FlatMap(prog, _) = &cs[0] {
                     if let Some(field) = single_field_prog(prog) {
                         if let Some(slot) = d.slot_of(field) {
                             return Some(Ok(objvec_flatmap_count_slot(d, slot)));
@@ -536,7 +536,7 @@ impl Pipeline {
                         return Some(Ok(objvec_num_slot(d, sm, n.op)));
                     }
                     if cs.len() == 1 {
-                        if let Stage::Filter(pred) = &cs[0] {
+                        if let Stage::Filter(pred, _) = &cs[0] {
                             let (pf, cop, lit) = single_cmp_prog(pred)?;
                             let sp = d.slot_of(pf)?;
                             return Some(Ok(objvec_filter_num_slots(d, sp, cop, &lit, sm, n.op)));
@@ -544,14 +544,14 @@ impl Pipeline {
                     }
                 }
                 if cs.len() == 1 {
-                    if let Stage::Map(prog) = &cs[0] {
+                    if let Stage::Map(prog, _) = &cs[0] {
                         let field = single_field_prog(prog)?;
                         let slot = d.slot_of(field)?;
                         return Some(Ok(objvec_num_slot(d, slot, n.op)));
                     }
                 }
                 if cs.len() == 2 {
-                    if let (Stage::Filter(pred), Stage::Map(map)) = (&cs[0], &cs[1]) {
+                    if let (Stage::Filter(pred, _), Stage::Map(map, _)) = (&cs[0], &cs[1]) {
                         let (pf, cop, lit) = single_cmp_prog(pred)?;
                         let mf = single_field_prog(map)?;
                         let sp = d.slot_of(pf)?;
@@ -562,7 +562,7 @@ impl Pipeline {
             }
             // Filter(...) → count-if (single cmp or AND chain)
             if matches!(csink, Sink::Count(_)) && cs.len() == 1 {
-                if let Stage::Filter(pred) = &cs[0] {
+                if let Stage::Filter(pred, _) = &cs[0] {
                     if let Some((pf, op, lit)) = single_cmp_prog(pred) {
                         let sp = d.slot_of(pf)?;
                         return Some(Ok(objvec_filter_count_slot(d, sp, op, &lit)));

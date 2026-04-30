@@ -596,7 +596,10 @@ mod tests {
         let source = CountingView::root(&[1, 2, 3]);
         let body = PipelineBody {
             stages: vec![
-                Stage::Filter(Arc::new(crate::vm::Program::new(Vec::new(), ""))),
+                Stage::Filter(
+                    Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                    crate::builtins::BuiltinViewStage::Filter,
+                ),
                 Stage::Take(
                     2,
                     crate::builtins::BuiltinViewStage::Take,

@@ -1343,9 +1343,15 @@ mod tests {
         let dummy = Arc::new(crate::vm::Program::new(Vec::new(), ""));
         let stages = vec![
             // [0]: Filter(price < 100)  — selectivity 0.4
-            Stage::Filter(Arc::clone(&dummy)),
+            Stage::Filter(
+                Arc::clone(&dummy),
+                crate::builtins::BuiltinViewStage::Filter,
+            ),
             // [1]: Filter(active == true) — selectivity 0.1, more selective
-            Stage::Filter(Arc::clone(&dummy)),
+            Stage::Filter(
+                Arc::clone(&dummy),
+                crate::builtins::BuiltinViewStage::Filter,
+            ),
         ];
         let kernels = vec![
             BodyKernel::FieldCmpLit(Arc::from("price"), BinOp::Lt, crate::value::Val::Int(100)),
@@ -1445,12 +1451,24 @@ mod tests {
 
         // Map + First → IndexedDispatch
         assert_eq!(
-            select_strategy(&[Stage::Map(Arc::clone(&dummy))], &first_sink),
+            select_strategy(
+                &[Stage::Map(
+                    Arc::clone(&dummy),
+                    crate::builtins::BuiltinViewStage::Map
+                )],
+                &first_sink,
+            ),
             Strategy::IndexedDispatch
         );
         // Filter + First → EarlyExit (Filter not 1:1)
         assert_eq!(
-            select_strategy(&[Stage::Filter(Arc::clone(&dummy))], &first_sink),
+            select_strategy(
+                &[Stage::Filter(
+                    Arc::clone(&dummy),
+                    crate::builtins::BuiltinViewStage::Filter,
+                )],
+                &first_sink,
+            ),
             Strategy::EarlyExit
         );
         // Sort + First → BarrierMaterialise
@@ -1461,7 +1479,10 @@ mod tests {
         // Map + Sum → PullLoop (no positional, no barrier)
         assert_eq!(
             select_strategy(
-                &[Stage::Map(Arc::clone(&dummy))],
+                &[Stage::Map(
+                    Arc::clone(&dummy),
+                    crate::builtins::BuiltinViewStage::Map
+                )],
                 &Sink::Numeric(NumericSink::identity(NumOp::Sum))
             ),
             Strategy::PullLoop
@@ -1505,7 +1526,10 @@ mod tests {
         // (Filter loses positional info upstream)
         let stages = vec![
             Stage::Sort(SortSpec::keyed(Arc::clone(&dummy_prog), false)),
-            Stage::Filter(Arc::clone(&dummy_prog)),
+            Stage::Filter(
+                Arc::clone(&dummy_prog),
+                crate::builtins::BuiltinViewStage::Filter,
+            ),
         ];
         let strats = compute_strategies(&stages, &first_sink);
         // Filter still sees AtMost(1) downstream → consumption=AtMost(1)

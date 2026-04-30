@@ -69,14 +69,14 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
                 .get(stage_idx)
                 .unwrap_or(&BodyKernel::Generic);
             match stage {
-                Stage::Filter(prog) => {
+                Stage::Filter(prog, _) => {
                     buf = filter_apply(buf, |v| {
                         eval_kernel(kernel, v, |item| {
                             apply_item_in_env(&mut vm, &mut loop_env, item, prog)
                         })
                     })?;
                 }
-                Stage::Map(prog) => {
+                Stage::Map(prog, _) => {
                     buf = map_apply(buf, |v| {
                         eval_kernel(kernel, v, |item| {
                             apply_item_in_env(&mut vm, &mut loop_env, item, prog)
@@ -138,7 +138,7 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
                     }
                     buf = out;
                 }
-                Stage::FlatMap(prog) => {
+                Stage::FlatMap(prog, _) => {
                     let mut out: Vec<Val> = Vec::new();
                     for v in &buf {
                         let inner = eval_kernel(kernel, v, |item| {
@@ -427,7 +427,7 @@ where
     let mut sink_acc = SinkAccumulator::new(&pipeline.sink);
     let terminal_map_idx = if matches!(pipeline.sink, Sink::Collect) {
         match pipeline.stages.last() {
-            Some(Stage::Map(_)) => pipeline.stages.len().checked_sub(1),
+            Some(Stage::Map(_, _)) => pipeline.stages.len().checked_sub(1),
             _ => None,
         }
     } else {
@@ -465,7 +465,7 @@ where
                     }
                     stage_taken[stage_idx] += 1;
                 }
-                Stage::Filter(prog) => {
+                Stage::Filter(prog, _) => {
                     if !filter_one(&item, |v| {
                         eval_kernel(kernel, v, |item| {
                             apply_item_in_env(&mut vm, &mut loop_env, item, prog)
@@ -474,7 +474,7 @@ where
                         continue 'outer;
                     }
                 }
-                Stage::Map(prog) => {
+                Stage::Map(prog, _) => {
                     if Some(stage_idx) == terminal_map_idx {
                         terminal_map_collect
                             .as_mut()
@@ -531,7 +531,7 @@ where
                 Stage::Reverse
                 | Stage::Sort(_)
                 | Stage::UniqueBy(_)
-                | Stage::FlatMap(_)
+                | Stage::FlatMap(_, _)
                 | Stage::GroupBy(_)
                 | Stage::Split(_)
                 | Stage::Chunk(_)
