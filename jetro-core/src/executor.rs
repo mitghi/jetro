@@ -457,6 +457,60 @@ mod tests {
 
     #[cfg(feature = "simd-json")]
     #[test]
+    fn tape_view_native_take_materializes_only_output_subtree() {
+        let j = Jetro::from_bytes(
+            br#"{"people":[{"name":"al","score":1},{"name":"ada","score":901},{"name":"bob","score":902}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j
+            .collect(r#"$.people.filter(score > 900).take(1).map(name)"#)
+            .unwrap();
+
+        assert_eq!(out, json!(["ada"]));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 1);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn tape_view_prefix_materializes_only_boundary_rows_for_generic_suffix() {
+        let j = Jetro::from_bytes(
+            br#"{"people":[{"name":"al","score":1},{"name":"ada","score":901},{"name":"bob","score":902},{"name":"cat","score":3}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j
+            .collect(r#"$.people.filter(score > 900).map(name).upper()"#)
+            .unwrap();
+
+        assert_eq!(out, json!(["ADA", "BOB"]));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 2);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn tape_row_bridge_materializes_only_demanded_rows_for_generic_prefix() {
+        let j = Jetro::from_bytes(
+            br#"{"people":[{"name":"al"},{"name":"ada"},{"name":"bob"},{"name":"carol"}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j
+            .collect(r#"$.people.filter(name.len() == 3).take(1).map(name)"#)
+            .unwrap();
+
+        assert_eq!(out, json!(["ada"]));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 2);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
     fn object_shape_tape_pipeline_generic_first_stage_uses_row_bridge() {
         let j = Jetro::from_bytes(
             br#"{"people":[{"name":"al"},{"name":"ada"},{"name":"bob"},{"name":"carol"}],"meta":{"version":3}}"#.to_vec(),

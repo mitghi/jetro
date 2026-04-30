@@ -16,6 +16,8 @@
 //! `AsRef<str>` allow existing string APIs (len, chars, find, memchr,
 //! etc.) to work against a `StrRef` transparently.
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 #[derive(Clone, Debug)]
@@ -215,6 +217,8 @@ pub struct TapeData {
     pub bytes_buf: Arc<[u8]>,
     /// Flat node sequence; same length as `simd_json::Tape.0`.
     pub nodes: Vec<TapeNode>,
+    #[cfg(test)]
+    materialized_subtrees: AtomicUsize,
 }
 
 #[cfg(feature = "simd-json")]
@@ -275,7 +279,30 @@ impl TapeData {
             combined.extend_from_slice(&extra_buf);
             Arc::from(combined.into_boxed_slice())
         };
-        Ok(Arc::new(Self { bytes_buf, nodes }))
+        Ok(Arc::new(Self {
+            bytes_buf,
+            nodes,
+            #[cfg(test)]
+            materialized_subtrees: AtomicUsize::new(0),
+        }))
+    }
+
+    #[cfg(test)]
+    #[inline]
+    pub(crate) fn observe_materialized_subtree(&self) {
+        self.materialized_subtrees.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    #[inline]
+    pub(crate) fn reset_materialized_subtrees(&self) {
+        self.materialized_subtrees.store(0, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    #[inline]
+    pub(crate) fn materialized_subtrees(&self) -> usize {
+        self.materialized_subtrees.load(Ordering::Relaxed)
     }
 
     /// Borrow string contents in `bytes_buf` at the given byte range.

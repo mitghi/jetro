@@ -310,6 +310,8 @@ impl<'a> ValueView<'a> for TapeView<'a> {
     fn materialize(&self) -> Val {
         match self {
             Self::Node { tape, idx } => {
+                #[cfg(test)]
+                tape.observe_materialized_subtree();
                 let mut idx = *idx;
                 Self::materialize_at(tape, &mut idx)
             }

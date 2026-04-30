@@ -333,6 +333,20 @@ impl Jetro {
         self.root_val.get().is_some()
     }
 
+    #[cfg(all(test, feature = "simd-json"))]
+    pub(crate) fn reset_tape_materialized_subtrees(&self) {
+        if let Some(tape) = self.lazy_tape() {
+            tape.reset_materialized_subtrees();
+        }
+    }
+
+    #[cfg(all(test, feature = "simd-json"))]
+    pub(crate) fn tape_materialized_subtrees(&self) -> usize {
+        self.lazy_tape()
+            .map(|tape| tape.materialized_subtrees())
+            .unwrap_or(0)
+    }
+
     /// Evaluate `expr` against the document. Routes through the planner and
     /// then either Pipeline IR or the thread-local VM.
     pub fn collect<S: AsRef<str>>(&self, expr: S) -> std::result::Result<Value, EvalError> {
