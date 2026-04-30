@@ -331,22 +331,22 @@ fn decode_method_chain(
                     (BuiltinMethod::IndicesWhere, 1, true) => {
                         stages.push(Stage::IndicesWhere(compile_subexpr(&args[0])?));
                         stage_exprs.push(arg_expr(&args[0]));
-                        sink = Sink::First;
+                        sink = Sink::First(BuiltinViewSink::First);
                     }
                     (BuiltinMethod::FindIndex, 1, true) => {
                         stages.push(Stage::FindIndex(compile_subexpr(&args[0])?));
                         stage_exprs.push(arg_expr(&args[0]));
-                        sink = Sink::First;
+                        sink = Sink::First(BuiltinViewSink::First);
                     }
                     (BuiltinMethod::MaxBy, 1, true) => {
                         stages.push(Stage::MaxBy(compile_subexpr(&args[0])?));
                         stage_exprs.push(arg_expr(&args[0]));
-                        sink = Sink::First;
+                        sink = Sink::First(BuiltinViewSink::First);
                     }
                     (BuiltinMethod::MinBy, 1, true) => {
                         stages.push(Stage::MinBy(compile_subexpr(&args[0])?));
                         stage_exprs.push(arg_expr(&args[0]));
-                        sink = Sink::First;
+                        sink = Sink::First(BuiltinViewSink::First);
                     }
                     (BuiltinMethod::TransformValues, 1, _) => {
                         stages.push(Stage::TransformValues(compile_subexpr(&args[0])?));
@@ -376,7 +376,7 @@ fn decode_method_chain(
                     (BuiltinMethod::FindFirst | BuiltinMethod::FindOne, 1, true) => {
                         stages.push(Stage::Filter(compile_subexpr(&args[0])?));
                         stage_exprs.push(arg_expr(&args[0]));
-                        sink = Sink::First;
+                        sink = Sink::First(BuiltinViewSink::First);
                     }
                     (BuiltinMethod::FindFirst | BuiltinMethod::FindOne, 1, false) => {
                         stages.push(Stage::Filter(compile_subexpr(&args[0])?));
@@ -387,7 +387,7 @@ fn decode_method_chain(
                     (BuiltinMethod::CountBy, 1, true) => {
                         stages.push(Stage::CountBy(compile_subexpr(&args[0])?));
                         stage_exprs.push(arg_expr(&args[0]));
-                        sink = Sink::First;
+                        sink = Sink::First(BuiltinViewSink::First);
                     }
                     (BuiltinMethod::CountBy, 1, false) => {
                         stages.push(Stage::CountBy(compile_subexpr(&args[0])?));
@@ -396,7 +396,7 @@ fn decode_method_chain(
                     (BuiltinMethod::IndexBy, 1, true) => {
                         stages.push(Stage::IndexBy(compile_subexpr(&args[0])?));
                         stage_exprs.push(arg_expr(&args[0]));
-                        sink = Sink::First;
+                        sink = Sink::First(BuiltinViewSink::First);
                     }
                     (BuiltinMethod::IndexBy, 1, false) => {
                         stages.push(Stage::IndexBy(compile_subexpr(&args[0])?));
@@ -543,12 +543,12 @@ fn terminal_sink_for_method(method: BuiltinMethod) -> Option<Sink> {
     }
 
     match spec.view_sink? {
-        BuiltinViewSink::Count => Some(Sink::Count),
+        BuiltinViewSink::Count => Some(Sink::Count(BuiltinViewSink::Count)),
         BuiltinViewSink::Numeric => Some(Sink::Numeric(NumericSink::identity(
             NumOp::from_builtin_reducer(spec.numeric_reducer?),
         ))),
-        BuiltinViewSink::First => Some(Sink::First),
-        BuiltinViewSink::Last => Some(Sink::Last),
+        BuiltinViewSink::First => Some(Sink::First(BuiltinViewSink::First)),
+        BuiltinViewSink::Last => Some(Sink::Last(BuiltinViewSink::Last)),
     }
 }
 

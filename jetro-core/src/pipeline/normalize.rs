@@ -19,7 +19,7 @@ struct RuntimeDemand {
 
 fn sink_runtime_demand(sink: &Sink) -> RuntimeDemand {
     match sink {
-        Sink::Count => RuntimeDemand {
+        Sink::Count(_) => RuntimeDemand {
             value: ValueDemand::None,
             order: false,
         },
@@ -31,7 +31,7 @@ fn sink_runtime_demand(sink: &Sink) -> RuntimeDemand {
             value: ValueDemand::Numeric,
             order: false,
         },
-        Sink::Collect | Sink::First | Sink::Last => RuntimeDemand {
+        Sink::Collect | Sink::First(_) | Sink::Last(_) => RuntimeDemand {
             value: ValueDemand::Whole,
             order: true,
         },
@@ -184,7 +184,7 @@ impl SymbolicEmitter {
     fn finish(&mut self, sink: &mut Sink) {
         self.flush_predicate();
         match sink {
-            Sink::Count => {}
+            Sink::Count(_) => {}
             Sink::Numeric(n) if n.is_identity() && !matches!(self.item, Expr::Current) => {
                 let item = simplify_expr(std::mem::replace(&mut self.item, Expr::Current));
                 *sink = Sink::Numeric(NumericSink::projected(n.op, compile_stage_expr(&item)));

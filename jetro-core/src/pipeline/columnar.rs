@@ -210,7 +210,7 @@ impl Pipeline {
                         }
                         return Some(Ok(Val::int_vec(out)));
                     }
-                    (Val::IntVec(a), Sink::Count) => {
+                    (Val::IntVec(a), Sink::Count(_)) => {
                         let mut c = 0i64;
                         for n in a.iter() {
                             let v = Val::Int(*n);
@@ -230,7 +230,7 @@ impl Pipeline {
                         }
                         return Some(Ok(Val::float_vec(out)));
                     }
-                    (Val::FloatVec(a), Sink::Count) => {
+                    (Val::FloatVec(a), Sink::Count(_)) => {
                         let mut c = 0i64;
                         for f in a.iter() {
                             let v = Val::Float(*f);
@@ -501,13 +501,13 @@ impl Pipeline {
                         .map(Val::Int)
                         .unwrap_or(Val::Null)))
                 }
-                (Val::IntVec(a), Sink::Count) => return Some(Ok(Val::Int(a.len() as i64))),
+                (Val::IntVec(a), Sink::Count(_)) => return Some(Ok(Val::Int(a.len() as i64))),
                 (Val::FloatVec(a), Sink::Numeric(n)) if n.is_identity() && n.op == NumOp::Sum => {
                     return Some(Ok(Val::Float(a.iter().sum())))
                 }
-                (Val::FloatVec(a), Sink::Count) => return Some(Ok(Val::Int(a.len() as i64))),
-                (Val::StrVec(a), Sink::Count) => return Some(Ok(Val::Int(a.len() as i64))),
-                (Val::StrSliceVec(a), Sink::Count) => return Some(Ok(Val::Int(a.len() as i64))),
+                (Val::FloatVec(a), Sink::Count(_)) => return Some(Ok(Val::Int(a.len() as i64))),
+                (Val::StrVec(a), Sink::Count(_)) => return Some(Ok(Val::Int(a.len() as i64))),
+                (Val::StrSliceVec(a), Sink::Count(_)) => return Some(Ok(Val::Int(a.len() as i64))),
                 _ => {}
             }
         }
@@ -518,7 +518,7 @@ impl Pipeline {
         if let Val::ObjVec(d) = &recv {
             let (cs, _ck, csink) = self.canonical();
             // FlatMap(FieldRead) → flatmap-count
-            if matches!(csink, Sink::Count) && cs.len() == 1 {
+            if matches!(csink, Sink::Count(_)) && cs.len() == 1 {
                 if let Stage::FlatMap(prog) = &cs[0] {
                     if let Some(field) = single_field_prog(prog) {
                         if let Some(slot) = d.slot_of(field) {
@@ -561,7 +561,7 @@ impl Pipeline {
                 }
             }
             // Filter(...) → count-if (single cmp or AND chain)
-            if matches!(csink, Sink::Count) && cs.len() == 1 {
+            if matches!(csink, Sink::Count(_)) && cs.len() == 1 {
                 if let Stage::Filter(pred) = &cs[0] {
                     if let Some((pf, op, lit)) = single_cmp_prog(pred) {
                         let sp = d.slot_of(pf)?;
@@ -634,7 +634,7 @@ impl Pipeline {
                 let s: i64 = a.iter().sum();
                 return Some(Ok(Val::Float(s as f64 / a.len() as f64)));
             }
-            (Val::IntVec(a), Sink::Count) => return Some(Ok(Val::Int(a.len() as i64))),
+            (Val::IntVec(a), Sink::Count(_)) => return Some(Ok(Val::Int(a.len() as i64))),
             (Val::FloatVec(a), Sink::Numeric(n)) if n.is_identity() && n.op == NumOp::Sum => {
                 return Some(Ok(Val::Float(a.iter().sum())))
             }
@@ -659,9 +659,9 @@ impl Pipeline {
                 let s: f64 = a.iter().sum();
                 return Some(Ok(Val::Float(s / a.len() as f64)));
             }
-            (Val::FloatVec(a), Sink::Count) => return Some(Ok(Val::Int(a.len() as i64))),
-            (Val::StrVec(a), Sink::Count) => return Some(Ok(Val::Int(a.len() as i64))),
-            (Val::StrSliceVec(a), Sink::Count) => return Some(Ok(Val::Int(a.len() as i64))),
+            (Val::FloatVec(a), Sink::Count(_)) => return Some(Ok(Val::Int(a.len() as i64))),
+            (Val::StrVec(a), Sink::Count(_)) => return Some(Ok(Val::Int(a.len() as i64))),
+            (Val::StrSliceVec(a), Sink::Count(_)) => return Some(Ok(Val::Int(a.len() as i64))),
             _ => {}
         }
 

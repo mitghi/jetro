@@ -38,10 +38,10 @@ impl<'a> SinkAccumulator<'a> {
     pub(crate) fn push(&mut self, item: Val) -> bool {
         match self.sink {
             Sink::Collect => self.observe_collect(item),
-            Sink::Count => self.observe_count(),
+            Sink::Count(_) => self.observe_count(),
             Sink::Numeric(_) => self.observe_numeric(&item),
-            Sink::First => return self.observe_first(item),
-            Sink::Last => self.observe_last(item),
+            Sink::First(_) => return self.observe_first(item),
+            Sink::Last(_) => self.observe_last(item),
             Sink::ApproxCountDistinct => self.observe_approx_distinct(&item),
         }
         false
@@ -94,7 +94,7 @@ impl<'a> SinkAccumulator<'a> {
                     Val::arr(self.collect)
                 }
             }
-            Sink::Count => Val::Int(self.count),
+            Sink::Count(_) => Val::Int(self.count),
             Sink::Numeric(numeric) => num_finalise(
                 numeric.op,
                 self.sum_i,
@@ -104,8 +104,8 @@ impl<'a> SinkAccumulator<'a> {
                 self.max_f,
                 self.n_obs,
             ),
-            Sink::First => self.first.unwrap_or(Val::Null),
-            Sink::Last => self.last.unwrap_or(Val::Null),
+            Sink::First(_) => self.first.unwrap_or(Val::Null),
+            Sink::Last(_) => self.last.unwrap_or(Val::Null),
             Sink::ApproxCountDistinct => Val::Int(hll_estimate(&self.hll) as i64),
         }
     }

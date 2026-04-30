@@ -144,6 +144,7 @@ mod tests {
     use std::sync::Arc;
 
     use crate::ast::BinOp;
+    use crate::builtins::BuiltinViewSink;
     use crate::pipeline::{
         BodyKernel, NumOp, NumericSink, PipelineBody, Sink, Stage, ViewInputMode,
         ViewMaterialization, ViewOutputMode, ViewSinkCapability, ViewStageCapability,
@@ -216,6 +217,22 @@ mod tests {
             ViewSinkCapability::First.materialization(),
             ViewMaterialization::SinkFinalRow
         );
+    }
+
+    #[test]
+    fn sink_view_capability_uses_carried_metadata() {
+        assert!(matches!(
+            Sink::Count(BuiltinViewSink::Count).view_capability(&[]),
+            Some(ViewSinkCapability::Count)
+        ));
+        assert!(matches!(
+            Sink::First(BuiltinViewSink::First).view_capability(&[]),
+            Some(ViewSinkCapability::First)
+        ));
+        assert!(matches!(
+            Sink::Last(BuiltinViewSink::Last).view_capability(&[]),
+            Some(ViewSinkCapability::Last)
+        ));
     }
 
     #[test]

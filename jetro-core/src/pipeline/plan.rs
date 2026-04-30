@@ -32,11 +32,11 @@ impl SinkDemand {
 impl Sink {
     pub fn demand(&self) -> SinkDemand {
         match self {
-            Sink::First => SinkDemand {
+            Sink::First(_) => SinkDemand {
                 chain: ChainDemand::first(ValueNeed::Whole),
                 positional: Some(Position::First),
             },
-            Sink::Last => SinkDemand {
+            Sink::Last(_) => SinkDemand {
                 chain: ChainDemand {
                     pull: PullDemand::All,
                     value: ValueNeed::Whole,
@@ -44,7 +44,7 @@ impl Sink {
                 },
                 positional: Some(Position::Last),
             },
-            Sink::Count => SinkDemand {
+            Sink::Count(_) => SinkDemand {
                 chain: ChainDemand {
                     pull: PullDemand::All,
                     value: ValueNeed::None,
@@ -69,9 +69,11 @@ impl Sink {
         F: FnMut(&crate::vm::Program) -> bool,
     {
         match self {
-            Sink::Collect | Sink::Count | Sink::First | Sink::Last | Sink::ApproxCountDistinct => {
-                true
-            }
+            Sink::Collect
+            | Sink::Count(_)
+            | Sink::First(_)
+            | Sink::Last(_)
+            | Sink::ApproxCountDistinct => true,
             Sink::Numeric(n) => n.project.as_ref().is_none_or(|prog| program_ok(prog)),
         }
     }
@@ -96,19 +98,17 @@ impl Sink {
                     project_kernel,
                 })
             }
-            Sink::Count | Sink::First | Sink::Last => {
-                ViewSinkCapability::from_builtin_sink(self.view_sink_method()?.spec().view_sink?)
+            Sink::Count(sink) if *sink == BuiltinViewSink::Count => {
+                ViewSinkCapability::from_builtin_sink(*sink)
             }
+            Sink::First(sink) if *sink == BuiltinViewSink::First => {
+                ViewSinkCapability::from_builtin_sink(*sink)
+            }
+            Sink::Last(sink) if *sink == BuiltinViewSink::Last => {
+                ViewSinkCapability::from_builtin_sink(*sink)
+            }
+            Sink::Count(_) | Sink::First(_) | Sink::Last(_) => None,
             Sink::ApproxCountDistinct => None,
-        }
-    }
-
-    fn view_sink_method(&self) -> Option<BuiltinMethod> {
-        match self {
-            Sink::Count => Some(BuiltinMethod::Count),
-            Sink::First => Some(BuiltinMethod::First),
-            Sink::Last => Some(BuiltinMethod::Last),
-            _ => None,
         }
     }
 }
@@ -727,7 +727,7 @@ pub fn select_strategy(stages: &[Stage], sink: &Sink) -> Strategy {
     let has_barrier = stages
         .iter()
         .any(|s| matches!(s.shape().cardinality, Cardinality::Barrier));
-    let has_short_circuit = matches!(sink, Sink::First);
+    let has_short_circuit = matches!(sink, Sink::First(_));
 
     if has_barrier {
         return Strategy::BarrierMaterialise;

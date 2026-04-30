@@ -1337,6 +1337,7 @@ mod tests {
         // Cheaper, more-selective filter first — Eq (sel=0.10) before
         // Lt (sel=0.40).  Reorder must preserve overall set semantics.
         use crate::ast::BinOp;
+        use crate::builtins::BuiltinViewSink;
         use crate::pipeline::{plan_with_kernels, BodyKernel, Sink, Stage};
         use std::sync::Arc;
         let dummy = Arc::new(crate::vm::Program::new(Vec::new(), ""));
@@ -1354,7 +1355,7 @@ mod tests {
                 crate::value::Val::Bool(true),
             ),
         ];
-        let p = plan_with_kernels(stages, &kernels, Sink::Count);
+        let p = plan_with_kernels(stages, &kernels, Sink::Count(BuiltinViewSink::Count));
         // Expect Eq filter first (rank ~ 1.5/0.9 = 1.67) before Lt
         // (rank ~ 1.5/0.6 = 2.5).
         assert_eq!(p.stages.len(), 2);
@@ -1417,22 +1418,23 @@ mod tests {
         use crate::pipeline::{
             select_strategy, NumOp, NumericSink, Sink, SortSpec, Stage, Strategy,
         };
+        let first_sink = Sink::First(crate::builtins::BuiltinViewSink::First);
         use std::sync::Arc;
         let dummy = Arc::new(crate::vm::Program::new(Vec::new(), ""));
 
         // Map + First → IndexedDispatch
         assert_eq!(
-            select_strategy(&[Stage::Map(Arc::clone(&dummy))], &Sink::First),
+            select_strategy(&[Stage::Map(Arc::clone(&dummy))], &first_sink),
             Strategy::IndexedDispatch
         );
         // Filter + First → EarlyExit (Filter not 1:1)
         assert_eq!(
-            select_strategy(&[Stage::Filter(Arc::clone(&dummy))], &Sink::First),
+            select_strategy(&[Stage::Filter(Arc::clone(&dummy))], &first_sink),
             Strategy::EarlyExit
         );
         // Sort + First → BarrierMaterialise
         assert_eq!(
-            select_strategy(&[Stage::Sort(SortSpec::identity())], &Sink::First),
+            select_strategy(&[Stage::Sort(SortSpec::identity())], &first_sink),
             Strategy::BarrierMaterialise
         );
         // Map + Sum → PullLoop (no positional, no barrier)
@@ -1453,10 +1455,11 @@ mod tests {
         use std::sync::Arc;
 
         let dummy_prog = Arc::new(crate::vm::Program::new(Vec::new(), ""));
+        let first_sink = Sink::First(crate::builtins::BuiltinViewSink::First);
 
         // [Sort] + First → SortTopK(1)
         let stages = vec![Stage::Sort(SortSpec::keyed(Arc::clone(&dummy_prog), false))];
-        let strats = compute_strategies(&stages, &Sink::First);
+        let strats = compute_strategies(&stages, &first_sink);
         assert!(matches!(strats[0], StageStrategy::SortTopK(1)));
 
         // [Sort, Take(5)] + Collect → SortTopK(5) at index 0
@@ -1479,7 +1482,7 @@ mod tests {
             Stage::Sort(SortSpec::keyed(Arc::clone(&dummy_prog), false)),
             Stage::Filter(Arc::clone(&dummy_prog)),
         ];
-        let strats = compute_strategies(&stages, &Sink::First);
+        let strats = compute_strategies(&stages, &first_sink);
         // Filter still sees AtMost(1) downstream → consumption=AtMost(1)
         // propagates up to Sort.  Sort picks SortTopK(1).
         assert!(matches!(strats[0], StageStrategy::SortTopK(1)));

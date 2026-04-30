@@ -35,7 +35,7 @@
 use std::sync::Arc;
 
 use crate::ast::Expr;
-use crate::builtins::{BuiltinMethod, BuiltinNumericReducer};
+use crate::builtins::{BuiltinMethod, BuiltinNumericReducer, BuiltinViewSink};
 use crate::context::EvalError;
 use crate::value::Val;
 
@@ -120,15 +120,15 @@ pub(crate) fn trace_enabled() -> bool {
 fn sink_name(s: &Sink) -> &'static str {
     match s {
         Sink::Collect => "collect",
-        Sink::Count => "count",
+        Sink::Count(_) => "count",
         Sink::Numeric(n) => match n.op {
             NumOp::Sum => "sum",
             NumOp::Min => "min",
             NumOp::Max => "max",
             NumOp::Avg => "avg",
         },
-        Sink::First => "first",
-        Sink::Last => "last",
+        Sink::First(_) => "first",
+        Sink::Last(_) => "last",
         Sink::ApproxCountDistinct => "approx_count_distinct",
     }
 }
@@ -404,13 +404,13 @@ pub enum Sink {
     Collect,
     /// `.count()` / `.len()` — yield the number of elements that
     /// reached the sink as a `Val::Int`.
-    Count,
+    Count(BuiltinViewSink),
     /// `.sum()`/`.min()`/`.max()`/`.avg()` over numerics.
     Numeric(NumericSink),
     /// `.first()` / `.last()` — yield the first/last element or
     /// `Val::Null`.
-    First,
-    Last,
+    First(BuiltinViewSink),
+    Last(BuiltinViewSink),
     /// Algorithmic Category E: `.approx_count_distinct()` — HLL-12
     /// (~2KB state, ±2% accuracy) returning Int approximate count.
     /// Per `algorithmic_optimization_cold_only.md` Category E (opt-in
@@ -924,14 +924,14 @@ mod tests {
     fn rewrite_map_then_count_drops_map() {
         let p = lower_query("$.orders.map(total).count()").unwrap();
         assert_eq!(p.stages.len(), 0);
-        assert!(matches!(p.sink, Sink::Count));
+        assert!(matches!(p.sink, Sink::Count(_)));
     }
 
     #[test]
     fn demand_optimizer_drops_value_only_work_for_count() {
         let p = lower_query("$.orders.map(total).upper().count()").unwrap();
         assert!(p.stages.is_empty());
-        assert!(matches!(p.sink, Sink::Count));
+        assert!(matches!(p.sink, Sink::Count(_)));
     }
 
     #[test]
@@ -939,7 +939,7 @@ mod tests {
         let p = lower_query("$.orders.map(total).filter(@ > 10).count()").unwrap();
         assert_eq!(p.stages.len(), 1);
         assert!(matches!(p.stages[0], Stage::Filter(_)));
-        assert!(matches!(p.sink, Sink::Count));
+        assert!(matches!(p.sink, Sink::Count(_)));
     }
 
     #[test]
@@ -948,7 +948,7 @@ mod tests {
         assert_eq!(p.stages.len(), 1);
         assert!(matches!(p.stages[0], Stage::Filter(_)));
         assert_price_qty_gt_100(only_stage_expr(&p));
-        assert!(matches!(p.sink, Sink::Count));
+        assert!(matches!(p.sink, Sink::Count(_)));
     }
 
     #[test]
@@ -957,7 +957,7 @@ mod tests {
             lower_query("$.users.map(name.trim().upper()).filter(@ == \"ADA\").count()").unwrap();
         assert_eq!(p.stages.len(), 1);
         assert!(matches!(p.stages[0], Stage::Filter(_)));
-        assert!(matches!(p.sink, Sink::Count));
+        assert!(matches!(p.sink, Sink::Count(_)));
     }
 
     #[test]
@@ -967,7 +967,7 @@ mod tests {
         assert_eq!(p.stages.len(), 1);
         assert!(matches!(p.stages[0], Stage::Filter(_)));
         assert_price_qty_gt_100(only_stage_expr(&p));
-        assert!(matches!(p.sink, Sink::Count));
+        assert!(matches!(p.sink, Sink::Count(_)));
     }
 
     #[test]
@@ -976,7 +976,7 @@ mod tests {
         assert_eq!(p.stages.len(), 1);
         assert!(matches!(p.stages[0], Stage::Filter(_)));
         assert_price_qty_gt_100(only_stage_expr(&p));
-        assert!(matches!(p.sink, Sink::Count));
+        assert!(matches!(p.sink, Sink::Count(_)));
     }
 
     #[test]
@@ -1217,7 +1217,7 @@ mod tests {
         // `true` literal — Filter(true) collapses to id.
         let p = lower_query("$.xs.filter(true).count()").unwrap();
         assert_eq!(p.stages.len(), 0);
-        assert!(matches!(p.sink, Sink::Count));
+        assert!(matches!(p.sink, Sink::Count(_)));
     }
 
     #[test]
