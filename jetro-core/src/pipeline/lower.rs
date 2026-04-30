@@ -454,11 +454,12 @@ fn decode_method_chain(
                             Arg::Pos(Expr::Int(n)) if *n >= 0 => *n as usize,
                             _ => return None,
                         };
-                        let stage = method.spec().view_stage?;
+                        let spec = method.spec();
+                        let stage = spec.view_stage?;
                         if stage != BuiltinViewStage::Take {
                             return None;
                         }
-                        stages.push(Stage::Take(n, stage));
+                        stages.push(Stage::Take(n, stage, spec.stage_merge?));
                         stage_exprs.push(None);
                     }
                     (BuiltinMethod::Skip, 1, _) => {
@@ -466,11 +467,12 @@ fn decode_method_chain(
                             Arg::Pos(Expr::Int(n)) if *n >= 0 => *n as usize,
                             _ => return None,
                         };
-                        let stage = method.spec().view_stage?;
+                        let spec = method.spec();
+                        let stage = spec.view_stage?;
                         if stage != BuiltinViewStage::Skip {
                             return None;
                         }
-                        stages.push(Stage::Skip(n, stage));
+                        stages.push(Stage::Skip(n, stage, spec.stage_merge?));
                         stage_exprs.push(None);
                     }
                     (BuiltinMethod::Split, 1, _) => {
@@ -702,7 +704,8 @@ fn rewrite_step(p: &mut PipelineBody) -> bool {
     // Pushdown: Map(f) ∘ Take(n) → Take(n) ∘ Map(f).
     // Strict perf win — composed exec runs map only n times.
     for i in 0..p.stages.len().saturating_sub(1) {
-        if matches!(&p.stages[i], Stage::Map(_)) && matches!(&p.stages[i + 1], Stage::Take(_, _)) {
+        if matches!(&p.stages[i], Stage::Map(_)) && matches!(&p.stages[i + 1], Stage::Take(_, _, _))
+        {
             p.stages.swap(i, i + 1);
             p.stage_exprs.swap(i, i + 1);
             return true;

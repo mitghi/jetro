@@ -597,7 +597,11 @@ mod tests {
         let body = PipelineBody {
             stages: vec![
                 Stage::Filter(Arc::new(crate::vm::Program::new(Vec::new(), ""))),
-                Stage::Take(2, crate::builtins::BuiltinViewStage::Take),
+                Stage::Take(
+                    2,
+                    crate::builtins::BuiltinViewStage::Take,
+                    crate::builtins::BuiltinStageMerge::UsizeMin,
+                ),
             ],
             stage_exprs: Vec::new(),
             sink: Sink::Collect,

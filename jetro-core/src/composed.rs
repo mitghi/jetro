@@ -1397,29 +1397,37 @@ mod tests {
 
     #[test]
     fn step3d_phase4_merge_take_skip() {
-        use crate::builtins::BuiltinViewStage;
+        use crate::builtins::{BuiltinStageMerge, BuiltinViewStage};
         use crate::pipeline::{plan, Sink, Stage};
         // Take(5) ∘ Take(3) → Take(3)
         let p = plan(
             vec![
-                Stage::Take(5, BuiltinViewStage::Take),
-                Stage::Take(3, BuiltinViewStage::Take),
+                Stage::Take(5, BuiltinViewStage::Take, BuiltinStageMerge::UsizeMin),
+                Stage::Take(3, BuiltinViewStage::Take, BuiltinStageMerge::UsizeMin),
             ],
             Sink::Collect,
         );
         assert_eq!(p.stages.len(), 1);
-        assert!(matches!(p.stages[0], Stage::Take(3, _)));
+        assert!(matches!(p.stages[0], Stage::Take(3, _, _)));
 
         // Skip(2) ∘ Skip(3) → Skip(5)
         let p = plan(
             vec![
-                Stage::Skip(2, BuiltinViewStage::Skip),
-                Stage::Skip(3, BuiltinViewStage::Skip),
+                Stage::Skip(
+                    2,
+                    BuiltinViewStage::Skip,
+                    BuiltinStageMerge::UsizeSaturatingAdd,
+                ),
+                Stage::Skip(
+                    3,
+                    BuiltinViewStage::Skip,
+                    BuiltinStageMerge::UsizeSaturatingAdd,
+                ),
             ],
             Sink::Collect,
         );
         assert_eq!(p.stages.len(), 1);
-        assert!(matches!(p.stages[0], Stage::Skip(5, _)));
+        assert!(matches!(p.stages[0], Stage::Skip(5, _, _)));
 
         // Reverse ∘ Reverse → identity (drops both)
         let p = plan(vec![Stage::Reverse, Stage::Reverse], Sink::Collect);
@@ -1478,7 +1486,11 @@ mod tests {
         // [Sort, Take(5)] + Collect → SortTopK(5) at index 0
         let stages = vec![
             Stage::Sort(SortSpec::keyed(Arc::clone(&dummy_prog), false)),
-            Stage::Take(5, crate::builtins::BuiltinViewStage::Take),
+            Stage::Take(
+                5,
+                crate::builtins::BuiltinViewStage::Take,
+                crate::builtins::BuiltinStageMerge::UsizeMin,
+            ),
         ];
         let strats = compute_strategies(&stages, &Sink::Collect);
         assert!(matches!(strats[0], StageStrategy::SortTopK(5)));

@@ -321,13 +321,13 @@ impl Stage {
                 return Some(ViewStageCapability::FlatMap { kernel: idx });
             }
             Some(BuiltinViewStage::Take) => {
-                let Stage::Take(n, _) = self else {
+                let Stage::Take(n, _, _) = self else {
                     return None;
                 };
                 return Some(ViewStageCapability::Take(*n));
             }
             Some(BuiltinViewStage::Skip) => {
-                let Stage::Skip(n, _) = self else {
+                let Stage::Skip(n, _, _) = self else {
                     return None;
                 };
                 return Some(ViewStageCapability::Skip(*n));
@@ -342,7 +342,7 @@ impl Stage {
             Stage::Filter(_) => BuiltinMethod::Filter.spec().view_stage,
             Stage::Map(_) => BuiltinMethod::Map.spec().view_stage,
             Stage::FlatMap(_) => BuiltinMethod::FlatMap.spec().view_stage,
-            Stage::Take(_, stage) | Stage::Skip(_, stage) => Some(*stage),
+            Stage::Take(_, stage, _) | Stage::Skip(_, stage, _) => Some(*stage),
             _ => None,
         }
     }
@@ -373,8 +373,8 @@ impl Stage {
             | Stage::CountBy(prog)
             | Stage::IndexBy(prog)
             | Stage::SortedDedup(Some(prog)) => program_ok(prog),
-            Stage::Take(_, _)
-            | Stage::Skip(_, _)
+            Stage::Take(_, _, _)
+            | Stage::Skip(_, _, _)
             | Stage::Reverse
             | Stage::Sort(super::SortSpec { key: None, .. })
             | Stage::UniqueBy(None)
@@ -394,8 +394,8 @@ impl Stage {
             Stage::Filter(_) => Some(ChainOp::Filter),
             Stage::Map(_) | Stage::CompiledMap(_) => Some(ChainOp::Map),
             Stage::FlatMap(_) | Stage::Split(_) => Some(ChainOp::FlatMap),
-            Stage::Take(n, _) => Some(ChainOp::Take(*n)),
-            Stage::Skip(n, _) => Some(ChainOp::Skip(*n)),
+            Stage::Take(n, _, _) => Some(ChainOp::Take(*n)),
+            Stage::Skip(n, _, _) => Some(ChainOp::Skip(*n)),
             Stage::Builtin(call) => Some(ChainOp::Builtin(call.method)),
             Stage::Slice(_, _) | Stage::Replace { .. } => Some(ChainOp::Map),
             _ => None,
@@ -439,7 +439,7 @@ impl Stage {
                 cost: 10.0,
                 selectivity: 1.0,
             },
-            Stage::Take(_, _) | Stage::Skip(_, _) => StageShape {
+            Stage::Take(_, _, _) | Stage::Skip(_, _, _) => StageShape {
                 cardinality: Cardinality::Bounded,
                 can_indexed: false,
                 cost: 0.5,
@@ -520,11 +520,10 @@ impl Stage {
     }
 
     pub fn merge_with(&self, other: &Self) -> Option<Self> {
+        if let Some(merged) = self.merge_with_usize_stage(other) {
+            return Some(merged);
+        }
         match (self, other) {
-            (Stage::Take(a, meta), Stage::Take(b, _)) => Some(Stage::Take((*a).min(*b), *meta)),
-            (Stage::Skip(a, meta), Stage::Skip(b, _)) => {
-                Some(Stage::Skip((*a).saturating_add(*b), *meta))
-            }
             (Stage::Sort(_), Stage::Sort(b)) => Some(Stage::Sort(b.clone())),
             (Stage::UniqueBy(_), Stage::UniqueBy(b)) => Some(Stage::UniqueBy(b.clone())),
             (Stage::UniqueBy(None), Stage::Sort(super::SortSpec { key: None, .. }))
@@ -544,12 +543,49 @@ impl Stage {
         }
     }
 
+    fn merge_with_usize_stage(&self, other: &Self) -> Option<Self> {
+        let lhs = self.usize_stage_merge_parts()?;
+        let rhs = other.usize_stage_merge_parts()?;
+        if lhs.stage != rhs.stage || lhs.merge != rhs.merge {
+            return None;
+        }
+        self.with_usize_stage_value(lhs.merge.combine_usize(lhs.value, rhs.value))
+    }
+
+    fn usize_stage_merge_parts(&self) -> Option<UsizeStageMergeParts> {
+        match self {
+            Stage::Take(value, stage, merge) | Stage::Skip(value, stage, merge) => {
+                Some(UsizeStageMergeParts {
+                    value: *value,
+                    stage: *stage,
+                    merge: *merge,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    fn with_usize_stage_value(&self, value: usize) -> Option<Self> {
+        match self {
+            Stage::Take(_, stage, merge) => Some(Stage::Take(value, *stage, *merge)),
+            Stage::Skip(_, stage, merge) => Some(Stage::Skip(value, *stage, *merge)),
+            _ => None,
+        }
+    }
+
     pub fn cancels_with(&self, other: &Self) -> bool {
         if let (Stage::Builtin(a), Stage::Builtin(b)) = (self, other) {
             return a.cancels_with(b);
         }
         matches!((self, other), (Stage::Reverse, Stage::Reverse))
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct UsizeStageMergeParts {
+    value: usize,
+    stage: BuiltinViewStage,
+    merge: crate::builtins::BuiltinStageMerge,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

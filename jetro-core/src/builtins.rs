@@ -552,6 +552,7 @@ pub struct BuiltinSpec {
     pub view_stage: Option<BuiltinViewStage>,
     pub view_sink: Option<BuiltinViewSink>,
     pub numeric_reducer: Option<BuiltinNumericReducer>,
+    pub stage_merge: Option<BuiltinStageMerge>,
     pub pipeline_stage: Option<BuiltinPipelineStage>,
     pub pipeline_sink: Option<BuiltinPipelineSink>,
     pub pipeline_element: bool,
@@ -581,6 +582,22 @@ pub enum BuiltinNumericReducer {
     Avg,
     Min,
     Max,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinStageMerge {
+    UsizeMin,
+    UsizeSaturatingAdd,
+}
+
+impl BuiltinStageMerge {
+    #[inline]
+    pub fn combine_usize(self, a: usize, b: usize) -> usize {
+        match self {
+            Self::UsizeMin => a.min(b),
+            Self::UsizeSaturatingAdd => a.saturating_add(b),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -651,6 +668,7 @@ impl BuiltinSpec {
             view_stage: None,
             view_sink: None,
             numeric_reducer: None,
+            stage_merge: None,
             pipeline_stage: None,
             pipeline_sink: None,
             pipeline_element: false,
@@ -697,6 +715,11 @@ impl BuiltinSpec {
     fn numeric_view_sink(mut self, reducer: BuiltinNumericReducer) -> Self {
         self.view_sink = Some(BuiltinViewSink::Numeric);
         self.numeric_reducer = Some(reducer);
+        self
+    }
+
+    fn stage_merge(mut self, merge: BuiltinStageMerge) -> Self {
+        self.stage_merge = Some(merge);
         self
     }
 
@@ -877,10 +900,12 @@ impl BuiltinMethod {
             Self::Take => BuiltinSpec::new(Cat::Positional, Card::Bounded)
                 .view_native()
                 .view_stage(BuiltinViewStage::Take)
+                .stage_merge(BuiltinStageMerge::UsizeMin)
                 .pipeline_stage(BuiltinPipelineStage::Unary),
             Self::Skip => BuiltinSpec::new(Cat::Positional, Card::Bounded)
                 .view_native()
                 .view_stage(BuiltinViewStage::Skip)
+                .stage_merge(BuiltinStageMerge::UsizeSaturatingAdd)
                 .pipeline_stage(BuiltinPipelineStage::Unary),
             Self::First => BuiltinSpec::new(Cat::Positional, Card::Bounded)
                 .view_native()
@@ -5980,8 +6005,8 @@ pub fn schema_apply(recv: &Val) -> Option<Val> {
 mod spec_tests {
     use super::{
         BuiltinCardinality, BuiltinCategory, BuiltinMethod, BuiltinNumericReducer,
-        BuiltinPipelineSink, BuiltinPipelineStage, BuiltinViewMaterialization, BuiltinViewSink,
-        BuiltinViewStage,
+        BuiltinPipelineSink, BuiltinPipelineStage, BuiltinStageMerge, BuiltinViewMaterialization,
+        BuiltinViewSink, BuiltinViewStage,
     };
 
     #[test]
@@ -6039,8 +6064,16 @@ mod spec_tests {
             Some(BuiltinViewStage::Take)
         );
         assert_eq!(
+            BuiltinMethod::Take.spec().stage_merge,
+            Some(BuiltinStageMerge::UsizeMin)
+        );
+        assert_eq!(
             BuiltinMethod::Skip.spec().view_stage,
             Some(BuiltinViewStage::Skip)
+        );
+        assert_eq!(
+            BuiltinMethod::Skip.spec().stage_merge,
+            Some(BuiltinStageMerge::UsizeSaturatingAdd)
         );
 
         assert_eq!(BuiltinMethod::Sort.spec().view_stage, None);

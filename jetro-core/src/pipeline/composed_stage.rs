@@ -42,10 +42,10 @@ impl<'a> ComposedStageBuilder<'a> {
             (Stage::FlatMap(_), BodyKernel::FieldChain(keys)) => Box::new(cmp::FlatMapFieldChain {
                 keys: Arc::clone(keys),
             }),
-            (Stage::Take(n, _), _) => Box::new(cmp::Take {
+            (Stage::Take(n, _, _), _) => Box::new(cmp::Take {
                 remaining: Cell::new(*n),
             }),
-            (Stage::Skip(n, _), _) => Box::new(cmp::Skip {
+            (Stage::Skip(n, _, _), _) => Box::new(cmp::Skip {
                 remaining: Cell::new(*n),
             }),
             (Stage::Builtin(call), _) => Box::new(cmp::BuiltinStage::new(call.clone())),
