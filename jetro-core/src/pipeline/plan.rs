@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use crate::ast::{BinOp, Expr};
-use crate::builtins::{BuiltinViewSink, BuiltinViewStage};
+use crate::builtins::{
+    BuiltinMethod, BuiltinPipelineMaterialization, BuiltinViewSink, BuiltinViewStage,
+};
 use crate::chain_ir::{ChainOp, Demand as ChainDemand, PullDemand, ValueNeed};
 use crate::vm::{CompiledObjEntry, Opcode, Program};
 
@@ -415,33 +417,42 @@ impl StageShape {
             selectivity: stage.selectivity(),
         }
     }
+
+    fn from_builtin(method: BuiltinMethod) -> Self {
+        use crate::builtins::BuiltinCategory;
+
+        let spec = method.spec();
+        if let Some(shape) = spec.pipeline_shape {
+            return Self {
+                cardinality: shape.cardinality.into(),
+                can_indexed: shape.can_indexed,
+                cost: shape.cost,
+                selectivity: shape.selectivity,
+            };
+        }
+        Self {
+            cardinality: spec.cardinality.into(),
+            can_indexed: spec.can_indexed,
+            cost: spec.cost,
+            selectivity: if matches!(spec.category, BuiltinCategory::StreamingFilter) {
+                0.5
+            } else {
+                1.0
+            },
+        }
+    }
 }
 
 impl Stage {
     pub(crate) fn is_composed_barrier(&self) -> bool {
-        matches!(
-            self,
-            Stage::Reverse(_) | Stage::Sort(_) | Stage::UniqueBy(_) | Stage::GroupBy(_)
-        )
+        self.pipeline_materialization() == BuiltinPipelineMaterialization::ComposedBarrier
     }
 
     pub(crate) fn requires_legacy_materialization(&self) -> bool {
-        self.is_composed_barrier()
-            || matches!(
-                self,
-                Stage::FlatMap(_, _)
-                    | Stage::Split(_)
-                    | Stage::Chunk(_)
-                    | Stage::Window(_)
-                    | Stage::DropWhile(_)
-                    | Stage::IndicesWhere(_)
-                    | Stage::FindIndex(_)
-                    | Stage::MaxBy(_)
-                    | Stage::MinBy(_)
-                    | Stage::CountBy(_)
-                    | Stage::IndexBy(_)
-                    | Stage::SortedDedup(_)
-            )
+        !matches!(
+            self.pipeline_materialization(),
+            BuiltinPipelineMaterialization::Streaming
+        )
     }
 
     pub(crate) fn view_capability(
@@ -483,6 +494,55 @@ impl Stage {
             }
             Stage::Take(_, stage, _) | Stage::Skip(_, stage, _) => Some(*stage),
             _ => None,
+        }
+    }
+
+    fn builtin_method_metadata(&self) -> Option<BuiltinMethod> {
+        match self {
+            Stage::Filter(_, _) => Some(BuiltinMethod::Filter),
+            Stage::Map(_, _) => Some(BuiltinMethod::Map),
+            Stage::FlatMap(_, _) => Some(BuiltinMethod::FlatMap),
+            Stage::Take(_, _, _) => Some(BuiltinMethod::Take),
+            Stage::Skip(_, _, _) => Some(BuiltinMethod::Skip),
+            Stage::Reverse(_) => Some(BuiltinMethod::Reverse),
+            Stage::UniqueBy(None) => Some(BuiltinMethod::Unique),
+            Stage::UniqueBy(Some(_)) => Some(BuiltinMethod::UniqueBy),
+            Stage::Sort(_) => Some(BuiltinMethod::Sort),
+            Stage::GroupBy(_) => Some(BuiltinMethod::GroupBy),
+            Stage::Split(_) => Some(BuiltinMethod::Split),
+            Stage::Slice(_, _) => Some(BuiltinMethod::Slice),
+            Stage::Replace { all, .. } => Some(if *all {
+                BuiltinMethod::ReplaceAll
+            } else {
+                BuiltinMethod::Replace
+            }),
+            Stage::Chunk(_) => Some(BuiltinMethod::Chunk),
+            Stage::Window(_) => Some(BuiltinMethod::Window),
+            Stage::TakeWhile(_) => Some(BuiltinMethod::TakeWhile),
+            Stage::DropWhile(_) => Some(BuiltinMethod::DropWhile),
+            Stage::IndicesWhere(_) => Some(BuiltinMethod::IndicesWhere),
+            Stage::FindIndex(_) => Some(BuiltinMethod::FindIndex),
+            Stage::MaxBy(_) => Some(BuiltinMethod::MaxBy),
+            Stage::MinBy(_) => Some(BuiltinMethod::MinBy),
+            Stage::TransformValues(_) => Some(BuiltinMethod::TransformValues),
+            Stage::TransformKeys(_) => Some(BuiltinMethod::TransformKeys),
+            Stage::FilterValues(_) => Some(BuiltinMethod::FilterValues),
+            Stage::FilterKeys(_) => Some(BuiltinMethod::FilterKeys),
+            Stage::CountBy(_) => Some(BuiltinMethod::CountBy),
+            Stage::IndexBy(_) => Some(BuiltinMethod::IndexBy),
+            Stage::Builtin(call) => Some(call.method),
+            Stage::CompiledMap(_) | Stage::SortedDedup(_) => None,
+        }
+    }
+
+    fn pipeline_materialization(&self) -> BuiltinPipelineMaterialization {
+        match self {
+            Stage::CompiledMap(_) => BuiltinPipelineMaterialization::Streaming,
+            Stage::SortedDedup(_) => BuiltinPipelineMaterialization::LegacyMaterialized,
+            _ => self
+                .builtin_method_metadata()
+                .map(|method| method.spec().pipeline_materialization)
+                .unwrap_or(BuiltinPipelineMaterialization::Streaming),
         }
     }
 
@@ -590,81 +650,27 @@ impl Stage {
             | Stage::FlatMap(_, stage)
             | Stage::Take(_, stage, _)
             | Stage::Skip(_, stage, _) => StageShape::from_view_stage(*stage),
-            Stage::Reverse(_) | Stage::Sort(_) | Stage::UniqueBy(_) | Stage::GroupBy(_) => {
-                StageShape {
-                    cardinality: Cardinality::Barrier,
-                    can_indexed: false,
-                    cost: 20.0,
-                    selectivity: 1.0,
-                }
-            }
-            Stage::Split(_) => StageShape {
-                cardinality: Cardinality::Expanding,
-                can_indexed: true,
-                cost: 2.0,
-                selectivity: 1.0,
-            },
-            Stage::Slice(_, _) => StageShape {
-                cardinality: Cardinality::OneToOne,
-                can_indexed: true,
-                cost: 1.0,
-                selectivity: 1.0,
-            },
-            Stage::Replace { .. } => StageShape {
-                cardinality: Cardinality::OneToOne,
-                can_indexed: true,
-                cost: 2.0,
-                selectivity: 1.0,
-            },
-            Stage::Chunk(_) | Stage::Window(_) => StageShape {
-                cardinality: Cardinality::Barrier,
-                can_indexed: true,
-                cost: 2.0,
-                selectivity: 1.0,
-            },
             Stage::CompiledMap(_) => StageShape {
                 cardinality: Cardinality::OneToOne,
                 can_indexed: true,
                 cost: 10.0,
                 selectivity: 1.0,
             },
-            Stage::Builtin(call) => {
-                use crate::builtins::BuiltinCategory;
-
-                let spec = call.spec();
-                StageShape {
-                    cardinality: spec.cardinality.into(),
-                    can_indexed: spec.can_indexed,
-                    cost: spec.cost,
-                    selectivity: if matches!(spec.category, BuiltinCategory::StreamingFilter) {
-                        0.5
-                    } else {
-                        1.0
-                    },
-                }
-            }
-            Stage::TakeWhile(_) | Stage::DropWhile(_) => StageShape {
-                cardinality: Cardinality::Filtering,
-                can_indexed: true,
-                cost: 10.0,
-                selectivity: 0.5,
-            },
-            Stage::IndicesWhere(_)
-            | Stage::FindIndex(_)
-            | Stage::MaxBy(_)
-            | Stage::MinBy(_)
-            | Stage::TransformValues(_)
-            | Stage::TransformKeys(_)
-            | Stage::FilterValues(_)
-            | Stage::FilterKeys(_)
-            | Stage::CountBy(_)
-            | Stage::IndexBy(_)
-            | Stage::SortedDedup(_) => StageShape {
+            Stage::SortedDedup(_) => StageShape {
                 cardinality: Cardinality::OneToOne,
                 can_indexed: true,
                 cost: 1.0,
                 selectivity: 1.0,
             },
+            _ => self
+                .builtin_method_metadata()
+                .map(StageShape::from_builtin)
+                .unwrap_or(StageShape {
+                    cardinality: Cardinality::OneToOne,
+                    can_indexed: false,
+                    cost: 1.0,
+                    selectivity: 1.0,
+                }),
         }
     }
 
