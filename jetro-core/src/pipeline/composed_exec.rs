@@ -39,7 +39,10 @@ pub(super) fn run(
         if i > last_split {
             let chain =
                 composed_segment::build_chain(stages_ref, kernels, last_split..i, &stage_builder)?;
-            buf = composed_segment::collect(&buf, chain.as_ref())?;
+            buf = super::row_source::Rows::Owned(composed_segment::collect(
+                buf.as_slice(),
+                chain.as_ref(),
+            )?);
         }
 
         let kernel = kernels.get(i).unwrap_or(&BodyKernel::Generic);
@@ -50,9 +53,9 @@ pub(super) fn run(
             strategy,
             &eff_sink,
             i + 1 == stages_ref.len(),
-            buf,
+            buf.into_vec(),
         )? {
-            BarrierOutput::Rows(rows) => buf = rows,
+            BarrierOutput::Rows(rows) => buf = super::row_source::Rows::Owned(rows),
             BarrierOutput::Done(val) => return Some(Ok(val)),
         };
 
@@ -68,7 +71,7 @@ pub(super) fn run(
     let final_demand = Pipeline::segment_source_demand(&stages_ref[last_split..], &eff_sink)
         .chain
         .pull;
-    let out = composed_sink::run(&eff_sink, &buf, chain.as_ref(), final_demand)?;
+    let out = composed_sink::run(&eff_sink, buf.as_slice(), chain.as_ref(), final_demand)?;
 
     Some(Ok(out))
 }
