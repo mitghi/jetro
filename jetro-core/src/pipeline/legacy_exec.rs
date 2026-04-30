@@ -6,11 +6,11 @@ use crate::{
 };
 
 use super::lower::run_compiled_map;
+use super::row_source;
 use super::sink_accumulator::SinkAccumulator;
 use super::{
     apply_item_in_env, bounded_sort_by_key, cmp_val_total, compute_strategies, eval_kernel,
-    is_truthy, walk_field_chain, BodyKernel, Pipeline, Sink, Source, Stage, StageStrategy,
-    TerminalMapCollector,
+    is_truthy, BodyKernel, Pipeline, Sink, Stage, StageStrategy, TerminalMapCollector,
 };
 
 use crate::builtins::{
@@ -32,10 +32,7 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
     let mut loop_env = base_env.clone();
 
     // Resolve source to an iterable Val::Arr-like sequence.
-    let recv = match &pipeline.source {
-        Source::Receiver(v) => v.clone(),
-        Source::FieldChain { keys } => walk_field_chain(root, keys),
-    };
+    let recv = row_source::resolve(&pipeline.source, root);
 
     // Pull-based stage chain.  At Phase 1 the inner loop materialises
     // elements one at a time as `Val`; Phase 3 will switch this to a
@@ -46,48 +43,32 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
     let mut stage_taken: Vec<usize> = vec![0; pipeline.stages.len()];
     let mut stage_skipped: Vec<usize> = vec![0; pipeline.stages.len()];
 
-    let iter: Box<dyn Iterator<Item = Val>> = match &recv {
-        Val::Arr(a) => Box::new(a.as_ref().clone().into_iter()),
-        Val::IntVec(a) => Box::new(
-            a.iter()
-                .map(|n| Val::Int(*n))
-                .collect::<Vec<_>>()
-                .into_iter(),
-        ),
-        Val::FloatVec(a) => Box::new(
-            a.iter()
-                .map(|f| Val::Float(*f))
-                .collect::<Vec<_>>()
-                .into_iter(),
-        ),
-        Val::StrVec(a) => Box::new(
-            a.iter()
-                .map(|s| Val::Str(Arc::clone(s)))
-                .collect::<Vec<_>>()
-                .into_iter(),
-        ),
-        // ObjVec: materialise rows into Val::Obj for the per-row pull
-        // path.  Slot-indexed columnar fast paths in `try_columnar`
-        // handle the common SumMap / CountIf / SumFilterMap shapes
-        // before this point — landing here means the sink is
-        // Collect / take / skip / etc., which truly need Val::Obj
-        // rows for downstream stages.
-        Val::ObjVec(d) => {
-            let n = d.nrows();
-            let mut out: Vec<Val> = Vec::with_capacity(n);
-            let stride = d.stride();
-            for row in 0..n {
-                let mut m: indexmap::IndexMap<Arc<str>, Val> =
-                    indexmap::IndexMap::with_capacity(stride);
-                for (i, k) in d.keys.iter().enumerate() {
-                    m.insert(Arc::clone(k), d.cells[row * stride + i].clone());
+    let iter: Box<dyn Iterator<Item = Val>> = if let Some(rows) = row_source::array_like_rows(&recv)
+    {
+        Box::new(rows.into_iter())
+    } else {
+        match &recv {
+            // ObjVec: materialise rows into Val::Obj for the per-row pull
+            // path.  Slot-indexed columnar fast paths handle common aggregate
+            // shapes before this point; landing here means downstream stages
+            // need Val::Obj rows.
+            Val::ObjVec(d) => {
+                let n = d.nrows();
+                let mut out: Vec<Val> = Vec::with_capacity(n);
+                let stride = d.stride();
+                for row in 0..n {
+                    let mut m: indexmap::IndexMap<Arc<str>, Val> =
+                        indexmap::IndexMap::with_capacity(stride);
+                    for (i, k) in d.keys.iter().enumerate() {
+                        m.insert(Arc::clone(k), d.cells[row * stride + i].clone());
+                    }
+                    out.push(Val::Obj(Arc::new(m)));
                 }
-                out.push(Val::Obj(Arc::new(m)));
+                Box::new(out.into_iter())
             }
-            Box::new(out.into_iter())
+            // Anything else (scalar, Obj, ...): single-element iterator.
+            _ => Box::new(std::iter::once(recv.clone())),
         }
-        // Anything else (scalar, Obj, …): single-element "iterator".
-        _ => Box::new(std::iter::once(recv.clone())),
     };
 
     let mut sink_acc = SinkAccumulator::new(&pipeline.sink);

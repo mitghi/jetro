@@ -56,6 +56,7 @@ mod legacy_exec;
 mod lower;
 mod normalize;
 mod plan;
+mod row_source;
 mod sink_accumulator;
 pub(crate) use capability::{
     view_capabilities, view_prefix_capabilities, ViewInputMode, ViewMaterialization,
