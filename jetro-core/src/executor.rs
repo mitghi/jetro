@@ -441,6 +441,40 @@ mod tests {
 
     #[cfg(feature = "simd-json")]
     #[test]
+    fn tape_pipeline_generic_first_stage_uses_row_bridge() {
+        let j = Jetro::from_bytes(
+            br#"{"people":[{"name":"al"},{"name":"ada"},{"name":"bob"},{"name":"carol"}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+
+        let out = j
+            .collect(r#"$.people.filter(name.len() == 3).take(1).map(name)"#)
+            .unwrap();
+
+        assert_eq!(out, json!(["ada"]));
+        assert!(!j.root_val_is_materialized());
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn object_shape_tape_pipeline_generic_first_stage_uses_row_bridge() {
+        let j = Jetro::from_bytes(
+            br#"{"people":[{"name":"al"},{"name":"ada"},{"name":"bob"},{"name":"carol"}],"meta":{"version":3}}"#.to_vec(),
+        )
+        .unwrap();
+
+        let out = j
+            .collect(
+                r#"{"first": $.people.filter(name.len() == 3).take(1).map(name), "v": $.meta.version}"#,
+            )
+            .unwrap();
+
+        assert_eq!(out, json!({"first": ["ada"], "v": 3}));
+        assert!(!j.root_val_is_materialized());
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
     fn view_pipeline_count_and_sum_read_from_tape_without_materializing_root_val() {
         let j = Jetro::from_bytes(
             br#"{"books":[{"score":1},{"score":901},{"score":902},{"score":2}]}"#.to_vec(),

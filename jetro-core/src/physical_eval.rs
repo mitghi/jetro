@@ -15,6 +15,20 @@ use crate::value_view::{ValView, ValueView};
 use crate::view_pipeline;
 use crate::{Jetro, VM};
 
+#[cfg(feature = "simd-json")]
+type TapePipelineFallback<'a> = Option<&'a crate::strref::TapeData>;
+
+#[cfg(not(feature = "simd-json"))]
+type TapePipelineFallback<'a> = Option<&'a ()>;
+
+#[derive(Clone, Copy)]
+struct ViewEvalCtx<'p, 'a> {
+    plan: &'p QueryPlan,
+    cache: Option<&'p dyn pipeline::PipelineData>,
+    allow_materialized_pipeline_fallback: bool,
+    tape_pipeline_fallback: TapePipelineFallback<'a>,
+}
+
 pub(crate) fn run(j: &Jetro, plan: &QueryPlan, root_id: NodeId) -> Result<Val, EvalError> {
     #[cfg(feature = "simd-json")]
     if let Some(tape) = j.lazy_tape() {
@@ -23,6 +37,8 @@ pub(crate) fn run(j: &Jetro, plan: &QueryPlan, root_id: NodeId) -> Result<Val, E
             root_id,
             crate::value_view::TapeView::root(tape),
             Some(j),
+            false,
+            Some(tape),
         ) {
             return result;
         }
@@ -32,7 +48,8 @@ pub(crate) fn run(j: &Jetro, plan: &QueryPlan, root_id: NodeId) -> Result<Val, E
     }
 
     let root = j.root_val();
-    if let Some(result) = try_run_view_plan(plan, root_id, ValView::new(&root), Some(j)) {
+    if let Some(result) = try_run_view_plan(plan, root_id, ValView::new(&root), Some(j), true, None)
+    {
         return result;
     }
 
@@ -66,51 +83,67 @@ fn try_run_view_plan<'a, V>(
     root_id: NodeId,
     root: V,
     cache: Option<&dyn pipeline::PipelineData>,
+    allow_materialized_pipeline_fallback: bool,
+    tape_pipeline_fallback: TapePipelineFallback<'a>,
 ) -> Option<Result<Val, EvalError>>
 where
     V: ValueView<'a>,
 {
-    eval_view_val(plan, root_id, &root, &root, cache)
+    let ctx = ViewEvalCtx {
+        plan,
+        cache,
+        allow_materialized_pipeline_fallback,
+        tape_pipeline_fallback,
+    };
+    eval_view_val(&ctx, root_id, &root, &root)
 }
 
 fn eval_view_val<'a, V>(
-    plan: &QueryPlan,
+    ctx: &ViewEvalCtx<'_, 'a>,
     id: NodeId,
     root: &V,
     current: &V,
-    cache: Option<&dyn pipeline::PipelineData>,
 ) -> Option<Result<Val, EvalError>>
 where
     V: ValueView<'a>,
 {
-    if let Some(view) = eval_view_ref(plan, id, root, current) {
+    if let Some(view) = eval_view_ref(ctx.plan, id, root, current) {
         return Some(view.map(|view| view.materialize()));
     }
 
-    match plan.node(id) {
+    match ctx.plan.node(id) {
         PlanNode::Literal(value) => Some(Ok(value.clone())),
         PlanNode::Pipeline {
             source: PipelinePlanSource::FieldChain { keys },
             body,
-        } => eval_view_pipeline(root, keys, body, cache),
-        PlanNode::Object(fields) => eval_view_object(plan, fields, root, current, cache),
-        PlanNode::Array(elems) => eval_view_array(plan, elems, root, current, cache),
+        } => eval_view_pipeline(ctx, root, keys, body),
+        PlanNode::Object(fields) => eval_view_object(ctx, fields, root, current),
+        PlanNode::Array(elems) => eval_view_array(ctx, elems, root, current),
         _ => None,
     }
 }
 
 fn eval_view_pipeline<'a, V>(
+    ctx: &ViewEvalCtx<'_, 'a>,
     root: &V,
     keys: &[Arc<str>],
     body: &pipeline::PipelineBody,
-    cache: Option<&dyn pipeline::PipelineData>,
 ) -> Option<Result<Val, EvalError>>
 where
     V: ValueView<'a>,
 {
     let source = view_pipeline::walk_fields(root.clone(), keys);
-    if let Some(result) = view_pipeline::run(source.clone(), body, cache) {
+    if let Some(result) = view_pipeline::run(source.clone(), body, ctx.cache) {
         return Some(result);
+    }
+    #[cfg(feature = "simd-json")]
+    if let Some(tape) = ctx.tape_pipeline_fallback {
+        if let Some(result) = pipeline::run_tape_field_chain(body, tape, keys) {
+            return Some(result);
+        }
+    }
+    if !ctx.allow_materialized_pipeline_fallback {
+        return None;
     }
     if !view_pipeline::can_run_materialized_receiver(body) {
         return None;
@@ -121,7 +154,7 @@ where
         .with_source(pipeline::Source::Receiver(source.materialize()));
     let root = Val::Null;
     let env = Env::new(Val::Null);
-    Some(pipeline.run_with_env(&root, &env, cache))
+    Some(pipeline.run_with_env(&root, &env, ctx.cache))
 }
 
 fn eval_view_ref<'a, V>(
@@ -149,11 +182,10 @@ where
 }
 
 fn eval_view_object<'a, V>(
-    plan: &QueryPlan,
+    ctx: &ViewEvalCtx<'_, 'a>,
     fields: &[PhysicalObjField],
     root: &V,
     current: &V,
-    cache: Option<&dyn pipeline::PipelineData>,
 ) -> Option<Result<Val, EvalError>>
 where
     V: ValueView<'a>,
@@ -171,7 +203,7 @@ where
                 if cond.is_some() {
                     return None;
                 }
-                let value = match eval_view_val(plan, *val, root, current, cache)? {
+                let value = match eval_view_val(ctx, *val, root, current)? {
                     Ok(value) => value,
                     Err(err) => return Some(Err(err)),
                 };
@@ -190,11 +222,10 @@ where
 }
 
 fn eval_view_array<'a, V>(
-    plan: &QueryPlan,
+    ctx: &ViewEvalCtx<'_, 'a>,
     elems: &[PhysicalArrayElem],
     root: &V,
     current: &V,
-    cache: Option<&dyn pipeline::PipelineData>,
 ) -> Option<Result<Val, EvalError>>
 where
     V: ValueView<'a>,
@@ -202,12 +233,10 @@ where
     let mut out = Vec::with_capacity(elems.len());
     for elem in elems {
         match elem {
-            PhysicalArrayElem::Expr(expr) => {
-                match eval_view_val(plan, *expr, root, current, cache)? {
-                    Ok(value) => out.push(value),
-                    Err(err) => return Some(Err(err)),
-                }
-            }
+            PhysicalArrayElem::Expr(expr) => match eval_view_val(ctx, *expr, root, current)? {
+                Ok(value) => out.push(value),
+                Err(err) => return Some(Err(err)),
+            },
             PhysicalArrayElem::Spread(_) => return None,
         }
     }
