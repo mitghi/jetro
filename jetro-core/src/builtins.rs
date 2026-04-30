@@ -475,6 +475,7 @@ pub struct BuiltinSpec {
     pub cardinality: BuiltinCardinality,
     pub can_indexed: bool,
     pub view_native: bool,
+    pub view_scalar: bool,
     pub view_stage: Option<BuiltinViewStage>,
     pub view_sink: Option<BuiltinViewSink>,
     pub pipeline_stage: Option<BuiltinPipelineStage>,
@@ -562,6 +563,7 @@ impl BuiltinSpec {
             cardinality,
             can_indexed: false,
             view_native: false,
+            view_scalar: false,
             view_stage: None,
             view_sink: None,
             pipeline_stage: None,
@@ -583,6 +585,12 @@ impl BuiltinSpec {
 
     fn view_stage(mut self, stage: BuiltinViewStage) -> Self {
         self.view_stage = Some(stage);
+        self
+    }
+
+    fn view_scalar(mut self) -> Self {
+        self.view_scalar = true;
+        self.view_native = true;
         self
     }
 
@@ -676,7 +684,7 @@ impl BuiltinMethod {
             }
             Self::Len => BuiltinSpec::new(Cat::Reducer, Card::Reducing)
                 .indexed()
-                .view_native()
+                .view_scalar()
                 .view_sink(BuiltinViewSink::Count),
             Self::Sum | Self::Avg | Self::Min | Self::Max => {
                 BuiltinSpec::new(Cat::Reducer, Card::Reducing)
@@ -1537,6 +1545,25 @@ impl BuiltinCall {
     pub fn from_pipeline_literal_args(name: &str, args: &[crate::ast::Arg]) -> Option<Self> {
         let call = Self::from_literal_ast_args(name, args)?;
         call.method.is_pipeline_element_method().then_some(call)
+    }
+
+    pub fn try_apply_json_view(&self, recv: crate::util::JsonView<'_>) -> Option<Val> {
+        if !self.spec().view_scalar {
+            return None;
+        }
+        match (self.method, &self.args) {
+            (BuiltinMethod::Len, BuiltinArgs::None) => json_view_len(recv).map(Val::Int),
+            _ => None,
+        }
+    }
+}
+
+#[inline]
+fn json_view_len(recv: crate::util::JsonView<'_>) -> Option<i64> {
+    match recv {
+        crate::util::JsonView::Str(s) => Some(s.chars().count() as i64),
+        crate::util::JsonView::ArrayLen(n) | crate::util::JsonView::ObjectLen(n) => Some(n as i64),
+        _ => None,
     }
 }
 
@@ -5863,6 +5890,13 @@ mod spec_tests {
             BuiltinViewMaterialization::SinkNumericInput
         );
         assert_eq!(BuiltinMethod::Sort.spec().view_sink, None);
+    }
+
+    #[test]
+    fn builtin_specs_drive_view_scalar_kernels() {
+        assert!(BuiltinMethod::Len.spec().view_scalar);
+        assert!(!BuiltinMethod::Sort.spec().view_scalar);
+        assert!(!BuiltinMethod::FromJson.spec().view_scalar);
     }
 
     #[test]

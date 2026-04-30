@@ -506,7 +506,7 @@ mod tests {
 
         assert_eq!(out, json!(["ada"]));
         assert!(!j.root_val_is_materialized());
-        assert_eq!(j.tape_materialized_subtrees(), 2);
+        assert_eq!(j.tape_materialized_subtrees(), 1);
     }
 
     #[cfg(feature = "simd-json")]

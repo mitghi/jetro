@@ -698,6 +698,23 @@ mod tests {
         eprintln!("PRED OPS = {:#?}", prog.ops);
     }
 
+    #[test]
+    fn method_chain_scalar_filter_lowers_from_builtin_view_metadata() {
+        let p = lower_query("$.people.filter(name.len() == 3).take(1).map(name)").unwrap();
+
+        assert!(matches!(
+            &p.stage_kernels[0],
+            BodyKernel::CmpLit { lhs, .. }
+                if matches!(
+                    lhs.as_ref(),
+                    BodyKernel::BuiltinCall { receiver, call }
+                        if call.spec().view_scalar
+                            && matches!(receiver.as_ref(), BodyKernel::FieldRead(k) if k.as_ref() == "name")
+                )
+        ));
+        assert!(p.stage_kernels[0].is_view_native());
+    }
+
     // `debug_compound_pipeline_lower` and `debug_full_pipeline_lower`
     // removed — referenced fused Sink::CountIf / Sink::NumFilterMap.
 

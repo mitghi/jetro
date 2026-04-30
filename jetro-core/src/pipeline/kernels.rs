@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::builtins::{BuiltinArgs, BuiltinCall};
 use crate::context::EvalError;
 use crate::util::JsonView;
 use crate::value::Val;
@@ -8,8 +9,18 @@ use crate::value_view::ValueView;
 #[derive(Debug, Clone)]
 pub enum BodyKernel {
     Generic,
+    Current,
     FieldRead(Arc<str>),
     FieldChain(Arc<[Arc<str>]>),
+    BuiltinCall {
+        receiver: Box<BodyKernel>,
+        call: BuiltinCall,
+    },
+    CmpLit {
+        lhs: Box<BodyKernel>,
+        op: crate::ast::BinOp,
+        lit: Val,
+    },
     FieldCmpLit(Arc<str>, crate::ast::BinOp, Val),
     FieldChainCmpLit(Arc<[Arc<str>]>, crate::ast::BinOp, Val),
     CurrentCmpLit(crate::ast::BinOp, Val),
@@ -97,7 +108,14 @@ impl ObjectKernel {
 
 impl BodyKernel {
     pub(crate) fn is_view_native(&self) -> bool {
-        !matches!(self, Self::Generic)
+        match self {
+            Self::Generic => false,
+            Self::BuiltinCall { receiver, call } => {
+                receiver.is_view_native() && call.spec().view_scalar
+            }
+            Self::CmpLit { lhs, .. } => lhs.is_view_native(),
+            _ => true,
+        }
     }
 
     pub(crate) fn collect_layout(&self) -> CollectLayout<'_> {
@@ -248,6 +266,9 @@ impl BodyKernel {
                 }
             }
         }
+        if let Some(kernel) = classify_structural_view_kernel(rest) {
+            return kernel;
+        }
         Self::Generic
     }
 }
@@ -288,6 +309,58 @@ fn trivial_lit(op: &crate::vm::Opcode) -> Option<Val> {
     }
 }
 
+fn classify_structural_view_kernel(ops: &[crate::vm::Opcode]) -> Option<BodyKernel> {
+    use crate::vm::Opcode;
+
+    let ops = match ops {
+        [Opcode::PushCurrent] => return Some(BodyKernel::Current),
+        [Opcode::PushCurrent, rest @ ..] => rest,
+        other => other,
+    };
+
+    if let [lhs @ .., lit_op, cmp_op] = ops {
+        if let Some(lit) = trivial_lit(lit_op) {
+            if let Some(op) = cmp_to_binop(cmp_op) {
+                let lhs = classify_structural_view_kernel(lhs)?;
+                return Some(BodyKernel::CmpLit {
+                    lhs: Box::new(lhs),
+                    op,
+                    lit,
+                });
+            }
+        }
+    }
+
+    match ops {
+        [Opcode::LoadIdent(k) | Opcode::GetField(k)] => Some(BodyKernel::FieldRead(k.clone())),
+        [Opcode::FieldChain(fc)] => Some(BodyKernel::FieldChain(fc.keys.clone())),
+        [Opcode::LoadIdent(k1), rest @ ..]
+            if rest.iter().all(|op| matches!(op, Opcode::GetField(_))) =>
+        {
+            let mut keys = Vec::with_capacity(rest.len() + 1);
+            keys.push(k1.clone());
+            for op in rest {
+                if let Opcode::GetField(k) = op {
+                    keys.push(k.clone());
+                }
+            }
+            Some(BodyKernel::FieldChain(keys.into()))
+        }
+        [receiver @ .., Opcode::CallMethod(call)]
+            if call.orig_args.is_empty()
+                && call.sub_progs.is_empty()
+                && call.method.spec().view_scalar =>
+        {
+            let receiver = classify_structural_view_kernel(receiver)?;
+            Some(BodyKernel::BuiltinCall {
+                receiver: Box::new(receiver),
+                call: BuiltinCall::new(call.method, BuiltinArgs::None),
+            })
+        }
+        _ => None,
+    }
+}
+
 #[inline]
 fn cmp_to_binop(op: &crate::vm::Opcode) -> Option<crate::ast::BinOp> {
     use crate::ast::BinOp as B;
@@ -316,6 +389,7 @@ where
 
 fn eval_native_kernel(kernel: &BodyKernel, item: &Val) -> Result<Val, EvalError> {
     match kernel {
+        BodyKernel::Current => Ok(item.clone()),
         BodyKernel::FieldRead(k) => Ok(item.get_field(k.as_ref())),
         BodyKernel::FieldChain(ks) => {
             let mut v = item.clone();
@@ -334,6 +408,15 @@ fn eval_native_kernel(kernel: &BodyKernel, item: &Val) -> Result<Val, EvalError>
         }
         BodyKernel::Object(object) => {
             eval_object_kernel(object, |kernel| eval_native_kernel(kernel, item))
+        }
+        BodyKernel::BuiltinCall { receiver, call } => {
+            let recv = eval_native_kernel(receiver, item)?;
+            call.try_apply(&recv)?
+                .ok_or_else(|| EvalError(format!("{:?}: unsupported receiver", call.method)))
+        }
+        BodyKernel::CmpLit { lhs, op, lit } => {
+            let lhs = eval_native_kernel(lhs, item)?;
+            Ok(Val::Bool(eval_cmp_op(&lhs, *op, lit)))
         }
         BodyKernel::FieldCmpLit(k, op, lit) => {
             let lhs = item.get_field(k.as_ref());
@@ -431,6 +514,7 @@ where
     V: ValueView<'a>,
 {
     match kernel {
+        BodyKernel::Current => Some(ViewKernelValue::View(item.clone())),
         BodyKernel::FieldRead(key) => Some(ViewKernelValue::View(item.field(key))),
         BodyKernel::FieldChain(keys) => Some(ViewKernelValue::View(walk_view_fields(
             item.clone(),
@@ -468,6 +552,31 @@ where
                 pairs.push((Arc::clone(&entry.key), value));
             }
             Some(ViewKernelValue::Owned(Val::ObjSmall(pairs.into())))
+        }
+        BodyKernel::BuiltinCall { receiver, call } => match eval_view_kernel(receiver, item)? {
+            ViewKernelValue::View(view) => call
+                .try_apply_json_view(view.scalar())
+                .map(ViewKernelValue::Owned),
+            ViewKernelValue::Owned(value) => call
+                .try_apply(&value)
+                .ok()
+                .flatten()
+                .map(ViewKernelValue::Owned),
+        },
+        BodyKernel::CmpLit { lhs, op, lit } => {
+            let passes = match eval_view_kernel(lhs, item)? {
+                ViewKernelValue::View(view) => crate::util::json_cmp_binop(
+                    view.scalar(),
+                    *op,
+                    crate::util::JsonView::from_val(lit),
+                ),
+                ViewKernelValue::Owned(value) => crate::util::json_cmp_binop(
+                    JsonView::from_val(&value),
+                    *op,
+                    crate::util::JsonView::from_val(lit),
+                ),
+            };
+            Some(ViewKernelValue::Owned(Val::Bool(passes)))
         }
         BodyKernel::FieldCmpLit(key, op, lit) => {
             let lhs = item.field(key);
