@@ -1,11 +1,9 @@
-use std::sync::Arc;
-
 use crate::{
     context::{Env, EvalError},
     value::Val,
 };
 
-use super::{select_strategy, walk_field_chain, Pipeline, Position, Source, Stage, Strategy};
+use super::{row_source, select_strategy, Pipeline, Position, Stage, Strategy};
 
 /// Generic O(1) optimisation for `(Map | identity)*` chains terminated by a
 /// positional sink (`First` / `Last`). Pulls only the target source element,
@@ -20,19 +18,8 @@ pub(super) fn run(
         return None;
     }
 
-    let recv = match &pipeline.source {
-        Source::Receiver(v) => v.clone(),
-        Source::FieldChain { keys } => walk_field_chain(root, keys),
-    };
-
-    let len = match &recv {
-        Val::Arr(a) => a.len(),
-        Val::IntVec(a) => a.len(),
-        Val::FloatVec(a) => a.len(),
-        Val::StrVec(a) => a.len(),
-        Val::ObjVec(d) => d.nrows(),
-        _ => return None,
-    };
+    let recv = row_source::resolve(&pipeline.source, root);
+    let len = row_source::row_count(&recv)?;
 
     let demand = pipeline.sink.demand();
     let idx = match demand.positional? {
@@ -43,22 +30,7 @@ pub(super) fn run(
         return Some(Ok(Val::Null));
     }
 
-    let elem = match &recv {
-        Val::Arr(a) => a[idx].clone(),
-        Val::IntVec(a) => Val::Int(a[idx]),
-        Val::FloatVec(a) => Val::Float(a[idx]),
-        Val::StrVec(a) => Val::Str(Arc::clone(&a[idx])),
-        Val::ObjVec(d) => {
-            let stride = d.stride();
-            let mut m: indexmap::IndexMap<Arc<str>, Val> =
-                indexmap::IndexMap::with_capacity(stride);
-            for (i, k) in d.keys.iter().enumerate() {
-                m.insert(Arc::clone(k), d.cells[idx * stride + i].clone());
-            }
-            Val::Obj(Arc::new(m))
-        }
-        _ => return None,
-    };
+    let elem = row_source::row_at(&recv, idx)?;
 
     let mut vm = crate::vm::VM::new();
     let mut env = base_env.clone();

@@ -69,11 +69,7 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
     });
     let mut terminal_map_collect = terminal_map_kernel.map(TerminalMapCollector::new);
     let pre_iter: LegacyPreIter<'_> = if needs_barrier {
-        let mut buf: Vec<Val> = if let Some(rows) = row_source::array_like_rows(&recv) {
-            rows.into_vec()
-        } else {
-            legacy_source_iter(&recv).collect()
-        };
+        let mut buf: Vec<Val> = row_source::materialize_source(&recv);
         let strategies = compute_strategies(&pipeline.stages, &pipeline.sink);
         // Phase 1.2 — barrier-stage path now reads stage_kernels[i]
         // and dispatches the inline kernel for Sort/UniqueBy keyed
@@ -356,7 +352,7 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
         }
         LegacyPreIter::Owned(buf.into_iter())
     } else {
-        LegacyPreIter::Source(legacy_source_iter(&recv))
+        LegacyPreIter::Source(row_source::source_iter(&recv))
     };
 
     'outer: for mut item in pre_iter {
@@ -514,7 +510,7 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
 }
 
 enum LegacyPreIter<'a> {
-    Source(LegacySourceIter<'a>),
+    Source(row_source::SourceIter<'a>),
     Owned(std::vec::IntoIter<Val>),
 }
 
@@ -526,53 +522,6 @@ impl Iterator for LegacyPreIter<'_> {
             Self::Source(iter) => iter.next(),
             Self::Owned(iter) => iter.next(),
         }
-    }
-}
-
-enum LegacySourceIter<'a> {
-    Rows(row_source::RowsIter<'a>),
-    ObjVec(std::vec::IntoIter<Val>),
-    Single(std::option::IntoIter<Val>),
-}
-
-impl Iterator for LegacySourceIter<'_> {
-    type Item = Val;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match self {
-            Self::Rows(iter) => iter.next(),
-            Self::ObjVec(iter) => iter.next(),
-            Self::Single(iter) => iter.next(),
-        }
-    }
-}
-
-fn legacy_source_iter<'a>(recv: &'a Val) -> LegacySourceIter<'a> {
-    if let Some(rows) = row_source::array_like_rows(recv) {
-        return LegacySourceIter::Rows(rows.iter_cloned());
-    }
-
-    match recv {
-        // ObjVec: materialise rows into Val::Obj for the per-row pull
-        // path. Slot-indexed columnar fast paths handle common aggregate
-        // shapes before this point; landing here means downstream stages
-        // need Val::Obj rows.
-        Val::ObjVec(d) => {
-            let n = d.nrows();
-            let mut out: Vec<Val> = Vec::with_capacity(n);
-            let stride = d.stride();
-            for row in 0..n {
-                let mut m: indexmap::IndexMap<Arc<str>, Val> =
-                    indexmap::IndexMap::with_capacity(stride);
-                for (i, k) in d.keys.iter().enumerate() {
-                    m.insert(Arc::clone(k), d.cells[row * stride + i].clone());
-                }
-                out.push(Val::Obj(Arc::new(m)));
-            }
-            LegacySourceIter::ObjVec(out.into_iter())
-        }
-        // Anything else (scalar, Obj, ...): single-element iterator.
-        _ => LegacySourceIter::Single(Some(recv.clone()).into_iter()),
     }
 }
 
