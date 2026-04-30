@@ -68,7 +68,7 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
             .unwrap_or(&BodyKernel::Generic)
     });
     let mut terminal_map_collect = terminal_map_kernel.map(TerminalMapCollector::new);
-    let pre_iter: Box<dyn Iterator<Item = Val> + '_> = if needs_barrier {
+    let pre_iter: LegacyPreIter<'_> = if needs_barrier {
         let mut buf: Vec<Val> = if let Some(rows) = row_source::array_like_rows(&recv) {
             rows.into_vec()
         } else {
@@ -354,9 +354,9 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
                 }
             }
         }
-        Box::new(buf.into_iter())
+        LegacyPreIter::Owned(buf.into_iter())
     } else {
-        legacy_source_iter(&recv)
+        LegacyPreIter::Source(legacy_source_iter(&recv))
     };
 
     'outer: for mut item in pre_iter {
@@ -513,9 +513,43 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
     Ok(sink_acc.finish(unwrap_single_collect_obj))
 }
 
-fn legacy_source_iter<'a>(recv: &'a Val) -> Box<dyn Iterator<Item = Val> + 'a> {
+enum LegacyPreIter<'a> {
+    Source(LegacySourceIter<'a>),
+    Owned(std::vec::IntoIter<Val>),
+}
+
+impl Iterator for LegacyPreIter<'_> {
+    type Item = Val;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Source(iter) => iter.next(),
+            Self::Owned(iter) => iter.next(),
+        }
+    }
+}
+
+enum LegacySourceIter<'a> {
+    Rows(row_source::RowsIter<'a>),
+    ObjVec(std::vec::IntoIter<Val>),
+    Single(std::option::IntoIter<Val>),
+}
+
+impl Iterator for LegacySourceIter<'_> {
+    type Item = Val;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Rows(iter) => iter.next(),
+            Self::ObjVec(iter) => iter.next(),
+            Self::Single(iter) => iter.next(),
+        }
+    }
+}
+
+fn legacy_source_iter<'a>(recv: &'a Val) -> LegacySourceIter<'a> {
     if let Some(rows) = row_source::array_like_rows(recv) {
-        return Box::new(rows.iter_cloned());
+        return LegacySourceIter::Rows(rows.iter_cloned());
     }
 
     match recv {
@@ -535,10 +569,10 @@ fn legacy_source_iter<'a>(recv: &'a Val) -> Box<dyn Iterator<Item = Val> + 'a> {
                 }
                 out.push(Val::Obj(Arc::new(m)));
             }
-            Box::new(out.into_iter())
+            LegacySourceIter::ObjVec(out.into_iter())
         }
         // Anything else (scalar, Obj, ...): single-element iterator.
-        _ => Box::new(std::iter::once(recv.clone())),
+        _ => LegacySourceIter::Single(Some(recv.clone()).into_iter()),
     }
 }
 
