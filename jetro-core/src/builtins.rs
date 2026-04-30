@@ -556,6 +556,7 @@ pub struct BuiltinSpec {
     pub cancellation: Option<BuiltinCancellation>,
     pub pipeline_stage: Option<BuiltinPipelineStage>,
     pub pipeline_sink: Option<BuiltinPipelineSink>,
+    pub pipeline_lowering: Option<BuiltinPipelineLowering>,
     pub pipeline_element: bool,
     pub cost: f64,
 }
@@ -683,6 +684,70 @@ pub enum BuiltinPipelineSink {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinPipelineLowering {
+    ExprStage(BuiltinExprStage),
+    TerminalExprStage {
+        stage: BuiltinExprStage,
+        terminal: BuiltinViewSink,
+    },
+    NullaryStage(BuiltinNullaryStage),
+    UsizeStage {
+        stage: BuiltinUsizeStage,
+        min: usize,
+    },
+    StringStage(BuiltinStringStage),
+    StringPairStage(BuiltinStringPairStage),
+    Sort,
+    Slice,
+    TerminalSink,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinExprStage {
+    Filter,
+    Map,
+    FlatMap,
+    TakeWhile,
+    DropWhile,
+    IndicesWhere,
+    FindIndex,
+    MaxBy,
+    MinBy,
+    UniqueBy,
+    GroupBy,
+    CountBy,
+    IndexBy,
+    TransformValues,
+    TransformKeys,
+    FilterValues,
+    FilterKeys,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinNullaryStage {
+    Reverse,
+    Unique,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinUsizeStage {
+    Take,
+    Skip,
+    Chunk,
+    Window,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinStringStage {
+    Split,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinStringPairStage {
+    Replace { all: bool },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinViewMaterialization {
     Never,
     SinkFinalRow,
@@ -743,6 +808,7 @@ impl BuiltinSpec {
             cancellation: None,
             pipeline_stage: None,
             pipeline_sink: None,
+            pipeline_lowering: None,
             pipeline_element: false,
             cost: 1.0,
         }
@@ -776,6 +842,11 @@ impl BuiltinSpec {
 
     fn pipeline_sink(mut self, sink: BuiltinPipelineSink) -> Self {
         self.pipeline_sink = Some(sink);
+        self
+    }
+
+    fn pipeline_lowering(mut self, lowering: BuiltinPipelineLowering) -> Self {
+        self.pipeline_lowering = Some(lowering);
         self
     }
 
@@ -935,6 +1006,7 @@ impl BuiltinMethod {
                 BuiltinSpec::new(Cat::StreamingFilter, Card::Filtering)
                     .view_stage(BuiltinViewStage::Filter)
                     .pipeline_stage(BuiltinPipelineStage::Unary)
+                    .pipeline_lowering(BuiltinPipelineLowering::ExprStage(BuiltinExprStage::Filter))
                     .cost(10.0)
             }
             Self::Compact | Self::Remove => {
@@ -944,6 +1016,7 @@ impl BuiltinMethod {
                 .indexed()
                 .view_stage(BuiltinViewStage::Map)
                 .pipeline_stage(BuiltinPipelineStage::Unary)
+                .pipeline_lowering(BuiltinPipelineLowering::ExprStage(BuiltinExprStage::Map))
                 .pipeline_element()
                 .cost(10.0),
             Self::Enumerate | Self::Pairwise => {
@@ -955,10 +1028,18 @@ impl BuiltinMethod {
             Self::FlatMap => BuiltinSpec::new(Cat::StreamingExpand, Card::Expanding)
                 .view_stage(BuiltinViewStage::FlatMap)
                 .pipeline_stage(BuiltinPipelineStage::Unary)
+                .pipeline_lowering(BuiltinPipelineLowering::ExprStage(
+                    BuiltinExprStage::FlatMap,
+                ))
                 .cost(10.0),
-            Self::Flatten | Self::Explode | Self::Split => {
+            Self::Flatten | Self::Explode => {
                 BuiltinSpec::new(Cat::StreamingExpand, Card::Expanding).cost(10.0)
             }
+            Self::Split => BuiltinSpec::new(Cat::StreamingExpand, Card::Expanding)
+                .pipeline_lowering(BuiltinPipelineLowering::StringStage(
+                    BuiltinStringStage::Split,
+                ))
+                .cost(10.0),
             Self::Lines | Self::Words | Self::Chars | Self::CharsOf | Self::Bytes => {
                 BuiltinSpec::new(Cat::StreamingExpand, Card::Expanding)
                     .pipeline_element()
@@ -967,29 +1048,48 @@ impl BuiltinMethod {
             Self::TakeWhile | Self::DropWhile => {
                 BuiltinSpec::new(Cat::StreamingFilter, Card::Filtering)
                     .pipeline_stage(BuiltinPipelineStage::Unary)
+                    .pipeline_lowering(BuiltinPipelineLowering::ExprStage(match self {
+                        Self::TakeWhile => BuiltinExprStage::TakeWhile,
+                        Self::DropWhile => BuiltinExprStage::DropWhile,
+                        _ => unreachable!(),
+                    }))
                     .cost(10.0)
             }
             Self::FindFirst | Self::FindOne => {
                 BuiltinSpec::new(Cat::StreamingFilter, Card::Filtering)
                     .pipeline_stage(BuiltinPipelineStage::Unary)
+                    .pipeline_lowering(BuiltinPipelineLowering::TerminalExprStage {
+                        stage: BuiltinExprStage::Filter,
+                        terminal: BuiltinViewSink::First,
+                    })
                     .cost(10.0)
             }
             Self::Take => BuiltinSpec::new(Cat::Positional, Card::Bounded)
                 .view_native()
                 .view_stage(BuiltinViewStage::Take)
                 .stage_merge(BuiltinStageMerge::UsizeMin)
+                .pipeline_lowering(BuiltinPipelineLowering::UsizeStage {
+                    stage: BuiltinUsizeStage::Take,
+                    min: 0,
+                })
                 .pipeline_stage(BuiltinPipelineStage::Unary),
             Self::Skip => BuiltinSpec::new(Cat::Positional, Card::Bounded)
                 .view_native()
                 .view_stage(BuiltinViewStage::Skip)
                 .stage_merge(BuiltinStageMerge::UsizeSaturatingAdd)
+                .pipeline_lowering(BuiltinPipelineLowering::UsizeStage {
+                    stage: BuiltinUsizeStage::Skip,
+                    min: 0,
+                })
                 .pipeline_stage(BuiltinPipelineStage::Unary),
             Self::First => BuiltinSpec::new(Cat::Positional, Card::Bounded)
                 .view_native()
-                .view_sink(BuiltinViewSink::First),
+                .view_sink(BuiltinViewSink::First)
+                .pipeline_lowering(BuiltinPipelineLowering::TerminalSink),
             Self::Last => BuiltinSpec::new(Cat::Positional, Card::Bounded)
                 .view_native()
-                .view_sink(BuiltinViewSink::Last),
+                .view_sink(BuiltinViewSink::Last)
+                .pipeline_lowering(BuiltinPipelineLowering::TerminalSink),
             Self::Nth | Self::Collect => {
                 BuiltinSpec::new(Cat::Positional, Card::Bounded).view_native()
             }
@@ -1000,25 +1100,31 @@ impl BuiltinMethod {
             Self::Sum => BuiltinSpec::new(Cat::Reducer, Card::Reducing)
                 .view_native()
                 .numeric_view_sink(BuiltinNumericReducer::Sum)
+                .pipeline_lowering(BuiltinPipelineLowering::TerminalSink)
                 .cost(10.0),
             Self::Avg => BuiltinSpec::new(Cat::Reducer, Card::Reducing)
                 .view_native()
                 .numeric_view_sink(BuiltinNumericReducer::Avg)
+                .pipeline_lowering(BuiltinPipelineLowering::TerminalSink)
                 .cost(10.0),
             Self::Min => BuiltinSpec::new(Cat::Reducer, Card::Reducing)
                 .view_native()
                 .numeric_view_sink(BuiltinNumericReducer::Min)
+                .pipeline_lowering(BuiltinPipelineLowering::TerminalSink)
                 .cost(10.0),
             Self::Max => BuiltinSpec::new(Cat::Reducer, Card::Reducing)
                 .view_native()
                 .numeric_view_sink(BuiltinNumericReducer::Max)
+                .pipeline_lowering(BuiltinPipelineLowering::TerminalSink)
                 .cost(10.0),
             Self::Count => BuiltinSpec::new(Cat::Reducer, Card::Reducing)
                 .view_native()
                 .view_sink(BuiltinViewSink::Count)
+                .pipeline_lowering(BuiltinPipelineLowering::TerminalSink)
                 .cost(10.0),
             Self::ApproxCountDistinct => BuiltinSpec::new(Cat::Reducer, Card::Reducing)
                 .pipeline_sink(BuiltinPipelineSink::ApproxCountDistinct)
+                .pipeline_lowering(BuiltinPipelineLowering::TerminalSink)
                 .cost(10.0),
             Self::Any
             | Self::All
@@ -1030,9 +1136,18 @@ impl BuiltinMethod {
                     .view_native()
                     .cost(10.0);
                 match self {
-                    Self::FindIndex | Self::IndicesWhere | Self::MaxBy | Self::MinBy => {
-                        spec.pipeline_stage(BuiltinPipelineStage::Unary)
-                    }
+                    Self::FindIndex | Self::IndicesWhere | Self::MaxBy | Self::MinBy => spec
+                        .pipeline_stage(BuiltinPipelineStage::Unary)
+                        .pipeline_lowering(BuiltinPipelineLowering::TerminalExprStage {
+                            stage: match self {
+                                Self::FindIndex => BuiltinExprStage::FindIndex,
+                                Self::IndicesWhere => BuiltinExprStage::IndicesWhere,
+                                Self::MaxBy => BuiltinExprStage::MaxBy,
+                                Self::MinBy => BuiltinExprStage::MinBy,
+                                _ => unreachable!(),
+                            },
+                            terminal: BuiltinViewSink::First,
+                        }),
                     _ => spec,
                 }
             }
@@ -1053,13 +1168,48 @@ impl BuiltinMethod {
             | Self::Accumulate => {
                 let spec = BuiltinSpec::new(Cat::Barrier, Card::Barrier).cost(20.0);
                 match self {
-                    Self::Sort | Self::Unique => spec.pipeline_stage(BuiltinPipelineStage::Nullary),
-                    Self::UniqueBy
-                    | Self::GroupBy
-                    | Self::CountBy
-                    | Self::IndexBy
-                    | Self::Chunk
-                    | Self::Window => spec.pipeline_stage(BuiltinPipelineStage::Unary),
+                    Self::Sort => spec
+                        .pipeline_stage(BuiltinPipelineStage::Nullary)
+                        .pipeline_lowering(BuiltinPipelineLowering::Sort),
+                    Self::Unique => spec
+                        .pipeline_stage(BuiltinPipelineStage::Nullary)
+                        .pipeline_lowering(BuiltinPipelineLowering::NullaryStage(
+                            BuiltinNullaryStage::Unique,
+                        )),
+                    Self::UniqueBy => spec
+                        .pipeline_stage(BuiltinPipelineStage::Unary)
+                        .pipeline_lowering(BuiltinPipelineLowering::ExprStage(
+                            BuiltinExprStage::UniqueBy,
+                        )),
+                    Self::GroupBy => spec
+                        .pipeline_stage(BuiltinPipelineStage::Unary)
+                        .pipeline_lowering(BuiltinPipelineLowering::ExprStage(
+                            BuiltinExprStage::GroupBy,
+                        )),
+                    Self::CountBy => spec
+                        .pipeline_stage(BuiltinPipelineStage::Unary)
+                        .pipeline_lowering(BuiltinPipelineLowering::TerminalExprStage {
+                            stage: BuiltinExprStage::CountBy,
+                            terminal: BuiltinViewSink::First,
+                        }),
+                    Self::IndexBy => spec
+                        .pipeline_stage(BuiltinPipelineStage::Unary)
+                        .pipeline_lowering(BuiltinPipelineLowering::TerminalExprStage {
+                            stage: BuiltinExprStage::IndexBy,
+                            terminal: BuiltinViewSink::First,
+                        }),
+                    Self::Chunk => spec
+                        .pipeline_stage(BuiltinPipelineStage::Unary)
+                        .pipeline_lowering(BuiltinPipelineLowering::UsizeStage {
+                            stage: BuiltinUsizeStage::Chunk,
+                            min: 1,
+                        }),
+                    Self::Window => spec
+                        .pipeline_stage(BuiltinPipelineStage::Unary)
+                        .pipeline_lowering(BuiltinPipelineLowering::UsizeStage {
+                            stage: BuiltinUsizeStage::Window,
+                            min: 1,
+                        }),
                     _ => spec,
                 }
             }
@@ -1080,6 +1230,9 @@ impl BuiltinMethod {
                         .pipeline_stage(BuiltinPipelineStage::Nullary)
                         .cancellation(BuiltinCancellation::SelfInverse(
                             BuiltinCancelGroup::Reverse,
+                        ))
+                        .pipeline_lowering(BuiltinPipelineLowering::NullaryStage(
+                            BuiltinNullaryStage::Reverse,
                         )),
                     _ => spec,
                 }
@@ -1096,12 +1249,19 @@ impl BuiltinMethod {
             | Self::DeepMerge
             | Self::Defaults
             | Self::Rename
-            | Self::TransformKeys
-            | Self::TransformValues
-            | Self::FilterKeys
-            | Self::FilterValues
             | Self::Pivot
             | Self::Implode => BuiltinSpec::new(Cat::Object, Card::OneToOne),
+            Self::TransformKeys | Self::TransformValues | Self::FilterKeys | Self::FilterValues => {
+                BuiltinSpec::new(Cat::Object, Card::OneToOne).pipeline_lowering(
+                    BuiltinPipelineLowering::ExprStage(match self {
+                        Self::TransformKeys => BuiltinExprStage::TransformKeys,
+                        Self::TransformValues => BuiltinExprStage::TransformValues,
+                        Self::FilterKeys => BuiltinExprStage::FilterKeys,
+                        Self::FilterValues => BuiltinExprStage::FilterValues,
+                        _ => unreachable!(),
+                    }),
+                )
+            }
             Self::GetPath | Self::DelPath | Self::HasPath => {
                 BuiltinSpec::new(Cat::Path, Card::OneToOne)
                     .indexed()
@@ -1139,6 +1299,18 @@ impl BuiltinMethod {
                 pure: false,
                 ..BuiltinSpec::new(Cat::Unknown, Card::OneToOne)
             },
+            Self::Slice => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .pipeline_lowering(BuiltinPipelineLowering::Slice),
+            Self::Replace | Self::ReplaceAll => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .pipeline_lowering(BuiltinPipelineLowering::StringPairStage(
+                    BuiltinStringPairStage::Replace {
+                        all: self == Self::ReplaceAll,
+                    },
+                )),
             _ => {
                 let spec = BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
                     .indexed()
@@ -6100,9 +6272,10 @@ pub fn schema_apply(recv: &Val) -> Option<Val> {
 #[cfg(test)]
 mod spec_tests {
     use super::{
-        BuiltinCardinality, BuiltinCategory, BuiltinMethod, BuiltinNumericReducer,
-        BuiltinPipelineSink, BuiltinPipelineStage, BuiltinStageMerge, BuiltinViewMaterialization,
-        BuiltinViewSink, BuiltinViewStage,
+        BuiltinCardinality, BuiltinCategory, BuiltinExprStage, BuiltinMethod, BuiltinNullaryStage,
+        BuiltinNumericReducer, BuiltinPipelineLowering, BuiltinPipelineSink, BuiltinPipelineStage,
+        BuiltinStageMerge, BuiltinStringPairStage, BuiltinStringStage, BuiltinUsizeStage,
+        BuiltinViewMaterialization, BuiltinViewSink, BuiltinViewStage,
     };
 
     #[test]
@@ -6224,6 +6397,58 @@ mod spec_tests {
             BuiltinViewMaterialization::SinkNumericInput
         );
         assert_eq!(BuiltinMethod::Sort.spec().view_sink, None);
+    }
+
+    #[test]
+    fn builtin_specs_drive_pipeline_lowering() {
+        assert_eq!(
+            BuiltinMethod::Filter.spec().pipeline_lowering,
+            Some(BuiltinPipelineLowering::ExprStage(BuiltinExprStage::Filter))
+        );
+        assert_eq!(
+            BuiltinMethod::Map.spec().pipeline_lowering,
+            Some(BuiltinPipelineLowering::ExprStage(BuiltinExprStage::Map))
+        );
+        assert_eq!(
+            BuiltinMethod::FindOne.spec().pipeline_lowering,
+            Some(BuiltinPipelineLowering::TerminalExprStage {
+                stage: BuiltinExprStage::Filter,
+                terminal: BuiltinViewSink::First,
+            })
+        );
+        assert_eq!(
+            BuiltinMethod::Take.spec().pipeline_lowering,
+            Some(BuiltinPipelineLowering::UsizeStage {
+                stage: BuiltinUsizeStage::Take,
+                min: 0,
+            })
+        );
+        assert_eq!(
+            BuiltinMethod::Sort.spec().pipeline_lowering,
+            Some(BuiltinPipelineLowering::Sort)
+        );
+        assert_eq!(
+            BuiltinMethod::Reverse.spec().pipeline_lowering,
+            Some(BuiltinPipelineLowering::NullaryStage(
+                BuiltinNullaryStage::Reverse
+            ))
+        );
+        assert_eq!(
+            BuiltinMethod::Split.spec().pipeline_lowering,
+            Some(BuiltinPipelineLowering::StringStage(
+                BuiltinStringStage::Split
+            ))
+        );
+        assert_eq!(
+            BuiltinMethod::ReplaceAll.spec().pipeline_lowering,
+            Some(BuiltinPipelineLowering::StringPairStage(
+                BuiltinStringPairStage::Replace { all: true }
+            ))
+        );
+        assert_eq!(
+            BuiltinMethod::Count.spec().pipeline_lowering,
+            Some(BuiltinPipelineLowering::TerminalSink)
+        );
     }
 
     #[test]
