@@ -957,7 +957,7 @@ impl BuiltinMethod {
                     .indexed()
                     .view_native();
                 let spec = match self {
-                    Self::StartsWith => spec.view_scalar(),
+                    Self::StartsWith | Self::EndsWith => spec.view_scalar(),
                     _ => spec,
                 };
                 if pipeline_element {
@@ -1631,6 +1631,9 @@ impl BuiltinCall {
             (BuiltinMethod::Len, BuiltinArgs::None) => json_view_len(recv).map(Val::Int),
             (BuiltinMethod::StartsWith, BuiltinArgs::Str(prefix)) => {
                 json_view_str(recv).map(|value| Val::Bool(value.starts_with(prefix.as_ref())))
+            }
+            (BuiltinMethod::EndsWith, BuiltinArgs::Str(suffix)) => {
+                json_view_str(recv).map(|value| Val::Bool(value.ends_with(suffix.as_ref())))
             }
             _ => None,
         }
@@ -5982,6 +5985,8 @@ mod spec_tests {
     #[test]
     fn builtin_specs_drive_view_scalar_kernels() {
         assert!(BuiltinMethod::Len.spec().view_scalar);
+        assert!(BuiltinMethod::StartsWith.spec().view_scalar);
+        assert!(BuiltinMethod::EndsWith.spec().view_scalar);
         assert!(!BuiltinMethod::Sort.spec().view_scalar);
         assert!(!BuiltinMethod::FromJson.spec().view_scalar);
     }
