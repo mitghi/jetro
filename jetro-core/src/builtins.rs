@@ -468,6 +468,79 @@ pub struct BuiltinCall {
     pub args: BuiltinArgs,
 }
 
+struct StaticArgDecoder<'a, E, I> {
+    name: &'a str,
+    eval_arg: E,
+    ident_arg: I,
+}
+
+impl<E, I> StaticArgDecoder<'_, E, I>
+where
+    E: FnMut(usize) -> Result<Option<Val>, EvalError>,
+    I: FnMut(usize) -> Option<Arc<str>>,
+{
+    fn val(&mut self, idx: usize) -> Result<Val, EvalError> {
+        (self.eval_arg)(idx)?.ok_or_else(|| EvalError(format!("{}: missing argument", self.name)))
+    }
+
+    fn str(&mut self, idx: usize) -> Result<Arc<str>, EvalError> {
+        if let Some(value) = (self.ident_arg)(idx) {
+            return Ok(value);
+        }
+        match self.val(idx)? {
+            Val::Str(s) => Ok(s),
+            other => Ok(Arc::from(crate::util::val_to_string(&other).as_str())),
+        }
+    }
+
+    fn i64(&mut self, idx: usize) -> Result<i64, EvalError> {
+        match self.val(idx)? {
+            Val::Int(n) => Ok(n),
+            Val::Float(f) => Ok(f as i64),
+            _ => Err(EvalError(format!(
+                "{}: expected number argument",
+                self.name
+            ))),
+        }
+    }
+
+    fn usize(&mut self, idx: usize) -> Result<usize, EvalError> {
+        Ok(self.i64(idx)?.max(0) as usize)
+    }
+
+    fn vec(&mut self, idx: usize) -> Result<Vec<Val>, EvalError> {
+        self.val(idx).and_then(|value| {
+            value
+                .into_vec()
+                .ok_or_else(|| EvalError(format!("{}: expected array arg", self.name)))
+        })
+    }
+
+    fn str_vec(&mut self, idx: usize) -> Result<Vec<Arc<str>>, EvalError> {
+        Ok(self
+            .vec(idx)?
+            .iter()
+            .map(|v| match v {
+                Val::Str(s) => s.clone(),
+                other => Arc::from(crate::util::val_to_string(other).as_str()),
+            })
+            .collect())
+    }
+
+    fn char(&mut self, idx: usize, arg_len: usize) -> Result<char, EvalError> {
+        if idx >= arg_len {
+            return Ok(' ');
+        }
+        match self.str(idx)? {
+            s if s.chars().count() == 1 => Ok(s.chars().next().unwrap()),
+            _ => Err(EvalError(format!(
+                "{}: filler must be a single-char string",
+                self.name
+            ))),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct BuiltinSpec {
     pub pure: bool,
@@ -883,6 +956,10 @@ impl BuiltinMethod {
                 let spec = BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
                     .indexed()
                     .view_native();
+                let spec = match self {
+                    Self::StartsWith => spec.view_scalar(),
+                    _ => spec,
+                };
                 if pipeline_element {
                     spec.pipeline_element()
                 } else {
@@ -1326,214 +1403,213 @@ impl BuiltinCall {
         }
     }
 
+    pub fn from_static_args<E, I>(
+        method: BuiltinMethod,
+        name: &str,
+        arg_len: usize,
+        eval_arg: E,
+        ident_arg: I,
+    ) -> Result<Option<Self>, EvalError>
+    where
+        E: FnMut(usize) -> Result<Option<Val>, EvalError>,
+        I: FnMut(usize) -> Option<Arc<str>>,
+    {
+        if method == BuiltinMethod::Unknown {
+            return Ok(None);
+        }
+
+        let mut args = StaticArgDecoder {
+            name,
+            eval_arg,
+            ident_arg,
+        };
+
+        let call = match method {
+            BuiltinMethod::Flatten => {
+                let depth = if arg_len > 0 { args.usize(0)? } else { 1 };
+                Self::new(method, BuiltinArgs::Usize(depth))
+            }
+            BuiltinMethod::First | BuiltinMethod::Last => {
+                let n = if arg_len > 0 { args.i64(0)? } else { 1 };
+                Self::new(method, BuiltinArgs::I64(n))
+            }
+            BuiltinMethod::Nth => Self::new(method, BuiltinArgs::I64(args.i64(0)?)),
+            BuiltinMethod::Append | BuiltinMethod::Prepend | BuiltinMethod::Set => {
+                let item = if arg_len > 0 { args.val(0)? } else { Val::Null };
+                Self::new(method, BuiltinArgs::Val(item))
+            }
+            BuiltinMethod::Or => {
+                let default = if arg_len > 0 { args.val(0)? } else { Val::Null };
+                Self::new(method, BuiltinArgs::Val(default))
+            }
+            BuiltinMethod::Includes | BuiltinMethod::Index | BuiltinMethod::IndicesOf => {
+                Self::new(method, BuiltinArgs::Val(args.val(0)?))
+            }
+            BuiltinMethod::Diff | BuiltinMethod::Intersect | BuiltinMethod::Union => {
+                Self::new(method, BuiltinArgs::ValVec(args.vec(0)?))
+            }
+            BuiltinMethod::Window
+            | BuiltinMethod::Chunk
+            | BuiltinMethod::RollingSum
+            | BuiltinMethod::RollingAvg
+            | BuiltinMethod::RollingMin
+            | BuiltinMethod::RollingMax => Self::new(method, BuiltinArgs::Usize(args.usize(0)?)),
+            BuiltinMethod::Lag | BuiltinMethod::Lead => {
+                let n = if arg_len > 0 { args.usize(0)? } else { 1 };
+                Self::new(method, BuiltinArgs::Usize(n))
+            }
+            BuiltinMethod::Merge
+            | BuiltinMethod::DeepMerge
+            | BuiltinMethod::Defaults
+            | BuiltinMethod::Rename => Self::new(method, BuiltinArgs::Val(args.val(0)?)),
+            BuiltinMethod::Slice => {
+                let start = args.i64(0)?;
+                let end = if arg_len > 1 {
+                    Some(args.i64(1)?)
+                } else {
+                    None
+                };
+                Self::new(
+                    method,
+                    BuiltinArgs::I64Opt {
+                        first: start,
+                        second: end,
+                    },
+                )
+            }
+            BuiltinMethod::GetPath
+            | BuiltinMethod::HasPath
+            | BuiltinMethod::Has
+            | BuiltinMethod::Join
+            | BuiltinMethod::Explode
+            | BuiltinMethod::Implode
+            | BuiltinMethod::DelPath
+            | BuiltinMethod::FlattenKeys
+            | BuiltinMethod::UnflattenKeys
+            | BuiltinMethod::Missing
+            | BuiltinMethod::StartsWith
+            | BuiltinMethod::EndsWith
+            | BuiltinMethod::IndexOf
+            | BuiltinMethod::LastIndexOf
+            | BuiltinMethod::StripPrefix
+            | BuiltinMethod::StripSuffix
+            | BuiltinMethod::Matches
+            | BuiltinMethod::Scan
+            | BuiltinMethod::Split
+            | BuiltinMethod::ReMatch
+            | BuiltinMethod::ReMatchFirst
+            | BuiltinMethod::ReMatchAll
+            | BuiltinMethod::ReCaptures
+            | BuiltinMethod::ReCapturesAll
+            | BuiltinMethod::ReSplit => {
+                let s = if arg_len > 0 {
+                    args.str(0)?
+                } else if matches!(method, BuiltinMethod::Join) {
+                    Arc::from("")
+                } else if matches!(
+                    method,
+                    BuiltinMethod::FlattenKeys | BuiltinMethod::UnflattenKeys
+                ) {
+                    Arc::from(".")
+                } else {
+                    return Ok(None);
+                };
+                Self::new(method, BuiltinArgs::Str(s))
+            }
+            BuiltinMethod::Replace
+            | BuiltinMethod::ReplaceAll
+            | BuiltinMethod::ReReplace
+            | BuiltinMethod::ReReplaceAll => Self::new(
+                method,
+                BuiltinArgs::StrPair {
+                    first: args.str(0)?,
+                    second: args.str(1)?,
+                },
+            ),
+            BuiltinMethod::ContainsAny | BuiltinMethod::ContainsAll => {
+                Self::new(method, BuiltinArgs::StrVec(args.str_vec(0)?))
+            }
+            BuiltinMethod::Repeat => Self::new(method, BuiltinArgs::Usize(args.usize(0)?)),
+            BuiltinMethod::Indent => {
+                let n = if arg_len > 0 { args.usize(0)? } else { 2 };
+                Self::new(method, BuiltinArgs::Usize(n))
+            }
+            BuiltinMethod::PadLeft | BuiltinMethod::PadRight | BuiltinMethod::Center => Self::new(
+                method,
+                BuiltinArgs::Pad {
+                    width: args.usize(0)?,
+                    fill: args.char(1, arg_len)?,
+                },
+            ),
+            _ if arg_len == 0 => Self::new(method, BuiltinArgs::None),
+            _ => return Ok(None),
+        };
+        Ok(Some(call))
+    }
+
     pub fn from_literal_ast_args(name: &str, args: &[crate::ast::Arg]) -> Option<Self> {
-        use crate::ast::{Arg, Expr};
+        use crate::ast::{Arg, ArrayElem, Expr, ObjField};
 
         let method = BuiltinMethod::from_name(name);
         if method == BuiltinMethod::Unknown {
             return None;
         }
 
-        let str_arg = |idx: usize| -> Option<Arc<str>> {
-            match args.get(idx)? {
-                Arg::Pos(Expr::Str(s)) => Some(Arc::from(s.as_str())),
-                _ => None,
-            }
-        };
-        let usize_arg = |idx: usize| -> Option<usize> {
-            match args.get(idx)? {
-                Arg::Pos(Expr::Int(n)) if *n >= 0 => Some(*n as usize),
-                _ => None,
-            }
-        };
-        let val_arg = |idx: usize| -> Option<Val> {
-            match args.get(idx)? {
-                Arg::Pos(Expr::Null) => Some(Val::Null),
-                Arg::Pos(Expr::Bool(b)) => Some(Val::Bool(*b)),
-                Arg::Pos(Expr::Int(n)) => Some(Val::Int(*n)),
-                Arg::Pos(Expr::Float(f)) => Some(Val::Float(*f)),
-                Arg::Pos(Expr::Str(s)) => Some(Val::Str(Arc::from(s.as_str()))),
-                _ => None,
-            }
-        };
-        let str_vec_arg = |idx: usize| -> Option<Vec<Arc<str>>> {
-            match args.get(idx)? {
-                Arg::Pos(Expr::Array(elems)) => {
+        fn literal_val(expr: &Expr) -> Option<Val> {
+            match expr {
+                Expr::Null => Some(Val::Null),
+                Expr::Bool(b) => Some(Val::Bool(*b)),
+                Expr::Int(n) => Some(Val::Int(*n)),
+                Expr::Float(f) => Some(Val::Float(*f)),
+                Expr::Str(s) => Some(Val::Str(Arc::from(s.as_str()))),
+                Expr::Array(elems) => {
                     let mut out = Vec::with_capacity(elems.len());
                     for elem in elems {
                         match elem {
-                            crate::ast::ArrayElem::Expr(Expr::Str(s)) => {
-                                out.push(Arc::from(s.as_str()));
+                            ArrayElem::Expr(expr) => out.push(literal_val(expr)?),
+                            ArrayElem::Spread(_) => return None,
+                        }
+                    }
+                    Some(Val::Arr(Arc::new(out)))
+                }
+                Expr::Object(fields) => {
+                    let mut out = IndexMap::with_capacity(fields.len());
+                    for field in fields {
+                        match field {
+                            ObjField::Kv {
+                                key,
+                                val,
+                                optional: false,
+                                cond: None,
+                            } => {
+                                out.insert(Arc::from(key.as_str()), literal_val(val)?);
                             }
                             _ => return None,
                         }
                     }
-                    Some(out)
+                    Some(Val::Obj(Arc::new(out)))
                 }
                 _ => None,
             }
-        };
-
-        match (method, args.len()) {
-            (
-                BuiltinMethod::Keys
-                | BuiltinMethod::Values
-                | BuiltinMethod::Entries
-                | BuiltinMethod::Reverse
-                | BuiltinMethod::Unique
-                | BuiltinMethod::FromJson
-                | BuiltinMethod::FromPairs
-                | BuiltinMethod::Enumerate
-                | BuiltinMethod::Ceil
-                | BuiltinMethod::Floor
-                | BuiltinMethod::Round
-                | BuiltinMethod::Abs
-                | BuiltinMethod::DiffWindow
-                | BuiltinMethod::PctChange
-                | BuiltinMethod::CumMax
-                | BuiltinMethod::CumMin
-                | BuiltinMethod::Zscore
-                | BuiltinMethod::Upper
-                | BuiltinMethod::Lower
-                | BuiltinMethod::Trim
-                | BuiltinMethod::TrimLeft
-                | BuiltinMethod::TrimRight
-                | BuiltinMethod::Capitalize
-                | BuiltinMethod::TitleCase
-                | BuiltinMethod::SnakeCase
-                | BuiltinMethod::KebabCase
-                | BuiltinMethod::CamelCase
-                | BuiltinMethod::PascalCase
-                | BuiltinMethod::ReverseStr
-                | BuiltinMethod::HtmlEscape
-                | BuiltinMethod::HtmlUnescape
-                | BuiltinMethod::UrlEncode
-                | BuiltinMethod::UrlDecode
-                | BuiltinMethod::ToBase64
-                | BuiltinMethod::FromBase64
-                | BuiltinMethod::Dedent
-                | BuiltinMethod::Lines
-                | BuiltinMethod::Words
-                | BuiltinMethod::Chars
-                | BuiltinMethod::CharsOf
-                | BuiltinMethod::Bytes
-                | BuiltinMethod::ByteLen
-                | BuiltinMethod::IsBlank
-                | BuiltinMethod::IsNumeric
-                | BuiltinMethod::IsAlpha
-                | BuiltinMethod::IsAscii
-                | BuiltinMethod::ToNumber
-                | BuiltinMethod::ToBool
-                | BuiltinMethod::ParseInt
-                | BuiltinMethod::ParseFloat
-                | BuiltinMethod::ParseBool
-                | BuiltinMethod::Or
-                | BuiltinMethod::Type
-                | BuiltinMethod::ToString
-                | BuiltinMethod::ToJson
-                | BuiltinMethod::Schema,
-                0,
-            ) => Some(Self::new(method, BuiltinArgs::None)),
-            (BuiltinMethod::Or, 1) => Some(Self::new(method, BuiltinArgs::Val(val_arg(0)?))),
-            (BuiltinMethod::Set, 0) => Some(Self::new(method, BuiltinArgs::Val(Val::Null))),
-            (BuiltinMethod::Set, 1) => Some(Self::new(method, BuiltinArgs::Val(val_arg(0)?))),
-            (BuiltinMethod::Missing, 1) => Some(Self::new(method, BuiltinArgs::Str(str_arg(0)?))),
-            (BuiltinMethod::Includes, 1) => Some(Self::new(method, BuiltinArgs::Val(val_arg(0)?))),
-            (BuiltinMethod::Index | BuiltinMethod::IndicesOf, 1) => {
-                Some(Self::new(method, BuiltinArgs::Val(val_arg(0)?)))
-            }
-            (BuiltinMethod::Join, 0) => Some(Self::new(method, BuiltinArgs::Str(Arc::from("")))),
-            (BuiltinMethod::Join, 1) => Some(Self::new(method, BuiltinArgs::Str(str_arg(0)?))),
-            (
-                BuiltinMethod::GetPath
-                | BuiltinMethod::HasPath
-                | BuiltinMethod::Has
-                | BuiltinMethod::Explode
-                | BuiltinMethod::Implode
-                | BuiltinMethod::DelPath
-                | BuiltinMethod::FlattenKeys
-                | BuiltinMethod::UnflattenKeys,
-                1,
-            ) => Some(Self::new(method, BuiltinArgs::Str(str_arg(0)?))),
-            (BuiltinMethod::FlattenKeys | BuiltinMethod::UnflattenKeys, 0) => {
-                Some(Self::new(method, BuiltinArgs::Str(Arc::from("."))))
-            }
-            (
-                BuiltinMethod::StartsWith
-                | BuiltinMethod::EndsWith
-                | BuiltinMethod::StripPrefix
-                | BuiltinMethod::StripSuffix
-                | BuiltinMethod::Matches
-                | BuiltinMethod::IndexOf
-                | BuiltinMethod::LastIndexOf
-                | BuiltinMethod::Scan
-                | BuiltinMethod::Split
-                | BuiltinMethod::ReMatch
-                | BuiltinMethod::ReMatchFirst
-                | BuiltinMethod::ReMatchAll
-                | BuiltinMethod::ReCaptures
-                | BuiltinMethod::ReCapturesAll
-                | BuiltinMethod::ReSplit,
-                1,
-            ) => Some(Self::new(method, BuiltinArgs::Str(str_arg(0)?))),
-            (BuiltinMethod::Replace | BuiltinMethod::ReplaceAll, 2) => Some(Self::new(
-                method,
-                BuiltinArgs::StrPair {
-                    first: str_arg(0)?,
-                    second: str_arg(1)?,
-                },
-            )),
-            (BuiltinMethod::ReReplace | BuiltinMethod::ReReplaceAll, 2) => Some(Self::new(
-                method,
-                BuiltinArgs::StrPair {
-                    first: str_arg(0)?,
-                    second: str_arg(1)?,
-                },
-            )),
-            (BuiltinMethod::ContainsAny | BuiltinMethod::ContainsAll, 1) => {
-                Some(Self::new(method, BuiltinArgs::StrVec(str_vec_arg(0)?)))
-            }
-            (BuiltinMethod::Repeat, 1) => {
-                Some(Self::new(method, BuiltinArgs::Usize(usize_arg(0)?)))
-            }
-            (
-                BuiltinMethod::RollingSum
-                | BuiltinMethod::RollingAvg
-                | BuiltinMethod::RollingMin
-                | BuiltinMethod::RollingMax,
-                1,
-            ) => Some(Self::new(method, BuiltinArgs::Usize(usize_arg(0)?))),
-            (BuiltinMethod::Lag | BuiltinMethod::Lead, 0) => {
-                Some(Self::new(method, BuiltinArgs::Usize(1)))
-            }
-            (BuiltinMethod::Lag | BuiltinMethod::Lead, 1) => {
-                Some(Self::new(method, BuiltinArgs::Usize(usize_arg(0)?)))
-            }
-            (BuiltinMethod::Indent, 0) => Some(Self::new(method, BuiltinArgs::Usize(2))),
-            (BuiltinMethod::Indent, 1) => {
-                Some(Self::new(method, BuiltinArgs::Usize(usize_arg(0)?)))
-            }
-            (BuiltinMethod::PadLeft | BuiltinMethod::PadRight | BuiltinMethod::Center, 1) => {
-                Some(Self::new(
-                    method,
-                    BuiltinArgs::Pad {
-                        width: usize_arg(0)?,
-                        fill: ' ',
-                    },
-                ))
-            }
-            (BuiltinMethod::PadLeft | BuiltinMethod::PadRight | BuiltinMethod::Center, 2) => {
-                let fill = str_arg(1)?.chars().next().unwrap_or(' ');
-                Some(Self::new(
-                    method,
-                    BuiltinArgs::Pad {
-                        width: usize_arg(0)?,
-                        fill,
-                    },
-                ))
-            }
-            _ => None,
         }
+
+        Self::from_static_args(
+            method,
+            name,
+            args.len(),
+            |idx| {
+                Ok(match args.get(idx) {
+                    Some(Arg::Pos(expr)) => literal_val(expr),
+                    _ => None,
+                })
+            },
+            |idx| match args.get(idx) {
+                Some(Arg::Pos(Expr::Ident(value))) => Some(Arc::from(value.as_str())),
+                _ => None,
+            },
+        )
+        .ok()
+        .flatten()
     }
 
     /// Lower a method call into a pure per-element pipeline builtin.
@@ -1553,6 +1629,9 @@ impl BuiltinCall {
         }
         match (self.method, &self.args) {
             (BuiltinMethod::Len, BuiltinArgs::None) => json_view_len(recv).map(Val::Int),
+            (BuiltinMethod::StartsWith, BuiltinArgs::Str(prefix)) => {
+                json_view_str(recv).map(|value| Val::Bool(value.starts_with(prefix.as_ref())))
+            }
             _ => None,
         }
     }
@@ -1563,6 +1642,14 @@ fn json_view_len(recv: crate::util::JsonView<'_>) -> Option<i64> {
     match recv {
         crate::util::JsonView::Str(s) => Some(s.chars().count() as i64),
         crate::util::JsonView::ArrayLen(n) | crate::util::JsonView::ObjectLen(n) => Some(n as i64),
+        _ => None,
+    }
+}
+
+#[inline]
+fn json_view_str(recv: crate::util::JsonView<'_>) -> Option<&str> {
+    match recv {
+        crate::util::JsonView::Str(s) => Some(s),
         _ => None,
     }
 }

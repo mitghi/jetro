@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::builtins::{BuiltinArgs, BuiltinCall};
+use crate::builtins::BuiltinCall;
 use crate::context::EvalError;
 use crate::util::JsonView;
 use crate::value::Val;
@@ -346,17 +346,42 @@ fn classify_structural_view_kernel(ops: &[crate::vm::Opcode]) -> Option<BodyKern
             }
             Some(BodyKernel::FieldChain(keys.into()))
         }
-        [receiver @ .., Opcode::CallMethod(call)]
-            if call.orig_args.is_empty()
-                && call.sub_progs.is_empty()
-                && call.method.spec().view_scalar =>
-        {
+        [receiver @ .., Opcode::CallMethod(call)] if call.method.spec().view_scalar => {
             let receiver = classify_structural_view_kernel(receiver)?;
+            let builtin_call = BuiltinCall::from_static_args(
+                call.method,
+                call.name.as_ref(),
+                call.orig_args.len(),
+                |idx| {
+                    Ok(call
+                        .sub_progs
+                        .get(idx)
+                        .and_then(|prog| static_prog_val(prog)))
+                },
+                |idx| match call.orig_args.get(idx) {
+                    Some(crate::ast::Arg::Pos(crate::ast::Expr::Ident(value))) => {
+                        Some(Arc::from(value.as_str()))
+                    }
+                    _ => None,
+                },
+            )
+            .ok()
+            .flatten()?;
+            if !builtin_call.spec().view_scalar {
+                return None;
+            }
             Some(BodyKernel::BuiltinCall {
                 receiver: Box::new(receiver),
-                call: BuiltinCall::new(call.method, BuiltinArgs::None),
+                call: builtin_call,
             })
         }
+        _ => None,
+    }
+}
+
+fn static_prog_val(prog: &crate::vm::Program) -> Option<Val> {
+    match prog.ops.as_ref() {
+        [op] => trivial_lit(op),
         _ => None,
     }
 }
