@@ -207,7 +207,11 @@ mod tests {
         assert_eq!(flat_map.output_mode(), ViewOutputMode::BorrowedSubviews);
         assert!(matches!(take, ViewStageCapability::Take(2)));
         assert!(matches!(skip, ViewStageCapability::Skip(1)));
-        assert!(Stage::Reverse.view_capability(9, None).is_none());
+        let cancel = crate::builtins::BuiltinMethod::Reverse
+            .spec()
+            .cancellation
+            .unwrap();
+        assert!(Stage::Reverse(cancel).view_capability(9, None).is_none());
     }
 
     #[test]

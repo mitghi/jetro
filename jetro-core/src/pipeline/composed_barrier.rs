@@ -18,7 +18,7 @@ pub(super) fn run(
     buf: Vec<Val>,
 ) -> Option<BarrierOutput> {
     let rows = match stage {
-        Stage::Reverse => cmp::barrier_reverse(buf),
+        Stage::Reverse(_) => cmp::barrier_reverse(buf),
         Stage::Sort(spec) => {
             let key = match &spec.key {
                 None => cmp::KeySource::None,

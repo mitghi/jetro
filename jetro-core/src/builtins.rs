@@ -553,6 +553,7 @@ pub struct BuiltinSpec {
     pub view_sink: Option<BuiltinViewSink>,
     pub numeric_reducer: Option<BuiltinNumericReducer>,
     pub stage_merge: Option<BuiltinStageMerge>,
+    pub cancellation: Option<BuiltinCancellation>,
     pub pipeline_stage: Option<BuiltinPipelineStage>,
     pub pipeline_sink: Option<BuiltinPipelineSink>,
     pub pipeline_element: bool,
@@ -588,6 +589,42 @@ pub enum BuiltinNumericReducer {
 pub enum BuiltinStageMerge {
     UsizeMin,
     UsizeSaturatingAdd,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinCancellation {
+    SelfInverse(BuiltinCancelGroup),
+    Inverse {
+        group: BuiltinCancelGroup,
+        side: BuiltinCancelSide,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinCancelGroup {
+    Reverse,
+    Base64,
+    Url,
+    Html,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinCancelSide {
+    Forward,
+    Backward,
+}
+
+impl BuiltinCancellation {
+    #[inline]
+    pub fn cancels_with(self, other: Self) -> bool {
+        match (self, other) {
+            (Self::SelfInverse(a), Self::SelfInverse(b)) => a == b,
+            (Self::Inverse { group: a, side: sa }, Self::Inverse { group: b, side: sb }) => {
+                a == b && sa != sb
+            }
+            _ => false,
+        }
+    }
 }
 
 impl BuiltinStageMerge {
@@ -669,6 +706,7 @@ impl BuiltinSpec {
             view_sink: None,
             numeric_reducer: None,
             stage_merge: None,
+            cancellation: None,
             pipeline_stage: None,
             pipeline_sink: None,
             pipeline_element: false,
@@ -720,6 +758,11 @@ impl BuiltinSpec {
 
     fn stage_merge(mut self, merge: BuiltinStageMerge) -> Self {
         self.stage_merge = Some(merge);
+        self
+    }
+
+    fn cancellation(mut self, cancellation: BuiltinCancellation) -> Self {
+        self.cancellation = Some(cancellation);
         self
     }
 
@@ -999,7 +1042,11 @@ impl BuiltinMethod {
             | Self::ZipShape => {
                 let spec = BuiltinSpec::new(Cat::Barrier, Card::Barrier).cost(10.0);
                 match self {
-                    Self::Reverse => spec.pipeline_stage(BuiltinPipelineStage::Nullary),
+                    Self::Reverse => spec
+                        .pipeline_stage(BuiltinPipelineStage::Nullary)
+                        .cancellation(BuiltinCancellation::SelfInverse(
+                            BuiltinCancelGroup::Reverse,
+                        )),
                     _ => spec,
                 }
             }
@@ -1074,7 +1121,36 @@ impl BuiltinMethod {
                 }
             }
         };
-        spec
+        match self {
+            Self::ToBase64 => spec.cancellation(BuiltinCancellation::Inverse {
+                group: BuiltinCancelGroup::Base64,
+                side: BuiltinCancelSide::Forward,
+            }),
+            Self::FromBase64 => spec.cancellation(BuiltinCancellation::Inverse {
+                group: BuiltinCancelGroup::Base64,
+                side: BuiltinCancelSide::Backward,
+            }),
+            Self::UrlEncode => spec.cancellation(BuiltinCancellation::Inverse {
+                group: BuiltinCancelGroup::Url,
+                side: BuiltinCancelSide::Forward,
+            }),
+            Self::UrlDecode => spec.cancellation(BuiltinCancellation::Inverse {
+                group: BuiltinCancelGroup::Url,
+                side: BuiltinCancelSide::Backward,
+            }),
+            Self::HtmlEscape => spec.cancellation(BuiltinCancellation::Inverse {
+                group: BuiltinCancelGroup::Html,
+                side: BuiltinCancelSide::Forward,
+            }),
+            Self::HtmlUnescape => spec.cancellation(BuiltinCancellation::Inverse {
+                group: BuiltinCancelGroup::Html,
+                side: BuiltinCancelSide::Backward,
+            }),
+            Self::ReverseStr => spec.cancellation(BuiltinCancellation::SelfInverse(
+                BuiltinCancelGroup::Reverse,
+            )),
+            _ => spec,
+        }
     }
 }
 
@@ -1135,20 +1211,6 @@ impl BuiltinCall {
                 | BuiltinMethod::CamelCase
                 | BuiltinMethod::PascalCase
                 | BuiltinMethod::Dedent
-        )
-    }
-
-    #[inline]
-    pub fn cancels_with(&self, other: &Self) -> bool {
-        matches!(
-            (self.method, other.method),
-            (BuiltinMethod::ToBase64, BuiltinMethod::FromBase64)
-                | (BuiltinMethod::FromBase64, BuiltinMethod::ToBase64)
-                | (BuiltinMethod::UrlEncode, BuiltinMethod::UrlDecode)
-                | (BuiltinMethod::UrlDecode, BuiltinMethod::UrlEncode)
-                | (BuiltinMethod::HtmlEscape, BuiltinMethod::HtmlUnescape)
-                | (BuiltinMethod::HtmlUnescape, BuiltinMethod::HtmlEscape)
-                | (BuiltinMethod::ReverseStr, BuiltinMethod::ReverseStr)
         )
     }
 

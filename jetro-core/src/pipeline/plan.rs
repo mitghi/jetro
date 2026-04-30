@@ -282,7 +282,7 @@ impl Stage {
     pub(crate) fn is_composed_barrier(&self) -> bool {
         matches!(
             self,
-            Stage::Reverse | Stage::Sort(_) | Stage::UniqueBy(_) | Stage::GroupBy(_)
+            Stage::Reverse(_) | Stage::Sort(_) | Stage::UniqueBy(_) | Stage::GroupBy(_)
         )
     }
 
@@ -375,7 +375,7 @@ impl Stage {
             | Stage::SortedDedup(Some(prog)) => program_ok(prog),
             Stage::Take(_, _, _)
             | Stage::Skip(_, _, _)
-            | Stage::Reverse
+            | Stage::Reverse(_)
             | Stage::Sort(super::SortSpec { key: None, .. })
             | Stage::UniqueBy(None)
             | Stage::Builtin(_)
@@ -445,7 +445,7 @@ impl Stage {
                 cost: 0.5,
                 selectivity: 0.5,
             },
-            Stage::Reverse | Stage::Sort(_) | Stage::UniqueBy(_) | Stage::GroupBy(_) => {
+            Stage::Reverse(_) | Stage::Sort(_) | Stage::UniqueBy(_) | Stage::GroupBy(_) => {
                 StageShape {
                     cardinality: Cardinality::Barrier,
                     can_indexed: false,
@@ -574,10 +574,18 @@ impl Stage {
     }
 
     pub fn cancels_with(&self, other: &Self) -> bool {
-        if let (Stage::Builtin(a), Stage::Builtin(b)) = (self, other) {
-            return a.cancels_with(b);
+        match (self.cancellation(), other.cancellation()) {
+            (Some(a), Some(b)) => a.cancels_with(b),
+            _ => false,
         }
-        matches!((self, other), (Stage::Reverse, Stage::Reverse))
+    }
+
+    fn cancellation(&self) -> Option<crate::builtins::BuiltinCancellation> {
+        match self {
+            Stage::Reverse(cancel) => Some(*cancel),
+            Stage::Builtin(call) => call.spec().cancellation,
+            _ => None,
+        }
     }
 }
 

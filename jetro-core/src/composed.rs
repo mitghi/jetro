@@ -1436,7 +1436,14 @@ mod tests {
         assert!(matches!(p.stages[0], Stage::Skip(5, _, _)));
 
         // Reverse ∘ Reverse → identity (drops both)
-        let p = plan(vec![Stage::Reverse, Stage::Reverse], Sink::Collect);
+        let cancel = crate::builtins::BuiltinMethod::Reverse
+            .spec()
+            .cancellation
+            .unwrap();
+        let p = plan(
+            vec![Stage::Reverse(cancel), Stage::Reverse(cancel)],
+            Sink::Collect,
+        );
         assert_eq!(p.stages.len(), 0);
     }
 

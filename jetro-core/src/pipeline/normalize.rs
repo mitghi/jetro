@@ -78,7 +78,7 @@ pub(super) fn normalize_symbolic(
                 out.flush_predicate();
                 out.push_stage(stage, expr);
             }
-            Stage::Reverse | Stage::Sort(_) => {
+            Stage::Reverse(_) | Stage::Sort(_) => {
                 if out.demand.order || suffix_needs_order(&in_stages[idx + 1..]) {
                     out.flush_all();
                     out.push_stage(stage, expr);

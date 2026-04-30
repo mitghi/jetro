@@ -440,7 +440,11 @@ fn decode_method_chain(
                         stage_exprs.push(arg_expr(&args[0]));
                     }
                     (BuiltinMethod::Reverse, 0, _) => {
-                        stages.push(Stage::Reverse);
+                        let cancel = method
+                            .spec()
+                            .cancellation
+                            .expect("reverse builtin must define cancellation metadata");
+                        stages.push(Stage::Reverse(cancel));
                         stage_exprs.push(None);
                     }
                     (BuiltinMethod::Unique, 0, _) => {

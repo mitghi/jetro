@@ -93,7 +93,7 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
                 Stage::Take(n, _, _) => {
                     buf.truncate(*n);
                 }
-                Stage::Reverse => buf.reverse(),
+                Stage::Reverse(_) => buf.reverse(),
                 Stage::Sort(spec) => match &spec.key {
                     None => {
                         let strategy = strategies
@@ -528,7 +528,7 @@ where
                 | Stage::FilterKeys(prog) => {
                     item = apply_lambda_obj(stage, &item, &mut vm, &mut loop_env, kernel, prog)?;
                 }
-                Stage::Reverse
+                Stage::Reverse(_)
                 | Stage::Sort(_)
                 | Stage::UniqueBy(_)
                 | Stage::FlatMap(_, _)

@@ -36,7 +36,8 @@ use std::sync::Arc;
 
 use crate::ast::Expr;
 use crate::builtins::{
-    BuiltinMethod, BuiltinNumericReducer, BuiltinStageMerge, BuiltinViewSink, BuiltinViewStage,
+    BuiltinCancellation, BuiltinMethod, BuiltinNumericReducer, BuiltinStageMerge, BuiltinViewSink,
+    BuiltinViewStage,
 };
 use crate::context::EvalError;
 use crate::value::Val;
@@ -223,7 +224,7 @@ pub enum Stage {
     /// `.skip(n)` — drops the first `n` elements.
     Skip(usize, BuiltinViewStage, BuiltinStageMerge),
     /// `.reverse()` — barrier; materialises and reverses.
-    Reverse,
+    Reverse(BuiltinCancellation),
     /// `.unique()` (None) / `.unique_by(key)` (Some) — barrier;
     /// materialises, dedupes by key (or by full value if `None`).
     UniqueBy(Option<Arc<crate::vm::Program>>),
