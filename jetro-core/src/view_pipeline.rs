@@ -69,7 +69,7 @@ where
     let mut emitted_outputs = 0usize;
 
     'outer: for row in items {
-        if matches!(source_demand, PullDemand::AtMost(n) if pulled_inputs >= n) {
+        if matches!(source_demand, PullDemand::FirstInput(n) if pulled_inputs >= n) {
             break 'outer;
         }
         pulled_inputs += 1;
@@ -188,7 +188,7 @@ where
     let mut emitted_outputs = 0usize;
 
     'outer: for row in items {
-        if matches!(source_demand, PullDemand::AtMost(n) if pulled_inputs >= n) {
+        if matches!(source_demand, PullDemand::FirstInput(n) if pulled_inputs >= n) {
             break 'outer;
         }
         pulled_inputs += 1;

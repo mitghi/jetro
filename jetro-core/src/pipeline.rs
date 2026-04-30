@@ -1141,16 +1141,20 @@ mod tests {
     }
 
     #[test]
-    fn sort_take_while_take_uses_bounded_strategy_only_when_prefix_safe() {
+    fn sort_take_while_take_uses_prefix_demand_without_key_correlation() {
         let p = lower_query("$.rows.sort_by(-price).take_while(price > 10).take(2)").unwrap();
         let strategies = compute_strategies_with_kernels(&p.stages, &p.stage_kernels, &p.sink);
         assert!(matches!(strategies[0], StageStrategy::SortTopK(2)));
 
         let p = lower_query("$.rows.sort_by(-score).take_while(price > 10).take(2)").unwrap();
         let strategies = compute_strategies_with_kernels(&p.stages, &p.stage_kernels, &p.sink);
-        assert!(matches!(strategies[0], StageStrategy::Default));
+        assert!(matches!(strategies[0], StageStrategy::SortTopK(2)));
 
         let p = lower_query("$.rows.sort().take_while(price > 10).take(2)").unwrap();
+        let strategies = compute_strategies_with_kernels(&p.stages, &p.stage_kernels, &p.sink);
+        assert!(matches!(strategies[0], StageStrategy::SortTopK(2)));
+
+        let p = lower_query("$.rows.sort_by(-score).filter(price > 10).take(2)").unwrap();
         let strategies = compute_strategies_with_kernels(&p.stages, &p.stage_kernels, &p.sink);
         assert!(matches!(strategies[0], StageStrategy::Default));
     }
@@ -1184,7 +1188,10 @@ mod tests {
             .into();
         let p = lower_query("$.data.take(2).filter(score > 900).first()").unwrap();
         let demand = p.source_demand();
-        assert_eq!(demand.chain.pull, crate::chain_ir::PullDemand::AtMost(2));
+        assert_eq!(
+            demand.chain.pull,
+            crate::chain_ir::PullDemand::FirstInput(2)
+        );
         let out = p.run(&doc).unwrap();
         assert_eq!(out, Val::Null);
     }

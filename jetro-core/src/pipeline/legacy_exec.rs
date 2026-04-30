@@ -346,7 +346,7 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
     };
 
     'outer: for item in pre_iter {
-        if matches!(source_demand, PullDemand::AtMost(n) if pulled_inputs >= n) {
+        if matches!(source_demand, PullDemand::FirstInput(n) if pulled_inputs >= n) {
             break 'outer;
         }
         pulled_inputs += 1;
@@ -446,7 +446,7 @@ where
     let mut terminal_map_collect = terminal_map_kernel.map(TerminalMapCollector::new);
 
     'outer: for mut item in iter {
-        if matches!(source_demand, PullDemand::AtMost(n) if pulled_inputs >= n) {
+        if matches!(source_demand, PullDemand::FirstInput(n) if pulled_inputs >= n) {
             break 'outer;
         }
         pulled_inputs += 1;

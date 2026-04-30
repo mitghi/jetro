@@ -65,19 +65,20 @@ impl ValueNeed {
 pub enum PullDemand {
     /// Pull every input item.
     All,
-    /// Pull at most N input items. This is a hard input bound.
-    AtMost(usize),
+    /// Pull only the first N input items. No later input can affect
+    /// the requested downstream result.
+    FirstInput(usize),
     /// Pull until N output items have been emitted by the current
     /// operator. For filtering operators this may require scanning more
-    /// than N inputs, so it must not be collapsed to `AtMost(N)`.
+    /// than N inputs, so it must not be collapsed to `FirstInput(N)`.
     UntilOutput(usize),
 }
 
 impl PullDemand {
     fn cap_inputs(self, n: usize) -> Self {
         match self {
-            PullDemand::All | PullDemand::UntilOutput(_) => PullDemand::AtMost(n),
-            PullDemand::AtMost(m) => PullDemand::AtMost(m.min(n)),
+            PullDemand::All | PullDemand::UntilOutput(_) => PullDemand::FirstInput(n),
+            PullDemand::FirstInput(m) => PullDemand::FirstInput(m.min(n)),
         }
     }
 }
@@ -106,7 +107,7 @@ impl Demand {
 
     pub fn first(value: ValueNeed) -> Self {
         Self {
-            pull: PullDemand::UntilOutput(1),
+            pull: PullDemand::FirstInput(1),
             value,
             order: false,
         }
@@ -230,7 +231,7 @@ impl ChainOp {
             Filter => Demand {
                 pull: match downstream.pull {
                     All => All,
-                    AtMost(n) | UntilOutput(n) => UntilOutput(n),
+                    FirstInput(n) | UntilOutput(n) => UntilOutput(n),
                 },
                 value: downstream.value.merge(Predicate),
                 order: downstream.order,
@@ -238,7 +239,7 @@ impl ChainOp {
             TakeWhile => Demand {
                 pull: match downstream.pull {
                     All => All,
-                    AtMost(n) | UntilOutput(n) => UntilOutput(n),
+                    FirstInput(n) | UntilOutput(n) => FirstInput(n),
                 },
                 value: downstream.value.merge(Predicate),
                 order: downstream.order,
@@ -251,7 +252,7 @@ impl ChainOp {
             },
             Skip(n) => Demand {
                 pull: match downstream.pull {
-                    AtMost(m) => AtMost(n.saturating_add(m)),
+                    FirstInput(m) => FirstInput(n.saturating_add(m)),
                     All | UntilOutput(_) => All,
                 },
                 ..downstream
@@ -336,10 +337,10 @@ mod tests {
             ChainOp::First,
         ];
         let steps = propagate_demands(&ops, Demand::RESULT);
-        assert_eq!(steps[0].upstream.pull, PullDemand::AtMost(3));
+        assert_eq!(steps[0].upstream.pull, PullDemand::FirstInput(3));
         assert_eq!(
             source_demand(&ops, Demand::RESULT).pull,
-            PullDemand::AtMost(3)
+            PullDemand::FirstInput(3)
         );
     }
 
@@ -348,6 +349,14 @@ mod tests {
         let ops = [ChainOp::Filter, ChainOp::Take(3)];
         let demand = source_demand(&ops, Demand::RESULT);
         assert_eq!(demand.pull, PullDemand::UntilOutput(3));
+    }
+
+    #[test]
+    fn take_while_take_collect_needs_only_input_prefix() {
+        let ops = [ChainOp::TakeWhile, ChainOp::Take(3)];
+        let demand = source_demand(&ops, Demand::RESULT);
+        assert_eq!(demand.pull, PullDemand::FirstInput(3));
+        assert_eq!(demand.value, ValueNeed::Whole);
     }
 
     #[test]

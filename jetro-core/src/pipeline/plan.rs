@@ -135,7 +135,13 @@ pub fn compute_strategies_with_kernels(
     for (i, stage) in stages.iter().enumerate().rev() {
         if let Stage::Sort(spec) = stage {
             match demand.chain.pull {
-                PullDemand::AtMost(k) | PullDemand::UntilOutput(k) => {
+                PullDemand::FirstInput(k) => {
+                    strategies[i] = match demand.positional {
+                        Some(Position::Last) => StageStrategy::SortBottomK(k),
+                        _ => StageStrategy::SortTopK(k),
+                    };
+                }
+                PullDemand::UntilOutput(k) => {
                     let sort_kernel = kernels.get(i).unwrap_or(&BodyKernel::Generic);
                     let kernel_suffix = if kernels.len() == stages.len() {
                         &kernels[i + 1..]

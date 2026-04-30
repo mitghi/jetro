@@ -219,7 +219,7 @@ pub fn run_pipeline<S: Sink>(arr: &[Val], stages: &dyn Stage) -> Val {
     run_pipeline_with_demand::<S>(arr, stages, PullDemand::All)
 }
 
-/// Demand-aware variant of [`run_pipeline`]. `AtMost(n)` is a hard cap
+/// Demand-aware variant of [`run_pipeline`]. `FirstInput(n)` is a hard cap
 /// on upstream inputs pulled from `arr`; `UntilOutput(n)` stops after n
 /// values have reached the sink, regardless of how many inputs filters
 /// had to inspect to produce them.
@@ -232,7 +232,7 @@ pub fn run_pipeline_with_demand<S: Sink>(
     let mut pulled_inputs = 0usize;
     let mut emitted_outputs = 0usize;
     for v in arr.iter() {
-        if matches!(demand, PullDemand::AtMost(n) if pulled_inputs >= n) {
+        if matches!(demand, PullDemand::FirstInput(n) if pulled_inputs >= n) {
             break;
         }
         pulled_inputs += 1;
@@ -777,7 +777,7 @@ pub fn barrier_sort(buf: Vec<Val>, key: &KeySource) -> Vec<Val> {
 /// Top-k sort: keep the `k` smallest-by-key elements, sorted ascending.
 /// O(N log k) via a max-heap of size k — for `k << N` this is the
 /// algorithmic win that demand propagation unlocks (`Sort ∘ First` →
-/// `Sort.adapt(AtMost(1))` → this kernel).
+/// `Sort.adapt(FirstInput(1))` → this kernel).
 pub fn barrier_top_k(buf: Vec<Val>, key: &KeySource, k: usize) -> Vec<Val> {
     barrier_top_or_bottom_k(buf, key, k, false)
 }
@@ -1114,7 +1114,7 @@ mod tests {
     }
 
     #[test]
-    fn demand_at_most_caps_composed_inputs() {
+    fn demand_first_input_caps_composed_inputs() {
         struct CountingPass<'a>(&'a std::cell::Cell<usize>);
 
         impl Stage for CountingPass<'_> {
@@ -1129,7 +1129,7 @@ mod tests {
         let out = run_pipeline_with_demand::<CountSink>(
             &arr,
             &CountingPass(&seen),
-            PullDemand::AtMost(3),
+            PullDemand::FirstInput(3),
         );
         assert!(matches!(out, Val::Int(3)));
         assert_eq!(seen.get(), 3);
@@ -1220,7 +1220,7 @@ mod tests {
 
     #[test]
     fn step3d_phase1_sort_topk() {
-        // Demand propagation: Sort sees AtMost(k) downstream and switches
+        // Demand propagation: Sort sees FirstInput(k) downstream and switches
         // to top-k via barrier_top_k.  Output ordering matches full sort.
         use serde_json::json;
         let doc = json!({
@@ -1529,8 +1529,9 @@ mod tests {
         let strats = compute_strategies(&stages, &Sink::Numeric(NumericSink::identity(NumOp::Sum)));
         assert!(matches!(strats[0], StageStrategy::Default));
 
-        // [Sort, Filter] + First → demand becomes unbounded above Filter
-        // (Filter loses positional info upstream)
+        // [Sort, Filter] + First cannot use fixed top-k without a
+        // monotonic predicate proof: filter may skip the sorted prefix
+        // and still need later ordered rows.
         let stages = vec![
             Stage::Sort(SortSpec::keyed(Arc::clone(&dummy_prog), false)),
             Stage::Filter(
@@ -1539,9 +1540,7 @@ mod tests {
             ),
         ];
         let strats = compute_strategies(&stages, &first_sink);
-        // Filter still sees AtMost(1) downstream → consumption=AtMost(1)
-        // propagates up to Sort.  Sort picks SortTopK(1).
-        assert!(matches!(strats[0], StageStrategy::SortTopK(1)));
+        assert!(matches!(strats[0], StageStrategy::Default));
     }
 
     #[test]
