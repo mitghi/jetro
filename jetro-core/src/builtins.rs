@@ -561,6 +561,7 @@ pub struct BuiltinSpec {
     pub pipeline_shape: Option<BuiltinPipelineShape>,
     pub pipeline_demand: Option<BuiltinPipelineDemand>,
     pub pipeline_order_effect: Option<BuiltinPipelineOrderEffect>,
+    pub columnar_stage: Option<BuiltinColumnarStage>,
     pub pipeline_element: bool,
     pub cost: f64,
 }
@@ -754,6 +755,14 @@ pub enum BuiltinPipelineOrderEffect {
     Blocks,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinColumnarStage {
+    Filter,
+    Map,
+    FlatMap,
+    GroupBy,
+}
+
 impl BuiltinPipelineShape {
     #[inline]
     pub fn new(
@@ -901,6 +910,7 @@ impl BuiltinSpec {
             pipeline_shape: None,
             pipeline_demand: None,
             pipeline_order_effect: None,
+            columnar_stage: None,
             pipeline_element: false,
             cost: 1.0,
         }
@@ -959,6 +969,11 @@ impl BuiltinSpec {
 
     fn pipeline_order_effect(mut self, effect: BuiltinPipelineOrderEffect) -> Self {
         self.pipeline_order_effect = Some(effect);
+        self
+    }
+
+    fn columnar_stage(mut self, stage: BuiltinColumnarStage) -> Self {
+        self.columnar_stage = Some(stage);
         self
     }
 
@@ -1121,6 +1136,7 @@ impl BuiltinMethod {
                     .pipeline_lowering(BuiltinPipelineLowering::ExprStage(BuiltinExprStage::Filter))
                     .pipeline_demand(BuiltinPipelineDemand::Filter)
                     .pipeline_order_effect(BuiltinPipelineOrderEffect::PredicatePrefix)
+                    .columnar_stage(BuiltinColumnarStage::Filter)
                     .cost(10.0)
             }
             Self::Compact | Self::Remove => {
@@ -1133,6 +1149,7 @@ impl BuiltinMethod {
                 .pipeline_lowering(BuiltinPipelineLowering::ExprStage(BuiltinExprStage::Map))
                 .pipeline_demand(BuiltinPipelineDemand::Map)
                 .pipeline_order_effect(BuiltinPipelineOrderEffect::Preserves)
+                .columnar_stage(BuiltinColumnarStage::Map)
                 .pipeline_element()
                 .cost(10.0),
             Self::Enumerate | Self::Pairwise => {
@@ -1149,6 +1166,7 @@ impl BuiltinMethod {
                 ))
                 .pipeline_materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
                 .pipeline_demand(BuiltinPipelineDemand::FlatMap)
+                .columnar_stage(BuiltinColumnarStage::FlatMap)
                 .cost(10.0),
             Self::Flatten | Self::Explode => {
                 BuiltinSpec::new(Cat::StreamingExpand, Card::Expanding).cost(10.0)
@@ -1327,7 +1345,8 @@ impl BuiltinMethod {
                         .pipeline_lowering(BuiltinPipelineLowering::ExprStage(
                             BuiltinExprStage::GroupBy,
                         ))
-                        .pipeline_materialization(BuiltinPipelineMaterialization::ComposedBarrier),
+                        .pipeline_materialization(BuiltinPipelineMaterialization::ComposedBarrier)
+                        .columnar_stage(BuiltinColumnarStage::GroupBy),
                     Self::CountBy => spec
                         .pipeline_stage(BuiltinPipelineStage::Unary)
                         .pipeline_lowering(BuiltinPipelineLowering::TerminalExprStage {
@@ -6438,8 +6457,8 @@ pub fn schema_apply(recv: &Val) -> Option<Val> {
 #[cfg(test)]
 mod spec_tests {
     use super::{
-        BuiltinCardinality, BuiltinCategory, BuiltinExprStage, BuiltinMethod, BuiltinNullaryStage,
-        BuiltinNumericReducer, BuiltinPipelineDemand, BuiltinPipelineLowering,
+        BuiltinCardinality, BuiltinCategory, BuiltinColumnarStage, BuiltinExprStage, BuiltinMethod,
+        BuiltinNullaryStage, BuiltinNumericReducer, BuiltinPipelineDemand, BuiltinPipelineLowering,
         BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect, BuiltinPipelineSink,
         BuiltinPipelineStage, BuiltinStageMerge, BuiltinStringPairStage, BuiltinStringStage,
         BuiltinUsizeStage, BuiltinViewInputMode, BuiltinViewMaterialization, BuiltinViewOutputMode,
@@ -6705,6 +6724,27 @@ mod spec_tests {
             BuiltinMethod::Replace.spec().pipeline_order_effect,
             Some(BuiltinPipelineOrderEffect::Preserves)
         );
+    }
+
+    #[test]
+    fn builtin_specs_drive_columnar_stage_metadata() {
+        assert_eq!(
+            BuiltinMethod::Filter.spec().columnar_stage,
+            Some(BuiltinColumnarStage::Filter)
+        );
+        assert_eq!(
+            BuiltinMethod::Map.spec().columnar_stage,
+            Some(BuiltinColumnarStage::Map)
+        );
+        assert_eq!(
+            BuiltinMethod::FlatMap.spec().columnar_stage,
+            Some(BuiltinColumnarStage::FlatMap)
+        );
+        assert_eq!(
+            BuiltinMethod::GroupBy.spec().columnar_stage,
+            Some(BuiltinColumnarStage::GroupBy)
+        );
+        assert_eq!(BuiltinMethod::Sort.spec().columnar_stage, None);
     }
 
     #[test]

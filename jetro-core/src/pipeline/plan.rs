@@ -498,7 +498,7 @@ impl Stage {
         }
     }
 
-    fn builtin_method_metadata(&self) -> Option<BuiltinMethod> {
+    pub(crate) fn builtin_method_metadata(&self) -> Option<BuiltinMethod> {
         match self {
             Stage::Filter(_, _) => Some(BuiltinMethod::Filter),
             Stage::Map(_, _) => Some(BuiltinMethod::Map),

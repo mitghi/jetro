@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::builtins::BuiltinColumnarStage;
 use crate::{context::EvalError, value::Val};
 
 use super::ReducerOp;
@@ -7,14 +8,6 @@ use super::{
     eval_cmp_op, num_finalise, num_fold, walk_field_chain, BodyKernel, NumOp, Pipeline,
     PipelineData, Sink, Source, Stage,
 };
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ColumnarStageKind {
-    Filter,
-    Map,
-    FlatMap,
-    GroupBy,
-}
 
 pub(super) fn run_cached(
     pipeline: &Pipeline,
@@ -28,20 +21,14 @@ pub(super) fn run_uncached(pipeline: &Pipeline, root: &Val) -> Option<Result<Val
     pipeline.run_uncached_columnar_impl(root)
 }
 
-fn stage_kind(stage: &Stage) -> Option<ColumnarStageKind> {
-    match stage {
-        Stage::Filter(_, _) => Some(ColumnarStageKind::Filter),
-        Stage::Map(_, _) => Some(ColumnarStageKind::Map),
-        Stage::FlatMap(_, _) => Some(ColumnarStageKind::FlatMap),
-        Stage::GroupBy(_) => Some(ColumnarStageKind::GroupBy),
-        _ => None,
-    }
+fn stage_kind(stage: &Stage) -> Option<BuiltinColumnarStage> {
+    stage.builtin_method_metadata()?.spec().columnar_stage
 }
 
 fn stage_kernel<'a>(
     stages: &[Stage],
     kernels: &'a [BodyKernel],
-    kind: ColumnarStageKind,
+    kind: BuiltinColumnarStage,
 ) -> Option<&'a BodyKernel> {
     let [stage] = stages else {
         return None;
@@ -55,8 +42,8 @@ fn stage_kernel<'a>(
 fn stage_kernel_pair<'a>(
     stages: &[Stage],
     kernels: &'a [BodyKernel],
-    first: ColumnarStageKind,
-    second: ColumnarStageKind,
+    first: BuiltinColumnarStage,
+    second: BuiltinColumnarStage,
 ) -> Option<(&'a BodyKernel, &'a BodyKernel)> {
     let [first_stage, second_stage] = stages else {
         return None;
@@ -68,7 +55,10 @@ fn stage_kernel_pair<'a>(
         .then_some((first_kernel, second_kernel))
 }
 
-fn stage_program<'a>(stage: &'a Stage, kind: ColumnarStageKind) -> Option<&'a crate::vm::Program> {
+fn stage_program<'a>(
+    stage: &'a Stage,
+    kind: BuiltinColumnarStage,
+) -> Option<&'a crate::vm::Program> {
     if stage_kind(stage)? != kind {
         return None;
     }
@@ -110,7 +100,7 @@ fn projected_numeric_sink(sink: &Sink) -> Option<(&crate::vm::Program, NumOp)> {
 
 fn single_stage_program<'a>(
     stages: &'a [Stage],
-    kind: ColumnarStageKind,
+    kind: BuiltinColumnarStage,
 ) -> Option<&'a crate::vm::Program> {
     let [stage] = stages else {
         return None;
@@ -120,8 +110,8 @@ fn single_stage_program<'a>(
 
 fn stage_program_pair<'a>(
     stages: &'a [Stage],
-    first: ColumnarStageKind,
-    second: ColumnarStageKind,
+    first: BuiltinColumnarStage,
+    second: BuiltinColumnarStage,
 ) -> Option<(&'a crate::vm::Program, &'a crate::vm::Program)> {
     let [first_stage, second_stage] = stages else {
         return None;
@@ -272,7 +262,7 @@ impl Pipeline {
                 stage_kernel(
                     &self.stages,
                     &self.stage_kernels,
-                    ColumnarStageKind::GroupBy,
+                    BuiltinColumnarStage::GroupBy,
                 ),
                 &recv,
             ) {
@@ -291,8 +281,8 @@ impl Pipeline {
             stage_kernel_pair(
                 &self.stages,
                 &self.stage_kernels,
-                ColumnarStageKind::Filter,
-                ColumnarStageKind::Map,
+                BuiltinColumnarStage::Filter,
+                BuiltinColumnarStage::Map,
             )
         {
             if let Val::ObjVec(d) = &recv {
@@ -313,9 +303,11 @@ impl Pipeline {
         // StrVec receivers.  Stage::Filter(CurrentCmpLit) over a
         // primitive vec → walk slice directly, build typed output.
         // Sinks: Collect / Count.
-        if let Some(BodyKernel::CurrentCmpLit(op, lit)) =
-            stage_kernel(&self.stages, &self.stage_kernels, ColumnarStageKind::Filter)
-        {
+        if let Some(BodyKernel::CurrentCmpLit(op, lit)) = stage_kernel(
+            &self.stages,
+            &self.stage_kernels,
+            BuiltinColumnarStage::Filter,
+        ) {
             match (&recv, &self.sink) {
                 (Val::IntVec(a), Sink::Collect) => {
                     let mut out: Vec<i64> = Vec::with_capacity(a.len());
@@ -371,7 +363,7 @@ impl Pipeline {
 
         // Single Map(FieldRead) → Collect: direct projection.
         if let Some(BodyKernel::FieldRead(k)) =
-            stage_kernel(&self.stages, &self.stage_kernels, ColumnarStageKind::Map)
+            stage_kernel(&self.stages, &self.stage_kernels, BuiltinColumnarStage::Map)
         {
             let mut out = Vec::with_capacity(arr.len());
             for v in arr.iter() {
@@ -383,9 +375,11 @@ impl Pipeline {
         // Single Filter(FieldCmpLit) → Collect: predicate mask copy.
         // Phase C1 — when Arc is uniquely held (refcount 1), take
         // ownership and retain-in-place; saves N Val clones.
-        if let Some(BodyKernel::FieldCmpLit(k, op, lit)) =
-            stage_kernel(&self.stages, &self.stage_kernels, ColumnarStageKind::Filter)
-        {
+        if let Some(BodyKernel::FieldCmpLit(k, op, lit)) = stage_kernel(
+            &self.stages,
+            &self.stage_kernels,
+            BuiltinColumnarStage::Filter,
+        ) {
             return match Arc::try_unwrap(arr) {
                 Ok(mut owned) => {
                     owned.retain(|v| {
@@ -410,8 +404,8 @@ impl Pipeline {
         let filter_map = stage_kernel_pair(
             &self.stages,
             &self.stage_kernels,
-            ColumnarStageKind::Filter,
-            ColumnarStageKind::Map,
+            BuiltinColumnarStage::Filter,
+            BuiltinColumnarStage::Map,
         );
 
         // Filter(FieldCmpLit) ∘ Map(FieldRead) → Collect: project filtered column.
@@ -434,7 +428,7 @@ impl Pipeline {
         // try the cached slot first, fall back to hash on miss.
         // Saves ~half the probe cost on uniform-shape arrays.
         if let Some(BodyKernel::FieldChain(ks)) =
-            stage_kernel(&self.stages, &self.stage_kernels, ColumnarStageKind::Map)
+            stage_kernel(&self.stages, &self.stage_kernels, BuiltinColumnarStage::Map)
         {
             let mut out = Vec::with_capacity(arr.len());
             let mut slots: Vec<Option<usize>> = vec![None; ks.len()];
@@ -650,7 +644,7 @@ impl Pipeline {
             let (cs, _ck, csink) = self.canonical();
             // FlatMap(FieldRead) → flatmap-count
             if is_count_sink(&csink) {
-                if let Some(prog) = single_stage_program(&cs, ColumnarStageKind::FlatMap) {
+                if let Some(prog) = single_stage_program(&cs, BuiltinColumnarStage::FlatMap) {
                     if let Some(field) = single_field_prog(prog) {
                         if let Some(slot) = d.slot_of(field) {
                             return Some(Ok(objvec_flatmap_count_slot(d, slot)));
@@ -665,20 +659,20 @@ impl Pipeline {
                 if cs.is_empty() {
                     return Some(Ok(objvec_num_slot(d, sm, op)));
                 }
-                if let Some(pred) = single_stage_program(&cs, ColumnarStageKind::Filter) {
+                if let Some(pred) = single_stage_program(&cs, BuiltinColumnarStage::Filter) {
                     let (pf, cop, lit) = single_cmp_prog(pred)?;
                     let sp = d.slot_of(pf)?;
                     return Some(Ok(objvec_filter_num_slots(d, sp, cop, &lit, sm, op)));
                 }
             }
             if let Some(op) = identity_numeric_sink(&csink) {
-                if let Some(prog) = single_stage_program(&cs, ColumnarStageKind::Map) {
+                if let Some(prog) = single_stage_program(&cs, BuiltinColumnarStage::Map) {
                     let field = single_field_prog(prog)?;
                     let slot = d.slot_of(field)?;
                     return Some(Ok(objvec_num_slot(d, slot, op)));
                 }
                 if let Some((pred, map)) =
-                    stage_program_pair(&cs, ColumnarStageKind::Filter, ColumnarStageKind::Map)
+                    stage_program_pair(&cs, BuiltinColumnarStage::Filter, BuiltinColumnarStage::Map)
                 {
                     let (pf, cop, lit) = single_cmp_prog(pred)?;
                     let mf = single_field_prog(map)?;
@@ -689,7 +683,7 @@ impl Pipeline {
             }
             // Filter(...) → count-if (single cmp or AND chain)
             if is_count_sink(&csink) {
-                if let Some(pred) = single_stage_program(&cs, ColumnarStageKind::Filter) {
+                if let Some(pred) = single_stage_program(&cs, BuiltinColumnarStage::Filter) {
                     if let Some((pf, op, lit)) = single_cmp_prog(pred) {
                         let sp = d.slot_of(pf)?;
                         return Some(Ok(objvec_filter_count_slot(d, sp, op, &lit)));
