@@ -4,5 +4,5 @@ use super::{row_source, Source};
 
 pub(super) fn rows(source: &Source, root: &Val) -> Option<Vec<Val>> {
     let recv = row_source::resolve(source, root);
-    row_source::array_like_rows(&recv)
+    row_source::array_like_rows(&recv).map(row_source::Rows::into_vec)
 }

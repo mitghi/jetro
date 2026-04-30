@@ -45,7 +45,7 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
 
     let iter: Box<dyn Iterator<Item = Val>> = if let Some(rows) = row_source::array_like_rows(&recv)
     {
-        Box::new(rows.into_iter())
+        Box::new(rows.into_vec().into_iter())
     } else {
         match &recv {
             // ObjVec: materialise rows into Val::Obj for the per-row pull
