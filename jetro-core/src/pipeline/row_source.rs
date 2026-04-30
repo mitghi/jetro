@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use crate::value::{ObjVecData, Val};
@@ -91,79 +92,53 @@ pub(super) fn resolve(source: &Source, root: &Val) -> Val {
 }
 
 pub(super) fn array_like_rows(recv: &Val) -> Option<Rows<'_>> {
-    match recv {
-        Val::Arr(items) => Some(Rows::Borrowed(items.as_ref())),
-        Val::IntVec(items) => Some(Rows::Owned(items.iter().map(|n| Val::Int(*n)).collect())),
-        Val::FloatVec(items) => Some(Rows::Owned(items.iter().map(|f| Val::Float(*f)).collect())),
-        Val::StrVec(items) => Some(Rows::Owned(
-            items.iter().map(|s| Val::Str(Arc::clone(s))).collect(),
-        )),
-        Val::StrSliceVec(items) => Some(Rows::Owned(
-            items.iter().map(|s| Val::StrSlice(s.clone())).collect(),
-        )),
-        _ => None,
+    match recv.as_vals()? {
+        Cow::Borrowed(rows) => Some(Rows::Borrowed(rows)),
+        Cow::Owned(rows) => Some(Rows::Owned(rows)),
     }
 }
 
 pub(super) fn source_iter(recv: &Val) -> SourceIter<'_> {
-    if let Some(rows) = array_like_rows(recv) {
-        return SourceIter::Rows(rows.iter_cloned());
-    }
-
     match recv {
         Val::ObjVec(data) => SourceIter::ObjVec {
             data: Arc::clone(data),
             index: 0,
         },
-        _ => SourceIter::Single(Some(recv.clone()).into_iter()),
+        _ => {
+            if let Some(rows) = array_like_rows(recv) {
+                SourceIter::Rows(rows.iter_cloned())
+            } else {
+                SourceIter::Single(Some(recv.clone()).into_iter())
+            }
+        }
     }
 }
 
 pub(super) fn materialize_source(recv: &Val) -> Vec<Val> {
-    if let Some(rows) = array_like_rows(recv) {
-        rows.into_vec()
-    } else {
-        source_iter(recv).collect()
+    match recv {
+        Val::ObjVec(_) => source_iter(recv).collect(),
+        _ => array_like_rows(recv)
+            .map(Rows::into_vec)
+            .unwrap_or_else(|| source_iter(recv).collect()),
     }
 }
 
 pub(super) fn row_count(recv: &Val) -> Option<usize> {
-    match recv {
-        Val::Arr(rows) => Some(rows.len()),
-        Val::IntVec(rows) => Some(rows.len()),
-        Val::FloatVec(rows) => Some(rows.len()),
-        Val::StrVec(rows) => Some(rows.len()),
-        Val::StrSliceVec(rows) => Some(rows.len()),
-        Val::ObjVec(rows) => Some(rows.nrows()),
-        _ => None,
-    }
+    recv.array_len()
 }
 
 pub(super) fn row_at(recv: &Val, idx: usize) -> Option<Val> {
-    match recv {
-        Val::Arr(rows) => rows.get(idx).cloned(),
-        Val::IntVec(rows) => rows.get(idx).map(|n| Val::Int(*n)),
-        Val::FloatVec(rows) => rows.get(idx).map(|f| Val::Float(*f)),
-        Val::StrVec(rows) => rows.get(idx).map(|s| Val::Str(Arc::clone(s))),
-        Val::StrSliceVec(rows) => rows.get(idx).map(|s| Val::StrSlice(s.clone())),
-        Val::ObjVec(rows) if idx < rows.nrows() => Some(objvec_row(rows, idx)),
-        Val::ObjVec(_) => None,
-        _ => None,
+    if let Val::ObjVec(rows) = recv {
+        return (idx < rows.nrows()).then(|| objvec_row(rows, idx));
     }
+
+    recv.as_vals()?.get(idx).cloned()
 }
 
 pub(super) fn resolved_array_like_rows(recv: Val) -> Option<Rows<'static>> {
     match recv {
         Val::Arr(items) => Some(Rows::Shared(items)),
-        Val::IntVec(items) => Some(Rows::Owned(items.iter().map(|n| Val::Int(*n)).collect())),
-        Val::FloatVec(items) => Some(Rows::Owned(items.iter().map(|f| Val::Float(*f)).collect())),
-        Val::StrVec(items) => Some(Rows::Owned(
-            items.iter().map(|s| Val::Str(Arc::clone(s))).collect(),
-        )),
-        Val::StrSliceVec(items) => Some(Rows::Owned(
-            items.iter().map(|s| Val::StrSlice(s.clone())).collect(),
-        )),
-        _ => None,
+        other => other.into_vals().ok().map(Rows::Owned),
     }
 }
 

@@ -436,6 +436,20 @@ impl Val {
         }
     }
 
+    /// Length of any array-like lane without materializing elements.
+    #[inline]
+    pub fn array_len(&self) -> Option<usize> {
+        match self {
+            Val::Arr(a) => Some(a.len()),
+            Val::IntVec(a) => Some(a.len()),
+            Val::FloatVec(a) => Some(a.len()),
+            Val::StrVec(a) => Some(a.len()),
+            Val::StrSliceVec(a) => Some(a.len()),
+            Val::ObjVec(d) => Some(d.nrows()),
+            _ => None,
+        }
+    }
+
     /// Materialize any array-like (including columnar) as a `Cow<[Val]>`.
     /// Borrowed for `Val::Arr`; owned allocation for `Val::IntVec`/`FloatVec`/`ObjVec`.
     pub fn as_vals(&self) -> Option<Cow<'_, [Val]>> {
