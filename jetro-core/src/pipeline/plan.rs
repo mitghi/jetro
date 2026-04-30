@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::ast::Expr;
+use crate::ast::{BinOp, Expr};
 use crate::builtins::{BuiltinViewSink, BuiltinViewStage};
 use crate::chain_ir::{ChainOp, Demand as ChainDemand, PullDemand, ValueNeed};
 use crate::vm::{CompiledObjEntry, Opcode, Program};
@@ -120,17 +120,39 @@ pub enum StageStrategy {
     SortBottomK(usize),
 }
 
+#[cfg(test)]
 pub fn compute_strategies(stages: &[Stage], sink: &Sink) -> Vec<StageStrategy> {
+    compute_strategies_with_kernels(stages, &[], sink)
+}
+
+pub fn compute_strategies_with_kernels(
+    stages: &[Stage],
+    kernels: &[BodyKernel],
+    sink: &Sink,
+) -> Vec<StageStrategy> {
     let mut strategies: Vec<StageStrategy> = vec![StageStrategy::Default; stages.len()];
     let mut demand = sink.demand();
     for (i, stage) in stages.iter().enumerate().rev() {
-        if let Stage::Sort(_) = stage {
+        if let Stage::Sort(spec) = stage {
             match demand.chain.pull {
                 PullDemand::AtMost(k) | PullDemand::UntilOutput(k) => {
-                    strategies[i] = match demand.positional {
-                        Some(Position::Last) => StageStrategy::SortBottomK(k),
-                        _ => StageStrategy::SortTopK(k),
+                    let sort_kernel = kernels.get(i).unwrap_or(&BodyKernel::Generic);
+                    let kernel_suffix = if kernels.len() == stages.len() {
+                        &kernels[i + 1..]
+                    } else {
+                        &[]
                     };
+                    if ordered_prefix_suffix_is_safe(
+                        spec,
+                        sort_kernel,
+                        &stages[i + 1..],
+                        kernel_suffix,
+                    ) {
+                        strategies[i] = match demand.positional {
+                            Some(Position::Last) => StageStrategy::SortBottomK(k),
+                            _ => StageStrategy::SortTopK(k),
+                        };
+                    }
                 }
                 PullDemand::All => {}
             }
@@ -138,6 +160,95 @@ pub fn compute_strategies(stages: &[Stage], sink: &Sink) -> Vec<StageStrategy> {
         demand = stage.upstream_demand(demand);
     }
     strategies
+}
+
+fn ordered_prefix_suffix_is_safe(
+    sort: &super::SortSpec,
+    sort_kernel: &BodyKernel,
+    suffix: &[Stage],
+    kernels: &[BodyKernel],
+) -> bool {
+    suffix.iter().enumerate().all(|(idx, stage)| {
+        let kernel = kernels.get(idx).unwrap_or(&BodyKernel::Generic);
+        stage.ordered_prefix_effect(sort, sort_kernel, kernel)
+    })
+}
+
+fn predicate_is_order_prefix(
+    sort: &super::SortSpec,
+    sort_kernel: &BodyKernel,
+    predicate: &BodyKernel,
+) -> bool {
+    let Some((lhs, op)) = predicate_order_lhs(predicate) else {
+        return false;
+    };
+    let Some(order_key) = sort_order_key(sort, sort_kernel) else {
+        return false;
+    };
+    order_lhs_eq(lhs, order_key) && cmp_is_prefix_for_order(op, sort.descending)
+}
+
+fn predicate_order_lhs(predicate: &BodyKernel) -> Option<(OrderKey<'_>, BinOp)> {
+    match predicate {
+        BodyKernel::CurrentCmpLit(op, _) => Some((OrderKey::Current, *op)),
+        BodyKernel::FieldCmpLit(field, op, _) => Some((OrderKey::Field(field.as_ref()), *op)),
+        BodyKernel::FieldChainCmpLit(keys, op, _) => {
+            Some((OrderKey::FieldChain(keys.as_ref()), *op))
+        }
+        BodyKernel::CmpLit { lhs, op, .. } => lhs_order_key(lhs).map(|lhs| (lhs, *op)),
+        _ => None,
+    }
+}
+
+fn lhs_order_key(lhs: &BodyKernel) -> Option<OrderKey<'_>> {
+    match lhs {
+        BodyKernel::Current => Some(OrderKey::Current),
+        BodyKernel::FieldRead(field) => Some(OrderKey::Field(field.as_ref())),
+        BodyKernel::FieldChain(keys) => Some(OrderKey::FieldChain(keys.as_ref())),
+        _ => None,
+    }
+}
+
+fn sort_order_key<'a>(sort: &super::SortSpec, sort_kernel: &'a BodyKernel) -> Option<OrderKey<'a>> {
+    if sort.key.is_none() {
+        return Some(OrderKey::Current);
+    }
+    match sort_kernel {
+        BodyKernel::FieldRead(field) => Some(OrderKey::Field(field.as_ref())),
+        BodyKernel::FieldChain(keys) => Some(OrderKey::FieldChain(keys)),
+        BodyKernel::Current => Some(OrderKey::Current),
+        _ => None,
+    }
+}
+
+enum OrderKey<'a> {
+    Current,
+    Field(&'a str),
+    FieldChain(&'a [Arc<str>]),
+}
+
+fn order_lhs_eq(lhs: OrderKey<'_>, key: OrderKey<'_>) -> bool {
+    match (lhs, key) {
+        (OrderKey::Current, OrderKey::Current) => true,
+        (OrderKey::Field(field), OrderKey::Field(key)) => field == key,
+        (OrderKey::FieldChain(lhs), OrderKey::FieldChain(rhs)) => same_key_chain(lhs, rhs),
+        _ => false,
+    }
+}
+
+fn same_key_chain(lhs: &[Arc<str>], rhs: &[Arc<str>]) -> bool {
+    lhs.len() == rhs.len()
+        && lhs
+            .iter()
+            .zip(rhs.iter())
+            .all(|(a, b)| a.as_ref() == b.as_ref())
+}
+
+fn cmp_is_prefix_for_order(op: BinOp, descending: bool) -> bool {
+    matches!(
+        (descending, op),
+        (true, BinOp::Gt | BinOp::Gte) | (false, BinOp::Lt | BinOp::Lte)
+    )
 }
 
 impl Pipeline {
@@ -408,6 +519,7 @@ impl Stage {
             Stage::Take(n, _, _) => Some(ChainOp::Take(*n)),
             Stage::Skip(n, _, _) => Some(ChainOp::Skip(*n)),
             Stage::Builtin(call) => Some(ChainOp::Builtin(call.method)),
+            Stage::TakeWhile(_) => Some(ChainOp::TakeWhile),
             Stage::Slice(_, _) | Stage::Replace { .. } => Some(ChainOp::Map),
             _ => None,
         }
@@ -427,6 +539,30 @@ impl Stage {
             None
         };
         SinkDemand { chain, positional }
+    }
+
+    fn ordered_prefix_effect(
+        &self,
+        sort: &super::SortSpec,
+        sort_kernel: &BodyKernel,
+        kernel: &BodyKernel,
+    ) -> bool {
+        match self {
+            Stage::Take(_, _, _) | Stage::Skip(_, _, _) => true,
+            Stage::Map(_, _)
+            | Stage::CompiledMap(_)
+            | Stage::Slice(_, _)
+            | Stage::Replace { .. } => true,
+            Stage::Builtin(call) => {
+                let shape = self.shape();
+                shape.cardinality == crate::chain_ir::Cardinality::OneToOne
+                    && call.spec().cardinality == crate::builtins::BuiltinCardinality::OneToOne
+            }
+            Stage::Filter(_, _) | Stage::TakeWhile(_) => {
+                predicate_is_order_prefix(sort, sort_kernel, kernel)
+            }
+            _ => false,
+        }
     }
 
     pub fn shape(&self) -> StageShape {
@@ -490,9 +626,13 @@ impl Stage {
                     },
                 }
             }
-            Stage::TakeWhile(_)
-            | Stage::DropWhile(_)
-            | Stage::IndicesWhere(_)
+            Stage::TakeWhile(_) | Stage::DropWhile(_) => StageShape {
+                cardinality: Cardinality::Filtering,
+                can_indexed: true,
+                cost: 10.0,
+                selectivity: 0.5,
+            },
+            Stage::IndicesWhere(_)
             | Stage::FindIndex(_)
             | Stage::MaxBy(_)
             | Stage::MinBy(_)

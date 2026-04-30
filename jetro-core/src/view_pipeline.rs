@@ -303,7 +303,8 @@ where
     let pipeline::Stage::Sort(spec) = body.stages.first()? else {
         return None;
     };
-    let strategies = pipeline::compute_strategies(&body.stages, &body.sink);
+    let strategies =
+        pipeline::compute_strategies_with_kernels(&body.stages, &body.stage_kernels, &body.sink);
     let strategy = strategies.first().copied()?;
     if matches!(strategy, pipeline::StageStrategy::Default) {
         return None;

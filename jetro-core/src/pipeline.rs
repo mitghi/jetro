@@ -74,10 +74,12 @@ pub(crate) use common::{
 pub use kernels::{eval_cmp_op, eval_kernel, BodyKernel};
 pub(crate) use kernels::{eval_view_kernel, CollectLayout, ObjectKernel, ViewKernelValue};
 #[cfg(test)]
+pub use plan::compute_strategies;
+#[cfg(test)]
 pub use plan::plan;
 pub use plan::{
-    compute_strategies, plan_with_exprs, plan_with_kernels, select_strategy, Plan, Position,
-    StageStrategy, Strategy,
+    compute_strategies_with_kernels, plan_with_exprs, plan_with_kernels, select_strategy, Plan,
+    Position, StageStrategy, Strategy,
 };
 pub(crate) use sink_accumulator::SinkAccumulator;
 
@@ -1136,6 +1138,21 @@ mod tests {
                 ]
             }),
         );
+    }
+
+    #[test]
+    fn sort_take_while_take_uses_bounded_strategy_only_when_prefix_safe() {
+        let p = lower_query("$.rows.sort_by(-price).take_while(price > 10).take(2)").unwrap();
+        let strategies = compute_strategies_with_kernels(&p.stages, &p.stage_kernels, &p.sink);
+        assert!(matches!(strategies[0], StageStrategy::SortTopK(2)));
+
+        let p = lower_query("$.rows.sort_by(-score).take_while(price > 10).take(2)").unwrap();
+        let strategies = compute_strategies_with_kernels(&p.stages, &p.stage_kernels, &p.sink);
+        assert!(matches!(strategies[0], StageStrategy::Default));
+
+        let p = lower_query("$.rows.sort().take_while(price > 10).take(2)").unwrap();
+        let strategies = compute_strategies_with_kernels(&p.stages, &p.stage_kernels, &p.sink);
+        assert!(matches!(strategies[0], StageStrategy::Default));
     }
 
     #[test]

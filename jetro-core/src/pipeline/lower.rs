@@ -118,6 +118,7 @@ impl Pipeline {
                 .iter()
                 .map(|s| match s {
                     Stage::Filter(p, _) => BodyKernel::classify(p),
+                    Stage::TakeWhile(p) => BodyKernel::classify(p),
                     Stage::Map(p, _) => BodyKernel::classify(p),
                     Stage::FlatMap(p, _) => BodyKernel::classify(p),
                     Stage::UniqueBy(Some(p)) => BodyKernel::classify(p),
@@ -185,6 +186,7 @@ fn is_receiver_pipeline_start_method(name: &str, arity: usize) -> bool {
                 || spec.pipeline_sink.is_some()
                 || spec.pipeline_stage == Some(BuiltinPipelineStage::Nullary)
         }
+        1 if method == BuiltinMethod::Sort => true,
         1 => spec.pipeline_stage == Some(BuiltinPipelineStage::Unary),
         _ => false,
     }
@@ -266,6 +268,7 @@ fn try_decode_map_body(arg: &crate::ast::Arg) -> Option<Plan> {
         .iter()
         .map(|s| match s {
             Stage::Filter(p, _) => BodyKernel::classify(p),
+            Stage::TakeWhile(p) => BodyKernel::classify(p),
             Stage::Map(p, _) => BodyKernel::classify(p),
             Stage::FlatMap(p, _) => BodyKernel::classify(p),
             Stage::UniqueBy(Some(p)) => BodyKernel::classify(p),

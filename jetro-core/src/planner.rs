@@ -73,26 +73,29 @@ fn try_lower_receiver_pipeline(builder: &mut PlanBuilder, expr: &Expr) -> Option
     let Expr::Chain(base, steps) = expr else {
         return None;
     };
-    if matches!(base.as_ref(), Expr::Root) {
-        return None;
-    }
 
-    let method_start = steps
+    for method_start in steps
         .iter()
-        .position(|step| matches!(step, Step::Method(_, _)))?;
-    if !Pipeline::is_receiver_pipeline_start(&steps[method_start]) {
-        return None;
+        .enumerate()
+        .filter_map(|(idx, step)| Pipeline::is_receiver_pipeline_start(step).then_some(idx))
+    {
+        if matches!(base.as_ref(), Expr::Root) && method_start == 0 {
+            continue;
+        }
+        let Some(body) = Pipeline::lower_body_from_steps(&steps[method_start..]) else {
+            continue;
+        };
+        let source_expr = base
+            .as_ref()
+            .clone()
+            .maybe_chain(steps[..method_start].to_vec());
+        let source = lower_expr(builder, &source_expr);
+        return Some(builder.push(PlanNode::Pipeline {
+            source: PipelinePlanSource::Expr(source),
+            body,
+        }));
     }
-    let source_expr = base
-        .as_ref()
-        .clone()
-        .maybe_chain(steps[..method_start].to_vec());
-    let source = lower_expr(builder, &source_expr);
-    let body = Pipeline::lower_body_from_steps(&steps[method_start..])?;
-    Some(builder.push(PlanNode::Pipeline {
-        source: PipelinePlanSource::Expr(source),
-        body,
-    }))
+    None
 }
 
 fn try_lower_root_path(expr: &Expr) -> Option<PlanNode> {
@@ -303,10 +306,7 @@ pub fn plan_query(expr: &str) -> QueryPlan {
             return builder.finish(root);
         }
     }
-    let root = match &ast {
-        Expr::Object(_) | Expr::Array(_) | Expr::Let { .. } => lower_expr(&mut builder, &ast),
-        _ => fallback_vm(&mut builder, &ast),
-    };
+    let root = lower_expr(&mut builder, &ast);
     builder.finish(root)
 }
 
@@ -340,6 +340,25 @@ mod tests {
             panic!("expected kv field");
         };
         assert!(matches!(plan.node(*val), PlanNode::RootPath(_)));
+    }
+
+    #[test]
+    fn descendant_prefix_can_feed_receiver_pipeline() {
+        let plan =
+            plan_query(r#"$..books?.first().sort_by(-price).take_while(price > 10).take(2)"#);
+        let PlanNode::Pipeline { source, body } = root_node(&plan) else {
+            panic!("expected physical receiver pipeline");
+        };
+        assert!(matches!(source, PipelinePlanSource::Expr(_)));
+        assert!(matches!(body.stages[0], crate::pipeline::Stage::Sort(_)));
+        assert!(matches!(
+            body.stages[1],
+            crate::pipeline::Stage::TakeWhile(_)
+        ));
+        assert!(matches!(
+            body.stages[2],
+            crate::pipeline::Stage::Take(2, _, _)
+        ));
     }
 
     #[test]

@@ -9,8 +9,8 @@ use super::lower::run_compiled_map;
 use super::row_source;
 use super::sink_accumulator::SinkAccumulator;
 use super::{
-    apply_item_in_env, bounded_sort_by_key, cmp_val_total, compute_strategies, eval_kernel,
-    is_truthy, BodyKernel, Pipeline, PipelineBody, Sink, Source, Stage, StageStrategy,
+    apply_item_in_env, bounded_sort_by_key, cmp_val_total, compute_strategies_with_kernels,
+    eval_kernel, is_truthy, BodyKernel, Pipeline, PipelineBody, Sink, Source, Stage, StageStrategy,
     TerminalMapCollector,
 };
 
@@ -58,7 +58,11 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
 
     let pre_iter: LegacyPreIter = {
         let mut buf: Vec<Val> = row_source::materialize_source(&recv);
-        let strategies = compute_strategies(&pipeline.stages, &pipeline.sink);
+        let strategies = compute_strategies_with_kernels(
+            &pipeline.stages,
+            &pipeline.stage_kernels,
+            &pipeline.sink,
+        );
         // Phase 1.2 — barrier-stage path now reads stage_kernels[i]
         // and dispatches the inline kernel for Sort/UniqueBy keyed
         // variants too, not just streaming Filter/Map.  Extends

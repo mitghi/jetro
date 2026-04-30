@@ -125,6 +125,7 @@ pub enum ChainOp {
     Filter,
     Map,
     FlatMap,
+    TakeWhile,
     Take(usize),
     Skip(usize),
     First,
@@ -166,6 +167,12 @@ impl ChainOp {
                 input: ValueKind::Stream,
                 output: ValueKind::Stream,
                 cardinality: Expanding,
+                preserves_order: true,
+            },
+            TakeWhile => OpSpec {
+                input: ValueKind::Stream,
+                output: ValueKind::Stream,
+                cardinality: Filtering,
                 preserves_order: true,
             },
             Take(_) | Skip(_) => OpSpec {
@@ -221,6 +228,14 @@ impl ChainOp {
         use ValueNeed::*;
         match self {
             Filter => Demand {
+                pull: match downstream.pull {
+                    All => All,
+                    AtMost(n) | UntilOutput(n) => UntilOutput(n),
+                },
+                value: downstream.value.merge(Predicate),
+                order: downstream.order,
+            },
+            TakeWhile => Demand {
                 pull: match downstream.pull {
                     All => All,
                     AtMost(n) | UntilOutput(n) => UntilOutput(n),

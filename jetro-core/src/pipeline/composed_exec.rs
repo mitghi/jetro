@@ -8,7 +8,7 @@ use super::composed_segment;
 use super::composed_sink;
 use super::composed_source;
 use super::composed_stage::ComposedStageBuilder;
-use super::{compute_strategies, BodyKernel, Pipeline, StageStrategy};
+use super::{compute_strategies_with_kernels, BodyKernel, Pipeline, StageStrategy};
 
 pub(super) fn run(
     pipeline: &Pipeline,
@@ -28,7 +28,7 @@ pub(super) fn run(
 
     // Demand propagation is the generic performance hook: stages pick
     // algorithms from downstream demand instead of query-specific rewrites.
-    let strategies = compute_strategies(stages_ref, &eff_sink);
+    let strategies = compute_strategies_with_kernels(stages_ref, kernels, &eff_sink);
 
     let mut last_split = 0usize;
     for (i, stage) in stages_ref.iter().enumerate() {
