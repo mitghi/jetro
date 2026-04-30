@@ -637,6 +637,40 @@ impl BuiltinStageMerge {
     }
 }
 
+impl BuiltinViewStage {
+    #[inline]
+    pub fn cardinality(self) -> BuiltinCardinality {
+        match self {
+            Self::Filter => BuiltinCardinality::Filtering,
+            Self::Map => BuiltinCardinality::OneToOne,
+            Self::FlatMap => BuiltinCardinality::Expanding,
+            Self::Take | Self::Skip => BuiltinCardinality::Bounded,
+        }
+    }
+
+    #[inline]
+    pub fn can_indexed(self) -> bool {
+        matches!(self, Self::Map)
+    }
+
+    #[inline]
+    pub fn cost(self) -> f64 {
+        match self {
+            Self::Filter | Self::Map | Self::FlatMap => 10.0,
+            Self::Take | Self::Skip => 0.5,
+        }
+    }
+
+    #[inline]
+    pub fn selectivity(self) -> f64 {
+        match self {
+            Self::Filter => 0.5,
+            Self::Map | Self::FlatMap => 1.0,
+            Self::Take | Self::Skip => 0.5,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinPipelineStage {
     Nullary,

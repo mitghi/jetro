@@ -278,6 +278,17 @@ pub struct StageShape {
     pub selectivity: f64,
 }
 
+impl StageShape {
+    fn from_view_stage(stage: BuiltinViewStage) -> Self {
+        Self {
+            cardinality: stage.cardinality().into(),
+            can_indexed: stage.can_indexed(),
+            cost: stage.cost(),
+            selectivity: stage.selectivity(),
+        }
+    }
+}
+
 impl Stage {
     pub(crate) fn is_composed_barrier(&self) -> bool {
         matches!(
@@ -421,30 +432,11 @@ impl Stage {
     pub fn shape(&self) -> StageShape {
         use crate::chain_ir::Cardinality;
         match self {
-            Stage::Map(_, _) => StageShape {
-                cardinality: Cardinality::OneToOne,
-                can_indexed: true,
-                cost: 10.0,
-                selectivity: 1.0,
-            },
-            Stage::Filter(_, _) => StageShape {
-                cardinality: Cardinality::Filtering,
-                can_indexed: false,
-                cost: 10.0,
-                selectivity: 0.5,
-            },
-            Stage::FlatMap(_, _) => StageShape {
-                cardinality: Cardinality::Expanding,
-                can_indexed: false,
-                cost: 10.0,
-                selectivity: 1.0,
-            },
-            Stage::Take(_, _, _) | Stage::Skip(_, _, _) => StageShape {
-                cardinality: Cardinality::Bounded,
-                can_indexed: false,
-                cost: 0.5,
-                selectivity: 0.5,
-            },
+            Stage::Map(_, stage)
+            | Stage::Filter(_, stage)
+            | Stage::FlatMap(_, stage)
+            | Stage::Take(_, stage, _)
+            | Stage::Skip(_, stage, _) => StageShape::from_view_stage(*stage),
             Stage::Reverse(_) | Stage::Sort(_) | Stage::UniqueBy(_) | Stage::GroupBy(_) => {
                 StageShape {
                     cardinality: Cardinality::Barrier,
