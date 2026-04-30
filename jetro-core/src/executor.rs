@@ -625,6 +625,44 @@ mod tests {
 
     #[cfg(feature = "simd-json")]
     #[test]
+    fn tape_numeric_scalar_filter_preserves_output_demand() {
+        let j = Jetro::from_bytes(
+            br#"{"people":[{"score":3},{"score":-12},{"score":20}],"unused":{"large":[1,2,3,4]}}"#
+                .to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j
+            .collect(r#"$.people.filter(score.abs() > 10).take(1).map(score)"#)
+            .unwrap();
+
+        assert_eq!(out, json!([-12]));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 1);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn tape_float_numeric_scalar_filter_preserves_output_demand() {
+        let j = Jetro::from_bytes(
+            br#"{"people":[{"score":8.2},{"score":9.7},{"score":10.2}],"unused":{"large":[1,2,3,4]}}"#
+                .to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j
+            .collect(r#"$.people.filter(score.round() == 10).take(1).map(score)"#)
+            .unwrap();
+
+        assert_eq!(out, json!([9.7]));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 1);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
     fn object_shape_tape_pipeline_generic_first_stage_uses_row_bridge() {
         let j = Jetro::from_bytes(
             br#"{"people":[{"name":"al"},{"name":"ada"},{"name":"bob"},{"name":"carol"}],"meta":{"version":3}}"#.to_vec(),

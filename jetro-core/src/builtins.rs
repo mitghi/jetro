@@ -968,7 +968,11 @@ impl BuiltinMethod {
                     | Self::IsAlpha
                     | Self::IsAscii
                     | Self::ToNumber
-                    | Self::ToBool => spec.view_scalar(),
+                    | Self::ToBool
+                    | Self::Ceil
+                    | Self::Floor
+                    | Self::Round
+                    | Self::Abs => spec.view_scalar(),
                     _ => spec,
                 };
                 if pipeline_element {
@@ -1151,10 +1155,12 @@ impl BuiltinCall {
             (BuiltinMethod::FromPairs, BuiltinArgs::None) => {
                 apply_or_recv!(from_pairs_apply(recv))
             }
-            (BuiltinMethod::Ceil, BuiltinArgs::None) => return ceil_apply(recv),
-            (BuiltinMethod::Floor, BuiltinArgs::None) => return floor_apply(recv),
-            (BuiltinMethod::Round, BuiltinArgs::None) => return round_apply(recv),
-            (BuiltinMethod::Abs, BuiltinArgs::None) => return abs_apply(recv),
+            (BuiltinMethod::Ceil, BuiltinArgs::None)
+            | (BuiltinMethod::Floor, BuiltinArgs::None)
+            | (BuiltinMethod::Round, BuiltinArgs::None)
+            | (BuiltinMethod::Abs, BuiltinArgs::None) => {
+                return numeric_no_arg_scalar_val_apply(self.method, recv)
+            }
             (BuiltinMethod::Or, BuiltinArgs::Val(default)) => return Some(or_apply(recv, default)),
             (BuiltinMethod::Missing, BuiltinArgs::Str(k)) => return Some(missing_apply(recv, k)),
             (BuiltinMethod::Includes, BuiltinArgs::Val(item)) => {
@@ -1644,6 +1650,13 @@ impl BuiltinCall {
                 str_no_arg_scalar_apply(self.method, value)
             }
             (
+                BuiltinMethod::Ceil
+                | BuiltinMethod::Floor
+                | BuiltinMethod::Round
+                | BuiltinMethod::Abs,
+                BuiltinArgs::None,
+            ) => numeric_no_arg_scalar_apply(self.method, recv),
+            (
                 BuiltinMethod::StartsWith
                 | BuiltinMethod::EndsWith
                 | BuiltinMethod::Matches
@@ -1656,6 +1669,44 @@ impl BuiltinCall {
             }
             _ => None,
         }
+    }
+}
+
+#[inline]
+fn numeric_no_arg_scalar_apply(
+    method: BuiltinMethod,
+    recv: crate::util::JsonView<'_>,
+) -> Option<Val> {
+    match (method, recv) {
+        (
+            BuiltinMethod::Ceil | BuiltinMethod::Floor | BuiltinMethod::Round,
+            crate::util::JsonView::Int(n),
+        ) => Some(Val::Int(n)),
+        (
+            BuiltinMethod::Ceil | BuiltinMethod::Floor | BuiltinMethod::Round,
+            crate::util::JsonView::UInt(n),
+        ) => Some(uint_to_val(n)),
+        (BuiltinMethod::Ceil, crate::util::JsonView::Float(f)) => Some(Val::Int(f.ceil() as i64)),
+        (BuiltinMethod::Floor, crate::util::JsonView::Float(f)) => Some(Val::Int(f.floor() as i64)),
+        (BuiltinMethod::Round, crate::util::JsonView::Float(f)) => Some(Val::Int(f.round() as i64)),
+        (BuiltinMethod::Abs, crate::util::JsonView::Int(n)) => Some(Val::Int(n.wrapping_abs())),
+        (BuiltinMethod::Abs, crate::util::JsonView::UInt(n)) => Some(uint_to_val(n)),
+        (BuiltinMethod::Abs, crate::util::JsonView::Float(f)) => Some(Val::Float(f.abs())),
+        _ => None,
+    }
+}
+
+#[inline]
+fn numeric_no_arg_scalar_val_apply(method: BuiltinMethod, recv: &Val) -> Option<Val> {
+    numeric_no_arg_scalar_apply(method, crate::util::JsonView::from_val(recv))
+}
+
+#[inline]
+fn uint_to_val(n: u64) -> Val {
+    if n <= i64::MAX as u64 {
+        Val::Int(n as i64)
+    } else {
+        Val::Float(n as f64)
     }
 }
 
@@ -5980,6 +6031,8 @@ mod spec_tests {
         assert!(BuiltinMethod::ByteLen.spec().view_scalar);
         assert!(BuiltinMethod::IsNumeric.spec().view_scalar);
         assert!(BuiltinMethod::ToNumber.spec().view_scalar);
+        assert!(BuiltinMethod::Abs.spec().view_scalar);
+        assert!(BuiltinMethod::Round.spec().view_scalar);
         assert!(!BuiltinMethod::Sort.spec().view_scalar);
         assert!(!BuiltinMethod::FromJson.spec().view_scalar);
     }
