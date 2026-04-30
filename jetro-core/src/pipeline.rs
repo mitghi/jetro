@@ -36,6 +36,7 @@ use std::sync::Arc;
 
 use crate::ast::Expr;
 use crate::builtins::BuiltinMethod;
+use crate::context::EvalError;
 use crate::value::Val;
 
 mod canonical;
@@ -76,6 +77,15 @@ pub use plan::{
     StageStrategy, Strategy,
 };
 pub(crate) use sink_accumulator::SinkAccumulator;
+
+#[cfg(feature = "simd-json")]
+pub(crate) fn run_tape_field_chain(
+    body: &PipelineBody,
+    tape: &crate::strref::TapeData,
+    keys: &[Arc<str>],
+) -> Option<Result<Val, EvalError>> {
+    legacy_exec::run_tape_field_chain(body, tape, keys)
+}
 
 /// Data capabilities supplied by the owning `Jetro` handle to pipeline
 /// execution. The pipeline remains independent of `Jetro` itself, but can ask

@@ -210,7 +210,6 @@ impl<'a> TapeRowSource<'a> {
         self.iter().collect()
     }
 
-    #[cfg(test)]
     pub(super) fn is_array_provider(&self) -> bool {
         matches!(self, Self::Array { .. })
     }

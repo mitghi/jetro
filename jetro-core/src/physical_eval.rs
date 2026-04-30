@@ -18,6 +18,9 @@ use crate::{Jetro, VM};
 pub(crate) fn run(j: &Jetro, plan: &QueryPlan, root_id: NodeId) -> Result<Val, EvalError> {
     #[cfg(feature = "simd-json")]
     if let Some(tape) = j.lazy_tape() {
+        if let Some(result) = try_run_tape_row_plan(plan, root_id, tape) {
+            return result;
+        }
         if let Some(result) = try_run_view_plan(
             plan,
             root_id,
@@ -41,6 +44,21 @@ pub(crate) fn run(j: &Jetro, plan: &QueryPlan, root_id: NodeId) -> Result<Val, E
         vm: VM::new(),
     };
     ctx.eval(root_id)
+}
+
+#[cfg(feature = "simd-json")]
+fn try_run_tape_row_plan(
+    plan: &QueryPlan,
+    root_id: NodeId,
+    tape: &crate::strref::TapeData,
+) -> Option<Result<Val, EvalError>> {
+    match plan.node(root_id) {
+        PlanNode::Pipeline {
+            source: PipelinePlanSource::FieldChain { keys },
+            body,
+        } => pipeline::run_tape_field_chain(body, tape, keys),
+        _ => None,
+    }
 }
 
 fn try_run_view_plan<'a, V>(

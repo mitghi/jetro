@@ -10,7 +10,8 @@ use super::row_source;
 use super::sink_accumulator::SinkAccumulator;
 use super::{
     apply_item_in_env, bounded_sort_by_key, cmp_val_total, compute_strategies, eval_kernel,
-    is_truthy, BodyKernel, Pipeline, Sink, Stage, StageStrategy, TerminalMapCollector,
+    is_truthy, BodyKernel, Pipeline, PipelineBody, Sink, Source, Stage, StageStrategy,
+    TerminalMapCollector,
 };
 
 use crate::builtins::{
@@ -40,8 +41,6 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
     let source_demand = pipeline.source_demand().chain.pull;
     let mut pulled_inputs: usize = 0;
     let mut emitted_outputs: usize = 0;
-    let mut stage_taken: Vec<usize> = vec![0; pipeline.stages.len()];
-    let mut stage_skipped: Vec<usize> = vec![0; pipeline.stages.len()];
 
     let mut sink_acc = SinkAccumulator::new(&pipeline.sink);
 
@@ -53,22 +52,11 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
         .stages
         .iter()
         .any(Stage::requires_legacy_materialization);
-    let terminal_map_idx = if !needs_barrier && matches!(pipeline.sink, Sink::Collect) {
-        match pipeline.stages.last() {
-            Some(Stage::Map(_)) => pipeline.stages.len().checked_sub(1),
-            _ => None,
-        }
-    } else {
-        None
-    };
-    let terminal_map_kernel = terminal_map_idx.map(|idx| {
-        pipeline
-            .stage_kernels
-            .get(idx)
-            .unwrap_or(&BodyKernel::Generic)
-    });
-    let mut terminal_map_collect = terminal_map_kernel.map(TerminalMapCollector::new);
-    let pre_iter: LegacyPreIter<'_> = if needs_barrier {
+    if !needs_barrier {
+        return run_streaming_rows(pipeline, base_env, row_source::source_iter(&recv));
+    }
+
+    let pre_iter: LegacyPreIter = {
         let mut buf: Vec<Val> = row_source::materialize_source(&recv);
         let strategies = compute_strategies(&pipeline.stages, &pipeline.sink);
         // Phase 1.2 — barrier-stage path now reads stage_kernels[i]
@@ -351,125 +339,210 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
             }
         }
         LegacyPreIter::Owned(buf.into_iter())
-    } else {
-        LegacyPreIter::Source(row_source::source_iter(&recv))
     };
 
-    'outer: for mut item in pre_iter {
+    'outer: for item in pre_iter {
         if matches!(source_demand, PullDemand::AtMost(n) if pulled_inputs >= n) {
             break 'outer;
         }
         pulled_inputs += 1;
 
-        // When barriers ran above, stages have already been
-        // applied — `pre_iter` yields the post-pipeline rows
-        // directly.  When no barriers are present, run streaming
-        // stages here.
-        if !needs_barrier {
-            for (stage_idx, stage) in pipeline.stages.iter().enumerate() {
-                let kernel = pipeline
-                    .stage_kernels
-                    .get(stage_idx)
-                    .unwrap_or(&BodyKernel::Generic);
-                match stage {
-                    Stage::Skip(n) => {
-                        if stage_skipped[stage_idx] < *n {
-                            stage_skipped[stage_idx] += 1;
-                            continue 'outer;
-                        }
-                    }
-                    Stage::Take(n) => {
-                        if stage_taken[stage_idx] >= *n {
-                            break 'outer;
-                        }
-                        stage_taken[stage_idx] += 1;
-                    }
-                    Stage::Filter(prog) => {
-                        if !filter_one(&item, |v| {
-                            eval_kernel(kernel, v, |item| {
-                                apply_item_in_env(&mut vm, &mut loop_env, item, prog)
-                            })
-                        })? {
-                            continue 'outer;
-                        }
-                    }
-                    Stage::Map(prog) => {
-                        if Some(stage_idx) == terminal_map_idx {
-                            terminal_map_collect
-                                .as_mut()
-                                .expect("terminal map collector")
-                                .push_val_row(&item, kernel, |item| {
-                                    apply_item_in_env(&mut vm, &mut loop_env, item, prog)
-                                })?;
-                            emitted_outputs += 1;
-                            if matches!(source_demand, PullDemand::UntilOutput(n) if emitted_outputs >= n)
-                            {
-                                break 'outer;
-                            }
-                            continue 'outer;
-                        }
-                        item = map_one(&item, |v| {
-                            eval_kernel(kernel, v, |item| {
-                                apply_item_in_env(&mut vm, &mut loop_env, item, prog)
-                            })
-                        })?;
-                    }
-                    Stage::Reverse
-                    | Stage::Sort(_)
-                    | Stage::UniqueBy(_)
-                    | Stage::FlatMap(_)
-                    | Stage::GroupBy(_) => {}
-                    Stage::Split(_) | Stage::Chunk(_) | Stage::Window(_) => {} // forced into barrier path above
-                    Stage::Slice(start, end) => {
-                        item = slice_apply(item, *start, *end);
-                    }
-                    Stage::Replace {
-                        needle,
-                        replacement,
-                        all,
-                    } => {
-                        if let Some(r) = replace_apply(item.clone(), needle, replacement, *all) {
-                            item = r;
-                        }
-                    }
-                    Stage::CompiledMap(plan) => {
-                        item = run_compiled_map(plan, item)?;
-                    }
-                    Stage::Builtin(call) => {
-                        item = call.apply(&item).unwrap_or(item);
-                    }
-                    // Lambda-bearing streaming arm: TakeWhile.
-                    Stage::TakeWhile(prog) => {
-                        if !take_while_one(&item, |v| {
-                            eval_kernel(kernel, v, |item| {
-                                apply_item_in_env(&mut vm, &mut loop_env, item, prog)
-                            })
-                        })? {
-                            break 'outer;
-                        }
-                    }
-                    Stage::TransformValues(prog)
-                    | Stage::TransformKeys(prog)
-                    | Stage::FilterValues(prog)
-                    | Stage::FilterKeys(prog) => {
-                        item =
-                            apply_lambda_obj(stage, &item, &mut vm, &mut loop_env, kernel, prog)?;
-                    }
-                    // Forced into barrier path above (DropWhile needs
-                    // cross-row state; reductions consume full stream).
-                    Stage::DropWhile(_)
-                    | Stage::IndicesWhere(_)
-                    | Stage::FindIndex(_)
-                    | Stage::MaxBy(_)
-                    | Stage::MinBy(_)
-                    | Stage::CountBy(_)
-                    | Stage::IndexBy(_)
-                    | Stage::SortedDedup(_) => {}
+        // Barrier stages have already been applied; `pre_iter` yields
+        // the post-pipeline rows directly, so only the sink remains.
+        let sink_done = match &pipeline.sink {
+            Sink::Numeric(n) => {
+                if let Some(project) = &n.project {
+                    let kernel = pipeline
+                        .sink_kernels
+                        .first()
+                        .unwrap_or(&BodyKernel::Generic);
+                    let numeric_item = eval_kernel(kernel, &item, |item| {
+                        apply_item_in_env(&mut vm, &mut loop_env, item, project)
+                    })?;
+                    sink_acc.push_projected_numeric(&numeric_item);
+                } else {
+                    sink_acc.push(item);
                 }
+                false
+            }
+            _ => sink_acc.push(item),
+        };
+        if sink_done {
+            break 'outer;
+        }
+        emitted_outputs += 1;
+        if matches!(source_demand, PullDemand::UntilOutput(n) if emitted_outputs >= n) {
+            break 'outer;
+        }
+    }
+
+    // GroupBy is a barrier that produces a single Val::Obj which
+    // Sink::Collect would otherwise wrap as [obj]. When the last
+    // stage is GroupBy, return the bare object to match walker
+    // semantics.
+    let unwrap_single_collect_obj = matches!(pipeline.stages.last(), Some(Stage::GroupBy(_)));
+    Ok(sink_acc.finish(unwrap_single_collect_obj))
+}
+
+#[cfg(feature = "simd-json")]
+pub(super) fn run_tape_field_chain(
+    body: &PipelineBody,
+    tape: &crate::strref::TapeData,
+    keys: &[Arc<str>],
+) -> Option<Result<Val, EvalError>> {
+    if body
+        .stages
+        .iter()
+        .any(Stage::requires_legacy_materialization)
+    {
+        return None;
+    }
+    if !body.can_run_with_materialized_receiver() {
+        return None;
+    }
+    let source = row_source::TapeRowSource::from_field_chain(tape, keys);
+    if !source.is_array_provider() {
+        return None;
+    }
+    let pipeline = body.clone().with_source(Source::Receiver(Val::Null));
+    let env = Env::new(Val::Null);
+    Some(run_streaming_rows(&pipeline, &env, source.iter()))
+}
+
+fn run_streaming_rows<I>(pipeline: &Pipeline, base_env: &Env, iter: I) -> Result<Val, EvalError>
+where
+    I: IntoIterator<Item = Val>,
+{
+    let mut vm = crate::vm::VM::new();
+    let mut loop_env = base_env.clone();
+    let source_demand = pipeline.source_demand().chain.pull;
+    let mut pulled_inputs: usize = 0;
+    let mut emitted_outputs: usize = 0;
+    let mut stage_taken: Vec<usize> = vec![0; pipeline.stages.len()];
+    let mut stage_skipped: Vec<usize> = vec![0; pipeline.stages.len()];
+    let mut sink_acc = SinkAccumulator::new(&pipeline.sink);
+    let terminal_map_idx = if matches!(pipeline.sink, Sink::Collect) {
+        match pipeline.stages.last() {
+            Some(Stage::Map(_)) => pipeline.stages.len().checked_sub(1),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let terminal_map_kernel = terminal_map_idx.map(|idx| {
+        pipeline
+            .stage_kernels
+            .get(idx)
+            .unwrap_or(&BodyKernel::Generic)
+    });
+    let mut terminal_map_collect = terminal_map_kernel.map(TerminalMapCollector::new);
+
+    'outer: for mut item in iter {
+        if matches!(source_demand, PullDemand::AtMost(n) if pulled_inputs >= n) {
+            break 'outer;
+        }
+        pulled_inputs += 1;
+
+        for (stage_idx, stage) in pipeline.stages.iter().enumerate() {
+            let kernel = pipeline
+                .stage_kernels
+                .get(stage_idx)
+                .unwrap_or(&BodyKernel::Generic);
+            match stage {
+                Stage::Skip(n) => {
+                    if stage_skipped[stage_idx] < *n {
+                        stage_skipped[stage_idx] += 1;
+                        continue 'outer;
+                    }
+                }
+                Stage::Take(n) => {
+                    if stage_taken[stage_idx] >= *n {
+                        break 'outer;
+                    }
+                    stage_taken[stage_idx] += 1;
+                }
+                Stage::Filter(prog) => {
+                    if !filter_one(&item, |v| {
+                        eval_kernel(kernel, v, |item| {
+                            apply_item_in_env(&mut vm, &mut loop_env, item, prog)
+                        })
+                    })? {
+                        continue 'outer;
+                    }
+                }
+                Stage::Map(prog) => {
+                    if Some(stage_idx) == terminal_map_idx {
+                        terminal_map_collect
+                            .as_mut()
+                            .expect("terminal map collector")
+                            .push_val_row(&item, kernel, |item| {
+                                apply_item_in_env(&mut vm, &mut loop_env, item, prog)
+                            })?;
+                        emitted_outputs += 1;
+                        if matches!(source_demand, PullDemand::UntilOutput(n) if emitted_outputs >= n)
+                        {
+                            break 'outer;
+                        }
+                        continue 'outer;
+                    }
+                    item = map_one(&item, |v| {
+                        eval_kernel(kernel, v, |item| {
+                            apply_item_in_env(&mut vm, &mut loop_env, item, prog)
+                        })
+                    })?;
+                }
+                Stage::Slice(start, end) => {
+                    item = slice_apply(item, *start, *end);
+                }
+                Stage::Replace {
+                    needle,
+                    replacement,
+                    all,
+                } => {
+                    if let Some(r) = replace_apply(item.clone(), needle, replacement, *all) {
+                        item = r;
+                    }
+                }
+                Stage::CompiledMap(plan) => {
+                    item = run_compiled_map(plan, item)?;
+                }
+                Stage::Builtin(call) => {
+                    item = call.apply(&item).unwrap_or(item);
+                }
+                Stage::TakeWhile(prog) => {
+                    if !take_while_one(&item, |v| {
+                        eval_kernel(kernel, v, |item| {
+                            apply_item_in_env(&mut vm, &mut loop_env, item, prog)
+                        })
+                    })? {
+                        break 'outer;
+                    }
+                }
+                Stage::TransformValues(prog)
+                | Stage::TransformKeys(prog)
+                | Stage::FilterValues(prog)
+                | Stage::FilterKeys(prog) => {
+                    item = apply_lambda_obj(stage, &item, &mut vm, &mut loop_env, kernel, prog)?;
+                }
+                Stage::Reverse
+                | Stage::Sort(_)
+                | Stage::UniqueBy(_)
+                | Stage::FlatMap(_)
+                | Stage::GroupBy(_)
+                | Stage::Split(_)
+                | Stage::Chunk(_)
+                | Stage::Window(_)
+                | Stage::DropWhile(_)
+                | Stage::IndicesWhere(_)
+                | Stage::FindIndex(_)
+                | Stage::MaxBy(_)
+                | Stage::MinBy(_)
+                | Stage::CountBy(_)
+                | Stage::IndexBy(_)
+                | Stage::SortedDedup(_) => {}
             }
         }
 
-        // Sink.
         let sink_done = match &pipeline.sink {
             Sink::Numeric(n) => {
                 if let Some(project) = &n.project {
@@ -500,26 +573,18 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
     if let Some(collector) = terminal_map_collect {
         return Ok(collector.finish());
     }
-
-    // GroupBy is a barrier that produces a single Val::Obj which
-    // Sink::Collect would otherwise wrap as [obj]. When the last
-    // stage is GroupBy, return the bare object to match walker
-    // semantics.
-    let unwrap_single_collect_obj = matches!(pipeline.stages.last(), Some(Stage::GroupBy(_)));
-    Ok(sink_acc.finish(unwrap_single_collect_obj))
+    Ok(sink_acc.finish(false))
 }
 
-enum LegacyPreIter<'a> {
-    Source(row_source::ValRowsIter<'a>),
+enum LegacyPreIter {
     Owned(std::vec::IntoIter<Val>),
 }
 
-impl Iterator for LegacyPreIter<'_> {
+impl Iterator for LegacyPreIter {
     type Item = Val;
 
     fn next(&mut self) -> Option<Self::Item> {
         match self {
-            Self::Source(iter) => iter.next(),
             Self::Owned(iter) => iter.next(),
         }
     }
