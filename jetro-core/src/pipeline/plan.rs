@@ -108,7 +108,7 @@ impl Sink {
         }
     }
 
-    fn builtin_sink_spec(&self) -> Option<BuiltinSinkSpec> {
+    pub(crate) fn builtin_sink_spec(&self) -> Option<BuiltinSinkSpec> {
         match self {
             Sink::First => BuiltinMethod::First.spec().sink,
             Sink::Last => BuiltinMethod::Last.spec().sink,

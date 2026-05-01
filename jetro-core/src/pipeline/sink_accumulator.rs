@@ -1,4 +1,4 @@
-use crate::value::Val;
+use crate::{builtins::BuiltinSinkAccumulator, value::Val};
 
 use super::{ReducerAccumulator, Sink};
 
@@ -24,12 +24,28 @@ impl<'a> SinkAccumulator<'a> {
     }
 
     pub(crate) fn push(&mut self, item: Val) -> bool {
+        if let Some(spec) = self.sink.builtin_sink_spec() {
+            return self.observe_builtin(spec.accumulator, item);
+        }
         match self.sink {
             Sink::Collect => self.observe_collect(item),
             Sink::Reducer(_) => self.observe_reducer(&item),
-            Sink::First => return self.observe_first(item),
-            Sink::Last => self.observe_last(item),
             Sink::ApproxCountDistinct => self.observe_approx_distinct(&item),
+            Sink::First | Sink::Last => {}
+        }
+        false
+    }
+
+    pub(crate) fn observe_builtin(
+        &mut self,
+        accumulator: BuiltinSinkAccumulator,
+        item: Val,
+    ) -> bool {
+        match accumulator {
+            BuiltinSinkAccumulator::Count => self.observe_count(),
+            BuiltinSinkAccumulator::Numeric => self.observe_numeric(&item),
+            BuiltinSinkAccumulator::First => return self.observe_first(item),
+            BuiltinSinkAccumulator::Last => self.observe_last(item),
         }
         false
     }
@@ -74,6 +90,9 @@ impl<'a> SinkAccumulator<'a> {
     }
 
     pub(crate) fn finish(self, unwrap_single_collect_obj: bool) -> Val {
+        if let Some(spec) = self.sink.builtin_sink_spec() {
+            return self.finish_builtin(spec.accumulator);
+        }
         match self.sink {
             Sink::Collect => {
                 if unwrap_single_collect_obj
@@ -89,9 +108,19 @@ impl<'a> SinkAccumulator<'a> {
                 .reducer
                 .expect("reducer sinks construct reducer")
                 .finish(),
-            Sink::First => self.first.unwrap_or(Val::Null),
-            Sink::Last => self.last.unwrap_or(Val::Null),
             Sink::ApproxCountDistinct => Val::Int(hll_estimate(&self.hll) as i64),
+            Sink::First | Sink::Last => Val::Null,
+        }
+    }
+
+    fn finish_builtin(self, accumulator: BuiltinSinkAccumulator) -> Val {
+        match accumulator {
+            BuiltinSinkAccumulator::Count | BuiltinSinkAccumulator::Numeric => self
+                .reducer
+                .expect("reducer sinks construct reducer")
+                .finish(),
+            BuiltinSinkAccumulator::First => self.first.unwrap_or(Val::Null),
+            BuiltinSinkAccumulator::Last => self.last.unwrap_or(Val::Null),
         }
     }
 }
