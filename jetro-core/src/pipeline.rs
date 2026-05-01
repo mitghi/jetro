@@ -138,8 +138,9 @@ fn sink_name(s: &Sink) -> &'static str {
             ReducerOp::Numeric(NumOp::Max) => "max",
             ReducerOp::Numeric(NumOp::Avg) => "avg",
         },
-        Sink::First => "first",
-        Sink::Last => "last",
+        Sink::Terminal(BuiltinMethod::First) => "first",
+        Sink::Terminal(BuiltinMethod::Last) => "last",
+        Sink::Terminal(_) => "terminal",
         Sink::ApproxCountDistinct => "approx_count_distinct",
     }
 }
@@ -255,7 +256,7 @@ pub enum Stage {
     // Stage variants.  Two wins:
     //   1. Chain flattening (Step 3d-extension A) can hoist them out of
     //      Map bodies — `map(@.text.split(",").first())` becomes
-    //      `[Map(@.text), Split(","), Sink::First]`.
+    //      `[Map(@.text), Split(","), Sink::Terminal(BuiltinMethod::First)]`.
     //   2. IndexedDispatch can compute `split(",").first()` directly
     //      instead of producing the full segment vector.
     /// `.split(sep)` — 1 string → many parts.  `Cardinality::Expanding`
@@ -397,10 +398,8 @@ pub enum Sink {
     /// Canonical reducer sink for count/sum/min/max/avg and future
     /// predicate/projection reducers.
     Reducer(ReducerSpec),
-    /// `.first()` / `.last()` — yield the first/last element or
-    /// `Val::Null`.
-    First,
-    Last,
+    /// Terminal builtin sink, e.g. `.first()` / `.last()`.
+    Terminal(BuiltinMethod),
     /// Algorithmic Category E: `.approx_count_distinct()` — HLL-12
     /// (~2KB state, ±2% accuracy) returning Int approximate count.
     /// Per `algorithmic_optimization_cold_only.md` Category E (opt-in

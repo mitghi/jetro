@@ -1310,7 +1310,7 @@ mod tests {
 
         // map(@.text.split(",").first()) — N first-parts, one per
         // record.  Cardinality preserved (3 results), each computed
-        // via inner Stage::Map(@.text) → Stage::Split(",") → Sink::First.
+        // via inner Stage::Map(@.text) → Stage::Split(",") → Sink::Terminal(BuiltinMethod::First).
         assert_eq!(
             j.collect("$.records.map(@.text.split(\",\").first())")
                 .unwrap(),
@@ -1346,9 +1346,9 @@ mod tests {
         );
         // .split(",").count() — Stage::Split + count reducer.
         assert_eq!(j.collect("$.s.split(\",\").count()").unwrap(), json!(5));
-        // .split(",").first() — Stage::Split + Sink::First.
+        // .split(",").first() — Stage::Split + Sink::Terminal(BuiltinMethod::First).
         assert_eq!(j.collect("$.s.split(\",\").first()").unwrap(), json!("a"));
-        // .split(",").last() — Stage::Split + Sink::Last.
+        // .split(",").last() — Stage::Split + Sink::Terminal(BuiltinMethod::Last).
         assert_eq!(j.collect("$.s.split(\",\").last()").unwrap(), json!("e"));
     }
 
@@ -1476,7 +1476,7 @@ mod tests {
         use crate::pipeline::{
             select_strategy, NumOp, ReducerOp, ReducerSpec, Sink, SortSpec, Stage, Strategy,
         };
-        let first_sink = Sink::First;
+        let first_sink = Sink::Terminal(BuiltinMethod::First);
         use std::sync::Arc;
         let dummy = Arc::new(crate::vm::Program::new(Vec::new(), ""));
 
@@ -1532,7 +1532,7 @@ mod tests {
         use std::sync::Arc;
 
         let dummy_prog = Arc::new(crate::vm::Program::new(Vec::new(), ""));
-        let first_sink = Sink::First;
+        let first_sink = Sink::Terminal(BuiltinMethod::First);
 
         // [Sort] + First → SortTopK(1)
         let stages = vec![Stage::Sort(SortSpec::keyed(Arc::clone(&dummy_prog), false))];

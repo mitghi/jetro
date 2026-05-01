@@ -34,7 +34,7 @@ impl<'a> SinkAccumulator<'a> {
             Sink::Collect => self.observe_collect(item),
             Sink::Reducer(_) => self.observe_reducer(&item),
             Sink::ApproxCountDistinct => self.observe_approx_distinct(&item),
-            Sink::First | Sink::Last => {}
+            Sink::Terminal(_) => {}
         }
         false
     }
@@ -116,7 +116,7 @@ impl<'a> SinkAccumulator<'a> {
                 .expect("reducer sinks construct reducer")
                 .finish(),
             Sink::ApproxCountDistinct => Val::Int(hll_estimate(&self.hll) as i64),
-            Sink::First | Sink::Last => Val::Null,
+            Sink::Terminal(_) => Val::Null,
         }
     }
 

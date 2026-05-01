@@ -40,8 +40,7 @@ impl Sink {
         }
         match self {
             Sink::Reducer(spec) => reducer_demand(spec.op),
-            Sink::Collect | Sink::ApproxCountDistinct => SinkDemand::RESULT,
-            Sink::First | Sink::Last => SinkDemand::RESULT,
+            Sink::Collect | Sink::ApproxCountDistinct | Sink::Terminal(_) => SinkDemand::RESULT,
         }
     }
 
@@ -50,7 +49,7 @@ impl Sink {
         F: FnMut(&crate::vm::Program) -> bool,
     {
         match self {
-            Sink::Collect | Sink::First | Sink::Last | Sink::ApproxCountDistinct => true,
+            Sink::Collect | Sink::Terminal(_) | Sink::ApproxCountDistinct => true,
             Sink::Reducer(spec) => spec.sink_programs().all(|prog| program_ok(prog)),
         }
     }
@@ -93,12 +92,7 @@ impl Sink {
                 };
                 Some(ViewSinkCapability::Count { predicate_kernel })
             }
-            Sink::First => BuiltinMethod::First
-                .spec()
-                .sink?
-                .view_sink
-                .and_then(ViewSinkCapability::from_builtin_sink),
-            Sink::Last => BuiltinMethod::Last
+            Sink::Terminal(method) => method
                 .spec()
                 .sink?
                 .view_sink
@@ -110,8 +104,7 @@ impl Sink {
 
     pub(crate) fn builtin_sink_spec(&self) -> Option<BuiltinSinkSpec> {
         match self {
-            Sink::First => BuiltinMethod::First.spec().sink,
-            Sink::Last => BuiltinMethod::Last.spec().sink,
+            Sink::Terminal(method) => method.spec().sink,
             Sink::Reducer(spec) => spec.method()?.spec().sink,
             Sink::Collect | Sink::ApproxCountDistinct => None,
         }
@@ -1006,7 +999,7 @@ pub fn select_strategy(stages: &[Stage], sink: &Sink) -> Strategy {
     let has_barrier = stages
         .iter()
         .any(|s| matches!(s.shape().cardinality, Cardinality::Barrier));
-    let has_short_circuit = matches!(sink, Sink::First);
+    let has_short_circuit = matches!(sink.demand().chain.pull, PullDemand::FirstInput(_));
 
     if has_barrier {
         return Strategy::BarrierMaterialise;
