@@ -3,8 +3,8 @@ use std::sync::Arc;
 use crate::ast::{BinOp, Expr};
 use crate::builtins::{
     BuiltinMethod, BuiltinPipelineDemand, BuiltinPipelineMaterialization,
-    BuiltinPipelineOrderEffect, BuiltinSinkDemand, BuiltinSinkSpec, BuiltinSinkValueNeed,
-    BuiltinViewSink, BuiltinViewStage,
+    BuiltinPipelineOrderEffect, BuiltinSelectionPosition, BuiltinSinkAccumulator,
+    BuiltinSinkDemand, BuiltinSinkSpec, BuiltinSinkValueNeed, BuiltinViewSink, BuiltinViewStage,
 };
 use crate::chain_ir::{ChainOp, Demand as ChainDemand, PullDemand, ValueNeed};
 use crate::vm::{CompiledObjEntry, Opcode, Program};
@@ -123,7 +123,7 @@ fn sink_demand_from_builtin(spec: BuiltinSinkSpec) -> SinkDemand {
         BuiltinSinkDemand::First { value } => SinkDemand {
             chain: ChainDemand::first(sink_value_need(value)),
             positional: match spec.accumulator {
-                crate::builtins::BuiltinSinkAccumulator::First => Some(Position::First),
+                BuiltinSinkAccumulator::SelectOne(position) => Some(position.into()),
                 _ => None,
             },
         },
@@ -134,7 +134,7 @@ fn sink_demand_from_builtin(spec: BuiltinSinkSpec) -> SinkDemand {
                 order,
             },
             positional: match spec.accumulator {
-                crate::builtins::BuiltinSinkAccumulator::Last => Some(Position::Last),
+                BuiltinSinkAccumulator::SelectOne(position) => Some(position.into()),
                 _ => None,
             },
         },
@@ -146,6 +146,15 @@ fn sink_value_need(value: BuiltinSinkValueNeed) -> ValueNeed {
         BuiltinSinkValueNeed::None => ValueNeed::None,
         BuiltinSinkValueNeed::Whole => ValueNeed::Whole,
         BuiltinSinkValueNeed::Numeric => ValueNeed::Numeric,
+    }
+}
+
+impl From<BuiltinSelectionPosition> for Position {
+    fn from(value: BuiltinSelectionPosition) -> Self {
+        match value {
+            BuiltinSelectionPosition::First => Position::First,
+            BuiltinSelectionPosition::Last => Position::Last,
+        }
     }
 }
 

@@ -609,6 +609,11 @@ pub struct BuiltinSinkSpec {
 pub enum BuiltinSinkAccumulator {
     Count,
     Numeric,
+    SelectOne(BuiltinSelectionPosition),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinSelectionPosition {
     First,
     Last,
 }
@@ -1063,14 +1068,14 @@ impl BuiltinSpec {
                 view_sink: Some(BuiltinViewSink::Numeric),
             },
             BuiltinViewSink::First => BuiltinSinkSpec {
-                accumulator: BuiltinSinkAccumulator::First,
+                accumulator: BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::First),
                 demand: BuiltinSinkDemand::First {
                     value: BuiltinSinkValueNeed::Whole,
                 },
                 view_sink: Some(BuiltinViewSink::First),
             },
             BuiltinViewSink::Last => BuiltinSinkSpec {
-                accumulator: BuiltinSinkAccumulator::Last,
+                accumulator: BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::Last),
                 demand: BuiltinSinkDemand::All {
                     value: BuiltinSinkValueNeed::Whole,
                     order: true,
@@ -6586,10 +6591,10 @@ mod spec_tests {
         BuiltinCardinality, BuiltinCategory, BuiltinColumnarStage, BuiltinExprStage, BuiltinMethod,
         BuiltinNullaryStage, BuiltinNumericReducer, BuiltinPipelineDemand, BuiltinPipelineExecutor,
         BuiltinPipelineLowering, BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect,
-        BuiltinPipelineSink, BuiltinPipelineStage, BuiltinSinkAccumulator, BuiltinSinkDemand,
-        BuiltinSinkValueNeed, BuiltinStageMerge, BuiltinStringPairStage, BuiltinStringStage,
-        BuiltinUsizeStage, BuiltinViewInputMode, BuiltinViewMaterialization, BuiltinViewOutputMode,
-        BuiltinViewSink, BuiltinViewStage,
+        BuiltinPipelineSink, BuiltinPipelineStage, BuiltinSelectionPosition,
+        BuiltinSinkAccumulator, BuiltinSinkDemand, BuiltinSinkValueNeed, BuiltinStageMerge,
+        BuiltinStringPairStage, BuiltinStringStage, BuiltinUsizeStage, BuiltinViewInputMode,
+        BuiltinViewMaterialization, BuiltinViewOutputMode, BuiltinViewSink, BuiltinViewStage,
     };
 
     #[test]
@@ -6727,7 +6732,7 @@ mod spec_tests {
         );
         assert_eq!(
             BuiltinMethod::First.spec().sink.unwrap().accumulator,
-            BuiltinSinkAccumulator::First
+            BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::First)
         );
         assert_eq!(
             BuiltinMethod::First.spec().sink.unwrap().demand,
@@ -6741,7 +6746,7 @@ mod spec_tests {
         );
         assert_eq!(
             BuiltinMethod::Last.spec().sink.unwrap().accumulator,
-            BuiltinSinkAccumulator::Last
+            BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::Last)
         );
         assert_eq!(
             BuiltinMethod::Last.spec().sink.unwrap().demand,

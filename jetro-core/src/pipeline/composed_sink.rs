@@ -1,4 +1,4 @@
-use crate::builtins::{BuiltinNumericReducer, BuiltinSinkAccumulator};
+use crate::builtins::{BuiltinNumericReducer, BuiltinSelectionPosition, BuiltinSinkAccumulator};
 use crate::chain_ir::PullDemand;
 use crate::composed as cmp;
 use crate::value::Val;
@@ -32,10 +32,10 @@ pub(super) fn run(
                         cmp::run_pipeline_with_demand::<cmp::AvgSink>(rows, chain, demand)
                     }
                 },
-                BuiltinSinkAccumulator::First => {
+                BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::First) => {
                     cmp::run_pipeline_with_demand::<cmp::FirstSink>(rows, chain, demand)
                 }
-                BuiltinSinkAccumulator::Last => {
+                BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::Last) => {
                     cmp::run_pipeline_with_demand::<cmp::LastSink>(rows, chain, demand)
                 }
             }
@@ -83,14 +83,16 @@ where
                         _,
                     >(rows, chain, demand),
                 },
-                BuiltinSinkAccumulator::First => cmp::run_pipeline_owned_iter_with_demand::<
-                    cmp::FirstSink,
-                    _,
-                >(rows, chain, demand),
-                BuiltinSinkAccumulator::Last => cmp::run_pipeline_owned_iter_with_demand::<
-                    cmp::LastSink,
-                    _,
-                >(rows, chain, demand),
+                BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::First) => {
+                    cmp::run_pipeline_owned_iter_with_demand::<cmp::FirstSink, _>(
+                        rows, chain, demand,
+                    )
+                }
+                BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::Last) => {
+                    cmp::run_pipeline_owned_iter_with_demand::<cmp::LastSink, _>(
+                        rows, chain, demand,
+                    )
+                }
             }
         }
         Sink::ApproxCountDistinct => return None,

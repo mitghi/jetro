@@ -1,4 +1,7 @@
-use crate::{builtins::BuiltinSinkAccumulator, value::Val};
+use crate::{
+    builtins::{BuiltinSelectionPosition, BuiltinSinkAccumulator},
+    value::Val,
+};
 
 use super::{ReducerAccumulator, Sink};
 
@@ -44,8 +47,12 @@ impl<'a> SinkAccumulator<'a> {
         match accumulator {
             BuiltinSinkAccumulator::Count => self.observe_count(),
             BuiltinSinkAccumulator::Numeric => self.observe_numeric(&item),
-            BuiltinSinkAccumulator::First => return self.observe_first(item),
-            BuiltinSinkAccumulator::Last => self.observe_last(item),
+            BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::First) => {
+                return self.observe_first(item);
+            }
+            BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::Last) => {
+                self.observe_last(item);
+            }
         }
         false
     }
@@ -119,8 +126,12 @@ impl<'a> SinkAccumulator<'a> {
                 .reducer
                 .expect("reducer sinks construct reducer")
                 .finish(),
-            BuiltinSinkAccumulator::First => self.first.unwrap_or(Val::Null),
-            BuiltinSinkAccumulator::Last => self.last.unwrap_or(Val::Null),
+            BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::First) => {
+                self.first.unwrap_or(Val::Null)
+            }
+            BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::Last) => {
+                self.last.unwrap_or(Val::Null)
+            }
         }
     }
 }
