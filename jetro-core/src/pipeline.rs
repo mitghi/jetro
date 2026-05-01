@@ -69,7 +69,7 @@ pub(crate) use capability::{
     view_capabilities, view_prefix_capabilities, ViewInputMode, ViewMaterialization,
     ViewOutputMode, ViewSinkCapability, ViewStageCapability,
 };
-pub(crate) use collector::TerminalMapCollector;
+pub(crate) use collector::{TerminalCollector, TerminalMapCollector};
 pub(crate) use common::{
     apply_item_in_env, bounded_sort_by_key, bounded_sort_by_key_cmp, cmp_val_total, is_truthy,
     num_finalise, num_fold, ordered_by_key_cmp, walk_field_chain,

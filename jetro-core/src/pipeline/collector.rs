@@ -5,7 +5,7 @@ use crate::value_view::ValueView;
 
 use super::{BodyKernel, CollectLayout, ObjectKernel, ViewKernelValue};
 
-pub(crate) enum TerminalMapCollector<'a> {
+pub(crate) enum TerminalCollector<'a> {
     Values(Vec<Val>),
     UniformObject(UniformObjectCollector<'a>),
 }
@@ -17,7 +17,7 @@ pub(crate) struct UniformObjectCollector<'a> {
     rows: Option<Vec<Val>>,
 }
 
-impl<'a> TerminalMapCollector<'a> {
+impl<'a> TerminalCollector<'a> {
     pub(crate) fn new(kernel: &'a BodyKernel) -> Self {
         match kernel.collect_layout() {
             CollectLayout::Values => Self::Values(Vec::new()),
@@ -64,6 +64,8 @@ impl<'a> TerminalMapCollector<'a> {
         }
     }
 }
+
+pub(crate) type TerminalMapCollector<'a> = TerminalCollector<'a>;
 
 impl<'a> UniformObjectCollector<'a> {
     fn push_view_row<'v, V>(&mut self, item: &V) -> Option<()>
