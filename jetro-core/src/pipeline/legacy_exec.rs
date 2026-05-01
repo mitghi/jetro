@@ -10,8 +10,8 @@ use super::row_source;
 use super::sink_accumulator::SinkAccumulator;
 use super::{
     apply_item_in_env, bounded_sort_by_key, cmp_val_total, compute_strategies_with_kernels,
-    eval_kernel, is_truthy, BodyKernel, Pipeline, PipelineBody, Sink, Source, Stage, StageStrategy,
-    TerminalMapCollector,
+    eval_kernel, is_truthy, BodyKernel, Pipeline, PipelineBody, Sink, Source, Stage, StageFlow,
+    StageStrategy, TerminalMapCollector,
 };
 
 use crate::builtins::{
@@ -266,10 +266,10 @@ where
                     terminal_map_idx,
                     &mut terminal_map_collect,
                 )? {
-                    StreamingStageFlow::Continue(next) => item = next,
-                    StreamingStageFlow::SkipRow => continue 'outer,
-                    StreamingStageFlow::Stop => break 'outer,
-                    StreamingStageFlow::TerminalCollected => {
+                    StageFlow::Continue(next) => item = next,
+                    StageFlow::SkipRow => continue 'outer,
+                    StageFlow::Stop => break 'outer,
+                    StageFlow::TerminalCollected => {
                         emitted_outputs += 1;
                         if matches!(source_demand, PullDemand::UntilOutput(n) if emitted_outputs >= n)
                         {
@@ -303,13 +303,6 @@ where
         return Ok(collector.finish());
     }
     Ok(sink_acc.finish(false))
-}
-
-enum StreamingStageFlow {
-    Continue(Val),
-    SkipRow,
-    Stop,
-    TerminalCollected,
 }
 
 enum LegacyPreIter {
@@ -677,35 +670,35 @@ fn apply_adapter_streaming<'a>(
     stage_skipped: &mut [usize],
     terminal_map_idx: Option<usize>,
     terminal_map_collect: &mut Option<TerminalMapCollector<'a>>,
-) -> Result<StreamingStageFlow, EvalError> {
+) -> Result<StageFlow<Val>, EvalError> {
     match stage_executor(stage) {
-        Some(BuiltinPipelineExecutor::ElementBuiltin) => Ok(StreamingStageFlow::Continue(
-            apply_element_adapter(stage, item),
-        )),
+        Some(BuiltinPipelineExecutor::ElementBuiltin) => {
+            Ok(StageFlow::Continue(apply_element_adapter(stage, item)))
+        }
         Some(BuiltinPipelineExecutor::ObjectLambda) => {
             let prog = object_lambda_program(stage)
                 .expect("object lambda executor must be attached to object lambda stage");
-            Ok(StreamingStageFlow::Continue(apply_lambda_obj(
+            Ok(StageFlow::Continue(apply_lambda_obj(
                 stage, &item, vm, loop_env, kernel, prog,
             )?))
         }
         Some(BuiltinPipelineExecutor::Position { take }) => {
             let n = match stage {
                 Stage::Take(n, _, _) | Stage::Skip(n, _, _) => *n,
-                _ => return Ok(StreamingStageFlow::Continue(item)),
+                _ => return Ok(StageFlow::Continue(item)),
             };
             if take {
                 if stage_taken[stage_idx] >= n {
-                    Ok(StreamingStageFlow::Stop)
+                    Ok(StageFlow::Stop)
                 } else {
                     stage_taken[stage_idx] += 1;
-                    Ok(StreamingStageFlow::Continue(item))
+                    Ok(StageFlow::Continue(item))
                 }
             } else if stage_skipped[stage_idx] < n {
                 stage_skipped[stage_idx] += 1;
-                Ok(StreamingStageFlow::SkipRow)
+                Ok(StageFlow::SkipRow)
             } else {
-                Ok(StreamingStageFlow::Continue(item))
+                Ok(StageFlow::Continue(item))
             }
         }
         Some(BuiltinPipelineExecutor::RowFilter) => {
@@ -715,9 +708,9 @@ fn apply_adapter_streaming<'a>(
                     apply_item_in_env(vm, loop_env, item, prog)
                 })
             })? {
-                Ok(StreamingStageFlow::Continue(item))
+                Ok(StageFlow::Continue(item))
             } else {
-                Ok(StreamingStageFlow::SkipRow)
+                Ok(StageFlow::SkipRow)
             }
         }
         Some(BuiltinPipelineExecutor::RowMap) => {
@@ -729,9 +722,9 @@ fn apply_adapter_streaming<'a>(
                     .push_val_row(&item, kernel, |item| {
                         apply_item_in_env(vm, loop_env, item, prog)
                     })?;
-                return Ok(StreamingStageFlow::TerminalCollected);
+                return Ok(StageFlow::TerminalCollected);
             }
-            Ok(StreamingStageFlow::Continue(map_one(&item, |v| {
+            Ok(StageFlow::Continue(map_one(&item, |v| {
                 eval_kernel(kernel, v, |item| {
                     apply_item_in_env(vm, loop_env, item, prog)
                 })
@@ -739,7 +732,7 @@ fn apply_adapter_streaming<'a>(
         }
         Some(BuiltinPipelineExecutor::PrefixWhile { take }) => {
             if !take {
-                return Ok(StreamingStageFlow::Continue(item));
+                return Ok(StageFlow::Continue(item));
             }
             let prog = keyed_stage_program(stage)
                 .expect("take_while executor must have predicate program");
@@ -748,9 +741,9 @@ fn apply_adapter_streaming<'a>(
                     apply_item_in_env(vm, loop_env, item, prog)
                 })
             })? {
-                Ok(StreamingStageFlow::Continue(item))
+                Ok(StageFlow::Continue(item))
             } else {
-                Ok(StreamingStageFlow::Stop)
+                Ok(StageFlow::Stop)
             }
         }
         Some(
@@ -769,7 +762,7 @@ fn apply_adapter_streaming<'a>(
             | BuiltinPipelineExecutor::Window
             | BuiltinPipelineExecutor::SortedDedup,
         )
-        | None => Ok(StreamingStageFlow::Continue(item)),
+        | None => Ok(StageFlow::Continue(item)),
     }
 }
 

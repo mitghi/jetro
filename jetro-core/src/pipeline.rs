@@ -64,6 +64,7 @@ mod plan;
 mod reducer;
 mod row_source;
 mod sink_accumulator;
+mod stage_flow;
 pub(crate) use capability::{
     view_capabilities, view_prefix_capabilities, ViewInputMode, ViewMaterialization,
     ViewOutputMode, ViewSinkCapability, ViewStageCapability,
@@ -86,6 +87,7 @@ pub use plan::{
 };
 pub(crate) use reducer::ReducerAccumulator;
 pub(crate) use sink_accumulator::SinkAccumulator;
+pub(crate) use stage_flow::StageFlow;
 
 #[cfg(feature = "simd-json")]
 pub(crate) fn run_tape_field_chain(
