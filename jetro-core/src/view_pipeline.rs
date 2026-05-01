@@ -2,7 +2,6 @@
 
 use std::sync::Arc;
 
-use crate::builtins::{BuiltinSelectionPosition, BuiltinSinkAccumulator};
 use crate::chain_ir::PullDemand;
 use crate::context::{Env, EvalError};
 use crate::pipeline;
@@ -102,52 +101,21 @@ where
                     accumulator,
                     predicate_kernel,
                     project_kernel,
-                    numeric_op,
+                    numeric_op: _,
                     ..
                 } => {
                     if !view_sink_predicate_matches(&item, predicate_kernel, &body.sink_kernels)? {
                         continue;
                     }
-                    match accumulator {
-                        BuiltinSinkAccumulator::Count => {
-                            debug_assert_eq!(
-                                capabilities.sink.materialization(),
-                                pipeline::ViewMaterialization::Never
-                            );
-                            sink_acc.observe_count();
-                            false
-                        }
-                        BuiltinSinkAccumulator::Numeric => {
-                            let _ = numeric_op?;
-                            debug_assert_eq!(
-                                capabilities.sink.materialization(),
-                                pipeline::ViewMaterialization::SinkNumericInput
-                            );
-                            let numeric_item = if let Some(kernel) = project_kernel {
-                                let kernel = body.sink_kernels.get(kernel)?;
-                                eval_value_kernel(&item, kernel)?
-                            } else {
-                                item.materialize()
-                            };
-                            sink_acc.observe_numeric(&numeric_item);
-                            false
-                        }
-                        BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::First) => {
-                            debug_assert_eq!(
-                                capabilities.sink.materialization(),
-                                pipeline::ViewMaterialization::SinkFinalRow
-                            );
-                            sink_acc.observe_first(item.materialize())
-                        }
-                        BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::Last) => {
-                            debug_assert_eq!(
-                                capabilities.sink.materialization(),
-                                pipeline::ViewMaterialization::SinkFinalRow
-                            );
-                            sink_acc.observe_last(item.materialize());
-                            false
-                        }
-                    }
+                    sink_acc.observe_builtin_lazy(
+                        accumulator,
+                        || item.materialize(),
+                        || {
+                            let kernel = project_kernel?;
+                            let kernel = body.sink_kernels.get(kernel)?;
+                            eval_value_kernel(&item, kernel)
+                        },
+                    )?
                 }
             };
 

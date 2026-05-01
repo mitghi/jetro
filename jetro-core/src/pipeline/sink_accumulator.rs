@@ -44,17 +44,38 @@ impl<'a> SinkAccumulator<'a> {
         accumulator: BuiltinSinkAccumulator,
         item: Val,
     ) -> bool {
+        self.observe_builtin_lazy(accumulator, || item, || None)
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn observe_builtin_lazy<F, N>(
+        &mut self,
+        accumulator: BuiltinSinkAccumulator,
+        materialize_item: F,
+        materialize_numeric: N,
+    ) -> Option<bool>
+    where
+        F: FnOnce() -> Val,
+        N: FnOnce() -> Option<Val>,
+    {
         match accumulator {
-            BuiltinSinkAccumulator::Count => self.observe_count(),
-            BuiltinSinkAccumulator::Numeric => self.observe_numeric(&item),
+            BuiltinSinkAccumulator::Count => {
+                self.observe_count();
+                Some(false)
+            }
+            BuiltinSinkAccumulator::Numeric => {
+                let numeric_item = materialize_numeric().unwrap_or_else(materialize_item);
+                self.observe_numeric(&numeric_item);
+                Some(false)
+            }
             BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::First) => {
-                return self.observe_first(item);
+                Some(self.observe_first(materialize_item()))
             }
             BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::Last) => {
-                self.observe_last(item);
+                self.observe_last(materialize_item());
+                Some(false)
             }
         }
-        false
     }
 
     pub(crate) fn observe_collect(&mut self, item: Val) {

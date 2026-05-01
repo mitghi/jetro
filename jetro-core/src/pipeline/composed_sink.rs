@@ -5,6 +5,56 @@ use crate::value::Val;
 
 use super::Sink;
 
+macro_rules! run_composed_sink {
+    ($runner:ident, $rows:expr, $chain:expr, $demand:expr, $sink:expr) => {
+        match $sink.builtin_sink_spec()?.accumulator {
+            BuiltinSinkAccumulator::Count => cmp::$runner::<cmp::CountSink>($rows, $chain, $demand),
+            BuiltinSinkAccumulator::Numeric => match numeric_reducer($sink)? {
+                BuiltinNumericReducer::Sum => cmp::$runner::<cmp::SumSink>($rows, $chain, $demand),
+                BuiltinNumericReducer::Min => cmp::$runner::<cmp::MinSink>($rows, $chain, $demand),
+                BuiltinNumericReducer::Max => cmp::$runner::<cmp::MaxSink>($rows, $chain, $demand),
+                BuiltinNumericReducer::Avg => cmp::$runner::<cmp::AvgSink>($rows, $chain, $demand),
+            },
+            BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::First) => {
+                cmp::$runner::<cmp::FirstSink>($rows, $chain, $demand)
+            }
+            BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::Last) => {
+                cmp::$runner::<cmp::LastSink>($rows, $chain, $demand)
+            }
+        }
+    };
+}
+
+macro_rules! run_composed_owned_sink {
+    ($runner:ident, $rows:expr, $chain:expr, $demand:expr, $sink:expr) => {
+        match $sink.builtin_sink_spec()?.accumulator {
+            BuiltinSinkAccumulator::Count => {
+                cmp::$runner::<cmp::CountSink, _>($rows, $chain, $demand)
+            }
+            BuiltinSinkAccumulator::Numeric => match numeric_reducer($sink)? {
+                BuiltinNumericReducer::Sum => {
+                    cmp::$runner::<cmp::SumSink, _>($rows, $chain, $demand)
+                }
+                BuiltinNumericReducer::Min => {
+                    cmp::$runner::<cmp::MinSink, _>($rows, $chain, $demand)
+                }
+                BuiltinNumericReducer::Max => {
+                    cmp::$runner::<cmp::MaxSink, _>($rows, $chain, $demand)
+                }
+                BuiltinNumericReducer::Avg => {
+                    cmp::$runner::<cmp::AvgSink, _>($rows, $chain, $demand)
+                }
+            },
+            BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::First) => {
+                cmp::$runner::<cmp::FirstSink, _>($rows, $chain, $demand)
+            }
+            BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::Last) => {
+                cmp::$runner::<cmp::LastSink, _>($rows, $chain, $demand)
+            }
+        }
+    };
+}
+
 pub(super) fn run(
     sink: &Sink,
     rows: &[Val],
@@ -13,31 +63,9 @@ pub(super) fn run(
 ) -> Option<Val> {
     let out = match sink {
         Sink::Collect => cmp::run_pipeline_with_demand::<cmp::CollectSink>(rows, chain, demand),
-        Sink::Reducer(_) | Sink::Terminal(_) => match sink.builtin_sink_spec()?.accumulator {
-            BuiltinSinkAccumulator::Count => {
-                cmp::run_pipeline_with_demand::<cmp::CountSink>(rows, chain, demand)
-            }
-            BuiltinSinkAccumulator::Numeric => match numeric_reducer(sink)? {
-                BuiltinNumericReducer::Sum => {
-                    cmp::run_pipeline_with_demand::<cmp::SumSink>(rows, chain, demand)
-                }
-                BuiltinNumericReducer::Min => {
-                    cmp::run_pipeline_with_demand::<cmp::MinSink>(rows, chain, demand)
-                }
-                BuiltinNumericReducer::Max => {
-                    cmp::run_pipeline_with_demand::<cmp::MaxSink>(rows, chain, demand)
-                }
-                BuiltinNumericReducer::Avg => {
-                    cmp::run_pipeline_with_demand::<cmp::AvgSink>(rows, chain, demand)
-                }
-            },
-            BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::First) => {
-                cmp::run_pipeline_with_demand::<cmp::FirstSink>(rows, chain, demand)
-            }
-            BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::Last) => {
-                cmp::run_pipeline_with_demand::<cmp::LastSink>(rows, chain, demand)
-            }
-        },
+        Sink::Reducer(_) | Sink::Terminal(_) => {
+            run_composed_sink!(run_pipeline_with_demand, rows, chain, demand, sink)
+        }
         Sink::ApproxCountDistinct => return None,
     };
 
@@ -57,31 +85,13 @@ where
         Sink::Collect => {
             cmp::run_pipeline_owned_iter_with_demand::<cmp::CollectSink, _>(rows, chain, demand)
         }
-        Sink::Reducer(_) | Sink::Terminal(_) => match sink.builtin_sink_spec()?.accumulator {
-            BuiltinSinkAccumulator::Count => {
-                cmp::run_pipeline_owned_iter_with_demand::<cmp::CountSink, _>(rows, chain, demand)
-            }
-            BuiltinSinkAccumulator::Numeric => match numeric_reducer(sink)? {
-                BuiltinNumericReducer::Sum => {
-                    cmp::run_pipeline_owned_iter_with_demand::<cmp::SumSink, _>(rows, chain, demand)
-                }
-                BuiltinNumericReducer::Min => {
-                    cmp::run_pipeline_owned_iter_with_demand::<cmp::MinSink, _>(rows, chain, demand)
-                }
-                BuiltinNumericReducer::Max => {
-                    cmp::run_pipeline_owned_iter_with_demand::<cmp::MaxSink, _>(rows, chain, demand)
-                }
-                BuiltinNumericReducer::Avg => {
-                    cmp::run_pipeline_owned_iter_with_demand::<cmp::AvgSink, _>(rows, chain, demand)
-                }
-            },
-            BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::First) => {
-                cmp::run_pipeline_owned_iter_with_demand::<cmp::FirstSink, _>(rows, chain, demand)
-            }
-            BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::Last) => {
-                cmp::run_pipeline_owned_iter_with_demand::<cmp::LastSink, _>(rows, chain, demand)
-            }
-        },
+        Sink::Reducer(_) | Sink::Terminal(_) => run_composed_owned_sink!(
+            run_pipeline_owned_iter_with_demand,
+            rows,
+            chain,
+            demand,
+            sink
+        ),
         Sink::ApproxCountDistinct => return None,
     };
 
