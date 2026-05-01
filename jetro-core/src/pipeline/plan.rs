@@ -489,13 +489,8 @@ impl Stage {
     }
 
     fn view_stage_metadata(&self) -> Option<BuiltinViewStage> {
-        match self {
-            Stage::Filter(_, stage) | Stage::Map(_, stage) | Stage::FlatMap(_, stage) => {
-                Some(*stage)
-            }
-            Stage::Take(_, stage, _) | Stage::Skip(_, stage, _) => Some(*stage),
-            _ => None,
-        }
+        self.builtin_method_metadata()
+            .and_then(|method| method.spec().view_stage)
     }
 
     pub(crate) fn builtin_method_metadata(&self) -> Option<BuiltinMethod> {
