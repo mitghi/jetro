@@ -551,6 +551,7 @@ pub struct BuiltinSpec {
     pub view_scalar: bool,
     pub view_stage: Option<BuiltinViewStage>,
     pub view_sink: Option<BuiltinViewSink>,
+    pub sink: Option<BuiltinSinkSpec>,
     pub numeric_reducer: Option<BuiltinNumericReducer>,
     pub stage_merge: Option<BuiltinStageMerge>,
     pub cancellation: Option<BuiltinCancellation>,
@@ -595,6 +596,39 @@ pub enum BuiltinViewSink {
     Numeric,
     First,
     Last,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BuiltinSinkSpec {
+    pub accumulator: BuiltinSinkAccumulator,
+    pub demand: BuiltinSinkDemand,
+    pub view_sink: Option<BuiltinViewSink>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinSinkAccumulator {
+    Count,
+    Numeric,
+    First,
+    Last,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinSinkDemand {
+    All {
+        value: BuiltinSinkValueNeed,
+        order: bool,
+    },
+    First {
+        value: BuiltinSinkValueNeed,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinSinkValueNeed {
+    None,
+    Whole,
+    Numeric,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -925,6 +959,7 @@ impl BuiltinSpec {
             view_scalar: false,
             view_stage: None,
             view_sink: None,
+            sink: None,
             numeric_reducer: None,
             stage_merge: None,
             cancellation: None,
@@ -1010,11 +1045,44 @@ impl BuiltinSpec {
 
     fn view_sink(mut self, sink: BuiltinViewSink) -> Self {
         self.view_sink = Some(sink);
+        self.sink = Some(match sink {
+            BuiltinViewSink::Count => BuiltinSinkSpec {
+                accumulator: BuiltinSinkAccumulator::Count,
+                demand: BuiltinSinkDemand::All {
+                    value: BuiltinSinkValueNeed::None,
+                    order: false,
+                },
+                view_sink: Some(BuiltinViewSink::Count),
+            },
+            BuiltinViewSink::Numeric => BuiltinSinkSpec {
+                accumulator: BuiltinSinkAccumulator::Numeric,
+                demand: BuiltinSinkDemand::All {
+                    value: BuiltinSinkValueNeed::Numeric,
+                    order: false,
+                },
+                view_sink: Some(BuiltinViewSink::Numeric),
+            },
+            BuiltinViewSink::First => BuiltinSinkSpec {
+                accumulator: BuiltinSinkAccumulator::First,
+                demand: BuiltinSinkDemand::First {
+                    value: BuiltinSinkValueNeed::Whole,
+                },
+                view_sink: Some(BuiltinViewSink::First),
+            },
+            BuiltinViewSink::Last => BuiltinSinkSpec {
+                accumulator: BuiltinSinkAccumulator::Last,
+                demand: BuiltinSinkDemand::All {
+                    value: BuiltinSinkValueNeed::Whole,
+                    order: true,
+                },
+                view_sink: Some(BuiltinViewSink::Last),
+            },
+        });
         self
     }
 
     fn numeric_view_sink(mut self, reducer: BuiltinNumericReducer) -> Self {
-        self.view_sink = Some(BuiltinViewSink::Numeric);
+        self = self.view_sink(BuiltinViewSink::Numeric);
         self.numeric_reducer = Some(reducer);
         self
     }
@@ -6518,9 +6586,10 @@ mod spec_tests {
         BuiltinCardinality, BuiltinCategory, BuiltinColumnarStage, BuiltinExprStage, BuiltinMethod,
         BuiltinNullaryStage, BuiltinNumericReducer, BuiltinPipelineDemand, BuiltinPipelineExecutor,
         BuiltinPipelineLowering, BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect,
-        BuiltinPipelineSink, BuiltinPipelineStage, BuiltinStageMerge, BuiltinStringPairStage,
-        BuiltinStringStage, BuiltinUsizeStage, BuiltinViewInputMode, BuiltinViewMaterialization,
-        BuiltinViewOutputMode, BuiltinViewSink, BuiltinViewStage,
+        BuiltinPipelineSink, BuiltinPipelineStage, BuiltinSinkAccumulator, BuiltinSinkDemand,
+        BuiltinSinkValueNeed, BuiltinStageMerge, BuiltinStringPairStage, BuiltinStringStage,
+        BuiltinUsizeStage, BuiltinViewInputMode, BuiltinViewMaterialization, BuiltinViewOutputMode,
+        BuiltinViewSink, BuiltinViewStage,
     };
 
     #[test]
@@ -6657,8 +6726,43 @@ mod spec_tests {
             Some(BuiltinViewSink::First)
         );
         assert_eq!(
+            BuiltinMethod::First.spec().sink.unwrap().accumulator,
+            BuiltinSinkAccumulator::First
+        );
+        assert_eq!(
+            BuiltinMethod::First.spec().sink.unwrap().demand,
+            BuiltinSinkDemand::First {
+                value: BuiltinSinkValueNeed::Whole
+            }
+        );
+        assert_eq!(
             BuiltinMethod::Last.spec().view_sink,
             Some(BuiltinViewSink::Last)
+        );
+        assert_eq!(
+            BuiltinMethod::Last.spec().sink.unwrap().accumulator,
+            BuiltinSinkAccumulator::Last
+        );
+        assert_eq!(
+            BuiltinMethod::Last.spec().sink.unwrap().demand,
+            BuiltinSinkDemand::All {
+                value: BuiltinSinkValueNeed::Whole,
+                order: true
+            }
+        );
+        assert_eq!(
+            BuiltinMethod::Count.spec().sink.unwrap().demand,
+            BuiltinSinkDemand::All {
+                value: BuiltinSinkValueNeed::None,
+                order: false
+            }
+        );
+        assert_eq!(
+            BuiltinMethod::Sum.spec().sink.unwrap().demand,
+            BuiltinSinkDemand::All {
+                value: BuiltinSinkValueNeed::Numeric,
+                order: false
+            }
         );
 
         assert_eq!(

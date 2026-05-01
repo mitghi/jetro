@@ -3,7 +3,8 @@ use std::sync::Arc;
 use crate::ast::{BinOp, Expr};
 use crate::builtins::{
     BuiltinMethod, BuiltinPipelineDemand, BuiltinPipelineMaterialization,
-    BuiltinPipelineOrderEffect, BuiltinViewSink, BuiltinViewStage,
+    BuiltinPipelineOrderEffect, BuiltinSinkDemand, BuiltinSinkSpec, BuiltinSinkValueNeed,
+    BuiltinViewSink, BuiltinViewStage,
 };
 use crate::chain_ir::{ChainOp, Demand as ChainDemand, PullDemand, ValueNeed};
 use crate::vm::{CompiledObjEntry, Opcode, Program};
@@ -34,21 +35,13 @@ impl SinkDemand {
 
 impl Sink {
     pub fn demand(&self) -> SinkDemand {
+        if let Some(spec) = self.builtin_sink_spec() {
+            return sink_demand_from_builtin(spec);
+        }
         match self {
-            Sink::First => SinkDemand {
-                chain: ChainDemand::first(ValueNeed::Whole),
-                positional: Some(Position::First),
-            },
-            Sink::Last => SinkDemand {
-                chain: ChainDemand {
-                    pull: PullDemand::All,
-                    value: ValueNeed::Whole,
-                    order: true,
-                },
-                positional: Some(Position::Last),
-            },
             Sink::Reducer(spec) => reducer_demand(spec.op),
             Sink::Collect | Sink::ApproxCountDistinct => SinkDemand::RESULT,
+            Sink::First | Sink::Last => SinkDemand::RESULT,
         }
     }
 
@@ -70,7 +63,7 @@ impl Sink {
             Sink::Collect => Some(ViewSinkCapability::Collect),
             Sink::Reducer(spec) if spec.numeric_op().is_some() => {
                 let spec = self.reducer_spec()?;
-                if spec.method()?.spec().view_sink != Some(BuiltinViewSink::Numeric) {
+                if spec.method()?.spec().sink?.view_sink != Some(BuiltinViewSink::Numeric) {
                     return None;
                 }
                 let predicate_kernel = if let Some(idx) = spec.predicate_kernel_index() {
@@ -90,7 +83,7 @@ impl Sink {
                 })
             }
             Sink::Reducer(spec) if spec.op == super::ReducerOp::Count => {
-                if spec.method()?.spec().view_sink != Some(BuiltinViewSink::Count) {
+                if spec.method()?.spec().sink?.view_sink != Some(BuiltinViewSink::Count) {
                     return None;
                 }
                 let predicate_kernel = if let Some(idx) = spec.predicate_kernel_index() {
@@ -102,15 +95,57 @@ impl Sink {
             }
             Sink::First => BuiltinMethod::First
                 .spec()
+                .sink?
                 .view_sink
                 .and_then(ViewSinkCapability::from_builtin_sink),
             Sink::Last => BuiltinMethod::Last
                 .spec()
+                .sink?
                 .view_sink
                 .and_then(ViewSinkCapability::from_builtin_sink),
             Sink::Reducer(_) => None,
             Sink::ApproxCountDistinct => None,
         }
+    }
+
+    fn builtin_sink_spec(&self) -> Option<BuiltinSinkSpec> {
+        match self {
+            Sink::First => BuiltinMethod::First.spec().sink,
+            Sink::Last => BuiltinMethod::Last.spec().sink,
+            Sink::Reducer(spec) => spec.method()?.spec().sink,
+            Sink::Collect | Sink::ApproxCountDistinct => None,
+        }
+    }
+}
+
+fn sink_demand_from_builtin(spec: BuiltinSinkSpec) -> SinkDemand {
+    match spec.demand {
+        BuiltinSinkDemand::First { value } => SinkDemand {
+            chain: ChainDemand::first(sink_value_need(value)),
+            positional: match spec.accumulator {
+                crate::builtins::BuiltinSinkAccumulator::First => Some(Position::First),
+                _ => None,
+            },
+        },
+        BuiltinSinkDemand::All { value, order } => SinkDemand {
+            chain: ChainDemand {
+                pull: PullDemand::All,
+                value: sink_value_need(value),
+                order,
+            },
+            positional: match spec.accumulator {
+                crate::builtins::BuiltinSinkAccumulator::Last => Some(Position::Last),
+                _ => None,
+            },
+        },
+    }
+}
+
+fn sink_value_need(value: BuiltinSinkValueNeed) -> ValueNeed {
+    match value {
+        BuiltinSinkValueNeed::None => ValueNeed::None,
+        BuiltinSinkValueNeed::Whole => ValueNeed::Whole,
+        BuiltinSinkValueNeed::Numeric => ValueNeed::Numeric,
     }
 }
 
