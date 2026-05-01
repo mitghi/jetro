@@ -568,8 +568,8 @@ fn push_expr_stage(
 
 fn set_terminal_sink(terminal: BuiltinViewSink, sink: &mut Sink) -> Option<()> {
     match terminal {
-        BuiltinViewSink::First => *sink = Sink::First(BuiltinViewSink::First),
-        BuiltinViewSink::Last => *sink = Sink::Last(BuiltinViewSink::Last),
+        BuiltinViewSink::First => *sink = Sink::First,
+        BuiltinViewSink::Last => *sink = Sink::Last,
         BuiltinViewSink::Count => *sink = Sink::Reducer(ReducerSpec::count()),
         BuiltinViewSink::Numeric => return None,
     }
@@ -626,8 +626,8 @@ fn terminal_sink_for_method(method: BuiltinMethod, args: &[crate::ast::Arg]) -> 
                 _ => return None,
             },
         })),
-        BuiltinViewSink::First if args.is_empty() => Some(Sink::First(BuiltinViewSink::First)),
-        BuiltinViewSink::Last if args.is_empty() => Some(Sink::Last(BuiltinViewSink::Last)),
+        BuiltinViewSink::First if args.is_empty() => Some(Sink::First),
+        BuiltinViewSink::Last if args.is_empty() => Some(Sink::Last),
         _ => None,
     }
 }

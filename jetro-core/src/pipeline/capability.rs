@@ -166,7 +166,7 @@ mod tests {
     use std::sync::Arc;
 
     use crate::ast::BinOp;
-    use crate::builtins::{BuiltinStageMerge, BuiltinViewSink, BuiltinViewStage};
+    use crate::builtins::{BuiltinStageMerge, BuiltinViewStage};
     use crate::pipeline::{
         BodyKernel, NumOp, PipelineBody, ReducerOp, ReducerSpec, Sink, Stage, ViewInputMode,
         ViewMaterialization, ViewOutputMode, ViewSinkCapability, ViewStageCapability,
@@ -273,11 +273,11 @@ mod tests {
             })
         ));
         assert!(matches!(
-            Sink::First(BuiltinViewSink::First).view_capability(&[]),
+            Sink::First.view_capability(&[]),
             Some(ViewSinkCapability::First)
         ));
         assert!(matches!(
-            Sink::Last(BuiltinViewSink::Last).view_capability(&[]),
+            Sink::Last.view_capability(&[]),
             Some(ViewSinkCapability::Last)
         ));
     }

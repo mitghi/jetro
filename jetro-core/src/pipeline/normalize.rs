@@ -35,7 +35,7 @@ fn sink_runtime_demand(sink: &Sink) -> RuntimeDemand {
             value: ValueDemand::Whole,
             order: false,
         },
-        Sink::Collect | Sink::First(_) | Sink::Last(_) => RuntimeDemand {
+        Sink::Collect | Sink::First | Sink::Last => RuntimeDemand {
             value: ValueDemand::Whole,
             order: true,
         },

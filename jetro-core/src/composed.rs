@@ -1476,7 +1476,7 @@ mod tests {
         use crate::pipeline::{
             select_strategy, NumOp, ReducerOp, ReducerSpec, Sink, SortSpec, Stage, Strategy,
         };
-        let first_sink = Sink::First(crate::builtins::BuiltinViewSink::First);
+        let first_sink = Sink::First;
         use std::sync::Arc;
         let dummy = Arc::new(crate::vm::Program::new(Vec::new(), ""));
 
@@ -1532,7 +1532,7 @@ mod tests {
         use std::sync::Arc;
 
         let dummy_prog = Arc::new(crate::vm::Program::new(Vec::new(), ""));
-        let first_sink = Sink::First(crate::builtins::BuiltinViewSink::First);
+        let first_sink = Sink::First;
 
         // [Sort] + First → SortTopK(1)
         let stages = vec![Stage::Sort(SortSpec::keyed(Arc::clone(&dummy_prog), false))];

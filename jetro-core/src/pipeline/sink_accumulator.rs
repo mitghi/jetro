@@ -27,8 +27,8 @@ impl<'a> SinkAccumulator<'a> {
         match self.sink {
             Sink::Collect => self.observe_collect(item),
             Sink::Reducer(_) => self.observe_reducer(&item),
-            Sink::First(_) => return self.observe_first(item),
-            Sink::Last(_) => self.observe_last(item),
+            Sink::First => return self.observe_first(item),
+            Sink::Last => self.observe_last(item),
             Sink::ApproxCountDistinct => self.observe_approx_distinct(&item),
         }
         false
@@ -89,8 +89,8 @@ impl<'a> SinkAccumulator<'a> {
                 .reducer
                 .expect("reducer sinks construct reducer")
                 .finish(),
-            Sink::First(_) => self.first.unwrap_or(Val::Null),
-            Sink::Last(_) => self.last.unwrap_or(Val::Null),
+            Sink::First => self.first.unwrap_or(Val::Null),
+            Sink::Last => self.last.unwrap_or(Val::Null),
             Sink::ApproxCountDistinct => Val::Int(hll_estimate(&self.hll) as i64),
         }
     }

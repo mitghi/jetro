@@ -36,8 +36,7 @@ use std::sync::Arc;
 
 use crate::ast::Expr;
 use crate::builtins::{
-    BuiltinCancellation, BuiltinMethod, BuiltinNumericReducer, BuiltinStageMerge, BuiltinViewSink,
-    BuiltinViewStage,
+    BuiltinCancellation, BuiltinMethod, BuiltinNumericReducer, BuiltinStageMerge, BuiltinViewStage,
 };
 use crate::context::EvalError;
 use crate::value::Val;
@@ -139,8 +138,8 @@ fn sink_name(s: &Sink) -> &'static str {
             ReducerOp::Numeric(NumOp::Max) => "max",
             ReducerOp::Numeric(NumOp::Avg) => "avg",
         },
-        Sink::First(_) => "first",
-        Sink::Last(_) => "last",
+        Sink::First => "first",
+        Sink::Last => "last",
         Sink::ApproxCountDistinct => "approx_count_distinct",
     }
 }
@@ -400,8 +399,8 @@ pub enum Sink {
     Reducer(ReducerSpec),
     /// `.first()` / `.last()` — yield the first/last element or
     /// `Val::Null`.
-    First(BuiltinViewSink),
-    Last(BuiltinViewSink),
+    First,
+    Last,
     /// Algorithmic Category E: `.approx_count_distinct()` — HLL-12
     /// (~2KB state, ±2% accuracy) returning Int approximate count.
     /// Per `algorithmic_optimization_cold_only.md` Category E (opt-in

@@ -29,8 +29,8 @@ pub(super) fn run(
                 cmp::run_pipeline_with_demand::<cmp::AvgSink>(rows, chain, demand)
             }
         },
-        Sink::First(_) => cmp::run_pipeline_with_demand::<cmp::FirstSink>(rows, chain, demand),
-        Sink::Last(_) => cmp::run_pipeline_with_demand::<cmp::LastSink>(rows, chain, demand),
+        Sink::First => cmp::run_pipeline_with_demand::<cmp::FirstSink>(rows, chain, demand),
+        Sink::Last => cmp::run_pipeline_with_demand::<cmp::LastSink>(rows, chain, demand),
         Sink::ApproxCountDistinct => return None,
     };
 
@@ -67,10 +67,10 @@ where
                 cmp::run_pipeline_owned_iter_with_demand::<cmp::AvgSink, _>(rows, chain, demand)
             }
         },
-        Sink::First(_) => {
+        Sink::First => {
             cmp::run_pipeline_owned_iter_with_demand::<cmp::FirstSink, _>(rows, chain, demand)
         }
-        Sink::Last(_) => {
+        Sink::Last => {
             cmp::run_pipeline_owned_iter_with_demand::<cmp::LastSink, _>(rows, chain, demand)
         }
         Sink::ApproxCountDistinct => return None,
