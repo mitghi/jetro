@@ -251,35 +251,25 @@ where
                 .get(stage_idx)
                 .unwrap_or(&BodyKernel::Generic);
             match stage {
-                Stage::Skip(n, _, _) => {
-                    if stage_skipped[stage_idx] < *n {
-                        stage_skipped[stage_idx] += 1;
-                        continue 'outer;
-                    }
+                Stage::CompiledMap(plan) => {
+                    item = run_compiled_map(plan, item)?;
                 }
-                Stage::Take(n, _, _) => {
-                    if stage_taken[stage_idx] >= *n {
-                        break 'outer;
-                    }
-                    stage_taken[stage_idx] += 1;
-                }
-                Stage::Filter(prog, _) => {
-                    if !filter_one(&item, |v| {
-                        eval_kernel(kernel, v, |item| {
-                            apply_item_in_env(&mut vm, &mut loop_env, item, prog)
-                        })
-                    })? {
-                        continue 'outer;
-                    }
-                }
-                Stage::Map(prog, _) => {
-                    if Some(stage_idx) == terminal_map_idx {
-                        terminal_map_collect
-                            .as_mut()
-                            .expect("terminal map collector")
-                            .push_val_row(&item, kernel, |item| {
-                                apply_item_in_env(&mut vm, &mut loop_env, item, prog)
-                            })?;
+                _ => match apply_adapter_streaming(
+                    stage,
+                    stage_idx,
+                    item,
+                    &mut vm,
+                    &mut loop_env,
+                    kernel,
+                    &mut stage_taken,
+                    &mut stage_skipped,
+                    terminal_map_idx,
+                    &mut terminal_map_collect,
+                )? {
+                    StreamingStageFlow::Continue(next) => item = next,
+                    StreamingStageFlow::SkipRow => continue 'outer,
+                    StreamingStageFlow::Stop => break 'outer,
+                    StreamingStageFlow::TerminalCollected => {
                         emitted_outputs += 1;
                         if matches!(source_demand, PullDemand::UntilOutput(n) if emitted_outputs >= n)
                         {
@@ -287,56 +277,7 @@ where
                         }
                         continue 'outer;
                     }
-                    item = map_one(&item, |v| {
-                        eval_kernel(kernel, v, |item| {
-                            apply_item_in_env(&mut vm, &mut loop_env, item, prog)
-                        })
-                    })?;
-                }
-                Stage::CompiledMap(plan) => {
-                    item = run_compiled_map(plan, item)?;
-                }
-                Stage::TakeWhile(prog) => {
-                    if !take_while_one(&item, |v| {
-                        eval_kernel(kernel, v, |item| {
-                            apply_item_in_env(&mut vm, &mut loop_env, item, prog)
-                        })
-                    })? {
-                        break 'outer;
-                    }
-                }
-                _ if stage
-                    .builtin_method_metadata()
-                    .and_then(|method| method.spec().pipeline_executor)
-                    .is_some() =>
-                {
-                    item = apply_adapter_streaming(stage, item, &mut vm, &mut loop_env, kernel)?;
-                }
-                Stage::Reverse(_)
-                | Stage::Sort(_)
-                | Stage::UniqueBy(_)
-                | Stage::FlatMap(_, _)
-                | Stage::GroupBy(_)
-                | Stage::Chunk(_)
-                | Stage::Window(_)
-                | Stage::DropWhile(_)
-                | Stage::IndicesWhere(_)
-                | Stage::FindIndex(_)
-                | Stage::MaxBy(_)
-                | Stage::MinBy(_)
-                | Stage::CountBy(_)
-                | Stage::IndexBy(_)
-                | Stage::SortedDedup(_) => {}
-                Stage::Split(_)
-                | Stage::Slice(_, _)
-                | Stage::Replace { .. }
-                | Stage::Builtin(_)
-                | Stage::TransformValues(_)
-                | Stage::TransformKeys(_)
-                | Stage::FilterValues(_)
-                | Stage::FilterKeys(_) => {
-                    unreachable!("adapter-backed stage was not handled by adapter")
-                }
+                },
             }
         }
 
@@ -362,6 +303,13 @@ where
         return Ok(collector.finish());
     }
     Ok(sink_acc.finish(false))
+}
+
+enum StreamingStageFlow {
+    Continue(Val),
+    SkipRow,
+    Stop,
+    TerminalCollected,
 }
 
 enum LegacyPreIter {
@@ -718,26 +666,96 @@ fn apply_adapter_materialized(
     }
 }
 
-fn apply_adapter_streaming(
+fn apply_adapter_streaming<'a>(
     stage: &Stage,
+    stage_idx: usize,
     item: Val,
     vm: &mut crate::vm::VM,
     loop_env: &mut Env,
     kernel: &BodyKernel,
-) -> Result<Val, EvalError> {
+    stage_taken: &mut [usize],
+    stage_skipped: &mut [usize],
+    terminal_map_idx: Option<usize>,
+    terminal_map_collect: &mut Option<TerminalMapCollector<'a>>,
+) -> Result<StreamingStageFlow, EvalError> {
     match stage_executor(stage) {
-        Some(BuiltinPipelineExecutor::ElementBuiltin) => Ok(apply_element_adapter(stage, item)),
+        Some(BuiltinPipelineExecutor::ElementBuiltin) => Ok(StreamingStageFlow::Continue(
+            apply_element_adapter(stage, item),
+        )),
         Some(BuiltinPipelineExecutor::ObjectLambda) => {
             let prog = object_lambda_program(stage)
                 .expect("object lambda executor must be attached to object lambda stage");
-            apply_lambda_obj(stage, &item, vm, loop_env, kernel, prog)
+            Ok(StreamingStageFlow::Continue(apply_lambda_obj(
+                stage, &item, vm, loop_env, kernel, prog,
+            )?))
+        }
+        Some(BuiltinPipelineExecutor::Position { take }) => {
+            let n = match stage {
+                Stage::Take(n, _, _) | Stage::Skip(n, _, _) => *n,
+                _ => return Ok(StreamingStageFlow::Continue(item)),
+            };
+            if take {
+                if stage_taken[stage_idx] >= n {
+                    Ok(StreamingStageFlow::Stop)
+                } else {
+                    stage_taken[stage_idx] += 1;
+                    Ok(StreamingStageFlow::Continue(item))
+                }
+            } else if stage_skipped[stage_idx] < n {
+                stage_skipped[stage_idx] += 1;
+                Ok(StreamingStageFlow::SkipRow)
+            } else {
+                Ok(StreamingStageFlow::Continue(item))
+            }
+        }
+        Some(BuiltinPipelineExecutor::RowFilter) => {
+            let prog = row_stage_program(stage).expect("row filter executor must have row program");
+            if filter_one(&item, |v| {
+                eval_kernel(kernel, v, |item| {
+                    apply_item_in_env(vm, loop_env, item, prog)
+                })
+            })? {
+                Ok(StreamingStageFlow::Continue(item))
+            } else {
+                Ok(StreamingStageFlow::SkipRow)
+            }
+        }
+        Some(BuiltinPipelineExecutor::RowMap) => {
+            let prog = row_stage_program(stage).expect("row map executor must have row program");
+            if Some(stage_idx) == terminal_map_idx {
+                terminal_map_collect
+                    .as_mut()
+                    .expect("terminal map collector")
+                    .push_val_row(&item, kernel, |item| {
+                        apply_item_in_env(vm, loop_env, item, prog)
+                    })?;
+                return Ok(StreamingStageFlow::TerminalCollected);
+            }
+            Ok(StreamingStageFlow::Continue(map_one(&item, |v| {
+                eval_kernel(kernel, v, |item| {
+                    apply_item_in_env(vm, loop_env, item, prog)
+                })
+            })?))
+        }
+        Some(BuiltinPipelineExecutor::PrefixWhile { take }) => {
+            if !take {
+                return Ok(StreamingStageFlow::Continue(item));
+            }
+            let prog = keyed_stage_program(stage)
+                .expect("take_while executor must have predicate program");
+            if take_while_one(&item, |v| {
+                eval_kernel(kernel, v, |item| {
+                    apply_item_in_env(vm, loop_env, item, prog)
+                })
+            })? {
+                Ok(StreamingStageFlow::Continue(item))
+            } else {
+                Ok(StreamingStageFlow::Stop)
+            }
         }
         Some(
             BuiltinPipelineExecutor::ExpandingBuiltin
-            | BuiltinPipelineExecutor::RowFilter
-            | BuiltinPipelineExecutor::RowMap
             | BuiltinPipelineExecutor::RowFlatMap
-            | BuiltinPipelineExecutor::Position { .. }
             | BuiltinPipelineExecutor::Reverse
             | BuiltinPipelineExecutor::Sort
             | BuiltinPipelineExecutor::UniqueBy
@@ -749,10 +767,9 @@ fn apply_adapter_streaming(
             | BuiltinPipelineExecutor::ArgExtreme { .. }
             | BuiltinPipelineExecutor::Chunk
             | BuiltinPipelineExecutor::Window
-            | BuiltinPipelineExecutor::PrefixWhile { .. }
             | BuiltinPipelineExecutor::SortedDedup,
         )
-        | None => Ok(item),
+        | None => Ok(StreamingStageFlow::Continue(item)),
     }
 }
 
