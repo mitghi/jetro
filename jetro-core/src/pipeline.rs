@@ -65,6 +65,7 @@ mod reducer;
 mod row_source;
 mod sink_accumulator;
 mod stage_flow;
+mod val_stage_flow;
 pub(crate) use capability::{
     view_capabilities, view_prefix_capabilities, ViewInputMode, ViewMaterialization,
     ViewOutputMode, ViewSinkCapability, ViewStageCapability,

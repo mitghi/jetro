@@ -16,8 +16,8 @@ use super::{
 
 use crate::builtins::{
     chunk_apply, count_by_apply, drop_while_apply, filter_apply, filter_one, group_by_apply,
-    index_by_apply, map_apply, map_one, replace_apply, slice_apply, split_apply, take_while_apply,
-    take_while_one, window_apply, BuiltinPipelineExecutor,
+    index_by_apply, map_apply, replace_apply, slice_apply, split_apply, take_while_apply,
+    window_apply, BuiltinPipelineExecutor,
 };
 use crate::chain_ir::PullDemand;
 
@@ -254,7 +254,7 @@ where
                 Stage::CompiledMap(plan) => {
                     item = run_compiled_map(plan, item)?;
                 }
-                _ => match apply_adapter_streaming(
+                _ => match super::val_stage_flow::apply_adapter_streaming(
                     stage,
                     stage_idx,
                     item,
@@ -309,7 +309,7 @@ enum LegacyPreIter {
     Owned(std::vec::IntoIter<Val>),
 }
 
-fn stage_executor(stage: &Stage) -> Option<BuiltinPipelineExecutor> {
+pub(super) fn stage_executor(stage: &Stage) -> Option<BuiltinPipelineExecutor> {
     stage
         .builtin_method_metadata()
         .and_then(|method| method.spec().pipeline_executor)
@@ -659,114 +659,7 @@ fn apply_adapter_materialized(
     }
 }
 
-fn apply_adapter_streaming<'a>(
-    stage: &Stage,
-    stage_idx: usize,
-    item: Val,
-    vm: &mut crate::vm::VM,
-    loop_env: &mut Env,
-    kernel: &BodyKernel,
-    stage_taken: &mut [usize],
-    stage_skipped: &mut [usize],
-    terminal_map_idx: Option<usize>,
-    terminal_map_collect: &mut Option<TerminalMapCollector<'a>>,
-) -> Result<StageFlow<Val>, EvalError> {
-    match stage_executor(stage) {
-        Some(BuiltinPipelineExecutor::ElementBuiltin) => {
-            Ok(StageFlow::Continue(apply_element_adapter(stage, item)))
-        }
-        Some(BuiltinPipelineExecutor::ObjectLambda) => {
-            let prog = object_lambda_program(stage)
-                .expect("object lambda executor must be attached to object lambda stage");
-            Ok(StageFlow::Continue(apply_lambda_obj(
-                stage, &item, vm, loop_env, kernel, prog,
-            )?))
-        }
-        Some(BuiltinPipelineExecutor::Position { take }) => {
-            let n = match stage {
-                Stage::Take(n, _, _) | Stage::Skip(n, _, _) => *n,
-                _ => return Ok(StageFlow::Continue(item)),
-            };
-            if take {
-                if stage_taken[stage_idx] >= n {
-                    Ok(StageFlow::Stop)
-                } else {
-                    stage_taken[stage_idx] += 1;
-                    Ok(StageFlow::Continue(item))
-                }
-            } else if stage_skipped[stage_idx] < n {
-                stage_skipped[stage_idx] += 1;
-                Ok(StageFlow::SkipRow)
-            } else {
-                Ok(StageFlow::Continue(item))
-            }
-        }
-        Some(BuiltinPipelineExecutor::RowFilter) => {
-            let prog = row_stage_program(stage).expect("row filter executor must have row program");
-            if filter_one(&item, |v| {
-                eval_kernel(kernel, v, |item| {
-                    apply_item_in_env(vm, loop_env, item, prog)
-                })
-            })? {
-                Ok(StageFlow::Continue(item))
-            } else {
-                Ok(StageFlow::SkipRow)
-            }
-        }
-        Some(BuiltinPipelineExecutor::RowMap) => {
-            let prog = row_stage_program(stage).expect("row map executor must have row program");
-            if Some(stage_idx) == terminal_map_idx {
-                terminal_map_collect
-                    .as_mut()
-                    .expect("terminal map collector")
-                    .push_val_row(&item, kernel, |item| {
-                        apply_item_in_env(vm, loop_env, item, prog)
-                    })?;
-                return Ok(StageFlow::TerminalCollected);
-            }
-            Ok(StageFlow::Continue(map_one(&item, |v| {
-                eval_kernel(kernel, v, |item| {
-                    apply_item_in_env(vm, loop_env, item, prog)
-                })
-            })?))
-        }
-        Some(BuiltinPipelineExecutor::PrefixWhile { take }) => {
-            if !take {
-                return Ok(StageFlow::Continue(item));
-            }
-            let prog = keyed_stage_program(stage)
-                .expect("take_while executor must have predicate program");
-            if take_while_one(&item, |v| {
-                eval_kernel(kernel, v, |item| {
-                    apply_item_in_env(vm, loop_env, item, prog)
-                })
-            })? {
-                Ok(StageFlow::Continue(item))
-            } else {
-                Ok(StageFlow::Stop)
-            }
-        }
-        Some(
-            BuiltinPipelineExecutor::ExpandingBuiltin
-            | BuiltinPipelineExecutor::RowFlatMap
-            | BuiltinPipelineExecutor::Reverse
-            | BuiltinPipelineExecutor::Sort
-            | BuiltinPipelineExecutor::UniqueBy
-            | BuiltinPipelineExecutor::GroupBy
-            | BuiltinPipelineExecutor::CountBy
-            | BuiltinPipelineExecutor::IndexBy
-            | BuiltinPipelineExecutor::FindIndex
-            | BuiltinPipelineExecutor::IndicesWhere
-            | BuiltinPipelineExecutor::ArgExtreme { .. }
-            | BuiltinPipelineExecutor::Chunk
-            | BuiltinPipelineExecutor::Window
-            | BuiltinPipelineExecutor::SortedDedup,
-        )
-        | None => Ok(StageFlow::Continue(item)),
-    }
-}
-
-fn apply_element_adapter(stage: &Stage, v: Val) -> Val {
+pub(super) fn apply_element_adapter(stage: &Stage, v: Val) -> Val {
     match stage {
         Stage::Slice(start, end) => slice_apply(v, *start, *end),
         Stage::Replace {
@@ -787,7 +680,7 @@ fn apply_expanding_adapter(stage: &Stage, v: &Val, out: &mut Vec<Val>) {
     }
 }
 
-fn object_lambda_program(stage: &Stage) -> Option<&Arc<crate::vm::Program>> {
+pub(super) fn object_lambda_program(stage: &Stage) -> Option<&Arc<crate::vm::Program>> {
     match stage {
         Stage::TransformValues(prog)
         | Stage::TransformKeys(prog)
@@ -797,14 +690,14 @@ fn object_lambda_program(stage: &Stage) -> Option<&Arc<crate::vm::Program>> {
     }
 }
 
-fn row_stage_program(stage: &Stage) -> Option<&Arc<crate::vm::Program>> {
+pub(super) fn row_stage_program(stage: &Stage) -> Option<&Arc<crate::vm::Program>> {
     match stage {
         Stage::Filter(prog, _) | Stage::Map(prog, _) | Stage::FlatMap(prog, _) => Some(prog),
         _ => None,
     }
 }
 
-fn keyed_stage_program(stage: &Stage) -> Option<&Arc<crate::vm::Program>> {
+pub(super) fn keyed_stage_program(stage: &Stage) -> Option<&Arc<crate::vm::Program>> {
     match stage {
         Stage::GroupBy(prog)
         | Stage::UniqueBy(Some(prog))
