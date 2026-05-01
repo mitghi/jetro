@@ -34,10 +34,10 @@ pub(crate) fn run<'a, V>(
 where
     V: ValueView<'a>,
 {
-    if let Some(result) = run_full(source.clone(), body) {
+    if let Some(result) = run_terminal_map_collect(source.clone(), body) {
         return Some(result);
     }
-    if let Some(result) = run_terminal_map_collect(source.clone(), body) {
+    if let Some(result) = run_full(source.clone(), body) {
         return Some(result);
     }
     if let Some(result) = run_sort_prefix_then_materialized_suffix(source.clone(), body, cache) {

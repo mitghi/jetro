@@ -42,6 +42,7 @@ mod tests {
     };
     use crate::pipeline::{NumOp, ReducerOp, Sink, Stage};
     use crate::planner;
+    use crate::value::Val;
     use crate::Jetro;
 
     fn assert_no_vm_fallback(plan: &crate::physical::QueryPlan, id: NodeId) {
@@ -118,6 +119,14 @@ mod tests {
                 assert_no_vm_fallback(plan, *init);
                 assert_no_vm_fallback(plan, *body);
             }
+        }
+    }
+
+    fn collect_test_val(j: &Jetro, expr: &str) -> Val {
+        let plan = planner::plan_query(expr);
+        match plan.root() {
+            QueryRoot::Node(root) => crate::physical_eval::run(j, &plan, *root).unwrap(),
+            QueryRoot::SourceVm(_) => panic!("unexpected source VM fallback"),
         }
     }
 
@@ -418,6 +427,29 @@ mod tests {
                 {"id": 2, "name": "bob", "city": "LA", "score": 20}
             ])
         );
+        assert!(!j.root_val_is_materialized());
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn view_object_map_collect_uses_terminal_objvec_collector() {
+        let j = Jetro::from_bytes(
+            br#"{"data":[{"id":1,"score":10,"user":{"name":"ada"}},{"id":2,"score":20,"user":{"name":"bob"}}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+
+        let out = collect_test_val(&j, r#"$.data.map({id, name: user.name, score})"#);
+
+        match out {
+            Val::ObjVec(rows) => {
+                assert_eq!(rows.nrows(), 2);
+                assert_eq!(
+                    rows.keys.iter().map(|key| key.as_ref()).collect::<Vec<_>>(),
+                    vec!["id", "name", "score"]
+                );
+            }
+            other => panic!("expected terminal object map to collect ObjVec, got {other:?}"),
+        }
         assert!(!j.root_val_is_materialized());
     }
 
