@@ -92,11 +92,7 @@ impl Sink {
                 };
                 Some(ViewSinkCapability::Count { predicate_kernel })
             }
-            Sink::Terminal(method) => method
-                .spec()
-                .sink?
-                .view_sink
-                .and_then(ViewSinkCapability::from_builtin_sink),
+            Sink::Terminal(method) => ViewSinkCapability::from_sink_spec(method.spec().sink?),
             Sink::Reducer(_) => None,
             Sink::ApproxCountDistinct => None,
         }

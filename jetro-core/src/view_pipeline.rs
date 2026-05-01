@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use crate::builtins::{BuiltinSelectionPosition, BuiltinSinkAccumulator};
 use crate::chain_ir::PullDemand;
 use crate::context::{Env, EvalError};
 use crate::pipeline;
@@ -130,20 +131,23 @@ where
                     sink_acc.observe_numeric(&numeric_item);
                     false
                 }
-                pipeline::ViewSinkCapability::First => {
+                pipeline::ViewSinkCapability::Terminal { accumulator } => {
                     debug_assert_eq!(
                         capabilities.sink.materialization(),
                         pipeline::ViewMaterialization::SinkFinalRow
                     );
-                    sink_acc.observe_first(item.materialize())
-                }
-                pipeline::ViewSinkCapability::Last => {
-                    debug_assert_eq!(
-                        capabilities.sink.materialization(),
-                        pipeline::ViewMaterialization::SinkFinalRow
-                    );
-                    sink_acc.observe_last(item.materialize());
-                    false
+                    match accumulator {
+                        BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::First) => {
+                            sink_acc.observe_first(item.materialize())
+                        }
+                        BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::Last) => {
+                            sink_acc.observe_last(item.materialize());
+                            false
+                        }
+                        BuiltinSinkAccumulator::Count | BuiltinSinkAccumulator::Numeric => {
+                            return None;
+                        }
+                    }
                 }
             };
 

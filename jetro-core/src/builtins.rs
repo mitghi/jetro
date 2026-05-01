@@ -594,8 +594,6 @@ pub enum BuiltinViewOutputMode {
 pub enum BuiltinViewSink {
     Count,
     Numeric,
-    First,
-    Last,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -849,7 +847,7 @@ pub enum BuiltinPipelineLowering {
     ExprStage(BuiltinExprStage),
     TerminalExprStage {
         stage: BuiltinExprStage,
-        terminal: BuiltinViewSink,
+        terminal: BuiltinMethod,
     },
     NullaryStage(BuiltinNullaryStage),
     UsizeStage {
@@ -911,7 +909,6 @@ pub enum BuiltinStringPairStage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinViewMaterialization {
     Never,
-    SinkFinalRow,
     SinkNumericInput,
 }
 
@@ -920,7 +917,6 @@ impl BuiltinViewSink {
         match self {
             Self::Count => BuiltinViewMaterialization::Never,
             Self::Numeric => BuiltinViewMaterialization::SinkNumericInput,
-            Self::First | Self::Last => BuiltinViewMaterialization::SinkFinalRow,
         }
     }
 }
@@ -1067,21 +1063,23 @@ impl BuiltinSpec {
                 },
                 view_sink: Some(BuiltinViewSink::Numeric),
             },
-            BuiltinViewSink::First => BuiltinSinkSpec {
-                accumulator: BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::First),
-                demand: BuiltinSinkDemand::First {
+        });
+        self
+    }
+
+    fn select_one_sink(mut self, position: BuiltinSelectionPosition) -> Self {
+        self.sink = Some(BuiltinSinkSpec {
+            accumulator: BuiltinSinkAccumulator::SelectOne(position),
+            demand: match position {
+                BuiltinSelectionPosition::First => BuiltinSinkDemand::First {
                     value: BuiltinSinkValueNeed::Whole,
                 },
-                view_sink: Some(BuiltinViewSink::First),
-            },
-            BuiltinViewSink::Last => BuiltinSinkSpec {
-                accumulator: BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::Last),
-                demand: BuiltinSinkDemand::All {
+                BuiltinSelectionPosition::Last => BuiltinSinkDemand::All {
                     value: BuiltinSinkValueNeed::Whole,
                     order: true,
                 },
-                view_sink: Some(BuiltinViewSink::Last),
             },
+            view_sink: None,
         });
         self
     }
@@ -1318,7 +1316,7 @@ impl BuiltinMethod {
                     .pipeline_stage(BuiltinPipelineStage::Unary)
                     .pipeline_lowering(BuiltinPipelineLowering::TerminalExprStage {
                         stage: BuiltinExprStage::Filter,
-                        terminal: BuiltinViewSink::First,
+                        terminal: BuiltinMethod::First,
                     })
                     .cost(10.0)
             }
@@ -1348,11 +1346,11 @@ impl BuiltinMethod {
                 .pipeline_executor(BuiltinPipelineExecutor::Position { take: false }),
             Self::First => BuiltinSpec::new(Cat::Positional, Card::Bounded)
                 .view_native()
-                .view_sink(BuiltinViewSink::First)
+                .select_one_sink(BuiltinSelectionPosition::First)
                 .pipeline_lowering(BuiltinPipelineLowering::TerminalSink),
             Self::Last => BuiltinSpec::new(Cat::Positional, Card::Bounded)
                 .view_native()
-                .view_sink(BuiltinViewSink::Last)
+                .select_one_sink(BuiltinSelectionPosition::Last)
                 .pipeline_lowering(BuiltinPipelineLowering::TerminalSink),
             Self::Nth | Self::Collect => {
                 BuiltinSpec::new(Cat::Positional, Card::Bounded).view_native()
@@ -1410,7 +1408,7 @@ impl BuiltinMethod {
                                 Self::MinBy => BuiltinExprStage::MinBy,
                                 _ => unreachable!(),
                             },
-                            terminal: BuiltinViewSink::First,
+                            terminal: BuiltinMethod::First,
                         })
                         .pipeline_materialization(
                             BuiltinPipelineMaterialization::LegacyMaterialized,
@@ -1474,7 +1472,7 @@ impl BuiltinMethod {
                         .pipeline_stage(BuiltinPipelineStage::Unary)
                         .pipeline_lowering(BuiltinPipelineLowering::TerminalExprStage {
                             stage: BuiltinExprStage::CountBy,
-                            terminal: BuiltinViewSink::First,
+                            terminal: BuiltinMethod::First,
                         })
                         .pipeline_materialization(
                             BuiltinPipelineMaterialization::LegacyMaterialized,
@@ -1485,7 +1483,7 @@ impl BuiltinMethod {
                         .pipeline_stage(BuiltinPipelineStage::Unary)
                         .pipeline_lowering(BuiltinPipelineLowering::TerminalExprStage {
                             stage: BuiltinExprStage::IndexBy,
-                            terminal: BuiltinViewSink::First,
+                            terminal: BuiltinMethod::First,
                         })
                         .pipeline_materialization(
                             BuiltinPipelineMaterialization::LegacyMaterialized,
@@ -6726,10 +6724,7 @@ mod spec_tests {
             BuiltinMethod::Max.spec().numeric_reducer,
             Some(BuiltinNumericReducer::Max)
         );
-        assert_eq!(
-            BuiltinMethod::First.spec().view_sink,
-            Some(BuiltinViewSink::First)
-        );
+        assert_eq!(BuiltinMethod::First.spec().view_sink, None);
         assert_eq!(
             BuiltinMethod::First.spec().sink.unwrap().accumulator,
             BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::First)
@@ -6740,10 +6735,7 @@ mod spec_tests {
                 value: BuiltinSinkValueNeed::Whole
             }
         );
-        assert_eq!(
-            BuiltinMethod::Last.spec().view_sink,
-            Some(BuiltinViewSink::Last)
-        );
+        assert_eq!(BuiltinMethod::Last.spec().view_sink, None);
         assert_eq!(
             BuiltinMethod::Last.spec().sink.unwrap().accumulator,
             BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::Last)
@@ -6795,7 +6787,7 @@ mod spec_tests {
             BuiltinMethod::FindOne.spec().pipeline_lowering,
             Some(BuiltinPipelineLowering::TerminalExprStage {
                 stage: BuiltinExprStage::Filter,
-                terminal: BuiltinViewSink::First,
+                terminal: BuiltinMethod::First,
             })
         );
         assert_eq!(

@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use crate::builtins::{
     BuiltinExprStage, BuiltinMethod, BuiltinNullaryStage, BuiltinPipelineLowering,
-    BuiltinPipelineSink, BuiltinPipelineStage, BuiltinStringPairStage, BuiltinStringStage,
-    BuiltinUsizeStage, BuiltinViewSink, BuiltinViewStage,
+    BuiltinPipelineSink, BuiltinPipelineStage, BuiltinSinkAccumulator, BuiltinStringPairStage,
+    BuiltinStringStage, BuiltinUsizeStage, BuiltinViewStage,
 };
 use crate::{ast::Expr, context::EvalError, value::Val};
 
@@ -186,7 +186,7 @@ fn is_receiver_pipeline_start_method(name: &str, arity: usize) -> bool {
     let spec = method.spec();
     match arity {
         0 => {
-            spec.view_sink.is_some()
+            spec.sink.is_some()
                 || spec.pipeline_sink.is_some()
                 || spec.pipeline_stage == Some(BuiltinPipelineStage::Nullary)
         }
@@ -566,12 +566,12 @@ fn push_expr_stage(
     Some(())
 }
 
-fn set_terminal_sink(terminal: BuiltinViewSink, sink: &mut Sink) -> Option<()> {
-    match terminal {
-        BuiltinViewSink::First => *sink = Sink::Terminal(BuiltinMethod::First),
-        BuiltinViewSink::Last => *sink = Sink::Terminal(BuiltinMethod::Last),
-        BuiltinViewSink::Count => *sink = Sink::Reducer(ReducerSpec::count()),
-        BuiltinViewSink::Numeric => return None,
+fn set_terminal_sink(method: BuiltinMethod, sink: &mut Sink) -> Option<()> {
+    let spec = method.spec();
+    match spec.sink?.accumulator {
+        BuiltinSinkAccumulator::SelectOne(_) => *sink = Sink::Terminal(method),
+        BuiltinSinkAccumulator::Count => *sink = Sink::Reducer(ReducerSpec::count()),
+        BuiltinSinkAccumulator::Numeric => return None,
     }
     Some(())
 }
@@ -607,8 +607,8 @@ fn terminal_sink_for_method(method: BuiltinMethod, args: &[crate::ast::Arg]) -> 
         _ => return None,
     }
 
-    match spec.view_sink? {
-        BuiltinViewSink::Count => match args {
+    match spec.sink?.accumulator {
+        BuiltinSinkAccumulator::Count => match args {
             [] => Some(Sink::Reducer(ReducerSpec::count())),
             [arg] if method == BuiltinMethod::Count => Some(Sink::Reducer(ReducerSpec {
                 op: ReducerOp::Count,
@@ -617,7 +617,7 @@ fn terminal_sink_for_method(method: BuiltinMethod, args: &[crate::ast::Arg]) -> 
             })),
             _ => None,
         },
-        BuiltinViewSink::Numeric => Some(Sink::Reducer(ReducerSpec {
+        BuiltinSinkAccumulator::Numeric => Some(Sink::Reducer(ReducerSpec {
             op: ReducerOp::Numeric(NumOp::from_builtin_reducer(spec.numeric_reducer?)),
             predicate: None,
             projection: match args {
@@ -626,9 +626,7 @@ fn terminal_sink_for_method(method: BuiltinMethod, args: &[crate::ast::Arg]) -> 
                 _ => return None,
             },
         })),
-        BuiltinViewSink::First | BuiltinViewSink::Last if args.is_empty() => {
-            Some(Sink::Terminal(method))
-        }
+        BuiltinSinkAccumulator::SelectOne(_) if args.is_empty() => Some(Sink::Terminal(method)),
         _ => None,
     }
 }

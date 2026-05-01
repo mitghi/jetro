@@ -1,6 +1,6 @@
 use crate::builtins::{
-    BuiltinViewInputMode, BuiltinViewMaterialization, BuiltinViewOutputMode, BuiltinViewSink,
-    BuiltinViewStage,
+    BuiltinSinkAccumulator, BuiltinSinkSpec, BuiltinViewInputMode, BuiltinViewMaterialization,
+    BuiltinViewOutputMode, BuiltinViewSink, BuiltinViewStage,
 };
 
 use super::{NumOp, PipelineBody, Stage};
@@ -82,8 +82,9 @@ pub(crate) enum ViewSinkCapability {
         predicate_kernel: Option<usize>,
         project_kernel: Option<usize>,
     },
-    First,
-    Last,
+    Terminal {
+        accumulator: BuiltinSinkAccumulator,
+    },
 }
 
 impl ViewSinkCapability {
@@ -92,9 +93,18 @@ impl ViewSinkCapability {
             BuiltinViewSink::Count => Some(Self::Count {
                 predicate_kernel: None,
             }),
-            BuiltinViewSink::First => Some(Self::First),
-            BuiltinViewSink::Last => Some(Self::Last),
             BuiltinViewSink::Numeric => None,
+        }
+    }
+
+    pub(crate) fn from_sink_spec(spec: BuiltinSinkSpec) -> Option<Self> {
+        match spec.accumulator {
+            BuiltinSinkAccumulator::SelectOne(_) => Some(Self::Terminal {
+                accumulator: spec.accumulator,
+            }),
+            BuiltinSinkAccumulator::Count | BuiltinSinkAccumulator::Numeric => {
+                spec.view_sink.and_then(Self::from_builtin_sink)
+            }
         }
     }
 
@@ -105,8 +115,15 @@ impl ViewSinkCapability {
             Self::Numeric { .. } => {
                 view_materialization(BuiltinViewSink::Numeric.materialization())
             }
-            Self::First => view_materialization(BuiltinViewSink::First.materialization()),
-            Self::Last => view_materialization(BuiltinViewSink::Last.materialization()),
+            Self::Terminal { accumulator } => match accumulator {
+                BuiltinSinkAccumulator::SelectOne(_) => ViewMaterialization::SinkFinalRow,
+                BuiltinSinkAccumulator::Count => {
+                    view_materialization(BuiltinViewSink::Count.materialization())
+                }
+                BuiltinSinkAccumulator::Numeric => {
+                    view_materialization(BuiltinViewSink::Numeric.materialization())
+                }
+            },
         }
     }
 }
@@ -114,7 +131,6 @@ impl ViewSinkCapability {
 fn view_materialization(materialization: BuiltinViewMaterialization) -> ViewMaterialization {
     match materialization {
         BuiltinViewMaterialization::Never => ViewMaterialization::Never,
-        BuiltinViewMaterialization::SinkFinalRow => ViewMaterialization::SinkFinalRow,
         BuiltinViewMaterialization::SinkNumericInput => ViewMaterialization::SinkNumericInput,
     }
 }
@@ -166,7 +182,10 @@ mod tests {
     use std::sync::Arc;
 
     use crate::ast::BinOp;
-    use crate::builtins::{BuiltinMethod, BuiltinStageMerge, BuiltinViewStage};
+    use crate::builtins::{
+        BuiltinMethod, BuiltinSelectionPosition, BuiltinSinkAccumulator, BuiltinStageMerge,
+        BuiltinViewStage,
+    };
     use crate::pipeline::{
         BodyKernel, NumOp, PipelineBody, ReducerOp, ReducerSpec, Sink, Stage, ViewInputMode,
         ViewMaterialization, ViewOutputMode, ViewSinkCapability, ViewStageCapability,
@@ -259,7 +278,10 @@ mod tests {
             ViewMaterialization::SinkNumericInput
         );
         assert_eq!(
-            ViewSinkCapability::First.materialization(),
+            ViewSinkCapability::Terminal {
+                accumulator: BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::First)
+            }
+            .materialization(),
             ViewMaterialization::SinkFinalRow
         );
     }
@@ -274,11 +296,15 @@ mod tests {
         ));
         assert!(matches!(
             Sink::Terminal(BuiltinMethod::First).view_capability(&[]),
-            Some(ViewSinkCapability::First)
+            Some(ViewSinkCapability::Terminal {
+                accumulator: BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::First)
+            })
         ));
         assert!(matches!(
             Sink::Terminal(BuiltinMethod::Last).view_capability(&[]),
-            Some(ViewSinkCapability::Last)
+            Some(ViewSinkCapability::Terminal {
+                accumulator: BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::Last)
+            })
         ));
     }
 
