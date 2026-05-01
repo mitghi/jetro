@@ -4,7 +4,7 @@ use crate::ast::{BinOp, Expr};
 use crate::builtins::{
     BuiltinMethod, BuiltinPipelineDemand, BuiltinPipelineMaterialization,
     BuiltinPipelineOrderEffect, BuiltinSelectionPosition, BuiltinSinkAccumulator,
-    BuiltinSinkDemand, BuiltinSinkSpec, BuiltinSinkValueNeed, BuiltinViewSink, BuiltinViewStage,
+    BuiltinSinkDemand, BuiltinSinkSpec, BuiltinSinkValueNeed, BuiltinViewStage,
 };
 use crate::chain_ir::{ChainOp, Demand as ChainDemand, PullDemand, ValueNeed};
 use crate::vm::{CompiledObjEntry, Opcode, Program};
@@ -62,7 +62,8 @@ impl Sink {
             Sink::Collect => Some(ViewSinkCapability::Collect),
             Sink::Reducer(spec) if spec.numeric_op().is_some() => {
                 let spec = self.reducer_spec()?;
-                if spec.method()?.spec().sink?.view_sink != Some(BuiltinViewSink::Numeric) {
+                let sink_spec = spec.method()?.spec().sink?;
+                if sink_spec.accumulator != BuiltinSinkAccumulator::Numeric {
                     return None;
                 }
                 let predicate_kernel = if let Some(idx) = spec.predicate_kernel_index() {
@@ -75,14 +76,16 @@ impl Sink {
                 } else {
                     None
                 };
-                Some(ViewSinkCapability::Numeric {
-                    op: spec.numeric_op()?,
+                Some(ViewSinkCapability::from_sink_spec(
+                    sink_spec,
                     predicate_kernel,
                     project_kernel,
-                })
+                    Some(spec.numeric_op()?),
+                ))
             }
             Sink::Reducer(spec) if spec.op == super::ReducerOp::Count => {
-                if spec.method()?.spec().sink?.view_sink != Some(BuiltinViewSink::Count) {
+                let sink_spec = spec.method()?.spec().sink?;
+                if sink_spec.accumulator != BuiltinSinkAccumulator::Count {
                     return None;
                 }
                 let predicate_kernel = if let Some(idx) = spec.predicate_kernel_index() {
@@ -90,9 +93,19 @@ impl Sink {
                 } else {
                     None
                 };
-                Some(ViewSinkCapability::Count { predicate_kernel })
+                Some(ViewSinkCapability::from_sink_spec(
+                    sink_spec,
+                    predicate_kernel,
+                    None,
+                    None,
+                ))
             }
-            Sink::Terminal(method) => ViewSinkCapability::from_sink_spec(method.spec().sink?),
+            Sink::Terminal(method) => Some(ViewSinkCapability::from_sink_spec(
+                method.spec().sink?,
+                None,
+                None,
+                None,
+            )),
             Sink::Reducer(_) => None,
             Sink::ApproxCountDistinct => None,
         }

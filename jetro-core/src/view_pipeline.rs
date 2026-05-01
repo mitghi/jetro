@@ -98,54 +98,54 @@ where
                     sink_acc.observe_collect(item.materialize());
                     false
                 }
-                pipeline::ViewSinkCapability::Count { predicate_kernel } => {
-                    debug_assert_eq!(
-                        capabilities.sink.materialization(),
-                        pipeline::ViewMaterialization::Never
-                    );
-                    if !view_sink_predicate_matches(&item, predicate_kernel, &body.sink_kernels)? {
-                        continue;
-                    }
-                    sink_acc.observe_count();
-                    false
-                }
-                pipeline::ViewSinkCapability::Numeric {
-                    op,
+                pipeline::ViewSinkCapability::Builtin {
+                    accumulator,
                     predicate_kernel,
                     project_kernel,
+                    numeric_op,
+                    ..
                 } => {
-                    let _ = op;
-                    debug_assert_eq!(
-                        capabilities.sink.materialization(),
-                        pipeline::ViewMaterialization::SinkNumericInput
-                    );
                     if !view_sink_predicate_matches(&item, predicate_kernel, &body.sink_kernels)? {
                         continue;
                     }
-                    let numeric_item = if let Some(kernel) = project_kernel {
-                        let kernel = body.sink_kernels.get(kernel)?;
-                        eval_value_kernel(&item, kernel)?
-                    } else {
-                        item.materialize()
-                    };
-                    sink_acc.observe_numeric(&numeric_item);
-                    false
-                }
-                pipeline::ViewSinkCapability::Terminal { accumulator } => {
-                    debug_assert_eq!(
-                        capabilities.sink.materialization(),
-                        pipeline::ViewMaterialization::SinkFinalRow
-                    );
                     match accumulator {
+                        BuiltinSinkAccumulator::Count => {
+                            debug_assert_eq!(
+                                capabilities.sink.materialization(),
+                                pipeline::ViewMaterialization::Never
+                            );
+                            sink_acc.observe_count();
+                            false
+                        }
+                        BuiltinSinkAccumulator::Numeric => {
+                            let _ = numeric_op?;
+                            debug_assert_eq!(
+                                capabilities.sink.materialization(),
+                                pipeline::ViewMaterialization::SinkNumericInput
+                            );
+                            let numeric_item = if let Some(kernel) = project_kernel {
+                                let kernel = body.sink_kernels.get(kernel)?;
+                                eval_value_kernel(&item, kernel)?
+                            } else {
+                                item.materialize()
+                            };
+                            sink_acc.observe_numeric(&numeric_item);
+                            false
+                        }
                         BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::First) => {
+                            debug_assert_eq!(
+                                capabilities.sink.materialization(),
+                                pipeline::ViewMaterialization::SinkFinalRow
+                            );
                             sink_acc.observe_first(item.materialize())
                         }
                         BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::Last) => {
+                            debug_assert_eq!(
+                                capabilities.sink.materialization(),
+                                pipeline::ViewMaterialization::SinkFinalRow
+                            );
                             sink_acc.observe_last(item.materialize());
                             false
-                        }
-                        BuiltinSinkAccumulator::Count | BuiltinSinkAccumulator::Numeric => {
-                            return None;
                         }
                     }
                 }
