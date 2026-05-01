@@ -8,16 +8,9 @@ use crate::pipeline;
 use crate::value::Val;
 use crate::value_view::ValueView;
 
-enum ViewStageFlow<V> {
-    Keep(V),
-    Drop,
-    Stop,
-}
+mod stage_flow;
 
-enum ViewFrontierFlow<V> {
-    Keep(Vec<V>),
-    Stop(Vec<V>),
-}
+use stage_flow::{ViewFrontierFlow, ViewStageFlow};
 
 pub(crate) fn walk_fields<'a, V>(mut cur: V, keys: &[Arc<str>]) -> V
 where
@@ -376,64 +369,7 @@ fn apply_view_stage<'a, V>(
 where
     V: ValueView<'a>,
 {
-    if !matches!(
-        stage.materialization(),
-        pipeline::ViewMaterialization::Never
-    ) {
-        return None;
-    }
-
-    match stage {
-        pipeline::ViewStageCapability::Skip(n) => {
-            debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::SkipsViewRead);
-            debug_assert_eq!(
-                stage.output_mode(),
-                pipeline::ViewOutputMode::PreservesInputView
-            );
-            if op_state[op_idx] < n {
-                op_state[op_idx] += 1;
-                Some(ViewStageFlow::Drop)
-            } else {
-                Some(ViewStageFlow::Keep(item))
-            }
-        }
-        pipeline::ViewStageCapability::Take(n) => {
-            debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::SkipsViewRead);
-            debug_assert_eq!(
-                stage.output_mode(),
-                pipeline::ViewOutputMode::PreservesInputView
-            );
-            if op_state[op_idx] >= n {
-                Some(ViewStageFlow::Stop)
-            } else {
-                op_state[op_idx] += 1;
-                Some(ViewStageFlow::Keep(item))
-            }
-        }
-        pipeline::ViewStageCapability::Filter { kernel } => {
-            debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::ReadsView);
-            debug_assert_eq!(
-                stage.output_mode(),
-                pipeline::ViewOutputMode::PreservesInputView
-            );
-            let kernel = stage_kernels.get(kernel)?;
-            if eval_filter_kernel(&item, kernel)? {
-                Some(ViewStageFlow::Keep(item))
-            } else {
-                Some(ViewStageFlow::Drop)
-            }
-        }
-        pipeline::ViewStageCapability::Map { kernel } => {
-            debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::ReadsView);
-            debug_assert_eq!(
-                stage.output_mode(),
-                pipeline::ViewOutputMode::BorrowedSubview
-            );
-            let kernel = stage_kernels.get(kernel)?;
-            Some(ViewStageFlow::Keep(eval_map_kernel(&item, kernel)?))
-        }
-        pipeline::ViewStageCapability::FlatMap { .. } => None,
-    }
+    stage_flow::apply_stage(item, stage, op_idx, op_state, stage_kernels)
 }
 
 fn apply_view_stage_frontier<'a, V>(
@@ -446,40 +382,7 @@ fn apply_view_stage_frontier<'a, V>(
 where
     V: ValueView<'a>,
 {
-    if !matches!(
-        stage.materialization(),
-        pipeline::ViewMaterialization::Never
-    ) {
-        return None;
-    }
-
-    match stage {
-        pipeline::ViewStageCapability::FlatMap { kernel } => {
-            debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::ReadsView);
-            debug_assert_eq!(
-                stage.output_mode(),
-                pipeline::ViewOutputMode::BorrowedSubviews
-            );
-            let kernel = stage_kernels.get(kernel)?;
-            let mut out = Vec::new();
-            for item in frontier {
-                let iter = eval_flat_map_kernel(&item, kernel)?;
-                out.extend(iter);
-            }
-            Some(ViewFrontierFlow::Keep(out))
-        }
-        _ => {
-            let mut out = Vec::with_capacity(frontier.len());
-            for item in frontier {
-                match apply_view_stage(item, stage, op_idx, op_state, stage_kernels)? {
-                    ViewStageFlow::Keep(next) => out.push(next),
-                    ViewStageFlow::Drop => {}
-                    ViewStageFlow::Stop => return Some(ViewFrontierFlow::Stop(out)),
-                }
-            }
-            Some(ViewFrontierFlow::Keep(out))
-        }
-    }
+    stage_flow::apply_frontier(frontier, stage, op_idx, op_state, stage_kernels)
 }
 
 fn suffix_body(body: &pipeline::PipelineBody, consumed_stages: usize) -> pipeline::PipelineBody {
