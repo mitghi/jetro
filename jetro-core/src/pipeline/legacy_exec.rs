@@ -10,8 +10,8 @@ use super::row_source;
 use super::sink_accumulator::SinkAccumulator;
 use super::{
     apply_item_in_env, bounded_sort_by_key, cmp_val_total, compute_strategies_with_kernels,
-    eval_kernel, is_truthy, BodyKernel, Pipeline, PipelineBody, Sink, Source, Stage, StageFlow,
-    StageStrategy, TerminalMapCollector,
+    eval_kernel, is_truthy, stage_executor, BodyKernel, Pipeline, PipelineBody, Sink, Source,
+    Stage, StageFlow, StageStrategy, TerminalMapCollector,
 };
 
 use crate::builtins::{
@@ -307,21 +307,6 @@ where
 
 enum LegacyPreIter {
     Owned(std::vec::IntoIter<Val>),
-}
-
-pub(super) fn stage_executor(stage: &Stage) -> Option<BuiltinPipelineExecutor> {
-    stage
-        .builtin_method_metadata()
-        .and_then(|method| method.spec().pipeline_executor)
-        .or_else(|| {
-            if matches!(stage, Stage::Builtin(_)) {
-                Some(BuiltinPipelineExecutor::ElementBuiltin)
-            } else if matches!(stage, Stage::SortedDedup(_)) {
-                Some(BuiltinPipelineExecutor::SortedDedup)
-            } else {
-                None
-            }
-        })
 }
 
 fn apply_adapter_materialized(

@@ -88,7 +88,7 @@ pub use plan::{
 };
 pub(crate) use reducer::ReducerAccumulator;
 pub(crate) use sink_accumulator::SinkAccumulator;
-pub(crate) use stage_flow::StageFlow;
+pub(crate) use stage_flow::{stage_executor, StageFlow};
 
 #[cfg(feature = "simd-json")]
 pub(crate) fn run_tape_field_chain(

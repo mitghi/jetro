@@ -5,7 +5,8 @@ use crate::{
 };
 
 use super::{
-    apply_item_in_env, eval_kernel, legacy_exec, BodyKernel, Stage, StageFlow, TerminalMapCollector,
+    apply_item_in_env, eval_kernel, legacy_exec, stage_executor, BodyKernel, Stage, StageFlow,
+    TerminalMapCollector,
 };
 
 pub(super) fn apply_adapter_streaming<'a>(
@@ -20,7 +21,7 @@ pub(super) fn apply_adapter_streaming<'a>(
     terminal_map_idx: Option<usize>,
     terminal_map_collect: &mut Option<TerminalMapCollector<'a>>,
 ) -> Result<StageFlow<Val>, EvalError> {
-    match legacy_exec::stage_executor(stage) {
+    match stage_executor(stage) {
         Some(BuiltinPipelineExecutor::ElementBuiltin) => Ok(StageFlow::Continue(
             legacy_exec::apply_element_adapter(stage, item),
         )),
