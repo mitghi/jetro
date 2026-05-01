@@ -230,10 +230,20 @@ where
 {
     let plan = terminal_collect_plan(body)?;
     let items = source.array_iter()?;
-    let mut collector = pipeline::TerminalCollector::new(plan.collect_kernel);
+    let mut collector = pipeline::TerminalCollector::new(&plan.collect_kernel);
     let mut op_state: Vec<usize> = vec![0; plan.prefix.len()];
+    let source_demand = pipeline::Pipeline::segment_source_demand(&body.stages, &body.sink)
+        .chain
+        .pull;
+    let mut pulled_inputs = 0usize;
+    let mut emitted_outputs = 0usize;
 
     'outer: for row in items {
+        if matches!(source_demand, PullDemand::FirstInput(n) if pulled_inputs >= n) {
+            break 'outer;
+        }
+        pulled_inputs += 1;
+
         let mut item = row;
         for (op_idx, capability) in plan.prefix.iter().copied().enumerate() {
             match apply_view_stage(item, capability, op_idx, &mut op_state, &body.stage_kernels)? {
@@ -242,37 +252,57 @@ where
                 ViewStageFlow::Stop => break 'outer,
             }
         }
-        collector.push_view_row(&item, plan.collect_kernel)?;
+        collector.push_view_row(&item, &plan.collect_kernel)?;
+        emitted_outputs += 1;
+        if matches!(source_demand, PullDemand::UntilOutput(n) if emitted_outputs >= n) {
+            break 'outer;
+        }
     }
 
     Some(Ok(collector.finish()))
 }
 
-struct TerminalCollectPlan<'a> {
+struct TerminalCollectPlan {
     prefix: Vec<pipeline::ViewStageCapability>,
-    collect_kernel: &'a pipeline::BodyKernel,
+    collect_kernel: pipeline::BodyKernel,
 }
 
-fn terminal_collect_plan(body: &pipeline::PipelineBody) -> Option<TerminalCollectPlan<'_>> {
+fn terminal_collect_plan(body: &pipeline::PipelineBody) -> Option<TerminalCollectPlan> {
     if !matches!(
         body.sink.view_capability(&body.sink_kernels)?,
         pipeline::ViewSinkCapability::Collect
     ) {
         return None;
     }
-    let (last_stage, prefix_stages) = body.stages.split_last()?;
-    let last_idx = prefix_stages.len();
-    let capability = last_stage.view_capability(last_idx, body.stage_kernels.get(last_idx))?;
-    let pipeline::ViewStageCapability::Map { kernel } = capability else {
-        return None;
-    };
-    let collect_kernel = body.stage_kernels.get(kernel)?;
-    if !collect_kernel.is_view_native() {
-        return None;
+
+    if let Some((last_stage, prefix_stages)) = body.stages.split_last() {
+        let last_idx = prefix_stages.len();
+        let capability = last_stage.view_capability(last_idx, body.stage_kernels.get(last_idx))?;
+        if let pipeline::ViewStageCapability::Map { kernel } = capability {
+            let collect_kernel = body.stage_kernels.get(kernel)?;
+            if !collect_kernel.is_view_native() {
+                return None;
+            }
+
+            return Some(TerminalCollectPlan {
+                prefix: terminal_collect_prefix(prefix_stages, body)?,
+                collect_kernel: collect_kernel.clone(),
+            });
+        }
     }
 
-    let mut prefix = Vec::with_capacity(prefix_stages.len());
-    for (idx, stage) in prefix_stages.iter().enumerate() {
+    Some(TerminalCollectPlan {
+        prefix: terminal_collect_prefix(&body.stages, body)?,
+        collect_kernel: pipeline::BodyKernel::Current,
+    })
+}
+
+fn terminal_collect_prefix(
+    stages: &[pipeline::Stage],
+    body: &pipeline::PipelineBody,
+) -> Option<Vec<pipeline::ViewStageCapability>> {
+    let mut prefix = Vec::with_capacity(stages.len());
+    for (idx, stage) in stages.iter().enumerate() {
         let capability = stage.view_capability(idx, body.stage_kernels.get(idx))?;
         if !matches!(
             capability.materialization(),
@@ -280,13 +310,12 @@ fn terminal_collect_plan(body: &pipeline::PipelineBody) -> Option<TerminalCollec
         ) {
             return None;
         }
+        if matches!(capability, pipeline::ViewStageCapability::FlatMap { .. }) {
+            return None;
+        }
         prefix.push(capability);
     }
-
-    Some(TerminalCollectPlan {
-        prefix,
-        collect_kernel,
-    })
+    Some(prefix)
 }
 
 fn run_sort_prefix_then_materialized_suffix<'a, V>(
@@ -560,5 +589,69 @@ mod tests {
         assert_eq!(plan.prefix.len(), 1);
         assert!(matches!(plan.prefix[0], ViewStageCapability::Filter { .. }));
         assert!(matches!(plan.collect_kernel, BodyKernel::Current));
+    }
+
+    #[test]
+    fn terminal_collect_plan_accepts_current_row_collect_without_final_map() {
+        let body = PipelineBody {
+            stages: vec![
+                Stage::Filter(
+                    Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                    crate::builtins::BuiltinViewStage::Filter,
+                ),
+                Stage::Take(
+                    1,
+                    crate::builtins::BuiltinViewStage::Take,
+                    crate::builtins::BuiltinStageMerge::UsizeMin,
+                ),
+            ],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![
+                BodyKernel::CurrentCmpLit(BinOp::Gt, Val::Int(1)),
+                BodyKernel::Generic,
+            ],
+            sink_kernels: Vec::new(),
+        };
+
+        let plan = super::terminal_collect_plan(&body).unwrap();
+
+        assert_eq!(plan.prefix.len(), 2);
+        assert!(matches!(plan.prefix[0], ViewStageCapability::Filter { .. }));
+        assert!(matches!(plan.prefix[1], ViewStageCapability::Take(1)));
+        assert!(matches!(plan.collect_kernel, BodyKernel::Current));
+    }
+
+    #[test]
+    fn terminal_collect_current_row_runner_stops_after_demand_is_met() {
+        let source = CountingView::root(&[1, 2, 3]);
+        let body = PipelineBody {
+            stages: vec![
+                Stage::Filter(
+                    Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                    crate::builtins::BuiltinViewStage::Filter,
+                ),
+                Stage::Take(
+                    1,
+                    crate::builtins::BuiltinViewStage::Take,
+                    crate::builtins::BuiltinStageMerge::UsizeMin,
+                ),
+            ],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![
+                BodyKernel::CurrentCmpLit(BinOp::Gt, Val::Int(1)),
+                BodyKernel::Generic,
+            ],
+            sink_kernels: Vec::new(),
+        };
+
+        let out = super::run_terminal_collect(source.clone(), &body)
+            .unwrap()
+            .unwrap();
+
+        let out_json: serde_json::Value = out.into();
+        assert_eq!(out_json, serde_json::json!([2]));
+        assert_eq!(source.scalar_reads(), 2);
     }
 }
