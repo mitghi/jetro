@@ -11,6 +11,23 @@ pub(crate) trait ValueView<'a>: Clone {
     fn materialize(&self) -> Val;
 }
 
+#[inline]
+pub(crate) fn scalar_view_to_owned_val(view: JsonView<'_>) -> Option<Val> {
+    match view {
+        JsonView::Null => Some(Val::Null),
+        JsonView::Bool(value) => Some(Val::Bool(value)),
+        JsonView::Int(value) => Some(Val::Int(value)),
+        JsonView::UInt(value) => Some(if value <= i64::MAX as u64 {
+            Val::Int(value as i64)
+        } else {
+            Val::Float(value as f64)
+        }),
+        JsonView::Float(value) => Some(Val::Float(value)),
+        JsonView::Str(value) => Some(Val::Str(Arc::from(value))),
+        JsonView::ArrayLen(_) | JsonView::ObjectLen(_) => None,
+    }
+}
+
 #[derive(Clone)]
 pub(crate) enum ValView<'a> {
     Borrowed(&'a Val),
@@ -362,7 +379,7 @@ mod tests {
 
     use serde_json::json;
 
-    use super::{ValView, ValueView};
+    use super::{scalar_view_to_owned_val, ValView, ValueView};
     use crate::util::{json_cmp_binop, JsonView};
     use crate::{ast::BinOp, value::Val};
 
@@ -404,6 +421,17 @@ mod tests {
             serde_json::Value::from(item.materialize()),
             json!({"id": 2})
         );
+    }
+
+    #[test]
+    fn scalar_view_to_owned_val_converts_only_scalars() {
+        assert_eq!(scalar_view_to_owned_val(JsonView::Null), Some(Val::Null));
+        assert_eq!(
+            scalar_view_to_owned_val(JsonView::Str("ada")),
+            Some(Val::Str(Arc::from("ada")))
+        );
+        assert!(scalar_view_to_owned_val(JsonView::ArrayLen(3)).is_none());
+        assert!(scalar_view_to_owned_val(JsonView::ObjectLen(2)).is_none());
     }
 
     #[cfg(feature = "simd-json")]

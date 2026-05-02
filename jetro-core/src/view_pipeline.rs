@@ -6,7 +6,7 @@ use crate::chain_ir::PullDemand;
 use crate::context::{Env, EvalError};
 use crate::pipeline;
 use crate::value::Val;
-use crate::value_view::ValueView;
+use crate::value_view::{scalar_view_to_owned_val, ValueView};
 
 mod stage_flow;
 
@@ -436,21 +436,9 @@ where
 {
     match pipeline::eval_view_kernel(kernel, item)? {
         pipeline::ViewKernelValue::Owned(value) => Some(value),
-        pipeline::ViewKernelValue::View(view) => match view.scalar() {
-            crate::util::JsonView::Null => Some(Val::Null),
-            crate::util::JsonView::Bool(value) => Some(Val::Bool(value)),
-            crate::util::JsonView::Int(value) => Some(Val::Int(value)),
-            crate::util::JsonView::UInt(value) => Some(if value <= i64::MAX as u64 {
-                Val::Int(value as i64)
-            } else {
-                Val::Float(value as f64)
-            }),
-            crate::util::JsonView::Float(value) => Some(Val::Float(value)),
-            crate::util::JsonView::Str(value) => Some(Val::Str(Arc::from(value))),
-            crate::util::JsonView::ArrayLen(_) | crate::util::JsonView::ObjectLen(_) => {
-                Some(view.materialize())
-            }
-        },
+        pipeline::ViewKernelValue::View(view) => {
+            scalar_view_to_owned_val(view.scalar()).or_else(|| Some(view.materialize()))
+        }
     }
 }
 
