@@ -86,7 +86,7 @@ where
                     || {
                         let kernel = project_kernel?;
                         let kernel = body.sink_kernels.get(kernel)?;
-                        eval_value_kernel(item, kernel)
+                        eval_owned_scalar_or_value_kernel(item, kernel)
                     },
                 )?;
                 Some(if sink_done {
@@ -335,7 +335,7 @@ where
 
     let items = source.array_iter()?;
     let winners = match pipeline::bounded_sort_by_key(items, spec.descending, strategy, |row| {
-        eval_sort_key_kernel(row, key_kernel)
+        eval_owned_scalar_or_value_kernel(row, key_kernel)
             .ok_or_else(|| EvalError("view sort: unsupported key".into()))
     }) {
         Ok(winners) => winners,
@@ -420,25 +420,15 @@ where
     }
 }
 
-fn eval_value_kernel<'a, V>(item: &V, kernel: &pipeline::BodyKernel) -> Option<Val>
+fn eval_owned_scalar_or_value_kernel<'a, V>(item: &V, kernel: &pipeline::BodyKernel) -> Option<Val>
 where
     V: ValueView<'a>,
 {
     match pipeline::eval_view_kernel(kernel, item)? {
-        pipeline::ViewKernelValue::View(view) => Some(view.materialize()),
-        pipeline::ViewKernelValue::Owned(value) => Some(value),
-    }
-}
-
-fn eval_sort_key_kernel<'a, V>(item: &V, kernel: &pipeline::BodyKernel) -> Option<Val>
-where
-    V: ValueView<'a>,
-{
-    match pipeline::eval_view_kernel(kernel, item)? {
-        pipeline::ViewKernelValue::Owned(value) => Some(value),
         pipeline::ViewKernelValue::View(view) => {
             scalar_view_to_owned_val(view.scalar()).or_else(|| Some(view.materialize()))
         }
+        pipeline::ViewKernelValue::Owned(value) => Some(value),
     }
 }
 

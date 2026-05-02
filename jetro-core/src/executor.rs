@@ -753,6 +753,22 @@ mod tests {
 
     #[cfg(feature = "simd-json")]
     #[test]
+    fn view_numeric_projection_sink_reads_scalar_keys_without_materializing_subtrees() {
+        let j = Jetro::from_bytes(
+            br#"{"books":[{"score":1},{"score":901},{"score":902},{"score":2}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j.collect(r#"$.books.sum(score)"#).unwrap();
+
+        assert_eq!(out, json!(1806));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
     fn view_flat_map_then_map_reads_from_tape_without_materializing_root_val() {
         let j = Jetro::from_bytes(
             br#"{"data":[{"items":[{"price":10},{"price":20}]},{"items":[{"price":30}]},{"items":[]}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
