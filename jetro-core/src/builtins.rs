@@ -229,6 +229,9 @@ pub enum BuiltinMethod {
 
 impl BuiltinMethod {
     pub fn from_name(name: &str) -> Self {
+        if let Some(method) = crate::builtin_registry::by_name(name).and_then(|id| id.method()) {
+            return method;
+        }
         match name {
             "len" => Self::Len,
             "keys" => Self::Keys,
