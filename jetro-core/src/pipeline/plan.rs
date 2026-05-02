@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use crate::ast::{BinOp, Expr};
-use crate::builtin_registry::BuiltinId;
 use crate::builtins::{
     BuiltinMethod, BuiltinPipelineDemand, BuiltinPipelineMaterialization,
     BuiltinPipelineOrderEffect, BuiltinSelectionPosition, BuiltinSinkAccumulator,
@@ -638,7 +637,7 @@ impl Stage {
 
     pub fn chain_op(&self) -> Option<ChainOp> {
         match self {
-            Stage::CompiledMap(_) => Some(ChainOp::Map),
+            Stage::CompiledMap(_) => Some(ChainOp::builtin(BuiltinMethod::Map)),
             Stage::SortedDedup(_) => None,
             _ => self.pipeline_demand_op(),
         }
@@ -647,20 +646,19 @@ impl Stage {
     fn pipeline_demand_op(&self) -> Option<ChainOp> {
         let method = self.builtin_method_metadata()?;
         let Some(demand) = method.spec().pipeline_demand else {
-            return matches!(self, Stage::Builtin(_))
-                .then_some(ChainOp::Builtin(BuiltinId::from_method(method)));
+            return matches!(self, Stage::Builtin(_)).then_some(ChainOp::builtin(method));
         };
         match demand {
-            BuiltinPipelineDemand::Filter => Some(ChainOp::Filter),
-            BuiltinPipelineDemand::Map => Some(ChainOp::Map),
-            BuiltinPipelineDemand::FlatMap => Some(ChainOp::FlatMap),
-            BuiltinPipelineDemand::TakeWhile => Some(ChainOp::TakeWhile),
+            BuiltinPipelineDemand::Filter => Some(ChainOp::builtin(BuiltinMethod::Filter)),
+            BuiltinPipelineDemand::Map => Some(ChainOp::builtin(BuiltinMethod::Map)),
+            BuiltinPipelineDemand::FlatMap => Some(ChainOp::builtin(BuiltinMethod::FlatMap)),
+            BuiltinPipelineDemand::TakeWhile => Some(ChainOp::builtin(BuiltinMethod::TakeWhile)),
             BuiltinPipelineDemand::Take => match self {
-                Stage::Take(n, _, _) => Some(ChainOp::Take(*n)),
+                Stage::Take(n, _, _) => Some(ChainOp::builtin_usize(BuiltinMethod::Take, *n)),
                 _ => None,
             },
             BuiltinPipelineDemand::Skip => match self {
-                Stage::Skip(n, _, _) => Some(ChainOp::Skip(*n)),
+                Stage::Skip(n, _, _) => Some(ChainOp::builtin_usize(BuiltinMethod::Skip, *n)),
                 _ => None,
             },
         }

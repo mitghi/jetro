@@ -8,9 +8,12 @@
 
 #![allow(dead_code)]
 
-use crate::builtin_registry::{
-    descriptor as builtin_descriptor, propagate_demand as propagate_builtin_demand,
-    BuiltinDemandArg, BuiltinId,
+use crate::{
+    builtin_registry::{
+        descriptor as builtin_descriptor, propagate_demand as propagate_builtin_demand,
+        BuiltinDemandArg, BuiltinId,
+    },
+    builtins::BuiltinMethod,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,31 +118,14 @@ impl Demand {
             order: false,
         }
     }
-
-    fn with_value(self, value: ValueNeed) -> Self {
-        Self {
-            value: self.value.merge(value),
-            ..self
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChainOp {
-    Filter,
-    Map,
-    FlatMap,
-    TakeWhile,
-    Take(usize),
-    Skip(usize),
-    First,
-    Last,
-    Count,
-    Sum,
-    Avg,
-    Min,
-    Max,
-    Builtin(BuiltinId),
+    Builtin {
+        id: BuiltinId,
+        demand_arg: BuiltinDemandArg,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,47 +137,23 @@ pub struct OpSpec {
 }
 
 impl ChainOp {
+    pub fn builtin(method: BuiltinMethod) -> Self {
+        Self::Builtin {
+            id: BuiltinId::from_method(method),
+            demand_arg: BuiltinDemandArg::None,
+        }
+    }
+
+    pub fn builtin_usize(method: BuiltinMethod, n: usize) -> Self {
+        Self::Builtin {
+            id: BuiltinId::from_method(method),
+            demand_arg: BuiltinDemandArg::Usize(n),
+        }
+    }
+
     pub fn spec(&self) -> OpSpec {
-        use Cardinality::*;
-        use ChainOp::*;
         match self {
-            Filter => OpSpec {
-                input: ValueKind::Stream,
-                output: ValueKind::Stream,
-                cardinality: Filtering,
-                preserves_order: true,
-            },
-            Map => OpSpec {
-                input: ValueKind::Stream,
-                output: ValueKind::Stream,
-                cardinality: OneToOne,
-                preserves_order: true,
-            },
-            FlatMap => OpSpec {
-                input: ValueKind::Stream,
-                output: ValueKind::Stream,
-                cardinality: Expanding,
-                preserves_order: true,
-            },
-            TakeWhile => OpSpec {
-                input: ValueKind::Stream,
-                output: ValueKind::Stream,
-                cardinality: Filtering,
-                preserves_order: true,
-            },
-            Take(_) | Skip(_) => OpSpec {
-                input: ValueKind::Stream,
-                output: ValueKind::Stream,
-                cardinality: Bounded,
-                preserves_order: true,
-            },
-            First | Last | Count | Sum | Avg | Min | Max => OpSpec {
-                input: ValueKind::Stream,
-                output: ValueKind::Scalar,
-                cardinality: Reducing,
-                preserves_order: true,
-            },
-            Builtin(id) => {
+            ChainOp::Builtin { id, .. } => {
                 use crate::builtins::BuiltinCategory as Cat;
 
                 let Some(descriptor) = builtin_descriptor(*id) else {
@@ -236,73 +198,8 @@ impl ChainOp {
 
     pub fn propagate_demand(&self, downstream: Demand) -> Demand {
         match self {
-            ChainOp::Filter => propagate_builtin_demand(
-                BuiltinId::from_method(crate::builtins::BuiltinMethod::Filter),
-                BuiltinDemandArg::None,
-                downstream,
-            ),
-            ChainOp::Map => propagate_builtin_demand(
-                BuiltinId::from_method(crate::builtins::BuiltinMethod::Map),
-                BuiltinDemandArg::None,
-                downstream,
-            ),
-            ChainOp::FlatMap => propagate_builtin_demand(
-                BuiltinId::from_method(crate::builtins::BuiltinMethod::FlatMap),
-                BuiltinDemandArg::None,
-                downstream,
-            ),
-            ChainOp::TakeWhile => propagate_builtin_demand(
-                BuiltinId::from_method(crate::builtins::BuiltinMethod::TakeWhile),
-                BuiltinDemandArg::None,
-                downstream,
-            ),
-            ChainOp::Take(n) => propagate_builtin_demand(
-                BuiltinId::from_method(crate::builtins::BuiltinMethod::Take),
-                BuiltinDemandArg::Usize(*n),
-                downstream,
-            ),
-            ChainOp::Skip(n) => propagate_builtin_demand(
-                BuiltinId::from_method(crate::builtins::BuiltinMethod::Skip),
-                BuiltinDemandArg::Usize(*n),
-                downstream,
-            ),
-            ChainOp::First => propagate_builtin_demand(
-                BuiltinId::from_method(crate::builtins::BuiltinMethod::First),
-                BuiltinDemandArg::None,
-                downstream,
-            ),
-            ChainOp::Last => propagate_builtin_demand(
-                BuiltinId::from_method(crate::builtins::BuiltinMethod::Last),
-                BuiltinDemandArg::None,
-                downstream,
-            ),
-            ChainOp::Count => propagate_builtin_demand(
-                BuiltinId::from_method(crate::builtins::BuiltinMethod::Count),
-                BuiltinDemandArg::None,
-                downstream,
-            ),
-            ChainOp::Sum => propagate_builtin_demand(
-                BuiltinId::from_method(crate::builtins::BuiltinMethod::Sum),
-                BuiltinDemandArg::None,
-                downstream,
-            ),
-            ChainOp::Avg => propagate_builtin_demand(
-                BuiltinId::from_method(crate::builtins::BuiltinMethod::Avg),
-                BuiltinDemandArg::None,
-                downstream,
-            ),
-            ChainOp::Min => propagate_builtin_demand(
-                BuiltinId::from_method(crate::builtins::BuiltinMethod::Min),
-                BuiltinDemandArg::None,
-                downstream,
-            ),
-            ChainOp::Max => propagate_builtin_demand(
-                BuiltinId::from_method(crate::builtins::BuiltinMethod::Max),
-                BuiltinDemandArg::None,
-                downstream,
-            ),
-            ChainOp::Builtin(id) => {
-                propagate_builtin_demand(*id, BuiltinDemandArg::None, downstream)
+            ChainOp::Builtin { id, demand_arg } => {
+                propagate_builtin_demand(*id, *demand_arg, downstream)
             }
         }
     }
@@ -341,9 +238,17 @@ pub fn source_demand(ops: &[ChainOp], final_demand: Demand) -> Demand {
 mod tests {
     use super::*;
 
+    fn op(method: BuiltinMethod) -> ChainOp {
+        ChainOp::builtin(method)
+    }
+
+    fn op_usize(method: BuiltinMethod, n: usize) -> ChainOp {
+        ChainOp::builtin_usize(method, n)
+    }
+
     #[test]
     fn filter_first_scans_until_one_output() {
-        let ops = [ChainOp::Filter, ChainOp::First];
+        let ops = [op(BuiltinMethod::Filter), op(BuiltinMethod::First)];
         let demand = source_demand(&ops, Demand::RESULT);
         assert_eq!(demand.pull, PullDemand::UntilOutput(1));
         assert_eq!(demand.value, ValueNeed::Whole);
@@ -351,7 +256,7 @@ mod tests {
 
     #[test]
     fn filter_last_requires_all_ordered_input() {
-        let ops = [ChainOp::Filter, ChainOp::Last];
+        let ops = [op(BuiltinMethod::Filter), op(BuiltinMethod::Last)];
         let demand = source_demand(&ops, Demand::RESULT);
         assert_eq!(demand.pull, PullDemand::All);
         assert_eq!(demand.value, ValueNeed::Whole);
@@ -361,10 +266,10 @@ mod tests {
     #[test]
     fn take_filter_first_caps_upstream_to_take_bound() {
         let ops = [
-            ChainOp::Map,
-            ChainOp::Take(3),
-            ChainOp::Filter,
-            ChainOp::First,
+            op(BuiltinMethod::Map),
+            op_usize(BuiltinMethod::Take, 3),
+            op(BuiltinMethod::Filter),
+            op(BuiltinMethod::First),
         ];
         let steps = propagate_demands(&ops, Demand::RESULT);
         assert_eq!(steps[0].upstream.pull, PullDemand::FirstInput(3));
@@ -376,14 +281,17 @@ mod tests {
 
     #[test]
     fn filter_take_collect_scans_until_take_outputs() {
-        let ops = [ChainOp::Filter, ChainOp::Take(3)];
+        let ops = [op(BuiltinMethod::Filter), op_usize(BuiltinMethod::Take, 3)];
         let demand = source_demand(&ops, Demand::RESULT);
         assert_eq!(demand.pull, PullDemand::UntilOutput(3));
     }
 
     #[test]
     fn take_while_take_collect_needs_only_input_prefix() {
-        let ops = [ChainOp::TakeWhile, ChainOp::Take(3)];
+        let ops = [
+            op(BuiltinMethod::TakeWhile),
+            op_usize(BuiltinMethod::Take, 3),
+        ];
         let demand = source_demand(&ops, Demand::RESULT);
         assert_eq!(demand.pull, PullDemand::FirstInput(3));
         assert_eq!(demand.value, ValueNeed::Whole);
@@ -391,12 +299,12 @@ mod tests {
 
     #[test]
     fn count_does_not_need_whole_values() {
-        let ops = [ChainOp::Map, ChainOp::Count];
+        let ops = [op(BuiltinMethod::Map), op(BuiltinMethod::Count)];
         let demand = source_demand(&ops, Demand::RESULT);
         assert_eq!(demand.pull, PullDemand::All);
         assert_eq!(demand.value, ValueNeed::Whole);
 
-        let ops = [ChainOp::Count];
+        let ops = [op(BuiltinMethod::Count)];
         let demand = source_demand(&ops, Demand::RESULT);
         assert_eq!(demand.value, ValueNeed::None);
     }
