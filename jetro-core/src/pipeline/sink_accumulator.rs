@@ -68,6 +68,10 @@ impl<'a> SinkAccumulator<'a> {
                 self.observe_numeric(&numeric_item);
                 Some(false)
             }
+            BuiltinSinkAccumulator::ApproxDistinct => {
+                self.observe_approx_distinct(&materialize_item());
+                Some(false)
+            }
             BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::First) => {
                 Some(self.observe_first(materialize_item()))
             }
@@ -113,6 +117,10 @@ impl<'a> SinkAccumulator<'a> {
         hll_observe(&mut self.hll, item);
     }
 
+    pub(crate) fn observe_approx_distinct_key(&mut self, key: &str) {
+        hll_observe_key(&mut self.hll, key);
+    }
+
     pub(crate) fn push_projected_numeric(&mut self, numeric_item: &Val) {
         self.observe_reducer(numeric_item);
     }
@@ -147,6 +155,7 @@ impl<'a> SinkAccumulator<'a> {
                 .reducer
                 .expect("reducer sinks construct reducer")
                 .finish(),
+            BuiltinSinkAccumulator::ApproxDistinct => Val::Int(hll_estimate(&self.hll) as i64),
             BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::First) => {
                 self.first.unwrap_or(Val::Null)
             }
@@ -161,21 +170,24 @@ const HLL_P: u32 = 12;
 const HLL_M: usize = 1 << HLL_P;
 
 #[inline]
-fn hll_hash(v: &Val) -> u64 {
-    use crate::util::val_to_key;
+fn hll_hash_key(key: &str) -> u64 {
     use std::collections::hash_map::RandomState;
     use std::hash::{BuildHasher, Hasher};
 
     static STATE: std::sync::OnceLock<RandomState> = std::sync::OnceLock::new();
     let bs = STATE.get_or_init(RandomState::new);
-    let s = val_to_key(v);
     let mut h = bs.build_hasher();
-    h.write(s.as_bytes());
+    h.write(key.as_bytes());
     h.finish()
 }
 
 fn hll_observe(reg: &mut [u8; HLL_M], v: &Val) {
-    let h = hll_hash(v);
+    use crate::util::val_to_key;
+    hll_observe_key(reg, &val_to_key(v));
+}
+
+fn hll_observe_key(reg: &mut [u8; HLL_M], key: &str) {
+    let h = hll_hash_key(key);
     let idx = (h >> (64 - HLL_P)) as usize;
     let w = (h << HLL_P) | (1u64 << (HLL_P - 1));
     let lz = w.leading_zeros() as u8 + 1;

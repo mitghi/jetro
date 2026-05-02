@@ -183,7 +183,9 @@ impl ViewSinkCapability {
 
 fn sink_materialization(spec: BuiltinSinkSpec) -> ViewMaterialization {
     match spec.accumulator {
-        BuiltinSinkAccumulator::Count => ViewMaterialization::Never,
+        BuiltinSinkAccumulator::Count | BuiltinSinkAccumulator::ApproxDistinct => {
+            ViewMaterialization::Never
+        }
         BuiltinSinkAccumulator::Numeric => ViewMaterialization::SinkNumericInput,
         BuiltinSinkAccumulator::SelectOne(_) => ViewMaterialization::SinkFinalRow,
     }

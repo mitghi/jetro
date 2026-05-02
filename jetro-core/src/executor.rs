@@ -810,6 +810,25 @@ mod tests {
 
     #[cfg(feature = "simd-json")]
     #[test]
+    fn view_approx_count_distinct_hashes_tape_scalars_without_materializing_rows() {
+        let j = Jetro::from_bytes(
+            br#"{"books":[{"tag":"a"},{"tag":"b"},{"tag":"a"},{"tag":"c"}],"unused":{"large":[1,2,3,4]}}"#
+                .to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j
+            .collect(r#"$.books.map(tag).approx_count_distinct()"#)
+            .unwrap();
+
+        assert!(out.as_i64().unwrap() >= 3);
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
     fn view_flat_map_then_map_reads_from_tape_without_materializing_root_val() {
         let j = Jetro::from_bytes(
             br#"{"data":[{"items":[{"price":10},{"price":20}]},{"items":[{"price":30}]},{"items":[]}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),

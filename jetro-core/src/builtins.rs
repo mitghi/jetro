@@ -598,6 +598,7 @@ pub struct BuiltinSinkSpec {
 pub enum BuiltinSinkAccumulator {
     Count,
     Numeric,
+    ApproxDistinct,
     SelectOne(BuiltinSelectionPosition),
 }
 
@@ -1067,6 +1068,17 @@ impl BuiltinSpec {
         self
     }
 
+    fn approx_distinct_sink(mut self) -> Self {
+        self.sink = Some(BuiltinSinkSpec {
+            accumulator: BuiltinSinkAccumulator::ApproxDistinct,
+            demand: BuiltinSinkDemand::All {
+                value: BuiltinSinkValueNeed::Whole,
+                order: false,
+            },
+        });
+        self
+    }
+
     fn stage_merge(mut self, merge: BuiltinStageMerge) -> Self {
         self.stage_merge = Some(merge);
         self
@@ -1205,7 +1217,10 @@ impl BuiltinMethod {
                 .view_native()
                 .count_sink()
                 .cost(10.0),
-            Self::ApproxCountDistinct => BuiltinSpec::new(Cat::Reducer, Card::Reducing).cost(10.0),
+            Self::ApproxCountDistinct => BuiltinSpec::new(Cat::Reducer, Card::Reducing)
+                .view_native()
+                .approx_distinct_sink()
+                .cost(10.0),
             Self::Any
             | Self::All
             | Self::FindIndex

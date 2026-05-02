@@ -242,6 +242,7 @@ fn set_terminal_sink(method: BuiltinMethod, sink: &mut Sink) -> Option<()> {
     match spec.sink?.accumulator {
         BuiltinSinkAccumulator::SelectOne(_) => *sink = Sink::Terminal(method),
         BuiltinSinkAccumulator::Count => *sink = Sink::Reducer(ReducerSpec::count()),
+        BuiltinSinkAccumulator::ApproxDistinct => *sink = Sink::ApproxCountDistinct,
         BuiltinSinkAccumulator::Numeric => return None,
     }
     Some(())

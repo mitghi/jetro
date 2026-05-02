@@ -110,8 +110,13 @@ impl Sink {
                 None,
                 None,
             )),
+            Sink::ApproxCountDistinct => Some(ViewSinkCapability::from_sink_spec(
+                BuiltinMethod::ApproxCountDistinct.spec().sink?,
+                None,
+                None,
+                None,
+            )),
             Sink::Reducer(_) => None,
-            Sink::ApproxCountDistinct => None,
         }
     }
 
@@ -119,7 +124,8 @@ impl Sink {
         match self {
             Sink::Terminal(method) => method.spec().sink,
             Sink::Reducer(spec) => spec.method()?.spec().sink,
-            Sink::Collect | Sink::ApproxCountDistinct => None,
+            Sink::ApproxCountDistinct => BuiltinMethod::ApproxCountDistinct.spec().sink,
+            Sink::Collect => None,
         }
     }
 }

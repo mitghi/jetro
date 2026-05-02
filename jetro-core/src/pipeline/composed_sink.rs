@@ -21,6 +21,7 @@ macro_rules! run_composed_sink {
             BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::Last) => {
                 cmp::$runner::<cmp::LastSink>($rows, $chain, $demand)
             }
+            BuiltinSinkAccumulator::ApproxDistinct => return None,
         }
     };
 }
@@ -51,6 +52,7 @@ macro_rules! run_composed_owned_sink {
             BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::Last) => {
                 cmp::$runner::<cmp::LastSink, _>($rows, $chain, $demand)
             }
+            BuiltinSinkAccumulator::ApproxDistinct => return None,
         }
     };
 }
