@@ -10,7 +10,7 @@ use crate::value_view::ValueView;
 
 mod stage_flow;
 
-use stage_flow::{ViewFrontierFlow, ViewStageFlow};
+use stage_flow::ViewFrontierFlow;
 
 pub(crate) fn walk_fields<'a, V>(mut cur: V, keys: &[Arc<str>]) -> V
 where
@@ -244,17 +244,34 @@ where
         }
         pulled_inputs += 1;
 
-        let mut item = row;
+        let mut frontier = vec![row];
+        let mut stop_after_frontier = false;
         for (op_idx, capability) in plan.prefix.iter().copied().enumerate() {
-            match apply_view_stage(item, capability, op_idx, &mut op_state, &body.stage_kernels)? {
-                ViewStageFlow::Keep(next) => item = next,
-                ViewStageFlow::Drop => continue 'outer,
-                ViewStageFlow::Stop => break 'outer,
+            match apply_view_stage_frontier(
+                frontier,
+                capability,
+                op_idx,
+                &mut op_state,
+                &body.stage_kernels,
+            )? {
+                ViewFrontierFlow::Keep(next) if next.is_empty() => continue 'outer,
+                ViewFrontierFlow::Keep(next) => frontier = next,
+                ViewFrontierFlow::Stop(next) if next.is_empty() => break 'outer,
+                ViewFrontierFlow::Stop(next) => {
+                    frontier = next;
+                    stop_after_frontier = true;
+                }
             }
         }
-        collector.push_view_row(&item, &plan.collect_kernel)?;
-        emitted_outputs += 1;
-        if matches!(source_demand, PullDemand::UntilOutput(n) if emitted_outputs >= n) {
+
+        for item in frontier {
+            collector.push_view_row(&item, &plan.collect_kernel)?;
+            emitted_outputs += 1;
+            if matches!(source_demand, PullDemand::UntilOutput(n) if emitted_outputs >= n) {
+                break 'outer;
+            }
+        }
+        if stop_after_frontier {
             break 'outer;
         }
     }
@@ -310,9 +327,6 @@ fn terminal_collect_prefix(
         ) {
             return None;
         }
-        if matches!(capability, pipeline::ViewStageCapability::FlatMap { .. }) {
-            return None;
-        }
         prefix.push(capability);
     }
     Some(prefix)
@@ -365,19 +379,6 @@ where
     let root = Val::Null;
     let env = Env::new(Val::Null);
     Some(suffix.run_with_env(&root, &env, cache))
-}
-
-fn apply_view_stage<'a, V>(
-    item: V,
-    stage: pipeline::ViewStageCapability,
-    op_idx: usize,
-    op_state: &mut [usize],
-    stage_kernels: &[pipeline::BodyKernel],
-) -> Option<ViewStageFlow<V>>
-where
-    V: ValueView<'a>,
-{
-    stage_flow::apply_stage(item, stage, op_idx, op_state, stage_kernels)
 }
 
 fn apply_view_stage_frontier<'a, V>(
@@ -461,7 +462,7 @@ mod tests {
     use crate::pipeline::{BodyKernel, PipelineBody, Sink, Stage, ViewStageCapability};
     use crate::util::JsonView;
     use crate::value::Val;
-    use crate::value_view::ValueView;
+    use crate::value_view::{ValView, ValueView};
 
     #[derive(Clone)]
     struct CountingView {
@@ -653,5 +654,47 @@ mod tests {
         let out_json: serde_json::Value = out.into();
         assert_eq!(out_json, serde_json::json!([2]));
         assert_eq!(source.scalar_reads(), 2);
+    }
+
+    #[test]
+    fn terminal_collect_accepts_flat_map_frontier_prefix() {
+        let source = Val::from(&serde_json::json!([
+            {"items": [1, 2, 3]},
+            {"items": [4]}
+        ]));
+        let body = PipelineBody {
+            stages: vec![
+                Stage::FlatMap(
+                    Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                    crate::builtins::BuiltinViewStage::FlatMap,
+                ),
+                Stage::Take(
+                    2,
+                    crate::builtins::BuiltinViewStage::Take,
+                    crate::builtins::BuiltinStageMerge::UsizeMin,
+                ),
+            ],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![
+                BodyKernel::FieldRead(Arc::from("items")),
+                BodyKernel::Generic,
+            ],
+            sink_kernels: Vec::new(),
+        };
+
+        let plan = super::terminal_collect_plan(&body).unwrap();
+        assert_eq!(plan.prefix.len(), 2);
+        assert!(matches!(
+            plan.prefix[0],
+            ViewStageCapability::FlatMap { .. }
+        ));
+
+        let out = super::run_terminal_collect(ValView::new(&source), &body)
+            .unwrap()
+            .unwrap();
+
+        let out_json: serde_json::Value = out.into();
+        assert_eq!(out_json, serde_json::json!([1, 2]));
     }
 }

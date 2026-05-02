@@ -783,6 +783,22 @@ mod tests {
 
     #[cfg(feature = "simd-json")]
     #[test]
+    fn view_flat_map_take_collects_expanded_rows_without_materializing_root_val() {
+        let j = Jetro::from_bytes(
+            br#"{"data":[{"items":[{"price":10},{"price":20},{"price":30}]},{"items":[{"price":40}]}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j.collect(r#"$.data.flat_map(items).take(2)"#).unwrap();
+
+        assert_eq!(out, json!([{"price": 10}, {"price": 20}]));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 2);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
     fn view_prefix_materializes_boundary_rows_not_root_for_suffix_builtin() {
         let j = Jetro::from_bytes(
             br#"{"people":[{"name":"low","score":1},{"name":"ada","score":901},{"name":"bob","score":902}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
