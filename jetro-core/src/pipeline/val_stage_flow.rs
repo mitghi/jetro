@@ -33,9 +33,9 @@ pub(super) fn apply_adapter_streaming<'a>(
             )?))
         }
         Some(BuiltinPipelineExecutor::Position { take }) => {
-            let n = match stage {
-                Stage::Take(n, _, _) | Stage::Skip(n, _, _) => *n,
-                _ => return Ok(StageFlow::Continue(item)),
+            let n = match stage.descriptor().and_then(|desc| desc.usize_arg) {
+                Some(n) => n,
+                None => return Ok(StageFlow::Continue(item)),
             };
             if take {
                 if stage_taken[stage_idx] >= n {

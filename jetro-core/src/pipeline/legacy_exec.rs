@@ -76,6 +76,15 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
                 .get(stage_idx)
                 .copied()
                 .unwrap_or(StageStrategy::Default);
+            if let Stage::CompiledMap(plan) = stage {
+                let mut out: Vec<Val> = Vec::with_capacity(buf.len());
+                for v in buf.into_iter() {
+                    out.push(run_compiled_map(plan, v)?);
+                }
+                buf = out;
+                continue;
+            }
+
             if let Some(applied) = apply_adapter_materialized(
                 stage,
                 &mut buf,
@@ -87,63 +96,7 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
                 applied?;
                 continue;
             }
-            match stage {
-                Stage::Filter(_, _) | Stage::Map(_, _) => {
-                    unreachable!("adapter-backed stage was not handled by adapter")
-                }
-                Stage::Skip(_, _, _)
-                | Stage::Take(_, _, _)
-                | Stage::Reverse(_)
-                | Stage::Sort(_) => {
-                    unreachable!("adapter-backed stage was not handled by adapter")
-                }
-                Stage::UniqueBy(_) => {
-                    unreachable!("adapter-backed stage was not handled by adapter")
-                }
-                Stage::FlatMap(_, _) => {
-                    unreachable!("adapter-backed stage was not handled by adapter")
-                }
-                Stage::GroupBy(_) => {
-                    unreachable!("adapter-backed stage was not handled by adapter")
-                }
-                Stage::Chunk(_) | Stage::Window(_) => {
-                    unreachable!("adapter-backed stage was not handled by adapter")
-                }
-                Stage::CompiledMap(plan) => {
-                    let mut out: Vec<Val> = Vec::with_capacity(buf.len());
-                    for v in buf.into_iter() {
-                        out.push(run_compiled_map(plan, v)?);
-                    }
-                    buf = out;
-                }
-                // Lambda-bearing barrier-mode stages.
-                Stage::TakeWhile(_) | Stage::DropWhile(_) => {
-                    unreachable!("adapter-backed stage was not handled by adapter")
-                }
-                Stage::IndicesWhere(_)
-                | Stage::FindIndex(_)
-                | Stage::MaxBy(_)
-                | Stage::MinBy(_)
-                | Stage::CountBy(_) => {
-                    unreachable!("adapter-backed stage was not handled by adapter")
-                }
-                Stage::SortedDedup(_) => {
-                    unreachable!("adapter-backed stage was not handled by adapter")
-                }
-                Stage::IndexBy(_) => {
-                    unreachable!("adapter-backed stage was not handled by adapter")
-                }
-                Stage::Split(_)
-                | Stage::Slice(_, _)
-                | Stage::Replace { .. }
-                | Stage::Builtin(_)
-                | Stage::TransformValues(_)
-                | Stage::TransformKeys(_)
-                | Stage::FilterValues(_)
-                | Stage::FilterKeys(_) => {
-                    unreachable!("adapter-backed stage was not handled by adapter")
-                }
-            }
+            unreachable!("descriptor-backed stage was not handled by materialized adapter")
         }
         LegacyPreIter::Owned(buf.into_iter())
     };
@@ -223,11 +176,13 @@ where
     let mut stage_taken: Vec<usize> = vec![0; pipeline.stages.len()];
     let mut stage_skipped: Vec<usize> = vec![0; pipeline.stages.len()];
     let mut sink_acc = SinkAccumulator::new(&pipeline.sink);
-    let terminal_map_idx = if matches!(pipeline.sink, Sink::Collect) {
-        match pipeline.stages.last() {
-            Some(Stage::Map(_, _)) => pipeline.stages.len().checked_sub(1),
-            _ => None,
-        }
+    let terminal_map_idx = if matches!(pipeline.sink, Sink::Collect)
+        && pipeline
+            .stages
+            .last()
+            .is_some_and(Stage::can_use_terminal_map_collector)
+    {
+        pipeline.stages.len().checked_sub(1)
     } else {
         None
     };
@@ -335,10 +290,7 @@ fn apply_adapter_materialized(
             Some(Ok(()))
         }
         BuiltinPipelineExecutor::Position { take } => {
-            let n = match stage {
-                Stage::Take(n, _, _) | Stage::Skip(n, _, _) => *n,
-                _ => return None,
-            };
+            let n = stage.descriptor()?.usize_arg?;
             if take {
                 buf.truncate(n);
             } else if buf.len() <= n {
@@ -580,17 +532,13 @@ fn apply_adapter_materialized(
             Some(Ok(()))
         }
         BuiltinPipelineExecutor::Chunk => {
-            let Stage::Chunk(n) = stage else {
-                return None;
-            };
-            *buf = chunk_apply(buf, *n);
+            let n = stage.descriptor()?.usize_arg?;
+            *buf = chunk_apply(buf, n);
             Some(Ok(()))
         }
         BuiltinPipelineExecutor::Window => {
-            let Stage::Window(n) = stage else {
-                return None;
-            };
-            *buf = window_apply(buf, *n);
+            let n = stage.descriptor()?.usize_arg?;
+            *buf = window_apply(buf, n);
             Some(Ok(()))
         }
         BuiltinPipelineExecutor::PrefixWhile { take } => {

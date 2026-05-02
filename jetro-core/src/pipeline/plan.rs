@@ -811,6 +811,12 @@ impl Stage {
         self.descriptor().and_then(|desc| desc.body)
     }
 
+    pub(crate) fn can_use_terminal_map_collector(&self) -> bool {
+        self.descriptor().is_some_and(|desc| {
+            desc.executor() == Some(BuiltinPipelineExecutor::RowMap) && desc.body.is_some()
+        })
+    }
+
     pub fn chain_op(&self) -> Option<ChainOp> {
         match self {
             Stage::CompiledMap(_) => Some(ChainOp::builtin(BuiltinMethod::Map)),
