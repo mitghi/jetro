@@ -8,7 +8,10 @@
 
 #![allow(dead_code)]
 
-use crate::builtin_registry::{descriptor as builtin_descriptor, BuiltinId};
+use crate::builtin_registry::{
+    descriptor as builtin_descriptor, propagate_demand as propagate_builtin_demand,
+    BuiltinDemandArg, BuiltinId,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValueKind {
@@ -49,7 +52,7 @@ pub enum ValueNeed {
 }
 
 impl ValueNeed {
-    fn merge(self, other: Self) -> Self {
+    pub(crate) fn merge(self, other: Self) -> Self {
         use ValueNeed::*;
         match (self, other) {
             (Whole, _) | (_, Whole) => Whole,
@@ -75,7 +78,7 @@ pub enum PullDemand {
 }
 
 impl PullDemand {
-    fn cap_inputs(self, n: usize) -> Self {
+    pub(crate) fn cap_inputs(self, n: usize) -> Self {
         match self {
             PullDemand::All | PullDemand::UntilOutput(_) => PullDemand::FirstInput(n),
             PullDemand::FirstInput(m) => PullDemand::FirstInput(m.min(n)),
@@ -232,56 +235,75 @@ impl ChainOp {
     }
 
     pub fn propagate_demand(&self, downstream: Demand) -> Demand {
-        use ChainOp::*;
-        use PullDemand::*;
-        use ValueNeed::*;
         match self {
-            Filter => Demand {
-                pull: match downstream.pull {
-                    All => All,
-                    FirstInput(n) | UntilOutput(n) => UntilOutput(n),
-                },
-                value: downstream.value.merge(Predicate),
-                order: downstream.order,
-            },
-            TakeWhile => Demand {
-                pull: match downstream.pull {
-                    All => All,
-                    FirstInput(n) | UntilOutput(n) => FirstInput(n),
-                },
-                value: downstream.value.merge(Predicate),
-                order: downstream.order,
-            },
-            Map => downstream.with_value(Whole),
-            FlatMap => Demand::all(Whole),
-            Take(n) => Demand {
-                pull: downstream.pull.cap_inputs(*n),
-                ..downstream
-            },
-            Skip(n) => Demand {
-                pull: match downstream.pull {
-                    FirstInput(m) => FirstInput(n.saturating_add(m)),
-                    All | UntilOutput(_) => All,
-                },
-                ..downstream
-            },
-            First => Demand::first(Whole),
-            Last => Demand {
-                pull: All,
-                value: Whole,
-                order: true,
-            },
-            Count => Demand {
-                pull: All,
-                value: None,
-                order: false,
-            },
-            Sum | Avg | Min | Max => Demand {
-                pull: All,
-                value: Numeric,
-                order: false,
-            },
-            Builtin(_) => downstream,
+            ChainOp::Filter => propagate_builtin_demand(
+                BuiltinId::from_method(crate::builtins::BuiltinMethod::Filter),
+                BuiltinDemandArg::None,
+                downstream,
+            ),
+            ChainOp::Map => propagate_builtin_demand(
+                BuiltinId::from_method(crate::builtins::BuiltinMethod::Map),
+                BuiltinDemandArg::None,
+                downstream,
+            ),
+            ChainOp::FlatMap => propagate_builtin_demand(
+                BuiltinId::from_method(crate::builtins::BuiltinMethod::FlatMap),
+                BuiltinDemandArg::None,
+                downstream,
+            ),
+            ChainOp::TakeWhile => propagate_builtin_demand(
+                BuiltinId::from_method(crate::builtins::BuiltinMethod::TakeWhile),
+                BuiltinDemandArg::None,
+                downstream,
+            ),
+            ChainOp::Take(n) => propagate_builtin_demand(
+                BuiltinId::from_method(crate::builtins::BuiltinMethod::Take),
+                BuiltinDemandArg::Usize(*n),
+                downstream,
+            ),
+            ChainOp::Skip(n) => propagate_builtin_demand(
+                BuiltinId::from_method(crate::builtins::BuiltinMethod::Skip),
+                BuiltinDemandArg::Usize(*n),
+                downstream,
+            ),
+            ChainOp::First => propagate_builtin_demand(
+                BuiltinId::from_method(crate::builtins::BuiltinMethod::First),
+                BuiltinDemandArg::None,
+                downstream,
+            ),
+            ChainOp::Last => propagate_builtin_demand(
+                BuiltinId::from_method(crate::builtins::BuiltinMethod::Last),
+                BuiltinDemandArg::None,
+                downstream,
+            ),
+            ChainOp::Count => propagate_builtin_demand(
+                BuiltinId::from_method(crate::builtins::BuiltinMethod::Count),
+                BuiltinDemandArg::None,
+                downstream,
+            ),
+            ChainOp::Sum => propagate_builtin_demand(
+                BuiltinId::from_method(crate::builtins::BuiltinMethod::Sum),
+                BuiltinDemandArg::None,
+                downstream,
+            ),
+            ChainOp::Avg => propagate_builtin_demand(
+                BuiltinId::from_method(crate::builtins::BuiltinMethod::Avg),
+                BuiltinDemandArg::None,
+                downstream,
+            ),
+            ChainOp::Min => propagate_builtin_demand(
+                BuiltinId::from_method(crate::builtins::BuiltinMethod::Min),
+                BuiltinDemandArg::None,
+                downstream,
+            ),
+            ChainOp::Max => propagate_builtin_demand(
+                BuiltinId::from_method(crate::builtins::BuiltinMethod::Max),
+                BuiltinDemandArg::None,
+                downstream,
+            ),
+            ChainOp::Builtin(id) => {
+                propagate_builtin_demand(*id, BuiltinDemandArg::None, downstream)
+            }
         }
     }
 }

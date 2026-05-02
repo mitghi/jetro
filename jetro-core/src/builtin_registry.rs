@@ -5,7 +5,10 @@
 //! stable identity new planner/runtime code can carry without depending on the
 //! old enum directly.
 
-use crate::builtins::{BuiltinMethod, BuiltinSpec};
+use crate::{
+    builtins::{BuiltinMethod, BuiltinSpec},
+    chain_ir::{Demand, PullDemand, ValueNeed},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct BuiltinId(pub(crate) u16);
@@ -18,10 +21,115 @@ pub(crate) struct BuiltinDescriptor {
     pub(crate) aliases: &'static [&'static str],
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BuiltinDemandArg {
+    None,
+    Usize(usize),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BuiltinDemandLaw {
+    Identity,
+    FilterLike,
+    TakeWhile,
+    MapLike,
+    FlatMapLike,
+    Take,
+    Skip,
+    First,
+    Last,
+    Count,
+    NumericReducer,
+}
+
 impl BuiltinDescriptor {
     #[inline]
     pub(crate) fn spec(self) -> BuiltinSpec {
         self.method.spec()
+    }
+}
+
+#[inline]
+pub(crate) fn propagate_demand(id: BuiltinId, arg: BuiltinDemandArg, downstream: Demand) -> Demand {
+    match demand_law(id) {
+        BuiltinDemandLaw::Identity => downstream,
+        BuiltinDemandLaw::FilterLike => Demand {
+            pull: match downstream.pull {
+                PullDemand::All => PullDemand::All,
+                PullDemand::FirstInput(n) | PullDemand::UntilOutput(n) => {
+                    PullDemand::UntilOutput(n)
+                }
+            },
+            value: downstream.value.merge(ValueNeed::Predicate),
+            order: downstream.order,
+        },
+        BuiltinDemandLaw::TakeWhile => Demand {
+            pull: match downstream.pull {
+                PullDemand::All => PullDemand::All,
+                PullDemand::FirstInput(n) | PullDemand::UntilOutput(n) => PullDemand::FirstInput(n),
+            },
+            value: downstream.value.merge(ValueNeed::Predicate),
+            order: downstream.order,
+        },
+        BuiltinDemandLaw::MapLike => Demand {
+            value: downstream.value.merge(ValueNeed::Whole),
+            ..downstream
+        },
+        BuiltinDemandLaw::FlatMapLike => Demand::all(ValueNeed::Whole),
+        BuiltinDemandLaw::Take => match arg {
+            BuiltinDemandArg::Usize(n) => Demand {
+                pull: downstream.pull.cap_inputs(n),
+                ..downstream
+            },
+            BuiltinDemandArg::None => downstream,
+        },
+        BuiltinDemandLaw::Skip => match arg {
+            BuiltinDemandArg::Usize(n) => Demand {
+                pull: match downstream.pull {
+                    PullDemand::FirstInput(m) => PullDemand::FirstInput(n.saturating_add(m)),
+                    PullDemand::All | PullDemand::UntilOutput(_) => PullDemand::All,
+                },
+                ..downstream
+            },
+            BuiltinDemandArg::None => downstream,
+        },
+        BuiltinDemandLaw::First => Demand::first(ValueNeed::Whole),
+        BuiltinDemandLaw::Last => Demand {
+            pull: PullDemand::All,
+            value: ValueNeed::Whole,
+            order: true,
+        },
+        BuiltinDemandLaw::Count => Demand {
+            pull: PullDemand::All,
+            value: ValueNeed::None,
+            order: false,
+        },
+        BuiltinDemandLaw::NumericReducer => Demand {
+            pull: PullDemand::All,
+            value: ValueNeed::Numeric,
+            order: false,
+        },
+    }
+}
+
+#[inline]
+fn demand_law(id: BuiltinId) -> BuiltinDemandLaw {
+    match method_from_id(id) {
+        Some(BuiltinMethod::Filter | BuiltinMethod::Find | BuiltinMethod::FindAll) => {
+            BuiltinDemandLaw::FilterLike
+        }
+        Some(BuiltinMethod::TakeWhile) => BuiltinDemandLaw::TakeWhile,
+        Some(BuiltinMethod::Map) => BuiltinDemandLaw::MapLike,
+        Some(BuiltinMethod::FlatMap) => BuiltinDemandLaw::FlatMapLike,
+        Some(BuiltinMethod::Take) => BuiltinDemandLaw::Take,
+        Some(BuiltinMethod::Skip) => BuiltinDemandLaw::Skip,
+        Some(BuiltinMethod::First | BuiltinMethod::FindFirst) => BuiltinDemandLaw::First,
+        Some(BuiltinMethod::Last) => BuiltinDemandLaw::Last,
+        Some(BuiltinMethod::Count) => BuiltinDemandLaw::Count,
+        Some(BuiltinMethod::Sum | BuiltinMethod::Avg | BuiltinMethod::Min | BuiltinMethod::Max) => {
+            BuiltinDemandLaw::NumericReducer
+        }
+        _ => BuiltinDemandLaw::Identity,
     }
 }
 
@@ -309,6 +417,42 @@ mod tests {
         assert_eq!(BuiltinMethod::from_name("exists"), BuiltinMethod::Any);
         assert_eq!(BuiltinMethod::from_name("distinct"), BuiltinMethod::Unique);
         assert_eq!(BuiltinMethod::from_name("lstrip"), BuiltinMethod::TrimLeft);
+    }
+
+    #[test]
+    fn registry_propagates_core_streaming_demands() {
+        let filter = BuiltinId::from_method(BuiltinMethod::Filter);
+        let take = BuiltinId::from_method(BuiltinMethod::Take);
+        let count = BuiltinId::from_method(BuiltinMethod::Count);
+
+        let demand = propagate_demand(take, BuiltinDemandArg::Usize(3), Demand::RESULT);
+        assert_eq!(demand.pull, PullDemand::FirstInput(3));
+
+        let demand = propagate_demand(filter, BuiltinDemandArg::None, demand);
+        assert_eq!(demand.pull, PullDemand::UntilOutput(3));
+        assert_eq!(demand.value, ValueNeed::Whole);
+
+        let demand = propagate_demand(count, BuiltinDemandArg::None, Demand::RESULT);
+        assert_eq!(demand.pull, PullDemand::All);
+        assert_eq!(demand.value, ValueNeed::None);
+        assert!(!demand.order);
+    }
+
+    #[test]
+    fn unknown_builtin_demand_is_identity() {
+        let downstream = Demand {
+            pull: PullDemand::FirstInput(7),
+            value: ValueNeed::Predicate,
+            order: false,
+        };
+        assert_eq!(
+            propagate_demand(
+                BuiltinId::from_method(BuiltinMethod::Unknown),
+                BuiltinDemandArg::None,
+                downstream
+            ),
+            downstream
+        );
     }
 
     #[test]
