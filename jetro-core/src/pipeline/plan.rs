@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use crate::ast::{BinOp, Expr};
 use crate::builtin_registry::{
-    participates_in_demand, pipeline_materialization, pipeline_order_effect, pipeline_shape,
-    BuiltinId,
+    participates_in_demand, pipeline_executor, pipeline_materialization, pipeline_order_effect,
+    pipeline_shape, BuiltinId,
 };
 use crate::builtins::{
     BuiltinMethod, BuiltinPipelineExecutor, BuiltinPipelineMaterialization,
@@ -556,6 +556,12 @@ impl<'a> StageDescriptor<'a> {
     }
 
     #[inline]
+    fn with_executor(mut self, executor: BuiltinPipelineExecutor) -> Self {
+        self.executor_override = Some(executor);
+        self
+    }
+
+    #[inline]
     fn allow_one_to_one_order_fallback(mut self) -> Self {
         self.allow_one_to_one_order_fallback = true;
         self
@@ -610,6 +616,14 @@ impl<'a> StageDescriptor<'a> {
         self.body
             .map(program_ok)
             .unwrap_or(self.receiver_safe_without_body)
+    }
+
+    #[inline]
+    pub(crate) fn executor(self) -> Option<BuiltinPipelineExecutor> {
+        self.executor_override.or_else(|| {
+            self.method
+                .and_then(|method| pipeline_executor(BuiltinId::from_method(method)))
+        })
     }
 }
 
@@ -753,9 +767,11 @@ impl Stage {
             } else {
                 BuiltinMethod::Replace
             })),
-            Stage::Builtin(call) => {
-                Some(StageDescriptor::new(call.method).allow_one_to_one_order_fallback())
-            }
+            Stage::Builtin(call) => Some(
+                StageDescriptor::new(call.method)
+                    .allow_one_to_one_order_fallback()
+                    .with_executor(BuiltinPipelineExecutor::ElementBuiltin),
+            ),
             Stage::SortedDedup(prog) => {
                 let desc = StageDescriptor::special(BuiltinPipelineExecutor::SortedDedup);
                 Some(if let Some(prog) = prog {
