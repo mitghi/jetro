@@ -505,6 +505,7 @@ pub(crate) struct StageDescriptor<'a> {
     pub body: Option<&'a Program>,
     pub usize_arg: Option<usize>,
     pub executor_override: Option<BuiltinPipelineExecutor>,
+    view_stage_override: Option<BuiltinViewStage>,
     allow_one_to_one_order_fallback: bool,
 }
 
@@ -516,6 +517,7 @@ impl<'a> StageDescriptor<'a> {
             body: None,
             usize_arg: None,
             executor_override: None,
+            view_stage_override: None,
             allow_one_to_one_order_fallback: false,
         }
     }
@@ -527,6 +529,7 @@ impl<'a> StageDescriptor<'a> {
             body: None,
             usize_arg: None,
             executor_override: Some(executor),
+            view_stage_override: None,
             allow_one_to_one_order_fallback: false,
         }
     }
@@ -544,6 +547,12 @@ impl<'a> StageDescriptor<'a> {
     }
 
     #[inline]
+    fn with_view_stage(mut self, stage: BuiltinViewStage) -> Self {
+        self.view_stage_override = Some(stage);
+        self
+    }
+
+    #[inline]
     fn allow_one_to_one_order_fallback(mut self) -> Self {
         self.allow_one_to_one_order_fallback = true;
         self
@@ -551,7 +560,8 @@ impl<'a> StageDescriptor<'a> {
 
     #[inline]
     pub(crate) fn view_stage(self) -> Option<BuiltinViewStage> {
-        self.method.and_then(|method| method.spec().view_stage)
+        self.view_stage_override
+            .or_else(|| self.method.and_then(|method| method.spec().view_stage))
     }
 
     #[inline]
@@ -599,7 +609,9 @@ macro_rules! view_body_stage_descriptor {
     ($stage:expr, { $($variant:ident => $method:ident),+ $(,)? }) => {
         match $stage {
             $(
-                Stage::$variant(prog, _) => Some(StageDescriptor::new(BuiltinMethod::$method).body(prog)),
+                Stage::$variant(prog, view_stage) => {
+                    Some(StageDescriptor::new(BuiltinMethod::$method).body(prog).with_view_stage(*view_stage))
+                },
             )+
             _ => None,
         }
@@ -655,10 +667,6 @@ impl Stage {
         )
     }
 
-    pub(crate) fn builtin_method_metadata(&self) -> Option<BuiltinMethod> {
-        self.descriptor().and_then(|desc| desc.method)
-    }
-
     pub(crate) fn descriptor(&self) -> Option<StageDescriptor<'_>> {
         if let Some(desc) = view_body_stage_descriptor!(self, {
             Filter => Filter,
@@ -700,8 +708,16 @@ impl Stage {
         }
 
         match self {
-            Stage::Take(n, _, _) => Some(StageDescriptor::new(BuiltinMethod::Take).usize_arg(*n)),
-            Stage::Skip(n, _, _) => Some(StageDescriptor::new(BuiltinMethod::Skip).usize_arg(*n)),
+            Stage::Take(n, view_stage, _) => Some(
+                StageDescriptor::new(BuiltinMethod::Take)
+                    .usize_arg(*n)
+                    .with_view_stage(*view_stage),
+            ),
+            Stage::Skip(n, view_stage, _) => Some(
+                StageDescriptor::new(BuiltinMethod::Skip)
+                    .usize_arg(*n)
+                    .with_view_stage(*view_stage),
+            ),
             Stage::UniqueBy(Some(prog)) => {
                 Some(StageDescriptor::new(BuiltinMethod::UniqueBy).body(prog))
             }
@@ -840,11 +856,6 @@ impl Stage {
     pub fn shape(&self) -> StageShape {
         use crate::chain_ir::Cardinality;
         match self {
-            Stage::Map(_, stage)
-            | Stage::Filter(_, stage)
-            | Stage::FlatMap(_, stage)
-            | Stage::Take(_, stage, _)
-            | Stage::Skip(_, stage, _) => StageShape::from_view_stage(*stage),
             Stage::CompiledMap(_) => StageShape {
                 cardinality: Cardinality::OneToOne,
                 can_indexed: true,
@@ -857,15 +868,25 @@ impl Stage {
                 cost: 1.0,
                 selectivity: 1.0,
             },
-            _ => self
-                .builtin_method_metadata()
-                .map(StageShape::from_builtin)
-                .unwrap_or(StageShape {
+            _ => self.descriptor().map_or(
+                StageShape {
                     cardinality: Cardinality::OneToOne,
                     can_indexed: false,
                     cost: 1.0,
                     selectivity: 1.0,
-                }),
+                },
+                |desc| {
+                    desc.view_stage()
+                        .map(StageShape::from_view_stage)
+                        .or_else(|| desc.method.map(StageShape::from_builtin))
+                        .unwrap_or(StageShape {
+                            cardinality: Cardinality::OneToOne,
+                            can_indexed: false,
+                            cost: 1.0,
+                            selectivity: 1.0,
+                        })
+                },
+            ),
         }
     }
 
