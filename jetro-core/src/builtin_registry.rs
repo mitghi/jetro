@@ -386,6 +386,99 @@ pub(crate) fn pipeline_sink(id: BuiltinId) -> Option<BuiltinPipelineSink> {
 }
 
 #[inline]
+pub(crate) fn pipeline_element(id: BuiltinId) -> bool {
+    matches!(
+        method_from_id(id),
+        Some(
+            BuiltinMethod::Map
+                | BuiltinMethod::Enumerate
+                | BuiltinMethod::Pairwise
+                | BuiltinMethod::Lines
+                | BuiltinMethod::Words
+                | BuiltinMethod::Chars
+                | BuiltinMethod::CharsOf
+                | BuiltinMethod::Bytes
+                | BuiltinMethod::StartsWith
+                | BuiltinMethod::EndsWith
+                | BuiltinMethod::Matches
+                | BuiltinMethod::IndexOf
+                | BuiltinMethod::LastIndexOf
+                | BuiltinMethod::ByteLen
+                | BuiltinMethod::IsBlank
+                | BuiltinMethod::IsNumeric
+                | BuiltinMethod::IsAlpha
+                | BuiltinMethod::IsAscii
+                | BuiltinMethod::ToNumber
+                | BuiltinMethod::ToBool
+                | BuiltinMethod::Ceil
+                | BuiltinMethod::Floor
+                | BuiltinMethod::Round
+                | BuiltinMethod::Abs
+                | BuiltinMethod::Upper
+                | BuiltinMethod::Lower
+                | BuiltinMethod::Trim
+                | BuiltinMethod::TrimLeft
+                | BuiltinMethod::TrimRight
+                | BuiltinMethod::Capitalize
+                | BuiltinMethod::TitleCase
+                | BuiltinMethod::SnakeCase
+                | BuiltinMethod::KebabCase
+                | BuiltinMethod::CamelCase
+                | BuiltinMethod::PascalCase
+                | BuiltinMethod::ReverseStr
+                | BuiltinMethod::HtmlEscape
+                | BuiltinMethod::HtmlUnescape
+                | BuiltinMethod::UrlEncode
+                | BuiltinMethod::UrlDecode
+                | BuiltinMethod::ToBase64
+                | BuiltinMethod::FromBase64
+                | BuiltinMethod::Dedent
+                | BuiltinMethod::StripPrefix
+                | BuiltinMethod::StripSuffix
+                | BuiltinMethod::Scan
+                | BuiltinMethod::ReMatch
+                | BuiltinMethod::ReMatchFirst
+                | BuiltinMethod::ReMatchAll
+                | BuiltinMethod::ReCaptures
+                | BuiltinMethod::ReCapturesAll
+                | BuiltinMethod::ReSplit
+                | BuiltinMethod::ReReplace
+                | BuiltinMethod::ReReplaceAll
+                | BuiltinMethod::ContainsAny
+                | BuiltinMethod::ContainsAll
+                | BuiltinMethod::Repeat
+                | BuiltinMethod::Indent
+                | BuiltinMethod::PadLeft
+                | BuiltinMethod::PadRight
+                | BuiltinMethod::Center
+                | BuiltinMethod::ParseInt
+                | BuiltinMethod::ParseFloat
+                | BuiltinMethod::ParseBool
+                | BuiltinMethod::Type
+                | BuiltinMethod::ToString
+                | BuiltinMethod::ToJson
+                | BuiltinMethod::Or
+                | BuiltinMethod::Schema
+                | BuiltinMethod::Has
+                | BuiltinMethod::Keys
+                | BuiltinMethod::Values
+                | BuiltinMethod::Entries
+                | BuiltinMethod::GetPath
+                | BuiltinMethod::DelPath
+                | BuiltinMethod::HasPath
+                | BuiltinMethod::Set
+                | BuiltinMethod::Lag
+                | BuiltinMethod::Lead
+                | BuiltinMethod::DiffWindow
+                | BuiltinMethod::PctChange
+                | BuiltinMethod::CumMax
+                | BuiltinMethod::CumMin
+                | BuiltinMethod::Zscore
+        )
+    )
+}
+
+#[inline]
 fn demand_law(id: BuiltinId) -> BuiltinDemandLaw {
     match method_from_id(id) {
         Some(BuiltinMethod::Filter | BuiltinMethod::Find | BuiltinMethod::FindAll) => {
@@ -939,6 +1032,31 @@ mod tests {
             pipeline_sink(BuiltinId::from_method(BuiltinMethod::Count)),
             None
         );
+    }
+
+    #[test]
+    fn registry_drives_pipeline_element_classification() {
+        for method in [
+            BuiltinMethod::Upper,
+            BuiltinMethod::StripPrefix,
+            BuiltinMethod::IsNumeric,
+            BuiltinMethod::Abs,
+            BuiltinMethod::ParseInt,
+            BuiltinMethod::Has,
+            BuiltinMethod::Lines,
+            BuiltinMethod::GetPath,
+        ] {
+            assert!(pipeline_element(BuiltinId::from_method(method)));
+        }
+
+        for method in [
+            BuiltinMethod::Len,
+            BuiltinMethod::FromJson,
+            BuiltinMethod::Sort,
+            BuiltinMethod::Flatten,
+        ] {
+            assert!(!pipeline_element(BuiltinId::from_method(method)));
+        }
     }
 
     #[test]

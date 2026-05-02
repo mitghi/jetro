@@ -558,7 +558,6 @@ pub struct BuiltinSpec {
     pub stage_merge: Option<BuiltinStageMerge>,
     pub cancellation: Option<BuiltinCancellation>,
     pub columnar_stage: Option<BuiltinColumnarStage>,
-    pub pipeline_element: bool,
     pub cost: f64,
 }
 
@@ -931,7 +930,6 @@ impl BuiltinSpec {
             stage_merge: None,
             cancellation: None,
             columnar_stage: None,
-            pipeline_element: false,
             cost: 1.0,
         }
     }
@@ -1011,11 +1009,6 @@ impl BuiltinSpec {
         self
     }
 
-    fn pipeline_element(mut self) -> Self {
-        self.pipeline_element = true;
-        self
-    }
-
     fn cost(mut self, cost: f64) -> Self {
         self.cost = cost;
         self
@@ -1059,84 +1052,6 @@ impl BuiltinMethod {
     }
 
     #[inline]
-    fn is_string_transform_pipeline_element(self) -> bool {
-        matches!(
-            self,
-            Self::Upper
-                | Self::Lower
-                | Self::Trim
-                | Self::TrimLeft
-                | Self::TrimRight
-                | Self::Capitalize
-                | Self::TitleCase
-                | Self::SnakeCase
-                | Self::KebabCase
-                | Self::CamelCase
-                | Self::PascalCase
-                | Self::ReverseStr
-                | Self::HtmlEscape
-                | Self::HtmlUnescape
-                | Self::UrlEncode
-                | Self::UrlDecode
-                | Self::ToBase64
-                | Self::FromBase64
-                | Self::Dedent
-        )
-    }
-
-    #[inline]
-    fn is_string_arg_transform_pipeline_element(self) -> bool {
-        matches!(
-            self,
-            Self::StripPrefix
-                | Self::StripSuffix
-                | Self::Scan
-                | Self::ReMatch
-                | Self::ReMatchFirst
-                | Self::ReMatchAll
-                | Self::ReCaptures
-                | Self::ReCapturesAll
-                | Self::ReSplit
-                | Self::ReReplace
-                | Self::ReReplaceAll
-                | Self::ContainsAny
-                | Self::ContainsAll
-                | Self::Repeat
-                | Self::Indent
-                | Self::PadLeft
-                | Self::PadRight
-                | Self::Center
-        )
-    }
-
-    #[inline]
-    fn is_cast_or_type_pipeline_element(self) -> bool {
-        matches!(
-            self,
-            Self::ParseInt
-                | Self::ParseFloat
-                | Self::ParseBool
-                | Self::Type
-                | Self::ToString
-                | Self::ToJson
-        )
-    }
-
-    #[inline]
-    fn is_misc_scalar_pipeline_element(self) -> bool {
-        matches!(self, Self::Or | Self::Schema | Self::Has)
-    }
-
-    #[inline]
-    fn is_scalar_pipeline_element(self) -> bool {
-        self.is_view_scalar_method()
-            || self.is_string_transform_pipeline_element()
-            || self.is_string_arg_transform_pipeline_element()
-            || self.is_cast_or_type_pipeline_element()
-            || self.is_misc_scalar_pipeline_element()
-    }
-
-    #[inline]
     pub fn spec(self) -> BuiltinSpec {
         use BuiltinCardinality as Card;
         use BuiltinCategory as Cat;
@@ -1155,12 +1070,10 @@ impl BuiltinMethod {
                 .indexed()
                 .view_stage(BuiltinViewStage::Map)
                 .columnar_stage(BuiltinColumnarStage::Map)
-                .pipeline_element()
                 .cost(10.0),
             Self::Enumerate | Self::Pairwise => {
                 BuiltinSpec::new(Cat::StreamingOneToOne, Card::OneToOne)
                     .indexed()
-                    .pipeline_element()
                     .cost(10.0)
             }
             Self::FlatMap => BuiltinSpec::new(Cat::StreamingExpand, Card::Expanding)
@@ -1172,9 +1085,7 @@ impl BuiltinMethod {
             }
             Self::Split => BuiltinSpec::new(Cat::StreamingExpand, Card::Expanding).cost(10.0),
             Self::Lines | Self::Words | Self::Chars | Self::CharsOf | Self::Bytes => {
-                BuiltinSpec::new(Cat::StreamingExpand, Card::Expanding)
-                    .pipeline_element()
-                    .cost(10.0)
+                BuiltinSpec::new(Cat::StreamingExpand, Card::Expanding).cost(10.0)
             }
             Self::TakeWhile => BuiltinSpec::new(Cat::StreamingFilter, Card::Filtering).cost(10.0),
             Self::DropWhile => BuiltinSpec::new(Cat::StreamingFilter, Card::Filtering).cost(10.0),
@@ -1277,7 +1188,7 @@ impl BuiltinMethod {
                 }
             }
             Self::Keys | Self::Values | Self::Entries => {
-                BuiltinSpec::new(Cat::Object, Card::OneToOne).pipeline_element()
+                BuiltinSpec::new(Cat::Object, Card::OneToOne)
             }
             Self::ToPairs
             | Self::FromPairs
@@ -1294,9 +1205,7 @@ impl BuiltinMethod {
                 BuiltinSpec::new(Cat::Object, Card::OneToOne)
             }
             Self::GetPath | Self::DelPath | Self::HasPath => {
-                BuiltinSpec::new(Cat::Path, Card::OneToOne)
-                    .indexed()
-                    .pipeline_element()
+                BuiltinSpec::new(Cat::Path, Card::OneToOne).indexed()
             }
             Self::SetPath | Self::DelPaths | Self::FlattenKeys | Self::UnflattenKeys => {
                 BuiltinSpec::new(Cat::Path, Card::OneToOne).indexed()
@@ -1312,9 +1221,7 @@ impl BuiltinMethod {
                 .indexed()
                 .cost(20.0),
             Self::EquiJoin => BuiltinSpec::new(Cat::Relational, Card::Barrier).cost(20.0),
-            Self::Set => BuiltinSpec::new(Cat::Mutation, Card::OneToOne)
-                .indexed()
-                .pipeline_element(),
+            Self::Set => BuiltinSpec::new(Cat::Mutation, Card::OneToOne).indexed(),
             Self::Update => BuiltinSpec::new(Cat::Mutation, Card::OneToOne).indexed(),
             Self::Lag
             | Self::Lead
@@ -1324,7 +1231,6 @@ impl BuiltinMethod {
             | Self::CumMin
             | Self::Zscore => BuiltinSpec::new(Cat::StreamingOneToOne, Card::OneToOne)
                 .indexed()
-                .pipeline_element()
                 .cost(10.0),
             Self::Unknown => BuiltinSpec {
                 pure: false,
@@ -1345,11 +1251,7 @@ impl BuiltinMethod {
                 } else {
                     spec
                 };
-                if self.is_scalar_pipeline_element() {
-                    spec.pipeline_element()
-                } else {
-                    spec
-                }
+                spec
             }
         };
         match self {
@@ -2787,7 +2689,9 @@ pub(crate) fn eval_builtin_no_args(recv: Val, name: &str) -> Result<Val, EvalErr
 impl BuiltinMethod {
     #[inline]
     pub fn is_pipeline_element_method(self) -> bool {
-        self.spec().pipeline_element
+        crate::builtin_registry::pipeline_element(crate::builtin_registry::BuiltinId::from_method(
+            self,
+        ))
     }
 }
 
@@ -6320,23 +6224,6 @@ mod spec_tests {
         let sort = BuiltinMethod::Sort.spec();
         assert_eq!(sort.category, BuiltinCategory::Barrier);
         assert_eq!(sort.cardinality, BuiltinCardinality::Barrier);
-    }
-
-    #[test]
-    fn builtin_specs_drive_pipeline_element_lowering() {
-        assert!(BuiltinMethod::Upper.spec().pipeline_element);
-        assert!(BuiltinMethod::StripPrefix.spec().pipeline_element);
-        assert!(BuiltinMethod::IsNumeric.spec().pipeline_element);
-        assert!(BuiltinMethod::Abs.spec().pipeline_element);
-        assert!(BuiltinMethod::ParseInt.spec().pipeline_element);
-        assert!(BuiltinMethod::Has.spec().pipeline_element);
-        assert!(BuiltinMethod::Lines.spec().pipeline_element);
-        assert!(BuiltinMethod::GetPath.spec().pipeline_element);
-
-        assert!(!BuiltinMethod::Len.spec().pipeline_element);
-        assert!(!BuiltinMethod::FromJson.spec().pipeline_element);
-        assert!(!BuiltinMethod::Sort.spec().pipeline_element);
-        assert!(!BuiltinMethod::Flatten.spec().pipeline_element);
     }
 
     #[test]
