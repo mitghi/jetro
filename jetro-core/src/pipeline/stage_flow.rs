@@ -1,4 +1,7 @@
-use crate::builtins::BuiltinPipelineExecutor;
+use crate::{
+    builtin_registry::{pipeline_executor, BuiltinId},
+    builtins::BuiltinPipelineExecutor,
+};
 
 use super::Stage;
 
@@ -12,7 +15,7 @@ pub(crate) enum StageFlow<T> {
 pub(crate) fn stage_executor(stage: &Stage) -> Option<BuiltinPipelineExecutor> {
     stage
         .builtin_method_metadata()
-        .and_then(|method| method.spec().pipeline_executor)
+        .and_then(|method| pipeline_executor(BuiltinId::from_method(method)))
         .or_else(|| {
             if matches!(stage, Stage::Builtin(_)) {
                 Some(BuiltinPipelineExecutor::ElementBuiltin)

@@ -6,7 +6,7 @@
 //! old enum directly.
 
 use crate::{
-    builtins::{BuiltinMethod, BuiltinSpec},
+    builtins::{BuiltinMethod, BuiltinPipelineExecutor, BuiltinSpec},
     chain_ir::{Demand, PullDemand, ValueNeed},
 };
 
@@ -115,6 +115,48 @@ pub(crate) fn propagate_demand(id: BuiltinId, arg: BuiltinDemandArg, downstream:
 #[inline]
 pub(crate) fn participates_in_demand(id: BuiltinId) -> bool {
     demand_law(id) != BuiltinDemandLaw::Identity
+}
+
+#[inline]
+pub(crate) fn pipeline_executor(id: BuiltinId) -> Option<BuiltinPipelineExecutor> {
+    match method_from_id(id) {
+        Some(BuiltinMethod::Slice | BuiltinMethod::Replace | BuiltinMethod::ReplaceAll) => {
+            Some(BuiltinPipelineExecutor::ElementBuiltin)
+        }
+        Some(BuiltinMethod::Split) => Some(BuiltinPipelineExecutor::ExpandingBuiltin),
+        Some(
+            BuiltinMethod::TransformKeys
+            | BuiltinMethod::TransformValues
+            | BuiltinMethod::FilterKeys
+            | BuiltinMethod::FilterValues,
+        ) => Some(BuiltinPipelineExecutor::ObjectLambda),
+        Some(BuiltinMethod::Filter | BuiltinMethod::Find | BuiltinMethod::FindAll) => {
+            Some(BuiltinPipelineExecutor::RowFilter)
+        }
+        Some(BuiltinMethod::Map) => Some(BuiltinPipelineExecutor::RowMap),
+        Some(BuiltinMethod::FlatMap) => Some(BuiltinPipelineExecutor::RowFlatMap),
+        Some(BuiltinMethod::Take) => Some(BuiltinPipelineExecutor::Position { take: true }),
+        Some(BuiltinMethod::Skip) => Some(BuiltinPipelineExecutor::Position { take: false }),
+        Some(BuiltinMethod::Reverse) => Some(BuiltinPipelineExecutor::Reverse),
+        Some(BuiltinMethod::Sort) => Some(BuiltinPipelineExecutor::Sort),
+        Some(BuiltinMethod::Unique | BuiltinMethod::UniqueBy) => {
+            Some(BuiltinPipelineExecutor::UniqueBy)
+        }
+        Some(BuiltinMethod::GroupBy) => Some(BuiltinPipelineExecutor::GroupBy),
+        Some(BuiltinMethod::CountBy) => Some(BuiltinPipelineExecutor::CountBy),
+        Some(BuiltinMethod::IndexBy) => Some(BuiltinPipelineExecutor::IndexBy),
+        Some(BuiltinMethod::FindIndex) => Some(BuiltinPipelineExecutor::FindIndex),
+        Some(BuiltinMethod::IndicesWhere) => Some(BuiltinPipelineExecutor::IndicesWhere),
+        Some(BuiltinMethod::MaxBy) => Some(BuiltinPipelineExecutor::ArgExtreme { max: true }),
+        Some(BuiltinMethod::MinBy) => Some(BuiltinPipelineExecutor::ArgExtreme { max: false }),
+        Some(BuiltinMethod::Chunk) => Some(BuiltinPipelineExecutor::Chunk),
+        Some(BuiltinMethod::Window) => Some(BuiltinPipelineExecutor::Window),
+        Some(BuiltinMethod::TakeWhile) => Some(BuiltinPipelineExecutor::PrefixWhile { take: true }),
+        Some(BuiltinMethod::DropWhile) => {
+            Some(BuiltinPipelineExecutor::PrefixWhile { take: false })
+        }
+        _ => None,
+    }
 }
 
 #[inline]
@@ -381,6 +423,7 @@ builtin_registry! {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::builtins::BuiltinPipelineExecutor;
 
     #[test]
     fn registry_name_lookup_matches_legacy_lookup() {
@@ -441,6 +484,90 @@ mod tests {
         assert_eq!(demand.pull, PullDemand::All);
         assert_eq!(demand.value, ValueNeed::None);
         assert!(!demand.order);
+    }
+
+    #[test]
+    fn registry_drives_pipeline_executor_classification() {
+        assert_eq!(
+            pipeline_executor(BuiltinId::from_method(BuiltinMethod::Slice)),
+            Some(BuiltinPipelineExecutor::ElementBuiltin)
+        );
+        assert_eq!(
+            pipeline_executor(BuiltinId::from_method(BuiltinMethod::Replace)),
+            Some(BuiltinPipelineExecutor::ElementBuiltin)
+        );
+        assert_eq!(
+            pipeline_executor(BuiltinId::from_method(BuiltinMethod::Split)),
+            Some(BuiltinPipelineExecutor::ExpandingBuiltin)
+        );
+        assert_eq!(
+            pipeline_executor(BuiltinId::from_method(BuiltinMethod::TransformValues)),
+            Some(BuiltinPipelineExecutor::ObjectLambda)
+        );
+        assert_eq!(
+            pipeline_executor(BuiltinId::from_method(BuiltinMethod::Filter)),
+            Some(BuiltinPipelineExecutor::RowFilter)
+        );
+        assert_eq!(
+            pipeline_executor(BuiltinId::from_method(BuiltinMethod::Map)),
+            Some(BuiltinPipelineExecutor::RowMap)
+        );
+        assert_eq!(
+            pipeline_executor(BuiltinId::from_method(BuiltinMethod::FlatMap)),
+            Some(BuiltinPipelineExecutor::RowFlatMap)
+        );
+        assert_eq!(
+            pipeline_executor(BuiltinId::from_method(BuiltinMethod::Take)),
+            Some(BuiltinPipelineExecutor::Position { take: true })
+        );
+        assert_eq!(
+            pipeline_executor(BuiltinId::from_method(BuiltinMethod::Skip)),
+            Some(BuiltinPipelineExecutor::Position { take: false })
+        );
+        assert_eq!(
+            pipeline_executor(BuiltinId::from_method(BuiltinMethod::Reverse)),
+            Some(BuiltinPipelineExecutor::Reverse)
+        );
+        assert_eq!(
+            pipeline_executor(BuiltinId::from_method(BuiltinMethod::Sort)),
+            Some(BuiltinPipelineExecutor::Sort)
+        );
+        assert_eq!(
+            pipeline_executor(BuiltinId::from_method(BuiltinMethod::GroupBy)),
+            Some(BuiltinPipelineExecutor::GroupBy)
+        );
+        assert_eq!(
+            pipeline_executor(BuiltinId::from_method(BuiltinMethod::CountBy)),
+            Some(BuiltinPipelineExecutor::CountBy)
+        );
+        assert_eq!(
+            pipeline_executor(BuiltinId::from_method(BuiltinMethod::MaxBy)),
+            Some(BuiltinPipelineExecutor::ArgExtreme { max: true })
+        );
+        assert_eq!(
+            pipeline_executor(BuiltinId::from_method(BuiltinMethod::FindIndex)),
+            Some(BuiltinPipelineExecutor::FindIndex)
+        );
+        assert_eq!(
+            pipeline_executor(BuiltinId::from_method(BuiltinMethod::UniqueBy)),
+            Some(BuiltinPipelineExecutor::UniqueBy)
+        );
+        assert_eq!(
+            pipeline_executor(BuiltinId::from_method(BuiltinMethod::Chunk)),
+            Some(BuiltinPipelineExecutor::Chunk)
+        );
+        assert_eq!(
+            pipeline_executor(BuiltinId::from_method(BuiltinMethod::Window)),
+            Some(BuiltinPipelineExecutor::Window)
+        );
+        assert_eq!(
+            pipeline_executor(BuiltinId::from_method(BuiltinMethod::TakeWhile)),
+            Some(BuiltinPipelineExecutor::PrefixWhile { take: true })
+        );
+        assert_eq!(
+            pipeline_executor(BuiltinId::from_method(BuiltinMethod::DropWhile)),
+            Some(BuiltinPipelineExecutor::PrefixWhile { take: false })
+        );
     }
 
     #[test]
