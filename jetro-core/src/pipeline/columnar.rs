@@ -22,7 +22,7 @@ pub(super) fn run_uncached(pipeline: &Pipeline, root: &Val) -> Option<Result<Val
 }
 
 fn stage_kind(stage: &Stage) -> Option<BuiltinColumnarStage> {
-    stage.builtin_method_metadata()?.spec().columnar_stage
+    stage.descriptor()?.columnar_stage()
 }
 
 fn stage_kernel<'a>(

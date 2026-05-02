@@ -6,9 +6,9 @@ use crate::builtin_registry::{
     BuiltinId,
 };
 use crate::builtins::{
-    BuiltinMethod, BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect,
-    BuiltinSelectionPosition, BuiltinSinkAccumulator, BuiltinSinkDemand, BuiltinSinkSpec,
-    BuiltinSinkValueNeed, BuiltinViewStage,
+    BuiltinMethod, BuiltinPipelineExecutor, BuiltinPipelineMaterialization,
+    BuiltinPipelineOrderEffect, BuiltinSelectionPosition, BuiltinSinkAccumulator,
+    BuiltinSinkDemand, BuiltinSinkSpec, BuiltinSinkValueNeed, BuiltinViewStage,
 };
 use crate::chain_ir::{ChainOp, Demand as ChainDemand, PullDemand, ValueNeed};
 use crate::vm::{CompiledObjEntry, Opcode, Program};
@@ -499,6 +499,91 @@ impl StageShape {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct StageDescriptor<'a> {
+    pub method: Option<BuiltinMethod>,
+    pub body: Option<&'a Program>,
+    pub usize_arg: Option<usize>,
+    pub executor_override: Option<BuiltinPipelineExecutor>,
+    allow_one_to_one_order_fallback: bool,
+}
+
+impl<'a> StageDescriptor<'a> {
+    #[inline]
+    fn new(method: BuiltinMethod) -> Self {
+        Self {
+            method: Some(method),
+            body: None,
+            usize_arg: None,
+            executor_override: None,
+            allow_one_to_one_order_fallback: false,
+        }
+    }
+
+    #[inline]
+    fn special(executor: BuiltinPipelineExecutor) -> Self {
+        Self {
+            method: None,
+            body: None,
+            usize_arg: None,
+            executor_override: Some(executor),
+            allow_one_to_one_order_fallback: false,
+        }
+    }
+
+    #[inline]
+    fn body(mut self, body: &'a Program) -> Self {
+        self.body = Some(body);
+        self
+    }
+
+    #[inline]
+    fn usize_arg(mut self, usize_arg: usize) -> Self {
+        self.usize_arg = Some(usize_arg);
+        self
+    }
+
+    #[inline]
+    fn allow_one_to_one_order_fallback(mut self) -> Self {
+        self.allow_one_to_one_order_fallback = true;
+        self
+    }
+
+    #[inline]
+    pub(crate) fn view_stage(self) -> Option<BuiltinViewStage> {
+        self.method.and_then(|method| method.spec().view_stage)
+    }
+
+    #[inline]
+    pub(crate) fn columnar_stage(self) -> Option<crate::builtins::BuiltinColumnarStage> {
+        self.method.and_then(|method| method.spec().columnar_stage)
+    }
+
+    #[inline]
+    pub(crate) fn pipeline_materialization(self) -> BuiltinPipelineMaterialization {
+        self.method
+            .map(|method| pipeline_materialization(BuiltinId::from_method(method)))
+            .unwrap_or(BuiltinPipelineMaterialization::Streaming)
+    }
+
+    #[inline]
+    pub(crate) fn pipeline_order_effect(self) -> BuiltinPipelineOrderEffect {
+        let Some(method) = self.method else {
+            return BuiltinPipelineOrderEffect::Blocks;
+        };
+        let spec = method.spec();
+        if let Some(effect) = pipeline_order_effect(BuiltinId::from_method(method)) {
+            return effect;
+        }
+        if self.allow_one_to_one_order_fallback
+            && spec.cardinality == crate::builtins::BuiltinCardinality::OneToOne
+        {
+            return BuiltinPipelineOrderEffect::Preserves;
+        }
+        BuiltinPipelineOrderEffect::Blocks
+    }
+}
+
 impl Stage {
     pub(crate) fn is_composed_barrier(&self) -> bool {
         self.pipeline_materialization() == BuiltinPipelineMaterialization::ComposedBarrier
@@ -544,45 +629,85 @@ impl Stage {
     }
 
     fn view_stage_metadata(&self) -> Option<BuiltinViewStage> {
-        self.builtin_method_metadata()
-            .and_then(|method| method.spec().view_stage)
+        self.descriptor().and_then(StageDescriptor::view_stage)
     }
 
     pub(crate) fn builtin_method_metadata(&self) -> Option<BuiltinMethod> {
+        self.descriptor().and_then(|desc| desc.method)
+    }
+
+    pub(crate) fn descriptor(&self) -> Option<StageDescriptor<'_>> {
         match self {
-            Stage::Filter(_, _) => Some(BuiltinMethod::Filter),
-            Stage::Map(_, _) => Some(BuiltinMethod::Map),
-            Stage::FlatMap(_, _) => Some(BuiltinMethod::FlatMap),
-            Stage::Take(_, _, _) => Some(BuiltinMethod::Take),
-            Stage::Skip(_, _, _) => Some(BuiltinMethod::Skip),
-            Stage::Reverse(_) => Some(BuiltinMethod::Reverse),
-            Stage::UniqueBy(None) => Some(BuiltinMethod::Unique),
-            Stage::UniqueBy(Some(_)) => Some(BuiltinMethod::UniqueBy),
-            Stage::Sort(_) => Some(BuiltinMethod::Sort),
-            Stage::GroupBy(_) => Some(BuiltinMethod::GroupBy),
-            Stage::Split(_) => Some(BuiltinMethod::Split),
-            Stage::Slice(_, _) => Some(BuiltinMethod::Slice),
-            Stage::Replace { all, .. } => Some(if *all {
+            Stage::Filter(prog, _) => Some(StageDescriptor::new(BuiltinMethod::Filter).body(prog)),
+            Stage::Map(prog, _) => Some(StageDescriptor::new(BuiltinMethod::Map).body(prog)),
+            Stage::FlatMap(prog, _) => {
+                Some(StageDescriptor::new(BuiltinMethod::FlatMap).body(prog))
+            }
+            Stage::Take(n, _, _) => Some(StageDescriptor::new(BuiltinMethod::Take).usize_arg(*n)),
+            Stage::Skip(n, _, _) => Some(StageDescriptor::new(BuiltinMethod::Skip).usize_arg(*n)),
+            Stage::Reverse(_) => Some(StageDescriptor::new(BuiltinMethod::Reverse)),
+            Stage::UniqueBy(None) => Some(StageDescriptor::new(BuiltinMethod::Unique)),
+            Stage::UniqueBy(Some(prog)) => {
+                Some(StageDescriptor::new(BuiltinMethod::UniqueBy).body(prog))
+            }
+            Stage::Sort(super::SortSpec { key, .. }) => {
+                let desc = StageDescriptor::new(BuiltinMethod::Sort);
+                Some(if let Some(prog) = key {
+                    desc.body(prog)
+                } else {
+                    desc
+                })
+            }
+            Stage::GroupBy(prog) => Some(StageDescriptor::new(BuiltinMethod::GroupBy).body(prog)),
+            Stage::Split(_) => Some(StageDescriptor::new(BuiltinMethod::Split)),
+            Stage::Slice(_, _) => Some(StageDescriptor::new(BuiltinMethod::Slice)),
+            Stage::Replace { all, .. } => Some(StageDescriptor::new(if *all {
                 BuiltinMethod::ReplaceAll
             } else {
                 BuiltinMethod::Replace
-            }),
-            Stage::Chunk(_) => Some(BuiltinMethod::Chunk),
-            Stage::Window(_) => Some(BuiltinMethod::Window),
-            Stage::TakeWhile(_) => Some(BuiltinMethod::TakeWhile),
-            Stage::DropWhile(_) => Some(BuiltinMethod::DropWhile),
-            Stage::IndicesWhere(_) => Some(BuiltinMethod::IndicesWhere),
-            Stage::FindIndex(_) => Some(BuiltinMethod::FindIndex),
-            Stage::MaxBy(_) => Some(BuiltinMethod::MaxBy),
-            Stage::MinBy(_) => Some(BuiltinMethod::MinBy),
-            Stage::TransformValues(_) => Some(BuiltinMethod::TransformValues),
-            Stage::TransformKeys(_) => Some(BuiltinMethod::TransformKeys),
-            Stage::FilterValues(_) => Some(BuiltinMethod::FilterValues),
-            Stage::FilterKeys(_) => Some(BuiltinMethod::FilterKeys),
-            Stage::CountBy(_) => Some(BuiltinMethod::CountBy),
-            Stage::IndexBy(_) => Some(BuiltinMethod::IndexBy),
-            Stage::Builtin(call) => Some(call.method),
-            Stage::CompiledMap(_) | Stage::SortedDedup(_) => None,
+            })),
+            Stage::Chunk(n) => Some(StageDescriptor::new(BuiltinMethod::Chunk).usize_arg(*n)),
+            Stage::Window(n) => Some(StageDescriptor::new(BuiltinMethod::Window).usize_arg(*n)),
+            Stage::TakeWhile(prog) => {
+                Some(StageDescriptor::new(BuiltinMethod::TakeWhile).body(prog))
+            }
+            Stage::DropWhile(prog) => {
+                Some(StageDescriptor::new(BuiltinMethod::DropWhile).body(prog))
+            }
+            Stage::IndicesWhere(prog) => {
+                Some(StageDescriptor::new(BuiltinMethod::IndicesWhere).body(prog))
+            }
+            Stage::FindIndex(prog) => {
+                Some(StageDescriptor::new(BuiltinMethod::FindIndex).body(prog))
+            }
+            Stage::MaxBy(prog) => Some(StageDescriptor::new(BuiltinMethod::MaxBy).body(prog)),
+            Stage::MinBy(prog) => Some(StageDescriptor::new(BuiltinMethod::MinBy).body(prog)),
+            Stage::TransformValues(prog) => {
+                Some(StageDescriptor::new(BuiltinMethod::TransformValues).body(prog))
+            }
+            Stage::TransformKeys(prog) => {
+                Some(StageDescriptor::new(BuiltinMethod::TransformKeys).body(prog))
+            }
+            Stage::FilterValues(prog) => {
+                Some(StageDescriptor::new(BuiltinMethod::FilterValues).body(prog))
+            }
+            Stage::FilterKeys(prog) => {
+                Some(StageDescriptor::new(BuiltinMethod::FilterKeys).body(prog))
+            }
+            Stage::CountBy(prog) => Some(StageDescriptor::new(BuiltinMethod::CountBy).body(prog)),
+            Stage::IndexBy(prog) => Some(StageDescriptor::new(BuiltinMethod::IndexBy).body(prog)),
+            Stage::Builtin(call) => {
+                Some(StageDescriptor::new(call.method).allow_one_to_one_order_fallback())
+            }
+            Stage::SortedDedup(prog) => {
+                let desc = StageDescriptor::special(BuiltinPipelineExecutor::SortedDedup);
+                Some(if let Some(prog) = prog {
+                    desc.body(prog)
+                } else {
+                    desc
+                })
+            }
+            Stage::CompiledMap(_) => None,
         }
     }
 
@@ -591,8 +716,8 @@ impl Stage {
             Stage::CompiledMap(_) => BuiltinPipelineMaterialization::Streaming,
             Stage::SortedDedup(_) => BuiltinPipelineMaterialization::LegacyMaterialized,
             _ => self
-                .builtin_method_metadata()
-                .map(|method| pipeline_materialization(BuiltinId::from_method(method)))
+                .descriptor()
+                .map(StageDescriptor::pipeline_materialization)
                 .unwrap_or(BuiltinPipelineMaterialization::Streaming),
         }
     }
@@ -623,30 +748,7 @@ impl Stage {
     }
 
     pub(crate) fn body_program(&self) -> Option<&crate::vm::Program> {
-        match self {
-            Stage::Filter(prog, _)
-            | Stage::Map(prog, _)
-            | Stage::FlatMap(prog, _)
-            | Stage::Sort(super::SortSpec {
-                key: Some(prog), ..
-            })
-            | Stage::UniqueBy(Some(prog))
-            | Stage::GroupBy(prog)
-            | Stage::TakeWhile(prog)
-            | Stage::DropWhile(prog)
-            | Stage::IndicesWhere(prog)
-            | Stage::FindIndex(prog)
-            | Stage::MaxBy(prog)
-            | Stage::MinBy(prog)
-            | Stage::TransformValues(prog)
-            | Stage::TransformKeys(prog)
-            | Stage::FilterValues(prog)
-            | Stage::FilterKeys(prog)
-            | Stage::CountBy(prog)
-            | Stage::IndexBy(prog)
-            | Stage::SortedDedup(Some(prog)) => Some(prog),
-            _ => None,
-        }
+        self.descriptor().and_then(|desc| desc.body)
     }
 
     pub fn chain_op(&self) -> Option<ChainOp> {
@@ -658,10 +760,10 @@ impl Stage {
     }
 
     fn chain_demand_op(&self) -> Option<ChainOp> {
-        let method = self.builtin_method_metadata()?;
+        let desc = self.descriptor()?;
+        let method = desc.method?;
         match self {
-            Stage::Take(n, _, _) => Some(ChainOp::builtin_usize(method, *n)),
-            Stage::Skip(n, _, _) => Some(ChainOp::builtin_usize(method, *n)),
+            _ if desc.usize_arg.is_some() => Some(ChainOp::builtin_usize(method, desc.usize_arg?)),
             Stage::Builtin(_) => Some(ChainOp::builtin(method)),
             _ if participates_in_demand(BuiltinId::from_method(method)) => {
                 Some(ChainOp::builtin(method))
@@ -705,21 +807,10 @@ impl Stage {
         match self {
             Stage::CompiledMap(_) => BuiltinPipelineOrderEffect::Preserves,
             Stage::SortedDedup(_) => BuiltinPipelineOrderEffect::Blocks,
-            _ => {
-                let Some(method) = self.builtin_method_metadata() else {
-                    return BuiltinPipelineOrderEffect::Blocks;
-                };
-                let spec = method.spec();
-                if let Some(effect) = pipeline_order_effect(BuiltinId::from_method(method)) {
-                    return effect;
-                }
-                if matches!(self, Stage::Builtin(_))
-                    && spec.cardinality == crate::builtins::BuiltinCardinality::OneToOne
-                {
-                    return BuiltinPipelineOrderEffect::Preserves;
-                }
-                BuiltinPipelineOrderEffect::Blocks
-            }
+            _ => self
+                .descriptor()
+                .map(StageDescriptor::pipeline_order_effect)
+                .unwrap_or(BuiltinPipelineOrderEffect::Blocks),
         }
     }
 

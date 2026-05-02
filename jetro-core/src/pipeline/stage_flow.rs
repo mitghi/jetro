@@ -13,16 +13,13 @@ pub(crate) enum StageFlow<T> {
 }
 
 pub(crate) fn stage_executor(stage: &Stage) -> Option<BuiltinPipelineExecutor> {
-    stage
-        .builtin_method_metadata()
-        .and_then(|method| pipeline_executor(BuiltinId::from_method(method)))
+    let desc = stage.descriptor()?;
+    desc.executor_override
         .or_else(|| {
-            if matches!(stage, Stage::Builtin(_)) {
-                Some(BuiltinPipelineExecutor::ElementBuiltin)
-            } else if matches!(stage, Stage::SortedDedup(_)) {
-                Some(BuiltinPipelineExecutor::SortedDedup)
-            } else {
-                None
-            }
+            desc.method
+                .and_then(|method| pipeline_executor(BuiltinId::from_method(method)))
+        })
+        .or_else(|| {
+            matches!(stage, Stage::Builtin(_)).then_some(BuiltinPipelineExecutor::ElementBuiltin)
         })
 }
