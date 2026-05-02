@@ -584,6 +584,50 @@ impl<'a> StageDescriptor<'a> {
     }
 }
 
+macro_rules! body_stage_descriptor {
+    ($stage:expr, { $($variant:ident => $method:ident),+ $(,)? }) => {
+        match $stage {
+            $(
+                Stage::$variant(prog) => Some(StageDescriptor::new(BuiltinMethod::$method).body(prog)),
+            )+
+            _ => None,
+        }
+    };
+}
+
+macro_rules! view_body_stage_descriptor {
+    ($stage:expr, { $($variant:ident => $method:ident),+ $(,)? }) => {
+        match $stage {
+            $(
+                Stage::$variant(prog, _) => Some(StageDescriptor::new(BuiltinMethod::$method).body(prog)),
+            )+
+            _ => None,
+        }
+    };
+}
+
+macro_rules! usize_stage_descriptor {
+    ($stage:expr, { $($variant:ident => $method:ident),+ $(,)? }) => {
+        match $stage {
+            $(
+                Stage::$variant(n) => Some(StageDescriptor::new(BuiltinMethod::$method).usize_arg(*n)),
+            )+
+            _ => None,
+        }
+    };
+}
+
+macro_rules! method_stage_descriptor {
+    ($stage:expr, { $($pattern:pat => $method:ident),+ $(,)? }) => {
+        match $stage {
+            $(
+                $pattern => Some(StageDescriptor::new(BuiltinMethod::$method)),
+            )+
+            _ => None,
+        }
+    };
+}
+
 impl Stage {
     pub(crate) fn is_composed_barrier(&self) -> bool {
         self.pipeline_materialization() == BuiltinPipelineMaterialization::ComposedBarrier
@@ -616,16 +660,48 @@ impl Stage {
     }
 
     pub(crate) fn descriptor(&self) -> Option<StageDescriptor<'_>> {
+        if let Some(desc) = view_body_stage_descriptor!(self, {
+            Filter => Filter,
+            Map => Map,
+            FlatMap => FlatMap,
+        }) {
+            return Some(desc);
+        }
+        if let Some(desc) = body_stage_descriptor!(self, {
+            GroupBy => GroupBy,
+            TakeWhile => TakeWhile,
+            DropWhile => DropWhile,
+            IndicesWhere => IndicesWhere,
+            FindIndex => FindIndex,
+            MaxBy => MaxBy,
+            MinBy => MinBy,
+            TransformValues => TransformValues,
+            TransformKeys => TransformKeys,
+            FilterValues => FilterValues,
+            FilterKeys => FilterKeys,
+            CountBy => CountBy,
+            IndexBy => IndexBy,
+        }) {
+            return Some(desc);
+        }
+        if let Some(desc) = usize_stage_descriptor!(self, {
+            Chunk => Chunk,
+            Window => Window,
+        }) {
+            return Some(desc);
+        }
+        if let Some(desc) = method_stage_descriptor!(self, {
+            Stage::Reverse(_) => Reverse,
+            Stage::UniqueBy(None) => Unique,
+            Stage::Split(_) => Split,
+            Stage::Slice(_, _) => Slice,
+        }) {
+            return Some(desc);
+        }
+
         match self {
-            Stage::Filter(prog, _) => Some(StageDescriptor::new(BuiltinMethod::Filter).body(prog)),
-            Stage::Map(prog, _) => Some(StageDescriptor::new(BuiltinMethod::Map).body(prog)),
-            Stage::FlatMap(prog, _) => {
-                Some(StageDescriptor::new(BuiltinMethod::FlatMap).body(prog))
-            }
             Stage::Take(n, _, _) => Some(StageDescriptor::new(BuiltinMethod::Take).usize_arg(*n)),
             Stage::Skip(n, _, _) => Some(StageDescriptor::new(BuiltinMethod::Skip).usize_arg(*n)),
-            Stage::Reverse(_) => Some(StageDescriptor::new(BuiltinMethod::Reverse)),
-            Stage::UniqueBy(None) => Some(StageDescriptor::new(BuiltinMethod::Unique)),
             Stage::UniqueBy(Some(prog)) => {
                 Some(StageDescriptor::new(BuiltinMethod::UniqueBy).body(prog))
             }
@@ -637,44 +713,11 @@ impl Stage {
                     desc
                 })
             }
-            Stage::GroupBy(prog) => Some(StageDescriptor::new(BuiltinMethod::GroupBy).body(prog)),
-            Stage::Split(_) => Some(StageDescriptor::new(BuiltinMethod::Split)),
-            Stage::Slice(_, _) => Some(StageDescriptor::new(BuiltinMethod::Slice)),
             Stage::Replace { all, .. } => Some(StageDescriptor::new(if *all {
                 BuiltinMethod::ReplaceAll
             } else {
                 BuiltinMethod::Replace
             })),
-            Stage::Chunk(n) => Some(StageDescriptor::new(BuiltinMethod::Chunk).usize_arg(*n)),
-            Stage::Window(n) => Some(StageDescriptor::new(BuiltinMethod::Window).usize_arg(*n)),
-            Stage::TakeWhile(prog) => {
-                Some(StageDescriptor::new(BuiltinMethod::TakeWhile).body(prog))
-            }
-            Stage::DropWhile(prog) => {
-                Some(StageDescriptor::new(BuiltinMethod::DropWhile).body(prog))
-            }
-            Stage::IndicesWhere(prog) => {
-                Some(StageDescriptor::new(BuiltinMethod::IndicesWhere).body(prog))
-            }
-            Stage::FindIndex(prog) => {
-                Some(StageDescriptor::new(BuiltinMethod::FindIndex).body(prog))
-            }
-            Stage::MaxBy(prog) => Some(StageDescriptor::new(BuiltinMethod::MaxBy).body(prog)),
-            Stage::MinBy(prog) => Some(StageDescriptor::new(BuiltinMethod::MinBy).body(prog)),
-            Stage::TransformValues(prog) => {
-                Some(StageDescriptor::new(BuiltinMethod::TransformValues).body(prog))
-            }
-            Stage::TransformKeys(prog) => {
-                Some(StageDescriptor::new(BuiltinMethod::TransformKeys).body(prog))
-            }
-            Stage::FilterValues(prog) => {
-                Some(StageDescriptor::new(BuiltinMethod::FilterValues).body(prog))
-            }
-            Stage::FilterKeys(prog) => {
-                Some(StageDescriptor::new(BuiltinMethod::FilterKeys).body(prog))
-            }
-            Stage::CountBy(prog) => Some(StageDescriptor::new(BuiltinMethod::CountBy).body(prog)),
-            Stage::IndexBy(prog) => Some(StageDescriptor::new(BuiltinMethod::IndexBy).body(prog)),
             Stage::Builtin(call) => {
                 Some(StageDescriptor::new(call.method).allow_one_to_one_order_fallback())
             }
@@ -687,6 +730,7 @@ impl Stage {
                 })
             }
             Stage::CompiledMap(_) => None,
+            _ => None,
         }
     }
 
