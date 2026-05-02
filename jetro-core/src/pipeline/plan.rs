@@ -601,35 +601,14 @@ impl Stage {
         idx: usize,
         kernel: Option<&BodyKernel>,
     ) -> Option<ViewStageCapability> {
-        match self.view_stage_metadata() {
-            Some(BuiltinViewStage::Filter) if kernel?.is_view_native() => {
-                return Some(ViewStageCapability::Filter { kernel: idx });
-            }
-            Some(BuiltinViewStage::Map) if kernel?.is_view_native() => {
-                return Some(ViewStageCapability::Map { kernel: idx });
-            }
-            Some(BuiltinViewStage::FlatMap) if kernel?.is_view_native() => {
-                return Some(ViewStageCapability::FlatMap { kernel: idx });
-            }
-            Some(BuiltinViewStage::Take) => {
-                let Stage::Take(n, _, _) = self else {
-                    return None;
-                };
-                return Some(ViewStageCapability::Take(*n));
-            }
-            Some(BuiltinViewStage::Skip) => {
-                let Stage::Skip(n, _, _) = self else {
-                    return None;
-                };
-                return Some(ViewStageCapability::Skip(*n));
-            }
-            _ => {}
-        }
-        None
-    }
-
-    fn view_stage_metadata(&self) -> Option<BuiltinViewStage> {
-        self.descriptor().and_then(StageDescriptor::view_stage)
+        let desc = self.descriptor()?;
+        let stage = desc.view_stage()?;
+        ViewStageCapability::from_stage_metadata(
+            stage,
+            desc.usize_arg,
+            idx,
+            kernel.is_some_and(BodyKernel::is_view_native),
+        )
     }
 
     pub(crate) fn builtin_method_metadata(&self) -> Option<BuiltinMethod> {

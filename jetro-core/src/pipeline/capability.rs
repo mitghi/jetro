@@ -48,6 +48,28 @@ pub(crate) enum ViewStageCapability {
 }
 
 impl ViewStageCapability {
+    pub(crate) fn from_stage_metadata(
+        stage: BuiltinViewStage,
+        usize_arg: Option<usize>,
+        kernel_index: usize,
+        kernel_is_view_native: bool,
+    ) -> Option<Self> {
+        match stage {
+            BuiltinViewStage::Filter if kernel_is_view_native => Some(Self::Filter {
+                kernel: kernel_index,
+            }),
+            BuiltinViewStage::Map if kernel_is_view_native => Some(Self::Map {
+                kernel: kernel_index,
+            }),
+            BuiltinViewStage::FlatMap if kernel_is_view_native => Some(Self::FlatMap {
+                kernel: kernel_index,
+            }),
+            BuiltinViewStage::Take => Some(Self::Take(usize_arg?)),
+            BuiltinViewStage::Skip => Some(Self::Skip(usize_arg?)),
+            _ => None,
+        }
+    }
+
     pub(crate) fn view_stage(self) -> BuiltinViewStage {
         match self {
             Self::Filter { .. } => BuiltinViewStage::Filter,
