@@ -51,86 +51,52 @@ where
     V: ValueView<'a>,
 {
     let capabilities = pipeline::view_capabilities(body)?;
-    let items = source.array_iter()?;
-
     let mut sink_acc = pipeline::SinkAccumulator::new(&body.sink);
-    let mut op_state: Vec<usize> = vec![0; capabilities.stages.len()];
     let source_demand = pipeline::Pipeline::segment_source_demand(&body.stages, &body.sink)
         .chain
         .pull;
-    let mut pulled_inputs = 0usize;
-    let mut emitted_outputs = 0usize;
 
-    'outer: for row in items {
-        if matches!(source_demand, PullDemand::FirstInput(n) if pulled_inputs >= n) {
-            break 'outer;
-        }
-        pulled_inputs += 1;
-
-        let mut frontier = vec![row];
-        let mut stop_after_frontier = false;
-        for (op_idx, stage) in capabilities.stages.iter().enumerate() {
-            match apply_view_stage_frontier(
-                frontier,
-                *stage,
-                op_idx,
-                &mut op_state,
-                &body.stage_kernels,
-            )? {
-                ViewFrontierFlow::Keep(next) if next.is_empty() => continue 'outer,
-                ViewFrontierFlow::Keep(next) => frontier = next,
-                ViewFrontierFlow::Stop(next) if next.is_empty() => break 'outer,
-                ViewFrontierFlow::Stop(next) => {
-                    frontier = next;
-                    stop_after_frontier = true;
-                }
+    drive_view_frontier(
+        source,
+        &capabilities.stages,
+        &body.stage_kernels,
+        source_demand,
+        |item| match capabilities.sink {
+            pipeline::ViewSinkCapability::Collect => {
+                debug_assert_eq!(
+                    capabilities.sink.materialization(),
+                    pipeline::ViewMaterialization::SinkOutputRows
+                );
+                sink_acc.observe_collect(item.materialize());
+                Some(ViewRowAction::Emit)
             }
-        }
-
-        for item in frontier {
-            let sink_done = match capabilities.sink {
-                pipeline::ViewSinkCapability::Collect => {
-                    debug_assert_eq!(
-                        capabilities.sink.materialization(),
-                        pipeline::ViewMaterialization::SinkOutputRows
-                    );
-                    sink_acc.observe_collect(item.materialize());
-                    false
+            pipeline::ViewSinkCapability::Builtin {
+                accumulator,
+                predicate_kernel,
+                project_kernel,
+                numeric_op: _,
+                ..
+            } => {
+                if !view_sink_predicate_matches(item, predicate_kernel, &body.sink_kernels)? {
+                    return Some(ViewRowAction::Skip);
                 }
-                pipeline::ViewSinkCapability::Builtin {
+                let sink_done = sink_acc.observe_builtin_lazy(
                     accumulator,
-                    predicate_kernel,
-                    project_kernel,
-                    numeric_op: _,
-                    ..
-                } => {
-                    if !view_sink_predicate_matches(&item, predicate_kernel, &body.sink_kernels)? {
-                        continue;
-                    }
-                    sink_acc.observe_builtin_lazy(
-                        accumulator,
-                        || item.materialize(),
-                        || {
-                            let kernel = project_kernel?;
-                            let kernel = body.sink_kernels.get(kernel)?;
-                            eval_value_kernel(&item, kernel)
-                        },
-                    )?
-                }
-            };
-
-            if sink_done {
-                break 'outer;
+                    || item.materialize(),
+                    || {
+                        let kernel = project_kernel?;
+                        let kernel = body.sink_kernels.get(kernel)?;
+                        eval_value_kernel(item, kernel)
+                    },
+                )?;
+                Some(if sink_done {
+                    ViewRowAction::Stop
+                } else {
+                    ViewRowAction::Emit
+                })
             }
-            emitted_outputs += 1;
-            if matches!(source_demand, PullDemand::UntilOutput(n) if emitted_outputs >= n) {
-                break 'outer;
-            }
-        }
-        if stop_after_frontier {
-            break 'outer;
-        }
-    }
+        },
+    )?;
 
     Some(Ok(sink_acc.finish(false)))
 }
@@ -168,51 +134,21 @@ where
         return None;
     }
 
-    let items = source.array_iter()?;
     let mut boundary_rows = Vec::new();
-    let mut op_state: Vec<usize> = vec![0; prefix.stages.len()];
     let source_demand = pipeline::Pipeline::segment_source_demand(&body.stages, &body.sink)
         .chain
         .pull;
-    let mut pulled_inputs = 0usize;
-    let mut emitted_outputs = 0usize;
 
-    'outer: for row in items {
-        if matches!(source_demand, PullDemand::FirstInput(n) if pulled_inputs >= n) {
-            break 'outer;
-        }
-        pulled_inputs += 1;
-
-        let mut frontier = vec![row];
-        let mut stop_after_frontier = false;
-        for (op_idx, stage) in prefix.stages.iter().enumerate() {
-            match apply_view_stage_frontier(
-                frontier,
-                *stage,
-                op_idx,
-                &mut op_state,
-                &body.stage_kernels,
-            )? {
-                ViewFrontierFlow::Keep(next) if next.is_empty() => continue 'outer,
-                ViewFrontierFlow::Keep(next) => frontier = next,
-                ViewFrontierFlow::Stop(next) if next.is_empty() => break 'outer,
-                ViewFrontierFlow::Stop(next) => {
-                    frontier = next;
-                    stop_after_frontier = true;
-                }
-            }
-        }
-        for item in frontier {
+    drive_view_frontier(
+        source,
+        &prefix.stages,
+        &body.stage_kernels,
+        source_demand,
+        |item| {
             boundary_rows.push(item.materialize());
-            emitted_outputs += 1;
-            if matches!(source_demand, PullDemand::UntilOutput(n) if emitted_outputs >= n) {
-                break 'outer;
-            }
-        }
-        if stop_after_frontier {
-            break 'outer;
-        }
-    }
+            Some(ViewRowAction::Emit)
+        },
+    )?;
 
     let suffix = suffix_body(body, prefix.consumed_stages)
         .with_source(pipeline::Source::Receiver(Val::arr(boundary_rows)));
@@ -229,12 +165,44 @@ where
     V: ValueView<'a>,
 {
     let plan = terminal_collect_plan(body)?;
-    let items = source.array_iter()?;
     let mut collector = pipeline::TerminalCollector::new(&plan.collect_kernel);
-    let mut op_state: Vec<usize> = vec![0; plan.prefix.len()];
     let source_demand = pipeline::Pipeline::segment_source_demand(&body.stages, &body.sink)
         .chain
         .pull;
+
+    drive_view_frontier(
+        source,
+        &plan.prefix,
+        &body.stage_kernels,
+        source_demand,
+        |item| {
+            collector.push_view_row(item, &plan.collect_kernel)?;
+            Some(ViewRowAction::Emit)
+        },
+    )?;
+
+    Some(Ok(collector.finish()))
+}
+
+enum ViewRowAction {
+    Skip,
+    Emit,
+    Stop,
+}
+
+fn drive_view_frontier<'a, V, F>(
+    source: V,
+    stages: &[pipeline::ViewStageCapability],
+    stage_kernels: &[pipeline::BodyKernel],
+    source_demand: PullDemand,
+    mut observe: F,
+) -> Option<()>
+where
+    V: ValueView<'a>,
+    F: FnMut(&V) -> Option<ViewRowAction>,
+{
+    let items = source.array_iter()?;
+    let mut op_state: Vec<usize> = vec![0; stages.len()];
     let mut pulled_inputs = 0usize;
     let mut emitted_outputs = 0usize;
 
@@ -246,14 +214,9 @@ where
 
         let mut frontier = vec![row];
         let mut stop_after_frontier = false;
-        for (op_idx, capability) in plan.prefix.iter().copied().enumerate() {
-            match apply_view_stage_frontier(
-                frontier,
-                capability,
-                op_idx,
-                &mut op_state,
-                &body.stage_kernels,
-            )? {
+        for (op_idx, stage) in stages.iter().copied().enumerate() {
+            match apply_view_stage_frontier(frontier, stage, op_idx, &mut op_state, stage_kernels)?
+            {
                 ViewFrontierFlow::Keep(next) if next.is_empty() => continue 'outer,
                 ViewFrontierFlow::Keep(next) => frontier = next,
                 ViewFrontierFlow::Stop(next) if next.is_empty() => break 'outer,
@@ -265,10 +228,15 @@ where
         }
 
         for item in frontier {
-            collector.push_view_row(&item, &plan.collect_kernel)?;
-            emitted_outputs += 1;
-            if matches!(source_demand, PullDemand::UntilOutput(n) if emitted_outputs >= n) {
-                break 'outer;
+            match observe(&item)? {
+                ViewRowAction::Skip => continue,
+                ViewRowAction::Emit => {
+                    emitted_outputs += 1;
+                    if matches!(source_demand, PullDemand::UntilOutput(n) if emitted_outputs >= n) {
+                        break 'outer;
+                    }
+                }
+                ViewRowAction::Stop => break 'outer,
             }
         }
         if stop_after_frontier {
@@ -276,7 +244,7 @@ where
         }
     }
 
-    Some(Ok(collector.finish()))
+    Some(())
 }
 
 struct TerminalCollectPlan {
