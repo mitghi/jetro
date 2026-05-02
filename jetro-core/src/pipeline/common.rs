@@ -135,64 +135,85 @@ where
     I: IntoIterator<Item = T>,
     F: FnMut(&T) -> Result<Val, EvalError>,
 {
-    let k = match strategy {
-        StageStrategy::SortTopK(k) | StageStrategy::SortBottomK(k) => Some(k),
-        StageStrategy::Default | StageStrategy::SortUntilOutput(_) => None,
-    };
-    let keep_largest = match strategy {
-        StageStrategy::SortTopK(_) => descending,
-        StageStrategy::SortBottomK(_) => !descending,
-        StageStrategy::Default | StageStrategy::SortUntilOutput(_) => false,
-    };
+    let mut sorter = BoundedKeySorter::new(descending, strategy, cmp);
+    for item in items {
+        let key = key_of(&item)?;
+        sorter.push_keyed(key, item);
+    }
+    Ok(sorter.finish())
+}
 
-    let mut keyed: Vec<(Val, T)> = match k {
-        Some(0) => return Ok(Vec::new()),
-        Some(limit) => {
-            let mut top: Vec<(Val, T)> = Vec::with_capacity(limit.saturating_add(1));
-            for item in items {
-                let key = key_of(&item)?;
-                if top.len() < limit {
-                    top.push((key, item));
-                    continue;
-                }
+pub(crate) struct BoundedKeySorter<T> {
+    descending: bool,
+    limit: Option<usize>,
+    keep_largest: bool,
+    cmp: fn(&Val, &Val) -> Ordering,
+    keyed: Vec<(Val, T)>,
+}
+
+impl<T> BoundedKeySorter<T> {
+    pub(crate) fn new(
+        descending: bool,
+        strategy: StageStrategy,
+        cmp: fn(&Val, &Val) -> Ordering,
+    ) -> Self {
+        let k = match strategy {
+            StageStrategy::SortTopK(k) | StageStrategy::SortBottomK(k) => Some(k),
+            StageStrategy::Default | StageStrategy::SortUntilOutput(_) => None,
+        };
+        let keep_largest = match strategy {
+            StageStrategy::SortTopK(_) => descending,
+            StageStrategy::SortBottomK(_) => !descending,
+            StageStrategy::Default | StageStrategy::SortUntilOutput(_) => false,
+        };
+
+        let capacity = k.unwrap_or(0).saturating_add(1);
+        Self {
+            descending,
+            limit: k,
+            keep_largest,
+            cmp,
+            keyed: Vec::with_capacity(capacity),
+        }
+    }
+
+    pub(crate) fn push_keyed(&mut self, key: Val, item: T) {
+        match self.limit {
+            Some(0) => {}
+            Some(limit) if self.keyed.len() >= limit => {
                 let mut worst_idx = 0usize;
-                for (idx, (candidate, _)) in top.iter().enumerate().skip(1) {
-                    let ord = cmp(candidate, &top[worst_idx].0);
-                    let displace = if keep_largest {
-                        ord == std::cmp::Ordering::Less
+                for (idx, (candidate, _)) in self.keyed.iter().enumerate().skip(1) {
+                    let ord = (self.cmp)(candidate, &self.keyed[worst_idx].0);
+                    let displace = if self.keep_largest {
+                        ord == Ordering::Less
                     } else {
-                        ord == std::cmp::Ordering::Greater
+                        ord == Ordering::Greater
                     };
                     if displace {
                         worst_idx = idx;
                     }
                 }
-                let ord = cmp(&key, &top[worst_idx].0);
-                let take = if keep_largest {
-                    ord == std::cmp::Ordering::Greater
+                let ord = (self.cmp)(&key, &self.keyed[worst_idx].0);
+                let take = if self.keep_largest {
+                    ord == Ordering::Greater
                 } else {
-                    ord == std::cmp::Ordering::Less
+                    ord == Ordering::Less
                 };
                 if take {
-                    top[worst_idx] = (key, item);
+                    self.keyed[worst_idx] = (key, item);
                 }
             }
-            top
+            Some(_) | None => self.keyed.push((key, item)),
         }
-        None => {
-            let mut keyed = Vec::new();
-            for item in items {
-                keyed.push((key_of(&item)?, item));
-            }
-            keyed
-        }
-    };
-
-    keyed.sort_by(|a, b| cmp(&a.0, &b.0));
-    if descending {
-        keyed.reverse();
     }
-    Ok(keyed.into_iter().map(|(_, item)| item).collect())
+
+    pub(crate) fn finish(mut self) -> Vec<T> {
+        self.keyed.sort_by(|a, b| (self.cmp)(&a.0, &b.0));
+        if self.descending {
+            self.keyed.reverse();
+        }
+        self.keyed.into_iter().map(|(_, item)| item).collect()
+    }
 }
 
 pub(crate) fn ordered_by_key_cmp<T, I, F>(

@@ -418,41 +418,87 @@ fn run_sort_prefix_then_materialized_suffix<'a, V>(
 where
     V: ValueView<'a>,
 {
-    let pipeline::Stage::Sort(spec) = body.stages.first()? else {
-        return None;
-    };
+    let plan = sort_barrier_plan(body)?;
     let strategies =
         pipeline::compute_strategies_with_kernels(&body.stages, &body.stage_kernels, &body.sink);
-    let strategy = strategies.first().copied()?;
-    if !matches!(
-        strategy,
-        pipeline::StageStrategy::SortTopK(_) | pipeline::StageStrategy::SortBottomK(_)
-    ) {
+    let strategy = strategies
+        .get(plan.sort_stage)
+        .copied()
+        .unwrap_or(pipeline::StageStrategy::Default);
+    if matches!(strategy, pipeline::StageStrategy::SortUntilOutput(_)) {
         return None;
     }
-    if !body.suffix_can_run_with_materialized_receiver(1) {
-        return None;
-    }
-
-    let key_kernel = match spec.key.as_ref() {
-        Some(_) => body.stage_kernels.first()?,
-        None => return None,
-    };
-    if !key_kernel.is_view_native() {
+    if !body.suffix_can_run_with_materialized_receiver(plan.sort_stage + 1) {
         return None;
     }
 
-    let items = source.array_iter()?;
-    let winners = match pipeline::bounded_sort_by_key(items, spec.descending, strategy, |row| {
-        eval_owned_scalar_or_value_kernel(row, key_kernel)
-            .ok_or_else(|| EvalError("view sort: unsupported key".into()))
-    }) {
-        Ok(winners) => winners,
-        Err(err) => return Some(Err(err)),
-    };
+    let mut sorter =
+        pipeline::BoundedKeySorter::new(plan.descending, strategy, pipeline::cmp_val_total);
+    drive_view_frontier(
+        source,
+        &plan.prefix,
+        &body.stage_kernels,
+        PullDemand::All,
+        |item| {
+            let key = view_sort_key(item, plan.key_kernel, &body.stage_kernels)?;
+            sorter.push_keyed(key, item.clone());
+            Some(ViewRowAction::Emit)
+        },
+    )?;
+
+    let winners = sorter.finish();
     let boundary_rows: Vec<Val> = winners.into_iter().map(|row| row.materialize()).collect();
 
-    Some(run_materialized_suffix(body, 1, boundary_rows, cache))
+    Some(run_materialized_suffix(
+        body,
+        plan.sort_stage + 1,
+        boundary_rows,
+        cache,
+    ))
+}
+
+struct SortBarrierPlan {
+    prefix: Vec<pipeline::ViewStageCapability>,
+    sort_stage: usize,
+    key_kernel: Option<usize>,
+    descending: bool,
+}
+
+fn sort_barrier_plan(body: &pipeline::PipelineBody) -> Option<SortBarrierPlan> {
+    let mut prefix = Vec::new();
+    for (idx, stage) in body.stages.iter().enumerate() {
+        match stage {
+            pipeline::Stage::Sort(spec) => {
+                let key_kernel = if spec.key.is_some() {
+                    Some(
+                        body.stage_kernels
+                            .get(idx)?
+                            .is_view_native()
+                            .then_some(idx)?,
+                    )
+                } else {
+                    None
+                };
+                return Some(SortBarrierPlan {
+                    prefix,
+                    sort_stage: idx,
+                    key_kernel,
+                    descending: spec.descending,
+                });
+            }
+            _ => {
+                let capability = stage.view_capability(idx, body.stage_kernels.get(idx))?;
+                if !matches!(
+                    capability.materialization(),
+                    pipeline::ViewMaterialization::Never
+                ) {
+                    return None;
+                }
+                prefix.push(capability);
+            }
+        }
+    }
+    None
 }
 
 fn run_materialized_suffix(
@@ -553,6 +599,20 @@ where
         },
         None => ViewKey::from_view(item.scalar())
             .or_else(|| Some(ViewKey::from_owned(item.materialize()))),
+    }
+}
+
+fn view_sort_key<'a, V>(
+    item: &V,
+    kernel_idx: Option<usize>,
+    stage_kernels: &[pipeline::BodyKernel],
+) -> Option<Val>
+where
+    V: ValueView<'a>,
+{
+    match kernel_idx {
+        Some(idx) => eval_owned_scalar_or_value_kernel(item, stage_kernels.get(idx)?),
+        None => Some(item.materialize()),
     }
 }
 
