@@ -63,6 +63,7 @@ mod plan;
 mod reducer;
 mod row_source;
 mod sink_accumulator;
+mod stage_factory;
 mod stage_flow;
 mod val_stage_flow;
 pub(crate) use capability::{
