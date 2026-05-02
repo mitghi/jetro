@@ -67,8 +67,8 @@ mod stage_factory;
 mod stage_flow;
 mod val_stage_flow;
 pub(crate) use capability::{
-    view_capabilities, view_prefix_capabilities, ViewInputMode, ViewMaterialization,
-    ViewOutputMode, ViewSinkCapability, ViewStageCapability,
+    view_capabilities, view_prefix_capabilities, ViewInputMode, ViewKeyedReducer,
+    ViewMaterialization, ViewOutputMode, ViewSinkCapability, ViewStageCapability,
 };
 pub(crate) use collector::{TerminalCollector, TerminalMapCollector};
 pub(crate) use common::{

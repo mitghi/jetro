@@ -701,6 +701,17 @@ impl Stage {
                 None => Some(ViewStageCapability::Distinct { kernel: None }),
             };
         }
+        if stage == BuiltinViewStage::KeyedReduce {
+            return match (desc.method, desc.body) {
+                (Some(method), Some(_)) if kernel.is_some_and(BodyKernel::is_view_native) => {
+                    Some(ViewStageCapability::KeyedReduce {
+                        kind: crate::pipeline::ViewKeyedReducer::from_method(method)?,
+                        kernel: idx,
+                    })
+                }
+                _ => None,
+            };
+        }
         ViewStageCapability::from_stage_metadata(
             stage,
             desc.usize_arg,

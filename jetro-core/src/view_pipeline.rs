@@ -8,9 +8,12 @@ use crate::pipeline;
 use crate::value::Val;
 use crate::value_view::{scalar_view_to_owned_val, ValueView};
 
+mod key;
+mod reducer_stage;
 mod stage_flow;
 
-use stage_flow::{ViewDistinctKey, ViewFrontierFlow, ViewStageState};
+use key::ViewKey;
+use stage_flow::{ViewFrontierFlow, ViewStageState};
 
 pub(crate) fn walk_fields<'a, V>(mut cur: V, keys: &[Arc<str>]) -> V
 where
@@ -306,74 +309,6 @@ fn terminal_collect_prefix(
     Some(prefix)
 }
 
-struct ReducingStagePlan {
-    prefix: Vec<pipeline::ViewStageCapability>,
-    reducer: ViewStageReducer,
-    consumed_stages: usize,
-}
-
-enum ViewStageReducer {
-    KeyedCount {
-        kernel: usize,
-        counts: indexmap::IndexMap<Arc<str>, i64>,
-    },
-}
-
-impl ViewStageReducer {
-    fn from_capability(capability: pipeline::ViewStageCapability) -> Option<Self> {
-        match capability {
-            pipeline::ViewStageCapability::KeyedCount { kernel } => Some(Self::KeyedCount {
-                kernel,
-                counts: indexmap::IndexMap::new(),
-            }),
-            _ => None,
-        }
-    }
-
-    fn observe<'a, V>(&mut self, item: &V, stage_kernels: &[pipeline::BodyKernel]) -> Option<()>
-    where
-        V: ValueView<'a>,
-    {
-        match self {
-            Self::KeyedCount { kernel, counts } => {
-                let key = eval_key_kernel(item, stage_kernels.get(*kernel)?)?;
-                *counts.entry(key).or_insert(0) += 1;
-                Some(())
-            }
-        }
-    }
-
-    fn finish(self) -> Val {
-        match self {
-            Self::KeyedCount { counts, .. } => Val::obj(
-                counts
-                    .into_iter()
-                    .map(|(key, count)| (key, Val::Int(count)))
-                    .collect(),
-            ),
-        }
-    }
-}
-
-fn reducing_stage_plan(body: &pipeline::PipelineBody) -> Option<ReducingStagePlan> {
-    let mut prefix = Vec::new();
-    for (idx, stage) in body.stages.iter().enumerate() {
-        let capability = stage.view_capability(idx, body.stage_kernels.get(idx))?;
-        match capability.materialization() {
-            pipeline::ViewMaterialization::Never => prefix.push(capability),
-            pipeline::ViewMaterialization::StageFinalValue => {
-                return Some(ReducingStagePlan {
-                    prefix,
-                    reducer: ViewStageReducer::from_capability(capability)?,
-                    consumed_stages: idx + 1,
-                });
-            }
-            _ => return None,
-        }
-    }
-    None
-}
-
 fn run_reducing_stage_prefix_then_materialized_suffix<'a, V>(
     source: V,
     body: &pipeline::PipelineBody,
@@ -382,7 +317,7 @@ fn run_reducing_stage_prefix_then_materialized_suffix<'a, V>(
 where
     V: ValueView<'a>,
 {
-    let mut plan = reducing_stage_plan(body)?;
+    let mut plan = reducer_stage::plan(body)?;
     if !body.suffix_can_run_with_materialized_receiver(plan.consumed_stages) {
         return None;
     }
@@ -541,49 +476,18 @@ where
     }
 }
 
-fn eval_key_kernel<'a, V>(item: &V, kernel: &pipeline::BodyKernel) -> Option<Arc<str>>
-where
-    V: ValueView<'a>,
-{
-    match pipeline::eval_view_kernel(kernel, item)? {
-        pipeline::ViewKernelValue::View(view) => json_view_key(view.scalar()).or_else(|| {
-            Some(Arc::from(
-                crate::util::val_to_key(&view.materialize()).as_str(),
-            ))
-        }),
-        pipeline::ViewKernelValue::Owned(value) => {
-            Some(Arc::from(crate::util::val_to_key(&value).as_str()))
-        }
-    }
-}
-
-fn eval_distinct_key<'a, V>(
-    item: &V,
-    kernel: Option<&pipeline::BodyKernel>,
-) -> Option<ViewDistinctKey>
+fn eval_view_key<'a, V>(item: &V, kernel: Option<&pipeline::BodyKernel>) -> Option<ViewKey>
 where
     V: ValueView<'a>,
 {
     match kernel {
         Some(kernel) => match pipeline::eval_view_kernel(kernel, item)? {
-            pipeline::ViewKernelValue::View(view) => ViewDistinctKey::from_view(view.scalar())
-                .or_else(|| Some(ViewDistinctKey::from_owned(view.materialize()))),
-            pipeline::ViewKernelValue::Owned(value) => Some(ViewDistinctKey::from_owned(value)),
+            pipeline::ViewKernelValue::View(view) => ViewKey::from_view(view.scalar())
+                .or_else(|| Some(ViewKey::from_owned(view.materialize()))),
+            pipeline::ViewKernelValue::Owned(value) => Some(ViewKey::from_owned(value)),
         },
-        None => ViewDistinctKey::from_view(item.scalar())
-            .or_else(|| Some(ViewDistinctKey::from_owned(item.materialize()))),
-    }
-}
-
-fn json_view_key(view: crate::util::JsonView<'_>) -> Option<Arc<str>> {
-    match view {
-        crate::util::JsonView::Null => Some(Arc::from("null")),
-        crate::util::JsonView::Bool(value) => Some(Arc::from(if value { "true" } else { "false" })),
-        crate::util::JsonView::Int(value) => Some(Arc::from(value.to_string().as_str())),
-        crate::util::JsonView::UInt(value) => Some(Arc::from(value.to_string().as_str())),
-        crate::util::JsonView::Float(value) => Some(Arc::from(value.to_string().as_str())),
-        crate::util::JsonView::Str(value) => Some(Arc::from(value)),
-        crate::util::JsonView::ArrayLen(_) | crate::util::JsonView::ObjectLen(_) => None,
+        None => ViewKey::from_view(item.scalar())
+            .or_else(|| Some(ViewKey::from_owned(item.materialize()))),
     }
 }
 
@@ -885,5 +789,30 @@ mod tests {
         assert_eq!(out_json, serde_json::json!({"1": 3, "2": 2, "3": 1}));
         assert_eq!(source.scalar_reads(), 6);
         assert_eq!(source.materialize_reads(), 0);
+    }
+
+    #[test]
+    fn reducing_index_by_stage_uses_shared_keyed_reducer_path() {
+        let source = CountingView::root(&[1, 2, 1, 3]);
+        let body = PipelineBody {
+            stages: vec![Stage::IndexBy(Arc::new(crate::vm::Program::new(
+                Vec::new(),
+                "",
+            )))],
+            stage_exprs: Vec::new(),
+            sink: Sink::Terminal(crate::builtins::BuiltinMethod::First),
+            stage_kernels: vec![BodyKernel::Current],
+            sink_kernels: Vec::new(),
+        };
+
+        let out =
+            super::run_reducing_stage_prefix_then_materialized_suffix(source.clone(), &body, None)
+                .unwrap()
+                .unwrap();
+
+        let out_json: serde_json::Value = out.into();
+        assert_eq!(out_json, serde_json::json!({"1": 1, "2": 2, "3": 3}));
+        assert_eq!(source.scalar_reads(), 4);
+        assert_eq!(source.materialize_reads(), 4);
     }
 }

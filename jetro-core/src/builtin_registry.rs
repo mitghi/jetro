@@ -512,7 +512,7 @@ builtin_registry! {
     };
     IndexBy => "index_by" [] {
         executor: BuiltinPipelineExecutor::IndexBy,
-        materialization: BuiltinPipelineMaterialization::LegacyMaterialized,
+        materialization: BuiltinPipelineMaterialization::Streaming,
         shape: BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 1.0, 1.0),
         lowering: BuiltinPipelineLowering::TerminalExprStage {
             stage: BuiltinExprStage::IndexBy,

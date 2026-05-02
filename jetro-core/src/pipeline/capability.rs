@@ -1,6 +1,6 @@
 use crate::builtins::{
-    BuiltinSinkAccumulator, BuiltinSinkSpec, BuiltinViewInputMode, BuiltinViewMaterialization,
-    BuiltinViewOutputMode, BuiltinViewStage,
+    BuiltinMethod, BuiltinSinkAccumulator, BuiltinSinkSpec, BuiltinViewInputMode,
+    BuiltinViewMaterialization, BuiltinViewOutputMode, BuiltinViewStage,
 };
 
 use super::{NumOp, PipelineBody, Stage};
@@ -42,13 +42,40 @@ pub(crate) struct ViewPrefixCapabilities {
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ViewStageCapability {
-    Filter { kernel: usize },
-    Map { kernel: usize },
-    FlatMap { kernel: usize },
-    Distinct { kernel: Option<usize> },
-    KeyedCount { kernel: usize },
+    Filter {
+        kernel: usize,
+    },
+    Map {
+        kernel: usize,
+    },
+    FlatMap {
+        kernel: usize,
+    },
+    Distinct {
+        kernel: Option<usize>,
+    },
+    KeyedReduce {
+        kind: ViewKeyedReducer,
+        kernel: usize,
+    },
     Take(usize),
     Skip(usize),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ViewKeyedReducer {
+    Count,
+    Index,
+}
+
+impl ViewKeyedReducer {
+    pub(crate) fn from_method(method: BuiltinMethod) -> Option<Self> {
+        match method {
+            BuiltinMethod::CountBy => Some(Self::Count),
+            BuiltinMethod::IndexBy => Some(Self::Index),
+            _ => None,
+        }
+    }
 }
 
 impl ViewStageCapability {
@@ -68,9 +95,6 @@ impl ViewStageCapability {
             BuiltinViewStage::FlatMap if kernel_is_view_native => Some(Self::FlatMap {
                 kernel: kernel_index,
             }),
-            BuiltinViewStage::KeyedCount if kernel_is_view_native => Some(Self::KeyedCount {
-                kernel: kernel_index,
-            }),
             BuiltinViewStage::Take => Some(Self::Take(usize_arg?)),
             BuiltinViewStage::Skip => Some(Self::Skip(usize_arg?)),
             _ => None,
@@ -83,7 +107,7 @@ impl ViewStageCapability {
             Self::Map { .. } => BuiltinViewStage::Map,
             Self::FlatMap { .. } => BuiltinViewStage::FlatMap,
             Self::Distinct { .. } => BuiltinViewStage::Distinct,
-            Self::KeyedCount { .. } => BuiltinViewStage::KeyedCount,
+            Self::KeyedReduce { .. } => BuiltinViewStage::KeyedReduce,
             Self::Take(_) => BuiltinViewStage::Take,
             Self::Skip(_) => BuiltinViewStage::Skip,
         }
@@ -98,7 +122,7 @@ impl ViewStageCapability {
     }
 
     pub(crate) fn materialization(self) -> ViewMaterialization {
-        if matches!(self, Self::KeyedCount { .. }) {
+        if matches!(self, Self::KeyedReduce { .. }) {
             return ViewMaterialization::StageFinalValue;
         }
         view_materialization(self.view_stage().materialization())

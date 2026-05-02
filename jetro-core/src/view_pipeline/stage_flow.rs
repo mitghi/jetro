@@ -1,6 +1,8 @@
-use std::{collections::HashSet, sync::Arc};
+use std::collections::HashSet;
 
-use crate::{pipeline, util::JsonView, value::Val, value_view::ValueView};
+use crate::{pipeline, value_view::ValueView};
+
+use super::key::ViewKey;
 
 pub(super) enum ViewStageFlow<V> {
     Keep(V),
@@ -18,43 +20,7 @@ pub(super) enum ViewStageState {
     #[default]
     Empty,
     Counter(usize),
-    Keys(HashSet<ViewDistinctKey>),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(super) enum ViewDistinctKey {
-    Null,
-    Bool(bool),
-    Int(i64),
-    UInt(u64),
-    Float(u64),
-    Str(Arc<str>),
-    Owned(Arc<str>),
-}
-
-impl ViewDistinctKey {
-    pub(super) fn from_view(view: JsonView<'_>) -> Option<Self> {
-        match view {
-            JsonView::Null => Some(Self::Null),
-            JsonView::Bool(value) => Some(Self::Bool(value)),
-            JsonView::Int(value) => Some(Self::Int(value)),
-            JsonView::UInt(value) => Some(Self::UInt(value)),
-            JsonView::Float(value) => Some(Self::Float(value.to_bits())),
-            JsonView::Str(value) => Some(Self::Str(Arc::from(value))),
-            JsonView::ArrayLen(_) | JsonView::ObjectLen(_) => None,
-        }
-    }
-
-    pub(super) fn from_owned(value: Val) -> Self {
-        match value {
-            Val::Null => Self::Null,
-            Val::Bool(value) => Self::Bool(value),
-            Val::Int(value) => Self::Int(value),
-            Val::Float(value) => Self::Float(value.to_bits()),
-            Val::Str(value) => Self::Str(value),
-            value => Self::Owned(Arc::from(crate::util::val_to_key(&value).as_str())),
-        }
-    }
+    Keys(HashSet<ViewKey>),
 }
 
 impl ViewStageState {
@@ -68,7 +34,7 @@ impl ViewStageState {
         }
     }
 
-    fn keys(&mut self) -> &mut HashSet<ViewDistinctKey> {
+    fn keys(&mut self) -> &mut HashSet<ViewKey> {
         if !matches!(self, Self::Keys(_)) {
             *self = Self::Keys(HashSet::new());
         }
@@ -145,8 +111,8 @@ where
                 pipeline::ViewOutputMode::PreservesInputView
             );
             let key = match kernel {
-                Some(kernel) => super::eval_distinct_key(&item, Some(stage_kernels.get(kernel)?))?,
-                None => super::eval_distinct_key(&item, None)?,
+                Some(kernel) => super::eval_view_key(&item, Some(stage_kernels.get(kernel)?))?,
+                None => super::eval_view_key(&item, None)?,
             };
             if op_state.get_mut(op_idx)?.keys().insert(key) {
                 Some(ViewStageFlow::Keep(item))
@@ -163,7 +129,7 @@ where
             let kernel = stage_kernels.get(kernel)?;
             Some(ViewStageFlow::Keep(super::eval_map_kernel(&item, kernel)?))
         }
-        pipeline::ViewStageCapability::KeyedCount { .. } => None,
+        pipeline::ViewStageCapability::KeyedReduce { .. } => None,
         pipeline::ViewStageCapability::FlatMap { .. } => None,
     }
 }

@@ -567,7 +567,7 @@ pub enum BuiltinViewStage {
     Map,
     FlatMap,
     Distinct,
-    KeyedCount,
+    KeyedReduce,
     Take,
     Skip,
 }
@@ -687,7 +687,7 @@ impl BuiltinViewStage {
     #[inline]
     pub fn input_mode(self) -> BuiltinViewInputMode {
         match self {
-            Self::Filter | Self::Map | Self::FlatMap | Self::Distinct | Self::KeyedCount => {
+            Self::Filter | Self::Map | Self::FlatMap | Self::Distinct | Self::KeyedReduce => {
                 BuiltinViewInputMode::ReadsView
             }
             Self::Take | Self::Skip => BuiltinViewInputMode::SkipsViewRead,
@@ -699,7 +699,7 @@ impl BuiltinViewStage {
         match self {
             Self::Map => BuiltinViewOutputMode::BorrowedSubview,
             Self::FlatMap => BuiltinViewOutputMode::BorrowedSubviews,
-            Self::KeyedCount => BuiltinViewOutputMode::EmitsOwnedValue,
+            Self::KeyedReduce => BuiltinViewOutputMode::EmitsOwnedValue,
             Self::Filter | Self::Distinct | Self::Take | Self::Skip => {
                 BuiltinViewOutputMode::PreservesInputView
             }
@@ -718,20 +718,20 @@ impl BuiltinViewStage {
             Self::Map => BuiltinCardinality::OneToOne,
             Self::FlatMap => BuiltinCardinality::Expanding,
             Self::Distinct => BuiltinCardinality::Filtering,
-            Self::KeyedCount => BuiltinCardinality::Reducing,
+            Self::KeyedReduce => BuiltinCardinality::Reducing,
             Self::Take | Self::Skip => BuiltinCardinality::Bounded,
         }
     }
 
     #[inline]
     pub fn can_indexed(self) -> bool {
-        matches!(self, Self::Map | Self::KeyedCount)
+        matches!(self, Self::Map | Self::KeyedReduce)
     }
 
     #[inline]
     pub fn cost(self) -> f64 {
         match self {
-            Self::Filter | Self::Map | Self::FlatMap | Self::Distinct | Self::KeyedCount => 10.0,
+            Self::Filter | Self::Map | Self::FlatMap | Self::Distinct | Self::KeyedReduce => 10.0,
             Self::Take | Self::Skip => 0.5,
         }
     }
@@ -741,7 +741,7 @@ impl BuiltinViewStage {
         match self {
             Self::Filter => 0.5,
             Self::Distinct => 1.0,
-            Self::Map | Self::FlatMap | Self::KeyedCount => 1.0,
+            Self::Map | Self::FlatMap | Self::KeyedReduce => 1.0,
             Self::Take | Self::Skip => 0.5,
         }
     }
@@ -1199,7 +1199,6 @@ impl BuiltinMethod {
             }
             Self::Sort
             | Self::GroupBy
-            | Self::IndexBy
             | Self::GroupShape
             | Self::Partition
             | Self::Window
@@ -1213,12 +1212,12 @@ impl BuiltinMethod {
                 match self {
                     Self::Sort | Self::Unique | Self::UniqueBy => spec,
                     Self::GroupBy => spec.columnar_stage(BuiltinColumnarStage::GroupBy),
-                    Self::IndexBy | Self::Chunk | Self::Window => spec,
+                    Self::Chunk | Self::Window => spec,
                     _ => spec,
                 }
             }
-            Self::CountBy => BuiltinSpec::new(Cat::Reducer, Card::Reducing)
-                .view_stage(BuiltinViewStage::KeyedCount)
+            Self::CountBy | Self::IndexBy => BuiltinSpec::new(Cat::Reducer, Card::Reducing)
+                .view_stage(BuiltinViewStage::KeyedReduce)
                 .cost(10.0),
             Self::Unique | Self::UniqueBy => {
                 BuiltinSpec::new(Cat::StreamingFilter, Card::Filtering)
