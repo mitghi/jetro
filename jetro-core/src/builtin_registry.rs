@@ -125,6 +125,14 @@ pub(crate) fn participates_in_demand(id: BuiltinId) -> bool {
 
 #[inline]
 pub(crate) fn pipeline_executor(id: BuiltinId) -> Option<BuiltinPipelineExecutor> {
+    if let Some(executor) = registry_pipeline_executor(id) {
+        return Some(executor);
+    }
+    fallback_pipeline_executor(id)
+}
+
+#[inline]
+fn fallback_pipeline_executor(id: BuiltinId) -> Option<BuiltinPipelineExecutor> {
     match method_from_id(id) {
         Some(BuiltinMethod::Slice | BuiltinMethod::Replace | BuiltinMethod::ReplaceAll) => {
             Some(BuiltinPipelineExecutor::ElementBuiltin)
@@ -167,6 +175,11 @@ pub(crate) fn pipeline_executor(id: BuiltinId) -> Option<BuiltinPipelineExecutor
 
 #[inline]
 pub(crate) fn pipeline_materialization(id: BuiltinId) -> BuiltinPipelineMaterialization {
+    registry_pipeline_materialization(id).unwrap_or_else(|| fallback_pipeline_materialization(id))
+}
+
+#[inline]
+fn fallback_pipeline_materialization(id: BuiltinId) -> BuiltinPipelineMaterialization {
     match method_from_id(id) {
         Some(
             BuiltinMethod::Sort
@@ -194,6 +207,11 @@ pub(crate) fn pipeline_materialization(id: BuiltinId) -> BuiltinPipelineMaterial
 
 #[inline]
 pub(crate) fn pipeline_shape(id: BuiltinId) -> Option<BuiltinPipelineShape> {
+    registry_pipeline_shape(id).or_else(|| fallback_pipeline_shape(id))
+}
+
+#[inline]
+fn fallback_pipeline_shape(id: BuiltinId) -> Option<BuiltinPipelineShape> {
     use BuiltinCardinality as Card;
 
     match method_from_id(id) {
@@ -228,6 +246,11 @@ pub(crate) fn pipeline_shape(id: BuiltinId) -> Option<BuiltinPipelineShape> {
 
 #[inline]
 pub(crate) fn pipeline_order_effect(id: BuiltinId) -> Option<BuiltinPipelineOrderEffect> {
+    registry_pipeline_order_effect(id).or_else(|| fallback_pipeline_order_effect(id))
+}
+
+#[inline]
+fn fallback_pipeline_order_effect(id: BuiltinId) -> Option<BuiltinPipelineOrderEffect> {
     match method_from_id(id) {
         Some(BuiltinMethod::Filter | BuiltinMethod::Find | BuiltinMethod::FindAll) => {
             Some(BuiltinPipelineOrderEffect::PredicatePrefix)
@@ -268,6 +291,11 @@ pub(crate) fn pipeline_stage(id: BuiltinId) -> Option<BuiltinPipelineStage> {
 
 #[inline]
 pub(crate) fn pipeline_lowering(id: BuiltinId) -> Option<BuiltinPipelineLowering> {
+    registry_pipeline_lowering(id).or_else(|| fallback_pipeline_lowering(id))
+}
+
+#[inline]
+fn fallback_pipeline_lowering(id: BuiltinId) -> Option<BuiltinPipelineLowering> {
     match method_from_id(id) {
         Some(BuiltinMethod::Filter | BuiltinMethod::Find | BuiltinMethod::FindAll) => {
             Some(BuiltinPipelineLowering::ExprStage(BuiltinExprStage::Filter))
@@ -379,6 +407,11 @@ pub(crate) fn pipeline_lowering(id: BuiltinId) -> Option<BuiltinPipelineLowering
 
 #[inline]
 pub(crate) fn pipeline_sink(id: BuiltinId) -> Option<BuiltinPipelineSink> {
+    registry_pipeline_sink(id).or_else(|| fallback_pipeline_sink(id))
+}
+
+#[inline]
+fn fallback_pipeline_sink(id: BuiltinId) -> Option<BuiltinPipelineSink> {
     match method_from_id(id) {
         Some(BuiltinMethod::ApproxCountDistinct) => Some(BuiltinPipelineSink::ApproxCountDistinct),
         _ => None,
@@ -387,6 +420,11 @@ pub(crate) fn pipeline_sink(id: BuiltinId) -> Option<BuiltinPipelineSink> {
 
 #[inline]
 pub(crate) fn pipeline_element(id: BuiltinId) -> bool {
+    registry_pipeline_element(id).unwrap_or_else(|| fallback_pipeline_element(id))
+}
+
+#[inline]
+fn fallback_pipeline_element(id: BuiltinId) -> bool {
     matches!(
         method_from_id(id),
         Some(
@@ -480,6 +518,11 @@ pub(crate) fn pipeline_element(id: BuiltinId) -> bool {
 
 #[inline]
 fn demand_law(id: BuiltinId) -> BuiltinDemandLaw {
+    registry_demand_law(id).unwrap_or_else(|| fallback_demand_law(id))
+}
+
+#[inline]
+fn fallback_demand_law(id: BuiltinId) -> BuiltinDemandLaw {
     match method_from_id(id) {
         Some(BuiltinMethod::Filter | BuiltinMethod::Find | BuiltinMethod::FindAll) => {
             BuiltinDemandLaw::FilterLike
@@ -511,8 +554,128 @@ impl BuiltinId {
     }
 }
 
+macro_rules! builtin_meta_demand {
+    () => {
+        None
+    };
+    (demand: $value:expr $(, $($rest:tt)*)?) => {
+        Some($value)
+    };
+    ($key:ident : $value:expr, $($rest:tt)*) => {
+        builtin_meta_demand!($($rest)*)
+    };
+    ($key:ident : $value:expr) => {
+        None
+    };
+}
+
+macro_rules! builtin_meta_executor {
+    () => {
+        None
+    };
+    (executor: $value:expr $(, $($rest:tt)*)?) => {
+        Some($value)
+    };
+    ($key:ident : $value:expr, $($rest:tt)*) => {
+        builtin_meta_executor!($($rest)*)
+    };
+    ($key:ident : $value:expr) => {
+        None
+    };
+}
+
+macro_rules! builtin_meta_materialization {
+    () => {
+        None
+    };
+    (materialization: $value:expr $(, $($rest:tt)*)?) => {
+        Some($value)
+    };
+    ($key:ident : $value:expr, $($rest:tt)*) => {
+        builtin_meta_materialization!($($rest)*)
+    };
+    ($key:ident : $value:expr) => {
+        None
+    };
+}
+
+macro_rules! builtin_meta_shape {
+    () => {
+        None
+    };
+    (shape: $value:expr $(, $($rest:tt)*)?) => {
+        Some($value)
+    };
+    ($key:ident : $value:expr, $($rest:tt)*) => {
+        builtin_meta_shape!($($rest)*)
+    };
+    ($key:ident : $value:expr) => {
+        None
+    };
+}
+
+macro_rules! builtin_meta_order {
+    () => {
+        None
+    };
+    (order: $value:expr $(, $($rest:tt)*)?) => {
+        Some($value)
+    };
+    ($key:ident : $value:expr, $($rest:tt)*) => {
+        builtin_meta_order!($($rest)*)
+    };
+    ($key:ident : $value:expr) => {
+        None
+    };
+}
+
+macro_rules! builtin_meta_lowering {
+    () => {
+        None
+    };
+    (lowering: $value:expr $(, $($rest:tt)*)?) => {
+        Some($value)
+    };
+    ($key:ident : $value:expr, $($rest:tt)*) => {
+        builtin_meta_lowering!($($rest)*)
+    };
+    ($key:ident : $value:expr) => {
+        None
+    };
+}
+
+macro_rules! builtin_meta_sink {
+    () => {
+        None
+    };
+    (sink: $value:expr $(, $($rest:tt)*)?) => {
+        Some($value)
+    };
+    ($key:ident : $value:expr, $($rest:tt)*) => {
+        builtin_meta_sink!($($rest)*)
+    };
+    ($key:ident : $value:expr) => {
+        None
+    };
+}
+
+macro_rules! builtin_meta_element {
+    () => {
+        None
+    };
+    (element: $value:expr $(, $($rest:tt)*)?) => {
+        Some($value)
+    };
+    ($key:ident : $value:expr, $($rest:tt)*) => {
+        builtin_meta_element!($($rest)*)
+    };
+    ($key:ident : $value:expr) => {
+        None
+    };
+}
+
 macro_rules! builtin_registry {
-    ($( $method:ident => $canonical:literal [ $( $alias:literal ),* $(,)? ]; )*) => {
+    ($( $method:ident => $canonical:literal [ $( $alias:literal ),* $(,)? ] $( { $($meta:tt)* } )? ; )*) => {
         pub(crate) static BUILTIN_DESCRIPTORS: &[BuiltinDescriptor] = &[
             $(
                 BuiltinDescriptor {
@@ -552,6 +715,72 @@ macro_rules! builtin_registry {
                 _ => None,
             }
         }
+
+        #[inline]
+        fn registry_demand_law(id: BuiltinId) -> Option<BuiltinDemandLaw> {
+            match id.0 {
+                $(x if x == BuiltinMethod::$method as u16 => builtin_meta_demand!($($($meta)*)?),)*
+                _ => None,
+            }
+        }
+
+        #[inline]
+        fn registry_pipeline_executor(id: BuiltinId) -> Option<BuiltinPipelineExecutor> {
+            match id.0 {
+                $(x if x == BuiltinMethod::$method as u16 => builtin_meta_executor!($($($meta)*)?),)*
+                _ => None,
+            }
+        }
+
+        #[inline]
+        fn registry_pipeline_materialization(
+            id: BuiltinId,
+        ) -> Option<BuiltinPipelineMaterialization> {
+            match id.0 {
+                $(x if x == BuiltinMethod::$method as u16 => builtin_meta_materialization!($($($meta)*)?),)*
+                _ => None,
+            }
+        }
+
+        #[inline]
+        fn registry_pipeline_shape(id: BuiltinId) -> Option<BuiltinPipelineShape> {
+            match id.0 {
+                $(x if x == BuiltinMethod::$method as u16 => builtin_meta_shape!($($($meta)*)?),)*
+                _ => None,
+            }
+        }
+
+        #[inline]
+        fn registry_pipeline_order_effect(id: BuiltinId) -> Option<BuiltinPipelineOrderEffect> {
+            match id.0 {
+                $(x if x == BuiltinMethod::$method as u16 => builtin_meta_order!($($($meta)*)?),)*
+                _ => None,
+            }
+        }
+
+        #[inline]
+        fn registry_pipeline_lowering(id: BuiltinId) -> Option<BuiltinPipelineLowering> {
+            match id.0 {
+                $(x if x == BuiltinMethod::$method as u16 => builtin_meta_lowering!($($($meta)*)?),)*
+                _ => None,
+            }
+        }
+
+        #[inline]
+        fn registry_pipeline_sink(id: BuiltinId) -> Option<BuiltinPipelineSink> {
+            match id.0 {
+                $(x if x == BuiltinMethod::$method as u16 => builtin_meta_sink!($($($meta)*)?),)*
+                _ => None,
+            }
+        }
+
+        #[inline]
+        fn registry_pipeline_element(id: BuiltinId) -> Option<bool> {
+            match id.0 {
+                $(x if x == BuiltinMethod::$method as u16 => builtin_meta_element!($($($meta)*)?),)*
+                _ => None,
+            }
+        }
     };
 }
 
@@ -568,11 +797,26 @@ builtin_registry! {
     ToString => "to_string" [];
     ToJson => "to_json" [];
     FromJson => "from_json" [];
-    Sum => "sum" [];
-    Avg => "avg" [];
-    Min => "min" [];
-    Max => "max" [];
-    Count => "count" [];
+    Sum => "sum" [] {
+        demand: BuiltinDemandLaw::NumericReducer,
+        lowering: BuiltinPipelineLowering::TerminalSink
+    };
+    Avg => "avg" [] {
+        demand: BuiltinDemandLaw::NumericReducer,
+        lowering: BuiltinPipelineLowering::TerminalSink
+    };
+    Min => "min" [] {
+        demand: BuiltinDemandLaw::NumericReducer,
+        lowering: BuiltinPipelineLowering::TerminalSink
+    };
+    Max => "max" [] {
+        demand: BuiltinDemandLaw::NumericReducer,
+        lowering: BuiltinPipelineLowering::TerminalSink
+    };
+    Count => "count" [] {
+        demand: BuiltinDemandLaw::Count,
+        lowering: BuiltinPipelineLowering::TerminalSink
+    };
     Any => "any" ["exists"];
     All => "all" [];
     FindIndex => "find_index" [];
@@ -585,12 +829,42 @@ builtin_registry! {
     GroupShape => "group_shape" [];
     Explode => "explode" [];
     Implode => "implode" [];
-    Filter => "filter" [];
-    Map => "map" [];
-    FlatMap => "flat_map" [];
-    Find => "find" [];
-    FindAll => "find_all" [];
-    Sort => "sort" ["sort_by"];
+    Filter => "filter" [] {
+        demand: BuiltinDemandLaw::FilterLike,
+        executor: BuiltinPipelineExecutor::RowFilter,
+        order: BuiltinPipelineOrderEffect::PredicatePrefix,
+        lowering: BuiltinPipelineLowering::ExprStage(BuiltinExprStage::Filter)
+    };
+    Map => "map" [] {
+        demand: BuiltinDemandLaw::MapLike,
+        executor: BuiltinPipelineExecutor::RowMap,
+        order: BuiltinPipelineOrderEffect::Preserves,
+        lowering: BuiltinPipelineLowering::ExprStage(BuiltinExprStage::Map),
+        element: true
+    };
+    FlatMap => "flat_map" [] {
+        demand: BuiltinDemandLaw::FlatMapLike,
+        executor: BuiltinPipelineExecutor::RowFlatMap,
+        materialization: BuiltinPipelineMaterialization::LegacyMaterialized,
+        lowering: BuiltinPipelineLowering::ExprStage(BuiltinExprStage::FlatMap)
+    };
+    Find => "find" [] {
+        demand: BuiltinDemandLaw::FilterLike,
+        executor: BuiltinPipelineExecutor::RowFilter,
+        order: BuiltinPipelineOrderEffect::PredicatePrefix,
+        lowering: BuiltinPipelineLowering::ExprStage(BuiltinExprStage::Filter)
+    };
+    FindAll => "find_all" [] {
+        demand: BuiltinDemandLaw::FilterLike,
+        executor: BuiltinPipelineExecutor::RowFilter,
+        order: BuiltinPipelineOrderEffect::PredicatePrefix,
+        lowering: BuiltinPipelineLowering::ExprStage(BuiltinExprStage::Filter)
+    };
+    Sort => "sort" ["sort_by"] {
+        executor: BuiltinPipelineExecutor::Sort,
+        materialization: BuiltinPipelineMaterialization::ComposedBarrier,
+        lowering: BuiltinPipelineLowering::Sort
+    };
     Unique => "unique" ["distinct"];
     UniqueBy => "unique_by" [];
     Collect => "collect" [];
@@ -604,11 +878,33 @@ builtin_registry! {
     Flatten => "flatten" [];
     Compact => "compact" [];
     Join => "join" [];
-    First => "first" [];
-    Last => "last" [];
+    First => "first" [] {
+        demand: BuiltinDemandLaw::First,
+        lowering: BuiltinPipelineLowering::TerminalSink
+    };
+    Last => "last" [] {
+        demand: BuiltinDemandLaw::Last,
+        lowering: BuiltinPipelineLowering::TerminalSink
+    };
     Nth => "nth" [];
-    Take => "take" [];
-    Skip => "skip" ["drop"];
+    Take => "take" [] {
+        demand: BuiltinDemandLaw::Take,
+        executor: BuiltinPipelineExecutor::Position { take: true },
+        order: BuiltinPipelineOrderEffect::Preserves,
+        lowering: BuiltinPipelineLowering::UsizeStage {
+            stage: BuiltinUsizeStage::Take,
+            min: 0,
+        }
+    };
+    Skip => "skip" ["drop"] {
+        demand: BuiltinDemandLaw::Skip,
+        executor: BuiltinPipelineExecutor::Position { take: false },
+        order: BuiltinPipelineOrderEffect::Preserves,
+        lowering: BuiltinPipelineLowering::UsizeStage {
+            stage: BuiltinUsizeStage::Skip,
+            min: 0,
+        }
+    };
     Append => "append" [];
     Prepend => "prepend" [];
     Remove => "remove" [];
@@ -619,11 +915,27 @@ builtin_registry! {
     Pairwise => "pairwise" [];
     Window => "window" [];
     Chunk => "chunk" ["batch"];
-    TakeWhile => "take_while" ["takewhile"];
+    TakeWhile => "take_while" ["takewhile"] {
+        demand: BuiltinDemandLaw::TakeWhile,
+        executor: BuiltinPipelineExecutor::PrefixWhile { take: true },
+        materialization: BuiltinPipelineMaterialization::Streaming,
+        shape: BuiltinPipelineShape::new(BuiltinCardinality::Filtering, true, 10.0, 0.5),
+        order: BuiltinPipelineOrderEffect::PredicatePrefix,
+        lowering: BuiltinPipelineLowering::ExprStage(BuiltinExprStage::TakeWhile)
+    };
     DropWhile => "drop_while" ["dropwhile"];
-    FindFirst => "find_first" [];
+    FindFirst => "find_first" [] {
+        demand: BuiltinDemandLaw::First,
+        lowering: BuiltinPipelineLowering::TerminalExprStage {
+            stage: BuiltinExprStage::Filter,
+            terminal: BuiltinMethod::First,
+        }
+    };
     FindOne => "find_one" [];
-    ApproxCountDistinct => "approx_count_distinct" [];
+    ApproxCountDistinct => "approx_count_distinct" [] {
+        lowering: BuiltinPipelineLowering::TerminalSink,
+        sink: BuiltinPipelineSink::ApproxCountDistinct
+    };
     Accumulate => "accumulate" [];
     Partition => "partition" [];
     Zip => "zip" [];
@@ -714,12 +1026,31 @@ builtin_registry! {
     EndsWith => "ends_with" [];
     IndexOf => "index_of" [];
     LastIndexOf => "last_index_of" [];
-    Replace => "replace" [];
-    ReplaceAll => "replace_all" [];
+    Replace => "replace" [] {
+        executor: BuiltinPipelineExecutor::ElementBuiltin,
+        shape: BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 2.0, 1.0),
+        order: BuiltinPipelineOrderEffect::Preserves,
+        lowering: BuiltinPipelineLowering::StringPairStage(
+            BuiltinStringPairStage::Replace { all: false }
+        )
+    };
+    ReplaceAll => "replace_all" [] {
+        executor: BuiltinPipelineExecutor::ElementBuiltin,
+        shape: BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 2.0, 1.0),
+        order: BuiltinPipelineOrderEffect::Preserves,
+        lowering: BuiltinPipelineLowering::StringPairStage(
+            BuiltinStringPairStage::Replace { all: true }
+        )
+    };
     StripPrefix => "strip_prefix" [];
     StripSuffix => "strip_suffix" [];
     Slice => "slice" [];
-    Split => "split" [];
+    Split => "split" [] {
+        executor: BuiltinPipelineExecutor::ExpandingBuiltin,
+        materialization: BuiltinPipelineMaterialization::LegacyMaterialized,
+        shape: BuiltinPipelineShape::new(BuiltinCardinality::Expanding, true, 2.0, 1.0),
+        lowering: BuiltinPipelineLowering::StringStage(BuiltinStringStage::Split)
+    };
     Indent => "indent" [];
     Dedent => "dedent" [];
     Matches => "matches" [];
