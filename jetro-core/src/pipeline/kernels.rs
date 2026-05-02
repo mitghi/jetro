@@ -4,7 +4,7 @@ use crate::builtins::BuiltinCall;
 use crate::context::EvalError;
 use crate::util::JsonView;
 use crate::value::Val;
-use crate::value_view::ValueView;
+use crate::value_view::{scalar_view_to_owned_val, ValueView};
 
 #[derive(Debug, Clone)]
 pub enum BodyKernel {
@@ -76,7 +76,9 @@ impl ObjectKernel {
         let start = cells.len();
         for entry in self.entries.iter() {
             let value = match eval_view_kernel(&entry.value, item)? {
-                ViewKernelValue::View(view) => view.materialize(),
+                ViewKernelValue::View(view) => {
+                    scalar_view_to_owned_val(view.scalar()).unwrap_or_else(|| view.materialize())
+                }
                 ViewKernelValue::Owned(value) => value,
             };
             if (entry.optional || entry.omit_null) && value.is_null() {

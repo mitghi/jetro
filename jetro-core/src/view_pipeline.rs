@@ -633,7 +633,7 @@ mod tests {
 
         let out_json: serde_json::Value = out.into();
         assert_eq!(out_json, serde_json::json!([2]));
-        assert_eq!(source.scalar_reads(), 2);
+        assert_eq!(source.scalar_reads(), 3);
     }
 
     #[test]

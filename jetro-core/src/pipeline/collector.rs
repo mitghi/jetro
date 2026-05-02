@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::value::{ObjVecData, Val};
-use crate::value_view::ValueView;
+use crate::value_view::{scalar_view_to_owned_val, ValueView};
 
 use super::{BodyKernel, CollectLayout, ObjectKernel, ViewKernelValue};
 
@@ -121,7 +121,9 @@ where
     V: ValueView<'a>,
 {
     match super::eval_view_kernel(kernel, item)? {
-        ViewKernelValue::View(view) => Some(view.materialize()),
+        ViewKernelValue::View(view) => {
+            scalar_view_to_owned_val(view.scalar()).or_else(|| Some(view.materialize()))
+        }
         ViewKernelValue::Owned(value) => Some(value),
     }
 }

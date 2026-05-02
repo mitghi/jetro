@@ -437,6 +437,7 @@ mod tests {
             br#"{"data":[{"id":1,"score":10,"user":{"name":"ada"}},{"id":2,"score":20,"user":{"name":"bob"}}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
         )
         .unwrap();
+        j.reset_tape_materialized_subtrees();
 
         let out = collect_test_val(&j, r#"$.data.map({id, name: user.name, score})"#);
 
@@ -451,6 +452,46 @@ mod tests {
             other => panic!("expected terminal object map to collect ObjVec, got {other:?}"),
         }
         assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn view_scalar_map_collects_without_materializing_subtrees() {
+        let j = Jetro::from_bytes(
+            br#"{"books":[{"title":"low","score":1},{"title":"a","score":901},{"title":"b","score":902}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j.collect(r#"$.books.map(score)"#).unwrap();
+
+        assert_eq!(out, json!([1, 901, 902]));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn view_object_map_collects_scalar_cells_without_materializing_subtrees() {
+        let j = Jetro::from_bytes(
+            br#"{"books":[{"title":"low","score":1},{"title":"a","score":901},{"title":"b","score":902}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j.collect(r#"$.books.map({title, score})"#).unwrap();
+
+        assert_eq!(
+            out,
+            json!([
+                {"title": "low", "score": 1},
+                {"title": "a", "score": 901},
+                {"title": "b", "score": 902}
+            ])
+        );
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
     }
 
     #[cfg(feature = "simd-json")]
@@ -502,7 +543,7 @@ mod tests {
 
         assert_eq!(out, json!(["ada"]));
         assert!(!j.root_val_is_materialized());
-        assert_eq!(j.tape_materialized_subtrees(), 1);
+        assert_eq!(j.tape_materialized_subtrees(), 0);
     }
 
     #[cfg(feature = "simd-json")]
@@ -556,7 +597,7 @@ mod tests {
 
         assert_eq!(out, json!(["ada"]));
         assert!(!j.root_val_is_materialized());
-        assert_eq!(j.tape_materialized_subtrees(), 1);
+        assert_eq!(j.tape_materialized_subtrees(), 0);
     }
 
     #[cfg(feature = "simd-json")]
@@ -575,7 +616,7 @@ mod tests {
 
         assert_eq!(out, json!(["ada"]));
         assert!(!j.root_val_is_materialized());
-        assert_eq!(j.tape_materialized_subtrees(), 1);
+        assert_eq!(j.tape_materialized_subtrees(), 0);
     }
 
     #[cfg(feature = "simd-json")]
@@ -594,7 +635,7 @@ mod tests {
 
         assert_eq!(out, json!(["ada"]));
         assert!(!j.root_val_is_materialized());
-        assert_eq!(j.tape_materialized_subtrees(), 1);
+        assert_eq!(j.tape_materialized_subtrees(), 0);
     }
 
     #[cfg(feature = "simd-json")]
@@ -613,7 +654,7 @@ mod tests {
 
         assert_eq!(out, json!(["ada"]));
         assert!(!j.root_val_is_materialized());
-        assert_eq!(j.tape_materialized_subtrees(), 1);
+        assert_eq!(j.tape_materialized_subtrees(), 0);
     }
 
     #[cfg(feature = "simd-json")]
@@ -632,7 +673,7 @@ mod tests {
 
         assert_eq!(out, json!(["ada"]));
         assert!(!j.root_val_is_materialized());
-        assert_eq!(j.tape_materialized_subtrees(), 1);
+        assert_eq!(j.tape_materialized_subtrees(), 0);
     }
 
     #[cfg(feature = "simd-json")]
@@ -651,7 +692,7 @@ mod tests {
 
         assert_eq!(out, json!(["123"]));
         assert!(!j.root_val_is_materialized());
-        assert_eq!(j.tape_materialized_subtrees(), 1);
+        assert_eq!(j.tape_materialized_subtrees(), 0);
     }
 
     #[cfg(feature = "simd-json")]
@@ -670,7 +711,7 @@ mod tests {
 
         assert_eq!(out, json!(["abc"]));
         assert!(!j.root_val_is_materialized());
-        assert_eq!(j.tape_materialized_subtrees(), 1);
+        assert_eq!(j.tape_materialized_subtrees(), 0);
     }
 
     #[cfg(feature = "simd-json")]
@@ -689,7 +730,7 @@ mod tests {
 
         assert_eq!(out, json!([-12]));
         assert!(!j.root_val_is_materialized());
-        assert_eq!(j.tape_materialized_subtrees(), 1);
+        assert_eq!(j.tape_materialized_subtrees(), 0);
     }
 
     #[cfg(feature = "simd-json")]
@@ -708,7 +749,7 @@ mod tests {
 
         assert_eq!(out, json!([9.7]));
         assert!(!j.root_val_is_materialized());
-        assert_eq!(j.tape_materialized_subtrees(), 1);
+        assert_eq!(j.tape_materialized_subtrees(), 0);
     }
 
     #[cfg(feature = "simd-json")]
