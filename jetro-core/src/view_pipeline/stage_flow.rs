@@ -1,4 +1,6 @@
-use crate::{pipeline, value_view::ValueView};
+use std::{collections::HashSet, sync::Arc};
+
+use crate::{pipeline, util::JsonView, value::Val, value_view::ValueView};
 
 pub(super) enum ViewStageFlow<V> {
     Keep(V),
@@ -11,11 +13,77 @@ pub(super) enum ViewFrontierFlow<V> {
     Stop(Vec<V>),
 }
 
+#[derive(Default)]
+pub(super) enum ViewStageState {
+    #[default]
+    Empty,
+    Counter(usize),
+    Keys(HashSet<ViewDistinctKey>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(super) enum ViewDistinctKey {
+    Null,
+    Bool(bool),
+    Int(i64),
+    UInt(u64),
+    Float(u64),
+    Str(Arc<str>),
+    Owned(Arc<str>),
+}
+
+impl ViewDistinctKey {
+    pub(super) fn from_view(view: JsonView<'_>) -> Option<Self> {
+        match view {
+            JsonView::Null => Some(Self::Null),
+            JsonView::Bool(value) => Some(Self::Bool(value)),
+            JsonView::Int(value) => Some(Self::Int(value)),
+            JsonView::UInt(value) => Some(Self::UInt(value)),
+            JsonView::Float(value) => Some(Self::Float(value.to_bits())),
+            JsonView::Str(value) => Some(Self::Str(Arc::from(value))),
+            JsonView::ArrayLen(_) | JsonView::ObjectLen(_) => None,
+        }
+    }
+
+    pub(super) fn from_owned(value: Val) -> Self {
+        match value {
+            Val::Null => Self::Null,
+            Val::Bool(value) => Self::Bool(value),
+            Val::Int(value) => Self::Int(value),
+            Val::Float(value) => Self::Float(value.to_bits()),
+            Val::Str(value) => Self::Str(value),
+            value => Self::Owned(Arc::from(crate::util::val_to_key(&value).as_str())),
+        }
+    }
+}
+
+impl ViewStageState {
+    fn counter(&mut self) -> &mut usize {
+        if !matches!(self, Self::Counter(_)) {
+            *self = Self::Counter(0);
+        }
+        match self {
+            Self::Counter(value) => value,
+            _ => unreachable!("counter state was initialized"),
+        }
+    }
+
+    fn keys(&mut self) -> &mut HashSet<ViewDistinctKey> {
+        if !matches!(self, Self::Keys(_)) {
+            *self = Self::Keys(HashSet::new());
+        }
+        match self {
+            Self::Keys(value) => value,
+            _ => unreachable!("key state was initialized"),
+        }
+    }
+}
+
 pub(super) fn apply_stage<'a, V>(
     item: V,
     stage: pipeline::ViewStageCapability,
     op_idx: usize,
-    op_state: &mut [usize],
+    op_state: &mut [ViewStageState],
     stage_kernels: &[pipeline::BodyKernel],
 ) -> Option<ViewStageFlow<V>>
 where
@@ -35,8 +103,9 @@ where
                 stage.output_mode(),
                 pipeline::ViewOutputMode::PreservesInputView
             );
-            if op_state[op_idx] < n {
-                op_state[op_idx] += 1;
+            let seen = op_state.get_mut(op_idx)?.counter();
+            if *seen < n {
+                *seen += 1;
                 Some(ViewStageFlow::Drop)
             } else {
                 Some(ViewStageFlow::Keep(item))
@@ -48,10 +117,11 @@ where
                 stage.output_mode(),
                 pipeline::ViewOutputMode::PreservesInputView
             );
-            if op_state[op_idx] >= n {
+            let seen = op_state.get_mut(op_idx)?.counter();
+            if *seen >= n {
                 Some(ViewStageFlow::Stop)
             } else {
-                op_state[op_idx] += 1;
+                *seen += 1;
                 Some(ViewStageFlow::Keep(item))
             }
         }
@@ -63,6 +133,22 @@ where
             );
             let kernel = stage_kernels.get(kernel)?;
             if super::eval_filter_kernel(&item, kernel)? {
+                Some(ViewStageFlow::Keep(item))
+            } else {
+                Some(ViewStageFlow::Drop)
+            }
+        }
+        pipeline::ViewStageCapability::Distinct { kernel } => {
+            debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::ReadsView);
+            debug_assert_eq!(
+                stage.output_mode(),
+                pipeline::ViewOutputMode::PreservesInputView
+            );
+            let key = match kernel {
+                Some(kernel) => super::eval_distinct_key(&item, Some(stage_kernels.get(kernel)?))?,
+                None => super::eval_distinct_key(&item, None)?,
+            };
+            if op_state.get_mut(op_idx)?.keys().insert(key) {
                 Some(ViewStageFlow::Keep(item))
             } else {
                 Some(ViewStageFlow::Drop)
@@ -85,7 +171,7 @@ pub(super) fn apply_frontier<'a, V>(
     frontier: Vec<V>,
     stage: pipeline::ViewStageCapability,
     op_idx: usize,
-    op_state: &mut [usize],
+    op_state: &mut [ViewStageState],
     stage_kernels: &[pipeline::BodyKernel],
 ) -> Option<ViewFrontierFlow<V>>
 where

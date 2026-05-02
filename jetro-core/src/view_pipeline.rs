@@ -11,7 +11,7 @@ use crate::value_view::{scalar_view_to_owned_val, ValueView};
 
 mod stage_flow;
 
-use stage_flow::ViewFrontierFlow;
+use stage_flow::{ViewDistinctKey, ViewFrontierFlow, ViewStageState};
 
 pub(crate) fn walk_fields<'a, V>(mut cur: V, keys: &[Arc<str>]) -> V
 where
@@ -252,7 +252,9 @@ where
     F: FnMut(&V) -> Option<ViewRowAction>,
 {
     let items = source.array_iter()?;
-    let mut op_state: Vec<usize> = vec![0; stages.len()];
+    let mut op_state: Vec<ViewStageState> = (0..stages.len())
+        .map(|_| ViewStageState::default())
+        .collect();
     let mut pulled_inputs = 0usize;
     let mut emitted_outputs = 0usize;
 
@@ -412,7 +414,7 @@ fn apply_view_stage_frontier<'a, V>(
     frontier: Vec<V>,
     stage: pipeline::ViewStageCapability,
     op_idx: usize,
-    op_state: &mut [usize],
+    op_state: &mut [ViewStageState],
     stage_kernels: &[pipeline::BodyKernel],
 ) -> Option<ViewFrontierFlow<V>>
 where
@@ -494,6 +496,24 @@ where
         pipeline::ViewKernelValue::Owned(value) => {
             Some(Arc::from(crate::util::val_to_key(&value).as_str()))
         }
+    }
+}
+
+fn eval_distinct_key<'a, V>(
+    item: &V,
+    kernel: Option<&pipeline::BodyKernel>,
+) -> Option<ViewDistinctKey>
+where
+    V: ValueView<'a>,
+{
+    match kernel {
+        Some(kernel) => match pipeline::eval_view_kernel(kernel, item)? {
+            pipeline::ViewKernelValue::View(view) => ViewDistinctKey::from_view(view.scalar())
+                .or_else(|| Some(ViewDistinctKey::from_owned(view.materialize()))),
+            pipeline::ViewKernelValue::Owned(value) => Some(ViewDistinctKey::from_owned(value)),
+        },
+        None => ViewDistinctKey::from_view(item.scalar())
+            .or_else(|| Some(ViewDistinctKey::from_owned(item.materialize()))),
     }
 }
 
@@ -764,6 +784,24 @@ mod tests {
 
         let out_json: serde_json::Value = out.into();
         assert_eq!(out_json, serde_json::json!([1, 2]));
+    }
+
+    #[test]
+    fn view_distinct_stage_feeds_count_sink_without_materializing_rows() {
+        let source = CountingView::root(&[7, 8, 7, 9, 8, 7]);
+        let body = PipelineBody {
+            stages: vec![Stage::UniqueBy(None)],
+            stage_exprs: Vec::new(),
+            sink: Sink::Reducer(crate::pipeline::ReducerSpec::count()),
+            stage_kernels: vec![BodyKernel::Generic],
+            sink_kernels: Vec::new(),
+        };
+
+        let out = super::run_full(source.clone(), &body).unwrap().unwrap();
+
+        assert_eq!(out, Val::Int(3));
+        assert_eq!(source.scalar_reads(), 6);
+        assert_eq!(source.materialize_reads(), 0);
     }
 
     #[test]

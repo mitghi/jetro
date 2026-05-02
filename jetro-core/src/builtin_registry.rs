@@ -560,12 +560,16 @@ builtin_registry! {
     };
     Unique => "unique" ["distinct"] {
         executor: BuiltinPipelineExecutor::UniqueBy,
-        materialization: BuiltinPipelineMaterialization::ComposedBarrier,
+        materialization: BuiltinPipelineMaterialization::Streaming,
+        shape: BuiltinPipelineShape::new(BuiltinCardinality::Filtering, true, 10.0, 1.0),
+        order: BuiltinPipelineOrderEffect::Preserves,
         lowering: BuiltinPipelineLowering::NullaryStage(BuiltinNullaryStage::Unique)
     };
     UniqueBy => "unique_by" [] {
         executor: BuiltinPipelineExecutor::UniqueBy,
-        materialization: BuiltinPipelineMaterialization::ComposedBarrier,
+        materialization: BuiltinPipelineMaterialization::Streaming,
+        shape: BuiltinPipelineShape::new(BuiltinCardinality::Filtering, true, 10.0, 1.0),
+        order: BuiltinPipelineOrderEffect::Preserves,
         lowering: BuiltinPipelineLowering::ExprStage(BuiltinExprStage::UniqueBy)
     };
     Collect => "collect" [];

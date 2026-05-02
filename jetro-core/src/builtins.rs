@@ -566,6 +566,7 @@ pub enum BuiltinViewStage {
     Filter,
     Map,
     FlatMap,
+    Distinct,
     Take,
     Skip,
 }
@@ -684,7 +685,9 @@ impl BuiltinViewStage {
     #[inline]
     pub fn input_mode(self) -> BuiltinViewInputMode {
         match self {
-            Self::Filter | Self::Map | Self::FlatMap => BuiltinViewInputMode::ReadsView,
+            Self::Filter | Self::Map | Self::FlatMap | Self::Distinct => {
+                BuiltinViewInputMode::ReadsView
+            }
             Self::Take | Self::Skip => BuiltinViewInputMode::SkipsViewRead,
         }
     }
@@ -694,7 +697,9 @@ impl BuiltinViewStage {
         match self {
             Self::Map => BuiltinViewOutputMode::BorrowedSubview,
             Self::FlatMap => BuiltinViewOutputMode::BorrowedSubviews,
-            Self::Filter | Self::Take | Self::Skip => BuiltinViewOutputMode::PreservesInputView,
+            Self::Filter | Self::Distinct | Self::Take | Self::Skip => {
+                BuiltinViewOutputMode::PreservesInputView
+            }
         }
     }
 
@@ -709,6 +714,7 @@ impl BuiltinViewStage {
             Self::Filter => BuiltinCardinality::Filtering,
             Self::Map => BuiltinCardinality::OneToOne,
             Self::FlatMap => BuiltinCardinality::Expanding,
+            Self::Distinct => BuiltinCardinality::Filtering,
             Self::Take | Self::Skip => BuiltinCardinality::Bounded,
         }
     }
@@ -721,7 +727,7 @@ impl BuiltinViewStage {
     #[inline]
     pub fn cost(self) -> f64 {
         match self {
-            Self::Filter | Self::Map | Self::FlatMap => 10.0,
+            Self::Filter | Self::Map | Self::FlatMap | Self::Distinct => 10.0,
             Self::Take | Self::Skip => 0.5,
         }
     }
@@ -730,6 +736,7 @@ impl BuiltinViewStage {
     pub fn selectivity(self) -> f64 {
         match self {
             Self::Filter => 0.5,
+            Self::Distinct => 1.0,
             Self::Map | Self::FlatMap => 1.0,
             Self::Take | Self::Skip => 0.5,
         }
@@ -1187,8 +1194,6 @@ impl BuiltinMethod {
                 spec
             }
             Self::Sort
-            | Self::Unique
-            | Self::UniqueBy
             | Self::GroupBy
             | Self::CountBy
             | Self::IndexBy
@@ -1208,6 +1213,11 @@ impl BuiltinMethod {
                     Self::CountBy | Self::IndexBy | Self::Chunk | Self::Window => spec,
                     _ => spec,
                 }
+            }
+            Self::Unique | Self::UniqueBy => {
+                BuiltinSpec::new(Cat::StreamingFilter, Card::Filtering)
+                    .view_stage(BuiltinViewStage::Distinct)
+                    .cost(10.0)
             }
             Self::Reverse
             | Self::Append

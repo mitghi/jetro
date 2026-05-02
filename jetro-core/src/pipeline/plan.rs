@@ -692,6 +692,15 @@ impl Stage {
     ) -> Option<ViewStageCapability> {
         let desc = self.descriptor()?;
         let stage = desc.view_stage()?;
+        if stage == BuiltinViewStage::Distinct {
+            return match desc.body {
+                Some(_) if kernel.is_some_and(BodyKernel::is_view_native) => {
+                    Some(ViewStageCapability::Distinct { kernel: Some(idx) })
+                }
+                Some(_) => None,
+                None => Some(ViewStageCapability::Distinct { kernel: None }),
+            };
+        }
         ViewStageCapability::from_stage_metadata(
             stage,
             desc.usize_arg,

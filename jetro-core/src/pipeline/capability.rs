@@ -43,6 +43,7 @@ pub(crate) enum ViewStageCapability {
     Filter { kernel: usize },
     Map { kernel: usize },
     FlatMap { kernel: usize },
+    Distinct { kernel: Option<usize> },
     Take(usize),
     Skip(usize),
 }
@@ -75,6 +76,7 @@ impl ViewStageCapability {
             Self::Filter { .. } => BuiltinViewStage::Filter,
             Self::Map { .. } => BuiltinViewStage::Map,
             Self::FlatMap { .. } => BuiltinViewStage::FlatMap,
+            Self::Distinct { .. } => BuiltinViewStage::Distinct,
             Self::Take(_) => BuiltinViewStage::Take,
             Self::Skip(_) => BuiltinViewStage::Skip,
         }
