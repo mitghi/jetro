@@ -507,6 +507,7 @@ pub(crate) struct StageDescriptor<'a> {
     pub executor_override: Option<BuiltinPipelineExecutor>,
     view_stage_override: Option<BuiltinViewStage>,
     allow_one_to_one_order_fallback: bool,
+    receiver_safe_without_body: bool,
 }
 
 impl<'a> StageDescriptor<'a> {
@@ -519,6 +520,7 @@ impl<'a> StageDescriptor<'a> {
             executor_override: None,
             view_stage_override: None,
             allow_one_to_one_order_fallback: false,
+            receiver_safe_without_body: true,
         }
     }
 
@@ -531,6 +533,7 @@ impl<'a> StageDescriptor<'a> {
             executor_override: Some(executor),
             view_stage_override: None,
             allow_one_to_one_order_fallback: false,
+            receiver_safe_without_body: true,
         }
     }
 
@@ -555,6 +558,12 @@ impl<'a> StageDescriptor<'a> {
     #[inline]
     fn allow_one_to_one_order_fallback(mut self) -> Self {
         self.allow_one_to_one_order_fallback = true;
+        self
+    }
+
+    #[inline]
+    fn receiver_unsafe_without_body(mut self) -> Self {
+        self.receiver_safe_without_body = false;
         self
     }
 
@@ -591,6 +600,16 @@ impl<'a> StageDescriptor<'a> {
             return BuiltinPipelineOrderEffect::Preserves;
         }
         BuiltinPipelineOrderEffect::Blocks
+    }
+
+    #[inline]
+    pub(crate) fn can_run_with_receiver_only<F>(self, program_ok: F) -> bool
+    where
+        F: FnMut(&crate::vm::Program) -> bool,
+    {
+        self.body
+            .map(program_ok)
+            .unwrap_or(self.receiver_safe_without_body)
     }
 }
 
@@ -745,7 +764,10 @@ impl Stage {
                     desc
                 })
             }
-            Stage::CompiledMap(_) => None,
+            Stage::CompiledMap(_) => Some(
+                StageDescriptor::special(BuiltinPipelineExecutor::RowMap)
+                    .receiver_unsafe_without_body(),
+            ),
             _ => None,
         }
     }
@@ -765,25 +787,8 @@ impl Stage {
     where
         F: FnMut(&crate::vm::Program) -> bool,
     {
-        if let Some(prog) = self.body_program() {
-            return program_ok(prog);
-        }
-        match self {
-            Stage::Take(_, _, _)
-            | Stage::Skip(_, _, _)
-            | Stage::Reverse(_)
-            | Stage::Sort(super::SortSpec { key: None, .. })
-            | Stage::UniqueBy(None)
-            | Stage::Builtin(_)
-            | Stage::Split(_)
-            | Stage::Slice(_, _)
-            | Stage::Replace { .. }
-            | Stage::Chunk(_)
-            | Stage::Window(_)
-            | Stage::SortedDedup(None) => true,
-            Stage::CompiledMap(_) => false,
-            _ => false,
-        }
+        self.descriptor()
+            .is_some_and(|desc| desc.can_run_with_receiver_only(&mut program_ok))
     }
 
     pub(crate) fn body_program(&self) -> Option<&crate::vm::Program> {
