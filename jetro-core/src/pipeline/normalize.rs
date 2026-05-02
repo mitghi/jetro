@@ -212,27 +212,10 @@ enum ExprStageKind {
 }
 
 fn stage_kernel(stage: &Stage) -> BodyKernel {
-    match stage {
-        Stage::Filter(p, _)
-        | Stage::Map(p, _)
-        | Stage::FlatMap(p, _)
-        | Stage::TakeWhile(p)
-        | Stage::DropWhile(p)
-        | Stage::IndicesWhere(p)
-        | Stage::FindIndex(p)
-        | Stage::MaxBy(p)
-        | Stage::MinBy(p)
-        | Stage::TransformValues(p)
-        | Stage::TransformKeys(p)
-        | Stage::FilterValues(p)
-        | Stage::FilterKeys(p)
-        | Stage::CountBy(p)
-        | Stage::IndexBy(p)
-        | Stage::GroupBy(p)
-        | Stage::Sort(crate::pipeline::SortSpec { key: Some(p), .. })
-        | Stage::UniqueBy(Some(p)) => BodyKernel::classify(p),
-        _ => BodyKernel::Generic,
-    }
+    stage
+        .body_program()
+        .map(BodyKernel::classify)
+        .unwrap_or(BodyKernel::Generic)
 }
 
 fn and_expr(lhs: Expr, rhs: Expr) -> Expr {

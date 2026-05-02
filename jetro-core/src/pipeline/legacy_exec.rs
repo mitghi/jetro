@@ -665,38 +665,16 @@ fn apply_expanding_adapter(stage: &Stage, v: &Val, out: &mut Vec<Val>) {
     }
 }
 
-pub(super) fn object_lambda_program(stage: &Stage) -> Option<&Arc<crate::vm::Program>> {
-    match stage {
-        Stage::TransformValues(prog)
-        | Stage::TransformKeys(prog)
-        | Stage::FilterValues(prog)
-        | Stage::FilterKeys(prog) => Some(prog),
-        _ => None,
-    }
+pub(super) fn object_lambda_program(stage: &Stage) -> Option<&crate::vm::Program> {
+    stage.body_program()
 }
 
-pub(super) fn row_stage_program(stage: &Stage) -> Option<&Arc<crate::vm::Program>> {
-    match stage {
-        Stage::Filter(prog, _) | Stage::Map(prog, _) | Stage::FlatMap(prog, _) => Some(prog),
-        _ => None,
-    }
+pub(super) fn row_stage_program(stage: &Stage) -> Option<&crate::vm::Program> {
+    stage.body_program()
 }
 
-pub(super) fn keyed_stage_program(stage: &Stage) -> Option<&Arc<crate::vm::Program>> {
-    match stage {
-        Stage::GroupBy(prog)
-        | Stage::UniqueBy(Some(prog))
-        | Stage::CountBy(prog)
-        | Stage::IndexBy(prog)
-        | Stage::FindIndex(prog)
-        | Stage::IndicesWhere(prog)
-        | Stage::MaxBy(prog)
-        | Stage::MinBy(prog)
-        | Stage::TakeWhile(prog)
-        | Stage::DropWhile(prog)
-        | Stage::SortedDedup(Some(prog)) => Some(prog),
-        _ => None,
-    }
+pub(super) fn keyed_stage_program(stage: &Stage) -> Option<&crate::vm::Program> {
+    stage.body_program()
 }
 
 impl Iterator for LegacyPreIter {
@@ -767,7 +745,7 @@ pub(crate) fn apply_lambda_obj(
     vm: &mut crate::vm::VM,
     loop_env: &mut crate::context::Env,
     kernel: &BodyKernel,
-    prog: &std::sync::Arc<crate::vm::Program>,
+    prog: &crate::vm::Program,
 ) -> Result<Val, EvalError> {
     let m = match recv.as_object() {
         Some(m) => m,

@@ -120,19 +120,10 @@ impl Pipeline {
         let classify_kernels = |stages: &[Stage]| -> Vec<BodyKernel> {
             stages
                 .iter()
-                .map(|s| match s {
-                    Stage::Filter(p, _) => BodyKernel::classify(p),
-                    Stage::TakeWhile(p) => BodyKernel::classify(p),
-                    Stage::Map(p, _) => BodyKernel::classify(p),
-                    Stage::FlatMap(p, _) => BodyKernel::classify(p),
-                    Stage::UniqueBy(Some(p)) => BodyKernel::classify(p),
-                    Stage::GroupBy(p) => BodyKernel::classify(p),
-                    Stage::Sort(spec) => spec
-                        .key
-                        .as_ref()
-                        .map(|p| BodyKernel::classify(p))
-                        .unwrap_or(BodyKernel::Generic),
-                    _ => BodyKernel::Generic,
+                .map(|s| {
+                    s.body_program()
+                        .map(BodyKernel::classify)
+                        .unwrap_or(BodyKernel::Generic)
                 })
                 .collect()
         };
@@ -272,19 +263,10 @@ fn try_decode_map_body(arg: &crate::ast::Arg) -> Option<Plan> {
     // classification feeds Phase 3 reorder + Phase 5 strategy select.
     let kernels: Vec<BodyKernel> = stages
         .iter()
-        .map(|s| match s {
-            Stage::Filter(p, _) => BodyKernel::classify(p),
-            Stage::TakeWhile(p) => BodyKernel::classify(p),
-            Stage::Map(p, _) => BodyKernel::classify(p),
-            Stage::FlatMap(p, _) => BodyKernel::classify(p),
-            Stage::UniqueBy(Some(p)) => BodyKernel::classify(p),
-            Stage::GroupBy(p) => BodyKernel::classify(p),
-            Stage::Sort(spec) => spec
-                .key
-                .as_ref()
-                .map(|p| BodyKernel::classify(p))
-                .unwrap_or(BodyKernel::Generic),
-            _ => BodyKernel::Generic,
+        .map(|s| {
+            s.body_program()
+                .map(BodyKernel::classify)
+                .unwrap_or(BodyKernel::Generic)
         })
         .collect();
     Some(plan_with_kernels(stages, &kernels, sink))
