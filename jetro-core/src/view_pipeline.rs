@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use crate::builtins::BuiltinMethod;
 use crate::chain_ir::PullDemand;
 use crate::context::{Env, EvalError};
 use crate::pipeline;
@@ -34,6 +35,9 @@ pub(crate) fn run<'a, V>(
 where
     V: ValueView<'a>,
 {
+    if let Some(result) = run_terminal_keyed_count(source.clone(), body) {
+        return Some(result);
+    }
     if let Some(result) = run_terminal_collect(source.clone(), body) {
         return Some(result);
     }
@@ -183,6 +187,51 @@ where
     )?;
 
     Some(Ok(collector.finish()))
+}
+
+fn run_terminal_keyed_count<'a, V>(
+    source: V,
+    body: &pipeline::PipelineBody,
+) -> Option<Result<Val, EvalError>>
+where
+    V: ValueView<'a>,
+{
+    if !matches!(body.sink, pipeline::Sink::Terminal(BuiltinMethod::First)) {
+        return None;
+    }
+    let (last_stage, prefix_stages) = body.stages.split_last()?;
+    let pipeline::Stage::CountBy(_) = last_stage else {
+        return None;
+    };
+    let key_idx = prefix_stages.len();
+    let key_kernel = body.stage_kernels.get(key_idx)?;
+    if !key_kernel.is_view_native() {
+        return None;
+    }
+
+    let prefix = terminal_collect_prefix(prefix_stages, body)?;
+    let source_demand = pipeline::Pipeline::segment_source_demand(&body.stages, &body.sink)
+        .chain
+        .pull;
+    let mut counts: indexmap::IndexMap<Arc<str>, i64> = indexmap::IndexMap::new();
+
+    drive_view_frontier(
+        source,
+        &prefix,
+        &body.stage_kernels,
+        source_demand,
+        |item| {
+            let key = eval_key_kernel(item, key_kernel)?;
+            *counts.entry(key).or_insert(0) += 1;
+            Some(ViewRowAction::Emit)
+        },
+    )?;
+
+    let out = counts
+        .into_iter()
+        .map(|(key, count)| (key, Val::Int(count)))
+        .collect();
+    Some(Ok(Val::obj(out)))
 }
 
 enum ViewRowAction {
@@ -432,6 +481,34 @@ where
     }
 }
 
+fn eval_key_kernel<'a, V>(item: &V, kernel: &pipeline::BodyKernel) -> Option<Arc<str>>
+where
+    V: ValueView<'a>,
+{
+    match pipeline::eval_view_kernel(kernel, item)? {
+        pipeline::ViewKernelValue::View(view) => json_view_key(view.scalar()).or_else(|| {
+            Some(Arc::from(
+                crate::util::val_to_key(&view.materialize()).as_str(),
+            ))
+        }),
+        pipeline::ViewKernelValue::Owned(value) => {
+            Some(Arc::from(crate::util::val_to_key(&value).as_str()))
+        }
+    }
+}
+
+fn json_view_key(view: crate::util::JsonView<'_>) -> Option<Arc<str>> {
+    match view {
+        crate::util::JsonView::Null => Some(Arc::from("null")),
+        crate::util::JsonView::Bool(value) => Some(Arc::from(if value { "true" } else { "false" })),
+        crate::util::JsonView::Int(value) => Some(Arc::from(value.to_string().as_str())),
+        crate::util::JsonView::UInt(value) => Some(Arc::from(value.to_string().as_str())),
+        crate::util::JsonView::Float(value) => Some(Arc::from(value.to_string().as_str())),
+        crate::util::JsonView::Str(value) => Some(Arc::from(value)),
+        crate::util::JsonView::ArrayLen(_) | crate::util::JsonView::ObjectLen(_) => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
@@ -449,6 +526,7 @@ mod tests {
         rows: Arc<[i64]>,
         idx: Option<usize>,
         scalar_reads: Rc<Cell<usize>>,
+        materialize_reads: Rc<Cell<usize>>,
     }
 
     impl CountingView {
@@ -457,11 +535,16 @@ mod tests {
                 rows: rows.iter().copied().collect::<Vec<_>>().into(),
                 idx: None,
                 scalar_reads: Rc::new(Cell::new(0)),
+                materialize_reads: Rc::new(Cell::new(0)),
             }
         }
 
         fn scalar_reads(&self) -> usize {
             self.scalar_reads.get()
+        }
+
+        fn materialize_reads(&self) -> usize {
+            self.materialize_reads.get()
         }
     }
 
@@ -479,6 +562,7 @@ mod tests {
                 rows: Arc::clone(&self.rows),
                 idx: None,
                 scalar_reads: Rc::clone(&self.scalar_reads),
+                materialize_reads: Rc::clone(&self.materialize_reads),
             }
         }
 
@@ -488,6 +572,7 @@ mod tests {
                 rows: Arc::clone(&self.rows),
                 idx,
                 scalar_reads: Rc::clone(&self.scalar_reads),
+                materialize_reads: Rc::clone(&self.materialize_reads),
             }
         }
 
@@ -497,14 +582,17 @@ mod tests {
             }
             let rows = Arc::clone(&self.rows);
             let scalar_reads = Rc::clone(&self.scalar_reads);
+            let materialize_reads = Rc::clone(&self.materialize_reads);
             Some(Box::new((0..rows.len()).map(move |idx| Self {
                 rows: Arc::clone(&rows),
                 idx: Some(idx),
                 scalar_reads: Rc::clone(&scalar_reads),
+                materialize_reads: Rc::clone(&materialize_reads),
             })))
         }
 
         fn materialize(&self) -> Val {
+            self.materialize_reads.set(self.materialize_reads.get() + 1);
             self.idx
                 .and_then(|idx| self.rows.get(idx).copied())
                 .map(Val::Int)
@@ -676,5 +764,29 @@ mod tests {
 
         let out_json: serde_json::Value = out.into();
         assert_eq!(out_json, serde_json::json!([1, 2]));
+    }
+
+    #[test]
+    fn terminal_keyed_count_counts_view_keys_without_materializing_rows() {
+        let source = CountingView::root(&[1, 2, 1, 3, 2, 1]);
+        let body = PipelineBody {
+            stages: vec![Stage::CountBy(Arc::new(crate::vm::Program::new(
+                Vec::new(),
+                "",
+            )))],
+            stage_exprs: Vec::new(),
+            sink: Sink::Terminal(crate::builtins::BuiltinMethod::First),
+            stage_kernels: vec![BodyKernel::Current],
+            sink_kernels: Vec::new(),
+        };
+
+        let out = super::run_terminal_keyed_count(source.clone(), &body)
+            .unwrap()
+            .unwrap();
+
+        let out_json: serde_json::Value = out.into();
+        assert_eq!(out_json, serde_json::json!({"1": 3, "2": 2, "3": 1}));
+        assert_eq!(source.scalar_reads(), 6);
+        assert_eq!(source.materialize_reads(), 0);
     }
 }
