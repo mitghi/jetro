@@ -1,10 +1,11 @@
 use std::sync::Arc;
 
 use crate::ast::{BinOp, Expr};
+use crate::builtin_registry::{participates_in_demand, BuiltinId};
 use crate::builtins::{
-    BuiltinMethod, BuiltinPipelineDemand, BuiltinPipelineMaterialization,
-    BuiltinPipelineOrderEffect, BuiltinSelectionPosition, BuiltinSinkAccumulator,
-    BuiltinSinkDemand, BuiltinSinkSpec, BuiltinSinkValueNeed, BuiltinViewStage,
+    BuiltinMethod, BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect,
+    BuiltinSelectionPosition, BuiltinSinkAccumulator, BuiltinSinkDemand, BuiltinSinkSpec,
+    BuiltinSinkValueNeed, BuiltinViewStage,
 };
 use crate::chain_ir::{ChainOp, Demand as ChainDemand, PullDemand, ValueNeed};
 use crate::vm::{CompiledObjEntry, Opcode, Program};
@@ -639,28 +640,20 @@ impl Stage {
         match self {
             Stage::CompiledMap(_) => Some(ChainOp::builtin(BuiltinMethod::Map)),
             Stage::SortedDedup(_) => None,
-            _ => self.pipeline_demand_op(),
+            _ => self.chain_demand_op(),
         }
     }
 
-    fn pipeline_demand_op(&self) -> Option<ChainOp> {
+    fn chain_demand_op(&self) -> Option<ChainOp> {
         let method = self.builtin_method_metadata()?;
-        let Some(demand) = method.spec().pipeline_demand else {
-            return matches!(self, Stage::Builtin(_)).then_some(ChainOp::builtin(method));
-        };
-        match demand {
-            BuiltinPipelineDemand::Filter => Some(ChainOp::builtin(BuiltinMethod::Filter)),
-            BuiltinPipelineDemand::Map => Some(ChainOp::builtin(BuiltinMethod::Map)),
-            BuiltinPipelineDemand::FlatMap => Some(ChainOp::builtin(BuiltinMethod::FlatMap)),
-            BuiltinPipelineDemand::TakeWhile => Some(ChainOp::builtin(BuiltinMethod::TakeWhile)),
-            BuiltinPipelineDemand::Take => match self {
-                Stage::Take(n, _, _) => Some(ChainOp::builtin_usize(BuiltinMethod::Take, *n)),
-                _ => None,
-            },
-            BuiltinPipelineDemand::Skip => match self {
-                Stage::Skip(n, _, _) => Some(ChainOp::builtin_usize(BuiltinMethod::Skip, *n)),
-                _ => None,
-            },
+        match self {
+            Stage::Take(n, _, _) => Some(ChainOp::builtin_usize(method, *n)),
+            Stage::Skip(n, _, _) => Some(ChainOp::builtin_usize(method, *n)),
+            Stage::Builtin(_) => Some(ChainOp::builtin(method)),
+            _ if participates_in_demand(BuiltinId::from_method(method)) => {
+                Some(ChainOp::builtin(method))
+            }
+            _ => None,
         }
     }
 

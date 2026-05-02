@@ -113,6 +113,11 @@ pub(crate) fn propagate_demand(id: BuiltinId, arg: BuiltinDemandArg, downstream:
 }
 
 #[inline]
+pub(crate) fn participates_in_demand(id: BuiltinId) -> bool {
+    demand_law(id) != BuiltinDemandLaw::Identity
+}
+
+#[inline]
 fn demand_law(id: BuiltinId) -> BuiltinDemandLaw {
     match method_from_id(id) {
         Some(BuiltinMethod::Filter | BuiltinMethod::Find | BuiltinMethod::FindAll) => {
