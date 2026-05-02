@@ -601,6 +601,28 @@ impl Stage {
     where
         F: FnMut(&crate::vm::Program) -> bool,
     {
+        if let Some(prog) = self.body_program() {
+            return program_ok(prog);
+        }
+        match self {
+            Stage::Take(_, _, _)
+            | Stage::Skip(_, _, _)
+            | Stage::Reverse(_)
+            | Stage::Sort(super::SortSpec { key: None, .. })
+            | Stage::UniqueBy(None)
+            | Stage::Builtin(_)
+            | Stage::Split(_)
+            | Stage::Slice(_, _)
+            | Stage::Replace { .. }
+            | Stage::Chunk(_)
+            | Stage::Window(_)
+            | Stage::SortedDedup(None) => true,
+            Stage::CompiledMap(_) => false,
+            _ => false,
+        }
+    }
+
+    pub(crate) fn body_program(&self) -> Option<&crate::vm::Program> {
         match self {
             Stage::Filter(prog, _)
             | Stage::Map(prog, _)
@@ -622,20 +644,8 @@ impl Stage {
             | Stage::FilterKeys(prog)
             | Stage::CountBy(prog)
             | Stage::IndexBy(prog)
-            | Stage::SortedDedup(Some(prog)) => program_ok(prog),
-            Stage::Take(_, _, _)
-            | Stage::Skip(_, _, _)
-            | Stage::Reverse(_)
-            | Stage::Sort(super::SortSpec { key: None, .. })
-            | Stage::UniqueBy(None)
-            | Stage::Builtin(_)
-            | Stage::Split(_)
-            | Stage::Slice(_, _)
-            | Stage::Replace { .. }
-            | Stage::Chunk(_)
-            | Stage::Window(_)
-            | Stage::SortedDedup(None) => true,
-            Stage::CompiledMap(_) => false,
+            | Stage::SortedDedup(Some(prog)) => Some(prog),
+            _ => None,
         }
     }
 

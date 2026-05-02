@@ -62,11 +62,7 @@ fn stage_program<'a>(
     if stage_kind(stage)? != kind {
         return None;
     }
-    match stage {
-        Stage::Filter(prog, _) | Stage::Map(prog, _) | Stage::FlatMap(prog, _) => Some(prog),
-        Stage::GroupBy(prog) => Some(prog),
-        _ => None,
-    }
+    stage.body_program()
 }
 
 fn reducer_op(sink: &Sink) -> Option<ReducerOp> {
