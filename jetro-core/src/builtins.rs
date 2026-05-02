@@ -801,6 +801,47 @@ pub enum BuiltinPipelineExecutor {
     SortedDedup,
 }
 
+impl BuiltinPipelineExecutor {
+    #[inline]
+    pub fn is_row_map(self) -> bool {
+        matches!(self, Self::RowMap)
+    }
+
+    #[inline]
+    pub fn is_row_filter(self) -> bool {
+        matches!(self, Self::RowFilter)
+    }
+
+    #[inline]
+    pub fn is_positional(self) -> bool {
+        matches!(self, Self::Position { .. })
+    }
+
+    #[inline]
+    pub fn is_order_only(self) -> bool {
+        matches!(self, Self::Reverse | Self::Sort)
+    }
+
+    #[inline]
+    pub fn consumes_input_value(self) -> bool {
+        matches!(
+            self,
+            Self::ObjectLambda
+                | Self::RowFilter
+                | Self::RowFlatMap
+                | Self::UniqueBy
+                | Self::GroupBy
+                | Self::CountBy
+                | Self::IndexBy
+                | Self::FindIndex
+                | Self::IndicesWhere
+                | Self::ArgExtreme { .. }
+                | Self::PrefixWhile { .. }
+                | Self::SortedDedup
+        )
+    }
+}
+
 impl BuiltinPipelineShape {
     #[inline]
     pub fn new(

@@ -58,7 +58,7 @@ pub(super) fn normalize_symbolic(
         let stage = in_stages[idx].clone();
         let expr = in_exprs.get(idx).cloned().unwrap_or(None);
         match stage {
-            Stage::Map(_, _) | Stage::CompiledMap(_) => {
+            _ if stage.is_symbolic_map_stage() => {
                 if let Some(expr) = expr.as_ref().filter(|e| is_pure_expr(e)) {
                     out.item = simplify_expr(substitute_current(expr, &out.item));
                 } else {
@@ -66,7 +66,7 @@ pub(super) fn normalize_symbolic(
                     out.push_stage(stage, expr);
                 }
             }
-            Stage::Filter(_, _) => {
+            _ if stage.is_symbolic_filter_stage() => {
                 if let Some(expr) = expr.as_ref().filter(|e| is_pure_expr(e)) {
                     let pred = simplify_expr(substitute_current(expr, &out.item));
                     out.predicate = Some(match out.predicate.take() {
@@ -78,34 +78,20 @@ pub(super) fn normalize_symbolic(
                     out.push_stage(stage, expr);
                 }
             }
-            Stage::Take(_, _, _) | Stage::Skip(_, _, _) => {
+            _ if stage.is_positional_stage() => {
                 out.flush_predicate();
                 out.push_stage(stage, expr);
             }
-            Stage::Reverse(_) | Stage::Sort(_) => {
+            _ if stage.is_order_only_stage() => {
                 if out.demand.order || suffix_needs_order(&in_stages[idx + 1..]) {
                     out.flush_all();
                     out.push_stage(stage, expr);
                 }
             }
-            Stage::Builtin(call)
-                if call.spec().pure
-                    && out.demand.value == ValueDemand::None
-                    && out.demand.order == false
-                    && !suffix_consumes_value(&in_stages[idx + 1..]) =>
-            {
-                // Pure one-to-one value work is dead for cardinality-only sinks
-                // unless a later symbolic filter consumes it.
-            }
-            Stage::Slice(_, _)
-            | Stage::Replace { .. }
-            | Stage::TransformValues(_)
-            | Stage::TransformKeys(_)
-            | Stage::FilterValues(_)
-            | Stage::FilterKeys(_)
-                if out.demand.value == ValueDemand::None
-                    && out.demand.order == false
-                    && !suffix_consumes_value(&in_stages[idx + 1..]) =>
+            _ if stage.can_drop_when_value_unused()
+                && out.demand.value == ValueDemand::None
+                && !out.demand.order
+                && !suffix_consumes_value(&in_stages[idx + 1..]) =>
             {
                 // Pure one-to-one value work is dead for cardinality-only sinks
                 // unless a later symbolic filter consumes it. At this point a
@@ -227,34 +213,11 @@ fn and_expr(lhs: Expr, rhs: Expr) -> Expr {
 }
 
 fn suffix_needs_order(stages: &[Stage]) -> bool {
-    stages
-        .iter()
-        .any(|s| matches!(s, Stage::Take(_, _, _) | Stage::Skip(_, _, _)))
+    stages.iter().any(Stage::is_positional_stage)
 }
 
 fn suffix_consumes_value(stages: &[Stage]) -> bool {
-    stages.iter().any(|s| {
-        matches!(
-            s,
-            Stage::Filter(_, _)
-                | Stage::UniqueBy(_)
-                | Stage::GroupBy(_)
-                | Stage::FlatMap(_, _)
-                | Stage::Sort(crate::pipeline::SortSpec { key: Some(_), .. })
-                | Stage::TakeWhile(_)
-                | Stage::DropWhile(_)
-                | Stage::IndicesWhere(_)
-                | Stage::FindIndex(_)
-                | Stage::MaxBy(_)
-                | Stage::MinBy(_)
-                | Stage::CountBy(_)
-                | Stage::IndexBy(_)
-                | Stage::TransformValues(_)
-                | Stage::TransformKeys(_)
-                | Stage::FilterValues(_)
-                | Stage::FilterKeys(_)
-        )
-    })
+    stages.iter().any(Stage::consumes_input_value)
 }
 
 fn compile_stage_expr(expr: &Expr) -> Arc<crate::vm::Program> {

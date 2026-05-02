@@ -817,6 +817,65 @@ impl Stage {
         })
     }
 
+    pub(crate) fn is_symbolic_map_stage(&self) -> bool {
+        matches!(self, Stage::CompiledMap(_))
+            || self
+                .descriptor()
+                .and_then(StageDescriptor::executor)
+                .is_some_and(BuiltinPipelineExecutor::is_row_map)
+    }
+
+    pub(crate) fn is_symbolic_filter_stage(&self) -> bool {
+        self.descriptor()
+            .and_then(StageDescriptor::executor)
+            .is_some_and(BuiltinPipelineExecutor::is_row_filter)
+    }
+
+    pub(crate) fn is_positional_stage(&self) -> bool {
+        self.descriptor()
+            .and_then(StageDescriptor::executor)
+            .is_some_and(BuiltinPipelineExecutor::is_positional)
+    }
+
+    pub(crate) fn is_order_only_stage(&self) -> bool {
+        self.descriptor()
+            .and_then(StageDescriptor::executor)
+            .is_some_and(BuiltinPipelineExecutor::is_order_only)
+    }
+
+    pub(crate) fn consumes_input_value(&self) -> bool {
+        let Some(desc) = self.descriptor() else {
+            return false;
+        };
+        let Some(executor) = desc.executor() else {
+            return false;
+        };
+        executor.consumes_input_value()
+            || (executor == BuiltinPipelineExecutor::Sort && desc.body.is_some())
+    }
+
+    pub(crate) fn can_drop_when_value_unused(&self) -> bool {
+        let Some(desc) = self.descriptor() else {
+            return false;
+        };
+        if !matches!(
+            self.shape().cardinality,
+            crate::chain_ir::Cardinality::OneToOne
+        ) {
+            return false;
+        }
+        if desc.pipeline_order_effect() != BuiltinPipelineOrderEffect::Preserves {
+            return false;
+        }
+        match desc.executor() {
+            Some(BuiltinPipelineExecutor::ElementBuiltin) => {
+                desc.method.is_some_and(|method| method.spec().pure)
+            }
+            Some(BuiltinPipelineExecutor::ObjectLambda) => true,
+            _ => false,
+        }
+    }
+
     pub fn chain_op(&self) -> Option<ChainOp> {
         match self {
             Stage::CompiledMap(_) => Some(ChainOp::builtin(BuiltinMethod::Map)),
