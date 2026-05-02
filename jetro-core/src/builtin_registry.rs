@@ -503,7 +503,7 @@ builtin_registry! {
     };
     CountBy => "count_by" [] {
         executor: BuiltinPipelineExecutor::CountBy,
-        materialization: BuiltinPipelineMaterialization::LegacyMaterialized,
+        materialization: BuiltinPipelineMaterialization::Streaming,
         shape: BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 1.0, 1.0),
         lowering: BuiltinPipelineLowering::TerminalExprStage {
             stage: BuiltinExprStage::CountBy,

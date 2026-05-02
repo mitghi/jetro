@@ -2,7 +2,6 @@
 
 use std::sync::Arc;
 
-use crate::builtins::BuiltinMethod;
 use crate::chain_ir::PullDemand;
 use crate::context::{Env, EvalError};
 use crate::pipeline;
@@ -35,13 +34,15 @@ pub(crate) fn run<'a, V>(
 where
     V: ValueView<'a>,
 {
-    if let Some(result) = run_terminal_keyed_count(source.clone(), body) {
-        return Some(result);
-    }
     if let Some(result) = run_terminal_collect(source.clone(), body) {
         return Some(result);
     }
     if let Some(result) = run_full(source.clone(), body) {
+        return Some(result);
+    }
+    if let Some(result) =
+        run_reducing_stage_prefix_then_materialized_suffix(source.clone(), body, cache)
+    {
         return Some(result);
     }
     if let Some(result) = run_sort_prefix_then_materialized_suffix(source.clone(), body, cache) {
@@ -139,9 +140,7 @@ where
     }
 
     let mut boundary_rows = Vec::new();
-    let source_demand = pipeline::Pipeline::segment_source_demand(&body.stages, &body.sink)
-        .chain
-        .pull;
+    let source_demand = PullDemand::All;
 
     drive_view_frontier(
         source,
@@ -187,51 +186,6 @@ where
     )?;
 
     Some(Ok(collector.finish()))
-}
-
-fn run_terminal_keyed_count<'a, V>(
-    source: V,
-    body: &pipeline::PipelineBody,
-) -> Option<Result<Val, EvalError>>
-where
-    V: ValueView<'a>,
-{
-    if !matches!(body.sink, pipeline::Sink::Terminal(BuiltinMethod::First)) {
-        return None;
-    }
-    let (last_stage, prefix_stages) = body.stages.split_last()?;
-    let pipeline::Stage::CountBy(_) = last_stage else {
-        return None;
-    };
-    let key_idx = prefix_stages.len();
-    let key_kernel = body.stage_kernels.get(key_idx)?;
-    if !key_kernel.is_view_native() {
-        return None;
-    }
-
-    let prefix = terminal_collect_prefix(prefix_stages, body)?;
-    let source_demand = pipeline::Pipeline::segment_source_demand(&body.stages, &body.sink)
-        .chain
-        .pull;
-    let mut counts: indexmap::IndexMap<Arc<str>, i64> = indexmap::IndexMap::new();
-
-    drive_view_frontier(
-        source,
-        &prefix,
-        &body.stage_kernels,
-        source_demand,
-        |item| {
-            let key = eval_key_kernel(item, key_kernel)?;
-            *counts.entry(key).or_insert(0) += 1;
-            Some(ViewRowAction::Emit)
-        },
-    )?;
-
-    let out = counts
-        .into_iter()
-        .map(|(key, count)| (key, Val::Int(count)))
-        .collect();
-    Some(Ok(Val::obj(out)))
 }
 
 enum ViewRowAction {
@@ -350,6 +304,110 @@ fn terminal_collect_prefix(
         prefix.push(capability);
     }
     Some(prefix)
+}
+
+struct ReducingStagePlan {
+    prefix: Vec<pipeline::ViewStageCapability>,
+    reducer: ViewStageReducer,
+    consumed_stages: usize,
+}
+
+enum ViewStageReducer {
+    KeyedCount {
+        kernel: usize,
+        counts: indexmap::IndexMap<Arc<str>, i64>,
+    },
+}
+
+impl ViewStageReducer {
+    fn from_capability(capability: pipeline::ViewStageCapability) -> Option<Self> {
+        match capability {
+            pipeline::ViewStageCapability::KeyedCount { kernel } => Some(Self::KeyedCount {
+                kernel,
+                counts: indexmap::IndexMap::new(),
+            }),
+            _ => None,
+        }
+    }
+
+    fn observe<'a, V>(&mut self, item: &V, stage_kernels: &[pipeline::BodyKernel]) -> Option<()>
+    where
+        V: ValueView<'a>,
+    {
+        match self {
+            Self::KeyedCount { kernel, counts } => {
+                let key = eval_key_kernel(item, stage_kernels.get(*kernel)?)?;
+                *counts.entry(key).or_insert(0) += 1;
+                Some(())
+            }
+        }
+    }
+
+    fn finish(self) -> Val {
+        match self {
+            Self::KeyedCount { counts, .. } => Val::obj(
+                counts
+                    .into_iter()
+                    .map(|(key, count)| (key, Val::Int(count)))
+                    .collect(),
+            ),
+        }
+    }
+}
+
+fn reducing_stage_plan(body: &pipeline::PipelineBody) -> Option<ReducingStagePlan> {
+    let mut prefix = Vec::new();
+    for (idx, stage) in body.stages.iter().enumerate() {
+        let capability = stage.view_capability(idx, body.stage_kernels.get(idx))?;
+        match capability.materialization() {
+            pipeline::ViewMaterialization::Never => prefix.push(capability),
+            pipeline::ViewMaterialization::StageFinalValue => {
+                return Some(ReducingStagePlan {
+                    prefix,
+                    reducer: ViewStageReducer::from_capability(capability)?,
+                    consumed_stages: idx + 1,
+                });
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
+fn run_reducing_stage_prefix_then_materialized_suffix<'a, V>(
+    source: V,
+    body: &pipeline::PipelineBody,
+    cache: Option<&dyn pipeline::PipelineData>,
+) -> Option<Result<Val, EvalError>>
+where
+    V: ValueView<'a>,
+{
+    let mut plan = reducing_stage_plan(body)?;
+    if !body.suffix_can_run_with_materialized_receiver(plan.consumed_stages) {
+        return None;
+    }
+    let source_demand = pipeline::Pipeline::segment_source_demand(&body.stages, &body.sink)
+        .chain
+        .pull;
+
+    drive_view_frontier(
+        source,
+        &plan.prefix,
+        &body.stage_kernels,
+        source_demand,
+        |item| {
+            plan.reducer.observe(item, &body.stage_kernels)?;
+            Some(ViewRowAction::Emit)
+        },
+    )?;
+
+    let boundary_rows = vec![plan.reducer.finish()];
+    Some(run_materialized_suffix(
+        body,
+        plan.consumed_stages,
+        boundary_rows,
+        cache,
+    ))
 }
 
 fn run_sort_prefix_then_materialized_suffix<'a, V>(
@@ -805,7 +863,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_keyed_count_counts_view_keys_without_materializing_rows() {
+    fn reducing_count_by_stage_materializes_only_final_boundary_value() {
         let source = CountingView::root(&[1, 2, 1, 3, 2, 1]);
         let body = PipelineBody {
             stages: vec![Stage::CountBy(Arc::new(crate::vm::Program::new(
@@ -818,9 +876,10 @@ mod tests {
             sink_kernels: Vec::new(),
         };
 
-        let out = super::run_terminal_keyed_count(source.clone(), &body)
-            .unwrap()
-            .unwrap();
+        let out =
+            super::run_reducing_stage_prefix_then_materialized_suffix(source.clone(), &body, None)
+                .unwrap()
+                .unwrap();
 
         let out_json: serde_json::Value = out.into();
         assert_eq!(out_json, serde_json::json!({"1": 3, "2": 2, "3": 1}));

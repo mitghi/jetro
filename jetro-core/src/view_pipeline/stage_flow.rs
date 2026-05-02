@@ -163,6 +163,7 @@ where
             let kernel = stage_kernels.get(kernel)?;
             Some(ViewStageFlow::Keep(super::eval_map_kernel(&item, kernel)?))
         }
+        pipeline::ViewStageCapability::KeyedCount { .. } => None,
         pipeline::ViewStageCapability::FlatMap { .. } => None,
     }
 }

@@ -16,11 +16,13 @@ pub(crate) enum ViewOutputMode {
     PreservesInputView,
     BorrowedSubview,
     BorrowedSubviews,
+    EmitsOwnedValue,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ViewMaterialization {
     Never,
+    StageFinalValue,
     SinkOutputRows,
     SinkFinalRow,
     SinkNumericInput,
@@ -44,6 +46,7 @@ pub(crate) enum ViewStageCapability {
     Map { kernel: usize },
     FlatMap { kernel: usize },
     Distinct { kernel: Option<usize> },
+    KeyedCount { kernel: usize },
     Take(usize),
     Skip(usize),
 }
@@ -65,6 +68,9 @@ impl ViewStageCapability {
             BuiltinViewStage::FlatMap if kernel_is_view_native => Some(Self::FlatMap {
                 kernel: kernel_index,
             }),
+            BuiltinViewStage::KeyedCount if kernel_is_view_native => Some(Self::KeyedCount {
+                kernel: kernel_index,
+            }),
             BuiltinViewStage::Take => Some(Self::Take(usize_arg?)),
             BuiltinViewStage::Skip => Some(Self::Skip(usize_arg?)),
             _ => None,
@@ -77,6 +83,7 @@ impl ViewStageCapability {
             Self::Map { .. } => BuiltinViewStage::Map,
             Self::FlatMap { .. } => BuiltinViewStage::FlatMap,
             Self::Distinct { .. } => BuiltinViewStage::Distinct,
+            Self::KeyedCount { .. } => BuiltinViewStage::KeyedCount,
             Self::Take(_) => BuiltinViewStage::Take,
             Self::Skip(_) => BuiltinViewStage::Skip,
         }
@@ -91,6 +98,9 @@ impl ViewStageCapability {
     }
 
     pub(crate) fn materialization(self) -> ViewMaterialization {
+        if matches!(self, Self::KeyedCount { .. }) {
+            return ViewMaterialization::StageFinalValue;
+        }
         view_materialization(self.view_stage().materialization())
     }
 }
@@ -159,6 +169,7 @@ fn view_output_mode(mode: BuiltinViewOutputMode) -> ViewOutputMode {
         BuiltinViewOutputMode::PreservesInputView => ViewOutputMode::PreservesInputView,
         BuiltinViewOutputMode::BorrowedSubview => ViewOutputMode::BorrowedSubview,
         BuiltinViewOutputMode::BorrowedSubviews => ViewOutputMode::BorrowedSubviews,
+        BuiltinViewOutputMode::EmitsOwnedValue => ViewOutputMode::EmitsOwnedValue,
     }
 }
 
