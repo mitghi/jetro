@@ -13,7 +13,7 @@ mod reducer_stage;
 mod stage_flow;
 
 use key::ViewKey;
-use stage_flow::{ViewFrontierFlow, ViewStageState};
+use stage_flow::{ViewStageFlow, ViewStageState};
 
 pub(crate) fn walk_fields<'a, V>(mut cur: V, keys: &[Arc<str>]) -> V
 where
@@ -197,6 +197,11 @@ enum ViewRowAction {
     Stop,
 }
 
+enum ViewDriveFlow {
+    Continue,
+    Stop,
+}
+
 fn drive_view_frontier<'a, V, F>(
     source: V,
     stages: &[pipeline::ViewStageCapability],
@@ -215,45 +220,105 @@ where
     let mut pulled_inputs = 0usize;
     let mut emitted_outputs = 0usize;
 
-    'outer: for row in items {
+    for row in items {
         if matches!(source_demand, PullDemand::FirstInput(n) if pulled_inputs >= n) {
-            break 'outer;
+            break;
         }
         pulled_inputs += 1;
 
-        let mut frontier = vec![row];
-        let mut stop_after_frontier = false;
-        for (op_idx, stage) in stages.iter().copied().enumerate() {
-            match apply_view_stage_frontier(frontier, stage, op_idx, &mut op_state, stage_kernels)?
-            {
-                ViewFrontierFlow::Keep(next) if next.is_empty() => continue 'outer,
-                ViewFrontierFlow::Keep(next) => frontier = next,
-                ViewFrontierFlow::Stop(next) if next.is_empty() => break 'outer,
-                ViewFrontierFlow::Stop(next) => {
-                    frontier = next;
-                    stop_after_frontier = true;
-                }
-            }
-        }
-
-        for item in frontier {
-            match observe(&item)? {
-                ViewRowAction::Skip => continue,
-                ViewRowAction::Emit => {
-                    emitted_outputs += 1;
-                    if matches!(source_demand, PullDemand::UntilOutput(n) if emitted_outputs >= n) {
-                        break 'outer;
-                    }
-                }
-                ViewRowAction::Stop => break 'outer,
-            }
-        }
-        if stop_after_frontier {
-            break 'outer;
+        if matches!(
+            drive_view_item(
+                row,
+                0,
+                stages,
+                &mut op_state,
+                stage_kernels,
+                source_demand,
+                &mut emitted_outputs,
+                &mut observe,
+            )?,
+            ViewDriveFlow::Stop
+        ) {
+            break;
         }
     }
 
     Some(())
+}
+
+fn drive_view_item<'a, V, F>(
+    item: V,
+    stage_idx: usize,
+    stages: &[pipeline::ViewStageCapability],
+    op_state: &mut [ViewStageState],
+    stage_kernels: &[pipeline::BodyKernel],
+    source_demand: PullDemand,
+    emitted_outputs: &mut usize,
+    observe: &mut F,
+) -> Option<ViewDriveFlow>
+where
+    V: ValueView<'a>,
+    F: FnMut(&V) -> Option<ViewRowAction>,
+{
+    let Some(stage) = stages.get(stage_idx).copied() else {
+        return match observe(&item)? {
+            ViewRowAction::Skip => Some(ViewDriveFlow::Continue),
+            ViewRowAction::Emit => {
+                *emitted_outputs += 1;
+                Some(
+                    if matches!(source_demand, PullDemand::UntilOutput(n) if *emitted_outputs >= n)
+                    {
+                        ViewDriveFlow::Stop
+                    } else {
+                        ViewDriveFlow::Continue
+                    },
+                )
+            }
+            ViewRowAction::Stop => Some(ViewDriveFlow::Stop),
+        };
+    };
+
+    if let pipeline::ViewStageCapability::FlatMap { kernel } = stage {
+        debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::ReadsView);
+        debug_assert_eq!(
+            stage.output_mode(),
+            pipeline::ViewOutputMode::BorrowedSubviews
+        );
+        let kernel = stage_kernels.get(kernel)?;
+        for child in eval_flat_map_kernel(&item, kernel)? {
+            if matches!(
+                drive_view_item(
+                    child,
+                    stage_idx + 1,
+                    stages,
+                    op_state,
+                    stage_kernels,
+                    source_demand,
+                    emitted_outputs,
+                    observe,
+                )?,
+                ViewDriveFlow::Stop
+            ) {
+                return Some(ViewDriveFlow::Stop);
+            }
+        }
+        return Some(ViewDriveFlow::Continue);
+    }
+
+    match apply_view_stage(item, stage, stage_idx, op_state, stage_kernels)? {
+        ViewStageFlow::Keep(next) => drive_view_item(
+            next,
+            stage_idx + 1,
+            stages,
+            op_state,
+            stage_kernels,
+            source_demand,
+            emitted_outputs,
+            observe,
+        ),
+        ViewStageFlow::Drop => Some(ViewDriveFlow::Continue),
+        ViewStageFlow::Stop => Some(ViewDriveFlow::Stop),
+    }
 }
 
 struct TerminalCollectPlan {
@@ -403,17 +468,17 @@ fn run_materialized_suffix(
     suffix.run_with_env(&root, &env, cache)
 }
 
-fn apply_view_stage_frontier<'a, V>(
-    frontier: Vec<V>,
+fn apply_view_stage<'a, V>(
+    item: V,
     stage: pipeline::ViewStageCapability,
     op_idx: usize,
     op_state: &mut [ViewStageState],
     stage_kernels: &[pipeline::BodyKernel],
-) -> Option<ViewFrontierFlow<V>>
+) -> Option<ViewStageFlow<V>>
 where
     V: ValueView<'a>,
 {
-    stage_flow::apply_frontier(frontier, stage, op_idx, op_state, stage_kernels)
+    stage_flow::apply_stage(item, stage, op_idx, op_state, stage_kernels)
 }
 
 fn suffix_body(body: &pipeline::PipelineBody, consumed_stages: usize) -> pipeline::PipelineBody {
