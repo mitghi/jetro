@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
 use crate::ast::{BinOp, Expr};
-use crate::builtin_registry::{participates_in_demand, BuiltinId};
+use crate::builtin_registry::{
+    participates_in_demand, pipeline_materialization, pipeline_order_effect, pipeline_shape,
+    BuiltinId,
+};
 use crate::builtins::{
     BuiltinMethod, BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect,
     BuiltinSelectionPosition, BuiltinSinkAccumulator, BuiltinSinkDemand, BuiltinSinkSpec,
@@ -475,7 +478,7 @@ impl StageShape {
         use crate::builtins::BuiltinCategory;
 
         let spec = method.spec();
-        if let Some(shape) = spec.pipeline_shape {
+        if let Some(shape) = pipeline_shape(BuiltinId::from_method(method)) {
             return Self {
                 cardinality: shape.cardinality.into(),
                 can_indexed: shape.can_indexed,
@@ -589,7 +592,7 @@ impl Stage {
             Stage::SortedDedup(_) => BuiltinPipelineMaterialization::LegacyMaterialized,
             _ => self
                 .builtin_method_metadata()
-                .map(|method| method.spec().pipeline_materialization)
+                .map(|method| pipeline_materialization(BuiltinId::from_method(method)))
                 .unwrap_or(BuiltinPipelineMaterialization::Streaming),
         }
     }
@@ -697,7 +700,7 @@ impl Stage {
                     return BuiltinPipelineOrderEffect::Blocks;
                 };
                 let spec = method.spec();
-                if let Some(effect) = spec.pipeline_order_effect {
+                if let Some(effect) = pipeline_order_effect(BuiltinId::from_method(method)) {
                     return effect;
                 }
                 if matches!(self, Stage::Builtin(_))

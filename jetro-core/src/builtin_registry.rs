@@ -6,7 +6,10 @@
 //! old enum directly.
 
 use crate::{
-    builtins::{BuiltinMethod, BuiltinPipelineExecutor, BuiltinSpec},
+    builtins::{
+        BuiltinCardinality, BuiltinMethod, BuiltinPipelineExecutor, BuiltinPipelineMaterialization,
+        BuiltinPipelineOrderEffect, BuiltinPipelineShape, BuiltinSpec,
+    },
     chain_ir::{Demand, PullDemand, ValueNeed},
 };
 
@@ -155,6 +158,91 @@ pub(crate) fn pipeline_executor(id: BuiltinId) -> Option<BuiltinPipelineExecutor
         Some(BuiltinMethod::DropWhile) => {
             Some(BuiltinPipelineExecutor::PrefixWhile { take: false })
         }
+        _ => None,
+    }
+}
+
+#[inline]
+pub(crate) fn pipeline_materialization(id: BuiltinId) -> BuiltinPipelineMaterialization {
+    match method_from_id(id) {
+        Some(
+            BuiltinMethod::Sort
+            | BuiltinMethod::Unique
+            | BuiltinMethod::UniqueBy
+            | BuiltinMethod::GroupBy
+            | BuiltinMethod::Reverse,
+        ) => BuiltinPipelineMaterialization::ComposedBarrier,
+        Some(
+            BuiltinMethod::FlatMap
+            | BuiltinMethod::Split
+            | BuiltinMethod::DropWhile
+            | BuiltinMethod::FindIndex
+            | BuiltinMethod::IndicesWhere
+            | BuiltinMethod::MaxBy
+            | BuiltinMethod::MinBy
+            | BuiltinMethod::CountBy
+            | BuiltinMethod::IndexBy
+            | BuiltinMethod::Chunk
+            | BuiltinMethod::Window,
+        ) => BuiltinPipelineMaterialization::LegacyMaterialized,
+        _ => BuiltinPipelineMaterialization::Streaming,
+    }
+}
+
+#[inline]
+pub(crate) fn pipeline_shape(id: BuiltinId) -> Option<BuiltinPipelineShape> {
+    use BuiltinCardinality as Card;
+
+    match method_from_id(id) {
+        Some(BuiltinMethod::Split) => {
+            Some(BuiltinPipelineShape::new(Card::Expanding, true, 2.0, 1.0))
+        }
+        Some(BuiltinMethod::TakeWhile | BuiltinMethod::DropWhile) => {
+            Some(BuiltinPipelineShape::new(Card::Filtering, true, 10.0, 0.5))
+        }
+        Some(
+            BuiltinMethod::FindIndex
+            | BuiltinMethod::IndicesWhere
+            | BuiltinMethod::MaxBy
+            | BuiltinMethod::MinBy
+            | BuiltinMethod::CountBy
+            | BuiltinMethod::IndexBy
+            | BuiltinMethod::TransformKeys
+            | BuiltinMethod::TransformValues
+            | BuiltinMethod::FilterKeys
+            | BuiltinMethod::FilterValues
+            | BuiltinMethod::Slice,
+        ) => Some(BuiltinPipelineShape::new(Card::OneToOne, true, 1.0, 1.0)),
+        Some(BuiltinMethod::Chunk | BuiltinMethod::Window) => {
+            Some(BuiltinPipelineShape::new(Card::Barrier, true, 2.0, 1.0))
+        }
+        Some(BuiltinMethod::Replace | BuiltinMethod::ReplaceAll) => {
+            Some(BuiltinPipelineShape::new(Card::OneToOne, true, 2.0, 1.0))
+        }
+        _ => None,
+    }
+}
+
+#[inline]
+pub(crate) fn pipeline_order_effect(id: BuiltinId) -> Option<BuiltinPipelineOrderEffect> {
+    match method_from_id(id) {
+        Some(BuiltinMethod::Filter | BuiltinMethod::Find | BuiltinMethod::FindAll) => {
+            Some(BuiltinPipelineOrderEffect::PredicatePrefix)
+        }
+        Some(BuiltinMethod::TakeWhile) => Some(BuiltinPipelineOrderEffect::PredicatePrefix),
+        Some(
+            BuiltinMethod::Map
+            | BuiltinMethod::Take
+            | BuiltinMethod::Skip
+            | BuiltinMethod::TransformKeys
+            | BuiltinMethod::TransformValues
+            | BuiltinMethod::FilterKeys
+            | BuiltinMethod::FilterValues
+            | BuiltinMethod::Slice
+            | BuiltinMethod::Replace
+            | BuiltinMethod::ReplaceAll,
+        ) => Some(BuiltinPipelineOrderEffect::Preserves),
+        Some(BuiltinMethod::DropWhile) => Some(BuiltinPipelineOrderEffect::Blocks),
         _ => None,
     }
 }
@@ -423,7 +511,9 @@ builtin_registry! {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::builtins::BuiltinPipelineExecutor;
+    use crate::builtins::{
+        BuiltinPipelineExecutor, BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect,
+    };
 
     #[test]
     fn registry_name_lookup_matches_legacy_lookup() {
@@ -567,6 +657,46 @@ mod tests {
         assert_eq!(
             pipeline_executor(BuiltinId::from_method(BuiltinMethod::DropWhile)),
             Some(BuiltinPipelineExecutor::PrefixWhile { take: false })
+        );
+    }
+
+    #[test]
+    fn registry_drives_pipeline_execution_policy() {
+        assert_eq!(
+            pipeline_materialization(BuiltinId::from_method(BuiltinMethod::Sort)),
+            BuiltinPipelineMaterialization::ComposedBarrier
+        );
+        assert_eq!(
+            pipeline_materialization(BuiltinId::from_method(BuiltinMethod::Reverse)),
+            BuiltinPipelineMaterialization::ComposedBarrier
+        );
+        assert_eq!(
+            pipeline_materialization(BuiltinId::from_method(BuiltinMethod::Split)),
+            BuiltinPipelineMaterialization::LegacyMaterialized
+        );
+        assert_eq!(
+            pipeline_materialization(BuiltinId::from_method(BuiltinMethod::TakeWhile)),
+            BuiltinPipelineMaterialization::Streaming
+        );
+        assert_eq!(
+            pipeline_shape(BuiltinId::from_method(BuiltinMethod::Split))
+                .unwrap()
+                .can_indexed,
+            true
+        );
+        assert_eq!(
+            pipeline_shape(BuiltinId::from_method(BuiltinMethod::Chunk))
+                .unwrap()
+                .cost,
+            2.0
+        );
+        assert_eq!(
+            pipeline_order_effect(BuiltinId::from_method(BuiltinMethod::Filter)),
+            Some(BuiltinPipelineOrderEffect::PredicatePrefix)
+        );
+        assert_eq!(
+            pipeline_order_effect(BuiltinId::from_method(BuiltinMethod::Replace)),
+            Some(BuiltinPipelineOrderEffect::Preserves)
         );
     }
 
