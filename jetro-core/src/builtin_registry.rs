@@ -7,8 +7,10 @@
 
 use crate::{
     builtins::{
-        BuiltinCardinality, BuiltinMethod, BuiltinPipelineExecutor, BuiltinPipelineMaterialization,
-        BuiltinPipelineOrderEffect, BuiltinPipelineShape, BuiltinSpec,
+        BuiltinCardinality, BuiltinExprStage, BuiltinMethod, BuiltinNullaryStage,
+        BuiltinPipelineExecutor, BuiltinPipelineLowering, BuiltinPipelineMaterialization,
+        BuiltinPipelineOrderEffect, BuiltinPipelineShape, BuiltinPipelineStage, BuiltinSpec,
+        BuiltinStringPairStage, BuiltinStringStage, BuiltinUsizeStage,
     },
     chain_ir::{Demand, PullDemand, ValueNeed},
 };
@@ -243,6 +245,133 @@ pub(crate) fn pipeline_order_effect(id: BuiltinId) -> Option<BuiltinPipelineOrde
             | BuiltinMethod::ReplaceAll,
         ) => Some(BuiltinPipelineOrderEffect::Preserves),
         Some(BuiltinMethod::DropWhile) => Some(BuiltinPipelineOrderEffect::Blocks),
+        _ => None,
+    }
+}
+
+#[inline]
+pub(crate) fn pipeline_stage(id: BuiltinId) -> Option<BuiltinPipelineStage> {
+    match pipeline_lowering(id)? {
+        BuiltinPipelineLowering::ExprStage(_)
+        | BuiltinPipelineLowering::TerminalExprStage { .. }
+        | BuiltinPipelineLowering::UsizeStage { .. } => Some(BuiltinPipelineStage::Unary),
+        BuiltinPipelineLowering::NullaryStage(_) | BuiltinPipelineLowering::Sort => {
+            Some(BuiltinPipelineStage::Nullary)
+        }
+        BuiltinPipelineLowering::StringStage(_)
+        | BuiltinPipelineLowering::StringPairStage(_)
+        | BuiltinPipelineLowering::Slice
+        | BuiltinPipelineLowering::TerminalSink => None,
+    }
+}
+
+#[inline]
+pub(crate) fn pipeline_lowering(id: BuiltinId) -> Option<BuiltinPipelineLowering> {
+    match method_from_id(id) {
+        Some(BuiltinMethod::Filter | BuiltinMethod::Find | BuiltinMethod::FindAll) => {
+            Some(BuiltinPipelineLowering::ExprStage(BuiltinExprStage::Filter))
+        }
+        Some(BuiltinMethod::Map) => Some(BuiltinPipelineLowering::ExprStage(BuiltinExprStage::Map)),
+        Some(BuiltinMethod::FlatMap) => Some(BuiltinPipelineLowering::ExprStage(
+            BuiltinExprStage::FlatMap,
+        )),
+        Some(BuiltinMethod::Split) => Some(BuiltinPipelineLowering::StringStage(
+            BuiltinStringStage::Split,
+        )),
+        Some(BuiltinMethod::TakeWhile) => Some(BuiltinPipelineLowering::ExprStage(
+            BuiltinExprStage::TakeWhile,
+        )),
+        Some(BuiltinMethod::DropWhile) => Some(BuiltinPipelineLowering::ExprStage(
+            BuiltinExprStage::DropWhile,
+        )),
+        Some(BuiltinMethod::FindFirst | BuiltinMethod::FindOne) => {
+            Some(BuiltinPipelineLowering::TerminalExprStage {
+                stage: BuiltinExprStage::Filter,
+                terminal: BuiltinMethod::First,
+            })
+        }
+        Some(BuiltinMethod::Take) => Some(BuiltinPipelineLowering::UsizeStage {
+            stage: BuiltinUsizeStage::Take,
+            min: 0,
+        }),
+        Some(BuiltinMethod::Skip) => Some(BuiltinPipelineLowering::UsizeStage {
+            stage: BuiltinUsizeStage::Skip,
+            min: 0,
+        }),
+        Some(
+            BuiltinMethod::First
+            | BuiltinMethod::Last
+            | BuiltinMethod::Sum
+            | BuiltinMethod::Avg
+            | BuiltinMethod::Min
+            | BuiltinMethod::Max
+            | BuiltinMethod::Count
+            | BuiltinMethod::ApproxCountDistinct,
+        ) => Some(BuiltinPipelineLowering::TerminalSink),
+        Some(BuiltinMethod::FindIndex) => Some(BuiltinPipelineLowering::TerminalExprStage {
+            stage: BuiltinExprStage::FindIndex,
+            terminal: BuiltinMethod::First,
+        }),
+        Some(BuiltinMethod::IndicesWhere) => Some(BuiltinPipelineLowering::TerminalExprStage {
+            stage: BuiltinExprStage::IndicesWhere,
+            terminal: BuiltinMethod::First,
+        }),
+        Some(BuiltinMethod::MaxBy) => Some(BuiltinPipelineLowering::TerminalExprStage {
+            stage: BuiltinExprStage::MaxBy,
+            terminal: BuiltinMethod::First,
+        }),
+        Some(BuiltinMethod::MinBy) => Some(BuiltinPipelineLowering::TerminalExprStage {
+            stage: BuiltinExprStage::MinBy,
+            terminal: BuiltinMethod::First,
+        }),
+        Some(BuiltinMethod::Sort) => Some(BuiltinPipelineLowering::Sort),
+        Some(BuiltinMethod::Unique) => Some(BuiltinPipelineLowering::NullaryStage(
+            BuiltinNullaryStage::Unique,
+        )),
+        Some(BuiltinMethod::UniqueBy) => Some(BuiltinPipelineLowering::ExprStage(
+            BuiltinExprStage::UniqueBy,
+        )),
+        Some(BuiltinMethod::GroupBy) => Some(BuiltinPipelineLowering::ExprStage(
+            BuiltinExprStage::GroupBy,
+        )),
+        Some(BuiltinMethod::CountBy) => Some(BuiltinPipelineLowering::TerminalExprStage {
+            stage: BuiltinExprStage::CountBy,
+            terminal: BuiltinMethod::First,
+        }),
+        Some(BuiltinMethod::IndexBy) => Some(BuiltinPipelineLowering::TerminalExprStage {
+            stage: BuiltinExprStage::IndexBy,
+            terminal: BuiltinMethod::First,
+        }),
+        Some(BuiltinMethod::Chunk) => Some(BuiltinPipelineLowering::UsizeStage {
+            stage: BuiltinUsizeStage::Chunk,
+            min: 1,
+        }),
+        Some(BuiltinMethod::Window) => Some(BuiltinPipelineLowering::UsizeStage {
+            stage: BuiltinUsizeStage::Window,
+            min: 1,
+        }),
+        Some(BuiltinMethod::Reverse) => Some(BuiltinPipelineLowering::NullaryStage(
+            BuiltinNullaryStage::Reverse,
+        )),
+        Some(BuiltinMethod::TransformKeys) => Some(BuiltinPipelineLowering::ExprStage(
+            BuiltinExprStage::TransformKeys,
+        )),
+        Some(BuiltinMethod::TransformValues) => Some(BuiltinPipelineLowering::ExprStage(
+            BuiltinExprStage::TransformValues,
+        )),
+        Some(BuiltinMethod::FilterKeys) => Some(BuiltinPipelineLowering::ExprStage(
+            BuiltinExprStage::FilterKeys,
+        )),
+        Some(BuiltinMethod::FilterValues) => Some(BuiltinPipelineLowering::ExprStage(
+            BuiltinExprStage::FilterValues,
+        )),
+        Some(BuiltinMethod::Slice) => Some(BuiltinPipelineLowering::Slice),
+        Some(BuiltinMethod::Replace) => Some(BuiltinPipelineLowering::StringPairStage(
+            BuiltinStringPairStage::Replace { all: false },
+        )),
+        Some(BuiltinMethod::ReplaceAll) => Some(BuiltinPipelineLowering::StringPairStage(
+            BuiltinStringPairStage::Replace { all: true },
+        )),
         _ => None,
     }
 }
@@ -512,7 +641,9 @@ builtin_registry! {
 mod tests {
     use super::*;
     use crate::builtins::{
-        BuiltinPipelineExecutor, BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect,
+        BuiltinExprStage, BuiltinNullaryStage, BuiltinPipelineExecutor, BuiltinPipelineLowering,
+        BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect, BuiltinPipelineStage,
+        BuiltinStringPairStage, BuiltinStringStage, BuiltinUsizeStage,
     };
 
     #[test]
@@ -697,6 +828,95 @@ mod tests {
         assert_eq!(
             pipeline_order_effect(BuiltinId::from_method(BuiltinMethod::Replace)),
             Some(BuiltinPipelineOrderEffect::Preserves)
+        );
+    }
+
+    #[test]
+    fn registry_drives_pipeline_lowering() {
+        assert_eq!(
+            pipeline_lowering(BuiltinId::from_method(BuiltinMethod::Filter)),
+            Some(BuiltinPipelineLowering::ExprStage(BuiltinExprStage::Filter))
+        );
+        assert_eq!(
+            pipeline_lowering(BuiltinId::from_method(BuiltinMethod::Map)),
+            Some(BuiltinPipelineLowering::ExprStage(BuiltinExprStage::Map))
+        );
+        assert_eq!(
+            pipeline_lowering(BuiltinId::from_method(BuiltinMethod::FindOne)),
+            Some(BuiltinPipelineLowering::TerminalExprStage {
+                stage: BuiltinExprStage::Filter,
+                terminal: BuiltinMethod::First,
+            })
+        );
+        assert_eq!(
+            pipeline_lowering(BuiltinId::from_method(BuiltinMethod::Take)),
+            Some(BuiltinPipelineLowering::UsizeStage {
+                stage: BuiltinUsizeStage::Take,
+                min: 0,
+            })
+        );
+        assert_eq!(
+            pipeline_lowering(BuiltinId::from_method(BuiltinMethod::Sort)),
+            Some(BuiltinPipelineLowering::Sort)
+        );
+        assert_eq!(
+            pipeline_lowering(BuiltinId::from_method(BuiltinMethod::Reverse)),
+            Some(BuiltinPipelineLowering::NullaryStage(
+                BuiltinNullaryStage::Reverse
+            ))
+        );
+        assert_eq!(
+            pipeline_lowering(BuiltinId::from_method(BuiltinMethod::Split)),
+            Some(BuiltinPipelineLowering::StringStage(
+                BuiltinStringStage::Split
+            ))
+        );
+        assert_eq!(
+            pipeline_lowering(BuiltinId::from_method(BuiltinMethod::ReplaceAll)),
+            Some(BuiltinPipelineLowering::StringPairStage(
+                BuiltinStringPairStage::Replace { all: true }
+            ))
+        );
+        assert_eq!(
+            pipeline_lowering(BuiltinId::from_method(BuiltinMethod::Count)),
+            Some(BuiltinPipelineLowering::TerminalSink)
+        );
+    }
+
+    #[test]
+    fn registry_drives_pipeline_stage_classification() {
+        assert_eq!(
+            pipeline_stage(BuiltinId::from_method(BuiltinMethod::Filter)),
+            Some(BuiltinPipelineStage::Unary)
+        );
+        assert_eq!(
+            pipeline_stage(BuiltinId::from_method(BuiltinMethod::CountBy)),
+            Some(BuiltinPipelineStage::Unary)
+        );
+        assert_eq!(
+            pipeline_stage(BuiltinId::from_method(BuiltinMethod::Sort)),
+            Some(BuiltinPipelineStage::Nullary)
+        );
+        assert_eq!(
+            pipeline_stage(BuiltinId::from_method(BuiltinMethod::Reverse)),
+            Some(BuiltinPipelineStage::Nullary)
+        );
+        assert_eq!(
+            pipeline_stage(BuiltinId::from_method(BuiltinMethod::Take)),
+            Some(BuiltinPipelineStage::Unary)
+        );
+        assert_eq!(
+            pipeline_stage(BuiltinId::from_method(BuiltinMethod::FindFirst)),
+            Some(BuiltinPipelineStage::Unary)
+        );
+
+        assert_eq!(
+            pipeline_stage(BuiltinId::from_method(BuiltinMethod::Len)),
+            None
+        );
+        assert_eq!(
+            pipeline_stage(BuiltinId::from_method(BuiltinMethod::FromJson)),
+            None
         );
     }
 

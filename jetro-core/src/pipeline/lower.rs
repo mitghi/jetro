@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::builtin_registry::{pipeline_lowering, pipeline_stage, BuiltinId};
 use crate::builtins::{
     BuiltinExprStage, BuiltinMethod, BuiltinNullaryStage, BuiltinPipelineLowering,
     BuiltinPipelineSink, BuiltinPipelineStage, BuiltinSinkAccumulator, BuiltinStringPairStage,
@@ -183,15 +184,16 @@ fn is_receiver_pipeline_start_method(name: &str, arity: usize) -> bool {
         return false;
     }
 
-    let spec = method.spec();
     match arity {
         0 => {
+            let spec = method.spec();
             spec.sink.is_some()
                 || spec.pipeline_sink.is_some()
-                || spec.pipeline_stage == Some(BuiltinPipelineStage::Nullary)
+                || pipeline_stage(BuiltinId::from_method(method))
+                    == Some(BuiltinPipelineStage::Nullary)
         }
         1 if method == BuiltinMethod::Sort => true,
-        1 => spec.pipeline_stage == Some(BuiltinPipelineStage::Unary),
+        1 => pipeline_stage(BuiltinId::from_method(method)) == Some(BuiltinPipelineStage::Unary),
         _ => false,
     }
 }
@@ -350,7 +352,7 @@ fn lower_method_from_registry(
     stage_exprs: &mut Vec<Option<Arc<Expr>>>,
     sink: &mut Sink,
 ) -> Option<()> {
-    let Some(lowering) = method.spec().pipeline_lowering else {
+    let Some(lowering) = pipeline_lowering(BuiltinId::from_method(method)) else {
         if is_last {
             *sink = terminal_sink_for_method(method, args)?;
             return Some(());
