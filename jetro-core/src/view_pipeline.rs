@@ -150,11 +150,12 @@ where
         },
     )?;
 
-    let suffix = suffix_body(body, prefix.consumed_stages)
-        .with_source(pipeline::Source::Receiver(Val::arr(boundary_rows)));
-    let root = Val::Null;
-    let env = Env::new(Val::Null);
-    Some(suffix.run_with_env(&root, &env, cache))
+    Some(run_materialized_suffix(
+        body,
+        prefix.consumed_stages,
+        boundary_rows,
+        cache,
+    ))
 }
 
 fn run_terminal_collect<'a, V>(
@@ -334,7 +335,7 @@ where
 
     let items = source.array_iter()?;
     let winners = match pipeline::bounded_sort_by_key(items, spec.descending, strategy, |row| {
-        eval_value_kernel(row, key_kernel)
+        eval_sort_key_kernel(row, key_kernel)
             .ok_or_else(|| EvalError("view sort: unsupported key".into()))
     }) {
         Ok(winners) => winners,
@@ -342,11 +343,20 @@ where
     };
     let boundary_rows: Vec<Val> = winners.into_iter().map(|row| row.materialize()).collect();
 
-    let suffix =
-        suffix_body(body, 1).with_source(pipeline::Source::Receiver(Val::arr(boundary_rows)));
+    Some(run_materialized_suffix(body, 1, boundary_rows, cache))
+}
+
+fn run_materialized_suffix(
+    body: &pipeline::PipelineBody,
+    consumed_stages: usize,
+    boundary_rows: Vec<Val>,
+    cache: Option<&dyn pipeline::PipelineData>,
+) -> Result<Val, EvalError> {
+    let suffix = suffix_body(body, consumed_stages)
+        .with_source(pipeline::Source::Receiver(Val::arr(boundary_rows)));
     let root = Val::Null;
     let env = Env::new(Val::Null);
-    Some(suffix.run_with_env(&root, &env, cache))
+    suffix.run_with_env(&root, &env, cache)
 }
 
 fn apply_view_stage_frontier<'a, V>(
@@ -417,6 +427,30 @@ where
     match pipeline::eval_view_kernel(kernel, item)? {
         pipeline::ViewKernelValue::View(view) => Some(view.materialize()),
         pipeline::ViewKernelValue::Owned(value) => Some(value),
+    }
+}
+
+fn eval_sort_key_kernel<'a, V>(item: &V, kernel: &pipeline::BodyKernel) -> Option<Val>
+where
+    V: ValueView<'a>,
+{
+    match pipeline::eval_view_kernel(kernel, item)? {
+        pipeline::ViewKernelValue::Owned(value) => Some(value),
+        pipeline::ViewKernelValue::View(view) => match view.scalar() {
+            crate::util::JsonView::Null => Some(Val::Null),
+            crate::util::JsonView::Bool(value) => Some(Val::Bool(value)),
+            crate::util::JsonView::Int(value) => Some(Val::Int(value)),
+            crate::util::JsonView::UInt(value) => Some(if value <= i64::MAX as u64 {
+                Val::Int(value as i64)
+            } else {
+                Val::Float(value as f64)
+            }),
+            crate::util::JsonView::Float(value) => Some(Val::Float(value)),
+            crate::util::JsonView::Str(value) => Some(Val::Str(Arc::from(value))),
+            crate::util::JsonView::ArrayLen(_) | crate::util::JsonView::ObjectLen(_) => {
+                Some(view.materialize())
+            }
+        },
     }
 }
 
