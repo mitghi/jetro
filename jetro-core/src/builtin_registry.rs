@@ -86,14 +86,14 @@ builtin_registry! {
     Keys => "keys" [];
     Values => "values" [];
     Entries => "entries" [];
-    ToPairs => "to_pairs" ["toPairs"];
-    FromPairs => "from_pairs" ["fromPairs"];
+    ToPairs => "to_pairs" [];
+    FromPairs => "from_pairs" [];
     Invert => "invert" [];
     Reverse => "reverse" [];
     Type => "type" [];
-    ToString => "to_string" ["toString"];
-    ToJson => "to_json" ["toJson"];
-    FromJson => "from_json" ["fromJson"];
+    ToString => "to_string" [];
+    ToJson => "to_json" [];
+    FromJson => "from_json" [];
     Sum => "sum" [];
     Avg => "avg" [];
     Min => "min" [];
@@ -101,32 +101,32 @@ builtin_registry! {
     Count => "count" [];
     Any => "any" ["exists"];
     All => "all" [];
-    FindIndex => "find_index" ["findIndex"];
-    IndicesWhere => "indices_where" ["indicesWhere"];
-    MaxBy => "max_by" ["maxBy"];
-    MinBy => "min_by" ["minBy"];
-    GroupBy => "group_by" ["groupBy"];
-    CountBy => "count_by" ["countBy"];
-    IndexBy => "index_by" ["indexBy"];
-    GroupShape => "group_shape" ["groupShape"];
+    FindIndex => "find_index" [];
+    IndicesWhere => "indices_where" [];
+    MaxBy => "max_by" [];
+    MinBy => "min_by" [];
+    GroupBy => "group_by" [];
+    CountBy => "count_by" [];
+    IndexBy => "index_by" [];
+    GroupShape => "group_shape" [];
     Explode => "explode" [];
     Implode => "implode" [];
     Filter => "filter" [];
     Map => "map" [];
-    FlatMap => "flat_map" ["flatMap"];
+    FlatMap => "flat_map" [];
     Find => "find" [];
-    FindAll => "find_all" ["findAll"];
-    Sort => "sort" ["sort_by", "sortBy"];
+    FindAll => "find_all" [];
+    Sort => "sort" ["sort_by"];
     Unique => "unique" ["distinct"];
-    UniqueBy => "unique_by" ["uniqueBy"];
+    UniqueBy => "unique_by" [];
     Collect => "collect" [];
-    DeepFind => "deep_find" ["deepFind"];
-    DeepShape => "deep_shape" ["deepShape"];
-    DeepLike => "deep_like" ["deepLike"];
+    DeepFind => "deep_find" [];
+    DeepShape => "deep_shape" [];
+    DeepLike => "deep_like" [];
     Walk => "walk" [];
-    WalkPre => "walk_pre" ["walkPre"];
+    WalkPre => "walk_pre" [];
     Rec => "rec" [];
-    TracePath => "trace_path" ["tracePath"];
+    TracePath => "trace_path" [];
     Flatten => "flatten" [];
     Compact => "compact" [];
     Join => "join" [];
@@ -147,121 +147,121 @@ builtin_registry! {
     Chunk => "chunk" ["batch"];
     TakeWhile => "take_while" ["takewhile"];
     DropWhile => "drop_while" ["dropwhile"];
-    FindFirst => "find_first" ["findFirst"];
-    FindOne => "find_one" ["findOne"];
-    ApproxCountDistinct => "approx_count_distinct" ["approxCountDistinct"];
+    FindFirst => "find_first" [];
+    FindOne => "find_one" [];
+    ApproxCountDistinct => "approx_count_distinct" [];
     Accumulate => "accumulate" [];
     Partition => "partition" [];
     Zip => "zip" [];
-    ZipLongest => "zip_longest" ["zipLongest"];
+    ZipLongest => "zip_longest" [];
     Fanout => "fanout" [];
-    ZipShape => "zip_shape" ["zipShape"];
+    ZipShape => "zip_shape" [];
     Pick => "pick" [];
     Omit => "omit" [];
     Merge => "merge" [];
-    DeepMerge => "deep_merge" ["deepMerge"];
+    DeepMerge => "deep_merge" [];
     Defaults => "defaults" [];
     Rename => "rename" [];
-    TransformKeys => "transform_keys" ["transformKeys"];
-    TransformValues => "transform_values" ["transformValues"];
-    FilterKeys => "filter_keys" ["filterKeys"];
-    FilterValues => "filter_values" ["filterValues"];
+    TransformKeys => "transform_keys" [];
+    TransformValues => "transform_values" [];
+    FilterKeys => "filter_keys" [];
+    FilterValues => "filter_values" [];
     Pivot => "pivot" [];
-    GetPath => "get_path" ["getPath"];
-    SetPath => "set_path" ["setPath"];
-    DelPath => "del_path" ["delPath"];
-    DelPaths => "del_paths" ["delPaths"];
-    HasPath => "has_path" ["hasPath"];
-    FlattenKeys => "flatten_keys" ["flattenKeys"];
-    UnflattenKeys => "unflatten_keys" ["unflattenKeys"];
-    ToCsv => "to_csv" ["toCsv"];
-    ToTsv => "to_tsv" ["toTsv"];
+    GetPath => "get_path" [];
+    SetPath => "set_path" [];
+    DelPath => "del_path" [];
+    DelPaths => "del_paths" [];
+    HasPath => "has_path" [];
+    FlattenKeys => "flatten_keys" [];
+    UnflattenKeys => "unflatten_keys" [];
+    ToCsv => "to_csv" [];
+    ToTsv => "to_tsv" [];
     Or => "or" [];
     Has => "has" [];
     Missing => "missing" [];
     Includes => "includes" ["contains"];
     Index => "index" [];
-    IndicesOf => "indices_of" ["indicesOf"];
+    IndicesOf => "indices_of" [];
     Set => "set" [];
     Update => "update" [];
     Ceil => "ceil" [];
     Floor => "floor" [];
     Round => "round" [];
     Abs => "abs" [];
-    RollingSum => "rolling_sum" ["rollingSum"];
-    RollingAvg => "rolling_avg" ["rollingAvg"];
-    RollingMin => "rolling_min" ["rollingMin"];
-    RollingMax => "rolling_max" ["rollingMax"];
+    RollingSum => "rolling_sum" [];
+    RollingAvg => "rolling_avg" [];
+    RollingMin => "rolling_min" [];
+    RollingMax => "rolling_max" [];
     Lag => "lag" [];
     Lead => "lead" [];
-    DiffWindow => "diff_window" ["diffWindow"];
-    PctChange => "pct_change" ["pctChange"];
+    DiffWindow => "diff_window" [];
+    PctChange => "pct_change" [];
     CumMax => "cummax" [];
     CumMin => "cummin" [];
     Zscore => "zscore" [];
     Upper => "upper" [];
     Lower => "lower" [];
     Capitalize => "capitalize" [];
-    TitleCase => "title_case" ["titleCase"];
+    TitleCase => "title_case" [];
     Trim => "trim" [];
-    TrimLeft => "trim_left" ["trimLeft", "lstrip"];
-    TrimRight => "trim_right" ["trimRight", "rstrip"];
-    SnakeCase => "snake_case" ["snakeCase"];
-    KebabCase => "kebab_case" ["kebabCase"];
-    CamelCase => "camel_case" ["camelCase"];
-    PascalCase => "pascal_case" ["pascalCase"];
-    ReverseStr => "reverse_str" ["reverseStr"];
+    TrimLeft => "trim_left" ["lstrip"];
+    TrimRight => "trim_right" ["rstrip"];
+    SnakeCase => "snake_case" [];
+    KebabCase => "kebab_case" [];
+    CamelCase => "camel_case" [];
+    PascalCase => "pascal_case" [];
+    ReverseStr => "reverse_str" [];
     Lines => "lines" [];
     Words => "words" [];
     Chars => "chars" [];
-    CharsOf => "chars_of" ["charsOf"];
+    CharsOf => "chars_of" [];
     Bytes => "bytes" [];
-    ByteLen => "byte_len" ["byteLen"];
-    IsBlank => "is_blank" ["isBlank"];
-    IsNumeric => "is_numeric" ["isNumeric"];
-    IsAlpha => "is_alpha" ["isAlpha"];
-    IsAscii => "is_ascii" ["isAscii"];
-    ToNumber => "to_number" ["toNumber"];
-    ToBool => "to_bool" ["toBool"];
-    ParseInt => "parse_int" ["parseInt"];
-    ParseFloat => "parse_float" ["parseFloat"];
-    ParseBool => "parse_bool" ["parseBool"];
-    ToBase64 => "to_base64" ["toBase64"];
-    FromBase64 => "from_base64" ["fromBase64"];
-    UrlEncode => "url_encode" ["urlEncode"];
-    UrlDecode => "url_decode" ["urlDecode"];
-    HtmlEscape => "html_escape" ["htmlEscape"];
-    HtmlUnescape => "html_unescape" ["htmlUnescape"];
-    Repeat => "repeat" ["repeat_str", "repeatStr"];
-    PadLeft => "pad_left" ["padLeft"];
-    PadRight => "pad_right" ["padRight"];
+    ByteLen => "byte_len" [];
+    IsBlank => "is_blank" [];
+    IsNumeric => "is_numeric" [];
+    IsAlpha => "is_alpha" [];
+    IsAscii => "is_ascii" [];
+    ToNumber => "to_number" [];
+    ToBool => "to_bool" [];
+    ParseInt => "parse_int" [];
+    ParseFloat => "parse_float" [];
+    ParseBool => "parse_bool" [];
+    ToBase64 => "to_base64" [];
+    FromBase64 => "from_base64" [];
+    UrlEncode => "url_encode" [];
+    UrlDecode => "url_decode" [];
+    HtmlEscape => "html_escape" [];
+    HtmlUnescape => "html_unescape" [];
+    Repeat => "repeat" ["repeat_str"];
+    PadLeft => "pad_left" [];
+    PadRight => "pad_right" [];
     Center => "center" [];
-    StartsWith => "starts_with" ["startsWith"];
-    EndsWith => "ends_with" ["endsWith"];
-    IndexOf => "index_of" ["indexOf"];
-    LastIndexOf => "last_index_of" ["lastIndexOf"];
+    StartsWith => "starts_with" [];
+    EndsWith => "ends_with" [];
+    IndexOf => "index_of" [];
+    LastIndexOf => "last_index_of" [];
     Replace => "replace" [];
-    ReplaceAll => "replace_all" ["replaceAll"];
-    StripPrefix => "strip_prefix" ["stripPrefix"];
-    StripSuffix => "strip_suffix" ["stripSuffix"];
+    ReplaceAll => "replace_all" [];
+    StripPrefix => "strip_prefix" [];
+    StripSuffix => "strip_suffix" [];
     Slice => "slice" [];
     Split => "split" [];
     Indent => "indent" [];
     Dedent => "dedent" [];
     Matches => "matches" [];
     Scan => "scan" [];
-    ReMatch => "re_match" ["reMatch"];
-    ReMatchFirst => "match_first" ["matchFirst"];
-    ReMatchAll => "match_all" ["matchAll"];
+    ReMatch => "re_match" [];
+    ReMatchFirst => "match_first" [];
+    ReMatchAll => "match_all" [];
     ReCaptures => "captures" [];
-    ReCapturesAll => "captures_all" ["capturesAll"];
-    ReSplit => "split_re" ["splitRe"];
-    ReReplace => "replace_re" ["replaceRe"];
-    ReReplaceAll => "replace_all_re" ["replaceAllRe"];
-    ContainsAny => "contains_any" ["containsAny"];
-    ContainsAll => "contains_all" ["containsAll"];
+    ReCapturesAll => "captures_all" [];
+    ReSplit => "split_re" [];
+    ReReplace => "replace_re" [];
+    ReReplaceAll => "replace_all_re" [];
+    ContainsAny => "contains_any" [];
+    ContainsAll => "contains_all" [];
     Schema => "schema" [];
-    EquiJoin => "equi_join" ["equiJoin"];
+    EquiJoin => "equi_join" [];
     Unknown => "<unknown>" [];
 }
 
@@ -284,6 +284,31 @@ mod tests {
             }
         }
         assert_eq!(by_name("missing_builtin"), None);
+    }
+
+    #[test]
+    fn registry_does_not_accept_obsolete_camel_case_aliases() {
+        for name in [
+            "toString",
+            "flatMap",
+            "groupBy",
+            "sortBy",
+            "uniqueBy",
+            "transformKeys",
+            "getPath",
+            "isBlank",
+            "parseInt",
+            "startsWith",
+            "replaceAll",
+        ] {
+            assert_eq!(by_name(name), None);
+            assert_eq!(BuiltinMethod::from_name(name), BuiltinMethod::Unknown);
+        }
+
+        assert_eq!(BuiltinMethod::from_name("group_by"), BuiltinMethod::GroupBy);
+        assert_eq!(BuiltinMethod::from_name("exists"), BuiltinMethod::Any);
+        assert_eq!(BuiltinMethod::from_name("distinct"), BuiltinMethod::Unique);
+        assert_eq!(BuiltinMethod::from_name("lstrip"), BuiltinMethod::TrimLeft);
     }
 
     #[test]

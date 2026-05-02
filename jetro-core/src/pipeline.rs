@@ -618,7 +618,7 @@ mod tests {
             Vec::new()
         )));
         assert!(Pipeline::is_receiver_pipeline_start(&Step::Method(
-            "countBy".into(),
+            "count_by".into(),
             vec![Arg::Pos(Expr::Ident("kind".into()))]
         )));
 
