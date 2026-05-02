@@ -557,7 +557,6 @@ pub struct BuiltinSpec {
     pub numeric_reducer: Option<BuiltinNumericReducer>,
     pub stage_merge: Option<BuiltinStageMerge>,
     pub cancellation: Option<BuiltinCancellation>,
-    pub pipeline_sink: Option<BuiltinPipelineSink>,
     pub columnar_stage: Option<BuiltinColumnarStage>,
     pub pipeline_element: bool,
     pub cost: f64,
@@ -931,7 +930,6 @@ impl BuiltinSpec {
             numeric_reducer: None,
             stage_merge: None,
             cancellation: None,
-            pipeline_sink: None,
             columnar_stage: None,
             pipeline_element: false,
             cost: 1.0,
@@ -956,11 +954,6 @@ impl BuiltinSpec {
     fn view_scalar(mut self) -> Self {
         self.view_scalar = true;
         self.view_native = true;
-        self
-    }
-
-    fn pipeline_sink(mut self, sink: BuiltinPipelineSink) -> Self {
-        self.pipeline_sink = Some(sink);
         self
     }
 
@@ -1229,9 +1222,7 @@ impl BuiltinMethod {
                 .view_native()
                 .count_sink()
                 .cost(10.0),
-            Self::ApproxCountDistinct => BuiltinSpec::new(Cat::Reducer, Card::Reducing)
-                .pipeline_sink(BuiltinPipelineSink::ApproxCountDistinct)
-                .cost(10.0),
+            Self::ApproxCountDistinct => BuiltinSpec::new(Cat::Reducer, Card::Reducing).cost(10.0),
             Self::Any
             | Self::All
             | Self::FindIndex
@@ -6307,9 +6298,9 @@ pub fn schema_apply(recv: &Val) -> Option<Val> {
 mod spec_tests {
     use super::{
         BuiltinCardinality, BuiltinCategory, BuiltinColumnarStage, BuiltinMethod,
-        BuiltinNumericReducer, BuiltinPipelineSink, BuiltinSelectionPosition,
-        BuiltinSinkAccumulator, BuiltinSinkDemand, BuiltinSinkValueNeed, BuiltinStageMerge,
-        BuiltinViewInputMode, BuiltinViewMaterialization, BuiltinViewOutputMode, BuiltinViewStage,
+        BuiltinNumericReducer, BuiltinSelectionPosition, BuiltinSinkAccumulator, BuiltinSinkDemand,
+        BuiltinSinkValueNeed, BuiltinStageMerge, BuiltinViewInputMode, BuiltinViewMaterialization,
+        BuiltinViewOutputMode, BuiltinViewStage,
     };
 
     #[test]
@@ -6528,14 +6519,5 @@ mod spec_tests {
         }
         assert!(!BuiltinMethod::Sort.spec().view_scalar);
         assert!(!BuiltinMethod::FromJson.spec().view_scalar);
-    }
-
-    #[test]
-    fn builtin_specs_drive_pipeline_sink_lowering() {
-        assert_eq!(
-            BuiltinMethod::ApproxCountDistinct.spec().pipeline_sink,
-            Some(BuiltinPipelineSink::ApproxCountDistinct)
-        );
-        assert_eq!(BuiltinMethod::Count.spec().pipeline_sink, None);
     }
 }

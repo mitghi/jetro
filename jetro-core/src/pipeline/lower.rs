@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::builtin_registry::{pipeline_lowering, pipeline_stage, BuiltinId};
+use crate::builtin_registry::{pipeline_lowering, pipeline_sink, pipeline_stage, BuiltinId};
 use crate::builtins::{
     BuiltinExprStage, BuiltinMethod, BuiltinNullaryStage, BuiltinPipelineLowering,
     BuiltinPipelineSink, BuiltinPipelineStage, BuiltinSinkAccumulator, BuiltinStringPairStage,
@@ -188,7 +188,7 @@ fn is_receiver_pipeline_start_method(name: &str, arity: usize) -> bool {
         0 => {
             let spec = method.spec();
             spec.sink.is_some()
-                || spec.pipeline_sink.is_some()
+                || pipeline_sink(BuiltinId::from_method(method)).is_some()
                 || pipeline_stage(BuiltinId::from_method(method))
                     == Some(BuiltinPipelineStage::Nullary)
         }
@@ -601,7 +601,7 @@ fn string_arg(arg: &crate::ast::Arg) -> Option<Arc<str>> {
 
 fn terminal_sink_for_method(method: BuiltinMethod, args: &[crate::ast::Arg]) -> Option<Sink> {
     let spec = method.spec();
-    match spec.pipeline_sink {
+    match pipeline_sink(BuiltinId::from_method(method)) {
         Some(BuiltinPipelineSink::ApproxCountDistinct) if args.is_empty() => {
             return Some(Sink::ApproxCountDistinct);
         }

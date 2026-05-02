@@ -9,8 +9,9 @@ use crate::{
     builtins::{
         BuiltinCardinality, BuiltinExprStage, BuiltinMethod, BuiltinNullaryStage,
         BuiltinPipelineExecutor, BuiltinPipelineLowering, BuiltinPipelineMaterialization,
-        BuiltinPipelineOrderEffect, BuiltinPipelineShape, BuiltinPipelineStage, BuiltinSpec,
-        BuiltinStringPairStage, BuiltinStringStage, BuiltinUsizeStage,
+        BuiltinPipelineOrderEffect, BuiltinPipelineShape, BuiltinPipelineSink,
+        BuiltinPipelineStage, BuiltinSpec, BuiltinStringPairStage, BuiltinStringStage,
+        BuiltinUsizeStage,
     },
     chain_ir::{Demand, PullDemand, ValueNeed},
 };
@@ -377,6 +378,14 @@ pub(crate) fn pipeline_lowering(id: BuiltinId) -> Option<BuiltinPipelineLowering
 }
 
 #[inline]
+pub(crate) fn pipeline_sink(id: BuiltinId) -> Option<BuiltinPipelineSink> {
+    match method_from_id(id) {
+        Some(BuiltinMethod::ApproxCountDistinct) => Some(BuiltinPipelineSink::ApproxCountDistinct),
+        _ => None,
+    }
+}
+
+#[inline]
 fn demand_law(id: BuiltinId) -> BuiltinDemandLaw {
     match method_from_id(id) {
         Some(BuiltinMethod::Filter | BuiltinMethod::Find | BuiltinMethod::FindAll) => {
@@ -642,8 +651,8 @@ mod tests {
     use super::*;
     use crate::builtins::{
         BuiltinExprStage, BuiltinNullaryStage, BuiltinPipelineExecutor, BuiltinPipelineLowering,
-        BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect, BuiltinPipelineStage,
-        BuiltinStringPairStage, BuiltinStringStage, BuiltinUsizeStage,
+        BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect, BuiltinPipelineSink,
+        BuiltinPipelineStage, BuiltinStringPairStage, BuiltinStringStage, BuiltinUsizeStage,
     };
 
     #[test]
@@ -916,6 +925,18 @@ mod tests {
         );
         assert_eq!(
             pipeline_stage(BuiltinId::from_method(BuiltinMethod::FromJson)),
+            None
+        );
+    }
+
+    #[test]
+    fn registry_drives_pipeline_sink_classification() {
+        assert_eq!(
+            pipeline_sink(BuiltinId::from_method(BuiltinMethod::ApproxCountDistinct)),
+            Some(BuiltinPipelineSink::ApproxCountDistinct)
+        );
+        assert_eq!(
+            pipeline_sink(BuiltinId::from_method(BuiltinMethod::Count)),
             None
         );
     }
