@@ -8,7 +8,7 @@
 
 #![allow(dead_code)]
 
-use crate::builtins::BuiltinMethod;
+use crate::builtin_registry::{descriptor as builtin_descriptor, BuiltinId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValueKind {
@@ -136,7 +136,7 @@ pub enum ChainOp {
     Avg,
     Min,
     Max,
-    Builtin(BuiltinMethod),
+    Builtin(BuiltinId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -188,10 +188,18 @@ impl ChainOp {
                 cardinality: Reducing,
                 preserves_order: true,
             },
-            Builtin(method) => {
+            Builtin(id) => {
                 use crate::builtins::BuiltinCategory as Cat;
 
-                let spec = method.spec();
+                let Some(descriptor) = builtin_descriptor(*id) else {
+                    return OpSpec {
+                        input: ValueKind::Any,
+                        output: ValueKind::Any,
+                        cardinality: Cardinality::OneToOne,
+                        preserves_order: true,
+                    };
+                };
+                let spec = descriptor.spec();
                 let input = match spec.category {
                     Cat::StreamingOneToOne
                     | Cat::StreamingFilter

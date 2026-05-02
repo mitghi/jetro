@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::ast::{BinOp, Expr};
+use crate::builtin_registry::BuiltinId;
 use crate::builtins::{
     BuiltinMethod, BuiltinPipelineDemand, BuiltinPipelineMaterialization,
     BuiltinPipelineOrderEffect, BuiltinSelectionPosition, BuiltinSinkAccumulator,
@@ -646,7 +647,8 @@ impl Stage {
     fn pipeline_demand_op(&self) -> Option<ChainOp> {
         let method = self.builtin_method_metadata()?;
         let Some(demand) = method.spec().pipeline_demand else {
-            return matches!(self, Stage::Builtin(_)).then_some(ChainOp::Builtin(method));
+            return matches!(self, Stage::Builtin(_))
+                .then_some(ChainOp::Builtin(BuiltinId::from_method(method)));
         };
         match demand {
             BuiltinPipelineDemand::Filter => Some(ChainOp::Filter),
