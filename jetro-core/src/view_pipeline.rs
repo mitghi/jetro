@@ -69,44 +69,56 @@ where
         &capabilities.stages,
         &body.stage_kernels,
         source_demand,
-        |item| match capabilities.sink {
-            pipeline::ViewSinkCapability::Collect => {
-                debug_assert_eq!(
-                    capabilities.sink.materialization(),
-                    pipeline::ViewMaterialization::SinkOutputRows
-                );
-                sink_acc.observe_collect(item.materialize());
-                Some(ViewRowAction::Emit)
-            }
-            pipeline::ViewSinkCapability::Builtin {
-                accumulator,
-                predicate_kernel,
-                project_kernel,
-                numeric_op: _,
-                ..
-            } => {
-                if !view_sink_predicate_matches(item, predicate_kernel, &body.sink_kernels)? {
-                    return Some(ViewRowAction::Skip);
-                }
-                let sink_done = sink_acc.observe_builtin_lazy(
-                    accumulator,
-                    || item.materialize(),
-                    || {
-                        let kernel = project_kernel?;
-                        let kernel = body.sink_kernels.get(kernel)?;
-                        eval_owned_scalar_or_value_kernel(item, kernel)
-                    },
-                )?;
-                Some(if sink_done {
-                    ViewRowAction::Stop
-                } else {
-                    ViewRowAction::Emit
-                })
-            }
-        },
+        |item| observe_view_sink(item, capabilities.sink, &mut sink_acc, &body.sink_kernels),
     )?;
 
     Some(Ok(sink_acc.finish(false)))
+}
+
+fn observe_view_sink<'a, V>(
+    item: &V,
+    sink: pipeline::ViewSinkCapability,
+    sink_acc: &mut pipeline::SinkAccumulator,
+    sink_kernels: &[pipeline::BodyKernel],
+) -> Option<ViewRowAction>
+where
+    V: ValueView<'a>,
+{
+    match sink {
+        pipeline::ViewSinkCapability::Collect => {
+            debug_assert_eq!(
+                sink.materialization(),
+                pipeline::ViewMaterialization::SinkOutputRows
+            );
+            sink_acc.observe_collect(item.materialize());
+            Some(ViewRowAction::Emit)
+        }
+        pipeline::ViewSinkCapability::Builtin {
+            accumulator,
+            predicate_kernel,
+            project_kernel,
+            numeric_op: _,
+            ..
+        } => {
+            if !view_sink_predicate_matches(item, predicate_kernel, sink_kernels)? {
+                return Some(ViewRowAction::Skip);
+            }
+            let sink_done = sink_acc.observe_builtin_lazy(
+                accumulator,
+                || item.materialize(),
+                || {
+                    let kernel = project_kernel?;
+                    let kernel = sink_kernels.get(kernel)?;
+                    eval_owned_scalar_or_value_kernel(item, kernel)
+                },
+            )?;
+            Some(if sink_done {
+                ViewRowAction::Stop
+            } else {
+                ViewRowAction::Emit
+            })
+        }
+    }
 }
 
 fn view_sink_predicate_matches<'a, V>(
@@ -207,13 +219,28 @@ fn drive_view_frontier<'a, V, F>(
     stages: &[pipeline::ViewStageCapability],
     stage_kernels: &[pipeline::BodyKernel],
     source_demand: PullDemand,
-    mut observe: F,
+    observe: F,
 ) -> Option<()>
 where
     V: ValueView<'a>,
     F: FnMut(&V) -> Option<ViewRowAction>,
 {
     let items = source.array_iter()?;
+    drive_view_iter(items, stages, stage_kernels, source_demand, observe)
+}
+
+fn drive_view_iter<'a, V, I, F>(
+    items: I,
+    stages: &[pipeline::ViewStageCapability],
+    stage_kernels: &[pipeline::BodyKernel],
+    source_demand: PullDemand,
+    mut observe: F,
+) -> Option<()>
+where
+    V: ValueView<'a>,
+    I: IntoIterator<Item = V>,
+    F: FnMut(&V) -> Option<ViewRowAction>,
+{
     let mut op_state: Vec<ViewStageState> = (0..stages.len())
         .map(|_| ViewStageState::default())
         .collect();
@@ -426,7 +453,7 @@ where
         .copied()
         .unwrap_or(pipeline::StageStrategy::Default);
     if matches!(strategy, pipeline::StageStrategy::SortUntilOutput(_)) {
-        return None;
+        return run_sort_prefix_then_view_suffix(source, body, &plan);
     }
     if !body.suffix_can_run_with_materialized_receiver(plan.sort_stage + 1) {
         return None;
@@ -457,11 +484,70 @@ where
     ))
 }
 
+fn run_sort_prefix_then_view_suffix<'a, V>(
+    source: V,
+    body: &pipeline::PipelineBody,
+    plan: &SortBarrierPlan,
+) -> Option<Result<Val, EvalError>>
+where
+    V: ValueView<'a>,
+{
+    let suffix = view_suffix_capabilities(body, plan.sort_stage + 1)?;
+    let mut sorter = pipeline::OrderedKeySorter::new(plan.descending, pipeline::cmp_val_total);
+
+    drive_view_frontier(
+        source,
+        &plan.prefix,
+        &body.stage_kernels,
+        PullDemand::All,
+        |item| {
+            let key = view_sort_key(item, plan.key_kernel, &body.stage_kernels)?;
+            sorter.push_keyed(key, item.clone());
+            Some(ViewRowAction::Emit)
+        },
+    )?;
+
+    let mut sink_acc = pipeline::SinkAccumulator::new(&body.sink);
+    let source_demand =
+        pipeline::Pipeline::segment_source_demand(&body.stages[plan.sort_stage + 1..], &body.sink)
+            .chain
+            .pull;
+
+    drive_view_iter(
+        sorter.finish(),
+        &suffix.stages,
+        &body.stage_kernels,
+        source_demand,
+        |item| observe_view_sink(item, suffix.sink, &mut sink_acc, &body.sink_kernels),
+    )?;
+
+    Some(Ok(sink_acc.finish(false)))
+}
+
 struct SortBarrierPlan {
     prefix: Vec<pipeline::ViewStageCapability>,
     sort_stage: usize,
     key_kernel: Option<usize>,
     descending: bool,
+}
+
+struct ViewSuffixCapabilities {
+    stages: Vec<pipeline::ViewStageCapability>,
+    sink: pipeline::ViewSinkCapability,
+}
+
+fn view_suffix_capabilities(
+    body: &pipeline::PipelineBody,
+    start: usize,
+) -> Option<ViewSuffixCapabilities> {
+    let mut stages = Vec::with_capacity(body.stages.len().saturating_sub(start));
+    for (idx, stage) in body.stages.iter().enumerate().skip(start) {
+        stages.push(stage.view_capability(idx, body.stage_kernels.get(idx))?);
+    }
+    Some(ViewSuffixCapabilities {
+        stages,
+        sink: body.sink.view_capability(&body.sink_kernels)?,
+    })
 }
 
 fn sort_barrier_plan(body: &pipeline::PipelineBody) -> Option<SortBarrierPlan> {

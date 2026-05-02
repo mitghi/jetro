@@ -566,6 +566,8 @@ pub enum BuiltinViewStage {
     Filter,
     Map,
     FlatMap,
+    TakeWhile,
+    DropWhile,
     Distinct,
     KeyedReduce,
     Take,
@@ -687,9 +689,13 @@ impl BuiltinViewStage {
     #[inline]
     pub fn input_mode(self) -> BuiltinViewInputMode {
         match self {
-            Self::Filter | Self::Map | Self::FlatMap | Self::Distinct | Self::KeyedReduce => {
-                BuiltinViewInputMode::ReadsView
-            }
+            Self::Filter
+            | Self::Map
+            | Self::FlatMap
+            | Self::TakeWhile
+            | Self::DropWhile
+            | Self::Distinct
+            | Self::KeyedReduce => BuiltinViewInputMode::ReadsView,
             Self::Take | Self::Skip => BuiltinViewInputMode::SkipsViewRead,
         }
     }
@@ -700,9 +706,12 @@ impl BuiltinViewStage {
             Self::Map => BuiltinViewOutputMode::BorrowedSubview,
             Self::FlatMap => BuiltinViewOutputMode::BorrowedSubviews,
             Self::KeyedReduce => BuiltinViewOutputMode::EmitsOwnedValue,
-            Self::Filter | Self::Distinct | Self::Take | Self::Skip => {
-                BuiltinViewOutputMode::PreservesInputView
-            }
+            Self::Filter
+            | Self::TakeWhile
+            | Self::DropWhile
+            | Self::Distinct
+            | Self::Take
+            | Self::Skip => BuiltinViewOutputMode::PreservesInputView,
         }
     }
 
@@ -717,6 +726,7 @@ impl BuiltinViewStage {
             Self::Filter => BuiltinCardinality::Filtering,
             Self::Map => BuiltinCardinality::OneToOne,
             Self::FlatMap => BuiltinCardinality::Expanding,
+            Self::TakeWhile | Self::DropWhile => BuiltinCardinality::Filtering,
             Self::Distinct => BuiltinCardinality::Filtering,
             Self::KeyedReduce => BuiltinCardinality::Reducing,
             Self::Take | Self::Skip => BuiltinCardinality::Bounded,
@@ -731,7 +741,13 @@ impl BuiltinViewStage {
     #[inline]
     pub fn cost(self) -> f64 {
         match self {
-            Self::Filter | Self::Map | Self::FlatMap | Self::Distinct | Self::KeyedReduce => 10.0,
+            Self::Filter
+            | Self::Map
+            | Self::FlatMap
+            | Self::TakeWhile
+            | Self::DropWhile
+            | Self::Distinct
+            | Self::KeyedReduce => 10.0,
             Self::Take | Self::Skip => 0.5,
         }
     }
@@ -739,7 +755,7 @@ impl BuiltinViewStage {
     #[inline]
     pub fn selectivity(self) -> f64 {
         match self {
-            Self::Filter => 0.5,
+            Self::Filter | Self::TakeWhile | Self::DropWhile => 0.5,
             Self::Distinct => 1.0,
             Self::Map | Self::FlatMap | Self::KeyedReduce => 1.0,
             Self::Take | Self::Skip => 0.5,
@@ -1139,8 +1155,12 @@ impl BuiltinMethod {
             Self::Lines | Self::Words | Self::Chars | Self::CharsOf | Self::Bytes => {
                 BuiltinSpec::new(Cat::StreamingExpand, Card::Expanding).cost(10.0)
             }
-            Self::TakeWhile => BuiltinSpec::new(Cat::StreamingFilter, Card::Filtering).cost(10.0),
-            Self::DropWhile => BuiltinSpec::new(Cat::StreamingFilter, Card::Filtering).cost(10.0),
+            Self::TakeWhile => BuiltinSpec::new(Cat::StreamingFilter, Card::Filtering)
+                .view_stage(BuiltinViewStage::TakeWhile)
+                .cost(10.0),
+            Self::DropWhile => BuiltinSpec::new(Cat::StreamingFilter, Card::Filtering)
+                .view_stage(BuiltinViewStage::DropWhile)
+                .cost(10.0),
             Self::FindFirst | Self::FindOne => {
                 BuiltinSpec::new(Cat::StreamingFilter, Card::Filtering).cost(10.0)
             }

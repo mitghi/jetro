@@ -51,6 +51,12 @@ pub(crate) enum ViewStageCapability {
     FlatMap {
         kernel: usize,
     },
+    TakeWhile {
+        kernel: usize,
+    },
+    DropWhile {
+        kernel: usize,
+    },
     Distinct {
         kernel: Option<usize>,
     },
@@ -95,6 +101,12 @@ impl ViewStageCapability {
             BuiltinViewStage::FlatMap if kernel_is_view_native => Some(Self::FlatMap {
                 kernel: kernel_index,
             }),
+            BuiltinViewStage::TakeWhile if kernel_is_view_native => Some(Self::TakeWhile {
+                kernel: kernel_index,
+            }),
+            BuiltinViewStage::DropWhile if kernel_is_view_native => Some(Self::DropWhile {
+                kernel: kernel_index,
+            }),
             BuiltinViewStage::Take => Some(Self::Take(usize_arg?)),
             BuiltinViewStage::Skip => Some(Self::Skip(usize_arg?)),
             _ => None,
@@ -106,6 +118,8 @@ impl ViewStageCapability {
             Self::Filter { .. } => BuiltinViewStage::Filter,
             Self::Map { .. } => BuiltinViewStage::Map,
             Self::FlatMap { .. } => BuiltinViewStage::FlatMap,
+            Self::TakeWhile { .. } => BuiltinViewStage::TakeWhile,
+            Self::DropWhile { .. } => BuiltinViewStage::DropWhile,
             Self::Distinct { .. } => BuiltinViewStage::Distinct,
             Self::KeyedReduce { .. } => BuiltinViewStage::KeyedReduce,
             Self::Take(_) => BuiltinViewStage::Take,

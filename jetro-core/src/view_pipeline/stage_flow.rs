@@ -15,6 +15,7 @@ pub(super) enum ViewStageState {
     #[default]
     Empty,
     Counter(usize),
+    Flag(bool),
     Keys(HashSet<ViewKey>),
 }
 
@@ -36,6 +37,16 @@ impl ViewStageState {
         match self {
             Self::Keys(value) => value,
             _ => unreachable!("key state was initialized"),
+        }
+    }
+
+    fn flag(&mut self) -> &mut bool {
+        if !matches!(self, Self::Flag(_)) {
+            *self = Self::Flag(false);
+        }
+        match self {
+            Self::Flag(value) => value,
+            _ => unreachable!("flag state was initialized"),
         }
     }
 }
@@ -97,6 +108,37 @@ where
                 Some(ViewStageFlow::Keep(item))
             } else {
                 Some(ViewStageFlow::Drop)
+            }
+        }
+        pipeline::ViewStageCapability::TakeWhile { kernel } => {
+            debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::ReadsView);
+            debug_assert_eq!(
+                stage.output_mode(),
+                pipeline::ViewOutputMode::PreservesInputView
+            );
+            let kernel = stage_kernels.get(kernel)?;
+            if super::eval_filter_kernel(&item, kernel)? {
+                Some(ViewStageFlow::Keep(item))
+            } else {
+                Some(ViewStageFlow::Stop)
+            }
+        }
+        pipeline::ViewStageCapability::DropWhile { kernel } => {
+            debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::ReadsView);
+            debug_assert_eq!(
+                stage.output_mode(),
+                pipeline::ViewOutputMode::PreservesInputView
+            );
+            let done = op_state.get_mut(op_idx)?.flag();
+            if *done {
+                return Some(ViewStageFlow::Keep(item));
+            }
+            let kernel = stage_kernels.get(kernel)?;
+            if super::eval_filter_kernel(&item, kernel)? {
+                Some(ViewStageFlow::Drop)
+            } else {
+                *done = true;
+                Some(ViewStageFlow::Keep(item))
             }
         }
         pipeline::ViewStageCapability::Distinct { kernel } => {

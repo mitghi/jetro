@@ -962,6 +962,24 @@ mod tests {
 
     #[cfg(feature = "simd-json")]
     #[test]
+    fn view_sort_until_output_feeds_take_while_suffix_as_tape_views() {
+        let j = Jetro::from_bytes(
+            br#"{"data":[{"name":"top","score":40,"price":20},{"name":"mid","score":30,"price":30},{"name":"stop","score":20,"price":5},{"name":"late","score":10,"price":99}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j
+            .collect(r#"$.data.sort_by(-score).take_while(price > 10).take(2).map(name)"#)
+            .unwrap();
+
+        assert_eq!(out, json!(["top", "mid"]));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 2);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
     fn view_prefix_and_full_execution_share_stage_semantics() {
         let data = br#"{"people":[{"name":"low","score":1},{"name":"ada","score":901},{"name":"bob","score":902},{"name":"cat","score":903},{"name":"dan","score":904}],"unused":{"large":[1,2,3,4]}}"#.to_vec();
         let full = Jetro::from_bytes(data.clone()).unwrap();

@@ -74,6 +74,7 @@ pub(crate) use collector::{TerminalCollector, TerminalMapCollector};
 pub(crate) use common::{
     apply_item_in_env, bounded_sort_by_key, bounded_sort_by_key_cmp, cmp_val_total, is_truthy,
     num_finalise, num_fold, ordered_by_key_cmp, walk_field_chain, BoundedKeySorter,
+    OrderedKeySorter,
 };
 pub use kernels::{eval_cmp_op, eval_kernel, BodyKernel};
 pub(crate) use kernels::{eval_view_kernel, CollectLayout, ObjectKernel, ViewKernelValue};

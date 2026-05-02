@@ -226,17 +226,46 @@ where
     I: IntoIterator<Item = T>,
     F: FnMut(&T) -> Result<Val, EvalError>,
 {
-    let mut heap = BinaryHeap::new();
-    for (seq, item) in items.into_iter().enumerate() {
-        heap.push(OrderedEntry {
-            key: key_of(&item)?,
-            item,
-            seq,
+    let mut sorter = OrderedKeySorter::new(descending, cmp);
+    for item in items {
+        let key = key_of(&item)?;
+        sorter.push_keyed(key, item);
+    }
+    Ok(sorter.finish())
+}
+
+pub(crate) struct OrderedKeySorter<T> {
+    heap: BinaryHeap<OrderedEntry<T>>,
+    next_seq: usize,
+    descending: bool,
+    cmp: fn(&Val, &Val) -> Ordering,
+}
+
+impl<T> OrderedKeySorter<T> {
+    pub(crate) fn new(descending: bool, cmp: fn(&Val, &Val) -> Ordering) -> Self {
+        Self {
+            heap: BinaryHeap::new(),
+            next_seq: 0,
             descending,
             cmp,
+        }
+    }
+
+    pub(crate) fn push_keyed(&mut self, key: Val, item: T) {
+        let seq = self.next_seq;
+        self.next_seq += 1;
+        self.heap.push(OrderedEntry {
+            key,
+            item,
+            seq,
+            descending: self.descending,
+            cmp: self.cmp,
         });
     }
-    Ok(OrderedByKey { heap })
+
+    pub(crate) fn finish(self) -> OrderedByKey<T> {
+        OrderedByKey { heap: self.heap }
+    }
 }
 
 pub(crate) struct OrderedByKey<T> {
