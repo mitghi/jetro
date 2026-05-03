@@ -25,10 +25,11 @@ where
     cur
 }
 
-pub(crate) fn run<'a, V>(
+pub(crate) fn run_with_env<'a, V>(
     source: V,
     body: &pipeline::PipelineBody,
     cache: Option<&dyn pipeline::PipelineData>,
+    base_env: &Env,
 ) -> Option<Result<Val, EvalError>>
 where
     V: ValueView<'a>,
@@ -40,14 +41,16 @@ where
         return Some(result);
     }
     if let Some(result) =
-        run_reducing_stage_prefix_then_materialized_suffix(source.clone(), body, cache)
+        run_reducing_stage_prefix_then_materialized_suffix(source.clone(), body, cache, base_env)
     {
         return Some(result);
     }
-    if let Some(result) = run_sort_prefix_then_materialized_suffix(source.clone(), body, cache) {
+    if let Some(result) =
+        run_sort_prefix_then_materialized_suffix(source.clone(), body, cache, base_env)
+    {
         return Some(result);
     }
-    run_prefix_then_materialized_suffix(source, body, cache)
+    run_prefix_then_materialized_suffix(source, body, cache, base_env)
 }
 
 fn run_full<'a, V>(source: V, body: &pipeline::PipelineBody) -> Option<Result<Val, EvalError>>
@@ -137,6 +140,7 @@ fn run_prefix_then_materialized_suffix<'a, V>(
     source: V,
     body: &pipeline::PipelineBody,
     cache: Option<&dyn pipeline::PipelineData>,
+    base_env: &Env,
 ) -> Option<Result<Val, EvalError>>
 where
     V: ValueView<'a>,
@@ -170,6 +174,7 @@ where
         prefix.consumed_stages,
         boundary_rows,
         cache,
+        base_env,
     ))
 }
 
@@ -472,6 +477,7 @@ fn run_reducing_stage_prefix_then_materialized_suffix<'a, V>(
     source: V,
     body: &pipeline::PipelineBody,
     cache: Option<&dyn pipeline::PipelineData>,
+    base_env: &Env,
 ) -> Option<Result<Val, EvalError>>
 where
     V: ValueView<'a>,
@@ -500,6 +506,7 @@ where
         plan.consumed_stages,
         plan.reducer.finish(),
         cache,
+        base_env,
     ))
 }
 
@@ -507,6 +514,7 @@ fn run_sort_prefix_then_materialized_suffix<'a, V>(
     source: V,
     body: &pipeline::PipelineBody,
     cache: Option<&dyn pipeline::PipelineData>,
+    base_env: &Env,
 ) -> Option<Result<Val, EvalError>>
 where
     V: ValueView<'a>,
@@ -557,6 +565,7 @@ where
         plan.sort_stage + 1,
         boundary_rows,
         cache,
+        base_env,
     ))
 }
 
@@ -691,12 +700,12 @@ fn run_materialized_suffix(
     consumed_stages: usize,
     boundary_rows: Vec<Val>,
     cache: Option<&dyn pipeline::PipelineData>,
+    base_env: &Env,
 ) -> Result<Val, EvalError> {
     let suffix = suffix_body(body, consumed_stages)
         .with_source(pipeline::Source::Receiver(Val::arr(boundary_rows)));
     let root = Val::Null;
-    let env = Env::new(Val::Null);
-    suffix.run_with_env(&root, &env, cache)
+    suffix.run_with_env(&root, base_env, cache)
 }
 
 fn run_materialized_value_suffix(
@@ -704,6 +713,7 @@ fn run_materialized_value_suffix(
     consumed_stages: usize,
     boundary_value: Val,
     cache: Option<&dyn pipeline::PipelineData>,
+    base_env: &Env,
 ) -> Result<Val, EvalError> {
     if consumed_stages >= body.stages.len() && matches!(body.sink, pipeline::Sink::Collect) {
         return Ok(boundary_value);
@@ -711,8 +721,7 @@ fn run_materialized_value_suffix(
     let suffix =
         suffix_body(body, consumed_stages).with_source(pipeline::Source::Receiver(boundary_value));
     let root = Val::Null;
-    let env = Env::new(Val::Null);
-    suffix.run_with_env(&root, &env, cache)
+    suffix.run_with_env(&root, base_env, cache)
 }
 
 fn apply_view_stage<'a, V>(
@@ -824,6 +833,7 @@ mod tests {
     use std::sync::Arc;
 
     use crate::ast::BinOp;
+    use crate::context::Env;
     use crate::pipeline::{BodyKernel, PipelineBody, Sink, Stage, ViewStageCapability};
     use crate::util::JsonView;
     use crate::value::Val;
@@ -1133,10 +1143,15 @@ mod tests {
             sink_kernels: Vec::new(),
         };
 
-        let out =
-            super::run_reducing_stage_prefix_then_materialized_suffix(source.clone(), &body, None)
-                .unwrap()
-                .unwrap();
+        let env = Env::new(Val::Null);
+        let out = super::run_reducing_stage_prefix_then_materialized_suffix(
+            source.clone(),
+            &body,
+            None,
+            &env,
+        )
+        .unwrap()
+        .unwrap();
 
         let out_json: serde_json::Value = out.into();
         assert_eq!(out_json, serde_json::json!({"1": 3, "2": 2, "3": 1}));
@@ -1158,10 +1173,15 @@ mod tests {
             sink_kernels: Vec::new(),
         };
 
-        let out =
-            super::run_reducing_stage_prefix_then_materialized_suffix(source.clone(), &body, None)
-                .unwrap()
-                .unwrap();
+        let env = Env::new(Val::Null);
+        let out = super::run_reducing_stage_prefix_then_materialized_suffix(
+            source.clone(),
+            &body,
+            None,
+            &env,
+        )
+        .unwrap()
+        .unwrap();
 
         let out_json: serde_json::Value = out.into();
         assert_eq!(out_json, serde_json::json!({"1": 1, "2": 2, "3": 3}));

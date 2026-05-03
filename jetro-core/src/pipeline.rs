@@ -38,7 +38,7 @@ use crate::ast::Expr;
 use crate::builtins::{
     BuiltinCancellation, BuiltinMethod, BuiltinNumericReducer, BuiltinStageMerge, BuiltinViewStage,
 };
-use crate::context::EvalError;
+use crate::context::{Env, EvalError};
 use crate::value::Val;
 
 mod canonical;
@@ -96,8 +96,9 @@ pub(crate) fn run_tape_field_chain(
     body: &PipelineBody,
     tape: &crate::strref::TapeData,
     keys: &[Arc<str>],
+    base_env: &Env,
 ) -> Option<Result<Val, EvalError>> {
-    legacy_exec::run_tape_field_chain(body, tape, keys)
+    legacy_exec::run_tape_field_chain(body, tape, keys, base_env)
 }
 
 /// Data capabilities supplied by the owning `Jetro` handle to pipeline

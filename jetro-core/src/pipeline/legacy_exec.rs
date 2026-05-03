@@ -140,6 +140,7 @@ pub(super) fn run_tape_field_chain(
     body: &PipelineBody,
     tape: &crate::strref::TapeData,
     keys: &[Arc<str>],
+    base_env: &Env,
 ) -> Option<Result<Val, EvalError>> {
     if body
         .stages
@@ -156,10 +157,9 @@ pub(super) fn run_tape_field_chain(
         return None;
     }
     let pipeline = body.clone().with_source(Source::Receiver(Val::Null));
-    let env = Env::new(Val::Null);
     Some(run_streaming_rows(
         &pipeline,
-        &env,
+        base_env,
         source.iter_materialized(),
     ))
 }

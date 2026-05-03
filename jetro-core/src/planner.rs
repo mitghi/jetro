@@ -6,14 +6,12 @@
 
 use std::sync::Arc;
 
-use crate::analysis;
 use crate::ast::{ArrayElem, Expr, ObjField, Step};
 use crate::builtins::{BuiltinCall, BuiltinMethod};
 use crate::parser;
 use crate::physical::{
-    node_subtree_contains_pipeline, BackendPlan, ExecutionFacts, NodeId, PhysicalArrayElem,
-    PhysicalChainStep, PhysicalNode, PhysicalObjField, PhysicalPathStep, PipelinePlanSource,
-    PlanNode, QueryPlan,
+    BackendPlan, ExecutionFacts, NodeId, PhysicalArrayElem, PhysicalChainStep, PhysicalNode,
+    PhysicalObjField, PhysicalPathStep, PipelinePlanSource, PlanNode, QueryPlan,
 };
 use crate::pipeline::{Pipeline, Source};
 use crate::structural::{StructuralPathStep, StructuralPlan};
@@ -41,11 +39,6 @@ impl PlanBuilder {
     #[inline]
     fn pop_local(&mut self) {
         self.locals.pop();
-    }
-
-    #[inline]
-    fn node_contains_pipeline(&self, id: NodeId) -> bool {
-        node_subtree_contains_pipeline(&self.nodes, id)
     }
 }
 
@@ -171,13 +164,9 @@ impl PlanBuilder {
                 body: lhs,
                 default: rhs,
             } => ExecutionFacts::combine_all([self.node_facts(*lhs), self.node_facts(*rhs)]),
-            PlanNode::Let { init, body, .. } if !self.node_contains_pipeline(*body) => {
+            PlanNode::Let { init, body, .. } => {
                 ExecutionFacts::combine_all([self.node_facts(*init), self.node_facts(*body)])
             }
-            PlanNode::Let { .. } => ExecutionFacts {
-                contains_vm_fallback: true,
-                ..ExecutionFacts::default()
-            },
             PlanNode::IfElse { cond, then_, else_ } => ExecutionFacts::combine_all([
                 self.node_facts(*cond),
                 self.node_facts(*then_),
@@ -283,7 +272,7 @@ fn adjust_facts_for_backend_plan(
 fn lower_expr(builder: &mut PlanBuilder, expr: &Expr) -> NodeId {
     try_lower_structural_op(expr)
         .map(|node| builder.push(node))
-        .or_else(|| try_lower_pipeline(builder, expr).map(|node| builder.push(node)))
+        .or_else(|| try_lower_pipeline(expr).map(|node| builder.push(node)))
         .or_else(|| try_lower_root_path(expr).map(|node| builder.push(node)))
         .or_else(|| try_lower_receiver_pipeline(builder, expr))
         .or_else(|| try_lower_structural_chain_prefix(builder, expr))
@@ -293,15 +282,12 @@ fn lower_expr(builder: &mut PlanBuilder, expr: &Expr) -> NodeId {
         .unwrap_or_else(|| fallback_vm(builder, expr))
 }
 
-fn try_lower_pipeline(builder: &PlanBuilder, expr: &Expr) -> Option<PlanNode> {
+fn try_lower_pipeline(expr: &Expr) -> Option<PlanNode> {
     let pipeline = Pipeline::lower(expr)?;
     if is_trivial_collect_pipeline(&pipeline) {
         return None;
     }
     let (source, body) = pipeline.into_source_body();
-    if pipeline_body_uses_active_locals(&body, builder) {
-        return None;
-    }
     pipeline_parts_to_plan_node(source, body)
 }
 
@@ -318,19 +304,6 @@ fn pipeline_parts_to_plan_node(
 
 fn is_trivial_collect_pipeline(pipeline: &Pipeline) -> bool {
     pipeline.stages.is_empty() && matches!(pipeline.sink, crate::pipeline::Sink::Collect)
-}
-
-fn pipeline_body_uses_active_locals(
-    body: &crate::pipeline::PipelineBody,
-    builder: &PlanBuilder,
-) -> bool {
-    !builder.locals.is_empty()
-        && body.stage_exprs.iter().flatten().any(|expr| {
-            builder
-                .locals
-                .iter()
-                .any(|local| analysis::expr_uses_ident(expr, local.as_ref()))
-        })
 }
 
 fn try_lower_structural_op(expr: &Expr) -> Option<PlanNode> {
@@ -432,9 +405,6 @@ fn try_lower_receiver_pipeline(builder: &mut PlanBuilder, expr: &Expr) -> Option
         let Some(body) = Pipeline::lower_body_from_steps(&steps[method_start..]) else {
             continue;
         };
-        if pipeline_body_uses_active_locals(&body, builder) {
-            continue;
-        }
         let source_expr = base
             .as_ref()
             .clone()

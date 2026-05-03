@@ -75,11 +75,6 @@ impl QueryPlan {
             },
         }
     }
-
-    #[inline]
-    pub(crate) fn subtree_contains_pipeline(&self, id: NodeId) -> bool {
-        node_subtree_contains_pipeline(&self.nodes, id)
-    }
 }
 
 #[derive(Clone)]
@@ -161,11 +156,6 @@ pub(crate) struct PhysicalNode {
 
 impl PhysicalNode {
     #[inline]
-    pub(crate) fn kind(&self) -> &PlanNode {
-        &self.kind
-    }
-
-    #[inline]
     pub(crate) fn new(kind: PlanNode) -> Self {
         let backends = BackendPlan::for_node(&kind);
         Self::with_backend_plan(kind, backends)
@@ -195,63 +185,6 @@ impl PhysicalNode {
     #[inline]
     pub(crate) fn execution_facts(&self) -> ExecutionFacts {
         self.facts
-    }
-}
-
-pub(crate) fn node_subtree_contains_pipeline(nodes: &[PhysicalNode], id: NodeId) -> bool {
-    match nodes[id.0].kind() {
-        PlanNode::Pipeline { .. } => true,
-        PlanNode::Chain { base, steps } => {
-            node_subtree_contains_pipeline(nodes, *base)
-                || steps.iter().any(|step| match step {
-                    PhysicalChainStep::DynIndex(id) => node_subtree_contains_pipeline(nodes, *id),
-                    _ => false,
-                })
-        }
-        PlanNode::Call { receiver, .. }
-        | PlanNode::UnaryNeg(receiver)
-        | PlanNode::Not(receiver)
-        | PlanNode::Kind { expr: receiver, .. } => node_subtree_contains_pipeline(nodes, *receiver),
-        PlanNode::Binary { lhs, rhs, .. }
-        | PlanNode::Coalesce { lhs, rhs }
-        | PlanNode::Try {
-            body: lhs,
-            default: rhs,
-        } => {
-            node_subtree_contains_pipeline(nodes, *lhs)
-                || node_subtree_contains_pipeline(nodes, *rhs)
-        }
-        PlanNode::IfElse { cond, then_, else_ } => {
-            node_subtree_contains_pipeline(nodes, *cond)
-                || node_subtree_contains_pipeline(nodes, *then_)
-                || node_subtree_contains_pipeline(nodes, *else_)
-        }
-        PlanNode::Object(fields) => fields.iter().any(|field| match field {
-            PhysicalObjField::Kv { val, cond, .. } => {
-                node_subtree_contains_pipeline(nodes, *val)
-                    || cond
-                        .as_ref()
-                        .is_some_and(|cond| node_subtree_contains_pipeline(nodes, *cond))
-            }
-            PhysicalObjField::Dynamic { key, val } => {
-                node_subtree_contains_pipeline(nodes, *key)
-                    || node_subtree_contains_pipeline(nodes, *val)
-            }
-            PhysicalObjField::Spread(id) | PhysicalObjField::SpreadDeep(id) => {
-                node_subtree_contains_pipeline(nodes, *id)
-            }
-            PhysicalObjField::Short(_) => false,
-        }),
-        PlanNode::Array(elems) => elems.iter().any(|elem| match elem {
-            PhysicalArrayElem::Expr(id) | PhysicalArrayElem::Spread(id) => {
-                node_subtree_contains_pipeline(nodes, *id)
-            }
-        }),
-        PlanNode::Let { init, body, .. } => {
-            node_subtree_contains_pipeline(nodes, *init)
-                || node_subtree_contains_pipeline(nodes, *body)
-        }
-        _ => false,
     }
 }
 

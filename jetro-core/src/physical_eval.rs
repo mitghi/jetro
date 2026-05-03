@@ -172,7 +172,7 @@ impl ExecCtx<'_> {
     fn env(&mut self) -> Result<&mut Env, EvalError> {
         if self.env.is_none() {
             let root = self.root()?;
-            self.env = Some(Env::new(root));
+            self.env = Some(self.env_with_fast_locals(root));
         }
         Ok(self.env.as_mut().expect("env initialized"))
     }
@@ -180,7 +180,7 @@ impl ExecCtx<'_> {
     fn take_env(&mut self) -> Result<Env, EvalError> {
         if self.env.is_none() {
             let root = self.root()?;
-            self.env = Some(Env::new(root));
+            self.env = Some(self.env_with_fast_locals(root));
         }
         Ok(self.env.take().expect("env initialized"))
     }
@@ -194,7 +194,11 @@ impl ExecCtx<'_> {
     }
 
     fn null_env_with_fast_locals(&self) -> Env {
-        let mut env = Env::new(Val::Null);
+        self.env_with_fast_locals(Val::Null)
+    }
+
+    fn env_with_fast_locals(&self, current: Val) -> Env {
+        let mut env = Env::new(current);
         for (name, value) in &self.locals {
             env = env.with_var(name.as_ref(), value.clone());
         }
@@ -337,9 +341,6 @@ impl ExecCtx<'_> {
                 self.eval_chain_fast(*base, steps)
             }
             (BackendPreference::FastChildren, PlanNode::Let { name, init, body }) => {
-                if self.plan.subtree_contains_pipeline(*body) {
-                    return None;
-                }
                 let init = match self.eval_fast(*init)? {
                     Ok(value) => value,
                     Err(err) => return Some(Err(err)),
@@ -426,7 +427,8 @@ impl ExecCtx<'_> {
             } {
                 let root = crate::value_view::TapeView::root(tape);
                 let source = view_pipeline::walk_fields(root, keys);
-                return view_pipeline::run(source, body, Some(self.j));
+                let env = self.null_env_with_fast_locals();
+                return view_pipeline::run_with_env(source, body, Some(self.j), &env);
             }
         }
         None
@@ -443,7 +445,8 @@ impl ExecCtx<'_> {
                 Ok(tape) => tape,
                 Err(err) => return Some(Err(err)),
             } {
-                return pipeline::run_tape_field_chain(body, tape, keys);
+                let env = self.null_env_with_fast_locals();
+                return pipeline::run_tape_field_chain(body, tape, keys, &env);
             }
         }
         None
@@ -491,7 +494,8 @@ impl ExecCtx<'_> {
                 Err(err) => return Some(Err(err)),
             };
             let source = view_pipeline::walk_fields(ValView::new(&root), keys);
-            if let Some(result) = view_pipeline::run(source, body, Some(self.j)) {
+            let env = self.null_env_with_fast_locals();
+            if let Some(result) = view_pipeline::run_with_env(source, body, Some(self.j), &env) {
                 return Some(result);
             }
         }
