@@ -19,20 +19,12 @@ pub(crate) fn run(j: &Jetro, plan: &QueryPlan, root_id: NodeId) -> Result<Val, E
     let mut ctx = ExecCtx {
         j,
         plan,
+        root_id,
         root: None,
         env: None,
         vm: VM::new(),
     };
     ctx.eval(root_id)
-}
-
-fn pipeline_body_is_current_free(body: &pipeline::PipelineBody) -> bool {
-    body.stage_exprs.iter().all(|expr| expr.is_none())
-        && body
-            .sink
-            .reducer_spec()
-            .map(|spec| spec.sink_programs().next().is_none())
-            .unwrap_or(true)
 }
 
 fn eval_materialized_chain_suffix(
@@ -69,6 +61,7 @@ where
 struct ExecCtx<'a> {
     j: &'a Jetro,
     plan: &'a QueryPlan,
+    root_id: NodeId,
     root: Option<Val>,
     env: Option<Env>,
     vm: VM,
@@ -287,7 +280,15 @@ impl ExecCtx<'_> {
                 };
                 Some(eval_materialized_chain_suffix(base, steps))
             }
-            (BackendPreference::Interpreted, _) => Some(self.eval_interpreted(id)),
+            (BackendPreference::Interpreted, _) => {
+                if id == self.root_id
+                    && self.j.raw_bytes().is_some()
+                    && self.plan.execution_facts(id).is_byte_native()
+                {
+                    return None;
+                }
+                Some(self.eval_interpreted(id))
+            }
             _ => None,
         }
     }
@@ -307,7 +308,7 @@ impl ExecCtx<'_> {
                 PipelinePlanSource::FieldChain { keys },
             ) => self.eval_field_chain_pipeline_backend(backend, keys, body),
             (BackendPreference::FastChildren, PipelinePlanSource::Expr(source))
-                if pipeline_body_is_current_free(body) =>
+                if body.can_run_with_materialized_receiver() =>
             {
                 let source = match self.eval_fast(*source)? {
                     Ok(value) => value,

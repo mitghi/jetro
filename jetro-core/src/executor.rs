@@ -63,12 +63,14 @@ pub(crate) fn planning_context(j: &Jetro) -> planner::PlanningContext {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use serde_json::json;
 
     use crate::physical::QueryRoot;
     use crate::physical::{
-        NodeId, PhysicalArrayElem, PhysicalChainStep, PhysicalObjField, PipelinePlanSource,
-        PlanNode,
+        BackendPlan, BackendPreference, NodeId, PhysicalArrayElem, PhysicalChainStep, PhysicalNode,
+        PhysicalObjField, PhysicalPathStep, PipelinePlanSource, PlanNode, QueryPlan,
     };
     use crate::pipeline::{NumOp, ReducerOp, Sink, Stage};
     use crate::planner;
@@ -1287,6 +1289,28 @@ mod tests {
         let out = super::collect_plan_json(&j, &plan).unwrap();
 
         assert_eq!(out, json!({"a": [{"score": 11}], "b": 1}));
+        assert!(!j.root_val_is_materialized());
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn byte_native_nodes_reject_interpreted_backend_at_runtime() {
+        let node = PlanNode::RootPath(vec![PhysicalPathStep::Field(Arc::from("meta"))]);
+        let plan = QueryPlan::from_physical_nodes(
+            NodeId(0),
+            vec![PhysicalNode::with_backend_plan(
+                node,
+                BackendPlan::new(&[BackendPreference::Interpreted]),
+            )],
+        );
+        assert!(plan.root_execution_facts().is_byte_native());
+
+        let j = Jetro::from_bytes(br#"{"meta":1}"#.to_vec()).unwrap();
+        let err = super::collect_plan_json(&j, &plan).unwrap_err();
+
+        assert!(err
+            .0
+            .contains("no planned backend could execute physical node"));
         assert!(!j.root_val_is_materialized());
     }
 
