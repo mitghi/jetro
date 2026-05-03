@@ -30,7 +30,6 @@ pub(super) enum ValRowsIter<'a> {
 }
 
 #[cfg(feature = "simd-json")]
-#[allow(dead_code)]
 pub(super) enum TapeRowSource<'a> {
     Array {
         tape: &'a crate::strref::TapeData,
@@ -42,7 +41,6 @@ pub(super) enum TapeRowSource<'a> {
 }
 
 #[cfg(feature = "simd-json")]
-#[allow(dead_code)]
 pub(super) enum TapeRowsIter<'a> {
     Array {
         tape: &'a crate::strref::TapeData,
@@ -54,7 +52,6 @@ pub(super) enum TapeRowsIter<'a> {
 }
 
 #[cfg(feature = "simd-json")]
-#[allow(dead_code)]
 pub(super) struct TapeMaterializedRowsIter<'a>(TapeRowsIter<'a>);
 
 impl Iterator for ValRowsIter<'_> {
@@ -188,7 +185,6 @@ impl<'a> ValRowSource<'a> {
 }
 
 #[cfg(feature = "simd-json")]
-#[allow(dead_code)]
 impl<'a> TapeRowSource<'a> {
     pub(super) fn from_field_chain(tape: &'a crate::strref::TapeData, keys: &[Arc<str>]) -> Self {
         let Some(idx) = tape_walk_field_chain(tape, keys) else {
@@ -223,10 +219,6 @@ impl<'a> TapeRowSource<'a> {
 
     pub(super) fn iter_materialized(self) -> TapeMaterializedRowsIter<'a> {
         TapeMaterializedRowsIter(self.iter_views())
-    }
-
-    pub(super) fn materialize(self) -> Vec<Val> {
-        self.iter_materialized().collect()
     }
 
     pub(super) fn is_array_provider(&self) -> bool {
@@ -280,7 +272,6 @@ fn objvec_row(data: &ObjVecData, row: usize) -> Val {
 }
 
 #[cfg(feature = "simd-json")]
-#[allow(dead_code)]
 fn tape_walk_field_chain(tape: &crate::strref::TapeData, keys: &[Arc<str>]) -> Option<usize> {
     let mut cur = 0usize;
     for key in keys {
@@ -290,7 +281,6 @@ fn tape_walk_field_chain(tape: &crate::strref::TapeData, keys: &[Arc<str>]) -> O
 }
 
 #[cfg(feature = "simd-json")]
-#[allow(dead_code)]
 fn tape_field(tape: &crate::strref::TapeData, idx: usize, key: &str) -> Option<usize> {
     let crate::strref::TapeNode::Object { len, .. } = *tape.nodes.get(idx)? else {
         return None;
