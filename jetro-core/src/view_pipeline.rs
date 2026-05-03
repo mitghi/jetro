@@ -25,10 +25,6 @@ where
     cur
 }
 
-pub(crate) fn can_run_materialized_receiver(body: &pipeline::PipelineBody) -> bool {
-    body.can_run_with_materialized_receiver()
-}
-
 pub(crate) fn run<'a, V>(
     source: V,
     body: &pipeline::PipelineBody,
