@@ -4,9 +4,6 @@
 //! between a parsed plan root and the source-level VM fallback used when
 //! parsing fails.
 
-use std::cell::RefCell;
-use std::collections::HashMap;
-
 use serde_json::Value;
 
 use crate::context::EvalError;
@@ -15,35 +12,16 @@ use crate::physical_eval;
 use crate::planner;
 use crate::{with_vm, Jetro, VM};
 
-const PLAN_CACHE_LIMIT: usize = 256;
-
-thread_local! {
-    static PLAN_CACHE: RefCell<HashMap<String, QueryPlan>> = RefCell::new(HashMap::new());
+pub(crate) fn collect_json(j: &Jetro, expr: &str) -> Result<Value, EvalError> {
+    let plan = planner::plan_query(expr);
+    collect_plan_json(j, &plan)
 }
 
-pub(crate) fn collect_json(j: &Jetro, expr: &str) -> Result<Value, EvalError> {
-    let plan = cached_plan(expr);
-
+pub(crate) fn collect_plan_json(j: &Jetro, plan: &QueryPlan) -> Result<Value, EvalError> {
     match plan.root() {
-        QueryRoot::Node(root) => physical_eval::run(j, &plan, *root).map(Value::from),
+        QueryRoot::Node(root) => physical_eval::run(j, plan, *root).map(Value::from),
         QueryRoot::SourceVm(source) => run_vm_json(j, source.as_ref()),
     }
-}
-
-fn cached_plan(expr: &str) -> QueryPlan {
-    PLAN_CACHE.with(|cache| {
-        let mut cache = cache.borrow_mut();
-        if let Some(plan) = cache.get(expr) {
-            return plan.clone();
-        }
-
-        let plan = planner::plan_query(expr);
-        if cache.len() >= PLAN_CACHE_LIMIT {
-            cache.clear();
-        }
-        cache.insert(expr.to_owned(), plan.clone());
-        plan
-    })
 }
 
 fn run_vm_json(j: &Jetro, expr: &str) -> Result<Value, EvalError> {
@@ -54,6 +32,20 @@ fn run_vm_json(j: &Jetro, expr: &str) -> Result<Value, EvalError> {
         }
         Err(_) => VM::new().run_str(expr, &j.document),
     })
+}
+
+pub(crate) fn collect_plan_json_with_vm(
+    j: &Jetro,
+    plan: &QueryPlan,
+    vm: &mut VM,
+) -> Result<Value, EvalError> {
+    match plan.root() {
+        QueryRoot::Node(root) => physical_eval::run(j, plan, *root).map(Value::from),
+        QueryRoot::SourceVm(source) => {
+            let prog = vm.get_or_compile(source.as_ref())?;
+            vm.execute_val(&prog, j.root_val())
+        }
+    }
 }
 
 #[cfg(test)]
@@ -68,7 +60,7 @@ mod tests {
     use crate::pipeline::{NumOp, ReducerOp, Sink, Stage};
     use crate::planner;
     use crate::value::Val;
-    use crate::Jetro;
+    use crate::{Jetro, JetroEngine};
 
     fn assert_no_vm_fallback(plan: &crate::physical::QueryPlan, id: NodeId) {
         match plan.node(id) {
@@ -156,7 +148,8 @@ mod tests {
     }
 
     #[test]
-    fn repeated_collect_reuses_cached_physical_plan() {
+    fn engine_reuses_cached_physical_plan_across_documents() {
+        let engine = JetroEngine::new();
         let j = Jetro::from(json!({
             "rows": [
                 {"name": "low", "score": 1},
@@ -164,13 +157,19 @@ mod tests {
                 {"name": "bob", "score": 902}
             ]
         }));
+        let j2 = Jetro::from(json!({
+            "rows": [
+                {"name": "cat", "score": 3},
+                {"name": "dan", "score": 903}
+            ]
+        }));
 
         let expr = "$.rows.filter(score > 900).first()";
-        let first = j.collect(expr).unwrap();
-        let second = j.collect(expr).unwrap();
+        let first = engine.collect(&j, expr).unwrap();
+        let second = engine.collect(&j2, expr).unwrap();
 
         assert_eq!(first, json!({"name": "ada", "score": 901}));
-        assert_eq!(second, first);
+        assert_eq!(second, json!({"name": "dan", "score": 903}));
     }
 
     #[test]

@@ -80,7 +80,9 @@ mod tests;
 
 use serde_json::Value;
 use std::cell::{OnceCell, RefCell};
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex;
 use value::Val;
 
 pub use context::EvalError;
@@ -189,6 +191,124 @@ pub struct Jetro {
     /// the Jetro handle.
     pub(crate) objvec_cache:
         std::sync::Mutex<std::collections::HashMap<usize, Arc<crate::value::ObjVecData>>>,
+}
+
+/// Reusable query engine for evaluating many expressions over many documents.
+///
+/// Unlike [`Jetro::collect`], this owns an explicit physical-plan cache. Use it
+/// when the same process evaluates repeated expressions against many `Jetro`
+/// documents and you want parse/lower/compile work amortised by this object,
+/// not hidden in thread-local state.
+pub struct JetroEngine {
+    plan_cache: Mutex<HashMap<String, physical::QueryPlan>>,
+    plan_cache_limit: usize,
+    vm: Mutex<VM>,
+}
+
+#[derive(Debug)]
+pub enum JetroEngineError {
+    Json(serde_json::Error),
+    Eval(EvalError),
+}
+
+impl std::fmt::Display for JetroEngineError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Json(err) => write!(f, "{}", err),
+            Self::Eval(err) => write!(f, "{}", err),
+        }
+    }
+}
+
+impl std::error::Error for JetroEngineError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Json(err) => Some(err),
+            Self::Eval(_) => None,
+        }
+    }
+}
+
+impl From<serde_json::Error> for JetroEngineError {
+    fn from(err: serde_json::Error) -> Self {
+        Self::Json(err)
+    }
+}
+
+impl From<EvalError> for JetroEngineError {
+    fn from(err: EvalError) -> Self {
+        Self::Eval(err)
+    }
+}
+
+impl Default for JetroEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl JetroEngine {
+    const DEFAULT_PLAN_CACHE_LIMIT: usize = 256;
+
+    pub fn new() -> Self {
+        Self::with_plan_cache_limit(Self::DEFAULT_PLAN_CACHE_LIMIT)
+    }
+
+    pub fn with_plan_cache_limit(plan_cache_limit: usize) -> Self {
+        Self {
+            plan_cache: Mutex::new(HashMap::new()),
+            plan_cache_limit,
+            vm: Mutex::new(VM::new()),
+        }
+    }
+
+    pub fn clear_cache(&self) {
+        self.plan_cache.lock().expect("plan cache poisoned").clear();
+    }
+
+    pub fn collect<S: AsRef<str>>(
+        &self,
+        document: &Jetro,
+        expr: S,
+    ) -> std::result::Result<Value, EvalError> {
+        let plan = self.cached_plan(expr.as_ref());
+        let mut vm = self.vm.lock().expect("vm cache poisoned");
+        executor::collect_plan_json_with_vm(document, &plan, &mut vm)
+    }
+
+    pub fn collect_value<S: AsRef<str>>(
+        &self,
+        document: Value,
+        expr: S,
+    ) -> std::result::Result<Value, EvalError> {
+        let document = Jetro::from(document);
+        self.collect(&document, expr)
+    }
+
+    pub fn collect_bytes<S: AsRef<str>>(
+        &self,
+        bytes: Vec<u8>,
+        expr: S,
+    ) -> std::result::Result<Value, JetroEngineError> {
+        let document = Jetro::from_bytes(bytes)?;
+        Ok(self.collect(&document, expr)?)
+    }
+
+    fn cached_plan(&self, expr: &str) -> physical::QueryPlan {
+        let mut cache = self.plan_cache.lock().expect("plan cache poisoned");
+        if let Some(plan) = cache.get(expr) {
+            return plan.clone();
+        }
+
+        let plan = planner::plan_query(expr);
+        if self.plan_cache_limit > 0 {
+            if cache.len() >= self.plan_cache_limit {
+                cache.clear();
+            }
+            cache.insert(expr.to_owned(), plan.clone());
+        }
+        plan
+    }
 }
 
 impl pipeline::PipelineData for Jetro {
