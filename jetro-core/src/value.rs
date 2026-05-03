@@ -1147,11 +1147,11 @@ impl Val {
         }
     }
 
-    /// Build a Val tree from a parsed `TapeData`.  String values share
-    /// `tape.bytes_buf` as their parent buffer — per-string cost is one
-    /// `StrRef` (Arc bump + 2 u32s), no fresh heap allocation.  Closes
-    /// the cold-path `Arc<str>::from` storm that dominates
-    /// `from_json_simd` on docs with many unique string fields.
+    /// Build a Val tree from a parsed `TapeData`. String leaves become
+    /// `StrSlice` values so the rest of the VM/Pipeline API remains
+    /// lifetime-free. Streaming view paths usually avoid this whole-tree
+    /// materialization; this exists for VM fallback and explicit `Val`
+    /// collection.
     ///
     /// Includes ObjVec promotion (homogeneous-shape Object Array →
     /// columnar `Val::ObjVec` with typed_cols) so post-build queries
@@ -1181,15 +1181,8 @@ impl Val {
                 }
             }
             TapeNode::Static(SN::F64(f)) => Val::Float(f),
-            TapeNode::StringRef { start, end } => {
-                Val::StrSlice(crate::strref::StrRef::slice_bytes(
-                    Arc::clone(&tape.bytes_buf),
-                    start as usize,
-                    end as usize,
-                ))
-            }
+            TapeNode::String(_) => Val::StrSlice(tape.str_ref_at(*idx - 1)),
             TapeNode::Array { len, .. } => {
-                let len = len as usize;
                 if len == 0 {
                     return Val::arr(Vec::new());
                 }
@@ -1206,7 +1199,7 @@ impl Val {
                         | TapeNode::Static(SN::U64(_))
                         | TapeNode::Static(SN::F64(_))
                 );
-                let mut try_str = matches!(first, TapeNode::StringRef { .. });
+                let mut try_str = matches!(first, TapeNode::String(_));
                 let mut probe = first_idx;
                 let mut counted = 0usize;
                 while counted < len && (try_int || try_float || try_str) {
@@ -1227,7 +1220,7 @@ impl Val {
                             try_str = false;
                             probe += 1;
                         }
-                        TapeNode::StringRef { .. } => {
+                        TapeNode::String(_) => {
                             try_int = false;
                             try_float = false;
                             probe += 1;
@@ -1277,12 +1270,8 @@ impl Val {
                 if try_str {
                     let mut out: Vec<crate::strref::StrRef> = Vec::with_capacity(len);
                     for _ in 0..len {
-                        if let TapeNode::StringRef { start, end } = tape.nodes[*idx] {
-                            out.push(crate::strref::StrRef::slice_bytes(
-                                Arc::clone(&tape.bytes_buf),
-                                start as usize,
-                                end as usize,
-                            ));
+                        if let TapeNode::String(_) = tape.nodes[*idx] {
+                            out.push(tape.str_ref_at(*idx));
                         }
                         *idx += 1;
                     }
@@ -1301,13 +1290,10 @@ impl Val {
                 Val::Arr(Arc::new(out))
             }
             TapeNode::Object { len, .. } => {
-                let len = len as usize;
                 let mut out: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(len);
                 for _ in 0..len {
                     let key = match tape.nodes[*idx] {
-                        TapeNode::StringRef { start, end } => {
-                            tape.str_at_range(start as usize, end as usize)
-                        }
+                        TapeNode::String(s) => s,
                         _ => unreachable!("object key must be string"),
                     };
                     *idx += 1;

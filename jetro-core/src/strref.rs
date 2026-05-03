@@ -181,41 +181,22 @@ impl From<String> for StrRef {
 
 // ── Tape-backed ingestion (simd-json) ────────────────────────────────────────
 //
-// The tape stores a parsed JSON document as a flat sequence of `TapeNode`s;
-// string nodes carry byte offsets into a side `bytes_buf` so `Val` can borrow
-// string slices during materialisation. Query execution still runs through the
-// normal `Val` / pipeline / VM paths.
+// The tape stores a parsed JSON document as simd-json's flat node sequence.
+// String nodes borrow from `bytes_buf`, which owns the mutated parser input.
+// Query execution still runs through the normal `Val` / pipeline / VM paths.
 
 #[cfg(feature = "simd-json")]
-#[derive(Debug, Clone, Copy)]
-pub enum TapeNode {
-    Static(simd_json::StaticNode),
-    /// String stored as `[start..end]` byte slice into `TapeData.bytes_buf`.
-    StringRef {
-        start: u32,
-        end: u32,
-    },
-    /// Object with `len` key/value pairs; `count` total nested nodes
-    /// (including children) for fast skip-ahead.
-    Object {
-        len: u32,
-        count: u32,
-    },
-    /// Array with `len` entries; `count` total nested nodes.
-    Array {
-        len: u32,
-        count: u32,
-    },
-}
+pub type TapeNode = simd_json::Node<'static>;
 
 #[cfg(feature = "simd-json")]
-#[derive(Debug)]
 pub struct TapeData {
-    /// All escape-decoded string contents concatenated; node offsets
-    /// reference this single buffer.  Owned by `Arc` so lookup paths
-    /// can borrow `&str` slices for the lifetime of the handle.
-    pub bytes_buf: Arc<[u8]>,
-    /// Flat node sequence; same length as `simd_json::Tape.0`.
+    /// Parser input after simd-json has escape-decoded strings in place.
+    /// `nodes` contains string slices into this allocation.
+    pub bytes_buf: Vec<u8>,
+    /// simd-json scratch buffers. Some parsed string slices point into
+    /// `string_buffer`, so the buffers must live as long as `nodes`.
+    _buffers: simd_json::Buffers,
+    /// Flat simd-json node sequence.
     pub nodes: Vec<TapeNode>,
     #[cfg(test)]
     materialized_subtrees: AtomicUsize,
@@ -224,16 +205,16 @@ pub struct TapeData {
 #[cfg(feature = "simd-json")]
 impl TapeData {
     /// Parse `bytes` (consumed; simd-json mutates in place) into a
-    /// `TapeData`.  Walks `simd_json::to_tape` and copies each string
-    /// into a single owned buffer with `(start, end)` offsets so
-    /// subsequent reads don't need lifetime gymnastics with the
-    /// simd-json scratch region.
+    /// `TapeData`. The retained node vector is simd-json's own tape, so
+    /// cold startup does not walk every node a second time to translate
+    /// into a Jetro-specific tape representation.
     pub fn parse(mut bytes: Vec<u8>) -> Result<Arc<Self>, String> {
         Self::parse_inner(&mut bytes)
             .map_err(|e| e.to_string())
-            .map(|(nodes, bytes_buf)| {
+            .map(|(nodes, bytes_buf, buffers)| {
                 Arc::new(Self {
                     bytes_buf,
+                    _buffers: buffers,
                     nodes,
                     #[cfg(test)]
                     materialized_subtrees: AtomicUsize::new(0),
@@ -243,8 +224,9 @@ impl TapeData {
 
     pub(crate) fn parse_or_return_bytes(mut bytes: Vec<u8>) -> Result<Arc<Self>, Vec<u8>> {
         match Self::parse_inner(&mut bytes) {
-            Ok((nodes, bytes_buf)) => Ok(Arc::new(Self {
+            Ok((nodes, bytes_buf, buffers)) => Ok(Arc::new(Self {
                 bytes_buf,
+                _buffers: buffers,
                 nodes,
                 #[cfg(test)]
                 materialized_subtrees: AtomicUsize::new(0),
@@ -253,58 +235,15 @@ impl TapeData {
         }
     }
 
-    fn parse_inner(bytes: &mut Vec<u8>) -> Result<(Vec<TapeNode>, Arc<[u8]>), simd_json::Error> {
-        // simd-json escape-decodes strings in place inside `bytes`.
-        // Each `Node::String(&str)` borrows a slice of that buffer.
-        // Capture per-string (offset, len) BEFORE moving `bytes`, then
-        // hand `bytes` over as the side buffer — zero string copies.
-        // Fallback to `extend_from_slice` only for the (rare) case
-        // where simd-json returns a slice outside the input buffer.
-        let base = bytes.as_ptr() as usize;
-        let bytes_len = bytes.len();
-        let limit = base + bytes_len;
-        let tape = simd_json::to_tape(bytes)?;
-        let mut nodes: Vec<TapeNode> = Vec::with_capacity(tape.0.len());
-        let mut extra_buf: Vec<u8> = Vec::new();
-        for n in tape.0.iter() {
-            nodes.push(match n {
-                simd_json::Node::Static(s) => TapeNode::Static(*s),
-                simd_json::Node::String(s) => {
-                    let p = s.as_ptr() as usize;
-                    if p >= base && p + s.len() <= limit {
-                        let off = p - base;
-                        TapeNode::StringRef {
-                            start: off as u32,
-                            end: (off + s.len()) as u32,
-                        }
-                    } else {
-                        let off = bytes_len + extra_buf.len();
-                        extra_buf.extend_from_slice(s.as_bytes());
-                        TapeNode::StringRef {
-                            start: off as u32,
-                            end: (off + s.len()) as u32,
-                        }
-                    }
-                }
-                simd_json::Node::Object { len, count } => TapeNode::Object {
-                    len: *len as u32,
-                    count: *count as u32,
-                },
-                simd_json::Node::Array { len, count } => TapeNode::Array {
-                    len: *len as u32,
-                    count: *count as u32,
-                },
-            });
-        }
-        drop(tape);
-        let bytes_buf: Arc<[u8]> = if extra_buf.is_empty() {
-            Arc::from(std::mem::take(bytes).into_boxed_slice())
-        } else {
-            let mut combined = std::mem::take(bytes);
-            combined.extend_from_slice(&extra_buf);
-            Arc::from(combined.into_boxed_slice())
-        };
-        Ok((nodes, bytes_buf))
+    fn parse_inner(
+        bytes: &mut Vec<u8>,
+    ) -> Result<(Vec<TapeNode>, Vec<u8>, simd_json::Buffers), simd_json::Error> {
+        let mut buffers = simd_json::Buffers::new(bytes.len());
+        let tape = simd_json::to_tape_with_buffers(bytes, &mut buffers)?;
+        let nodes =
+            unsafe { std::mem::transmute::<Vec<simd_json::Node<'_>>, Vec<TapeNode>>(tape.0) };
+        let bytes_buf = std::mem::take(bytes);
+        Ok((nodes, bytes_buf, buffers))
     }
 
     #[cfg(test)]
@@ -333,16 +272,20 @@ impl TapeData {
         unsafe { std::str::from_utf8_unchecked(&self.bytes_buf[start..end]) }
     }
 
-    /// Borrow the string at node `i` (panics if not a `StringRef`).
-    /// SAFETY: simd-json validates UTF-8; the offsets are written
-    /// from `&str.as_bytes()` so the slice remains valid UTF-8.
+    /// Borrow the string at node `i` (panics if not a string).
     #[inline]
     pub fn str_at(&self, i: usize) -> &str {
         match self.nodes[i] {
-            TapeNode::StringRef { start, end } => unsafe {
-                std::str::from_utf8_unchecked(&self.bytes_buf[start as usize..end as usize])
-            },
+            TapeNode::String(s) => s,
             _ => unreachable!("str_at: node {} is not a string", i),
+        }
+    }
+
+    #[inline]
+    pub fn str_ref_at(&self, i: usize) -> StrRef {
+        match self.nodes[i] {
+            TapeNode::String(s) => StrRef::from(s),
+            _ => unreachable!("str_ref_at: node {} is not a string", i),
         }
     }
 
@@ -350,7 +293,7 @@ impl TapeData {
     /// root, or 0 for primitive roots.
     pub fn root_len(&self) -> usize {
         match self.nodes.first() {
-            Some(TapeNode::Object { len, .. }) | Some(TapeNode::Array { len, .. }) => *len as usize,
+            Some(TapeNode::Object { len, .. }) | Some(TapeNode::Array { len, .. }) => *len,
             _ => 0,
         }
     }
@@ -360,7 +303,7 @@ impl TapeData {
     #[inline]
     pub fn span(&self, i: usize) -> usize {
         match self.nodes[i] {
-            TapeNode::Object { count, .. } | TapeNode::Array { count, .. } => count as usize + 1,
+            TapeNode::Object { count, .. } | TapeNode::Array { count, .. } => count + 1,
             _ => 1,
         }
     }

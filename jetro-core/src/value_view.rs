@@ -211,22 +211,16 @@ impl<'a> TapeView<'a> {
                 }
             }
             TapeNode::Static(SN::F64(f)) => Val::Float(f),
-            TapeNode::StringRef { start, end } => {
-                Val::StrSlice(crate::strref::StrRef::slice_bytes(
-                    std::sync::Arc::clone(&tape.bytes_buf),
-                    start as usize,
-                    end as usize,
-                ))
-            }
+            TapeNode::String(_) => Val::StrSlice(tape.str_ref_at(*idx - 1)),
             TapeNode::Array { len, .. } => {
-                let mut out = Vec::with_capacity(len as usize);
+                let mut out = Vec::with_capacity(len);
                 for _ in 0..len {
                     out.push(Self::materialize_at(tape, idx));
                 }
                 Val::arr(out)
             }
             TapeNode::Object { len, .. } => {
-                let mut out = indexmap::IndexMap::with_capacity(len as usize);
+                let mut out = indexmap::IndexMap::with_capacity(len);
                 for _ in 0..len {
                     let key = tape.str_at(*idx);
                     *idx += 1;
@@ -255,9 +249,9 @@ impl<'a> ValueView<'a> for TapeView<'a> {
             TapeNode::Static(SN::I64(n)) => JsonView::Int(n),
             TapeNode::Static(SN::U64(n)) => JsonView::UInt(n),
             TapeNode::Static(SN::F64(f)) => JsonView::Float(f),
-            TapeNode::StringRef { .. } => JsonView::Str(tape.str_at(*idx)),
-            TapeNode::Array { len, .. } => JsonView::ArrayLen(len as usize),
-            TapeNode::Object { len, .. } => JsonView::ObjectLen(len as usize),
+            TapeNode::String(_) => JsonView::Str(tape.str_at(*idx)),
+            TapeNode::Array { len, .. } => JsonView::ArrayLen(len),
+            TapeNode::Object { len, .. } => JsonView::ObjectLen(len),
         }
     }
 
@@ -294,7 +288,7 @@ impl<'a> ValueView<'a> for TapeView<'a> {
         let TapeNode::Array { len, .. } = tape.nodes[*node] else {
             return Self::Missing;
         };
-        let Some(target) = normalize_index(len as usize, idx) else {
+        let Some(target) = normalize_index(len, idx) else {
             return Self::Missing;
         };
 
@@ -318,7 +312,7 @@ impl<'a> ValueView<'a> for TapeView<'a> {
 
         Some(Box::new(TapeArrayIter {
             tape,
-            remaining: len as usize,
+            remaining: len,
             cur: *idx + 1,
         }))
     }

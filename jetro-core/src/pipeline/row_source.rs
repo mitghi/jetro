@@ -202,7 +202,7 @@ impl<'a> TapeRowSource<'a> {
             Some(crate::strref::TapeNode::Array { len, .. }) => Self::Array {
                 tape,
                 first: idx + 1,
-                len: *len as usize,
+                len: *len,
             },
             Some(_) => Self::Single(crate::value_view::TapeView::Node { tape, idx }),
             None => Self::Missing,

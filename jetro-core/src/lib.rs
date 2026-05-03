@@ -427,10 +427,9 @@ impl Jetro {
                 #[cfg(feature = "simd-json")]
                 {
                     // Prefer the retained simd-json tape when present:
-                    // materialise a normal Val tree whose string leaves are
-                    // StrSlice views into TapeData.bytes_buf. This keeps the
-                    // rest of the VM/Pipeline API lifetime-free while avoiding
-                    // per-string Arc<str> allocation on cold VM fallback.
+                    // materialise a normal Val tree only when the query cannot
+                    // stay on the tape/view path. The rest of the VM/Pipeline
+                    // API remains lifetime-free.
                     if let Some(tape) = self.lazy_tape() {
                         return Val::from_tape_data(tape);
                     }
