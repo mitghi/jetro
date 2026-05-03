@@ -501,14 +501,6 @@ impl FieldChainData {
             ics: ics.into_boxed_slice(),
         }
     }
-    #[inline]
-    pub fn len(&self) -> usize {
-        self.keys.len()
-    }
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.keys.is_empty()
-    }
 }
 
 impl std::ops::Deref for FieldChainData {
