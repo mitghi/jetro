@@ -114,6 +114,17 @@ pub enum PlanNode {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct BackendSet(u16);
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BackendPreference {
+    Structural,
+    TapeView,
+    TapeRows,
+    TapePath,
+    ValView,
+    MaterializedSource,
+    FastChildren,
+}
+
 impl BackendSet {
     pub(crate) const NONE: Self = Self(0);
     pub(crate) const STRUCTURAL: Self = Self(1 << 0);
@@ -137,21 +148,47 @@ impl BackendSet {
 
 impl PlanNode {
     #[inline]
-    pub(crate) fn backends(&self) -> BackendSet {
+    pub(crate) fn backend_preferences(&self) -> &'static [BackendPreference] {
         match self {
             Self::Pipeline { source, .. } => match source {
-                PipelinePlanSource::FieldChain { .. } => BackendSet::TAPE_VIEW
-                    .union(BackendSet::TAPE_ROWS)
-                    .union(BackendSet::VAL_VIEW)
-                    .union(BackendSet::MATERIALIZED_SOURCE),
-                PipelinePlanSource::Expr(_) => BackendSet::FAST_CHILDREN,
+                PipelinePlanSource::FieldChain { .. } => &[
+                    BackendPreference::TapeView,
+                    BackendPreference::TapeRows,
+                    BackendPreference::MaterializedSource,
+                    BackendPreference::ValView,
+                ],
+                PipelinePlanSource::Expr(_) => &[BackendPreference::FastChildren],
             },
-            Self::Structural { .. } => BackendSet::STRUCTURAL,
-            Self::RootPath(_) => BackendSet::TAPE_PATH,
+            Self::Structural { .. } => &[BackendPreference::Structural],
+            Self::RootPath(_) => &[BackendPreference::TapePath],
             Self::Object(_) | Self::Array(_) | Self::Call { .. } | Self::Chain { .. } => {
-                BackendSet::FAST_CHILDREN
+                &[BackendPreference::FastChildren]
             }
-            _ => BackendSet::NONE,
+            _ => &[],
+        }
+    }
+
+    #[inline]
+    pub(crate) fn backends(&self) -> BackendSet {
+        let mut out = BackendSet::NONE;
+        for backend in self.backend_preferences() {
+            out = out.union(backend.backend_set());
+        }
+        out
+    }
+}
+
+impl BackendPreference {
+    #[inline]
+    const fn backend_set(self) -> BackendSet {
+        match self {
+            Self::Structural => BackendSet::STRUCTURAL,
+            Self::TapeView => BackendSet::TAPE_VIEW,
+            Self::TapeRows => BackendSet::TAPE_ROWS,
+            Self::TapePath => BackendSet::TAPE_PATH,
+            Self::ValView => BackendSet::VAL_VIEW,
+            Self::MaterializedSource => BackendSet::MATERIALIZED_SOURCE,
+            Self::FastChildren => BackendSet::FAST_CHILDREN,
         }
     }
 }
@@ -227,6 +264,15 @@ mod tests {
         assert!(backends.contains(BackendSet::VAL_VIEW));
         assert!(backends.contains(BackendSet::MATERIALIZED_SOURCE));
         assert!(!backends.contains(BackendSet::FAST_CHILDREN));
+        assert_eq!(
+            node.backend_preferences(),
+            &[
+                BackendPreference::TapeView,
+                BackendPreference::TapeRows,
+                BackendPreference::MaterializedSource,
+                BackendPreference::ValView,
+            ]
+        );
     }
 
     #[test]
@@ -252,5 +298,9 @@ mod tests {
         let backends = pipeline.backends();
         assert!(backends.contains(BackendSet::FAST_CHILDREN));
         assert!(!backends.contains(BackendSet::TAPE_VIEW));
+        assert_eq!(
+            pipeline.backend_preferences(),
+            &[BackendPreference::FastChildren]
+        );
     }
 }

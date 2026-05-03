@@ -5,8 +5,8 @@ use std::sync::Arc;
 use crate::ast::BinOp;
 use crate::context::{Env, EvalError};
 use crate::physical::{
-    BackendSet, NodeId, PhysicalArrayElem, PhysicalChainStep, PhysicalObjField, PhysicalPathStep,
-    PipelinePlanSource, PlanNode, QueryPlan,
+    BackendPreference, NodeId, PhysicalArrayElem, PhysicalChainStep, PhysicalObjField,
+    PhysicalPathStep, PipelinePlanSource, PlanNode, QueryPlan,
 };
 use crate::pipeline;
 use crate::runtime::{PipelineSourceResolver, ResolvedPipelineSource};
@@ -199,11 +199,26 @@ impl ExecCtx<'_> {
     }
 
     fn eval_fast(&mut self, id: NodeId) -> Option<Result<Val, EvalError>> {
-        let backends = self.plan.node(id).backends();
-        match self.plan.node(id) {
-            PlanNode::Structural {
-                plan: structural, ..
-            } if backends.contains(BackendSet::STRUCTURAL) => {
+        for backend in self.plan.node(id).backend_preferences() {
+            if let Some(result) = self.eval_backend(id, *backend) {
+                return Some(result);
+            }
+        }
+        None
+    }
+
+    fn eval_backend(
+        &mut self,
+        id: NodeId,
+        backend: BackendPreference,
+    ) -> Option<Result<Val, EvalError>> {
+        match (backend, self.plan.node(id)) {
+            (
+                BackendPreference::Structural,
+                PlanNode::Structural {
+                    plan: structural, ..
+                },
+            ) => {
                 let bytes = match self.j.raw_bytes() {
                     Some(bytes) => bytes,
                     None => return None,
@@ -215,21 +230,33 @@ impl ExecCtx<'_> {
                 };
                 Some(structural.run(index, bytes))
             }
-            PlanNode::Pipeline { source, body } => self.eval_pipeline_fast(backends, source, body),
-            PlanNode::RootPath(steps) if backends.contains(BackendSet::TAPE_PATH) => {
+            (
+                BackendPreference::TapeView
+                | BackendPreference::TapeRows
+                | BackendPreference::ValView
+                | BackendPreference::MaterializedSource,
+                PlanNode::Pipeline { source, body },
+            ) => self.eval_pipeline_backend(backend, source, body),
+            (BackendPreference::FastChildren, PlanNode::Pipeline { source, body }) => {
+                self.eval_pipeline_backend(backend, source, body)
+            }
+            (BackendPreference::TapePath, PlanNode::RootPath(steps)) => {
                 self.eval_root_path_fast(steps)
             }
-            PlanNode::Object(fields) if backends.contains(BackendSet::FAST_CHILDREN) => {
+            (BackendPreference::FastChildren, PlanNode::Object(fields)) => {
                 self.eval_object_fast(fields)
             }
-            PlanNode::Array(elems) if backends.contains(BackendSet::FAST_CHILDREN) => {
+            (BackendPreference::FastChildren, PlanNode::Array(elems)) => {
                 self.eval_array_fast(elems)
             }
-            PlanNode::Call {
-                receiver,
-                call,
-                optional,
-            } if backends.contains(BackendSet::FAST_CHILDREN) => {
+            (
+                BackendPreference::FastChildren,
+                PlanNode::Call {
+                    receiver,
+                    call,
+                    optional,
+                },
+            ) => {
                 let receiver = match self.eval_fast(*receiver)? {
                     Ok(value) => value,
                     Err(err) => return Some(Err(err)),
@@ -242,7 +269,7 @@ impl ExecCtx<'_> {
                         .ok_or_else(|| EvalError(format!("{:?}: builtin unsupported", call.method)))
                 }))
             }
-            PlanNode::Chain { base, steps } if backends.contains(BackendSet::FAST_CHILDREN) => {
+            (BackendPreference::FastChildren, PlanNode::Chain { base, steps }) => {
                 let base = match self.eval_fast(*base)? {
                     Ok(value) => value,
                     Err(err) => return Some(Err(err)),
@@ -253,19 +280,22 @@ impl ExecCtx<'_> {
         }
     }
 
-    fn eval_pipeline_fast(
+    fn eval_pipeline_backend(
         &mut self,
-        backends: BackendSet,
+        backend: BackendPreference,
         source: &PipelinePlanSource,
         body: &pipeline::PipelineBody,
     ) -> Option<Result<Val, EvalError>> {
-        match source {
-            PipelinePlanSource::FieldChain { keys } => {
-                self.eval_field_chain_pipeline_fast(backends, keys, body)
-            }
-            PipelinePlanSource::Expr(source)
-                if backends.contains(BackendSet::FAST_CHILDREN)
-                    && pipeline_body_is_current_free(body) =>
+        match (backend, source) {
+            (
+                BackendPreference::TapeView
+                | BackendPreference::TapeRows
+                | BackendPreference::ValView
+                | BackendPreference::MaterializedSource,
+                PipelinePlanSource::FieldChain { keys },
+            ) => self.eval_field_chain_pipeline_backend(backend, keys, body),
+            (BackendPreference::FastChildren, PipelinePlanSource::Expr(source))
+                if pipeline_body_is_current_free(body) =>
             {
                 let source = match self.eval_fast(*source)? {
                     Ok(value) => value,
@@ -280,20 +310,33 @@ impl ExecCtx<'_> {
                     Some(self.j as &dyn pipeline::PipelineData),
                 ))
             }
-            PipelinePlanSource::Expr(_) => None,
+            _ => None,
         }
     }
 
-    fn eval_field_chain_pipeline_fast(
+    fn eval_field_chain_pipeline_backend(
         &mut self,
-        backends: BackendSet,
+        backend: BackendPreference,
+        keys: &[Arc<str>],
+        body: &pipeline::PipelineBody,
+    ) -> Option<Result<Val, EvalError>> {
+        match backend {
+            BackendPreference::TapeView => self.eval_tape_view_pipeline(keys, body),
+            BackendPreference::TapeRows => self.eval_tape_rows_pipeline(keys, body),
+            BackendPreference::MaterializedSource => {
+                self.eval_materialized_source_pipeline(keys, body)
+            }
+            BackendPreference::ValView => self.eval_val_view_pipeline(keys, body),
+            _ => None,
+        }
+    }
+
+    fn eval_tape_view_pipeline(
+        &mut self,
         keys: &[Arc<str>],
         body: &pipeline::PipelineBody,
     ) -> Option<Result<Val, EvalError>> {
         #[cfg(feature = "simd-json")]
-        if backends.contains(BackendSet::TAPE_VIEW)
-            || backends.contains(BackendSet::TAPE_ROWS)
-            || backends.contains(BackendSet::MATERIALIZED_SOURCE)
         {
             if let Some(tape) = match self.j.lazy_tape() {
                 Ok(tape) => tape,
@@ -301,36 +344,66 @@ impl ExecCtx<'_> {
             } {
                 let root = crate::value_view::TapeView::root(tape);
                 let source = view_pipeline::walk_fields(root, keys);
-                if backends.contains(BackendSet::TAPE_VIEW) {
-                    if let Some(result) = view_pipeline::run(source.clone(), body, Some(self.j)) {
-                        return Some(result);
-                    }
-                }
-                if backends.contains(BackendSet::TAPE_ROWS) {
-                    if let Some(result) = pipeline::run_tape_field_chain(body, tape, keys) {
-                        return Some(result);
-                    }
-                }
-                if backends.contains(BackendSet::MATERIALIZED_SOURCE)
-                    && body.can_run_with_materialized_receiver()
-                {
-                    let pipeline = body
-                        .clone()
-                        .with_source(pipeline::Source::Receiver(source.materialize()));
-                    let root = Val::Null;
-                    let env = Env::new(Val::Null);
-                    return Some(pipeline.run_with_env(
-                        &root,
-                        &env,
-                        Some(self.j as &dyn pipeline::PipelineData),
-                    ));
-                }
+                return view_pipeline::run(source, body, Some(self.j));
             }
         }
+        None
+    }
 
-        if backends.contains(BackendSet::VAL_VIEW)
-            && (self.j.raw_bytes().is_none() || self.root.is_some())
+    fn eval_tape_rows_pipeline(
+        &mut self,
+        keys: &[Arc<str>],
+        body: &pipeline::PipelineBody,
+    ) -> Option<Result<Val, EvalError>> {
+        #[cfg(feature = "simd-json")]
         {
+            if let Some(tape) = match self.j.lazy_tape() {
+                Ok(tape) => tape,
+                Err(err) => return Some(Err(err)),
+            } {
+                return pipeline::run_tape_field_chain(body, tape, keys);
+            }
+        }
+        None
+    }
+
+    fn eval_materialized_source_pipeline(
+        &mut self,
+        keys: &[Arc<str>],
+        body: &pipeline::PipelineBody,
+    ) -> Option<Result<Val, EvalError>> {
+        if !body.can_run_with_materialized_receiver() {
+            return None;
+        }
+        #[cfg(feature = "simd-json")]
+        {
+            if let Some(tape) = match self.j.lazy_tape() {
+                Ok(tape) => tape,
+                Err(err) => return Some(Err(err)),
+            } {
+                let root = crate::value_view::TapeView::root(tape);
+                let source = view_pipeline::walk_fields(root, keys);
+                let pipeline = body
+                    .clone()
+                    .with_source(pipeline::Source::Receiver(source.materialize()));
+                let root = Val::Null;
+                let env = Env::new(Val::Null);
+                return Some(pipeline.run_with_env(
+                    &root,
+                    &env,
+                    Some(self.j as &dyn pipeline::PipelineData),
+                ));
+            }
+        }
+        None
+    }
+
+    fn eval_val_view_pipeline(
+        &mut self,
+        keys: &[Arc<str>],
+        body: &pipeline::PipelineBody,
+    ) -> Option<Result<Val, EvalError>> {
+        if self.j.raw_bytes().is_none() || self.root.is_some() {
             let root = match self.root() {
                 Ok(root) => root,
                 Err(err) => return Some(Err(err)),
