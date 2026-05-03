@@ -88,19 +88,24 @@ impl PlanBuilder {
 
     #[inline]
     fn backend_plan_for_node(&self, node: &PlanNode) -> BackendPlan {
-        match (self.context.input, node) {
-            (
-                InputMode::Val,
-                PlanNode::Pipeline {
-                    source: PipelinePlanSource::FieldChain { .. },
-                    ..
-                },
-            ) => BackendPlan::new(&[crate::physical::BackendPreference::ValView]),
-            (InputMode::Val, PlanNode::RootPath(_) | PlanNode::Structural { .. }) => {
-                BackendPlan::new(&[])
-            }
-            _ => BackendPlan::for_node(node),
+        select_backend_plan(self.context, node)
+    }
+}
+
+#[inline]
+fn select_backend_plan(context: PlanningContext, node: &PlanNode) -> BackendPlan {
+    match (context.input, node) {
+        (
+            InputMode::Val,
+            PlanNode::Pipeline {
+                source: PipelinePlanSource::FieldChain { .. },
+                ..
+            },
+        ) => BackendPlan::new(&[crate::physical::BackendPreference::ValView]),
+        (InputMode::Val, PlanNode::RootPath(_) | PlanNode::Structural { .. }) => {
+            BackendPlan::new(&[])
         }
+        _ => BackendPlan::for_node(node),
     }
 }
 
@@ -508,6 +513,31 @@ mod tests {
                 BackendPreference::MaterializedSource,
                 BackendPreference::ValView,
             ]
+        );
+    }
+
+    #[test]
+    fn backend_policy_is_centralized_for_input_context() {
+        let node = PlanNode::Pipeline {
+            source: PipelinePlanSource::FieldChain {
+                keys: Arc::from([Arc::<str>::from("rows")]),
+            },
+            body: crate::pipeline::PipelineBody {
+                stages: Vec::new(),
+                stage_exprs: Vec::new(),
+                sink: crate::pipeline::Sink::Collect,
+                stage_kernels: Vec::new(),
+                sink_kernels: Vec::new(),
+            },
+        };
+
+        assert_eq!(
+            select_backend_plan(PlanningContext::val(), &node).as_slice(),
+            &[BackendPreference::ValView]
+        );
+        assert_eq!(
+            select_backend_plan(PlanningContext::bytes(), &node).as_slice()[0],
+            BackendPreference::TapeView
         );
     }
 
