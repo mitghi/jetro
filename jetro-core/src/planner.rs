@@ -76,6 +76,7 @@ impl PlanBuilder {
     fn push(&mut self, node: PlanNode) -> NodeId {
         let facts = self.execution_facts_for_node(&node);
         let backends = self.backend_plan_for_node(&node, facts);
+        let facts = adjust_facts_for_backend_plan(&node, backends, facts);
         self.push_with_backends_and_facts(node, backends, facts)
     }
 
@@ -216,6 +217,22 @@ fn select_backend_plan(
         ]),
         _ => BackendPlan::for_node(node),
     }
+}
+
+#[inline]
+fn adjust_facts_for_backend_plan(
+    node: &PlanNode,
+    backends: BackendPlan,
+    mut facts: ExecutionFacts,
+) -> ExecutionFacts {
+    if matches!(node, PlanNode::Structural { .. })
+        && backends
+            .as_slice()
+            .contains(&crate::physical::BackendPreference::Structural)
+    {
+        facts.contains_vm_fallback = false;
+    }
+    facts
 }
 
 #[inline]
@@ -750,6 +767,30 @@ mod tests {
             PlanningContext::bytes(),
         );
         let facts = plan.root_execution_facts();
+        assert!(facts.contains_vm_fallback);
+        assert!(!facts.is_byte_native());
+    }
+
+    #[test]
+    fn root_facts_classify_byte_structural_plan_as_byte_native() {
+        let plan = plan_query_with_context(
+            r#"$.deep_find(@ kind object and status == "open")"#,
+            PlanningContext::bytes(),
+        );
+        let facts = plan.root_execution_facts();
+        assert!(matches!(root_node(&plan), PlanNode::Structural { .. }));
+        assert!(facts.is_byte_native());
+        assert!(!facts.contains_vm_fallback);
+    }
+
+    #[test]
+    fn root_facts_keep_val_structural_plan_as_vm_fallback() {
+        let plan = plan_query_with_context(
+            r#"$.deep_find(@ kind object and status == "open")"#,
+            PlanningContext::val(),
+        );
+        let facts = plan.root_execution_facts();
+        assert!(matches!(root_node(&plan), PlanNode::Structural { .. }));
         assert!(facts.contains_vm_fallback);
         assert!(!facts.is_byte_native());
     }
