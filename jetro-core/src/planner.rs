@@ -206,6 +206,9 @@ fn select_backend_plan(
         (InputMode::Val, PlanNode::RootPath(_) | PlanNode::Structural { .. }) => {
             BackendPlan::new(&[crate::physical::BackendPreference::Interpreted])
         }
+        (InputMode::Bytes, PlanNode::Structural { .. }) => {
+            BackendPlan::new(&[crate::physical::BackendPreference::Structural])
+        }
         (
             InputMode::Bytes,
             PlanNode::Pipeline {
@@ -219,6 +222,12 @@ fn select_backend_plan(
             crate::physical::BackendPreference::ValView,
             crate::physical::BackendPreference::Interpreted,
         ]),
+        _ if context.input == InputMode::Bytes
+            && facts.is_byte_native()
+            && !matches!(node, PlanNode::Pipeline { .. }) =>
+        {
+            BackendPlan::for_node(node).without_interpreted()
+        }
         _ => BackendPlan::for_node(node),
     }
 }

@@ -327,6 +327,22 @@ impl BackendPlan {
         }
         out
     }
+
+    #[inline]
+    pub(crate) fn without_interpreted(self) -> Self {
+        let mut items = [BackendPreference::FastChildren; 5];
+        let mut len = 0usize;
+        for backend in self.as_slice() {
+            if *backend != BackendPreference::Interpreted {
+                items[len] = *backend;
+                len += 1;
+            }
+        }
+        Self {
+            len: len as u8,
+            items,
+        }
+    }
 }
 
 impl BackendSet {
