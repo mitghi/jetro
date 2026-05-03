@@ -1316,6 +1316,25 @@ mod tests {
 
     #[cfg(feature = "simd-json")]
     #[test]
+    fn byte_native_dynamic_index_chain_executes_without_root_materialization() {
+        let expr = r#"{"item": $.items[$.index].name, "field": $.object[$.key]}"#;
+        let plan = planner::plan_query_with_context(expr, planner::PlanningContext::bytes());
+        assert!(plan.root_execution_facts().is_byte_native());
+
+        let j = Jetro::from_bytes(
+            br#"{"items":[{"name":"zero"},{"name":"one"}],"index":1,"object":{"x":7},"key":"x"}"#
+                .to_vec(),
+        )
+        .unwrap();
+
+        let out = super::collect_plan_json(&j, &plan).unwrap();
+
+        assert_eq!(out, json!({"item": "one", "field": 7}));
+        assert!(!j.root_val_is_materialized());
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
     fn vm_fallback_root_facts_match_materialized_execution() {
         let expr = r#"{"a": [x for x in $.rows if x.score > 10], "b": $.meta.version}"#;
         let plan = planner::plan_query_with_context(expr, planner::PlanningContext::bytes());

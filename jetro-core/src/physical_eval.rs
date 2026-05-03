@@ -27,24 +27,6 @@ pub(crate) fn run(j: &Jetro, plan: &QueryPlan, root_id: NodeId) -> Result<Val, E
     ctx.eval(root_id)
 }
 
-fn eval_materialized_chain_suffix(
-    mut cur: Val,
-    steps: &[PhysicalChainStep],
-) -> Result<Val, EvalError> {
-    for step in steps {
-        cur = match step {
-            PhysicalChainStep::Field(key) => cur.get_field(key.as_ref()),
-            PhysicalChainStep::Index(idx) => cur.get_index(*idx),
-            PhysicalChainStep::DynIndex(_) => {
-                return Err(EvalError(
-                    "structural suffix dynamic index requires generic evaluation".into(),
-                ))
-            }
-        };
-    }
-    Ok(cur)
-}
-
 fn walk_path_view<'a, V>(mut cur: V, steps: &[PhysicalPathStep]) -> V
 where
     V: ValueView<'a>,
@@ -268,17 +250,7 @@ impl ExecCtx<'_> {
                 }))
             }
             (BackendPreference::FastChildren, PlanNode::Chain { base, steps }) => {
-                if steps
-                    .iter()
-                    .any(|step| matches!(step, PhysicalChainStep::DynIndex(_)))
-                {
-                    return None;
-                }
-                let base = match self.eval_fast(*base)? {
-                    Ok(value) => value,
-                    Err(err) => return Some(Err(err)),
-                };
-                Some(eval_materialized_chain_suffix(base, steps))
+                self.eval_chain_fast(*base, steps)
             }
             (BackendPreference::Interpreted, _) => {
                 if id == self.root_id
@@ -488,6 +460,36 @@ impl ExecCtx<'_> {
             }
         }
         Some(Ok(Val::arr(out)))
+    }
+
+    fn eval_chain_fast(
+        &mut self,
+        base: NodeId,
+        steps: &[PhysicalChainStep],
+    ) -> Option<Result<Val, EvalError>> {
+        let mut cur = match self.eval_fast(base)? {
+            Ok(value) => value,
+            Err(err) => return Some(Err(err)),
+        };
+        for step in steps {
+            cur = match step {
+                PhysicalChainStep::Field(key) => cur.get_field(key.as_ref()),
+                PhysicalChainStep::Index(idx) => cur.get_index(*idx),
+                PhysicalChainStep::DynIndex(expr) => {
+                    let key = match self.eval_fast(*expr)? {
+                        Ok(value) => value,
+                        Err(err) => return Some(Err(err)),
+                    };
+                    match key {
+                        Val::Int(idx) => cur.get_index(idx),
+                        Val::Str(key) => cur.get_field(key.as_ref()),
+                        Val::StrSlice(key) => cur.get_field(key.as_str()),
+                        _ => Val::Null,
+                    }
+                }
+            };
+        }
+        Some(Ok(cur))
     }
 
     fn eval_chain(&mut self, base: NodeId, steps: &[PhysicalChainStep]) -> Result<Val, EvalError> {
