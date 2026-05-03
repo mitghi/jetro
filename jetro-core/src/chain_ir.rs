@@ -10,8 +10,7 @@
 
 use crate::{
     builtin_registry::{
-        descriptor as builtin_descriptor, propagate_demand as propagate_builtin_demand,
-        BuiltinDemandArg, BuiltinId,
+        propagate_demand as propagate_builtin_demand, BuiltinDemandArg, BuiltinId,
     },
     builtins::BuiltinMethod,
 };
@@ -156,7 +155,7 @@ impl ChainOp {
             ChainOp::Builtin { id, .. } => {
                 use crate::builtins::BuiltinCategory as Cat;
 
-                let Some(descriptor) = builtin_descriptor(*id) else {
+                let Some(method) = id.method() else {
                     return OpSpec {
                         input: ValueKind::Any,
                         output: ValueKind::Any,
@@ -164,7 +163,7 @@ impl ChainOp {
                         preserves_order: true,
                     };
                 };
-                let spec = descriptor.spec();
+                let spec = method.spec();
                 let input = match spec.category {
                     Cat::StreamingOneToOne
                     | Cat::StreamingFilter

@@ -9,7 +9,7 @@ use crate::{
     builtins::{
         BuiltinCardinality, BuiltinExprStage, BuiltinMethod, BuiltinNullaryStage,
         BuiltinPipelineExecutor, BuiltinPipelineLowering, BuiltinPipelineMaterialization,
-        BuiltinPipelineOrderEffect, BuiltinPipelineShape, BuiltinPipelineStage, BuiltinSpec,
+        BuiltinPipelineOrderEffect, BuiltinPipelineShape, BuiltinPipelineStage,
         BuiltinStringPairStage, BuiltinStringStage, BuiltinStructural, BuiltinUsizeStage,
     },
     chain_ir::{Demand, PullDemand, ValueNeed},
@@ -19,6 +19,7 @@ use crate::{
 pub(crate) struct BuiltinId(pub(crate) u16);
 
 #[derive(Debug, Clone, Copy)]
+#[cfg(test)]
 pub(crate) struct BuiltinDescriptor {
     pub(crate) id: BuiltinId,
     pub(crate) method: BuiltinMethod,
@@ -45,13 +46,6 @@ enum BuiltinDemandLaw {
     Last,
     Count,
     NumericReducer,
-}
-
-impl BuiltinDescriptor {
-    #[inline]
-    pub(crate) fn spec(self) -> BuiltinSpec {
-        self.method.spec()
-    }
 }
 
 #[inline]
@@ -312,6 +306,7 @@ macro_rules! builtin_meta_structural {
 
 macro_rules! builtin_registry {
     ($( $method:ident => $canonical:literal [ $( $alias:literal ),* $(,)? ] $( { $($meta:tt)* } )? ; )*) => {
+        #[cfg(test)]
         pub(crate) static BUILTIN_DESCRIPTORS: &[BuiltinDescriptor] = &[
             $(
                 BuiltinDescriptor {
@@ -332,6 +327,7 @@ macro_rules! builtin_registry {
         }
 
         #[inline]
+        #[cfg(test)]
         pub(crate) fn descriptor(id: BuiltinId) -> Option<BuiltinDescriptor> {
             match id.0 {
                 $(x if x == BuiltinMethod::$method as u16 => Some(BuiltinDescriptor {
