@@ -21,6 +21,49 @@ use crate::vm::Compiler;
 #[derive(Default)]
 struct PlanBuilder {
     nodes: Vec<PhysicalNode>,
+    context: PlanningContext,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum InputMode {
+    Bytes,
+    Val,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct PlanningContext {
+    input: InputMode,
+}
+
+impl Default for PlanningContext {
+    #[inline]
+    fn default() -> Self {
+        Self::bytes()
+    }
+}
+
+impl PlanningContext {
+    #[inline]
+    pub(crate) const fn bytes() -> Self {
+        Self {
+            input: InputMode::Bytes,
+        }
+    }
+
+    #[inline]
+    pub(crate) const fn val() -> Self {
+        Self {
+            input: InputMode::Val,
+        }
+    }
+
+    #[inline]
+    pub(crate) const fn cache_key(self) -> &'static str {
+        match self.input {
+            InputMode::Bytes => "bytes",
+            InputMode::Val => "val",
+        }
+    }
 }
 
 impl PlanBuilder {
@@ -45,7 +88,19 @@ impl PlanBuilder {
 
     #[inline]
     fn backend_plan_for_node(&self, node: &PlanNode) -> BackendPlan {
-        BackendPlan::for_node(node)
+        match (self.context.input, node) {
+            (
+                InputMode::Val,
+                PlanNode::Pipeline {
+                    source: PipelinePlanSource::FieldChain { .. },
+                    ..
+                },
+            ) => BackendPlan::new(&[crate::physical::BackendPreference::ValView]),
+            (InputMode::Val, PlanNode::RootPath(_) | PlanNode::Structural { .. }) => {
+                BackendPlan::new(&[])
+            }
+            _ => BackendPlan::for_node(node),
+        }
     }
 }
 
@@ -394,10 +449,19 @@ fn plan_array_elem(builder: &mut PlanBuilder, elem: &ArrayElem) -> PhysicalArray
 /// Parse and classify a query once.
 #[inline]
 pub fn plan_query(expr: &str) -> QueryPlan {
+    plan_query_with_context(expr, PlanningContext::default())
+}
+
+/// Parse and classify a query once with input-representation preferences.
+#[inline]
+pub(crate) fn plan_query_with_context(expr: &str, context: PlanningContext) -> QueryPlan {
     let Ok(ast) = parser::parse(expr) else {
         return QueryPlan::source_vm(expr);
     };
-    let mut builder = PlanBuilder::default();
+    let mut builder = PlanBuilder {
+        nodes: Vec::new(),
+        context,
+    };
     if let Some(pipeline) = Pipeline::lower(&ast) {
         if let Some(node) = pipeline_to_plan_node(pipeline) {
             let root = builder.push(node);
@@ -412,7 +476,9 @@ pub fn plan_query(expr: &str) -> QueryPlan {
 mod tests {
     use super::*;
     use crate::ast::BinOp;
-    use crate::physical::{PhysicalObjField, PipelinePlanSource, PlanNode, QueryRoot};
+    use crate::physical::{
+        BackendPreference, PhysicalObjField, PipelinePlanSource, PlanNode, QueryRoot,
+    };
 
     fn root_node(plan: &QueryPlan) -> &PlanNode {
         let QueryRoot::Node(root) = plan.root() else {
@@ -425,6 +491,60 @@ mod tests {
     fn deep_shape_lowers_to_structural_plan() {
         let plan = plan_query(r#"$.deep_shape({email})"#);
         assert!(matches!(root_node(&plan), PlanNode::Structural { .. }));
+    }
+
+    #[test]
+    fn byte_context_prefers_tape_pipeline_backends() {
+        let plan =
+            plan_query_with_context(r#"$.rows.filter(score > 10)"#, PlanningContext::bytes());
+        let QueryRoot::Node(root) = plan.root() else {
+            panic!("expected physical plan");
+        };
+        assert_eq!(
+            plan.backend_preferences(*root),
+            &[
+                BackendPreference::TapeView,
+                BackendPreference::TapeRows,
+                BackendPreference::MaterializedSource,
+                BackendPreference::ValView,
+            ]
+        );
+    }
+
+    #[test]
+    fn val_context_prefers_val_pipeline_backend() {
+        let plan = plan_query_with_context(r#"$.rows.filter(score > 10)"#, PlanningContext::val());
+        let QueryRoot::Node(root) = plan.root() else {
+            panic!("expected physical plan");
+        };
+        assert_eq!(
+            plan.backend_preferences(*root),
+            &[BackendPreference::ValView]
+        );
+    }
+
+    #[test]
+    fn val_context_avoids_tape_only_root_path_backend() {
+        let plan = plan_query_with_context(r#"{"x": $.a.b}"#, PlanningContext::val());
+        let PlanNode::Object(fields) = root_node(&plan) else {
+            panic!("expected object plan");
+        };
+        let PhysicalObjField::Kv { val, .. } = &fields[0] else {
+            panic!("expected kv field");
+        };
+        assert!(plan.backend_preferences(*val).is_empty());
+    }
+
+    #[test]
+    fn val_context_prefers_val_backend_for_top_level_field_chain_pipeline() {
+        let plan = plan_query_with_context(r#"$.a.b"#, PlanningContext::val());
+        let QueryRoot::Node(root) = plan.root() else {
+            panic!("expected physical plan");
+        };
+        assert_eq!(
+            plan.backend_preferences(*root),
+            &[BackendPreference::ValView]
+        );
     }
 
     #[test]

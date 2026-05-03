@@ -13,7 +13,7 @@ use crate::planner;
 use crate::{with_vm, Jetro, VM};
 
 pub(crate) fn collect_json(j: &Jetro, expr: &str) -> Result<Value, EvalError> {
-    let plan = planner::plan_query(expr);
+    let plan = planner::plan_query_with_context(expr, planning_context(j));
     collect_plan_json(j, &plan)
 }
 
@@ -49,6 +49,15 @@ pub(crate) fn collect_plan_json_with_vm(
             let prog = vm.get_or_compile(source.as_ref())?;
             vm.execute_val(&prog, j.root_val()?)
         }
+    }
+}
+
+#[inline]
+pub(crate) fn planning_context(j: &Jetro) -> planner::PlanningContext {
+    if j.raw_bytes().is_some() {
+        planner::PlanningContext::bytes()
+    } else {
+        planner::PlanningContext::val()
     }
 }
 

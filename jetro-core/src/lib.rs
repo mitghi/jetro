@@ -277,7 +277,7 @@ impl JetroEngine {
         document: &Jetro,
         expr: S,
     ) -> std::result::Result<Value, EvalError> {
-        let plan = self.cached_plan(expr.as_ref());
+        let plan = self.cached_plan(expr.as_ref(), executor::planning_context(document));
         let mut vm = self.vm.lock().expect("vm cache poisoned");
         executor::collect_plan_json_with_vm(document, &plan, &mut vm)
     }
@@ -300,18 +300,19 @@ impl JetroEngine {
         Ok(self.collect(&document, expr)?)
     }
 
-    fn cached_plan(&self, expr: &str) -> physical::QueryPlan {
+    fn cached_plan(&self, expr: &str, context: planner::PlanningContext) -> physical::QueryPlan {
         let mut cache = self.plan_cache.lock().expect("plan cache poisoned");
-        if let Some(plan) = cache.get(expr) {
+        let cache_key = format!("{}\0{}", context.cache_key(), expr);
+        if let Some(plan) = cache.get(&cache_key) {
             return plan.clone();
         }
 
-        let plan = planner::plan_query(expr);
+        let plan = planner::plan_query_with_context(expr, context);
         if self.plan_cache_limit > 0 {
             if cache.len() >= self.plan_cache_limit {
                 cache.clear();
             }
-            cache.insert(expr.to_owned(), plan.clone());
+            cache.insert(cache_key, plan.clone());
         }
         plan
     }
