@@ -352,9 +352,17 @@ where
 struct TerminalCollectPlan {
     prefix: Vec<pipeline::ViewStageCapability>,
     collect_kernel: pipeline::BodyKernel,
+    source_demand: PullDemand,
 }
 
 fn terminal_collect_plan(body: &pipeline::PipelineBody) -> Option<TerminalCollectPlan> {
+    terminal_collect_plan_from(body, 0)
+}
+
+fn terminal_collect_plan_from(
+    body: &pipeline::PipelineBody,
+    start: usize,
+) -> Option<TerminalCollectPlan> {
     if !matches!(
         body.sink.view_capability(&body.sink_kernels)?,
         pipeline::ViewSinkCapability::Collect
@@ -362,8 +370,12 @@ fn terminal_collect_plan(body: &pipeline::PipelineBody) -> Option<TerminalCollec
         return None;
     }
 
-    if let Some((last_stage, prefix_stages)) = body.stages.split_last() {
-        let last_idx = prefix_stages.len();
+    let suffix_stages = body.stages.get(start..)?;
+    let source_demand = pipeline::Pipeline::segment_source_demand(suffix_stages, &body.sink)
+        .chain
+        .pull;
+    if let Some((last_stage, prefix_stages)) = suffix_stages.split_last() {
+        let last_idx = start + prefix_stages.len();
         let capability = last_stage.view_capability(last_idx, body.stage_kernels.get(last_idx))?;
         if let pipeline::ViewStageCapability::Map { kernel } = capability {
             let collect_kernel = body.stage_kernels.get(kernel)?;
@@ -372,24 +384,28 @@ fn terminal_collect_plan(body: &pipeline::PipelineBody) -> Option<TerminalCollec
             }
 
             return Some(TerminalCollectPlan {
-                prefix: terminal_collect_prefix(prefix_stages, body)?,
+                prefix: terminal_collect_prefix_from(prefix_stages, body, start)?,
                 collect_kernel: collect_kernel.clone(),
+                source_demand,
             });
         }
     }
 
     Some(TerminalCollectPlan {
-        prefix: terminal_collect_prefix(&body.stages, body)?,
+        prefix: terminal_collect_prefix_from(suffix_stages, body, start)?,
         collect_kernel: pipeline::BodyKernel::Current,
+        source_demand,
     })
 }
 
-fn terminal_collect_prefix(
+fn terminal_collect_prefix_from(
     stages: &[pipeline::Stage],
     body: &pipeline::PipelineBody,
+    start: usize,
 ) -> Option<Vec<pipeline::ViewStageCapability>> {
     let mut prefix = Vec::with_capacity(stages.len());
-    for (idx, stage) in stages.iter().enumerate() {
+    for (offset, stage) in stages.iter().enumerate() {
+        let idx = start + offset;
         let capability = stage.view_capability(idx, body.stage_kernels.get(idx))?;
         if !matches!(
             capability.materialization(),
@@ -455,7 +471,10 @@ where
     if matches!(strategy, pipeline::StageStrategy::SortUntilOutput(_)) {
         return run_sort_prefix_then_view_suffix(source, body, &plan);
     }
-    if !body.suffix_can_run_with_materialized_receiver(plan.sort_stage + 1) {
+    let collect_suffix = terminal_collect_plan_from(body, plan.sort_stage + 1);
+    if collect_suffix.is_none()
+        && !body.suffix_can_run_with_materialized_receiver(plan.sort_stage + 1)
+    {
         return None;
     }
 
@@ -474,6 +493,13 @@ where
     )?;
 
     let winners = sorter.finish();
+    if let Some(collect_plan) = collect_suffix {
+        return run_sorted_rows_terminal_collect_suffix(
+            winners,
+            &collect_plan,
+            &body.stage_kernels,
+        );
+    }
     let boundary_rows: Vec<Val> = winners.into_iter().map(|row| row.materialize()).collect();
 
     Some(run_materialized_suffix(
@@ -482,6 +508,29 @@ where
         boundary_rows,
         cache,
     ))
+}
+
+fn run_sorted_rows_terminal_collect_suffix<'a, V>(
+    rows: Vec<V>,
+    plan: &TerminalCollectPlan,
+    stage_kernels: &[pipeline::BodyKernel],
+) -> Option<Result<Val, EvalError>>
+where
+    V: ValueView<'a>,
+{
+    let mut collector = pipeline::TerminalCollector::new(&plan.collect_kernel);
+    drive_view_iter(
+        rows,
+        &plan.prefix,
+        stage_kernels,
+        plan.source_demand,
+        |item| {
+            collector.push_view_row(item, &plan.collect_kernel)?;
+            Some(ViewRowAction::Emit)
+        },
+    )?;
+
+    Some(Ok(collector.finish()))
 }
 
 fn run_sort_prefix_then_view_suffix<'a, V>(

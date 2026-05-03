@@ -956,6 +956,7 @@ mod tests {
             br#"{"data":[{"id":1,"score":10,"user":{"name":"low"}},{"id":2,"score":30,"user":{"name":"top"}},{"id":3,"score":20,"user":{"name":"mid"}}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
         )
         .unwrap();
+        j.reset_tape_materialized_subtrees();
 
         let out = j
             .collect(r#"$.data.sort_by(-score).take(2).map({id, name: user.name, score})"#)
@@ -969,6 +970,7 @@ mod tests {
             ])
         );
         assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
     }
 
     #[cfg(feature = "simd-json")]
@@ -1004,7 +1006,7 @@ mod tests {
 
         assert_eq!(out, json!(["top", "mid"]));
         assert!(!j.root_val_is_materialized());
-        assert_eq!(j.tape_materialized_subtrees(), 2);
+        assert_eq!(j.tape_materialized_subtrees(), 0);
     }
 
     #[cfg(feature = "simd-json")]
@@ -1022,7 +1024,7 @@ mod tests {
 
         assert_eq!(out, json!(["top", "mid"]));
         assert!(!j.root_val_is_materialized());
-        assert_eq!(j.tape_materialized_subtrees(), 2);
+        assert_eq!(j.tape_materialized_subtrees(), 0);
     }
 
     #[cfg(feature = "simd-json")]
