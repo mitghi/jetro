@@ -11,7 +11,7 @@ use crate::{
         BuiltinPipelineExecutor, BuiltinPipelineLowering, BuiltinPipelineMaterialization,
         BuiltinPipelineOrderEffect, BuiltinPipelineShape, BuiltinPipelineSink,
         BuiltinPipelineStage, BuiltinSpec, BuiltinStringPairStage, BuiltinStringStage,
-        BuiltinUsizeStage,
+        BuiltinStructural, BuiltinUsizeStage,
     },
     chain_ir::{Demand, PullDemand, ValueNeed},
 };
@@ -175,6 +175,11 @@ pub(crate) fn pipeline_element(id: BuiltinId) -> bool {
 }
 
 #[inline]
+pub(crate) fn structural(id: BuiltinId) -> Option<BuiltinStructural> {
+    registry_structural(id)
+}
+
+#[inline]
 fn demand_law(id: BuiltinId) -> BuiltinDemandLaw {
     registry_demand_law(id).unwrap_or(BuiltinDemandLaw::Identity)
 }
@@ -311,6 +316,21 @@ macro_rules! builtin_meta_element {
     };
 }
 
+macro_rules! builtin_meta_structural {
+    () => {
+        None
+    };
+    (structural: $value:expr $(, $($rest:tt)*)?) => {
+        Some($value)
+    };
+    ($key:ident : $value:expr, $($rest:tt)*) => {
+        builtin_meta_structural!($($rest)*)
+    };
+    ($key:ident : $value:expr) => {
+        None
+    };
+}
+
 macro_rules! builtin_registry {
     ($( $method:ident => $canonical:literal [ $( $alias:literal ),* $(,)? ] $( { $($meta:tt)* } )? ; )*) => {
         pub(crate) static BUILTIN_DESCRIPTORS: &[BuiltinDescriptor] = &[
@@ -415,6 +435,14 @@ macro_rules! builtin_registry {
         fn registry_pipeline_element(id: BuiltinId) -> Option<bool> {
             match id.0 {
                 $(x if x == BuiltinMethod::$method as u16 => builtin_meta_element!($($($meta)*)?),)*
+                _ => None,
+            }
+        }
+
+        #[inline]
+        fn registry_structural(id: BuiltinId) -> Option<BuiltinStructural> {
+            match id.0 {
+                $(x if x == BuiltinMethod::$method as u16 => builtin_meta_structural!($($($meta)*)?),)*
                 _ => None,
             }
         }
@@ -573,9 +601,15 @@ builtin_registry! {
         lowering: BuiltinPipelineLowering::ExprStage(BuiltinExprStage::UniqueBy)
     };
     Collect => "collect" [];
-    DeepFind => "deep_find" [];
-    DeepShape => "deep_shape" [];
-    DeepLike => "deep_like" [];
+    DeepFind => "deep_find" [] {
+        structural: BuiltinStructural::DeepFind
+    };
+    DeepShape => "deep_shape" [] {
+        structural: BuiltinStructural::DeepShape
+    };
+    DeepLike => "deep_like" [] {
+        structural: BuiltinStructural::DeepLike
+    };
     Walk => "walk" [];
     WalkPre => "walk_pre" [];
     Rec => "rec" [];
@@ -1145,6 +1179,30 @@ mod tests {
         ] {
             assert!(!pipeline_element(BuiltinId::from_method(method)));
         }
+    }
+
+    #[test]
+    fn registry_drives_structural_lowering() {
+        assert_eq!(
+            structural(BuiltinId::from_method(BuiltinMethod::DeepFind)),
+            Some(BuiltinStructural::DeepFind)
+        );
+        assert_eq!(
+            structural(BuiltinId::from_method(BuiltinMethod::DeepShape)),
+            Some(BuiltinStructural::DeepShape)
+        );
+        assert_eq!(
+            structural(BuiltinId::from_method(BuiltinMethod::DeepLike)),
+            Some(BuiltinStructural::DeepLike)
+        );
+        assert_eq!(
+            structural(BuiltinId::from_method(BuiltinMethod::Walk)),
+            None
+        );
+        assert_eq!(
+            structural(BuiltinId::from_method(BuiltinMethod::Filter)),
+            None
+        );
     }
 
     #[test]

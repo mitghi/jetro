@@ -6,6 +6,7 @@ use jetro_experimental::{StructuralIndex, TokenId, TokenKind};
 use serde::Deserialize;
 
 use crate::ast::{Arg, BinOp, Expr, KindType, ObjField, Step};
+use crate::builtin_registry::{self, BuiltinId};
 use crate::builtins::{BuiltinMethod, BuiltinStructural};
 use crate::context::EvalError;
 use crate::value::Val;
@@ -54,7 +55,7 @@ impl StructuralPlan {
         method: BuiltinMethod,
         args: &[Arg],
     ) -> Option<Self> {
-        match method.spec().structural? {
+        match builtin_registry::structural(BuiltinId::from_method(method))? {
             BuiltinStructural::DeepFind => lower_deep_find(anchor, args),
             BuiltinStructural::DeepShape => lower_deep_shape(anchor, args),
             BuiltinStructural::DeepLike => lower_deep_like(anchor, args),
