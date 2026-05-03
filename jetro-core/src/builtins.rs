@@ -565,6 +565,7 @@ pub struct BuiltinSpec {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinStructural {
+    DeepFind,
     DeepShape,
     DeepLike,
 }
@@ -1341,9 +1342,12 @@ impl BuiltinMethod {
             Self::SetPath | Self::DelPaths | Self::FlattenKeys | Self::UnflattenKeys => {
                 BuiltinSpec::new(Cat::Path, Card::OneToOne).indexed()
             }
-            Self::DeepFind | Self::Walk | Self::WalkPre | Self::Rec | Self::TracePath => {
+            Self::Walk | Self::WalkPre | Self::Rec | Self::TracePath => {
                 BuiltinSpec::new(Cat::Deep, Card::Expanding).cost(20.0)
             }
+            Self::DeepFind => BuiltinSpec::new(Cat::Deep, Card::Expanding)
+                .structural(BuiltinStructural::DeepFind)
+                .cost(20.0),
             Self::DeepShape => BuiltinSpec::new(Cat::Deep, Card::Expanding)
                 .structural(BuiltinStructural::DeepShape)
                 .cost(20.0),
@@ -6425,7 +6429,10 @@ mod spec_tests {
             BuiltinMethod::DeepLike.spec().structural,
             Some(BuiltinStructural::DeepLike)
         );
-        assert_eq!(BuiltinMethod::DeepFind.spec().structural, None);
+        assert_eq!(
+            BuiltinMethod::DeepFind.spec().structural,
+            Some(BuiltinStructural::DeepFind)
+        );
     }
 
     #[test]

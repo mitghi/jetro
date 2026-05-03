@@ -85,22 +85,16 @@ fn eval_structural_derived(
     id: NodeId,
 ) -> Option<Result<Val, EvalError>> {
     match plan.node(id) {
-        PlanNode::Structural(structural) => {
+        PlanNode::Structural {
+            plan: structural, ..
+        } => {
             let bytes = match j.raw_bytes() {
                 Some(bytes) => bytes,
-                None => {
-                    return Some(Err(EvalError(
-                        "structural plan requires source bytes".into(),
-                    )))
-                }
+                None => return None,
             };
             let index = match j.lazy_structural_index() {
                 Ok(Some(index)) => index,
-                Ok(None) => {
-                    return Some(Err(EvalError(
-                        "structural plan requires source bytes".into(),
-                    )))
-                }
+                Ok(None) => return None,
                 Err(err) => return Some(Err(err)),
             };
             Some(structural.run(index, bytes))
@@ -177,7 +171,10 @@ fn try_run_structural_plan(
     plan: &QueryPlan,
     root_id: NodeId,
 ) -> Result<Option<Val>, EvalError> {
-    let PlanNode::Structural(structural) = plan.node(root_id) else {
+    let PlanNode::Structural {
+        plan: structural, ..
+    } = plan.node(root_id)
+    else {
         return Ok(None);
     };
     let Some(bytes) = j.raw_bytes() else {
@@ -243,7 +240,7 @@ where
             source: PipelinePlanSource::FieldChain { keys },
             body,
         } => eval_view_pipeline(ctx, root, keys, body),
-        PlanNode::Structural(_) => None,
+        PlanNode::Structural { .. } => None,
         PlanNode::Object(fields) => eval_view_object(ctx, fields, root, current),
         PlanNode::Array(elems) => eval_view_array(ctx, elems, root, current),
         _ => None,
@@ -477,17 +474,7 @@ impl ExecCtx<'_> {
             },
             PlanNode::Object(fields) => self.eval_object(fields),
             PlanNode::Array(elems) => self.eval_array(elems),
-            PlanNode::Structural(structural) => {
-                let bytes = self
-                    .j
-                    .raw_bytes()
-                    .ok_or_else(|| EvalError("structural plan requires source bytes".into()))?;
-                let index = self
-                    .j
-                    .lazy_structural_index()?
-                    .ok_or_else(|| EvalError("structural plan requires source bytes".into()))?;
-                structural.run(index, bytes)
-            }
+            PlanNode::Structural { fallback, .. } => self.vm.exec_in_env(fallback, &mut self.env),
             PlanNode::Let { name, init, body } => {
                 let init_val = self.eval(*init)?;
                 let body_env = self.env.with_var(name.as_ref(), init_val);

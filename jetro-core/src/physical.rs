@@ -62,7 +62,10 @@ pub enum PlanNode {
         source: PipelinePlanSource,
         body: PipelineBody,
     },
-    Structural(StructuralPlan),
+    Structural {
+        plan: StructuralPlan,
+        fallback: Arc<Program>,
+    },
     RootPath(Vec<PhysicalPathStep>),
     Chain {
         base: NodeId,

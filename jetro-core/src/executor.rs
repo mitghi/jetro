@@ -74,7 +74,7 @@ mod tests {
             | PlanNode::Current
             | PlanNode::Ident(_)
             | PlanNode::RootPath(_)
-            | PlanNode::Structural(_) => {}
+            | PlanNode::Structural { .. } => {}
             PlanNode::Pipeline { source, .. } => {
                 if let PipelinePlanSource::Expr(source) = source {
                     assert_no_vm_fallback(plan, *source);
@@ -461,6 +461,64 @@ mod tests {
             out,
             json!([{"email": "a@x", "role": "lead", "active": true}])
         );
+        assert!(j.structural_index_is_built());
+        assert!(!j.root_val_is_materialized());
+        assert!(!j.tape_is_built());
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn deep_find_field_literal_predicate_reads_from_structural_index() {
+        let j = Jetro::from_bytes(
+            br#"{"rows":[{"status":"open","id":1},{"status":"closed","id":2},{"nested":{"status":"open","id":3}}]}"#.to_vec(),
+        )
+        .unwrap();
+
+        let out = j.collect(r#"$.deep_find(status == "open")"#).unwrap();
+
+        assert_eq!(
+            out,
+            json!([{"status": "open", "id": 1}, {"status": "open", "id": 3}])
+        );
+        assert!(j.structural_index_is_built());
+        assert!(!j.root_val_is_materialized());
+        assert!(!j.tape_is_built());
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn deep_find_kind_and_field_predicate_reads_from_structural_index() {
+        let j = Jetro::from_bytes(
+            br#"{"rows":[{"status":"open","id":1},{"status":"closed","id":2},{"nested":{"status":"open","id":3}}]}"#.to_vec(),
+        )
+        .unwrap();
+
+        let out = j
+            .collect(r#"$.deep_find(@ kind object and @.status == "open")"#)
+            .unwrap();
+
+        assert_eq!(
+            out,
+            json!([{"status": "open", "id": 1}, {"status": "open", "id": 3}])
+        );
+        assert!(j.structural_index_is_built());
+        assert!(!j.root_val_is_materialized());
+        assert!(!j.tape_is_built());
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn anchored_deep_find_executes_pipeline_suffix() {
+        let j = Jetro::from_bytes(
+            br#"{"outside":{"status":"open","id":0},"org":{"rows":[{"status":"open","id":1},{"status":"open","id":2},{"status":"closed","id":3}]}}"#.to_vec(),
+        )
+        .unwrap();
+
+        let out = j
+            .collect(r#"$.org.rows.deep_find(status == "open").take(1)"#)
+            .unwrap();
+
+        assert_eq!(out, json!([{"status": "open", "id": 1}]));
         assert!(j.structural_index_is_built());
         assert!(!j.root_val_is_materialized());
         assert!(!j.tape_is_built());

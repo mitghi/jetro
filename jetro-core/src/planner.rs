@@ -76,9 +76,9 @@ fn try_lower_structural_op(expr: &Expr) -> Option<PlanNode> {
     let Expr::Chain(base, steps) = expr else {
         return None;
     };
-    let (plan, consumed) = lower_structural_prefix(base, steps)?;
+    let (plan, fallback, consumed) = lower_structural_prefix(base, steps)?;
     if consumed == steps.len() {
-        Some(PlanNode::Structural(plan))
+        Some(PlanNode::Structural { plan, fallback })
     } else {
         None
     }
@@ -88,11 +88,11 @@ fn try_lower_structural_chain_prefix(builder: &mut PlanBuilder, expr: &Expr) -> 
     let Expr::Chain(base, steps) = expr else {
         return None;
     };
-    let (plan, consumed) = lower_structural_prefix(base, steps)?;
+    let (plan, fallback, consumed) = lower_structural_prefix(base, steps)?;
     if consumed >= steps.len() {
         return None;
     }
-    let mut cur = builder.push(PlanNode::Structural(plan));
+    let mut cur = builder.push(PlanNode::Structural { plan, fallback });
     let mut out = Vec::new();
     for step in &steps[consumed..] {
         match step {
@@ -127,7 +127,10 @@ fn try_lower_structural_chain_prefix(builder: &mut PlanBuilder, expr: &Expr) -> 
     Some(flush_chain(builder, cur, &mut out))
 }
 
-fn lower_structural_prefix(base: &Expr, steps: &[Step]) -> Option<(StructuralPlan, usize)> {
+fn lower_structural_prefix(
+    base: &Expr,
+    steps: &[Step],
+) -> Option<(StructuralPlan, Arc<crate::vm::Program>, usize)> {
     if !matches!(base, Expr::Root) {
         return None;
     }
@@ -142,7 +145,9 @@ fn lower_structural_prefix(base: &Expr, steps: &[Step]) -> Option<(StructuralPla
                 let anchor = Arc::from(anchor);
                 let method = BuiltinMethod::from_name(name);
                 let plan = StructuralPlan::lower_builtin(anchor, method, args)?;
-                return Some((plan, idx + 1));
+                let fallback_expr = base.clone().maybe_chain(steps[..=idx].to_vec());
+                let fallback = Arc::new(Compiler::compile(&fallback_expr, "<structural-fallback>"));
+                return Some((plan, fallback, idx + 1));
             }
             _ => return None,
         }
@@ -407,19 +412,31 @@ mod tests {
     #[test]
     fn deep_shape_lowers_to_structural_plan() {
         let plan = plan_query(r#"$.deep_shape({email})"#);
-        assert!(matches!(root_node(&plan), PlanNode::Structural(_)));
+        assert!(matches!(root_node(&plan), PlanNode::Structural { .. }));
+    }
+
+    #[test]
+    fn deep_find_supported_predicate_lowers_to_structural_plan() {
+        let plan = plan_query(r#"$.deep_find(@ kind object and status == "open")"#);
+        assert!(matches!(root_node(&plan), PlanNode::Structural { .. }));
+    }
+
+    #[test]
+    fn deep_find_unsupported_predicate_does_not_lower_to_structural_plan() {
+        let plan = plan_query(r#"$.deep_find(score > 10)"#);
+        assert!(!matches!(root_node(&plan), PlanNode::Structural { .. }));
     }
 
     #[test]
     fn deep_like_lowers_literal_pattern_to_structural_plan() {
         let plan = plan_query(r#"$.deep_like({role: "lead", active: true})"#);
-        assert!(matches!(root_node(&plan), PlanNode::Structural(_)));
+        assert!(matches!(root_node(&plan), PlanNode::Structural { .. }));
     }
 
     #[test]
     fn anchored_deep_shape_lowers_to_structural_plan() {
         let plan = plan_query(r#"$.org.users.deep_shape({email})"#);
-        assert!(matches!(root_node(&plan), PlanNode::Structural(_)));
+        assert!(matches!(root_node(&plan), PlanNode::Structural { .. }));
     }
 
     #[test]
@@ -431,7 +448,7 @@ mod tests {
         let PipelinePlanSource::Expr(source) = source else {
             panic!("expected structural expression source");
         };
-        assert!(matches!(plan.node(*source), PlanNode::Structural(_)));
+        assert!(matches!(plan.node(*source), PlanNode::Structural { .. }));
     }
 
     #[test]
@@ -443,7 +460,7 @@ mod tests {
         let PipelinePlanSource::Expr(source) = source else {
             panic!("expected structural expression source");
         };
-        assert!(matches!(plan.node(*source), PlanNode::Structural(_)));
+        assert!(matches!(plan.node(*source), PlanNode::Structural { .. }));
     }
 
     #[test]

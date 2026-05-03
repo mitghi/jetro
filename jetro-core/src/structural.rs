@@ -5,13 +5,17 @@ use jetro_experimental::{StructuralIndex, TokenId, TokenKind};
 #[cfg(not(feature = "simd-json"))]
 use serde::Deserialize;
 
-use crate::ast::{Arg, Expr, ObjField};
+use crate::ast::{Arg, BinOp, Expr, KindType, ObjField, Step};
 use crate::builtins::{BuiltinMethod, BuiltinStructural};
 use crate::context::EvalError;
 use crate::value::Val;
 
 #[derive(Clone)]
 pub(crate) enum StructuralPlan {
+    DeepFind {
+        anchor: Arc<[StructuralPathStep]>,
+        predicates: Arc<[StructuralPredicate]>,
+    },
     DeepShape {
         anchor: Arc<[StructuralPathStep]>,
         keys: Arc<[Arc<str>]>,
@@ -37,6 +41,13 @@ pub(crate) enum StructuralLiteral {
     Str(Arc<str>),
 }
 
+#[derive(Clone)]
+pub(crate) enum StructuralPredicate {
+    KindObject,
+    FieldEqLiteral(Arc<str>, StructuralLiteral),
+    And(Arc<[StructuralPredicate]>),
+}
+
 impl StructuralPlan {
     pub(crate) fn lower_builtin(
         anchor: Arc<[StructuralPathStep]>,
@@ -44,6 +55,7 @@ impl StructuralPlan {
         args: &[Arg],
     ) -> Option<Self> {
         match method.spec().structural? {
+            BuiltinStructural::DeepFind => lower_deep_find(anchor, args),
             BuiltinStructural::DeepShape => lower_deep_shape(anchor, args),
             BuiltinStructural::DeepLike => lower_deep_like(anchor, args),
         }
@@ -51,10 +63,25 @@ impl StructuralPlan {
 
     pub(crate) fn run(&self, idx: &StructuralIndex, bytes: &[u8]) -> Result<Val, EvalError> {
         match self {
+            Self::DeepFind { anchor, predicates } => run_deep_find(idx, bytes, anchor, predicates),
             Self::DeepShape { anchor, keys } => run_deep_shape(idx, bytes, anchor, keys),
             Self::DeepLike { anchor, patterns } => run_deep_like(idx, bytes, anchor, patterns),
         }
     }
+}
+
+fn lower_deep_find(anchor: Arc<[StructuralPathStep]>, args: &[Arg]) -> Option<StructuralPlan> {
+    if args.is_empty() {
+        return None;
+    }
+    let mut predicates = Vec::with_capacity(args.len());
+    for arg in args {
+        predicates.push(lower_predicate(arg_expr(arg)?)?);
+    }
+    Some(StructuralPlan::DeepFind {
+        anchor,
+        predicates: Arc::from(predicates),
+    })
 }
 
 fn lower_deep_shape(anchor: Arc<[StructuralPathStep]>, args: &[Arg]) -> Option<StructuralPlan> {
@@ -115,6 +142,76 @@ fn lower_literal(expr: &Expr) -> Option<StructuralLiteral> {
         Expr::Str(v) => Some(StructuralLiteral::Str(Arc::from(v.as_str()))),
         _ => None,
     }
+}
+
+fn lower_predicate(expr: &Expr) -> Option<StructuralPredicate> {
+    match expr {
+        Expr::BinOp(lhs, BinOp::And, rhs) => {
+            let mut parts = Vec::new();
+            flatten_and_predicate(lhs, &mut parts)?;
+            flatten_and_predicate(rhs, &mut parts)?;
+            Some(StructuralPredicate::And(Arc::from(parts)))
+        }
+        Expr::BinOp(lhs, BinOp::Eq, rhs) => {
+            if let (Some(field), Some(lit)) = (field_ref(lhs), lower_literal(rhs)) {
+                return Some(StructuralPredicate::FieldEqLiteral(field, lit));
+            }
+            if let (Some(field), Some(lit)) = (field_ref(rhs), lower_literal(lhs)) {
+                return Some(StructuralPredicate::FieldEqLiteral(field, lit));
+            }
+            None
+        }
+        Expr::Kind { expr, ty, negate } if !*negate && *ty == KindType::Object => {
+            matches!(expr.as_ref(), Expr::Current).then_some(StructuralPredicate::KindObject)
+        }
+        _ => None,
+    }
+}
+
+fn flatten_and_predicate(expr: &Expr, out: &mut Vec<StructuralPredicate>) -> Option<()> {
+    match lower_predicate(expr)? {
+        StructuralPredicate::And(parts) => out.extend(parts.iter().cloned()),
+        pred => out.push(pred),
+    }
+    Some(())
+}
+
+fn field_ref(expr: &Expr) -> Option<Arc<str>> {
+    match expr {
+        Expr::Ident(name) => Some(Arc::from(name.as_str())),
+        Expr::Chain(base, steps) if matches!(base.as_ref(), Expr::Current) && steps.len() == 1 => {
+            match &steps[0] {
+                Step::Field(name) | Step::OptField(name) => Some(Arc::from(name.as_str())),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn run_deep_find(
+    idx: &StructuralIndex,
+    bytes: &[u8],
+    anchor: &[StructuralPathStep],
+    predicates: &[StructuralPredicate],
+) -> Result<Val, EvalError> {
+    if predicates.is_empty() {
+        return Err(EvalError("find: requires at least one predicate".into()));
+    }
+    let Some(anchor) = anchor_token(idx, anchor) else {
+        return Ok(Val::arr(Vec::new()));
+    };
+    let mut out = Vec::new();
+    visit_predicate_candidates(idx, anchor, predicates, |object| {
+        if predicates
+            .iter()
+            .all(|pred| predicate_matches(idx, bytes, object, pred))
+        {
+            out.push(materialize_token(idx, bytes, object)?);
+        }
+        Ok(())
+    })?;
+    Ok(Val::arr(out))
 }
 
 fn run_deep_shape(
@@ -191,6 +288,68 @@ where
         visit(parent)?;
     }
     Ok(())
+}
+
+fn visit_predicate_candidates<F>(
+    idx: &StructuralIndex,
+    anchor: TokenId,
+    predicates: &[StructuralPredicate],
+    mut visit: F,
+) -> Result<(), EvalError>
+where
+    F: FnMut(TokenId) -> Result<(), EvalError>,
+{
+    if let Some(key) = first_candidate_key(predicates) {
+        return visit_candidate_objects(idx, anchor, &[key], visit);
+    }
+
+    let close = idx
+        .close_of(anchor)
+        .map(|tok| tok.raw())
+        .unwrap_or_else(|| idx.token_count().saturating_sub(1));
+    for tok in idx
+        .tokens()
+        .skip(anchor.raw() as usize)
+        .take_while(|tok| tok.raw() <= close)
+    {
+        if idx.kind(tok) == TokenKind::Object {
+            visit(tok)?;
+        }
+    }
+    Ok(())
+}
+
+fn first_candidate_key(predicates: &[StructuralPredicate]) -> Option<Arc<str>> {
+    for pred in predicates {
+        match pred {
+            StructuralPredicate::FieldEqLiteral(key, _) => return Some(Arc::clone(key)),
+            StructuralPredicate::And(parts) => {
+                if let Some(key) = first_candidate_key(parts) {
+                    return Some(key);
+                }
+            }
+            StructuralPredicate::KindObject => {}
+        }
+    }
+    None
+}
+
+fn predicate_matches(
+    idx: &StructuralIndex,
+    bytes: &[u8],
+    object: TokenId,
+    pred: &StructuralPredicate,
+) -> bool {
+    match pred {
+        StructuralPredicate::KindObject => idx.kind(object) == TokenKind::Object,
+        StructuralPredicate::FieldEqLiteral(key, want) => idx
+            .field_of(object, key)
+            .map(|value| literal_matches(idx, bytes, value, want))
+            .unwrap_or(false),
+        StructuralPredicate::And(parts) => parts
+            .iter()
+            .all(|part| predicate_matches(idx, bytes, object, part)),
+    }
 }
 
 fn anchor_token(idx: &StructuralIndex, steps: &[StructuralPathStep]) -> Option<TokenId> {
