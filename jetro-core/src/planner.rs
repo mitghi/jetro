@@ -390,6 +390,9 @@ fn recompile_stage_body_for_lexical_env(stage: &mut crate::pipeline::Stage, expr
         | crate::pipeline::Stage::IndexBy(body) => *body = program,
         crate::pipeline::Stage::UniqueBy(Some(body)) => *body = program,
         crate::pipeline::Stage::Sort(sort) if sort.key.is_some() => sort.key = Some(program),
+        crate::pipeline::Stage::CompiledMap(_) => {
+            *stage = crate::pipeline::Stage::Map(program, crate::builtins::BuiltinViewStage::Map);
+        }
         _ => {}
     }
 }

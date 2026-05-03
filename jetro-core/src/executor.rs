@@ -1553,6 +1553,35 @@ mod tests {
 
     #[cfg(feature = "simd-json")]
     #[test]
+    fn local_ident_compiled_map_body_uses_env_not_inner_row_field() {
+        let expr = r#"let label = "fixed" in $.books.map(@.items.map(label).take(1))"#;
+        let plan = planner::plan_query_with_context(expr, planner::PlanningContext::bytes());
+        let QueryRoot::Node(root) = plan.root() else {
+            panic!("expected physical expression plan");
+        };
+        let PlanNode::Let { body, .. } = plan.node(*root) else {
+            panic!("expected let root");
+        };
+        let PlanNode::Pipeline { body, .. } = plan.node(*body) else {
+            panic!("expected pipeline body");
+        };
+        assert!(matches!(
+            body.stage_kernels.first(),
+            Some(BodyKernel::Generic)
+        ));
+
+        let j = Jetro::from_bytes(
+            br#"{"books":[{"items":[{"label":"row-a"}]},{"items":[{"label":"row-b"}]}]}"#.to_vec(),
+        )
+        .unwrap();
+        let out = super::collect_plan_json(&j, &plan).unwrap();
+
+        assert_eq!(out, json!([["fixed"], ["fixed"]]));
+        assert!(!j.root_val_is_materialized());
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
     fn byte_native_let_keeps_locals_visible_without_root_materialization() {
         let expr =
             r#"let min_score = 900 in {"root": $.meta.version, "min": min_score, min_score}"#;
