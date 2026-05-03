@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use crate::ast::{ArrayElem, Expr, ObjField, Step};
+use crate::ast::{Arg, ArrayElem, Expr, ObjField, Step};
 use crate::builtins::BuiltinCall;
 use crate::parser;
 use crate::physical::{
@@ -14,6 +14,7 @@ use crate::physical::{
     PipelinePlanSource, PlanNode, QueryPlan,
 };
 use crate::pipeline::{Pipeline, Source};
+use crate::structural::{StructuralLiteral, StructuralPlan};
 use crate::value::Val;
 use crate::vm::Compiler;
 
@@ -38,8 +39,9 @@ impl PlanBuilder {
 
 #[inline]
 fn lower_expr(builder: &mut PlanBuilder, expr: &Expr) -> NodeId {
-    try_lower_pipeline(expr)
+    try_lower_structural_op(expr)
         .map(|node| builder.push(node))
+        .or_else(|| try_lower_pipeline(expr).map(|node| builder.push(node)))
         .or_else(|| try_lower_root_path(expr).map(|node| builder.push(node)))
         .or_else(|| try_lower_receiver_pipeline(builder, expr))
         .or_else(|| try_lower_chain(builder, expr))
@@ -67,6 +69,81 @@ fn pipeline_to_plan_node(pipeline: Pipeline) -> Option<PlanNode> {
 
 fn is_trivial_collect_pipeline(pipeline: &Pipeline) -> bool {
     pipeline.stages.is_empty() && matches!(pipeline.sink, crate::pipeline::Sink::Collect)
+}
+
+fn try_lower_structural_op(expr: &Expr) -> Option<PlanNode> {
+    let Expr::Chain(base, steps) = expr else {
+        return None;
+    };
+    if !matches!(base.as_ref(), Expr::Root) || steps.len() != 1 {
+        return None;
+    }
+    let (Step::Method(name, args) | Step::OptMethod(name, args)) = &steps[0] else {
+        return None;
+    };
+    match name.as_str() {
+        "deep_shape" => lower_structural_shape(args).map(PlanNode::Structural),
+        "deep_like" => lower_structural_like(args).map(PlanNode::Structural),
+        _ => None,
+    }
+}
+
+fn lower_structural_shape(args: &[Arg]) -> Option<StructuralPlan> {
+    let Expr::Object(fields) = arg_expr(args.first()?)? else {
+        return None;
+    };
+    let mut keys = Vec::with_capacity(fields.len());
+    for field in fields {
+        match field {
+            ObjField::Short(key) => keys.push(Arc::from(key.as_str())),
+            ObjField::Kv { key, val, .. } if matches!(val, Expr::Ident(name) if name == key) => {
+                keys.push(Arc::from(key.as_str()));
+            }
+            _ => return None,
+        }
+    }
+    if keys.is_empty() {
+        return None;
+    }
+    Some(StructuralPlan::DeepShape {
+        keys: Arc::from(keys),
+    })
+}
+
+fn lower_structural_like(args: &[Arg]) -> Option<StructuralPlan> {
+    let Expr::Object(fields) = arg_expr(args.first()?)? else {
+        return None;
+    };
+    let mut patterns = Vec::with_capacity(fields.len());
+    for field in fields {
+        let ObjField::Kv { key, val, .. } = field else {
+            return None;
+        };
+        patterns.push((Arc::from(key.as_str()), lower_structural_literal(val)?));
+    }
+    if patterns.is_empty() {
+        return None;
+    }
+    Some(StructuralPlan::DeepLike {
+        patterns: Arc::from(patterns),
+    })
+}
+
+fn arg_expr(arg: &Arg) -> Option<&Expr> {
+    match arg {
+        Arg::Pos(expr) | Arg::Named(_, expr) => Some(expr),
+    }
+}
+
+fn lower_structural_literal(expr: &Expr) -> Option<StructuralLiteral> {
+    match expr {
+        Expr::Null => Some(StructuralLiteral::Null),
+        Expr::Bool(v) => Some(StructuralLiteral::Bool(*v)),
+        Expr::Int(v) => Some(StructuralLiteral::Int(*v)),
+        Expr::Float(v) => Some(StructuralLiteral::Float(*v)),
+        Expr::Str(v) => Some(StructuralLiteral::Str(Arc::from(v.as_str()))),
+        _ => None,
+    }
 }
 
 fn try_lower_receiver_pipeline(builder: &mut PlanBuilder, expr: &Expr) -> Option<NodeId> {
@@ -321,6 +398,18 @@ mod tests {
             panic!("expected physical plan");
         };
         plan.node(*root)
+    }
+
+    #[test]
+    fn deep_shape_lowers_to_structural_plan() {
+        let plan = plan_query(r#"$.deep_shape({email})"#);
+        assert!(matches!(root_node(&plan), PlanNode::Structural(_)));
+    }
+
+    #[test]
+    fn deep_like_lowers_literal_pattern_to_structural_plan() {
+        let plan = plan_query(r#"$.deep_like({role: "lead", active: true})"#);
+        assert!(matches!(root_node(&plan), PlanNode::Structural(_)));
     }
 
     #[test]

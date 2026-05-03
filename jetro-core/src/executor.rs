@@ -73,7 +73,8 @@ mod tests {
             | PlanNode::Root
             | PlanNode::Current
             | PlanNode::Ident(_)
-            | PlanNode::RootPath(_) => {}
+            | PlanNode::RootPath(_)
+            | PlanNode::Structural(_) => {}
             PlanNode::Pipeline { source, .. } => {
                 if let PipelinePlanSource::Expr(source) = source {
                     assert_no_vm_fallback(plan, *source);
@@ -420,6 +421,49 @@ mod tests {
 
         assert_eq!(out, json!({"value": "next", "n": 7}));
         assert!(!j.root_val_is_materialized());
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn deep_shape_reads_from_structural_index_without_tape_or_root_val() {
+        let j = Jetro::from_bytes(
+            br#"{"users":[{"email":"a@x","role":"lead"},{"name":"missing"},{"team":{"email":"b@x","role":"dev"}}]}"#.to_vec(),
+        )
+        .unwrap();
+
+        let out = j.collect(r#"$.deep_shape({email})"#).unwrap();
+
+        assert_eq!(
+            out,
+            json!([
+                {"email": "a@x", "role": "lead"},
+                {"email": "b@x", "role": "dev"}
+            ])
+        );
+        assert!(j.structural_index_is_built());
+        assert!(!j.root_val_is_materialized());
+        assert!(!j.tape_is_built());
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn deep_like_literal_pattern_reads_from_structural_index() {
+        let j = Jetro::from_bytes(
+            br#"{"users":[{"email":"a@x","role":"lead","active":true},{"email":"b@x","role":"lead","active":false},{"email":"c@x","role":"dev","active":true}]}"#.to_vec(),
+        )
+        .unwrap();
+
+        let out = j
+            .collect(r#"$.deep_like({role: "lead", active: true})"#)
+            .unwrap();
+
+        assert_eq!(
+            out,
+            json!([{"email": "a@x", "role": "lead", "active": true}])
+        );
+        assert!(j.structural_index_is_built());
+        assert!(!j.root_val_is_materialized());
+        assert!(!j.tape_is_built());
     }
 
     #[cfg(feature = "simd-json")]

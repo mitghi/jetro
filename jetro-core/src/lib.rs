@@ -66,6 +66,7 @@ pub(crate) mod pipeline;
 pub(crate) mod planner;
 pub(crate) mod runtime;
 pub(crate) mod strref;
+pub(crate) mod structural;
 pub(crate) mod util;
 pub(crate) mod value;
 #[cfg_attr(not(test), allow(dead_code))]
@@ -183,6 +184,11 @@ pub struct Jetro {
     #[cfg(not(feature = "simd-json"))]
     #[allow(dead_code)]
     tape: OnceCell<()>,
+    /// Byte structural sidecar from `jetro-experimental`.  Built only when
+    /// the planner selects a structural backend node, so normal tape/Val paths
+    /// do not pay the key-bitmap/index cost.
+    structural_index:
+        OnceCell<std::result::Result<Arc<jetro_experimental::StructuralIndex>, String>>,
     /// Memoised ObjVec promotions, keyed by the source `Arc<Vec<Val>>`'s
     /// pointer identity.  When a Pipeline collects a uniform-shape array
     /// of objects, the first call probes + builds an `ObjVecData`; all
@@ -379,6 +385,7 @@ impl Jetro {
             objvec_cache: Default::default(),
             raw_bytes: None,
             tape: OnceCell::new(),
+            structural_index: OnceCell::new(),
         }
     }
 
@@ -397,6 +404,7 @@ impl Jetro {
                 objvec_cache: Default::default(),
                 raw_bytes: Some(Arc::from(bytes.into_boxed_slice())),
                 tape: OnceCell::new(),
+                structural_index: OnceCell::new(),
             });
         }
         #[allow(unreachable_code)]
@@ -408,8 +416,40 @@ impl Jetro {
                 objvec_cache: Default::default(),
                 raw_bytes: Some(Arc::from(bytes.into_boxed_slice())),
                 tape: OnceCell::new(),
+                structural_index: OnceCell::new(),
             })
         }
+    }
+
+    pub(crate) fn raw_bytes(&self) -> Option<&[u8]> {
+        self.raw_bytes.as_deref()
+    }
+
+    pub(crate) fn lazy_structural_index(
+        &self,
+    ) -> std::result::Result<Option<&Arc<jetro_experimental::StructuralIndex>>, EvalError> {
+        if let Some(result) = self.structural_index.get() {
+            return result
+                .as_ref()
+                .map(Some)
+                .map_err(|err| EvalError(format!("Invalid JSON: {err}")));
+        }
+        let Some(raw) = self.raw_bytes.as_ref() else {
+            return Ok(None);
+        };
+        let built = jetro_experimental::from_bytes_with(
+            raw.as_ref(),
+            jetro_experimental::BuildOptions::keys_only(),
+        )
+        .map(Arc::new)
+        .map_err(|err| err.to_string());
+        let _ = self.structural_index.set(built);
+        self.structural_index
+            .get()
+            .expect("structural index cache initialized")
+            .as_ref()
+            .map(Some)
+            .map_err(|err| EvalError(format!("Invalid JSON: {err}")))
     }
 
     pub(crate) fn root_val(&self) -> std::result::Result<Val, EvalError> {
@@ -437,6 +477,16 @@ impl Jetro {
     #[cfg(test)]
     pub(crate) fn root_val_is_materialized(&self) -> bool {
         self.root_val.get().is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn structural_index_is_built(&self) -> bool {
+        self.structural_index.get().is_some()
+    }
+
+    #[cfg(all(test, feature = "simd-json"))]
+    pub(crate) fn tape_is_built(&self) -> bool {
+        self.tape.get().is_some()
     }
 
     #[cfg(all(test, feature = "simd-json"))]

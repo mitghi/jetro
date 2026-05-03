@@ -30,6 +30,10 @@ struct ViewEvalCtx<'p, 'a> {
 }
 
 pub(crate) fn run(j: &Jetro, plan: &QueryPlan, root_id: NodeId) -> Result<Val, EvalError> {
+    if let Some(result) = try_run_structural_plan(j, plan, root_id)? {
+        return Ok(result);
+    }
+
     #[cfg(feature = "simd-json")]
     if let Some(tape) = j.lazy_tape()? {
         if let Some(result) = try_run_view_plan(
@@ -61,6 +65,23 @@ pub(crate) fn run(j: &Jetro, plan: &QueryPlan, root_id: NodeId) -> Result<Val, E
         vm: VM::new(),
     };
     ctx.eval(root_id)
+}
+
+fn try_run_structural_plan(
+    j: &Jetro,
+    plan: &QueryPlan,
+    root_id: NodeId,
+) -> Result<Option<Val>, EvalError> {
+    let PlanNode::Structural(structural) = plan.node(root_id) else {
+        return Ok(None);
+    };
+    let Some(bytes) = j.raw_bytes() else {
+        return Ok(None);
+    };
+    let Some(index) = j.lazy_structural_index()? else {
+        return Ok(None);
+    };
+    structural.run(index, bytes).map(Some)
 }
 
 #[cfg(feature = "simd-json")]
@@ -117,6 +138,7 @@ where
             source: PipelinePlanSource::FieldChain { keys },
             body,
         } => eval_view_pipeline(ctx, root, keys, body),
+        PlanNode::Structural(_) => None,
         PlanNode::Object(fields) => eval_view_object(ctx, fields, root, current),
         PlanNode::Array(elems) => eval_view_array(ctx, elems, root, current),
         _ => None,
@@ -350,6 +372,17 @@ impl ExecCtx<'_> {
             },
             PlanNode::Object(fields) => self.eval_object(fields),
             PlanNode::Array(elems) => self.eval_array(elems),
+            PlanNode::Structural(structural) => {
+                let bytes = self
+                    .j
+                    .raw_bytes()
+                    .ok_or_else(|| EvalError("structural plan requires source bytes".into()))?;
+                let index = self
+                    .j
+                    .lazy_structural_index()?
+                    .ok_or_else(|| EvalError("structural plan requires source bytes".into()))?;
+                structural.run(index, bytes)
+            }
             PlanNode::Let { name, init, body } => {
                 let init_val = self.eval(*init)?;
                 let body_env = self.env.with_var(name.as_ref(), init_val);
