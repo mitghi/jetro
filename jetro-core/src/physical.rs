@@ -25,6 +25,14 @@ impl QueryPlan {
     }
 
     #[inline]
+    pub(crate) fn from_physical_nodes(root: NodeId, nodes: Vec<PhysicalNode>) -> Self {
+        Self {
+            root: QueryRoot::Node(root),
+            nodes,
+        }
+    }
+
+    #[inline]
     pub fn source_vm(expr: &str) -> Self {
         Self {
             root: QueryRoot::SourceVm(Arc::from(expr)),
@@ -124,8 +132,13 @@ pub(crate) struct PhysicalNode {
 
 impl PhysicalNode {
     #[inline]
-    fn new(kind: PlanNode) -> Self {
+    pub(crate) fn new(kind: PlanNode) -> Self {
         let backends = BackendPlan::for_node(&kind);
+        Self { kind, backends }
+    }
+
+    #[inline]
+    pub(crate) fn with_backend_plan(kind: PlanNode, backends: BackendPlan) -> Self {
         Self { kind, backends }
     }
 }
@@ -157,7 +170,7 @@ impl BackendPlan {
     };
 
     #[inline]
-    fn for_node(node: &PlanNode) -> Self {
+    pub(crate) fn for_node(node: &PlanNode) -> Self {
         Self::new(node.backend_preferences())
     }
 
@@ -351,6 +364,28 @@ mod tests {
                 BackendPreference::MaterializedSource,
                 BackendPreference::ValView,
             ]
+        );
+    }
+
+    #[test]
+    fn query_plan_allows_planner_selected_backend_order() {
+        let node = PlanNode::Pipeline {
+            source: PipelinePlanSource::FieldChain {
+                keys: Arc::from([Arc::<str>::from("rows")]),
+            },
+            body: empty_body(),
+        };
+        let plan = QueryPlan::from_physical_nodes(
+            NodeId(0),
+            vec![PhysicalNode::with_backend_plan(
+                node,
+                BackendPlan::new(&[BackendPreference::ValView, BackendPreference::TapeView]),
+            )],
+        );
+
+        assert_eq!(
+            plan.backend_preferences(NodeId(0)),
+            &[BackendPreference::ValView, BackendPreference::TapeView]
         );
     }
 

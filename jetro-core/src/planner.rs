@@ -10,8 +10,8 @@ use crate::ast::{ArrayElem, Expr, ObjField, Step};
 use crate::builtins::{BuiltinCall, BuiltinMethod};
 use crate::parser;
 use crate::physical::{
-    NodeId, PhysicalArrayElem, PhysicalChainStep, PhysicalObjField, PhysicalPathStep,
-    PipelinePlanSource, PlanNode, QueryPlan,
+    BackendPlan, NodeId, PhysicalArrayElem, PhysicalChainStep, PhysicalNode, PhysicalObjField,
+    PhysicalPathStep, PipelinePlanSource, PlanNode, QueryPlan,
 };
 use crate::pipeline::{Pipeline, Source};
 use crate::structural::{StructuralPathStep, StructuralPlan};
@@ -20,20 +20,32 @@ use crate::vm::Compiler;
 
 #[derive(Default)]
 struct PlanBuilder {
-    nodes: Vec<PlanNode>,
+    nodes: Vec<PhysicalNode>,
 }
 
 impl PlanBuilder {
     #[inline]
     fn finish(self, root: NodeId) -> QueryPlan {
-        QueryPlan::from_nodes(root, self.nodes)
+        QueryPlan::from_physical_nodes(root, self.nodes)
     }
 
     #[inline]
     fn push(&mut self, node: PlanNode) -> NodeId {
+        let backends = self.backend_plan_for_node(&node);
+        self.push_with_backends(node, backends)
+    }
+
+    #[inline]
+    fn push_with_backends(&mut self, node: PlanNode, backends: BackendPlan) -> NodeId {
         let id = NodeId(self.nodes.len());
-        self.nodes.push(node);
+        self.nodes
+            .push(PhysicalNode::with_backend_plan(node, backends));
         id
+    }
+
+    #[inline]
+    fn backend_plan_for_node(&self, node: &PlanNode) -> BackendPlan {
+        BackendPlan::for_node(node)
     }
 }
 
