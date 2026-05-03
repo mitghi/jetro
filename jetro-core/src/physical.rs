@@ -151,14 +151,28 @@ impl PhysicalNode {
 
     #[inline]
     pub(crate) fn with_backend_plan(kind: PlanNode, backends: BackendPlan) -> Self {
-        let capabilities = kind.backends();
         let facts = ExecutionFacts::for_node(&kind);
+        Self::with_backend_plan_and_facts(kind, backends, facts)
+    }
+
+    #[inline]
+    pub(crate) fn with_backend_plan_and_facts(
+        kind: PlanNode,
+        backends: BackendPlan,
+        facts: ExecutionFacts,
+    ) -> Self {
+        let capabilities = kind.backends();
         Self {
             kind,
             capabilities,
             facts,
             backends,
         }
+    }
+
+    #[inline]
+    pub(crate) fn execution_facts(&self) -> ExecutionFacts {
+        self.facts
     }
 }
 
@@ -187,8 +201,40 @@ pub(crate) struct ExecutionFacts {
 
 impl ExecutionFacts {
     #[inline]
+    pub(crate) fn constant() -> Self {
+        Self {
+            can_avoid_root_materialization: true,
+            ..Self::default()
+        }
+    }
+
+    #[inline]
+    pub(crate) fn combine_all(children: impl IntoIterator<Item = Self>) -> Self {
+        let mut saw_child = false;
+        let mut out = Self {
+            can_avoid_root_materialization: true,
+            ..Self::default()
+        };
+        for child in children {
+            saw_child = true;
+            out.can_avoid_root_materialization &=
+                child.can_avoid_root_materialization && !child.contains_vm_fallback;
+            out.can_stream_rows |= child.can_stream_rows;
+            out.can_use_tape |= child.can_use_tape;
+            out.contains_vm_fallback |= child.contains_vm_fallback;
+            out.may_materialize_source |= child.may_materialize_source;
+        }
+        if saw_child {
+            out
+        } else {
+            Self::constant()
+        }
+    }
+
+    #[inline]
     pub(crate) fn for_node(node: &PlanNode) -> Self {
         match node {
+            PlanNode::Literal(_) => Self::constant(),
             PlanNode::Pipeline { source, body } => {
                 let field_chain = matches!(source, PipelinePlanSource::FieldChain { .. });
                 let view_native = crate::pipeline::view_capabilities(body).is_some();

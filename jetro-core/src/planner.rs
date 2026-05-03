@@ -74,21 +74,114 @@ impl PlanBuilder {
 
     #[inline]
     fn push(&mut self, node: PlanNode) -> NodeId {
-        let backends = self.backend_plan_for_node(&node);
-        self.push_with_backends(node, backends)
+        let facts = self.execution_facts_for_node(&node);
+        let backends = self.backend_plan_for_node(&node, facts);
+        self.push_with_backends_and_facts(node, backends, facts)
     }
 
     #[inline]
-    fn push_with_backends(&mut self, node: PlanNode, backends: BackendPlan) -> NodeId {
+    fn push_with_backends_and_facts(
+        &mut self,
+        node: PlanNode,
+        backends: BackendPlan,
+        facts: ExecutionFacts,
+    ) -> NodeId {
         let id = NodeId(self.nodes.len());
-        self.nodes
-            .push(PhysicalNode::with_backend_plan(node, backends));
+        self.nodes.push(PhysicalNode::with_backend_plan_and_facts(
+            node, backends, facts,
+        ));
         id
     }
 
     #[inline]
-    fn backend_plan_for_node(&self, node: &PlanNode) -> BackendPlan {
-        select_backend_plan(self.context, node, ExecutionFacts::for_node(node))
+    fn backend_plan_for_node(&self, node: &PlanNode, facts: ExecutionFacts) -> BackendPlan {
+        select_backend_plan(self.context, node, facts)
+    }
+
+    #[inline]
+    fn node_facts(&self, id: NodeId) -> ExecutionFacts {
+        self.nodes[id.0].execution_facts()
+    }
+
+    fn execution_facts_for_node(&self, node: &PlanNode) -> ExecutionFacts {
+        match node {
+            PlanNode::Pipeline {
+                source: PipelinePlanSource::Expr(source),
+                ..
+            } => {
+                let local = ExecutionFacts::for_node(node);
+                let source = self.node_facts(*source);
+                ExecutionFacts {
+                    can_avoid_root_materialization: source.can_avoid_root_materialization
+                        && !source.contains_vm_fallback,
+                    can_stream_rows: local.can_stream_rows || source.can_stream_rows,
+                    can_use_tape: local.can_use_tape || source.can_use_tape,
+                    contains_vm_fallback: source.contains_vm_fallback,
+                    may_materialize_source: local.may_materialize_source
+                        || source.may_materialize_source,
+                }
+            }
+            PlanNode::Chain { base, steps } => {
+                let children = std::iter::once(self.node_facts(*base)).chain(
+                    steps.iter().filter_map(|step| match step {
+                        PhysicalChainStep::DynIndex(id) => Some(self.node_facts(*id)),
+                        _ => None,
+                    }),
+                );
+                ExecutionFacts::combine_all(children)
+            }
+            PlanNode::Call { receiver, .. }
+            | PlanNode::UnaryNeg(receiver)
+            | PlanNode::Not(receiver)
+            | PlanNode::Kind { expr: receiver, .. } => {
+                ExecutionFacts::combine_all([self.node_facts(*receiver)])
+            }
+            PlanNode::Binary { lhs, rhs, .. }
+            | PlanNode::Coalesce { lhs, rhs }
+            | PlanNode::Try {
+                body: lhs,
+                default: rhs,
+            }
+            | PlanNode::Let {
+                init: lhs,
+                body: rhs,
+                ..
+            } => ExecutionFacts::combine_all([self.node_facts(*lhs), self.node_facts(*rhs)]),
+            PlanNode::IfElse { cond, then_, else_ } => ExecutionFacts::combine_all([
+                self.node_facts(*cond),
+                self.node_facts(*then_),
+                self.node_facts(*else_),
+            ]),
+            PlanNode::Object(fields) => {
+                let children = fields.iter().flat_map(|field| match field {
+                    PhysicalObjField::Kv { val, cond, .. } => {
+                        let mut out = Vec::with_capacity(2);
+                        if let Some(cond) = cond {
+                            out.push(self.node_facts(*cond));
+                        }
+                        out.push(self.node_facts(*val));
+                        out
+                    }
+                    PhysicalObjField::Dynamic { key, val } => {
+                        vec![self.node_facts(*key), self.node_facts(*val)]
+                    }
+                    PhysicalObjField::Spread(id) | PhysicalObjField::SpreadDeep(id) => {
+                        vec![self.node_facts(*id)]
+                    }
+                    PhysicalObjField::Short(_) => vec![ExecutionFacts::default()],
+                });
+                ExecutionFacts::combine_all(children)
+            }
+            PlanNode::Array(elems) => {
+                let children = elems.iter().map(|elem| match elem {
+                    PhysicalArrayElem::Expr(id) | PhysicalArrayElem::Spread(id) => {
+                        self.node_facts(*id)
+                    }
+                });
+                ExecutionFacts::combine_all(children)
+            }
+            _ => ExecutionFacts::for_node(node),
+        }
     }
 }
 
@@ -607,6 +700,36 @@ mod tests {
             plan.backend_preferences(*root),
             &[BackendPreference::ValView]
         );
+    }
+
+    #[test]
+    fn object_shape_facts_aggregate_tape_pipeline_and_root_path_children() {
+        let plan = plan_query_with_context(
+            r#"{"a": $.rows.filter(score > 10).take(1), "b": $.meta.version}"#,
+            PlanningContext::bytes(),
+        );
+        let QueryRoot::Node(root) = plan.root() else {
+            panic!("expected physical plan");
+        };
+        let facts = plan.execution_facts(*root);
+        assert!(facts.can_avoid_root_materialization);
+        assert!(facts.can_stream_rows);
+        assert!(facts.can_use_tape);
+        assert!(!facts.contains_vm_fallback);
+    }
+
+    #[test]
+    fn object_shape_facts_report_vm_fallback_children() {
+        let plan = plan_query_with_context(
+            r#"{"a": [x for x in $.rows if x.score > 10], "b": $.meta.version}"#,
+            PlanningContext::bytes(),
+        );
+        let QueryRoot::Node(root) = plan.root() else {
+            panic!("expected physical plan");
+        };
+        let facts = plan.execution_facts(*root);
+        assert!(facts.contains_vm_fallback);
+        assert!(!facts.can_avoid_root_materialization);
     }
 
     #[test]
