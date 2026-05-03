@@ -10,8 +10,9 @@ use crate::ast::{Arg, ArrayElem, Expr, ObjField, Step};
 use crate::builtins::{BuiltinCall, BuiltinMethod};
 use crate::parser;
 use crate::physical::{
-    BackendPlan, ExecutionFacts, NodeId, PhysicalArrayElem, PhysicalChainStep, PhysicalNode,
-    PhysicalObjField, PhysicalPathStep, PipelinePlanSource, PlanNode, QueryPlan,
+    node_subtree_contains_pipeline, BackendPlan, ExecutionFacts, NodeId, PhysicalArrayElem,
+    PhysicalChainStep, PhysicalNode, PhysicalObjField, PhysicalPathStep, PipelinePlanSource,
+    PlanNode, QueryPlan,
 };
 use crate::pipeline::{Pipeline, Source};
 use crate::structural::{StructuralPathStep, StructuralPlan};
@@ -42,60 +43,8 @@ impl PlanBuilder {
     }
 
     #[inline]
-    fn node_kind(&self, id: NodeId) -> &PlanNode {
-        self.nodes[id.0].kind()
-    }
-
     fn node_contains_pipeline(&self, id: NodeId) -> bool {
-        match self.node_kind(id) {
-            PlanNode::Pipeline { .. } => true,
-            PlanNode::Chain { base, steps } => {
-                self.node_contains_pipeline(*base)
-                    || steps.iter().any(|step| match step {
-                        PhysicalChainStep::DynIndex(id) => self.node_contains_pipeline(*id),
-                        _ => false,
-                    })
-            }
-            PlanNode::Call { receiver, .. }
-            | PlanNode::UnaryNeg(receiver)
-            | PlanNode::Not(receiver)
-            | PlanNode::Kind { expr: receiver, .. } => self.node_contains_pipeline(*receiver),
-            PlanNode::Binary { lhs, rhs, .. }
-            | PlanNode::Coalesce { lhs, rhs }
-            | PlanNode::Try {
-                body: lhs,
-                default: rhs,
-            } => self.node_contains_pipeline(*lhs) || self.node_contains_pipeline(*rhs),
-            PlanNode::IfElse { cond, then_, else_ } => {
-                self.node_contains_pipeline(*cond)
-                    || self.node_contains_pipeline(*then_)
-                    || self.node_contains_pipeline(*else_)
-            }
-            PlanNode::Object(fields) => fields.iter().any(|field| match field {
-                PhysicalObjField::Kv { val, cond, .. } => {
-                    self.node_contains_pipeline(*val)
-                        || cond
-                            .as_ref()
-                            .is_some_and(|cond| self.node_contains_pipeline(*cond))
-                }
-                PhysicalObjField::Dynamic { key, val } => {
-                    self.node_contains_pipeline(*key) || self.node_contains_pipeline(*val)
-                }
-                PhysicalObjField::Spread(id) | PhysicalObjField::SpreadDeep(id) => {
-                    self.node_contains_pipeline(*id)
-                }
-                PhysicalObjField::Short(_) => false,
-            }),
-            PlanNode::Array(elems) => elems.iter().any(|elem| match elem {
-                PhysicalArrayElem::Expr(id) | PhysicalArrayElem::Spread(id) => {
-                    self.node_contains_pipeline(*id)
-                }
-            }),
-            PlanNode::Let { init, body, .. } => {
-                self.node_contains_pipeline(*init) || self.node_contains_pipeline(*body)
-            }
-            _ => false,
-        }
+        node_subtree_contains_pipeline(&self.nodes, id)
     }
 }
 
