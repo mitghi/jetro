@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use crate::ast::{ArrayElem, Expr, ObjField, Step};
+use crate::ast::{Arg, ArrayElem, Expr, ObjField, Step};
 use crate::builtins::{BuiltinCall, BuiltinMethod};
 use crate::parser;
 use crate::physical::{
@@ -22,6 +22,81 @@ use crate::vm::Compiler;
 struct PlanBuilder {
     nodes: Vec<PhysicalNode>,
     context: PlanningContext,
+    locals: Vec<Arc<str>>,
+}
+
+impl PlanBuilder {
+    #[inline]
+    fn is_local(&self, name: &str) -> bool {
+        self.locals.iter().rev().any(|local| local.as_ref() == name)
+    }
+
+    #[inline]
+    fn push_local(&mut self, name: Arc<str>) {
+        self.locals.push(name);
+    }
+
+    #[inline]
+    fn pop_local(&mut self) {
+        self.locals.pop();
+    }
+
+    #[inline]
+    fn node_kind(&self, id: NodeId) -> &PlanNode {
+        self.nodes[id.0].kind()
+    }
+
+    fn node_contains_pipeline(&self, id: NodeId) -> bool {
+        match self.node_kind(id) {
+            PlanNode::Pipeline { .. } => true,
+            PlanNode::Chain { base, steps } => {
+                self.node_contains_pipeline(*base)
+                    || steps.iter().any(|step| match step {
+                        PhysicalChainStep::DynIndex(id) => self.node_contains_pipeline(*id),
+                        _ => false,
+                    })
+            }
+            PlanNode::Call { receiver, .. }
+            | PlanNode::UnaryNeg(receiver)
+            | PlanNode::Not(receiver)
+            | PlanNode::Kind { expr: receiver, .. } => self.node_contains_pipeline(*receiver),
+            PlanNode::Binary { lhs, rhs, .. }
+            | PlanNode::Coalesce { lhs, rhs }
+            | PlanNode::Try {
+                body: lhs,
+                default: rhs,
+            } => self.node_contains_pipeline(*lhs) || self.node_contains_pipeline(*rhs),
+            PlanNode::IfElse { cond, then_, else_ } => {
+                self.node_contains_pipeline(*cond)
+                    || self.node_contains_pipeline(*then_)
+                    || self.node_contains_pipeline(*else_)
+            }
+            PlanNode::Object(fields) => fields.iter().any(|field| match field {
+                PhysicalObjField::Kv { val, cond, .. } => {
+                    self.node_contains_pipeline(*val)
+                        || cond
+                            .as_ref()
+                            .is_some_and(|cond| self.node_contains_pipeline(*cond))
+                }
+                PhysicalObjField::Dynamic { key, val } => {
+                    self.node_contains_pipeline(*key) || self.node_contains_pipeline(*val)
+                }
+                PhysicalObjField::Spread(id) | PhysicalObjField::SpreadDeep(id) => {
+                    self.node_contains_pipeline(*id)
+                }
+                PhysicalObjField::Short(_) => false,
+            }),
+            PlanNode::Array(elems) => elems.iter().any(|elem| match elem {
+                PhysicalArrayElem::Expr(id) | PhysicalArrayElem::Spread(id) => {
+                    self.node_contains_pipeline(*id)
+                }
+            }),
+            PlanNode::Let { init, body, .. } => {
+                self.node_contains_pipeline(*init) || self.node_contains_pipeline(*body)
+            }
+            _ => false,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -133,6 +208,7 @@ impl PlanBuilder {
                 );
                 ExecutionFacts::combine_all(children)
             }
+            PlanNode::Local(_) => ExecutionFacts::constant(),
             PlanNode::Call { receiver, .. }
             | PlanNode::UnaryNeg(receiver)
             | PlanNode::Not(receiver)
@@ -145,6 +221,9 @@ impl PlanBuilder {
                 body: lhs,
                 default: rhs,
             } => ExecutionFacts::combine_all([self.node_facts(*lhs), self.node_facts(*rhs)]),
+            PlanNode::Let { init, body, .. } if !self.node_contains_pipeline(*body) => {
+                ExecutionFacts::combine_all([self.node_facts(*init), self.node_facts(*body)])
+            }
             PlanNode::Let { .. } => ExecutionFacts {
                 contains_vm_fallback: true,
                 ..ExecutionFacts::default()
@@ -254,7 +333,7 @@ fn adjust_facts_for_backend_plan(
 fn lower_expr(builder: &mut PlanBuilder, expr: &Expr) -> NodeId {
     try_lower_structural_op(expr)
         .map(|node| builder.push(node))
-        .or_else(|| try_lower_pipeline(expr).map(|node| builder.push(node)))
+        .or_else(|| try_lower_pipeline(builder, expr).map(|node| builder.push(node)))
         .or_else(|| try_lower_root_path(expr).map(|node| builder.push(node)))
         .or_else(|| try_lower_receiver_pipeline(builder, expr))
         .or_else(|| try_lower_structural_chain_prefix(builder, expr))
@@ -264,16 +343,22 @@ fn lower_expr(builder: &mut PlanBuilder, expr: &Expr) -> NodeId {
         .unwrap_or_else(|| fallback_vm(builder, expr))
 }
 
-fn try_lower_pipeline(expr: &Expr) -> Option<PlanNode> {
+fn try_lower_pipeline(builder: &PlanBuilder, expr: &Expr) -> Option<PlanNode> {
     let pipeline = Pipeline::lower(expr)?;
     if is_trivial_collect_pipeline(&pipeline) {
         return None;
     }
-    pipeline_to_plan_node(pipeline)
+    let (source, body) = pipeline.into_source_body();
+    if pipeline_body_uses_active_locals(&body, builder) {
+        return None;
+    }
+    pipeline_parts_to_plan_node(source, body)
 }
 
-fn pipeline_to_plan_node(pipeline: Pipeline) -> Option<PlanNode> {
-    let (source, body) = pipeline.into_source_body();
+fn pipeline_parts_to_plan_node(
+    source: Source,
+    body: crate::pipeline::PipelineBody,
+) -> Option<PlanNode> {
     let source = match source {
         Source::FieldChain { keys } => PipelinePlanSource::FieldChain { keys },
         Source::Receiver(_) => return None,
@@ -283,6 +368,81 @@ fn pipeline_to_plan_node(pipeline: Pipeline) -> Option<PlanNode> {
 
 fn is_trivial_collect_pipeline(pipeline: &Pipeline) -> bool {
     pipeline.stages.is_empty() && matches!(pipeline.sink, crate::pipeline::Sink::Collect)
+}
+
+fn pipeline_body_uses_active_locals(
+    body: &crate::pipeline::PipelineBody,
+    builder: &PlanBuilder,
+) -> bool {
+    !builder.locals.is_empty()
+        && body
+            .stage_exprs
+            .iter()
+            .flatten()
+            .any(|expr| expr_uses_any_active_local(expr, builder))
+}
+
+fn expr_uses_any_active_local(expr: &Expr, builder: &PlanBuilder) -> bool {
+    match expr {
+        Expr::Ident(name) => builder.is_local(name),
+        Expr::UnaryNeg(inner) | Expr::Not(inner) => expr_uses_any_active_local(inner, builder),
+        Expr::Try { body, default } => {
+            expr_uses_any_active_local(body, builder)
+                || expr_uses_any_active_local(default, builder)
+        }
+        Expr::BinOp(lhs, _, rhs) | Expr::Coalesce(lhs, rhs) => {
+            expr_uses_any_active_local(lhs, builder) || expr_uses_any_active_local(rhs, builder)
+        }
+        Expr::Kind { expr, .. } => expr_uses_any_active_local(expr, builder),
+        Expr::IfElse { cond, then_, else_ } => {
+            expr_uses_any_active_local(cond, builder)
+                || expr_uses_any_active_local(then_, builder)
+                || expr_uses_any_active_local(else_, builder)
+        }
+        Expr::Array(elems) => elems.iter().any(|elem| match elem {
+            ArrayElem::Expr(expr) | ArrayElem::Spread(expr) => {
+                expr_uses_any_active_local(expr, builder)
+            }
+        }),
+        Expr::Object(fields) => fields.iter().any(|field| match field {
+            ObjField::Kv { val, cond, .. } => {
+                expr_uses_any_active_local(val, builder)
+                    || cond
+                        .as_ref()
+                        .is_some_and(|cond| expr_uses_any_active_local(cond, builder))
+            }
+            ObjField::Dynamic { key, val } => {
+                expr_uses_any_active_local(key, builder) || expr_uses_any_active_local(val, builder)
+            }
+            ObjField::Spread(expr) | ObjField::SpreadDeep(expr) => {
+                expr_uses_any_active_local(expr, builder)
+            }
+            ObjField::Short(name) => builder.is_local(name),
+        }),
+        Expr::Chain(base, steps) => {
+            expr_uses_any_active_local(base, builder)
+                || steps.iter().any(|step| match step {
+                    Step::DynIndex(expr) | Step::InlineFilter(expr) => {
+                        expr_uses_any_active_local(expr, builder)
+                    }
+                    Step::Method(_, args) | Step::OptMethod(_, args) => args
+                        .iter()
+                        .any(|arg| arg_uses_any_active_local(arg, builder)),
+                    _ => false,
+                })
+        }
+        Expr::Let { name, init, body } => {
+            expr_uses_any_active_local(init, builder)
+                || (builder.is_local(name) && expr_uses_any_active_local(body, builder))
+        }
+        _ => false,
+    }
+}
+
+fn arg_uses_any_active_local(arg: &Arg, builder: &PlanBuilder) -> bool {
+    match arg {
+        Arg::Pos(expr) | Arg::Named(_, expr) => expr_uses_any_active_local(expr, builder),
+    }
 }
 
 fn try_lower_structural_op(expr: &Expr) -> Option<PlanNode> {
@@ -384,6 +544,9 @@ fn try_lower_receiver_pipeline(builder: &mut PlanBuilder, expr: &Expr) -> Option
         let Some(body) = Pipeline::lower_body_from_steps(&steps[method_start..]) else {
             continue;
         };
+        if pipeline_body_uses_active_locals(&body, builder) {
+            continue;
+        }
         let source_expr = base
             .as_ref()
             .clone()
@@ -484,6 +647,9 @@ fn try_lower_scalar(builder: &mut PlanBuilder, expr: &Expr) -> Option<NodeId> {
         Expr::Str(s) => Some(builder.push(PlanNode::Literal(Val::Str(Arc::from(s.as_str()))))),
         Expr::Root => Some(builder.push(PlanNode::Root)),
         Expr::Current => Some(builder.push(PlanNode::Current)),
+        Expr::Ident(name) if builder.is_local(name) => {
+            Some(builder.push(PlanNode::Local(Arc::from(name.as_str()))))
+        }
         Expr::Ident(name) => Some(builder.push(PlanNode::Ident(Arc::from(name.as_str())))),
         Expr::UnaryNeg(inner) => {
             let inner = lower_expr(builder, inner);
@@ -544,12 +710,11 @@ fn try_lower_structural(builder: &mut PlanBuilder, expr: &Expr) -> Option<NodeId
         }
         Expr::Let { name, init, body } => {
             let init = lower_expr(builder, init);
+            let name = Arc::from(name.as_str());
+            builder.push_local(Arc::clone(&name));
             let body = lower_expr(builder, body);
-            Some(builder.push(PlanNode::Let {
-                name: Arc::from(name.as_str()),
-                init,
-                body,
-            }))
+            builder.pop_local();
+            Some(builder.push(PlanNode::Let { name, init, body }))
         }
         _ => None,
     }
@@ -574,6 +739,12 @@ fn plan_obj_field(builder: &mut PlanBuilder, field: &ObjField) -> PhysicalObjFie
             val: lower_expr(builder, val),
             optional: *optional,
             cond: cond.as_ref().map(|cond| lower_expr(builder, cond)),
+        },
+        ObjField::Short(name) if builder.is_local(name) => PhysicalObjField::Kv {
+            key: Arc::from(name.as_str()),
+            val: builder.push(PlanNode::Local(Arc::from(name.as_str()))),
+            optional: false,
+            cond: None,
         },
         ObjField::Short(name) => PhysicalObjField::Short(Arc::from(name.as_str())),
         ObjField::Dynamic { key, val } => PhysicalObjField::Dynamic {
@@ -607,9 +778,11 @@ pub(crate) fn plan_query_with_context(expr: &str, context: PlanningContext) -> Q
     let mut builder = PlanBuilder {
         nodes: Vec::new(),
         context,
+        locals: Vec::new(),
     };
     if let Some(pipeline) = Pipeline::lower(&ast) {
-        if let Some(node) = pipeline_to_plan_node(pipeline) {
+        let (source, body) = pipeline.into_source_body();
+        if let Some(node) = pipeline_parts_to_plan_node(source, body) {
             let root = builder.push(node);
             return builder.finish(root);
         }
@@ -840,12 +1013,12 @@ mod tests {
     }
 
     #[test]
-    fn let_root_facts_keep_interpreted_fallback() {
+    fn let_root_facts_are_byte_native_when_body_is_byte_native() {
         let plan =
             plan_query_with_context(r#"let x = 1 in $.meta.version"#, PlanningContext::bytes());
         let facts = plan.root_execution_facts();
-        assert!(facts.contains_vm_fallback);
-        assert!(!facts.is_byte_native());
+        assert!(!facts.contains_vm_fallback);
+        assert!(facts.is_byte_native());
     }
 
     #[test]
@@ -1121,7 +1294,7 @@ mod tests {
         else {
             panic!("expected receiver pipeline source");
         };
-        assert!(matches!(plan.node(*source), PlanNode::Ident(name) if name.as_ref() == "books"));
+        assert!(matches!(plan.node(*source), PlanNode::Local(name) if name.as_ref() == "books"));
         assert_eq!(body.stages.len(), 3);
     }
 
@@ -1150,7 +1323,7 @@ mod tests {
                 panic!("expected receiver pipeline source");
             };
             assert!(
-                matches!(plan.node(*source), PlanNode::Ident(name) if name.as_ref() == "books")
+                matches!(plan.node(*source), PlanNode::Local(name) if name.as_ref() == "books")
             );
             assert!(!body.stages.is_empty());
         }
@@ -1181,7 +1354,7 @@ mod tests {
                 panic!("expected receiver pipeline source");
             };
             assert!(
-                matches!(plan.node(*source), PlanNode::Ident(name) if name.as_ref() == "books")
+                matches!(plan.node(*source), PlanNode::Local(name) if name.as_ref() == "books")
             );
             assert!(!body.stages.is_empty());
         }

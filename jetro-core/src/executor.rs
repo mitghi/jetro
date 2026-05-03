@@ -84,6 +84,7 @@ mod tests {
             | PlanNode::Root
             | PlanNode::Current
             | PlanNode::Ident(_)
+            | PlanNode::Local(_)
             | PlanNode::RootPath(_)
             | PlanNode::Structural { .. } => {}
             PlanNode::Pipeline { source, .. } => {
@@ -1354,7 +1355,8 @@ mod tests {
     #[cfg(feature = "simd-json")]
     #[test]
     fn byte_native_composite_fields_execute_without_root_materialization() {
-        let expr = r#"[{"a": $.a when $.ok, [$.key]: $.value, ...$.base, ...**$.deep}, ...$.items]"#;
+        let expr =
+            r#"[{"a": $.a when $.ok, [$.key]: $.value, ...$.base, ...**$.deep}, ...$.items]"#;
         let plan = planner::plan_query_with_context(expr, planner::PlanningContext::bytes());
         assert!(plan.root_execution_facts().is_byte_native());
 
@@ -1493,6 +1495,22 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn byte_native_let_keeps_locals_visible_without_root_materialization() {
+        let expr =
+            r#"let min_score = 900 in {"root": $.meta.version, "min": min_score, min_score}"#;
+        let plan = planner::plan_query_with_context(expr, planner::PlanningContext::bytes());
+        assert!(plan.root_execution_facts().is_byte_native());
+
+        let j = Jetro::from_bytes(br#"{"meta":{"version":7}}"#.to_vec()).unwrap();
+
+        let out = super::collect_plan_json(&j, &plan).unwrap();
+
+        assert_eq!(out, json!({"root": 7, "min": 900, "min_score": 900}));
+        assert!(!j.root_val_is_materialized());
+    }
+
     #[test]
     fn let_bound_receiver_chain_executes_as_pipeline_source() {
         let expr = r#"let books = $.books in books.filter(score > 900).take(2).map(title)"#;
@@ -1510,7 +1528,7 @@ mod tests {
         else {
             panic!("expected receiver pipeline source");
         };
-        assert!(matches!(plan.node(*source), PlanNode::Ident(name) if name.as_ref() == "books"));
+        assert!(matches!(plan.node(*source), PlanNode::Local(name) if name.as_ref() == "books"));
         assert_eq!(body.stages.len(), 3);
 
         let j = Jetro::from(json!({

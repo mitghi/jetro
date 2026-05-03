@@ -22,6 +22,7 @@ pub(crate) fn run(j: &Jetro, plan: &QueryPlan, root_id: NodeId) -> Result<Val, E
         root_id,
         root: None,
         env: None,
+        locals: Vec::new(),
         vm: VM::new(),
     };
     ctx.eval(root_id)
@@ -46,6 +47,7 @@ struct ExecCtx<'a> {
     root_id: NodeId,
     root: Option<Val>,
     env: Option<Env>,
+    locals: Vec<(Arc<str>, Val)>,
     vm: VM,
 }
 
@@ -71,6 +73,11 @@ impl ExecCtx<'_> {
                     .cloned()
                     .unwrap_or_else(|| env.current.get_field(name.as_ref())))
             }
+            PlanNode::Local(name) => self
+                .env()?
+                .get_var(name.as_ref())
+                .cloned()
+                .ok_or_else(|| EvalError(format!("unbound local {}", name))),
             PlanNode::Pipeline { source, body } => {
                 let source = self.resolve_pipeline_source(source, body)?;
                 let pipeline = body.clone().with_source(source.into_pipeline_source());
@@ -178,6 +185,74 @@ impl ExecCtx<'_> {
         Ok(self.env.take().expect("env initialized"))
     }
 
+    fn fast_local(&self, name: &str) -> Option<Val> {
+        self.locals
+            .iter()
+            .rev()
+            .find(|(local, _)| local.as_ref() == name)
+            .map(|(_, value)| value.clone())
+    }
+
+    fn null_env_with_fast_locals(&self) -> Env {
+        let mut env = Env::new(Val::Null);
+        for (name, value) in &self.locals {
+            env = env.with_var(name.as_ref(), value.clone());
+        }
+        env
+    }
+
+    fn node_contains_pipeline(&self, id: NodeId) -> bool {
+        match self.plan.node(id) {
+            PlanNode::Pipeline { .. } => true,
+            PlanNode::Chain { base, steps } => {
+                self.node_contains_pipeline(*base)
+                    || steps.iter().any(|step| match step {
+                        PhysicalChainStep::DynIndex(id) => self.node_contains_pipeline(*id),
+                        _ => false,
+                    })
+            }
+            PlanNode::Call { receiver, .. }
+            | PlanNode::UnaryNeg(receiver)
+            | PlanNode::Not(receiver)
+            | PlanNode::Kind { expr: receiver, .. } => self.node_contains_pipeline(*receiver),
+            PlanNode::Binary { lhs, rhs, .. }
+            | PlanNode::Coalesce { lhs, rhs }
+            | PlanNode::Try {
+                body: lhs,
+                default: rhs,
+            } => self.node_contains_pipeline(*lhs) || self.node_contains_pipeline(*rhs),
+            PlanNode::IfElse { cond, then_, else_ } => {
+                self.node_contains_pipeline(*cond)
+                    || self.node_contains_pipeline(*then_)
+                    || self.node_contains_pipeline(*else_)
+            }
+            PlanNode::Object(fields) => fields.iter().any(|field| match field {
+                PhysicalObjField::Kv { val, cond, .. } => {
+                    self.node_contains_pipeline(*val)
+                        || cond
+                            .as_ref()
+                            .is_some_and(|cond| self.node_contains_pipeline(*cond))
+                }
+                PhysicalObjField::Dynamic { key, val } => {
+                    self.node_contains_pipeline(*key) || self.node_contains_pipeline(*val)
+                }
+                PhysicalObjField::Spread(id) | PhysicalObjField::SpreadDeep(id) => {
+                    self.node_contains_pipeline(*id)
+                }
+                PhysicalObjField::Short(_) => false,
+            }),
+            PlanNode::Array(elems) => elems.iter().any(|elem| match elem {
+                PhysicalArrayElem::Expr(id) | PhysicalArrayElem::Spread(id) => {
+                    self.node_contains_pipeline(*id)
+                }
+            }),
+            PlanNode::Let { init, body, .. } => {
+                self.node_contains_pipeline(*init) || self.node_contains_pipeline(*body)
+            }
+            _ => false,
+        }
+    }
+
     fn eval_fast(&mut self, id: NodeId) -> Option<Result<Val, EvalError>> {
         for backend in self.plan.backend_preferences(id) {
             if let Some(result) = self.eval_backend(id, *backend) {
@@ -227,6 +302,9 @@ impl ExecCtx<'_> {
                 self.eval_object_fast(fields)
             }
             (BackendPreference::FastChildren, PlanNode::Literal(value)) => Some(Ok(value.clone())),
+            (BackendPreference::FastChildren, PlanNode::Local(name)) => {
+                self.fast_local(name.as_ref()).map(Ok)
+            }
             (BackendPreference::FastChildren, PlanNode::Array(elems)) => {
                 self.eval_array_fast(elems)
             }
@@ -310,6 +388,19 @@ impl ExecCtx<'_> {
             (BackendPreference::FastChildren, PlanNode::Chain { base, steps }) => {
                 self.eval_chain_fast(*base, steps)
             }
+            (BackendPreference::FastChildren, PlanNode::Let { name, init, body }) => {
+                if self.node_contains_pipeline(*body) {
+                    return None;
+                }
+                let init = match self.eval_fast(*init)? {
+                    Ok(value) => value,
+                    Err(err) => return Some(Err(err)),
+                };
+                self.locals.push((Arc::clone(name), init));
+                let result = self.eval_fast(*body);
+                self.locals.pop();
+                result
+            }
             (BackendPreference::Interpreted, _) => {
                 if id == self.root_id
                     && self.j.raw_bytes().is_some()
@@ -346,7 +437,7 @@ impl ExecCtx<'_> {
                 };
                 let pipeline = body.clone().with_source(pipeline::Source::Receiver(source));
                 let root = Val::Null;
-                let env = Env::new(Val::Null);
+                let env = self.null_env_with_fast_locals();
                 Some(pipeline.run_with_env(
                     &root,
                     &env,
@@ -430,7 +521,7 @@ impl ExecCtx<'_> {
                     .clone()
                     .with_source(pipeline::Source::Receiver(source.materialize()));
                 let root = Val::Null;
-                let env = Env::new(Val::Null);
+                let env = self.null_env_with_fast_locals();
                 return Some(pipeline.run_with_env(
                     &root,
                     &env,

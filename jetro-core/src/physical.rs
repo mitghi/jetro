@@ -92,6 +92,7 @@ pub enum PlanNode {
     Root,
     Current,
     Ident(Arc<str>),
+    Local(Arc<str>),
     Pipeline {
         source: PipelinePlanSource,
         body: PipelineBody,
@@ -154,6 +155,11 @@ pub(crate) struct PhysicalNode {
 }
 
 impl PhysicalNode {
+    #[inline]
+    pub(crate) fn kind(&self) -> &PlanNode {
+        &self.kind
+    }
+
     #[inline]
     pub(crate) fn new(kind: PlanNode) -> Self {
         let backends = BackendPlan::for_node(&kind);
@@ -400,6 +406,7 @@ impl PlanNode {
             ],
             Self::RootPath(_) => &[BackendPreference::TapePath, BackendPreference::Interpreted],
             Self::Literal(_)
+            | Self::Local(_)
             | Self::Object(_)
             | Self::Array(_)
             | Self::Call { .. }
@@ -410,7 +417,8 @@ impl PlanNode {
             | Self::Kind { .. }
             | Self::Coalesce { .. }
             | Self::IfElse { .. }
-            | Self::Try { .. } => &[
+            | Self::Try { .. }
+            | Self::Let { .. } => &[
                 BackendPreference::FastChildren,
                 BackendPreference::Interpreted,
             ],
