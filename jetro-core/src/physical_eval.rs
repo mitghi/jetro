@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::ast::BinOp;
 use crate::context::{Env, EvalError};
 use crate::physical::{
-    NodeId, PhysicalArrayElem, PhysicalChainStep, PhysicalObjField, PhysicalPathStep,
+    BackendSet, NodeId, PhysicalArrayElem, PhysicalChainStep, PhysicalObjField, PhysicalPathStep,
     PipelinePlanSource, PlanNode, QueryPlan,
 };
 use crate::pipeline;
@@ -199,10 +199,11 @@ impl ExecCtx<'_> {
     }
 
     fn eval_fast(&mut self, id: NodeId) -> Option<Result<Val, EvalError>> {
+        let backends = self.plan.node(id).backends();
         match self.plan.node(id) {
             PlanNode::Structural {
                 plan: structural, ..
-            } => {
+            } if backends.contains(BackendSet::STRUCTURAL) => {
                 let bytes = match self.j.raw_bytes() {
                     Some(bytes) => bytes,
                     None => return None,
@@ -214,15 +215,21 @@ impl ExecCtx<'_> {
                 };
                 Some(structural.run(index, bytes))
             }
-            PlanNode::Pipeline { source, body } => self.eval_pipeline_fast(source, body),
-            PlanNode::RootPath(steps) => self.eval_root_path_fast(steps),
-            PlanNode::Object(fields) => self.eval_object_fast(fields),
-            PlanNode::Array(elems) => self.eval_array_fast(elems),
+            PlanNode::Pipeline { source, body } => self.eval_pipeline_fast(backends, source, body),
+            PlanNode::RootPath(steps) if backends.contains(BackendSet::TAPE_PATH) => {
+                self.eval_root_path_fast(steps)
+            }
+            PlanNode::Object(fields) if backends.contains(BackendSet::FAST_CHILDREN) => {
+                self.eval_object_fast(fields)
+            }
+            PlanNode::Array(elems) if backends.contains(BackendSet::FAST_CHILDREN) => {
+                self.eval_array_fast(elems)
+            }
             PlanNode::Call {
                 receiver,
                 call,
                 optional,
-            } => {
+            } if backends.contains(BackendSet::FAST_CHILDREN) => {
                 let receiver = match self.eval_fast(*receiver)? {
                     Ok(value) => value,
                     Err(err) => return Some(Err(err)),
@@ -235,7 +242,7 @@ impl ExecCtx<'_> {
                         .ok_or_else(|| EvalError(format!("{:?}: builtin unsupported", call.method)))
                 }))
             }
-            PlanNode::Chain { base, steps } => {
+            PlanNode::Chain { base, steps } if backends.contains(BackendSet::FAST_CHILDREN) => {
                 let base = match self.eval_fast(*base)? {
                     Ok(value) => value,
                     Err(err) => return Some(Err(err)),
@@ -248,14 +255,18 @@ impl ExecCtx<'_> {
 
     fn eval_pipeline_fast(
         &mut self,
+        backends: BackendSet,
         source: &PipelinePlanSource,
         body: &pipeline::PipelineBody,
     ) -> Option<Result<Val, EvalError>> {
         match source {
             PipelinePlanSource::FieldChain { keys } => {
-                self.eval_field_chain_pipeline_fast(keys, body)
+                self.eval_field_chain_pipeline_fast(backends, keys, body)
             }
-            PipelinePlanSource::Expr(source) if pipeline_body_is_current_free(body) => {
+            PipelinePlanSource::Expr(source)
+                if backends.contains(BackendSet::FAST_CHILDREN)
+                    && pipeline_body_is_current_free(body) =>
+            {
                 let source = match self.eval_fast(*source)? {
                     Ok(value) => value,
                     Err(err) => return Some(Err(err)),
@@ -275,37 +286,51 @@ impl ExecCtx<'_> {
 
     fn eval_field_chain_pipeline_fast(
         &mut self,
+        backends: BackendSet,
         keys: &[Arc<str>],
         body: &pipeline::PipelineBody,
     ) -> Option<Result<Val, EvalError>> {
         #[cfg(feature = "simd-json")]
-        if let Some(tape) = match self.j.lazy_tape() {
-            Ok(tape) => tape,
-            Err(err) => return Some(Err(err)),
-        } {
-            let root = crate::value_view::TapeView::root(tape);
-            let source = view_pipeline::walk_fields(root, keys);
-            if let Some(result) = view_pipeline::run(source.clone(), body, Some(self.j)) {
-                return Some(result);
-            }
-            if let Some(result) = pipeline::run_tape_field_chain(body, tape, keys) {
-                return Some(result);
-            }
-            if body.can_run_with_materialized_receiver() {
-                let pipeline = body
-                    .clone()
-                    .with_source(pipeline::Source::Receiver(source.materialize()));
-                let root = Val::Null;
-                let env = Env::new(Val::Null);
-                return Some(pipeline.run_with_env(
-                    &root,
-                    &env,
-                    Some(self.j as &dyn pipeline::PipelineData),
-                ));
+        if backends.contains(BackendSet::TAPE_VIEW)
+            || backends.contains(BackendSet::TAPE_ROWS)
+            || backends.contains(BackendSet::MATERIALIZED_SOURCE)
+        {
+            if let Some(tape) = match self.j.lazy_tape() {
+                Ok(tape) => tape,
+                Err(err) => return Some(Err(err)),
+            } {
+                let root = crate::value_view::TapeView::root(tape);
+                let source = view_pipeline::walk_fields(root, keys);
+                if backends.contains(BackendSet::TAPE_VIEW) {
+                    if let Some(result) = view_pipeline::run(source.clone(), body, Some(self.j)) {
+                        return Some(result);
+                    }
+                }
+                if backends.contains(BackendSet::TAPE_ROWS) {
+                    if let Some(result) = pipeline::run_tape_field_chain(body, tape, keys) {
+                        return Some(result);
+                    }
+                }
+                if backends.contains(BackendSet::MATERIALIZED_SOURCE)
+                    && body.can_run_with_materialized_receiver()
+                {
+                    let pipeline = body
+                        .clone()
+                        .with_source(pipeline::Source::Receiver(source.materialize()));
+                    let root = Val::Null;
+                    let env = Env::new(Val::Null);
+                    return Some(pipeline.run_with_env(
+                        &root,
+                        &env,
+                        Some(self.j as &dyn pipeline::PipelineData),
+                    ));
+                }
             }
         }
 
-        if self.j.raw_bytes().is_none() || self.root.is_some() {
+        if backends.contains(BackendSet::VAL_VIEW)
+            && (self.j.raw_bytes().is_none() || self.root.is_some())
+        {
             let root = match self.root() {
                 Ok(root) => root,
                 Err(err) => return Some(Err(err)),
