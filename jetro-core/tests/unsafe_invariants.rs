@@ -688,7 +688,7 @@ fn compile_handle_run_on_jetro() {
 
 #[test]
 fn has_array_value() {
-    assert_eq!(q("$ has 'b'", &json!(["a", "b"])).unwrap(), json!(false));
+    assert_eq!(q("$ has 'b'", &json!(["a", "b"])).unwrap(), json!(true));
     assert_eq!(q("$ has 'z'", &json!(["a", "b"])).unwrap(), json!(false));
 }
 
@@ -799,7 +799,10 @@ fn find_index_with_field_pred() {
 
 #[test]
 fn index_of_value() {
-    assert!(q("$.index('urgent')", &json!(["a", "urgent", "x", "urgent"])).is_err());
+    assert_eq!(
+        q("$.index('urgent')", &json!(["a", "urgent", "x", "urgent"])).unwrap(),
+        json!(1)
+    );
 }
 
 #[test]
@@ -810,7 +813,10 @@ fn indices_where_basic() {
 
 #[test]
 fn indices_of_basic() {
-    assert!(q("$.indices_of('a')", &json!(["a", "b", "a", "c", "a"])).is_err());
+    assert_eq!(
+        q("$.indices_of('a')", &json!(["a", "b", "a", "c", "a"])).unwrap(),
+        json!([0, 2, 4])
+    );
 }
 
 #[test]

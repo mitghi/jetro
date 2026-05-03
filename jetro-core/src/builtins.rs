@@ -1606,6 +1606,7 @@ impl BuiltinCall {
             (BuiltinMethod::Enumerate, BuiltinArgs::None) => enumerate_apply(recv)
                 .map(Some)
                 .ok_or_else(|| EvalError("enumerate: expected array".into())),
+            (BuiltinMethod::Sort, BuiltinArgs::None) => sort_apply(recv.clone()).map(Some),
             (BuiltinMethod::Index, BuiltinArgs::Val(item)) => index_value_apply(recv, item)
                 .map(Some)
                 .ok_or_else(|| EvalError("index: expected array".into())),
