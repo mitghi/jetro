@@ -108,13 +108,15 @@ impl PlanBuilder {
         match node {
             PlanNode::Pipeline {
                 source: PipelinePlanSource::Expr(source),
-                ..
+                body,
             } => {
                 let local = ExecutionFacts::for_node(node);
                 let source = self.node_facts(*source);
+                let receiver_only = body.can_run_with_materialized_receiver();
                 ExecutionFacts {
                     can_avoid_root_materialization: source.can_avoid_root_materialization
-                        && !source.contains_vm_fallback,
+                        && !source.contains_vm_fallback
+                        && receiver_only,
                     can_stream_rows: local.can_stream_rows || source.can_stream_rows,
                     can_use_tape: local.can_use_tape || source.can_use_tape,
                     contains_vm_fallback: source.contains_vm_fallback,
@@ -884,6 +886,28 @@ mod tests {
             panic!("expected structural expression source");
         };
         assert!(matches!(plan.node(*source), PlanNode::Structural { .. }));
+    }
+
+    #[test]
+    fn structural_receiver_pipeline_facts_require_receiver_only_suffix() {
+        let fast = plan_query_with_context(
+            r#"$.org.users.deep_shape({email}).take(1)"#,
+            PlanningContext::bytes(),
+        );
+        assert!(fast.root_execution_facts().is_byte_native());
+
+        let fallback = plan_query_with_context(
+            r#"$.org.users.deep_shape({email}).filter(@ == $.target)"#,
+            PlanningContext::bytes(),
+        );
+        let QueryRoot::Node(root) = fallback.root() else {
+            panic!("expected physical plan");
+        };
+        let facts = fallback.root_execution_facts();
+        assert!(!facts.is_byte_native());
+        assert!(fallback
+            .backend_preferences(*root)
+            .contains(&BackendPreference::Interpreted));
     }
 
     #[test]
