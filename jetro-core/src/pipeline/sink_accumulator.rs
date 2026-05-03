@@ -44,19 +44,21 @@ impl<'a> SinkAccumulator<'a> {
         accumulator: BuiltinSinkAccumulator,
         item: Val,
     ) -> bool {
-        self.observe_builtin_lazy(accumulator, || item, || None)
+        self.observe_builtin_lazy(accumulator, || item, || None, || None)
             .unwrap_or(false)
     }
 
-    pub(crate) fn observe_builtin_lazy<F, N>(
+    pub(crate) fn observe_builtin_lazy<F, N, K>(
         &mut self,
         accumulator: BuiltinSinkAccumulator,
         materialize_item: F,
         materialize_numeric: N,
+        hash_key: K,
     ) -> Option<bool>
     where
         F: FnOnce() -> Val,
         N: FnOnce() -> Option<Val>,
+        K: FnOnce() -> Option<String>,
     {
         match accumulator {
             BuiltinSinkAccumulator::Count => {
@@ -69,7 +71,11 @@ impl<'a> SinkAccumulator<'a> {
                 Some(false)
             }
             BuiltinSinkAccumulator::ApproxDistinct => {
-                self.observe_approx_distinct(&materialize_item());
+                if let Some(key) = hash_key() {
+                    self.observe_approx_distinct_key(&key);
+                } else {
+                    self.observe_approx_distinct(&materialize_item());
+                }
                 Some(false)
             }
             BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::First) => {

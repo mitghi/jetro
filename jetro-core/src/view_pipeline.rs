@@ -100,14 +100,6 @@ where
             numeric_op: _,
             ..
         } => {
-            if matches!(
-                accumulator,
-                crate::builtins::BuiltinSinkAccumulator::ApproxDistinct
-            ) {
-                let key = eval_view_key(item, None)?;
-                sink_acc.observe_approx_distinct_key(key.object_key().as_ref());
-                return Some(ViewRowAction::Emit);
-            }
             if !view_sink_predicate_matches(item, predicate_kernel, sink_kernels)? {
                 return Some(ViewRowAction::Skip);
             }
@@ -119,6 +111,7 @@ where
                     let kernel = sink_kernels.get(kernel)?;
                     eval_owned_scalar_or_value_kernel(item, kernel)
                 },
+                || Some(eval_view_key(item, None)?.object_key().to_string()),
             )?;
             Some(if sink_done {
                 ViewRowAction::Stop
