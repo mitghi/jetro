@@ -148,7 +148,9 @@ pub(crate) struct BoundedKeySorter<T> {
     limit: Option<usize>,
     keep_largest: bool,
     cmp: fn(&Val, &Val) -> Ordering,
-    keyed: Vec<(Val, T)>,
+    keyed: Vec<(Val, usize, T)>,
+    heap: BinaryHeap<BoundedEntry<T>>,
+    next_seq: usize,
 }
 
 impl<T> BoundedKeySorter<T> {
@@ -173,46 +175,105 @@ impl<T> BoundedKeySorter<T> {
             limit: k,
             keep_largest,
             cmp,
-            keyed: Vec::with_capacity(capacity),
+            keyed: Vec::with_capacity(if k.is_none() { capacity } else { 0 }),
+            heap: BinaryHeap::with_capacity(k.unwrap_or(0)),
+            next_seq: 0,
         }
     }
 
     pub(crate) fn push_keyed(&mut self, key: Val, item: T) {
+        let seq = self.next_seq;
+        self.next_seq += 1;
         match self.limit {
             Some(0) => {}
-            Some(limit) if self.keyed.len() >= limit => {
-                let mut worst_idx = 0usize;
-                for (idx, (candidate, _)) in self.keyed.iter().enumerate().skip(1) {
-                    let ord = (self.cmp)(candidate, &self.keyed[worst_idx].0);
-                    let displace = if self.keep_largest {
-                        ord == Ordering::Less
-                    } else {
-                        ord == Ordering::Greater
-                    };
-                    if displace {
-                        worst_idx = idx;
-                    }
-                }
-                let ord = (self.cmp)(&key, &self.keyed[worst_idx].0);
-                let take = if self.keep_largest {
+            Some(limit) if self.heap.len() >= limit => {
+                let Some(worst) = self.heap.peek() else {
+                    return;
+                };
+                let ord = (self.cmp)(&key, &worst.key);
+                let should_replace = if self.keep_largest {
                     ord == Ordering::Greater
                 } else {
                     ord == Ordering::Less
                 };
-                if take {
-                    self.keyed[worst_idx] = (key, item);
+                if should_replace {
+                    let _ = self.heap.pop();
+                    self.heap.push(BoundedEntry {
+                        key,
+                        item,
+                        seq,
+                        keep_largest: self.keep_largest,
+                        cmp: self.cmp,
+                    });
                 }
             }
-            Some(_) | None => self.keyed.push((key, item)),
+            Some(_) => {
+                self.heap.push(BoundedEntry {
+                    key,
+                    item,
+                    seq,
+                    keep_largest: self.keep_largest,
+                    cmp: self.cmp,
+                });
+            }
+            None => self.keyed.push((key, seq, item)),
         }
     }
 
     pub(crate) fn finish(mut self) -> Vec<T> {
-        self.keyed.sort_by(|a, b| (self.cmp)(&a.0, &b.0));
-        if self.descending {
-            self.keyed.reverse();
+        if self.limit.is_some() {
+            self.keyed = self
+                .heap
+                .into_vec()
+                .into_iter()
+                .map(|entry| (entry.key, entry.seq, entry.item))
+                .collect();
         }
-        self.keyed.into_iter().map(|(_, item)| item).collect()
+        let cmp = self.cmp;
+        self.keyed.sort_by(|a, b| {
+            let order = cmp(&a.0, &b.0);
+            let order = if self.descending {
+                order.reverse()
+            } else {
+                order
+            };
+            order.then_with(|| a.1.cmp(&b.1))
+        });
+        self.keyed.into_iter().map(|(_, _, item)| item).collect()
+    }
+}
+
+struct BoundedEntry<T> {
+    key: Val,
+    item: T,
+    seq: usize,
+    keep_largest: bool,
+    cmp: fn(&Val, &Val) -> Ordering,
+}
+
+impl<T> PartialEq for BoundedEntry<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.seq == other.seq && (self.cmp)(&self.key, &other.key) == Ordering::Equal
+    }
+}
+
+impl<T> Eq for BoundedEntry<T> {}
+
+impl<T> PartialOrd for BoundedEntry<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<T> Ord for BoundedEntry<T> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let key_order = (self.cmp)(&self.key, &other.key);
+        let priority = if self.keep_largest {
+            key_order.reverse()
+        } else {
+            key_order
+        };
+        priority.then_with(|| self.seq.cmp(&other.seq))
     }
 }
 
