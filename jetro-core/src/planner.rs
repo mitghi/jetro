@@ -521,6 +521,12 @@ mod tests {
             plan.backend_preferences(*root),
             &[BackendPreference::ValView]
         );
+        assert!(plan
+            .backend_capabilities(*root)
+            .contains(crate::physical::BackendSet::TAPE_VIEW));
+        assert!(plan
+            .backend_capabilities(*root)
+            .contains(crate::physical::BackendSet::VAL_VIEW));
     }
 
     #[test]

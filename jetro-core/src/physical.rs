@@ -54,6 +54,11 @@ impl QueryPlan {
     pub(crate) fn backend_preferences(&self, id: NodeId) -> &[BackendPreference] {
         self.nodes[id.0].backends.as_slice()
     }
+
+    #[inline]
+    pub(crate) fn backend_capabilities(&self, id: NodeId) -> BackendSet {
+        self.nodes[id.0].capabilities
+    }
 }
 
 #[derive(Clone)]
@@ -127,6 +132,7 @@ pub enum PlanNode {
 #[derive(Clone)]
 pub(crate) struct PhysicalNode {
     kind: PlanNode,
+    capabilities: BackendSet,
     backends: BackendPlan,
 }
 
@@ -134,12 +140,17 @@ impl PhysicalNode {
     #[inline]
     pub(crate) fn new(kind: PlanNode) -> Self {
         let backends = BackendPlan::for_node(&kind);
-        Self { kind, backends }
+        Self::with_backend_plan(kind, backends)
     }
 
     #[inline]
     pub(crate) fn with_backend_plan(kind: PlanNode, backends: BackendPlan) -> Self {
-        Self { kind, backends }
+        let capabilities = kind.backends();
+        Self {
+            kind,
+            capabilities,
+            backends,
+        }
     }
 }
 
@@ -387,6 +398,11 @@ mod tests {
             plan.backend_preferences(NodeId(0)),
             &[BackendPreference::ValView, BackendPreference::TapeView]
         );
+        let capabilities = plan.backend_capabilities(NodeId(0));
+        assert!(capabilities.contains(BackendSet::TAPE_VIEW));
+        assert!(capabilities.contains(BackendSet::TAPE_ROWS));
+        assert!(capabilities.contains(BackendSet::MATERIALIZED_SOURCE));
+        assert!(capabilities.contains(BackendSet::VAL_VIEW));
     }
 
     #[test]
