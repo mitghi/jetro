@@ -30,6 +30,10 @@ struct ViewEvalCtx<'p, 'a> {
 }
 
 pub(crate) fn run(j: &Jetro, plan: &QueryPlan, root_id: NodeId) -> Result<Val, EvalError> {
+    if let Some(result) = try_run_structural_derived_plan(j, plan, root_id) {
+        return result;
+    }
+
     if let Some(result) = try_run_structural_plan(j, plan, root_id)? {
         return Ok(result);
     }
@@ -65,6 +69,107 @@ pub(crate) fn run(j: &Jetro, plan: &QueryPlan, root_id: NodeId) -> Result<Val, E
         vm: VM::new(),
     };
     ctx.eval(root_id)
+}
+
+fn try_run_structural_derived_plan(
+    j: &Jetro,
+    plan: &QueryPlan,
+    root_id: NodeId,
+) -> Option<Result<Val, EvalError>> {
+    eval_structural_derived(j, plan, root_id)
+}
+
+fn eval_structural_derived(
+    j: &Jetro,
+    plan: &QueryPlan,
+    id: NodeId,
+) -> Option<Result<Val, EvalError>> {
+    match plan.node(id) {
+        PlanNode::Structural(structural) => {
+            let bytes = match j.raw_bytes() {
+                Some(bytes) => bytes,
+                None => {
+                    return Some(Err(EvalError(
+                        "structural plan requires source bytes".into(),
+                    )))
+                }
+            };
+            let index = match j.lazy_structural_index() {
+                Ok(Some(index)) => index,
+                Ok(None) => {
+                    return Some(Err(EvalError(
+                        "structural plan requires source bytes".into(),
+                    )))
+                }
+                Err(err) => return Some(Err(err)),
+            };
+            Some(structural.run(index, bytes))
+        }
+        PlanNode::Pipeline {
+            source: PipelinePlanSource::Expr(source),
+            body,
+        } if pipeline_body_is_current_free(body) => {
+            let source = match eval_structural_derived(j, plan, *source)? {
+                Ok(value) => value,
+                Err(err) => return Some(Err(err)),
+            };
+            let pipeline = body.clone().with_source(pipeline::Source::Receiver(source));
+            let root = Val::Null;
+            let env = Env::new(Val::Null);
+            Some(pipeline.run_with_env(&root, &env, Some(j as &dyn pipeline::PipelineData)))
+        }
+        PlanNode::Call {
+            receiver,
+            call,
+            optional,
+        } => {
+            let receiver = match eval_structural_derived(j, plan, *receiver)? {
+                Ok(value) => value,
+                Err(err) => return Some(Err(err)),
+            };
+            if *optional && receiver.is_null() {
+                return Some(Ok(Val::Null));
+            }
+            Some(call.try_apply(&receiver).and_then(|result| {
+                result.ok_or_else(|| EvalError(format!("{:?}: builtin unsupported", call.method)))
+            }))
+        }
+        PlanNode::Chain { base, steps } => {
+            let base = match eval_structural_derived(j, plan, *base)? {
+                Ok(value) => value,
+                Err(err) => return Some(Err(err)),
+            };
+            Some(eval_materialized_chain_suffix(base, steps))
+        }
+        _ => None,
+    }
+}
+
+fn pipeline_body_is_current_free(body: &pipeline::PipelineBody) -> bool {
+    body.stage_exprs.iter().all(|expr| expr.is_none())
+        && body
+            .sink
+            .reducer_spec()
+            .map(|spec| spec.sink_programs().next().is_none())
+            .unwrap_or(true)
+}
+
+fn eval_materialized_chain_suffix(
+    mut cur: Val,
+    steps: &[PhysicalChainStep],
+) -> Result<Val, EvalError> {
+    for step in steps {
+        cur = match step {
+            PhysicalChainStep::Field(key) => cur.get_field(key.as_ref()),
+            PhysicalChainStep::Index(idx) => cur.get_index(*idx),
+            PhysicalChainStep::DynIndex(_) => {
+                return Err(EvalError(
+                    "structural suffix dynamic index requires generic evaluation".into(),
+                ))
+            }
+        };
+    }
+    Ok(cur)
 }
 
 fn try_run_structural_plan(

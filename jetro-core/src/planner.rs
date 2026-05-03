@@ -14,7 +14,7 @@ use crate::physical::{
     PipelinePlanSource, PlanNode, QueryPlan,
 };
 use crate::pipeline::{Pipeline, Source};
-use crate::structural::{StructuralLiteral, StructuralPlan};
+use crate::structural::{StructuralLiteral, StructuralPathStep, StructuralPlan};
 use crate::value::Val;
 use crate::vm::Compiler;
 
@@ -44,6 +44,7 @@ fn lower_expr(builder: &mut PlanBuilder, expr: &Expr) -> NodeId {
         .or_else(|| try_lower_pipeline(expr).map(|node| builder.push(node)))
         .or_else(|| try_lower_root_path(expr).map(|node| builder.push(node)))
         .or_else(|| try_lower_receiver_pipeline(builder, expr))
+        .or_else(|| try_lower_structural_chain_prefix(builder, expr))
         .or_else(|| try_lower_chain(builder, expr))
         .or_else(|| try_lower_scalar(builder, expr))
         .or_else(|| try_lower_structural(builder, expr))
@@ -75,20 +76,87 @@ fn try_lower_structural_op(expr: &Expr) -> Option<PlanNode> {
     let Expr::Chain(base, steps) = expr else {
         return None;
     };
-    if !matches!(base.as_ref(), Expr::Root) || steps.len() != 1 {
-        return None;
-    }
-    let (Step::Method(name, args) | Step::OptMethod(name, args)) = &steps[0] else {
-        return None;
-    };
-    match name.as_str() {
-        "deep_shape" => lower_structural_shape(args).map(PlanNode::Structural),
-        "deep_like" => lower_structural_like(args).map(PlanNode::Structural),
-        _ => None,
+    let (plan, consumed) = lower_structural_prefix(base, steps)?;
+    if consumed == steps.len() {
+        Some(PlanNode::Structural(plan))
+    } else {
+        None
     }
 }
 
-fn lower_structural_shape(args: &[Arg]) -> Option<StructuralPlan> {
+fn try_lower_structural_chain_prefix(builder: &mut PlanBuilder, expr: &Expr) -> Option<NodeId> {
+    let Expr::Chain(base, steps) = expr else {
+        return None;
+    };
+    let (plan, consumed) = lower_structural_prefix(base, steps)?;
+    if consumed >= steps.len() {
+        return None;
+    }
+    let mut cur = builder.push(PlanNode::Structural(plan));
+    let mut out = Vec::new();
+    for step in &steps[consumed..] {
+        match step {
+            Step::Field(key) | Step::OptField(key) => {
+                out.push(PhysicalChainStep::Field(Arc::from(key.as_str())));
+            }
+            Step::Index(idx) => out.push(PhysicalChainStep::Index(*idx)),
+            Step::DynIndex(expr) => {
+                out.push(PhysicalChainStep::DynIndex(lower_expr(builder, expr)));
+            }
+            Step::Method(name, args) => {
+                let call = BuiltinCall::from_literal_ast_args(name, args)?;
+                cur = flush_chain(builder, cur, &mut out);
+                cur = builder.push(PlanNode::Call {
+                    receiver: cur,
+                    call,
+                    optional: false,
+                });
+            }
+            Step::OptMethod(name, args) => {
+                let call = BuiltinCall::from_literal_ast_args(name, args)?;
+                cur = flush_chain(builder, cur, &mut out);
+                cur = builder.push(PlanNode::Call {
+                    receiver: cur,
+                    call,
+                    optional: true,
+                });
+            }
+            _ => return None,
+        }
+    }
+    Some(flush_chain(builder, cur, &mut out))
+}
+
+fn lower_structural_prefix(base: &Expr, steps: &[Step]) -> Option<(StructuralPlan, usize)> {
+    if !matches!(base, Expr::Root) {
+        return None;
+    }
+    let mut anchor = Vec::new();
+    for (idx, step) in steps.iter().enumerate() {
+        match step {
+            Step::Field(key) | Step::OptField(key) => {
+                anchor.push(StructuralPathStep::Field(Arc::from(key.as_str())));
+            }
+            Step::Index(index) => anchor.push(StructuralPathStep::Index(*index)),
+            Step::Method(name, args) | Step::OptMethod(name, args) => {
+                let anchor = Arc::from(anchor);
+                let plan = match name.as_str() {
+                    "deep_shape" => lower_structural_shape(anchor, args)?,
+                    "deep_like" => lower_structural_like(anchor, args)?,
+                    _ => return None,
+                };
+                return Some((plan, idx + 1));
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
+fn lower_structural_shape(
+    anchor: Arc<[StructuralPathStep]>,
+    args: &[Arg],
+) -> Option<StructuralPlan> {
     let Expr::Object(fields) = arg_expr(args.first()?)? else {
         return None;
     };
@@ -106,11 +174,15 @@ fn lower_structural_shape(args: &[Arg]) -> Option<StructuralPlan> {
         return None;
     }
     Some(StructuralPlan::DeepShape {
+        anchor,
         keys: Arc::from(keys),
     })
 }
 
-fn lower_structural_like(args: &[Arg]) -> Option<StructuralPlan> {
+fn lower_structural_like(
+    anchor: Arc<[StructuralPathStep]>,
+    args: &[Arg],
+) -> Option<StructuralPlan> {
     let Expr::Object(fields) = arg_expr(args.first()?)? else {
         return None;
     };
@@ -125,6 +197,7 @@ fn lower_structural_like(args: &[Arg]) -> Option<StructuralPlan> {
         return None;
     }
     Some(StructuralPlan::DeepLike {
+        anchor,
         patterns: Arc::from(patterns),
     })
 }
@@ -410,6 +483,36 @@ mod tests {
     fn deep_like_lowers_literal_pattern_to_structural_plan() {
         let plan = plan_query(r#"$.deep_like({role: "lead", active: true})"#);
         assert!(matches!(root_node(&plan), PlanNode::Structural(_)));
+    }
+
+    #[test]
+    fn anchored_deep_shape_lowers_to_structural_plan() {
+        let plan = plan_query(r#"$.org.users.deep_shape({email})"#);
+        assert!(matches!(root_node(&plan), PlanNode::Structural(_)));
+    }
+
+    #[test]
+    fn structural_prefix_can_feed_suffix_call() {
+        let plan = plan_query(r#"$.org.users.deep_shape({email}).count()"#);
+        let PlanNode::Pipeline { source, .. } = root_node(&plan) else {
+            panic!("expected receiver pipeline");
+        };
+        let PipelinePlanSource::Expr(source) = source else {
+            panic!("expected structural expression source");
+        };
+        assert!(matches!(plan.node(*source), PlanNode::Structural(_)));
+    }
+
+    #[test]
+    fn structural_prefix_can_feed_receiver_pipeline() {
+        let plan = plan_query(r#"$.org.users.deep_shape({email}).take(1)"#);
+        let PlanNode::Pipeline { source, .. } = root_node(&plan) else {
+            panic!("expected receiver pipeline");
+        };
+        let PipelinePlanSource::Expr(source) = source else {
+            panic!("expected structural expression source");
+        };
+        assert!(matches!(plan.node(*source), PlanNode::Structural(_)));
     }
 
     #[test]

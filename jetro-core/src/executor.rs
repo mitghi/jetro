@@ -468,6 +468,57 @@ mod tests {
 
     #[cfg(feature = "simd-json")]
     #[test]
+    fn anchored_deep_shape_reads_only_structural_subtree() {
+        let j = Jetro::from_bytes(
+            br#"{"outside":{"email":"outside@x"},"org":{"users":[{"email":"a@x"},{"team":{"email":"b@x"}}]}}"#.to_vec(),
+        )
+        .unwrap();
+
+        let out = j.collect(r#"$.org.users.deep_shape({email})"#).unwrap();
+
+        assert_eq!(out, json!([{"email": "a@x"}, {"email": "b@x"}]));
+        assert!(j.structural_index_is_built());
+        assert!(!j.root_val_is_materialized());
+        assert!(!j.tape_is_built());
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn structural_prefix_executes_pipeline_suffix() {
+        let j = Jetro::from_bytes(
+            br#"{"org":{"users":[{"email":"a@x"},{"email":"b@x"},{"name":"missing"}]}}"#.to_vec(),
+        )
+        .unwrap();
+
+        let out = j
+            .collect(r#"$.org.users.deep_shape({email}).take(1)"#)
+            .unwrap();
+
+        assert_eq!(out, json!([{"email": "a@x"}]));
+        assert!(j.structural_index_is_built());
+        assert!(!j.root_val_is_materialized());
+        assert!(!j.tape_is_built());
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn structural_prefix_executes_call_suffix() {
+        let j = Jetro::from_bytes(
+            br#"{"org":{"users":[{"email":"a@x"},{"email":"b@x"},{"name":"missing"}]}}"#.to_vec(),
+        )
+        .unwrap();
+
+        let out = j
+            .collect(r#"$.org.users.deep_shape({email}).count()"#)
+            .unwrap();
+
+        assert_eq!(out, json!(2));
+        assert!(j.structural_index_is_built());
+        assert!(!j.tape_is_built());
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
     fn top_level_pipeline_source_reads_from_tape_without_materializing_root_val() {
         let j = Jetro::from_bytes(
             br#"{"books":[{"title":"low","score":1},{"title":"a","score":901},{"title":"b","score":902}],"unused":{"large":[1,2,3]}}"#.to_vec(),

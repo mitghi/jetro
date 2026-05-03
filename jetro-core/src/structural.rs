@@ -11,11 +11,19 @@ use crate::value::Val;
 #[derive(Clone)]
 pub(crate) enum StructuralPlan {
     DeepShape {
+        anchor: Arc<[StructuralPathStep]>,
         keys: Arc<[Arc<str>]>,
     },
     DeepLike {
+        anchor: Arc<[StructuralPathStep]>,
         patterns: Arc<[(Arc<str>, StructuralLiteral)]>,
     },
+}
+
+#[derive(Clone)]
+pub(crate) enum StructuralPathStep {
+    Field(Arc<str>),
+    Index(i64),
 }
 
 #[derive(Clone)]
@@ -30,8 +38,8 @@ pub(crate) enum StructuralLiteral {
 impl StructuralPlan {
     pub(crate) fn run(&self, idx: &StructuralIndex, bytes: &[u8]) -> Result<Val, EvalError> {
         match self {
-            Self::DeepShape { keys } => run_deep_shape(idx, bytes, keys),
-            Self::DeepLike { patterns } => run_deep_like(idx, bytes, patterns),
+            Self::DeepShape { anchor, keys } => run_deep_shape(idx, bytes, anchor, keys),
+            Self::DeepLike { anchor, patterns } => run_deep_like(idx, bytes, anchor, patterns),
         }
     }
 }
@@ -39,13 +47,17 @@ impl StructuralPlan {
 fn run_deep_shape(
     idx: &StructuralIndex,
     bytes: &[u8],
+    anchor: &[StructuralPathStep],
     keys: &[Arc<str>],
 ) -> Result<Val, EvalError> {
     if keys.is_empty() {
         return Err(EvalError("shape: empty pattern".into()));
     }
+    let Some(anchor) = anchor_token(idx, anchor) else {
+        return Ok(Val::arr(Vec::new()));
+    };
     let mut out = Vec::new();
-    visit_candidate_objects(idx, keys, |object| {
+    visit_candidate_objects(idx, anchor, keys, |object| {
         if keys.iter().all(|key| idx.field_of(object, key).is_some()) {
             out.push(materialize_token(idx, bytes, object)?);
         }
@@ -57,14 +69,18 @@ fn run_deep_shape(
 fn run_deep_like(
     idx: &StructuralIndex,
     bytes: &[u8],
+    anchor: &[StructuralPathStep],
     patterns: &[(Arc<str>, StructuralLiteral)],
 ) -> Result<Val, EvalError> {
     if patterns.is_empty() {
         return Err(EvalError("like: empty pattern".into()));
     }
+    let Some(anchor) = anchor_token(idx, anchor) else {
+        return Ok(Val::arr(Vec::new()));
+    };
     let keys: Vec<Arc<str>> = patterns.iter().map(|(key, _)| Arc::clone(key)).collect();
     let mut out = Vec::new();
-    visit_candidate_objects(idx, &keys, |object| {
+    visit_candidate_objects(idx, anchor, &keys, |object| {
         for (key, want) in patterns {
             let Some(value) = idx.field_of(object, key) else {
                 return Ok(());
@@ -81,6 +97,7 @@ fn run_deep_like(
 
 fn visit_candidate_objects<F>(
     idx: &StructuralIndex,
+    anchor: TokenId,
     keys: &[Arc<str>],
     mut visit: F,
 ) -> Result<(), EvalError>
@@ -91,7 +108,7 @@ where
         return Ok(());
     };
     let mut seen = HashSet::new();
-    for key_tok in idx.keys_named(first_key, None) {
+    for key_tok in idx.keys_named_in(first_key, anchor) {
         let Some(parent) = idx.parent(key_tok) else {
             continue;
         };
@@ -101,6 +118,42 @@ where
         visit(parent)?;
     }
     Ok(())
+}
+
+fn anchor_token(idx: &StructuralIndex, steps: &[StructuralPathStep]) -> Option<TokenId> {
+    let mut cur = TokenId::from(0);
+    for step in steps {
+        cur = match step {
+            StructuralPathStep::Field(key) => idx.field_of(cur, key),
+            StructuralPathStep::Index(index) => array_child_at(idx, cur, *index),
+        }?;
+    }
+    Some(cur)
+}
+
+fn array_child_at(idx: &StructuralIndex, array: TokenId, index: i64) -> Option<TokenId> {
+    if idx.kind(array) != TokenKind::Array {
+        return None;
+    }
+    let close = idx
+        .close_of(array)
+        .map(|tok| tok.raw())
+        .unwrap_or_else(|| idx.token_count().saturating_sub(1));
+    let children: Vec<TokenId> = idx
+        .tokens()
+        .skip((array.raw() + 1) as usize)
+        .take_while(|tok| tok.raw() < close)
+        .filter(|tok| idx.parent(*tok) == Some(array))
+        .collect();
+    let pos = if index < 0 {
+        children.len() as i64 + index
+    } else {
+        index
+    };
+    if pos < 0 {
+        return None;
+    }
+    children.get(pos as usize).copied()
 }
 
 fn literal_matches(
