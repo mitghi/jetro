@@ -69,8 +69,9 @@ mod tests {
 
     use crate::physical::QueryRoot;
     use crate::physical::{
-        BackendPlan, BackendPreference, NodeId, PhysicalArrayElem, PhysicalChainStep, PhysicalNode,
-        PhysicalObjField, PhysicalPathStep, PipelinePlanSource, PlanNode, QueryPlan,
+        BackendPlan, BackendPreference, BackendSet, ExecutionFacts, NodeId, PhysicalArrayElem,
+        PhysicalChainStep, PhysicalNode, PhysicalObjField, PhysicalPathStep, PipelinePlanSource,
+        PlanNode, QueryPlan,
     };
     use crate::pipeline::{BodyKernel, NumOp, ReducerOp, Sink, Stage};
     use crate::planner;
@@ -1313,6 +1314,27 @@ mod tests {
             .0
             .contains("no planned backend could execute physical node"));
         assert!(!j.root_val_is_materialized());
+    }
+
+    #[test]
+    fn executor_skips_backends_not_advertised_by_capabilities() {
+        let node = PlanNode::RootPath(vec![PhysicalPathStep::Field(Arc::from("meta"))]);
+        let plan = QueryPlan::from_physical_nodes(
+            NodeId(0),
+            vec![PhysicalNode::with_backend_plan_capabilities_and_facts(
+                node,
+                BackendPlan::new(&[BackendPreference::Interpreted]),
+                BackendSet::TAPE_PATH,
+                ExecutionFacts::default(),
+            )],
+        );
+
+        let j = Jetro::from(json!({"meta": 1}));
+        let err = super::collect_plan_json(&j, &plan).unwrap_err();
+
+        assert!(err
+            .0
+            .contains("no planned backend could execute physical node"));
     }
 
     #[cfg(feature = "simd-json")]

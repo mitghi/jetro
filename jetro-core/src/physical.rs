@@ -174,6 +174,33 @@ impl PhysicalNode {
         facts: ExecutionFacts,
     ) -> Self {
         let capabilities = kind.backends();
+        Self::with_backend_plan_capabilities_and_facts(kind, backends, capabilities, facts)
+    }
+
+    #[cfg(test)]
+    #[inline]
+    pub(crate) fn with_backend_plan_capabilities_and_facts(
+        kind: PlanNode,
+        backends: BackendPlan,
+        capabilities: BackendSet,
+        facts: ExecutionFacts,
+    ) -> Self {
+        Self {
+            kind,
+            capabilities,
+            facts,
+            backends,
+        }
+    }
+
+    #[cfg(not(test))]
+    #[inline]
+    fn with_backend_plan_capabilities_and_facts(
+        kind: PlanNode,
+        backends: BackendPlan,
+        capabilities: BackendSet,
+        facts: ExecutionFacts,
+    ) -> Self {
         Self {
             kind,
             capabilities,
@@ -429,7 +456,7 @@ impl PlanNode {
 
 impl BackendPreference {
     #[inline]
-    const fn backend_set(self) -> BackendSet {
+    pub(crate) const fn backend_set(self) -> BackendSet {
         match self {
             Self::Structural => BackendSet::STRUCTURAL,
             Self::TapeView => BackendSet::TAPE_VIEW,

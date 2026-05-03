@@ -206,7 +206,11 @@ impl ExecCtx<'_> {
     }
 
     fn eval_fast(&mut self, id: NodeId) -> Option<Result<Val, EvalError>> {
+        let capabilities = self.plan.backend_capabilities(id);
         for backend in self.plan.backend_preferences(id) {
+            if !capabilities.contains(backend.backend_set()) {
+                continue;
+            }
             if let Some(result) = self.eval_backend(id, *backend) {
                 return Some(result);
             }
