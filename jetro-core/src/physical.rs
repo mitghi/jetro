@@ -59,6 +59,11 @@ impl QueryPlan {
     pub(crate) fn backend_capabilities(&self, id: NodeId) -> BackendSet {
         self.nodes[id.0].capabilities
     }
+
+    #[inline]
+    pub(crate) fn execution_facts(&self, id: NodeId) -> ExecutionFacts {
+        self.nodes[id.0].facts
+    }
 }
 
 #[derive(Clone)]
@@ -133,6 +138,7 @@ pub enum PlanNode {
 pub(crate) struct PhysicalNode {
     kind: PlanNode,
     capabilities: BackendSet,
+    facts: ExecutionFacts,
     backends: BackendPlan,
 }
 
@@ -146,9 +152,11 @@ impl PhysicalNode {
     #[inline]
     pub(crate) fn with_backend_plan(kind: PlanNode, backends: BackendPlan) -> Self {
         let capabilities = kind.backends();
+        let facts = ExecutionFacts::for_node(&kind);
         Self {
             kind,
             capabilities,
+            facts,
             backends,
         }
     }
@@ -166,6 +174,55 @@ pub(crate) enum BackendPreference {
     ValView,
     MaterializedSource,
     FastChildren,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ExecutionFacts {
+    pub(crate) can_avoid_root_materialization: bool,
+    pub(crate) can_stream_rows: bool,
+    pub(crate) can_use_tape: bool,
+    pub(crate) contains_vm_fallback: bool,
+    pub(crate) may_materialize_source: bool,
+}
+
+impl ExecutionFacts {
+    #[inline]
+    pub(crate) fn for_node(node: &PlanNode) -> Self {
+        match node {
+            PlanNode::Pipeline { source, body } => {
+                let field_chain = matches!(source, PipelinePlanSource::FieldChain { .. });
+                let view_native = crate::pipeline::view_capabilities(body).is_some();
+                let view_prefix = crate::pipeline::view_prefix_capabilities(body).is_some();
+                Self {
+                    can_avoid_root_materialization: field_chain && (view_native || view_prefix),
+                    can_stream_rows: field_chain && (view_native || view_prefix),
+                    can_use_tape: field_chain,
+                    contains_vm_fallback: false,
+                    may_materialize_source: field_chain
+                        && body.can_run_with_materialized_receiver(),
+                }
+            }
+            PlanNode::Structural { .. } => Self {
+                can_avoid_root_materialization: true,
+                can_stream_rows: false,
+                can_use_tape: false,
+                contains_vm_fallback: true,
+                may_materialize_source: false,
+            },
+            PlanNode::RootPath(_) => Self {
+                can_avoid_root_materialization: true,
+                can_stream_rows: false,
+                can_use_tape: true,
+                contains_vm_fallback: false,
+                may_materialize_source: false,
+            },
+            PlanNode::Vm(_) => Self {
+                contains_vm_fallback: true,
+                ..Self::default()
+            },
+            _ => Self::default(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -403,12 +460,19 @@ mod tests {
         assert!(capabilities.contains(BackendSet::TAPE_ROWS));
         assert!(capabilities.contains(BackendSet::MATERIALIZED_SOURCE));
         assert!(capabilities.contains(BackendSet::VAL_VIEW));
+        let facts = plan.execution_facts(NodeId(0));
+        assert!(facts.can_avoid_root_materialization);
+        assert!(facts.can_stream_rows);
+        assert!(facts.can_use_tape);
     }
 
     #[test]
     fn structural_nodes_and_composite_nodes_advertise_distinct_backends() {
         let root_path = PlanNode::RootPath(vec![PhysicalPathStep::Field(Arc::from("meta"))]);
         assert!(root_path.backends().contains(BackendSet::TAPE_PATH));
+        let facts = ExecutionFacts::for_node(&root_path);
+        assert!(facts.can_avoid_root_materialization);
+        assert!(facts.can_use_tape);
 
         let object = PlanNode::Object(vec![PhysicalObjField::Kv {
             key: Arc::from("a"),

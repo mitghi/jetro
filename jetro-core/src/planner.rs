@@ -10,8 +10,8 @@ use crate::ast::{ArrayElem, Expr, ObjField, Step};
 use crate::builtins::{BuiltinCall, BuiltinMethod};
 use crate::parser;
 use crate::physical::{
-    BackendPlan, NodeId, PhysicalArrayElem, PhysicalChainStep, PhysicalNode, PhysicalObjField,
-    PhysicalPathStep, PipelinePlanSource, PlanNode, QueryPlan,
+    BackendPlan, ExecutionFacts, NodeId, PhysicalArrayElem, PhysicalChainStep, PhysicalNode,
+    PhysicalObjField, PhysicalPathStep, PipelinePlanSource, PlanNode, QueryPlan,
 };
 use crate::pipeline::{Pipeline, Source};
 use crate::structural::{StructuralPathStep, StructuralPlan};
@@ -88,12 +88,16 @@ impl PlanBuilder {
 
     #[inline]
     fn backend_plan_for_node(&self, node: &PlanNode) -> BackendPlan {
-        select_backend_plan(self.context, node)
+        select_backend_plan(self.context, node, ExecutionFacts::for_node(node))
     }
 }
 
 #[inline]
-fn select_backend_plan(context: PlanningContext, node: &PlanNode) -> BackendPlan {
+fn select_backend_plan(
+    context: PlanningContext,
+    node: &PlanNode,
+    facts: ExecutionFacts,
+) -> BackendPlan {
     match (context.input, node) {
         (
             InputMode::Val,
@@ -105,6 +109,18 @@ fn select_backend_plan(context: PlanningContext, node: &PlanNode) -> BackendPlan
         (InputMode::Val, PlanNode::RootPath(_) | PlanNode::Structural { .. }) => {
             BackendPlan::new(&[])
         }
+        (
+            InputMode::Bytes,
+            PlanNode::Pipeline {
+                source: PipelinePlanSource::FieldChain { .. },
+                ..
+            },
+        ) if facts.can_stream_rows => BackendPlan::new(&[
+            crate::physical::BackendPreference::TapeView,
+            crate::physical::BackendPreference::TapeRows,
+            crate::physical::BackendPreference::MaterializedSource,
+            crate::physical::BackendPreference::ValView,
+        ]),
         _ => BackendPlan::for_node(node),
     }
 }
@@ -532,11 +548,21 @@ mod tests {
         };
 
         assert_eq!(
-            select_backend_plan(PlanningContext::val(), &node).as_slice(),
+            select_backend_plan(
+                PlanningContext::val(),
+                &node,
+                ExecutionFacts::for_node(&node)
+            )
+            .as_slice(),
             &[BackendPreference::ValView]
         );
         assert_eq!(
-            select_backend_plan(PlanningContext::bytes(), &node).as_slice()[0],
+            select_backend_plan(
+                PlanningContext::bytes(),
+                &node,
+                ExecutionFacts::for_node(&node)
+            )
+            .as_slice()[0],
             BackendPreference::TapeView
         );
     }
