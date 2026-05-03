@@ -308,22 +308,94 @@ fn is_trivial_collect_pipeline(pipeline: &Pipeline) -> bool {
     pipeline.stages.is_empty() && matches!(pipeline.sink, crate::pipeline::Sink::Collect)
 }
 
-fn mask_active_local_stage_kernels(body: &mut crate::pipeline::PipelineBody, builder: &PlanBuilder) {
-    if builder.locals.is_empty() || body.stage_exprs.len() != body.stage_kernels.len() {
+fn mask_active_local_stage_kernels(
+    body: &mut crate::pipeline::PipelineBody,
+    builder: &PlanBuilder,
+) {
+    if builder.locals.is_empty() {
         return;
     }
-    for (expr, kernel) in body.stage_exprs.iter().zip(body.stage_kernels.iter_mut()) {
-        let Some(expr) = expr else {
-            continue;
-        };
-        if builder
-            .locals
-            .iter()
-            .any(|local| analysis::expr_uses_ident(expr, local.as_ref()))
-        {
-            *kernel = crate::pipeline::BodyKernel::Generic;
+
+    if body.stage_exprs.len() == body.stage_kernels.len() {
+        for idx in 0..body.stage_exprs.len() {
+            let expr = &body.stage_exprs[idx];
+            let Some(expr) = expr else {
+                continue;
+            };
+            if builder
+                .locals
+                .iter()
+                .any(|local| analysis::expr_uses_ident(expr, local.as_ref()))
+            {
+                recompile_stage_body_for_lexical_env(&mut body.stages[idx], expr);
+                body.stage_kernels[idx] = crate::pipeline::BodyKernel::Generic;
+            }
         }
     }
+
+    if let crate::pipeline::Sink::Reducer(spec) = &mut body.sink {
+        let mut kernel_idx = 0usize;
+        if let (Some(program), Some(expr)) = (&mut spec.predicate, spec.predicate_expr.as_ref()) {
+            if builder
+                .locals
+                .iter()
+                .any(|local| analysis::expr_uses_ident(expr, local.as_ref()))
+            {
+                *program = Arc::new(Compiler::compile(expr, "<local-aware-pipeline-sink>"));
+                if let Some(kernel) = body.sink_kernels.get_mut(kernel_idx) {
+                    *kernel = crate::pipeline::BodyKernel::Generic;
+                }
+            }
+            kernel_idx += 1;
+        }
+        if let (Some(program), Some(expr)) = (&mut spec.projection, spec.projection_expr.as_ref()) {
+            if builder
+                .locals
+                .iter()
+                .any(|local| analysis::expr_uses_ident(expr, local.as_ref()))
+            {
+                *program = Arc::new(Compiler::compile(expr, "<local-aware-pipeline-sink>"));
+                if let Some(kernel) = body.sink_kernels.get_mut(kernel_idx) {
+                    *kernel = crate::pipeline::BodyKernel::Generic;
+                }
+            }
+        }
+    } else {
+        for kernel in &mut body.sink_kernels {
+            if kernel_mentions_active_local(kernel, &builder.locals) {
+                *kernel = crate::pipeline::BodyKernel::Generic;
+            }
+        }
+    }
+}
+
+fn recompile_stage_body_for_lexical_env(stage: &mut crate::pipeline::Stage, expr: &Expr) {
+    let program = Arc::new(Compiler::compile(expr, "<local-aware-pipeline-stage>"));
+    match stage {
+        crate::pipeline::Stage::Filter(body, _)
+        | crate::pipeline::Stage::Map(body, _)
+        | crate::pipeline::Stage::FlatMap(body, _)
+        | crate::pipeline::Stage::GroupBy(body)
+        | crate::pipeline::Stage::TakeWhile(body)
+        | crate::pipeline::Stage::DropWhile(body)
+        | crate::pipeline::Stage::IndicesWhere(body)
+        | crate::pipeline::Stage::FindIndex(body)
+        | crate::pipeline::Stage::MaxBy(body)
+        | crate::pipeline::Stage::MinBy(body)
+        | crate::pipeline::Stage::TransformValues(body)
+        | crate::pipeline::Stage::TransformKeys(body)
+        | crate::pipeline::Stage::FilterValues(body)
+        | crate::pipeline::Stage::FilterKeys(body)
+        | crate::pipeline::Stage::CountBy(body)
+        | crate::pipeline::Stage::IndexBy(body) => *body = program,
+        crate::pipeline::Stage::UniqueBy(Some(body)) => *body = program,
+        crate::pipeline::Stage::Sort(sort) if sort.key.is_some() => sort.key = Some(program),
+        _ => {}
+    }
+}
+
+fn kernel_mentions_active_local(kernel: &crate::pipeline::BodyKernel, locals: &[Arc<str>]) -> bool {
+    kernel.mentions_any_field_like_ident(locals)
 }
 
 fn try_lower_structural_op(expr: &Expr) -> Option<PlanNode> {

@@ -286,6 +286,8 @@ fn terminal_sink_for_method(method: BuiltinMethod, args: &[crate::ast::Arg]) -> 
                 op: ReducerOp::Count,
                 predicate: Some(compile_subexpr(arg)?),
                 projection: None,
+                predicate_expr: arg_expr(arg),
+                projection_expr: None,
             })),
             _ => None,
         },
@@ -295,6 +297,12 @@ fn terminal_sink_for_method(method: BuiltinMethod, args: &[crate::ast::Arg]) -> 
             projection: match args {
                 [] => None,
                 [arg] => Some(compile_subexpr(arg)?),
+                _ => return None,
+            },
+            predicate_expr: None,
+            projection_expr: match args {
+                [] => None,
+                [arg] => arg_expr(arg),
                 _ => return None,
             },
         })),

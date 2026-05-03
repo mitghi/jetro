@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::ast::Expr;
 use crate::builtins::BuiltinMethod;
 use crate::vm::Program;
 
@@ -10,6 +11,8 @@ pub struct ReducerSpec {
     pub op: ReducerOp,
     pub predicate: Option<Arc<Program>>,
     pub projection: Option<Arc<Program>>,
+    pub predicate_expr: Option<Arc<Expr>>,
+    pub projection_expr: Option<Arc<Expr>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,6 +27,8 @@ impl ReducerSpec {
             op: ReducerOp::Count,
             predicate: None,
             projection: None,
+            predicate_expr: None,
+            projection_expr: None,
         }
     }
 

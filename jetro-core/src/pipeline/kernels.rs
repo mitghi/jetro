@@ -114,6 +114,43 @@ impl ObjectKernel {
 }
 
 impl BodyKernel {
+    pub(crate) fn mentions_any_field_like_ident(&self, names: &[Arc<str>]) -> bool {
+        fn matches_name(name: &str, names: &[Arc<str>]) -> bool {
+            names.iter().any(|candidate| candidate.as_ref() == name)
+        }
+
+        match self {
+            Self::FieldRead(name) | Self::FieldCmpLit(name, _, _) => {
+                matches_name(name.as_ref(), names)
+            }
+            Self::FieldChain(keys) | Self::FieldChainCmpLit(keys, _, _) => keys
+                .first()
+                .is_some_and(|name| matches_name(name.as_ref(), names)),
+            Self::BuiltinCall { receiver, .. } => receiver.mentions_any_field_like_ident(names),
+            Self::Compose { first, then } => {
+                first.mentions_any_field_like_ident(names)
+                    || then.mentions_any_field_like_ident(names)
+            }
+            Self::CmpLit { lhs, .. } => lhs.mentions_any_field_like_ident(names),
+            Self::And(predicates) => predicates
+                .iter()
+                .any(|predicate| predicate.mentions_any_field_like_ident(names)),
+            Self::FString(fstring) => fstring.parts.iter().any(|part| match part {
+                FStringKernelPart::Lit(_) => false,
+                FStringKernelPart::Interp(kernel) => kernel.mentions_any_field_like_ident(names),
+            }),
+            Self::Object(object) => object
+                .entries
+                .iter()
+                .any(|entry| entry.value.mentions_any_field_like_ident(names)),
+            Self::Generic
+            | Self::Current
+            | Self::CurrentCmpLit(_, _)
+            | Self::ConstBool(_)
+            | Self::Const(_) => false,
+        }
+    }
+
     pub(crate) fn is_view_native(&self) -> bool {
         match self {
             Self::Generic => false,

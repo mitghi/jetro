@@ -1517,6 +1517,8 @@ mod tests {
                     op: ReducerOp::Numeric(NumOp::Sum),
                     predicate: None,
                     projection: None,
+                    predicate_expr: None,
+                    projection_expr: None,
                 })
             ),
             Strategy::PullLoop
@@ -1559,6 +1561,8 @@ mod tests {
                 op: ReducerOp::Numeric(NumOp::Sum),
                 predicate: None,
                 projection: None,
+                predicate_expr: None,
+                projection_expr: None,
             }),
         );
         assert!(matches!(strats[0], StageStrategy::Default));

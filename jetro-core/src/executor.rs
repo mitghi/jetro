@@ -1509,7 +1509,10 @@ mod tests {
         let PlanNode::Pipeline { body, .. } = plan.node(*body) else {
             panic!("expected pipeline body");
         };
-        assert!(matches!(body.stage_kernels.first(), Some(BodyKernel::Generic)));
+        assert!(matches!(
+            body.stage_kernels.first(),
+            Some(BodyKernel::Generic)
+        ));
 
         let j = Jetro::from_bytes(
             br#"{"books":[{"title":"row-a"},{"title":"row-b"},{"title":"row-c"}]}"#.to_vec(),
@@ -1518,6 +1521,33 @@ mod tests {
         let out = super::collect_plan_json(&j, &plan).unwrap();
 
         assert_eq!(out, json!(["fixed", "fixed"]));
+        assert!(!j.root_val_is_materialized());
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn local_ident_reducer_projection_uses_env_not_row_field_kernel() {
+        let expr = r#"let bonus = 10 in $.books.sum(bonus)"#;
+        let plan = planner::plan_query_with_context(expr, planner::PlanningContext::bytes());
+        let QueryRoot::Node(root) = plan.root() else {
+            panic!("expected physical expression plan");
+        };
+        let PlanNode::Let { body, .. } = plan.node(*root) else {
+            panic!("expected let root");
+        };
+        let PlanNode::Pipeline { body, .. } = plan.node(*body) else {
+            panic!("expected pipeline body");
+        };
+        assert!(matches!(
+            body.sink_kernels.first(),
+            Some(BodyKernel::Generic)
+        ));
+
+        let j = Jetro::from_bytes(br#"{"books":[{"bonus":1},{"bonus":2},{"bonus":3}]}"#.to_vec())
+            .unwrap();
+        let out = super::collect_plan_json(&j, &plan).unwrap();
+
+        assert_eq!(out, json!(30));
         assert!(!j.root_val_is_materialized());
     }
 

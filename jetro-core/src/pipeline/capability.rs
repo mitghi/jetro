@@ -400,6 +400,8 @@ mod tests {
                 op: ReducerOp::Numeric(NumOp::Sum),
                 predicate: None,
                 projection: Some(Arc::new(crate::vm::Program::new(Vec::new(), ""))),
+                predicate_expr: None,
+                projection_expr: None,
             }),
             stage_kernels: vec![
                 BodyKernel::FieldCmpLit(Arc::from("score"), BinOp::Gt, Val::Int(10)),
