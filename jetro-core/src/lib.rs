@@ -102,9 +102,6 @@ pub(crate) enum Error {
 }
 
 #[cfg(test)]
-pub(crate) type Result<T> = std::result::Result<T, Error>;
-
-#[cfg(test)]
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
