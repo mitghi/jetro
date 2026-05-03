@@ -31,7 +31,7 @@ struct ViewEvalCtx<'p, 'a> {
 
 pub(crate) fn run(j: &Jetro, plan: &QueryPlan, root_id: NodeId) -> Result<Val, EvalError> {
     #[cfg(feature = "simd-json")]
-    if let Some(tape) = j.lazy_tape() {
+    if let Some(tape) = j.lazy_tape()? {
         if let Some(result) = try_run_view_plan(
             plan,
             root_id,
@@ -47,7 +47,7 @@ pub(crate) fn run(j: &Jetro, plan: &QueryPlan, root_id: NodeId) -> Result<Val, E
         }
     }
 
-    let root = j.root_val();
+    let root = j.root_val()?;
     if let Some(result) = try_run_view_plan(plan, root_id, ValView::new(&root), Some(j), true, None)
     {
         return result;
@@ -57,7 +57,7 @@ pub(crate) fn run(j: &Jetro, plan: &QueryPlan, root_id: NodeId) -> Result<Val, E
         j,
         plan,
         root,
-        env: Env::new(j.root_val()),
+        env: Env::new(j.root_val()?),
         vm: VM::new(),
     };
     ctx.eval(root_id)

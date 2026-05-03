@@ -1312,10 +1312,7 @@ fn simd_json_ndjson_basic() {
 #[test]
 fn simd_json_invalid_falls_back_with_helpful_error() {
     let bad = b"{ this is not json ".to_vec();
-    let r = Jetro::from_bytes(bad);
-    let msg = match r {
-        Err(e) => e.to_string(),
-        Ok(_) => panic!("expected error on invalid JSON"),
-    };
+    let j = Jetro::from_bytes(bad).expect("from_bytes keeps bytes lazily");
+    let msg = j.collect("$.x").unwrap_err().to_string();
     assert!(!msg.is_empty());
 }

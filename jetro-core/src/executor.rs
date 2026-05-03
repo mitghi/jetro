@@ -28,9 +28,13 @@ fn run_vm_json(j: &Jetro, expr: &str) -> Result<Value, EvalError> {
     with_vm(|cell| match cell.try_borrow_mut() {
         Ok(mut vm) => {
             let prog = vm.get_or_compile(expr)?;
-            vm.execute_val(&prog, j.root_val())
+            vm.execute_val(&prog, j.root_val()?)
         }
-        Err(_) => VM::new().run_str(expr, &j.document),
+        Err(_) => {
+            let mut vm = VM::new();
+            let prog = vm.get_or_compile(expr)?;
+            vm.execute_val(&prog, j.root_val()?)
+        }
     })
 }
 
@@ -43,7 +47,7 @@ pub(crate) fn collect_plan_json_with_vm(
         QueryRoot::Node(root) => physical_eval::run(j, plan, *root).map(Value::from),
         QueryRoot::SourceVm(source) => {
             let prog = vm.get_or_compile(source.as_ref())?;
-            vm.execute_val(&prog, j.root_val())
+            vm.execute_val(&prog, j.root_val()?)
         }
     }
 }

@@ -222,19 +222,6 @@ impl TapeData {
             })
     }
 
-    pub(crate) fn parse_or_return_bytes(mut bytes: Vec<u8>) -> Result<Arc<Self>, Vec<u8>> {
-        match Self::parse_inner(&mut bytes) {
-            Ok((nodes, bytes_buf, buffers)) => Ok(Arc::new(Self {
-                bytes_buf,
-                _buffers: buffers,
-                nodes,
-                #[cfg(test)]
-                materialized_subtrees: AtomicUsize::new(0),
-            })),
-            Err(_) => Err(bytes),
-        }
-    }
-
     fn parse_inner(
         bytes: &mut Vec<u8>,
     ) -> Result<(Vec<TapeNode>, Vec<u8>, simd_json::Buffers), simd_json::Error> {

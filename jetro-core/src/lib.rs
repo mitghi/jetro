@@ -179,7 +179,7 @@ pub struct Jetro {
     /// `lazy_tape()` access.  Defers the simd-json `to_tape` cost
     /// (~5-7 ms / MB) until a query needs the tape.
     #[cfg(feature = "simd-json")]
-    tape: OnceCell<Arc<crate::strref::TapeData>>,
+    tape: OnceCell<std::result::Result<Arc<crate::strref::TapeData>, String>>,
     #[cfg(not(feature = "simd-json"))]
     #[allow(dead_code)]
     tape: OnceCell<()>,
@@ -324,17 +324,27 @@ impl Jetro {
     /// Cost: ~5-7 ms / MB on first call (simd-json `to_tape` + node walk
     /// + Arc clone).  Subsequent calls return the cached Arc.
     #[cfg(feature = "simd-json")]
-    fn lazy_tape(&self) -> Option<&Arc<crate::strref::TapeData>> {
-        // OnceCell::get_or_try_init isn't stable for std OnceCell; do
-        // get-then-init manually.
-        if let Some(t) = self.tape.get() {
-            return Some(t);
+    pub(crate) fn lazy_tape(
+        &self,
+    ) -> std::result::Result<Option<&Arc<crate::strref::TapeData>>, EvalError> {
+        if let Some(result) = self.tape.get() {
+            return result
+                .as_ref()
+                .map(Some)
+                .map_err(|err| EvalError(format!("Invalid JSON: {err}")));
         }
-        let raw = self.raw_bytes.as_ref()?;
+        let Some(raw) = self.raw_bytes.as_ref() else {
+            return Ok(None);
+        };
         let bytes: Vec<u8> = (**raw).to_vec();
-        let parsed = crate::strref::TapeData::parse(bytes).ok()?;
+        let parsed = crate::strref::TapeData::parse(bytes).map_err(|err| err.to_string());
         let _ = self.tape.set(parsed);
-        self.tape.get()
+        self.tape
+            .get()
+            .expect("tape cache initialized")
+            .as_ref()
+            .map(Some)
+            .map_err(|err| EvalError(format!("Invalid JSON: {err}")))
     }
 
     /// Memoised ObjVec promotion.  First call probes the array shape and
@@ -374,39 +384,20 @@ impl Jetro {
 
     /// Parse JSON bytes and retain them for lazy materialisation.
     pub fn from_bytes(bytes: Vec<u8>) -> std::result::Result<Self, serde_json::Error> {
-        // Cold-start path — when the simd-json feature is on, parse to a
-        // TapeData first and retain it. The full Val tree builds lazily on
-        // first access via root_val(). Avoid cloning the full input on the
-        // valid simd-json path; the tape owns the mutated parser buffer.
-        // Falls back to the serde_json path on simd-json parse error.
+        // Cold-start path: with simd-json enabled, keep bytes only. The
+        // executor plans first, then asks for tape or Val only if the selected
+        // representation needs it. This keeps representation choice
+        // demand-driven instead of paying a full parse before the expression is
+        // known. Parse errors surface from `collect`.
         #[cfg(feature = "simd-json")]
         {
-            match crate::strref::TapeData::parse_or_return_bytes(bytes) {
-                Ok(tape) => {
-                    return Ok(Self {
-                        document: Value::Null,
-                        // Lazy Val build via root_val() from retained tape.
-                        root_val: OnceCell::new(),
-                        objvec_cache: Default::default(),
-                        raw_bytes: None,
-                        tape: {
-                            let c = OnceCell::new();
-                            let _ = c.set(tape);
-                            c
-                        },
-                    });
-                }
-                Err(bytes) => {
-                    let document: Value = serde_json::from_slice(&bytes)?;
-                    return Ok(Self {
-                        document,
-                        root_val: OnceCell::new(),
-                        objvec_cache: Default::default(),
-                        raw_bytes: Some(Arc::from(bytes.into_boxed_slice())),
-                        tape: OnceCell::new(),
-                    });
-                }
-            }
+            return Ok(Self {
+                document: Value::Null,
+                root_val: OnceCell::new(),
+                objvec_cache: Default::default(),
+                raw_bytes: Some(Arc::from(bytes.into_boxed_slice())),
+                tape: OnceCell::new(),
+            });
         }
         #[allow(unreachable_code)]
         {
@@ -421,31 +412,26 @@ impl Jetro {
         }
     }
 
-    fn root_val(&self) -> Val {
-        self.root_val
-            .get_or_init(|| {
-                #[cfg(feature = "simd-json")]
-                {
-                    // Prefer the retained simd-json tape when present:
-                    // materialise a normal Val tree only when the query cannot
-                    // stay on the tape/view path. The rest of the VM/Pipeline
-                    // API remains lifetime-free.
-                    if let Some(tape) = self.lazy_tape() {
-                        return Val::from_tape_data(tape);
-                    }
-                    // If tape parsing was unavailable but raw bytes exist,
-                    // still use the direct simd-json -> Val parser before
-                    // falling back to the serde_json::Value document.
-                    if let Some(raw) = &self.raw_bytes {
-                        let mut buf: Vec<u8> = (**raw).to_vec();
-                        if let Ok(v) = Val::from_json_simd(&mut buf) {
-                            return v;
-                        }
-                    }
+    pub(crate) fn root_val(&self) -> std::result::Result<Val, EvalError> {
+        if let Some(root) = self.root_val.get() {
+            return Ok(root.clone());
+        }
+        let root = {
+            #[cfg(feature = "simd-json")]
+            {
+                if let Some(tape) = self.lazy_tape()? {
+                    Val::from_tape_data(tape)
+                } else {
+                    Val::from(&self.document)
                 }
+            }
+            #[cfg(not(feature = "simd-json"))]
+            {
                 Val::from(&self.document)
-            })
-            .clone()
+            }
+        };
+        let _ = self.root_val.set(root);
+        Ok(self.root_val.get().expect("root val initialized").clone())
     }
 
     #[cfg(test)]
@@ -455,7 +441,7 @@ impl Jetro {
 
     #[cfg(all(test, feature = "simd-json"))]
     pub(crate) fn reset_tape_materialized_subtrees(&self) {
-        if let Some(tape) = self.lazy_tape() {
+        if let Ok(Some(tape)) = self.lazy_tape() {
             tape.reset_materialized_subtrees();
         }
     }
@@ -463,6 +449,8 @@ impl Jetro {
     #[cfg(all(test, feature = "simd-json"))]
     pub(crate) fn tape_materialized_subtrees(&self) -> usize {
         self.lazy_tape()
+            .ok()
+            .flatten()
             .map(|tape| tape.materialized_subtrees())
             .unwrap_or(0)
     }
