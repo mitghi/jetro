@@ -81,6 +81,27 @@ enum BuiltinDemandLaw {
     OrderBarrier,
 }
 
+/// Canonical argument-count contract for pipeline lowering. This keeps
+/// receiver-start checks, stage construction, and tests from re-encoding
+/// per-builtin arity rules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BuiltinPipelineArity {
+    /// Accepts exactly N arguments.
+    Exact(usize),
+    /// Accepts any count in the inclusive range.
+    Range { min: usize, max: usize },
+}
+
+impl BuiltinPipelineArity {
+    #[inline]
+    pub(crate) fn accepts(self, arity: usize) -> bool {
+        match self {
+            Self::Exact(n) => arity == n,
+            Self::Range { min, max } => (min..=max).contains(&arity),
+        }
+    }
+}
+
 /// Compute the upstream `Demand` that builtin `id` must place on its source
 /// given the `downstream` demand from the next stage and optional numeric `arg`.
 #[inline]
@@ -212,37 +233,52 @@ pub(crate) fn pipeline_lowering(id: BuiltinId) -> Option<BuiltinPipelineLowering
 /// `arity` arguments. Terminal sinks are only accepted when `is_last` is true.
 #[inline]
 pub(crate) fn pipeline_accepts_arity(id: BuiltinId, arity: usize, is_last: bool) -> bool {
+    pipeline_arity(id, is_last).is_some_and(|accepted| accepted.accepts(arity))
+}
+
+/// Return the canonical accepted pipeline arity for builtin `id`. Terminal
+/// sinks are only exposed when `is_last` is true.
+#[inline]
+pub(crate) fn pipeline_arity(id: BuiltinId, is_last: bool) -> Option<BuiltinPipelineArity> {
     let Some(method) = id.method() else {
-        return false;
+        return None;
     };
     match pipeline_lowering(id) {
         Some(BuiltinPipelineLowering::ExprStage(_))
         | Some(BuiltinPipelineLowering::TerminalExprStage { .. })
         | Some(BuiltinPipelineLowering::UsizeStage { .. })
-        | Some(BuiltinPipelineLowering::StringStage(_)) => arity == 1,
-        Some(BuiltinPipelineLowering::NullaryStage(_)) => arity == 0,
-        Some(BuiltinPipelineLowering::StringPairStage(_)) => arity == 2,
-        Some(BuiltinPipelineLowering::Sort) => arity <= 1,
-        Some(BuiltinPipelineLowering::Slice) => (1..=2).contains(&arity),
-        Some(BuiltinPipelineLowering::TerminalSink) => {
-            is_last && terminal_sink_accepts_arity(method, arity)
+        | Some(BuiltinPipelineLowering::StringStage(_)) => Some(BuiltinPipelineArity::Exact(1)),
+        Some(BuiltinPipelineLowering::NullaryStage(_)) => Some(BuiltinPipelineArity::Exact(0)),
+        Some(BuiltinPipelineLowering::StringPairStage(_)) => Some(BuiltinPipelineArity::Exact(2)),
+        Some(BuiltinPipelineLowering::Sort) => Some(BuiltinPipelineArity::Range { min: 0, max: 1 }),
+        Some(BuiltinPipelineLowering::Slice) => {
+            Some(BuiltinPipelineArity::Range { min: 1, max: 2 })
         }
-        None => is_last && terminal_sink_accepts_arity(method, arity),
+        Some(BuiltinPipelineLowering::TerminalSink) => {
+            is_last.then(|| terminal_sink_arity(method))?
+        }
+        None => is_last.then(|| terminal_sink_arity(method))?,
     }
 }
 
 #[inline]
-fn terminal_sink_accepts_arity(method: BuiltinMethod, arity: usize) -> bool {
+fn terminal_sink_arity(method: BuiltinMethod) -> Option<BuiltinPipelineArity> {
     let Some(sink) = method.spec().sink else {
-        return false;
+        return None;
     };
-    match sink.accumulator {
+    Some(match sink.accumulator {
         BuiltinSinkAccumulator::Count => {
-            arity == 0 || (method == BuiltinMethod::Count && arity == 1)
+            if method == BuiltinMethod::Count {
+                BuiltinPipelineArity::Range { min: 0, max: 1 }
+            } else {
+                BuiltinPipelineArity::Exact(0)
+            }
         }
-        BuiltinSinkAccumulator::Numeric => arity <= 1,
-        BuiltinSinkAccumulator::SelectOne(_) | BuiltinSinkAccumulator::ApproxDistinct => arity == 0,
-    }
+        BuiltinSinkAccumulator::Numeric => BuiltinPipelineArity::Range { min: 0, max: 1 },
+        BuiltinSinkAccumulator::SelectOne(_) | BuiltinSinkAccumulator::ApproxDistinct => {
+            BuiltinPipelineArity::Exact(0)
+        }
+    })
 }
 
 /// Return `true` if builtin `id` is an element-wise operation that can be
@@ -1207,6 +1243,10 @@ mod tests {
 
     #[test]
     fn registry_classifies_pipeline_arity_without_method_special_cases() {
+        assert_eq!(
+            pipeline_arity(BuiltinId::from_method(BuiltinMethod::Filter), false),
+            Some(BuiltinPipelineArity::Exact(1))
+        );
         assert!(pipeline_accepts_arity(
             BuiltinId::from_method(BuiltinMethod::Filter),
             1,
@@ -1222,6 +1262,10 @@ mod tests {
             0,
             false
         ));
+        assert_eq!(
+            pipeline_arity(BuiltinId::from_method(BuiltinMethod::Sort), false),
+            Some(BuiltinPipelineArity::Range { min: 0, max: 1 })
+        );
         assert!(pipeline_accepts_arity(
             BuiltinId::from_method(BuiltinMethod::Sort),
             1,
@@ -1242,6 +1286,14 @@ mod tests {
             1,
             false
         ));
+        assert_eq!(
+            pipeline_arity(BuiltinId::from_method(BuiltinMethod::Count), false),
+            None
+        );
+        assert_eq!(
+            pipeline_arity(BuiltinId::from_method(BuiltinMethod::Count), true),
+            Some(BuiltinPipelineArity::Range { min: 0, max: 1 })
+        );
         assert!(pipeline_accepts_arity(
             BuiltinId::from_method(BuiltinMethod::Count),
             1,
