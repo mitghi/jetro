@@ -4,21 +4,46 @@
 //! between a parsed plan root and the source-level VM fallback used when
 //! parsing fails.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+
 use serde_json::Value;
 
 use crate::context::EvalError;
-use crate::physical::QueryRoot;
+use crate::physical::{QueryPlan, QueryRoot};
 use crate::physical_eval;
 use crate::planner;
 use crate::{with_vm, Jetro, VM};
 
+const PLAN_CACHE_LIMIT: usize = 256;
+
+thread_local! {
+    static PLAN_CACHE: RefCell<HashMap<String, QueryPlan>> = RefCell::new(HashMap::new());
+}
+
 pub(crate) fn collect_json(j: &Jetro, expr: &str) -> Result<Value, EvalError> {
-    let plan = planner::plan_query(expr);
+    let plan = cached_plan(expr);
 
     match plan.root() {
         QueryRoot::Node(root) => physical_eval::run(j, &plan, *root).map(Value::from),
         QueryRoot::SourceVm(source) => run_vm_json(j, source.as_ref()),
     }
+}
+
+fn cached_plan(expr: &str) -> QueryPlan {
+    PLAN_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some(plan) = cache.get(expr) {
+            return plan.clone();
+        }
+
+        let plan = planner::plan_query(expr);
+        if cache.len() >= PLAN_CACHE_LIMIT {
+            cache.clear();
+        }
+        cache.insert(expr.to_owned(), plan.clone());
+        plan
+    })
 }
 
 fn run_vm_json(j: &Jetro, expr: &str) -> Result<Value, EvalError> {
@@ -128,6 +153,24 @@ mod tests {
             QueryRoot::Node(root) => crate::physical_eval::run(j, &plan, *root).unwrap(),
             QueryRoot::SourceVm(_) => panic!("unexpected source VM fallback"),
         }
+    }
+
+    #[test]
+    fn repeated_collect_reuses_cached_physical_plan() {
+        let j = Jetro::from(json!({
+            "rows": [
+                {"name": "low", "score": 1},
+                {"name": "ada", "score": 901},
+                {"name": "bob", "score": 902}
+            ]
+        }));
+
+        let expr = "$.rows.filter(score > 900).first()";
+        let first = j.collect(expr).unwrap();
+        let second = j.collect(expr).unwrap();
+
+        assert_eq!(first, json!({"name": "ada", "score": 901}));
+        assert_eq!(second, first);
     }
 
     #[test]
