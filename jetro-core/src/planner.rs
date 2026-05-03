@@ -6,15 +6,15 @@
 
 use std::sync::Arc;
 
-use crate::ast::{Arg, ArrayElem, Expr, ObjField, Step};
-use crate::builtins::BuiltinCall;
+use crate::ast::{ArrayElem, Expr, ObjField, Step};
+use crate::builtins::{BuiltinCall, BuiltinMethod};
 use crate::parser;
 use crate::physical::{
     NodeId, PhysicalArrayElem, PhysicalChainStep, PhysicalObjField, PhysicalPathStep,
     PipelinePlanSource, PlanNode, QueryPlan,
 };
 use crate::pipeline::{Pipeline, Source};
-use crate::structural::{StructuralLiteral, StructuralPathStep, StructuralPlan};
+use crate::structural::{StructuralPathStep, StructuralPlan};
 use crate::value::Val;
 use crate::vm::Compiler;
 
@@ -140,83 +140,14 @@ fn lower_structural_prefix(base: &Expr, steps: &[Step]) -> Option<(StructuralPla
             Step::Index(index) => anchor.push(StructuralPathStep::Index(*index)),
             Step::Method(name, args) | Step::OptMethod(name, args) => {
                 let anchor = Arc::from(anchor);
-                let plan = match name.as_str() {
-                    "deep_shape" => lower_structural_shape(anchor, args)?,
-                    "deep_like" => lower_structural_like(anchor, args)?,
-                    _ => return None,
-                };
+                let method = BuiltinMethod::from_name(name);
+                let plan = StructuralPlan::lower_builtin(anchor, method, args)?;
                 return Some((plan, idx + 1));
             }
             _ => return None,
         }
     }
     None
-}
-
-fn lower_structural_shape(
-    anchor: Arc<[StructuralPathStep]>,
-    args: &[Arg],
-) -> Option<StructuralPlan> {
-    let Expr::Object(fields) = arg_expr(args.first()?)? else {
-        return None;
-    };
-    let mut keys = Vec::with_capacity(fields.len());
-    for field in fields {
-        match field {
-            ObjField::Short(key) => keys.push(Arc::from(key.as_str())),
-            ObjField::Kv { key, val, .. } if matches!(val, Expr::Ident(name) if name == key) => {
-                keys.push(Arc::from(key.as_str()));
-            }
-            _ => return None,
-        }
-    }
-    if keys.is_empty() {
-        return None;
-    }
-    Some(StructuralPlan::DeepShape {
-        anchor,
-        keys: Arc::from(keys),
-    })
-}
-
-fn lower_structural_like(
-    anchor: Arc<[StructuralPathStep]>,
-    args: &[Arg],
-) -> Option<StructuralPlan> {
-    let Expr::Object(fields) = arg_expr(args.first()?)? else {
-        return None;
-    };
-    let mut patterns = Vec::with_capacity(fields.len());
-    for field in fields {
-        let ObjField::Kv { key, val, .. } = field else {
-            return None;
-        };
-        patterns.push((Arc::from(key.as_str()), lower_structural_literal(val)?));
-    }
-    if patterns.is_empty() {
-        return None;
-    }
-    Some(StructuralPlan::DeepLike {
-        anchor,
-        patterns: Arc::from(patterns),
-    })
-}
-
-fn arg_expr(arg: &Arg) -> Option<&Expr> {
-    match arg {
-        Arg::Pos(expr) | Arg::Named(_, expr) => Some(expr),
-    }
-}
-
-fn lower_structural_literal(expr: &Expr) -> Option<StructuralLiteral> {
-    match expr {
-        Expr::Null => Some(StructuralLiteral::Null),
-        Expr::Bool(v) => Some(StructuralLiteral::Bool(*v)),
-        Expr::Int(v) => Some(StructuralLiteral::Int(*v)),
-        Expr::Float(v) => Some(StructuralLiteral::Float(*v)),
-        Expr::Str(v) => Some(StructuralLiteral::Str(Arc::from(v.as_str()))),
-        _ => None,
-    }
 }
 
 fn try_lower_receiver_pipeline(builder: &mut PlanBuilder, expr: &Expr) -> Option<NodeId> {

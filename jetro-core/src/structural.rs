@@ -5,6 +5,8 @@ use jetro_experimental::{StructuralIndex, TokenId, TokenKind};
 #[cfg(not(feature = "simd-json"))]
 use serde::Deserialize;
 
+use crate::ast::{Arg, Expr, ObjField};
+use crate::builtins::{BuiltinMethod, BuiltinStructural};
 use crate::context::EvalError;
 use crate::value::Val;
 
@@ -36,11 +38,82 @@ pub(crate) enum StructuralLiteral {
 }
 
 impl StructuralPlan {
+    pub(crate) fn lower_builtin(
+        anchor: Arc<[StructuralPathStep]>,
+        method: BuiltinMethod,
+        args: &[Arg],
+    ) -> Option<Self> {
+        match method.spec().structural? {
+            BuiltinStructural::DeepShape => lower_deep_shape(anchor, args),
+            BuiltinStructural::DeepLike => lower_deep_like(anchor, args),
+        }
+    }
+
     pub(crate) fn run(&self, idx: &StructuralIndex, bytes: &[u8]) -> Result<Val, EvalError> {
         match self {
             Self::DeepShape { anchor, keys } => run_deep_shape(idx, bytes, anchor, keys),
             Self::DeepLike { anchor, patterns } => run_deep_like(idx, bytes, anchor, patterns),
         }
+    }
+}
+
+fn lower_deep_shape(anchor: Arc<[StructuralPathStep]>, args: &[Arg]) -> Option<StructuralPlan> {
+    let Expr::Object(fields) = arg_expr(args.first()?)? else {
+        return None;
+    };
+    let mut keys = Vec::with_capacity(fields.len());
+    for field in fields {
+        match field {
+            ObjField::Short(key) => keys.push(Arc::from(key.as_str())),
+            ObjField::Kv { key, val, .. } if matches!(val, Expr::Ident(name) if name == key) => {
+                keys.push(Arc::from(key.as_str()));
+            }
+            _ => return None,
+        }
+    }
+    if keys.is_empty() {
+        return None;
+    }
+    Some(StructuralPlan::DeepShape {
+        anchor,
+        keys: Arc::from(keys),
+    })
+}
+
+fn lower_deep_like(anchor: Arc<[StructuralPathStep]>, args: &[Arg]) -> Option<StructuralPlan> {
+    let Expr::Object(fields) = arg_expr(args.first()?)? else {
+        return None;
+    };
+    let mut patterns = Vec::with_capacity(fields.len());
+    for field in fields {
+        let ObjField::Kv { key, val, .. } = field else {
+            return None;
+        };
+        patterns.push((Arc::from(key.as_str()), lower_literal(val)?));
+    }
+    if patterns.is_empty() {
+        return None;
+    }
+    Some(StructuralPlan::DeepLike {
+        anchor,
+        patterns: Arc::from(patterns),
+    })
+}
+
+fn arg_expr(arg: &Arg) -> Option<&Expr> {
+    match arg {
+        Arg::Pos(expr) | Arg::Named(_, expr) => Some(expr),
+    }
+}
+
+fn lower_literal(expr: &Expr) -> Option<StructuralLiteral> {
+    match expr {
+        Expr::Null => Some(StructuralLiteral::Null),
+        Expr::Bool(v) => Some(StructuralLiteral::Bool(*v)),
+        Expr::Int(v) => Some(StructuralLiteral::Int(*v)),
+        Expr::Float(v) => Some(StructuralLiteral::Float(*v)),
+        Expr::Str(v) => Some(StructuralLiteral::Str(Arc::from(v.as_str()))),
+        _ => None,
     }
 }
 

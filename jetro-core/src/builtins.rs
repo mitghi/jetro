@@ -559,7 +559,14 @@ pub struct BuiltinSpec {
     pub stage_merge: Option<BuiltinStageMerge>,
     pub cancellation: Option<BuiltinCancellation>,
     pub columnar_stage: Option<BuiltinColumnarStage>,
+    pub structural: Option<BuiltinStructural>,
     pub cost: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinStructural {
+    DeepShape,
+    DeepLike,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1008,6 +1015,7 @@ impl BuiltinSpec {
             stage_merge: None,
             cancellation: None,
             columnar_stage: None,
+            structural: None,
             cost: 1.0,
         }
     }
@@ -1100,6 +1108,11 @@ impl BuiltinSpec {
 
     fn cancellation(mut self, cancellation: BuiltinCancellation) -> Self {
         self.cancellation = Some(cancellation);
+        self
+    }
+
+    fn structural(mut self, structural: BuiltinStructural) -> Self {
+        self.structural = Some(structural);
         self
     }
 
@@ -1328,13 +1341,15 @@ impl BuiltinMethod {
             Self::SetPath | Self::DelPaths | Self::FlattenKeys | Self::UnflattenKeys => {
                 BuiltinSpec::new(Cat::Path, Card::OneToOne).indexed()
             }
-            Self::DeepFind
-            | Self::DeepShape
-            | Self::DeepLike
-            | Self::Walk
-            | Self::WalkPre
-            | Self::Rec
-            | Self::TracePath => BuiltinSpec::new(Cat::Deep, Card::Expanding).cost(20.0),
+            Self::DeepFind | Self::Walk | Self::WalkPre | Self::Rec | Self::TracePath => {
+                BuiltinSpec::new(Cat::Deep, Card::Expanding).cost(20.0)
+            }
+            Self::DeepShape => BuiltinSpec::new(Cat::Deep, Card::Expanding)
+                .structural(BuiltinStructural::DeepShape)
+                .cost(20.0),
+            Self::DeepLike => BuiltinSpec::new(Cat::Deep, Card::Expanding)
+                .structural(BuiltinStructural::DeepLike)
+                .cost(20.0),
             Self::ToCsv | Self::ToTsv => BuiltinSpec::new(Cat::Serialization, Card::OneToOne)
                 .indexed()
                 .cost(20.0),
@@ -6342,8 +6357,8 @@ mod spec_tests {
     use super::{
         BuiltinCardinality, BuiltinCategory, BuiltinColumnarStage, BuiltinKeyedReducer,
         BuiltinMethod, BuiltinNumericReducer, BuiltinSelectionPosition, BuiltinSinkAccumulator,
-        BuiltinSinkDemand, BuiltinSinkValueNeed, BuiltinStageMerge, BuiltinViewInputMode,
-        BuiltinViewMaterialization, BuiltinViewOutputMode, BuiltinViewStage,
+        BuiltinSinkDemand, BuiltinSinkValueNeed, BuiltinStageMerge, BuiltinStructural,
+        BuiltinViewInputMode, BuiltinViewMaterialization, BuiltinViewOutputMode, BuiltinViewStage,
     };
 
     #[test]
@@ -6398,6 +6413,19 @@ mod spec_tests {
 
         assert_eq!(BuiltinMethod::Sort.spec().view_stage, None);
         assert_eq!(BuiltinMethod::Upper.spec().view_stage, None);
+    }
+
+    #[test]
+    fn builtin_specs_drive_structural_lowering() {
+        assert_eq!(
+            BuiltinMethod::DeepShape.spec().structural,
+            Some(BuiltinStructural::DeepShape)
+        );
+        assert_eq!(
+            BuiltinMethod::DeepLike.spec().structural,
+            Some(BuiltinStructural::DeepLike)
+        );
+        assert_eq!(BuiltinMethod::DeepFind.spec().structural, None);
     }
 
     #[test]
