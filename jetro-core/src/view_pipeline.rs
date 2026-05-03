@@ -374,21 +374,12 @@ fn terminal_collect_plan_from(
     let source_demand = pipeline::Pipeline::segment_source_demand(suffix_stages, &body.sink)
         .chain
         .pull;
-    if let Some((last_stage, prefix_stages)) = suffix_stages.split_last() {
-        let last_idx = start + prefix_stages.len();
-        let capability = last_stage.view_capability(last_idx, body.stage_kernels.get(last_idx))?;
-        if let pipeline::ViewStageCapability::Map { kernel } = capability {
-            let collect_kernel = body.stage_kernels.get(kernel)?;
-            if !collect_kernel.is_view_native() {
-                return None;
-            }
-
-            return Some(TerminalCollectPlan {
-                prefix: terminal_collect_prefix_from(prefix_stages, body, start)?,
-                collect_kernel: collect_kernel.clone(),
-                source_demand,
-            });
-        }
+    if let Some((prefix_len, collect_kernel)) = terminal_projection_run(body, start) {
+        return Some(TerminalCollectPlan {
+            prefix: terminal_collect_prefix_from(&suffix_stages[..prefix_len], body, start)?,
+            collect_kernel,
+            source_demand,
+        });
     }
 
     Some(TerminalCollectPlan {
@@ -396,6 +387,69 @@ fn terminal_collect_plan_from(
         collect_kernel: pipeline::BodyKernel::Current,
         source_demand,
     })
+}
+
+fn terminal_projection_run(
+    body: &pipeline::PipelineBody,
+    start: usize,
+) -> Option<(usize, pipeline::BodyKernel)> {
+    let suffix_stages = body.stages.get(start..)?;
+    let mut idx = suffix_stages.len();
+    let mut kernel = pipeline::BodyKernel::Current;
+    let mut found = false;
+
+    while idx > 0 {
+        let abs_idx = start + idx - 1;
+        let Some(stage_kernel) = terminal_projection_stage_kernel(
+            &body.stages[abs_idx],
+            abs_idx,
+            body.stage_kernels.get(abs_idx),
+        ) else {
+            break;
+        };
+        kernel = compose_projection_kernels(stage_kernel, kernel);
+        found = true;
+        idx -= 1;
+    }
+
+    found.then_some((idx, kernel))
+}
+
+fn terminal_projection_stage_kernel(
+    stage: &pipeline::Stage,
+    idx: usize,
+    kernel: Option<&pipeline::BodyKernel>,
+) -> Option<pipeline::BodyKernel> {
+    if matches!(
+        stage.view_capability(idx, kernel),
+        Some(pipeline::ViewStageCapability::Map { .. })
+    ) {
+        let kernel = kernel?;
+        return kernel.is_view_native().then(|| kernel.clone());
+    }
+
+    match stage {
+        pipeline::Stage::Builtin(call) if call.spec().view_scalar => {
+            Some(pipeline::BodyKernel::BuiltinCall {
+                receiver: Box::new(pipeline::BodyKernel::Current),
+                call: call.clone(),
+            })
+        }
+        _ => None,
+    }
+}
+
+fn compose_projection_kernels(
+    first: pipeline::BodyKernel,
+    then: pipeline::BodyKernel,
+) -> pipeline::BodyKernel {
+    if matches!(then, pipeline::BodyKernel::Current) {
+        return first;
+    }
+    pipeline::BodyKernel::Compose {
+        first: Box::new(first),
+        then: Box::new(then),
+    }
 }
 
 fn terminal_collect_prefix_from(
@@ -947,6 +1001,33 @@ mod tests {
         assert!(matches!(plan.prefix[0], ViewStageCapability::Filter { .. }));
         assert!(matches!(plan.prefix[1], ViewStageCapability::Take(1)));
         assert!(matches!(plan.collect_kernel, BodyKernel::Current));
+    }
+
+    #[test]
+    fn terminal_collect_plan_composes_trailing_projection_builtins() {
+        let call = crate::builtins::BuiltinCall {
+            method: crate::builtins::BuiltinMethod::Upper,
+            args: crate::builtins::BuiltinArgs::None,
+        };
+        assert!(call.spec().view_scalar);
+        let body = PipelineBody {
+            stages: vec![
+                Stage::Map(
+                    Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                    crate::builtins::BuiltinViewStage::Map,
+                ),
+                Stage::Builtin(call),
+            ],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![BodyKernel::FieldRead(Arc::from("name")), BodyKernel::Generic],
+            sink_kernels: Vec::new(),
+        };
+
+        let plan = super::terminal_collect_plan(&body).unwrap();
+
+        assert!(plan.prefix.is_empty());
+        assert!(matches!(plan.collect_kernel, BodyKernel::Compose { .. }));
     }
 
     #[test]

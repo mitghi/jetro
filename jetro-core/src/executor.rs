@@ -566,7 +566,7 @@ mod tests {
 
     #[cfg(feature = "simd-json")]
     #[test]
-    fn tape_view_prefix_materializes_only_boundary_rows_for_generic_suffix() {
+    fn tape_view_prefix_keeps_projection_builtin_suffix_as_tape_views() {
         let j = Jetro::from_bytes(
             br#"{"people":[{"name":"al","score":1},{"name":"ada","score":901},{"name":"bob","score":902},{"name":"cat","score":3}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
         )
@@ -579,7 +579,7 @@ mod tests {
 
         assert_eq!(out, json!(["ADA", "BOB"]));
         assert!(!j.root_val_is_materialized());
-        assert_eq!(j.tape_materialized_subtrees(), 2);
+        assert_eq!(j.tape_materialized_subtrees(), 0);
     }
 
     #[cfg(feature = "simd-json")]
@@ -975,7 +975,7 @@ mod tests {
 
     #[cfg(feature = "simd-json")]
     #[test]
-    fn view_sort_topk_uses_shared_materialized_suffix_handoff() {
+    fn view_sort_topk_keeps_projection_builtin_suffix_as_tape_views() {
         let j = Jetro::from_bytes(
             br#"{"data":[{"name":"low","score":10},{"name":"top","score":30},{"name":"mid","score":20}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
         )
@@ -988,7 +988,7 @@ mod tests {
 
         assert_eq!(out, json!(["TOP", "MID"]));
         assert!(!j.root_val_is_materialized());
-        assert_eq!(j.tape_materialized_subtrees(), 2);
+        assert_eq!(j.tape_materialized_subtrees(), 0);
     }
 
     #[cfg(feature = "simd-json")]

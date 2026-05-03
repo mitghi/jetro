@@ -16,6 +16,10 @@ pub enum BodyKernel {
         receiver: Box<BodyKernel>,
         call: BuiltinCall,
     },
+    Compose {
+        first: Box<BodyKernel>,
+        then: Box<BodyKernel>,
+    },
     CmpLit {
         lhs: Box<BodyKernel>,
         op: crate::ast::BinOp,
@@ -116,6 +120,7 @@ impl BodyKernel {
             Self::BuiltinCall { receiver, call } => {
                 receiver.is_view_native() && call.spec().view_scalar
             }
+            Self::Compose { first, then } => first.is_view_native() && then.is_view_native(),
             Self::CmpLit { lhs, .. } => lhs.is_view_native(),
             Self::And(predicates) => predicates.iter().all(Self::is_view_native),
             _ => true,
@@ -470,6 +475,10 @@ fn eval_native_kernel(kernel: &BodyKernel, item: &Val) -> Result<Val, EvalError>
             call.try_apply(&recv)?
                 .ok_or_else(|| EvalError(format!("{:?}: unsupported receiver", call.method)))
         }
+        BodyKernel::Compose { first, then } => {
+            let recv = eval_native_kernel(first, item)?;
+            eval_native_kernel(then, &recv)
+        }
         BodyKernel::CmpLit { lhs, op, lit } => {
             let lhs = eval_native_kernel(lhs, item)?;
             Ok(Val::Bool(eval_cmp_op(&lhs, *op, lit)))
@@ -625,6 +634,12 @@ where
                 .try_apply(&value)
                 .ok()
                 .flatten()
+                .map(ViewKernelValue::Owned),
+        },
+        BodyKernel::Compose { first, then } => match eval_view_kernel(first, item)? {
+            ViewKernelValue::View(view) => eval_view_kernel(then, &view),
+            ViewKernelValue::Owned(value) => eval_native_kernel(then, &value)
+                .ok()
                 .map(ViewKernelValue::Owned),
         },
         BodyKernel::CmpLit { lhs, op, lit } => {

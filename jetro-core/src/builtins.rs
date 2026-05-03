@@ -1122,7 +1122,12 @@ impl BuiltinMethod {
     pub(crate) fn is_string_no_arg_view_scalar(self) -> bool {
         matches!(
             self,
-            Self::ByteLen
+            Self::Upper
+                | Self::Lower
+                | Self::Trim
+                | Self::TrimLeft
+                | Self::TrimRight
+                | Self::ByteLen
                 | Self::IsBlank
                 | Self::IsNumeric
                 | Self::IsAlpha
@@ -2093,6 +2098,27 @@ fn uint_to_val(n: u64) -> Val {
 #[inline]
 fn str_no_arg_scalar_apply(method: BuiltinMethod, value: &str) -> Option<Val> {
     match method {
+        BuiltinMethod::Upper => {
+            if value.is_ascii() {
+                let mut buf = value.to_owned();
+                buf.make_ascii_uppercase();
+                Some(Val::Str(Arc::from(buf)))
+            } else {
+                Some(Val::Str(Arc::from(value.to_uppercase())))
+            }
+        }
+        BuiltinMethod::Lower => {
+            if value.is_ascii() {
+                let mut buf = value.to_owned();
+                buf.make_ascii_lowercase();
+                Some(Val::Str(Arc::from(buf)))
+            } else {
+                Some(Val::Str(Arc::from(value.to_lowercase())))
+            }
+        }
+        BuiltinMethod::Trim => Some(Val::Str(Arc::from(value.trim()))),
+        BuiltinMethod::TrimLeft => Some(Val::Str(Arc::from(value.trim_start()))),
+        BuiltinMethod::TrimRight => Some(Val::Str(Arc::from(value.trim_end()))),
         BuiltinMethod::ByteLen => Some(Val::Int(value.len() as i64)),
         BuiltinMethod::IsBlank => Some(Val::Bool(value.chars().all(|c| c.is_whitespace()))),
         BuiltinMethod::IsNumeric => Some(Val::Bool(
