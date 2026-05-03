@@ -57,6 +57,8 @@ enum BuiltinDemandLaw {
     FilterLike,
     /// Like `take_while`: stops at the first predicate failure, so `UntilOutput(n)` becomes `FirstInput(n)`.
     TakeWhile,
+    /// Like `unique`/`unique_by`: scan until enough distinct outputs are observed.
+    UniqueLike,
     /// Like map: the output count equals the input count; passes demand through but requires whole values.
     MapLike,
     /// Like `flat_map`: output count is unbounded relative to input, so always requests all input.
@@ -73,6 +75,10 @@ enum BuiltinDemandLaw {
     Count,
     /// A numeric aggregate (sum/min/max/avg); requires all inputs with numeric-only payload.
     NumericReducer,
+    /// A predicate/keyed aggregate; requires all inputs and predicate/key evaluation.
+    KeyedReducer,
+    /// A full-input ordering barrier; downstream limits can choose strategy, but source scan remains all input.
+    OrderBarrier,
 }
 
 /// Compute the upstream `Demand` that builtin `id` must place on its source
@@ -97,6 +103,16 @@ pub(crate) fn propagate_demand(id: BuiltinId, arg: BuiltinDemandArg, downstream:
                 PullDemand::FirstInput(n) | PullDemand::UntilOutput(n) => PullDemand::FirstInput(n),
             },
             value: downstream.value.merge(ValueNeed::Predicate),
+            order: downstream.order,
+        },
+        BuiltinDemandLaw::UniqueLike => Demand {
+            pull: match downstream.pull {
+                PullDemand::All => PullDemand::All,
+                PullDemand::FirstInput(n) | PullDemand::UntilOutput(n) => {
+                    PullDemand::UntilOutput(n)
+                }
+            },
+            value: downstream.value.merge(ValueNeed::Whole),
             order: downstream.order,
         },
         BuiltinDemandLaw::MapLike => Demand {
@@ -136,6 +152,16 @@ pub(crate) fn propagate_demand(id: BuiltinId, arg: BuiltinDemandArg, downstream:
             pull: PullDemand::All,
             value: ValueNeed::Numeric,
             order: false,
+        },
+        BuiltinDemandLaw::KeyedReducer => Demand {
+            pull: PullDemand::All,
+            value: ValueNeed::Predicate,
+            order: false,
+        },
+        BuiltinDemandLaw::OrderBarrier => Demand {
+            pull: PullDemand::All,
+            value: downstream.value.merge(ValueNeed::Whole),
+            order: true,
         },
     }
 }
@@ -476,6 +502,7 @@ builtin_registry! {
     FromPairs => "from_pairs" [];
     Invert => "invert" [];
     Reverse => "reverse" [] {
+        demand: BuiltinDemandLaw::OrderBarrier,
         executor: BuiltinPipelineExecutor::Reverse,
         materialization: BuiltinPipelineMaterialization::ComposedBarrier,
         lowering: BuiltinPipelineLowering::NullaryStage(BuiltinNullaryStage::Reverse)
@@ -543,11 +570,13 @@ builtin_registry! {
         }
     };
     GroupBy => "group_by" [] {
+        demand: BuiltinDemandLaw::KeyedReducer,
         executor: BuiltinPipelineExecutor::GroupBy,
         materialization: BuiltinPipelineMaterialization::ComposedBarrier,
         lowering: BuiltinPipelineLowering::ExprStage(BuiltinExprStage::GroupBy)
     };
     CountBy => "count_by" [] {
+        demand: BuiltinDemandLaw::KeyedReducer,
         executor: BuiltinPipelineExecutor::CountBy,
         materialization: BuiltinPipelineMaterialization::Streaming,
         shape: BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 1.0, 1.0),
@@ -557,6 +586,7 @@ builtin_registry! {
         }
     };
     IndexBy => "index_by" [] {
+        demand: BuiltinDemandLaw::KeyedReducer,
         executor: BuiltinPipelineExecutor::IndexBy,
         materialization: BuiltinPipelineMaterialization::Streaming,
         shape: BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 1.0, 1.0),
@@ -600,11 +630,13 @@ builtin_registry! {
         lowering: BuiltinPipelineLowering::ExprStage(BuiltinExprStage::Filter)
     };
     Sort => "sort" ["sort_by"] {
+        demand: BuiltinDemandLaw::OrderBarrier,
         executor: BuiltinPipelineExecutor::Sort,
         materialization: BuiltinPipelineMaterialization::ComposedBarrier,
         lowering: BuiltinPipelineLowering::Sort
     };
     Unique => "unique" ["distinct"] {
+        demand: BuiltinDemandLaw::UniqueLike,
         executor: BuiltinPipelineExecutor::UniqueBy,
         materialization: BuiltinPipelineMaterialization::Streaming,
         shape: BuiltinPipelineShape::new(BuiltinCardinality::Filtering, true, 10.0, 1.0),
@@ -612,6 +644,7 @@ builtin_registry! {
         lowering: BuiltinPipelineLowering::NullaryStage(BuiltinNullaryStage::Unique)
     };
     UniqueBy => "unique_by" [] {
+        demand: BuiltinDemandLaw::UniqueLike,
         executor: BuiltinPipelineExecutor::UniqueBy,
         materialization: BuiltinPipelineMaterialization::Streaming,
         shape: BuiltinPipelineShape::new(BuiltinCardinality::Filtering, true, 10.0, 1.0),
@@ -717,6 +750,7 @@ builtin_registry! {
         }
     };
     ApproxCountDistinct => "approx_count_distinct" [] {
+        demand: BuiltinDemandLaw::KeyedReducer,
         lowering: BuiltinPipelineLowering::TerminalSink
     };
     Accumulate => "accumulate" [];
@@ -934,6 +968,9 @@ mod tests {
         let filter = BuiltinId::from_method(BuiltinMethod::Filter);
         let take = BuiltinId::from_method(BuiltinMethod::Take);
         let count = BuiltinId::from_method(BuiltinMethod::Count);
+        let unique = BuiltinId::from_method(BuiltinMethod::Unique);
+        let count_by = BuiltinId::from_method(BuiltinMethod::CountBy);
+        let sort = BuiltinId::from_method(BuiltinMethod::Sort);
 
         let demand = propagate_demand(take, BuiltinDemandArg::Usize(3), Demand::RESULT);
         assert_eq!(demand.pull, PullDemand::FirstInput(3));
@@ -946,6 +983,31 @@ mod tests {
         assert_eq!(demand.pull, PullDemand::All);
         assert_eq!(demand.value, ValueNeed::None);
         assert!(!demand.order);
+
+        let downstream = Demand {
+            pull: PullDemand::FirstInput(2),
+            value: ValueNeed::Whole,
+            order: true,
+        };
+        let demand = propagate_demand(unique, BuiltinDemandArg::None, downstream);
+        assert_eq!(demand.pull, PullDemand::UntilOutput(2));
+        assert_eq!(demand.value, ValueNeed::Whole);
+        assert!(demand.order);
+
+        let demand = propagate_demand(count_by, BuiltinDemandArg::None, Demand::RESULT);
+        assert_eq!(demand.pull, PullDemand::All);
+        assert_eq!(demand.value, ValueNeed::Predicate);
+        assert!(!demand.order);
+
+        let downstream = Demand {
+            pull: PullDemand::FirstInput(5),
+            value: ValueNeed::Predicate,
+            order: false,
+        };
+        let demand = propagate_demand(sort, BuiltinDemandArg::None, downstream);
+        assert_eq!(demand.pull, PullDemand::All);
+        assert_eq!(demand.value, ValueNeed::Whole);
+        assert!(demand.order);
     }
 
     #[test]
