@@ -1416,6 +1416,22 @@ mod tests {
         assert!(j.root_val_is_materialized());
     }
 
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn root_receiver_sort_executes_without_root_val_cache_materialization() {
+        let plan = planner::plan_query_with_context("$.sort()", planner::PlanningContext::bytes());
+        let QueryRoot::Node(root) = plan.root() else {
+            panic!("expected physical expression plan");
+        };
+        assert_no_vm_fallback(&plan, *root);
+
+        let j = Jetro::from_bytes(br#"[3,1,2]"#.to_vec()).unwrap();
+        let out = super::collect_plan_json(&j, &plan).unwrap();
+
+        assert_eq!(out, json!([1, 2, 3]));
+        assert!(!j.root_val_is_materialized());
+    }
+
     #[test]
     fn object_shape_executes_common_scalar_nodes_without_vm() {
         let expr = r#"{"gt": $.a > 1, "sum": $.a + 4, "picked": "yes" if $.ok else "no"}"#;

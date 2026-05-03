@@ -1254,6 +1254,19 @@ mod tests {
     }
 
     #[test]
+    fn root_receiver_method_chain_lowers_without_vm_fallback() {
+        let plan = plan_query(r#"$.sort()"#);
+        let QueryRoot::Node(root) = plan.root() else {
+            panic!("expected physical plan");
+        };
+        assert!(!plan.execution_facts(*root).contains_vm_fallback);
+        let PlanNode::Call { receiver, .. } = plan.node(*root) else {
+            panic!("expected root receiver call");
+        };
+        assert!(matches!(plan.node(*receiver), PlanNode::RootPath(steps) if steps.is_empty()));
+    }
+
+    #[test]
     fn object_shape_keeps_receiver_pipeline_children() {
         let plan = plan_query(
             r#"let books = $.books in {"top": books.filter(score > 900).take(2).map(title), "first": books.filter(score > 900).first()}"#,
