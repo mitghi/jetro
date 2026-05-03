@@ -269,7 +269,7 @@ impl ExecCtx<'_> {
                 Some(Ok(Val::Bool(!crate::util::is_truthy(&value))))
             }
             (BackendPreference::FastChildren, PlanNode::Binary { lhs, op, rhs }) => {
-                Some(self.eval_binary(*lhs, *op, *rhs))
+                self.eval_binary_fast(*lhs, *op, *rhs)
             }
             (BackendPreference::FastChildren, PlanNode::Kind { expr, ty, negate }) => {
                 let value = match self.eval_fast(*expr)? {
@@ -485,8 +485,14 @@ impl ExecCtx<'_> {
                     optional,
                     cond,
                 } => {
-                    if cond.is_some() {
-                        return None;
+                    if let Some(cond) = cond {
+                        let cond = match self.eval_fast(*cond)? {
+                            Ok(value) => value,
+                            Err(err) => return Some(Err(err)),
+                        };
+                        if !crate::util::is_truthy(&cond) {
+                            continue;
+                        }
                     }
                     let value = match self.eval_fast(*val)? {
                         Ok(value) => value,
@@ -497,10 +503,42 @@ impl ExecCtx<'_> {
                     }
                     map.insert(Arc::clone(key), value);
                 }
-                PhysicalObjField::Short(_)
-                | PhysicalObjField::Dynamic { .. }
-                | PhysicalObjField::Spread(_)
-                | PhysicalObjField::SpreadDeep(_) => return None,
+                PhysicalObjField::Dynamic { key, val } => {
+                    let key = match self.eval_fast(*key)? {
+                        Ok(value) => Arc::from(crate::util::val_to_key(&value).as_str()),
+                        Err(err) => return Some(Err(err)),
+                    };
+                    let value = match self.eval_fast(*val)? {
+                        Ok(value) => value,
+                        Err(err) => return Some(Err(err)),
+                    };
+                    map.insert(key, value);
+                }
+                PhysicalObjField::Spread(expr) => {
+                    if let Val::Obj(other) = match self.eval_fast(*expr)? {
+                        Ok(value) => value,
+                        Err(err) => return Some(Err(err)),
+                    } {
+                        let entries = Arc::try_unwrap(other).unwrap_or_else(|m| (*m).clone());
+                        for (key, value) in entries {
+                            map.insert(key, value);
+                        }
+                    }
+                }
+                PhysicalObjField::SpreadDeep(expr) => {
+                    if let Val::Obj(other) = match self.eval_fast(*expr)? {
+                        Ok(value) => value,
+                        Err(err) => return Some(Err(err)),
+                    } {
+                        let base = std::mem::take(&mut map);
+                        let merged =
+                            crate::util::deep_merge_concat(Val::obj(base), Val::Obj(other));
+                        if let Val::Obj(merged) = merged {
+                            map = Arc::try_unwrap(merged).unwrap_or_else(|m| (*m).clone());
+                        }
+                    }
+                }
+                PhysicalObjField::Short(_) => return None,
             }
         }
         Some(Ok(Val::obj(map)))
@@ -514,7 +552,16 @@ impl ExecCtx<'_> {
                     Ok(value) => out.push(value),
                     Err(err) => return Some(Err(err)),
                 },
-                PhysicalArrayElem::Spread(_) => return None,
+                PhysicalArrayElem::Spread(expr) => {
+                    let value = match self.eval_fast(*expr)? {
+                        Ok(value) => value,
+                        Err(err) => return Some(Err(err)),
+                    };
+                    match value.into_vals() {
+                        Ok(items) => out.extend(items),
+                        Err(value) => out.push(value),
+                    }
+                }
             }
         }
         Some(Ok(Val::arr(out)))
@@ -570,6 +617,48 @@ impl ExecCtx<'_> {
         Ok(cur)
     }
 
+    fn eval_binary_fast(
+        &mut self,
+        lhs: NodeId,
+        op: BinOp,
+        rhs: NodeId,
+    ) -> Option<Result<Val, EvalError>> {
+        if op == BinOp::And {
+            let lhs = match self.eval_fast(lhs)? {
+                Ok(value) => value,
+                Err(err) => return Some(Err(err)),
+            };
+            if !crate::util::is_truthy(&lhs) {
+                return Some(Ok(Val::Bool(false)));
+            }
+            let rhs = match self.eval_fast(rhs)? {
+                Ok(value) => value,
+                Err(err) => return Some(Err(err)),
+            };
+            return Some(Ok(Val::Bool(crate::util::is_truthy(&rhs))));
+        }
+        if op == BinOp::Or {
+            let lhs = match self.eval_fast(lhs)? {
+                Ok(value) => value,
+                Err(err) => return Some(Err(err)),
+            };
+            if crate::util::is_truthy(&lhs) {
+                return Some(Ok(lhs));
+            }
+            return self.eval_fast(rhs);
+        }
+
+        let lhs = match self.eval_fast(lhs)? {
+            Ok(value) => value,
+            Err(err) => return Some(Err(err)),
+        };
+        let rhs = match self.eval_fast(rhs)? {
+            Ok(value) => value,
+            Err(err) => return Some(Err(err)),
+        };
+        Some(self.apply_binary(lhs, op, rhs))
+    }
+
     fn eval_binary(&mut self, lhs: NodeId, op: BinOp, rhs: NodeId) -> Result<Val, EvalError> {
         if op == BinOp::And {
             let lhs = self.eval(lhs)?;
@@ -589,6 +678,10 @@ impl ExecCtx<'_> {
 
         let lhs = self.eval(lhs)?;
         let rhs = self.eval(rhs)?;
+        self.apply_binary(lhs, op, rhs)
+    }
+
+    fn apply_binary(&self, lhs: Val, op: BinOp, rhs: Val) -> Result<Val, EvalError> {
         match op {
             BinOp::Add => crate::util::add_vals(lhs, rhs),
             BinOp::Sub => crate::util::num_op(lhs, rhs, |a, b| a - b, |a, b| a - b),
