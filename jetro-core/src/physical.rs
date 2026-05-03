@@ -64,6 +64,17 @@ impl QueryPlan {
     pub(crate) fn execution_facts(&self, id: NodeId) -> ExecutionFacts {
         self.nodes[id.0].facts
     }
+
+    #[inline]
+    pub(crate) fn root_execution_facts(&self) -> ExecutionFacts {
+        match self.root {
+            QueryRoot::Node(root) => self.execution_facts(root),
+            QueryRoot::SourceVm(_) => ExecutionFacts {
+                contains_vm_fallback: true,
+                ..ExecutionFacts::default()
+            },
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -200,6 +211,11 @@ pub(crate) struct ExecutionFacts {
 }
 
 impl ExecutionFacts {
+    #[inline]
+    pub(crate) fn is_byte_native(self) -> bool {
+        self.can_avoid_root_materialization && !self.contains_vm_fallback
+    }
+
     #[inline]
     pub(crate) fn constant() -> Self {
         Self {

@@ -719,6 +719,17 @@ mod tests {
     }
 
     #[test]
+    fn root_facts_classify_byte_native_object_shape() {
+        let plan = plan_query_with_context(
+            r#"{"a": $.rows.filter(score > 10).take(1), "b": $.meta.version}"#,
+            PlanningContext::bytes(),
+        );
+        let facts = plan.root_execution_facts();
+        assert!(facts.is_byte_native());
+        assert!(facts.can_use_tape);
+    }
+
+    #[test]
     fn object_shape_facts_report_vm_fallback_children() {
         let plan = plan_query_with_context(
             r#"{"a": [x for x in $.rows if x.score > 10], "b": $.meta.version}"#,
@@ -730,6 +741,25 @@ mod tests {
         let facts = plan.execution_facts(*root);
         assert!(facts.contains_vm_fallback);
         assert!(!facts.can_avoid_root_materialization);
+    }
+
+    #[test]
+    fn root_facts_classify_vm_fallback_object_shape_as_not_byte_native() {
+        let plan = plan_query_with_context(
+            r#"{"a": [x for x in $.rows if x.score > 10], "b": $.meta.version}"#,
+            PlanningContext::bytes(),
+        );
+        let facts = plan.root_execution_facts();
+        assert!(facts.contains_vm_fallback);
+        assert!(!facts.is_byte_native());
+    }
+
+    #[test]
+    fn source_vm_plan_is_not_byte_native() {
+        let plan = QueryPlan::source_vm("$[");
+        let facts = plan.root_execution_facts();
+        assert!(facts.contains_vm_fallback);
+        assert!(!facts.is_byte_native());
     }
 
     #[test]
