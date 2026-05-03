@@ -221,7 +221,8 @@ fn select_backend_plan(
             crate::physical::BackendPreference::MaterializedSource,
             crate::physical::BackendPreference::ValView,
             crate::physical::BackendPreference::Interpreted,
-        ]),
+        ])
+        .without_interpreted_if(facts.is_byte_native()),
         _ if context.input == InputMode::Bytes
             && facts.is_byte_native()
             && !matches!(node, PlanNode::Pipeline { .. }) =>
@@ -651,7 +652,6 @@ mod tests {
                 BackendPreference::TapeRows,
                 BackendPreference::MaterializedSource,
                 BackendPreference::ValView,
-                BackendPreference::Interpreted,
             ]
         );
     }
@@ -761,6 +761,24 @@ mod tests {
         let facts = plan.root_execution_facts();
         assert!(facts.is_byte_native());
         assert!(facts.can_use_tape);
+    }
+
+    #[test]
+    fn root_facts_classify_prefix_only_pipeline_as_needing_fallback() {
+        let plan = plan_query_with_context(
+            r#"$.people.filter(score > 900).map(name).take(10).filter(@ == $.target)"#,
+            PlanningContext::bytes(),
+        );
+        let QueryRoot::Node(root) = plan.root() else {
+            panic!("expected physical plan");
+        };
+        let facts = plan.root_execution_facts();
+        assert!(facts.can_stream_rows);
+        assert!(facts.can_use_tape);
+        assert!(!facts.is_byte_native());
+        assert!(plan
+            .backend_preferences(*root)
+            .contains(&BackendPreference::Interpreted));
     }
 
     #[test]

@@ -256,13 +256,14 @@ impl ExecutionFacts {
                 let field_chain = matches!(source, PipelinePlanSource::FieldChain { .. });
                 let view_native = crate::pipeline::view_capabilities(body).is_some();
                 let view_prefix = crate::pipeline::view_prefix_capabilities(body).is_some();
+                let materialized_source = field_chain && body.can_run_with_materialized_receiver();
+                let can_complete_without_root = field_chain && (view_native || materialized_source);
                 Self {
-                    can_avoid_root_materialization: field_chain && (view_native || view_prefix),
+                    can_avoid_root_materialization: can_complete_without_root,
                     can_stream_rows: field_chain && (view_native || view_prefix),
                     can_use_tape: field_chain,
                     contains_vm_fallback: false,
-                    may_materialize_source: field_chain
-                        && body.can_run_with_materialized_receiver(),
+                    may_materialize_source: materialized_source,
                 }
             }
             PlanNode::Structural { .. } => Self {
@@ -341,6 +342,15 @@ impl BackendPlan {
         Self {
             len: len as u8,
             items,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn without_interpreted_if(self, condition: bool) -> Self {
+        if condition {
+            self.without_interpreted()
+        } else {
+            self
         }
     }
 }
