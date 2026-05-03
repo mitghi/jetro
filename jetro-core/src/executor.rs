@@ -829,6 +829,34 @@ mod tests {
 
     #[cfg(feature = "simd-json")]
     #[test]
+    fn view_group_by_reduces_tape_rows_without_materializing_root() {
+        let j = Jetro::from_bytes(
+            br#"{"books":[{"genre":"sf","title":"a"},{"genre":"fantasy","title":"b"},{"genre":"sf","title":"c"}],"unused":{"large":[1,2,3,4]}}"#
+                .to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j.collect(r#"$.books.group_by(genre)"#).unwrap();
+
+        assert_eq!(
+            out,
+            json!({
+                "sf": [
+                    {"genre": "sf", "title": "a"},
+                    {"genre": "sf", "title": "c"}
+                ],
+                "fantasy": [
+                    {"genre": "fantasy", "title": "b"}
+                ]
+            })
+        );
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 3);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
     fn view_flat_map_then_map_reads_from_tape_without_materializing_root_val() {
         let j = Jetro::from_bytes(
             br#"{"data":[{"items":[{"price":10},{"price":20}]},{"items":[{"price":30}]},{"items":[]}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),

@@ -436,11 +436,10 @@ where
         },
     )?;
 
-    let boundary_rows = vec![plan.reducer.finish()];
-    Some(run_materialized_suffix(
+    Some(run_materialized_value_suffix(
         body,
         plan.consumed_stages,
-        boundary_rows,
+        plan.reducer.finish(),
         cache,
     ))
 }
@@ -603,6 +602,22 @@ fn run_materialized_suffix(
 ) -> Result<Val, EvalError> {
     let suffix = suffix_body(body, consumed_stages)
         .with_source(pipeline::Source::Receiver(Val::arr(boundary_rows)));
+    let root = Val::Null;
+    let env = Env::new(Val::Null);
+    suffix.run_with_env(&root, &env, cache)
+}
+
+fn run_materialized_value_suffix(
+    body: &pipeline::PipelineBody,
+    consumed_stages: usize,
+    boundary_value: Val,
+    cache: Option<&dyn pipeline::PipelineData>,
+) -> Result<Val, EvalError> {
+    if consumed_stages >= body.stages.len() && matches!(body.sink, pipeline::Sink::Collect) {
+        return Ok(boundary_value);
+    }
+    let suffix =
+        suffix_body(body, consumed_stages).with_source(pipeline::Source::Receiver(boundary_value));
     let root = Val::Null;
     let env = Env::new(Val::Null);
     suffix.run_with_env(&root, &env, cache)

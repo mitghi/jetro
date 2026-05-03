@@ -1233,7 +1233,6 @@ impl BuiltinMethod {
                 spec
             }
             Self::Sort
-            | Self::GroupBy
             | Self::GroupShape
             | Self::Partition
             | Self::Window
@@ -1246,11 +1245,14 @@ impl BuiltinMethod {
                 let spec = BuiltinSpec::new(Cat::Barrier, Card::Barrier).cost(20.0);
                 match self {
                     Self::Sort | Self::Unique | Self::UniqueBy => spec,
-                    Self::GroupBy => spec.columnar_stage(BuiltinColumnarStage::GroupBy),
                     Self::Chunk | Self::Window => spec,
                     _ => spec,
                 }
             }
+            Self::GroupBy => BuiltinSpec::new(Cat::Reducer, Card::Reducing)
+                .view_stage(BuiltinViewStage::KeyedReduce)
+                .columnar_stage(BuiltinColumnarStage::GroupBy)
+                .cost(20.0),
             Self::CountBy | Self::IndexBy => BuiltinSpec::new(Cat::Reducer, Card::Reducing)
                 .view_stage(BuiltinViewStage::KeyedReduce)
                 .cost(10.0),

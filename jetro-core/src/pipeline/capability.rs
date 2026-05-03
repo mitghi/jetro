@@ -72,6 +72,7 @@ pub(crate) enum ViewStageCapability {
 pub(crate) enum ViewKeyedReducer {
     Count,
     Index,
+    Group,
 }
 
 impl ViewKeyedReducer {
@@ -79,6 +80,7 @@ impl ViewKeyedReducer {
         match method {
             BuiltinMethod::CountBy => Some(Self::Count),
             BuiltinMethod::IndexBy => Some(Self::Index),
+            BuiltinMethod::GroupBy => Some(Self::Group),
             _ => None,
         }
     }

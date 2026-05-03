@@ -21,6 +21,7 @@ pub(super) enum ViewStageReducer {
 pub(super) enum KeyedEntry {
     Count(i64),
     Value(Val),
+    Group(Vec<Val>),
 }
 
 impl ViewStageReducer {
@@ -64,6 +65,16 @@ impl ViewStageReducer {
                     pipeline::ViewKeyedReducer::Index => {
                         entries.insert(key, KeyedEntry::Value(item.materialize()));
                     }
+                    pipeline::ViewKeyedReducer::Group => match entries.entry(key) {
+                        indexmap::map::Entry::Occupied(mut entry) => {
+                            if let KeyedEntry::Group(items) = entry.get_mut() {
+                                items.push(item.materialize());
+                            }
+                        }
+                        indexmap::map::Entry::Vacant(entry) => {
+                            entry.insert(KeyedEntry::Group(vec![item.materialize()]));
+                        }
+                    },
                 }
                 Some(())
             }
@@ -79,6 +90,7 @@ impl ViewStageReducer {
                         let value = match entry {
                             KeyedEntry::Count(count) => Val::Int(count),
                             KeyedEntry::Value(value) => value,
+                            KeyedEntry::Group(items) => Val::arr(items),
                         };
                         (key.object_key(), value)
                     })
