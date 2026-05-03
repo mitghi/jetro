@@ -229,6 +229,31 @@ impl TapeData {
     /// subsequent reads don't need lifetime gymnastics with the
     /// simd-json scratch region.
     pub fn parse(mut bytes: Vec<u8>) -> Result<Arc<Self>, String> {
+        Self::parse_inner(&mut bytes)
+            .map_err(|e| e.to_string())
+            .map(|(nodes, bytes_buf)| {
+                Arc::new(Self {
+                    bytes_buf,
+                    nodes,
+                    #[cfg(test)]
+                    materialized_subtrees: AtomicUsize::new(0),
+                })
+            })
+    }
+
+    pub(crate) fn parse_or_return_bytes(mut bytes: Vec<u8>) -> Result<Arc<Self>, Vec<u8>> {
+        match Self::parse_inner(&mut bytes) {
+            Ok((nodes, bytes_buf)) => Ok(Arc::new(Self {
+                bytes_buf,
+                nodes,
+                #[cfg(test)]
+                materialized_subtrees: AtomicUsize::new(0),
+            })),
+            Err(_) => Err(bytes),
+        }
+    }
+
+    fn parse_inner(bytes: &mut Vec<u8>) -> Result<(Vec<TapeNode>, Arc<[u8]>), simd_json::Error> {
         // simd-json escape-decodes strings in place inside `bytes`.
         // Each `Node::String(&str)` borrows a slice of that buffer.
         // Capture per-string (offset, len) BEFORE moving `bytes`, then
@@ -238,7 +263,7 @@ impl TapeData {
         let base = bytes.as_ptr() as usize;
         let bytes_len = bytes.len();
         let limit = base + bytes_len;
-        let tape = simd_json::to_tape(&mut bytes).map_err(|e| e.to_string())?;
+        let tape = simd_json::to_tape(bytes)?;
         let mut nodes: Vec<TapeNode> = Vec::with_capacity(tape.0.len());
         let mut extra_buf: Vec<u8> = Vec::new();
         for n in tape.0.iter() {
@@ -273,18 +298,13 @@ impl TapeData {
         }
         drop(tape);
         let bytes_buf: Arc<[u8]> = if extra_buf.is_empty() {
-            Arc::from(bytes.into_boxed_slice())
+            Arc::from(std::mem::take(bytes).into_boxed_slice())
         } else {
-            let mut combined = bytes;
+            let mut combined = std::mem::take(bytes);
             combined.extend_from_slice(&extra_buf);
             Arc::from(combined.into_boxed_slice())
         };
-        Ok(Arc::new(Self {
-            bytes_buf,
-            nodes,
-            #[cfg(test)]
-            materialized_subtrees: AtomicUsize::new(0),
-        }))
+        Ok((nodes, bytes_buf))
     }
 
     #[cfg(test)]

@@ -376,19 +376,19 @@ impl Jetro {
     pub fn from_bytes(bytes: Vec<u8>) -> std::result::Result<Self, serde_json::Error> {
         // Cold-start path — when the simd-json feature is on, parse to a
         // TapeData first and retain it. The full Val tree builds lazily on
-        // first access via root_val().
+        // first access via root_val(). Avoid cloning the full input on the
+        // valid simd-json path; the tape owns the mutated parser buffer.
         // Falls back to the serde_json path on simd-json parse error.
         #[cfg(feature = "simd-json")]
         {
-            let raw: Arc<[u8]> = Arc::from(bytes.clone().into_boxed_slice());
-            match crate::strref::TapeData::parse(bytes) {
+            match crate::strref::TapeData::parse_or_return_bytes(bytes) {
                 Ok(tape) => {
                     return Ok(Self {
                         document: Value::Null,
                         // Lazy Val build via root_val() from retained tape.
                         root_val: OnceCell::new(),
                         objvec_cache: Default::default(),
-                        raw_bytes: Some(raw),
+                        raw_bytes: None,
                         tape: {
                             let c = OnceCell::new();
                             let _ = c.set(tape);
@@ -396,13 +396,13 @@ impl Jetro {
                         },
                     });
                 }
-                Err(_) => {
-                    let document: Value = serde_json::from_slice(&raw)?;
+                Err(bytes) => {
+                    let document: Value = serde_json::from_slice(&bytes)?;
                     return Ok(Self {
                         document,
                         root_val: OnceCell::new(),
                         objvec_cache: Default::default(),
-                        raw_bytes: Some(raw),
+                        raw_bytes: Some(Arc::from(bytes.into_boxed_slice())),
                         tape: OnceCell::new(),
                     });
                 }
