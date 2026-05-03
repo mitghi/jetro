@@ -6,8 +6,8 @@
 
 use std::sync::Arc;
 
-use crate::builtin_registry::{pipeline_stage, BuiltinId};
-use crate::builtins::{BuiltinMethod, BuiltinPipelineStage, BuiltinViewStage};
+use crate::builtin_registry::{pipeline_accepts_arity, BuiltinId};
+use crate::builtins::{BuiltinMethod, BuiltinViewStage};
 use crate::{ast::Expr, context::EvalError, value::Val};
 
 use super::stage_factory::lower_method_from_registry;
@@ -146,19 +146,8 @@ fn is_receiver_pipeline_start_method(name: &str, arity: usize) -> bool {
         return false;
     }
 
-    match arity {
-        0 => {
-            let spec = method.spec();
-            spec.sink.is_some()
-                || pipeline_stage(BuiltinId::from_method(method))
-                    == Some(BuiltinPipelineStage::Nullary)
-        }
-        1 if method == BuiltinMethod::Sort => true,
-        1 => pipeline_stage(BuiltinId::from_method(method)) == Some(BuiltinPipelineStage::Unary),
-        _ => false,
-    }
+    pipeline_accepts_arity(BuiltinId::from_method(method), arity, true)
 }
-
 
 /// Decodes a `map(expr)` argument as a nested pipeline `Plan`, enabling the `CompiledMap` stage optimisation.
 pub(super) fn try_decode_map_body(arg: &crate::ast::Arg) -> Option<Plan> {
@@ -226,7 +215,6 @@ pub(super) fn try_decode_map_body(arg: &crate::ast::Arg) -> Option<Plan> {
     Some(plan_with_kernels(stages, &kernels, sink))
 }
 
-
 /// Wraps `seed` in a single-element receiver pipeline backed by `plan` and runs it.
 pub(super) fn run_compiled_map(plan: &Plan, seed: Val) -> Result<Val, EvalError> {
     let synth = Pipeline {
@@ -239,7 +227,6 @@ pub(super) fn run_compiled_map(plan: &Plan, seed: Val) -> Result<Val, EvalError>
     };
     synth.run(&Val::Null)
 }
-
 
 // Classifies each trailing method step as a stage or sink; `None` on any unrecognised step.
 fn decode_method_chain(
@@ -276,7 +263,6 @@ fn decode_method_chain(
     Some((stages, stage_exprs, sink))
 }
 
-
 // Repeatedly applies `rewrite_step` until fixpoint (at most 16 iterations).
 fn rewrite(p: &mut PipelineBody) {
     let mut fuel = 16usize;
@@ -288,7 +274,6 @@ fn rewrite(p: &mut PipelineBody) {
         break;
     }
 }
-
 
 // Applies one rewrite pass: const-false short-circuit, adjacent map/filter fusion, map/take commutation.
 fn rewrite_step(p: &mut PipelineBody) -> bool {
@@ -385,7 +370,6 @@ fn rewrite_step(p: &mut PipelineBody) -> bool {
     false
 }
 
-
 // Returns `Some(b)` when `prog` is a single `PushBool(b)` opcode; detects constant filter stages.
 fn prog_const_bool(prog: &crate::vm::Program) -> Option<bool> {
     use crate::vm::Opcode;
@@ -398,7 +382,6 @@ fn prog_const_bool(prog: &crate::vm::Program) -> Option<bool> {
         _ => None,
     }
 }
-
 
 /// Compiles a positional argument into a VM `Program`, rewriting bare `Ident` nodes into `@.<ident>` field accesses.
 pub(super) fn compile_subexpr(arg: &crate::ast::Arg) -> Option<Arc<crate::vm::Program>> {

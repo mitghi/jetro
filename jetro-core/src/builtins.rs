@@ -12,7 +12,6 @@ use crate::value::Val;
 use indexmap::IndexMap;
 use std::sync::Arc;
 
-
 /// Pre-resolved method identifier. Carried by `CompiledCall` and pipeline
 /// plan nodes so method dispatch is an O(1) integer match, not a string hash.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -439,7 +438,6 @@ impl BuiltinMethod {
         )
     }
 }
-
 
 /// Statically-typed argument payload stored inside a [`BuiltinCall`].
 /// Each variant corresponds to the argument signature of a group of builtins,
@@ -892,15 +890,6 @@ impl BuiltinViewStage {
             Self::Take | Self::Skip => 0.5,
         }
     }
-}
-
-/// Arity of a pipeline stage as seen by the stage compiler.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BuiltinPipelineStage {
-    /// Stage takes no argument (e.g. `reverse`, `unique`).
-    Nullary,
-    /// Stage takes exactly one argument expression or lambda.
-    Unary,
 }
 
 /// Planning metadata for a builtin in the pipeline execution path.
@@ -2495,7 +2484,6 @@ fn json_view_str(recv: crate::util::JsonView<'_>) -> Option<&str> {
     }
 }
 
-
 /// Main dispatch entry point called by the tree-walking evaluator.
 ///
 /// Resolves `name` to a [`BuiltinMethod`], decodes arguments, and invokes the
@@ -3138,7 +3126,6 @@ impl BuiltinMethod {
     }
 }
 
-
 /// Per-row filter primitive: evaluates `eval` on `item` and returns its truthiness.
 /// Streaming consumers call this once per row instead of buffering the entire array.
 #[inline]
@@ -3164,7 +3151,6 @@ where
     }
     Ok(out)
 }
-
 
 /// Bounded filter: like [`filter_apply`] but stops after collecting `max_keep` matching items.
 /// Pass `None` for `max_keep` to collect all matches (equivalent to `filter_apply`).
@@ -3195,7 +3181,6 @@ where
     Ok(out)
 }
 
-
 /// Per-row map primitive: evaluates `eval` on `item` and returns the projected value.
 #[inline]
 pub fn map_one<F>(item: &Val, mut eval: F) -> Result<Val, EvalError>
@@ -3217,7 +3202,6 @@ where
     }
     Ok(out)
 }
-
 
 /// Bounded map: like [`map_apply`] but stops after emitting `max_emit` projected values.
 #[inline]
@@ -3245,7 +3229,6 @@ where
     Ok(out)
 }
 
-
 /// Per-row flat_map primitive: evaluates `eval`, then flattens one level if the result is an array.
 /// Returns a `SmallVec` to avoid heap allocation for the common single-element case.
 #[inline]
@@ -3264,7 +3247,6 @@ where
     })
 }
 
-
 /// Buffered flat_map: maps and flattens every element into a single output vector.
 #[inline]
 pub fn flat_map_apply<F>(items: Vec<Val>, mut eval: F) -> Result<Vec<Val>, EvalError>
@@ -3277,7 +3259,6 @@ where
     }
     Ok(out)
 }
-
 
 /// Natural (ascending) sort. Specialises for homogeneous `IntVec` and `FloatVec` arrays
 /// before falling back to the generic `cmp_vals` comparator.
@@ -4001,7 +3982,6 @@ where
     Ok(Val::obj(out))
 }
 
-
 /// Per-row primitive for `take_while`: returns true while the predicate holds.
 #[inline]
 pub fn take_while_one<F>(item: &Val, eval: F) -> Result<bool, EvalError>
@@ -4029,7 +4009,6 @@ where
     filter_one(item, eval)
 }
 
-
 /// Buffered `take_while`: keeps the leading elements satisfying the predicate, stops at the first falsy result.
 #[inline]
 pub fn take_while_apply<F>(items: Vec<Val>, mut eval: F) -> Result<Vec<Val>, EvalError>
@@ -4045,7 +4024,6 @@ where
     }
     Ok(out)
 }
-
 
 /// Buffered `drop_while`: skips leading elements satisfying the predicate, then passes the rest.
 #[inline]
@@ -4067,7 +4045,6 @@ where
     Ok(out)
 }
 
-
 /// Splits elements into two groups: those satisfying the predicate (first) and those that don't (second).
 #[inline]
 pub fn partition_apply<F>(items: Vec<Val>, mut eval: F) -> Result<(Vec<Val>, Vec<Val>), EvalError>
@@ -4085,7 +4062,6 @@ where
     }
     Ok((yes, no))
 }
-
 
 /// Groups elements by a key expression, returning an `IndexMap<key, [elements]>`.
 /// Insertion order of the first occurrence of each key is preserved.
@@ -4106,7 +4082,6 @@ where
     }
     Ok(map)
 }
-
 
 /// Counts elements per key expression, returning an `IndexMap<key, Int>`.
 #[inline]
@@ -4129,7 +4104,6 @@ where
     Ok(map)
 }
 
-
 /// Indexes elements by a key expression, returning `IndexMap<key, last_matching_element>`.
 /// When two elements share a key, the last one wins.
 #[inline]
@@ -4149,7 +4123,6 @@ where
     Ok(map)
 }
 
-
 /// Filters an object's entries, keeping only those for which `keep(key, value)` is truthy.
 #[inline]
 pub fn filter_object_apply<F>(
@@ -4167,7 +4140,6 @@ where
     }
     Ok(out)
 }
-
 
 /// Applies `eval` to every key of the object and rebuilds the map with the new keys.
 #[inline]
@@ -4187,7 +4159,6 @@ where
     Ok(out)
 }
 
-
 /// Returns an array of every key in the object, or an empty array for non-objects.
 #[inline]
 pub fn keys_apply(recv: &Val) -> Val {
@@ -4198,7 +4169,6 @@ pub fn keys_apply(recv: &Val) -> Val {
     )
 }
 
-
 /// Returns an array of every value in the object, or an empty array for non-objects.
 #[inline]
 pub fn values_apply(recv: &Val) -> Val {
@@ -4208,7 +4178,6 @@ pub fn values_apply(recv: &Val) -> Val {
             .unwrap_or_default(),
     )
 }
-
 
 /// Returns `[[key, value], ...]` pairs for each entry in the object.
 #[inline]
@@ -4223,7 +4192,6 @@ pub fn entries_apply(recv: &Val) -> Val {
             .unwrap_or_default(),
     )
 }
-
 
 /// Returns a substring by character indices, supporting negative indexing.
 /// Returns a zero-copy `StrSlice` view when the input is ASCII; allocates otherwise.
@@ -4287,7 +4255,6 @@ pub fn slice_apply(recv: Val, start: i64, end: Option<i64>) -> Val {
     ))
 }
 
-
 /// Splits a string on `sep` and returns the parts as an array of strings.
 #[inline]
 pub fn split_apply(recv: &Val, sep: &str) -> Option<Val> {
@@ -4303,7 +4270,6 @@ pub fn split_apply(recv: &Val, sep: &str) -> Option<Val> {
     ))
 }
 
-
 /// Splits a slice into non-overlapping chunks of size `n` (last chunk may be smaller).
 #[inline]
 pub fn chunk_apply(items: &[Val], n: usize) -> Vec<Val> {
@@ -4311,14 +4277,12 @@ pub fn chunk_apply(items: &[Val], n: usize) -> Vec<Val> {
     items.chunks(n).map(|c| Val::arr(c.to_vec())).collect()
 }
 
-
 /// Produces all contiguous windows of size `n` from a slice of values.
 #[inline]
 pub fn window_apply(items: &[Val], n: usize) -> Vec<Val> {
     let n = n.max(1);
     items.windows(n).map(|w| Val::arr(w.to_vec())).collect()
 }
-
 
 /// Replaces `needle` with `replacement` in a string. When `all` is true replaces every
 /// occurrence; otherwise only the first. Returns the original value unchanged if `needle` is absent.
@@ -4340,14 +4304,12 @@ pub fn replace_apply(recv: Val, needle: &str, replacement: &str, all: bool) -> O
     Some(Val::Str(Arc::<str>::from(out)))
 }
 
-
 /// Applies a `&str → String` transform to the string inside `recv`, wrapping the result in `Val::Str`.
 #[inline]
 fn map_str_owned(recv: &Val, f: impl FnOnce(&str) -> String) -> Option<Val> {
     let s = recv.as_str_ref()?;
     Some(Val::Str(Arc::<str>::from(f(s).as_str())))
 }
-
 
 /// Converts the string to all-uppercase (ASCII fast path).
 #[inline]
@@ -4363,7 +4325,6 @@ pub fn upper_apply(recv: &Val) -> Option<Val> {
     })
 }
 
-
 /// Converts the string to all-lowercase (ASCII fast path).
 #[inline]
 pub fn lower_apply(recv: &Val) -> Option<Val> {
@@ -4378,13 +4339,11 @@ pub fn lower_apply(recv: &Val) -> Option<Val> {
     })
 }
 
-
 /// Strips leading and trailing whitespace from a string.
 #[inline]
 pub fn trim_apply(recv: &Val) -> Option<Val> {
     map_str_owned(recv, |s| s.trim().to_owned())
 }
-
 
 /// Strips leading whitespace from a string.
 #[inline]
@@ -4392,13 +4351,11 @@ pub fn trim_left_apply(recv: &Val) -> Option<Val> {
     map_str_owned(recv, |s| s.trim_start().to_owned())
 }
 
-
 /// Strips trailing whitespace from a string.
 #[inline]
 pub fn trim_right_apply(recv: &Val) -> Option<Val> {
     map_str_owned(recv, |s| s.trim_end().to_owned())
 }
-
 
 /// Uppercases the first character and lowercases the rest of a string.
 #[inline]
@@ -4415,7 +4372,6 @@ pub fn capitalize_apply(recv: &Val) -> Option<Val> {
         out
     })
 }
-
 
 /// Capitalises the first letter of each whitespace-delimited word.
 #[inline]
@@ -4442,7 +4398,6 @@ pub fn title_case_apply(recv: &Val) -> Option<Val> {
     })
 }
 
-
 /// Escapes `<`, `>`, `&`, `"`, and `'` to their HTML entity equivalents.
 #[inline]
 pub fn html_escape_apply(recv: &Val) -> Option<Val> {
@@ -4462,7 +4417,6 @@ pub fn html_escape_apply(recv: &Val) -> Option<Val> {
     })
 }
 
-
 /// Converts HTML entities (`&lt;`, `&gt;`, `&amp;`, `&quot;`, `&#39;`) back to their characters.
 #[inline]
 pub fn html_unescape_apply(recv: &Val) -> Option<Val> {
@@ -4474,7 +4428,6 @@ pub fn html_unescape_apply(recv: &Val) -> Option<Val> {
             .replace("&#39;", "'")
     })
 }
-
 
 /// Percent-encodes a string using RFC 3986 unreserved characters (`A-Z a-z 0-9 - _ . ~`).
 #[inline]
@@ -4496,7 +4449,6 @@ pub fn url_encode_apply(recv: &Val) -> Option<Val> {
         out
     })
 }
-
 
 /// Decodes a percent-encoded URL string, also converting `+` to space.
 #[inline]
@@ -4526,7 +4478,6 @@ pub fn url_decode_apply(recv: &Val) -> Option<Val> {
     })
 }
 
-
 /// Encodes a string's bytes as standard (non-padded) Base64.
 #[inline]
 pub fn to_base64_apply(recv: &Val) -> Option<Val> {
@@ -4534,7 +4485,6 @@ pub fn to_base64_apply(recv: &Val) -> Option<Val> {
         crate::builtin_helpers::base64_encode(s.as_bytes())
     })
 }
-
 
 /// Removes the common leading whitespace prefix from every non-blank line.
 #[inline]
@@ -4559,7 +4509,6 @@ pub fn dedent_apply(recv: &Val) -> Option<Val> {
     })
 }
 
-
 /// Converts a string to `snake_case` by splitting on word boundaries and joining with `_`.
 #[inline]
 pub fn snake_case_apply(recv: &Val) -> Option<Val> {
@@ -4568,7 +4517,6 @@ pub fn snake_case_apply(recv: &Val) -> Option<Val> {
     })
 }
 
-
 /// Converts a string to `kebab-case` by splitting on word boundaries and joining with `-`.
 #[inline]
 pub fn kebab_case_apply(recv: &Val) -> Option<Val> {
@@ -4576,7 +4524,6 @@ pub fn kebab_case_apply(recv: &Val) -> Option<Val> {
         crate::builtin_helpers::split_words_lower(s).join("-")
     })
 }
-
 
 /// Converts a string to `camelCase` (first word lowercase, subsequent words title-cased).
 #[inline]
@@ -4595,7 +4542,6 @@ pub fn camel_case_apply(recv: &Val) -> Option<Val> {
     })
 }
 
-
 /// Converts a string to `PascalCase` (every word title-cased, no separator).
 #[inline]
 pub fn pascal_case_apply(recv: &Val) -> Option<Val> {
@@ -4609,20 +4555,17 @@ pub fn pascal_case_apply(recv: &Val) -> Option<Val> {
     })
 }
 
-
 /// Reverses the Unicode codepoints of a string.
 #[inline]
 pub fn reverse_str_apply(recv: &Val) -> Option<Val> {
     map_str_owned(recv, |s| s.chars().rev().collect::<String>())
 }
 
-
 /// Applies a `&str → Val` transform to the string inside `recv`.
 #[inline]
 fn map_str_val(recv: &Val, f: impl FnOnce(&str) -> Val) -> Option<Val> {
     Some(f(recv.as_str_ref()?))
 }
-
 
 /// Splits a string on newlines and returns each line as a `Val::Str`.
 #[inline]
@@ -4631,7 +4574,6 @@ pub fn lines_apply(recv: &Val) -> Option<Val> {
         Val::arr(s.lines().map(|l| Val::Str(Arc::from(l))).collect())
     })
 }
-
 
 /// Splits a string on whitespace and returns each token as a `Val::Str`.
 #[inline]
@@ -4645,7 +4587,6 @@ pub fn words_apply(recv: &Val) -> Option<Val> {
     })
 }
 
-
 /// Returns each Unicode character as a single-char `Val::Str`.
 #[inline]
 pub fn chars_apply(recv: &Val) -> Option<Val> {
@@ -4657,7 +4598,6 @@ pub fn chars_apply(recv: &Val) -> Option<Val> {
         )
     })
 }
-
 
 /// Returns each Unicode code point re-encoded as a UTF-8 `Val::Str` (same as `chars` for BMP).
 #[inline]
@@ -4673,7 +4613,6 @@ pub fn chars_of_apply(recv: &Val) -> Option<Val> {
     })
 }
 
-
 /// Returns each byte of the string's UTF-8 encoding as a `Val::Int`.
 #[inline]
 pub fn bytes_of_apply(recv: &Val) -> Option<Val> {
@@ -4682,7 +4621,6 @@ pub fn bytes_of_apply(recv: &Val) -> Option<Val> {
         Val::int_vec(v)
     })
 }
-
 
 /// Returns the ceiling (round-up) of a numeric value as `Val::Int`.
 #[inline]
@@ -4702,7 +4640,6 @@ pub fn try_ceil_apply(recv: &Val) -> Result<Option<Val>, EvalError> {
         .ok_or_else(|| EvalError("ceil: expected number".into()))
 }
 
-
 /// Returns the floor (round-down) of a numeric value as `Val::Int`.
 #[inline]
 pub fn floor_apply(recv: &Val) -> Option<Val> {
@@ -4720,7 +4657,6 @@ pub fn try_floor_apply(recv: &Val) -> Result<Option<Val>, EvalError> {
         .map(Some)
         .ok_or_else(|| EvalError("floor: expected number".into()))
 }
-
 
 /// Rounds a numeric value to the nearest integer.
 #[inline]
@@ -4740,7 +4676,6 @@ pub fn try_round_apply(recv: &Val) -> Result<Option<Val>, EvalError> {
         .ok_or_else(|| EvalError("round: expected number".into()))
 }
 
-
 /// Returns the absolute value of an integer or float.
 #[inline]
 pub fn abs_apply(recv: &Val) -> Option<Val> {
@@ -4759,7 +4694,6 @@ pub fn try_abs_apply(recv: &Val) -> Result<Option<Val>, EvalError> {
         .ok_or_else(|| EvalError("abs: expected number".into()))
 }
 
-
 /// Parses the string as a base-10 `i64`; returns `Val::Null` on failure.
 #[inline]
 pub fn parse_int_apply(recv: &Val) -> Option<Val> {
@@ -4768,7 +4702,6 @@ pub fn parse_int_apply(recv: &Val) -> Option<Val> {
     })
 }
 
-
 /// Parses the string as an `f64`; returns `Val::Null` on failure.
 #[inline]
 pub fn parse_float_apply(recv: &Val) -> Option<Val> {
@@ -4776,7 +4709,6 @@ pub fn parse_float_apply(recv: &Val) -> Option<Val> {
         s.trim().parse::<f64>().map(Val::Float).unwrap_or(Val::Null)
     })
 }
-
 
 /// Parses common truthy/falsy string representations to `Val::Bool`; returns `Val::Null` otherwise.
 /// Recognises `true/yes/1/on` and `false/no/0/off` (case-insensitive).
@@ -4789,7 +4721,6 @@ pub fn parse_bool_apply(recv: &Val) -> Option<Val> {
     })
 }
 
-
 /// Decodes a Base64 string to its UTF-8 representation; returns `Val::Null` for invalid input.
 #[inline]
 pub fn from_base64_apply(recv: &Val) -> Option<Val> {
@@ -4799,13 +4730,11 @@ pub fn from_base64_apply(recv: &Val) -> Option<Val> {
     })
 }
 
-
 /// Returns the string repeated `n` times.
 #[inline]
 pub fn repeat_apply(recv: &Val, n: usize) -> Option<Val> {
     Some(Val::Str(Arc::from(recv.as_str_ref()?.repeat(n))))
 }
-
 
 /// Removes `prefix` from the beginning of the string if present; returns the original otherwise.
 #[inline]
@@ -4817,7 +4746,6 @@ pub fn strip_prefix_apply(recv: &Val, prefix: &str) -> Option<Val> {
     })
 }
 
-
 /// Removes `suffix` from the end of the string if present; returns the original otherwise.
 #[inline]
 pub fn strip_suffix_apply(recv: &Val, suffix: &str) -> Option<Val> {
@@ -4827,7 +4755,6 @@ pub fn strip_suffix_apply(recv: &Val, suffix: &str) -> Option<Val> {
         None => recv.clone(),
     })
 }
-
 
 /// Left-pads the string to `width` characters with `fill`; returns the original when already wide enough.
 #[inline]
@@ -4841,7 +4768,6 @@ pub fn pad_left_apply(recv: &Val, width: usize, fill: char) -> Option<Val> {
     Some(Val::Str(Arc::from(pad + s)))
 }
 
-
 /// Right-pads the string to `width` characters with `fill`; returns the original when already wide enough.
 #[inline]
 pub fn pad_right_apply(recv: &Val, width: usize, fill: char) -> Option<Val> {
@@ -4853,7 +4779,6 @@ pub fn pad_right_apply(recv: &Val, width: usize, fill: char) -> Option<Val> {
     let pad: String = std::iter::repeat(fill).take(width - n).collect();
     Some(Val::Str(Arc::from(s.to_string() + &pad)))
 }
-
 
 /// Centers the string within `width` characters by padding both sides with `fill`.
 #[inline]
@@ -4877,7 +4802,6 @@ pub fn center_apply(recv: &Val, width: usize, fill: char) -> Option<Val> {
     Some(Val::Str(Arc::from(out)))
 }
 
-
 /// Prepends `n` spaces to each line of the string.
 #[inline]
 pub fn indent_apply(recv: &Val, n: usize) -> Option<Val> {
@@ -4890,7 +4814,6 @@ pub fn indent_apply(recv: &Val, n: usize) -> Option<Val> {
         .join("\n");
     Some(Val::Str(Arc::from(out)))
 }
-
 
 /// Finds every non-overlapping occurrence of `pat` and returns an array of the matched strings.
 #[inline]
@@ -4907,7 +4830,6 @@ pub fn scan_apply(recv: &Val, pat: &str) -> Option<Val> {
     Some(Val::arr(out))
 }
 
-
 /// Applies a numeric aggregate (`sum`, `avg`, `min`, `max`) to an array or typed numeric vector.
 /// Returns `Val::Null` when the receiver is not an array-like type.
 #[inline]
@@ -4919,7 +4841,6 @@ pub fn numeric_aggregate_apply(recv: &Val, method: BuiltinMethod) -> Val {
         _ => Val::Null,
     }
 }
-
 
 /// Numeric aggregate with a projection: evaluates `eval` on each element first,
 /// then aggregates all numeric results. Non-numeric projected values are silently skipped.
@@ -5066,7 +4987,6 @@ fn numeric_aggregate_values(a: &[Val], method: BuiltinMethod) -> Val {
     }
 }
 
-
 /// Returns the logical length of an array, object, or string (char count), or `None` for scalars.
 #[inline]
 pub fn len_apply(recv: &Val) -> Option<Val> {
@@ -5084,7 +5004,6 @@ pub fn len_apply(recv: &Val) -> Option<Val> {
     Some(Val::Int(n as i64))
 }
 
-
 /// Removes all `Val::Null` elements from an array.
 #[inline]
 pub fn compact_apply(recv: &Val) -> Option<Val> {
@@ -5097,7 +5016,6 @@ pub fn compact_apply(recv: &Val) -> Option<Val> {
     Some(Val::arr(kept))
 }
 
-
 /// Recursively flattens nested arrays up to `depth` levels deep.
 #[inline]
 pub fn flatten_depth_apply(recv: &Val, depth: usize) -> Option<Val> {
@@ -5107,7 +5025,6 @@ pub fn flatten_depth_apply(recv: &Val, depth: usize) -> Option<Val> {
         None
     }
 }
-
 
 /// Reverses any sequence type: arrays, typed vectors, and strings (by Unicode codepoints).
 #[inline]
@@ -5140,7 +5057,6 @@ pub fn reverse_any_apply(recv: &Val) -> Option<Val> {
         _ => return None,
     })
 }
-
 
 /// Removes duplicate elements from an array, preserving first-seen order.
 #[inline]
@@ -5189,7 +5105,6 @@ fn numeric_options_to_val(out: Vec<Option<f64>>) -> Val {
     }
 }
 
-
 /// Computes a rolling sum over a window of size `n`; positions before the first full window are `Null`.
 #[inline]
 pub fn rolling_sum_apply(recv: &Val, n: usize) -> Option<Val> {
@@ -5216,7 +5131,6 @@ pub fn rolling_sum_apply(recv: &Val, n: usize) -> Option<Val> {
     }
     Some(numeric_options_to_val(out))
 }
-
 
 /// Computes a rolling average over a window of size `n`; positions before the first full window are `Null`.
 #[inline]
@@ -5248,7 +5162,6 @@ pub fn rolling_avg_apply(recv: &Val, n: usize) -> Option<Val> {
     Some(numeric_options_to_val(out))
 }
 
-
 /// Computes a rolling minimum over a window of size `n`; positions before the first full window are `Null`.
 #[inline]
 pub fn rolling_min_apply(recv: &Val, n: usize) -> Option<Val> {
@@ -5271,7 +5184,6 @@ pub fn rolling_min_apply(recv: &Val, n: usize) -> Option<Val> {
     }
     Some(numeric_options_to_val(out))
 }
-
 
 /// Computes a rolling maximum over a window of size `n`; positions before the first full window are `Null`.
 #[inline]
@@ -5296,7 +5208,6 @@ pub fn rolling_max_apply(recv: &Val, n: usize) -> Option<Val> {
     Some(numeric_options_to_val(out))
 }
 
-
 /// Shifts values backward by `n` positions; the first `n` positions are `Null`.
 #[inline]
 pub fn lag_apply(recv: &Val, n: usize) -> Option<Val> {
@@ -5307,7 +5218,6 @@ pub fn lag_apply(recv: &Val, n: usize) -> Option<Val> {
     }
     Some(numeric_options_to_val(out))
 }
-
 
 /// Shifts values forward by `n` positions; the last `n` positions are `Null`.
 #[inline]
@@ -5320,7 +5230,6 @@ pub fn lead_apply(recv: &Val, n: usize) -> Option<Val> {
     }
     Some(numeric_options_to_val(out))
 }
-
 
 /// Returns element-wise first differences (`v[i] - v[i-1]`); the first element is `Null`.
 #[inline]
@@ -5336,7 +5245,6 @@ pub fn diff_window_apply(recv: &Val) -> Option<Val> {
     Some(numeric_options_to_val(out))
 }
 
-
 /// Returns element-wise percentage change `(v[i] - v[i-1]) / v[i-1]`; division by zero and the first element yield `Null`.
 #[inline]
 pub fn pct_change_apply(recv: &Val) -> Option<Val> {
@@ -5350,7 +5258,6 @@ pub fn pct_change_apply(recv: &Val) -> Option<Val> {
     }
     Some(numeric_options_to_val(out))
 }
-
 
 /// Computes a cumulative maximum: each position holds the running max up to that index.
 #[inline]
@@ -5374,7 +5281,6 @@ pub fn cummax_apply(recv: &Val) -> Option<Val> {
     Some(numeric_options_to_val(out))
 }
 
-
 /// Computes a cumulative minimum: each position holds the running min up to that index.
 #[inline]
 pub fn cummin_apply(recv: &Val) -> Option<Val> {
@@ -5396,7 +5302,6 @@ pub fn cummin_apply(recv: &Val) -> Option<Val> {
     }
     Some(numeric_options_to_val(out))
 }
-
 
 /// Normalises each element to its z-score `(v - mean) / stddev`; returns 0 when stddev is zero, `Null` for non-numeric.
 #[inline]
@@ -5420,7 +5325,6 @@ pub fn zscore_apply(recv: &Val) -> Option<Val> {
     Some(numeric_options_to_val(out))
 }
 
-
 /// Returns the first `n` elements of an array; when `n == 1` returns a scalar instead of a single-element array.
 #[inline]
 pub fn first_apply(recv: &Val, n: i64) -> Option<Val> {
@@ -5434,7 +5338,6 @@ pub fn first_apply(recv: &Val, n: i64) -> Option<Val> {
         Some(Val::Null)
     }
 }
-
 
 /// Returns the last `n` elements of an array; when `n == 1` returns a scalar instead of a single-element array.
 #[inline]
@@ -5451,13 +5354,11 @@ pub fn last_apply(recv: &Val, n: i64) -> Option<Val> {
     }
 }
 
-
 /// Returns the element at index `i` (negative indices count from the end); delegates to `Val::get_index`.
 #[inline]
 pub fn nth_any_apply(recv: &Val, i: i64) -> Option<Val> {
     Some(recv.get_index(i))
 }
-
 
 /// Appends `item` to the end of an array, returning a new array.
 #[inline]
@@ -5467,7 +5368,6 @@ pub fn append_apply(recv: &Val, item: &Val) -> Option<Val> {
     Some(Val::arr(v))
 }
 
-
 /// Inserts `item` at the beginning of an array, returning a new array.
 #[inline]
 pub fn prepend_apply(recv: &Val, item: &Val) -> Option<Val> {
@@ -5475,7 +5375,6 @@ pub fn prepend_apply(recv: &Val, item: &Val) -> Option<Val> {
     v.insert(0, item.clone());
     Some(Val::arr(v))
 }
-
 
 /// Removes all elements from an array that are structurally equal to `target`.
 #[inline]
@@ -5491,7 +5390,6 @@ pub fn remove_value_apply(recv: &Val, target: &Val) -> Option<Val> {
     Some(Val::arr(out))
 }
 
-
 /// Pairs each element with its zero-based index, producing `[{index, value}, …]`.
 #[inline]
 pub fn enumerate_apply(recv: &Val) -> Option<Val> {
@@ -5503,7 +5401,6 @@ pub fn enumerate_apply(recv: &Val) -> Option<Val> {
         .collect();
     Some(Val::arr(out))
 }
-
 
 /// Joins all array elements into a single string separated by `sep`; non-string elements are coerced.
 #[inline]
@@ -5555,7 +5452,6 @@ pub fn join_apply(recv: &Val, sep: &str) -> Option<Val> {
     Some(Val::Str(Arc::from(out)))
 }
 
-
 /// Returns the zero-based index of the first occurrence of `target`, or `Val::Null` if not found.
 #[inline]
 pub fn index_value_apply(recv: &Val, target: &Val) -> Option<Val> {
@@ -5567,7 +5463,6 @@ pub fn index_value_apply(recv: &Val, target: &Val) -> Option<Val> {
     }
     Some(Val::Null)
 }
-
 
 /// Returns all zero-based indices where `target` appears in the array.
 #[inline]
@@ -5581,7 +5476,6 @@ pub fn indices_of_apply(recv: &Val, target: &Val) -> Option<Val> {
         .collect();
     Some(Val::int_vec(out))
 }
-
 
 /// Unnests the array-valued `field` of each row object: each element of the nested array becomes
 /// its own row, copying all other fields.
@@ -5610,7 +5504,6 @@ pub fn explode_apply(recv: &Val, field: &str) -> Option<Val> {
     }
     Some(Val::arr(out))
 }
-
 
 /// Inverse of `explode`: groups rows by all fields except `field`, collecting the `field` values
 /// into an array on each merged row.
@@ -5644,7 +5537,6 @@ pub fn implode_apply(recv: &Val, field: &str) -> Option<Val> {
     Some(Val::arr(out))
 }
 
-
 /// Produces all adjacent pairs `[[a,b],[b,c],…]` from an array.
 #[inline]
 pub fn pairwise_apply(recv: &Val) -> Option<Val> {
@@ -5656,7 +5548,6 @@ pub fn pairwise_apply(recv: &Val) -> Option<Val> {
     }
     Some(Val::arr(out))
 }
-
 
 /// Splits an array into non-overlapping chunks of size `n`; the last chunk may be smaller.
 #[inline]
@@ -5672,7 +5563,6 @@ pub fn chunk_arr_apply(recv: &Val, n: usize) -> Option<Val> {
     }
 }
 
-
 /// Produces all overlapping sliding windows of size `n` from an array.
 #[inline]
 pub fn window_arr_apply(recv: &Val, n: usize) -> Option<Val> {
@@ -5686,7 +5576,6 @@ pub fn window_arr_apply(recv: &Val, n: usize) -> Option<Val> {
         None
     }
 }
-
 
 /// Returns elements that appear in both `recv` and `other` (set intersection, order from `recv`).
 #[inline]
@@ -5704,7 +5593,6 @@ pub fn intersect_apply(recv: &Val, other: &[Val]) -> Option<Val> {
         None
     }
 }
-
 
 /// Returns all elements from `recv` plus elements in `other` not already present (set union).
 #[inline]
@@ -5724,7 +5612,6 @@ pub fn union_apply(recv: &Val, other: &[Val]) -> Option<Val> {
     }
 }
 
-
 /// Returns elements from `recv` that do not appear in `other` (set difference).
 #[inline]
 pub fn diff_apply(recv: &Val, other: &[Val]) -> Option<Val> {
@@ -5741,7 +5628,6 @@ pub fn diff_apply(recv: &Val, other: &[Val]) -> Option<Val> {
         None
     }
 }
-
 
 /// Converts an array of `[key, value]` pairs or `{key, val}` objects into an object.
 #[inline]
@@ -5776,7 +5662,6 @@ pub fn from_pairs_apply(recv: &Val) -> Option<Val> {
     Some(Val::Obj(Arc::new(m)))
 }
 
-
 /// Swaps keys and values of an object; values are coerced to strings to become new keys.
 #[inline]
 pub fn invert_apply(recv: &Val) -> Option<Val> {
@@ -5793,7 +5678,6 @@ pub fn invert_apply(recv: &Val) -> Option<Val> {
     Some(Val::Obj(Arc::new(out)))
 }
 
-
 /// Shallow-merges `other` into `recv`; `other` keys overwrite `recv` keys.
 #[inline]
 pub fn merge_apply(recv: &Val, other: &Val) -> Option<Val> {
@@ -5806,13 +5690,11 @@ pub fn merge_apply(recv: &Val, other: &Val) -> Option<Val> {
     Some(Val::Obj(Arc::new(out)))
 }
 
-
 /// Recursively merges `other` into `recv`, combining nested objects rather than replacing them.
 #[inline]
 pub fn deep_merge_apply(recv: &Val, other: &Val) -> Option<Val> {
     Some(crate::util::deep_merge(recv.clone(), other.clone()))
 }
-
 
 /// Fills missing or null keys of `recv` with values from `other` (non-destructive merge).
 #[inline]
@@ -5828,7 +5710,6 @@ pub fn defaults_apply(recv: &Val, other: &Val) -> Option<Val> {
     }
     Some(Val::Obj(Arc::new(out)))
 }
-
 
 /// Renames keys in an object according to `renames` (`{old: new, …}`), preserving other keys.
 #[inline]
@@ -5847,7 +5728,6 @@ pub fn rename_apply(recv: &Val, renames: &Val) -> Option<Val> {
     }
     Some(Val::Obj(Arc::new(out)))
 }
-
 
 /// A single resolved segment of a dot/bracket path string.
 pub(crate) enum PathSeg {
@@ -6044,14 +5924,12 @@ fn insert_nested(obj: &mut IndexMap<Arc<str>, Val>, parts: &[&str], val: Val) {
     }
 }
 
-
 /// Retrieves the value at a dot/bracket `path` string, returning `Val::Null` for missing nodes.
 #[inline]
 pub fn get_path_apply(recv: &Val, path: &str) -> Option<Val> {
     let segs = parse_path_segs(path);
     Some(get_path_impl(recv, &segs))
 }
-
 
 /// Returns `Val::Bool(true)` when a value exists (non-null) at the given dot/bracket path.
 #[inline]
@@ -6061,14 +5939,12 @@ pub fn has_path_apply(recv: &Val, path: &str) -> Option<Val> {
     Some(Val::Bool(found))
 }
 
-
 /// Returns `Val::Bool(true)` when the object has a top-level key named `key`.
 #[inline]
 pub fn has_apply(recv: &Val, key: &str) -> Option<Val> {
     let m = recv.as_object()?;
     Some(Val::Bool(m.contains_key(key)))
 }
-
 
 /// Keeps only the listed `keys` from an object (or each object in an array), dropping all others.
 #[inline]
@@ -6137,7 +6013,6 @@ pub(crate) fn pick_specs_apply(recv: &Val, specs: &[PickSpec]) -> Option<Val> {
     }
 }
 
-
 /// Removes the listed `keys` from an object (or each object in an array), keeping all others.
 #[inline]
 pub fn omit_apply(recv: &Val, keys: &[Arc<str>]) -> Option<Val> {
@@ -6163,7 +6038,6 @@ pub fn omit_apply(recv: &Val, keys: &[Arc<str>]) -> Option<Val> {
     }
 }
 
-
 /// Returns a copy of `recv` with the node at the dot/bracket `path` removed.
 #[inline]
 pub fn del_path_apply(recv: &Val, path: &str) -> Option<Val> {
@@ -6171,14 +6045,12 @@ pub fn del_path_apply(recv: &Val, path: &str) -> Option<Val> {
     Some(del_path_impl(recv.clone(), &segs))
 }
 
-
 /// Returns a copy of `recv` with the node at the dot/bracket `path` replaced by `value`.
 #[inline]
 pub fn set_path_apply(recv: &Val, path: &str, value: &Val) -> Option<Val> {
     let segs = parse_path_segs(path);
     Some(set_path_impl(recv.clone(), &segs, value.clone()))
 }
-
 
 /// Deletes multiple dot/bracket paths from `recv` sequentially, returning the final result.
 #[inline]
@@ -6191,7 +6063,6 @@ pub fn del_paths_apply(recv: &Val, paths: &[Arc<str>]) -> Option<Val> {
     Some(out)
 }
 
-
 /// Collapses a nested object into a flat object using `sep`-joined key paths (e.g. `"a.b.c": v`).
 #[inline]
 pub fn flatten_keys_apply(recv: &Val, sep: &str) -> Option<Val> {
@@ -6199,7 +6070,6 @@ pub fn flatten_keys_apply(recv: &Val, sep: &str) -> Option<Val> {
     flatten_keys_impl("", recv, sep, &mut out);
     Some(Val::obj(out))
 }
-
 
 /// Reconstructs a nested object from a flat `sep`-delimited key map; inverse of `flatten_keys_apply`.
 #[inline]
@@ -6211,13 +6081,11 @@ pub fn unflatten_keys_apply(recv: &Val, sep: &str) -> Option<Val> {
     }
 }
 
-
 /// Compiles a regex pattern, converting any compilation error into an `EvalError`.
 #[inline]
 fn compile_regex_eval(pat: &str) -> Result<Arc<regex::Regex>, EvalError> {
     crate::builtin_helpers::compile_regex(pat).map_err(EvalError)
 }
-
 
 /// Returns `Val::Bool` indicating whether the full string matches `pat`; returns `None` for non-strings.
 #[inline]
@@ -6234,7 +6102,6 @@ pub fn try_re_match_apply(recv: &Val, pat: &str) -> Result<Option<Val>, EvalErro
     let re = compile_regex_eval(pat)?;
     Ok(Some(Val::Bool(re.is_match(s))))
 }
-
 
 /// Returns the first substring matching `pat`, or `Val::Null` if no match is found.
 #[inline]
@@ -6256,7 +6123,6 @@ pub fn try_re_match_first_apply(recv: &Val, pat: &str) -> Result<Option<Val>, Ev
     ))
 }
 
-
 /// Returns all non-overlapping substrings matching `pat` as a `StrVec`.
 #[inline]
 pub fn re_match_all_apply(recv: &Val, pat: &str) -> Option<Val> {
@@ -6276,7 +6142,6 @@ pub fn try_re_match_all_apply(recv: &Val, pat: &str) -> Result<Option<Val>, Eval
         .collect();
     Ok(Some(Val::str_vec(out)))
 }
-
 
 /// Returns capture groups of the first match as an array, or `Val::Null` if no match.
 #[inline]
@@ -6307,7 +6172,6 @@ pub fn try_re_captures_apply(recv: &Val, pat: &str) -> Result<Option<Val>, EvalE
     }))
 }
 
-
 /// Returns an array of capture-group arrays for every match of `pat` in the string.
 #[inline]
 pub fn re_captures_all_apply(recv: &Val, pat: &str) -> Option<Val> {
@@ -6336,7 +6200,6 @@ pub fn try_re_captures_all_apply(recv: &Val, pat: &str) -> Result<Option<Val>, E
     Ok(Some(Val::arr(all)))
 }
 
-
 /// Replaces the first occurrence of `pat` in the string with `with`.
 #[inline]
 pub fn re_replace_apply(recv: &Val, pat: &str, with: &str) -> Option<Val> {
@@ -6353,7 +6216,6 @@ pub fn try_re_replace_apply(recv: &Val, pat: &str, with: &str) -> Result<Option<
     let out = re.replace(s, with);
     Ok(Some(Val::Str(Arc::from(out.as_ref()))))
 }
-
 
 /// Replaces all non-overlapping occurrences of `pat` in the string with `with`.
 #[inline]
@@ -6376,7 +6238,6 @@ pub fn try_re_replace_all_apply(
     Ok(Some(Val::Str(Arc::from(out.as_ref()))))
 }
 
-
 /// Splits the string on all matches of `pat`, returning a `StrVec` of tokens.
 #[inline]
 pub fn re_split_apply(recv: &Val, pat: &str) -> Option<Val> {
@@ -6394,7 +6255,6 @@ pub fn try_re_split_apply(recv: &Val, pat: &str) -> Result<Option<Val>, EvalErro
     Ok(Some(Val::str_vec(out)))
 }
 
-
 /// Returns `Val::Bool(true)` when the string contains at least one of the `needles`.
 #[inline]
 pub fn contains_any_apply(recv: &Val, needles: &[Arc<str>]) -> Option<Val> {
@@ -6402,14 +6262,12 @@ pub fn contains_any_apply(recv: &Val, needles: &[Arc<str>]) -> Option<Val> {
     Some(Val::Bool(needles.iter().any(|n| s.contains(n.as_ref()))))
 }
 
-
 /// Returns `Val::Bool(true)` when the string contains every one of the `needles`.
 #[inline]
 pub fn contains_all_apply(recv: &Val, needles: &[Arc<str>]) -> Option<Val> {
     let s = recv.as_str_ref()?;
     Some(Val::Bool(needles.iter().all(|n| s.contains(n.as_ref()))))
 }
-
 
 /// Serialises an array of arrays/objects to CSV format (comma-delimited).
 #[inline]
@@ -6419,7 +6277,6 @@ pub fn to_csv_apply(recv: &Val) -> Option<Val> {
     )))
 }
 
-
 /// Serialises an array of arrays/objects to TSV format (tab-delimited).
 #[inline]
 pub fn to_tsv_apply(recv: &Val) -> Option<Val> {
@@ -6427,7 +6284,6 @@ pub fn to_tsv_apply(recv: &Val) -> Option<Val> {
         crate::builtin_helpers::csv_emit(recv, "\t").as_str(),
     )))
 }
-
 
 /// Converts an object into `[{key, val}, …]`; returns an empty array for non-objects.
 #[inline]
@@ -6444,13 +6300,11 @@ pub fn to_pairs_apply(recv: &Val) -> Option<Val> {
     Some(Val::arr(arr))
 }
 
-
 /// Returns the runtime type name of `recv` as a `Val::Str` (e.g. `"Int"`, `"Array"`, `"Object"`).
 #[inline]
 pub fn type_name_apply(recv: &Val) -> Option<Val> {
     Some(Val::Str(Arc::from(recv.type_name())))
 }
-
 
 /// Coerces any `Val` to its human-readable string representation.
 #[inline]
@@ -6459,7 +6313,6 @@ pub fn to_string_apply(recv: &Val) -> Option<Val> {
         crate::util::val_to_string(recv).as_str(),
     )))
 }
-
 
 /// Serialises `recv` to a compact JSON string; non-finite floats become `"null"`.
 #[inline]
@@ -6487,7 +6340,6 @@ pub fn to_json_apply(recv: &Val) -> Option<Val> {
     };
     Some(Val::Str(Arc::from(out)))
 }
-
 
 /// Parses a JSON string into a `Val`; silently returns `None` on parse errors.
 #[inline]
@@ -6525,7 +6377,6 @@ pub fn try_from_json_apply(recv: &Val) -> Result<Option<Val>, EvalError> {
     }
 }
 
-
 /// Returns `recv` if it is non-null, otherwise returns `default`.
 #[inline]
 pub fn or_apply(recv: &Val, default: &Val) -> Val {
@@ -6536,13 +6387,11 @@ pub fn or_apply(recv: &Val, default: &Val) -> Val {
     }
 }
 
-
 /// Returns `Val::Bool(true)` when `key` is absent or null at any nesting level inside `recv`.
 #[inline]
 pub fn missing_apply(recv: &Val, key: &str) -> Val {
     Val::Bool(!crate::util::field_exists_nested(recv, key))
 }
-
 
 /// Membership test: arrays/vectors check element presence, strings check substring, objects check key.
 #[inline]
@@ -6783,7 +6632,6 @@ fn extract_required_set(v: &Val) -> std::collections::HashSet<String> {
     }
     set
 }
-
 
 /// Public adapter for [`schema_of`]: infers and returns a schema descriptor for any `Val`.
 #[inline]

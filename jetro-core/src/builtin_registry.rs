@@ -9,7 +9,7 @@ use crate::{
     builtins::{
         BuiltinCardinality, BuiltinExprStage, BuiltinMethod, BuiltinNullaryStage,
         BuiltinPipelineExecutor, BuiltinPipelineLowering, BuiltinPipelineMaterialization,
-        BuiltinPipelineOrderEffect, BuiltinPipelineShape, BuiltinPipelineStage,
+        BuiltinPipelineOrderEffect, BuiltinPipelineShape, BuiltinSinkAccumulator,
         BuiltinStringPairStage, BuiltinStringStage, BuiltinStructural, BuiltinUsizeStage,
     },
     chain_ir::{Demand, PullDemand, ValueNeed},
@@ -201,29 +201,48 @@ pub(crate) fn pipeline_order_effect(id: BuiltinId) -> Option<BuiltinPipelineOrde
     registry_pipeline_order_effect(id)
 }
 
-/// Classify builtin `id` as a `Unary` or `Nullary` pipeline stage based on
-/// its lowering form, returning `None` for builtins that cannot be lowered.
-#[inline]
-pub(crate) fn pipeline_stage(id: BuiltinId) -> Option<BuiltinPipelineStage> {
-    match pipeline_lowering(id)? {
-        BuiltinPipelineLowering::ExprStage(_)
-        | BuiltinPipelineLowering::TerminalExprStage { .. }
-        | BuiltinPipelineLowering::UsizeStage { .. } => Some(BuiltinPipelineStage::Unary),
-        BuiltinPipelineLowering::NullaryStage(_) | BuiltinPipelineLowering::Sort => {
-            Some(BuiltinPipelineStage::Nullary)
-        }
-        BuiltinPipelineLowering::StringStage(_)
-        | BuiltinPipelineLowering::StringPairStage(_)
-        | BuiltinPipelineLowering::Slice
-        | BuiltinPipelineLowering::TerminalSink => None,
-    }
-}
-
 /// Return the pipeline lowering strategy for builtin `id`, indicating which
 /// physical stage type and arguments the builtin compiles to.
 #[inline]
 pub(crate) fn pipeline_lowering(id: BuiltinId) -> Option<BuiltinPipelineLowering> {
     registry_pipeline_lowering(id)
+}
+
+/// Return `true` if builtin `id` can be lowered in pipeline position with
+/// `arity` arguments. Terminal sinks are only accepted when `is_last` is true.
+#[inline]
+pub(crate) fn pipeline_accepts_arity(id: BuiltinId, arity: usize, is_last: bool) -> bool {
+    let Some(method) = id.method() else {
+        return false;
+    };
+    match pipeline_lowering(id) {
+        Some(BuiltinPipelineLowering::ExprStage(_))
+        | Some(BuiltinPipelineLowering::TerminalExprStage { .. })
+        | Some(BuiltinPipelineLowering::UsizeStage { .. })
+        | Some(BuiltinPipelineLowering::StringStage(_)) => arity == 1,
+        Some(BuiltinPipelineLowering::NullaryStage(_)) => arity == 0,
+        Some(BuiltinPipelineLowering::StringPairStage(_)) => arity == 2,
+        Some(BuiltinPipelineLowering::Sort) => arity <= 1,
+        Some(BuiltinPipelineLowering::Slice) => (1..=2).contains(&arity),
+        Some(BuiltinPipelineLowering::TerminalSink) => {
+            is_last && terminal_sink_accepts_arity(method, arity)
+        }
+        None => is_last && terminal_sink_accepts_arity(method, arity),
+    }
+}
+
+#[inline]
+fn terminal_sink_accepts_arity(method: BuiltinMethod, arity: usize) -> bool {
+    let Some(sink) = method.spec().sink else {
+        return false;
+    };
+    match sink.accumulator {
+        BuiltinSinkAccumulator::Count => {
+            arity == 0 || (method == BuiltinMethod::Count && arity == 1)
+        }
+        BuiltinSinkAccumulator::Numeric => arity <= 1,
+        BuiltinSinkAccumulator::SelectOne(_) | BuiltinSinkAccumulator::ApproxDistinct => arity == 0,
+    }
 }
 
 /// Return `true` if builtin `id` is an element-wise operation that can be
@@ -917,8 +936,8 @@ mod tests {
     use super::*;
     use crate::builtins::{
         BuiltinExprStage, BuiltinNullaryStage, BuiltinPipelineExecutor, BuiltinPipelineLowering,
-        BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect, BuiltinPipelineStage,
-        BuiltinStringPairStage, BuiltinStringStage, BuiltinUsizeStage,
+        BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect, BuiltinStringPairStage,
+        BuiltinStringStage, BuiltinUsizeStage,
     };
 
     #[test]
@@ -1187,40 +1206,57 @@ mod tests {
     }
 
     #[test]
-    fn registry_drives_pipeline_stage_classification() {
-        assert_eq!(
-            pipeline_stage(BuiltinId::from_method(BuiltinMethod::Filter)),
-            Some(BuiltinPipelineStage::Unary)
-        );
-        assert_eq!(
-            pipeline_stage(BuiltinId::from_method(BuiltinMethod::CountBy)),
-            Some(BuiltinPipelineStage::Unary)
-        );
-        assert_eq!(
-            pipeline_stage(BuiltinId::from_method(BuiltinMethod::Sort)),
-            Some(BuiltinPipelineStage::Nullary)
-        );
-        assert_eq!(
-            pipeline_stage(BuiltinId::from_method(BuiltinMethod::Reverse)),
-            Some(BuiltinPipelineStage::Nullary)
-        );
-        assert_eq!(
-            pipeline_stage(BuiltinId::from_method(BuiltinMethod::Take)),
-            Some(BuiltinPipelineStage::Unary)
-        );
-        assert_eq!(
-            pipeline_stage(BuiltinId::from_method(BuiltinMethod::FindFirst)),
-            Some(BuiltinPipelineStage::Unary)
-        );
-
-        assert_eq!(
-            pipeline_stage(BuiltinId::from_method(BuiltinMethod::Len)),
-            None
-        );
-        assert_eq!(
-            pipeline_stage(BuiltinId::from_method(BuiltinMethod::FromJson)),
-            None
-        );
+    fn registry_classifies_pipeline_arity_without_method_special_cases() {
+        assert!(pipeline_accepts_arity(
+            BuiltinId::from_method(BuiltinMethod::Filter),
+            1,
+            false
+        ));
+        assert!(!pipeline_accepts_arity(
+            BuiltinId::from_method(BuiltinMethod::Filter),
+            0,
+            false
+        ));
+        assert!(pipeline_accepts_arity(
+            BuiltinId::from_method(BuiltinMethod::Sort),
+            0,
+            false
+        ));
+        assert!(pipeline_accepts_arity(
+            BuiltinId::from_method(BuiltinMethod::Sort),
+            1,
+            false
+        ));
+        assert!(!pipeline_accepts_arity(
+            BuiltinId::from_method(BuiltinMethod::Sort),
+            2,
+            false
+        ));
+        assert!(pipeline_accepts_arity(
+            BuiltinId::from_method(BuiltinMethod::Slice),
+            2,
+            false
+        ));
+        assert!(!pipeline_accepts_arity(
+            BuiltinId::from_method(BuiltinMethod::Count),
+            1,
+            false
+        ));
+        assert!(pipeline_accepts_arity(
+            BuiltinId::from_method(BuiltinMethod::Count),
+            1,
+            true
+        ));
+        assert!(pipeline_accepts_arity(
+            BuiltinId::from_method(BuiltinMethod::Sum),
+            1,
+            true
+        ));
+        assert!(!pipeline_accepts_arity(
+            BuiltinId::from_method(BuiltinMethod::First),
+            1,
+            true
+        ));
     }
 
     #[test]
