@@ -317,20 +317,11 @@ pub enum Opcode {
     // ── Pipeline helpers ──────────────────────────────────────────────────────
     /// Pop TOS → env.current, then push it back (pass-through with context update).
     SetCurrent,
-    /// TOS → env var by name, TOS remains (for `->` bind).
-    BindVar(Arc<str>),
-    /// Pop TOS → env var (for `let` init).
-    StoreVar(Arc<str>),
-    /// Object destructure bind: TOS obj → multiple vars.
-    BindObjDestructure(Arc<BindObjSpec>),
-    /// Array destructure bind: TOS arr → multiple vars.
-    BindArrDestructure(Arc<[Arc<str>]>),
     /// Single-opcode pipeline `base | rhs1 | rhs2 -> n | rhs3 ...` —
     /// runs `base`, threads the value through each step under a local
     /// mutable Env (forward: env.current = val + run rhs; bind: store
-    /// in env vars, value unchanged).  Replaces the previous SetCurrent
-    /// / BindVar / Bind*Destructure no-op chain in the flat opcode
-    /// stream.
+    /// in env vars, value unchanged).  Replaces the previous flat
+    /// pipeline helper chain.
     PipelineRun {
         base: Arc<Program>,
         steps: Arc<[CompiledPipeStep]>,
@@ -357,9 +348,6 @@ pub enum Opcode {
     ListComp(Arc<CompSpec>),
     DictComp(Arc<DictCompSpec>),
     SetComp(Arc<CompSpec>),
-
-    // ── Resolution cache fast-path ────────────────────────────────────────────
-    GetPointer(Arc<str>),
 
     // ── Patch block ──────────────────────────────────────────────────────────
     /// Patch block — pre-compiled form.  Tree-walker no longer used;
@@ -465,7 +453,6 @@ impl Program {
                     | Opcode::OptField(_)
                     | Opcode::RootChain(_)
                     | Opcode::FieldChain(_)
-                    | Opcode::GetPointer(_)
             )
         });
         let ics = fresh_ics(ops.len());
@@ -3307,20 +3294,6 @@ impl VM {
                     // flat opcode stream because pipeline steps that need SetCurrent
                     // are compiled as sub-programs. Skip.
                 }
-                Opcode::BindVar(name) => {
-                    // TOS becomes a named var; TOS remains (pass-through for ->) .
-                    // We can't mutate env here. This is handled at the pipeline level.
-                    // For now, just keep TOS.
-                    let _ = name;
-                }
-                Opcode::StoreVar(name) => {
-                    // Pop and discard (the LetExpr opcode handles binding properly).
-                    let _ = name;
-                    pop!(stack);
-                }
-                Opcode::BindObjDestructure(_) | Opcode::BindArrDestructure(_) => {
-                    // Pipeline bind destructure — handled at pipeline level.
-                }
                 Opcode::PipelineRun { base, steps } => {
                     let val = self.exec(base, env)?;
                     let mut local_env = env.clone();
@@ -3537,19 +3510,6 @@ impl VM {
                         }
                     }
                     stack.push(Val::arr(out));
-                }
-
-                // ── Path cache lookup ─────────────────────────────────────────
-                Opcode::GetPointer(ptr) => {
-                    let doc_hash = self.doc_hash;
-                    let v = if let Some(cached) = self.path_cache.get(doc_hash, ptr.as_ref()) {
-                        cached
-                    } else {
-                        let v = resolve_pointer(&env.root, ptr.as_ref());
-                        self.path_cache.insert(doc_hash, ptr.clone(), v.clone());
-                        v
-                    };
-                    stack.push(v);
                 }
 
                 // ── Patch block ───────────────────────────────────────────────
@@ -5074,14 +5034,6 @@ fn collect_desc_with_paths(
         }
         _ => {}
     }
-}
-
-fn resolve_pointer(root: &Val, ptr: &str) -> Val {
-    let mut cur = root.clone();
-    for seg in ptr.split('/').filter(|s| !s.is_empty()) {
-        cur = cur.get_field(seg);
-    }
-    cur
 }
 
 #[derive(Clone, Copy)]

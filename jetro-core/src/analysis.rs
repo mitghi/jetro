@@ -210,16 +210,6 @@ fn apply_op_env(
             let av = env.get(name).copied().unwrap_or(AbstractVal::UNKNOWN);
             stack.push(av);
         }
-        Opcode::BindVar(name) => {
-            // TOS preserved; record type.
-            if let Some(top) = stack.last().copied() {
-                env.insert(name.clone(), top);
-            }
-        }
-        Opcode::StoreVar(name) => {
-            let v = stack.pop().unwrap_or(AbstractVal::UNKNOWN);
-            env.insert(name.clone(), v);
-        }
         Opcode::LetExpr { name, body } => {
             let init = stack.pop().unwrap_or(AbstractVal::UNKNOWN);
             let saved = env.get(name).copied();
@@ -353,18 +343,12 @@ fn apply_op(op: &Opcode, stack: &mut Vec<AbstractVal>) {
             stack.push(AbstractVal::scalar(VType::Bool));
         }
         Opcode::SetCurrent => {} // TOS stays as current
-        Opcode::BindVar(_) => {} // TOS preserved
-        Opcode::StoreVar(_) => {
-            pop1!();
-        }
-        Opcode::BindObjDestructure(_) | Opcode::BindArrDestructure(_) => {} // TOS preserved
         Opcode::LetExpr { .. } => {
             pop1!();
             stack.push(AbstractVal::UNKNOWN);
         }
         Opcode::ListComp(_) | Opcode::SetComp(_) => stack.push(AbstractVal::array()),
         Opcode::DictComp(_) => stack.push(AbstractVal::object()),
-        Opcode::GetPointer(_) => stack.push(AbstractVal::UNKNOWN),
         Opcode::PatchEval(_) => stack.push(AbstractVal::UNKNOWN),
         Opcode::CastOp(ty) => {
             pop1!();
@@ -591,8 +575,7 @@ fn hash_ops(ops: &[Opcode], h: &mut impl std::hash::Hasher) {
             Opcode::GetField(k)
             | Opcode::OptField(k)
             | Opcode::Descendant(k)
-            | Opcode::LoadIdent(k)
-            | Opcode::GetPointer(k) => k.as_bytes().hash(h),
+            | Opcode::LoadIdent(k) => k.as_bytes().hash(h),
             Opcode::GetIndex(i) => i.hash(h),
             Opcode::CallMethod(c) | Opcode::CallOptMethod(c) => {
                 (c.method as u8).hash(h);
@@ -1111,17 +1094,10 @@ pub fn opcode_cost(op: &Opcode) -> u32 {
         | Opcode::OptField(_)
         | Opcode::GetIndex(_)
         | Opcode::RootChain(_)
-        | Opcode::FieldChain(_)
-        | Opcode::GetPointer(_) => 2,
+        | Opcode::FieldChain(_) => 2,
         Opcode::GetSlice(..) | Opcode::Descendant(_) => 5,
         Opcode::DescendAll => 20,
-        Opcode::Not
-        | Opcode::Neg
-        | Opcode::SetCurrent
-        | Opcode::BindVar(_)
-        | Opcode::StoreVar(_)
-        | Opcode::BindObjDestructure(_)
-        | Opcode::BindArrDestructure(_) => 1,
+        Opcode::Not | Opcode::Neg | Opcode::SetCurrent => 1,
         Opcode::Add
         | Opcode::Sub
         | Opcode::Mul
@@ -1275,7 +1251,6 @@ pub fn escapes_doc(program: &Program) -> bool {
             | Opcode::GetSlice(..)
             | Opcode::Descendant(_)
             | Opcode::DescendAll
-            | Opcode::GetPointer(_)
             | Opcode::OptField(_) => return true,
             Opcode::CallMethod(c) | Opcode::CallOptMethod(c)
                 if c.sub_progs.iter().any(|p| escapes_doc(p)) =>

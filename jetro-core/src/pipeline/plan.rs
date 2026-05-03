@@ -333,12 +333,8 @@ fn program_is_current_only(program: &Program) -> bool {
 
 fn opcode_is_current_only(opcode: &Opcode) -> bool {
     match opcode {
-        Opcode::PushRoot | Opcode::RootChain(_) | Opcode::GetPointer(_) => false,
-        Opcode::BindVar(_)
-        | Opcode::StoreVar(_)
-        | Opcode::BindObjDestructure(_)
-        | Opcode::BindArrDestructure(_)
-        | Opcode::PipelineRun { .. }
+        Opcode::PushRoot | Opcode::RootChain(_) => false,
+        Opcode::PipelineRun { .. }
         | Opcode::LetExpr { .. }
         | Opcode::ListComp(_)
         | Opcode::DictComp(_)
