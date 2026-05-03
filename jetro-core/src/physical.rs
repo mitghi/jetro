@@ -17,6 +17,7 @@ pub struct QueryPlan {
 
 impl QueryPlan {
     #[inline]
+    #[cfg(test)]
     pub(crate) fn from_nodes(root: NodeId, nodes: Vec<PlanNode>) -> Self {
         Self {
             root: QueryRoot::Node(root),
@@ -66,6 +67,7 @@ impl QueryPlan {
     }
 
     #[inline]
+    #[cfg(test)]
     pub(crate) fn root_execution_facts(&self) -> ExecutionFacts {
         match self.root {
             QueryRoot::Node(root) => self.execution_facts(root),
@@ -156,12 +158,14 @@ pub(crate) struct PhysicalNode {
 
 impl PhysicalNode {
     #[inline]
+    #[cfg(test)]
     pub(crate) fn new(kind: PlanNode) -> Self {
         let backends = BackendPlan::for_node(&kind);
         Self::with_backend_plan(kind, backends)
     }
 
     #[inline]
+    #[cfg(test)]
     pub(crate) fn with_backend_plan(kind: PlanNode, backends: BackendPlan) -> Self {
         let facts = ExecutionFacts::for_node(&kind);
         Self::with_backend_plan_and_facts(kind, backends, facts)
