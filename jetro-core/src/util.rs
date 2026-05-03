@@ -1,17 +1,6 @@
-//! Shared helpers used across builtins, pipeline, and VM:
-//!
-//! - `cmp_vals`: total ordering on `Val` (null < bool < num < str <
-//!   arr < obj), used by sort, min, max, top-N, distinct.  Unlike
-//!   `PartialOrd`, this never returns `None` — it uses a lexicographic
-//!   fallback when types are incomparable, which is essential for
-//!   heap-based partial sorts.
-//! - `add_vals` / `num_op`: numeric widening + arithmetic dispatch
-//!   shared by all execution paths so semantics match.
-//! - `val_key`: canonical string key for grouping / dedup.
-//! - `flatten_val` / `zip_arrays` / `cartesian` / `deep_merge`:
-//!   array / object combinators reused by builtins.
-//! - `val_str` / `val_to_string`: coercion helpers for string
-//!   methods and CSV emission.
+//! Shared utilities: `JsonView` borrowed scalar enum, arithmetic helpers,
+//! comparison, truthiness, key extraction, and structural equality used
+//! by the VM, builtins, and pipeline backends.
 
 use indexmap::IndexMap;
 use std::cmp::Ordering;
@@ -22,24 +11,32 @@ use crate::ast::KindType;
 use crate::context::EvalError;
 use crate::value::Val;
 
-// ── Scalar semantic kernel ───────────────────────────────────────────────────
 
-/// Borrowed JSON-scalar/container view used by both `Val` and simd-json tape
-/// execution. Tape adapters should only decode node shape into this view; the
-/// truthiness/comparison/numeric behavior lives here.
+/// Borrowed scalar view — used by `ValueView` implementations so scalar
+/// reads return a stack value without allocating a `Val`.
 #[derive(Debug, Clone, Copy)]
 pub enum JsonView<'a> {
+    /// JSON `null` value.
     Null,
+    /// JSON boolean value.
     Bool(bool),
+    /// Signed 64-bit integer, used when the JSON number fits in `i64`.
     Int(i64),
+    /// Unsigned 64-bit integer, used for large positive integers that don't fit in `i64`.
     UInt(u64),
+    /// IEEE-754 double-precision floating point number.
     Float(f64),
+    /// Borrowed string slice pointing directly into the source document or `Val` storage.
     Str(&'a str),
+    /// The length of an array node, returned instead of materialising the array contents.
     ArrayLen(usize),
+    /// The number of key-value pairs in an object node, returned without materialising the map.
     ObjectLen(usize),
 }
 
 impl<'a> JsonView<'a> {
+    /// Convert a `Val` reference to a `JsonView` without cloning compound nodes;
+    /// arrays and objects become length-only variants.
     #[inline]
     pub fn from_val(v: &'a Val) -> Self {
         match v {
@@ -60,6 +57,8 @@ impl<'a> JsonView<'a> {
         }
     }
 
+    /// Return `true` if this scalar is considered truthy by Jetro semantics
+    /// (non-zero numbers, non-empty strings, `true`; `null` and empty are falsy).
     #[inline]
     pub fn truthy(self) -> bool {
         match self {
@@ -74,6 +73,8 @@ impl<'a> JsonView<'a> {
     }
 }
 
+/// Test structural equality between two `JsonView` scalars, including
+/// cross-type numeric comparisons (e.g. `Int(3) == UInt(3)`).
 #[inline]
 pub fn json_vals_eq(a: JsonView<'_>, b: JsonView<'_>) -> bool {
     match (a, b) {
@@ -93,6 +94,8 @@ pub fn json_vals_eq(a: JsonView<'_>, b: JsonView<'_>) -> bool {
     }
 }
 
+/// Return the total ordering between two `JsonView` scalars, promoting
+/// mixed integer/float pairs to `f64` for comparison.
 #[inline]
 pub fn json_cmp_vals(a: JsonView<'_>, b: JsonView<'_>) -> Ordering {
     match (a, b) {
@@ -131,6 +134,8 @@ pub fn json_cmp_vals(a: JsonView<'_>, b: JsonView<'_>) -> Ordering {
     }
 }
 
+/// Evaluate a binary comparison operator (`<`, `<=`, `>`, `>=`, `==`, `!=`)
+/// between two `JsonView` scalars; incompatible types return `false`.
 #[inline]
 pub fn json_cmp_binop(lhs: JsonView<'_>, op: BinOp, rhs: JsonView<'_>) -> bool {
     #[inline]
@@ -163,13 +168,14 @@ pub fn json_cmp_binop(lhs: JsonView<'_>, op: BinOp, rhs: JsonView<'_>) -> bool {
     }
 }
 
-// ── Value predicates ──────────────────────────────────────────────────────────
 
+/// Return `true` if `v` is considered truthy according to Jetro semantics.
 #[inline]
 pub fn is_truthy(v: &Val) -> bool {
     JsonView::from_val(v).truthy()
 }
 
+/// Return `true` if `v` belongs to the `KindType` category used by the `type()` builtin.
 #[inline]
 pub fn kind_matches(v: &Val, ty: KindType) -> bool {
     matches!(
@@ -186,24 +192,26 @@ pub fn kind_matches(v: &Val, ty: KindType) -> bool {
     )
 }
 
+/// Test equality between two `Val` references by delegating to `json_vals_eq`.
 #[inline]
 pub fn vals_eq(a: &Val, b: &Val) -> bool {
     json_vals_eq(JsonView::from_val(a), JsonView::from_val(b))
 }
 
+/// Compare two `Val` references and return their ordering.
 #[inline]
 pub fn cmp_vals(a: &Val, b: &Val) -> std::cmp::Ordering {
     json_cmp_vals(JsonView::from_val(a), JsonView::from_val(b))
 }
 
+/// Evaluate a binary comparison operator between two `Val` references.
 #[inline]
 pub fn cmp_vals_binop(a: &Val, op: BinOp, b: &Val) -> bool {
     json_cmp_binop(JsonView::from_val(a), op, JsonView::from_val(b))
 }
 
-// ── Value conversions ─────────────────────────────────────────────────────────
 
-/// Canonical string key for use in HashSets / dedup (never allocates for Str).
+/// Convert a `Val` to a string suitable for use as an object key or map key.
 #[inline]
 pub fn val_to_key(v: &Val) -> String {
     match v {
@@ -217,6 +225,7 @@ pub fn val_to_key(v: &Val) -> String {
     }
 }
 
+/// Render a `Val` as a `String`; compound types are serialised to JSON text.
 #[inline]
 pub fn val_to_string(v: &Val) -> String {
     match v {
@@ -233,15 +242,16 @@ pub fn val_to_string(v: &Val) -> String {
     }
 }
 
-// ── Constructors ──────────────────────────────────────────────────────────────
 
+/// Intern a string slice into an `Arc<str>` suitable for use as an `IndexMap` key.
 #[inline]
 pub fn val_key(s: &str) -> Arc<str> {
     Arc::from(s)
 }
 
-// ── Arithmetic ────────────────────────────────────────────────────────────────
 
+/// Add two `Val` operands; supports numeric addition, string concatenation,
+/// and array concatenation. Returns an error for incompatible types.
 pub fn add_vals(a: Val, b: Val) -> Result<Val, EvalError> {
     match (a, b) {
         (Val::Int(x), Val::Int(y)) => Ok(Val::Int(x + y)),
@@ -249,9 +259,8 @@ pub fn add_vals(a: Val, b: Val) -> Result<Val, EvalError> {
         (Val::Int(x), Val::Float(y)) => Ok(Val::Float(x as f64 + y)),
         (Val::Float(x), Val::Int(y)) => Ok(Val::Float(x + y as f64)),
         (Val::Str(x), Val::Str(y)) => {
-            // `format!` would allocate a temporary `String` for argument
-            // formatting, on top of the `Arc::<str>::from` allocation.
-            // Direct `push_str` halves the allocation count.
+            
+            
             let mut s = String::with_capacity(x.len() + y.len());
             s.push_str(&x);
             s.push_str(&y);
@@ -266,6 +275,8 @@ pub fn add_vals(a: Val, b: Val) -> Result<Val, EvalError> {
     }
 }
 
+/// Apply an integer operation `fi` or a float operation `ff` to two `Val` operands,
+/// promoting mixed integer/float pairs to `f64`.
 pub fn num_op<Fi, Ff>(a: Val, b: Val, fi: Fi, ff: Ff) -> Result<Val, EvalError>
 where
     Fi: Fn(i64, i64) -> i64,
@@ -280,15 +291,15 @@ where
     }
 }
 
-// ── Array helpers ─────────────────────────────────────────────────────────────
 
+/// Flatten nested arrays up to `depth` levels; homogeneous element types are
+/// collapsed to their optimised columnar representation (`IntVec`, `FloatVec`).
 pub fn flatten_val(v: Val, depth: usize) -> Val {
     match v {
         Val::Arr(a) if depth > 0 => {
             let items = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
-            // Columnar fast-path: Arr of IntVec (or Int scalars) → IntVec out.
-            // Skips per-item Val::Int allocation and keeps the result in the
-            // typed lane for downstream aggregates / accumulate.
+            
+            
             let all_int_children = !items.is_empty()
                 && items
                     .iter()
@@ -334,9 +345,8 @@ pub fn flatten_val(v: Val, depth: usize) -> Val {
                 }
                 return Val::float_vec(out);
             }
-            // Precompute exact capacity in one pass — eliminates Vec doubling
-            // reallocations on the hot `$.flatten()` / `.map(...).flatten()`
-            // paths.
+            
+            
             let cap: usize = items
                 .iter()
                 .map(|it| match it {
@@ -366,7 +376,7 @@ pub fn flatten_val(v: Val, depth: usize) -> Val {
                         _ => {}
                     },
                     Val::IntVec(inner) => {
-                        // IntVec is already flat-of-scalars — extend once.
+                        
                         out.extend(inner.iter().map(|n| Val::Int(*n)));
                     }
                     Val::FloatVec(inner) => {
@@ -380,12 +390,15 @@ pub fn flatten_val(v: Val, depth: usize) -> Val {
             }
             Val::arr(out)
         }
-        // Columnar receiver — already flat of scalars.
+        
         Val::IntVec(_) | Val::FloatVec(_) | Val::StrVec(_) => v,
         other => other,
     }
 }
 
+/// Zip two array-like `Val`s into an array of `[a_i, b_i]` pairs.
+/// When `longest` is `true` the shorter side is padded with `fill`; otherwise
+/// the result is truncated to the shorter length.
 pub fn zip_arrays(a: Val, b: Val, longest: bool, fill: Val) -> Result<Val, EvalError> {
     let av = a.as_vals().map(|c| c.into_owned()).unwrap_or_default();
     let bv = b.as_vals().map(|c| c.into_owned()).unwrap_or_default();
@@ -406,6 +419,8 @@ pub fn zip_arrays(a: Val, b: Val, longest: bool, fill: Val) -> Result<Val, EvalE
     ))
 }
 
+/// Compute the Cartesian product of multiple `Val` arrays, returning every
+/// combination as a `Vec<Val>` row.
 pub fn cartesian(arrays: &[Vec<Val>]) -> Vec<Vec<Val>> {
     arrays.iter().fold(vec![vec![]], |acc, arr| {
         acc.into_iter()
@@ -422,8 +437,9 @@ pub fn cartesian(arrays: &[Vec<Val>]) -> Vec<Vec<Val>> {
     })
 }
 
-// ── Field existence ───────────────────────────────────────────────────────────
 
+/// Return `true` if a dot-separated `path` resolves to a non-null value
+/// within `v`, traversing nested objects recursively.
 pub fn field_exists_nested(v: &Val, path: &str) -> bool {
     let mut parts = path.splitn(2, '.');
     let first = parts.next().unwrap_or("");
@@ -435,8 +451,9 @@ pub fn field_exists_nested(v: &Val, path: &str) -> bool {
     }
 }
 
-// ── Deep merge ────────────────────────────────────────────────────────────────
 
+/// Recursively merge `other` into `base` for object values; non-object
+/// values in `other` overwrite the corresponding entry in `base`.
 pub fn deep_merge(base: Val, other: Val) -> Val {
     match (base, other) {
         (Val::Obj(bm), Val::Obj(om)) => {
@@ -457,8 +474,9 @@ pub fn deep_merge(base: Val, other: Val) -> Val {
     }
 }
 
-/// Deep-merge where arrays concatenate instead of replace.  Used by the
-/// `...**` spread operator.  Objects recurse, arrays concat, scalars rhs-wins.
+
+/// Like `deep_merge`, but array-typed values at the same key are concatenated
+/// rather than overwritten.
 pub fn deep_merge_concat(base: Val, other: Val) -> Val {
     match (base, other) {
         (Val::Obj(bm), Val::Obj(om)) => {
@@ -497,9 +515,8 @@ pub fn deep_merge_concat(base: Val, other: Val) -> Val {
     }
 }
 
-// ── Object building helpers ───────────────────────────────────────────────────
 
-/// Build a Val::Obj with two string-key entries (common pattern for itertools output).
+/// Construct a two-field object `{k1: v1, k2: v2}` with a pre-sized map.
 pub fn obj2(k1: &str, v1: Val, k2: &str, v2: Val) -> Val {
     let mut m = IndexMap::with_capacity(2);
     m.insert(val_key(k1), v1);

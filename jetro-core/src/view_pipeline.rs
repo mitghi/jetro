@@ -1,4 +1,10 @@
-//! View-backed execution for streamable pipeline bodies.
+//! View-based pipeline execution over borrowed document representations.
+//!
+//! Runs pipeline plans against a `ValueView` implementation rather than a
+//! materialised `Val` tree. Stages that can stay in the borrowed domain do so;
+//! only the final collect step, or a stage that requires a `Val` (e.g. a
+//! method call), calls `materialize()`. Used by `physical_eval` when the
+//! planner selects the `View` backend preference.
 
 use std::sync::Arc;
 
@@ -15,6 +21,9 @@ mod stage_flow;
 use key::ViewKey;
 use stage_flow::{ViewStageFlow, ViewStageState};
 
+/// Navigates a field-key sequence on `cur`, calling `ValueView::field` for each
+/// key and returning the deepest resolved view. If a step returns a null-like
+/// view, traversal continues with that null view.
 pub(crate) fn walk_fields<'a, V>(mut cur: V, keys: &[Arc<str>]) -> V
 where
     V: ValueView<'a>,
@@ -25,6 +34,10 @@ where
     cur
 }
 
+/// Top-level view-pipeline runner. Tries fast-path sub-runners in priority order:
+/// `terminal_collect`, `full`, `reducing_stage_prefix`, `sort_prefix`, then a
+/// generic `prefix_then_materialized_suffix` fallback. Returns `None` when no
+/// path can handle the pipeline shape, allowing the caller to fall back to `Val`-based execution.
 pub(crate) fn run_with_env<'a, V>(
     source: V,
     body: &pipeline::PipelineBody,
@@ -53,6 +66,9 @@ where
     run_prefix_then_materialized_suffix(source, body, cache, base_env)
 }
 
+/// Runs the complete pipeline entirely in the view domain when all stages and
+/// the sink have a `ViewCapability`. Returns `None` when any stage lacks
+/// view support, allowing a less specialised path to take over.
 fn run_full<'a, V>(source: V, body: &pipeline::PipelineBody) -> Option<Result<Val, EvalError>>
 where
     V: ValueView<'a>,
@@ -74,6 +90,9 @@ where
     Some(Ok(sink_acc.finish(false)))
 }
 
+/// Feeds one view row into the sink accumulator according to `sink`'s capability.
+/// Returns `Some(action)` indicating whether to `Emit`, `Skip`, or `Stop`;
+/// returns `None` when a kernel lookup fails (signals the view path is unusable).
 fn observe_view_sink<'a, V>(
     item: &V,
     sink: pipeline::ViewSinkCapability,
@@ -120,6 +139,9 @@ where
     }
 }
 
+/// Evaluates the sink's optional predicate kernel against `item`. Returns
+/// `Some(true)` when there is no predicate, `Some(bool)` for the predicate
+/// result, or `None` when the kernel index is out of bounds.
 fn view_sink_predicate_matches<'a, V>(
     item: &V,
     predicate_kernel: Option<usize>,
@@ -135,6 +157,9 @@ where
     eval_filter_kernel(item, kernel)
 }
 
+/// Runs as many leading stages as possible in the view domain, materialises the
+/// resulting boundary rows, then continues execution with the standard pipeline
+/// runner on the remaining suffix stages.
 fn run_prefix_then_materialized_suffix<'a, V>(
     source: V,
     body: &pipeline::PipelineBody,
@@ -177,6 +202,9 @@ where
     ))
 }
 
+/// Optimised path for pipelines whose suffix is a pure collect sink. Builds a
+/// `TerminalCollectPlan` that may fuse trailing projection stages into the
+/// collection kernel, avoiding a separate map pass.
 fn run_terminal_collect<'a, V>(
     source: V,
     body: &pipeline::PipelineBody,
@@ -204,17 +232,27 @@ where
     Some(Ok(collector.finish()))
 }
 
+/// Action returned by a sink observer after processing one view row.
 enum ViewRowAction {
+    /// The row did not pass the predicate; do not count it as output.
     Skip,
+    /// The row was accepted and counted as an emitted output.
     Emit,
+    /// The sink has reached its output limit; stop iterating immediately.
     Stop,
 }
 
+/// Control flow returned by the item-level drive helpers.
 enum ViewDriveFlow {
+    /// Processing of the current item is complete; continue with the next row.
     Continue,
+    /// A demand limit was reached; the outer loop should break immediately.
     Stop,
 }
 
+/// Iterates over the array rows of `source` and drives each row through
+/// `stages`, calling `observe` for rows that reach the end of the stage list.
+/// Returns `None` when `source` cannot be iterated as an array.
 fn drive_view_frontier<'a, V, F>(
     source: V,
     stages: &[pipeline::ViewStageCapability],
@@ -230,6 +268,9 @@ where
     drive_view_iter(items, stages, stage_kernels, source_demand, observe)
 }
 
+/// Drives an arbitrary `items` iterator through the view-stage frontier, calling
+/// `observe` for each row that survives all stages. Respects `source_demand`
+/// limits on both inputs consumed and outputs emitted.
 fn drive_view_iter<'a, V, I, F>(
     items: I,
     stages: &[pipeline::ViewStageCapability],
@@ -274,6 +315,9 @@ where
     Some(())
 }
 
+/// Recursively applies one view stage to `item`, then advances to the next stage.
+/// When all stages have been applied it calls `observe`. `FlatMap` stages expand
+/// into child views, each of which is recursed independently.
 fn drive_view_item<'a, V, F>(
     item: V,
     stage_idx: usize,
@@ -349,16 +393,25 @@ where
     }
 }
 
+/// Execution plan for the terminal-collect fast path. Contains the view-domain
+/// prefix stages and a potentially composed collection kernel.
 struct TerminalCollectPlan {
+    /// Stages that run entirely in the view domain before collection.
     prefix: Vec<pipeline::ViewStageCapability>,
+    /// The kernel used to extract the value of each row for the output array.
     collect_kernel: pipeline::BodyKernel,
+    /// Demand constraint derived from the pipeline's suffix stages.
     source_demand: PullDemand,
 }
 
+/// Constructs a `TerminalCollectPlan` for the entire pipeline starting from
+/// stage 0, or returns `None` when the plan cannot be formed.
 fn terminal_collect_plan(body: &pipeline::PipelineBody) -> Option<TerminalCollectPlan> {
     terminal_collect_plan_from(body, 0)
 }
 
+/// Constructs a `TerminalCollectPlan` for the pipeline suffix starting at
+/// `start`, detecting and fusing trailing projection stages into the collect kernel.
 fn terminal_collect_plan_from(
     body: &pipeline::PipelineBody,
     start: usize,
@@ -389,6 +442,10 @@ fn terminal_collect_plan_from(
     })
 }
 
+/// Scans trailing stages from the end, collecting view-native projection kernels
+/// that can be fused into the terminal collect. Returns the stage index where
+/// the projection run ends and the composed kernel, or `None` when no such
+/// run exists.
 fn terminal_projection_run(
     body: &pipeline::PipelineBody,
     start: usize,
@@ -415,6 +472,9 @@ fn terminal_projection_run(
     found.then_some((idx, kernel))
 }
 
+/// Returns the view-native `BodyKernel` for a single trailing stage if it can
+/// be fused into the terminal collect kernel. Returns `None` for stages that
+/// are not projections or do not have a view-native kernel.
 fn terminal_projection_stage_kernel(
     stage: &pipeline::Stage,
     idx: usize,
@@ -439,6 +499,8 @@ fn terminal_projection_stage_kernel(
     }
 }
 
+/// Composes two `BodyKernel` projection steps into a single `Compose` kernel,
+/// or returns `first` directly when `then` is the identity `Current` kernel.
 fn compose_projection_kernels(
     first: pipeline::BodyKernel,
     then: pipeline::BodyKernel,
@@ -452,6 +514,9 @@ fn compose_projection_kernels(
     }
 }
 
+/// Converts the given `stages` slice into a vec of `ViewStageCapability` for use
+/// as the prefix in a `TerminalCollectPlan`. Returns `None` if any stage has
+/// a `ViewMaterialization` other than `Never`.
 fn terminal_collect_prefix_from(
     stages: &[pipeline::Stage],
     body: &pipeline::PipelineBody,
@@ -472,6 +537,10 @@ fn terminal_collect_prefix_from(
     Some(prefix)
 }
 
+/// Handles pipelines that begin with a keyed-reduce barrier stage
+/// (`group_by`, `count_by`, `index_by`). Collects rows in a `ViewStageReducer`
+/// while remaining in the view domain, then passes the reduced `Val` to the
+/// materialised suffix runner.
 fn run_reducing_stage_prefix_then_materialized_suffix<'a, V>(
     source: V,
     body: &pipeline::PipelineBody,
@@ -509,6 +578,10 @@ where
     ))
 }
 
+/// Handles pipelines with a `Sort` barrier. Runs any preceding view-native
+/// stages, accumulates rows into a `BoundedKeySorter` without materialisation,
+/// then continues with the sorted rows through either the view or materialised
+/// suffix runner.
 fn run_sort_prefix_then_materialized_suffix<'a, V>(
     source: V,
     body: &pipeline::PipelineBody,
@@ -568,6 +641,9 @@ where
     ))
 }
 
+/// Feeds a pre-sorted vec of view rows through the terminal-collect plan,
+/// applying any remaining prefix stages and the fused projection kernel without
+/// a separate materialisation step.
 fn run_sorted_rows_terminal_collect_suffix<'a, V>(
     rows: Vec<V>,
     plan: &TerminalCollectPlan,
@@ -591,6 +667,9 @@ where
     Some(Ok(collector.finish()))
 }
 
+/// Handles `SortUntilOutput` strategy: sorts rows with an `OrderedKeySorter`
+/// then drives them through the view-domain suffix to enable lazy top-N pulls
+/// that stop as soon as the output demand is met.
 fn run_sort_prefix_then_view_suffix<'a, V>(
     source: V,
     body: &pipeline::PipelineBody,
@@ -631,18 +710,31 @@ where
     Some(Ok(sink_acc.finish(false)))
 }
 
+/// Plan produced when a `Sort` barrier is detected. Records the view-domain
+/// prefix, the index of the sort stage, and the key extraction configuration.
 struct SortBarrierPlan {
+    /// View-domain stages that precede the sort barrier.
     prefix: Vec<pipeline::ViewStageCapability>,
+    /// Index of the `Sort` stage within `body.stages`.
     sort_stage: usize,
+    /// Stage-kernel index for the sort key, or `None` for a natural (identity) sort.
     key_kernel: Option<usize>,
+    /// Whether the sort order is descending.
     descending: bool,
 }
 
+/// The fully resolved view-domain capabilities for the suffix of a pipeline
+/// starting after a barrier stage.
 struct ViewSuffixCapabilities {
+    /// View-domain stage capabilities for each suffix stage.
     stages: Vec<pipeline::ViewStageCapability>,
+    /// View-domain sink capability for the pipeline's terminal sink.
     sink: pipeline::ViewSinkCapability,
 }
 
+/// Resolves view-domain capabilities for all stages from `start` to the end of
+/// the pipeline plus the sink. Returns `None` if any stage or the sink lacks a
+/// view capability.
 fn view_suffix_capabilities(
     body: &pipeline::PipelineBody,
     start: usize,
@@ -657,6 +749,9 @@ fn view_suffix_capabilities(
     })
 }
 
+/// Scans `body.stages` for the first `Sort` stage preceded only by view-native
+/// `Never`-materialisation stages, building a `SortBarrierPlan`. Returns `None`
+/// when no qualifying `Sort` barrier is found.
 fn sort_barrier_plan(body: &pipeline::PipelineBody) -> Option<SortBarrierPlan> {
     let mut prefix = Vec::new();
     for (idx, stage) in body.stages.iter().enumerate() {
@@ -694,6 +789,8 @@ fn sort_barrier_plan(body: &pipeline::PipelineBody) -> Option<SortBarrierPlan> {
     None
 }
 
+/// Runs the suffix of `body` (from `consumed_stages` onward) against a
+/// materialised `boundary_rows` array using the standard `Val`-based pipeline runner.
 fn run_materialized_suffix(
     body: &pipeline::PipelineBody,
     consumed_stages: usize,
@@ -707,6 +804,9 @@ fn run_materialized_suffix(
     suffix.run_with_env(&root, base_env, cache)
 }
 
+/// Runs the suffix of `body` against a single `boundary_value` (e.g. the
+/// output of a keyed-reduce barrier). Short-circuits to return the value
+/// directly when no suffix stages remain and the sink is `Collect`.
 fn run_materialized_value_suffix(
     body: &pipeline::PipelineBody,
     consumed_stages: usize,
@@ -723,6 +823,8 @@ fn run_materialized_value_suffix(
     suffix.run_with_env(&root, base_env, cache)
 }
 
+/// Applies a single view stage to `item`, returning the control flow decision
+/// (`Keep`, `Drop`, or `Stop`). Delegates to `stage_flow::apply_stage`.
 fn apply_view_stage<'a, V>(
     item: V,
     stage: pipeline::ViewStageCapability,
@@ -736,6 +838,8 @@ where
     stage_flow::apply_stage(item, stage, op_idx, op_state, stage_kernels)
 }
 
+/// Slices `body` to produce a new `PipelineBody` starting at `consumed_stages`,
+/// preserving the sink and adjusting the stage/kernel slices accordingly.
 fn suffix_body(body: &pipeline::PipelineBody, consumed_stages: usize) -> pipeline::PipelineBody {
     let stage_exprs = if body.stage_exprs.len() == body.stages.len() {
         body.stage_exprs[consumed_stages..].to_vec()
@@ -751,6 +855,8 @@ fn suffix_body(body: &pipeline::PipelineBody, consumed_stages: usize) -> pipelin
     }
 }
 
+/// Evaluates `kernel` against `item` as a boolean predicate.
+/// Returns `None` when kernel evaluation is not supported in the view domain.
 fn eval_filter_kernel<'a, V>(item: &V, kernel: &pipeline::BodyKernel) -> Option<bool>
 where
     V: ValueView<'a>,
@@ -761,6 +867,9 @@ where
     }
 }
 
+/// Evaluates `kernel` against `item` as a view-domain projection, returning the
+/// result as a `V` subview. Returns `None` when the kernel produces an owned
+/// value (requiring materialisation) rather than a borrowed view.
 fn eval_map_kernel<'a, V>(item: &V, kernel: &pipeline::BodyKernel) -> Option<V>
 where
     V: ValueView<'a>,
@@ -771,6 +880,9 @@ where
     }
 }
 
+/// Evaluates `kernel` against `item` expecting an array result, returning an
+/// iterator of child views. Returns `None` when the kernel produces an owned
+/// `Val` (not array-iterable in the view domain).
 fn eval_flat_map_kernel<'a, V>(
     item: &V,
     kernel: &pipeline::BodyKernel,
@@ -784,6 +896,9 @@ where
     }
 }
 
+/// Evaluates `kernel` against `item` and extracts a scalar `Val`. For view
+/// results, attempts a direct scalar conversion before falling back to full
+/// materialisation.
 fn eval_owned_scalar_or_value_kernel<'a, V>(item: &V, kernel: &pipeline::BodyKernel) -> Option<Val>
 where
     V: ValueView<'a>,
@@ -796,6 +911,9 @@ where
     }
 }
 
+/// Extracts a `ViewKey` from `item` using `kernel` when provided, or from the
+/// item's own scalar directly. Used for dedup (`distinct`) and group-by keying
+/// without materialising the full value.
 fn eval_view_key<'a, V>(item: &V, kernel: Option<&pipeline::BodyKernel>) -> Option<ViewKey>
 where
     V: ValueView<'a>,
@@ -811,6 +929,8 @@ where
     }
 }
 
+/// Extracts a sort key `Val` from `item`, optionally applying `stage_kernels[kernel_idx]`
+/// as a projection. Falls back to `item.materialize()` when no kernel is specified.
 fn view_sort_key<'a, V>(
     item: &V,
     kernel_idx: Option<usize>,

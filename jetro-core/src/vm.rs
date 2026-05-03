@@ -1,41 +1,12 @@
-//! High-performance bytecode VM for v2 Jetro expressions.
+//! Bytecode compiler and stack-machine VM for Jetro expressions.
 //!
-//! # Architecture
-//!
-//! ```text
-//!  String expression
-//!        │  parser::parse()
-//!        ▼
-//!     Expr (AST)
-//!        │  planner::plan_query()
-//!        ├─ Pipeline IR when the expression shape allows it
-//!        │
-//!        │  Compiler::compile()
-//!        ▼
-//!     Program              ← flat Arc<[Opcode]>  (cached: compile_cache)
-//!        │  VM::execute()
-//!        ▼
-//!      Val                 ← result              (structural: resolution_cache)
-//! ```
-//!
-//! # Scalar VM responsibilities
-//!
-//! 1. **Compile cache** — parse + compile once per unique expression string.
-//! 2. **Val type** — `Arc`-wrapped compound nodes; every clone is O(1).
-//! 3. **BuiltinMethod enum** — O(1) method dispatch (jump-table vs string hash).
-//! 4. **Pre-compiled sub-programs** — lambda/arg bodies compiled to `Arc<Program>`
-//!    once at compile time; never re-compiled per call.
-//! 5. **Resolution cache** — structural programs (`$.a.b[0]`) cache their
-//!    pointer path after the first traversal; subsequent calls skip traversal.
-//! 6. **Peephole pass 1 — RootChain** — `PushRoot + GetField+` fused into a
-//!    single pointer-resolve opcode.
-//! 7. **Pipeline handoff** — streamable chains are planned by `planner.rs`
-//!    and executed by `pipeline.rs` / `composed.rs`; the VM remains the
-//!    general scalar fallback.
-//! 8. **Peephole pass 3 — ConstFold** — arithmetic on adjacent integer literals
-//!    folded at compile time.
-//! 9. **Stack machine** — iterative `exec()` loop; no per-opcode stack-frame
-//!    overhead for simple navigation / arithmetic opcodes.
+//! `Compiler` lowers an `Expr` AST to a flat `Arc<[Opcode]>` program and runs
+//! peephole passes (`RootChain` fusion, `FilterCount` fusion, `ConstFold`,
+//! demand annotation). `VM` owns two caches: a compile cache keyed on the
+//! expression string, and a path-resolution cache keyed on document structure.
+//! Both caches accumulate over the thread's lifetime via the thread-local in
+//! `lib.rs`. The VM is the general scalar fallback; streamable chains are
+//! handled by the pipeline IR in `pipeline.rs` / `composed.rs`.
 
 use indexmap::IndexMap;
 use smallvec::SmallVec;
@@ -57,6 +28,7 @@ use crate::util::{
 };
 use crate::value::Val;
 
+/// Pop the top of the operand stack, returning a `stack underflow` error if empty.
 macro_rules! pop {
     ($stack:expr) => {
         $stack
@@ -64,330 +36,360 @@ macro_rules! pop {
             .ok_or_else(|| EvalError("stack underflow".into()))?
     };
 }
+/// Construct an `Err(EvalError(...))` from a format string, mirroring `format!` syntax.
 macro_rules! err {
     ($($t:tt)*) => { Err(EvalError(format!($($t)*))) };
 }
 
-// ── Compiled sub-structures ───────────────────────────────────────────────────
 
-/// A compiled method call stored inside `Opcode::CallMethod`.
+/// A method call compiled into a `CallMethod` opcode. Lambda/arg bodies are
+/// pre-compiled into `sub_progs` exactly once at compile time so the inner
+/// loop never re-compiles them. `demand_max_keep` is set by the demand-pass
+/// peephole when a `take(n)` follows this call.
 #[derive(Debug, Clone)]
 pub struct CompiledCall {
+    /// Resolved built-in variant; `Unknown` when the name is not a built-in.
     pub method: BuiltinMethod,
+    /// Original method name from source, used for error messages and registry lookup.
     pub name: Arc<str>,
-    /// Compiled lambda/expression sub-programs (one per arg, in order).
+    /// Pre-compiled sub-programs for each lambda/expression argument; shared via `Arc`.
     pub sub_progs: Arc<[Arc<Program>]>,
-    /// Original AST args kept for non-lambda dispatch fallback.
+    /// Original un-compiled arguments kept for lambda-param introspection at runtime.
     pub orig_args: Arc<[Arg]>,
-    /// Demand hint set by `pass_method_demand` peephole pass when this
-    /// call is followed by a constant-arg `take(n)`. Filter / Map
-    /// handlers read this and dispatch to `*_apply_bounded(items,
-    /// Some(n), ...)` so the predicate / mapper stops after `n` keeps.
-    /// `None` = no demand; behave as before.
+    /// When set, `filter`/`map` may stop early after collecting this many results.
     pub demand_max_keep: Option<usize>,
 }
 
-/// A compiled object field for `Opcode::MakeObj`.
+
+/// A field entry inside a `MakeObj` opcode. `Short` is the fast path for
+/// `{name}` shorthand — reads from `current` using an inline-cache hint;
+/// `KvPath` is the structural fast path for `{key: $.a.b}` chains.
 #[derive(Debug, Clone)]
 pub enum CompiledObjEntry {
-    /// `{ name }` / `{ name, … }` shorthand — reads `env.current.name`
-    /// (or a bound variable of that name).  `ic` is a per-entry inline
-    /// cache hint so that repeated MakeObj calls over objects that share
-    /// shape skip the IndexMap key-hash on hit.
+    /// `{name}` shorthand: copies the field from `current`, using `ic` as an
+    /// inline-cache slot to remember the last-seen map index.
     Short {
+        /// Field name to read from the current object (or variable scope).
         name: Arc<str>,
+        /// Inline-cache slot storing the last successful map index + 1 (0 = cold).
         ic: Arc<AtomicU64>,
     },
+    /// General `{key: expr}` entry with an optional guard condition.
     Kv {
+        /// Output key name.
         key: Arc<str>,
+        /// Compiled value expression evaluated against the current environment.
         prog: Arc<Program>,
+        /// When true, null values are omitted from the output object.
         optional: bool,
+        /// If present, the entry is skipped when the condition evaluates falsy.
         cond: Option<Arc<Program>>,
     },
-    /// Specialised `Kv` where the value is a pure path from current:
-    /// `{ key: @.a.b[0] }` compiles to `KvPath` so `exec_make_obj` can
-    /// walk `env.current` through the pre-resolved steps without a
-    /// sub-program exec.  `optional=true` mirrors `?` in the source —
-    /// the field is omitted when the walk lands on `Null`.
-    /// `ics[i]` is an inline-cache slot for `steps[i]` — only used when
-    /// the step is `Field`.
+    /// Structural fast-path for `{key: @.a.b[0]}` — avoids spawning a sub-`exec` call
+    /// when the value is a pure chain of field/index steps rooted at `@`.
     KvPath {
+        /// Output key name.
         key: Arc<str>,
+        /// Ordered field/index steps traversed starting from `current`.
         steps: Arc<[KvStep]>,
+        /// When true, null values are omitted from the output object.
         optional: bool,
+        /// Per-step inline-cache slots, one per element of `steps`.
         ics: Arc<[AtomicU64]>,
     },
+    /// `{(expr): expr}` — both key and value are computed at runtime.
     Dynamic {
+        /// Program producing the key; result is coerced to a string.
         key: Arc<Program>,
+        /// Program producing the value.
         val: Arc<Program>,
     },
+    /// `{...expr}` — shallow-merges all fields from an object value into the output.
     Spread(Arc<Program>),
+    /// `{...!expr}` — recursively deep-merges an object value into the output.
     SpreadDeep(Arc<Program>),
 }
 
-/// Single step in a pre-resolved `KvPath` projection.
+
+/// A single traversal step in a `KvPath` entry, representing either a named
+/// field access or an integer index into an array.
 #[derive(Debug, Clone)]
 pub enum KvStep {
+    /// Access an object field by name.
     Field(Arc<str>),
+    /// Access an array element; negative values count from the end.
     Index(i64),
 }
 
-/// A compiled f-string interpolation part.
+
+/// A single segment of a compiled format-string (`f"..."`).
+/// Segments alternate between literal text and interpolated expressions.
 #[derive(Debug, Clone)]
 pub enum CompiledFSPart {
+    /// A verbatim string fragment that is appended directly to the output buffer.
     Lit(Arc<str>),
+    /// An interpolated expression whose result is formatted and inserted at this position.
     Interp {
+        /// The compiled sub-program that produces the interpolated value.
         prog: Arc<Program>,
+        /// Optional format spec such as `.2f` or `>10`; `None` uses default formatting.
         fmt: Option<FmtSpec>,
     },
 }
 
-/// Compiled bind-object destructure spec.
+
+/// Specifies the destructuring pattern for an object bind step in a pipeline
+/// (`... | {a, b, ...rest} -> ...`).
 #[derive(Debug, Clone)]
 pub struct BindObjSpec {
+    /// Named fields that are extracted as individual variables.
     pub fields: Arc<[Arc<str>]>,
+    /// If present, remaining fields are collected into this variable as an object.
     pub rest: Option<Arc<str>>,
 }
 
-/// One step inside a `PipelineRun` opcode.  Forward-step evaluates
-/// `prog` against an env where `current = pipe_value` and replaces the
-/// pipe value with the result.  Bind-step stores the pipe value in the
-/// local env's vars (the pipe value is unchanged).
+
+/// A single compiled step inside a `PipelineRun` opcode. Each step either
+/// transforms the current pipeline value or captures it into named variables.
 #[derive(Debug, Clone)]
 pub enum CompiledPipeStep {
-    /// `| <expr>` — env.current = pipe_value; pipe_value = exec(prog).
+    /// Pass the current value through an expression, updating the pipeline value.
     Forward(Arc<Program>),
-    /// `-> name` — env.set_var(name, pipe_value); pipe_value unchanged.
+    /// Bind the current pipeline value to a single named variable.
     BindName(Arc<str>),
-    /// `-> { f1, f2, …, …rest }` — destructure object into named vars.
+    /// Destructure the current object value into named field variables (with optional rest).
     BindObj(Arc<BindObjSpec>),
-    /// `-> [a, b, …]` — destructure array into named vars.
+    /// Destructure the current array value into positional variables by index.
     BindArr(Arc<[Arc<str>]>),
 }
 
-/// Compiled comprehension spec.
+
+/// Compiled specification for a list, set, or generator comprehension
+/// (`[expr for vars in iter if cond]`).
 #[derive(Debug, Clone)]
 pub struct CompSpec {
+    /// Expression evaluated for each item to produce the output element.
     pub expr: Arc<Program>,
+    /// Variable names bound per iteration; one name for simple loops, two for indexed.
     pub vars: Arc<[Arc<str>]>,
+    /// Program whose result is iterated (must yield an array or object).
     pub iter: Arc<Program>,
+    /// Optional filter; items for which this evaluates falsy are skipped.
     pub cond: Option<Arc<Program>>,
 }
 
+/// Compiled specification for a dictionary comprehension
+/// (`{key: val for vars in iter if cond}`).
 #[derive(Debug, Clone)]
 pub struct DictCompSpec {
+    /// Program evaluated to produce each output key; coerced to a string.
     pub key: Arc<Program>,
+    /// Program evaluated to produce each output value.
     pub val: Arc<Program>,
+    /// Variable names bound per iteration.
     pub vars: Arc<[Arc<str>]>,
+    /// Program whose result is iterated (must yield an array or object).
     pub iter: Arc<Program>,
+    /// Optional filter; items for which this evaluates falsy are skipped.
     pub cond: Option<Arc<Program>>,
 }
 
-// ── Opcode ────────────────────────────────────────────────────────────────────
 
+/// Single instruction in a compiled `Program`. The VM executes a flat
+/// `Arc<[Opcode]>` slice iteratively; no per-opcode stack frames.
 #[derive(Debug, Clone)]
 pub enum Opcode {
-    // ── Literals ─────────────────────────────────────────────────────────────
+    /// Push the literal `null` value onto the stack.
     PushNull,
+    /// Push a boolean literal onto the stack.
     PushBool(bool),
+    /// Push a 64-bit integer literal onto the stack.
     PushInt(i64),
+    /// Push a 64-bit float literal onto the stack.
     PushFloat(f64),
+    /// Push a reference-counted string literal onto the stack.
     PushStr(Arc<str>),
 
-    // ── Context ───────────────────────────────────────────────────────────────
+    /// Push the root document value (`$`) onto the stack.
     PushRoot,
+    /// Push the current iteration value (`@`) onto the stack.
     PushCurrent,
 
-    // ── Navigation ────────────────────────────────────────────────────────────
+    /// Pop an object, push the named field (or `null` if absent).
     GetField(Arc<str>),
+    /// Pop an array/string, push element at the given index; negative indices count from end.
     GetIndex(i64),
+    /// Pop an array, push a sub-slice between the optional start and end indices.
     GetSlice(Option<i64>, Option<i64>),
+    /// Pop a container; evaluate the inner program to get a key, then index into the container.
     DynIndex(Arc<Program>),
+    /// Like `GetField` but propagates `null` receivers silently instead of erroring.
     OptField(Arc<str>),
+    /// Collect all descendants matching the given field name via DFS; result is an array.
     Descendant(Arc<str>),
+    /// Collect every scalar and object node in the subtree into an array (DFS pre-order).
     DescendAll,
+    /// Filter an array or singleton using the predicate sub-program; `@` is each item.
     InlineFilter(Arc<Program>),
+    /// Apply a quantifier to the top-of-stack value (`?` for first, `!` for exactly-one).
     Quantifier(QuantifierKind),
 
-    // ── Peephole fusions ──────────────────────────────────────────────────────
-    /// PushRoot + GetField* fused — resolves chain via pointer arithmetic.
+    /// Fused `PushRoot` + one-or-more `GetField` steps; avoids repeated stack traffic.
+    /// Results are memoised in `root_chain_cache` keyed by `Arc` pointer identity.
     RootChain(Arc<[Arc<str>]>),
-    /// GetField(k1) + GetField(k2) + … fused — walks TOS through N fields.
-    /// Applies mid-program where `RootChain` does not match (e.g. after a
-    /// method call or filter produces an object on stack).
-    /// Carries a per-step inline-cache array so that `map(a.b.c)` over a
-    /// shape-uniform array of objects hits `get_index(cached_slot)`
-    /// instead of re-hashing the key at every iteration.
+
+    /// Fused run of consecutive `GetField`/`OptField` steps after a non-root value.
+    /// Each step has its own inline-cache slot inside `FieldChainData`.
     FieldChain(Arc<FieldChainData>),
-    /// Fused `map(@.replace(lit, lit))` (and `replace_all`) — literal needle
-    /// and replacement inlined; skips per-item sub_prog evaluation for arg
-    /// strings.  `all=true` means replace every occurrence, else only first.
-    /// Fused `map(@.upper().replace(lit, lit))` (and `replace_all`) — scan
-    /// bytes once: ASCII-upper + memchr needle scan into a single pre-sized
-    /// output String per item. Falls back to non-ASCII path for Unicode.
-    /// Fused `map(@.lower().replace(lit, lit))` (and `replace_all`) — same as
-    /// above but ASCII-lower.
-    /// Fused `map(prefix + @ + suffix)` — per item, allocate exact-size
-    /// `Arc<str>` with one uninit slice + copy_nonoverlapping. Either
-    /// prefix or suffix may be empty for the 2-operand forms.
-    /// Fused `map(@.split(sep).map(len).sum())` — emits IntVec of per-row
-    /// sum-of-segment-char-lengths. Uses byte-scan (memchr/memmem) for ASCII
-    /// source; falls back to char counting for Unicode.
-    /// Fused `map({k1, k2, ..})` — map over an array projecting each object
-    /// to a fixed set of `Short`-form fields (bare identifiers). Avoids the
-    /// nested `MakeObj` dispatch per row and hoists key `Arc<str>` clones
-    /// outside the inner loop. Uses one IC slot per key for shape lookup.
-    /// Fused `map(@.split(sep).count())` — byte-scan per row, returns Int;
-    /// zero per-row allocations.
-    /// Fused `map(@.split(sep).count()).sum()` — scalar Int, no intermediate
-    /// `[Int,Int,...]` array. One memchr-backed scan per row, accumulated.
-    /// Fused `map(@.split(sep).first())` — first segment only; one Arc per
-    /// row instead of N.
-    /// Fused `map(@.split(sep).nth(n))` — nth segment; one Arc per row.
-    // Map+<aggregate> fusions deleted in Tier 3.
 
-    // ── Field-specialised fusions (Tier 3) ────────────────────────────────────
-    // MapFieldSum / Avg / Min / Max migrated to pipeline.rs
-    // Sink::NumMap(op, prog).  See memory/project_opcode_migration.md.
-    // MapField / MapFieldChain / MapFieldUnique / MapFieldChainUnique /
-    // FlatMapChain fused opcodes deleted in Tier 3.  Pipeline IR Stage::Map
-    // + BodyKernel::FieldRead / FieldChain / + Stage::FlatMap covers them.
-
-    // ── Filter predicate specialisation deleted in Tier 3 ────────────────────
-    // FilterFieldEqLit / FilterFieldCmpLit / FilterCurrentCmpLit /
-    // FilterFieldCmpField / FilterFieldCmpFieldCount /
-    // FilterFieldEqLitMapField / FilterFieldCmpLitMapField /
-    // FilterFieldsAllEqLitCount / FilterFieldsAllCmpLitCount /
-    // FilterFieldEqLitCount / FilterFieldCmpLitCount — all replaced by
-    // pipeline IR Stage::Filter + composed substrate (auto-index +
-    // columnar IntVec/FloatVec/StrVec lanes preserved through Stage
-    // dispatch).
-    // FilterStrVec* (StartsWith/EndsWith/Contains) + MapStrVec* (Upper/Lower/Trim)
-    // + MapNumVecArith + MapNumVecNeg deleted in Tier 3.  Pipeline IR
-    // Stage::Filter / Stage::Map + composed substrate dispatch through
-    // base CallMethod chain on StrVec/IntVec/FloatVec receivers.
-
-    // ── Ident lookup (var, then current field) ────────────────────────────────
+    /// Resolve an identifier: looks up a variable, falls back to a field on `current`.
     LoadIdent(Arc<str>),
 
-    // ── Binary / unary ops ────────────────────────────────────────────────────
+    /// Pop two values and push their sum (number or string concatenation).
     Add,
+    /// Pop two numbers and push their difference.
     Sub,
+    /// Pop two numbers and push their product.
     Mul,
+    /// Pop two numbers and push their quotient as a float; errors on divide-by-zero.
     Div,
+    /// Pop two numbers and push the remainder.
     Mod,
+    /// Pop two values and push `true` if they are equal.
     Eq,
+    /// Pop two values and push `true` if they are not equal.
     Neq,
+    /// Pop two values and push `true` if the left is strictly less than the right.
     Lt,
+    /// Pop two values and push `true` if the left is less than or equal to the right.
     Lte,
+    /// Pop two values and push `true` if the left is strictly greater than the right.
     Gt,
+    /// Pop two values and push `true` if the left is greater than or equal to the right.
     Gte,
+    /// Pop two string values and push `true` if either contains the other (case-insensitive).
     Fuzzy,
+    /// Pop a value and push its boolean negation.
     Not,
+    /// Pop a number and push its arithmetic negation.
     Neg,
 
-    // ── Type cast (`as T`) ───────────────────────────────────────────────────
+    /// Pop a value and push it cast to the given type.
     CastOp(super::ast::CastType),
 
-    // ── Short-circuit ops (embed rhs as sub-program) ──────────────────────────
+    /// Short-circuit AND: pop lhs; if falsy push `false`, else evaluate rhs sub-program.
     AndOp(Arc<Program>),
+    /// Short-circuit OR: pop lhs; if truthy push it, else evaluate rhs sub-program.
     OrOp(Arc<Program>),
+    /// Null coalescing: pop lhs; if non-null push it, else evaluate rhs sub-program.
     CoalesceOp(Arc<Program>),
 
-    // ── Method calls ─────────────────────────────────────────────────────────
+    /// Pop receiver and dispatch it with the pre-compiled call descriptor.
     CallMethod(Arc<CompiledCall>),
+    /// Like `CallMethod` but silently returns `null` when the receiver is `null`.
     CallOptMethod(Arc<CompiledCall>),
 
-    // ── Construction ─────────────────────────────────────────────────────────
+    /// Construct an object literal from the compiled field entries; does not consume the stack.
     MakeObj(Arc<[CompiledObjEntry]>),
-    /// Array literal `[e0, e1, ...]`.  Each entry carries a spread
-    /// flag — `true` means the element's program produces an iterable
-    /// whose contents are flattened into the result.
+
+    /// Construct an array literal; each element has a compiled program and a spread flag.
     MakeArr(Arc<[(Arc<Program>, bool)]>),
 
-    // ── F-string ─────────────────────────────────────────────────────────────
+    /// Evaluate a format-string from its compiled parts and push the resulting string.
     FString(Arc<[CompiledFSPart]>),
 
-    // ── Kind check ───────────────────────────────────────────────────────────
+    /// Pop a value and push a boolean indicating whether it matches the given kind.
     KindCheck {
+        /// The kind to test against (e.g. `KindType::Arr`).
         ty: KindType,
+        /// When true the boolean result is inverted (`is not`).
         negate: bool,
     },
 
-    // ── Pipeline helpers ──────────────────────────────────────────────────────
-    /// Pop TOS → env.current, then push it back (pass-through with context update).
+    /// No-op marker inserted by the pipeline emitter to delimit scope boundaries;
+    /// consumed during compilation and stripped from the final program.
     SetCurrent,
-    /// Single-opcode pipeline `base | rhs1 | rhs2 -> n | rhs3 ...` —
-    /// runs `base`, threads the value through each step under a local
-    /// mutable Env (forward: env.current = val + run rhs; bind: store
-    /// in env vars, value unchanged).  Replaces the previous flat
-    /// pipeline helper chain.
+
+    /// Evaluate `base`, then run each `CompiledPipeStep` in sequence, threading
+    /// the current value and environment through the pipeline.
     PipelineRun {
+        /// The left-hand-side expression whose result seeds the pipeline.
         base: Arc<Program>,
+        /// Ordered pipeline steps (forward transforms and bind patterns).
         steps: Arc<[CompiledPipeStep]>,
     },
 
-    // ── Complex (recursive sub-programs) ─────────────────────────────────────
+    /// Pop the initialiser off the stack, bind it to `name`, and evaluate `body`.
     LetExpr {
+        /// Variable name introduced for the duration of `body`.
         name: Arc<str>,
+        /// Body program evaluated in the extended environment.
         body: Arc<Program>,
     },
-    /// Python-style ternary: TOS is cond; branch into `then_` or `else_`.
-    /// Short-circuits — only the taken branch is executed.
+
+    /// Pop the condition, then evaluate either `then_` or `else_` branch.
     IfElse {
+        /// Branch evaluated when the condition is truthy.
         then_: Arc<Program>,
+        /// Branch evaluated when the condition is falsy.
         else_: Arc<Program>,
     },
-    /// `try BODY else DEFAULT` — execute `body`; on `EvalError` or
-    /// `Val::Null` result, execute `default`.  Both subprograms are
-    /// isolated; only one's value lands on the stack.
+
+    /// Evaluate `body`; on error or null result fall back to `default`.
     TryExpr {
+        /// Primary expression to attempt.
         body: Arc<Program>,
+        /// Fallback expression evaluated when `body` fails or returns null.
         default: Arc<Program>,
     },
+    /// Execute a list comprehension using the given compiled spec.
     ListComp(Arc<CompSpec>),
+    /// Execute a dictionary comprehension using the given compiled spec.
     DictComp(Arc<DictCompSpec>),
+    /// Execute a set/generator comprehension (deduplication semantics).
     SetComp(Arc<CompSpec>),
 
-    // ── Patch block ──────────────────────────────────────────────────────────
-    /// Patch block — pre-compiled form.  Tree-walker no longer used;
-    /// all sub-expressions live as `Arc<Program>` and run via VM.
+    /// Execute a compiled patch expression (`.set`, `.modify`, `.delete`, `.unset`).
     PatchEval(Arc<CompiledPatch>),
-    /// Sentinel for `DELETE` outside a patch — runtime raises error.
+
+    /// Guard that fires when a `DELETE` sentinel reaches execution outside a patch context.
     DeleteMarkErr,
 }
 
-// ── Program ───────────────────────────────────────────────────────────────────
 
-/// A compiled, immutable v2 program.  Cheap to clone (`Arc` internals).
+/// A compiled, immutable bytecode program. Shared between the compile cache and
+/// the path-resolution cache via `Arc`; cloning is O(1).
 #[derive(Debug, Clone)]
 pub struct Program {
+    /// The flat opcode slice executed by the VM.
     pub ops: Arc<[Opcode]>,
+    /// The source expression string this program was compiled from; used for cache keys.
     pub source: Arc<str>,
+    /// Stable hash of `source` used for fast equality checks.
     pub id: u64,
-    /// True when the program contains only structural navigation opcodes
-    /// (eligible for resolution caching).
+
+    /// `true` when every opcode is a pure structural navigation step; allows the
+    /// path-resolution cache to memoize results for this program.
     pub is_structural: bool,
-    /// Inline caches — one `AtomicU64` slot per opcode.  Populated by
-    /// `Opcode::GetField` / `Opcode::OptField` / `Opcode::FieldChain`.
-    ///
-    /// Encoding: `stored_slot = slot_idx + 1` (0 reserved for "unset").
-    /// No Arc-ptr gating — the hit path is `get_index(slot)` + byte-eq
-    /// key verify.  That lets a single slot survive across different
-    /// `Arc<IndexMap>` instances of the same shape, which is the common
-    /// case for repeated queries over distinct docs and for shape-uniform
-    /// array iteration reaching the opcode inside a sub-program.
+
+    /// Per-opcode inline-cache slots (one `AtomicU64` per opcode); used by `GetField`
+    /// and `OptField` to remember the last-seen map index.
     pub ics: Arc<[AtomicU64]>,
 }
 
-// ── Patch runtime helpers ──────────────────────────────────────────
 
+/// Internal return value from the recursive patch walker indicating whether the
+/// target node should be replaced with a new value or removed entirely.
 #[derive(Debug)]
 enum PatchResult {
+    /// The node at this path is replaced with the given value.
     Replace(Val),
+    /// The node at this path is deleted from its parent container.
     Delete,
 }
 
+/// Resolve a signed index `i` into the range `[0, len]`, clamping out-of-bounds
+/// values. Negative indices count backwards from `len` (Python-style).
 #[inline]
 fn vm_resolve_idx(i: i64, len: i64) -> usize {
     if len == 0 {
@@ -403,43 +405,57 @@ fn vm_resolve_idx(i: i64, len: i64) -> usize {
     }
 }
 
-// ── Compiled patch (VM-native) ─────────────────────────────────────
 
-/// Pre-compiled form of `Expr::Patch`.  Every sub-expression is a
-/// `vm::Program`; the runtime patch executor uses `self.exec` to
-/// evaluate them.
+/// A compiled `patch` expression: a root document program plus a list of
+/// individual field-mutation operations applied in order.
 #[derive(Debug, Clone)]
 pub struct CompiledPatch {
+    /// Program that yields the base document to patch.
     pub root_prog: Arc<Program>,
+    /// Ordered list of compiled field operations applied to the document.
     pub ops: Vec<CompiledPatchOp>,
 }
 
+/// A single field-mutation within a `CompiledPatch`: a path, a replacement/delete
+/// value, and an optional runtime guard condition.
 #[derive(Debug, Clone)]
 pub struct CompiledPatchOp {
+    /// Sequence of path steps that locate the target node in the document.
     pub path: Vec<CompiledPathStep>,
+    /// The value action to perform at the target: replace or delete.
     pub val: CompiledPatchVal,
+    /// When present, the operation is skipped unless this program evaluates truthy.
     pub cond: Option<Arc<Program>>,
 }
 
+/// The replacement action for a single `CompiledPatchOp`.
 #[derive(Debug, Clone)]
 pub enum CompiledPatchVal {
-    /// Replace leaf with the value produced by `prog` (with `@` = leaf).
+    /// Replace the node with the result of evaluating this program; `@` is the old value.
     Replace(Arc<Program>),
-    /// Sentinel: delete the leaf entry.
+    /// Remove the node from its parent (object field or array element).
     Delete,
 }
 
+/// A single step in the path portion of a `CompiledPatchOp`.
 #[derive(Debug, Clone)]
 pub enum CompiledPathStep {
+    /// Navigate into an object field by name.
     Field(Arc<str>),
+    /// Navigate into an array element by signed index.
     Index(i64),
+    /// Navigate to an array element whose index is computed at runtime.
     DynIndex(Arc<Program>),
+    /// Apply the operation to every element of an array (`[*]`).
     Wildcard,
+    /// Apply the operation to every array element that satisfies the predicate.
     WildcardFilter(Arc<Program>),
+    /// Recursively descend and apply the operation wherever the named field exists.
     Descendant(Arc<str>),
 }
 
 impl Program {
+    /// Construct a new `Program`, computing `is_structural` and allocating fresh inline-cache slots.
     pub fn new(ops: Vec<Opcode>, source: &str) -> Self {
         let id = hash_str(source);
         let is_structural = ops.iter().all(|op| {
@@ -466,17 +482,19 @@ impl Program {
     }
 }
 
-/// Per-step inline caches for `Opcode::FieldChain`.  One `AtomicU64` slot per
-/// key in the chain — same encoding as `Program.ics` (`slot_idx + 1`, 0 unset).
-/// Lives inside the opcode rather than the top-level side-table because the
-/// chain length is known only at compile time of that specific opcode.
+
+/// Cached pointer-path data for a `FieldChain` opcode. Stores the ordered field
+/// keys and one inline-cache slot per key for fast map-index lookup.
 #[derive(Debug)]
 pub struct FieldChainData {
+    /// Ordered sequence of field names traversed by this chain.
     pub keys: Arc<[Arc<str>]>,
+    /// Per-key inline-cache slots; each stores the last-seen index + 1 (0 = cold).
     pub ics: Box<[AtomicU64]>,
 }
 
 impl FieldChainData {
+    /// Allocate a new `FieldChainData` with cold (zero) inline-cache slots.
     pub fn new(keys: Arc<[Arc<str>]>) -> Self {
         let n = keys.len();
         let mut ics = Vec::with_capacity(n);
@@ -490,6 +508,7 @@ impl FieldChainData {
     }
 }
 
+/// Deref to the key slice so callers can iterate keys without naming the field.
 impl std::ops::Deref for FieldChainData {
     type Target = [Arc<str>];
     #[inline]
@@ -498,9 +517,8 @@ impl std::ops::Deref for FieldChainData {
     }
 }
 
-/// Build a fresh IC side-table with one zeroed `AtomicU64` per opcode.
-/// Kept public so other modules that fabricate `Program` values (schema
-/// specialisation, analysis passes) can populate the field.
+
+/// Allocate `len` cold inline-cache slots (all zero) and return them as a shared slice.
 pub fn fresh_ics(len: usize) -> Arc<[AtomicU64]> {
     let mut v = Vec::with_capacity(len);
     for _ in 0..len {
@@ -509,27 +527,17 @@ pub fn fresh_ics(len: usize) -> Arc<[AtomicU64]> {
     v.into()
 }
 
-/// Look up `key` in `m`, using the IC slot as a speculative hint.
-///
-/// IC is ptr-independent: slot survives across different `Arc<IndexMap>`
-/// instances as long as shape (key ordering) is the same.  Hit path is
-/// `get_index(slot) + byte-eq key verify`; miss path is one `get_full`
-/// that also refreshes the slot.  Slot is encoded as `idx + 1` so zero
-/// stays reserved for "unset".
-/// Migration gate for opcode-level fusion.  When the env var
-/// `JETRO_DISABLE_OPCODE_FUSION` is set (any value), `Compiler::optimize`
-/// passes that emit fused/specialised opcodes become no-ops, leaving
-/// the unfused forms in place.  Used to validate that
-/// `pipeline.rs` rewrite rules cover every shape an opcode currently
-/// fuses.  See `memory/project_opcode_migration.md`.
-///
-/// Read once per call (env-var lookup is fast but not free); callers
-/// invoke this from the per-pass entry, not the per-row inner loop.
+
+/// Return `true` when the `JETRO_DISABLE_OPCODE_FUSION` environment variable is set,
+/// suppressing all peephole fusion passes for debugging purposes.
 #[inline]
 fn disable_opcode_fusion() -> bool {
     std::env::var_os("JETRO_DISABLE_OPCODE_FUSION").is_some()
 }
 
+/// Look up `key` in the map using the inline-cache `ic` as a fast-path hint.
+/// On a cache miss the map is searched linearly and the cache is updated.
+/// Returns `Val::Null` when the key is absent.
 fn ic_get_field(m: &Arc<IndexMap<Arc<str>, Val>>, key: &str, ic: &AtomicU64) -> Val {
     let cached = ic.load(Ordering::Relaxed);
     if cached != 0 {
@@ -548,25 +556,20 @@ fn ic_get_field(m: &Arc<IndexMap<Arc<str>, Val>>, key: &str, ic: &AtomicU64) -> 
     }
 }
 
-/// Accumulate lambda pattern tag — selects which fused binop to run.
+
+/// Simple binary arithmetic operation used by specialised accumulate/transform paths.
 #[derive(Copy, Clone)]
 enum AccumOp {
+    /// Wrapping integer addition or float addition.
     Add,
+    /// Wrapping integer subtraction or float subtraction.
     Sub,
+    /// Wrapping integer multiplication or float multiplication.
     Mul,
 }
 
-// ── Typed-numeric aggregate fast-paths ────────────────────────────────────────
-// Direct loops over `&[Val]` for mono-typed or mixed Int/Float arrays.  Used
-// by the bare `.sum()/.min()/.max()/.avg()` no-arg method-call fast path in
-// `exec_call` — skips fallback dispatch, `into_vec()` clone, and the extra
-// `.filter().collect()` that `func_aggregates::collect_nums` performs.
-//
-// Semantics match `func_aggregates`: non-numeric items are skipped; Int-only
-// arrays stay on `i64` (no lossy widening); Float appearance widens once.
 
-/// 4-lane unrolled i64 sum.  LLVM emits SIMD horizontal-reduce for
-/// `chunks_exact(4)` over independent accumulators.
+/// Sum a slice of `i64` values using 4-lane manual unrolling to assist auto-vectorisation.
 #[inline]
 fn simd_sum_i64_slice(a: &[i64]) -> i64 {
     let mut s0: i64 = 0;
@@ -591,6 +594,7 @@ fn simd_sum_i64_slice(a: &[i64]) -> i64 {
         .wrapping_add(tail)
 }
 
+/// Sum a slice of `f64` values using 4-lane manual unrolling to assist auto-vectorisation.
 #[inline]
 fn simd_sum_f64_slice(a: &[f64]) -> f64 {
     let mut s0: f64 = 0.0;
@@ -612,6 +616,7 @@ fn simd_sum_f64_slice(a: &[f64]) -> f64 {
     s0 + s1 + s2 + s3 + tail
 }
 
+/// Return the minimum value in an `i64` slice, or `None` when empty.
 #[inline]
 fn simd_min_i64_slice(a: &[i64]) -> Option<i64> {
     if a.is_empty() {
@@ -625,6 +630,7 @@ fn simd_min_i64_slice(a: &[i64]) -> Option<i64> {
     }
     Some(best)
 }
+/// Return the maximum value in an `i64` slice, or `None` when empty.
 #[inline]
 fn simd_max_i64_slice(a: &[i64]) -> Option<i64> {
     if a.is_empty() {
@@ -638,6 +644,7 @@ fn simd_max_i64_slice(a: &[i64]) -> Option<i64> {
     }
     Some(best)
 }
+/// Return the minimum value in an `f64` slice, or `None` when empty.
 #[inline]
 fn simd_min_f64_slice(a: &[f64]) -> Option<f64> {
     if a.is_empty() {
@@ -651,6 +658,7 @@ fn simd_min_f64_slice(a: &[f64]) -> Option<f64> {
     }
     Some(best)
 }
+/// Return the maximum value in an `f64` slice, or `None` when empty.
 #[inline]
 fn simd_max_f64_slice(a: &[f64]) -> Option<f64> {
     if a.is_empty() {
@@ -665,8 +673,10 @@ fn simd_max_f64_slice(a: &[f64]) -> Option<f64> {
     Some(best)
 }
 
+/// Sum a heterogeneous `Val` slice, promoting to `Float` as soon as a float element
+/// is encountered. Non-numeric elements are silently skipped.
 fn agg_sum_typed(a: &[Val]) -> Val {
-    // Tight i64 loop until first Float; then switch to f64 loop.
+
     let mut i_acc: i64 = 0;
     let mut it = a.iter();
     while let Some(v) = it.next() {
@@ -683,12 +693,14 @@ fn agg_sum_typed(a: &[Val]) -> Val {
                 }
                 return Val::Float(f_acc);
             }
-            _ => {} // skip non-numeric
+            _ => {} 
         }
     }
     Val::Int(i_acc)
 }
 
+/// Compute the arithmetic mean of numeric values in a heterogeneous `Val` slice.
+/// Returns `Val::Null` when the slice contains no numeric elements.
 #[inline]
 fn agg_avg_typed(a: &[Val]) -> Val {
     let mut sum: f64 = 0.0;
@@ -713,10 +725,13 @@ fn agg_avg_typed(a: &[Val]) -> Val {
     }
 }
 
+/// Find the minimum or maximum numeric value in a heterogeneous `Val` slice.
+/// When `want_max` is `true` the maximum is returned; otherwise the minimum.
+/// Promotes to `Float` if any float element is encountered. Returns `Val::Null` when empty.
 #[inline]
 fn agg_minmax_typed(a: &[Val], want_max: bool) -> Val {
     let mut it = a.iter();
-    // Find first number.
+    
     let first = loop {
         match it.next() {
             Some(v) if v.is_number() => break v,
@@ -727,7 +742,7 @@ fn agg_minmax_typed(a: &[Val], want_max: bool) -> Val {
     match first {
         Val::Int(n0) => {
             let mut best: i64 = *n0;
-            // Mono-Int tight loop; on first Float, promote.
+            
             while let Some(v) = it.next() {
                 match v {
                     Val::Int(n) => {
@@ -827,16 +842,17 @@ fn agg_minmax_typed(a: &[Val], want_max: bool) -> Val {
     }
 }
 
-/// `&str`-keyed variant of `lookup_field_cached`; ptr-eq shortcut is skipped
-/// (caller doesn't hold an `Arc<str>`), so the hit path is byte-eq only.
-// ── Variable context (compile-time) ──────────────────────────────────────────
 
+/// Compile-time variable scope used by the `Compiler` to decide whether an
+/// identifier refers to a bound variable or a built-in/field name.
 #[derive(Clone, Default)]
 struct VarCtx {
+    /// Deduplicated set of names currently in scope; stored inline for small counts.
     known: SmallVec<[Arc<str>; 4]>,
 }
 
 impl VarCtx {
+    /// Return a new context extended with `name`, deduplicating if already present.
     fn with_var(&self, name: &str) -> Self {
         let mut v = self.clone();
         if !v.known.iter().any(|k| k.as_ref() == name) {
@@ -844,6 +860,7 @@ impl VarCtx {
         }
         v
     }
+    /// Return a new context extended with all `names`, deduplicating each.
     fn with_vars(&self, names: &[String]) -> Self {
         let mut v = self.clone();
         for n in names {
@@ -853,23 +870,27 @@ impl VarCtx {
         }
         v
     }
+    /// Return `true` if `name` is currently in scope as a bound variable.
     fn has(&self, name: &str) -> bool {
         self.known.iter().any(|k| k.as_ref() == name)
     }
 }
 
-// ── Compiler ─────────────────────────────────────────────────────────────────
 
+/// Stateless unit struct that compiles an `Expr` AST into a flat `Program`.
+/// All methods are associated functions; no instance state is needed.
 pub struct Compiler;
 
 impl Compiler {
+    /// Compile `expr` with all optimisation passes enabled and sub-program deduplication.
+    /// `source` is stored verbatim in the returned `Program` for cache keying.
     pub fn compile(expr: &Expr, source: &str) -> Program {
         let mut e = expr.clone();
         Self::reorder_and_operands(&mut e);
         let ctx = VarCtx::default();
         let ops = Self::optimize(Self::emit(&e, &ctx));
         let prog = Program::new(ops, source);
-        // Post-pass: canonicalise identical sub-programs.
+        
         let deduped = super::analysis::dedup_subprograms(&prog);
         let ics = fresh_ics(deduped.ops.len());
         Program {
@@ -881,9 +902,8 @@ impl Compiler {
         }
     }
 
-    /// AST rewrite: for each `a and b`, if `b` is more selective than `a`,
-    /// swap operands so the cheaper/selective predicate runs first.  Safe
-    /// because `and` is commutative on pure, side-effect-free expressions.
+    /// Recursively reorder the operands of `&&` expressions so the more selective
+    /// (cheaper) operand comes first, enabling short-circuit evaluation to skip work.
     fn reorder_and_operands(expr: &mut Expr) {
         use super::analysis::selectivity_score;
         match expr {
@@ -1003,14 +1023,15 @@ impl Compiler {
         }
     }
 
+    /// Parse and compile `input` with all default passes; available in test builds only.
     #[cfg(test)]
     pub fn compile_str(input: &str) -> Result<Program, EvalError> {
         let expr = super::parser::parse(input).map_err(|e| EvalError(e.to_string()))?;
         Ok(Self::compile(&expr, input))
     }
 
-    /// Compile with explicit pass configuration.  Cached by callers
-    /// under `(config.hash(), expr)`.
+    /// Parse and compile `input` with the passes controlled by `config`.
+    /// Used by `VM::get_or_compile` so pass selection can vary per `VM` instance.
     pub fn compile_str_with_config(input: &str, config: PassConfig) -> Result<Program, EvalError> {
         let expr = super::parser::parse(input).map_err(|e| EvalError(e.to_string()))?;
         let mut e = expr.clone();
@@ -1035,20 +1056,16 @@ impl Compiler {
         }
     }
 
-    // ── Peephole optimizer ────────────────────────────────────────────────────
-
+    /// Run all peephole passes with the default `PassConfig`.
     fn optimize(ops: Vec<Opcode>) -> Vec<Opcode> {
         Self::optimize_with(ops, PassConfig::default())
     }
 
+    /// Run the subset of peephole passes enabled in `cfg`, respecting the
+    /// `JETRO_DISABLE_OPCODE_FUSION` environment override.
     fn optimize_with(ops: Vec<Opcode>, cfg: PassConfig) -> Vec<Opcode> {
-        // Migration gate: when JETRO_DISABLE_OPCODE_FUSION is set,
-        // skip the fusion-emitting passes so pipeline.rs rewrite
-        // rules become the sole fusion mechanism.  Correctness-level
-        // passes (const fold / nullness / method-const / kind check /
-        // strength reduce / redundant-ops / equi-join — which is a
-        // method dispatch fast-path not a chain fusion) keep running.
-        // See `memory/project_opcode_migration.md`.
+        
+        
         let no_fusion = disable_opcode_fusion();
         let ops = if cfg.root_chain && !no_fusion {
             Self::pass_root_chain(ops)
@@ -1060,9 +1077,8 @@ impl Compiler {
         } else {
             ops
         };
-        // Tier 3: pass_filter_count / pass_find_quantifier / pass_filter_fusion
-        // / pass_string_chain_fusion deleted — composed substrate handles
-        // every chain shape via base CallMethod opcodes.
+        
+        
         let ops = if cfg.filter_fusion {
             Self::pass_field_specialise(ops)
         } else {
@@ -1111,19 +1127,10 @@ impl Compiler {
         ops
     }
 
-    /// Demand propagation peephole — when an array-yielding CallMethod
-    /// (Filter / Map / FlatMap) is immediately followed by a CallMethod
-    /// to `take` with a constant `Int(n)` arg, fold the demand into
-    /// the producer's `demand_max_keep` field and drop the take call.
-    /// The producer's runtime handler then dispatches to
-    /// `*_apply_bounded(items, Some(n), ...)` and stops after `n`
-    /// items pass — no full-array materialisation.
-    ///
-    /// Generic algorithm: parameterised over (method, demand). No
-    /// per-shape `FilterTake` / `MapTake` opcode invented; the demand
-    /// hint travels in the existing `CompiledCall` struct.
+    /// Demand-annotation pass: when a `filter` or `map` is immediately followed by
+    /// `take(n)`, annotate the call's `demand_max_keep` so the inner loop stops early.
     fn pass_method_demand(ops: Vec<Opcode>) -> Vec<Opcode> {
-        // Extract `n` if `call` is `take(Int(n))` with no other args.
+
         fn take_const(call: &CompiledCall) -> Option<usize> {
             use crate::ast::{Arg, Expr};
             if call.name.as_ref() != "take" {
@@ -1137,8 +1144,8 @@ impl Compiler {
                 _ => None,
             }
         }
-        // Producer must be a per-row 1:1 / filtering call whose handler
-        // honours `demand_max_keep`.
+        
+        
         fn is_demand_aware(method: BuiltinMethod) -> bool {
             matches!(method, BuiltinMethod::Filter | BuiltinMethod::Map)
         }
@@ -1149,7 +1156,7 @@ impl Compiler {
                 if let (Opcode::CallMethod(a), Opcode::CallMethod(b)) = (&ops[i], &ops[i + 1]) {
                     if is_demand_aware(a.method) && a.demand_max_keep.is_none() {
                         if let Some(n) = take_const(b) {
-                            // Rewrite `a` with demand; drop `b`.
+                            
                             let mut new_call = (**a).clone();
                             new_call.demand_max_keep = Some(n);
                             out.push(Opcode::CallMethod(Arc::new(new_call)));
@@ -1165,20 +1172,14 @@ impl Compiler {
         out
     }
 
-    // pass_equi_join_fusion deleted — composed substrate runs base
-    // CallMethod(equi_join, [rhs, lk, rk]) via the builtin call path.
-
-    /// Nullness-driven: when the preceding op provably leaves a non-null
-    /// receiver on the stack, rewrite `OptField(k)` → `GetField(k)`.
-    /// Conservative: only folds when the predecessor is a construction
-    /// opcode (MakeObj / MakeArr / PushStr / RootChain / GetField).
+    /// Replace `OptField` with `GetField` when the preceding opcode always produces
+    /// a non-null value (e.g. `MakeObj`), eliminating the null-propagation overhead.
     fn pass_nullness_opt_field(ops: Vec<Opcode>) -> Vec<Opcode> {
         let mut out: Vec<Opcode> = Vec::with_capacity(ops.len());
         for op in ops {
             if let Opcode::OptField(k) = &op {
-                // Only safe when receiver is provably a non-null object —
-                // MakeObj is the only opcode that guarantees this without
-                // a schema.  Other cases are handled by schema::specialize.
+                
+                
                 let non_null = matches!(out.last(), Some(Opcode::MakeObj(_)));
                 if non_null {
                     out.push(Opcode::GetField(k.clone()));
@@ -1190,12 +1191,8 @@ impl Compiler {
         out
     }
 
-    /// Fold built-in methods when receiver is a literal with known length/content:
-    ///   PushStr(s) + .len()    → PushInt(utf8 char count)
-    ///   PushStr(s) + .upper()  → PushStr(upper)
-    ///   PushStr(s) + .lower()  → PushStr(lower)
-    ///   PushStr(s) + .trim()   → PushStr(trim)
-    ///   MakeArr(n elems) + .len()  → PushInt(n)  (only for non-spread arrays)
+    /// Fold no-argument method calls on constant operands (e.g. `"hello".len()` → `5`).
+    /// Covers `len`, `upper`, `lower`, `trim` on string literals and `len` on non-spread arrays.
     fn pass_method_const_fold(ops: Vec<Opcode>) -> Vec<Opcode> {
         let mut out: Vec<Opcode> = Vec::with_capacity(ops.len());
         for op in ops {
@@ -1227,9 +1224,8 @@ impl Compiler {
                             continue;
                         }
                         (Some(Opcode::MakeArr(progs)), BuiltinMethod::Len) => {
-                            // Fold to a constant only when no entry is a
-                            // spread — spreads expand at runtime so the
-                            // length is dynamic.
+                            
+                            
                             if progs.iter().all(|(_, sp)| !*sp) {
                                 let n = progs.len() as i64;
                                 out.pop();
@@ -1246,12 +1242,8 @@ impl Compiler {
         out
     }
 
-    /// Fold `KindCheck` when its input type is a literal push:
-    ///   PushInt(n)  + KindCheck{number, neg} → PushBool(!neg)
-    ///   PushStr(_)  + KindCheck{string, neg} → PushBool(!neg)
-    ///   PushNull    + KindCheck{null, neg}   → PushBool(!neg)
-    ///   PushBool(_) + KindCheck{bool, neg}   → PushBool(!neg)
-    ///   mismatches fold to opposite.
+    /// Fold `KindCheck` against a preceding literal push into a constant boolean,
+    /// e.g. `MakeObj` followed by `is array` → `false`.
     fn pass_kind_check_fold(ops: Vec<Opcode>) -> Vec<Opcode> {
         use super::analysis::{fold_kind_check, VType};
         let mut out = Vec::with_capacity(ops.len());
@@ -1280,16 +1272,8 @@ impl Compiler {
         out
     }
 
-    /// Lower generic fused opcodes to field-specialised variants when the
-    /// sub-program is a trivial `GetField(k)` read. Runs AFTER
-    /// pass_find_quantifier / pass_filter_count so those passes see the
-    /// generic `CallMethod(Filter)` / `MapSum` forms first.
-    ///
-    /// Migration gate (`JETRO_DISABLE_OPCODE_FUSION=1`): when set, this
-    /// pass becomes a no-op, leaving the unfused opcode in place so
-    /// pipeline.rs rewrite rules become the sole fusion mechanism.
-    /// Used to validate opcode → rule migration without permanently
-    /// deleting code; see `memory/project_opcode_migration.md`.
+    /// Placeholder for filter/field specialisation fusion; currently a pass-through
+    /// that preserves opcodes for future pattern-specific fast paths.
     fn pass_field_specialise(ops: Vec<Opcode>) -> Vec<Opcode> {
         if disable_opcode_fusion() {
             return ops;
@@ -1297,119 +1281,78 @@ impl Compiler {
         let mut out2: Vec<Opcode> = Vec::with_capacity(ops.len());
         for op in ops {
             match op {
-                // MapSum/Avg/Min/Max specialisations migrated to
-                // pipeline.rs `Sink::NumMap(NumOp::*)` rule (see
-                // memory/project_opcode_migration.md).  Unfused MapSum
-                // / MapAvg / MapMin / MapMax fall through to their
-                // generic handlers below for queries pipeline can't
-                // lower (sub-programs, non-Root chains).
-                // FilterFieldsAllEqLitCount / FilterFieldsAllCmpLitCount
-                // (compound-AND filter+count specialisations) migrated to
-                // pipeline.rs count reducer with and_chain_prog decoder.
+                
+                
                 Opcode::CallMethod(ref b) => {
-                    // MapField / MapFieldChain fusion deleted in Tier 3 —
-                    // pipeline IR Stage::Map + BodyKernel::FieldRead /
-                    // FieldChain covers `map(k)` and `map(a.b.c)`.
+                    
+                    
                     let _ = b;
-                    // GroupByField/CountByField/UniqueByField fusion
-                    // deleted in Tier 3 — base CallMethod chain.
-                    // Filter field/current cmp-lit fusion deleted in Tier 3 —
-                    // pipeline IR Stage::Filter + composed substrate covers
-                    // single-field, current-element, and field-vs-field
-                    // predicates.  StrVec prefix/suffix/substring fusion stays
-                    // (typed-lane SIMD path).
-                    // FilterStrVec* / MapStrVec* / MapNumVec* fusion deleted
-                    // in Tier 3 — composed substrate runs base CallMethod chain.
+                    
+                    
                 }
                 _ => {}
             }
             out2.push(op);
         }
-        // Third pass: fold `FilterField* + count()` into FilterField*Count,
-        // and collapse chains of `MapField(k1) + MapFlatten(trivial k2) + ...`
-        // into a single `FlatMapChain([k1,k2,...])`.
+        
+        
         let mut out3: Vec<Opcode> = Vec::with_capacity(out2.len());
         for op in out2 {
-            // FilterFieldEqLit/CmpLit + count() fusion migrated to
-            // pipeline.rs count reducer. FilterFieldCmpField + count()
-            // fusion deleted in Tier 3 — base Stage::Filter + count reducer.
-            // FilterField* + MapField(k) fusion migrated to pipeline.rs
-            // Sink::NumFilterMap (and the columnar fast path) — covered
-            // for top-level Root-prefix queries.  Sub-program path falls
-            // back to the unfused FilterFieldEqLit / FilterFieldCmpLit
-            // followed by MapField sequence.
-            // MapFlatten-based FlatMapChain fusion deleted with MapFlatten.
+            
+            
             out3.push(op);
         }
         out3
     }
 
-    /// List-comp specialisation deleted in Tier 3 — it emitted the
-    /// now-removed Opcode::MapField.  Base Opcode::ListComp handler
-    /// covers the same shapes; pipeline IR can hoist the inner
-    /// Filter+Map via Stage composition.
+    /// Placeholder for list-comprehension specialisation; currently a pass-through.
     fn pass_list_comp_specialise(ops: Vec<Opcode>) -> Vec<Opcode> {
         ops
     }
 
-    // sort_lam_param helper removed alongside ArgExtreme opcode.
-
-    /// Replace expensive ops with cheaper equivalents:
-    ///   sort() + first()    → min()
-    ///   sort() + last()     → max()
-    ///   sort() + [0]        → min()
-    ///   sort() + [-1]       → max()
-    ///   reverse() + first() → last()
-    ///   reverse() + last()  → first()
-    ///   sort_by(k) + first()/last() → ArgExtreme (O(N) scan)
+    /// Strength-reduction pass: replace expensive method sequences with cheaper equivalents.
+    /// Examples: `sort()[0]` → `min()`, `reverse().first()` → `last()`, `sort().sort()` → `sort()`.
     fn pass_strength_reduce(ops: Vec<Opcode>) -> Vec<Opcode> {
         let mut out: Vec<Opcode> = Vec::with_capacity(ops.len());
         for op in ops {
-            // Pattern: [..., prev_method_call, current_op]
+            
             if let Some(Opcode::CallMethod(prev)) = out.last().cloned() {
                 let replaced = match (prev.method, &op) {
-                    // sort() + [0] → min()
+                    
                     (BuiltinMethod::Sort, Opcode::GetIndex(0)) if prev.sub_progs.is_empty() => {
                         Some(make_noarg_call(BuiltinMethod::Min, "min"))
                     }
-                    // sort() + [-1] → max()
+                    
                     (BuiltinMethod::Sort, Opcode::GetIndex(-1)) if prev.sub_progs.is_empty() => {
                         Some(make_noarg_call(BuiltinMethod::Max, "max"))
                     }
-                    // sort() + first() → min()
+                    
                     (BuiltinMethod::Sort, Opcode::CallMethod(next))
                         if prev.sub_progs.is_empty() && next.method == BuiltinMethod::First =>
                     {
                         Some(make_noarg_call(BuiltinMethod::Min, "min"))
                     }
-                    // sort() + last() → max()
+                    
                     (BuiltinMethod::Sort, Opcode::CallMethod(next))
                         if prev.sub_progs.is_empty() && next.method == BuiltinMethod::Last =>
                     {
                         Some(make_noarg_call(BuiltinMethod::Max, "max"))
                     }
-                    // sort_by(k) + first() / + last() fusions migrated to
-                    // pipeline.rs Sink::MinBy(k) / Sink::MaxBy(k).
-                    // Sub-program path: unfused sort_by(k) followed by
-                    // First / Last opcodes.
-                    // reverse() + first() → last()
+                    
+                    
                     (BuiltinMethod::Reverse, Opcode::CallMethod(next))
                         if next.method == BuiltinMethod::First =>
                     {
                         Some(make_noarg_call(BuiltinMethod::Last, "last"))
                     }
-                    // reverse() + last() → first()
+                    
                     (BuiltinMethod::Reverse, Opcode::CallMethod(next))
                         if next.method == BuiltinMethod::Last =>
                     {
                         Some(make_noarg_call(BuiltinMethod::First, "first"))
                     }
-                    // sort() + [0:n] / take(n) fusion migrated to
-                    // pipeline.rs Sink::TopN { n, asc }.
-                    // Cardinality-preserving op + len/count → drop the first op.
-                    // sort / reverse preserve length by definition; map is
-                    // 1:1 so it also preserves length, and `count` only needs
-                    // the input array length.
+                    
+                    
                     (
                         BuiltinMethod::Sort | BuiltinMethod::Reverse | BuiltinMethod::Map,
                         Opcode::CallMethod(next),
@@ -1419,9 +1362,8 @@ impl Compiler {
                     {
                         Some(Opcode::CallMethod(Arc::clone(next)))
                     }
-                    // Order-independent aggregate after sort/reverse → drop
-                    // the reorder.  sum / avg / min / max only inspect the
-                    // multiset of elements, not their order.
+                    
+                    
                     (BuiltinMethod::Sort | BuiltinMethod::Reverse, Opcode::CallMethod(next))
                         if prev.sub_progs.is_empty()
                             && next.sub_progs.is_empty()
@@ -1435,9 +1377,8 @@ impl Compiler {
                     {
                         Some(Opcode::CallMethod(Arc::clone(next)))
                     }
-                    // Idempotent: f(f(x)) == f(x).  `sort(k)` is idempotent
-                    // only when both calls use the same key, so we restrict
-                    // the no-arg case; `unique()` dedup is always idempotent.
+                    
+                    
                     (BuiltinMethod::Sort, Opcode::CallMethod(next))
                         if prev.sub_progs.is_empty()
                             && next.method == BuiltinMethod::Sort
@@ -1450,8 +1391,8 @@ impl Compiler {
                     {
                         Some(Opcode::CallMethod(Arc::clone(next)))
                     }
-                    // UniqueCount removed; pipeline rule
-                    // Unique ∘ Count → UniqueCount fuses at lower-time.
+                    
+                    
                     _ => None,
                 };
                 if let Some(rep) = replaced {
@@ -1459,7 +1400,7 @@ impl Compiler {
                     out.push(rep);
                     continue;
                 }
-                // Involution: reverse().reverse() → drop both.
+                
                 if prev.method == BuiltinMethod::Reverse && prev.sub_progs.is_empty() {
                     if let Opcode::CallMethod(next) = &op {
                         if next.method == BuiltinMethod::Reverse && next.sub_progs.is_empty() {
@@ -1474,14 +1415,11 @@ impl Compiler {
         out
     }
 
-    /// Fuse runs of `GetField` not consumed by `pass_root_chain` into a
-    /// single `FieldChain`.  Applies mid-program where the object on TOS
-    /// came from elsewhere (method return, filter, comprehension).  Singletons
-    /// are left as-is — fusion only triggers at length ≥ 2.
+    /// Fuse runs of two or more consecutive `GetField`/`OptField` opcodes into a
+    /// single `FieldChain` opcode, reducing dispatch overhead and enabling per-step ICs.
     fn pass_field_chain(ops: Vec<Opcode>) -> Vec<Opcode> {
-        // Both GetField(k) and OptField(k) devolve to `get_field(k)` which
-        // returns Null for non-objects, so OptField can be absorbed into a
-        // FieldChain: null propagates through the remaining get_field calls.
+
+
         fn field_key(op: &Opcode) -> Option<Arc<str>> {
             match op {
                 Opcode::GetField(k) | Opcode::OptField(k) => Some(Arc::clone(k)),
@@ -1511,7 +1449,8 @@ impl Compiler {
         out
     }
 
-    /// Fuse `PushRoot + GetField(k1) + GetField(k2) ...` → `RootChain([k1,k2,...])`.
+    /// Fuse `PushRoot` followed by one or more `GetField` opcodes into a single
+    /// `RootChain` opcode, enabling path-cache lookups without individual stack pushes.
     fn pass_root_chain(ops: Vec<Opcode>) -> Vec<Opcode> {
         let mut out = Vec::with_capacity(ops.len());
         let mut it = ops.into_iter().peekable();
@@ -1535,25 +1474,20 @@ impl Compiler {
         out
     }
 
-    /// Eliminate redundant adjacent method calls:
-    ///   reverse() + reverse()         → identity (both dropped)
-    ///   unique() + unique()           → unique()
-    ///   compact() + compact()         → compact()
-    ///   sort() + sort(k)              → sort(k)      (later sort wins on same-array)
-    ///   sort(k) + sort(k)             → sort(k)
-    ///   Quantifier + Quantifier       → second only  (first wrap is scalar anyway)
+    /// Eliminate provably redundant adjacent opcodes: `reverse().reverse()` → identity,
+    /// `!!` → identity, double `unique`/`compact`/`sort`, consecutive quantifiers, etc.
     fn pass_redundant_ops(ops: Vec<Opcode>) -> Vec<Opcode> {
         let mut out: Vec<Opcode> = Vec::with_capacity(ops.len());
         for op in ops {
             match (&op, out.last()) {
-                // reverse + reverse: drop both
+                
                 (Opcode::CallMethod(b), Some(Opcode::CallMethod(a)))
                     if a.method == BuiltinMethod::Reverse && b.method == BuiltinMethod::Reverse =>
                 {
                     out.pop();
                     continue;
                 }
-                // idempotent method pairs: keep second only (drop first)
+                
                 (Opcode::CallMethod(b), Some(Opcode::CallMethod(a)))
                     if a.method == b.method
                         && matches!(a.method, BuiltinMethod::Unique | BuiltinMethod::Compact)
@@ -1564,7 +1498,7 @@ impl Compiler {
                     out.push(op);
                     continue;
                 }
-                // sort + sort(_): later sort wins, drop the first
+                
                 (Opcode::CallMethod(b), Some(Opcode::CallMethod(a)))
                     if a.method == BuiltinMethod::Sort && b.method == BuiltinMethod::Sort =>
                 {
@@ -1572,22 +1506,20 @@ impl Compiler {
                     out.push(op);
                     continue;
                 }
-                // Quantifier + Quantifier: second wins (first unwraps scalar,
-                // second is no-op on scalar — but keeping second preserves error
-                // semantics of `!`). Drop first.
+                
+                
                 (Opcode::Quantifier(_), Some(Opcode::Quantifier(_))) => {
                     out.pop();
                     out.push(op);
                     continue;
                 }
-                // reverse + last → first (strength reduction fallback after sort)
-                // already handled in pass_strength_reduce
-                // Not + Not: double negation → drop both
+                
+                
                 (Opcode::Not, Some(Opcode::Not)) => {
                     out.pop();
                     continue;
                 }
-                // Neg + Neg: --x → x
+                
                 (Opcode::Neg, Some(Opcode::Neg)) => {
                     out.pop();
                     continue;
@@ -1599,14 +1531,14 @@ impl Compiler {
         out
     }
 
-    /// Constant-fold adjacent integer arithmetic + bool short-circuits.
+    /// Constant-fold arithmetic, comparison, and logical opcodes when all operands
+    /// are known literals, reducing runtime work to a single `Push` opcode.
     fn pass_const_fold(ops: Vec<Opcode>) -> Vec<Opcode> {
         let mut out = Vec::with_capacity(ops.len());
         let mut i = 0;
         while i < ops.len() {
-            // 2-op bool short-circuit folds:
-            //   PushBool(false) + AndOp(_)  → PushBool(false)
-            //   PushBool(true)  + OrOp(_)   → PushBool(true)
+            
+            
             if i + 1 < ops.len() {
                 let folded = match (&ops[i], &ops[i + 1]) {
                     (Opcode::PushBool(false), Opcode::AndOp(_)) => Some(Opcode::PushBool(false)),
@@ -1619,7 +1551,7 @@ impl Compiler {
                     continue;
                 }
             }
-            // 2-op unary folds
+            
             if i + 1 < ops.len() {
                 let folded = match (&ops[i], &ops[i + 1]) {
                     (Opcode::PushBool(b), Opcode::Not) => Some(Opcode::PushBool(!b)),
@@ -1633,7 +1565,7 @@ impl Compiler {
                     continue;
                 }
             }
-            // 3-op arithmetic + comparison folds
+            
             if i + 2 < ops.len() {
                 let folded = match (&ops[i], &ops[i + 1], &ops[i + 2]) {
                     (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Add) => {
@@ -1663,7 +1595,7 @@ impl Compiler {
                     (Opcode::PushFloat(a), Opcode::PushFloat(b), Opcode::Div) if *b != 0.0 => {
                         Some(Opcode::PushFloat(a / b))
                     }
-                    // Mixed int/float arithmetic
+                    
                     (Opcode::PushInt(a), Opcode::PushFloat(b), Opcode::Add) => {
                         Some(Opcode::PushFloat(*a as f64 + b))
                     }
@@ -1688,7 +1620,7 @@ impl Compiler {
                     (Opcode::PushFloat(a), Opcode::PushInt(b), Opcode::Div) if *b != 0 => {
                         Some(Opcode::PushFloat(a / *b as f64))
                     }
-                    // Mixed int/float comparisons
+                    
                     (Opcode::PushInt(a), Opcode::PushFloat(b), Opcode::Lt) => {
                         Some(Opcode::PushBool((*a as f64) < *b))
                     }
@@ -1713,7 +1645,7 @@ impl Compiler {
                     (Opcode::PushFloat(a), Opcode::PushInt(b), Opcode::Gte) => {
                         Some(Opcode::PushBool(*a >= (*b as f64)))
                     }
-                    // Float comparisons (parity with int)
+                    
                     (Opcode::PushFloat(a), Opcode::PushFloat(b), Opcode::Lt) => {
                         Some(Opcode::PushBool(a < b))
                     }
@@ -1782,14 +1714,15 @@ impl Compiler {
         out
     }
 
-    // ── Main emit ─────────────────────────────────────────────────────────────
-
+    /// Emit opcodes for `expr` into a fresh vector and return it.
     fn emit(expr: &Expr, ctx: &VarCtx) -> Vec<Opcode> {
         let mut ops = Vec::new();
         Self::emit_into(expr, ctx, &mut ops);
         ops
     }
 
+    /// Recursively emit opcodes for `expr` into `ops`, consulting `ctx` to distinguish
+    /// variable references from field/built-in names.
     fn emit_into(expr: &Expr, ctx: &VarCtx, ops: &mut Vec<Opcode>) {
         match expr {
             Expr::Null => ops.push(Opcode::PushNull),
@@ -1902,9 +1835,8 @@ impl Compiler {
             }
 
             Expr::Array(elems) => {
-                // Each entry: (sub-program, is_spread).  Spreads execute
-                // their program normally; the MakeArr handler flattens
-                // an iterable result into the output array.
+                
+                
                 let progs: Vec<(Arc<Program>, bool)> = elems
                     .iter()
                     .map(|e| match e {
@@ -1991,13 +1923,13 @@ impl Compiler {
             }
 
             Expr::Lambda { .. } => {
-                // Lambdas as standalone values are errors; they only appear as args
+                
                 ops.push(Opcode::PushNull);
             }
 
             Expr::Let { name, init, body } => {
-                // Dead-let: if body never references `name` and init is pure,
-                // drop the binding entirely and emit body only.
+                
+                
                 if super::analysis::expr_is_pure(init)
                     && !super::analysis::expr_uses_ident(body, name)
                 {
@@ -2014,7 +1946,7 @@ impl Compiler {
             }
 
             Expr::IfElse { cond, then_, else_ } => {
-                // Compile-time fold when cond is a literal bool.
+                
                 match cond.as_ref() {
                     Expr::Bool(true) => {
                         Self::emit_into(then_, ctx, ops);
@@ -2035,9 +1967,8 @@ impl Compiler {
             }
 
             Expr::Try { body, default } => {
-                // Compile-time fold: if body is a literal non-null constant,
-                // emit only the body. If body is null literal, emit only the
-                // default. Avoids TryExpr opcode overhead for trivial cases.
+                
+                
                 match body.as_ref() {
                     Expr::Null => {
                         Self::emit_into(default, ctx, ops);
@@ -2057,18 +1988,14 @@ impl Compiler {
             }
 
             Expr::GlobalCall { name, args } => {
-                // Match runtime `eval_global` semantics: special-case
-                // `coalesce/chain/join/zip/zip_longest/product/range` compile
-                // through their existing handlers via root receiver; for all
-                // OTHER global names (`to_string(x)`, `to_bool(x)`, etc.),
-                // first arg is the receiver — equivalent to method-call form.
-                // No-args case: current is receiver.
+                
+                
                 let is_special = matches!(
                     name.as_str(),
                     "coalesce" | "chain" | "join" | "zip" | "zip_longest" | "product" | "range"
                 );
                 if !is_special && !args.is_empty() {
-                    // <first_arg> CallMethod(name, [args[1..]])
+                    
                     let first = match &args[0] {
                         Arg::Pos(e) | Arg::Named(_, e) => e.clone(),
                     };
@@ -2089,7 +2016,7 @@ impl Compiler {
                     });
                     ops.push(Opcode::CallMethod(call));
                 } else {
-                    // Special globals (or no-arg) — keep root-receiver path.
+                    
                     let sub_progs: Vec<Arc<Program>> = args
                         .iter()
                         .map(|a| match a {
@@ -2117,22 +2044,21 @@ impl Compiler {
                 root,
                 ops: patch_ops,
             } => {
-                // Patch block — pre-compiled to CompiledPatch.  Every
-                // sub-expression (root, op.val, op.cond, dyn-index,
-                // wildcard-filter pred) lives as Arc<Program>; runtime
-                // patch executor uses self.exec.
+                
+                
                 let compiled = Self::compile_patch(root, patch_ops, ctx);
                 ops.push(Opcode::PatchEval(Arc::new(compiled)));
             }
 
             Expr::DeleteMark => {
-                // DELETE outside a patch-field value is a static error
-                // raised at runtime via `Opcode::DeleteMarkErr` sentinel.
+                
+                
                 ops.push(Opcode::DeleteMarkErr);
             }
         }
     }
 
+    /// Emit a single chain `Step` as the corresponding opcode(s) into `ops`.
     fn emit_step(step: &Step, ctx: &VarCtx, ops: &mut Vec<Opcode>) {
         match step {
             Step::Field(name) => ops.push(Opcode::GetField(Arc::from(name.as_str()))),
@@ -2157,6 +2083,8 @@ impl Compiler {
         }
     }
 
+    /// Build a `CompiledCall` descriptor for a method invocation, pre-compiling
+    /// each argument expression into a sub-program.
     fn compile_call(name: &str, args: &[Arg], ctx: &VarCtx) -> CompiledCall {
         let method = BuiltinMethod::from_name(name);
         let sub_progs: Vec<Arc<Program>> = args
@@ -2174,13 +2102,9 @@ impl Compiler {
         }
     }
 
-    /// Compile an argument expression; for lambdas, the lambda param becomes a
-    /// known var in the inner context so `Ident(param)` emits `LoadIdent`.
-    /// For single-param lambdas the param is bound to the per-iteration
-    /// `current` (push_lam threads both name+current), so substitute the
-    /// resulting `LoadIdent(param)` ops with `PushCurrent`.  This lets
-    /// trivial_field / trivial_field_chain peepholes recognise the
-    /// `b => b.price` shape as equivalent to `map(@.price)`.
+    /// Compile a method argument that may be a lambda or a plain expression.
+    /// For single-param lambdas, the parameter identifier is rewritten to `PushCurrent`
+    /// so the body can be executed without an extra variable lookup.
     fn compile_lambda_or_expr(expr: &Expr, ctx: &VarCtx) -> Program {
         match expr {
             Expr::Lambda { params, body } => {
@@ -2204,6 +2128,8 @@ impl Compiler {
         }
     }
 
+    /// Emit the appropriate opcode(s) for a binary operator, using short-circuit
+    /// sub-programs for `&&`, `||`, and `??`.
     fn emit_binop(l: &Expr, op: BinOp, r: &Expr, ctx: &VarCtx, ops: &mut Vec<Opcode>) {
         match op {
             BinOp::And => {
@@ -2279,31 +2205,23 @@ impl Compiler {
         }
     }
 
+    /// Emit a `PipelineRun` opcode for a `base | step1 | step2 | …` expression,
+    /// compiling each forward and bind step while threading the variable context.
     fn emit_pipeline(base: &Expr, steps: &[PipeStep], ctx: &VarCtx, ops: &mut Vec<Opcode>) {
-        // Compile base + each step into a fused PipelineRun opcode.
-        // Runtime threads the value through a local mutable Env so
-        // forward steps see env.current = pipe_value and bind steps
-        // store into env vars; downstream steps then resolve the
-        // bound names correctly.
+        
+        
         let base_prog = Arc::new(Self::compile_sub(base, ctx));
         let mut cur_ctx = ctx.clone();
         let mut compiled_steps: Vec<CompiledPipeStep> = Vec::with_capacity(steps.len());
         for step in steps {
             match step {
                 PipeStep::Forward(rhs) => {
-                    // emit_pipe_forward handles the `Ident(method)` and
-                    // `Chain(method-base, steps)` shapes specially so a
-                    // bare `| len` resolves as a method call on the
-                    // pipe value rather than a variable load.  Reuse
-                    // that logic by emitting into a fresh Vec then
-                    // wrapping as a sub-program.
+                    
+                    
                     let mut sub_ops: Vec<Opcode> = Vec::new();
                     Self::emit_pipe_forward(rhs, &cur_ctx, &mut sub_ops);
-                    // Strip a leading SetCurrent — the PipelineRun
-                    // handler already sets env.current before invoking
-                    // the sub-program, so the opcode is redundant
-                    // here.  All other shapes have no SetCurrent and
-                    // need exactly the emitted ops.
+                    
+                    
                     if let Some(Opcode::SetCurrent) = sub_ops.first() {
                         sub_ops.remove(0);
                     }
@@ -2349,11 +2267,14 @@ impl Compiler {
         });
     }
 
+    /// Emit the right-hand side of a pipe forward step. Bare identifiers and bare
+    /// chains rooted at an unbound identifier are treated as zero-arg method calls on
+    /// the current value; everything else inserts a `SetCurrent` marker first.
     fn emit_pipe_forward(rhs: &Expr, ctx: &VarCtx, ops: &mut Vec<Opcode>) {
         match rhs {
             Expr::Ident(name) if !ctx.has(name) => {
-                // No-arg method call on the pipe value (env.current).
-                // Push current as the receiver so CallMethod's pop yields it.
+                
+                
                 let call = CompiledCall {
                     method: BuiltinMethod::from_name(name),
                     name: Arc::from(name.as_str()),
@@ -2367,7 +2288,7 @@ impl Compiler {
             Expr::Chain(base, steps) if !steps.is_empty() => {
                 if let Expr::Ident(name) = base.as_ref() {
                     if !ctx.has(name) {
-                        // method(args...) — base is method, steps are chained
+                        
                         let call = CompiledCall {
                             method: BuiltinMethod::from_name(name),
                             name: Arc::from(name.as_str()),
@@ -2387,21 +2308,22 @@ impl Compiler {
                 Self::emit_into(rhs, ctx, ops);
             }
             _ => {
-                // Arbitrary expression; set current to pipe input, then eval
+                
                 ops.push(Opcode::SetCurrent);
                 Self::emit_into(rhs, ctx, ops);
             }
         }
     }
 
+    /// Compile a sub-expression (lambda body, arg, or nested expression) with full
+    /// optimisation but a generic `"<sub>"` source label.
     fn compile_sub(expr: &Expr, ctx: &VarCtx) -> Program {
         let ops = Self::optimize(Self::emit(expr, ctx));
         Program::new(ops, "<sub>")
     }
 
-    /// Compile `Expr::Patch` into VM-native `CompiledPatch`.  Every
-    /// sub-expression becomes an `Arc<Program>` so the runtime patch
-    /// executor stays inside the VM.
+    /// Compile a `patch` expression into a `CompiledPatch` by lowering each AST
+    /// `PatchOp` to its compiled path steps, value action, and optional condition.
     fn compile_patch(
         root: &Expr,
         patch_ops: &[crate::ast::PatchOp],
@@ -2444,10 +2366,8 @@ impl Compiler {
         CompiledPatch { root_prog, ops }
     }
 
-    /// Classify an object-value expression as a pure path on `current`:
-    /// a chain of `Field(name)` / `Index(i)` steps rooted at `Expr::Current`.
-    /// Returns `None` for anything else — the caller falls back to full
-    /// sub-program compilation.
+    /// Try to lower an `Expr` rooted at `@` into a sequence of `KvStep`s.
+    /// Returns `None` if the expression contains anything other than field/index steps.
     fn try_kv_path_steps(expr: &Expr) -> Option<Vec<KvStep>> {
         use super::ast::Step;
         let (base, steps) = match expr {
@@ -2472,23 +2392,20 @@ impl Compiler {
     }
 }
 
-// ── Path cache ────────────────────────────────────────────────────────────────
-//
-// Key: (doc_hash, json_pointer) → Val
-//
-// Doc-scoped (no program_id): any program resolving the same path on the same
-// document gets a hit.  Intermediate nodes are cached so a prefix of a longer
-// path can be reused without re-traversal.
 
+/// LRU path-resolution cache keyed by `(doc_hash, JSON-pointer string)`.
+/// Avoids re-traversing the document for repeated structural queries.
 struct PathCache {
-    /// doc_hash → (pointer_string → Val)
+    /// Nested map: outer key is `doc_hash`, inner key is the slash-delimited pointer path.
     docs: HashMap<u64, HashMap<Arc<str>, Val>>,
-    /// FIFO eviction order
+    /// Insertion-order deque used to identify and evict the least-recently-used entry.
     order: VecDeque<(u64, Arc<str>)>,
+    /// Maximum number of cached entries before eviction begins.
     capacity: usize,
 }
 
 impl PathCache {
+    /// Create a new `PathCache` with the given capacity limit.
     fn new(cap: usize) -> Self {
         Self {
             docs: HashMap::new(),
@@ -2497,12 +2414,15 @@ impl PathCache {
         }
     }
 
-    /// O(1) immutable lookup — returns cloned Val (Val::clone is O(1)).
+    /// Look up a previously cached value by document hash and path pointer.
+    /// Returns `None` when the entry is absent or has been evicted.
     #[inline]
     fn get(&self, doc_hash: u64, ptr: &str) -> Option<Val> {
         self.docs.get(&doc_hash)?.get(ptr).cloned()
     }
 
+    /// Insert a path → value mapping for the given document hash, evicting the
+    /// oldest entry first when the cache is at capacity.
     fn insert(&mut self, doc_hash: u64, ptr: Arc<str>, val: Val) {
         if self.order.len() >= self.capacity {
             if let Some((old_hash, old_ptr)) = self.order.pop_front() {
@@ -2521,44 +2441,47 @@ impl PathCache {
             .insert(ptr, val);
     }
 
+    /// Return the current number of cached entries; available in test builds only.
     #[cfg(test)]
     fn len(&self) -> usize {
         self.order.len()
     }
 }
 
-// ── VM ────────────────────────────────────────────────────────────────────────
 
-/// High-performance v2 virtual machine.
-///
-/// Maintains:
-/// - **Compile cache** — expression string → `Program` (parse + compile once).
-/// - **Path cache** — `(doc_hash, json_pointer)` → `Val`; doc-scoped so any
-///   program navigating the same path on the same document shares cached nodes.
-///   Intermediate nodes are populated as a side-effect of every traversal,
-///   enabling prefix reuse without re-traversal.
-///
-/// One VM per thread; wrap in `Mutex` for shared use.
-/// Toggle each optimiser pass independently.  Default enables every
-/// pass.  Disabling a pass invalidates the compile cache for the next
-/// compilation by changing `hash()`.
+/// Per-flag configuration controlling which peephole passes the `Compiler` runs.
+/// All flags default to `true`; individual flags can be disabled for testing or profiling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PassConfig {
+    /// Enable `PushRoot + GetField…` → `RootChain` fusion.
     pub root_chain: bool,
+    /// Enable consecutive `GetField`/`OptField` → `FieldChain` fusion.
     pub field_chain: bool,
+    /// Enable `FilterCount` fusion (reserved; currently unused at runtime).
     pub filter_count: bool,
+    /// Enable field/filter specialisation pass.
     pub filter_fusion: bool,
+    /// Enable find-quantifier optimisation pass (reserved for future use).
     pub find_quantifier: bool,
+    /// Enable strength-reduction (e.g. `sort()[0]` → `min()`).
     pub strength_reduce: bool,
+    /// Enable removal of provably redundant adjacent opcodes.
     pub redundant_ops: bool,
+    /// Enable constant folding of `KindCheck` against known-type literals.
     pub kind_check_fold: bool,
+    /// Enable constant folding of no-arg method calls on literal operands.
     pub method_const: bool,
+    /// Enable general constant folding of arithmetic and comparison operators.
     pub const_fold: bool,
+    /// Enable `OptField`-to-`GetField` promotion when the receiver is non-null.
     pub nullness: bool,
+    /// Enable reordering of `&&` operands by selectivity.
     pub reorder_and: bool,
+    /// Enable sub-program deduplication to share identical `Arc<Program>` instances.
     pub dedup_subprogs: bool,
 }
 
+/// All passes enabled — the configuration used in production.
 impl Default for PassConfig {
     fn default() -> Self {
         Self {
@@ -2580,7 +2503,8 @@ impl Default for PassConfig {
 }
 
 impl PassConfig {
-    /// Disable every pass — emit raw opcodes.
+    /// Return a `PassConfig` with all passes disabled; useful in tests that
+    /// need to inspect unoptimised opcode sequences.
     #[cfg(test)]
     pub fn none() -> Self {
         Self {
@@ -2600,6 +2524,8 @@ impl PassConfig {
         }
     }
 
+    /// Encode all pass flags as a single `u64` bitmask; used as part of the compile-cache key
+    /// so programs compiled under different configs are stored separately.
     pub fn hash(&self) -> u64 {
         let mut bits: u64 = 0;
         for (i, b) in [
@@ -2628,38 +2554,37 @@ impl PassConfig {
     }
 }
 
+/// Stack-machine VM that owns both a compile cache and a path-resolution cache.
+/// Instances are long-lived (typically thread-local) so caches warm up across calls.
 pub struct VM {
-    /// Cache key = (pass_config_hash, expr_string).  Changing `config`
-    /// invalidates prior entries automatically via key divergence.
+    /// Maps `(pass_config_hash, expression_string)` → compiled `Program`.
+    /// Avoids re-compiling the same expression string with the same pass config.
     compile_cache: HashMap<(u64, String), Arc<Program>>,
-    /// LRU ordering for `compile_cache`; front = least recently used.
-    /// Entries are moved to back on hit; oldest evicted when over cap.
+
+    /// LRU order for the compile cache; entries are moved to the back on access.
     compile_lru: std::collections::VecDeque<(u64, String)>,
+    /// Maximum number of programs kept in the compile cache.
     compile_cap: usize,
+    /// Path-resolution cache for structural navigation results.
     path_cache: PathCache,
-    /// Per-exec RootChain resolution cache.  Key = raw address of the
-    /// `chain` Arc slice; value = resolved Val.  Cleared on every top-level
-    /// `execute()` call so stale entries never outlive the doc they
-    /// reference.  Avoids rebuilding the `/a/b/c` pointer string and
-    /// consulting `path_cache` when the same RootChain opcode fires
-    /// repeatedly inside a loop.
+
+    /// Per-exec cache of `RootChain` results keyed by `Arc` pointer identity.
+    /// Cleared at the start of each `execute` call to stay consistent with the document.
     root_chain_cache: HashMap<usize, Val>,
-    /// Hash of the document currently being executed — set once by `execute()`,
-    /// reused by all recursive `exec()` calls within the same top-level call.
+
+    /// Hash of the current root document, seeding `path_cache` lookups for this call.
     doc_hash: u64,
-    /// Cache of root Arc pointer → structural hash.  Lets repeated calls
-    /// against the same cached root (e.g. via `Jetro::collect`) skip the
-    /// O(doc) structural walk entirely.  Keyed on the inner Arc ptr of
-    /// the root `Val::Obj`/`Val::Arr`.
+
+    /// One-entry cache pairing a root `Arc` pointer with its computed hash, avoiding
+    /// rehashing when the same document object is reused across sequential calls.
     root_hash_cache: Option<(usize, u64)>,
-    /// Optimiser pass toggles.  Default: all on.
+
+    /// The pass configuration used when compiling new programs in this VM instance.
     config: PassConfig,
 }
 
-// AutoIndexCache + auto_index_key deleted in Tier 3 — they were only used
-// by the now-removed FilterFieldEqLit opcode.  Pipeline IR Stage::Filter
-// runs predicate without per-VM auto-index state.
 
+/// Delegate `Default` to `VM::new` with the standard capacity defaults.
 impl Default for VM {
     fn default() -> Self {
         Self::new()
@@ -2667,10 +2592,12 @@ impl Default for VM {
 }
 
 impl VM {
+    /// Create a `VM` with default capacities (512 compiled programs, 4096 path entries).
     pub fn new() -> Self {
         Self::with_capacity(512, 4096)
     }
 
+    /// Create a `VM` with explicit compile-cache and path-cache capacities.
     pub fn with_capacity(compile_cap: usize, path_cap: usize) -> Self {
         Self {
             compile_cache: HashMap::with_capacity(compile_cap),
@@ -2684,17 +2611,13 @@ impl VM {
         }
     }
 
-    /// Replace the pass configuration.  The compile cache is not purged,
-    /// but future lookups key off the new config hash so old entries
-    /// are effectively invalidated for the new regime.
+    /// Override the pass configuration; only available in test builds.
     #[cfg(test)]
     pub fn set_pass_config(&mut self, config: PassConfig) {
         self.config = config;
     }
 
-    // ── Public entry-points ───────────────────────────────────────────────────
-
-    /// Parse, compile (cached), and execute `expr` against `doc`.
+    /// Compile `expr` (or retrieve from cache) and execute it against `doc`; test-only.
     #[cfg(test)]
     pub fn run_str(
         &mut self,
@@ -2705,7 +2628,7 @@ impl VM {
         self.execute(&prog, doc)
     }
 
-    /// Execute a pre-compiled `Program` against `doc`.
+    /// Execute a pre-compiled `program` against a `serde_json::Value` document; test-only.
     #[cfg(test)]
     pub fn execute(
         &mut self,
@@ -2714,17 +2637,16 @@ impl VM {
     ) -> Result<serde_json::Value, EvalError> {
         let root = Val::from(doc);
         self.doc_hash = self.compute_or_cache_root_hash(&root);
-        // Per-exec RootChain cache: entries key off raw Arc addresses that
-        // must not outlive this document.  Clear before every run.
+        
+        
         self.root_chain_cache.clear();
         let env = self.make_env(root);
         let result = self.exec(program, &env)?;
         Ok(result.into())
     }
 
-    /// Reuse the cached structural hash if `root`'s inner Arc pointer
-    /// matches a prior call; otherwise walk the tree once and cache.
-    /// Primitive roots bypass the cache (hashing is already O(1)).
+    /// Compute the structural hash of `root`, using the single-entry `root_hash_cache`
+    /// to avoid rehashing when the same `Arc`-backed document is reused across calls.
     fn compute_or_cache_root_hash(&mut self, root: &Val) -> u64 {
         let ptr: Option<usize> = match root {
             Val::Obj(m) => Some(Arc::as_ptr(m) as *const () as usize),
@@ -2747,9 +2669,8 @@ impl VM {
         }
     }
 
-    /// Execute against a pre-built `Val` root without raw bytes.  Skips the
-    /// `Val::from` conversion only — path cache and doc hash still behave
-    /// as in `execute()`.
+    /// Execute `program` against the given `Val` root and convert the result to
+    /// `serde_json::Value`. Clears the `root_chain_cache` before each run.
     pub fn execute_val(
         &mut self,
         program: &Program,
@@ -2758,10 +2679,8 @@ impl VM {
         Ok(self.execute_val_raw(program, root)?.into())
     }
 
-    /// Execute against a pre-built `Val` root and return the raw `Val` —
-    /// no `serde_json::Value` materialisation.  Use when the caller will
-    /// consume results structurally (further queries, custom walk) and
-    /// wants to skip a potentially expensive `Val → Value` conversion.
+    /// Execute `program` against the given `Val` root and return the raw `Val` result
+    /// without converting to `serde_json::Value`.
     pub fn execute_val_raw(&mut self, program: &Program, root: Val) -> Result<Val, EvalError> {
         self.doc_hash = self.compute_or_cache_root_hash(&root);
         self.root_chain_cache.clear();
@@ -2769,23 +2688,15 @@ impl VM {
         self.exec(program, &env)
     }
 
-    /// Hot-loop variant for pull-based pipelines: skip doc-hash recompute
-    /// + root_chain_cache clear + Env construction per call.  Caller
-    /// builds the Env once outside the loop and threads it via
-    /// `swap_current` per row.  Used by `pipeline::Pipeline::run` and
-    /// any per-element evaluator that knows the document hasn't changed.
+    /// Execute `program` within an already-constructed `Env`, bypassing document-hash
+    /// setup. Used by the runtime when the caller manages the environment directly.
     #[inline]
     pub fn exec_in_env(&mut self, program: &Program, env: &Env) -> Result<Val, EvalError> {
         self.exec(program, env)
     }
 
-    /// Execute a compiled program against a document, first specialising
-    // execute_with_schema / execute_with_inferred_schema removed —
-    // schema.rs deleted in Tier 3 aggressive sweep (warm-only path).
-
-    /// Get or compile an expression string (compile cache).
-    /// Cache key is (pass_config_hash, expr) so that different pass
-    /// configurations yield different compiled programs.
+    /// Return a cached compiled program for `expr`, compiling and caching it if absent.
+    /// The cache key includes the `PassConfig` hash so config changes produce distinct entries.
     pub fn get_or_compile(&mut self, expr: &str) -> Result<Arc<Program>, EvalError> {
         let key = (self.config.hash(), expr.to_string());
         if let Some(p) = self.compile_cache.get(&key) {
@@ -2799,7 +2710,8 @@ impl VM {
         Ok(arc)
     }
 
-    /// Move `key` to the back of the LRU queue (most recently used).
+    
+    /// Move `key` to the back of the LRU deque, marking it as most-recently-used.
     fn touch_lru(&mut self, key: &(u64, String)) {
         if let Some(pos) = self.compile_lru.iter().position(|k| k == key) {
             let k = self.compile_lru.remove(pos).unwrap();
@@ -2807,7 +2719,8 @@ impl VM {
         }
     }
 
-    /// Insert into compile cache with LRU eviction at `compile_cap`.
+    /// Insert a new compiled program into the cache, evicting least-recently-used
+    /// entries when the compile cache is at capacity.
     fn insert_compile(&mut self, key: (u64, String), prog: Arc<Program>) {
         while self.compile_cache.len() >= self.compile_cap && self.compile_cap > 0 {
             if let Some(old) = self.compile_lru.pop_front() {
@@ -2820,21 +2733,19 @@ impl VM {
         self.compile_cache.insert(key, prog);
     }
 
-    /// Cache statistics: `(compile_entries, path_entries)`.
+    /// Return `(compile_cache_len, path_cache_len)` for assertion in tests.
     #[cfg(test)]
     pub fn cache_stats(&self) -> (usize, usize) {
         (self.compile_cache.len(), self.path_cache.len())
     }
 
-    // ── Internal helpers ──────────────────────────────────────────────────────
-
+    /// Construct a fresh `Env` with `root` as both the root and current value.
     fn make_env(&self, root: Val) -> Env {
         Env::new(root)
     }
 
-    // ── Core execution loop ───────────────────────────────────────────────────
-
-    /// Execute `program` in environment `env`, returning the top-of-stack value.
+    /// Core interpreter loop: execute every opcode in `program` against `env`,
+    /// returning the single value left on the stack when the program completes.
     pub fn exec(&mut self, program: &Program, env: &Env) -> Result<Val, EvalError> {
         let mut stack: SmallVec<[Val; 16]> = SmallVec::new();
         let ops_slice: &[Opcode] = &program.ops;
@@ -2846,18 +2757,18 @@ impl VM {
                 continue;
             }
             match op {
-                // ── Literals ──────────────────────────────────────────────────
+                
                 Opcode::PushNull => stack.push(Val::Null),
                 Opcode::PushBool(b) => stack.push(Val::Bool(*b)),
                 Opcode::PushInt(n) => stack.push(Val::Int(*n)),
                 Opcode::PushFloat(f) => stack.push(Val::Float(*f)),
                 Opcode::PushStr(s) => stack.push(Val::Str(s.clone())),
 
-                // ── Context ───────────────────────────────────────────────────
+                
                 Opcode::PushRoot => stack.push(env.root.clone()),
                 Opcode::PushCurrent => stack.push(env.current.clone()),
 
-                // ── Navigation ────────────────────────────────────────────────
+                
                 Opcode::GetField(k) => {
                     let v = pop!(stack);
                     let out = match &v {
@@ -2905,17 +2816,15 @@ impl VM {
                 }
                 Opcode::Descendant(k) => {
                     let v = pop!(stack);
-                    // (D) When descending from root, track pointer paths and
-                    // cache each discovered node for future RootChain lookups.
+                    
+                    
                     let from_root = match (&v, &env.root) {
                         (Val::Obj(a), Val::Obj(b)) => Arc::ptr_eq(a, b),
                         (Val::Arr(a), Val::Arr(b)) => Arc::ptr_eq(a, b),
                         _ => matches!((&v, &env.root), (Val::Null, Val::Null)),
                     };
-                    // Early exit: `$..k.first()` / `$..k!` materialises only
-                    // the first self-first DFS hit. Skips pointer-cache
-                    // population since single-hit callers do not benefit from
-                    // storing siblings.
+                    
+                    
                     if let Some(next) = ops_slice.get(op_idx + 1) {
                         if is_first_selector_op(next) {
                             let hit = find_desc_first(&v, k.as_ref()).unwrap_or(Val::Null);
@@ -2988,11 +2897,10 @@ impl VM {
                     });
                 }
 
-                // ── Peephole fusions ──────────────────────────────────────────
+                
                 Opcode::RootChain(chain) => {
-                    // Fast path — same RootChain opcode fired earlier in this
-                    // execute() call on this same doc.  Arc pointer identity
-                    // is stable; cache is cleared per top-level execute().
+                    
+                    
                     let key = Arc::as_ptr(chain) as *const () as usize;
                     if let Some(v) = self.root_chain_cache.get(&key) {
                         stack.push(v.clone());
@@ -3006,8 +2914,8 @@ impl VM {
                     for k in chain.iter() {
                         ptr.push('/');
                         ptr.push_str(k.as_ref());
-                        // Try resuming from a longer cached prefix before
-                        // stepping through get_field.
+                        
+                        
                         if !resumed_from_cache {
                             if let Some(cached) = self.path_cache.get(doc_hash, &ptr) {
                                 current = cached;
@@ -3023,51 +2931,8 @@ impl VM {
                     self.root_chain_cache.insert(key, current.clone());
                     stack.push(current);
                 }
-                // MapField / MapFieldChain / MapFieldUnique /
-                // MapFieldChainUnique / FlatMapChain handlers deleted in
-                // Tier 3.  Pipeline IR runs the base `CallMethod(Map | FlatMap | Unique, [GetField...])`
-                // chain via composed `MapField` / `MapFieldChain` /
-                // `FlatMapField` / `FlatMapFieldChain` Stages.
-
-                // FilterFieldEqLit / FilterFieldCmpLit / FilterCurrentCmpLit
-                // handlers deleted in Tier 3.  Pipeline IR Stage::Filter +
-                // BodyKernel::FieldCmpLit / CurrentCmpLit + composed substrate
-                // covers these — including auto-index, IntVec/FloatVec/StrVec
-                // typed-lane fast paths.
-                // FilterStrVec* + MapStrVec* + MapNumVec* handlers deleted in Tier 3.
-                // Pipeline IR Stage::Filter / Stage::Map + composed substrate runs
-                // base CallMethod chain via the builtin call path on StrVec/IntVec/FloatVec
-                // typed-lane receivers.  Loses the autovectoriser-friendly tight
-                // loops here in exchange for a single generic execution path.
-                // FilterFieldEqLitMapField / FilterFieldCmpLitMapField
-                // handlers removed — pipeline.rs Sink::NumFilterMap
-                // covers these shapes for top-level Root-prefix queries.
-                // Sub-program path executes the unfused
-                // FilterFieldEqLit/FilterFieldCmpLit + MapField sequence.
-                // FilterFieldCmpField + FilterFieldCmpFieldCount handlers
-                // deleted in Tier 3.  Base CallMethod(Filter, [field-vs-field
-                // predicate]) chain runs through composed substrate.
-
-                // GroupByField/CountByField/UniqueByField handlers
-                // deleted in Tier 3.
-                // FilterMapSum / Avg / First / Min / Max handlers
-                // removed.  Pipeline.rs Sink::NumFilterMap (sum/avg/min/max)
-                // and Sink::FilterFirst cover these shapes for top-level
-                // queries; sub-program path executes FilterMap + bare
-                // aggregate as two separate ops.
-                // FilterLast handler removed — pipeline.rs Sink::FilterLast
-                // covers `.filter(p).last()` for top-level queries.
-                // EquiJoin handler removed — base CallMethod(equi_join)
-                // dispatch covers it via the builtin call path.
-                // TopN handler removed — pipeline.rs Sink::TopN covers
-                // sort()+take(n) for top-level Root-prefix queries.
-                // UniqueCount handler removed — pipeline.rs Sink::UniqueCount
-                // covers unique().count() at lower-time.
-                // ArgExtreme handler removed — pipeline.rs MinBy/MaxBy
-                // covers sort_by(k)+first()/last().
-                // MapMap handler removed — pipeline runs two Map stages
-                // sequentially, and the bytecode now lowers `map().map()`
-                // as two unfused CallMethod(Map) ops.
+                
+                
                 Opcode::LoadIdent(name) => {
                     let v = if let Some(v) = env.get_var(name.as_ref()) {
                         v.clone()
@@ -3089,7 +2954,7 @@ impl VM {
                     stack.push(v);
                 }
 
-                // ── Operators ─────────────────────────────────────────────────
+                
                 Opcode::Add => {
                     let r = pop!(stack);
                     let l = pop!(stack);
@@ -3179,7 +3044,7 @@ impl VM {
                     stack.push(exec_cast(&v, *ty)?);
                 }
 
-                // ── Short-circuit ops ─────────────────────────────────────────
+                
                 Opcode::AndOp(rhs) => {
                     let lv = pop!(stack);
                     if !is_truthy(&lv) {
@@ -3211,14 +3076,14 @@ impl VM {
                     stack.push(self.exec(branch, env)?);
                 }
                 Opcode::TryExpr { body, default } => {
-                    // Catch EvalError AND Val::Null; panics propagate.
+                    
                     match self.exec(body, env) {
                         Ok(v) if !v.is_null() => stack.push(v),
                         Ok(_) | Err(_) => stack.push(self.exec(default, env)?),
                     }
                 }
 
-                // ── Method calls ──────────────────────────────────────────────
+                
                 Opcode::CallMethod(call) => {
                     let recv = pop!(stack);
                     let result = self.exec_call(recv, call, env)?;
@@ -3233,7 +3098,7 @@ impl VM {
                     }
                 }
 
-                // ── Construction ──────────────────────────────────────────────
+                
                 Opcode::MakeObj(entries) => {
                     let entries = Arc::clone(entries);
                     let result = self.exec_make_obj(&entries, env)?;
@@ -3262,29 +3127,24 @@ impl VM {
                     stack.push(Val::arr(out));
                 }
 
-                // ── F-string ──────────────────────────────────────────────────
+                
                 Opcode::FString(parts) => {
                     let parts = Arc::clone(parts);
                     let result = self.exec_fstring(&parts, env)?;
                     stack.push(result);
                 }
 
-                // ── Kind check ────────────────────────────────────────────────
+                
                 Opcode::KindCheck { ty, negate } => {
                     let v = pop!(stack);
                     let m = kind_matches(&v, *ty);
                     stack.push(Val::Bool(if *negate { !m } else { m }));
                 }
 
-                // ── Pipeline helpers ──────────────────────────────────────────
+                
                 Opcode::SetCurrent => {
-                    // This is emitted before an arbitrary pipe-forward expression.
-                    // The value flowing through the pipe is now on the stack as TOS.
-                    // However we can't mutate env here since env is immutable.
-                    // The actual "set current" happens by the caller preparing a new env.
-                    // In practice, SetCurrent should not appear in isolation in the
-                    // flat opcode stream because pipeline steps that need SetCurrent
-                    // are compiled as sub-programs. Skip.
+                    
+                    
                 }
                 Opcode::PipelineRun { base, steps } => {
                     let val = self.exec(base, env)?;
@@ -3293,11 +3153,8 @@ impl VM {
                     for step in steps.iter() {
                         match step {
                             CompiledPipeStep::Forward(rhs) => {
-                                // Sub-program reads env.current to access
-                                // the pipe value.  Method-call shapes
-                                // (`| len`, `| upper(2)`) prepend their
-                                // own PushCurrent at compile-time so
-                                // CallMethod has the receiver on TOS.
+                                
+                                
                                 let prev = local_env.swap_current(cur);
                                 cur = self.exec(rhs, &local_env)?;
                                 let _ = local_env.swap_current(prev);
@@ -3344,7 +3201,7 @@ impl VM {
                     stack.push(cur);
                 }
 
-                // ── Complex recursive ops ─────────────────────────────────────
+                
                 Opcode::LetExpr { name, body } => {
                     let init_val = pop!(stack);
                     let body_env = env.with_var(name.as_ref(), init_val);
@@ -3354,9 +3211,8 @@ impl VM {
                 Opcode::ListComp(spec) => {
                     let items = self.exec_iter_vals(&spec.iter, env)?;
                     let mut out = Vec::with_capacity(items.len());
-                    // Fast path: single-var `for x in iter` — reuse one
-                    // scratch Env via push_lam / pop_lam instead of
-                    // cloning per iteration.
+                    
+                    
                     if spec.vars.len() == 1 {
                         let vname = spec.vars[0].clone();
                         let mut scratch = env.clone();
@@ -3389,15 +3245,12 @@ impl VM {
                 Opcode::DictComp(spec) => {
                     let items = self.exec_iter_vals(&spec.iter, env)?;
                     let mut map: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(items.len());
-                    // Single-var fast path: reuse scratch Env via push_lam/pop_lam
-                    // instead of cloning per iteration.
+                    
+                    
                     if spec.vars.len() == 1 {
                         let vname = spec.vars[0].clone();
-                        // Hot pattern: `{ f(x): x for x in iter }` with no
-                        // condition.  Both key and val depend only on `x`,
-                        // which is also `current`, so we can elide the
-                        // env rebind and the two `self.exec` calls by
-                        // dispatching the common shapes inline.
+                        
+                        
                         let val_is_ident = matches!(
                             spec.val.ops.as_ref(),
                             [Opcode::LoadIdent(v)] if v.as_ref() == vname.as_ref()
@@ -3504,7 +3357,7 @@ impl VM {
                     stack.push(Val::arr(out));
                 }
 
-                // ── Patch block ───────────────────────────────────────────────
+                
                 Opcode::PatchEval(cp) => {
                     let result = self.exec_patch_compiled(cp, env)?;
                     stack.push(result);
@@ -3520,17 +3373,13 @@ impl VM {
             .ok_or_else(|| EvalError("program produced no value".into()))
     }
 
-    // filter_map_minmax helper removed alongside the FilterMapMin /
-    // FilterMapMax opcodes (migrated to pipeline.rs Sink::NumFilterMap).
-
-    // ── Method call dispatch ──────────────────────────────────────────────────
-
+    /// Dispatch a `CallMethod` opcode: applies fast numeric/typed specialisations first,
+    /// then lambda-aware methods, then the general `call_builtin_method_compiled` fallback.
     fn exec_call(&mut self, recv: Val, call: &CompiledCall, env: &Env) -> Result<Val, EvalError> {
-        // Global-call opcodes push Root before calling; handle them
+        
         if call.method == BuiltinMethod::Unknown {
-            // Global function (coalesce, zip, range, etc.) — known globals
-            // route through eval_global; unknown names fall back to method
-            // dispatch on the pushed receiver.
+            
+            
             match call.name.as_ref() {
                 "coalesce" | "chain" | "join" | "zip" | "zip_longest" | "product" | "range" => {
                     return crate::runtime::eval_global_compiled(self, call, env);
@@ -3567,13 +3416,12 @@ impl VM {
             );
         }
 
-        // Lambda methods — VM handles iteration, running sub-programs per item
+        
         if call.method.is_lambda_method() {
             return self.exec_lambda_method(recv, call, env);
         }
 
-        // Typed-numeric aggregate fast-path: bare `.sum()/.min()/.max()/.avg()`
-        // on an array.  Skips fallback dispatch + `collect_nums` extra Vec.
+        
         if call.sub_progs.is_empty() && call.orig_args.is_empty() {
             if let Val::Arr(a) = &recv {
                 match call.method {
@@ -3584,9 +3432,8 @@ impl VM {
                     _ => {}
                 }
             }
-            // Columnar IntVec — autovec-friendly 4-lane unrolled
-            // accumulators get the LLVM vectoriser to emit AVX2 / NEON
-            // horizontal-reduce.  Native parity on x86-64-v3 / aarch64.
+            
+            
             if let Val::IntVec(a) = &recv {
                 match call.method {
                     BuiltinMethod::Sum => return Ok(Val::Int(simd_sum_i64_slice(a))),
@@ -3608,10 +3455,8 @@ impl VM {
                     _ => {}
                 }
             }
-            // Homogeneous-Int `Val::Arr` receivers get routed through
-            // columnar reverse/sort — 3x less memory bandwidth than the
-            // Vec<Val> path.  Clone cost is identical (O(N) in both cases
-            // because the Arr is typically shared); the win is on write.
+            
+            
             if let Val::Arr(a) = &recv {
                 let is_all_int = a.iter().all(|v| matches!(v, Val::Int(_)));
                 if is_all_int && !a.is_empty() {
@@ -3646,7 +3491,7 @@ impl VM {
                     }
                 }
             }
-            // Columnar IntVec receiver — reverse/sort in-place on Vec<i64>.
+            
             if let Val::IntVec(a) = &recv {
                 match call.method {
                     BuiltinMethod::Reverse => {
@@ -3685,11 +3530,11 @@ impl VM {
                     _ => {}
                 }
             }
-            // Bare `.flatten()` (depth=1) — inline depth-1 flatten with exact
-            // preallocation.  Skips fallback builtin arg parsing.
+            
+            
             if call.method == BuiltinMethod::Flatten {
                 if let Val::Arr(a) = &recv {
-                    // Columnar fast-path: all inners Int-only → emit Val::IntVec.
+                    
                     let all_int_inner = a.iter().all(|it| match it {
                         Val::IntVec(_) => true,
                         Val::Arr(inner) => inner.iter().all(|v| matches!(v, Val::Int(_))),
@@ -3748,7 +3593,7 @@ impl VM {
                     }
                     return Ok(Val::arr(out));
                 }
-                // Columnar receiver itself — already flat; return as-is.
+                
                 if matches!(
                     &recv,
                     Val::IntVec(_) | Val::FloatVec(_) | Val::StrVec(_) | Val::StrSliceVec(_)
@@ -3756,9 +3601,8 @@ impl VM {
                     return Ok(recv);
                 }
             }
-            // Scalar `.to_string()` — inline the conversion.  The fallback
-            // path allocates a fresh `Val::Str` via `val_to_string`; this
-            // does the same work without the dispatch + argslice copy.
+            
+            
             if call.method == BuiltinMethod::ToString {
                 let s: Arc<str> = match &recv {
                     Val::Str(s) => return Ok(Val::Str(s.clone())),
@@ -3770,9 +3614,8 @@ impl VM {
                 };
                 return Ok(Val::Str(s));
             }
-            // Scalar `.to_json()` — skip the `Val -> serde_json::Value ->
-            // String` round-trip for primitives.  Big-ticket users are
-            // `.map(@.to_json())` in hot pipelines.
+            
+            
             if call.method == BuiltinMethod::ToJson {
                 match &recv {
                     Val::Int(n) => return Ok(Val::Str(Arc::from(n.to_string()))),
@@ -3789,9 +3632,8 @@ impl VM {
                     }
                     Val::Null => return Ok(Val::Str(Arc::from("null"))),
                     Val::Str(s) => {
-                        // JSON-escape — fall through for now; cheap escape
-                        // added here to keep the fast-path.  Handles the
-                        // common no-escape case with a single scan.
+                        
+                        
                         let src = s.as_ref();
                         let mut needs_escape = false;
                         for &b in src.as_bytes() {
@@ -3807,7 +3649,7 @@ impl VM {
                             out.push('"');
                             return Ok(Val::Str(Arc::from(out)));
                         }
-                        // Fall through to serde path for escape handling.
+                        
                     }
                     _ => {}
                 }
@@ -3818,11 +3660,12 @@ impl VM {
             return Ok(v);
         }
 
-        // Value methods — delegate to the builtin dispatcher using the
-        // compiled argument programs already stored on the call.
+        
         call_builtin_method_compiled(self, recv, call, env)
     }
 
+    /// Attempt to dispatch a built-in call using a pre-computed `BuiltinCall` descriptor
+    /// whose arguments are all static (non-lambda). Returns `Ok(None)` if inapplicable.
     fn exec_static_builtin_call(
         &mut self,
         recv: &Val,
@@ -3842,6 +3685,8 @@ impl VM {
         Ok(None)
     }
 
+    /// Build a `BuiltinCall` descriptor by evaluating each argument eagerly as a static value.
+    /// Returns `None` when the method does not support the static-args protocol.
     fn static_shared_builtin_call(
         &mut self,
         call: &CompiledCall,
@@ -3859,6 +3704,8 @@ impl VM {
         )
     }
 
+    /// Evaluate the sub-program at position `idx` in `call` to produce a concrete argument
+    /// value. Returns `Ok(None)` when the index is out of range.
     fn static_arg_val(
         &mut self,
         call: &CompiledCall,
@@ -3871,6 +3718,8 @@ impl VM {
         }
     }
 
+    /// Execute the class of built-in methods that accept lambda/predicate arguments
+    /// (e.g. `filter`, `map`, `sort`, `groupBy`, `accumulate`, …).
     fn exec_lambda_method(
         &mut self,
         recv: Val,
@@ -3878,16 +3727,16 @@ impl VM {
         env: &Env,
     ) -> Result<Val, EvalError> {
         let sub = call.sub_progs.first();
-        // Hoist the lambda param name out of the per-item loop — otherwise
-        // each iteration would re-scan `orig_args` for the Lambda pattern.
+        
+        
         let lam_param: Option<&str> = match call.orig_args.first() {
             Some(Arg::Pos(Expr::Lambda { params, .. })) if !params.is_empty() => {
                 Some(params[0].as_str())
             }
             _ => None,
         };
-        // Single scratch env per call — reused across every item iteration
-        // below via `push_lam` / `pop_lam` instead of a fresh clone per item.
+        
+        
         let mut scratch = env.clone();
 
         match call.method {
@@ -4016,10 +3865,8 @@ impl VM {
                 let items = recv
                     .into_vec()
                     .ok_or_else(|| EvalError("groupBy: expected array".into()))?;
-                // Pattern specialisation: `lambda x: x % K` where K is a small
-                // positive Int.  Skips per-item exec + string-keying.  Uses a
-                // dense Vec<Vec<Val>> indexed by (n % K).rem_euclid — collapsed
-                // into an IndexMap<Arc<str>, Val> once at the end.
+                
+                
                 if let Some(param) = lam_param {
                     if let [Opcode::LoadIdent(p), Opcode::PushInt(k_lit), Opcode::Mod] =
                         key_prog.ops.as_ref()
@@ -4030,7 +3877,7 @@ impl VM {
                             let mut buckets: Vec<Vec<Val>> = vec![Vec::new(); k_u];
                             let mut seen: Vec<bool> = vec![false; k_u];
                             let mut order: Vec<usize> = Vec::new();
-                            // All-numeric fast path; error on non-numeric.
+                            
                             for item in items {
                                 let idx = match &item {
                                     Val::Int(n) => n.rem_euclid(k_lit) as usize,
@@ -4054,7 +3901,7 @@ impl VM {
                         }
                     }
                 }
-                // General compiled-bytecode path.
+                
                 let map = crate::builtins::group_by_apply(items, |item| {
                     self.exec_lam_body_scratch(key_prog, item, lam_param, &mut scratch)
                 })?;
@@ -4101,12 +3948,8 @@ impl VM {
                 Ok(Val::arr(out))
             }
             BuiltinMethod::Accumulate => {
-                // VM-accelerate the common 2-param form `accumulate(lambda a, x: …)`
-                // with no `start:` named arg.  Pattern-specialise for a handful
-                // of tight-loop shapes (`a + x`, `a - x`, `a * x`, `max/min`)
-                // that the compiled bytecode would otherwise re-dispatch per
-                // iteration. Other shapes fall through to a compiled-bytecode
-                // VM loop.
+                
+                
                 let lam_body =
                     sub.ok_or_else(|| EvalError("accumulate: requires lambda".into()))?;
                 let (p1, p2) = match call.orig_args.first() {
@@ -4122,7 +3965,7 @@ impl VM {
                 {
                     return call_builtin_method_compiled(self, recv, call, env);
                 }
-                // Try pattern specialisation: `LoadIdent(p1), LoadIdent(p2), <BinOp>`.
+                
                 let specialised_binop = match lam_body.ops.as_ref() {
                     [Opcode::LoadIdent(a), Opcode::LoadIdent(b), op]
                         if a.as_ref() == p1 && b.as_ref() == p2 =>
@@ -4136,7 +3979,7 @@ impl VM {
                     }
                     _ => None,
                 };
-                // Columnar IntVec input → IntVec output (native-parity).
+                
                 if let (Val::IntVec(a), Some(bop)) = (&recv, specialised_binop.as_ref().copied()) {
                     let mut out: Vec<i64> = Vec::with_capacity(a.len());
                     let mut acc: i64 = 0;
@@ -4181,9 +4024,8 @@ impl VM {
                     .ok_or_else(|| EvalError("accumulate: expected array".into()))?;
                 let mut out = Vec::with_capacity(items.len());
                 if let Some(bop) = specialised_binop {
-                    // Typed i64 tight-loop when every item is Int.  No Val
-                    // match, no add_vals dispatch, no per-step Val clone —
-                    // native parity.
+                    
+                    
                     if items.iter().all(|v| matches!(v, Val::Int(_))) {
                         let mut acc_out: Vec<i64> = Vec::with_capacity(items.len());
                         let mut acc: i64 = 0;
@@ -4208,7 +4050,7 @@ impl VM {
                         }
                         return Ok(Val::int_vec(acc_out));
                     }
-                    // Typed f64 tight-loop when every item is Float.
+                    
                     if items.iter().all(|v| matches!(v, Val::Float(_))) {
                         let mut acc_out: Vec<f64> = Vec::with_capacity(items.len());
                         let mut acc: f64 = 0.0;
@@ -4233,7 +4075,7 @@ impl VM {
                         }
                         return Ok(Val::float_vec(acc_out));
                     }
-                    // Mixed / non-numeric — inline fold via add_vals/num_op.
+                    
                     let mut running: Option<Val> = None;
                     for item in items {
                         let next = match running.take() {
@@ -4249,7 +4091,7 @@ impl VM {
                     }
                     return Ok(Val::arr(out));
                 }
-                // General path: compiled-bytecode VM loop.
+                
                 let mut running: Option<Val> = None;
                 for item in items {
                     let next = if let Some(acc) = running.take() {
@@ -4293,15 +4135,13 @@ impl VM {
             BuiltinMethod::TransformValues => {
                 let lam =
                     sub.ok_or_else(|| EvalError("transformValues: requires lambda".into()))?;
-                // COW: if the receiver's Arc is unique we mutate in place,
-                // otherwise deep-clone once and mutate the clone.  Either
-                // way, no fresh IndexMap allocation and no key-Arc clone
-                // per entry (IndexMap::values_mut preserves slot identity).
+                
+                
                 let mut map = recv
                     .into_map()
                     .ok_or_else(|| EvalError("transformValues: expected object".into()))?;
-                // Pattern-specialise `[PushCurrent, PushInt(K), <BinOp>]` —
-                // the body of `transform_values(@ + K)` / `(@ - K)` / `(@ * K)`.
+                
+                
                 let pat = match lam.ops.as_ref() {
                     [Opcode::PushCurrent, Opcode::PushInt(k), op] => match op {
                         Opcode::Add => Some((AccumOp::Add, *k)),
@@ -4338,8 +4178,8 @@ impl VM {
                     }
                     return Ok(Val::obj(map));
                 }
-                // General path — mutate in place via values_mut; no new map,
-                // no key reinsertion.
+                
+                
                 for v in map.values_mut() {
                     *v = crate::builtins::map_one(v, |item| {
                         self.exec_lam_body_scratch(lam, item, lam_param, &mut scratch)
@@ -4381,9 +4221,8 @@ impl VM {
         }
     }
 
-    /// Convenience wrapper: clones `env` once, runs the prog, discards
-    /// the scratch.  Hot loops should use `exec_lam_body_scratch` to
-    /// reuse a single scratch env instead.
+    /// Execute a lambda body `prog` with `item` as the current value, creating a
+    /// temporary scratch environment so the caller's `env` is unchanged.
     fn exec_lam_body(
         &mut self,
         prog: &Program,
@@ -4395,6 +4234,8 @@ impl VM {
         self.exec_lam_body_scratch(prog, item, lam_param, &mut scratch)
     }
 
+    /// Execute a two-parameter lambda body (e.g. for `sort` comparators), binding
+    /// `left` and `right` to the appropriate parameter names extracted from `arg`.
     fn exec_pair_lam_body(
         &mut self,
         prog: &Program,
@@ -4433,8 +4274,8 @@ impl VM {
         }
     }
 
-    // ── Patch executor (VM-native) ──────────────────────────────────
-
+    /// Apply a compiled patch to its root document: evaluate the root, then apply
+    /// each operation in order, respecting optional guard conditions.
     fn exec_patch_compiled(&mut self, cp: &CompiledPatch, env: &Env) -> Result<Val, EvalError> {
         let mut doc = self.exec(&cp.root_prog, env)?;
         for op in &cp.ops {
@@ -4452,6 +4293,8 @@ impl VM {
         Ok(doc)
     }
 
+    /// Recursive patch walker: descend to `path[i]` in `v` and apply `val`.
+    /// When `i == path.len()` the target has been reached and `val` is applied directly.
     fn apply_patch_step_compiled(
         &mut self,
         v: Val,
@@ -4599,6 +4442,8 @@ impl VM {
         }
     }
 
+    /// DFS patch application for `Descendant` path steps: recursively apply the
+    /// operation wherever `name` appears in the subtree rooted at `v`.
     fn descend_apply_patch_compiled(
         &mut self,
         v: Val,
@@ -4650,10 +4495,9 @@ impl VM {
         }
     }
 
-    /// Scratch-reusing variant: mutates `scratch` in place via
-    /// `Env::push_lam` / `Env::pop_lam` instead of cloning per item.
-    /// The caller provides (and reuses) the scratch env across loop
-    /// iterations.
+    /// Push `item` (and optionally bind it to `lam_param`) onto a scratch environment,
+    /// execute `prog`, then pop the frame. Reusing `scratch` avoids re-cloning the base env
+    /// on every iteration of high-frequency loops like `filter` and `map`.
     fn exec_lam_body_scratch(
         &mut self,
         prog: &Program,
@@ -4667,8 +4511,8 @@ impl VM {
         r
     }
 
-    // ── Object construction ───────────────────────────────────────────────────
-
+    /// Build an object `Val` from a slice of compiled field entries, handling all
+    /// variants: `Short`, `Kv`, `KvPath`, `Dynamic`, `Spread`, and `SpreadDeep`.
     fn exec_make_obj(&mut self, entries: &[CompiledObjEntry], env: &Env) -> Result<Val, EvalError> {
         let mut map: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(entries.len());
         for entry in entries {
@@ -4757,11 +4601,11 @@ impl VM {
         Ok(Val::obj(map))
     }
 
-    // ── F-string ──────────────────────────────────────────────────────────────
-
+    /// Evaluate a format-string from its compiled parts, applying optional format specs
+    /// and fast-path shortcuts for simple `{@}`, `{@.field}`, and `{ident}` patterns.
     fn exec_fstring(&mut self, parts: &[CompiledFSPart], env: &Env) -> Result<Val, EvalError> {
         use std::fmt::Write as _;
-        // Pre-size by summing literal lengths + rough 8 bytes per interp.
+        
         let lit_len: usize = parts
             .iter()
             .map(|p| match p {
@@ -4774,9 +4618,8 @@ impl VM {
             match part {
                 CompiledFSPart::Lit(s) => out.push_str(s.as_ref()),
                 CompiledFSPart::Interp { prog, fmt } => {
-                    // Fast path: very small interp programs that just extract
-                    // a field / index / current — avoid full self.exec() recursion
-                    // (stack alloc, ic vec, etc.) per row.
+                    
+                    
                     let val: Val = match &prog.ops[..] {
                         [Opcode::PushCurrent] => env.current.clone(),
                         [Opcode::PushCurrent, Opcode::GetIndex(n)] => match &env.current {
@@ -4801,7 +4644,7 @@ impl VM {
                     };
                     match fmt {
                         None => match &val {
-                            // Fast paths: avoid val_to_string's temporary String.
+                            
                             Val::Str(s) => out.push_str(s.as_ref()),
                             Val::Int(n) => {
                                 let _ = write!(out, "{}", n);
@@ -4839,12 +4682,12 @@ impl VM {
                 }
             }
         }
-        // `Arc::<str>::from(String)` transfers the buffer — no realloc.
+        
         Ok(Val::Str(Arc::<str>::from(out)))
     }
 
-    // ── Comprehension helpers ─────────────────────────────────────────────────
-
+    /// Evaluate `iter_prog` and expand the result into a `Vec<Val>` suitable for iteration.
+    /// Objects are converted to `[{key, value}]` pairs; scalars become single-element vecs.
     fn exec_iter_vals(&mut self, iter_prog: &Program, env: &Env) -> Result<Vec<Val>, EvalError> {
         match self.exec(iter_prog, env)? {
             Val::Arr(a) => Ok(Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone())),
@@ -4860,24 +4703,9 @@ impl VM {
     }
 }
 
-// ── Free helpers ──────────────────────────────────────────────────────────────
 
-/// Route C — chained-descendant byte chain.
-///
-/// Entry: `root_key` is the key of the root `Descendant` that triggered the
-/// scan.  `tail` is the opcode slice immediately after that `Descendant`.
-///
-/// Consumes as many tail opcodes as can be handled on byte spans:
-///   - `Descendant(k)` — re-scan within each current span.
-///   - `Quantifier(First)` — keep first span; `Quantifier(One)` when exactly one.
-///   - `InlineFilter(pred)` / `CallMethod(Filter, [pred])` with a canonical
-///     equality literal (int/string/bool/null) — bytewise retain.
-///
-/// Any other opcode terminates the chain; remaining spans are materialised
-/// into `Val`s and returned, and the caller resumes normal opcode dispatch.
-/// A "first-selector" opcode: bare `.first()` / `Quantifier::First`.
-/// When `Descendant(k)` is followed by one of these, the byte scan
-/// can stop at the first match per span.
+/// Return `true` when `op` is a "take the first element" selector (`?` quantifier
+/// or a no-arg `.first()` call), used to short-circuit `Descendant` to `find_desc_first`.
 fn is_first_selector_op(op: &Opcode) -> bool {
     match op {
         Opcode::Quantifier(QuantifierKind::First) => true,
@@ -4886,6 +4714,8 @@ fn is_first_selector_op(op: &Opcode) -> bool {
     }
 }
 
+/// Slice an array or typed vector, resolving optional start/end indices with
+/// Python-style negative-index semantics and clamping to valid bounds.
 fn exec_slice(v: Val, from: Option<i64>, to: Option<i64>) -> Val {
     match v {
         Val::Arr(a) => {
@@ -4919,10 +4749,13 @@ fn exec_slice(v: Val, from: Option<i64>, to: Option<i64>) -> Val {
     }
 }
 
+/// Resolve a signed index into a non-clamping usize offset (used for slice bounds).
 fn resolve_idx(i: i64, len: i64) -> usize {
     (if i < 0 { (len + i).max(0) } else { i }) as usize
 }
 
+/// Recursively collect every value stored under `name` anywhere in the subtree of `v`,
+/// without recording path information (used for non-root `Descendant` traversal).
 fn collect_desc(v: &Val, name: &str, out: &mut Vec<Val>) {
     match v {
         Val::Obj(m) => {
@@ -4942,9 +4775,9 @@ fn collect_desc(v: &Val, name: &str, out: &mut Vec<Val>) {
     }
 }
 
-/// Early-exit variant of `collect_desc`: returns the first self-first DFS
-/// hit for `name`, matching the order that `collect_desc` would produce.
-/// Powers the `$..key.first()` fast path.
+
+/// DFS pre-order search returning the first occurrence of `name` in the subtree of `v`.
+/// Used to optimise `Descendant` when followed by a `.first()` selector.
 fn find_desc_first(v: &Val, name: &str) -> Option<Val> {
     match v {
         Val::Obj(m) => {
@@ -4970,6 +4803,8 @@ fn find_desc_first(v: &Val, name: &str) -> Option<Val> {
     }
 }
 
+/// Collect every node in the subtree of `v` (DFS pre-order) into `out`.
+/// Used by the `DescendAll` opcode to implement `$..**`.
 fn collect_all(v: &Val, out: &mut Vec<Val>) {
     match v {
         Val::Obj(m) => {
@@ -4987,9 +4822,9 @@ fn collect_all(v: &Val, out: &mut Vec<Val>) {
     }
 }
 
-/// Path-tracking variant — called when descending from root so paths are
-/// root-relative and can be cached for future `RootChain` lookups.
-/// `prefix` is mutated in-place (push/truncate) to avoid allocations.
+
+/// Like `collect_desc` but also records `(JSON-pointer, value)` pairs in `cached`
+/// for bulk insertion into the `PathCache` when traversing from the root document.
 fn collect_desc_with_paths(
     v: &Val,
     name: &str,
@@ -5028,14 +4863,18 @@ fn collect_desc_with_paths(
     }
 }
 
+/// Classification of a dict-comp key expression relative to the loop variable,
+/// used to select a fast path that avoids a full `exec` call per iteration.
 #[derive(Clone, Copy)]
 enum DictKeyShape {
-    /// key prog is `[LoadIdent(v)]` — use item directly (stringify non-Str).
+    /// Key is `v` (the loop variable itself) — use value directly as the key.
     Ident,
-    /// key prog is `[LoadIdent(v), CallMethod{ToString, no args}]`.
+    /// Key is `v.to_string()` — coerce the loop variable to a string.
     IdentToString,
 }
 
+/// Detect whether the key program in a dict comprehension has a `DictKeyShape`
+/// fast-path pattern relative to `vname`, or return `None` for the general case.
 fn classify_dict_key(prog: &Program, vname: &str) -> Option<DictKeyShape> {
     match prog.ops.as_ref() {
         [Opcode::LoadIdent(v)] if v.as_ref() == vname => Some(DictKeyShape::Ident),
@@ -5051,6 +4890,9 @@ fn classify_dict_key(prog: &Program, vname: &str) -> Option<DictKeyShape> {
     }
 }
 
+/// Construct an iteration environment for a comprehension by binding `item` to
+/// the variable names in `vars`. Single-var uses `{v: item}`, two-var uses the
+/// `{index, value}` struct produced by object iteration.
 fn bind_comp_vars(env: &Env, vars: &[Arc<str>], item: Val) -> Env {
     match vars {
         [] => env.with_current(item),
@@ -5071,6 +4913,8 @@ fn bind_comp_vars(env: &Env, vars: &[Arc<str>], item: Val) -> Env {
     }
 }
 
+/// Perform an explicit type cast on `v` as specified by `ty` (`as str`, `as int`,
+/// `as float`, `as bool`, `as array`, `as object`, `as null`).
 fn exec_cast(v: &Val, ty: super::ast::CastType) -> Result<Val, EvalError> {
     use super::ast::CastType;
     match ty {
@@ -5137,6 +4981,8 @@ fn exec_cast(v: &Val, ty: super::ast::CastType) -> Result<Val, EvalError> {
     }
 }
 
+/// Format `val` according to the mini format spec string `spec` (e.g. `.2f`, `d`,
+/// `>10`, `<10`, `^10`, `05`). Falls back to `val_to_string` for unknown specs.
 fn apply_fmt_spec(val: &Val, spec: &str) -> String {
     if let Some(rest) = spec.strip_suffix('f') {
         if let Some(prec_str) = rest.strip_prefix('.') {
@@ -5170,10 +5016,9 @@ fn apply_fmt_spec(val: &Val, spec: &str) -> String {
     s
 }
 
-// ── Opcode helpers ────────────────────────────────────────────────────────────
 
-// WrapVal removed alongside the TopN opcode.
-
+/// Construct a `CallMethod` opcode for a zero-argument built-in call.
+/// Used by the strength-reduction pass to emit replacement opcodes.
 fn make_noarg_call(method: BuiltinMethod, name: &str) -> Opcode {
     Opcode::CallMethod(Arc::new(CompiledCall {
         method,
@@ -5184,23 +5029,25 @@ fn make_noarg_call(method: BuiltinMethod, name: &str) -> Opcode {
     }))
 }
 
-// ── Hash helpers ──────────────────────────────────────────────────────────────
 
+/// Compute a fast `u64` hash of a string using `DefaultHasher`.
 fn hash_str(s: &str) -> u64 {
     let mut h = DefaultHasher::new();
     s.hash(&mut h);
     h.finish()
 }
 
-/// Hash the *structure* (keys + types) of a Val for the resolution cache key.
-/// Does NOT hash values, only shape, so structural navigation results are
-/// stable across different values in the same-shaped document.
+/// Compute a structural hash of a `Val` that distinguishes both shape AND leaf values.
+/// Two documents with the same shape but different primitive values must produce different
+/// hashes so the path-resolution cache does not return stale results across distinct docs.
 fn hash_val_structure(v: &Val) -> u64 {
     let mut h = DefaultHasher::new();
     hash_structure_into(v, &mut h, 0);
     h.finish()
 }
 
+/// Recursive helper for `hash_val_structure`. Hashing is bounded to depth 8 to
+/// avoid O(n) cost on deeply nested documents while still capturing leaf values.
 fn hash_structure_into(v: &Val, h: &mut DefaultHasher, depth: usize) {
     if depth > 8 {
         return;

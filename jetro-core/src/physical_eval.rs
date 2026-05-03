@@ -1,4 +1,9 @@
-//! Interpreter for `physical.rs` expression plans.
+//! Interpreter for physical `QueryPlan` IR nodes.
+//!
+//! `run` walks the plan tree produced by `planner`, evaluating each
+//! `PlanNode` variant. Backend selection per node follows the preference list
+//! attached by the planner: structural (jetro-experimental bitmap index),
+//! view (tape/borrowed), pipeline (pull IR), then VM as the final fallback.
 
 use std::sync::Arc;
 
@@ -15,6 +20,7 @@ use crate::value_view::{ValView, ValueView};
 use crate::view_pipeline;
 use crate::{Jetro, VM};
 
+/// Entry point: constructs an `ExecCtx` and evaluates the plan DAG starting from `root_id`.
 pub(crate) fn run(j: &Jetro, plan: &QueryPlan, root_id: NodeId) -> Result<Val, EvalError> {
     let mut ctx = ExecCtx {
         j,
@@ -28,6 +34,8 @@ pub(crate) fn run(j: &Jetro, plan: &QueryPlan, root_id: NodeId) -> Result<Val, E
     ctx.eval(root_id)
 }
 
+/// Applies a sequence of field/index navigation steps to a borrowed `ValueView` without
+/// materialising intermediate values.
 fn walk_path_view<'a, V>(mut cur: V, steps: &[PhysicalPathStep]) -> V
 where
     V: ValueView<'a>,
@@ -41,17 +49,26 @@ where
     cur
 }
 
+/// Stateful execution context that drives tree-walking evaluation of a `QueryPlan`.
 struct ExecCtx<'a> {
+    /// The document handle providing raw bytes, tape, structural index, and `Val` root.
     j: &'a Jetro,
+    /// The plan DAG being evaluated.
     plan: &'a QueryPlan,
+    /// The `NodeId` of the plan's root, used to suppress interpreted fallback on byte-native roots.
     root_id: NodeId,
+    /// Lazily-materialised document root value; `None` until first needed.
     root: Option<Val>,
+    /// Lazily-constructed evaluation environment; `None` until a node requires `Env` access.
     env: Option<Env>,
+    /// Stack of let-bound variable values visible to `FastChildren` evaluation paths.
     locals: Vec<(Arc<str>, Val)>,
+    /// Private VM instance used for `Vm` and `Structural` fallback nodes.
     vm: VM,
 }
 
 impl ExecCtx<'_> {
+    /// Evaluates node `id`, returning an error if no backend in its preference list could run.
     fn eval(&mut self, id: NodeId) -> Result<Val, EvalError> {
         self.eval_fast(id).unwrap_or_else(|| {
             Err(EvalError(format!(
@@ -61,6 +78,7 @@ impl ExecCtx<'_> {
         })
     }
 
+    /// Evaluates node `id` through the full interpreted tree-walker, constructing `Env` as needed.
     fn eval_interpreted(&mut self, id: NodeId) -> Result<Val, EvalError> {
         match self.plan.node(id) {
             PlanNode::Literal(value) => Ok(value.clone()),
@@ -160,6 +178,7 @@ impl ExecCtx<'_> {
         }
     }
 
+    /// Returns the materialised document root, lazily computing and caching it on first call.
     fn root(&mut self) -> Result<Val, EvalError> {
         if let Some(root) = &self.root {
             return Ok(root.clone());
@@ -169,6 +188,7 @@ impl ExecCtx<'_> {
         Ok(root)
     }
 
+    /// Returns a mutable reference to the evaluation environment, creating it if not yet built.
     fn env(&mut self) -> Result<&mut Env, EvalError> {
         if self.env.is_none() {
             let root = self.root()?;
@@ -177,6 +197,7 @@ impl ExecCtx<'_> {
         Ok(self.env.as_mut().expect("env initialized"))
     }
 
+    /// Removes and returns the `Env`, rebuilding it from the root if it was previously absent.
     fn take_env(&mut self) -> Result<Env, EvalError> {
         if self.env.is_none() {
             let root = self.root()?;
@@ -185,6 +206,7 @@ impl ExecCtx<'_> {
         Ok(self.env.take().expect("env initialized"))
     }
 
+    /// Looks up `name` in the fast-local stack without constructing a full `Env`.
     fn fast_local(&self, name: &str) -> Option<Val> {
         self.locals
             .iter()
@@ -193,10 +215,12 @@ impl ExecCtx<'_> {
             .map(|(_, value)| value.clone())
     }
 
+    /// Constructs an `Env` with `current = Null` and all fast-locals pre-populated.
     fn null_env_with_fast_locals(&self) -> Env {
         self.env_with_fast_locals(Val::Null)
     }
 
+    /// Constructs an `Env` with the given `current` value and all fast-locals pre-populated.
     fn env_with_fast_locals(&self, current: Val) -> Env {
         let mut env = Env::new(current);
         for (name, value) in &self.locals {
@@ -205,6 +229,9 @@ impl ExecCtx<'_> {
         env
     }
 
+    /// Iterates the backend preference list for `id` and returns the first backend that succeeds.
+    ///
+    /// Returns `None` when every backend is ineligible or declines to handle the node.
     fn eval_fast(&mut self, id: NodeId) -> Option<Result<Val, EvalError>> {
         let capabilities = self.plan.backend_capabilities(id);
         for backend in self.plan.backend_preferences(id) {
@@ -218,6 +245,8 @@ impl ExecCtx<'_> {
         None
     }
 
+    /// Attempts to run node `id` under the specific `backend`; returns `None` when the backend
+    /// cannot handle the node (wrong node kind, missing tape/index, or preconditions not met).
     fn eval_backend(
         &mut self,
         id: NodeId,
@@ -367,6 +396,8 @@ impl ExecCtx<'_> {
         }
     }
 
+    /// Routes a `Pipeline` node to the appropriate sub-backend based on its source type and
+    /// the requested backend preference.
     fn eval_pipeline_backend(
         &mut self,
         backend: BackendPreference,
@@ -401,6 +432,8 @@ impl ExecCtx<'_> {
         }
     }
 
+    /// Dispatches a field-chain pipeline to one of the four concrete sub-backends based on
+    /// the preference value (TapeView, TapeRows, MaterializedSource, or ValView).
     fn eval_field_chain_pipeline_backend(
         &mut self,
         backend: BackendPreference,
@@ -418,6 +451,8 @@ impl ExecCtx<'_> {
         }
     }
 
+    /// Runs the pipeline entirely on the simd-json tape via a zero-copy view; requires
+    /// `simd-json` feature and a live tape, otherwise returns `None`.
     fn eval_tape_view_pipeline(
         &mut self,
         keys: &[Arc<str>],
@@ -438,6 +473,8 @@ impl ExecCtx<'_> {
         None
     }
 
+    /// Runs the pipeline using the tape row-bridge, materialising individual rows on demand;
+    /// suitable when the first stage is not natively tape-evaluable.
     fn eval_tape_rows_pipeline(
         &mut self,
         keys: &[Arc<str>],
@@ -456,6 +493,8 @@ impl ExecCtx<'_> {
         None
     }
 
+    /// Materialises the field-chain source array from the tape and runs the pipeline on a `Val`
+    /// receiver; used when the body requires a fully-materialised array but not the full document.
     fn eval_materialized_source_pipeline(
         &mut self,
         keys: &[Arc<str>],
@@ -487,6 +526,8 @@ impl ExecCtx<'_> {
         None
     }
 
+    /// Runs the pipeline against a borrowed `ValView` of the already-materialised root value;
+    /// used when raw bytes are unavailable or the root `Val` has already been constructed.
     fn eval_val_view_pipeline(
         &mut self,
         keys: &[Arc<str>],
@@ -506,6 +547,8 @@ impl ExecCtx<'_> {
         None
     }
 
+    /// Navigates a `RootPath` directly on the simd-json tape, materialising only the leaf value;
+    /// returns `None` when the tape is unavailable.
     fn eval_root_path_fast(
         &mut self,
         steps: &[PhysicalPathStep],
@@ -521,6 +564,8 @@ impl ExecCtx<'_> {
         None
     }
 
+    /// Evaluates an `Object` node via `FastChildren`, using `eval_fast` for every field value;
+    /// returns `None` if any field requires `Env` access (e.g. `Short` fields).
     fn eval_object_fast(&mut self, fields: &[PhysicalObjField]) -> Option<Result<Val, EvalError>> {
         let mut map: indexmap::IndexMap<Arc<str>, Val> =
             indexmap::IndexMap::with_capacity(fields.len());
@@ -591,6 +636,8 @@ impl ExecCtx<'_> {
         Some(Ok(Val::obj(map)))
     }
 
+    /// Evaluates an `Array` node via `FastChildren`, using `eval_fast` for every element and
+    /// flattening spreads inline.
     fn eval_array_fast(&mut self, elems: &[PhysicalArrayElem]) -> Option<Result<Val, EvalError>> {
         let mut out = Vec::with_capacity(elems.len());
         for elem in elems {
@@ -614,6 +661,8 @@ impl ExecCtx<'_> {
         Some(Ok(Val::arr(out)))
     }
 
+    /// Evaluates a `Chain` node via `FastChildren`, navigating field/index/dynamic steps on `Val`
+    /// without constructing an `Env`; returns `None` if the base cannot be fast-evaluated.
     fn eval_chain_fast(
         &mut self,
         base: NodeId,
@@ -644,6 +693,7 @@ impl ExecCtx<'_> {
         Some(Ok(cur))
     }
 
+    /// Evaluates a `Chain` node through the full interpreted path, always constructing values.
     fn eval_chain(&mut self, base: NodeId, steps: &[PhysicalChainStep]) -> Result<Val, EvalError> {
         let mut cur = self.eval(base)?;
         for step in steps {
@@ -664,6 +714,8 @@ impl ExecCtx<'_> {
         Ok(cur)
     }
 
+    /// Evaluates a binary operation via `FastChildren`; uses short-circuit logic for `And`/`Or`;
+    /// returns `None` if either operand cannot be fast-evaluated.
     fn eval_binary_fast(
         &mut self,
         lhs: NodeId,
@@ -706,6 +758,8 @@ impl ExecCtx<'_> {
         Some(self.apply_binary(lhs, op, rhs))
     }
 
+    /// Evaluates a binary operation through the full interpreter, using short-circuit logic for
+    /// `And`/`Or`.
     fn eval_binary(&mut self, lhs: NodeId, op: BinOp, rhs: NodeId) -> Result<Val, EvalError> {
         if op == BinOp::And {
             let lhs = self.eval(lhs)?;
@@ -728,6 +782,7 @@ impl ExecCtx<'_> {
         self.apply_binary(lhs, op, rhs)
     }
 
+    /// Applies a non-short-circuit binary operator to two already-evaluated operands.
     fn apply_binary(&self, lhs: Val, op: BinOp, rhs: Val) -> Result<Val, EvalError> {
         match op {
             BinOp::Add => crate::util::add_vals(lhs, rhs),
@@ -762,6 +817,7 @@ impl ExecCtx<'_> {
         }
     }
 
+    /// Evaluates an `Object` node through the full interpreter, handling shorthand fields via `Env`.
     fn eval_object(&mut self, fields: &[PhysicalObjField]) -> Result<Val, EvalError> {
         let mut map: indexmap::IndexMap<Arc<str>, Val> =
             indexmap::IndexMap::with_capacity(fields.len());
@@ -823,6 +879,7 @@ impl ExecCtx<'_> {
         Ok(Val::obj(map))
     }
 
+    /// Evaluates an `Array` node through the full interpreter, flattening spread elements.
     fn eval_array(&mut self, elems: &[PhysicalArrayElem]) -> Result<Val, EvalError> {
         let mut out = Vec::with_capacity(elems.len());
         for elem in elems {
@@ -842,6 +899,9 @@ impl ExecCtx<'_> {
 }
 
 impl PipelineSourceResolver for ExecCtx<'_> {
+    /// Converts a `PipelinePlanSource` into a `ResolvedPipelineSource` for use by the interpreter.
+    ///
+    /// Field-chain sources are returned as `ValFieldChain`; expression sources are evaluated eagerly.
     fn resolve_pipeline_source(
         &mut self,
         source: &PipelinePlanSource,
@@ -858,6 +918,7 @@ impl PipelineSourceResolver for ExecCtx<'_> {
     }
 }
 
+/// Applies a `RootPath` step sequence to an already-materialised root `Val`.
 fn run_root_path(root: &Val, steps: &[PhysicalPathStep]) -> Val {
     let mut cur = root.clone();
     for step in steps {

@@ -1,12 +1,4 @@
-//! Miri-targeted tests covering every unsafe path in jetro-core.
-//!
-//! Run under Miri:
-//!     cargo +nightly miri test -p jetro-core --test unsafe_invariants
-//!
-//! Each test exercises one `unsafe` block from `vm.rs` /
-//! `builtins.rs`. If Miri accepts these, the documented
-//! invariants hold (no OOB write, no uninit read, no Arc layout
-//! mismatch, no UTF-8 corruption).
+
 
 use jetro_core::Jetro;
 use serde_json::{json, Value};
@@ -19,7 +11,7 @@ fn q(expr: &str, document: &Value) -> Result<Value, jetro_core::EvalError> {
     j(document.clone()).collect(expr)
 }
 
-/// Hits `ascii_fold_to_arc_str` via the StrTrimUpper fused opcode.
+
 #[test]
 fn trim_upper_fused_ascii() {
     let doc = json!(["  hello  ", "world", "  mixed CASE  "]);
@@ -144,9 +136,8 @@ fn map_split_len_sum_single_byte() {
     let out = j(doc)
         .collect(r#"$.map(@.split('-').map(len).sum())"#)
         .unwrap();
-    // "a-bb-ccc".split("-") = [a,bb,ccc] lens=[1,2,3] sum=6
-    // "x".split("-") = [x] sum=1
-    // "foo-bar".split("-") = [foo,bar] sum=6
+    
+    
     assert_eq!(out.to_string(), "[6,1,6]");
 }
 
@@ -156,8 +147,8 @@ fn map_split_len_sum_multi_byte_sep() {
     let out = j(doc)
         .collect(r#"$.map(@.split('--').map(len).sum())"#)
         .unwrap();
-    // "ab--cd" → [ab,cd] = [2,2] = 4
-    // "e--f--g" → [e,f,g] = [1,1,1] = 3
+    
+    
     assert_eq!(out.to_string(), "[4,3]");
 }
 
@@ -167,7 +158,7 @@ fn map_split_len_sum_unicode() {
     let out = j(doc)
         .collect(r#"$.map(@.split('-').map(len).sum())"#)
         .unwrap();
-    // 3 segments, each is 1 char → sum = 3
+    
     assert_eq!(out.to_string(), "[3]");
 }
 
@@ -215,7 +206,6 @@ fn empty_string_edge_cases() {
     assert_eq!(o3.to_string(), r#"[""]"#);
 }
 
-// ── Tier A: walk + schema ─────────────────────────────────────────────────
 
 #[test]
 fn walk_post_order_doubles_numbers() {
@@ -252,7 +242,7 @@ fn schema_array_unifies_items() {
     let out = j(doc).collect("$.schema()").unwrap();
     let s = out.to_string();
     assert!(s.contains(r#""type":"Array""#), "got {s}");
-    // "extra" only in second obj → optional
+    
     assert!(
         s.contains(r#""extra":{"type":"Bool","optional":true}"#)
             || s.contains(r#""extra":{"optional":true,"type":"Bool"}"#),
@@ -268,7 +258,6 @@ fn schema_mixed_scalar_array() {
     assert!(s.contains(r#""type":"Mixed""#), "got {s}");
 }
 
-// ── Tier B: explode / implode / group_shape ─────────────────────────────
 
 #[test]
 fn explode_basic() {
@@ -331,7 +320,6 @@ fn group_shape_count() {
     assert!(s.contains(r#""b":1"#), "got {s}");
 }
 
-// ── Columnar SIMD filter ─────────────────────────────────────────────────
 
 #[test]
 fn filter_intvec_gt_int_literal() {
@@ -350,7 +338,7 @@ fn filter_intvec_eq_int() {
 #[test]
 fn filter_intvec_flipped_lit_lt_current() {
     let doc = json!([1, 2, 3, 4, 5]);
-    // `2 < @` → flipped to `@ > 2`
+    
     let out = j(doc).collect(r#"$.filter(2 < @)"#).unwrap();
     assert_eq!(out.to_string(), r#"[3,4,5]"#);
 }
@@ -364,7 +352,7 @@ fn filter_floatvec_gte_float() {
 
 #[test]
 fn filter_intvec_preserves_typed_output() {
-    // After filter, sum should use the IntVec fast path (not Val::Arr).
+    
     let doc = json!([1, 2, 3, 4, 5]);
     let out = j(doc).collect(r#"$.filter(@ > 2).sum()"#).unwrap();
     assert_eq!(out.to_string(), "12");
@@ -372,8 +360,8 @@ fn filter_intvec_preserves_typed_output() {
 
 #[test]
 fn filter_non_columnar_fallback() {
-    // Homogeneous string arrays take the StrVec columnar fast path —
-    // bytewise compare vs literal, output preserves StrVec lane.
+    
+    
     let doc = json!(["a", "bb", "ccc", "dddd"]);
     let out = j(doc).collect(r#"$.filter(@ > "b")"#).unwrap();
     assert_eq!(out.to_string(), r#"["bb","ccc","dddd"]"#);
@@ -395,7 +383,7 @@ fn filter_strvec_lt_str() {
 
 #[test]
 fn filter_strvec_preserves_lane_for_sort() {
-    // After StrVec filter, downstream .sort() should still work correctly.
+    
     let doc = json!(["pear", "apple", "banana", "cherry"]);
     let out = j(doc).collect(r#"$.filter(@ > "b").sort()"#).unwrap();
     assert_eq!(out.to_string(), r#"["banana","cherry","pear"]"#);
@@ -403,7 +391,7 @@ fn filter_strvec_preserves_lane_for_sort() {
 
 #[test]
 fn filter_strvec_mixed_types_not_columnar() {
-    // Non-homogeneous array doesn't promote to StrVec — falls back to Arr path.
+    
     let doc = json!(["a", 1, "b", 2]);
     let out = j(doc).collect(r#"$.filter(@ == "a")"#).unwrap();
     assert_eq!(out.to_string(), r#"["a"]"#);
@@ -432,7 +420,7 @@ fn filter_strvec_contains() {
 
 #[test]
 fn filter_strvec_contains_empty_needle() {
-    // Empty needle should match every string.
+    
     let doc = json!(["a", "bb", "ccc"]);
     let out = j(doc).collect(r#"$.filter(@.contains(""))"#).unwrap();
     assert_eq!(out.to_string(), r#"["a","bb","ccc"]"#);
@@ -447,7 +435,7 @@ fn filter_strvec_starts_with_no_match() {
 
 #[test]
 fn filter_strvec_starts_with_needle_longer_than_item() {
-    // Guard: needle length > item length must not panic.
+    
     let doc = json!(["a", "bb", "ccc"]);
     let out = j(doc)
         .collect(r#"$.filter(@.starts_with("abcd"))"#)
@@ -478,7 +466,7 @@ fn map_strvec_trim() {
 
 #[test]
 fn map_strvec_upper_unicode_fallback() {
-    // Non-ASCII input uses std to_uppercase() path, not byte-loop.
+    
     let doc = json!(["café", "niño"]);
     let out = j(doc).collect(r#"$.map(@.upper())"#).unwrap();
     assert_eq!(out.to_string(), r#"["CAFÉ","NIÑO"]"#);
@@ -514,7 +502,7 @@ fn map_intvec_sub_lhs_flipped() {
 
 #[test]
 fn map_intvec_div_int_promotes_float() {
-    // Int / Int → Float (Div has float-returning semantics)
+    
     let doc = json!([1, 2, 4]);
     let out = j(doc).collect(r#"$.map(@ / 2)"#).unwrap();
     assert_eq!(out.to_string(), r#"[0.5,1.0,2.0]"#);
@@ -557,7 +545,7 @@ fn map_neg_floatvec() {
 
 #[test]
 fn map_intvec_mul_chain_filter() {
-    // IntVec filter → IntVec; then IntVec map → IntVec.
+    
     let doc = json!([1, 2, 3, 4, 5, 6]);
     let out = j(doc).collect(r#"$.filter(@ > 2).map(@ * 10)"#).unwrap();
     assert_eq!(out.to_string(), r#"[30,40,50,60]"#);
@@ -565,7 +553,7 @@ fn map_intvec_mul_chain_filter() {
 
 #[test]
 fn strvec_filter_then_map_chain() {
-    // StrVec path propagates through chained filter + map.
+    
     let doc = json!(["apple", "banana", "avocado", "cherry"]);
     let out = j(doc)
         .collect(r#"$.filter(@.starts_with("a")).map(@.upper())"#)
@@ -573,7 +561,6 @@ fn strvec_filter_then_map_chain() {
     assert_eq!(out.to_string(), r#"["APPLE","AVOCADO"]"#);
 }
 
-// ── Tier C/E: fanout / zip_shape / rec / trace_path ──────────────────────
 
 #[test]
 fn fanout_multiple_views() {
@@ -592,7 +579,7 @@ fn zip_shape_named_and_bare() {
 
 #[test]
 fn rec_fixpoint_cap() {
-    // keep halving until 0, then return 0 stably
+    
     let doc = json!(32);
     let out = j(doc).collect(r#"$.rec(@ / 2 if @ > 0 else 0)"#).unwrap();
     assert_eq!(out.to_string(), "0");
@@ -645,7 +632,7 @@ fn simd_json_basic_query() {
 #[cfg(feature = "simd-json")]
 #[test]
 fn simd_json_descendant_query() {
-    // Descendant queries still work when the handle was built from simd-json.
+    
     let bytes = br#"{"a":{"id":1,"sub":{"id":2}},"b":{"id":3}}"#.to_vec();
     let j = Jetro::from_bytes(bytes).unwrap();
     let ids = j.collect("$..id").unwrap();
@@ -684,7 +671,6 @@ fn compile_handle_run_on_jetro() {
     assert_eq!(j2.collect("$.n").unwrap(), json!([2]));
 }
 
-// ── has / exists / any ──────────────────────────────────────────────
 
 #[test]
 fn has_array_value() {
@@ -732,7 +718,6 @@ fn elegant_indices_via_any_and_contains() {
     assert_eq!(r, json!([1, 3]));
 }
 
-// ── streaming iter ──────────────────────────────────────────────────
 
 #[test]
 fn iter_eager_array() {
@@ -775,7 +760,6 @@ fn iter_eager_fallback_for_sort() {
     assert_eq!(xs, json!([1, 2, 3]));
 }
 
-// ── index lookup + max_by / min_by ──────────────────────────────────
 
 #[test]
 fn find_index_basic() {
@@ -840,12 +824,11 @@ fn max_by_min_by_lambda_key() {
     assert_eq!(r, json!("a"));
 }
 
-// ── window-style numeric ops ────────────────────────────────────────
 
 #[test]
 fn rolling_avg_basic() {
     let r = q("$.rolling_avg(3)", &json!([1, 2, 3, 4, 5])).unwrap();
-    // first 2 entries: null (window not full).  rest: avg.
+    
     assert_eq!(r, json!([null, null, 2.0, 3.0, 4.0]));
 }
 
@@ -898,13 +881,12 @@ fn cummax_cummin() {
 fn zscore_basic() {
     let r = q("$.zscore()", &json!([1, 2, 3, 4, 5])).unwrap();
     let arr = r.as_array().unwrap();
-    // mean=3, sd=sqrt(2).  z = (x-3)/sqrt(2).
+    
     assert!((arr[2].as_f64().unwrap() - 0.0).abs() < 1e-9);
     assert!(arr[0].as_f64().unwrap() < 0.0);
     assert!(arr[4].as_f64().unwrap() > 0.0);
 }
 
-// ── new string functions ────────────────────────────────────────────
 
 #[test]
 fn case_conversions() {
@@ -967,7 +949,6 @@ fn byte_introspection() {
     assert_eq!(bs, json!([97, 98, 99]));
 }
 
-// ── regex ───────────────────────────────────────────────────────────
 
 #[test]
 fn regex_match_and_captures() {
@@ -1074,8 +1055,8 @@ fn compile_handle_run_val_skips_value_materialise() {
 #[cfg(feature = "simd-json")]
 #[test]
 fn simd_json_lazy_tape_foundation() {
-    // SIMD ingestion retains enough source data for lazy Val materialisation.
-    // Query execution still uses the normal Val / pipeline / VM paths.
+    
+    
     let bytes = br#"{"items":[{"id":1,"name":"a"},{"id":2,"name":"b"}]}"#.to_vec();
     let j = Jetro::from_bytes(bytes).unwrap();
     let names = j.collect("$.items.map(name)").unwrap();
@@ -1108,13 +1089,13 @@ fn simd_lazy_descend_sum_min_max_count() {
 #[cfg(feature = "simd-json")]
 #[test]
 fn simd_lazy_descend_bare_collect_int_and_float() {
-    // Bare `$..k` over all-int.
+    
     let bytes = br#"{"a":[{"k":1},{"k":2},{"nested":{"k":3}}]}"#.to_vec();
     let j = Jetro::from_bytes(bytes).unwrap();
     let r = j.collect("$..k").unwrap();
     assert_eq!(r, json!([1, 2, 3]));
 
-    // Bare `$..k` over mixed int+float.
+    
     let bytes2 = br#"{"a":[{"k":1},{"k":2.5},{"nested":{"k":3}}]}"#.to_vec();
     let j2 = Jetro::from_bytes(bytes2).unwrap();
     let r2 = j2.collect("$..k").unwrap();
@@ -1144,7 +1125,7 @@ fn simd_lazy_array_filter_compound_predicate() {
         .collect(r#"$.orders.filter(status == "shipped" and total > 80).map(total).sum()"#)
         .unwrap();
     assert_eq!(s.as_i64().unwrap(), 300);
-    // 3-way AND
+    
     let n3 = j.collect(r#"$.orders.filter(status == "shipped" and priority == "high" and total >= 75).count()"#).unwrap();
     assert_eq!(n3.as_i64().unwrap(), 2);
 }
@@ -1209,12 +1190,11 @@ fn simd_lazy_array_filter_count_numeric_and_string() {
         .collect(r#"$.orders.filter(status == "shipped").count()"#)
         .unwrap();
     assert_eq!(n2.as_i64().unwrap(), 3);
-    // jetro grammar parses `field != lit` ambiguously with `!` unary;
-    // skip that variant — `!=` works elsewhere but not as the leading
-    // op in a filter predicate's first cmp position with a bare ident.
+    
+    
     let n4 = j.collect("$.orders.filter(total >= 100).len()").unwrap();
     assert_eq!(n4.as_i64().unwrap(), 2);
-    // flipped form: 100 < total
+    
     let n5 = j.collect("$.orders.filter(100 < total).count()").unwrap();
     assert_eq!(n5.as_i64().unwrap(), 1);
 }
@@ -1244,19 +1224,19 @@ fn simd_lazy_array_map_field_aggregate() {
 #[cfg(feature = "simd-json")]
 #[test]
 fn simd_lazy_array_map_field_handles_non_object_entry() {
-    // Array of mixed primitives must use the normal Val pipeline semantics.
+    
     let bytes = br#"{"items":[1,2,3]}"#.to_vec();
     let j = Jetro::from_bytes(bytes).unwrap();
-    // Whatever Val path returns is the truth — just must not panic or
-    // return something malformed from the materialized source path.
+    
+    
     let _ = j.collect("$.items.map(total)");
 }
 
 #[cfg(feature = "simd-json")]
 #[test]
 fn simd_lazy_descend_count_works_on_strings() {
-    // `$..k.count()` where k binds strings — must count every match,
-    // not silently return 0.
+    
+    
     let bytes = br#"{"a":[{"k":"x"},{"k":"y"},{"nested":{"k":"z"}}]}"#.to_vec();
     let j = Jetro::from_bytes(bytes).unwrap();
     let r = j.collect("$..k.count()").unwrap();
@@ -1268,19 +1248,19 @@ fn simd_lazy_descend_count_works_on_strings() {
 #[cfg(feature = "simd-json")]
 #[test]
 fn simd_lazy_descend_sum_handles_mixed_values() {
-    // `$..k.sum()` with a non-numeric value mixed in should produce the
-    // documented Val-path semantic and must not silently drop the string.
+    
+    
     let bytes = br#"{"a":[{"k":1},{"k":"oops"},{"k":3}]}"#.to_vec();
     let j = Jetro::from_bytes(bytes).unwrap();
-    // Whatever the Val path returns is correct; what we are checking
-    // is that lazy SIMD ingestion did not short-circuit to a wrong number.
+    
+    
     let _ = j.collect("$..k.sum()");
 }
 
 #[cfg(feature = "simd-json")]
 #[test]
 fn simd_lazy_descend_bare_non_numeric_values() {
-    // Bare `$..k` with string values.
+    
     let bytes = br#"{"a":[{"k":"hello"},{"k":"world"}]}"#.to_vec();
     let j = Jetro::from_bytes(bytes).unwrap();
     let r = j.collect("$..k").unwrap();
@@ -1290,8 +1270,8 @@ fn simd_lazy_descend_bare_non_numeric_values() {
 #[cfg(feature = "simd-json")]
 #[test]
 fn simd_lazy_unsupported_query_uses_val_semantics() {
-    // Filter on descendant uses the normal Val path and should produce the
-    // right result.
+    
+    
     let bytes = br#"{"items":[{"price":5},{"price":15},{"price":20}]}"#.to_vec();
     let j = Jetro::from_bytes(bytes).unwrap();
     let r = j.collect("$.items.filter(price > 10).map(price)").unwrap();

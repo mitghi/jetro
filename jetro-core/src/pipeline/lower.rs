@@ -1,3 +1,10 @@
+//! Lowers an `Expr` AST into a `Pipeline` IR.
+//!
+//! `Pipeline::lower` is the single entry point. It walks the expression,
+//! classifies sources, stages, and sinks, and returns `None` for any shape
+//! that cannot be represented as a linear pull chain — signalling fallback
+//! to the VM opcode path.
+
 use std::sync::Arc;
 
 use crate::builtin_registry::{pipeline_stage, BuiltinId};
@@ -11,20 +18,8 @@ use super::{
 };
 
 impl Pipeline {
-    /// Try to lower an `Expr` into a Pipeline.  Returns `None` for any
-    /// shape this Phase 1 substrate doesn't yet handle — caller falls
-    /// back to the existing opcode compilation path.
-    ///
-    /// Supported (Phase 1):
-    ///   - `$.k1.k2…kN.<stage>*.<sink>` where each `kN` is a plain Field,
-    ///     stages are zero-or-more of `filter` / `map` / `take` / `skip`,
-    ///     and the sink is `count` / `len` / `sum` / nothing (Collect).
-    ///
-    /// Not yet supported and returns `None`:
-    ///   - Any non-Root base
-    ///   - Any non-Field step before the first method (e.g. `[idx]`)
-    ///   - Lambda methods (`map(@.x + 1)` is fine; `map(lambda x: …)` is not)
-    ///   - Any unrecognised method in stage position
+    /// Attempts to lower `expr` into a `Pipeline` IR, returning `None` when the expression
+    /// shape is unsupported and the VM opcode path should be used instead.
     pub fn lower(expr: &Expr) -> Option<Pipeline> {
         let p = Self::lower_with_reason(expr);
         if trace_enabled() {
@@ -43,10 +38,14 @@ impl Pipeline {
         p.ok()
     }
 
+    /// Wraps `lower_inner` and converts `None` into an `Err` with a static reason string,
+    /// so the trace machinery can report why lowering was skipped.
     fn lower_with_reason(expr: &Expr) -> std::result::Result<Pipeline, &'static str> {
         Self::lower_inner(expr).ok_or("shape not yet supported")
     }
 
+    /// Core lowering logic: requires `expr` to be `$.<field>*.<method>*` rooted at `$`, extracts
+    /// the field-chain source, and delegates trailing steps to `lower_from_source`.
     fn lower_inner(expr: &Expr) -> Option<Pipeline> {
         use crate::ast::Step;
         let (base, steps) = match expr {
@@ -57,7 +56,7 @@ impl Pipeline {
             return None;
         }
 
-        // Find where the field-chain prefix ends and stages begin.
+        
         let mut field_end = 0;
         for s in steps {
             match s {
@@ -65,12 +64,8 @@ impl Pipeline {
                 _ => break,
             }
         }
-        // Phase 1 deliberately does not lower bare `$.<method>` shapes
-        // (no field-chain prefix) because the existing fused opcodes
-        // (MapSplitLenSum, FilterFieldCmpLitMapField, etc.) often beat
-        // a generic pull-based pipeline for those.  Field-chain prefix
-        // signals a "scan over a sub-array" intent — the pipeline's
-        // sweet spot.
+        
+        
         if field_end == 0 {
             return None;
         }
@@ -88,6 +83,8 @@ impl Pipeline {
         Self::lower_from_source(Source::FieldChain { keys }, trailing)
     }
 
+    /// Lowers `trailing` steps into a `PipelineBody` and attaches `source` to produce a complete
+    /// `Pipeline`; returns `None` when any step cannot be classified.
     pub(crate) fn lower_from_source(
         source: Source,
         trailing: &[crate::ast::Step],
@@ -95,12 +92,11 @@ impl Pipeline {
         Some(Self::lower_body_from_steps(trailing)?.with_source(source))
     }
 
+    /// Decodes `trailing` method steps into stages and a sink, runs the rewrite / planning passes,
+    /// and classifies kernels for both stages and sink sub-programs.
     pub(crate) fn lower_body_from_steps(trailing: &[crate::ast::Step]) -> Option<PipelineBody> {
-        // Decode the trailing methods into stages + a sink.
-        // Compile each filter / map sub-Expr to a Program once so
-        // Pipeline::run can reuse it per row.  Sub-programs run against
-        // the current item bound as the VM's root, so `@.field` and
-        // `@` references resolve to the row.
+        
+        
         let (stages, stage_exprs, sink) = decode_method_chain(trailing)?;
         let mut p = PipelineBody {
             stages,
@@ -110,9 +106,8 @@ impl Pipeline {
             sink_kernels: Vec::new(),
         };
         rewrite(&mut p);
-        // Phase A3 — classify per-stage sub-programs.  Per-row pull loop
-        // reads these hints to choose a specialised inline path vs the
-        // generic vm.exec fallback.  Also drives Step 3d Phase 3 reorder.
+        
+        
         let classify_kernels = |stages: &[Stage]| -> Vec<BodyKernel> {
             stages
                 .iter()
@@ -125,10 +120,7 @@ impl Pipeline {
         };
         let kernels = classify_kernels(&p.stages);
 
-        // Step 3d planning — Phase 2/3/4 transforms with kernel-aware
-        // cost/selectivity.  Result.stages / Result.sink replace the
-        // pre-plan values.  Phase 1 + Phase 5 (demand prop, strategy
-        // selection) re-runs at exec time on the final shape.
+        
         let plan_result = plan_with_exprs(
             p.stages.clone(),
             p.stage_exprs.clone(),
@@ -139,9 +131,7 @@ impl Pipeline {
         p.stage_exprs = plan_result.stage_exprs;
         p.sink = plan_result.sink;
 
-        // Re-classify post-plan since Phase 4 merges may have produced
-        // new sub-programs (e.g. Map+Map → field-chain-Map), or demand
-        // planning may have absorbed a projection into a numeric sink.
+        
         p.stage_kernels = classify_kernels(&p.stages);
         p.sink_kernels = p
             .sink
@@ -155,6 +145,8 @@ impl Pipeline {
         Some(p)
     }
 
+    /// Returns `true` when `step` is a method call that may start a pipeline from a receiver
+    /// value (rather than requiring a `$.field` source prefix).
     pub(crate) fn is_receiver_pipeline_start(step: &crate::ast::Step) -> bool {
         use crate::ast::Step;
 
@@ -165,6 +157,8 @@ impl Pipeline {
     }
 }
 
+/// Returns `true` when a method named `name` with `arity` arguments can serve as the first
+/// step of a receiver-based pipeline (i.e. requires no field-chain source prefix).
 fn is_receiver_pipeline_start_method(name: &str, arity: usize) -> bool {
     let method = BuiltinMethod::from_name(name);
     if method == BuiltinMethod::Unknown {
@@ -184,16 +178,9 @@ fn is_receiver_pipeline_start_method(name: &str, arity: usize) -> bool {
     }
 }
 
-/// Step 3d-extension (A2): try to decode the body of a Map(...) call as
-/// its own pipeline Plan.  Body must be `Expr::Chain(Expr::Current, [...])`
-/// with at least one trailing method or field access.  Field-chain
-/// prefix becomes a leading `Stage::Map(field-walk)`; trailing methods
-/// decode via the shared `decode_method_chain` helper.  Inner Plan runs
-/// `plan_with_kernels` so it picks IndexedDispatch / BarrierMaterialise /
-/// EarlyExit / DoneTerminating / PullLoop strategies recursively.
-///
-/// Returns None when the body is opaque (lambda or side effect) — caller
-/// falls back to `Stage::Map(opaque_program)`.
+
+/// Tries to decode a `map(expr)` argument as a nested pipeline `Plan`, enabling the
+/// `CompiledMap` stage optimisation for chains like `@.field.filter(…).sum()`.
 pub(super) fn try_decode_map_body(arg: &crate::ast::Arg) -> Option<Plan> {
     use crate::ast::{Arg, Step};
     let expr = match arg {
@@ -208,8 +195,7 @@ pub(super) fn try_decode_map_body(arg: &crate::ast::Arg) -> Option<Plan> {
         return None;
     }
 
-    // Field-chain prefix walks @.a.b.c → seed.a.b.c.  Encoded as a
-    // leading Map stage whose body is the FieldChain program over @.
+    
     let mut field_end = 0;
     for s in steps {
         match s {
@@ -218,16 +204,16 @@ pub(super) fn try_decode_map_body(arg: &crate::ast::Arg) -> Option<Plan> {
         }
     }
     let trailing = &steps[field_end..];
-    // Require at least one trailing method — pure field access alone
-    // is what plain Stage::Map(@.a.b.c) already handles.
+    
+    
     if trailing.is_empty() {
         return None;
     }
 
     let mut stages: Vec<Stage> = Vec::new();
     if field_end > 0 {
-        // Build a sub-program `[PushCurrent, FieldChain([...])]` that
-        // walks the prefix from the seed.
+        
+        
         let keys: Arc<[Arc<str>]> = steps[..field_end]
             .iter()
             .map(|s| match s {
@@ -254,8 +240,7 @@ pub(super) fn try_decode_map_body(arg: &crate::ast::Arg) -> Option<Plan> {
     let (mut more_stages, _more_exprs, sink) = decode_method_chain(trailing)?;
     stages.append(&mut more_stages);
 
-    // Run the same planning the outer pipeline does.  Kernel
-    // classification feeds Phase 3 reorder + Phase 5 strategy select.
+    
     let kernels: Vec<BodyKernel> = stages
         .iter()
         .map(|s| {
@@ -267,10 +252,9 @@ pub(super) fn try_decode_map_body(arg: &crate::ast::Arg) -> Option<Plan> {
     Some(plan_with_kernels(stages, &kernels, sink))
 }
 
-/// Run a `Plan` against a single seed Val (Step 3d-extension A2).  Used
-/// by `Stage::CompiledMap` per outer element.  Wraps seed as a single-
-/// element Val::Arr and runs through a synth Pipeline so all strategy
-/// selection (IndexedDispatch / EarlyExit / etc.) applies recursively.
+
+/// Wraps `seed` in a single-element receiver pipeline backed by `plan` and executes it,
+/// used to evaluate a `CompiledMap` stage body against one element at a time.
 pub(super) fn run_compiled_map(plan: &Plan, seed: Val) -> Result<Val, EvalError> {
     let synth = Pipeline {
         source: Source::Receiver(Val::arr(vec![seed])),
@@ -283,10 +267,9 @@ pub(super) fn run_compiled_map(plan: &Plan, seed: Val) -> Result<Val, EvalError>
     synth.run(&Val::Null)
 }
 
-/// Decode a slice of `Step::Method(...)` into pipeline `(stages, sink)`.
-/// Shared by top-level `lower_inner` and Step 3d-extension (A2)
-/// recursive sub-pipeline planning for `Map(@.<chain>)` bodies.
-/// Returns `None` if any method shape isn't recognised.
+
+/// Iterates `trailing` method steps, classifying each as a builtin stage, a registry-lowered
+/// stage, or a sink; returns `None` when any step is a non-method field access or unrecognised.
 fn decode_method_chain(
     trailing: &[crate::ast::Step],
 ) -> Option<(Vec<Stage>, Vec<Option<Arc<Expr>>>, Sink)> {
@@ -321,25 +304,8 @@ fn decode_method_chain(
     Some((stages, stage_exprs, sink))
 }
 
-/// Apply algebraic rewrite rules until fixed point or a fuel limit
-/// expires.  Rules listed in `project_pipeline_ir.md`; this function
-/// implements the subset that operates on the currently-supported
-/// Stage / Sink set (`Filter` / `Map` / `Take` / `Skip` /
-/// `Collect` / `Count` / `Sum` and the fused sinks).
-///
-/// Rules NOT yet implemented (require Stage variants the lowering
-/// + execution don't yet emit):
-///   `Sort ∘ Take → TopK`            (no Sort stage)
-///   `Reverse ∘ Reverse → id`        (no Reverse stage)
-///   `UniqueBy(k) ∘ UniqueBy(k) → UniqueBy(k)`
-///   `Pick(a) ∘ Pick(b) → Pick(a ∩ b)`
-///   `DeepScan(k) ∘ Filter(p on k) → DeepScanFiltered(k, p)`
-///   `DeepScan(k) ∘ Pick({k}) → DeepScan(k)`
-///   `Filter(p) ∘ Map(f) → Map(f) ∘ Filter(p ∘ f⁻¹)`  (needs SSA dep)
-///
-/// Each rule is monotonic — strictly reduces stage count or rewrites
-/// to a structurally smaller form — so a fuel limit of 16 protects
-/// against pathological loops without affecting correctness.
+
+/// Applies `rewrite_step` repeatedly (up to 16 times) until no further rewrites are possible.
 fn rewrite(p: &mut PipelineBody) {
     let mut fuel = 16usize;
     while fuel > 0 {
@@ -351,29 +317,14 @@ fn rewrite(p: &mut PipelineBody) {
     }
 }
 
-/// One round of the rewrite loop.  Returns `true` if any rule fired,
-/// `false` if the pipeline is at a local fixed point.
-///
-/// Most algebraic rules deleted in the Step 1+2 mop-up — Step 3d
-/// `plan_with_kernels()` (called from `lower_with_reason`) now subsumes:
-///   - Filter(true) → identity                     (Phase 4 const-fold)
-///   - Skip+Skip / Take+Take / Reverse∘Reverse     (Phase 4)
-///   - Sort∘Sort / UniqueBy∘UniqueBy idempotence   (Phase 4)
-///   - Map∘Count drop                              (Phase 2)
-///   - Filter run reorder by selectivity           (Phase 3)
-///
-/// What remains here:
-///   - Filter(false) → empty pipeline.  Phase 4 doesn't have access to
-///     the Sink to swap to its identity-element form, so this stays.
-///   - Map(f) ∘ Filter(g) ∘ Filter(h) etc.: the kernel-aware Filter+
-///     Filter merge via `Opcode::AndOp` and the Map+Map field-chain
-///     fusion — both build new `vm::Program`s, which the Phase 4
-///     stage-only API can't do without a wider rewrite.  Kept here.
-///   - Map ∘ Take pushdown: still strictly correct + a perf win, kept.
+
+/// Applies one rewrite to `p` if possible, returning `true` when a rewrite was made so the
+/// caller can loop; handles: const-false short-circuit, adjacent map fusion, adjacent filter
+/// fusion, and map/take commutation.
 fn rewrite_step(p: &mut PipelineBody) -> bool {
     use crate::vm::Opcode;
 
-    // Filter(false) → empty pipeline.  Filter(true) handled by Phase 4.
+    
     let mut const_false_at: Option<usize> = None;
     for (i, s) in p.stages.iter().enumerate() {
         if let Stage::Filter(prog, _) = s {
@@ -384,17 +335,14 @@ fn rewrite_step(p: &mut PipelineBody) -> bool {
         }
     }
     if const_false_at.is_some() {
-        // Empty input: existing accumulators in run() yield Int(0) /
-        // Float(0.0) / Val::arr([]) — clearing stages suffices.
+        
+        
         p.stages.clear();
         p.stage_exprs.clear();
         return true;
     }
 
-    // Filter+Filter → AndOp-merged Filter (kernel-aware vm::Program build).
-    // Map+Map → FieldChain Map (kernel-aware vm::Program build).
-    // Both construct new programs — keep here until Phase 4 gains a
-    // program-building API.
+    
     for i in 0..p.stages.len().saturating_sub(1) {
         match (&p.stages[i], &p.stages[i + 1]) {
             (Stage::Map(a_prog, _), Stage::Map(b_prog, _)) => {
@@ -458,8 +406,7 @@ fn rewrite_step(p: &mut PipelineBody) -> bool {
         }
     }
 
-    // Pushdown: Map(f) ∘ Take(n) → Take(n) ∘ Map(f).
-    // Strict perf win — composed exec runs map only n times.
+    
     for i in 0..p.stages.len().saturating_sub(1) {
         if matches!(&p.stages[i], Stage::Map(_, _))
             && matches!(&p.stages[i + 1], Stage::Take(_, _, _))
@@ -473,9 +420,9 @@ fn rewrite_step(p: &mut PipelineBody) -> bool {
     false
 }
 
-/// If `prog` evaluates to a constant boolean independent of `@`,
-/// return the literal value.  Currently matches the trivial shape
-/// `[PushBool(b)]`; future SSA work could constant-fold larger preds.
+
+/// Returns `Some(b)` when `prog` is a single `PushBool(b)` opcode, used to detect
+/// constant-true/false filter stages.
 fn prog_const_bool(prog: &crate::vm::Program) -> Option<bool> {
     use crate::vm::Opcode;
     let ops = prog.ops.as_ref();
@@ -488,12 +435,9 @@ fn prog_const_bool(prog: &crate::vm::Program) -> Option<bool> {
     }
 }
 
-/// Compile a `.filter(arg)` / `.map(arg)` sub-expression into a `Program`
-/// the VM can run against a row's `@`. The argument's expression is
-/// wrapped so that bare-ident shorthand (`map(total)`) becomes
-/// `@.total` for evaluation against the current row. Runtime adapter
-/// helpers apply the same rule for non-pipeline calls, but the pipeline
-/// needs an explicit bytecode body here.
+
+/// Compiles a positional argument expression into a VM `Program`, rewriting bare `Ident` nodes
+/// into `@.<ident>` field accesses so the program runs against the current element.
 pub(super) fn compile_subexpr(arg: &crate::ast::Arg) -> Option<Arc<crate::vm::Program>> {
     use crate::ast::{Arg, Expr, Step};
     let inner = match arg {
@@ -501,16 +445,18 @@ pub(super) fn compile_subexpr(arg: &crate::ast::Arg) -> Option<Arc<crate::vm::Pr
         _ => return None,
     };
     let rooted: Expr = match inner {
-        // Bare ident `total` -> `@.total`
+        
         Expr::Ident(name) => Expr::Chain(Box::new(Expr::Current), vec![Step::Field(name.clone())]),
-        // `@...` chains: keep base = Current, accept as-is.
+        
         Expr::Chain(base, _) if matches!(base.as_ref(), Expr::Current) => inner.clone(),
-        // Anything else: wrap as-is; VM resolves `@` via Current refs.
+        
         other => other.clone(),
     };
     Some(Arc::new(crate::vm::Compiler::compile(&rooted, "")))
 }
 
+/// Compiles a sort-key argument (which may be `UnaryNeg`-wrapped for descending order) into a
+/// `SortSpec` paired with the preserved `Arc<Expr>` for the demand optimiser.
 pub(super) fn compile_sort_spec(arg: &crate::ast::Arg) -> Option<(SortSpec, Option<Arc<Expr>>)> {
     use crate::ast::{Arg, Expr};
     let expr = match arg {
@@ -528,6 +474,8 @@ pub(super) fn compile_sort_spec(arg: &crate::ast::Arg) -> Option<(SortSpec, Opti
     ))
 }
 
+/// Extracts and wraps the inner `Expr` from a positional argument, or returns `None` for
+/// named arguments.
 pub(super) fn arg_expr(arg: &crate::ast::Arg) -> Option<Arc<Expr>> {
     match arg {
         crate::ast::Arg::Pos(e) => Some(Arc::new(e.clone())),

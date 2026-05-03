@@ -1,25 +1,44 @@
+//! Per-element control-flow enum for the view-pipeline stage loop.
+//! Mirrors `StageFlow` from the `Val` pipeline path but parameterised
+//! over the `ValueView` type to stay in the borrowed domain.
+
 use std::collections::HashSet;
 
 use crate::{pipeline, value_view::ValueView};
 
 use super::key::ViewKey;
 
+/// Per-element control flow for the view-domain stage loop, parameterised by
+/// the concrete `ValueView` type `V` to avoid materialisation.
 pub(super) enum ViewStageFlow<V> {
+    /// The item passed the stage; carry it forward to the next stage with the
+    /// (possibly transformed) view.
     Keep(V),
+    /// The item was rejected by the stage (e.g. filter predicate was false);
+    /// skip to the next source row.
     Drop,
+    /// A limit condition was reached; stop iterating entirely.
     Stop,
 }
 
+/// Mutable per-stage state carried across successive rows for stateful view
+/// stages like `Take`, `Skip`, `DropWhile`, and `Distinct`.
 #[derive(Default)]
 pub(super) enum ViewStageState {
+    /// Initial state before any row is processed.
     #[default]
     Empty,
+    /// A monotonically advancing counter, used by `Skip` and `Take`.
     Counter(usize),
+    /// A boolean latch, used by `DropWhile` to track when the prefix ends.
     Flag(bool),
+    /// A set of seen keys, used by `Distinct` to filter duplicate rows.
     Keys(HashSet<ViewKey>),
 }
 
 impl ViewStageState {
+    /// Returns a mutable reference to the inner counter, initialising to `0`
+    /// the first time it is accessed.
     fn counter(&mut self) -> &mut usize {
         if !matches!(self, Self::Counter(_)) {
             *self = Self::Counter(0);
@@ -30,6 +49,8 @@ impl ViewStageState {
         }
     }
 
+    /// Returns a mutable reference to the inner `HashSet<ViewKey>`, initialising
+    /// to an empty set the first time it is accessed.
     fn keys(&mut self) -> &mut HashSet<ViewKey> {
         if !matches!(self, Self::Keys(_)) {
             *self = Self::Keys(HashSet::new());
@@ -40,6 +61,8 @@ impl ViewStageState {
         }
     }
 
+    /// Returns a mutable reference to the inner boolean flag, initialising to
+    /// `false` the first time it is accessed.
     fn flag(&mut self) -> &mut bool {
         if !matches!(self, Self::Flag(_)) {
             *self = Self::Flag(false);
@@ -51,6 +74,9 @@ impl ViewStageState {
     }
 }
 
+/// Applies a single view-domain stage to `item`, returning the appropriate
+/// `ViewStageFlow`. Returns `None` when the stage requires materialisation
+/// (e.g. `KeyedReduce` or `FlatMap`) and cannot be handled here.
 pub(super) fn apply_stage<'a, V>(
     item: V,
     stage: pipeline::ViewStageCapability,

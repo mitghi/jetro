@@ -1,5 +1,11 @@
+//! String-manipulation helpers shared by builtin implementations.
+//! Utility functions for case conversion, base64, and string formatting
+//! that would be noise inside the large `builtins.rs` dispatch table.
+
 use crate::value::Val;
 
+/// Split a camelCase, snake_case, or kebab-case string into lowercase words.
+/// Used by case-conversion builtins such as `snake_case` and `camel_case`.
 pub(crate) fn split_words_lower(s: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut cur = String::new();
@@ -27,6 +33,8 @@ pub(crate) fn split_words_lower(s: &str) -> Vec<String> {
     out
 }
 
+/// Append `p` to `out` with its first Unicode character uppercased.
+/// Used by `PascalCase` and `TitleCase` builtins.
 pub(crate) fn upper_first_into(p: &str, out: &mut String) {
     let mut chars = p.chars();
     if let Some(f) = chars.next() {
@@ -37,6 +45,7 @@ pub(crate) fn upper_first_into(p: &str, out: &mut String) {
     }
 }
 
+/// Encode a byte slice to a standard Base64 string with `=` padding.
 pub(crate) fn base64_encode(bytes: &[u8]) -> String {
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
@@ -71,6 +80,8 @@ pub(crate) fn base64_encode(bytes: &[u8]) -> String {
     out
 }
 
+/// Decode a Base64 string (with optional `=` padding) to raw bytes,
+/// returning an error message if any character is invalid.
 pub(crate) fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
     const DECODE: [i8; 128] = {
         let mut t = [-1i8; 128];
@@ -113,6 +124,8 @@ pub(crate) fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
+/// Format a single `Val` as a CSV cell, quoting and escaping if the value
+/// contains the separator, double quotes, or newlines.
 #[inline]
 fn csv_cell(v: &Val, sep: &str) -> String {
     use crate::util::val_to_string;
@@ -125,6 +138,8 @@ fn csv_cell(v: &Val, sep: &str) -> String {
     }
 }
 
+/// Serialize a `Val` to CSV text using `sep` as the field separator.
+/// Arrays of arrays become multi-row CSV; arrays of objects emit object values.
 pub(crate) fn csv_emit(val: &Val, sep: &str) -> String {
     match val {
         Val::Arr(rows) => rows
@@ -153,11 +168,15 @@ pub(crate) fn csv_emit(val: &Val, sep: &str) -> String {
     }
 }
 
+// Per-thread cache that maps pattern strings to compiled `Regex` objects,
+// avoiding repeated compilation for the same pattern across builtin calls.
 thread_local! {
     static REGEX_CACHE: std::cell::RefCell<std::collections::HashMap<String, std::sync::Arc<regex::Regex>>>
         = std::cell::RefCell::new(std::collections::HashMap::with_capacity(32));
 }
 
+/// Compile `pat` into a `Regex`, returning a cached `Arc` clone on subsequent
+/// calls with the same pattern. Returns an error string if the pattern is invalid.
 pub(crate) fn compile_regex(pat: &str) -> Result<std::sync::Arc<regex::Regex>, String> {
     REGEX_CACHE.with(|cell| {
         let mut m = cell.borrow_mut();

@@ -1,52 +1,24 @@
 //! Jetro core — parser, compiler, and VM for the Jetro JSON query language.
 //!
-//! This crate is storage-free.  For the embedded B+ tree store, named
-//! expressions, joins, and [`Session`](../jetrodb/struct.Session.html),
-//! depend on the sibling `jetrodb` crate, or pull the umbrella `jetro` crate
-//! which re-exports both.
-//!
-//! # Architecture
+//! # Execution path
 //!
 //! ```text
-//!   source text
-//!       │
-//!       ▼
-//!   parser.rs  ── pest grammar → [ast::Expr] tree
-//!       │
-//!       ▼
-//!   planner.rs              ── classify query shape
-//!       │                       ├─ Pipeline IR for streamable chains
-//!       │                       └─ VM fallback for the general language
-//!       ▼
-//!   vm::Compiler::emit      ── Expr → Vec<Opcode>
-//!       │
-//!       ▼
-//!   vm::Compiler::optimize  ── peephole passes (root_chain, filter/count,
-//!                              filter/map fusion, strength reduction,
-//!                              constant folding, nullness-driven specialisation)
-//!       │
-//!       ▼
-//!   Compiler::compile runs:
-//!       • AST rewrite: reorder_and_operands        (selectivity-based)
-//!       • post-pass  : analysis::dedup_subprograms (CSE on Arc<Program>)
-//!       │
-//!       ▼
-//!   vm::VM::execute          ── scalar stack machine fallback with
-//!                                thread-local compile/path caches.
+//! source text
+//!   │  parser::parse()      → Expr AST
+//!   │  planner::plan_query()→ QueryPlan (physical IR)
+//!   │  physical_eval::run() → dispatches to:
+//!   │    StructuralIndex backend  (jetro-experimental bitmap)
+//!   │    ViewPipeline backend     (borrowed tape/Val navigation)
+//!   │    Pipeline backend         (pull-based composed stages)
+//!   └─  VM fallback               (bytecode stack machine)
 //! ```
 //!
 //! # Quick start
 //!
 //! ```rust
 //! use jetro_core::Jetro;
-//!
-//! let j = Jetro::from_bytes(br#"{"store":{"books":[
-//!   {"title":"Dune","price":12.99},
-//!   {"title":"Foundation","price":9.99}
-//! ]}}"#.to_vec()).unwrap();
-//!
-//! let count = j.collect("$.store.books.len()").unwrap();
-//! assert_eq!(count, serde_json::json!(2));
+//! let j = Jetro::from_bytes(br#"{"books":[{"price":12}]}"#.to_vec()).unwrap();
+//! assert_eq!(j.collect("$.books.len()").unwrap(), serde_json::json!(1));
 //! ```
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -91,9 +63,7 @@ pub use context::EvalError;
 use parser::ParseError;
 use vm::VM;
 
-// ── Error ─────────────────────────────────────────────────────────────────────
 
-/// Query-side error type used by direct VM test helpers.
 #[cfg(test)]
 #[derive(Debug)]
 pub(crate) enum Error {
@@ -133,21 +103,16 @@ impl From<EvalError> for Error {
     }
 }
 
-// ── Jetro ─────────────────────────────────────────────────────────────────────
 
-// Thread-local VM with lazy init.  `VM::new()` allocates compile/path
-// caches — tiny but not free; deferring until first use saves ~100-200 µs
-// of cold-start fixed cost when a thread spins up but never calls
-// `collect()`.  `OnceCell<RefCell<VM>>` defers; `with_vm` materialises
-// on first access.
+// Thread-local VM, constructed lazily on first `collect()` call.
+// Thread-local avoids a Mutex and lets compile/path caches accumulate.
 thread_local! {
     static THREAD_VM: OnceCell<RefCell<VM>> = const { OnceCell::new() };
 }
 
-/// Borrow the thread-local `VM` lazily.  Constructs the VM on first
-/// access in the current thread; subsequent calls reuse it.  All
-/// existing `with_vm(|cell| ...)` callers route through this
-/// adapter so the closure still receives `&RefCell<VM>`.
+/// Borrow the thread-local `VM`, constructing it on first access.
+/// All `Jetro::collect` calls on the same thread share one `VM` so that
+/// compile and path-resolution caches accumulate across queries.
 fn with_vm<F, R>(f: F) -> R
 where
     F: FnOnce(&RefCell<VM>) -> R,
@@ -158,59 +123,59 @@ where
     })
 }
 
-/// Primary entry point for evaluating Jetro expressions.
-///
-/// Holds a JSON document and evaluates expressions against it.  Internally
-/// delegates to a thread-local [`VM`] so the compile cache and resolution
-/// cache accumulate over the lifetime of the thread.
+
+/// Primary entry point. Holds a JSON document and evaluates expressions against
+/// it. Lazy fields (`root_val`, `tape`, `structural_index`, `objvec_cache`)
+/// are populated on first use so callers only pay for the representations a
+/// particular query actually needs.
 pub struct Jetro {
+    /// The `serde_json::Value` root document; unused when `simd-json` is enabled
+    /// (the tape is the authoritative source in that case).
     document: Value,
-    /// Cached `Val` tree — built on first `collect()` and reused across
-    /// subsequent calls, amortising the `Val::from(&Value)` walk.
+    /// Cached `Val` tree — built once and reused across `collect()` calls.
     root_val: OnceCell<Val>,
-    /// Retained JSON source bytes when the caller built via
-    /// [`Jetro::from_bytes`]. Enables lazy
-    /// materialisation without requiring callers to keep their input buffer
-    /// alive.
+    /// Retained raw bytes for lazy tape and structural-index materialisation.
     raw_bytes: Option<Arc<[u8]>>,
-    /// Phase-6 tape lane — lazily parsed from `raw_bytes` on first
-    /// `lazy_tape()` access.  Defers the simd-json `to_tape` cost
-    /// (~5-7 ms / MB) until a query needs the tape.
+
+    /// Lazily parsed simd-json tape; `Err` is cached to avoid re-parsing after failure.
     #[cfg(feature = "simd-json")]
     tape: OnceCell<std::result::Result<Arc<crate::strref::TapeData>, String>>,
+    /// Unused placeholder so the field name is consistent regardless of features.
     #[cfg(not(feature = "simd-json"))]
     #[allow(dead_code)]
     tape: OnceCell<()>,
-    /// Byte structural sidecar from `jetro-experimental`.  Built only when
-    /// the planner selects a structural backend node, so normal tape/Val paths
-    /// do not pay the key-bitmap/index cost.
+
+    /// Lazily built bitmap structural index for accelerated key-presence queries.
     structural_index:
         OnceCell<std::result::Result<Arc<jetro_experimental::StructuralIndex>, String>>,
-    /// Memoised ObjVec promotions, keyed by the source `Arc<Vec<Val>>`'s
-    /// pointer identity.  When a Pipeline collects a uniform-shape array
-    /// of objects, the first call probes + builds an `ObjVecData`; all
-    /// subsequent calls (across queries, across iterations) reuse the
-    /// cached columnar layout.  Cost amortised across the lifetime of
-    /// the Jetro handle.
+
+    /// Per-document cache from `Arc<Vec<Val>>` pointer addresses to promoted
+    /// `ObjVecData` columnar representations; keyed by pointer to avoid re-promotion.
     pub(crate) objvec_cache:
         std::sync::Mutex<std::collections::HashMap<usize, Arc<crate::value::ObjVecData>>>,
 }
 
-/// Reusable query engine for evaluating many expressions over many documents.
-///
-/// Unlike [`Jetro::collect`], this owns an explicit physical-plan cache. Use it
-/// when the same process evaluates repeated expressions against many `Jetro`
-/// documents and you want parse/lower/compile work amortised by this object,
-/// not hidden in thread-local state.
+
+/// Long-lived multi-document query engine with an explicit plan cache.
+/// Use when the same process evaluates many expressions over many documents —
+/// parse/lower/compile work is amortised by this object, not hidden in
+/// thread-local state.
 pub struct JetroEngine {
+    /// Maps `"<context_key>\0<expr>"` to compiled `QueryPlan`; evicted wholesale when full.
     plan_cache: Mutex<HashMap<String, physical::QueryPlan>>,
+    /// Maximum number of entries before the cache is cleared; 0 disables caching.
     plan_cache_limit: usize,
+    /// The shared `VM` used by all `collect*` calls on this engine instance.
     vm: Mutex<VM>,
 }
 
+/// Error returned by `JetroEngine::collect_bytes` and similar methods that
+/// may fail during JSON parsing or during expression evaluation.
 #[derive(Debug)]
 pub enum JetroEngineError {
+    /// JSON parsing failed before evaluation could begin.
     Json(serde_json::Error),
+    /// Expression evaluation failed (the JSON was valid but the query errored).
     Eval(EvalError),
 }
 
@@ -251,12 +216,16 @@ impl Default for JetroEngine {
 }
 
 impl JetroEngine {
+    /// Default maximum plan-cache size; the cache is cleared wholesale when reached.
     const DEFAULT_PLAN_CACHE_LIMIT: usize = 256;
 
+    /// Create a `JetroEngine` with the default plan-cache limit of 256 entries.
     pub fn new() -> Self {
         Self::with_plan_cache_limit(Self::DEFAULT_PLAN_CACHE_LIMIT)
     }
 
+    /// Create a `JetroEngine` with an explicit plan-cache capacity.
+    /// Set `plan_cache_limit` to 0 to disable caching entirely.
     pub fn with_plan_cache_limit(plan_cache_limit: usize) -> Self {
         Self {
             plan_cache: Mutex::new(HashMap::new()),
@@ -265,10 +234,13 @@ impl JetroEngine {
         }
     }
 
+    /// Discard all cached query plans, forcing re-compilation on the next call.
     pub fn clear_cache(&self) {
         self.plan_cache.lock().expect("plan cache poisoned").clear();
     }
 
+    /// Evaluate a Jetro expression against an already-constructed `Jetro` document,
+    /// using the engine's shared plan cache and `VM`.
     pub fn collect<S: AsRef<str>>(
         &self,
         document: &Jetro,
@@ -279,6 +251,7 @@ impl JetroEngine {
         executor::collect_plan_json_with_vm(document, &plan, &mut vm)
     }
 
+    /// Convenience wrapper: wrap a `serde_json::Value` in a `Jetro` and evaluate `expr`.
     pub fn collect_value<S: AsRef<str>>(
         &self,
         document: Value,
@@ -288,6 +261,8 @@ impl JetroEngine {
         self.collect(&document, expr)
     }
 
+    /// Parse raw JSON bytes into a `Jetro` document and evaluate `expr`,
+    /// returning a `JetroEngineError` on either parse or evaluation failure.
     pub fn collect_bytes<S: AsRef<str>>(
         &self,
         bytes: Vec<u8>,
@@ -297,6 +272,8 @@ impl JetroEngine {
         Ok(self.collect(&document, expr)?)
     }
 
+    /// Look up a compiled `QueryPlan` by expression string and planning context,
+    /// compiling and inserting it if not already cached; evicts the whole cache if full.
     fn cached_plan(&self, expr: &str, context: planner::PlanningContext) -> physical::QueryPlan {
         let mut cache = self.plan_cache.lock().expect("plan cache poisoned");
         let cache_key = format!("{}\0{}", context.cache_key(), expr);
@@ -322,11 +299,8 @@ impl pipeline::PipelineData for Jetro {
 }
 
 impl Jetro {
-    /// Lazily parse raw_bytes into a TapeData on first access.  Cached
-    /// in `tape: OnceCell<Arc<TapeData>>`.  Returns None when no raw
-    /// bytes available (handle built from an in-memory serde_json::Value in tests).
-    /// Cost: ~5-7 ms / MB on first call (simd-json `to_tape` + node walk
-    /// + Arc clone).  Subsequent calls return the cached Arc.
+    /// Return a reference to the lazily parsed simd-json `TapeData`, parsing raw bytes
+    /// on first access. Returns `Ok(None)` when no raw bytes are stored.
     #[cfg(feature = "simd-json")]
     pub(crate) fn lazy_tape(
         &self,
@@ -351,14 +325,8 @@ impl Jetro {
             .map_err(|err| EvalError(format!("Invalid JSON: {err}")))
     }
 
-    /// Memoised ObjVec promotion.  First call probes the array shape and
-    /// builds a columnar ObjVecData; subsequent calls (same Arc<Vec<Val>>
-    /// pointer) return the cached layout.  Cache key is the Vec ptr —
-    /// safe because `Arc<Vec<Val>>` is immutable in our model.
-    ///
-    /// Cost: O(N × K) on first miss, O(1) on hit.  Pipeline calls this
-    /// once per source array per Jetro lifetime; thereafter every
-    /// columnar slot kernel reads slices directly.
+    /// Look up or build an `ObjVecData` columnar representation for the given
+    /// `Arc<Vec<Val>>` array, caching the result by pointer address.
     pub(crate) fn get_or_promote_objvec(
         &self,
         arr: &Arc<Vec<Val>>,
@@ -376,6 +344,7 @@ impl Jetro {
         Some(promoted)
     }
 
+    /// Internal constructor that wraps a `serde_json::Value` without raw bytes.
     pub(crate) fn new(document: Value) -> Self {
         Self {
             document,
@@ -387,13 +356,12 @@ impl Jetro {
         }
     }
 
-    /// Parse JSON bytes and retain them for lazy materialisation.
+    /// Parse raw JSON bytes and build a `Jetro` query handle.
+    /// When the `simd-json` feature is enabled the bytes are not parsed eagerly;
+    /// the tape is built lazily on the first query that needs it.
     pub fn from_bytes(bytes: Vec<u8>) -> std::result::Result<Self, serde_json::Error> {
-        // Cold-start path: with simd-json enabled, keep bytes only. The
-        // executor plans first, then asks for tape or Val only if the selected
-        // representation needs it. This keeps representation choice
-        // demand-driven instead of paying a full parse before the expression is
-        // known. Parse errors surface from `collect`.
+        
+        
         #[cfg(feature = "simd-json")]
         {
             return Ok(Self {
@@ -419,10 +387,14 @@ impl Jetro {
         }
     }
 
+    /// Return the raw JSON byte slice if this handle was constructed from bytes,
+    /// or `None` if it was constructed from a `serde_json::Value`.
     pub(crate) fn raw_bytes(&self) -> Option<&[u8]> {
         self.raw_bytes.as_deref()
     }
 
+    /// Return a reference to the lazily built `StructuralIndex` for key-presence
+    /// queries, constructing it from raw bytes on first access if available.
     pub(crate) fn lazy_structural_index(
         &self,
     ) -> std::result::Result<Option<&Arc<jetro_experimental::StructuralIndex>>, EvalError> {
@@ -450,6 +422,8 @@ impl Jetro {
             .map_err(|err| EvalError(format!("Invalid JSON: {err}")))
     }
 
+    /// Return the root `Val` for the document, building and caching it from the
+    /// tape (simd-json) or from the `serde_json::Value` on first access.
     pub(crate) fn root_val(&self) -> std::result::Result<Val, EvalError> {
         if let Some(root) = self.root_val.get() {
             return Ok(root.clone());
@@ -472,6 +446,8 @@ impl Jetro {
         Ok(self.root_val.get().expect("root val initialized").clone())
     }
 
+    /// Return `true` if the `Val` tree has already been materialised; used in
+    /// tests to assert that lazy evaluation is working correctly.
     #[cfg(test)]
     pub(crate) fn root_val_is_materialized(&self) -> bool {
         self.root_val.get().is_some()
@@ -503,14 +479,19 @@ impl Jetro {
             .unwrap_or(0)
     }
 
-    /// Evaluate `expr` against the document. Routes through the planner and
-    /// then either Pipeline IR or the thread-local VM.
+    /// Evaluate a Jetro expression against this document and return the result
+    /// as a `serde_json::Value`. Uses the thread-local `VM` with compile and
+    /// path-resolution caches for repeated calls.
     pub fn collect<S: AsRef<str>>(&self, expr: S) -> std::result::Result<Value, EvalError> {
         executor::collect_json(self, expr.as_ref())
     }
 }
 
+/// Wrap an existing `serde_json::Value` in a `Jetro` handle without raw bytes.
+/// Prefer `Jetro::from_bytes` when you have the original JSON source, as it
+/// enables the tape and structural-index lazy backends.
 impl From<Value> for Jetro {
+    /// Convert a `serde_json::Value` into a `Jetro` query handle.
     fn from(v: Value) -> Self {
         Self::new(v)
     }

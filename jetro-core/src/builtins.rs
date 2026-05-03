@@ -1,23 +1,10 @@
-//! Unified built-in kernels — single home for builtin algorithm bodies
-//! shared across `vm.rs`, `pipeline.rs`, and `composed.rs`.
+//! Builtin method catalog and shared algorithm implementations.
 //!
-//! Per-builtin shape: an algorithm helper that takes a closure
-//! evaluator from the caller. Each backend supplies its own per-row
-//! evaluator (kernel-classified eval, lambda-body executor, VM
-//! re-entry); the algorithm (loop / truthy-check / push-if-true) lives
-//! here exactly once.
-//!
-//! ```text
-//!   vm.rs            ─┐
-//!   pipeline.rs      ─┼── all call ── builtins::filter_one / filter_apply / map_* / ...
-//!   composed.rs      ─┘
-//! ```
-//!
-//! Two primitive shapes:
-//!   - `*_one(item, eval)` — per-row decision/transform; building block.
-//!   - `*_apply(items, eval)` — buffered form, built on `*_one`.
-//!
-//! Streaming consumers call `*_one`; barrier consumers call `*_apply`.
+//! All three execution backends (VM, pipeline, composed) dispatch here for
+//! algorithm bodies. Each builtin exposes two primitives:
+//! `*_one(item, eval)` for per-row work and `*_apply(items, eval)` for
+//! buffered work. Streaming consumers call `*_one`; barrier consumers call
+//! `*_apply`. This module owns the loop and truthy-check logic exactly once.
 
 use crate::context::EvalError;
 use crate::util::{cmp_vals, is_truthy, val_key, zip_arrays};
@@ -25,216 +12,407 @@ use crate::value::Val;
 use indexmap::IndexMap;
 use std::sync::Arc;
 
-// ── BuiltinMethod ─────────────────────────────────────────────────────────────
 
-/// Pre-resolved method identifier shared by VM, pipeline analysis, and
-/// builtin dispatch. Keeps method name resolution out of backend-specific
-/// modules.
+/// Pre-resolved method identifier. Carried by `CompiledCall` and pipeline
+/// plan nodes so method dispatch is an O(1) integer match, not a string hash.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum BuiltinMethod {
-    // Navigation / basics
+    // ── Object / structural inspection ────────────────────────────────────
+    /// Returns the number of elements in an array, object, or string.
     Len = 0,
+    /// Returns an array of all keys of an object.
     Keys,
+    /// Returns an array of all values of an object.
     Values,
+    /// Returns `[[key, value], ...]` pairs for each object entry.
     Entries,
+    /// Converts an object to `[{key, val}, ...]` form.
     ToPairs,
+    /// Inverse of `to_pairs`; reconstructs an object from key/value pairs.
     FromPairs,
+    /// Swaps keys and values of an object.
     Invert,
+    /// Reverses an array or string.
     Reverse,
+    /// Returns a string name for the runtime type of a value.
     Type,
+    /// Converts any value to its display string representation.
     ToString,
+    /// Serialises a value to a JSON string.
     ToJson,
+    /// Parses a JSON string back to a value.
     FromJson,
-    // Aggregates
+
+    // ── Numeric aggregates ─────────────────────────────────────────────────
+    /// Sums all numeric elements; accepts an optional projection lambda.
     Sum,
+    /// Computes the arithmetic mean; accepts an optional projection lambda.
     Avg,
+    /// Returns the minimum numeric element; accepts an optional projection.
     Min,
+    /// Returns the maximum numeric element; accepts an optional projection.
     Max,
+    /// Counts elements, or truthy results of a predicate lambda.
     Count,
+    /// Returns true if any element satisfies the predicate.
     Any,
+    /// Returns true only when every element satisfies the predicate.
     All,
+    /// Returns the index of the first element satisfying the predicate.
     FindIndex,
+    /// Returns all indices whose elements satisfy the predicate.
     IndicesWhere,
+    /// Returns the element whose projected key is the greatest.
     MaxBy,
+    /// Returns the element whose projected key is the smallest.
     MinBy,
+    /// Groups elements into an object keyed by the lambda result.
     GroupBy,
+    /// Counts elements per key produced by the lambda.
     CountBy,
+    /// Indexes elements into a map keyed by the lambda result (last wins).
     IndexBy,
+    /// Groups elements by a key lambda, then applies a shape lambda to each group.
     GroupShape,
+    /// Unnests an array field so each nested value becomes its own row.
     Explode,
+    /// Inverse of `explode`; collapses rows sharing the same non-field keys.
     Implode,
-    // Array ops
+
+    // ── Streaming / array transforms ──────────────────────────────────────
+    /// Keeps only elements for which the predicate is truthy.
     Filter,
+    /// Projects each element through the lambda.
     Map,
+    /// Maps each element and flattens one level of the resulting arrays.
     FlatMap,
+    /// Alias of `filter`; keeps elements matching the predicate.
     Find,
+    /// Alias of `filter`; keeps all elements matching the predicate.
     FindAll,
+    /// Sorts an array; supports key expressions and comparator lambdas.
     Sort,
+    /// Removes duplicate values from an array.
     Unique,
+    /// Removes duplicates by comparing the value of a key lambda.
     UniqueBy,
+    /// Wraps a scalar in `[scalar]`; passes arrays through unchanged.
     Collect,
+    /// DFS pre-order search across the entire value tree.
     DeepFind,
+    /// Collects all objects that contain every key in the shape pattern.
     DeepShape,
+    /// Collects all objects whose listed keys equal the given literals.
     DeepLike,
+    /// Post-order recursive tree transform (bottom-up).
     Walk,
+    /// Pre-order recursive tree transform (top-down).
     WalkPre,
+    /// Applies a step expression repeatedly until a fixpoint is reached.
     Rec,
+    /// Walks the tree collecting `{path, value}` rows for matching nodes.
     TracePath,
+    /// Flattens nested arrays up to a given depth (default 1).
     Flatten,
+    /// Removes `null` values from an array.
     Compact,
+    /// Joins array elements into a string with a separator.
     Join,
+    /// Returns the first element, or the first N elements as an array.
     First,
+    /// Returns the last element, or the last N elements as an array.
     Last,
+    /// Returns the element at a given index (supports negative indexing).
     Nth,
+    /// Keeps at most N elements from the front of the array.
     Take,
+    /// Drops the first N elements and returns the rest.
     Skip,
+    /// Appends an element to the end of an array.
     Append,
+    /// Inserts an element at the front of an array.
     Prepend,
+    /// Removes occurrences of a value from an array, or items matching a predicate.
     Remove,
+    /// Returns elements of the receiver not present in the argument array.
     Diff,
+    /// Returns elements present in both arrays.
     Intersect,
+    /// Returns the union of two arrays without duplicates.
     Union,
+    /// Produces `[{index, value}, ...]` pairs for each element.
     Enumerate,
+    /// Returns consecutive overlapping pairs as `[[a, b], ...]`.
     Pairwise,
+    /// Slides a window of size N over the array.
     Window,
+    /// Splits an array into non-overlapping chunks of size N.
     Chunk,
+    /// Keeps elements from the front as long as the predicate holds.
     TakeWhile,
+    /// Drops elements from the front while the predicate holds, then keeps the rest.
     DropWhile,
+    /// Returns the first element satisfying the predicate, or null.
     FindFirst,
+    /// Alias of `find_first`.
     FindOne,
+    /// Counts approximate distinct values using a HyperLogLog-style sketch.
     ApproxCountDistinct,
+    /// Produces a running accumulation using the lambda.
     Accumulate,
+    /// Splits an array into two arrays: elements that pass and those that fail the predicate.
     Partition,
+    /// Zips two arrays element-wise into `[[a0, b0], ...]`.
     Zip,
+    /// Like `zip` but pads the shorter array with a fill value.
     ZipLongest,
+    /// Applies multiple expressions to the same receiver and collects results.
     Fanout,
+    /// Applies named expressions to one value and collects them into an object.
     ZipShape,
-    // Object ops
+
+    // ── Object transforms ──────────────────────────────────────────────────
+    /// Selects a named subset of fields from an object or array of objects.
     Pick,
+    /// Removes named fields from an object or array of objects.
     Omit,
+    /// Shallow-merges two objects (right wins on collision).
     Merge,
+    /// Recursively merges two objects.
     DeepMerge,
+    /// Fills in missing or null fields from a defaults object.
     Defaults,
+    /// Renames object keys according to a `{old: new}` map.
     Rename,
+    /// Maps a lambda over each key, replacing the key with the result.
     TransformKeys,
+    /// Maps a lambda over each value, replacing the value with the result.
     TransformValues,
+    /// Keeps only the object entries for which the lambda is truthy.
     FilterKeys,
+    /// Keeps only the object entries whose values satisfy the lambda.
     FilterValues,
+    /// Pivots an array of objects into a nested object or flat map.
     Pivot,
-    // Path ops
+
+    // ── Path operations ────────────────────────────────────────────────────
+    /// Retrieves a value at a dot-notation path.
     GetPath,
+    /// Sets a value at a dot-notation path, returning the modified document.
     SetPath,
+    /// Deletes the value at a dot-notation path.
     DelPath,
+    /// Deletes values at multiple dot-notation paths.
     DelPaths,
+    /// Returns true if a non-null value exists at the given path.
     HasPath,
+    /// Flattens a nested object to dot-notation keys with a given separator.
     FlattenKeys,
+    /// Reconstructs a nested object from dot-notation flat keys.
     UnflattenKeys,
-    // CSV
+
+    // ── Serialisation ──────────────────────────────────────────────────────
+    /// Serialises an array/object to CSV text.
     ToCsv,
+    /// Serialises an array/object to TSV text.
     ToTsv,
-    // Null / predicate
+
+    // ── Miscellaneous scalar helpers ───────────────────────────────────────
+    /// Returns the receiver if non-null; otherwise returns the argument.
     Or,
+    /// Returns true if the object contains the given key.
     Has,
+    /// Returns true if a field path is absent or null in the receiver.
     Missing,
+    /// Returns true if the array/string/object contains the given item.
     Includes,
+    /// Returns the first index of a value in an array, or -1.
     Index,
+    /// Returns all indices where a value occurs in an array.
     IndicesOf,
+    /// Replaces the receiver with the argument value (chain-write terminal).
     Set,
+    /// Mutates the receiver in place using a lambda (chain-write terminal).
     Update,
-    // Numeric scalar ops
+
+    // ── Numeric / math ─────────────────────────────────────────────────────
+    /// Rounds up to the nearest integer.
     Ceil,
+    /// Rounds down to the nearest integer.
     Floor,
+    /// Rounds to the nearest integer.
     Round,
+    /// Returns the absolute value.
     Abs,
+    /// Computes a rolling sum over a sliding window of size N.
     RollingSum,
+    /// Computes a rolling mean over a sliding window of size N.
     RollingAvg,
+    /// Computes a rolling minimum over a sliding window of size N.
     RollingMin,
+    /// Computes a rolling maximum over a sliding window of size N.
     RollingMax,
+    /// Shifts values backward by N positions (fills leading positions with null).
     Lag,
+    /// Shifts values forward by N positions (fills trailing positions with null).
     Lead,
+    /// Computes element-wise first differences.
     DiffWindow,
+    /// Computes element-wise percentage change from the previous value.
     PctChange,
+    /// Running maximum up to each position.
     CumMax,
+    /// Running minimum up to each position.
     CumMin,
+    /// Normalises each element to its z-score relative to the array mean/std.
     Zscore,
-    // String methods
+
+    // ── String transforms ──────────────────────────────────────────────────
+    /// Converts a string to all-uppercase.
     Upper,
+    /// Converts a string to all-lowercase.
     Lower,
+    /// Uppercases the first character and lowercases the rest.
     Capitalize,
+    /// Title-cases every word in the string.
     TitleCase,
+    /// Strips leading and trailing ASCII whitespace.
     Trim,
+    /// Strips leading ASCII whitespace.
     TrimLeft,
+    /// Strips trailing ASCII whitespace.
     TrimRight,
+    /// Converts a string to `snake_case`.
     SnakeCase,
+    /// Converts a string to `kebab-case`.
     KebabCase,
+    /// Converts a string to `camelCase`.
     CamelCase,
+    /// Converts a string to `PascalCase`.
     PascalCase,
+    /// Reverses the characters of a string.
     ReverseStr,
+    /// Splits a string on newlines and returns an array of lines.
     Lines,
+    /// Splits a string on whitespace and returns an array of words.
     Words,
+    /// Returns each Unicode grapheme cluster as a single-element string.
     Chars,
+    /// Returns each Unicode code point as a UTF-8 encoded string.
     CharsOf,
+    /// Returns each byte of the string as an integer.
     Bytes,
+    /// Returns the byte length (not char count) of a string.
     ByteLen,
+    /// Returns true if the string is empty or contains only whitespace.
     IsBlank,
+    /// Returns true if the string consists entirely of ASCII digits.
     IsNumeric,
+    /// Returns true if the string consists entirely of alphabetic characters.
     IsAlpha,
+    /// Returns true if the string is valid ASCII.
     IsAscii,
+    /// Parses a string as an integer or float; returns null on failure.
     ToNumber,
+    /// Parses `"true"` / `"false"` to a boolean; returns null otherwise.
     ToBool,
+    /// Parses the string as a base-10 integer; returns null on failure.
     ParseInt,
+    /// Parses the string as a float; returns null on failure.
     ParseFloat,
+    /// Parses common truthy/falsy string representations to a boolean.
     ParseBool,
+    /// Encodes a string as standard Base64.
     ToBase64,
+    /// Decodes a Base64-encoded string.
     FromBase64,
+    /// Percent-encodes a string for use in a URL.
     UrlEncode,
+    /// Decodes a percent-encoded URL string.
     UrlDecode,
+    /// Escapes `<`, `>`, `&`, `"`, `'` to their HTML entities.
     HtmlEscape,
+    /// Converts HTML entities back to their literal characters.
     HtmlUnescape,
+    /// Repeats the string N times.
     Repeat,
+    /// Left-pads the string to the given width with a fill character.
     PadLeft,
+    /// Right-pads the string to the given width with a fill character.
     PadRight,
+    /// Centers the string within the given width using a fill character.
     Center,
+    /// Returns true if the string starts with the given prefix.
     StartsWith,
+    /// Returns true if the string ends with the given suffix.
     EndsWith,
+    /// Returns the char index of the first occurrence, or -1.
     IndexOf,
+    /// Returns the char index of the last occurrence, or -1.
     LastIndexOf,
+    /// Replaces the first occurrence of `needle` with `replacement`.
     Replace,
+    /// Replaces all occurrences of `needle` with `replacement`.
     ReplaceAll,
+    /// Strips the given prefix if present; returns the receiver unchanged otherwise.
     StripPrefix,
+    /// Strips the given suffix if present; returns the receiver unchanged otherwise.
     StripSuffix,
+    /// Returns a substring by character indices (supports negative indexing).
     Slice,
+    /// Splits a string on a separator and returns an array of parts.
     Split,
+    /// Prepends N spaces to every line of a string.
     Indent,
+    /// Removes the common leading whitespace from every line.
     Dedent,
+    /// Returns true if the string contains the given substring.
     Matches,
+    /// Returns an array of every non-overlapping occurrence of a pattern.
     Scan,
+    /// Returns true if the regex matches the string.
     ReMatch,
+    /// Returns the first regex match as a string, or null.
     ReMatchFirst,
+    /// Returns all non-overlapping regex matches as an array of strings.
     ReMatchAll,
+    /// Returns capture groups of the first regex match as an array, or null.
     ReCaptures,
+    /// Returns all capture groups for every match as an array of arrays.
     ReCapturesAll,
+    /// Splits a string on a regex pattern.
     ReSplit,
+    /// Replaces the first regex match with a replacement string.
     ReReplace,
+    /// Replaces all regex matches with a replacement string.
     ReReplaceAll,
+    /// Returns true if the string contains any of the given substrings.
     ContainsAny,
+    /// Returns true if the string contains all of the given substrings.
     ContainsAll,
+    /// Infers a structural schema description from the value.
     Schema,
-    // Relational
+
+    // ── Relational ─────────────────────────────────────────────────────────
+    /// Performs an inner equi-join of two arrays of objects on matching key fields.
     EquiJoin,
-    // Sentinel for custom/unknown
+
+    /// Sentinel returned by `from_name` when the method string is unrecognised.
     Unknown,
 }
 
 impl BuiltinMethod {
+    /// Resolves a method name string to the corresponding `BuiltinMethod` variant.
+    /// Returns [`BuiltinMethod::Unknown`] when the name is not registered.
     pub fn from_name(name: &str) -> Self {
         crate::builtin_registry::by_name(name)
             .and_then(|id| id.method())
             .unwrap_or(Self::Unknown)
     }
 
-    /// True for methods that receive a sub-program to run per item.
+    /// Returns true when the method requires a lambda expression as its first argument.
+    /// The pipeline planner uses this to distinguish element vs. expression stages.
     pub(crate) fn is_lambda_method(self) -> bool {
         matches!(
             self,
@@ -262,32 +440,46 @@ impl BuiltinMethod {
     }
 }
 
-// ── Resolved builtin calls ──────────────────────────────────────────────────
 
-/// Literal arguments attached to a resolved builtin call.
-///
-/// Backends that can only lower compile-time literal arguments use this
-/// carrier instead of keeping their own per-runtime argument enum.
+/// Statically-typed argument payload stored inside a [`BuiltinCall`].
+/// Each variant corresponds to the argument signature of a group of builtins,
+/// enabling argument decoding without heap allocation at call time.
 #[derive(Debug, Clone)]
 pub enum BuiltinArgs {
+    /// No arguments.
     None,
+    /// A single string argument (field name, separator, pattern, etc.).
     Str(Arc<str>),
+    /// Two string arguments (needle + replacement, pattern + replacement).
     StrPair { first: Arc<str>, second: Arc<str> },
+    /// A list of string arguments (field list for `pick`, `omit`, etc.).
     StrVec(Vec<Arc<str>>),
+    /// A single signed-integer argument (index, count).
     I64(i64),
+    /// A primary integer plus an optional second integer (start + optional end for `slice`).
     I64Opt { first: i64, second: Option<i64> },
+    /// A single unsigned-integer argument (window size, chunk size, etc.).
     Usize(usize),
+    /// A single pre-evaluated `Val` argument.
     Val(Val),
+    /// A list of pre-evaluated `Val` arguments (`diff`, `intersect`, `union`).
     ValVec(Vec<Val>),
+    /// Padding width and fill character (`pad_left`, `pad_right`, `center`).
     Pad { width: usize, fill: char },
 }
 
+/// A pre-compiled builtin call ready for stateless execution.
+/// Stored in pipeline plan nodes and the `CompiledCall` opcode payload.
 #[derive(Debug, Clone)]
 pub struct BuiltinCall {
+    /// Which builtin to invoke.
     pub method: BuiltinMethod,
+    /// The decoded static arguments for this call.
     pub args: BuiltinArgs,
 }
 
+/// Internal helper that decodes static (non-lambda) arguments for [`BuiltinCall::from_static_args`].
+/// Wraps the `eval_arg` and `ident_arg` closures with typed accessor methods.
 struct StaticArgDecoder<'a, E, I> {
     name: &'a str,
     eval_arg: E,
@@ -299,10 +491,12 @@ where
     E: FnMut(usize) -> Result<Option<Val>, EvalError>,
     I: FnMut(usize) -> Option<Arc<str>>,
 {
+    /// Evaluates the argument at `idx`, returning an error if it is absent.
     fn val(&mut self, idx: usize) -> Result<Val, EvalError> {
         (self.eval_arg)(idx)?.ok_or_else(|| EvalError(format!("{}: missing argument", self.name)))
     }
 
+    /// Evaluates the argument at `idx` as a string, accepting bare identifiers.
     fn str(&mut self, idx: usize) -> Result<Arc<str>, EvalError> {
         if let Some(value) = (self.ident_arg)(idx) {
             return Ok(value);
@@ -313,6 +507,7 @@ where
         }
     }
 
+    /// Evaluates the argument at `idx` as a signed 64-bit integer.
     fn i64(&mut self, idx: usize) -> Result<i64, EvalError> {
         match self.val(idx)? {
             Val::Int(n) => Ok(n),
@@ -324,10 +519,12 @@ where
         }
     }
 
+    /// Evaluates the argument at `idx` as a `usize` (clamped to 0 from below).
     fn usize(&mut self, idx: usize) -> Result<usize, EvalError> {
         Ok(self.i64(idx)?.max(0) as usize)
     }
 
+    /// Evaluates the argument at `idx` as a `Vec<Val>`, failing if not an array.
     fn vec(&mut self, idx: usize) -> Result<Vec<Val>, EvalError> {
         self.val(idx).and_then(|value| {
             value
@@ -336,6 +533,7 @@ where
         })
     }
 
+    /// Evaluates the argument at `idx` as a vector of strings.
     fn str_vec(&mut self, idx: usize) -> Result<Vec<Arc<str>>, EvalError> {
         Ok(self
             .vec(idx)?
@@ -347,6 +545,8 @@ where
             .collect())
     }
 
+    /// Evaluates the argument at `idx` as a single character for padding operations.
+    /// Defaults to `' '` when the argument index is out of range.
     fn char(&mut self, idx: usize, arg_len: usize) -> Result<char, EvalError> {
         if idx >= arg_len {
             return Ok(' ');
@@ -361,142 +561,231 @@ where
     }
 }
 
+/// Capability and cost descriptor for a single builtin method.
+/// The pipeline planner reads these fields to decide how to lower each stage.
 #[derive(Debug, Clone, Copy)]
 pub struct BuiltinSpec {
+    /// Whether the method is pure (no side effects); impure methods are never fused.
     pub pure: bool,
+    /// Broad classification used for planning and display.
     pub category: BuiltinCategory,
+    /// Input-to-output row-count relationship.
     pub cardinality: BuiltinCardinality,
+    /// Whether the builtin may be used as an indexed projection (e.g. inside `map`).
     pub can_indexed: bool,
+    /// Whether the builtin has a native view-path implementation.
     pub view_native: bool,
+    /// Whether the builtin can execute directly on a `JsonView` without materialising.
     pub view_scalar: bool,
+    /// View-stage lowering target, if the builtin maps to one of the view stages.
     pub view_stage: Option<BuiltinViewStage>,
+    /// Sink (terminal aggregation) descriptor, present for reducing builtins.
     pub sink: Option<BuiltinSinkSpec>,
+    /// Keyed reducer kind (group/count/index), used for grouped output planning.
     pub keyed_reducer: Option<BuiltinKeyedReducer>,
+    /// Numeric reducer kind, used by the numeric sink path.
     pub numeric_reducer: Option<BuiltinNumericReducer>,
+    /// How adjacent stages of the same kind can be merged (e.g. `take(3).take(2)` → `take(2)`).
     pub stage_merge: Option<BuiltinStageMerge>,
+    /// Algebraic cancellation rule (e.g. `reverse().reverse()` = identity).
     pub cancellation: Option<BuiltinCancellation>,
+    /// Columnar stage kind for backends that work on typed column vectors.
     pub columnar_stage: Option<BuiltinColumnarStage>,
+    /// Structural index backend hint (deep search variants).
     pub structural: Option<BuiltinStructural>,
+    /// Relative cost used by the planner's heuristic optimizer.
     pub cost: f64,
 }
 
+/// Marker that a builtin has a structural (index-based) execution backend.
+/// The query planner may choose the structural path over the generic DFS walk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinStructural {
+    /// Structural backend for `deep_find`.
     DeepFind,
+    /// Structural backend for `deep_shape`.
     DeepShape,
+    /// Structural backend for `deep_like`.
     DeepLike,
 }
 
+/// View-layer stage that a builtin can be lowered into.
+/// Each variant corresponds to a distinct operation in the view execution path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinViewStage {
+    /// Predicate-driven row filter stage.
     Filter,
+    /// Per-row projection stage.
     Map,
+    /// Per-row expansion stage (one-to-many).
     FlatMap,
+    /// Prefix filter that stops at the first non-matching row.
     TakeWhile,
+    /// Skips leading matching rows and passes the rest.
     DropWhile,
+    /// Deduplication stage (keeps first occurrence of each key).
     Distinct,
+    /// Keyed reduce stage (groups, counts, or indexes by key).
     KeyedReduce,
+    /// Positional limit stage.
     Take,
+    /// Positional skip stage.
     Skip,
 }
 
+/// Whether a view stage needs to iterate the source view or can skip it entirely.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinViewInputMode {
+    /// Stage reads values from the underlying view one by one.
     ReadsView,
+    /// Stage does not consult the view at all (e.g. positional `take`/`skip`).
     SkipsViewRead,
 }
 
+/// How a view stage produces its output relative to the source view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinViewOutputMode {
+    /// Output is a sub-slice of the input view (filter, take, skip, etc.).
     PreservesInputView,
+    /// Output is a single borrowed subview derived from one input element (map).
     BorrowedSubview,
+    /// Output is multiple borrowed subviews derived from one element (flat_map).
     BorrowedSubviews,
+    /// Output is a freshly constructed owned value (keyed reduce, etc.).
     EmitsOwnedValue,
 }
 
+/// Describes how a terminal reducing builtin accumulates its final result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BuiltinSinkSpec {
+    /// Which accumulator algorithm to use.
     pub accumulator: BuiltinSinkAccumulator,
+    /// How many rows the sink needs to see before it can emit a result.
     pub demand: BuiltinSinkDemand,
 }
 
+/// The accumulation strategy for a terminal reducing builtin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinSinkAccumulator {
+    /// Counts the number of rows.
     Count,
+    /// Applies a numeric reduction (sum, avg, min, max).
     Numeric,
+    /// Counts approximate distinct values using a probabilistic sketch.
     ApproxDistinct,
+    /// Selects either the first or last observed row.
     SelectOne(BuiltinSelectionPosition),
 }
 
+/// The keyed-reduction algorithm used by `group_by` / `count_by` / `index_by`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinKeyedReducer {
+    /// Counts occurrences per key (`count_by`).
     Count,
+    /// Maps each key to its last value (`index_by`).
     Index,
+    /// Maps each key to a list of its values (`group_by`).
     Group,
 }
 
+/// Which end of the stream the `SelectOne` sink picks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinSelectionPosition {
+    /// Pick the first row seen (short-circuits on `first`).
     First,
+    /// Pick the last row seen (must consume the whole stream for `last`).
     Last,
 }
 
+/// How many rows a terminal sink must consume to produce its result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinSinkDemand {
+    /// Must see every row; `order` indicates whether row order matters.
     All {
+        /// Which aspect of each row value is needed.
         value: BuiltinSinkValueNeed,
+        /// Whether the sink is order-sensitive (affects fusion legality).
         order: bool,
     },
+    /// Can stop after the first qualifying row.
     First {
+        /// Which aspect of the first row's value is needed.
         value: BuiltinSinkValueNeed,
     },
 }
 
+/// Which portion of each row value the sink algorithm actually reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinSinkValueNeed {
+    /// The sink counts rows only and never dereferences their values.
     None,
+    /// The sink needs the complete `Val` (e.g. `first`, `last`).
     Whole,
+    /// The sink only reads the numeric representation of each value (sum, avg, min, max).
     Numeric,
 }
 
+/// Which numeric aggregation the `Numeric` sink accumulator performs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinNumericReducer {
+    /// Accumulate by addition.
     Sum,
+    /// Accumulate sum and count, emit mean.
     Avg,
+    /// Track the running minimum.
     Min,
+    /// Track the running maximum.
     Max,
 }
 
+/// Describes how two adjacent identical stages can be collapsed into one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinStageMerge {
+    /// `take(a).take(b)` → `take(min(a, b))`.
     UsizeMin,
+    /// `skip(a).skip(b)` → `skip(a + b)` (saturating to avoid overflow).
     UsizeSaturatingAdd,
 }
 
+/// Algebraic cancellation rule for a builtin.
+/// Two adjacent stages cancel when `a.cancels_with(b)` is true.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinCancellation {
+    /// The operation is its own inverse (`reverse().reverse()` = identity).
     SelfInverse(BuiltinCancelGroup),
+    /// The operation has a paired inverse (encode/decode, escape/unescape).
     Inverse {
+        /// Which encode/decode group this operation belongs to.
         group: BuiltinCancelGroup,
+        /// Whether this is the forward (encoding) or backward (decoding) member.
         side: BuiltinCancelSide,
     },
 }
 
+/// Identifies which encode/decode pair a cancellation belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinCancelGroup {
+    /// String reversal (`reverse_str` is self-inverse).
     Reverse,
+    /// Base64 encode/decode pair.
     Base64,
+    /// URL percent-encode/decode pair.
     Url,
+    /// HTML escape/unescape pair.
     Html,
 }
 
+/// Which side of a forward/backward cancellation pair this builtin occupies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinCancelSide {
+    /// The encoding or escaping direction.
     Forward,
+    /// The decoding or unescaping direction.
     Backward,
 }
 
 impl BuiltinCancellation {
+    /// Returns true if `self` and `other` are algebraically inverse and can be eliminated.
     #[inline]
     pub fn cancels_with(self, other: Self) -> bool {
         match (self, other) {
@@ -510,6 +799,7 @@ impl BuiltinCancellation {
 }
 
 impl BuiltinStageMerge {
+    /// Combines two stage arguments according to the merge rule.
     #[inline]
     pub fn combine_usize(self, a: usize, b: usize) -> usize {
         match self {
@@ -520,6 +810,7 @@ impl BuiltinStageMerge {
 }
 
 impl BuiltinViewStage {
+    /// Returns whether this stage reads values from the source view or can skip it.
     #[inline]
     pub fn input_mode(self) -> BuiltinViewInputMode {
         match self {
@@ -534,6 +825,7 @@ impl BuiltinViewStage {
         }
     }
 
+    /// Returns how this stage relates its output to the source view's memory.
     #[inline]
     pub fn output_mode(self) -> BuiltinViewOutputMode {
         match self {
@@ -549,11 +841,13 @@ impl BuiltinViewStage {
         }
     }
 
+    /// Returns the materialization policy; currently always `Never` for all view stages.
     #[inline]
     pub fn materialization(self) -> BuiltinViewMaterialization {
         BuiltinViewMaterialization::Never
     }
 
+    /// Returns the output row-count relationship of this stage.
     #[inline]
     pub fn cardinality(self) -> BuiltinCardinality {
         match self {
@@ -567,11 +861,13 @@ impl BuiltinViewStage {
         }
     }
 
+    /// Returns whether this stage can participate in indexed (random-access) evaluation.
     #[inline]
     pub fn can_indexed(self) -> bool {
         matches!(self, Self::Map | Self::KeyedReduce)
     }
 
+    /// Returns the relative per-row cost estimate used by the planner.
     #[inline]
     pub fn cost(self) -> f64 {
         match self {
@@ -586,6 +882,7 @@ impl BuiltinViewStage {
         }
     }
 
+    /// Returns the estimated output-to-input row ratio (1.0 = no change, 0.5 = half the rows).
     #[inline]
     pub fn selectivity(self) -> f64 {
         match self {
@@ -597,87 +894,136 @@ impl BuiltinViewStage {
     }
 }
 
+/// Arity of a pipeline stage as seen by the stage compiler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinPipelineStage {
+    /// Stage takes no argument (e.g. `reverse`, `unique`).
     Nullary,
+    /// Stage takes exactly one argument expression or lambda.
     Unary,
 }
 
+/// Planning metadata for a builtin in the pipeline execution path.
+/// The planner uses these fields to order and fuse pipeline stages.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BuiltinPipelineShape {
+    /// Row-count relationship of this stage.
     pub cardinality: BuiltinCardinality,
+    /// Whether the stage supports indexed access.
     pub can_indexed: bool,
+    /// Relative per-row cost used for ordering heuristics.
     pub cost: f64,
+    /// Estimated output/input row ratio.
     pub selectivity: f64,
 }
 
+/// When/how a pipeline stage materialises its output into a concrete `Vec<Val>`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinPipelineMaterialization {
+    /// Stage processes rows one-at-a-time without buffering.
     Streaming,
+    /// Stage buffers all input (barrier), then emits via the composed path.
     ComposedBarrier,
+    /// Stage uses the legacy full-materialisation path.
     LegacyMaterialized,
 }
 
+/// Describes how a pipeline stage interacts with the ordering of its input stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinPipelineOrderEffect {
+    /// Stage forwards rows in the same order it receives them.
     Preserves,
+    /// Stage emits a contiguous prefix determined by a predicate (take_while, drop_while).
     PredicatePrefix,
+    /// Stage may reorder or buffer all rows (sort, group_by, etc.).
     Blocks,
 }
 
+/// Stage variant for columnar (typed-array) execution backends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinColumnarStage {
+    /// Columnar predicate filter.
     Filter,
+    /// Columnar projection.
     Map,
+    /// Columnar expansion.
     FlatMap,
+    /// Columnar keyed grouping.
     GroupBy,
 }
 
+/// Identifies the concrete executor kernel used to run a pipeline stage.
+/// Selected by the lowering pass when translating a `BuiltinPipelineLowering` node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinPipelineExecutor {
+    /// Element-level builtin with no lambda (scalar transforms, string ops, etc.).
     ElementBuiltin,
+    /// Element-level builtin that may expand one row to many (flatten, explode, etc.).
     ExpandingBuiltin,
+    /// Lambda applied over the fields of an object.
     ObjectLambda,
+    /// Row-level predicate filter using a lambda.
     RowFilter,
+    /// Row-level projection using a lambda.
     RowMap,
+    /// Row-level expansion using a lambda.
     RowFlatMap,
+    /// Positional slice operator; `take: true` = limit, `false` = offset.
     Position { take: bool },
+    /// In-place array reversal.
     Reverse,
+    /// Full-barrier comparison sort.
     Sort,
+    /// Deduplication keyed by a lambda.
     UniqueBy,
+    /// Group elements into an object keyed by a lambda.
     GroupBy,
+    /// Count elements per key produced by a lambda.
     CountBy,
+    /// Index elements (last write wins) keyed by a lambda.
     IndexBy,
+    /// Return the index of the first matching element.
     FindIndex,
+    /// Return all indices of matching elements.
     IndicesWhere,
+    /// Select the element with the extreme (max or min) key value.
     ArgExtreme { max: bool },
+    /// Split array into fixed-size chunks.
     Chunk,
+    /// Slide a fixed-size window over the array.
     Window,
+    /// Emit/skip elements from a contiguous prefix; `take: true` = take_while, `false` = drop_while.
     PrefixWhile { take: bool },
+    /// Deduplication that assumes the input is already sorted.
     SortedDedup,
 }
 
 impl BuiltinPipelineExecutor {
+    /// Returns true if this executor performs a per-row projection.
     #[inline]
     pub fn is_row_map(self) -> bool {
         matches!(self, Self::RowMap)
     }
 
+    /// Returns true if this executor performs a per-row predicate filter.
     #[inline]
     pub fn is_row_filter(self) -> bool {
         matches!(self, Self::RowFilter)
     }
 
+    /// Returns true if this executor operates on positions rather than values.
     #[inline]
     pub fn is_positional(self) -> bool {
         matches!(self, Self::Position { .. })
     }
 
+    /// Returns true if the executor only reorders rows and never inspects their content.
     #[inline]
     pub fn is_order_only(self) -> bool {
         matches!(self, Self::Reverse | Self::Sort)
     }
 
+    /// Returns true if the executor passes each input value into the lambda or comparator.
     #[inline]
     pub fn consumes_input_value(self) -> bool {
         matches!(
@@ -699,6 +1045,7 @@ impl BuiltinPipelineExecutor {
 }
 
 impl BuiltinPipelineShape {
+    /// Constructs a `BuiltinPipelineShape` from its four planning fields.
     #[inline]
     pub fn new(
         cardinality: BuiltinCardinality,
@@ -715,104 +1062,175 @@ impl BuiltinPipelineShape {
     }
 }
 
+/// Describes the lowering target for a builtin in the pipeline compiler.
+/// Each variant maps to a distinct code-generation path in the pipeline backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinPipelineLowering {
+    /// Lambda-based stage (filter, map, flat_map, sort_by, etc.).
     ExprStage(BuiltinExprStage),
+    /// Lambda-based stage followed by a terminal builtin that collapses the stream.
     TerminalExprStage {
+        /// The upstream streaming stage.
         stage: BuiltinExprStage,
+        /// The terminal method applied after the stage.
         terminal: BuiltinMethod,
     },
+    /// Argument-free stage (reverse, unique).
     NullaryStage(BuiltinNullaryStage),
+    /// Stage parameterised by a single `usize` (take, skip, chunk, window).
     UsizeStage {
+        /// Which usize-parameterised stage.
         stage: BuiltinUsizeStage,
+        /// Minimum legal argument value; arguments below this are rejected.
         min: usize,
     },
+    /// Stage parameterised by a single string (split).
     StringStage(BuiltinStringStage),
+    /// Stage parameterised by a pair of strings (replace, re_replace).
     StringPairStage(BuiltinStringPairStage),
+    /// Full-barrier comparison sort with optional key expressions.
     Sort,
+    /// Substring slice parameterised by start and optional end.
     Slice,
+    /// Terminal sink (count, sum, avg, first, last, etc.).
     TerminalSink,
 }
 
+/// Lambda-driven pipeline stage variants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinExprStage {
+    /// Predicate filter.
     Filter,
+    /// Projection.
     Map,
+    /// Expanding projection.
     FlatMap,
+    /// Contiguous prefix filter.
     TakeWhile,
+    /// Drop prefix, pass rest.
     DropWhile,
+    /// Collect all matching indices.
     IndicesWhere,
+    /// Return the first matching index.
     FindIndex,
+    /// Select element with the greatest key.
     MaxBy,
+    /// Select element with the smallest key.
     MinBy,
+    /// Deduplicate by key.
     UniqueBy,
+    /// Group elements by key.
     GroupBy,
+    /// Count elements by key.
     CountBy,
+    /// Index elements by key.
     IndexBy,
+    /// Map over values of an object.
     TransformValues,
+    /// Map over keys of an object.
     TransformKeys,
+    /// Filter entries of an object by value predicate.
     FilterValues,
+    /// Filter entries of an object by key predicate.
     FilterKeys,
 }
 
+/// Argument-free pipeline stage variants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinNullaryStage {
+    /// Reverse the order of the array.
     Reverse,
+    /// Remove duplicate values.
     Unique,
 }
 
+/// Pipeline stages parameterised by a single `usize` argument.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinUsizeStage {
+    /// Keep the first N elements.
     Take,
+    /// Drop the first N elements.
     Skip,
+    /// Split into non-overlapping chunks of size N.
     Chunk,
+    /// Slide a window of size N.
     Window,
 }
 
+/// Pipeline stages parameterised by a single string argument.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinStringStage {
+    /// Split on a separator string.
     Split,
 }
 
+/// Pipeline stages parameterised by two string arguments.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinStringPairStage {
+    /// Replace using a literal needle; `all: true` replaces every occurrence.
     Replace { all: bool },
 }
 
+/// Materialisation policy for a view stage's output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinViewMaterialization {
+    /// The stage never forces materialisation of the underlying view.
     Never,
 }
 
+/// Broad category for a builtin, used for grouping and display purposes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinCategory {
+    /// Operates on a single scalar value (string transforms, math, type ops).
     Scalar,
+    /// Streaming one-to-one transform over array elements (map, enumerate, etc.).
     StreamingOneToOne,
+    /// Streaming predicate filter (filter, take_while, drop_while, compact, etc.).
     StreamingFilter,
+    /// Streaming expansion (flat_map, flatten, explode, split, etc.).
     StreamingExpand,
+    /// Reduces many rows to one value (sum, count, any, all, group_by, etc.).
     Reducer,
+    /// Positional slice (first, last, nth, take, skip).
     Positional,
+    /// Full barrier: must buffer all input before emitting (sort, reverse, window, etc.).
     Barrier,
+    /// Object-manipulation builtin (pick, omit, merge, keys, values, etc.).
     Object,
+    /// Dot-path navigation and mutation (get_path, set_path, del_path, etc.).
     Path,
+    /// Deep tree traversal (deep_find, deep_shape, walk, rec, etc.).
     Deep,
+    /// Serialisation / deserialisation (to_csv, to_json, from_json, etc.).
     Serialization,
+    /// Set-theory or join operations across multiple collections (equi_join, etc.).
     Relational,
+    /// In-place mutation chain write (set, update).
     Mutation,
+    /// Category is not known at compile time.
     Unknown,
 }
 
+/// Row-count relationship between a builtin's input and output.
+/// Used by the pipeline planner to reason about stream length.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinCardinality {
+    /// Every input row produces exactly one output row.
     OneToOne,
+    /// Output has at most as many rows as the input (subset).
     Filtering,
+    /// Output may have more rows than the input (flat_map, flatten, etc.).
     Expanding,
+    /// Output is bounded by a fixed constant regardless of input size.
     Bounded,
+    /// Multiple input rows collapse to one output value.
     Reducing,
+    /// Must buffer the full input stream before emitting; output size may vary.
     Barrier,
 }
 
 impl BuiltinSpec {
+    /// Creates a minimal `BuiltinSpec` with sensible defaults (pure, cost 1.0, no optional features).
     fn new(category: BuiltinCategory, cardinality: BuiltinCardinality) -> Self {
         Self {
             pure: true,
@@ -833,32 +1251,38 @@ impl BuiltinSpec {
         }
     }
 
+    /// Marks this builtin as safe for indexed (random-access) evaluation.
     fn indexed(mut self) -> Self {
         self.can_indexed = true;
         self
     }
 
+    /// Marks this builtin as having a native view-path implementation.
     fn view_native(mut self) -> Self {
         self.view_native = true;
         self
     }
 
+    /// Attaches the view stage lowering target for this builtin.
     fn view_stage(mut self, stage: BuiltinViewStage) -> Self {
         self.view_stage = Some(stage);
         self
     }
 
+    /// Marks this builtin as a view-scalar method (implies `view_native`).
     fn view_scalar(mut self) -> Self {
         self.view_scalar = true;
         self.view_native = true;
         self
     }
 
+    /// Attaches a columnar stage kind for typed-array execution backends.
     fn columnar_stage(mut self, stage: BuiltinColumnarStage) -> Self {
         self.columnar_stage = Some(stage);
         self
     }
 
+    /// Configures a counting sink (demand all rows, value not needed, order-insensitive).
     fn count_sink(mut self) -> Self {
         self.sink = Some(BuiltinSinkSpec {
             accumulator: BuiltinSinkAccumulator::Count,
@@ -870,6 +1294,7 @@ impl BuiltinSpec {
         self
     }
 
+    /// Configures a select-one sink that picks the first or last row.
     fn select_one_sink(mut self, position: BuiltinSelectionPosition) -> Self {
         self.sink = Some(BuiltinSinkSpec {
             accumulator: BuiltinSinkAccumulator::SelectOne(position),
@@ -886,6 +1311,7 @@ impl BuiltinSpec {
         self
     }
 
+    /// Configures a numeric sink (sum, avg, min, max) that needs numeric values from every row.
     fn numeric_sink(mut self, reducer: BuiltinNumericReducer) -> Self {
         self.sink = Some(BuiltinSinkSpec {
             accumulator: BuiltinSinkAccumulator::Numeric,
@@ -898,6 +1324,7 @@ impl BuiltinSpec {
         self
     }
 
+    /// Configures an approximate distinct-count sink.
     fn approx_distinct_sink(mut self) -> Self {
         self.sink = Some(BuiltinSinkSpec {
             accumulator: BuiltinSinkAccumulator::ApproxDistinct,
@@ -909,26 +1336,31 @@ impl BuiltinSpec {
         self
     }
 
+    /// Attaches a keyed reducer kind (group, count, or index).
     fn keyed_reducer(mut self, reducer: BuiltinKeyedReducer) -> Self {
         self.keyed_reducer = Some(reducer);
         self
     }
 
+    /// Attaches a stage-merge rule so adjacent identical stages can be collapsed.
     fn stage_merge(mut self, merge: BuiltinStageMerge) -> Self {
         self.stage_merge = Some(merge);
         self
     }
 
+    /// Attaches an algebraic cancellation rule for this builtin.
     fn cancellation(mut self, cancellation: BuiltinCancellation) -> Self {
         self.cancellation = Some(cancellation);
         self
     }
 
+    /// Marks this builtin as having a structural index backend.
     fn structural(mut self, structural: BuiltinStructural) -> Self {
         self.structural = Some(structural);
         self
     }
 
+    /// Overrides the default relative cost estimate.
     fn cost(mut self, cost: f64) -> Self {
         self.cost = cost;
         self
@@ -936,6 +1368,8 @@ impl BuiltinSpec {
 }
 
 impl BuiltinMethod {
+    /// Returns true for string scalar methods that take a single string argument and
+    /// can execute directly on a `JsonView` without materialising the receiver.
     #[inline]
     pub(crate) fn is_string_arg_view_scalar(self) -> bool {
         matches!(
@@ -944,6 +1378,7 @@ impl BuiltinMethod {
         )
     }
 
+    /// Returns true for zero-argument string scalar methods that can execute on a `JsonView`.
     #[inline]
     pub(crate) fn is_string_no_arg_view_scalar(self) -> bool {
         matches!(
@@ -963,11 +1398,13 @@ impl BuiltinMethod {
         )
     }
 
+    /// Returns true for zero-argument numeric scalar methods that can execute on a `JsonView`.
     #[inline]
     pub(crate) fn is_numeric_no_arg_view_scalar(self) -> bool {
         matches!(self, Self::Ceil | Self::Floor | Self::Round | Self::Abs)
     }
 
+    /// Returns true if this method can be evaluated on a raw `JsonView` without materialising.
     #[inline]
     pub(crate) fn is_view_scalar_method(self) -> bool {
         self == Self::Len
@@ -976,6 +1413,8 @@ impl BuiltinMethod {
             || self.is_numeric_no_arg_view_scalar()
     }
 
+    /// Returns the full capability descriptor for this builtin.
+    /// Called by the pipeline planner and VM to query cardinality, cost, and feature flags.
     #[inline]
     pub fn spec(self) -> BuiltinSpec {
         use BuiltinCardinality as Card;
@@ -1237,11 +1676,14 @@ impl BuiltinMethod {
 }
 
 impl BuiltinCall {
+    /// Constructs a `BuiltinCall` from a resolved method and its decoded arguments.
     #[inline]
     pub fn new(method: BuiltinMethod, args: BuiltinArgs) -> Self {
         Self { method, args }
     }
 
+    /// Returns the capability descriptor for this call, potentially overriding the
+    /// method-level spec with argument-specific cost or indexability adjustments.
     #[inline]
     pub fn spec(&self) -> BuiltinSpec {
         let mut spec = self.method.spec();
@@ -1277,6 +1719,8 @@ impl BuiltinCall {
         spec
     }
 
+    /// Returns true if applying this builtin twice is equivalent to applying it once.
+    /// The pipeline optimizer uses this to eliminate redundant stages.
     #[inline]
     pub fn is_idempotent(&self) -> bool {
         matches!(
@@ -1296,6 +1740,9 @@ impl BuiltinCall {
         )
     }
 
+    /// Executes the builtin against `recv` with its pre-decoded static arguments.
+    /// Returns `None` when the receiver type is not applicable (caller may fall back).
+    /// For methods that can return errors, prefer [`BuiltinCall::try_apply`].
     pub fn apply(&self, recv: &Val) -> Option<Val> {
         macro_rules! apply_or_recv {
             ($expr:expr) => {
@@ -1583,6 +2030,8 @@ impl BuiltinCall {
         }
     }
 
+    /// Like [`BuiltinCall::apply`] but propagates evaluation errors (regex compilation,
+    /// window-size-zero, JSON parse failures, etc.) as `EvalError`.
     pub fn try_apply(&self, recv: &Val) -> Result<Option<Val>, EvalError> {
         match (self.method, &self.args) {
             (BuiltinMethod::ReMatch, BuiltinArgs::Str(p)) => try_re_match_apply(recv, p),
@@ -1647,6 +2096,10 @@ impl BuiltinCall {
         }
     }
 
+    /// Decodes static (non-lambda) arguments for `method` and constructs a `BuiltinCall`.
+    /// `eval_arg` evaluates positional argument expressions; `ident_arg` extracts bare
+    /// identifier names (used to accept field names without quote syntax).
+    /// Returns `Ok(None)` for methods that require lambda arguments (handled separately).
     pub fn from_static_args<E, I>(
         method: BuiltinMethod,
         name: &str,
@@ -1791,6 +2244,9 @@ impl BuiltinCall {
         Ok(Some(call))
     }
 
+    /// Attempts to construct a `BuiltinCall` from AST arguments that are all compile-time
+    /// literals. Non-literal or lambda arguments cause `None` to be returned, falling back
+    /// to runtime evaluation.
     pub fn from_literal_ast_args(name: &str, args: &[crate::ast::Arg]) -> Option<Self> {
         use crate::ast::{Arg, ArrayElem, Expr, ObjField};
 
@@ -1856,17 +2312,15 @@ impl BuiltinCall {
         .flatten()
     }
 
-    /// Lower a method call into a pure per-element pipeline builtin.
-    ///
-    /// This intentionally excludes whole-receiver methods such as `compact`,
-    /// `flatten`, `join`, `rolling_*`, etc.  Pipeline lowering applies stages
-    /// to each row yielded by the source stream, so only methods whose
-    /// semantics are valid per input value belong here.
+    /// Like [`BuiltinCall::from_literal_ast_args`] but also requires the method to be a
+    /// registered pipeline element method, returning `None` otherwise.
     pub fn from_pipeline_literal_args(name: &str, args: &[crate::ast::Arg]) -> Option<Self> {
         let call = Self::from_literal_ast_args(name, args)?;
         call.method.is_pipeline_element_method().then_some(call)
     }
 
+    /// Evaluates this builtin directly on a zero-copy `JsonView` without materialising a `Val`.
+    /// Only works for view-scalar methods; returns `None` for all other builtins.
     pub fn try_apply_json_view(&self, recv: crate::util::JsonView<'_>) -> Option<Val> {
         if !self.spec().view_scalar {
             return None;
@@ -1889,6 +2343,7 @@ impl BuiltinCall {
     }
 }
 
+/// Applies a zero-argument numeric scalar method (`ceil`, `floor`, `round`, `abs`) to a `JsonView`.
 #[inline]
 fn numeric_no_arg_scalar_apply(
     method: BuiltinMethod,
@@ -1913,11 +2368,13 @@ fn numeric_no_arg_scalar_apply(
     }
 }
 
+/// Applies a zero-argument numeric scalar method to a materialised `Val`.
 #[inline]
 fn numeric_no_arg_scalar_val_apply(method: BuiltinMethod, recv: &Val) -> Option<Val> {
     numeric_no_arg_scalar_apply(method, crate::util::JsonView::from_val(recv))
 }
 
+/// Converts a `u64` to `Val::Int` if it fits, otherwise `Val::Float`.
 #[inline]
 fn uint_to_val(n: u64) -> Val {
     if n <= i64::MAX as u64 {
@@ -1927,6 +2384,7 @@ fn uint_to_val(n: u64) -> Val {
     }
 }
 
+/// Applies a zero-argument string scalar method to a `&str`, returning the result as a `Val`.
 #[inline]
 fn str_no_arg_scalar_apply(method: BuiltinMethod, value: &str) -> Option<Val> {
     match method {
@@ -1978,11 +2436,13 @@ fn str_no_arg_scalar_apply(method: BuiltinMethod, value: &str) -> Option<Val> {
     }
 }
 
+/// Applies a zero-argument string scalar method to a `Val`, extracting the string slice first.
 #[inline]
 fn str_no_arg_scalar_val_apply(method: BuiltinMethod, recv: &Val) -> Option<Val> {
     str_no_arg_scalar_apply(method, recv.as_str_ref()?)
 }
 
+/// Applies a single-string-argument scalar method to a `&str` value with the argument.
 #[inline]
 fn str_arg_scalar_apply(method: BuiltinMethod, value: &str, arg: &str) -> Option<Val> {
     match method {
@@ -1995,11 +2455,14 @@ fn str_arg_scalar_apply(method: BuiltinMethod, value: &str, arg: &str) -> Option
     }
 }
 
+/// Applies a single-string-argument scalar method to a `Val` receiver.
 #[inline]
 fn str_arg_scalar_val_apply(method: BuiltinMethod, recv: &Val, arg: &str) -> Option<Val> {
     str_arg_scalar_apply(method, recv.as_str_ref()?, arg)
 }
 
+/// Returns the character index of `needle` in `value`; uses `rfind` when `last` is true.
+/// Returns `Val::Int(-1)` when not found.
 #[inline]
 fn str_index_of(value: &str, needle: &str, last: bool) -> Val {
     let offset = if last {
@@ -2013,6 +2476,7 @@ fn str_index_of(value: &str, needle: &str, last: bool) -> Val {
     }
 }
 
+/// Extracts the logical length from a `JsonView` (char count for strings, element count for collections).
 #[inline]
 fn json_view_len(recv: crate::util::JsonView<'_>) -> Option<i64> {
     match recv {
@@ -2022,6 +2486,7 @@ fn json_view_len(recv: crate::util::JsonView<'_>) -> Option<i64> {
     }
 }
 
+/// Extracts a `&str` from a `JsonView::Str` variant; returns `None` for other variants.
 #[inline]
 fn json_view_str(recv: crate::util::JsonView<'_>) -> Option<&str> {
     match recv {
@@ -2030,12 +2495,15 @@ fn json_view_str(recv: crate::util::JsonView<'_>) -> Option<&str> {
     }
 }
 
-/// Direct VM fallback adapter for builtins with AST arguments.
+
+/// Main dispatch entry point called by the tree-walking evaluator.
 ///
-/// This replaces the old dynamic builtin hash table. It resolves by
-/// `BuiltinMethod`, evaluates only the arguments needed for the resolved
-/// builtin, then executes the canonical `BuiltinCall` implementation in this
-/// module.
+/// Resolves `name` to a [`BuiltinMethod`], decodes arguments, and invokes the
+/// appropriate algorithm body. Three evaluator closures supply the backend's
+/// expression evaluation strategy:
+/// - `eval_arg`: evaluates a standalone argument expression.
+/// - `eval_item`: evaluates a lambda body with `@` bound to an array element.
+/// - `eval_pair`: evaluates a two-parameter comparator lambda (`sort` with a custom comparator).
 pub(crate) fn eval_builtin_method<F, G, H>(
     recv: Val,
     name: &str,
@@ -2641,6 +3109,8 @@ where
         .ok_or_else(|| EvalError(format!("{}: builtin unsupported", name)))
 }
 
+/// Convenience wrapper over [`eval_builtin_method`] for zero-argument builtins.
+/// Panics (via `EvalError`) if any argument evaluation closure is unexpectedly invoked.
 pub(crate) fn eval_builtin_no_args(recv: Val, name: &str) -> Result<Val, EvalError> {
     eval_builtin_method(
         recv,
@@ -2658,6 +3128,8 @@ pub(crate) fn eval_builtin_no_args(recv: Val, name: &str) -> Result<Val, EvalErr
 }
 
 impl BuiltinMethod {
+    /// Returns true if this method is registered as a pipeline element method.
+    /// Pipeline element methods operate on individual values and can run in-stream.
     #[inline]
     pub fn is_pipeline_element_method(self) -> bool {
         crate::builtin_registry::pipeline_element(crate::builtin_registry::BuiltinId::from_method(
@@ -2666,12 +3138,9 @@ impl BuiltinMethod {
     }
 }
 
-// ── filter ──────────────────────────────────────────────────────────
 
-/// Per-row filter decision — single source of truth for `.filter()`
-/// semantics across all backends (Pipeline streaming arm, Pipeline
-/// barrier arm, VM `BuiltinMethod::Filter`, composed runner
-/// `GenericFilter`).
+/// Per-row filter primitive: evaluates `eval` on `item` and returns its truthiness.
+/// Streaming consumers call this once per row instead of buffering the entire array.
 #[inline]
 pub fn filter_one<F>(item: &Val, mut eval: F) -> Result<bool, EvalError>
 where
@@ -2680,8 +3149,8 @@ where
     Ok(is_truthy(&eval(item)?))
 }
 
-/// Buffered filter — `Vec<Val> → Vec<Val>` form, built on
-/// `filter_one`.
+/// Buffered filter: applies the predicate to every element and returns all passing items.
+/// Barrier consumers call this after collecting the full input.
 #[inline]
 pub fn filter_apply<F>(items: Vec<Val>, mut eval: F) -> Result<Vec<Val>, EvalError>
 where
@@ -2696,17 +3165,9 @@ where
     Ok(out)
 }
 
-/// Demand-aware filter — stops after `max_keep` items pass the
-/// predicate.
-///
-/// Used by the planner / VM-peephole-fused `Filter ∘ Take(n)` shape
-/// to avoid evaluating the predicate over the entire array when only
-/// the first N keeps are needed. When `max_keep` is `None`, behaves
-/// identically to `filter_apply`.
-///
-/// Trivial generalisation of `filter_apply` — same algorithm, one
-/// extra termination check. Single source of truth keeps drift
-/// impossible.
+
+/// Bounded filter: like [`filter_apply`] but stops after collecting `max_keep` matching items.
+/// Pass `None` for `max_keep` to collect all matches (equivalent to `filter_apply`).
 #[inline]
 pub fn filter_apply_bounded<F>(
     items: Vec<Val>,
@@ -2734,9 +3195,8 @@ where
     Ok(out)
 }
 
-// ── map ─────────────────────────────────────────────────────────────
 
-/// Per-row map transform — single source of truth for `.map()`.
+/// Per-row map primitive: evaluates `eval` on `item` and returns the projected value.
 #[inline]
 pub fn map_one<F>(item: &Val, mut eval: F) -> Result<Val, EvalError>
 where
@@ -2745,7 +3205,7 @@ where
     eval(item)
 }
 
-/// Buffered map — `Vec<Val> → Vec<Val>`.
+/// Buffered map: applies the projection to every element and returns the results.
 #[inline]
 pub fn map_apply<F>(items: Vec<Val>, mut eval: F) -> Result<Vec<Val>, EvalError>
 where
@@ -2758,11 +3218,8 @@ where
     Ok(out)
 }
 
-/// Demand-aware map — stops after `max_emit` items.
-///
-/// Used by the planner / VM-peephole-fused `Map ∘ Take(n)` shape.
-/// Map is 1:1 so `max_emit = max_keep` here, but the helper is
-/// kept distinct for symmetry with the filter shape.
+
+/// Bounded map: like [`map_apply`] but stops after emitting `max_emit` projected values.
 #[inline]
 pub fn map_apply_bounded<F>(
     items: Vec<Val>,
@@ -2788,11 +3245,9 @@ where
     Ok(out)
 }
 
-// ── flat_map ────────────────────────────────────────────────────────
 
-/// Per-row flat_map — yields zero or more results. Backend
-/// evaluator returns a single Val; if Arr, elements are flattened
-/// one level into the output stream.
+/// Per-row flat_map primitive: evaluates `eval`, then flattens one level if the result is an array.
+/// Returns a `SmallVec` to avoid heap allocation for the common single-element case.
 #[inline]
 pub fn flat_map_one<F>(item: &Val, mut eval: F) -> Result<smallvec::SmallVec<[Val; 1]>, EvalError>
 where
@@ -2809,7 +3264,8 @@ where
     })
 }
 
-/// Buffered flat_map — `Vec<Val> → Vec<Val>`.
+
+/// Buffered flat_map: maps and flattens every element into a single output vector.
 #[inline]
 pub fn flat_map_apply<F>(items: Vec<Val>, mut eval: F) -> Result<Vec<Val>, EvalError>
 where
@@ -2822,8 +3278,9 @@ where
     Ok(out)
 }
 
-// ── sort ───────────────────────────────────────────────────────────
 
+/// Natural (ascending) sort. Specialises for homogeneous `IntVec` and `FloatVec` arrays
+/// before falling back to the generic `cmp_vals` comparator.
 #[inline]
 pub fn sort_apply(recv: Val) -> Result<Val, EvalError> {
     match recv {
@@ -2847,6 +3304,9 @@ pub fn sort_apply(recv: Val) -> Result<Val, EvalError> {
     }
 }
 
+/// Multi-key sort: evaluates one or more key expressions per element, then sorts using
+/// the resulting key tuples. Each entry in `desc` controls ascending/descending order
+/// for the corresponding key position.
 #[inline]
 pub fn sort_by_apply<F>(recv: Val, desc: &[bool], mut eval: F) -> Result<Val, EvalError>
 where
@@ -2875,6 +3335,8 @@ where
     Ok(Val::arr(keyed.into_iter().map(|(_, v)| v).collect()))
 }
 
+/// Sorts an array using a two-argument comparator lambda (returns `true` when left < right).
+/// Errors from the comparator are captured and surfaced after the sort completes.
 #[inline]
 pub fn sort_comparator_apply<F>(recv: Val, mut eval_pair: F) -> Result<Val, EvalError>
 where
@@ -2904,6 +3366,7 @@ where
     }
 }
 
+/// Removes all elements for which the predicate is truthy (inverse of `filter`).
 #[inline]
 pub fn remove_predicate_apply<F>(recv: Val, mut eval: F) -> Result<Val, EvalError>
 where
@@ -2921,6 +3384,8 @@ where
     Ok(Val::arr(out))
 }
 
+/// Filters an array keeping only elements that satisfy all `pred_count` predicates.
+/// Multiple predicates are ANDed together; `eval(item, idx)` evaluates the `idx`-th predicate.
 #[inline]
 pub fn find_apply<F>(recv: Val, pred_count: usize, mut eval: F) -> Result<Val, EvalError>
 where
@@ -2944,6 +3409,7 @@ where
     Ok(Val::arr(out))
 }
 
+/// Deduplicates an array by a key expression, keeping the first occurrence of each distinct key.
 #[inline]
 pub fn unique_by_apply<F>(recv: Val, mut eval: F) -> Result<Val, EvalError>
 where
@@ -2963,6 +3429,7 @@ where
     Ok(Val::arr(out))
 }
 
+/// Returns the index of the first element satisfying all predicates, or `Val::Null`.
 #[inline]
 pub fn find_index_apply<F>(recv: Val, pred_count: usize, mut eval: F) -> Result<Val, EvalError>
 where
@@ -2985,6 +3452,7 @@ where
     Ok(Val::Null)
 }
 
+/// Returns all indices where every predicate evaluates to truthy; result is `Val::IntVec`.
 #[inline]
 pub fn indices_where_apply<F>(recv: Val, pred_count: usize, mut eval: F) -> Result<Val, EvalError>
 where
@@ -3008,6 +3476,8 @@ where
     Ok(Val::int_vec(out))
 }
 
+/// Returns the element with the greatest (or smallest) key from the key expression.
+/// `want_max = true` for `max_by`, `false` for `min_by`. Returns `Val::Null` for empty arrays.
 #[inline]
 pub fn extreme_by_apply<F>(recv: Val, want_max: bool, mut eval: F) -> Result<Val, EvalError>
 where
@@ -3042,6 +3512,7 @@ where
     Ok(items.into_iter().nth(best_idx).unwrap_or(Val::Null))
 }
 
+/// Normalises a value to an array: `null` → `[]`, array → identity, scalar → `[scalar]`.
 #[inline]
 pub fn collect_apply(recv: &Val) -> Val {
     match recv {
@@ -3053,16 +3524,19 @@ pub fn collect_apply(recv: &Val) -> Val {
     }
 }
 
+/// Zips two arrays element-wise, stopping at the shorter array.
 #[inline]
 pub fn zip_apply(recv: Val, other: Val) -> Result<Val, EvalError> {
     zip_arrays(recv, other, false, Val::Null)
 }
 
+/// Zips two arrays element-wise, padding the shorter array with `fill`.
 #[inline]
 pub fn zip_longest_apply(recv: Val, other: Val, fill: Val) -> Result<Val, EvalError> {
     zip_arrays(recv, other, true, fill)
 }
 
+/// Zips N arrays element-wise into `[[a0, b0, ...], ...]`, truncating to the shortest.
 #[inline]
 pub fn global_zip_apply(arrs: &[Val]) -> Val {
     let len = arrs.iter().filter_map(|a| a.arr_len()).min().unwrap_or(0);
@@ -3073,6 +3547,7 @@ pub fn global_zip_apply(arrs: &[Val]) -> Val {
     )
 }
 
+/// Zips N arrays element-wise, padding shorter arrays with `fill`.
 #[inline]
 pub fn global_zip_longest_apply(arrs: &[Val], fill: &Val) -> Val {
     let len = arrs.iter().filter_map(|a| a.arr_len()).max().unwrap_or(0);
@@ -3095,6 +3570,7 @@ pub fn global_zip_longest_apply(arrs: &[Val], fill: &Val) -> Val {
     )
 }
 
+/// Computes the Cartesian product of N arrays, returning all combinations as `[[...], ...]`.
 #[inline]
 pub fn global_product_apply(arrs: &[Val]) -> Val {
     let arrays: Vec<Vec<Val>> = arrs
@@ -3109,6 +3585,8 @@ pub fn global_product_apply(arrs: &[Val]) -> Val {
     )
 }
 
+/// Generates an integer range. Accepts 1–3 arguments: `(end)`, `(start, end)`, or
+/// `(start, end, step)`. Returns an empty array when `step == 0` or the range is empty.
 #[inline]
 pub fn range_apply(nums: &[i64]) -> Result<Val, EvalError> {
     if nums.is_empty() || nums.len() > 3 {
@@ -3149,6 +3627,8 @@ pub fn range_apply(nums: &[i64]) -> Result<Val, EvalError> {
     Ok(Val::int_vec(out))
 }
 
+/// Inner equi-join of two arrays of objects on matching key fields.
+/// Builds a hash index over the right-hand array, then iterates the left, merging matches.
 #[inline]
 pub fn equi_join_apply(
     recv: Val,
@@ -3194,6 +3674,7 @@ pub fn equi_join_apply(
     Ok(Val::arr(out))
 }
 
+/// Shallow-merges two objects (right wins on collision). Used internally by `equi_join`.
 fn merge_pair(left: &Val, right: &Val) -> Val {
     match (left, right) {
         (Val::Obj(lo), Val::Obj(ro)) => {
@@ -3207,6 +3688,9 @@ fn merge_pair(left: &Val, right: &Val) -> Val {
     }
 }
 
+/// Pivots an array of objects into a flat or nested map.
+/// Two-arg form: `pivot(key_expr, val_expr)` → `{key: val, ...}`.
+/// Three-arg form: `pivot(row_expr, col_expr, val_expr)` → `{row: {col: val, ...}, ...}`.
 #[inline]
 pub fn pivot_apply<F>(recv: Val, arg_count: usize, mut eval: F) -> Result<Val, EvalError>
 where
@@ -3252,6 +3736,7 @@ where
     Ok(Val::obj(map))
 }
 
+/// DFS pre-order visitor: calls `f` on every node (parents before children).
 fn walk_pre<F: FnMut(&Val)>(value: &Val, f: &mut F) {
     f(value);
     match value {
@@ -3269,6 +3754,8 @@ fn walk_pre<F: FnMut(&Val)>(value: &Val, f: &mut F) {
     }
 }
 
+/// DFS pre-order search: collects every node in the tree that satisfies all `pred_count` predicates.
+/// Visits every descendant including nested arrays and objects.
 #[inline]
 pub fn deep_find_apply<F>(recv: Val, pred_count: usize, mut eval: F) -> Result<Val, EvalError>
 where
@@ -3302,6 +3789,7 @@ where
     }
 }
 
+/// DFS pre-order search: collects every object node that contains all of the given `keys`.
 #[inline]
 pub fn deep_shape_apply(recv: Val, keys: &[Arc<str>]) -> Result<Val, EvalError> {
     if keys.is_empty() {
@@ -3318,6 +3806,7 @@ pub fn deep_shape_apply(recv: Val, keys: &[Arc<str>]) -> Result<Val, EvalError> 
     Ok(Val::arr(out))
 }
 
+/// DFS pre-order search: collects every object node whose listed keys equal the given literal values.
 #[inline]
 pub fn deep_like_apply(recv: Val, pats: &[(Arc<str>, Val)]) -> Result<Val, EvalError> {
     if pats.is_empty() {
@@ -3339,6 +3828,9 @@ pub fn deep_like_apply(recv: Val, pats: &[(Arc<str>, Val)]) -> Result<Val, EvalE
     Ok(Val::arr(out))
 }
 
+/// Recursive tree transform. When `pre = true` the transform runs top-down (pre-order);
+/// when `pre = false` it runs bottom-up (post-order). All array and object children
+/// are recursively transformed, then the lambda is applied.
 pub fn walk_apply<F>(recv: Val, pre: bool, eval: &mut F) -> Result<Val, EvalError>
 where
     F: FnMut(Val) -> Result<Val, EvalError>,
@@ -3384,6 +3876,8 @@ where
     }
 }
 
+/// Applies `eval` repeatedly until the value reaches a fixpoint (output equals input).
+/// Errors if the fixpoint is not reached within 10 000 iterations.
 #[inline]
 pub fn rec_apply<F>(mut recv: Val, mut eval: F) -> Result<Val, EvalError>
 where
@@ -3401,6 +3895,8 @@ where
     ))
 }
 
+/// Walks the entire value tree and, for every node where the predicate is truthy, emits
+/// a `{path: "$...", value: ...}` object. Paths use `$` as the root and `.field` / `[idx]` syntax.
 pub fn trace_path_apply<F>(recv: Val, mut eval: F) -> Result<Val, EvalError>
 where
     F: FnMut(&Val) -> Result<Val, EvalError>,
@@ -3446,6 +3942,8 @@ where
     Ok(Val::arr(out))
 }
 
+/// Evaluates `count` independent expressions against the same receiver and returns
+/// the results as an array `[expr0(recv), expr1(recv), ...]`.
 #[inline]
 pub fn fanout_apply<F>(recv: &Val, count: usize, mut eval: F) -> Result<Val, EvalError>
 where
@@ -3461,6 +3959,8 @@ where
     Ok(Val::arr(out))
 }
 
+/// Evaluates named expressions against the receiver and collects results into an object
+/// `{name0: expr0(recv), name1: expr1(recv), ...}`.
 #[inline]
 pub fn zip_shape_apply<F>(recv: &Val, names: &[Arc<str>], mut eval: F) -> Result<Val, EvalError>
 where
@@ -3476,6 +3976,8 @@ where
     Ok(Val::obj(out))
 }
 
+/// Groups elements by a key expression (arg 0), then applies a shape expression (arg 1)
+/// to each group, returning `{key: shape(group), ...}`.
 #[inline]
 pub fn group_shape_apply<F>(recv: Val, mut eval: F) -> Result<Val, EvalError>
 where
@@ -3499,10 +4001,8 @@ where
     Ok(Val::obj(out))
 }
 
-// ── take_while / drop_while / any / all ─────────────────────────────
 
-/// Per-row take_while decision — `Ok(true)` continue, `Ok(false)`
-/// stop the stream (caller breaks the outer loop).
+/// Per-row primitive for `take_while`: returns true while the predicate holds.
 #[inline]
 pub fn take_while_one<F>(item: &Val, eval: F) -> Result<bool, EvalError>
 where
@@ -3511,8 +4011,7 @@ where
     filter_one(item, eval)
 }
 
-/// Per-row any — `Ok(true)` short-circuits the loop. Caller breaks
-/// on first true.
+/// Per-row primitive for `any`: returns true when the predicate is truthy.
 #[inline]
 pub fn any_one<F>(item: &Val, eval: F) -> Result<bool, EvalError>
 where
@@ -3521,8 +4020,7 @@ where
     filter_one(item, eval)
 }
 
-/// Per-row all — `Ok(false)` short-circuits the loop. Caller breaks
-/// on first false.
+/// Per-row primitive for `all`: returns true when the predicate is truthy.
 #[inline]
 pub fn all_one<F>(item: &Val, eval: F) -> Result<bool, EvalError>
 where
@@ -3531,8 +4029,8 @@ where
     filter_one(item, eval)
 }
 
-/// Buffered take_while — keeps prefix while predicate holds, then
-/// stops.
+
+/// Buffered `take_while`: keeps the leading elements satisfying the predicate, stops at the first falsy result.
 #[inline]
 pub fn take_while_apply<F>(items: Vec<Val>, mut eval: F) -> Result<Vec<Val>, EvalError>
 where
@@ -3548,8 +4046,8 @@ where
     Ok(out)
 }
 
-/// Buffered drop_while — drops prefix while predicate holds,
-/// keeps the rest unconditionally.
+
+/// Buffered `drop_while`: skips leading elements satisfying the predicate, then passes the rest.
 #[inline]
 pub fn drop_while_apply<F>(items: Vec<Val>, mut eval: F) -> Result<Vec<Val>, EvalError>
 where
@@ -3569,9 +4067,8 @@ where
     Ok(out)
 }
 
-// ── partition / group_by / count_by / index_by ──────────────────────
 
-/// Buffered partition — splits items by predicate into (truthy, falsy).
+/// Splits elements into two groups: those satisfying the predicate (first) and those that don't (second).
 #[inline]
 pub fn partition_apply<F>(items: Vec<Val>, mut eval: F) -> Result<(Vec<Val>, Vec<Val>), EvalError>
 where
@@ -3589,8 +4086,9 @@ where
     Ok((yes, no))
 }
 
-/// Buffered group_by — bucket items by key produced by `eval(item)`.
-/// Key is val_to_key'd to `Arc<str>` for IndexMap insertion.
+
+/// Groups elements by a key expression, returning an `IndexMap<key, [elements]>`.
+/// Insertion order of the first occurrence of each key is preserved.
 #[inline]
 pub fn group_by_apply<F>(
     items: Vec<Val>,
@@ -3609,7 +4107,8 @@ where
     Ok(map)
 }
 
-/// Buffered count_by — count items per `eval(item)` key.
+
+/// Counts elements per key expression, returning an `IndexMap<key, Int>`.
 #[inline]
 pub fn count_by_apply<F>(
     items: Vec<Val>,
@@ -3630,7 +4129,9 @@ where
     Ok(map)
 }
 
-/// Buffered index_by — index items by `eval(item)` key (last write wins).
+
+/// Indexes elements by a key expression, returning `IndexMap<key, last_matching_element>`.
+/// When two elements share a key, the last one wins.
 #[inline]
 pub fn index_by_apply<F>(
     items: Vec<Val>,
@@ -3648,11 +4149,8 @@ where
     Ok(map)
 }
 
-// ── object-shaped (filter / transform on IndexMap) ──────────────────
 
-/// Object form of filter — keep entries where predicate on `(k, v)`
-/// holds. Caller supplies which side feeds the predicate (key for
-/// `filter_keys`, value for `filter_values`) via the closure.
+/// Filters an object's entries, keeping only those for which `keep(key, value)` is truthy.
 #[inline]
 pub fn filter_object_apply<F>(
     map: indexmap::IndexMap<std::sync::Arc<str>, Val>,
@@ -3670,8 +4168,8 @@ where
     Ok(out)
 }
 
-/// Object form of map — rename keys via `eval(key)`. Values
-/// preserved.
+
+/// Applies `eval` to every key of the object and rebuilds the map with the new keys.
 #[inline]
 pub fn transform_keys_apply<F>(
     map: indexmap::IndexMap<std::sync::Arc<str>, Val>,
@@ -3689,17 +4187,8 @@ where
     Ok(out)
 }
 
-// ── Pure 1:1 kernels (no closure) ───────────────────────────────────
-//
-// `&Val → Val` shape — these are the canonical bodies for built-ins
-// that lifted natively to Pipeline IR `Stage::*` enum variants per
-// `lift_native_pattern.md`. Called from BOTH the Pipeline runtime arm
-// AND the VM fallback adapter (for nested sub-program invocation via
-// `Opcode::CallMethod`).
 
-/// Canonical `.keys()` impl shared by `Stage::Keys` runtime arm and
-/// the `.keys` VM adapter.  Non-object receivers yield an
-/// empty array.
+/// Returns an array of every key in the object, or an empty array for non-objects.
 #[inline]
 pub fn keys_apply(recv: &Val) -> Val {
     Val::arr(
@@ -3709,7 +4198,8 @@ pub fn keys_apply(recv: &Val) -> Val {
     )
 }
 
-/// Canonical `.values()` impl.
+
+/// Returns an array of every value in the object, or an empty array for non-objects.
 #[inline]
 pub fn values_apply(recv: &Val) -> Val {
     Val::arr(
@@ -3719,7 +4209,8 @@ pub fn values_apply(recv: &Val) -> Val {
     )
 }
 
-/// Canonical `.entries()` impl.  Each entry is `Val::arr([key, value])`.
+
+/// Returns `[[key, value], ...]` pairs for each entry in the object.
 #[inline]
 pub fn entries_apply(recv: &Val) -> Val {
     Val::arr(
@@ -3733,13 +4224,9 @@ pub fn entries_apply(recv: &Val) -> Val {
     )
 }
 
-/// Canonical `.slice(start[, end])` impl shared by `Stage::Slice`
-/// runtime arms and the `.slice` builtin dispatch shim.
-/// Handles `Val::Str` + `Val::StrSlice` receivers; ASCII fast path
-/// returns zero-alloc `Val::StrSlice` via `StrRef`; Unicode walks
-/// `char_indices`. Negative indexes count from end (Python slice
-/// semantics); `end=None` means "to end". Non-string receiver
-/// returns the value unchanged.
+
+/// Returns a substring by character indices, supporting negative indexing.
+/// Returns a zero-copy `StrSlice` view when the input is ASCII; allocates otherwise.
 pub fn slice_apply(recv: Val, start: i64, end: Option<i64>) -> Val {
     let (parent, base_off, view_len): (Arc<str>, usize, usize) = match recv {
         Val::Str(s) => {
@@ -3800,10 +4287,8 @@ pub fn slice_apply(recv: Val, start: i64, end: Option<i64>) -> Val {
     ))
 }
 
-/// Canonical `.split(sep)` impl shared by `Stage::Split` runtime arms
-/// and the `.split` builtin dispatch shim. Returns the split segments
-/// as fresh `Val::Str` allocations wrapped in `Val::Arr`. `None` on
-/// non-string receiver.
+
+/// Splits a string on `sep` and returns the parts as an array of strings.
 #[inline]
 pub fn split_apply(recv: &Val, sep: &str) -> Option<Val> {
     let s: &str = match recv {
@@ -3818,28 +4303,25 @@ pub fn split_apply(recv: &Val, sep: &str) -> Option<Val> {
     ))
 }
 
-/// Canonical `.chunk(n)` partition into chunks of size `n` (last may
-/// be shorter). Each emitted Val is `Val::arr` of up to `n` source
-/// elements.
+
+/// Splits a slice into non-overlapping chunks of size `n` (last chunk may be smaller).
 #[inline]
 pub fn chunk_apply(items: &[Val], n: usize) -> Vec<Val> {
     let n = n.max(1);
     items.chunks(n).map(|c| Val::arr(c.to_vec())).collect()
 }
 
-/// Canonical `.window(n)` sliding window of size `n` over the source
-/// stream. Emits `len.saturating_sub(n) + 1` overlapping windows;
-/// empty when `n > len`.
+
+/// Produces all contiguous windows of size `n` from a slice of values.
 #[inline]
 pub fn window_apply(items: &[Val], n: usize) -> Vec<Val> {
     let n = n.max(1);
     items.windows(n).map(|w| Val::arr(w.to_vec())).collect()
 }
 
-/// Canonical `.replace(needle, repl)` (all=false) and `.replace_all`
-/// (all=true). Shared by `Stage::Replace` runtime arms and the
-/// dispatch shim. Returns receiver unchanged when needle is absent
-/// (no alloc fast-path). `None` on non-string receiver.
+
+/// Replaces `needle` with `replacement` in a string. When `all` is true replaces every
+/// occurrence; otherwise only the first. Returns the original value unchanged if `needle` is absent.
 #[inline]
 pub fn replace_apply(recv: Val, needle: &str, replacement: &str, all: bool) -> Option<Val> {
     let s: Arc<str> = match recv {
@@ -3858,24 +4340,16 @@ pub fn replace_apply(recv: Val, needle: &str, replacement: &str, all: bool) -> O
     Some(Val::Str(Arc::<str>::from(out)))
 }
 
-// ── String 1:1 transforms (Phase D batch 1) ─────────────────────────
-//
-// Per `lift_native_pattern.md` — each builtin's body lives here as a
-// `pub fn *_apply(recv: &Val) -> Option<Val>` free fn. Pipeline IR
-// runtime arm calls these directly via `lifted_apply` dispatch.
-//
-// Helper: lift any `&str → String` transform into a `&Val → Option<Val>`
-// kernel that filters non-string receivers. Accepts both owned strings
-// and tape-backed `StrSlice` views so simd-json materialisation can
-// share string storage without changing builtin semantics.
 
+/// Applies a `&str → String` transform to the string inside `recv`, wrapping the result in `Val::Str`.
 #[inline]
 fn map_str_owned(recv: &Val, f: impl FnOnce(&str) -> String) -> Option<Val> {
     let s = recv.as_str_ref()?;
     Some(Val::Str(Arc::<str>::from(f(s).as_str())))
 }
 
-/// `.upper()` — ASCII fast path; full Unicode fallback.
+
+/// Converts the string to all-uppercase (ASCII fast path).
 #[inline]
 pub fn upper_apply(recv: &Val) -> Option<Val> {
     map_str_owned(recv, |s| {
@@ -3889,7 +4363,8 @@ pub fn upper_apply(recv: &Val) -> Option<Val> {
     })
 }
 
-/// `.lower()` — ASCII fast path; full Unicode fallback.
+
+/// Converts the string to all-lowercase (ASCII fast path).
 #[inline]
 pub fn lower_apply(recv: &Val) -> Option<Val> {
     map_str_owned(recv, |s| {
@@ -3903,25 +4378,29 @@ pub fn lower_apply(recv: &Val) -> Option<Val> {
     })
 }
 
-/// `.trim()` — strip whitespace from both ends.
+
+/// Strips leading and trailing whitespace from a string.
 #[inline]
 pub fn trim_apply(recv: &Val) -> Option<Val> {
     map_str_owned(recv, |s| s.trim().to_owned())
 }
 
-/// `.trim_left()` / `.trim_start()` — strip leading whitespace.
+
+/// Strips leading whitespace from a string.
 #[inline]
 pub fn trim_left_apply(recv: &Val) -> Option<Val> {
     map_str_owned(recv, |s| s.trim_start().to_owned())
 }
 
-/// `.trim_right()` / `.trim_end()` — strip trailing whitespace.
+
+/// Strips trailing whitespace from a string.
 #[inline]
 pub fn trim_right_apply(recv: &Val) -> Option<Val> {
     map_str_owned(recv, |s| s.trim_end().to_owned())
 }
 
-/// `.capitalize()` — uppercase first char, lowercase rest (per Unicode).
+
+/// Uppercases the first character and lowercases the rest of a string.
 #[inline]
 pub fn capitalize_apply(recv: &Val) -> Option<Val> {
     map_str_owned(recv, |s| {
@@ -3937,7 +4416,8 @@ pub fn capitalize_apply(recv: &Val) -> Option<Val> {
     })
 }
 
-/// `.title_case()` — uppercase first char of each word, lowercase rest.
+
+/// Capitalises the first letter of each whitespace-delimited word.
 #[inline]
 pub fn title_case_apply(recv: &Val) -> Option<Val> {
     map_str_owned(recv, |s| {
@@ -3962,7 +4442,8 @@ pub fn title_case_apply(recv: &Val) -> Option<Val> {
     })
 }
 
-/// `.html_escape()` — replace HTML special chars with entities.
+
+/// Escapes `<`, `>`, `&`, `"`, and `'` to their HTML entity equivalents.
 #[inline]
 pub fn html_escape_apply(recv: &Val) -> Option<Val> {
     map_str_owned(recv, |s| {
@@ -3981,7 +4462,8 @@ pub fn html_escape_apply(recv: &Val) -> Option<Val> {
     })
 }
 
-/// `.html_unescape()` — reverse the 5 entity replacements.
+
+/// Converts HTML entities (`&lt;`, `&gt;`, `&amp;`, `&quot;`, `&#39;`) back to their characters.
 #[inline]
 pub fn html_unescape_apply(recv: &Val) -> Option<Val> {
     map_str_owned(recv, |s| {
@@ -3993,7 +4475,8 @@ pub fn html_unescape_apply(recv: &Val) -> Option<Val> {
     })
 }
 
-/// `.url_encode()` — percent-encode per RFC 3986 unreserved set.
+
+/// Percent-encodes a string using RFC 3986 unreserved characters (`A-Z a-z 0-9 - _ . ~`).
 #[inline]
 pub fn url_encode_apply(recv: &Val) -> Option<Val> {
     map_str_owned(recv, |s| {
@@ -4014,7 +4497,8 @@ pub fn url_encode_apply(recv: &Val) -> Option<Val> {
     })
 }
 
-/// `.url_decode()` — percent-decode + plus-to-space.
+
+/// Decodes a percent-encoded URL string, also converting `+` to space.
 #[inline]
 pub fn url_decode_apply(recv: &Val) -> Option<Val> {
     map_str_owned(recv, |s| {
@@ -4042,7 +4526,8 @@ pub fn url_decode_apply(recv: &Val) -> Option<Val> {
     })
 }
 
-/// `.to_base64()` — RFC 4648 base64 encoding.
+
+/// Encodes a string's bytes as standard (non-padded) Base64.
 #[inline]
 pub fn to_base64_apply(recv: &Val) -> Option<Val> {
     map_str_owned(recv, |s| {
@@ -4050,7 +4535,8 @@ pub fn to_base64_apply(recv: &Val) -> Option<Val> {
     })
 }
 
-/// `.dedent()` — strip common leading whitespace from all non-empty lines.
+
+/// Removes the common leading whitespace prefix from every non-blank line.
 #[inline]
 pub fn dedent_apply(recv: &Val) -> Option<Val> {
     map_str_owned(recv, |s| {
@@ -4073,7 +4559,8 @@ pub fn dedent_apply(recv: &Val) -> Option<Val> {
     })
 }
 
-/// `.snake_case()` — lower-case words joined by `_`.
+
+/// Converts a string to `snake_case` by splitting on word boundaries and joining with `_`.
 #[inline]
 pub fn snake_case_apply(recv: &Val) -> Option<Val> {
     map_str_owned(recv, |s| {
@@ -4081,7 +4568,8 @@ pub fn snake_case_apply(recv: &Val) -> Option<Val> {
     })
 }
 
-/// `.kebab_case()` — lower-case words joined by `-`.
+
+/// Converts a string to `kebab-case` by splitting on word boundaries and joining with `-`.
 #[inline]
 pub fn kebab_case_apply(recv: &Val) -> Option<Val> {
     map_str_owned(recv, |s| {
@@ -4089,7 +4577,8 @@ pub fn kebab_case_apply(recv: &Val) -> Option<Val> {
     })
 }
 
-/// `.camel_case()` — first word lower, rest capitalised, no separator.
+
+/// Converts a string to `camelCase` (first word lowercase, subsequent words title-cased).
 #[inline]
 pub fn camel_case_apply(recv: &Val) -> Option<Val> {
     map_str_owned(recv, |s| {
@@ -4106,7 +4595,8 @@ pub fn camel_case_apply(recv: &Val) -> Option<Val> {
     })
 }
 
-/// `.pascal_case()` — every word capitalised, no separator.
+
+/// Converts a string to `PascalCase` (every word title-cased, no separator).
 #[inline]
 pub fn pascal_case_apply(recv: &Val) -> Option<Val> {
     map_str_owned(recv, |s| {
@@ -4119,23 +4609,22 @@ pub fn pascal_case_apply(recv: &Val) -> Option<Val> {
     })
 }
 
-/// `.reverse()` on a string — Unicode-aware char reverse.
+
+/// Reverses the Unicode codepoints of a string.
 #[inline]
 pub fn reverse_str_apply(recv: &Val) -> Option<Val> {
     map_str_owned(recv, |s| s.chars().rev().collect::<String>())
 }
 
-/// Helper: lift any `&str → Val` transform into a kernel that
-/// filters non-string receivers (matches prior `lifted_str_to_val!`
-/// macro semantics).
+
+/// Applies a `&str → Val` transform to the string inside `recv`.
 #[inline]
 fn map_str_val(recv: &Val, f: impl FnOnce(&str) -> Val) -> Option<Val> {
     Some(f(recv.as_str_ref()?))
 }
 
-// ── Phase D batch 2: string → Val transforms (was lifted_str_to_val!) ──
 
-/// `.lines()` — split into Val::Arr of Val::Str by newline.
+/// Splits a string on newlines and returns each line as a `Val::Str`.
 #[inline]
 pub fn lines_apply(recv: &Val) -> Option<Val> {
     map_str_val(recv, |s| {
@@ -4143,7 +4632,8 @@ pub fn lines_apply(recv: &Val) -> Option<Val> {
     })
 }
 
-/// `.words()` — whitespace split into Val::Arr of Val::Str.
+
+/// Splits a string on whitespace and returns each token as a `Val::Str`.
 #[inline]
 pub fn words_apply(recv: &Val) -> Option<Val> {
     map_str_val(recv, |s| {
@@ -4155,7 +4645,8 @@ pub fn words_apply(recv: &Val) -> Option<Val> {
     })
 }
 
-/// `.chars()` — codepoint split into Val::Arr of Val::Str.
+
+/// Returns each Unicode character as a single-char `Val::Str`.
 #[inline]
 pub fn chars_apply(recv: &Val) -> Option<Val> {
     map_str_val(recv, |s| {
@@ -4167,7 +4658,8 @@ pub fn chars_apply(recv: &Val) -> Option<Val> {
     })
 }
 
-/// `.chars_of()` — Str → Arr<Str> (one Str per Unicode char).
+
+/// Returns each Unicode code point re-encoded as a UTF-8 `Val::Str` (same as `chars` for BMP).
 #[inline]
 pub fn chars_of_apply(recv: &Val) -> Option<Val> {
     map_str_val(recv, |s| {
@@ -4181,7 +4673,8 @@ pub fn chars_of_apply(recv: &Val) -> Option<Val> {
     })
 }
 
-/// `.bytes()` — Str → IntVec of byte values.
+
+/// Returns each byte of the string's UTF-8 encoding as a `Val::Int`.
 #[inline]
 pub fn bytes_of_apply(recv: &Val) -> Option<Val> {
     map_str_val(recv, |s| {
@@ -4190,7 +4683,8 @@ pub fn bytes_of_apply(recv: &Val) -> Option<Val> {
     })
 }
 
-/// `.ceil()` — numeric ceiling as Int.
+
+/// Returns the ceiling (round-up) of a numeric value as `Val::Int`.
 #[inline]
 pub fn ceil_apply(recv: &Val) -> Option<Val> {
     match recv {
@@ -4200,6 +4694,7 @@ pub fn ceil_apply(recv: &Val) -> Option<Val> {
     }
 }
 
+/// Like [`ceil_apply`] but returns an error for non-numeric receivers.
 #[inline]
 pub fn try_ceil_apply(recv: &Val) -> Result<Option<Val>, EvalError> {
     ceil_apply(recv)
@@ -4207,7 +4702,8 @@ pub fn try_ceil_apply(recv: &Val) -> Result<Option<Val>, EvalError> {
         .ok_or_else(|| EvalError("ceil: expected number".into()))
 }
 
-/// `.floor()` — numeric floor as Int.
+
+/// Returns the floor (round-down) of a numeric value as `Val::Int`.
 #[inline]
 pub fn floor_apply(recv: &Val) -> Option<Val> {
     match recv {
@@ -4217,6 +4713,7 @@ pub fn floor_apply(recv: &Val) -> Option<Val> {
     }
 }
 
+/// Like [`floor_apply`] but returns an error for non-numeric receivers.
 #[inline]
 pub fn try_floor_apply(recv: &Val) -> Result<Option<Val>, EvalError> {
     floor_apply(recv)
@@ -4224,7 +4721,8 @@ pub fn try_floor_apply(recv: &Val) -> Result<Option<Val>, EvalError> {
         .ok_or_else(|| EvalError("floor: expected number".into()))
 }
 
-/// `.round()` — numeric round as Int.
+
+/// Rounds a numeric value to the nearest integer.
 #[inline]
 pub fn round_apply(recv: &Val) -> Option<Val> {
     match recv {
@@ -4234,6 +4732,7 @@ pub fn round_apply(recv: &Val) -> Option<Val> {
     }
 }
 
+/// Like [`round_apply`] but returns an error for non-numeric receivers.
 #[inline]
 pub fn try_round_apply(recv: &Val) -> Result<Option<Val>, EvalError> {
     round_apply(recv)
@@ -4241,7 +4740,8 @@ pub fn try_round_apply(recv: &Val) -> Result<Option<Val>, EvalError> {
         .ok_or_else(|| EvalError("round: expected number".into()))
 }
 
-/// `.abs()` — numeric absolute value.
+
+/// Returns the absolute value of an integer or float.
 #[inline]
 pub fn abs_apply(recv: &Val) -> Option<Val> {
     match recv {
@@ -4251,6 +4751,7 @@ pub fn abs_apply(recv: &Val) -> Option<Val> {
     }
 }
 
+/// Like [`abs_apply`] but returns an error for non-numeric receivers.
 #[inline]
 pub fn try_abs_apply(recv: &Val) -> Result<Option<Val>, EvalError> {
     abs_apply(recv)
@@ -4258,7 +4759,8 @@ pub fn try_abs_apply(recv: &Val) -> Result<Option<Val>, EvalError> {
         .ok_or_else(|| EvalError("abs: expected number".into()))
 }
 
-/// `.parse_int()` — trim + parse i64; Null on failure.
+
+/// Parses the string as a base-10 `i64`; returns `Val::Null` on failure.
 #[inline]
 pub fn parse_int_apply(recv: &Val) -> Option<Val> {
     map_str_val(recv, |s| {
@@ -4266,7 +4768,8 @@ pub fn parse_int_apply(recv: &Val) -> Option<Val> {
     })
 }
 
-/// `.parse_float()` — trim + parse f64; Null on failure.
+
+/// Parses the string as an `f64`; returns `Val::Null` on failure.
 #[inline]
 pub fn parse_float_apply(recv: &Val) -> Option<Val> {
     map_str_val(recv, |s| {
@@ -4274,8 +4777,9 @@ pub fn parse_float_apply(recv: &Val) -> Option<Val> {
     })
 }
 
-/// `.parse_bool()` — recognise extended forms (true/yes/1/on, false/no/0/off);
-/// Null on unrecognised.
+
+/// Parses common truthy/falsy string representations to `Val::Bool`; returns `Val::Null` otherwise.
+/// Recognises `true/yes/1/on` and `false/no/0/off` (case-insensitive).
 #[inline]
 pub fn parse_bool_apply(recv: &Val) -> Option<Val> {
     map_str_val(recv, |s| match s.trim().to_ascii_lowercase().as_str() {
@@ -4285,7 +4789,8 @@ pub fn parse_bool_apply(recv: &Val) -> Option<Val> {
     })
 }
 
-/// `.from_base64()` — decode; lossy UTF-8 conversion. Null on decode failure.
+
+/// Decodes a Base64 string to its UTF-8 representation; returns `Val::Null` for invalid input.
 #[inline]
 pub fn from_base64_apply(recv: &Val) -> Option<Val> {
     map_str_val(recv, |s| match crate::builtin_helpers::base64_decode(s) {
@@ -4294,15 +4799,15 @@ pub fn from_base64_apply(recv: &Val) -> Option<Val> {
     })
 }
 
-// ── Phase D batch 3: string args (one-arg / two-arg search/transform) ──
 
-/// `.repeat(n)` — repeat string n times.
+/// Returns the string repeated `n` times.
 #[inline]
 pub fn repeat_apply(recv: &Val, n: usize) -> Option<Val> {
     Some(Val::Str(Arc::from(recv.as_str_ref()?.repeat(n))))
 }
 
-/// `.strip_prefix(prefix)` — strip if present, else return original.
+
+/// Removes `prefix` from the beginning of the string if present; returns the original otherwise.
 #[inline]
 pub fn strip_prefix_apply(recv: &Val, prefix: &str) -> Option<Val> {
     let s = recv.as_str_ref()?;
@@ -4312,7 +4817,8 @@ pub fn strip_prefix_apply(recv: &Val, prefix: &str) -> Option<Val> {
     })
 }
 
-/// `.strip_suffix(suffix)` — strip if present, else return original.
+
+/// Removes `suffix` from the end of the string if present; returns the original otherwise.
 #[inline]
 pub fn strip_suffix_apply(recv: &Val, suffix: &str) -> Option<Val> {
     let s = recv.as_str_ref()?;
@@ -4322,7 +4828,8 @@ pub fn strip_suffix_apply(recv: &Val, suffix: &str) -> Option<Val> {
     })
 }
 
-/// `.pad_left(width, fill)` — left-pad to width with fill char.
+
+/// Left-pads the string to `width` characters with `fill`; returns the original when already wide enough.
 #[inline]
 pub fn pad_left_apply(recv: &Val, width: usize, fill: char) -> Option<Val> {
     let s = recv.as_str_ref()?;
@@ -4334,7 +4841,8 @@ pub fn pad_left_apply(recv: &Val, width: usize, fill: char) -> Option<Val> {
     Some(Val::Str(Arc::from(pad + s)))
 }
 
-/// `.pad_right(width, fill)` — right-pad to width with fill char.
+
+/// Right-pads the string to `width` characters with `fill`; returns the original when already wide enough.
 #[inline]
 pub fn pad_right_apply(recv: &Val, width: usize, fill: char) -> Option<Val> {
     let s = recv.as_str_ref()?;
@@ -4346,7 +4854,8 @@ pub fn pad_right_apply(recv: &Val, width: usize, fill: char) -> Option<Val> {
     Some(Val::Str(Arc::from(s.to_string() + &pad)))
 }
 
-/// `.center(width, fill)` — center-pad to width with fill char.
+
+/// Centers the string within `width` characters by padding both sides with `fill`.
 #[inline]
 pub fn center_apply(recv: &Val, width: usize, fill: char) -> Option<Val> {
     let s = recv.as_str_ref()?;
@@ -4368,7 +4877,8 @@ pub fn center_apply(recv: &Val, width: usize, fill: char) -> Option<Val> {
     Some(Val::Str(Arc::from(out)))
 }
 
-/// `.indent(n)` — prepend n spaces to each line.
+
+/// Prepends `n` spaces to each line of the string.
 #[inline]
 pub fn indent_apply(recv: &Val, n: usize) -> Option<Val> {
     let s = recv.as_str_ref()?;
@@ -4381,7 +4891,8 @@ pub fn indent_apply(recv: &Val, n: usize) -> Option<Val> {
     Some(Val::Str(Arc::from(out)))
 }
 
-/// `.scan(pat)` — collect all occurrences of `pat` in `s`.
+
+/// Finds every non-overlapping occurrence of `pat` and returns an array of the matched strings.
 #[inline]
 pub fn scan_apply(recv: &Val, pat: &str) -> Option<Val> {
     let s = recv.as_str_ref()?;
@@ -4396,10 +4907,9 @@ pub fn scan_apply(recv: &Val, pat: &str) -> Option<Val> {
     Some(Val::arr(out))
 }
 
-// ── Phase D batch 4: array family ───────────────────────────────────
 
-/// Numeric aggregate over a receiver without projection. Typed vectors stay on
-/// slice loops; mixed arrays skip non-numeric values.
+/// Applies a numeric aggregate (`sum`, `avg`, `min`, `max`) to an array or typed numeric vector.
+/// Returns `Val::Null` when the receiver is not an array-like type.
 #[inline]
 pub fn numeric_aggregate_apply(recv: &Val, method: BuiltinMethod) -> Val {
     match recv {
@@ -4410,9 +4920,9 @@ pub fn numeric_aggregate_apply(recv: &Val, method: BuiltinMethod) -> Val {
     }
 }
 
-/// Numeric aggregate with per-item projection. This path is used for
-/// `.sum(field)` / `.avg(lambda ...)`; bare `.sum()` stays on the typed
-/// no-projection kernel above.
+
+/// Numeric aggregate with a projection: evaluates `eval` on each element first,
+/// then aggregates all numeric results. Non-numeric projected values are silently skipped.
 #[inline]
 pub fn numeric_aggregate_projected_apply<F>(
     recv: &Val,
@@ -4436,6 +4946,7 @@ where
     Ok(numeric_aggregate_values(&vals, method))
 }
 
+/// Numeric aggregate specialised for homogeneous `i64` slices.
 #[inline]
 fn numeric_aggregate_i64(a: &[i64], method: BuiltinMethod) -> Val {
     match method {
@@ -4454,6 +4965,7 @@ fn numeric_aggregate_i64(a: &[i64], method: BuiltinMethod) -> Val {
     }
 }
 
+/// Numeric aggregate specialised for homogeneous `f64` slices.
 #[inline]
 fn numeric_aggregate_f64(a: &[f64], method: BuiltinMethod) -> Val {
     match method {
@@ -4481,6 +4993,7 @@ fn numeric_aggregate_f64(a: &[f64], method: BuiltinMethod) -> Val {
     }
 }
 
+/// Numeric aggregate for heterogeneous `Val` slices; skips non-numeric elements.
 #[inline]
 fn numeric_aggregate_values(a: &[Val], method: BuiltinMethod) -> Val {
     match method {
@@ -4553,8 +5066,8 @@ fn numeric_aggregate_values(a: &[Val], method: BuiltinMethod) -> Val {
     }
 }
 
-/// `.len()` / `.count()` — element count for Arr / typed vecs / Obj /
-/// Str (chars).
+
+/// Returns the logical length of an array, object, or string (char count), or `None` for scalars.
 #[inline]
 pub fn len_apply(recv: &Val) -> Option<Val> {
     let n = match recv {
@@ -4571,7 +5084,8 @@ pub fn len_apply(recv: &Val) -> Option<Val> {
     Some(Val::Int(n as i64))
 }
 
-/// `.compact()` — drop Null entries from Arr.
+
+/// Removes all `Val::Null` elements from an array.
 #[inline]
 pub fn compact_apply(recv: &Val) -> Option<Val> {
     let items_cow = recv.as_vals()?;
@@ -4583,7 +5097,8 @@ pub fn compact_apply(recv: &Val) -> Option<Val> {
     Some(Val::arr(kept))
 }
 
-/// `.flatten(depth)` — recursive flatten up to depth levels.
+
+/// Recursively flattens nested arrays up to `depth` levels deep.
 #[inline]
 pub fn flatten_depth_apply(recv: &Val, depth: usize) -> Option<Val> {
     if matches!(recv, Val::Arr(_)) {
@@ -4593,7 +5108,8 @@ pub fn flatten_depth_apply(recv: &Val, depth: usize) -> Option<Val> {
     }
 }
 
-/// `.reverse()` — reverse Arr / IntVec / FloatVec / StrVec / Str.
+
+/// Reverses any sequence type: arrays, typed vectors, and strings (by Unicode codepoints).
 #[inline]
 pub fn reverse_any_apply(recv: &Val) -> Option<Val> {
     Some(match recv {
@@ -4625,7 +5141,8 @@ pub fn reverse_any_apply(recv: &Val) -> Option<Val> {
     })
 }
 
-/// `.unique()` / `.distinct()` — dedup Arr by val_to_key.
+
+/// Removes duplicate elements from an array, preserving first-seen order.
 #[inline]
 pub fn unique_arr_apply(recv: &Val) -> Option<Val> {
     let items_cow = recv.as_vals()?;
@@ -4638,6 +5155,7 @@ pub fn unique_arr_apply(recv: &Val) -> Option<Val> {
     Some(Val::arr(kept))
 }
 
+/// Extracts numeric values from any array-like `Val` as `Option<f64>`, preserving nulls as `None`.
 fn numeric_options(recv: &Val) -> Option<Vec<Option<f64>>> {
     match recv {
         Val::IntVec(a) => Some(a.iter().map(|n| Some(*n as f64)).collect()),
@@ -4655,6 +5173,7 @@ fn numeric_options(recv: &Val) -> Option<Vec<Option<f64>>> {
     }
 }
 
+/// Converts a `Vec<Option<f64>>` back to a `Val`: returns `FloatVec` when all are `Some`, otherwise `Arr` with nulls.
 fn numeric_options_to_val(out: Vec<Option<f64>>) -> Val {
     if out.iter().all(|v| v.is_some()) {
         Val::float_vec(out.into_iter().map(|v| v.unwrap()).collect())
@@ -4670,7 +5189,8 @@ fn numeric_options_to_val(out: Vec<Option<f64>>) -> Val {
     }
 }
 
-/// `.rolling_sum(n)` — rolling numeric sum.
+
+/// Computes a rolling sum over a window of size `n`; positions before the first full window are `Null`.
 #[inline]
 pub fn rolling_sum_apply(recv: &Val, n: usize) -> Option<Val> {
     if n == 0 {
@@ -4697,7 +5217,8 @@ pub fn rolling_sum_apply(recv: &Val, n: usize) -> Option<Val> {
     Some(numeric_options_to_val(out))
 }
 
-/// `.rolling_avg(n)` — rolling numeric average over present values.
+
+/// Computes a rolling average over a window of size `n`; positions before the first full window are `Null`.
 #[inline]
 pub fn rolling_avg_apply(recv: &Val, n: usize) -> Option<Val> {
     if n == 0 {
@@ -4727,7 +5248,8 @@ pub fn rolling_avg_apply(recv: &Val, n: usize) -> Option<Val> {
     Some(numeric_options_to_val(out))
 }
 
-/// `.rolling_min(n)` — rolling numeric min.
+
+/// Computes a rolling minimum over a window of size `n`; positions before the first full window are `Null`.
 #[inline]
 pub fn rolling_min_apply(recv: &Val, n: usize) -> Option<Val> {
     if n == 0 {
@@ -4750,7 +5272,8 @@ pub fn rolling_min_apply(recv: &Val, n: usize) -> Option<Val> {
     Some(numeric_options_to_val(out))
 }
 
-/// `.rolling_max(n)` — rolling numeric max.
+
+/// Computes a rolling maximum over a window of size `n`; positions before the first full window are `Null`.
 #[inline]
 pub fn rolling_max_apply(recv: &Val, n: usize) -> Option<Val> {
     if n == 0 {
@@ -4773,7 +5296,8 @@ pub fn rolling_max_apply(recv: &Val, n: usize) -> Option<Val> {
     Some(numeric_options_to_val(out))
 }
 
-/// `.lag(n)` — shift numeric values backward, filling leading nulls.
+
+/// Shifts values backward by `n` positions; the first `n` positions are `Null`.
 #[inline]
 pub fn lag_apply(recv: &Val, n: usize) -> Option<Val> {
     let xs = numeric_options(recv)?;
@@ -4784,7 +5308,8 @@ pub fn lag_apply(recv: &Val, n: usize) -> Option<Val> {
     Some(numeric_options_to_val(out))
 }
 
-/// `.lead(n)` — shift numeric values forward, filling trailing nulls.
+
+/// Shifts values forward by `n` positions; the last `n` positions are `Null`.
 #[inline]
 pub fn lead_apply(recv: &Val, n: usize) -> Option<Val> {
     let xs = numeric_options(recv)?;
@@ -4796,7 +5321,8 @@ pub fn lead_apply(recv: &Val, n: usize) -> Option<Val> {
     Some(numeric_options_to_val(out))
 }
 
-/// `.diff_window()` — current numeric value minus previous numeric value.
+
+/// Returns element-wise first differences (`v[i] - v[i-1]`); the first element is `Null`.
 #[inline]
 pub fn diff_window_apply(recv: &Val) -> Option<Val> {
     let xs = numeric_options(recv)?;
@@ -4810,7 +5336,8 @@ pub fn diff_window_apply(recv: &Val) -> Option<Val> {
     Some(numeric_options_to_val(out))
 }
 
-/// `.pct_change()` — fractional change from previous numeric value.
+
+/// Returns element-wise percentage change `(v[i] - v[i-1]) / v[i-1]`; division by zero and the first element yield `Null`.
 #[inline]
 pub fn pct_change_apply(recv: &Val) -> Option<Val> {
     let xs = numeric_options(recv)?;
@@ -4824,7 +5351,8 @@ pub fn pct_change_apply(recv: &Val) -> Option<Val> {
     Some(numeric_options_to_val(out))
 }
 
-/// `.cummax()` — cumulative numeric maximum, carrying previous best over nulls.
+
+/// Computes a cumulative maximum: each position holds the running max up to that index.
 #[inline]
 pub fn cummax_apply(recv: &Val) -> Option<Val> {
     let xs = numeric_options(recv)?;
@@ -4846,7 +5374,8 @@ pub fn cummax_apply(recv: &Val) -> Option<Val> {
     Some(numeric_options_to_val(out))
 }
 
-/// `.cummin()` — cumulative numeric minimum, carrying previous best over nulls.
+
+/// Computes a cumulative minimum: each position holds the running min up to that index.
 #[inline]
 pub fn cummin_apply(recv: &Val) -> Option<Val> {
     let xs = numeric_options(recv)?;
@@ -4868,7 +5397,8 @@ pub fn cummin_apply(recv: &Val) -> Option<Val> {
     Some(numeric_options_to_val(out))
 }
 
-/// `.zscore()` — numeric standard score.
+
+/// Normalises each element to its z-score `(v - mean) / stddev`; returns 0 when stddev is zero, `Null` for non-numeric.
 #[inline]
 pub fn zscore_apply(recv: &Val) -> Option<Val> {
     let xs = numeric_options(recv)?;
@@ -4890,7 +5420,8 @@ pub fn zscore_apply(recv: &Val) -> Option<Val> {
     Some(numeric_options_to_val(out))
 }
 
-/// `.first(n)` — n==1 returns scalar, else Arr of first n.
+
+/// Returns the first `n` elements of an array; when `n == 1` returns a scalar instead of a single-element array.
 #[inline]
 pub fn first_apply(recv: &Val, n: i64) -> Option<Val> {
     if let Val::Arr(a) = recv {
@@ -4904,7 +5435,8 @@ pub fn first_apply(recv: &Val, n: i64) -> Option<Val> {
     }
 }
 
-/// `.last(n)` — n==1 returns scalar, else Arr of last n.
+
+/// Returns the last `n` elements of an array; when `n == 1` returns a scalar instead of a single-element array.
 #[inline]
 pub fn last_apply(recv: &Val, n: i64) -> Option<Val> {
     if let Val::Arr(a) = recv {
@@ -4919,13 +5451,15 @@ pub fn last_apply(recv: &Val, n: i64) -> Option<Val> {
     }
 }
 
-/// `.nth(i)` — index lookup (negative = from end).
+
+/// Returns the element at index `i` (negative indices count from the end); delegates to `Val::get_index`.
 #[inline]
 pub fn nth_any_apply(recv: &Val, i: i64) -> Option<Val> {
     Some(recv.get_index(i))
 }
 
-/// `.append(item)` — push item onto end. Coerces typed vecs.
+
+/// Appends `item` to the end of an array, returning a new array.
 #[inline]
 pub fn append_apply(recv: &Val, item: &Val) -> Option<Val> {
     let mut v = recv.clone().into_vec()?;
@@ -4933,7 +5467,8 @@ pub fn append_apply(recv: &Val, item: &Val) -> Option<Val> {
     Some(Val::arr(v))
 }
 
-/// `.prepend(item)` — insert item at front.
+
+/// Inserts `item` at the beginning of an array, returning a new array.
 #[inline]
 pub fn prepend_apply(recv: &Val, item: &Val) -> Option<Val> {
     let mut v = recv.clone().into_vec()?;
@@ -4941,7 +5476,8 @@ pub fn prepend_apply(recv: &Val, item: &Val) -> Option<Val> {
     Some(Val::arr(v))
 }
 
-/// `.remove(target)` — array-like receiver without values equal to target.
+
+/// Removes all elements from an array that are structurally equal to `target`.
 #[inline]
 pub fn remove_value_apply(recv: &Val, target: &Val) -> Option<Val> {
     use crate::util::val_to_key;
@@ -4955,7 +5491,8 @@ pub fn remove_value_apply(recv: &Val, target: &Val) -> Option<Val> {
     Some(Val::arr(out))
 }
 
-/// `.enumerate()` — Arr → Arr<{index, value}>.
+
+/// Pairs each element with its zero-based index, producing `[{index, value}, …]`.
 #[inline]
 pub fn enumerate_apply(recv: &Val) -> Option<Val> {
     let items_cow = recv.as_vals()?;
@@ -4967,7 +5504,8 @@ pub fn enumerate_apply(recv: &Val) -> Option<Val> {
     Some(Val::arr(out))
 }
 
-/// `.join(sep)` — array-like receiver to string.
+
+/// Joins all array elements into a single string separated by `sep`; non-string elements are coerced.
 #[inline]
 pub fn join_apply(recv: &Val, sep: &str) -> Option<Val> {
     use crate::util::val_to_string;
@@ -5017,7 +5555,8 @@ pub fn join_apply(recv: &Val, sep: &str) -> Option<Val> {
     Some(Val::Str(Arc::from(out)))
 }
 
-/// `.index(target)` — first index of target, else null.
+
+/// Returns the zero-based index of the first occurrence of `target`, or `Val::Null` if not found.
 #[inline]
 pub fn index_value_apply(recv: &Val, target: &Val) -> Option<Val> {
     let items_cow = recv.as_vals()?;
@@ -5029,7 +5568,8 @@ pub fn index_value_apply(recv: &Val, target: &Val) -> Option<Val> {
     Some(Val::Null)
 }
 
-/// `.indices_of(target)` — all indices of target.
+
+/// Returns all zero-based indices where `target` appears in the array.
 #[inline]
 pub fn indices_of_apply(recv: &Val, target: &Val) -> Option<Val> {
     let items_cow = recv.as_vals()?;
@@ -5042,7 +5582,9 @@ pub fn indices_of_apply(recv: &Val, target: &Val) -> Option<Val> {
     Some(Val::int_vec(out))
 }
 
-/// `.explode(field)` — expand array-valued object field into one row per element.
+
+/// Unnests the array-valued `field` of each row object: each element of the nested array becomes
+/// its own row, copying all other fields.
 #[inline]
 pub fn explode_apply(recv: &Val, field: &str) -> Option<Val> {
     let items_cow = recv.as_vals()?;
@@ -5069,7 +5611,9 @@ pub fn explode_apply(recv: &Val, field: &str) -> Option<Val> {
     Some(Val::arr(out))
 }
 
-/// `.implode(field)` — inverse of explode, grouping rows by all non-field values.
+
+/// Inverse of `explode`: groups rows by all fields except `field`, collecting the `field` values
+/// into an array on each merged row.
 #[inline]
 pub fn implode_apply(recv: &Val, field: &str) -> Option<Val> {
     use crate::util::val_to_key;
@@ -5100,7 +5644,8 @@ pub fn implode_apply(recv: &Val, field: &str) -> Option<Val> {
     Some(Val::arr(out))
 }
 
-/// `.pairwise()` — Arr → Arr<[arr[i], arr[i+1]]>.
+
+/// Produces all adjacent pairs `[[a,b],[b,c],…]` from an array.
 #[inline]
 pub fn pairwise_apply(recv: &Val) -> Option<Val> {
     let items_cow = recv.as_vals()?;
@@ -5112,7 +5657,8 @@ pub fn pairwise_apply(recv: &Val) -> Option<Val> {
     Some(Val::arr(out))
 }
 
-/// `.chunk(n)` Stage — Val::Arr → Arr<Arr<n>>.
+
+/// Splits an array into non-overlapping chunks of size `n`; the last chunk may be smaller.
 #[inline]
 pub fn chunk_arr_apply(recv: &Val, n: usize) -> Option<Val> {
     if n == 0 {
@@ -5126,7 +5672,8 @@ pub fn chunk_arr_apply(recv: &Val, n: usize) -> Option<Val> {
     }
 }
 
-/// `.window(n)` Stage — Val::Arr → Arr<Arr<n>>.
+
+/// Produces all overlapping sliding windows of size `n` from an array.
 #[inline]
 pub fn window_arr_apply(recv: &Val, n: usize) -> Option<Val> {
     if n == 0 {
@@ -5140,7 +5687,8 @@ pub fn window_arr_apply(recv: &Val, n: usize) -> Option<Val> {
     }
 }
 
-/// `.intersect(other)` — keep elements in both arrays.
+
+/// Returns elements that appear in both `recv` and `other` (set intersection, order from `recv`).
 #[inline]
 pub fn intersect_apply(recv: &Val, other: &[Val]) -> Option<Val> {
     if let Val::Arr(a) = recv {
@@ -5157,7 +5705,8 @@ pub fn intersect_apply(recv: &Val, other: &[Val]) -> Option<Val> {
     }
 }
 
-/// `.union(other)` — combine, preserve order, dedup.
+
+/// Returns all elements from `recv` plus elements in `other` not already present (set union).
 #[inline]
 pub fn union_apply(recv: &Val, other: &[Val]) -> Option<Val> {
     if let Val::Arr(a) = recv {
@@ -5175,7 +5724,8 @@ pub fn union_apply(recv: &Val, other: &[Val]) -> Option<Val> {
     }
 }
 
-/// `.diff(other)` — keep elements in self but not other.
+
+/// Returns elements from `recv` that do not appear in `other` (set difference).
 #[inline]
 pub fn diff_apply(recv: &Val, other: &[Val]) -> Option<Val> {
     if let Val::Arr(a) = recv {
@@ -5192,9 +5742,8 @@ pub fn diff_apply(recv: &Val, other: &[Val]) -> Option<Val> {
     }
 }
 
-// ── Phase D batch 5: object family ──────────────────────────────────
 
-/// `.from_pairs()` — Arr<{key,val}> or Arr<[Str, Val]> → Obj.
+/// Converts an array of `[key, value]` pairs or `{key, val}` objects into an object.
 #[inline]
 pub fn from_pairs_apply(recv: &Val) -> Option<Val> {
     let items = recv.as_vals()?;
@@ -5227,7 +5776,8 @@ pub fn from_pairs_apply(recv: &Val) -> Option<Val> {
     Some(Val::Obj(Arc::new(m)))
 }
 
-/// `.invert()` — Obj{k → v} → Obj{v_str → k}.
+
+/// Swaps keys and values of an object; values are coerced to strings to become new keys.
 #[inline]
 pub fn invert_apply(recv: &Val) -> Option<Val> {
     let m = recv.as_object()?;
@@ -5243,7 +5793,8 @@ pub fn invert_apply(recv: &Val) -> Option<Val> {
     Some(Val::Obj(Arc::new(out)))
 }
 
-/// `.merge(other)` — shallow merge; other wins on conflict.
+
+/// Shallow-merges `other` into `recv`; `other` keys overwrite `recv` keys.
 #[inline]
 pub fn merge_apply(recv: &Val, other: &Val) -> Option<Val> {
     let base = recv.as_object()?;
@@ -5255,13 +5806,15 @@ pub fn merge_apply(recv: &Val, other: &Val) -> Option<Val> {
     Some(Val::Obj(Arc::new(out)))
 }
 
-/// `.deep_merge(other)` — recursive merge.
+
+/// Recursively merges `other` into `recv`, combining nested objects rather than replacing them.
 #[inline]
 pub fn deep_merge_apply(recv: &Val, other: &Val) -> Option<Val> {
     Some(crate::util::deep_merge(recv.clone(), other.clone()))
 }
 
-/// `.defaults(other)` — fill null/missing keys from other.
+
+/// Fills missing or null keys of `recv` with values from `other` (non-destructive merge).
 #[inline]
 pub fn defaults_apply(recv: &Val, other: &Val) -> Option<Val> {
     let base = recv.as_object()?;
@@ -5276,7 +5829,8 @@ pub fn defaults_apply(recv: &Val, other: &Val) -> Option<Val> {
     Some(Val::Obj(Arc::new(out)))
 }
 
-/// `.rename({old: new, ...})` — rename keys per mapping.
+
+/// Renames keys in an object according to `renames` (`{old: new, …}`), preserving other keys.
 #[inline]
 pub fn rename_apply(recv: &Val, renames: &Val) -> Option<Val> {
     let base = recv.as_object()?;
@@ -5294,23 +5848,32 @@ pub fn rename_apply(recv: &Val, renames: &Val) -> Option<Val> {
     Some(Val::Obj(Arc::new(out)))
 }
 
-// ── Phase D batch 6: path family ────────────────────────────────────
 
+/// A single resolved segment of a dot/bracket path string.
 pub(crate) enum PathSeg {
+    /// A named object field (`.foo`).
     Field(String),
+    /// A numeric array index (`[0]` or `[-1]`).
     Index(i64),
 }
 
+/// Describes where to read a value from when executing a `pick` specification.
 pub(crate) enum PickSource {
+    /// A single top-level field name.
     Field(Arc<str>),
+    /// A multi-segment dot/bracket path, pre-parsed into [`PathSeg`]s.
     Path(Vec<PathSeg>),
 }
 
+/// One entry in a compiled `pick` call: the output key name and where to read the value from.
 pub(crate) struct PickSpec {
+    /// Key used in the output object.
     pub out_key: Arc<str>,
+    /// Source location (field or path) inside the input object.
     pub source: PickSource,
 }
 
+/// Parses a dot/bracket path string (e.g. `"a.b[0].c"`) into a `Vec<PathSeg>`.
 pub(crate) fn parse_path_segs(path: &str) -> Vec<PathSeg> {
     let mut segs = Vec::new();
     let mut cur = String::new();
@@ -5344,6 +5907,7 @@ pub(crate) fn parse_path_segs(path: &str) -> Vec<PathSeg> {
     segs
 }
 
+/// Traverses `val` following `segs`, returning the found value or `Val::Null` when any step is missing.
 pub(crate) fn get_path_impl(val: &Val, segs: &[PathSeg]) -> Val {
     if segs.is_empty() {
         return val.clone();
@@ -5355,6 +5919,7 @@ pub(crate) fn get_path_impl(val: &Val, segs: &[PathSeg]) -> Val {
     get_path_impl(&next, &segs[1..])
 }
 
+/// Returns a copy of `val` with the node at `segs` replaced by `new_val`; creates missing intermediate objects.
 pub(crate) fn set_path_impl(val: Val, segs: &[PathSeg], new_val: Val) -> Val {
     if segs.is_empty() {
         return new_val;
@@ -5390,6 +5955,7 @@ pub(crate) fn set_path_impl(val: Val, segs: &[PathSeg], new_val: Val) -> Val {
     }
 }
 
+/// Returns a copy of `val` with the node at `segs` removed; no-ops if the path does not exist.
 pub(crate) fn del_path_impl(val: Val, segs: &[PathSeg]) -> Val {
     if segs.is_empty() {
         return Val::Null;
@@ -5421,10 +5987,13 @@ pub(crate) fn del_path_impl(val: Val, segs: &[PathSeg]) -> Val {
     }
 }
 
+/// Converts a possibly-negative index into an absolute `usize`, clamped to `[0, len)`.
 fn resolve_path_idx(i: i64, len: i64) -> usize {
     (if i < 0 { (len + i).max(0) } else { i }) as usize
 }
 
+/// Recursively flattens nested object keys into dot-separated (or `sep`-separated) flat keys,
+/// writing results into `out`. Arrays and scalars terminate the recursion.
 pub(crate) fn flatten_keys_impl(
     prefix: &str,
     val: &Val,
@@ -5448,6 +6017,7 @@ pub(crate) fn flatten_keys_impl(
     }
 }
 
+/// Reconstructs a nested object from a flat `{sep}-joined-key: value` map.
 pub(crate) fn unflatten_keys_impl(m: &IndexMap<Arc<str>, Val>, sep: &str) -> Val {
     let mut root: IndexMap<Arc<str>, Val> = IndexMap::new();
     for (key, val) in m {
@@ -5457,6 +6027,7 @@ pub(crate) fn unflatten_keys_impl(m: &IndexMap<Arc<str>, Val>, sep: &str) -> Val
     Val::obj(root)
 }
 
+/// Recursively inserts `val` at the nested path `parts` inside `obj`, creating intermediate objects as needed.
 fn insert_nested(obj: &mut IndexMap<Arc<str>, Val>, parts: &[&str], val: Val) {
     if parts.is_empty() {
         return;
@@ -5473,14 +6044,16 @@ fn insert_nested(obj: &mut IndexMap<Arc<str>, Val>, parts: &[&str], val: Val) {
     }
 }
 
-/// `.get_path(path)` — read leaf at dotted/bracket path.
+
+/// Retrieves the value at a dot/bracket `path` string, returning `Val::Null` for missing nodes.
 #[inline]
 pub fn get_path_apply(recv: &Val, path: &str) -> Option<Val> {
     let segs = parse_path_segs(path);
     Some(get_path_impl(recv, &segs))
 }
 
-/// `.has_path(path)` — Val::Bool, true if path resolves non-null.
+
+/// Returns `Val::Bool(true)` when a value exists (non-null) at the given dot/bracket path.
 #[inline]
 pub fn has_path_apply(recv: &Val, path: &str) -> Option<Val> {
     let segs = parse_path_segs(path);
@@ -5488,15 +6061,16 @@ pub fn has_path_apply(recv: &Val, path: &str) -> Option<Val> {
     Some(Val::Bool(found))
 }
 
-/// `.has(key)` — Val::Bool, true if Obj has key.
+
+/// Returns `Val::Bool(true)` when the object has a top-level key named `key`.
 #[inline]
 pub fn has_apply(recv: &Val, key: &str) -> Option<Val> {
     let m = recv.as_object()?;
     Some(Val::Bool(m.contains_key(key)))
 }
 
-/// `.pick(keys...)` — keep selected object keys. For array receivers, applies
-/// the projection to each object element.
+
+/// Keeps only the listed `keys` from an object (or each object in an array), dropping all others.
 #[inline]
 pub fn pick_apply(recv: &Val, keys: &[Arc<str>]) -> Option<Val> {
     use indexmap::IndexMap;
@@ -5525,6 +6099,7 @@ pub fn pick_apply(recv: &Val, keys: &[Arc<str>]) -> Option<Val> {
     }
 }
 
+/// Richer version of `pick_apply` that supports aliasing and deep-path sources via [`PickSpec`].
 #[inline]
 pub(crate) fn pick_specs_apply(recv: &Val, specs: &[PickSpec]) -> Option<Val> {
     fn pick_obj(m: &IndexMap<Arc<str>, Val>, specs: &[PickSpec]) -> Val {
@@ -5562,8 +6137,8 @@ pub(crate) fn pick_specs_apply(recv: &Val, specs: &[PickSpec]) -> Option<Val> {
     }
 }
 
-/// `.omit(keys...)` — drop selected object keys. For array receivers, applies
-/// the projection to each object element.
+
+/// Removes the listed `keys` from an object (or each object in an array), keeping all others.
 #[inline]
 pub fn omit_apply(recv: &Val, keys: &[Arc<str>]) -> Option<Val> {
     fn omit_obj(m: &indexmap::IndexMap<Arc<str>, Val>, keys: &[Arc<str>]) -> Val {
@@ -5588,21 +6163,24 @@ pub fn omit_apply(recv: &Val, keys: &[Arc<str>]) -> Option<Val> {
     }
 }
 
-/// `.del_path(path)` — remove value at dotted path.
+
+/// Returns a copy of `recv` with the node at the dot/bracket `path` removed.
 #[inline]
 pub fn del_path_apply(recv: &Val, path: &str) -> Option<Val> {
     let segs = parse_path_segs(path);
     Some(del_path_impl(recv.clone(), &segs))
 }
 
-/// `.set_path(path, value)` — set value at dotted path.
+
+/// Returns a copy of `recv` with the node at the dot/bracket `path` replaced by `value`.
 #[inline]
 pub fn set_path_apply(recv: &Val, path: &str, value: &Val) -> Option<Val> {
     let segs = parse_path_segs(path);
     Some(set_path_impl(recv.clone(), &segs, value.clone()))
 }
 
-/// `.del_paths(p1, p2, ...)` — remove multiple dotted paths.
+
+/// Deletes multiple dot/bracket paths from `recv` sequentially, returning the final result.
 #[inline]
 pub fn del_paths_apply(recv: &Val, paths: &[Arc<str>]) -> Option<Val> {
     let mut out = recv.clone();
@@ -5613,7 +6191,8 @@ pub fn del_paths_apply(recv: &Val, paths: &[Arc<str>]) -> Option<Val> {
     Some(out)
 }
 
-/// `.flatten_keys(sep)` — Obj → flat-Obj with `sep`-joined keys.
+
+/// Collapses a nested object into a flat object using `sep`-joined key paths (e.g. `"a.b.c": v`).
 #[inline]
 pub fn flatten_keys_apply(recv: &Val, sep: &str) -> Option<Val> {
     let mut out: indexmap::IndexMap<Arc<str>, Val> = indexmap::IndexMap::new();
@@ -5621,7 +6200,8 @@ pub fn flatten_keys_apply(recv: &Val, sep: &str) -> Option<Val> {
     Some(Val::obj(out))
 }
 
-/// `.unflatten_keys(sep)` — flat-Obj → nested Obj.
+
+/// Reconstructs a nested object from a flat `sep`-delimited key map; inverse of `flatten_keys_apply`.
 #[inline]
 pub fn unflatten_keys_apply(recv: &Val, sep: &str) -> Option<Val> {
     if let Val::Obj(m) = recv {
@@ -5631,19 +6211,21 @@ pub fn unflatten_keys_apply(recv: &Val, sep: &str) -> Option<Val> {
     }
 }
 
-// ── Phase D batch 7: regex family ───────────────────────────────────
 
+/// Compiles a regex pattern, converting any compilation error into an `EvalError`.
 #[inline]
 fn compile_regex_eval(pat: &str) -> Result<Arc<regex::Regex>, EvalError> {
     crate::builtin_helpers::compile_regex(pat).map_err(EvalError)
 }
 
-/// `.match(pat)` — Bool, regex match anywhere.
+
+/// Returns `Val::Bool` indicating whether the full string matches `pat`; returns `None` for non-strings.
 #[inline]
 pub fn re_match_apply(recv: &Val, pat: &str) -> Option<Val> {
     try_re_match_apply(recv, pat).ok().flatten()
 }
 
+/// Fallible variant of [`re_match_apply`]; propagates regex compilation errors as `EvalError`.
 #[inline]
 pub fn try_re_match_apply(recv: &Val, pat: &str) -> Result<Option<Val>, EvalError> {
     let Some(s) = recv.as_str_ref() else {
@@ -5653,12 +6235,14 @@ pub fn try_re_match_apply(recv: &Val, pat: &str) -> Result<Option<Val>, EvalErro
     Ok(Some(Val::Bool(re.is_match(s))))
 }
 
-/// `.match_first(pat)` — Str of first match or Null.
+
+/// Returns the first substring matching `pat`, or `Val::Null` if no match is found.
 #[inline]
 pub fn re_match_first_apply(recv: &Val, pat: &str) -> Option<Val> {
     try_re_match_first_apply(recv, pat).ok().flatten()
 }
 
+/// Fallible variant of [`re_match_first_apply`]; propagates regex compilation errors.
 #[inline]
 pub fn try_re_match_first_apply(recv: &Val, pat: &str) -> Result<Option<Val>, EvalError> {
     let Some(s) = recv.as_str_ref() else {
@@ -5672,12 +6256,14 @@ pub fn try_re_match_first_apply(recv: &Val, pat: &str) -> Result<Option<Val>, Ev
     ))
 }
 
-/// `.match_all(pat)` — StrVec of all matches.
+
+/// Returns all non-overlapping substrings matching `pat` as a `StrVec`.
 #[inline]
 pub fn re_match_all_apply(recv: &Val, pat: &str) -> Option<Val> {
     try_re_match_all_apply(recv, pat).ok().flatten()
 }
 
+/// Fallible variant of [`re_match_all_apply`]; propagates regex compilation errors.
 #[inline]
 pub fn try_re_match_all_apply(recv: &Val, pat: &str) -> Result<Option<Val>, EvalError> {
     let Some(s) = recv.as_str_ref() else {
@@ -5691,12 +6277,14 @@ pub fn try_re_match_all_apply(recv: &Val, pat: &str) -> Result<Option<Val>, Eval
     Ok(Some(Val::str_vec(out)))
 }
 
-/// `.captures(pat)` — Arr of capture groups (group 0 first); Null on miss.
+
+/// Returns capture groups of the first match as an array, or `Val::Null` if no match.
 #[inline]
 pub fn re_captures_apply(recv: &Val, pat: &str) -> Option<Val> {
     try_re_captures_apply(recv, pat).ok().flatten()
 }
 
+/// Fallible variant of [`re_captures_apply`]; propagates regex compilation errors.
 #[inline]
 pub fn try_re_captures_apply(recv: &Val, pat: &str) -> Result<Option<Val>, EvalError> {
     let Some(s) = recv.as_str_ref() else {
@@ -5719,12 +6307,14 @@ pub fn try_re_captures_apply(recv: &Val, pat: &str) -> Result<Option<Val>, EvalE
     }))
 }
 
-/// `.captures_all(pat)` — Arr<Arr> of capture groups for every match.
+
+/// Returns an array of capture-group arrays for every match of `pat` in the string.
 #[inline]
 pub fn re_captures_all_apply(recv: &Val, pat: &str) -> Option<Val> {
     try_re_captures_all_apply(recv, pat).ok().flatten()
 }
 
+/// Fallible variant of [`re_captures_all_apply`]; propagates regex compilation errors.
 #[inline]
 pub fn try_re_captures_all_apply(recv: &Val, pat: &str) -> Result<Option<Val>, EvalError> {
     let Some(s) = recv.as_str_ref() else {
@@ -5746,12 +6336,14 @@ pub fn try_re_captures_all_apply(recv: &Val, pat: &str) -> Result<Option<Val>, E
     Ok(Some(Val::arr(all)))
 }
 
-/// `.replace_re(pat, with)` — single regex replacement.
+
+/// Replaces the first occurrence of `pat` in the string with `with`.
 #[inline]
 pub fn re_replace_apply(recv: &Val, pat: &str, with: &str) -> Option<Val> {
     try_re_replace_apply(recv, pat, with).ok().flatten()
 }
 
+/// Fallible variant of [`re_replace_apply`]; propagates regex compilation errors.
 #[inline]
 pub fn try_re_replace_apply(recv: &Val, pat: &str, with: &str) -> Result<Option<Val>, EvalError> {
     let Some(s) = recv.as_str_ref() else {
@@ -5762,12 +6354,14 @@ pub fn try_re_replace_apply(recv: &Val, pat: &str, with: &str) -> Result<Option<
     Ok(Some(Val::Str(Arc::from(out.as_ref()))))
 }
 
-/// `.replace_all_re(pat, with)` — all regex replacements.
+
+/// Replaces all non-overlapping occurrences of `pat` in the string with `with`.
 #[inline]
 pub fn re_replace_all_apply(recv: &Val, pat: &str, with: &str) -> Option<Val> {
     try_re_replace_all_apply(recv, pat, with).ok().flatten()
 }
 
+/// Fallible variant of [`re_replace_all_apply`]; propagates regex compilation errors.
 #[inline]
 pub fn try_re_replace_all_apply(
     recv: &Val,
@@ -5782,12 +6376,14 @@ pub fn try_re_replace_all_apply(
     Ok(Some(Val::Str(Arc::from(out.as_ref()))))
 }
 
-/// `.split_re(pat)` — regex split into StrVec.
+
+/// Splits the string on all matches of `pat`, returning a `StrVec` of tokens.
 #[inline]
 pub fn re_split_apply(recv: &Val, pat: &str) -> Option<Val> {
     try_re_split_apply(recv, pat).ok().flatten()
 }
 
+/// Fallible variant of [`re_split_apply`]; propagates regex compilation errors.
 #[inline]
 pub fn try_re_split_apply(recv: &Val, pat: &str) -> Result<Option<Val>, EvalError> {
     let Some(s) = recv.as_str_ref() else {
@@ -5798,23 +6394,24 @@ pub fn try_re_split_apply(recv: &Val, pat: &str) -> Result<Option<Val>, EvalErro
     Ok(Some(Val::str_vec(out)))
 }
 
-/// `.contains_any([needles])` — Bool, true if any needle appears.
+
+/// Returns `Val::Bool(true)` when the string contains at least one of the `needles`.
 #[inline]
 pub fn contains_any_apply(recv: &Val, needles: &[Arc<str>]) -> Option<Val> {
     let s = recv.as_str_ref()?;
     Some(Val::Bool(needles.iter().any(|n| s.contains(n.as_ref()))))
 }
 
-/// `.contains_all([needles])` — Bool, true if every needle appears.
+
+/// Returns `Val::Bool(true)` when the string contains every one of the `needles`.
 #[inline]
 pub fn contains_all_apply(recv: &Val, needles: &[Arc<str>]) -> Option<Val> {
     let s = recv.as_str_ref()?;
     Some(Val::Bool(needles.iter().all(|n| s.contains(n.as_ref()))))
 }
 
-// ── Phase D batch 8: csv / cast / type-name ────────────────────────
 
-/// `.to_csv()` — Val → Str (comma sep).
+/// Serialises an array of arrays/objects to CSV format (comma-delimited).
 #[inline]
 pub fn to_csv_apply(recv: &Val) -> Option<Val> {
     Some(Val::Str(Arc::from(
@@ -5822,7 +6419,8 @@ pub fn to_csv_apply(recv: &Val) -> Option<Val> {
     )))
 }
 
-/// `.to_tsv()` — Val → Str (tab sep).
+
+/// Serialises an array of arrays/objects to TSV format (tab-delimited).
 #[inline]
 pub fn to_tsv_apply(recv: &Val) -> Option<Val> {
     Some(Val::Str(Arc::from(
@@ -5830,7 +6428,8 @@ pub fn to_tsv_apply(recv: &Val) -> Option<Val> {
     )))
 }
 
-/// `.to_pairs()` — Obj → Arr<{key, val}> (named-obj form).
+
+/// Converts an object into `[{key, val}, …]`; returns an empty array for non-objects.
 #[inline]
 pub fn to_pairs_apply(recv: &Val) -> Option<Val> {
     use crate::util::obj2;
@@ -5845,13 +6444,15 @@ pub fn to_pairs_apply(recv: &Val) -> Option<Val> {
     Some(Val::arr(arr))
 }
 
-/// `.type()` — Val → Str (type name).
+
+/// Returns the runtime type name of `recv` as a `Val::Str` (e.g. `"Int"`, `"Array"`, `"Object"`).
 #[inline]
 pub fn type_name_apply(recv: &Val) -> Option<Val> {
     Some(Val::Str(Arc::from(recv.type_name())))
 }
 
-/// `.to_string()` — Val → Str (display form).
+
+/// Coerces any `Val` to its human-readable string representation.
 #[inline]
 pub fn to_string_apply(recv: &Val) -> Option<Val> {
     Some(Val::Str(Arc::from(
@@ -5859,7 +6460,8 @@ pub fn to_string_apply(recv: &Val) -> Option<Val> {
     )))
 }
 
-/// `.to_json()` — Val → Str (JSON encoding). Inline fast paths for primitives.
+
+/// Serialises `recv` to a compact JSON string; non-finite floats become `"null"`.
 #[inline]
 pub fn to_json_apply(recv: &Val) -> Option<Val> {
     let out = match recv {
@@ -5886,12 +6488,14 @@ pub fn to_json_apply(recv: &Val) -> Option<Val> {
     Some(Val::Str(Arc::from(out)))
 }
 
-/// `.from_json()` — parse receiver as JSON.
+
+/// Parses a JSON string into a `Val`; silently returns `None` on parse errors.
 #[inline]
 pub fn from_json_apply(recv: &Val) -> Option<Val> {
     try_from_json_apply(recv).ok().flatten()
 }
 
+/// Fallible variant of [`from_json_apply`]; returns an `EvalError` on invalid JSON.
 #[inline]
 pub fn try_from_json_apply(recv: &Val) -> Result<Option<Val>, EvalError> {
     #[cfg(feature = "simd-json")]
@@ -5921,7 +6525,8 @@ pub fn try_from_json_apply(recv: &Val) -> Result<Option<Val>, EvalError> {
     }
 }
 
-/// `.or(default)` — default only when receiver is null.
+
+/// Returns `recv` if it is non-null, otherwise returns `default`.
 #[inline]
 pub fn or_apply(recv: &Val, default: &Val) -> Val {
     if recv.is_null() {
@@ -5931,13 +6536,15 @@ pub fn or_apply(recv: &Val, default: &Val) -> Val {
     }
 }
 
-/// `.missing(key)` — negated nested field existence test.
+
+/// Returns `Val::Bool(true)` when `key` is absent or null at any nesting level inside `recv`.
 #[inline]
 pub fn missing_apply(recv: &Val, key: &str) -> Val {
     Val::Bool(!crate::util::field_exists_nested(recv, key))
 }
 
-/// `.includes(item)` / `.contains(item)` — membership or substring check.
+
+/// Membership test: arrays/vectors check element presence, strings check substring, objects check key.
 #[inline]
 pub fn includes_apply(recv: &Val, item: &Val) -> Val {
     use crate::util::val_to_key;
@@ -5964,6 +6571,7 @@ pub fn includes_apply(recv: &Val, item: &Val) -> Val {
     })
 }
 
+/// Infers a JSON-Schema-like descriptor `Val` from a `Val` instance, recursing into objects and arrays.
 pub(crate) fn schema_of(v: &Val) -> Val {
     match v {
         Val::Null => ty_obj("Null"),
@@ -5993,6 +6601,7 @@ pub(crate) fn schema_of(v: &Val) -> Val {
     }
 }
 
+/// Builds an `Object` schema descriptor from an iterator of `(key, value)` pairs.
 fn schema_object<'a>(pairs: impl Iterator<Item = (Arc<str>, &'a Val)>) -> Val {
     let mut required = Vec::new();
     let mut fields = IndexMap::new();
@@ -6012,12 +6621,14 @@ fn schema_object<'a>(pairs: impl Iterator<Item = (Arc<str>, &'a Val)>) -> Val {
     Val::obj(out)
 }
 
+/// Constructs a minimal `{type: name}` schema object.
 fn ty_obj(name: &str) -> Val {
     let mut m: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(1);
     m.insert(Arc::from("type"), Val::Str(Arc::from(name)));
     Val::obj(m)
 }
 
+/// Constructs an `{type: "Array", len, items}` schema object.
 fn array_schema(len: usize, items: Val) -> Val {
     let mut m: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(3);
     m.insert(Arc::from("type"), Val::Str(Arc::from("Array")));
@@ -6026,6 +6637,7 @@ fn array_schema(len: usize, items: Val) -> Val {
     Val::obj(m)
 }
 
+/// Inserts or overwrites a single field in a schema object; returns `obj` unchanged if not an `Obj`.
 fn set_schema_field(obj: Val, key: &str, v: Val) -> Val {
     if let Val::Obj(m) = obj {
         let mut m = Arc::try_unwrap(m).unwrap_or_else(|arc| (*arc).clone());
@@ -6036,6 +6648,7 @@ fn set_schema_field(obj: Val, key: &str, v: Val) -> Val {
     }
 }
 
+/// Extracts the `"type"` string from a schema object, returning `None` for non-schema values.
 fn schema_type(v: &Val) -> Option<&str> {
     if let Val::Obj(m) = v {
         if let Some(Val::Str(s)) = m.get("type") {
@@ -6045,6 +6658,7 @@ fn schema_type(v: &Val) -> Option<&str> {
     None
 }
 
+/// Merges two schema descriptors into one, widening types as needed (same type → recurse, mismatch → `Mixed`).
 fn unify_schema(a: Val, b: Val) -> Val {
     match (schema_type(&a), schema_type(&b)) {
         (Some(x), Some(y)) if x == y => match x {
@@ -6058,6 +6672,7 @@ fn unify_schema(a: Val, b: Val) -> Val {
     }
 }
 
+/// Marks schema `a` as nullable if either `a` or `b` is already nullable; otherwise returns `a` unchanged.
 fn mark_nullable_if_either(a: Val, b: Val) -> Val {
     if is_schema_nullable(&a) || is_schema_nullable(&b) {
         set_schema_field(a, "nullable", Val::Bool(true))
@@ -6066,6 +6681,7 @@ fn mark_nullable_if_either(a: Val, b: Val) -> Val {
     }
 }
 
+/// Returns `true` when the schema object carries `nullable: true`.
 fn is_schema_nullable(v: &Val) -> bool {
     matches!(
         v,
@@ -6073,6 +6689,7 @@ fn is_schema_nullable(v: &Val) -> bool {
     )
 }
 
+/// Unifies two `Array` schemas: recursively unifies item schemas and sums lengths.
 fn unify_array_schemas(a: Val, b: Val) -> Val {
     let items = match (
         extract_schema_field(&a, "items"),
@@ -6088,6 +6705,7 @@ fn unify_array_schemas(a: Val, b: Val) -> Val {
     array_schema((la + lb) as usize, items)
 }
 
+/// Extracts a field from a schema object by key, returning `None` when absent.
 fn extract_schema_field(v: &Val, key: &str) -> Option<Val> {
     if let Val::Obj(m) = v {
         m.get(key).cloned()
@@ -6096,6 +6714,7 @@ fn extract_schema_field(v: &Val, key: &str) -> Option<Val> {
     }
 }
 
+/// Extracts an integer field from a schema object; returns `None` when absent or not an integer.
 fn extract_schema_int(v: &Val, key: &str) -> Option<i64> {
     if let Some(Val::Int(n)) = extract_schema_field(v, key) {
         Some(n)
@@ -6104,6 +6723,7 @@ fn extract_schema_int(v: &Val, key: &str) -> Option<i64> {
     }
 }
 
+/// Unifies two `Object` schemas: merges field schemas, marks fields present in only one as optional.
 fn unify_object_schemas(a: Val, b: Val) -> Val {
     let (Some(Val::Obj(a_fields)), Some(Val::Obj(b_fields))) = (
         extract_schema_field(&a, "fields"),
@@ -6151,6 +6771,7 @@ fn unify_object_schemas(a: Val, b: Val) -> Val {
     Val::obj(out)
 }
 
+/// Extracts the set of required field names from a schema object's `"required"` array.
 fn extract_required_set(v: &Val) -> std::collections::HashSet<String> {
     let mut set = std::collections::HashSet::new();
     if let Some(Val::Arr(a)) = extract_schema_field(v, "required") {
@@ -6163,7 +6784,8 @@ fn extract_required_set(v: &Val) -> std::collections::HashSet<String> {
     set
 }
 
-/// `.schema()` — Val → schema Obj describing types/required/array shape.
+
+/// Public adapter for [`schema_of`]: infers and returns a schema descriptor for any `Val`.
 #[inline]
 pub fn schema_apply(recv: &Val) -> Option<Val> {
     Some(schema_of(recv))

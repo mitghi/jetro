@@ -1,105 +1,91 @@
+//! Internal value type for the evaluator.
+//!
+//! `Val` is the single currency type across all execution paths — VM, pipeline,
+//! and composed. Compound nodes (`Arr`, `Obj`) are `Arc`-wrapped so every
+//! clone is an O(1) refcount bump. Columnar lanes (`IntVec`, `FloatVec`,
+//! `StrVec`, `StrSliceVec`, `ObjVec`) reduce per-element overhead on
+//! homogeneous arrays: 8 B/element instead of a 24 B `Val` enum tag + pointer.
+//! All lanes materialise on demand through `as_vals()` / `into_vals()`.
+
 use indexmap::IndexMap;
 use serde::de::{self, Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde::ser::{Serialize, SerializeMap, SerializeSeq, Serializer};
 use serde_json::{Map, Number};
-/// Internal value type for the v2 evaluator.
-///
-/// Every compound node (Arr, Obj) is `Arc`-wrapped so that `Val::clone()`
-/// is a single atomic refcount bump — no deep copies during traversal.
-///
-/// The API boundary (`evaluate()`) converts `&serde_json::Value → Val`
-/// once on entry and `Val → serde_json::Value` once on exit.
+
 use std::borrow::Cow;
 use std::sync::Arc;
 
-// ── Core type ─────────────────────────────────────────────────────────────────
-//
-// `IntVec` / `FloatVec` are columnar variants: mono-typed numeric arrays
-// stored as `Vec<i64>` / `Vec<f64>` instead of `Vec<Val>`.  This cuts output
-// bandwidth 3x (8B/elem vs 24B Val enum) on producers that emit homogeneous
-// numeric arrays (`range()`, `accumulate` typed fast-path, `from_json` of
-// all-int seq).  Consumers either handle them directly (typed aggregates,
-// serde) or materialize on demand via `as_vals() -> Cow<[Val]>`.
-
+/// Core value type. Every variant is cheaply cloneable; compound variants
+/// are O(1) via Arc refcounting. Columnar variants store homogeneous arrays
+/// without per-element boxing.
 #[derive(Clone, Debug)]
 pub enum Val {
+    /// JSON null; also used as the sentinel for missing fields and out-of-bounds indexing.
     Null,
+    /// JSON boolean value.
     Bool(bool),
+    /// 64-bit signed integer; preferred representation for whole-number JSON numbers.
     Int(i64),
+    /// 64-bit IEEE-754 float; used when a JSON number is not representable as i64.
     Float(f64),
+    /// Heap-allocated interned string; `Arc` makes cloning O(1).
     Str(Arc<str>),
-    /// Borrowed slice into a parent `Arc<str>` — zero-alloc view.
-    /// Produced by slice/split-first/substring to avoid a fresh heap
-    /// allocation per row.  Treat identically to `Str` at all semantic
-    /// boundaries (display, serialize, compare, hash).
+    /// Borrowed string slice into a parent Arc<str>. Zero-alloc view produced
+    /// by the simd-json tape path and string-slice builtins.
     StrSlice(crate::strref::StrRef),
+    /// Heterogeneous array of `Val` elements; Arc-wrapped for O(1) clone.
     Arr(Arc<Vec<Val>>),
+    /// Columnar lane for homogeneous integer arrays; 8 B/element vs 24 B for `Val::Int`.
     IntVec(Arc<Vec<i64>>),
+    /// Columnar lane for homogeneous float arrays; avoids per-element enum tag.
     FloatVec(Arc<Vec<f64>>),
+    /// Columnar lane for homogeneous Arc<str> arrays; avoids per-element enum tag.
     StrVec(Arc<Vec<Arc<str>>>),
-    /// Columnar lane of borrowed-slice string views.  Each element is a
-    /// `StrRef` (parent Arc + byte range); emitted by map-slice / split
-    /// fusions to avoid per-row `Val` enum tag + per-row heap allocation.
-    /// Serializes directly as JSON array of strings via `ValRef`.
+    /// Columnar lane of borrowed-string views; emitted by map-slice fusions.
     StrSliceVec(Arc<Vec<crate::strref::StrRef>>),
+    /// JSON object backed by an insertion-ordered hash map; Arc-wrapped for O(1) clone.
     Obj(Arc<IndexMap<Arc<str>, Val>>),
-    /// Inline small object — flat `(key, value)` pair slice, no hashtable.
-    /// Used for per-row `map({k1, k2, ..})` projections and similar hot
-    /// loops where the allocating an `Arc<IndexMap>` per row dominates.
-    /// Lookup is linear scan (fine for ≤8 entries); insertion-order
-    /// preserved.  Promote to `Obj` if growth / key churn demands it.
+    /// Flat (key, value) pair slice — no hashtable. Hot path for per-row
+    /// projections where allocating Arc<IndexMap> per row dominates.
     ObjSmall(Arc<[(Arc<str>, Val)]>),
-    /// Columnar array-of-objects lane — struct-of-arrays with shared key
-    /// schema.  Each row is an object with the exact same keys in the same
-    /// order; keys stored once in `keys`, row values in `rows[i]`.  Used
-    /// by `map({k1, k2, ..})` projections that produce a uniform-shape
-    /// array.  Serialize iterates once over rows without per-row Arc
-    /// allocation or hashtable reconstruction.
+    /// Struct-of-arrays representation for uniform-shape object arrays; enables zero-tag-check column aggregates.
     ObjVec(Arc<ObjVecData>),
 }
 
-/// Columnar struct-of-arrays for a uniform-shape array of objects.
-///
-/// Phase 7 layout: cells are stored row-major in a single flat
-/// `Vec<Val>` so that a row's fields live in adjacent memory.  Stride
-/// = `keys.len()`; the value at `(row, slot)` is `cells[row * stride + slot]`.
-///
-/// Compared to the prior `Vec<Vec<Val>>` layout this removes one heap
-/// allocation per row and lets the inner loop in slot-aware aggregates
-/// stride through cells with a constant offset, which the autovec /
-/// prefetch path can exploit on hot kernels.
-///
-/// Phase 7-typed-columns: alongside `cells` (row-major Val matrix used
-/// for compatibility with all existing kernels), `typed_cols` holds an
-/// optional per-slot column typed as `Vec<i64>` / `Vec<f64>` / etc.
-/// when the slot is uniform-type across all rows.  Slot kernels can
-/// read raw `&[i64]` directly — closes the boxed-Val tag-check tax
-/// (~3-4× win on numeric aggregates).
+
+/// Struct-of-arrays backing store for `Val::ObjVec`: rows share a single key schema.
+/// `cells` is row-major flat: row `r`, column `c` lives at `cells[r * keys.len() + c]`.
 #[derive(Debug)]
 pub struct ObjVecData {
+    /// Shared column names for every row; length equals the stride (number of columns).
     pub keys: Arc<[Arc<str>]>,
+    /// Row-major flat cell storage; invariant: `cells.len() == keys.len() * nrows`.
     pub cells: Vec<Val>,
-    /// Typed-column mirror.  `None` if not promoted; `Some(cols)` with
-    /// `cols.len() == keys.len()`.  Each column may be `Mixed` (no
-    /// type lock) or a typed lane (`Ints` / `Floats` / `Strs` / `Bools`).
+    /// Optional per-column typed lanes built by `build_typed_cols_from_cells`; enables
+    /// zero-tag-check aggregates (sum/min/max) over typed columns.
     pub typed_cols: Option<Arc<Vec<ObjVecCol>>>,
 }
 
-/// Per-slot typed column variants.  Selected at promotion time when
-/// every row's value at that slot has the same primitive Val tag.
+
+/// Typed column lane for a single `ObjVecData` column; `Mixed` means the slot contains
+/// heterogeneous or non-scalar values and must be accessed through the `cells` flat array.
 #[derive(Debug, Clone)]
 pub enum ObjVecCol {
-    Mixed, // no uniform type; fall back to cells walk
+    /// Column contains mixed or non-scalar types; fall back to `cells` for per-cell access.
+    Mixed,
+    /// All values in this column are `i64`; indexed by row directly without tag checks.
     Ints(Vec<i64>),
+    /// All values in this column are `f64`; indexed by row directly without tag checks.
     Floats(Vec<f64>),
+    /// All values in this column are `Arc<str>`; indexed by row directly without tag checks.
     Strs(Vec<Arc<str>>),
+    /// All values in this column are `bool`; indexed by row directly without tag checks.
     Bools(Vec<bool>),
 }
 
-/// Build typed-column mirror from a row-major Val cells matrix.
-/// Same logic as the pipeline-side helper; lives here so the simd-json
-/// promotion path (`from_simd_tape`) can light up typed kernels at
-/// cold-parse time without depending on the pipeline crate ordering.
+
+/// Inspect the flat `cells` buffer and produce per-column typed lanes for an `ObjVecData`.
+/// A column becomes `Mixed` if any row disagrees with the first row's type tag.
 pub fn build_typed_cols_from_cells(cells: &[Val], stride: usize, nrows: usize) -> Vec<ObjVecCol> {
     let mut out: Vec<ObjVecCol> = Vec::with_capacity(stride);
     if stride == 0 || nrows == 0 {
@@ -186,14 +172,13 @@ pub fn build_typed_cols_from_cells(cells: &[Val], stride: usize, nrows: usize) -
 }
 
 impl ObjVecData {
-    /// Stride between rows (== number of keys).  Per-instance constant.
+    /// Return the number of columns (== `keys.len()`); also the flat-buffer row stride.
     #[inline]
     pub fn stride(&self) -> usize {
         self.keys.len()
     }
 
-    /// Number of rows.  `cells.len() / stride()` (cheap, no division when
-    /// stride is a const propagated by the optimiser at the call site).
+    /// Return the number of object rows stored in `cells`; derived from `cells.len() / stride`.
     #[inline]
     pub fn nrows(&self) -> usize {
         let s = self.stride();
@@ -204,16 +189,13 @@ impl ObjVecData {
         }
     }
 
-    /// Slot index for `key`, or `None` if the field isn't in the shape.
-    /// Linear scan; called once per opcode, then cached in a closure
-    /// over the slot for the per-row inner loop.
+    /// Return the column index for `key`, or `None` if the key is not in the schema.
     #[inline]
     pub fn slot_of(&self, key: &str) -> Option<usize> {
         self.keys.iter().position(|k| k.as_ref() == key)
     }
 
-    /// Borrow the cell at `(row, slot)`.  Caller asserts `slot < stride()`
-    /// and `row < nrows()`; debug-asserted.
+    /// Return a reference to the `Val` at (`row`, `slot`) in the row-major flat buffer.
     #[inline]
     pub fn cell(&self, row: usize, slot: usize) -> &Val {
         debug_assert!(slot < self.stride());
@@ -221,17 +203,14 @@ impl ObjVecData {
         &self.cells[row * self.stride() + slot]
     }
 
-    /// Iterator over the values in a single column (`slot`).  Steps by
-    /// `stride()` through the flat cells vec.  O(N) materialisation
-    /// avoided — caller may call `.sum()` / `.min()` directly.
+    /// Iterate over every value in column `slot`, stepping across rows via `step_by(stride)`.
     pub fn column(&self, slot: usize) -> impl Iterator<Item = &Val> {
         let s = self.stride();
         debug_assert!(slot < s);
         self.cells.iter().skip(slot).step_by(s)
     }
 
-    /// Reconstruct row `i` as a borrowed slice over its `stride()`
-    /// adjacent cells.  Cheap — no allocation.
+    /// Return the contiguous slice of `cells` that represents row `row`; length == stride.
     #[inline]
     pub fn row_slice(&self, row: usize) -> &[Val] {
         let s = self.stride();
@@ -239,8 +218,7 @@ impl ObjVecData {
         &self.cells[off..off + s]
     }
 
-    /// Reconstruct row `i` as a regular object. This is the single
-    /// compatibility materialization point for generic row consumers.
+    /// Materialise row `row` as a heap-allocated `Val::Obj`; used at the compatibility boundary.
     #[inline]
     pub fn row_val(&self, row: usize) -> Val {
         let stride = self.stride();
@@ -253,8 +231,8 @@ impl ObjVecData {
 }
 
 impl Val {
-    /// Unified borrowed `&str` view that works for both `Val::Str` and
-    /// `Val::StrSlice`.  Returns `None` for non-string variants.
+    /// Return the underlying `&str` for both owned (`Str`) and borrowed (`StrSlice`) string variants.
+    /// Returns `None` for all other variants.
     #[inline]
     pub fn as_str_ref(&self) -> Option<&str> {
         match self {
@@ -265,24 +243,19 @@ impl Val {
     }
 }
 
-// ── Constants (avoid heap allocation for common nulls) ────────────────────────
 
 thread_local! {
+    /// Shared sentinel `Val::Null` available without allocation; used by callers that need a `&Val`.
     static NULL_VAL: Val = Val::Null;
-    /// Per-thread key intern cache — shared across `visit_map` / `From<&Value>`
-    /// calls within a single deserialize to avoid allocating a fresh
-    /// `Arc<str>` for every repeated key across rows of an array.
-    /// Scoped keys live until the cache hits its capacity limit; common
-    /// short keys like "id", "grp", "status" get reused for the entire
-    /// array walk.
+    /// Per-thread key-interning cache: maps raw `Box<str>` → shared `Arc<str>` to deduplicate
+    /// object key allocations across repeated parses. Capped at 4096 entries to bound memory.
     static KEY_INTERN: std::cell::RefCell<std::collections::HashMap<Box<str>, Arc<str>>> =
         std::cell::RefCell::new(std::collections::HashMap::with_capacity(64));
 }
 
-/// Intern an object key for the current thread.  Returns a clone of a
-/// cached `Arc<str>` when the key has already been seen; otherwise
-/// allocates once and caches.  Capped at a soft limit to avoid
-/// unbounded growth on pathological docs.
+
+/// Return a shared `Arc<str>` for `k`, reusing a cached copy when possible.
+/// Falls back to a fresh allocation once the per-thread cache exceeds 4096 entries.
 #[inline]
 pub fn intern_key(k: &str) -> Arc<str> {
     const CAP: usize = 4096;
@@ -292,8 +265,8 @@ pub fn intern_key(k: &str) -> Arc<str> {
             return Arc::clone(a);
         }
         if m.len() >= CAP {
-            // Fall back to a fresh Arc without caching — prevents
-            // unbounded growth on docs with wildly varying keys.
+            
+            
             return Arc::<str>::from(k);
         }
         let a: Arc<str> = Arc::<str>::from(k);
@@ -302,10 +275,9 @@ pub fn intern_key(k: &str) -> Arc<str> {
     })
 }
 
-// ── Cheap structural operations ───────────────────────────────────────────────
 
 impl Val {
-    /// O(1) field lookup — returns a clone of the child (cheap: Arc bump for Arr/Obj, copy for scalars).
+    /// Look up `key` in an `Obj` or `ObjSmall` value; returns `Val::Null` for any other variant or missing key.
     #[inline]
     pub fn get_field(&self, key: &str) -> Val {
         match self {
@@ -322,7 +294,8 @@ impl Val {
         }
     }
 
-    /// O(1) index — returns a clone of the element (cheap: Arc bump for Arr/Obj).
+    /// Index into any array-like variant with Python-style negative indexing; returns `Val::Null`
+    /// for out-of-bounds or non-array variants.
     #[inline]
     pub fn get_index(&self, i: i64) -> Val {
         match self {
@@ -370,18 +343,22 @@ impl Val {
         }
     }
 
+    /// Return `true` if the value is `Val::Null`.
     #[inline]
     pub fn is_null(&self) -> bool {
         matches!(self, Val::Null)
     }
+    /// Return `true` if the value is an `Int` or `Float` scalar.
     #[inline]
     pub fn is_number(&self) -> bool {
         matches!(self, Val::Int(_) | Val::Float(_))
     }
+    /// Return `true` for both owned (`Str`) and borrowed (`StrSlice`) string variants.
     #[inline]
     pub fn is_string(&self) -> bool {
         matches!(self, Val::Str(_) | Val::StrSlice(_))
     }
+    /// Return `true` for all array-like variants including columnar lanes; does not include `ObjVec`.
     #[inline]
     pub fn is_array(&self) -> bool {
         matches!(
@@ -390,7 +367,7 @@ impl Val {
         )
     }
 
-    /// Array length — also works on columnar variants.
+    /// Return the element count for any array-like variant (including `ObjVec`), or `None` for scalars/objects.
     #[inline]
     pub fn arr_len(&self) -> Option<usize> {
         match self {
@@ -404,6 +381,7 @@ impl Val {
         }
     }
 
+    /// Coerce `Int` or `Float` to `i64`; truncates floats via `as` cast.
     #[inline]
     pub fn as_i64(&self) -> Option<i64> {
         match self {
@@ -413,6 +391,7 @@ impl Val {
         }
     }
 
+    /// Coerce `Int` or `Float` to `f64`; widens integers losslessly up to 2^53.
     #[inline]
     pub fn as_f64(&self) -> Option<f64> {
         match self {
@@ -422,11 +401,13 @@ impl Val {
         }
     }
 
+    /// Convenience alias for `as_str_ref`; returns `&str` for `Str` and `StrSlice` variants.
     #[inline]
     pub fn as_str(&self) -> Option<&str> {
         self.as_str_ref()
     }
 
+    /// Return a slice reference into the inner `Vec<Val>` only for `Val::Arr`; columnar lanes return `None`.
     #[inline]
     pub fn as_array(&self) -> Option<&[Val]> {
         if let Val::Arr(a) = self {
@@ -436,7 +417,7 @@ impl Val {
         }
     }
 
-    /// Length of any array-like lane without materializing elements.
+    /// Alias for `arr_len`; returns element count for all array-like variants including `ObjVec`.
     #[inline]
     pub fn array_len(&self) -> Option<usize> {
         match self {
@@ -450,8 +431,8 @@ impl Val {
         }
     }
 
-    /// Materialize any array-like (including columnar) as a `Cow<[Val]>`.
-    /// Borrowed for `Val::Arr`; owned allocation for `Val::IntVec`/`FloatVec`/`ObjVec`.
+    /// Materialise any array-like variant as a `Cow<[Val]>`, borrowing `Val::Arr` in place
+    /// and heap-allocating a `Vec<Val>` for columnar lanes. Returns `None` for non-array variants.
     pub fn as_vals(&self) -> Option<Cow<'_, [Val]>> {
         match self {
             Val::Arr(a) => Some(Cow::Borrowed(a.as_slice())),
@@ -473,9 +454,8 @@ impl Val {
         }
     }
 
-    /// Move or materialize any array-like value into a `Vec<Val>`.
-    /// `Arr` preserves its allocation when uniquely owned; typed lanes
-    /// and ObjVec materialize only at this compatibility boundary.
+    /// Consume any array-like variant and return an owned `Vec<Val>`, using `Arc::try_unwrap`
+    /// to avoid a copy for uniquely-owned `Arr`. Returns `Err(self)` for non-array variants.
     pub fn into_vals(self) -> Result<Vec<Val>, Val> {
         match self {
             Val::Arr(a) => Ok(Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone())),
@@ -495,6 +475,8 @@ impl Val {
         }
     }
 
+    /// Return a mutable reference to the inner `Vec<Val>` of a `Val::Arr`, triggering COW via
+    /// `Arc::make_mut` if the Arc is shared. Returns `None` for all other variants.
     pub fn as_array_mut(&mut self) -> Option<&mut Vec<Val>> {
         if let Val::Arr(a) = self {
             Some(Arc::make_mut(a))
@@ -503,6 +485,7 @@ impl Val {
         }
     }
 
+    /// Return a reference to the inner `IndexMap` for `Val::Obj` only; `ObjSmall` and `ObjVec` return `None`.
     #[inline]
     pub fn as_object(&self) -> Option<&IndexMap<Arc<str>, Val>> {
         if let Val::Obj(m) = self {
@@ -512,7 +495,7 @@ impl Val {
         }
     }
 
-    /// Read-only get (serde_json compat shim).
+    /// Borrow a field value by key from `Obj` or `ObjSmall`; returns `None` for all other variants.
     pub fn get(&self, key: &str) -> Option<&Val> {
         match self {
             Val::Obj(m) => m.get(key),
@@ -524,6 +507,7 @@ impl Val {
         }
     }
 
+    /// Return a static JSON-type name string for use in error messages and type predicates.
     pub fn type_name(&self) -> &'static str {
         match self {
             Val::Null => "null",
@@ -540,8 +524,8 @@ impl Val {
         }
     }
 
-    /// Consume self and produce a mutable Vec (clone only if shared).
-    /// Columnar variants are materialized into `Vec<Val>`.
+    /// Consume any array-like variant and return `Some(Vec<Val>)`; returns `None` for scalars and objects.
+    /// Prefer `into_vals` when callers need to distinguish non-array inputs.
     pub fn into_vec(self) -> Option<Vec<Val>> {
         match self {
             Val::Arr(a) => Some(Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone())),
@@ -570,7 +554,8 @@ impl Val {
         }
     }
 
-    /// Consume self and produce a mutable map (clone only if shared).
+    /// Consume a `Val::Obj` and return the inner `IndexMap`, using `Arc::try_unwrap` to avoid a copy
+    /// when the Arc is uniquely owned. Returns `None` for all other variants.
     pub fn into_map(self) -> Option<IndexMap<Arc<str>, Val>> {
         if let Val::Obj(m) = self {
             Some(Arc::try_unwrap(m).unwrap_or_else(|m| (*m).clone()))
@@ -579,45 +564,46 @@ impl Val {
         }
     }
 
-    /// Build a Val::Arr from a Vec without an extra allocation.
+    /// Wrap a `Vec<Val>` in an `Arc` and return `Val::Arr`; preferred constructor for heterogeneous arrays.
     #[inline]
     pub fn arr(v: Vec<Val>) -> Self {
         Val::Arr(Arc::new(v))
     }
 
-    /// Build a columnar `Val::IntVec` from a `Vec<i64>`.
+    /// Wrap a `Vec<i64>` in an `Arc` and return `Val::IntVec`; preferred constructor for integer columnar lanes.
     #[inline]
     pub fn int_vec(v: Vec<i64>) -> Self {
         Val::IntVec(Arc::new(v))
     }
 
-    /// Build a columnar `Val::FloatVec` from a `Vec<f64>`.
+    /// Wrap a `Vec<f64>` in an `Arc` and return `Val::FloatVec`; preferred constructor for float columnar lanes.
     #[inline]
     pub fn float_vec(v: Vec<f64>) -> Self {
         Val::FloatVec(Arc::new(v))
     }
 
-    /// Build a columnar `Val::StrVec` from a `Vec<Arc<str>>`.
+    /// Wrap a `Vec<Arc<str>>` in an `Arc` and return `Val::StrVec`; preferred constructor for string columnar lanes.
     #[inline]
     pub fn str_vec(v: Vec<Arc<str>>) -> Self {
         Val::StrVec(Arc::new(v))
     }
 
-    /// Build a Val::Obj from an IndexMap without an extra allocation.
+    /// Wrap an `IndexMap` in an `Arc` and return `Val::Obj`; preferred constructor for object values.
     #[inline]
     pub fn obj(m: IndexMap<Arc<str>, Val>) -> Self {
         Val::Obj(Arc::new(m))
     }
 
-    /// Intern a string key.
+    /// Allocate a fresh `Arc<str>` from a `&str` without interning; use `intern_key` for repeated keys.
     #[inline]
     pub fn key(s: &str) -> Arc<str> {
         Arc::from(s)
     }
 }
 
-// ── serde_json::Value ↔ Val conversions ───────────────────────────────────────
 
+/// Convert a borrowed `serde_json::Value` tree into `Val`, promoting homogeneous arrays
+/// to columnar `IntVec` or `StrVec` lanes on the fly.
 impl From<&serde_json::Value> for Val {
     fn from(v: &serde_json::Value) -> Self {
         match v {
@@ -632,8 +618,8 @@ impl From<&serde_json::Value> for Val {
             }
             serde_json::Value::String(s) => Val::Str(Arc::from(s.as_str())),
             serde_json::Value::Array(a) => {
-                // Columnar fast-path: homogeneous all-int arrays become
-                // `Val::IntVec`.  Saves 3x storage for big numeric docs.
+                
+                
                 let all_i64 = !a.is_empty()
                     && a.iter().all(|v| {
                         matches!(v,
@@ -652,8 +638,8 @@ impl From<&serde_json::Value> for Val {
                         .collect();
                     return Val::IntVec(Arc::new(out));
                 }
-                // Homogeneous all-string arrays promote to Val::StrVec for
-                // columnar filter/contains fast paths.
+                
+                
                 let all_str =
                     !a.is_empty() && a.iter().all(|v| matches!(v, serde_json::Value::String(_)));
                 if all_str {
@@ -680,6 +666,8 @@ impl From<&serde_json::Value> for Val {
     }
 }
 
+/// Convert a `Val` into a `serde_json::Value` tree, materialising all columnar lanes.
+/// Uses `Arc::try_unwrap` to avoid cloning uniquely-owned `Arr` and `Obj` data.
 impl From<Val> for serde_json::Value {
     fn from(v: Val) -> Self {
         match v {
@@ -776,17 +764,9 @@ impl From<Val> for serde_json::Value {
     }
 }
 
-// ── Lazy serde adapter ────────────────────────────────────────────────────────
-//
-// `ValRef<'a>` serialises a borrowed `Val` directly to the output byte
-// stream, skipping the intermediate `serde_json::Value` tree that
-// `From<Val> for serde_json::Value` builds.  For Obj-heavy results this
-// elides N key-string clones + the `Map` rebuild per call.
-//
-// Non-finite floats (NaN/±Inf) are coerced to `0` to match the existing
-// `From<Val>` impl, which falls back to `0.into()` when `Number::from_f64`
-// returns `None`.
 
+/// Lazy serde `Serialize` adapter for `&Val` that avoids allocating an intermediate
+/// `serde_json::Value` tree; used by `to_json_vec` and the `Display` impl.
 pub struct ValRef<'a>(pub &'a Val);
 
 impl<'a> Serialize for ValRef<'a> {
@@ -886,17 +866,12 @@ impl<'a> Serialize for ValRef<'a> {
 }
 
 impl Val {
-    /// Serialise `self` as JSON bytes without building an intermediate
-    /// `serde_json::Value` tree.  Preferred over `serde_json::to_vec(&Value::from(val))`
-    /// for Obj-heavy results.
+    /// Serialise `self` to a compact JSON byte vector via `ValRef`, without building a `serde_json::Value` tree.
     pub fn to_json_vec(&self) -> Vec<u8> {
         serde_json::to_vec(&ValRef(self)).unwrap_or_default()
     }
 
-    /// Parse JSON text into `Val` directly — one pass, no intermediate
-    /// `serde_json::Value` tree.  Preferred over the
-    /// `serde_json::from_str -> serde_json::Value -> Val::from` round-trip
-    /// for hot `from_json` paths.
+    /// Parse a JSON string into `Val`, automatically promoting homogeneous arrays to columnar lanes.
     pub fn from_json_str(s: &str) -> serde_json::Result<Val> {
         let mut de = serde_json::Deserializer::from_str(s);
         let v = Val::deserialize(&mut de)?;
@@ -904,30 +879,21 @@ impl Val {
         Ok(v)
     }
 
-    /// Parse JSON via simd-json (SIMD-accelerated structural scanner).
-    /// Requires the `simd-json` feature.  Input bytes are mutated in-place
-    /// by the simd-json parser — caller must own a writable buffer.
-    ///
-    /// Goes through `simd_json::to_borrowed_value` (the lower-level
-    /// in-place tree builder, faster than the serde shim per upstream
-    /// guidance) and then walks the resulting `BorrowedValue` directly
-    /// into `Val`, applying the same columnar-lane heuristics as
-    /// `From<&serde_json::Value>` (all-int → `IntVec`, all-str → `StrVec`).
+    /// Parse a mutable byte slice in-place using simd-json, then walk the tape to produce `Val`.
+    /// The input buffer is mutated by simd-json's in-place unescaping; caller must own the bytes.
     #[cfg(feature = "simd-json")]
     #[cfg(feature = "simd-json")]
     pub fn from_json_simd(bytes: &mut [u8]) -> Result<Val, String> {
-        // Tape path: walk simd-json's flat Vec<Node> directly into Val,
-        // skipping the BorrowedValue intermediate tree.  Each Object /
-        // Array node carries a `count` field telling us how many tape
-        // entries belong to it (for fast skip-ahead in homogeneity probes).
+        
+        
         let tape = simd_json::to_tape(bytes).map_err(|e| e.to_string())?;
         let nodes = tape.0;
         let mut idx = 0usize;
         Ok(Self::from_simd_tape(&nodes, &mut idx))
     }
 
-    /// Number of tape nodes the subtree at `idx` occupies.  Used by
-    /// the shape-probe walker.  Matches simd-json's "count" semantics.
+    /// Return the number of tape slots consumed by the node at `idx`: 1 for scalars/strings,
+    /// `count + 1` for arrays and objects (count is the total descendant node count).
     #[cfg(feature = "simd-json")]
     fn node_span(nodes: &[simd_json::Node<'_>], idx: usize) -> usize {
         match nodes[idx] {
@@ -938,10 +904,8 @@ impl Val {
         }
     }
 
-    /// Probe an Array of Objects starting at `start` for uniform shape
-    /// (same `len`, same key sequence in same order).  Returns the
-    /// shared key list as borrowed `&str` slices into the tape's
-    /// scratch buffer when promotion is safe; `None` otherwise.
+    /// Walk the tape starting at `start` and verify that `n_entries` consecutive objects all share
+    /// the same `first_len` keys in the same order; returns the shared key slice or `None` on mismatch.
     #[cfg(feature = "simd-json")]
     #[allow(clippy::needless_lifetimes)]
     fn probe_obj_shape_inner<'a>(
@@ -951,7 +915,7 @@ impl Val {
         first_len: usize,
     ) -> Option<Vec<&'a str>> {
         use simd_json::Node;
-        // Grab the first Object's keys as the reference shape.
+        
         let mut keys: Vec<&'a str> = Vec::with_capacity(first_len);
         if !matches!(nodes[start], Node::Object { len, .. } if len as usize == first_len) {
             return None;
@@ -963,12 +927,12 @@ impl Val {
                 _ => return None,
             }
             idx += 1;
-            // Skip value subtree.
+            
             idx += Self::node_span(nodes, idx);
         }
         let mut entry_start = idx;
         for _ in 1..n_entries {
-            // Each subsequent entry: same Object header `len`, same keys.
+            
             match nodes[entry_start] {
                 Node::Object { len, .. } if len as usize == first_len => {}
                 _ => return None,
@@ -987,9 +951,8 @@ impl Val {
         Some(keys)
     }
 
-    /// Recursive tape materializer. `idx` advances as nodes are consumed.
-    /// Honours the same columnar all-i64 / all-string lane fast paths as
-    /// `from_simd_borrowed` and `From<&serde_json::Value>`.
+    /// Recursively materialise a `Val` from a simd-json tape by advancing `idx`; promotes
+    /// homogeneous arrays to columnar lanes and uniform object arrays to `ObjVec`.
     #[cfg(feature = "simd-json")]
     fn from_simd_tape(nodes: &[simd_json::Node<'_>], idx: &mut usize) -> Val {
         use simd_json::Node;
@@ -1014,16 +977,14 @@ impl Val {
                     return Val::arr(Vec::new());
                 }
                 let start = *idx;
-                // Probe the first element to decide if we can take a
-                // columnar lane. Only `Static(I64|U64)` and `String`
-                // qualify; if the first child is itself an array/object
-                // we won't promote (skip the probe).
+                
+                
                 let first = nodes[start];
                 let mut try_int =
                     matches!(first, Node::Static(SN::I64(_)) | Node::Static(SN::U64(_)));
                 let mut try_str = matches!(first, Node::String(_));
-                // Walk siblings to verify homogeneity.  A sibling is
-                // identified by stepping over each child's full count.
+                
+                
                 let mut probe = start;
                 let mut counted = 0usize;
                 while counted < len {
@@ -1075,18 +1036,8 @@ impl Val {
                     }
                     return Val::StrVec(Arc::new(out));
                 }
-                // ── Phase 7 foundation (DISABLED): homogeneous-shape Object Array → ObjVec ──
-                //
-                // The probe + promotion code below is correct but the
-                // engine's filter/map/sort/group_by/etc. handlers in
-                // runtime.rs and vm.rs only accept `Val::Arr`/`Val::IntVec`/`Val::StrVec`
-                // receivers — they do not match `Val::ObjVec`, so promotion
-                // here breaks every downstream operation.  Real Phase 7
-                // requires migrating ~30-50 match sites to handle ObjVec
-                // natively (slot-indexed field reads).  Until that lands,
-                // promotion is gated off; the probe path stays in source
-                // so the next session can flip it on alongside the
-                // handler migration.
+                
+                
                 if let Node::Object { len: first_len, .. } = first {
                     if first_len > 0 && first_len <= 64 {
                         let shape_keys =
@@ -1108,10 +1059,8 @@ impl Val {
                                 .map(|k| intern_key(k))
                                 .collect::<Vec<_>>()
                                 .into();
-                            // Build typed-column mirror at simd-json
-                            // promotion time.  Cost paid during cold
-                            // parse anyway (cells walk).  Lights up
-                            // typed slot kernels for first-call queries.
+                            
+                            
                             let stride = key_arcs.len();
                             let nrows = if stride == 0 { 0 } else { cells.len() / stride };
                             let typed = build_typed_cols_from_cells(&cells, stride, nrows);
@@ -1132,8 +1081,8 @@ impl Val {
             Node::Object { len, .. } => {
                 let mut out: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(len);
                 for _ in 0..len {
-                    // Object children are key/value pairs: key first,
-                    // then value (which may be nested).
+                    
+                    
                     let key = match nodes[*idx] {
                         Node::String(s) => s,
                         _ => unreachable!("object key must be string"),
@@ -1147,22 +1096,16 @@ impl Val {
         }
     }
 
-    /// Build a Val tree from a parsed `TapeData`. String leaves become
-    /// `StrSlice` values so the rest of the VM/Pipeline API remains
-    /// lifetime-free. Streaming view paths usually avoid this whole-tree
-    /// materialization; this exists for VM fallback and explicit `Val`
-    /// collection.
-    ///
-    /// Includes ObjVec promotion (homogeneous-shape Object Array →
-    /// columnar `Val::ObjVec` with typed_cols) so post-build queries
-    /// hit slot kernels.  Object keys still intern via `intern_key`
-    /// (Phase B scope: borrow keys too).
+    /// Materialise a `Val` from a `TapeData` (a pre-parsed, Arc-owned simd-json tape), producing
+    /// `StrSlice` views into the tape buffer instead of allocating new `Arc<str>` for strings.
     #[cfg(feature = "simd-json")]
     pub fn from_tape_data(tape: &Arc<crate::strref::TapeData>) -> Val {
         let mut idx = 0usize;
         Self::from_tape_walk(tape, &mut idx)
     }
 
+    /// Recursive walk helper for `from_tape_data`; advances `idx` through `TapeNode` entries,
+    /// emitting `StrSlice` for string nodes and promoting homogeneous arrays to columnar lanes.
     #[cfg(feature = "simd-json")]
     fn from_tape_walk(tape: &Arc<crate::strref::TapeData>, idx: &mut usize) -> Val {
         use crate::strref::TapeNode;
@@ -1186,7 +1129,7 @@ impl Val {
                 if len == 0 {
                     return Val::arr(Vec::new());
                 }
-                // Probe homogeneity for IntVec / FloatVec / StrSliceVec lanes.
+                
                 let first_idx = *idx;
                 let first = tape.nodes[first_idx];
                 let mut try_int = matches!(
@@ -1277,12 +1220,8 @@ impl Val {
                     }
                     return Val::StrSliceVec(Arc::new(out));
                 }
-                // Keep root materialisation semantically conservative:
-                // build ordinary Arr<Obj> here. ObjVec promotion remains
-                // available through Pipeline's memoised promotion cache,
-                // where callers have already selected kernels that handle
-                // ObjVec correctly. Eager root-level ObjVec can surprise
-                // generic VM/builtin code that expects array buckets.
+                
+                
                 let mut out: Vec<Val> = Vec::with_capacity(len);
                 for _ in 0..len {
                     out.push(Self::from_tape_walk(tape, idx));
@@ -1305,9 +1244,8 @@ impl Val {
         }
     }
 
-    /// Walk a `simd_json::BorrowedValue` into a `Val`.
-    /// Mirrors `From<&serde_json::Value>` with columnar all-int / all-str
-    /// fast paths, but skips the serde_json::Value materialisation step.
+    /// Convert a `simd_json::BorrowedValue` into `Val`, promoting homogeneous integer and string
+    /// arrays to columnar lanes. Kept as a fallback for borrowed-value API callers.
     #[cfg(feature = "simd-json")]
     #[allow(dead_code)]
     fn from_simd_borrowed(v: &simd_json::BorrowedValue<'_>) -> Val {
@@ -1327,7 +1265,7 @@ impl Val {
             SV::Static(SN::F64(f)) => Val::Float(*f),
             SV::String(s) => Val::Str(Arc::<str>::from(s.as_ref())),
             SV::Array(a) => {
-                // All-i64 / all-string columnar fast paths.
+                
                 let all_i64 = !a.is_empty()
                     && a.iter()
                         .all(|v| matches!(v, SV::Static(SN::I64(_)) | SV::Static(SN::U64(_))));
@@ -1340,7 +1278,7 @@ impl Val {
                             if *n <= i64::MAX as u64 {
                                 out.push(*n as i64);
                             } else {
-                                // Mixed: fall back to mapped Vec<Val> below.
+                                
                                 return Val::Arr(Arc::new(
                                     a.iter().map(Self::from_simd_borrowed).collect(),
                                 ));
@@ -1372,11 +1310,9 @@ impl Val {
     }
 }
 
-// ── Direct Deserialize ────────────────────────────────────────────────────────
-//
-// Avoids the intermediate `serde_json::Value` tree that `b_from_json` used
-// to build.  Preserves order by using IndexMap directly in the visitor.
 
+/// serde `Visitor` implementation that drives `Val`'s `Deserialize`; promotes homogeneous
+/// integer and string sequences to `IntVec`/`StrVec` columnar lanes without a two-pass scan.
 struct ValVisitor;
 
 impl<'de> Visitor<'de> for ValVisitor {
@@ -1422,10 +1358,8 @@ impl<'de> Visitor<'de> for ValVisitor {
     }
 
     fn visit_seq<A: SeqAccess<'de>>(self, mut a: A) -> Result<Val, A::Error> {
-        // Speculative columnar path: lock the lane on the first element.
-        // While every subsequent element matches the lane, push into the
-        // typed vec; on first mismatch, migrate to `Vec<Val>`.  Empty arrays
-        // default to generic Val::Arr (no lane to commit to).
+        
+        
         enum Lane {
             Unset,
             Int(Vec<i64>),
@@ -1487,6 +1421,8 @@ impl<'de> Visitor<'de> for ValVisitor {
     }
 }
 
+/// Deserialise any JSON token stream into `Val` via `ValVisitor`, routing through `deserialize_any`
+/// so both self-describing (JSON) and non-self-describing formats work transparently.
 impl<'de> serde::Deserialize<'de> for Val {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Val, D::Error> {
         d.deserialize_any(ValVisitor)
@@ -1502,8 +1438,8 @@ mod valref_tests {
         let val = Val::from(&v);
         let via_tree = serde_json::to_vec(&serde_json::Value::from(val.clone())).unwrap();
         let via_ref = val.to_json_vec();
-        // Both paths must serialise to byte-identical JSON (IndexMap and
-        // serde_json::Map both preserve insertion order).
+        
+        
         assert_eq!(via_tree, via_ref, "payload: {js}");
     }
 
@@ -1581,8 +1517,9 @@ mod valref_tests {
     }
 }
 
-// ── PartialEq for comparison ──────────────────────────────────────────────────
 
+/// Structural equality for scalar and columnar variants; compound variants (Arr/Obj/ObjVec)
+/// are intentionally not deeply compared here to avoid O(n) surprises on large trees.
 impl PartialEq for Val {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
@@ -1606,6 +1543,8 @@ impl PartialEq for Val {
 
 impl Eq for Val {}
 
+/// Identity-based hashing for compound variants (pointer hash) and value-based for scalars;
+/// enables `Val` as a `HashMap` key while keeping compound hashing O(1).
 impl std::hash::Hash for Val {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         match self {
@@ -1666,8 +1605,9 @@ impl std::hash::Hash for Val {
     }
 }
 
-// ── Display ───────────────────────────────────────────────────────────────────
 
+/// Human-readable display: scalars and strings emit their raw value; compound variants
+/// fall back to compact JSON serialisation via `ValRef` to avoid allocating a tree.
 impl std::fmt::Display for Val {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

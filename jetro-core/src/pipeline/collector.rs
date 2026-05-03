@@ -1,3 +1,9 @@
+//! Terminal result collectors for the view-pipeline and composed paths.
+//!
+//! `TerminalCollector` decides at collection time whether the output should
+//! materialise as a plain `Vec<Val>` or as a `Val::ObjVec` (columnar struct-
+//! of-arrays) when all collected rows have uniform shape.
+
 use std::sync::Arc;
 
 use crate::value::{ObjVecData, Val};
@@ -5,19 +11,33 @@ use crate::value_view::{scalar_view_to_owned_val, ValueView};
 
 use super::{BodyKernel, CollectLayout, ObjectKernel, ViewKernelValue};
 
+/// Output collector for the terminal stage of a pipeline.
+///
+/// Selects between a plain `Vec<Val>` and a columnar `ObjVec` layout based on the
+/// kernel's declared `CollectLayout`.
 pub(crate) enum TerminalCollector<'a> {
+    /// Collects heterogeneous or scalar rows into a plain `Val::Arr`.
     Values(Vec<Val>),
+    /// Collects uniform-shape object rows, attempting a `Val::ObjVec` columnar representation.
     UniformObject(UniformObjectCollector<'a>),
 }
 
+/// Accumulates uniform-shape object rows into flat cell storage for `Val::ObjVec` construction.
+///
+/// Falls back to a `Vec<Val>` of individual `Val::ObjSmall` objects when a row breaks uniformity.
 pub(crate) struct UniformObjectCollector<'a> {
+    /// The object kernel that describes expected field names and projections.
     object: &'a ObjectKernel,
+    /// Interned key slice shared across all output rows.
     keys: Arc<[Arc<str>]>,
+    /// Flat cell buffer: `rows × columns` values stored in row-major order.
     cells: Vec<Val>,
+    /// Overflow buffer used once a row cannot be inlined into `cells`.
     rows: Option<Vec<Val>>,
 }
 
 impl<'a> TerminalCollector<'a> {
+    /// Creates a collector with the layout dictated by `kernel`'s `CollectLayout`.
     pub(crate) fn new(kernel: &'a BodyKernel) -> Self {
         match kernel.collect_layout() {
             CollectLayout::Values => Self::Values(Vec::new()),
@@ -30,6 +50,9 @@ impl<'a> TerminalCollector<'a> {
         }
     }
 
+    /// Evaluates `item` via `kernel` using the zero-copy view path and stores the result.
+    ///
+    /// Returns `None` if view evaluation fails; callers may fall back to the `Val` path.
     pub(crate) fn push_view_row<'v, V>(&mut self, item: &V, kernel: &BodyKernel) -> Option<()>
     where
         V: ValueView<'v>,
@@ -41,6 +64,9 @@ impl<'a> TerminalCollector<'a> {
         Some(())
     }
 
+    /// Evaluates `item` via `kernel` (owned `Val` path) and stores the result.
+    ///
+    /// `fallback` is invoked when the kernel cannot evaluate without calling the VM.
     pub(crate) fn push_val_row<F>(
         &mut self,
         item: &Val,
@@ -57,6 +83,7 @@ impl<'a> TerminalCollector<'a> {
         Ok(())
     }
 
+    /// Consumes the collector and returns either `Val::Arr` or `Val::ObjVec`.
     pub(crate) fn finish(self) -> Val {
         match self {
             Self::Values(values) => Val::arr(values),
@@ -65,9 +92,11 @@ impl<'a> TerminalCollector<'a> {
     }
 }
 
+/// Alias used by the streaming execution path for terminal map collection.
 pub(crate) type TerminalMapCollector<'a> = TerminalCollector<'a>;
 
 impl<'a> UniformObjectCollector<'a> {
+    /// Appends a row from a zero-copy view, switching to the overflow path if shape breaks.
     fn push_view_row<'v, V>(&mut self, item: &V) -> Option<()>
     where
         V: ValueView<'v>,
@@ -83,6 +112,7 @@ impl<'a> UniformObjectCollector<'a> {
         Some(())
     }
 
+    /// Appends a row from an owned `Val`, switching to the overflow path if shape breaks.
     fn push_val_row(&mut self, item: &Val) {
         if let Some(rows) = self.rows.as_mut() {
             rows.push(self.object.eval_val(item));
@@ -94,6 +124,7 @@ impl<'a> UniformObjectCollector<'a> {
         }
     }
 
+    /// Converts accumulated flat cells into `Val::ObjSmall` rows and starts the overflow buffer.
     fn flush_cells_to_rows_with(&mut self, current: Val) {
         let mut rows = Vec::with_capacity(self.cells.len() / self.object.len().max(1) + 1);
         for row_cells in self.cells.chunks_exact(self.object.len()) {
@@ -104,6 +135,7 @@ impl<'a> UniformObjectCollector<'a> {
         self.rows = Some(rows);
     }
 
+    /// Produces `Val::ObjVec` when all rows were uniform, or `Val::Arr` after any overflow.
     fn finish(self) -> Val {
         if let Some(rows) = self.rows {
             return Val::arr(rows);
@@ -116,6 +148,7 @@ impl<'a> UniformObjectCollector<'a> {
     }
 }
 
+/// Evaluates `kernel` against the view `item`, materialising a scalar cheaply when possible.
 fn eval_view_value<'a, V>(item: &V, kernel: &BodyKernel) -> Option<Val>
 where
     V: ValueView<'a>,
@@ -128,6 +161,7 @@ where
     }
 }
 
+/// Evaluates `object` against `item` by delegating to `eval_view_value` with a wrapped kernel.
 fn eval_view_object_value<'a, V>(item: &V, object: &ObjectKernel) -> Option<Val>
 where
     V: ValueView<'a>,
@@ -135,6 +169,7 @@ where
     eval_view_value(item, &BodyKernel::Object(object.clone()))
 }
 
+/// Zips `keys` and `cells` into a `Val::ObjSmall`, cloning each pair.
 fn row_small_object(keys: &[Arc<str>], cells: &[Val]) -> Val {
     Val::ObjSmall(
         keys.iter()

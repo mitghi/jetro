@@ -1,3 +1,10 @@
+//! Classified expression kernels for pipeline stage evaluation.
+//!
+//! `BodyKernel` is a pre-classified form of a stage body expression that lets
+//! the pipeline executor skip the VM for common patterns (field reads,
+//! literal comparisons, `FieldCmpLit` fusions). Generic/unknown expressions
+//! fall back to `BodyKernel::Generic`, which re-enters the VM.
+
 use std::sync::Arc;
 
 use crate::builtins::BuiltinCall;
@@ -6,66 +13,108 @@ use crate::util::JsonView;
 use crate::value::Val;
 use crate::value_view::{scalar_view_to_owned_val, ValueView};
 
+/// A pre-classified form of a stage body expression that bypasses the VM for common patterns.
+///
+/// Variants are ordered roughly from least to most expensive. The `Generic` variant is a
+/// catch-all that re-enters the VM opcode interpreter.
 #[derive(Debug, Clone)]
 pub enum BodyKernel {
+    /// Expression not classifiable into a faster form; falls back to full VM evaluation.
     Generic,
+    /// Returns the current element unchanged (`@`).
     Current,
+    /// Reads a single named field from the current element object.
     FieldRead(Arc<str>),
+    /// Traverses a chain of field names left-to-right, returning the final value.
     FieldChain(Arc<[Arc<str>]>),
+    /// Applies a view-scalar builtin to the result of the receiver kernel.
     BuiltinCall {
+        /// Sub-kernel that computes the value the builtin is called on.
         receiver: Box<BodyKernel>,
+        /// The resolved builtin method and its static arguments.
         call: BuiltinCall,
     },
+    /// Chains two kernels: applies `first`, then feeds the result into `then`.
     Compose {
+        /// The first kernel in the composition chain.
         first: Box<BodyKernel>,
+        /// The kernel applied to the output of `first`.
         then: Box<BodyKernel>,
     },
+    /// Compares the result of `lhs` to a literal using `op`, returning a boolean.
     CmpLit {
+        /// The sub-kernel whose result is the left-hand side of the comparison.
         lhs: Box<BodyKernel>,
+        /// The comparison operator.
         op: crate::ast::BinOp,
+        /// The literal right-hand side value.
         lit: Val,
     },
+    /// Short-circuits through a list of predicates, returning `false` on the first failure.
     And(Arc<[BodyKernel]>),
+    /// Reads a single field and compares it to a literal in one fused step.
     FieldCmpLit(Arc<str>, crate::ast::BinOp, Val),
+    /// Traverses a field chain and compares the result to a literal in one fused step.
     FieldChainCmpLit(Arc<[Arc<str>]>, crate::ast::BinOp, Val),
+    /// Compares the current element directly to a literal.
     CurrentCmpLit(crate::ast::BinOp, Val),
+    /// Always produces the given boolean constant, regardless of the current element.
     ConstBool(bool),
+    /// Always produces the given `Val` constant.
     Const(Val),
+    /// Evaluates an interpolated format string by evaluating each part kernel.
     FString(FStringKernel),
+    /// Evaluates an object literal by evaluating each field-value kernel.
     Object(ObjectKernel),
 }
 
+/// Pre-classified kernel for a format-string expression, avoiding VM re-entry for each part.
 #[derive(Debug, Clone)]
 pub struct FStringKernel {
+    /// Ordered parts (literals and interpolated sub-kernels) that make up the format string.
     parts: Arc<[FStringKernelPart]>,
+    /// Pre-computed lower-bound capacity for the output string buffer.
     base_capacity: usize,
 }
 
+/// A single part of an `FStringKernel`: either a fixed literal or a dynamic interpolation.
 #[derive(Debug, Clone)]
 pub enum FStringKernelPart {
+    /// A constant string segment that is copied verbatim into the output.
     Lit(Arc<str>),
+    /// A sub-kernel whose result is formatted and appended to the output string.
     Interp(BodyKernel),
 }
 
+/// Pre-classified kernel for an object-literal expression, allowing direct field evaluation
+/// without dispatching through the VM's object-construction opcodes.
 #[derive(Debug, Clone)]
 pub struct ObjectKernel {
+    /// Ordered key/value entries that constitute the produced object.
     entries: Arc<[ObjectKernelEntry]>,
 }
 
+/// A single key/value entry in an `ObjectKernel`.
 #[derive(Debug, Clone)]
 pub struct ObjectKernelEntry {
+    /// The key name in the produced object.
     key: Arc<str>,
+    /// The kernel used to compute the value for this key.
     value: BodyKernel,
+    /// When `true`, a null value causes this entry to be silently omitted (optional field).
     optional: bool,
+    /// When `true`, null values are omitted regardless of the `optional` flag.
     omit_null: bool,
 }
 
 impl ObjectKernel {
+    /// Returns the number of key/value entries in this object kernel.
     #[inline]
     pub(crate) fn len(&self) -> usize {
         self.entries.len()
     }
 
+    /// Collects and returns the ordered list of key names from this object kernel.
     pub(crate) fn keys(&self) -> Arc<[Arc<str>]> {
         self.entries
             .iter()
@@ -74,6 +123,9 @@ impl ObjectKernel {
             .into()
     }
 
+    /// Evaluates each entry against the borrowed `item` view, appending results to `cells`.
+    /// Returns `Some(true)` on success, `Some(false)` when a null optional field causes the
+    /// whole row to be skipped, and `None` when the view kernel cannot be evaluated.
     pub(crate) fn eval_view_row_cells<'a, V>(&self, item: &V, cells: &mut Vec<Val>) -> Option<bool>
     where
         V: ValueView<'a>,
@@ -95,6 +147,8 @@ impl ObjectKernel {
         Some(true)
     }
 
+    /// Evaluates each entry against the owned `item` value, appending results to `cells`;
+    /// returns `false` when a null optional field causes the whole row to be skipped.
     pub(crate) fn eval_val_row_cells(&self, item: &Val, cells: &mut Vec<Val>) -> bool {
         let start = cells.len();
         for entry in self.entries.iter() {
@@ -108,12 +162,16 @@ impl ObjectKernel {
         true
     }
 
+    /// Evaluates all entries against `item` and assembles them into a `Val::ObjSmall`,
+    /// returning `Val::Null` when any sub-kernel fails.
     pub(crate) fn eval_val(&self, item: &Val) -> Val {
         eval_object_kernel(self, |kernel| eval_native_kernel(kernel, item)).unwrap_or(Val::Null)
     }
 }
 
 impl BodyKernel {
+    /// Returns `true` when the kernel references any identifier in `names` as a field-like
+    /// access, used by the demand optimiser to decide whether substitution is safe.
     pub(crate) fn mentions_any_field_like_ident(&self, names: &[Arc<str>]) -> bool {
         fn matches_name(name: &str, names: &[Arc<str>]) -> bool {
             names.iter().any(|candidate| candidate.as_ref() == name)
@@ -151,6 +209,8 @@ impl BodyKernel {
         }
     }
 
+    /// Returns `true` when the kernel can be evaluated entirely within the borrowed
+    /// `ValueView` domain without materialising the element into a `Val`.
     pub(crate) fn is_view_native(&self) -> bool {
         match self {
             Self::Generic => false,
@@ -164,6 +224,8 @@ impl BodyKernel {
         }
     }
 
+    /// Returns the `CollectLayout` hint for this kernel, indicating whether the output can be
+    /// collected into a uniform-object columnar layout or must fall back to generic value collection.
     pub(crate) fn collect_layout(&self) -> CollectLayout<'_> {
         match self {
             Self::Object(object) if object.len() > 0 => CollectLayout::UniformObject(object),
@@ -171,6 +233,8 @@ impl BodyKernel {
         }
     }
 
+    /// Classifies a compiled `Program` into the most specific `BodyKernel` variant possible,
+    /// falling back to `Generic` for patterns the classifier does not recognise.
     pub fn classify(prog: &crate::vm::Program) -> Self {
         use crate::vm::Opcode;
         let ops = prog.ops.as_ref();
@@ -322,6 +386,8 @@ impl BodyKernel {
     }
 }
 
+/// Attempts to classify an opcode sequence ending in `AndOp` into a `BodyKernel::And`,
+/// returning `None` if either side contains a `Generic` sub-kernel.
 fn classify_and_kernel(ops: &[crate::vm::Opcode]) -> Option<BodyKernel> {
     let (lhs_ops, rhs) = match ops {
         [lhs @ .., crate::vm::Opcode::AndOp(rhs)] if !lhs.is_empty() => (lhs, rhs),
@@ -339,6 +405,7 @@ fn classify_and_kernel(ops: &[crate::vm::Opcode]) -> Option<BodyKernel> {
     Some(BodyKernel::And(predicates.into()))
 }
 
+/// Flattens nested `BodyKernel::And` trees into a single flat predicate list in `out`.
 fn flatten_and_kernel(kernel: BodyKernel, out: &mut Vec<BodyKernel>) {
     match kernel {
         BodyKernel::And(predicates) => out.extend(predicates.iter().cloned()),
@@ -346,11 +413,17 @@ fn flatten_and_kernel(kernel: BodyKernel, out: &mut Vec<BodyKernel>) {
     }
 }
 
+/// Describes how a Map stage's output elements should be collected by the sink.
 pub(crate) enum CollectLayout<'a> {
+    /// Output elements are heterogeneous `Val`s; collect into a plain array.
     Values,
+    /// Every output element is a uniform object with the same key schema; collect into a
+    /// columnar `ObjVec` for cheaper downstream access.
     UniformObject(&'a ObjectKernel),
 }
 
+/// Attempts to classify a `KvPath` entry's step list as a `FieldRead` or `FieldChain` kernel,
+/// returning `None` when the steps contain numeric indices.
 fn classify_kv_path(steps: &[crate::vm::KvStep]) -> Option<BodyKernel> {
     if steps.is_empty() {
         return None;
@@ -369,6 +442,7 @@ fn classify_kv_path(steps: &[crate::vm::KvStep]) -> Option<BodyKernel> {
     }
 }
 
+/// Extracts an immediate scalar literal from a push opcode, returning `None` for all other opcodes.
 #[inline]
 fn trivial_lit(op: &crate::vm::Opcode) -> Option<Val> {
     use crate::vm::Opcode;
@@ -382,6 +456,8 @@ fn trivial_lit(op: &crate::vm::Opcode) -> Option<Val> {
     }
 }
 
+/// Recursively classifies an opcode sequence into a view-native `BodyKernel`, recognising
+/// field reads, field chains, literal comparisons, and scalar builtin calls.
 fn classify_structural_view_kernel(ops: &[crate::vm::Opcode]) -> Option<BodyKernel> {
     use crate::vm::Opcode;
 
@@ -452,6 +528,8 @@ fn classify_structural_view_kernel(ops: &[crate::vm::Opcode]) -> Option<BodyKern
     }
 }
 
+/// Returns the single literal value produced by a single-opcode program, or `None` if the
+/// program is not a trivial literal push.
 fn static_prog_val(prog: &crate::vm::Program) -> Option<Val> {
     match prog.ops.as_ref() {
         [op] => trivial_lit(op),
@@ -459,6 +537,8 @@ fn static_prog_val(prog: &crate::vm::Program) -> Option<Val> {
     }
 }
 
+/// Maps a VM comparison opcode to the corresponding `BinOp` AST enum variant, returning `None`
+/// for non-comparison opcodes.
 #[inline]
 fn cmp_to_binop(op: &crate::vm::Opcode) -> Option<crate::ast::BinOp> {
     use crate::ast::BinOp as B;
@@ -474,6 +554,8 @@ fn cmp_to_binop(op: &crate::vm::Opcode) -> Option<crate::ast::BinOp> {
     }
 }
 
+/// Evaluates `kernel` against `item`, invoking `fallback` (VM re-entry) only when the kernel
+/// is `Generic`; all other variants are dispatched natively.
 #[inline]
 pub fn eval_kernel<F>(kernel: &BodyKernel, item: &Val, fallback: F) -> Result<Val, EvalError>
 where
@@ -485,6 +567,8 @@ where
     eval_native_kernel(kernel, item)
 }
 
+/// Dispatches a non-Generic `BodyKernel` against an owned `Val` without VM re-entry;
+/// panics if called with `BodyKernel::Generic`.
 fn eval_native_kernel(kernel: &BodyKernel, item: &Val) -> Result<Val, EvalError> {
     match kernel {
         BodyKernel::Current => Ok(item.clone()),
@@ -547,6 +631,8 @@ fn eval_native_kernel(kernel: &BodyKernel, item: &Val) -> Result<Val, EvalError>
     }
 }
 
+/// Evaluates all entries of `object` using the provided `eval` closure and assembles the results
+/// into a `Val::ObjSmall`, omitting null optional or null-omit fields.
 fn eval_object_kernel<F>(object: &ObjectKernel, mut eval: F) -> Result<Val, EvalError>
 where
     F: FnMut(&BodyKernel) -> Result<Val, EvalError>,
@@ -562,6 +648,8 @@ where
     Ok(Val::ObjSmall(pairs.into()))
 }
 
+/// Evaluates all parts of `fstring` using the provided `eval` closure and concatenates the
+/// results into a `Val::Str`.
 fn eval_fstring_kernel<F>(fstring: &FStringKernel, mut eval: F) -> Result<Val, EvalError>
 where
     F: FnMut(&BodyKernel) -> Result<Val, EvalError>,
@@ -576,6 +664,8 @@ where
     Ok(Val::Str(Arc::from(out)))
 }
 
+/// Appends the string representation of `value` to `out`, using fast integer/float formatters
+/// for numeric types and `val_to_string` as a fallback for compound values.
 fn append_val_to_string(out: &mut String, value: &Val) -> Result<(), EvalError> {
     match value {
         Val::Str(value) => out.push_str(value),
@@ -590,6 +680,8 @@ fn append_val_to_string(out: &mut String, value: &Val) -> Result<(), EvalError> 
     Ok(())
 }
 
+/// Appends the string representation of `scalar` (a borrowed JSON view) to `out`, materialising
+/// compound values through `view.materialize()` only when needed.
 fn append_json_view_to_string<'a, V>(
     out: &mut String,
     view: &V,
@@ -613,11 +705,17 @@ where
     Ok(())
 }
 
+/// The result of evaluating a view-native kernel: either a still-borrowed sub-view or a
+/// newly-owned `Val` that required materialisation.
 pub(crate) enum ViewKernelValue<V> {
+    /// The kernel produced a borrowed sub-view of the input without materialising.
     View(V),
+    /// The kernel produced an owned `Val` (e.g. a literal, comparison result, or builtin output).
     Owned(Val),
 }
 
+/// Evaluates `kernel` against the borrowed `item` view, returning a `ViewKernelValue` that
+/// is either a further-borrowed sub-view or an owned `Val`; returns `None` for `Generic` kernels.
 #[inline]
 pub(crate) fn eval_view_kernel<'a, V>(kernel: &BodyKernel, item: &V) -> Option<ViewKernelValue<V>>
 where
@@ -733,6 +831,8 @@ where
     }
 }
 
+/// Traverses a sequence of field names on a `ValueView`, returning the view at the final key
+/// without materialising any intermediate object.
 #[inline]
 fn walk_view_fields<'a, V>(mut cur: V, keys: &[Arc<str>]) -> V
 where
@@ -744,6 +844,8 @@ where
     cur
 }
 
+/// Evaluates a binary comparison `lhs op rhs` using the JSON-view comparison logic,
+/// returning the boolean result.
 #[inline]
 pub fn eval_cmp_op(lhs: &Val, op: crate::ast::BinOp, rhs: &Val) -> bool {
     crate::util::json_cmp_binop(

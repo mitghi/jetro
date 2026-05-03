@@ -1,3 +1,10 @@
+//! Legacy per-shape pipeline execution path.
+//!
+//! Executes pipeline plans that have not been promoted to the composed or
+//! columnar paths. Still the hot path for many common shapes; kept separate
+//! from `composed_exec` so migration to the composed substrate can proceed
+//! incrementally without breaking existing correctness.
+
 use std::sync::Arc;
 
 use crate::{
@@ -21,33 +28,28 @@ use crate::builtins::{
 };
 use crate::chain_ir::PullDemand;
 
+/// Top-level entry point for the legacy execution path.
+/// Materialises rows that require a barrier (sort, group-by, etc.) before
+/// iterating, and streams rows directly otherwise.
 pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val, EvalError> {
-    // One VM owned by the pull loop — shared across stage program
-    // calls so VM compile / path caches amortise across the row
-    // sweep.  Constructing a fresh VM per row regresses 250x.
+    
+    
     let mut vm = crate::vm::VM::new();
-    // Phase A1: build one Env at loop entry; per-row apply uses
-    // `swap_current` instead of full Env construction + doc-hash
-    // recompute + cache clear (those add ~80 ns/row of pure
-    // overhead in execute_val_raw).
+    
+    
     let mut loop_env = base_env.clone();
 
-    // Resolve source to an iterable Val::Arr-like sequence.
+    
     let recv = row_source::resolve(&pipeline.source, root);
 
-    // Pull-based stage chain.  At Phase 1 the inner loop materialises
-    // elements one at a time as `Val`; Phase 3 will switch this to a
-    // per-batch pull over columnar lanes.
+    
     let source_demand = pipeline.source_demand().chain.pull;
     let mut pulled_inputs: usize = 0;
     let mut emitted_outputs: usize = 0;
 
     let mut sink_acc = SinkAccumulator::new(&pipeline.sink);
 
-    // Stages that materialise force a buffer; stages preceding
-    // them run as streaming filter/map over the buffer.  Process
-    // every stage in order so the pipeline semantics match the
-    // surface query.
+    
     let needs_barrier = pipeline
         .stages
         .iter()
@@ -63,10 +65,8 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
             &pipeline.stage_kernels,
             &pipeline.sink,
         );
-        // Phase 1.2 — barrier-stage path now reads stage_kernels[i]
-        // and dispatches the inline kernel for Sort/UniqueBy keyed
-        // variants too, not just streaming Filter/Map.  Extends
-        // Layer A coverage to the keyed-barrier surface.
+        
+        
         for (stage_idx, stage) in pipeline.stages.iter().enumerate() {
             let kernel = pipeline
                 .stage_kernels
@@ -107,8 +107,7 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
         }
         pulled_inputs += 1;
 
-        // Barrier stages have already been applied; `pre_iter` yields
-        // the post-pipeline rows directly, so only the sink remains.
+        
         let sink_done = match &pipeline.sink {
             Sink::Reducer(_) => {
                 match observe_reducer_item(pipeline, item, &mut sink_acc, &mut vm, &mut loop_env)? {
@@ -127,14 +126,14 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
         }
     }
 
-    // GroupBy is a barrier that produces a single Val::Obj which
-    // Sink::Collect would otherwise wrap as [obj]. When the last
-    // stage is GroupBy, return the bare object to match walker
-    // semantics.
+    
     let unwrap_single_collect_obj = matches!(pipeline.stages.last(), Some(Stage::GroupBy(_)));
     Ok(sink_acc.finish(unwrap_single_collect_obj))
 }
 
+/// Runs a streaming pipeline directly from a `simd-json` tape without fully
+/// materialising the document. Returns `None` when any stage requires
+/// materialisation or the source is not an array-like tape node.
 #[cfg(feature = "simd-json")]
 pub(super) fn run_tape_field_chain(
     body: &PipelineBody,
@@ -164,6 +163,9 @@ pub(super) fn run_tape_field_chain(
     ))
 }
 
+/// Drives the streaming (no-barrier) execution loop over an arbitrary row
+/// iterator. Applies each stage inline, respects `PullDemand` limits, and
+/// feeds passing rows into the `SinkAccumulator`.
 fn run_streaming_rows<I>(pipeline: &Pipeline, base_env: &Env, iter: I) -> Result<Val, EvalError>
 where
     I: IntoIterator<Item = Val>,
@@ -260,10 +262,16 @@ where
     Ok(sink_acc.finish(false))
 }
 
+/// Internal iterator used after barrier-stage materialisation; currently only
+/// the `Owned` variant is needed because barriers always produce a `Vec<Val>`.
 enum LegacyPreIter {
+    /// Fully materialised row buffer produced by one or more barrier stages.
     Owned(std::vec::IntoIter<Val>),
 }
 
+/// Applies a single barrier-compatible stage to the fully materialised row
+/// buffer `buf` in-place. Returns `Some(Ok(()))` on success, `Some(Err(_))` on
+/// evaluation failure, or `None` when the stage type is not handled here.
 fn apply_adapter_materialized(
     stage: &Stage,
     buf: &mut Vec<Val>,
@@ -592,6 +600,8 @@ fn apply_adapter_materialized(
     }
 }
 
+/// Applies an element-wise stage transformation to a single `Val` row, such as
+/// `Slice`, `Replace`, or a `Builtin` call that maps one value to another.
 pub(super) fn apply_element_adapter(stage: &Stage, v: Val) -> Val {
     match stage {
         Stage::Slice(start, end) => slice_apply(v, *start, *end),
@@ -605,6 +615,8 @@ pub(super) fn apply_element_adapter(stage: &Stage, v: Val) -> Val {
     }
 }
 
+/// Applies an expanding stage (currently only `Split`) to a single row, pushing
+/// the resulting elements into `out`. Elements that do not expand are dropped.
 fn apply_expanding_adapter(stage: &Stage, v: &Val, out: &mut Vec<Val>) {
     if let Stage::Split(sep) = stage {
         if let Some(Val::Arr(a)) = split_apply(v, sep.as_ref()) {
@@ -613,14 +625,20 @@ fn apply_expanding_adapter(stage: &Stage, v: &Val, out: &mut Vec<Val>) {
     }
 }
 
+/// Extracts the compiled body `Program` from an object-lambda stage
+/// (`TransformKeys`, `TransformValues`, `FilterKeys`, `FilterValues`).
 pub(super) fn object_lambda_program(stage: &Stage) -> Option<&crate::vm::Program> {
     stage.body_program()
 }
 
+/// Extracts the compiled body `Program` from a row-level stage
+/// (`Filter`, `Map`, `FlatMap`).
 pub(super) fn row_stage_program(stage: &Stage) -> Option<&crate::vm::Program> {
     stage.body_program()
 }
 
+/// Extracts the compiled body `Program` from a keyed stage
+/// (`GroupBy`, `CountBy`, `IndexBy`, `SortBy`, `UniqueBy`).
 pub(super) fn keyed_stage_program(stage: &Stage) -> Option<&crate::vm::Program> {
     stage.body_program()
 }
@@ -635,11 +653,17 @@ impl Iterator for LegacyPreIter {
     }
 }
 
+/// Outcome of processing a single row through the reducer sink logic.
 enum ReducerItemFlow {
+    /// The item passed the optional predicate and was counted/accumulated.
     Observed,
+    /// The item was rejected by the reducer predicate and should be skipped.
     Skipped,
 }
 
+/// Evaluates the reducer sink's optional predicate and projection for `item`,
+/// then pushes the (possibly projected) value into `sink_acc`.
+/// Returns `Skipped` when the predicate evaluates to falsy.
 fn observe_reducer_item(
     pipeline: &Pipeline,
     item: Val,
@@ -683,10 +707,10 @@ fn observe_reducer_item(
     Ok(ReducerItemFlow::Observed)
 }
 
-/// Per-Obj lambda dispatch helper for `TransformKeys` /
-/// `TransformValues` / `FilterKeys` / `FilterValues`.  Each visits
-/// every (k, v) entry and runs the program with the arg as `@`.
-/// Non-Obj receivers pass through unchanged.
+
+/// Applies an object-lambda stage (`TransformKeys`, `TransformValues`,
+/// `FilterKeys`, `FilterValues`) to the object `recv`, producing a new
+/// `Val::Obj` with the transformed or filtered key-value pairs.
 pub(crate) fn apply_lambda_obj(
     stage: &Stage,
     recv: &Val,

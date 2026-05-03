@@ -1,308 +1,416 @@
-//! Abstract syntax tree for Jetro v2 expressions.
+//! Abstract syntax tree produced by `parser` and consumed by every
+//! downstream layer — compiler, planner, and analyses.
 //!
-//! The AST is the contract between the parser and every other v2 layer —
-//! the compiler lowers it to opcodes, analyses inspect it for ident-use
-//! / purity, and tests build it directly.  Because every component
-//! observes `Expr`, its variants are kept deliberately orthogonal:
-//! each is a language concept, not an implementation shortcut.
-//!
-//! `Arc<str>` is used for every identifier so that cloning a name into
-//! an opcode is a refcount bump rather than a byte copy.  Recursive
-//! sub-expressions are `Box<Expr>` — owned, not shared — since the
-//! compiler rewrites the AST in-place (see `reorder_and_operands`).
+//! Each variant is a language concept, not an implementation shortcut.
+//! Identifiers use `Arc<str>` so that cloning a name into an opcode is a
+//! refcount bump. Sub-expressions are `Box<Expr>` so the compiler can
+//! rewrite them in place (`reorder_and_operands`).
 
-// ── AST nodes ─────────────────────────────────────────────────────────────────
-
+/// Complete expression AST. The parser produces one of these for every
+/// syntactically valid Jetro expression.
 #[derive(Debug, Clone)]
 pub enum Expr {
-    // Literals
+    /// The `null` literal; evaluates to `Val::Null`.
     Null,
+    /// A boolean literal (`true` / `false`).
     Bool(bool),
+    /// A 64-bit signed integer literal.
     Int(i64),
+    /// A 64-bit floating-point literal.
     Float(f64),
+    /// A plain string literal with no interpolation.
     Str(String),
+    /// A format string whose parts may contain interpolated sub-expressions.
     FString(Vec<FStringPart>),
 
-    // References
-    Root,          // $
-    Current,       // @
-    Ident(String), // variable or implicit current-item field
+    /// The root document binding `$`; evaluates to `Env::root`.
+    Root,
+    /// The current item binding `@`; evaluates to `Env::current`.
+    Current,
+    /// A named variable reference resolved from `Env::vars`.
+    Ident(String),
 
-    // Navigation chain: base followed by postfix steps
+    /// A navigation chain: evaluate the base, then apply each `Step` in sequence.
     Chain(Box<Expr>, Vec<Step>),
 
-    // Binary operations
+    /// A binary infix operation; operands may be reordered by the compiler for `And`/`Or`.
     BinOp(Box<Expr>, BinOp, Box<Expr>),
+    /// Arithmetic negation of a numeric expression.
     UnaryNeg(Box<Expr>),
+    /// Logical negation; coerces the inner value to bool.
     Not(Box<Expr>),
 
-    // Kind check: expr kind [not] type
+    /// Runtime type-check: `expr is <kind>` or `expr is not <kind>`.
     Kind {
+        /// Expression whose runtime type is being checked.
         expr: Box<Expr>,
+        /// The target kind to test against.
         ty: KindType,
+        /// When `true` the result is inverted (`is not`).
         negate: bool,
     },
 
-    // Null-coalesce: lhs ?| rhs
+    /// Null-coalescing: evaluates left; if null, evaluates and returns right.
     Coalesce(Box<Expr>, Box<Expr>),
 
-    // Object / array construction
+    /// Object literal `{ k: v, … }` with optional dynamic keys, spreads, and conditions.
     Object(Vec<ObjField>),
+    /// Array literal `[e, …]` where elements may be spread (`...x`).
     Array(Vec<ArrayElem>),
 
-    // Pipeline: base | step1 | step2  or  base -> name | ...
+    /// Pipeline expression `base | step1 | step2 | …`; value threads left-to-right.
     Pipeline {
+        /// Seed value for the pipeline.
         base: Box<Expr>,
+        /// Ordered sequence of forward-pass or bind steps.
         steps: Vec<PipeStep>,
     },
 
-    // Comprehensions
+    /// List comprehension `[expr for vars in iter if cond]`.
     ListComp {
+        /// Body expression evaluated for each element.
         expr: Box<Expr>,
+        /// Binding names introduced by the `for` clause.
         vars: Vec<String>,
+        /// Iterator expression supplying elements.
         iter: Box<Expr>,
+        /// Optional guard; elements where this is falsy are skipped.
         cond: Option<Box<Expr>>,
     },
+    /// Dict comprehension `{key: val for vars in iter if cond}`.
     DictComp {
+        /// Expression computing each output key.
         key: Box<Expr>,
+        /// Expression computing each output value.
         val: Box<Expr>,
+        /// Binding names introduced by the `for` clause.
         vars: Vec<String>,
+        /// Iterator expression supplying elements.
         iter: Box<Expr>,
+        /// Optional guard; pairs where this is falsy are skipped.
         cond: Option<Box<Expr>>,
     },
+    /// Set comprehension `{expr for vars in iter if cond}`; produces a deduplicated array.
     SetComp {
+        /// Body expression evaluated for each element.
         expr: Box<Expr>,
+        /// Binding names introduced by the `for` clause.
         vars: Vec<String>,
+        /// Iterator expression supplying elements.
         iter: Box<Expr>,
+        /// Optional guard; elements where this is falsy are skipped.
         cond: Option<Box<Expr>>,
     },
+    /// Generator comprehension; currently evaluates lazily into an array like `ListComp`.
     GenComp {
+        /// Body expression evaluated for each element.
         expr: Box<Expr>,
+        /// Binding names introduced by the `for` clause.
         vars: Vec<String>,
+        /// Iterator expression supplying elements.
         iter: Box<Expr>,
+        /// Optional guard; elements where this is falsy are skipped.
         cond: Option<Box<Expr>>,
     },
 
-    // Lambda: lambda x, y: body
+    /// Anonymous function `(p1, p2) -> body`; closed over the current `Env`.
     Lambda {
+        /// Ordered parameter names bound when the lambda is called.
         params: Vec<String>,
+        /// Expression evaluated in the extended environment.
         body: Box<Expr>,
     },
 
-    // Let binding: let x = init in body
+    /// `let name = init; body` — lexically scoped binding, not a mutation.
     Let {
+        /// Name of the new binding.
         name: String,
+        /// Initialiser evaluated in the outer scope.
         init: Box<Expr>,
+        /// Body evaluated with `name` in scope.
         body: Box<Expr>,
     },
 
-    // Python-style conditional: `then_ if cond else else_`.
-    // Short-circuits — only the taken branch is evaluated.
+    /// Conditional expression `if cond then then_ else else_`.
     IfElse {
+        /// Boolean guard expression.
         cond: Box<Expr>,
+        /// Branch taken when `cond` is truthy.
         then_: Box<Expr>,
+        /// Branch taken when `cond` is falsy.
         else_: Box<Expr>,
     },
 
-    // `try BODY else DEFAULT` — evaluate BODY; on EvalError or
-    // Val::Null result, evaluate DEFAULT instead.  Both BODY and
-    // DEFAULT can be arbitrary expressions; chains right-associative
-    // (`try a else try b else c` parses as `try a else (try b else c)`).
+    /// Error-catching expression; evaluates `body`, returns `default` on any error.
     Try {
+        /// Expression that may fail at runtime.
         body: Box<Expr>,
+        /// Fallback value returned when `body` errors.
         default: Box<Expr>,
     },
 
-    // Global function calls
+    /// Top-level function call `name(args…)` dispatched through the global registry.
     GlobalCall {
+        /// Name of the global function to invoke.
         name: String,
+        /// Positional and named arguments.
         args: Vec<Arg>,
     },
 
-    // Type cast: `expr as int` / `expr as string` etc.  Add-on sugar on top
-    // of existing `.to_int()` / `.to_string()` methods — semantics identical.
+    /// Explicit type-cast `expr as <type>`; may return null on failure.
     Cast {
+        /// Value to cast.
         expr: Box<Expr>,
+        /// Target type.
         ty: CastType,
     },
 
-    // Declarative patch block: `patch root { path1: val1, path2: val2, ... }`.
-    // Returns a new document with the listed paths rewritten in order.
-    // COW semantics — unchanged subtrees are shared.
+    /// Structural patch `patch root { path: val, … }`; chain-write terminal desugars here.
     Patch {
+        /// Document to patch; usually `Expr::Root`.
         root: Box<Expr>,
+        /// Ordered list of path/value operations to apply.
         ops: Vec<PatchOp>,
     },
 
-    // Sentinel: `DELETE` inside a patch-field value removes the key.
-    // Only meaningful at the leaf of a patch path; outside patch it errors.
+    /// Sentinel emitted by the parser for `.delete()` / `.unset()` terminals.
+    /// Reaching the evaluator is a hard error; the compiler must consume it during patch lowering.
     DeleteMark,
 }
 
-// ── Patch ─────────────────────────────────────────────────────────────────────
 
+/// A single write operation inside a `Patch` expression.
 #[derive(Debug, Clone)]
 pub struct PatchOp {
+    /// Navigation path identifying the target node.
     pub path: Vec<PathStep>,
+    /// Value to write; `Expr::DeleteMark` removes the node instead.
     pub val: Expr,
+    /// Optional guard; the op is skipped when this evaluates to falsy.
     pub cond: Option<Expr>,
 }
 
+/// One segment of a patch path — mirrors `Step` but restricted to write-safe forms.
 #[derive(Debug, Clone)]
 pub enum PathStep {
+    /// Static field name lookup.
     Field(String),
+    /// Integer index into an array.
     Index(i64),
+    /// Runtime-computed index evaluated against the current value.
     DynIndex(Expr),
+    /// Wildcard `*` matches all array elements or object values.
     Wildcard,
+    /// Filtered wildcard `*[pred]`; applies the op only to matching children.
     WildcardFilter(Box<Expr>),
+    /// Recursive descent to all nodes named `field` at any depth.
     Descendant(String),
 }
 
-// ── Cast type ─────────────────────────────────────────────────────────────────
 
+/// Target type for an `as` cast expression.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CastType {
+    /// Cast to `i64`.
     Int,
+    /// Cast to `f64`.
     Float,
+    /// Cast to the most precise numeric type that fits.
     Number,
+    /// Cast to string via `Display`.
     Str,
+    /// Cast to boolean; empty / zero / null → false.
     Bool,
+    /// Wrap scalar in a single-element array; pass arrays through.
     Array,
+    /// Coerce to `Val::Obj`; null → empty object.
     Object,
+    /// Always returns `Val::Null`; useful to conditionally erase a field.
     Null,
 }
 
-// ── Pipeline step ─────────────────────────────────────────────────────────────
 
+/// One stage in a `Pipeline` expression.
 #[derive(Debug, Clone)]
 pub enum PipeStep {
-    /// `| expr` — forward current value as new context
+    /// Pass the current value through an expression (`| expr`).
     Forward(Expr),
-    /// `-> target` — label current value, pass through unchanged
+    /// Destructure the current value into named bindings (`| as $name`).
     Bind(BindTarget),
 }
 
+/// Destructuring pattern used by a `PipeStep::Bind`.
 #[derive(Debug, Clone)]
 pub enum BindTarget {
+    /// Bind the whole value to a single name (`as $x`).
     Name(String),
+    /// Destructure an object into named fields with an optional rest capture.
     Obj {
+        /// Field names extracted from the object.
         fields: Vec<String>,
+        /// Optional name to capture remaining fields.
         rest: Option<String>,
     },
+    /// Destructure an array positionally into named slots.
     Arr(Vec<String>),
 }
 
-// ── F-string parts ────────────────────────────────────────────────────────────
 
+/// One part of an `FString` template.
 #[derive(Debug, Clone)]
 pub enum FStringPart {
+    /// A literal string segment between interpolation sites.
     Lit(String),
+    /// An interpolated expression with an optional formatting directive.
     Interp { expr: Expr, fmt: Option<FmtSpec> },
 }
 
+/// Formatting directive attached to an FString interpolation site.
 #[derive(Debug, Clone)]
 pub enum FmtSpec {
-    Spec(String), // :.2f  :>10  etc.
-    Pipe(String), // |upper  |trim  etc.
+    /// Python-style format spec string (e.g. `:.2f`).
+    Spec(String),
+    /// Named pipe formatter applied to the interpolated value.
+    Pipe(String),
 }
 
-// ── Array element ─────────────────────────────────────────────────────────────
 
+/// One element inside an array literal.
 #[derive(Debug, Clone)]
 pub enum ArrayElem {
+    /// A single expression contributing one element.
     Expr(Expr),
+    /// Spread operator `...expr`; splices an iterable's items inline.
     Spread(Expr),
 }
 
-// ── Postfix steps ─────────────────────────────────────────────────────────────
 
+/// Controls how `.first` / `.one` quantifiers resolve a multi-value result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuantifierKind {
-    /// `?` — first element or null
+    /// Return the first element, or null if the array is empty.
     First,
-    /// `!` — exactly one element (error if 0 or >1)
+    /// Return the single element; error if the array has ≠ 1 element.
     One,
 }
 
+/// One postfix navigation step in a `Chain` expression.
 #[derive(Debug, Clone)]
 pub enum Step {
-    Field(String),                   // .field
-    OptField(String),                // ?.field
-    Descendant(String),              // ..field
-    DescendAll,                      // ..  (all descendants)
-    Index(i64),                      // [n]
-    DynIndex(Box<Expr>),             // [expr]
-    Slice(Option<i64>, Option<i64>), // [n:m]
-    Method(String, Vec<Arg>),        // .method(args)
-    OptMethod(String, Vec<Arg>),     // ?.method(args)
-    InlineFilter(Box<Expr>),         // {pred}
-    Quantifier(QuantifierKind),      // ? or !
+    /// `.field` — mandatory field access; propagates null if the key is absent.
+    Field(String),
+    /// `.field?` — optional field access; returns null without error when absent.
+    OptField(String),
+    /// `..field` — recursive descent collecting all nodes named `field`.
+    Descendant(String),
+    /// `..**` — recursive descent collecting every descendant.
+    DescendAll,
+    /// `[n]` — integer index; negative values count from the end.
+    Index(i64),
+    /// `[expr]` — runtime-computed index; `expr` is evaluated as a key or integer.
+    DynIndex(Box<Expr>),
+    /// `[start:end]` — array slice; either bound may be absent (open range).
+    Slice(Option<i64>, Option<i64>),
+    /// `.method(args…)` — method call dispatched through the builtin / custom registry.
+    Method(String, Vec<Arg>),
+    /// `.method?(args…)` — optional method call; errors become null.
+    OptMethod(String, Vec<Arg>),
+    /// `[pred]` — inline filter; keeps array elements for which `pred` is truthy.
+    InlineFilter(Box<Expr>),
+    /// `.first` / `.one` — quantifier that collapses an array to a scalar.
+    Quantifier(QuantifierKind),
 }
 
-// ── Function arguments ────────────────────────────────────────────────────────
 
+/// One argument in a method or global-function call.
 #[derive(Debug, Clone)]
 pub enum Arg {
+    /// A positional argument.
     Pos(Expr),
+    /// A named (keyword) argument.
     Named(String, Expr),
 }
 
-// ── Object field ─────────────────────────────────────────────────────────────
 
+/// One field in an object literal.
 #[derive(Debug, Clone)]
 pub enum ObjField {
-    /// `key: expr` (optionally `key: expr when cond`)
+    /// A full `key: value` pair with optional omit-if-null and conditional flags.
     Kv {
+        /// String key for this field.
         key: String,
+        /// Value expression.
         val: Expr,
+        /// When `true`, the field is omitted from the output if `val` evaluates to null.
         optional: bool,
+        /// When present, the field is omitted unless this expression is truthy.
         cond: Option<Expr>,
     },
-    /// `key` — shorthand for `key: key`
+    /// Shorthand `{name}` — equivalent to `{name: $.name}` when parsed in context.
     Short(String),
-    /// `[expr]: expr` — dynamic key
+    /// Computed key `{[key_expr]: val_expr}` — both key and value are evaluated at runtime.
     Dynamic { key: Expr, val: Expr },
-    /// `...expr` — spread object (shallow)
+    /// Shallow spread `{...expr}` — merges all key/value pairs of `expr` one level deep.
     Spread(Expr),
-    /// `...**expr` — deep-merge spread: recurse into nested objects,
-    /// concatenate arrays, rhs wins for scalars
+    /// Deep recursive spread `{**expr}` — recursively merges nested objects.
     SpreadDeep(Expr),
 }
 
-// ── Binary operators ──────────────────────────────────────────────────────────
 
+/// Binary infix operator. Variants map 1-to-1 to opcodes after compilation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinOp {
+    /// Numeric addition or string concatenation.
     Add,
+    /// Numeric subtraction.
     Sub,
+    /// Numeric multiplication.
     Mul,
+    /// Floating-point division; always returns `f64`.
     Div,
+    /// Integer modulo.
     Mod,
+    /// Structural equality; compares deeply for objects and arrays.
     Eq,
+    /// Structural inequality.
     Neq,
+    /// Strict less-than comparison.
     Lt,
+    /// Less-than-or-equal comparison.
     Lte,
+    /// Strict greater-than comparison.
     Gt,
+    /// Greater-than-or-equal comparison.
     Gte,
+    /// Fuzzy / substring match (`~=`).
     Fuzzy,
+    /// Short-circuit logical AND; right side compiled into a sub-program.
     And,
+    /// Short-circuit logical OR; right side compiled into a sub-program.
     Or,
 }
 
-// ── Kind types ────────────────────────────────────────────────────────────────
 
+/// Runtime type tag used with `is` / `is not` kind-check expressions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KindType {
+    /// Matches `Val::Null`.
     Null,
+    /// Matches `Val::Bool`.
     Bool,
+    /// Matches any numeric variant (`Val::Int`, `Val::Float`).
     Number,
+    /// Matches `Val::Str` and `Val::StrRef`.
     Str,
+    /// Matches `Val::Arr`.
     Array,
+    /// Matches `Val::Obj`.
     Object,
 }
 
 impl Expr {
-    /// Wrap in a Chain if steps is non-empty, otherwise return self.
+    /// Wrap `self` in a `Chain` only when `steps` is non-empty; avoids
+    /// spurious chain nodes for bare navigations with no postfix steps.
     pub fn maybe_chain(self, steps: Vec<Step>) -> Self {
         if steps.is_empty() {
             self

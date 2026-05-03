@@ -1,3 +1,9 @@
+//! Pipeline plan construction and sink-demand analysis.
+//!
+//! Translates a `Pipeline` IR into executable `Stage`/`Sink` chains, computes
+//! `SinkDemand` (how many input elements the sink needs), and wires up
+//! `PullDemand` annotations so pull loops can terminate early.
+
 use std::sync::Arc;
 
 use crate::ast::{BinOp, Expr};
@@ -18,19 +24,28 @@ use super::{
     ViewSinkCapability, ViewStageCapability,
 };
 
+/// Indicates whether a positional terminal sink wants the first or the last qualifying element.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Position {
+    /// The sink wants only the first element that satisfies all upstream stages.
     First,
+    /// The sink wants only the last element that satisfies all upstream stages.
     Last,
 }
 
+/// Combined demand description for a sink: how many elements to pull from upstream, plus an
+/// optional positional preference used to pick between top-K and bottom-K sort strategies.
 #[derive(Debug, Clone, Copy)]
 pub struct SinkDemand {
+    /// Element-level pull/value/order requirements propagated to the source chain.
     pub chain: ChainDemand,
+    /// Set when the sink selects exactly one element by position (first/last).
     pub positional: Option<Position>,
 }
 
 impl SinkDemand {
+    /// A "pull everything, materialise fully" demand used as the baseline when no tighter
+    /// demand can be computed.
     pub const RESULT: SinkDemand = SinkDemand {
         chain: ChainDemand::RESULT,
         positional: None,
@@ -38,6 +53,8 @@ impl SinkDemand {
 }
 
 impl Sink {
+    /// Computes the `SinkDemand` for this sink by consulting its builtin metadata, falling back
+    /// to `SinkDemand::RESULT` for sinks with no registered spec.
     pub fn demand(&self) -> SinkDemand {
         if let Some(spec) = self.builtin_sink_spec() {
             return sink_demand_from_builtin(spec);
@@ -45,6 +62,9 @@ impl Sink {
         SinkDemand::RESULT
     }
 
+    /// Returns `true` when every sub-program in the sink (predicate, projection) satisfies
+    /// `program_ok`, meaning the sink can execute against a materialised receiver without a
+    /// document-root lookup.
     pub(crate) fn can_run_with_receiver_only<F>(&self, mut program_ok: F) -> bool
     where
         F: FnMut(&crate::vm::Program) -> bool,
@@ -55,6 +75,8 @@ impl Sink {
         }
     }
 
+    /// Returns the `ViewSinkCapability` if the sink can operate in the borrowed `ValueView`
+    /// domain, or `None` if full materialisation is required.
     pub(crate) fn view_capability(
         &self,
         sink_kernels: &[BodyKernel],
@@ -90,6 +112,8 @@ impl Sink {
         ))
     }
 
+    /// Looks up the `BuiltinSinkSpec` for this sink from the builtin registry, returning `None`
+    /// for `Sink::Collect` which has no associated spec.
     pub(crate) fn builtin_sink_spec(&self) -> Option<BuiltinSinkSpec> {
         match self {
             Sink::Terminal(method) => method.spec().sink,
@@ -100,10 +124,14 @@ impl Sink {
     }
 }
 
+/// Returns `Some(idx)` if the sink kernel at `idx` is view-native, allowing the view pipeline
+/// path to avoid materialisation for that sub-expression.
 fn view_native_sink_kernel(sink_kernels: &[BodyKernel], idx: usize) -> Option<usize> {
     sink_kernels.get(idx)?.is_view_native().then_some(idx)
 }
 
+/// Converts a `BuiltinSinkSpec` into a `SinkDemand`, mapping builtin pull/value/order flags to
+/// the chain-IR demand types.
 fn sink_demand_from_builtin(spec: BuiltinSinkSpec) -> SinkDemand {
     match spec.demand {
         BuiltinSinkDemand::First { value } => SinkDemand {
@@ -127,6 +155,7 @@ fn sink_demand_from_builtin(spec: BuiltinSinkSpec) -> SinkDemand {
     }
 }
 
+/// Converts the builtin value-need tag to the chain-IR `ValueNeed` type.
 fn sink_value_need(value: BuiltinSinkValueNeed) -> ValueNeed {
     match value {
         BuiltinSinkValueNeed::None => ValueNeed::None,
@@ -144,19 +173,28 @@ impl From<BuiltinSelectionPosition> for Position {
     }
 }
 
+/// Execution strategy chosen by the planner for a `Stage::Sort` when downstream demand is bounded.
 #[derive(Debug, Clone, Copy)]
 pub enum StageStrategy {
+    /// No special treatment; execute the stage with its default implementation.
     Default,
+    /// Use a min-heap of size `k` to produce the `k` smallest (or top-key) elements without a full
+    /// sort.
     SortTopK(usize),
+    /// Use a max-heap of size `k` to produce the `k` largest elements without a full sort.
     SortBottomK(usize),
+    /// Sort lazily and stop emitting once `k` outputs have passed all downstream filters.
     SortUntilOutput(usize),
 }
 
+/// Test-only wrapper around `compute_strategies_with_kernels` that passes an empty kernel slice.
 #[cfg(test)]
 pub fn compute_strategies(stages: &[Stage], sink: &Sink) -> Vec<StageStrategy> {
     compute_strategies_with_kernels(stages, &[], sink)
 }
 
+/// Assigns a `StageStrategy` to every stage in `stages` by walking backwards from the sink
+/// demand and promoting bounded `Sort` stages to top-K or lazy-until-output strategies.
 pub fn compute_strategies_with_kernels(
     stages: &[Stage],
     kernels: &[BodyKernel],
@@ -202,6 +240,8 @@ pub fn compute_strategies_with_kernels(
     strategies
 }
 
+/// Returns `true` when every stage in `suffix` either preserves sort order or acts as an
+/// order-prefix predicate, making it safe to apply a bounded top-K sort for the whole prefix.
 fn ordered_prefix_suffix_is_safe(
     sort: &super::SortSpec,
     sort_kernel: &BodyKernel,
@@ -214,6 +254,8 @@ fn ordered_prefix_suffix_is_safe(
     })
 }
 
+/// Returns `true` when `predicate` is a range comparison on the same key as `sort`, meaning
+/// all remaining elements beyond the predicate's cut-off can never satisfy the predicate.
 fn predicate_is_order_prefix(
     sort: &super::SortSpec,
     sort_kernel: &BodyKernel,
@@ -228,6 +270,8 @@ fn predicate_is_order_prefix(
     order_lhs_eq(lhs, order_key) && cmp_is_prefix_for_order(op, sort.descending)
 }
 
+/// Extracts the left-hand side key and comparison operator from a kernel that is a simple
+/// literal comparison, returning `None` for compound or non-comparison kernels.
 fn predicate_order_lhs(predicate: &BodyKernel) -> Option<(OrderKey<'_>, BinOp)> {
     match predicate {
         BodyKernel::CurrentCmpLit(op, _) => Some((OrderKey::Current, *op)),
@@ -240,6 +284,7 @@ fn predicate_order_lhs(predicate: &BodyKernel) -> Option<(OrderKey<'_>, BinOp)> 
     }
 }
 
+/// Interprets a kernel as an `OrderKey` reference when it is a simple current/field/chain read.
 fn lhs_order_key(lhs: &BodyKernel) -> Option<OrderKey<'_>> {
     match lhs {
         BodyKernel::Current => Some(OrderKey::Current),
@@ -249,6 +294,8 @@ fn lhs_order_key(lhs: &BodyKernel) -> Option<OrderKey<'_>> {
     }
 }
 
+/// Determines the `OrderKey` used by a `Sort` stage: current element for identity sorts,
+/// or the field/chain indicated by the sort kernel.
 fn sort_order_key<'a>(sort: &super::SortSpec, sort_kernel: &'a BodyKernel) -> Option<OrderKey<'a>> {
     if sort.key.is_none() {
         return Some(OrderKey::Current);
@@ -261,12 +308,18 @@ fn sort_order_key<'a>(sort: &super::SortSpec, sort_kernel: &'a BodyKernel) -> Op
     }
 }
 
+/// A lightweight key descriptor used during sort-strategy analysis to compare sort and predicate
+/// keys without allocating.
 enum OrderKey<'a> {
+    /// The key is the element value itself (no field lookup).
     Current,
+    /// The key is a single named field of the element object.
     Field(&'a str),
+    /// The key is obtained by traversing a sequence of field names.
     FieldChain(&'a [Arc<str>]),
 }
 
+/// Returns `true` when `lhs` and `key` refer to the same sort key path.
 fn order_lhs_eq(lhs: OrderKey<'_>, key: OrderKey<'_>) -> bool {
     match (lhs, key) {
         (OrderKey::Current, OrderKey::Current) => true,
@@ -276,6 +329,7 @@ fn order_lhs_eq(lhs: OrderKey<'_>, key: OrderKey<'_>) -> bool {
     }
 }
 
+/// Returns `true` when two field-chain slices have identical length and element-wise equal keys.
 fn same_key_chain(lhs: &[Arc<str>], rhs: &[Arc<str>]) -> bool {
     lhs.len() == rhs.len()
         && lhs
@@ -284,6 +338,8 @@ fn same_key_chain(lhs: &[Arc<str>], rhs: &[Arc<str>]) -> bool {
             .all(|(a, b)| a.as_ref() == b.as_ref())
 }
 
+/// Returns `true` when the comparison operator `op` is a prefix predicate for `descending`
+/// order — i.e. `>` / `>=` for descending, `<` / `<=` for ascending.
 fn cmp_is_prefix_for_order(op: BinOp, descending: bool) -> bool {
     matches!(
         (descending, op),
@@ -292,6 +348,8 @@ fn cmp_is_prefix_for_order(op: BinOp, descending: bool) -> bool {
 }
 
 impl Pipeline {
+    /// Folds the sink demand backwards through `stages`, returning the demand that must be
+    /// satisfied by the source of the given stage/sink segment.
     pub fn segment_source_demand(stages: &[Stage], sink: &Sink) -> SinkDemand {
         stages
             .iter()
@@ -299,12 +357,16 @@ impl Pipeline {
             .fold(sink.demand(), |demand, stage| stage.upstream_demand(demand))
     }
 
+    /// Returns the `SinkDemand` that the pipeline's source must satisfy after propagating the
+    /// sink demand through all stages.
     pub fn source_demand(&self) -> SinkDemand {
         Self::segment_source_demand(&self.stages, &self.sink)
     }
 }
 
 impl PipelineBody {
+    /// Returns `true` when all stages and the sink can execute using only the materialised
+    /// receiver value, without needing a document-root (`$`) reference.
     pub(crate) fn can_run_with_materialized_receiver(&self) -> bool {
         stages_can_run_with_materialized_receiver(&self.stages)
             && self
@@ -312,6 +374,8 @@ impl PipelineBody {
                 .can_run_with_receiver_only(program_is_current_only)
     }
 
+    /// Like `can_run_with_materialized_receiver` but only checks stages starting at index
+    /// `consumed_stages`, used after a view-pipeline prefix has already been executed.
     pub(crate) fn suffix_can_run_with_materialized_receiver(&self, consumed_stages: usize) -> bool {
         consumed_stages <= self.stages.len()
             && stages_can_run_with_materialized_receiver(&self.stages[consumed_stages..])
@@ -321,16 +385,21 @@ impl PipelineBody {
     }
 }
 
+/// Returns `true` when every stage in `stages` can execute without a document-root reference.
 fn stages_can_run_with_materialized_receiver(stages: &[Stage]) -> bool {
     stages
         .iter()
         .all(|stage| stage.can_run_with_receiver_only(program_is_current_only))
 }
 
+/// Returns `true` when every opcode in `program` can be evaluated using only the current element
+/// (`@`), with no reference to the document root (`$`).
 fn program_is_current_only(program: &Program) -> bool {
     program.ops.iter().all(opcode_is_current_only)
 }
 
+/// Returns `true` when `opcode` does not push the document root or spawn a new root-dependent
+/// sub-expression.
 fn opcode_is_current_only(opcode: &Opcode) -> bool {
     match opcode {
         Opcode::PushRoot | Opcode::RootChain(_) => false,
@@ -399,6 +468,7 @@ fn opcode_is_current_only(opcode: &Opcode) -> bool {
     }
 }
 
+/// Returns `true` when the object entry's key and value programs are both current-only.
 fn obj_entry_is_current_only(entry: &CompiledObjEntry) -> bool {
     match entry {
         CompiledObjEntry::Short { .. } | CompiledObjEntry::KvPath { .. } => true,
@@ -417,15 +487,22 @@ fn obj_entry_is_current_only(entry: &CompiledObjEntry) -> bool {
     }
 }
 
+/// Static cost/cardinality metadata for a pipeline stage, used by the planner to pick
+/// execution strategies and reorder filter runs.
 #[derive(Debug, Clone, Copy)]
 pub struct StageShape {
+    /// Whether the stage emits one-to-one, fewer, more, or barrier-level output rows.
     pub cardinality: crate::chain_ir::Cardinality,
+    /// `true` when the stage supports position-indexed execution (used for `IndexedDispatch`).
     pub can_indexed: bool,
+    /// Estimated relative CPU cost per element passing through the stage.
     pub cost: f64,
+    /// Fraction of elements expected to pass through (1.0 = all pass, 0.0 = none pass).
     pub selectivity: f64,
 }
 
 impl StageShape {
+    /// Constructs a `StageShape` from the registered `BuiltinViewStage` metadata.
     fn from_view_stage(stage: BuiltinViewStage) -> Self {
         Self {
             cardinality: stage.cardinality().into(),
@@ -435,6 +512,8 @@ impl StageShape {
         }
     }
 
+    /// Constructs a `StageShape` from the builtin registry, falling back to the method's own
+    /// spec fields when no pipeline-specific shape override is registered.
     fn from_builtin(method: BuiltinMethod) -> Self {
         use crate::builtins::BuiltinCategory;
 
@@ -460,18 +539,28 @@ impl StageShape {
     }
 }
 
+/// A unified descriptor for a `Stage`, providing the canonical method, body program,
+/// numeric argument, and execution/view-stage overrides needed by the planner.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct StageDescriptor<'a> {
+    /// The `BuiltinMethod` this stage maps to, if any.
     pub method: Option<BuiltinMethod>,
+    /// The compiled predicate or projection program carried by the stage, if any.
     pub body: Option<&'a Program>,
+    /// Integer argument (e.g. the `n` in `take(n)`), if applicable.
     pub usize_arg: Option<usize>,
+    /// Override for the pipeline executor, used for special-cased stages like `SortedDedup`.
     pub executor_override: Option<BuiltinPipelineExecutor>,
+    /// Override for the `BuiltinViewStage` metadata, replacing the method's default.
     view_stage_override: Option<BuiltinViewStage>,
+    /// When `true`, a one-to-one cardinality stage may fall back to `Preserves` order effect.
     allow_one_to_one_order_fallback: bool,
+    /// When `true`, the stage is safe to run against a materialised receiver with no body program.
     receiver_safe_without_body: bool,
 }
 
 impl<'a> StageDescriptor<'a> {
+    /// Creates a descriptor for a standard builtin-method stage with all optional fields unset.
     #[inline]
     fn new(method: BuiltinMethod) -> Self {
         Self {
@@ -485,6 +574,8 @@ impl<'a> StageDescriptor<'a> {
         }
     }
 
+    /// Creates a descriptor for a stage that has no builtin method but requires a specific
+    /// executor (e.g. `SortedDedup`, `RowMap`).
     #[inline]
     fn special(executor: BuiltinPipelineExecutor) -> Self {
         Self {
@@ -498,53 +589,65 @@ impl<'a> StageDescriptor<'a> {
         }
     }
 
+    /// Attaches a compiled body program to the descriptor.
     #[inline]
     fn body(mut self, body: &'a Program) -> Self {
         self.body = Some(body);
         self
     }
 
+    /// Sets the integer argument (e.g. `n` for `take(n)` or `skip(n)`).
     #[inline]
     fn usize_arg(mut self, usize_arg: usize) -> Self {
         self.usize_arg = Some(usize_arg);
         self
     }
 
+    /// Overrides the `BuiltinViewStage` metadata for this descriptor.
     #[inline]
     fn with_view_stage(mut self, stage: BuiltinViewStage) -> Self {
         self.view_stage_override = Some(stage);
         self
     }
 
+    /// Overrides the executor used to dispatch this stage during pipeline execution.
     #[inline]
     fn with_executor(mut self, executor: BuiltinPipelineExecutor) -> Self {
         self.executor_override = Some(executor);
         self
     }
 
+    /// Allows a one-to-one stage to report `Preserves` order even if the registry has no explicit
+    /// order-effect entry, enabling downstream sort optimisations.
     #[inline]
     fn allow_one_to_one_order_fallback(mut self) -> Self {
         self.allow_one_to_one_order_fallback = true;
         self
     }
 
+    /// Marks the stage as requiring a body program to run against a materialised receiver;
+    /// used for stages like `CompiledMap` that have no fallback without their body.
     #[inline]
     fn receiver_unsafe_without_body(mut self) -> Self {
         self.receiver_safe_without_body = false;
         self
     }
 
+    /// Returns the effective `BuiltinViewStage` for this descriptor, using the override if set
+    /// or falling back to the method's registered view stage.
     #[inline]
     pub(crate) fn view_stage(self) -> Option<BuiltinViewStage> {
         self.view_stage_override
             .or_else(|| self.method.and_then(|method| method.spec().view_stage))
     }
 
+    /// Returns the columnar-stage metadata for the method, if it supports columnar execution.
     #[inline]
     pub(crate) fn columnar_stage(self) -> Option<crate::builtins::BuiltinColumnarStage> {
         self.method.and_then(|method| method.spec().columnar_stage)
     }
 
+    /// Returns whether the stage is streaming, legacy-materialised, or a composed barrier.
     #[inline]
     pub(crate) fn pipeline_materialization(self) -> BuiltinPipelineMaterialization {
         self.method
@@ -552,6 +655,7 @@ impl<'a> StageDescriptor<'a> {
             .unwrap_or(BuiltinPipelineMaterialization::Streaming)
     }
 
+    /// Returns how this stage affects the sort order of its input stream.
     #[inline]
     pub(crate) fn pipeline_order_effect(self) -> BuiltinPipelineOrderEffect {
         let Some(method) = self.method else {
@@ -569,6 +673,8 @@ impl<'a> StageDescriptor<'a> {
         BuiltinPipelineOrderEffect::Blocks
     }
 
+    /// Returns `true` when the stage can run using only a materialised receiver, delegating
+    /// to `program_ok` for the body program if one is present.
     #[inline]
     pub(crate) fn can_run_with_receiver_only<F>(self, program_ok: F) -> bool
     where
@@ -579,6 +685,8 @@ impl<'a> StageDescriptor<'a> {
             .unwrap_or(self.receiver_safe_without_body)
     }
 
+    /// Returns the effective executor for this stage: the override if set, otherwise the
+    /// executor registered for the method in the builtin registry.
     #[inline]
     pub(crate) fn executor(self) -> Option<BuiltinPipelineExecutor> {
         self.executor_override.or_else(|| {
@@ -635,10 +743,14 @@ macro_rules! method_stage_descriptor {
 }
 
 impl Stage {
+    /// Returns `true` when this stage requires a composed-barrier materialisation pass before
+    /// the next stage can begin.
     pub(crate) fn is_composed_barrier(&self) -> bool {
         self.pipeline_materialization() == BuiltinPipelineMaterialization::ComposedBarrier
     }
 
+    /// Returns `true` when the stage cannot participate in the streaming pull loop and must be
+    /// executed via the legacy materialisation path.
     pub(crate) fn requires_legacy_materialization(&self) -> bool {
         !matches!(
             self.pipeline_materialization(),
@@ -646,6 +758,8 @@ impl Stage {
         )
     }
 
+    /// Returns the `ViewStageCapability` for this stage at position `idx` in the kernel list,
+    /// or `None` if the stage or its kernel cannot operate in the borrowed `ValueView` domain.
     pub(crate) fn view_capability(
         &self,
         idx: usize,
@@ -679,6 +793,8 @@ impl Stage {
         )
     }
 
+    /// Builds a `StageDescriptor` for this stage, providing the canonical method / body /
+    /// executor metadata used throughout the planner; returns `None` for unrecognised variants.
     pub(crate) fn descriptor(&self) -> Option<StageDescriptor<'_>> {
         if let Some(desc) = view_body_stage_descriptor!(self, {
             Filter => Filter,
@@ -767,6 +883,8 @@ impl Stage {
         }
     }
 
+    /// Returns the pipeline materialisation mode for this stage, with special cases for
+    /// `CompiledMap` (streaming) and `SortedDedup` (legacy).
     fn pipeline_materialization(&self) -> BuiltinPipelineMaterialization {
         match self {
             Stage::CompiledMap(_) => BuiltinPipelineMaterialization::Streaming,
@@ -778,6 +896,8 @@ impl Stage {
         }
     }
 
+    /// Returns `true` when this stage can execute using only the materialised receiver, with
+    /// `program_ok` used to validate the stage's body program if present.
     pub(crate) fn can_run_with_receiver_only<F>(&self, mut program_ok: F) -> bool
     where
         F: FnMut(&crate::vm::Program) -> bool,
@@ -786,16 +906,22 @@ impl Stage {
             .is_some_and(|desc| desc.can_run_with_receiver_only(&mut program_ok))
     }
 
+    /// Returns the compiled body program carried by this stage, or `None` if the stage has no
+    /// sub-expression (e.g. `Reverse`, `Take`).
     pub(crate) fn body_program(&self) -> Option<&crate::vm::Program> {
         self.descriptor().and_then(|desc| desc.body)
     }
 
+    /// Returns `true` when this stage can be consumed by the `TerminalMapCollector`
+    /// optimisation (requires `RowMap` executor and a body program).
     pub(crate) fn can_use_terminal_map_collector(&self) -> bool {
         self.descriptor().is_some_and(|desc| {
             desc.executor() == Some(BuiltinPipelineExecutor::RowMap) && desc.body.is_some()
         })
     }
 
+    /// Returns `true` when this stage performs a per-element value transformation that the
+    /// demand optimiser can track symbolically (substitute `@` in downstream predicates).
     pub(crate) fn is_symbolic_map_stage(&self) -> bool {
         matches!(self, Stage::CompiledMap(_))
             || self
@@ -804,24 +930,32 @@ impl Stage {
                 .is_some_and(BuiltinPipelineExecutor::is_row_map)
     }
 
+    /// Returns `true` when this stage is a filter whose predicate can be substituted symbolically
+    /// by the demand optimiser after a map transformation.
     pub(crate) fn is_symbolic_filter_stage(&self) -> bool {
         self.descriptor()
             .and_then(StageDescriptor::executor)
             .is_some_and(BuiltinPipelineExecutor::is_row_filter)
     }
 
+    /// Returns `true` when this stage uses a positional / bounded executor (e.g. `Take`, `Skip`),
+    /// meaning order must be preserved upstream.
     pub(crate) fn is_positional_stage(&self) -> bool {
         self.descriptor()
             .and_then(StageDescriptor::executor)
             .is_some_and(BuiltinPipelineExecutor::is_positional)
     }
 
+    /// Returns `true` when this stage only changes element order without affecting membership
+    /// (e.g. `Sort`, `Reverse`), allowing the demand optimiser to drop it when order is unused.
     pub(crate) fn is_order_only_stage(&self) -> bool {
         self.descriptor()
             .and_then(StageDescriptor::executor)
             .is_some_and(BuiltinPipelineExecutor::is_order_only)
     }
 
+    /// Returns `true` when the stage reads the actual element value rather than just membership
+    /// metadata, meaning downstream value-demand cannot be eliminated.
     pub(crate) fn consumes_input_value(&self) -> bool {
         let Some(desc) = self.descriptor() else {
             return false;
@@ -833,6 +967,8 @@ impl Stage {
             || (executor == BuiltinPipelineExecutor::Sort && desc.body.is_some())
     }
 
+    /// Returns `true` when the stage can be safely eliminated by the demand optimiser when its
+    /// output value is never consumed (one-to-one, order-preserving, and pure).
     pub(crate) fn can_drop_when_value_unused(&self) -> bool {
         let Some(desc) = self.descriptor() else {
             return false;
@@ -855,6 +991,8 @@ impl Stage {
         }
     }
 
+    /// Returns the `ChainOp` representing this stage in the chain-IR demand propagation graph,
+    /// or `None` for stages that do not participate in demand propagation.
     pub fn chain_op(&self) -> Option<ChainOp> {
         match self {
             Stage::CompiledMap(_) => Some(ChainOp::builtin(BuiltinMethod::Map)),
@@ -863,6 +1001,8 @@ impl Stage {
         }
     }
 
+    /// Builds a `ChainOp` from the stage's descriptor when the method participates in demand
+    /// propagation, returning `None` otherwise.
     fn chain_demand_op(&self) -> Option<ChainOp> {
         let desc = self.descriptor()?;
         let method = desc.method?;
@@ -876,6 +1016,8 @@ impl Stage {
         }
     }
 
+    /// Propagates `demand` backwards through this stage, returning the demand that must be
+    /// satisfied by the stage immediately upstream.
     pub fn upstream_demand(&self, demand: SinkDemand) -> SinkDemand {
         let chain = match self.chain_op() {
             Some(op) => op.propagate_demand(demand.chain),
@@ -892,6 +1034,8 @@ impl Stage {
         SinkDemand { chain, positional }
     }
 
+    /// Returns `true` when this stage is safe to execute after a bounded sort for the given
+    /// `sort` spec and sort kernel — i.e. it either preserves order or is a prefix predicate.
     fn ordered_prefix_effect(
         &self,
         sort: &super::SortSpec,
@@ -907,6 +1051,8 @@ impl Stage {
         }
     }
 
+    /// Returns the order effect of this stage (preserves, blocks, or predicate-prefix), with
+    /// hard-coded overrides for `CompiledMap` and `SortedDedup`.
     fn pipeline_order_effect(&self) -> BuiltinPipelineOrderEffect {
         match self {
             Stage::CompiledMap(_) => BuiltinPipelineOrderEffect::Preserves,
@@ -918,6 +1064,8 @@ impl Stage {
         }
     }
 
+    /// Returns the static `StageShape` (cardinality, cost, selectivity, indexed flag) for this
+    /// stage, used by the planner for strategy selection and filter reordering.
     pub fn shape(&self) -> StageShape {
         use crate::chain_ir::Cardinality;
         match self {
@@ -955,6 +1103,8 @@ impl Stage {
         }
     }
 
+    /// Attempts to merge `self` with `other` into a single equivalent stage, returning `None`
+    /// when the two stages cannot be combined.
     pub fn merge_with(&self, other: &Self) -> Option<Self> {
         if let Some(merged) = self.merge_with_usize_stage(other) {
             return Some(merged);
@@ -979,6 +1129,8 @@ impl Stage {
         }
     }
 
+    /// Merges two usize-valued stages (Take/Skip) using their `BuiltinStageMerge` combinator,
+    /// or returns `None` if they are not the same kind of stage.
     fn merge_with_usize_stage(&self, other: &Self) -> Option<Self> {
         let lhs = self.usize_stage_merge_parts()?;
         let rhs = other.usize_stage_merge_parts()?;
@@ -988,6 +1140,8 @@ impl Stage {
         self.with_usize_stage_value(lhs.merge.combine_usize(lhs.value, rhs.value))
     }
 
+    /// Extracts the merge-relevant components from a Take or Skip stage, returning `None` for all
+    /// other variants.
     fn usize_stage_merge_parts(&self) -> Option<UsizeStageMergeParts> {
         match self {
             Stage::Take(value, stage, merge) | Stage::Skip(value, stage, merge) => {
@@ -1001,6 +1155,7 @@ impl Stage {
         }
     }
 
+    /// Constructs a new stage of the same kind with the integer argument replaced by `value`.
     fn with_usize_stage_value(&self, value: usize) -> Option<Self> {
         match self {
             Stage::Take(_, stage, merge) => Some(Stage::Take(value, *stage, *merge)),
@@ -1009,6 +1164,8 @@ impl Stage {
         }
     }
 
+    /// Returns `true` when `self` and `other` are each other's inverse and can be eliminated
+    /// together during plan fusion (e.g. two consecutive `Reverse` stages).
     pub fn cancels_with(&self, other: &Self) -> bool {
         match (self.cancellation(), other.cancellation()) {
             (Some(a), Some(b)) => a.cancels_with(b),
@@ -1016,6 +1173,8 @@ impl Stage {
         }
     }
 
+    /// Returns the `BuiltinCancellation` tag if this stage has one, used to check whether two
+    /// adjacent stages cancel each other out.
     fn cancellation(&self) -> Option<crate::builtins::BuiltinCancellation> {
         match self {
             Stage::Reverse(cancel) => Some(*cancel),
@@ -1025,37 +1184,58 @@ impl Stage {
     }
 }
 
+/// Internal helper that captures the components of a Take or Skip stage for merge analysis.
 #[derive(Debug, Clone, Copy)]
 struct UsizeStageMergeParts {
+    /// The integer count carried by the stage (n in `take(n)` / `skip(n)`).
     value: usize,
+    /// The view-stage tag, used to ensure both stages are the same kind.
     stage: BuiltinViewStage,
+    /// Describes how two counts from the same stage kind should be combined.
     merge: crate::builtins::BuiltinStageMerge,
 }
 
+/// Top-level execution strategy chosen by `select_strategy` for a complete pipeline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Strategy {
+    /// All stages support indexed access and the sink selects by position; use a direct
+    /// index dispatch without a pull loop.
     IndexedDispatch,
+    /// At least one stage is a barrier that must materialise all upstream data before
+    /// the next stage can begin.
     BarrierMaterialise,
+    /// The sink needs only the first `n` inputs; break out of the pull loop once they arrive.
     EarlyExit,
+    /// The default pull-loop path: iterate elements one-by-one through all stages into the sink.
     PullLoop,
 }
 
+/// An optimised stage/sink plan produced by `plan_with_exprs`, ready for execution or further
+/// wrapping into a `Pipeline`.
 #[derive(Debug, Clone)]
 pub struct Plan {
+    /// Optimised, fused, and reordered stages.
     pub stages: Vec<Stage>,
+    /// Preserved AST expressions parallel to `stages` after symbolic optimisation.
     pub stage_exprs: Vec<Option<Arc<Expr>>>,
+    /// The terminal sink after demand optimisation.
     pub sink: Sink,
 }
 
+/// Test-only convenience wrapper around `plan_with_kernels` with an empty kernel slice.
 #[cfg(test)]
 pub fn plan(stages: Vec<Stage>, sink: Sink) -> Plan {
     plan_with_kernels(stages, &[], sink)
 }
 
+/// Optimises `stages` and `sink` using the provided pre-classified `kernels`, running symbolic
+/// normalisation, filter reordering, filter fusion, and merge-with passes.
 pub fn plan_with_kernels(stages: Vec<Stage>, kernels: &[BodyKernel], sink: Sink) -> Plan {
     plan_with_exprs(stages, Vec::new(), kernels, sink)
 }
 
+/// Full planning entry point that also accepts `stage_exprs` for the demand optimiser; returns
+/// an optimised `Plan` with updated stages, expressions, and sink.
 pub fn plan_with_exprs(
     stages: Vec<Stage>,
     stage_exprs: Vec<Option<Arc<Expr>>>,
@@ -1086,6 +1266,8 @@ pub fn plan_with_exprs(
     }
 }
 
+/// Returns `(cost, selectivity)` for a filter stage with the given kernel, using heuristic
+/// estimates based on comparison operator type.
 fn kernel_cost_selectivity(stage: &Stage, kernel: &BodyKernel) -> (f64, f64) {
     use crate::ast::BinOp;
     match (stage, kernel) {
@@ -1128,6 +1310,8 @@ fn kernel_cost_selectivity(stage: &Stage, kernel: &BodyKernel) -> (f64, f64) {
     }
 }
 
+/// Re-orders consecutive runs of non-generic filter stages by ascending cost/selectivity ratio
+/// so that the cheapest, most selective predicates run first.
 fn reorder_filter_runs(
     stages: &mut Vec<Stage>,
     exprs: &mut Vec<Option<Arc<Expr>>>,
@@ -1168,6 +1352,8 @@ fn reorder_filter_runs(
     }
 }
 
+/// Merges consecutive `Filter` stages within each run into a single filter with an `AndOp`
+/// program, reducing per-element dispatch overhead.
 fn fuse_filter_runs(
     stages: &mut Vec<Stage>,
     exprs: &mut Vec<Option<Arc<Expr>>>,
@@ -1196,6 +1382,8 @@ fn fuse_filter_runs(
     }
 }
 
+/// Combines the programs from a contiguous slice of `Filter` stages into a single program by
+/// chaining them with `AndOp` opcodes.
 fn merge_filter_programs(filters: &[Stage]) -> Arc<Program> {
     let mut iter = filters.iter();
     let Some(Stage::Filter(first, _)) = iter.next() else {
@@ -1217,6 +1405,8 @@ fn merge_filter_programs(filters: &[Stage]) -> Arc<Program> {
     })
 }
 
+/// Removes constant-true filter stages and fuses or cancels adjacent stage pairs using
+/// `Stage::merge_with` and `Stage::cancels_with`.
 fn fold_merge_with_kernels(
     stages: &mut Vec<Stage>,
     exprs: &mut Vec<Option<Arc<Expr>>>,
@@ -1256,6 +1446,8 @@ fn fold_merge_with_kernels(
     }
 }
 
+/// Chooses the top-level execution `Strategy` for a planned pipeline by inspecting cardinality,
+/// indexed support, and pull demand of the stages and sink.
 pub fn select_strategy(stages: &[Stage], sink: &Sink) -> Strategy {
     use crate::chain_ir::Cardinality;
 

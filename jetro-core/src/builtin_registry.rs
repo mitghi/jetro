@@ -1,9 +1,9 @@
-//! Macro-generated builtin registry facade.
+//! Stable numeric IDs for builtins and per-builtin demand-propagation laws.
 //!
-//! This is the first v2.6 adapter layer: `BuiltinMethod` remains the
-//! compatibility identity for existing executors, while `BuiltinId` becomes the
-//! stable identity new planner/runtime code can carry without depending on the
-//! old enum directly.
+//! `BuiltinMethod` (the original enum in `builtins.rs`) remains the execution
+//! identity used by the VM and pipeline. `BuiltinId` is a compact numeric
+//! alias for the same set, stable across refactors, that new planner and
+//! analysis code carries without depending on the legacy enum directly.
 
 use crate::{
     builtins::{
@@ -15,39 +15,68 @@ use crate::{
     chain_ir::{Demand, PullDemand, ValueNeed},
 };
 
+/// Compact, stable numeric identity for a builtin. One-to-one with
+/// `BuiltinMethod`; used by planner/analysis to avoid re-matching names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct BuiltinId(pub(crate) u16);
 
+/// Complete compile-time description of a single builtin, used only in tests
+/// to verify round-trip consistency between names, aliases, and IDs.
 #[derive(Debug, Clone, Copy)]
 #[cfg(test)]
 pub(crate) struct BuiltinDescriptor {
+    /// Stable numeric ID for this builtin.
     pub(crate) id: BuiltinId,
+    /// Canonical `BuiltinMethod` variant associated with this descriptor.
     pub(crate) method: BuiltinMethod,
+    /// Primary name as it appears in Jetro expressions.
     pub(crate) canonical_name: &'static str,
+    /// Alternative names that resolve to the same builtin.
     pub(crate) aliases: &'static [&'static str],
 }
 
+/// Optional numeric argument carried alongside a builtin's demand law.
+/// `Take(n)` and `Skip(n)` pass their count here so `propagate_demand` can
+/// tighten or loosen the upstream `PullDemand` accordingly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BuiltinDemandArg {
+    /// No numeric argument; the law is applied unconditionally.
     None,
+    /// A specific count (e.g. the `n` in `.take(n)` or `.skip(n)`).
     Usize(usize),
 }
 
+/// Encodes how a builtin transforms downstream demand into the demand it
+/// places on its own upstream source. The planner matches each builtin to
+/// exactly one law; unknown builtins default to `Identity`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BuiltinDemandLaw {
+    /// Pass downstream demand through unchanged (e.g. purely transforming builtins).
     Identity,
+    /// Like filter: must scan until `n` outputs are produced, so converts `FirstInput(n)` to `UntilOutput(n)`.
     FilterLike,
+    /// Like `take_while`: stops at the first predicate failure, so `UntilOutput(n)` becomes `FirstInput(n)`.
     TakeWhile,
+    /// Like map: the output count equals the input count; passes demand through but requires whole values.
     MapLike,
+    /// Like `flat_map`: output count is unbounded relative to input, so always requests all input.
     FlatMapLike,
+    /// Cap the upstream pull to the provided count argument.
     Take,
+    /// Shift the upstream pull window by the provided count argument.
     Skip,
+    /// Only the first element is needed; translates any downstream demand to `FirstInput(1)`.
     First,
+    /// The last element is needed; requires all ordered input.
     Last,
+    /// Only a count is needed; requires all inputs but no value payloads.
     Count,
+    /// A numeric aggregate (sum/min/max/avg); requires all inputs with numeric-only payload.
     NumericReducer,
 }
 
+/// Compute the upstream `Demand` that builtin `id` must place on its source
+/// given the `downstream` demand from the next stage and optional numeric `arg`.
 #[inline]
 pub(crate) fn propagate_demand(id: BuiltinId, arg: BuiltinDemandArg, downstream: Demand) -> Demand {
     match demand_law(id) {
@@ -111,31 +140,43 @@ pub(crate) fn propagate_demand(id: BuiltinId, arg: BuiltinDemandArg, downstream:
     }
 }
 
+/// Return `true` if builtin `id` has a non-trivial demand law that can
+/// restrict the amount of input the planner must pull from its source.
 #[inline]
 pub(crate) fn participates_in_demand(id: BuiltinId) -> bool {
     demand_law(id) != BuiltinDemandLaw::Identity
 }
 
+/// Return the pipeline executor variant for builtin `id`, or `None` if the
+/// builtin has no specialised streaming executor.
 #[inline]
 pub(crate) fn pipeline_executor(id: BuiltinId) -> Option<BuiltinPipelineExecutor> {
     registry_pipeline_executor(id)
 }
 
+/// Return the materialization policy for builtin `id`; defaults to `Streaming`
+/// when the builtin has no explicit registry entry.
 #[inline]
 pub(crate) fn pipeline_materialization(id: BuiltinId) -> BuiltinPipelineMaterialization {
     registry_pipeline_materialization(id).unwrap_or(BuiltinPipelineMaterialization::Streaming)
 }
 
+/// Return the cardinality/cost shape annotation for builtin `id`, used by
+/// the pipeline cost estimator during plan selection.
 #[inline]
 pub(crate) fn pipeline_shape(id: BuiltinId) -> Option<BuiltinPipelineShape> {
     registry_pipeline_shape(id)
 }
 
+/// Return how builtin `id` affects element ordering in the pipeline, or
+/// `None` if the builtin has no registered ordering behaviour.
 #[inline]
 pub(crate) fn pipeline_order_effect(id: BuiltinId) -> Option<BuiltinPipelineOrderEffect> {
     registry_pipeline_order_effect(id)
 }
 
+/// Classify builtin `id` as a `Unary` or `Nullary` pipeline stage based on
+/// its lowering form, returning `None` for builtins that cannot be lowered.
 #[inline]
 pub(crate) fn pipeline_stage(id: BuiltinId) -> Option<BuiltinPipelineStage> {
     match pipeline_lowering(id)? {
@@ -152,32 +193,42 @@ pub(crate) fn pipeline_stage(id: BuiltinId) -> Option<BuiltinPipelineStage> {
     }
 }
 
+/// Return the pipeline lowering strategy for builtin `id`, indicating which
+/// physical stage type and arguments the builtin compiles to.
 #[inline]
 pub(crate) fn pipeline_lowering(id: BuiltinId) -> Option<BuiltinPipelineLowering> {
     registry_pipeline_lowering(id)
 }
 
+/// Return `true` if builtin `id` is an element-wise operation that can be
+/// applied independently to each item in a vectorised column.
 #[inline]
 pub(crate) fn pipeline_element(id: BuiltinId) -> bool {
     registry_pipeline_element(id).unwrap_or(false)
 }
 
+/// Return the structural traversal variant for builtin `id` (`DeepFind`,
+/// `DeepShape`, `DeepLike`), or `None` for non-structural builtins.
 #[inline]
 pub(crate) fn structural(id: BuiltinId) -> Option<BuiltinStructural> {
     registry_structural(id)
 }
 
+/// Look up the demand law for `id`, returning `Identity` for any unregistered builtin.
 #[inline]
 fn demand_law(id: BuiltinId) -> BuiltinDemandLaw {
     registry_demand_law(id).unwrap_or(BuiltinDemandLaw::Identity)
 }
 
 impl BuiltinId {
+    /// Construct a `BuiltinId` from a `BuiltinMethod` by casting its discriminant to `u16`.
     #[inline]
     pub(crate) fn from_method(method: BuiltinMethod) -> Self {
         BuiltinId(method as u16)
     }
 
+    /// Resolve this `BuiltinId` back to its `BuiltinMethod`, returning `None`
+    /// for IDs that do not correspond to any registered method.
     #[inline]
     pub(crate) fn method(self) -> Option<BuiltinMethod> {
         method_from_id(self)

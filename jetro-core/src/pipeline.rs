@@ -1,36 +1,11 @@
-//! Pipeline IR — pull-based query plan that replaces hand-written
-//! peephole fusions in `vm.rs`.
+//! Pull-based pipeline IR for streamable query chains.
 //!
-//! Goal: a query like `$.orders.filter(total > 100).map(id).count()`
-//! lowers to:
-//!
-//! ```ignore
-//! Pipeline {
-//!     source: Source::Field { base: Source::Root, key: "orders" },
-//!     stages: vec![
-//!         Stage::Filter(<prog: total > 100>),
-//!         Stage::Map(<prog: id>),
-//!     ],
-//!     sink: Sink::Reducer(count),
-//! }
-//! ```
-//!
-//! Execution = single outer loop in [`Sink::run`] that pulls one
-//! element from the source, threads it through the stages, writes
-//! into the sink — no `Vec<Val>` between stages.
-//!
-//! Phase 1 (this module): pull-based [`Pipeline`] / [`Stage`] /
-//! [`Source`] / [`Sink`] + a lowering path that handles a small
-//! initial shape set (`Field`-chain source, `Filter`/`Map`/`Take`/
-//! `Skip` stages, `Count`/`Sum`/`Collect` sinks).  Anything outside
-//! the supported shape set falls back to the existing opcode path
-//! by returning `None` from [`Pipeline::lower`].
-//!
-//! Phase 2 will add rewrite rules; Phase 3 will swap the per-element
-//! `pull_next` for a per-batch `pull_batch` over `IntVec`/`FloatVec`/
-//! `StrVec` columnar lanes.
-//!
-//! See `memory/project_pipeline_ir.md` for the full plan.
+//! A query like `$.orders.filter(total > 100).map(id).count()` lowers to a
+//! `Pipeline` with a `Source`, a list of `Stage`s, and a `Sink`. Execution is
+//! a single outer loop: pull one element from the source, thread it through
+//! stages, write into the sink — no intermediate `Vec<Val>` between stages.
+//! Queries that fall outside the supported shape set return `None` from
+//! `Pipeline::lower` and fall back to the VM opcode path.
 
 use std::sync::Arc;
 
@@ -92,6 +67,8 @@ pub(crate) use sink_accumulator::SinkAccumulator;
 pub(crate) use stage_flow::{stage_executor, StageFlow};
 
 #[cfg(feature = "simd-json")]
+/// Executes the field-chain traversal of `body` against a borrowed simd-json tape, returning
+/// the first matching value or `None` if the shape is not tape-compatible.
 pub(crate) fn run_tape_field_chain(
     body: &PipelineBody,
     tape: &crate::strref::TapeData,
@@ -101,25 +78,21 @@ pub(crate) fn run_tape_field_chain(
     legacy_exec::run_tape_field_chain(body, tape, keys, base_env)
 }
 
-/// Data capabilities supplied by the owning `Jetro` handle to pipeline
-/// execution. The pipeline remains independent of `Jetro` itself, but can ask
-/// for memoised ObjVec promotion.
+/// Extension point allowing the host (e.g. `Jetro`) to upgrade a flat `Arc<Vec<Val>>` array
+/// into a columnar `ObjVecData` representation for zero-copy row iteration.
 pub trait PipelineData {
+    /// Attempts to interpret `arr` as a columnar object-vector, returning `None` if the
+    /// array layout does not match the expected uniform-key schema.
     fn promote_objvec(&self, arr: &Arc<Vec<Val>>) -> Option<Arc<crate::value::ObjVecData>>;
 }
 
-// ── Diagnostic tracing ──────────────────────────────────────────────────────
-//
-// `JETRO_PIPELINE_TRACE=1` env-var prints per-call lowering decisions to
-// stderr.  Three event kinds:
-//   activated: <Stage count, Sink kind, Source kind> for each lowered call
-//   fallback : <reason, expr-label> when lower returns None
-//   perf-ok / perf-loss : optional, set in benches via `pipeline_trace::report_run`
-//
-// Reads env var once into a static AtomicBool.  Zero overhead when disabled.
-use std::sync::atomic::{AtomicU8, Ordering};
-static TRACE_INIT: AtomicU8 = AtomicU8::new(0); // 0 = unread, 1 = off, 2 = on
 
+use std::sync::atomic::{AtomicU8, Ordering};
+/// Cached initialisation flag for the pipeline trace flag: 0 = uninitialised, 1 = off, 2 = on.
+static TRACE_INIT: AtomicU8 = AtomicU8::new(0);
+
+/// Returns `true` when the `JETRO_PIPELINE_TRACE` environment variable is set, caching the
+/// result in `TRACE_INIT` so the env lookup happens at most once per process.
 #[inline]
 pub(crate) fn trace_enabled() -> bool {
     let v = TRACE_INIT.load(Ordering::Relaxed);
@@ -131,6 +104,7 @@ pub(crate) fn trace_enabled() -> bool {
     on
 }
 
+/// Returns a short human-readable label for `s`, used in pipeline trace output.
 fn sink_name(s: &Sink) -> &'static str {
     match s {
         Sink::Collect => "collect",
@@ -148,6 +122,7 @@ fn sink_name(s: &Sink) -> &'static str {
     }
 }
 
+/// Returns a short human-readable label for `s`, used in pipeline trace output.
 fn source_name(s: &Source) -> &'static str {
     match s {
         Source::Receiver(_) => "receiver",
@@ -155,6 +130,7 @@ fn source_name(s: &Source) -> &'static str {
     }
 }
 
+/// Returns a short label for the top-level `Expr` variant, used in pipeline fallback trace messages.
 fn expr_label(e: &Expr) -> &'static str {
     match e {
         Expr::Chain(_, _) => "chain",
@@ -173,35 +149,34 @@ fn expr_label(e: &Expr) -> &'static str {
     }
 }
 
-// ── Plan types ───────────────────────────────────────────────────────────────
 
-/// Where a pipeline starts.
+/// The value-producing root of a pipeline — either an already-materialised value or a
+/// dot-separated field path that is resolved against the document before the first stage runs.
 #[derive(Debug, Clone)]
 pub enum Source {
-    /// Pull from a concrete `Val::Arr` / `Val::IntVec` / `Val::FloatVec` /
-    /// `Val::StrVec` / `Val::ObjVec` already on the stack.
+    /// A pre-evaluated value handed directly to the pipeline as its starting collection;
+    /// used when the query begins from an existing `Val` rather than a document field path.
     Receiver(Val),
-    /// Walk `$.<keys[0]>.<keys[1]>…` from the document root, then iterate
-    /// the array at the end of the chain.  `keys.is_empty()` means the
-    /// document root itself is the iterable.
+
+    /// A sequence of field names resolved left-to-right from the document root (`$`),
+    /// producing the array (or scalar) that feeds the first pipeline stage.
     FieldChain { keys: Arc<[Arc<str>]> },
 }
 
+/// Type alias for a fully-resolved built-in call used as a pipeline stage.
 pub type PipelineBuiltinCall = crate::builtins::BuiltinCall;
 
-/// Canonical internal sort description.
-///
-/// Surface spellings such as `.sort()`, `.sort(score)`,
-/// `.sort(-score)`, and `.sort_by(score)` lower to this single shape.
-/// `descending` is part of the sort metadata, so common descending key
-/// queries do not need to evaluate unary negation for every input row.
+/// Describes the sort order for a `Stage::Sort` stage, optionally with a key-extraction program.
 #[derive(Debug, Clone)]
 pub struct SortSpec {
+    /// Compiled key-extraction expression, or `None` for natural (value-level) ordering.
     pub key: Option<Arc<crate::vm::Program>>,
+    /// When `true` the sort is highest-first; when `false` it is lowest-first.
     pub descending: bool,
 }
 
 impl SortSpec {
+    /// Creates a `SortSpec` with no key expression and ascending order.
     pub fn identity() -> Self {
         Self {
             key: None,
@@ -209,6 +184,7 @@ impl SortSpec {
         }
     }
 
+    /// Creates a `SortSpec` with the given compiled key program and ordering direction.
     pub fn keyed(key: Arc<crate::vm::Program>, descending: bool) -> Self {
         Self {
             key: Some(key),
@@ -217,137 +193,111 @@ impl SortSpec {
     }
 }
 
-/// A pull-based stage.  Streaming stages (Filter / Map / FlatMap /
-/// Take / Skip) flow elements through one at a time; barrier stages
-/// (Reverse / Sort / UniqueBy) require the full input materialised.
-/// Filter / Map / FlatMap / UniqueBy carry a pre-compiled `Program`
-/// reused per row — drops per-row parse/compile overhead.
+
+/// A single transformation step in a pull-based pipeline between the source and the sink.
+///
+/// Each variant carries the compiled predicate / projection program and any metadata needed
+/// to select the correct execution path (view-native, VM fallback, etc.).
 #[derive(Debug, Clone)]
 pub enum Stage {
-    /// `.filter(pred)` — drops elements where `pred` is falsy.
+    /// Retains only elements for which the predicate program yields a truthy value.
     Filter(Arc<crate::vm::Program>, BuiltinViewStage),
-    /// `.map(f)` — replaces each element with `f(@)`.
+    /// Transforms each element by evaluating the projection program against it.
     Map(Arc<crate::vm::Program>, BuiltinViewStage),
-    /// `.flat_map(f)` — `f(@)` must yield an iterable; flattens one
-    /// level into the pull stream.
+
+    /// Evaluates the program for each element and concatenates the resulting arrays into the stream.
     FlatMap(Arc<crate::vm::Program>, BuiltinViewStage),
-    /// `.take(n)` — yields at most `n` elements, then completes.
+    /// Passes at most `n` elements downstream, stopping the pull loop early.
     Take(usize, BuiltinViewStage, BuiltinStageMerge),
-    /// `.skip(n)` — drops the first `n` elements.
+    /// Discards the first `n` elements before passing the rest downstream.
     Skip(usize, BuiltinViewStage, BuiltinStageMerge),
-    /// `.reverse()` — barrier; materialises and reverses.
+    /// Reverses the element order; cancels with an adjacent `Reverse` during plan fusion.
     Reverse(BuiltinCancellation),
-    /// `.unique()` (None) / `.unique_by(key)` (Some) — barrier;
-    /// materialises, dedupes by key (or by full value if `None`).
+
+    /// Removes duplicates, optionally keyed by a projection program; uses identity equality
+    /// when the program is `None`.
     UniqueBy(Option<Arc<crate::vm::Program>>),
-    /// `.sort()` / `.sort(key)` / `.sort_by(key)` — barrier; the
-    /// planner may choose full sort, bounded top-k, or drop it when the
-    /// downstream demand is order-insensitive.
+
+    /// Sorts all elements using the `SortSpec`; may be fused into a bounded top-k heap by
+    /// the planner when followed by `Take`.
     Sort(SortSpec),
-    /// `.group_by(key)` — barrier; partitions rows by key,
-    /// produces `Val::Obj { key_str → Vec<row> }`.  As a Stage
-    /// this is a sink-shaped operation; placed under Stage so
-    /// downstream `.values()` / `.map(@.len())` can compose.
+
+    /// Groups elements into `{key: [items]}` maps using the compiled key program.
     GroupBy(Arc<crate::vm::Program>),
-    /// Pure per-element builtin lowered through `BuiltinMethod`.
+    /// Delegates each element to a pure built-in method call with pre-resolved literal arguments.
     Builtin(PipelineBuiltinCall),
 
-    // ── Step 3d-extension (C): lifted string Stages ──────────────────────────
-    //
-    // Lifts `.split(sep)` / `.slice(a, b)` from method-call
-    // method calls inside Map/Filter sub-program bodies into first-class
-    // Stage variants.  Two wins:
-    //   1. Chain flattening (Step 3d-extension A) can hoist them out of
-    //      Map bodies — `map(@.text.split(",").first())` becomes
-    //      `[Map(@.text), Split(","), Sink::Terminal(BuiltinMethod::First)]`.
-    //   2. IndexedDispatch can compute `split(",").first()` directly
-    //      instead of producing the full segment vector.
-    /// `.split(sep)` — 1 string → many parts.  `Cardinality::Expanding`
-    /// + `can_indexed=true` (kth segment via memchr).
+    /// Splits each string element on the given delimiter, emitting the resulting substrings.
     Split(Arc<str>),
-    /// `.slice(start, end)` — 1 string → 1 substring.  `Cardinality::
-    /// OneToOne` + `can_indexed=true`.  `end=None` means "to end".
+
+    /// Selects a contiguous sub-range of the element stream using start/end indices.
     Slice(i64, Option<i64>),
 
-    /// `.replace(needle, replacement)` (`all=false`, replacen-1-style) and
-    /// `.replace_all(needle, replacement)` (`all=true`) — 1 string → 1
-    /// string.  `Cardinality::OneToOne` + `can_indexed=true`.
+    /// Performs string replacement on each string element; `all` controls single vs. global replace.
     Replace {
+        /// The substring or pattern to search for.
         needle: Arc<str>,
+        /// The string to substitute in place of each match.
         replacement: Arc<str>,
+        /// When `true`, all occurrences are replaced; otherwise only the first.
         all: bool,
     },
 
-    /// `.chunk(n)` — partitions the upstream stream into chunks of size n
-    /// (last chunk may be shorter).  Barrier — needs the full stream.
-    /// Each emitted element is a `Val::arr` of n upstream values.
+    /// Collects elements into non-overlapping chunks of `n`, emitting each chunk as an array.
     Chunk(usize),
-    /// `.window(n)` — sliding window of size n over the upstream stream.
-    /// Barrier.  Emits `len.saturating_sub(n) + 1` overlapping windows.
+
+    /// Emits overlapping sliding windows of `n` consecutive elements as arrays.
     Window(usize),
 
-    /// Step 3d-extension (A2): recursive sub-pipeline planning.
-    /// Outer `.map(@.<chain>)` whose body is itself a recognisable
-    /// chain compiles BODY into its own `Plan` instead of an opaque
-    /// `vm::Program`.  Per outer element, the inner Plan runs against
-    /// that element as the seed.  `Cardinality::OneToOne` (one inner
-    /// run per outer element) + `can_indexed=true`.  Wins on shapes
-    /// like `map(@.text.split(",").first())` — inner Plan reduces via
-    /// IndexedDispatch / EarlyExit etc., not full materialisation.
+    /// Applies a pre-compiled sub-pipeline `Plan` to each element, replacing it with the result.
     CompiledMap(Arc<Plan>),
 
-    // ── lift_all_builtins (lambda-bearing — Pipeline IR samples) ─────
-    //
-    // These mirror Filter/Map/FlatMap: carry a pre-compiled
-    // `vm::Program` for the lambda body, evaluated per-row via
-    // `eval_kernel`.  Streaming Stages (TakeWhile, DropWhile) run
-    // inline with state; barrier Stages (IndicesWhere,
-    // FindIndex, MaxBy, MinBy) materialise then consume buf once.
-    /// `.takewhile(pred)` — emit while pred true; stop on first false.
+    /// Passes elements while the predicate holds, stopping at the first failing element.
     TakeWhile(Arc<crate::vm::Program>),
-    /// `.dropwhile(pred)` — drop while pred true; emit rest.
+    /// Skips elements while the predicate holds, then passes all remaining elements.
     DropWhile(Arc<crate::vm::Program>),
-    /// `.indices_where(pred)` — barrier; Arr<Int> of matching indices.
+    /// Emits the integer indices of all elements for which the predicate is truthy.
     IndicesWhere(Arc<crate::vm::Program>),
-    /// `.find_index(pred)` — barrier; first matching index or Null.
+    /// Emits the index of the first element satisfying the predicate, or `null`.
     FindIndex(Arc<crate::vm::Program>),
-    /// `.max_by(key)` — barrier; row with max key value.
+    /// Retains the single element with the maximum key produced by the program.
     MaxBy(Arc<crate::vm::Program>),
-    /// `.min_by(key)` — barrier; row with min key value.
+    /// Retains the single element with the minimum key produced by the program.
     MinBy(Arc<crate::vm::Program>),
-    /// `.transform_values(lam)` — per-Obj; new Obj with each value mapped.
+    /// Maps over the values of each object element using the program, leaving keys unchanged.
     TransformValues(Arc<crate::vm::Program>),
-    /// `.transform_keys(lam)` — per-Obj; new Obj with each key mapped.
+    /// Maps over the keys of each object element using the program, leaving values unchanged.
     TransformKeys(Arc<crate::vm::Program>),
-    /// `.filter_values(pred)` — per-Obj; keep entries whose value passes.
+    /// Retains only the key-value pairs of each object for which the value program is truthy.
     FilterValues(Arc<crate::vm::Program>),
-    /// `.filter_keys(pred)` — per-Obj; keep entries whose key passes.
+    /// Retains only the key-value pairs of each object for which the key program is truthy.
     FilterKeys(Arc<crate::vm::Program>),
-    /// `.count_by(key)` — barrier; Obj{key_str → count}.
+    /// Produces a `{key: count}` frequency map over the stream using the key program.
     CountBy(Arc<crate::vm::Program>),
-    /// `.index_by(key)` — barrier; Obj{key_str → row}.
+    /// Produces a `{key: element}` index map over the stream using the key program.
     IndexBy(Arc<crate::vm::Program>),
 
-    /// Algorithmic Category F: `UniqueBy(k) ∘ Sort(k)` merged.  One
-    /// traversal: sort buf, then dedup_by adjacent (cache-friendly,
-    /// avoids HashSet allocation).  Per
-    /// `algorithmic_optimization_cold_only.md` Category F.
+    /// Removes consecutive duplicates from a pre-sorted stream, optionally keyed by a program.
     SortedDedup(Option<Arc<crate::vm::Program>>),
 }
 
-/// Numeric fold operator — common shape across `sum`/`min`/`max`/`avg`.
-/// Centralising the op here lets a single set of fused-sink variants
-/// (`NumMap`, `NumFilterMap`) cover four aggregate shapes instead of
-/// twelve.
+
+/// The four numeric fold operations supported by the `Reducer` sink.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NumOp {
+    /// Adds all numeric elements together.
     Sum,
+    /// Selects the smallest numeric element.
     Min,
+    /// Selects the largest numeric element.
     Max,
+    /// Computes the arithmetic mean of all numeric elements.
     Avg,
 }
 
 impl NumOp {
+    /// Converts a `BuiltinNumericReducer` tag from the builtin registry into the corresponding
+    /// `NumOp` variant.
     pub(crate) fn from_builtin_reducer(reducer: BuiltinNumericReducer) -> Self {
         match reducer {
             BuiltinNumericReducer::Sum => NumOp::Sum,
@@ -357,6 +307,7 @@ impl NumOp {
         }
     }
 
+    /// Returns the `BuiltinMethod` that corresponds to this numeric operation.
     pub(crate) fn method(self) -> BuiltinMethod {
         match self {
             NumOp::Sum => BuiltinMethod::Sum,
@@ -366,9 +317,7 @@ impl NumOp {
         }
     }
 
-    /// Render the bare-aggregate result for the bench's start state
-    /// (zero-element fold).  Sum/Avg → 0/Null; Min/Max → Null when
-    /// no element observed.
+    /// Returns the identity / empty-input value for this operation (`0` for Sum, `null` for others).
     fn empty(self) -> Val {
         match self {
             NumOp::Sum => Val::Int(0),
@@ -380,6 +329,7 @@ impl NumOp {
 }
 
 impl Sink {
+    /// Returns the `ReducerSpec` if this sink is a `Reducer`, otherwise `None`.
     pub(crate) fn reducer_spec(&self) -> Option<ReducerSpec> {
         match self {
             Sink::Reducer(spec) => Some(spec.clone()),
@@ -388,68 +338,62 @@ impl Sink {
     }
 }
 
-/// Where pipeline output lands.  Determines the result type.
-///
-/// Single mechanism per terminal kind. Fused variants (NumMap,
-/// NumFilterMap, CountIf, etc.) deleted in Tier 3 — composed
-/// substrate + canonical view dispatch handle every chain shape via
-/// base form.
+
+/// The terminal accumulator of a pipeline — consumes the element stream and produces the final value.
 #[derive(Debug, Clone)]
 pub enum Sink {
-    /// Materialise every element into a `Val::Arr`.
+    /// Gathers all passing elements into a `Val::Arr`.
     Collect,
-    /// Canonical reducer sink for count/sum/min/max/avg and future
-    /// predicate/projection reducers.
+
+    /// Folds the stream using the given `ReducerSpec` (count, sum, min, max, avg).
     Reducer(ReducerSpec),
-    /// Terminal builtin sink, e.g. `.first()` / `.last()`.
+    /// Delegates to a built-in method that consumes the stream (e.g. `first`, `last`).
     Terminal(BuiltinMethod),
-    /// Algorithmic Category E: `.approx_count_distinct()` — HLL-12
-    /// (~2KB state, ±2% accuracy) returning Int approximate count.
-    /// Per `algorithmic_optimization_cold_only.md` Category E (opt-in
-    /// approximate sink).
+
+    /// Computes an approximate count of distinct values using a probabilistic sketch.
     ApproxCountDistinct,
 }
+/// The complete pipeline IR: source → stages → sink, with pre-classified kernels for each stage.
 #[derive(Debug, Clone)]
 pub struct Pipeline {
+    /// Where element values originate — a document field path or an already-evaluated receiver.
     pub source: Source,
+    /// Ordered list of transformation stages applied to each element in turn.
     pub stages: Vec<Stage>,
-    /// Original AST bodies for expression-bearing stages, aligned with
-    /// `stages`. Present for optimizer-only semantic rewrites; execution
-    /// still uses compiled programs and kernel hints.
+
+    /// Preserved AST expressions parallel to `stages`, used by the demand optimiser to
+    /// substitute `@` and simplify predicates without re-parsing.
     pub stage_exprs: Vec<Option<Arc<Expr>>>,
+    /// How the stream is consumed and a final value produced.
     pub sink: Sink,
-    /// Phase A3 — per-Stage kernel hint, in 1:1 correspondence with
-    /// `stages`.  Computed once at lowering by `BodyKernel::classify`
-    /// over each stage's sub-program.  Run loop dispatches the
-    /// specialised inline path when the kernel is recognised, falls
-    /// back to the generic `vm.exec_in_env` path for `Generic`.
-    /// Empty when the lowering didn't populate it (legacy code paths).
+
+    /// Pre-classified kernels parallel to `stages`; avoids VM re-entry for common patterns.
     pub stage_kernels: Vec<BodyKernel>,
-    /// Sink kernel hint — same idea for the terminal program (NumMap,
-    /// CountIf, NumFilterMap, FilterFirst, etc.).  Empty `Vec` when
-    /// the sink has no sub-program.
+
+    /// Pre-classified kernels for sink sub-programs (predicate / projection inside a reducer).
     pub sink_kernels: Vec<BodyKernel>,
 }
 
-/// Source-free executable pipeline body.
-///
-/// Physical plans use this for receiver pipelines whose input value is produced
-/// by another physical node at runtime. Keeping the source separate avoids fake
-/// placeholder receivers in planned IR while preserving the same executable
-/// `Pipeline` representation once the receiver is known.
+
+/// The source-independent half of a `Pipeline`; can be combined with any `Source` via
+/// `with_source` to produce a runnable `Pipeline`.
 #[derive(Debug, Clone)]
 pub struct PipelineBody {
+    /// Ordered transformation stages.
     pub stages: Vec<Stage>,
-    /// Original AST bodies for expression-bearing stages, aligned with
-    /// `stages`. Present for optimizer-only semantic rewrites; execution
-    /// still uses compiled programs and kernel hints.
+
+    /// Preserved AST expressions parallel to `stages` for symbolic optimisation.
     pub stage_exprs: Vec<Option<Arc<Expr>>>,
+    /// Terminal accumulator for the pipeline.
     pub sink: Sink,
+    /// Pre-classified kernels parallel to `stages`.
     pub stage_kernels: Vec<BodyKernel>,
+    /// Pre-classified kernels for sink sub-programs.
     pub sink_kernels: Vec<BodyKernel>,
 }
 
 impl PipelineBody {
+    /// Attaches `source` to this body, producing a complete executable `Pipeline`.
     #[inline]
     pub fn with_source(self, source: Source) -> Pipeline {
         Pipeline {
@@ -464,6 +408,8 @@ impl PipelineBody {
 }
 
 impl Pipeline {
+    /// Splits the pipeline into its `Source` and the source-independent `PipelineBody`,
+    /// allowing the body to be reused with a different source.
     #[inline]
     pub fn into_source_body(self) -> (Source, PipelineBody) {
         let body = PipelineBody {
@@ -477,7 +423,6 @@ impl Pipeline {
     }
 }
 
-// ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -631,9 +576,7 @@ mod tests {
         )));
     }
 
-    // `lower_filter_map_count` removed — fused CountIf variant deleted
-    // in Tier 3. Lowered shape is now [Filter] + Sink::Reducer(count).
-
+    
     #[test]
     fn lower_take_skip_sum() {
         let p = lower_query("$.xs.skip(2).take(5).sum()").unwrap();
@@ -687,10 +630,10 @@ mod tests {
 
     #[test]
     fn lower_returns_none_for_unsupported_shape() {
-        // group_by now supported as a Stage; verify a different
-        // unsupported shape stays None.
+        
+        
         assert!(lower_query("$.xs.equi_join($.ys, lhs, rhs)").is_none());
-        // Non-root base.
+        
         assert!(lower_query("@.x.filter(y > 0)").is_none());
     }
 
@@ -847,9 +790,7 @@ mod tests {
         assert!(p.stage_kernels[0].is_view_native());
     }
 
-    // `debug_compound_pipeline_lower` and `debug_full_pipeline_lower`
-    // removed — referenced deleted fused CountIf / NumFilterMap sinks.
-
+    
     #[test]
     fn run_count_on_simple_array() {
         use serde_json::json;
@@ -1143,17 +1084,14 @@ mod tests {
         );
     }
 
-    // `rewrite_take_after_map_pushdown`, `rewrite_sort_take_to_topn`,
-    // `rewrite_sort_by_first_to_minby`, `rewrite_sort_by_last_to_maxby`
-    // removed — fused Sink::NumMap/TopN/MinBy/MaxBy variants deleted.
-
+    
     #[test]
     fn run_topn_smallest_three() {
         use serde_json::json;
         let doc: Val = (&json!({"xs":[5, 2, 8, 1, 4, 7, 3]})).into();
         let p = lower_query("$.xs.sort().take(3)").unwrap();
         let out = p.run(&doc).unwrap();
-        // Compare via JSON to avoid Val::Arr vs Val::IntVec variant mismatch.
+        
         let out_json: serde_json::Value = out.into();
         assert_eq!(out_json, json!([1, 2, 3]));
     }
@@ -1317,7 +1255,7 @@ mod tests {
 
     #[test]
     fn rewrite_filter_const_true_dropped() {
-        // `true` literal — Filter(true) collapses to id.
+        
         let p = lower_query("$.xs.filter(true).count()").unwrap();
         assert_eq!(p.stages.len(), 0);
         assert!(matches!(p.sink, Sink::Reducer(ref spec) if spec.op == ReducerOp::Count));
@@ -1329,6 +1267,6 @@ mod tests {
         let doc: Val = (&json!({"xs":[10, 20, 30, 40, 50]})).into();
         let p = lower_query("$.xs.skip(1).take(2).sum()").unwrap();
         let out = p.run(&doc).unwrap();
-        assert_eq!(out, Val::Int(50)); // 20 + 30
+        assert_eq!(out, Val::Int(50)); 
     }
 }

@@ -1,3 +1,11 @@
+//! Structural query plans backed by the `jetro-experimental` bitmap index.
+//!
+//! `StructuralPlan` variants (`DeepFind`, `DeepShape`, `DeepLike`) are emitted
+//! by the planner for DFS deep-search operations. At execution time the plan
+//! is evaluated against `StructuralIndex` — a pre-built key-bitmap over the
+//! raw JSON bytes — so matching never materialises a `Val` tree for unmatched
+//! branches. Falls back to a `Val`-walk interpreter when the index is absent.
+
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -11,45 +19,79 @@ use crate::builtins::{BuiltinMethod, BuiltinStructural};
 use crate::context::EvalError;
 use crate::value::Val;
 
+/// A compiled structural deep-search plan. Carried inside `PlanNode::Structural`
+/// and evaluated by `physical_eval` against a `StructuralIndex`.
 #[derive(Clone)]
 pub(crate) enum StructuralPlan {
+    /// DFS search that returns all descendant objects satisfying every predicate
+    /// in `predicates`, starting from the node reached by `anchor`.
     DeepFind {
+        /// Path from the document root to the subtree to search.
         anchor: Arc<[StructuralPathStep]>,
+        /// Predicates that each candidate object must satisfy to be included.
         predicates: Arc<[StructuralPredicate]>,
     },
+    /// Returns all descendant objects that possess every key listed in `keys`,
+    /// without checking the values of those keys.
     DeepShape {
+        /// Path from the document root to the subtree to search.
         anchor: Arc<[StructuralPathStep]>,
+        /// Field names that must all be present on matching objects.
         keys: Arc<[Arc<str>]>,
     },
+    /// Returns all descendant objects where each key in `patterns` maps to the
+    /// corresponding literal value.
     DeepLike {
+        /// Path from the document root to the subtree to search.
         anchor: Arc<[StructuralPathStep]>,
+        /// Key/literal pairs that must all match on each candidate object.
         patterns: Arc<[(Arc<str>, StructuralLiteral)]>,
     },
 }
 
+/// One step along the anchor path from the document root to the search subtree.
+/// Mirrors `PathStep` but restricted to the subset the structural index can resolve.
 #[derive(Clone)]
 pub(crate) enum StructuralPathStep {
+    /// Descend into the named field of an object token.
     Field(Arc<str>),
+    /// Descend into the element at the given index of an array token.
     Index(i64),
 }
 
+/// A literal value pattern used in `StructuralPlan::DeepLike` and
+/// `StructuralPredicate::FieldEqLiteral` to compare against raw JSON bytes
+/// without deserialising the full subtree.
 #[derive(Clone)]
 pub(crate) enum StructuralLiteral {
+    /// Match JSON `null`.
     Null,
+    /// Match JSON `true` or `false`.
     Bool(bool),
+    /// Match a JSON integer by parsed `i64` value.
     Int(i64),
+    /// Match a JSON float within `f64::EPSILON`.
     Float(f64),
+    /// Match a JSON string using `jetro_experimental::json_string_eq`.
     Str(Arc<str>),
 }
 
+/// A composable predicate evaluated against candidate object tokens in the
+/// structural index. All matching is done directly on raw JSON byte spans.
 #[derive(Clone)]
 pub(crate) enum StructuralPredicate {
+    /// The candidate token must have kind `Object`.
     KindObject,
+    /// The named field of the candidate object must equal the given literal.
     FieldEqLiteral(Arc<str>, StructuralLiteral),
+    /// All sub-predicates must hold; flattened from nested `and` expressions.
     And(Arc<[StructuralPredicate]>),
 }
 
 impl StructuralPlan {
+    /// Attempt to lower a `BuiltinMethod` + args combination into a
+    /// `StructuralPlan` starting at `anchor`. Returns `None` when the method is
+    /// not structurally lowerable or the arguments are too complex for the index.
     pub(crate) fn lower_builtin(
         anchor: Arc<[StructuralPathStep]>,
         method: BuiltinMethod,
@@ -62,6 +104,8 @@ impl StructuralPlan {
         }
     }
 
+    /// Execute the plan against `idx` (pre-built structural index) and the raw
+    /// `bytes` of the JSON document, returning a `Val::Arr` of matching objects.
     pub(crate) fn run(&self, idx: &StructuralIndex, bytes: &[u8]) -> Result<Val, EvalError> {
         match self {
             Self::DeepFind { anchor, predicates } => run_deep_find(idx, bytes, anchor, predicates),
@@ -71,6 +115,9 @@ impl StructuralPlan {
     }
 }
 
+/// Attempt to lower `args` into a `StructuralPlan::DeepFind`; returns `None`
+/// when no arguments are present or any argument expression is too complex to
+/// compile to a `StructuralPredicate`.
 fn lower_deep_find(anchor: Arc<[StructuralPathStep]>, args: &[Arg]) -> Option<StructuralPlan> {
     if args.is_empty() {
         return None;
@@ -85,6 +132,9 @@ fn lower_deep_find(anchor: Arc<[StructuralPathStep]>, args: &[Arg]) -> Option<St
     })
 }
 
+/// Attempt to lower `args` (expected to be a single object expression) into a
+/// `StructuralPlan::DeepShape`; returns `None` when the argument is not a
+/// simple key list or contains unsupported field patterns.
 fn lower_deep_shape(anchor: Arc<[StructuralPathStep]>, args: &[Arg]) -> Option<StructuralPlan> {
     let Expr::Object(fields) = arg_expr(args.first()?)? else {
         return None;
@@ -108,6 +158,9 @@ fn lower_deep_shape(anchor: Arc<[StructuralPathStep]>, args: &[Arg]) -> Option<S
     })
 }
 
+/// Attempt to lower `args` (expected to be a single object expression with
+/// literal values) into a `StructuralPlan::DeepLike`; returns `None` when
+/// any value is not a lowerable literal or the arg shape is unsupported.
 fn lower_deep_like(anchor: Arc<[StructuralPathStep]>, args: &[Arg]) -> Option<StructuralPlan> {
     let Expr::Object(fields) = arg_expr(args.first()?)? else {
         return None;
@@ -128,12 +181,16 @@ fn lower_deep_like(anchor: Arc<[StructuralPathStep]>, args: &[Arg]) -> Option<St
     })
 }
 
+/// Extract the `&Expr` inner value from a positional or named `Arg`, returning
+/// `None` only when an unsupported variant is encountered (currently never).
 fn arg_expr(arg: &Arg) -> Option<&Expr> {
     match arg {
         Arg::Pos(expr) | Arg::Named(_, expr) => Some(expr),
     }
 }
 
+/// Attempt to lower a constant `Expr` into a `StructuralLiteral`. Returns `None`
+/// for any expression that is not a compile-time constant scalar.
 fn lower_literal(expr: &Expr) -> Option<StructuralLiteral> {
     match expr {
         Expr::Null => Some(StructuralLiteral::Null),
@@ -145,6 +202,10 @@ fn lower_literal(expr: &Expr) -> Option<StructuralLiteral> {
     }
 }
 
+/// Attempt to lower a predicate `Expr` into a `StructuralPredicate`. Handles
+/// `and` conjunctions (flattened), `field == literal` comparisons (both
+/// orderings), and `@ kind is object` type checks. Returns `None` for anything
+/// that cannot be expressed in terms of the structural index.
 fn lower_predicate(expr: &Expr) -> Option<StructuralPredicate> {
     match expr {
         Expr::BinOp(lhs, BinOp::And, rhs) => {
@@ -169,6 +230,8 @@ fn lower_predicate(expr: &Expr) -> Option<StructuralPredicate> {
     }
 }
 
+/// Recursively flatten an `And` predicate into `out`, collapsing nested `And`
+/// nodes. Returns `None` when `lower_predicate` fails on any sub-expression.
 fn flatten_and_predicate(expr: &Expr, out: &mut Vec<StructuralPredicate>) -> Option<()> {
     match lower_predicate(expr)? {
         StructuralPredicate::And(parts) => out.extend(parts.iter().cloned()),
@@ -177,6 +240,9 @@ fn flatten_and_predicate(expr: &Expr, out: &mut Vec<StructuralPredicate>) -> Opt
     Some(())
 }
 
+/// Return `Some(field_name)` when `expr` is a bare identifier or a
+/// `@.field` chain step — the two forms that refer to a field of the current
+/// object in a predicate. Returns `None` for anything more complex.
 fn field_ref(expr: &Expr) -> Option<Arc<str>> {
     match expr {
         Expr::Ident(name) => Some(Arc::from(name.as_str())),
@@ -190,6 +256,9 @@ fn field_ref(expr: &Expr) -> Option<Arc<str>> {
     }
 }
 
+/// Execute a `DeepFind` plan: walk all object tokens under `anchor` and
+/// collect those for which every predicate in `predicates` holds, materialising
+/// matching subtrees from raw `bytes`.
 fn run_deep_find(
     idx: &StructuralIndex,
     bytes: &[u8],
@@ -215,6 +284,8 @@ fn run_deep_find(
     Ok(Val::arr(out))
 }
 
+/// Execute a `DeepShape` plan: collect every descendant object under `anchor`
+/// that has all listed `keys` as present fields, regardless of their values.
 fn run_deep_shape(
     idx: &StructuralIndex,
     bytes: &[u8],
@@ -237,6 +308,8 @@ fn run_deep_shape(
     Ok(Val::arr(out))
 }
 
+/// Execute a `DeepLike` plan: collect every descendant object under `anchor`
+/// where every `(key, literal)` pattern matches the corresponding field value.
 fn run_deep_like(
     idx: &StructuralIndex,
     bytes: &[u8],
@@ -266,6 +339,9 @@ fn run_deep_like(
     Ok(Val::arr(out))
 }
 
+/// Find all object tokens under `anchor` that contain at least the first key
+/// in `keys`, deduplicated by token id. Uses the index's key-name bitmap to
+/// avoid scanning the entire subtree.
 fn visit_candidate_objects<F>(
     idx: &StructuralIndex,
     anchor: TokenId,
@@ -291,6 +367,10 @@ where
     Ok(())
 }
 
+/// Enumerate candidate object tokens for predicate evaluation. When any
+/// predicate references a specific field name, uses `visit_candidate_objects`
+/// for a faster targeted scan; otherwise falls back to a full linear walk of
+/// all object tokens in the anchor subtree.
 fn visit_predicate_candidates<F>(
     idx: &StructuralIndex,
     anchor: TokenId,
@@ -320,6 +400,9 @@ where
     Ok(())
 }
 
+/// Return the first field name referenced in a `FieldEqLiteral` predicate
+/// (or nested inside an `And`) that can serve as a candidate-set seed key for
+/// `visit_candidate_objects`. Returns `None` when no field reference is found.
 fn first_candidate_key(predicates: &[StructuralPredicate]) -> Option<Arc<str>> {
     for pred in predicates {
         match pred {
@@ -335,6 +418,8 @@ fn first_candidate_key(predicates: &[StructuralPredicate]) -> Option<Arc<str>> {
     None
 }
 
+/// Evaluate a single `StructuralPredicate` against a candidate `object` token,
+/// comparing field byte spans directly without materialising a `Val`.
 fn predicate_matches(
     idx: &StructuralIndex,
     bytes: &[u8],
@@ -353,6 +438,9 @@ fn predicate_matches(
     }
 }
 
+/// Navigate the `StructuralIndex` from the document root following each step in
+/// `steps`, returning the `TokenId` of the final token. Returns `None` when any
+/// step fails (field missing, wrong token kind, or out-of-bounds index).
 fn anchor_token(idx: &StructuralIndex, steps: &[StructuralPathStep]) -> Option<TokenId> {
     let mut cur = TokenId::from(0);
     for step in steps {
@@ -364,6 +452,9 @@ fn anchor_token(idx: &StructuralIndex, steps: &[StructuralPathStep]) -> Option<T
     Some(cur)
 }
 
+/// Return the `TokenId` of the child at position `index` inside an array token,
+/// supporting negative indices (Python-style). Returns `None` when `array` is
+/// not an array token or the index is out of range.
 fn array_child_at(idx: &StructuralIndex, array: TokenId, index: i64) -> Option<TokenId> {
     if idx.kind(array) != TokenKind::Array {
         return None;
@@ -389,6 +480,9 @@ fn array_child_at(idx: &StructuralIndex, array: TokenId, index: i64) -> Option<T
     children.get(pos as usize).copied()
 }
 
+/// Compare a token's raw byte span against a `StructuralLiteral` without
+/// deserialising. String comparison delegates to
+/// `jetro_experimental::json_string_eq` to handle JSON escape sequences.
 fn literal_matches(
     idx: &StructuralIndex,
     bytes: &[u8],
@@ -418,6 +512,9 @@ fn literal_matches(
     }
 }
 
+/// Deserialise the byte span of `tok` into a `Val` using either `simd-json`
+/// (when the `simd-json` feature is enabled) or `serde_json`. Returns an error
+/// when the span does not contain valid JSON.
 fn materialize_token(idx: &StructuralIndex, bytes: &[u8], tok: TokenId) -> Result<Val, EvalError> {
     let span = idx.byte_span_in(tok, bytes);
     let raw = span.slice(bytes);

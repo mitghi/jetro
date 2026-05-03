@@ -1,21 +1,4 @@
-//! Head-to-head: jetro vs jaq on a *deeply nested* synthetic corpus.
-//!
-//! Tree shape (7 levels of nesting):
-//!   org
-//!     └─ regions[]
-//!         └─ offices[]
-//!             └─ teams[]
-//!                 └─ members[]
-//!                     └─ projects[]
-//!                         └─ tasks[]
-//!                             └─ events[]
-//!
-//! Each query exercises multiple engine features at once:
-//!   deep recursion, multi-predicate filter, reshape/pick, aggregation
-//!   composed across levels, top-N sort, group/partition, joins.
-//!
-//! Run:
-//!   cargo run --release --example bench_nested_vs_jaq -p jetro-core
+
 
 use jetro_core::Jetro;
 use serde_json::{json, Value};
@@ -27,7 +10,6 @@ use jaq_json::{read as jaq_read, Val as JaqVal};
 
 const ITERS: usize = 8;
 
-// ── Synthetic deeply-nested corpus ──────────────────────────────────────────
 
 fn build_corpus(
     n_regions: usize,
@@ -160,7 +142,6 @@ fn build_corpus(
     })
 }
 
-// ── timing ──────────────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy)]
 struct Stats {
@@ -170,7 +151,7 @@ struct Stats {
 }
 
 fn sample<F: FnMut()>(mut f: F) -> Stats {
-    let _ = f(); // warmup
+    let _ = f(); 
     let mut samples = Vec::with_capacity(ITERS);
     for _ in 0..ITERS {
         let t = Instant::now();
@@ -192,7 +173,6 @@ fn show(label: &str, s: Stats) {
     );
 }
 
-// ── jaq runner (compile once, reuse) ────────────────────────────────────────
 
 fn compile_jaq(
     code: &str,
@@ -221,7 +201,6 @@ fn run_jaq(
     filter.id.run((ctx, input.clone())).map(unwrap_valr).count()
 }
 
-// ── bench harness ───────────────────────────────────────────────────────────
 
 fn bench(
     label: &str,
@@ -237,9 +216,7 @@ fn bench(
     println!("  jetro: {}", jetro_q);
     println!("  jq   : {}", jaq_q);
 
-    // `collect` — keep result as jetro's `serde_json::Value` for parity with
-    // jaq (which returns its own `Val` iterator without materialising to
-    // `serde_json::Value`).
+    
     let t = sample(|| {
         let _ = jetro_tree.collect(jetro_q).unwrap();
     });
@@ -276,8 +253,8 @@ fn bench(
 }
 
 fn main() {
-    // Shape: 5 × 4 × 4 × 6 × 3 × 4 × 3 =  17280 tasks, 51840 events.
-    // Produces a ~30 MB doc with 8-deep nesting.
+    
+    
     let doc = build_corpus(5, 4, 4, 6, 3, 4, 3);
     let bytes = serde_json::to_vec(&doc).unwrap();
     let mb = bytes.len() as f64 / 1_048_576.0;
@@ -287,7 +264,7 @@ fn main() {
     let j_scan = Jetro::from_bytes(bytes.clone()).unwrap();
     let jaq_input: JaqVal = jaq_read::parse_single(&bytes).unwrap();
 
-    // ── Q1: shallow deep-projection through 4 levels ─────────────────────────
+    
     bench(
         "Q1  4-level shape projection — region → office → team → name",
         "Project team names across every region/office without any filter.",
@@ -298,7 +275,7 @@ fn main() {
         &jaq_input,
     );
 
-    // ── Q2: filter at multiple levels, then project ─────────────────────────
+    
     bench(
         "Q2  multi-level filter chain (open office → active project → critical task)",
         "Only open offices, only active projects, only critical tasks — project task ids.",
@@ -309,7 +286,7 @@ fn main() {
         &jaq_input,
     );
 
-    // ── Q3: deep recursion for multi-predicate find ─────────────────────────
+    
     bench(
         "Q3  deep $..find with two predicates",
         "Every descendant object whose status==in_review AND severity==high.",
@@ -320,7 +297,7 @@ fn main() {
         &jaq_input,
     );
 
-    // ── Q4: deep key extract + aggregate ────────────────────────────────────
+    
     bench(
         "Q4  deep key sum — every `cost` anywhere in tree",
         "Fold every numeric `cost` leaf. Heavy recursion for jaq.",
@@ -331,7 +308,7 @@ fn main() {
         &jaq_input,
     );
 
-    // ── Q5: deep shape projection ───────────────────────────────────────────
+    
     bench(
         "Q5  deep shape + pick rename",
         "Every task: pick id → task_id, severity → sev, total_cost → cost.",
@@ -341,7 +318,7 @@ fn main() {
         &jaq_input,
     );
 
-    // ── Q6: nested reduce — sum of events.cost inside every task, then avg ──
+    
     bench(
         "Q6  nested aggregate: per-task event cost sum, then mean across tasks",
         "Evaluate a sub-aggregate (map(events).flatten().map(cost).sum()) inside outer map.",
@@ -351,7 +328,7 @@ fn main() {
         &jaq_input,
     );
 
-    // ── Q7: multi-level filter + count ──────────────────────────────────────
+    
     bench(
         "Q7  5-level filter + count blocked tasks in active projects",
         "Counts blocked tasks belonging to active projects — FilterCount fusion path.",
@@ -362,7 +339,7 @@ fn main() {
         &jaq_input,
     );
 
-    // ── Q8: top-10 budget values ────────────────────────────────────────────
+    
     bench(
         "Q8  largest 10 project budgets (map + sort + slice)",
         "map(budget), sort ascending, take last 10 — exercises TopN fusion.",
@@ -372,7 +349,7 @@ fn main() {
         &jaq_input,
     );
 
-    // ── Q9: group_by(region.name) then count offices ───────────────────────
+    
     bench(
         "Q9  group regions by continent",
         "group_by over regions.continent — partitioning test.",
@@ -383,7 +360,7 @@ fn main() {
         &jaq_input,
     );
 
-    // ── Q10: cross-field filter under nested flatten ────────────────────────
+    
     bench(
         "Q10 events.cost > 400 deep filter + project",
         "Drill into every task's events, filter costly ones, project `id`.",
@@ -393,7 +370,7 @@ fn main() {
         &jaq_input,
     );
 
-    // ── Q11: deep-extract then unique ──────────────────────────────────────
+    
     bench(
         "Q11 deep extract `kind` unique across tree",
         "Collect every `kind` leaf anywhere, dedup. Hits DescendantChain + unique.",
@@ -404,7 +381,7 @@ fn main() {
         &jaq_input,
     );
 
-    // ── Q12: compound filter w/ cross-field predicate ──────────────────────
+    
     bench(
         "Q12 task with actual > estimate (over-run)",
         "Predicate compares two fields of same item — typical complex filter.",
@@ -414,7 +391,7 @@ fn main() {
         &jaq_input,
     );
 
-    // ── Q13: find a single deep record by compound key ─────────────────────
+    
     bench(
         "Q13 deep $..find narrow (single-hit)",
         "Pick one specific task id anywhere in tree.",

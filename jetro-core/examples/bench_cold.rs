@@ -1,23 +1,11 @@
-//! Cold-start bench — measures the single-call latency for parsing
-//! a JSON document and running one query, with no warmup.  This is
-//! the cost a CLI invocation, MCP server cold call, or test fixture
-//! pays each time.
-//!
-//! Uses the public byte API:
-//!   `Jetro::from_bytes(bytes)` → `collect`
-//!
-//! Run:
-//!   cargo run --release --example bench_cold --features simd-json
-//!
-//! Per-iteration: each iteration builds a fresh Jetro, runs ONE query,
-//! discards.  No reuse — measures pure cold-start cost.
+
 
 use jetro_core::Jetro;
 use serde_json::json;
 use std::time::Instant;
 
 fn make_doc() -> Vec<u8> {
-    // Same shape as bench_complex: 5000 records with nested fields.
+    
     let mut orders = Vec::with_capacity(5000);
     for i in 0..5000usize {
         orders.push(json!({
@@ -68,7 +56,7 @@ fn main() {
     );
     println!();
 
-    // Each cold iteration: build Jetro fresh, run one query, drop.
+    
     let q_simple = "$.orders.map(total).sum()";
     let q_filter = "$.orders.filter(total > 500).map(id)";
 
@@ -96,7 +84,7 @@ fn main() {
     println!();
     println!("Warm — same Jetro, 100 queries (amortised)");
     let j = Jetro::from_bytes(bytes.clone()).unwrap();
-    // Touch root_val + objvec_cache once so subsequent calls hit cache.
+    
     let _ = j.collect(q_simple).unwrap();
     time("warm: map(total).sum()", 100, || {
         let _ = j.collect(q_simple).unwrap();
@@ -113,7 +101,7 @@ fn main() {
     for n in [1usize, 5, 10, 100] {
         let t0 = Instant::now();
         let j = Jetro::from_bytes(bytes.clone()).unwrap();
-        let _ = j.collect(q_simple).unwrap(); // warm caches
+        let _ = j.collect(q_simple).unwrap(); 
         for _ in 0..n {
             let _ = j.collect(q_simple).unwrap();
             let _ = j.collect(q_filter).unwrap();

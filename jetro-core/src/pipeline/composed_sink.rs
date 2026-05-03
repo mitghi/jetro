@@ -1,3 +1,7 @@
+//! Bridges `Sink` IR variants to the generic `composed::Sink` trait via a
+//! macro-generated dispatch table. `run_composed_sink!` selects the concrete
+//! sink type at lower time so the outer loop is monomorphised per sink kind.
+
 use crate::builtins::{BuiltinNumericReducer, BuiltinSelectionPosition, BuiltinSinkAccumulator};
 use crate::chain_ir::PullDemand;
 use crate::composed as cmp;
@@ -5,6 +9,9 @@ use crate::value::Val;
 
 use super::Sink;
 
+/// Dispatches a borrowed-slice pipeline run to the concrete typed sink for `$sink`.
+///
+/// Expands to a `cmp::$runner` call monomorphised over the matching `composed::Sink` impl.
 macro_rules! run_composed_sink {
     ($runner:ident, $rows:expr, $chain:expr, $demand:expr, $sink:expr) => {
         match $sink.builtin_sink_spec()?.accumulator {
@@ -26,6 +33,9 @@ macro_rules! run_composed_sink {
     };
 }
 
+/// Dispatches an owned-iterator pipeline run to the concrete typed sink for `$sink`.
+///
+/// Like `run_composed_sink!` but accepts any `IntoIterator<Item = Val>` as the row source.
 macro_rules! run_composed_owned_sink {
     ($runner:ident, $rows:expr, $chain:expr, $demand:expr, $sink:expr) => {
         match $sink.builtin_sink_spec()?.accumulator {
@@ -57,6 +67,9 @@ macro_rules! run_composed_owned_sink {
     };
 }
 
+/// Runs `chain` over the borrowed `rows` slice, collecting into the sink determined by `sink`.
+///
+/// Returns `None` for `ApproxCountDistinct`, which is not supported by the composed path.
 pub(super) fn run(
     sink: &Sink,
     rows: &[Val],
@@ -74,6 +87,9 @@ pub(super) fn run(
     Some(out)
 }
 
+/// Runs `chain` over an owned iterator `rows`, collecting into the sink determined by `sink`.
+///
+/// Used after barrier stages that produce a new `Vec<Val>` rather than a borrowed slice.
 pub(super) fn run_owned_iter<I>(
     sink: &Sink,
     rows: I,
@@ -100,6 +116,7 @@ where
     Some(out)
 }
 
+/// Extracts the `BuiltinNumericReducer` variant from a reducer sink for dispatch.
 fn numeric_reducer(sink: &Sink) -> Option<BuiltinNumericReducer> {
     sink.reducer_spec()?.method()?.spec().numeric_reducer
 }

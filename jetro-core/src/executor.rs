@@ -1,8 +1,9 @@
-//! Top-level query execution routing.
+//! Top-level query execution router.
 //!
-//! `planner.rs` builds a single-use `QueryPlan`. This module only chooses
-//! between a parsed plan root and the source-level VM fallback used when
-//! parsing fails.
+//! Receives a `Jetro` document and a `QueryPlan` produced by `planner`,
+//! then dispatches to either `physical_eval` (for structured IR nodes) or the
+//! thread-local VM (for the `SourceVm` fallback when planning is bypassed).
+//! The only job here is routing — no evaluation logic lives in this module.
 
 use serde_json::Value;
 
@@ -12,11 +13,17 @@ use crate::physical_eval;
 use crate::planner;
 use crate::{with_vm, Jetro, VM};
 
+/// Plans `expr` against `j`'s input mode and then executes the resulting plan, returning JSON.
+///
+/// This is the single call path used by `Jetro::collect` for one-shot queries.
 pub(crate) fn collect_json(j: &Jetro, expr: &str) -> Result<Value, EvalError> {
     let plan = planner::plan_query_with_context(expr, planning_context(j));
     collect_plan_json(j, &plan)
 }
 
+/// Executes a pre-built `QueryPlan` against `j`, routing to `physical_eval` or the VM fallback.
+///
+/// Used by `JetroEngine::collect` when the plan was already retrieved from cache.
 pub(crate) fn collect_plan_json(j: &Jetro, plan: &QueryPlan) -> Result<Value, EvalError> {
     match plan.root() {
         QueryRoot::Node(root) => physical_eval::run(j, plan, *root).map(Value::from),
@@ -24,6 +31,7 @@ pub(crate) fn collect_plan_json(j: &Jetro, plan: &QueryPlan) -> Result<Value, Ev
     }
 }
 
+/// Executes `expr` via the thread-local VM, acquiring a fresh `VM` if the cell is already borrowed.
 fn run_vm_json(j: &Jetro, expr: &str) -> Result<Value, EvalError> {
     with_vm(|cell| match cell.try_borrow_mut() {
         Ok(mut vm) => {
@@ -38,6 +46,8 @@ fn run_vm_json(j: &Jetro, expr: &str) -> Result<Value, EvalError> {
     })
 }
 
+/// Executes a pre-built plan using a caller-supplied `VM` instance owned by `JetroEngine`,
+/// avoiding the thread-local VM cell and enabling re-entrant use within the same thread.
 pub(crate) fn collect_plan_json_with_vm(
     j: &Jetro,
     plan: &QueryPlan,
@@ -52,6 +62,9 @@ pub(crate) fn collect_plan_json_with_vm(
     }
 }
 
+/// Derives the appropriate `PlanningContext` from the document handle's backing representation.
+///
+/// Documents backed by raw bytes use `Bytes` mode; in-memory `Val` documents use `Val` mode.
 #[inline]
 pub(crate) fn planning_context(j: &Jetro) -> planner::PlanningContext {
     if j.raw_bytes().is_some() {

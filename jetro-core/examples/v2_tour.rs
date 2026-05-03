@@ -1,10 +1,4 @@
-//! v2.2 feature tour — Tier 1 search, chain-style writes, and the
-//! Python-style ternary.  Run with:
-//!
-//!     cargo run --release --example v2_tour -p jetro-core
-//!
-//! Every snippet is compiled through the same VM the Jetro facade uses,
-//! so the compile + pointer caches hit across calls on the same doc.
+
 
 use jetro_core::Jetro;
 use serde_json::json;
@@ -35,8 +29,7 @@ fn main() {
 
     let j = Jetro::from_bytes(serde_json::to_vec(&doc).unwrap()).unwrap();
 
-    // ── Shallow search (Tier 1) ──────────────────────────────────────────────
-
+    
     show(
         "find — first match (alias of filter + [0])",
         &j.collect(r#"$.store.books.find(title == "Dune")"#).unwrap(),
@@ -65,8 +58,7 @@ fn main() {
         &j.collect("$.store.books[0].tags.collect()").unwrap(),
     );
 
-    // ── Deep search ──────────────────────────────────────────────────────────
-
+    
     show(
         "$..find — every descendant satisfying pred",
         &j.collect("$..find(@ kind number and @ < 10)").unwrap(),
@@ -82,8 +74,7 @@ fn main() {
         &j.collect(r#"$..like({status: "paid"})"#).unwrap(),
     );
 
-    // ── Chain-style writes (desugar into `patch` blocks) ─────────────────────
-
+    
     show(
         ".set — replace a single leaf (returns full doc)",
         &j.collect("$.store.currency.set(\"EUR\")").unwrap(),
@@ -99,8 +90,7 @@ fn main() {
         &j.collect("$.store.books[0].unset(ratings)").unwrap(),
     );
 
-    // ── Python-style ternary ─────────────────────────────────────────────────
-
+    
     show(
         "ternary — chained right-assoc",
         &j.collect(
@@ -121,8 +111,7 @@ fn main() {
         &j.collect("42 if true else 0/0").unwrap(),
     );
 
-    // ── Combined: search + conditional inside projection ─────────────────────
-
+    
     show(
         "shape via pick + ternary — analyst view",
         &j.collect(

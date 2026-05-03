@@ -1,33 +1,10 @@
-//! Physical pipeline operators built from composed-Cow Stage chains.
+//! Zero-overhead stage composition using `Cow` borrow semantics.
 //!
-//! Per `pipeline_specialisation.md` (CORRECTED 2026-04-26 + cold-first
-//! pivot): replace the legacy fused-Sink enum + ~30 hand-rolled VM
-//! opcodes with a single generic substrate driven by composition. No
-//! per-shape opcodes, no enumerated `(stage_chain × sink)` Sink
-//! variants. Composition primitives + a
-//! bounded list of generic Sinks cover all chain shapes uniformly.
-//!
-//! ## Design
-//!
-//! - `Stage`: `&'a Val → StageOutput<'a>` — borrow-form returns
-//!   `Cow::Borrowed`, computed-form returns `Cow::Owned`. Avoids the
-//!   per-stage clone tax measured at 2.3× (composed-fn owned) vs 1.29×
-//!   (composed-borrow Cow) on `filter+map+sum` × 5000 × 1000 iters.
-//! - `Composed<A, B>`: monoidal pairing; N stages fold into one apply
-//!   call via `stages.into_iter().fold(Identity, compose)`. One
-//!   virtual call per element regardless of chain length.
-//! - `Sink`: `Acc + fold(&Acc, &Val) → Acc + finalise(Acc) → Val`. A
-//!   bounded set (Sum/Min/Max/Avg/Count/First/Last/Collect) covers
-//!   every legacy fused Sink variant.
-//! - `run_pipeline<S: Sink>`: one generic outer loop, parameterised by
-//!   `S`. Stages composed once at lower-time, used N× at execute.
-//!
-//! No (stage × sink) enumeration anywhere. Adding a new stage shape =
-//! one `Stage::apply` impl. Adding a new sink = one `Sink` impl.
-//! Adding a new chain shape = no code.
-//!
-//! `pipeline.rs` plans streamable query shapes; this module executes the
-//! reusable per-element operators and sinks for those plans.
+//! `Stage` transforms one element into a `StageOutput`. `Composed<A,B>` pairs
+//! two stages so N stages fold into a single apply call at lower time, with
+//! one virtual dispatch per element regardless of chain length. `Sink`
+//! accumulates and finalises — a bounded set covers all legacy fused variants.
+//! `run_pipeline` is the single generic outer loop parameterised by `Sink`.
 
 use smallvec::SmallVec;
 use std::borrow::{Borrow, Cow};
@@ -36,75 +13,80 @@ use crate::builtins::BuiltinCall;
 use crate::chain_ir::PullDemand;
 use crate::value::Val;
 
-// ── Stage ────────────────────────────────────────────────────────────────────
 
-/// Per-element output of a `Stage::apply`. Borrowed payload when the
-/// stage is a pass-through over the input (filter, field-read);
-/// owned payload only when the stage computed a fresh value
-/// (arithmetic, format-string, projection).
+/// Per-element output of a `Stage::apply`. `Pass(Cow::Borrowed)` is the
+/// hot path for filter and field-read (zero clone); `Cow::Owned` for
+/// computed values; `Filtered` for dropped rows; `Many` for flat-map;
+/// `Done` signals early termination to the outer loop.
 pub enum StageOutput<'a> {
-    /// Stage produced one element. `Cow::Borrowed` for pass-through
-    /// stages (zero clone); `Cow::Owned` for computed values.
+    /// The element passes through; borrowed when the stage did not transform it,
+    /// owned when a new value was computed.
     Pass(Cow<'a, Val>),
-    /// Filter dropped the element.
+    /// The element was rejected by this stage and should be skipped.
     Filtered,
-    /// FlatMap produced multiple elements.
+    /// The stage expanded one element into multiple outputs (flat-map semantics).
     Many(SmallVec<[Cow<'a, Val>; 4]>),
-    /// Take exhausted; outer loop should terminate.
+    /// The stage requests early termination of the outer loop (e.g. `Take`).
     Done,
 }
 
-/// A Stage transforms one element into a `StageOutput`. The lifetime
-/// `'a` ties borrowed outputs to the input reference, eliminating the
-/// per-stage clone overhead that owned-Val composition incurred.
-///
-/// Pipelines run single-threaded per invocation; no Send/Sync bound.
-/// Stages with interior mutability (`Take`, `Skip` counters) work in
-/// place via `Cell<usize>` reset at lower-time.
+
+/// Per-element transformation. Implemented by every pipeline stage type;
+/// composed monoidally by `Composed<A, B>`.
 pub trait Stage {
+    /// Apply the stage to a single input element, returning the appropriate
+    /// `StageOutput` variant without consuming the input.
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a>;
 }
 
-/// Blanket impl so `Box<dyn Stage>` itself implements `Stage`. Lets a
-/// chain of stages be folded into a single `Box<dyn Stage>` at
-/// lower-time without macro acrobatics.
+
 impl<T: Stage + ?Sized> Stage for Box<T> {
+    /// Delegate to the inner stage, allowing boxed trait objects to satisfy
+    /// the `Stage` bound without an extra allocation path.
     #[inline]
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         (**self).apply(x)
     }
 }
 
-/// Identity stage — pass-through. Used as the fold seed when composing
-/// a chain of stages.
+
+/// Identity stage — pass every element through unchanged. Neutral element for
+/// `compose`, so the fold over an empty stage list is well-typed.
 pub struct Identity;
 
 impl Default for Identity {
+    /// Construct the identity stage; equivalent to `Identity`.
     fn default() -> Self {
         Self
     }
 }
 
 impl Stage for Identity {
+    /// Return the element as a zero-copy borrowed `Pass`, performing no work.
     #[inline]
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         StageOutput::Pass(Cow::Borrowed(x))
     }
 }
 
-/// Adapter that lets the composed runtime execute canonical builtins
-/// without defining one `Stage` struct per builtin.
+
+/// A pipeline stage backed by a statically-dispatched `BuiltinCall`. Wraps the
+/// call's `apply` return value into the `StageOutput` protocol.
 pub struct BuiltinStage {
+    /// The underlying builtin call that performs the actual transformation.
     call: BuiltinCall,
 }
 
 impl BuiltinStage {
+    /// Construct a `BuiltinStage` from a pre-built `BuiltinCall`.
     pub fn new(call: BuiltinCall) -> Self {
         Self { call }
     }
 }
 
 impl Stage for BuiltinStage {
+    /// Delegate to `BuiltinCall::apply`; maps `Some(v)` to `Pass(Owned)` and
+    /// `None` (no-op / filter) to `Filtered`.
     #[inline]
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         match self.call.apply(x) {
@@ -114,20 +96,26 @@ impl Stage for BuiltinStage {
     }
 }
 
-/// Monoidal composition. `Composed { a, b }.apply(x) = b.apply(a.apply(x))`
-/// with proper handling of Filtered / Many / Done propagation.
+
+/// Monoidal pairing of two stages. `Composed<A, B>` applies `A` first, then
+/// feeds surviving elements into `B`, lifting ownership correctly across the
+/// borrow-checker boundary when `A` returns an owned value.
 pub struct Composed<A, B> {
+    /// The first stage to apply to each element.
     pub a: A,
+    /// The second stage, applied to every element that `a` did not filter out.
     pub b: B,
 }
 
 impl<A: Stage, B: Stage> Stage for Composed<A, B> {
+    /// Apply `a`, then `b`, propagating `Filtered` and `Done` without
+    /// allocating; upcasts borrowed `Cow` values to owned when needed.
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         match self.a.apply(x) {
             StageOutput::Pass(Cow::Borrowed(v)) => self.b.apply(v),
             StageOutput::Pass(Cow::Owned(v)) => {
-                // `b` may borrow from v, but v dies at scope end. Force
-                // owned result so the returned lifetime is independent of v.
+                // `v` is owned; `self.b` borrows it locally, so any `Borrowed`
+                // reference it returns must be re-owned before returning.
                 let owned = match self.b.apply(&v) {
                     StageOutput::Pass(c) => Cow::Owned(c.into_owned()),
                     StageOutput::Filtered => return StageOutput::Filtered,
@@ -160,8 +148,8 @@ impl<A: Stage, B: Stage> Stage for Composed<A, B> {
                             }
                         },
                         Cow::Owned(v) => {
-                            // `v` dies at end of this arm, so promote any
-                            // borrow returned by `b` to an owned value.
+                            // Same ownership-lifting as the scalar owned case
+                            // above; references from `b` cannot outlive `v`.
                             match self.b.apply(&v) {
                                 StageOutput::Pass(c) => out.push(Cow::Owned(c.into_owned())),
                                 StageOutput::Filtered => continue,
@@ -194,35 +182,36 @@ impl<A: Stage, B: Stage> Stage for Composed<A, B> {
     }
 }
 
-// ── Sink ─────────────────────────────────────────────────────────────────────
 
-/// Generic terminal accumulator. Bounded list (Sum/Min/Max/Avg/Count/
-/// First/Last/Collect) covers every fused Sink variant in
-/// `pipeline.rs`. New sinks = new impl, no per-chain code.
+/// Accumulator over the elements that survive a pipeline stage chain.
+/// Analogous to a fold; `init` creates the zero, `fold` updates it per element,
+/// and `finalise` converts it to the output `Val`.
 pub trait Sink {
+    /// The type of the running accumulator maintained across all rows.
     type Acc;
+    /// Return the zero accumulator before any rows are processed.
     fn init() -> Self::Acc;
+    /// Update the accumulator with one passing element; consumes and returns it.
     fn fold(acc: Self::Acc, v: &Val) -> Self::Acc;
+    /// Return `true` to signal the outer loop to stop pulling rows early.
     #[inline]
     fn done(_acc: &Self::Acc) -> bool {
         false
     }
+    /// Convert the final accumulator into the result `Val`.
     fn finalise(acc: Self::Acc) -> Val;
 }
 
-// ── Generic outer loop ──────────────────────────────────────────────────────
 
-/// Parameterised outer loop. One pass over `arr`, dispatching each
-/// element through the composed `stages`, accumulating into `S::Acc`.
-/// Stages composed once at lower-time, used N× here.
+/// Run `stages` over every element of `arr`, collecting results with sink `S`,
+/// processing all rows (`PullDemand::All`).
 pub fn run_pipeline<S: Sink>(arr: &[Val], stages: &dyn Stage) -> Val {
     run_pipeline_with_demand::<S>(arr, stages, PullDemand::All)
 }
 
-/// Demand-aware variant of [`run_pipeline`]. `FirstInput(n)` is a hard cap
-/// on upstream inputs pulled from `arr`; `UntilOutput(n)` stops after n
-/// values have reached the sink, regardless of how many inputs filters
-/// had to inspect to produce them.
+
+/// Run `stages` over `arr` with a `PullDemand` hint that lets callers cap
+/// how many input rows are consumed or how many outputs are emitted.
 pub fn run_pipeline_with_demand<S: Sink>(
     arr: &[Val],
     stages: &dyn Stage,
@@ -231,6 +220,8 @@ pub fn run_pipeline_with_demand<S: Sink>(
     run_pipeline_iter_with_demand::<S, _>(arr.iter(), stages, demand)
 }
 
+/// Run `stages` over an owned iterator of `Val` rows with a demand hint.
+/// Useful when the source is not a contiguous slice (e.g. a chained iterator).
 pub fn run_pipeline_owned_iter_with_demand<S, I>(
     rows: I,
     stages: &dyn Stage,
@@ -243,6 +234,8 @@ where
     run_pipeline_iter_with_demand::<S, _>(rows.into_iter(), stages, demand)
 }
 
+/// Core pipeline loop: iterate `rows`, apply `stages` to each element, feed
+/// surviving values into `S::fold`, and honour `PullDemand` early-exit hints.
 fn run_pipeline_iter_with_demand<'a, S, I>(rows: I, stages: &dyn Stage, demand: PullDemand) -> Val
 where
     S: Sink,
@@ -292,32 +285,41 @@ where
     S::finalise(acc)
 }
 
-// ── Generic Sink impls ──────────────────────────────────────────────────────
 
+/// Sink that counts every passing element and returns `Val::Int(n)`.
 pub struct CountSink;
 impl Sink for CountSink {
     type Acc = i64;
+    /// Initialise the counter to zero.
     #[inline]
     fn init() -> i64 {
         0
     }
+    /// Increment the counter by one for each element, ignoring its value.
     #[inline]
     fn fold(acc: i64, _: &Val) -> i64 {
         acc + 1
     }
+    /// Wrap the final count in `Val::Int`.
     #[inline]
     fn finalise(acc: i64) -> Val {
         Val::Int(acc)
     }
 }
 
+/// Sink that sums all numeric elements; accumulates integers and floats
+/// separately, upgrading the result to `Val::Float` when any float is seen.
 pub struct SumSink;
 impl Sink for SumSink {
-    type Acc = (i64, f64, bool); // (int_sum, float_sum, any_float)
+    /// `(int_sum, float_sum, has_float)` — `has_float` tracks whether any
+    /// floating-point value was encountered so the final result type is correct.
+    type Acc = (i64, f64, bool);
+    /// Initialise to zero with no floats seen.
     #[inline]
     fn init() -> Self::Acc {
         (0, 0.0, false)
     }
+    /// Add the element to the appropriate accumulator; booleans count as 0/1.
     fn fold(mut acc: Self::Acc, v: &Val) -> Self::Acc {
         match v {
             Val::Int(i) => acc.0 += *i,
@@ -330,6 +332,7 @@ impl Sink for SumSink {
         }
         acc
     }
+    /// Return `Val::Float` when any float was seen, otherwise `Val::Int`.
     fn finalise(acc: Self::Acc) -> Val {
         if acc.2 {
             Val::Float(acc.0 as f64 + acc.1)
@@ -339,13 +342,17 @@ impl Sink for SumSink {
     }
 }
 
+/// Sink that returns the minimum numeric value seen, or `Val::Null` on empty input.
 pub struct MinSink;
 impl Sink for MinSink {
+    /// `None` before any numeric element is seen, `Some(min)` thereafter.
     type Acc = Option<f64>;
+    /// Initialise with no minimum yet.
     #[inline]
     fn init() -> Self::Acc {
         None
     }
+    /// Update the running minimum, skipping non-numeric values.
     fn fold(acc: Self::Acc, v: &Val) -> Self::Acc {
         let n = match v {
             Val::Int(i) => *i as f64,
@@ -357,6 +364,8 @@ impl Sink for MinSink {
             None => n,
         })
     }
+    /// Return `Val::Int` when the result is a whole number, otherwise `Val::Float`;
+    /// returns `Val::Null` when no numeric elements were processed.
     fn finalise(acc: Self::Acc) -> Val {
         match acc {
             Some(f) if f.fract() == 0.0 && f.abs() < (i64::MAX as f64) => Val::Int(f as i64),
@@ -366,13 +375,17 @@ impl Sink for MinSink {
     }
 }
 
+/// Sink that returns the maximum numeric value seen, or `Val::Null` on empty input.
 pub struct MaxSink;
 impl Sink for MaxSink {
+    /// `None` before any numeric element is seen, `Some(max)` thereafter.
     type Acc = Option<f64>;
+    /// Initialise with no maximum yet.
     #[inline]
     fn init() -> Self::Acc {
         None
     }
+    /// Update the running maximum, skipping non-numeric values.
     fn fold(acc: Self::Acc, v: &Val) -> Self::Acc {
         let n = match v {
             Val::Int(i) => *i as f64,
@@ -384,6 +397,8 @@ impl Sink for MaxSink {
             None => n,
         })
     }
+    /// Return `Val::Int` when the result is a whole number, otherwise `Val::Float`;
+    /// returns `Val::Null` when no numeric elements were processed.
     fn finalise(acc: Self::Acc) -> Val {
         match acc {
             Some(f) if f.fract() == 0.0 && f.abs() < (i64::MAX as f64) => Val::Int(f as i64),
@@ -393,13 +408,18 @@ impl Sink for MaxSink {
     }
 }
 
+/// Sink that computes the arithmetic mean of all numeric elements, returning
+/// `Val::Null` when the input is empty or contains no numbers.
 pub struct AvgSink;
 impl Sink for AvgSink {
+    /// `(running_sum, count)` — both reset to zero on `init`.
     type Acc = (f64, usize);
+    /// Initialise to sum=0, count=0.
     #[inline]
     fn init() -> Self::Acc {
         (0.0, 0)
     }
+    /// Accumulate numeric values; non-numeric elements are silently skipped.
     fn fold(mut acc: Self::Acc, v: &Val) -> Self::Acc {
         let n = match v {
             Val::Int(i) => *i as f64,
@@ -410,6 +430,7 @@ impl Sink for AvgSink {
         acc.1 += 1;
         acc
     }
+    /// Divide sum by count; returns `Val::Null` when count is zero.
     fn finalise(acc: Self::Acc) -> Val {
         if acc.1 == 0 {
             Val::Null
@@ -419,13 +440,18 @@ impl Sink for AvgSink {
     }
 }
 
+/// Sink that returns the first element seen, then signals `done` to stop
+/// pulling rows, giving O(1) behaviour with any upstream stage.
 pub struct FirstSink;
 impl Sink for FirstSink {
+    /// `None` until the first element arrives, `Some(val)` thereafter.
     type Acc = Option<Val>;
+    /// Initialise with no element captured yet.
     #[inline]
     fn init() -> Self::Acc {
         None
     }
+    /// Store the first element; subsequent calls are no-ops once filled.
     fn fold(acc: Self::Acc, v: &Val) -> Self::Acc {
         if acc.is_some() {
             acc
@@ -433,76 +459,86 @@ impl Sink for FirstSink {
             Some(v.clone())
         }
     }
+    /// Signal early termination as soon as one element has been captured.
     #[inline]
     fn done(acc: &Self::Acc) -> bool {
         acc.is_some()
     }
+    /// Return the captured element, or `Val::Null` if the input was empty.
     fn finalise(acc: Self::Acc) -> Val {
         acc.unwrap_or(Val::Null)
     }
 }
 
+/// Sink that returns the last element seen; must consume the entire input
+/// to determine which element is last.
 pub struct LastSink;
 impl Sink for LastSink {
+    /// The most recently seen element, replaced on every new row.
     type Acc = Option<Val>;
+    /// Initialise with no element captured yet.
     #[inline]
     fn init() -> Self::Acc {
         None
     }
+    /// Overwrite the accumulator with the newest element unconditionally.
     fn fold(_acc: Self::Acc, v: &Val) -> Self::Acc {
         Some(v.clone())
     }
+    /// Return the last element seen, or `Val::Null` if the input was empty.
     fn finalise(acc: Self::Acc) -> Val {
         acc.unwrap_or(Val::Null)
     }
 }
 
+/// Sink that collects all passing elements into a `Val::Arr`.
 pub struct CollectSink;
 impl Sink for CollectSink {
+    /// The list of elements accumulated so far.
     type Acc = Vec<Val>;
+    /// Initialise with an empty vector.
     #[inline]
     fn init() -> Self::Acc {
         Vec::new()
     }
+    /// Append a clone of the element to the accumulator.
     fn fold(mut acc: Self::Acc, v: &Val) -> Self::Acc {
         acc.push(v.clone());
         acc
     }
+    /// Wrap the collected vector in `Val::Arr`.
     fn finalise(acc: Self::Acc) -> Val {
         Val::Arr(std::sync::Arc::new(acc))
     }
 }
 
-// ── Generic VM-fallback stages ──────────────────────────────────────────────
-//
-// Cover any kernel shape the borrow stages don't recognise (Generic,
-// Arith, FString, FieldCmpLit non-Eq, custom lambdas). One VM + Env
-// shared across all Generic stages in the chain via Rc<RefCell>;
-// constructed once per pipeline call so compile/path caches amortise.
-//
-// These exist so `try_run_composed` never bails on body-shape — every
-// pipeline lowers via composition, every chain runs the same outer
-// loop. No per-shape walker; one mechanism for every body.
 
+/// Shared VM + environment context threaded through generic pipeline stages
+/// that need to re-enter the evaluator (e.g. `GenericFilter`, `GenericMap`).
 pub struct VmCtx {
+    /// The VM instance used to execute compiled sub-programs.
     pub vm: crate::vm::VM,
+    /// The evaluation environment (variables, current value) for sub-program execution.
     pub env: crate::context::Env,
 }
 
-/// `.filter(pred)` with arbitrary pred — VM evaluates per row, result
-/// truthy-checked. Borrow form on pass-through (zero-clone of x).
+
+/// A pipeline stage that evaluates a compiled boolean sub-program against each
+/// element and passes it through only when the result is truthy.
 pub struct GenericFilter {
+    /// The compiled boolean predicate program to evaluate per row.
     pub prog: std::sync::Arc<crate::vm::Program>,
+    /// Shared VM and environment context, wrapped for interior mutability.
     pub ctx: std::rc::Rc<std::cell::RefCell<VmCtx>>,
 }
 
 impl Stage for GenericFilter {
+    /// Set `@` to `x`, run `prog`; return `Pass` when truthy, `Filtered` otherwise.
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         let mut c = self.ctx.borrow_mut();
         let VmCtx { vm, env } = &mut *c;
-        // Single source of truth for filter semantics: route the
-        // truthy-check through `crate::builtins::filter_one` so this
-        // backend shares its definition with vm.rs + pipeline.rs.
+
+        // `filter_one` handles both scalar-bool and wrapped-array results.
         let kept = crate::builtins::filter_one(x, |item| {
             let prev = env.swap_current(item.clone());
             let r = vm.exec_in_env(&self.prog, env);
@@ -516,13 +552,19 @@ impl Stage for GenericFilter {
     }
 }
 
-/// `.map(f)` with arbitrary f — VM emits a fresh Val per row.
+
+/// A pipeline stage that maps each element through a compiled expression,
+/// producing a new owned `Val` per row.
 pub struct GenericMap {
+    /// The compiled mapping expression program to evaluate per row.
     pub prog: std::sync::Arc<crate::vm::Program>,
+    /// Shared VM and environment context, wrapped for interior mutability.
     pub ctx: std::rc::Rc<std::cell::RefCell<VmCtx>>,
 }
 
 impl Stage for GenericMap {
+    /// Set `@` to `x`, run `prog`, and return the result as `Pass(Owned)`;
+    /// evaluation errors degrade to `Filtered` rather than propagating.
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         let mut c = self.ctx.borrow_mut();
         let VmCtx { vm, env } = &mut *c;
@@ -536,14 +578,19 @@ impl Stage for GenericMap {
     }
 }
 
-/// `.flat_map(f)` with arbitrary f — VM emits a Val that must be
-/// iterable; `flatten_iterable` dispatches across all lane variants.
+
+/// A pipeline stage that maps each element through a compiled expression and
+/// then flattens the resulting array into individual rows.
 pub struct GenericFlatMap {
+    /// The compiled flat-mapping expression program to evaluate per row.
     pub prog: std::sync::Arc<crate::vm::Program>,
+    /// Shared VM and environment context, wrapped for interior mutability.
     pub ctx: std::rc::Rc<std::cell::RefCell<VmCtx>>,
 }
 
 impl Stage for GenericFlatMap {
+    /// Set `@` to `x`, run `prog`, then expand the result into `Many`; errors
+    /// or non-iterable results degrade to `Filtered`.
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         let mut c = self.ctx.borrow_mut();
         let VmCtx { vm, env } = &mut *c;
@@ -554,9 +601,8 @@ impl Stage for GenericFlatMap {
             Ok(v) => v,
             Err(_) => return StageOutput::Filtered,
         };
-        // `owned` lives in this scope; any borrow against it must be
-        // promoted to owned before returning. Materialise in a way
-        // that doesn't outlive `owned`.
+
+        // `into_vals` extracts the element vector without cloning the `Arc`.
         let result: StageOutput<'a> = match owned.into_vals() {
             Ok(items) => many_from_owned_vals(items),
             Err(_) => StageOutput::Filtered,
@@ -565,15 +611,18 @@ impl Stage for GenericFlatMap {
     }
 }
 
-// ── Borrow-form stages — zero-clone pass-through ────────────────────────────
 
-/// `.filter(@.k == lit)` — borrow-form when pred holds.
+/// A pipeline stage that keeps only object elements whose named field equals a
+/// compile-time literal value; avoids a VM round-trip for simple equality predicates.
 pub struct FilterFieldEqLit {
+    /// The field name to look up on each object element.
     pub field: std::sync::Arc<str>,
+    /// The literal value the field must equal for the row to pass.
     pub target: Val,
 }
 
 impl Stage for FilterFieldEqLit {
+    /// Pass `x` only when it is an object, has `field`, and `field == target`.
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         if let Val::Obj(m) = x {
             if let Some(v) = m.get(self.field.as_ref()) {
@@ -586,12 +635,17 @@ impl Stage for FilterFieldEqLit {
     }
 }
 
-/// `.map(@.k)` — borrow into the parent object.
+
+/// A pipeline stage that extracts a single named field from each object element,
+/// discarding elements that are not objects or lack the field.
 pub struct MapField {
+    /// The name of the field to extract from each object.
     pub field: std::sync::Arc<str>,
 }
 
 impl Stage for MapField {
+    /// Return a zero-copy borrowed reference to `x.field`, or `Filtered` when
+    /// `x` is not an object or the field is absent.
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         if let Val::Obj(m) = x {
             if let Some(v) = m.get(self.field.as_ref()) {
@@ -602,14 +656,17 @@ impl Stage for MapField {
     }
 }
 
-/// `.flat_map(@.k)` — borrow into array field, yield elements as Many.
-/// FieldRead variant: kernel resolves to a single field whose value
-/// is an array; emit each element as a borrow.
+
+/// A pipeline stage that extracts a named field from each object and expands it
+/// into individual rows when the field value is itself an array.
 pub struct FlatMapField {
+    /// The name of the field whose value should be flattened into rows.
     pub field: std::sync::Arc<str>,
 }
 
 impl Stage for FlatMapField {
+    /// Retrieve `x.field` and flatten it; produces `Filtered` when the field is
+    /// absent, not an object, or the field value is not iterable.
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         if let Val::Obj(m) = x {
             if let Some(v) = m.get(self.field.as_ref()) {
@@ -620,12 +677,17 @@ impl Stage for FlatMapField {
     }
 }
 
-/// `.flat_map(@.a.b.c)` — borrow into deep array field.
+
+/// A pipeline stage that follows a sequence of field keys through nested objects
+/// and then flattens the final value into individual rows.
 pub struct FlatMapFieldChain {
+    /// Ordered sequence of field keys forming the nested path to follow.
     pub keys: std::sync::Arc<[std::sync::Arc<str>]>,
 }
 
 impl Stage for FlatMapFieldChain {
+    /// Traverse `keys` depth-first; flatten the terminal value, or return
+    /// `Filtered` when any intermediate step is missing or non-object.
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         let mut cur = x;
         for k in self.keys.iter() {
@@ -641,9 +703,9 @@ impl Stage for FlatMapFieldChain {
     }
 }
 
-/// Generic flatten dispatch. `Val::as_vals()` is the single lane
-/// adapter: Arr rows stay borrowed, typed lanes and ObjVec materialize
-/// only at this compatibility boundary.
+
+/// Expand an iterable `Val` into a `Many` output, borrowing the inner slice
+/// when possible to avoid cloning. Returns `Filtered` for non-iterable values.
 #[inline]
 fn flatten_iterable<'a>(v: &'a Val) -> StageOutput<'a> {
     match v.as_vals() {
@@ -652,6 +714,8 @@ fn flatten_iterable<'a>(v: &'a Val) -> StageOutput<'a> {
     }
 }
 
+/// Convert a `Cow<[Val]>` into `StageOutput::Many`, borrowing each element
+/// when `allow_borrow` is `true` and the slice is borrowed, otherwise owning.
 fn many_from_vals<'a>(items: Cow<'a, [Val]>, allow_borrow: bool) -> StageOutput<'a> {
     match items {
         Cow::Borrowed(items) if allow_borrow => {
@@ -669,6 +733,8 @@ fn many_from_vals<'a>(items: Cow<'a, [Val]>, allow_borrow: bool) -> StageOutput<
     }
 }
 
+/// Convert an owned `Vec<Val>` into `StageOutput::Many`, wrapping each element
+/// in `Cow::Owned`. Returns `Filtered` when the vector is empty.
 fn many_from_owned_vals<'a>(items: Vec<Val>) -> StageOutput<'a> {
     let mut out: SmallVec<[Cow<'a, Val>; 4]> = SmallVec::with_capacity(items.len());
     for item in items {
@@ -681,12 +747,17 @@ fn many_from_owned_vals<'a>(items: Vec<Val>) -> StageOutput<'a> {
     }
 }
 
-/// `.map(@.a.b.c)` — generic field chain walk.
+
+/// A pipeline stage that traverses a fixed sequence of field keys through
+/// nested objects and returns the terminal value as a zero-copy borrow.
 pub struct MapFieldChain {
+    /// Ordered sequence of field keys forming the nested path to follow.
     pub keys: std::sync::Arc<[std::sync::Arc<str>]>,
 }
 
 impl Stage for MapFieldChain {
+    /// Follow `keys` depth-first; return a borrowed reference to the terminal
+    /// value, or `Filtered` when any step is missing or non-object.
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         let mut cur = x;
         for k in self.keys.iter() {
@@ -702,13 +773,16 @@ impl Stage for MapFieldChain {
     }
 }
 
-/// `.take(n)` — counts via interior mutability (single-thread per
-/// pipeline invocation; outer loop owns the closure).
+
+/// A pipeline stage that passes at most `remaining` elements, then signals
+/// `Done` to terminate the outer loop — enables fused `sort | take(k)`.
 pub struct Take {
+    /// Interior-mutable counter of elements still allowed to pass through.
     pub remaining: std::cell::Cell<usize>,
 }
 
 impl Stage for Take {
+    /// Decrement the counter and pass the element; return `Done` when exhausted.
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         let r = self.remaining.get();
         if r == 0 {
@@ -719,12 +793,16 @@ impl Stage for Take {
     }
 }
 
-/// `.skip(n)` — same shape as Take.
+
+/// A pipeline stage that discards the first `remaining` elements, then passes
+/// every subsequent element through unchanged.
 pub struct Skip {
+    /// Interior-mutable counter of elements still to be dropped.
     pub remaining: std::cell::Cell<usize>,
 }
 
 impl Stage for Skip {
+    /// Filter while `remaining > 0`, decrementing; pass once the quota is exhausted.
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         let r = self.remaining.get();
         if r > 0 {
@@ -735,26 +813,21 @@ impl Stage for Skip {
     }
 }
 
-// ── Barrier ops ─────────────────────────────────────────────────────────────
-//
-// Barriers consume the upstream stream into a Vec<Val>, run a single
-// op, and return a new Vec<Val>. Caller drives them — see
-// `pipeline::Pipeline::try_run_composed` segment loop.
-//
-// Key extraction is shared with the streaming Stage classifier:
-// FieldRead / FieldChain only. Computed-key barriers (Arith, FString,
-// custom lambda) bail to legacy in `try_run_composed`.
 
-/// Source of a barrier key — same shape grammar as borrow stages.
+/// Describes how a barrier operation (`sort_by`, `unique_by`, `group_by`) should
+/// extract the comparison or grouping key from each element.
 pub enum KeySource {
+    /// Use the element itself as the key.
     None,
+    /// Extract a single top-level field from the element.
     Field(std::sync::Arc<str>),
+    /// Follow a dot-separated chain of fields to reach the key.
     Chain(std::sync::Arc<[std::sync::Arc<str>]>),
 }
 
 impl KeySource {
-    /// Extract key Val by reference; clone-on-extract since the key
-    /// must outlive the borrow on `v` (sort/dedup buffers retain it).
+    /// Extract the key from `v` according to the source variant, returning
+    /// `Val::Null` when a required field is absent or `v` is not an object.
     pub fn extract(&self, v: &Val) -> Val {
         match self {
             KeySource::None => v.clone(),
@@ -780,35 +853,40 @@ impl KeySource {
     }
 }
 
-/// Reverse a buffered stream in place when uniquely owned, else clone.
+
+/// Barrier operation: reverse the entire buffered row set in-place, returning
+/// the reversed vector.
 pub fn barrier_reverse(buf: Vec<Val>) -> Vec<Val> {
     let mut buf = buf;
     buf.reverse();
     buf
 }
 
-/// Sort with optional key. Compares Val natural ordering via
-/// `cmp_val` — wraps `util::cmp_val` for primitive Vals.
+
+/// Barrier operation: stable-sort the buffered rows by the key produced by
+/// `key`, using `cmp_val` for ordering.
 pub fn barrier_sort(buf: Vec<Val>, key: &KeySource) -> Vec<Val> {
     let mut indexed: Vec<(Val, Val)> = buf.into_iter().map(|v| (key.extract(&v), v)).collect();
     indexed.sort_by(|a, b| cmp_val(&a.0, &b.0));
     indexed.into_iter().map(|(_, v)| v).collect()
 }
 
-/// Top-k sort: keep the `k` smallest-by-key elements, sorted ascending.
-/// O(N log k) via a max-heap of size k — for `k << N` this is the
-/// algorithmic win that demand propagation unlocks (`Sort ∘ First` →
-/// `Sort.adapt(FirstInput(1))` → this kernel).
+
+/// Barrier operation: return the `k` smallest rows by `key` using a partial
+/// sort, cheaper than sorting the full buffer when `k << buf.len()`.
 pub fn barrier_top_k(buf: Vec<Val>, key: &KeySource, k: usize) -> Vec<Val> {
     barrier_top_or_bottom_k(buf, key, k, false)
 }
 
-/// Bottom-k sort: keep the `k` largest-by-key elements, sorted ascending.
-/// Driven by `Sort ∘ Last` / positional=Last under demand propagation.
+
+/// Barrier operation: return the `k` largest rows by `key` using a partial
+/// sort, cheaper than sorting the full buffer when `k << buf.len()`.
 pub fn barrier_bottom_k(buf: Vec<Val>, key: &KeySource, k: usize) -> Vec<Val> {
     barrier_top_or_bottom_k(buf, key, k, true)
 }
 
+/// Shared implementation for `barrier_top_k` and `barrier_bottom_k`; delegates
+/// to `pipeline::bounded_sort_by_key_cmp` with the appropriate `StageStrategy`.
 fn barrier_top_or_bottom_k(buf: Vec<Val>, key: &KeySource, k: usize, largest: bool) -> Vec<Val> {
     let strategy = if largest {
         crate::pipeline::StageStrategy::SortBottomK(k)
@@ -819,8 +897,9 @@ fn barrier_top_or_bottom_k(buf: Vec<Val>, key: &KeySource, k: usize, largest: bo
         .unwrap_or_default()
 }
 
-/// Dedup by key. Uses a linear-probe HashSet on hashable keys; for
-/// primitive Vals this is O(N).
+
+/// Barrier operation: deduplicate rows, keeping the first occurrence of each
+/// unique key produced by `key`.
 pub fn barrier_unique_by(buf: Vec<Val>, key: &KeySource) -> Vec<Val> {
     use std::collections::HashSet;
     let mut seen: HashSet<KeyHash> = HashSet::with_capacity(buf.len());
@@ -834,9 +913,9 @@ pub fn barrier_unique_by(buf: Vec<Val>, key: &KeySource) -> Vec<Val> {
     out
 }
 
-/// Group-by key. Produces a `Val::Obj` where each key maps to the
-/// `Val::Arr` of rows that hashed to it. Insertion-ordered by first
-/// occurrence (IndexMap preserves this).
+
+/// Barrier operation: group rows by the string form of each row's key,
+/// returning a `Val::Obj` whose values are `Val::Arr` lists of grouped rows.
 pub fn barrier_group_by(buf: Vec<Val>, key: &KeySource) -> Val {
     use indexmap::IndexMap;
     let mut groups: IndexMap<std::sync::Arc<str>, Vec<Val>> = IndexMap::new();
@@ -858,21 +937,31 @@ pub fn barrier_group_by(buf: Vec<Val>, key: &KeySource) -> Val {
     Val::Obj(std::sync::Arc::new(m))
 }
 
-// ── Hashable Val key wrapper ──
 
+/// A `Val`-based hash wrapper used as the deduplication key inside `barrier_unique_by`.
+/// Stores the key in a canonical `KeyRepr` to enable `HashSet` membership tests.
 #[derive(Eq, PartialEq, Hash)]
 struct KeyHash(KeyRepr);
 
+/// The canonical form of a `Val` used as a hash key. Floats are stored as
+/// raw `u64` bits so that equal floating-point values produce equal hashes.
 #[derive(Eq, PartialEq, Hash)]
 enum KeyRepr {
+    /// Null key, equal to all other nulls.
     Null,
+    /// Boolean key.
     Bool(bool),
+    /// Integer key.
     Int(i64),
-    Float(u64), // f64::to_bits for total ordering
+    /// Float stored as raw bits for hash-equality; NaN maps to a distinct value.
+    Float(u64),
+    /// String key, covering all string-like `Val` variants.
     Str(String),
 }
 
 impl From<Val> for KeyHash {
+    /// Convert a `Val` into a `KeyHash` by mapping to `KeyRepr`; compound
+    /// values (`Arr`, `Obj`) are serialised via `DisplayKey` as a best-effort fallback.
     fn from(v: Val) -> Self {
         let r = match v {
             Val::Null => KeyRepr::Null,
@@ -887,8 +976,11 @@ impl From<Val> for KeyHash {
     }
 }
 
+/// Minimal `Display` adapter for `Val` used when a complex value must be
+/// serialised as a group-by or dedup key string.
 struct DisplayKey<'a>(&'a Val);
 impl<'a> std::fmt::Display for DisplayKey<'a> {
+    /// Format the value as a terse string; compound types render as `"<complex>"`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.0 {
             Val::Null => write!(f, "null"),
@@ -902,8 +994,10 @@ impl<'a> std::fmt::Display for DisplayKey<'a> {
     }
 }
 
-/// Total ordering on Val keys; mirrors the legacy sort comparator
-/// shape used in `pipeline::run_with`.
+
+/// Total order over `Val` used by all barrier sorts. `Null` sorts smallest;
+/// cross-type numeric comparisons promote integers to `f64`. Incomparable
+/// pairs (e.g. two objects) return `Equal` to preserve insertion order.
 pub(crate) fn cmp_val(a: &Val, b: &Val) -> std::cmp::Ordering {
     use std::cmp::Ordering::*;
     match (a, b) {
@@ -923,8 +1017,10 @@ pub(crate) fn cmp_val(a: &Val, b: &Val) -> std::cmp::Ordering {
     }
 }
 
-// ── Helpers ─────────────────────────────────────────────────────────────────
 
+/// Structural equality over scalar `Val` variants used by `FilterFieldEqLit`.
+/// Cross-type numeric comparison (`Int` vs `Float`) is supported; compound
+/// types always return `false`.
 #[inline]
 fn vals_eq(a: &Val, b: &Val) -> bool {
     match (a, b) {
@@ -942,7 +1038,6 @@ fn vals_eq(a: &Val, b: &Val) -> bool {
     }
 }
 
-// ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -1006,7 +1101,7 @@ mod tests {
 
     #[test]
     fn count_filter_map_field() {
-        // [{a:1, b:10}, {a:2, b:20}, {a:1, b:30}].filter(@.a == 1).map(@.b) → count = 2
+        // filter a==1, map b, count → 2
         let arr = vec![
             obj(&[("a", Val::Int(1)), ("b", Val::Int(10))]),
             obj(&[("a", Val::Int(2)), ("b", Val::Int(20))]),
@@ -1042,13 +1137,13 @@ mod tests {
             },
         };
         let out = run_pipeline::<SumSink>(&arr, &stages);
-        // 10 + 30 = 40
+        // rows a==1: b=10, b=30 → sum=40
         assert!(matches!(out, Val::Int(40)));
     }
 
     #[test]
     fn collect_map_field_chain() {
-        // [{u:{a:{c:"NYC"}}}, {u:{a:{c:"LA"}}}].map(@.u.a.c) → ["NYC", "LA"]
+        // u.a.c for each row
         let inner1 = obj(&[("c", Val::Str(Arc::from("NYC")))]);
         let inner2 = obj(&[("c", Val::Str(Arc::from("LA")))]);
         let mid1 = obj(&[("a", inner1)]);
@@ -1095,7 +1190,7 @@ mod tests {
             run_pipeline::<MaxSink>(&arr, &Identity),
             Val::Int(9)
         ));
-        // (5+2+9+3)/4 = 4.75
+        // avg = (5+2+9+3)/4 = 4.75
         if let Val::Float(f) = run_pipeline::<AvgSink>(&arr, &Identity) {
             assert!((f - 4.75).abs() < 1e-9);
         } else {
@@ -1220,19 +1315,19 @@ mod tests {
 
         let j = crate::Jetro::new(doc);
 
-        // Reverse + collect prices
+        // reverse then map
         assert_eq!(
             j.collect("$.rows.reverse().map(price)").unwrap(),
             json!([40, 20, 10, 30])
         );
 
-        // unique_by city + count
+        // unique_by city → 2 cities
         assert_eq!(
             j.collect("$.rows.unique_by(city).count()").unwrap(),
             json!(2)
         );
 
-        // sort_by price + first → smallest (Step 3d Phase 1: top-k, k=1)
+        // sort_by price ascending → first is the cheapest
         assert_eq!(
             j.collect("$.rows.sort_by(price).first()").unwrap(),
             json!({"city": "NYC", "price": 10})
@@ -1241,8 +1336,8 @@ mod tests {
 
     #[test]
     fn step3d_phase1_sort_topk() {
-        // Demand propagation: Sort sees FirstInput(k) downstream and switches
-        // to top-k via barrier_top_k.  Output ordering matches full sort.
+        // Verify that sort_by + take(k) uses the fused top-k path and returns
+        // correctly sorted results.
         use serde_json::json;
         let doc = json!({
             "rows": [
@@ -1255,18 +1350,18 @@ mod tests {
         });
         let j = crate::Jetro::new(doc);
 
-        // Sort ∘ Take(2) → top-k=2, ascending by v
+        // take(2) after sort → two smallest
         assert_eq!(
             j.collect("$.rows.sort_by(v).take(2)").unwrap(),
             json!([{"id": 1, "v": 10}, {"id": 2, "v": 20}])
         );
-        // Sort ∘ First → top-k=1
+        // first after sort → smallest
         assert_eq!(
             j.collect("$.rows.sort_by(v).first()").unwrap(),
             json!({"id": 1, "v": 10})
         );
-        // Sort ∘ Last → top-k=1 with positional Last; current Sort produces
-        // sorted ascending, Last picks largest.
+
+        // last after sort → largest
         assert_eq!(
             j.collect("$.rows.sort_by(v).last()").unwrap(),
             json!({"id": 5, "v": 50})
@@ -1275,7 +1370,7 @@ mod tests {
 
     #[test]
     fn step3d_phase5_indexed_dispatch_correctness() {
-        // Map().first/last/nth — output must match generic-loop semantics.
+        // Ensure indexed dispatch (first/last after map) returns the right elements.
         use serde_json::json;
         let doc = json!({
             "books": [
@@ -1285,21 +1380,17 @@ mod tests {
             ]
         });
         let j = crate::Jetro::new(doc);
-        // map(price).first() — IndexedDispatch picks books[0], runs Map.
+        // first
         assert_eq!(j.collect("$.books.map(price).first()").unwrap(), json!(10));
-        // map(price).last() — IndexedDispatch picks books[len-1].
+        // last
         assert_eq!(j.collect("$.books.map(price).last()").unwrap(), json!(30));
-        // chained Map's still 1:1 — both elide.
+        // first again (cache check)
         assert_eq!(j.collect("$.books.map(price).first()").unwrap(), json!(10));
     }
 
     #[test]
     fn step3d_ext_a2_compiled_map() {
-        // Step 3d-extension (A2): Map body that's a chain of recognised
-        // methods over @ becomes Stage::CompiledMap.  Inner Plan runs
-        // recursively per outer element — preserves cardinality (N
-        // outer rows → N results) while taking advantage of inner
-        // strategy selection (IndexedDispatch on Split.first(), etc.).
+        // Compiled map with chained method calls on @.
         use serde_json::json;
         let doc = json!({ "records": [
             { "text": "alice,smith,42" },
@@ -1308,22 +1399,20 @@ mod tests {
         ]});
         let j = crate::Jetro::new(doc);
 
-        // map(@.text.split(",").first()) — N first-parts, one per
-        // record.  Cardinality preserved (3 results), each computed
-        // via inner Stage::Map(@.text) → Stage::Split(",") → Sink::Terminal(BuiltinMethod::First).
+        // first segment
         assert_eq!(
             j.collect("$.records.map(@.text.split(\",\").first())")
                 .unwrap(),
             json!(["alice", "bob", "carol"])
         );
-        // map(@.text.split(",").last()).
+        // last segment
         assert_eq!(
             j.collect("$.records.map(@.text.split(\",\").last())")
                 .unwrap(),
             json!(["42", "17", "99"])
         );
-        // map(@.text.split(",").count()) — count reducer inside body
-        // returns one count per row.
+
+        // count segments
         assert_eq!(
             j.collect("$.records.map(@.text.split(\",\").count())")
                 .unwrap(),
@@ -1333,41 +1422,38 @@ mod tests {
 
     #[test]
     fn step3d_ext_split_slice_lifted() {
-        // Step 3d-extension (C): top-level Stage::Split + Stage::Slice
-        // semantics match legacy method-call dispatch.
+        // split on a scalar string, then slice/aggregate on the resulting array.
         use serde_json::json;
         let doc = json!({ "s": "a,b,c,d,e" });
         let j = crate::Jetro::new(doc);
 
-        // .split(",") collects to array.
+        // plain split
         assert_eq!(
             j.collect("$.s.split(\",\")").unwrap(),
             json!(["a", "b", "c", "d", "e"])
         );
-        // .split(",").count() — Stage::Split + count reducer.
+        // count
         assert_eq!(j.collect("$.s.split(\",\").count()").unwrap(), json!(5));
-        // .split(",").first() — Stage::Split + Sink::Terminal(BuiltinMethod::First).
+        // first
         assert_eq!(j.collect("$.s.split(\",\").first()").unwrap(), json!("a"));
-        // .split(",").last() — Stage::Split + Sink::Terminal(BuiltinMethod::Last).
+        // last
         assert_eq!(j.collect("$.s.split(\",\").last()").unwrap(), json!("e"));
     }
 
     #[test]
     fn step3d_phase3_filter_reorder() {
-        // Phase 3: adjacent Filter runs reorder by cost / (1 - selectivity).
-        // Cheaper, more-selective filter first — Eq (sel=0.10) before
-        // Lt (sel=0.40).  Reorder must preserve overall set semantics.
+        // Two consecutive Filter stages should be fused/reordered into one by the planner.
         use crate::ast::BinOp;
         use crate::pipeline::{plan_with_kernels, BodyKernel, Sink, Stage};
         use std::sync::Arc;
         let dummy = Arc::new(crate::vm::Program::new(Vec::new(), ""));
         let stages = vec![
-            // [0]: Filter(price < 100)  — selectivity 0.4
+            // first filter
             Stage::Filter(
                 Arc::clone(&dummy),
                 crate::builtins::BuiltinViewStage::Filter,
             ),
-            // [1]: Filter(active == true) — selectivity 0.1, more selective
+            // second filter
             Stage::Filter(
                 Arc::clone(&dummy),
                 crate::builtins::BuiltinViewStage::Filter,
@@ -1386,17 +1472,14 @@ mod tests {
             &kernels,
             Sink::Reducer(crate::pipeline::ReducerSpec::count()),
         );
-        // Reorder is immediately followed by predicate fusion, so the
-        // adjacent filter run becomes one stage. Behavioural correctness is
-        // covered by the parity test below.
+        // both filters should be merged into a single composed stage
         assert_eq!(p.stages.len(), 1);
         assert!(matches!(p.stages[0], Stage::Filter(_, _)));
     }
 
     #[test]
     fn step3d_phase3_filter_reorder_correctness() {
-        // End-to-end correctness: same query result regardless of
-        // reorder.  Phase 3 reorder must not change semantics.
+        // Two chained filters should yield the same results as either order.
         use serde_json::json;
         let doc = json!({
             "rows": [
@@ -1408,15 +1491,13 @@ mod tests {
             ]
         });
         let j = crate::Jetro::new(doc);
-        // filter(b > 15) AND filter(tag == "x") — Eq more selective.
-        // Result regardless of order: rows where b>15 AND tag=="x" =
-        // {a:3,b:30,tag:"x"}, {a:5,b:50,tag:"x"} → count = 2.
+        // b>15 AND tag=="x" → rows 3,5 → count=2
         assert_eq!(
             j.collect("$.rows.filter(b > 15).filter(tag == \"x\").count()")
                 .unwrap(),
             json!(2)
         );
-        // Sum after the same filters.
+        // sum of b for those rows → 30+50=80
         assert_eq!(
             j.collect("$.rows.filter(b > 15).filter(tag == \"x\").map(b).sum()")
                 .unwrap(),
@@ -1428,7 +1509,7 @@ mod tests {
     fn step3d_phase4_merge_take_skip() {
         use crate::builtins::{BuiltinStageMerge, BuiltinViewStage};
         use crate::pipeline::{plan, Sink, Stage};
-        // Take(5) ∘ Take(3) → Take(3)
+        // take(5).take(3) → take(3)
         let p = plan(
             vec![
                 Stage::Take(5, BuiltinViewStage::Take, BuiltinStageMerge::UsizeMin),
@@ -1439,7 +1520,7 @@ mod tests {
         assert_eq!(p.stages.len(), 1);
         assert!(matches!(p.stages[0], Stage::Take(3, _, _)));
 
-        // Skip(2) ∘ Skip(3) → Skip(5)
+        // skip(2).skip(3) → skip(5)
         let p = plan(
             vec![
                 Stage::Skip(
@@ -1458,7 +1539,7 @@ mod tests {
         assert_eq!(p.stages.len(), 1);
         assert!(matches!(p.stages[0], Stage::Skip(5, _, _)));
 
-        // Reverse ∘ Reverse → identity (drops both)
+        // reverse().reverse() → empty
         let cancel = crate::builtins::BuiltinMethod::Reverse
             .spec()
             .cancellation
@@ -1490,7 +1571,7 @@ mod tests {
             ),
             Strategy::IndexedDispatch
         );
-        // Filter + First → EarlyExit (Filter not 1:1)
+        // Filter + First → EarlyExit
         assert_eq!(
             select_strategy(
                 &[Stage::Filter(
@@ -1506,7 +1587,7 @@ mod tests {
             select_strategy(&[Stage::Sort(SortSpec::identity())], &first_sink),
             Strategy::BarrierMaterialise
         );
-        // Map + Sum → PullLoop (no positional, no barrier)
+        // Map + Sum reducer → PullLoop
         assert_eq!(
             select_strategy(
                 &[Stage::Map(
@@ -1535,12 +1616,12 @@ mod tests {
         let dummy_prog = Arc::new(crate::vm::Program::new(Vec::new(), ""));
         let first_sink = Sink::Terminal(BuiltinMethod::First);
 
-        // [Sort] + First → SortTopK(1)
+        // Sort + First → SortTopK(1)
         let stages = vec![Stage::Sort(SortSpec::keyed(Arc::clone(&dummy_prog), false))];
         let strats = compute_strategies(&stages, &first_sink);
         assert!(matches!(strats[0], StageStrategy::SortTopK(1)));
 
-        // [Sort, Take(5)] + Collect → SortTopK(5) at index 0
+        // Sort + Take(5) + Collect → SortTopK(5)
         let stages = vec![
             Stage::Sort(SortSpec::keyed(Arc::clone(&dummy_prog), false)),
             Stage::Take(
@@ -1553,7 +1634,7 @@ mod tests {
         assert!(matches!(strats[0], StageStrategy::SortTopK(5)));
         assert!(matches!(strats[1], StageStrategy::Default));
 
-        // [Sort] + Sum → unbounded → Default (full sort)
+        // Sort + Sum reducer → Default (full materialise required)
         let stages = vec![Stage::Sort(SortSpec::identity())];
         let strats = compute_strategies(
             &stages,
@@ -1567,9 +1648,7 @@ mod tests {
         );
         assert!(matches!(strats[0], StageStrategy::Default));
 
-        // [Sort, Filter] + First cannot use fixed top-k without a
-        // monotonic predicate proof, but it can use a lazy ordered
-        // producer that keeps popping sorted rows until First is done.
+        // Sort + Filter + First → SortUntilOutput(1)
         let stages = vec![
             Stage::Sort(SortSpec::keyed(Arc::clone(&dummy_prog), false)),
             Stage::Filter(
@@ -1583,9 +1662,7 @@ mod tests {
 
     #[test]
     fn integration_generic_kernels() {
-        // Body shapes the borrow stages don't recognise — should
-        // still run via the GenericFilter / GenericMap / GenericFlatMap
-        // VM-fallback path.
+        // Compiled lambdas in map/filter go through the VM path.
         use serde_json::json;
 
         let doc = json!({
@@ -1598,14 +1675,13 @@ mod tests {
 
         let j = crate::Jetro::new(doc);
 
-        // Arith body — `qty * price` not a borrow shape.
+        // computed field in map
         assert_eq!(
             j.collect("$.rows.map(qty * price).sum()").unwrap(),
             json!(110)
         );
 
-        // FieldCmpLit non-Eq — `qty > 1` is FieldCmpLit Gt, not the
-        // Eq fast path.
+        // filter with expression
         assert_eq!(
             j.collect("$.rows.filter(qty > 1).count()").unwrap(),
             json!(2)

@@ -1,3 +1,10 @@
+//! Columnar execution path for `ObjVec`-backed pipelines.
+//!
+//! When the source array has been promoted to `Val::ObjVec` (uniform-shape
+//! array of objects stored as a struct-of-arrays), this module runs filter,
+//! map, and aggregate stages directly over typed column slices — skipping per-
+//! row `Val` enum dispatch. Falls through to the generic exec path otherwise.
+
 use std::sync::Arc;
 
 use crate::builtins::BuiltinColumnarStage;
@@ -9,6 +16,9 @@ use super::{
     PipelineData, Sink, Source, Stage,
 };
 
+/// Entry point for the cache-assisted columnar path.
+/// Delegates to `Pipeline::run_cached_columnar_impl`; returns `None` when the
+/// pipeline shape does not qualify for columnar execution.
 pub(super) fn run_cached(
     pipeline: &Pipeline,
     root: &Val,
@@ -17,14 +27,21 @@ pub(super) fn run_cached(
     pipeline.run_cached_columnar_impl(root, cache)
 }
 
+/// Entry point for the cache-free columnar path.
+/// Delegates to `Pipeline::run_uncached_columnar_impl`; returns `None` when
+/// the pipeline shape does not qualify for columnar execution.
 pub(super) fn run_uncached(pipeline: &Pipeline, root: &Val) -> Option<Result<Val, EvalError>> {
     pipeline.run_uncached_columnar_impl(root)
 }
 
+/// Returns the `BuiltinColumnarStage` classification for a single stage, or
+/// `None` if the stage has no descriptor or lacks a columnar mapping.
 fn stage_kind(stage: &Stage) -> Option<BuiltinColumnarStage> {
     stage.descriptor()?.columnar_stage()
 }
 
+/// Returns the single `BodyKernel` when there is exactly one stage of the
+/// given `kind`; returns `None` for any other stage count or kind mismatch.
 fn stage_kernel<'a>(
     stages: &[Stage],
     kernels: &'a [BodyKernel],
@@ -39,6 +56,8 @@ fn stage_kernel<'a>(
     (stage_kind(stage)? == kind).then_some(kernel)
 }
 
+/// Returns the two `BodyKernel`s when the pipeline has exactly two stages
+/// whose kinds match `first` then `second` in order.
 fn stage_kernel_pair<'a>(
     stages: &[Stage],
     kernels: &'a [BodyKernel],
@@ -55,6 +74,8 @@ fn stage_kernel_pair<'a>(
         .then_some((first_kernel, second_kernel))
 }
 
+/// Returns the compiled `Program` body for a stage whose kind matches `kind`,
+/// or `None` if the kind does not match or the stage has no body program.
 fn stage_program<'a>(
     stage: &'a Stage,
     kind: BuiltinColumnarStage,
@@ -65,6 +86,8 @@ fn stage_program<'a>(
     stage.body_program()
 }
 
+/// Extracts the `ReducerOp` from a `Sink::Reducer` that has no predicate,
+/// returning `None` for any other sink shape.
 fn reducer_op(sink: &Sink) -> Option<ReducerOp> {
     match sink {
         Sink::Reducer(spec) if spec.predicate.is_none() => Some(spec.op),
@@ -72,10 +95,13 @@ fn reducer_op(sink: &Sink) -> Option<ReducerOp> {
     }
 }
 
+/// Returns `true` when the sink is a predicate-free `Count` reducer.
 fn is_count_sink(sink: &Sink) -> bool {
     matches!(reducer_op(sink), Some(ReducerOp::Count))
 }
 
+/// Returns the `NumOp` for a reducer sink that has neither a predicate nor a
+/// projection (i.e. operates directly on the current row value).
 fn identity_numeric_sink(sink: &Sink) -> Option<NumOp> {
     match sink {
         Sink::Reducer(spec) if spec.predicate.is_none() && spec.projection.is_none() => {
@@ -85,6 +111,8 @@ fn identity_numeric_sink(sink: &Sink) -> Option<NumOp> {
     }
 }
 
+/// Returns the projection `Program` and `NumOp` for a reducer sink that has a
+/// projection but no predicate guard.
 fn projected_numeric_sink(sink: &Sink) -> Option<(&crate::vm::Program, NumOp)> {
     match sink {
         Sink::Reducer(spec) if spec.predicate.is_none() => {
@@ -94,6 +122,8 @@ fn projected_numeric_sink(sink: &Sink) -> Option<(&crate::vm::Program, NumOp)> {
     }
 }
 
+/// Returns the body `Program` when there is exactly one stage of the given
+/// `kind`; returns `None` for any other count or kind mismatch.
 fn single_stage_program<'a>(
     stages: &'a [Stage],
     kind: BuiltinColumnarStage,
@@ -104,6 +134,8 @@ fn single_stage_program<'a>(
     stage_program(stage, kind)
 }
 
+/// Returns the two body `Program`s when there are exactly two stages whose
+/// kinds match `first` and `second` in order.
 fn stage_program_pair<'a>(
     stages: &'a [Stage],
     first: BuiltinColumnarStage,
@@ -118,10 +150,10 @@ fn stage_program_pair<'a>(
     ))
 }
 
-/// Build per-slot typed columns from a row-major Val cells matrix.
-/// First-row inspection picks the candidate type per slot; subsequent
-/// rows must match or that slot falls back to `Mixed`.  Cost O(N×K)
-/// — already paid by the cells walk in `try_promote_objvec`.
+
+/// Analyses the flat cell buffer of an `ObjVec` and constructs per-column typed
+/// vectors (`Ints`, `Floats`, `Strs`, `Bools`), or `Mixed` when a column is
+/// heterogeneous. Enables SIMD-friendly scalar loops in the hot aggregation paths.
 fn build_typed_cols(cells: &[Val], stride: usize, nrows: usize) -> Vec<crate::value::ObjVecCol> {
     use crate::value::ObjVecCol;
     let mut out: Vec<ObjVecCol> = Vec::with_capacity(stride);
@@ -132,19 +164,19 @@ fn build_typed_cols(cells: &[Val], stride: usize, nrows: usize) -> Vec<crate::va
         return out;
     }
     for slot in 0..stride {
-        // Inspect first row's value at this slot to choose target.
+        
         let target_tag: u8 = match &cells[slot] {
             Val::Int(_) => 1,
             Val::Float(_) => 2,
             Val::Str(_) | Val::StrSlice(_) => 3,
             Val::Bool(_) => 4,
-            _ => 0, // mixed / unsupported
+            _ => 0, 
         };
         if target_tag == 0 {
             out.push(ObjVecCol::Mixed);
             continue;
         }
-        // Verify all rows.
+        
         let mut ok = true;
         for r in 0..nrows {
             let v = &cells[r * stride + slot];
@@ -164,7 +196,7 @@ fn build_typed_cols(cells: &[Val], stride: usize, nrows: usize) -> Vec<crate::va
             out.push(ObjVecCol::Mixed);
             continue;
         }
-        // Allocate typed lane.
+        
         match target_tag {
             1 => {
                 let mut col: Vec<i64> = Vec::with_capacity(nrows);
@@ -211,23 +243,9 @@ fn build_typed_cols(cells: &[Val], stride: usize, nrows: usize) -> Vec<crate::va
 }
 
 impl Pipeline {
-    /// Phase 3 columnar fast path.  Detects pipelines whose source is
-    /// an array of objects + zero stages + a single-field `SumMap` /
-    /// `CountIf` / `SumFilterMap` sink.  Extracts the projected column
-    /// into a flat `Vec<i64>` / `Vec<f64>` once, then folds the whole
-    /// slice via the autovec'd reductions in vm.rs.
-    ///
-    /// Returns `None` if the shape doesn't match the columnar fast
-    /// path; caller falls back to the per-row pull loop.
-    /// Phase A2 stage-chain columnar fast path:
-    ///   `Stage::Filter(FieldCmpLit) ∘ Stage::Map(FieldRead) ∘ Sink::Collect`
-    ///   `Stage::Map(FieldRead) ∘ Sink::Collect`
-    ///   `Stage::Filter(FieldCmpLit) ∘ Sink::Reducer(count)`
-    ///   `Stage::Filter(FieldCmpLit) ∘ Sink::Reducer(numeric)`
-    /// Walks the column without entering vm.exec per row.
-    /// Same as [`try_columnar_stage_chain`] but consults the optional
-    /// data context to upgrade Val::Arr → Val::ObjVec; lets the typed
-    /// stage-chain path (filter+map on ObjVec typed columns) fire.
+    /// Attempts columnar execution for `ObjVec`-backed sources, optionally
+    /// promoting a plain `Val::Arr` to `ObjVec` via the supplied `cache`.
+    /// Handles `group_by` and `filter+map` two-stage chains over typed columns.
     fn try_columnar_stage_chain_with(
         &self,
         root: &Val,
@@ -237,8 +255,8 @@ impl Pipeline {
             Source::Receiver(v) => v.clone(),
             Source::FieldChain { keys } => walk_field_chain(root, keys),
         };
-        // Promote to ObjVec via cache when available.  Unlocks the
-        // typed-column stage-chain path below.
+        
+        
         let recv = if let (Some(c), Val::Arr(a)) = (cache, &recv) {
             if let Some(d) = c.promote_objvec(a) {
                 Val::ObjVec(d)
@@ -249,10 +267,7 @@ impl Pipeline {
             recv
         };
 
-        // Typed-column ObjVec group_by: Stage::GroupBy(FieldRead) ∘
-        // Sink::Collect over Strs / Ints / Floats / Bools key column.
-        // Walks the typed key column directly, partitions row indices
-        // per key, materialises Val::Obj { key → Vec<row> }.
+        
         if matches!(self.sink, Sink::Collect) {
             if let (Some(BodyKernel::FieldRead(key)), Val::ObjVec(d)) = (
                 stage_kernel(
@@ -268,8 +283,7 @@ impl Pipeline {
             }
         }
 
-        // Typed-column ObjVec stage-chain: Filter(FieldCmpLit) ∘
-        // Map(FieldRead) ∘ Collect → primitive mask + typed gather.
+        
         if !matches!(self.sink, Sink::Collect) {
             return None;
         }
@@ -288,17 +302,17 @@ impl Pipeline {
         None
     }
 
+    /// Attempts columnar execution for `Val::IntVec`, `Val::FloatVec`, and
+    /// plain `Val::Arr` sources without relying on a cache. Handles single-field
+    /// `map`, `filter`, and combined `filter+map` kernel specialisations.
     fn try_columnar_stage_chain(&self, root: &Val) -> Option<Result<Val, EvalError>> {
-        // Resolve receiver.
+
         let recv = match &self.source {
             Source::Receiver(v) => v.clone(),
             Source::FieldChain { keys } => walk_field_chain(root, keys),
         };
 
-        // Phase B1 — typed-lane filter chain on IntVec / FloatVec /
-        // StrVec receivers.  Stage::Filter(CurrentCmpLit) over a
-        // primitive vec → walk slice directly, build typed output.
-        // Sinks: Collect / Count.
+        
         if let Some(BodyKernel::CurrentCmpLit(op, lit)) = stage_kernel(
             &self.stages,
             &self.stage_kernels,
@@ -357,7 +371,7 @@ impl Pipeline {
             _ => return None,
         };
 
-        // Single Map(FieldRead) → Collect: direct projection.
+        
         if let Some(BodyKernel::FieldRead(k)) =
             stage_kernel(&self.stages, &self.stage_kernels, BuiltinColumnarStage::Map)
         {
@@ -368,9 +382,7 @@ impl Pipeline {
             return Some(Ok(Val::arr(out)));
         }
 
-        // Single Filter(FieldCmpLit) → Collect: predicate mask copy.
-        // Phase C1 — when Arc is uniquely held (refcount 1), take
-        // ownership and retain-in-place; saves N Val clones.
+        
         if let Some(BodyKernel::FieldCmpLit(k, op, lit)) = stage_kernel(
             &self.stages,
             &self.stage_kernels,
@@ -404,7 +416,7 @@ impl Pipeline {
             BuiltinColumnarStage::Map,
         );
 
-        // Filter(FieldCmpLit) ∘ Map(FieldRead) → Collect: project filtered column.
+        
         if let Some((BodyKernel::FieldCmpLit(pk, pop, plit), BodyKernel::FieldRead(mk))) =
             filter_map
         {
@@ -418,11 +430,7 @@ impl Pipeline {
             return Some(Ok(Val::arr(out)));
         }
 
-        // Single Map(FieldChain) → Collect: walk chain per item.
-        // IC-cached probe: first item resolves each chain step via
-        // IndexMap.get_full (returns slot index); subsequent items
-        // try the cached slot first, fall back to hash on miss.
-        // Saves ~half the probe cost on uniform-shape arrays.
+        
         if let Some(BodyKernel::FieldChain(ks)) =
             stage_kernel(&self.stages, &self.stage_kernels, BuiltinColumnarStage::Map)
         {
@@ -441,7 +449,7 @@ impl Pipeline {
             return Some(Ok(Val::arr(out)));
         }
 
-        // Filter(FieldCmpLit) ∘ Map(FieldChain) → Collect.
+        
         if let Some((BodyKernel::FieldCmpLit(pk, pop, plit), BodyKernel::FieldChain(mks))) =
             filter_map
         {
@@ -462,7 +470,7 @@ impl Pipeline {
             return Some(Ok(Val::arr(out)));
         }
 
-        // Filter(FieldChainCmpLit) ∘ Map(FieldRead) → Collect.
+        
         if let Some((BodyKernel::FieldChainCmpLit(pks, pop, plit), BodyKernel::FieldRead(mk))) =
             filter_map
         {
@@ -485,19 +493,8 @@ impl Pipeline {
         None
     }
 
-    /// Phase 7-lite — speculative ObjVec promotion at pipeline source.
-    /// When the resolved receiver is `Val::Arr<Val::Obj>` with uniform
-    /// shape (all rows have the same key set, in the same order), build
-    /// a columnar `ObjVecData` on the fly so downstream slot-indexed
-    /// kernels (objvec_*_slot) can fire.  No schema needed; just probe
-    /// the first row + verify subsequent rows match.  Bails on shape
-    /// mismatch, returns the original Arr unchanged.
-    ///
-    /// Cost: O(N × K) where N=row count, K=key count, dominated by
-    /// pointer-equality on Arc<str> keys.  Win: subsequent operations
-    /// run as O(N) slice walks instead of O(N) IndexMap probes.
-    /// Wrapper that returns the promoted `ObjVecData` directly (for the
-    /// memoised cache in `Jetro::get_or_promote_objvec`).
+    /// Promotes a `Val::Arr` of uniform-shape objects to `ObjVecData`, returning
+    /// the inner `Arc` directly. Returns `None` if promotion fails (e.g. mixed shapes).
     pub fn try_promote_objvec_arr(arr: &Arc<Vec<Val>>) -> Option<Arc<crate::value::ObjVecData>> {
         if let Some(Val::ObjVec(d)) = Self::try_promote_objvec(arr) {
             Some(d)
@@ -506,6 +503,9 @@ impl Pipeline {
         }
     }
 
+    /// Converts a homogeneous `Val::Arr` of objects into a `Val::ObjVec` with
+    /// pre-built typed column vectors; returns `None` when any row has a
+    /// different key set or a non-object element is encountered.
     fn try_promote_objvec(arr: &Arc<Vec<Val>>) -> Option<Val> {
         if arr.is_empty() {
             return None;
@@ -529,8 +529,8 @@ impl Pipeline {
                 return None;
             }
             for (i, k) in keys.iter().enumerate() {
-                // Pointer-equal Arc check first (cheap path); fall back
-                // to hash lookup if Arc identity differs across rows.
+                
+                
                 let val = match m.get_index(i) {
                     Some((k2, v)) if Arc::ptr_eq(k2, k) => v.clone(),
                     _ => match m.get(k.as_ref()) {
@@ -541,11 +541,8 @@ impl Pipeline {
                 cells.push(val);
             }
         }
-        // Build typed-column mirror at promotion time.  Costs O(N×K)
-        // already spent walking cells; per-slot type lock determined
-        // by inspecting the first row + verifying subsequent rows
-        // match.  Uniform-type columns light up the typed-fast-path
-        // in slot kernels (closes the boxed-Val tag-check tax).
+        
+        
         let stride = keys.len();
         let nrows = if stride == 0 { 0 } else { cells.len() / stride };
         let typed_cols = build_typed_cols(&cells, stride, nrows);
@@ -557,15 +554,16 @@ impl Pipeline {
         })))
     }
 
-    /// Cache-aware variant: when cache promotes the source array,
-    /// recv is replaced with `Val::ObjVec` and the slot kernels fire.
+    /// Main dispatcher for the cache-assisted columnar path. Attempts fast-path
+    /// kernel chains first, then falls back to slot-level numeric/count/aggregate
+    /// operations directly on `ObjVec` typed column slices.
     fn run_cached_columnar_impl(
         &self,
         root: &Val,
         cache: Option<&dyn PipelineData>,
     ) -> Option<Result<Val, EvalError>> {
-        // Typed ObjVec stage-chain path first. Cold SIMD inputs may also have
-        // reached this runner through the tape-to-Val source bridge.
+        
+        
         if let Some(out) = self.try_columnar_stage_chain_with(root, cache) {
             return Some(out);
         }
@@ -578,8 +576,7 @@ impl Pipeline {
             Source::FieldChain { keys } => walk_field_chain(root, keys),
         };
 
-        // Cache-driven ObjVec promotion: only if cache provided AND
-        // recv is Val::Arr.  Promoted ObjVec memoised across calls.
+        
         let recv = if let (Some(c), Val::Arr(a)) = (cache, &recv) {
             if let Some(d) = c.promote_objvec(a) {
                 Val::ObjVec(d)
@@ -590,9 +587,7 @@ impl Pipeline {
             recv
         };
 
-        // Typed primitive lane fast paths — only when the original
-        // pipeline has zero stages (bare aggregate over a primitive
-        // vec). Stage'd shapes go through the slot-kernel block below.
+        
         if self.stages.is_empty() {
             match (&recv, &self.sink) {
                 (Val::IntVec(a), sink) if identity_numeric_sink(sink) == Some(NumOp::Sum) => {
@@ -632,13 +627,11 @@ impl Pipeline {
                 _ => {}
             }
         }
-        // ObjVec slot-kernel paths — operate on canonical view so they
-        // fire whether the lowered pipeline kept fused Sinks or kept
-        // base Sink + last Stage(...). One match arm per kernel; no
-        // per-fused-variant duplication.
+        
+        
         if let Val::ObjVec(d) = &recv {
             let (cs, _ck, csink) = self.canonical();
-            // FlatMap(FieldRead) → flatmap-count
+            
             if is_count_sink(&csink) {
                 if let Some(prog) = single_stage_program(&cs, BuiltinColumnarStage::FlatMap) {
                     if let Some(field) = single_field_prog(prog) {
@@ -648,7 +641,7 @@ impl Pipeline {
                     }
                 }
             }
-            // Map(FieldRead) → numeric-on-slot
+            
             if let Some((project, op)) = projected_numeric_sink(&csink) {
                 let mf = single_field_prog(project)?;
                 let sm = d.slot_of(mf)?;
@@ -677,7 +670,7 @@ impl Pipeline {
                     return Some(Ok(objvec_filter_num_slots(d, sp, cop, &lit, sm, op)));
                 }
             }
-            // Filter(...) → count-if (single cmp or AND chain)
+            
             if is_count_sink(&csink) {
                 if let Some(pred) = single_stage_program(&cs, BuiltinColumnarStage::Filter) {
                     if let Some((pf, op, lit)) = single_cmp_prog(pred) {
@@ -698,11 +691,12 @@ impl Pipeline {
         None
     }
 
+    /// Cache-free columnar implementation. Handles typed-vec sources
+    /// (`IntVec`, `FloatVec`, `StrVec`) with empty stage lists and identity
+    /// numeric or count sinks without requiring ObjVec promotion.
     fn run_uncached_columnar_impl(&self, root: &Val) -> Option<Result<Val, EvalError>> {
-        // Phase A2 — Stage::Filter(FieldCmpLit) + Stage::Map(FieldRead) +
-        // Sink::Collect over Val::Arr (object rows): walk the column
-        // directly via slot-known IndexMap probes, build typed output
-        // vec.  No per-row vm.exec.
+        
+        
         if let Some(out) = self.try_columnar_stage_chain(root) {
             return Some(out);
         }
@@ -715,15 +709,8 @@ impl Pipeline {
             Source::Receiver(v) => v.clone(),
             Source::FieldChain { keys } => walk_field_chain(root, keys),
         };
-        // ObjVec promotion deferred to Phase 7 (build at parse time);
-        // per-call promotion pays its O(N×K) cost on every collect()
-        // and dominates short queries.  Keep the helper for a future
-        // memoising path that caches the promoted shape on the source.
-
-        // Phase A2 — typed-lane fast path.  When receiver is an
-        // already-typed vector (IntVec / FloatVec / StrVec), the
-        // sink can read the slice directly with no per-row Val tag
-        // dispatch.  Each branch is mechanical: same fold, lane-typed.
+        
+        
         match (&recv, &self.sink) {
             (Val::IntVec(a), sink) if identity_numeric_sink(sink) == Some(NumOp::Sum) => {
                 return Some(Ok(Val::Int(a.iter().sum())))
@@ -790,19 +777,15 @@ impl Pipeline {
             _ => {}
         }
 
-        // ObjVec slot-kernel paths and Val::Arr columnar paths
-        // previously dispatched on fused Sink variants. All gone post
-        // fusion-off. Canonical-view consumer in run_cached_columnar_impl
-        // covers the ObjVec shape; primitive-lane fast paths above
-        // (IntVec / FloatVec / StrVec) cover Val::Arr-of-primitives.
+        
         let _ = recv;
         None
     }
 }
 
-/// Decode a compiled sub-program that reads a single field from `@`
-/// — either `[PushCurrent, GetField(k)]` (explicit `@.field`) or
-/// `[LoadIdent(k)]` (bare-ident shorthand).  Returns the field name.
+
+/// Decodes a single-field accessor program (`LoadIdent k` or `PushCurrent GetField k`)
+/// and returns the field name, or `None` for any other opcode shape.
 fn single_field_prog(prog: &crate::vm::Program) -> Option<&str> {
     use crate::vm::Opcode;
     let ops = prog.ops.as_ref();
@@ -819,14 +802,10 @@ fn single_field_prog(prog: &crate::vm::Program) -> Option<&str> {
     }
 }
 
-/// Decode a compound AND predicate (a chain of single-cmp predicates
-/// joined by `AndOp`) into a flat list of leaves.  Operates directly
-/// on the `&[Opcode]` slice so the returned `&str` field references
-/// borrow from the original program — no Arc allocation per leaf.
-///
-/// Accepts the shapes the compiler emits in practice:
-///   2-way:  `[<cmp1>, AndOp(<cmp2>)]`
-///   3-way:  `[<cmp1>, AndOp([<cmp2>, AndOp(<cmp3>)])]`
+
+/// Decodes a left-associative `AndOp` chain of comparison programs into a flat
+/// list of `(field, op, literal)` leaves, enabling multi-predicate slot-based
+/// count short-circuits on `ObjVec` columns.
 fn and_chain_prog<'a>(
     prog: &'a crate::vm::Program,
 ) -> Option<Vec<(&'a str, crate::ast::BinOp, Val)>> {
@@ -846,7 +825,10 @@ fn and_chain_prog<'a>(
     Some(out)
 }
 
-/// Match the single-cmp opcode prefix and return `(field, op, lit)`.
+
+/// Decodes a minimal comparison opcode sequence (`field`, `literal`, `cmp`) into
+/// a `(field_name, BinOp, literal_Val)` triple; returns `None` for any unrecognised
+/// opcode pattern or unsupported literal type.
 fn decode_cmp_ops<'a>(ops: &'a [crate::vm::Opcode]) -> Option<(&'a str, crate::ast::BinOp, Val)> {
     use crate::ast::BinOp;
     use crate::vm::Opcode;
@@ -881,22 +863,16 @@ fn decode_cmp_ops<'a>(ops: &'a [crate::vm::Opcode]) -> Option<(&'a str, crate::a
     Some((field, op, lit))
 }
 
-/// Decode a compiled predicate of the shape `<load-field-k>;
-/// <push-lit>; <cmp>` into `(field, op, lit)`.  Thin wrapper over
-/// `decode_cmp_ops` for backward-compat with existing callers that
-/// pass a `Program`.
+
+/// Convenience wrapper: decodes a single-comparison `Program` into
+/// `(field, op, literal)` via `decode_cmp_ops`.
 fn single_cmp_prog<'a>(prog: &'a crate::vm::Program) -> Option<(&'a str, crate::ast::BinOp, Val)> {
     decode_cmp_ops(prog.ops.as_ref())
 }
-// ── ObjVec slot-indexed kernels (Phase 3.5) ──────────────────────────────────
-//
-// When the receiver is an ObjVec the row layout is flat
-// `cells: Vec<Val>` with stride = keys.len(); a row's field at slot
-// `s` lives at `cells[row * stride + s]`.  No IndexMap probe per
-// row — direct array index.
 
-/// Columnar `$.<arr>.flat_map(<field>).count()` — sums lengths of the
-/// inner sequences without materialising the flattened result.
+
+/// Counts the total number of elements produced by flat-mapping over the array-like
+/// values stored in `slot` across all rows of an `ObjVec`.
 fn objvec_flatmap_count_slot(d: &Arc<crate::value::ObjVecData>, slot: usize) -> Val {
     let stride = d.stride();
     let nrows = d.nrows();
@@ -916,11 +892,13 @@ fn objvec_flatmap_count_slot(d: &Arc<crate::value::ObjVecData>, slot: usize) -> 
     Val::Int(count)
 }
 
+/// Applies a numeric aggregate (`Sum`, `Min`, `Max`, `Avg`) to the values at
+/// `slot` across all rows of an `ObjVec`, preferring typed column slices when
+/// available to avoid `Val` enum dispatch per element.
 fn objvec_num_slot(d: &Arc<crate::value::ObjVecData>, slot: usize, op: NumOp) -> Val {
     use crate::value::ObjVecCol;
-    // Phase 7-typed-columns fast path: typed lane → direct slice walk,
-    // no per-row Val tag check.  Closes the boxed-Val tax on numeric
-    // aggregates (~3-4× win measured on bench_complex Q12).
+    
+    
     if let Some(cols) = &d.typed_cols {
         match cols.get(slot) {
             Some(ObjVecCol::Ints(col)) => {
@@ -984,6 +962,9 @@ fn objvec_num_slot(d: &Arc<crate::value::ObjVecData>, slot: usize, op: NumOp) ->
     num_finalise(op, acc_i, acc_f, floated, min_f, max_f, n_obs)
 }
 
+/// Counts the rows in an `ObjVec` where the value at `slot` satisfies the
+/// comparison `op` against `lit`. Uses typed column slices to avoid boxing
+/// when the column is homogeneously typed.
 fn objvec_filter_count_slot(
     d: &Arc<crate::value::ObjVecData>,
     slot: usize,
@@ -992,8 +973,8 @@ fn objvec_filter_count_slot(
 ) -> Val {
     use crate::ast::BinOp as B;
     use crate::value::ObjVecCol;
-    // Typed-column fast path.  Direct slice scan with primitive
-    // comparison; no Val tag check, no boxed unbox.
+    
+    
     if let Some(cols) = &d.typed_cols {
         match (cols.get(slot), lit) {
             (Some(ObjVecCol::Ints(col)), Val::Int(rhs)) => {
@@ -1064,6 +1045,9 @@ fn objvec_filter_count_slot(
     Val::Int(count)
 }
 
+/// Applies a filter on `pred_slot` then aggregates values at `map_slot` for
+/// all matching rows using `op`. Exploits typed column slices for both the
+/// predicate and the aggregation when possible.
 fn objvec_filter_num_slots(
     d: &Arc<crate::value::ObjVecData>,
     pred_slot: usize,
@@ -1074,10 +1058,10 @@ fn objvec_filter_num_slots(
 ) -> Val {
     use crate::ast::BinOp as B;
     use crate::value::ObjVecCol;
-    // Typed-column fast path for filter+map slot pair: walk both
-    // columns as raw slices, primitive cmp + primitive fold.
+    
+    
     if let Some(cols) = &d.typed_cols {
-        // Int pred + Int map (covers `total > 100` then `map(total)`).
+        
         if let (Some(ObjVecCol::Ints(p)), Some(ObjVecCol::Ints(m)), Val::Int(rhs)) =
             (cols.get(pred_slot), cols.get(map_slot), lit)
         {
@@ -1141,10 +1125,11 @@ fn objvec_filter_num_slots(
     num_finalise(op, acc_i, acc_f, floated, min_f, max_f, n_obs)
 }
 
-/// Phase 7-typed-columns Q3 path: ObjVec source + Filter(FieldCmpLit)
-/// + Map(FieldRead) + Sink::Collect.  When both pred + map slots are
-/// typed lanes, walk primitive columns directly: build typed output
-/// vec sized by predicate hit count; no Val tag check, no IndexMap probe.
+
+/// Typed filter-then-map collect for `ObjVec`: filters rows by comparing the
+/// `pk` column with `(pop, plit)` and collects values from the `mk` column.
+/// Returns a typed-vec result (`IntVec`, `FloatVec`, or `StrVec`) when both
+/// involved columns are homogeneous; returns `None` otherwise.
 fn objvec_typed_filter_map_collect(
     d: &Arc<crate::value::ObjVecData>,
     pk: &str,
@@ -1160,7 +1145,7 @@ fn objvec_typed_filter_map_collect(
     let pred_col = cols.get(pred_slot)?;
     let map_col = cols.get(map_slot)?;
 
-    // Int pred + Int map (e.g. `filter(total > 500).map(id)`).
+    
     if let (ObjVecCol::Ints(p), ObjVecCol::Ints(m), Val::Int(rhs)) = (pred_col, map_col, plit) {
         let r = *rhs;
         let mut out: Vec<i64> = Vec::with_capacity(p.len());
@@ -1180,9 +1165,8 @@ fn objvec_typed_filter_map_collect(
         }
         return Some(Ok(Val::int_vec(out)));
     }
-    // Float pred + Int map: `filter(total > 500.0).map(id)` —
-    // common bench shape (numeric thresholds with int IDs).
-    // Promote int literal to f64 for cross-type compare.
+    
+    
     {
         let pred_f64 = match (pred_col, plit) {
             (ObjVecCol::Floats(p), Val::Float(r)) => Some((p, *r)),
@@ -1190,7 +1174,7 @@ fn objvec_typed_filter_map_collect(
             _ => None,
         };
         if let Some((p, r)) = pred_f64 {
-            // Map slot can be Int or Float; pick output.
+            
             if let ObjVecCol::Ints(m) = map_col {
                 let mut out: Vec<i64> = Vec::with_capacity(p.len());
                 for (i, &pv) in p.iter().enumerate() {
@@ -1247,7 +1231,7 @@ fn objvec_typed_filter_map_collect(
             }
         }
     }
-    // Int pred + Str map (e.g. `filter(total > 500).map(name)`).
+    
     if let (ObjVecCol::Ints(p), ObjVecCol::Strs(m), Val::Int(rhs)) = (pred_col, map_col, plit) {
         let r = *rhs;
         let mut out: Vec<Arc<str>> = Vec::with_capacity(p.len());
@@ -1267,7 +1251,7 @@ fn objvec_typed_filter_map_collect(
         }
         return Some(Ok(Val::str_vec(out)));
     }
-    // Str pred (== / !=) + any map: status-style filter.
+    
     if let (ObjVecCol::Strs(p), Val::Str(rhs)) = (pred_col, plit) {
         let r: &str = rhs.as_ref();
         let mut hits: Vec<usize> = Vec::with_capacity(p.len());
@@ -1286,11 +1270,11 @@ fn objvec_typed_filter_map_collect(
     None
 }
 
-/// Typed columnar group_by: walk the key column directly, partition
-/// row indices per distinct key, materialise per-group Val::Arr<Val::Obj>
-/// (or a typed lane when all selected rows project the same shape).
-/// Avoids per-row IndexMap probe + per-row key Arc clone of the walker
-/// path.
+
+/// Groups all rows of an `ObjVec` by the typed values in `key_field`, returning
+/// a `Val::Obj` where each key maps to a `Val::Arr` of the matching rows.
+/// Returns `None` when the key column is not a homogeneous `Strs`, `Ints`, or
+/// `Bools` column.
 fn objvec_typed_group_by(d: &Arc<crate::value::ObjVecData>, key_field: &str) -> Option<Val> {
     use crate::value::ObjVecCol;
     let cols = d.typed_cols.as_ref()?;
@@ -1299,11 +1283,11 @@ fn objvec_typed_group_by(d: &Arc<crate::value::ObjVecData>, key_field: &str) -> 
     let stride = d.stride();
     let nrows = d.nrows();
 
-    // Partition row indices by key string.
+    
     let mut groups: indexmap::IndexMap<Arc<str>, Vec<usize>> = indexmap::IndexMap::new();
     match key_col {
         ObjVecCol::Strs(c) => {
-            // Use Arc::clone for repeated keys (Arc is interned-ish).
+            
             for (i, s) in c.iter().enumerate() {
                 groups.entry(Arc::clone(s)).or_default().push(i);
             }
@@ -1327,9 +1311,7 @@ fn objvec_typed_group_by(d: &Arc<crate::value::ObjVecData>, key_field: &str) -> 
         _ => return None,
     };
 
-    // Public group_by semantics expose each bucket as an array of
-    // objects. Keep the fast key partitioning, but materialise bucket
-    // rows to the same shape as the generic builtin path.
+    
     let mut out: indexmap::IndexMap<Arc<str>, Val> =
         indexmap::IndexMap::with_capacity(groups.len());
     for (k, indices) in groups.into_iter() {
@@ -1349,6 +1331,9 @@ fn objvec_typed_group_by(d: &Arc<crate::value::ObjVecData>, key_field: &str) -> 
     Some(Val::Obj(Arc::new(out)))
 }
 
+/// Materialises a subset of rows from a typed column slice identified by `indices`
+/// into the most specific `Val` type possible (`IntVec`, `FloatVec`, `StrVec`, or
+/// a plain `Val::Arr` of `Bool` for boolean columns).
 fn materialise_typed_indices(col: &crate::value::ObjVecCol, indices: &[usize]) -> Val {
     use crate::value::ObjVecCol;
     match col {
@@ -1384,20 +1369,20 @@ fn materialise_typed_indices(col: &crate::value::ObjVecCol, indices: &[usize]) -
     }
 }
 
+/// Counts rows in an `ObjVec` that satisfy every condition in `leaves`
+/// (a conjunction of slot-level comparisons). Builds inline `Checker` variants
+/// backed by typed column slices to avoid `Val` allocation per row.
 fn objvec_filter_count_and_slots(
     d: &Arc<crate::value::ObjVecData>,
     leaves: &[(usize, crate::ast::BinOp, Val)],
 ) -> Val {
     use crate::ast::BinOp as B;
     use crate::value::ObjVecCol;
-    // Phase 7-typed-columns AND-chain path.  Pre-resolve each leaf to
-    // a typed checker closure once; per row, run all checkers as
-    // primitive comparisons over typed slices.  Skips per-leaf
-    // cmp_val_binop_local + Val tag check on every row.
+    
+    
     if let Some(cols) = &d.typed_cols {
-        // Snapshot each leaf as a "typed checker": closures over &[i64]
-        // / &[f64] / &[Arc<str>] indexed by row.  Bail to scalar path
-        // if any leaf can't be typed-resolved.
+        
+        
         enum Checker<'a> {
             IntsEq(&'a [i64], i64),
             IntsNeq(&'a [i64], i64),
@@ -1526,9 +1511,11 @@ fn objvec_filter_count_and_slots(
     }
     Val::Int(count)
 }
-/// Inline numeric/string comparison for the columnar path.  Mirrors
-/// the semantics of the VM's existing `cmp_val_binop` helper but
-/// accessible from this module.
+
+
+/// Evaluates a `BinOp` comparison between two `Val` scalars without boxing.
+/// Returns `false` for any type combination that does not define a total order
+/// (e.g. comparing an integer to an object).
 #[inline]
 fn cmp_val_binop_local(a: &Val, op: crate::ast::BinOp, b: &Val) -> bool {
     use crate::ast::BinOp;
@@ -1571,6 +1558,8 @@ fn cmp_val_binop_local(a: &Val, op: crate::ast::BinOp, b: &Val) -> bool {
     }
 }
 
+/// Compares two `f64` values using the given `BinOp`; returns `false` for
+/// non-comparison operators (e.g. arithmetic ops).
 #[inline]
 fn num_f_cmp(a: f64, b: f64, op: crate::ast::BinOp) -> bool {
     use crate::ast::BinOp;
@@ -1585,9 +1574,10 @@ fn num_f_cmp(a: f64, b: f64, op: crate::ast::BinOp) -> bool {
     }
 }
 
-/// IC-cached chain step.  Cached `Option<usize>` slot survives across
-/// rows; missing-key marks slot None.  Used by Map(FieldChain) columnar
-/// path to amortise the IndexMap probe cost across the whole array.
+
+/// Reads field `k` from `v`, caching the `IndexMap` slot index in `ic` across
+/// successive calls on rows with the same key layout to avoid repeated hash
+/// lookups in multi-key map traversals.
 #[inline]
 fn chain_step_ic(v: &Val, k: &str, ic: &mut Option<usize>) -> Val {
     match v {
@@ -1599,6 +1589,8 @@ fn chain_step_ic(v: &Val, k: &str, ic: &mut Option<usize>) -> Val {
     }
 }
 
+/// Index-cached `IndexMap` lookup: checks the previously cached slot position
+/// first; falls back to a full `get_full` search and updates the cache on success.
 fn lookup_via_ic<'a>(
     m: &'a indexmap::IndexMap<Arc<str>, Val>,
     k: &str,

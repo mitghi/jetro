@@ -1,16 +1,9 @@
-//! Static analysis passes over compiled `Program` IR.
+//! Forward-flow static analyses over compiled `Program` IR.
 //!
-//! Forward-flow analyses that produce *abstract domains* for each opcode
-//! position.  Callers (compiler, planner, caller code) can use these to:
-//!
-//! - emit specialised opcodes where a value's type / nullness / cardinality
-//!   is statically known,
-//! - reject ill-typed expressions at compile time,
-//! - enable further peephole passes that require type awareness.
-//!
-//! The analyses run on the flat `Arc<[Opcode]>` IR and are intentionally
-//! conservative — when uncertain, they return the `Unknown` top element of
-//! the lattice.
+//! Analyses run on the flat `Arc<[Opcode]>` representation after compilation.
+//! They are conservative (return the `Unknown` top element when uncertain)
+//! and used by the compiler for peephole specialisation and by the planner
+//! for CSE (`dedup_subprograms`). None affect runtime correctness.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -19,27 +12,35 @@ use super::ast::KindType;
 use super::vm::{CompiledPipeStep, Opcode, Program};
 use crate::builtins::BuiltinMethod;
 
-// ── Type lattice ──────────────────────────────────────────────────────────────
 
+/// Type lattice element. Ordered: `Bottom` ⊑ concrete types ⊑ `Unknown`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VType {
-    /// Bottom: no value (unreachable).
+    /// Unreachable position; join with any type yields that type.
     Bottom,
+    /// Definitely `Val::Null`.
     Null,
+    /// Definitely `Val::Bool`.
     Bool,
+    /// Definitely `Val::Int` (i64).
     Int,
+    /// Definitely `Val::Float` (f64).
     Float,
-    /// Numeric — Int or Float (partially refined).
+    /// Either `Int` or `Float`; the join of both concrete numeric types.
     Num,
+    /// Definitely a string value.
     Str,
+    /// Definitely `Val::Arr`.
     Arr,
+    /// Definitely `Val::Obj`.
     Obj,
-    /// Top: any type possible.
+    /// Any type possible — top element, used when analysis cannot determine the type.
     Unknown,
 }
 
 impl VType {
-    /// Least upper bound (join) for the lattice.
+    /// Lattice join: return the least upper bound of `self` and `other`.
+    /// `Int ⊔ Float = Num`; incompatible concrete types collapse to `Unknown`.
     pub fn join(self, other: VType) -> VType {
         if self == other {
             return self;
@@ -56,33 +57,38 @@ impl VType {
         }
     }
 
+    /// Return `true` only for `Arr`; used to guard array-specific optimisations.
     pub fn is_array_like(self) -> bool {
         matches!(self, VType::Arr)
     }
+    /// Return `true` only for `Obj`; used to guard object-specific optimisations.
     pub fn is_object_like(self) -> bool {
         matches!(self, VType::Obj)
     }
+    /// Return `true` for any numeric variant (`Int`, `Float`, or `Num`).
     pub fn is_numeric(self) -> bool {
         matches!(self, VType::Int | VType::Float | VType::Num)
     }
+    /// Return `true` only when the type is definitely a string.
     pub fn is_string(self) -> bool {
         matches!(self, VType::Str)
     }
 }
 
-// ── Null-ness lattice ─────────────────────────────────────────────────────────
 
+/// Nullness lattice element tracking whether a value can ever be `null`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Nullness {
-    /// Proven null.
+    /// The value is always `Val::Null` at this program point.
     AlwaysNull,
-    /// Proven non-null.
+    /// The value is never null at this program point.
     NonNull,
-    /// May or may not be null.
+    /// The value may or may not be null; the conservative top element.
     MaybeNull,
 }
 
 impl Nullness {
+    /// Lattice join: any disagreement between `AlwaysNull` and `NonNull` yields `MaybeNull`.
     pub fn join(self, other: Nullness) -> Nullness {
         if self == other {
             return self;
@@ -91,25 +97,26 @@ impl Nullness {
     }
 }
 
-// ── Cardinality lattice ───────────────────────────────────────────────────────
 
+/// Cardinality lattice element describing how many values a program position produces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Cardinality {
-    /// Exactly 0 elements (empty).
+    /// Produces no values (empty result / unreachable branch).
     Zero,
-    /// Exactly 1 element (scalar-wrapped or unwrapped).
+    /// Produces exactly one value.
     One,
-    /// 0 or 1 (e.g. result of `?` quantifier).
+    /// Produces zero or one values (e.g. optional field access).
     ZeroOrOne,
-    /// Multiple elements possible.
+    /// Produces two or more values (array output).
     Many,
-    /// Not an array (scalar domain).
+    /// The value is a scalar — not wrapped in an array.
     NotArray,
-    /// Unknown shape.
+    /// Cardinality is indeterminate; conservative top element.
     Unknown,
 }
 
 impl Cardinality {
+    /// Lattice join: `Zero ⊔ One = ZeroOrOne`; all other mixed pairs collapse to `Unknown`.
     pub fn join(self, other: Cardinality) -> Cardinality {
         if self == other {
             return self;
@@ -123,26 +130,32 @@ impl Cardinality {
     }
 }
 
-// ── Abstract value ────────────────────────────────────────────────────────────
 
+/// Product of all three lattice dimensions for a single program point.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AbstractVal {
+    /// Inferred type of the value.
     pub ty: VType,
+    /// Nullness of the value.
     pub null: Nullness,
+    /// Cardinality (scalar vs. array, count) of the value.
     pub card: Cardinality,
 }
 
 impl AbstractVal {
+    /// Fully conservative element; used as the initial stack value and when analysis fails.
     pub const UNKNOWN: Self = Self {
         ty: VType::Unknown,
         null: Nullness::MaybeNull,
         card: Cardinality::Unknown,
     };
+    /// Abstract value for a definite null literal.
     pub const NULL: Self = Self {
         ty: VType::Null,
         null: Nullness::AlwaysNull,
         card: Cardinality::NotArray,
     };
+    /// Construct an abstract scalar (non-null, non-array) with the given type.
     pub fn scalar(ty: VType) -> Self {
         Self {
             ty,
@@ -150,6 +163,7 @@ impl AbstractVal {
             card: Cardinality::NotArray,
         }
     }
+    /// Construct the canonical abstract value for a non-null array result.
     pub fn array() -> Self {
         Self {
             ty: VType::Arr,
@@ -157,6 +171,7 @@ impl AbstractVal {
             card: Cardinality::Many,
         }
     }
+    /// Construct the canonical abstract value for a non-null object result.
     pub fn object() -> Self {
         Self {
             ty: VType::Obj,
@@ -164,6 +179,7 @@ impl AbstractVal {
             card: Cardinality::NotArray,
         }
     }
+    /// Component-wise lattice join over all three dimensions.
     pub fn join(self, other: AbstractVal) -> AbstractVal {
         AbstractVal {
             ty: self.ty.join(other.ty),
@@ -173,10 +189,9 @@ impl AbstractVal {
     }
 }
 
-// ── Forward type inference ────────────────────────────────────────────────────
 
-/// Walk opcodes of `program` forward, simulating a stack of `AbstractVal`s.
-/// Returns the top-of-stack abstract value at program end (i.e. the result type).
+/// Run the forward-flow type analysis over `program` and return the abstract
+/// value at the top of the stack after the last opcode.
 pub fn infer_result_type(program: &Program) -> AbstractVal {
     let mut stack: Vec<AbstractVal> = Vec::with_capacity(16);
     let mut env: HashMap<Arc<str>, AbstractVal> = HashMap::new();
@@ -186,8 +201,9 @@ pub fn infer_result_type(program: &Program) -> AbstractVal {
     stack.pop().unwrap_or(AbstractVal::UNKNOWN)
 }
 
-/// Same as `infer_result_type` but exposes the bindings environment after
-/// the program finishes — useful for debugging the interprocedural flow.
+
+/// Like `infer_result_type` but also returns the variable environment so the
+/// caller can inspect inferred types for named bindings.
 pub fn infer_result_type_with_env(
     program: &Program,
 ) -> (AbstractVal, HashMap<Arc<str>, AbstractVal>) {
@@ -199,12 +215,14 @@ pub fn infer_result_type_with_env(
     (stack.pop().unwrap_or(AbstractVal::UNKNOWN), env)
 }
 
+/// Apply a single opcode to the abstract stack, threading the variable environment
+/// for `LetExpr` and `LoadIdent`; delegates to `apply_op` for all other opcodes.
 fn apply_op_env(
     op: &Opcode,
     stack: &mut Vec<AbstractVal>,
     env: &mut HashMap<Arc<str>, AbstractVal>,
 ) {
-    // Handle binding & ident lookup here, delegate scalar cases to apply_op.
+    // Handle the two opcodes that read/write the variable environment.
     match op {
         Opcode::LoadIdent(name) => {
             let av = env.get(name).copied().unwrap_or(AbstractVal::UNKNOWN);
@@ -219,7 +237,7 @@ fn apply_op_env(
                 apply_op_env(op2, &mut sub_stack, env);
             }
             let res = sub_stack.pop().unwrap_or(AbstractVal::UNKNOWN);
-            // Restore shadowed binding.
+            // Restore the variable environment to its state before the let binding.
             match saved {
                 Some(v) => {
                     env.insert(name.clone(), v);
@@ -234,6 +252,8 @@ fn apply_op_env(
     }
 }
 
+/// Apply a single opcode to the abstract stack, producing abstract output values
+/// from abstract input values without touching the variable environment.
 fn apply_op(op: &Opcode, stack: &mut Vec<AbstractVal>) {
     macro_rules! pop2 {
         () => {{
@@ -342,7 +362,7 @@ fn apply_op(op: &Opcode, stack: &mut Vec<AbstractVal>) {
             pop1!();
             stack.push(AbstractVal::scalar(VType::Bool));
         }
-        Opcode::SetCurrent => {} // TOS stays as current
+        Opcode::SetCurrent => {} // Side-effecting; does not push a value.
         Opcode::LetExpr { .. } => {
             pop1!();
             stack.push(AbstractVal::UNKNOWN);
@@ -370,31 +390,34 @@ fn apply_op(op: &Opcode, stack: &mut Vec<AbstractVal>) {
     }
 }
 
-/// Static result-type mapping for builtin methods (conservative).
+
+/// Return the statically known result type of a builtin method call.
+/// Grouped by return-type family; methods whose return type is data-dependent
+/// fall through to `AbstractVal::UNKNOWN`.
 pub fn method_result_type(m: BuiltinMethod) -> AbstractVal {
     use BuiltinMethod::*;
     match m {
-        // → Int
+        // Integer-returning methods.
         Len | Count | Sum | ApproxCountDistinct | IndexOf | LastIndexOf | ByteLen | ParseInt
         | Ceil | Floor | Round => AbstractVal::scalar(VType::Int),
-        // → Bool
+        // Boolean-returning methods.
         Any | All | Has | Missing | Includes | StartsWith | EndsWith | IsBlank | IsNumeric
         | IsAlpha | IsAscii | ParseBool | ReMatch | ContainsAny | ContainsAll => {
             AbstractVal::scalar(VType::Bool)
         }
-        // → Str
+        // String-returning methods.
         Upper | Lower | Capitalize | TitleCase | Trim | TrimLeft | TrimRight | ToString
         | ToJson | ToBase64 | FromBase64 | UrlEncode | UrlDecode | HtmlEscape | HtmlUnescape
         | Repeat | PadLeft | PadRight | Replace | ReplaceAll | StripPrefix | StripSuffix
         | Indent | Dedent | Join | ToCsv | ToTsv | Type | SnakeCase | KebabCase | CamelCase
         | PascalCase | ReverseStr | Center => AbstractVal::scalar(VType::Str),
-        // → Float
+        // Float-returning methods.
         Avg | ParseFloat => AbstractVal::scalar(VType::Float),
-        // → Num (Min/Max depend on input; treat as unknown scalar)
+        // Polymorphic-numeric methods; exact type depends on input.
         Min | Max | ToNumber | Abs => AbstractVal::scalar(VType::Num),
-        // → Bool (to_bool)
+        // Explicit bool coercion.
         ToBool => AbstractVal::scalar(VType::Bool),
-        // → Arr
+        // Array-returning methods (includes collection, transform, and window operations).
         Keys | Values | Entries | ToPairs | Reverse | Unique | Collect | Flatten | Compact
         | Chars | CharsOf | Lines | Words | Split | Sort | Filter | Map | FlatMap | Find
         | FindAll | UniqueBy | DeepFind | DeepShape | DeepLike | IndicesWhere | Fanout
@@ -403,12 +426,12 @@ pub fn method_result_type(m: BuiltinMethod) -> AbstractVal {
         | Remove | Matches | Scan | Slice | Bytes | IndicesOf | Explode | Implode | RollingSum
         | RollingAvg | RollingMin | RollingMax | Lag | Lead | DiffWindow | PctChange | CumMax
         | CumMin | Zscore => AbstractVal::array(),
-        // → Obj
+        // Object-returning methods.
         FromPairs | Invert | Pick | Omit | Merge | DeepMerge | Defaults | Rename
         | TransformKeys | TransformValues | FilterKeys | FilterValues | Pivot | GroupBy
         | CountBy | IndexBy | GroupShape | ZipShape | Partition | FlattenKeys | UnflattenKeys
         | SetPath | DelPath | DelPaths | Update | Schema => AbstractVal::object(),
-        // → various
+        // Scalar-returning methods whose type cannot be determined without runtime information.
         First | Last | Nth | FindFirst | FindOne | FindIndex | MaxBy | MinBy | Walk | WalkPre
         | Rec | GetPath | ReMatchFirst | ReCaptures => AbstractVal::UNKNOWN,
         HasPath => AbstractVal::scalar(VType::Bool),
@@ -420,15 +443,16 @@ pub fn method_result_type(m: BuiltinMethod) -> AbstractVal {
     }
 }
 
-// ── Alias / use-count analysis ────────────────────────────────────────────────
 
-/// Count `LoadIdent(name)` references across an entire program (including sub-programs).
+/// Count how many times `name` is referenced as `Opcode::LoadIdent` across
+/// `program` and all nested sub-programs; used for inlining decisions.
 pub fn count_ident_uses(program: &Program, name: &str) -> usize {
     let mut n = 0;
     count_ident_uses_in_ops(&program.ops, name, &mut n);
     n
 }
 
+/// Recursive helper for `count_ident_uses`; descends into every embedded `Program`.
 fn count_ident_uses_in_ops(ops: &[Opcode], name: &str, acc: &mut usize) {
     for op in ops {
         match op {
@@ -504,17 +528,16 @@ fn count_ident_uses_in_ops(ops: &[Opcode], name: &str, acc: &mut usize) {
     }
 }
 
-// ── Projection set (field access pattern) ─────────────────────────────────────
 
-/// Collect all field names directly accessed from a program.  Used by
-/// projection-pushdown analysis: if an object is later accessed only via these
-/// fields, other fields can be trimmed early.
+/// Collect every field name statically accessed by `program` (via `GetField`,
+/// `OptField`, `Descendant`, or `RootChain`). De-duplicated; order is discovery order.
 pub fn collect_accessed_fields(program: &Program) -> Vec<Arc<str>> {
     let mut set = Vec::new();
     collect_fields_in_ops(&program.ops, &mut set);
     set
 }
 
+/// Recursive helper for `collect_accessed_fields`.
 fn collect_fields_in_ops(ops: &[Opcode], acc: &mut Vec<Arc<str>>) {
     for op in ops {
         match op {
@@ -550,11 +573,9 @@ fn collect_fields_in_ops(ops: &[Opcode], acc: &mut Vec<Arc<str>>) {
     }
 }
 
-// ── Structural opcode hashing (for CSE) ───────────────────────────────────────
 
-/// Hash a program's opcode sequence into a stable identifier.  Two programs
-/// with the same opcodes hash to the same value — enables CSE across `let`
-/// initialisers or parallel `->` binds.
+/// Compute a structural hash of `program` that identifies its opcode sequence.
+/// Used as a key for CSE deduplication and the compiled-program cache.
 pub fn program_signature(program: &Program) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::Hasher;
@@ -563,10 +584,12 @@ pub fn program_signature(program: &Program) -> u64 {
     h.finish()
 }
 
+/// Recursively hash an opcode slice; only structurally significant fields are hashed
+/// (discriminant + key literals + sub-program signatures).
 fn hash_ops(ops: &[Opcode], h: &mut impl std::hash::Hasher) {
     use std::hash::Hash;
     for op in ops {
-        // Discriminant + data for stable signature.
+        // Always hash the variant discriminant so different opcodes don't collide.
         std::mem::discriminant(op).hash(h);
         match op {
             Opcode::PushInt(n) => n.hash(h),
@@ -669,11 +692,9 @@ fn hash_ops(ops: &[Opcode], h: &mut impl std::hash::Hasher) {
     }
 }
 
-// ── Common-subexpression detection ────────────────────────────────────────────
 
-/// Find sub-programs (via `Arc<Program>` pointers inside opcodes) that appear
-/// multiple times across the program tree.  Returns a map of
-/// `signature → count` for analysis / potential reuse.
+/// Walk `program` and its nested sub-programs, recording every sub-program
+/// signature and how many times it appears; entries with count ≥ 2 are CSE candidates.
 pub fn find_common_subexprs(program: &Program) -> HashMap<u64, usize> {
     let mut map: HashMap<u64, usize> = HashMap::new();
     walk_subprograms(&program.ops, &mut map);
@@ -681,6 +702,8 @@ pub fn find_common_subexprs(program: &Program) -> HashMap<u64, usize> {
     map
 }
 
+/// Recursive helper for `find_common_subexprs`; increments a counter for each
+/// sub-program encountered and recurses into its opcodes.
 fn walk_subprograms(ops: &[Opcode], map: &mut HashMap<u64, usize>) {
     for op in ops {
         let sub_progs: Vec<&Arc<Program>> = match op {
@@ -726,12 +749,9 @@ fn walk_subprograms(ops: &[Opcode], map: &mut HashMap<u64, usize>) {
     }
 }
 
-// ── AST-level ident use walker (for dead-let) ────────────────────────────────
 
-/// True if any sub-expression references `name` as a bare identifier.
-/// Walks the AST without compiling.  Shadowing by inner `let` / `lambda` /
-/// comprehension binders is respected: inner bindings with the same name
-/// hide the outer one.
+/// Return `true` when `expr` contains a free reference to the variable `name`,
+/// respecting lexical scope (bindings introduced inside comprehensions / lambdas / let shadow `name`).
 pub fn expr_uses_ident(expr: &super::ast::Expr, name: &str) -> bool {
     use super::ast::{Arg, ArrayElem, BindTarget, Expr, FStringPart, ObjField, PipeStep, Step};
     match expr {
@@ -816,8 +836,8 @@ pub fn expr_uses_ident(expr: &super::ast::Expr, name: &str) -> bool {
                 return true;
             }
             if vars.iter().any(|v| v == name) {
-                return false;
-            } // shadowed
+                return false; // `name` is shadowed by the comprehension binding.
+            }
             expr_uses_ident(expr, name) || cond.as_ref().map_or(false, |c| expr_uses_ident(c, name))
         }
         Expr::DictComp {
@@ -831,7 +851,7 @@ pub fn expr_uses_ident(expr: &super::ast::Expr, name: &str) -> bool {
                 return true;
             }
             if vars.iter().any(|v| v == name) {
-                return false;
+                return false; // `name` is shadowed by the comprehension binding.
             }
             expr_uses_ident(key, name)
                 || expr_uses_ident(val, name)
@@ -839,7 +859,7 @@ pub fn expr_uses_ident(expr: &super::ast::Expr, name: &str) -> bool {
         }
         Expr::Lambda { params, body } => {
             if params.iter().any(|p| p == name) {
-                return false;
+                return false; // Parameter shadows the outer binding.
             }
             expr_uses_ident(body, name)
         }
@@ -852,8 +872,8 @@ pub fn expr_uses_ident(expr: &super::ast::Expr, name: &str) -> bool {
                 return true;
             }
             if n == name {
-                return false;
-            } // inner let shadows
+                return false; // The let binding itself shadows `name` in `body`.
+            }
             expr_uses_ident(body, name)
         }
         Expr::IfElse { cond, then_, else_ } => {
@@ -885,8 +905,9 @@ pub fn expr_uses_ident(expr: &super::ast::Expr, name: &str) -> bool {
     }
 }
 
-/// True if the expression is pure — no side-effecting global calls or
-/// unknown methods.  Enables dropping unused `let` initialisers safely.
+
+/// Return `true` when `expr` is side-effect-free and may be safely eliminated
+/// or reordered. Conservatively returns `true` for most compound forms.
 pub fn expr_is_pure(expr: &super::ast::Expr) -> bool {
     use super::ast::{Arg, Expr, Step};
     match expr {
@@ -913,24 +934,23 @@ pub fn expr_is_pure(expr: &super::ast::Expr) -> bool {
         }
         Expr::BinOp(l, _, r) | Expr::Coalesce(l, r) => expr_is_pure(l) && expr_is_pure(r),
         Expr::UnaryNeg(e) | Expr::Not(e) | Expr::Kind { expr: e, .. } => expr_is_pure(e),
-        // All Jetro exprs are pure in practice; global calls may throw but no side effects.
+        // Conservatively treat all other forms (lambdas, patches, comprehensions) as pure
+        // since they don't mutate shared state in the current runtime.
         _ => true,
     }
 }
 
-// ── CSE: canonicalise identical sub-programs ─────────────────────────────────
 
-/// Walk `program` and replace every `Arc<Program>` inside opcodes with a
-/// canonical `Arc` keyed by `program_signature`.  Structurally-identical
-/// sub-programs end up pointing at the same allocation, reducing memory
-/// and enabling downstream caches to hit on the same key.
-///
-/// Returns a new `Program` with deduplicated sub-programs.
+/// CSE pass over `program`: replace duplicate sub-programs (identified by
+/// `program_signature`) with shared `Arc` pointers, reducing re-compilation and
+/// memory pressure in programs with repeated sub-expressions.
 pub fn dedup_subprograms(program: &Program) -> Arc<Program> {
     let mut cache: HashMap<u64, Arc<Program>> = HashMap::new();
     dedup_rec(program, &mut cache)
 }
 
+/// Recursive implementation of `dedup_subprograms`; returns a cached `Arc<Program>`
+/// if one with the same signature already exists, otherwise rebuilds with deduped children.
 fn dedup_rec(program: &Program, cache: &mut HashMap<u64, Arc<Program>>) -> Arc<Program> {
     let sig = program_signature(program);
     if let Some(a) = cache.get(&sig) {
@@ -949,6 +969,8 @@ fn dedup_rec(program: &Program, cache: &mut HashMap<u64, Arc<Program>>) -> Arc<P
     out
 }
 
+/// Rewrite a single opcode so that all embedded sub-programs are replaced with
+/// their deduplicated equivalents from `cache`.
 fn rewrite_op(op: &Opcode, cache: &mut HashMap<u64, Arc<Program>>) -> Opcode {
     use super::vm::{CompSpec, CompiledFSPart, CompiledObjEntry, DictCompSpec};
     match op {
@@ -1061,6 +1083,7 @@ fn rewrite_op(op: &Opcode, cache: &mut HashMap<u64, Arc<Program>>) -> Opcode {
     }
 }
 
+/// Rebuild a `CompiledCall` with all sub-programs replaced by their deduplicated equivalents.
 fn rewrite_call(
     c: &Arc<super::vm::CompiledCall>,
     cache: &mut HashMap<u64, Arc<Program>>,
@@ -1076,10 +1099,9 @@ fn rewrite_call(
     })
 }
 
-// ── Cost model ────────────────────────────────────────────────────────────────
 
-/// Rough, ordinal cost estimate per opcode.  Not a wall-clock number — only
-/// useful to compare relative cost (e.g. for AndOp operand reordering).
+/// Return an estimated execution cost for a single opcode, used by the planner
+/// to order filter predicates cheapest-first and to guide inlining decisions.
 pub fn opcode_cost(op: &Opcode) -> u32 {
     match op {
         Opcode::PushNull
@@ -1183,27 +1205,30 @@ pub fn opcode_cost(op: &Opcode) -> u32 {
     }
 }
 
-/// Total cost of a program (sum of per-op costs).
+
+/// Sum `opcode_cost` over all opcodes in `program`; used as a proxy for execution
+/// time when comparing alternative sub-expressions for predicate reordering.
 pub fn program_cost(program: &Program) -> u32 {
     program.ops.iter().map(opcode_cost).sum()
 }
 
-// ── Monotonicity lattice ─────────────────────────────────────────────────────
 
-/// Tracks ordering properties of array-like values through the pipeline.
+/// Monotonicity of an array-valued program with respect to its natural order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Monotonicity {
-    /// Order unknown.
+    /// Order is unknown or has been disrupted by a non-monotone operation.
     Unknown,
-    /// Ascending by natural comparator.
+    /// The array is in ascending order (e.g. after `.sort()`).
     Asc,
-    /// Descending by natural comparator.
+    /// The array is in descending order (e.g. after `.sort().reverse()`).
     Desc,
-    /// Not an ordered collection.
+    /// The value is not an array; monotonicity is not applicable.
     NotArray,
 }
 
 impl Monotonicity {
+    /// Compute the monotonicity that results from applying `op` to a value
+    /// with the current monotonicity. Used to track sort order through pipelines.
     pub fn after(self, op: &Opcode) -> Monotonicity {
         match op {
             Opcode::CallMethod(c) if c.sub_progs.is_empty() => match c.method {
@@ -1213,8 +1238,8 @@ impl Monotonicity {
                     Monotonicity::Desc => Monotonicity::Asc,
                     x => x,
                 },
-                BuiltinMethod::Filter => self, // order preserved
-                BuiltinMethod::Map => Monotonicity::Unknown, // key changes
+                BuiltinMethod::Filter => self, // Filter preserves order.
+                BuiltinMethod::Map => Monotonicity::Unknown, // Map may reorder.
                 _ => Monotonicity::Unknown,
             },
             Opcode::MakeArr(_) | Opcode::ListComp(_) => Monotonicity::Unknown,
@@ -1223,7 +1248,9 @@ impl Monotonicity {
     }
 }
 
-/// Walk program and determine monotonicity of the final result.
+
+/// Infer the output monotonicity of `program` by stepping through each opcode
+/// sequentially from `Unknown`, updating the state with `Monotonicity::after`.
 pub fn infer_monotonicity(program: &Program) -> Monotonicity {
     let mut m = Monotonicity::Unknown;
     for op in program.ops.iter() {
@@ -1232,14 +1259,10 @@ pub fn infer_monotonicity(program: &Program) -> Monotonicity {
     m
 }
 
-// ── Escape analysis ───────────────────────────────────────────────────────────
 
-/// Simple escape check: does the program's final value contain references to
-/// the input document (i.e. survive returning)?  If not, the compiler may
-/// emit value-copying ops rather than Arc-sharing to free the original doc.
-///
-/// Returns `false` only when the result is a scalar or newly-constructed
-/// object/array with no root references.
+/// Return `true` when `program` reads from the input document (`PushRoot`,
+/// `PushCurrent`, field/index accesses, descendants). Used to detect programs
+/// that are fully constant and need not be re-evaluated per document.
 pub fn escapes_doc(program: &Program) -> bool {
     for op in program.ops.iter() {
         match op {
@@ -1263,16 +1286,15 @@ pub fn escapes_doc(program: &Program) -> bool {
     false
 }
 
-// ── Selectivity scoring ──────────────────────────────────────────────────────
 
-/// Rough selectivity estimate for AST predicates.  Lower score → more
-/// selective (filters out more rows).  Used to reorder `and` operands so
-/// cheaper / more-selective predicate runs first (short-circuit friendly).
+/// Estimate the selectivity of a filter predicate expression; lower scores mean
+/// the predicate eliminates more candidates and should be tested first.
+/// The planner uses this to reorder `And` operands cheapest/most-selective first.
 pub fn selectivity_score(expr: &super::ast::Expr) -> u32 {
     use super::ast::{BinOp, Expr};
     match expr {
-        Expr::Bool(true) => 1000, // no filtering
-        Expr::Bool(false) => 0,   // max filtering
+        Expr::Bool(true) => 1000, // Always passes — effectively no filter.
+        Expr::Bool(false) => 0,   // Never passes — maximally selective.
         Expr::BinOp(_, BinOp::Eq, _) => 1,
         Expr::BinOp(_, BinOp::Neq, _) => 5,
         Expr::BinOp(_, BinOp::Lt, _)
@@ -1288,10 +1310,10 @@ pub fn selectivity_score(expr: &super::ast::Expr) -> u32 {
     }
 }
 
-// ── Kind-check specialisation ────────────────────────────────────────────────
 
-/// When a `KindCheck` is applied to a value with a statically-known type,
-/// the check can be constant-folded to true/false at compile time.
+/// Attempt to evaluate a kind-check at compile time given a statically known
+/// `VType`. Returns `Some(bool)` when the result is certain, `None` when
+/// `val_ty` is `Unknown` and the check must be deferred to runtime.
 pub fn fold_kind_check(val_ty: VType, target: KindType, negate: bool) -> Option<bool> {
     let matches = match (val_ty, target) {
         (VType::Null, KindType::Null) => true,

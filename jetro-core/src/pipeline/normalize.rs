@@ -1,22 +1,37 @@
+//! Symbolic expression normalization for pipeline lowering.
+//!
+//! Classifies `Expr` sub-trees into `BodyKernel`, `Stage`, and `Sink`
+//! representations the pipeline can evaluate without re-entering the VM.
+//! Expressions that cannot be classified return `None`; the lowering layer
+//! then either wraps them in a VM-backed `Generic` kernel or aborts lowering.
+
 use std::sync::Arc;
 
 use crate::ast::{Arg, ArrayElem, Expr, FStringPart, ObjField, PatchOp, PathStep, PipeStep, Step};
 
 use super::{BodyKernel, ReducerOp, Sink, Stage};
 
+/// Describes how much of each element's value the sink actually requires.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ValueDemand {
+    /// The sink does not inspect element values at all (e.g. pure count).
     None,
+    /// The sink needs the complete materialised value.
     Whole,
+    /// The sink only needs a numeric projection of each element (e.g. sum, min).
     Numeric,
 }
 
+/// Combined runtime demand of a sink: value-level and order-level.
 #[derive(Debug, Clone, Copy)]
 struct RuntimeDemand {
+    /// How much of each element value the sink consumes.
     value: ValueDemand,
+    /// `true` when the sink is sensitive to element order (Collect, Terminal).
     order: bool,
 }
 
+/// Converts a `Sink` into the `RuntimeDemand` that describes what its input elements must provide.
 fn sink_runtime_demand(sink: &Sink) -> RuntimeDemand {
     match sink {
         Sink::Reducer(spec) if spec.op == ReducerOp::Count => RuntimeDemand {
@@ -42,6 +57,9 @@ fn sink_runtime_demand(sink: &Sink) -> RuntimeDemand {
     }
 }
 
+/// Demand-driven symbolic optimiser: tracks the current-element expression symbolically
+/// through map stages, substitutes `@` into downstream predicates, and drops stages whose
+/// output is unused by the sink (e.g. order-only stages before a numeric reducer).
 pub(super) fn normalize_symbolic(
     stages: &mut Vec<Stage>,
     exprs: &mut Vec<Option<Arc<Expr>>>,
@@ -93,10 +111,8 @@ pub(super) fn normalize_symbolic(
                 && !out.demand.order
                 && !suffix_consumes_value(&in_stages[idx + 1..]) =>
             {
-                // Pure one-to-one value work is dead for cardinality-only sinks
-                // unless a later symbolic filter consumes it. At this point a
-                // non-symbolic stage cannot be represented in `item`, so only
-                // drop it when it is safe to ignore values entirely.
+                
+                
             }
             other => {
                 out.flush_all();
@@ -110,16 +126,25 @@ pub(super) fn normalize_symbolic(
     *kernels = out.out_kernels;
 }
 
+/// Accumulates the output of symbolic normalisation: tracks a pending item expression,
+/// a pending predicate expression, and the partially-built output stage list.
 struct SymbolicEmitter {
+    /// The symbolic expression representing the current element after all pending maps.
     item: Expr,
+    /// An accumulated predicate to be emitted as a filter when a non-symbolic stage is encountered.
     predicate: Option<Expr>,
+    /// The sink demand that drives which stages can be dropped or deferred.
     demand: RuntimeDemand,
+    /// Stages emitted so far.
     out_stages: Vec<Stage>,
+    /// Stage expressions emitted so far, parallel to `out_stages`.
     out_exprs: Vec<Option<Arc<Expr>>>,
+    /// Classified kernels emitted so far, parallel to `out_stages`.
     out_kernels: Vec<BodyKernel>,
 }
 
 impl SymbolicEmitter {
+    /// Creates a new emitter with `@` as the initial item expression and no pending predicate.
     fn new(demand: RuntimeDemand) -> Self {
         Self {
             item: Expr::Current,
@@ -131,6 +156,8 @@ impl SymbolicEmitter {
         }
     }
 
+    /// Appends a pre-classified stage and its optional expression directly to the output without
+    /// symbolic processing.
     fn push_stage(&mut self, stage: Stage, expr: Option<Arc<Expr>>) {
         let kernel = stage_kernel(&stage);
         self.out_stages.push(stage);
@@ -138,6 +165,8 @@ impl SymbolicEmitter {
         self.out_kernels.push(kernel);
     }
 
+    /// Simplifies `expr`, compiles it into a program, classifies it as a kernel, and appends the
+    /// resulting `Filter` or `Map` stage to the output.
     fn push_expr_stage(&mut self, expr: Expr, kind: ExprStageKind) {
         let expr = simplify_expr(expr);
         let prog = compile_stage_expr(&expr);
@@ -151,6 +180,8 @@ impl SymbolicEmitter {
         self.out_kernels.push(kernel);
     }
 
+    /// Emits the pending predicate as a `Filter` stage (unless it is trivially `true`), then
+    /// clears the pending predicate field.
     fn flush_predicate(&mut self) {
         if let Some(pred) = self.predicate.take() {
             if !matches!(pred, Expr::Bool(true)) {
@@ -159,6 +190,8 @@ impl SymbolicEmitter {
         }
     }
 
+    /// Emits the pending item expression as a `Map` stage (unless it is identity `@`), then
+    /// resets the item to `Expr::Current`.
     fn flush_item(&mut self) {
         if !matches!(self.item, Expr::Current) {
             let item = std::mem::replace(&mut self.item, Expr::Current);
@@ -166,11 +199,14 @@ impl SymbolicEmitter {
         }
     }
 
+    /// Flushes both the pending predicate and the pending item expression in predicate-first order.
     fn flush_all(&mut self) {
         self.flush_predicate();
         self.flush_item();
     }
 
+    /// Finalises the emitter by flushing the predicate and, when possible, folding the pending
+    /// item expression into the sink's projection rather than emitting a standalone `Map` stage.
     fn finish(&mut self, sink: &mut Sink) {
         self.flush_predicate();
         match sink {
@@ -191,12 +227,17 @@ impl SymbolicEmitter {
     }
 }
 
+/// Specifies whether a symbolic expression should be emitted as a `Filter` or a `Map` stage.
 #[derive(Debug, Clone, Copy)]
 enum ExprStageKind {
+    /// Emit a `Stage::Filter` that keeps elements for which the expression is truthy.
     Filter,
+    /// Emit a `Stage::Map` that replaces each element with the expression's result.
     Map,
 }
 
+/// Classifies the body program of `stage` into a `BodyKernel`, returning `Generic` when
+/// the stage carries no body.
 fn stage_kernel(stage: &Stage) -> BodyKernel {
     stage
         .body_program()
@@ -204,6 +245,8 @@ fn stage_kernel(stage: &Stage) -> BodyKernel {
         .unwrap_or(BodyKernel::Generic)
 }
 
+/// Constructs `lhs && rhs`, applying short-circuit constant folding when either operand is
+/// a `Bool` literal.
 fn and_expr(lhs: Expr, rhs: Expr) -> Expr {
     match (lhs, rhs) {
         (Expr::Bool(true), r) => r,
@@ -212,18 +255,25 @@ fn and_expr(lhs: Expr, rhs: Expr) -> Expr {
     }
 }
 
+/// Returns `true` when any stage in `stages` is positional, meaning upstream order must be
+/// preserved.
 fn suffix_needs_order(stages: &[Stage]) -> bool {
     stages.iter().any(Stage::is_positional_stage)
 }
 
+/// Returns `true` when any stage in `stages` reads element values, preventing the demand
+/// optimiser from dropping a preceding value-producing stage.
 fn suffix_consumes_value(stages: &[Stage]) -> bool {
     stages.iter().any(Stage::consumes_input_value)
 }
 
+/// Compiles `expr` into a VM `Program` tagged with the `<pipeline-rewrite>` source label.
 fn compile_stage_expr(expr: &Expr) -> Arc<crate::vm::Program> {
     Arc::new(crate::vm::Compiler::compile(expr, "<pipeline-rewrite>"))
 }
 
+/// Recursively simplifies `expr` by constant-folding boolean operators, evaluating static
+/// object/array projections, and propagating `null` through coalescing.
 fn simplify_expr(expr: Expr) -> Expr {
     match expr {
         Expr::Chain(base, steps) => simplify_chain(simplify_expr(*base), steps),
@@ -405,6 +455,8 @@ fn simplify_expr(expr: Expr) -> Expr {
     }
 }
 
+/// Simplifies a `Chain` expression by statically evaluating field/index steps against literal
+/// object/array bases, folding away steps that can be resolved at compile time.
 fn simplify_chain(mut base: Expr, steps: Vec<Step>) -> Expr {
     let mut remaining: Vec<Step> = Vec::new();
     for step in steps {
@@ -423,6 +475,8 @@ fn simplify_chain(mut base: Expr, steps: Vec<Step>) -> Expr {
     }
 }
 
+/// Attempts to evaluate `step` applied to a literal `base` at simplification time, returning
+/// `None` when dynamic dispatch is required.
 fn project_static_step(base: &Expr, step: &Step) -> Option<Expr> {
     match (base, step) {
         (Expr::Object(fields), Step::Field(key)) => project_object_field(fields, key),
@@ -439,6 +493,8 @@ fn project_static_step(base: &Expr, step: &Step) -> Option<Expr> {
     }
 }
 
+/// Looks up `key` in a literal object field list, returning the value expression or `None` if
+/// the object contains dynamic/optional/conditional entries that prevent static resolution.
 fn project_object_field(fields: &[ObjField], key: &str) -> Option<Expr> {
     let mut found = None;
     for field in fields {
@@ -461,6 +517,8 @@ fn project_object_field(fields: &[ObjField], key: &str) -> Option<Expr> {
     found
 }
 
+/// Returns the element at `idx` from a literal array (supporting negative indices), or `None`
+/// when the array contains spread elements or the index is out of range.
 fn project_array_index(elems: &[ArrayElem], idx: i64) -> Option<Expr> {
     if elems
         .iter()
@@ -479,6 +537,7 @@ fn project_array_index(elems: &[ArrayElem], idx: i64) -> Option<Expr> {
     }
 }
 
+/// Recursively simplifies the expression arguments within a `Step` variant.
 fn simplify_step(step: Step) -> Step {
     match step {
         Step::DynIndex(e) => Step::DynIndex(Box::new(simplify_expr(*e))),
@@ -489,6 +548,7 @@ fn simplify_step(step: Step) -> Step {
     }
 }
 
+/// Simplifies all expressions inside a list of positional or named arguments.
 fn simplify_args(args: Vec<Arg>) -> Vec<Arg> {
     args.into_iter()
         .map(|arg| match arg {
@@ -498,6 +558,8 @@ fn simplify_args(args: Vec<Arg>) -> Vec<Arg> {
         .collect()
 }
 
+/// Applies constant-folding rules to a binary expression: short-circuits `&&` / `||` when
+/// either operand is a boolean literal.
 fn simplify_binop(lhs: Expr, op: crate::ast::BinOp, rhs: Expr) -> Expr {
     use crate::ast::BinOp;
     match (lhs, op, rhs) {
@@ -511,6 +573,8 @@ fn simplify_binop(lhs: Expr, op: crate::ast::BinOp, rhs: Expr) -> Expr {
     }
 }
 
+/// Performs capture-avoiding substitution of `Expr::Current` (`@`) with `replacement` throughout
+/// `expr`; lambdas are not descended into since they rebind `@`.
 fn substitute_current(expr: &Expr, replacement: &Expr) -> Expr {
     match expr {
         Expr::Current => replacement.clone(),
@@ -680,6 +744,7 @@ fn substitute_current(expr: &Expr, replacement: &Expr) -> Expr {
     }
 }
 
+/// Substitutes `@` with `replacement` inside the expressions carried by a `Step`.
 fn substitute_current_step(step: &Step, replacement: &Expr) -> Step {
     match step {
         Step::DynIndex(e) => Step::DynIndex(Box::new(substitute_current(e, replacement))),
@@ -700,6 +765,7 @@ fn substitute_current_step(step: &Step, replacement: &Expr) -> Step {
     }
 }
 
+/// Substitutes `@` with `replacement` inside a positional or named argument expression.
 fn substitute_current_arg(arg: &Arg, replacement: &Expr) -> Arg {
     match arg {
         Arg::Pos(e) => Arg::Pos(substitute_current(e, replacement)),
@@ -707,6 +773,7 @@ fn substitute_current_arg(arg: &Arg, replacement: &Expr) -> Arg {
     }
 }
 
+/// Substitutes `@` with `replacement` in all expression slots of an object field.
 fn substitute_current_obj_field(field: &ObjField, replacement: &Expr) -> ObjField {
     match field {
         ObjField::Kv {
@@ -730,6 +797,8 @@ fn substitute_current_obj_field(field: &ObjField, replacement: &Expr) -> ObjFiel
     }
 }
 
+/// Substitutes `@` with `replacement` in the dynamic-index and wildcard-filter slots of a
+/// `PathStep`, leaving static field and index steps unchanged.
 fn substitute_current_path_step(step: &PathStep, replacement: &Expr) -> PathStep {
     match step {
         PathStep::DynIndex(e) => PathStep::DynIndex(substitute_current(e, replacement)),
@@ -740,6 +809,8 @@ fn substitute_current_path_step(step: &PathStep, replacement: &Expr) -> PathStep
     }
 }
 
+/// Returns `true` when `expr` is side-effect-free and can safely be substituted or reordered
+/// by the demand optimiser; `Patch`, `DeleteMark`, and `GlobalCall` are considered impure.
 fn is_pure_expr(expr: &Expr) -> bool {
     match expr {
         Expr::Patch { .. } | Expr::DeleteMark => false,
@@ -825,6 +896,7 @@ fn is_pure_expr(expr: &Expr) -> bool {
     }
 }
 
+/// Returns `true` when the expression carried by `arg` is pure.
 fn is_pure_arg(arg: &Arg) -> bool {
     match arg {
         Arg::Pos(e) | Arg::Named(_, e) => is_pure_expr(e),

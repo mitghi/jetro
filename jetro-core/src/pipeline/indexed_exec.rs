@@ -1,3 +1,7 @@
+//! Index-aware pipeline execution for `first` / `last` positional sinks.
+//! Tracks absolute row position so positional selection can terminate the
+//! loop without scanning the entire source.
+
 use crate::{
     context::{Env, EvalError},
     value::Val,
@@ -5,9 +9,11 @@ use crate::{
 
 use super::{row_source, select_strategy, Pipeline, Position, Stage, Strategy};
 
-/// Generic O(1) optimisation for `(Map | identity)*` chains terminated by a
-/// positional sink (`First` / `Last`). Pulls only the target source element,
-/// runs the 1:1 chain once, and returns.
+
+/// Executes a positional (`first`/`last`) pipeline by directly indexing the source.
+///
+/// Returns `None` when the pipeline does not qualify for indexed dispatch (non-positional sink,
+/// non-indexable source, or stages that cannot be applied element-wise).
 pub(super) fn run(
     pipeline: &Pipeline,
     root: &Val,

@@ -1,16 +1,36 @@
+//! Unified borrowed view over `Val` or a simd-json tape node.
+//!
+//! `ValueView` is the abstract interface that lets `physical_eval` and
+//! `view_pipeline` navigate a document without materialising a `Val` tree.
+//! Implementations exist for `Val` (in-memory) and for the tape path
+//! (simd-json, behind the `simd-json` feature). Paths that need a concrete
+//! `Val` call `materialize()`; structural navigation stays zero-alloc.
+
 use std::sync::Arc;
 
 use crate::util::JsonView;
 use crate::value::Val;
 
+/// Navigation interface shared by all document representations.
+/// Implementations exist for `ValView` (in-memory `Val` tree) and,
+/// behind the `simd-json` feature, for `TapeView` (borrowed tape nodes).
 pub(crate) trait ValueView<'a>: Clone {
+    /// Return a borrowed scalar view of the current node without allocating.
     fn scalar(&self) -> JsonView<'_>;
+    /// Navigate into the named field of an object node, returning `Null` if absent.
     fn field(&self, key: &str) -> Self;
+    /// Navigate to the element at `idx` (negative indices count from the end),
+    /// returning `Null` if out of bounds.
     fn index(&self, idx: i64) -> Self;
+    /// Return an iterator over the elements of an array node, or `None` if the
+    /// current node is not an array.
     fn array_iter(&self) -> Option<Box<dyn Iterator<Item = Self> + 'a>>;
+    /// Fully materialise the current node as a `Val`, allocating as needed.
     fn materialize(&self) -> Val;
 }
 
+/// Convert a `JsonView` scalar to an owned `Val`, returning `None` for the
+/// `ArrayLen` and `ObjectLen` pseudo-variants that carry no value payload.
 #[inline]
 pub(crate) fn scalar_view_to_owned_val(view: JsonView<'_>) -> Option<Val> {
     match view {
@@ -28,18 +48,26 @@ pub(crate) fn scalar_view_to_owned_val(view: JsonView<'_>) -> Option<Val> {
     }
 }
 
+/// `ValueView` implementation for in-memory `Val` trees.
+/// Borrows the source `Val` when possible and falls back to an owned clone
+/// only for dynamically computed results such as index out-of-range fallbacks.
 #[derive(Clone)]
 pub(crate) enum ValView<'a> {
+    /// A direct borrow of a `Val` node from the original tree — zero copy.
     Borrowed(&'a Val),
+    /// A transiently computed `Val` that has no parent in the original tree.
     Owned(Val),
 }
 
 impl<'a> ValView<'a> {
+    /// Construct a `ValView` that borrows `value` from the caller.
     #[inline]
     pub(crate) fn new(value: &'a Val) -> Self {
         Self::Borrowed(value)
     }
 
+    /// Return a reference to the underlying `Val` regardless of whether it is
+    /// borrowed or owned.
     #[inline]
     fn value(&self) -> &Val {
         match self {
@@ -171,18 +199,26 @@ impl<'a> ValueView<'a> for ValView<'a> {
     }
 }
 
+/// `ValueView` implementation that navigates a simd-json tape without
+/// materialising `Val` nodes until `materialize()` is explicitly called.
 #[cfg(feature = "simd-json")]
 #[derive(Clone, Copy)]
 pub(crate) enum TapeView<'a> {
+    /// A live reference to a tape node at `idx` within the borrowed `TapeData`.
     Node {
+        /// The simd-json tape buffer this view points into.
         tape: &'a crate::strref::TapeData,
+        /// Index of the current node within `tape.nodes`.
         idx: usize,
     },
+    /// Sentinel for a field or index that was not found; behaves like `Val::Null`.
     Missing,
 }
 
 #[cfg(feature = "simd-json")]
 impl<'a> TapeView<'a> {
+    /// Return a `TapeView` pointing at the root node of `tape`, or `Missing`
+    /// if the tape is empty (invalid JSON).
     #[inline]
     pub(crate) fn root(tape: &'a crate::strref::TapeData) -> Self {
         if tape.nodes.is_empty() {
@@ -192,6 +228,8 @@ impl<'a> TapeView<'a> {
         }
     }
 
+    /// Recursively materialise the tape subtree starting at `*idx`, advancing
+    /// `idx` past all consumed nodes and returning the resulting `Val`.
     #[inline]
     fn materialize_at(tape: &'a crate::strref::TapeData, idx: &mut usize) -> Val {
         use crate::strref::TapeNode;
@@ -331,10 +369,15 @@ impl<'a> ValueView<'a> for TapeView<'a> {
     }
 }
 
+/// Iterator that yields `TapeView` nodes for each element of a tape array,
+/// advancing through the tape by the span of each node.
 #[cfg(feature = "simd-json")]
 struct TapeArrayIter<'a> {
+    /// The tape buffer being iterated.
     tape: &'a crate::strref::TapeData,
+    /// Number of elements still to be yielded.
     remaining: usize,
+    /// Current tape position (index of the next element node).
     cur: usize,
 }
 

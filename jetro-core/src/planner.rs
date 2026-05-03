@@ -1,8 +1,11 @@
-//! Query execution planner.
+//! Query planner: parser output → physical `QueryPlan`.
 //!
-//! This module lowers a parsed expression into one lightweight, single-use
-//! `QueryPlan`. Pipeline and VM are backend nodes inside that plan, not
-//! separate top-level execution modes.
+//! `plan_query_with_context` is the single entry point. It parses the
+//! expression string, walks the AST, and emits a `QueryPlan` whose nodes
+//! carry ordered backend-preference lists. Pipeline-eligible chains get a
+//! `Pipeline` node preference; structural deep-search gets a `Structural`
+//! preference; everything else gets a VM-compiled `Program`. No evaluation
+//! happens here — the plan is a pure data structure for `physical_eval`.
 
 use std::sync::Arc;
 
@@ -19,42 +22,56 @@ use crate::structural::{StructuralPathStep, StructuralPlan};
 use crate::value::Val;
 use crate::vm::Compiler;
 
+/// Accumulates `PhysicalNode`s as the AST is lowered and tracks lexical state
+/// needed to distinguish let-bound locals from bare field identifiers.
 #[derive(Default)]
 struct PlanBuilder {
+    /// Flat arena of physical nodes indexed by `NodeId`.
     nodes: Vec<PhysicalNode>,
+    /// Input-mode context that controls which backends are eligible.
     context: PlanningContext,
+    /// Stack of names currently bound by enclosing `let` expressions.
     locals: Vec<Arc<str>>,
 }
 
 impl PlanBuilder {
+    /// Returns `true` if `name` is currently bound by an enclosing `let`.
     #[inline]
     fn is_local(&self, name: &str) -> bool {
         self.locals.iter().rev().any(|local| local.as_ref() == name)
     }
 
+    /// Records a new `let`-binding name as entering scope.
     #[inline]
     fn push_local(&mut self, name: Arc<str>) {
         self.locals.push(name);
     }
 
+    /// Removes the innermost `let`-binding name when leaving its scope.
     #[inline]
     fn pop_local(&mut self) {
         self.locals.pop();
     }
 }
 
+/// Whether the `Jetro` handle was built from raw bytes or an in-memory Value.
+/// Governs which backend representations (tape, structural index) are eligible.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum InputMode {
     Bytes,
     Val,
 }
 
+/// Planner configuration derived from the `Jetro` document handle at
+/// call time. Feeds into the plan-cache key so that the same expression
+/// string planned against bytes vs. Value hits different cache slots.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct PlanningContext {
     input: InputMode,
 }
 
 impl Default for PlanningContext {
+    /// Defaults to `Bytes` mode, matching the most capable backend tier.
     #[inline]
     fn default() -> Self {
         Self::bytes()
@@ -62,6 +79,7 @@ impl Default for PlanningContext {
 }
 
 impl PlanningContext {
+    /// Constructs a context for a document backed by raw bytes (tape/structural eligible).
     #[inline]
     pub(crate) const fn bytes() -> Self {
         Self {
@@ -69,6 +87,7 @@ impl PlanningContext {
         }
     }
 
+    /// Constructs a context for an in-memory `Val` document (no tape or structural index).
     #[inline]
     pub(crate) const fn val() -> Self {
         Self {
@@ -76,6 +95,7 @@ impl PlanningContext {
         }
     }
 
+    /// Returns a short static string suitable for use as a plan-cache namespace key.
     #[inline]
     pub(crate) const fn cache_key(self) -> &'static str {
         match self.input {
@@ -86,11 +106,13 @@ impl PlanningContext {
 }
 
 impl PlanBuilder {
+    /// Consumes the builder and wraps all accumulated nodes into a `QueryPlan`.
     #[inline]
     fn finish(self, root: NodeId) -> QueryPlan {
         QueryPlan::from_physical_nodes(root, self.nodes)
     }
 
+    /// Appends a node, auto-computing its `ExecutionFacts` and `BackendPlan`, and returns its id.
     #[inline]
     fn push(&mut self, node: PlanNode) -> NodeId {
         let facts = self.execution_facts_for_node(&node);
@@ -99,6 +121,7 @@ impl PlanBuilder {
         self.push_with_backends_and_facts(node, backends, facts)
     }
 
+    /// Appends a node with pre-computed backends and facts, returning its assigned `NodeId`.
     #[inline]
     fn push_with_backends_and_facts(
         &mut self,
@@ -113,16 +136,19 @@ impl PlanBuilder {
         id
     }
 
+    /// Selects the ordered backend preference list for `node` given the current planning context.
     #[inline]
     fn backend_plan_for_node(&self, node: &PlanNode, facts: ExecutionFacts) -> BackendPlan {
         select_backend_plan(self.context, node, facts)
     }
 
+    /// Retrieves the cached `ExecutionFacts` for an already-pushed node.
     #[inline]
     fn node_facts(&self, id: NodeId) -> ExecutionFacts {
         self.nodes[id.0].execution_facts()
     }
 
+    /// Derives `ExecutionFacts` for `node` by propagating facts from its children.
     fn execution_facts_for_node(&self, node: &PlanNode) -> ExecutionFacts {
         match node {
             PlanNode::Pipeline {
@@ -206,6 +232,9 @@ impl PlanBuilder {
     }
 }
 
+/// Maps a `(context, node, facts)` triple to the ordered `BackendPlan` preference list.
+///
+/// This is the single policy point that decides backend ordering; all callers go through here.
 #[inline]
 fn select_backend_plan(
     context: PlanningContext,
@@ -253,6 +282,8 @@ fn select_backend_plan(
     }
 }
 
+/// Clears the `contains_vm_fallback` flag on `Structural` nodes when the structural backend is
+/// actually selected, since no VM execution will occur for those nodes at runtime.
 #[inline]
 fn adjust_facts_for_backend_plan(
     node: &PlanNode,
@@ -269,6 +300,8 @@ fn adjust_facts_for_backend_plan(
     facts
 }
 
+/// Top-level AST-to-plan dispatcher: tries each lowering strategy in priority order and falls
+/// back to a `PlanNode::Vm` wrapper when no specialised path applies.
 #[inline]
 fn lower_expr(builder: &mut PlanBuilder, expr: &Expr) -> NodeId {
     try_lower_structural_op(expr)
@@ -283,6 +316,8 @@ fn lower_expr(builder: &mut PlanBuilder, expr: &Expr) -> NodeId {
         .unwrap_or_else(|| fallback_vm(builder, expr))
 }
 
+/// Attempts to lower `expr` as a field-chain pipeline node; returns `None` for non-pipeline
+/// expressions and for trivial collect-only pipelines that add no value.
 fn try_lower_pipeline(builder: &PlanBuilder, expr: &Expr) -> Option<PlanNode> {
     let pipeline = Pipeline::lower(expr)?;
     if is_trivial_collect_pipeline(&pipeline) {
@@ -293,6 +328,8 @@ fn try_lower_pipeline(builder: &PlanBuilder, expr: &Expr) -> Option<PlanNode> {
     pipeline_parts_to_plan_node(source, body)
 }
 
+/// Converts a decomposed pipeline `(source, body)` pair into a `PlanNode::Pipeline`, returning
+/// `None` when the source is a `Receiver` (those go through `try_lower_receiver_pipeline`).
 fn pipeline_parts_to_plan_node(
     source: Source,
     body: crate::pipeline::PipelineBody,
@@ -304,10 +341,14 @@ fn pipeline_parts_to_plan_node(
     Some(PlanNode::Pipeline { source, body })
 }
 
+/// Returns `true` when the pipeline has no stages and sinks straight to `Collect`,
+/// meaning it is semantically equivalent to just evaluating the source expression.
 fn is_trivial_collect_pipeline(pipeline: &Pipeline) -> bool {
     pipeline.stages.is_empty() && matches!(pipeline.sink, crate::pipeline::Sink::Collect)
 }
 
+/// Demotes any stage or sink kernel that references an in-scope local variable to `Generic`,
+/// ensuring the pipeline evaluator resolves the name through the `Env` rather than as a row field.
 fn mask_active_local_stage_kernels(
     body: &mut crate::pipeline::PipelineBody,
     builder: &PlanBuilder,
@@ -369,6 +410,8 @@ fn mask_active_local_stage_kernels(
     }
 }
 
+/// Recompiles the stored kernel program of a pipeline stage so it will be evaluated inside
+/// a full `Env` (picking up let-bound variables) rather than against a bare row.
 fn recompile_stage_body_for_lexical_env(stage: &mut crate::pipeline::Stage, expr: &Expr) {
     let program = Arc::new(Compiler::compile(expr, "<local-aware-pipeline-stage>"));
     match stage {
@@ -397,10 +440,13 @@ fn recompile_stage_body_for_lexical_env(stage: &mut crate::pipeline::Stage, expr
     }
 }
 
+/// Returns `true` if `kernel` references any identifier that is currently a let-bound local.
 fn kernel_mentions_active_local(kernel: &crate::pipeline::BodyKernel, locals: &[Arc<str>]) -> bool {
     kernel.mentions_any_field_like_ident(locals)
 }
 
+/// Tries to lower `expr` as a complete `Structural` node when every step can be handled by the
+/// bitmap index (all steps must be consumed — no residual suffix is allowed here).
 fn try_lower_structural_op(expr: &Expr) -> Option<PlanNode> {
     let Expr::Chain(base, steps) = expr else {
         return None;
@@ -413,6 +459,8 @@ fn try_lower_structural_op(expr: &Expr) -> Option<PlanNode> {
     }
 }
 
+/// Lowers an expression whose prefix qualifies for the structural backend while additional
+/// field, index, or method steps follow; emits a `Structural` node feeding into a `Chain`.
 fn try_lower_structural_chain_prefix(builder: &mut PlanBuilder, expr: &Expr) -> Option<NodeId> {
     let Expr::Chain(base, steps) = expr else {
         return None;
@@ -456,6 +504,10 @@ fn try_lower_structural_chain_prefix(builder: &mut PlanBuilder, expr: &Expr) -> 
     Some(flush_chain(builder, cur, &mut out))
 }
 
+/// Attempts to extract a contiguous leading `Structural` prefix from `(base, steps)`.
+///
+/// Returns `(plan, fallback_program, consumed_step_count)` on success; `None` when no prefix
+/// can be mapped to the structural backend.
 fn lower_structural_prefix(
     base: &Expr,
     steps: &[Step],
@@ -484,6 +536,8 @@ fn lower_structural_prefix(
     None
 }
 
+/// Lowers a pipeline whose source is an arbitrary sub-expression (e.g. a let-bound variable or
+/// a structural result), emitting a `Pipeline { source: Expr(_), body }` node.
 fn try_lower_receiver_pipeline(builder: &mut PlanBuilder, expr: &Expr) -> Option<NodeId> {
     let Expr::Chain(base, steps) = expr else {
         return None;
@@ -514,6 +568,8 @@ fn try_lower_receiver_pipeline(builder: &mut PlanBuilder, expr: &Expr) -> Option
     None
 }
 
+/// Lowers `$` or a pure `$.field[idx]...` chain into a `RootPath` node, enabling tape-native
+/// path navigation without materialising the full document value.
 fn try_lower_root_path(expr: &Expr) -> Option<PlanNode> {
     match expr {
         Expr::Root => Some(PlanNode::RootPath(Vec::new())),
@@ -537,6 +593,8 @@ fn try_lower_root_path(expr: &Expr) -> Option<PlanNode> {
     }
 }
 
+/// Lowers a general `Expr::Chain` into a sequence of `PhysicalChainStep`s, flushing accumulated
+/// steps into `Chain` nodes whenever a method call interrupts the sequence.
 fn try_lower_chain(builder: &mut PlanBuilder, expr: &Expr) -> Option<NodeId> {
     let Expr::Chain(base, steps) = expr else {
         return None;
@@ -578,6 +636,7 @@ fn try_lower_chain(builder: &mut PlanBuilder, expr: &Expr) -> Option<NodeId> {
     Some(flush_chain(builder, cur, &mut out))
 }
 
+/// Emits a `Chain` node for any pending `steps`; returns `base` unchanged when `steps` is empty.
 fn flush_chain(
     builder: &mut PlanBuilder,
     base: NodeId,
@@ -592,6 +651,8 @@ fn flush_chain(
     })
 }
 
+/// Lowers scalar and simple compound expressions (literals, identifiers, unary/binary ops,
+/// conditionals) that do not require a structural or pipeline-level representation.
 fn try_lower_scalar(builder: &mut PlanBuilder, expr: &Expr) -> Option<NodeId> {
     match expr {
         Expr::Null => Some(builder.push(PlanNode::Literal(Val::Null))),
@@ -646,6 +707,8 @@ fn try_lower_scalar(builder: &mut PlanBuilder, expr: &Expr) -> Option<NodeId> {
     }
 }
 
+/// Lowers object literals, array literals, and `let` expressions into their physical
+/// counterparts, recursively lowering all child sub-expressions.
 fn try_lower_structural(builder: &mut PlanBuilder, expr: &Expr) -> Option<NodeId> {
     match expr {
         Expr::Object(fields) => {
@@ -674,6 +737,8 @@ fn try_lower_structural(builder: &mut PlanBuilder, expr: &Expr) -> Option<NodeId
     }
 }
 
+/// Creates a `PlanNode::Vm` wrapping a compiled `Program` as the last-resort fallback for
+/// expressions that no specialised lowering path could handle.
 fn fallback_vm(builder: &mut PlanBuilder, expr: &Expr) -> NodeId {
     builder.push(PlanNode::Vm(Arc::new(Compiler::compile(
         expr,
@@ -681,6 +746,8 @@ fn fallback_vm(builder: &mut PlanBuilder, expr: &Expr) -> NodeId {
     ))))
 }
 
+/// Converts an AST `ObjField` into a `PhysicalObjField`, recursively lowering value and
+/// condition sub-expressions and promoting shorthand locals to explicit `Kv` nodes.
 fn plan_obj_field(builder: &mut PlanBuilder, field: &ObjField) -> PhysicalObjField {
     match field {
         ObjField::Kv {
@@ -710,6 +777,7 @@ fn plan_obj_field(builder: &mut PlanBuilder, field: &ObjField) -> PhysicalObjFie
     }
 }
 
+/// Converts an AST `ArrayElem` into a `PhysicalArrayElem`, lowering the contained expression.
 fn plan_array_elem(builder: &mut PlanBuilder, elem: &ArrayElem) -> PhysicalArrayElem {
     match elem {
         ArrayElem::Expr(expr) => PhysicalArrayElem::Expr(lower_expr(builder, expr)),
@@ -717,14 +785,18 @@ fn plan_array_elem(builder: &mut PlanBuilder, elem: &ArrayElem) -> PhysicalArray
     }
 }
 
-/// Parse and classify a query once.
+
+/// Plans `expr` using the default (`Bytes`) context; exposed for tests only.
 #[inline]
 #[cfg(test)]
 pub fn plan_query(expr: &str) -> QueryPlan {
     plan_query_with_context(expr, PlanningContext::default())
 }
 
-/// Parse and classify a query once with input-representation preferences.
+
+/// Parses `expr`, walks the resulting AST through `PlanBuilder`, and returns a `QueryPlan`.
+///
+/// Falls back to a `SourceVm` plan when parsing fails, so callers always receive a usable plan.
 #[inline]
 pub(crate) fn plan_query_with_context(expr: &str, context: PlanningContext) -> QueryPlan {
     let Ok(ast) = parser::parse(expr) else {

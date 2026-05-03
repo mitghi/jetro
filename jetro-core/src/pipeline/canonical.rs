@@ -1,12 +1,12 @@
+//! Canonical decomposition of a `Pipeline` into its parts for testing and
+//! introspection. Not on the hot execution path.
+
 use super::{BodyKernel, Pipeline, Sink, Stage};
 
 impl Pipeline {
-    /// Decompose a pipeline into its canonical `(stages, kernels, sink)`
-    /// triple. Pure function: it does not mutate `self`.
+    /// Returns cloned copies of the pipeline's stages, per-stage body kernels, and terminal sink.
     ///
-    /// Fused sink variants were removed in Tier 3, so every pipeline is already
-    /// in base form. This stable name remains the shared canonical-view
-    /// boundary for composed Val/tape runners and columnar fast paths.
+    /// Intended for testing and introspection; not called on the hot execution path.
     pub fn canonical(&self) -> (Vec<Stage>, Vec<BodyKernel>, Sink) {
         (
             self.stages.clone(),

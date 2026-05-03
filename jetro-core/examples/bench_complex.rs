@@ -1,16 +1,4 @@
-//! Complex-query benchmark on a semi-large synthetic payload.
-//!
-//! Run:
-//!   cargo run --release --example bench_complex -p jetro-core
-//!
-//! Exercises a mix of query shapes that stress different parts of the
-//! engine: repeat-shape field access (IC), deep chains, multi-predicate
-//! find, aggregates, comprehensions, and chain-style writes
-//! (patch walker COW fast-path).
-//!
-//! Not a rigorous harness — directional numbers only.  Each query is
-//! warmed once then timed over ITERS repetitions; best / median / mean
-//! reported.
+
 
 use jetro_core::Jetro;
 use serde_json::{json, Value};
@@ -18,11 +6,7 @@ use std::time::Instant;
 
 const ITERS: usize = 10;
 
-/// Synthesise an e-commerce-shaped payload.
-///
-/// Top-level: { orders: [..], customers: [..], meta: {..} }
-/// Each order has nested customer, items[], shipping.address, metadata.
-/// Shape is stable across orders → exercises inline-cache hit path.
+
 fn synth_doc(n_orders: usize, items_per_order: usize) -> Value {
     let regions = [
         "us-east",
@@ -127,7 +111,7 @@ struct Stats {
 }
 
 fn run<F: FnMut() -> Value>(label: &str, mut f: F) -> Stats {
-    // Warmup — compile cache + IC population happen here.
+    
     let _ = f();
     let mut samples = Vec::with_capacity(ITERS);
     for _ in 0..ITERS {
@@ -172,7 +156,7 @@ fn main() {
     let j_tree = Jetro::from_bytes(serde_json::to_vec(&doc).unwrap()).unwrap();
     let j_bytes = Jetro::from_bytes(bytes.clone()).unwrap();
 
-    // ── Repeat-shape field access (IC hot path) ──────────────────────────
+    
     println!("Q1  $.orders.map(customer.address.city)    (repeat-shape; IC sweet spot)");
     run("tree_walker", || {
         j_tree
@@ -187,7 +171,7 @@ fn main() {
             .unwrap()
     });
 
-    // ── Filter chain ─────────────────────────────────────────────────────
+    
     println!("\nQ3  $.orders.filter(total > 500).map(id)   (bare-pred filter → scratch-Env)");
     run("tree_walker", || {
         j_tree
@@ -202,7 +186,7 @@ fn main() {
             .unwrap()
     });
 
-    // ── Multi-predicate find ────────────────────────────────────────────
+    
     println!("\nQ5  $..find(@.status == \"shipped\")   (deep enclosing-object search)");
     let q = r#"$..find(@.status == "shipped")"#;
     let a = run("tree_walker", || j_tree.collect(q).unwrap());
@@ -221,7 +205,7 @@ fn main() {
     let b = run("from_bytes", || j_bytes.collect(q).unwrap());
     compare(a, b);
 
-    // ── Deep descendant keys ────────────────────────────────────────────
+    
     println!("\nQ8  $..total.sum()   (deep key + aggregate)");
     let q = "$..total.sum()";
     let a = run("tree_walker", || j_tree.collect(q).unwrap());
@@ -237,7 +221,7 @@ fn main() {
     let b = run("from_bytes", || j_bytes.collect(q).unwrap());
     compare(a, b);
 
-    // ── Aggregates + grouping ────────────────────────────────────────────
+    
     println!("\nQ10 $.orders.group_by(status)         (group-by count_by-like)");
     run("tree_walker", || {
         j_tree.collect("$.orders.group_by(status)").unwrap()
@@ -253,7 +237,7 @@ fn main() {
         j_tree.collect("$.orders.map(total).sum()").unwrap()
     });
 
-    // ── Comprehension / pick ─────────────────────────────────────────────
+    
     println!("\nQ13 [o.id for o in $.orders if o.total > 1000]   (list comp)");
     run("tree_walker", || {
         j_tree
@@ -268,13 +252,13 @@ fn main() {
             .unwrap()
     });
 
-    // ── Sort + first strength-reduction ──────────────────────────────────
+    
     println!("\nQ15 $.orders.map(total).max()   (aggregate max)");
     run("tree_walker", || {
         j_tree.collect("$.orders.map(total).max()").unwrap()
     });
 
-    // ── Chain-style write (COW fast-path exercised) ──────────────────────
+    
     println!("\nQ16 $.orders[0].customer.address.set({{...}})   (deep patch; COW)");
     run("tree_walker", || {
         j_tree.collect(r#"$.orders[0].customer.address.set({"city": "Remote", "zip": "00000", "country_code": "XX", "street": "N/A"})"#).unwrap()
@@ -292,7 +276,7 @@ fn main() {
         j_tree.collect("$.orders[0].items[0].tags.set([])").unwrap()
     });
 
-    // ── Baseline ─────────────────────────────────────────────────────────
+    
     println!("\nBaseline");
     run("serde_json::from_slice (parse)", || {
         let _: Value = serde_json::from_slice(&bytes).unwrap();

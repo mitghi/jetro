@@ -1,3 +1,9 @@
+//! Execution via the composed `Stage` + `Sink` substrate from `composed.rs`.
+//!
+//! Builds a `Composed` stage chain once at lower time, then drives it through
+//! `run_pipeline`. Avoids the per-shape dispatch in `legacy_exec` — any
+//! combination of stages and sinks executes through one generic loop.
+
 use crate::{
     context::{Env, EvalError},
     value::Val,
@@ -12,6 +18,10 @@ use super::{
     compute_strategies_with_kernels, ordered_by_key_cmp, BodyKernel, Pipeline, Stage, StageStrategy,
 };
 
+/// Entry point for the composed execution path. Builds a `ComposedStage` chain
+/// from the pipeline's canonical stages and drives it through the composed sink.
+/// Returns `None` when any stage or the sink cannot be lowered to the composed
+/// substrate, falling through to the legacy path.
 pub(super) fn run(
     pipeline: &Pipeline,
     root: &Val,
@@ -22,14 +32,11 @@ pub(super) fn run(
 
     let mut buf = composed_source::rows(&pipeline.source, root)?;
 
-    // Walk stages, splitting at barriers. Each streaming run uses a
-    // composed-Cow chain into a CollectSink to materialise the
-    // intermediate Vec<Val>; each barrier consumes Vec, returns Vec.
+    
     let kernels = &eff_kernels;
     let stages_ref = &eff_stages;
 
-    // Demand propagation is the generic performance hook: stages pick
-    // algorithms from downstream demand instead of query-specific rewrites.
+    
     let strategies = compute_strategies_with_kernels(stages_ref, kernels, &eff_sink);
 
     let mut last_split = 0usize;
@@ -97,6 +104,10 @@ pub(super) fn run(
     Some(Ok(out))
 }
 
+/// Handles a `Sort` stage followed by a suffix that has no further barriers.
+/// Sorts `rows` by key using the composed `KeySource`, then feeds the ordered
+/// iterator into the composed sink, enabling top-N short-circuit on
+/// `SortUntilOutput` strategies.
 fn run_lazy_ordered_suffix(
     stage: &Stage,
     kernel: &BodyKernel,
@@ -140,6 +151,9 @@ fn run_lazy_ordered_suffix(
     composed_sink::run_owned_iter(&sink, ordered, chain.as_ref(), final_demand).map(Ok)
 }
 
+/// Promotes reducer sink predicate and projection into composed filter/map
+/// stages appended to the existing `chain`, then strips those fields from the
+/// returned sink so the composed runner does not double-apply them.
 fn append_reducer_sink_stages(
     sink: &super::Sink,
     sink_kernels: &[BodyKernel],

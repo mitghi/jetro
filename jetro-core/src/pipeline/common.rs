@@ -1,3 +1,7 @@
+//! Shared primitives reused across all pipeline execution paths:
+//! numeric fold helpers, bounded sort, total-order comparators, and the
+//! `BoundedKeySorter` / `OrderedKeySorter` for `sort_by` and `group_by`.
+
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::sync::Arc;
@@ -6,6 +10,9 @@ use crate::{context::EvalError, value::Val};
 
 use super::{NumOp, StageStrategy};
 
+/// Accumulates a single numeric `Val` into the running aggregate state for `op`.
+/// Integer accumulators are used as long as no `Float` has been seen; the first
+/// `Float` value promotes `acc_i` into `acc_f` to preserve precision.
 #[inline]
 pub(crate) fn num_fold(
     acc_i: &mut i64,
@@ -54,6 +61,8 @@ pub(crate) fn num_fold(
     }
 }
 
+/// Converts the running aggregate state accumulated by `num_fold` into the
+/// final `Val`. Returns `op.empty()` when no numeric observations were made.
 #[inline]
 pub(crate) fn num_finalise(
     op: NumOp,
@@ -84,12 +93,10 @@ pub(crate) fn num_finalise(
     }
 }
 
-// (sum_acc removed; superseded by num_fold which handles Sum/Min/Max/Avg)
 
-/// Total ordering over `Val` for sort barriers: numeric < string <
-/// other; ties broken by debug-format equality so the comparator is
-/// stable across calls.  Used only inside Pipeline::run barriers,
-/// not exposed.
+/// Total order comparator for `Val` that handles mixed numeric types by
+/// promoting both sides to `f64`. Non-numeric values fall back to a lexicographic
+/// comparison on their debug representation.
 pub(crate) fn cmp_val_total(a: &Val, b: &Val) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     let af = match a {
@@ -111,6 +118,9 @@ pub(crate) fn cmp_val_total(a: &Val, b: &Val) -> std::cmp::Ordering {
     }
 }
 
+/// Sorts `items` by a key function using `cmp_val_total` as the comparator.
+/// Delegates to `bounded_sort_by_key_cmp` which handles top-K heap optimisation
+/// when the `StageStrategy` indicates a bounded sort.
 pub(crate) fn bounded_sort_by_key<T, I, F>(
     items: I,
     descending: bool,
@@ -124,6 +134,9 @@ where
     bounded_sort_by_key_cmp(items, descending, strategy, key_of, cmp_val_total)
 }
 
+/// Sorts `items` using a caller-supplied comparator `cmp` and key extractor
+/// `key_of`. Uses a `BoundedKeySorter` to restrict memory to the top-K
+/// elements when the strategy is `SortTopK` or `SortBottomK`.
 pub(crate) fn bounded_sort_by_key_cmp<T, I, F>(
     items: I,
     descending: bool,
@@ -143,17 +156,30 @@ where
     Ok(sorter.finish())
 }
 
+/// Key-based sorter that optionally caps memory usage to the top-K or bottom-K
+/// entries using a `BinaryHeap`. When no limit is set it degrades to a plain
+/// in-memory vector sort.
 pub(crate) struct BoundedKeySorter<T> {
+    /// Direction of the final sort; reversed relative to heap priority order.
     descending: bool,
+    /// Maximum number of entries to retain; `None` means keep all.
     limit: Option<usize>,
+    /// Whether the heap evicts the smallest (`true`) or largest (`false`) entry
+    /// when over capacity.
     keep_largest: bool,
+    /// Caller-supplied comparator for `Val` keys.
     cmp: fn(&Val, &Val) -> Ordering,
+    /// Accumulator used when no limit is active.
     keyed: Vec<(Val, usize, T)>,
+    /// Bounded heap used when a limit is active.
     heap: BinaryHeap<BoundedEntry<T>>,
+    /// Monotonically increasing sequence counter for stable ordering.
     next_seq: usize,
 }
 
 impl<T> BoundedKeySorter<T> {
+    /// Constructs a `BoundedKeySorter` configured according to `strategy`.
+    /// `SortTopK(k)` / `SortBottomK(k)` activate heap mode; `Default` uses a plain vec.
     pub(crate) fn new(
         descending: bool,
         strategy: StageStrategy,
@@ -181,6 +207,8 @@ impl<T> BoundedKeySorter<T> {
         }
     }
 
+    /// Inserts `item` with the associated sort `key`. In heap mode, evicts the
+    /// current worst entry when at capacity and the new key is strictly better.
     pub(crate) fn push_keyed(&mut self, key: Val, item: T) {
         let seq = self.next_seq;
         self.next_seq += 1;
@@ -220,6 +248,8 @@ impl<T> BoundedKeySorter<T> {
         }
     }
 
+    /// Drains the heap or vec, sorts the retained entries (stable on sequence),
+    /// and returns the items in final order.
     pub(crate) fn finish(mut self) -> Vec<T> {
         if self.limit.is_some() {
             self.keyed = self
@@ -243,15 +273,23 @@ impl<T> BoundedKeySorter<T> {
     }
 }
 
+/// A heap entry for `BoundedKeySorter`. Ordering is inverted relative to the
+/// desired output so that `BinaryHeap::pop` removes the least-desirable entry.
 struct BoundedEntry<T> {
+    /// The sort key for this entry.
     key: Val,
+    /// The payload item carried alongside the key.
     item: T,
+    /// Insertion sequence for stable ordering among equal keys.
     seq: usize,
+    /// When `true`, the heap is a max-heap (evicts smallest); otherwise min-heap.
     keep_largest: bool,
+    /// Comparator shared with the parent `BoundedKeySorter`.
     cmp: fn(&Val, &Val) -> Ordering,
 }
 
 impl<T> PartialEq for BoundedEntry<T> {
+    /// Two entries are equal when their sequence numbers and keys compare equal.
     fn eq(&self, other: &Self) -> bool {
         self.seq == other.seq && (self.cmp)(&self.key, &other.key) == Ordering::Equal
     }
@@ -266,6 +304,8 @@ impl<T> PartialOrd for BoundedEntry<T> {
 }
 
 impl<T> Ord for BoundedEntry<T> {
+    /// Priority order for the eviction heap: reverses the key ordering so that
+    /// `BinaryHeap::pop` removes the entry we want to evict (the worst one).
     fn cmp(&self, other: &Self) -> Ordering {
         let key_order = (self.cmp)(&self.key, &other.key);
         let priority = if self.keep_largest {
@@ -277,6 +317,8 @@ impl<T> Ord for BoundedEntry<T> {
     }
 }
 
+/// Sorts `items` using `key_of` and `cmp`, returning a lazy `OrderedByKey`
+/// iterator that yields elements in sorted order from a `BinaryHeap`.
 pub(crate) fn ordered_by_key_cmp<T, I, F>(
     items: I,
     descending: bool,
@@ -295,14 +337,22 @@ where
     Ok(sorter.finish())
 }
 
+/// Collects all `(key, item)` pairs into a `BinaryHeap` so that `finish` can
+/// serve them in sorted order via `OrderedByKey`, enabling lazy top-K pulls in
+/// the composed `SortUntilOutput` strategy.
 pub(crate) struct OrderedKeySorter<T> {
+    /// Heap holding all entries keyed for sorted extraction.
     heap: BinaryHeap<OrderedEntry<T>>,
+    /// Monotonically increasing insertion sequence for stable ordering.
     next_seq: usize,
+    /// Output order (`true` = largest first).
     descending: bool,
+    /// Comparator for `Val` keys.
     cmp: fn(&Val, &Val) -> Ordering,
 }
 
 impl<T> OrderedKeySorter<T> {
+    /// Creates a new `OrderedKeySorter` with the given sort direction and comparator.
     pub(crate) fn new(descending: bool, cmp: fn(&Val, &Val) -> Ordering) -> Self {
         Self {
             heap: BinaryHeap::new(),
@@ -312,6 +362,7 @@ impl<T> OrderedKeySorter<T> {
         }
     }
 
+    /// Inserts `item` associated with `key` into the heap.
     pub(crate) fn push_keyed(&mut self, key: Val, item: T) {
         let seq = self.next_seq;
         self.next_seq += 1;
@@ -324,32 +375,45 @@ impl<T> OrderedKeySorter<T> {
         });
     }
 
+    /// Converts the sorter into a lazy `OrderedByKey` iterator over the heap.
     pub(crate) fn finish(self) -> OrderedByKey<T> {
         OrderedByKey { heap: self.heap }
     }
 }
 
+/// Lazy iterator that extracts items from a `BinaryHeap` in sorted order.
+/// Created by `OrderedKeySorter::finish` for use in `SortUntilOutput` execution.
 pub(crate) struct OrderedByKey<T> {
+    /// The underlying heap; each `pop` yields the next item in order.
     heap: BinaryHeap<OrderedEntry<T>>,
 }
 
 impl<T> Iterator for OrderedByKey<T> {
     type Item = T;
 
+    /// Pops and returns the highest-priority (best-sorted) item from the heap.
     fn next(&mut self) -> Option<Self::Item> {
         self.heap.pop().map(|entry| entry.item)
     }
 }
 
+/// Internal heap entry for `OrderedKeySorter`. Ordering implements the
+/// correct priority so that `BinaryHeap::pop` always yields the next sorted item.
 struct OrderedEntry<T> {
+    /// The sort key used for heap ordering.
     key: Val,
+    /// The carried payload item.
     item: T,
+    /// Insertion sequence number for stable ordering.
     seq: usize,
+    /// `true` when larger keys should appear first in the output.
     descending: bool,
+    /// Comparator shared with the parent `OrderedKeySorter`.
     cmp: fn(&Val, &Val) -> Ordering,
 }
 
 impl<T> PartialEq for OrderedEntry<T> {
+    /// Two entries are equal when their keys compare equal and sequences match.
     fn eq(&self, other: &Self) -> bool {
         self.seq == other.seq && (self.cmp)(&self.key, &other.key) == Ordering::Equal
     }
@@ -364,6 +428,9 @@ impl<T> PartialOrd for OrderedEntry<T> {
 }
 
 impl<T> Ord for OrderedEntry<T> {
+    /// Determines heap priority so that `BinaryHeap::pop` yields the next item
+    /// in the desired sort order. Uses `other.seq.cmp(&self.seq)` for stable
+    /// tie-breaking (earlier insertions are higher priority).
     fn cmp(&self, other: &Self) -> Ordering {
         let key_order = (self.cmp)(&self.key, &other.key);
         let priority = if self.descending {
@@ -375,10 +442,9 @@ impl<T> Ord for OrderedEntry<T> {
     }
 }
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
 
-/// Walk `$.k1.k2…` from `root`, returning `Val::Null` on any miss.
-/// Used by `Source::FieldChain` resolution.
+/// Traverses a sequence of field `keys` on `root`, returning the nested value
+/// or `Val::Null` if any step produces a missing field.
 pub(crate) fn walk_field_chain(root: &Val, keys: &[Arc<str>]) -> Val {
     let mut cur = root.clone();
     for k in keys {
@@ -387,13 +453,10 @@ pub(crate) fn walk_field_chain(root: &Val, keys: &[Arc<str>]) -> Val {
     cur
 }
 
-/// Evaluate `prog` against `item` as the VM root using a long-lived
-/// VM borrowed from the caller (Pipeline::run owns one per query).
-/// Per-row apply.  Phase A1 fast path: rebinds the loop-shared Env's
-/// `current` slot in place (one swap, two assignments) and runs the
-/// stage program directly via `exec_in_env`.  Skips doc-hash recompute,
-/// root_chain_cache clear, and Env construction that
-/// `execute_val_raw` does on every call.  Saves ~80 ns/row.
+
+/// Sets `item` as `@` (current) in `env`, executes `prog` via `vm`, then
+/// restores the previous current value. Used by filter/map kernels to bind
+/// each row to `@` before evaluation.
 #[inline]
 pub(crate) fn apply_item_in_env(
     vm: &mut crate::vm::VM,
@@ -407,6 +470,8 @@ pub(crate) fn apply_item_in_env(
     r
 }
 
+/// Returns `true` when `v` is a truthy `Val` (non-null, non-false, non-zero,
+/// non-empty). Delegates to `crate::util::is_truthy`.
 #[inline]
 pub(crate) fn is_truthy(v: &Val) -> bool {
     crate::util::is_truthy(v)

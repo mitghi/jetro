@@ -1,7 +1,4 @@
-//! Directional benchmark for native f-string map execution.
-//!
-//! Run:
-//!   cargo run --release -p jetro-core --example bench_fstring
+
 
 use std::time::Instant;
 

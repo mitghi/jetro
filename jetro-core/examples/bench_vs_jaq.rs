@@ -1,22 +1,4 @@
-//! Head-to-head: jetro vs jaq (https://github.com/01mf02/jaq) in-process,
-//! against the same semi-large synthetic payload used by bench_complex.
-//!
-//! Run:
-//!   cargo run --release --example bench_vs_jaq -p jetro-core
-//!
-//! Both engines parse the JSON once and execute N warmed iterations of
-//! each query.  We report jetro tree-walker, jetro byte-scan (where it
-//! applies), and jaq — best/median/mean per engine + relative speedup.
-//!
-//! Notes:
-//! - Jetro and jq syntaxes differ; we hand-translate each query to the
-//!   most idiomatic equivalent.  If the jq form is structurally weaker
-//!   (e.g. wraps with `[.. | objects | select(...)]`) we keep it — the
-//!   goal is "typical user formulation", not identical IR.
-//! - jaq's `Val` is built from serde_json once (outside the timed
-//!   section), just like jetro caches its `Val` via `OnceCell`.
-//! - For jetro we execute via `Jetro::collect` which routes through the
-//!   thread-local VM with compile-cache + IC hot.
+
 
 use jetro_core::Jetro;
 use serde_json::{json, Value};
@@ -99,7 +81,7 @@ struct Stats {
 }
 
 fn sample<F: FnMut()>(mut f: F) -> Stats {
-    let _ = f(); // warmup
+    let _ = f(); 
     let mut samples = Vec::with_capacity(ITERS);
     for _ in 0..ITERS {
         let t = Instant::now();
@@ -120,7 +102,6 @@ fn show(label: &str, s: Stats) {
     );
 }
 
-// ── jaq in-process runner ────────────────────────────────────────────────────
 
 fn compile_jaq(
     code: &str,
@@ -149,7 +130,6 @@ fn run_jaq(
     filter.id.run((ctx, input.clone())).map(unwrap_valr).count()
 }
 
-// ── Benchmark harness ────────────────────────────────────────────────────────
 
 fn bench(
     label: &str,
@@ -163,11 +143,7 @@ fn bench(
     println!("  jetro: {}", jetro_q);
     println!("  jq   : {}", jaq_q);
 
-    // `collect` keeps the result as jetro's `serde_json::Value` — parity with
-    // jaq, which returns its own `Val` iterator without materialising to
-    // `serde_json::Value`.  `collect` would add a deep Arc<str>→String
-    // clone of every key + a full tree rebuild, which dominates structural
-    // results like `group_by` on 20k items and unfairly penalises jetro.
+    
     let t = sample(|| {
         let _ = jetro_tree.collect(jetro_q).unwrap();
     });
@@ -219,7 +195,7 @@ fn main() {
     let j_tree = Jetro::from_bytes(serde_json::to_vec(&doc).unwrap()).unwrap();
     let j_scan = Jetro::from_bytes(bytes.clone()).unwrap();
 
-    // Build jaq input once from the JSON bytes.
+    
     let jaq_input: JaqVal = jaq_read::parse_single(&bytes).unwrap();
 
     bench(

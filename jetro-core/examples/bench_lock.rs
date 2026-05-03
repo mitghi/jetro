@@ -1,22 +1,4 @@
-//! Regression guard for jetro-core VM perf.
-//!
-//! Runs a fixed query set against a reproducible synthetic payload and
-//! compares median runtime + result hash against `bench_baseline.json`.
-//!
-//! Usage:
-//!   cargo run --release -p jetro-core --example bench_lock
-//!   cargo run --release -p jetro-core --example bench_lock -- --update
-//!   cargo run --release -p jetro-core --example bench_lock -- --hash-only
-//!
-//! Exit codes:
-//!   0 — all queries within tolerance
-//!   1 — at least one regression (perf or result)
-//!   2 — baseline missing (first run); use --update to create
-//!
-//! Modes:
-//!   default    — full gate (timing + hash). Laptop / dedicated bench.
-//!   --hash-only — correctness only (no timing). CI-safe on shared runners.
-//!   --update   — reseed baseline with current measurements.
+
 
 use std::collections::hash_map::DefaultHasher;
 use std::fs;
@@ -30,13 +12,11 @@ use serde_json::{json, Value};
 
 const WARMUP: usize = 3;
 const ITERS: usize = 20;
-/// Relative tolerance.  Laptop variance routinely hits ±15-20% between
-/// runs even with warmup; 1.25x catches real regressions without false
-/// positives.  Set lower on a dedicated bench machine.
+
+
 const TOLERANCE: f64 = 1.25;
-/// Absolute noise floor.  Sub-ms queries flap by hundreds of µs from
-/// thermal/background jitter; only flag regressions where the absolute
-/// delta is this large too.
+
+
 const NOISE_FLOOR_US: u128 = 500;
 
 const QUERIES: &[(&str, &str)] = &[
@@ -131,8 +111,8 @@ fn synth_doc(n_orders: usize, items_per_order: usize) -> Value {
 }
 
 fn result_hash(v: &Value) -> u64 {
-    // Canonical bytes via serde_json::to_vec (stable for same shape);
-    // hash via SipHash default. Good enough for fingerprinting.
+    
+    
     let bytes = serde_json::to_vec(v).unwrap();
     let mut h = DefaultHasher::new();
     bytes.hash(&mut h);
@@ -152,7 +132,7 @@ fn measure_us<F: FnMut() -> Value>(mut f: F) -> (u128, u64) {
         samples.push(t.elapsed().as_micros());
     }
     samples.sort();
-    // Use best-of rather than median — more stable for sub-ms queries.
+    
     (samples[0], hash)
 }
 
@@ -171,7 +151,7 @@ struct Baseline {
 }
 
 fn baseline_path() -> PathBuf {
-    // CARGO_MANIFEST_DIR points at jetro-core.
+    
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     p.push("bench_baseline.json");
     p
@@ -266,8 +246,8 @@ fn main() {
         let ratio = e.best_us as f64 / b.best_us.max(1) as f64;
         let hash_ok = e.result_hash == b.result_hash;
         let abs_delta = e.best_us.saturating_sub(b.best_us);
-        // Perf passes if under ratio OR under absolute noise floor.
-        // In hash-only mode, skip perf check entirely.
+        
+        
         let perf_ok = hash_only || ratio <= TOLERANCE || abs_delta < NOISE_FLOOR_US;
         let flag = match (perf_ok, hash_ok) {
             (true, true) => "  ok",

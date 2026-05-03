@@ -1,20 +1,36 @@
+//! Stateful numeric reducer accumulator for pipeline aggregate sinks.
+//! Tracks running sum, count, min, and max in a single pass so `avg`, `sum`,
+//! `min`, `max`, and `count` share one loop over the source elements.
+
 use crate::value::Val;
 
 use super::{num_finalise, num_fold, ReducerOp, ReducerSpec};
 
+/// Single-pass accumulator for numeric aggregate sinks (`sum`, `avg`, `min`, `max`, `count`).
+///
+/// All statistics are computed in one iteration over the source; unused fields incur no cost.
 #[derive(Debug, Clone)]
 pub(crate) struct ReducerAccumulator {
+    /// Governs which aggregate operation is performed and any associated projection/predicate.
     spec: ReducerSpec,
+    /// Running row count, incremented for every `push` when `op` is `Count`.
     count: i64,
+    /// Integer accumulation for sum; promoted to `sum_f` on first float encounter.
     sum_i: i64,
+    /// Floating-point accumulation for sum after integer overflow or float input.
     sum_f: f64,
+    /// Set to `true` once `sum_i` has been promoted to `sum_f`.
     sum_floated: bool,
+    /// Running minimum tracked as `f64` for uniform comparison.
     min_f: f64,
+    /// Running maximum tracked as `f64` for uniform comparison.
     max_f: f64,
+    /// Count of numeric observations used by `avg` to compute the mean.
     n_obs: usize,
 }
 
 impl ReducerAccumulator {
+    /// Creates an accumulator initialised to identity values for all running statistics.
     pub(crate) fn new(spec: ReducerSpec) -> Self {
         Self {
             spec,
@@ -28,6 +44,7 @@ impl ReducerAccumulator {
         }
     }
 
+    /// Folds `item` into the running statistics according to the reducer operation.
     pub(crate) fn push(&mut self, item: &Val) {
         match self.spec.op {
             ReducerOp::Count => {
@@ -48,6 +65,7 @@ impl ReducerAccumulator {
         }
     }
 
+    /// Consumes the accumulator and returns the final aggregate `Val`.
     pub(crate) fn finish(self) -> Val {
         match self.spec.op {
             ReducerOp::Count => Val::Int(self.count),

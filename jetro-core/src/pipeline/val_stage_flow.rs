@@ -1,3 +1,7 @@
+//! Val-based stage flow helpers for the legacy execution path.
+//! Implements per-element filter, map, and take-while stepping over `Val`
+//! items using the builtins-layer primitives.
+
 use crate::{
     builtins::{filter_one, map_one, take_while_one, BuiltinPipelineExecutor},
     context::{Env, EvalError},
@@ -9,6 +13,10 @@ use super::{
     TerminalMapCollector,
 };
 
+/// Applies a single `Stage` to `item` in the streaming (legacy) execution loop.
+///
+/// Dispatches to the appropriate builtin executor or falls back to `StageFlow::Continue` for
+/// barrier and expanding stages that are handled outside the per-row loop.
 pub(super) fn apply_adapter_streaming<'a>(
     stage: &Stage,
     stage_idx: usize,

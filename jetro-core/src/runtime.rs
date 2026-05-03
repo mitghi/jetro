@@ -1,3 +1,11 @@
+//! Bridge between the builtin algorithm layer and the VM argument evaluator.
+//!
+//! The VM compiles lambda/arg bodies into `Arc<Program>` sub-programs stored
+//! inside `CompiledCall`. This module provides the closures that re-enter the
+//! VM to evaluate those sub-programs per row, then hands those closures to
+//! `builtins::eval_builtin_method`. Neither the builtins module nor the VM
+//! depends on each other directly — `runtime` is the glue.
+
 use std::sync::Arc;
 
 use crate::ast::{Arg, Expr};
@@ -7,7 +15,12 @@ use crate::pipeline::{self, PipelineBody};
 use crate::value::Val;
 use crate::vm::{CompiledCall, VM};
 
+/// Allows `physical_eval`'s `ExecCtx` to hand a pipeline-source resolution
+/// request back up to the execution context without importing it directly,
+/// breaking the circular dependency between the physical layer and the VM.
 pub(crate) trait PipelineSourceResolver {
+    /// Resolve a `PipelinePlanSource` into a concrete `ResolvedPipelineSource`
+    /// given the pipeline body context, returning an error on failure.
     fn resolve_pipeline_source(
         &mut self,
         source: &PipelinePlanSource,
@@ -15,12 +28,19 @@ pub(crate) trait PipelineSourceResolver {
     ) -> Result<ResolvedPipelineSource, EvalError>;
 }
 
+/// The concrete form of a pipeline source after resolution by `ExecCtx`.
+/// Either a lazily-traversed field-path key chain or a fully materialised `Val`.
 pub(crate) enum ResolvedPipelineSource {
+    /// A sequence of field-name keys to follow on each row — avoids cloning
+    /// the full document when the source is a simple nested-field path.
     ValFieldChain { keys: Arc<[Arc<str>]> },
+    /// A fully materialised value used as the pipeline's input rows.
     ValReceiver(Val),
 }
 
 impl ResolvedPipelineSource {
+    /// Convert into the `pipeline::Source` variant expected by the pipeline
+    /// executor, consuming `self`.
     pub(crate) fn into_pipeline_source(self) -> pipeline::Source {
         match self {
             Self::ValFieldChain { keys } => pipeline::Source::FieldChain { keys },
@@ -29,6 +49,10 @@ impl ResolvedPipelineSource {
     }
 }
 
+/// Entry point for the VM path: bridges a `CompiledCall` to
+/// `builtins::eval_builtin_method` by building three closures that re-enter
+/// the VM to evaluate compiled sub-programs for plain args, single-item
+/// lambdas, and pair-item lambdas respectively.
 pub(crate) fn call_builtin_method_compiled(
     vm: &mut VM,
     recv: Val,
@@ -66,6 +90,9 @@ pub(crate) fn call_builtin_method_compiled(
     )
 }
 
+/// Evaluate a top-level (non-method) global call such as `coalesce`, `chain`,
+/// `zip`, `zip_longest`, `product`, or `range`, falling back to
+/// `call_builtin_method_compiled` for unrecognised names.
 pub(crate) fn eval_global_compiled(
     vm: &mut VM,
     call: &CompiledCall,
@@ -143,10 +170,15 @@ pub(crate) fn eval_global_compiled(
     }
 }
 
+/// Find the position of `needle` inside `args` by pointer identity, returning
+/// `None` when the argument was synthesised and is not part of the original slice.
 fn arg_index(args: &[Arg], needle: &Arg) -> Option<usize> {
     args.iter().position(|arg| std::ptr::eq(arg, needle))
 }
 
+/// Evaluate `arg` against the current environment, preferring the pre-compiled
+/// sub-program stored in `call` when the argument is part of the original call
+/// and falling back to a fresh `Compiler::compile` for synthetic arguments.
 fn eval_compiled_arg(
     vm: &mut VM,
     call: &CompiledCall,
@@ -157,11 +189,7 @@ fn eval_compiled_arg(
         return eval_compiled_arg_at(vm, call, idx, env);
     }
 
-    // Some builtin adapters construct a static synthetic Arg while decoding
-    // richer argument syntax, e.g. `deep_like({k: lit})` evaluates each object
-    // field literal independently. Those are not in `CompiledCall::sub_progs`;
-    // compile them once for this call rather than failing back to the old
-    // tree-walker path.
+
     let expr = match arg {
         Arg::Pos(expr) | Arg::Named(_, expr) => expr,
     };
@@ -169,6 +197,8 @@ fn eval_compiled_arg(
     vm.exec_in_env(&prog, env)
 }
 
+/// Fetch the nth pre-compiled sub-program from `call` and execute it in `env`,
+/// returning an error when the index is out of range.
 fn eval_compiled_arg_at(
     vm: &mut VM,
     call: &CompiledCall,
@@ -182,6 +212,9 @@ fn eval_compiled_arg_at(
     vm.exec_in_env(prog, env)
 }
 
+/// Push `item` as the current value (`@`) into `env`, execute the sub-program
+/// at `arg`'s position, then restore the previous current value. Handles both
+/// named lambda parameters and implicit `@` bindings.
 fn apply_compiled_item(
     vm: &mut VM,
     call: &CompiledCall,
@@ -212,6 +245,9 @@ fn apply_compiled_item(
     }
 }
 
+/// Push a two-value frame (`first`, `second`) for binary lambda arguments
+/// such as `reduce(acc, x -> …)`, then execute the sub-program and restore
+/// the environment. Degrades to `apply_compiled_item` for non-binary lambdas.
 fn apply_compiled_pair(
     vm: &mut VM,
     call: &CompiledCall,

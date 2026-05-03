@@ -5,70 +5,117 @@ use crate::builtins::{
 
 use super::{PipelineBody, Stage};
 
+/// Describes whether a view-pipeline stage actually reads from the input `ValueView` or can
+/// skip the read entirely (e.g. `Take` / `Skip` only counts positions).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ViewInputMode {
+    /// The stage examines the view's fields or scalar value.
     ReadsView,
+    /// The stage ignores view content and acts on position alone.
     SkipsViewRead,
 }
 
+/// Describes what the output of a view-pipeline stage looks like in terms of ownership and
+/// borrowing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ViewOutputMode {
+    /// The stage passes the same input view through unchanged (e.g. `Filter`).
     PreservesInputView,
+    /// The stage yields a single borrowed sub-view of the input (e.g. `Map` on a field).
     BorrowedSubview,
+    /// The stage yields multiple borrowed sub-views (e.g. `FlatMap`).
     BorrowedSubviews,
+    /// The stage produces a new owned `Val` that cannot be represented as a borrowed view.
     EmitsOwnedValue,
 }
 
+/// When, if ever, a view-pipeline stage or sink must materialise elements into owned `Val`s.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ViewMaterialization {
+    /// No materialisation is needed; the stage/sink can operate entirely on borrowed views.
     Never,
+    /// The stage must materialise the final value it emits (e.g. keyed reduce output).
     StageFinalValue,
+    /// The sink materialises each output row into the result array (e.g. `Collect`).
     SinkOutputRows,
+    /// The sink materialises only the single selected row (e.g. `first` / `last`).
     SinkFinalRow,
+    /// The sink materialises each element's numeric input for folding (e.g. `sum`).
     SinkNumericInput,
 }
 
+/// Full view-pipeline capability descriptor for a `PipelineBody`: one entry per stage plus the
+/// sink capability.
 #[derive(Debug, Clone)]
 pub(crate) struct ViewPipelineCapabilities {
+    /// Per-stage capabilities, parallel to `PipelineBody::stages`.
     pub stages: Vec<ViewStageCapability>,
+    /// Sink capability describing how and when elements are materialised.
     pub sink: ViewSinkCapability,
 }
 
+/// Capability descriptor for a view-native prefix of a `PipelineBody`: the stages that can
+/// execute without materialisation before the first non-view stage.
 #[derive(Debug, Clone)]
 pub(crate) struct ViewPrefixCapabilities {
+    /// View-native stage capabilities for the prefix portion.
     pub stages: Vec<ViewStageCapability>,
+    /// The number of stages from the body that are consumed by this prefix.
     pub consumed_stages: usize,
 }
 
+/// Describes the borrowing and materialisation behaviour of a single view-pipeline stage.
+///
+/// Each variant carries a kernel index into `PipelineBody::stage_kernels` so the executor can
+/// look up the pre-classified expression kernel without re-scanning the stage list.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ViewStageCapability {
+    /// Filter stage: evaluates the view-native predicate at `kernel`, keeping matching views.
     Filter {
+        /// Index into `stage_kernels` for the predicate kernel.
         kernel: usize,
     },
+    /// Map stage: evaluates the view-native projection at `kernel`, yielding a sub-view.
     Map {
+        /// Index into `stage_kernels` for the projection kernel.
         kernel: usize,
     },
+    /// FlatMap stage: evaluates the view-native body at `kernel`, yielding multiple sub-views.
     FlatMap {
+        /// Index into `stage_kernels` for the body kernel.
         kernel: usize,
     },
+    /// TakeWhile stage: passes views while the predicate at `kernel` is truthy.
     TakeWhile {
+        /// Index into `stage_kernels` for the predicate kernel.
         kernel: usize,
     },
+    /// DropWhile stage: skips views while the predicate at `kernel` is truthy.
     DropWhile {
+        /// Index into `stage_kernels` for the predicate kernel.
         kernel: usize,
     },
+    /// Deduplicate stage; `kernel` is `Some` when deduplication uses a view-native key program.
     Distinct {
+        /// Optional index into `stage_kernels` for the key kernel.
         kernel: Option<usize>,
     },
+    /// Keyed-reduce stage (e.g. `group_by`, `count_by`); uses the view-native key kernel.
     KeyedReduce {
+        /// The kind of keyed reduction to perform.
         kind: BuiltinKeyedReducer,
+        /// Index into `stage_kernels` for the key kernel.
         kernel: usize,
     },
+    /// Take the first `n` elements without reading their content.
     Take(usize),
+    /// Skip the first `n` elements without reading their content.
     Skip(usize),
 }
 
 impl ViewStageCapability {
+    /// Constructs a `ViewStageCapability` from the stage's `BuiltinViewStage` metadata,
+    /// returning `None` when the stage or its kernel cannot operate in the view domain.
     pub(crate) fn from_stage_metadata(
         stage: BuiltinViewStage,
         usize_arg: Option<usize>,
@@ -97,6 +144,7 @@ impl ViewStageCapability {
         }
     }
 
+    /// Returns the `BuiltinViewStage` tag that corresponds to this capability variant.
     pub(crate) fn view_stage(self) -> BuiltinViewStage {
         match self {
             Self::Filter { .. } => BuiltinViewStage::Filter,
@@ -111,14 +159,17 @@ impl ViewStageCapability {
         }
     }
 
+    /// Returns whether this stage reads the input view or only acts on position.
     pub(crate) fn input_mode(self) -> ViewInputMode {
         view_input_mode(self.view_stage().input_mode())
     }
 
+    /// Returns how this stage's output relates to the input view (same view, sub-view, or owned).
     pub(crate) fn output_mode(self) -> ViewOutputMode {
         view_output_mode(self.view_stage().output_mode())
     }
 
+    /// Returns when (if ever) this stage must materialise an element into an owned `Val`.
     pub(crate) fn materialization(self) -> ViewMaterialization {
         if matches!(self, Self::KeyedReduce { .. }) {
             return ViewMaterialization::StageFinalValue;
@@ -127,18 +178,27 @@ impl ViewStageCapability {
     }
 }
 
+/// Describes how a pipeline sink interacts with the view domain.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ViewSinkCapability {
+    /// The sink collects all views, materialising each row into the output array.
     Collect,
+    /// A built-in accumulator sink (count, numeric reducer, first/last selector).
     Builtin {
+        /// The kind of accumulation performed by this sink.
         accumulator: BuiltinSinkAccumulator,
+        /// Index of the view-native predicate kernel in `sink_kernels`, if any.
         predicate_kernel: Option<usize>,
+        /// Index of the view-native projection kernel in `sink_kernels`, if any.
         project_kernel: Option<usize>,
+        /// When the sink must materialise element values.
         materialization: ViewMaterialization,
     },
 }
 
 impl ViewSinkCapability {
+    /// Constructs a `Builtin` view sink capability from a `BuiltinSinkSpec` and optional kernel
+    /// indices for predicate and projection sub-programs.
     pub(crate) fn from_sink_spec(
         spec: BuiltinSinkSpec,
         predicate_kernel: Option<usize>,
@@ -152,6 +212,7 @@ impl ViewSinkCapability {
         }
     }
 
+    /// Returns when this sink must materialise element values from the view domain.
     pub(crate) fn materialization(self) -> ViewMaterialization {
         match self {
             Self::Collect => ViewMaterialization::SinkOutputRows,
@@ -162,6 +223,7 @@ impl ViewSinkCapability {
     }
 }
 
+/// Converts a `BuiltinSinkSpec` accumulator to the corresponding `ViewMaterialization` policy.
 fn sink_materialization(spec: BuiltinSinkSpec) -> ViewMaterialization {
     match spec.accumulator {
         BuiltinSinkAccumulator::Count | BuiltinSinkAccumulator::ApproxDistinct => {
@@ -172,12 +234,15 @@ fn sink_materialization(spec: BuiltinSinkSpec) -> ViewMaterialization {
     }
 }
 
+/// Converts a `BuiltinViewMaterialization` tag from the registry into the pipeline's
+/// `ViewMaterialization` enum.
 fn view_materialization(materialization: BuiltinViewMaterialization) -> ViewMaterialization {
     match materialization {
         BuiltinViewMaterialization::Never => ViewMaterialization::Never,
     }
 }
 
+/// Converts a `BuiltinViewInputMode` tag from the registry to the pipeline's `ViewInputMode`.
 fn view_input_mode(mode: BuiltinViewInputMode) -> ViewInputMode {
     match mode {
         BuiltinViewInputMode::ReadsView => ViewInputMode::ReadsView,
@@ -185,6 +250,7 @@ fn view_input_mode(mode: BuiltinViewInputMode) -> ViewInputMode {
     }
 }
 
+/// Converts a `BuiltinViewOutputMode` tag from the registry to the pipeline's `ViewOutputMode`.
 fn view_output_mode(mode: BuiltinViewOutputMode) -> ViewOutputMode {
     match mode {
         BuiltinViewOutputMode::PreservesInputView => ViewOutputMode::PreservesInputView,
@@ -194,6 +260,8 @@ fn view_output_mode(mode: BuiltinViewOutputMode) -> ViewOutputMode {
     }
 }
 
+/// Computes `ViewPipelineCapabilities` for all stages and the sink in `body`, returning `None`
+/// when any stage or the sink cannot operate in the view domain.
 pub(crate) fn view_capabilities(body: &PipelineBody) -> Option<ViewPipelineCapabilities> {
     Some(ViewPipelineCapabilities {
         stages: view_stage_capabilities(body)?,
@@ -201,6 +269,8 @@ pub(crate) fn view_capabilities(body: &PipelineBody) -> Option<ViewPipelineCapab
     })
 }
 
+/// Computes the longest view-native prefix of `body`'s stages (all stages that can run without
+/// any materialisation), returning `None` when even the first stage is incompatible.
 pub(crate) fn view_prefix_capabilities(body: &PipelineBody) -> Option<ViewPrefixCapabilities> {
     let mut stages = Vec::new();
     for (idx, stage) in body.stages.iter().enumerate() {
@@ -452,6 +522,8 @@ mod tests {
     }
 }
 
+/// Collects a `ViewStageCapability` for every stage in `body`, returning `None` on the first
+/// stage that is not view-compatible.
 fn view_stage_capabilities(body: &PipelineBody) -> Option<Vec<ViewStageCapability>> {
     let mut out = Vec::with_capacity(body.stages.len());
     for (idx, stage) in body.stages.iter().enumerate() {
@@ -460,6 +532,8 @@ fn view_stage_capabilities(body: &PipelineBody) -> Option<Vec<ViewStageCapabilit
     Some(out)
 }
 
+/// Looks up the view capability for a single `stage` at position `idx`, delegating to
+/// `Stage::view_capability` with the corresponding kernel from `body.stage_kernels`.
 fn view_stage_capability(
     body: &PipelineBody,
     idx: usize,
@@ -468,6 +542,8 @@ fn view_stage_capability(
     stage.view_capability(idx, body.stage_kernels.get(idx))
 }
 
+/// Returns the `ViewSinkCapability` for `body`'s sink, consulting `sink_kernels` for any
+/// predicate/projection sub-programs.
 fn view_sink_capability(body: &PipelineBody) -> Option<ViewSinkCapability> {
     body.sink.view_capability(&body.sink_kernels)
 }
