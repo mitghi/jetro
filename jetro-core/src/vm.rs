@@ -2470,14 +2470,6 @@ impl Compiler {
         }
         Some(out)
     }
-
-    // (compile_array_spread / compile_sub_spread removed — MakeArr now
-    //  carries an `is_spread` flag per entry, no special program shape
-    //  needed.)
-    #[allow(dead_code)]
-    fn _spread_helpers_removed_marker(_: &Expr, _: &VarCtx) -> Program {
-        Program::new(vec![], "<spread>")
-    }
 }
 
 // ── Path cache ────────────────────────────────────────────────────────────────
