@@ -1016,6 +1016,7 @@ impl Compiler {
         }
     }
 
+    #[cfg(test)]
     pub fn compile_str(input: &str) -> Result<Program, EvalError> {
         let expr = super::parser::parse(input).map_err(|e| EvalError(e.to_string()))?;
         Ok(Self::compile(&expr, input))
@@ -2541,6 +2542,7 @@ impl PathCache {
             .insert(ptr, val);
     }
 
+    #[cfg(test)]
     fn len(&self) -> usize {
         self.order.len()
     }
@@ -2600,6 +2602,7 @@ impl Default for PassConfig {
 
 impl PassConfig {
     /// Disable every pass — emit raw opcodes.
+    #[cfg(test)]
     pub fn none() -> Self {
         Self {
             root_chain: false,
@@ -2705,17 +2708,15 @@ impl VM {
     /// Replace the pass configuration.  The compile cache is not purged,
     /// but future lookups key off the new config hash so old entries
     /// are effectively invalidated for the new regime.
+    #[cfg(test)]
     pub fn set_pass_config(&mut self, config: PassConfig) {
         self.config = config;
-    }
-
-    pub fn pass_config(&self) -> PassConfig {
-        self.config
     }
 
     // ── Public entry-points ───────────────────────────────────────────────────
 
     /// Parse, compile (cached), and execute `expr` against `doc`.
+    #[cfg(test)]
     pub fn run_str(
         &mut self,
         expr: &str,
@@ -2726,6 +2727,7 @@ impl VM {
     }
 
     /// Execute a pre-compiled `Program` against `doc`.
+    #[cfg(test)]
     pub fn execute(
         &mut self,
         program: &Program,
@@ -2798,12 +2800,6 @@ impl VM {
         self.exec(program, env)
     }
 
-    /// Make an Env for the given root. Public so the pipeline can build one Env per pull loop and rebind
-    /// `current` per row instead of per-row Env construction.
-    pub fn make_loop_env(&self, root: Val) -> Env {
-        self.make_env(root)
-    }
-
     /// Execute a compiled program against a document, first specialising
     // execute_with_schema / execute_with_inferred_schema removed —
     // schema.rs deleted in Tier 3 aggressive sweep (warm-only path).
@@ -2846,6 +2842,7 @@ impl VM {
     }
 
     /// Cache statistics: `(compile_entries, path_entries)`.
+    #[cfg(test)]
     pub fn cache_stats(&self) -> (usize, usize) {
         (self.compile_cache.len(), self.path_cache.len())
     }
