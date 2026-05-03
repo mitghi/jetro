@@ -6,7 +6,8 @@
 
 use std::sync::Arc;
 
-use crate::ast::{Arg, ArrayElem, Expr, ObjField, Step};
+use crate::analysis;
+use crate::ast::{ArrayElem, Expr, ObjField, Step};
 use crate::builtins::{BuiltinCall, BuiltinMethod};
 use crate::parser;
 use crate::physical::{
@@ -324,74 +325,12 @@ fn pipeline_body_uses_active_locals(
     builder: &PlanBuilder,
 ) -> bool {
     !builder.locals.is_empty()
-        && body
-            .stage_exprs
-            .iter()
-            .flatten()
-            .any(|expr| expr_uses_any_active_local(expr, builder))
-}
-
-fn expr_uses_any_active_local(expr: &Expr, builder: &PlanBuilder) -> bool {
-    match expr {
-        Expr::Ident(name) => builder.is_local(name),
-        Expr::UnaryNeg(inner) | Expr::Not(inner) => expr_uses_any_active_local(inner, builder),
-        Expr::Try { body, default } => {
-            expr_uses_any_active_local(body, builder)
-                || expr_uses_any_active_local(default, builder)
-        }
-        Expr::BinOp(lhs, _, rhs) | Expr::Coalesce(lhs, rhs) => {
-            expr_uses_any_active_local(lhs, builder) || expr_uses_any_active_local(rhs, builder)
-        }
-        Expr::Kind { expr, .. } => expr_uses_any_active_local(expr, builder),
-        Expr::IfElse { cond, then_, else_ } => {
-            expr_uses_any_active_local(cond, builder)
-                || expr_uses_any_active_local(then_, builder)
-                || expr_uses_any_active_local(else_, builder)
-        }
-        Expr::Array(elems) => elems.iter().any(|elem| match elem {
-            ArrayElem::Expr(expr) | ArrayElem::Spread(expr) => {
-                expr_uses_any_active_local(expr, builder)
-            }
-        }),
-        Expr::Object(fields) => fields.iter().any(|field| match field {
-            ObjField::Kv { val, cond, .. } => {
-                expr_uses_any_active_local(val, builder)
-                    || cond
-                        .as_ref()
-                        .is_some_and(|cond| expr_uses_any_active_local(cond, builder))
-            }
-            ObjField::Dynamic { key, val } => {
-                expr_uses_any_active_local(key, builder) || expr_uses_any_active_local(val, builder)
-            }
-            ObjField::Spread(expr) | ObjField::SpreadDeep(expr) => {
-                expr_uses_any_active_local(expr, builder)
-            }
-            ObjField::Short(name) => builder.is_local(name),
-        }),
-        Expr::Chain(base, steps) => {
-            expr_uses_any_active_local(base, builder)
-                || steps.iter().any(|step| match step {
-                    Step::DynIndex(expr) | Step::InlineFilter(expr) => {
-                        expr_uses_any_active_local(expr, builder)
-                    }
-                    Step::Method(_, args) | Step::OptMethod(_, args) => args
-                        .iter()
-                        .any(|arg| arg_uses_any_active_local(arg, builder)),
-                    _ => false,
-                })
-        }
-        Expr::Let { name, init, body } => {
-            expr_uses_any_active_local(init, builder)
-                || (builder.is_local(name) && expr_uses_any_active_local(body, builder))
-        }
-        _ => false,
-    }
-}
-
-fn arg_uses_any_active_local(arg: &Arg, builder: &PlanBuilder) -> bool {
-    match arg {
-        Arg::Pos(expr) | Arg::Named(_, expr) => expr_uses_any_active_local(expr, builder),
-    }
+        && body.stage_exprs.iter().flatten().any(|expr| {
+            builder
+                .locals
+                .iter()
+                .any(|local| analysis::expr_uses_ident(expr, local.as_ref()))
+        })
 }
 
 fn try_lower_structural_op(expr: &Expr) -> Option<PlanNode> {
