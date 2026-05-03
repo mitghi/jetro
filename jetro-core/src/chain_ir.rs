@@ -9,9 +9,7 @@
 #![allow(dead_code)]
 
 use crate::{
-    builtin_registry::{
-        propagate_demand as propagate_builtin_demand, BuiltinDemandArg, BuiltinId,
-    },
+    builtin_registry::{propagate_demand as propagate_builtin_demand, BuiltinDemandArg, BuiltinId},
     builtins::BuiltinMethod,
 };
 

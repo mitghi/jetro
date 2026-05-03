@@ -79,16 +79,14 @@ impl Sink {
             Some(idx) => Some(view_native_sink_kernel(sink_kernels, idx)?),
             None => None,
         };
-        let numeric_op = match sink_spec.accumulator {
-            BuiltinSinkAccumulator::Numeric => Some(reducer.as_ref()?.numeric_op()?),
-            _ => None,
-        };
+        if sink_spec.accumulator == BuiltinSinkAccumulator::Numeric {
+            reducer.as_ref()?.numeric_op()?;
+        }
 
         Some(ViewSinkCapability::from_sink_spec(
             sink_spec,
             predicate_kernel,
             project_kernel,
-            numeric_op,
         ))
     }
 

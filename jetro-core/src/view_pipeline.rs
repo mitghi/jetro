@@ -96,7 +96,6 @@ where
             accumulator,
             predicate_kernel,
             project_kernel,
-            numeric_op: _,
             ..
         } => {
             if !view_sink_predicate_matches(item, predicate_kernel, sink_kernels)? {

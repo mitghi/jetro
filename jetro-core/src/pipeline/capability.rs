@@ -3,7 +3,7 @@ use crate::builtins::{
     BuiltinViewMaterialization, BuiltinViewOutputMode, BuiltinViewStage,
 };
 
-use super::{NumOp, PipelineBody, Stage};
+use super::{PipelineBody, Stage};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ViewInputMode {
@@ -134,7 +134,6 @@ pub(crate) enum ViewSinkCapability {
         accumulator: BuiltinSinkAccumulator,
         predicate_kernel: Option<usize>,
         project_kernel: Option<usize>,
-        numeric_op: Option<NumOp>,
         materialization: ViewMaterialization,
     },
 }
@@ -144,13 +143,11 @@ impl ViewSinkCapability {
         spec: BuiltinSinkSpec,
         predicate_kernel: Option<usize>,
         project_kernel: Option<usize>,
-        numeric_op: Option<NumOp>,
     ) -> Self {
         Self::Builtin {
             accumulator: spec.accumulator,
             predicate_kernel,
             project_kernel,
-            numeric_op,
             materialization: sink_materialization(spec),
         }
     }
@@ -313,7 +310,6 @@ mod tests {
                 accumulator: BuiltinSinkAccumulator::Count,
                 predicate_kernel: None,
                 project_kernel: None,
-                numeric_op: None,
                 materialization: ViewMaterialization::Never,
             }
             .materialization(),
@@ -324,7 +320,6 @@ mod tests {
                 accumulator: BuiltinSinkAccumulator::Numeric,
                 predicate_kernel: None,
                 project_kernel: Some(0),
-                numeric_op: Some(NumOp::Sum),
                 materialization: ViewMaterialization::SinkNumericInput,
             }
             .materialization(),
@@ -335,7 +330,6 @@ mod tests {
                 accumulator: BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::First),
                 predicate_kernel: None,
                 project_kernel: None,
-                numeric_op: None,
                 materialization: ViewMaterialization::SinkFinalRow,
             }
             .materialization(),
@@ -351,7 +345,6 @@ mod tests {
                 accumulator: BuiltinSinkAccumulator::Count,
                 predicate_kernel: None,
                 project_kernel: None,
-                numeric_op: None,
                 materialization: ViewMaterialization::Never,
             })
         ));
@@ -361,7 +354,6 @@ mod tests {
                 accumulator: BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::First),
                 predicate_kernel: None,
                 project_kernel: None,
-                numeric_op: None,
                 materialization: ViewMaterialization::SinkFinalRow,
             })
         ));
@@ -371,7 +363,6 @@ mod tests {
                 accumulator: BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::Last),
                 predicate_kernel: None,
                 project_kernel: None,
-                numeric_op: None,
                 materialization: ViewMaterialization::SinkFinalRow,
             })
         ));
