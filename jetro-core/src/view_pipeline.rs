@@ -1026,7 +1026,10 @@ mod tests {
             ],
             stage_exprs: Vec::new(),
             sink: Sink::Collect,
-            stage_kernels: vec![BodyKernel::FieldRead(Arc::from("name")), BodyKernel::Generic],
+            stage_kernels: vec![
+                BodyKernel::FieldRead(Arc::from("name")),
+                BodyKernel::Generic,
+            ],
             sink_kernels: Vec::new(),
         };
 

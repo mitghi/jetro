@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
 use crate::ast::Expr;
-use crate::builtin_registry::{pipeline_lowering, pipeline_sink, BuiltinId};
+use crate::builtin_registry::{pipeline_lowering, BuiltinId};
 use crate::builtins::{
     BuiltinExprStage, BuiltinMethod, BuiltinNullaryStage, BuiltinPipelineLowering,
-    BuiltinPipelineSink, BuiltinSinkAccumulator, BuiltinStringPairStage, BuiltinStringStage,
-    BuiltinUsizeStage, BuiltinViewStage,
+    BuiltinSinkAccumulator, BuiltinStringPairStage, BuiltinStringStage, BuiltinUsizeStage,
+    BuiltinViewStage,
 };
 
 use super::{
@@ -271,15 +271,10 @@ fn string_arg(arg: &crate::ast::Arg) -> Option<Arc<str>> {
 
 fn terminal_sink_for_method(method: BuiltinMethod, args: &[crate::ast::Arg]) -> Option<Sink> {
     let spec = method.spec();
-    match pipeline_sink(BuiltinId::from_method(method)) {
-        Some(BuiltinPipelineSink::ApproxCountDistinct) if args.is_empty() => {
-            return Some(Sink::ApproxCountDistinct);
-        }
-        None => {}
-        _ => return None,
-    }
-
     match spec.sink?.accumulator {
+        BuiltinSinkAccumulator::ApproxDistinct if args.is_empty() => {
+            Some(Sink::ApproxCountDistinct)
+        }
         BuiltinSinkAccumulator::Count => match args {
             [] => Some(Sink::Reducer(ReducerSpec::count())),
             [arg] if method == BuiltinMethod::Count => Some(Sink::Reducer(ReducerSpec {

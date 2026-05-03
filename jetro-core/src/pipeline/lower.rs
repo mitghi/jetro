@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::builtin_registry::{pipeline_sink, pipeline_stage, BuiltinId};
+use crate::builtin_registry::{pipeline_stage, BuiltinId};
 use crate::builtins::{BuiltinMethod, BuiltinPipelineStage, BuiltinViewStage};
 use crate::{ast::Expr, context::EvalError, value::Val};
 
@@ -175,7 +175,6 @@ fn is_receiver_pipeline_start_method(name: &str, arity: usize) -> bool {
         0 => {
             let spec = method.spec();
             spec.sink.is_some()
-                || pipeline_sink(BuiltinId::from_method(method)).is_some()
                 || pipeline_stage(BuiltinId::from_method(method))
                     == Some(BuiltinPipelineStage::Nullary)
         }

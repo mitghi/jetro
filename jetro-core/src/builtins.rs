@@ -786,11 +786,6 @@ pub enum BuiltinPipelineStage {
     Unary,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BuiltinPipelineSink {
-    ApproxCountDistinct,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BuiltinPipelineShape {
     pub cardinality: BuiltinCardinality,

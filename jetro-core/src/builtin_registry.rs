@@ -9,9 +9,8 @@ use crate::{
     builtins::{
         BuiltinCardinality, BuiltinExprStage, BuiltinMethod, BuiltinNullaryStage,
         BuiltinPipelineExecutor, BuiltinPipelineLowering, BuiltinPipelineMaterialization,
-        BuiltinPipelineOrderEffect, BuiltinPipelineShape, BuiltinPipelineSink,
-        BuiltinPipelineStage, BuiltinSpec, BuiltinStringPairStage, BuiltinStringStage,
-        BuiltinStructural, BuiltinUsizeStage,
+        BuiltinPipelineOrderEffect, BuiltinPipelineShape, BuiltinPipelineStage, BuiltinSpec,
+        BuiltinStringPairStage, BuiltinStringStage, BuiltinStructural, BuiltinUsizeStage,
     },
     chain_ir::{Demand, PullDemand, ValueNeed},
 };
@@ -165,11 +164,6 @@ pub(crate) fn pipeline_lowering(id: BuiltinId) -> Option<BuiltinPipelineLowering
 }
 
 #[inline]
-pub(crate) fn pipeline_sink(id: BuiltinId) -> Option<BuiltinPipelineSink> {
-    registry_pipeline_sink(id)
-}
-
-#[inline]
 pub(crate) fn pipeline_element(id: BuiltinId) -> bool {
     registry_pipeline_element(id).unwrap_or(false)
 }
@@ -280,21 +274,6 @@ macro_rules! builtin_meta_lowering {
     };
     ($key:ident : $value:expr, $($rest:tt)*) => {
         builtin_meta_lowering!($($rest)*)
-    };
-    ($key:ident : $value:expr) => {
-        None
-    };
-}
-
-macro_rules! builtin_meta_sink {
-    () => {
-        None
-    };
-    (sink: $value:expr $(, $($rest:tt)*)?) => {
-        Some($value)
-    };
-    ($key:ident : $value:expr, $($rest:tt)*) => {
-        builtin_meta_sink!($($rest)*)
     };
     ($key:ident : $value:expr) => {
         None
@@ -419,14 +398,6 @@ macro_rules! builtin_registry {
         fn registry_pipeline_lowering(id: BuiltinId) -> Option<BuiltinPipelineLowering> {
             match id.0 {
                 $(x if x == BuiltinMethod::$method as u16 => builtin_meta_lowering!($($($meta)*)?),)*
-                _ => None,
-            }
-        }
-
-        #[inline]
-        fn registry_pipeline_sink(id: BuiltinId) -> Option<BuiltinPipelineSink> {
-            match id.0 {
-                $(x if x == BuiltinMethod::$method as u16 => builtin_meta_sink!($($($meta)*)?),)*
                 _ => None,
             }
         }
@@ -699,8 +670,7 @@ builtin_registry! {
         }
     };
     ApproxCountDistinct => "approx_count_distinct" [] {
-        lowering: BuiltinPipelineLowering::TerminalSink,
-        sink: BuiltinPipelineSink::ApproxCountDistinct
+        lowering: BuiltinPipelineLowering::TerminalSink
     };
     Accumulate => "accumulate" [];
     Partition => "partition" [];
@@ -866,8 +836,8 @@ mod tests {
     use super::*;
     use crate::builtins::{
         BuiltinExprStage, BuiltinNullaryStage, BuiltinPipelineExecutor, BuiltinPipelineLowering,
-        BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect, BuiltinPipelineSink,
-        BuiltinPipelineStage, BuiltinStringPairStage, BuiltinStringStage, BuiltinUsizeStage,
+        BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect, BuiltinPipelineStage,
+        BuiltinStringPairStage, BuiltinStringStage, BuiltinUsizeStage,
     };
 
     #[test]
@@ -1140,18 +1110,6 @@ mod tests {
         );
         assert_eq!(
             pipeline_stage(BuiltinId::from_method(BuiltinMethod::FromJson)),
-            None
-        );
-    }
-
-    #[test]
-    fn registry_drives_pipeline_sink_classification() {
-        assert_eq!(
-            pipeline_sink(BuiltinId::from_method(BuiltinMethod::ApproxCountDistinct)),
-            Some(BuiltinPipelineSink::ApproxCountDistinct)
-        );
-        assert_eq!(
-            pipeline_sink(BuiltinId::from_method(BuiltinMethod::Count)),
             None
         );
     }
