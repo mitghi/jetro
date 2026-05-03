@@ -71,9 +71,9 @@ pub enum BodyKernel {
 /// Pre-classified kernel for a format-string expression, avoiding VM re-entry for each part.
 #[derive(Debug, Clone)]
 pub struct FStringKernel {
-    /// Ordered parts (literals and interpolated sub-kernels) that make up the format string.
+    // ordered parts (literals and interpolated sub-kernels) that make up the format string
     parts: Arc<[FStringKernelPart]>,
-    /// Pre-computed lower-bound capacity for the output string buffer.
+    // pre-computed lower-bound capacity hint for the output string buffer
     base_capacity: usize,
 }
 
@@ -90,20 +90,20 @@ pub enum FStringKernelPart {
 /// without dispatching through the VM's object-construction opcodes.
 #[derive(Debug, Clone)]
 pub struct ObjectKernel {
-    /// Ordered key/value entries that constitute the produced object.
+    // ordered key/value entries that constitute the produced object
     entries: Arc<[ObjectKernelEntry]>,
 }
 
 /// A single key/value entry in an `ObjectKernel`.
 #[derive(Debug, Clone)]
 pub struct ObjectKernelEntry {
-    /// The key name in the produced object.
+    // key name in the produced object
     key: Arc<str>,
-    /// The kernel used to compute the value for this key.
+    // kernel used to compute the value for this key
     value: BodyKernel,
-    /// When `true`, a null value causes this entry to be silently omitted (optional field).
+    // when true, a null result causes this entry to be silently omitted
     optional: bool,
-    /// When `true`, null values are omitted regardless of the `optional` flag.
+    // when true, null values are omitted regardless of the optional flag
     omit_null: bool,
 }
 
@@ -386,8 +386,7 @@ impl BodyKernel {
     }
 }
 
-/// Attempts to classify an opcode sequence ending in `AndOp` into a `BodyKernel::And`,
-/// returning `None` if either side contains a `Generic` sub-kernel.
+// returns None rather than wrapping a Generic sub-kernel, which would defeat specialisation
 fn classify_and_kernel(ops: &[crate::vm::Opcode]) -> Option<BodyKernel> {
     let (lhs_ops, rhs) = match ops {
         [lhs @ .., crate::vm::Opcode::AndOp(rhs)] if !lhs.is_empty() => (lhs, rhs),
@@ -405,7 +404,6 @@ fn classify_and_kernel(ops: &[crate::vm::Opcode]) -> Option<BodyKernel> {
     Some(BodyKernel::And(predicates.into()))
 }
 
-/// Flattens nested `BodyKernel::And` trees into a single flat predicate list in `out`.
 fn flatten_and_kernel(kernel: BodyKernel, out: &mut Vec<BodyKernel>) {
     match kernel {
         BodyKernel::And(predicates) => out.extend(predicates.iter().cloned()),
@@ -422,8 +420,7 @@ pub(crate) enum CollectLayout<'a> {
     UniformObject(&'a ObjectKernel),
 }
 
-/// Attempts to classify a `KvPath` entry's step list as a `FieldRead` or `FieldChain` kernel,
-/// returning `None` when the steps contain numeric indices.
+// numeric index steps cannot be represented as a FieldChain, so return None
 fn classify_kv_path(steps: &[crate::vm::KvStep]) -> Option<BodyKernel> {
     if steps.is_empty() {
         return None;
@@ -442,7 +439,6 @@ fn classify_kv_path(steps: &[crate::vm::KvStep]) -> Option<BodyKernel> {
     }
 }
 
-/// Extracts an immediate scalar literal from a push opcode, returning `None` for all other opcodes.
 #[inline]
 fn trivial_lit(op: &crate::vm::Opcode) -> Option<Val> {
     use crate::vm::Opcode;

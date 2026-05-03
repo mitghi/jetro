@@ -640,7 +640,7 @@ mod tests {
     #[test]
     fn debug_filter_pred_shape() {
         let expr = crate::parser::parse("@.total > 100").unwrap();
-        let prog = crate::vm::Compiler::compile(&expr, "");
+        let prog = crate::compiler::Compiler::compile(&expr, "");
         eprintln!("PRED OPS = {:#?}", prog.ops);
     }
 

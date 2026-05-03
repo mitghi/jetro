@@ -1,6 +1,6 @@
-//! Bridges `Sink` IR variants to the generic `composed::Sink` trait via a
-//! macro-generated dispatch table. `run_composed_sink!` selects the concrete
-//! sink type at lower time so the outer loop is monomorphised per sink kind.
+//! Bridges `Sink` IR variants to the generic `composed::Sink` trait via a macro-generated dispatch table.
+//! `run_composed_sink!` selects the concrete sink type at lower time so the outer loop is
+//! monomorphised per sink kind.
 
 use crate::builtins::{BuiltinNumericReducer, BuiltinSelectionPosition, BuiltinSinkAccumulator};
 use crate::chain_ir::PullDemand;
@@ -9,9 +9,7 @@ use crate::value::Val;
 
 use super::Sink;
 
-/// Dispatches a borrowed-slice pipeline run to the concrete typed sink for `$sink`.
-///
-/// Expands to a `cmp::$runner` call monomorphised over the matching `composed::Sink` impl.
+// dispatches a borrowed-slice run; expands to a monomorphised cmp::$runner call
 macro_rules! run_composed_sink {
     ($runner:ident, $rows:expr, $chain:expr, $demand:expr, $sink:expr) => {
         match $sink.builtin_sink_spec()?.accumulator {
@@ -33,9 +31,7 @@ macro_rules! run_composed_sink {
     };
 }
 
-/// Dispatches an owned-iterator pipeline run to the concrete typed sink for `$sink`.
-///
-/// Like `run_composed_sink!` but accepts any `IntoIterator<Item = Val>` as the row source.
+// like run_composed_sink! but accepts any IntoIterator<Item = Val> as the row source
 macro_rules! run_composed_owned_sink {
     ($runner:ident, $rows:expr, $chain:expr, $demand:expr, $sink:expr) => {
         match $sink.builtin_sink_spec()?.accumulator {
@@ -67,9 +63,7 @@ macro_rules! run_composed_owned_sink {
     };
 }
 
-/// Runs `chain` over the borrowed `rows` slice, collecting into the sink determined by `sink`.
-///
-/// Returns `None` for `ApproxCountDistinct`, which is not supported by the composed path.
+/// Runs `chain` over `rows`, collecting into the sink; returns `None` for `ApproxCountDistinct`.
 pub(super) fn run(
     sink: &Sink,
     rows: &[Val],

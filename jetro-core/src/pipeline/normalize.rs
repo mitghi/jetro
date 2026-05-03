@@ -269,7 +269,7 @@ fn suffix_consumes_value(stages: &[Stage]) -> bool {
 
 /// Compiles `expr` into a VM `Program` tagged with the `<pipeline-rewrite>` source label.
 fn compile_stage_expr(expr: &Expr) -> Arc<crate::vm::Program> {
-    Arc::new(crate::vm::Compiler::compile(expr, "<pipeline-rewrite>"))
+    Arc::new(crate::compiler::Compiler::compile(expr, "<pipeline-rewrite>"))
 }
 
 /// Recursively simplifies `expr` by constant-folding boolean operators, evaluating static

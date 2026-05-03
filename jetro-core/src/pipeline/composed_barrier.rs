@@ -1,7 +1,6 @@
 //! Barrier-stage execution for the composed path.
-//! Handles stages that must see all input before producing output (sort,
-//! group_by, unique_by) by collecting into `BarrierOutput` then continuing
-//! the chain over the resulting rows.
+//! Handles stages that must see all input before producing output (sort, group_by, unique_by)
+//! by collecting into `BarrierOutput` and continuing the chain over the resulting rows.
 
 use crate::composed as cmp;
 use crate::value::Val;
@@ -11,15 +10,13 @@ use super::{BodyKernel, Sink, Stage, StageStrategy};
 
 /// Result of a barrier stage: either a new row list for downstream stages, or a finished value.
 pub(super) enum BarrierOutput {
-    /// The barrier produced a transformed row set that should continue through the pipeline.
+    /// Transformed row set to continue through the pipeline.
     Rows(Vec<Val>),
-    /// The barrier fully consumed its input and produced the final result (e.g. `group_by`).
+    /// Final result produced by a consuming barrier (e.g. `group_by`).
     Done(Val),
 }
 
-/// Executes a barrier stage over the pre-collected `buf`, returning the transformed output.
-///
-/// Returns `None` when `stage` is not a recognised barrier or its kernel cannot supply a key.
+/// Executes a barrier stage over `buf`; returns `None` for unrecognised barriers or missing keys.
 pub(super) fn run(
     stage: &Stage,
     kernel: &BodyKernel,

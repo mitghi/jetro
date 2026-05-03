@@ -44,6 +44,7 @@ pub(crate) mod value;
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod value_view;
 pub(crate) mod view_pipeline;
+pub(crate) mod compiler;
 pub(crate) mod vm;
 
 #[cfg(test)]

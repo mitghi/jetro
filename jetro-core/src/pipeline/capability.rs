@@ -1,3 +1,9 @@
+//! View-pipeline capability descriptors for stages and sinks.
+//!
+//! Defines the borrowing, materialisation, and input/output mode traits that let
+//! the view execution path decide, per stage, whether it can operate on borrowed
+//! `ValueView` slices or must materialise rows into owned `Val`s.
+
 use crate::builtins::{
     BuiltinKeyedReducer, BuiltinSinkAccumulator, BuiltinSinkSpec, BuiltinViewInputMode,
     BuiltinViewMaterialization, BuiltinViewOutputMode, BuiltinViewStage,
@@ -223,7 +229,7 @@ impl ViewSinkCapability {
     }
 }
 
-/// Converts a `BuiltinSinkSpec` accumulator to the corresponding `ViewMaterialization` policy.
+// maps the builtin sink accumulator kind to the materialisation policy it requires
 fn sink_materialization(spec: BuiltinSinkSpec) -> ViewMaterialization {
     match spec.accumulator {
         BuiltinSinkAccumulator::Count | BuiltinSinkAccumulator::ApproxDistinct => {
@@ -234,15 +240,14 @@ fn sink_materialization(spec: BuiltinSinkSpec) -> ViewMaterialization {
     }
 }
 
-/// Converts a `BuiltinViewMaterialization` tag from the registry into the pipeline's
-/// `ViewMaterialization` enum.
+// bridges the registry's BuiltinViewMaterialization tag to the pipeline's enum
 fn view_materialization(materialization: BuiltinViewMaterialization) -> ViewMaterialization {
     match materialization {
         BuiltinViewMaterialization::Never => ViewMaterialization::Never,
     }
 }
 
-/// Converts a `BuiltinViewInputMode` tag from the registry to the pipeline's `ViewInputMode`.
+// bridges the registry's BuiltinViewInputMode tag to the pipeline's enum
 fn view_input_mode(mode: BuiltinViewInputMode) -> ViewInputMode {
     match mode {
         BuiltinViewInputMode::ReadsView => ViewInputMode::ReadsView,
@@ -250,7 +255,7 @@ fn view_input_mode(mode: BuiltinViewInputMode) -> ViewInputMode {
     }
 }
 
-/// Converts a `BuiltinViewOutputMode` tag from the registry to the pipeline's `ViewOutputMode`.
+// bridges the registry's BuiltinViewOutputMode tag to the pipeline's enum
 fn view_output_mode(mode: BuiltinViewOutputMode) -> ViewOutputMode {
     match mode {
         BuiltinViewOutputMode::PreservesInputView => ViewOutputMode::PreservesInputView,
@@ -522,8 +527,7 @@ mod tests {
     }
 }
 
-/// Collects a `ViewStageCapability` for every stage in `body`, returning `None` on the first
-/// stage that is not view-compatible.
+// short-circuits on the first incompatible stage, returning None rather than a partial list
 fn view_stage_capabilities(body: &PipelineBody) -> Option<Vec<ViewStageCapability>> {
     let mut out = Vec::with_capacity(body.stages.len());
     for (idx, stage) in body.stages.iter().enumerate() {
@@ -532,8 +536,6 @@ fn view_stage_capabilities(body: &PipelineBody) -> Option<Vec<ViewStageCapabilit
     Some(out)
 }
 
-/// Looks up the view capability for a single `stage` at position `idx`, delegating to
-/// `Stage::view_capability` with the corresponding kernel from `body.stage_kernels`.
 fn view_stage_capability(
     body: &PipelineBody,
     idx: usize,
@@ -542,8 +544,6 @@ fn view_stage_capability(
     stage.view_capability(idx, body.stage_kernels.get(idx))
 }
 
-/// Returns the `ViewSinkCapability` for `body`'s sink, consulting `sink_kernels` for any
-/// predicate/projection sub-programs.
 fn view_sink_capability(body: &PipelineBody) -> Option<ViewSinkCapability> {
     body.sink.view_capability(&body.sink_kernels)
 }

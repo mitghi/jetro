@@ -37,8 +37,7 @@ pub(super) enum ViewStageState {
 }
 
 impl ViewStageState {
-    /// Returns a mutable reference to the inner counter, initialising to `0`
-    /// the first time it is accessed.
+    // Returns a mutable reference to the inner counter, initialising to `0` the first time it is accessed.
     fn counter(&mut self) -> &mut usize {
         if !matches!(self, Self::Counter(_)) {
             *self = Self::Counter(0);
@@ -49,8 +48,7 @@ impl ViewStageState {
         }
     }
 
-    /// Returns a mutable reference to the inner `HashSet<ViewKey>`, initialising
-    /// to an empty set the first time it is accessed.
+    // Returns a mutable reference to the inner `HashSet<ViewKey>`, initialising to an empty set the first time it is accessed.
     fn keys(&mut self) -> &mut HashSet<ViewKey> {
         if !matches!(self, Self::Keys(_)) {
             *self = Self::Keys(HashSet::new());
@@ -61,8 +59,7 @@ impl ViewStageState {
         }
     }
 
-    /// Returns a mutable reference to the inner boolean flag, initialising to
-    /// `false` the first time it is accessed.
+    // Returns a mutable reference to the inner boolean flag, initialising to `false` the first time it is accessed.
     fn flag(&mut self) -> &mut bool {
         if !matches!(self, Self::Flag(_)) {
             *self = Self::Flag(false);

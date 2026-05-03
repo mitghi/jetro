@@ -45,8 +45,7 @@ pub(super) enum KeyedEntry {
 }
 
 impl ViewStageReducer {
-    /// Constructs a `ViewStageReducer` from a `KeyedReduce` stage capability.
-    /// Returns `None` for any other capability variant.
+    // Constructs a `ViewStageReducer` from a `KeyedReduce` capability; returns `None` for all other variants.
     fn from_capability(capability: pipeline::ViewStageCapability) -> Option<Self> {
         match capability {
             pipeline::ViewStageCapability::KeyedReduce { kind, kernel } => Some(Self::Keyed {

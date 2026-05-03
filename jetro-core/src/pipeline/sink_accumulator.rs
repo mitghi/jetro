@@ -1,7 +1,7 @@
-//! `SinkAccumulator` — stateful wrapper around a `Sink` for the legacy exec
-//! path. Receives one element at a time via `step` and materialises the final
-//! result via `finish`. Mirrors the `Sink` trait from `composed.rs` but
-//! without the generic type parameter, for compatibility with the older paths.
+//! Sink accumulator: stateful wrapper around a `Sink` for the legacy execution path.
+//! Receives one element at a time via `push` and materialises the final result via `finish`.
+//! Mirrors the composed `Sink` contract but without a generic type parameter, for compatibility
+//! with older execution paths.
 
 use crate::{
     builtins::{BuiltinSelectionPosition, BuiltinSinkAccumulator},
@@ -11,20 +11,18 @@ use crate::{
 use super::{ReducerAccumulator, Sink};
 
 /// Stateful wrapper that accumulates one pipeline element at a time on behalf of a `Sink`.
-///
-/// Owned by the legacy exec path; the composed path uses typed `composed::Sink` impls instead.
 pub(crate) struct SinkAccumulator<'a> {
-    /// Reference to the sink descriptor that governs accumulation strategy.
+    // governs which accumulation strategy is applied
     sink: &'a Sink,
-    /// Buffer for `Sink::Collect` — elements appended as they arrive.
+    // elements appended as they arrive for Sink::Collect
     collect: Vec<Val>,
-    /// Running numeric reducer state, present only for reducer-bearing sinks.
+    // present only for reducer-bearing sinks
     reducer: Option<ReducerAccumulator>,
-    /// Holds the first observed item for `SelectOne(First)` sinks.
+    // first observed item for SelectOne(First) sinks
     first: Option<Val>,
-    /// Holds the most recently observed item for `SelectOne(Last)` sinks.
+    // most recently observed item for SelectOne(Last) sinks
     last: Option<Val>,
-    /// HyperLogLog register array for approximate-distinct-count sinks.
+    // HyperLogLog register array for approximate-distinct-count sinks
     hll: [u8; HLL_M],
 }
 
@@ -41,9 +39,7 @@ impl<'a> SinkAccumulator<'a> {
         }
     }
 
-    /// Forwards `item` to the appropriate observation method based on sink kind.
-    ///
-    /// Returns `true` when the sink signals early termination (first-select after capture).
+    /// Forwards `item` to the appropriate observation method; returns `true` on early termination.
     pub(crate) fn push(&mut self, item: Val) -> bool {
         if let Some(spec) = self.sink.builtin_sink_spec() {
             return self.observe_builtin(spec.accumulator, item);
@@ -57,9 +53,7 @@ impl<'a> SinkAccumulator<'a> {
         false
     }
 
-    /// Dispatches `item` to the correct builtin accumulator without lazy closures.
-    ///
-    /// Convenience wrapper over `observe_builtin_lazy` for callers that already own the value.
+    /// Dispatches `item` to the correct builtin accumulator; convenience wrapper over `observe_builtin_lazy`.
     pub(crate) fn observe_builtin(
         &mut self,
         accumulator: BuiltinSinkAccumulator,
@@ -69,10 +63,7 @@ impl<'a> SinkAccumulator<'a> {
             .unwrap_or(false)
     }
 
-    /// Lazy variant of `observe_builtin` that defers value materialisation to closures.
-    ///
-    /// `materialize_item` is called at most once; `materialize_numeric` and `hash_key` are
-    /// called only when the accumulator kind actually needs them, avoiding redundant work.
+    /// Lazy variant of `observe_builtin`; closures are called only when the accumulator kind needs them.
     pub(crate) fn observe_builtin_lazy<F, N, K>(
         &mut self,
         accumulator: BuiltinSinkAccumulator,
@@ -135,9 +126,7 @@ impl<'a> SinkAccumulator<'a> {
         self.observe_reducer(item);
     }
 
-    /// Captures `item` as the first-seen value; returns `true` on successful capture.
-    ///
-    /// Subsequent calls after the first are no-ops that return `false`.
+    /// Captures `item` as the first-seen value and returns `true`; subsequent calls return `false`.
     pub(crate) fn observe_first(&mut self, item: Val) -> bool {
         if self.first.is_none() {
             self.first = Some(item);
@@ -168,9 +157,6 @@ impl<'a> SinkAccumulator<'a> {
     }
 
     /// Consumes the accumulator and produces the final `Val` according to the sink kind.
-    ///
-    /// When `unwrap_single_collect_obj` is `true` and exactly one object was collected, that
-    /// object is returned unwrapped rather than wrapped in a single-element array.
     pub(crate) fn finish(self, unwrap_single_collect_obj: bool) -> Val {
         if let Some(spec) = self.sink.builtin_sink_spec() {
             return self.finish_builtin(spec.accumulator);
@@ -213,12 +199,11 @@ impl<'a> SinkAccumulator<'a> {
     }
 }
 
-/// HyperLogLog precision parameter; 2^12 = 4096 registers.
+// HyperLogLog precision: 2^12 = 4096 registers
 const HLL_P: u32 = 12;
-/// Number of HyperLogLog registers derived from `HLL_P`.
 const HLL_M: usize = 1 << HLL_P;
 
-/// Hashes `key` to a `u64` using a process-stable random state seeded once at startup.
+// process-stable random state seeded once at startup
 #[inline]
 fn hll_hash_key(key: &str) -> u64 {
     use std::collections::hash_map::RandomState;
@@ -231,13 +216,11 @@ fn hll_hash_key(key: &str) -> u64 {
     h.finish()
 }
 
-/// Serialises `v` to a key string and updates the HLL registers.
 fn hll_observe(reg: &mut [u8; HLL_M], v: &Val) {
     use crate::util::val_to_key;
     hll_observe_key(reg, &val_to_key(v));
 }
 
-/// Updates the HLL register for `key` using the leading-zeros position encoding.
 fn hll_observe_key(reg: &mut [u8; HLL_M], key: &str) {
     let h = hll_hash_key(key);
     let idx = (h >> (64 - HLL_P)) as usize;
@@ -248,9 +231,7 @@ fn hll_observe_key(reg: &mut [u8; HLL_M], key: &str) {
     }
 }
 
-/// Computes the HyperLogLog cardinality estimate from the register array.
-///
-/// Applies small-range linear counting correction when many registers are zero.
+// applies small-range linear counting correction when many registers are zero
 fn hll_estimate(reg: &[u8; HLL_M]) -> f64 {
     let mut z: f64 = 0.0;
     let mut zeros: usize = 0;

@@ -193,7 +193,7 @@ fn eval_compiled_arg(
     let expr = match arg {
         Arg::Pos(expr) | Arg::Named(_, expr) => expr,
     };
-    let prog = crate::vm::Compiler::compile(expr, "<synthetic-arg>");
+    let prog = crate::compiler::Compiler::compile(expr, "<synthetic-arg>");
     vm.exec_in_env(&prog, env)
 }
 

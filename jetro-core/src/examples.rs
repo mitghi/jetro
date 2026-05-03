@@ -2,12 +2,12 @@
 
 #[cfg(test)]
 mod examples {
-    use crate::{parser, vm, vm::VM};
+    use crate::{compiler, parser, vm, vm::VM};
     use serde_json::{json, Value};
 
     fn vm_query(expr: &str, doc: &Value) -> Result<Value, crate::Error> {
         let ast = parser::parse(expr)?;
-        let program = vm::Compiler::compile(&ast, expr);
+        let program = compiler::Compiler::compile(&ast, expr);
         let mut vm = vm::VM::new();
         Ok(vm.execute(&program, doc)?)
     }
