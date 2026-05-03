@@ -6,6 +6,7 @@
 
 use std::sync::Arc;
 
+use crate::analysis;
 use crate::ast::{ArrayElem, Expr, ObjField, Step};
 use crate::builtins::{BuiltinCall, BuiltinMethod};
 use crate::parser;
@@ -272,7 +273,7 @@ fn adjust_facts_for_backend_plan(
 fn lower_expr(builder: &mut PlanBuilder, expr: &Expr) -> NodeId {
     try_lower_structural_op(expr)
         .map(|node| builder.push(node))
-        .or_else(|| try_lower_pipeline(expr).map(|node| builder.push(node)))
+        .or_else(|| try_lower_pipeline(builder, expr).map(|node| builder.push(node)))
         .or_else(|| try_lower_root_path(expr).map(|node| builder.push(node)))
         .or_else(|| try_lower_receiver_pipeline(builder, expr))
         .or_else(|| try_lower_structural_chain_prefix(builder, expr))
@@ -282,12 +283,13 @@ fn lower_expr(builder: &mut PlanBuilder, expr: &Expr) -> NodeId {
         .unwrap_or_else(|| fallback_vm(builder, expr))
 }
 
-fn try_lower_pipeline(expr: &Expr) -> Option<PlanNode> {
+fn try_lower_pipeline(builder: &PlanBuilder, expr: &Expr) -> Option<PlanNode> {
     let pipeline = Pipeline::lower(expr)?;
     if is_trivial_collect_pipeline(&pipeline) {
         return None;
     }
-    let (source, body) = pipeline.into_source_body();
+    let (source, mut body) = pipeline.into_source_body();
+    mask_active_local_stage_kernels(&mut body, builder);
     pipeline_parts_to_plan_node(source, body)
 }
 
@@ -304,6 +306,24 @@ fn pipeline_parts_to_plan_node(
 
 fn is_trivial_collect_pipeline(pipeline: &Pipeline) -> bool {
     pipeline.stages.is_empty() && matches!(pipeline.sink, crate::pipeline::Sink::Collect)
+}
+
+fn mask_active_local_stage_kernels(body: &mut crate::pipeline::PipelineBody, builder: &PlanBuilder) {
+    if builder.locals.is_empty() || body.stage_exprs.len() != body.stage_kernels.len() {
+        return;
+    }
+    for (expr, kernel) in body.stage_exprs.iter().zip(body.stage_kernels.iter_mut()) {
+        let Some(expr) = expr else {
+            continue;
+        };
+        if builder
+            .locals
+            .iter()
+            .any(|local| analysis::expr_uses_ident(expr, local.as_ref()))
+        {
+            *kernel = crate::pipeline::BodyKernel::Generic;
+        }
+    }
 }
 
 fn try_lower_structural_op(expr: &Expr) -> Option<PlanNode> {
@@ -402,9 +422,10 @@ fn try_lower_receiver_pipeline(builder: &mut PlanBuilder, expr: &Expr) -> Option
         if matches!(base.as_ref(), Expr::Root) && method_start == 0 {
             continue;
         }
-        let Some(body) = Pipeline::lower_body_from_steps(&steps[method_start..]) else {
+        let Some(mut body) = Pipeline::lower_body_from_steps(&steps[method_start..]) else {
             continue;
         };
+        mask_active_local_stage_kernels(&mut body, builder);
         let source_expr = base
             .as_ref()
             .clone()

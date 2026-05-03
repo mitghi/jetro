@@ -72,7 +72,7 @@ mod tests {
         BackendPlan, BackendPreference, NodeId, PhysicalArrayElem, PhysicalChainStep, PhysicalNode,
         PhysicalObjField, PhysicalPathStep, PipelinePlanSource, PlanNode, QueryPlan,
     };
-    use crate::pipeline::{NumOp, ReducerOp, Sink, Stage};
+    use crate::pipeline::{BodyKernel, NumOp, ReducerOp, Sink, Stage};
     use crate::planner;
     use crate::value::Val;
     use crate::{Jetro, JetroEngine};
@@ -1493,6 +1493,32 @@ mod tests {
                 "first": {"title": "a", "score": 901}
             })
         );
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn local_ident_pipeline_body_uses_env_not_row_field_kernel() {
+        let expr = r#"let title = "fixed" in $.books.map(title).take(2)"#;
+        let plan = planner::plan_query_with_context(expr, planner::PlanningContext::bytes());
+        let QueryRoot::Node(root) = plan.root() else {
+            panic!("expected physical expression plan");
+        };
+        let PlanNode::Let { body, .. } = plan.node(*root) else {
+            panic!("expected let root");
+        };
+        let PlanNode::Pipeline { body, .. } = plan.node(*body) else {
+            panic!("expected pipeline body");
+        };
+        assert!(matches!(body.stage_kernels.first(), Some(BodyKernel::Generic)));
+
+        let j = Jetro::from_bytes(
+            br#"{"books":[{"title":"row-a"},{"title":"row-b"},{"title":"row-c"}]}"#.to_vec(),
+        )
+        .unwrap();
+        let out = super::collect_plan_json(&j, &plan).unwrap();
+
+        assert_eq!(out, json!(["fixed", "fixed"]));
+        assert!(!j.root_val_is_materialized());
     }
 
     #[cfg(feature = "simd-json")]
