@@ -62,62 +62,37 @@ impl Sink {
         &self,
         sink_kernels: &[BodyKernel],
     ) -> Option<ViewSinkCapability> {
-        match self {
-            Sink::Collect => Some(ViewSinkCapability::Collect),
-            Sink::Reducer(spec) if spec.numeric_op().is_some() => {
-                let spec = self.reducer_spec()?;
-                let sink_spec = spec.method()?.spec().sink?;
-                if sink_spec.accumulator != BuiltinSinkAccumulator::Numeric {
-                    return None;
-                }
-                let predicate_kernel = if let Some(idx) = spec.predicate_kernel_index() {
-                    Some(sink_kernels.get(idx)?.is_view_native().then_some(idx)?)
-                } else {
-                    None
-                };
-                let project_kernel = if let Some(idx) = spec.projection_kernel_index() {
-                    Some(sink_kernels.get(idx)?.is_view_native().then_some(idx)?)
-                } else {
-                    None
-                };
-                Some(ViewSinkCapability::from_sink_spec(
-                    sink_spec,
-                    predicate_kernel,
-                    project_kernel,
-                    Some(spec.numeric_op()?),
-                ))
-            }
-            Sink::Reducer(spec) if spec.op == super::ReducerOp::Count => {
-                let sink_spec = spec.method()?.spec().sink?;
-                if sink_spec.accumulator != BuiltinSinkAccumulator::Count {
-                    return None;
-                }
-                let predicate_kernel = if let Some(idx) = spec.predicate_kernel_index() {
-                    Some(sink_kernels.get(idx)?.is_view_native().then_some(idx)?)
-                } else {
-                    None
-                };
-                Some(ViewSinkCapability::from_sink_spec(
-                    sink_spec,
-                    predicate_kernel,
-                    None,
-                    None,
-                ))
-            }
-            Sink::Terminal(method) => Some(ViewSinkCapability::from_sink_spec(
-                method.spec().sink?,
-                None,
-                None,
-                None,
-            )),
-            Sink::ApproxCountDistinct => Some(ViewSinkCapability::from_sink_spec(
-                BuiltinMethod::ApproxCountDistinct.spec().sink?,
-                None,
-                None,
-                None,
-            )),
-            Sink::Reducer(_) => None,
+        if matches!(self, Sink::Collect) {
+            return Some(ViewSinkCapability::Collect);
         }
+
+        let sink_spec = self.builtin_sink_spec()?;
+        let reducer = self.reducer_spec();
+        let predicate_kernel = match reducer
+            .as_ref()
+            .and_then(|spec| spec.predicate_kernel_index())
+        {
+            Some(idx) => Some(view_native_sink_kernel(sink_kernels, idx)?),
+            None => None,
+        };
+        let project_kernel = match reducer
+            .as_ref()
+            .and_then(|spec| spec.projection_kernel_index())
+        {
+            Some(idx) => Some(view_native_sink_kernel(sink_kernels, idx)?),
+            None => None,
+        };
+        let numeric_op = match sink_spec.accumulator {
+            BuiltinSinkAccumulator::Numeric => Some(reducer.as_ref()?.numeric_op()?),
+            _ => None,
+        };
+
+        Some(ViewSinkCapability::from_sink_spec(
+            sink_spec,
+            predicate_kernel,
+            project_kernel,
+            numeric_op,
+        ))
     }
 
     pub(crate) fn builtin_sink_spec(&self) -> Option<BuiltinSinkSpec> {
@@ -128,6 +103,10 @@ impl Sink {
             Sink::Collect => None,
         }
     }
+}
+
+fn view_native_sink_kernel(sink_kernels: &[BodyKernel], idx: usize) -> Option<usize> {
+    sink_kernels.get(idx)?.is_view_native().then_some(idx)
 }
 
 fn sink_demand_from_builtin(spec: BuiltinSinkSpec) -> SinkDemand {
