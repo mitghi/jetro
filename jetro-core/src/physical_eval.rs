@@ -226,6 +226,7 @@ impl ExecCtx<'_> {
             (BackendPreference::FastChildren, PlanNode::Object(fields)) => {
                 self.eval_object_fast(fields)
             }
+            (BackendPreference::FastChildren, PlanNode::Literal(value)) => Some(Ok(value.clone())),
             (BackendPreference::FastChildren, PlanNode::Array(elems)) => {
                 self.eval_array_fast(elems)
             }
@@ -248,6 +249,63 @@ impl ExecCtx<'_> {
                     result
                         .ok_or_else(|| EvalError(format!("{:?}: builtin unsupported", call.method)))
                 }))
+            }
+            (BackendPreference::FastChildren, PlanNode::UnaryNeg(inner)) => {
+                let value = match self.eval_fast(*inner)? {
+                    Ok(value) => value,
+                    Err(err) => return Some(Err(err)),
+                };
+                Some(match value {
+                    Val::Int(n) => Ok(Val::Int(-n)),
+                    Val::Float(f) => Ok(Val::Float(-f)),
+                    _ => Err(EvalError("unary minus requires a number".into())),
+                })
+            }
+            (BackendPreference::FastChildren, PlanNode::Not(inner)) => {
+                let value = match self.eval_fast(*inner)? {
+                    Ok(value) => value,
+                    Err(err) => return Some(Err(err)),
+                };
+                Some(Ok(Val::Bool(!crate::util::is_truthy(&value))))
+            }
+            (BackendPreference::FastChildren, PlanNode::Binary { lhs, op, rhs }) => {
+                Some(self.eval_binary(*lhs, *op, *rhs))
+            }
+            (BackendPreference::FastChildren, PlanNode::Kind { expr, ty, negate }) => {
+                let value = match self.eval_fast(*expr)? {
+                    Ok(value) => value,
+                    Err(err) => return Some(Err(err)),
+                };
+                let matched = crate::util::kind_matches(&value, *ty);
+                Some(Ok(Val::Bool(if *negate { !matched } else { matched })))
+            }
+            (BackendPreference::FastChildren, PlanNode::Coalesce { lhs, rhs }) => {
+                let lhs = match self.eval_fast(*lhs)? {
+                    Ok(value) => value,
+                    Err(err) => return Some(Err(err)),
+                };
+                if lhs.is_null() {
+                    self.eval_fast(*rhs)
+                } else {
+                    Some(Ok(lhs))
+                }
+            }
+            (BackendPreference::FastChildren, PlanNode::IfElse { cond, then_, else_ }) => {
+                let cond = match self.eval_fast(*cond)? {
+                    Ok(value) => value,
+                    Err(err) => return Some(Err(err)),
+                };
+                if crate::util::is_truthy(&cond) {
+                    self.eval_fast(*then_)
+                } else {
+                    self.eval_fast(*else_)
+                }
+            }
+            (BackendPreference::FastChildren, PlanNode::Try { body, default }) => {
+                match self.eval_fast(*body)? {
+                    Ok(value) if !value.is_null() => Some(Ok(value)),
+                    Ok(_) | Err(_) => self.eval_fast(*default),
+                }
             }
             (BackendPreference::FastChildren, PlanNode::Chain { base, steps }) => {
                 self.eval_chain_fast(*base, steps)

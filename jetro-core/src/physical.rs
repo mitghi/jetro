@@ -399,7 +399,18 @@ impl PlanNode {
                 BackendPreference::Interpreted,
             ],
             Self::RootPath(_) => &[BackendPreference::TapePath, BackendPreference::Interpreted],
-            Self::Object(_) | Self::Array(_) | Self::Call { .. } | Self::Chain { .. } => &[
+            Self::Literal(_)
+            | Self::Object(_)
+            | Self::Array(_)
+            | Self::Call { .. }
+            | Self::Chain { .. }
+            | Self::UnaryNeg(_)
+            | Self::Not(_)
+            | Self::Binary { .. }
+            | Self::Kind { .. }
+            | Self::Coalesce { .. }
+            | Self::IfElse { .. }
+            | Self::Try { .. } => &[
                 BackendPreference::FastChildren,
                 BackendPreference::Interpreted,
             ],

@@ -144,12 +144,11 @@ impl PlanBuilder {
             | PlanNode::Try {
                 body: lhs,
                 default: rhs,
-            }
-            | PlanNode::Let {
-                init: lhs,
-                body: rhs,
-                ..
             } => ExecutionFacts::combine_all([self.node_facts(*lhs), self.node_facts(*rhs)]),
+            PlanNode::Let { .. } => ExecutionFacts {
+                contains_vm_fallback: true,
+                ..ExecutionFacts::default()
+            },
             PlanNode::IfElse { cond, then_, else_ } => ExecutionFacts::combine_all([
                 self.node_facts(*cond),
                 self.node_facts(*then_),
@@ -835,6 +834,15 @@ mod tests {
     #[test]
     fn source_vm_plan_is_not_byte_native() {
         let plan = QueryPlan::source_vm("$[");
+        let facts = plan.root_execution_facts();
+        assert!(facts.contains_vm_fallback);
+        assert!(!facts.is_byte_native());
+    }
+
+    #[test]
+    fn let_root_facts_keep_interpreted_fallback() {
+        let plan =
+            plan_query_with_context(r#"let x = 1 in $.meta.version"#, PlanningContext::bytes());
         let facts = plan.root_execution_facts();
         assert!(facts.contains_vm_fallback);
         assert!(!facts.is_byte_native());
