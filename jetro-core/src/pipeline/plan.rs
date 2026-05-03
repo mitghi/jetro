@@ -1121,6 +1121,7 @@ pub fn plan_with_exprs(
 
     normalize_symbolic(&mut stages, &mut e_buf, &mut k_buf, &mut sink);
     reorder_filter_runs(&mut stages, &mut e_buf, &mut k_buf);
+    fuse_filter_runs(&mut stages, &mut e_buf, &mut k_buf);
     fold_merge_with_kernels(&mut stages, &mut e_buf, &mut k_buf);
 
     Plan {
@@ -1210,6 +1211,55 @@ fn reorder_filter_runs(
         }
         i = j.max(i + 1);
     }
+}
+
+fn fuse_filter_runs(
+    stages: &mut Vec<Stage>,
+    exprs: &mut Vec<Option<Arc<Expr>>>,
+    kernels: &mut Vec<BodyKernel>,
+) {
+    let mut i = 0;
+    while i < stages.len() {
+        let mut j = i;
+        while j < stages.len() && matches!(stages[j], Stage::Filter(_, _)) {
+            j += 1;
+        }
+        if j - i < 2 {
+            i = j.max(i + 1);
+            continue;
+        }
+
+        let merged = merge_filter_programs(&stages[i..j]);
+        let merged_kernel = BodyKernel::classify(&merged);
+        stages[i] = Stage::Filter(merged, BuiltinViewStage::Filter);
+        exprs[i] = None;
+        kernels[i] = merged_kernel;
+        stages.drain(i + 1..j);
+        exprs.drain(i + 1..j);
+        kernels.drain(i + 1..j);
+        i += 1;
+    }
+}
+
+fn merge_filter_programs(filters: &[Stage]) -> Arc<Program> {
+    let mut iter = filters.iter();
+    let Some(Stage::Filter(first, _)) = iter.next() else {
+        unreachable!("filter run contains only filter stages")
+    };
+    let mut ops: Vec<Opcode> = first.ops.as_ref().to_vec();
+    for stage in iter {
+        let Stage::Filter(prog, _) = stage else {
+            unreachable!("filter run contains only filter stages")
+        };
+        ops.push(Opcode::AndOp(Arc::clone(prog)));
+    }
+    Arc::new(Program {
+        ops: ops.into(),
+        source: first.source.clone(),
+        id: 0,
+        is_structural: false,
+        ics: first.ics.clone(),
+    })
 }
 
 fn fold_merge_with_kernels(

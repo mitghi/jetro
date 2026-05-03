@@ -21,6 +21,7 @@ pub enum BodyKernel {
         op: crate::ast::BinOp,
         lit: Val,
     },
+    And(Arc<[BodyKernel]>),
     FieldCmpLit(Arc<str>, crate::ast::BinOp, Val),
     FieldChainCmpLit(Arc<[Arc<str>]>, crate::ast::BinOp, Val),
     CurrentCmpLit(crate::ast::BinOp, Val),
@@ -116,6 +117,7 @@ impl BodyKernel {
                 receiver.is_view_native() && call.spec().view_scalar
             }
             Self::CmpLit { lhs, .. } => lhs.is_view_native(),
+            Self::And(predicates) => predicates.iter().all(Self::is_view_native),
             _ => true,
         }
     }
@@ -271,7 +273,34 @@ impl BodyKernel {
         if let Some(kernel) = classify_structural_view_kernel(rest) {
             return kernel;
         }
+        if let Some(kernel) = classify_and_kernel(ops) {
+            return kernel;
+        }
         Self::Generic
+    }
+}
+
+fn classify_and_kernel(ops: &[crate::vm::Opcode]) -> Option<BodyKernel> {
+    let (lhs_ops, rhs) = match ops {
+        [lhs @ .., crate::vm::Opcode::AndOp(rhs)] if !lhs.is_empty() => (lhs, rhs),
+        _ => return None,
+    };
+    let lhs_prog = crate::vm::Program::new(lhs_ops.to_vec(), "<pipeline-and-lhs>");
+    let lhs = BodyKernel::classify(&lhs_prog);
+    let rhs = BodyKernel::classify(rhs);
+    if matches!(lhs, BodyKernel::Generic) || matches!(rhs, BodyKernel::Generic) {
+        return None;
+    }
+    let mut predicates = Vec::new();
+    flatten_and_kernel(lhs, &mut predicates);
+    flatten_and_kernel(rhs, &mut predicates);
+    Some(BodyKernel::And(predicates.into()))
+}
+
+fn flatten_and_kernel(kernel: BodyKernel, out: &mut Vec<BodyKernel>) {
+    match kernel {
+        BodyKernel::And(predicates) => out.extend(predicates.iter().cloned()),
+        other => out.push(other),
     }
 }
 
@@ -445,6 +474,14 @@ fn eval_native_kernel(kernel: &BodyKernel, item: &Val) -> Result<Val, EvalError>
             let lhs = eval_native_kernel(lhs, item)?;
             Ok(Val::Bool(eval_cmp_op(&lhs, *op, lit)))
         }
+        BodyKernel::And(predicates) => {
+            for predicate in predicates.iter() {
+                if !crate::util::is_truthy(&eval_native_kernel(predicate, item)?) {
+                    return Ok(Val::Bool(false));
+                }
+            }
+            Ok(Val::Bool(true))
+        }
         BodyKernel::FieldCmpLit(k, op, lit) => {
             let lhs = item.get_field(k.as_ref());
             Ok(Val::Bool(eval_cmp_op(&lhs, *op, lit)))
@@ -604,6 +641,18 @@ where
                 ),
             };
             Some(ViewKernelValue::Owned(Val::Bool(passes)))
+        }
+        BodyKernel::And(predicates) => {
+            for predicate in predicates.iter() {
+                let passes = match eval_view_kernel(predicate, item)? {
+                    ViewKernelValue::View(view) => view.scalar().truthy(),
+                    ViewKernelValue::Owned(value) => crate::util::is_truthy(&value),
+                };
+                if !passes {
+                    return Some(ViewKernelValue::Owned(Val::Bool(false)));
+                }
+            }
+            Some(ViewKernelValue::Owned(Val::Bool(true)))
         }
         BodyKernel::FieldCmpLit(key, op, lit) => {
             let lhs = item.field(key);

@@ -1386,12 +1386,11 @@ mod tests {
             &kernels,
             Sink::Reducer(crate::pipeline::ReducerSpec::count()),
         );
-        // Expect Eq filter first (rank ~ 1.5/0.9 = 1.67) before Lt
-        // (rank ~ 1.5/0.6 = 2.5).
-        assert_eq!(p.stages.len(), 2);
-        // Reordered — first stage should be the Eq predicate.  Verify by
-        // checking we got 2 Filters; behavioural correctness is via
-        // integration test that asserts result parity with non-reordered.
+        // Reorder is immediately followed by predicate fusion, so the
+        // adjacent filter run becomes one stage. Behavioural correctness is
+        // covered by the parity test below.
+        assert_eq!(p.stages.len(), 1);
+        assert!(matches!(p.stages[0], Stage::Filter(_, _)));
     }
 
     #[test]

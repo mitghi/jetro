@@ -935,6 +935,25 @@ mod tests {
             }
             _ => panic!("expected merged Filter"),
         }
+        assert!(
+            matches!(&p.stage_kernels[0], BodyKernel::And(predicates) if predicates.len() == 2)
+        );
+        assert!(p.stage_kernels[0].is_view_native());
+    }
+
+    #[test]
+    fn predicate_fusion_collapses_long_filter_runs_after_planning() {
+        let p = lower_query(
+            "$.orders.filter(total > 100).filter(qty > 0).filter(active == true).filter(region == \"eu\").count()",
+        )
+        .unwrap();
+
+        assert_eq!(p.stages.len(), 1);
+        assert!(matches!(&p.stages[0], Stage::Filter(_, _)));
+        assert!(
+            matches!(&p.stage_kernels[0], BodyKernel::And(predicates) if predicates.len() == 4)
+        );
+        assert!(p.stage_kernels[0].is_view_native());
     }
 
     #[test]
