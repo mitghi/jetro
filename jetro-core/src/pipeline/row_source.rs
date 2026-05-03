@@ -12,8 +12,7 @@ use crate::value::{ObjVecData, Val};
 
 use super::{walk_field_chain, Source};
 
-/// Unified row storage that avoids copying when the source already owns or
-/// borrows an array slice, while still supporting fully owned `Vec<Val>` output.
+/// Unified row storage that avoids copying when the source owns or borrows an array slice, while also supporting owned `Vec<Val>`.
 pub(super) enum Rows<'a> {
     /// A borrowed slice from a pre-existing array; zero-copy iteration.
     Borrowed(&'a [Val]),
@@ -33,8 +32,7 @@ pub(super) enum RowsIter<'a> {
     Owned(std::vec::IntoIter<Val>),
 }
 
-/// Abstraction over a pipeline row source that handles `ObjVec` columnar
-/// data, regular array-like `Rows`, and single scalar values.
+/// Abstraction over a pipeline row source, handling `ObjVec` columnar data, array-like `Rows`, and single scalars.
 pub(super) enum ValRowSource<'a> {
     /// A columnar `ObjVec`; rows are reconstructed as objects on demand.
     ObjVec(Arc<ObjVecData>),
@@ -54,16 +52,15 @@ pub(super) enum ValRowsIter<'a> {
     Single(std::option::IntoIter<Val>),
 }
 
-/// A row source backed directly by a `simd-json` tape, enabling zero-copy
-/// streaming over unparsed JSON without building a `Val` tree.
+/// Row source backed directly by a `simd-json` tape, enabling zero-copy streaming without building a `Val` tree.
 #[cfg(feature = "simd-json")]
 pub(super) enum TapeRowSource<'a> {
     /// The source tape node is an array; iteration yields each element by span.
     Array {
         tape: &'a crate::strref::TapeData,
-        /// Index of the first array element in the tape.
+        // Index of the first array element in the tape.
         first: usize,
-        /// Number of elements in the array.
+        // Number of elements in the array.
         len: usize,
     },
     /// The source tape node is a scalar or object; treated as a single row.
@@ -72,16 +69,15 @@ pub(super) enum TapeRowSource<'a> {
     Missing,
 }
 
-/// Iterator over tape nodes, yielding each array element as a `TapeView` without
-/// materialisation.
+/// Iterator over tape nodes that yields each array element as a `TapeView` without materialisation.
 #[cfg(feature = "simd-json")]
 pub(super) enum TapeRowsIter<'a> {
     /// Advances through array elements by consuming tape spans.
     Array {
         tape: &'a crate::strref::TapeData,
-        /// Elements remaining to be yielded.
+        // Elements remaining to be yielded.
         remaining: usize,
-        /// Current tape index.
+        // Current tape index.
         cur: usize,
     },
     /// Single-element iterator for a non-array tape node.
@@ -90,16 +86,13 @@ pub(super) enum TapeRowsIter<'a> {
     Empty,
 }
 
-/// Wrapper around `TapeRowsIter` that materialises each `TapeView` into a
-/// fully owned `Val` on demand, bridging the zero-copy tape path into
-/// the standard `Val`-based execution loop.
+/// Wrapper around `TapeRowsIter` that materialises each `TapeView` into a `Val` on demand.
 #[cfg(feature = "simd-json")]
 pub(super) struct TapeMaterializedRowsIter<'a>(TapeRowsIter<'a>);
 
 impl Iterator for ValRowsIter<'_> {
     type Item = Val;
 
-    /// Advances to the next row, materialising `ObjVec` rows as `Val::Obj` on demand.
     fn next(&mut self) -> Option<Self::Item> {
         match self {
             Self::Rows(iter) => iter.next(),
@@ -120,8 +113,7 @@ impl Iterator for ValRowsIter<'_> {
 impl<'a> Iterator for TapeRowsIter<'a> {
     type Item = crate::value_view::TapeView<'a>;
 
-    /// Yields the next tape node view, advancing the current tape index by the
-    /// node's span so the next call starts at the correct position.
+    // Advances the current tape index by the node's span before returning the view.
     fn next(&mut self) -> Option<Self::Item> {
         use crate::value_view::TapeView;
 
@@ -149,7 +141,6 @@ impl<'a> Iterator for TapeRowsIter<'a> {
 impl Iterator for TapeMaterializedRowsIter<'_> {
     type Item = Val;
 
-    /// Materialises the next tape node into a `Val`, calling `ValueView::materialize`.
     fn next(&mut self) -> Option<Self::Item> {
         use crate::value_view::ValueView;
 
@@ -160,7 +151,6 @@ impl Iterator for TapeMaterializedRowsIter<'_> {
 impl Iterator for RowsIter<'_> {
     type Item = Val;
 
-    /// Yields the next `Val` from the backing slice, `Arc`, or owned vec.
     fn next(&mut self) -> Option<Self::Item> {
         match self {
             Self::Borrowed(iter) => iter.next().cloned(),
@@ -193,8 +183,7 @@ impl<'a> Rows<'a> {
         }
     }
 
-    /// Consumes the `Rows` and returns an owned `Vec<Val>`, cloning only when
-    /// the backing store is `Borrowed` or `Shared`.
+    /// Consumes `Rows` and returns an owned `Vec<Val>`, cloning only when the backing store is `Borrowed` or `Shared`.
     pub(super) fn into_vec(self) -> Vec<Val> {
         match self {
             Self::Borrowed(rows) => rows.to_vec(),
@@ -205,8 +194,7 @@ impl<'a> Rows<'a> {
 }
 
 impl<'a> ValRowSource<'a> {
-    /// Constructs a `ValRowSource` from a received `Val`, choosing the most
-    /// efficient backing based on the value's concrete type.
+    /// Constructs a `ValRowSource` from `recv`, selecting the most efficient backing for the value's type.
     pub(super) fn from_receiver(recv: &'a Val) -> Self {
         match recv {
             Val::ObjVec(data) => Self::ObjVec(Arc::clone(data)),
@@ -225,8 +213,7 @@ impl<'a> ValRowSource<'a> {
         }
     }
 
-    /// Materialises all rows into an owned `Vec<Val>`. For `Rows` this avoids
-    /// iteration overhead; for `ObjVec` and `Single` it collects through the iterator.
+    /// Materialises all rows into an owned `Vec<Val>`, avoiding iteration overhead for `Rows` variants.
     pub(super) fn materialize(self) -> Vec<Val> {
         match self {
             Self::Rows(rows) => rows.into_vec(),
@@ -234,8 +221,7 @@ impl<'a> ValRowSource<'a> {
         }
     }
 
-    /// Returns `true` when this source is an `ObjVec`, used in tests to verify
-    /// that promotion is not inadvertently materialised before the execution loop.
+    /// Returns `true` when this source is an `ObjVec`; used in tests to verify the source is not prematurely materialised.
     #[cfg(test)]
     pub(super) fn is_objvec_streaming(&self) -> bool {
         matches!(self, Self::ObjVec(_))
@@ -244,8 +230,7 @@ impl<'a> ValRowSource<'a> {
 
 #[cfg(feature = "simd-json")]
 impl<'a> TapeRowSource<'a> {
-    /// Walks `keys` through `tape` and returns a `TapeRowSource` rooted at the
-    /// resolved node, or `Missing` when any key in the chain is absent.
+    /// Walks `keys` through `tape` and returns a `TapeRowSource` rooted at the resolved node, or `Missing` when any key is absent.
     pub(super) fn from_field_chain(tape: &'a crate::strref::TapeData, keys: &[Arc<str>]) -> Self {
         let Some(idx) = tape_walk_field_chain(tape, keys) else {
             return Self::Missing;
@@ -253,8 +238,7 @@ impl<'a> TapeRowSource<'a> {
         Self::from_tape_index(tape, idx)
     }
 
-    /// Constructs a `TapeRowSource` rooted at tape node `idx`, choosing `Array`
-    /// when the node is a JSON array or `Single` for any other node type.
+    /// Constructs a `TapeRowSource` at tape node `idx`, choosing `Array` for JSON arrays and `Single` otherwise.
     pub(super) fn from_tape_index(tape: &'a crate::strref::TapeData, idx: usize) -> Self {
         match tape.nodes.get(idx) {
             Some(crate::strref::TapeNode::Array { len, .. }) => Self::Array {
@@ -267,8 +251,7 @@ impl<'a> TapeRowSource<'a> {
         }
     }
 
-    /// Returns a `TapeRowsIter` that yields each element as a `TapeView`
-    /// without materialisation.
+    /// Returns a `TapeRowsIter` that yields each element as a `TapeView` without materialisation.
     pub(super) fn iter_views(self) -> TapeRowsIter<'a> {
         match self {
             Self::Array { tape, first, len } => TapeRowsIter::Array {
@@ -281,21 +264,18 @@ impl<'a> TapeRowSource<'a> {
         }
     }
 
-    /// Returns a `TapeMaterializedRowsIter` that materialises each tape element
-    /// into a `Val` as it iterates. Use when downstream code requires owned `Val` rows.
+    /// Returns a `TapeMaterializedRowsIter` that materialises each tape element into an owned `Val` as it iterates.
     pub(super) fn iter_materialized(self) -> TapeMaterializedRowsIter<'a> {
         TapeMaterializedRowsIter(self.iter_views())
     }
 
-    /// Returns `true` when the tape source resolves to an array node and can
-    /// therefore act as a multi-row provider for a streaming pipeline.
+    /// Returns `true` when the tape source resolves to an array node, making it a multi-row provider.
     pub(super) fn is_array_provider(&self) -> bool {
         matches!(self, Self::Array { .. })
     }
 }
 
-/// Resolves a `Source` to a `Val` by either cloning the embedded receiver or
-/// walking the field-chain on `root`.
+/// Resolves a `Source` to a `Val`, cloning the embedded receiver or walking the field-chain on `root`.
 pub(super) fn resolve(source: &Source, root: &Val) -> Val {
     match source {
         Source::Receiver(v) => v.clone(),
@@ -303,8 +283,7 @@ pub(super) fn resolve(source: &Source, root: &Val) -> Val {
     }
 }
 
-/// Returns `Rows` wrapping the array-like content of `recv`, or `None` when
-/// `recv` does not expose a `Cow<[Val]>` representation (e.g. it is a scalar).
+/// Returns `Rows` wrapping the array content of `recv`, or `None` when `recv` is a scalar with no `Cow<[Val]>` representation.
 pub(super) fn array_like_rows(recv: &Val) -> Option<Rows<'_>> {
     match recv.as_vals()? {
         Cow::Borrowed(rows) => Some(Rows::Borrowed(rows)),
@@ -312,26 +291,22 @@ pub(super) fn array_like_rows(recv: &Val) -> Option<Rows<'_>> {
     }
 }
 
-/// Constructs a `ValRowsIter` from `recv` for use in the streaming execution
-/// loop. Delegates through `ValRowSource::from_receiver`.
+/// Constructs a `ValRowsIter` from `recv` for the streaming execution loop.
 pub(super) fn source_iter(recv: &Val) -> ValRowsIter<'_> {
     ValRowSource::from_receiver(recv).iter()
 }
 
-/// Materialises all rows from `recv` into an owned `Vec<Val>`, used before
-/// barrier-stage processing in the legacy execution path.
+/// Materialises all rows from `recv` into an owned `Vec<Val>`.
 pub(super) fn materialize_source(recv: &Val) -> Vec<Val> {
     ValRowSource::from_receiver(recv).materialize()
 }
 
-/// Returns the number of rows in `recv` when it is an array-like value, or
-/// `None` when the value is a scalar or otherwise non-iterable.
+/// Returns the number of rows in `recv`, or `None` when `recv` is a scalar or non-iterable.
 pub(super) fn row_count(recv: &Val) -> Option<usize> {
     recv.array_len()
 }
 
-/// Returns the row at `idx` from an array-like `recv`, reconstructing an
-/// `ObjVec` row as a `Val::Obj` when necessary.
+/// Returns the row at `idx` from an array-like `recv`, reconstructing an `ObjVec` row as `Val::Obj` when needed.
 pub(super) fn row_at(recv: &Val, idx: usize) -> Option<Val> {
     if let Val::ObjVec(rows) = recv {
         return (idx < rows.nrows()).then(|| objvec_row(rows, idx));
@@ -340,8 +315,7 @@ pub(super) fn row_at(recv: &Val, idx: usize) -> Option<Val> {
     recv.as_vals()?.get(idx).cloned()
 }
 
-/// Converts an owned `Val` into `Rows<'static>` when it is array-like, or
-/// returns `None` for scalars. Avoids copying `Val::Arr` by wrapping in `Shared`.
+/// Converts an owned `Val` into `Rows<'static>` when array-like, wrapping `Val::Arr` in `Shared` to avoid copying.
 pub(super) fn resolved_array_like_rows(recv: Val) -> Option<Rows<'static>> {
     match recv {
         Val::Arr(items) => Some(Rows::Shared(items)),
@@ -349,14 +323,11 @@ pub(super) fn resolved_array_like_rows(recv: Val) -> Option<Rows<'static>> {
     }
 }
 
-/// Reconstructs a single `ObjVec` row at position `row` as a `Val::Obj` using
-/// `ObjVecData::row_val`.
 fn objvec_row(data: &ObjVecData, row: usize) -> Val {
     data.row_val(row)
 }
 
-/// Walks a field-key sequence through `tape`, returning the tape index of the
-/// final resolved node or `None` if any step fails to find the key.
+// Returns the tape index of the final node after walking `keys`, or `None` if any key is missing.
 #[cfg(feature = "simd-json")]
 fn tape_walk_field_chain(tape: &crate::strref::TapeData, keys: &[Arc<str>]) -> Option<usize> {
     let mut cur = 0usize;
@@ -366,9 +337,7 @@ fn tape_walk_field_chain(tape: &crate::strref::TapeData, keys: &[Arc<str>]) -> O
     Some(cur)
 }
 
-/// Scans the object node at `idx` in `tape` for a field named `key` and returns
-/// the tape index of its value, or `None` if the node is not an object or the
-/// key is not present.
+// Scans the tape object at `idx` for `key` and returns the tape index of its value, or `None` when absent.
 #[cfg(feature = "simd-json")]
 fn tape_field(tape: &crate::strref::TapeData, idx: usize, key: &str) -> Option<usize> {
     let crate::strref::TapeNode::Object { len, .. } = *tape.nodes.get(idx)? else {

@@ -7,25 +7,18 @@ use crate::value::Val;
 use super::{num_finalise, num_fold, ReducerOp, ReducerSpec};
 
 /// Single-pass accumulator for numeric aggregate sinks (`sum`, `avg`, `min`, `max`, `count`).
-///
-/// All statistics are computed in one iteration over the source; unused fields incur no cost.
 #[derive(Debug, Clone)]
 pub(crate) struct ReducerAccumulator {
-    /// Governs which aggregate operation is performed and any associated projection/predicate.
     spec: ReducerSpec,
-    /// Running row count, incremented for every `push` when `op` is `Count`.
     count: i64,
-    /// Integer accumulation for sum; promoted to `sum_f` on first float encounter.
     sum_i: i64,
-    /// Floating-point accumulation for sum after integer overflow or float input.
+    // promoted from sum_i on first float encounter
     sum_f: f64,
-    /// Set to `true` once `sum_i` has been promoted to `sum_f`.
+    // true once sum_i has been promoted to sum_f
     sum_floated: bool,
-    /// Running minimum tracked as `f64` for uniform comparison.
     min_f: f64,
-    /// Running maximum tracked as `f64` for uniform comparison.
     max_f: f64,
-    /// Count of numeric observations used by `avg` to compute the mean.
+    // observation count for avg denominator
     n_obs: usize,
 }
 

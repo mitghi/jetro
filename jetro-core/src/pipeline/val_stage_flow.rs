@@ -13,10 +13,7 @@ use super::{
     TerminalMapCollector,
 };
 
-/// Applies a single `Stage` to `item` in the streaming (legacy) execution loop.
-///
-/// Dispatches to the appropriate builtin executor or falls back to `StageFlow::Continue` for
-/// barrier and expanding stages that are handled outside the per-row loop.
+/// Applies `stage` to `item` in the streaming loop; barrier and expanding stages return `Continue`.
 pub(super) fn apply_adapter_streaming<'a>(
     stage: &Stage,
     stage_idx: usize,

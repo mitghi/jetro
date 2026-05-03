@@ -28,28 +28,19 @@ use crate::builtins::{
 };
 use crate::chain_ir::PullDemand;
 
-/// Top-level entry point for the legacy execution path.
-/// Materialises rows that require a barrier (sort, group-by, etc.) before
-/// iterating, and streams rows directly otherwise.
+/// Runs the pipeline against `root`, materialising barrier stages then streaming the rest.
 pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val, EvalError> {
-    
-    
     let mut vm = crate::vm::VM::new();
-    
-    
     let mut loop_env = base_env.clone();
 
-    
     let recv = row_source::resolve(&pipeline.source, root);
 
-    
     let source_demand = pipeline.source_demand().chain.pull;
     let mut pulled_inputs: usize = 0;
     let mut emitted_outputs: usize = 0;
 
     let mut sink_acc = SinkAccumulator::new(&pipeline.sink);
 
-    
     let needs_barrier = pipeline
         .stages
         .iter()
@@ -65,8 +56,6 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
             &pipeline.stage_kernels,
             &pipeline.sink,
         );
-        
-        
         for (stage_idx, stage) in pipeline.stages.iter().enumerate() {
             let kernel = pipeline
                 .stage_kernels
@@ -107,7 +96,6 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
         }
         pulled_inputs += 1;
 
-        
         let sink_done = match &pipeline.sink {
             Sink::Reducer(_) => {
                 match observe_reducer_item(pipeline, item, &mut sink_acc, &mut vm, &mut loop_env)? {
@@ -126,14 +114,12 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
         }
     }
 
-    
+    // group_by wraps its output in a single-element array; unwrap it so the caller sees the map
     let unwrap_single_collect_obj = matches!(pipeline.stages.last(), Some(Stage::GroupBy(_)));
     Ok(sink_acc.finish(unwrap_single_collect_obj))
 }
 
-/// Runs a streaming pipeline directly from a `simd-json` tape without fully
-/// materialising the document. Returns `None` when any stage requires
-/// materialisation or the source is not an array-like tape node.
+/// Streams a pipeline directly from a `simd-json` tape; returns `None` when any stage requires materialisation.
 #[cfg(feature = "simd-json")]
 pub(super) fn run_tape_field_chain(
     body: &PipelineBody,
@@ -163,9 +149,6 @@ pub(super) fn run_tape_field_chain(
     ))
 }
 
-/// Drives the streaming (no-barrier) execution loop over an arbitrary row
-/// iterator. Applies each stage inline, respects `PullDemand` limits, and
-/// feeds passing rows into the `SinkAccumulator`.
 fn run_streaming_rows<I>(pipeline: &Pipeline, base_env: &Env, iter: I) -> Result<Val, EvalError>
 where
     I: IntoIterator<Item = Val>,
@@ -262,16 +245,12 @@ where
     Ok(sink_acc.finish(false))
 }
 
-/// Internal iterator used after barrier-stage materialisation; currently only
-/// the `Owned` variant is needed because barriers always produce a `Vec<Val>`.
+// barrier stages always produce a Vec<Val>, so only the Owned variant is needed here
 enum LegacyPreIter {
-    /// Fully materialised row buffer produced by one or more barrier stages.
     Owned(std::vec::IntoIter<Val>),
 }
 
-/// Applies a single barrier-compatible stage to the fully materialised row
-/// buffer `buf` in-place. Returns `Some(Ok(()))` on success, `Some(Err(_))` on
-/// evaluation failure, or `None` when the stage type is not handled here.
+// returns None for unrecognised stage types so the caller can unreachable!()
 fn apply_adapter_materialized(
     stage: &Stage,
     buf: &mut Vec<Val>,
@@ -600,8 +579,7 @@ fn apply_adapter_materialized(
     }
 }
 
-/// Applies an element-wise stage transformation to a single `Val` row, such as
-/// `Slice`, `Replace`, or a `Builtin` call that maps one value to another.
+/// Applies an element-wise stage (`Slice`, `Replace`, `Builtin`) to a single `Val` row.
 pub(super) fn apply_element_adapter(stage: &Stage, v: Val) -> Val {
     match stage {
         Stage::Slice(start, end) => slice_apply(v, *start, *end),
@@ -615,8 +593,6 @@ pub(super) fn apply_element_adapter(stage: &Stage, v: Val) -> Val {
     }
 }
 
-/// Applies an expanding stage (currently only `Split`) to a single row, pushing
-/// the resulting elements into `out`. Elements that do not expand are dropped.
 fn apply_expanding_adapter(stage: &Stage, v: &Val, out: &mut Vec<Val>) {
     if let Stage::Split(sep) = stage {
         if let Some(Val::Arr(a)) = split_apply(v, sep.as_ref()) {
@@ -625,20 +601,17 @@ fn apply_expanding_adapter(stage: &Stage, v: &Val, out: &mut Vec<Val>) {
     }
 }
 
-/// Extracts the compiled body `Program` from an object-lambda stage
-/// (`TransformKeys`, `TransformValues`, `FilterKeys`, `FilterValues`).
+/// Extracts the compiled body `Program` from an object-lambda stage variant.
 pub(super) fn object_lambda_program(stage: &Stage) -> Option<&crate::vm::Program> {
     stage.body_program()
 }
 
-/// Extracts the compiled body `Program` from a row-level stage
-/// (`Filter`, `Map`, `FlatMap`).
+/// Extracts the compiled body `Program` from a row-level stage variant.
 pub(super) fn row_stage_program(stage: &Stage) -> Option<&crate::vm::Program> {
     stage.body_program()
 }
 
-/// Extracts the compiled body `Program` from a keyed stage
-/// (`GroupBy`, `CountBy`, `IndexBy`, `SortBy`, `UniqueBy`).
+/// Extracts the compiled body `Program` from a keyed stage variant.
 pub(super) fn keyed_stage_program(stage: &Stage) -> Option<&crate::vm::Program> {
     stage.body_program()
 }
@@ -653,17 +626,11 @@ impl Iterator for LegacyPreIter {
     }
 }
 
-/// Outcome of processing a single row through the reducer sink logic.
 enum ReducerItemFlow {
-    /// The item passed the optional predicate and was counted/accumulated.
     Observed,
-    /// The item was rejected by the reducer predicate and should be skipped.
     Skipped,
 }
 
-/// Evaluates the reducer sink's optional predicate and projection for `item`,
-/// then pushes the (possibly projected) value into `sink_acc`.
-/// Returns `Skipped` when the predicate evaluates to falsy.
 fn observe_reducer_item(
     pipeline: &Pipeline,
     item: Val,
@@ -708,9 +675,7 @@ fn observe_reducer_item(
 }
 
 
-/// Applies an object-lambda stage (`TransformKeys`, `TransformValues`,
-/// `FilterKeys`, `FilterValues`) to the object `recv`, producing a new
-/// `Val::Obj` with the transformed or filtered key-value pairs.
+/// Applies an object-lambda stage (`TransformKeys`, `TransformValues`, `FilterKeys`, `FilterValues`) to `recv`.
 pub(crate) fn apply_lambda_obj(
     stage: &Stage,
     recv: &Val,

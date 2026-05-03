@@ -9,11 +9,7 @@ use crate::{
 
 use super::{row_source, select_strategy, Pipeline, Position, Stage, Strategy};
 
-
-/// Executes a positional (`first`/`last`) pipeline by directly indexing the source.
-///
-/// Returns `None` when the pipeline does not qualify for indexed dispatch (non-positional sink,
-/// non-indexable source, or stages that cannot be applied element-wise).
+/// Executes a positional (`first`/`last`) pipeline by directly indexing the source; returns `None` when the pipeline does not qualify.
 pub(super) fn run(
     pipeline: &Pipeline,
     root: &Val,

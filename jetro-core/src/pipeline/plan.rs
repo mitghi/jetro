@@ -124,14 +124,10 @@ impl Sink {
     }
 }
 
-/// Returns `Some(idx)` if the sink kernel at `idx` is view-native, allowing the view pipeline
-/// path to avoid materialisation for that sub-expression.
 fn view_native_sink_kernel(sink_kernels: &[BodyKernel], idx: usize) -> Option<usize> {
     sink_kernels.get(idx)?.is_view_native().then_some(idx)
 }
 
-/// Converts a `BuiltinSinkSpec` into a `SinkDemand`, mapping builtin pull/value/order flags to
-/// the chain-IR demand types.
 fn sink_demand_from_builtin(spec: BuiltinSinkSpec) -> SinkDemand {
     match spec.demand {
         BuiltinSinkDemand::First { value } => SinkDemand {
@@ -155,7 +151,6 @@ fn sink_demand_from_builtin(spec: BuiltinSinkSpec) -> SinkDemand {
     }
 }
 
-/// Converts the builtin value-need tag to the chain-IR `ValueNeed` type.
 fn sink_value_need(value: BuiltinSinkValueNeed) -> ValueNeed {
     match value {
         BuiltinSinkValueNeed::None => ValueNeed::None,
@@ -240,8 +235,6 @@ pub fn compute_strategies_with_kernels(
     strategies
 }
 
-/// Returns `true` when every stage in `suffix` either preserves sort order or acts as an
-/// order-prefix predicate, making it safe to apply a bounded top-K sort for the whole prefix.
 fn ordered_prefix_suffix_is_safe(
     sort: &super::SortSpec,
     sort_kernel: &BodyKernel,
@@ -254,8 +247,8 @@ fn ordered_prefix_suffix_is_safe(
     })
 }
 
-/// Returns `true` when `predicate` is a range comparison on the same key as `sort`, meaning
-/// all remaining elements beyond the predicate's cut-off can never satisfy the predicate.
+// Returns `true` when `predicate` is a range comparison on the same key as `sort`, meaning
+// all remaining elements beyond the predicate's cut-off can never satisfy the predicate.
 fn predicate_is_order_prefix(
     sort: &super::SortSpec,
     sort_kernel: &BodyKernel,
@@ -270,8 +263,6 @@ fn predicate_is_order_prefix(
     order_lhs_eq(lhs, order_key) && cmp_is_prefix_for_order(op, sort.descending)
 }
 
-/// Extracts the left-hand side key and comparison operator from a kernel that is a simple
-/// literal comparison, returning `None` for compound or non-comparison kernels.
 fn predicate_order_lhs(predicate: &BodyKernel) -> Option<(OrderKey<'_>, BinOp)> {
     match predicate {
         BodyKernel::CurrentCmpLit(op, _) => Some((OrderKey::Current, *op)),
@@ -284,7 +275,6 @@ fn predicate_order_lhs(predicate: &BodyKernel) -> Option<(OrderKey<'_>, BinOp)> 
     }
 }
 
-/// Interprets a kernel as an `OrderKey` reference when it is a simple current/field/chain read.
 fn lhs_order_key(lhs: &BodyKernel) -> Option<OrderKey<'_>> {
     match lhs {
         BodyKernel::Current => Some(OrderKey::Current),
@@ -294,8 +284,6 @@ fn lhs_order_key(lhs: &BodyKernel) -> Option<OrderKey<'_>> {
     }
 }
 
-/// Determines the `OrderKey` used by a `Sort` stage: current element for identity sorts,
-/// or the field/chain indicated by the sort kernel.
 fn sort_order_key<'a>(sort: &super::SortSpec, sort_kernel: &'a BodyKernel) -> Option<OrderKey<'a>> {
     if sort.key.is_none() {
         return Some(OrderKey::Current);
@@ -308,18 +296,16 @@ fn sort_order_key<'a>(sort: &super::SortSpec, sort_kernel: &'a BodyKernel) -> Op
     }
 }
 
-/// A lightweight key descriptor used during sort-strategy analysis to compare sort and predicate
-/// keys without allocating.
+// Lightweight key descriptor used during sort-strategy analysis; avoids allocation.
 enum OrderKey<'a> {
-    /// The key is the element value itself (no field lookup).
+    // The key is the element value itself (no field lookup).
     Current,
-    /// The key is a single named field of the element object.
+    // The key is a single named field of the element object.
     Field(&'a str),
-    /// The key is obtained by traversing a sequence of field names.
+    // The key is obtained by traversing a sequence of field names.
     FieldChain(&'a [Arc<str>]),
 }
 
-/// Returns `true` when `lhs` and `key` refer to the same sort key path.
 fn order_lhs_eq(lhs: OrderKey<'_>, key: OrderKey<'_>) -> bool {
     match (lhs, key) {
         (OrderKey::Current, OrderKey::Current) => true,
@@ -329,7 +315,6 @@ fn order_lhs_eq(lhs: OrderKey<'_>, key: OrderKey<'_>) -> bool {
     }
 }
 
-/// Returns `true` when two field-chain slices have identical length and element-wise equal keys.
 fn same_key_chain(lhs: &[Arc<str>], rhs: &[Arc<str>]) -> bool {
     lhs.len() == rhs.len()
         && lhs
@@ -338,8 +323,7 @@ fn same_key_chain(lhs: &[Arc<str>], rhs: &[Arc<str>]) -> bool {
             .all(|(a, b)| a.as_ref() == b.as_ref())
 }
 
-/// Returns `true` when the comparison operator `op` is a prefix predicate for `descending`
-/// order — i.e. `>` / `>=` for descending, `<` / `<=` for ascending.
+// `>` / `>=` is a prefix for descending order; `<` / `<=` for ascending.
 fn cmp_is_prefix_for_order(op: BinOp, descending: bool) -> bool {
     matches!(
         (descending, op),
@@ -385,21 +369,16 @@ impl PipelineBody {
     }
 }
 
-/// Returns `true` when every stage in `stages` can execute without a document-root reference.
 fn stages_can_run_with_materialized_receiver(stages: &[Stage]) -> bool {
     stages
         .iter()
         .all(|stage| stage.can_run_with_receiver_only(program_is_current_only))
 }
 
-/// Returns `true` when every opcode in `program` can be evaluated using only the current element
-/// (`@`), with no reference to the document root (`$`).
 fn program_is_current_only(program: &Program) -> bool {
     program.ops.iter().all(opcode_is_current_only)
 }
 
-/// Returns `true` when `opcode` does not push the document root or spawn a new root-dependent
-/// sub-expression.
 fn opcode_is_current_only(opcode: &Opcode) -> bool {
     match opcode {
         Opcode::PushRoot | Opcode::RootChain(_) => false,
@@ -468,7 +447,6 @@ fn opcode_is_current_only(opcode: &Opcode) -> bool {
     }
 }
 
-/// Returns `true` when the object entry's key and value programs are both current-only.
 fn obj_entry_is_current_only(entry: &CompiledObjEntry) -> bool {
     match entry {
         CompiledObjEntry::Short { .. } | CompiledObjEntry::KvPath { .. } => true,
@@ -502,7 +480,6 @@ pub struct StageShape {
 }
 
 impl StageShape {
-    /// Constructs a `StageShape` from the registered `BuiltinViewStage` metadata.
     fn from_view_stage(stage: BuiltinViewStage) -> Self {
         Self {
             cardinality: stage.cardinality().into(),
@@ -512,8 +489,6 @@ impl StageShape {
         }
     }
 
-    /// Constructs a `StageShape` from the builtin registry, falling back to the method's own
-    /// spec fields when no pipeline-specific shape override is registered.
     fn from_builtin(method: BuiltinMethod) -> Self {
         use crate::builtins::BuiltinCategory;
 
@@ -551,16 +526,14 @@ pub(crate) struct StageDescriptor<'a> {
     pub usize_arg: Option<usize>,
     /// Override for the pipeline executor, used for special-cased stages like `SortedDedup`.
     pub executor_override: Option<BuiltinPipelineExecutor>,
-    /// Override for the `BuiltinViewStage` metadata, replacing the method's default.
     view_stage_override: Option<BuiltinViewStage>,
-    /// When `true`, a one-to-one cardinality stage may fall back to `Preserves` order effect.
+    // when true, a one-to-one stage may fall back to Preserves order effect
     allow_one_to_one_order_fallback: bool,
-    /// When `true`, the stage is safe to run against a materialised receiver with no body program.
+    // when true, the stage is safe to run against a materialised receiver with no body program
     receiver_safe_without_body: bool,
 }
 
 impl<'a> StageDescriptor<'a> {
-    /// Creates a descriptor for a standard builtin-method stage with all optional fields unset.
     #[inline]
     fn new(method: BuiltinMethod) -> Self {
         Self {
@@ -574,8 +547,7 @@ impl<'a> StageDescriptor<'a> {
         }
     }
 
-    /// Creates a descriptor for a stage that has no builtin method but requires a specific
-    /// executor (e.g. `SortedDedup`, `RowMap`).
+    // Used for stages with no builtin method but a required specific executor (e.g. SortedDedup).
     #[inline]
     fn special(executor: BuiltinPipelineExecutor) -> Self {
         Self {
@@ -589,44 +561,37 @@ impl<'a> StageDescriptor<'a> {
         }
     }
 
-    /// Attaches a compiled body program to the descriptor.
     #[inline]
     fn body(mut self, body: &'a Program) -> Self {
         self.body = Some(body);
         self
     }
 
-    /// Sets the integer argument (e.g. `n` for `take(n)` or `skip(n)`).
     #[inline]
     fn usize_arg(mut self, usize_arg: usize) -> Self {
         self.usize_arg = Some(usize_arg);
         self
     }
 
-    /// Overrides the `BuiltinViewStage` metadata for this descriptor.
     #[inline]
     fn with_view_stage(mut self, stage: BuiltinViewStage) -> Self {
         self.view_stage_override = Some(stage);
         self
     }
 
-    /// Overrides the executor used to dispatch this stage during pipeline execution.
     #[inline]
     fn with_executor(mut self, executor: BuiltinPipelineExecutor) -> Self {
         self.executor_override = Some(executor);
         self
     }
 
-    /// Allows a one-to-one stage to report `Preserves` order even if the registry has no explicit
-    /// order-effect entry, enabling downstream sort optimisations.
     #[inline]
     fn allow_one_to_one_order_fallback(mut self) -> Self {
         self.allow_one_to_one_order_fallback = true;
         self
     }
 
-    /// Marks the stage as requiring a body program to run against a materialised receiver;
-    /// used for stages like `CompiledMap` that have no fallback without their body.
+    // Marks stages like `CompiledMap` that have no fallback without their body program.
     #[inline]
     fn receiver_unsafe_without_body(mut self) -> Self {
         self.receiver_safe_without_body = false;
@@ -883,8 +848,7 @@ impl Stage {
         }
     }
 
-    /// Returns the pipeline materialisation mode for this stage, with special cases for
-    /// `CompiledMap` (streaming) and `SortedDedup` (legacy).
+    // Hard-coded overrides for CompiledMap (streaming) and SortedDedup (legacy).
     fn pipeline_materialization(&self) -> BuiltinPipelineMaterialization {
         match self {
             Stage::CompiledMap(_) => BuiltinPipelineMaterialization::Streaming,
@@ -1001,8 +965,6 @@ impl Stage {
         }
     }
 
-    /// Builds a `ChainOp` from the stage's descriptor when the method participates in demand
-    /// propagation, returning `None` otherwise.
     fn chain_demand_op(&self) -> Option<ChainOp> {
         let desc = self.descriptor()?;
         let method = desc.method?;
@@ -1034,8 +996,6 @@ impl Stage {
         SinkDemand { chain, positional }
     }
 
-    /// Returns `true` when this stage is safe to execute after a bounded sort for the given
-    /// `sort` spec and sort kernel — i.e. it either preserves order or is a prefix predicate.
     fn ordered_prefix_effect(
         &self,
         sort: &super::SortSpec,
@@ -1051,8 +1011,7 @@ impl Stage {
         }
     }
 
-    /// Returns the order effect of this stage (preserves, blocks, or predicate-prefix), with
-    /// hard-coded overrides for `CompiledMap` and `SortedDedup`.
+    // Hard-coded overrides for CompiledMap (Preserves) and SortedDedup (Blocks).
     fn pipeline_order_effect(&self) -> BuiltinPipelineOrderEffect {
         match self {
             Stage::CompiledMap(_) => BuiltinPipelineOrderEffect::Preserves,
@@ -1129,8 +1088,6 @@ impl Stage {
         }
     }
 
-    /// Merges two usize-valued stages (Take/Skip) using their `BuiltinStageMerge` combinator,
-    /// or returns `None` if they are not the same kind of stage.
     fn merge_with_usize_stage(&self, other: &Self) -> Option<Self> {
         let lhs = self.usize_stage_merge_parts()?;
         let rhs = other.usize_stage_merge_parts()?;
@@ -1140,8 +1097,6 @@ impl Stage {
         self.with_usize_stage_value(lhs.merge.combine_usize(lhs.value, rhs.value))
     }
 
-    /// Extracts the merge-relevant components from a Take or Skip stage, returning `None` for all
-    /// other variants.
     fn usize_stage_merge_parts(&self) -> Option<UsizeStageMergeParts> {
         match self {
             Stage::Take(value, stage, merge) | Stage::Skip(value, stage, merge) => {
@@ -1155,7 +1110,6 @@ impl Stage {
         }
     }
 
-    /// Constructs a new stage of the same kind with the integer argument replaced by `value`.
     fn with_usize_stage_value(&self, value: usize) -> Option<Self> {
         match self {
             Stage::Take(_, stage, merge) => Some(Stage::Take(value, *stage, *merge)),
@@ -1173,8 +1127,6 @@ impl Stage {
         }
     }
 
-    /// Returns the `BuiltinCancellation` tag if this stage has one, used to check whether two
-    /// adjacent stages cancel each other out.
     fn cancellation(&self) -> Option<crate::builtins::BuiltinCancellation> {
         match self {
             Stage::Reverse(cancel) => Some(*cancel),
@@ -1184,14 +1136,10 @@ impl Stage {
     }
 }
 
-/// Internal helper that captures the components of a Take or Skip stage for merge analysis.
 #[derive(Debug, Clone, Copy)]
 struct UsizeStageMergeParts {
-    /// The integer count carried by the stage (n in `take(n)` / `skip(n)`).
     value: usize,
-    /// The view-stage tag, used to ensure both stages are the same kind.
     stage: BuiltinViewStage,
-    /// Describes how two counts from the same stage kind should be combined.
     merge: crate::builtins::BuiltinStageMerge,
 }
 
@@ -1266,8 +1214,7 @@ pub fn plan_with_exprs(
     }
 }
 
-/// Returns `(cost, selectivity)` for a filter stage with the given kernel, using heuristic
-/// estimates based on comparison operator type.
+// Uses heuristic selectivity estimates based on the comparison operator type.
 fn kernel_cost_selectivity(stage: &Stage, kernel: &BodyKernel) -> (f64, f64) {
     use crate::ast::BinOp;
     match (stage, kernel) {
@@ -1310,8 +1257,7 @@ fn kernel_cost_selectivity(stage: &Stage, kernel: &BodyKernel) -> (f64, f64) {
     }
 }
 
-/// Re-orders consecutive runs of non-generic filter stages by ascending cost/selectivity ratio
-/// so that the cheapest, most selective predicates run first.
+// Sorts consecutive runs of non-generic filter stages by ascending cost/selectivity ratio.
 fn reorder_filter_runs(
     stages: &mut Vec<Stage>,
     exprs: &mut Vec<Option<Arc<Expr>>>,
@@ -1352,8 +1298,7 @@ fn reorder_filter_runs(
     }
 }
 
-/// Merges consecutive `Filter` stages within each run into a single filter with an `AndOp`
-/// program, reducing per-element dispatch overhead.
+// Merges consecutive Filter stages into a single filter with an AndOp program.
 fn fuse_filter_runs(
     stages: &mut Vec<Stage>,
     exprs: &mut Vec<Option<Arc<Expr>>>,
@@ -1382,8 +1327,6 @@ fn fuse_filter_runs(
     }
 }
 
-/// Combines the programs from a contiguous slice of `Filter` stages into a single program by
-/// chaining them with `AndOp` opcodes.
 fn merge_filter_programs(filters: &[Stage]) -> Arc<Program> {
     let mut iter = filters.iter();
     let Some(Stage::Filter(first, _)) = iter.next() else {
@@ -1405,8 +1348,7 @@ fn merge_filter_programs(filters: &[Stage]) -> Arc<Program> {
     })
 }
 
-/// Removes constant-true filter stages and fuses or cancels adjacent stage pairs using
-/// `Stage::merge_with` and `Stage::cancels_with`.
+// Removes constant-true filters, then fuses or cancels adjacent stage pairs.
 fn fold_merge_with_kernels(
     stages: &mut Vec<Stage>,
     exprs: &mut Vec<Option<Arc<Expr>>>,

@@ -4,9 +4,7 @@
 use super::{BodyKernel, Pipeline, Sink, Stage};
 
 impl Pipeline {
-    /// Returns cloned copies of the pipeline's stages, per-stage body kernels, and terminal sink.
-    ///
-    /// Intended for testing and introspection; not called on the hot execution path.
+    /// Returns cloned copies of the pipeline's stages, body kernels, and terminal sink for testing and introspection.
     pub fn canonical(&self) -> (Vec<Stage>, Vec<BodyKernel>, Sink) {
         (
             self.stages.clone(),

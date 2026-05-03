@@ -81,9 +81,7 @@ pub(super) fn run(
     Some(out)
 }
 
-/// Runs `chain` over an owned iterator `rows`, collecting into the sink determined by `sink`.
-///
-/// Used after barrier stages that produce a new `Vec<Val>` rather than a borrowed slice.
+/// Runs `chain` over an owned iterator `rows`, collecting into the sink.
 pub(super) fn run_owned_iter<I>(
     sink: &Sink,
     rows: I,
@@ -110,7 +108,6 @@ where
     Some(out)
 }
 
-/// Extracts the `BuiltinNumericReducer` variant from a reducer sink for dispatch.
 fn numeric_reducer(sink: &Sink) -> Option<BuiltinNumericReducer> {
     sink.reducer_spec()?.method()?.spec().numeric_reducer
 }

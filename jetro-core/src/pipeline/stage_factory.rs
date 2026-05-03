@@ -20,10 +20,7 @@ use super::{
     NumOp, ReducerOp, ReducerSpec, Sink, Stage,
 };
 
-/// Lowers a `BuiltinMethod` call to a concrete `Stage` (or `Sink`) using registry metadata.
-///
-/// Returns `Some(())` on success or `None` when the method cannot be lowered at this position
-/// (e.g. a terminal sink appearing in a non-final position).
+/// Lowers a `BuiltinMethod` call to a concrete `Stage` or `Sink`, returning `None` when the method cannot be lowered at this position.
 pub(super) fn lower_method_from_registry(
     method: BuiltinMethod,
     args: &[crate::ast::Arg],
@@ -157,9 +154,7 @@ pub(super) fn lower_method_from_registry(
     }
 }
 
-/// Compiles `arg` into a sub-expression program and appends the corresponding `Stage` variant.
-///
-/// Returns `None` if `arg` cannot be compiled (e.g. syntax error or unsupported form).
+// Compiles `arg` into a sub-expression program and appends the corresponding `Stage` variant; `None` on compile failure.
 fn push_expr_stage(
     stage: BuiltinExprStage,
     arg: &crate::ast::Arg,
@@ -251,9 +246,7 @@ fn push_expr_stage(
     Some(())
 }
 
-/// Writes the terminal `Sink` value derived from `method`'s sink spec into `*sink`.
-///
-/// Returns `None` for numeric reducers that require argument-based configuration.
+// Writes the terminal `Sink` for `method` into `*sink`; returns `None` for numeric reducers needing argument-based config.
 fn set_terminal_sink(method: BuiltinMethod, sink: &mut Sink) -> Option<()> {
     let spec = method.spec();
     match spec.sink?.accumulator {
@@ -265,9 +258,7 @@ fn set_terminal_sink(method: BuiltinMethod, sink: &mut Sink) -> Option<()> {
     Some(())
 }
 
-/// Extracts a `usize` integer literal from `arg`, enforcing `value >= min`.
-///
-/// Returns `None` if the argument is not a non-negative integer or is below the minimum.
+// Extracts a `usize` integer literal from `arg` and enforces `value >= min`.
 fn usize_arg_at_least(arg: &crate::ast::Arg, min: usize) -> Option<usize> {
     match arg {
         crate::ast::Arg::Pos(Expr::Int(n)) if *n >= min as i64 => Some(*n as usize),
@@ -275,7 +266,7 @@ fn usize_arg_at_least(arg: &crate::ast::Arg, min: usize) -> Option<usize> {
     }
 }
 
-/// Extracts a signed integer literal from `arg`, accepting any `i64` value.
+// Extracts a signed integer literal from `arg`.
 fn int_arg(arg: &crate::ast::Arg) -> Option<i64> {
     match arg {
         crate::ast::Arg::Pos(Expr::Int(n)) => Some(*n),
@@ -283,7 +274,7 @@ fn int_arg(arg: &crate::ast::Arg) -> Option<i64> {
     }
 }
 
-/// Extracts a string literal from `arg` and interns it as `Arc<str>`.
+// Extracts a string literal from `arg` and interns it as `Arc<str>`.
 fn string_arg(arg: &crate::ast::Arg) -> Option<Arc<str>> {
     match arg {
         crate::ast::Arg::Pos(Expr::Str(s)) => Some(Arc::<str>::from(s.as_str())),
@@ -291,9 +282,7 @@ fn string_arg(arg: &crate::ast::Arg) -> Option<Arc<str>> {
     }
 }
 
-/// Constructs the terminal `Sink` for `method` given its argument list.
-///
-/// Handles count predicates, numeric reducers with optional projection, and positional selects.
+// Constructs the terminal `Sink` for `method`, handling count predicates, numeric reducers, and positional selects.
 fn terminal_sink_for_method(method: BuiltinMethod, args: &[crate::ast::Arg]) -> Option<Sink> {
     let spec = method.spec();
     match spec.sink?.accumulator {

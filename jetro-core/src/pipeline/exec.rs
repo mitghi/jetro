@@ -1,9 +1,7 @@
 //! Top-level pipeline execution dispatcher.
-//!
-//! `Pipeline::run` selects among the columnar, indexed, composed, and legacy
-//! execution paths based on the pipeline shape and source representation.
-//! Each specialised path is in its own sub-module; this file contains only the
-//! routing logic.
+//! `Pipeline::run` selects among the columnar, indexed, composed, and legacy execution paths
+//! based on pipeline shape and source representation.
+//! Each specialised path lives in its own sub-module; this file contains only routing logic.
 
 use crate::{
     context::{Env, EvalError},
@@ -18,20 +16,17 @@ use super::{Pipeline, PipelineData};
 
 impl Pipeline {
     /// Executes the pipeline against `root` using a freshly constructed environment.
-    /// Convenience wrapper around [`run_with`] with no external cache.
     pub fn run(&self, root: &Val) -> Result<Val, EvalError> {
         self.run_with(root, None)
     }
 
-    /// Executes the pipeline against `root`, optionally supplying a `PipelineData` cache
-    /// that can promote plain `Val::Arr` sources to an `ObjVec` columnar layout.
+    /// Executes the pipeline against `root`, optionally with a `PipelineData` cache for columnar promotion.
     pub fn run_with(&self, root: &Val, cache: Option<&dyn PipelineData>) -> Result<Val, EvalError> {
         let env = Env::new(root.clone());
         self.run_with_env(root, &env, cache)
     }
 
-    /// Core dispatch: tries each specialised execution path in priority order and
-    /// falls through to the legacy path if none matches.
+    /// Tries each specialised execution path in priority order, falling through to the legacy path.
     pub fn run_with_env(
         &self,
         root: &Val,

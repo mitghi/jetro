@@ -11,8 +11,7 @@ use crate::builtins::{
 
 use super::{PipelineBody, Stage};
 
-/// Describes whether a view-pipeline stage actually reads from the input `ValueView` or can
-/// skip the read entirely (e.g. `Take` / `Skip` only counts positions).
+/// Describes whether a view-pipeline stage reads the input `ValueView` or only acts on position.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ViewInputMode {
     /// The stage examines the view's fields or scalar value.
@@ -21,8 +20,7 @@ pub(crate) enum ViewInputMode {
     SkipsViewRead,
 }
 
-/// Describes what the output of a view-pipeline stage looks like in terms of ownership and
-/// borrowing.
+/// Describes whether a view-pipeline stage's output is the same view, a sub-view, or an owned value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ViewOutputMode {
     /// The stage passes the same input view through unchanged (e.g. `Filter`).
@@ -50,8 +48,7 @@ pub(crate) enum ViewMaterialization {
     SinkNumericInput,
 }
 
-/// Full view-pipeline capability descriptor for a `PipelineBody`: one entry per stage plus the
-/// sink capability.
+/// Full capability descriptor for a `PipelineBody`: per-stage entries plus the sink capability.
 #[derive(Debug, Clone)]
 pub(crate) struct ViewPipelineCapabilities {
     /// Per-stage capabilities, parallel to `PipelineBody::stages`.
@@ -60,8 +57,7 @@ pub(crate) struct ViewPipelineCapabilities {
     pub sink: ViewSinkCapability,
 }
 
-/// Capability descriptor for a view-native prefix of a `PipelineBody`: the stages that can
-/// execute without materialisation before the first non-view stage.
+/// Capability descriptor for the view-native prefix of a `PipelineBody` up to the first incompatible stage.
 #[derive(Debug, Clone)]
 pub(crate) struct ViewPrefixCapabilities {
     /// View-native stage capabilities for the prefix portion.
@@ -70,10 +66,7 @@ pub(crate) struct ViewPrefixCapabilities {
     pub consumed_stages: usize,
 }
 
-/// Describes the borrowing and materialisation behaviour of a single view-pipeline stage.
-///
-/// Each variant carries a kernel index into `PipelineBody::stage_kernels` so the executor can
-/// look up the pre-classified expression kernel without re-scanning the stage list.
+/// Per-stage capability for the view execution path; each variant carries a kernel index into `stage_kernels`.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ViewStageCapability {
     /// Filter stage: evaluates the view-native predicate at `kernel`, keeping matching views.
@@ -120,8 +113,7 @@ pub(crate) enum ViewStageCapability {
 }
 
 impl ViewStageCapability {
-    /// Constructs a `ViewStageCapability` from the stage's `BuiltinViewStage` metadata,
-    /// returning `None` when the stage or its kernel cannot operate in the view domain.
+    /// Constructs a `ViewStageCapability` from `BuiltinViewStage` metadata; returns `None` when incompatible.
     pub(crate) fn from_stage_metadata(
         stage: BuiltinViewStage,
         usize_arg: Option<usize>,
@@ -203,8 +195,7 @@ pub(crate) enum ViewSinkCapability {
 }
 
 impl ViewSinkCapability {
-    /// Constructs a `Builtin` view sink capability from a `BuiltinSinkSpec` and optional kernel
-    /// indices for predicate and projection sub-programs.
+    /// Constructs a `Builtin` view sink capability from a `BuiltinSinkSpec` and optional kernel indices.
     pub(crate) fn from_sink_spec(
         spec: BuiltinSinkSpec,
         predicate_kernel: Option<usize>,
@@ -265,8 +256,7 @@ fn view_output_mode(mode: BuiltinViewOutputMode) -> ViewOutputMode {
     }
 }
 
-/// Computes `ViewPipelineCapabilities` for all stages and the sink in `body`, returning `None`
-/// when any stage or the sink cannot operate in the view domain.
+/// Computes `ViewPipelineCapabilities` for `body`; returns `None` when any stage or the sink is incompatible.
 pub(crate) fn view_capabilities(body: &PipelineBody) -> Option<ViewPipelineCapabilities> {
     Some(ViewPipelineCapabilities {
         stages: view_stage_capabilities(body)?,
@@ -274,8 +264,7 @@ pub(crate) fn view_capabilities(body: &PipelineBody) -> Option<ViewPipelineCapab
     })
 }
 
-/// Computes the longest view-native prefix of `body`'s stages (all stages that can run without
-/// any materialisation), returning `None` when even the first stage is incompatible.
+/// Computes the longest view-native stage prefix of `body`; returns `None` when even the first stage is incompatible.
 pub(crate) fn view_prefix_capabilities(body: &PipelineBody) -> Option<ViewPrefixCapabilities> {
     let mut stages = Vec::new();
     for (idx, stage) in body.stages.iter().enumerate() {
