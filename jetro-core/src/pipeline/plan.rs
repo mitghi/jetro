@@ -42,10 +42,7 @@ impl Sink {
         if let Some(spec) = self.builtin_sink_spec() {
             return sink_demand_from_builtin(spec);
         }
-        match self {
-            Sink::Reducer(spec) => reducer_demand(spec.op),
-            Sink::Collect | Sink::ApproxCountDistinct | Sink::Terminal(_) => SinkDemand::RESULT,
-        }
+        SinkDemand::RESULT
     }
 
     pub(crate) fn can_run_with_receiver_only<F>(&self, mut program_ok: F) -> bool
@@ -146,21 +143,6 @@ impl From<BuiltinSelectionPosition> for Position {
             BuiltinSelectionPosition::First => Position::First,
             BuiltinSelectionPosition::Last => Position::Last,
         }
-    }
-}
-
-fn reducer_demand(op: super::ReducerOp) -> SinkDemand {
-    let value = match op {
-        super::ReducerOp::Count => ValueNeed::None,
-        super::ReducerOp::Numeric(_) => ValueNeed::Numeric,
-    };
-    SinkDemand {
-        chain: ChainDemand {
-            pull: PullDemand::All,
-            value,
-            order: false,
-        },
-        positional: None,
     }
 }
 
