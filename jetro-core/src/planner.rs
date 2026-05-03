@@ -719,6 +719,7 @@ fn plan_array_elem(builder: &mut PlanBuilder, elem: &ArrayElem) -> PhysicalArray
 
 /// Parse and classify a query once.
 #[inline]
+#[cfg(test)]
 pub fn plan_query(expr: &str) -> QueryPlan {
     plan_query_with_context(expr, PlanningContext::default())
 }
