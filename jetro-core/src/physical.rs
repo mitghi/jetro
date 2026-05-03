@@ -12,7 +12,7 @@ use crate::vm::Program;
 #[derive(Clone)]
 pub struct QueryPlan {
     root: QueryRoot,
-    nodes: Vec<PlanNode>,
+    nodes: Vec<PhysicalNode>,
 }
 
 impl QueryPlan {
@@ -20,7 +20,7 @@ impl QueryPlan {
     pub(crate) fn from_nodes(root: NodeId, nodes: Vec<PlanNode>) -> Self {
         Self {
             root: QueryRoot::Node(root),
-            nodes,
+            nodes: nodes.into_iter().map(PhysicalNode::new).collect(),
         }
     }
 
@@ -39,7 +39,12 @@ impl QueryPlan {
 
     #[inline]
     pub(crate) fn node(&self, id: NodeId) -> &PlanNode {
-        &self.nodes[id.0]
+        &self.nodes[id.0].kind
+    }
+
+    #[inline]
+    pub(crate) fn backend_preferences(&self, id: NodeId) -> &[BackendPreference] {
+        self.nodes[id.0].backends.as_slice()
     }
 }
 
@@ -111,6 +116,20 @@ pub enum PlanNode {
     Vm(Arc<Program>),
 }
 
+#[derive(Clone)]
+pub(crate) struct PhysicalNode {
+    kind: PlanNode,
+    backends: BackendPlan,
+}
+
+impl PhysicalNode {
+    #[inline]
+    fn new(kind: PlanNode) -> Self {
+        let backends = BackendPlan::for_node(&kind);
+        Self { kind, backends }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct BackendSet(u16);
 
@@ -123,6 +142,47 @@ pub(crate) enum BackendPreference {
     ValView,
     MaterializedSource,
     FastChildren,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct BackendPlan {
+    len: u8,
+    items: [BackendPreference; 4],
+}
+
+impl BackendPlan {
+    const EMPTY: Self = Self {
+        len: 0,
+        items: [BackendPreference::FastChildren; 4],
+    };
+
+    #[inline]
+    fn for_node(node: &PlanNode) -> Self {
+        Self::new(node.backend_preferences())
+    }
+
+    #[inline]
+    pub(crate) fn new(backends: &[BackendPreference]) -> Self {
+        debug_assert!(backends.len() <= 4);
+        let mut out = Self::EMPTY;
+        out.len = backends.len().min(4) as u8;
+        out.items[..out.len as usize].copy_from_slice(&backends[..out.len as usize]);
+        out
+    }
+
+    #[inline]
+    pub(crate) fn as_slice(&self) -> &[BackendPreference] {
+        &self.items[..self.len as usize]
+    }
+
+    #[inline]
+    pub(crate) fn as_set(&self) -> BackendSet {
+        let mut out = BackendSet::NONE;
+        for backend in self.as_slice() {
+            out = out.union(backend.backend_set());
+        }
+        out
+    }
 }
 
 impl BackendSet {
@@ -170,11 +230,7 @@ impl PlanNode {
 
     #[inline]
     pub(crate) fn backends(&self) -> BackendSet {
-        let mut out = BackendSet::NONE;
-        for backend in self.backend_preferences() {
-            out = out.union(backend.backend_set());
-        }
-        out
+        BackendPlan::new(self.backend_preferences()).as_set()
     }
 }
 
@@ -266,6 +322,29 @@ mod tests {
         assert!(!backends.contains(BackendSet::FAST_CHILDREN));
         assert_eq!(
             node.backend_preferences(),
+            &[
+                BackendPreference::TapeView,
+                BackendPreference::TapeRows,
+                BackendPreference::MaterializedSource,
+                BackendPreference::ValView,
+            ]
+        );
+    }
+
+    #[test]
+    fn query_plan_stores_backend_preferences_per_node() {
+        let plan = QueryPlan::from_nodes(
+            NodeId(0),
+            vec![PlanNode::Pipeline {
+                source: PipelinePlanSource::FieldChain {
+                    keys: Arc::from([Arc::<str>::from("rows")]),
+                },
+                body: empty_body(),
+            }],
+        );
+
+        assert_eq!(
+            plan.backend_preferences(NodeId(0)),
             &[
                 BackendPreference::TapeView,
                 BackendPreference::TapeRows,

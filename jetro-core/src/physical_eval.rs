@@ -199,7 +199,7 @@ impl ExecCtx<'_> {
     }
 
     fn eval_fast(&mut self, id: NodeId) -> Option<Result<Val, EvalError>> {
-        for backend in self.plan.node(id).backend_preferences() {
+        for backend in self.plan.backend_preferences(id) {
             if let Some(result) = self.eval_backend(id, *backend) {
                 return Some(result);
             }
