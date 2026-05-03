@@ -1,6 +1,6 @@
 use indexmap::IndexMap;
 
-use crate::{pipeline, value::Val, value_view::ValueView};
+use crate::{builtins::BuiltinKeyedReducer, pipeline, value::Val, value_view::ValueView};
 
 use super::key::ViewKey;
 
@@ -12,7 +12,7 @@ pub(super) struct ReducingStagePlan {
 
 pub(super) enum ViewStageReducer {
     Keyed {
-        kind: pipeline::ViewKeyedReducer,
+        kind: BuiltinKeyedReducer,
         kernel: usize,
         entries: IndexMap<ViewKey, KeyedEntry>,
     },
@@ -52,7 +52,7 @@ impl ViewStageReducer {
             } => {
                 let key = super::eval_view_key(item, Some(stage_kernels.get(*kernel)?))?;
                 match kind {
-                    pipeline::ViewKeyedReducer::Count => match entries.entry(key) {
+                    BuiltinKeyedReducer::Count => match entries.entry(key) {
                         indexmap::map::Entry::Occupied(mut entry) => {
                             if let KeyedEntry::Count(count) = entry.get_mut() {
                                 *count += 1;
@@ -62,10 +62,10 @@ impl ViewStageReducer {
                             entry.insert(KeyedEntry::Count(1));
                         }
                     },
-                    pipeline::ViewKeyedReducer::Index => {
+                    BuiltinKeyedReducer::Index => {
                         entries.insert(key, KeyedEntry::Value(item.materialize()));
                     }
-                    pipeline::ViewKeyedReducer::Group => match entries.entry(key) {
+                    BuiltinKeyedReducer::Group => match entries.entry(key) {
                         indexmap::map::Entry::Occupied(mut entry) => {
                             if let KeyedEntry::Group(items) = entry.get_mut() {
                                 items.push(item.materialize());

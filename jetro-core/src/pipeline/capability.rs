@@ -1,5 +1,5 @@
 use crate::builtins::{
-    BuiltinMethod, BuiltinSinkAccumulator, BuiltinSinkSpec, BuiltinViewInputMode,
+    BuiltinKeyedReducer, BuiltinSinkAccumulator, BuiltinSinkSpec, BuiltinViewInputMode,
     BuiltinViewMaterialization, BuiltinViewOutputMode, BuiltinViewStage,
 };
 
@@ -61,29 +61,11 @@ pub(crate) enum ViewStageCapability {
         kernel: Option<usize>,
     },
     KeyedReduce {
-        kind: ViewKeyedReducer,
+        kind: BuiltinKeyedReducer,
         kernel: usize,
     },
     Take(usize),
     Skip(usize),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ViewKeyedReducer {
-    Count,
-    Index,
-    Group,
-}
-
-impl ViewKeyedReducer {
-    pub(crate) fn from_method(method: BuiltinMethod) -> Option<Self> {
-        match method {
-            BuiltinMethod::CountBy => Some(Self::Count),
-            BuiltinMethod::IndexBy => Some(Self::Index),
-            BuiltinMethod::GroupBy => Some(Self::Group),
-            _ => None,
-        }
-    }
 }
 
 impl ViewStageCapability {

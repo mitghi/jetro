@@ -554,6 +554,7 @@ pub struct BuiltinSpec {
     pub view_scalar: bool,
     pub view_stage: Option<BuiltinViewStage>,
     pub sink: Option<BuiltinSinkSpec>,
+    pub keyed_reducer: Option<BuiltinKeyedReducer>,
     pub numeric_reducer: Option<BuiltinNumericReducer>,
     pub stage_merge: Option<BuiltinStageMerge>,
     pub cancellation: Option<BuiltinCancellation>,
@@ -600,6 +601,13 @@ pub enum BuiltinSinkAccumulator {
     Numeric,
     ApproxDistinct,
     SelectOne(BuiltinSelectionPosition),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinKeyedReducer {
+    Count,
+    Index,
+    Group,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -995,6 +1003,7 @@ impl BuiltinSpec {
             view_scalar: false,
             view_stage: None,
             sink: None,
+            keyed_reducer: None,
             numeric_reducer: None,
             stage_merge: None,
             cancellation: None,
@@ -1076,6 +1085,11 @@ impl BuiltinSpec {
                 order: false,
             },
         });
+        self
+    }
+
+    fn keyed_reducer(mut self, reducer: BuiltinKeyedReducer) -> Self {
+        self.keyed_reducer = Some(reducer);
         self
     }
 
@@ -1251,10 +1265,16 @@ impl BuiltinMethod {
             }
             Self::GroupBy => BuiltinSpec::new(Cat::Reducer, Card::Reducing)
                 .view_stage(BuiltinViewStage::KeyedReduce)
+                .keyed_reducer(BuiltinKeyedReducer::Group)
                 .columnar_stage(BuiltinColumnarStage::GroupBy)
                 .cost(20.0),
-            Self::CountBy | Self::IndexBy => BuiltinSpec::new(Cat::Reducer, Card::Reducing)
+            Self::CountBy => BuiltinSpec::new(Cat::Reducer, Card::Reducing)
                 .view_stage(BuiltinViewStage::KeyedReduce)
+                .keyed_reducer(BuiltinKeyedReducer::Count)
+                .cost(10.0),
+            Self::IndexBy => BuiltinSpec::new(Cat::Reducer, Card::Reducing)
+                .view_stage(BuiltinViewStage::KeyedReduce)
+                .keyed_reducer(BuiltinKeyedReducer::Index)
                 .cost(10.0),
             Self::Unique | Self::UniqueBy => {
                 BuiltinSpec::new(Cat::StreamingFilter, Card::Filtering)
@@ -6294,10 +6314,10 @@ pub fn schema_apply(recv: &Val) -> Option<Val> {
 #[cfg(test)]
 mod spec_tests {
     use super::{
-        BuiltinCardinality, BuiltinCategory, BuiltinColumnarStage, BuiltinMethod,
-        BuiltinNumericReducer, BuiltinSelectionPosition, BuiltinSinkAccumulator, BuiltinSinkDemand,
-        BuiltinSinkValueNeed, BuiltinStageMerge, BuiltinViewInputMode, BuiltinViewMaterialization,
-        BuiltinViewOutputMode, BuiltinViewStage,
+        BuiltinCardinality, BuiltinCategory, BuiltinColumnarStage, BuiltinKeyedReducer,
+        BuiltinMethod, BuiltinNumericReducer, BuiltinSelectionPosition, BuiltinSinkAccumulator,
+        BuiltinSinkDemand, BuiltinSinkValueNeed, BuiltinStageMerge, BuiltinViewInputMode,
+        BuiltinViewMaterialization, BuiltinViewOutputMode, BuiltinViewStage,
     };
 
     #[test]
@@ -6468,6 +6488,18 @@ mod spec_tests {
         assert_eq!(
             BuiltinMethod::GroupBy.spec().columnar_stage,
             Some(BuiltinColumnarStage::GroupBy)
+        );
+        assert_eq!(
+            BuiltinMethod::CountBy.spec().keyed_reducer,
+            Some(BuiltinKeyedReducer::Count)
+        );
+        assert_eq!(
+            BuiltinMethod::IndexBy.spec().keyed_reducer,
+            Some(BuiltinKeyedReducer::Index)
+        );
+        assert_eq!(
+            BuiltinMethod::GroupBy.spec().keyed_reducer,
+            Some(BuiltinKeyedReducer::Group)
         );
         assert_eq!(BuiltinMethod::Sort.spec().columnar_stage, None);
     }
