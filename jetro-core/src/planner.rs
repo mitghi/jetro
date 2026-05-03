@@ -199,9 +199,12 @@ fn select_backend_plan(
                 source: PipelinePlanSource::FieldChain { .. },
                 ..
             },
-        ) => BackendPlan::new(&[crate::physical::BackendPreference::ValView]),
+        ) => BackendPlan::new(&[
+            crate::physical::BackendPreference::ValView,
+            crate::physical::BackendPreference::Interpreted,
+        ]),
         (InputMode::Val, PlanNode::RootPath(_) | PlanNode::Structural { .. }) => {
-            BackendPlan::new(&[])
+            BackendPlan::new(&[crate::physical::BackendPreference::Interpreted])
         }
         (
             InputMode::Bytes,
@@ -214,6 +217,7 @@ fn select_backend_plan(
             crate::physical::BackendPreference::TapeRows,
             crate::physical::BackendPreference::MaterializedSource,
             crate::physical::BackendPreference::ValView,
+            crate::physical::BackendPreference::Interpreted,
         ]),
         _ => BackendPlan::for_node(node),
     }
@@ -638,6 +642,7 @@ mod tests {
                 BackendPreference::TapeRows,
                 BackendPreference::MaterializedSource,
                 BackendPreference::ValView,
+                BackendPreference::Interpreted,
             ]
         );
     }
@@ -664,7 +669,7 @@ mod tests {
                 ExecutionFacts::for_node(&node)
             )
             .as_slice(),
-            &[BackendPreference::ValView]
+            &[BackendPreference::ValView, BackendPreference::Interpreted]
         );
         assert_eq!(
             select_backend_plan(
@@ -685,7 +690,7 @@ mod tests {
         };
         assert_eq!(
             plan.backend_preferences(*root),
-            &[BackendPreference::ValView]
+            &[BackendPreference::ValView, BackendPreference::Interpreted]
         );
         assert!(plan
             .backend_capabilities(*root)
@@ -704,7 +709,10 @@ mod tests {
         let PhysicalObjField::Kv { val, .. } = &fields[0] else {
             panic!("expected kv field");
         };
-        assert!(plan.backend_preferences(*val).is_empty());
+        assert_eq!(
+            plan.backend_preferences(*val),
+            &[BackendPreference::Interpreted]
+        );
     }
 
     #[test]
@@ -715,7 +723,7 @@ mod tests {
         };
         assert_eq!(
             plan.backend_preferences(*root),
-            &[BackendPreference::ValView]
+            &[BackendPreference::ValView, BackendPreference::Interpreted]
         );
     }
 

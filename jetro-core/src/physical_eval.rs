@@ -76,10 +76,15 @@ struct ExecCtx<'a> {
 
 impl ExecCtx<'_> {
     fn eval(&mut self, id: NodeId) -> Result<Val, EvalError> {
-        if let Some(result) = self.eval_fast(id) {
-            return result;
-        }
+        self.eval_fast(id).unwrap_or_else(|| {
+            Err(EvalError(format!(
+                "no planned backend could execute physical node {}",
+                id.0
+            )))
+        })
+    }
 
+    fn eval_interpreted(&mut self, id: NodeId) -> Result<Val, EvalError> {
         match self.plan.node(id) {
             PlanNode::Literal(value) => Ok(value.clone()),
             PlanNode::Root => self.root(),
@@ -270,12 +275,19 @@ impl ExecCtx<'_> {
                 }))
             }
             (BackendPreference::FastChildren, PlanNode::Chain { base, steps }) => {
+                if steps
+                    .iter()
+                    .any(|step| matches!(step, PhysicalChainStep::DynIndex(_)))
+                {
+                    return None;
+                }
                 let base = match self.eval_fast(*base)? {
                     Ok(value) => value,
                     Err(err) => return Some(Err(err)),
                 };
                 Some(eval_materialized_chain_suffix(base, steps))
             }
+            (BackendPreference::Interpreted, _) => Some(self.eval_interpreted(id)),
             _ => None,
         }
     }

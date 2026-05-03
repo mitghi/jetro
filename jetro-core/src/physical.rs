@@ -199,6 +199,7 @@ pub(crate) enum BackendPreference {
     ValView,
     MaterializedSource,
     FastChildren,
+    Interpreted,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -290,13 +291,13 @@ impl ExecutionFacts {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct BackendPlan {
     len: u8,
-    items: [BackendPreference; 4],
+    items: [BackendPreference; 5],
 }
 
 impl BackendPlan {
     const EMPTY: Self = Self {
         len: 0,
-        items: [BackendPreference::FastChildren; 4],
+        items: [BackendPreference::FastChildren; 5],
     };
 
     #[inline]
@@ -306,9 +307,9 @@ impl BackendPlan {
 
     #[inline]
     pub(crate) fn new(backends: &[BackendPreference]) -> Self {
-        debug_assert!(backends.len() <= 4);
+        debug_assert!(backends.len() <= 5);
         let mut out = Self::EMPTY;
-        out.len = backends.len().min(4) as u8;
+        out.len = backends.len().min(5) as u8;
         out.items[..out.len as usize].copy_from_slice(&backends[..out.len as usize]);
         out
     }
@@ -337,6 +338,7 @@ impl BackendSet {
     pub(crate) const VAL_VIEW: Self = Self(1 << 4);
     pub(crate) const MATERIALIZED_SOURCE: Self = Self(1 << 5);
     pub(crate) const FAST_CHILDREN: Self = Self(1 << 6);
+    pub(crate) const INTERPRETED: Self = Self(1 << 7);
 
     #[inline]
     pub(crate) const fn union(self, other: Self) -> Self {
@@ -359,15 +361,23 @@ impl PlanNode {
                     BackendPreference::TapeRows,
                     BackendPreference::MaterializedSource,
                     BackendPreference::ValView,
+                    BackendPreference::Interpreted,
                 ],
-                PipelinePlanSource::Expr(_) => &[BackendPreference::FastChildren],
+                PipelinePlanSource::Expr(_) => &[
+                    BackendPreference::FastChildren,
+                    BackendPreference::Interpreted,
+                ],
             },
-            Self::Structural { .. } => &[BackendPreference::Structural],
-            Self::RootPath(_) => &[BackendPreference::TapePath],
-            Self::Object(_) | Self::Array(_) | Self::Call { .. } | Self::Chain { .. } => {
-                &[BackendPreference::FastChildren]
-            }
-            _ => &[],
+            Self::Structural { .. } => &[
+                BackendPreference::Structural,
+                BackendPreference::Interpreted,
+            ],
+            Self::RootPath(_) => &[BackendPreference::TapePath, BackendPreference::Interpreted],
+            Self::Object(_) | Self::Array(_) | Self::Call { .. } | Self::Chain { .. } => &[
+                BackendPreference::FastChildren,
+                BackendPreference::Interpreted,
+            ],
+            _ => &[BackendPreference::Interpreted],
         }
     }
 
@@ -388,6 +398,7 @@ impl BackendPreference {
             Self::ValView => BackendSet::VAL_VIEW,
             Self::MaterializedSource => BackendSet::MATERIALIZED_SOURCE,
             Self::FastChildren => BackendSet::FAST_CHILDREN,
+            Self::Interpreted => BackendSet::INTERPRETED,
         }
     }
 }
@@ -462,6 +473,7 @@ mod tests {
         assert!(backends.contains(BackendSet::TAPE_ROWS));
         assert!(backends.contains(BackendSet::VAL_VIEW));
         assert!(backends.contains(BackendSet::MATERIALIZED_SOURCE));
+        assert!(backends.contains(BackendSet::INTERPRETED));
         assert!(!backends.contains(BackendSet::FAST_CHILDREN));
         assert_eq!(
             node.backend_preferences(),
@@ -470,6 +482,7 @@ mod tests {
                 BackendPreference::TapeRows,
                 BackendPreference::MaterializedSource,
                 BackendPreference::ValView,
+                BackendPreference::Interpreted,
             ]
         );
     }
@@ -493,6 +506,7 @@ mod tests {
                 BackendPreference::TapeRows,
                 BackendPreference::MaterializedSource,
                 BackendPreference::ValView,
+                BackendPreference::Interpreted,
             ]
         );
     }
@@ -543,6 +557,7 @@ mod tests {
             cond: None,
         }]);
         assert!(object.backends().contains(BackendSet::FAST_CHILDREN));
+        assert!(object.backends().contains(BackendSet::INTERPRETED));
 
         let pipeline = PlanNode::Pipeline {
             source: PipelinePlanSource::Expr(NodeId(0)),
@@ -553,10 +568,14 @@ mod tests {
         };
         let backends = pipeline.backends();
         assert!(backends.contains(BackendSet::FAST_CHILDREN));
+        assert!(backends.contains(BackendSet::INTERPRETED));
         assert!(!backends.contains(BackendSet::TAPE_VIEW));
         assert_eq!(
             pipeline.backend_preferences(),
-            &[BackendPreference::FastChildren]
+            &[
+                BackendPreference::FastChildren,
+                BackendPreference::Interpreted
+            ]
         );
     }
 }
