@@ -115,7 +115,11 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
     }
 
     // group_by wraps its output in a single-element array; unwrap it so the caller sees the map
-    let unwrap_single_collect_obj = matches!(pipeline.stages.last(), Some(Stage::GroupBy(_)));
+    let unwrap_single_collect_obj = pipeline
+        .stages
+        .last()
+        .and_then(Stage::descriptor)
+        .is_some_and(|desc| desc.method == Some(BuiltinMethod::GroupBy));
     Ok(sink_acc.finish(unwrap_single_collect_obj))
 }
 

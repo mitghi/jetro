@@ -187,36 +187,29 @@ fn push_expr_stage(
             stage_exprs.push(arg_expr(arg));
         }
         BuiltinExprStage::TakeWhile => {
-            stages.push(Stage::TakeWhile(compile_subexpr(arg)?));
-            stage_exprs.push(arg_expr(arg));
+            push_expr_builtin(BuiltinMethod::TakeWhile, arg, stages, stage_exprs)?;
         }
         BuiltinExprStage::DropWhile => {
-            stages.push(Stage::DropWhile(compile_subexpr(arg)?));
-            stage_exprs.push(arg_expr(arg));
+            push_expr_builtin(BuiltinMethod::DropWhile, arg, stages, stage_exprs)?;
         }
         BuiltinExprStage::IndicesWhere => {
-            stages.push(Stage::IndicesWhere(compile_subexpr(arg)?));
-            stage_exprs.push(arg_expr(arg));
+            push_expr_builtin(BuiltinMethod::IndicesWhere, arg, stages, stage_exprs)?;
         }
         BuiltinExprStage::FindIndex => {
-            stages.push(Stage::FindIndex(compile_subexpr(arg)?));
-            stage_exprs.push(arg_expr(arg));
+            push_expr_builtin(BuiltinMethod::FindIndex, arg, stages, stage_exprs)?;
         }
         BuiltinExprStage::MaxBy => {
-            stages.push(Stage::MaxBy(compile_subexpr(arg)?));
-            stage_exprs.push(arg_expr(arg));
+            push_expr_builtin(BuiltinMethod::MaxBy, arg, stages, stage_exprs)?;
         }
         BuiltinExprStage::MinBy => {
-            stages.push(Stage::MinBy(compile_subexpr(arg)?));
-            stage_exprs.push(arg_expr(arg));
+            push_expr_builtin(BuiltinMethod::MinBy, arg, stages, stage_exprs)?;
         }
         BuiltinExprStage::UniqueBy => {
             stages.push(Stage::UniqueBy(Some(compile_subexpr(arg)?)));
             stage_exprs.push(arg_expr(arg));
         }
         BuiltinExprStage::GroupBy => {
-            stages.push(Stage::GroupBy(compile_subexpr(arg)?));
-            stage_exprs.push(arg_expr(arg));
+            push_expr_builtin(BuiltinMethod::GroupBy, arg, stages, stage_exprs)?;
         }
         BuiltinExprStage::CountBy => {
             push_expr_builtin(BuiltinMethod::CountBy, arg, stages, stage_exprs)?;

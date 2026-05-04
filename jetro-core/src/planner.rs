@@ -417,14 +417,7 @@ fn recompile_stage_body_for_lexical_env(stage: &mut crate::pipeline::Stage, expr
     match stage {
         crate::pipeline::Stage::Filter(body, _)
         | crate::pipeline::Stage::Map(body, _)
-        | crate::pipeline::Stage::FlatMap(body, _)
-        | crate::pipeline::Stage::GroupBy(body)
-        | crate::pipeline::Stage::TakeWhile(body)
-        | crate::pipeline::Stage::DropWhile(body)
-        | crate::pipeline::Stage::IndicesWhere(body)
-        | crate::pipeline::Stage::FindIndex(body)
-        | crate::pipeline::Stage::MaxBy(body)
-        | crate::pipeline::Stage::MinBy(body) => *body = program,
+        | crate::pipeline::Stage::FlatMap(body, _) => *body = program,
         crate::pipeline::Stage::ExprBuiltin { body, .. } => *body = program,
         crate::pipeline::Stage::UniqueBy(Some(body)) => *body = program,
         crate::pipeline::Stage::Sort(sort) if sort.key.is_some() => sort.key = Some(program),
@@ -1143,7 +1136,10 @@ mod tests {
         assert!(matches!(body.stages[0], crate::pipeline::Stage::Sort(_)));
         assert!(matches!(
             body.stages[1],
-            crate::pipeline::Stage::TakeWhile(_)
+            crate::pipeline::Stage::ExprBuiltin {
+                method: crate::builtins::BuiltinMethod::TakeWhile,
+                ..
+            }
         ));
         assert!(matches!(
             body.stages[2],

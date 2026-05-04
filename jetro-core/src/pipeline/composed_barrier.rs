@@ -51,7 +51,10 @@ pub(super) fn run(
             let key = key_from_kernel(kernel)?;
             cmp::barrier_unique_by(buf, &key)
         }
-        Stage::GroupBy(_) => {
+        Stage::ExprBuiltin {
+            method: crate::builtins::BuiltinMethod::GroupBy,
+            ..
+        } => {
             if !matches!(sink, Sink::Collect) || !is_terminal {
                 return None;
             }

@@ -661,17 +661,6 @@ impl<'a> StageDescriptor<'a> {
     }
 }
 
-macro_rules! body_stage_descriptor {
-    ($stage:expr, { $($variant:ident => $method:ident),+ $(,)? }) => {
-        match $stage {
-            $(
-                Stage::$variant(prog) => Some(StageDescriptor::new(BuiltinMethod::$method).body(prog)),
-            )+
-            _ => None,
-        }
-    };
-}
-
 macro_rules! view_body_stage_descriptor {
     ($stage:expr, { $($variant:ident => $method:ident),+ $(,)? }) => {
         match $stage {
@@ -765,17 +754,6 @@ impl Stage {
             Filter => Filter,
             Map => Map,
             FlatMap => FlatMap,
-        }) {
-            return Some(desc);
-        }
-        if let Some(desc) = body_stage_descriptor!(self, {
-            GroupBy => GroupBy,
-            TakeWhile => TakeWhile,
-            DropWhile => DropWhile,
-            IndicesWhere => IndicesWhere,
-            FindIndex => FindIndex,
-            MaxBy => MaxBy,
-            MinBy => MinBy,
         }) {
             return Some(desc);
         }

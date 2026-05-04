@@ -222,8 +222,6 @@ pub enum Stage {
     /// the planner when followed by `Take`.
     Sort(SortSpec),
 
-    /// Groups elements into `{key: [items]}` maps using the compiled key program.
-    GroupBy(Arc<crate::vm::Program>),
     /// Delegates each element to a pure built-in method call with pre-resolved literal arguments.
     Builtin(PipelineBuiltinCall),
 
@@ -252,19 +250,7 @@ pub enum Stage {
     /// Applies a pre-compiled sub-pipeline `Plan` to each element, replacing it with the result.
     CompiledMap(Arc<Plan>),
 
-    /// Passes elements while the predicate holds, stopping at the first failing element.
-    TakeWhile(Arc<crate::vm::Program>),
-    /// Skips elements while the predicate holds, then passes all remaining elements.
-    DropWhile(Arc<crate::vm::Program>),
-    /// Emits the integer indices of all elements for which the predicate is truthy.
-    IndicesWhere(Arc<crate::vm::Program>),
-    /// Emits the index of the first element satisfying the predicate, or `null`.
-    FindIndex(Arc<crate::vm::Program>),
-    /// Retains the single element with the maximum key produced by the program.
-    MaxBy(Arc<crate::vm::Program>),
-    /// Retains the single element with the minimum key produced by the program.
-    MinBy(Arc<crate::vm::Program>),
-    /// Maps over the values of each object element using the program, leaving keys unchanged.
+    /// Expression-backed builtin stage identified by the registry.
     ExprBuiltin {
         /// Registry method identity for this expression-backed stage.
         method: BuiltinMethod,
