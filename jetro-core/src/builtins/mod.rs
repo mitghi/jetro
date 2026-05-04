@@ -1427,52 +1427,27 @@ impl BuiltinMethod {
             Self::Compact => <defs::Compact as builtin_def::Builtin>::spec(),
             Self::Remove => <defs::Remove as builtin_def::Builtin>::spec(),
             Self::Map => <defs::Map as builtin_def::Builtin>::spec(),
-            Self::Enumerate => {
-                BuiltinSpec::new(Cat::StreamingOneToOne, Card::OneToOne)
-                    .indexed()
-                    .cost(10.0)
-                    .element()
-            }
-            Self::Pairwise => {
-                BuiltinSpec::new(Cat::StreamingOneToOne, Card::OneToOne)
-                    .indexed()
-                    .cost(10.0)
-                    .element()
-            }
+            Self::Enumerate => <defs::Enumerate as builtin_def::Builtin>::spec(),
+            Self::Pairwise => <defs::Pairwise as builtin_def::Builtin>::spec(),
             Self::FlatMap => <defs::FlatMap as builtin_def::Builtin>::spec(),
-            Self::Flatten | Self::Explode => {
-                BuiltinSpec::new(Cat::StreamingExpand, Card::Expanding).cost(10.0)
-            }
-            Self::Split => BuiltinSpec::new(Cat::StreamingExpand, Card::Expanding)
-                .cost(10.0)
-                .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
-                .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::Expanding, true, 2.0, 1.0))
-                .lowering(BuiltinPipelineLowering::StringArg),
-            Self::Lines | Self::Words | Self::Chars | Self::CharsOf | Self::Bytes => {
-                BuiltinSpec::new(Cat::StreamingExpand, Card::Expanding)
-                    .cost(10.0)
-                    .element()
-            }
+            Self::Flatten => <defs::Flatten as builtin_def::Builtin>::spec(),
+            Self::Explode => <defs::Explode as builtin_def::Builtin>::spec(),
+            Self::Split => <defs::Split as builtin_def::Builtin>::spec(),
+            Self::Lines => <defs::Lines as builtin_def::Builtin>::spec(),
+            Self::Words => <defs::Words as builtin_def::Builtin>::spec(),
+            Self::Chars => <defs::Chars as builtin_def::Builtin>::spec(),
+            Self::CharsOf => <defs::CharsOf as builtin_def::Builtin>::spec(),
+            Self::Bytes => <defs::Bytes as builtin_def::Builtin>::spec(),
             Self::TakeWhile => <defs::TakeWhile as builtin_def::Builtin>::spec(),
             Self::DropWhile => <defs::DropWhile as builtin_def::Builtin>::spec(),
-            Self::FindFirst => {
-                BuiltinSpec::new(Cat::StreamingFilter, Card::Filtering)
-                    .cost(10.0)
-                    .demand_law(BuiltinDemandLaw::First)
-                    .lowering(BuiltinPipelineLowering::TerminalExprArg { terminal: BuiltinMethod::First, })
-            }
-            Self::FindOne => {
-                BuiltinSpec::new(Cat::StreamingFilter, Card::Filtering)
-                    .cost(10.0)
-                    .lowering(BuiltinPipelineLowering::TerminalExprArg { terminal: BuiltinMethod::First, })
-            }
+            Self::FindFirst => <defs::FindFirst as builtin_def::Builtin>::spec(),
+            Self::FindOne => <defs::FindOne as builtin_def::Builtin>::spec(),
             Self::Take => <defs::Take as builtin_def::Builtin>::spec(),
             Self::Skip => <defs::Skip as builtin_def::Builtin>::spec(),
             Self::First => <defs::First as builtin_def::Builtin>::spec(),
             Self::Last => <defs::Last as builtin_def::Builtin>::spec(),
-            Self::Nth | Self::Collect => {
-                BuiltinSpec::new(Cat::Positional, Card::Bounded).view_native()
-            }
+            Self::Nth => <defs::Nth as builtin_def::Builtin>::spec(),
+            Self::Collect => <defs::Collect as builtin_def::Builtin>::spec(),
             Self::Len => <defs::Len as builtin_def::Builtin>::spec(),
             Self::Sum => <defs::Sum as builtin_def::Builtin>::spec(),
             Self::Avg => <defs::Avg as builtin_def::Builtin>::spec(),
@@ -1486,189 +1461,76 @@ impl BuiltinMethod {
             Self::IndicesWhere => <defs::IndicesWhere as builtin_def::Builtin>::spec(),
             Self::MaxBy => <defs::MaxBy as builtin_def::Builtin>::spec(),
             Self::MinBy => <defs::MinBy as builtin_def::Builtin>::spec(),
-            Self::Sort
-            | Self::GroupShape
-            | Self::Partition
-            | Self::Window
-            | Self::Chunk
-            | Self::RollingSum
-            | Self::RollingAvg
-            | Self::RollingMin
-            | Self::RollingMax
-            | Self::Accumulate => {
-                let spec = BuiltinSpec::new(Cat::Barrier, Card::Barrier).cost(20.0);
-                match self {
-                    Self::Sort => spec
-                        .demand_law(BuiltinDemandLaw::OrderBarrier)
-                        .materialization(BuiltinPipelineMaterialization::ComposedBarrier)
-                        .lowering(BuiltinPipelineLowering::Sort),
-                    Self::Window => spec
-                        .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
-                        .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::Barrier, true, 2.0, 1.0))
-                        .lowering(BuiltinPipelineLowering::UsizeArg { min: 1, }),
-                    Self::Chunk => spec
-                        .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
-                        .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::Barrier, true, 2.0, 1.0))
-                        .lowering(BuiltinPipelineLowering::UsizeArg { min: 1, }),
-                    _ => spec,
-                }
-            }
-            Self::GroupBy => BuiltinSpec::new(Cat::Reducer, Card::Reducing)
-                .view_stage(BuiltinViewStage::KeyedReduce)
-                .keyed_reducer(BuiltinKeyedReducer::Group)
-                .columnar_stage(BuiltinColumnarStage::GroupBy)
-                .cost(20.0)
-                .demand_law(BuiltinDemandLaw::KeyedReducer)
-                .materialization(BuiltinPipelineMaterialization::ComposedBarrier)
-                .lowering(BuiltinPipelineLowering::ExprArg),
-            Self::CountBy => BuiltinSpec::new(Cat::Reducer, Card::Reducing)
-                .view_stage(BuiltinViewStage::KeyedReduce)
-                .keyed_reducer(BuiltinKeyedReducer::Count)
-                .cost(10.0)
-                .demand_law(BuiltinDemandLaw::KeyedReducer)
-                .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 1.0, 1.0))
-                .lowering(BuiltinPipelineLowering::TerminalExprArg { terminal: BuiltinMethod::First, }),
-            Self::IndexBy => BuiltinSpec::new(Cat::Reducer, Card::Reducing)
-                .view_stage(BuiltinViewStage::KeyedReduce)
-                .keyed_reducer(BuiltinKeyedReducer::Index)
-                .cost(10.0)
-                .demand_law(BuiltinDemandLaw::KeyedReducer)
-                .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 1.0, 1.0))
-                .lowering(BuiltinPipelineLowering::TerminalExprArg { terminal: BuiltinMethod::First, }),
-            Self::Unique => {
-                BuiltinSpec::new(Cat::StreamingFilter, Card::Filtering)
-                    .view_stage(BuiltinViewStage::Distinct)
-                    .cost(10.0)
-                    .demand_law(BuiltinDemandLaw::UniqueLike)
-                    .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::Filtering, true, 10.0, 1.0))
-                    .order_effect(BuiltinPipelineOrderEffect::Preserves)
-                    .lowering(BuiltinPipelineLowering::Nullary)
-            }
-            Self::UniqueBy => {
-                BuiltinSpec::new(Cat::StreamingFilter, Card::Filtering)
-                    .view_stage(BuiltinViewStage::Distinct)
-                    .cost(10.0)
-                    .demand_law(BuiltinDemandLaw::UniqueLike)
-                    .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::Filtering, true, 10.0, 1.0))
-                    .order_effect(BuiltinPipelineOrderEffect::Preserves)
-                    .lowering(BuiltinPipelineLowering::ExprArg)
-            }
-            Self::Reverse => {
-                BuiltinSpec::new(Cat::Barrier, Card::Barrier)
-                    .cost(10.0)
-                    .cancellation(BuiltinCancellation::SelfInverse(BuiltinCancelGroup::Reverse))
-                    .demand_law(BuiltinDemandLaw::OrderBarrier)
-                    .materialization(BuiltinPipelineMaterialization::ComposedBarrier)
-                    .lowering(BuiltinPipelineLowering::Nullary)
-            }
-            Self::Append
-            | Self::Prepend
-            | Self::Diff
-            | Self::Intersect
-            | Self::Union
-            | Self::Join
-            | Self::Zip
-            | Self::ZipLongest
-            | Self::Fanout
-            | Self::ZipShape => {
-                BuiltinSpec::new(Cat::Barrier, Card::Barrier).cost(10.0)
-            }
-            Self::Keys => BuiltinSpec::new(Cat::Object, Card::OneToOne).element(),
-            Self::Values => BuiltinSpec::new(Cat::Object, Card::OneToOne).element(),
-            Self::Entries => BuiltinSpec::new(Cat::Object, Card::OneToOne).element(),
-            Self::ToPairs
-            | Self::FromPairs
-            | Self::Invert
-            | Self::Pick
-            | Self::Omit
-            | Self::Merge
-            | Self::DeepMerge
-            | Self::Defaults
-            | Self::Rename
-            | Self::Pivot
-            | Self::Implode => BuiltinSpec::new(Cat::Object, Card::OneToOne),
-            Self::TransformKeys => {
-                BuiltinSpec::new(Cat::Object, Card::OneToOne)
-                    .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 1.0, 1.0))
-                    .order_effect(BuiltinPipelineOrderEffect::Preserves)
-                    .lowering(BuiltinPipelineLowering::ExprArg)
-            }
-            Self::TransformValues => {
-                BuiltinSpec::new(Cat::Object, Card::OneToOne)
-                    .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 1.0, 1.0))
-                    .order_effect(BuiltinPipelineOrderEffect::Preserves)
-                    .lowering(BuiltinPipelineLowering::ExprArg)
-            }
-            Self::FilterKeys => {
-                BuiltinSpec::new(Cat::Object, Card::OneToOne)
-                    .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 1.0, 1.0))
-                    .order_effect(BuiltinPipelineOrderEffect::Preserves)
-                    .lowering(BuiltinPipelineLowering::ExprArg)
-            }
-            Self::FilterValues => {
-                BuiltinSpec::new(Cat::Object, Card::OneToOne)
-                    .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 1.0, 1.0))
-                    .order_effect(BuiltinPipelineOrderEffect::Preserves)
-                    .lowering(BuiltinPipelineLowering::ExprArg)
-            }
-            Self::GetPath => {
-                BuiltinSpec::new(Cat::Path, Card::OneToOne).indexed().element()
-            }
-            Self::DelPath => {
-                BuiltinSpec::new(Cat::Path, Card::OneToOne).indexed().element()
-            }
-            Self::HasPath => {
-                BuiltinSpec::new(Cat::Path, Card::OneToOne).indexed().element()
-            }
-            Self::SetPath | Self::DelPaths | Self::FlattenKeys | Self::UnflattenKeys => {
-                BuiltinSpec::new(Cat::Path, Card::OneToOne).indexed()
-            }
-            Self::Walk | Self::WalkPre | Self::Rec | Self::TracePath => {
-                BuiltinSpec::new(Cat::Deep, Card::Expanding).cost(20.0)
-            }
-            Self::DeepFind => BuiltinSpec::new(Cat::Deep, Card::Expanding)
-                .structural(BuiltinStructural::DeepFind)
-                .cost(20.0),
-            Self::DeepShape => BuiltinSpec::new(Cat::Deep, Card::Expanding)
-                .structural(BuiltinStructural::DeepShape)
-                .cost(20.0),
-            Self::DeepLike => BuiltinSpec::new(Cat::Deep, Card::Expanding)
-                .structural(BuiltinStructural::DeepLike)
-                .cost(20.0),
-            Self::ToCsv | Self::ToTsv => BuiltinSpec::new(Cat::Serialization, Card::OneToOne)
-                .indexed()
-                .cost(20.0),
-            Self::EquiJoin => BuiltinSpec::new(Cat::Relational, Card::Barrier).cost(20.0),
-            Self::Set => BuiltinSpec::new(Cat::Mutation, Card::OneToOne).indexed().element(),
-            Self::Update => BuiltinSpec::new(Cat::Mutation, Card::OneToOne).indexed(),
-            Self::Lag => BuiltinSpec::new(Cat::StreamingOneToOne, Card::OneToOne)
-                .indexed()
-                .cost(10.0)
-                .element(),
-            Self::Lead => BuiltinSpec::new(Cat::StreamingOneToOne, Card::OneToOne)
-                .indexed()
-                .cost(10.0)
-                .element(),
-            Self::DiffWindow => BuiltinSpec::new(Cat::StreamingOneToOne, Card::OneToOne)
-                .indexed()
-                .cost(10.0)
-                .element(),
-            Self::PctChange => BuiltinSpec::new(Cat::StreamingOneToOne, Card::OneToOne)
-                .indexed()
-                .cost(10.0)
-                .element(),
-            Self::CumMax => BuiltinSpec::new(Cat::StreamingOneToOne, Card::OneToOne)
-                .indexed()
-                .cost(10.0)
-                .element(),
-            Self::CumMin => BuiltinSpec::new(Cat::StreamingOneToOne, Card::OneToOne)
-                .indexed()
-                .cost(10.0)
-                .element(),
-            Self::Zscore => BuiltinSpec::new(Cat::StreamingOneToOne, Card::OneToOne)
-                .indexed()
-                .cost(10.0)
-                .element(),
+            Self::Sort => <defs::Sort as builtin_def::Builtin>::spec(),
+            Self::GroupShape => <defs::GroupShape as builtin_def::Builtin>::spec(),
+            Self::Partition => <defs::Partition as builtin_def::Builtin>::spec(),
+            Self::Window => <defs::Window as builtin_def::Builtin>::spec(),
+            Self::Chunk => <defs::Chunk as builtin_def::Builtin>::spec(),
+            Self::RollingSum => <defs::RollingSum as builtin_def::Builtin>::spec(),
+            Self::RollingAvg => <defs::RollingAvg as builtin_def::Builtin>::spec(),
+            Self::RollingMin => <defs::RollingMin as builtin_def::Builtin>::spec(),
+            Self::RollingMax => <defs::RollingMax as builtin_def::Builtin>::spec(),
+            Self::Accumulate => <defs::Accumulate as builtin_def::Builtin>::spec(),
+            Self::GroupBy => <defs::GroupBy as builtin_def::Builtin>::spec(),
+            Self::CountBy => <defs::CountBy as builtin_def::Builtin>::spec(),
+            Self::IndexBy => <defs::IndexBy as builtin_def::Builtin>::spec(),
+            Self::Unique => <defs::Unique as builtin_def::Builtin>::spec(),
+            Self::UniqueBy => <defs::UniqueBy as builtin_def::Builtin>::spec(),
+            Self::Reverse => <defs::Reverse as builtin_def::Builtin>::spec(),
+            Self::Append => <defs::Append as builtin_def::Builtin>::spec(),
+            Self::Prepend => <defs::Prepend as builtin_def::Builtin>::spec(),
+            Self::Diff => <defs::Diff as builtin_def::Builtin>::spec(),
+            Self::Intersect => <defs::Intersect as builtin_def::Builtin>::spec(),
+            Self::Union => <defs::Union as builtin_def::Builtin>::spec(),
+            Self::Join => <defs::Join as builtin_def::Builtin>::spec(),
+            Self::Zip => <defs::Zip as builtin_def::Builtin>::spec(),
+            Self::ZipLongest => <defs::ZipLongest as builtin_def::Builtin>::spec(),
+            Self::Fanout => <defs::Fanout as builtin_def::Builtin>::spec(),
+            Self::ZipShape => <defs::ZipShape as builtin_def::Builtin>::spec(),
+            Self::Keys => <defs::Keys as builtin_def::Builtin>::spec(),
+            Self::Values => <defs::Values as builtin_def::Builtin>::spec(),
+            Self::Entries => <defs::Entries as builtin_def::Builtin>::spec(),
+            Self::ToPairs => <defs::ToPairs as builtin_def::Builtin>::spec(),
+            Self::FromPairs => <defs::FromPairs as builtin_def::Builtin>::spec(),
+            Self::Invert => <defs::Invert as builtin_def::Builtin>::spec(),
+            Self::Pick => <defs::Pick as builtin_def::Builtin>::spec(),
+            Self::Omit => <defs::Omit as builtin_def::Builtin>::spec(),
+            Self::Merge => <defs::Merge as builtin_def::Builtin>::spec(),
+            Self::DeepMerge => <defs::DeepMerge as builtin_def::Builtin>::spec(),
+            Self::Defaults => <defs::Defaults as builtin_def::Builtin>::spec(),
+            Self::Rename => <defs::Rename as builtin_def::Builtin>::spec(),
+            Self::Pivot => <defs::Pivot as builtin_def::Builtin>::spec(),
+            Self::Implode => <defs::Implode as builtin_def::Builtin>::spec(),
+            Self::TransformKeys => <defs::TransformKeys as builtin_def::Builtin>::spec(),
+            Self::TransformValues => <defs::TransformValues as builtin_def::Builtin>::spec(),
+            Self::FilterKeys => <defs::FilterKeys as builtin_def::Builtin>::spec(),
+            Self::FilterValues => <defs::FilterValues as builtin_def::Builtin>::spec(),
+            Self::GetPath => <defs::GetPath as builtin_def::Builtin>::spec(),
+            Self::DelPath => <defs::DelPath as builtin_def::Builtin>::spec(),
+            Self::HasPath => <defs::HasPath as builtin_def::Builtin>::spec(),
+            Self::SetPath => <defs::SetPath as builtin_def::Builtin>::spec(),
+            Self::DelPaths => <defs::DelPaths as builtin_def::Builtin>::spec(),
+            Self::FlattenKeys => <defs::FlattenKeys as builtin_def::Builtin>::spec(),
+            Self::UnflattenKeys => <defs::UnflattenKeys as builtin_def::Builtin>::spec(),
+            Self::Walk => <defs::Walk as builtin_def::Builtin>::spec(),
+            Self::WalkPre => <defs::WalkPre as builtin_def::Builtin>::spec(),
+            Self::Rec => <defs::Rec as builtin_def::Builtin>::spec(),
+            Self::TracePath => <defs::TracePath as builtin_def::Builtin>::spec(),
+            Self::DeepFind => <defs::DeepFind as builtin_def::Builtin>::spec(),
+            Self::DeepShape => <defs::DeepShape as builtin_def::Builtin>::spec(),
+            Self::DeepLike => <defs::DeepLike as builtin_def::Builtin>::spec(),
+            Self::ToCsv => <defs::ToCsv as builtin_def::Builtin>::spec(),
+            Self::ToTsv => <defs::ToTsv as builtin_def::Builtin>::spec(),
+            Self::EquiJoin => <defs::EquiJoin as builtin_def::Builtin>::spec(),
+            Self::Set => <defs::Set as builtin_def::Builtin>::spec(),
+            Self::Update => <defs::Update as builtin_def::Builtin>::spec(),
+            Self::Lag => <defs::Lag as builtin_def::Builtin>::spec(),
+            Self::Lead => <defs::Lead as builtin_def::Builtin>::spec(),
+            Self::DiffWindow => <defs::DiffWindow as builtin_def::Builtin>::spec(),
+            Self::PctChange => <defs::PctChange as builtin_def::Builtin>::spec(),
+            Self::CumMax => <defs::CumMax as builtin_def::Builtin>::spec(),
+            Self::CumMin => <defs::CumMin as builtin_def::Builtin>::spec(),
+            Self::Zscore => <defs::Zscore as builtin_def::Builtin>::spec(),
             Self::Or => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
                 .indexed()
                 .view_native()

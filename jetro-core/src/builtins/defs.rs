@@ -6,10 +6,11 @@
 //! match into this file (or category-split children).
 
 use super::{
-    builtin_def::Builtin, BuiltinCardinality, BuiltinCategory, BuiltinColumnarStage,
-    BuiltinDemandLaw, BuiltinMethod, BuiltinNumericReducer, BuiltinPipelineLowering,
-    BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect, BuiltinPipelineShape,
-    BuiltinSelectionPosition, BuiltinSpec, BuiltinStageMerge, BuiltinViewStage,
+    builtin_def::Builtin, BuiltinCancelGroup, BuiltinCancellation, BuiltinCardinality,
+    BuiltinCategory, BuiltinColumnarStage, BuiltinDemandLaw, BuiltinKeyedReducer, BuiltinMethod,
+    BuiltinNumericReducer, BuiltinPipelineLowering, BuiltinPipelineMaterialization,
+    BuiltinPipelineOrderEffect, BuiltinPipelineShape, BuiltinSelectionPosition, BuiltinSpec,
+    BuiltinStageMerge, BuiltinStructural, BuiltinViewStage,
 };
 
 // ── Helpers shared across reducer family ─────────────────────────────────────
@@ -424,4 +425,930 @@ impl Builtin for MinBy {
     fn spec() -> BuiltinSpec {
         predicate_reducer_spec()
     }
+}
+
+// ── Indexed/element-only streaming ───────────────────────────────────────────
+
+/// `enumerate` — pairs each element with its index; element-wise.
+pub(crate) struct Enumerate;
+impl Builtin for Enumerate {
+    const METHOD: BuiltinMethod = BuiltinMethod::Enumerate;
+    const NAME: &'static str = "enumerate";
+    fn spec() -> BuiltinSpec {
+        BuiltinSpec::new(BuiltinCategory::StreamingOneToOne, BuiltinCardinality::OneToOne)
+            .indexed()
+            .cost(10.0)
+            .element()
+    }
+}
+
+/// `pairwise` — yields adjacent pairs; element-wise indexed.
+pub(crate) struct Pairwise;
+impl Builtin for Pairwise {
+    const METHOD: BuiltinMethod = BuiltinMethod::Pairwise;
+    const NAME: &'static str = "pairwise";
+    fn spec() -> BuiltinSpec {
+        BuiltinSpec::new(BuiltinCategory::StreamingOneToOne, BuiltinCardinality::OneToOne)
+            .indexed()
+            .cost(10.0)
+            .element()
+    }
+}
+
+// ── Expanding (no lambda) ────────────────────────────────────────────────────
+
+#[inline]
+fn expand_simple_spec() -> BuiltinSpec {
+    BuiltinSpec::new(BuiltinCategory::StreamingExpand, BuiltinCardinality::Expanding).cost(10.0)
+}
+
+/// `flatten` — concatenates nested arrays.
+pub(crate) struct Flatten;
+impl Builtin for Flatten {
+    const METHOD: BuiltinMethod = BuiltinMethod::Flatten;
+    const NAME: &'static str = "flatten";
+    fn spec() -> BuiltinSpec { expand_simple_spec() }
+}
+
+/// `explode` — same as flatten with object semantics.
+pub(crate) struct Explode;
+impl Builtin for Explode {
+    const METHOD: BuiltinMethod = BuiltinMethod::Explode;
+    const NAME: &'static str = "explode";
+    fn spec() -> BuiltinSpec { expand_simple_spec() }
+}
+
+/// `split(sep)` — string-arg expansion stage.
+pub(crate) struct Split;
+impl Builtin for Split {
+    const METHOD: BuiltinMethod = BuiltinMethod::Split;
+    const NAME: &'static str = "split";
+    fn spec() -> BuiltinSpec {
+        BuiltinSpec::new(BuiltinCategory::StreamingExpand, BuiltinCardinality::Expanding)
+            .cost(10.0)
+            .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
+            .pipeline_shape(BuiltinPipelineShape::new(
+                BuiltinCardinality::Expanding,
+                true,
+                2.0,
+                1.0,
+            ))
+            .lowering(BuiltinPipelineLowering::StringArg)
+    }
+}
+
+#[inline]
+fn expand_element_spec() -> BuiltinSpec {
+    BuiltinSpec::new(BuiltinCategory::StreamingExpand, BuiltinCardinality::Expanding)
+        .cost(10.0)
+        .element()
+}
+
+/// `lines` — split string on newlines.
+pub(crate) struct Lines;
+impl Builtin for Lines {
+    const METHOD: BuiltinMethod = BuiltinMethod::Lines;
+    const NAME: &'static str = "lines";
+    fn spec() -> BuiltinSpec { expand_element_spec() }
+}
+
+/// `words` — whitespace-tokenise string.
+pub(crate) struct Words;
+impl Builtin for Words {
+    const METHOD: BuiltinMethod = BuiltinMethod::Words;
+    const NAME: &'static str = "words";
+    fn spec() -> BuiltinSpec { expand_element_spec() }
+}
+
+/// `chars` — string char iterator.
+pub(crate) struct Chars;
+impl Builtin for Chars {
+    const METHOD: BuiltinMethod = BuiltinMethod::Chars;
+    const NAME: &'static str = "chars";
+    fn spec() -> BuiltinSpec { expand_element_spec() }
+}
+
+/// `chars_of` — chars at given positions.
+pub(crate) struct CharsOf;
+impl Builtin for CharsOf {
+    const METHOD: BuiltinMethod = BuiltinMethod::CharsOf;
+    const NAME: &'static str = "chars_of";
+    fn spec() -> BuiltinSpec { expand_element_spec() }
+}
+
+/// `bytes` — string byte iterator.
+pub(crate) struct Bytes;
+impl Builtin for Bytes {
+    const METHOD: BuiltinMethod = BuiltinMethod::Bytes;
+    const NAME: &'static str = "bytes";
+    fn spec() -> BuiltinSpec { expand_element_spec() }
+}
+
+// ── Find-first / find-one ────────────────────────────────────────────────────
+
+/// `find_first(pred)` — terminal expr-arg returning first match with First demand.
+pub(crate) struct FindFirst;
+impl Builtin for FindFirst {
+    const METHOD: BuiltinMethod = BuiltinMethod::FindFirst;
+    const NAME: &'static str = "find_first";
+    fn spec() -> BuiltinSpec {
+        BuiltinSpec::new(BuiltinCategory::StreamingFilter, BuiltinCardinality::Filtering)
+            .cost(10.0)
+            .demand_law(BuiltinDemandLaw::First)
+            .lowering(BuiltinPipelineLowering::TerminalExprArg {
+                terminal: BuiltinMethod::First,
+            })
+    }
+}
+
+/// `find_one(pred)` — terminal expr-arg without demand annotation.
+pub(crate) struct FindOne;
+impl Builtin for FindOne {
+    const METHOD: BuiltinMethod = BuiltinMethod::FindOne;
+    const NAME: &'static str = "find_one";
+    fn spec() -> BuiltinSpec {
+        BuiltinSpec::new(BuiltinCategory::StreamingFilter, BuiltinCardinality::Filtering)
+            .cost(10.0)
+            .lowering(BuiltinPipelineLowering::TerminalExprArg {
+                terminal: BuiltinMethod::First,
+            })
+    }
+}
+
+// ── Positional miscellaneous ─────────────────────────────────────────────────
+
+#[inline]
+fn positional_native_spec() -> BuiltinSpec {
+    BuiltinSpec::new(BuiltinCategory::Positional, BuiltinCardinality::Bounded).view_native()
+}
+
+/// `nth(i)` — positional select by index.
+pub(crate) struct Nth;
+impl Builtin for Nth {
+    const METHOD: BuiltinMethod = BuiltinMethod::Nth;
+    const NAME: &'static str = "nth";
+    fn spec() -> BuiltinSpec { positional_native_spec() }
+}
+
+/// `collect()` — materialise stream to Vec; positional pass-through.
+pub(crate) struct Collect;
+impl Builtin for Collect {
+    const METHOD: BuiltinMethod = BuiltinMethod::Collect;
+    const NAME: &'static str = "collect";
+    fn spec() -> BuiltinSpec { positional_native_spec() }
+}
+
+// ── Barrier family ───────────────────────────────────────────────────────────
+
+#[inline]
+fn barrier_default_spec() -> BuiltinSpec {
+    BuiltinSpec::new(BuiltinCategory::Barrier, BuiltinCardinality::Barrier).cost(20.0)
+}
+
+/// `sort` — full-barrier comparison sort, optional key.
+pub(crate) struct Sort;
+impl Builtin for Sort {
+    const METHOD: BuiltinMethod = BuiltinMethod::Sort;
+    const NAME: &'static str = "sort";
+    fn spec() -> BuiltinSpec {
+        barrier_default_spec()
+            .demand_law(BuiltinDemandLaw::OrderBarrier)
+            .materialization(BuiltinPipelineMaterialization::ComposedBarrier)
+            .lowering(BuiltinPipelineLowering::Sort)
+    }
+}
+
+/// `group_shape` — barrier returning per-shape buckets.
+pub(crate) struct GroupShape;
+impl Builtin for GroupShape {
+    const METHOD: BuiltinMethod = BuiltinMethod::GroupShape;
+    const NAME: &'static str = "group_shape";
+    fn spec() -> BuiltinSpec { barrier_default_spec() }
+}
+
+/// `partition` — splits stream by predicate; barrier.
+pub(crate) struct Partition;
+impl Builtin for Partition {
+    const METHOD: BuiltinMethod = BuiltinMethod::Partition;
+    const NAME: &'static str = "partition";
+    fn spec() -> BuiltinSpec { barrier_default_spec() }
+}
+
+/// `window(n)` — sliding window barrier.
+pub(crate) struct Window;
+impl Builtin for Window {
+    const METHOD: BuiltinMethod = BuiltinMethod::Window;
+    const NAME: &'static str = "window";
+    fn spec() -> BuiltinSpec {
+        barrier_default_spec()
+            .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
+            .pipeline_shape(BuiltinPipelineShape::new(
+                BuiltinCardinality::Barrier,
+                true,
+                2.0,
+                1.0,
+            ))
+            .lowering(BuiltinPipelineLowering::UsizeArg { min: 1 })
+    }
+}
+
+/// `chunk(n)` — non-overlapping fixed-size buckets.
+pub(crate) struct Chunk;
+impl Builtin for Chunk {
+    const METHOD: BuiltinMethod = BuiltinMethod::Chunk;
+    const NAME: &'static str = "chunk";
+    fn spec() -> BuiltinSpec {
+        barrier_default_spec()
+            .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
+            .pipeline_shape(BuiltinPipelineShape::new(
+                BuiltinCardinality::Barrier,
+                true,
+                2.0,
+                1.0,
+            ))
+            .lowering(BuiltinPipelineLowering::UsizeArg { min: 1 })
+    }
+}
+
+/// `rolling_sum(n)` — windowed sum barrier.
+pub(crate) struct RollingSum;
+impl Builtin for RollingSum {
+    const METHOD: BuiltinMethod = BuiltinMethod::RollingSum;
+    const NAME: &'static str = "rolling_sum";
+    fn spec() -> BuiltinSpec { barrier_default_spec() }
+}
+
+/// `rolling_avg(n)` — windowed mean barrier.
+pub(crate) struct RollingAvg;
+impl Builtin for RollingAvg {
+    const METHOD: BuiltinMethod = BuiltinMethod::RollingAvg;
+    const NAME: &'static str = "rolling_avg";
+    fn spec() -> BuiltinSpec { barrier_default_spec() }
+}
+
+/// `rolling_min(n)` — windowed min barrier.
+pub(crate) struct RollingMin;
+impl Builtin for RollingMin {
+    const METHOD: BuiltinMethod = BuiltinMethod::RollingMin;
+    const NAME: &'static str = "rolling_min";
+    fn spec() -> BuiltinSpec { barrier_default_spec() }
+}
+
+/// `rolling_max(n)` — windowed max barrier.
+pub(crate) struct RollingMax;
+impl Builtin for RollingMax {
+    const METHOD: BuiltinMethod = BuiltinMethod::RollingMax;
+    const NAME: &'static str = "rolling_max";
+    fn spec() -> BuiltinSpec { barrier_default_spec() }
+}
+
+/// `accumulate` — running fold barrier.
+pub(crate) struct Accumulate;
+impl Builtin for Accumulate {
+    const METHOD: BuiltinMethod = BuiltinMethod::Accumulate;
+    const NAME: &'static str = "accumulate";
+    fn spec() -> BuiltinSpec { barrier_default_spec() }
+}
+
+// ── Keyed reducers ───────────────────────────────────────────────────────────
+
+/// `group_by(key)` — keyed reducer collecting elements per key.
+pub(crate) struct GroupBy;
+impl Builtin for GroupBy {
+    const METHOD: BuiltinMethod = BuiltinMethod::GroupBy;
+    const NAME: &'static str = "group_by";
+    fn spec() -> BuiltinSpec {
+        BuiltinSpec::new(BuiltinCategory::Reducer, BuiltinCardinality::Reducing)
+            .view_stage(BuiltinViewStage::KeyedReduce)
+            .keyed_reducer(BuiltinKeyedReducer::Group)
+            .columnar_stage(BuiltinColumnarStage::GroupBy)
+            .cost(20.0)
+            .demand_law(BuiltinDemandLaw::KeyedReducer)
+            .materialization(BuiltinPipelineMaterialization::ComposedBarrier)
+            .lowering(BuiltinPipelineLowering::ExprArg)
+    }
+}
+
+/// `count_by(key)` — keyed reducer counting per key.
+pub(crate) struct CountBy;
+impl Builtin for CountBy {
+    const METHOD: BuiltinMethod = BuiltinMethod::CountBy;
+    const NAME: &'static str = "count_by";
+    fn spec() -> BuiltinSpec {
+        BuiltinSpec::new(BuiltinCategory::Reducer, BuiltinCardinality::Reducing)
+            .view_stage(BuiltinViewStage::KeyedReduce)
+            .keyed_reducer(BuiltinKeyedReducer::Count)
+            .cost(10.0)
+            .demand_law(BuiltinDemandLaw::KeyedReducer)
+            .pipeline_shape(BuiltinPipelineShape::new(
+                BuiltinCardinality::OneToOne,
+                true,
+                1.0,
+                1.0,
+            ))
+            .lowering(BuiltinPipelineLowering::TerminalExprArg {
+                terminal: BuiltinMethod::First,
+            })
+    }
+}
+
+/// `index_by(key)` — keyed reducer with last-write-wins.
+pub(crate) struct IndexBy;
+impl Builtin for IndexBy {
+    const METHOD: BuiltinMethod = BuiltinMethod::IndexBy;
+    const NAME: &'static str = "index_by";
+    fn spec() -> BuiltinSpec {
+        BuiltinSpec::new(BuiltinCategory::Reducer, BuiltinCardinality::Reducing)
+            .view_stage(BuiltinViewStage::KeyedReduce)
+            .keyed_reducer(BuiltinKeyedReducer::Index)
+            .cost(10.0)
+            .demand_law(BuiltinDemandLaw::KeyedReducer)
+            .pipeline_shape(BuiltinPipelineShape::new(
+                BuiltinCardinality::OneToOne,
+                true,
+                1.0,
+                1.0,
+            ))
+            .lowering(BuiltinPipelineLowering::TerminalExprArg {
+                terminal: BuiltinMethod::First,
+            })
+    }
+}
+
+// ── Distinct / unique ────────────────────────────────────────────────────────
+
+#[inline]
+fn unique_spec() -> BuiltinSpec {
+    BuiltinSpec::new(BuiltinCategory::StreamingFilter, BuiltinCardinality::Filtering)
+        .view_stage(BuiltinViewStage::Distinct)
+        .cost(10.0)
+        .demand_law(BuiltinDemandLaw::UniqueLike)
+        .pipeline_shape(BuiltinPipelineShape::new(
+            BuiltinCardinality::Filtering,
+            true,
+            10.0,
+            1.0,
+        ))
+        .order_effect(BuiltinPipelineOrderEffect::Preserves)
+}
+
+/// `unique` — argument-free distinct.
+pub(crate) struct Unique;
+impl Builtin for Unique {
+    const METHOD: BuiltinMethod = BuiltinMethod::Unique;
+    const NAME: &'static str = "unique";
+    fn spec() -> BuiltinSpec {
+        unique_spec().lowering(BuiltinPipelineLowering::Nullary)
+    }
+}
+
+/// `unique_by(key)` — distinct by projected key.
+pub(crate) struct UniqueBy;
+impl Builtin for UniqueBy {
+    const METHOD: BuiltinMethod = BuiltinMethod::UniqueBy;
+    const NAME: &'static str = "unique_by";
+    fn spec() -> BuiltinSpec {
+        unique_spec().lowering(BuiltinPipelineLowering::ExprArg)
+    }
+}
+
+// ── Reverse ──────────────────────────────────────────────────────────────────
+
+/// `reverse` — full-barrier order reversal; cancels with adjacent reverse.
+pub(crate) struct Reverse;
+impl Builtin for Reverse {
+    const METHOD: BuiltinMethod = BuiltinMethod::Reverse;
+    const NAME: &'static str = "reverse";
+    fn spec() -> BuiltinSpec {
+        BuiltinSpec::new(BuiltinCategory::Barrier, BuiltinCardinality::Barrier)
+            .cost(10.0)
+            .cancellation(BuiltinCancellation::SelfInverse(BuiltinCancelGroup::Reverse))
+            .demand_law(BuiltinDemandLaw::OrderBarrier)
+            .materialization(BuiltinPipelineMaterialization::ComposedBarrier)
+            .lowering(BuiltinPipelineLowering::Nullary)
+    }
+}
+
+// ── Set / array combiners (barriers, no extra metadata) ──────────────────────
+
+#[inline]
+fn barrier_simple_spec() -> BuiltinSpec {
+    BuiltinSpec::new(BuiltinCategory::Barrier, BuiltinCardinality::Barrier).cost(10.0)
+}
+
+/// `append(arr)` — concatenates barrier.
+pub(crate) struct Append;
+impl Builtin for Append {
+    const METHOD: BuiltinMethod = BuiltinMethod::Append;
+    const NAME: &'static str = "append";
+    fn spec() -> BuiltinSpec { barrier_simple_spec() }
+}
+
+/// `prepend(arr)` — prepend barrier.
+pub(crate) struct Prepend;
+impl Builtin for Prepend {
+    const METHOD: BuiltinMethod = BuiltinMethod::Prepend;
+    const NAME: &'static str = "prepend";
+    fn spec() -> BuiltinSpec { barrier_simple_spec() }
+}
+
+/// `diff(arr)` — set difference.
+pub(crate) struct Diff;
+impl Builtin for Diff {
+    const METHOD: BuiltinMethod = BuiltinMethod::Diff;
+    const NAME: &'static str = "diff";
+    fn spec() -> BuiltinSpec { barrier_simple_spec() }
+}
+
+/// `intersect(arr)` — set intersection.
+pub(crate) struct Intersect;
+impl Builtin for Intersect {
+    const METHOD: BuiltinMethod = BuiltinMethod::Intersect;
+    const NAME: &'static str = "intersect";
+    fn spec() -> BuiltinSpec { barrier_simple_spec() }
+}
+
+/// `union(arr)` — set union.
+pub(crate) struct Union;
+impl Builtin for Union {
+    const METHOD: BuiltinMethod = BuiltinMethod::Union;
+    const NAME: &'static str = "union";
+    fn spec() -> BuiltinSpec { barrier_simple_spec() }
+}
+
+/// `join(sep)` — string join barrier.
+pub(crate) struct Join;
+impl Builtin for Join {
+    const METHOD: BuiltinMethod = BuiltinMethod::Join;
+    const NAME: &'static str = "join";
+    fn spec() -> BuiltinSpec { barrier_simple_spec() }
+}
+
+/// `zip(arr)` — element pairing.
+pub(crate) struct Zip;
+impl Builtin for Zip {
+    const METHOD: BuiltinMethod = BuiltinMethod::Zip;
+    const NAME: &'static str = "zip";
+    fn spec() -> BuiltinSpec { barrier_simple_spec() }
+}
+
+/// `zip_longest(arr)` — pad-shorter zip.
+pub(crate) struct ZipLongest;
+impl Builtin for ZipLongest {
+    const METHOD: BuiltinMethod = BuiltinMethod::ZipLongest;
+    const NAME: &'static str = "zip_longest";
+    fn spec() -> BuiltinSpec { barrier_simple_spec() }
+}
+
+/// `fanout(...)` — multi-projection.
+pub(crate) struct Fanout;
+impl Builtin for Fanout {
+    const METHOD: BuiltinMethod = BuiltinMethod::Fanout;
+    const NAME: &'static str = "fanout";
+    fn spec() -> BuiltinSpec { barrier_simple_spec() }
+}
+
+/// `zip_shape(...)` — shape-preserving zip.
+pub(crate) struct ZipShape;
+impl Builtin for ZipShape {
+    const METHOD: BuiltinMethod = BuiltinMethod::ZipShape;
+    const NAME: &'static str = "zip_shape";
+    fn spec() -> BuiltinSpec { barrier_simple_spec() }
+}
+
+// ── Object operations ────────────────────────────────────────────────────────
+
+#[inline]
+fn object_element_spec() -> BuiltinSpec {
+    BuiltinSpec::new(BuiltinCategory::Object, BuiltinCardinality::OneToOne).element()
+}
+
+/// `keys` — extract keys of an object (element-wise).
+pub(crate) struct Keys;
+impl Builtin for Keys {
+    const METHOD: BuiltinMethod = BuiltinMethod::Keys;
+    const NAME: &'static str = "keys";
+    fn spec() -> BuiltinSpec { object_element_spec() }
+}
+
+/// `values` — extract values of an object (element-wise).
+pub(crate) struct Values;
+impl Builtin for Values {
+    const METHOD: BuiltinMethod = BuiltinMethod::Values;
+    const NAME: &'static str = "values";
+    fn spec() -> BuiltinSpec { object_element_spec() }
+}
+
+/// `entries` — extract (key, value) pairs (element-wise).
+pub(crate) struct Entries;
+impl Builtin for Entries {
+    const METHOD: BuiltinMethod = BuiltinMethod::Entries;
+    const NAME: &'static str = "entries";
+    fn spec() -> BuiltinSpec { object_element_spec() }
+}
+
+#[inline]
+fn object_simple_spec() -> BuiltinSpec {
+    BuiltinSpec::new(BuiltinCategory::Object, BuiltinCardinality::OneToOne)
+}
+
+/// `to_pairs` — convert object to array of `[k, v]` pairs.
+pub(crate) struct ToPairs;
+impl Builtin for ToPairs {
+    const METHOD: BuiltinMethod = BuiltinMethod::ToPairs;
+    const NAME: &'static str = "to_pairs";
+    fn spec() -> BuiltinSpec { object_simple_spec() }
+}
+
+/// `from_pairs` — invert `to_pairs`.
+pub(crate) struct FromPairs;
+impl Builtin for FromPairs {
+    const METHOD: BuiltinMethod = BuiltinMethod::FromPairs;
+    const NAME: &'static str = "from_pairs";
+    fn spec() -> BuiltinSpec { object_simple_spec() }
+}
+
+/// `invert` — swap keys and values.
+pub(crate) struct Invert;
+impl Builtin for Invert {
+    const METHOD: BuiltinMethod = BuiltinMethod::Invert;
+    const NAME: &'static str = "invert";
+    fn spec() -> BuiltinSpec { object_simple_spec() }
+}
+
+/// `pick(...keys)` — restrict object to given keys.
+pub(crate) struct Pick;
+impl Builtin for Pick {
+    const METHOD: BuiltinMethod = BuiltinMethod::Pick;
+    const NAME: &'static str = "pick";
+    fn spec() -> BuiltinSpec { object_simple_spec() }
+}
+
+/// `omit(...keys)` — drop given keys from object.
+pub(crate) struct Omit;
+impl Builtin for Omit {
+    const METHOD: BuiltinMethod = BuiltinMethod::Omit;
+    const NAME: &'static str = "omit";
+    fn spec() -> BuiltinSpec { object_simple_spec() }
+}
+
+/// `merge(...objs)` — shallow merge objects.
+pub(crate) struct Merge;
+impl Builtin for Merge {
+    const METHOD: BuiltinMethod = BuiltinMethod::Merge;
+    const NAME: &'static str = "merge";
+    fn spec() -> BuiltinSpec { object_simple_spec() }
+}
+
+/// `deep_merge(...objs)` — recursive merge.
+pub(crate) struct DeepMerge;
+impl Builtin for DeepMerge {
+    const METHOD: BuiltinMethod = BuiltinMethod::DeepMerge;
+    const NAME: &'static str = "deep_merge";
+    fn spec() -> BuiltinSpec { object_simple_spec() }
+}
+
+/// `defaults(...objs)` — fill-in defaults without overwriting.
+pub(crate) struct Defaults;
+impl Builtin for Defaults {
+    const METHOD: BuiltinMethod = BuiltinMethod::Defaults;
+    const NAME: &'static str = "defaults";
+    fn spec() -> BuiltinSpec { object_simple_spec() }
+}
+
+/// `rename({...})` — rename object keys.
+pub(crate) struct Rename;
+impl Builtin for Rename {
+    const METHOD: BuiltinMethod = BuiltinMethod::Rename;
+    const NAME: &'static str = "rename";
+    fn spec() -> BuiltinSpec { object_simple_spec() }
+}
+
+/// `pivot(...)` — reshape object axes.
+pub(crate) struct Pivot;
+impl Builtin for Pivot {
+    const METHOD: BuiltinMethod = BuiltinMethod::Pivot;
+    const NAME: &'static str = "pivot";
+    fn spec() -> BuiltinSpec { object_simple_spec() }
+}
+
+/// `implode(sep)` — array-to-string with separator.
+pub(crate) struct Implode;
+impl Builtin for Implode {
+    const METHOD: BuiltinMethod = BuiltinMethod::Implode;
+    const NAME: &'static str = "implode";
+    fn spec() -> BuiltinSpec { object_simple_spec() }
+}
+
+#[inline]
+fn object_lambda_spec() -> BuiltinSpec {
+    BuiltinSpec::new(BuiltinCategory::Object, BuiltinCardinality::OneToOne)
+        .pipeline_shape(BuiltinPipelineShape::new(
+            BuiltinCardinality::OneToOne,
+            true,
+            1.0,
+            1.0,
+        ))
+        .order_effect(BuiltinPipelineOrderEffect::Preserves)
+        .lowering(BuiltinPipelineLowering::ExprArg)
+}
+
+/// `transform_keys(lam)` — map over keys of an object.
+pub(crate) struct TransformKeys;
+impl Builtin for TransformKeys {
+    const METHOD: BuiltinMethod = BuiltinMethod::TransformKeys;
+    const NAME: &'static str = "transform_keys";
+    fn spec() -> BuiltinSpec { object_lambda_spec() }
+}
+
+/// `transform_values(lam)` — map over values of an object.
+pub(crate) struct TransformValues;
+impl Builtin for TransformValues {
+    const METHOD: BuiltinMethod = BuiltinMethod::TransformValues;
+    const NAME: &'static str = "transform_values";
+    fn spec() -> BuiltinSpec { object_lambda_spec() }
+}
+
+/// `filter_keys(pred)` — drop entries by key predicate.
+pub(crate) struct FilterKeys;
+impl Builtin for FilterKeys {
+    const METHOD: BuiltinMethod = BuiltinMethod::FilterKeys;
+    const NAME: &'static str = "filter_keys";
+    fn spec() -> BuiltinSpec { object_lambda_spec() }
+}
+
+/// `filter_values(pred)` — drop entries by value predicate.
+pub(crate) struct FilterValues;
+impl Builtin for FilterValues {
+    const METHOD: BuiltinMethod = BuiltinMethod::FilterValues;
+    const NAME: &'static str = "filter_values";
+    fn spec() -> BuiltinSpec { object_lambda_spec() }
+}
+
+// ── Path operations ──────────────────────────────────────────────────────────
+
+#[inline]
+fn path_element_spec() -> BuiltinSpec {
+    BuiltinSpec::new(BuiltinCategory::Path, BuiltinCardinality::OneToOne)
+        .indexed()
+        .element()
+}
+
+/// `get_path(path)` — navigate path lookup.
+pub(crate) struct GetPath;
+impl Builtin for GetPath {
+    const METHOD: BuiltinMethod = BuiltinMethod::GetPath;
+    const NAME: &'static str = "get_path";
+    fn spec() -> BuiltinSpec { path_element_spec() }
+}
+
+/// `del_path(path)` — remove value at path.
+pub(crate) struct DelPath;
+impl Builtin for DelPath {
+    const METHOD: BuiltinMethod = BuiltinMethod::DelPath;
+    const NAME: &'static str = "del_path";
+    fn spec() -> BuiltinSpec { path_element_spec() }
+}
+
+/// `has_path(path)` — existence test.
+pub(crate) struct HasPath;
+impl Builtin for HasPath {
+    const METHOD: BuiltinMethod = BuiltinMethod::HasPath;
+    const NAME: &'static str = "has_path";
+    fn spec() -> BuiltinSpec { path_element_spec() }
+}
+
+#[inline]
+fn path_indexed_spec() -> BuiltinSpec {
+    BuiltinSpec::new(BuiltinCategory::Path, BuiltinCardinality::OneToOne).indexed()
+}
+
+/// `set_path(path, val)` — write value at path.
+pub(crate) struct SetPath;
+impl Builtin for SetPath {
+    const METHOD: BuiltinMethod = BuiltinMethod::SetPath;
+    const NAME: &'static str = "set_path";
+    fn spec() -> BuiltinSpec { path_indexed_spec() }
+}
+
+/// `del_paths([...])` — bulk path removal.
+pub(crate) struct DelPaths;
+impl Builtin for DelPaths {
+    const METHOD: BuiltinMethod = BuiltinMethod::DelPaths;
+    const NAME: &'static str = "del_paths";
+    fn spec() -> BuiltinSpec { path_indexed_spec() }
+}
+
+/// `flatten_keys` — flatten nested object into dotted keys.
+pub(crate) struct FlattenKeys;
+impl Builtin for FlattenKeys {
+    const METHOD: BuiltinMethod = BuiltinMethod::FlattenKeys;
+    const NAME: &'static str = "flatten_keys";
+    fn spec() -> BuiltinSpec { path_indexed_spec() }
+}
+
+/// `unflatten_keys` — invert `flatten_keys`.
+pub(crate) struct UnflattenKeys;
+impl Builtin for UnflattenKeys {
+    const METHOD: BuiltinMethod = BuiltinMethod::UnflattenKeys;
+    const NAME: &'static str = "unflatten_keys";
+    fn spec() -> BuiltinSpec { path_indexed_spec() }
+}
+
+// ── Deep operations ──────────────────────────────────────────────────────────
+
+#[inline]
+fn deep_simple_spec() -> BuiltinSpec {
+    BuiltinSpec::new(BuiltinCategory::Deep, BuiltinCardinality::Expanding).cost(20.0)
+}
+
+/// `walk(fn)` — post-order walk.
+pub(crate) struct Walk;
+impl Builtin for Walk {
+    const METHOD: BuiltinMethod = BuiltinMethod::Walk;
+    const NAME: &'static str = "walk";
+    fn spec() -> BuiltinSpec { deep_simple_spec() }
+}
+
+/// `walk_pre(fn)` — pre-order walk.
+pub(crate) struct WalkPre;
+impl Builtin for WalkPre {
+    const METHOD: BuiltinMethod = BuiltinMethod::WalkPre;
+    const NAME: &'static str = "walk_pre";
+    fn spec() -> BuiltinSpec { deep_simple_spec() }
+}
+
+/// `rec(fn)` — recursive descent map.
+pub(crate) struct Rec;
+impl Builtin for Rec {
+    const METHOD: BuiltinMethod = BuiltinMethod::Rec;
+    const NAME: &'static str = "rec";
+    fn spec() -> BuiltinSpec { deep_simple_spec() }
+}
+
+/// `trace_path()` — collect all paths.
+pub(crate) struct TracePath;
+impl Builtin for TracePath {
+    const METHOD: BuiltinMethod = BuiltinMethod::TracePath;
+    const NAME: &'static str = "trace_path";
+    fn spec() -> BuiltinSpec { deep_simple_spec() }
+}
+
+/// `deep_find(pred)` — descend and collect all matches.
+pub(crate) struct DeepFind;
+impl Builtin for DeepFind {
+    const METHOD: BuiltinMethod = BuiltinMethod::DeepFind;
+    const NAME: &'static str = "deep_find";
+    fn spec() -> BuiltinSpec {
+        BuiltinSpec::new(BuiltinCategory::Deep, BuiltinCardinality::Expanding)
+            .structural(BuiltinStructural::DeepFind)
+            .cost(20.0)
+    }
+}
+
+/// `deep_shape({...})` — descend and collect by shape.
+pub(crate) struct DeepShape;
+impl Builtin for DeepShape {
+    const METHOD: BuiltinMethod = BuiltinMethod::DeepShape;
+    const NAME: &'static str = "deep_shape";
+    fn spec() -> BuiltinSpec {
+        BuiltinSpec::new(BuiltinCategory::Deep, BuiltinCardinality::Expanding)
+            .structural(BuiltinStructural::DeepShape)
+            .cost(20.0)
+    }
+}
+
+/// `deep_like({...})` — descend and collect by literal match.
+pub(crate) struct DeepLike;
+impl Builtin for DeepLike {
+    const METHOD: BuiltinMethod = BuiltinMethod::DeepLike;
+    const NAME: &'static str = "deep_like";
+    fn spec() -> BuiltinSpec {
+        BuiltinSpec::new(BuiltinCategory::Deep, BuiltinCardinality::Expanding)
+            .structural(BuiltinStructural::DeepLike)
+            .cost(20.0)
+    }
+}
+
+// ── Serialization / relational / mutation ────────────────────────────────────
+
+#[inline]
+fn serialization_spec() -> BuiltinSpec {
+    BuiltinSpec::new(BuiltinCategory::Serialization, BuiltinCardinality::OneToOne)
+        .indexed()
+        .cost(20.0)
+}
+
+/// `to_csv()` — CSV serialiser.
+pub(crate) struct ToCsv;
+impl Builtin for ToCsv {
+    const METHOD: BuiltinMethod = BuiltinMethod::ToCsv;
+    const NAME: &'static str = "to_csv";
+    fn spec() -> BuiltinSpec { serialization_spec() }
+}
+
+/// `to_tsv()` — TSV serialiser.
+pub(crate) struct ToTsv;
+impl Builtin for ToTsv {
+    const METHOD: BuiltinMethod = BuiltinMethod::ToTsv;
+    const NAME: &'static str = "to_tsv";
+    fn spec() -> BuiltinSpec { serialization_spec() }
+}
+
+/// `equi_join(left, right, on)` — relational join barrier.
+pub(crate) struct EquiJoin;
+impl Builtin for EquiJoin {
+    const METHOD: BuiltinMethod = BuiltinMethod::EquiJoin;
+    const NAME: &'static str = "equi_join";
+    fn spec() -> BuiltinSpec {
+        BuiltinSpec::new(BuiltinCategory::Relational, BuiltinCardinality::Barrier).cost(20.0)
+    }
+}
+
+/// `set(path, val)` — element-wise mutation.
+pub(crate) struct Set;
+impl Builtin for Set {
+    const METHOD: BuiltinMethod = BuiltinMethod::Set;
+    const NAME: &'static str = "set";
+    fn spec() -> BuiltinSpec {
+        BuiltinSpec::new(BuiltinCategory::Mutation, BuiltinCardinality::OneToOne)
+            .indexed()
+            .element()
+    }
+}
+
+/// `update(path, fn)` — mutation via lambda.
+pub(crate) struct Update;
+impl Builtin for Update {
+    const METHOD: BuiltinMethod = BuiltinMethod::Update;
+    const NAME: &'static str = "update";
+    fn spec() -> BuiltinSpec {
+        BuiltinSpec::new(BuiltinCategory::Mutation, BuiltinCardinality::OneToOne).indexed()
+    }
+}
+
+// ── Streaming OneToOne (no lambda, indexed, element) ─────────────────────────
+
+#[inline]
+fn streaming_one_to_one_element_spec() -> BuiltinSpec {
+    BuiltinSpec::new(BuiltinCategory::StreamingOneToOne, BuiltinCardinality::OneToOne)
+        .indexed()
+        .cost(10.0)
+        .element()
+}
+
+/// `lag(n)` — element shifted by N positions.
+pub(crate) struct Lag;
+impl Builtin for Lag {
+    const METHOD: BuiltinMethod = BuiltinMethod::Lag;
+    const NAME: &'static str = "lag";
+    fn spec() -> BuiltinSpec { streaming_one_to_one_element_spec() }
+}
+
+/// `lead(n)` — element shifted forward by N positions.
+pub(crate) struct Lead;
+impl Builtin for Lead {
+    const METHOD: BuiltinMethod = BuiltinMethod::Lead;
+    const NAME: &'static str = "lead";
+    fn spec() -> BuiltinSpec { streaming_one_to_one_element_spec() }
+}
+
+/// `diff_window(n)` — pairwise diff at lag N.
+pub(crate) struct DiffWindow;
+impl Builtin for DiffWindow {
+    const METHOD: BuiltinMethod = BuiltinMethod::DiffWindow;
+    const NAME: &'static str = "diff_window";
+    fn spec() -> BuiltinSpec { streaming_one_to_one_element_spec() }
+}
+
+/// `pct_change(n)` — pairwise relative change at lag N.
+pub(crate) struct PctChange;
+impl Builtin for PctChange {
+    const METHOD: BuiltinMethod = BuiltinMethod::PctChange;
+    const NAME: &'static str = "pct_change";
+    fn spec() -> BuiltinSpec { streaming_one_to_one_element_spec() }
+}
+
+/// `cum_max()` — running maximum.
+pub(crate) struct CumMax;
+impl Builtin for CumMax {
+    const METHOD: BuiltinMethod = BuiltinMethod::CumMax;
+    const NAME: &'static str = "cum_max";
+    fn spec() -> BuiltinSpec { streaming_one_to_one_element_spec() }
+}
+
+/// `cum_min()` — running minimum.
+pub(crate) struct CumMin;
+impl Builtin for CumMin {
+    const METHOD: BuiltinMethod = BuiltinMethod::CumMin;
+    const NAME: &'static str = "cum_min";
+    fn spec() -> BuiltinSpec { streaming_one_to_one_element_spec() }
+}
+
+/// `zscore()` — element standardised by mean/std.
+pub(crate) struct Zscore;
+impl Builtin for Zscore {
+    const METHOD: BuiltinMethod = BuiltinMethod::Zscore;
+    const NAME: &'static str = "zscore";
+    fn spec() -> BuiltinSpec { streaming_one_to_one_element_spec() }
 }
