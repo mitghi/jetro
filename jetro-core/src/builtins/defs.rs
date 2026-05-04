@@ -177,6 +177,7 @@ pub(crate) struct Skip;
 impl Builtin for Skip {
     const METHOD: BuiltinMethod = BuiltinMethod::Skip;
     const NAME: &'static str = "skip";
+    const ALIASES: &'static [&'static str] = &["drop"];
 
     fn spec() -> BuiltinSpec {
         BuiltinSpec::new(BuiltinCategory::Positional, BuiltinCardinality::Bounded)
@@ -226,6 +227,7 @@ pub(crate) struct TakeWhile;
 impl Builtin for TakeWhile {
     const METHOD: BuiltinMethod = BuiltinMethod::TakeWhile;
     const NAME: &'static str = "take_while";
+    const ALIASES: &'static [&'static str] = &["takewhile"];
 
     fn spec() -> BuiltinSpec {
         BuiltinSpec::new(BuiltinCategory::StreamingFilter, BuiltinCardinality::Filtering)
@@ -248,6 +250,7 @@ pub(crate) struct DropWhile;
 impl Builtin for DropWhile {
     const METHOD: BuiltinMethod = BuiltinMethod::DropWhile;
     const NAME: &'static str = "drop_while";
+    const ALIASES: &'static [&'static str] = &["dropwhile"];
 
     fn spec() -> BuiltinSpec {
         BuiltinSpec::new(BuiltinCategory::StreamingFilter, BuiltinCardinality::Filtering)
@@ -362,6 +365,7 @@ pub(crate) struct Any;
 impl Builtin for Any {
     const METHOD: BuiltinMethod = BuiltinMethod::Any;
     const NAME: &'static str = "any";
+    const ALIASES: &'static [&'static str] = &["exists"];
 
     fn spec() -> BuiltinSpec {
         BuiltinSpec::new(BuiltinCategory::Reducer, BuiltinCardinality::Reducing)
@@ -610,6 +614,7 @@ pub(crate) struct Sort;
 impl Builtin for Sort {
     const METHOD: BuiltinMethod = BuiltinMethod::Sort;
     const NAME: &'static str = "sort";
+    const ALIASES: &'static [&'static str] = &["sort_by"];
     fn spec() -> BuiltinSpec {
         barrier_default_spec()
             .demand_law(BuiltinDemandLaw::OrderBarrier)
@@ -657,6 +662,7 @@ pub(crate) struct Chunk;
 impl Builtin for Chunk {
     const METHOD: BuiltinMethod = BuiltinMethod::Chunk;
     const NAME: &'static str = "chunk";
+    const ALIASES: &'static [&'static str] = &["batch"];
     fn spec() -> BuiltinSpec {
         barrier_default_spec()
             .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
@@ -797,6 +803,7 @@ pub(crate) struct Unique;
 impl Builtin for Unique {
     const METHOD: BuiltinMethod = BuiltinMethod::Unique;
     const NAME: &'static str = "unique";
+    const ALIASES: &'static [&'static str] = &["distinct"];
     fn spec() -> BuiltinSpec {
         unique_spec().lowering(BuiltinPipelineLowering::Nullary)
     }
@@ -1374,12 +1381,13 @@ fn scalar_view_scalar_element_spec() -> BuiltinSpec {
 
 // Native-element (no view_scalar):
 macro_rules! scalar_native_element {
-    ( $( $ty:ident => $variant:ident, $name:literal ; )* ) => {
+    ( $( $ty:ident => $variant:ident, $name:literal $( , aliases: [ $( $alias:literal ),* $(,)? ] )? ; )* ) => {
         $(
             pub(crate) struct $ty;
             impl Builtin for $ty {
                 const METHOD: BuiltinMethod = BuiltinMethod::$variant;
                 const NAME: &'static str = $name;
+                $( const ALIASES: &'static [&'static str] = &[ $( $alias ),* ]; )?
                 fn spec() -> BuiltinSpec { scalar_native_element_spec() }
             }
         )*
@@ -1388,12 +1396,13 @@ macro_rules! scalar_native_element {
 
 // View-scalar element:
 macro_rules! scalar_view_scalar_element {
-    ( $( $ty:ident => $variant:ident, $name:literal ; )* ) => {
+    ( $( $ty:ident => $variant:ident, $name:literal $( , aliases: [ $( $alias:literal ),* $(,)? ] )? ; )* ) => {
         $(
             pub(crate) struct $ty;
             impl Builtin for $ty {
                 const METHOD: BuiltinMethod = BuiltinMethod::$variant;
                 const NAME: &'static str = $name;
+                $( const ALIASES: &'static [&'static str] = &[ $( $alias ),* ]; )?
                 fn spec() -> BuiltinSpec { scalar_view_scalar_element_spec() }
             }
         )*
@@ -1419,7 +1428,7 @@ scalar_native_element! {
     UrlDecode => UrlDecode, "url_decode";
     HtmlEscape => HtmlEscape, "html_escape";
     HtmlUnescape => HtmlUnescape, "html_unescape";
-    Repeat => Repeat, "repeat";
+    Repeat => Repeat, "repeat", aliases: ["repeat_str"];
     PadLeft => PadLeft, "pad_left";
     PadRight => PadRight, "pad_right";
     Center => Center, "center";
@@ -1438,7 +1447,7 @@ scalar_native_element! {
     ContainsAll => ContainsAll, "contains_all";
     Schema => Schema, "schema";
     Type => Type, "type";
-    ToString_ => ToString, "to_string";
+    ToString => ToString, "to_string";
     ToJson => ToJson, "to_json";
     Indent => Indent, "indent";
     Dedent => Dedent, "dedent";
@@ -1452,8 +1461,8 @@ scalar_view_scalar_element! {
     Upper => Upper, "upper";
     Lower => Lower, "lower";
     Trim => Trim, "trim";
-    TrimLeft => TrimLeft, "trim_left";
-    TrimRight => TrimRight, "trim_right";
+    TrimLeft => TrimLeft, "trim_left", aliases: ["lstrip"];
+    TrimRight => TrimRight, "trim_right", aliases: ["rstrip"];
     IsBlank => IsBlank, "is_blank";
     IsNumeric => IsNumeric, "is_numeric";
     IsAlpha => IsAlpha, "is_alpha";
@@ -1540,5 +1549,61 @@ impl Builtin for Unknown {
             pure: false,
             ..BuiltinSpec::new(BuiltinCategory::Unknown, BuiltinCardinality::OneToOne)
         }
+    }
+}
+
+// ── Wildcard-default methods now made explicit (so all methods have defs entries) ──
+
+/// `from_json` — string → JSON value (default scalar element).
+pub(crate) struct FromJson;
+impl Builtin for FromJson {
+    const METHOD: BuiltinMethod = BuiltinMethod::FromJson;
+    const NAME: &'static str = "from_json";
+    fn spec() -> BuiltinSpec { default_scalar_spec(BuiltinMethod::FromJson) }
+}
+
+/// `includes(item)` / `contains(item)` — array membership scalar.
+pub(crate) struct Includes;
+impl Builtin for Includes {
+    const METHOD: BuiltinMethod = BuiltinMethod::Includes;
+    const NAME: &'static str = "includes";
+    const ALIASES: &'static [&'static str] = &["contains"];
+    fn spec() -> BuiltinSpec { default_scalar_spec(BuiltinMethod::Includes) }
+}
+
+/// `index(item)` — first index of element.
+pub(crate) struct Index;
+impl Builtin for Index {
+    const METHOD: BuiltinMethod = BuiltinMethod::Index;
+    const NAME: &'static str = "index";
+    fn spec() -> BuiltinSpec { default_scalar_spec(BuiltinMethod::Index) }
+}
+
+/// `indices_of(item)` — all indices of element.
+pub(crate) struct IndicesOf;
+impl Builtin for IndicesOf {
+    const METHOD: BuiltinMethod = BuiltinMethod::IndicesOf;
+    const NAME: &'static str = "indices_of";
+    fn spec() -> BuiltinSpec { default_scalar_spec(BuiltinMethod::IndicesOf) }
+}
+
+/// `missing` — sentinel for missing key/path.
+pub(crate) struct Missing;
+impl Builtin for Missing {
+    const METHOD: BuiltinMethod = BuiltinMethod::Missing;
+    const NAME: &'static str = "missing";
+    fn spec() -> BuiltinSpec { default_scalar_spec(BuiltinMethod::Missing) }
+}
+
+/// Default scalar fallback used by methods that previously fell to the wildcard arm.
+/// Mirrors the `_ => { ... }` body in legacy `BuiltinMethod::spec()`.
+fn default_scalar_spec(method: BuiltinMethod) -> BuiltinSpec {
+    let spec = BuiltinSpec::new(BuiltinCategory::Scalar, BuiltinCardinality::OneToOne)
+        .indexed()
+        .view_native();
+    if method.is_view_scalar_method() {
+        spec.view_scalar()
+    } else {
+        spec
     }
 }

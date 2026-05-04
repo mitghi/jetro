@@ -1417,9 +1417,6 @@ impl BuiltinMethod {
     /// Called by the pipeline planner and VM to query cardinality, cost, and feature flags.
     #[inline]
     pub fn spec(self) -> BuiltinSpec {
-        use BuiltinCardinality as Card;
-        use BuiltinCategory as Cat;
-
         let spec = match self {
             Self::Filter => <defs::Filter as builtin_def::Builtin>::spec(),
             Self::Find => <defs::Find as builtin_def::Builtin>::spec(),
@@ -1593,21 +1590,15 @@ impl BuiltinMethod {
             Self::Replace => <defs::Replace as builtin_def::Builtin>::spec(),
             Self::ReplaceAll => <defs::ReplaceAll as builtin_def::Builtin>::spec(),
             Self::Type => <defs::Type as builtin_def::Builtin>::spec(),
-            Self::ToString => <defs::ToString_ as builtin_def::Builtin>::spec(),
+            Self::ToString => <defs::ToString as builtin_def::Builtin>::spec(),
             Self::ToJson => <defs::ToJson as builtin_def::Builtin>::spec(),
             Self::Indent => <defs::Indent as builtin_def::Builtin>::spec(),
             Self::Dedent => <defs::Dedent as builtin_def::Builtin>::spec(),
-            _ => {
-                let spec = BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                    .indexed()
-                    .view_native();
-                let spec = if self.is_view_scalar_method() {
-                    spec.view_scalar()
-                } else {
-                    spec
-                };
-                spec
-            }
+            Self::FromJson => <defs::FromJson as builtin_def::Builtin>::spec(),
+            Self::Includes => <defs::Includes as builtin_def::Builtin>::spec(),
+            Self::Index => <defs::Index as builtin_def::Builtin>::spec(),
+            Self::IndicesOf => <defs::IndicesOf as builtin_def::Builtin>::spec(),
+            Self::Missing => <defs::Missing as builtin_def::Builtin>::spec(),
         };
         match self {
             Self::ToBase64 => spec.cancellation(BuiltinCancellation::Inverse {
