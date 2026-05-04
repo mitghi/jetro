@@ -583,23 +583,35 @@ fn apply_adapter_materialized(
     }
 }
 
-/// Applies an element-wise stage (`Slice`, `Replace`, `Builtin`) to a single `Val` row.
+/// Applies an element-wise stage (`Slice`, string pair builtins, `Builtin`) to a single `Val` row.
 pub(super) fn apply_element_adapter(stage: &Stage, v: Val) -> Val {
     match stage {
         Stage::Slice(start, end) => slice_apply(v, *start, *end),
-        Stage::Replace {
-            needle,
-            replacement,
-            all,
-        } => replace_apply(v.clone(), needle, replacement, *all).unwrap_or(v),
+        Stage::StringPairBuiltin {
+            method,
+            first,
+            second,
+        } if matches!(*method, BuiltinMethod::Replace | BuiltinMethod::ReplaceAll) => {
+            replace_apply(
+                v.clone(),
+                first,
+                second,
+                *method == BuiltinMethod::ReplaceAll,
+            )
+            .unwrap_or(v)
+        }
         Stage::Builtin(call) => call.apply(&v).unwrap_or(v),
         _ => v,
     }
 }
 
 fn apply_expanding_adapter(stage: &Stage, v: &Val, out: &mut Vec<Val>) {
-    if let Stage::Split(sep) = stage {
-        if let Some(Val::Arr(a)) = split_apply(v, sep.as_ref()) {
+    if let Stage::StringBuiltin {
+        method: BuiltinMethod::Split,
+        value,
+    } = stage
+    {
+        if let Some(Val::Arr(a)) = split_apply(v, value.as_ref()) {
             out.extend(Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone()));
         }
     }
@@ -677,7 +689,6 @@ fn observe_reducer_item(
 
     Ok(ReducerItemFlow::Observed)
 }
-
 
 /// Applies an object-lambda stage (`TransformKeys`, `TransformValues`, `FilterKeys`, `FilterValues`) to `recv`.
 pub(crate) fn apply_lambda_obj(

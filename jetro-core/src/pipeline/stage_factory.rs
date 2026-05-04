@@ -89,8 +89,9 @@ pub(super) fn lower_method_from_registry(
                         _ => return None,
                     }
                 }
-                BuiltinUsizeStage::Chunk => stages.push(Stage::Chunk(n)),
-                BuiltinUsizeStage::Window => stages.push(Stage::Window(n)),
+                BuiltinUsizeStage::Chunk | BuiltinUsizeStage::Window => {
+                    stages.push(Stage::UsizeBuiltin { method, value: n });
+                }
             }
             stage_exprs.push(None);
             Some(())
@@ -100,7 +101,10 @@ pub(super) fn lower_method_from_registry(
                 return None;
             }
             match stage {
-                BuiltinStringStage::Split => stages.push(Stage::Split(string_arg(&args[0])?)),
+                BuiltinStringStage::Split => stages.push(Stage::StringBuiltin {
+                    method,
+                    value: string_arg(&args[0])?,
+                }),
             }
             stage_exprs.push(None);
             Some(())
@@ -110,10 +114,10 @@ pub(super) fn lower_method_from_registry(
                 return None;
             }
             match stage {
-                BuiltinStringPairStage::Replace { all } => stages.push(Stage::Replace {
-                    needle: string_arg(&args[0])?,
-                    replacement: string_arg(&args[1])?,
-                    all,
+                BuiltinStringPairStage::Replace { .. } => stages.push(Stage::StringPairBuiltin {
+                    method,
+                    first: string_arg(&args[0])?,
+                    second: string_arg(&args[1])?,
                 }),
             }
             stage_exprs.push(None);

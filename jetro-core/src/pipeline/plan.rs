@@ -674,17 +674,6 @@ macro_rules! view_body_stage_descriptor {
     };
 }
 
-macro_rules! usize_stage_descriptor {
-    ($stage:expr, { $($variant:ident => $method:ident),+ $(,)? }) => {
-        match $stage {
-            $(
-                Stage::$variant(n) => Some(StageDescriptor::new(BuiltinMethod::$method).usize_arg(*n)),
-            )+
-            _ => None,
-        }
-    };
-}
-
 macro_rules! method_stage_descriptor {
     ($stage:expr, { $($pattern:pat => $method:ident),+ $(,)? }) => {
         match $stage {
@@ -757,16 +746,9 @@ impl Stage {
         }) {
             return Some(desc);
         }
-        if let Some(desc) = usize_stage_descriptor!(self, {
-            Chunk => Chunk,
-            Window => Window,
-        }) {
-            return Some(desc);
-        }
         if let Some(desc) = method_stage_descriptor!(self, {
             Stage::Reverse(_) => Reverse,
             Stage::UniqueBy(None) => Unique,
-            Stage::Split(_) => Split,
             Stage::Slice(_, _) => Slice,
         }) {
             return Some(desc);
@@ -794,11 +776,12 @@ impl Stage {
                     desc
                 })
             }
-            Stage::Replace { all, .. } => Some(StageDescriptor::new(if *all {
-                BuiltinMethod::ReplaceAll
-            } else {
-                BuiltinMethod::Replace
-            })),
+            Stage::UsizeBuiltin { method, value } => {
+                Some(StageDescriptor::new(*method).usize_arg(*value))
+            }
+            Stage::StringBuiltin { method, .. } | Stage::StringPairBuiltin { method, .. } => {
+                Some(StageDescriptor::new(*method))
+            }
             Stage::ExprBuiltin { method, body } => Some(StageDescriptor::new(*method).body(body)),
             Stage::Builtin(call) => Some(
                 StageDescriptor::new(call.method)

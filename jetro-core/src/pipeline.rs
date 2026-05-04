@@ -86,7 +86,6 @@ pub trait PipelineData {
     fn promote_objvec(&self, arr: &Arc<Vec<Val>>) -> Option<Arc<crate::value::ObjVecData>>;
 }
 
-
 use std::sync::atomic::{AtomicU8, Ordering};
 /// Cached initialisation flag for the pipeline trace flag: 0 = uninitialised, 1 = off, 2 = on.
 static TRACE_INIT: AtomicU8 = AtomicU8::new(0);
@@ -149,7 +148,6 @@ fn expr_label(e: &Expr) -> &'static str {
     }
 }
 
-
 /// The value-producing root of a pipeline — either an already-materialised value or a
 /// dot-separated field path that is resolved against the document before the first stage runs.
 #[derive(Debug, Clone)]
@@ -193,7 +191,6 @@ impl SortSpec {
     }
 }
 
-
 /// A single transformation step in a pull-based pipeline between the source and the sink.
 ///
 /// Each variant carries the compiled predicate / projection program and any metadata needed
@@ -225,27 +222,34 @@ pub enum Stage {
     /// Delegates each element to a pure built-in method call with pre-resolved literal arguments.
     Builtin(PipelineBuiltinCall),
 
-    /// Splits each string element on the given delimiter, emitting the resulting substrings.
-    Split(Arc<str>),
-
     /// Selects a contiguous sub-range of the element stream using start/end indices.
     Slice(i64, Option<i64>),
 
-    /// Performs string replacement on each string element; `all` controls single vs. global replace.
-    Replace {
-        /// The substring or pattern to search for.
-        needle: Arc<str>,
-        /// The string to substitute in place of each match.
-        replacement: Arc<str>,
-        /// When `true`, all occurrences are replaced; otherwise only the first.
-        all: bool,
+    /// `usize`-argument builtin stage identified by the registry.
+    UsizeBuiltin {
+        /// Registry method identity for this stage.
+        method: BuiltinMethod,
+        /// Integer argument accepted by the builtin.
+        value: usize,
     },
 
-    /// Collects elements into non-overlapping chunks of `n`, emitting each chunk as an array.
-    Chunk(usize),
+    /// Single string-argument builtin stage identified by the registry.
+    StringBuiltin {
+        /// Registry method identity for this stage.
+        method: BuiltinMethod,
+        /// String argument accepted by the builtin.
+        value: Arc<str>,
+    },
 
-    /// Emits overlapping sliding windows of `n` consecutive elements as arrays.
-    Window(usize),
+    /// Two string-argument builtin stage identified by the registry.
+    StringPairBuiltin {
+        /// Registry method identity for this stage.
+        method: BuiltinMethod,
+        /// First string argument accepted by the builtin.
+        first: Arc<str>,
+        /// Second string argument accepted by the builtin.
+        second: Arc<str>,
+    },
 
     /// Applies a pre-compiled sub-pipeline `Plan` to each element, replacing it with the result.
     CompiledMap(Arc<Plan>),
@@ -261,7 +265,6 @@ pub enum Stage {
     /// Removes consecutive duplicates from a pre-sorted stream, optionally keyed by a program.
     SortedDedup(Option<Arc<crate::vm::Program>>),
 }
-
 
 /// The four numeric fold operations supported by the `Reducer` sink.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -319,7 +322,6 @@ impl Sink {
     }
 }
 
-
 /// The terminal accumulator of a pipeline — consumes the element stream and produces the final value.
 #[derive(Debug, Clone)]
 pub enum Sink {
@@ -354,7 +356,6 @@ pub struct Pipeline {
     /// Pre-classified kernels for sink sub-programs (predicate / projection inside a reducer).
     pub sink_kernels: Vec<BodyKernel>,
 }
-
 
 /// The source-independent half of a `Pipeline`; can be combined with any `Source` via
 /// `with_source` to produce a runnable `Pipeline`.
@@ -403,7 +404,6 @@ impl Pipeline {
         (self.source, body)
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -557,7 +557,6 @@ mod tests {
         )));
     }
 
-    
     #[test]
     fn lower_take_skip_sum() {
         let p = lower_query("$.xs.skip(2).take(5).sum()").unwrap();
@@ -611,10 +610,8 @@ mod tests {
 
     #[test]
     fn lower_returns_none_for_unsupported_shape() {
-        
-        
         assert!(lower_query("$.xs.equi_join($.ys, lhs, rhs)").is_none());
-        
+
         assert!(lower_query("@.x.filter(y > 0)").is_none());
     }
 
@@ -771,7 +768,6 @@ mod tests {
         assert!(p.stage_kernels[0].is_view_native());
     }
 
-    
     #[test]
     fn run_count_on_simple_array() {
         use serde_json::json;
@@ -1065,14 +1061,13 @@ mod tests {
         );
     }
 
-    
     #[test]
     fn run_topn_smallest_three() {
         use serde_json::json;
         let doc: Val = (&json!({"xs":[5, 2, 8, 1, 4, 7, 3]})).into();
         let p = lower_query("$.xs.sort().take(3)").unwrap();
         let out = p.run(&doc).unwrap();
-        
+
         let out_json: serde_json::Value = out.into();
         assert_eq!(out_json, json!([1, 2, 3]));
     }
@@ -1236,7 +1231,6 @@ mod tests {
 
     #[test]
     fn rewrite_filter_const_true_dropped() {
-        
         let p = lower_query("$.xs.filter(true).count()").unwrap();
         assert_eq!(p.stages.len(), 0);
         assert!(matches!(p.sink, Sink::Reducer(ref spec) if spec.op == ReducerOp::Count));
@@ -1248,6 +1242,6 @@ mod tests {
         let doc: Val = (&json!({"xs":[10, 20, 30, 40, 50]})).into();
         let p = lower_query("$.xs.skip(1).take(2).sum()").unwrap();
         let out = p.run(&doc).unwrap();
-        assert_eq!(out, Val::Int(50)); 
+        assert_eq!(out, Val::Int(50));
     }
 }
