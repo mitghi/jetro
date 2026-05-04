@@ -586,7 +586,11 @@ fn apply_adapter_materialized(
 /// Applies an element-wise stage (`Slice`, string pair builtins, `Builtin`) to a single `Val` row.
 pub(super) fn apply_element_adapter(stage: &Stage, v: Val) -> Val {
     match stage {
-        Stage::Slice(start, end) => slice_apply(v, *start, *end),
+        Stage::IntRangeBuiltin {
+            method: BuiltinMethod::Slice,
+            start,
+            end,
+        } => slice_apply(v, *start, *end),
         Stage::StringPairBuiltin {
             method,
             first,

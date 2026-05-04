@@ -7,10 +7,11 @@
 
 use crate::{
     builtins::{
-        BuiltinCardinality, BuiltinExprStage, BuiltinMethod, BuiltinNullaryStage,
-        BuiltinPipelineExecutor, BuiltinPipelineLowering, BuiltinPipelineMaterialization,
-        BuiltinPipelineOrderEffect, BuiltinPipelineShape, BuiltinSinkAccumulator,
-        BuiltinStringPairStage, BuiltinStringStage, BuiltinStructural, BuiltinUsizeStage,
+        BuiltinCardinality, BuiltinExprStage, BuiltinIntRangeStage, BuiltinMethod,
+        BuiltinNullaryStage, BuiltinPipelineExecutor, BuiltinPipelineLowering,
+        BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect, BuiltinPipelineShape,
+        BuiltinSinkAccumulator, BuiltinStringPairStage, BuiltinStringStage, BuiltinStructural,
+        BuiltinUsizeStage,
     },
     chain_ir::{Demand, PullDemand, ValueNeed},
 };
@@ -250,10 +251,10 @@ pub(crate) fn pipeline_arity(id: BuiltinId, is_last: bool) -> Option<BuiltinPipe
         | Some(BuiltinPipelineLowering::StringStage(_)) => Some(BuiltinPipelineArity::Exact(1)),
         Some(BuiltinPipelineLowering::NullaryStage(_)) => Some(BuiltinPipelineArity::Exact(0)),
         Some(BuiltinPipelineLowering::StringPairStage(_)) => Some(BuiltinPipelineArity::Exact(2)),
-        Some(BuiltinPipelineLowering::Sort) => Some(BuiltinPipelineArity::Range { min: 0, max: 1 }),
-        Some(BuiltinPipelineLowering::Slice) => {
+        Some(BuiltinPipelineLowering::IntRangeStage(_)) => {
             Some(BuiltinPipelineArity::Range { min: 1, max: 2 })
         }
+        Some(BuiltinPipelineLowering::Sort) => Some(BuiltinPipelineArity::Range { min: 0, max: 1 }),
         Some(BuiltinPipelineLowering::TerminalSink) => {
             is_last.then(|| terminal_sink_arity(method))?
         }
@@ -940,7 +941,7 @@ builtin_registry! {
         executor: BuiltinPipelineExecutor::ElementBuiltin,
         shape: BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 1.0, 1.0),
         order: BuiltinPipelineOrderEffect::Preserves,
-        lowering: BuiltinPipelineLowering::Slice
+        lowering: BuiltinPipelineLowering::IntRangeStage(BuiltinIntRangeStage::Slice)
     };
     Split => "split" [] {
         executor: BuiltinPipelineExecutor::ExpandingBuiltin,
@@ -971,9 +972,9 @@ builtin_registry! {
 mod tests {
     use super::*;
     use crate::builtins::{
-        BuiltinExprStage, BuiltinNullaryStage, BuiltinPipelineExecutor, BuiltinPipelineLowering,
-        BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect, BuiltinStringPairStage,
-        BuiltinStringStage, BuiltinUsizeStage,
+        BuiltinExprStage, BuiltinIntRangeStage, BuiltinNullaryStage, BuiltinPipelineExecutor,
+        BuiltinPipelineLowering, BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect,
+        BuiltinStringPairStage, BuiltinStringStage, BuiltinUsizeStage,
     };
 
     #[test]
@@ -1233,6 +1234,12 @@ mod tests {
             pipeline_lowering(BuiltinId::from_method(BuiltinMethod::ReplaceAll)),
             Some(BuiltinPipelineLowering::StringPairStage(
                 BuiltinStringPairStage::Replace { all: true }
+            ))
+        );
+        assert_eq!(
+            pipeline_lowering(BuiltinId::from_method(BuiltinMethod::Slice)),
+            Some(BuiltinPipelineLowering::IntRangeStage(
+                BuiltinIntRangeStage::Slice
             ))
         );
         assert_eq!(

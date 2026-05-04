@@ -218,9 +218,6 @@ pub enum Stage {
     /// Delegates each element to a pure built-in method call with pre-resolved literal arguments.
     Builtin(PipelineBuiltinCall),
 
-    /// Selects a contiguous sub-range of the element stream using start/end indices.
-    Slice(i64, Option<i64>),
-
     /// `usize`-argument builtin stage identified by the registry.
     UsizeBuiltin {
         /// Registry method identity for this stage.
@@ -245,6 +242,16 @@ pub enum Stage {
         first: Arc<str>,
         /// Second string argument accepted by the builtin.
         second: Arc<str>,
+    },
+
+    /// Integer-range builtin stage identified by the registry.
+    IntRangeBuiltin {
+        /// Registry method identity for this stage.
+        method: BuiltinMethod,
+        /// Inclusive start index accepted by the builtin.
+        start: i64,
+        /// Exclusive end index accepted by the builtin, if present.
+        end: Option<i64>,
     },
 
     /// Applies a pre-compiled sub-pipeline `Plan` to each element, replacing it with the result.

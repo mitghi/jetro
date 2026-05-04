@@ -749,7 +749,6 @@ impl Stage {
         if let Some(desc) = method_stage_descriptor!(self, {
             Stage::Reverse(_) => Reverse,
             Stage::UniqueBy(None) => Unique,
-            Stage::Slice(_, _) => Slice,
         }) {
             return Some(desc);
         }
@@ -772,6 +771,7 @@ impl Stage {
             Stage::StringBuiltin { method, .. } | Stage::StringPairBuiltin { method, .. } => {
                 Some(StageDescriptor::new(*method))
             }
+            Stage::IntRangeBuiltin { method, .. } => Some(StageDescriptor::new(*method)),
             Stage::ExprBuiltin { method, body } => Some(StageDescriptor::new(*method).body(body)),
             Stage::Builtin(call) => Some(
                 StageDescriptor::new(call.method)

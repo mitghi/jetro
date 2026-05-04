@@ -1077,10 +1077,10 @@ pub enum BuiltinPipelineLowering {
     StringStage(BuiltinStringStage),
     /// Stage parameterised by a pair of strings (replace, re_replace).
     StringPairStage(BuiltinStringPairStage),
+    /// Stage parameterised by integer start/end bounds.
+    IntRangeStage(BuiltinIntRangeStage),
     /// Full-barrier comparison sort with optional key expressions.
     Sort,
-    /// Substring slice parameterised by start and optional end.
-    Slice,
     /// Terminal sink (count, sum, avg, first, last, etc.).
     TerminalSink,
 }
@@ -1158,6 +1158,13 @@ pub enum BuiltinStringStage {
 pub enum BuiltinStringPairStage {
     /// Replace using a literal needle; `all: true` replaces every occurrence.
     Replace { all: bool },
+}
+
+/// Pipeline stages parameterised by integer range arguments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinIntRangeStage {
+    /// Slice an array or string by start/end index.
+    Slice,
 }
 
 /// Materialisation policy for a view stage's output.

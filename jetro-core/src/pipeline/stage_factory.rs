@@ -10,9 +10,9 @@ use std::sync::Arc;
 use crate::ast::Expr;
 use crate::builtin_registry::{pipeline_lowering, BuiltinId};
 use crate::builtins::{
-    BuiltinExprStage, BuiltinMethod, BuiltinNullaryStage, BuiltinPipelineLowering,
-    BuiltinSinkAccumulator, BuiltinStringPairStage, BuiltinStringStage, BuiltinUsizeStage,
-    BuiltinViewStage,
+    BuiltinExprStage, BuiltinIntRangeStage, BuiltinMethod, BuiltinNullaryStage,
+    BuiltinPipelineLowering, BuiltinSinkAccumulator, BuiltinStringPairStage, BuiltinStringStage,
+    BuiltinUsizeStage, BuiltinViewStage,
 };
 
 use super::{
@@ -127,14 +127,22 @@ pub(super) fn lower_method_from_registry(
             }
             _ => None,
         },
-        BuiltinPipelineLowering::Slice => match args {
-            [arg] => {
-                stages.push(Stage::Slice(int_arg(arg)?, None));
+        BuiltinPipelineLowering::IntRangeStage(stage) => match (stage, args) {
+            (BuiltinIntRangeStage::Slice, [arg]) => {
+                stages.push(Stage::IntRangeBuiltin {
+                    method,
+                    start: int_arg(arg)?,
+                    end: None,
+                });
                 stage_exprs.push(None);
                 Some(())
             }
-            [start, end] => {
-                stages.push(Stage::Slice(int_arg(start)?, Some(int_arg(end)?)));
+            (BuiltinIntRangeStage::Slice, [start, end]) => {
+                stages.push(Stage::IntRangeBuiltin {
+                    method,
+                    start: int_arg(start)?,
+                    end: Some(int_arg(end)?),
+                });
                 stage_exprs.push(None);
                 Some(())
             }
