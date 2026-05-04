@@ -318,14 +318,25 @@ fn lower_expr(builder: &mut PlanBuilder, expr: &Expr) -> NodeId {
 
 /// Attempts to lower `expr` as a field-chain pipeline node; returns `None` for non-pipeline
 /// expressions and for trivial collect-only pipelines that add no value.
+///
+/// Tries the logical path (`logical_planner → optimizer → logical_lower`) first; falls back
+/// to the legacy `Pipeline::lower()` for shapes the logical planner cannot classify.
 fn try_lower_pipeline(builder: &PlanBuilder, expr: &Expr) -> Option<PlanNode> {
-    let pipeline = Pipeline::lower(expr)?;
+    let pipeline = lower_via_logical(expr).or_else(|| Pipeline::lower(expr))?;
     if is_trivial_collect_pipeline(&pipeline) {
         return None;
     }
     let (source, mut body) = pipeline.into_source_body();
     mask_active_local_stage_kernels(&mut body, builder);
     pipeline_parts_to_plan_node(source, body)
+}
+
+/// Runs `expr` through the logical planner, optimizer, and logical lowerer. Returns `None` if
+/// any stage cannot classify the expression.
+fn lower_via_logical(expr: &Expr) -> Option<Pipeline> {
+    let logical = crate::logical_planner::try_lower(expr)?;
+    let optimized = crate::optimizer::Optimizer::default_rules().optimize(logical);
+    crate::pipeline::logical_lower::try_lower(optimized)
 }
 
 /// Converts a decomposed pipeline `(source, body)` pair into a `PlanNode::Pipeline`, returning
@@ -793,21 +804,9 @@ pub(crate) fn plan_query_with_context(expr: &str, context: PlanningContext) -> Q
         context,
         locals: Vec::new(),
     };
-    // Try new logical path first (produces same result but applies optimizer rules)
-    if let Some(logical_plan) = crate::logical_planner::try_lower(&ast) {
-        let optimized = crate::optimizer::Optimizer::default_rules().optimize(logical_plan);
-        if let Some(pipeline) = crate::pipeline::logical_lower::try_lower(optimized) {
-            let (source, mut body) = pipeline.into_source_body();
-            mask_active_local_stage_kernels(&mut body, &builder);
-            if let Some(node) = pipeline_parts_to_plan_node(source, body) {
-                let root = builder.push(node);
-                return builder.finish(root);
-            }
-        }
-    }
-    // Fall through to existing path
-    if let Some(pipeline) = Pipeline::lower(&ast) {
-        let (source, body) = pipeline.into_source_body();
+    if let Some(pipeline) = lower_via_logical(&ast).or_else(|| Pipeline::lower(&ast)) {
+        let (source, mut body) = pipeline.into_source_body();
+        mask_active_local_stage_kernels(&mut body, &builder);
         if let Some(node) = pipeline_parts_to_plan_node(source, body) {
             let root = builder.push(node);
             return builder.finish(root);
