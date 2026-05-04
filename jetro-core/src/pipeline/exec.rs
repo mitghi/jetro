@@ -12,7 +12,7 @@ use super::columnar;
 use super::composed_exec;
 use super::indexed_exec;
 use super::legacy_exec;
-use super::{Pipeline, PipelineData};
+use super::{Pipeline, PipelineData, Strategy};
 
 impl Pipeline {
     /// Executes the pipeline against `root` using a freshly constructed environment.
@@ -26,16 +26,20 @@ impl Pipeline {
         self.run_with_env(root, &env, cache)
     }
 
-    /// Tries each specialised execution path in priority order, falling through to the legacy path.
+    /// Dispatches to the appropriate execution path using the pre-computed `strategy`.
+    /// The indexed path is gated on `Strategy::IndexedDispatch`; columnar and composed
+    /// paths remain document-dependent and are tried in priority order when applicable.
     pub fn run_with_env(
         &self,
         root: &Val,
         base_env: &Env,
         cache: Option<&dyn PipelineData>,
     ) -> Result<Val, EvalError> {
-        // 1. Indexed fast-path for single-element lookups by position.
-        if let Some(out) = indexed_exec::run(self, root, base_env) {
-            return out;
+        // 1. Indexed fast-path: only valid when strategy was pre-classified as IndexedDispatch.
+        if self.strategy == Strategy::IndexedDispatch {
+            if let Some(out) = indexed_exec::run(self, root, base_env) {
+                return out;
+            }
         }
 
         // 2. Columnar path using an externally supplied ObjVec promotion cache.
@@ -50,7 +54,7 @@ impl Pipeline {
             }
         }
 
-        // 4. Composed stage substrate for pipelines that have been fully lowered.
+        // 4. Composed stage substrate; document-dependent (source must resolve to an array).
         if let Some(out) = composed_exec::run(self, root, base_env) {
             return out;
         }

@@ -6,6 +6,7 @@
 //! analysis code carries without depending on the legacy enum directly.
 
 use crate::{
+    builtin_trait::BuiltinDemandLaw,
     builtins::{
         BuiltinCardinality, BuiltinExprStage, BuiltinIntRangeStage, BuiltinMethod,
         BuiltinNullaryStage, BuiltinPipelineExecutor, BuiltinPipelineLowering,
@@ -21,21 +22,6 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct BuiltinId(pub(crate) u16);
 
-/// Complete compile-time description of a single builtin, used only in tests
-/// to verify round-trip consistency between names, aliases, and IDs.
-#[derive(Debug, Clone, Copy)]
-#[cfg(test)]
-pub(crate) struct BuiltinDescriptor {
-    /// Stable numeric ID for this builtin.
-    pub(crate) id: BuiltinId,
-    /// Canonical `BuiltinMethod` variant associated with this descriptor.
-    pub(crate) method: BuiltinMethod,
-    /// Primary name as it appears in Jetro expressions.
-    pub(crate) canonical_name: &'static str,
-    /// Alternative names that resolve to the same builtin.
-    pub(crate) aliases: &'static [&'static str],
-}
-
 /// Optional numeric argument carried alongside a builtin's demand law.
 /// `Take(n)` and `Skip(n)` pass their count here so `propagate_demand` can
 /// tighten or loosen the upstream `PullDemand` accordingly.
@@ -45,41 +31,6 @@ pub(crate) enum BuiltinDemandArg {
     None,
     /// A specific count (e.g. the `n` in `.take(n)` or `.skip(n)`).
     Usize(usize),
-}
-
-/// Encodes how a builtin transforms downstream demand into the demand it
-/// places on its own upstream source. The planner matches each builtin to
-/// exactly one law; unknown builtins default to `Identity`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BuiltinDemandLaw {
-    /// Pass downstream demand through unchanged (e.g. purely transforming builtins).
-    Identity,
-    /// Like filter: must scan until `n` outputs are produced, so converts `FirstInput(n)` to `UntilOutput(n)`.
-    FilterLike,
-    /// Like `take_while`: stops at the first predicate failure, so `UntilOutput(n)` becomes `FirstInput(n)`.
-    TakeWhile,
-    /// Like `unique`/`unique_by`: scan until enough distinct outputs are observed.
-    UniqueLike,
-    /// Like map: the output count equals the input count; passes demand through but requires whole values.
-    MapLike,
-    /// Like `flat_map`: output count is unbounded relative to input, so always requests all input.
-    FlatMapLike,
-    /// Cap the upstream pull to the provided count argument.
-    Take,
-    /// Shift the upstream pull window by the provided count argument.
-    Skip,
-    /// Only the first element is needed; translates any downstream demand to `FirstInput(1)`.
-    First,
-    /// The last element is needed; requires all ordered input.
-    Last,
-    /// Only a count is needed; requires all inputs but no value payloads.
-    Count,
-    /// A numeric aggregate (sum/min/max/avg); requires all inputs with numeric-only payload.
-    NumericReducer,
-    /// A predicate/keyed aggregate; requires all inputs and predicate/key evaluation.
-    KeyedReducer,
-    /// A full-input ordering barrier; downstream limits can choose strategy, but source scan remains all input.
-    OrderBarrier,
 }
 
 /// Canonical argument-count contract for pipeline lowering. This keeps
@@ -199,35 +150,37 @@ pub(crate) fn participates_in_demand(id: BuiltinId) -> bool {
 /// builtin has no specialised streaming executor.
 #[inline]
 pub(crate) fn pipeline_executor(id: BuiltinId) -> Option<BuiltinPipelineExecutor> {
-    registry_pipeline_executor(id)
+    id.method().map(|m| get_descriptor(m).executor).flatten()
 }
 
 /// Return the materialization policy for builtin `id`; defaults to `Streaming`
 /// when the builtin has no explicit registry entry.
 #[inline]
 pub(crate) fn pipeline_materialization(id: BuiltinId) -> BuiltinPipelineMaterialization {
-    registry_pipeline_materialization(id).unwrap_or(BuiltinPipelineMaterialization::Streaming)
+    id.method()
+        .map(|m| get_descriptor(m).materialization)
+        .unwrap_or(BuiltinPipelineMaterialization::Streaming)
 }
 
 /// Return the cardinality/cost shape annotation for builtin `id`, used by
 /// the pipeline cost estimator during plan selection.
 #[inline]
 pub(crate) fn pipeline_shape(id: BuiltinId) -> Option<BuiltinPipelineShape> {
-    registry_pipeline_shape(id)
+    id.method().map(|m| get_descriptor(m).pipeline_shape).flatten()
 }
 
 /// Return how builtin `id` affects element ordering in the pipeline, or
 /// `None` if the builtin has no registered ordering behaviour.
 #[inline]
 pub(crate) fn pipeline_order_effect(id: BuiltinId) -> Option<BuiltinPipelineOrderEffect> {
-    registry_pipeline_order_effect(id)
+    id.method().map(|m| get_descriptor(m).order_effect).flatten()
 }
 
 /// Return the pipeline lowering strategy for builtin `id`, indicating which
 /// physical stage type and arguments the builtin compiles to.
 #[inline]
 pub(crate) fn pipeline_lowering(id: BuiltinId) -> Option<BuiltinPipelineLowering> {
-    registry_pipeline_lowering(id)
+    id.method().map(|m| get_descriptor(m).lowering).flatten()
 }
 
 /// Return `true` if builtin `id` can be lowered in pipeline position with
@@ -286,20 +239,22 @@ fn terminal_sink_arity(method: BuiltinMethod) -> Option<BuiltinPipelineArity> {
 /// applied independently to each item in a vectorised column.
 #[inline]
 pub(crate) fn pipeline_element(id: BuiltinId) -> bool {
-    registry_pipeline_element(id).unwrap_or(false)
+    id.method().map(|m| get_descriptor(m).is_element).unwrap_or(false)
 }
 
 /// Return the structural traversal variant for builtin `id` (`DeepFind`,
 /// `DeepShape`, `DeepLike`), or `None` for non-structural builtins.
 #[inline]
 pub(crate) fn structural(id: BuiltinId) -> Option<BuiltinStructural> {
-    registry_structural(id)
+    id.method().map(|m| get_descriptor(m).structural).flatten()
 }
 
 /// Look up the demand law for `id`, returning `Identity` for any unregistered builtin.
 #[inline]
 fn demand_law(id: BuiltinId) -> BuiltinDemandLaw {
-    registry_demand_law(id).unwrap_or(BuiltinDemandLaw::Identity)
+    id.method()
+        .map(|m| get_descriptor(m).demand_law)
+        .unwrap_or(BuiltinDemandLaw::Identity)
 }
 
 impl BuiltinId {
@@ -317,18 +272,20 @@ impl BuiltinId {
     }
 }
 
-macro_rules! builtin_meta_demand {
+// ── Helper macros for extracting individual fields from meta-token-trees ──────
+
+macro_rules! builtin_meta_demand_law {
     () => {
-        None
+        crate::builtin_trait::BuiltinDemandLaw::Identity
     };
     (demand: $value:expr $(, $($rest:tt)*)?) => {
-        Some($value)
+        $value
     };
     ($key:ident : $value:expr, $($rest:tt)*) => {
-        builtin_meta_demand!($($rest)*)
+        builtin_meta_demand_law!($($rest)*)
     };
     ($key:ident : $value:expr) => {
-        None
+        crate::builtin_trait::BuiltinDemandLaw::Identity
     };
 }
 
@@ -349,16 +306,16 @@ macro_rules! builtin_meta_executor {
 
 macro_rules! builtin_meta_materialization {
     () => {
-        None
+        BuiltinPipelineMaterialization::Streaming
     };
     (materialization: $value:expr $(, $($rest:tt)*)?) => {
-        Some($value)
+        $value
     };
     ($key:ident : $value:expr, $($rest:tt)*) => {
         builtin_meta_materialization!($($rest)*)
     };
     ($key:ident : $value:expr) => {
-        None
+        BuiltinPipelineMaterialization::Streaming
     };
 }
 
@@ -407,18 +364,18 @@ macro_rules! builtin_meta_lowering {
     };
 }
 
-macro_rules! builtin_meta_element {
+macro_rules! builtin_meta_element_bool {
     () => {
-        None
+        false
     };
     (element: $value:expr $(, $($rest:tt)*)?) => {
-        Some($value)
+        $value
     };
     ($key:ident : $value:expr, $($rest:tt)*) => {
-        builtin_meta_element!($($rest)*)
+        builtin_meta_element_bool!($($rest)*)
     };
     ($key:ident : $value:expr) => {
-        None
+        false
     };
 }
 
@@ -437,38 +394,34 @@ macro_rules! builtin_meta_structural {
     };
 }
 
+// ── Main registry macro ───────────────────────────────────────────────────────
+
 macro_rules! builtin_registry {
     ($( $method:ident => $canonical:literal [ $( $alias:literal ),* $(,)? ] $( { $($meta:tt)* } )? ; )*) => {
-        #[cfg(test)]
-        pub(crate) static BUILTIN_DESCRIPTORS: &[BuiltinDescriptor] = &[
-            $(
-                BuiltinDescriptor {
-                    id: BuiltinId(BuiltinMethod::$method as u16),
-                    method: BuiltinMethod::$method,
-                    canonical_name: $canonical,
-                    aliases: &[$($alias),*],
+
+        /// Return the full compile-time descriptor for a given `BuiltinMethod`.
+        /// This is the single dispatch point replacing the nine parallel match functions.
+        pub(crate) fn get_descriptor(method: BuiltinMethod) -> crate::builtin_trait::BuiltinDescriptor {
+            match method {
+                $(
+                BuiltinMethod::$method => crate::builtin_trait::BuiltinDescriptor {
+                    demand_law: builtin_meta_demand_law!($($($meta)*)?),
+                    executor: builtin_meta_executor!($($($meta)*)?),
+                    materialization: builtin_meta_materialization!($($($meta)*)?),
+                    pipeline_shape: builtin_meta_shape!($($($meta)*)?),
+                    order_effect: builtin_meta_order!($($($meta)*)?),
+                    lowering: builtin_meta_lowering!($($($meta)*)?),
+                    is_element: builtin_meta_element_bool!($($($meta)*)?),
+                    structural: builtin_meta_structural!($($($meta)*)?),
                 },
-            )*
-        ];
+                )*
+            }
+        }
 
         #[inline]
         pub(crate) fn method_from_id(id: BuiltinId) -> Option<BuiltinMethod> {
             match id.0 {
                 $(x if x == BuiltinMethod::$method as u16 => Some(BuiltinMethod::$method),)*
-                _ => None,
-            }
-        }
-
-        #[inline]
-        #[cfg(test)]
-        pub(crate) fn descriptor(id: BuiltinId) -> Option<BuiltinDescriptor> {
-            match id.0 {
-                $(x if x == BuiltinMethod::$method as u16 => Some(BuiltinDescriptor {
-                    id,
-                    method: BuiltinMethod::$method,
-                    canonical_name: $canonical,
-                    aliases: &[$($alias),*],
-                }),)*
                 _ => None,
             }
         }
@@ -481,70 +434,12 @@ macro_rules! builtin_registry {
             }
         }
 
-        #[inline]
-        fn registry_demand_law(id: BuiltinId) -> Option<BuiltinDemandLaw> {
-            match id.0 {
-                $(x if x == BuiltinMethod::$method as u16 => builtin_meta_demand!($($($meta)*)?),)*
-                _ => None,
-            }
-        }
-
-        #[inline]
-        fn registry_pipeline_executor(id: BuiltinId) -> Option<BuiltinPipelineExecutor> {
-            match id.0 {
-                $(x if x == BuiltinMethod::$method as u16 => builtin_meta_executor!($($($meta)*)?),)*
-                _ => None,
-            }
-        }
-
-        #[inline]
-        fn registry_pipeline_materialization(
-            id: BuiltinId,
-        ) -> Option<BuiltinPipelineMaterialization> {
-            match id.0 {
-                $(x if x == BuiltinMethod::$method as u16 => builtin_meta_materialization!($($($meta)*)?),)*
-                _ => None,
-            }
-        }
-
-        #[inline]
-        fn registry_pipeline_shape(id: BuiltinId) -> Option<BuiltinPipelineShape> {
-            match id.0 {
-                $(x if x == BuiltinMethod::$method as u16 => builtin_meta_shape!($($($meta)*)?),)*
-                _ => None,
-            }
-        }
-
-        #[inline]
-        fn registry_pipeline_order_effect(id: BuiltinId) -> Option<BuiltinPipelineOrderEffect> {
-            match id.0 {
-                $(x if x == BuiltinMethod::$method as u16 => builtin_meta_order!($($($meta)*)?),)*
-                _ => None,
-            }
-        }
-
-        #[inline]
-        fn registry_pipeline_lowering(id: BuiltinId) -> Option<BuiltinPipelineLowering> {
-            match id.0 {
-                $(x if x == BuiltinMethod::$method as u16 => builtin_meta_lowering!($($($meta)*)?),)*
-                _ => None,
-            }
-        }
-
-        #[inline]
-        fn registry_pipeline_element(id: BuiltinId) -> Option<bool> {
-            match id.0 {
-                $(x if x == BuiltinMethod::$method as u16 => builtin_meta_element!($($($meta)*)?),)*
-                _ => None,
-            }
-        }
-
-        #[inline]
-        fn registry_structural(id: BuiltinId) -> Option<BuiltinStructural> {
-            match id.0 {
-                $(x if x == BuiltinMethod::$method as u16 => builtin_meta_structural!($($($meta)*)?),)*
-                _ => None,
-            }
+        /// Return identity entries for all registered builtins: (method, canonical, aliases).
+        #[cfg(test)]
+        pub(crate) fn all_method_entries() -> Vec<(BuiltinMethod, &'static str, &'static [&'static str])> {
+            vec![
+                $( (BuiltinMethod::$method, $canonical, &[$($alias),*]), )*
+            ]
         }
     };
 }
@@ -979,15 +874,15 @@ mod tests {
 
     #[test]
     fn registry_name_lookup_matches_legacy_lookup() {
-        for descriptor in BUILTIN_DESCRIPTORS {
+        for (method, canonical, aliases) in all_method_entries() {
             assert_eq!(
-                by_name(descriptor.canonical_name).and_then(BuiltinId::method),
-                Some(descriptor.method)
+                by_name(canonical).and_then(BuiltinId::method),
+                Some(method)
             );
-            for alias in descriptor.aliases {
+            for alias in aliases {
                 assert_eq!(
                     by_name(alias).and_then(BuiltinId::method),
-                    Some(descriptor.method)
+                    Some(method)
                 );
             }
         }
@@ -1386,12 +1281,11 @@ mod tests {
 
     #[test]
     fn descriptor_round_trips_method_identity() {
-        for desc in BUILTIN_DESCRIPTORS {
-            assert_eq!(desc.id.method(), Some(desc.method));
-            assert_eq!(
-                descriptor(desc.id).map(|descriptor| descriptor.method),
-                Some(desc.method)
-            );
+        for (method, _, _) in all_method_entries() {
+            let id = BuiltinId::from_method(method);
+            assert_eq!(id.method(), Some(method));
+            // get_descriptor must not panic for any registered method
+            let _ = get_descriptor(method);
         }
     }
 }

@@ -31,14 +31,16 @@ mod exec;
 mod indexed_exec;
 mod kernels;
 mod legacy_exec;
+mod ir;
 mod lower;
+pub(crate) mod logical_lower;
 mod normalize;
 mod operator;
 mod plan;
+mod symbolic;
 mod reducer;
 mod row_source;
 mod sink_accumulator;
-mod stage_factory;
 mod stage_flow;
 mod val_stage_flow;
 pub(crate) use capability::{
@@ -58,9 +60,9 @@ pub use operator::{ReducerOp, ReducerSpec};
 pub use plan::compute_strategies;
 #[cfg(test)]
 pub use plan::plan;
+pub use ir::{Plan, Position, StageStrategy, Strategy};
 pub use plan::{
-    compute_strategies_with_kernels, plan_with_exprs, plan_with_kernels, select_strategy, Plan,
-    Position, StageStrategy, Strategy,
+    compute_strategies_with_kernels, plan_with_exprs, plan_with_kernels, select_strategy,
 };
 pub(crate) use reducer::ReducerAccumulator;
 pub(crate) use sink_accumulator::SinkAccumulator;
@@ -358,6 +360,10 @@ pub struct Pipeline {
 
     /// Pre-classified kernels for sink sub-programs (predicate / projection inside a reducer).
     pub sink_kernels: Vec<BodyKernel>,
+
+    /// Pre-computed execution strategy; set once at lower time so `run_with_env` can
+    /// dispatch directly without re-walking stages on every call.
+    pub strategy: Strategy,
 }
 
 /// The source-independent half of a `Pipeline`; can be combined with any `Source` via
@@ -379,10 +385,14 @@ pub struct PipelineBody {
 
 impl PipelineBody {
     /// Attaches `source` to this body, producing a complete executable `Pipeline`.
+    /// Computes the execution `Strategy` once here so `run_with_env` can dispatch
+    /// directly without re-walking stages on every call.
     #[inline]
     pub fn with_source(self, source: Source) -> Pipeline {
+        let strategy = select_strategy(&self.stages, &self.sink);
         Pipeline {
             source,
+            strategy,
             stages: self.stages,
             stage_exprs: self.stage_exprs,
             sink: self.sink,

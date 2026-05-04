@@ -7,7 +7,7 @@ use crate::{
     value::Val,
 };
 
-use super::{row_source, select_strategy, Pipeline, Position, Stage, Strategy};
+use super::{row_source, Pipeline, Position, Stage};
 
 /// Executes a positional (`first`/`last`) pipeline by directly indexing the source; returns `None` when the pipeline does not qualify.
 pub(super) fn run(
@@ -15,11 +15,6 @@ pub(super) fn run(
     root: &Val,
     base_env: &Env,
 ) -> Option<Result<Val, EvalError>> {
-    let strategy = select_strategy(&pipeline.stages, &pipeline.sink);
-    if strategy != Strategy::IndexedDispatch {
-        return None;
-    }
-
     let recv = row_source::resolve(&pipeline.source, root);
     let len = row_source::row_count(&recv)?;
 

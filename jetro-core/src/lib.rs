@@ -25,6 +25,7 @@
 pub(crate) mod analysis;
 pub(crate) mod ast;
 pub(crate) mod builtin_helpers;
+pub(crate) mod builtin_trait;
 pub(crate) mod builtin_registry;
 pub(crate) mod builtins;
 pub(crate) mod chain_ir;
@@ -46,6 +47,9 @@ pub(crate) mod value_view;
 pub(crate) mod view_pipeline;
 pub(crate) mod compiler;
 pub(crate) mod vm;
+pub(crate) mod logical_plan;
+pub(crate) mod logical_planner;
+pub(crate) mod optimizer;
 
 #[cfg(test)]
 mod examples;
