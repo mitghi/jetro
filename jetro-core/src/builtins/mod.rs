@@ -594,8 +594,6 @@ pub struct BuiltinSpec {
     pub cost: f64,
     /// Demand-propagation law for pipeline planning (default: `Identity`).
     pub demand_law: BuiltinDemandLaw,
-    /// Streaming executor variant, if any.
-    pub executor: Option<BuiltinPipelineExecutor>,
     /// Materialisation policy (default: `Streaming`).
     pub materialization: BuiltinPipelineMaterialization,
     /// Cardinality/cost shape annotation for the pipeline cost estimator.
@@ -1209,7 +1207,6 @@ impl BuiltinSpec {
             structural: None,
             cost: 1.0,
             demand_law: BuiltinDemandLaw::Identity,
-            executor: None,
             materialization: BuiltinPipelineMaterialization::Streaming,
             pipeline_shape: None,
             order_effect: None,
@@ -1339,12 +1336,6 @@ impl BuiltinSpec {
         self
     }
 
-    /// Sets the streaming executor variant.
-    fn executor(mut self, ex: BuiltinPipelineExecutor) -> Self {
-        self.executor = Some(ex);
-        self
-    }
-
     /// Sets the materialization policy.
     fn materialization(mut self, m: BuiltinPipelineMaterialization) -> Self {
         self.materialization = m;
@@ -1436,7 +1427,6 @@ impl BuiltinMethod {
                     .columnar_stage(BuiltinColumnarStage::Filter)
                     .cost(10.0)
                     .demand_law(BuiltinDemandLaw::FilterLike)
-                    .executor(BuiltinPipelineExecutor::RowFilter)
                     .order_effect(BuiltinPipelineOrderEffect::PredicatePrefix)
                     .lowering(BuiltinPipelineLowering::ExprArg)
             }
@@ -1446,7 +1436,6 @@ impl BuiltinMethod {
                     .columnar_stage(BuiltinColumnarStage::Filter)
                     .cost(10.0)
                     .demand_law(BuiltinDemandLaw::FilterLike)
-                    .executor(BuiltinPipelineExecutor::RowFilter)
                     .order_effect(BuiltinPipelineOrderEffect::PredicatePrefix)
                     .lowering(BuiltinPipelineLowering::ExprArg)
             }
@@ -1456,7 +1445,6 @@ impl BuiltinMethod {
                     .columnar_stage(BuiltinColumnarStage::Filter)
                     .cost(10.0)
                     .demand_law(BuiltinDemandLaw::FilterLike)
-                    .executor(BuiltinPipelineExecutor::RowFilter)
                     .order_effect(BuiltinPipelineOrderEffect::PredicatePrefix)
                     .lowering(BuiltinPipelineLowering::ExprArg)
             }
@@ -1469,7 +1457,6 @@ impl BuiltinMethod {
                 .columnar_stage(BuiltinColumnarStage::Map)
                 .cost(10.0)
                 .demand_law(BuiltinDemandLaw::MapLike)
-                .executor(BuiltinPipelineExecutor::RowMap)
                 .order_effect(BuiltinPipelineOrderEffect::Preserves)
                 .lowering(BuiltinPipelineLowering::ExprArg)
                 .element(),
@@ -1490,7 +1477,6 @@ impl BuiltinMethod {
                 .columnar_stage(BuiltinColumnarStage::FlatMap)
                 .cost(10.0)
                 .demand_law(BuiltinDemandLaw::FlatMapLike)
-                .executor(BuiltinPipelineExecutor::RowFlatMap)
                 .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
                 .lowering(BuiltinPipelineLowering::ExprArg),
             Self::Flatten | Self::Explode => {
@@ -1498,7 +1484,6 @@ impl BuiltinMethod {
             }
             Self::Split => BuiltinSpec::new(Cat::StreamingExpand, Card::Expanding)
                 .cost(10.0)
-                .executor(BuiltinPipelineExecutor::ExpandingBuiltin)
                 .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
                 .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::Expanding, true, 2.0, 1.0))
                 .lowering(BuiltinPipelineLowering::StringArg),
@@ -1511,14 +1496,12 @@ impl BuiltinMethod {
                 .view_stage(BuiltinViewStage::TakeWhile)
                 .cost(10.0)
                 .demand_law(BuiltinDemandLaw::TakeWhile)
-                .executor(BuiltinPipelineExecutor::PrefixWhile { take: true })
                 .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::Filtering, true, 10.0, 0.5))
                 .order_effect(BuiltinPipelineOrderEffect::PredicatePrefix)
                 .lowering(BuiltinPipelineLowering::ExprArg),
             Self::DropWhile => BuiltinSpec::new(Cat::StreamingFilter, Card::Filtering)
                 .view_stage(BuiltinViewStage::DropWhile)
                 .cost(10.0)
-                .executor(BuiltinPipelineExecutor::PrefixWhile { take: false })
                 .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
                 .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::Filtering, true, 10.0, 0.5))
                 .order_effect(BuiltinPipelineOrderEffect::Blocks)
@@ -1539,7 +1522,6 @@ impl BuiltinMethod {
                 .view_stage(BuiltinViewStage::Take)
                 .stage_merge(BuiltinStageMerge::UsizeMin)
                 .demand_law(BuiltinDemandLaw::Take)
-                .executor(BuiltinPipelineExecutor::Position { take: true })
                 .order_effect(BuiltinPipelineOrderEffect::Preserves)
                 .lowering(BuiltinPipelineLowering::UsizeArg { min: 0, }),
             Self::Skip => BuiltinSpec::new(Cat::Positional, Card::Bounded)
@@ -1547,7 +1529,6 @@ impl BuiltinMethod {
                 .view_stage(BuiltinViewStage::Skip)
                 .stage_merge(BuiltinStageMerge::UsizeSaturatingAdd)
                 .demand_law(BuiltinDemandLaw::Skip)
-                .executor(BuiltinPipelineExecutor::Position { take: false })
                 .order_effect(BuiltinPipelineOrderEffect::Preserves)
                 .lowering(BuiltinPipelineLowering::UsizeArg { min: 0, }),
             Self::First => BuiltinSpec::new(Cat::Positional, Card::Bounded)
@@ -1612,7 +1593,6 @@ impl BuiltinMethod {
                 BuiltinSpec::new(Cat::Reducer, Card::Reducing)
                     .view_native()
                     .cost(10.0)
-                    .executor(BuiltinPipelineExecutor::FindIndex)
                     .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
                     .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 1.0, 1.0))
                     .lowering(BuiltinPipelineLowering::TerminalExprArg { terminal: BuiltinMethod::First, })
@@ -1621,7 +1601,6 @@ impl BuiltinMethod {
                 BuiltinSpec::new(Cat::Reducer, Card::Reducing)
                     .view_native()
                     .cost(10.0)
-                    .executor(BuiltinPipelineExecutor::IndicesWhere)
                     .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
                     .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 1.0, 1.0))
                     .lowering(BuiltinPipelineLowering::TerminalExprArg { terminal: BuiltinMethod::First, })
@@ -1630,7 +1609,6 @@ impl BuiltinMethod {
                 BuiltinSpec::new(Cat::Reducer, Card::Reducing)
                     .view_native()
                     .cost(10.0)
-                    .executor(BuiltinPipelineExecutor::ArgExtreme { max: true })
                     .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
                     .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 1.0, 1.0))
                     .lowering(BuiltinPipelineLowering::TerminalExprArg { terminal: BuiltinMethod::First, })
@@ -1639,7 +1617,6 @@ impl BuiltinMethod {
                 BuiltinSpec::new(Cat::Reducer, Card::Reducing)
                     .view_native()
                     .cost(10.0)
-                    .executor(BuiltinPipelineExecutor::ArgExtreme { max: false })
                     .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
                     .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 1.0, 1.0))
                     .lowering(BuiltinPipelineLowering::TerminalExprArg { terminal: BuiltinMethod::First, })
@@ -1658,16 +1635,13 @@ impl BuiltinMethod {
                 match self {
                     Self::Sort => spec
                         .demand_law(BuiltinDemandLaw::OrderBarrier)
-                        .executor(BuiltinPipelineExecutor::Sort)
                         .materialization(BuiltinPipelineMaterialization::ComposedBarrier)
                         .lowering(BuiltinPipelineLowering::Sort),
                     Self::Window => spec
-                        .executor(BuiltinPipelineExecutor::Window)
                         .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
                         .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::Barrier, true, 2.0, 1.0))
                         .lowering(BuiltinPipelineLowering::UsizeArg { min: 1, }),
                     Self::Chunk => spec
-                        .executor(BuiltinPipelineExecutor::Chunk)
                         .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
                         .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::Barrier, true, 2.0, 1.0))
                         .lowering(BuiltinPipelineLowering::UsizeArg { min: 1, }),
@@ -1680,7 +1654,6 @@ impl BuiltinMethod {
                 .columnar_stage(BuiltinColumnarStage::GroupBy)
                 .cost(20.0)
                 .demand_law(BuiltinDemandLaw::KeyedReducer)
-                .executor(BuiltinPipelineExecutor::GroupBy)
                 .materialization(BuiltinPipelineMaterialization::ComposedBarrier)
                 .lowering(BuiltinPipelineLowering::ExprArg),
             Self::CountBy => BuiltinSpec::new(Cat::Reducer, Card::Reducing)
@@ -1688,7 +1661,6 @@ impl BuiltinMethod {
                 .keyed_reducer(BuiltinKeyedReducer::Count)
                 .cost(10.0)
                 .demand_law(BuiltinDemandLaw::KeyedReducer)
-                .executor(BuiltinPipelineExecutor::CountBy)
                 .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 1.0, 1.0))
                 .lowering(BuiltinPipelineLowering::TerminalExprArg { terminal: BuiltinMethod::First, }),
             Self::IndexBy => BuiltinSpec::new(Cat::Reducer, Card::Reducing)
@@ -1696,7 +1668,6 @@ impl BuiltinMethod {
                 .keyed_reducer(BuiltinKeyedReducer::Index)
                 .cost(10.0)
                 .demand_law(BuiltinDemandLaw::KeyedReducer)
-                .executor(BuiltinPipelineExecutor::IndexBy)
                 .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 1.0, 1.0))
                 .lowering(BuiltinPipelineLowering::TerminalExprArg { terminal: BuiltinMethod::First, }),
             Self::Unique => {
@@ -1704,7 +1675,6 @@ impl BuiltinMethod {
                     .view_stage(BuiltinViewStage::Distinct)
                     .cost(10.0)
                     .demand_law(BuiltinDemandLaw::UniqueLike)
-                    .executor(BuiltinPipelineExecutor::UniqueBy)
                     .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::Filtering, true, 10.0, 1.0))
                     .order_effect(BuiltinPipelineOrderEffect::Preserves)
                     .lowering(BuiltinPipelineLowering::Nullary)
@@ -1714,7 +1684,6 @@ impl BuiltinMethod {
                     .view_stage(BuiltinViewStage::Distinct)
                     .cost(10.0)
                     .demand_law(BuiltinDemandLaw::UniqueLike)
-                    .executor(BuiltinPipelineExecutor::UniqueBy)
                     .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::Filtering, true, 10.0, 1.0))
                     .order_effect(BuiltinPipelineOrderEffect::Preserves)
                     .lowering(BuiltinPipelineLowering::ExprArg)
@@ -1724,7 +1693,6 @@ impl BuiltinMethod {
                     .cost(10.0)
                     .cancellation(BuiltinCancellation::SelfInverse(BuiltinCancelGroup::Reverse))
                     .demand_law(BuiltinDemandLaw::OrderBarrier)
-                    .executor(BuiltinPipelineExecutor::Reverse)
                     .materialization(BuiltinPipelineMaterialization::ComposedBarrier)
                     .lowering(BuiltinPipelineLowering::Nullary)
             }
@@ -1756,28 +1724,24 @@ impl BuiltinMethod {
             | Self::Implode => BuiltinSpec::new(Cat::Object, Card::OneToOne),
             Self::TransformKeys => {
                 BuiltinSpec::new(Cat::Object, Card::OneToOne)
-                    .executor(BuiltinPipelineExecutor::ObjectLambda)
                     .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 1.0, 1.0))
                     .order_effect(BuiltinPipelineOrderEffect::Preserves)
                     .lowering(BuiltinPipelineLowering::ExprArg)
             }
             Self::TransformValues => {
                 BuiltinSpec::new(Cat::Object, Card::OneToOne)
-                    .executor(BuiltinPipelineExecutor::ObjectLambda)
                     .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 1.0, 1.0))
                     .order_effect(BuiltinPipelineOrderEffect::Preserves)
                     .lowering(BuiltinPipelineLowering::ExprArg)
             }
             Self::FilterKeys => {
                 BuiltinSpec::new(Cat::Object, Card::OneToOne)
-                    .executor(BuiltinPipelineExecutor::ObjectLambda)
                     .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 1.0, 1.0))
                     .order_effect(BuiltinPipelineOrderEffect::Preserves)
                     .lowering(BuiltinPipelineLowering::ExprArg)
             }
             Self::FilterValues => {
                 BuiltinSpec::new(Cat::Object, Card::OneToOne)
-                    .executor(BuiltinPipelineExecutor::ObjectLambda)
                     .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 1.0, 1.0))
                     .order_effect(BuiltinPipelineOrderEffect::Preserves)
                     .lowering(BuiltinPipelineLowering::ExprArg)
@@ -2096,21 +2060,18 @@ impl BuiltinMethod {
             Self::Slice => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
                 .indexed()
                 .view_native()
-                .executor(BuiltinPipelineExecutor::ElementBuiltin)
                 .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 1.0, 1.0))
                 .order_effect(BuiltinPipelineOrderEffect::Preserves)
                 .lowering(BuiltinPipelineLowering::IntRangeArg),
             Self::Replace => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
                 .indexed()
                 .view_native()
-                .executor(BuiltinPipelineExecutor::ElementBuiltin)
                 .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 2.0, 1.0))
                 .order_effect(BuiltinPipelineOrderEffect::Preserves)
                 .lowering(BuiltinPipelineLowering::StringPairArg),
             Self::ReplaceAll => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
                 .indexed()
                 .view_native()
-                .executor(BuiltinPipelineExecutor::ElementBuiltin)
                 .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 2.0, 1.0))
                 .order_effect(BuiltinPipelineOrderEffect::Preserves)
                 .lowering(BuiltinPipelineLowering::StringPairArg),

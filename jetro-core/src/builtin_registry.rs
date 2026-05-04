@@ -146,9 +146,55 @@ pub(crate) fn participates_in_demand(id: BuiltinId) -> bool {
 
 /// Return the pipeline executor variant for builtin `id`, or `None` if the
 /// builtin has no specialised streaming executor.
+///
+/// Derived directly from `BuiltinMethod` rather than a spec metadata table:
+/// the method identity is the single source of truth for executor classification.
 #[inline]
 pub(crate) fn pipeline_executor(id: BuiltinId) -> Option<BuiltinPipelineExecutor> {
-    id.method().map(|m| m.spec().executor).flatten()
+    id.method().and_then(executor_for_method)
+}
+
+/// Maps every method that has a streaming executor classification to its `BuiltinPipelineExecutor`.
+/// Methods without a streaming executor (sinks, scalars, deep-search, etc.) return `None`.
+fn executor_for_method(method: BuiltinMethod) -> Option<BuiltinPipelineExecutor> {
+    use BuiltinMethod as M;
+    use BuiltinPipelineExecutor as E;
+    Some(match method {
+        // Row-level lambda dispatch.
+        M::Filter | M::Find | M::FindAll => E::RowFilter,
+        M::Map => E::RowMap,
+        M::FlatMap => E::RowFlatMap,
+        // Bounded prefix predicates.
+        M::TakeWhile => E::PrefixWhile { take: true },
+        M::DropWhile => E::PrefixWhile { take: false },
+        // Positional slicing.
+        M::Take => E::Position { take: true },
+        M::Skip => E::Position { take: false },
+        // Order-only barriers.
+        M::Reverse => E::Reverse,
+        M::Sort => E::Sort,
+        // Keyed reducers / dedup.
+        M::Unique | M::UniqueBy => E::UniqueBy,
+        M::GroupBy => E::GroupBy,
+        M::CountBy => E::CountBy,
+        M::IndexBy => E::IndexBy,
+        // Index lookups.
+        M::FindIndex => E::FindIndex,
+        M::IndicesWhere => E::IndicesWhere,
+        // Argmax / argmin.
+        M::MaxBy => E::ArgExtreme { max: true },
+        M::MinBy => E::ArgExtreme { max: false },
+        // Bucket-shape reordering.
+        M::Chunk => E::Chunk,
+        M::Window => E::Window,
+        // Object-lambda variants.
+        M::TransformKeys | M::TransformValues | M::FilterKeys | M::FilterValues => E::ObjectLambda,
+        // Element-wise scalars carried via Stage::IntRangeBuiltin / Stage::StringPairBuiltin.
+        M::Slice | M::Replace | M::ReplaceAll => E::ElementBuiltin,
+        // Stream-expanding scalar.
+        M::Split => E::ExpandingBuiltin,
+        _ => return None,
+    })
 }
 
 /// Return the materialization policy for builtin `id`; defaults to `Streaming`
