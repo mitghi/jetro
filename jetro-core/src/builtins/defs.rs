@@ -7,10 +7,41 @@
 
 use super::{
     builtin_def::Builtin, BuiltinCardinality, BuiltinCategory, BuiltinColumnarStage,
-    BuiltinDemandLaw, BuiltinMethod, BuiltinPipelineLowering, BuiltinPipelineMaterialization,
-    BuiltinPipelineOrderEffect, BuiltinPipelineShape, BuiltinSelectionPosition,
-    BuiltinSpec, BuiltinStageMerge, BuiltinViewStage,
+    BuiltinDemandLaw, BuiltinMethod, BuiltinNumericReducer, BuiltinPipelineLowering,
+    BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect, BuiltinPipelineShape,
+    BuiltinSelectionPosition, BuiltinSpec, BuiltinStageMerge, BuiltinViewStage,
 };
+
+// ── Helpers shared across reducer family ─────────────────────────────────────
+
+/// Numeric reducer (sum/avg/min/max) skeleton; same demand/lowering across the four.
+#[inline]
+fn numeric_reducer_spec(reducer: BuiltinNumericReducer) -> BuiltinSpec {
+    BuiltinSpec::new(BuiltinCategory::Reducer, BuiltinCardinality::Reducing)
+        .view_native()
+        .numeric_sink(reducer)
+        .cost(10.0)
+        .demand_law(BuiltinDemandLaw::NumericReducer)
+        .lowering(BuiltinPipelineLowering::TerminalSink)
+}
+
+/// Predicate-driven reducer-with-take-first skeleton (FindIndex / IndicesWhere / MaxBy / MinBy).
+#[inline]
+fn predicate_reducer_spec() -> BuiltinSpec {
+    BuiltinSpec::new(BuiltinCategory::Reducer, BuiltinCardinality::Reducing)
+        .view_native()
+        .cost(10.0)
+        .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
+        .pipeline_shape(BuiltinPipelineShape::new(
+            BuiltinCardinality::OneToOne,
+            true,
+            1.0,
+            1.0,
+        ))
+        .lowering(BuiltinPipelineLowering::TerminalExprArg {
+            terminal: BuiltinMethod::First,
+        })
+}
 
 // ── Streaming filters ────────────────────────────────────────────────────────
 
@@ -230,5 +261,167 @@ impl Builtin for DropWhile {
             ))
             .order_effect(BuiltinPipelineOrderEffect::Blocks)
             .lowering(BuiltinPipelineLowering::ExprArg)
+    }
+}
+
+// ── Reducer sinks ────────────────────────────────────────────────────────────
+
+/// Element count via scalar view sink; degenerate non-numeric reducer.
+pub(crate) struct Len;
+impl Builtin for Len {
+    const METHOD: BuiltinMethod = BuiltinMethod::Len;
+    const NAME: &'static str = "len";
+
+    fn spec() -> BuiltinSpec {
+        BuiltinSpec::new(BuiltinCategory::Reducer, BuiltinCardinality::Reducing)
+            .indexed()
+            .view_scalar()
+            .count_sink()
+    }
+}
+
+/// Sum of numeric stream elements.
+pub(crate) struct Sum;
+impl Builtin for Sum {
+    const METHOD: BuiltinMethod = BuiltinMethod::Sum;
+    const NAME: &'static str = "sum";
+
+    fn spec() -> BuiltinSpec {
+        numeric_reducer_spec(BuiltinNumericReducer::Sum)
+    }
+}
+
+/// Arithmetic mean of numeric stream elements.
+pub(crate) struct Avg;
+impl Builtin for Avg {
+    const METHOD: BuiltinMethod = BuiltinMethod::Avg;
+    const NAME: &'static str = "avg";
+
+    fn spec() -> BuiltinSpec {
+        numeric_reducer_spec(BuiltinNumericReducer::Avg)
+    }
+}
+
+/// Smallest numeric element.
+pub(crate) struct Min;
+impl Builtin for Min {
+    const METHOD: BuiltinMethod = BuiltinMethod::Min;
+    const NAME: &'static str = "min";
+
+    fn spec() -> BuiltinSpec {
+        numeric_reducer_spec(BuiltinNumericReducer::Min)
+    }
+}
+
+/// Largest numeric element.
+pub(crate) struct Max;
+impl Builtin for Max {
+    const METHOD: BuiltinMethod = BuiltinMethod::Max;
+    const NAME: &'static str = "max";
+
+    fn spec() -> BuiltinSpec {
+        numeric_reducer_spec(BuiltinNumericReducer::Max)
+    }
+}
+
+/// Stream length count; differs from `Len` in being a streaming reducer (not scalar).
+pub(crate) struct Count;
+impl Builtin for Count {
+    const METHOD: BuiltinMethod = BuiltinMethod::Count;
+    const NAME: &'static str = "count";
+
+    fn spec() -> BuiltinSpec {
+        BuiltinSpec::new(BuiltinCategory::Reducer, BuiltinCardinality::Reducing)
+            .view_native()
+            .count_sink()
+            .cost(10.0)
+            .demand_law(BuiltinDemandLaw::Count)
+            .lowering(BuiltinPipelineLowering::TerminalSink)
+    }
+}
+
+/// HyperLogLog-style approximate distinct count.
+pub(crate) struct ApproxCountDistinct;
+impl Builtin for ApproxCountDistinct {
+    const METHOD: BuiltinMethod = BuiltinMethod::ApproxCountDistinct;
+    const NAME: &'static str = "approx_count_distinct";
+
+    fn spec() -> BuiltinSpec {
+        BuiltinSpec::new(BuiltinCategory::Reducer, BuiltinCardinality::Reducing)
+            .view_native()
+            .approx_distinct_sink()
+            .cost(10.0)
+            .demand_law(BuiltinDemandLaw::KeyedReducer)
+            .lowering(BuiltinPipelineLowering::TerminalSink)
+    }
+}
+
+/// Boolean reducer: true if any element matches predicate.
+pub(crate) struct Any;
+impl Builtin for Any {
+    const METHOD: BuiltinMethod = BuiltinMethod::Any;
+    const NAME: &'static str = "any";
+
+    fn spec() -> BuiltinSpec {
+        BuiltinSpec::new(BuiltinCategory::Reducer, BuiltinCardinality::Reducing)
+            .view_native()
+            .cost(10.0)
+    }
+}
+
+/// Boolean reducer: true if all elements match predicate.
+pub(crate) struct All;
+impl Builtin for All {
+    const METHOD: BuiltinMethod = BuiltinMethod::All;
+    const NAME: &'static str = "all";
+
+    fn spec() -> BuiltinSpec {
+        BuiltinSpec::new(BuiltinCategory::Reducer, BuiltinCardinality::Reducing)
+            .view_native()
+            .cost(10.0)
+    }
+}
+
+/// Index of the first element satisfying the predicate.
+pub(crate) struct FindIndex;
+impl Builtin for FindIndex {
+    const METHOD: BuiltinMethod = BuiltinMethod::FindIndex;
+    const NAME: &'static str = "find_index";
+
+    fn spec() -> BuiltinSpec {
+        predicate_reducer_spec()
+    }
+}
+
+/// Indices of all elements satisfying the predicate.
+pub(crate) struct IndicesWhere;
+impl Builtin for IndicesWhere {
+    const METHOD: BuiltinMethod = BuiltinMethod::IndicesWhere;
+    const NAME: &'static str = "indices_where";
+
+    fn spec() -> BuiltinSpec {
+        predicate_reducer_spec()
+    }
+}
+
+/// Element with the largest projected key.
+pub(crate) struct MaxBy;
+impl Builtin for MaxBy {
+    const METHOD: BuiltinMethod = BuiltinMethod::MaxBy;
+    const NAME: &'static str = "max_by";
+
+    fn spec() -> BuiltinSpec {
+        predicate_reducer_spec()
+    }
+}
+
+/// Element with the smallest projected key.
+pub(crate) struct MinBy;
+impl Builtin for MinBy {
+    const METHOD: BuiltinMethod = BuiltinMethod::MinBy;
+    const NAME: &'static str = "min_by";
+
+    fn spec() -> BuiltinSpec {
+        predicate_reducer_spec()
     }
 }

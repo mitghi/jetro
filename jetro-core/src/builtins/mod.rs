@@ -1473,83 +1473,19 @@ impl BuiltinMethod {
             Self::Nth | Self::Collect => {
                 BuiltinSpec::new(Cat::Positional, Card::Bounded).view_native()
             }
-            Self::Len => BuiltinSpec::new(Cat::Reducer, Card::Reducing)
-                .indexed()
-                .view_scalar()
-                .count_sink(),
-            Self::Sum => BuiltinSpec::new(Cat::Reducer, Card::Reducing)
-                .view_native()
-                .numeric_sink(BuiltinNumericReducer::Sum)
-                .cost(10.0)
-                .demand_law(BuiltinDemandLaw::NumericReducer)
-                .lowering(BuiltinPipelineLowering::TerminalSink),
-            Self::Avg => BuiltinSpec::new(Cat::Reducer, Card::Reducing)
-                .view_native()
-                .numeric_sink(BuiltinNumericReducer::Avg)
-                .cost(10.0)
-                .demand_law(BuiltinDemandLaw::NumericReducer)
-                .lowering(BuiltinPipelineLowering::TerminalSink),
-            Self::Min => BuiltinSpec::new(Cat::Reducer, Card::Reducing)
-                .view_native()
-                .numeric_sink(BuiltinNumericReducer::Min)
-                .cost(10.0)
-                .demand_law(BuiltinDemandLaw::NumericReducer)
-                .lowering(BuiltinPipelineLowering::TerminalSink),
-            Self::Max => BuiltinSpec::new(Cat::Reducer, Card::Reducing)
-                .view_native()
-                .numeric_sink(BuiltinNumericReducer::Max)
-                .cost(10.0)
-                .demand_law(BuiltinDemandLaw::NumericReducer)
-                .lowering(BuiltinPipelineLowering::TerminalSink),
-            Self::Count => BuiltinSpec::new(Cat::Reducer, Card::Reducing)
-                .view_native()
-                .count_sink()
-                .cost(10.0)
-                .demand_law(BuiltinDemandLaw::Count)
-                .lowering(BuiltinPipelineLowering::TerminalSink),
-            Self::ApproxCountDistinct => BuiltinSpec::new(Cat::Reducer, Card::Reducing)
-                .view_native()
-                .approx_distinct_sink()
-                .cost(10.0)
-                .demand_law(BuiltinDemandLaw::KeyedReducer)
-                .lowering(BuiltinPipelineLowering::TerminalSink),
-            Self::Any | Self::All => {
-                BuiltinSpec::new(Cat::Reducer, Card::Reducing)
-                    .view_native()
-                    .cost(10.0)
-            }
-            Self::FindIndex => {
-                BuiltinSpec::new(Cat::Reducer, Card::Reducing)
-                    .view_native()
-                    .cost(10.0)
-                    .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
-                    .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 1.0, 1.0))
-                    .lowering(BuiltinPipelineLowering::TerminalExprArg { terminal: BuiltinMethod::First, })
-            }
-            Self::IndicesWhere => {
-                BuiltinSpec::new(Cat::Reducer, Card::Reducing)
-                    .view_native()
-                    .cost(10.0)
-                    .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
-                    .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 1.0, 1.0))
-                    .lowering(BuiltinPipelineLowering::TerminalExprArg { terminal: BuiltinMethod::First, })
-            }
-            Self::MaxBy => {
-                BuiltinSpec::new(Cat::Reducer, Card::Reducing)
-                    .view_native()
-                    .cost(10.0)
-                    .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
-                    .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 1.0, 1.0))
-                    .lowering(BuiltinPipelineLowering::TerminalExprArg { terminal: BuiltinMethod::First, })
-            }
-            Self::MinBy => {
-                BuiltinSpec::new(Cat::Reducer, Card::Reducing)
-                    .view_native()
-                    .cost(10.0)
-                    .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
-                    .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 1.0, 1.0))
-                    .lowering(BuiltinPipelineLowering::TerminalExprArg { terminal: BuiltinMethod::First, })
-            }
+            Self::Len => <defs::Len as builtin_def::Builtin>::spec(),
+            Self::Sum => <defs::Sum as builtin_def::Builtin>::spec(),
+            Self::Avg => <defs::Avg as builtin_def::Builtin>::spec(),
+            Self::Min => <defs::Min as builtin_def::Builtin>::spec(),
+            Self::Max => <defs::Max as builtin_def::Builtin>::spec(),
+            Self::Count => <defs::Count as builtin_def::Builtin>::spec(),
+            Self::ApproxCountDistinct => <defs::ApproxCountDistinct as builtin_def::Builtin>::spec(),
+            Self::Any => <defs::Any as builtin_def::Builtin>::spec(),
+            Self::All => <defs::All as builtin_def::Builtin>::spec(),
+            Self::FindIndex => <defs::FindIndex as builtin_def::Builtin>::spec(),
+            Self::IndicesWhere => <defs::IndicesWhere as builtin_def::Builtin>::spec(),
+            Self::MaxBy => <defs::MaxBy as builtin_def::Builtin>::spec(),
+            Self::MinBy => <defs::MinBy as builtin_def::Builtin>::spec(),
             Self::Sort
             | Self::GroupShape
             | Self::Partition
