@@ -219,30 +219,38 @@ fn push_expr_stage(
             stage_exprs.push(arg_expr(arg));
         }
         BuiltinExprStage::CountBy => {
-            stages.push(Stage::CountBy(compile_subexpr(arg)?));
-            stage_exprs.push(arg_expr(arg));
+            push_expr_builtin(BuiltinMethod::CountBy, arg, stages, stage_exprs)?;
         }
         BuiltinExprStage::IndexBy => {
-            stages.push(Stage::IndexBy(compile_subexpr(arg)?));
-            stage_exprs.push(arg_expr(arg));
+            push_expr_builtin(BuiltinMethod::IndexBy, arg, stages, stage_exprs)?;
         }
         BuiltinExprStage::TransformValues => {
-            stages.push(Stage::TransformValues(compile_subexpr(arg)?));
-            stage_exprs.push(arg_expr(arg));
+            push_expr_builtin(BuiltinMethod::TransformValues, arg, stages, stage_exprs)?;
         }
         BuiltinExprStage::TransformKeys => {
-            stages.push(Stage::TransformKeys(compile_subexpr(arg)?));
-            stage_exprs.push(arg_expr(arg));
+            push_expr_builtin(BuiltinMethod::TransformKeys, arg, stages, stage_exprs)?;
         }
         BuiltinExprStage::FilterValues => {
-            stages.push(Stage::FilterValues(compile_subexpr(arg)?));
-            stage_exprs.push(arg_expr(arg));
+            push_expr_builtin(BuiltinMethod::FilterValues, arg, stages, stage_exprs)?;
         }
         BuiltinExprStage::FilterKeys => {
-            stages.push(Stage::FilterKeys(compile_subexpr(arg)?));
-            stage_exprs.push(arg_expr(arg));
+            push_expr_builtin(BuiltinMethod::FilterKeys, arg, stages, stage_exprs)?;
         }
     }
+    Some(())
+}
+
+fn push_expr_builtin(
+    method: BuiltinMethod,
+    arg: &crate::ast::Arg,
+    stages: &mut Vec<Stage>,
+    stage_exprs: &mut Vec<Option<Arc<Expr>>>,
+) -> Option<()> {
+    stages.push(Stage::ExprBuiltin {
+        method,
+        body: compile_subexpr(arg)?,
+    });
+    stage_exprs.push(arg_expr(arg));
     Some(())
 }
 

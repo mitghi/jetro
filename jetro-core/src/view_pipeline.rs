@@ -1255,10 +1255,10 @@ mod tests {
     fn reducing_count_by_stage_materializes_only_final_boundary_value() {
         let source = CountingView::root(&[1, 2, 1, 3, 2, 1]);
         let body = PipelineBody {
-            stages: vec![Stage::CountBy(Arc::new(crate::vm::Program::new(
-                Vec::new(),
-                "",
-            )))],
+            stages: vec![Stage::ExprBuiltin {
+                method: crate::builtins::BuiltinMethod::CountBy,
+                body: Arc::new(crate::vm::Program::new(Vec::new(), "")),
+            }],
             stage_exprs: Vec::new(),
             sink: Sink::Terminal(crate::builtins::BuiltinMethod::First),
             stage_kernels: vec![BodyKernel::Current],
@@ -1285,10 +1285,10 @@ mod tests {
     fn reducing_index_by_stage_uses_shared_keyed_reducer_path() {
         let source = CountingView::root(&[1, 2, 1, 3]);
         let body = PipelineBody {
-            stages: vec![Stage::IndexBy(Arc::new(crate::vm::Program::new(
-                Vec::new(),
-                "",
-            )))],
+            stages: vec![Stage::ExprBuiltin {
+                method: crate::builtins::BuiltinMethod::IndexBy,
+                body: Arc::new(crate::vm::Program::new(Vec::new(), "")),
+            }],
             stage_exprs: Vec::new(),
             sink: Sink::Terminal(crate::builtins::BuiltinMethod::First),
             stage_kernels: vec![BodyKernel::Current],

@@ -265,17 +265,12 @@ pub enum Stage {
     /// Retains the single element with the minimum key produced by the program.
     MinBy(Arc<crate::vm::Program>),
     /// Maps over the values of each object element using the program, leaving keys unchanged.
-    TransformValues(Arc<crate::vm::Program>),
-    /// Maps over the keys of each object element using the program, leaving values unchanged.
-    TransformKeys(Arc<crate::vm::Program>),
-    /// Retains only the key-value pairs of each object for which the value program is truthy.
-    FilterValues(Arc<crate::vm::Program>),
-    /// Retains only the key-value pairs of each object for which the key program is truthy.
-    FilterKeys(Arc<crate::vm::Program>),
-    /// Produces a `{key: count}` frequency map over the stream using the key program.
-    CountBy(Arc<crate::vm::Program>),
-    /// Produces a `{key: element}` index map over the stream using the key program.
-    IndexBy(Arc<crate::vm::Program>),
+    ExprBuiltin {
+        /// Registry method identity for this expression-backed stage.
+        method: BuiltinMethod,
+        /// Compiled expression body evaluated for each relevant element/key/value.
+        body: Arc<crate::vm::Program>,
+    },
 
     /// Removes consecutive duplicates from a pre-sorted stream, optionally keyed by a program.
     SortedDedup(Option<Arc<crate::vm::Program>>),

@@ -424,13 +424,8 @@ fn recompile_stage_body_for_lexical_env(stage: &mut crate::pipeline::Stage, expr
         | crate::pipeline::Stage::IndicesWhere(body)
         | crate::pipeline::Stage::FindIndex(body)
         | crate::pipeline::Stage::MaxBy(body)
-        | crate::pipeline::Stage::MinBy(body)
-        | crate::pipeline::Stage::TransformValues(body)
-        | crate::pipeline::Stage::TransformKeys(body)
-        | crate::pipeline::Stage::FilterValues(body)
-        | crate::pipeline::Stage::FilterKeys(body)
-        | crate::pipeline::Stage::CountBy(body)
-        | crate::pipeline::Stage::IndexBy(body) => *body = program,
+        | crate::pipeline::Stage::MinBy(body) => *body = program,
+        crate::pipeline::Stage::ExprBuiltin { body, .. } => *body = program,
         crate::pipeline::Stage::UniqueBy(Some(body)) => *body = program,
         crate::pipeline::Stage::Sort(sort) if sort.key.is_some() => sort.key = Some(program),
         crate::pipeline::Stage::CompiledMap(_) => {

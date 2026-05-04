@@ -776,12 +776,6 @@ impl Stage {
             FindIndex => FindIndex,
             MaxBy => MaxBy,
             MinBy => MinBy,
-            TransformValues => TransformValues,
-            TransformKeys => TransformKeys,
-            FilterValues => FilterValues,
-            FilterKeys => FilterKeys,
-            CountBy => CountBy,
-            IndexBy => IndexBy,
         }) {
             return Some(desc);
         }
@@ -827,6 +821,7 @@ impl Stage {
             } else {
                 BuiltinMethod::Replace
             })),
+            Stage::ExprBuiltin { method, body } => Some(StageDescriptor::new(*method).body(body)),
             Stage::Builtin(call) => Some(
                 StageDescriptor::new(call.method)
                     .allow_one_to_one_order_fallback()

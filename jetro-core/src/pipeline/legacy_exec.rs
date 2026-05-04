@@ -24,7 +24,7 @@ use super::{
 use crate::builtins::{
     chunk_apply, count_by_apply, drop_while_apply, filter_apply, filter_one, group_by_apply,
     index_by_apply, map_apply, replace_apply, slice_apply, split_apply, take_while_apply,
-    window_apply, BuiltinPipelineExecutor,
+    window_apply, BuiltinMethod, BuiltinPipelineExecutor,
 };
 use crate::chain_ir::PullDemand;
 
@@ -692,7 +692,10 @@ pub(crate) fn apply_lambda_obj(
         indexmap::IndexMap::with_capacity(m.len());
     for (k, v) in m.iter() {
         match stage {
-            Stage::TransformKeys(_) => {
+            Stage::ExprBuiltin {
+                method: BuiltinMethod::TransformKeys,
+                ..
+            } => {
                 let k_val = Val::Str(k.clone());
                 let new_k = eval_kernel(kernel, &k_val, |item| {
                     apply_item_in_env(vm, loop_env, item, prog)
@@ -703,13 +706,19 @@ pub(crate) fn apply_lambda_obj(
                 };
                 out.insert(new_k_arc, v.clone());
             }
-            Stage::TransformValues(_) => {
+            Stage::ExprBuiltin {
+                method: BuiltinMethod::TransformValues,
+                ..
+            } => {
                 let new_v = eval_kernel(kernel, v, |item| {
                     apply_item_in_env(vm, loop_env, item, prog)
                 })?;
                 out.insert(k.clone(), new_v);
             }
-            Stage::FilterKeys(_) => {
+            Stage::ExprBuiltin {
+                method: BuiltinMethod::FilterKeys,
+                ..
+            } => {
                 let k_val = Val::Str(k.clone());
                 if is_truthy(&eval_kernel(kernel, &k_val, |item| {
                     apply_item_in_env(vm, loop_env, item, prog)
@@ -717,7 +726,10 @@ pub(crate) fn apply_lambda_obj(
                     out.insert(k.clone(), v.clone());
                 }
             }
-            Stage::FilterValues(_) => {
+            Stage::ExprBuiltin {
+                method: BuiltinMethod::FilterValues,
+                ..
+            } => {
                 if is_truthy(&eval_kernel(kernel, v, |item| {
                     apply_item_in_env(vm, loop_env, item, prog)
                 })?) {
