@@ -1352,3 +1352,193 @@ impl Builtin for Zscore {
     const NAME: &'static str = "zscore";
     fn spec() -> BuiltinSpec { streaming_one_to_one_element_spec() }
 }
+
+// ── Scalar element-only (basic) ──────────────────────────────────────────────
+
+#[inline]
+fn scalar_native_element_spec() -> BuiltinSpec {
+    BuiltinSpec::new(BuiltinCategory::Scalar, BuiltinCardinality::OneToOne)
+        .indexed()
+        .view_native()
+        .element()
+}
+
+#[inline]
+fn scalar_view_scalar_element_spec() -> BuiltinSpec {
+    BuiltinSpec::new(BuiltinCategory::Scalar, BuiltinCardinality::OneToOne)
+        .indexed()
+        .view_native()
+        .view_scalar()
+        .element()
+}
+
+// Native-element (no view_scalar):
+macro_rules! scalar_native_element {
+    ( $( $ty:ident => $variant:ident, $name:literal ; )* ) => {
+        $(
+            pub(crate) struct $ty;
+            impl Builtin for $ty {
+                const METHOD: BuiltinMethod = BuiltinMethod::$variant;
+                const NAME: &'static str = $name;
+                fn spec() -> BuiltinSpec { scalar_native_element_spec() }
+            }
+        )*
+    };
+}
+
+// View-scalar element:
+macro_rules! scalar_view_scalar_element {
+    ( $( $ty:ident => $variant:ident, $name:literal ; )* ) => {
+        $(
+            pub(crate) struct $ty;
+            impl Builtin for $ty {
+                const METHOD: BuiltinMethod = BuiltinMethod::$variant;
+                const NAME: &'static str = $name;
+                fn spec() -> BuiltinSpec { scalar_view_scalar_element_spec() }
+            }
+        )*
+    };
+}
+
+scalar_native_element! {
+    Or => Or, "or";
+    Has => Has, "has";
+    Capitalize => Capitalize, "capitalize";
+    TitleCase => TitleCase, "title_case";
+    SnakeCase => SnakeCase, "snake_case";
+    KebabCase => KebabCase, "kebab_case";
+    CamelCase => CamelCase, "camel_case";
+    PascalCase => PascalCase, "pascal_case";
+    ReverseStr => ReverseStr, "reverse_str";
+    ParseInt => ParseInt, "parse_int";
+    ParseFloat => ParseFloat, "parse_float";
+    ParseBool => ParseBool, "parse_bool";
+    ToBase64 => ToBase64, "to_base64";
+    FromBase64 => FromBase64, "from_base64";
+    UrlEncode => UrlEncode, "url_encode";
+    UrlDecode => UrlDecode, "url_decode";
+    HtmlEscape => HtmlEscape, "html_escape";
+    HtmlUnescape => HtmlUnescape, "html_unescape";
+    Repeat => Repeat, "repeat";
+    PadLeft => PadLeft, "pad_left";
+    PadRight => PadRight, "pad_right";
+    Center => Center, "center";
+    StripPrefix => StripPrefix, "strip_prefix";
+    StripSuffix => StripSuffix, "strip_suffix";
+    Scan => Scan, "scan";
+    ReMatch => ReMatch, "re_match";
+    ReMatchFirst => ReMatchFirst, "re_match_first";
+    ReMatchAll => ReMatchAll, "re_match_all";
+    ReCaptures => ReCaptures, "re_captures";
+    ReCapturesAll => ReCapturesAll, "re_captures_all";
+    ReSplit => ReSplit, "re_split";
+    ReReplace => ReReplace, "re_replace";
+    ReReplaceAll => ReReplaceAll, "re_replace_all";
+    ContainsAny => ContainsAny, "contains_any";
+    ContainsAll => ContainsAll, "contains_all";
+    Schema => Schema, "schema";
+    Type => Type, "type";
+    ToString_ => ToString, "to_string";
+    ToJson => ToJson, "to_json";
+    Indent => Indent, "indent";
+    Dedent => Dedent, "dedent";
+}
+
+scalar_view_scalar_element! {
+    Ceil => Ceil, "ceil";
+    Floor => Floor, "floor";
+    Round => Round, "round";
+    Abs => Abs, "abs";
+    Upper => Upper, "upper";
+    Lower => Lower, "lower";
+    Trim => Trim, "trim";
+    TrimLeft => TrimLeft, "trim_left";
+    TrimRight => TrimRight, "trim_right";
+    IsBlank => IsBlank, "is_blank";
+    IsNumeric => IsNumeric, "is_numeric";
+    IsAlpha => IsAlpha, "is_alpha";
+    IsAscii => IsAscii, "is_ascii";
+    ToNumber => ToNumber, "to_number";
+    ToBool => ToBool, "to_bool";
+    StartsWith => StartsWith, "starts_with";
+    EndsWith => EndsWith, "ends_with";
+    IndexOf => IndexOf, "index_of";
+    LastIndexOf => LastIndexOf, "last_index_of";
+    Matches => Matches, "matches";
+    ByteLen => ByteLen, "byte_len";
+}
+
+// ── Scalar with pipeline lowerings ───────────────────────────────────────────
+
+/// `slice(start, end?)` — int-range scalar element with pipeline lowering.
+pub(crate) struct Slice;
+impl Builtin for Slice {
+    const METHOD: BuiltinMethod = BuiltinMethod::Slice;
+    const NAME: &'static str = "slice";
+    fn spec() -> BuiltinSpec {
+        BuiltinSpec::new(BuiltinCategory::Scalar, BuiltinCardinality::OneToOne)
+            .indexed()
+            .view_native()
+            .pipeline_shape(BuiltinPipelineShape::new(
+                BuiltinCardinality::OneToOne,
+                true,
+                1.0,
+                1.0,
+            ))
+            .order_effect(BuiltinPipelineOrderEffect::Preserves)
+            .lowering(BuiltinPipelineLowering::IntRangeArg)
+    }
+}
+
+/// `replace(needle, with)` — single-replace string-pair scalar.
+pub(crate) struct Replace;
+impl Builtin for Replace {
+    const METHOD: BuiltinMethod = BuiltinMethod::Replace;
+    const NAME: &'static str = "replace";
+    fn spec() -> BuiltinSpec {
+        BuiltinSpec::new(BuiltinCategory::Scalar, BuiltinCardinality::OneToOne)
+            .indexed()
+            .view_native()
+            .pipeline_shape(BuiltinPipelineShape::new(
+                BuiltinCardinality::OneToOne,
+                true,
+                2.0,
+                1.0,
+            ))
+            .order_effect(BuiltinPipelineOrderEffect::Preserves)
+            .lowering(BuiltinPipelineLowering::StringPairArg)
+    }
+}
+
+/// `replace_all(needle, with)` — replace-all string-pair scalar.
+pub(crate) struct ReplaceAll;
+impl Builtin for ReplaceAll {
+    const METHOD: BuiltinMethod = BuiltinMethod::ReplaceAll;
+    const NAME: &'static str = "replace_all";
+    fn spec() -> BuiltinSpec {
+        BuiltinSpec::new(BuiltinCategory::Scalar, BuiltinCardinality::OneToOne)
+            .indexed()
+            .view_native()
+            .pipeline_shape(BuiltinPipelineShape::new(
+                BuiltinCardinality::OneToOne,
+                true,
+                2.0,
+                1.0,
+            ))
+            .order_effect(BuiltinPipelineOrderEffect::Preserves)
+            .lowering(BuiltinPipelineLowering::StringPairArg)
+    }
+}
+
+/// `unknown` — sentinel for unrecognised methods (impure).
+pub(crate) struct Unknown;
+impl Builtin for Unknown {
+    const METHOD: BuiltinMethod = BuiltinMethod::Unknown;
+    const NAME: &'static str = "unknown";
+    fn spec() -> BuiltinSpec {
+        BuiltinSpec {
+            pure: false,
+            ..BuiltinSpec::new(BuiltinCategory::Unknown, BuiltinCardinality::OneToOne)
+        }
+    }
+}

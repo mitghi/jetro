@@ -1531,297 +1531,72 @@ impl BuiltinMethod {
             Self::CumMax => <defs::CumMax as builtin_def::Builtin>::spec(),
             Self::CumMin => <defs::CumMin as builtin_def::Builtin>::spec(),
             Self::Zscore => <defs::Zscore as builtin_def::Builtin>::spec(),
-            Self::Or => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .element(),
-            Self::Has => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .element(),
-            Self::Ceil => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .view_scalar()
-                .element(),
-            Self::Floor => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .view_scalar()
-                .element(),
-            Self::Round => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .view_scalar()
-                .element(),
-            Self::Abs => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .view_scalar()
-                .element(),
-            Self::Upper => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .view_scalar()
-                .element(),
-            Self::Lower => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .view_scalar()
-                .element(),
-            Self::Capitalize => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .element(),
-            Self::TitleCase => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .element(),
-            Self::Trim => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .view_scalar()
-                .element(),
-            Self::TrimLeft => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .view_scalar()
-                .element(),
-            Self::TrimRight => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .view_scalar()
-                .element(),
-            Self::SnakeCase => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .element(),
-            Self::KebabCase => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .element(),
-            Self::CamelCase => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .element(),
-            Self::PascalCase => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .element(),
-            Self::ReverseStr => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .element(),
-            Self::IsBlank => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .view_scalar()
-                .element(),
-            Self::IsNumeric => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .view_scalar()
-                .element(),
-            Self::IsAlpha => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .view_scalar()
-                .element(),
-            Self::IsAscii => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .view_scalar()
-                .element(),
-            Self::ToNumber => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .view_scalar()
-                .element(),
-            Self::ToBool => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .view_scalar()
-                .element(),
-            Self::ParseInt => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .element(),
-            Self::ParseFloat => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .element(),
-            Self::ParseBool => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .element(),
-            Self::ToBase64 => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .element(),
-            Self::FromBase64 => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .element(),
-            Self::UrlEncode => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .element(),
-            Self::UrlDecode => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .element(),
-            Self::HtmlEscape => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .element(),
-            Self::HtmlUnescape => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .element(),
-            Self::Repeat => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .element(),
-            Self::PadLeft => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .element(),
-            Self::PadRight => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .element(),
-            Self::Center => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .element(),
-            Self::StartsWith => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .view_scalar()
-                .element(),
-            Self::EndsWith => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .view_scalar()
-                .element(),
-            Self::IndexOf => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .view_scalar()
-                .element(),
-            Self::LastIndexOf => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .view_scalar()
-                .element(),
-            Self::StripPrefix => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .element(),
-            Self::StripSuffix => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .element(),
-            Self::Matches => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .view_scalar()
-                .element(),
-            Self::Scan => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .element(),
-            Self::ReMatch => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .element(),
-            Self::ReMatchFirst => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .element(),
-            Self::ReMatchAll => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .element(),
-            Self::ReCaptures => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .element(),
-            Self::ReCapturesAll => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .element(),
-            Self::ReSplit => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .element(),
-            Self::ReReplace => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .element(),
-            Self::ReReplaceAll => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .element(),
-            Self::ContainsAny => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .element(),
-            Self::ContainsAll => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .element(),
-            Self::Schema => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .element(),
-            Self::ByteLen => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .view_scalar()
-                .element(),
-            Self::Unknown => BuiltinSpec {
-                pure: false,
-                ..BuiltinSpec::new(Cat::Unknown, Card::OneToOne)
-            },
-            Self::Slice => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 1.0, 1.0))
-                .order_effect(BuiltinPipelineOrderEffect::Preserves)
-                .lowering(BuiltinPipelineLowering::IntRangeArg),
-            Self::Replace => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 2.0, 1.0))
-                .order_effect(BuiltinPipelineOrderEffect::Preserves)
-                .lowering(BuiltinPipelineLowering::StringPairArg),
-            Self::ReplaceAll => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 2.0, 1.0))
-                .order_effect(BuiltinPipelineOrderEffect::Preserves)
-                .lowering(BuiltinPipelineLowering::StringPairArg),
-            Self::Type => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .element(),
-            Self::ToString => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .element(),
-            Self::ToJson => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .element(),
-            Self::Indent => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .element(),
-            Self::Dedent => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
-                .indexed()
-                .view_native()
-                .element(),
+            Self::Or => <defs::Or as builtin_def::Builtin>::spec(),
+            Self::Has => <defs::Has as builtin_def::Builtin>::spec(),
+            Self::Ceil => <defs::Ceil as builtin_def::Builtin>::spec(),
+            Self::Floor => <defs::Floor as builtin_def::Builtin>::spec(),
+            Self::Round => <defs::Round as builtin_def::Builtin>::spec(),
+            Self::Abs => <defs::Abs as builtin_def::Builtin>::spec(),
+            Self::Upper => <defs::Upper as builtin_def::Builtin>::spec(),
+            Self::Lower => <defs::Lower as builtin_def::Builtin>::spec(),
+            Self::Capitalize => <defs::Capitalize as builtin_def::Builtin>::spec(),
+            Self::TitleCase => <defs::TitleCase as builtin_def::Builtin>::spec(),
+            Self::Trim => <defs::Trim as builtin_def::Builtin>::spec(),
+            Self::TrimLeft => <defs::TrimLeft as builtin_def::Builtin>::spec(),
+            Self::TrimRight => <defs::TrimRight as builtin_def::Builtin>::spec(),
+            Self::SnakeCase => <defs::SnakeCase as builtin_def::Builtin>::spec(),
+            Self::KebabCase => <defs::KebabCase as builtin_def::Builtin>::spec(),
+            Self::CamelCase => <defs::CamelCase as builtin_def::Builtin>::spec(),
+            Self::PascalCase => <defs::PascalCase as builtin_def::Builtin>::spec(),
+            Self::ReverseStr => <defs::ReverseStr as builtin_def::Builtin>::spec(),
+            Self::IsBlank => <defs::IsBlank as builtin_def::Builtin>::spec(),
+            Self::IsNumeric => <defs::IsNumeric as builtin_def::Builtin>::spec(),
+            Self::IsAlpha => <defs::IsAlpha as builtin_def::Builtin>::spec(),
+            Self::IsAscii => <defs::IsAscii as builtin_def::Builtin>::spec(),
+            Self::ToNumber => <defs::ToNumber as builtin_def::Builtin>::spec(),
+            Self::ToBool => <defs::ToBool as builtin_def::Builtin>::spec(),
+            Self::ParseInt => <defs::ParseInt as builtin_def::Builtin>::spec(),
+            Self::ParseFloat => <defs::ParseFloat as builtin_def::Builtin>::spec(),
+            Self::ParseBool => <defs::ParseBool as builtin_def::Builtin>::spec(),
+            Self::ToBase64 => <defs::ToBase64 as builtin_def::Builtin>::spec(),
+            Self::FromBase64 => <defs::FromBase64 as builtin_def::Builtin>::spec(),
+            Self::UrlEncode => <defs::UrlEncode as builtin_def::Builtin>::spec(),
+            Self::UrlDecode => <defs::UrlDecode as builtin_def::Builtin>::spec(),
+            Self::HtmlEscape => <defs::HtmlEscape as builtin_def::Builtin>::spec(),
+            Self::HtmlUnescape => <defs::HtmlUnescape as builtin_def::Builtin>::spec(),
+            Self::Repeat => <defs::Repeat as builtin_def::Builtin>::spec(),
+            Self::PadLeft => <defs::PadLeft as builtin_def::Builtin>::spec(),
+            Self::PadRight => <defs::PadRight as builtin_def::Builtin>::spec(),
+            Self::Center => <defs::Center as builtin_def::Builtin>::spec(),
+            Self::StartsWith => <defs::StartsWith as builtin_def::Builtin>::spec(),
+            Self::EndsWith => <defs::EndsWith as builtin_def::Builtin>::spec(),
+            Self::IndexOf => <defs::IndexOf as builtin_def::Builtin>::spec(),
+            Self::LastIndexOf => <defs::LastIndexOf as builtin_def::Builtin>::spec(),
+            Self::StripPrefix => <defs::StripPrefix as builtin_def::Builtin>::spec(),
+            Self::StripSuffix => <defs::StripSuffix as builtin_def::Builtin>::spec(),
+            Self::Matches => <defs::Matches as builtin_def::Builtin>::spec(),
+            Self::Scan => <defs::Scan as builtin_def::Builtin>::spec(),
+            Self::ReMatch => <defs::ReMatch as builtin_def::Builtin>::spec(),
+            Self::ReMatchFirst => <defs::ReMatchFirst as builtin_def::Builtin>::spec(),
+            Self::ReMatchAll => <defs::ReMatchAll as builtin_def::Builtin>::spec(),
+            Self::ReCaptures => <defs::ReCaptures as builtin_def::Builtin>::spec(),
+            Self::ReCapturesAll => <defs::ReCapturesAll as builtin_def::Builtin>::spec(),
+            Self::ReSplit => <defs::ReSplit as builtin_def::Builtin>::spec(),
+            Self::ReReplace => <defs::ReReplace as builtin_def::Builtin>::spec(),
+            Self::ReReplaceAll => <defs::ReReplaceAll as builtin_def::Builtin>::spec(),
+            Self::ContainsAny => <defs::ContainsAny as builtin_def::Builtin>::spec(),
+            Self::ContainsAll => <defs::ContainsAll as builtin_def::Builtin>::spec(),
+            Self::Schema => <defs::Schema as builtin_def::Builtin>::spec(),
+            Self::ByteLen => <defs::ByteLen as builtin_def::Builtin>::spec(),
+            Self::Unknown => <defs::Unknown as builtin_def::Builtin>::spec(),
+            Self::Slice => <defs::Slice as builtin_def::Builtin>::spec(),
+            Self::Replace => <defs::Replace as builtin_def::Builtin>::spec(),
+            Self::ReplaceAll => <defs::ReplaceAll as builtin_def::Builtin>::spec(),
+            Self::Type => <defs::Type as builtin_def::Builtin>::spec(),
+            Self::ToString => <defs::ToString_ as builtin_def::Builtin>::spec(),
+            Self::ToJson => <defs::ToJson as builtin_def::Builtin>::spec(),
+            Self::Indent => <defs::Indent as builtin_def::Builtin>::spec(),
+            Self::Dedent => <defs::Dedent as builtin_def::Builtin>::spec(),
             _ => {
                 let spec = BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
                     .indexed()
