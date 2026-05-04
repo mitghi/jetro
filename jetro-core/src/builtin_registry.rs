@@ -196,13 +196,13 @@ pub(crate) fn pipeline_arity(id: BuiltinId, is_last: bool) -> Option<BuiltinPipe
         return None;
     };
     match pipeline_lowering(id) {
-        Some(BuiltinPipelineLowering::ExprStage(_))
-        | Some(BuiltinPipelineLowering::TerminalExprStage { .. })
-        | Some(BuiltinPipelineLowering::UsizeStage { .. })
-        | Some(BuiltinPipelineLowering::StringStage(_)) => Some(BuiltinPipelineArity::Exact(1)),
-        Some(BuiltinPipelineLowering::NullaryStage(_)) => Some(BuiltinPipelineArity::Exact(0)),
-        Some(BuiltinPipelineLowering::StringPairStage(_)) => Some(BuiltinPipelineArity::Exact(2)),
-        Some(BuiltinPipelineLowering::IntRangeStage(_)) => {
+        Some(BuiltinPipelineLowering::ExprArg)
+        | Some(BuiltinPipelineLowering::TerminalExprArg { .. })
+        | Some(BuiltinPipelineLowering::UsizeArg { .. })
+        | Some(BuiltinPipelineLowering::StringArg) => Some(BuiltinPipelineArity::Exact(1)),
+        Some(BuiltinPipelineLowering::Nullary) => Some(BuiltinPipelineArity::Exact(0)),
+        Some(BuiltinPipelineLowering::StringPairArg) => Some(BuiltinPipelineArity::Exact(2)),
+        Some(BuiltinPipelineLowering::IntRangeArg) => {
             Some(BuiltinPipelineArity::Range { min: 1, max: 2 })
         }
         Some(BuiltinPipelineLowering::Sort) => Some(BuiltinPipelineArity::Range { min: 0, max: 1 }),
@@ -724,9 +724,8 @@ builtin_registry! {
 mod tests {
     use super::*;
     use crate::builtins::{
-        BuiltinExprStage, BuiltinIntRangeStage, BuiltinNullaryStage, BuiltinPipelineExecutor,
-        BuiltinPipelineLowering, BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect,
-        BuiltinStringPairStage, BuiltinStringStage, BuiltinUsizeStage,
+        BuiltinPipelineExecutor, BuiltinPipelineLowering, BuiltinPipelineMaterialization,
+        BuiltinPipelineOrderEffect,
     };
 
     #[test]
@@ -946,25 +945,21 @@ mod tests {
     fn registry_drives_pipeline_lowering() {
         assert_eq!(
             pipeline_lowering(BuiltinId::from_method(BuiltinMethod::Filter)),
-            Some(BuiltinPipelineLowering::ExprStage(BuiltinExprStage::Filter))
+            Some(BuiltinPipelineLowering::ExprArg)
         );
         assert_eq!(
             pipeline_lowering(BuiltinId::from_method(BuiltinMethod::Map)),
-            Some(BuiltinPipelineLowering::ExprStage(BuiltinExprStage::Map))
+            Some(BuiltinPipelineLowering::ExprArg)
         );
         assert_eq!(
             pipeline_lowering(BuiltinId::from_method(BuiltinMethod::FindOne)),
-            Some(BuiltinPipelineLowering::TerminalExprStage {
-                stage: BuiltinExprStage::Filter,
+            Some(BuiltinPipelineLowering::TerminalExprArg {
                 terminal: BuiltinMethod::First,
             })
         );
         assert_eq!(
             pipeline_lowering(BuiltinId::from_method(BuiltinMethod::Take)),
-            Some(BuiltinPipelineLowering::UsizeStage {
-                stage: BuiltinUsizeStage::Take,
-                min: 0,
-            })
+            Some(BuiltinPipelineLowering::UsizeArg { min: 0 })
         );
         assert_eq!(
             pipeline_lowering(BuiltinId::from_method(BuiltinMethod::Sort)),
@@ -972,27 +967,19 @@ mod tests {
         );
         assert_eq!(
             pipeline_lowering(BuiltinId::from_method(BuiltinMethod::Reverse)),
-            Some(BuiltinPipelineLowering::NullaryStage(
-                BuiltinNullaryStage::Reverse
-            ))
+            Some(BuiltinPipelineLowering::Nullary)
         );
         assert_eq!(
             pipeline_lowering(BuiltinId::from_method(BuiltinMethod::Split)),
-            Some(BuiltinPipelineLowering::StringStage(
-                BuiltinStringStage::Split
-            ))
+            Some(BuiltinPipelineLowering::StringArg)
         );
         assert_eq!(
             pipeline_lowering(BuiltinId::from_method(BuiltinMethod::ReplaceAll)),
-            Some(BuiltinPipelineLowering::StringPairStage(
-                BuiltinStringPairStage::Replace { all: true }
-            ))
+            Some(BuiltinPipelineLowering::StringPairArg)
         );
         assert_eq!(
             pipeline_lowering(BuiltinId::from_method(BuiltinMethod::Slice)),
-            Some(BuiltinPipelineLowering::IntRangeStage(
-                BuiltinIntRangeStage::Slice
-            ))
+            Some(BuiltinPipelineLowering::IntRangeArg)
         );
         assert_eq!(
             pipeline_lowering(BuiltinId::from_method(BuiltinMethod::Count)),

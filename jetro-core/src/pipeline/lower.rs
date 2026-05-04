@@ -12,9 +12,7 @@ use std::sync::Arc;
 use crate::ast::Expr;
 use crate::builtin_registry::{pipeline_accepts_arity, pipeline_lowering, BuiltinId};
 use crate::builtins::{
-    BuiltinExprStage, BuiltinIntRangeStage, BuiltinMethod, BuiltinNullaryStage,
-    BuiltinPipelineLowering, BuiltinSinkAccumulator, BuiltinStringPairStage, BuiltinStringStage,
-    BuiltinUsizeStage, BuiltinViewStage,
+    BuiltinMethod, BuiltinPipelineLowering, BuiltinSinkAccumulator, BuiltinViewStage,
 };
 use crate::{context::EvalError, value::Val};
 
@@ -463,79 +461,69 @@ pub(super) fn lower_method_from_registry(
         return None;
     };
     match lowering {
-        BuiltinPipelineLowering::ExprStage(stage) => {
+        BuiltinPipelineLowering::ExprArg => {
             if args.len() != 1 {
                 return None;
             }
-            push_expr_stage(stage, &args[0], stages, stage_exprs)
+            push_expr_stage(method, &args[0], stages, stage_exprs)
         }
-        BuiltinPipelineLowering::TerminalExprStage { stage, terminal } => {
+        BuiltinPipelineLowering::TerminalExprArg { terminal } => {
             if args.len() != 1 {
                 return None;
             }
-            push_expr_stage(stage, &args[0], stages, stage_exprs)?;
+            push_expr_stage(method, &args[0], stages, stage_exprs)?;
             if is_last {
                 set_terminal_sink(terminal, sink)?;
             }
             Some(())
         }
-        BuiltinPipelineLowering::NullaryStage(stage) => {
+        BuiltinPipelineLowering::Nullary => {
             if !args.is_empty() {
                 return None;
             }
-            match stage {
-                BuiltinNullaryStage::Reverse => {
+            match method {
+                BuiltinMethod::Reverse => {
                     let cancel = method
                         .spec()
                         .cancellation
                         .expect("reverse builtin must define cancellation metadata");
                     stages.push(Stage::Reverse(cancel));
                 }
-                BuiltinNullaryStage::Unique => stages.push(Stage::UniqueBy(None)),
+                BuiltinMethod::Unique => stages.push(Stage::UniqueBy(None)),
+                _ => return None,
             }
             stage_exprs.push(None);
             Some(())
         }
-        BuiltinPipelineLowering::UsizeStage { stage, min } => {
+        BuiltinPipelineLowering::UsizeArg { min } => {
             if args.len() != 1 {
                 return None;
             }
             let n = usize_arg_at_least(&args[0], min)?;
-            match stage {
-                BuiltinUsizeStage::Take
-                | BuiltinUsizeStage::Skip
-                | BuiltinUsizeStage::Chunk
-                | BuiltinUsizeStage::Window => {
-                    stages.push(Stage::UsizeBuiltin { method, value: n })
-                }
-            }
+            stages.push(Stage::UsizeBuiltin { method, value: n });
             stage_exprs.push(None);
             Some(())
         }
-        BuiltinPipelineLowering::StringStage(stage) => {
+        BuiltinPipelineLowering::StringArg => {
             if args.len() != 1 {
                 return None;
             }
-            match stage {
-                BuiltinStringStage::Split => stages.push(Stage::StringBuiltin {
-                    method,
-                    value: string_arg(&args[0])?,
-                }),
-            }
+            stages.push(Stage::StringBuiltin {
+                method,
+                value: string_arg(&args[0])?,
+            });
             stage_exprs.push(None);
             Some(())
         }
-        BuiltinPipelineLowering::StringPairStage(stage) => {
+        BuiltinPipelineLowering::StringPairArg => {
             if args.len() != 2 {
                 return None;
             }
-            match stage {
-                BuiltinStringPairStage::Replace { .. } => stages.push(Stage::StringPairBuiltin {
-                    method,
-                    first: string_arg(&args[0])?,
-                    second: string_arg(&args[1])?,
-                }),
-            }
+            stages.push(Stage::StringPairBuiltin {
+                method,
+                first: string_arg(&args[0])?,
+                second: string_arg(&args[1])?,
+            });
             stage_exprs.push(None);
             Some(())
         }
@@ -553,8 +541,8 @@ pub(super) fn lower_method_from_registry(
             }
             _ => None,
         },
-        BuiltinPipelineLowering::IntRangeStage(stage) => match (stage, args) {
-            (BuiltinIntRangeStage::Slice, [arg]) => {
+        BuiltinPipelineLowering::IntRangeArg => match args {
+            [arg] => {
                 stages.push(Stage::IntRangeBuiltin {
                     method,
                     start: int_arg(arg)?,
@@ -563,7 +551,7 @@ pub(super) fn lower_method_from_registry(
                 stage_exprs.push(None);
                 Some(())
             }
-            (BuiltinIntRangeStage::Slice, [start, end]) => {
+            [start, end] => {
                 stages.push(Stage::IntRangeBuiltin {
                     method,
                     start: int_arg(start)?,
@@ -584,20 +572,20 @@ pub(super) fn lower_method_from_registry(
 
 // Compiles `arg` into a sub-expression program and appends the corresponding `Stage` variant; `None` on compile failure.
 fn push_expr_stage(
-    stage: BuiltinExprStage,
+    method: BuiltinMethod,
     arg: &crate::ast::Arg,
     stages: &mut Vec<Stage>,
     stage_exprs: &mut Vec<Option<Arc<Expr>>>,
 ) -> Option<()> {
-    match stage {
-        BuiltinExprStage::Filter => {
+    match method {
+        BuiltinMethod::Filter | BuiltinMethod::Find | BuiltinMethod::FindAll => {
             stages.push(Stage::Filter(
                 compile_subexpr(arg)?,
                 BuiltinViewStage::Filter,
             ));
             stage_exprs.push(arg_expr(arg));
         }
-        BuiltinExprStage::Map => match try_decode_map_body(arg) {
+        BuiltinMethod::Map => match try_decode_map_body(arg) {
             Some(plan) => {
                 stages.push(Stage::CompiledMap(Arc::new(plan)));
                 stage_exprs.push(arg_expr(arg));
@@ -607,56 +595,35 @@ fn push_expr_stage(
                 stage_exprs.push(arg_expr(arg));
             }
         },
-        BuiltinExprStage::FlatMap => {
+        BuiltinMethod::FlatMap => {
             stages.push(Stage::FlatMap(
                 compile_subexpr(arg)?,
                 BuiltinViewStage::FlatMap,
             ));
             stage_exprs.push(arg_expr(arg));
         }
-        BuiltinExprStage::TakeWhile => {
-            push_expr_builtin(BuiltinMethod::TakeWhile, arg, stages, stage_exprs)?;
-        }
-        BuiltinExprStage::DropWhile => {
-            push_expr_builtin(BuiltinMethod::DropWhile, arg, stages, stage_exprs)?;
-        }
-        BuiltinExprStage::IndicesWhere => {
-            push_expr_builtin(BuiltinMethod::IndicesWhere, arg, stages, stage_exprs)?;
-        }
-        BuiltinExprStage::FindIndex => {
-            push_expr_builtin(BuiltinMethod::FindIndex, arg, stages, stage_exprs)?;
-        }
-        BuiltinExprStage::MaxBy => {
-            push_expr_builtin(BuiltinMethod::MaxBy, arg, stages, stage_exprs)?;
-        }
-        BuiltinExprStage::MinBy => {
-            push_expr_builtin(BuiltinMethod::MinBy, arg, stages, stage_exprs)?;
-        }
-        BuiltinExprStage::UniqueBy => {
+        BuiltinMethod::UniqueBy => {
             stages.push(Stage::UniqueBy(Some(compile_subexpr(arg)?)));
             stage_exprs.push(arg_expr(arg));
         }
-        BuiltinExprStage::GroupBy => {
-            push_expr_builtin(BuiltinMethod::GroupBy, arg, stages, stage_exprs)?;
+        // Methods that route through the generic ExprBuiltin stage; `method` is preserved
+        // verbatim so the runtime executor dispatches on the right semantics.
+        BuiltinMethod::TakeWhile
+        | BuiltinMethod::DropWhile
+        | BuiltinMethod::IndicesWhere
+        | BuiltinMethod::FindIndex
+        | BuiltinMethod::MaxBy
+        | BuiltinMethod::MinBy
+        | BuiltinMethod::GroupBy
+        | BuiltinMethod::CountBy
+        | BuiltinMethod::IndexBy
+        | BuiltinMethod::TransformValues
+        | BuiltinMethod::TransformKeys
+        | BuiltinMethod::FilterValues
+        | BuiltinMethod::FilterKeys => {
+            push_expr_builtin(method, arg, stages, stage_exprs)?;
         }
-        BuiltinExprStage::CountBy => {
-            push_expr_builtin(BuiltinMethod::CountBy, arg, stages, stage_exprs)?;
-        }
-        BuiltinExprStage::IndexBy => {
-            push_expr_builtin(BuiltinMethod::IndexBy, arg, stages, stage_exprs)?;
-        }
-        BuiltinExprStage::TransformValues => {
-            push_expr_builtin(BuiltinMethod::TransformValues, arg, stages, stage_exprs)?;
-        }
-        BuiltinExprStage::TransformKeys => {
-            push_expr_builtin(BuiltinMethod::TransformKeys, arg, stages, stage_exprs)?;
-        }
-        BuiltinExprStage::FilterValues => {
-            push_expr_builtin(BuiltinMethod::FilterValues, arg, stages, stage_exprs)?;
-        }
-        BuiltinExprStage::FilterKeys => {
-            push_expr_builtin(BuiltinMethod::FilterKeys, arg, stages, stage_exprs)?;
-        }
+        _ => return None,
     }
     Some(())
 }

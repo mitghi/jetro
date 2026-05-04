@@ -1098,120 +1098,37 @@ impl BuiltinPipelineShape {
     }
 }
 
-/// Describes the lowering target for a builtin in the pipeline compiler.
-/// Each variant maps to a distinct code-generation path in the pipeline backend.
+/// Describes the *shape* of a builtin's lowering call (arg count + arg type).
+///
+/// The lowering routine dispatches first on this shape to validate args, then on
+/// `BuiltinMethod` itself to emit the right `Stage` variant. Shape tags do not
+/// duplicate method identity — the method is already passed alongside the spec.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinPipelineLowering {
-    /// Lambda-based stage (filter, map, flat_map, sort_by, etc.).
-    ExprStage(BuiltinExprStage),
-    /// Lambda-based stage followed by a terminal builtin that collapses the stream.
-    TerminalExprStage {
-        /// The upstream streaming stage.
-        stage: BuiltinExprStage,
+    /// One Expr argument (a lambda).
+    ExprArg,
+    /// One Expr argument followed by a terminal builtin that collapses the stream when last.
+    TerminalExprArg {
         /// The terminal method applied after the stage.
         terminal: BuiltinMethod,
     },
-    /// Argument-free stage (reverse, unique).
-    NullaryStage(BuiltinNullaryStage),
-    /// Stage parameterised by a single `usize` (take, skip, chunk, window).
-    UsizeStage {
-        /// Which usize-parameterised stage.
-        stage: BuiltinUsizeStage,
+    /// No arguments.
+    Nullary,
+    /// One `usize` argument with a minimum legal value.
+    UsizeArg {
         /// Minimum legal argument value; arguments below this are rejected.
         min: usize,
     },
-    /// Stage parameterised by a single string (split).
-    StringStage(BuiltinStringStage),
-    /// Stage parameterised by a pair of strings (replace, re_replace).
-    StringPairStage(BuiltinStringPairStage),
-    /// Stage parameterised by integer start/end bounds.
-    IntRangeStage(BuiltinIntRangeStage),
-    /// Full-barrier comparison sort with optional key expressions.
+    /// One string argument.
+    StringArg,
+    /// Two string arguments.
+    StringPairArg,
+    /// One or two integer arguments (e.g. slice).
+    IntRangeArg,
+    /// Sort with optional key expression (zero or one arg).
     Sort,
-    /// Terminal sink (count, sum, avg, first, last, etc.).
+    /// Terminal sink (no stage emitted).
     TerminalSink,
-}
-
-/// Lambda-driven pipeline stage variants.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BuiltinExprStage {
-    /// Predicate filter.
-    Filter,
-    /// Projection.
-    Map,
-    /// Expanding projection.
-    FlatMap,
-    /// Contiguous prefix filter.
-    TakeWhile,
-    /// Drop prefix, pass rest.
-    DropWhile,
-    /// Collect all matching indices.
-    IndicesWhere,
-    /// Return the first matching index.
-    FindIndex,
-    /// Select element with the greatest key.
-    MaxBy,
-    /// Select element with the smallest key.
-    MinBy,
-    /// Deduplicate by key.
-    UniqueBy,
-    /// Group elements by key.
-    GroupBy,
-    /// Count elements by key.
-    CountBy,
-    /// Index elements by key.
-    IndexBy,
-    /// Map over values of an object.
-    TransformValues,
-    /// Map over keys of an object.
-    TransformKeys,
-    /// Filter entries of an object by value predicate.
-    FilterValues,
-    /// Filter entries of an object by key predicate.
-    FilterKeys,
-}
-
-/// Argument-free pipeline stage variants.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BuiltinNullaryStage {
-    /// Reverse the order of the array.
-    Reverse,
-    /// Remove duplicate values.
-    Unique,
-}
-
-/// Pipeline stages parameterised by a single `usize` argument.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BuiltinUsizeStage {
-    /// Keep the first N elements.
-    Take,
-    /// Drop the first N elements.
-    Skip,
-    /// Split into non-overlapping chunks of size N.
-    Chunk,
-    /// Slide a window of size N.
-    Window,
-}
-
-/// Pipeline stages parameterised by a single string argument.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BuiltinStringStage {
-    /// Split on a separator string.
-    Split,
-}
-
-/// Pipeline stages parameterised by two string arguments.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BuiltinStringPairStage {
-    /// Replace using a literal needle; `all: true` replaces every occurrence.
-    Replace { all: bool },
-}
-
-/// Pipeline stages parameterised by integer range arguments.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BuiltinIntRangeStage {
-    /// Slice an array or string by start/end index.
-    Slice,
 }
 
 /// Materialisation policy for a view stage's output.
@@ -1521,7 +1438,7 @@ impl BuiltinMethod {
                     .demand_law(BuiltinDemandLaw::FilterLike)
                     .executor(BuiltinPipelineExecutor::RowFilter)
                     .order_effect(BuiltinPipelineOrderEffect::PredicatePrefix)
-                    .lowering(BuiltinPipelineLowering::ExprStage(BuiltinExprStage::Filter))
+                    .lowering(BuiltinPipelineLowering::ExprArg)
             }
             Self::Find => {
                 BuiltinSpec::new(Cat::StreamingFilter, Card::Filtering)
@@ -1531,7 +1448,7 @@ impl BuiltinMethod {
                     .demand_law(BuiltinDemandLaw::FilterLike)
                     .executor(BuiltinPipelineExecutor::RowFilter)
                     .order_effect(BuiltinPipelineOrderEffect::PredicatePrefix)
-                    .lowering(BuiltinPipelineLowering::ExprStage(BuiltinExprStage::Filter))
+                    .lowering(BuiltinPipelineLowering::ExprArg)
             }
             Self::FindAll => {
                 BuiltinSpec::new(Cat::StreamingFilter, Card::Filtering)
@@ -1541,7 +1458,7 @@ impl BuiltinMethod {
                     .demand_law(BuiltinDemandLaw::FilterLike)
                     .executor(BuiltinPipelineExecutor::RowFilter)
                     .order_effect(BuiltinPipelineOrderEffect::PredicatePrefix)
-                    .lowering(BuiltinPipelineLowering::ExprStage(BuiltinExprStage::Filter))
+                    .lowering(BuiltinPipelineLowering::ExprArg)
             }
             Self::Compact | Self::Remove => {
                 BuiltinSpec::new(Cat::StreamingFilter, Card::Filtering).cost(10.0)
@@ -1554,7 +1471,7 @@ impl BuiltinMethod {
                 .demand_law(BuiltinDemandLaw::MapLike)
                 .executor(BuiltinPipelineExecutor::RowMap)
                 .order_effect(BuiltinPipelineOrderEffect::Preserves)
-                .lowering(BuiltinPipelineLowering::ExprStage(BuiltinExprStage::Map))
+                .lowering(BuiltinPipelineLowering::ExprArg)
                 .element(),
             Self::Enumerate => {
                 BuiltinSpec::new(Cat::StreamingOneToOne, Card::OneToOne)
@@ -1575,7 +1492,7 @@ impl BuiltinMethod {
                 .demand_law(BuiltinDemandLaw::FlatMapLike)
                 .executor(BuiltinPipelineExecutor::RowFlatMap)
                 .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
-                .lowering(BuiltinPipelineLowering::ExprStage(BuiltinExprStage::FlatMap)),
+                .lowering(BuiltinPipelineLowering::ExprArg),
             Self::Flatten | Self::Explode => {
                 BuiltinSpec::new(Cat::StreamingExpand, Card::Expanding).cost(10.0)
             }
@@ -1584,7 +1501,7 @@ impl BuiltinMethod {
                 .executor(BuiltinPipelineExecutor::ExpandingBuiltin)
                 .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
                 .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::Expanding, true, 2.0, 1.0))
-                .lowering(BuiltinPipelineLowering::StringStage(BuiltinStringStage::Split)),
+                .lowering(BuiltinPipelineLowering::StringArg),
             Self::Lines | Self::Words | Self::Chars | Self::CharsOf | Self::Bytes => {
                 BuiltinSpec::new(Cat::StreamingExpand, Card::Expanding)
                     .cost(10.0)
@@ -1597,7 +1514,7 @@ impl BuiltinMethod {
                 .executor(BuiltinPipelineExecutor::PrefixWhile { take: true })
                 .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::Filtering, true, 10.0, 0.5))
                 .order_effect(BuiltinPipelineOrderEffect::PredicatePrefix)
-                .lowering(BuiltinPipelineLowering::ExprStage(BuiltinExprStage::TakeWhile)),
+                .lowering(BuiltinPipelineLowering::ExprArg),
             Self::DropWhile => BuiltinSpec::new(Cat::StreamingFilter, Card::Filtering)
                 .view_stage(BuiltinViewStage::DropWhile)
                 .cost(10.0)
@@ -1605,23 +1522,17 @@ impl BuiltinMethod {
                 .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
                 .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::Filtering, true, 10.0, 0.5))
                 .order_effect(BuiltinPipelineOrderEffect::Blocks)
-                .lowering(BuiltinPipelineLowering::ExprStage(BuiltinExprStage::DropWhile)),
+                .lowering(BuiltinPipelineLowering::ExprArg),
             Self::FindFirst => {
                 BuiltinSpec::new(Cat::StreamingFilter, Card::Filtering)
                     .cost(10.0)
                     .demand_law(BuiltinDemandLaw::First)
-                    .lowering(BuiltinPipelineLowering::TerminalExprStage {
-                        stage: BuiltinExprStage::Filter,
-                        terminal: BuiltinMethod::First,
-                    })
+                    .lowering(BuiltinPipelineLowering::TerminalExprArg { terminal: BuiltinMethod::First, })
             }
             Self::FindOne => {
                 BuiltinSpec::new(Cat::StreamingFilter, Card::Filtering)
                     .cost(10.0)
-                    .lowering(BuiltinPipelineLowering::TerminalExprStage {
-                        stage: BuiltinExprStage::Filter,
-                        terminal: BuiltinMethod::First,
-                    })
+                    .lowering(BuiltinPipelineLowering::TerminalExprArg { terminal: BuiltinMethod::First, })
             }
             Self::Take => BuiltinSpec::new(Cat::Positional, Card::Bounded)
                 .view_native()
@@ -1630,10 +1541,7 @@ impl BuiltinMethod {
                 .demand_law(BuiltinDemandLaw::Take)
                 .executor(BuiltinPipelineExecutor::Position { take: true })
                 .order_effect(BuiltinPipelineOrderEffect::Preserves)
-                .lowering(BuiltinPipelineLowering::UsizeStage {
-                    stage: BuiltinUsizeStage::Take,
-                    min: 0,
-                }),
+                .lowering(BuiltinPipelineLowering::UsizeArg { min: 0, }),
             Self::Skip => BuiltinSpec::new(Cat::Positional, Card::Bounded)
                 .view_native()
                 .view_stage(BuiltinViewStage::Skip)
@@ -1641,10 +1549,7 @@ impl BuiltinMethod {
                 .demand_law(BuiltinDemandLaw::Skip)
                 .executor(BuiltinPipelineExecutor::Position { take: false })
                 .order_effect(BuiltinPipelineOrderEffect::Preserves)
-                .lowering(BuiltinPipelineLowering::UsizeStage {
-                    stage: BuiltinUsizeStage::Skip,
-                    min: 0,
-                }),
+                .lowering(BuiltinPipelineLowering::UsizeArg { min: 0, }),
             Self::First => BuiltinSpec::new(Cat::Positional, Card::Bounded)
                 .view_native()
                 .select_one_sink(BuiltinSelectionPosition::First)
@@ -1710,10 +1615,7 @@ impl BuiltinMethod {
                     .executor(BuiltinPipelineExecutor::FindIndex)
                     .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
                     .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 1.0, 1.0))
-                    .lowering(BuiltinPipelineLowering::TerminalExprStage {
-                        stage: BuiltinExprStage::FindIndex,
-                        terminal: BuiltinMethod::First,
-                    })
+                    .lowering(BuiltinPipelineLowering::TerminalExprArg { terminal: BuiltinMethod::First, })
             }
             Self::IndicesWhere => {
                 BuiltinSpec::new(Cat::Reducer, Card::Reducing)
@@ -1722,10 +1624,7 @@ impl BuiltinMethod {
                     .executor(BuiltinPipelineExecutor::IndicesWhere)
                     .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
                     .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 1.0, 1.0))
-                    .lowering(BuiltinPipelineLowering::TerminalExprStage {
-                        stage: BuiltinExprStage::IndicesWhere,
-                        terminal: BuiltinMethod::First,
-                    })
+                    .lowering(BuiltinPipelineLowering::TerminalExprArg { terminal: BuiltinMethod::First, })
             }
             Self::MaxBy => {
                 BuiltinSpec::new(Cat::Reducer, Card::Reducing)
@@ -1734,10 +1633,7 @@ impl BuiltinMethod {
                     .executor(BuiltinPipelineExecutor::ArgExtreme { max: true })
                     .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
                     .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 1.0, 1.0))
-                    .lowering(BuiltinPipelineLowering::TerminalExprStage {
-                        stage: BuiltinExprStage::MaxBy,
-                        terminal: BuiltinMethod::First,
-                    })
+                    .lowering(BuiltinPipelineLowering::TerminalExprArg { terminal: BuiltinMethod::First, })
             }
             Self::MinBy => {
                 BuiltinSpec::new(Cat::Reducer, Card::Reducing)
@@ -1746,10 +1642,7 @@ impl BuiltinMethod {
                     .executor(BuiltinPipelineExecutor::ArgExtreme { max: false })
                     .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
                     .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 1.0, 1.0))
-                    .lowering(BuiltinPipelineLowering::TerminalExprStage {
-                        stage: BuiltinExprStage::MinBy,
-                        terminal: BuiltinMethod::First,
-                    })
+                    .lowering(BuiltinPipelineLowering::TerminalExprArg { terminal: BuiltinMethod::First, })
             }
             Self::Sort
             | Self::GroupShape
@@ -1772,18 +1665,12 @@ impl BuiltinMethod {
                         .executor(BuiltinPipelineExecutor::Window)
                         .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
                         .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::Barrier, true, 2.0, 1.0))
-                        .lowering(BuiltinPipelineLowering::UsizeStage {
-                            stage: BuiltinUsizeStage::Window,
-                            min: 1,
-                        }),
+                        .lowering(BuiltinPipelineLowering::UsizeArg { min: 1, }),
                     Self::Chunk => spec
                         .executor(BuiltinPipelineExecutor::Chunk)
                         .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
                         .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::Barrier, true, 2.0, 1.0))
-                        .lowering(BuiltinPipelineLowering::UsizeStage {
-                            stage: BuiltinUsizeStage::Chunk,
-                            min: 1,
-                        }),
+                        .lowering(BuiltinPipelineLowering::UsizeArg { min: 1, }),
                     _ => spec,
                 }
             }
@@ -1795,7 +1682,7 @@ impl BuiltinMethod {
                 .demand_law(BuiltinDemandLaw::KeyedReducer)
                 .executor(BuiltinPipelineExecutor::GroupBy)
                 .materialization(BuiltinPipelineMaterialization::ComposedBarrier)
-                .lowering(BuiltinPipelineLowering::ExprStage(BuiltinExprStage::GroupBy)),
+                .lowering(BuiltinPipelineLowering::ExprArg),
             Self::CountBy => BuiltinSpec::new(Cat::Reducer, Card::Reducing)
                 .view_stage(BuiltinViewStage::KeyedReduce)
                 .keyed_reducer(BuiltinKeyedReducer::Count)
@@ -1803,10 +1690,7 @@ impl BuiltinMethod {
                 .demand_law(BuiltinDemandLaw::KeyedReducer)
                 .executor(BuiltinPipelineExecutor::CountBy)
                 .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 1.0, 1.0))
-                .lowering(BuiltinPipelineLowering::TerminalExprStage {
-                    stage: BuiltinExprStage::CountBy,
-                    terminal: BuiltinMethod::First,
-                }),
+                .lowering(BuiltinPipelineLowering::TerminalExprArg { terminal: BuiltinMethod::First, }),
             Self::IndexBy => BuiltinSpec::new(Cat::Reducer, Card::Reducing)
                 .view_stage(BuiltinViewStage::KeyedReduce)
                 .keyed_reducer(BuiltinKeyedReducer::Index)
@@ -1814,10 +1698,7 @@ impl BuiltinMethod {
                 .demand_law(BuiltinDemandLaw::KeyedReducer)
                 .executor(BuiltinPipelineExecutor::IndexBy)
                 .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 1.0, 1.0))
-                .lowering(BuiltinPipelineLowering::TerminalExprStage {
-                    stage: BuiltinExprStage::IndexBy,
-                    terminal: BuiltinMethod::First,
-                }),
+                .lowering(BuiltinPipelineLowering::TerminalExprArg { terminal: BuiltinMethod::First, }),
             Self::Unique => {
                 BuiltinSpec::new(Cat::StreamingFilter, Card::Filtering)
                     .view_stage(BuiltinViewStage::Distinct)
@@ -1826,7 +1707,7 @@ impl BuiltinMethod {
                     .executor(BuiltinPipelineExecutor::UniqueBy)
                     .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::Filtering, true, 10.0, 1.0))
                     .order_effect(BuiltinPipelineOrderEffect::Preserves)
-                    .lowering(BuiltinPipelineLowering::NullaryStage(BuiltinNullaryStage::Unique))
+                    .lowering(BuiltinPipelineLowering::Nullary)
             }
             Self::UniqueBy => {
                 BuiltinSpec::new(Cat::StreamingFilter, Card::Filtering)
@@ -1836,7 +1717,7 @@ impl BuiltinMethod {
                     .executor(BuiltinPipelineExecutor::UniqueBy)
                     .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::Filtering, true, 10.0, 1.0))
                     .order_effect(BuiltinPipelineOrderEffect::Preserves)
-                    .lowering(BuiltinPipelineLowering::ExprStage(BuiltinExprStage::UniqueBy))
+                    .lowering(BuiltinPipelineLowering::ExprArg)
             }
             Self::Reverse => {
                 BuiltinSpec::new(Cat::Barrier, Card::Barrier)
@@ -1845,7 +1726,7 @@ impl BuiltinMethod {
                     .demand_law(BuiltinDemandLaw::OrderBarrier)
                     .executor(BuiltinPipelineExecutor::Reverse)
                     .materialization(BuiltinPipelineMaterialization::ComposedBarrier)
-                    .lowering(BuiltinPipelineLowering::NullaryStage(BuiltinNullaryStage::Reverse))
+                    .lowering(BuiltinPipelineLowering::Nullary)
             }
             Self::Append
             | Self::Prepend
@@ -1878,28 +1759,28 @@ impl BuiltinMethod {
                     .executor(BuiltinPipelineExecutor::ObjectLambda)
                     .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 1.0, 1.0))
                     .order_effect(BuiltinPipelineOrderEffect::Preserves)
-                    .lowering(BuiltinPipelineLowering::ExprStage(BuiltinExprStage::TransformKeys))
+                    .lowering(BuiltinPipelineLowering::ExprArg)
             }
             Self::TransformValues => {
                 BuiltinSpec::new(Cat::Object, Card::OneToOne)
                     .executor(BuiltinPipelineExecutor::ObjectLambda)
                     .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 1.0, 1.0))
                     .order_effect(BuiltinPipelineOrderEffect::Preserves)
-                    .lowering(BuiltinPipelineLowering::ExprStage(BuiltinExprStage::TransformValues))
+                    .lowering(BuiltinPipelineLowering::ExprArg)
             }
             Self::FilterKeys => {
                 BuiltinSpec::new(Cat::Object, Card::OneToOne)
                     .executor(BuiltinPipelineExecutor::ObjectLambda)
                     .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 1.0, 1.0))
                     .order_effect(BuiltinPipelineOrderEffect::Preserves)
-                    .lowering(BuiltinPipelineLowering::ExprStage(BuiltinExprStage::FilterKeys))
+                    .lowering(BuiltinPipelineLowering::ExprArg)
             }
             Self::FilterValues => {
                 BuiltinSpec::new(Cat::Object, Card::OneToOne)
                     .executor(BuiltinPipelineExecutor::ObjectLambda)
                     .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 1.0, 1.0))
                     .order_effect(BuiltinPipelineOrderEffect::Preserves)
-                    .lowering(BuiltinPipelineLowering::ExprStage(BuiltinExprStage::FilterValues))
+                    .lowering(BuiltinPipelineLowering::ExprArg)
             }
             Self::GetPath => {
                 BuiltinSpec::new(Cat::Path, Card::OneToOne).indexed().element()
@@ -2218,25 +2099,21 @@ impl BuiltinMethod {
                 .executor(BuiltinPipelineExecutor::ElementBuiltin)
                 .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 1.0, 1.0))
                 .order_effect(BuiltinPipelineOrderEffect::Preserves)
-                .lowering(BuiltinPipelineLowering::IntRangeStage(BuiltinIntRangeStage::Slice)),
+                .lowering(BuiltinPipelineLowering::IntRangeArg),
             Self::Replace => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
                 .indexed()
                 .view_native()
                 .executor(BuiltinPipelineExecutor::ElementBuiltin)
                 .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 2.0, 1.0))
                 .order_effect(BuiltinPipelineOrderEffect::Preserves)
-                .lowering(BuiltinPipelineLowering::StringPairStage(
-                    BuiltinStringPairStage::Replace { all: false }
-                )),
+                .lowering(BuiltinPipelineLowering::StringPairArg),
             Self::ReplaceAll => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
                 .indexed()
                 .view_native()
                 .executor(BuiltinPipelineExecutor::ElementBuiltin)
                 .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 2.0, 1.0))
                 .order_effect(BuiltinPipelineOrderEffect::Preserves)
-                .lowering(BuiltinPipelineLowering::StringPairStage(
-                    BuiltinStringPairStage::Replace { all: true }
-                )),
+                .lowering(BuiltinPipelineLowering::StringPairArg),
             Self::Type => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
                 .indexed()
                 .view_native()
