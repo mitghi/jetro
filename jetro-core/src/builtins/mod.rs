@@ -1422,36 +1422,11 @@ impl BuiltinMethod {
 
         let spec = match self {
             Self::Filter => <defs::Filter as builtin_def::Builtin>::spec(),
-            Self::Find => {
-                BuiltinSpec::new(Cat::StreamingFilter, Card::Filtering)
-                    .view_stage(BuiltinViewStage::Filter)
-                    .columnar_stage(BuiltinColumnarStage::Filter)
-                    .cost(10.0)
-                    .demand_law(BuiltinDemandLaw::FilterLike)
-                    .order_effect(BuiltinPipelineOrderEffect::PredicatePrefix)
-                    .lowering(BuiltinPipelineLowering::ExprArg)
-            }
-            Self::FindAll => {
-                BuiltinSpec::new(Cat::StreamingFilter, Card::Filtering)
-                    .view_stage(BuiltinViewStage::Filter)
-                    .columnar_stage(BuiltinColumnarStage::Filter)
-                    .cost(10.0)
-                    .demand_law(BuiltinDemandLaw::FilterLike)
-                    .order_effect(BuiltinPipelineOrderEffect::PredicatePrefix)
-                    .lowering(BuiltinPipelineLowering::ExprArg)
-            }
-            Self::Compact | Self::Remove => {
-                BuiltinSpec::new(Cat::StreamingFilter, Card::Filtering).cost(10.0)
-            }
-            Self::Map => BuiltinSpec::new(Cat::StreamingOneToOne, Card::OneToOne)
-                .indexed()
-                .view_stage(BuiltinViewStage::Map)
-                .columnar_stage(BuiltinColumnarStage::Map)
-                .cost(10.0)
-                .demand_law(BuiltinDemandLaw::MapLike)
-                .order_effect(BuiltinPipelineOrderEffect::Preserves)
-                .lowering(BuiltinPipelineLowering::ExprArg)
-                .element(),
+            Self::Find => <defs::Find as builtin_def::Builtin>::spec(),
+            Self::FindAll => <defs::FindAll as builtin_def::Builtin>::spec(),
+            Self::Compact => <defs::Compact as builtin_def::Builtin>::spec(),
+            Self::Remove => <defs::Remove as builtin_def::Builtin>::spec(),
+            Self::Map => <defs::Map as builtin_def::Builtin>::spec(),
             Self::Enumerate => {
                 BuiltinSpec::new(Cat::StreamingOneToOne, Card::OneToOne)
                     .indexed()
@@ -1464,13 +1439,7 @@ impl BuiltinMethod {
                     .cost(10.0)
                     .element()
             }
-            Self::FlatMap => BuiltinSpec::new(Cat::StreamingExpand, Card::Expanding)
-                .view_stage(BuiltinViewStage::FlatMap)
-                .columnar_stage(BuiltinColumnarStage::FlatMap)
-                .cost(10.0)
-                .demand_law(BuiltinDemandLaw::FlatMapLike)
-                .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
-                .lowering(BuiltinPipelineLowering::ExprArg),
+            Self::FlatMap => <defs::FlatMap as builtin_def::Builtin>::spec(),
             Self::Flatten | Self::Explode => {
                 BuiltinSpec::new(Cat::StreamingExpand, Card::Expanding).cost(10.0)
             }
@@ -1484,20 +1453,8 @@ impl BuiltinMethod {
                     .cost(10.0)
                     .element()
             }
-            Self::TakeWhile => BuiltinSpec::new(Cat::StreamingFilter, Card::Filtering)
-                .view_stage(BuiltinViewStage::TakeWhile)
-                .cost(10.0)
-                .demand_law(BuiltinDemandLaw::TakeWhile)
-                .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::Filtering, true, 10.0, 0.5))
-                .order_effect(BuiltinPipelineOrderEffect::PredicatePrefix)
-                .lowering(BuiltinPipelineLowering::ExprArg),
-            Self::DropWhile => BuiltinSpec::new(Cat::StreamingFilter, Card::Filtering)
-                .view_stage(BuiltinViewStage::DropWhile)
-                .cost(10.0)
-                .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
-                .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::Filtering, true, 10.0, 0.5))
-                .order_effect(BuiltinPipelineOrderEffect::Blocks)
-                .lowering(BuiltinPipelineLowering::ExprArg),
+            Self::TakeWhile => <defs::TakeWhile as builtin_def::Builtin>::spec(),
+            Self::DropWhile => <defs::DropWhile as builtin_def::Builtin>::spec(),
             Self::FindFirst => {
                 BuiltinSpec::new(Cat::StreamingFilter, Card::Filtering)
                     .cost(10.0)
@@ -1509,30 +1466,10 @@ impl BuiltinMethod {
                     .cost(10.0)
                     .lowering(BuiltinPipelineLowering::TerminalExprArg { terminal: BuiltinMethod::First, })
             }
-            Self::Take => BuiltinSpec::new(Cat::Positional, Card::Bounded)
-                .view_native()
-                .view_stage(BuiltinViewStage::Take)
-                .stage_merge(BuiltinStageMerge::UsizeMin)
-                .demand_law(BuiltinDemandLaw::Take)
-                .order_effect(BuiltinPipelineOrderEffect::Preserves)
-                .lowering(BuiltinPipelineLowering::UsizeArg { min: 0, }),
-            Self::Skip => BuiltinSpec::new(Cat::Positional, Card::Bounded)
-                .view_native()
-                .view_stage(BuiltinViewStage::Skip)
-                .stage_merge(BuiltinStageMerge::UsizeSaturatingAdd)
-                .demand_law(BuiltinDemandLaw::Skip)
-                .order_effect(BuiltinPipelineOrderEffect::Preserves)
-                .lowering(BuiltinPipelineLowering::UsizeArg { min: 0, }),
-            Self::First => BuiltinSpec::new(Cat::Positional, Card::Bounded)
-                .view_native()
-                .select_one_sink(BuiltinSelectionPosition::First)
-                .demand_law(BuiltinDemandLaw::First)
-                .lowering(BuiltinPipelineLowering::TerminalSink),
-            Self::Last => BuiltinSpec::new(Cat::Positional, Card::Bounded)
-                .view_native()
-                .select_one_sink(BuiltinSelectionPosition::Last)
-                .demand_law(BuiltinDemandLaw::Last)
-                .lowering(BuiltinPipelineLowering::TerminalSink),
+            Self::Take => <defs::Take as builtin_def::Builtin>::spec(),
+            Self::Skip => <defs::Skip as builtin_def::Builtin>::spec(),
+            Self::First => <defs::First as builtin_def::Builtin>::spec(),
+            Self::Last => <defs::Last as builtin_def::Builtin>::spec(),
             Self::Nth | Self::Collect => {
                 BuiltinSpec::new(Cat::Positional, Card::Bounded).view_native()
             }
