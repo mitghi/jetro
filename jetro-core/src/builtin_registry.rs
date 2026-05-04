@@ -6,9 +6,8 @@
 //! analysis code carries without depending on the legacy enum directly.
 
 use crate::{
-    builtin_trait::BuiltinDemandLaw,
     builtins::{
-        BuiltinCardinality, BuiltinExprStage, BuiltinIntRangeStage, BuiltinMethod,
+        BuiltinCardinality, BuiltinDemandLaw, BuiltinExprStage, BuiltinIntRangeStage, BuiltinMethod,
         BuiltinNullaryStage, BuiltinPipelineExecutor, BuiltinPipelineLowering,
         BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect, BuiltinPipelineShape,
         BuiltinSinkAccumulator, BuiltinStringPairStage, BuiltinStringStage, BuiltinStructural,
@@ -150,7 +149,7 @@ pub(crate) fn participates_in_demand(id: BuiltinId) -> bool {
 /// builtin has no specialised streaming executor.
 #[inline]
 pub(crate) fn pipeline_executor(id: BuiltinId) -> Option<BuiltinPipelineExecutor> {
-    id.method().map(|m| get_descriptor(m).executor).flatten()
+    id.method().map(|m| m.spec().executor).flatten()
 }
 
 /// Return the materialization policy for builtin `id`; defaults to `Streaming`
@@ -158,7 +157,7 @@ pub(crate) fn pipeline_executor(id: BuiltinId) -> Option<BuiltinPipelineExecutor
 #[inline]
 pub(crate) fn pipeline_materialization(id: BuiltinId) -> BuiltinPipelineMaterialization {
     id.method()
-        .map(|m| get_descriptor(m).materialization)
+        .map(|m| m.spec().materialization)
         .unwrap_or(BuiltinPipelineMaterialization::Streaming)
 }
 
@@ -166,21 +165,21 @@ pub(crate) fn pipeline_materialization(id: BuiltinId) -> BuiltinPipelineMaterial
 /// the pipeline cost estimator during plan selection.
 #[inline]
 pub(crate) fn pipeline_shape(id: BuiltinId) -> Option<BuiltinPipelineShape> {
-    id.method().map(|m| get_descriptor(m).pipeline_shape).flatten()
+    id.method().map(|m| m.spec().pipeline_shape).flatten()
 }
 
 /// Return how builtin `id` affects element ordering in the pipeline, or
 /// `None` if the builtin has no registered ordering behaviour.
 #[inline]
 pub(crate) fn pipeline_order_effect(id: BuiltinId) -> Option<BuiltinPipelineOrderEffect> {
-    id.method().map(|m| get_descriptor(m).order_effect).flatten()
+    id.method().map(|m| m.spec().order_effect).flatten()
 }
 
 /// Return the pipeline lowering strategy for builtin `id`, indicating which
 /// physical stage type and arguments the builtin compiles to.
 #[inline]
 pub(crate) fn pipeline_lowering(id: BuiltinId) -> Option<BuiltinPipelineLowering> {
-    id.method().map(|m| get_descriptor(m).lowering).flatten()
+    id.method().map(|m| m.spec().lowering).flatten()
 }
 
 /// Return `true` if builtin `id` can be lowered in pipeline position with
@@ -239,21 +238,21 @@ fn terminal_sink_arity(method: BuiltinMethod) -> Option<BuiltinPipelineArity> {
 /// applied independently to each item in a vectorised column.
 #[inline]
 pub(crate) fn pipeline_element(id: BuiltinId) -> bool {
-    id.method().map(|m| get_descriptor(m).is_element).unwrap_or(false)
+    id.method().map(|m| m.spec().is_element).unwrap_or(false)
 }
 
 /// Return the structural traversal variant for builtin `id` (`DeepFind`,
 /// `DeepShape`, `DeepLike`), or `None` for non-structural builtins.
 #[inline]
 pub(crate) fn structural(id: BuiltinId) -> Option<BuiltinStructural> {
-    id.method().map(|m| get_descriptor(m).structural).flatten()
+    id.method().map(|m| m.spec().structural).flatten()
 }
 
 /// Look up the demand law for `id`, returning `Identity` for any unregistered builtin.
 #[inline]
 fn demand_law(id: BuiltinId) -> BuiltinDemandLaw {
     id.method()
-        .map(|m| get_descriptor(m).demand_law)
+        .map(|m| m.spec().demand_law)
         .unwrap_or(BuiltinDemandLaw::Identity)
 }
 
@@ -272,151 +271,10 @@ impl BuiltinId {
     }
 }
 
-// ── Helper macros for extracting individual fields from meta-token-trees ──────
-
-macro_rules! builtin_meta_demand_law {
-    () => {
-        crate::builtin_trait::BuiltinDemandLaw::Identity
-    };
-    (demand: $value:expr $(, $($rest:tt)*)?) => {
-        $value
-    };
-    ($key:ident : $value:expr, $($rest:tt)*) => {
-        builtin_meta_demand_law!($($rest)*)
-    };
-    ($key:ident : $value:expr) => {
-        crate::builtin_trait::BuiltinDemandLaw::Identity
-    };
-}
-
-macro_rules! builtin_meta_executor {
-    () => {
-        None
-    };
-    (executor: $value:expr $(, $($rest:tt)*)?) => {
-        Some($value)
-    };
-    ($key:ident : $value:expr, $($rest:tt)*) => {
-        builtin_meta_executor!($($rest)*)
-    };
-    ($key:ident : $value:expr) => {
-        None
-    };
-}
-
-macro_rules! builtin_meta_materialization {
-    () => {
-        BuiltinPipelineMaterialization::Streaming
-    };
-    (materialization: $value:expr $(, $($rest:tt)*)?) => {
-        $value
-    };
-    ($key:ident : $value:expr, $($rest:tt)*) => {
-        builtin_meta_materialization!($($rest)*)
-    };
-    ($key:ident : $value:expr) => {
-        BuiltinPipelineMaterialization::Streaming
-    };
-}
-
-macro_rules! builtin_meta_shape {
-    () => {
-        None
-    };
-    (shape: $value:expr $(, $($rest:tt)*)?) => {
-        Some($value)
-    };
-    ($key:ident : $value:expr, $($rest:tt)*) => {
-        builtin_meta_shape!($($rest)*)
-    };
-    ($key:ident : $value:expr) => {
-        None
-    };
-}
-
-macro_rules! builtin_meta_order {
-    () => {
-        None
-    };
-    (order: $value:expr $(, $($rest:tt)*)?) => {
-        Some($value)
-    };
-    ($key:ident : $value:expr, $($rest:tt)*) => {
-        builtin_meta_order!($($rest)*)
-    };
-    ($key:ident : $value:expr) => {
-        None
-    };
-}
-
-macro_rules! builtin_meta_lowering {
-    () => {
-        None
-    };
-    (lowering: $value:expr $(, $($rest:tt)*)?) => {
-        Some($value)
-    };
-    ($key:ident : $value:expr, $($rest:tt)*) => {
-        builtin_meta_lowering!($($rest)*)
-    };
-    ($key:ident : $value:expr) => {
-        None
-    };
-}
-
-macro_rules! builtin_meta_element_bool {
-    () => {
-        false
-    };
-    (element: $value:expr $(, $($rest:tt)*)?) => {
-        $value
-    };
-    ($key:ident : $value:expr, $($rest:tt)*) => {
-        builtin_meta_element_bool!($($rest)*)
-    };
-    ($key:ident : $value:expr) => {
-        false
-    };
-}
-
-macro_rules! builtin_meta_structural {
-    () => {
-        None
-    };
-    (structural: $value:expr $(, $($rest:tt)*)?) => {
-        Some($value)
-    };
-    ($key:ident : $value:expr, $($rest:tt)*) => {
-        builtin_meta_structural!($($rest)*)
-    };
-    ($key:ident : $value:expr) => {
-        None
-    };
-}
-
 // ── Main registry macro ───────────────────────────────────────────────────────
 
 macro_rules! builtin_registry {
     ($( $method:ident => $canonical:literal [ $( $alias:literal ),* $(,)? ] $( { $($meta:tt)* } )? ; )*) => {
-
-        /// Return the full compile-time descriptor for a given `BuiltinMethod`.
-        /// This is the single dispatch point replacing the nine parallel match functions.
-        pub(crate) fn get_descriptor(method: BuiltinMethod) -> crate::builtin_trait::BuiltinDescriptor {
-            match method {
-                $(
-                BuiltinMethod::$method => crate::builtin_trait::BuiltinDescriptor {
-                    demand_law: builtin_meta_demand_law!($($($meta)*)?),
-                    executor: builtin_meta_executor!($($($meta)*)?),
-                    materialization: builtin_meta_materialization!($($($meta)*)?),
-                    pipeline_shape: builtin_meta_shape!($($($meta)*)?),
-                    order_effect: builtin_meta_order!($($($meta)*)?),
-                    lowering: builtin_meta_lowering!($($($meta)*)?),
-                    is_element: builtin_meta_element_bool!($($($meta)*)?),
-                    structural: builtin_meta_structural!($($($meta)*)?),
-                },
-                )*
-            }
-        }
 
         #[inline]
         pub(crate) fn method_from_id(id: BuiltinId) -> Option<BuiltinMethod> {
@@ -1284,8 +1142,8 @@ mod tests {
         for (method, _, _) in all_method_entries() {
             let id = BuiltinId::from_method(method);
             assert_eq!(id.method(), Some(method));
-            // get_descriptor must not panic for any registered method
-            let _ = get_descriptor(method);
+            // spec() must not panic for any registered method
+            let _ = method.spec();
         }
     }
 }

@@ -25,7 +25,6 @@
 pub(crate) mod analysis;
 pub(crate) mod ast;
 pub(crate) mod builtin_helpers;
-pub(crate) mod builtin_trait;
 pub(crate) mod builtin_registry;
 pub(crate) mod builtins;
 pub(crate) mod chain_ir;

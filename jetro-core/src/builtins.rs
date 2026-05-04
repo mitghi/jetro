@@ -593,6 +593,54 @@ pub struct BuiltinSpec {
     pub structural: Option<BuiltinStructural>,
     /// Relative cost used by the planner's heuristic optimizer.
     pub cost: f64,
+    /// Demand-propagation law for pipeline planning (default: `Identity`).
+    pub demand_law: BuiltinDemandLaw,
+    /// Streaming executor variant, if any.
+    pub executor: Option<BuiltinPipelineExecutor>,
+    /// Materialisation policy (default: `Streaming`).
+    pub materialization: BuiltinPipelineMaterialization,
+    /// Cardinality/cost shape annotation for the pipeline cost estimator.
+    pub pipeline_shape: Option<BuiltinPipelineShape>,
+    /// How this builtin affects element ordering in the pipeline.
+    pub order_effect: Option<BuiltinPipelineOrderEffect>,
+    /// Physical stage lowering strategy, if registered.
+    pub lowering: Option<BuiltinPipelineLowering>,
+    /// Whether the builtin is element-wise vectorisable.
+    pub is_element: bool,
+}
+
+/// How a builtin transforms downstream demand into the demand it places on
+/// its upstream source. Unknown builtins default to `Identity`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinDemandLaw {
+    /// Pass downstream demand through unchanged (e.g. purely transforming builtins).
+    Identity,
+    /// Like filter: must scan until `n` outputs are produced, so converts `FirstInput(n)` to `UntilOutput(n)`.
+    FilterLike,
+    /// Like `take_while`: stops at the first predicate failure, so `UntilOutput(n)` becomes `FirstInput(n)`.
+    TakeWhile,
+    /// Like `unique`/`unique_by`: scan until enough distinct outputs are observed.
+    UniqueLike,
+    /// Like map: the output count equals the input count; passes demand through but requires whole values.
+    MapLike,
+    /// Like `flat_map`: output count is unbounded relative to input, so always requests all input.
+    FlatMapLike,
+    /// Cap the upstream pull to the provided count argument.
+    Take,
+    /// Shift the upstream pull window by the provided count argument.
+    Skip,
+    /// Only the first element is needed; translates any downstream demand to `FirstInput(1)`.
+    First,
+    /// The last element is needed; requires all ordered input.
+    Last,
+    /// Only a count is needed; requires all inputs but no value payloads.
+    Count,
+    /// A numeric aggregate (sum/min/max/avg); requires all inputs with numeric-only payload.
+    NumericReducer,
+    /// A predicate/keyed aggregate; requires all inputs and predicate/key evaluation.
+    KeyedReducer,
+    /// A full-input ordering barrier; downstream limits can choose strategy, but source scan remains all input.
+    OrderBarrier,
 }
 
 /// Marker that a builtin has a structural (index-based) execution backend.
@@ -1244,6 +1292,13 @@ impl BuiltinSpec {
             columnar_stage: None,
             structural: None,
             cost: 1.0,
+            demand_law: BuiltinDemandLaw::Identity,
+            executor: None,
+            materialization: BuiltinPipelineMaterialization::Streaming,
+            pipeline_shape: None,
+            order_effect: None,
+            lowering: None,
+            is_element: false,
         }
     }
 
@@ -1361,6 +1416,48 @@ impl BuiltinSpec {
         self.cost = cost;
         self
     }
+
+    /// Sets the demand-propagation law for pipeline planning.
+    fn demand_law(mut self, law: BuiltinDemandLaw) -> Self {
+        self.demand_law = law;
+        self
+    }
+
+    /// Sets the streaming executor variant.
+    fn executor(mut self, ex: BuiltinPipelineExecutor) -> Self {
+        self.executor = Some(ex);
+        self
+    }
+
+    /// Sets the materialization policy.
+    fn materialization(mut self, m: BuiltinPipelineMaterialization) -> Self {
+        self.materialization = m;
+        self
+    }
+
+    /// Sets the cardinality/cost pipeline shape annotation.
+    fn pipeline_shape(mut self, s: BuiltinPipelineShape) -> Self {
+        self.pipeline_shape = Some(s);
+        self
+    }
+
+    /// Sets the ordering-effect annotation.
+    fn order_effect(mut self, o: BuiltinPipelineOrderEffect) -> Self {
+        self.order_effect = Some(o);
+        self
+    }
+
+    /// Sets the physical stage lowering strategy.
+    fn lowering(mut self, l: BuiltinPipelineLowering) -> Self {
+        self.lowering = Some(l);
+        self
+    }
+
+    /// Marks this builtin as element-wise vectorisable.
+    fn element(mut self) -> Self {
+        self.is_element = true;
+        self
+    }
 }
 
 impl BuiltinMethod {
@@ -1417,11 +1514,35 @@ impl BuiltinMethod {
         use BuiltinCategory as Cat;
 
         let spec = match self {
-            Self::Filter | Self::Find | Self::FindAll => {
+            Self::Filter => {
                 BuiltinSpec::new(Cat::StreamingFilter, Card::Filtering)
                     .view_stage(BuiltinViewStage::Filter)
                     .columnar_stage(BuiltinColumnarStage::Filter)
                     .cost(10.0)
+                    .demand_law(BuiltinDemandLaw::FilterLike)
+                    .executor(BuiltinPipelineExecutor::RowFilter)
+                    .order_effect(BuiltinPipelineOrderEffect::PredicatePrefix)
+                    .lowering(BuiltinPipelineLowering::ExprStage(BuiltinExprStage::Filter))
+            }
+            Self::Find => {
+                BuiltinSpec::new(Cat::StreamingFilter, Card::Filtering)
+                    .view_stage(BuiltinViewStage::Filter)
+                    .columnar_stage(BuiltinColumnarStage::Filter)
+                    .cost(10.0)
+                    .demand_law(BuiltinDemandLaw::FilterLike)
+                    .executor(BuiltinPipelineExecutor::RowFilter)
+                    .order_effect(BuiltinPipelineOrderEffect::PredicatePrefix)
+                    .lowering(BuiltinPipelineLowering::ExprStage(BuiltinExprStage::Filter))
+            }
+            Self::FindAll => {
+                BuiltinSpec::new(Cat::StreamingFilter, Card::Filtering)
+                    .view_stage(BuiltinViewStage::Filter)
+                    .columnar_stage(BuiltinColumnarStage::Filter)
+                    .cost(10.0)
+                    .demand_law(BuiltinDemandLaw::FilterLike)
+                    .executor(BuiltinPipelineExecutor::RowFilter)
+                    .order_effect(BuiltinPipelineOrderEffect::PredicatePrefix)
+                    .lowering(BuiltinPipelineLowering::ExprStage(BuiltinExprStage::Filter))
             }
             Self::Compact | Self::Remove => {
                 BuiltinSpec::new(Cat::StreamingFilter, Card::Filtering).cost(10.0)
@@ -1430,46 +1551,111 @@ impl BuiltinMethod {
                 .indexed()
                 .view_stage(BuiltinViewStage::Map)
                 .columnar_stage(BuiltinColumnarStage::Map)
-                .cost(10.0),
-            Self::Enumerate | Self::Pairwise => {
+                .cost(10.0)
+                .demand_law(BuiltinDemandLaw::MapLike)
+                .executor(BuiltinPipelineExecutor::RowMap)
+                .order_effect(BuiltinPipelineOrderEffect::Preserves)
+                .lowering(BuiltinPipelineLowering::ExprStage(BuiltinExprStage::Map))
+                .element(),
+            Self::Enumerate => {
                 BuiltinSpec::new(Cat::StreamingOneToOne, Card::OneToOne)
                     .indexed()
                     .cost(10.0)
+                    .element()
+            }
+            Self::Pairwise => {
+                BuiltinSpec::new(Cat::StreamingOneToOne, Card::OneToOne)
+                    .indexed()
+                    .cost(10.0)
+                    .element()
             }
             Self::FlatMap => BuiltinSpec::new(Cat::StreamingExpand, Card::Expanding)
                 .view_stage(BuiltinViewStage::FlatMap)
                 .columnar_stage(BuiltinColumnarStage::FlatMap)
-                .cost(10.0),
+                .cost(10.0)
+                .demand_law(BuiltinDemandLaw::FlatMapLike)
+                .executor(BuiltinPipelineExecutor::RowFlatMap)
+                .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
+                .lowering(BuiltinPipelineLowering::ExprStage(BuiltinExprStage::FlatMap)),
             Self::Flatten | Self::Explode => {
                 BuiltinSpec::new(Cat::StreamingExpand, Card::Expanding).cost(10.0)
             }
-            Self::Split => BuiltinSpec::new(Cat::StreamingExpand, Card::Expanding).cost(10.0),
+            Self::Split => BuiltinSpec::new(Cat::StreamingExpand, Card::Expanding)
+                .cost(10.0)
+                .executor(BuiltinPipelineExecutor::ExpandingBuiltin)
+                .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
+                .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::Expanding, true, 2.0, 1.0))
+                .lowering(BuiltinPipelineLowering::StringStage(BuiltinStringStage::Split)),
             Self::Lines | Self::Words | Self::Chars | Self::CharsOf | Self::Bytes => {
-                BuiltinSpec::new(Cat::StreamingExpand, Card::Expanding).cost(10.0)
+                BuiltinSpec::new(Cat::StreamingExpand, Card::Expanding)
+                    .cost(10.0)
+                    .element()
             }
             Self::TakeWhile => BuiltinSpec::new(Cat::StreamingFilter, Card::Filtering)
                 .view_stage(BuiltinViewStage::TakeWhile)
-                .cost(10.0),
+                .cost(10.0)
+                .demand_law(BuiltinDemandLaw::TakeWhile)
+                .executor(BuiltinPipelineExecutor::PrefixWhile { take: true })
+                .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::Filtering, true, 10.0, 0.5))
+                .order_effect(BuiltinPipelineOrderEffect::PredicatePrefix)
+                .lowering(BuiltinPipelineLowering::ExprStage(BuiltinExprStage::TakeWhile)),
             Self::DropWhile => BuiltinSpec::new(Cat::StreamingFilter, Card::Filtering)
                 .view_stage(BuiltinViewStage::DropWhile)
-                .cost(10.0),
-            Self::FindFirst | Self::FindOne => {
-                BuiltinSpec::new(Cat::StreamingFilter, Card::Filtering).cost(10.0)
+                .cost(10.0)
+                .executor(BuiltinPipelineExecutor::PrefixWhile { take: false })
+                .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
+                .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::Filtering, true, 10.0, 0.5))
+                .order_effect(BuiltinPipelineOrderEffect::Blocks)
+                .lowering(BuiltinPipelineLowering::ExprStage(BuiltinExprStage::DropWhile)),
+            Self::FindFirst => {
+                BuiltinSpec::new(Cat::StreamingFilter, Card::Filtering)
+                    .cost(10.0)
+                    .demand_law(BuiltinDemandLaw::First)
+                    .lowering(BuiltinPipelineLowering::TerminalExprStage {
+                        stage: BuiltinExprStage::Filter,
+                        terminal: BuiltinMethod::First,
+                    })
+            }
+            Self::FindOne => {
+                BuiltinSpec::new(Cat::StreamingFilter, Card::Filtering)
+                    .cost(10.0)
+                    .lowering(BuiltinPipelineLowering::TerminalExprStage {
+                        stage: BuiltinExprStage::Filter,
+                        terminal: BuiltinMethod::First,
+                    })
             }
             Self::Take => BuiltinSpec::new(Cat::Positional, Card::Bounded)
                 .view_native()
                 .view_stage(BuiltinViewStage::Take)
-                .stage_merge(BuiltinStageMerge::UsizeMin),
+                .stage_merge(BuiltinStageMerge::UsizeMin)
+                .demand_law(BuiltinDemandLaw::Take)
+                .executor(BuiltinPipelineExecutor::Position { take: true })
+                .order_effect(BuiltinPipelineOrderEffect::Preserves)
+                .lowering(BuiltinPipelineLowering::UsizeStage {
+                    stage: BuiltinUsizeStage::Take,
+                    min: 0,
+                }),
             Self::Skip => BuiltinSpec::new(Cat::Positional, Card::Bounded)
                 .view_native()
                 .view_stage(BuiltinViewStage::Skip)
-                .stage_merge(BuiltinStageMerge::UsizeSaturatingAdd),
+                .stage_merge(BuiltinStageMerge::UsizeSaturatingAdd)
+                .demand_law(BuiltinDemandLaw::Skip)
+                .executor(BuiltinPipelineExecutor::Position { take: false })
+                .order_effect(BuiltinPipelineOrderEffect::Preserves)
+                .lowering(BuiltinPipelineLowering::UsizeStage {
+                    stage: BuiltinUsizeStage::Skip,
+                    min: 0,
+                }),
             Self::First => BuiltinSpec::new(Cat::Positional, Card::Bounded)
                 .view_native()
-                .select_one_sink(BuiltinSelectionPosition::First),
+                .select_one_sink(BuiltinSelectionPosition::First)
+                .demand_law(BuiltinDemandLaw::First)
+                .lowering(BuiltinPipelineLowering::TerminalSink),
             Self::Last => BuiltinSpec::new(Cat::Positional, Card::Bounded)
                 .view_native()
-                .select_one_sink(BuiltinSelectionPosition::Last),
+                .select_one_sink(BuiltinSelectionPosition::Last)
+                .demand_law(BuiltinDemandLaw::Last)
+                .lowering(BuiltinPipelineLowering::TerminalSink),
             Self::Nth | Self::Collect => {
                 BuiltinSpec::new(Cat::Positional, Card::Bounded).view_native()
             }
@@ -1480,37 +1666,91 @@ impl BuiltinMethod {
             Self::Sum => BuiltinSpec::new(Cat::Reducer, Card::Reducing)
                 .view_native()
                 .numeric_sink(BuiltinNumericReducer::Sum)
-                .cost(10.0),
+                .cost(10.0)
+                .demand_law(BuiltinDemandLaw::NumericReducer)
+                .lowering(BuiltinPipelineLowering::TerminalSink),
             Self::Avg => BuiltinSpec::new(Cat::Reducer, Card::Reducing)
                 .view_native()
                 .numeric_sink(BuiltinNumericReducer::Avg)
-                .cost(10.0),
+                .cost(10.0)
+                .demand_law(BuiltinDemandLaw::NumericReducer)
+                .lowering(BuiltinPipelineLowering::TerminalSink),
             Self::Min => BuiltinSpec::new(Cat::Reducer, Card::Reducing)
                 .view_native()
                 .numeric_sink(BuiltinNumericReducer::Min)
-                .cost(10.0),
+                .cost(10.0)
+                .demand_law(BuiltinDemandLaw::NumericReducer)
+                .lowering(BuiltinPipelineLowering::TerminalSink),
             Self::Max => BuiltinSpec::new(Cat::Reducer, Card::Reducing)
                 .view_native()
                 .numeric_sink(BuiltinNumericReducer::Max)
-                .cost(10.0),
+                .cost(10.0)
+                .demand_law(BuiltinDemandLaw::NumericReducer)
+                .lowering(BuiltinPipelineLowering::TerminalSink),
             Self::Count => BuiltinSpec::new(Cat::Reducer, Card::Reducing)
                 .view_native()
                 .count_sink()
-                .cost(10.0),
+                .cost(10.0)
+                .demand_law(BuiltinDemandLaw::Count)
+                .lowering(BuiltinPipelineLowering::TerminalSink),
             Self::ApproxCountDistinct => BuiltinSpec::new(Cat::Reducer, Card::Reducing)
                 .view_native()
                 .approx_distinct_sink()
-                .cost(10.0),
-            Self::Any
-            | Self::All
-            | Self::FindIndex
-            | Self::IndicesWhere
-            | Self::MaxBy
-            | Self::MinBy => {
-                let spec = BuiltinSpec::new(Cat::Reducer, Card::Reducing)
+                .cost(10.0)
+                .demand_law(BuiltinDemandLaw::KeyedReducer)
+                .lowering(BuiltinPipelineLowering::TerminalSink),
+            Self::Any | Self::All => {
+                BuiltinSpec::new(Cat::Reducer, Card::Reducing)
                     .view_native()
-                    .cost(10.0);
-                spec
+                    .cost(10.0)
+            }
+            Self::FindIndex => {
+                BuiltinSpec::new(Cat::Reducer, Card::Reducing)
+                    .view_native()
+                    .cost(10.0)
+                    .executor(BuiltinPipelineExecutor::FindIndex)
+                    .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
+                    .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 1.0, 1.0))
+                    .lowering(BuiltinPipelineLowering::TerminalExprStage {
+                        stage: BuiltinExprStage::FindIndex,
+                        terminal: BuiltinMethod::First,
+                    })
+            }
+            Self::IndicesWhere => {
+                BuiltinSpec::new(Cat::Reducer, Card::Reducing)
+                    .view_native()
+                    .cost(10.0)
+                    .executor(BuiltinPipelineExecutor::IndicesWhere)
+                    .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
+                    .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 1.0, 1.0))
+                    .lowering(BuiltinPipelineLowering::TerminalExprStage {
+                        stage: BuiltinExprStage::IndicesWhere,
+                        terminal: BuiltinMethod::First,
+                    })
+            }
+            Self::MaxBy => {
+                BuiltinSpec::new(Cat::Reducer, Card::Reducing)
+                    .view_native()
+                    .cost(10.0)
+                    .executor(BuiltinPipelineExecutor::ArgExtreme { max: true })
+                    .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
+                    .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 1.0, 1.0))
+                    .lowering(BuiltinPipelineLowering::TerminalExprStage {
+                        stage: BuiltinExprStage::MaxBy,
+                        terminal: BuiltinMethod::First,
+                    })
+            }
+            Self::MinBy => {
+                BuiltinSpec::new(Cat::Reducer, Card::Reducing)
+                    .view_native()
+                    .cost(10.0)
+                    .executor(BuiltinPipelineExecutor::ArgExtreme { max: false })
+                    .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
+                    .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 1.0, 1.0))
+                    .lowering(BuiltinPipelineLowering::TerminalExprStage {
+                        stage: BuiltinExprStage::MinBy,
+                        terminal: BuiltinMethod::First,
+                    })
             }
             Self::Sort
             | Self::GroupShape
@@ -1524,8 +1764,27 @@ impl BuiltinMethod {
             | Self::Accumulate => {
                 let spec = BuiltinSpec::new(Cat::Barrier, Card::Barrier).cost(20.0);
                 match self {
-                    Self::Sort | Self::Unique | Self::UniqueBy => spec,
-                    Self::Chunk | Self::Window => spec,
+                    Self::Sort => spec
+                        .demand_law(BuiltinDemandLaw::OrderBarrier)
+                        .executor(BuiltinPipelineExecutor::Sort)
+                        .materialization(BuiltinPipelineMaterialization::ComposedBarrier)
+                        .lowering(BuiltinPipelineLowering::Sort),
+                    Self::Window => spec
+                        .executor(BuiltinPipelineExecutor::Window)
+                        .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
+                        .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::Barrier, true, 2.0, 1.0))
+                        .lowering(BuiltinPipelineLowering::UsizeStage {
+                            stage: BuiltinUsizeStage::Window,
+                            min: 1,
+                        }),
+                    Self::Chunk => spec
+                        .executor(BuiltinPipelineExecutor::Chunk)
+                        .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
+                        .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::Barrier, true, 2.0, 1.0))
+                        .lowering(BuiltinPipelineLowering::UsizeStage {
+                            stage: BuiltinUsizeStage::Chunk,
+                            min: 1,
+                        }),
                     _ => spec,
                 }
             }
@@ -1533,22 +1792,63 @@ impl BuiltinMethod {
                 .view_stage(BuiltinViewStage::KeyedReduce)
                 .keyed_reducer(BuiltinKeyedReducer::Group)
                 .columnar_stage(BuiltinColumnarStage::GroupBy)
-                .cost(20.0),
+                .cost(20.0)
+                .demand_law(BuiltinDemandLaw::KeyedReducer)
+                .executor(BuiltinPipelineExecutor::GroupBy)
+                .materialization(BuiltinPipelineMaterialization::ComposedBarrier)
+                .lowering(BuiltinPipelineLowering::ExprStage(BuiltinExprStage::GroupBy)),
             Self::CountBy => BuiltinSpec::new(Cat::Reducer, Card::Reducing)
                 .view_stage(BuiltinViewStage::KeyedReduce)
                 .keyed_reducer(BuiltinKeyedReducer::Count)
-                .cost(10.0),
+                .cost(10.0)
+                .demand_law(BuiltinDemandLaw::KeyedReducer)
+                .executor(BuiltinPipelineExecutor::CountBy)
+                .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 1.0, 1.0))
+                .lowering(BuiltinPipelineLowering::TerminalExprStage {
+                    stage: BuiltinExprStage::CountBy,
+                    terminal: BuiltinMethod::First,
+                }),
             Self::IndexBy => BuiltinSpec::new(Cat::Reducer, Card::Reducing)
                 .view_stage(BuiltinViewStage::KeyedReduce)
                 .keyed_reducer(BuiltinKeyedReducer::Index)
-                .cost(10.0),
-            Self::Unique | Self::UniqueBy => {
+                .cost(10.0)
+                .demand_law(BuiltinDemandLaw::KeyedReducer)
+                .executor(BuiltinPipelineExecutor::IndexBy)
+                .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 1.0, 1.0))
+                .lowering(BuiltinPipelineLowering::TerminalExprStage {
+                    stage: BuiltinExprStage::IndexBy,
+                    terminal: BuiltinMethod::First,
+                }),
+            Self::Unique => {
                 BuiltinSpec::new(Cat::StreamingFilter, Card::Filtering)
                     .view_stage(BuiltinViewStage::Distinct)
                     .cost(10.0)
+                    .demand_law(BuiltinDemandLaw::UniqueLike)
+                    .executor(BuiltinPipelineExecutor::UniqueBy)
+                    .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::Filtering, true, 10.0, 1.0))
+                    .order_effect(BuiltinPipelineOrderEffect::Preserves)
+                    .lowering(BuiltinPipelineLowering::NullaryStage(BuiltinNullaryStage::Unique))
             }
-            Self::Reverse
-            | Self::Append
+            Self::UniqueBy => {
+                BuiltinSpec::new(Cat::StreamingFilter, Card::Filtering)
+                    .view_stage(BuiltinViewStage::Distinct)
+                    .cost(10.0)
+                    .demand_law(BuiltinDemandLaw::UniqueLike)
+                    .executor(BuiltinPipelineExecutor::UniqueBy)
+                    .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::Filtering, true, 10.0, 1.0))
+                    .order_effect(BuiltinPipelineOrderEffect::Preserves)
+                    .lowering(BuiltinPipelineLowering::ExprStage(BuiltinExprStage::UniqueBy))
+            }
+            Self::Reverse => {
+                BuiltinSpec::new(Cat::Barrier, Card::Barrier)
+                    .cost(10.0)
+                    .cancellation(BuiltinCancellation::SelfInverse(BuiltinCancelGroup::Reverse))
+                    .demand_law(BuiltinDemandLaw::OrderBarrier)
+                    .executor(BuiltinPipelineExecutor::Reverse)
+                    .materialization(BuiltinPipelineMaterialization::ComposedBarrier)
+                    .lowering(BuiltinPipelineLowering::NullaryStage(BuiltinNullaryStage::Reverse))
+            }
+            Self::Append
             | Self::Prepend
             | Self::Diff
             | Self::Intersect
@@ -1558,17 +1858,11 @@ impl BuiltinMethod {
             | Self::ZipLongest
             | Self::Fanout
             | Self::ZipShape => {
-                let spec = BuiltinSpec::new(Cat::Barrier, Card::Barrier).cost(10.0);
-                match self {
-                    Self::Reverse => spec.cancellation(BuiltinCancellation::SelfInverse(
-                        BuiltinCancelGroup::Reverse,
-                    )),
-                    _ => spec,
-                }
+                BuiltinSpec::new(Cat::Barrier, Card::Barrier).cost(10.0)
             }
-            Self::Keys | Self::Values | Self::Entries => {
-                BuiltinSpec::new(Cat::Object, Card::OneToOne)
-            }
+            Self::Keys => BuiltinSpec::new(Cat::Object, Card::OneToOne).element(),
+            Self::Values => BuiltinSpec::new(Cat::Object, Card::OneToOne).element(),
+            Self::Entries => BuiltinSpec::new(Cat::Object, Card::OneToOne).element(),
             Self::ToPairs
             | Self::FromPairs
             | Self::Invert
@@ -1580,11 +1874,42 @@ impl BuiltinMethod {
             | Self::Rename
             | Self::Pivot
             | Self::Implode => BuiltinSpec::new(Cat::Object, Card::OneToOne),
-            Self::TransformKeys | Self::TransformValues | Self::FilterKeys | Self::FilterValues => {
+            Self::TransformKeys => {
                 BuiltinSpec::new(Cat::Object, Card::OneToOne)
+                    .executor(BuiltinPipelineExecutor::ObjectLambda)
+                    .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 1.0, 1.0))
+                    .order_effect(BuiltinPipelineOrderEffect::Preserves)
+                    .lowering(BuiltinPipelineLowering::ExprStage(BuiltinExprStage::TransformKeys))
             }
-            Self::GetPath | Self::DelPath | Self::HasPath => {
-                BuiltinSpec::new(Cat::Path, Card::OneToOne).indexed()
+            Self::TransformValues => {
+                BuiltinSpec::new(Cat::Object, Card::OneToOne)
+                    .executor(BuiltinPipelineExecutor::ObjectLambda)
+                    .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 1.0, 1.0))
+                    .order_effect(BuiltinPipelineOrderEffect::Preserves)
+                    .lowering(BuiltinPipelineLowering::ExprStage(BuiltinExprStage::TransformValues))
+            }
+            Self::FilterKeys => {
+                BuiltinSpec::new(Cat::Object, Card::OneToOne)
+                    .executor(BuiltinPipelineExecutor::ObjectLambda)
+                    .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 1.0, 1.0))
+                    .order_effect(BuiltinPipelineOrderEffect::Preserves)
+                    .lowering(BuiltinPipelineLowering::ExprStage(BuiltinExprStage::FilterKeys))
+            }
+            Self::FilterValues => {
+                BuiltinSpec::new(Cat::Object, Card::OneToOne)
+                    .executor(BuiltinPipelineExecutor::ObjectLambda)
+                    .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 1.0, 1.0))
+                    .order_effect(BuiltinPipelineOrderEffect::Preserves)
+                    .lowering(BuiltinPipelineLowering::ExprStage(BuiltinExprStage::FilterValues))
+            }
+            Self::GetPath => {
+                BuiltinSpec::new(Cat::Path, Card::OneToOne).indexed().element()
+            }
+            Self::DelPath => {
+                BuiltinSpec::new(Cat::Path, Card::OneToOne).indexed().element()
+            }
+            Self::HasPath => {
+                BuiltinSpec::new(Cat::Path, Card::OneToOne).indexed().element()
             }
             Self::SetPath | Self::DelPaths | Self::FlattenKeys | Self::UnflattenKeys => {
                 BuiltinSpec::new(Cat::Path, Card::OneToOne).indexed()
@@ -1605,27 +1930,334 @@ impl BuiltinMethod {
                 .indexed()
                 .cost(20.0),
             Self::EquiJoin => BuiltinSpec::new(Cat::Relational, Card::Barrier).cost(20.0),
-            Self::Set => BuiltinSpec::new(Cat::Mutation, Card::OneToOne).indexed(),
+            Self::Set => BuiltinSpec::new(Cat::Mutation, Card::OneToOne).indexed().element(),
             Self::Update => BuiltinSpec::new(Cat::Mutation, Card::OneToOne).indexed(),
-            Self::Lag
-            | Self::Lead
-            | Self::DiffWindow
-            | Self::PctChange
-            | Self::CumMax
-            | Self::CumMin
-            | Self::Zscore => BuiltinSpec::new(Cat::StreamingOneToOne, Card::OneToOne)
+            Self::Lag => BuiltinSpec::new(Cat::StreamingOneToOne, Card::OneToOne)
                 .indexed()
-                .cost(10.0),
+                .cost(10.0)
+                .element(),
+            Self::Lead => BuiltinSpec::new(Cat::StreamingOneToOne, Card::OneToOne)
+                .indexed()
+                .cost(10.0)
+                .element(),
+            Self::DiffWindow => BuiltinSpec::new(Cat::StreamingOneToOne, Card::OneToOne)
+                .indexed()
+                .cost(10.0)
+                .element(),
+            Self::PctChange => BuiltinSpec::new(Cat::StreamingOneToOne, Card::OneToOne)
+                .indexed()
+                .cost(10.0)
+                .element(),
+            Self::CumMax => BuiltinSpec::new(Cat::StreamingOneToOne, Card::OneToOne)
+                .indexed()
+                .cost(10.0)
+                .element(),
+            Self::CumMin => BuiltinSpec::new(Cat::StreamingOneToOne, Card::OneToOne)
+                .indexed()
+                .cost(10.0)
+                .element(),
+            Self::Zscore => BuiltinSpec::new(Cat::StreamingOneToOne, Card::OneToOne)
+                .indexed()
+                .cost(10.0)
+                .element(),
+            Self::Or => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .element(),
+            Self::Has => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .element(),
+            Self::Ceil => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .view_scalar()
+                .element(),
+            Self::Floor => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .view_scalar()
+                .element(),
+            Self::Round => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .view_scalar()
+                .element(),
+            Self::Abs => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .view_scalar()
+                .element(),
+            Self::Upper => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .view_scalar()
+                .element(),
+            Self::Lower => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .view_scalar()
+                .element(),
+            Self::Capitalize => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .element(),
+            Self::TitleCase => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .element(),
+            Self::Trim => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .view_scalar()
+                .element(),
+            Self::TrimLeft => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .view_scalar()
+                .element(),
+            Self::TrimRight => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .view_scalar()
+                .element(),
+            Self::SnakeCase => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .element(),
+            Self::KebabCase => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .element(),
+            Self::CamelCase => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .element(),
+            Self::PascalCase => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .element(),
+            Self::ReverseStr => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .element(),
+            Self::IsBlank => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .view_scalar()
+                .element(),
+            Self::IsNumeric => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .view_scalar()
+                .element(),
+            Self::IsAlpha => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .view_scalar()
+                .element(),
+            Self::IsAscii => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .view_scalar()
+                .element(),
+            Self::ToNumber => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .view_scalar()
+                .element(),
+            Self::ToBool => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .view_scalar()
+                .element(),
+            Self::ParseInt => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .element(),
+            Self::ParseFloat => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .element(),
+            Self::ParseBool => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .element(),
+            Self::ToBase64 => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .element(),
+            Self::FromBase64 => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .element(),
+            Self::UrlEncode => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .element(),
+            Self::UrlDecode => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .element(),
+            Self::HtmlEscape => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .element(),
+            Self::HtmlUnescape => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .element(),
+            Self::Repeat => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .element(),
+            Self::PadLeft => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .element(),
+            Self::PadRight => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .element(),
+            Self::Center => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .element(),
+            Self::StartsWith => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .view_scalar()
+                .element(),
+            Self::EndsWith => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .view_scalar()
+                .element(),
+            Self::IndexOf => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .view_scalar()
+                .element(),
+            Self::LastIndexOf => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .view_scalar()
+                .element(),
+            Self::StripPrefix => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .element(),
+            Self::StripSuffix => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .element(),
+            Self::Matches => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .view_scalar()
+                .element(),
+            Self::Scan => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .element(),
+            Self::ReMatch => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .element(),
+            Self::ReMatchFirst => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .element(),
+            Self::ReMatchAll => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .element(),
+            Self::ReCaptures => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .element(),
+            Self::ReCapturesAll => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .element(),
+            Self::ReSplit => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .element(),
+            Self::ReReplace => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .element(),
+            Self::ReReplaceAll => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .element(),
+            Self::ContainsAny => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .element(),
+            Self::ContainsAll => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .element(),
+            Self::Schema => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .element(),
+            Self::ByteLen => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .view_scalar()
+                .element(),
             Self::Unknown => BuiltinSpec {
                 pure: false,
                 ..BuiltinSpec::new(Cat::Unknown, Card::OneToOne)
             },
             Self::Slice => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
                 .indexed()
-                .view_native(),
-            Self::Replace | Self::ReplaceAll => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .view_native()
+                .executor(BuiltinPipelineExecutor::ElementBuiltin)
+                .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 1.0, 1.0))
+                .order_effect(BuiltinPipelineOrderEffect::Preserves)
+                .lowering(BuiltinPipelineLowering::IntRangeStage(BuiltinIntRangeStage::Slice)),
+            Self::Replace => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
                 .indexed()
-                .view_native(),
+                .view_native()
+                .executor(BuiltinPipelineExecutor::ElementBuiltin)
+                .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 2.0, 1.0))
+                .order_effect(BuiltinPipelineOrderEffect::Preserves)
+                .lowering(BuiltinPipelineLowering::StringPairStage(
+                    BuiltinStringPairStage::Replace { all: false }
+                )),
+            Self::ReplaceAll => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .executor(BuiltinPipelineExecutor::ElementBuiltin)
+                .pipeline_shape(BuiltinPipelineShape::new(BuiltinCardinality::OneToOne, true, 2.0, 1.0))
+                .order_effect(BuiltinPipelineOrderEffect::Preserves)
+                .lowering(BuiltinPipelineLowering::StringPairStage(
+                    BuiltinStringPairStage::Replace { all: true }
+                )),
+            Self::Type => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .element(),
+            Self::ToString => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .element(),
+            Self::ToJson => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .element(),
+            Self::Indent => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .element(),
+            Self::Dedent => BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
+                .indexed()
+                .view_native()
+                .element(),
             _ => {
                 let spec = BuiltinSpec::new(Cat::Scalar, Card::OneToOne)
                     .indexed()
