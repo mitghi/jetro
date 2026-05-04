@@ -358,9 +358,7 @@ fn rewrite_step(p: &mut PipelineBody) -> bool {
     }
 
     for i in 0..p.stages.len().saturating_sub(1) {
-        if matches!(&p.stages[i], Stage::Map(_, _))
-            && matches!(&p.stages[i + 1], Stage::Take(_, _, _))
-        {
+        if matches!(&p.stages[i], Stage::Map(_, _)) && is_take_stage(&p.stages[i + 1]) {
             p.stages.swap(i, i + 1);
             p.stage_exprs.swap(i, i + 1);
             return true;
@@ -368,6 +366,16 @@ fn rewrite_step(p: &mut PipelineBody) -> bool {
     }
 
     false
+}
+
+fn is_take_stage(stage: &Stage) -> bool {
+    matches!(
+        stage,
+        Stage::UsizeBuiltin {
+            method: BuiltinMethod::Take,
+            ..
+        }
+    )
 }
 
 // Returns `Some(b)` when `prog` is a single `PushBool(b)` opcode; detects constant filter stages.

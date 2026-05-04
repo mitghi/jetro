@@ -76,21 +76,11 @@ pub(super) fn lower_method_from_registry(
             }
             let n = usize_arg_at_least(&args[0], min)?;
             match stage {
-                BuiltinUsizeStage::Take | BuiltinUsizeStage::Skip => {
-                    let spec = method.spec();
-                    let view_stage = spec.view_stage?;
-                    match stage {
-                        BuiltinUsizeStage::Take if view_stage == BuiltinViewStage::Take => {
-                            stages.push(Stage::Take(n, view_stage, spec.stage_merge?));
-                        }
-                        BuiltinUsizeStage::Skip if view_stage == BuiltinViewStage::Skip => {
-                            stages.push(Stage::Skip(n, view_stage, spec.stage_merge?));
-                        }
-                        _ => return None,
-                    }
-                }
-                BuiltinUsizeStage::Chunk | BuiltinUsizeStage::Window => {
-                    stages.push(Stage::UsizeBuiltin { method, value: n });
+                BuiltinUsizeStage::Take
+                | BuiltinUsizeStage::Skip
+                | BuiltinUsizeStage::Chunk
+                | BuiltinUsizeStage::Window => {
+                    stages.push(Stage::UsizeBuiltin { method, value: n })
                 }
             }
             stage_exprs.push(None);

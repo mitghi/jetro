@@ -13,7 +13,6 @@ use crate::builtins::BuiltinCall;
 use crate::chain_ir::PullDemand;
 use crate::value::Val;
 
-
 /// Per-element output of a `Stage::apply`. `Pass(Cow::Borrowed)` is the
 /// hot path for filter and field-read (zero clone); `Cow::Owned` for
 /// computed values; `Filtered` for dropped rows; `Many` for flat-map;
@@ -30,7 +29,6 @@ pub enum StageOutput<'a> {
     Done,
 }
 
-
 /// Per-element transformation. Implemented by every pipeline stage type;
 /// composed monoidally by `Composed<A, B>`.
 pub trait Stage {
@@ -38,7 +36,6 @@ pub trait Stage {
     /// `StageOutput` variant without consuming the input.
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a>;
 }
-
 
 impl<T: Stage + ?Sized> Stage for Box<T> {
     /// Delegate to the inner stage, allowing boxed trait objects to satisfy
@@ -48,7 +45,6 @@ impl<T: Stage + ?Sized> Stage for Box<T> {
         (**self).apply(x)
     }
 }
-
 
 /// Identity stage — pass every element through unchanged. Neutral element for
 /// `compose`, so the fold over an empty stage list is well-typed.
@@ -68,7 +64,6 @@ impl Stage for Identity {
         StageOutput::Pass(Cow::Borrowed(x))
     }
 }
-
 
 /// A pipeline stage backed by a statically-dispatched `BuiltinCall`. Wraps the
 /// call's `apply` return value into the `StageOutput` protocol.
@@ -95,7 +90,6 @@ impl Stage for BuiltinStage {
         }
     }
 }
-
 
 /// Monoidal pairing of two stages. `Composed<A, B>` applies `A` first, then
 /// feeds surviving elements into `B`, lifting ownership correctly across the
@@ -182,7 +176,6 @@ impl<A: Stage, B: Stage> Stage for Composed<A, B> {
     }
 }
 
-
 /// Accumulator over the elements that survive a pipeline stage chain.
 /// Analogous to a fold; `init` creates the zero, `fold` updates it per element,
 /// and `finalise` converts it to the output `Val`.
@@ -202,13 +195,11 @@ pub trait Sink {
     fn finalise(acc: Self::Acc) -> Val;
 }
 
-
 /// Run `stages` over every element of `arr`, collecting results with sink `S`,
 /// processing all rows (`PullDemand::All`).
 pub fn run_pipeline<S: Sink>(arr: &[Val], stages: &dyn Stage) -> Val {
     run_pipeline_with_demand::<S>(arr, stages, PullDemand::All)
 }
-
 
 /// Run `stages` over `arr` with a `PullDemand` hint that lets callers cap
 /// how many input rows are consumed or how many outputs are emitted.
@@ -284,7 +275,6 @@ where
     }
     S::finalise(acc)
 }
-
 
 /// Sink that counts every passing element and returns `Val::Int(n)`.
 pub struct CountSink;
@@ -512,7 +502,6 @@ impl Sink for CollectSink {
     }
 }
 
-
 /// Shared VM + environment context threaded through generic pipeline stages
 /// that need to re-enter the evaluator (e.g. `GenericFilter`, `GenericMap`).
 pub struct VmCtx {
@@ -521,7 +510,6 @@ pub struct VmCtx {
     /// The evaluation environment (variables, current value) for sub-program execution.
     pub env: crate::context::Env,
 }
-
 
 /// A pipeline stage that evaluates a compiled boolean sub-program against each
 /// element and passes it through only when the result is truthy.
@@ -552,7 +540,6 @@ impl Stage for GenericFilter {
     }
 }
 
-
 /// A pipeline stage that maps each element through a compiled expression,
 /// producing a new owned `Val` per row.
 pub struct GenericMap {
@@ -577,7 +564,6 @@ impl Stage for GenericMap {
         }
     }
 }
-
 
 /// A pipeline stage that maps each element through a compiled expression and
 /// then flattens the resulting array into individual rows.
@@ -611,7 +597,6 @@ impl Stage for GenericFlatMap {
     }
 }
 
-
 /// A pipeline stage that keeps only object elements whose named field equals a
 /// compile-time literal value; avoids a VM round-trip for simple equality predicates.
 pub struct FilterFieldEqLit {
@@ -635,7 +620,6 @@ impl Stage for FilterFieldEqLit {
     }
 }
 
-
 /// A pipeline stage that extracts a single named field from each object element,
 /// discarding elements that are not objects or lack the field.
 pub struct MapField {
@@ -656,7 +640,6 @@ impl Stage for MapField {
     }
 }
 
-
 /// A pipeline stage that extracts a named field from each object and expands it
 /// into individual rows when the field value is itself an array.
 pub struct FlatMapField {
@@ -676,7 +659,6 @@ impl Stage for FlatMapField {
         StageOutput::Filtered
     }
 }
-
 
 /// A pipeline stage that follows a sequence of field keys through nested objects
 /// and then flattens the final value into individual rows.
@@ -702,7 +684,6 @@ impl Stage for FlatMapFieldChain {
         flatten_iterable(cur)
     }
 }
-
 
 /// Expand an iterable `Val` into a `Many` output, borrowing the inner slice
 /// when possible to avoid cloning. Returns `Filtered` for non-iterable values.
@@ -747,7 +728,6 @@ fn many_from_owned_vals<'a>(items: Vec<Val>) -> StageOutput<'a> {
     }
 }
 
-
 /// A pipeline stage that traverses a fixed sequence of field keys through
 /// nested objects and returns the terminal value as a zero-copy borrow.
 pub struct MapFieldChain {
@@ -773,7 +753,6 @@ impl Stage for MapFieldChain {
     }
 }
 
-
 /// A pipeline stage that passes at most `remaining` elements, then signals
 /// `Done` to terminate the outer loop — enables fused `sort | take(k)`.
 pub struct Take {
@@ -793,7 +772,6 @@ impl Stage for Take {
     }
 }
 
-
 /// A pipeline stage that discards the first `remaining` elements, then passes
 /// every subsequent element through unchanged.
 pub struct Skip {
@@ -812,7 +790,6 @@ impl Stage for Skip {
         StageOutput::Pass(Cow::Borrowed(x))
     }
 }
-
 
 /// Describes how a barrier operation (`sort_by`, `unique_by`, `group_by`) should
 /// extract the comparison or grouping key from each element.
@@ -853,7 +830,6 @@ impl KeySource {
     }
 }
 
-
 /// Barrier operation: reverse the entire buffered row set in-place, returning
 /// the reversed vector.
 pub fn barrier_reverse(buf: Vec<Val>) -> Vec<Val> {
@@ -861,7 +837,6 @@ pub fn barrier_reverse(buf: Vec<Val>) -> Vec<Val> {
     buf.reverse();
     buf
 }
-
 
 /// Barrier operation: stable-sort the buffered rows by the key produced by
 /// `key`, using `cmp_val` for ordering.
@@ -871,13 +846,11 @@ pub fn barrier_sort(buf: Vec<Val>, key: &KeySource) -> Vec<Val> {
     indexed.into_iter().map(|(_, v)| v).collect()
 }
 
-
 /// Barrier operation: return the `k` smallest rows by `key` using a partial
 /// sort, cheaper than sorting the full buffer when `k << buf.len()`.
 pub fn barrier_top_k(buf: Vec<Val>, key: &KeySource, k: usize) -> Vec<Val> {
     barrier_top_or_bottom_k(buf, key, k, false)
 }
-
 
 /// Barrier operation: return the `k` largest rows by `key` using a partial
 /// sort, cheaper than sorting the full buffer when `k << buf.len()`.
@@ -897,7 +870,6 @@ fn barrier_top_or_bottom_k(buf: Vec<Val>, key: &KeySource, k: usize, largest: bo
         .unwrap_or_default()
 }
 
-
 /// Barrier operation: deduplicate rows, keeping the first occurrence of each
 /// unique key produced by `key`.
 pub fn barrier_unique_by(buf: Vec<Val>, key: &KeySource) -> Vec<Val> {
@@ -912,7 +884,6 @@ pub fn barrier_unique_by(buf: Vec<Val>, key: &KeySource) -> Vec<Val> {
     }
     out
 }
-
 
 /// Barrier operation: group rows by the string form of each row's key,
 /// returning a `Val::Obj` whose values are `Val::Arr` lists of grouped rows.
@@ -936,7 +907,6 @@ pub fn barrier_group_by(buf: Vec<Val>, key: &KeySource) -> Val {
     }
     Val::Obj(std::sync::Arc::new(m))
 }
-
 
 /// A `Val`-based hash wrapper used as the deduplication key inside `barrier_unique_by`.
 /// Stores the key in a canonical `KeyRepr` to enable `HashSet` membership tests.
@@ -994,7 +964,6 @@ impl<'a> std::fmt::Display for DisplayKey<'a> {
     }
 }
 
-
 /// Total order over `Val` used by all barrier sorts. `Null` sorts smallest;
 /// cross-type numeric comparisons promote integers to `f64`. Incomparable
 /// pairs (e.g. two objects) return `Equal` to preserve insertion order.
@@ -1017,7 +986,6 @@ pub(crate) fn cmp_val(a: &Val, b: &Val) -> std::cmp::Ordering {
     }
 }
 
-
 /// Structural equality over scalar `Val` variants used by `FilterFieldEqLit`.
 /// Cross-type numeric comparison (`Int` vs `Float`) is supported; compound
 /// types always return `false`.
@@ -1037,7 +1005,6 @@ fn vals_eq(a: &Val, b: &Val) -> bool {
         _ => false,
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -1507,37 +1474,52 @@ mod tests {
 
     #[test]
     fn step3d_phase4_merge_take_skip() {
-        use crate::builtins::{BuiltinStageMerge, BuiltinViewStage};
         use crate::pipeline::{plan, Sink, Stage};
         // take(5).take(3) → take(3)
         let p = plan(
             vec![
-                Stage::Take(5, BuiltinViewStage::Take, BuiltinStageMerge::UsizeMin),
-                Stage::Take(3, BuiltinViewStage::Take, BuiltinStageMerge::UsizeMin),
+                Stage::UsizeBuiltin {
+                    method: BuiltinMethod::Take,
+                    value: 5,
+                },
+                Stage::UsizeBuiltin {
+                    method: BuiltinMethod::Take,
+                    value: 3,
+                },
             ],
             Sink::Collect,
         );
         assert_eq!(p.stages.len(), 1);
-        assert!(matches!(p.stages[0], Stage::Take(3, _, _)));
+        assert!(matches!(
+            p.stages[0],
+            Stage::UsizeBuiltin {
+                method: BuiltinMethod::Take,
+                value: 3
+            }
+        ));
 
         // skip(2).skip(3) → skip(5)
         let p = plan(
             vec![
-                Stage::Skip(
-                    2,
-                    BuiltinViewStage::Skip,
-                    BuiltinStageMerge::UsizeSaturatingAdd,
-                ),
-                Stage::Skip(
-                    3,
-                    BuiltinViewStage::Skip,
-                    BuiltinStageMerge::UsizeSaturatingAdd,
-                ),
+                Stage::UsizeBuiltin {
+                    method: BuiltinMethod::Skip,
+                    value: 2,
+                },
+                Stage::UsizeBuiltin {
+                    method: BuiltinMethod::Skip,
+                    value: 3,
+                },
             ],
             Sink::Collect,
         );
         assert_eq!(p.stages.len(), 1);
-        assert!(matches!(p.stages[0], Stage::Skip(5, _, _)));
+        assert!(matches!(
+            p.stages[0],
+            Stage::UsizeBuiltin {
+                method: BuiltinMethod::Skip,
+                value: 5
+            }
+        ));
 
         // reverse().reverse() → empty
         let cancel = crate::builtins::BuiltinMethod::Reverse
@@ -1624,11 +1606,10 @@ mod tests {
         // Sort + Take(5) + Collect → SortTopK(5)
         let stages = vec![
             Stage::Sort(SortSpec::keyed(Arc::clone(&dummy_prog), false)),
-            Stage::Take(
-                5,
-                crate::builtins::BuiltinViewStage::Take,
-                crate::builtins::BuiltinStageMerge::UsizeMin,
-            ),
+            Stage::UsizeBuiltin {
+                method: BuiltinMethod::Take,
+                value: 5,
+            },
         ];
         let strats = compute_strategies(&stages, &Sink::Collect);
         assert!(matches!(strats[0], StageStrategy::SortTopK(5)));

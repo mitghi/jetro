@@ -12,6 +12,7 @@ use std::sync::Arc;
 use crate::analysis;
 use crate::ast::{ArrayElem, Expr, ObjField, Step};
 use crate::builtins::{BuiltinCall, BuiltinMethod};
+use crate::compiler::Compiler;
 use crate::parser;
 use crate::physical::{
     BackendPlan, ExecutionFacts, NodeId, PhysicalArrayElem, PhysicalChainStep, PhysicalNode,
@@ -20,7 +21,6 @@ use crate::physical::{
 use crate::pipeline::{Pipeline, Source};
 use crate::structural::{StructuralPathStep, StructuralPlan};
 use crate::value::Val;
-use crate::compiler::Compiler;
 
 /// Accumulates `PhysicalNode`s as the AST is lowered and tracks lexical state
 /// needed to distinguish let-bound locals from bare field identifiers.
@@ -773,14 +773,12 @@ fn plan_array_elem(builder: &mut PlanBuilder, elem: &ArrayElem) -> PhysicalArray
     }
 }
 
-
 /// Plans `expr` using the default (`Bytes`) context; exposed for tests only.
 #[inline]
 #[cfg(test)]
 pub fn plan_query(expr: &str) -> QueryPlan {
     plan_query_with_context(expr, PlanningContext::default())
 }
-
 
 /// Parses `expr`, walks the resulting AST through `PlanBuilder`, and returns a `QueryPlan`.
 ///
@@ -1143,7 +1141,10 @@ mod tests {
         ));
         assert!(matches!(
             body.stages[2],
-            crate::pipeline::Stage::Take(2, _, _)
+            crate::pipeline::Stage::UsizeBuiltin {
+                method: crate::builtins::BuiltinMethod::Take,
+                value: 2
+            }
         ));
     }
 

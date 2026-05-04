@@ -54,11 +54,23 @@ impl<'a> ComposedStageBuilder<'a> {
                     keys: Arc::clone(keys),
                 })
             }
-            (Stage::Take(n, _, _), _) => Box::new(cmp::Take {
-                remaining: Cell::new(*n),
+            (
+                Stage::UsizeBuiltin {
+                    method: crate::builtins::BuiltinMethod::Take,
+                    value,
+                },
+                _,
+            ) => Box::new(cmp::Take {
+                remaining: Cell::new(*value),
             }),
-            (Stage::Skip(n, _, _), _) => Box::new(cmp::Skip {
-                remaining: Cell::new(*n),
+            (
+                Stage::UsizeBuiltin {
+                    method: crate::builtins::BuiltinMethod::Skip,
+                    value,
+                },
+                _,
+            ) => Box::new(cmp::Skip {
+                remaining: Cell::new(*value),
             }),
             (Stage::Builtin(call), _) => Box::new(cmp::BuiltinStage::new(call.clone())),
             (Stage::Filter(p, _), _) => Box::new(cmp::GenericFilter {

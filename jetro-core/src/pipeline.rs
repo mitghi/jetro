@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use crate::ast::Expr;
 use crate::builtins::{
-    BuiltinCancellation, BuiltinMethod, BuiltinNumericReducer, BuiltinStageMerge, BuiltinViewStage,
+    BuiltinCancellation, BuiltinMethod, BuiltinNumericReducer, BuiltinViewStage,
 };
 use crate::context::{Env, EvalError};
 use crate::value::Val;
@@ -204,10 +204,6 @@ pub enum Stage {
 
     /// Evaluates the program for each element and concatenates the resulting arrays into the stream.
     FlatMap(Arc<crate::vm::Program>, BuiltinViewStage),
-    /// Passes at most `n` elements downstream, stopping the pull loop early.
-    Take(usize, BuiltinViewStage, BuiltinStageMerge),
-    /// Discards the first `n` elements before passing the rest downstream.
-    Skip(usize, BuiltinViewStage, BuiltinStageMerge),
     /// Reverses the element order; cancels with an adjacent `Reverse` during plan fusion.
     Reverse(BuiltinCancellation),
 
@@ -561,8 +557,20 @@ mod tests {
     fn lower_take_skip_sum() {
         let p = lower_query("$.xs.skip(2).take(5).sum()").unwrap();
         assert_eq!(p.stages.len(), 2);
-        assert!(matches!(p.stages[0], Stage::Skip(2, _, _)));
-        assert!(matches!(p.stages[1], Stage::Take(5, _, _)));
+        assert!(matches!(
+            p.stages[0],
+            Stage::UsizeBuiltin {
+                method: BuiltinMethod::Skip,
+                value: 2
+            }
+        ));
+        assert!(matches!(
+            p.stages[1],
+            Stage::UsizeBuiltin {
+                method: BuiltinMethod::Take,
+                value: 5
+            }
+        ));
         assert!(
             matches!(&p.sink, Sink::Reducer(spec) if spec.op == ReducerOp::Numeric(NumOp::Sum))
         );
@@ -831,14 +839,26 @@ mod tests {
     fn rewrite_skip_skip_merges() {
         let p = lower_query("$.xs.skip(2).skip(3).sum()").unwrap();
         assert_eq!(p.stages.len(), 1);
-        assert!(matches!(p.stages[0], Stage::Skip(5, _, _)));
+        assert!(matches!(
+            p.stages[0],
+            Stage::UsizeBuiltin {
+                method: BuiltinMethod::Skip,
+                value: 5
+            }
+        ));
     }
 
     #[test]
     fn rewrite_take_take_merges_min() {
         let p = lower_query("$.xs.take(10).take(3).sum()").unwrap();
         assert_eq!(p.stages.len(), 1);
-        assert!(matches!(p.stages[0], Stage::Take(3, _, _)));
+        assert!(matches!(
+            p.stages[0],
+            Stage::UsizeBuiltin {
+                method: BuiltinMethod::Take,
+                value: 3
+            }
+        ));
     }
 
     #[test]
@@ -974,7 +994,13 @@ mod tests {
     fn demand_optimizer_keeps_membership_work_for_numeric_sink() {
         let p = lower_query("$.orders.take(2).map(total).sum()").unwrap();
         assert_eq!(p.stages.len(), 1);
-        assert!(matches!(p.stages[0], Stage::Take(2, _, _)));
+        assert!(matches!(
+            p.stages[0],
+            Stage::UsizeBuiltin {
+                method: BuiltinMethod::Take,
+                value: 2
+            }
+        ));
         assert!(
             matches!(&p.sink, Sink::Reducer(spec) if spec.op == ReducerOp::Numeric(NumOp::Sum) && spec.projection.is_some())
         );

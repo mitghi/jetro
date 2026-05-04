@@ -291,8 +291,7 @@ mod tests {
 
     use crate::ast::BinOp;
     use crate::builtins::{
-        BuiltinMethod, BuiltinSelectionPosition, BuiltinSinkAccumulator, BuiltinStageMerge,
-        BuiltinViewStage,
+        BuiltinMethod, BuiltinSelectionPosition, BuiltinSinkAccumulator, BuiltinViewStage,
     };
     use crate::pipeline::{
         BodyKernel, NumOp, PipelineBody, ReducerOp, ReducerSpec, Sink, Stage, ViewInputMode,
@@ -340,14 +339,16 @@ mod tests {
         )
         .view_capability(6, Some(&BodyKernel::FieldRead(Arc::<str>::from("items"))))
         .unwrap();
-        let take = Stage::Take(2, BuiltinViewStage::Take, BuiltinStageMerge::UsizeMin)
-            .view_capability(7, None)
-            .unwrap();
-        let skip = Stage::Skip(
-            1,
-            BuiltinViewStage::Skip,
-            BuiltinStageMerge::UsizeSaturatingAdd,
-        )
+        let take = Stage::UsizeBuiltin {
+            method: BuiltinMethod::Take,
+            value: 2,
+        }
+        .view_capability(7, None)
+        .unwrap();
+        let skip = Stage::UsizeBuiltin {
+            method: BuiltinMethod::Skip,
+            value: 1,
+        }
         .view_capability(8, None)
         .unwrap();
 
@@ -444,11 +445,10 @@ mod tests {
                     Arc::new(crate::vm::Program::new(Vec::new(), "")),
                     BuiltinViewStage::Map,
                 ),
-                Stage::Take(
-                    2,
-                    crate::builtins::BuiltinViewStage::Take,
-                    crate::builtins::BuiltinStageMerge::UsizeMin,
-                ),
+                Stage::UsizeBuiltin {
+                    method: BuiltinMethod::Take,
+                    value: 2,
+                },
             ],
             stage_exprs: Vec::new(),
             sink: Sink::Reducer(ReducerSpec {

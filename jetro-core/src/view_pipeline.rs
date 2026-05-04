@@ -1046,11 +1046,10 @@ mod tests {
                     Arc::new(crate::vm::Program::new(Vec::new(), "")),
                     crate::builtins::BuiltinViewStage::Filter,
                 ),
-                Stage::Take(
-                    2,
-                    crate::builtins::BuiltinViewStage::Take,
-                    crate::builtins::BuiltinStageMerge::UsizeMin,
-                ),
+                Stage::UsizeBuiltin {
+                    method: crate::builtins::BuiltinMethod::Take,
+                    value: 2,
+                },
             ],
             stage_exprs: Vec::new(),
             sink: Sink::Collect,
@@ -1105,11 +1104,10 @@ mod tests {
                     Arc::new(crate::vm::Program::new(Vec::new(), "")),
                     crate::builtins::BuiltinViewStage::Filter,
                 ),
-                Stage::Take(
-                    1,
-                    crate::builtins::BuiltinViewStage::Take,
-                    crate::builtins::BuiltinStageMerge::UsizeMin,
-                ),
+                Stage::UsizeBuiltin {
+                    method: crate::builtins::BuiltinMethod::Take,
+                    value: 1,
+                },
             ],
             stage_exprs: Vec::new(),
             sink: Sink::Collect,
@@ -1167,11 +1165,10 @@ mod tests {
                     Arc::new(crate::vm::Program::new(Vec::new(), "")),
                     crate::builtins::BuiltinViewStage::Filter,
                 ),
-                Stage::Take(
-                    1,
-                    crate::builtins::BuiltinViewStage::Take,
-                    crate::builtins::BuiltinStageMerge::UsizeMin,
-                ),
+                Stage::UsizeBuiltin {
+                    method: crate::builtins::BuiltinMethod::Take,
+                    value: 1,
+                },
             ],
             stage_exprs: Vec::new(),
             sink: Sink::Collect,
@@ -1203,11 +1200,10 @@ mod tests {
                     Arc::new(crate::vm::Program::new(Vec::new(), "")),
                     crate::builtins::BuiltinViewStage::FlatMap,
                 ),
-                Stage::Take(
-                    2,
-                    crate::builtins::BuiltinViewStage::Take,
-                    crate::builtins::BuiltinStageMerge::UsizeMin,
-                ),
+                Stage::UsizeBuiltin {
+                    method: crate::builtins::BuiltinMethod::Take,
+                    value: 2,
+                },
             ],
             stage_exprs: Vec::new(),
             sink: Sink::Collect,

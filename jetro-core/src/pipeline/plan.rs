@@ -755,16 +755,6 @@ impl Stage {
         }
 
         match self {
-            Stage::Take(n, view_stage, _) => Some(
-                StageDescriptor::new(BuiltinMethod::Take)
-                    .usize_arg(*n)
-                    .with_view_stage(*view_stage),
-            ),
-            Stage::Skip(n, view_stage, _) => Some(
-                StageDescriptor::new(BuiltinMethod::Skip)
-                    .usize_arg(*n)
-                    .with_view_stage(*view_stage),
-            ),
             Stage::UniqueBy(Some(prog)) => {
                 Some(StageDescriptor::new(BuiltinMethod::UniqueBy).body(prog))
             }
@@ -1055,21 +1045,21 @@ impl Stage {
 
     fn usize_stage_merge_parts(&self) -> Option<UsizeStageMergeParts> {
         match self {
-            Stage::Take(value, stage, merge) | Stage::Skip(value, stage, merge) => {
-                Some(UsizeStageMergeParts {
-                    value: *value,
-                    stage: *stage,
-                    merge: *merge,
-                })
-            }
+            Stage::UsizeBuiltin { method, value } => Some(UsizeStageMergeParts {
+                value: *value,
+                stage: method.spec().view_stage?,
+                merge: method.spec().stage_merge?,
+            }),
             _ => None,
         }
     }
 
     fn with_usize_stage_value(&self, value: usize) -> Option<Self> {
         match self {
-            Stage::Take(_, stage, merge) => Some(Stage::Take(value, *stage, *merge)),
-            Stage::Skip(_, stage, merge) => Some(Stage::Skip(value, *stage, *merge)),
+            Stage::UsizeBuiltin { method, .. } => Some(Stage::UsizeBuiltin {
+                method: *method,
+                value,
+            }),
             _ => None,
         }
     }
