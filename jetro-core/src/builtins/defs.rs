@@ -1336,19 +1336,19 @@ impl Builtin for PctChange {
     fn spec() -> BuiltinSpec { streaming_one_to_one_element_spec() }
 }
 
-/// `cum_max()` — running maximum.
+/// `cummax()` — running maximum.
 pub(crate) struct CumMax;
 impl Builtin for CumMax {
     const METHOD: BuiltinMethod = BuiltinMethod::CumMax;
-    const NAME: &'static str = "cum_max";
+    const NAME: &'static str = "cummax";
     fn spec() -> BuiltinSpec { streaming_one_to_one_element_spec() }
 }
 
-/// `cum_min()` — running minimum.
+/// `cummin()` — running minimum.
 pub(crate) struct CumMin;
 impl Builtin for CumMin {
     const METHOD: BuiltinMethod = BuiltinMethod::CumMin;
-    const NAME: &'static str = "cum_min";
+    const NAME: &'static str = "cummin";
     fn spec() -> BuiltinSpec { streaming_one_to_one_element_spec() }
 }
 
@@ -1436,13 +1436,13 @@ scalar_native_element! {
     StripSuffix => StripSuffix, "strip_suffix";
     Scan => Scan, "scan";
     ReMatch => ReMatch, "re_match";
-    ReMatchFirst => ReMatchFirst, "re_match_first";
-    ReMatchAll => ReMatchAll, "re_match_all";
-    ReCaptures => ReCaptures, "re_captures";
-    ReCapturesAll => ReCapturesAll, "re_captures_all";
-    ReSplit => ReSplit, "re_split";
-    ReReplace => ReReplace, "re_replace";
-    ReReplaceAll => ReReplaceAll, "re_replace_all";
+    ReMatchFirst => ReMatchFirst, "match_first";
+    ReMatchAll => ReMatchAll, "match_all";
+    ReCaptures => ReCaptures, "captures";
+    ReCapturesAll => ReCapturesAll, "captures_all";
+    ReSplit => ReSplit, "split_re";
+    ReReplace => ReReplace, "replace_re";
+    ReReplaceAll => ReReplaceAll, "replace_all_re";
     ContainsAny => ContainsAny, "contains_any";
     ContainsAll => ContainsAll, "contains_all";
     Schema => Schema, "schema";
@@ -1540,10 +1540,11 @@ impl Builtin for ReplaceAll {
 }
 
 /// `unknown` — sentinel for unrecognised methods (impure).
+/// Canonical name uses angle brackets so it can never collide with user-callable names.
 pub(crate) struct Unknown;
 impl Builtin for Unknown {
     const METHOD: BuiltinMethod = BuiltinMethod::Unknown;
-    const NAME: &'static str = "unknown";
+    const NAME: &'static str = "<unknown>";
     fn spec() -> BuiltinSpec {
         BuiltinSpec {
             pure: false,
