@@ -225,7 +225,7 @@ pub(super) fn try_decode_map_body(arg: &crate::ast::Arg) -> Option<Plan> {
 /// Wraps `seed` in a single-element receiver pipeline backed by `plan` and runs it.
 pub(super) fn run_compiled_map(plan: &Plan, seed: Val) -> Result<Val, EvalError> {
     let synth = Pipeline {
-        strategy: super::select_strategy(&plan.stages, &plan.sink),
+        exec_path: super::select_exec_path(&plan.stages, &plan.sink),
         source: Source::Receiver(Val::arr(vec![seed])),
         stages: plan.stages.clone(),
         stage_exprs: Vec::new(),

@@ -15,7 +15,7 @@ use super::{
     normalize::normalize_symbolic, BodyKernel, Sink, Stage,
 };
 
-pub use super::ir::{Plan, Position, StageStrategy, Strategy};
+pub use super::ir::{PhysicalExecPath, Plan, Position, StageStrategy, Strategy};
 
 /// Test-only wrapper around `compute_strategies_with_kernels` that passes an empty kernel slice.
 #[cfg(test)]
@@ -406,4 +406,33 @@ pub fn select_strategy(stages: &[Stage], sink: &Sink) -> Strategy {
         return Strategy::EarlyExit;
     }
     Strategy::PullLoop
+}
+
+/// Selects the physical execution path for a pipeline at lower time, eliminating runtime
+/// fallthrough for paths that static analysis proves cannot fire.
+///
+/// Priority: Indexed > Columnar > Composed > Legacy.  Each variant is the first path that
+/// *might* fire; paths ranked above it are guaranteed not to apply for this pipeline shape.
+pub fn select_exec_path(stages: &[Stage], sink: &Sink) -> PhysicalExecPath {
+    // Indexed: all stages support position access and sink is positional.
+    if select_strategy(stages, sink) == Strategy::IndexedDispatch {
+        return PhysicalExecPath::Indexed;
+    }
+
+    // Columnar: at least one stage has a BuiltinColumnarStage variant, meaning an ObjVec /
+    // IntVec / StrVec / FloatVec fast path exists for it.
+    let columnar_eligible = stages.iter().any(|s| {
+        s.descriptor().is_some_and(|d| d.columnar_stage().is_some())
+    });
+    if columnar_eligible {
+        return PhysicalExecPath::Columnar;
+    }
+
+    // Composed: any non-empty stage list can be driven through the composed segment loop,
+    // provided the source resolves to an array at runtime.
+    if !stages.is_empty() {
+        return PhysicalExecPath::Composed;
+    }
+
+    PhysicalExecPath::Legacy
 }

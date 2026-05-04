@@ -60,10 +60,14 @@ pub use operator::{ReducerOp, ReducerSpec};
 pub use plan::compute_strategies;
 #[cfg(test)]
 pub use plan::plan;
-pub use ir::{Plan, Position, StageStrategy, Strategy};
+pub use ir::{PhysicalExecPath, Plan, Position, StageStrategy};
+#[cfg(test)]
+pub use ir::Strategy;
 pub use plan::{
-    compute_strategies_with_kernels, plan_with_exprs, plan_with_kernels, select_strategy,
+    compute_strategies_with_kernels, plan_with_exprs, plan_with_kernels, select_exec_path,
 };
+#[cfg(test)]
+pub use plan::select_strategy;
 pub(crate) use reducer::ReducerAccumulator;
 pub(crate) use sink_accumulator::SinkAccumulator;
 pub(crate) use stage_flow::{stage_executor, StageFlow};
@@ -361,9 +365,10 @@ pub struct Pipeline {
     /// Pre-classified kernels for sink sub-programs (predicate / projection inside a reducer).
     pub sink_kernels: Vec<BodyKernel>,
 
-    /// Pre-computed execution strategy; set once at lower time so `run_with_env` can
-    /// dispatch directly without re-walking stages on every call.
-    pub strategy: Strategy,
+    /// Physical execution path selected at lower time; tells `exec.rs` which specialised
+    /// backends to attempt before falling back to legacy, eliminating runtime fallthrough
+    /// for paths that static analysis proves cannot fire.
+    pub exec_path: PhysicalExecPath,
 }
 
 /// The source-independent half of a `Pipeline`; can be combined with any `Source` via
@@ -389,10 +394,10 @@ impl PipelineBody {
     /// directly without re-walking stages on every call.
     #[inline]
     pub fn with_source(self, source: Source) -> Pipeline {
-        let strategy = select_strategy(&self.stages, &self.sink);
+        let exec_path = select_exec_path(&self.stages, &self.sink);
         Pipeline {
             source,
-            strategy,
+            exec_path,
             stages: self.stages,
             stage_exprs: self.stage_exprs,
             sink: self.sink,

@@ -820,6 +820,23 @@ pub enum Strategy {
     PullLoop,
 }
 
+/// Physical execution path chosen once at lower time; replaces the runtime 4-way fallthrough
+/// in `exec.rs` with a static first-eligible-path dispatch.
+///
+/// Variants are ordered by priority: each skips all earlier paths that static analysis proved
+/// cannot fire for this pipeline shape. Legacy is always the last-resort fallback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhysicalExecPath {
+    /// Try indexed dispatch first; if it returns None, fall through to columnar → composed → legacy.
+    Indexed,
+    /// Skip indexed (it cannot apply); try columnar → composed → legacy.
+    Columnar,
+    /// Skip indexed and columnar (neither can apply); try composed → legacy.
+    Composed,
+    /// Skip all specialised paths; execute directly through the legacy interpreter.
+    Legacy,
+}
+
 /// An optimised stage/sink plan produced by `plan_with_exprs`, ready for execution or further
 /// wrapping into a `Pipeline`.
 #[derive(Debug, Clone)]

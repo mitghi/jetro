@@ -1,7 +1,7 @@
-//! Top-level pipeline execution dispatcher.
-//! `Pipeline::run` selects among the columnar, indexed, composed, and legacy execution paths
-//! based on pipeline shape and source representation.
-//! Each specialised path lives in its own sub-module; this file contains only routing logic.
+//! Physical execution dispatch — routes each pipeline to the right backend
+//! without runtime fallthrough. `exec_path` is computed once at lower time by
+//! `select_exec_path`; `run_with_env` does a single match and never re-examines
+//! the stage list.
 
 use crate::{
     context::{Env, EvalError},
@@ -12,7 +12,7 @@ use super::columnar;
 use super::composed_exec;
 use super::indexed_exec;
 use super::legacy_exec;
-use super::{Pipeline, PipelineData, Strategy};
+use super::{PhysicalExecPath, Pipeline, PipelineData};
 
 impl Pipeline {
     /// Executes the pipeline against `root` using a freshly constructed environment.
@@ -26,40 +26,45 @@ impl Pipeline {
         self.run_with_env(root, &env, cache)
     }
 
-    /// Dispatches to the appropriate execution path using the pre-computed `strategy`.
-    /// The indexed path is gated on `Strategy::IndexedDispatch`; columnar and composed
-    /// paths remain document-dependent and are tried in priority order when applicable.
+    /// Dispatches to the first applicable backend for this pipeline shape.
+    /// The path was classified at lower time; no stage-list re-inspection occurs here.
     pub fn run_with_env(
         &self,
         root: &Val,
         base_env: &Env,
         cache: Option<&dyn PipelineData>,
     ) -> Result<Val, EvalError> {
-        // 1. Indexed fast-path: only valid when strategy was pre-classified as IndexedDispatch.
-        if self.strategy == Strategy::IndexedDispatch {
-            if let Some(out) = indexed_exec::run(self, root, base_env) {
-                return out;
+        match self.exec_path {
+            PhysicalExecPath::Indexed => {
+                if let Some(out) = indexed_exec::run(self, root, base_env) {
+                    return out;
+                }
+                self.run_columnar_or_below(root, base_env, cache)
             }
+            PhysicalExecPath::Columnar => self.run_columnar_or_below(root, base_env, cache),
+            PhysicalExecPath::Composed => composed_exec::run(self, root, base_env)
+                .unwrap_or_else(|| legacy_exec::run(self, root, base_env)),
+            PhysicalExecPath::Legacy => legacy_exec::run(self, root, base_env),
         }
+    }
 
-        // 2. Columnar path using an externally supplied ObjVec promotion cache.
+    /// Tries the columnar paths then composed then legacy.
+    /// Shared by `Indexed` (after indexed misses) and `Columnar`.
+    fn run_columnar_or_below(
+        &self,
+        root: &Val,
+        base_env: &Env,
+        cache: Option<&dyn PipelineData>,
+    ) -> Result<Val, EvalError> {
         if let Some(out) = columnar::run_cached(self, root, cache) {
             return out;
         }
-
-        // 3. Columnar path without a cache (promotes in-place if the source qualifies).
         if cache.is_none() {
             if let Some(out) = columnar::run_uncached(self, root) {
                 return out;
             }
         }
-
-        // 4. Composed stage substrate; document-dependent (source must resolve to an array).
-        if let Some(out) = composed_exec::run(self, root, base_env) {
-            return out;
-        }
-
-        // 5. Legacy per-shape fallback — always produces a result.
-        legacy_exec::run(self, root, base_env)
+        composed_exec::run(self, root, base_env)
+            .unwrap_or_else(|| legacy_exec::run(self, root, base_env))
     }
 }
