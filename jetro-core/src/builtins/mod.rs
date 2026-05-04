@@ -1421,15 +1421,7 @@ impl BuiltinMethod {
         use BuiltinCategory as Cat;
 
         let spec = match self {
-            Self::Filter => {
-                BuiltinSpec::new(Cat::StreamingFilter, Card::Filtering)
-                    .view_stage(BuiltinViewStage::Filter)
-                    .columnar_stage(BuiltinColumnarStage::Filter)
-                    .cost(10.0)
-                    .demand_law(BuiltinDemandLaw::FilterLike)
-                    .order_effect(BuiltinPipelineOrderEffect::PredicatePrefix)
-                    .lowering(BuiltinPipelineLowering::ExprArg)
-            }
+            Self::Filter => <defs::Filter as builtin_def::Builtin>::spec(),
             Self::Find => {
                 BuiltinSpec::new(Cat::StreamingFilter, Card::Filtering)
                     .view_stage(BuiltinViewStage::Filter)
@@ -3610,6 +3602,9 @@ pub mod path;
 pub mod regex;
 pub mod schema;
 pub mod string;
+
+pub(crate) mod builtin_def;
+pub(crate) mod defs;
 
 pub use array::*;
 pub use collection::*;
