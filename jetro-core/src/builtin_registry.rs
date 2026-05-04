@@ -7,11 +7,10 @@
 
 use crate::{
     builtins::{
-        BuiltinCardinality, BuiltinDemandLaw, BuiltinExprStage, BuiltinIntRangeStage, BuiltinMethod,
-        BuiltinNullaryStage, BuiltinPipelineExecutor, BuiltinPipelineLowering,
+        BuiltinDemandLaw, BuiltinMethod,
+        BuiltinPipelineExecutor, BuiltinPipelineLowering,
         BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect, BuiltinPipelineShape,
-        BuiltinSinkAccumulator, BuiltinStringPairStage, BuiltinStringStage, BuiltinStructural,
-        BuiltinUsizeStage,
+        BuiltinSinkAccumulator, BuiltinStructural,
     },
     chain_ir::{Demand, PullDemand, ValueNeed},
 };

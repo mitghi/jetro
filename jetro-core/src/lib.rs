@@ -45,6 +45,7 @@ pub(crate) mod value;
 pub(crate) mod value_view;
 pub(crate) mod view_pipeline;
 pub(crate) mod compiler;
+pub(crate) mod compiler_passes;
 pub(crate) mod vm;
 pub(crate) mod logical_plan;
 pub(crate) mod logical_planner;
