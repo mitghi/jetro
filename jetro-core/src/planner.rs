@@ -256,7 +256,10 @@ fn select_backend_plan(
             BackendPlan::new(&[crate::physical::BackendPreference::Interpreted])
         }
         (InputMode::Bytes, PlanNode::Structural { .. }) => {
-            BackendPlan::new(&[crate::physical::BackendPreference::Structural])
+            BackendPlan::new(&[
+                crate::physical::BackendPreference::Structural,
+                crate::physical::BackendPreference::Interpreted,
+            ])
         }
         (
             InputMode::Bytes,
@@ -1051,6 +1054,7 @@ mod tests {
         let plan = plan_query(r#"$.deep_find(@ kind object and status == "open")"#);
         assert!(matches!(root_node(&plan), PlanNode::Structural { .. }));
     }
+
 
     #[test]
     fn deep_find_unsupported_predicate_does_not_lower_to_structural_plan() {

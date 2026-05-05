@@ -22,7 +22,7 @@ regex = "1.10"
 itoa = "1"
 ryu = "1"
 simd-json = { version = "0.13", optional = true }
-jetro-experimental = "0.1.0"
+jetro-experimental = "0.2"
 
 [features]
 # simd-json default-on per cold_start_direct_parse plan: routes
