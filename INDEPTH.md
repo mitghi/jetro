@@ -441,23 +441,6 @@ patch $ {
 }
 ```
 
----
-
-## Architecture
-
-### Expression engine
-
-The public crate exposes the byte-oriented facade. The internals live in `jetro-core`.
-
-- `grammar.pest` + `parser.rs` — pest PEG grammar to `ast::Expr`
-- `value.rs` — `Val` type, with cheap shared strings and compound nodes
-- `builtins.rs` — the single builtin implementation surface used by execution paths
-- `pipeline.rs` / `planner.rs` / `runtime.rs` — plan query shape and route it to the fastest generic execution path
-- `vm.rs` — bytecode compiler and stack machine
-- `composed.rs` — composed builtin adapters over the shared builtin implementation
-- `strref.rs` — SIMD JSON tape ownership and string reference support
-- `analysis.rs` — query analysis helpers
-
 See [`jetro-core/README.md`](../jetro-core/README.md) for a full technical walkthrough: AST variants, opcode set, peephole passes, cache invariants.
 
 ### Companion crates
