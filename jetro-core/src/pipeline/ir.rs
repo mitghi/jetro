@@ -581,15 +581,20 @@ impl Stage {
 
     /// Returns `true` when the stage reads the actual element value rather than just membership
     /// metadata, meaning downstream value-demand cannot be eliminated.
+    /// Direct Stage-variant match — Sort with key, lambdas (Filter/Map/FlatMap),
+    /// keyed reducers, prefix predicates, and ExprBuiltin all read element value.
     pub(crate) fn consumes_input_value(&self) -> bool {
-        let Some(desc) = self.descriptor() else {
-            return false;
-        };
-        let Some(executor) = desc.executor() else {
-            return false;
-        };
-        executor.consumes_input_value()
-            || (executor == BuiltinPipelineExecutor::Sort && desc.body.is_some())
+        match self {
+            Stage::Filter(_, _)
+            | Stage::Map(_, _)
+            | Stage::FlatMap(_, _)
+            | Stage::CompiledMap(_)
+            | Stage::ExprBuiltin { .. }
+            | Stage::UniqueBy(Some(_))
+            | Stage::SortedDedup(Some(_)) => true,
+            Stage::Sort(spec) => spec.key.is_some(),
+            _ => false,
+        }
     }
 
     /// Returns `true` when the stage can be safely eliminated by the demand optimiser when its
@@ -607,11 +612,20 @@ impl Stage {
         if desc.pipeline_order_effect() != BuiltinPipelineOrderEffect::Preserves {
             return false;
         }
-        match desc.executor() {
-            Some(BuiltinPipelineExecutor::ElementBuiltin) => {
-                desc.method.is_some_and(|method| method.spec().pure)
+        // Element-wise scalar: keep iff method is pure.
+        // ObjectLambda variants (TransformKeys/TransformValues/FilterKeys/FilterValues): always droppable.
+        match self {
+            Stage::Builtin(_) | Stage::IntRangeBuiltin { .. } | Stage::StringPairBuiltin { .. } => {
+                desc.method.is_some_and(|m| m.spec().pure)
             }
-            Some(BuiltinPipelineExecutor::ObjectLambda) => true,
+            Stage::ExprBuiltin {
+                method:
+                    BuiltinMethod::TransformKeys
+                    | BuiltinMethod::TransformValues
+                    | BuiltinMethod::FilterKeys
+                    | BuiltinMethod::FilterValues,
+                ..
+            } => true,
             _ => false,
         }
     }

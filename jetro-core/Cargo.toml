@@ -6,7 +6,7 @@ authors = ["Milad (Mike) Taghavi <mitghi.at.me.com>"]
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/mitghi/jetro"
-description = "Jetro core — parser, compiler, and VM for the Jetro JSON query language. Storage-free."
+description = "jetro-core: parser, compiler, and VM for the Jetro JSON query language"
 keywords = ["json-search", "json-query", "json-path", "jmespath", "serde"]
 categories = ["algorithms", "encoding"]
 
@@ -22,7 +22,7 @@ regex = "1.10"
 itoa = "1"
 ryu = "1"
 simd-json = { version = "0.13", optional = true }
-jetro-experimental = { path = "../../jetro-experimental" }
+jetro-experimental = "0.1.0"
 
 [features]
 # simd-json default-on per cold_start_direct_parse plan: routes

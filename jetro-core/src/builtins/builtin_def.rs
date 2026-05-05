@@ -124,4 +124,13 @@ pub(crate) trait Builtin {
     ) -> Option<Result<(), EvalError>> {
         None
     }
+
+    /// Returns `true` if this method is a terminal sink (Sum, Avg, Min, Max, Count,
+    /// First, Last, Any, All, ApproxCountDistinct, Collect, Nth, Len). Default:
+    /// derived from `spec().sink.is_some()` so concrete sinks need only set their
+    /// sink spec — no extra trait override required.
+    #[inline]
+    fn is_sink() -> bool {
+        Self::spec().sink.is_some()
+    }
 }

@@ -1065,28 +1065,6 @@ pub enum BuiltinPipelineExecutor {
     SortedDedup,
 }
 
-impl BuiltinPipelineExecutor {
-    /// Returns true if the executor passes each input value into the lambda or comparator.
-    #[inline]
-    pub fn consumes_input_value(self) -> bool {
-        matches!(
-            self,
-            Self::ObjectLambda
-                | Self::RowFilter
-                | Self::RowFlatMap
-                | Self::UniqueBy
-                | Self::GroupBy
-                | Self::CountBy
-                | Self::IndexBy
-                | Self::FindIndex
-                | Self::IndicesWhere
-                | Self::ArgExtreme { .. }
-                | Self::PrefixWhile { .. }
-                | Self::SortedDedup
-        )
-    }
-}
-
 impl BuiltinPipelineShape {
     /// Constructs a `BuiltinPipelineShape` from its four planning fields.
     #[inline]
