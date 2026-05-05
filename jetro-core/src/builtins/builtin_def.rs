@@ -13,9 +13,29 @@
 //!
 //! After full migration, each builtin = one `impl Builtin for X` block.
 
+use crate::context::{Env, EvalError};
 use crate::value::Val;
+use crate::vm::{Program, VM};
 
 use super::{BuiltinCancellation, BuiltinMethod, BuiltinSpec};
+
+/// Concrete context passed to `Builtin::apply_stream`.
+/// Carries all per-element streaming state — VM, env, kernel, positional counters,
+/// and the optional terminal-map collector — by mutable reference so individual
+/// builtin streaming bodies can update counters and reach into VM state without
+/// allocating per-call.
+#[allow(dead_code)]
+pub(crate) struct StreamCtx<'a, 'b> {
+    pub vm: &'a mut VM,
+    pub env: &'a mut Env,
+    pub kernel: &'a super::super::pipeline::BodyKernel,
+    pub stage: &'a super::super::pipeline::Stage,
+    pub stage_idx: usize,
+    pub stage_taken: &'a mut [usize],
+    pub stage_skipped: &'a mut [usize],
+    pub terminal_map_idx: Option<usize>,
+    pub terminal_map_collect: &'a mut Option<super::super::pipeline::TerminalMapCollector<'b>>,
+}
 
 /// Per-method definition trait. Each `BuiltinMethod` variant has a corresponding zero-sized
 /// struct in `builtins::defs::*` that implements this trait.
@@ -61,5 +81,22 @@ pub(crate) trait Builtin {
     #[inline]
     fn apply_args(_recv: &Val, _args: &super::BuiltinArgs) -> Option<Val> {
         None
+    }
+
+    /// Streaming row-stage runtime: takes an item plus the per-stage `StreamCtx` and
+    /// returns a `StageFlow` (Continue/SkipRow/Stop/TerminalCollected). Default returns
+    /// `Continue(item)` (pass-through). Override on streaming-shaped builtins:
+    /// Filter / Find / FindAll → row-predicate filter
+    /// Map / FlatMap → row projection
+    /// TakeWhile / DropWhile → bounded prefix predicate
+    /// Take / Skip → positional slice
+    /// TransformKeys / TransformValues / FilterKeys / FilterValues → object lambda
+    #[inline]
+    fn apply_stream(
+        _ctx: &mut StreamCtx<'_, '_>,
+        item: Val,
+        _body: Option<&Program>,
+    ) -> Result<super::super::pipeline::StageFlow<Val>, EvalError> {
+        Ok(super::super::pipeline::StageFlow::Continue(item))
     }
 }
