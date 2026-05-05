@@ -16,16 +16,12 @@ use super::lower::run_compiled_map;
 use super::row_source;
 use super::sink_accumulator::SinkAccumulator;
 use super::{
-    apply_item_in_env, bounded_sort_by_key, cmp_val_total, compute_strategies_with_kernels,
-    eval_kernel, is_truthy, stage_executor, BodyKernel, Pipeline, PipelineBody, Sink, Source,
-    Stage, StageFlow, StageStrategy, TerminalMapCollector,
+    apply_item_in_env, cmp_val_total, compute_strategies_with_kernels, eval_kernel, is_truthy,
+    stage_executor, BodyKernel, Pipeline, PipelineBody, Sink, Source, Stage, StageFlow,
+    StageStrategy, TerminalMapCollector,
 };
 
-use crate::builtins::{
-    chunk_apply, count_by_apply, drop_while_apply, filter_apply, filter_one, group_by_apply,
-    index_by_apply, map_apply, replace_apply, slice_apply, split_apply, take_while_apply,
-    window_apply, BuiltinMethod, BuiltinPipelineExecutor,
-};
+use crate::builtins::{replace_apply, slice_apply, split_apply, BuiltinMethod, BuiltinPipelineExecutor};
 use crate::chain_ir::PullDemand;
 
 /// Runs the pipeline against `root`, materialising barrier stages then streaming the rest.
@@ -307,6 +303,9 @@ fn apply_adapter_materialized(
             return Some(r);
         }
     }
+    // Remaining barrier dispatch: ElementBuiltin (Stage::Builtin/IntRangeBuiltin/StringPairBuiltin),
+    // ExpandingBuiltin (Split), and SortedDedup (no trait migration yet).
+    // All other variants are handled by trait dispatch above and unreachable here.
     match stage_executor(stage)? {
         BuiltinPipelineExecutor::ElementBuiltin => {
             let mut out: Vec<Val> = Vec::with_capacity(buf.len());
@@ -324,284 +323,8 @@ fn apply_adapter_materialized(
             *buf = out;
             Some(Ok(()))
         }
-        BuiltinPipelineExecutor::Position { take } => {
-            let n = stage.descriptor()?.usize_arg?;
-            if take {
-                buf.truncate(n);
-            } else if buf.len() <= n {
-                buf.clear();
-            } else {
-                buf.drain(..n);
-            }
-            Some(Ok(()))
-        }
-        BuiltinPipelineExecutor::Reverse => {
-            buf.reverse();
-            Some(Ok(()))
-        }
-        BuiltinPipelineExecutor::Sort => {
-            let Stage::Sort(spec) = stage else {
-                return None;
-            };
-            let sorted = match &spec.key {
-                None => bounded_sort_by_key(std::mem::take(buf), spec.descending, strategy, |v| {
-                    Ok(v.clone())
-                }),
-                Some(prog) => {
-                    bounded_sort_by_key(std::mem::take(buf), spec.descending, strategy, |v| {
-                        Ok(eval_kernel(kernel, v, |item| {
-                            apply_item_in_env(vm, loop_env, item, prog)
-                        })
-                        .unwrap_or(Val::Null))
-                    })
-                }
-            };
-            match sorted {
-                Ok(sorted) => {
-                    *buf = sorted;
-                    Some(Ok(()))
-                }
-                Err(err) => Some(Err(err)),
-            }
-        }
-        BuiltinPipelineExecutor::ObjectLambda => {
-            let prog = object_lambda_program(stage)?;
-            let mut out: Vec<Val> = Vec::with_capacity(buf.len());
-            for v in std::mem::take(buf) {
-                match apply_lambda_obj(stage, &v, vm, loop_env, kernel, prog) {
-                    Ok(mapped) => out.push(mapped),
-                    Err(err) => {
-                        *buf = out;
-                        return Some(Err(err));
-                    }
-                }
-            }
-            *buf = out;
-            Some(Ok(()))
-        }
-        BuiltinPipelineExecutor::RowFilter => {
-            let prog = row_stage_program(stage)?;
-            match filter_apply(std::mem::take(buf), |v| {
-                eval_kernel(kernel, v, |item| {
-                    apply_item_in_env(vm, loop_env, item, prog)
-                })
-            }) {
-                Ok(out) => {
-                    *buf = out;
-                    Some(Ok(()))
-                }
-                Err(err) => Some(Err(err)),
-            }
-        }
-        BuiltinPipelineExecutor::RowMap => {
-            let prog = row_stage_program(stage)?;
-            match map_apply(std::mem::take(buf), |v| {
-                eval_kernel(kernel, v, |item| {
-                    apply_item_in_env(vm, loop_env, item, prog)
-                })
-            }) {
-                Ok(out) => {
-                    *buf = out;
-                    Some(Ok(()))
-                }
-                Err(err) => Some(Err(err)),
-            }
-        }
-        BuiltinPipelineExecutor::RowFlatMap => {
-            let prog = row_stage_program(stage)?;
-            let mut out: Vec<Val> = Vec::new();
-            for v in buf.iter() {
-                let inner = match eval_kernel(kernel, v, |item| {
-                    apply_item_in_env(vm, loop_env, item, prog)
-                }) {
-                    Ok(inner) => inner,
-                    Err(err) => return Some(Err(err)),
-                };
-                if let Some(arr) = inner.as_vals() {
-                    out.extend(arr.iter().cloned());
-                } else {
-                    out.push(inner);
-                }
-            }
-            *buf = out;
-            Some(Ok(()))
-        }
-        BuiltinPipelineExecutor::UniqueBy => {
-            match keyed_stage_program(stage) {
-                None => {
-                    let mut seen: std::collections::HashSet<String> = Default::default();
-                    buf.retain(|v| seen.insert(format!("{:?}", v)));
-                }
-                Some(prog) => {
-                    let mut seen: std::collections::HashSet<String> = Default::default();
-                    let mut keep: Vec<bool> = Vec::with_capacity(buf.len());
-                    for v in buf.iter() {
-                        let key = eval_kernel(kernel, v, |item| {
-                            apply_item_in_env(vm, loop_env, item, prog)
-                        })
-                        .unwrap_or(Val::Null);
-                        keep.push(seen.insert(format!("{:?}", key)));
-                    }
-                    let mut out: Vec<Val> = Vec::with_capacity(buf.len());
-                    for (i, v) in std::mem::take(buf).into_iter().enumerate() {
-                        if keep[i] {
-                            out.push(v);
-                        }
-                    }
-                    *buf = out;
-                }
-            }
-            Some(Ok(()))
-        }
-        BuiltinPipelineExecutor::GroupBy => {
-            let prog = keyed_stage_program(stage)?;
-            let out_obj = match group_by_apply(std::mem::take(buf), |v| {
-                eval_kernel(kernel, v, |item| {
-                    apply_item_in_env(vm, loop_env, item, prog)
-                })
-            }) {
-                Ok(out_obj) => out_obj,
-                Err(err) => return Some(Err(err)),
-            };
-            *buf = vec![Val::Obj(Arc::new(out_obj))];
-            Some(Ok(()))
-        }
-        BuiltinPipelineExecutor::CountBy => {
-            let prog = keyed_stage_program(stage)?;
-            let map = match count_by_apply(std::mem::take(buf), |v| {
-                eval_kernel(kernel, v, |item| {
-                    apply_item_in_env(vm, loop_env, item, prog)
-                })
-            }) {
-                Ok(map) => map,
-                Err(err) => return Some(Err(err)),
-            };
-            *buf = vec![Val::obj(map)];
-            Some(Ok(()))
-        }
-        BuiltinPipelineExecutor::IndexBy => {
-            let prog = keyed_stage_program(stage)?;
-            let map = match index_by_apply(std::mem::take(buf), |v| {
-                eval_kernel(kernel, v, |item| {
-                    apply_item_in_env(vm, loop_env, item, prog)
-                })
-            }) {
-                Ok(map) => map,
-                Err(err) => return Some(Err(err)),
-            };
-            *buf = vec![Val::obj(map)];
-            Some(Ok(()))
-        }
-        BuiltinPipelineExecutor::IndicesWhere => {
-            let prog = keyed_stage_program(stage)?;
-            let mut out: Vec<i64> = Vec::new();
-            for (i, v) in buf.iter().enumerate() {
-                match filter_one(v, |item| {
-                    eval_kernel(kernel, item, |item| {
-                        apply_item_in_env(vm, loop_env, item, prog)
-                    })
-                }) {
-                    Ok(true) => out.push(i as i64),
-                    Ok(false) => {}
-                    Err(err) => return Some(Err(err)),
-                }
-            }
-            *buf = vec![Val::int_vec(out)];
-            Some(Ok(()))
-        }
-        BuiltinPipelineExecutor::FindIndex => {
-            let prog = keyed_stage_program(stage)?;
-            let mut found: Val = Val::Null;
-            for (i, v) in buf.iter().enumerate() {
-                match filter_one(v, |item| {
-                    eval_kernel(kernel, item, |item| {
-                        apply_item_in_env(vm, loop_env, item, prog)
-                    })
-                }) {
-                    Ok(true) => {
-                        found = Val::Int(i as i64);
-                        break;
-                    }
-                    Ok(false) => {}
-                    Err(err) => return Some(Err(err)),
-                }
-            }
-            *buf = vec![found];
-            Some(Ok(()))
-        }
-        BuiltinPipelineExecutor::ArgExtreme { max } => {
-            let prog = keyed_stage_program(stage)?;
-            if buf.is_empty() {
-                *buf = vec![Val::Null];
-                return Some(Ok(()));
-            }
-
-            let mut best_idx = 0usize;
-            let mut best_key = match eval_kernel(kernel, &buf[0], |item| {
-                apply_item_in_env(vm, loop_env, item, prog)
-            }) {
-                Ok(key) => key,
-                Err(err) => return Some(Err(err)),
-            };
-            for i in 1..buf.len() {
-                let key = match eval_kernel(kernel, &buf[i], |item| {
-                    apply_item_in_env(vm, loop_env, item, prog)
-                }) {
-                    Ok(key) => key,
-                    Err(err) => return Some(Err(err)),
-                };
-                let cmp = cmp_val_total(&key, &best_key);
-                let take = if max {
-                    cmp == std::cmp::Ordering::Greater
-                } else {
-                    cmp == std::cmp::Ordering::Less
-                };
-                if take {
-                    best_idx = i;
-                    best_key = key;
-                }
-            }
-
-            let best = std::mem::take(buf).into_iter().nth(best_idx).unwrap();
-            *buf = vec![best];
-            Some(Ok(()))
-        }
-        BuiltinPipelineExecutor::Chunk => {
-            let n = stage.descriptor()?.usize_arg?;
-            *buf = chunk_apply(buf, n);
-            Some(Ok(()))
-        }
-        BuiltinPipelineExecutor::Window => {
-            let n = stage.descriptor()?.usize_arg?;
-            *buf = window_apply(buf, n);
-            Some(Ok(()))
-        }
-        BuiltinPipelineExecutor::PrefixWhile { take } => {
-            let prog = keyed_stage_program(stage)?;
-            let input = std::mem::take(buf);
-            let out = if take {
-                take_while_apply(input, |v| {
-                    eval_kernel(kernel, v, |item| {
-                        apply_item_in_env(vm, loop_env, item, prog)
-                    })
-                })
-            } else {
-                drop_while_apply(input, |v| {
-                    eval_kernel(kernel, v, |item| {
-                        apply_item_in_env(vm, loop_env, item, prog)
-                    })
-                })
-            };
-            match out {
-                Ok(out) => {
-                    *buf = out;
-                    Some(Ok(()))
-                }
-                Err(err) => Some(Err(err)),
-            }
-        }
         BuiltinPipelineExecutor::SortedDedup => {
-            match keyed_stage_program(stage) {
+            match stage.body_program() {
                 None => {
                     buf.sort_by(cmp_val_total);
                     buf.dedup_by(|a, b| crate::util::vals_eq(a, b));
@@ -624,6 +347,11 @@ fn apply_adapter_materialized(
             }
             Some(Ok(()))
         }
+        // All other executor variants (RowFilter, RowMap, RowFlatMap, ObjectLambda,
+        // Position, Reverse, Sort, UniqueBy, GroupBy, CountBy, IndexBy, IndicesWhere,
+        // FindIndex, ArgExtreme, Chunk, Window, PrefixWhile) are handled above by
+        // trait dispatch via Builtin::apply_barrier — unreachable here.
+        _ => None,
     }
 }
 
@@ -665,20 +393,6 @@ fn apply_expanding_adapter(stage: &Stage, v: &Val, out: &mut Vec<Val>) {
     }
 }
 
-/// Extracts the compiled body `Program` from an object-lambda stage variant.
-pub(super) fn object_lambda_program(stage: &Stage) -> Option<&crate::vm::Program> {
-    stage.body_program()
-}
-
-/// Extracts the compiled body `Program` from a row-level stage variant.
-pub(super) fn row_stage_program(stage: &Stage) -> Option<&crate::vm::Program> {
-    stage.body_program()
-}
-
-/// Extracts the compiled body `Program` from a keyed stage variant.
-pub(super) fn keyed_stage_program(stage: &Stage) -> Option<&crate::vm::Program> {
-    stage.body_program()
-}
 
 impl Iterator for LegacyPreIter {
     type Item = Val;
