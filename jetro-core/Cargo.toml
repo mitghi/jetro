@@ -1,12 +1,12 @@
 [package]
 name = "jetro-core"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 authors = ["Milad (Mike) Taghavi <mitghi.at.me.com>"]
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/mitghi/jetro"
-description = "Jetro core — parser, compiler, and VM for the Jetro JSON query language. Storage-free."
+description = "jetro-core: parser, compiler, and VM for the Jetro JSON query language"
 keywords = ["json-search", "json-query", "json-path", "jmespath", "serde"]
 categories = ["algorithms", "encoding"]
 
@@ -15,14 +15,21 @@ serde_json = "1.0.102"
 pest = "2.7.0"
 pest_derive = "2.7.0"
 serde = { version = "1.0.171", features = ["derive"] }
-parking_lot = "0.12"
 smallvec = { version = "1", features = ["union"] }
 indexmap = "2"
 memchr = "2"
+regex = "1.10"
+itoa = "1"
+ryu = "1"
 simd-json = { version = "0.13", optional = true }
+jetro-experimental = "0.2"
 
 [features]
-default = []
+# simd-json default-on per cold_start_direct_parse plan: routes
+# from_bytes / from_slice through the direct bytes→Val parser,
+# skipping the serde_json::Value intermediate.  ~4× cold-start win.
+# Users wanting the legacy serde-only path: default-features = false.
+default = ["simd-json"]
 simd-json = ["dep:simd-json"]
 
 [dev-dependencies]

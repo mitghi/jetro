@@ -1,16 +1,12 @@
 # Jetro Syntax Reference
 
-Complete reference for the Jetro v2 expression language. Grammar source: `src/grammar.pest`. Builtin catalog: `src/eval/builtins.rs`.
+Complete reference for the Jetro v2 expression language. Grammar source: `src/grammar.pest`. Builtin catalog: `src/builtins.rs`.
 
 Entry points:
 
 | Call | Notes |
 |------|-------|
-| `jetro::query(expr, &doc)` | One-shot, tree-walker |
-| `jetro::query_with(expr, &doc, registry)` | With custom methods |
-| `Jetro::new(doc).collect(expr)` | Thread-local cached VM |
-| `Engine::new().run(expr, &doc)` | Shared-cache VM (multi-thread) |
-| `jetro!("expr")` | Compile-time checked `Expr<Value>` (feature `macros`) |
+| `Jetro::from_bytes(bytes).collect(expr)` | Byte-oriented query API; SIMD JSON by default |
 
 ---
 
@@ -437,6 +433,39 @@ patch $ { users[* if not active]: DELETE }     // bulk delete
 patch $ { ..name: @.upper() }                  // all "name" anywhere
 ```
 
+### `try / else` — fallback expression
+
+Catches both `Val::Null` results AND evaluation errors.  Body can
+optionally be parenthesised; without parens it's a `pipe_expr`.
+Default arm is any expression; chains right-associative.
+
+```
+try $.user.email else 'unknown'
+try $.scores.avg() else 0
+try ($.x if $.kind == 'a' else $.y) else null    // parens for ternary inside body
+try $.id else try $.uid else 'anon'              // chained fallback
+```
+
+Inside object shaping (the killer use case — defensive construction
+over messy upstream data):
+
+```
+$.users.map({
+  id:      id,
+  name:    try .first_name + ' ' + .last_name else .name else 'Anon',
+  age:     try .age | parse_int else null,
+  email:   try .email | lower else null,
+  premium: try .subscription.tier == 'gold' else false,
+})
+```
+
+`try` differs from the coalesce operator `?|`:
+
+```
+try .price | parse_int else 0     // catches parse error AND null
+.price | parse_int ?| 0           // catches null only
+```
+
 ### Conditional (`when`)
 
 ```
@@ -506,60 +535,7 @@ missing(obj, "key")          // negated existence
 
 ---
 
-## 19. `jetro!` Macro (`features = ["macros"]`)
-
-Compile-time checked expression literal.
-
-```rust
-use jetro::prelude::*;
-use jetro::jetro;
-
-let e = jetro!("$.books.filter(price > 10).map(title)");
-let out = e.eval(&doc)?;
-```
-
-Checks at compile time:
-- Balanced `()`, `[]`, `{}`
-- Balanced `"` / `'` (escape-aware)
-- Non-empty body
-
-Full parse runs at first eval.
-
----
-
-## 20. `#[derive(JetroSchema)]` (`features = ["macros"]`)
-
-Attach a fixed set of named expressions to a type.
-
-```rust
-use jetro::prelude::*;
-use jetro::JetroSchema;
-
-#[derive(JetroSchema)]
-#[expr(titles = "$.books.map(title)")]
-#[expr(count  = "$.books.len()")]
-#[expr(top    = "$.books.filter(price > 10)")]
-struct BookView;
-
-for (name, src) in BookView::exprs() {
-    session.register_expr(name, src)?;
-}
-```
-
-Generated:
-```rust
-impl JetroSchema for BookView {
-    const EXPRS: &'static [(&'static str, &'static str)] = &[...];
-    fn exprs() -> &'static [(&'static str, &'static str)] { Self::EXPRS }
-    fn names() -> &'static [&'static str] { ... }
-}
-```
-
-Each `#[expr(name = "src")]` is lex-checked at compile time (same rules as `jetro!`).
-
----
-
-## 21. Method Catalog
+## 19. Method Catalog
 
 Every snake_case method has a camelCase alias (e.g. `group_by` ≡ `groupBy`). Listed once here.
 

@@ -1,388 +1,488 @@
 # jetro-core
 
-[<img src="https://img.shields.io/badge/docs-jetro--core-blue"></img>](https://docs.rs/jetro-core)
-
-Parser, compiler, and bytecode VM for the Jetro JSON query language.
-
----
-
-## Pipeline
-
-```text
-source string
-     │
-     ▼  parser::parse        pest PEG → syntax tree
-  Expr (AST)
-     │
-     ▼  Compiler::emit       structural lowering → Vec<Opcode>
-     │  Compiler::optimize   10 peephole passes
-  Program                    Arc<[Opcode]>, cheap to clone
-     │
-     ▼  VM::execute          stack machine over &serde_json::Value
-  serde_json::Value
-```
-
-The tree-walker in `eval/` is the *reference implementation*: when VM behaviour diverges from it, the VM is wrong. Every new language feature lands in the tree-walker first, then is mirrored in the compiler and opcode set.
-
----
-
-## Layer 1 — parser (pest PEG)
-
-`grammar.pest` defines the full syntax in pest rules. Highlights:
-
-- **Root / current**: `$` (document root), `@` (current item inside filter / comprehension).
-- **Navigation**: `.field`, `[idx]`, `[start:end]`, `..descendant`, `?.optional`, `.{dynamic}`.
-- **Method calls**: `.name(arg, named: value)`; named + positional args mix freely.
-- **Operators**: arithmetic (`+ - * / %`), comparison (`== != < <= > >= ~=`), logical (`and or not`), nullish (`?|`), type cast (`as int`).
-- **Literals**: int, float, bool, null, `"str"`, `'str'`, `f"format {expr}"`.
-- **Kind checks**: `x kind number`, `x kind not null`.
-- **Comprehensions**: list `[e for v in iter if cond]`, dict `{k: v for …}`, set, generator.
-- **Let**: `let x = init in body`.
-- **Lambdas**: `lambda x, y: body`.
-- **Pipelines**: `base | step1 | step2`, optional named bind `-> name |`.
-- **Conditional**: Python-style ternary `then_ if cond else else_` (right-assoc).
-- **Reserved words** (guarded against identifier use): `and or not for in if else let lambda kind is as when patch DELETE true false null`.
-
-The parser walks pest's concrete syntax tree once, producing an `ast::Expr`. Identifiers are stored as `Arc<str>` so that cloning a name into an opcode is a refcount bump instead of a `String` allocation.
-
-### `ast::Expr`
-
-```rust
-pub enum Expr {
-    Null, Bool(bool), Int(i64), Float(f64), Str(String), FString(Vec<FStringPart>),
-    Root, Current, Ident(String),
-    Chain(Box<Expr>, Vec<Step>),
-    BinOp(Box<Expr>, BinOp, Box<Expr>),
-    UnaryNeg(Box<Expr>), Not(Box<Expr>),
-    Kind { expr, ty, negate },
-    Coalesce(Box<Expr>, Box<Expr>),
-    Object(Vec<ObjField>), Array(Vec<ArrayElem>),
-    Pipeline { base, steps },
-    ListComp { expr, vars, iter, cond },
-    DictComp { key, val, vars, iter, cond },
-    SetComp { … }, GenComp { … },
-    Lambda { params, body },
-    Let { name, init, body },
-    IfElse { cond, then_, else_ },         // Python-style ternary
-    // … patch blocks, cast, f-string parts
-}
-```
-
-Variants are orthogonal — each maps to one language concept. Subtrees are `Box<Expr>` (owned, not shared) because the compiler mutates the AST in place during `reorder_and_operands`.
-
----
-
-## Layer 2 — tree-walker (`eval/`)
-
-`eval::evaluate(&ast, &doc)` is the shortest path from AST to result.
-
-### `Val`
-
-```rust
-pub enum Val {
-    Null,
-    Bool(bool),
-    Int(i64),
-    Float(f64),
-    Str(Arc<str>),
-    Arr(Arc<Vec<Val>>),
-    Obj(Arc<IndexMap<Arc<str>, Val>>),
-}
-```
-
-Every compound variant wraps its payload in `Arc`. Cloning a `Val` bumps a refcount — no deep copy, no heap churn during chain traversal. Mutation uses `Arc::try_unwrap` with a clone-on-fallback pattern.
-
-`Val` is the engine's internal currency. Conversion to / from `serde_json::Value` happens exactly twice per query: once on entry (`Val::from(&doc)`), once on exit (`Val → Value`).
-
-### `Env`
-
-```rust
-struct Env {
-    root:     Val,
-    current:  Val,
-    vars:     SmallVec<[(Arc<str>, Val); 4]>,
-    registry: Arc<MethodRegistry>,
-}
-```
-
-Let-bindings and comprehension variables push onto `vars`; scope exit truncates. The inline capacity of 4 covers every realistic query, and the linear lookup is faster than any hashmap at that size.
-
-### `MethodRegistry`
-
-A `HashMap<&'static str, Arc<dyn Method>>` that the user can extend with custom methods. `Method` is:
-
-```rust
-pub trait Method: Send + Sync + 'static {
-    fn call(&self, recv: &Val, args: &[Val], env: &Env) -> Result<Val, EvalError>;
-}
-```
-
-The registry itself is `Clone` (all entries are `Arc<dyn Method>`), so threading it through recursive calls is free.
-
----
-
-## Layer 3 — bytecode VM (`vm.rs`)
-
-The VM is an accelerated path on top of the tree-walker. It uses:
-
-1. A **compile cache** — parse + compile happen once per unique expression string.
-2. A **pointer cache** — purely structural programs (`$.a.b[0]`) cache their resolved pointer path keyed by `(doc_hash, program_id)` and skip traversal on re-run.
-3. A **flat opcode array** — `Arc<[Opcode]>`; the execution loop iterates linearly with no recursion for navigation/arithmetic.
-
-### `Program`
-
-```rust
-pub struct Program {
-    pub ops:           Arc<[Opcode]>,
-    pub source:        Arc<str>,
-    pub id:            u64,           // hash of source
-    pub is_structural: bool,          // eligible for pointer-cache
-}
-```
-
-A `Program` is immutable and `Arc`-cloneable. The `is_structural` flag is set when every opcode is pure navigation (`PushRoot`, `GetField`, `GetIndex`, `GetSlice`, `OptField`, `RootChain`, `GetPointer`) — those programs are eligible for the resolution cache.
-
-### `Opcode`
-
-Representative slice — the full set is ~60 variants, grouped by purpose:
-
-```rust
-pub enum Opcode {
-    // Literals
-    PushNull, PushBool(bool), PushInt(i64), PushFloat(f64), PushStr(Arc<str>),
-    // Context
-    PushRoot, PushCurrent,
-    // Navigation
-    GetField(Arc<str>), GetIndex(i64), GetSlice(Option<i64>, Option<i64>),
-    DynIndex(Arc<Program>), OptField(Arc<str>), Descendant(Arc<str>),
-    DescendAll, InlineFilter(Arc<Program>), Quantifier(QuantifierKind),
-
-    // Peephole fusions
-    RootChain(Arc<[Arc<str>]>),          // PushRoot + GetField+
-    FilterCount(Arc<Program>),           // filter(p).count()
-    FindFirst(Arc<Program>),             // filter(p).first()
-    FindOne(Arc<Program>),               // filter(p).one()
-    FilterMap { pred, map },             // filter(p).map(f)
-    FilterFilter { p1, p2 },             // filter(p1).filter(p2)
-    MapMap { f1, f2 },                   // map(f1).map(f2)
-    MapSum(Arc<Program>),                // map(f).sum()
-    MapAvg(Arc<Program>),                // map(f).avg()
-    MapFlatten(Arc<Program>),            // map(f).flatten()
-    MapUnique(Arc<Program>),             // map(f).unique()
-    MapField(Arc<str>),                  // map(x => x.k)
-    MapFieldChain(Arc<[Arc<str>]>),      // map(x => x.k1.k2.…)
-    MapFieldUnique(Arc<str>),            // map(x => x.k).unique()
-    MapFieldChainUnique(Arc<[Arc<str>]>),// map(x => x.k1.…).unique()
-    FilterFieldEqLit(Arc<str>, Val),     // filter(@.k == lit)
-    FilterFieldCmpLit(Arc<str>, CmpOp, Val),
-    FilterFieldEqLitMapField(…),         // fused scan + project
-    TopN { n: usize, asc: bool },        // sort()[0:n]
-    FilterTakeWhile { pred, stop },
-    FilterDropWhile { pred, drop },
-    EquiJoin { rhs, lhs_key, rhs_key },
-
-    // Idents, ops, short-circuit
-    LoadIdent(Arc<str>),
-    Add, Sub, Mul, Div, Mod,
-    Eq, Neq, Lt, Lte, Gt, Gte, Fuzzy, Not, Neg,
-    CastOp(CastType),
-    AndOp(Arc<Program>), OrOp(Arc<Program>), CoalesceOp(Arc<Program>),
-    IfElse { then_: Arc<Program>, else_: Arc<Program> },  // ternary, one branch runs
-
-    // Methods, construction, pipelines, comprehensions, patch
-    CallMethod(Arc<CompiledCall>), CallOptMethod(Arc<CompiledCall>),
-    MakeObj(Arc<[CompiledObjEntry]>), MakeArr(Arc<[Arc<Program>]>),
-    FString(Arc<[CompiledFSPart]>),
-    KindCheck { ty, negate },
-    SetCurrent, BindVar(Arc<str>), StoreVar(Arc<str>),
-    BindObjDestructure(Arc<BindObjSpec>), BindArrDestructure(Arc<[Arc<str>]>),
-    LetExpr { name, body }, ListComp(Arc<CompSpec>), DictComp(…), SetComp(…),
-    GetPointer(Arc<str>),                // resolution-cache fast-path
-    PatchEval(Arc<Expr>),                // delegates to tree-walker
-}
-```
-
-### Compilation
-
-```rust
-Compiler::compile(expr: &Expr, source: &str) -> Program
-```
-
-Runs three phases:
-
-1. **AST rewrite** — `reorder_and_operands` commutes `a and b` if `b` is cheaper/more-selective. The estimate is shallow but cheap.
-2. **Lowering** — `emit` walks the (possibly rewritten) AST and produces a flat `Vec<Opcode>`. Sub-programs (lambda bodies, method args, comprehension iterators) are recursively compiled and stored as `Arc<Program>`.
-3. **Optimisation** — `optimize` runs the peephole passes below.
-4. **Post-pass** — `analysis::dedup_subprograms` canonicalises identical `Arc<Program>` sub-trees (common-subexpression elimination at the Program level).
-
-### Peephole passes
-
-Run in this order — each may expose new fusions for the next:
-
-1. **`root_chain`** — `PushRoot` followed by `GetField*` collapses to a single `RootChain` opcode. The whole path is resolved against `doc` via one pointer walk; structural programs made entirely of `RootChain` become eligible for the pointer cache.
-2. **`filter_count`** — `filter(p).count()` → `FilterCount(p)`. No intermediate array.
-3. **`filter_map / map_map / filter_filter`** — single-pass fusion of adjacent combinators.
-4. **`find_quantifier`** — `filter(p).first()` / `.one()` → early-exit `FindFirst` / `FindOne`.
-5. **`strength_reduction`** — `len() == 0` → `is_empty`; `.sort()[0:n]` → `TopN`; `map(f).sum()` / `.avg()` fused.
-6. **`redundant_op_removal`** — `PushCurrent` followed immediately by `SetCurrent` on the same value cancels.
-7. **`kind_check_fold`** — `expr kind T` where `expr` is a literal folds to a `PushBool`.
-8. **`method_const_fold`** — builtins applied to literal args fold at compile time (`"ab".len()` → `PushInt(2)`).
-9. **`expr_const_fold`** — arithmetic on adjacent integer/float literals folds.
-10. **`nullness_specialisation`** — when upstream analysis proves a field cannot be absent, `OptField` downgrades to `GetField` (one fewer branch per execution).
-11. **`field_specialise`** — `.map(x => x.k)` and `.filter(@.k op lit)` collapse to single `MapField* / FilterField*` opcodes; trivial field chains fuse into `MapFieldChain`, dedup variants into `MapFieldUnique` / `MapFieldChainUnique`.
-12. **`list_comp_specialise`** — `[x.k for x in iter]` and `[x.k for x in iter if x.p op lit]` splice the iter sub-program inline + emit the same fused `MapField` / `FilterFieldEqLitMapField` opcodes as the method-chain form. No per-item opcode dispatch.
-13. **`ifelse_const_fold`** — `then_ if true else e` / `then_ if false else e` collapse to the taken branch at compile time.
-
-Each pass has a `PassConfig` toggle; `VM::set_pass_config` lets you disable any of them at runtime (the cache keys off the config hash, so toggles don't return stale programs).
-
-### VM state
-
-```rust
-pub struct VM {
-    registry:      Arc<MethodRegistry>,
-    compile_cache: HashMap<(u64, String), Arc<Program>>,
-    compile_lru:   VecDeque<(u64, String)>,
-    compile_cap:   usize,
-    path_cache:    PathCache,
-    doc_hash:      u64,
-    config:        PassConfig,
-}
-```
-
-- **`compile_cache`** — keyed by `(pass_config_hash, source)`. LRU eviction at `compile_cap` (default 512).
-- **`path_cache`** — structural programs map `(doc_hash, program_id) → resolved Val`. `doc_hash` is computed once per top-level `execute()` via `hash_val_structure`, which hashes both structure *and* primitive values (bounded at depth 8). Two documents with the same shape but different leaf values produce different hashes — otherwise the cache would return stale results across distinct docs.
-- **`registry`** — shared via `Arc` so multiple VMs on the same thread share method implementations.
-
-### Execution
-
-```rust
-pub fn run_str(&mut self, expr: &str, doc: &Value) -> Result<Value, EvalError>;
-pub fn execute(&mut self, program: &Program, doc: &Value) -> Result<Value, EvalError>;
-```
-
-`execute` enters a tight loop over `program.ops`, maintaining a `Vec<Val>` operand stack. Opcodes that need sub-programs (method args, lambda bodies, comprehension iterators) recurse through `exec(sub_program, env)`; the doc-hash is *not* recomputed on recursion.
-
----
-
-## Layer 4 — analyses (`analysis.rs`, `schema.rs`, `plan.rs`, `cfg.rs`, `ssa.rs`)
-
-Optional IRs. None are mandatory for correctness; they exist so advanced callers can specialise programs further or export a readable data-flow graph.
-
-| Module     | Produces                                            | Used for                                    |
-|------------|-----------------------------------------------------|---------------------------------------------|
-| `analysis` | Type / Nullness / Cardinality / cost / monotonicity | Optimiser heuristics; CSE via `dedup_subprograms` |
-| `schema`   | Shape inference from sample JSON                    | Specialise `OptField → GetField`            |
-| `plan`     | Logical relational plan IR                          | Filter push-down, join detection            |
-| `cfg`      | Basic blocks, edges, dominators, loop headers       | Liveness, slot allocator                    |
-| `ssa`      | SSA numbering + phi nodes                           | Common-subexpression elimination, def-use   |
-
-The analyses operate on `Program`, not `Expr` — they observe the already-lowered bytecode.
-
----
-
-## Public API
-
-```rust
-// One-shot tree-walker.
-pub fn query(expr: &str, doc: &Value) -> Result<Value>;
-pub fn query_with(expr: &str, doc: &Value, registry: Arc<MethodRegistry>) -> Result<Value>;
-
-// Persistent VM (thread-local in the umbrella; fresh in this crate).
-pub struct Jetro { … }
-impl Jetro {
-    pub fn new(doc: Value) -> Self;
-    pub fn collect<S: AsRef<str>>(&self, expr: S) -> Result<Value, EvalError>;
-}
-
-// Lower-level building blocks.
-pub use vm::{VM, Compiler, Program};
-pub use expr::Expr;              // typed-phantom wrapper for compile-time expression literals
-pub use eval::{Method, MethodRegistry, EvalError};
-pub use parser::{parse, ParseError};
-pub use graph::Graph;            // multi-document queries
-pub use engine::Engine;          // high-level wrapper
-```
-
-### `Jetro` — document-bound convenience
+[![docs](https://img.shields.io/badge/docs-jetro--core-blue)](https://docs.rs/jetro-core)
+[![license](https://img.shields.io/crates/l/jetro-core.svg)](LICENSE)
+
+`jetro-core` is the parser, planner, optimizer, and execution runtime for the
+Jetro JSON query language.
+
+The top-level `jetro` crate exposes the small public API. This crate contains
+the machinery behind it: AST parsing, physical planning, builtin metadata,
+demand propagation, byte/tape navigation, streaming pipelines, and VM fallback.
 
 ```rust
 use jetro_core::Jetro;
-use serde_json::json;
 
-let j = Jetro::new(json!({
-    "store": { "books": [
-        {"title": "Dune",       "price": 12.99},
-        {"title": "Foundation", "price":  9.99},
-    ]}
-}));
+let j = Jetro::from_bytes(br#"{
+  "orders": [
+    {"id": "o1", "status": "paid", "total": 184.5, "customer": {"name": "Ada"}},
+    {"id": "o2", "status": "open", "total": 42.0, "customer": {"name": "Grace"}},
+    {"id": "o3", "status": "paid", "total": 312.2, "customer": {"name": "Alan"}}
+  ]
+}"#.to_vec()).unwrap();
 
-let titles = j.collect("$.store.books.filter(price > 10).map(title)").unwrap();
-assert_eq!(titles, serde_json::json!(["Dune"]));
-```
+let out = j.collect(r#"
+{
+  "top_paid": $.orders
+    .filter(status == "paid")
+    .sort_by(-total)
+    .take(2)
+    .map({id, customer: customer.name, total}),
 
-`Jetro::collect` uses a thread-local VM so the compile cache accumulates across calls on the same thread.
-
-### `query` — one-shot
-
-```rust
-let n = jetro_core::query("$.store.books.len()", &doc).unwrap();
-```
-
-Uses the tree-walker directly — no compile/resolution caches. Use `Jetro` or `VM` for repeated queries.
-
-### Custom methods
-
-```rust
-use jetro_core::{VM, Method, Val, Env, EvalError};
-
-struct Shout;
-impl Method for Shout {
-    fn call(&self, recv: &Val, _: &[Val], _: &Env) -> Result<Val, EvalError> {
-        match recv {
-            Val::Str(s) => Ok(Val::Str(s.to_uppercase().into())),
-            _           => Err(EvalError("shout: expected string".into())),
-        }
-    }
+  "paid_total": $.orders
+    .filter(status == "paid")
+    .map(total)
+    .sum()
 }
-
-let mut vm = VM::new();
-vm.register("shout", Shout);
-let r = vm.run_str(r#""hello".shout()"#, &serde_json::json!(null)).unwrap();
-assert_eq!(r, serde_json::json!("HELLO"));
+"#).unwrap();
 ```
 
-### `Graph` — multi-document queries
+## Architecture
 
-`Graph::new({node: Value, …})` merges named documents into a virtual root and evaluates an expression against the combined object. Joins are expressed inside the query (`.#join('orders', 'customer_id', 'id')`). The `jetrodb` crate's `GraphBucket` is a storage-backed orchestrator on top of this primitive.
+Jetro is built around one physical plan and several execution backends.
 
----
+```text
+source text
+  -> parser
+  -> Expr AST
+  -> planner
+  -> QueryPlan DAG
+  -> physical_eval
+     -> StructuralIndex backend
+     -> ViewPipeline backend
+     -> Pipeline backend
+     -> VM fallback
+  -> serde_json::Value
+```
 
-## Performance notes
+The planner does not commit every expression to one executor too early. It
+builds a `QueryPlan`, a DAG of physical nodes. Each node carries:
 
-- **Clone cost**: `Val::clone` is always O(1) — the cost is one atomic increment. Nothing in the VM copies compound payloads.
-- **Pointer cache hits**: A structural program re-run against the same document is a `HashMap` lookup plus an `Arc` bump. No traversal.
-- **Compile cache**: First call: parse + compile + optimize (~microseconds for short queries). Subsequent: `HashMap` lookup.
-- **Peephole fusions**: `map(f).sum()` runs one pass, no intermediate vec. `filter(p).first()` early-exits on the first match.
-- **Dead-code elimination via CSE**: `dedup_subprograms` canonicalises identical sub-programs across the compiled tree — `map(x.price).sum() + map(x.price).avg()` shares one `map(x.price)` sub-program by `Arc` identity after this pass.
-- **`smallvec` for scopes**: `Env::vars` keeps the first 4 let-bindings inline. Real queries rarely exceed this.
+- the operation to perform, such as `RootPath`, `Pipeline`, `Structural`,
+  `Object`, `Array`, `Call`, `Let`, or `Vm`
+- backend capabilities
+- backend preferences
+- execution facts, such as whether a VM fallback is still present
 
----
+The physical evaluator walks the plan and tries the preferred backend for each
+node. If a specialized backend cannot execute a node, execution falls back to
+the VM while preserving the same language semantics.
 
-## Error types
+## Core Data Flow
+
+`Jetro::from_bytes` stores the raw JSON bytes. Expensive representations are
+lazy:
+
+```text
+raw bytes
+  -> simd-json tape              when tape/view execution needs it
+  -> structural index            when structural search needs it
+  -> Val tree                    when owned materialization is required
+  -> ObjVec columnar projection  when uniform object arrays benefit from it
+```
+
+This lets simple path and streaming queries avoid building a full owned tree.
+Materialization happens only when the selected backend or builtin requires it.
+
+## Physical Plan Nodes
+
+Important `PlanNode` variants include:
+
+```text
+Root                  document root
+RootPath              static field/index path rooted at $
+Chain                 path steps applied to another node
+Pipeline              source + stages + sink
+Structural            deep-search plan with VM fallback
+Object / Array         shaped output
+Call                  builtin call
+Let                   lexical binding
+Vm                    compiled bytecode fallback
+```
+
+Example:
+
+```text
+{
+  "names": $.orders.filter(status == "paid").map(customer.name),
+  "count": $.orders.count()
+}
+```
+
+Roughly lowers to:
+
+```text
+Object
+  field "names" -> Pipeline
+    source: RootPath($.orders)
+    stages:
+      Filter(status == "paid")
+      Map(customer.name)
+    sink: Collect
+
+  field "count" -> Pipeline
+    source: RootPath($.orders)
+    stages: []
+    sink: Count
+```
+
+The object shape remains one physical expression, but each field can use the
+best backend available for that sub-expression.
+
+## Pipeline IR
+
+A pipeline is a row source plus an ordered stage list plus a terminal sink.
+
+```text
+source -> stage -> stage -> stage -> sink
+```
+
+Common sources:
+
+```text
+$.orders
+@.items
+receiver expression
+```
+
+Common stages:
+
+```text
+filter(predicate)
+map(projection)
+flat_map(projection)
+take(n)
+skip(n)
+take_while(predicate)
+drop_while(predicate)
+sort_by(key)
+unique_by(key)
+```
+
+Common sinks:
+
+```text
+collect
+first
+last
+count
+sum
+avg
+min
+max
+count_by
+group_by
+index_by
+```
+
+The pipeline IR is not only an executor format. It is also where builtin
+metadata is used for planning: cardinality, order behavior, materialization
+requirements, view compatibility, sink demand, and lowering shape.
+
+## Demand Propagation
+
+Demand propagation is a backward pass through a pipeline. The sink says what it
+needs, and each stage translates that demand into the demand it places on its
+input.
+
+The core demand model is:
+
+```text
+PullDemand:
+  All              pull every input
+  FirstInput(n)    pull at most n input rows
+  UntilOutput(n)   pull until n output rows have survived
+
+ValueNeed:
+  None             row payload is not needed
+  Predicate        enough value is needed to test a predicate
+  Numeric          numeric interpretation is needed
+  Whole            full row is needed
+```
+
+Example:
+
+```text
+$.orders.filter(status == "paid").first()
+```
+
+The `first` sink asks for one output. `filter` converts that to
+`UntilOutput(1)`, because it may need to inspect many input rows before one row
+passes. The executor can stop as soon as the first matching output exists.
+
+```text
+sink: First
+  demand: FirstInput(1)
+
+filter(status == "paid")
+  upstream demand: UntilOutput(1)
+```
+
+This is different from a hand-written `filter_first` fusion. The behavior comes
+from the builtin demand laws, so any compatible chain can participate without a
+new pairwise fused function.
+
+## Barrier Strategy
+
+Some stages are barriers: they need more than one row before they can produce
+correct output. Sorting is the most important example.
+
+```text
+$.orders.sort_by(-total).take(10)
+```
+
+A naive plan fully sorts all rows and then takes ten. A demand-aware plan can
+derive a bounded sort strategy:
+
+```text
+source: $.orders
+stage: SortBy(-total) with SortTopK(10)
+stage: Take(10)
+sink: Collect
+```
+
+More complex chains need careful handling:
+
+```text
+$.orders
+  .sort_by(-total)
+  .take_while(customer.tier == "gold")
+  .take(10)
+```
+
+`take_while` does not guarantee that the first ten sorted rows satisfy the
+predicate. The safe strategy is not simply `SortTopK(10)`. The planner uses
+stage metadata to decide whether bounded sorting is safe, whether the sort must
+produce until enough downstream outputs survive, or whether full materialization
+is required.
+
+The rule is semantic safety first, then performance.
+
+## Builtin Registry
+
+Builtins are intended to be registry-driven. A builtin should describe its
+behavior once, and all executors should consume that metadata.
+
+Important metadata includes:
+
+```text
+name and aliases
+category
+cardinality
+pipeline lowering
+view-stage capability
+sink accumulator
+sink demand
+demand law
+order effect
+materialization requirement
+structural capability
+```
+
+This avoids scattering builtin-specific rules across VM, pipeline, view, and
+planner code.
+
+For example, `count` declares that it is a sink needing all rows but no row
+payload:
+
+```text
+pull: All
+value: None
+order: false
+```
+
+That lets executors count rows without materializing full values when the row
+source supports it.
+
+## Execution Backends
+
+### Structural Index
+
+Structural plans use `jetro-experimental` bitmap indexing for deep-search and
+key-presence style queries.
+
+```text
+$..price
+$..find(@.status == "paid")
+$..shape({id, total})
+```
+
+When the structural backend is available, it can answer supported descendant
+queries from raw bytes and index data. A VM fallback remains attached for
+semantic correctness.
+
+### View Pipeline
+
+The view pipeline executes against a borrowed `ValueView`.
+
+`ValueView` abstracts over:
+
+```text
+ValView      borrowed view into an owned Val tree
+TapeView     borrowed view into simd-json tape data
+```
+
+This is the bridge that allows eligible stages and sinks to run without fully
+materializing a `Val` tree.
+
+### Pipeline Backend
+
+The pipeline backend executes lowered source/stage/sink chains. It can use row
+streaming, composed stages, barrier strategies, and columnar promotion for
+uniform object arrays.
+
+### VM Fallback
+
+The VM is the general executor. It runs compiled bytecode programs and preserves
+correctness for expressions that are not yet lowered into a specialized backend.
+
+The VM remains important for:
+
+```text
+arbitrary scalar expressions
+stage predicates and projections that are not view-native
+let bindings
+conditionals
+patches
+complex dynamic expressions
+fallback execution
+```
+
+## Complex Query Walkthrough
+
+Query:
+
+```text
+{
+  "leaders": $.orders
+    .filter(status == "paid" and total > 100)
+    .sort_by(-total)
+    .take(3)
+    .map({
+      id,
+      customer: customer.name,
+      label: f"{customer.name}: ${total}",
+      total
+    }),
+
+  "stats": {
+    "paid": $.orders.filter(status == "paid").count(),
+    "revenue": $.orders.filter(status == "paid").map(total).sum()
+  }
+}
+```
+
+Lowering shape:
+
+```text
+Object
+  "leaders" -> Pipeline
+    source: RootPath($.orders)
+    stages:
+      Filter(status == "paid" and total > 100)
+      SortBy(-total)
+      Take(3)
+      Map({id, customer, label, total})
+    sink: Collect
+
+  "stats" -> Object
+    "paid" -> Pipeline
+      source: RootPath($.orders)
+      stages:
+        Filter(status == "paid")
+      sink: Count
+
+    "revenue" -> Pipeline
+      source: RootPath($.orders)
+      stages:
+        Filter(status == "paid")
+        Map(total)
+      sink: Sum
+```
+
+Execution behavior:
+
+```text
+leaders:
+  - source can be read from bytes/tape if available
+  - filter is streaming
+  - sort is a barrier
+  - take(3) pushes bounded demand backward
+  - sort may use top-k strategy when safe
+  - map shapes only the surviving rows
+
+stats.paid:
+  - count needs row existence, not whole row payload
+  - filter needs predicate fields
+  - executor can avoid building result rows
+
+stats.revenue:
+  - sum needs numeric values
+  - map(total) can become a numeric projection when view-native
+```
+
+The planner does not need a dedicated
+`filter_sort_take_map_count_sum_object` implementation. The plan is assembled
+from builtin metadata and backend capabilities.
+
+## Design Principles
+
+- One language semantics, multiple execution backends.
+- Optimize by metadata and algebraic properties, not by enumerating every chain.
+- Keep raw bytes authoritative when possible.
+- Materialize only at backend boundaries or when a builtin requires ownership.
+- Prefer `ValueView` and tape navigation for read-only streaming work.
+- Use the VM as the correctness fallback.
+- Make builtin integration registry-driven so adding a builtin does not require
+  editing every executor.
+
+## Public Core APIs
+
+The main document handle is:
 
 ```rust
-pub enum Error {
-    Parse(ParseError),
-    Eval(EvalError),
-}
-
-pub struct ParseError(pub String);
-pub struct EvalError(pub String);
+let j = jetro_core::Jetro::from_bytes(bytes)?;
+let out = j.collect("$.orders.count()")?;
 ```
 
-Both implement `std::error::Error + Display`. The umbrella `jetro` crate re-exports these and keeps the same shape. `jetrodb` extends with `Db` and `Io` variants.
+For long-lived multi-document use, `JetroEngine` provides an explicit plan cache
+and shared VM:
 
----
+```rust
+let engine = jetro_core::JetroEngine::new();
+let out = engine.collect_bytes(bytes, "$.orders.count()")?;
+```
+
+The top-level `jetro` crate intentionally exposes a smaller facade for end
+users.
+
+## Current Direction
+
+The architecture is converging toward:
+
+```text
+registry-defined builtins
+  -> logical/pipeline lowering
+  -> demand-aware physical planning
+  -> ValueView/tape execution where possible
+  -> VM fallback only where necessary
+```
+
+The goal is full tape-aware streaming without duplicating builtin logic across
+VM, pipeline, view, and composed execution paths.
+
+## Testing
+
+The core crate contains parser, planner, executor, pipeline, view, structural,
+and VM tests.
+
+```bash
+cargo test -p jetro-core
+cargo test -p jetro-core some_test_name -- --nocapture
+```
+
+Use focused tests when changing lowering, demand propagation, or builtin
+metadata. Use full core tests before committing executor or value-model changes.
 
 ## License
 
