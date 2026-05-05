@@ -214,6 +214,13 @@ impl Builtin for First {
             .demand_law(BuiltinDemandLaw::First)
             .lowering(BuiltinPipelineLowering::TerminalSink)
     }
+    #[inline]
+    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+        match args {
+            super::BuiltinArgs::I64(n) => { super::first_apply(recv, *n) }
+            _ => None,
+        }
+    }
 }
 
 /// Selects the last element; terminal positional sink.
@@ -228,6 +235,13 @@ impl Builtin for Last {
             .select_one_sink(BuiltinSelectionPosition::Last)
             .demand_law(BuiltinDemandLaw::Last)
             .lowering(BuiltinPipelineLowering::TerminalSink)
+    }
+    #[inline]
+    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+        match args {
+            super::BuiltinArgs::I64(n) => { super::last_apply(recv, *n) }
+            _ => None,
+        }
     }
 }
 
@@ -495,6 +509,13 @@ impl Builtin for Flatten {
     const METHOD: BuiltinMethod = BuiltinMethod::Flatten;
     const NAME: &'static str = "flatten";
     fn spec() -> BuiltinSpec { expand_simple_spec() }
+    #[inline]
+    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+        match args {
+            super::BuiltinArgs::Usize(depth) => { super::flatten_depth_apply(recv, *depth) }
+            _ => None,
+        }
+    }
 }
 
 /// `explode` — same as flatten with object semantics.
@@ -649,6 +670,13 @@ impl Builtin for Nth {
     const METHOD: BuiltinMethod = BuiltinMethod::Nth;
     const NAME: &'static str = "nth";
     fn spec() -> BuiltinSpec { positional_native_spec() }
+    #[inline]
+    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+        match args {
+            super::BuiltinArgs::I64(n) => { super::nth_any_apply(recv, *n) }
+            _ => None,
+        }
+    }
 }
 
 /// `collect()` — materialise stream to Vec; positional pass-through.
@@ -1152,6 +1180,13 @@ impl Builtin for Pick {
     const METHOD: BuiltinMethod = BuiltinMethod::Pick;
     const NAME: &'static str = "pick";
     fn spec() -> BuiltinSpec { object_simple_spec() }
+    #[inline]
+    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+        match args {
+            super::BuiltinArgs::StrVec(keys) => { super::pick_apply(recv, keys) }
+            _ => None,
+        }
+    }
 }
 
 /// `omit(...keys)` — drop given keys from object.
@@ -1160,6 +1195,13 @@ impl Builtin for Omit {
     const METHOD: BuiltinMethod = BuiltinMethod::Omit;
     const NAME: &'static str = "omit";
     fn spec() -> BuiltinSpec { object_simple_spec() }
+    #[inline]
+    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+        match args {
+            super::BuiltinArgs::StrVec(keys) => { super::omit_apply(recv, keys) }
+            _ => None,
+        }
+    }
 }
 
 /// `merge(...objs)` — shallow merge objects.
@@ -1588,6 +1630,13 @@ impl Builtin for DiffWindow {
     const METHOD: BuiltinMethod = BuiltinMethod::DiffWindow;
     const NAME: &'static str = "diff_window";
     fn spec() -> BuiltinSpec { streaming_one_to_one_element_spec() }
+    #[inline]
+    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+        match args {
+            super::BuiltinArgs::None => { super::diff_window_apply(recv) }
+            _ => None,
+        }
+    }
 }
 
 /// `pct_change(n)` — pairwise relative change at lag N.
@@ -1596,6 +1645,13 @@ impl Builtin for PctChange {
     const METHOD: BuiltinMethod = BuiltinMethod::PctChange;
     const NAME: &'static str = "pct_change";
     fn spec() -> BuiltinSpec { streaming_one_to_one_element_spec() }
+    #[inline]
+    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+        match args {
+            super::BuiltinArgs::None => { super::pct_change_apply(recv) }
+            _ => None,
+        }
+    }
 }
 
 /// `cummax()` — running maximum.
@@ -1604,6 +1660,13 @@ impl Builtin for CumMax {
     const METHOD: BuiltinMethod = BuiltinMethod::CumMax;
     const NAME: &'static str = "cummax";
     fn spec() -> BuiltinSpec { streaming_one_to_one_element_spec() }
+    #[inline]
+    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+        match args {
+            super::BuiltinArgs::None => { super::cummax_apply(recv) }
+            _ => None,
+        }
+    }
 }
 
 /// `cummin()` — running minimum.
@@ -1612,6 +1675,13 @@ impl Builtin for CumMin {
     const METHOD: BuiltinMethod = BuiltinMethod::CumMin;
     const NAME: &'static str = "cummin";
     fn spec() -> BuiltinSpec { streaming_one_to_one_element_spec() }
+    #[inline]
+    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+        match args {
+            super::BuiltinArgs::None => { super::cummin_apply(recv) }
+            _ => None,
+        }
+    }
 }
 
 /// `zscore()` — element standardised by mean/std.
@@ -1620,6 +1690,13 @@ impl Builtin for Zscore {
     const METHOD: BuiltinMethod = BuiltinMethod::Zscore;
     const NAME: &'static str = "zscore";
     fn spec() -> BuiltinSpec { streaming_one_to_one_element_spec() }
+    #[inline]
+    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+        match args {
+            super::BuiltinArgs::None => { super::zscore_apply(recv) }
+            _ => None,
+        }
+    }
 }
 
 // ── Scalar element-only (basic) ──────────────────────────────────────────────
@@ -1697,21 +1774,10 @@ scalar_native_element! {
     ParseInt => ParseInt, "parse_int", apply: parse_int_apply;
     ParseFloat => ParseFloat, "parse_float", apply: parse_float_apply;
     ParseBool => ParseBool, "parse_bool", apply: parse_bool_apply;
-    Repeat => Repeat, "repeat", aliases: ["repeat_str"];
-    PadLeft => PadLeft, "pad_left";
-    PadRight => PadRight, "pad_right";
-    Center => Center, "center";
-    ReCapturesAll => ReCapturesAll, "captures_all";
-    ReSplit => ReSplit, "split_re";
-    ReReplace => ReReplace, "replace_re";
-    ReReplaceAll => ReReplaceAll, "replace_all_re";
-    ContainsAny => ContainsAny, "contains_any";
-    ContainsAll => ContainsAll, "contains_all";
     Schema => Schema, "schema", apply: schema_apply;
     Type => Type, "type", apply: type_name_apply;
     ToString => ToString, "to_string", apply: to_string_apply;
     ToJson => ToJson, "to_json", apply: to_json_apply;
-    Indent => Indent, "indent";
     Dedent => Dedent, "dedent", apply: dedent_apply;
 }
 
@@ -1759,6 +1825,13 @@ impl Builtin for Slice {
             .order_effect(BuiltinPipelineOrderEffect::Preserves)
             .lowering(BuiltinPipelineLowering::IntRangeArg)
     }
+    #[inline]
+    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+        match args {
+            super::BuiltinArgs::I64Opt { first, second } => { Some(super::slice_apply(recv.clone(), *first, *second)) }
+            _ => None,
+        }
+    }
 }
 
 /// `replace(needle, with)` — single-replace string-pair scalar.
@@ -1779,6 +1852,13 @@ impl Builtin for Replace {
             .order_effect(BuiltinPipelineOrderEffect::Preserves)
             .lowering(BuiltinPipelineLowering::StringPairArg)
     }
+    #[inline]
+    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+        match args {
+            super::BuiltinArgs::StrPair { first, second } => { super::replace_apply(recv.clone(), first, second, false) }
+            _ => None,
+        }
+    }
 }
 
 /// `replace_all(needle, with)` — replace-all string-pair scalar.
@@ -1798,6 +1878,13 @@ impl Builtin for ReplaceAll {
             ))
             .order_effect(BuiltinPipelineOrderEffect::Preserves)
             .lowering(BuiltinPipelineLowering::StringPairArg)
+    }
+    #[inline]
+    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+        match args {
+            super::BuiltinArgs::StrPair { first, second } => { super::replace_apply(recv.clone(), first, second, true) }
+            _ => None,
+        }
     }
 }
 
@@ -2087,4 +2174,110 @@ str_arg_scalar_native! {
     ReMatchFirst, "match_first", re_match_first_apply;
     ReMatchAll, "match_all", re_match_all_apply;
     ReCaptures, "captures", re_captures_apply;
+}
+
+// ── More multi-arg scalar element methods ──
+
+// Str-arg cases that extend the str_arg_scalar_native pattern.
+str_arg_scalar_native! {
+    ReCapturesAll, "captures_all", re_captures_all_apply;
+    ReSplit, "split_re", re_split_apply;
+}
+
+macro_rules! str_vec_arg_scalar_native {
+    ( $( $ty:ident, $name:literal, $apply:ident ; )* ) => {
+        $(
+            pub(crate) struct $ty;
+            impl Builtin for $ty {
+                const METHOD: BuiltinMethod = BuiltinMethod::$ty;
+                const NAME: &'static str = $name;
+                fn spec() -> BuiltinSpec { scalar_native_element_spec() }
+                #[inline]
+                fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+                    match args {
+                        super::BuiltinArgs::StrVec(v) => super::$apply(recv, v),
+                        _ => None,
+                    }
+                }
+            }
+        )*
+    };
+}
+str_vec_arg_scalar_native! {
+    ContainsAny, "contains_any", contains_any_apply;
+    ContainsAll, "contains_all", contains_all_apply;
+}
+
+macro_rules! usize_arg_scalar_native {
+    ( $( $ty:ident, $name:literal, $apply:ident $( , aliases: [ $( $alias:literal ),* $(,)? ] )? ; )* ) => {
+        $(
+            pub(crate) struct $ty;
+            impl Builtin for $ty {
+                const METHOD: BuiltinMethod = BuiltinMethod::$ty;
+                const NAME: &'static str = $name;
+                $( const ALIASES: &'static [&'static str] = &[ $( $alias ),* ]; )?
+                fn spec() -> BuiltinSpec { scalar_native_element_spec() }
+                #[inline]
+                fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+                    match args {
+                        super::BuiltinArgs::Usize(n) => super::$apply(recv, *n),
+                        _ => None,
+                    }
+                }
+            }
+        )*
+    };
+}
+usize_arg_scalar_native! {
+    Repeat, "repeat", repeat_apply, aliases: ["repeat_str"];
+    Indent, "indent", indent_apply;
+}
+
+macro_rules! pad_arg_scalar_native {
+    ( $( $ty:ident, $name:literal, $apply:ident ; )* ) => {
+        $(
+            pub(crate) struct $ty;
+            impl Builtin for $ty {
+                const METHOD: BuiltinMethod = BuiltinMethod::$ty;
+                const NAME: &'static str = $name;
+                fn spec() -> BuiltinSpec { scalar_native_element_spec() }
+                #[inline]
+                fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+                    match args {
+                        super::BuiltinArgs::Pad { width, fill } => super::$apply(recv, *width, *fill),
+                        _ => None,
+                    }
+                }
+            }
+        )*
+    };
+}
+pad_arg_scalar_native! {
+    PadLeft, "pad_left", pad_left_apply;
+    PadRight, "pad_right", pad_right_apply;
+    Center, "center", center_apply;
+}
+
+macro_rules! str_pair_scalar_native {
+    ( $( $ty:ident, $name:literal, $apply:expr ; )* ) => {
+        $(
+            pub(crate) struct $ty;
+            impl Builtin for $ty {
+                const METHOD: BuiltinMethod = BuiltinMethod::$ty;
+                const NAME: &'static str = $name;
+                fn spec() -> BuiltinSpec { scalar_native_element_spec() }
+                #[inline]
+                fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+                    match args {
+                        super::BuiltinArgs::StrPair { first, second } => $apply(recv, first, second),
+                        _ => None,
+                    }
+                }
+            }
+        )*
+    };
+}
+str_pair_scalar_native! {
+    ReReplace, "replace_re", super::re_replace_apply;
+    ReReplaceAll, "replace_all_re", super::re_replace_all_apply;
 }
