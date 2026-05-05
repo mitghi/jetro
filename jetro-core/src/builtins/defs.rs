@@ -390,6 +390,18 @@ impl Builtin for DropWhile {
             .order_effect(BuiltinPipelineOrderEffect::Blocks)
             .lowering(BuiltinPipelineLowering::ExprArg)
     }
+
+    /// DropWhile in the streaming loop is a no-op pass-through (the materialised
+    /// barrier path handles the actual drop semantics in legacy_exec). Mirrors
+    /// the original `PrefixWhile { take: false }` arm in val_stage_flow.
+    #[inline]
+    fn apply_stream(
+        _ctx: &mut super::builtin_def::StreamCtx<'_, '_>,
+        item: crate::value::Val,
+        _body: Option<&crate::vm::Program>,
+    ) -> Result<crate::pipeline::StageFlow<crate::value::Val>, crate::context::EvalError> {
+        Ok(crate::pipeline::StageFlow::Continue(item))
+    }
 }
 
 // ── Reducer sinks ────────────────────────────────────────────────────────────
@@ -1405,6 +1417,30 @@ impl Builtin for TransformKeys {
     const METHOD: BuiltinMethod = BuiltinMethod::TransformKeys;
     const NAME: &'static str = "transform_keys";
     fn spec() -> BuiltinSpec { object_lambda_spec() }
+
+    #[inline]
+    fn apply_stream(
+        ctx: &mut super::builtin_def::StreamCtx<'_, '_>,
+        item: crate::value::Val,
+        body: Option<&crate::vm::Program>,
+    ) -> Result<crate::pipeline::StageFlow<crate::value::Val>, crate::context::EvalError> {
+        object_lambda_apply_stream(ctx, item, body)
+    }
+}
+
+/// Helper used by all ObjectLambda variants — single body shared across
+/// TransformKeys / TransformValues / FilterKeys / FilterValues.
+#[inline]
+fn object_lambda_apply_stream(
+    ctx: &mut super::builtin_def::StreamCtx<'_, '_>,
+    item: crate::value::Val,
+    body: Option<&crate::vm::Program>,
+) -> Result<crate::pipeline::StageFlow<crate::value::Val>, crate::context::EvalError> {
+    let prog = body.expect("object lambda body");
+    let result = crate::pipeline::legacy_exec::apply_lambda_obj(
+        ctx.stage, &item, ctx.vm, ctx.env, ctx.kernel, prog,
+    )?;
+    Ok(crate::pipeline::StageFlow::Continue(result))
 }
 
 /// `transform_values(lam)` — map over values of an object.
@@ -1413,6 +1449,14 @@ impl Builtin for TransformValues {
     const METHOD: BuiltinMethod = BuiltinMethod::TransformValues;
     const NAME: &'static str = "transform_values";
     fn spec() -> BuiltinSpec { object_lambda_spec() }
+    #[inline]
+    fn apply_stream(
+        ctx: &mut super::builtin_def::StreamCtx<'_, '_>,
+        item: crate::value::Val,
+        body: Option<&crate::vm::Program>,
+    ) -> Result<crate::pipeline::StageFlow<crate::value::Val>, crate::context::EvalError> {
+        object_lambda_apply_stream(ctx, item, body)
+    }
 }
 
 /// `filter_keys(pred)` — drop entries by key predicate.
@@ -1421,6 +1465,14 @@ impl Builtin for FilterKeys {
     const METHOD: BuiltinMethod = BuiltinMethod::FilterKeys;
     const NAME: &'static str = "filter_keys";
     fn spec() -> BuiltinSpec { object_lambda_spec() }
+    #[inline]
+    fn apply_stream(
+        ctx: &mut super::builtin_def::StreamCtx<'_, '_>,
+        item: crate::value::Val,
+        body: Option<&crate::vm::Program>,
+    ) -> Result<crate::pipeline::StageFlow<crate::value::Val>, crate::context::EvalError> {
+        object_lambda_apply_stream(ctx, item, body)
+    }
 }
 
 /// `filter_values(pred)` — drop entries by value predicate.
@@ -1429,6 +1481,14 @@ impl Builtin for FilterValues {
     const METHOD: BuiltinMethod = BuiltinMethod::FilterValues;
     const NAME: &'static str = "filter_values";
     fn spec() -> BuiltinSpec { object_lambda_spec() }
+    #[inline]
+    fn apply_stream(
+        ctx: &mut super::builtin_def::StreamCtx<'_, '_>,
+        item: crate::value::Val,
+        body: Option<&crate::vm::Program>,
+    ) -> Result<crate::pipeline::StageFlow<crate::value::Val>, crate::context::EvalError> {
+        object_lambda_apply_stream(ctx, item, body)
+    }
 }
 
 // ── Path operations ──────────────────────────────────────────────────────────

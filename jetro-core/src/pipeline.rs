@@ -30,7 +30,7 @@ mod composed_stage;
 mod exec;
 mod indexed_exec;
 mod kernels;
-mod legacy_exec;
+pub(crate) mod legacy_exec;
 mod ir;
 mod lower;
 pub(crate) mod logical_lower;
