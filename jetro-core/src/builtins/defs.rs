@@ -102,6 +102,10 @@ impl Builtin for Compact {
     fn spec() -> BuiltinSpec {
         BuiltinSpec::new(BuiltinCategory::StreamingFilter, BuiltinCardinality::Filtering).cost(10.0)
     }
+    #[inline]
+    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+        super::compact_apply(recv)
+    }
 }
 
 /// Removes elements equal to the literal argument; degenerate equality filter.
@@ -282,6 +286,10 @@ impl Builtin for Len {
             .view_scalar()
             .count_sink()
     }
+    #[inline]
+    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+        super::len_apply(recv)
+    }
 }
 
 /// Sum of numeric stream elements.
@@ -444,6 +452,10 @@ impl Builtin for Enumerate {
             .cost(10.0)
             .element()
     }
+    #[inline]
+    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+        super::enumerate_apply(recv)
+    }
 }
 
 /// `pairwise` — yields adjacent pairs; element-wise indexed.
@@ -456,6 +468,10 @@ impl Builtin for Pairwise {
             .indexed()
             .cost(10.0)
             .element()
+    }
+    #[inline]
+    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+        super::pairwise_apply(recv)
     }
 }
 
@@ -514,6 +530,10 @@ impl Builtin for Lines {
     const METHOD: BuiltinMethod = BuiltinMethod::Lines;
     const NAME: &'static str = "lines";
     fn spec() -> BuiltinSpec { expand_element_spec() }
+    #[inline]
+    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+        super::lines_apply(recv)
+    }
 }
 
 /// `words` — whitespace-tokenise string.
@@ -522,6 +542,10 @@ impl Builtin for Words {
     const METHOD: BuiltinMethod = BuiltinMethod::Words;
     const NAME: &'static str = "words";
     fn spec() -> BuiltinSpec { expand_element_spec() }
+    #[inline]
+    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+        super::words_apply(recv)
+    }
 }
 
 /// `chars` — string char iterator.
@@ -530,6 +554,10 @@ impl Builtin for Chars {
     const METHOD: BuiltinMethod = BuiltinMethod::Chars;
     const NAME: &'static str = "chars";
     fn spec() -> BuiltinSpec { expand_element_spec() }
+    #[inline]
+    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+        super::chars_apply(recv)
+    }
 }
 
 /// `chars_of` — chars at given positions.
@@ -538,6 +566,10 @@ impl Builtin for CharsOf {
     const METHOD: BuiltinMethod = BuiltinMethod::CharsOf;
     const NAME: &'static str = "chars_of";
     fn spec() -> BuiltinSpec { expand_element_spec() }
+    #[inline]
+    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+        super::chars_of_apply(recv)
+    }
 }
 
 /// `bytes` — string byte iterator.
@@ -546,6 +578,10 @@ impl Builtin for Bytes {
     const METHOD: BuiltinMethod = BuiltinMethod::Bytes;
     const NAME: &'static str = "bytes";
     fn spec() -> BuiltinSpec { expand_element_spec() }
+    #[inline]
+    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+        super::bytes_of_apply(recv)
+    }
 }
 
 // ── Find-first / find-one ────────────────────────────────────────────────────
@@ -600,6 +636,10 @@ impl Builtin for Collect {
     const METHOD: BuiltinMethod = BuiltinMethod::Collect;
     const NAME: &'static str = "collect";
     fn spec() -> BuiltinSpec { positional_native_spec() }
+    #[inline]
+    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+        Some(super::collect_apply(recv))
+    }
 }
 
 // ── Barrier family ───────────────────────────────────────────────────────────
@@ -807,6 +847,10 @@ impl Builtin for Unique {
     fn spec() -> BuiltinSpec {
         unique_spec().lowering(BuiltinPipelineLowering::Nullary)
     }
+    #[inline]
+    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+        super::unique_arr_apply(recv)
+    }
 }
 
 /// `unique_by(key)` — distinct by projected key.
@@ -833,6 +877,10 @@ impl Builtin for Reverse {
             .demand_law(BuiltinDemandLaw::OrderBarrier)
             .materialization(BuiltinPipelineMaterialization::ComposedBarrier)
             .lowering(BuiltinPipelineLowering::Nullary)
+    }
+    #[inline]
+    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+        super::reverse_any_apply(recv)
     }
 }
 
@@ -936,6 +984,10 @@ impl Builtin for Keys {
     const METHOD: BuiltinMethod = BuiltinMethod::Keys;
     const NAME: &'static str = "keys";
     fn spec() -> BuiltinSpec { object_element_spec() }
+    #[inline]
+    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+        Some(super::keys_apply(recv))
+    }
 }
 
 /// `values` — extract values of an object (element-wise).
@@ -944,6 +996,10 @@ impl Builtin for Values {
     const METHOD: BuiltinMethod = BuiltinMethod::Values;
     const NAME: &'static str = "values";
     fn spec() -> BuiltinSpec { object_element_spec() }
+    #[inline]
+    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+        Some(super::values_apply(recv))
+    }
 }
 
 /// `entries` — extract (key, value) pairs (element-wise).
@@ -952,6 +1008,10 @@ impl Builtin for Entries {
     const METHOD: BuiltinMethod = BuiltinMethod::Entries;
     const NAME: &'static str = "entries";
     fn spec() -> BuiltinSpec { object_element_spec() }
+    #[inline]
+    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+        Some(super::entries_apply(recv))
+    }
 }
 
 #[inline]
@@ -965,6 +1025,10 @@ impl Builtin for ToPairs {
     const METHOD: BuiltinMethod = BuiltinMethod::ToPairs;
     const NAME: &'static str = "to_pairs";
     fn spec() -> BuiltinSpec { object_simple_spec() }
+    #[inline]
+    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+        super::to_pairs_apply(recv)
+    }
 }
 
 /// `from_pairs` — invert `to_pairs`.
@@ -973,6 +1037,10 @@ impl Builtin for FromPairs {
     const METHOD: BuiltinMethod = BuiltinMethod::FromPairs;
     const NAME: &'static str = "from_pairs";
     fn spec() -> BuiltinSpec { object_simple_spec() }
+    #[inline]
+    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+        super::from_pairs_apply(recv)
+    }
 }
 
 /// `invert` — swap keys and values.
@@ -981,6 +1049,10 @@ impl Builtin for Invert {
     const METHOD: BuiltinMethod = BuiltinMethod::Invert;
     const NAME: &'static str = "invert";
     fn spec() -> BuiltinSpec { object_simple_spec() }
+    #[inline]
+    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+        super::invert_apply(recv)
+    }
 }
 
 /// `pick(...keys)` — restrict object to given keys.
@@ -1252,6 +1324,10 @@ impl Builtin for ToCsv {
     const METHOD: BuiltinMethod = BuiltinMethod::ToCsv;
     const NAME: &'static str = "to_csv";
     fn spec() -> BuiltinSpec { serialization_spec() }
+    #[inline]
+    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+        super::to_csv_apply(recv)
+    }
 }
 
 /// `to_tsv()` — TSV serialiser.
@@ -1260,6 +1336,10 @@ impl Builtin for ToTsv {
     const METHOD: BuiltinMethod = BuiltinMethod::ToTsv;
     const NAME: &'static str = "to_tsv";
     fn spec() -> BuiltinSpec { serialization_spec() }
+    #[inline]
+    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+        super::to_tsv_apply(recv)
+    }
 }
 
 /// `equi_join(left, right, on)` — relational join barrier.
@@ -1434,9 +1514,9 @@ scalar_native_element! {
     KebabCase => KebabCase, "kebab_case", apply: kebab_case_apply;
     CamelCase => CamelCase, "camel_case", apply: camel_case_apply;
     PascalCase => PascalCase, "pascal_case", apply: pascal_case_apply;
-    ParseInt => ParseInt, "parse_int";
-    ParseFloat => ParseFloat, "parse_float";
-    ParseBool => ParseBool, "parse_bool";
+    ParseInt => ParseInt, "parse_int", apply: parse_int_apply;
+    ParseFloat => ParseFloat, "parse_float", apply: parse_float_apply;
+    ParseBool => ParseBool, "parse_bool", apply: parse_bool_apply;
     Repeat => Repeat, "repeat", aliases: ["repeat_str"];
     PadLeft => PadLeft, "pad_left";
     PadRight => PadRight, "pad_right";
@@ -1454,10 +1534,10 @@ scalar_native_element! {
     ReReplaceAll => ReReplaceAll, "replace_all_re";
     ContainsAny => ContainsAny, "contains_any";
     ContainsAll => ContainsAll, "contains_all";
-    Schema => Schema, "schema";
-    Type => Type, "type";
-    ToString => ToString, "to_string";
-    ToJson => ToJson, "to_json";
+    Schema => Schema, "schema", apply: schema_apply;
+    Type => Type, "type", apply: type_name_apply;
+    ToString => ToString, "to_string", apply: to_string_apply;
+    ToJson => ToJson, "to_json", apply: to_json_apply;
     Indent => Indent, "indent";
     Dedent => Dedent, "dedent", apply: dedent_apply;
 }
@@ -1570,6 +1650,10 @@ impl Builtin for FromJson {
     const METHOD: BuiltinMethod = BuiltinMethod::FromJson;
     const NAME: &'static str = "from_json";
     fn spec() -> BuiltinSpec { default_scalar_spec(BuiltinMethod::FromJson) }
+    #[inline]
+    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+        super::from_json_apply(recv)
+    }
 }
 
 /// `includes(item)` / `contains(item)` — array membership scalar.
