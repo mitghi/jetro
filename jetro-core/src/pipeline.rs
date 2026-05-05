@@ -70,7 +70,7 @@ pub use plan::{
 pub use plan::select_strategy;
 pub(crate) use reducer::ReducerAccumulator;
 pub(crate) use sink_accumulator::SinkAccumulator;
-pub(crate) use stage_flow::{stage_executor, StageFlow};
+pub(crate) use stage_flow::StageFlow;
 
 #[cfg(feature = "simd-json")]
 /// Executes the field-chain traversal of `body` against a borrowed simd-json tape, returning

@@ -10,11 +10,11 @@ use std::sync::Arc;
 
 use crate::ast::Expr;
 use crate::builtin_registry::{
-    participates_in_demand, pipeline_executor, pipeline_materialization, pipeline_order_effect,
+    participates_in_demand, pipeline_materialization, pipeline_order_effect,
     pipeline_shape, BuiltinId,
 };
 use crate::builtins::{
-    BuiltinMethod, BuiltinPipelineExecutor, BuiltinPipelineMaterialization,
+    BuiltinMethod, BuiltinPipelineMaterialization,
     BuiltinPipelineOrderEffect, BuiltinSelectionPosition, BuiltinSinkAccumulator,
     BuiltinSinkDemand, BuiltinSinkSpec, BuiltinSinkValueNeed, BuiltinViewStage,
 };
@@ -240,8 +240,6 @@ pub(crate) struct StageDescriptor<'a> {
     pub body: Option<&'a Program>,
     /// Integer argument (e.g. the `n` in `take(n)`), if applicable.
     pub usize_arg: Option<usize>,
-    /// Override for the pipeline executor, used for special-cased stages like `SortedDedup`.
-    pub executor_override: Option<BuiltinPipelineExecutor>,
     view_stage_override: Option<BuiltinViewStage>,
     // when true, a one-to-one stage may fall back to Preserves order effect
     allow_one_to_one_order_fallback: bool,
@@ -256,21 +254,19 @@ impl<'a> StageDescriptor<'a> {
             method: Some(method),
             body: None,
             usize_arg: None,
-            executor_override: None,
             view_stage_override: None,
             allow_one_to_one_order_fallback: false,
             receiver_safe_without_body: true,
         }
     }
 
-    // Used for stages with no builtin method but a required specific executor (e.g. SortedDedup).
+    // Used for stages with no builtin method (SortedDedup, CompiledMap synthetics).
     #[inline]
-    pub(crate) fn special(executor: BuiltinPipelineExecutor) -> Self {
+    pub(crate) fn special() -> Self {
         Self {
             method: None,
             body: None,
             usize_arg: None,
-            executor_override: Some(executor),
             view_stage_override: None,
             allow_one_to_one_order_fallback: false,
             receiver_safe_without_body: true,
@@ -292,12 +288,6 @@ impl<'a> StageDescriptor<'a> {
     #[inline]
     pub(crate) fn with_view_stage(mut self, stage: BuiltinViewStage) -> Self {
         self.view_stage_override = Some(stage);
-        self
-    }
-
-    #[inline]
-    pub(crate) fn with_executor(mut self, executor: BuiltinPipelineExecutor) -> Self {
-        self.executor_override = Some(executor);
         self
     }
 
@@ -366,15 +356,6 @@ impl<'a> StageDescriptor<'a> {
             .unwrap_or(self.receiver_safe_without_body)
     }
 
-    /// Returns the effective executor for this stage: the override if set, otherwise the
-    /// executor registered for the method in the builtin registry.
-    #[inline]
-    pub(crate) fn executor(self) -> Option<BuiltinPipelineExecutor> {
-        self.executor_override.or_else(|| {
-            self.method
-                .and_then(|method| pipeline_executor(BuiltinId::from_method(method)))
-        })
-    }
 }
 
 macro_rules! view_body_stage_descriptor {
@@ -490,22 +471,17 @@ impl Stage {
             Stage::IntRangeBuiltin { method, .. } => Some(StageDescriptor::new(*method)),
             Stage::ExprBuiltin { method, body } => Some(StageDescriptor::new(*method).body(body)),
             Stage::Builtin(call) => Some(
-                StageDescriptor::new(call.method)
-                    .allow_one_to_one_order_fallback()
-                    .with_executor(BuiltinPipelineExecutor::ElementBuiltin),
+                StageDescriptor::new(call.method).allow_one_to_one_order_fallback(),
             ),
             Stage::SortedDedup(prog) => {
-                let desc = StageDescriptor::special(BuiltinPipelineExecutor::SortedDedup);
+                let desc = StageDescriptor::special();
                 Some(if let Some(prog) = prog {
                     desc.body(prog)
                 } else {
                     desc
                 })
             }
-            Stage::CompiledMap(_) => Some(
-                StageDescriptor::special(BuiltinPipelineExecutor::RowMap)
-                    .receiver_unsafe_without_body(),
-            ),
+            Stage::CompiledMap(_) => Some(StageDescriptor::special().receiver_unsafe_without_body()),
             _ => None,
         }
     }

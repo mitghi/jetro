@@ -1019,52 +1019,6 @@ pub enum BuiltinColumnarStage {
     GroupBy,
 }
 
-/// Identifies the concrete executor kernel used to run a pipeline stage.
-/// Selected by the lowering pass when translating a `BuiltinPipelineLowering` node.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BuiltinPipelineExecutor {
-    /// Element-level builtin with no lambda (scalar transforms, string ops, etc.).
-    ElementBuiltin,
-    /// Element-level builtin that may expand one row to many (flatten, explode, etc.).
-    ExpandingBuiltin,
-    /// Lambda applied over the fields of an object.
-    ObjectLambda,
-    /// Row-level predicate filter using a lambda.
-    RowFilter,
-    /// Row-level projection using a lambda.
-    RowMap,
-    /// Row-level expansion using a lambda.
-    RowFlatMap,
-    /// Positional slice operator; `take: true` = limit, `false` = offset.
-    Position { take: bool },
-    /// In-place array reversal.
-    Reverse,
-    /// Full-barrier comparison sort.
-    Sort,
-    /// Deduplication keyed by a lambda.
-    UniqueBy,
-    /// Group elements into an object keyed by a lambda.
-    GroupBy,
-    /// Count elements per key produced by a lambda.
-    CountBy,
-    /// Index elements (last write wins) keyed by a lambda.
-    IndexBy,
-    /// Return the index of the first matching element.
-    FindIndex,
-    /// Return all indices of matching elements.
-    IndicesWhere,
-    /// Select the element with the extreme (max or min) key value.
-    ArgExtreme { max: bool },
-    /// Split array into fixed-size chunks.
-    Chunk,
-    /// Slide a fixed-size window over the array.
-    Window,
-    /// Emit/skip elements from a contiguous prefix; `take: true` = take_while, `false` = drop_while.
-    PrefixWhile { take: bool },
-    /// Deduplication that assumes the input is already sorted.
-    SortedDedup,
-}
-
 impl BuiltinPipelineShape {
     /// Constructs a `BuiltinPipelineShape` from its four planning fields.
     #[inline]

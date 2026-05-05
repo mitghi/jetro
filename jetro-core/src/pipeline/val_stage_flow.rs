@@ -3,12 +3,11 @@
 //! items using the builtins-layer primitives.
 
 use crate::{
-    builtins::BuiltinPipelineExecutor,
     context::{Env, EvalError},
     value::Val,
 };
 
-use super::{legacy_exec, stage_executor, BodyKernel, Stage, StageFlow, TerminalMapCollector};
+use super::{legacy_exec, BodyKernel, Stage, StageFlow, TerminalMapCollector};
 
 /// Applies `stage` to `item` in the streaming loop; barrier and expanding stages return `Continue`.
 pub(super) fn apply_adapter_streaming<'a>(
@@ -24,7 +23,6 @@ pub(super) fn apply_adapter_streaming<'a>(
     terminal_map_collect: &mut Option<TerminalMapCollector<'a>>,
 ) -> Result<StageFlow<Val>, EvalError> {
     // Trait dispatch: try Builtin::apply_stream for migrated methods.
-    // Returns `Some(flow)` when method is migrated; `None` falls through to legacy executor match.
     if let Some(method) = stage.descriptor().and_then(|d| d.method) {
         let body = stage.body_program();
         let mut ctx = crate::builtins::builtin_def::StreamCtx {
@@ -38,9 +36,6 @@ pub(super) fn apply_adapter_streaming<'a>(
             terminal_map_idx,
             terminal_map_collect,
         };
-        // Only dispatch for methods that have overridden `apply_stream`.
-        // Migrated set is enumerated explicitly to avoid invoking the default
-        // (pass-through) impl on every non-streaming method.
         use crate::builtins::{BuiltinMethod as M, builtin_def::Builtin, defs};
         match method {
             M::Filter | M::Find | M::FindAll => {
@@ -51,23 +46,25 @@ pub(super) fn apply_adapter_streaming<'a>(
             M::DropWhile => return <defs::DropWhile as Builtin>::apply_stream(&mut ctx, item, body),
             M::Take => return <defs::Take as Builtin>::apply_stream(&mut ctx, item, body),
             M::Skip => return <defs::Skip as Builtin>::apply_stream(&mut ctx, item, body),
-            M::TransformKeys => return <defs::TransformKeys as Builtin>::apply_stream(&mut ctx, item, body),
-            M::TransformValues => return <defs::TransformValues as Builtin>::apply_stream(&mut ctx, item, body),
+            M::TransformKeys => {
+                return <defs::TransformKeys as Builtin>::apply_stream(&mut ctx, item, body)
+            }
+            M::TransformValues => {
+                return <defs::TransformValues as Builtin>::apply_stream(&mut ctx, item, body)
+            }
             M::FilterKeys => return <defs::FilterKeys as Builtin>::apply_stream(&mut ctx, item, body),
-            M::FilterValues => return <defs::FilterValues as Builtin>::apply_stream(&mut ctx, item, body),
+            M::FilterValues => {
+                return <defs::FilterValues as Builtin>::apply_stream(&mut ctx, item, body)
+            }
             _ => {}
         }
     }
-    // Remaining dispatch for non-trait-migrated methods:
-    // - ElementBuiltin: Stage::Builtin / IntRangeBuiltin / StringPairBuiltin (apply via element adapter)
-    // - All barrier/expanding methods: pass-through (handled by materialised path elsewhere)
-    match stage_executor(stage) {
-        Some(BuiltinPipelineExecutor::ElementBuiltin) => Ok(StageFlow::Continue(
-            legacy_exec::apply_element_adapter(stage, item),
-        )),
-        // Filter / Map / TakeWhile / DropWhile / Take / Skip / ObjectLambda variants
-        // are handled above via Builtin::apply_stream — the executor enum classification
-        // is preserved here only as a runtime sanity match for unmigrated paths.
+    // ElementBuiltin: element-wise scalar apply via Stage variant match.
+    // All other variants pass through (barriers handled by materialised path).
+    match stage {
+        Stage::Builtin(_) | Stage::IntRangeBuiltin { .. } | Stage::StringPairBuiltin { .. } => {
+            Ok(StageFlow::Continue(legacy_exec::apply_element_adapter(stage, item)))
+        }
         _ => Ok(StageFlow::Continue(item)),
     }
 }

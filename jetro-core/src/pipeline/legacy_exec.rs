@@ -17,11 +17,11 @@ use super::row_source;
 use super::sink_accumulator::SinkAccumulator;
 use super::{
     apply_item_in_env, cmp_val_total, compute_strategies_with_kernels, eval_kernel, is_truthy,
-    stage_executor, BodyKernel, Pipeline, PipelineBody, Sink, Source, Stage, StageFlow,
-    StageStrategy, TerminalMapCollector,
+    BodyKernel, Pipeline, PipelineBody, Sink, Source, Stage, StageFlow, StageStrategy,
+    TerminalMapCollector,
 };
 
-use crate::builtins::{replace_apply, slice_apply, split_apply, BuiltinMethod, BuiltinPipelineExecutor};
+use crate::builtins::{replace_apply, slice_apply, split_apply, BuiltinMethod};
 use crate::chain_ir::PullDemand;
 
 /// Runs the pipeline against `root`, materialising barrier stages then streaming the rest.
@@ -303,11 +303,11 @@ fn apply_adapter_materialized(
             return Some(r);
         }
     }
-    // Remaining barrier dispatch: ElementBuiltin (Stage::Builtin/IntRangeBuiltin/StringPairBuiltin),
-    // ExpandingBuiltin (Split), and SortedDedup (no trait migration yet).
-    // All other variants are handled by trait dispatch above and unreachable here.
-    match stage_executor(stage)? {
-        BuiltinPipelineExecutor::ElementBuiltin => {
+    // Remaining barrier dispatch by Stage variant — all other variants are handled
+    // above by Builtin::apply_barrier trait dispatch and never reach this point.
+    match stage {
+        // Element-wise scalar (Slice, Replace, ReplaceAll, BuiltinCall::apply).
+        Stage::Builtin(_) | Stage::IntRangeBuiltin { .. } | Stage::StringPairBuiltin { .. } => {
             let mut out: Vec<Val> = Vec::with_capacity(buf.len());
             for v in std::mem::take(buf) {
                 out.push(apply_element_adapter(stage, v));
@@ -315,7 +315,8 @@ fn apply_adapter_materialized(
             *buf = out;
             Some(Ok(()))
         }
-        BuiltinPipelineExecutor::ExpandingBuiltin => {
+        // Expanding scalar (Split).
+        Stage::StringBuiltin { .. } => {
             let mut out: Vec<Val> = Vec::with_capacity(buf.len());
             for v in std::mem::take(buf) {
                 apply_expanding_adapter(stage, &v, &mut out);
@@ -323,8 +324,9 @@ fn apply_adapter_materialized(
             *buf = out;
             Some(Ok(()))
         }
-        BuiltinPipelineExecutor::SortedDedup => {
-            match stage.body_program() {
+        // Sorted-dedup barrier — pre-sorted dedup, optionally keyed.
+        Stage::SortedDedup(opt_prog) => {
+            match opt_prog {
                 None => {
                     buf.sort_by(cmp_val_total);
                     buf.dedup_by(|a, b| crate::util::vals_eq(a, b));
@@ -347,10 +349,7 @@ fn apply_adapter_materialized(
             }
             Some(Ok(()))
         }
-        // All other executor variants (RowFilter, RowMap, RowFlatMap, ObjectLambda,
-        // Position, Reverse, Sort, UniqueBy, GroupBy, CountBy, IndexBy, IndicesWhere,
-        // FindIndex, ArgExtreme, Chunk, Window, PrefixWhile) are handled above by
-        // trait dispatch via Builtin::apply_barrier — unreachable here.
+        // All other variants handled above by trait dispatch — unreachable.
         _ => None,
     }
 }
