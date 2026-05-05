@@ -26,6 +26,36 @@ pub(super) fn apply_adapter_streaming<'a>(
     terminal_map_idx: Option<usize>,
     terminal_map_collect: &mut Option<TerminalMapCollector<'a>>,
 ) -> Result<StageFlow<Val>, EvalError> {
+    // Trait dispatch: try Builtin::apply_stream for migrated methods.
+    // Returns `Some(flow)` when method is migrated; `None` falls through to legacy executor match.
+    if let Some(method) = stage.descriptor().and_then(|d| d.method) {
+        let body = stage.body_program();
+        let mut ctx = crate::builtins::builtin_def::StreamCtx {
+            vm,
+            env: loop_env,
+            kernel,
+            stage,
+            stage_idx,
+            stage_taken,
+            stage_skipped,
+            terminal_map_idx,
+            terminal_map_collect,
+        };
+        // Only dispatch for methods that have overridden `apply_stream`.
+        // Migrated set is enumerated explicitly to avoid invoking the default
+        // (pass-through) impl on every non-streaming method.
+        use crate::builtins::{BuiltinMethod as M, builtin_def::Builtin, defs};
+        match method {
+            M::Filter | M::Find | M::FindAll => {
+                return <defs::Filter as Builtin>::apply_stream(&mut ctx, item, body);
+            }
+            M::Map => return <defs::Map as Builtin>::apply_stream(&mut ctx, item, body),
+            M::TakeWhile => return <defs::TakeWhile as Builtin>::apply_stream(&mut ctx, item, body),
+            M::Take => return <defs::Take as Builtin>::apply_stream(&mut ctx, item, body),
+            M::Skip => return <defs::Skip as Builtin>::apply_stream(&mut ctx, item, body),
+            _ => {}
+        }
+    }
     match stage_executor(stage) {
         Some(BuiltinPipelineExecutor::ElementBuiltin) => Ok(StageFlow::Continue(
             legacy_exec::apply_element_adapter(stage, item),

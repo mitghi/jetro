@@ -69,6 +69,25 @@ impl Builtin for Filter {
     fn spec() -> BuiltinSpec {
         filter_spec()
     }
+
+    #[inline]
+    fn apply_stream(
+        ctx: &mut super::builtin_def::StreamCtx<'_, '_>,
+        item: crate::value::Val,
+        body: Option<&crate::vm::Program>,
+    ) -> Result<crate::pipeline::StageFlow<crate::value::Val>, crate::context::EvalError> {
+        let prog = body.expect("filter body");
+        let keep = super::filter_one(&item, |v| {
+            crate::pipeline::eval_kernel(ctx.kernel, v, |it| {
+                crate::pipeline::apply_item_in_env(ctx.vm, ctx.env, it, prog)
+            })
+        })?;
+        Ok(if keep {
+            crate::pipeline::StageFlow::Continue(item)
+        } else {
+            crate::pipeline::StageFlow::SkipRow
+        })
+    }
 }
 
 /// Surface alias of `Filter` (same semantics; user-facing v2 name).
@@ -145,6 +164,31 @@ impl Builtin for Map {
             .lowering(BuiltinPipelineLowering::ExprArg)
             .element()
     }
+
+    #[inline]
+    fn apply_stream(
+        ctx: &mut super::builtin_def::StreamCtx<'_, '_>,
+        item: crate::value::Val,
+        body: Option<&crate::vm::Program>,
+    ) -> Result<crate::pipeline::StageFlow<crate::value::Val>, crate::context::EvalError> {
+        let prog = body.expect("map body");
+        // Terminal-map collector short-circuit (avoid allocating intermediate Val).
+        if Some(ctx.stage_idx) == ctx.terminal_map_idx {
+            ctx.terminal_map_collect
+                .as_mut()
+                .expect("terminal map collector")
+                .push_val_row(&item, ctx.kernel, |it| {
+                    crate::pipeline::apply_item_in_env(ctx.vm, ctx.env, it, prog)
+                })?;
+            return Ok(crate::pipeline::StageFlow::TerminalCollected);
+        }
+        let mapped = super::map_one(&item, |v| {
+            crate::pipeline::eval_kernel(ctx.kernel, v, |it| {
+                crate::pipeline::apply_item_in_env(ctx.vm, ctx.env, it, prog)
+            })
+        })?;
+        Ok(crate::pipeline::StageFlow::Continue(mapped))
+    }
 }
 
 /// Expanding projection: each element produces an array; outputs are concatenated.
@@ -181,6 +225,24 @@ impl Builtin for Take {
             .order_effect(BuiltinPipelineOrderEffect::Preserves)
             .lowering(BuiltinPipelineLowering::UsizeArg { min: 0 })
     }
+
+    #[inline]
+    fn apply_stream(
+        ctx: &mut super::builtin_def::StreamCtx<'_, '_>,
+        item: crate::value::Val,
+        _body: Option<&crate::vm::Program>,
+    ) -> Result<crate::pipeline::StageFlow<crate::value::Val>, crate::context::EvalError> {
+        let n = match ctx.stage.descriptor().and_then(|d| d.usize_arg) {
+            Some(n) => n,
+            None => return Ok(crate::pipeline::StageFlow::Continue(item)),
+        };
+        if ctx.stage_taken[ctx.stage_idx] >= n {
+            Ok(crate::pipeline::StageFlow::Stop)
+        } else {
+            ctx.stage_taken[ctx.stage_idx] += 1;
+            Ok(crate::pipeline::StageFlow::Continue(item))
+        }
+    }
 }
 
 /// Skip first N elements; bounded positional offset.
@@ -198,6 +260,24 @@ impl Builtin for Skip {
             .demand_law(BuiltinDemandLaw::Skip)
             .order_effect(BuiltinPipelineOrderEffect::Preserves)
             .lowering(BuiltinPipelineLowering::UsizeArg { min: 0 })
+    }
+
+    #[inline]
+    fn apply_stream(
+        ctx: &mut super::builtin_def::StreamCtx<'_, '_>,
+        item: crate::value::Val,
+        _body: Option<&crate::vm::Program>,
+    ) -> Result<crate::pipeline::StageFlow<crate::value::Val>, crate::context::EvalError> {
+        let n = match ctx.stage.descriptor().and_then(|d| d.usize_arg) {
+            Some(n) => n,
+            None => return Ok(crate::pipeline::StageFlow::Continue(item)),
+        };
+        if ctx.stage_skipped[ctx.stage_idx] < n {
+            ctx.stage_skipped[ctx.stage_idx] += 1;
+            Ok(crate::pipeline::StageFlow::SkipRow)
+        } else {
+            Ok(crate::pipeline::StageFlow::Continue(item))
+        }
     }
 }
 
@@ -267,6 +347,25 @@ impl Builtin for TakeWhile {
             ))
             .order_effect(BuiltinPipelineOrderEffect::PredicatePrefix)
             .lowering(BuiltinPipelineLowering::ExprArg)
+    }
+
+    #[inline]
+    fn apply_stream(
+        ctx: &mut super::builtin_def::StreamCtx<'_, '_>,
+        item: crate::value::Val,
+        body: Option<&crate::vm::Program>,
+    ) -> Result<crate::pipeline::StageFlow<crate::value::Val>, crate::context::EvalError> {
+        let prog = body.expect("take_while body");
+        let pass = super::take_while_one(&item, |v| {
+            crate::pipeline::eval_kernel(ctx.kernel, v, |it| {
+                crate::pipeline::apply_item_in_env(ctx.vm, ctx.env, it, prog)
+            })
+        })?;
+        Ok(if pass {
+            crate::pipeline::StageFlow::Continue(item)
+        } else {
+            crate::pipeline::StageFlow::Stop
+        })
     }
 }
 
