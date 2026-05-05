@@ -117,6 +117,13 @@ impl Builtin for Remove {
     fn spec() -> BuiltinSpec {
         BuiltinSpec::new(BuiltinCategory::StreamingFilter, BuiltinCardinality::Filtering).cost(10.0)
     }
+    #[inline]
+    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+        match args {
+            super::BuiltinArgs::Val(item) => super::remove_value_apply(recv, item),
+            _ => None,
+        }
+    }
 }
 
 // ── Streaming one-to-one ─────────────────────────────────────────────────────
@@ -897,6 +904,13 @@ impl Builtin for Append {
     const METHOD: BuiltinMethod = BuiltinMethod::Append;
     const NAME: &'static str = "append";
     fn spec() -> BuiltinSpec { barrier_simple_spec() }
+    #[inline]
+    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+        match args {
+            super::BuiltinArgs::Val(item) => super::append_apply(recv, item),
+            _ => None,
+        }
+    }
 }
 
 /// `prepend(arr)` — prepend barrier.
@@ -905,6 +919,13 @@ impl Builtin for Prepend {
     const METHOD: BuiltinMethod = BuiltinMethod::Prepend;
     const NAME: &'static str = "prepend";
     fn spec() -> BuiltinSpec { barrier_simple_spec() }
+    #[inline]
+    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+        match args {
+            super::BuiltinArgs::Val(item) => super::prepend_apply(recv, item),
+            _ => None,
+        }
+    }
 }
 
 /// `diff(arr)` — set difference.
@@ -937,6 +958,13 @@ impl Builtin for Join {
     const METHOD: BuiltinMethod = BuiltinMethod::Join;
     const NAME: &'static str = "join";
     fn spec() -> BuiltinSpec { barrier_simple_spec() }
+    #[inline]
+    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+        match args {
+            super::BuiltinArgs::Str(sep) => super::join_apply(recv, sep),
+            _ => None,
+        }
+    }
 }
 
 /// `zip(arr)` — element pairing.
@@ -1362,6 +1390,13 @@ impl Builtin for Set {
             .indexed()
             .element()
     }
+    #[inline]
+    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+        match args {
+            super::BuiltinArgs::Val(item) => Some(item.clone()),
+            _ => None,
+        }
+    }
 }
 
 /// `update(path, fn)` — mutation via lambda.
@@ -1506,7 +1541,6 @@ macro_rules! scalar_view_scalar_element {
 }
 
 scalar_native_element! {
-    Or => Or, "or";
     Has => Has, "has";
     Capitalize => Capitalize, "capitalize", apply: capitalize_apply;
     TitleCase => TitleCase, "title_case", apply: title_case_apply;
@@ -1663,6 +1697,13 @@ impl Builtin for Includes {
     const NAME: &'static str = "includes";
     const ALIASES: &'static [&'static str] = &["contains"];
     fn spec() -> BuiltinSpec { default_scalar_spec(BuiltinMethod::Includes) }
+    #[inline]
+    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+        match args {
+            super::BuiltinArgs::Val(item) => Some(super::includes_apply(recv, item)),
+            _ => None,
+        }
+    }
 }
 
 /// `index(item)` — first index of element.
@@ -1671,6 +1712,13 @@ impl Builtin for Index {
     const METHOD: BuiltinMethod = BuiltinMethod::Index;
     const NAME: &'static str = "index";
     fn spec() -> BuiltinSpec { default_scalar_spec(BuiltinMethod::Index) }
+    #[inline]
+    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+        match args {
+            super::BuiltinArgs::Val(item) => super::index_value_apply(recv, item),
+            _ => None,
+        }
+    }
 }
 
 /// `indices_of(item)` — all indices of element.
@@ -1679,6 +1727,13 @@ impl Builtin for IndicesOf {
     const METHOD: BuiltinMethod = BuiltinMethod::IndicesOf;
     const NAME: &'static str = "indices_of";
     fn spec() -> BuiltinSpec { default_scalar_spec(BuiltinMethod::IndicesOf) }
+    #[inline]
+    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+        match args {
+            super::BuiltinArgs::Val(item) => super::indices_of_apply(recv, item),
+            _ => None,
+        }
+    }
 }
 
 /// `missing` — sentinel for missing key/path.
@@ -1687,6 +1742,13 @@ impl Builtin for Missing {
     const METHOD: BuiltinMethod = BuiltinMethod::Missing;
     const NAME: &'static str = "missing";
     fn spec() -> BuiltinSpec { default_scalar_spec(BuiltinMethod::Missing) }
+    #[inline]
+    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+        match args {
+            super::BuiltinArgs::Str(key) => Some(super::missing_apply(recv, key)),
+            _ => None,
+        }
+    }
 }
 
 /// Default scalar fallback used by methods that previously fell to the wildcard arm.
@@ -1838,3 +1900,18 @@ impl Builtin for ReverseStr {
 }
 
 // ── Re-export Builtin trait constants used by cancellation impls (already imported above) ──
+
+/// `or(default)` — coalesce: returns recv unless null/missing, else default.
+pub(crate) struct Or;
+impl Builtin for Or {
+    const METHOD: BuiltinMethod = BuiltinMethod::Or;
+    const NAME: &'static str = "or";
+    fn spec() -> BuiltinSpec { scalar_native_element_spec() }
+    #[inline]
+    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+        match args {
+            super::BuiltinArgs::Val(default) => Some(super::or_apply(recv, default)),
+            _ => None,
+        }
+    }
+}

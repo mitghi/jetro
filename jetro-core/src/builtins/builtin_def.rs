@@ -53,4 +53,13 @@ pub(crate) trait Builtin {
     fn apply_one(_recv: &Val) -> Option<Val> {
         None
     }
+
+    /// Multi-arg pure runtime apply: takes a receiver and pre-decoded args, returns the
+    /// transformed value or `None` to fall through to legacy dispatch.
+    /// Override on element-wise scalar methods that take literal arguments
+    /// (Or/Includes/Append/Replace/Slice/Window/etc.).
+    #[inline]
+    fn apply_args(_recv: &Val, _args: &super::BuiltinArgs) -> Option<Val> {
+        None
+    }
 }
