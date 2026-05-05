@@ -226,7 +226,7 @@ mod spec_tests {
         BuiltinCardinality, BuiltinCategory, BuiltinColumnarStage, BuiltinKeyedReducer,
         BuiltinMethod, BuiltinNumericReducer, BuiltinSelectionPosition, BuiltinSinkAccumulator,
         BuiltinSinkDemand, BuiltinSinkValueNeed, BuiltinStageMerge, BuiltinStructural,
-        BuiltinViewInputMode, BuiltinViewMaterialization, BuiltinViewOutputMode, BuiltinViewStage,
+        BuiltinViewInputMode, BuiltinViewOutputMode, BuiltinViewStage,
     };
 
     #[test]
@@ -320,10 +320,6 @@ mod spec_tests {
         assert_eq!(
             BuiltinViewStage::Skip.output_mode(),
             BuiltinViewOutputMode::PreservesInputView
-        );
-        assert_eq!(
-            BuiltinViewStage::Filter.materialization(),
-            BuiltinViewMaterialization::Never
         );
     }
 

@@ -917,13 +917,7 @@ impl BuiltinViewStage {
         }
     }
 
-    /// Returns the materialization policy; currently always `Never` for all view stages.
-    #[inline]
-    pub fn materialization(self) -> BuiltinViewMaterialization {
-        BuiltinViewMaterialization::Never
-    }
-
-    /// Returns the output row-count relationship of this stage.
+/// Returns the output row-count relationship of this stage.
     #[inline]
     pub fn cardinality(self) -> BuiltinCardinality {
         match self {
@@ -1068,13 +1062,6 @@ pub enum BuiltinPipelineLowering {
     Sort,
     /// Terminal sink (no stage emitted).
     TerminalSink,
-}
-
-/// Materialisation policy for a view stage's output.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BuiltinViewMaterialization {
-    /// The stage never forces materialisation of the underlying view.
-    Never,
 }
 
 /// Broad category for a builtin, used for grouping and display purposes.

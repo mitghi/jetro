@@ -6,7 +6,7 @@
 
 use crate::builtins::{
     BuiltinKeyedReducer, BuiltinSinkAccumulator, BuiltinSinkSpec, BuiltinViewInputMode,
-    BuiltinViewMaterialization, BuiltinViewOutputMode, BuiltinViewStage,
+    BuiltinViewOutputMode, BuiltinViewStage,
 };
 
 use super::{PipelineBody, Stage};
@@ -172,7 +172,7 @@ impl ViewStageCapability {
         if matches!(self, Self::KeyedReduce { .. }) {
             return ViewMaterialization::StageFinalValue;
         }
-        view_materialization(self.view_stage().materialization())
+        ViewMaterialization::Never
     }
 }
 
@@ -228,13 +228,6 @@ fn sink_materialization(spec: BuiltinSinkSpec) -> ViewMaterialization {
         }
         BuiltinSinkAccumulator::Numeric => ViewMaterialization::SinkNumericInput,
         BuiltinSinkAccumulator::SelectOne(_) => ViewMaterialization::SinkFinalRow,
-    }
-}
-
-// bridges the registry's BuiltinViewMaterialization tag to the pipeline's enum
-fn view_materialization(materialization: BuiltinViewMaterialization) -> ViewMaterialization {
-    match materialization {
-        BuiltinViewMaterialization::Never => ViewMaterialization::Never,
     }
 }
 
