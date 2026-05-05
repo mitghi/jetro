@@ -1381,7 +1381,9 @@ fn scalar_view_scalar_element_spec() -> BuiltinSpec {
 
 // Native-element (no view_scalar):
 macro_rules! scalar_native_element {
-    ( $( $ty:ident => $variant:ident, $name:literal $( , aliases: [ $( $alias:literal ),* $(,)? ] )? ; )* ) => {
+    ( $( $ty:ident => $variant:ident, $name:literal
+         $( , aliases: [ $( $alias:literal ),* $(,)? ] )?
+         $( , apply: $apply:ident )? ; )* ) => {
         $(
             pub(crate) struct $ty;
             impl Builtin for $ty {
@@ -1389,6 +1391,12 @@ macro_rules! scalar_native_element {
                 const NAME: &'static str = $name;
                 $( const ALIASES: &'static [&'static str] = &[ $( $alias ),* ]; )?
                 fn spec() -> BuiltinSpec { scalar_native_element_spec() }
+                $(
+                    #[inline]
+                    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+                        super::$apply(recv)
+                    }
+                )?
             }
         )*
     };
@@ -1396,7 +1404,9 @@ macro_rules! scalar_native_element {
 
 // View-scalar element:
 macro_rules! scalar_view_scalar_element {
-    ( $( $ty:ident => $variant:ident, $name:literal $( , aliases: [ $( $alias:literal ),* $(,)? ] )? ; )* ) => {
+    ( $( $ty:ident => $variant:ident, $name:literal
+         $( , aliases: [ $( $alias:literal ),* $(,)? ] )?
+         $( , apply: $apply:ident )? ; )* ) => {
         $(
             pub(crate) struct $ty;
             impl Builtin for $ty {
@@ -1404,6 +1414,12 @@ macro_rules! scalar_view_scalar_element {
                 const NAME: &'static str = $name;
                 $( const ALIASES: &'static [&'static str] = &[ $( $alias ),* ]; )?
                 fn spec() -> BuiltinSpec { scalar_view_scalar_element_spec() }
+                $(
+                    #[inline]
+                    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+                        super::$apply(recv)
+                    }
+                )?
             }
         )*
     };
@@ -1412,12 +1428,12 @@ macro_rules! scalar_view_scalar_element {
 scalar_native_element! {
     Or => Or, "or";
     Has => Has, "has";
-    Capitalize => Capitalize, "capitalize";
-    TitleCase => TitleCase, "title_case";
-    SnakeCase => SnakeCase, "snake_case";
-    KebabCase => KebabCase, "kebab_case";
-    CamelCase => CamelCase, "camel_case";
-    PascalCase => PascalCase, "pascal_case";
+    Capitalize => Capitalize, "capitalize", apply: capitalize_apply;
+    TitleCase => TitleCase, "title_case", apply: title_case_apply;
+    SnakeCase => SnakeCase, "snake_case", apply: snake_case_apply;
+    KebabCase => KebabCase, "kebab_case", apply: kebab_case_apply;
+    CamelCase => CamelCase, "camel_case", apply: camel_case_apply;
+    PascalCase => PascalCase, "pascal_case", apply: pascal_case_apply;
     ParseInt => ParseInt, "parse_int";
     ParseFloat => ParseFloat, "parse_float";
     ParseBool => ParseBool, "parse_bool";
@@ -1443,7 +1459,7 @@ scalar_native_element! {
     ToString => ToString, "to_string";
     ToJson => ToJson, "to_json";
     Indent => Indent, "indent";
-    Dedent => Dedent, "dedent";
+    Dedent => Dedent, "dedent", apply: dedent_apply;
 }
 
 scalar_view_scalar_element! {
@@ -1451,11 +1467,11 @@ scalar_view_scalar_element! {
     Floor => Floor, "floor";
     Round => Round, "round";
     Abs => Abs, "abs";
-    Upper => Upper, "upper";
-    Lower => Lower, "lower";
-    Trim => Trim, "trim";
-    TrimLeft => TrimLeft, "trim_left", aliases: ["lstrip"];
-    TrimRight => TrimRight, "trim_right", aliases: ["rstrip"];
+    Upper => Upper, "upper", apply: upper_apply;
+    Lower => Lower, "lower", apply: lower_apply;
+    Trim => Trim, "trim", apply: trim_apply;
+    TrimLeft => TrimLeft, "trim_left", aliases: ["lstrip"], apply: trim_left_apply;
+    TrimRight => TrimRight, "trim_right", aliases: ["rstrip"], apply: trim_right_apply;
     IsBlank => IsBlank, "is_blank";
     IsNumeric => IsNumeric, "is_numeric";
     IsAlpha => IsAlpha, "is_alpha";
@@ -1614,6 +1630,10 @@ impl Builtin for ToBase64 {
     const NAME: &'static str = "to_base64";
     fn spec() -> BuiltinSpec { scalar_native_element_spec() }
     #[inline]
+    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+        super::to_base64_apply(recv)
+    }
+    #[inline]
     fn cancellation() -> Option<BuiltinCancellation> {
         Some(BuiltinCancellation::Inverse {
             group: BuiltinCancelGroup::Base64,
@@ -1628,6 +1648,10 @@ impl Builtin for FromBase64 {
     const METHOD: BuiltinMethod = BuiltinMethod::FromBase64;
     const NAME: &'static str = "from_base64";
     fn spec() -> BuiltinSpec { scalar_native_element_spec() }
+    #[inline]
+    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+        super::from_base64_apply(recv)
+    }
     #[inline]
     fn cancellation() -> Option<BuiltinCancellation> {
         Some(BuiltinCancellation::Inverse {
@@ -1644,6 +1668,10 @@ impl Builtin for UrlEncode {
     const NAME: &'static str = "url_encode";
     fn spec() -> BuiltinSpec { scalar_native_element_spec() }
     #[inline]
+    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+        super::url_encode_apply(recv)
+    }
+    #[inline]
     fn cancellation() -> Option<BuiltinCancellation> {
         Some(BuiltinCancellation::Inverse {
             group: BuiltinCancelGroup::Url,
@@ -1658,6 +1686,10 @@ impl Builtin for UrlDecode {
     const METHOD: BuiltinMethod = BuiltinMethod::UrlDecode;
     const NAME: &'static str = "url_decode";
     fn spec() -> BuiltinSpec { scalar_native_element_spec() }
+    #[inline]
+    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+        super::url_decode_apply(recv)
+    }
     #[inline]
     fn cancellation() -> Option<BuiltinCancellation> {
         Some(BuiltinCancellation::Inverse {
@@ -1674,6 +1706,10 @@ impl Builtin for HtmlEscape {
     const NAME: &'static str = "html_escape";
     fn spec() -> BuiltinSpec { scalar_native_element_spec() }
     #[inline]
+    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+        super::html_escape_apply(recv)
+    }
+    #[inline]
     fn cancellation() -> Option<BuiltinCancellation> {
         Some(BuiltinCancellation::Inverse {
             group: BuiltinCancelGroup::Html,
@@ -1689,6 +1725,10 @@ impl Builtin for HtmlUnescape {
     const NAME: &'static str = "html_unescape";
     fn spec() -> BuiltinSpec { scalar_native_element_spec() }
     #[inline]
+    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+        super::html_unescape_apply(recv)
+    }
+    #[inline]
     fn cancellation() -> Option<BuiltinCancellation> {
         Some(BuiltinCancellation::Inverse {
             group: BuiltinCancelGroup::Html,
@@ -1703,6 +1743,10 @@ impl Builtin for ReverseStr {
     const METHOD: BuiltinMethod = BuiltinMethod::ReverseStr;
     const NAME: &'static str = "reverse_str";
     fn spec() -> BuiltinSpec { scalar_native_element_spec() }
+    #[inline]
+    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+        super::reverse_str_apply(recv)
+    }
     #[inline]
     fn cancellation() -> Option<BuiltinCancellation> {
         Some(BuiltinCancellation::SelfInverse(BuiltinCancelGroup::Reverse))

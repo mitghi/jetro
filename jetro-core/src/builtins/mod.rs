@@ -1547,6 +1547,24 @@ impl BuiltinCall {
                 return Some($expr.unwrap_or_else(|| recv.clone()))
             };
         }
+        // Try trait dispatch first for no-arg cases. Each migrated builtin's
+        // `apply_one` returns `Some(val)` when applicable, `None` otherwise.
+        // Methods that have not yet implemented `apply_one` return `None` here
+        // and fall through to the legacy match below.
+        if matches!(self.args, BuiltinArgs::None) {
+            macro_rules! trait_arm {
+                ( $( $variant:ident ),* $(,)? ) => {
+                    match self.method {
+                        $( BuiltinMethod::$variant => {
+                            if let Some(v) = <defs::$variant as builtin_def::Builtin>::apply_one(recv) {
+                                return Some(v);
+                            }
+                        } )*
+                    }
+                };
+            }
+            crate::for_each_builtin!(trait_arm);
+        }
         match (self.method, &self.args) {
             (BuiltinMethod::Upper, BuiltinArgs::None) => apply_or_recv!(upper_apply(recv)),
             (BuiltinMethod::Lower, BuiltinArgs::None) => apply_or_recv!(lower_apply(recv)),

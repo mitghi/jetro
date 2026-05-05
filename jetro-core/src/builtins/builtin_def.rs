@@ -13,6 +13,8 @@
 //!
 //! After full migration, each builtin = one `impl Builtin for X` block.
 
+use crate::value::Val;
+
 use super::{BuiltinCancellation, BuiltinMethod, BuiltinSpec};
 
 /// Per-method definition trait. Each `BuiltinMethod` variant has a corresponding zero-sized
@@ -40,6 +42,15 @@ pub(crate) trait Builtin {
     /// self-inverses (ReverseStr). Used by the optimizer to fuse-cancel adjacent stages.
     #[inline]
     fn cancellation() -> Option<BuiltinCancellation> {
+        None
+    }
+
+    /// Element-wise pure runtime apply: takes a receiver value, returns the transformed
+    /// value or `None` if the receiver type is not applicable.
+    /// Default `None` (caller falls back to legacy dispatch).
+    /// Override on element-wise scalar methods (Upper, Lower, Trim, encoders, ...).
+    #[inline]
+    fn apply_one(_recv: &Val) -> Option<Val> {
         None
     }
 }
