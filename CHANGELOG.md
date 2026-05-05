@@ -1,110 +1,116 @@
 # Changelog
 
-## 0.4.0 — 2026-04-25
+## 0.4.0 — 2026-05-05
 
-### Grammar (breaking)
+### Breaking Changes
 
-- **Postfix `?` optional marker.** The null-safety marker now attaches to the
-  step it guards, never the next step. Prefix `?.field` / `?.method()` no
-  longer parses.
-  - `.field?` → null-propagate (same end-result as prior `?.field` on the
-    next step).
-  - `..descendant?` → still returns an array; `?` is null-safety, not
-    first-of-array. Use `.first()` explicitly to extract one:
-    `$..services?.first()`.
-  - `.method()?` → null-safe method call.
-  - `!` (exactly-one quantifier) unchanged.
+- **Public API is now byte-first.** The top-level `jetro` crate exposes a
+  minimal API centered on `Jetro::from_bytes(bytes)` and `Jetro::collect(expr)`.
+  Older direct tree-walker helpers, prelude exports, and custom function
+  registration paths have been removed from the public facade.
+- **Custom/user-registered function support has been removed for now.** Builtins
+  are statically known and dispatched through the builtin system.
+- **CamelCase builtin aliases are no longer supported.** Builtin names are
+  canonicalized around snake_case.
+- **Legacy eval/tree-walker modules have been removed.** The VM and physical
+  executor are now the correctness path, with optimized backends selected by
+  the planner where possible.
 
-  Existing query strings that relied on visually writing `?.name` still
-  parse — the grammar now interprets the `?` as attached to the field
-  before it instead of the one after. End behaviour converges for the
-  common null-propagation case.
+### Architecture
 
-### New opcodes (VM fusions)
+- Added a unified physical planning layer with `QueryPlan`, `PlanNode`, backend
+  capabilities, backend preferences, and execution facts.
+- Added recursive physical planning for object shaping, nested expressions,
+  receiver pipelines, scalar chains, structural prefixes, and fallback nodes.
+- Added backend-aware execution through structural index, tape/value-view,
+  pipeline, and VM fallback paths.
+- Added `JetroEngine`, a long-lived engine with explicit plan caching and a
+  shared VM for repeated queries across documents.
+- Moved builtin behavior toward a registry/trait-driven model. Builtin identity,
+  metadata, demand laws, lowering shape, sink behavior, and execution policy are
+  centralized instead of scattered across VM, pipeline, view, and composed
+  paths.
 
-Map-body pattern-specialisations. All are peephole-detected at compile
-time; no user-visible API change.
+### Performance
 
-- `MapUpperReplaceLit` / `MapLowerReplaceLit` —
-  `map(@.upper().replace(lit, lit))` / lower variant. Single-pass ASCII
-  case-fold + memchr needle match into a pre-sized `Arc<[u8]>`.
-- `MapStrConcat { prefix, suffix }` —
-  `map(prefix + @ + suffix)` in three shapes. Exact-size buffer + one
-  Arc alloc per row.
-- `MapSplitLenSum { sep }` —
-  `map(@.split(sep).map(len).sum())`. Emits `IntVec`. ASCII path:
-  memchr / memmem hit-count. Unicode: char-count - hits × sep-chars.
-- `MapProject` —
-  `map({k1, k2, ..})` with all-`Short` entries. Emits columnar
-  `Val::ObjVec`; hoists per-row hashtable allocation.
-- `MapStrSlice { start, end }` —
-  `map(@.slice(lit, lit))`. ASCII path: zero-alloc `Val::StrSlice` /
-  `Val::StrSliceVec` borrowed view into parent Arc.
-- `MapFString(parts)` —
-  `map(f"...")`. Emits columnar `Val::StrVec` output; skips per-row
-  CallMethod dispatch.
-- `CountByField(k)` / `UniqueByField(k)` —
-  `count_by(k)` / `unique_by(k)` with trivial field key. Direct
-  `obj.get(k)` per row instead of lambda dispatch.
+- `simd-json` is enabled by default.
+- `Jetro::from_bytes` keeps raw bytes and lazily builds expensive
+  representations only when needed.
+- Added lazy simd-json tape handling and `TapeView`/`ValueView` execution paths.
+- Added on-demand tape row streaming for eligible pipelines.
+- Added structural-index execution for supported deep-search queries.
+- Added demand propagation through pipeline chains.
+- Added bounded sort/top-k strategies where downstream demand makes them safe.
+- Added view-native execution for more scalar, projection, reducer, keyed
+  reducer, object-map, f-string, and terminal collection paths.
+- Added columnar and object-vector execution paths for uniform object arrays.
+- Reduced reliance on hand-written fused VM opcodes in favor of metadata-driven
+  pipeline and builtin execution.
 
-### New Val variants
+### Pipeline and Demand Propagation
 
-- **`Val::StrSlice(StrRef)`** — borrowed slice into a parent `Arc<str>`.
-  Cloning = atomic Arc bump + two u32 offset copies; no heap alloc.
-  Emitted by `slice`, `substring`, `split.first` to avoid per-row
-  `Arc<str>` allocation.
-- **`Val::StrSliceVec(Arc<Vec<StrRef>>)`** — columnar lane of borrowed
-  slices. Drops per-row Val enum tag; serializes directly via `ValRef`.
-- **`Val::ObjSmall(Arc<[(Arc<str>, Val)]>)`** — inline-object variant
-  (flat key-value slice, no hashtable). Used where hashtable build per
-  row would dominate.
-- **`Val::ObjVec(Arc<ObjVecData>)`** — columnar array-of-objects. Shared
-  `keys: Arc<[Arc<str>]>` with `rows: Vec<Vec<Val>>`. One Arc per array
-  instead of N Arcs per N rows.
+- Added a pipeline IR with explicit source, stages, sinks, body kernels, sink
+  demand, stage strategy, view capability, and materialization policy.
+- Demand now flows backward from sinks through stages:
+  - `filter(...).first()` can stop after the first matching output.
+  - `take(n)` can cap upstream input demand.
+  - `count()` can avoid materializing row payloads where supported.
+  - `sort_by(...).take(k)` can use bounded top-k strategy when semantically
+    safe.
+- Added safety-aware handling for barrier stages such as `sort_by`,
+  `take_while`, `unique`, keyed reducers, and materialized suffixes.
 
-### Other
+### Builtins
 
-- **exec_fstring fast paths** — pre-size output `String::with_capacity`;
-  per-interp skip `val_to_string`'s temporary String (push_str direct
-  for `Val::Str`, `write!` for numeric, `"null"` for null);
-  `Arc::<str>::from(String)` transfers buffer instead of reallocating.
-  Small interp sub-programs (`[PushCurrent]`, `[PushCurrent, GetIndex]`,
-  `[PushCurrent, GetField]`, `[LoadIdent]`) fast-path without full
-  `self.exec()` recursion.
-- **Zero-alloc MapStrVec Upper/Lower/Trim** — ASCII nop path reuses
-  input `Arc`; mut path uses `String::from_utf8_unchecked` +
-  `Arc::<str>::from(String)` to transfer buffer.
-- **Deserialize key intern** — per-thread `HashMap<Box<str>, Arc<str>>`
-  (cap 4096) collapses repeated-key allocs during
-  `Val::from(&serde_json::Value)` and the custom `Deserialize` path.
+- Migrated builtin definitions into `jetro-core/src/builtins/`.
+- Added `Builtin` trait metadata and static dispatch hooks.
+- Added centralized builtin specs for names and aliases, category, cardinality,
+  lowering, streaming behavior, barrier behavior, sink behavior, demand law,
+  structural capability, and view capability.
+- Removed old `functions.rs`/eval-style builtin shims.
+- Removed duplicated dispatch tables where possible.
 
-### Benchmarks (v0.3.0 → 0.4.0, N=10k iters=100)
+### Removed
 
-**bench_smallstr** (native = hand-written Rust+serde = 1.0x):
+- Removed legacy eval modules.
+- Removed legacy graph support.
+- Removed old scan/bytescan paths.
+- Removed unused schema/plan/cfg/ssa modules.
+- Removed the old macro crate from the workspace.
+- Removed many obsolete fused VM opcodes and peephole paths now covered by the
+  planner/pipeline architecture.
 
-| workload | 0.3.0 | 0.4.0 |
-|---|---|---|
-| group_by short | 8.42x | **0.85x** (jetro wins) |
-| unique_by grp | 7.35x | 1.71x |
-| project {id,grp} | 6.88x | 2.49x |
-| fstring.short | 1.87x | 1.59x |
+### Documentation
 
-**bench_strings**:
+- Rewrote the root README around the new byte-first API.
+- Rewrote `jetro-core/README.md` to explain physical planning, backend
+  selection, demand propagation, tape/value-view execution, builtin registry
+  design, and VM fallback.
+- Updated syntax and in-depth documentation for the current API direction.
 
-| workload | 0.3.0 | 0.4.0 |
-|---|---|---|
-| split.count | ~3x | **0.77x** (jetro wins) |
-| concat | 1.99x | **0.75x** (jetro wins) |
-| split.map(len).sum | 5.64x | **0.51x** (jetro wins) |
-| upper+replace | 4.54x | 1.13x |
-| replace_all | 5.40x | 1.22x |
-| slice | 9.73x | 2.34x |
-| split-rev-join | 3.98x | 1.36x |
-| f-string | 3.53x | 2.71x |
-| upper+trim | 3.96x | 1.75x |
+### Benchmarks
 
-**bench_all_native** (opt_x_2): all workloads within 1.15x, 5 jetro wins
-(add / min-max / kv / kv-update / to-fromjson).
+- Expanded `bench_cold` with the full cold benchmark case set from `jqvsjetro`.
+- Added and updated benchmark examples covering cold start, nested projections,
+  f-strings, jaq comparisons, lock/cache behavior, and complex pipeline chains.
+
+### Validation
+
+Verified before release:
+
+```bash
+cargo check -p jetro-core --examples --offline
+cargo test -p jetro-core --offline
+cargo test --offline
+cargo package -p jetro-core --allow-dirty --offline
+cargo package --allow-dirty --offline
+```
+
+- Core unit tests passed: 749 passed, 1 ignored.
+- Integration tests passed.
+- Doctests passed.
+- Examples compile.
+- Package verification passes for both `jetro-core` and `jetro`.
 
 ---
 
