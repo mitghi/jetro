@@ -282,6 +282,13 @@ fn apply_adapter_materialized(
             M::GroupBy => <defs::GroupBy as Builtin>::apply_barrier(&mut ctx, buf, body),
             M::CountBy => <defs::CountBy as Builtin>::apply_barrier(&mut ctx, buf, body),
             M::IndexBy => <defs::IndexBy as Builtin>::apply_barrier(&mut ctx, buf, body),
+            M::Filter | M::Find | M::FindAll => {
+                <defs::Filter as Builtin>::apply_barrier(&mut ctx, buf, body)
+            }
+            M::Map => <defs::Map as Builtin>::apply_barrier(&mut ctx, buf, body),
+            M::FlatMap => <defs::FlatMap as Builtin>::apply_barrier(&mut ctx, buf, body),
+            M::Unique => <defs::Unique as Builtin>::apply_barrier(&mut ctx, buf, body),
+            M::UniqueBy => <defs::UniqueBy as Builtin>::apply_barrier(&mut ctx, buf, body),
             _ => None,
         };
         if let Some(r) = trait_result {

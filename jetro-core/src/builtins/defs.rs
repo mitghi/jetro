@@ -88,6 +88,23 @@ impl Builtin for Filter {
             crate::pipeline::StageFlow::SkipRow
         })
     }
+#[inline]
+    fn apply_barrier(
+        ctx: &mut super::builtin_def::BarrierCtx<'_>,
+        buf: &mut Vec<crate::value::Val>,
+        body: Option<&crate::vm::Program>,
+    ) -> Option<Result<(), crate::context::EvalError>> {
+        let prog = body?;
+        let result = super::filter_apply(std::mem::take(buf), |v| {
+            crate::pipeline::eval_kernel(ctx.kernel, v, |item| {
+                crate::pipeline::apply_item_in_env(ctx.vm, ctx.env, item, prog)
+            })
+        });
+        match result {
+            Ok(out) => { *buf = out; Some(Ok(())) }
+            Err(err) => Some(Err(err)),
+        }
+    }
 }
 
 /// Surface alias of `Filter` (same semantics; user-facing v2 name).
@@ -189,6 +206,24 @@ impl Builtin for Map {
         })?;
         Ok(crate::pipeline::StageFlow::Continue(mapped))
     }
+
+    #[inline]
+    fn apply_barrier(
+        ctx: &mut super::builtin_def::BarrierCtx<'_>,
+        buf: &mut Vec<crate::value::Val>,
+        body: Option<&crate::vm::Program>,
+    ) -> Option<Result<(), crate::context::EvalError>> {
+        let prog = body?;
+        let result = super::map_apply(std::mem::take(buf), |v| {
+            crate::pipeline::eval_kernel(ctx.kernel, v, |item| {
+                crate::pipeline::apply_item_in_env(ctx.vm, ctx.env, item, prog)
+            })
+        });
+        match result {
+            Ok(out) => { *buf = out; Some(Ok(())) }
+            Err(err) => Some(Err(err)),
+        }
+    }
 }
 
 /// Expanding projection: each element produces an array; outputs are concatenated.
@@ -205,6 +240,31 @@ impl Builtin for FlatMap {
             .demand_law(BuiltinDemandLaw::FlatMapLike)
             .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
             .lowering(BuiltinPipelineLowering::ExprArg)
+    }
+
+    #[inline]
+    fn apply_barrier(
+        ctx: &mut super::builtin_def::BarrierCtx<'_>,
+        buf: &mut Vec<crate::value::Val>,
+        body: Option<&crate::vm::Program>,
+    ) -> Option<Result<(), crate::context::EvalError>> {
+        let prog = body?;
+        let mut out: Vec<crate::value::Val> = Vec::new();
+        for v in buf.iter() {
+            let inner = match crate::pipeline::eval_kernel(ctx.kernel, v, |item| {
+                crate::pipeline::apply_item_in_env(ctx.vm, ctx.env, item, prog)
+            }) {
+                Ok(inner) => inner,
+                Err(err) => return Some(Err(err)),
+            };
+            if let Some(arr) = inner.as_vals() {
+                out.extend(arr.iter().cloned());
+            } else {
+                out.push(inner);
+            }
+        }
+        *buf = out;
+        Some(Ok(()))
     }
 }
 
@@ -1148,6 +1208,40 @@ fn unique_spec() -> BuiltinSpec {
         .order_effect(BuiltinPipelineOrderEffect::Preserves)
 }
 
+/// Shared barrier body for Unique / UniqueBy.
+#[inline]
+fn unique_apply_barrier(
+    ctx: &mut super::builtin_def::BarrierCtx<'_>,
+    buf: &mut Vec<crate::value::Val>,
+    body: Option<&crate::vm::Program>,
+) -> Option<Result<(), crate::context::EvalError>> {
+    match body {
+        None => {
+            let mut seen: std::collections::HashSet<String> = Default::default();
+            buf.retain(|v| seen.insert(format!("{:?}", v)));
+        }
+        Some(prog) => {
+            let mut seen: std::collections::HashSet<String> = Default::default();
+            let mut keep: Vec<bool> = Vec::with_capacity(buf.len());
+            for v in buf.iter() {
+                let key = crate::pipeline::eval_kernel(ctx.kernel, v, |item| {
+                    crate::pipeline::apply_item_in_env(ctx.vm, ctx.env, item, prog)
+                })
+                .unwrap_or(crate::value::Val::Null);
+                keep.push(seen.insert(format!("{:?}", key)));
+            }
+            let mut out: Vec<crate::value::Val> = Vec::with_capacity(buf.len());
+            for (i, v) in std::mem::take(buf).into_iter().enumerate() {
+                if keep[i] {
+                    out.push(v);
+                }
+            }
+            *buf = out;
+        }
+    }
+    Some(Ok(()))
+}
+
 /// `unique` — argument-free distinct.
 pub(crate) struct Unique;
 impl Builtin for Unique {
@@ -1161,6 +1255,14 @@ impl Builtin for Unique {
     fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
         Some(super::unique_arr_apply(recv).unwrap_or_else(|| recv.clone()))
     }
+    #[inline]
+    fn apply_barrier(
+        ctx: &mut super::builtin_def::BarrierCtx<'_>,
+        buf: &mut Vec<crate::value::Val>,
+        body: Option<&crate::vm::Program>,
+    ) -> Option<Result<(), crate::context::EvalError>> {
+        unique_apply_barrier(ctx, buf, body)
+    }
 }
 
 /// `unique_by(key)` — distinct by projected key.
@@ -1170,6 +1272,14 @@ impl Builtin for UniqueBy {
     const NAME: &'static str = "unique_by";
     fn spec() -> BuiltinSpec {
         unique_spec().lowering(BuiltinPipelineLowering::ExprArg)
+    }
+    #[inline]
+    fn apply_barrier(
+        ctx: &mut super::builtin_def::BarrierCtx<'_>,
+        buf: &mut Vec<crate::value::Val>,
+        body: Option<&crate::vm::Program>,
+    ) -> Option<Result<(), crate::context::EvalError>> {
+        unique_apply_barrier(ctx, buf, body)
     }
 }
 
