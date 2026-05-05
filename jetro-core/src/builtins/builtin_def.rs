@@ -37,6 +37,18 @@ pub(crate) struct StreamCtx<'a, 'b> {
     pub terminal_map_collect: &'a mut Option<super::super::pipeline::TerminalMapCollector<'b>>,
 }
 
+/// Concrete context passed to `Builtin::apply_barrier`.
+/// Carries the materialised buffer plus VM/env/kernel/stage references so individual
+/// barrier bodies can run their full-buffer transforms without allocating per-call.
+#[allow(dead_code)]
+pub(crate) struct BarrierCtx<'a> {
+    pub vm: &'a mut VM,
+    pub env: &'a mut Env,
+    pub kernel: &'a super::super::pipeline::BodyKernel,
+    pub stage: &'a super::super::pipeline::Stage,
+    pub strategy: super::super::pipeline::StageStrategy,
+}
+
 /// Per-method definition trait. Each `BuiltinMethod` variant has a corresponding zero-sized
 /// struct in `builtins::defs::*` that implements this trait.
 ///
@@ -98,5 +110,18 @@ pub(crate) trait Builtin {
         _body: Option<&Program>,
     ) -> Result<super::super::pipeline::StageFlow<Val>, EvalError> {
         Ok(super::super::pipeline::StageFlow::Continue(item))
+    }
+
+    /// Barrier full-buffer runtime: transforms `buf` in place. Default leaves `buf`
+    /// unchanged. Override on barrier-shaped builtins (Sort, Reverse, Unique, GroupBy,
+    /// Window, Chunk, RowFilter materialised, RowMap materialised, RowFlatMap, ...).
+    /// Returns `None` when method is not migrated to barrier dispatch (caller handles).
+    #[inline]
+    fn apply_barrier(
+        _ctx: &mut BarrierCtx<'_>,
+        _buf: &mut Vec<Val>,
+        _body: Option<&Program>,
+    ) -> Option<Result<(), EvalError>> {
+        None
     }
 }

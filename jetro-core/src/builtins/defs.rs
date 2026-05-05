@@ -821,6 +821,39 @@ impl Builtin for Sort {
             .materialization(BuiltinPipelineMaterialization::ComposedBarrier)
             .lowering(BuiltinPipelineLowering::Sort)
     }
+    #[inline]
+    fn apply_barrier(
+        ctx: &mut super::builtin_def::BarrierCtx<'_>,
+        buf: &mut Vec<crate::value::Val>,
+        body: Option<&crate::vm::Program>,
+    ) -> Option<Result<(), crate::context::EvalError>> {
+        let _ = body;
+        let _ = ctx;
+        let crate::pipeline::Stage::Sort(spec) = ctx.stage else {
+            return None;
+        };
+        let descending = spec.descending;
+        let strategy = ctx.strategy;
+        let result = match &spec.key {
+            None => crate::pipeline::bounded_sort_by_key(
+                std::mem::take(buf), descending, strategy, |v| Ok(v.clone()),
+            ),
+            Some(prog) => {
+                let key_prog = prog.clone();
+                crate::pipeline::bounded_sort_by_key(
+                    std::mem::take(buf), descending, strategy, |v| {
+                        Ok(crate::pipeline::eval_kernel(ctx.kernel, v, |item| {
+                            crate::pipeline::apply_item_in_env(ctx.vm, ctx.env, item, &key_prog)
+                        }).unwrap_or(crate::value::Val::Null))
+                    },
+                )
+            }
+        };
+        match result {
+            Ok(sorted) => { *buf = sorted; Some(Ok(())) }
+            Err(err) => Some(Err(err)),
+        }
+    }
 }
 
 /// `group_shape` — barrier returning per-shape buckets.
@@ -855,6 +888,17 @@ impl Builtin for Window {
             ))
             .lowering(BuiltinPipelineLowering::UsizeArg { min: 1 })
     }
+
+    #[inline]
+    fn apply_barrier(
+        ctx: &mut super::builtin_def::BarrierCtx<'_>,
+        buf: &mut Vec<crate::value::Val>,
+        _body: Option<&crate::vm::Program>,
+    ) -> Option<Result<(), crate::context::EvalError>> {
+        let n = ctx.stage.descriptor().and_then(|d| d.usize_arg)?;
+        *buf = super::window_apply(buf, n);
+        Some(Ok(()))
+    }
 }
 
 /// `chunk(n)` — non-overlapping fixed-size buckets.
@@ -873,6 +917,17 @@ impl Builtin for Chunk {
                 1.0,
             ))
             .lowering(BuiltinPipelineLowering::UsizeArg { min: 1 })
+    }
+
+    #[inline]
+    fn apply_barrier(
+        ctx: &mut super::builtin_def::BarrierCtx<'_>,
+        buf: &mut Vec<crate::value::Val>,
+        _body: Option<&crate::vm::Program>,
+    ) -> Option<Result<(), crate::context::EvalError>> {
+        let n = ctx.stage.descriptor().and_then(|d| d.usize_arg)?;
+        *buf = super::chunk_apply(buf, n);
+        Some(Ok(()))
     }
 }
 
@@ -961,6 +1016,31 @@ impl Builtin for GroupBy {
             .materialization(BuiltinPipelineMaterialization::ComposedBarrier)
             .lowering(BuiltinPipelineLowering::ExprArg)
     }
+    #[inline]
+    fn apply_barrier(
+        ctx: &mut super::builtin_def::BarrierCtx<'_>,
+        buf: &mut Vec<crate::value::Val>,
+        body: Option<&crate::vm::Program>,
+    ) -> Option<Result<(), crate::context::EvalError>> {
+        let _ = body;
+        let _ = ctx;
+        let prog = match body {
+            Some(p) => p,
+            None => return Some(Ok(())),
+        };
+        let result = super::group_by_apply(std::mem::take(buf), |v| {
+            crate::pipeline::eval_kernel(ctx.kernel, v, |item| {
+                crate::pipeline::apply_item_in_env(ctx.vm, ctx.env, item, prog)
+            })
+        });
+        match result {
+            Ok(out_obj) => {
+                *buf = vec![crate::value::Val::Obj(std::sync::Arc::new(out_obj))];
+                Some(Ok(()))
+            }
+            Err(err) => Some(Err(err)),
+        }
+    }
 }
 
 /// `count_by(key)` — keyed reducer counting per key.
@@ -984,6 +1064,27 @@ impl Builtin for CountBy {
                 terminal: BuiltinMethod::First,
             })
     }
+
+    #[inline]
+    fn apply_barrier(
+        ctx: &mut super::builtin_def::BarrierCtx<'_>,
+        buf: &mut Vec<crate::value::Val>,
+        body: Option<&crate::vm::Program>,
+    ) -> Option<Result<(), crate::context::EvalError>> {
+        let prog = body?;
+        let result = super::count_by_apply(std::mem::take(buf), |v| {
+            crate::pipeline::eval_kernel(ctx.kernel, v, |item| {
+                crate::pipeline::apply_item_in_env(ctx.vm, ctx.env, item, prog)
+            })
+        });
+        match result {
+            Ok(map) => {
+                *buf = vec![crate::value::Val::obj(map)];
+                Some(Ok(()))
+            }
+            Err(err) => Some(Err(err)),
+        }
+    }
 }
 
 /// `index_by(key)` — keyed reducer with last-write-wins.
@@ -1006,6 +1107,27 @@ impl Builtin for IndexBy {
             .lowering(BuiltinPipelineLowering::TerminalExprArg {
                 terminal: BuiltinMethod::First,
             })
+    }
+
+    #[inline]
+    fn apply_barrier(
+        ctx: &mut super::builtin_def::BarrierCtx<'_>,
+        buf: &mut Vec<crate::value::Val>,
+        body: Option<&crate::vm::Program>,
+    ) -> Option<Result<(), crate::context::EvalError>> {
+        let prog = body?;
+        let result = super::index_by_apply(std::mem::take(buf), |v| {
+            crate::pipeline::eval_kernel(ctx.kernel, v, |item| {
+                crate::pipeline::apply_item_in_env(ctx.vm, ctx.env, item, prog)
+            })
+        });
+        match result {
+            Ok(map) => {
+                *buf = vec![crate::value::Val::obj(map)];
+                Some(Ok(()))
+            }
+            Err(err) => Some(Err(err)),
+        }
     }
 }
 
@@ -1069,6 +1191,16 @@ impl Builtin for Reverse {
     #[inline]
     fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
         Some(super::reverse_any_apply(recv).unwrap_or_else(|| recv.clone()))
+    }
+
+    #[inline]
+    fn apply_barrier(
+        _ctx: &mut super::builtin_def::BarrierCtx<'_>,
+        buf: &mut Vec<crate::value::Val>,
+        _body: Option<&crate::vm::Program>,
+    ) -> Option<Result<(), crate::context::EvalError>> {
+        buf.reverse();
+        Some(Ok(()))
     }
 }
 

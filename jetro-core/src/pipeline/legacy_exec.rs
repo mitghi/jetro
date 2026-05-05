@@ -263,6 +263,31 @@ fn apply_adapter_materialized(
     kernel: &BodyKernel,
     strategy: StageStrategy,
 ) -> Option<Result<(), EvalError>> {
+    // Trait dispatch for migrated barrier methods.
+    if let Some(method) = stage.descriptor().and_then(|d| d.method) {
+        let body = stage.body_program();
+        let mut ctx = crate::builtins::builtin_def::BarrierCtx {
+            vm,
+            env: loop_env,
+            kernel,
+            stage,
+            strategy,
+        };
+        use crate::builtins::{BuiltinMethod as M, builtin_def::Builtin, defs};
+        let trait_result = match method {
+            M::Reverse => <defs::Reverse as Builtin>::apply_barrier(&mut ctx, buf, body),
+            M::Sort => <defs::Sort as Builtin>::apply_barrier(&mut ctx, buf, body),
+            M::Window => <defs::Window as Builtin>::apply_barrier(&mut ctx, buf, body),
+            M::Chunk => <defs::Chunk as Builtin>::apply_barrier(&mut ctx, buf, body),
+            M::GroupBy => <defs::GroupBy as Builtin>::apply_barrier(&mut ctx, buf, body),
+            M::CountBy => <defs::CountBy as Builtin>::apply_barrier(&mut ctx, buf, body),
+            M::IndexBy => <defs::IndexBy as Builtin>::apply_barrier(&mut ctx, buf, body),
+            _ => None,
+        };
+        if let Some(r) = trait_result {
+            return Some(r);
+        }
+    }
     match stage_executor(stage)? {
         BuiltinPipelineExecutor::ElementBuiltin => {
             let mut out: Vec<Val> = Vec::with_capacity(buf.len());
