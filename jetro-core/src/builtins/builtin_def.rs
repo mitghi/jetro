@@ -13,7 +13,7 @@
 //!
 //! After full migration, each builtin = one `impl Builtin for X` block.
 
-use super::{BuiltinMethod, BuiltinSpec};
+use super::{BuiltinCancellation, BuiltinMethod, BuiltinSpec};
 
 /// Per-method definition trait. Each `BuiltinMethod` variant has a corresponding zero-sized
 /// struct in `builtins::defs::*` that implements this trait.
@@ -34,4 +34,12 @@ pub(crate) trait Builtin {
 
     /// Returns the full `BuiltinSpec` for this method.
     fn spec() -> BuiltinSpec;
+
+    /// Algebraic cancellation rule for this method, if any.
+    /// Default `None`; override for inverse pairs (Base64/Url/Html encode/decode) and
+    /// self-inverses (ReverseStr). Used by the optimizer to fuse-cancel adjacent stages.
+    #[inline]
+    fn cancellation() -> Option<BuiltinCancellation> {
+        None
+    }
 }

@@ -6,11 +6,11 @@
 //! match into this file (or category-split children).
 
 use super::{
-    builtin_def::Builtin, BuiltinCancelGroup, BuiltinCancellation, BuiltinCardinality,
-    BuiltinCategory, BuiltinColumnarStage, BuiltinDemandLaw, BuiltinKeyedReducer, BuiltinMethod,
-    BuiltinNumericReducer, BuiltinPipelineLowering, BuiltinPipelineMaterialization,
-    BuiltinPipelineOrderEffect, BuiltinPipelineShape, BuiltinSelectionPosition, BuiltinSpec,
-    BuiltinStageMerge, BuiltinStructural, BuiltinViewStage,
+    builtin_def::Builtin, BuiltinCancelGroup, BuiltinCancelSide, BuiltinCancellation,
+    BuiltinCardinality, BuiltinCategory, BuiltinColumnarStage, BuiltinDemandLaw,
+    BuiltinKeyedReducer, BuiltinMethod, BuiltinNumericReducer, BuiltinPipelineLowering,
+    BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect, BuiltinPipelineShape,
+    BuiltinSelectionPosition, BuiltinSpec, BuiltinStageMerge, BuiltinStructural, BuiltinViewStage,
 };
 
 // ── Helpers shared across reducer family ─────────────────────────────────────
@@ -1418,16 +1418,9 @@ scalar_native_element! {
     KebabCase => KebabCase, "kebab_case";
     CamelCase => CamelCase, "camel_case";
     PascalCase => PascalCase, "pascal_case";
-    ReverseStr => ReverseStr, "reverse_str";
     ParseInt => ParseInt, "parse_int";
     ParseFloat => ParseFloat, "parse_float";
     ParseBool => ParseBool, "parse_bool";
-    ToBase64 => ToBase64, "to_base64";
-    FromBase64 => FromBase64, "from_base64";
-    UrlEncode => UrlEncode, "url_encode";
-    UrlDecode => UrlDecode, "url_decode";
-    HtmlEscape => HtmlEscape, "html_escape";
-    HtmlUnescape => HtmlUnescape, "html_unescape";
     Repeat => Repeat, "repeat", aliases: ["repeat_str"];
     PadLeft => PadLeft, "pad_left";
     PadRight => PadRight, "pad_right";
@@ -1608,3 +1601,112 @@ fn default_scalar_spec(method: BuiltinMethod) -> BuiltinSpec {
         spec
     }
 }
+
+// ── Cancellation-aware encode/decode pairs ───────────────────────────────────
+// Each is a scalar element with the same spec body as `scalar_native_element_spec`
+// but advertises an algebraic cancellation rule used by the optimizer to fuse
+// adjacent inverse pairs (e.g. `to_base64(from_base64(x))` → identity).
+
+/// `to_base64` — Forward base64 encode.
+pub(crate) struct ToBase64;
+impl Builtin for ToBase64 {
+    const METHOD: BuiltinMethod = BuiltinMethod::ToBase64;
+    const NAME: &'static str = "to_base64";
+    fn spec() -> BuiltinSpec { scalar_native_element_spec() }
+    #[inline]
+    fn cancellation() -> Option<BuiltinCancellation> {
+        Some(BuiltinCancellation::Inverse {
+            group: BuiltinCancelGroup::Base64,
+            side: BuiltinCancelSide::Forward,
+        })
+    }
+}
+
+/// `from_base64` — Inverse of `to_base64`.
+pub(crate) struct FromBase64;
+impl Builtin for FromBase64 {
+    const METHOD: BuiltinMethod = BuiltinMethod::FromBase64;
+    const NAME: &'static str = "from_base64";
+    fn spec() -> BuiltinSpec { scalar_native_element_spec() }
+    #[inline]
+    fn cancellation() -> Option<BuiltinCancellation> {
+        Some(BuiltinCancellation::Inverse {
+            group: BuiltinCancelGroup::Base64,
+            side: BuiltinCancelSide::Backward,
+        })
+    }
+}
+
+/// `url_encode` — Forward URL percent-encode.
+pub(crate) struct UrlEncode;
+impl Builtin for UrlEncode {
+    const METHOD: BuiltinMethod = BuiltinMethod::UrlEncode;
+    const NAME: &'static str = "url_encode";
+    fn spec() -> BuiltinSpec { scalar_native_element_spec() }
+    #[inline]
+    fn cancellation() -> Option<BuiltinCancellation> {
+        Some(BuiltinCancellation::Inverse {
+            group: BuiltinCancelGroup::Url,
+            side: BuiltinCancelSide::Forward,
+        })
+    }
+}
+
+/// `url_decode` — Inverse of `url_encode`.
+pub(crate) struct UrlDecode;
+impl Builtin for UrlDecode {
+    const METHOD: BuiltinMethod = BuiltinMethod::UrlDecode;
+    const NAME: &'static str = "url_decode";
+    fn spec() -> BuiltinSpec { scalar_native_element_spec() }
+    #[inline]
+    fn cancellation() -> Option<BuiltinCancellation> {
+        Some(BuiltinCancellation::Inverse {
+            group: BuiltinCancelGroup::Url,
+            side: BuiltinCancelSide::Backward,
+        })
+    }
+}
+
+/// `html_escape` — Forward HTML-entity escape.
+pub(crate) struct HtmlEscape;
+impl Builtin for HtmlEscape {
+    const METHOD: BuiltinMethod = BuiltinMethod::HtmlEscape;
+    const NAME: &'static str = "html_escape";
+    fn spec() -> BuiltinSpec { scalar_native_element_spec() }
+    #[inline]
+    fn cancellation() -> Option<BuiltinCancellation> {
+        Some(BuiltinCancellation::Inverse {
+            group: BuiltinCancelGroup::Html,
+            side: BuiltinCancelSide::Forward,
+        })
+    }
+}
+
+/// `html_unescape` — Inverse of `html_escape`.
+pub(crate) struct HtmlUnescape;
+impl Builtin for HtmlUnescape {
+    const METHOD: BuiltinMethod = BuiltinMethod::HtmlUnescape;
+    const NAME: &'static str = "html_unescape";
+    fn spec() -> BuiltinSpec { scalar_native_element_spec() }
+    #[inline]
+    fn cancellation() -> Option<BuiltinCancellation> {
+        Some(BuiltinCancellation::Inverse {
+            group: BuiltinCancelGroup::Html,
+            side: BuiltinCancelSide::Backward,
+        })
+    }
+}
+
+/// `reverse_str` — Self-inverse string reversal (cancels with adjacent reverse_str).
+pub(crate) struct ReverseStr;
+impl Builtin for ReverseStr {
+    const METHOD: BuiltinMethod = BuiltinMethod::ReverseStr;
+    const NAME: &'static str = "reverse_str";
+    fn spec() -> BuiltinSpec { scalar_native_element_spec() }
+    #[inline]
+    fn cancellation() -> Option<BuiltinCancellation> {
+        Some(BuiltinCancellation::SelfInverse(BuiltinCancelGroup::Reverse))
+    }
+}
+
+// ── Re-export Builtin trait constants used by cancellation impls (already imported above) ──

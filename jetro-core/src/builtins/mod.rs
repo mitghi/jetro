@@ -1458,35 +1458,17 @@ impl BuiltinMethod {
             };
         }
         let spec = crate::for_each_builtin!(spec_arm);
-        match self {
-            Self::ToBase64 => spec.cancellation(BuiltinCancellation::Inverse {
-                group: BuiltinCancelGroup::Base64,
-                side: BuiltinCancelSide::Forward,
-            }),
-            Self::FromBase64 => spec.cancellation(BuiltinCancellation::Inverse {
-                group: BuiltinCancelGroup::Base64,
-                side: BuiltinCancelSide::Backward,
-            }),
-            Self::UrlEncode => spec.cancellation(BuiltinCancellation::Inverse {
-                group: BuiltinCancelGroup::Url,
-                side: BuiltinCancelSide::Forward,
-            }),
-            Self::UrlDecode => spec.cancellation(BuiltinCancellation::Inverse {
-                group: BuiltinCancelGroup::Url,
-                side: BuiltinCancelSide::Backward,
-            }),
-            Self::HtmlEscape => spec.cancellation(BuiltinCancellation::Inverse {
-                group: BuiltinCancelGroup::Html,
-                side: BuiltinCancelSide::Forward,
-            }),
-            Self::HtmlUnescape => spec.cancellation(BuiltinCancellation::Inverse {
-                group: BuiltinCancelGroup::Html,
-                side: BuiltinCancelSide::Backward,
-            }),
-            Self::ReverseStr => spec.cancellation(BuiltinCancellation::SelfInverse(
-                BuiltinCancelGroup::Reverse,
-            )),
-            _ => spec,
+        // Apply per-method cancellation override (defaults to None for most methods).
+        macro_rules! cancel_arm {
+            ( $( $variant:ident ),* $(,)? ) => {
+                match self {
+                    $( Self::$variant => <defs::$variant as builtin_def::Builtin>::cancellation(), )*
+                }
+            };
+        }
+        match crate::for_each_builtin!(cancel_arm) {
+            Some(c) => spec.cancellation(c),
+            None => spec,
         }
     }
 }
