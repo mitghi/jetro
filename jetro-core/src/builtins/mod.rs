@@ -1547,84 +1547,26 @@ impl BuiltinCall {
                 return Some($expr.unwrap_or_else(|| recv.clone()))
             };
         }
-        // Try trait dispatch first. Each migrated builtin's `apply_one` (no-arg) or
-        // `apply_args` (multi-arg) returns `Some(val)` when applicable, `None` otherwise.
-        // Methods that have not yet implemented these return `None` here and fall through
-        // to the legacy match below.
-        if matches!(self.args, BuiltinArgs::None) {
-            macro_rules! trait_arm {
-                ( $( $variant:ident ),* $(,)? ) => {
-                    match self.method {
-                        $( BuiltinMethod::$variant => {
+        // Try trait dispatch first. Each migrated builtin overrides `apply_one` (no-arg)
+        // or `apply_args` (any-args). Both default to `None`, falling through to legacy.
+        macro_rules! trait_arm {
+            ( $( $variant:ident ),* $(,)? ) => {
+                match self.method {
+                    $( BuiltinMethod::$variant => {
+                        if matches!(self.args, BuiltinArgs::None) {
                             if let Some(v) = <defs::$variant as builtin_def::Builtin>::apply_one(recv) {
                                 return Some(v);
                             }
-                        } )*
-                    }
-                };
-            }
-            crate::for_each_builtin!(trait_arm);
-        } else {
-            macro_rules! trait_arg_arm {
-                ( $( $variant:ident ),* $(,)? ) => {
-                    match self.method {
-                        $( BuiltinMethod::$variant => {
-                            if let Some(v) = <defs::$variant as builtin_def::Builtin>::apply_args(recv, &self.args) {
-                                return Some(v);
-                            }
-                        } )*
-                    }
-                };
-            }
-            crate::for_each_builtin!(trait_arg_arm);
+                        }
+                        if let Some(v) = <defs::$variant as builtin_def::Builtin>::apply_args(recv, &self.args) {
+                            return Some(v);
+                        }
+                    } )*
+                }
+            };
         }
+        crate::for_each_builtin!(trait_arm);
         match (self.method, &self.args) {
-            (BuiltinMethod::Upper, BuiltinArgs::None) => apply_or_recv!(upper_apply(recv)),
-            (BuiltinMethod::Lower, BuiltinArgs::None) => apply_or_recv!(lower_apply(recv)),
-            (BuiltinMethod::Trim, BuiltinArgs::None) => apply_or_recv!(trim_apply(recv)),
-            (BuiltinMethod::TrimLeft, BuiltinArgs::None) => apply_or_recv!(trim_left_apply(recv)),
-            (BuiltinMethod::TrimRight, BuiltinArgs::None) => {
-                apply_or_recv!(trim_right_apply(recv))
-            }
-            (BuiltinMethod::Capitalize, BuiltinArgs::None) => {
-                apply_or_recv!(capitalize_apply(recv))
-            }
-            (BuiltinMethod::TitleCase, BuiltinArgs::None) => {
-                apply_or_recv!(title_case_apply(recv))
-            }
-            (BuiltinMethod::SnakeCase, BuiltinArgs::None) => apply_or_recv!(snake_case_apply(recv)),
-            (BuiltinMethod::KebabCase, BuiltinArgs::None) => apply_or_recv!(kebab_case_apply(recv)),
-            (BuiltinMethod::CamelCase, BuiltinArgs::None) => apply_or_recv!(camel_case_apply(recv)),
-            (BuiltinMethod::PascalCase, BuiltinArgs::None) => {
-                apply_or_recv!(pascal_case_apply(recv))
-            }
-            (BuiltinMethod::ReverseStr, BuiltinArgs::None) => {
-                apply_or_recv!(reverse_str_apply(recv))
-            }
-            (BuiltinMethod::HtmlEscape, BuiltinArgs::None) => {
-                apply_or_recv!(html_escape_apply(recv))
-            }
-            (BuiltinMethod::HtmlUnescape, BuiltinArgs::None) => {
-                apply_or_recv!(html_unescape_apply(recv))
-            }
-            (BuiltinMethod::UrlEncode, BuiltinArgs::None) => {
-                apply_or_recv!(url_encode_apply(recv))
-            }
-            (BuiltinMethod::UrlDecode, BuiltinArgs::None) => {
-                apply_or_recv!(url_decode_apply(recv))
-            }
-            (BuiltinMethod::ToBase64, BuiltinArgs::None) => {
-                apply_or_recv!(to_base64_apply(recv))
-            }
-            (BuiltinMethod::FromBase64, BuiltinArgs::None) => {
-                apply_or_recv!(from_base64_apply(recv))
-            }
-            (BuiltinMethod::Dedent, BuiltinArgs::None) => apply_or_recv!(dedent_apply(recv)),
-            (BuiltinMethod::Lines, BuiltinArgs::None) => apply_or_recv!(lines_apply(recv)),
-            (BuiltinMethod::Words, BuiltinArgs::None) => apply_or_recv!(words_apply(recv)),
-            (BuiltinMethod::Chars, BuiltinArgs::None) => apply_or_recv!(chars_apply(recv)),
-            (BuiltinMethod::CharsOf, BuiltinArgs::None) => apply_or_recv!(chars_of_apply(recv)),
-            (BuiltinMethod::Bytes, BuiltinArgs::None) => apply_or_recv!(bytes_of_apply(recv)),
             (BuiltinMethod::ByteLen, BuiltinArgs::None)
             | (BuiltinMethod::IsBlank, BuiltinArgs::None)
             | (BuiltinMethod::IsNumeric, BuiltinArgs::None)
@@ -1633,13 +1575,6 @@ impl BuiltinCall {
             | (BuiltinMethod::ToNumber, BuiltinArgs::None)
             | (BuiltinMethod::ToBool, BuiltinArgs::None) => {
                 apply_or_recv!(str_no_arg_scalar_val_apply(self.method, recv))
-            }
-            (BuiltinMethod::ParseInt, BuiltinArgs::None) => apply_or_recv!(parse_int_apply(recv)),
-            (BuiltinMethod::ParseFloat, BuiltinArgs::None) => {
-                apply_or_recv!(parse_float_apply(recv))
-            }
-            (BuiltinMethod::ParseBool, BuiltinArgs::None) => {
-                apply_or_recv!(parse_bool_apply(recv))
             }
             (BuiltinMethod::Sum, BuiltinArgs::None)
             | (BuiltinMethod::Avg, BuiltinArgs::None)
@@ -1653,20 +1588,8 @@ impl BuiltinCall {
             (BuiltinMethod::Keys, BuiltinArgs::None) => return Some(keys_apply(recv)),
             (BuiltinMethod::Values, BuiltinArgs::None) => return Some(values_apply(recv)),
             (BuiltinMethod::Entries, BuiltinArgs::None) => return Some(entries_apply(recv)),
-            (BuiltinMethod::Reverse, BuiltinArgs::None) => apply_or_recv!(reverse_any_apply(recv)),
-            (BuiltinMethod::Unique, BuiltinArgs::None) => apply_or_recv!(unique_arr_apply(recv)),
             (BuiltinMethod::Collect, BuiltinArgs::None) => return Some(collect_apply(recv)),
-            (BuiltinMethod::Invert, BuiltinArgs::None) => apply_or_recv!(invert_apply(recv)),
-            (BuiltinMethod::Type, BuiltinArgs::None) => apply_or_recv!(type_name_apply(recv)),
-            (BuiltinMethod::ToString, BuiltinArgs::None) => apply_or_recv!(to_string_apply(recv)),
-            (BuiltinMethod::ToJson, BuiltinArgs::None) => apply_or_recv!(to_json_apply(recv)),
             (BuiltinMethod::FromJson, BuiltinArgs::None) => return from_json_apply(recv),
-            (BuiltinMethod::ToCsv, BuiltinArgs::None) => apply_or_recv!(to_csv_apply(recv)),
-            (BuiltinMethod::ToTsv, BuiltinArgs::None) => apply_or_recv!(to_tsv_apply(recv)),
-            (BuiltinMethod::ToPairs, BuiltinArgs::None) => apply_or_recv!(to_pairs_apply(recv)),
-            (BuiltinMethod::FromPairs, BuiltinArgs::None) => {
-                apply_or_recv!(from_pairs_apply(recv))
-            }
             (BuiltinMethod::Ceil, BuiltinArgs::None)
             | (BuiltinMethod::Floor, BuiltinArgs::None)
             | (BuiltinMethod::Round, BuiltinArgs::None)
@@ -1683,11 +1606,8 @@ impl BuiltinCall {
                 return indices_of_apply(recv, item)
             }
             (BuiltinMethod::Set, BuiltinArgs::Val(item)) => return Some(item.clone()),
-            (BuiltinMethod::Compact, BuiltinArgs::None) => apply_or_recv!(compact_apply(recv)),
             (BuiltinMethod::Join, BuiltinArgs::Str(sep)) => return join_apply(recv, sep),
             (BuiltinMethod::Enumerate, BuiltinArgs::None) => return enumerate_apply(recv),
-            (BuiltinMethod::Pairwise, BuiltinArgs::None) => apply_or_recv!(pairwise_apply(recv)),
-            (BuiltinMethod::Schema, BuiltinArgs::None) => apply_or_recv!(schema_apply(recv)),
             (BuiltinMethod::Flatten, BuiltinArgs::Usize(depth)) => {
                 apply_or_recv!(flatten_depth_apply(recv, *depth))
             }
@@ -1737,15 +1657,6 @@ impl BuiltinCall {
             }
             (BuiltinMethod::Lag, BuiltinArgs::Usize(n)) => apply_or_recv!(lag_apply(recv, *n)),
             (BuiltinMethod::Lead, BuiltinArgs::Usize(n)) => apply_or_recv!(lead_apply(recv, *n)),
-            (BuiltinMethod::DiffWindow, BuiltinArgs::None) => {
-                apply_or_recv!(diff_window_apply(recv))
-            }
-            (BuiltinMethod::PctChange, BuiltinArgs::None) => {
-                apply_or_recv!(pct_change_apply(recv))
-            }
-            (BuiltinMethod::CumMax, BuiltinArgs::None) => apply_or_recv!(cummax_apply(recv)),
-            (BuiltinMethod::CumMin, BuiltinArgs::None) => apply_or_recv!(cummin_apply(recv)),
-            (BuiltinMethod::Zscore, BuiltinArgs::None) => apply_or_recv!(zscore_apply(recv)),
             (BuiltinMethod::Merge, BuiltinArgs::Val(other)) => {
                 apply_or_recv!(merge_apply(recv, other))
             }

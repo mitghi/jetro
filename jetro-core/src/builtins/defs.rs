@@ -104,7 +104,7 @@ impl Builtin for Compact {
     }
     #[inline]
     fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
-        super::compact_apply(recv)
+        Some(super::compact_apply(recv).unwrap_or_else(|| recv.clone()))
     }
 }
 
@@ -120,7 +120,7 @@ impl Builtin for Remove {
     #[inline]
     fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
         match args {
-            super::BuiltinArgs::Val(item) => super::remove_value_apply(recv, item),
+            super::BuiltinArgs::Val(item) => Some(super::remove_value_apply(recv, item).unwrap_or_else(|| recv.clone())),
             _ => None,
         }
     }
@@ -309,7 +309,7 @@ impl Builtin for Len {
     }
     #[inline]
     fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
-        super::len_apply(recv)
+        Some(super::len_apply(recv).unwrap_or_else(|| recv.clone()))
     }
 }
 
@@ -475,7 +475,7 @@ impl Builtin for Enumerate {
     }
     #[inline]
     fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
-        super::enumerate_apply(recv)
+        Some(super::enumerate_apply(recv).unwrap_or_else(|| recv.clone()))
     }
 }
 
@@ -492,7 +492,7 @@ impl Builtin for Pairwise {
     }
     #[inline]
     fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
-        super::pairwise_apply(recv)
+        Some(super::pairwise_apply(recv).unwrap_or_else(|| recv.clone()))
     }
 }
 
@@ -574,7 +574,7 @@ impl Builtin for Lines {
     fn spec() -> BuiltinSpec { expand_element_spec() }
     #[inline]
     fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
-        super::lines_apply(recv)
+        Some(super::lines_apply(recv).unwrap_or_else(|| recv.clone()))
     }
 }
 
@@ -586,7 +586,7 @@ impl Builtin for Words {
     fn spec() -> BuiltinSpec { expand_element_spec() }
     #[inline]
     fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
-        super::words_apply(recv)
+        Some(super::words_apply(recv).unwrap_or_else(|| recv.clone()))
     }
 }
 
@@ -598,7 +598,7 @@ impl Builtin for Chars {
     fn spec() -> BuiltinSpec { expand_element_spec() }
     #[inline]
     fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
-        super::chars_apply(recv)
+        Some(super::chars_apply(recv).unwrap_or_else(|| recv.clone()))
     }
 }
 
@@ -610,7 +610,7 @@ impl Builtin for CharsOf {
     fn spec() -> BuiltinSpec { expand_element_spec() }
     #[inline]
     fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
-        super::chars_of_apply(recv)
+        Some(super::chars_of_apply(recv).unwrap_or_else(|| recv.clone()))
     }
 }
 
@@ -622,7 +622,7 @@ impl Builtin for Bytes {
     fn spec() -> BuiltinSpec { expand_element_spec() }
     #[inline]
     fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
-        super::bytes_of_apply(recv)
+        Some(super::bytes_of_apply(recv).unwrap_or_else(|| recv.clone()))
     }
 }
 
@@ -926,7 +926,7 @@ impl Builtin for Unique {
     }
     #[inline]
     fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
-        super::unique_arr_apply(recv)
+        Some(super::unique_arr_apply(recv).unwrap_or_else(|| recv.clone()))
     }
 }
 
@@ -957,7 +957,7 @@ impl Builtin for Reverse {
     }
     #[inline]
     fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
-        super::reverse_any_apply(recv)
+        Some(super::reverse_any_apply(recv).unwrap_or_else(|| recv.clone()))
     }
 }
 
@@ -977,7 +977,7 @@ impl Builtin for Append {
     #[inline]
     fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
         match args {
-            super::BuiltinArgs::Val(item) => super::append_apply(recv, item),
+            super::BuiltinArgs::Val(item) => Some(super::append_apply(recv, item).unwrap_or_else(|| recv.clone())),
             _ => None,
         }
     }
@@ -992,7 +992,7 @@ impl Builtin for Prepend {
     #[inline]
     fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
         match args {
-            super::BuiltinArgs::Val(item) => super::prepend_apply(recv, item),
+            super::BuiltinArgs::Val(item) => Some(super::prepend_apply(recv, item).unwrap_or_else(|| recv.clone())),
             _ => None,
         }
     }
@@ -1052,7 +1052,7 @@ impl Builtin for Join {
     #[inline]
     fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
         match args {
-            super::BuiltinArgs::Str(sep) => super::join_apply(recv, sep),
+            super::BuiltinArgs::Str(sep) => Some(super::join_apply(recv, sep).unwrap_or_else(|| recv.clone())),
             _ => None,
         }
     }
@@ -1146,7 +1146,7 @@ impl Builtin for ToPairs {
     fn spec() -> BuiltinSpec { object_simple_spec() }
     #[inline]
     fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
-        super::to_pairs_apply(recv)
+        Some(super::to_pairs_apply(recv).unwrap_or_else(|| recv.clone()))
     }
 }
 
@@ -1158,7 +1158,7 @@ impl Builtin for FromPairs {
     fn spec() -> BuiltinSpec { object_simple_spec() }
     #[inline]
     fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
-        super::from_pairs_apply(recv)
+        Some(super::from_pairs_apply(recv).unwrap_or_else(|| recv.clone()))
     }
 }
 
@@ -1170,7 +1170,7 @@ impl Builtin for Invert {
     fn spec() -> BuiltinSpec { object_simple_spec() }
     #[inline]
     fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
-        super::invert_apply(recv)
+        Some(super::invert_apply(recv).unwrap_or_else(|| recv.clone()))
     }
 }
 
@@ -1529,7 +1529,7 @@ impl Builtin for ToCsv {
     fn spec() -> BuiltinSpec { serialization_spec() }
     #[inline]
     fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
-        super::to_csv_apply(recv)
+        Some(super::to_csv_apply(recv).unwrap_or_else(|| recv.clone()))
     }
 }
 
@@ -1541,7 +1541,7 @@ impl Builtin for ToTsv {
     fn spec() -> BuiltinSpec { serialization_spec() }
     #[inline]
     fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
-        super::to_tsv_apply(recv)
+        Some(super::to_tsv_apply(recv).unwrap_or_else(|| recv.clone()))
     }
 }
 
@@ -1633,7 +1633,7 @@ impl Builtin for DiffWindow {
     #[inline]
     fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
         match args {
-            super::BuiltinArgs::None => { super::diff_window_apply(recv) }
+            super::BuiltinArgs::None => { Some(super::diff_window_apply(recv).unwrap_or_else(|| recv.clone())) }
             _ => None,
         }
     }
@@ -1648,7 +1648,7 @@ impl Builtin for PctChange {
     #[inline]
     fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
         match args {
-            super::BuiltinArgs::None => { super::pct_change_apply(recv) }
+            super::BuiltinArgs::None => { Some(super::pct_change_apply(recv).unwrap_or_else(|| recv.clone())) }
             _ => None,
         }
     }
@@ -1663,7 +1663,7 @@ impl Builtin for CumMax {
     #[inline]
     fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
         match args {
-            super::BuiltinArgs::None => { super::cummax_apply(recv) }
+            super::BuiltinArgs::None => { Some(super::cummax_apply(recv).unwrap_or_else(|| recv.clone())) }
             _ => None,
         }
     }
@@ -1678,7 +1678,7 @@ impl Builtin for CumMin {
     #[inline]
     fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
         match args {
-            super::BuiltinArgs::None => { super::cummin_apply(recv) }
+            super::BuiltinArgs::None => { Some(super::cummin_apply(recv).unwrap_or_else(|| recv.clone())) }
             _ => None,
         }
     }
@@ -1693,7 +1693,7 @@ impl Builtin for Zscore {
     #[inline]
     fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
         match args {
-            super::BuiltinArgs::None => { super::zscore_apply(recv) }
+            super::BuiltinArgs::None => { Some(super::zscore_apply(recv).unwrap_or_else(|| recv.clone())) }
             _ => None,
         }
     }
@@ -1719,6 +1719,8 @@ fn scalar_view_scalar_element_spec() -> BuiltinSpec {
 }
 
 // Native-element (no view_scalar):
+// `apply` clause wraps with recv.clone() fallback so trait dispatch fully owns this method
+// (no fall-through to legacy match on type mismatch).
 macro_rules! scalar_native_element {
     ( $( $ty:ident => $variant:ident, $name:literal
          $( , aliases: [ $( $alias:literal ),* $(,)? ] )?
@@ -1733,7 +1735,7 @@ macro_rules! scalar_native_element {
                 $(
                     #[inline]
                     fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
-                        super::$apply(recv)
+                        Some(super::$apply(recv).unwrap_or_else(|| recv.clone()))
                     }
                 )?
             }
@@ -1756,7 +1758,7 @@ macro_rules! scalar_view_scalar_element {
                 $(
                     #[inline]
                     fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
-                        super::$apply(recv)
+                        Some(super::$apply(recv).unwrap_or_else(|| recv.clone()))
                     }
                 )?
             }
@@ -1912,7 +1914,7 @@ impl Builtin for FromJson {
     fn spec() -> BuiltinSpec { default_scalar_spec(BuiltinMethod::FromJson) }
     #[inline]
     fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
-        super::from_json_apply(recv)
+        Some(super::from_json_apply(recv).unwrap_or_else(|| recv.clone()))
     }
 }
 
@@ -1941,7 +1943,7 @@ impl Builtin for Index {
     #[inline]
     fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
         match args {
-            super::BuiltinArgs::Val(item) => super::index_value_apply(recv, item),
+            super::BuiltinArgs::Val(item) => Some(super::index_value_apply(recv, item).unwrap_or_else(|| recv.clone())),
             _ => None,
         }
     }
@@ -1956,7 +1958,7 @@ impl Builtin for IndicesOf {
     #[inline]
     fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
         match args {
-            super::BuiltinArgs::Val(item) => super::indices_of_apply(recv, item),
+            super::BuiltinArgs::Val(item) => Some(super::indices_of_apply(recv, item).unwrap_or_else(|| recv.clone())),
             _ => None,
         }
     }
@@ -2003,7 +2005,7 @@ impl Builtin for ToBase64 {
     fn spec() -> BuiltinSpec { scalar_native_element_spec() }
     #[inline]
     fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
-        super::to_base64_apply(recv)
+        Some(super::to_base64_apply(recv).unwrap_or_else(|| recv.clone()))
     }
     #[inline]
     fn cancellation() -> Option<BuiltinCancellation> {
@@ -2022,7 +2024,7 @@ impl Builtin for FromBase64 {
     fn spec() -> BuiltinSpec { scalar_native_element_spec() }
     #[inline]
     fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
-        super::from_base64_apply(recv)
+        Some(super::from_base64_apply(recv).unwrap_or_else(|| recv.clone()))
     }
     #[inline]
     fn cancellation() -> Option<BuiltinCancellation> {
@@ -2041,7 +2043,7 @@ impl Builtin for UrlEncode {
     fn spec() -> BuiltinSpec { scalar_native_element_spec() }
     #[inline]
     fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
-        super::url_encode_apply(recv)
+        Some(super::url_encode_apply(recv).unwrap_or_else(|| recv.clone()))
     }
     #[inline]
     fn cancellation() -> Option<BuiltinCancellation> {
@@ -2060,7 +2062,7 @@ impl Builtin for UrlDecode {
     fn spec() -> BuiltinSpec { scalar_native_element_spec() }
     #[inline]
     fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
-        super::url_decode_apply(recv)
+        Some(super::url_decode_apply(recv).unwrap_or_else(|| recv.clone()))
     }
     #[inline]
     fn cancellation() -> Option<BuiltinCancellation> {
@@ -2079,7 +2081,7 @@ impl Builtin for HtmlEscape {
     fn spec() -> BuiltinSpec { scalar_native_element_spec() }
     #[inline]
     fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
-        super::html_escape_apply(recv)
+        Some(super::html_escape_apply(recv).unwrap_or_else(|| recv.clone()))
     }
     #[inline]
     fn cancellation() -> Option<BuiltinCancellation> {
@@ -2098,7 +2100,7 @@ impl Builtin for HtmlUnescape {
     fn spec() -> BuiltinSpec { scalar_native_element_spec() }
     #[inline]
     fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
-        super::html_unescape_apply(recv)
+        Some(super::html_unescape_apply(recv).unwrap_or_else(|| recv.clone()))
     }
     #[inline]
     fn cancellation() -> Option<BuiltinCancellation> {
@@ -2117,7 +2119,7 @@ impl Builtin for ReverseStr {
     fn spec() -> BuiltinSpec { scalar_native_element_spec() }
     #[inline]
     fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
-        super::reverse_str_apply(recv)
+        Some(super::reverse_str_apply(recv).unwrap_or_else(|| recv.clone()))
     }
     #[inline]
     fn cancellation() -> Option<BuiltinCancellation> {
@@ -2156,7 +2158,9 @@ macro_rules! str_arg_scalar_native {
                 #[inline]
                 fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
                     match args {
-                        super::BuiltinArgs::Str(p) => super::$apply(recv, p),
+                        super::BuiltinArgs::Str(p) => {
+                            Some(super::$apply(recv, p).unwrap_or_else(|| recv.clone()))
+                        }
                         _ => None,
                     }
                 }
@@ -2195,7 +2199,9 @@ macro_rules! str_vec_arg_scalar_native {
                 #[inline]
                 fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
                     match args {
-                        super::BuiltinArgs::StrVec(v) => super::$apply(recv, v),
+                        super::BuiltinArgs::StrVec(v) => {
+                            Some(super::$apply(recv, v).unwrap_or_else(|| recv.clone()))
+                        }
                         _ => None,
                     }
                 }
@@ -2220,7 +2226,9 @@ macro_rules! usize_arg_scalar_native {
                 #[inline]
                 fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
                     match args {
-                        super::BuiltinArgs::Usize(n) => super::$apply(recv, *n),
+                        super::BuiltinArgs::Usize(n) => {
+                            Some(super::$apply(recv, *n).unwrap_or_else(|| recv.clone()))
+                        }
                         _ => None,
                     }
                 }
@@ -2244,7 +2252,9 @@ macro_rules! pad_arg_scalar_native {
                 #[inline]
                 fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
                     match args {
-                        super::BuiltinArgs::Pad { width, fill } => super::$apply(recv, *width, *fill),
+                        super::BuiltinArgs::Pad { width, fill } => {
+                            Some(super::$apply(recv, *width, *fill).unwrap_or_else(|| recv.clone()))
+                        }
                         _ => None,
                     }
                 }
@@ -2269,7 +2279,9 @@ macro_rules! str_pair_scalar_native {
                 #[inline]
                 fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
                     match args {
-                        super::BuiltinArgs::StrPair { first, second } => $apply(recv, first, second),
+                        super::BuiltinArgs::StrPair { first, second } => {
+                            Some($apply(recv, first, second).unwrap_or_else(|| recv.clone()))
+                        }
                         _ => None,
                     }
                 }
