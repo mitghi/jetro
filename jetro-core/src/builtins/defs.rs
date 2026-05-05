@@ -503,6 +503,13 @@ impl Builtin for Explode {
     const METHOD: BuiltinMethod = BuiltinMethod::Explode;
     const NAME: &'static str = "explode";
     fn spec() -> BuiltinSpec { expand_simple_spec() }
+    #[inline]
+    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+        match args {
+            super::BuiltinArgs::Str(field) => { super::explode_apply(recv, field) }
+            _ => None,
+        }
+    }
 }
 
 /// `split(sep)` — string-arg expansion stage.
@@ -521,6 +528,13 @@ impl Builtin for Split {
                 1.0,
             ))
             .lowering(BuiltinPipelineLowering::StringArg)
+    }
+    #[inline]
+    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+        match args {
+            super::BuiltinArgs::Str(p) => { super::split_apply(recv, p) }
+            _ => None,
+        }
     }
 }
 
@@ -729,6 +743,13 @@ impl Builtin for RollingSum {
     const METHOD: BuiltinMethod = BuiltinMethod::RollingSum;
     const NAME: &'static str = "rolling_sum";
     fn spec() -> BuiltinSpec { barrier_default_spec() }
+    #[inline]
+    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+        match args {
+            super::BuiltinArgs::Usize(n) => { super::rolling_sum_apply(recv, *n) }
+            _ => None,
+        }
+    }
 }
 
 /// `rolling_avg(n)` — windowed mean barrier.
@@ -737,6 +758,13 @@ impl Builtin for RollingAvg {
     const METHOD: BuiltinMethod = BuiltinMethod::RollingAvg;
     const NAME: &'static str = "rolling_avg";
     fn spec() -> BuiltinSpec { barrier_default_spec() }
+    #[inline]
+    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+        match args {
+            super::BuiltinArgs::Usize(n) => { super::rolling_avg_apply(recv, *n) }
+            _ => None,
+        }
+    }
 }
 
 /// `rolling_min(n)` — windowed min barrier.
@@ -745,6 +773,13 @@ impl Builtin for RollingMin {
     const METHOD: BuiltinMethod = BuiltinMethod::RollingMin;
     const NAME: &'static str = "rolling_min";
     fn spec() -> BuiltinSpec { barrier_default_spec() }
+    #[inline]
+    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+        match args {
+            super::BuiltinArgs::Usize(n) => { super::rolling_min_apply(recv, *n) }
+            _ => None,
+        }
+    }
 }
 
 /// `rolling_max(n)` — windowed max barrier.
@@ -753,6 +788,13 @@ impl Builtin for RollingMax {
     const METHOD: BuiltinMethod = BuiltinMethod::RollingMax;
     const NAME: &'static str = "rolling_max";
     fn spec() -> BuiltinSpec { barrier_default_spec() }
+    #[inline]
+    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+        match args {
+            super::BuiltinArgs::Usize(n) => { super::rolling_max_apply(recv, *n) }
+            _ => None,
+        }
+    }
 }
 
 /// `accumulate` — running fold barrier.
@@ -934,6 +976,13 @@ impl Builtin for Diff {
     const METHOD: BuiltinMethod = BuiltinMethod::Diff;
     const NAME: &'static str = "diff";
     fn spec() -> BuiltinSpec { barrier_simple_spec() }
+    #[inline]
+    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+        match args {
+            super::BuiltinArgs::ValVec(other) => { let arr_recv = recv.clone().into_vec().map(crate::value::Val::arr)?; super::diff_apply(&arr_recv, other) }
+            _ => None,
+        }
+    }
 }
 
 /// `intersect(arr)` — set intersection.
@@ -942,6 +991,13 @@ impl Builtin for Intersect {
     const METHOD: BuiltinMethod = BuiltinMethod::Intersect;
     const NAME: &'static str = "intersect";
     fn spec() -> BuiltinSpec { barrier_simple_spec() }
+    #[inline]
+    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+        match args {
+            super::BuiltinArgs::ValVec(other) => { let arr_recv = recv.clone().into_vec().map(crate::value::Val::arr)?; super::intersect_apply(&arr_recv, other) }
+            _ => None,
+        }
+    }
 }
 
 /// `union(arr)` — set union.
@@ -950,6 +1006,13 @@ impl Builtin for Union {
     const METHOD: BuiltinMethod = BuiltinMethod::Union;
     const NAME: &'static str = "union";
     fn spec() -> BuiltinSpec { barrier_simple_spec() }
+    #[inline]
+    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+        match args {
+            super::BuiltinArgs::ValVec(other) => { let arr_recv = recv.clone().into_vec().map(crate::value::Val::arr)?; super::union_apply(&arr_recv, other) }
+            _ => None,
+        }
+    }
 }
 
 /// `join(sep)` — string join barrier.
@@ -1105,6 +1168,13 @@ impl Builtin for Merge {
     const METHOD: BuiltinMethod = BuiltinMethod::Merge;
     const NAME: &'static str = "merge";
     fn spec() -> BuiltinSpec { object_simple_spec() }
+    #[inline]
+    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+        match args {
+            super::BuiltinArgs::Val(other) => { super::merge_apply(recv, other) }
+            _ => None,
+        }
+    }
 }
 
 /// `deep_merge(...objs)` — recursive merge.
@@ -1113,6 +1183,13 @@ impl Builtin for DeepMerge {
     const METHOD: BuiltinMethod = BuiltinMethod::DeepMerge;
     const NAME: &'static str = "deep_merge";
     fn spec() -> BuiltinSpec { object_simple_spec() }
+    #[inline]
+    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+        match args {
+            super::BuiltinArgs::Val(other) => { super::deep_merge_apply(recv, other) }
+            _ => None,
+        }
+    }
 }
 
 /// `defaults(...objs)` — fill-in defaults without overwriting.
@@ -1121,6 +1198,13 @@ impl Builtin for Defaults {
     const METHOD: BuiltinMethod = BuiltinMethod::Defaults;
     const NAME: &'static str = "defaults";
     fn spec() -> BuiltinSpec { object_simple_spec() }
+    #[inline]
+    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+        match args {
+            super::BuiltinArgs::Val(other) => { super::defaults_apply(recv, other) }
+            _ => None,
+        }
+    }
 }
 
 /// `rename({...})` — rename object keys.
@@ -1129,6 +1213,13 @@ impl Builtin for Rename {
     const METHOD: BuiltinMethod = BuiltinMethod::Rename;
     const NAME: &'static str = "rename";
     fn spec() -> BuiltinSpec { object_simple_spec() }
+    #[inline]
+    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+        match args {
+            super::BuiltinArgs::Val(other) => { super::rename_apply(recv, other) }
+            _ => None,
+        }
+    }
 }
 
 /// `pivot(...)` — reshape object axes.
@@ -1145,6 +1236,13 @@ impl Builtin for Implode {
     const METHOD: BuiltinMethod = BuiltinMethod::Implode;
     const NAME: &'static str = "implode";
     fn spec() -> BuiltinSpec { object_simple_spec() }
+    #[inline]
+    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+        match args {
+            super::BuiltinArgs::Str(field) => { super::implode_apply(recv, field) }
+            _ => None,
+        }
+    }
 }
 
 #[inline]
@@ -1207,6 +1305,13 @@ impl Builtin for GetPath {
     const METHOD: BuiltinMethod = BuiltinMethod::GetPath;
     const NAME: &'static str = "get_path";
     fn spec() -> BuiltinSpec { path_element_spec() }
+    #[inline]
+    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+        match args {
+            super::BuiltinArgs::Str(p) => { super::get_path_apply(recv, p) }
+            _ => None,
+        }
+    }
 }
 
 /// `del_path(path)` — remove value at path.
@@ -1215,6 +1320,13 @@ impl Builtin for DelPath {
     const METHOD: BuiltinMethod = BuiltinMethod::DelPath;
     const NAME: &'static str = "del_path";
     fn spec() -> BuiltinSpec { path_element_spec() }
+    #[inline]
+    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+        match args {
+            super::BuiltinArgs::Str(p) => { super::del_path_apply(recv, p) }
+            _ => None,
+        }
+    }
 }
 
 /// `has_path(path)` — existence test.
@@ -1223,6 +1335,13 @@ impl Builtin for HasPath {
     const METHOD: BuiltinMethod = BuiltinMethod::HasPath;
     const NAME: &'static str = "has_path";
     fn spec() -> BuiltinSpec { path_element_spec() }
+    #[inline]
+    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+        match args {
+            super::BuiltinArgs::Str(p) => { super::has_path_apply(recv, p) }
+            _ => None,
+        }
+    }
 }
 
 #[inline]
@@ -1252,6 +1371,13 @@ impl Builtin for FlattenKeys {
     const METHOD: BuiltinMethod = BuiltinMethod::FlattenKeys;
     const NAME: &'static str = "flatten_keys";
     fn spec() -> BuiltinSpec { path_indexed_spec() }
+    #[inline]
+    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+        match args {
+            super::BuiltinArgs::Str(p) => { super::flatten_keys_apply(recv, p) }
+            _ => None,
+        }
+    }
 }
 
 /// `unflatten_keys` — invert `flatten_keys`.
@@ -1260,6 +1386,13 @@ impl Builtin for UnflattenKeys {
     const METHOD: BuiltinMethod = BuiltinMethod::UnflattenKeys;
     const NAME: &'static str = "unflatten_keys";
     fn spec() -> BuiltinSpec { path_indexed_spec() }
+    #[inline]
+    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+        match args {
+            super::BuiltinArgs::Str(p) => { super::unflatten_keys_apply(recv, p) }
+            _ => None,
+        }
+    }
 }
 
 // ── Deep operations ──────────────────────────────────────────────────────────
@@ -1425,6 +1558,13 @@ impl Builtin for Lag {
     const METHOD: BuiltinMethod = BuiltinMethod::Lag;
     const NAME: &'static str = "lag";
     fn spec() -> BuiltinSpec { streaming_one_to_one_element_spec() }
+    #[inline]
+    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+        match args {
+            super::BuiltinArgs::Usize(n) => { super::lag_apply(recv, *n) }
+            _ => None,
+        }
+    }
 }
 
 /// `lead(n)` — element shifted forward by N positions.
@@ -1433,6 +1573,13 @@ impl Builtin for Lead {
     const METHOD: BuiltinMethod = BuiltinMethod::Lead;
     const NAME: &'static str = "lead";
     fn spec() -> BuiltinSpec { streaming_one_to_one_element_spec() }
+    #[inline]
+    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+        match args {
+            super::BuiltinArgs::Usize(n) => { super::lead_apply(recv, *n) }
+            _ => None,
+        }
+    }
 }
 
 /// `diff_window(n)` — pairwise diff at lag N.
@@ -1541,7 +1688,6 @@ macro_rules! scalar_view_scalar_element {
 }
 
 scalar_native_element! {
-    Has => Has, "has";
     Capitalize => Capitalize, "capitalize", apply: capitalize_apply;
     TitleCase => TitleCase, "title_case", apply: title_case_apply;
     SnakeCase => SnakeCase, "snake_case", apply: snake_case_apply;
@@ -1555,13 +1701,6 @@ scalar_native_element! {
     PadLeft => PadLeft, "pad_left";
     PadRight => PadRight, "pad_right";
     Center => Center, "center";
-    StripPrefix => StripPrefix, "strip_prefix";
-    StripSuffix => StripSuffix, "strip_suffix";
-    Scan => Scan, "scan";
-    ReMatch => ReMatch, "re_match";
-    ReMatchFirst => ReMatchFirst, "match_first";
-    ReMatchAll => ReMatchAll, "match_all";
-    ReCaptures => ReCaptures, "captures";
     ReCapturesAll => ReCapturesAll, "captures_all";
     ReSplit => ReSplit, "split_re";
     ReReplace => ReReplace, "replace_re";
@@ -1914,4 +2053,38 @@ impl Builtin for Or {
             _ => None,
         }
     }
+}
+
+// ── Multi-arg scalar element methods (need apply_args) ──
+
+macro_rules! str_arg_scalar_native {
+    ( $( $ty:ident, $name:literal $( , aliases: [ $( $alias:literal ),* $(,)? ] )?, $apply:ident ; )* ) => {
+        $(
+            pub(crate) struct $ty;
+            impl Builtin for $ty {
+                const METHOD: BuiltinMethod = BuiltinMethod::$ty;
+                const NAME: &'static str = $name;
+                $( const ALIASES: &'static [&'static str] = &[ $( $alias ),* ]; )?
+                fn spec() -> BuiltinSpec { scalar_native_element_spec() }
+                #[inline]
+                fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+                    match args {
+                        super::BuiltinArgs::Str(p) => super::$apply(recv, p),
+                        _ => None,
+                    }
+                }
+            }
+        )*
+    };
+}
+
+str_arg_scalar_native! {
+    Has, "has", has_apply;
+    StripPrefix, "strip_prefix", strip_prefix_apply;
+    StripSuffix, "strip_suffix", strip_suffix_apply;
+    Scan, "scan", scan_apply;
+    ReMatch, "re_match", re_match_apply;
+    ReMatchFirst, "match_first", re_match_first_apply;
+    ReMatchAll, "match_all", re_match_all_apply;
+    ReCaptures, "captures", re_captures_apply;
 }
