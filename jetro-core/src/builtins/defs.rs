@@ -2199,7 +2199,7 @@ impl Builtin for Set {
             .element()
     }
     #[inline]
-    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+    fn apply_args(_recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
         match args {
             super::BuiltinArgs::Val(item) => Some(item.clone()),
             _ => None,

@@ -1066,30 +1066,6 @@ pub enum BuiltinPipelineExecutor {
 }
 
 impl BuiltinPipelineExecutor {
-    /// Returns true if this executor performs a per-row projection.
-    #[inline]
-    pub fn is_row_map(self) -> bool {
-        matches!(self, Self::RowMap)
-    }
-
-    /// Returns true if this executor performs a per-row predicate filter.
-    #[inline]
-    pub fn is_row_filter(self) -> bool {
-        matches!(self, Self::RowFilter)
-    }
-
-    /// Returns true if this executor operates on positions rather than values.
-    #[inline]
-    pub fn is_positional(self) -> bool {
-        matches!(self, Self::Position { .. })
-    }
-
-    /// Returns true if the executor only reorders rows and never inspects their content.
-    #[inline]
-    pub fn is_order_only(self) -> bool {
-        matches!(self, Self::Reverse | Self::Sort)
-    }
-
     /// Returns true if the executor passes each input value into the lambda or comparator.
     #[inline]
     pub fn consumes_input_value(self) -> bool {

@@ -539,45 +539,44 @@ impl Stage {
     }
 
     /// Returns `true` when this stage can be consumed by the `TerminalMapCollector`
-    /// optimisation (requires `RowMap` executor and a body program).
+    /// optimisation (requires Map shape and a body program).
     pub(crate) fn can_use_terminal_map_collector(&self) -> bool {
-        self.descriptor().is_some_and(|desc| {
-            desc.executor() == Some(BuiltinPipelineExecutor::RowMap) && desc.body.is_some()
-        })
+        match self {
+            Stage::Map(_, _) => true,
+            Stage::CompiledMap(_) => true,
+            _ => false,
+        }
     }
 
     /// Returns `true` when this stage performs a per-element value transformation that the
     /// demand optimiser can track symbolically (substitute `@` in downstream predicates).
+    /// Direct Stage-variant match — no executor enum lookup.
     pub(crate) fn is_symbolic_map_stage(&self) -> bool {
-        matches!(self, Stage::CompiledMap(_))
-            || self
-                .descriptor()
-                .and_then(StageDescriptor::executor)
-                .is_some_and(BuiltinPipelineExecutor::is_row_map)
+        matches!(self, Stage::CompiledMap(_) | Stage::Map(_, _))
     }
 
     /// Returns `true` when this stage is a filter whose predicate can be substituted symbolically
     /// by the demand optimiser after a map transformation.
     pub(crate) fn is_symbolic_filter_stage(&self) -> bool {
-        self.descriptor()
-            .and_then(StageDescriptor::executor)
-            .is_some_and(BuiltinPipelineExecutor::is_row_filter)
+        matches!(self, Stage::Filter(_, _))
     }
 
     /// Returns `true` when this stage uses a positional / bounded executor (e.g. `Take`, `Skip`),
     /// meaning order must be preserved upstream.
     pub(crate) fn is_positional_stage(&self) -> bool {
-        self.descriptor()
-            .and_then(StageDescriptor::executor)
-            .is_some_and(BuiltinPipelineExecutor::is_positional)
+        matches!(
+            self,
+            Stage::UsizeBuiltin {
+                method: BuiltinMethod::Take | BuiltinMethod::Skip,
+                ..
+            }
+        )
     }
 
     /// Returns `true` when this stage only changes element order without affecting membership
     /// (e.g. `Sort`, `Reverse`), allowing the demand optimiser to drop it when order is unused.
     pub(crate) fn is_order_only_stage(&self) -> bool {
-        self.descriptor()
-            .and_then(StageDescriptor::executor)
-            .is_some_and(BuiltinPipelineExecutor::is_order_only)
+        matches!(self, Stage::Sort(_) | Stage::Reverse(_))
     }
 
     /// Returns `true` when the stage reads the actual element value rather than just membership
