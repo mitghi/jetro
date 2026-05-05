@@ -289,6 +289,18 @@ fn apply_adapter_materialized(
             M::FlatMap => <defs::FlatMap as Builtin>::apply_barrier(&mut ctx, buf, body),
             M::Unique => <defs::Unique as Builtin>::apply_barrier(&mut ctx, buf, body),
             M::UniqueBy => <defs::UniqueBy as Builtin>::apply_barrier(&mut ctx, buf, body),
+            M::TakeWhile => <defs::TakeWhile as Builtin>::apply_barrier(&mut ctx, buf, body),
+            M::DropWhile => <defs::DropWhile as Builtin>::apply_barrier(&mut ctx, buf, body),
+            M::Take => <defs::Take as Builtin>::apply_barrier(&mut ctx, buf, body),
+            M::Skip => <defs::Skip as Builtin>::apply_barrier(&mut ctx, buf, body),
+            M::FindIndex => <defs::FindIndex as Builtin>::apply_barrier(&mut ctx, buf, body),
+            M::IndicesWhere => <defs::IndicesWhere as Builtin>::apply_barrier(&mut ctx, buf, body),
+            M::MaxBy => <defs::MaxBy as Builtin>::apply_barrier(&mut ctx, buf, body),
+            M::MinBy => <defs::MinBy as Builtin>::apply_barrier(&mut ctx, buf, body),
+            M::TransformKeys => <defs::TransformKeys as Builtin>::apply_barrier(&mut ctx, buf, body),
+            M::TransformValues => <defs::TransformValues as Builtin>::apply_barrier(&mut ctx, buf, body),
+            M::FilterKeys => <defs::FilterKeys as Builtin>::apply_barrier(&mut ctx, buf, body),
+            M::FilterValues => <defs::FilterValues as Builtin>::apply_barrier(&mut ctx, buf, body),
             _ => None,
         };
         if let Some(r) = trait_result {

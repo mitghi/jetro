@@ -303,6 +303,17 @@ impl Builtin for Take {
             Ok(crate::pipeline::StageFlow::Continue(item))
         }
     }
+
+    #[inline]
+    fn apply_barrier(
+        ctx: &mut super::builtin_def::BarrierCtx<'_>,
+        buf: &mut Vec<crate::value::Val>,
+        _body: Option<&crate::vm::Program>,
+    ) -> Option<Result<(), crate::context::EvalError>> {
+        let n = ctx.stage.descriptor().and_then(|d| d.usize_arg)?;
+        buf.truncate(n);
+        Some(Ok(()))
+    }
 }
 
 /// Skip first N elements; bounded positional offset.
@@ -338,6 +349,21 @@ impl Builtin for Skip {
         } else {
             Ok(crate::pipeline::StageFlow::Continue(item))
         }
+    }
+
+    #[inline]
+    fn apply_barrier(
+        ctx: &mut super::builtin_def::BarrierCtx<'_>,
+        buf: &mut Vec<crate::value::Val>,
+        _body: Option<&crate::vm::Program>,
+    ) -> Option<Result<(), crate::context::EvalError>> {
+        let n = ctx.stage.descriptor().and_then(|d| d.usize_arg)?;
+        if buf.len() <= n {
+            buf.clear();
+        } else {
+            buf.drain(..n);
+        }
+        Some(Ok(()))
     }
 }
 
@@ -427,6 +453,24 @@ impl Builtin for TakeWhile {
             crate::pipeline::StageFlow::Stop
         })
     }
+
+    #[inline]
+    fn apply_barrier(
+        ctx: &mut super::builtin_def::BarrierCtx<'_>,
+        buf: &mut Vec<crate::value::Val>,
+        body: Option<&crate::vm::Program>,
+    ) -> Option<Result<(), crate::context::EvalError>> {
+        let prog = body?;
+        let result = super::take_while_apply(std::mem::take(buf), |v| {
+            crate::pipeline::eval_kernel(ctx.kernel, v, |item| {
+                crate::pipeline::apply_item_in_env(ctx.vm, ctx.env, item, prog)
+            })
+        });
+        match result {
+            Ok(out) => { *buf = out; Some(Ok(())) }
+            Err(err) => Some(Err(err)),
+        }
+    }
 }
 
 /// Skip elements while predicate holds; emits the remainder.
@@ -461,6 +505,24 @@ impl Builtin for DropWhile {
         _body: Option<&crate::vm::Program>,
     ) -> Result<crate::pipeline::StageFlow<crate::value::Val>, crate::context::EvalError> {
         Ok(crate::pipeline::StageFlow::Continue(item))
+    }
+
+    #[inline]
+    fn apply_barrier(
+        ctx: &mut super::builtin_def::BarrierCtx<'_>,
+        buf: &mut Vec<crate::value::Val>,
+        body: Option<&crate::vm::Program>,
+    ) -> Option<Result<(), crate::context::EvalError>> {
+        let prog = body?;
+        let result = super::drop_while_apply(std::mem::take(buf), |v| {
+            crate::pipeline::eval_kernel(ctx.kernel, v, |item| {
+                crate::pipeline::apply_item_in_env(ctx.vm, ctx.env, item, prog)
+            })
+        });
+        match result {
+            Ok(out) => { *buf = out; Some(Ok(())) }
+            Err(err) => Some(Err(err)),
+        }
     }
 }
 
@@ -596,6 +658,32 @@ impl Builtin for FindIndex {
     fn spec() -> BuiltinSpec {
         predicate_reducer_spec()
     }
+
+    #[inline]
+    fn apply_barrier(
+        ctx: &mut super::builtin_def::BarrierCtx<'_>,
+        buf: &mut Vec<crate::value::Val>,
+        body: Option<&crate::vm::Program>,
+    ) -> Option<Result<(), crate::context::EvalError>> {
+        let prog = body?;
+        let mut found: crate::value::Val = crate::value::Val::Null;
+        for (i, v) in buf.iter().enumerate() {
+            match super::filter_one(v, |item| {
+                crate::pipeline::eval_kernel(ctx.kernel, item, |it| {
+                    crate::pipeline::apply_item_in_env(ctx.vm, ctx.env, it, prog)
+                })
+            }) {
+                Ok(true) => {
+                    found = crate::value::Val::Int(i as i64);
+                    break;
+                }
+                Ok(false) => {}
+                Err(err) => return Some(Err(err)),
+            }
+        }
+        *buf = vec![found];
+        Some(Ok(()))
+    }
 }
 
 /// Indices of all elements satisfying the predicate.
@@ -607,6 +695,72 @@ impl Builtin for IndicesWhere {
     fn spec() -> BuiltinSpec {
         predicate_reducer_spec()
     }
+
+    #[inline]
+    fn apply_barrier(
+        ctx: &mut super::builtin_def::BarrierCtx<'_>,
+        buf: &mut Vec<crate::value::Val>,
+        body: Option<&crate::vm::Program>,
+    ) -> Option<Result<(), crate::context::EvalError>> {
+        let prog = body?;
+        let mut out: Vec<i64> = Vec::new();
+        for (i, v) in buf.iter().enumerate() {
+            match super::filter_one(v, |item| {
+                crate::pipeline::eval_kernel(ctx.kernel, item, |it| {
+                    crate::pipeline::apply_item_in_env(ctx.vm, ctx.env, it, prog)
+                })
+            }) {
+                Ok(true) => out.push(i as i64),
+                Ok(false) => {}
+                Err(err) => return Some(Err(err)),
+            }
+        }
+        *buf = vec![crate::value::Val::int_vec(out)];
+        Some(Ok(()))
+    }
+}
+
+/// Shared barrier body for MaxBy / MinBy (ArgExtreme).
+#[inline]
+fn arg_extreme_apply_barrier(
+    ctx: &mut super::builtin_def::BarrierCtx<'_>,
+    buf: &mut Vec<crate::value::Val>,
+    body: Option<&crate::vm::Program>,
+    max: bool,
+) -> Option<Result<(), crate::context::EvalError>> {
+    let prog = body?;
+    if buf.is_empty() {
+        *buf = vec![crate::value::Val::Null];
+        return Some(Ok(()));
+    }
+    let mut best_idx = 0usize;
+    let mut best_key = match crate::pipeline::eval_kernel(ctx.kernel, &buf[0], |item| {
+        crate::pipeline::apply_item_in_env(ctx.vm, ctx.env, item, prog)
+    }) {
+        Ok(key) => key,
+        Err(err) => return Some(Err(err)),
+    };
+    for i in 1..buf.len() {
+        let key = match crate::pipeline::eval_kernel(ctx.kernel, &buf[i], |item| {
+            crate::pipeline::apply_item_in_env(ctx.vm, ctx.env, item, prog)
+        }) {
+            Ok(key) => key,
+            Err(err) => return Some(Err(err)),
+        };
+        let cmp = crate::pipeline::cmp_val_total(&key, &best_key);
+        let take = if max {
+            cmp == std::cmp::Ordering::Greater
+        } else {
+            cmp == std::cmp::Ordering::Less
+        };
+        if take {
+            best_idx = i;
+            best_key = key;
+        }
+    }
+    let best = std::mem::take(buf).into_iter().nth(best_idx).unwrap();
+    *buf = vec![best];
+    Some(Ok(()))
 }
 
 /// Element with the largest projected key.
@@ -618,6 +772,15 @@ impl Builtin for MaxBy {
     fn spec() -> BuiltinSpec {
         predicate_reducer_spec()
     }
+
+    #[inline]
+    fn apply_barrier(
+        ctx: &mut super::builtin_def::BarrierCtx<'_>,
+        buf: &mut Vec<crate::value::Val>,
+        body: Option<&crate::vm::Program>,
+    ) -> Option<Result<(), crate::context::EvalError>> {
+        arg_extreme_apply_barrier(ctx, buf, body, true)
+    }
 }
 
 /// Element with the smallest projected key.
@@ -628,6 +791,15 @@ impl Builtin for MinBy {
 
     fn spec() -> BuiltinSpec {
         predicate_reducer_spec()
+    }
+
+    #[inline]
+    fn apply_barrier(
+        ctx: &mut super::builtin_def::BarrierCtx<'_>,
+        buf: &mut Vec<crate::value::Val>,
+        body: Option<&crate::vm::Program>,
+    ) -> Option<Result<(), crate::context::EvalError>> {
+        arg_extreme_apply_barrier(ctx, buf, body, false)
     }
 }
 
@@ -1668,6 +1840,15 @@ impl Builtin for TransformKeys {
     ) -> Result<crate::pipeline::StageFlow<crate::value::Val>, crate::context::EvalError> {
         object_lambda_apply_stream(ctx, item, body)
     }
+
+    #[inline]
+    fn apply_barrier(
+        ctx: &mut super::builtin_def::BarrierCtx<'_>,
+        buf: &mut Vec<crate::value::Val>,
+        body: Option<&crate::vm::Program>,
+    ) -> Option<Result<(), crate::context::EvalError>> {
+        object_lambda_apply_barrier(ctx, buf, body)
+    }
 }
 
 /// Helper used by all ObjectLambda variants — single body shared across
@@ -1685,6 +1866,30 @@ fn object_lambda_apply_stream(
     Ok(crate::pipeline::StageFlow::Continue(result))
 }
 
+/// Helper used by all ObjectLambda variants for barrier (whole-buffer) execution.
+#[inline]
+fn object_lambda_apply_barrier(
+    ctx: &mut super::builtin_def::BarrierCtx<'_>,
+    buf: &mut Vec<crate::value::Val>,
+    body: Option<&crate::vm::Program>,
+) -> Option<Result<(), crate::context::EvalError>> {
+    let prog = body?;
+    let mut out: Vec<crate::value::Val> = Vec::with_capacity(buf.len());
+    for v in std::mem::take(buf) {
+        match crate::pipeline::legacy_exec::apply_lambda_obj(
+            ctx.stage, &v, ctx.vm, ctx.env, ctx.kernel, prog,
+        ) {
+            Ok(mapped) => out.push(mapped),
+            Err(err) => {
+                *buf = out;
+                return Some(Err(err));
+            }
+        }
+    }
+    *buf = out;
+    Some(Ok(()))
+}
+
 /// `transform_values(lam)` — map over values of an object.
 pub(crate) struct TransformValues;
 impl Builtin for TransformValues {
@@ -1698,6 +1903,15 @@ impl Builtin for TransformValues {
         body: Option<&crate::vm::Program>,
     ) -> Result<crate::pipeline::StageFlow<crate::value::Val>, crate::context::EvalError> {
         object_lambda_apply_stream(ctx, item, body)
+    }
+
+    #[inline]
+    fn apply_barrier(
+        ctx: &mut super::builtin_def::BarrierCtx<'_>,
+        buf: &mut Vec<crate::value::Val>,
+        body: Option<&crate::vm::Program>,
+    ) -> Option<Result<(), crate::context::EvalError>> {
+        object_lambda_apply_barrier(ctx, buf, body)
     }
 }
 
@@ -1715,6 +1929,15 @@ impl Builtin for FilterKeys {
     ) -> Result<crate::pipeline::StageFlow<crate::value::Val>, crate::context::EvalError> {
         object_lambda_apply_stream(ctx, item, body)
     }
+
+    #[inline]
+    fn apply_barrier(
+        ctx: &mut super::builtin_def::BarrierCtx<'_>,
+        buf: &mut Vec<crate::value::Val>,
+        body: Option<&crate::vm::Program>,
+    ) -> Option<Result<(), crate::context::EvalError>> {
+        object_lambda_apply_barrier(ctx, buf, body)
+    }
 }
 
 /// `filter_values(pred)` — drop entries by value predicate.
@@ -1730,6 +1953,15 @@ impl Builtin for FilterValues {
         body: Option<&crate::vm::Program>,
     ) -> Result<crate::pipeline::StageFlow<crate::value::Val>, crate::context::EvalError> {
         object_lambda_apply_stream(ctx, item, body)
+    }
+
+    #[inline]
+    fn apply_barrier(
+        ctx: &mut super::builtin_def::BarrierCtx<'_>,
+        buf: &mut Vec<crate::value::Val>,
+        body: Option<&crate::vm::Program>,
+    ) -> Option<Result<(), crate::context::EvalError>> {
+        object_lambda_apply_barrier(ctx, buf, body)
     }
 }
 
