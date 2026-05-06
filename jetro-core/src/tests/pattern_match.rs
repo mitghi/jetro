@@ -962,6 +962,68 @@ fn view_domain_runtime_runs_against_borrowed_view() {
 }
 
 #[test]
+fn runtime_partial_shared_prefix_with_mixed_suffix() {
+    // The first two arms share a leading object key (`role`); the
+    // remaining arms have unrelated shapes (length-2 array, raw int,
+    // catch-all). Cross-arm sharing now hoists the `ObjCheck +
+    // LoadField` for the leading run while later arms run their own
+    // standard codegen.
+    //
+    // Object scrutinee — admin: shared run hits arm 0.
+    let v = run(
+        br#"{"x": {"role": "admin", "id": 1}}"#,
+        r#"match $.x with {
+            {role: "admin"} -> "admin",
+            {role: "user"}  -> "user",
+            [a, b]          -> "pair",
+            42              -> "answer",
+            _               -> "other"
+        }"#,
+    );
+    assert_eq!(v, json!("admin"));
+
+    // Array scrutinee — prelude `LoadField` would fail; jumps to arm 2
+    // (first non-shared arm) which matches.
+    let v = run(
+        br#"{"x": [1, 2]}"#,
+        r#"match $.x with {
+            {role: "admin"} -> "admin",
+            {role: "user"}  -> "user",
+            [a, b]          -> "pair",
+            42              -> "answer",
+            _               -> "other"
+        }"#,
+    );
+    assert_eq!(v, json!("pair"));
+
+    // Integer scrutinee — falls through past arrays to arm 3.
+    let v = run(
+        br#"{"x": 42}"#,
+        r#"match $.x with {
+            {role: "admin"} -> "admin",
+            {role: "user"}  -> "user",
+            [a, b]          -> "pair",
+            42              -> "answer",
+            _               -> "other"
+        }"#,
+    );
+    assert_eq!(v, json!("answer"));
+
+    // String scrutinee — falls through to wildcard catch-all.
+    let v = run(
+        br#"{"x": "hello"}"#,
+        r#"match $.x with {
+            {role: "admin"} -> "admin",
+            {role: "user"}  -> "user",
+            [a, b]          -> "pair",
+            42              -> "answer",
+            _               -> "other"
+        }"#,
+    );
+    assert_eq!(v, json!("other"));
+}
+
+#[test]
 fn runtime_match_chained_with_postfix() {
     // Result of a match flows into a subsequent method call.
     let src = br#"{"xs": [1, 2, 3]}"#;

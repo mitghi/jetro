@@ -1070,36 +1070,29 @@ fn compile_match(
     // is set to the position of the trailing `Fail` op.
     let mut arm_starts: Vec<u32> = Vec::with_capacity(arms.len());
 
-    // Cross-arm prefix sharing comes in two flavours: object patterns
-    // share a leading key sequence, or array patterns share a fixed
-    // length. The two are mutually exclusive (an arm is `Pat::Obj` xor
-    // `Pat::Arr`), so each match expression picks at most one prelude
-    // shape. Loaded values land in slots `1..=N` and are preserved
-    // across arms via `ResetArm.keep_above = N + 1`. A trailing
-    // wildcard or bind arm participates as a catch-all: prelude
-    // failures (not-an-object, key missing, length mismatch) jump
-    // straight to the catch-all arm rather than the global `Fail` op.
-    let trailing_catchall_idx: Option<usize> = arms
-        .last()
-        .map(|a| matches!(a.pat, Pat::Wild | Pat::Bind(_)))
-        .filter(|b| *b)
-        .map(|_| arms.len() - 1);
-    let typed_arms: &[crate::parse::ast::MatchArm] = match trailing_catchall_idx {
-        Some(_) => &arms[..arms.len() - 1],
-        None => arms,
-    };
-    let shared_keys: Vec<Arc<str>> = detect_shared_key_prefix(typed_arms);
-    let shared_arr_len: Option<u32> = if shared_keys.is_empty() {
-        detect_shared_arr_len(typed_arms)
+    // Cross-arm prefix sharing recognises a *contiguous leading run* of
+    // arms that agree on shape (all `Pat::Obj` with shared keys, all
+    // `Pat::Arr` with same length, or all `Pat::Kind` of the same kind).
+    // The shared check is hoisted into a single match-level prelude;
+    // arms in the leading run use a compressed codegen that skips the
+    // hoisted ops, while later arms (mixed shapes, catch-alls, etc.)
+    // fall through to standard codegen. A failed prelude check jumps to
+    // the first non-shared arm — or to the global `Fail` op when the
+    // entire arm list participates in sharing.
+    let (shared_keys, shared_arms_n) = detect_shared_key_prefix(arms);
+    let (shared_arr_len, shared_arms_n) = if shared_keys.is_empty() {
+        detect_shared_arr_len(arms)
+            .map(|(len, n)| (Some(len), n))
+            .unwrap_or((None, 0))
     } else {
-        None
+        (None, shared_arms_n)
     };
-    let shared_kind: Option<crate::parse::ast::KindType> = if shared_keys.is_empty()
-        && shared_arr_len.is_none()
-    {
-        detect_shared_kind(typed_arms)
+    let (shared_kind, shared_arms_n) = if shared_keys.is_empty() && shared_arr_len.is_none() {
+        detect_shared_kind(arms)
+            .map(|(kind, n)| (Some(kind), n))
+            .unwrap_or((None, 0))
     } else {
-        None
+        (None, shared_arms_n)
     };
     let mut prelude_pending: Vec<u32> = Vec::new();
     if !shared_keys.is_empty() {
@@ -1148,24 +1141,23 @@ fn compile_match(
         // placeholders are tracked independently of earlier arms.
         b.pending_else.push(Vec::new());
         arm_starts.push(b.next_pc());
-        // ResetArm placeholder; slot count patched once we know how many
-        // sub-projections the arm allocated.
+        // Per-arm reset preserves the prelude-allocated slots only for
+        // arms that are part of the shared run; arms outside the shared
+        // run get the default `keep_above = 1` reset so their reads of
+        // the shared slots return null and routinely fall through.
+        let arm_in_share = arm_idx < shared_arms_n;
+        let arm_keep = if arm_in_share { keep_above } else { 1 };
         let reset_idx = b.emit(MatchOp::ResetArm {
-            slots: keep_above,
-            keep_above,
+            slots: arm_keep,
+            keep_above: arm_keep,
         });
 
-        // Slot space: when sharing is active, slot 1 already holds the
-        // shared key's loaded value, so per-arm allocation begins at 2.
-        let mut slot_alloc = SlotAlloc::starting_at(keep_above);
+        // Slot space: when sharing applies to this arm, slot 1.. already
+        // hold the prelude's loaded values, so per-arm allocation begins
+        // above the prelude region.
+        let mut slot_alloc = SlotAlloc::starting_at(arm_keep);
 
-        // The trailing catch-all arm uses standard codegen even when a
-        // shared prefix is active. Sharing only governs the typed arms
-        // (which are uniformly `Pat::Obj` or `Pat::Arr`); the catch-all
-        // is `Pat::Wild` / `Pat::Bind` and produces no field tests.
-        let is_trailing_catchall = trailing_catchall_idx == Some(arm_idx);
-
-        if !shared_keys.is_empty() && !is_trailing_catchall {
+        if arm_in_share && !shared_keys.is_empty() {
             // Object prefix sharing: every arm is `Pat::Obj` whose first
             // `shared_keys.len()` fields agree on key order. Compile
             // those sub-patterns against prelude-allocated slots; let
@@ -1187,7 +1179,7 @@ fn compile_match(
                 });
                 b.compile_pat_for_arm(sub_pat, dst, &mut slot_alloc);
             }
-        } else if shared_kind.is_some() && !is_trailing_catchall {
+        } else if arm_in_share && shared_kind.is_some() {
             // Kind sharing: every arm is `Pat::Kind` testing the same
             // scalar kind. The prelude has already verified the kind, so
             // per-arm codegen only needs to push the optional binding.
@@ -1200,7 +1192,7 @@ fn compile_match(
                     slot: 0,
                 });
             }
-        } else if shared_arr_len.is_some() && !is_trailing_catchall {
+        } else if arm_in_share && shared_arr_len.is_some() {
             // Array length sharing: every arm is `Pat::Arr` with the
             // same exact length and no rest binding. The prelude has
             // already verified the length, so per-arm codegen skips
@@ -1245,11 +1237,14 @@ fn compile_match(
     b.emit(MatchOp::Fail);
 
     // Patch the shared-prelude placeholders (object check, key loads,
-    // length check) to the catch-all arm's start if one exists, or to
-    // the trailing `Fail` op otherwise.
-    let prelude_miss_target: u32 = trailing_catchall_idx
-        .and_then(|i| arm_starts.get(i).copied())
-        .unwrap_or(fail_pc);
+    // length check, kind check) to the start of the first arm that did
+    // not participate in sharing. When every arm participates the miss
+    // path is the trailing `Fail` op.
+    let prelude_miss_target: u32 = if shared_arms_n < arms.len() {
+        arm_starts[shared_arms_n]
+    } else {
+        fail_pc
+    };
     for pc in prelude_pending {
         b.patch_else_pc(pc, prelude_miss_target);
     }
@@ -1341,78 +1336,86 @@ fn compute_max_slots(ops: &[MatchOp]) -> u16 {
     hi
 }
 
-/// Detect when every arm of a `match` is a `Pat::Kind` pattern testing
-/// the same scalar kind (`s: string`, `n: number`, ...). When applicable
-/// the runtime kind check is hoisted out of every per-arm prologue and
-/// emitted once as a match-level prelude, similar to the object/array
-/// prefix sharing variants.
-fn detect_shared_kind(arms: &[crate::parse::ast::MatchArm]) -> Option<crate::parse::ast::KindType> {
+/// Detect a contiguous leading run of `Pat::Kind` arms that all test
+/// the same scalar kind. Returns `(kind, n)` where `n` is the number of
+/// participating arms; arms `arms[n..]` fall through to standard
+/// codegen. Like the other shared-prefix detectors, requires at least
+/// two participating arms.
+fn detect_shared_kind(
+    arms: &[crate::parse::ast::MatchArm],
+) -> Option<(crate::parse::ast::KindType, usize)> {
     use crate::parse::ast::Pat;
 
     if arms.len() < 2 {
         return None;
     }
-    let mut shared: Option<crate::parse::ast::KindType> = None;
-    for arm in arms {
-        let Pat::Kind { kind, .. } = &arm.pat else {
-            return None;
-        };
-        match shared {
-            None => shared = Some(*kind),
-            Some(k) if k == *kind => {}
-            _ => return None,
+    let Pat::Kind { kind: first, .. } = &arms[0].pat else {
+        return None;
+    };
+    let shared = *first;
+    let mut count = 1usize;
+    for arm in &arms[1..] {
+        match &arm.pat {
+            Pat::Kind { kind, .. } if *kind == shared => count += 1,
+            _ => break,
         }
     }
-    shared
+    if count < 2 {
+        None
+    } else {
+        Some((shared, count))
+    }
 }
 
-/// Detect when every arm of a `match` is a fixed-length array pattern
-/// (`Pat::Arr` with no rest binding) of the same length, allowing the
-/// `LenCheck` to be hoisted into a single match-level prelude. Returns
-/// the agreed length when applicable, `None` otherwise.
-///
-/// Like the object variant, the optimization needs at least two arms
-/// and is disabled when any arm has a different shape (including arms
-/// that bind a rest tail, since a rest binding implies a `>=` length
-/// test that does not compose with an exact-length prelude).
-fn detect_shared_arr_len(arms: &[crate::parse::ast::MatchArm]) -> Option<u32> {
+/// Detect a contiguous leading run of fixed-length `Pat::Arr` arms that
+/// all agree on length. Returns `(len, n)` where `n` is the number of
+/// participating arms; arms `arms[n..]` fall through to standard
+/// codegen. Rest bindings disable participation because they imply a
+/// `>=` length test rather than an exact one.
+fn detect_shared_arr_len(arms: &[crate::parse::ast::MatchArm]) -> Option<(u32, usize)> {
     use crate::parse::ast::Pat;
 
     if arms.len() < 2 {
         return None;
     }
-    let mut shared: Option<u32> = None;
-    for arm in arms {
-        let Pat::Arr { elems, rest } = &arm.pat else {
-            return None;
-        };
-        if rest.is_some() {
-            return None;
-        }
-        let len = elems.len() as u32;
-        match shared {
-            None => shared = Some(len),
-            Some(n) if n == len => {}
-            _ => return None,
+    let Pat::Arr {
+        elems: first_elems,
+        rest: first_rest,
+    } = &arms[0].pat
+    else {
+        return None;
+    };
+    if first_rest.is_some() {
+        return None;
+    }
+    let shared = first_elems.len() as u32;
+    let mut count = 1usize;
+    for arm in &arms[1..] {
+        match &arm.pat {
+            Pat::Arr { elems, rest } if rest.is_none() && elems.len() as u32 == shared => {
+                count += 1;
+            }
+            _ => break,
         }
     }
-    shared
+    if count < 2 {
+        None
+    } else {
+        Some((shared, count))
+    }
 }
 
-/// Detect the longest leading key sequence that every arm of a `match`
-/// agrees on. Each arm must be a `Pat::Obj` whose first N fields list the
-/// same keys in the same order; the returned vector contains those keys
-/// (in source order) and unlocks hoisting the corresponding
-/// `ObjCheck + LoadField` ops out of every arm's prologue.
-///
-/// Returns an empty vector when any arm is non-object, when arms have no
-/// leading key in common, or when fewer than two arms exist (the
-/// optimization needs at least two arms to be worth its prelude cost).
-fn detect_shared_key_prefix(arms: &[crate::parse::ast::MatchArm]) -> Vec<Arc<str>> {
+/// Detect the longest leading key sequence shared by a contiguous run
+/// of `Pat::Obj` arms at the start of `arms`. The returned tuple is
+/// `(shared_keys, n)` where `n` is the number of leading arms that
+/// participate in the shared prefix; arms `arms[n..]` fall through to
+/// standard codegen. The optimization requires at least two participating
+/// arms to be worth its prelude cost.
+fn detect_shared_key_prefix(arms: &[crate::parse::ast::MatchArm]) -> (Vec<Arc<str>>, usize) {
     use crate::parse::ast::Pat;
 
     if arms.len() < 2 {
-        return Vec::new();
+        return (Vec::new(), 0);
     }
 
     // Seed the shared prefix with the first arm's full key list.
@@ -1421,30 +1424,39 @@ fn detect_shared_key_prefix(arms: &[crate::parse::ast::MatchArm]) -> Vec<Arc<str
         ..
     } = &arms[0].pat
     else {
-        return Vec::new();
+        return (Vec::new(), 0);
     };
     let mut prefix: Vec<&str> = first_fields.iter().map(|(k, _)| k.as_str()).collect();
     if prefix.is_empty() {
-        return Vec::new();
+        return (Vec::new(), 0);
     }
 
-    // Intersect against each subsequent arm.
+    // Walk subsequent arms, intersecting their leading key list with
+    // the running prefix. Stop at the first arm whose pattern is not
+    // `Pat::Obj` or whose first key does not match — every arm that
+    // contributes must keep at least one key in the shared prefix.
+    let mut count = 1usize;
     for arm in &arms[1..] {
         let Pat::Obj { fields, .. } = &arm.pat else {
-            return Vec::new();
+            break;
         };
         let common = prefix
             .iter()
             .zip(fields.iter().map(|(k, _)| k.as_str()))
             .take_while(|(a, b)| **a == *b)
             .count();
-        prefix.truncate(common);
-        if prefix.is_empty() {
-            return Vec::new();
+        if common == 0 {
+            break;
         }
+        prefix.truncate(common);
+        count += 1;
     }
 
-    prefix.into_iter().map(Arc::from).collect()
+    if count < 2 || prefix.is_empty() {
+        return (Vec::new(), 0);
+    }
+
+    (prefix.into_iter().map(Arc::from).collect(), count)
 }
 
 /// Mutable state used while emitting a `CompiledMatch`. Tracks the op
