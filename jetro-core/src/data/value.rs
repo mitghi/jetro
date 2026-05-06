@@ -244,35 +244,16 @@ impl Val {
 }
 
 
-thread_local! {
-    /// Shared sentinel `Val::Null` available without allocation; used by callers that need a `&Val`.
-    static NULL_VAL: Val = Val::Null;
-    /// Per-thread key-interning cache: maps raw `Box<str>` → shared `Arc<str>` to deduplicate
-    /// object key allocations across repeated parses. Capped at 4096 entries to bound memory.
-    static KEY_INTERN: std::cell::RefCell<std::collections::HashMap<Box<str>, Arc<str>>> =
-        std::cell::RefCell::new(std::collections::HashMap::with_capacity(64));
-}
-
-
-/// Return a shared `Arc<str>` for `k`, reusing a cached copy when possible.
-/// Falls back to a fresh allocation once the per-thread cache exceeds 4096 entries.
+/// Return a shared `Arc<str>` for `k`, reusing a cached copy from the
+/// process-wide [`crate::data::intern::default_cache`] when possible.
+/// Used by `From<serde_json::Value> for Val` and the standalone
+/// `Jetro::from_bytes` path; engine-aware ingestion uses
+/// [`Val::from_value_with`] / [`Val::from_simd_borrowed_with`] /
+/// [`Val::from_tape_data_with`] instead, which thread an engine-owned
+/// [`crate::data::intern::KeyCache`].
 #[inline]
 pub fn intern_key(k: &str) -> Arc<str> {
-    const CAP: usize = 4096;
-    KEY_INTERN.with(|cell| {
-        let mut m = cell.borrow_mut();
-        if let Some(a) = m.get(k) {
-            return Arc::clone(a);
-        }
-        if m.len() >= CAP {
-            
-            
-            return Arc::<str>::from(k);
-        }
-        let a: Arc<str> = Arc::<str>::from(k);
-        m.insert(k.into(), Arc::clone(&a));
-        a
-    })
+    crate::data::intern::default_cache().intern(k)
 }
 
 
@@ -1303,6 +1284,231 @@ impl Val {
                 let mut out: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(m.len());
                 for (k, v) in m.iter() {
                     out.insert(intern_key(k.as_ref()), Self::from_simd_borrowed(v));
+                }
+                Val::Obj(Arc::new(out))
+            }
+        }
+    }
+
+    // =================================================================
+    // Engine-aware ingest constructors.
+    //
+    // Each one mirrors the matching default-cache constructor above but
+    // routes object-key interning through the supplied
+    // [`crate::data::intern::KeyCache`]. `JetroEngine::parse_*` calls
+    // these so per-engine isolation is preserved without altering the
+    // existing `From` trait impls.
+    // =================================================================
+
+    /// Convert a borrowed `serde_json::Value` into `Val`, interning every
+    /// object key into `caches`. Promotes homogeneous arrays to columnar
+    /// lanes, matching `From<&serde_json::Value> for Val`.
+    pub fn from_value_with(
+        caches: &crate::data::intern::KeyCache,
+        v: &serde_json::Value,
+    ) -> Self {
+        match v {
+            serde_json::Value::Null => Val::Null,
+            serde_json::Value::Bool(b) => Val::Bool(*b),
+            serde_json::Value::Number(n) => {
+                if let Some(i) = n.as_i64() {
+                    Val::Int(i)
+                } else {
+                    Val::Float(n.as_f64().unwrap_or(0.0))
+                }
+            }
+            serde_json::Value::String(s) => Val::Str(Arc::from(s.as_str())),
+            serde_json::Value::Array(a) => {
+                let all_i64 = !a.is_empty()
+                    && a.iter()
+                        .all(|v| matches!(v, serde_json::Value::Number(n) if n.is_i64()));
+                if all_i64 {
+                    let out: Vec<i64> = a
+                        .iter()
+                        .filter_map(|v| {
+                            if let serde_json::Value::Number(n) = v {
+                                n.as_i64()
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    return Val::IntVec(Arc::new(out));
+                }
+                let all_str =
+                    !a.is_empty() && a.iter().all(|v| matches!(v, serde_json::Value::String(_)));
+                if all_str {
+                    let out: Vec<Arc<str>> = a
+                        .iter()
+                        .filter_map(|v| {
+                            if let serde_json::Value::String(s) = v {
+                                Some(Arc::from(s.as_str()))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    return Val::StrVec(Arc::new(out));
+                }
+                Val::Arr(Arc::new(
+                    a.iter().map(|v| Self::from_value_with(caches, v)).collect(),
+                ))
+            }
+            serde_json::Value::Object(m) => Val::Obj(Arc::new(
+                m.iter()
+                    .map(|(k, v)| (caches.intern(k.as_str()), Self::from_value_with(caches, v)))
+                    .collect(),
+            )),
+        }
+    }
+
+    /// Materialise a `Val` from a simd-json `TapeData`, interning object
+    /// keys through `caches` instead of the default thread-local cache.
+    #[cfg(feature = "simd-json")]
+    pub fn from_tape_data_with(
+        caches: &crate::data::intern::KeyCache,
+        tape: &Arc<crate::data::tape::TapeData>,
+    ) -> Val {
+        let mut idx = 0usize;
+        Self::from_tape_walk_with(caches, tape, &mut idx)
+    }
+
+    /// Recursive helper for [`Val::from_tape_data_with`]; mirrors
+    /// [`Val::from_tape_walk`] body for body, replacing every
+    /// `intern_key` call with `caches.intern`.
+    #[cfg(feature = "simd-json")]
+    fn from_tape_walk_with(
+        caches: &crate::data::intern::KeyCache,
+        tape: &Arc<crate::data::tape::TapeData>,
+        idx: &mut usize,
+    ) -> Val {
+        use crate::data::tape::TapeNode;
+        use simd_json::StaticNode as SN;
+        let here = tape.nodes[*idx];
+        *idx += 1;
+        match here {
+            TapeNode::Static(SN::Null) => Val::Null,
+            TapeNode::Static(SN::Bool(b)) => Val::Bool(b),
+            TapeNode::Static(SN::I64(n)) => Val::Int(n),
+            TapeNode::Static(SN::U64(n)) => {
+                if n <= i64::MAX as u64 {
+                    Val::Int(n as i64)
+                } else {
+                    Val::Float(n as f64)
+                }
+            }
+            TapeNode::Static(SN::F64(f)) => Val::Float(f),
+            TapeNode::String(_) => Val::StrSlice(tape.str_ref_at(*idx - 1)),
+            TapeNode::Array { len, .. } => {
+                if len == 0 {
+                    return Val::arr(Vec::new());
+                }
+                let first_idx = *idx;
+                let first = tape.nodes[first_idx];
+                let mut try_int = matches!(
+                    first,
+                    TapeNode::Static(SN::I64(_)) | TapeNode::Static(SN::U64(_))
+                );
+                let mut try_float = matches!(
+                    first,
+                    TapeNode::Static(SN::I64(_))
+                        | TapeNode::Static(SN::U64(_))
+                        | TapeNode::Static(SN::F64(_))
+                );
+                let mut try_str = matches!(first, TapeNode::String(_));
+                let mut probe = first_idx;
+                let mut counted = 0usize;
+                while counted < len && (try_int || try_float || try_str) {
+                    match tape.nodes[probe] {
+                        TapeNode::Static(SN::I64(_)) => {
+                            try_str = false;
+                            probe += 1;
+                        }
+                        TapeNode::Static(SN::U64(n)) => {
+                            if n > i64::MAX as u64 {
+                                try_int = false;
+                            }
+                            try_str = false;
+                            probe += 1;
+                        }
+                        TapeNode::Static(SN::F64(_)) => {
+                            try_int = false;
+                            try_str = false;
+                            probe += 1;
+                        }
+                        TapeNode::String(_) => {
+                            try_int = false;
+                            try_float = false;
+                            probe += 1;
+                        }
+                        TapeNode::Static(_) => {
+                            try_int = false;
+                            try_float = false;
+                            try_str = false;
+                            probe += 1;
+                        }
+                        TapeNode::Array { .. } | TapeNode::Object { .. } => {
+                            try_int = false;
+                            try_float = false;
+                            try_str = false;
+                            probe += tape.span(probe);
+                        }
+                    }
+                    counted += 1;
+                }
+                if try_int {
+                    let mut out: Vec<i64> = Vec::with_capacity(len);
+                    for _ in 0..len {
+                        match tape.nodes[*idx] {
+                            TapeNode::Static(SN::I64(n)) => out.push(n),
+                            TapeNode::Static(SN::U64(n)) if n <= i64::MAX as u64 => {
+                                out.push(n as i64)
+                            }
+                            _ => unreachable!("homogeneity check"),
+                        }
+                        *idx += 1;
+                    }
+                    return Val::IntVec(Arc::new(out));
+                }
+                if try_float {
+                    let mut out: Vec<f64> = Vec::with_capacity(len);
+                    for _ in 0..len {
+                        match tape.nodes[*idx] {
+                            TapeNode::Static(SN::I64(n)) => out.push(n as f64),
+                            TapeNode::Static(SN::U64(n)) => out.push(n as f64),
+                            TapeNode::Static(SN::F64(f)) => out.push(f),
+                            _ => unreachable!("homogeneity check"),
+                        }
+                        *idx += 1;
+                    }
+                    return Val::FloatVec(Arc::new(out));
+                }
+                if try_str {
+                    let mut out: Vec<crate::data::tape::StrRef> = Vec::with_capacity(len);
+                    for _ in 0..len {
+                        if let TapeNode::String(_) = tape.nodes[*idx] {
+                            out.push(tape.str_ref_at(*idx));
+                        }
+                        *idx += 1;
+                    }
+                    return Val::StrSliceVec(Arc::new(out));
+                }
+                let mut out: Vec<Val> = Vec::with_capacity(len);
+                for _ in 0..len {
+                    out.push(Self::from_tape_walk_with(caches, tape, idx));
+                }
+                Val::Arr(Arc::new(out))
+            }
+            TapeNode::Object { len, .. } => {
+                let mut out: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(len);
+                for _ in 0..len {
+                    let key = match tape.nodes[*idx] {
+                        TapeNode::String(s) => s,
+                        _ => unreachable!("object key must be string"),
+                    };
+                    *idx += 1;
+                    let v = Self::from_tape_walk_with(caches, tape, idx);
+                    out.insert(caches.intern(key), v);
                 }
                 Val::Obj(Arc::new(out))
             }

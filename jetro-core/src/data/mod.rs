@@ -7,6 +7,7 @@
 //! - [`runtime`] — per-evaluation runtime state shared across the engine.
 
 pub(crate) mod context;
+pub(crate) mod intern;
 pub(crate) mod runtime;
 pub(crate) mod tape;
 pub(crate) mod value;
