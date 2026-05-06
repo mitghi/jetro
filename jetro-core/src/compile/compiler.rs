@@ -60,7 +60,11 @@ impl Compiler {
     /// Compile `expr` with all optimisation passes enabled and sub-program deduplication.
     /// `source` is stored verbatim in the returned `Program` for cache keying.
     pub fn compile(expr: &Expr, source: &str) -> Program {
-        let mut e = expr.clone();
+        // Phase B: fuse contiguous same-root chain-writes into multi-op
+        // `Expr::Patch` nodes before emitting bytecode. Phase D's
+        // `CompiledPatchTrie::from_ops` then auto-routes the resulting
+        // multi-op patches onto the shared-`Arc::make_mut` path.
+        let mut e = crate::plan::patch_fusion::fuse_writes(expr.clone());
         Self::reorder_and_operands(&mut e);
         let ctx = VarCtx::default();
         let ops = Self::optimize(Self::emit(&e, &ctx));

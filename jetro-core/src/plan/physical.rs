@@ -802,6 +802,14 @@ pub(crate) fn plan_query_with_context(expr: &str, context: PlanningContext) -> Q
     let Ok(ast) = parser::parse(expr) else {
         return QueryPlan::source_vm(expr);
     };
+    // Phase B: fuse contiguous same-root chain-writes into multi-op
+    // `Expr::Patch` nodes before lowering. The resulting Patches are
+    // automatically routed to Phase D's PathTrie execution path by the
+    // bytecode compiler. The compiler runs the same pass on its inputs,
+    // but doing it here as well lets the structural / pipeline lowerers
+    // see fused Patches before they decide whether to fall back to the
+    // VM source path.
+    let ast = crate::plan::patch_fusion::fuse_writes(ast);
     let mut builder = PlanBuilder {
         nodes: Vec::new(),
         context,

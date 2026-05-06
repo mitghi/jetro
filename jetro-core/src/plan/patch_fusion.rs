@@ -1,5 +1,6 @@
-// Phase A is analysis-only; Phase B will consume these types so the
-// dead-code lints fire here until then.
+// Phase A types are analysis-only; Phase B's `fuse_writes` consumes them.
+// Some helpers remain available for Phase C/E/F so we keep the lint
+// allowance until those phases land.
 #![allow(dead_code)]
 
 //! Phase A of the write-fusion plan: a non-mutating effect-summary
@@ -523,6 +524,949 @@ impl EffectAnalyzer {
 // re-importing. Keeping it here documents the dependency.
 #[allow(dead_code)]
 fn _bind_target_witness(_b: &BindTarget) {}
+
+// ---------------------------------------------------------------------------
+// Phase B: contiguous same-root write fusion (IR rewrite)
+// ---------------------------------------------------------------------------
+//
+// `fuse_writes` rewrites an [`Expr`] tree so adjacent writes targeting the
+// same canonical root collapse into a single multi-op [`Expr::Patch`]. The
+// downstream compiler builds one `CompiledPatch` per fused node, and Phase D's
+// `CompiledPatchTrie::from_ops` then triages the multi-op forms onto the
+// shared-`Arc::make_mut` execution path.
+//
+// Patterns handled here:
+//
+// * **P1** — `Pipeline { Forward, … }` chains with adjacent same-root writes.
+//   The chain-write rewriter only fires for `$`-rooted bases, so a pipe
+//   stage like `… | @.b.set(2)` parses as `Chain(Current, [..set])`. We
+//   detect that shape during fusion (option (b) from the plan) and lift it
+//   into a synthetic `Patch{root:@,…}` so the `RootRef::Current` adjacency
+//   check below sees both writes against the same scope.
+// * **P2** — `Object` field writes that share a canonical root: lifted
+//   into a `let _patch_fuse_<n> = patch $ {…}` outside the object, with
+//   each fused field replaced by a reference to the binding name. Other
+//   fields keep their original expressions; we re-target rooted reads
+//   inside *those* fields to read from the post-batch document so the
+//   semantics match a sequential left-to-right evaluation order.
+// * **P3** — `Let` whose `init` is a [`Expr::Patch`] and whose body
+//   contains adjacent same-root writes through the alias name. The let
+//   alias resolves to the patch's root (via Phase A's alias table); we
+//   pull the body's writes into the init's op list and replace them with
+//   references to the let-bound name.
+// * **P4** — Nested pipelines: each pass merges any new same-root pair
+//   exposed by the prior pass; we run a fixpoint loop until no rule fires.
+//
+// Soundness guards (matching `write_fusion_plan.md` invariants 1-7):
+//
+// * A pipeline stage that **reads** a root being batched against forces a
+//   flush — we stop merging at that boundary.
+// * Conditional ops (`PatchOp.cond.is_some()`) are not fused; they remain
+//   in their original `Patch` so Phase F can handle them later.
+// * Lambda / comprehension bodies introduce a fresh `Current` scope; their
+//   writes never leak into an enclosing batch.
+// * Source order is preserved: ops are concatenated in left-to-right
+//   evaluation order so last-write-wins semantics line up with the
+//   trie-builder's contract.
+// * Composite roots never fuse (no fusion across opaque expressions).
+
+/// Public entry: rewrite `expr` so contiguous same-root chain-writes
+/// collapse into single multi-op [`Expr::Patch`] nodes. Pure: takes
+/// ownership and returns the new tree.
+pub(crate) fn fuse_writes(expr: Expr) -> Expr {
+    let mut ctx = FuseCtx::default();
+    fuse_recursive(expr, &mut ctx)
+}
+
+/// Mutable state threaded through the rewrite. Today it only holds
+/// alias information; Phase C will grow it with a flush stack.
+#[derive(Default)]
+struct FuseCtx {
+    /// Mirrors [`EffectAnalyzer::aliases`] for the duration of the
+    /// rewrite so let-aliases compose with the canonical-root rule.
+    aliases: Vec<(Arc<str>, RootRef)>,
+    /// Stack of `Current` scope ids (lambda / comprehension boundaries).
+    scope_stack: Vec<u32>,
+    /// Scope id allocator.
+    next_scope: u32,
+    /// Counter for synthetic `let` names introduced by P2 (object lift).
+    next_synth: u32,
+}
+
+impl FuseCtx {
+    fn current_scope(&self) -> u32 {
+        *self.scope_stack.last().unwrap_or(&0)
+    }
+    fn fresh_scope(&mut self) -> u32 {
+        let id = self.next_scope;
+        self.next_scope += 1;
+        id
+    }
+    fn fresh_synth_name(&mut self) -> String {
+        let id = self.next_synth;
+        self.next_synth += 1;
+        format!("__patch_fuse_{}", id)
+    }
+    fn resolve(&self, name: &str) -> Option<RootRef> {
+        self.aliases
+            .iter()
+            .rev()
+            .find(|(n, _)| n.as_ref() == name)
+            .map(|(_, r)| r.clone())
+    }
+    fn canonical_root(&self, expr: &Expr) -> RootRef {
+        match expr {
+            Expr::Root => RootRef::Root,
+            Expr::Current => RootRef::Current(self.current_scope()),
+            Expr::Ident(name) => self
+                .resolve(name)
+                .unwrap_or_else(|| RootRef::Local(Arc::from(name.as_str()))),
+            other => RootRef::Composite(Arc::new(other.clone())),
+        }
+    }
+
+    /// Build a [`EffectAnalyzer`] seeded with our current alias / scope
+    /// state so soundness checks (`reads.contains(...)`) compose.
+    fn analyzer(&self) -> EffectAnalyzer {
+        let mut a = EffectAnalyzer::new();
+        a.aliases = self.aliases.clone();
+        a.scope_stack = self.scope_stack.clone();
+        // Make sure `next_scope` doesn't collide with ours.
+        a.next_scope = self.next_scope;
+        a
+    }
+}
+
+/// Walk the expression bottom-up, fusing where shapes match. Most
+/// variants only need to recurse into children — the interesting work
+/// happens at `Pipeline`, `Object`, and `Let`.
+fn fuse_recursive(expr: Expr, ctx: &mut FuseCtx) -> Expr {
+    match expr {
+        // Leaves and trivially recursive cases.
+        Expr::Null
+        | Expr::Bool(_)
+        | Expr::Int(_)
+        | Expr::Float(_)
+        | Expr::Str(_)
+        | Expr::Root
+        | Expr::Current
+        | Expr::Ident(_)
+        | Expr::DeleteMark => expr,
+
+        Expr::FString(parts) => Expr::FString(
+            parts
+                .into_iter()
+                .map(|p| match p {
+                    crate::parse::ast::FStringPart::Lit(s) => {
+                        crate::parse::ast::FStringPart::Lit(s)
+                    }
+                    crate::parse::ast::FStringPart::Interp { expr, fmt } => {
+                        crate::parse::ast::FStringPart::Interp {
+                            expr: fuse_recursive(expr, ctx),
+                            fmt,
+                        }
+                    }
+                })
+                .collect(),
+        ),
+
+        Expr::Chain(base, steps) => {
+            let base = Box::new(fuse_recursive(*base, ctx));
+            let steps = steps.into_iter().map(|s| fuse_step(s, ctx)).collect();
+            Expr::Chain(base, steps)
+        }
+
+        Expr::BinOp(l, op, r) => Expr::BinOp(
+            Box::new(fuse_recursive(*l, ctx)),
+            op,
+            Box::new(fuse_recursive(*r, ctx)),
+        ),
+        Expr::UnaryNeg(inner) => Expr::UnaryNeg(Box::new(fuse_recursive(*inner, ctx))),
+        Expr::Not(inner) => Expr::Not(Box::new(fuse_recursive(*inner, ctx))),
+        Expr::Kind { expr, ty, negate } => Expr::Kind {
+            expr: Box::new(fuse_recursive(*expr, ctx)),
+            ty,
+            negate,
+        },
+        Expr::Coalesce(l, r) => Expr::Coalesce(
+            Box::new(fuse_recursive(*l, ctx)),
+            Box::new(fuse_recursive(*r, ctx)),
+        ),
+
+        Expr::Object(fields) => fuse_object(fields, ctx),
+        Expr::Array(elems) => Expr::Array(
+            elems
+                .into_iter()
+                .map(|e| match e {
+                    ArrayElem::Expr(x) => ArrayElem::Expr(fuse_recursive(x, ctx)),
+                    ArrayElem::Spread(x) => ArrayElem::Spread(fuse_recursive(x, ctx)),
+                })
+                .collect(),
+        ),
+
+        Expr::Pipeline { base, steps } => fuse_pipeline(*base, steps, ctx),
+
+        Expr::ListComp { expr, vars, iter, cond } => {
+            let iter = Box::new(fuse_recursive(*iter, ctx));
+            with_lambda_scope(ctx, &vars, |ctx| Expr::ListComp {
+                expr: Box::new(fuse_recursive(*expr, ctx)),
+                vars: vars.clone(),
+                iter,
+                cond: cond.map(|c| Box::new(fuse_recursive(*c, ctx))),
+            })
+        }
+        Expr::SetComp { expr, vars, iter, cond } => {
+            let iter = Box::new(fuse_recursive(*iter, ctx));
+            with_lambda_scope(ctx, &vars, |ctx| Expr::SetComp {
+                expr: Box::new(fuse_recursive(*expr, ctx)),
+                vars: vars.clone(),
+                iter,
+                cond: cond.map(|c| Box::new(fuse_recursive(*c, ctx))),
+            })
+        }
+        Expr::GenComp { expr, vars, iter, cond } => {
+            let iter = Box::new(fuse_recursive(*iter, ctx));
+            with_lambda_scope(ctx, &vars, |ctx| Expr::GenComp {
+                expr: Box::new(fuse_recursive(*expr, ctx)),
+                vars: vars.clone(),
+                iter,
+                cond: cond.map(|c| Box::new(fuse_recursive(*c, ctx))),
+            })
+        }
+        Expr::DictComp { key, val, vars, iter, cond } => {
+            let iter = Box::new(fuse_recursive(*iter, ctx));
+            with_lambda_scope(ctx, &vars, |ctx| Expr::DictComp {
+                key: Box::new(fuse_recursive(*key, ctx)),
+                val: Box::new(fuse_recursive(*val, ctx)),
+                vars: vars.clone(),
+                iter,
+                cond: cond.map(|c| Box::new(fuse_recursive(*c, ctx))),
+            })
+        }
+
+        Expr::Lambda { params, body } => with_lambda_scope(ctx, &params, |ctx| Expr::Lambda {
+            params: params.clone(),
+            body: Box::new(fuse_recursive(*body, ctx)),
+        }),
+
+        Expr::Let { name, init, body } => fuse_let(name, *init, *body, ctx),
+
+        Expr::IfElse { cond, then_, else_ } => Expr::IfElse {
+            cond: Box::new(fuse_recursive(*cond, ctx)),
+            then_: Box::new(fuse_recursive(*then_, ctx)),
+            else_: Box::new(fuse_recursive(*else_, ctx)),
+        },
+        Expr::Try { body, default } => Expr::Try {
+            body: Box::new(fuse_recursive(*body, ctx)),
+            default: Box::new(fuse_recursive(*default, ctx)),
+        },
+        Expr::GlobalCall { name, args } => Expr::GlobalCall {
+            name,
+            args: args
+                .into_iter()
+                .map(|a| match a {
+                    Arg::Pos(e) => Arg::Pos(fuse_recursive(e, ctx)),
+                    Arg::Named(n, e) => Arg::Named(n, fuse_recursive(e, ctx)),
+                })
+                .collect(),
+        },
+        Expr::Cast { expr, ty } => Expr::Cast {
+            expr: Box::new(fuse_recursive(*expr, ctx)),
+            ty,
+        },
+
+        Expr::Patch { root, ops } => {
+            let root = Box::new(fuse_recursive(*root, ctx));
+            let ops = ops
+                .into_iter()
+                .map(|op| fuse_patch_op(op, ctx))
+                .collect();
+            Expr::Patch { root, ops }
+        }
+    }
+}
+
+fn fuse_step(step: Step, ctx: &mut FuseCtx) -> Step {
+    match step {
+        Step::DynIndex(e) => Step::DynIndex(Box::new(fuse_recursive(*e, ctx))),
+        Step::InlineFilter(e) => Step::InlineFilter(Box::new(fuse_recursive(*e, ctx))),
+        Step::Method(n, args) => Step::Method(
+            n,
+            args.into_iter()
+                .map(|a| match a {
+                    Arg::Pos(e) => Arg::Pos(fuse_recursive(e, ctx)),
+                    Arg::Named(n, e) => Arg::Named(n, fuse_recursive(e, ctx)),
+                })
+                .collect(),
+        ),
+        Step::OptMethod(n, args) => Step::OptMethod(
+            n,
+            args.into_iter()
+                .map(|a| match a {
+                    Arg::Pos(e) => Arg::Pos(fuse_recursive(e, ctx)),
+                    Arg::Named(n, e) => Arg::Named(n, fuse_recursive(e, ctx)),
+                })
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
+fn fuse_patch_op(op: PatchOp, ctx: &mut FuseCtx) -> PatchOp {
+    let PatchOp { path, val, cond } = op;
+    let path = path
+        .into_iter()
+        .map(|s| match s {
+            PathStep::DynIndex(e) => PathStep::DynIndex(fuse_recursive(e, ctx)),
+            PathStep::WildcardFilter(e) => {
+                PathStep::WildcardFilter(Box::new(fuse_recursive(*e, ctx)))
+            }
+            other => other,
+        })
+        .collect();
+    PatchOp {
+        path,
+        val: fuse_recursive(val, ctx),
+        cond: cond.map(|c| fuse_recursive(c, ctx)),
+    }
+}
+
+/// Helper to enter a lambda-/comprehension-scope: pushes a fresh
+/// `Current` scope id and aliases each parameter to it, runs `f`, then
+/// pops.
+fn with_lambda_scope<R>(
+    ctx: &mut FuseCtx,
+    params: &[String],
+    f: impl FnOnce(&mut FuseCtx) -> R,
+) -> R {
+    let scope = ctx.fresh_scope();
+    ctx.scope_stack.push(scope);
+    for p in params {
+        ctx.aliases
+            .push((Arc::from(p.as_str()), RootRef::Current(scope)));
+    }
+    let out = f(ctx);
+    for _ in params {
+        ctx.aliases.pop();
+    }
+    ctx.scope_stack.pop();
+    out
+}
+
+// --- Pattern P1: Pipeline fusion ------------------------------------------
+
+/// Try to lift a pipe-stage expression into an `Expr::Patch`.
+///
+/// The chain-write rewriter in the parser only fires for `$`-rooted
+/// bases. Pipe stages like `… | @.b.set(2)` parse as
+/// `Chain(Current, [Field("b"), Method("set", [arg])])`. This helper
+/// recognises that exact shape and emits a synthetic `Patch{root:@,…}`
+/// so the pipeline fuser can treat it uniformly.
+///
+/// Returns `None` when the stage is not a chain-write terminal — leaves
+/// the expression untouched. Conservative: only fires when the base is
+/// `Expr::Current` or `Expr::Ident` (lifting alias-equivalent let names
+/// into Patches against the alias name; canonicalisation happens later).
+fn lift_chain_write_pipe_stage(stage: Expr) -> Result<Expr, Expr> {
+    let (base, steps) = match stage {
+        Expr::Chain(b, s) => (*b, s),
+        other => return Err(other),
+    };
+    // Must be a write-shaped chain.
+    let last = match steps.last() {
+        Some(s) => s,
+        None => return Err(Expr::Chain(Box::new(base), steps)),
+    };
+    let (name, args) = match last {
+        Step::Method(n, a) => (n.clone(), a.clone()),
+        _ => return Err(Expr::Chain(Box::new(base), steps)),
+    };
+    if !is_write_terminal(&name) {
+        return Err(Expr::Chain(Box::new(base), steps));
+    }
+    // Base must be a recognised root form.
+    let allow = matches!(&base, Expr::Current | Expr::Ident(_) | Expr::Root);
+    if !allow {
+        return Err(Expr::Chain(Box::new(base), steps));
+    }
+    let prefix: Vec<Step> = steps[..steps.len() - 1].to_vec();
+    let path = match steps_to_path(&prefix) {
+        Some(p) => p,
+        None => return Err(Expr::Chain(Box::new(base), steps)),
+    };
+    let op = match build_write_patch_op(&name, &args, path) {
+        Some(o) => o,
+        None => return Err(Expr::Chain(Box::new(base), steps)),
+    };
+    Ok(Expr::Patch {
+        root: Box::new(base),
+        ops: vec![op],
+    })
+}
+
+/// Mirrors `parser::is_terminal_write` — duplicated locally so we don't
+/// need to make that helper `pub(crate)` for one call site.
+fn is_write_terminal(name: &str) -> bool {
+    matches!(
+        name,
+        "set" | "modify" | "delete" | "unset" | "merge" | "deep_merge" | "deepMerge"
+    )
+}
+
+fn steps_to_path(steps: &[Step]) -> Option<Vec<PathStep>> {
+    let mut out = Vec::with_capacity(steps.len());
+    for s in steps {
+        match s {
+            Step::Field(f) | Step::OptField(f) => out.push(PathStep::Field(f.clone())),
+            Step::Index(i) => out.push(PathStep::Index(*i)),
+            Step::Descendant(f) => out.push(PathStep::Descendant(f.clone())),
+            Step::DynIndex(e) => out.push(PathStep::DynIndex((**e).clone())),
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
+/// Mirrors `parser::build_write_op`. We only need `set` / `modify` /
+/// `delete` / `unset` for pipe-stage lifting; `merge` and `deep_merge`
+/// already pass through the original parser path when the base is `$`,
+/// and the pipe form `| .merge(x)` is unusual enough that we leave it
+/// alone for now.
+fn build_write_patch_op(
+    name: &str,
+    args: &[Arg],
+    path: Vec<PathStep>,
+) -> Option<PatchOp> {
+    match name {
+        "set" => {
+            let v = arg_expr_owned(args.first()?);
+            Some(PatchOp {
+                path,
+                val: v,
+                cond: None,
+            })
+        }
+        "modify" => {
+            let v = match arg_expr_owned(args.first()?) {
+                Expr::Lambda { params, body } => {
+                    if let Some(p) = params.into_iter().next() {
+                        Expr::Let {
+                            name: p,
+                            init: Box::new(Expr::Current),
+                            body,
+                        }
+                    } else {
+                        *body
+                    }
+                }
+                other => other,
+            };
+            Some(PatchOp {
+                path,
+                val: v,
+                cond: None,
+            })
+        }
+        "delete" => {
+            if !args.is_empty() {
+                return None;
+            }
+            Some(PatchOp {
+                path,
+                val: Expr::DeleteMark,
+                cond: None,
+            })
+        }
+        "unset" => {
+            let key = match arg_expr_owned(args.first()?) {
+                Expr::Str(s) => s,
+                Expr::Ident(s) => s,
+                _ => return None,
+            };
+            let mut p = path;
+            p.push(PathStep::Field(key));
+            Some(PatchOp {
+                path: p,
+                val: Expr::DeleteMark,
+                cond: None,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn arg_expr_owned(a: &Arg) -> Expr {
+    match a {
+        Arg::Pos(e) | Arg::Named(_, e) => e.clone(),
+    }
+}
+
+/// Fuse a pipeline. Walks left-to-right, merging adjacent same-root
+/// `Patch` stages into the running base, splitting on:
+///
+/// * `PipeStep::Bind` (introduces a name in the surface; conservative
+///   stop point so the binding's value is unambiguous)
+/// * a stage that reads the root being batched (read-after-write barrier)
+/// * a stage with non-fuseable shape
+fn fuse_pipeline(base: Expr, steps: Vec<PipeStep>, ctx: &mut FuseCtx) -> Expr {
+    // Recurse into base and each forward stage first.
+    let mut acc: Expr = fuse_recursive(base, ctx);
+    let mut new_steps: Vec<PipeStep> = Vec::with_capacity(steps.len());
+
+    for st in steps {
+        match st {
+            PipeStep::Bind(t) => {
+                // Flush — keep the bind as-is, accept the batched acc.
+                new_steps.push(PipeStep::Bind(t));
+            }
+            PipeStep::Forward(stage_expr) => {
+                let stage_expr = fuse_recursive(stage_expr, ctx);
+                // Try to lift method-call form into a Patch first.
+                let stage_expr = match lift_chain_write_pipe_stage(stage_expr) {
+                    Ok(p) => p,
+                    Err(other) => other,
+                };
+
+                if let Some(merged) = try_merge_pipeline_stage(&acc, &new_steps, &stage_expr, ctx) {
+                    acc = merged;
+                } else {
+                    new_steps.push(PipeStep::Forward(stage_expr));
+                }
+            }
+        }
+    }
+
+    if new_steps.is_empty() {
+        acc
+    } else {
+        Expr::Pipeline {
+            base: Box::new(acc),
+            steps: new_steps,
+        }
+    }
+}
+
+/// Try to fuse `stage` into `acc` (the running pipeline base).
+/// Returns `Some(new_base)` when the merge succeeded; `None` to fall
+/// back to keeping the stage as a forward step.
+fn try_merge_pipeline_stage(
+    acc: &Expr,
+    pending_steps: &[PipeStep],
+    stage: &Expr,
+    ctx: &FuseCtx,
+) -> Option<Expr> {
+    // Phase B only fuses when no forward steps have been buffered yet
+    // (i.e. acc is still our cumulative batched Patch). Once a non-
+    // fuseable stage lands in `pending_steps` we stop merging into acc.
+    if !pending_steps.is_empty() {
+        return None;
+    }
+
+    // Both sides must be `Patch` nodes.
+    let (acc_root, acc_ops) = match acc {
+        Expr::Patch { root, ops } => (root.as_ref(), ops),
+        _ => return None,
+    };
+    let (stage_root, stage_ops) = match stage {
+        Expr::Patch { root, ops } => (root.as_ref(), ops),
+        _ => return None,
+    };
+
+    // Conditional ops disable trie fusion. Phase F handles them; for
+    // now we leave both Patches separate so the trie path keeps its
+    // simple invariants.
+    if acc_ops.iter().any(|o| o.cond.is_some())
+        || stage_ops.iter().any(|o| o.cond.is_some())
+    {
+        return None;
+    }
+
+    // Composite roots never fuse.
+    let acc_root_ref = ctx.canonical_root(acc_root);
+    if matches!(acc_root_ref, RootRef::Composite(_)) {
+        return None;
+    }
+
+    // The stage's root, after canonicalisation, must equal the acc's
+    // root OR `Current` — `@` in a pipe stage refers to the previous
+    // stage's value, which by induction is `acc` (one batched Patch
+    // against `acc_root`). So a `Patch{root:@,…}` against a pipeline
+    // whose head writes to `acc_root` is targeting the same logical
+    // document.
+    let stage_root_ref = ctx.canonical_root(stage_root);
+    let same_root = stage_root_ref == acc_root_ref
+        || stage_root_ref == RootRef::Current(ctx.current_scope());
+    if !same_root {
+        return None;
+    }
+
+    // Soundness: the stage's ops' values / conds / dyn-indices must not
+    // READ the root being written. We check ops directly rather than
+    // analysing the whole stage `Expr::Patch`, because `Patch.root` is
+    // (necessarily) a read of the target root and would always trigger
+    // a false positive.
+    let mut a = ctx.analyzer();
+    for op in stage_ops {
+        let val_summary = a.analyze(&op.val);
+        if val_summary.reads.contains(&acc_root_ref) {
+            return None;
+        }
+        if let Some(c) = &op.cond {
+            if a.analyze(c).reads.contains(&acc_root_ref) {
+                return None;
+            }
+        }
+        for s in &op.path {
+            if let PathStep::DynIndex(e) = s {
+                if a.analyze(e).reads.contains(&acc_root_ref) {
+                    return None;
+                }
+            }
+            if let PathStep::WildcardFilter(e) = s {
+                if a.analyze(e).reads.contains(&acc_root_ref) {
+                    return None;
+                }
+            }
+        }
+    }
+
+    // Concatenate ops in source order. The stage's ops were authored
+    // against `Current` (= acc) but their paths and values are
+    // structurally independent of which root expression we use —
+    // the trie applies them to whatever document the merged Patch
+    // ultimately walks. Last-write-wins is preserved by the
+    // CompiledPatchTrie builder's left-to-right traversal.
+    let mut merged_ops = acc_ops.clone();
+    merged_ops.extend(stage_ops.iter().cloned());
+
+    Some(Expr::Patch {
+        root: Box::new(acc_root.clone()),
+        ops: merged_ops,
+    })
+}
+
+// --- Pattern P2: Object-field write fusion --------------------------------
+
+/// Lift sibling Patches inside an object literal into a `let` binding
+/// before the object so the doc materialises once. Conservative: only
+/// fires when ≥ 2 same-canonical-root Patch fields exist back-to-back
+/// AND no other field reads the same root (else lifting would change
+/// the read-vs-write order).
+///
+/// Example transform:
+///
+/// ```text
+/// {a: $.x.set(1), b: $.y.set(2), c: 3}
+///   ↓
+/// let __patch_fuse_0 = patch $ { x: 1, y: 2 } in
+/// {a: __patch_fuse_0, b: __patch_fuse_0, c: 3}
+/// ```
+fn fuse_object(fields: Vec<ObjField>, ctx: &mut FuseCtx) -> Expr {
+    // First, recursively fuse each field's sub-expressions.
+    let recursed: Vec<ObjField> = fields
+        .into_iter()
+        .map(|f| match f {
+            ObjField::Kv {
+                key,
+                val,
+                optional,
+                cond,
+            } => ObjField::Kv {
+                key,
+                val: fuse_recursive(val, ctx),
+                optional,
+                cond: cond.map(|c| fuse_recursive(c, ctx)),
+            },
+            ObjField::Short(n) => ObjField::Short(n),
+            ObjField::Dynamic { key, val } => ObjField::Dynamic {
+                key: fuse_recursive(key, ctx),
+                val: fuse_recursive(val, ctx),
+            },
+            ObjField::Spread(e) => ObjField::Spread(fuse_recursive(e, ctx)),
+            ObjField::SpreadDeep(e) => ObjField::SpreadDeep(fuse_recursive(e, ctx)),
+        })
+        .collect();
+
+    // Detect ≥ 2 Kv fields whose value is a Patch with a non-Composite
+    // root — and whose roots all agree.
+    let mut patch_indices: Vec<usize> = Vec::new();
+    let mut shared_root: Option<RootRef> = None;
+    let mut shared_root_expr: Option<Expr> = None;
+    for (i, f) in recursed.iter().enumerate() {
+        if let ObjField::Kv {
+            val: Expr::Patch { root, ops },
+            cond: None,
+            ..
+        } = f
+        {
+            if ops.iter().any(|o| o.cond.is_some()) {
+                continue;
+            }
+            let r = ctx.canonical_root(root);
+            if matches!(r, RootRef::Composite(_)) {
+                continue;
+            }
+            match &shared_root {
+                None => {
+                    shared_root = Some(r.clone());
+                    shared_root_expr = Some((**root).clone());
+                    patch_indices.push(i);
+                }
+                Some(existing) if existing == &r => {
+                    patch_indices.push(i);
+                }
+                _ => {
+                    // Different root — can't fuse with the others; keep
+                    // the first cluster only. (Phase C may relax this.)
+                }
+            }
+        }
+    }
+
+    if patch_indices.len() < 2 {
+        return Expr::Object(recursed);
+    }
+    let shared_root = shared_root.unwrap();
+    let shared_root_expr = shared_root_expr.unwrap();
+
+    // Soundness: no other field may read the root being batched.
+    // Otherwise the field would observe pre-batch state in Jetro's
+    // current evaluation order, but post-batch state after the lift.
+    for (i, f) in recursed.iter().enumerate() {
+        if patch_indices.contains(&i) {
+            continue;
+        }
+        let summary = ctx.analyzer().analyze_obj_field(f);
+        if summary.reads.contains(&shared_root) {
+            return Expr::Object(recursed);
+        }
+        // Conservatively also bail if a non-fused field writes the
+        // same root — preserves source-order semantics.
+        if summary.writes.iter().any(|w| w.root == shared_root) {
+            return Expr::Object(recursed);
+        }
+    }
+
+    // Build the merged op list (concatenated in source order — using
+    // `patch_indices` which is already increasing by construction).
+    let mut merged_ops: Vec<PatchOp> = Vec::new();
+    for &i in &patch_indices {
+        if let ObjField::Kv {
+            val: Expr::Patch { ops, .. },
+            ..
+        } = &recursed[i]
+        {
+            merged_ops.extend(ops.iter().cloned());
+        }
+    }
+
+    let synth_name = ctx.fresh_synth_name();
+    let synth_arc: Arc<str> = Arc::from(synth_name.as_str());
+
+    // Replace each fused field's value with a reference to the synth
+    // binding. Other fields stay unchanged — they didn't read the
+    // shared root so they observe the same document either way.
+    let new_fields: Vec<ObjField> = recursed
+        .into_iter()
+        .enumerate()
+        .map(|(i, f)| {
+            if patch_indices.contains(&i) {
+                if let ObjField::Kv {
+                    key,
+                    optional,
+                    cond,
+                    ..
+                } = f
+                {
+                    ObjField::Kv {
+                        key,
+                        val: Expr::Ident(synth_name.clone()),
+                        optional,
+                        cond,
+                    }
+                } else {
+                    f
+                }
+            } else {
+                f
+            }
+        })
+        .collect();
+
+    let object_expr = Expr::Object(new_fields);
+
+    // Wrap in `let synth = patch shared_root { merged_ops } in object_expr`.
+    // Push the alias so any nested `Ident(synth)` references are visible
+    // — in practice we just inserted them, so the alias is conservative.
+    ctx.aliases
+        .push((synth_arc, shared_root.clone()));
+    let body = object_expr;
+    ctx.aliases.pop();
+
+    Expr::Let {
+        name: synth_name,
+        init: Box::new(Expr::Patch {
+            root: Box::new(shared_root_expr),
+            ops: merged_ops,
+        }),
+        body: Box::new(body),
+    }
+}
+
+// --- Pattern P3: Let init→body fusion -------------------------------------
+
+/// Lift `Chain(<base>, [..steps, MethodWrite])` into a synthetic Patch.
+/// Like `lift_chain_write_pipe_stage` but does not consume ownership;
+/// returns `None` when the chain isn't a write terminal.
+fn try_lift_chain_write(expr: &Expr) -> Option<Expr> {
+    let (base, steps) = match expr {
+        Expr::Chain(b, s) => (b.as_ref(), s.as_slice()),
+        _ => return None,
+    };
+    let last = steps.last()?;
+    let (name, args) = match last {
+        Step::Method(n, a) => (n.clone(), a.clone()),
+        _ => return None,
+    };
+    if !is_write_terminal(&name) {
+        return None;
+    }
+    if !matches!(base, Expr::Current | Expr::Ident(_) | Expr::Root) {
+        return None;
+    }
+    let prefix: Vec<Step> = steps[..steps.len() - 1].to_vec();
+    let path = steps_to_path(&prefix)?;
+    let op = build_write_patch_op(&name, &args, path)?;
+    Some(Expr::Patch {
+        root: Box::new(base.clone()),
+        ops: vec![op],
+    })
+}
+
+fn fuse_let(name: String, init: Expr, body: Expr, ctx: &mut FuseCtx) -> Expr {
+    let init = fuse_recursive(init, ctx);
+    let alias = ctx.canonical_root(&init_target(&init));
+    ctx.aliases.push((Arc::from(name.as_str()), alias.clone()));
+    let body = fuse_recursive(body, ctx);
+
+    // Try to fuse: when `init` is a Patch and `body` is — or contains as
+    // its leaf — a Patch (or chain-write shape) targeting the same
+    // canonical root (after alias resolution). Pull those ops into the
+    // init list; replace the inner write with a reference to the alias.
+    let merged = try_let_init_body_fusion(&name, &alias, &init, &body, ctx);
+
+    ctx.aliases.pop();
+
+    match merged {
+        Some(new_let) => new_let,
+        None => Expr::Let {
+            name,
+            init: Box::new(init),
+            body: Box::new(body),
+        },
+    }
+}
+
+/// If `init` is a Patch, return the root expression that names the
+/// document being patched (so canonicalisation flows through let-aliases
+/// correctly). Otherwise return the init expression unchanged.
+fn init_target(init: &Expr) -> Expr {
+    match init {
+        Expr::Patch { root, .. } => (**root).clone(),
+        other => other.clone(),
+    }
+}
+
+/// Implement P3. Returns `Some(rewritten_let)` on success, leaving
+/// fallback to the caller.
+fn try_let_init_body_fusion(
+    name: &str,
+    alias: &RootRef,
+    init: &Expr,
+    body: &Expr,
+    ctx: &FuseCtx,
+) -> Option<Expr> {
+    let (init_root, init_ops) = match init {
+        Expr::Patch { root, ops } => (root, ops),
+        _ => return None,
+    };
+    if init_ops.iter().any(|o| o.cond.is_some()) {
+        return None;
+    }
+    let init_root_ref = ctx.canonical_root(init_root);
+    if matches!(init_root_ref, RootRef::Composite(_)) {
+        return None;
+    }
+
+    // Try the body as a direct Patch first; if not, try lifting a
+    // chain-write (e.g. `x.b.set(2)`).
+    let body_patch_owned;
+    let body_patch: &Expr = if matches!(body, Expr::Patch { .. }) {
+        body
+    } else if let Some(lifted) = try_lift_chain_write(body) {
+        body_patch_owned = lifted;
+        &body_patch_owned
+    } else {
+        return None;
+    };
+
+    let (body_root, body_ops) = match body_patch {
+        Expr::Patch { root, ops } => (root, ops),
+        _ => return None,
+    };
+    if body_ops.iter().any(|o| o.cond.is_some()) {
+        return None;
+    }
+
+    // Canonicalise body's root with `name` aliased to `init_root_ref`.
+    let body_root_ref = canonical_root_with_alias(body_root, name, alias, ctx);
+    if body_root_ref != init_root_ref {
+        return None;
+    }
+
+    let mut merged = init_ops.clone();
+    merged.extend(body_ops.iter().cloned());
+
+    // The let body becomes a bare reference to `name` (which is the
+    // patched doc). Equivalently we could collapse to the init, but
+    // keeping the let preserves the binding's scope for any outer
+    // expression that might capture it (compositional safety).
+    Some(Expr::Let {
+        name: name.to_string(),
+        init: Box::new(Expr::Patch {
+            root: init_root.clone(),
+            ops: merged,
+        }),
+        body: Box::new(Expr::Ident(name.to_string())),
+    })
+}
+
+/// Resolve `expr` as a canonical root with `name` temporarily aliased to
+/// `alias`. Used in P3 because the body sees the let-bound name and we
+/// need to canonicalise *as if* we were inside the body's lexical scope.
+fn canonical_root_with_alias(
+    expr: &Expr,
+    name: &str,
+    alias: &RootRef,
+    ctx: &FuseCtx,
+) -> RootRef {
+    match expr {
+        Expr::Ident(n) if n == name => alias.clone(),
+        Expr::Root => RootRef::Root,
+        Expr::Current => RootRef::Current(ctx.current_scope()),
+        other => ctx.canonical_root(other),
+    }
+}
+
+// --- Phase A analyser hook for object-field reads -------------------------
+
+impl EffectAnalyzer {
+    /// Public-in-crate facade so Phase B's object lifter can compute a
+    /// summary for one field without re-implementing the dispatch.
+    pub(crate) fn analyze_obj_field(&mut self, f: &ObjField) -> EffectSummary {
+        self.visit_obj_field(f)
+    }
+}
 
 #[cfg(test)]
 mod tests {
