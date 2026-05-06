@@ -1,5 +1,81 @@
 # Changelog
 
+## 0.5.1 — 2026-05-06
+
+### Architecture
+
+- Reorganized `jetro-core/src/` around the current execution pipeline:
+  `parse/`, `compile/`, `vm/`, `data/`, `ir/`, `plan/`, `exec/`, and
+  `builtins/`.
+- Moved execution backends under `exec/`, including the router, interpreted
+  physical executor, structural backend, view backend, composed helpers, and
+  pipeline backend.
+- Split compiler and VM code into dedicated modules, with opcodes separated
+  from VM execution.
+- Consolidated value, tape, view, context, and runtime substrate types under
+  `data/`.
+- Moved builtin helper/runtime bodies under `builtins/ops/` and kept builtin
+  facts in the builtin definition and registry modules.
+- Split the large regression test module into focused parser, examples,
+  deep-search, chain-write, patch-fusion, and regression modules.
+
+### Demand Propagation
+
+- Added positional pull demand support for `last()` and `nth()` so eligible
+  chains can request `LastInput(n)` or `NthInput(i)` instead of scanning every
+  row.
+- Added projection-aware value demand metadata and broader demand propagation
+  tests in the chain IR.
+- Added generic late-projection behavior for safe one-to-one maps, allowing
+  chains such as `map(...).first()`, `map(...).last()`, `map(...).nth(n)`, and
+  `map(...).take(n)` to evaluate projections only for demanded rows.
+- Added indexed, reverse, and bounded source access handling for materialized,
+  composed, view, and tape-backed execution paths.
+- Fixed bounded sort planning for chains where a selective suffix follows
+  `sort`/`sort_by`; bounded top-k/bottom-k is now used only when the downstream
+  suffix is semantically one-to-one.
+- Updated lazy sorted suffix execution so `last()` traverses from the sorted
+  tail when safe, while selective suffixes scan until a matching output is
+  found.
+- Kept `unique()` conservative in the owned pipeline fallback by forcing the
+  legacy materialized path where stateful distinct handling is required.
+
+### Patch Fusion
+
+- Added a patch-fusion planner with effect summaries, root-reference tracking,
+  alias tables, pending write batches, scope-aware flushing, and path-trie
+  batching.
+- Added same-root contiguous fusion across pipes, objects, and lets.
+- Added fusion support for cross-let alias chains, lambda/comprehension bodies,
+  per-iteration chain-write lifting, conditional trie nodes, and final plan
+  completion.
+- Added soundness coverage for read-after-write behavior, scope isolation,
+  alias resolution, conditionals, and atomicity.
+
+### Fuzzing and Benchmarks
+
+- Added a `cargo-fuzz` harness for parse, plan, and collect targets behind the
+  `fuzz_internal` feature.
+- Added recorded parse timeout artifacts for known parser stress cases.
+- Updated the benchmark baseline to `0.5.0` after the module restructure,
+  structural backend work, demand propagation improvements, and patch fusion.
+
+### Validation
+
+Verified before release:
+
+```bash
+cargo test -p jetro-core
+cargo test
+git diff --check
+```
+
+- Core tests passed: 858 unit tests, 157 integration tests, and 1 doctest;
+  1 unit test ignored.
+- Workspace tests and doctests passed.
+
+---
+
 ## 0.4.0 — 2026-05-05
 
 ### Breaking Changes

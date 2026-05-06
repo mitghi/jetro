@@ -4,7 +4,7 @@ exclude = ["jetro-core/fuzz"]
 
 [package]
 name = "jetro"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2021"
 authors = ["Milad (Mike) Taghavi <mitghi.at.me.com>"]
 license = "MIT"
@@ -18,7 +18,7 @@ keywords = ["json-search", "json-query", "json-path", "jmespath", "serde"]
 categories = ["algorithms", "encoding"]
 
 [dependencies]
-jetro-core   = { path = "jetro-core", version = "0.5.0" }
+jetro-core   = { path = "jetro-core", version = "0.5.1" }
 serde_json   = "1.0.102"
 
 [features]

@@ -296,7 +296,7 @@ dependencies = [
 
 [[package]]
 name = "jetro"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "jetro-core",
  "serde_json",
@@ -304,7 +304,7 @@ dependencies = [
 
 [[package]]
 name = "jetro-core"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "indexmap",
  "itoa",
