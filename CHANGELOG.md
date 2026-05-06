@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.5.2 — unreleased
+
+### Pattern Matching
+
+- New `match scrutinee with { pat -> body, ... }` expression with first-match
+  semantics, optional `when` guards, and full composition with `.map`,
+  `.filter`, pipelines, and postfix navigation.
+- Pattern forms: wildcard `_`, scalar literal, identifier bind, kind-bind
+  `s: string`, kind-only `string`, object pattern `{k: pat}`, array pattern
+  `[a, b]`, array head/tail `[head, ...tail]`, or-pattern `a | b | c`,
+  numeric range `1..10` / `0..=100` (negative and float bounds supported),
+  and parenthesised sub-patterns.
+- Object rest binding `{k: pat, ...*rest}` captures every unlisted key as a
+  freshly built `Val::Obj`; the `...*expr` sigil is also accepted in object
+  body position as a shallow-spread synonym.
+- Deep search variants: `$..match { arms }` walks every descendant in DFS
+  pre-order and collects truthy arm-body results; `$..match! { arms }`
+  is the early-stop variant returning the first truthy result.
+- Compile-time analyses: or-pattern linearity check at parse, optional
+  exhaustiveness lint via `JETRO_STRICT_MATCH=1`, shape summary
+  (`ObjAnyOfKeys` / `KindOnly` / `NumericRange`) for runtime pre-filter and
+  structural dispatch.
+- Runtime: flat `MatchOp` decision-machine VM with cross-arm shared-prefix
+  hoisting (single-key, multi-key, array-length, kind variants) and partial
+  prefix sharing for mixed-suffix arm lists; or-of-literals lowers to a flat
+  `LitEq + Jump` cascade; or-with-binders falls back to a tree-walk helper.
+- View-domain runtime `exec_match_view<V: ValueView>` runs pattern tests
+  against borrowed views; pipeline `MatchFilter` / `MatchMap` stages dispatch
+  through it directly to skip per-row VM opcode dispatch.
+- Bitmap-backed `..match` via `jetro-experimental`: when every arm shares an
+  object key prefix, the planner emits `StructuralPlan::DeepMatch` and
+  enumerates candidates from the structural index instead of walking the
+  full document tree.
+- Demand model integration: `ChainOp::Match { Predicate, Transform, Multi }`
+  classifies match-bodied stages so `Take`, `find`, and `count` correctly cut
+  upstream demand through `.filter(match @ ...)` chains.
+- Bench harness: `cargo bench -p jetro-core --bench match_bench` exercises
+  `match_filter_take`, `match_dispatch_5_arms`, `match_range_scan`. Reference
+  baseline saved as `match-v0.6`.
+
+### Reserved keywords added
+
+- `match`, `with`
+
 ## 0.5.1 — 2026-05-06
 
 ### Architecture
