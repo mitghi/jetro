@@ -7,4 +7,5 @@
 pub(crate) mod analysis;
 pub(crate) mod logical;
 pub(crate) mod optimize;
+pub(crate) mod patch_fusion;
 pub(crate) mod physical;
