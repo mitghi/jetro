@@ -1264,6 +1264,13 @@ impl VM {
                     collect_all_inclusive(&recv, &mut all_descendants);
                     let mut out: Vec<Val> = Vec::new();
                     for desc in &all_descendants {
+                        // Pre-filter via the compile-time shape summary:
+                        // descendants whose runtime kind cannot satisfy
+                        // any arm are skipped without paying for the
+                        // full pattern walk.
+                        if !shape_summary_admits(&cm.shape_summary, desc) {
+                            continue;
+                        }
                         match self.exec_match(cm, desc, env) {
                             Ok(v) if crate::util::is_truthy(&v) => out.push(v),
                             Ok(_) => {}
@@ -1271,6 +1278,24 @@ impl VM {
                         }
                     }
                     stack.push(Val::arr(out));
+                }
+                Opcode::DeepMatchFirst(cm) => {
+                    let recv = pop!(stack);
+                    let mut all_descendants: Vec<Val> = Vec::new();
+                    collect_all_inclusive(&recv, &mut all_descendants);
+                    let mut found: Option<Val> = None;
+                    for desc in &all_descendants {
+                        if !shape_summary_admits(&cm.shape_summary, desc) {
+                            continue;
+                        }
+                        if let Ok(v) = self.exec_match(cm, desc, env) {
+                            if crate::util::is_truthy(&v) {
+                                found = Some(v);
+                                break;
+                            }
+                        }
+                    }
+                    stack.push(found.unwrap_or(Val::Null));
                 }
                 Opcode::Match(cm) => {
                     // Resolve the scrutinee under whichever strategy the
@@ -3374,6 +3399,31 @@ fn find_desc_first(v: &Val, name: &str) -> Option<Val> {
             None
         }
         _ => None,
+    }
+}
+
+/// Test whether `val` could match any arm summarised by `summary`. The
+/// check is conservative — when `summary` is `None` (no usable
+/// structural information) every value is admitted and the per-arm
+/// runtime decides. When `summary` is present, values whose runtime
+/// kind is provably outside the summarised set are rejected upfront.
+fn shape_summary_admits(summary: &Option<MatchShapeSummary>, val: &Val) -> bool {
+    let Some(s) = summary.as_ref() else {
+        return true;
+    };
+    match s {
+        MatchShapeSummary::ObjAnyOfKeys(keys) => match val {
+            Val::Obj(m) => keys.iter().any(|k| m.contains_key(k.as_ref())),
+            Val::ObjSmall(pairs) => keys
+                .iter()
+                .any(|k| pairs.iter().any(|(pk, _)| pk.as_ref() == k.as_ref())),
+            _ => false,
+        },
+        MatchShapeSummary::KindOnly(kind) => val_matches_kind(val, *kind),
+        MatchShapeSummary::NumericRange { lo, hi, inclusive } => match val_to_f64(val) {
+            Some(n) => range_contains(*lo, *hi, *inclusive, n),
+            None => false,
+        },
     }
 }
 

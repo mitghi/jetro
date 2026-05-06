@@ -343,6 +343,12 @@ pub enum Opcode {
     /// that is truthy. Falsy bodies and unmatched values (the trailing
     /// `Fail`) are silently dropped. Pushes the resulting `Val::Arr`.
     DeepMatchAll(Arc<CompiledMatch>),
+
+    /// Like `DeepMatchAll` but stops at the first descendant whose
+    /// match produces a truthy arm-body result. Pushes the body
+    /// directly (not wrapped in an array); pushes `Val::Null` when no
+    /// descendant matches.
+    DeepMatchFirst(Arc<CompiledMatch>),
 }
 
 /// Strategy for producing the scrutinee value of a compiled `match`
@@ -392,6 +398,37 @@ pub struct CompiledMatch {
     /// the same non-exhaustive error if every arm misses, regardless of
     /// the flag value.
     pub is_exhaustive: bool,
+    /// Shape summary describing what the structural backend can serve
+    /// from a bitmap index without touching the document body. `None`
+    /// means the match has no exploitable structure (mixed shapes,
+    /// guard-only arms, etc.) and the runtime walks every descendant
+    /// directly.
+    pub shape_summary: Option<MatchShapeSummary>,
+}
+
+/// Compile-time summary of a `match`'s arm shapes, used by deep-search
+/// (`..match`) dispatch to pre-filter candidates via a structural
+/// bitmap before running the per-arm pattern test.
+#[derive(Debug, Clone)]
+pub enum MatchShapeSummary {
+    /// Every arm is a `Pat::Obj` and the union of leading keys across
+    /// arms is the listed set. A document node qualifies as a candidate
+    /// when it is an object containing *any* of these keys; the per-arm
+    /// runtime then narrows further.
+    ObjAnyOfKeys(Arc<[Arc<str>]>),
+    /// Every arm tests the same scalar kind. Non-matching kinds can
+    /// be skipped entirely.
+    KindOnly(crate::parse::ast::KindType),
+    /// Every arm tests a numeric range. The union range is the smallest
+    /// interval covering all per-arm bounds.
+    NumericRange {
+        /// Lower bound across all arms (inclusive).
+        lo: f64,
+        /// Upper bound across all arms.
+        hi: f64,
+        /// `true` when the upper bound is inclusive (any arm uses `..=`).
+        inclusive: bool,
+    },
 }
 
 /// Slot identifier used by the match instruction stream. Slot 0 always

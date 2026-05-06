@@ -256,7 +256,13 @@ match_expr = { kw_match ~ expr ~ kw_with ~ "{" ~ match_arm ~ ("," ~ match_arm)* 
 // match against each, and collects truthy arm-body results into an
 // array. Falsy bodies and unmatched values are silently dropped — the
 // shape is "find all descendants whose pattern fires non-falsy".
-deep_match = { ".." ~ kw_match ~ "{" ~ match_arm ~ ("," ~ match_arm)* ~ ","? ~ "}" }
+//
+// The `!` suffix (`..match! { arms }`) selects the early-stop variant:
+// the runtime returns the first truthy arm-body result without walking
+// the rest of the tree. Useful for "find any descendant satisfying the
+// pattern" queries.
+deep_match_op = @{ "..match!" | "..match" }
+deep_match = { deep_match_op ~ "{" ~ match_arm ~ ("," ~ match_arm)* ~ ","? ~ "}" }
 
 // ── Patch block ───────────────────────────────────────────────────────────────
 pp_wild_filter = { "[" ~ "*" ~ kw_if ~ expr ~ "]" }

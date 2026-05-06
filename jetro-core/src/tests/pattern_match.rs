@@ -1068,6 +1068,39 @@ fn runtime_deep_match_with_range_pattern() {
 }
 
 #[test]
+fn runtime_deep_match_first_returns_first_truthy() {
+    // `..match! { arms }` aborts the descent at the first truthy
+    // arm-body and returns it directly (not wrapped in an array).
+    let src = br#"{
+        "events": [
+            {"tag": "view", "id": "a"},
+            {"tag": "click", "id": "b"},
+            {"tag": "click", "id": "c"}
+        ]
+    }"#;
+    let v = run(
+        src,
+        r#"$..match! {
+            {tag: "click", id: i} -> i,
+            _                     -> false
+        }"#,
+    );
+    assert_eq!(v, json!("b"));
+}
+
+#[test]
+fn runtime_deep_match_first_returns_null_when_nothing_matches() {
+    let v = run(
+        br#"{"a": 1, "b": "x"}"#,
+        r#"$..match! {
+            {role: "admin"} -> "found",
+            _               -> false
+        }"#,
+    );
+    assert_eq!(v, json!(null));
+}
+
+#[test]
 fn runtime_deep_match_no_matches_returns_empty() {
     let v = run(
         br#"{"a": 1, "b": 2}"#,

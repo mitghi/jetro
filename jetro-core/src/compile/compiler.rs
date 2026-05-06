@@ -630,16 +630,23 @@ impl Compiler {
                 ops.push(Opcode::InlineFilter(Arc::new(Self::compile_sub(pred, ctx))));
             }
             Step::Quantifier(k) => ops.push(Opcode::Quantifier(*k)),
-            Step::DeepMatch(arms) => {
-                // The deep-match step shares its compile path with the
-                // expression-level `match`, with the receiver stack value
-                // serving as both the descent root and the per-element
-                // scrutinee. The synthesised `MatchScrutinee::Current`
-                // tells the runtime to read the iteration item directly
-                // rather than re-evaluating a sub-program per descendant.
+            Step::DeepMatch { arms, early_stop } => {
+                // Both deep-match shapes share their compile path with
+                // expression-level `match`; the receiver stack value
+                // doubles as the descent root and the per-element
+                // scrutinee. `MatchScrutinee::Current` tells the runtime
+                // to read the iteration item from `@` rather than
+                // re-evaluating a sub-program per descendant. The
+                // `early_stop` flag selects between the collect-all and
+                // first-match runtime opcodes.
                 let scrutinee_marker = Expr::Current;
                 let cm = compile_match(&scrutinee_marker, arms, ctx);
-                ops.push(Opcode::DeepMatchAll(Arc::new(cm)));
+                let cm = Arc::new(cm);
+                if *early_stop {
+                    ops.push(Opcode::DeepMatchFirst(cm));
+                } else {
+                    ops.push(Opcode::DeepMatchAll(cm));
+                }
             }
         }
     }
@@ -1286,7 +1293,94 @@ fn compile_match(
         is_exhaustive: arms.iter().any(|a| {
             a.guard.is_none() && matches!(a.pat, Pat::Wild | Pat::Bind(_))
         }),
+        shape_summary: derive_shape_summary(arms),
     }
+}
+
+/// Inspect the typed (non-catch-all) arms of a `match` and return a
+/// structural summary the deep-match runtime can use to pre-filter
+/// candidates via a bitmap index. Returns `None` when arms are
+/// heterogeneous or the leading shape cannot be characterised by one
+/// of the recognised summaries.
+fn derive_shape_summary(
+    arms: &[crate::parse::ast::MatchArm],
+) -> Option<crate::vm::MatchShapeSummary> {
+    use crate::parse::ast::Pat;
+
+    // Strip a trailing catch-all (`_` / unbound bind) from consideration —
+    // it does not constrain the candidate set; the typed arms above it
+    // determine the summary.
+    let typed: &[crate::parse::ast::MatchArm] = match arms.last() {
+        Some(a) if matches!(a.pat, Pat::Wild | Pat::Bind(_)) => &arms[..arms.len() - 1],
+        _ => arms,
+    };
+    if typed.is_empty() {
+        return None;
+    }
+
+    // Object-of-keys summary — every typed arm is a `Pat::Obj`. Collect
+    // the union of leading keys.
+    if typed.iter().all(|a| matches!(a.pat, Pat::Obj { .. })) {
+        let mut keys: Vec<Arc<str>> = Vec::new();
+        for arm in typed {
+            if let Pat::Obj { fields, .. } = &arm.pat {
+                for (k, _) in fields {
+                    let arc: Arc<str> = Arc::from(k.as_str());
+                    if !keys.iter().any(|existing| existing.as_ref() == k.as_str()) {
+                        keys.push(arc);
+                    }
+                }
+            }
+        }
+        if !keys.is_empty() {
+            return Some(crate::vm::MatchShapeSummary::ObjAnyOfKeys(Arc::from(keys)));
+        }
+    }
+
+    // Kind-only summary — every typed arm is `Pat::Kind` of the same
+    // scalar kind.
+    if let Pat::Kind {
+        kind: first_kind, ..
+    } = &typed[0].pat
+    {
+        if typed.iter().all(|a| match &a.pat {
+            Pat::Kind { kind, .. } => kind == first_kind,
+            _ => false,
+        }) {
+            return Some(crate::vm::MatchShapeSummary::KindOnly(*first_kind));
+        }
+    }
+
+    // Numeric-range summary — every typed arm is a `Pat::Range`. Take
+    // the union (min lo, max hi).
+    if typed.iter().all(|a| matches!(a.pat, Pat::Range { .. })) {
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        let mut inclusive = false;
+        for arm in typed {
+            if let Pat::Range {
+                lo: l,
+                hi: h,
+                inclusive: inc,
+            } = &arm.pat
+            {
+                if *l < lo {
+                    lo = *l;
+                }
+                if *h > hi {
+                    hi = *h;
+                }
+                if *inc {
+                    inclusive = true;
+                }
+            }
+        }
+        if lo.is_finite() && hi.is_finite() && lo <= hi {
+            return Some(crate::vm::MatchShapeSummary::NumericRange { lo, hi, inclusive });
+        }
+    }
+
+    None
 }
 
 /// Pick the cheapest strategy for evaluating a `match` scrutinee at run

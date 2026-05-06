@@ -397,7 +397,14 @@ pub enum Step {
     Quantifier(QuantifierKind),
     /// `..match { arms }` — recursive descent that runs the arm list
     /// against every descendant and collects truthy arm-body results.
-    DeepMatch(Vec<MatchArm>),
+    /// `early_stop` is `true` for the `..match! { ... }` form, which
+    /// returns the first truthy result and aborts the walk.
+    DeepMatch {
+        /// Arm list applied against every descendant.
+        arms: Vec<MatchArm>,
+        /// `true` for the early-stop `..match!` form.
+        early_stop: bool,
+    },
 }
 
 

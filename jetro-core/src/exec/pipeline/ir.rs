@@ -921,7 +921,8 @@ pub(super) fn opcode_is_current_only(opcode: &Opcode) -> bool {
         | Opcode::SetComp(_)
         | Opcode::PatchEval(_)
         | Opcode::Match(_)
-        | Opcode::DeepMatchAll(_) => false,
+        | Opcode::DeepMatchAll(_)
+        | Opcode::DeepMatchFirst(_) => false,
         Opcode::DynIndex(prog)
         | Opcode::InlineFilter(prog)
         | Opcode::AndOp(prog)

@@ -228,7 +228,7 @@ fn validate_pattern_linearity(expr: &Expr) -> Result<(), ParseError> {
             Expr::Chain(base, steps) => {
                 walk(base)?;
                 for step in steps {
-                    if let Step::DeepMatch(arms) = step {
+                    if let Step::DeepMatch { arms, .. } = step {
                         for arm in arms {
                             walk_pat(&arm.pat)?;
                             if let Some(g) = arm.guard.as_ref() {
@@ -887,28 +887,36 @@ fn parse_postfix_step(pair: Pair<Rule>) -> Vec<Step> {
             vec![Step::Method(mapped, args)]
         }
         Rule::deep_match => {
-            // `$..match { arms }` — recursive descent variant of `match`.
+            // `$..match { arms }` (collect all) and `$..match! { arms }`
+            // (early-stop on first truthy match) share the parsing path.
+            // The `deep_match_op` token spelling distinguishes the two.
             let mut arms: Vec<MatchArm> = Vec::new();
+            let mut early_stop = false;
             for child in inner_pair.into_inner().filter(|p| !is_kw(p.as_rule())) {
-                if child.as_rule() != Rule::match_arm {
-                    continue;
-                }
-                let mut ai = child.into_inner().filter(|p| !is_kw(p.as_rule()));
-                let pat = parse_pat(ai.next().expect("match arm pattern"));
-                let rest: Vec<_> = ai.collect();
-                let (guard, body) = match rest.len() {
-                    1 => (None, parse_expr(rest.into_iter().next().unwrap())),
-                    2 => {
-                        let mut it = rest.into_iter();
-                        let g = parse_expr(it.next().unwrap());
-                        let b = parse_expr(it.next().unwrap());
-                        (Some(g), b)
+                match child.as_rule() {
+                    Rule::deep_match_op => {
+                        early_stop = child.as_str().ends_with('!');
                     }
-                    _ => panic!("deep_match arm: expected 1 or 2 trailing exprs (guard?, body)"),
-                };
-                arms.push(MatchArm { pat, guard, body });
+                    Rule::match_arm => {
+                        let mut ai = child.into_inner().filter(|p| !is_kw(p.as_rule()));
+                        let pat = parse_pat(ai.next().expect("match arm pattern"));
+                        let rest: Vec<_> = ai.collect();
+                        let (guard, body) = match rest.len() {
+                            1 => (None, parse_expr(rest.into_iter().next().unwrap())),
+                            2 => {
+                                let mut it = rest.into_iter();
+                                let g = parse_expr(it.next().unwrap());
+                                let b = parse_expr(it.next().unwrap());
+                                (Some(g), b)
+                            }
+                            _ => panic!("deep_match arm: expected 1 or 2 trailing exprs (guard?, body)"),
+                        };
+                        arms.push(MatchArm { pat, guard, body });
+                    }
+                    _ => {}
+                }
             }
-            vec![Step::DeepMatch(arms)]
+            vec![Step::DeepMatch { arms, early_stop }]
         }
         Rule::inline_filter => {
             let expr = parse_expr(inner_pair.into_inner().next().unwrap());

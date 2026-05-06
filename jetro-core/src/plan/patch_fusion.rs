@@ -494,7 +494,7 @@ impl EffectAnalyzer {
                 }
                 s
             }
-            Step::DeepMatch(arms) => {
+            Step::DeepMatch { arms, .. } => {
                 let mut s = EffectSummary::default();
                 for arm in arms {
                     if let Some(g) = arm.guard.as_ref() {
