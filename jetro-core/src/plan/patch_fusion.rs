@@ -573,13 +573,62 @@ fn _bind_target_witness(_b: &BindTarget) {}
 /// Public entry: rewrite `expr` so contiguous same-root chain-writes
 /// collapse into single multi-op [`Expr::Patch`] nodes. Pure: takes
 /// ownership and returns the new tree.
+///
+/// Phase C wraps the result in a final `flush_all` so any pending
+/// batches accumulated by the recursion bottom out as `let _N = patch …
+/// in body`. In the current pass Phase B's local lifters return their
+/// fused output directly so `pending` is typically empty here, but the
+/// final flush is the safety net Phase E will lean on.
 pub(crate) fn fuse_writes(expr: Expr) -> Expr {
     let mut ctx = FuseCtx::default();
-    fuse_recursive(expr, &mut ctx)
+    let body = fuse_recursive(expr, &mut ctx);
+    ctx.flush_all(body)
 }
 
-/// Mutable state threaded through the rewrite. Today it only holds
-/// alias information; Phase C will grow it with a flush stack.
+/// Phase C: recurse into a child that lives behind a non-fuseable
+/// scope boundary (lambda body, comprehension iter / body / cond,
+/// if/else branch, try-default). The outer pending map is taken before
+/// recursion so the child sees an empty `pending`; whatever batches
+/// the child produces flush *inside* the child's returned expression
+/// before we restore the outer state. Net effect: a write inside a
+/// branch can never be merged with a write outside that branch.
+fn fuse_subtree(child: Expr, ctx: &mut FuseCtx) -> Expr {
+    let saved = ctx.take_pending();
+    let inner = fuse_recursive(child, ctx);
+    let inner = ctx.flush_all(inner);
+    ctx.restore_pending(saved);
+    inner
+}
+
+/// Maximum number of alias-chain hops [`FuseCtx::canonical_root`] will
+/// chase before bailing to [`RootRef::Composite`]. Phase C's transitive
+/// resolution can in principle iterate forever if the alias table
+/// contains a cycle (`a -> b -> a`), which a well-formed `let` program
+/// cannot produce — but a defensive cap means the optimizer can't be
+/// tipped into a hang by malformed analyzer state.
+const MAX_ALIAS_CHAIN_DEPTH: usize = 16;
+
+/// One open batch of writes against a single canonical root, awaiting
+/// flush. Phase C tracks these per-root in [`FuseCtx::pending`] so a
+/// sequence of writes can collect into a single emitted `Patch` even
+/// when the surrounding shape isn't directly handled by the Phase B
+/// local lifters.
+#[derive(Debug, Clone)]
+struct PendingBatch {
+    /// The root expression to attach to the emitted [`Expr::Patch`].
+    /// We preserve the *original* root expression (not a canonicalised
+    /// `RootRef`) so the lowered Patch keeps user-visible semantics.
+    root_expr: Expr,
+    /// The synthesized binding name `__patch_fuse_N` that any reference
+    /// to the post-batch document will resolve to.
+    binding: String,
+    /// Ops collected against this batch in source order.
+    ops: Vec<PatchOp>,
+}
+
+/// Mutable state threaded through the rewrite. Phase C extends Phase B's
+/// alias table with a `pending` tracker (open batches per root) and a
+/// depth-capped multi-level alias resolver.
 #[derive(Default)]
 struct FuseCtx {
     /// Mirrors [`EffectAnalyzer::aliases`] for the duration of the
@@ -589,8 +638,14 @@ struct FuseCtx {
     scope_stack: Vec<u32>,
     /// Scope id allocator.
     next_scope: u32,
-    /// Counter for synthetic `let` names introduced by P2 (object lift).
+    /// Counter for synthetic `let` names introduced by P2 (object lift)
+    /// and Phase C's pending-batch flush.
     next_synth: u32,
+    /// Phase C: open batches per canonical root, keyed in source order.
+    /// `IndexMap` (not `HashMap`) so flush order matches insertion order
+    /// — a deterministic emission shape is required by the soundness
+    /// invariants on read-after-write coherence.
+    pending: indexmap::IndexMap<RootRef, PendingBatch>,
 }
 
 impl FuseCtx {
@@ -614,15 +669,52 @@ impl FuseCtx {
             .find(|(n, _)| n.as_ref() == name)
             .map(|(_, r)| r.clone())
     }
+
+    /// Canonicalise an expression to a [`RootRef`].
+    ///
+    /// Phase C upgrades this to chase alias chains transitively: if the
+    /// resolve step returns `Local(name)` and `name` is itself bound,
+    /// we keep walking. The walk is bounded by [`MAX_ALIAS_CHAIN_DEPTH`]
+    /// hops and breaks on cycles (where the same `Local` name is
+    /// revisited), bailing to [`RootRef::Composite`] in either failure
+    /// mode so the caller never observes a half-resolved alias.
     fn canonical_root(&self, expr: &Expr) -> RootRef {
         match expr {
             Expr::Root => RootRef::Root,
             Expr::Current => RootRef::Current(self.current_scope()),
-            Expr::Ident(name) => self
-                .resolve(name)
-                .unwrap_or_else(|| RootRef::Local(Arc::from(name.as_str()))),
+            Expr::Ident(name) => self.canonical_local_chain(name.as_str()),
             other => RootRef::Composite(Arc::new(other.clone())),
         }
+    }
+
+    /// Resolve a name through the alias table, chasing transitive
+    /// `Local -> Local` hops. Returns the deepest non-`Local` root we
+    /// can prove, or `Local(seed)` if the name itself isn't in the
+    /// table. On cycle / depth-cap violation we return
+    /// [`RootRef::Composite`] of the original [`Expr::Ident`] so no
+    /// fusion can falsely claim cross-root identity.
+    fn canonical_local_chain(&self, seed: &str) -> RootRef {
+        let mut current_name: Arc<str> = Arc::from(seed);
+        let mut visited: Vec<Arc<str>> = Vec::new();
+        for _ in 0..MAX_ALIAS_CHAIN_DEPTH {
+            // Cycle guard: if we've already seen this name, fall back.
+            if visited.iter().any(|v| v == &current_name) {
+                return RootRef::Composite(Arc::new(Expr::Ident(seed.to_string())));
+            }
+            visited.push(current_name.clone());
+            match self.resolve(&current_name) {
+                None => return RootRef::Local(current_name),
+                Some(RootRef::Local(next)) => {
+                    // Keep chasing — the next hop might bottom out at
+                    // Root / Current / Composite.
+                    current_name = next;
+                    continue;
+                }
+                Some(other) => return other,
+            }
+        }
+        // Depth cap: defensive bail.
+        RootRef::Composite(Arc::new(Expr::Ident(seed.to_string())))
     }
 
     /// Build a [`EffectAnalyzer`] seeded with our current alias / scope
@@ -634,6 +726,80 @@ impl FuseCtx {
         // Make sure `next_scope` doesn't collide with ours.
         a.next_scope = self.next_scope;
         a
+    }
+
+    /// Phase C: append `ops` to the pending batch keyed by `root`.
+    /// Creates a fresh [`PendingBatch`] (with a `__patch_fuse_N` binding
+    /// name) when this is the first batch against the root. Returns the
+    /// binding name; callers use it to construct an [`Expr::Ident`]
+    /// placeholder where the post-batch value would have appeared.
+    fn add_to_batch(&mut self, root: RootRef, root_expr: Expr, ops: Vec<PatchOp>) -> String {
+        if let Some(batch) = self.pending.get_mut(&root) {
+            batch.ops.extend(ops);
+            batch.binding.clone()
+        } else {
+            let binding = self.fresh_synth_name();
+            let batch = PendingBatch {
+                root_expr,
+                binding: binding.clone(),
+                ops,
+            };
+            self.pending.insert(root, batch);
+            binding
+        }
+    }
+
+    /// Phase C: flush every pending batch, wrapping `body` in a
+    /// `let __patch_fuse_N = Patch{...} in ...` chain. Insertion order
+    /// of `pending` determines the wrapping order; the outermost let
+    /// is the first batch added, matching source-order semantics.
+    fn flush_all(&mut self, body: Expr) -> Expr {
+        let mut wrapped = body;
+        // Drain in reverse so the first-inserted batch is the outermost
+        // let — preserves source order for nested reads.
+        let drained: Vec<(RootRef, PendingBatch)> = self.pending.drain(..).collect();
+        for (_root, batch) in drained.into_iter().rev() {
+            wrapped = Expr::Let {
+                name: batch.binding,
+                init: Box::new(Expr::Patch {
+                    root: Box::new(batch.root_expr),
+                    ops: batch.ops,
+                }),
+                body: Box::new(wrapped),
+            };
+        }
+        wrapped
+    }
+
+    /// Phase C: flush only the pending batch keyed by `root`. Used when
+    /// a read of `root` is encountered; we must materialise the writes
+    /// before the read evaluates.
+    fn flush_root(&mut self, root: &RootRef, body: Expr) -> Expr {
+        if let Some(batch) = self.pending.shift_remove(root) {
+            Expr::Let {
+                name: batch.binding,
+                init: Box::new(Expr::Patch {
+                    root: Box::new(batch.root_expr),
+                    ops: batch.ops,
+                }),
+                body: Box::new(body),
+            }
+        } else {
+            body
+        }
+    }
+
+    /// Phase C: snapshot/restore for scope boundaries. Returns the
+    /// pending map at the call site and replaces it with an empty one
+    /// so children can collect their own batches without disturbing
+    /// outer state.
+    fn take_pending(&mut self) -> indexmap::IndexMap<RootRef, PendingBatch> {
+        std::mem::take(&mut self.pending)
+    }
+
+    /// Phase C: restore a previously taken pending map.
+    fn restore_pending(&mut self, prev: indexmap::IndexMap<RootRef, PendingBatch>) {
+        self.pending = prev;
     }
 }
 
@@ -707,58 +873,75 @@ fn fuse_recursive(expr: Expr, ctx: &mut FuseCtx) -> Expr {
         Expr::Pipeline { base, steps } => fuse_pipeline(*base, steps, ctx),
 
         Expr::ListComp { expr, vars, iter, cond } => {
-            let iter = Box::new(fuse_recursive(*iter, ctx));
+            // Phase C: comprehension source runs in the outer scope but
+            // each iter step is a new boundary; flush both before / after
+            // entering the inner scope so cross-boundary leaks are
+            // impossible. (Inner-scope writes today are already isolated
+            // by the per-iter `Current` scope id; the seal here pins the
+            // invariant in case future Phase E fusion adds cross-iter
+            // batching.)
+            let iter = Box::new(fuse_subtree(*iter, ctx));
             with_lambda_scope(ctx, &vars, |ctx| Expr::ListComp {
-                expr: Box::new(fuse_recursive(*expr, ctx)),
+                expr: Box::new(fuse_subtree(*expr, ctx)),
                 vars: vars.clone(),
                 iter,
-                cond: cond.map(|c| Box::new(fuse_recursive(*c, ctx))),
+                cond: cond.map(|c| Box::new(fuse_subtree(*c, ctx))),
             })
         }
         Expr::SetComp { expr, vars, iter, cond } => {
-            let iter = Box::new(fuse_recursive(*iter, ctx));
+            let iter = Box::new(fuse_subtree(*iter, ctx));
             with_lambda_scope(ctx, &vars, |ctx| Expr::SetComp {
-                expr: Box::new(fuse_recursive(*expr, ctx)),
+                expr: Box::new(fuse_subtree(*expr, ctx)),
                 vars: vars.clone(),
                 iter,
-                cond: cond.map(|c| Box::new(fuse_recursive(*c, ctx))),
+                cond: cond.map(|c| Box::new(fuse_subtree(*c, ctx))),
             })
         }
         Expr::GenComp { expr, vars, iter, cond } => {
-            let iter = Box::new(fuse_recursive(*iter, ctx));
+            let iter = Box::new(fuse_subtree(*iter, ctx));
             with_lambda_scope(ctx, &vars, |ctx| Expr::GenComp {
-                expr: Box::new(fuse_recursive(*expr, ctx)),
+                expr: Box::new(fuse_subtree(*expr, ctx)),
                 vars: vars.clone(),
                 iter,
-                cond: cond.map(|c| Box::new(fuse_recursive(*c, ctx))),
+                cond: cond.map(|c| Box::new(fuse_subtree(*c, ctx))),
             })
         }
         Expr::DictComp { key, val, vars, iter, cond } => {
-            let iter = Box::new(fuse_recursive(*iter, ctx));
+            let iter = Box::new(fuse_subtree(*iter, ctx));
             with_lambda_scope(ctx, &vars, |ctx| Expr::DictComp {
-                key: Box::new(fuse_recursive(*key, ctx)),
-                val: Box::new(fuse_recursive(*val, ctx)),
+                key: Box::new(fuse_subtree(*key, ctx)),
+                val: Box::new(fuse_subtree(*val, ctx)),
                 vars: vars.clone(),
                 iter,
-                cond: cond.map(|c| Box::new(fuse_recursive(*c, ctx))),
+                cond: cond.map(|c| Box::new(fuse_subtree(*c, ctx))),
             })
         }
 
         Expr::Lambda { params, body } => with_lambda_scope(ctx, &params, |ctx| Expr::Lambda {
             params: params.clone(),
-            body: Box::new(fuse_recursive(*body, ctx)),
+            // Phase C: lambda body is a non-fuseable boundary — flush
+            // both outer pending and the body's own pending so writes
+            // never leak in either direction across the call edge.
+            body: Box::new(fuse_subtree(*body, ctx)),
         }),
 
         Expr::Let { name, init, body } => fuse_let(name, *init, *body, ctx),
 
         Expr::IfElse { cond, then_, else_ } => Expr::IfElse {
-            cond: Box::new(fuse_recursive(*cond, ctx)),
-            then_: Box::new(fuse_recursive(*then_, ctx)),
-            else_: Box::new(fuse_recursive(*else_, ctx)),
+            // Phase C: each branch is its own scope. A write that only
+            // appears in `then_` must not be batched with one in `else_`,
+            // since at most one branch runs. `fuse_subtree` flushes
+            // pending at each boundary so any optimisation lifted into
+            // a branch stays inside it.
+            cond: Box::new(fuse_subtree(*cond, ctx)),
+            then_: Box::new(fuse_subtree(*then_, ctx)),
+            else_: Box::new(fuse_subtree(*else_, ctx)),
         },
         Expr::Try { body, default } => Expr::Try {
-            body: Box::new(fuse_recursive(*body, ctx)),
-            default: Box::new(fuse_recursive(*default, ctx)),
+            // Phase C: a try-default boundary is non-fuseable; the body
+            // may abort and the default observes the pre-failure state.
+            body: Box::new(fuse_subtree(*body, ctx)),
+            default: Box::new(fuse_subtree(*default, ctx)),
         },
         Expr::GlobalCall { name, args } => Expr::GlobalCall {
             name,
@@ -1584,5 +1767,120 @@ mod tests {
         // Phase A is a may-summary: both branches' writes are
         // collected unconditionally.
         assert_eq!(s.writes.len(), 2);
+    }
+
+    // -------- Phase C: cycle / depth safety on alias chains -----------
+
+    #[test]
+    fn alias_chain_cycle_bails_to_composite() {
+        // Synthesise an alias table with a self-cycle a -> b -> a, then
+        // canonicalise `a`. Without the cycle guard we'd loop forever;
+        // with it we land on Composite.
+        let mut ctx = FuseCtx::default();
+        ctx.aliases
+            .push((Arc::from("a"), RootRef::Local(Arc::from("b"))));
+        ctx.aliases
+            .push((Arc::from("b"), RootRef::Local(Arc::from("a"))));
+        let r = ctx.canonical_root(&Expr::Ident("a".to_string()));
+        assert!(
+            matches!(r, RootRef::Composite(_)),
+            "cycle should fall back to Composite, got {:?}",
+            r
+        );
+    }
+
+    #[test]
+    fn alias_chain_depth_cap_bails_to_composite() {
+        // Build a chain longer than `MAX_ALIAS_CHAIN_DEPTH`. Each name
+        // resolves to the next; the last one resolves to nothing
+        // (`Local` terminal). The walker should hit the cap and bail.
+        let mut ctx = FuseCtx::default();
+        let len = MAX_ALIAS_CHAIN_DEPTH + 2;
+        for i in 0..len {
+            let name: Arc<str> = Arc::from(format!("n{}", i));
+            let next: Arc<str> = Arc::from(format!("n{}", i + 1));
+            ctx.aliases.push((name, RootRef::Local(next)));
+        }
+        let r = ctx.canonical_root(&Expr::Ident("n0".to_string()));
+        assert!(
+            matches!(r, RootRef::Composite(_)),
+            "over-deep chain should bail to Composite, got {:?}",
+            r
+        );
+    }
+
+    #[test]
+    fn alias_chain_within_cap_resolves_to_root() {
+        // A chain *exactly* at the cap minus one (so the walker has
+        // budget to reach the bottom) bottoms out at Root.
+        let mut ctx = FuseCtx::default();
+        let len = MAX_ALIAS_CHAIN_DEPTH - 1;
+        for i in 0..len {
+            let name: Arc<str> = Arc::from(format!("n{}", i));
+            let next: Arc<str> = Arc::from(format!("n{}", i + 1));
+            ctx.aliases.push((name, RootRef::Local(next)));
+        }
+        // Final hop bottoms out at Root.
+        ctx.aliases.push((
+            Arc::from(format!("n{}", len)),
+            RootRef::Root,
+        ));
+        let r = ctx.canonical_root(&Expr::Ident("n0".to_string()));
+        assert_eq!(r, RootRef::Root);
+    }
+
+    #[test]
+    fn pending_batch_add_and_flush_emits_let_wrapper() {
+        // Phase C: adding ops to pending and flushing wraps the body
+        // in `let __patch_fuse_0 = patch <root> { … } in body`.
+        let mut ctx = FuseCtx::default();
+        let op = PatchOp {
+            path: vec![PathStep::Field("k".into())],
+            val: Expr::Int(1),
+            cond: None,
+        };
+        let _binding = ctx.add_to_batch(RootRef::Root, Expr::Root, vec![op]);
+        let body = Expr::Bool(true);
+        let wrapped = ctx.flush_all(body);
+        match wrapped {
+            Expr::Let { name, init, body } => {
+                assert!(name.starts_with("__patch_fuse_"));
+                assert!(matches!(*init, Expr::Patch { .. }));
+                assert!(matches!(*body, Expr::Bool(true)));
+            }
+            other => panic!("expected Let wrapper, got {:?}", other),
+        }
+        // Pending should be drained.
+        assert!(ctx.pending.is_empty());
+    }
+
+    #[test]
+    fn flush_root_only_drains_named_root() {
+        // Two pending batches against distinct roots; flush_root drains
+        // only the targeted one and leaves the other intact.
+        let mut ctx = FuseCtx::default();
+        let op_a = PatchOp {
+            path: vec![PathStep::Field("a".into())],
+            val: Expr::Int(1),
+            cond: None,
+        };
+        let op_b = PatchOp {
+            path: vec![PathStep::Field("b".into())],
+            val: Expr::Int(2),
+            cond: None,
+        };
+        ctx.add_to_batch(RootRef::Root, Expr::Root, vec![op_a]);
+        ctx.add_to_batch(
+            RootRef::Local(Arc::from("x")),
+            Expr::Ident("x".into()),
+            vec![op_b],
+        );
+        let body = ctx.flush_root(&RootRef::Root, Expr::Bool(true));
+        // Wrapper for Root should be emitted; Local("x") still pending.
+        assert!(matches!(body, Expr::Let { .. }));
+        assert_eq!(ctx.pending.len(), 1);
+        assert!(ctx
+            .pending
+            .contains_key(&RootRef::Local(Arc::from("x"))));
     }
 }
