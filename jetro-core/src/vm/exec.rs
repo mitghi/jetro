@@ -2169,8 +2169,22 @@ impl VM {
 
     /// Apply a compiled patch to its root document: evaluate the root, then apply
     /// each operation in order, respecting optional guard conditions.
+    ///
+    /// Phase D: when `cp.ops.len() >= 2` and the op set is trie-eligible
+    /// (only `Field`/`Index`/`DynIndex` path steps and no `cond` guards),
+    /// compile a `CompiledPatchTrie` once (cached on `cp.trie`) and apply
+    /// every op in a single tree-walk that uses `Arc::make_mut` for CoW.
+    /// Sibling writes share the parent's `make_mut`; subtrees not on any
+    /// write path stay `Arc`-shared and are never visited.
     fn exec_patch_compiled(&mut self, cp: &CompiledPatch, env: &Env) -> Result<Val, EvalError> {
         let mut doc = self.exec(&cp.root_prog, env)?;
+        if cp.ops.len() >= 2 {
+            let trie_slot = cp.trie.get_or_init(|| CompiledPatchTrie::from_ops(&cp.ops));
+            if let Some(trie) = trie_slot {
+                self.apply_trie(&mut doc, &trie.root, env)?;
+                return Ok(doc);
+            }
+        }
         for op in &cp.ops {
             if let Some(cond) = &op.cond {
                 let cenv = env.with_current(doc.clone());
@@ -2184,6 +2198,135 @@ impl VM {
             }
         }
         Ok(doc)
+    }
+
+    /// Apply a `CompiledPatchTrie` node against `val` in place. Uses
+    /// `Arc::make_mut` on `Val::Arr` and `Val::Obj` to copy-on-write only
+    /// the spine of the doc that actually changes; untouched subtrees keep
+    /// their original `Arc` (so a later read of those subtrees still sees
+    /// the same pointer identity).
+    fn apply_trie(
+        &mut self,
+        val: &mut Val,
+        node: &TrieNode,
+        env: &Env,
+    ) -> Result<(), EvalError> {
+        match node {
+            TrieNode::Replace(prog) => {
+                // Bind the existing value to `@` so `Replace` programs that
+                // reference the old value (e.g. `.modify(@ + 1)`) still see it.
+                let old = std::mem::replace(val, Val::Null);
+                let cenv = env.with_current(old);
+                *val = self.exec(prog, &cenv)?;
+                Ok(())
+            }
+            TrieNode::Delete => {
+                // At the root of a patch, deletion degrades to `Null` to
+                // match the existing per-op walker's behaviour. When `Delete`
+                // appears as a `Branch` child, the parent arm intercepts it
+                // and never recurses here.
+                *val = Val::Null;
+                Ok(())
+            }
+            TrieNode::Branch { fields, indices } => {
+                // Normalise columnar / small variants (ObjSmall, IntVec,
+                // FloatVec, StrVec, ObjVec, …) to the canonical
+                // `Val::Arr(Arc<Vec<Val>>)` / `Val::Obj(Arc<IndexMap<...>>)`
+                // forms so `Arc::make_mut` has something to write into.
+                // The per-op walker does the same conversion implicitly via
+                // `into_vec()` / `into_map()`.
+                if !fields.is_empty() && !matches!(val, Val::Obj(_)) {
+                    if let Some(map) = std::mem::replace(val, Val::Null).into_map() {
+                        *val = Val::obj(map);
+                    } else {
+                        *val = Val::obj(IndexMap::new());
+                    }
+                }
+                if !indices.is_empty() && !matches!(val, Val::Arr(_)) {
+                    if let Some(vec) = std::mem::replace(val, Val::Null).into_vec() {
+                        *val = Val::arr(vec);
+                    } else {
+                        *val = Val::arr(Vec::new());
+                    }
+                }
+                match val {
+                Val::Obj(arc) => {
+                    let map = Arc::make_mut(arc);
+                    for (key, child_node) in fields {
+                        if matches!(child_node, TrieNode::Delete) {
+                            map.shift_remove(key.as_ref());
+                            continue;
+                        }
+                        if let Some(child) = map.get_mut(key.as_ref()) {
+                            self.apply_trie(child, child_node, env)?;
+                        } else {
+                            // Path doesn't exist yet — synthesise from Null.
+                            let mut fresh = Val::Null;
+                            self.apply_trie(&mut fresh, child_node, env)?;
+                            map.insert(Arc::clone(key), fresh);
+                        }
+                    }
+                    Ok(())
+                }
+                Val::Arr(arc) => {
+                    let v = Arc::make_mut(arc);
+                    // Apply indices in source order. Deletions shift the
+                    // array and may invalidate later static indices, just
+                    // like the per-op walker. Source-order ops over the
+                    // same array should be rare enough that this matches
+                    // existing semantics for the supported cases.
+                    for (idx_key, child_node) in indices {
+                        let idx = match idx_key {
+                            IdxKey::Static(i) => *i,
+                            IdxKey::Dynamic(prog) => {
+                                let r = self.exec(prog, env)?;
+                                r.as_i64().ok_or_else(|| {
+                                    EvalError(format!(
+                                        "patch dyn-index: expected integer, got {}",
+                                        r.type_name()
+                                    ))
+                                })?
+                            }
+                        };
+                        let len = v.len() as i64;
+                        let resolved = vm_resolve_idx(idx, len);
+                        if matches!(child_node, TrieNode::Delete) {
+                            if resolved < v.len() {
+                                v.remove(resolved);
+                            }
+                            continue;
+                        }
+                        if resolved < v.len() {
+                            self.apply_trie(&mut v[resolved], child_node, env)?;
+                        } else {
+                            // Out-of-bounds index on a `Replace` is a no-op
+                            // in the per-op walker; preserve that here.
+                        }
+                    }
+                    Ok(())
+                }
+                // Non-container at this position: fall back to building from
+                // Null when the trie wants to descend further. This mirrors
+                // the per-op walker which materialises empty maps/vecs as
+                // needed (`v.into_map().unwrap_or_default()`).
+                _ => {
+                    if fields.is_empty() && indices.is_empty() {
+                        return Ok(());
+                    }
+                    if !fields.is_empty() {
+                        let mut fresh = Val::obj(IndexMap::new());
+                        self.apply_trie(&mut fresh, node, env)?;
+                        *val = fresh;
+                    } else {
+                        let mut fresh = Val::arr(Vec::new());
+                        self.apply_trie(&mut fresh, node, env)?;
+                        *val = fresh;
+                    }
+                    Ok(())
+                }
+                }
+            }
+        }
     }
 
     /// Recursive patch walker: descend to `path[i]` in `v` and apply `val`.

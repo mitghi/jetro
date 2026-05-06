@@ -904,7 +904,11 @@ impl Compiler {
                 .map(|c| Arc::new(Self::compile_sub(c, ctx)));
             ops.push(CompiledPatchOp { path, val, cond });
         }
-        CompiledPatch { root_prog, ops }
+        CompiledPatch {
+            root_prog,
+            ops,
+            trie: std::sync::OnceLock::new(),
+        }
     }
 
     /// Try to lower an `Expr` rooted at `@` into a sequence of `KvStep`s.

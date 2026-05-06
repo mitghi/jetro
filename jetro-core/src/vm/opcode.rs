@@ -11,7 +11,10 @@ use std::{
     hash::{Hash, Hasher},
     sync::atomic::AtomicU64,
     sync::Arc,
+    sync::OnceLock,
 };
+
+use indexmap::IndexMap;
 
 use crate::parse::ast::*;
 pub use crate::builtins::BuiltinMethod;
@@ -355,12 +358,35 @@ pub struct Program {
 
 /// A compiled `patch` expression: a root document program plus a list of
 /// individual field-mutation operations applied in order.
-#[derive(Debug, Clone)]
+///
+/// Phase D adds a lazily-built `trie` cache. When the patch contains
+/// multiple ops over disjoint or sibling fields, the executor compiles the
+/// op list into a `CompiledPatchTrie` once and reuses it on subsequent
+/// invocations to amortise the trie-build cost across cache hits.
+#[derive(Debug)]
 pub struct CompiledPatch {
     /// Program that yields the base document to patch.
     pub root_prog: Arc<Program>,
     /// Ordered list of compiled field operations applied to the document.
     pub ops: Vec<CompiledPatchOp>,
+    /// Lazily-built trie used when `ops.len() >= 2` and every op uses
+    /// only `Field`/`Index`/`DynIndex` path steps with no `cond` guard.
+    /// `None` after build means the op set is not trie-eligible and the
+    /// per-op fallback should always be used.
+    pub trie: OnceLock<Option<CompiledPatchTrie>>,
+}
+
+impl Clone for CompiledPatch {
+    fn clone(&self) -> Self {
+        // The lazy trie cache is not propagated across clones; each clone
+        // rebuilds on first multi-op execution. This keeps `Clone` cheap
+        // and avoids duplicating partially-initialised state.
+        Self {
+            root_prog: Arc::clone(&self.root_prog),
+            ops: self.ops.clone(),
+            trie: OnceLock::new(),
+        }
+    }
 }
 
 /// A single field-mutation within a `CompiledPatch`: a path, a replacement/delete
@@ -399,6 +425,160 @@ pub enum CompiledPathStep {
     WildcardFilter(Arc<Program>),
     /// Recursively descend and apply the operation wherever the named field exists.
     Descendant(Arc<str>),
+}
+
+
+/// Phase D: a path-trie that batches multi-op patches into a single tree-walk.
+/// Sibling writes share their parent's `Arc::make_mut`; subtrees not on any
+/// write path stay `Arc`-shared and are never visited.
+#[derive(Debug, Clone)]
+pub struct CompiledPatchTrie {
+    /// Root of the trie. Always a `Branch` for non-empty patches; a single
+    /// op with an empty path produces `Replace`/`Delete` directly at root.
+    pub root: TrieNode,
+}
+
+/// One node in a `CompiledPatchTrie`.
+#[derive(Debug, Clone)]
+pub enum TrieNode {
+    /// Replace this subtree with the result of executing `prog`. The
+    /// program is evaluated with `@` bound to the current value at this
+    /// position, mirroring the existing `CompiledPatchVal::Replace` semantics.
+    Replace(Arc<Program>),
+    /// Remove this node from its parent (object field or array element).
+    /// Treated as a structural marker; deletion happens in the parent's
+    /// `Branch` arm rather than by recursing into this node.
+    Delete,
+    /// Recurse into named (object) and indexed (array) children. Children
+    /// not in either map remain `Arc`-shared with no traversal.
+    Branch {
+        /// Per-field children for object containers, ordered by first-seen op.
+        fields: IndexMap<Arc<str>, TrieNode>,
+        /// Per-index children for array containers; static indices coalesce
+        /// when equal, dynamic indices coalesce by `Arc::ptr_eq` on the program.
+        indices: Vec<(IdxKey, TrieNode)>,
+    },
+}
+
+/// Key into the `indices` slot of a `TrieNode::Branch`.
+#[derive(Debug, Clone)]
+pub enum IdxKey {
+    /// Static index (Python-style negative indexing).
+    Static(i64),
+    /// Dynamic index — execute the program at apply time to get an `i64`.
+    /// Two `Dynamic` keys coalesce only when the program `Arc`s are pointer-equal.
+    Dynamic(Arc<Program>),
+}
+
+impl CompiledPatchTrie {
+    /// Build a trie from `ops` in source order. Returns `None` when any op
+    /// is not trie-eligible: contains a `cond`, or uses `Wildcard` /
+    /// `WildcardFilter` / `Descendant` path steps. Such patches fall back
+    /// to the per-op walker which handles those cases natively.
+    ///
+    /// Source-order semantics: later ops shadow earlier ops at the same
+    /// leaf, but ops with deeper paths convert a leaf into a `Branch`. A
+    /// later op replacing a prior `Branch` discards the prior children.
+    pub fn from_ops(ops: &[CompiledPatchOp]) -> Option<Self> {
+        for op in ops {
+            if op.cond.is_some() {
+                return None;
+            }
+            for step in &op.path {
+                match step {
+                    CompiledPathStep::Field(_)
+                    | CompiledPathStep::Index(_)
+                    | CompiledPathStep::DynIndex(_) => {}
+                    CompiledPathStep::Wildcard
+                    | CompiledPathStep::WildcardFilter(_)
+                    | CompiledPathStep::Descendant(_) => return None,
+                }
+            }
+        }
+        let mut root = TrieNode::Branch {
+            fields: IndexMap::new(),
+            indices: Vec::new(),
+        };
+        for op in ops {
+            let leaf = match &op.val {
+                CompiledPatchVal::Replace(prog) => TrieNode::Replace(Arc::clone(prog)),
+                CompiledPatchVal::Delete => TrieNode::Delete,
+            };
+            insert_leaf(&mut root, &op.path, leaf);
+        }
+        Some(Self { root })
+    }
+}
+
+/// Insert `leaf` at the position addressed by `path` inside `node`,
+/// converting non-`Branch` interior positions into fresh `Branch` nodes
+/// as needed. When two ops collide at the same position, the later one
+/// fully replaces the earlier (last-write-wins).
+fn insert_leaf(node: &mut TrieNode, path: &[CompiledPathStep], leaf: TrieNode) {
+    if path.is_empty() {
+        *node = leaf;
+        return;
+    }
+    // Force `node` to be a `Branch` so we can descend.
+    if !matches!(node, TrieNode::Branch { .. }) {
+        *node = TrieNode::Branch {
+            fields: IndexMap::new(),
+            indices: Vec::new(),
+        };
+    }
+    let TrieNode::Branch { fields, indices } = node else {
+        unreachable!()
+    };
+    match &path[0] {
+        CompiledPathStep::Field(name) => {
+            if let Some(child) = fields.get_mut(name) {
+                insert_leaf(child, &path[1..], leaf);
+            } else {
+                let mut fresh = TrieNode::Branch {
+                    fields: IndexMap::new(),
+                    indices: Vec::new(),
+                };
+                insert_leaf(&mut fresh, &path[1..], leaf);
+                fields.insert(Arc::clone(name), fresh);
+            }
+        }
+        CompiledPathStep::Index(i) => {
+            // Coalesce by exact i64 match.
+            if let Some((_, child)) = indices
+                .iter_mut()
+                .find(|(k, _)| matches!(k, IdxKey::Static(s) if *s == *i))
+            {
+                insert_leaf(child, &path[1..], leaf);
+            } else {
+                let mut fresh = TrieNode::Branch {
+                    fields: IndexMap::new(),
+                    indices: Vec::new(),
+                };
+                insert_leaf(&mut fresh, &path[1..], leaf);
+                indices.push((IdxKey::Static(*i), fresh));
+            }
+        }
+        CompiledPathStep::DynIndex(prog) => {
+            // Coalesce only on pointer equality of the program Arc.
+            if let Some((_, child)) = indices.iter_mut().find(|(k, _)| match k {
+                IdxKey::Dynamic(p) => Arc::ptr_eq(p, prog),
+                _ => false,
+            }) {
+                insert_leaf(child, &path[1..], leaf);
+            } else {
+                let mut fresh = TrieNode::Branch {
+                    fields: IndexMap::new(),
+                    indices: Vec::new(),
+                };
+                insert_leaf(&mut fresh, &path[1..], leaf);
+                indices.push((IdxKey::Dynamic(Arc::clone(prog)), fresh));
+            }
+        }
+        // `from_ops` filters these out before we reach here.
+        CompiledPathStep::Wildcard
+        | CompiledPathStep::WildcardFilter(_)
+        | CompiledPathStep::Descendant(_) => unreachable!(),
+    }
 }
 
 impl Program {
