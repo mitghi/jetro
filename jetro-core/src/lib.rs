@@ -32,8 +32,6 @@ pub(crate) mod util;
 pub(crate) mod vm;
 
 #[cfg(test)]
-mod examples;
-#[cfg(test)]
 mod tests;
 
 use serde_json::Value;
