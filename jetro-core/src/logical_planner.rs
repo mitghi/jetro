@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use crate::ast::{Arg, Expr, Step};
+use crate::parse::ast::{Arg, Expr, Step};
 use crate::builtins::BuiltinMethod;
 use crate::logical_plan::LogicalPlan;
 use crate::pipeline::{SortSpec, Source};

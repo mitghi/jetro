@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use crate::ast::{Arg, ArrayElem, Expr, FStringPart, ObjField, PatchOp, PathStep, PipeStep, Step};
+use crate::parse::ast::{Arg, ArrayElem, Expr, FStringPart, ObjField, PatchOp, PathStep, PipeStep, Step};
 
 use super::{BodyKernel, ReducerOp, Sink, Stage};
 
@@ -226,7 +226,7 @@ fn and_expr(lhs: Expr, rhs: Expr) -> Expr {
     match (lhs, rhs) {
         (Expr::Bool(true), r) => r,
         (l, Expr::Bool(true)) => l,
-        (l, r) => Expr::BinOp(Box::new(l), crate::ast::BinOp::And, Box::new(r)),
+        (l, r) => Expr::BinOp(Box::new(l), crate::parse::ast::BinOp::And, Box::new(r)),
     }
 }
 
@@ -520,8 +520,8 @@ fn simplify_args(args: Vec<Arg>) -> Vec<Arg> {
 }
 
 // Short-circuits `&&` / `||` when either operand is a boolean literal.
-fn simplify_binop(lhs: Expr, op: crate::ast::BinOp, rhs: Expr) -> Expr {
-    use crate::ast::BinOp;
+fn simplify_binop(lhs: Expr, op: crate::parse::ast::BinOp, rhs: Expr) -> Expr {
+    use crate::parse::ast::BinOp;
     match (lhs, op, rhs) {
         (Expr::Bool(true), BinOp::And, rhs) | (rhs, BinOp::And, Expr::Bool(true)) => rhs,
         (Expr::Bool(false), BinOp::And, _) | (_, BinOp::And, Expr::Bool(false)) => {

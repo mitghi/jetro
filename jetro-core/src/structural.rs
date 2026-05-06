@@ -13,7 +13,7 @@ use jetro_experimental::{StructuralIndex, TokenId, TokenKind};
 #[cfg(not(feature = "simd-json"))]
 use serde::Deserialize;
 
-use crate::ast::{Arg, BinOp, Expr, KindType, ObjField, Step};
+use crate::parse::ast::{Arg, BinOp, Expr, KindType, ObjField, Step};
 use crate::builtin_registry::{self, BuiltinId};
 use crate::builtins::{BuiltinMethod, BuiltinStructural};
 use crate::context::EvalError;

@@ -12,7 +12,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::builtins::{BuiltinNumericReducer, BuiltinSelectionPosition, BuiltinSinkAccumulator};
-use crate::chain_ir::PullDemand;
+use crate::parse::chain_ir::PullDemand;
 use crate::composed_pipeline as cmp;
 use crate::context::{Env, EvalError};
 use crate::data::value::Val;
@@ -48,7 +48,7 @@ impl<'a> ComposedStageBuilder<'a> {
     pub(super) fn build(&self, stage: &Stage, kernel: &BodyKernel) -> Option<Box<dyn cmp::Stage>> {
         Some(match (stage, kernel) {
             (Stage::Filter(_, _), BodyKernel::FieldCmpLit(field, op, lit))
-                if matches!(op, crate::ast::BinOp::Eq) =>
+                if matches!(op, crate::parse::ast::BinOp::Eq) =>
             {
                 Box::new(cmp::FilterFieldEqLit {
                     field: Arc::clone(field),
@@ -111,7 +111,7 @@ impl<'a> ComposedStageBuilder<'a> {
         kernel: &BodyKernel,
     ) -> Box<dyn cmp::Stage> {
         match kernel {
-            BodyKernel::FieldCmpLit(field, op, lit) if matches!(op, crate::ast::BinOp::Eq) => {
+            BodyKernel::FieldCmpLit(field, op, lit) if matches!(op, crate::parse::ast::BinOp::Eq) => {
                 Box::new(cmp::FilterFieldEqLit {
                     field: Arc::clone(field),
                     target: lit.clone(),

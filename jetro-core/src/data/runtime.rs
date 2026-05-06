@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use crate::ast::{Arg, Expr};
+use crate::parse::ast::{Arg, Expr};
 use crate::context::{Env, EvalError};
 use crate::physical::PipelinePlanSource;
 use crate::pipeline::{self, PipelineBody};

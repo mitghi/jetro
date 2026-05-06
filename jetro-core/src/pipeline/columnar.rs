@@ -627,7 +627,7 @@ impl Pipeline {
                         return Some(Ok(objvec_filter_count_slot(d, sp, op, &lit)));
                     }
                     if let Some(leaves) = and_chain_prog(pred) {
-                        let slots: Option<Vec<(usize, crate::ast::BinOp, Val)>> = leaves
+                        let slots: Option<Vec<(usize, crate::parse::ast::BinOp, Val)>> = leaves
                             .iter()
                             .map(|(f, op, lit)| d.slot_of(f).map(|s| (s, *op, lit.clone())))
                             .collect();
@@ -747,7 +747,7 @@ fn single_field_prog(prog: &crate::vm::Program) -> Option<&str> {
 // for multi-predicate slot-based count short-circuits.
 fn and_chain_prog<'a>(
     prog: &'a crate::vm::Program,
-) -> Option<Vec<(&'a str, crate::ast::BinOp, Val)>> {
+) -> Option<Vec<(&'a str, crate::parse::ast::BinOp, Val)>> {
     use crate::vm::Opcode;
     let ops = prog.ops.as_ref();
     let (last, head) = ops.split_last()?;
@@ -765,8 +765,8 @@ fn and_chain_prog<'a>(
 }
 
 // Decodes a minimal `(field, literal, cmp)` opcode triple into a typed triple.
-fn decode_cmp_ops<'a>(ops: &'a [crate::vm::Opcode]) -> Option<(&'a str, crate::ast::BinOp, Val)> {
-    use crate::ast::BinOp;
+fn decode_cmp_ops<'a>(ops: &'a [crate::vm::Opcode]) -> Option<(&'a str, crate::parse::ast::BinOp, Val)> {
+    use crate::parse::ast::BinOp;
     use crate::vm::Opcode;
     let (field, lit_idx, cmp_idx) = match ops.len() {
         3 => match &ops[0] {
@@ -799,7 +799,7 @@ fn decode_cmp_ops<'a>(ops: &'a [crate::vm::Opcode]) -> Option<(&'a str, crate::a
     Some((field, op, lit))
 }
 
-fn single_cmp_prog<'a>(prog: &'a crate::vm::Program) -> Option<(&'a str, crate::ast::BinOp, Val)> {
+fn single_cmp_prog<'a>(prog: &'a crate::vm::Program) -> Option<(&'a str, crate::parse::ast::BinOp, Val)> {
     decode_cmp_ops(prog.ops.as_ref())
 }
 
@@ -893,10 +893,10 @@ fn objvec_num_slot(d: &Arc<crate::data::value::ObjVecData>, slot: usize, op: Num
 fn objvec_filter_count_slot(
     d: &Arc<crate::data::value::ObjVecData>,
     slot: usize,
-    op: crate::ast::BinOp,
+    op: crate::parse::ast::BinOp,
     lit: &Val,
 ) -> Val {
-    use crate::ast::BinOp as B;
+    use crate::parse::ast::BinOp as B;
     use crate::data::value::ObjVecCol;
 
     if let Some(cols) = &d.typed_cols {
@@ -973,12 +973,12 @@ fn objvec_filter_count_slot(
 fn objvec_filter_num_slots(
     d: &Arc<crate::data::value::ObjVecData>,
     pred_slot: usize,
-    cop: crate::ast::BinOp,
+    cop: crate::parse::ast::BinOp,
     lit: &Val,
     map_slot: usize,
     op: NumOp,
 ) -> Val {
-    use crate::ast::BinOp as B;
+    use crate::parse::ast::BinOp as B;
     use crate::data::value::ObjVecCol;
 
     if let Some(cols) = &d.typed_cols {
@@ -1051,11 +1051,11 @@ fn objvec_filter_num_slots(
 fn objvec_typed_filter_map_collect(
     d: &Arc<crate::data::value::ObjVecData>,
     pk: &str,
-    pop: crate::ast::BinOp,
+    pop: crate::parse::ast::BinOp,
     plit: &Val,
     mk: &str,
 ) -> Option<Result<Val, EvalError>> {
-    use crate::ast::BinOp as B;
+    use crate::parse::ast::BinOp as B;
     use crate::data::value::ObjVecCol;
     let cols = d.typed_cols.as_ref()?;
     let pred_slot = d.slot_of(pk)?;
@@ -1279,9 +1279,9 @@ fn materialise_typed_indices(col: &crate::data::value::ObjVecCol, indices: &[usi
 // Builds inline `Checker` variants backed by typed column slices to avoid Val allocation per row.
 fn objvec_filter_count_and_slots(
     d: &Arc<crate::data::value::ObjVecData>,
-    leaves: &[(usize, crate::ast::BinOp, Val)],
+    leaves: &[(usize, crate::parse::ast::BinOp, Val)],
 ) -> Val {
-    use crate::ast::BinOp as B;
+    use crate::parse::ast::BinOp as B;
     use crate::data::value::ObjVecCol;
 
     if let Some(cols) = &d.typed_cols {
@@ -1417,8 +1417,8 @@ fn objvec_filter_count_and_slots(
 
 // Returns `false` for type combinations that do not define a total order.
 #[inline]
-fn cmp_val_binop_local(a: &Val, op: crate::ast::BinOp, b: &Val) -> bool {
-    use crate::ast::BinOp;
+fn cmp_val_binop_local(a: &Val, op: crate::parse::ast::BinOp, b: &Val) -> bool {
+    use crate::parse::ast::BinOp;
     match (a, b) {
         (Val::Int(x), Val::Int(y)) => match op {
             BinOp::Eq => x == y,
@@ -1460,8 +1460,8 @@ fn cmp_val_binop_local(a: &Val, op: crate::ast::BinOp, b: &Val) -> bool {
 
 // Returns `false` for non-comparison operators.
 #[inline]
-fn num_f_cmp(a: f64, b: f64, op: crate::ast::BinOp) -> bool {
-    use crate::ast::BinOp;
+fn num_f_cmp(a: f64, b: f64, op: crate::parse::ast::BinOp) -> bool {
+    use crate::parse::ast::BinOp;
     match op {
         BinOp::Eq => a == b,
         BinOp::Neq => a != b,

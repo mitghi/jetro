@@ -18,7 +18,7 @@ use std::{
     sync::Arc,
 };
 
-use crate::ast::*;
+use crate::parse::ast::*;
 pub use crate::builtins::BuiltinMethod;
 use crate::context::{Env, EvalError};
 use crate::data::runtime::call_builtin_method_compiled;
@@ -275,7 +275,7 @@ pub enum Opcode {
     Neg,
 
     /// Pop a value and push it cast to the given type.
-    CastOp(super::ast::CastType),
+    CastOp(crate::parse::ast::CastType),
 
     /// Short-circuit AND: pop lhs; if falsy push `false`, else evaluate rhs sub-program.
     AndOp(Arc<Program>),
@@ -3265,8 +3265,8 @@ fn bind_comp_vars(env: &Env, vars: &[Arc<str>], item: Val) -> Env {
 
 /// Perform an explicit type cast on `v` as specified by `ty` (`as str`, `as int`,
 /// `as float`, `as bool`, `as array`, `as object`, `as null`).
-fn exec_cast(v: &Val, ty: super::ast::CastType) -> Result<Val, EvalError> {
-    use super::ast::CastType;
+fn exec_cast(v: &Val, ty: crate::parse::ast::CastType) -> Result<Val, EvalError> {
+    use crate::parse::ast::CastType;
     match ty {
         CastType::Str => Ok(Val::Str(Arc::from(
             match v {

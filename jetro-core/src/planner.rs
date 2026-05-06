@@ -10,10 +10,10 @@
 use std::sync::Arc;
 
 use crate::analysis;
-use crate::ast::{ArrayElem, Expr, ObjField, Step};
+use crate::parse::ast::{ArrayElem, Expr, ObjField, Step};
 use crate::builtins::{BuiltinCall, BuiltinMethod};
 use crate::compiler::Compiler;
-use crate::parser;
+use crate::parse::parser;
 use crate::physical::{
     BackendPlan, ExecutionFacts, NodeId, PhysicalArrayElem, PhysicalChainStep, PhysicalNode,
     PhysicalObjField, PhysicalPathStep, PipelinePlanSource, PlanNode, QueryPlan,
@@ -822,7 +822,7 @@ pub(crate) fn plan_query_with_context(expr: &str, context: PlanningContext) -> Q
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::BinOp;
+    use crate::parse::ast::BinOp;
     use crate::physical::{
         BackendPreference, PhysicalObjField, PipelinePlanSource, PlanNode, QueryRoot,
     };

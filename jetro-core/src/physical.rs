@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use crate::ast::{BinOp, KindType};
+use crate::parse::ast::{BinOp, KindType};
 use crate::builtins::BuiltinCall;
 use crate::pipeline::PipelineBody;
 use crate::structural::StructuralPlan;

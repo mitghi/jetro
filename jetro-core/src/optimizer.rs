@@ -213,8 +213,8 @@ pub(crate) mod rules {
     ///
     /// Conservative: only allow literals, root/current references, simple field
     /// chains, and binary/unary combinations of the above.
-    fn is_independent_predicate(expr: &crate::ast::Expr) -> bool {
-        use crate::ast::Expr;
+    fn is_independent_predicate(expr: &crate::parse::ast::Expr) -> bool {
+        use crate::parse::ast::Expr;
         match expr {
             // Literals — always safe
             Expr::Null | Expr::Bool(_) | Expr::Int(_) | Expr::Float(_) | Expr::Str(_) => true,
@@ -224,7 +224,7 @@ pub(crate) mod rules {
             Expr::Ident(_) => true,
             // Simple field navigation chains (e.g. `@.price`)
             Expr::Chain(base, steps) => {
-                use crate::ast::Step;
+                use crate::parse::ast::Step;
                 let base_ok = is_independent_predicate(base);
                 let steps_ok = steps.iter().all(|s| matches!(s, Step::Field(_) | Step::Index(_)));
                 base_ok && steps_ok

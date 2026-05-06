@@ -5,7 +5,7 @@
 //! `Arc<Program>` happens only in the lowering pass after optimizer rules have
 //! been applied.
 
-use crate::ast::Expr;
+use crate::parse::ast::Expr;
 use crate::pipeline::{SortSpec, Source};
 
 /// A tree-shaped, uncompiled pipeline plan.

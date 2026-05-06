@@ -43,18 +43,18 @@ pub enum BodyKernel {
         /// The sub-kernel whose result is the left-hand side of the comparison.
         lhs: Box<BodyKernel>,
         /// The comparison operator.
-        op: crate::ast::BinOp,
+        op: crate::parse::ast::BinOp,
         /// The literal right-hand side value.
         lit: Val,
     },
     /// Short-circuits through a list of predicates, returning `false` on the first failure.
     And(Arc<[BodyKernel]>),
     /// Reads a single field and compares it to a literal in one fused step.
-    FieldCmpLit(Arc<str>, crate::ast::BinOp, Val),
+    FieldCmpLit(Arc<str>, crate::parse::ast::BinOp, Val),
     /// Traverses a field chain and compares the result to a literal in one fused step.
-    FieldChainCmpLit(Arc<[Arc<str>]>, crate::ast::BinOp, Val),
+    FieldChainCmpLit(Arc<[Arc<str>]>, crate::parse::ast::BinOp, Val),
     /// Compares the current element directly to a literal.
-    CurrentCmpLit(crate::ast::BinOp, Val),
+    CurrentCmpLit(crate::parse::ast::BinOp, Val),
     /// Always produces the given boolean constant, regardless of the current element.
     ConstBool(bool),
     /// Always produces the given `Val` constant.
@@ -490,7 +490,7 @@ fn classify_structural_view_kernel(ops: &[crate::vm::Opcode]) -> Option<BodyKern
                         .and_then(|prog| static_prog_val(prog)))
                 },
                 |idx| match call.orig_args.get(idx) {
-                    Some(crate::ast::Arg::Pos(crate::ast::Expr::Ident(value))) => {
+                    Some(crate::parse::ast::Arg::Pos(crate::parse::ast::Expr::Ident(value))) => {
                         Some(Arc::from(value.as_str()))
                     }
                     _ => None,
@@ -518,8 +518,8 @@ fn static_prog_val(prog: &crate::vm::Program) -> Option<Val> {
 }
 
 #[inline]
-fn cmp_to_binop(op: &crate::vm::Opcode) -> Option<crate::ast::BinOp> {
-    use crate::ast::BinOp as B;
+fn cmp_to_binop(op: &crate::vm::Opcode) -> Option<crate::parse::ast::BinOp> {
+    use crate::parse::ast::BinOp as B;
     use crate::vm::Opcode as O;
     match op {
         O::Eq => Some(B::Eq),
@@ -812,7 +812,7 @@ where
 
 /// Evaluates `lhs op rhs` using JSON-view comparison semantics, returning the boolean result.
 #[inline]
-pub fn eval_cmp_op(lhs: &Val, op: crate::ast::BinOp, rhs: &Val) -> bool {
+pub fn eval_cmp_op(lhs: &Val, op: crate::parse::ast::BinOp, rhs: &Val) -> bool {
     crate::util::json_cmp_binop(
         crate::util::JsonView::from_val(lhs),
         op,

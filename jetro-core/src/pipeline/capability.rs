@@ -282,7 +282,7 @@ pub(crate) fn view_prefix_capabilities(body: &PipelineBody) -> Option<ViewPrefix
 mod tests {
     use std::sync::Arc;
 
-    use crate::ast::BinOp;
+    use crate::parse::ast::BinOp;
     use crate::builtins::{
         BuiltinMethod, BuiltinSelectionPosition, BuiltinSinkAccumulator, BuiltinViewStage,
     };

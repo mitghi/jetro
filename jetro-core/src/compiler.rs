@@ -8,7 +8,7 @@ use smallvec::SmallVec;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
-use crate::ast::*;
+use crate::parse::ast::*;
 use crate::builtins::BuiltinMethod;
 use crate::context::EvalError;
 use crate::vm::{
@@ -104,14 +104,14 @@ impl Compiler {
                 Self::reorder_and_operands(base);
                 for s in steps {
                     match s {
-                        crate::ast::Step::DynIndex(e) | crate::ast::Step::InlineFilter(e) => {
+                        crate::parse::ast::Step::DynIndex(e) | crate::parse::ast::Step::InlineFilter(e) => {
                             Self::reorder_and_operands(e)
                         }
-                        crate::ast::Step::Method(_, args)
-                        | crate::ast::Step::OptMethod(_, args) => {
+                        crate::parse::ast::Step::Method(_, args)
+                        | crate::parse::ast::Step::OptMethod(_, args) => {
                             for a in args {
                                 match a {
-                                    crate::ast::Arg::Pos(e) | crate::ast::Arg::Named(_, e) => {
+                                    crate::parse::ast::Arg::Pos(e) | crate::parse::ast::Arg::Named(_, e) => {
                                         Self::reorder_and_operands(e)
                                     }
                                 }
@@ -128,7 +128,7 @@ impl Compiler {
             Expr::Pipeline { base, steps } => {
                 Self::reorder_and_operands(base);
                 for s in steps {
-                    if let crate::ast::PipeStep::Forward(e) = s {
+                    if let crate::parse::ast::PipeStep::Forward(e) = s {
                         Self::reorder_and_operands(e);
                     }
                 }
@@ -136,12 +136,12 @@ impl Compiler {
             Expr::Object(fields) => {
                 for f in fields {
                     match f {
-                        crate::ast::ObjField::Kv { val, .. } => Self::reorder_and_operands(val),
-                        crate::ast::ObjField::Dynamic { key, val } => {
+                        crate::parse::ast::ObjField::Kv { val, .. } => Self::reorder_and_operands(val),
+                        crate::parse::ast::ObjField::Dynamic { key, val } => {
                             Self::reorder_and_operands(key);
                             Self::reorder_and_operands(val);
                         }
-                        crate::ast::ObjField::Spread(e) => Self::reorder_and_operands(e),
+                        crate::parse::ast::ObjField::Spread(e) => Self::reorder_and_operands(e),
                         _ => {}
                     }
                 }
@@ -149,7 +149,7 @@ impl Compiler {
             Expr::Array(elems) => {
                 for e in elems {
                     match e {
-                        crate::ast::ArrayElem::Expr(e) | crate::ast::ArrayElem::Spread(e) => {
+                        crate::parse::ast::ArrayElem::Expr(e) | crate::parse::ast::ArrayElem::Spread(e) => {
                             Self::reorder_and_operands(e)
                         }
                     }
@@ -188,7 +188,7 @@ impl Compiler {
             Expr::GlobalCall { args, .. } => {
                 for a in args {
                     match a {
-                        crate::ast::Arg::Pos(e) | crate::ast::Arg::Named(_, e) => {
+                        crate::parse::ast::Arg::Pos(e) | crate::parse::ast::Arg::Named(_, e) => {
                             Self::reorder_and_operands(e)
                         }
                     }
@@ -201,14 +201,14 @@ impl Compiler {
     /// Parse and compile `input` with all default passes; available in test builds only.
     #[cfg(test)]
     pub fn compile_str(input: &str) -> Result<Program, EvalError> {
-        let expr = crate::parser::parse(input).map_err(|e| EvalError(e.to_string()))?;
+        let expr = crate::parse::parser::parse(input).map_err(|e| EvalError(e.to_string()))?;
         Ok(Self::compile(&expr, input))
     }
 
     /// Parse and compile `input` with the passes controlled by `config`.
     /// Used by `VM::get_or_compile` so pass selection can vary per `VM` instance.
     pub fn compile_str_with_config(input: &str, config: PassConfig) -> Result<Program, EvalError> {
-        let expr = crate::parser::parse(input).map_err(|e| EvalError(e.to_string()))?;
+        let expr = crate::parse::parser::parse(input).map_err(|e| EvalError(e.to_string()))?;
         let mut e = expr.clone();
         if config.reorder_and {
             Self::reorder_and_operands(&mut e);
@@ -867,7 +867,7 @@ impl Compiler {
     /// `PatchOp` to its compiled path steps, value action, and optional condition.
     fn compile_patch(
         root: &Expr,
-        patch_ops: &[crate::ast::PatchOp],
+        patch_ops: &[crate::parse::ast::PatchOp],
         ctx: &VarCtx,
     ) -> CompiledPatch {
         let root_prog = Arc::new(Self::compile_sub(root, ctx));
@@ -877,18 +877,18 @@ impl Compiler {
                 .path
                 .iter()
                 .map(|s| match s {
-                    crate::ast::PathStep::Field(n) => {
+                    crate::parse::ast::PathStep::Field(n) => {
                         CompiledPathStep::Field(Arc::from(n.as_str()))
                     }
-                    crate::ast::PathStep::Index(i) => CompiledPathStep::Index(*i),
-                    crate::ast::PathStep::DynIndex(e) => {
+                    crate::parse::ast::PathStep::Index(i) => CompiledPathStep::Index(*i),
+                    crate::parse::ast::PathStep::DynIndex(e) => {
                         CompiledPathStep::DynIndex(Arc::new(Self::compile_sub(e, ctx)))
                     }
-                    crate::ast::PathStep::Wildcard => CompiledPathStep::Wildcard,
-                    crate::ast::PathStep::WildcardFilter(p) => {
+                    crate::parse::ast::PathStep::Wildcard => CompiledPathStep::Wildcard,
+                    crate::parse::ast::PathStep::WildcardFilter(p) => {
                         CompiledPathStep::WildcardFilter(Arc::new(Self::compile_sub(p, ctx)))
                     }
-                    crate::ast::PathStep::Descendant(n) => {
+                    crate::parse::ast::PathStep::Descendant(n) => {
                         CompiledPathStep::Descendant(Arc::from(n.as_str()))
                     }
                 })
@@ -910,7 +910,7 @@ impl Compiler {
     /// Try to lower an `Expr` rooted at `@` into a sequence of `KvStep`s.
     /// Returns `None` if the expression contains anything other than field/index steps.
     fn try_kv_path_steps(expr: &Expr) -> Option<Vec<KvStep>> {
-        use crate::ast::Step;
+        use crate::parse::ast::Step;
         let (base, steps) = match expr {
             Expr::Chain(b, s) => (&**b, s.as_slice()),
             _ => return None,

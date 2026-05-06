@@ -22,7 +22,7 @@ use super::{
 };
 
 use crate::builtins::{replace_apply, slice_apply, split_apply, BuiltinMethod};
-use crate::chain_ir::PullDemand;
+use crate::parse::chain_ir::PullDemand;
 
 /// Runs the pipeline against `root`, materialising barrier stages then streaming the rest.
 pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val, EvalError> {

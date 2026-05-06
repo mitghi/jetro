@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use crate::ast::Expr;
+use crate::parse::ast::Expr;
 use crate::builtins::{
     BuiltinCancellation, BuiltinMethod, BuiltinNumericReducer, BuiltinViewStage,
 };
@@ -444,8 +444,8 @@ impl Pipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{Arg, BinOp, Expr, Step};
-    use crate::parser;
+    use crate::parse::ast::{Arg, BinOp, Expr, Step};
+    use crate::parse::parser;
 
     fn lower_query(q: &str) -> Option<Pipeline> {
         let expr = parser::parse(q).ok()?;
@@ -665,7 +665,7 @@ mod tests {
 
     #[test]
     fn debug_filter_pred_shape() {
-        let expr = crate::parser::parse("@.total > 100").unwrap();
+        let expr = crate::parse::parser::parse("@.total > 100").unwrap();
         let prog = crate::compiler::Compiler::compile(&expr, "");
         eprintln!("PRED OPS = {:#?}", prog.ops);
     }
@@ -1246,7 +1246,7 @@ mod tests {
         let demand = p.source_demand();
         assert_eq!(
             demand.chain.pull,
-            crate::chain_ir::PullDemand::FirstInput(2)
+            crate::parse::chain_ir::PullDemand::FirstInput(2)
         );
         let out = p.run(&doc).unwrap();
         assert_eq!(out, Val::Null);
@@ -1267,7 +1267,7 @@ mod tests {
         let demand = p.source_demand();
         assert_eq!(
             demand.chain.pull,
-            crate::chain_ir::PullDemand::UntilOutput(2)
+            crate::parse::chain_ir::PullDemand::UntilOutput(2)
         );
         let out = p.run(&doc).unwrap();
         let out_json: serde_json::Value = out.into();
@@ -1289,7 +1289,7 @@ mod tests {
             .into();
         let p = lower_query("$.data.filter(score > 900).last()").unwrap();
         let demand = p.source_demand();
-        assert_eq!(demand.chain.pull, crate::chain_ir::PullDemand::All);
+        assert_eq!(demand.chain.pull, crate::parse::chain_ir::PullDemand::All);
         let out = p.run(&doc).unwrap();
         let out_json: serde_json::Value = out.into();
         assert_eq!(out_json, json!({"score": 902}));

@@ -2,7 +2,7 @@
 
 #[cfg(test)]
 mod examples {
-    use crate::{compiler, parser, vm, vm::VM};
+    use crate::{compiler, parse::parser, vm, vm::VM};
     use serde_json::{json, Value};
 
     fn vm_query(expr: &str, doc: &Value) -> Result<Value, crate::Error> {

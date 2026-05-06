@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use crate::ast::BinOp;
+use crate::parse::ast::BinOp;
 use crate::context::{Env, EvalError};
 use crate::physical::{
     BackendPreference, NodeId, PhysicalArrayElem, PhysicalChainStep, PhysicalObjField,

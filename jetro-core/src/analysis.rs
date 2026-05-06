@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::ast::KindType;
+use crate::parse::ast::KindType;
 use super::vm::{CompiledPipeStep, Opcode, Program};
 use crate::builtins::BuiltinMethod;
 
@@ -298,7 +298,7 @@ fn apply_op(op: &Opcode, stack: &mut Vec<AbstractVal>) {
         }
         Opcode::Quantifier(kind) => {
             pop1!();
-            use super::ast::QuantifierKind;
+            use crate::parse::ast::QuantifierKind;
             let card = match kind {
                 QuantifierKind::First => Cardinality::ZeroOrOne,
                 QuantifierKind::One => Cardinality::One,
@@ -372,7 +372,7 @@ fn apply_op(op: &Opcode, stack: &mut Vec<AbstractVal>) {
         Opcode::PatchEval(_) => stack.push(AbstractVal::UNKNOWN),
         Opcode::CastOp(ty) => {
             pop1!();
-            use super::ast::CastType;
+            use crate::parse::ast::CastType;
             let av = match ty {
                 CastType::Int => AbstractVal::scalar(VType::Int),
                 CastType::Float => AbstractVal::scalar(VType::Float),
@@ -752,8 +752,8 @@ fn walk_subprograms(ops: &[Opcode], map: &mut HashMap<u64, usize>) {
 
 /// Return `true` when `expr` contains a free reference to the variable `name`,
 /// respecting lexical scope (bindings introduced inside comprehensions / lambdas / let shadow `name`).
-pub fn expr_uses_ident(expr: &super::ast::Expr, name: &str) -> bool {
-    use super::ast::{Arg, ArrayElem, BindTarget, Expr, FStringPart, ObjField, PipeStep, Step};
+pub fn expr_uses_ident(expr: &crate::parse::ast::Expr, name: &str) -> bool {
+    use crate::parse::ast::{Arg, ArrayElem, BindTarget, Expr, FStringPart, ObjField, PipeStep, Step};
     match expr {
         Expr::Ident(n) => n == name,
         Expr::Null
@@ -889,7 +889,7 @@ pub fn expr_uses_ident(expr: &super::ast::Expr, name: &str) -> bool {
         }),
         Expr::Cast { expr, .. } => expr_uses_ident(expr, name),
         Expr::Patch { root, ops } => {
-            use super::ast::PathStep;
+            use crate::parse::ast::PathStep;
             if expr_uses_ident(root, name) {
                 return true;
             }
@@ -908,8 +908,8 @@ pub fn expr_uses_ident(expr: &super::ast::Expr, name: &str) -> bool {
 
 /// Return `true` when `expr` is side-effect-free and may be safely eliminated
 /// or reordered. Conservatively returns `true` for most compound forms.
-pub fn expr_is_pure(expr: &super::ast::Expr) -> bool {
-    use super::ast::{Arg, Expr, Step};
+pub fn expr_is_pure(expr: &crate::parse::ast::Expr) -> bool {
+    use crate::parse::ast::{Arg, Expr, Step};
     match expr {
         Expr::Null
         | Expr::Bool(_)
@@ -1290,8 +1290,8 @@ pub fn escapes_doc(program: &Program) -> bool {
 /// Estimate the selectivity of a filter predicate expression; lower scores mean
 /// the predicate eliminates more candidates and should be tested first.
 /// The planner uses this to reorder `And` operands cheapest/most-selective first.
-pub fn selectivity_score(expr: &super::ast::Expr) -> u32 {
-    use super::ast::{BinOp, Expr};
+pub fn selectivity_score(expr: &crate::parse::ast::Expr) -> u32 {
+    use crate::parse::ast::{BinOp, Expr};
     match expr {
         Expr::Bool(true) => 1000, // Always passes — effectively no filter.
         Expr::Bool(false) => 0,   // Never passes — maximally selective.

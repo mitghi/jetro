@@ -23,16 +23,14 @@
 
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod analysis;
-pub(crate) mod ast;
 pub(crate) mod builtin_helpers;
 pub(crate) mod builtin_registry;
 pub(crate) mod builtins;
-pub(crate) mod chain_ir;
 pub(crate) mod composed_pipeline;
 pub(crate) mod context;
 pub(crate) mod data;
 pub(crate) mod executor;
-pub(crate) mod parser;
+pub(crate) mod parse;
 pub(crate) mod physical;
 pub(crate) mod physical_eval;
 pub(crate) mod pipeline;
@@ -61,7 +59,7 @@ use data::value::Val;
 
 pub use context::EvalError;
 #[cfg(test)]
-use parser::ParseError;
+use parse::parser::ParseError;
 use vm::VM;
 
 

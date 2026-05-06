@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use crate::ast::Expr;
+use crate::parse::ast::Expr;
 use crate::builtin_registry::{pipeline_accepts_arity, pipeline_lowering, BuiltinId};
 use crate::builtins::{
     BuiltinMethod, BuiltinPipelineLowering, BuiltinSinkAccumulator, BuiltinViewStage,
@@ -48,7 +48,7 @@ impl Pipeline {
 
     // Requires `expr` rooted at `$`; extracts the leading field chain and delegates the rest to `lower_from_source`.
     fn lower_inner(expr: &Expr) -> Option<Pipeline> {
-        use crate::ast::Step;
+        use crate::parse::ast::Step;
         let (base, steps) = match expr {
             Expr::Chain(b, s) => (b.as_ref(), s.as_slice()),
             _ => return None,
@@ -84,13 +84,13 @@ impl Pipeline {
     /// Lowers `trailing` steps into a `PipelineBody` and attaches `source`, returning `None` when any step is unclassifiable.
     pub(crate) fn lower_from_source(
         source: Source,
-        trailing: &[crate::ast::Step],
+        trailing: &[crate::parse::ast::Step],
     ) -> Option<Pipeline> {
         Some(Self::lower_body_from_steps(trailing)?.with_source(source))
     }
 
     /// Decodes `trailing` steps into stages and a sink, runs rewrite passes, and classifies body kernels.
-    pub(crate) fn lower_body_from_steps(trailing: &[crate::ast::Step]) -> Option<PipelineBody> {
+    pub(crate) fn lower_body_from_steps(trailing: &[crate::parse::ast::Step]) -> Option<PipelineBody> {
         let (stages, stage_exprs, sink) = decode_method_chain(trailing)?;
         let mut p = PipelineBody {
             stages,
@@ -134,8 +134,8 @@ impl Pipeline {
     }
 
     /// Returns `true` when `step` is a method call that can open a receiver-based pipeline without a field-chain prefix.
-    pub(crate) fn is_receiver_pipeline_start(step: &crate::ast::Step) -> bool {
-        use crate::ast::Step;
+    pub(crate) fn is_receiver_pipeline_start(step: &crate::parse::ast::Step) -> bool {
+        use crate::parse::ast::Step;
 
         let Step::Method(name, args) = step else {
             return false;
@@ -155,8 +155,8 @@ fn is_receiver_pipeline_start_method(name: &str, arity: usize) -> bool {
 }
 
 /// Decodes a `map(expr)` argument as a nested pipeline `Plan`, enabling the `CompiledMap` stage optimisation.
-pub(super) fn try_decode_map_body(arg: &crate::ast::Arg) -> Option<Plan> {
-    use crate::ast::{Arg, Step};
+pub(super) fn try_decode_map_body(arg: &crate::parse::ast::Arg) -> Option<Plan> {
+    use crate::parse::ast::{Arg, Step};
     let expr = match arg {
         Arg::Pos(e) => e,
         _ => return None,
@@ -236,9 +236,9 @@ pub(super) fn run_compiled_map(plan: &Plan, seed: Val) -> Result<Val, EvalError>
 
 // Classifies each trailing method step as a stage or sink; `None` on any unrecognised step.
 fn decode_method_chain(
-    trailing: &[crate::ast::Step],
+    trailing: &[crate::parse::ast::Step],
 ) -> Option<(Vec<Stage>, Vec<Option<Arc<Expr>>>, Sink)> {
-    use crate::ast::Step;
+    use crate::parse::ast::Step;
     let mut stages: Vec<Stage> = Vec::new();
     let mut stage_exprs: Vec<Option<Arc<Expr>>> = Vec::new();
     let mut sink: Sink = Sink::Collect;
@@ -398,8 +398,8 @@ fn prog_const_bool(prog: &crate::vm::Program) -> Option<bool> {
 }
 
 /// Compiles a positional argument into a VM `Program`, rewriting bare `Ident` nodes into `@.<ident>` field accesses.
-pub(super) fn compile_subexpr(arg: &crate::ast::Arg) -> Option<Arc<crate::vm::Program>> {
-    use crate::ast::{Arg, Expr, Step};
+pub(super) fn compile_subexpr(arg: &crate::parse::ast::Arg) -> Option<Arc<crate::vm::Program>> {
+    use crate::parse::ast::{Arg, Expr, Step};
     let inner = match arg {
         Arg::Pos(e) => e,
         _ => return None,
@@ -413,8 +413,8 @@ pub(super) fn compile_subexpr(arg: &crate::ast::Arg) -> Option<Arc<crate::vm::Pr
 }
 
 /// Compiles a sort-key argument into a `SortSpec`, interpreting `UnaryNeg`-wrapping as descending order.
-pub(super) fn compile_sort_spec(arg: &crate::ast::Arg) -> Option<(SortSpec, Option<Arc<Expr>>)> {
-    use crate::ast::{Arg, Expr};
+pub(super) fn compile_sort_spec(arg: &crate::parse::ast::Arg) -> Option<(SortSpec, Option<Arc<Expr>>)> {
+    use crate::parse::ast::{Arg, Expr};
     let expr = match arg {
         Arg::Pos(e) => e,
         _ => return None,
@@ -431,9 +431,9 @@ pub(super) fn compile_sort_spec(arg: &crate::ast::Arg) -> Option<(SortSpec, Opti
 }
 
 /// Wraps the inner `Expr` of a positional argument as `Arc<Expr>`, returning `None` for named arguments.
-pub(super) fn arg_expr(arg: &crate::ast::Arg) -> Option<Arc<Expr>> {
+pub(super) fn arg_expr(arg: &crate::parse::ast::Arg) -> Option<Arc<Expr>> {
     match arg {
-        crate::ast::Arg::Pos(e) => Some(Arc::new(e.clone())),
+        crate::parse::ast::Arg::Pos(e) => Some(Arc::new(e.clone())),
         _ => None,
     }
 }
@@ -447,7 +447,7 @@ use super::{NumOp, ReducerOp, ReducerSpec};
 /// Lowers a `BuiltinMethod` call to a concrete `Stage` or `Sink`, returning `None` when the method cannot be lowered at this position.
 pub(super) fn lower_method_from_registry(
     method: BuiltinMethod,
-    args: &[crate::ast::Arg],
+    args: &[crate::parse::ast::Arg],
     is_last: bool,
     stages: &mut Vec<Stage>,
     stage_exprs: &mut Vec<Option<Arc<Expr>>>,
@@ -573,7 +573,7 @@ pub(super) fn lower_method_from_registry(
 // Compiles `arg` into a sub-expression program and appends the corresponding `Stage` variant; `None` on compile failure.
 fn push_expr_stage(
     method: BuiltinMethod,
-    arg: &crate::ast::Arg,
+    arg: &crate::parse::ast::Arg,
     stages: &mut Vec<Stage>,
     stage_exprs: &mut Vec<Option<Arc<Expr>>>,
 ) -> Option<()> {
@@ -630,7 +630,7 @@ fn push_expr_stage(
 
 fn push_expr_builtin(
     method: BuiltinMethod,
-    arg: &crate::ast::Arg,
+    arg: &crate::parse::ast::Arg,
     stages: &mut Vec<Stage>,
     stage_exprs: &mut Vec<Option<Arc<Expr>>>,
 ) -> Option<()> {
@@ -655,31 +655,31 @@ fn set_terminal_sink(method: BuiltinMethod, sink: &mut Sink) -> Option<()> {
 }
 
 // Extracts a `usize` integer literal from `arg` and enforces `value >= min`.
-fn usize_arg_at_least(arg: &crate::ast::Arg, min: usize) -> Option<usize> {
+fn usize_arg_at_least(arg: &crate::parse::ast::Arg, min: usize) -> Option<usize> {
     match arg {
-        crate::ast::Arg::Pos(Expr::Int(n)) if *n >= min as i64 => Some(*n as usize),
+        crate::parse::ast::Arg::Pos(Expr::Int(n)) if *n >= min as i64 => Some(*n as usize),
         _ => None,
     }
 }
 
 // Extracts a signed integer literal from `arg`.
-fn int_arg(arg: &crate::ast::Arg) -> Option<i64> {
+fn int_arg(arg: &crate::parse::ast::Arg) -> Option<i64> {
     match arg {
-        crate::ast::Arg::Pos(Expr::Int(n)) => Some(*n),
+        crate::parse::ast::Arg::Pos(Expr::Int(n)) => Some(*n),
         _ => None,
     }
 }
 
 // Extracts a string literal from `arg` and interns it as `Arc<str>`.
-fn string_arg(arg: &crate::ast::Arg) -> Option<Arc<str>> {
+fn string_arg(arg: &crate::parse::ast::Arg) -> Option<Arc<str>> {
     match arg {
-        crate::ast::Arg::Pos(Expr::Str(s)) => Some(Arc::<str>::from(s.as_str())),
+        crate::parse::ast::Arg::Pos(Expr::Str(s)) => Some(Arc::<str>::from(s.as_str())),
         _ => None,
     }
 }
 
 // Constructs the terminal `Sink` for `method`, handling count predicates, numeric reducers, and positional selects.
-fn terminal_sink_for_method(method: BuiltinMethod, args: &[crate::ast::Arg]) -> Option<Sink> {
+fn terminal_sink_for_method(method: BuiltinMethod, args: &[crate::parse::ast::Arg]) -> Option<Sink> {
     let spec = method.spec();
     match spec.sink?.accumulator {
         BuiltinSinkAccumulator::ApproxDistinct if args.is_empty() => {

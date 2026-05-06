@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use crate::ast::{Expr, Step};
+use crate::parse::ast::{Expr, Step};
 use crate::builtins::{BuiltinMethod, BuiltinViewStage};
 use crate::logical_plan::LogicalPlan;
 use crate::pipeline::{

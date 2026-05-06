@@ -6,8 +6,8 @@
 
 use std::sync::Arc;
 
-use crate::ast::{BinOp, Expr};
-use crate::chain_ir::PullDemand;
+use crate::parse::ast::{BinOp, Expr};
+use crate::parse::chain_ir::PullDemand;
 use crate::builtins::BuiltinViewStage;
 use crate::vm::{Opcode, Program};
 
@@ -212,7 +212,7 @@ pub fn plan_with_exprs(
 
 // Uses heuristic selectivity estimates based on the comparison operator type.
 fn kernel_cost_selectivity(stage: &Stage, kernel: &BodyKernel) -> (f64, f64) {
-    use crate::ast::BinOp;
+    use crate::parse::ast::BinOp;
     match (stage, kernel) {
         (Stage::Filter(_, _), BodyKernel::FieldCmpLit(_, op, _)) => {
             let s = match op {
@@ -387,7 +387,7 @@ fn fold_merge_with_kernels(
 /// Chooses the top-level execution `Strategy` for a planned pipeline by inspecting cardinality,
 /// indexed support, and pull demand of the stages and sink.
 pub fn select_strategy(stages: &[Stage], sink: &Sink) -> Strategy {
-    use crate::chain_ir::Cardinality;
+    use crate::parse::chain_ir::Cardinality;
 
     let stages_can_indexed = stages.iter().all(|s| s.shape().can_indexed);
     let sink_positional = sink.demand().positional.is_some();

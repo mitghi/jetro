@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use crate::{compiler, parser, vm};
+    use crate::{compiler, parse::parser, vm};
     use serde_json::json;
 
     fn vm_query(expr: &str, doc: &serde_json::Value) -> Result<serde_json::Value, crate::Error> {
@@ -1512,7 +1512,7 @@ mod tests {
     #[test]
     fn analysis_selectivity_score() {
         use crate::analysis::selectivity_score;
-        use crate::parser::parse;
+        use crate::parse::parser::parse;
         let eq = parse("x == 1").unwrap();
         let lt = parse("x < 1").unwrap();
         let t = parse("true").unwrap();
@@ -2079,7 +2079,7 @@ mod tests {
     #[test]
     fn analysis_expr_uses_ident() {
         use crate::analysis::expr_uses_ident;
-        use crate::parser::parse;
+        use crate::parse::parser::parse;
         let e = parse("x + 1").unwrap();
         assert!(expr_uses_ident(&e, "x"));
         assert!(!expr_uses_ident(&e, "y"));
@@ -2090,7 +2090,7 @@ mod tests {
     #[test]
     fn analysis_fold_kind_check_helper() {
         use crate::analysis::{fold_kind_check, VType};
-        use crate::ast::KindType;
+        use crate::parse::ast::KindType;
         assert_eq!(
             fold_kind_check(VType::Int, KindType::Number, false),
             Some(true)

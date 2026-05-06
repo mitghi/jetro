@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use crate::ast::Expr;
+use crate::parse::ast::Expr;
 use crate::builtin_registry::{
     participates_in_demand, pipeline_materialization, pipeline_order_effect,
     pipeline_shape, BuiltinId,
@@ -18,7 +18,7 @@ use crate::builtins::{
     BuiltinPipelineOrderEffect, BuiltinSelectionPosition, BuiltinSinkAccumulator,
     BuiltinSinkDemand, BuiltinSinkSpec, BuiltinSinkValueNeed, BuiltinViewStage,
 };
-use crate::chain_ir::{ChainOp, Demand as ChainDemand, PullDemand, ValueNeed};
+use crate::parse::chain_ir::{ChainOp, Demand as ChainDemand, PullDemand, ValueNeed};
 use crate::vm::{CompiledObjEntry, Opcode, Program};
 
 use super::{BodyKernel, Pipeline, PipelineBody, Sink, Stage, ViewSinkCapability, ViewStageCapability};
@@ -186,7 +186,7 @@ pub enum StageStrategy {
 #[derive(Debug, Clone, Copy)]
 pub struct StageShape {
     /// Whether the stage emits one-to-one, fewer, more, or barrier-level output rows.
-    pub cardinality: crate::chain_ir::Cardinality,
+    pub cardinality: crate::parse::chain_ir::Cardinality,
     /// `true` when the stage supports position-indexed execution (used for `IndexedDispatch`).
     pub can_indexed: bool,
     /// Estimated relative CPU cost per element passing through the stage.
@@ -581,7 +581,7 @@ impl Stage {
         };
         if !matches!(
             self.shape().cardinality,
-            crate::chain_ir::Cardinality::OneToOne
+            crate::parse::chain_ir::Cardinality::OneToOne
         ) {
             return false;
         }
@@ -638,7 +638,7 @@ impl Stage {
         };
         let positional = if matches!(
             self.shape().cardinality,
-            crate::chain_ir::Cardinality::OneToOne
+            crate::parse::chain_ir::Cardinality::OneToOne
         ) {
             demand.positional
         } else {
@@ -677,7 +677,7 @@ impl Stage {
     /// Returns the static `StageShape` (cardinality, cost, selectivity, indexed flag) for this
     /// stage, used by the planner for strategy selection and filter reordering.
     pub fn shape(&self) -> StageShape {
-        use crate::chain_ir::Cardinality;
+        use crate::parse::chain_ir::Cardinality;
         match self {
             Stage::CompiledMap(_) => StageShape {
                 cardinality: Cardinality::OneToOne,

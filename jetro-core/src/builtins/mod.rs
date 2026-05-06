@@ -1882,8 +1882,8 @@ impl BuiltinCall {
     /// Attempts to construct a `BuiltinCall` from AST arguments that are all compile-time
     /// literals. Non-literal or lambda arguments cause `None` to be returned, falling back
     /// to runtime evaluation.
-    pub fn from_literal_ast_args(name: &str, args: &[crate::ast::Arg]) -> Option<Self> {
-        use crate::ast::{Arg, ArrayElem, Expr, ObjField};
+    pub fn from_literal_ast_args(name: &str, args: &[crate::parse::ast::Arg]) -> Option<Self> {
+        use crate::parse::ast::{Arg, ArrayElem, Expr, ObjField};
 
         let method = BuiltinMethod::from_name(name);
         if method == BuiltinMethod::Unknown {
@@ -1949,7 +1949,7 @@ impl BuiltinCall {
 
     /// Like [`BuiltinCall::from_literal_ast_args`] but also requires the method to be a
     /// registered pipeline element method, returning `None` otherwise.
-    pub fn from_pipeline_literal_args(name: &str, args: &[crate::ast::Arg]) -> Option<Self> {
+    pub fn from_pipeline_literal_args(name: &str, args: &[crate::parse::ast::Arg]) -> Option<Self> {
         let call = Self::from_literal_ast_args(name, args)?;
         call.method.is_pipeline_element_method().then_some(call)
     }
@@ -2141,17 +2141,17 @@ fn json_view_str(recv: crate::util::JsonView<'_>) -> Option<&str> {
 pub(crate) fn eval_builtin_method<F, G, H>(
     recv: Val,
     name: &str,
-    args: &[crate::ast::Arg],
+    args: &[crate::parse::ast::Arg],
     mut eval_arg: F,
     mut eval_item: G,
     mut eval_pair: H,
 ) -> Result<Val, EvalError>
 where
-    F: FnMut(&crate::ast::Arg) -> Result<Val, EvalError>,
-    G: FnMut(&Val, &crate::ast::Arg) -> Result<Val, EvalError>,
-    H: FnMut(&Val, &Val, &crate::ast::Arg) -> Result<Val, EvalError>,
+    F: FnMut(&crate::parse::ast::Arg) -> Result<Val, EvalError>,
+    G: FnMut(&Val, &crate::parse::ast::Arg) -> Result<Val, EvalError>,
+    H: FnMut(&Val, &Val, &crate::parse::ast::Arg) -> Result<Val, EvalError>,
 {
-    use crate::ast::{Arg, Expr, ObjField};
+    use crate::parse::ast::{Arg, Expr, ObjField};
 
     let method = BuiltinMethod::from_name(name);
     if method == BuiltinMethod::Unknown {

@@ -10,7 +10,7 @@ use smallvec::SmallVec;
 use std::borrow::{Borrow, Cow};
 
 use crate::builtins::BuiltinCall;
-use crate::chain_ir::PullDemand;
+use crate::parse::chain_ir::PullDemand;
 use crate::data::value::Val;
 
 /// Per-element output of a `Stage::apply`. `Pass(Cow::Borrowed)` is the
@@ -1410,7 +1410,7 @@ mod tests {
     #[test]
     fn step3d_phase3_filter_reorder() {
         // Two consecutive Filter stages should be fused/reordered into one by the planner.
-        use crate::ast::BinOp;
+        use crate::parse::ast::BinOp;
         use crate::pipeline::{plan_with_kernels, BodyKernel, Sink, Stage};
         use std::sync::Arc;
         let dummy = Arc::new(crate::vm::Program::new(Vec::new(), ""));

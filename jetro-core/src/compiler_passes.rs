@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use crate::ast::Arg;
+use crate::parse::ast::Arg;
 use crate::builtins::BuiltinMethod;
 use crate::vm::{
     CompiledCall, FieldChainData, Opcode, Program,
@@ -26,7 +26,7 @@ fn make_noarg_call(method: BuiltinMethod, name: &str) -> Opcode {
 /// `take(n)`, annotate the call's `demand_max_keep` so the inner loop stops early.
 pub(crate) fn pass_method_demand(ops: Vec<Opcode>) -> Vec<Opcode> {
     fn take_const(call: &CompiledCall) -> Option<usize> {
-        use crate::ast::Expr;
+        use crate::parse::ast::Expr;
         if call.name.as_ref() != "take" {
             return None;
         }

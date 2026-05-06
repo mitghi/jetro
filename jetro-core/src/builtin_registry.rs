@@ -11,7 +11,7 @@ use crate::{
         BuiltinPipelineOrderEffect, BuiltinPipelineShape, BuiltinSinkAccumulator,
         BuiltinStructural,
     },
-    chain_ir::{Demand, PullDemand, ValueNeed},
+    parse::chain_ir::{Demand, PullDemand, ValueNeed},
 };
 
 /// Compact, stable numeric identity for a builtin. One-to-one with

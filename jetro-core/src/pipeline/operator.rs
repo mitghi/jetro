@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use crate::ast::Expr;
+use crate::parse::ast::Expr;
 use crate::builtins::BuiltinMethod;
 use crate::vm::Program;
 

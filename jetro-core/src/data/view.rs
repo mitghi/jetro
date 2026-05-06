@@ -418,7 +418,7 @@ mod tests {
 
     use super::{scalar_view_to_owned_val, ValView, ValueView};
     use crate::util::{json_cmp_binop, JsonView};
-    use crate::{ast::BinOp, data::value::Val};
+    use crate::{parse::ast::BinOp, data::value::Val};
 
     #[test]
     fn val_view_reads_nested_fields_without_materializing_parent() {
