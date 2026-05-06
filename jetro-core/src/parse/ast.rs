@@ -395,6 +395,9 @@ pub enum Step {
     InlineFilter(Box<Expr>),
     /// `.first` / `.one` — quantifier that collapses an array to a scalar.
     Quantifier(QuantifierKind),
+    /// `..match { arms }` — recursive descent that runs the arm list
+    /// against every descendant and collects truthy arm-body results.
+    DeepMatch(Vec<MatchArm>),
 }
 
 

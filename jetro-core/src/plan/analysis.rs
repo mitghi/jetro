@@ -388,6 +388,7 @@ fn apply_op(op: &Opcode, stack: &mut Vec<AbstractVal>) {
         Opcode::PipelineRun { .. } => stack.push(AbstractVal::UNKNOWN),
         Opcode::DeleteMarkErr => stack.push(AbstractVal::UNKNOWN),
         Opcode::Match(_) => stack.push(AbstractVal::UNKNOWN),
+        Opcode::DeepMatchAll(_) => stack.push(AbstractVal::UNKNOWN),
     }
 }
 
@@ -1201,6 +1202,7 @@ pub fn opcode_cost(op: &Opcode) -> u32 {
         Opcode::PatchEval(_) => 50,
         Opcode::DeleteMarkErr => 1,
         Opcode::Match(_) => 1,
+        Opcode::DeepMatchAll(_) => 1,
         Opcode::PipelineRun { base, steps } => {
             program_cost(base)
                 + steps

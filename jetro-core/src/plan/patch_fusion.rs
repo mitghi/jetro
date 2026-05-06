@@ -494,6 +494,16 @@ impl EffectAnalyzer {
                 }
                 s
             }
+            Step::DeepMatch(arms) => {
+                let mut s = EffectSummary::default();
+                for arm in arms {
+                    if let Some(g) = arm.guard.as_ref() {
+                        s.merge(self.visit(g));
+                    }
+                    s.merge(self.visit(&arm.body));
+                }
+                s
+            }
         }
     }
 

@@ -1024,6 +1024,62 @@ fn runtime_partial_shared_prefix_with_mixed_suffix() {
 }
 
 #[test]
+fn runtime_deep_match_collects_truthy_arm_bodies() {
+    // `..match { arms }` walks every descendant in DFS order and
+    // collects the truthy arm-body results. The catch-all arm here
+    // returns `false`, so descendants that hit it are dropped from
+    // the output.
+    let src = br#"{
+        "page": "/home",
+        "events": [
+            {"tag": "click", "id": "btn-a"},
+            {"tag": "view", "url": "/about"},
+            {"nested": {"tag": "click", "id": "btn-b"}}
+        ],
+        "meta": {"title": "site"}
+    }"#;
+    let v = run(
+        src,
+        r#"$..match {
+            {tag: "click", id: i} -> i,
+            _                     -> false
+        }"#,
+    );
+    // Two click events match — IDs in DFS order.
+    assert_eq!(v, json!(["btn-a", "btn-b"]));
+}
+
+#[test]
+fn runtime_deep_match_with_range_pattern() {
+    // Range pattern over numeric descendants: collect every number in
+    // 100..=999 anywhere in the tree.
+    let src = br#"{
+        "stats": {"a": 50, "b": 250, "c": 1500},
+        "more":  [42, 200, 800, 9999]
+    }"#;
+    let v = run(
+        src,
+        r#"$..match {
+            n: number when n >= 100 and n < 1000 -> n,
+            _                                     -> false
+        }"#,
+    );
+    assert_eq!(v, json!([250, 200, 800]));
+}
+
+#[test]
+fn runtime_deep_match_no_matches_returns_empty() {
+    let v = run(
+        br#"{"a": 1, "b": 2}"#,
+        r#"$..match {
+            {role: "admin"} -> "found",
+            _               -> false
+        }"#,
+    );
+    assert_eq!(v, json!([]));
+}
+
+#[test]
 fn runtime_match_chained_with_postfix() {
     // Result of a match flows into a subsequent method call.
     let src = br#"{"xs": [1, 2, 3]}"#;

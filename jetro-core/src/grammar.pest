@@ -97,7 +97,7 @@ inline_filter  = { "{" ~ expr ~ "}" }
 // (e.g. `..services?.name`, `.a?.b?`).  Still reject `?|` to avoid
 // conflict with pipe, and `??` which is coalesce.
 quantifier     = { ("?" ~ !("|" | "?")) | "!" }
-postfix = { deep_method | descendant | method_call | dyn_field | map_into_shape | field_access | index_access | inline_filter | quantifier }
+postfix = { deep_match | deep_method | descendant | method_call | dyn_field | map_into_shape | field_access | index_access | inline_filter | quantifier }
 
 // ── Expression hierarchy ──────────────────────────────────────────────────────
 expr = { cond_expr }
@@ -252,6 +252,11 @@ match_arm = { pat_or ~ (kw_when ~ coalesce_expr)? ~ "->" ~ expr }
 // `expr { inline_filter }` postfix. Without it, `match $.x { v -> v }` parses
 // the `{ v -> v }` as inline_filter (since `v -> v` is a valid pipe-bind expr).
 match_expr = { kw_match ~ expr ~ kw_with ~ "{" ~ match_arm ~ ("," ~ match_arm)* ~ ","? ~ "}" }
+// `..match { arms }` walks every descendant in DFS pre-order, runs the
+// match against each, and collects truthy arm-body results into an
+// array. Falsy bodies and unmatched values are silently dropped — the
+// shape is "find all descendants whose pattern fires non-falsy".
+deep_match = { ".." ~ kw_match ~ "{" ~ match_arm ~ ("," ~ match_arm)* ~ ","? ~ "}" }
 
 // ── Patch block ───────────────────────────────────────────────────────────────
 pp_wild_filter = { "[" ~ "*" ~ kw_if ~ expr ~ "]" }

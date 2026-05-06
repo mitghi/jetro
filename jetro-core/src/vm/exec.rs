@@ -1258,6 +1258,20 @@ impl VM {
                 Opcode::DeleteMarkErr => {
                     return err!("DELETE: only valid inside a patch-field value");
                 }
+                Opcode::DeepMatchAll(cm) => {
+                    let recv = pop!(stack);
+                    let mut all_descendants: Vec<Val> = Vec::new();
+                    collect_all_inclusive(&recv, &mut all_descendants);
+                    let mut out: Vec<Val> = Vec::new();
+                    for desc in &all_descendants {
+                        match self.exec_match(cm, desc, env) {
+                            Ok(v) if crate::util::is_truthy(&v) => out.push(v),
+                            Ok(_) => {}
+                            Err(_) => {}
+                        }
+                    }
+                    stack.push(Val::arr(out));
+                }
                 Opcode::Match(cm) => {
                     // Resolve the scrutinee under whichever strategy the
                     // compiler chose. `Current` and `Root` skip VM re-entry
@@ -3360,6 +3374,61 @@ fn find_desc_first(v: &Val, name: &str) -> Option<Val> {
             None
         }
         _ => None,
+    }
+}
+
+/// Collect every node in the subtree of `v` (DFS pre-order) into `out`,
+/// including `v` itself and every leaf and compound representation
+/// (`IntVec`, `FloatVec`, `StrVec`, `StrSliceVec`, `ObjVec`, `ObjSmall`).
+/// Used by `DeepMatchAll` to feed the match runtime with every
+/// descendant regardless of how the document was promoted at parse
+/// time. The pre-existing `collect_all` walks only `Obj` / `Arr`
+/// because its callers (`$..**`) operate before columnar promotion.
+fn collect_all_inclusive(v: &Val, out: &mut Vec<Val>) {
+    out.push(v.clone());
+    match v {
+        Val::Obj(m) => {
+            for child in m.values() {
+                collect_all_inclusive(child, out);
+            }
+        }
+        Val::ObjSmall(pairs) => {
+            for (_, child) in pairs.iter() {
+                collect_all_inclusive(child, out);
+            }
+        }
+        Val::ObjVec(data) => {
+            for row in 0..data.nrows() {
+                let row_val = data.row_val(row);
+                collect_all_inclusive(&row_val, out);
+            }
+        }
+        Val::Arr(a) => {
+            for item in a.as_ref() {
+                collect_all_inclusive(item, out);
+            }
+        }
+        Val::IntVec(a) => {
+            for &n in a.iter() {
+                out.push(Val::Int(n));
+            }
+        }
+        Val::FloatVec(a) => {
+            for &f in a.iter() {
+                out.push(Val::Float(f));
+            }
+        }
+        Val::StrVec(a) => {
+            for s in a.iter() {
+                out.push(Val::Str(Arc::clone(s)));
+            }
+        }
+        Val::StrSliceVec(a) => {
+            for s in a.iter() {
+                out.push(Val::StrSlice(s.clone()));
+            }
+        }
+        _ => {}
     }
 }
 

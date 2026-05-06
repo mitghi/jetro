@@ -630,6 +630,17 @@ impl Compiler {
                 ops.push(Opcode::InlineFilter(Arc::new(Self::compile_sub(pred, ctx))));
             }
             Step::Quantifier(k) => ops.push(Opcode::Quantifier(*k)),
+            Step::DeepMatch(arms) => {
+                // The deep-match step shares its compile path with the
+                // expression-level `match`, with the receiver stack value
+                // serving as both the descent root and the per-element
+                // scrutinee. The synthesised `MatchScrutinee::Current`
+                // tells the runtime to read the iteration item directly
+                // rather than re-evaluating a sub-program per descendant.
+                let scrutinee_marker = Expr::Current;
+                let cm = compile_match(&scrutinee_marker, arms, ctx);
+                ops.push(Opcode::DeepMatchAll(Arc::new(cm)));
+            }
         }
     }
 

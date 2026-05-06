@@ -337,6 +337,12 @@ pub enum Opcode {
     /// try each arm's pattern (and optional guard) in order, and run the body
     /// of the first matching arm with its bindings in scope.
     Match(Arc<CompiledMatch>),
+
+    /// Walk every descendant of the receiver in DFS pre-order, run the
+    /// compiled match against each, and collect every arm-body result
+    /// that is truthy. Falsy bodies and unmatched values (the trailing
+    /// `Fail`) are silently dropped. Pushes the resulting `Val::Arr`.
+    DeepMatchAll(Arc<CompiledMatch>),
 }
 
 /// Strategy for producing the scrutinee value of a compiled `match`

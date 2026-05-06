@@ -920,7 +920,8 @@ pub(super) fn opcode_is_current_only(opcode: &Opcode) -> bool {
         | Opcode::DictComp(_)
         | Opcode::SetComp(_)
         | Opcode::PatchEval(_)
-        | Opcode::Match(_) => false,
+        | Opcode::Match(_)
+        | Opcode::DeepMatchAll(_) => false,
         Opcode::DynIndex(prog)
         | Opcode::InlineFilter(prog)
         | Opcode::AndOp(prog)
