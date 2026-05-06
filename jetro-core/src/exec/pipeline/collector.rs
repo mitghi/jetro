@@ -63,9 +63,9 @@ impl<'a> TerminalCollector<'a> {
         item: &Val,
         kernel: &BodyKernel,
         fallback: F,
-    ) -> Result<(), crate::context::EvalError>
+    ) -> Result<(), crate::data::context::EvalError>
     where
-        F: FnOnce(&Val) -> Result<Val, crate::context::EvalError>,
+        F: FnOnce(&Val) -> Result<Val, crate::data::context::EvalError>,
     {
         match self {
             Self::Values(values) => values.push(super::eval_kernel(kernel, item, fallback)?),

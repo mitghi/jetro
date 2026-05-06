@@ -1,4 +1,4 @@
-use crate::context::EvalError;
+use crate::data::context::EvalError;
 use crate::data::value::Val;
 use crate::builtins::BuiltinMethod;
 use std::sync::Arc;
@@ -292,7 +292,7 @@ pub fn url_decode_apply(recv: &Val) -> Option<Val> {
 #[inline]
 pub fn to_base64_apply(recv: &Val) -> Option<Val> {
     map_str_owned(recv, |s| {
-        crate::builtin_helpers::base64_encode(s.as_bytes())
+        crate::builtins::helpers::base64_encode(s.as_bytes())
     })
 }
 
@@ -323,7 +323,7 @@ pub fn dedent_apply(recv: &Val) -> Option<Val> {
 #[inline]
 pub fn snake_case_apply(recv: &Val) -> Option<Val> {
     map_str_owned(recv, |s| {
-        crate::builtin_helpers::split_words_lower(s).join("_")
+        crate::builtins::helpers::split_words_lower(s).join("_")
     })
 }
 
@@ -331,7 +331,7 @@ pub fn snake_case_apply(recv: &Val) -> Option<Val> {
 #[inline]
 pub fn kebab_case_apply(recv: &Val) -> Option<Val> {
     map_str_owned(recv, |s| {
-        crate::builtin_helpers::split_words_lower(s).join("-")
+        crate::builtins::helpers::split_words_lower(s).join("-")
     })
 }
 
@@ -339,13 +339,13 @@ pub fn kebab_case_apply(recv: &Val) -> Option<Val> {
 #[inline]
 pub fn camel_case_apply(recv: &Val) -> Option<Val> {
     map_str_owned(recv, |s| {
-        let parts = crate::builtin_helpers::split_words_lower(s);
+        let parts = crate::builtins::helpers::split_words_lower(s);
         let mut out = String::with_capacity(s.len());
         for (i, p) in parts.iter().enumerate() {
             if i == 0 {
                 out.push_str(p);
             } else {
-                crate::builtin_helpers::upper_first_into(p, &mut out);
+                crate::builtins::helpers::upper_first_into(p, &mut out);
             }
         }
         out
@@ -356,10 +356,10 @@ pub fn camel_case_apply(recv: &Val) -> Option<Val> {
 #[inline]
 pub fn pascal_case_apply(recv: &Val) -> Option<Val> {
     map_str_owned(recv, |s| {
-        let parts = crate::builtin_helpers::split_words_lower(s);
+        let parts = crate::builtins::helpers::split_words_lower(s);
         let mut out = String::with_capacity(s.len());
         for p in parts.iter() {
-            crate::builtin_helpers::upper_first_into(p, &mut out);
+            crate::builtins::helpers::upper_first_into(p, &mut out);
         }
         out
     })
@@ -534,7 +534,7 @@ pub fn parse_bool_apply(recv: &Val) -> Option<Val> {
 /// Decodes a Base64 string to its UTF-8 representation; returns `Val::Null` for invalid input.
 #[inline]
 pub fn from_base64_apply(recv: &Val) -> Option<Val> {
-    map_str_val(recv, |s| match crate::builtin_helpers::base64_decode(s) {
+    map_str_val(recv, |s| match crate::builtins::helpers::base64_decode(s) {
         Ok(bytes) => Val::Str(Arc::from(String::from_utf8_lossy(&bytes).as_ref())),
         Err(_) => Val::Null,
     })

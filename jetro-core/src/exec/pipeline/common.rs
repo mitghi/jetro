@@ -6,7 +6,7 @@ use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::sync::Arc;
 
-use crate::{context::EvalError, data::value::Val};
+use crate::{data::context::EvalError, data::value::Val};
 
 use super::{NumOp, StageStrategy};
 
@@ -419,7 +419,7 @@ pub(crate) fn walk_field_chain(root: &Val, keys: &[Arc<str>]) -> Val {
 #[inline]
 pub(crate) fn apply_item_in_env(
     vm: &mut crate::vm::VM,
-    env: &mut crate::context::Env,
+    env: &mut crate::data::context::Env,
     item: &Val,
     prog: &crate::vm::Program,
 ) -> Result<Val, EvalError> {

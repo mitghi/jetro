@@ -7,7 +7,7 @@
 
 use serde_json::Value;
 
-use crate::context::EvalError;
+use crate::data::context::EvalError;
 use crate::ir::physical::{QueryPlan, QueryRoot};
 use crate::exec::interpreted as physical_eval;
 use crate::plan::physical as planner;

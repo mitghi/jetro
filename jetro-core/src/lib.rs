@@ -21,12 +21,8 @@
 //! assert_eq!(j.collect("$.books.len()").unwrap(), serde_json::json!(1));
 //! ```
 
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) mod builtin_helpers;
-pub(crate) mod builtin_registry;
 pub(crate) mod builtins;
 pub(crate) mod compile;
-pub(crate) mod context;
 pub(crate) mod data;
 pub(crate) mod exec;
 pub(crate) mod ir;
@@ -47,7 +43,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use data::value::Val;
 
-pub use context::EvalError;
+pub use data::context::EvalError;
 #[cfg(test)]
 use parse::parser::ParseError;
 use vm::VM;

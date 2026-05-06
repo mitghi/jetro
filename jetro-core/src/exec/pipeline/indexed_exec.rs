@@ -3,7 +3,7 @@
 //! loop without scanning the entire source.
 
 use crate::{
-    context::{Env, EvalError},
+    data::context::{Env, EvalError},
     data::value::Val,
 };
 

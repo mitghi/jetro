@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use crate::builtins::BuiltinColumnarStage;
-use crate::{context::EvalError, data::value::Val};
+use crate::{data::context::EvalError, data::value::Val};
 
 use super::ReducerOp;
 use super::{

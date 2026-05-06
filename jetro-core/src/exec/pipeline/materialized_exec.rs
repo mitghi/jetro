@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use crate::{
-    context::{Env, EvalError},
+    data::context::{Env, EvalError},
     data::value::Val,
 };
 
@@ -456,7 +456,7 @@ pub(crate) fn apply_lambda_obj(
     stage: &Stage,
     recv: &Val,
     vm: &mut crate::vm::VM,
-    loop_env: &mut crate::context::Env,
+    loop_env: &mut crate::data::context::Env,
     kernel: &BodyKernel,
     prog: &crate::vm::Program,
 ) -> Result<Val, EvalError> {

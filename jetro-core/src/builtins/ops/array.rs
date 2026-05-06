@@ -1,4 +1,4 @@
-use crate::context::EvalError;
+use crate::data::context::EvalError;
 use crate::util::{cmp_vals, is_truthy, zip_arrays};
 use crate::data::value::Val;
 use indexmap::IndexMap;

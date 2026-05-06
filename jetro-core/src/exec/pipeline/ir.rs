@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 use crate::parse::ast::Expr;
-use crate::builtin_registry::{
+use crate::builtins::registry::{
     participates_in_demand, pipeline_materialization, pipeline_order_effect,
     pipeline_shape, BuiltinId,
 };

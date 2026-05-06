@@ -14,9 +14,9 @@ use jetro_experimental::{StructuralIndex, TokenId, TokenKind};
 use serde::Deserialize;
 
 use crate::parse::ast::{Arg, BinOp, Expr, KindType, ObjField, Step};
-use crate::builtin_registry::{self, BuiltinId};
+use crate::builtins::registry::{self, BuiltinId};
 use crate::builtins::{BuiltinMethod, BuiltinStructural};
-use crate::context::EvalError;
+use crate::data::context::EvalError;
 use crate::data::value::Val;
 
 /// A compiled structural deep-search plan. Carried inside `PlanNode::Structural`
@@ -97,7 +97,7 @@ impl StructuralPlan {
         method: BuiltinMethod,
         args: &[Arg],
     ) -> Option<Self> {
-        match builtin_registry::structural(BuiltinId::from_method(method))? {
+        match registry::structural(BuiltinId::from_method(method))? {
             BuiltinStructural::DeepFind => lower_deep_find(anchor, args),
             BuiltinStructural::DeepShape => lower_deep_shape(anchor, args),
             BuiltinStructural::DeepLike => lower_deep_like(anchor, args),

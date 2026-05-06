@@ -6,6 +6,7 @@
 //! - [`tape`] — simd-json tape representation and `StrRef` slices.
 //! - [`runtime`] — per-evaluation runtime state shared across the engine.
 
+pub(crate) mod context;
 pub(crate) mod runtime;
 pub(crate) mod tape;
 pub(crate) mod value;

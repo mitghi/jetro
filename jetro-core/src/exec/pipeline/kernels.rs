@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use crate::builtins::BuiltinCall;
-use crate::context::EvalError;
+use crate::data::context::EvalError;
 use crate::util::JsonView;
 use crate::data::value::Val;
 use crate::data::view::{scalar_view_to_owned_val, ValueView};

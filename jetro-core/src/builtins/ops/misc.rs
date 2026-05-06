@@ -1,10 +1,10 @@
-use crate::context::EvalError;
+use crate::data::context::EvalError;
 use crate::data::value::Val;
 use std::sync::Arc;
 
 pub fn to_csv_apply(recv: &Val) -> Option<Val> {
     Some(Val::Str(Arc::from(
-        crate::builtin_helpers::csv_emit(recv, ",").as_str(),
+        crate::builtins::helpers::csv_emit(recv, ",").as_str(),
     )))
 }
 
@@ -12,7 +12,7 @@ pub fn to_csv_apply(recv: &Val) -> Option<Val> {
 #[inline]
 pub fn to_tsv_apply(recv: &Val) -> Option<Val> {
     Some(Val::Str(Arc::from(
-        crate::builtin_helpers::csv_emit(recv, "\t").as_str(),
+        crate::builtins::helpers::csv_emit(recv, "\t").as_str(),
     )))
 }
 

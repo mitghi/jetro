@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use crate::parse::ast::BinOp;
 use crate::parse::ast::KindType;
-use crate::context::EvalError;
+use crate::data::context::EvalError;
 use crate::data::value::Val;
 
 

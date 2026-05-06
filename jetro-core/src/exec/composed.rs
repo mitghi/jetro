@@ -508,7 +508,7 @@ pub struct VmCtx {
     /// The VM instance used to execute compiled sub-programs.
     pub vm: crate::vm::VM,
     /// The evaluation environment (variables, current value) for sub-program execution.
-    pub env: crate::context::Env,
+    pub env: crate::data::context::Env,
 }
 
 /// A pipeline stage that evaluates a compiled boolean sub-program against each

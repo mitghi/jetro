@@ -75,7 +75,7 @@ impl Builtin for Filter {
         ctx: &mut super::builtin::StreamCtx<'_, '_>,
         item: crate::data::value::Val,
         body: Option<&crate::vm::Program>,
-    ) -> Result<crate::exec::pipeline::StageFlow<crate::data::value::Val>, crate::context::EvalError> {
+    ) -> Result<crate::exec::pipeline::StageFlow<crate::data::value::Val>, crate::data::context::EvalError> {
         let prog = body.expect("filter body");
         let keep = super::filter_one(&item, |v| {
             crate::exec::pipeline::eval_kernel(ctx.kernel, v, |it| {
@@ -93,7 +93,7 @@ impl Builtin for Filter {
         ctx: &mut super::builtin::BarrierCtx<'_>,
         buf: &mut Vec<crate::data::value::Val>,
         body: Option<&crate::vm::Program>,
-    ) -> Option<Result<(), crate::context::EvalError>> {
+    ) -> Option<Result<(), crate::data::context::EvalError>> {
         let prog = body?;
         let result = super::filter_apply(std::mem::take(buf), |v| {
             crate::exec::pipeline::eval_kernel(ctx.kernel, v, |item| {
@@ -187,7 +187,7 @@ impl Builtin for Map {
         ctx: &mut super::builtin::StreamCtx<'_, '_>,
         item: crate::data::value::Val,
         body: Option<&crate::vm::Program>,
-    ) -> Result<crate::exec::pipeline::StageFlow<crate::data::value::Val>, crate::context::EvalError> {
+    ) -> Result<crate::exec::pipeline::StageFlow<crate::data::value::Val>, crate::data::context::EvalError> {
         let prog = body.expect("map body");
         // Terminal-map collector short-circuit (avoid allocating intermediate Val).
         if Some(ctx.stage_idx) == ctx.terminal_map_idx {
@@ -212,7 +212,7 @@ impl Builtin for Map {
         ctx: &mut super::builtin::BarrierCtx<'_>,
         buf: &mut Vec<crate::data::value::Val>,
         body: Option<&crate::vm::Program>,
-    ) -> Option<Result<(), crate::context::EvalError>> {
+    ) -> Option<Result<(), crate::data::context::EvalError>> {
         let prog = body?;
         let result = super::map_apply(std::mem::take(buf), |v| {
             crate::exec::pipeline::eval_kernel(ctx.kernel, v, |item| {
@@ -247,7 +247,7 @@ impl Builtin for FlatMap {
         ctx: &mut super::builtin::BarrierCtx<'_>,
         buf: &mut Vec<crate::data::value::Val>,
         body: Option<&crate::vm::Program>,
-    ) -> Option<Result<(), crate::context::EvalError>> {
+    ) -> Option<Result<(), crate::data::context::EvalError>> {
         let prog = body?;
         let mut out: Vec<crate::data::value::Val> = Vec::new();
         for v in buf.iter() {
@@ -291,7 +291,7 @@ impl Builtin for Take {
         ctx: &mut super::builtin::StreamCtx<'_, '_>,
         item: crate::data::value::Val,
         _body: Option<&crate::vm::Program>,
-    ) -> Result<crate::exec::pipeline::StageFlow<crate::data::value::Val>, crate::context::EvalError> {
+    ) -> Result<crate::exec::pipeline::StageFlow<crate::data::value::Val>, crate::data::context::EvalError> {
         let n = match ctx.stage.descriptor().and_then(|d| d.usize_arg) {
             Some(n) => n,
             None => return Ok(crate::exec::pipeline::StageFlow::Continue(item)),
@@ -309,7 +309,7 @@ impl Builtin for Take {
         ctx: &mut super::builtin::BarrierCtx<'_>,
         buf: &mut Vec<crate::data::value::Val>,
         _body: Option<&crate::vm::Program>,
-    ) -> Option<Result<(), crate::context::EvalError>> {
+    ) -> Option<Result<(), crate::data::context::EvalError>> {
         let n = ctx.stage.descriptor().and_then(|d| d.usize_arg)?;
         buf.truncate(n);
         Some(Ok(()))
@@ -338,7 +338,7 @@ impl Builtin for Skip {
         ctx: &mut super::builtin::StreamCtx<'_, '_>,
         item: crate::data::value::Val,
         _body: Option<&crate::vm::Program>,
-    ) -> Result<crate::exec::pipeline::StageFlow<crate::data::value::Val>, crate::context::EvalError> {
+    ) -> Result<crate::exec::pipeline::StageFlow<crate::data::value::Val>, crate::data::context::EvalError> {
         let n = match ctx.stage.descriptor().and_then(|d| d.usize_arg) {
             Some(n) => n,
             None => return Ok(crate::exec::pipeline::StageFlow::Continue(item)),
@@ -356,7 +356,7 @@ impl Builtin for Skip {
         ctx: &mut super::builtin::BarrierCtx<'_>,
         buf: &mut Vec<crate::data::value::Val>,
         _body: Option<&crate::vm::Program>,
-    ) -> Option<Result<(), crate::context::EvalError>> {
+    ) -> Option<Result<(), crate::data::context::EvalError>> {
         let n = ctx.stage.descriptor().and_then(|d| d.usize_arg)?;
         if buf.len() <= n {
             buf.clear();
@@ -440,7 +440,7 @@ impl Builtin for TakeWhile {
         ctx: &mut super::builtin::StreamCtx<'_, '_>,
         item: crate::data::value::Val,
         body: Option<&crate::vm::Program>,
-    ) -> Result<crate::exec::pipeline::StageFlow<crate::data::value::Val>, crate::context::EvalError> {
+    ) -> Result<crate::exec::pipeline::StageFlow<crate::data::value::Val>, crate::data::context::EvalError> {
         let prog = body.expect("take_while body");
         let pass = super::take_while_one(&item, |v| {
             crate::exec::pipeline::eval_kernel(ctx.kernel, v, |it| {
@@ -459,7 +459,7 @@ impl Builtin for TakeWhile {
         ctx: &mut super::builtin::BarrierCtx<'_>,
         buf: &mut Vec<crate::data::value::Val>,
         body: Option<&crate::vm::Program>,
-    ) -> Option<Result<(), crate::context::EvalError>> {
+    ) -> Option<Result<(), crate::data::context::EvalError>> {
         let prog = body?;
         let result = super::take_while_apply(std::mem::take(buf), |v| {
             crate::exec::pipeline::eval_kernel(ctx.kernel, v, |item| {
@@ -503,7 +503,7 @@ impl Builtin for DropWhile {
         _ctx: &mut super::builtin::StreamCtx<'_, '_>,
         item: crate::data::value::Val,
         _body: Option<&crate::vm::Program>,
-    ) -> Result<crate::exec::pipeline::StageFlow<crate::data::value::Val>, crate::context::EvalError> {
+    ) -> Result<crate::exec::pipeline::StageFlow<crate::data::value::Val>, crate::data::context::EvalError> {
         Ok(crate::exec::pipeline::StageFlow::Continue(item))
     }
 
@@ -512,7 +512,7 @@ impl Builtin for DropWhile {
         ctx: &mut super::builtin::BarrierCtx<'_>,
         buf: &mut Vec<crate::data::value::Val>,
         body: Option<&crate::vm::Program>,
-    ) -> Option<Result<(), crate::context::EvalError>> {
+    ) -> Option<Result<(), crate::data::context::EvalError>> {
         let prog = body?;
         let result = super::drop_while_apply(std::mem::take(buf), |v| {
             crate::exec::pipeline::eval_kernel(ctx.kernel, v, |item| {
@@ -664,7 +664,7 @@ impl Builtin for FindIndex {
         ctx: &mut super::builtin::BarrierCtx<'_>,
         buf: &mut Vec<crate::data::value::Val>,
         body: Option<&crate::vm::Program>,
-    ) -> Option<Result<(), crate::context::EvalError>> {
+    ) -> Option<Result<(), crate::data::context::EvalError>> {
         let prog = body?;
         let mut found: crate::data::value::Val = crate::data::value::Val::Null;
         for (i, v) in buf.iter().enumerate() {
@@ -701,7 +701,7 @@ impl Builtin for IndicesWhere {
         ctx: &mut super::builtin::BarrierCtx<'_>,
         buf: &mut Vec<crate::data::value::Val>,
         body: Option<&crate::vm::Program>,
-    ) -> Option<Result<(), crate::context::EvalError>> {
+    ) -> Option<Result<(), crate::data::context::EvalError>> {
         let prog = body?;
         let mut out: Vec<i64> = Vec::new();
         for (i, v) in buf.iter().enumerate() {
@@ -727,7 +727,7 @@ fn arg_extreme_apply_barrier(
     buf: &mut Vec<crate::data::value::Val>,
     body: Option<&crate::vm::Program>,
     max: bool,
-) -> Option<Result<(), crate::context::EvalError>> {
+) -> Option<Result<(), crate::data::context::EvalError>> {
     let prog = body?;
     if buf.is_empty() {
         *buf = vec![crate::data::value::Val::Null];
@@ -778,7 +778,7 @@ impl Builtin for MaxBy {
         ctx: &mut super::builtin::BarrierCtx<'_>,
         buf: &mut Vec<crate::data::value::Val>,
         body: Option<&crate::vm::Program>,
-    ) -> Option<Result<(), crate::context::EvalError>> {
+    ) -> Option<Result<(), crate::data::context::EvalError>> {
         arg_extreme_apply_barrier(ctx, buf, body, true)
     }
 }
@@ -798,7 +798,7 @@ impl Builtin for MinBy {
         ctx: &mut super::builtin::BarrierCtx<'_>,
         buf: &mut Vec<crate::data::value::Val>,
         body: Option<&crate::vm::Program>,
-    ) -> Option<Result<(), crate::context::EvalError>> {
+    ) -> Option<Result<(), crate::data::context::EvalError>> {
         arg_extreme_apply_barrier(ctx, buf, body, false)
     }
 }
@@ -1058,7 +1058,7 @@ impl Builtin for Sort {
         ctx: &mut super::builtin::BarrierCtx<'_>,
         buf: &mut Vec<crate::data::value::Val>,
         body: Option<&crate::vm::Program>,
-    ) -> Option<Result<(), crate::context::EvalError>> {
+    ) -> Option<Result<(), crate::data::context::EvalError>> {
         let _ = body;
         let _ = ctx;
         let crate::exec::pipeline::Stage::Sort(spec) = ctx.stage else {
@@ -1126,7 +1126,7 @@ impl Builtin for Window {
         ctx: &mut super::builtin::BarrierCtx<'_>,
         buf: &mut Vec<crate::data::value::Val>,
         _body: Option<&crate::vm::Program>,
-    ) -> Option<Result<(), crate::context::EvalError>> {
+    ) -> Option<Result<(), crate::data::context::EvalError>> {
         let n = ctx.stage.descriptor().and_then(|d| d.usize_arg)?;
         *buf = super::window_apply(buf, n);
         Some(Ok(()))
@@ -1156,7 +1156,7 @@ impl Builtin for Chunk {
         ctx: &mut super::builtin::BarrierCtx<'_>,
         buf: &mut Vec<crate::data::value::Val>,
         _body: Option<&crate::vm::Program>,
-    ) -> Option<Result<(), crate::context::EvalError>> {
+    ) -> Option<Result<(), crate::data::context::EvalError>> {
         let n = ctx.stage.descriptor().and_then(|d| d.usize_arg)?;
         *buf = super::chunk_apply(buf, n);
         Some(Ok(()))
@@ -1253,7 +1253,7 @@ impl Builtin for GroupBy {
         ctx: &mut super::builtin::BarrierCtx<'_>,
         buf: &mut Vec<crate::data::value::Val>,
         body: Option<&crate::vm::Program>,
-    ) -> Option<Result<(), crate::context::EvalError>> {
+    ) -> Option<Result<(), crate::data::context::EvalError>> {
         let _ = body;
         let _ = ctx;
         let prog = match body {
@@ -1302,7 +1302,7 @@ impl Builtin for CountBy {
         ctx: &mut super::builtin::BarrierCtx<'_>,
         buf: &mut Vec<crate::data::value::Val>,
         body: Option<&crate::vm::Program>,
-    ) -> Option<Result<(), crate::context::EvalError>> {
+    ) -> Option<Result<(), crate::data::context::EvalError>> {
         let prog = body?;
         let result = super::count_by_apply(std::mem::take(buf), |v| {
             crate::exec::pipeline::eval_kernel(ctx.kernel, v, |item| {
@@ -1346,7 +1346,7 @@ impl Builtin for IndexBy {
         ctx: &mut super::builtin::BarrierCtx<'_>,
         buf: &mut Vec<crate::data::value::Val>,
         body: Option<&crate::vm::Program>,
-    ) -> Option<Result<(), crate::context::EvalError>> {
+    ) -> Option<Result<(), crate::data::context::EvalError>> {
         let prog = body?;
         let result = super::index_by_apply(std::mem::take(buf), |v| {
             crate::exec::pipeline::eval_kernel(ctx.kernel, v, |item| {
@@ -1386,7 +1386,7 @@ fn unique_apply_barrier(
     ctx: &mut super::builtin::BarrierCtx<'_>,
     buf: &mut Vec<crate::data::value::Val>,
     body: Option<&crate::vm::Program>,
-) -> Option<Result<(), crate::context::EvalError>> {
+) -> Option<Result<(), crate::data::context::EvalError>> {
     match body {
         None => {
             let mut seen: std::collections::HashSet<String> = Default::default();
@@ -1432,7 +1432,7 @@ impl Builtin for Unique {
         ctx: &mut super::builtin::BarrierCtx<'_>,
         buf: &mut Vec<crate::data::value::Val>,
         body: Option<&crate::vm::Program>,
-    ) -> Option<Result<(), crate::context::EvalError>> {
+    ) -> Option<Result<(), crate::data::context::EvalError>> {
         unique_apply_barrier(ctx, buf, body)
     }
 }
@@ -1450,7 +1450,7 @@ impl Builtin for UniqueBy {
         ctx: &mut super::builtin::BarrierCtx<'_>,
         buf: &mut Vec<crate::data::value::Val>,
         body: Option<&crate::vm::Program>,
-    ) -> Option<Result<(), crate::context::EvalError>> {
+    ) -> Option<Result<(), crate::data::context::EvalError>> {
         unique_apply_barrier(ctx, buf, body)
     }
 }
@@ -1480,7 +1480,7 @@ impl Builtin for Reverse {
         _ctx: &mut super::builtin::BarrierCtx<'_>,
         buf: &mut Vec<crate::data::value::Val>,
         _body: Option<&crate::vm::Program>,
-    ) -> Option<Result<(), crate::context::EvalError>> {
+    ) -> Option<Result<(), crate::data::context::EvalError>> {
         buf.reverse();
         Some(Ok(()))
     }
@@ -1837,7 +1837,7 @@ impl Builtin for TransformKeys {
         ctx: &mut super::builtin::StreamCtx<'_, '_>,
         item: crate::data::value::Val,
         body: Option<&crate::vm::Program>,
-    ) -> Result<crate::exec::pipeline::StageFlow<crate::data::value::Val>, crate::context::EvalError> {
+    ) -> Result<crate::exec::pipeline::StageFlow<crate::data::value::Val>, crate::data::context::EvalError> {
         object_lambda_apply_stream(ctx, item, body)
     }
 
@@ -1846,7 +1846,7 @@ impl Builtin for TransformKeys {
         ctx: &mut super::builtin::BarrierCtx<'_>,
         buf: &mut Vec<crate::data::value::Val>,
         body: Option<&crate::vm::Program>,
-    ) -> Option<Result<(), crate::context::EvalError>> {
+    ) -> Option<Result<(), crate::data::context::EvalError>> {
         object_lambda_apply_barrier(ctx, buf, body)
     }
 }
@@ -1858,7 +1858,7 @@ fn object_lambda_apply_stream(
     ctx: &mut super::builtin::StreamCtx<'_, '_>,
     item: crate::data::value::Val,
     body: Option<&crate::vm::Program>,
-) -> Result<crate::exec::pipeline::StageFlow<crate::data::value::Val>, crate::context::EvalError> {
+) -> Result<crate::exec::pipeline::StageFlow<crate::data::value::Val>, crate::data::context::EvalError> {
     let prog = body.expect("object lambda body");
     let result = crate::exec::pipeline::materialized_exec::apply_lambda_obj(
         ctx.stage, &item, ctx.vm, ctx.env, ctx.kernel, prog,
@@ -1872,7 +1872,7 @@ fn object_lambda_apply_barrier(
     ctx: &mut super::builtin::BarrierCtx<'_>,
     buf: &mut Vec<crate::data::value::Val>,
     body: Option<&crate::vm::Program>,
-) -> Option<Result<(), crate::context::EvalError>> {
+) -> Option<Result<(), crate::data::context::EvalError>> {
     let prog = body?;
     let mut out: Vec<crate::data::value::Val> = Vec::with_capacity(buf.len());
     for v in std::mem::take(buf) {
@@ -1901,7 +1901,7 @@ impl Builtin for TransformValues {
         ctx: &mut super::builtin::StreamCtx<'_, '_>,
         item: crate::data::value::Val,
         body: Option<&crate::vm::Program>,
-    ) -> Result<crate::exec::pipeline::StageFlow<crate::data::value::Val>, crate::context::EvalError> {
+    ) -> Result<crate::exec::pipeline::StageFlow<crate::data::value::Val>, crate::data::context::EvalError> {
         object_lambda_apply_stream(ctx, item, body)
     }
 
@@ -1910,7 +1910,7 @@ impl Builtin for TransformValues {
         ctx: &mut super::builtin::BarrierCtx<'_>,
         buf: &mut Vec<crate::data::value::Val>,
         body: Option<&crate::vm::Program>,
-    ) -> Option<Result<(), crate::context::EvalError>> {
+    ) -> Option<Result<(), crate::data::context::EvalError>> {
         object_lambda_apply_barrier(ctx, buf, body)
     }
 }
@@ -1926,7 +1926,7 @@ impl Builtin for FilterKeys {
         ctx: &mut super::builtin::StreamCtx<'_, '_>,
         item: crate::data::value::Val,
         body: Option<&crate::vm::Program>,
-    ) -> Result<crate::exec::pipeline::StageFlow<crate::data::value::Val>, crate::context::EvalError> {
+    ) -> Result<crate::exec::pipeline::StageFlow<crate::data::value::Val>, crate::data::context::EvalError> {
         object_lambda_apply_stream(ctx, item, body)
     }
 
@@ -1935,7 +1935,7 @@ impl Builtin for FilterKeys {
         ctx: &mut super::builtin::BarrierCtx<'_>,
         buf: &mut Vec<crate::data::value::Val>,
         body: Option<&crate::vm::Program>,
-    ) -> Option<Result<(), crate::context::EvalError>> {
+    ) -> Option<Result<(), crate::data::context::EvalError>> {
         object_lambda_apply_barrier(ctx, buf, body)
     }
 }
@@ -1951,7 +1951,7 @@ impl Builtin for FilterValues {
         ctx: &mut super::builtin::StreamCtx<'_, '_>,
         item: crate::data::value::Val,
         body: Option<&crate::vm::Program>,
-    ) -> Result<crate::exec::pipeline::StageFlow<crate::data::value::Val>, crate::context::EvalError> {
+    ) -> Result<crate::exec::pipeline::StageFlow<crate::data::value::Val>, crate::data::context::EvalError> {
         object_lambda_apply_stream(ctx, item, body)
     }
 
@@ -1960,7 +1960,7 @@ impl Builtin for FilterValues {
         ctx: &mut super::builtin::BarrierCtx<'_>,
         buf: &mut Vec<crate::data::value::Val>,
         body: Option<&crate::vm::Program>,
-    ) -> Option<Result<(), crate::context::EvalError>> {
+    ) -> Option<Result<(), crate::data::context::EvalError>> {
         object_lambda_apply_barrier(ctx, buf, body)
     }
 }

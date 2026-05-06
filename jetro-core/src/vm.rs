@@ -20,7 +20,7 @@ use std::{
 
 use crate::parse::ast::*;
 pub use crate::builtins::BuiltinMethod;
-use crate::context::{Env, EvalError};
+use crate::data::context::{Env, EvalError};
 use crate::data::runtime::call_builtin_method_compiled;
 use crate::util::{
     add_vals, cmp_vals_binop, is_truthy, kind_matches, num_op, obj2, val_to_key, val_to_string,

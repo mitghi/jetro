@@ -13,7 +13,7 @@ use crate::parse::ast::Expr;
 use crate::builtins::{
     BuiltinCancellation, BuiltinMethod, BuiltinNumericReducer, BuiltinViewStage,
 };
-use crate::context::{Env, EvalError};
+use crate::data::context::{Env, EvalError};
 use crate::data::value::Val;
 
 mod capability;

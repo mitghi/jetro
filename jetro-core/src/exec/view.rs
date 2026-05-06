@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 use crate::parse::chain_ir::PullDemand;
-use crate::context::{Env, EvalError};
+use crate::data::context::{Env, EvalError};
 use crate::exec::pipeline;
 use crate::data::value::Val;
 use crate::data::view::{scalar_view_to_owned_val, ValueView};
@@ -952,7 +952,7 @@ mod tests {
     use std::sync::Arc;
 
     use crate::parse::ast::BinOp;
-    use crate::context::Env;
+    use crate::data::context::Env;
     use crate::exec::pipeline::{BodyKernel, PipelineBody, Sink, Stage, ViewStageCapability};
     use crate::util::JsonView;
     use crate::data::value::Val;

@@ -6,7 +6,7 @@
 //! buffered work. Streaming consumers call `*_one`; barrier consumers call
 //! `*_apply`. This module owns the loop and truthy-check logic exactly once.
 
-use crate::context::EvalError;
+use crate::data::context::EvalError;
 use crate::data::value::Val;
 use indexmap::IndexMap;
 use std::sync::Arc;
@@ -437,7 +437,7 @@ impl BuiltinMethod {
     /// Resolves a method name string to the corresponding `BuiltinMethod` variant.
     /// Returns [`BuiltinMethod::Unknown`] when the name is not registered.
     pub fn from_name(name: &str) -> Self {
-        crate::builtin_registry::by_name(name)
+        crate::builtins::registry::by_name(name)
             .and_then(|id| id.method())
             .unwrap_or(Self::Unknown)
     }
@@ -2766,7 +2766,7 @@ impl BuiltinMethod {
     /// Pipeline element methods operate on individual values and can run in-stream.
     #[inline]
     pub fn is_pipeline_element_method(self) -> bool {
-        crate::builtin_registry::pipeline_element(crate::builtin_registry::BuiltinId::from_method(
+        crate::builtins::registry::pipeline_element(crate::builtins::registry::BuiltinId::from_method(
             self,
         ))
     }
@@ -2777,6 +2777,9 @@ pub mod ops;
 
 pub(crate) mod builtin;
 pub(crate) mod defs;
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) mod helpers;
+pub(crate) mod registry;
 
 pub use ops::array::*;
 pub use ops::collection::*;

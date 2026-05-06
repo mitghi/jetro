@@ -10,11 +10,11 @@
 use std::sync::Arc;
 
 use crate::parse::ast::Expr;
-use crate::builtin_registry::{pipeline_accepts_arity, pipeline_lowering, BuiltinId};
+use crate::builtins::registry::{pipeline_accepts_arity, pipeline_lowering, BuiltinId};
 use crate::builtins::{
     BuiltinMethod, BuiltinPipelineLowering, BuiltinSinkAccumulator, BuiltinViewStage,
 };
-use crate::{context::EvalError, data::value::Val};
+use crate::{data::context::EvalError, data::value::Val};
 
 use super::{
     expr_label, plan_with_exprs, plan_with_kernels, sink_name, source_name, trace_enabled,

@@ -1,9 +1,9 @@
-use crate::context::EvalError;
+use crate::data::context::EvalError;
 use crate::data::value::Val;
 use std::sync::Arc;
 
 fn compile_regex_eval(pat: &str) -> Result<Arc<regex::Regex>, EvalError> {
-    crate::builtin_helpers::compile_regex(pat).map_err(EvalError)
+    crate::builtins::helpers::compile_regex(pat).map_err(EvalError)
 }
 
 /// Returns `Val::Bool` indicating whether the full string matches `pat`; returns `None` for non-strings.

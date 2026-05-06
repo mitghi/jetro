@@ -10,7 +10,7 @@ use std::sync::atomic::AtomicU64;
 
 use crate::parse::ast::*;
 use crate::builtins::BuiltinMethod;
-use crate::context::EvalError;
+use crate::data::context::EvalError;
 use crate::vm::{
     Opcode, Program, CompiledCall, CompiledObjEntry, KvStep, CompiledFSPart,
     BindObjSpec, CompiledPipeStep, CompSpec, DictCompSpec,
