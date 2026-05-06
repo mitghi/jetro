@@ -36,14 +36,18 @@ pub(super) fn apply_adapter_streaming<'a>(
             terminal_map_idx,
             terminal_map_collect,
         };
-        use crate::builtins::{BuiltinMethod as M, builtin::Builtin, defs};
+        use crate::builtins::{builtin::Builtin, defs, BuiltinMethod as M};
         match method {
             M::Filter | M::Find | M::FindAll => {
                 return <defs::Filter as Builtin>::apply_stream(&mut ctx, item, body);
             }
             M::Map => return <defs::Map as Builtin>::apply_stream(&mut ctx, item, body),
-            M::TakeWhile => return <defs::TakeWhile as Builtin>::apply_stream(&mut ctx, item, body),
-            M::DropWhile => return <defs::DropWhile as Builtin>::apply_stream(&mut ctx, item, body),
+            M::TakeWhile => {
+                return <defs::TakeWhile as Builtin>::apply_stream(&mut ctx, item, body)
+            }
+            M::DropWhile => {
+                return <defs::DropWhile as Builtin>::apply_stream(&mut ctx, item, body)
+            }
             M::Take => return <defs::Take as Builtin>::apply_stream(&mut ctx, item, body),
             M::Skip => return <defs::Skip as Builtin>::apply_stream(&mut ctx, item, body),
             M::TransformKeys => {
@@ -52,7 +56,9 @@ pub(super) fn apply_adapter_streaming<'a>(
             M::TransformValues => {
                 return <defs::TransformValues as Builtin>::apply_stream(&mut ctx, item, body)
             }
-            M::FilterKeys => return <defs::FilterKeys as Builtin>::apply_stream(&mut ctx, item, body),
+            M::FilterKeys => {
+                return <defs::FilterKeys as Builtin>::apply_stream(&mut ctx, item, body)
+            }
             M::FilterValues => {
                 return <defs::FilterValues as Builtin>::apply_stream(&mut ctx, item, body)
             }
@@ -62,9 +68,26 @@ pub(super) fn apply_adapter_streaming<'a>(
     // ElementBuiltin: element-wise scalar apply via Stage variant match.
     // All other variants pass through (barriers handled by materialised path).
     match stage {
-        Stage::Builtin(_) | Stage::IntRangeBuiltin { .. } | Stage::StringPairBuiltin { .. } => {
-            Ok(StageFlow::Continue(materialized_exec::apply_element_adapter(stage, item)))
+        Stage::Builtin(call) if call.method == crate::builtins::BuiltinMethod::Compact => {
+            if matches!(item, Val::Null) {
+                Ok(StageFlow::SkipRow)
+            } else {
+                Ok(StageFlow::Continue(item))
+            }
         }
+        Stage::Builtin(call) if call.method == crate::builtins::BuiltinMethod::Remove => {
+            match &call.args {
+                crate::builtins::BuiltinArgs::Val(target)
+                    if crate::util::vals_eq(&item, target) =>
+                {
+                    Ok(StageFlow::SkipRow)
+                }
+                _ => Ok(StageFlow::Continue(item)),
+            }
+        }
+        Stage::Builtin(_) | Stage::IntRangeBuiltin { .. } | Stage::StringPairBuiltin { .. } => Ok(
+            StageFlow::Continue(materialized_exec::apply_element_adapter(stage, item)),
+        ),
         _ => Ok(StageFlow::Continue(item)),
     }
 }

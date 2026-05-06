@@ -136,7 +136,10 @@ impl Builtin for Compact {
     const NAME: &'static str = "compact";
 
     fn spec() -> BuiltinSpec {
-        BuiltinSpec::new(BuiltinCategory::StreamingFilter, BuiltinCardinality::Filtering).cost(10.0)
+        BuiltinSpec::new(BuiltinCategory::StreamingFilter, BuiltinCardinality::Filtering)
+            .cost(10.0)
+            .demand_law(BuiltinDemandLaw::FilterLike)
+            .order_effect(BuiltinPipelineOrderEffect::PredicatePrefix)
     }
     #[inline]
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
@@ -151,7 +154,10 @@ impl Builtin for Remove {
     const NAME: &'static str = "remove";
 
     fn spec() -> BuiltinSpec {
-        BuiltinSpec::new(BuiltinCategory::StreamingFilter, BuiltinCardinality::Filtering).cost(10.0)
+        BuiltinSpec::new(BuiltinCategory::StreamingFilter, BuiltinCardinality::Filtering)
+            .cost(10.0)
+            .demand_law(BuiltinDemandLaw::FilterLike)
+            .order_effect(BuiltinPipelineOrderEffect::PredicatePrefix)
     }
     #[inline]
     fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
@@ -979,7 +985,7 @@ impl Builtin for FindFirst {
     fn spec() -> BuiltinSpec {
         BuiltinSpec::new(BuiltinCategory::StreamingFilter, BuiltinCardinality::Filtering)
             .cost(10.0)
-            .demand_law(BuiltinDemandLaw::First)
+            .demand_law(BuiltinDemandLaw::FilterLike)
             .lowering(BuiltinPipelineLowering::TerminalExprArg {
                 terminal: BuiltinMethod::First,
             })

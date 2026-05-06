@@ -8,7 +8,7 @@ use crate::builtins::{
     BuiltinKeyedReducer, BuiltinSinkAccumulator, BuiltinSinkSpec, BuiltinViewInputMode,
     BuiltinViewOutputMode, BuiltinViewStage,
 };
-use crate::parse::chain_ir::PullDemand;
+use crate::plan::demand::PullDemand;
 
 use super::{PipelineBody, Stage};
 
@@ -41,7 +41,9 @@ impl SourceCapabilities {
     pub(crate) fn choose_access(self, demand: PullDemand) -> SourceAccessMode {
         match demand {
             PullDemand::NthInput(idx) if self.indexed_array_child => SourceAccessMode::Indexed(idx),
-            PullDemand::LastInput(n) if self.reverse_stream => SourceAccessMode::Reverse { outputs: n },
+            PullDemand::LastInput(n) if self.reverse_stream => {
+                SourceAccessMode::Reverse { outputs: n }
+            }
             PullDemand::FirstInput(n) if self.forward_stream => SourceAccessMode::ForwardBounded(n),
             _ if self.forward_stream => SourceAccessMode::Forward,
             _ => SourceAccessMode::MaterializedFallback,
@@ -344,15 +346,15 @@ pub(crate) fn view_prefix_capabilities(body: &PipelineBody) -> Option<ViewPrefix
 mod tests {
     use std::sync::Arc;
 
-    use crate::parse::ast::BinOp;
     use crate::builtins::{
         BuiltinMethod, BuiltinSelectionPosition, BuiltinSinkAccumulator, BuiltinViewStage,
     };
+    use crate::data::value::Val;
     use crate::exec::pipeline::{
         BodyKernel, NumOp, PipelineBody, ReducerOp, ReducerSpec, Sink, Stage, ViewInputMode,
         ViewMaterialization, ViewOutputMode, ViewSinkCapability, ViewStageCapability,
     };
-    use crate::data::value::Val;
+    use crate::parse::ast::BinOp;
 
     use super::{view_capabilities, view_prefix_capabilities};
 

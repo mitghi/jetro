@@ -6,14 +6,12 @@
 
 use std::sync::Arc;
 
-use crate::parse::ast::{BinOp, Expr};
-use crate::parse::chain_ir::PullDemand;
 use crate::builtins::BuiltinViewStage;
+use crate::parse::ast::{BinOp, Expr};
+use crate::plan::demand::PullDemand;
 use crate::vm::{Opcode, Program};
 
-use super::{
-    symbolic::normalize_symbolic, BodyKernel, Sink, Stage,
-};
+use super::{symbolic::normalize_symbolic, BodyKernel, Sink, Stage};
 
 pub use super::ir::{PhysicalExecPath, Plan, Position, StageStrategy, Strategy};
 
@@ -443,9 +441,9 @@ pub fn select_exec_path(stages: &[Stage], sink: &Sink) -> PhysicalExecPath {
 
     // Columnar: at least one stage has a BuiltinColumnarStage variant, meaning an ObjVec /
     // IntVec / StrVec / FloatVec fast path exists for it.
-    let columnar_eligible = stages.iter().any(|s| {
-        s.descriptor().is_some_and(|d| d.columnar_stage().is_some())
-    });
+    let columnar_eligible = stages
+        .iter()
+        .any(|s| s.descriptor().is_some_and(|d| d.columnar_stage().is_some()));
     if columnar_eligible {
         return PhysicalExecPath::Columnar;
     }

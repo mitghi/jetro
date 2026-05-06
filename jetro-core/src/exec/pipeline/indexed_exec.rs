@@ -5,9 +5,8 @@
 use crate::{
     data::context::{Env, EvalError},
     data::value::Val,
+    plan::demand::PullDemand,
 };
-
-use crate::parse::chain_ir::PullDemand;
 
 use super::{row_source, Pipeline, Position, Stage};
 

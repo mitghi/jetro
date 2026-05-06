@@ -9,12 +9,12 @@
 
 use std::sync::Arc;
 
-use crate::parse::ast::Expr;
 use crate::builtins::{
     BuiltinCancellation, BuiltinMethod, BuiltinNumericReducer, BuiltinViewStage,
 };
 use crate::data::context::{Env, EvalError};
 use crate::data::value::Val;
+use crate::parse::ast::Expr;
 
 mod capability;
 mod collector;
@@ -23,17 +23,17 @@ mod common;
 mod composed;
 mod exec;
 mod indexed_exec;
-mod kernels;
-pub(crate) mod materialized_exec;
 mod ir;
-mod lower;
+mod kernels;
 pub(crate) mod logical_lower;
+mod lower;
+pub(crate) mod materialized_exec;
 mod operator;
 mod plan;
-mod symbolic;
 mod reducer;
 mod row_source;
 mod sink_accumulator;
+mod symbolic;
 mod val_stage_flow;
 pub(crate) use capability::{
     view_capabilities, view_prefix_capabilities, SourceAccessMode, SourceCapabilities,
@@ -45,6 +45,9 @@ pub(crate) use common::{
     num_finalise, num_fold, ordered_by_key_cmp, walk_field_chain, BoundedKeySorter,
     OrderedKeySorter,
 };
+#[cfg(test)]
+pub use ir::Strategy;
+pub use ir::{PhysicalExecPath, Plan, Position, StageStrategy};
 pub use kernels::{eval_cmp_op, eval_kernel, BodyKernel};
 pub(crate) use kernels::{eval_view_kernel, CollectLayout, ObjectKernel, ViewKernelValue};
 pub use operator::{ReducerOp, ReducerSpec};
@@ -52,14 +55,11 @@ pub use operator::{ReducerOp, ReducerSpec};
 pub use plan::compute_strategies;
 #[cfg(test)]
 pub use plan::plan;
-pub use ir::{PhysicalExecPath, Plan, Position, StageStrategy};
 #[cfg(test)]
-pub use ir::Strategy;
+pub use plan::select_strategy;
 pub use plan::{
     compute_strategies_with_kernels, plan_with_exprs, plan_with_kernels, select_exec_path,
 };
-#[cfg(test)]
-pub use plan::select_strategy;
 pub(crate) use reducer::ReducerAccumulator;
 pub(crate) use sink_accumulator::SinkAccumulator;
 
@@ -548,9 +548,10 @@ mod tests {
     #[cfg(feature = "simd-json")]
     #[test]
     fn tape_row_source_walks_field_chain_array_lazily() {
-        let tape =
-            crate::data::tape::TapeData::parse(br#"{"books":[{"id":1},{"id":2}],"skip":[3]}"#.to_vec())
-                .unwrap();
+        let tape = crate::data::tape::TapeData::parse(
+            br#"{"books":[{"id":1},{"id":2}],"skip":[3]}"#.to_vec(),
+        )
+        .unwrap();
         let keys = vec![std::sync::Arc::<str>::from("books")];
 
         let source = row_source::TapeRowSource::from_field_chain(&tape, &keys);
@@ -655,7 +656,6 @@ mod tests {
 
     #[test]
     fn lower_whole_receiver_builtin_not_as_per_element_stage() {
-        assert!(lower_query("$.items.compact()").is_none());
         assert!(lower_query("$.items.join(\",\")").is_none());
     }
 
@@ -1397,7 +1397,7 @@ mod tests {
         let demand = p.source_demand();
         assert_eq!(
             demand.chain.pull,
-            crate::parse::chain_ir::PullDemand::FirstInput(2)
+            crate::plan::demand::PullDemand::FirstInput(2)
         );
         let out = p.run(&doc).unwrap();
         assert_eq!(out, Val::Null);
@@ -1418,7 +1418,7 @@ mod tests {
         let demand = p.source_demand();
         assert_eq!(
             demand.chain.pull,
-            crate::parse::chain_ir::PullDemand::UntilOutput(2)
+            crate::plan::demand::PullDemand::UntilOutput(2)
         );
         let out = p.run(&doc).unwrap();
         let out_json: serde_json::Value = out.into();
@@ -1442,7 +1442,7 @@ mod tests {
         let demand = p.source_demand();
         assert_eq!(
             demand.chain.pull,
-            crate::parse::chain_ir::PullDemand::LastInput(1)
+            crate::plan::demand::PullDemand::LastInput(1)
         );
         let out = p.run(&doc).unwrap();
         let out_json: serde_json::Value = out.into();
@@ -1464,7 +1464,7 @@ mod tests {
         let demand = p.source_demand();
         assert_eq!(
             demand.chain.pull,
-            crate::parse::chain_ir::PullDemand::NthInput(1)
+            crate::plan::demand::PullDemand::NthInput(1)
         );
         let out = p.run(&doc).unwrap();
         let out_json: serde_json::Value = out.into();
@@ -1485,10 +1485,76 @@ mod tests {
             .into();
         let p = lower_query("$.data.filter(score > 900).map(score).nth(1)").unwrap();
         let demand = p.source_demand();
-        assert_eq!(demand.chain.pull, crate::parse::chain_ir::PullDemand::All);
+        assert_eq!(demand.chain.pull, crate::plan::demand::PullDemand::All);
         let out = p.run(&doc).unwrap();
         let out_json: serde_json::Value = out.into();
         assert_eq!(out_json, json!(902));
+    }
+
+    #[test]
+    fn compact_first_and_last_are_filter_like() {
+        use serde_json::json;
+        let doc: Val = (&json!({"xs": [null, 10, null, 20]})).into();
+
+        let first = lower_query("$.xs.compact().first()").unwrap();
+        assert_eq!(
+            first.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::UntilOutput(1)
+        );
+        assert_eq!(first.run(&doc).unwrap(), Val::Int(10));
+
+        let last = lower_query("$.xs.compact().last()").unwrap();
+        assert_eq!(
+            last.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::LastInput(1)
+        );
+        assert_eq!(last.run(&doc).unwrap(), Val::Int(20));
+    }
+
+    #[test]
+    fn remove_first_and_last_are_filter_like() {
+        use serde_json::json;
+        let doc: Val = (&json!({"xs": [2, 1, 2, 3, 2]})).into();
+
+        let collect = lower_query("$.xs.remove(2)").unwrap();
+        let collect_json: serde_json::Value = collect.run(&doc).unwrap().into();
+        assert_eq!(collect_json, json!([1, 3]));
+
+        let first = lower_query("$.xs.remove(2).first()").unwrap();
+        assert_eq!(
+            first.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::UntilOutput(1)
+        );
+        assert_eq!(first.run(&doc).unwrap(), Val::Int(1));
+
+        let last = lower_query("$.xs.remove(2).last()").unwrap();
+        assert_eq!(
+            last.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::LastInput(1)
+        );
+        assert_eq!(last.run(&doc).unwrap(), Val::Int(3));
+    }
+
+    #[test]
+    fn find_first_lowers_to_filter_first_demand() {
+        use serde_json::json;
+        let doc: Val = (&json!({
+            "xs": [
+                {"score": 1},
+                {"score": 9},
+                {"score": 11}
+            ]
+        }))
+            .into();
+
+        let p = lower_query("$.xs.find_first(score > 5)").unwrap();
+        assert!(matches!(p.sink, Sink::Terminal(BuiltinMethod::First)));
+        assert_eq!(
+            p.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::UntilOutput(1)
+        );
+        let out_json: serde_json::Value = p.run(&doc).unwrap().into();
+        assert_eq!(out_json, json!({"score": 9}));
     }
 
     #[test]

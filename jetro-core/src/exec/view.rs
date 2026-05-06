@@ -8,11 +8,11 @@
 
 use std::sync::Arc;
 
-use crate::parse::chain_ir::PullDemand;
 use crate::data::context::{Env, EvalError};
-use crate::exec::pipeline;
 use crate::data::value::Val;
 use crate::data::view::{scalar_view_to_owned_val, ValueView};
+use crate::exec::pipeline;
+use crate::plan::demand::PullDemand;
 use crate::util::JsonView;
 
 mod key;
@@ -1000,12 +1000,12 @@ mod tests {
     use std::rc::Rc;
     use std::sync::Arc;
 
-    use crate::parse::ast::BinOp;
     use crate::data::context::Env;
-    use crate::exec::pipeline::{BodyKernel, PipelineBody, Sink, Stage, ViewStageCapability};
-    use crate::util::JsonView;
     use crate::data::value::Val;
     use crate::data::view::{ValView, ValueView};
+    use crate::exec::pipeline::{BodyKernel, PipelineBody, Sink, Stage, ViewStageCapability};
+    use crate::parse::ast::BinOp;
+    use crate::util::JsonView;
 
     #[derive(Clone)]
     struct CountingView {

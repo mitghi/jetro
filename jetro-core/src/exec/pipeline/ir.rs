@@ -8,20 +8,23 @@
 
 use std::sync::Arc;
 
-use crate::parse::ast::Expr;
 use crate::builtins::registry::{
-    participates_in_demand, pipeline_materialization, pipeline_order_effect,
-    pipeline_shape, BuiltinId,
+    participates_in_demand, pipeline_materialization, pipeline_order_effect, pipeline_shape,
+    BuiltinId,
 };
 use crate::builtins::{
-    BuiltinMethod, BuiltinPipelineMaterialization,
-    BuiltinPipelineOrderEffect, BuiltinSelectionPosition, BuiltinSinkAccumulator,
-    BuiltinSinkDemand, BuiltinSinkSpec, BuiltinSinkValueNeed, BuiltinViewStage,
+    BuiltinMethod, BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect,
+    BuiltinSelectionPosition, BuiltinSinkAccumulator, BuiltinSinkDemand, BuiltinSinkSpec,
+    BuiltinSinkValueNeed, BuiltinViewStage,
 };
-use crate::parse::chain_ir::{ChainOp, Demand as ChainDemand, PullDemand, ValueNeed};
+use crate::parse::ast::Expr;
+use crate::parse::chain_ir::{Cardinality, ChainOp};
+use crate::plan::demand::{Demand as ChainDemand, PullDemand, ValueNeed};
 use crate::vm::{CompiledObjEntry, Opcode, Program};
 
-use super::{BodyKernel, Pipeline, PipelineBody, Sink, Stage, ViewSinkCapability, ViewStageCapability};
+use super::{
+    BodyKernel, Pipeline, PipelineBody, Sink, Stage, ViewSinkCapability, ViewStageCapability,
+};
 
 /// Indicates whether a positional terminal sink wants the first or the last qualifying element.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -211,7 +214,7 @@ pub enum StageStrategy {
 #[derive(Debug, Clone, Copy)]
 pub struct StageShape {
     /// Whether the stage emits one-to-one, fewer, more, or barrier-level output rows.
-    pub cardinality: crate::parse::chain_ir::Cardinality,
+    pub cardinality: Cardinality,
     /// `true` when the stage supports position-indexed execution (used for `IndexedDispatch`).
     pub can_indexed: bool,
     /// Estimated relative CPU cost per element passing through the stage.
@@ -380,7 +383,6 @@ impl<'a> StageDescriptor<'a> {
             .map(program_ok)
             .unwrap_or(self.receiver_safe_without_body)
     }
-
 }
 
 macro_rules! view_body_stage_descriptor {
@@ -495,9 +497,9 @@ impl Stage {
             }
             Stage::IntRangeBuiltin { method, .. } => Some(StageDescriptor::new(*method)),
             Stage::ExprBuiltin { method, body } => Some(StageDescriptor::new(*method).body(body)),
-            Stage::Builtin(call) => Some(
-                StageDescriptor::new(call.method).allow_one_to_one_order_fallback(),
-            ),
+            Stage::Builtin(call) => {
+                Some(StageDescriptor::new(call.method).allow_one_to_one_order_fallback())
+            }
             Stage::SortedDedup(prog) => {
                 let desc = StageDescriptor::special();
                 Some(if let Some(prog) = prog {
@@ -506,7 +508,9 @@ impl Stage {
                     desc
                 })
             }
-            Stage::CompiledMap(_) => Some(StageDescriptor::special().receiver_unsafe_without_body()),
+            Stage::CompiledMap(_) => {
+                Some(StageDescriptor::special().receiver_unsafe_without_body())
+            }
             _ => None,
         }
     }
@@ -604,10 +608,7 @@ impl Stage {
         let Some(desc) = self.descriptor() else {
             return false;
         };
-        if !matches!(
-            self.shape().cardinality,
-            crate::parse::chain_ir::Cardinality::OneToOne
-        ) {
+        if !matches!(self.shape().cardinality, Cardinality::OneToOne) {
             return false;
         }
         if desc.pipeline_order_effect() != BuiltinPipelineOrderEffect::Preserves {
@@ -661,10 +662,7 @@ impl Stage {
             Some(op) => op.propagate_demand(demand.chain),
             None => ChainDemand::RESULT,
         };
-        let positional = if matches!(
-            self.shape().cardinality,
-            crate::parse::chain_ir::Cardinality::OneToOne
-        ) {
+        let positional = if matches!(self.shape().cardinality, Cardinality::OneToOne) {
             demand.positional
         } else {
             None
@@ -702,7 +700,6 @@ impl Stage {
     /// Returns the static `StageShape` (cardinality, cost, selectivity, indexed flag) for this
     /// stage, used by the planner for strategy selection and filter reordering.
     pub fn shape(&self) -> StageShape {
-        use crate::parse::chain_ir::Cardinality;
         match self {
             Stage::CompiledMap(_) => StageShape {
                 cardinality: Cardinality::OneToOne,
