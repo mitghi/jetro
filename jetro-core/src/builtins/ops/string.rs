@@ -1,6 +1,6 @@
 use crate::context::EvalError;
 use crate::data::value::Val;
-use super::BuiltinMethod;
+use crate::builtins::BuiltinMethod;
 use std::sync::Arc;
 
 /// Returns a substring by character indices, supporting negative indexing.

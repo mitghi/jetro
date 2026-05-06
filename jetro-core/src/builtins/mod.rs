@@ -2773,21 +2773,15 @@ impl BuiltinMethod {
 }
 
 
-pub mod array;
-pub mod collection;
-pub mod misc;
-pub mod path;
-pub mod regex;
-pub mod schema;
-pub mod string;
+pub mod ops;
 
 pub(crate) mod builtin;
 pub(crate) mod defs;
 
-pub use array::*;
-pub use collection::*;
-pub use misc::*;
-pub use path::*;
-pub use regex::*;
-pub use schema::*;
-pub use string::*;
+pub use ops::array::*;
+pub use ops::collection::*;
+pub use ops::misc::*;
+pub use ops::path::*;
+pub use ops::regex::*;
+pub use ops::schema::*;
+pub use ops::string::*;
