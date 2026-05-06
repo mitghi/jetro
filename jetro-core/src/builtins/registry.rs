@@ -60,6 +60,8 @@ pub(crate) fn propagate_demand(id: BuiltinId, arg: BuiltinDemandArg, downstream:
         BuiltinDemandLaw::FilterLike => Demand {
             pull: match downstream.pull {
                 PullDemand::All => PullDemand::All,
+                PullDemand::LastInput(n) => PullDemand::LastInput(n),
+                PullDemand::NthInput(_) => PullDemand::All,
                 PullDemand::FirstInput(n) | PullDemand::UntilOutput(n) => {
                     PullDemand::UntilOutput(n)
                 }
@@ -69,7 +71,9 @@ pub(crate) fn propagate_demand(id: BuiltinId, arg: BuiltinDemandArg, downstream:
         },
         BuiltinDemandLaw::TakeWhile => Demand {
             pull: match downstream.pull {
-                PullDemand::All => PullDemand::All,
+                PullDemand::All | PullDemand::LastInput(_) | PullDemand::NthInput(_) => {
+                    PullDemand::All
+                }
                 PullDemand::FirstInput(n) | PullDemand::UntilOutput(n) => PullDemand::FirstInput(n),
             },
             value: downstream.value.merge(ValueNeed::Predicate),
@@ -78,6 +82,7 @@ pub(crate) fn propagate_demand(id: BuiltinId, arg: BuiltinDemandArg, downstream:
         BuiltinDemandLaw::UniqueLike => Demand {
             pull: match downstream.pull {
                 PullDemand::All => PullDemand::All,
+                PullDemand::LastInput(_) | PullDemand::NthInput(_) => PullDemand::All,
                 PullDemand::FirstInput(n) | PullDemand::UntilOutput(n) => {
                     PullDemand::UntilOutput(n)
                 }
@@ -101,7 +106,10 @@ pub(crate) fn propagate_demand(id: BuiltinId, arg: BuiltinDemandArg, downstream:
             BuiltinDemandArg::Usize(n) => Demand {
                 pull: match downstream.pull {
                     PullDemand::FirstInput(m) => PullDemand::FirstInput(n.saturating_add(m)),
-                    PullDemand::All | PullDemand::UntilOutput(_) => PullDemand::All,
+                    PullDemand::NthInput(i) => PullDemand::NthInput(n.saturating_add(i)),
+                    PullDemand::All | PullDemand::UntilOutput(_) | PullDemand::LastInput(_) => {
+                        PullDemand::All
+                    }
                 },
                 ..downstream
             },
@@ -109,9 +117,17 @@ pub(crate) fn propagate_demand(id: BuiltinId, arg: BuiltinDemandArg, downstream:
         },
         BuiltinDemandLaw::First => Demand::first(ValueNeed::Whole),
         BuiltinDemandLaw::Last => Demand {
-            pull: PullDemand::All,
+            pull: PullDemand::LastInput(1),
             value: ValueNeed::Whole,
             order: true,
+        },
+        BuiltinDemandLaw::Nth => match arg {
+            BuiltinDemandArg::Usize(i) => Demand {
+                pull: PullDemand::NthInput(i),
+                value: ValueNeed::Whole,
+                order: false,
+            },
+            BuiltinDemandArg::None => Demand::all(ValueNeed::Whole),
         },
         BuiltinDemandLaw::Count => Demand {
             pull: PullDemand::All,
@@ -200,6 +216,9 @@ pub(crate) fn pipeline_arity(id: BuiltinId, is_last: bool) -> Option<BuiltinPipe
         Some(BuiltinPipelineLowering::Sort) => Some(BuiltinPipelineArity::Range { min: 0, max: 1 }),
         Some(BuiltinPipelineLowering::TerminalSink) => {
             is_last.then(|| terminal_sink_arity(method))?
+        }
+        Some(BuiltinPipelineLowering::TerminalUsizeSink { .. }) => {
+            is_last.then_some(BuiltinPipelineArity::Exact(1))
         }
         None => is_last.then(|| terminal_sink_arity(method))?,
     }

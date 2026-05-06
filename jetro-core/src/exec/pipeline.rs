@@ -36,8 +36,8 @@ mod row_source;
 mod sink_accumulator;
 mod val_stage_flow;
 pub(crate) use capability::{
-    view_capabilities, view_prefix_capabilities, ViewInputMode, ViewMaterialization,
-    ViewOutputMode, ViewSinkCapability, ViewStageCapability,
+    view_capabilities, view_prefix_capabilities, SourceAccessMode, SourceCapabilities,
+    ViewInputMode, ViewMaterialization, ViewOutputMode, ViewSinkCapability, ViewStageCapability,
 };
 pub(crate) use collector::{TerminalCollector, TerminalMapCollector};
 pub(crate) use common::{
@@ -128,6 +128,7 @@ fn sink_name(s: &Sink) -> &'static str {
         },
         Sink::Terminal(BuiltinMethod::First) => "first",
         Sink::Terminal(BuiltinMethod::Last) => "last",
+        Sink::Nth(_) => "nth",
         Sink::Terminal(_) => "terminal",
         Sink::ApproxCountDistinct => "approx_count_distinct",
     }
@@ -347,6 +348,8 @@ pub enum Sink {
     Reducer(ReducerSpec),
     /// Delegates to a built-in method that consumes the stream (e.g. `first`, `last`).
     Terminal(BuiltinMethod),
+    /// Selects the nth emitted row from the stream.
+    Nth(usize),
 
     /// Computes an approximate count of distinct values using a probabilistic sketch.
     ApproxCountDistinct,
@@ -1278,7 +1281,7 @@ mod tests {
     }
 
     #[test]
-    fn last_sink_keeps_full_scan_requirement() {
+    fn last_sink_requests_reverse_input_when_available() {
         use serde_json::json;
         let doc: Val = (&json!({
             "data": [
@@ -1289,10 +1292,55 @@ mod tests {
             .into();
         let p = lower_query("$.data.filter(score > 900).last()").unwrap();
         let demand = p.source_demand();
-        assert_eq!(demand.chain.pull, crate::parse::chain_ir::PullDemand::All);
+        assert_eq!(
+            demand.chain.pull,
+            crate::parse::chain_ir::PullDemand::LastInput(1)
+        );
         let out = p.run(&doc).unwrap();
         let out_json: serde_json::Value = out.into();
         assert_eq!(out_json, json!({"score": 902}));
+    }
+
+    #[test]
+    fn nth_sink_requests_indexed_input_when_available() {
+        use serde_json::json;
+        let doc: Val = (&json!({
+            "data": [
+                {"score": 901},
+                {"score": 902},
+                {"score": 903}
+            ]
+        }))
+            .into();
+        let p = lower_query("$.data.map(score).nth(1)").unwrap();
+        let demand = p.source_demand();
+        assert_eq!(
+            demand.chain.pull,
+            crate::parse::chain_ir::PullDemand::NthInput(1)
+        );
+        let out = p.run(&doc).unwrap();
+        let out_json: serde_json::Value = out.into();
+        assert_eq!(out_json, json!(902));
+    }
+
+    #[test]
+    fn filter_nth_sink_keeps_filtered_semantics() {
+        use serde_json::json;
+        let doc: Val = (&json!({
+            "data": [
+                {"score": 1},
+                {"score": 901},
+                {"score": 902},
+                {"score": 903}
+            ]
+        }))
+            .into();
+        let p = lower_query("$.data.filter(score > 900).map(score).nth(1)").unwrap();
+        let demand = p.source_demand();
+        assert_eq!(demand.chain.pull, crate::parse::chain_ir::PullDemand::All);
+        let out = p.run(&doc).unwrap();
+        let out_json: serde_json::Value = out.into();
+        assert_eq!(out_json, json!(902));
     }
 
     #[test]

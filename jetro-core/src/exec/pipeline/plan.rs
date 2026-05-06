@@ -62,7 +62,13 @@ pub fn compute_strategies_with_kernels(
                         strategies[i] = StageStrategy::SortUntilOutput(k);
                     }
                 }
-                PullDemand::All => {}
+                PullDemand::LastInput(k) => {
+                    strategies[i] = match demand.positional {
+                        Some(Position::First) => StageStrategy::SortTopK(k),
+                        _ => StageStrategy::SortBottomK(k),
+                    };
+                }
+                PullDemand::NthInput(_) | PullDemand::All => {}
             }
         }
         demand = stage.upstream_demand(demand);
@@ -394,7 +400,10 @@ pub fn select_strategy(stages: &[Stage], sink: &Sink) -> Strategy {
     let has_barrier = stages
         .iter()
         .any(|s| matches!(s.shape().cardinality, Cardinality::Barrier));
-    let has_short_circuit = matches!(sink.demand().chain.pull, PullDemand::FirstInput(_));
+    let has_short_circuit = matches!(
+        sink.demand().chain.pull,
+        PullDemand::FirstInput(_) | PullDemand::LastInput(_) | PullDemand::NthInput(_)
+    );
 
     if has_barrier {
         return Strategy::BarrierMaterialise;

@@ -791,6 +791,74 @@ mod tests {
 
     #[cfg(feature = "simd-json")]
     #[test]
+    fn tape_view_map_last_reads_tail_and_materializes_one_result() {
+        let j = Jetro::from_bytes(
+            br#"{"people":[{"name":"al","score":1},{"name":"ada","score":901},{"name":"bob","score":902}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j.collect(r#"$.people.map(name).last()"#).unwrap();
+
+        assert_eq!(out, json!("bob"));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 1);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn tape_view_filter_map_last_scans_from_tail_until_match() {
+        let j = Jetro::from_bytes(
+            br#"{"people":[{"name":"al","score":1},{"name":"ada","score":901},{"name":"bob","score":2},{"name":"cy","score":903}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j
+            .collect(r#"$.people.filter(score < 900).map(name).last()"#)
+            .unwrap();
+
+        assert_eq!(out, json!("bob"));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 1);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn tape_view_map_nth_reads_indexed_row() {
+        let j = Jetro::from_bytes(
+            br#"{"people":[{"name":"al","score":1},{"name":"ada","score":901},{"name":"bob","score":902}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j.collect(r#"$.people.map(name).nth(1)"#).unwrap();
+
+        assert_eq!(out, json!("ada"));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 1);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn tape_view_filter_map_nth_preserves_filtered_semantics() {
+        let j = Jetro::from_bytes(
+            br#"{"people":[{"name":"al","score":1},{"name":"ada","score":901},{"name":"bob","score":902},{"name":"cy","score":903}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j
+            .collect(r#"$.people.filter(score > 900).map(name).nth(1)"#)
+            .unwrap();
+
+        assert_eq!(out, json!("bob"));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 1);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
     fn tape_view_prefix_keeps_projection_builtin_suffix_as_tape_views() {
         let j = Jetro::from_bytes(
             br#"{"people":[{"name":"al","score":1},{"name":"ada","score":901},{"name":"bob","score":902},{"name":"cat","score":3}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),

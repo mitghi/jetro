@@ -1012,7 +1012,11 @@ pub(crate) struct Nth;
 impl Builtin for Nth {
     const METHOD: BuiltinMethod = BuiltinMethod::Nth;
     const NAME: &'static str = "nth";
-    fn spec() -> BuiltinSpec { positional_native_spec() }
+    fn spec() -> BuiltinSpec {
+        positional_native_spec()
+            .demand_law(BuiltinDemandLaw::Nth)
+            .lowering(BuiltinPipelineLowering::TerminalUsizeSink { min: 0 })
+    }
     #[inline]
     fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {

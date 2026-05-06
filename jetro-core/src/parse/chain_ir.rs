@@ -66,6 +66,8 @@ pub enum ValueNeed {
     None,
     /// The stage evaluates a predicate and needs enough of the value to test it.
     Predicate,
+    /// The stage only needs fields used by a projection.
+    Projection,
     /// The full element value is required.
     Whole,
     /// Only the numeric interpretation of the element is needed (e.g. for `sum`).
@@ -79,6 +81,7 @@ impl ValueNeed {
         match (self, other) {
             (Whole, _) | (_, Whole) => Whole,
             (Numeric, _) | (_, Numeric) => Numeric,
+            (Projection, _) | (_, Projection) => Projection,
             (Predicate, _) | (_, Predicate) => Predicate,
             (None, None) => None,
         }
@@ -94,6 +97,10 @@ pub enum PullDemand {
     All,
     /// Pull at most the first `n` input elements regardless of how many outputs they produce.
     FirstInput(usize),
+    /// Pull from the end of the input until `n` outputs have been produced.
+    LastInput(usize),
+    /// Pull the input element at zero-based index `i` when the source can seek to it.
+    NthInput(usize),
     /// Pull input until exactly `n` output elements have been produced.
     UntilOutput(usize),
 }
@@ -103,8 +110,17 @@ impl PullDemand {
     /// converting `All` or `UntilOutput` variants to `FirstInput(n)`.
     pub(crate) fn cap_inputs(self, n: usize) -> Self {
         match self {
-            PullDemand::All | PullDemand::UntilOutput(_) => PullDemand::FirstInput(n),
+            PullDemand::All | PullDemand::UntilOutput(_) | PullDemand::LastInput(_) => {
+                PullDemand::FirstInput(n)
+            }
             PullDemand::FirstInput(m) => PullDemand::FirstInput(m.min(n)),
+            PullDemand::NthInput(i) => {
+                if i < n {
+                    PullDemand::NthInput(i)
+                } else {
+                    PullDemand::FirstInput(n)
+                }
+            }
         }
     }
 }
@@ -312,12 +328,42 @@ mod tests {
     }
 
     #[test]
-    fn filter_last_requires_all_ordered_input() {
+    fn filter_last_requests_reverse_until_output() {
         let ops = [op(BuiltinMethod::Filter), op(BuiltinMethod::Last)];
+        let demand = source_demand(&ops, Demand::RESULT);
+        assert_eq!(demand.pull, PullDemand::LastInput(1));
+        assert_eq!(demand.value, ValueNeed::Whole);
+        assert!(demand.order);
+    }
+
+    #[test]
+    fn map_last_requests_last_input() {
+        let ops = [op(BuiltinMethod::Map), op(BuiltinMethod::Last)];
+        let demand = source_demand(&ops, Demand::RESULT);
+        assert_eq!(demand.pull, PullDemand::LastInput(1));
+        assert_eq!(demand.value, ValueNeed::Whole);
+    }
+
+    #[test]
+    fn map_nth_requests_nth_input() {
+        let ops = [
+            op(BuiltinMethod::Map),
+            op_usize(BuiltinMethod::Nth, 2),
+        ];
+        let demand = source_demand(&ops, Demand::RESULT);
+        assert_eq!(demand.pull, PullDemand::NthInput(2));
+        assert_eq!(demand.value, ValueNeed::Whole);
+    }
+
+    #[test]
+    fn filter_nth_falls_back_to_all_input() {
+        let ops = [
+            op(BuiltinMethod::Filter),
+            op_usize(BuiltinMethod::Nth, 2),
+        ];
         let demand = source_demand(&ops, Demand::RESULT);
         assert_eq!(demand.pull, PullDemand::All);
         assert_eq!(demand.value, ValueNeed::Whole);
-        assert!(demand.order);
     }
 
     #[test]

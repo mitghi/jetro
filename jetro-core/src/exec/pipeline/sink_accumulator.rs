@@ -22,6 +22,9 @@ pub(crate) struct SinkAccumulator<'a> {
     first: Option<Val>,
     // most recently observed item for SelectOne(Last) sinks
     last: Option<Val>,
+    // nth observed item for Sink::Nth
+    nth: Option<Val>,
+    nth_seen: usize,
     // HyperLogLog register array for approximate-distinct-count sinks
     hll: [u8; HLL_M],
 }
@@ -35,6 +38,8 @@ impl<'a> SinkAccumulator<'a> {
             reducer: sink.reducer_spec().map(ReducerAccumulator::new),
             first: None,
             last: None,
+            nth: None,
+            nth_seen: 0,
             hll: [0; HLL_M],
         }
     }
@@ -45,12 +50,21 @@ impl<'a> SinkAccumulator<'a> {
             return self.observe_builtin(spec.accumulator, item);
         }
         match self.sink {
-            Sink::Collect => self.observe_collect(item),
-            Sink::Reducer(_) => self.observe_reducer(&item),
-            Sink::ApproxCountDistinct => self.observe_approx_distinct(&item),
-            Sink::Terminal(_) => {}
+            Sink::Collect => {
+                self.observe_collect(item);
+                false
+            }
+            Sink::Reducer(_) => {
+                self.observe_reducer(&item);
+                false
+            }
+            Sink::ApproxCountDistinct => {
+                self.observe_approx_distinct(&item);
+                false
+            }
+            Sink::Nth(idx) => self.observe_nth(*idx, item),
+            Sink::Terminal(_) => false,
         }
-        false
     }
 
     /// Dispatches `item` to the correct builtin accumulator; convenience wrapper over `observe_builtin_lazy`.
@@ -141,6 +155,28 @@ impl<'a> SinkAccumulator<'a> {
         self.last = Some(item);
     }
 
+    /// Captures the nth observed value, returning true once it is found.
+    pub(crate) fn observe_nth(&mut self, idx: usize, item: Val) -> bool {
+        self.observe_nth_lazy(idx, || item)
+    }
+
+    /// Lazy nth variant; materialises only the selected item.
+    pub(crate) fn observe_nth_lazy<F>(&mut self, idx: usize, materialize_item: F) -> bool
+    where
+        F: FnOnce() -> Val,
+    {
+        if self.nth.is_some() {
+            return true;
+        }
+        if self.nth_seen == idx {
+            self.nth = Some(materialize_item());
+            true
+        } else {
+            self.nth_seen += 1;
+            false
+        }
+    }
+
     /// Hashes `item` into the HyperLogLog registers for cardinality estimation.
     pub(crate) fn observe_approx_distinct(&mut self, item: &Val) {
         hll_observe(&mut self.hll, item);
@@ -177,6 +213,7 @@ impl<'a> SinkAccumulator<'a> {
                 .expect("reducer sinks construct reducer")
                 .finish(),
             Sink::ApproxCountDistinct => Val::Int(hll_estimate(&self.hll) as i64),
+            Sink::Nth(_) => self.nth.unwrap_or(Val::Null),
             Sink::Terminal(_) => Val::Null,
         }
     }

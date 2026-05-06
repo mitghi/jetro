@@ -369,9 +369,8 @@ mod spec_tests {
         );
         assert_eq!(
             BuiltinMethod::Last.spec().sink.unwrap().demand,
-            BuiltinSinkDemand::All {
-                value: BuiltinSinkValueNeed::Whole,
-                order: true
+            BuiltinSinkDemand::Last {
+                value: BuiltinSinkValueNeed::Whole
             }
         );
         assert_eq!(

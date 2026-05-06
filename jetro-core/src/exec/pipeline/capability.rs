@@ -8,8 +8,64 @@ use crate::builtins::{
     BuiltinKeyedReducer, BuiltinSinkAccumulator, BuiltinSinkSpec, BuiltinViewInputMode,
     BuiltinViewOutputMode, BuiltinViewStage,
 };
+use crate::parse::chain_ir::PullDemand;
 
 use super::{PipelineBody, Stage};
+
+/// Describes how a source can be traversed without materialising the full row set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SourceCapabilities {
+    /// Source can be streamed from the beginning.
+    pub forward_stream: bool,
+    /// Source can be streamed from the end.
+    pub reverse_stream: bool,
+    /// Source can seek directly to a zero-based array child.
+    pub indexed_array_child: bool,
+    /// Source rows can remain in the borrowed tape/view domain.
+    pub tape_view: bool,
+    /// Source can fall back to materialising owned values.
+    pub materialized_fallback: bool,
+}
+
+impl SourceCapabilities {
+    /// Capabilities for a `ValueView` array source.
+    pub(crate) const VIEW_ARRAY: Self = Self {
+        forward_stream: true,
+        reverse_stream: true,
+        indexed_array_child: true,
+        tape_view: true,
+        materialized_fallback: true,
+    };
+
+    /// Chooses the most direct access mode that satisfies `demand`.
+    pub(crate) fn choose_access(self, demand: PullDemand) -> SourceAccessMode {
+        match demand {
+            PullDemand::NthInput(idx) if self.indexed_array_child => SourceAccessMode::Indexed(idx),
+            PullDemand::LastInput(n) if self.reverse_stream => SourceAccessMode::Reverse { outputs: n },
+            PullDemand::FirstInput(n) if self.forward_stream => SourceAccessMode::ForwardBounded(n),
+            _ if self.forward_stream => SourceAccessMode::Forward,
+            _ => SourceAccessMode::MaterializedFallback,
+        }
+    }
+}
+
+/// Physical traversal selected from source capabilities plus propagated demand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SourceAccessMode {
+    /// Stream rows from the beginning with no demand cap.
+    Forward,
+    /// Stream at most this many input rows from the beginning.
+    ForwardBounded(usize),
+    /// Stream rows from the end until enough outputs have been accepted.
+    Reverse {
+        /// Number of demanded outputs.
+        outputs: usize,
+    },
+    /// Seek directly to this array child.
+    Indexed(usize),
+    /// Conservative materialised fallback.
+    MaterializedFallback,
+}
 
 /// Describes whether a view-pipeline stage reads the input `ValueView` or only acts on position.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -192,6 +248,11 @@ pub(crate) enum ViewSinkCapability {
         /// When the sink must materialise element values.
         materialization: ViewMaterialization,
     },
+    /// Positional nth selector with a runtime index.
+    Nth {
+        /// Zero-based output index selected by the sink.
+        index: usize,
+    },
 }
 
 impl ViewSinkCapability {
@@ -216,6 +277,7 @@ impl ViewSinkCapability {
             Self::Builtin {
                 materialization, ..
             } => materialization,
+            Self::Nth { .. } => ViewMaterialization::SinkFinalRow,
         }
     }
 }

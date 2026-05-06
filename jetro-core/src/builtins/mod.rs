@@ -663,6 +663,8 @@ pub enum BuiltinDemandLaw {
     First,
     /// The last element is needed; requires all ordered input.
     Last,
+    /// A specific positional element is needed.
+    Nth,
     /// Only a count is needed; requires all inputs but no value payloads.
     Count,
     /// A numeric aggregate (sum/min/max/avg); requires all inputs with numeric-only payload.
@@ -786,6 +788,11 @@ pub enum BuiltinSinkDemand {
     /// Can stop after the first qualifying row.
     First {
         /// Which aspect of the first row's value is needed.
+        value: BuiltinSinkValueNeed,
+    },
+    /// Can satisfy selection by reading from the tail of a reversible/indexed source.
+    Last {
+        /// Which aspect of the last row's value is needed.
         value: BuiltinSinkValueNeed,
     },
 }
@@ -1062,6 +1069,11 @@ pub enum BuiltinPipelineLowering {
     Sort,
     /// Terminal sink (no stage emitted).
     TerminalSink,
+    /// Terminal sink with one `usize` argument (e.g. `nth(i)`).
+    TerminalUsizeSink {
+        /// Minimum legal argument value; arguments below this are rejected.
+        min: usize,
+    },
 }
 
 /// Broad category for a builtin, used for grouping and display purposes.
@@ -1194,9 +1206,8 @@ impl BuiltinSpec {
                 BuiltinSelectionPosition::First => BuiltinSinkDemand::First {
                     value: BuiltinSinkValueNeed::Whole,
                 },
-                BuiltinSelectionPosition::Last => BuiltinSinkDemand::All {
+                BuiltinSelectionPosition::Last => BuiltinSinkDemand::Last {
                     value: BuiltinSinkValueNeed::Whole,
-                    order: true,
                 },
             },
         });

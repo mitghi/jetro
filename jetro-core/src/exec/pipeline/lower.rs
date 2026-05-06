@@ -567,6 +567,14 @@ pub(super) fn lower_method_from_registry(
             Some(())
         }
         BuiltinPipelineLowering::TerminalSink => None,
+        BuiltinPipelineLowering::TerminalUsizeSink { min } if is_last => {
+            if args.len() != 1 {
+                return None;
+            }
+            *sink = Sink::Nth(usize_arg_at_least(&args[0], min)?);
+            Some(())
+        }
+        BuiltinPipelineLowering::TerminalUsizeSink { .. } => None,
     }
 }
 

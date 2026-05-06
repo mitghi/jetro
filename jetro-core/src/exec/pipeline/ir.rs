@@ -55,6 +55,16 @@ impl Sink {
     /// Computes the `SinkDemand` for this sink by consulting its builtin metadata, falling back
     /// to `SinkDemand::RESULT` for sinks with no registered spec.
     pub fn demand(&self) -> SinkDemand {
+        if let Sink::Nth(idx) = self {
+            return SinkDemand {
+                chain: ChainDemand {
+                    pull: PullDemand::NthInput(*idx),
+                    value: ValueNeed::Whole,
+                    order: false,
+                },
+                positional: Some(Position::First),
+            };
+        }
         if let Some(spec) = self.builtin_sink_spec() {
             return sink_demand_from_builtin(spec);
         }
@@ -69,7 +79,7 @@ impl Sink {
         F: FnMut(&crate::vm::Program) -> bool,
     {
         match self {
-            Sink::Collect | Sink::Terminal(_) | Sink::ApproxCountDistinct => true,
+            Sink::Collect | Sink::Terminal(_) | Sink::Nth(_) | Sink::ApproxCountDistinct => true,
             Sink::Reducer(spec) => spec.sink_programs().all(|prog| program_ok(prog)),
         }
     }
@@ -82,6 +92,9 @@ impl Sink {
     ) -> Option<ViewSinkCapability> {
         if matches!(self, Sink::Collect) {
             return Some(ViewSinkCapability::Collect);
+        }
+        if let Sink::Nth(index) = self {
+            return Some(ViewSinkCapability::Nth { index: *index });
         }
 
         let sink_spec = self.builtin_sink_spec()?;
@@ -116,6 +129,7 @@ impl Sink {
     pub(crate) fn builtin_sink_spec(&self) -> Option<BuiltinSinkSpec> {
         match self {
             Sink::Terminal(method) => method.spec().sink,
+            Sink::Nth(_) => None,
             Sink::Reducer(spec) => spec.method()?.spec().sink,
             Sink::ApproxCountDistinct => BuiltinMethod::ApproxCountDistinct.spec().sink,
             Sink::Collect => None,
@@ -131,6 +145,17 @@ fn sink_demand_from_builtin(spec: BuiltinSinkSpec) -> SinkDemand {
     match spec.demand {
         BuiltinSinkDemand::First { value } => SinkDemand {
             chain: ChainDemand::first(sink_value_need(value)),
+            positional: match spec.accumulator {
+                BuiltinSinkAccumulator::SelectOne(position) => Some(position.into()),
+                _ => None,
+            },
+        },
+        BuiltinSinkDemand::Last { value } => SinkDemand {
+            chain: ChainDemand {
+                pull: PullDemand::LastInput(1),
+                value: sink_value_need(value),
+                order: true,
+            },
             positional: match spec.accumulator {
                 BuiltinSinkAccumulator::SelectOne(position) => Some(position.into()),
                 _ => None,

@@ -7,6 +7,8 @@ use crate::{
     data::value::Val,
 };
 
+use crate::parse::chain_ir::PullDemand;
+
 use super::{row_source, Pipeline, Position, Stage};
 
 /// Executes a positional (`first`/`last`) pipeline by directly indexing the source; returns `None` when the pipeline does not qualify.
@@ -18,10 +20,15 @@ pub(super) fn run(
     let recv = row_source::resolve(&pipeline.source, root);
     let len = row_source::row_count(&recv)?;
 
-    let demand = pipeline.sink.demand();
-    let idx = match demand.positional? {
-        Position::First => 0,
-        Position::Last => len.checked_sub(1)?,
+    let demand = pipeline.source_demand();
+    let idx = match demand.chain.pull {
+        PullDemand::NthInput(idx) => idx,
+        PullDemand::FirstInput(_) => 0,
+        PullDemand::LastInput(_) => len.checked_sub(1)?,
+        _ => match demand.positional? {
+            Position::First => 0,
+            Position::Last => len.checked_sub(1)?,
+        },
     };
     if idx >= len {
         return Some(Ok(Val::Null));

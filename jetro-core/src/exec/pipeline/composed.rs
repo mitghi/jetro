@@ -327,6 +327,7 @@ fn run_sink(
 ) -> Option<Val> {
     let out = match sink {
         Sink::Collect => cmp::run_pipeline_with_demand::<cmp::CollectSink>(rows, chain, demand),
+        Sink::Nth(idx) => cmp::run_pipeline_nth_with_demand(rows, chain, demand, *idx),
         Sink::Reducer(_) | Sink::Terminal(_) => {
             run_composed_sink!(run_pipeline_with_demand, rows, chain, demand, sink)
         }
@@ -350,6 +351,7 @@ where
         Sink::Collect => {
             cmp::run_pipeline_owned_iter_with_demand::<cmp::CollectSink, _>(rows, chain, demand)
         }
+        Sink::Nth(idx) => cmp::run_pipeline_owned_iter_nth_with_demand(rows, chain, demand, *idx),
         Sink::Reducer(_) | Sink::Terminal(_) => run_composed_owned_sink!(
             run_pipeline_owned_iter_with_demand,
             rows,

@@ -208,7 +208,15 @@ pub fn run_pipeline_with_demand<S: Sink>(
     stages: &dyn Stage,
     demand: PullDemand,
 ) -> Val {
-    run_pipeline_iter_with_demand::<S, _>(arr.iter(), stages, demand)
+    match demand {
+        PullDemand::LastInput(_) => {
+            run_pipeline_iter_with_demand::<S, _>(arr.iter().rev(), stages, demand)
+        }
+        PullDemand::NthInput(i) => {
+            run_pipeline_iter_with_demand::<S, _>(arr.get(i).into_iter(), stages, PullDemand::All)
+        }
+        _ => run_pipeline_iter_with_demand::<S, _>(arr.iter(), stages, demand),
+    }
 }
 
 /// Run `stages` over an owned iterator of `Val` rows with a demand hint.
@@ -223,6 +231,32 @@ where
     I: IntoIterator<Item = Val>,
 {
     run_pipeline_iter_with_demand::<S, _>(rows.into_iter(), stages, demand)
+}
+
+/// Run `stages` over `arr` and return the nth emitted output.
+pub fn run_pipeline_nth_with_demand(arr: &[Val], stages: &dyn Stage, demand: PullDemand, nth: usize) -> Val {
+    match demand {
+        PullDemand::NthInput(i) => {
+            run_pipeline_nth_iter_with_demand(arr.get(i).into_iter(), stages, PullDemand::All, 0)
+        }
+        PullDemand::LastInput(_) => {
+            run_pipeline_nth_iter_with_demand(arr.iter().rev(), stages, demand, nth)
+        }
+        _ => run_pipeline_nth_iter_with_demand(arr.iter(), stages, demand, nth),
+    }
+}
+
+/// Run `stages` over an owned iterator and return the nth emitted output.
+pub fn run_pipeline_owned_iter_nth_with_demand<I>(
+    rows: I,
+    stages: &dyn Stage,
+    demand: PullDemand,
+    nth: usize,
+) -> Val
+where
+    I: IntoIterator<Item = Val>,
+{
+    run_pipeline_nth_iter_with_demand(rows.into_iter(), stages, demand, nth)
 }
 
 /// Core pipeline loop: iterate `rows`, apply `stages` to each element, feed
@@ -251,6 +285,9 @@ where
                 if matches!(demand, PullDemand::UntilOutput(n) if emitted_outputs >= n) {
                     break;
                 }
+                if matches!(demand, PullDemand::LastInput(n) if emitted_outputs >= n) {
+                    break;
+                }
             }
             StageOutput::Filtered => continue,
             StageOutput::Many(items) => {
@@ -263,9 +300,13 @@ where
                     if matches!(demand, PullDemand::UntilOutput(n) if emitted_outputs >= n) {
                         break;
                     }
+                    if matches!(demand, PullDemand::LastInput(n) if emitted_outputs >= n) {
+                        break;
+                    }
                 }
                 if S::done(&acc)
                     || matches!(demand, PullDemand::UntilOutput(n) if emitted_outputs >= n)
+                    || matches!(demand, PullDemand::LastInput(n) if emitted_outputs >= n)
                 {
                     break;
                 }
@@ -274,6 +315,54 @@ where
         }
     }
     S::finalise(acc)
+}
+
+fn run_pipeline_nth_iter_with_demand<'a, I>(
+    rows: I,
+    stages: &dyn Stage,
+    demand: PullDemand,
+    nth: usize,
+) -> Val
+where
+    I: IntoIterator,
+    I::Item: std::borrow::Borrow<Val>,
+{
+    let mut pulled_inputs = 0usize;
+    let mut emitted_outputs = 0usize;
+    for v in rows {
+        if matches!(demand, PullDemand::FirstInput(n) if pulled_inputs >= n) {
+            break;
+        }
+        pulled_inputs += 1;
+        match stages.apply(v.borrow()) {
+            StageOutput::Pass(cow) => {
+                if emitted_outputs == nth {
+                    return cow.into_owned();
+                }
+                emitted_outputs += 1;
+                if matches!(demand, PullDemand::UntilOutput(n) | PullDemand::LastInput(n) if emitted_outputs >= n) {
+                    break;
+                }
+            }
+            StageOutput::Filtered => continue,
+            StageOutput::Many(items) => {
+                for it in items {
+                    if emitted_outputs == nth {
+                        return it.into_owned();
+                    }
+                    emitted_outputs += 1;
+                    if matches!(demand, PullDemand::UntilOutput(n) | PullDemand::LastInput(n) if emitted_outputs >= n) {
+                        break;
+                    }
+                }
+                if matches!(demand, PullDemand::UntilOutput(n) | PullDemand::LastInput(n) if emitted_outputs >= n) {
+                    break;
+                }
+            }
+            StageOutput::Done => break,
+        }
+    }
+    Val::Null
 }
 
 /// Sink that counts every passing element and returns `Val::Int(n)`.

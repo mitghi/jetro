@@ -13,6 +13,7 @@ use crate::data::context::{Env, EvalError};
 use crate::exec::pipeline;
 use crate::data::value::Val;
 use crate::data::view::{scalar_view_to_owned_val, ValueView};
+use crate::util::JsonView;
 
 mod key;
 mod reducer_stage;
@@ -78,13 +79,19 @@ where
     let source_demand = pipeline::Pipeline::segment_source_demand(&body.stages, &body.sink)
         .chain
         .pull;
+    let sink = match (source_demand, capabilities.sink) {
+        (PullDemand::NthInput(_), pipeline::ViewSinkCapability::Nth { .. }) => {
+            pipeline::ViewSinkCapability::Nth { index: 0 }
+        }
+        (_, sink) => sink,
+    };
 
     drive_view_frontier(
         source,
         &capabilities.stages,
         &body.stage_kernels,
         source_demand,
-        |item| observe_view_sink(item, capabilities.sink, &mut sink_acc, &body.sink_kernels),
+        |item| observe_view_sink(item, sink, &mut sink_acc, &body.sink_kernels),
     )?;
 
     Some(Ok(sink_acc.finish(false)))
@@ -130,6 +137,14 @@ where
                 },
                 || Some(eval_view_key(item, None)?.object_key().to_string()),
             )?;
+            Some(if sink_done {
+                ViewRowAction::Stop
+            } else {
+                ViewRowAction::Emit
+            })
+        }
+        pipeline::ViewSinkCapability::Nth { index } => {
+            let sink_done = sink_acc.observe_nth_lazy(index, || item.materialize());
             Some(if sink_done {
                 ViewRowAction::Stop
             } else {
@@ -264,6 +279,31 @@ where
     V: ValueView<'a>,
     F: FnMut(&V) -> Option<ViewRowAction>,
 {
+    let access = pipeline::SourceCapabilities::VIEW_ARRAY.choose_access(source_demand);
+    match access {
+        pipeline::SourceAccessMode::Reverse { .. } => {
+            let len = match source.scalar() {
+                JsonView::ArrayLen(len) => len,
+                _ => return None,
+            };
+            let items = (0..len).rev().map(|idx| source.index(idx as i64));
+            return drive_view_iter(items, stages, stage_kernels, source_demand, observe);
+        }
+        pipeline::SourceAccessMode::Indexed(idx) => {
+            let len = match source.scalar() {
+                JsonView::ArrayLen(len) => len,
+                _ => return None,
+            };
+            if idx >= len {
+                return Some(());
+            }
+            let items = std::iter::once(source.index(idx as i64));
+            return drive_view_iter(items, stages, stage_kernels, PullDemand::All, observe);
+        }
+        pipeline::SourceAccessMode::Forward
+        | pipeline::SourceAccessMode::ForwardBounded(_)
+        | pipeline::SourceAccessMode::MaterializedFallback => {}
+    }
     let items = source.array_iter()?;
     drive_view_iter(items, stages, stage_kernels, source_demand, observe)
 }
@@ -310,6 +350,9 @@ where
         ) {
             break;
         }
+        if matches!(source_demand, PullDemand::LastInput(n) if emitted_outputs >= n) {
+            break;
+        }
     }
 
     Some(())
@@ -339,6 +382,7 @@ where
                 *emitted_outputs += 1;
                 Some(
                     if matches!(source_demand, PullDemand::UntilOutput(n) if *emitted_outputs >= n)
+                        || matches!(source_demand, PullDemand::LastInput(n) if *emitted_outputs >= n)
                     {
                         ViewDriveFlow::Stop
                     } else {

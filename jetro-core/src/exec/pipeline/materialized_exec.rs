@@ -183,6 +183,10 @@ where
         if matches!(source_demand, PullDemand::FirstInput(n) if pulled_inputs >= n) {
             break 'outer;
         }
+        if matches!(source_demand, PullDemand::NthInput(n) if pulled_inputs < n) {
+            pulled_inputs += 1;
+            continue 'outer;
+        }
         pulled_inputs += 1;
 
         for (stage_idx, stage) in pipeline.stages.iter().enumerate() {
@@ -219,6 +223,10 @@ where
                     }
                 },
             }
+        }
+
+        if matches!(source_demand, PullDemand::NthInput(_)) && matches!(pipeline.sink, Sink::Nth(_)) {
+            return Ok(item);
         }
 
         let sink_done = match &pipeline.sink {
