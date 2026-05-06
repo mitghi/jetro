@@ -4,7 +4,7 @@
 //! (fixed-point iteration). Each rule receives ownership of a node and returns
 //! either a rewritten plan (`Ok`) or the original plan unchanged (`Err`).
 
-use crate::logical_plan::LogicalPlan;
+use crate::ir::logical::LogicalPlan;
 
 /// A single rewrite rule applied to a `LogicalPlan` node.
 pub(crate) trait Rule: Send + Sync {
@@ -75,7 +75,7 @@ impl Optimizer {
 
 pub(crate) mod rules {
     use super::Rule;
-    use crate::logical_plan::LogicalPlan;
+    use crate::ir::logical::LogicalPlan;
 
     /// Replaces expensive patterns with cheaper equivalents:
     /// - `Sort(asc, no key) → Take(1)` → `Min`

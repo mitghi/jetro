@@ -133,7 +133,7 @@ pub(crate) fn pass_method_const_fold(ops: Vec<Opcode>) -> Vec<Opcode> {
 /// Fold `KindCheck` against a preceding literal push into a constant boolean,
 /// e.g. `MakeObj` followed by `is array` → `false`.
 pub(crate) fn pass_kind_check_fold(ops: Vec<Opcode>) -> Vec<Opcode> {
-    use crate::analysis::{fold_kind_check, VType};
+    use crate::plan::analysis::{fold_kind_check, VType};
     let mut out = Vec::with_capacity(ops.len());
     for op in ops {
         if let Opcode::KindCheck { ty, negate } = &op {

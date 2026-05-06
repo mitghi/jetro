@@ -1357,7 +1357,7 @@ mod tests {
 
     #[test]
     fn analysis_infer_result_type() {
-        use crate::analysis::{infer_result_type, VType};
+        use crate::plan::analysis::{infer_result_type, VType};
         use crate::compile::compiler::Compiler;
         let p = Compiler::compile_str("42 + 1").unwrap();
         let av = infer_result_type(&p);
@@ -1370,7 +1370,7 @@ mod tests {
 
     #[test]
     fn analysis_count_ident_uses() {
-        use crate::analysis::count_ident_uses;
+        use crate::plan::analysis::count_ident_uses;
         use crate::compile::compiler::Compiler;
         let p = Compiler::compile_str("let x = 10 in x + x + 1").unwrap();
         assert_eq!(count_ident_uses(&p, "x"), 2);
@@ -1380,7 +1380,7 @@ mod tests {
 
     #[test]
     fn analysis_collect_accessed_fields() {
-        use crate::analysis::collect_accessed_fields;
+        use crate::plan::analysis::collect_accessed_fields;
         use crate::compile::compiler::Compiler;
         let p = Compiler::compile_str("$.store.books.map(@.title)").unwrap();
         let fields = collect_accessed_fields(&p);
@@ -1391,7 +1391,7 @@ mod tests {
 
     #[test]
     fn analysis_program_signature_stable() {
-        use crate::analysis::program_signature;
+        use crate::plan::analysis::program_signature;
         use crate::compile::compiler::Compiler;
         let a = Compiler::compile_str("$.x.y + 1").unwrap();
         let b = Compiler::compile_str("$.x.y + 1").unwrap();
@@ -1491,7 +1491,7 @@ mod tests {
 
     #[test]
     fn analysis_monotonicity_sort() {
-        use crate::analysis::{infer_monotonicity, Monotonicity};
+        use crate::plan::analysis::{infer_monotonicity, Monotonicity};
         use crate::compile::compiler::Compiler;
         let p = Compiler::compile_str("$.x.sort()").unwrap();
         assert_eq!(infer_monotonicity(&p), Monotonicity::Asc);
@@ -1501,7 +1501,7 @@ mod tests {
 
     #[test]
     fn analysis_cost_nonzero() {
-        use crate::analysis::program_cost;
+        use crate::plan::analysis::program_cost;
         use crate::compile::compiler::Compiler;
         let cheap = Compiler::compile_str("42").unwrap();
         let expensive =
@@ -1511,7 +1511,7 @@ mod tests {
 
     #[test]
     fn analysis_selectivity_score() {
-        use crate::analysis::selectivity_score;
+        use crate::plan::analysis::selectivity_score;
         use crate::parse::parser::parse;
         let eq = parse("x == 1").unwrap();
         let lt = parse("x < 1").unwrap();
@@ -1522,7 +1522,7 @@ mod tests {
 
     #[test]
     fn analysis_escapes_doc() {
-        use crate::analysis::escapes_doc;
+        use crate::plan::analysis::escapes_doc;
         use crate::compile::compiler::Compiler;
         let p = Compiler::compile_str("42").unwrap();
         assert!(!escapes_doc(&p));
@@ -2015,7 +2015,7 @@ mod tests {
 
     #[test]
     fn analysis_dedup_subprograms() {
-        use crate::analysis::dedup_subprograms;
+        use crate::plan::analysis::dedup_subprograms;
         use crate::compile::compiler::Compiler;
         
         let prog = Compiler::compile_str("[$.a.b + 1, $.a.b + 1]").unwrap();
@@ -2042,7 +2042,7 @@ mod tests {
 
     #[test]
     fn analysis_find_common_subexprs() {
-        use crate::analysis::find_common_subexprs;
+        use crate::plan::analysis::find_common_subexprs;
         use crate::compile::compiler::Compiler;
         let prog = Compiler::compile_str("[$.x.y, $.x.y, $.z]").unwrap();
         let cs = find_common_subexprs(&prog);
@@ -2078,7 +2078,7 @@ mod tests {
 
     #[test]
     fn analysis_expr_uses_ident() {
-        use crate::analysis::expr_uses_ident;
+        use crate::plan::analysis::expr_uses_ident;
         use crate::parse::parser::parse;
         let e = parse("x + 1").unwrap();
         assert!(expr_uses_ident(&e, "x"));
@@ -2089,7 +2089,7 @@ mod tests {
 
     #[test]
     fn analysis_fold_kind_check_helper() {
-        use crate::analysis::{fold_kind_check, VType};
+        use crate::plan::analysis::{fold_kind_check, VType};
         use crate::parse::ast::KindType;
         assert_eq!(
             fold_kind_check(VType::Int, KindType::Number, false),

@@ -66,7 +66,7 @@ impl Compiler {
         let ops = Self::optimize(Self::emit(&e, &ctx));
         let prog = Program::new(ops, source);
         
-        let deduped = crate::analysis::dedup_subprograms(&prog);
+        let deduped = crate::plan::analysis::dedup_subprograms(&prog);
         let ics = fresh_ics(deduped.ops.len());
         Program {
             ops: deduped.ops.clone(),
@@ -80,7 +80,7 @@ impl Compiler {
     /// Recursively reorder the operands of `&&` expressions so the more selective
     /// (cheaper) operand comes first, enabling short-circuit evaluation to skip work.
     fn reorder_and_operands(expr: &mut Expr) {
-        use crate::analysis::selectivity_score;
+        use crate::plan::analysis::selectivity_score;
         match expr {
             Expr::BinOp(l, op, r) if *op == BinOp::And => {
                 Self::reorder_and_operands(l);
@@ -217,7 +217,7 @@ impl Compiler {
         let ops = Self::optimize_with(Self::emit(&e, &ctx), config);
         let prog = Program::new(ops, input);
         if config.dedup_subprogs {
-            let deduped = crate::analysis::dedup_subprograms(&prog);
+            let deduped = crate::plan::analysis::dedup_subprograms(&prog);
             let ics = fresh_ics(deduped.ops.len());
             Ok(Program {
                 ops: deduped.ops.clone(),
@@ -471,8 +471,8 @@ impl Compiler {
             Expr::Let { name, init, body } => {
                 
                 
-                if crate::analysis::expr_is_pure(init)
-                    && !crate::analysis::expr_uses_ident(body, name)
+                if crate::plan::analysis::expr_is_pure(init)
+                    && !crate::plan::analysis::expr_uses_ident(body, name)
                 {
                     Self::emit_into(body, ctx, ops);
                 } else {

@@ -5,7 +5,7 @@
 //! ```text
 //! source text
 //!   │  parser::parse()      → Expr AST
-//!   │  planner::plan_query()→ QueryPlan (physical IR)
+//!   │  plan::physical::plan_query() → QueryPlan (physical IR)
 //!   │  physical_eval::run() → dispatches to:
 //!   │    StructuralIndex backend  (jetro-experimental bitmap)
 //!   │    ViewPipeline backend     (borrowed tape/Val navigation)
@@ -22,7 +22,6 @@
 //! ```
 
 #[cfg_attr(not(test), allow(dead_code))]
-pub(crate) mod analysis;
 pub(crate) mod builtin_helpers;
 pub(crate) mod builtin_registry;
 pub(crate) mod builtins;
@@ -30,19 +29,16 @@ pub(crate) mod composed_pipeline;
 pub(crate) mod context;
 pub(crate) mod data;
 pub(crate) mod executor;
+pub(crate) mod ir;
 pub(crate) mod parse;
-pub(crate) mod physical;
 pub(crate) mod physical_eval;
 pub(crate) mod pipeline;
-pub(crate) mod planner;
+pub(crate) mod plan;
 pub(crate) mod structural;
 pub(crate) mod util;
 pub(crate) mod view_pipeline;
 pub(crate) mod compile;
 pub(crate) mod vm;
-pub(crate) mod logical_plan;
-pub(crate) mod logical_planner;
-pub(crate) mod optimizer;
 
 #[cfg(test)]
 mod examples;
@@ -160,7 +156,7 @@ pub struct Jetro {
 /// thread-local state.
 pub struct JetroEngine {
     /// Maps `"<context_key>\0<expr>"` to compiled `QueryPlan`; evicted wholesale when full.
-    plan_cache: Mutex<HashMap<String, physical::QueryPlan>>,
+    plan_cache: Mutex<HashMap<String, ir::physical::QueryPlan>>,
     /// Maximum number of entries before the cache is cleared; 0 disables caching.
     plan_cache_limit: usize,
     /// The shared `VM` used by all `collect*` calls on this engine instance.
@@ -272,14 +268,14 @@ impl JetroEngine {
 
     /// Look up a compiled `QueryPlan` by expression string and planning context,
     /// compiling and inserting it if not already cached; evicts the whole cache if full.
-    fn cached_plan(&self, expr: &str, context: planner::PlanningContext) -> physical::QueryPlan {
+    fn cached_plan(&self, expr: &str, context: plan::physical::PlanningContext) -> ir::physical::QueryPlan {
         let mut cache = self.plan_cache.lock().expect("plan cache poisoned");
         let cache_key = format!("{}\0{}", context.cache_key(), expr);
         if let Some(plan) = cache.get(&cache_key) {
             return plan.clone();
         }
 
-        let plan = planner::plan_query_with_context(expr, context);
+        let plan = plan::physical::plan_query_with_context(expr, context);
         if self.plan_cache_limit > 0 {
             if cache.len() >= self.plan_cache_limit {
                 cache.clear();

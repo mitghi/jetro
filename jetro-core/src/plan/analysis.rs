@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::parse::ast::KindType;
-use super::vm::{CompiledPipeStep, Opcode, Program};
+use crate::vm::{CompiledPipeStep, Opcode, Program};
 use crate::builtins::BuiltinMethod;
 
 
@@ -488,7 +488,7 @@ fn count_ident_uses_in_ops(ops: &[Opcode], name: &str, acc: &mut usize) {
                 }
             }
             Opcode::MakeObj(entries) => {
-                use super::vm::CompiledObjEntry;
+                use crate::vm::CompiledObjEntry;
                 for e in entries.iter() {
                     match e {
                         CompiledObjEntry::Short { .. } => {}
@@ -516,7 +516,7 @@ fn count_ident_uses_in_ops(ops: &[Opcode], name: &str, acc: &mut usize) {
                 }
             }
             Opcode::FString(parts) => {
-                use super::vm::CompiledFSPart;
+                use crate::vm::CompiledFSPart;
                 for p in parts.iter() {
                     if let CompiledFSPart::Interp { prog, .. } = p {
                         count_ident_uses_in_ops(&prog.ops, name, acc);
@@ -621,7 +621,7 @@ fn hash_ops(ops: &[Opcode], h: &mut impl std::hash::Hasher) {
                 }
             }
             Opcode::MakeObj(entries) => {
-                use super::vm::CompiledObjEntry;
+                use crate::vm::CompiledObjEntry;
                 for e in entries.iter() {
                     match e {
                         CompiledObjEntry::Short { name, .. } => {
@@ -652,7 +652,7 @@ fn hash_ops(ops: &[Opcode], h: &mut impl std::hash::Hasher) {
                             key.as_bytes().hash(h);
                             optional.hash(h);
                             for st in steps.iter() {
-                                use super::vm::KvStep;
+                                use crate::vm::KvStep;
                                 match st {
                                     KvStep::Field(f) => {
                                         0u8.hash(h);
@@ -717,7 +717,7 @@ fn walk_subprograms(ops: &[Opcode], map: &mut HashMap<u64, usize>) {
             Opcode::LetExpr { body, .. } => vec![body],
             Opcode::MakeArr(progs) => progs.iter().map(|(p, _)| p).collect(),
             Opcode::MakeObj(entries) => {
-                use super::vm::CompiledObjEntry;
+                use crate::vm::CompiledObjEntry;
                 let mut v = Vec::new();
                 for e in entries.iter() {
                     match e {
@@ -972,7 +972,7 @@ fn dedup_rec(program: &Program, cache: &mut HashMap<u64, Arc<Program>>) -> Arc<P
 /// Rewrite a single opcode so that all embedded sub-programs are replaced with
 /// their deduplicated equivalents from `cache`.
 fn rewrite_op(op: &Opcode, cache: &mut HashMap<u64, Arc<Program>>) -> Opcode {
-    use super::vm::{CompSpec, CompiledFSPart, CompiledObjEntry, DictCompSpec};
+    use crate::vm::{CompSpec, CompiledFSPart, CompiledObjEntry, DictCompSpec};
     match op {
         Opcode::AndOp(p) => Opcode::AndOp(dedup_rec(p, cache)),
         Opcode::OrOp(p) => Opcode::OrOp(dedup_rec(p, cache)),
@@ -1085,10 +1085,10 @@ fn rewrite_op(op: &Opcode, cache: &mut HashMap<u64, Arc<Program>>) -> Opcode {
 
 /// Rebuild a `CompiledCall` with all sub-programs replaced by their deduplicated equivalents.
 fn rewrite_call(
-    c: &Arc<super::vm::CompiledCall>,
+    c: &Arc<crate::vm::CompiledCall>,
     cache: &mut HashMap<u64, Arc<Program>>,
-) -> Arc<super::vm::CompiledCall> {
-    use super::vm::CompiledCall;
+) -> Arc<crate::vm::CompiledCall> {
+    use crate::vm::CompiledCall;
     let new_subs: Vec<Arc<Program>> = c.sub_progs.iter().map(|p| dedup_rec(p, cache)).collect();
     Arc::new(CompiledCall {
         method: c.method,
@@ -1148,7 +1148,7 @@ pub fn opcode_cost(op: &Opcode) -> u32 {
             base + c.sub_progs.iter().map(|p| program_cost(p)).sum::<u32>()
         }
         Opcode::MakeObj(entries) => {
-            use super::vm::CompiledObjEntry;
+            use crate::vm::CompiledObjEntry;
             entries
                 .iter()
                 .map(|e| match e {
@@ -1167,7 +1167,7 @@ pub fn opcode_cost(op: &Opcode) -> u32 {
         }
         Opcode::MakeArr(progs) => progs.iter().map(|(p, _)| 1 + program_cost(p)).sum(),
         Opcode::FString(parts) => {
-            use super::vm::CompiledFSPart;
+            use crate::vm::CompiledFSPart;
             parts
                 .iter()
                 .map(|p| match p {

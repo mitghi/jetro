@@ -8,9 +8,9 @@
 use serde_json::Value;
 
 use crate::context::EvalError;
-use crate::physical::{QueryPlan, QueryRoot};
+use crate::ir::physical::{QueryPlan, QueryRoot};
 use crate::physical_eval;
-use crate::planner;
+use crate::plan::physical as planner;
 use crate::{with_vm, Jetro, VM};
 
 /// Plans `expr` against `j`'s input mode and then executes the resulting plan, returning JSON.
@@ -80,18 +80,18 @@ mod tests {
 
     use serde_json::json;
 
-    use crate::physical::QueryRoot;
-    use crate::physical::{
+    use crate::ir::physical::QueryRoot;
+    use crate::ir::physical::{
         BackendPlan, BackendPreference, BackendSet, ExecutionFacts, NodeId, PhysicalArrayElem,
         PhysicalChainStep, PhysicalNode, PhysicalObjField, PhysicalPathStep, PipelinePlanSource,
         PlanNode, QueryPlan,
     };
     use crate::pipeline::{BodyKernel, NumOp, ReducerOp, Sink, Stage};
-    use crate::planner;
+    use crate::plan::physical as planner;
     use crate::data::value::Val;
     use crate::{Jetro, JetroEngine};
 
-    fn assert_no_vm_fallback(plan: &crate::physical::QueryPlan, id: NodeId) {
+    fn assert_no_vm_fallback(plan: &crate::ir::physical::QueryPlan, id: NodeId) {
         match plan.node(id) {
             PlanNode::Vm(_) => panic!("unexpected VM fallback in physical plan"),
             PlanNode::Literal(_)

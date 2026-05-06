@@ -9,12 +9,12 @@
 
 use std::sync::Arc;
 
-use crate::analysis;
+use crate::plan::analysis;
 use crate::parse::ast::{ArrayElem, Expr, ObjField, Step};
 use crate::builtins::{BuiltinCall, BuiltinMethod};
 use crate::compile::compiler::Compiler;
 use crate::parse::parser;
-use crate::physical::{
+use crate::ir::physical::{
     BackendPlan, ExecutionFacts, NodeId, PhysicalArrayElem, PhysicalChainStep, PhysicalNode,
     PhysicalObjField, PhysicalPathStep, PipelinePlanSource, PlanNode, QueryPlan,
 };
@@ -249,16 +249,16 @@ fn select_backend_plan(
                 ..
             },
         ) => BackendPlan::new(&[
-            crate::physical::BackendPreference::ValView,
-            crate::physical::BackendPreference::Interpreted,
+            crate::ir::physical::BackendPreference::ValView,
+            crate::ir::physical::BackendPreference::Interpreted,
         ]),
         (InputMode::Val, PlanNode::RootPath(_) | PlanNode::Structural { .. }) => {
-            BackendPlan::new(&[crate::physical::BackendPreference::Interpreted])
+            BackendPlan::new(&[crate::ir::physical::BackendPreference::Interpreted])
         }
         (InputMode::Bytes, PlanNode::Structural { .. }) => {
             BackendPlan::new(&[
-                crate::physical::BackendPreference::Structural,
-                crate::physical::BackendPreference::Interpreted,
+                crate::ir::physical::BackendPreference::Structural,
+                crate::ir::physical::BackendPreference::Interpreted,
             ])
         }
         (
@@ -268,11 +268,11 @@ fn select_backend_plan(
                 ..
             },
         ) if facts.can_stream_rows => BackendPlan::new(&[
-            crate::physical::BackendPreference::TapeView,
-            crate::physical::BackendPreference::TapeRows,
-            crate::physical::BackendPreference::MaterializedSource,
-            crate::physical::BackendPreference::ValView,
-            crate::physical::BackendPreference::Interpreted,
+            crate::ir::physical::BackendPreference::TapeView,
+            crate::ir::physical::BackendPreference::TapeRows,
+            crate::ir::physical::BackendPreference::MaterializedSource,
+            crate::ir::physical::BackendPreference::ValView,
+            crate::ir::physical::BackendPreference::Interpreted,
         ])
         .without_interpreted_if(facts.is_byte_native()),
         _ if context.input == InputMode::Bytes
@@ -296,7 +296,7 @@ fn adjust_facts_for_backend_plan(
     if matches!(node, PlanNode::Structural { .. })
         && backends
             .as_slice()
-            .contains(&crate::physical::BackendPreference::Structural)
+            .contains(&crate::ir::physical::BackendPreference::Structural)
     {
         facts.contains_vm_fallback = false;
     }
@@ -337,8 +337,8 @@ fn try_lower_pipeline(builder: &PlanBuilder, expr: &Expr) -> Option<PlanNode> {
 /// Runs `expr` through the logical planner, optimizer, and logical lowerer. Returns `None` if
 /// any stage cannot classify the expression.
 fn lower_via_logical(expr: &Expr) -> Option<Pipeline> {
-    let logical = crate::logical_planner::try_lower(expr)?;
-    let optimized = crate::optimizer::Optimizer::default_rules().optimize(logical);
+    let logical = crate::plan::logical::try_lower(expr)?;
+    let optimized = crate::plan::optimize::Optimizer::default_rules().optimize(logical);
     crate::pipeline::logical_lower::try_lower(optimized)
 }
 
@@ -823,7 +823,7 @@ pub(crate) fn plan_query_with_context(expr: &str, context: PlanningContext) -> Q
 mod tests {
     use super::*;
     use crate::parse::ast::BinOp;
-    use crate::physical::{
+    use crate::ir::physical::{
         BackendPreference, PhysicalObjField, PipelinePlanSource, PlanNode, QueryRoot,
     };
 
@@ -905,10 +905,10 @@ mod tests {
         );
         assert!(plan
             .backend_capabilities(*root)
-            .contains(crate::physical::BackendSet::TAPE_VIEW));
+            .contains(crate::ir::physical::BackendSet::TAPE_VIEW));
         assert!(plan
             .backend_capabilities(*root)
-            .contains(crate::physical::BackendSet::VAL_VIEW));
+            .contains(crate::ir::physical::BackendSet::VAL_VIEW));
     }
 
     #[test]
