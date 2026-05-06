@@ -23,4 +23,6 @@ mod patch_fusion_soundness;
 #[cfg(test)]
 mod examples;
 #[cfg(test)]
+mod pattern_match;
+#[cfg(test)]
 mod regression;

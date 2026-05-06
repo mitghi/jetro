@@ -1258,6 +1258,11 @@ impl VM {
                 Opcode::DeleteMarkErr => {
                     return err!("DELETE: only valid inside a patch-field value");
                 }
+                Opcode::Match(cm) => {
+                    let scrutinee = self.exec(&cm.scrutinee, env)?;
+                    let result = self.exec_match(cm, &scrutinee, env)?;
+                    stack.push(result);
+                }
             }
         }
 
@@ -2815,6 +2820,218 @@ impl VM {
             }
             other => Ok(vec![other]),
         }
+    }
+
+    /// Evaluate a compiled `match` expression: walk arms in order, attempt
+    /// to match the scrutinee against each pattern, run the optional guard,
+    /// and evaluate the body of the first arm that fires. Returns an
+    /// evaluation error when no arm matches.
+    fn exec_match(
+        &mut self,
+        cm: &CompiledMatch,
+        scrutinee: &Val,
+        env: &Env,
+    ) -> Result<Val, EvalError> {
+        for arm in cm.arms.iter() {
+            let mut bindings: Vec<(Arc<str>, Val)> = Vec::new();
+            if !match_pat(&arm.pat, scrutinee, &mut bindings) {
+                continue;
+            }
+            let arm_env = bindings
+                .iter()
+                .fold(env.clone(), |e, (n, v)| e.with_var(n.as_ref(), v.clone()));
+            if let Some(guard) = arm.guard.as_ref() {
+                let g = self.exec(guard, &arm_env)?;
+                if !crate::util::is_truthy(&g) {
+                    continue;
+                }
+            }
+            return self.exec(&arm.body, &arm_env);
+        }
+        Err(EvalError(format!(
+            "match: no arm matched value of kind {}",
+            kind_label(scrutinee)
+        )))
+    }
+}
+
+/// Short type-tag string used in `match` non-exhaustive errors.
+fn kind_label(v: &Val) -> &'static str {
+    match v {
+        Val::Null => "null",
+        Val::Bool(_) => "bool",
+        Val::Int(_) => "int",
+        Val::Float(_) => "float",
+        Val::Str(_) | Val::StrSlice(_) | Val::StrVec(_) | Val::StrSliceVec(_) => "string",
+        Val::Arr(_) | Val::IntVec(_) | Val::FloatVec(_) | Val::ObjVec(_) => "array",
+        Val::Obj(_) | Val::ObjSmall(_) => "object",
+    }
+}
+
+/// Try to match `pat` against `val`, recording any captured names in `out`.
+/// Returns `true` on success and `false` on failure. On failure, callers
+/// must discard `out` (it may contain partial bindings from a sub-pattern
+/// that succeeded before the overall match failed).
+fn match_pat(pat: &Pat, val: &Val, out: &mut Vec<(Arc<str>, Val)>) -> bool {
+    match pat {
+        Pat::Wild => true,
+        Pat::Bind(name) => {
+            out.push((Arc::from(name.as_str()), val.clone()));
+            true
+        }
+        Pat::Lit(lit) => match_pat_lit(lit, val),
+        Pat::Or(alts) => {
+            let saved_len = out.len();
+            for alt in alts {
+                if match_pat(alt, val, out) {
+                    return true;
+                }
+                out.truncate(saved_len);
+            }
+            false
+        }
+        Pat::Kind { name, kind } => {
+            if !val_matches_kind(val, *kind) {
+                return false;
+            }
+            if let Some(n) = name.as_deref() {
+                out.push((Arc::from(n), val.clone()));
+            }
+            true
+        }
+        Pat::Obj { fields, open: _ } => {
+            if !matches!(val, Val::Obj(_) | Val::ObjSmall(_)) {
+                return false;
+            }
+            let saved_len = out.len();
+            for (key, sub_pat) in fields {
+                let Some(sub_val) = obj_like_get(val, key.as_str()) else {
+                    out.truncate(saved_len);
+                    return false;
+                };
+                if !match_pat(sub_pat, &sub_val, out) {
+                    out.truncate(saved_len);
+                    return false;
+                }
+            }
+            true
+        }
+        Pat::Arr { elems, rest } => {
+            let Some(arr_len) = arr_like_len(val) else {
+                return false;
+            };
+            let saved_len = out.len();
+            let prefix = elems.len();
+            match rest {
+                Some(_) => {
+                    if arr_len < prefix {
+                        return false;
+                    }
+                }
+                None => {
+                    if arr_len != prefix {
+                        return false;
+                    }
+                }
+            }
+            for (i, sub_pat) in elems.iter().enumerate() {
+                let item = arr_like_get(val, i);
+                if !match_pat(sub_pat, &item, out) {
+                    out.truncate(saved_len);
+                    return false;
+                }
+            }
+            if let Some(rest_name) = rest.as_ref().and_then(|n| n.as_deref()) {
+                let tail: Vec<Val> = (prefix..arr_len).map(|i| arr_like_get(val, i)).collect();
+                out.push((Arc::from(rest_name), Val::arr(tail)));
+            }
+            true
+        }
+    }
+}
+
+/// Return the element count of any array-like `Val` (the materialised
+/// `Arr` form, the columnar primitive vectors, and the row-vector
+/// `ObjVec`), or `None` for non-array values.
+fn arr_like_len(val: &Val) -> Option<usize> {
+    match val {
+        Val::Arr(a) => Some(a.len()),
+        Val::IntVec(v) => Some(v.len()),
+        Val::FloatVec(v) => Some(v.len()),
+        Val::StrVec(v) => Some(v.len()),
+        Val::StrSliceVec(v) => Some(v.len()),
+        Val::ObjVec(d) => Some(d.nrows()),
+        _ => None,
+    }
+}
+
+/// Project the `i`-th element of an array-like `Val` into a freshly
+/// constructed `Val`. Caller must guarantee `i < arr_like_len(val)`.
+fn arr_like_get(val: &Val, i: usize) -> Val {
+    match val {
+        Val::Arr(a) => a[i].clone(),
+        Val::IntVec(v) => Val::Int(v[i]),
+        Val::FloatVec(v) => Val::Float(v[i]),
+        Val::StrVec(v) => Val::Str(v[i].clone()),
+        Val::StrSliceVec(v) => Val::StrSlice(v[i].clone()),
+        Val::ObjVec(d) => d.row_val(i),
+        _ => Val::Null,
+    }
+}
+
+/// Look up an object field by string key in `Obj` / `ObjSmall` values.
+/// Returns `None` when the value is not a scalar object or the key is
+/// absent. `ObjVec` is treated as an array of objects, not a single object,
+/// and is excluded here.
+fn obj_like_get(val: &Val, key: &str) -> Option<Val> {
+    match val {
+        Val::Obj(m) => m.get(key).cloned(),
+        Val::ObjSmall(entries) => entries
+            .iter()
+            .find(|(k, _)| k.as_ref() == key)
+            .map(|(_, v)| v.clone()),
+        _ => None,
+    }
+}
+
+/// Compare a `PatLit` against a runtime `Val` for structural equality.
+fn match_pat_lit(lit: &PatLit, val: &Val) -> bool {
+    match (lit, val) {
+        (PatLit::Null, Val::Null) => true,
+        (PatLit::Bool(b), Val::Bool(v)) => b == v,
+        (PatLit::Int(n), Val::Int(v)) => n == v,
+        (PatLit::Int(n), Val::Float(v)) => (*n as f64) == *v,
+        (PatLit::Float(f), Val::Float(v)) => f == v,
+        (PatLit::Float(f), Val::Int(v)) => *f == (*v as f64),
+        (PatLit::Str(s), Val::Str(v)) => s.as_str() == v.as_ref(),
+        (PatLit::Str(s), Val::StrSlice(v)) => s.as_str() == v.as_ref(),
+        _ => false,
+    }
+}
+
+/// Return `true` when `val`'s runtime type matches the `KindType` requested
+/// by a kind-bind or kind-only pattern.
+fn val_matches_kind(val: &Val, kind: KindType) -> bool {
+    match (val, kind) {
+        (Val::Null, KindType::Null) => true,
+        (Val::Bool(_), KindType::Bool) => true,
+        (Val::Int(_) | Val::Float(_), KindType::Number) => true,
+        (Val::Str(_) | Val::StrSlice(_) | Val::StrVec(_) | Val::StrSliceVec(_), KindType::Str) => {
+            // StrVec/StrSliceVec are vector-of-string fast representations;
+            // they do not satisfy a scalar string kind check.
+            matches!(val, Val::Str(_) | Val::StrSlice(_))
+        }
+        (
+            Val::Arr(_)
+            | Val::IntVec(_)
+            | Val::FloatVec(_)
+            | Val::StrVec(_)
+            | Val::StrSliceVec(_)
+            | Val::ObjVec(_),
+            KindType::Array,
+        ) => true,
+        (Val::Obj(_) | Val::ObjSmall(_), KindType::Object) => true,
+        _ => false,
     }
 }
 

@@ -24,11 +24,14 @@ kw_patch  = @{ "patch"  ~ !ident_char }
 kw_delete = @{ "DELETE" ~ !ident_char }
 kw_try    = @{ "try"    ~ !ident_char }
 kw_has    = @{ "has"    ~ !ident_char }
+kw_match  = @{ "match"  ~ !ident_char }
+kw_with   = @{ "with"   ~ !ident_char }
 
 reserved = _{
     ("true" | "false" | "null" | "and" | "or" | "not"
      | "for" | "in" | "if" | "else" | "let" | "lambda" | "kind"
-     | "is" | "as" | "when" | "patch" | "DELETE" | "try" | "has") ~ !ident_char
+     | "is" | "as" | "when" | "patch" | "DELETE" | "try" | "has"
+     | "match" | "with") ~ !ident_char
 }
 
 ident      = @{ !reserved ~ (ASCII_ALPHA | "_") ~ ident_char* }
@@ -190,6 +193,53 @@ arr_construct = { "[" ~ (arr_elem ~ ("," ~ arr_elem)* ~ ","?)? ~ "]" }
 // ── Global function calls ─────────────────────────────────────────────────────
 global_call = { ident ~ "(" ~ arg_list? ~ ")" }
 
+// ── Match expression ──────────────────────────────────────────────────────────
+// Pattern grammar.  Object/array patterns are recognised inside arm heads only,
+// so `{k: pat}` does not collide with `{k: expr}` object literals (those parse
+// as `obj_construct` in expression position).
+//
+// Pattern precedence: `pat_or` > `pat_atom`.  Or-patterns at the top of an
+// arm head; everything else is atom or object/array.
+pat_lit_null  = @{ "null"  ~ !ident_char }
+pat_lit_true  = @{ "true"  ~ !ident_char }
+pat_lit_false = @{ "false" ~ !ident_char }
+pat_lit_float = @{ "-"? ~ ASCII_DIGIT+ ~ "." ~ ASCII_DIGIT+ }
+pat_lit_int   = @{ "-"? ~ ASCII_DIGIT+ }
+pat_lit_str   = { lit_str_dq | lit_str_sq }
+pat_literal   = { pat_lit_null | pat_lit_true | pat_lit_false | pat_lit_float | pat_lit_int | pat_lit_str }
+
+pat_wild      = @{ "_" ~ !ident_char }
+pat_kind_bind = { ident ~ ":" ~ kind_type }
+pat_kind_only = { kind_type }
+pat_bind      = { ident }
+
+pat_obj_open  = { "..." }
+pat_obj_field = { ident ~ ":" ~ pat_or }
+pat_obj       = { "{" ~ (pat_obj_field ~ ("," ~ pat_obj_field)* ~ ("," ~ pat_obj_open)? ~ ","?)? ~ "}" }
+
+pat_arr_rest_named = { "..." ~ ident }
+pat_arr_rest_anon  = { "..." }
+pat_arr_rest       = { pat_arr_rest_named | pat_arr_rest_anon }
+pat_arr            = { "[" ~ (pat_or ~ ("," ~ pat_or)* ~ ("," ~ pat_arr_rest)? ~ ","?)? ~ "]" }
+
+pat_atom = {
+    pat_wild     |
+    pat_literal  |
+    pat_kind_bind|
+    pat_kind_only|
+    pat_obj      |
+    pat_arr      |
+    pat_bind     |
+    "(" ~ pat_or ~ ")"
+}
+pat_or  = { pat_atom ~ ("|" ~ pat_atom)* }
+
+match_arm = { pat_or ~ (kw_when ~ expr)? ~ "->" ~ expr }
+// `match scrutinee with { arms }` — `with` separator avoids ambiguity with
+// `expr { inline_filter }` postfix. Without it, `match $.x { v -> v }` parses
+// the `{ v -> v }` as inline_filter (since `v -> v` is a valid pipe-bind expr).
+match_expr = { kw_match ~ expr ~ kw_with ~ "{" ~ match_arm ~ ("," ~ match_arm)* ~ ","? ~ "}" }
+
 // ── Patch block ───────────────────────────────────────────────────────────────
 pp_wild_filter = { "[" ~ "*" ~ kw_if ~ expr ~ "]" }
 pp_wild        = { "[" ~ "*" ~ "]" }
@@ -203,6 +253,7 @@ patch_block    = { kw_patch ~ coalesce_expr ~ "{" ~ (patch_field ~ ("," ~ patch_
 
 // ── Primary ───────────────────────────────────────────────────────────────────
 primary = {
+    match_expr    |
     patch_block   |
     let_expr      |
     lambda_expr   |

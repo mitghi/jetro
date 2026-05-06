@@ -176,6 +176,71 @@ pub enum Expr {
     /// Sentinel emitted by the parser for `.delete()` / `.unset()` terminals.
     /// Reaching the evaluator is a hard error; the compiler must consume it during patch lowering.
     DeleteMark,
+
+    /// Pattern-match expression `match scrutinee { pat when guard -> body, ... }`.
+    /// Arms are tested top to bottom; first match wins.
+    Match {
+        /// Value being matched against the arm patterns.
+        scrutinee: Box<Expr>,
+        /// Ordered list of `pat -> body` arms with optional guards.
+        arms: Vec<MatchArm>,
+    },
+}
+
+/// One arm of a `Match` expression: a pattern, optional guard, and body.
+#[derive(Debug, Clone)]
+pub struct MatchArm {
+    /// Pattern that the scrutinee must satisfy.
+    pub pat: Pat,
+    /// Optional `when <expr>` guard evaluated with arm bindings in scope.
+    pub guard: Option<Expr>,
+    /// Body expression evaluated when this arm fires.
+    pub body: Expr,
+}
+
+/// Pattern node used in `Match` arms. Patterns describe the shape of a value
+/// and may bind subterms into the arm's scope.
+#[derive(Debug, Clone)]
+pub enum Pat {
+    /// Wildcard `_` — matches any value, no binding.
+    Wild,
+    /// Literal pattern — matches by structural equality with `Lit`.
+    Lit(PatLit),
+    /// Identifier binding `name` — captures the whole value into `name`.
+    Bind(String),
+    /// Or-pattern `a | b | c` — matches if any sub-pattern matches.
+    Or(Vec<Pat>),
+    /// Object pattern `{k: pat, ...}` — every listed key must match. The
+    /// runtime always permits extra keys; the `open` flag is currently
+    /// informational and left in the AST so future passes can opt into
+    /// strict closed-object matching without a grammar change.
+    Obj {
+        /// Listed key/sub-pattern pairs that must all match.
+        fields: Vec<(String, Pat)>,
+        /// `true` when the source spelled the trailing `...` rest marker.
+        #[allow(dead_code)]
+        open: bool,
+    },
+    /// Array pattern `[a, b, ...rest]` — fixed prefix with optional rest binding.
+    Arr { elems: Vec<Pat>, rest: Option<Option<String>> },
+    /// Type-kind pattern `name: kind` (e.g. `s: str`) — matches a kind, binds the value.
+    Kind { name: Option<String>, kind: KindType },
+}
+
+/// Literal sub-form of `Pat::Lit`. Restricted to scalar literals; arbitrary
+/// expressions are not allowed in pattern position.
+#[derive(Debug, Clone)]
+pub enum PatLit {
+    /// `null` literal.
+    Null,
+    /// Boolean literal.
+    Bool(bool),
+    /// Integer literal.
+    Int(i64),
+    /// Float literal.
+    Float(f64),
+    /// String literal.
+    Str(String),
 }
 
 

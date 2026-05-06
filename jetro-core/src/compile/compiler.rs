@@ -14,7 +14,7 @@ use crate::data::context::EvalError;
 use crate::vm::{
     Opcode, Program, CompiledCall, CompiledObjEntry, KvStep, CompiledFSPart,
     BindObjSpec, CompiledPipeStep, CompSpec, DictCompSpec,
-    CompiledPatch, CompiledPatchOp, CompiledPatchVal, CompiledPathStep,
+    CompiledMatch, CompiledMatchArm, CompiledPatch, CompiledPatchOp, CompiledPatchVal, CompiledPathStep,
     fresh_ics, disable_opcode_fusion,
 };
 
@@ -596,9 +596,28 @@ impl Compiler {
             }
 
             Expr::DeleteMark => {
-                
-                
+
+
                 ops.push(Opcode::DeleteMarkErr);
+            }
+
+            Expr::Match { scrutinee, arms } => {
+                let scrutinee_prog = Arc::new(Self::compile_sub(scrutinee, ctx));
+                let compiled_arms: Vec<CompiledMatchArm> = arms
+                    .iter()
+                    .map(|arm| CompiledMatchArm {
+                        pat: arm.pat.clone(),
+                        guard: arm
+                            .guard
+                            .as_ref()
+                            .map(|g| Arc::new(Self::compile_sub(g, ctx))),
+                        body: Arc::new(Self::compile_sub(&arm.body, ctx)),
+                    })
+                    .collect();
+                ops.push(Opcode::Match(Arc::new(CompiledMatch {
+                    scrutinee: scrutinee_prog,
+                    arms: Arc::from(compiled_arms),
+                })));
             }
         }
     }

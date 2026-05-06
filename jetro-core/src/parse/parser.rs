@@ -71,6 +71,9 @@ fn is_kw(rule: Rule) -> bool {
             | Rule::kw_is
             | Rule::kw_as
             | Rule::kw_try
+            | Rule::kw_when
+            | Rule::kw_match
+            | Rule::kw_with
     )
 }
 
@@ -768,8 +771,144 @@ fn parse_primary(pair: Pair<Rule>) -> Expr {
         Rule::global_call => parse_global_call(inner),
         Rule::expr => parse_expr(inner),
         Rule::patch_block => parse_patch(inner),
+        Rule::match_expr => parse_match_expr(inner),
         Rule::kw_delete => Expr::DeleteMark,
         r => panic!("unexpected primary rule: {:?}", r),
+    }
+}
+
+/// Parse a `match scrutinee { pat when guard -> body, ... }` expression.
+fn parse_match_expr(pair: Pair<Rule>) -> Expr {
+    let mut inner = pair.into_inner().filter(|p| !is_kw(p.as_rule()));
+    let scrutinee = parse_expr(inner.next().expect("match scrutinee"));
+    let mut arms: Vec<MatchArm> = Vec::new();
+    for arm_pair in inner {
+        if arm_pair.as_rule() != Rule::match_arm {
+            continue;
+        }
+        let mut ai = arm_pair.into_inner().filter(|p| !is_kw(p.as_rule()));
+        let pat_pair = ai.next().expect("match arm pattern");
+        let pat = parse_pat(pat_pair);
+        // Remaining: optional guard expr, then body expr.
+        let rest: Vec<_> = ai.collect();
+        let (guard, body) = match rest.len() {
+            1 => (None, parse_expr(rest.into_iter().next().unwrap())),
+            2 => {
+                let mut it = rest.into_iter();
+                let g = parse_expr(it.next().unwrap());
+                let b = parse_expr(it.next().unwrap());
+                (Some(g), b)
+            }
+            _ => panic!("match arm: expected 1 or 2 trailing exprs (guard?, body)"),
+        };
+        arms.push(MatchArm { pat, guard, body });
+    }
+    Expr::Match {
+        scrutinee: Box::new(scrutinee),
+        arms,
+    }
+}
+
+/// Parse a `pat_or` / `pat_atom` rule into a `Pat` AST node.
+fn parse_pat(pair: Pair<Rule>) -> Pat {
+    match pair.as_rule() {
+        Rule::pat_or => {
+            let mut alts: Vec<Pat> = pair.into_inner().map(parse_pat).collect();
+            if alts.len() == 1 {
+                alts.pop().unwrap()
+            } else {
+                Pat::Or(alts)
+            }
+        }
+        Rule::pat_atom => {
+            let inner = pair.into_inner().next().expect("pat_atom inner");
+            parse_pat(inner)
+        }
+        Rule::pat_wild => Pat::Wild,
+        Rule::pat_literal => Pat::Lit(parse_pat_literal(pair)),
+        Rule::pat_kind_bind => {
+            let mut it = pair.into_inner();
+            let name = it.next().unwrap().as_str().to_string();
+            let kind = parse_kind_type(it.next().unwrap().as_str());
+            Pat::Kind { name: Some(name), kind }
+        }
+        Rule::pat_kind_only => {
+            let kt = pair.into_inner().next().unwrap().as_str();
+            Pat::Kind { name: None, kind: parse_kind_type(kt) }
+        }
+        Rule::pat_bind => Pat::Bind(pair.as_str().to_string()),
+        Rule::pat_obj => {
+            let mut fields: Vec<(String, Pat)> = Vec::new();
+            let mut open = false;
+            for p in pair.into_inner() {
+                match p.as_rule() {
+                    Rule::pat_obj_field => {
+                        let mut fi = p.into_inner();
+                        let k = fi.next().unwrap().as_str().to_string();
+                        let v = parse_pat(fi.next().unwrap());
+                        fields.push((k, v));
+                    }
+                    Rule::pat_obj_open => open = true,
+                    _ => {}
+                }
+            }
+            Pat::Obj { fields, open }
+        }
+        Rule::pat_arr => {
+            let mut elems: Vec<Pat> = Vec::new();
+            let mut rest: Option<Option<String>> = None;
+            for p in pair.into_inner() {
+                match p.as_rule() {
+                    Rule::pat_or | Rule::pat_atom => elems.push(parse_pat(p)),
+                    Rule::pat_arr_rest => {
+                        let inner = p.into_inner().next().unwrap();
+                        match inner.as_rule() {
+                            Rule::pat_arr_rest_named => {
+                                let nm = inner.into_inner().next().unwrap().as_str().to_string();
+                                rest = Some(Some(nm));
+                            }
+                            Rule::pat_arr_rest_anon => rest = Some(None),
+                            _ => {}
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Pat::Arr { elems, rest }
+        }
+        r => panic!("unexpected pattern rule: {:?}", r),
+    }
+}
+
+/// Decode a `pat_literal` rule into a `PatLit`.
+fn parse_pat_literal(pair: Pair<Rule>) -> PatLit {
+    let inner = pair.into_inner().next().expect("pat_literal inner");
+    match inner.as_rule() {
+        Rule::pat_lit_null => PatLit::Null,
+        Rule::pat_lit_true => PatLit::Bool(true),
+        Rule::pat_lit_false => PatLit::Bool(false),
+        Rule::pat_lit_int => PatLit::Int(inner.as_str().parse().expect("pat int")),
+        Rule::pat_lit_float => PatLit::Float(inner.as_str().parse().expect("pat float")),
+        Rule::pat_lit_str => {
+            let raw = inner.as_str();
+            // Strip surrounding quotes.
+            let stripped = &raw[1..raw.len() - 1];
+            PatLit::Str(stripped.to_string())
+        }
+        r => panic!("unexpected pat literal rule: {:?}", r),
+    }
+}
+
+/// Map a kind type name (`number`, `string`, ...) to `KindType`.
+fn parse_kind_type(name: &str) -> KindType {
+    match name {
+        "number" => KindType::Number,
+        "string" => KindType::Str,
+        "array" => KindType::Array,
+        "object" => KindType::Object,
+        "bool" => KindType::Bool,
+        "null" => KindType::Null,
+        other => panic!("unknown kind type: {other}"),
     }
 }
 

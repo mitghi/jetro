@@ -387,6 +387,7 @@ fn apply_op(op: &Opcode, stack: &mut Vec<AbstractVal>) {
         }
         Opcode::PipelineRun { .. } => stack.push(AbstractVal::UNKNOWN),
         Opcode::DeleteMarkErr => stack.push(AbstractVal::UNKNOWN),
+        Opcode::Match(_) => stack.push(AbstractVal::UNKNOWN),
     }
 }
 
@@ -902,6 +903,13 @@ pub fn expr_uses_ident(expr: &crate::parse::ast::Expr, name: &str) -> bool {
             })
         }
         Expr::DeleteMark => false,
+        Expr::Match { scrutinee, arms } => {
+            expr_uses_ident(scrutinee, name)
+                || arms.iter().any(|a| {
+                    a.guard.as_ref().is_some_and(|g| expr_uses_ident(g, name))
+                        || expr_uses_ident(&a.body, name)
+                })
+        }
     }
 }
 
@@ -1192,6 +1200,7 @@ pub fn opcode_cost(op: &Opcode) -> u32 {
         Opcode::CastOp(_) => 2,
         Opcode::PatchEval(_) => 50,
         Opcode::DeleteMarkErr => 1,
+        Opcode::Match(_) => 1,
         Opcode::PipelineRun { base, steps } => {
             program_cost(base)
                 + steps

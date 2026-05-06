@@ -205,6 +205,19 @@ impl EffectAnalyzer {
             | Expr::Str(_)
             | Expr::DeleteMark => EffectSummary::default(),
 
+            // Match: opaque to fusion until P2 ships runtime; treat as a black-box
+            // expression that may read/write anything reachable from its sub-exprs.
+            Expr::Match { scrutinee, arms } => {
+                let mut s = self.visit(scrutinee);
+                for a in arms {
+                    if let Some(g) = a.guard.as_ref() {
+                        s.merge(self.visit(g));
+                    }
+                    s.merge(self.visit(&a.body));
+                }
+                s
+            }
+
             // Root references: one read, no writes.
             Expr::Root => {
                 let mut s = EffectSummary::default();
@@ -818,6 +831,20 @@ fn fuse_recursive(expr: Expr, ctx: &mut FuseCtx) -> Expr {
         | Expr::Current
         | Expr::Ident(_)
         | Expr::DeleteMark => expr,
+
+        // Match: recurse into sub-exprs, leave structure intact. P2 will land
+        // a real fusion-aware lowering that can move writes through arms.
+        Expr::Match { scrutinee, arms } => Expr::Match {
+            scrutinee: Box::new(fuse_recursive(*scrutinee, ctx)),
+            arms: arms
+                .into_iter()
+                .map(|a| crate::parse::ast::MatchArm {
+                    pat: a.pat,
+                    guard: a.guard.map(|g| fuse_recursive(g, ctx)),
+                    body: fuse_recursive(a.body, ctx),
+                })
+                .collect(),
+        },
 
         Expr::FString(parts) => Expr::FString(
             parts

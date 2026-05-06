@@ -332,6 +332,35 @@ pub enum Opcode {
 
     /// Guard that fires when a `DELETE` sentinel reaches execution outside a patch context.
     DeleteMarkErr,
+
+    /// Execute a compiled pattern-match expression: evaluate the scrutinee,
+    /// try each arm's pattern (and optional guard) in order, and run the body
+    /// of the first matching arm with its bindings in scope.
+    Match(Arc<CompiledMatch>),
+}
+
+/// Compiled representation of a `match scrutinee with { arms }` expression.
+/// Patterns are stored unflattened; the runtime walks them directly. Arm
+/// bodies and guards are pre-compiled to `Program`s so they can be re-used
+/// across invocations.
+#[derive(Debug, Clone)]
+pub struct CompiledMatch {
+    /// Program that evaluates the value being matched.
+    pub scrutinee: Arc<Program>,
+    /// Ordered arm list; first matching arm wins.
+    pub arms: Arc<[CompiledMatchArm]>,
+}
+
+/// One compiled arm of a `match` expression, including the pattern, the
+/// optional guard expression, and the body to evaluate on a successful match.
+#[derive(Debug, Clone)]
+pub struct CompiledMatchArm {
+    /// Pattern that the scrutinee must satisfy.
+    pub pat: crate::parse::ast::Pat,
+    /// Optional guard expression; the arm fires only if it evaluates truthy.
+    pub guard: Option<Arc<Program>>,
+    /// Body program evaluated when the pattern matches and the guard passes.
+    pub body: Arc<Program>,
 }
 
 

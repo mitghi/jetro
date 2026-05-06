@@ -878,7 +878,8 @@ pub(super) fn opcode_is_current_only(opcode: &Opcode) -> bool {
         | Opcode::ListComp(_)
         | Opcode::DictComp(_)
         | Opcode::SetComp(_)
-        | Opcode::PatchEval(_) => false,
+        | Opcode::PatchEval(_)
+        | Opcode::Match(_) => false,
         Opcode::DynIndex(prog)
         | Opcode::InlineFilter(prog)
         | Opcode::AndOp(prog)
