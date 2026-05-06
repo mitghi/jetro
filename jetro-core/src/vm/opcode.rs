@@ -449,6 +449,16 @@ pub enum TrieNode {
     /// Treated as a structural marker; deletion happens in the parent's
     /// `Branch` arm rather than by recursing into this node.
     Delete,
+    /// Conditional wrapper: evaluate `cond_prog` against the pre-batch doc
+    /// and, only if it's truthy, apply `then` at this position. Phase F
+    /// preserves invariant 5 (cond reads pre-batch state) by using the
+    /// original `env` and the pre-batch doc as `@` when running `cond_prog`.
+    Conditional {
+        /// Guard program; evaluated with `@` = pre-batch doc, `$` = env.root.
+        cond_prog: Arc<Program>,
+        /// Subtree applied when the guard is truthy.
+        then: Box<TrieNode>,
+    },
     /// Recurse into named (object) and indexed (array) children. Children
     /// not in either map remain `Arc`-shared with no traversal.
     Branch {
@@ -472,18 +482,16 @@ pub enum IdxKey {
 
 impl CompiledPatchTrie {
     /// Build a trie from `ops` in source order. Returns `None` when any op
-    /// is not trie-eligible: contains a `cond`, or uses `Wildcard` /
-    /// `WildcardFilter` / `Descendant` path steps. Such patches fall back
-    /// to the per-op walker which handles those cases natively.
+    /// uses `Wildcard` / `WildcardFilter` / `Descendant` path steps; such
+    /// patches fall back to the per-op walker which handles those cases
+    /// natively. Phase F: conditional ops (`op.cond.is_some()`) are now
+    /// trie-eligible and produce `TrieNode::Conditional` leaves.
     ///
     /// Source-order semantics: later ops shadow earlier ops at the same
     /// leaf, but ops with deeper paths convert a leaf into a `Branch`. A
     /// later op replacing a prior `Branch` discards the prior children.
     pub fn from_ops(ops: &[CompiledPatchOp]) -> Option<Self> {
         for op in ops {
-            if op.cond.is_some() {
-                return None;
-            }
             for step in &op.path {
                 match step {
                     CompiledPathStep::Field(_)
@@ -503,6 +511,17 @@ impl CompiledPatchTrie {
             let leaf = match &op.val {
                 CompiledPatchVal::Replace(prog) => TrieNode::Replace(Arc::clone(prog)),
                 CompiledPatchVal::Delete => TrieNode::Delete,
+            };
+            // Phase F: wrap conditional ops so the trie applier evaluates
+            // the guard before descending into `then`. The guard semantics
+            // (pre-batch state) are preserved by `apply_trie`.
+            let leaf = if let Some(cond_prog) = &op.cond {
+                TrieNode::Conditional {
+                    cond_prog: Arc::clone(cond_prog),
+                    then: Box::new(leaf),
+                }
+            } else {
+                leaf
             };
             insert_leaf(&mut root, &op.path, leaf);
         }

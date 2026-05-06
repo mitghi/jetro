@@ -259,10 +259,11 @@ mod tests {
     }
 
     #[test]
-    fn batched_patch_conditional_op_falls_back() {
-        // Conditional ops are not trie-eligible — `from_ops` returns None
-        // and the executor falls through to the per-op path. Result must
-        // still be correct.
+    fn batched_patch_conditional_op_via_trie() {
+        // Phase F: conditional ops are now trie-eligible. The trie wraps
+        // each leaf in `TrieNode::Conditional` and resolves guards against
+        // pre-batch state before descending. Mixed-truthiness ops produce
+        // the same observable result as the per-op walker.
         let doc = json!({"role": "admin", "id": 7});
         let r = vm_query(
             r#"patch $ { active: true when $.role == "admin", banned: true when $.id < 0 }"#,
@@ -273,6 +274,120 @@ mod tests {
             r,
             json!({"role": "admin", "id": 7, "active": true})
         );
+    }
+
+    #[test]
+    fn trie_handles_single_conditional_op_truthy() {
+        // Phase F: single conditional op with truthy guard is applied.
+        let doc = json!({"role": "admin", "active": false});
+        let r = vm_query(
+            r#"patch $ { active: true when $.role == "admin" }"#,
+            &doc,
+        )
+        .unwrap();
+        assert_eq!(r, json!({"role": "admin", "active": true}));
+    }
+
+    #[test]
+    fn trie_handles_single_conditional_op_falsy() {
+        // Phase F: single conditional op with falsy guard is skipped —
+        // crucially, no phantom Null field is inserted at the target key.
+        let doc = json!({"role": "user", "active": false});
+        let r = vm_query(
+            r#"patch $ { active: true when $.role == "admin" }"#,
+            &doc,
+        )
+        .unwrap();
+        assert_eq!(r, json!({"role": "user", "active": false}));
+    }
+
+    #[test]
+    fn trie_handles_multiple_conditional_ops_mixed_truthiness() {
+        // Phase F: two conditional ops, one truthy, one falsy. Only the
+        // truthy op writes; the falsy slot stays as it was (and is not
+        // injected as Null when the field doesn't exist).
+        let doc = json!({"role": "admin", "score": 10});
+        let r = vm_query(
+            r#"patch $ {
+                active: true when $.role == "admin",
+                banned: true when $.score < 0
+            }"#,
+            &doc,
+        )
+        .unwrap();
+        assert_eq!(
+            r,
+            json!({"role": "admin", "score": 10, "active": true})
+        );
+    }
+
+    #[test]
+    fn trie_handles_conditional_alongside_unconditional_ops() {
+        // Phase F: 3 ops total — two unconditional, one conditional.
+        // All three should batch into a single trie walk.
+        let doc = json!({"role": "admin", "id": 0, "extra": "stay"});
+        let r = vm_query(
+            r#"patch $ {
+                id: 7,
+                tag: "ok",
+                flagged: true when $.role == "admin"
+            }"#,
+            &doc,
+        )
+        .unwrap();
+        assert_eq!(
+            r,
+            json!({
+                "role": "admin",
+                "id": 7,
+                "extra": "stay",
+                "tag": "ok",
+                "flagged": true
+            })
+        );
+    }
+
+    #[test]
+    fn trie_conditional_op_evaluates_against_pre_batch_doc() {
+        // Phase F soundness — invariant 5: `$.id` in the guard reads the
+        // pre-batch doc state, not the rolled state from a prior op in
+        // the same batch. Even though `id` is set to 7 in source order
+        // BEFORE the conditional, the guard `$.id > 5` sees `id == 0`
+        // (pre-batch) and skips. Mirrors `conditional_reads_prebatch_state`
+        // but exercises the Phase F trie path explicitly.
+        let doc = json!({"id": 0, "flag": false});
+        let r = vm_query(
+            r#"patch $ { id: 7, flag: true when $.id > 5 }"#,
+            &doc,
+        )
+        .unwrap();
+        assert_eq!(r, json!({"id": 7, "flag": false}));
+    }
+
+    #[test]
+    fn trie_conditional_delete_op_falsy_keeps_field() {
+        // Phase F: a guarded `DELETE` whose guard is false leaves the
+        // existing field intact (no parent-level shift_remove fires).
+        let doc = json!({"a": 1, "b": 2});
+        let r = vm_query(
+            r#"patch $ { a: DELETE when $.b > 100 }"#,
+            &doc,
+        )
+        .unwrap();
+        assert_eq!(r, json!({"a": 1, "b": 2}));
+    }
+
+    #[test]
+    fn trie_conditional_delete_op_truthy_removes_field() {
+        // Phase F: a guarded `DELETE` whose guard is true does remove
+        // the field, and batches alongside a sibling unconditional write.
+        let doc = json!({"a": 1, "b": 2, "c": 3});
+        let r = vm_query(
+            r#"patch $ { a: DELETE when $.b > 1, c: 99 }"#,
+            &doc,
+        )
+        .unwrap();
+        assert_eq!(r, json!({"b": 2, "c": 99}));
     }
 
     #[test]

@@ -2181,7 +2181,12 @@ impl VM {
         if cp.ops.len() >= 2 {
             let trie_slot = cp.trie.get_or_init(|| CompiledPatchTrie::from_ops(&cp.ops));
             if let Some(trie) = trie_slot {
-                self.apply_trie(&mut doc, &trie.root, env)?;
+                // Phase F: snapshot the doc *before* any op fires so
+                // `TrieNode::Conditional` guards can read pre-batch state
+                // (matching invariant 5 / the per-op walker's `$` semantics).
+                // Cloning a `Val` is O(1) — Arc bump only.
+                let pre_batch = doc.clone();
+                self.apply_trie(&mut doc, &trie.root, env, &pre_batch)?;
                 return Ok(doc);
             }
         }
@@ -2210,6 +2215,7 @@ impl VM {
         val: &mut Val,
         node: &TrieNode,
         env: &Env,
+        pre_batch_doc: &Val,
     ) -> Result<(), EvalError> {
         match node {
             TrieNode::Replace(prog) => {
@@ -2226,6 +2232,18 @@ impl VM {
                 // appears as a `Branch` child, the parent arm intercepts it
                 // and never recurses here.
                 *val = Val::Null;
+                Ok(())
+            }
+            TrieNode::Conditional { cond_prog, then } => {
+                // Phase F: evaluate the guard against pre-batch doc state so
+                // `$` (env.root, immutable) and `@` (pre-batch doc) both
+                // resolve to the same snapshot the per-op walker would see
+                // for source-order op 0. This locks invariant 5 — see the
+                // soundness test `conditional_reads_prebatch_state`.
+                let cenv = env.with_current(pre_batch_doc.clone());
+                if is_truthy(&self.exec(cond_prog, &cenv)?) {
+                    self.apply_trie(val, then, env, pre_batch_doc)?;
+                }
                 Ok(())
             }
             TrieNode::Branch { fields, indices } => {
@@ -2253,17 +2271,30 @@ impl VM {
                 Val::Obj(arc) => {
                     let map = Arc::make_mut(arc);
                     for (key, child_node) in fields {
-                        if matches!(child_node, TrieNode::Delete) {
-                            map.shift_remove(key.as_ref());
-                            continue;
-                        }
-                        if let Some(child) = map.get_mut(key.as_ref()) {
-                            self.apply_trie(child, child_node, env)?;
-                        } else {
-                            // Path doesn't exist yet — synthesise from Null.
-                            let mut fresh = Val::Null;
-                            self.apply_trie(&mut fresh, child_node, env)?;
-                            map.insert(Arc::clone(key), fresh);
+                        // Phase F: pre-resolve any `Conditional` guards
+                        // against pre-batch state. Skip / Delete short-
+                        // circuit; Apply hands back the unwrapped subtree.
+                        let effect = self.trie_resolve_child(
+                            child_node,
+                            env,
+                            pre_batch_doc,
+                        )?;
+                        match effect {
+                            ChildEffect::Skip => continue,
+                            ChildEffect::Delete => {
+                                map.shift_remove(key.as_ref());
+                                continue;
+                            }
+                            ChildEffect::Apply(inner) => {
+                                if let Some(child) = map.get_mut(key.as_ref()) {
+                                    self.apply_trie(child, inner, env, pre_batch_doc)?;
+                                } else {
+                                    // Path doesn't exist yet — synthesise from Null.
+                                    let mut fresh = Val::Null;
+                                    self.apply_trie(&mut fresh, inner, env, pre_batch_doc)?;
+                                    map.insert(Arc::clone(key), fresh);
+                                }
+                            }
                         }
                     }
                     Ok(())
@@ -2290,17 +2321,33 @@ impl VM {
                         };
                         let len = v.len() as i64;
                         let resolved = vm_resolve_idx(idx, len);
-                        if matches!(child_node, TrieNode::Delete) {
-                            if resolved < v.len() {
-                                v.remove(resolved);
+                        // Phase F: pre-resolve guards (see object arm).
+                        let effect = self.trie_resolve_child(
+                            child_node,
+                            env,
+                            pre_batch_doc,
+                        )?;
+                        match effect {
+                            ChildEffect::Skip => continue,
+                            ChildEffect::Delete => {
+                                if resolved < v.len() {
+                                    v.remove(resolved);
+                                }
+                                continue;
                             }
-                            continue;
-                        }
-                        if resolved < v.len() {
-                            self.apply_trie(&mut v[resolved], child_node, env)?;
-                        } else {
-                            // Out-of-bounds index on a `Replace` is a no-op
-                            // in the per-op walker; preserve that here.
+                            ChildEffect::Apply(inner) => {
+                                if resolved < v.len() {
+                                    self.apply_trie(
+                                        &mut v[resolved],
+                                        inner,
+                                        env,
+                                        pre_batch_doc,
+                                    )?;
+                                } else {
+                                    // Out-of-bounds index on a `Replace` is
+                                    // a no-op in the per-op walker; preserve.
+                                }
+                            }
                         }
                     }
                     Ok(())
@@ -2315,16 +2362,48 @@ impl VM {
                     }
                     if !fields.is_empty() {
                         let mut fresh = Val::obj(IndexMap::new());
-                        self.apply_trie(&mut fresh, node, env)?;
+                        self.apply_trie(&mut fresh, node, env, pre_batch_doc)?;
                         *val = fresh;
                     } else {
                         let mut fresh = Val::arr(Vec::new());
-                        self.apply_trie(&mut fresh, node, env)?;
+                        self.apply_trie(&mut fresh, node, env, pre_batch_doc)?;
                         *val = fresh;
                     }
                     Ok(())
                 }
                 }
+            }
+        }
+    }
+
+    /// Phase F helper: resolve a trie child against the pre-batch doc by
+    /// evaluating any outer `Conditional` guards up-front (against pre-batch
+    /// state, per invariant 5). Returns the parent-level effect:
+    ///
+    ///   - `ChildEffect::Skip`      — guard false; parent leaves slot unchanged.
+    ///   - `ChildEffect::Delete`    — effective delete; parent removes the slot.
+    ///   - `ChildEffect::Apply(n)`  — descend into `n` (guards already stripped).
+    ///
+    /// All `Conditional` wrappers at the top of `node` are unwrapped here so
+    /// the descent into Branch/Replace runs without re-evaluating guards.
+    fn trie_resolve_child<'a>(
+        &mut self,
+        node: &'a TrieNode,
+        env: &Env,
+        pre_batch_doc: &Val,
+    ) -> Result<ChildEffect<'a>, EvalError> {
+        let mut cur = node;
+        loop {
+            match cur {
+                TrieNode::Delete => return Ok(ChildEffect::Delete),
+                TrieNode::Conditional { cond_prog, then } => {
+                    let cenv = env.with_current(pre_batch_doc.clone());
+                    if !is_truthy(&self.exec(cond_prog, &cenv)?) {
+                        return Ok(ChildEffect::Skip);
+                    }
+                    cur = then;
+                }
+                _ => return Ok(ChildEffect::Apply(cur)),
             }
         }
     }
@@ -2792,6 +2871,17 @@ fn resolve_idx(i: i64, len: i64) -> usize {
 
 /// Recursively collect every value stored under `name` anywhere in the subtree of `v`,
 /// without recording path information (used for non-root `Descendant` traversal).
+/// Phase F: parent-level disposition for a trie child after pre-batch
+/// guard resolution. See `VM::trie_resolve_child`.
+enum ChildEffect<'a> {
+    /// Guard false — parent leaves the slot untouched.
+    Skip,
+    /// Effective delete — parent removes the slot.
+    Delete,
+    /// Apply this node (guards already stripped) at the slot.
+    Apply(&'a TrieNode),
+}
+
 fn collect_desc(v: &Val, name: &str, out: &mut Vec<Val>) {
     match v {
         Val::Obj(m) => {
