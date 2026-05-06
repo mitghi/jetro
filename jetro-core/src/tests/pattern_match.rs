@@ -54,10 +54,10 @@ fn parses_literal_arms() {
 #[test]
 fn parses_object_pattern() {
     let (_, arms) = parse_match(r#"match $.u with { {role: "admin"} -> 1, _ -> 0 }"#);
-    let Pat::Obj { fields, open } = &arms[0].pat else {
+    let Pat::Obj { fields, rest } = &arms[0].pat else {
         panic!("expected Obj pattern");
     };
-    assert!(!open);
+    assert!(rest.is_none());
     assert_eq!(fields.len(), 1);
     assert_eq!(fields[0].0, "role");
     assert!(matches!(fields[0].1, Pat::Lit(PatLit::Str(ref s)) if s == "admin"));
@@ -65,11 +65,12 @@ fn parses_object_pattern() {
 
 #[test]
 fn parses_object_open_pattern() {
-    let (_, arms) = parse_match(r#"match $.u with { {role: "admin", ...} -> 1, _ -> 0 }"#);
-    let Pat::Obj { open, .. } = &arms[0].pat else {
+    let (_, arms) =
+        parse_match(r#"match $.u with { {role: "admin", ...*} -> 1, _ -> 0 }"#);
+    let Pat::Obj { rest, .. } = &arms[0].pat else {
         panic!("expected Obj pattern");
     };
-    assert!(*open);
+    assert!(matches!(rest, Some(None)));
 }
 
 #[test]
@@ -1206,6 +1207,60 @@ fn match_runtimes_agree_on_canonical_corpus() {
             (a, b) => panic!("domains disagreed (one errored) on `{src}`: {a:?} vs {b:?}"),
         }
     }
+}
+
+#[test]
+fn parses_object_pattern_with_named_rest() {
+    let (_, arms) = parse_match(
+        r#"match $.u with { {a: x, c: y, ...*rest} -> rest, _ -> {} }"#,
+    );
+    let Pat::Obj { fields, rest } = &arms[0].pat else {
+        panic!("expected Obj pattern");
+    };
+    assert_eq!(fields.len(), 2);
+    assert!(matches!(rest, Some(Some(ref s)) if s == "rest"));
+}
+
+#[test]
+fn runtime_object_rest_captures_unlisted_keys() {
+    // Named `...*rest` builds a `Val::Obj` of every key not listed in
+    // the pattern's explicit fields, in source order.
+    let v = run(
+        br#"{"u": {"a": "alpha", "b": "beta", "c": "gamma", "d": "delta"}}"#,
+        r#"match $.u with {
+            {a: x, c: y, ...*rest} -> rest,
+            _                      -> {}
+        }"#,
+    );
+    assert_eq!(v, json!({"b": "beta", "d": "delta"}));
+}
+
+#[test]
+fn runtime_object_rest_then_splat_produces_merged_object() {
+    // The rest-capture binding can be splatted back into a fresh
+    // object literal via `...*rest`, mirroring the spread sigil. The
+    // shallow-spread synonym treats `...*` and `...` identically.
+    let v = run(
+        br#"{"u": {"a": "old", "c": "x", "extra": 1}}"#,
+        r#"match $.u with {
+            {a: a_old, c: c_old, ...*rest} -> {...*rest, a: "new value", c: c_old},
+            _                              -> @
+        }"#,
+    );
+    assert_eq!(v, json!({"extra": 1, "a": "new value", "c": "x"}));
+}
+
+#[test]
+fn runtime_object_anonymous_rest_does_not_bind() {
+    // Anonymous `...*` is informational; no binding is introduced.
+    let v = run(
+        br#"{"u": {"a": 1, "b": 2}}"#,
+        r#"match $.u with {
+            {a: x, ...*} -> x,
+            _            -> -1
+        }"#,
+    );
+    assert_eq!(v, json!(1));
 }
 
 #[test]

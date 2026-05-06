@@ -152,9 +152,12 @@ fn validate_pattern_linearity(expr: &Expr) -> Result<(), ParseError> {
                     collect_binds(alt, out);
                 }
             }
-            Pat::Obj { fields, .. } => {
+            Pat::Obj { fields, rest } => {
                 for (_, sub) in fields {
                     collect_binds(sub, out);
+                }
+                if let Some(Some(name)) = rest {
+                    out.insert(name.clone());
                 }
             }
             Pat::Arr { elems, rest } => {
@@ -1104,7 +1107,7 @@ fn parse_pat(pair: Pair<Rule>) -> Pat {
         Rule::pat_bind => Pat::Bind(pair.as_str().to_string()),
         Rule::pat_obj => {
             let mut fields: Vec<(String, Pat)> = Vec::new();
-            let mut open = false;
+            let mut rest: Option<Option<String>> = None;
             for p in pair.into_inner() {
                 match p.as_rule() {
                     Rule::pat_obj_field => {
@@ -1113,11 +1116,26 @@ fn parse_pat(pair: Pair<Rule>) -> Pat {
                         let v = parse_pat(fi.next().unwrap());
                         fields.push((k, v));
                     }
-                    Rule::pat_obj_open => open = true,
+                    Rule::pat_obj_rest => {
+                        let inner = p.into_inner().next().unwrap();
+                        match inner.as_rule() {
+                            Rule::pat_obj_rest_named => {
+                                let nm = inner
+                                    .into_inner()
+                                    .next()
+                                    .unwrap()
+                                    .as_str()
+                                    .to_string();
+                                rest = Some(Some(nm));
+                            }
+                            Rule::pat_obj_rest_anon => rest = Some(None),
+                            _ => {}
+                        }
+                    }
                     _ => {}
                 }
             }
-            Pat::Obj { fields, open }
+            Pat::Obj { fields, rest }
         }
         Rule::pat_arr => {
             let mut elems: Vec<Pat> = Vec::new();
@@ -1479,7 +1497,7 @@ fn parse_obj_field(pair: Pair<Rule>) -> ObjField {
                 cond: None,
             }
         }
-        Rule::obj_field_spread => {
+        Rule::obj_field_spread | Rule::obj_field_spread_star => {
             let expr = parse_expr(inner.into_inner().next().unwrap());
             ObjField::Spread(expr)
         }

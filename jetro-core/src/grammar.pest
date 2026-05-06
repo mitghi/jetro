@@ -179,10 +179,15 @@ obj_field_dyn    = { "[" ~ expr ~ "]" ~ ":" ~ expr }
 obj_field_opt_v  = { obj_key_expr ~ "?" ~ ":" ~ expr }
 obj_field_opt    = { obj_key_expr ~ "?" }
 obj_field_spread_deep = { "...**" ~ expr }
+// `...*expr` is a shallow spread synonym used by object rest patterns
+// for symmetry with the `{...*rest}` capture form. Same semantics as
+// `...expr`. Listed before `obj_field_spread` so it wins the leading
+// `...*` prefix without backtracking.
+obj_field_spread_star = { "...*" ~ expr }
 obj_field_spread      = { "..." ~ expr }
 obj_field_kv          = { obj_key_expr ~ ":" ~ expr ~ (kw_when ~ expr)? }
 obj_field_short       = { ident }
-obj_field             = { obj_field_dyn | obj_field_opt_v | obj_field_opt | obj_field_spread_deep | obj_field_spread | obj_field_kv | obj_field_short }
+obj_field             = { obj_field_dyn | obj_field_opt_v | obj_field_opt | obj_field_spread_deep | obj_field_spread_star | obj_field_spread | obj_field_kv | obj_field_short }
 obj_construct    = { "{" ~ (obj_field ~ ("," ~ obj_field)* ~ ","?)? ~ "}" }
 
 // ── Array construction ─────────────────────────────────────────────────────────
@@ -222,9 +227,11 @@ pat_kind_bind = { ident ~ ":" ~ kind_type }
 pat_kind_only = { kind_type }
 pat_bind      = { ident }
 
-pat_obj_open  = { "..." }
+pat_obj_rest_named = { "...*" ~ ident }
+pat_obj_rest_anon  = { "...*" }
+pat_obj_rest       = { pat_obj_rest_named | pat_obj_rest_anon }
 pat_obj_field = { ident ~ ":" ~ pat_or }
-pat_obj       = { "{" ~ (pat_obj_field ~ ("," ~ pat_obj_field)* ~ ("," ~ pat_obj_open)? ~ ","?)? ~ "}" }
+pat_obj       = { "{" ~ (pat_obj_field ~ ("," ~ pat_obj_field)* ~ ("," ~ pat_obj_rest)? ~ ","?)? ~ "}" }
 
 pat_arr_rest_named = { "..." ~ ident }
 pat_arr_rest_anon  = { "..." }

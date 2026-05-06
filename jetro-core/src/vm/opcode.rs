@@ -552,6 +552,20 @@ pub enum MatchOp {
         dst: MatchSlot,
     },
 
+    /// Capture the object "rest" — every key/value pair on `src` whose
+    /// key is *not* present in `listed_keys` — into `dst` as a freshly
+    /// built `Val::Obj`. Emitted by the compiler when an object pattern
+    /// binds a named rest marker (`{a: x, ...rest}`).
+    LoadObjRest {
+        /// Source slot holding the object value.
+        src: MatchSlot,
+        /// Keys already covered by explicit pattern fields; excluded
+        /// from the captured rest object.
+        listed_keys: Arc<[Arc<str>]>,
+        /// Destination slot for the rest object.
+        dst: MatchSlot,
+    },
+
     /// Walk a tree-form sub-pattern at `subpat` against the value at `slot`,
     /// pushing any captured bindings into the arm's binding stack. Used for
     /// sub-patterns (currently `Or`) whose flat representation would expand

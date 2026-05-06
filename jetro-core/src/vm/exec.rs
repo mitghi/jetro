@@ -3001,6 +3001,15 @@ impl VM {
                     slots[*dst as usize] = Val::arr(tail);
                     pc += 1;
                 }
+                MatchOp::LoadObjRest {
+                    src,
+                    listed_keys,
+                    dst,
+                } => {
+                    let listed: Vec<&str> = listed_keys.iter().map(|k| k.as_ref()).collect();
+                    slots[*dst as usize] = build_obj_rest(&slots[*src as usize], &listed);
+                    pc += 1;
+                }
                 MatchOp::TestSubPat { slot, subpat, else_pc } => {
                     let saved = bindings.len();
                     let mut tmp: Vec<(Arc<str>, Val)> = Vec::new();
@@ -3135,7 +3144,7 @@ fn match_pat(pat: &Pat, val: &Val, out: &mut Vec<(Arc<str>, Val)>) -> bool {
             }
             true
         }
-        Pat::Obj { fields, open: _ } => {
+        Pat::Obj { fields, rest } => {
             if !matches!(val, Val::Obj(_) | Val::ObjSmall(_)) {
                 return false;
             }
@@ -3149,6 +3158,13 @@ fn match_pat(pat: &Pat, val: &Val, out: &mut Vec<(Arc<str>, Val)>) -> bool {
                     out.truncate(saved_len);
                     return false;
                 }
+            }
+            // Named `...rest` rest binding captures every key not
+            // already covered by the explicit field list.
+            if let Some(Some(rest_name)) = rest {
+                let listed: Vec<&str> = fields.iter().map(|(k, _)| k.as_str()).collect();
+                let rest_obj = build_obj_rest(val, &listed);
+                out.push((Arc::from(rest_name.as_str()), rest_obj));
             }
             true
         }
@@ -3213,6 +3229,33 @@ fn arr_like_get(val: &Val, i: usize) -> Val {
         Val::ObjVec(d) => d.row_val(i),
         _ => Val::Null,
     }
+}
+
+/// Build a fresh `Val::Obj` containing every key/value pair on `val`
+/// whose key is not present in `listed` (used by the `...name` rest
+/// binding in object patterns). Returns `Val::Null` for non-object
+/// scrutinees; callers always guard with `Val::Obj` / `Val::ObjSmall`
+/// before invoking this.
+fn build_obj_rest(val: &Val, listed: &[&str]) -> Val {
+    let mut out: IndexMap<Arc<str>, Val> = IndexMap::new();
+    match val {
+        Val::Obj(m) => {
+            for (k, v) in m.iter() {
+                if !listed.iter().any(|l| *l == k.as_ref()) {
+                    out.insert(Arc::clone(k), v.clone());
+                }
+            }
+        }
+        Val::ObjSmall(pairs) => {
+            for (k, v) in pairs.iter() {
+                if !listed.iter().any(|l| *l == k.as_ref()) {
+                    out.insert(Arc::clone(k), v.clone());
+                }
+            }
+        }
+        _ => return Val::Null,
+    }
+    Val::Obj(Arc::new(out))
 }
 
 /// Look up an object field by string key in `Obj` / `ObjSmall` values.
@@ -3938,6 +3981,18 @@ where
                     tail.push(slot_view_index(&slots[*src as usize], i as i64).materialize());
                 }
                 slots[*dst as usize] = SlotView::Owned(Val::arr(tail));
+                pc += 1;
+            }
+            MatchOp::LoadObjRest {
+                src,
+                listed_keys,
+                dst,
+            } => {
+                // Materialise the source view to a `Val::Obj` so we can
+                // walk its keys; the rest object is always owned.
+                let owned = slots[*src as usize].materialize();
+                let listed: Vec<&str> = listed_keys.iter().map(|k| k.as_ref()).collect();
+                slots[*dst as usize] = SlotView::Owned(build_obj_rest(&owned, &listed));
                 pc += 1;
             }
             MatchOp::TestSubPat {

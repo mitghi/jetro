@@ -1180,7 +1180,7 @@ pub(crate) fn compile_match(
             // `shared_keys.len()` fields agree on key order. Compile
             // those sub-patterns against prelude-allocated slots; let
             // any extra fields go through the standard load-field path.
-            let Pat::Obj { fields, open: _ } = &arm.pat else {
+            let Pat::Obj { fields, rest: _ } = &arm.pat else {
                 unreachable!("shared-prefix invariant: every arm is Pat::Obj");
             };
             for (i, key) in shared_keys.iter().enumerate() {
@@ -1427,6 +1427,12 @@ fn compute_max_slots(ops: &[MatchOp]) -> u16 {
                 }
             }
             MatchOp::LoadIndex { src, dst, .. } | MatchOp::LoadTail { src, dst, .. } => {
+                let n = src.max(dst).saturating_add(1);
+                if n > hi {
+                    hi = n;
+                }
+            }
+            MatchOp::LoadObjRest { src, dst, .. } => {
                 let n = src.max(dst).saturating_add(1);
                 if n > hi {
                     hi = n;
@@ -1793,7 +1799,7 @@ impl MatchBuilder {
                     else_pc: u32::MAX,
                 });
             }
-            Pat::Obj { fields, open: _ } => {
+            Pat::Obj { fields, rest } => {
                 self.emit_with_pending_else(MatchOp::ObjCheck {
                     slot,
                     else_pc: u32::MAX,
@@ -1807,6 +1813,24 @@ impl MatchBuilder {
                         else_pc: u32::MAX,
                     });
                     self.compile_pat_for_arm(sub_pat, dst, slot_alloc);
+                }
+                // A named `...rest` rest binding captures every key not
+                // listed in `fields` into a freshly built `Val::Obj`.
+                // Anonymous `...` is recorded in the AST but emits no
+                // ops because the runtime already admits extra keys.
+                if let Some(Some(rest_name)) = rest {
+                    let listed_keys: Arc<[Arc<str>]> =
+                        fields.iter().map(|(k, _)| Arc::from(k.as_str())).collect();
+                    let dst = slot_alloc.alloc();
+                    self.emit(MatchOp::LoadObjRest {
+                        src: slot,
+                        listed_keys,
+                        dst,
+                    });
+                    self.emit(MatchOp::Bind {
+                        name: Arc::from(rest_name.as_str()),
+                        slot: dst,
+                    });
                 }
             }
             Pat::Arr { elems, rest } => {

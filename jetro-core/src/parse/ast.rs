@@ -211,15 +211,18 @@ pub enum Pat {
     /// Or-pattern `a | b | c` — matches if any sub-pattern matches.
     Or(Vec<Pat>),
     /// Object pattern `{k: pat, ...}` — every listed key must match. The
-    /// runtime always permits extra keys; the `open` flag is currently
-    /// informational and left in the AST so future passes can opt into
-    /// strict closed-object matching without a grammar change.
+    /// runtime always permits extra keys; an explicit `...` marker
+    /// signals the source spelled the rest marker, and a named
+    /// `...rest` captures every unlisted key into `rest` as a freshly
+    /// built `Val::Obj`.
     Obj {
         /// Listed key/sub-pattern pairs that must all match.
         fields: Vec<(String, Pat)>,
-        /// `true` when the source spelled the trailing `...` rest marker.
-        #[allow(dead_code)]
-        open: bool,
+        /// Rest behaviour mirrors `Pat::Arr`:
+        /// - `None`             → no rest marker (default; extras silently allowed)
+        /// - `Some(None)`       → anonymous `...` marker; same semantics, explicit
+        /// - `Some(Some(name))` → `...name` capture into a named binding
+        rest: Option<Option<String>>,
     },
     /// Array pattern `[a, b, ...rest]` — fixed prefix with optional rest binding.
     Arr { elems: Vec<Pat>, rest: Option<Option<String>> },
