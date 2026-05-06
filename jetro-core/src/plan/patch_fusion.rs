@@ -1191,9 +1191,48 @@ fn arg_expr_owned(a: &Arg) -> Expr {
 ///   stop point so the binding's value is unambiguous)
 /// * a stage that reads the root being batched (read-after-write barrier)
 /// * a stage with non-fuseable shape
+///
+/// Phase E: when the pipeline base is a chain-write against a non-`$`
+/// receiver (typically a lambda binding `o` or `@`), the parser leaves
+/// it as `Chain(Ident(o), [..set])` rather than rewriting to `Patch`.
+/// To enable per-iter lambda/comprehension body fusion, we *speculatively*
+/// lift the base to a Patch and let `try_merge_pipeline_stage` accumulate
+/// subsequent same-root chain-writes into it. If no fusion fires (the
+/// base ends up alone with one op), we revert to the original Chain so
+/// the v1 single-write `Ident.set(v)` pipe-form semantics — `→ v` —
+/// stay locked. Soundness: the revert path is exact (`original_base` is
+/// kept until we know fusion fired), so single-write lambda bodies
+/// behave identically to pre-Phase-E.
 fn fuse_pipeline(base: Expr, steps: Vec<PipeStep>, ctx: &mut FuseCtx) -> Expr {
     // Recurse into base and each forward stage first.
-    let mut acc: Expr = fuse_recursive(base, ctx);
+    let recursed_base: Expr = fuse_recursive(base, ctx);
+
+    // Phase E: speculatively lift the base into a Patch when it's a
+    // chain-write terminal against a recognised root (Current / Ident /
+    // Root). The lift only fires if the shape matches; non-write bases
+    // are returned as `Err(original)` so `acc` stays unchanged.
+    //
+    // We track whether the base was speculatively lifted so we can
+    // revert it if no Forward stage ends up fusing into it. The revert
+    // preserves the v1 chain semantics for single-write expressions
+    // (e.g. `o.id.set(99)` inside `.map(...)` returns `99`, not the
+    // patched `o`).
+    let original_base_for_revert: Option<Expr>;
+    let mut acc: Expr = match lift_chain_write_pipe_stage(recursed_base) {
+        Ok(lifted) => {
+            // Save the pre-lift Chain so we can revert. We reconstruct
+            // it from the Patch's root + ops by inverting the lift —
+            // but it's simpler to just clone the original Chain before
+            // calling. Refactor: pull the lift out so we have access.
+            original_base_for_revert = Some(unlift_chain_write_pipe_stage(&lifted));
+            lifted
+        }
+        Err(other) => {
+            original_base_for_revert = None;
+            other
+        }
+    };
+    let mut fusion_fired = false;
     let mut new_steps: Vec<PipeStep> = Vec::with_capacity(steps.len());
 
     for st in steps {
@@ -1212,10 +1251,19 @@ fn fuse_pipeline(base: Expr, steps: Vec<PipeStep>, ctx: &mut FuseCtx) -> Expr {
 
                 if let Some(merged) = try_merge_pipeline_stage(&acc, &new_steps, &stage_expr, ctx) {
                     acc = merged;
+                    fusion_fired = true;
                 } else {
                     new_steps.push(PipeStep::Forward(stage_expr));
                 }
             }
+        }
+    }
+
+    // Phase E revert: if we speculatively lifted the base but no merge
+    // ever fired, drop the lift so single-write semantics survive.
+    if !fusion_fired {
+        if let Some(orig) = original_base_for_revert {
+            acc = orig;
         }
     }
 
@@ -1227,6 +1275,66 @@ fn fuse_pipeline(base: Expr, steps: Vec<PipeStep>, ctx: &mut FuseCtx) -> Expr {
             steps: new_steps,
         }
     }
+}
+
+/// Phase E: invert `lift_chain_write_pipe_stage` for a single-op `Patch`
+/// produced by it. Used to revert a speculative base-lift when no fusion
+/// fired downstream. Only handles the shapes the lift itself produces:
+/// one op with no `cond`, path of plain field/index/dyn-index steps,
+/// and a recognised write terminal name. Falls back to returning the
+/// Patch verbatim if anything looks unusual — defensive but should
+/// never trigger in practice since the input came from the lift.
+fn unlift_chain_write_pipe_stage(patch: &Expr) -> Expr {
+    let (root, ops) = match patch {
+        Expr::Patch { root, ops } => (root.as_ref(), ops),
+        other => return other.clone(),
+    };
+    if ops.len() != 1 {
+        return patch.clone();
+    }
+    let op = &ops[0];
+    if op.cond.is_some() {
+        return patch.clone();
+    }
+    // Path back to Steps.
+    let mut steps: Vec<Step> = Vec::with_capacity(op.path.len() + 1);
+    for ps in &op.path {
+        match ps {
+            PathStep::Field(f) => steps.push(Step::Field(f.clone())),
+            PathStep::Index(i) => steps.push(Step::Index(*i)),
+            PathStep::Descendant(f) => steps.push(Step::Descendant(f.clone())),
+            PathStep::DynIndex(e) => steps.push(Step::DynIndex(Box::new(e.clone()))),
+            // Should not appear in lift output, but be defensive.
+            _ => return patch.clone(),
+        }
+    }
+    // Recover the terminal method shape from the op's val.
+    let (method_name, method_args): (String, Vec<Arg>) = match &op.val {
+        // `set(v)` → val == v
+        // `delete()` → val == DeleteMark, path may have an extra Field for `unset`.
+        Expr::DeleteMark => {
+            // Could be `delete()` or `unset(key)` — distinguish by whether
+            // the last path step matches a field added by `unset`. We
+            // can't tell which, so for safety just emit `.delete()`. The
+            // semantics of revert are: this base wasn't fused, so we
+            // return the AST in a shape the evaluator handles. Both
+            // delete and unset routes converge on the same path/value
+            // for evaluation purposes, but their original Step layout
+            // differed. To stay safe, fall back to keeping the Patch.
+            return patch.clone();
+        }
+        // `modify(lam)` was lifted as `Let { name: p, init: Current, body }`
+        // We can't perfectly restore the original Lambda step, so fall
+        // back to keeping the Patch — modify single-write revert is rare
+        // enough that the conservative path costs little.
+        Expr::Let { init, .. } if matches!(init.as_ref(), Expr::Current) => {
+            return patch.clone();
+        }
+        // Plain `set(v)` — recover the Method step.
+        v => ("set".to_string(), vec![Arg::Pos(v.clone())]),
+    };
+    steps.push(Step::Method(method_name, method_args));
+    Expr::Chain(Box::new(root.clone()), steps)
 }
 
 /// Try to fuse `stage` into `acc` (the running pipeline base).

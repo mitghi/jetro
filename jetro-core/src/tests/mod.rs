@@ -17,6 +17,8 @@ mod deep_search;
 #[cfg(test)]
 mod patch_fusion_phase_c;
 #[cfg(test)]
+mod patch_fusion_phase_e;
+#[cfg(test)]
 mod patch_fusion_soundness;
 #[cfg(test)]
 mod examples;
