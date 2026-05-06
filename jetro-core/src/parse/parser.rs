@@ -70,25 +70,40 @@ fn strict_match_lint_enabled() -> bool {
     std::env::var_os("JETRO_STRICT_MATCH").is_some()
 }
 
+/// Recognise irrefutable patterns — those that match every value
+/// regardless of shape and therefore qualify as a catch-all arm in the
+/// exhaustiveness analysis. Beyond the trivial `Wild` and bare `Bind`
+/// cases, this also accepts `Or` patterns whose alternative list
+/// contains an irrefutable alt (since at least one alt fires for every
+/// value) and `Kind`-bound patterns whose kind covers all runtime
+/// types (currently never, but the structure is in place for future
+/// extension to a `_: any` form).
+fn pat_is_irrefutable(pat: &Pat) -> bool {
+    match pat {
+        Pat::Wild | Pat::Bind(_) => true,
+        Pat::Or(alts) => alts.iter().any(pat_is_irrefutable),
+        _ => false,
+    }
+}
+
 /// Walk the `Expr` tree and reject any `match` whose arms cannot prove
-/// exhaustiveness — that is, when no arm has an unconditional catch-all
-/// (`Pat::Wild` or a bare `Pat::Bind`) without a guard. Triggered only
-/// when the `JETRO_STRICT_MATCH` environment variable is set; the
-/// default behaviour is to surface non-exhaustive matches as a runtime
-/// `EvalError` when no arm fires.
+/// exhaustiveness — that is, when no arm has an unguarded catch-all
+/// (`Pat::Wild`, a bare `Pat::Bind`, or an `Or`-pattern containing one).
+/// Triggered only when the `JETRO_STRICT_MATCH` environment variable
+/// is set; the default behaviour is to surface non-exhaustive matches
+/// as a runtime `EvalError` when no arm fires.
 fn validate_match_exhaustiveness(expr: &Expr) -> Result<(), ParseError> {
     fn check(e: &Expr) -> Result<(), ParseError> {
         match e {
             Expr::Match { scrutinee, arms } => {
                 check(scrutinee)?;
-                let exhaustive = arms.iter().any(|a| {
-                    a.guard.is_none()
-                        && matches!(a.pat, Pat::Wild | Pat::Bind(_))
-                });
+                let exhaustive = arms
+                    .iter()
+                    .any(|a| a.guard.is_none() && pat_is_irrefutable(&a.pat));
                 if !exhaustive {
                     return Err(ParseError(
-                        "non-exhaustive match: no unconditional catch-all arm \
-                         (`_` or a bare bind without `when`)"
+                        "non-exhaustive match: no unguarded catch-all arm \
+                         (`_`, a bare bind, or an or-pattern containing one)"
                             .to_string(),
                     ));
                 }

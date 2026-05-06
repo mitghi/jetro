@@ -687,13 +687,16 @@ pub struct MatchFilter {
 
 impl Stage for MatchFilter {
     /// Set `@` to `x`, evaluate the match flat-IR with `x` as the
-    /// scrutinee, and pass the row through when the chosen arm body is
-    /// truthy. Errors and non-exhaustive matches degrade to `Filtered`.
+    /// scrutinee via the view-domain runtime so missed-arm pattern
+    /// tests do not materialise sub-`Val`s, and pass the row through
+    /// when the chosen arm body is truthy. Errors and non-exhaustive
+    /// matches degrade to `Filtered`.
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         let mut c = self.ctx.borrow_mut();
         let VmCtx { vm, env } = &mut *c;
         let prev = env.swap_current(x.clone());
-        let r = vm.exec_match(&self.cm, x, env);
+        let view = crate::data::view::ValView::new(x);
+        let r = crate::vm::exec::exec_match_view(vm, &self.cm, view, env);
         env.restore_current(prev);
         match r {
             Ok(v) if crate::util::is_truthy(&v) => StageOutput::Pass(Cow::Borrowed(x)),
@@ -712,13 +715,16 @@ pub struct MatchMap {
 }
 
 impl Stage for MatchMap {
-    /// Set `@` to `x`, evaluate the match flat-IR, and forward the
-    /// arm-body result. Errors degrade to `Filtered`.
+    /// Set `@` to `x`, evaluate the match flat-IR via the view-domain
+    /// runtime so pattern tests against borrowed sub-projections do not
+    /// allocate, and forward the arm-body result. Errors degrade to
+    /// `Filtered`.
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
         let mut c = self.ctx.borrow_mut();
         let VmCtx { vm, env } = &mut *c;
         let prev = env.swap_current(x.clone());
-        let r = vm.exec_match(&self.cm, x, env);
+        let view = crate::data::view::ValView::new(x);
+        let r = crate::vm::exec::exec_match_view(vm, &self.cm, view, env);
         env.restore_current(prev);
         match r {
             Ok(v) => StageOutput::Pass(Cow::Owned(v)),
