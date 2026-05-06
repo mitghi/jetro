@@ -11,7 +11,7 @@ use crate::{
 use super::columnar;
 use super::composed_exec;
 use super::indexed_exec;
-use super::legacy_exec;
+use super::materialized_exec;
 use super::{PhysicalExecPath, Pipeline, PipelineData};
 
 impl Pipeline {
@@ -43,8 +43,8 @@ impl Pipeline {
             }
             PhysicalExecPath::Columnar => self.run_columnar_or_below(root, base_env, cache),
             PhysicalExecPath::Composed => composed_exec::run(self, root, base_env)
-                .unwrap_or_else(|| legacy_exec::run(self, root, base_env)),
-            PhysicalExecPath::Legacy => legacy_exec::run(self, root, base_env),
+                .unwrap_or_else(|| materialized_exec::run(self, root, base_env)),
+            PhysicalExecPath::Legacy => materialized_exec::run(self, root, base_env),
         }
     }
 
@@ -65,6 +65,6 @@ impl Pipeline {
             }
         }
         composed_exec::run(self, root, base_env)
-            .unwrap_or_else(|| legacy_exec::run(self, root, base_env))
+            .unwrap_or_else(|| materialized_exec::run(self, root, base_env))
     }
 }

@@ -6,7 +6,7 @@
 //! match into this file (or category-split children).
 
 use super::{
-    builtin_def::Builtin, BuiltinCancelGroup, BuiltinCancelSide, BuiltinCancellation,
+    builtin::Builtin, BuiltinCancelGroup, BuiltinCancelSide, BuiltinCancellation,
     BuiltinCardinality, BuiltinCategory, BuiltinColumnarStage, BuiltinDemandLaw,
     BuiltinKeyedReducer, BuiltinMethod, BuiltinNumericReducer, BuiltinPipelineLowering,
     BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect, BuiltinPipelineShape,
@@ -72,7 +72,7 @@ impl Builtin for Filter {
 
     #[inline]
     fn apply_stream(
-        ctx: &mut super::builtin_def::StreamCtx<'_, '_>,
+        ctx: &mut super::builtin::StreamCtx<'_, '_>,
         item: crate::value::Val,
         body: Option<&crate::vm::Program>,
     ) -> Result<crate::pipeline::StageFlow<crate::value::Val>, crate::context::EvalError> {
@@ -90,7 +90,7 @@ impl Builtin for Filter {
     }
 #[inline]
     fn apply_barrier(
-        ctx: &mut super::builtin_def::BarrierCtx<'_>,
+        ctx: &mut super::builtin::BarrierCtx<'_>,
         buf: &mut Vec<crate::value::Val>,
         body: Option<&crate::vm::Program>,
     ) -> Option<Result<(), crate::context::EvalError>> {
@@ -184,7 +184,7 @@ impl Builtin for Map {
 
     #[inline]
     fn apply_stream(
-        ctx: &mut super::builtin_def::StreamCtx<'_, '_>,
+        ctx: &mut super::builtin::StreamCtx<'_, '_>,
         item: crate::value::Val,
         body: Option<&crate::vm::Program>,
     ) -> Result<crate::pipeline::StageFlow<crate::value::Val>, crate::context::EvalError> {
@@ -209,7 +209,7 @@ impl Builtin for Map {
 
     #[inline]
     fn apply_barrier(
-        ctx: &mut super::builtin_def::BarrierCtx<'_>,
+        ctx: &mut super::builtin::BarrierCtx<'_>,
         buf: &mut Vec<crate::value::Val>,
         body: Option<&crate::vm::Program>,
     ) -> Option<Result<(), crate::context::EvalError>> {
@@ -244,7 +244,7 @@ impl Builtin for FlatMap {
 
     #[inline]
     fn apply_barrier(
-        ctx: &mut super::builtin_def::BarrierCtx<'_>,
+        ctx: &mut super::builtin::BarrierCtx<'_>,
         buf: &mut Vec<crate::value::Val>,
         body: Option<&crate::vm::Program>,
     ) -> Option<Result<(), crate::context::EvalError>> {
@@ -288,7 +288,7 @@ impl Builtin for Take {
 
     #[inline]
     fn apply_stream(
-        ctx: &mut super::builtin_def::StreamCtx<'_, '_>,
+        ctx: &mut super::builtin::StreamCtx<'_, '_>,
         item: crate::value::Val,
         _body: Option<&crate::vm::Program>,
     ) -> Result<crate::pipeline::StageFlow<crate::value::Val>, crate::context::EvalError> {
@@ -306,7 +306,7 @@ impl Builtin for Take {
 
     #[inline]
     fn apply_barrier(
-        ctx: &mut super::builtin_def::BarrierCtx<'_>,
+        ctx: &mut super::builtin::BarrierCtx<'_>,
         buf: &mut Vec<crate::value::Val>,
         _body: Option<&crate::vm::Program>,
     ) -> Option<Result<(), crate::context::EvalError>> {
@@ -335,7 +335,7 @@ impl Builtin for Skip {
 
     #[inline]
     fn apply_stream(
-        ctx: &mut super::builtin_def::StreamCtx<'_, '_>,
+        ctx: &mut super::builtin::StreamCtx<'_, '_>,
         item: crate::value::Val,
         _body: Option<&crate::vm::Program>,
     ) -> Result<crate::pipeline::StageFlow<crate::value::Val>, crate::context::EvalError> {
@@ -353,7 +353,7 @@ impl Builtin for Skip {
 
     #[inline]
     fn apply_barrier(
-        ctx: &mut super::builtin_def::BarrierCtx<'_>,
+        ctx: &mut super::builtin::BarrierCtx<'_>,
         buf: &mut Vec<crate::value::Val>,
         _body: Option<&crate::vm::Program>,
     ) -> Option<Result<(), crate::context::EvalError>> {
@@ -437,7 +437,7 @@ impl Builtin for TakeWhile {
 
     #[inline]
     fn apply_stream(
-        ctx: &mut super::builtin_def::StreamCtx<'_, '_>,
+        ctx: &mut super::builtin::StreamCtx<'_, '_>,
         item: crate::value::Val,
         body: Option<&crate::vm::Program>,
     ) -> Result<crate::pipeline::StageFlow<crate::value::Val>, crate::context::EvalError> {
@@ -456,7 +456,7 @@ impl Builtin for TakeWhile {
 
     #[inline]
     fn apply_barrier(
-        ctx: &mut super::builtin_def::BarrierCtx<'_>,
+        ctx: &mut super::builtin::BarrierCtx<'_>,
         buf: &mut Vec<crate::value::Val>,
         body: Option<&crate::vm::Program>,
     ) -> Option<Result<(), crate::context::EvalError>> {
@@ -496,11 +496,11 @@ impl Builtin for DropWhile {
     }
 
     /// DropWhile in the streaming loop is a no-op pass-through (the materialised
-    /// barrier path handles the actual drop semantics in legacy_exec). Mirrors
+    /// barrier path handles the actual drop semantics in materialized_exec). Mirrors
     /// the original `PrefixWhile { take: false }` arm in val_stage_flow.
     #[inline]
     fn apply_stream(
-        _ctx: &mut super::builtin_def::StreamCtx<'_, '_>,
+        _ctx: &mut super::builtin::StreamCtx<'_, '_>,
         item: crate::value::Val,
         _body: Option<&crate::vm::Program>,
     ) -> Result<crate::pipeline::StageFlow<crate::value::Val>, crate::context::EvalError> {
@@ -509,7 +509,7 @@ impl Builtin for DropWhile {
 
     #[inline]
     fn apply_barrier(
-        ctx: &mut super::builtin_def::BarrierCtx<'_>,
+        ctx: &mut super::builtin::BarrierCtx<'_>,
         buf: &mut Vec<crate::value::Val>,
         body: Option<&crate::vm::Program>,
     ) -> Option<Result<(), crate::context::EvalError>> {
@@ -661,7 +661,7 @@ impl Builtin for FindIndex {
 
     #[inline]
     fn apply_barrier(
-        ctx: &mut super::builtin_def::BarrierCtx<'_>,
+        ctx: &mut super::builtin::BarrierCtx<'_>,
         buf: &mut Vec<crate::value::Val>,
         body: Option<&crate::vm::Program>,
     ) -> Option<Result<(), crate::context::EvalError>> {
@@ -698,7 +698,7 @@ impl Builtin for IndicesWhere {
 
     #[inline]
     fn apply_barrier(
-        ctx: &mut super::builtin_def::BarrierCtx<'_>,
+        ctx: &mut super::builtin::BarrierCtx<'_>,
         buf: &mut Vec<crate::value::Val>,
         body: Option<&crate::vm::Program>,
     ) -> Option<Result<(), crate::context::EvalError>> {
@@ -723,7 +723,7 @@ impl Builtin for IndicesWhere {
 /// Shared barrier body for MaxBy / MinBy (ArgExtreme).
 #[inline]
 fn arg_extreme_apply_barrier(
-    ctx: &mut super::builtin_def::BarrierCtx<'_>,
+    ctx: &mut super::builtin::BarrierCtx<'_>,
     buf: &mut Vec<crate::value::Val>,
     body: Option<&crate::vm::Program>,
     max: bool,
@@ -775,7 +775,7 @@ impl Builtin for MaxBy {
 
     #[inline]
     fn apply_barrier(
-        ctx: &mut super::builtin_def::BarrierCtx<'_>,
+        ctx: &mut super::builtin::BarrierCtx<'_>,
         buf: &mut Vec<crate::value::Val>,
         body: Option<&crate::vm::Program>,
     ) -> Option<Result<(), crate::context::EvalError>> {
@@ -795,7 +795,7 @@ impl Builtin for MinBy {
 
     #[inline]
     fn apply_barrier(
-        ctx: &mut super::builtin_def::BarrierCtx<'_>,
+        ctx: &mut super::builtin::BarrierCtx<'_>,
         buf: &mut Vec<crate::value::Val>,
         body: Option<&crate::vm::Program>,
     ) -> Option<Result<(), crate::context::EvalError>> {
@@ -1055,7 +1055,7 @@ impl Builtin for Sort {
     }
     #[inline]
     fn apply_barrier(
-        ctx: &mut super::builtin_def::BarrierCtx<'_>,
+        ctx: &mut super::builtin::BarrierCtx<'_>,
         buf: &mut Vec<crate::value::Val>,
         body: Option<&crate::vm::Program>,
     ) -> Option<Result<(), crate::context::EvalError>> {
@@ -1123,7 +1123,7 @@ impl Builtin for Window {
 
     #[inline]
     fn apply_barrier(
-        ctx: &mut super::builtin_def::BarrierCtx<'_>,
+        ctx: &mut super::builtin::BarrierCtx<'_>,
         buf: &mut Vec<crate::value::Val>,
         _body: Option<&crate::vm::Program>,
     ) -> Option<Result<(), crate::context::EvalError>> {
@@ -1153,7 +1153,7 @@ impl Builtin for Chunk {
 
     #[inline]
     fn apply_barrier(
-        ctx: &mut super::builtin_def::BarrierCtx<'_>,
+        ctx: &mut super::builtin::BarrierCtx<'_>,
         buf: &mut Vec<crate::value::Val>,
         _body: Option<&crate::vm::Program>,
     ) -> Option<Result<(), crate::context::EvalError>> {
@@ -1250,7 +1250,7 @@ impl Builtin for GroupBy {
     }
     #[inline]
     fn apply_barrier(
-        ctx: &mut super::builtin_def::BarrierCtx<'_>,
+        ctx: &mut super::builtin::BarrierCtx<'_>,
         buf: &mut Vec<crate::value::Val>,
         body: Option<&crate::vm::Program>,
     ) -> Option<Result<(), crate::context::EvalError>> {
@@ -1299,7 +1299,7 @@ impl Builtin for CountBy {
 
     #[inline]
     fn apply_barrier(
-        ctx: &mut super::builtin_def::BarrierCtx<'_>,
+        ctx: &mut super::builtin::BarrierCtx<'_>,
         buf: &mut Vec<crate::value::Val>,
         body: Option<&crate::vm::Program>,
     ) -> Option<Result<(), crate::context::EvalError>> {
@@ -1343,7 +1343,7 @@ impl Builtin for IndexBy {
 
     #[inline]
     fn apply_barrier(
-        ctx: &mut super::builtin_def::BarrierCtx<'_>,
+        ctx: &mut super::builtin::BarrierCtx<'_>,
         buf: &mut Vec<crate::value::Val>,
         body: Option<&crate::vm::Program>,
     ) -> Option<Result<(), crate::context::EvalError>> {
@@ -1383,7 +1383,7 @@ fn unique_spec() -> BuiltinSpec {
 /// Shared barrier body for Unique / UniqueBy.
 #[inline]
 fn unique_apply_barrier(
-    ctx: &mut super::builtin_def::BarrierCtx<'_>,
+    ctx: &mut super::builtin::BarrierCtx<'_>,
     buf: &mut Vec<crate::value::Val>,
     body: Option<&crate::vm::Program>,
 ) -> Option<Result<(), crate::context::EvalError>> {
@@ -1429,7 +1429,7 @@ impl Builtin for Unique {
     }
     #[inline]
     fn apply_barrier(
-        ctx: &mut super::builtin_def::BarrierCtx<'_>,
+        ctx: &mut super::builtin::BarrierCtx<'_>,
         buf: &mut Vec<crate::value::Val>,
         body: Option<&crate::vm::Program>,
     ) -> Option<Result<(), crate::context::EvalError>> {
@@ -1447,7 +1447,7 @@ impl Builtin for UniqueBy {
     }
     #[inline]
     fn apply_barrier(
-        ctx: &mut super::builtin_def::BarrierCtx<'_>,
+        ctx: &mut super::builtin::BarrierCtx<'_>,
         buf: &mut Vec<crate::value::Val>,
         body: Option<&crate::vm::Program>,
     ) -> Option<Result<(), crate::context::EvalError>> {
@@ -1477,7 +1477,7 @@ impl Builtin for Reverse {
 
     #[inline]
     fn apply_barrier(
-        _ctx: &mut super::builtin_def::BarrierCtx<'_>,
+        _ctx: &mut super::builtin::BarrierCtx<'_>,
         buf: &mut Vec<crate::value::Val>,
         _body: Option<&crate::vm::Program>,
     ) -> Option<Result<(), crate::context::EvalError>> {
@@ -1834,7 +1834,7 @@ impl Builtin for TransformKeys {
 
     #[inline]
     fn apply_stream(
-        ctx: &mut super::builtin_def::StreamCtx<'_, '_>,
+        ctx: &mut super::builtin::StreamCtx<'_, '_>,
         item: crate::value::Val,
         body: Option<&crate::vm::Program>,
     ) -> Result<crate::pipeline::StageFlow<crate::value::Val>, crate::context::EvalError> {
@@ -1843,7 +1843,7 @@ impl Builtin for TransformKeys {
 
     #[inline]
     fn apply_barrier(
-        ctx: &mut super::builtin_def::BarrierCtx<'_>,
+        ctx: &mut super::builtin::BarrierCtx<'_>,
         buf: &mut Vec<crate::value::Val>,
         body: Option<&crate::vm::Program>,
     ) -> Option<Result<(), crate::context::EvalError>> {
@@ -1855,12 +1855,12 @@ impl Builtin for TransformKeys {
 /// TransformKeys / TransformValues / FilterKeys / FilterValues.
 #[inline]
 fn object_lambda_apply_stream(
-    ctx: &mut super::builtin_def::StreamCtx<'_, '_>,
+    ctx: &mut super::builtin::StreamCtx<'_, '_>,
     item: crate::value::Val,
     body: Option<&crate::vm::Program>,
 ) -> Result<crate::pipeline::StageFlow<crate::value::Val>, crate::context::EvalError> {
     let prog = body.expect("object lambda body");
-    let result = crate::pipeline::legacy_exec::apply_lambda_obj(
+    let result = crate::pipeline::materialized_exec::apply_lambda_obj(
         ctx.stage, &item, ctx.vm, ctx.env, ctx.kernel, prog,
     )?;
     Ok(crate::pipeline::StageFlow::Continue(result))
@@ -1869,14 +1869,14 @@ fn object_lambda_apply_stream(
 /// Helper used by all ObjectLambda variants for barrier (whole-buffer) execution.
 #[inline]
 fn object_lambda_apply_barrier(
-    ctx: &mut super::builtin_def::BarrierCtx<'_>,
+    ctx: &mut super::builtin::BarrierCtx<'_>,
     buf: &mut Vec<crate::value::Val>,
     body: Option<&crate::vm::Program>,
 ) -> Option<Result<(), crate::context::EvalError>> {
     let prog = body?;
     let mut out: Vec<crate::value::Val> = Vec::with_capacity(buf.len());
     for v in std::mem::take(buf) {
-        match crate::pipeline::legacy_exec::apply_lambda_obj(
+        match crate::pipeline::materialized_exec::apply_lambda_obj(
             ctx.stage, &v, ctx.vm, ctx.env, ctx.kernel, prog,
         ) {
             Ok(mapped) => out.push(mapped),
@@ -1898,7 +1898,7 @@ impl Builtin for TransformValues {
     fn spec() -> BuiltinSpec { object_lambda_spec() }
     #[inline]
     fn apply_stream(
-        ctx: &mut super::builtin_def::StreamCtx<'_, '_>,
+        ctx: &mut super::builtin::StreamCtx<'_, '_>,
         item: crate::value::Val,
         body: Option<&crate::vm::Program>,
     ) -> Result<crate::pipeline::StageFlow<crate::value::Val>, crate::context::EvalError> {
@@ -1907,7 +1907,7 @@ impl Builtin for TransformValues {
 
     #[inline]
     fn apply_barrier(
-        ctx: &mut super::builtin_def::BarrierCtx<'_>,
+        ctx: &mut super::builtin::BarrierCtx<'_>,
         buf: &mut Vec<crate::value::Val>,
         body: Option<&crate::vm::Program>,
     ) -> Option<Result<(), crate::context::EvalError>> {
@@ -1923,7 +1923,7 @@ impl Builtin for FilterKeys {
     fn spec() -> BuiltinSpec { object_lambda_spec() }
     #[inline]
     fn apply_stream(
-        ctx: &mut super::builtin_def::StreamCtx<'_, '_>,
+        ctx: &mut super::builtin::StreamCtx<'_, '_>,
         item: crate::value::Val,
         body: Option<&crate::vm::Program>,
     ) -> Result<crate::pipeline::StageFlow<crate::value::Val>, crate::context::EvalError> {
@@ -1932,7 +1932,7 @@ impl Builtin for FilterKeys {
 
     #[inline]
     fn apply_barrier(
-        ctx: &mut super::builtin_def::BarrierCtx<'_>,
+        ctx: &mut super::builtin::BarrierCtx<'_>,
         buf: &mut Vec<crate::value::Val>,
         body: Option<&crate::vm::Program>,
     ) -> Option<Result<(), crate::context::EvalError>> {
@@ -1948,7 +1948,7 @@ impl Builtin for FilterValues {
     fn spec() -> BuiltinSpec { object_lambda_spec() }
     #[inline]
     fn apply_stream(
-        ctx: &mut super::builtin_def::StreamCtx<'_, '_>,
+        ctx: &mut super::builtin::StreamCtx<'_, '_>,
         item: crate::value::Val,
         body: Option<&crate::vm::Program>,
     ) -> Result<crate::pipeline::StageFlow<crate::value::Val>, crate::context::EvalError> {
@@ -1957,7 +1957,7 @@ impl Builtin for FilterValues {
 
     #[inline]
     fn apply_barrier(
-        ctx: &mut super::builtin_def::BarrierCtx<'_>,
+        ctx: &mut super::builtin::BarrierCtx<'_>,
         buf: &mut Vec<crate::value::Val>,
         body: Option<&crate::vm::Program>,
     ) -> Option<Result<(), crate::context::EvalError>> {

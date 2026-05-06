@@ -16,7 +16,6 @@ use crate::builtins::{
 use crate::context::{Env, EvalError};
 use crate::value::Val;
 
-mod canonical;
 mod capability;
 mod collector;
 mod columnar;
@@ -25,23 +24,20 @@ mod composed_barrier;
 mod composed_exec;
 mod composed_segment;
 mod composed_sink;
-mod composed_source;
 mod composed_stage;
 mod exec;
 mod indexed_exec;
 mod kernels;
-pub(crate) mod legacy_exec;
+pub(crate) mod materialized_exec;
 mod ir;
 mod lower;
 pub(crate) mod logical_lower;
-mod normalize;
 mod operator;
 mod plan;
 mod symbolic;
 mod reducer;
 mod row_source;
 mod sink_accumulator;
-mod stage_flow;
 mod val_stage_flow;
 pub(crate) use capability::{
     view_capabilities, view_prefix_capabilities, ViewInputMode, ViewMaterialization,
@@ -70,18 +66,32 @@ pub use plan::{
 pub use plan::select_strategy;
 pub(crate) use reducer::ReducerAccumulator;
 pub(crate) use sink_accumulator::SinkAccumulator;
-pub(crate) use stage_flow::StageFlow;
+
+/// Per-element control-flow signal returned by a pipeline stage.
+///
+/// Communicates continue, filter-skip, early stop, and terminal-collect signals
+/// from a stage to its caller without heap allocation.
+pub(crate) enum StageFlow<T> {
+    /// Stage produced a value; pass it to the next stage or sink.
+    Continue(T),
+    /// Stage filtered out this element; skip to the next input row.
+    SkipRow,
+    /// Stage signalled early termination; discard remaining input.
+    Stop,
+    /// A terminal-map stage already wrote the result; no further accumulation needed.
+    TerminalCollected,
+}
 
 #[cfg(feature = "simd-json")]
 /// Executes the field-chain traversal of `body` against a borrowed simd-json tape, returning
 /// the first matching value or `None` if the shape is not tape-compatible.
 pub(crate) fn run_tape_field_chain(
     body: &PipelineBody,
-    tape: &crate::strref::TapeData,
+    tape: &crate::tape::TapeData,
     keys: &[Arc<str>],
     base_env: &Env,
 ) -> Option<Result<Val, EvalError>> {
-    legacy_exec::run_tape_field_chain(body, tape, keys, base_env)
+    materialized_exec::run_tape_field_chain(body, tape, keys, base_env)
 }
 
 /// Extension point allowing the host (e.g. `Jetro`) to upgrade a flat `Arc<Vec<Val>>` array
@@ -421,6 +431,18 @@ impl Pipeline {
         };
         (self.source, body)
     }
+
+    /// Returns cloned copies of the pipeline's stages, body kernels, and terminal sink for testing and introspection.
+    ///
+    /// Canonical decomposition of a `Pipeline` into its parts for testing and
+    /// introspection. Not on the hot execution path.
+    pub fn canonical(&self) -> (Vec<Stage>, Vec<BodyKernel>, Sink) {
+        (
+            self.stages.clone(),
+            self.stage_kernels.clone(),
+            self.sink.clone(),
+        )
+    }
 }
 
 #[cfg(test)]
@@ -528,7 +550,7 @@ mod tests {
     #[test]
     fn tape_row_source_walks_field_chain_array_lazily() {
         let tape =
-            crate::strref::TapeData::parse(br#"{"books":[{"id":1},{"id":2}],"skip":[3]}"#.to_vec())
+            crate::tape::TapeData::parse(br#"{"books":[{"id":1},{"id":2}],"skip":[3]}"#.to_vec())
                 .unwrap();
         let keys = vec![std::sync::Arc::<str>::from("books")];
 

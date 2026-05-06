@@ -12,7 +12,7 @@ use crate::builtins::BuiltinViewStage;
 use crate::vm::{Opcode, Program};
 
 use super::{
-    normalize::normalize_symbolic, BodyKernel, Sink, Stage,
+    symbolic::normalize_symbolic, BodyKernel, Sink, Stage,
 };
 
 pub use super::ir::{PhysicalExecPath, Plan, Position, StageStrategy, Strategy};

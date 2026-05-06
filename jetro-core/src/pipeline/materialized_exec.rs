@@ -123,7 +123,7 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
 #[cfg(feature = "simd-json")]
 pub(super) fn run_tape_field_chain(
     body: &PipelineBody,
-    tape: &crate::strref::TapeData,
+    tape: &crate::tape::TapeData,
     keys: &[Arc<str>],
     base_env: &Env,
 ) -> Option<Result<Val, EvalError>> {
@@ -262,14 +262,14 @@ fn apply_adapter_materialized(
     // Trait dispatch for migrated barrier methods.
     if let Some(method) = stage.descriptor().and_then(|d| d.method) {
         let body = stage.body_program();
-        let mut ctx = crate::builtins::builtin_def::BarrierCtx {
+        let mut ctx = crate::builtins::builtin::BarrierCtx {
             vm,
             env: loop_env,
             kernel,
             stage,
             strategy,
         };
-        use crate::builtins::{BuiltinMethod as M, builtin_def::Builtin, defs};
+        use crate::builtins::{BuiltinMethod as M, builtin::Builtin, defs};
         let trait_result = match method {
             M::Reverse => <defs::Reverse as Builtin>::apply_barrier(&mut ctx, buf, body),
             M::Sort => <defs::Sort as Builtin>::apply_barrier(&mut ctx, buf, body),

@@ -37,7 +37,7 @@ pub(crate) mod physical_eval;
 pub(crate) mod pipeline;
 pub(crate) mod planner;
 pub(crate) mod runtime;
-pub(crate) mod strref;
+pub(crate) mod tape;
 pub(crate) mod structural;
 pub(crate) mod util;
 pub(crate) mod value;
@@ -144,7 +144,7 @@ pub struct Jetro {
 
     /// Lazily parsed simd-json tape; `Err` is cached to avoid re-parsing after failure.
     #[cfg(feature = "simd-json")]
-    tape: OnceCell<std::result::Result<Arc<crate::strref::TapeData>, String>>,
+    tape: OnceCell<std::result::Result<Arc<crate::tape::TapeData>, String>>,
     /// Unused placeholder so the field name is consistent regardless of features.
     #[cfg(not(feature = "simd-json"))]
     #[allow(dead_code)]
@@ -309,7 +309,7 @@ impl Jetro {
     #[cfg(feature = "simd-json")]
     pub(crate) fn lazy_tape(
         &self,
-    ) -> std::result::Result<Option<&Arc<crate::strref::TapeData>>, EvalError> {
+    ) -> std::result::Result<Option<&Arc<crate::tape::TapeData>>, EvalError> {
         if let Some(result) = self.tape.get() {
             return result
                 .as_ref()
@@ -320,7 +320,7 @@ impl Jetro {
             return Ok(None);
         };
         let bytes: Vec<u8> = (**raw).to_vec();
-        let parsed = crate::strref::TapeData::parse(bytes).map_err(|err| err.to_string());
+        let parsed = crate::tape::TapeData::parse(bytes).map_err(|err| err.to_string());
         let _ = self.tape.set(parsed);
         self.tape
             .get()

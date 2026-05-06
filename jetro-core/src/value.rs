@@ -32,7 +32,7 @@ pub enum Val {
     Str(Arc<str>),
     /// Borrowed string slice into a parent Arc<str>. Zero-alloc view produced
     /// by the simd-json tape path and string-slice builtins.
-    StrSlice(crate::strref::StrRef),
+    StrSlice(crate::tape::StrRef),
     /// Heterogeneous array of `Val` elements; Arc-wrapped for O(1) clone.
     Arr(Arc<Vec<Val>>),
     /// Columnar lane for homogeneous integer arrays; 8 B/element vs 24 B for `Val::Int`.
@@ -42,7 +42,7 @@ pub enum Val {
     /// Columnar lane for homogeneous Arc<str> arrays; avoids per-element enum tag.
     StrVec(Arc<Vec<Arc<str>>>),
     /// Columnar lane of borrowed-string views; emitted by map-slice fusions.
-    StrSliceVec(Arc<Vec<crate::strref::StrRef>>),
+    StrSliceVec(Arc<Vec<crate::tape::StrRef>>),
     /// JSON object backed by an insertion-ordered hash map; Arc-wrapped for O(1) clone.
     Obj(Arc<IndexMap<Arc<str>, Val>>),
     /// Flat (key, value) pair slice — no hashtable. Hot path for per-row
@@ -1099,7 +1099,7 @@ impl Val {
     /// Materialise a `Val` from a `TapeData` (a pre-parsed, Arc-owned simd-json tape), producing
     /// `StrSlice` views into the tape buffer instead of allocating new `Arc<str>` for strings.
     #[cfg(feature = "simd-json")]
-    pub fn from_tape_data(tape: &Arc<crate::strref::TapeData>) -> Val {
+    pub fn from_tape_data(tape: &Arc<crate::tape::TapeData>) -> Val {
         let mut idx = 0usize;
         Self::from_tape_walk(tape, &mut idx)
     }
@@ -1107,8 +1107,8 @@ impl Val {
     /// Recursive walk helper for `from_tape_data`; advances `idx` through `TapeNode` entries,
     /// emitting `StrSlice` for string nodes and promoting homogeneous arrays to columnar lanes.
     #[cfg(feature = "simd-json")]
-    fn from_tape_walk(tape: &Arc<crate::strref::TapeData>, idx: &mut usize) -> Val {
-        use crate::strref::TapeNode;
+    fn from_tape_walk(tape: &Arc<crate::tape::TapeData>, idx: &mut usize) -> Val {
+        use crate::tape::TapeNode;
         use simd_json::StaticNode as SN;
         let here = tape.nodes[*idx];
         *idx += 1;
@@ -1211,7 +1211,7 @@ impl Val {
                     return Val::FloatVec(Arc::new(out));
                 }
                 if try_str {
-                    let mut out: Vec<crate::strref::StrRef> = Vec::with_capacity(len);
+                    let mut out: Vec<crate::tape::StrRef> = Vec::with_capacity(len);
                     for _ in 0..len {
                         if let TapeNode::String(_) = tape.nodes[*idx] {
                             out.push(tape.str_ref_at(*idx));
@@ -1480,7 +1480,7 @@ mod valref_tests {
     fn from_tape_data_uses_borrowed_string_slices_and_preserves_json() {
         let js =
             br#"{"title":"Dune","tags":["sci-fi","classic"],"nested":{"name":"Paul"}}"#.to_vec();
-        let tape = crate::strref::TapeData::parse(js.clone()).unwrap();
+        let tape = crate::tape::TapeData::parse(js.clone()).unwrap();
         let val = Val::from_tape_data(&tape);
 
         assert_eq!(val.to_json_vec(), js);
@@ -1502,7 +1502,7 @@ mod valref_tests {
     #[test]
     fn from_tape_data_promotes_float_arrays_and_indexes_str_slice_vec() {
         let js = br#"{"nums":[1,2.5,3],"names":["a","b"]}"#.to_vec();
-        let tape = crate::strref::TapeData::parse(js).unwrap();
+        let tape = crate::tape::TapeData::parse(js).unwrap();
         let val = Val::from_tape_data(&tape);
         let obj = val.as_object().unwrap();
 

@@ -1,5 +1,5 @@
 //! Composed execution path: builds a `Stage` chain once at lower time and drives it through `run_pipeline`.
-//! Avoids the per-shape dispatch in `legacy_exec`; any combination of stages and sinks executes
+//! Avoids the per-shape dispatch in `materialized_exec`; any combination of stages and sinks executes
 //! through one generic loop.
 //! Returns `None` from `run` to fall through to the legacy path when lowering cannot complete.
 
@@ -11,11 +11,19 @@ use crate::{
 use super::composed_barrier::{self, BarrierOutput};
 use super::composed_segment;
 use super::composed_sink;
-use super::composed_source;
 use super::composed_stage::ComposedStageBuilder;
 use super::{
-    compute_strategies_with_kernels, ordered_by_key_cmp, BodyKernel, Pipeline, Stage, StageStrategy,
+    compute_strategies_with_kernels, ordered_by_key_cmp, row_source, BodyKernel, Pipeline, Source,
+    Stage, StageStrategy,
 };
+
+/// Resolves `source` against `root` and returns a `Rows` iterator for composed execution.
+///
+/// Returns `None` when the resolved value is not array-like (scalar or null source).
+fn source_rows(source: &Source, root: &Val) -> Option<row_source::Rows<'static>> {
+    let recv = row_source::resolve(source, root);
+    row_source::resolved_array_like_rows(recv)
+}
 
 /// Entry point for composed execution; returns `None` when any stage or sink cannot be lowered.
 pub(super) fn run(
@@ -26,7 +34,7 @@ pub(super) fn run(
     let (eff_stages, eff_kernels, eff_sink) = pipeline.canonical();
     let stage_builder = ComposedStageBuilder::new(base_env);
 
-    let mut buf = composed_source::rows(&pipeline.source, root)?;
+    let mut buf = source_rows(&pipeline.source, root)?;
 
     
     let kernels = &eff_kernels;

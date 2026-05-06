@@ -7,7 +7,7 @@ use crate::{
     value::Val,
 };
 
-use super::{legacy_exec, BodyKernel, Stage, StageFlow, TerminalMapCollector};
+use super::{materialized_exec, BodyKernel, Stage, StageFlow, TerminalMapCollector};
 
 /// Applies `stage` to `item` in the streaming loop; barrier and expanding stages return `Continue`.
 pub(super) fn apply_adapter_streaming<'a>(
@@ -25,7 +25,7 @@ pub(super) fn apply_adapter_streaming<'a>(
     // Trait dispatch: try Builtin::apply_stream for migrated methods.
     if let Some(method) = stage.descriptor().and_then(|d| d.method) {
         let body = stage.body_program();
-        let mut ctx = crate::builtins::builtin_def::StreamCtx {
+        let mut ctx = crate::builtins::builtin::StreamCtx {
             vm,
             env: loop_env,
             kernel,
@@ -36,7 +36,7 @@ pub(super) fn apply_adapter_streaming<'a>(
             terminal_map_idx,
             terminal_map_collect,
         };
-        use crate::builtins::{BuiltinMethod as M, builtin_def::Builtin, defs};
+        use crate::builtins::{BuiltinMethod as M, builtin::Builtin, defs};
         match method {
             M::Filter | M::Find | M::FindAll => {
                 return <defs::Filter as Builtin>::apply_stream(&mut ctx, item, body);
@@ -63,7 +63,7 @@ pub(super) fn apply_adapter_streaming<'a>(
     // All other variants pass through (barriers handled by materialised path).
     match stage {
         Stage::Builtin(_) | Stage::IntRangeBuiltin { .. } | Stage::StringPairBuiltin { .. } => {
-            Ok(StageFlow::Continue(legacy_exec::apply_element_adapter(stage, item)))
+            Ok(StageFlow::Continue(materialized_exec::apply_element_adapter(stage, item)))
         }
         _ => Ok(StageFlow::Continue(item)),
     }

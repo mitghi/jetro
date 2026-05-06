@@ -207,7 +207,7 @@ pub(crate) enum TapeView<'a> {
     /// A live reference to a tape node at `idx` within the borrowed `TapeData`.
     Node {
         /// The simd-json tape buffer this view points into.
-        tape: &'a crate::strref::TapeData,
+        tape: &'a crate::tape::TapeData,
         /// Index of the current node within `tape.nodes`.
         idx: usize,
     },
@@ -220,7 +220,7 @@ impl<'a> TapeView<'a> {
     /// Return a `TapeView` pointing at the root node of `tape`, or `Missing`
     /// if the tape is empty (invalid JSON).
     #[inline]
-    pub(crate) fn root(tape: &'a crate::strref::TapeData) -> Self {
+    pub(crate) fn root(tape: &'a crate::tape::TapeData) -> Self {
         if tape.nodes.is_empty() {
             Self::Missing
         } else {
@@ -231,8 +231,8 @@ impl<'a> TapeView<'a> {
     /// Recursively materialise the tape subtree starting at `*idx`, advancing
     /// `idx` past all consumed nodes and returning the resulting `Val`.
     #[inline]
-    fn materialize_at(tape: &'a crate::strref::TapeData, idx: &mut usize) -> Val {
-        use crate::strref::TapeNode;
+    fn materialize_at(tape: &'a crate::tape::TapeData, idx: &mut usize) -> Val {
+        use crate::tape::TapeNode;
         use simd_json::StaticNode as SN;
 
         let here = tape.nodes[*idx];
@@ -275,7 +275,7 @@ impl<'a> TapeView<'a> {
 impl<'a> ValueView<'a> for TapeView<'a> {
     #[inline]
     fn scalar(&self) -> JsonView<'_> {
-        use crate::strref::TapeNode;
+        use crate::tape::TapeNode;
         use simd_json::StaticNode as SN;
 
         let Self::Node { tape, idx } = self else {
@@ -295,7 +295,7 @@ impl<'a> ValueView<'a> for TapeView<'a> {
 
     #[inline]
     fn field(&self, key: &str) -> Self {
-        use crate::strref::TapeNode;
+        use crate::tape::TapeNode;
 
         let Self::Node { tape, idx } = self else {
             return Self::Missing;
@@ -318,7 +318,7 @@ impl<'a> ValueView<'a> for TapeView<'a> {
 
     #[inline]
     fn index(&self, idx: i64) -> Self {
-        use crate::strref::TapeNode;
+        use crate::tape::TapeNode;
 
         let Self::Node { tape, idx: node } = self else {
             return Self::Missing;
@@ -339,7 +339,7 @@ impl<'a> ValueView<'a> for TapeView<'a> {
 
     #[inline]
     fn array_iter(&self) -> Option<Box<dyn Iterator<Item = Self> + 'a>> {
-        use crate::strref::TapeNode;
+        use crate::tape::TapeNode;
 
         let Self::Node { tape, idx } = self else {
             return None;
@@ -374,7 +374,7 @@ impl<'a> ValueView<'a> for TapeView<'a> {
 #[cfg(feature = "simd-json")]
 struct TapeArrayIter<'a> {
     /// The tape buffer being iterated.
-    tape: &'a crate::strref::TapeData,
+    tape: &'a crate::tape::TapeData,
     /// Number of elements still to be yielded.
     remaining: usize,
     /// Current tape position (index of the next element node).
@@ -478,7 +478,7 @@ mod tests {
 
         let bytes =
             br#"{"books":[{"title":"low","score":1},{"title":"Dune","score":901}]}"#.to_vec();
-        let tape = crate::strref::TapeData::parse(bytes).unwrap();
+        let tape = crate::tape::TapeData::parse(bytes).unwrap();
         let val = Val::from_tape_data(&tape);
 
         let tape_score_view = TapeView::root(&tape).field("books").index(1).field("score");
@@ -497,7 +497,7 @@ mod tests {
     fn tape_view_materializes_current_subtree_only() {
         use super::TapeView;
 
-        let tape = crate::strref::TapeData::parse(
+        let tape = crate::tape::TapeData::parse(
             br#"{"items":[{"id":1},{"id":2}],"unused":[0]}"#.to_vec(),
         )
         .unwrap();

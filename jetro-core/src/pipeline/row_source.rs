@@ -57,7 +57,7 @@ pub(super) enum ValRowsIter<'a> {
 pub(super) enum TapeRowSource<'a> {
     /// The source tape node is an array; iteration yields each element by span.
     Array {
-        tape: &'a crate::strref::TapeData,
+        tape: &'a crate::tape::TapeData,
         // Index of the first array element in the tape.
         first: usize,
         // Number of elements in the array.
@@ -74,7 +74,7 @@ pub(super) enum TapeRowSource<'a> {
 pub(super) enum TapeRowsIter<'a> {
     /// Advances through array elements by consuming tape spans.
     Array {
-        tape: &'a crate::strref::TapeData,
+        tape: &'a crate::tape::TapeData,
         // Elements remaining to be yielded.
         remaining: usize,
         // Current tape index.
@@ -231,7 +231,7 @@ impl<'a> ValRowSource<'a> {
 #[cfg(feature = "simd-json")]
 impl<'a> TapeRowSource<'a> {
     /// Walks `keys` through `tape` and returns a `TapeRowSource` rooted at the resolved node, or `Missing` when any key is absent.
-    pub(super) fn from_field_chain(tape: &'a crate::strref::TapeData, keys: &[Arc<str>]) -> Self {
+    pub(super) fn from_field_chain(tape: &'a crate::tape::TapeData, keys: &[Arc<str>]) -> Self {
         let Some(idx) = tape_walk_field_chain(tape, keys) else {
             return Self::Missing;
         };
@@ -239,9 +239,9 @@ impl<'a> TapeRowSource<'a> {
     }
 
     /// Constructs a `TapeRowSource` at tape node `idx`, choosing `Array` for JSON arrays and `Single` otherwise.
-    pub(super) fn from_tape_index(tape: &'a crate::strref::TapeData, idx: usize) -> Self {
+    pub(super) fn from_tape_index(tape: &'a crate::tape::TapeData, idx: usize) -> Self {
         match tape.nodes.get(idx) {
-            Some(crate::strref::TapeNode::Array { len, .. }) => Self::Array {
+            Some(crate::tape::TapeNode::Array { len, .. }) => Self::Array {
                 tape,
                 first: idx + 1,
                 len: *len,
@@ -329,7 +329,7 @@ fn objvec_row(data: &ObjVecData, row: usize) -> Val {
 
 // Returns the tape index of the final node after walking `keys`, or `None` if any key is missing.
 #[cfg(feature = "simd-json")]
-fn tape_walk_field_chain(tape: &crate::strref::TapeData, keys: &[Arc<str>]) -> Option<usize> {
+fn tape_walk_field_chain(tape: &crate::tape::TapeData, keys: &[Arc<str>]) -> Option<usize> {
     let mut cur = 0usize;
     for key in keys {
         cur = tape_field(tape, cur, key.as_ref())?;
@@ -339,8 +339,8 @@ fn tape_walk_field_chain(tape: &crate::strref::TapeData, keys: &[Arc<str>]) -> O
 
 // Scans the tape object at `idx` for `key` and returns the tape index of its value, or `None` when absent.
 #[cfg(feature = "simd-json")]
-fn tape_field(tape: &crate::strref::TapeData, idx: usize, key: &str) -> Option<usize> {
-    let crate::strref::TapeNode::Object { len, .. } = *tape.nodes.get(idx)? else {
+fn tape_field(tape: &crate::tape::TapeData, idx: usize, key: &str) -> Option<usize> {
+    let crate::tape::TapeNode::Object { len, .. } = *tape.nodes.get(idx)? else {
         return None;
     };
     let mut cur = idx + 1;

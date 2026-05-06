@@ -287,10 +287,10 @@ pub(crate) fn by_name(name: &str) -> Option<BuiltinId> {
     macro_rules! check {
         ( $( $variant:ident ),* $(,)? ) => {
             $(
-                if name == <crate::builtins::defs::$variant as crate::builtins::builtin_def::Builtin>::NAME {
+                if name == <crate::builtins::defs::$variant as crate::builtins::builtin::Builtin>::NAME {
                     return Some(BuiltinId(BuiltinMethod::$variant as u16));
                 }
-                if <crate::builtins::defs::$variant as crate::builtins::builtin_def::Builtin>::ALIASES
+                if <crate::builtins::defs::$variant as crate::builtins::builtin::Builtin>::ALIASES
                     .contains(&name)
                 {
                     return Some(BuiltinId(BuiltinMethod::$variant as u16));
@@ -310,8 +310,8 @@ pub(crate) fn all_method_entries() -> Vec<(BuiltinMethod, &'static str, &'static
             vec![
                 $(
                     (BuiltinMethod::$variant,
-                     <crate::builtins::defs::$variant as crate::builtins::builtin_def::Builtin>::NAME,
-                     <crate::builtins::defs::$variant as crate::builtins::builtin_def::Builtin>::ALIASES),
+                     <crate::builtins::defs::$variant as crate::builtins::builtin::Builtin>::NAME,
+                     <crate::builtins::defs::$variant as crate::builtins::builtin::Builtin>::ALIASES),
                 )*
             ]
         };

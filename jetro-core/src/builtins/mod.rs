@@ -1348,7 +1348,7 @@ impl BuiltinMethod {
         macro_rules! spec_arm {
             ( $( $variant:ident ),* $(,)? ) => {
                 match self {
-                    $( Self::$variant => <defs::$variant as builtin_def::Builtin>::spec(), )*
+                    $( Self::$variant => <defs::$variant as builtin::Builtin>::spec(), )*
                 }
             };
         }
@@ -1357,7 +1357,7 @@ impl BuiltinMethod {
         macro_rules! cancel_arm {
             ( $( $variant:ident ),* $(,)? ) => {
                 match self {
-                    $( Self::$variant => <defs::$variant as builtin_def::Builtin>::cancellation(), )*
+                    $( Self::$variant => <defs::$variant as builtin::Builtin>::cancellation(), )*
                 }
             };
         }
@@ -1449,11 +1449,11 @@ impl BuiltinCall {
                 match self.method {
                     $( BuiltinMethod::$variant => {
                         if matches!(self.args, BuiltinArgs::None) {
-                            if let Some(v) = <defs::$variant as builtin_def::Builtin>::apply_one(recv) {
+                            if let Some(v) = <defs::$variant as builtin::Builtin>::apply_one(recv) {
                                 return Some(v);
                             }
                         }
-                        if let Some(v) = <defs::$variant as builtin_def::Builtin>::apply_args(recv, &self.args) {
+                        if let Some(v) = <defs::$variant as builtin::Builtin>::apply_args(recv, &self.args) {
                             return Some(v);
                         }
                     } )*
@@ -2781,7 +2781,7 @@ pub mod regex;
 pub mod schema;
 pub mod string;
 
-pub(crate) mod builtin_def;
+pub(crate) mod builtin;
 pub(crate) mod defs;
 
 pub use array::*;
