@@ -28,7 +28,7 @@ pub(crate) mod builtin_helpers;
 pub(crate) mod builtin_registry;
 pub(crate) mod builtins;
 pub(crate) mod chain_ir;
-pub(crate) mod composed;
+pub(crate) mod composed_pipeline;
 pub(crate) mod context;
 pub(crate) mod executor;
 pub(crate) mod parser;
