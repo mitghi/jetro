@@ -787,9 +787,9 @@ fn plan_array_elem(builder: &mut PlanBuilder, elem: &ArrayElem) -> PhysicalArray
     }
 }
 
-/// Plans `expr` using the default (`Bytes`) context; exposed for tests only.
+/// Plans `expr` using the default (`Bytes`) context; exposed for tests + fuzz.
 #[inline]
-#[cfg(test)]
+#[cfg(any(test, feature = "fuzz_internal"))]
 pub fn plan_query(expr: &str) -> QueryPlan {
     plan_query_with_context(expr, PlanningContext::default())
 }

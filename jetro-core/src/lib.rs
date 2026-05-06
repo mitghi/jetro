@@ -46,6 +46,15 @@ pub use data::context::EvalError;
 use parse::parser::ParseError;
 use vm::VM;
 
+/// Internal parser surface re-exported only when the `fuzz_internal` feature
+/// is enabled. Used by the `cargo-fuzz` harness to reach the PEG parser
+/// without going through `Jetro::collect`. NOT a stable public API.
+#[cfg(feature = "fuzz_internal")]
+pub mod __fuzz_internal {
+    pub use crate::parse::parser::{parse, ParseError};
+    pub use crate::plan::physical::plan_query;
+}
+
 
 #[cfg(test)]
 #[derive(Debug)]
