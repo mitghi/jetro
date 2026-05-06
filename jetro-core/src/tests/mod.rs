@@ -15,6 +15,8 @@ mod chain_write;
 #[cfg(test)]
 mod deep_search;
 #[cfg(test)]
+mod patch_fusion_soundness;
+#[cfg(test)]
 mod examples;
 #[cfg(test)]
 mod regression;
