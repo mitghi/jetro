@@ -21,7 +21,7 @@ use crate::vm::{
 /// Compile-time variable scope used by the `Compiler` to decide whether an
 /// identifier refers to a bound variable or a built-in/field name.
 #[derive(Clone, Default)]
-struct VarCtx {
+pub(crate) struct VarCtx {
     /// Deduplicated set of names currently in scope; stored inline for small counts.
     known: SmallVec<[Arc<str>; 4]>,
 }
@@ -1075,7 +1075,7 @@ impl PassConfig {
 /// pattern tests, optional guard, and a terminating `Body`. Failed tests
 /// jump forward to the start of the next arm; the trailing `Fail` op is
 /// reached only when no arm matches.
-fn compile_match(
+pub(crate) fn compile_match(
     scrutinee: &Expr,
     arms: &[crate::parse::ast::MatchArm],
     ctx: &VarCtx,

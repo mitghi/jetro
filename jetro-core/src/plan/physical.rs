@@ -532,6 +532,31 @@ fn lower_structural_prefix(
                 let fallback = Arc::new(Compiler::compile(&fallback_expr, "<structural-fallback>"));
                 return Some((plan, fallback, idx + 1));
             }
+            Step::DeepMatch { arms, early_stop } => {
+                // Lower `..match { ... }` to a structural plan when the
+                // compile-time shape summary admits bitmap candidate
+                // enumeration (currently `ObjAnyOfKeys`). All other
+                // shape summaries fall through to the VM tree-walk
+                // runtime by returning `None` here.
+                let cm = Arc::new(crate::compile::compiler::compile_match(
+                    &Expr::Current,
+                    arms,
+                    &crate::compile::compiler::VarCtx::default(),
+                ));
+                let candidate_keys = match cm.shape_summary.as_ref()? {
+                    crate::vm::MatchShapeSummary::ObjAnyOfKeys(keys) => Arc::clone(keys),
+                    _ => return None,
+                };
+                let plan = StructuralPlan::DeepMatch {
+                    anchor: Arc::from(anchor),
+                    candidate_keys,
+                    cm,
+                    early_stop: *early_stop,
+                };
+                let fallback_expr = base.clone().maybe_chain(steps[..=idx].to_vec());
+                let fallback = Arc::new(Compiler::compile(&fallback_expr, "<structural-fallback>"));
+                return Some((plan, fallback, idx + 1));
+            }
             _ => return None,
         }
     }

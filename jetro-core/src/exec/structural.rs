@@ -47,6 +47,24 @@ pub(crate) enum StructuralPlan {
         /// Key/literal pairs that must all match on each candidate object.
         patterns: Arc<[(Arc<str>, StructuralLiteral)]>,
     },
+    /// Bitmap-narrowed `..match` dispatch. Uses the compile-time
+    /// shape summary on `cm` to enumerate candidate descendant tokens
+    /// from the structural index, materialises each into a `Val`, and
+    /// runs the compiled match against it. Truthy arm-body results
+    /// are accumulated into an array (or returned directly when
+    /// `early_stop` is set, mirroring the `..match!` runtime).
+    DeepMatch {
+        /// Path from the document root to the subtree to search.
+        anchor: Arc<[StructuralPathStep]>,
+        /// Object keys used to seed the candidate enumeration. Drawn
+        /// from `MatchShapeSummary::ObjAnyOfKeys`; the planner only
+        /// emits this variant when the summary admits bitmap dispatch.
+        candidate_keys: Arc<[Arc<str>]>,
+        /// The compiled match program executed against each candidate.
+        cm: Arc<crate::vm::CompiledMatch>,
+        /// `true` for the `..match! { ... }` early-stop variant.
+        early_stop: bool,
+    },
 }
 
 /// One step along the anchor path from the document root to the search subtree.
@@ -106,12 +124,86 @@ impl StructuralPlan {
 
     /// Execute the plan against `idx` (pre-built structural index) and the raw
     /// `bytes` of the JSON document, returning a `Val::Arr` of matching objects.
+    /// Returns an error for variants that require a runtime VM (`DeepMatch`);
+    /// those callers must use `run_with_vm` instead.
     pub(crate) fn run(&self, idx: &StructuralIndex, bytes: &[u8]) -> Result<Val, EvalError> {
         match self {
             Self::DeepFind { anchor, predicates } => run_deep_find(idx, bytes, anchor, predicates),
             Self::DeepShape { anchor, keys } => run_deep_shape(idx, bytes, anchor, keys),
             Self::DeepLike { anchor, patterns } => run_deep_like(idx, bytes, anchor, patterns),
+            Self::DeepMatch { .. } => Err(EvalError(
+                "DeepMatch requires a VM; use run_with_vm".to_string(),
+            )),
         }
+    }
+
+    /// VM-aware execution entry. Runs `Self::DeepMatch` against the
+    /// supplied `vm`/`env` so per-candidate guard and body programs can
+    /// evaluate; delegates to `run` for non-VM variants.
+    pub(crate) fn run_with_vm(
+        &self,
+        idx: &StructuralIndex,
+        bytes: &[u8],
+        vm: &mut crate::vm::VM,
+        env: &crate::data::context::Env,
+    ) -> Result<Val, EvalError> {
+        match self {
+            Self::DeepMatch {
+                anchor,
+                candidate_keys,
+                cm,
+                early_stop,
+            } => run_deep_match(idx, bytes, anchor, candidate_keys, cm, *early_stop, vm, env),
+            other => other.run(idx, bytes),
+        }
+    }
+}
+
+/// Walk the structural index for object descendants whose keys overlap
+/// `candidate_keys` (the union of leading keys across the match's
+/// typed arms), materialise each candidate, and run the compiled
+/// match against it. Truthy arm-body results accumulate into a
+/// `Val::Arr`; when `early_stop` is set, the first truthy result is
+/// returned directly (or `Val::Null` when nothing matches).
+fn run_deep_match(
+    idx: &StructuralIndex,
+    bytes: &[u8],
+    anchor: &[StructuralPathStep],
+    candidate_keys: &[Arc<str>],
+    cm: &Arc<crate::vm::CompiledMatch>,
+    early_stop: bool,
+    vm: &mut crate::vm::VM,
+    env: &crate::data::context::Env,
+) -> Result<Val, EvalError> {
+    let Some(anchor_tok) = anchor_token(idx, anchor) else {
+        return Ok(if early_stop { Val::Null } else { Val::arr(Vec::new()) });
+    };
+    let mut seen = HashSet::new();
+    let mut hits: Vec<Val> = Vec::new();
+    for key in candidate_keys.iter() {
+        for key_tok in idx.keys_named_in(key.as_ref(), anchor_tok) {
+            let Some(parent) = idx.parent(key_tok) else {
+                continue;
+            };
+            if idx.kind(parent) != TokenKind::Object || !seen.insert(parent.raw()) {
+                continue;
+            }
+            let candidate = materialize_token(idx, bytes, parent)?;
+            match vm.exec_match(cm, &candidate, env) {
+                Ok(v) if crate::util::is_truthy(&v) => {
+                    if early_stop {
+                        return Ok(v);
+                    }
+                    hits.push(v);
+                }
+                Ok(_) | Err(_) => {}
+            }
+        }
+    }
+    if early_stop {
+        Ok(Val::Null)
+    } else {
+        Ok(Val::arr(hits))
     }
 }
 

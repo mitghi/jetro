@@ -451,6 +451,61 @@ mod tests {
 
     #[cfg(feature = "simd-json")]
     #[test]
+    fn deep_match_obj_keys_routes_through_structural_index() {
+        // `$..match { {role: "admin"} -> ..., ... }` is lowered to a
+        // `StructuralPlan::DeepMatch` whose candidate enumeration draws
+        // on the bitmap index, so the body of the document never has
+        // to be materialised end-to-end.
+        let j = Jetro::from_bytes(
+            br#"{"u":[{"role":"admin","id":1},{"role":"user","id":2},{"name":"none"}]}"#.to_vec(),
+        )
+        .unwrap();
+
+        let out = j
+            .collect(
+                r#"$..match {
+                    {role: "admin", id: i} -> {tag: "a", n: i},
+                    {role: "user",  id: i} -> {tag: "u", n: i},
+                    _                      -> false
+                }"#,
+            )
+            .unwrap();
+
+        assert_eq!(
+            out,
+            serde_json::json!([
+                {"tag": "a", "n": 1},
+                {"tag": "u", "n": 2}
+            ])
+        );
+        assert!(j.structural_index_is_built());
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn deep_match_first_obj_keys_via_structural_index() {
+        // The early-stop variant returns the first truthy arm body
+        // without walking the rest of the document.
+        let j = Jetro::from_bytes(
+            br#"{"events":[{"role":"viewer"},{"role":"admin","id":7},{"role":"editor"}]}"#.to_vec(),
+        )
+        .unwrap();
+
+        let out = j
+            .collect(
+                r#"$..match! {
+                    {role: "admin", id: i} -> i,
+                    _                      -> false
+                }"#,
+            )
+            .unwrap();
+
+        assert_eq!(out, serde_json::json!(7));
+        assert!(j.structural_index_is_built());
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
     fn deep_shape_reads_from_structural_index_without_tape_or_root_val() {
         let j = Jetro::from_bytes(
             br#"{"users":[{"email":"a@x","role":"lead"},{"name":"missing"},{"team":{"email":"b@x","role":"dev"}}]}"#.to_vec(),
