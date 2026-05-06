@@ -2972,8 +2972,9 @@ impl VM {
                 }
                 MatchOp::Fail => {
                     return Err(EvalError(format!(
-                        "match: no arm matched value of kind {}",
-                        kind_label(scrutinee)
+                        "match: no arm matched {} value {}",
+                        kind_label(scrutinee),
+                        snippet_for_error(scrutinee),
                     )));
                 }
                 MatchOp::Jump { target_pc } => {
@@ -2991,6 +2992,33 @@ fn build_arm_env(env: &Env, bindings: &[(Arc<str>, Val)]) -> Env {
     bindings
         .iter()
         .fold(env.clone(), |e, (n, v)| e.with_var(n.as_ref(), v.clone()))
+}
+
+/// Render a short, single-line snippet of `val` suitable for inclusion in
+/// a non-exhaustive-match error message. Long compound values are
+/// truncated so the error stays scannable.
+fn snippet_for_error(val: &Val) -> String {
+    const MAX_LEN: usize = 80;
+    let mut s = match val {
+        Val::Null => "null".to_string(),
+        Val::Bool(b) => b.to_string(),
+        Val::Int(n) => n.to_string(),
+        Val::Float(f) => f.to_string(),
+        Val::Str(s) => format!("{:?}", s.as_ref()),
+        Val::StrSlice(r) => format!("{:?}", r.as_ref()),
+        Val::Arr(_)
+        | Val::IntVec(_)
+        | Val::FloatVec(_)
+        | Val::StrVec(_)
+        | Val::StrSliceVec(_)
+        | Val::ObjVec(_) => "[…]".to_string(),
+        Val::Obj(_) | Val::ObjSmall(_) => "{…}".to_string(),
+    };
+    if s.len() > MAX_LEN {
+        s.truncate(MAX_LEN);
+        s.push('…');
+    }
+    s
 }
 
 /// Short type-tag string used in `match` non-exhaustive errors.

@@ -446,6 +446,162 @@ fn runtime_shared_key_preserves_arm_bindings() {
 }
 
 #[test]
+fn runtime_shared_two_key_prefix_dispatch() {
+    // Every arm tests the same two leading keys (`tag` then `target`) in
+    // the same order. The compiler hoists `ObjCheck` + two `LoadField`
+    // ops out of the per-arm prologue.
+    let v = run(
+        br#"{"e": {"tag": "click", "target": "btn-a"}}"#,
+        r#"match $.e with {
+            {tag: "click", target: t} -> {sort: "click", t: t},
+            {tag: "view",  target: t} -> {sort: "view",  t: t},
+            _                         -> {sort: "other"}
+        }"#,
+    );
+    assert_eq!(v, json!({"sort": "click", "t": "btn-a"}));
+    let v = run(
+        br#"{"e": {"tag": "view", "target": "/home"}}"#,
+        r#"match $.e with {
+            {tag: "click", target: t} -> {sort: "click", t: t},
+            {tag: "view",  target: t} -> {sort: "view",  t: t},
+            _                         -> {sort: "other"}
+        }"#,
+    );
+    assert_eq!(v, json!({"sort": "view", "t": "/home"}));
+}
+
+#[test]
+fn runtime_shared_arr_len_dispatch() {
+    // Every arm is a fixed-length array pattern of the same length, so
+    // the compiler hoists the `LenCheck` into a single match-level
+    // prelude and emits only `LoadIndex` ops per arm.
+    let v = run(
+        br#"{"p": [1, 2]}"#,
+        r#"match $.p with {
+            [0, x] -> {tag: "zero", x: x},
+            [1, x] -> {tag: "one",  x: x},
+            [_, x] -> {tag: "any",  x: x}
+        }"#,
+    );
+    assert_eq!(v, json!({"tag": "one", "x": 2}));
+}
+
+#[test]
+fn runtime_shared_arr_len_disabled_when_lengths_differ() {
+    // Arm 0 has length 2, arm 1 has length 3 — sharing is disabled and
+    // each arm runs its own `LenCheck`.
+    let v = run(
+        br#"{"p": [1, 2, 3]}"#,
+        r#"match $.p with {
+            [a, b]    -> {tag: "two", a: a},
+            [a, b, c] -> {tag: "three", c: c},
+            _         -> {tag: "other"}
+        }"#,
+    );
+    assert_eq!(v, json!({"tag": "three", "c": 3}));
+}
+
+#[test]
+fn runtime_shared_prefix_with_trailing_catchall_routes_prelude_failure() {
+    // Mixing typed `Pat::Obj` arms with a trailing wildcard catch-all
+    // still enables shared-prefix sharing; prelude failures route to
+    // the catch-all arm rather than the global `Fail` op.
+    // Scrutinee is not an object — `ObjCheck` in the prelude fails and
+    // jumps to the catch-all body.
+    let v = run(
+        br#"{"u": 42}"#,
+        r#"match $.u with {
+            {role: "admin"} -> "admin",
+            {role: "user"}  -> "user",
+            _               -> "fallback"
+        }"#,
+    );
+    assert_eq!(v, json!("fallback"));
+
+    // Object missing the shared key — prelude `LoadField` fails and
+    // routes to the catch-all arm.
+    let v = run(
+        br#"{"u": {"name": "alice"}}"#,
+        r#"match $.u with {
+            {role: "admin"} -> "admin",
+            {role: "user"}  -> "user",
+            _               -> "fallback"
+        }"#,
+    );
+    assert_eq!(v, json!("fallback"));
+
+    // Object with shared key but no typed arm matches — last typed arm's
+    // miss routes to the catch-all (via the standard pending-else patch).
+    let v = run(
+        br#"{"u": {"role": "guest"}}"#,
+        r#"match $.u with {
+            {role: "admin"} -> "admin",
+            {role: "user"}  -> "user",
+            _               -> "fallback"
+        }"#,
+    );
+    assert_eq!(v, json!("fallback"));
+}
+
+#[test]
+fn runtime_arr_length_share_with_trailing_catchall() {
+    // Same idea for the array-length sharing path: a trailing wildcard
+    // catch-all participates without disabling the shared `LenCheck`.
+    let v = run(
+        br#"{"p": [1, 2, 3]}"#,
+        r#"match $.p with {
+            [a, b]    -> {tag: "two", a: a},
+            [a, b, _] -> {tag: "three", a: a},
+            _         -> {tag: "other"}
+        }"#,
+    );
+    // First two arms have lengths 2 and 3 — sharing disabled. Catch-all
+    // present but not used. Test exercises the no-sharing-with-catchall
+    // path for completeness.
+    assert_eq!(v, json!({"tag": "three", "a": 1}));
+
+    // All typed arms agree on length 3, plus a trailing catch-all.
+    let v = run(
+        br#"{"p": [1, 2]}"#,
+        r#"match $.p with {
+            [a, _, _] -> {tag: "first",  a: a},
+            [_, b, _] -> {tag: "second", b: b},
+            _         -> {tag: "other"}
+        }"#,
+    );
+    // Scrutinee has length 2, prelude `LenCheck { len: 3, exact: true }`
+    // fails and routes to the catch-all.
+    assert_eq!(v, json!({"tag": "other"}));
+}
+
+#[test]
+fn runtime_non_exhaustive_error_includes_value_snippet() {
+    // The trailing `Fail` op renders a short snippet of the scrutinee
+    // alongside its kind so users can spot the offending value.
+    let err = run_err(
+        br#"{"x": 7}"#,
+        r#"match $.x with { 1 -> "a", 2 -> "b" }"#,
+    );
+    assert!(err.contains("no arm matched"), "{err}");
+    assert!(err.contains("7"), "expected scrutinee value in error: {err}");
+}
+
+#[test]
+fn runtime_shared_prefix_disabled_on_key_order_divergence() {
+    // The two arms list the same keys but in different orders. The
+    // shared-prefix optimization is disabled (common prefix length 0)
+    // and per-arm codegen handles every key independently.
+    let v = run(
+        br#"{"u": {"role": "admin", "id": 9}}"#,
+        r#"match $.u with {
+            {role: r, id: i} -> {r: r, i: i},
+            {id: i, role: r} -> {r: r, i: i}
+        }"#,
+    );
+    assert_eq!(v, json!({"r": "admin", "i": 9}));
+}
+
+#[test]
 fn runtime_shared_key_no_arm_match_falls_through_to_fail() {
     // No arm tests "missing" so a value with that role hits the trailing
     // `Fail` op via the per-arm miss path (not the prelude's else_pc).

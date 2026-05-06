@@ -1070,32 +1070,64 @@ fn compile_match(
     // is set to the position of the trailing `Fail` op.
     let mut arm_starts: Vec<u32> = Vec::with_capacity(arms.len());
 
-    // Cross-arm prefix sharing: when every arm is an object pattern that
-    // tests the same first key (the most common shape for tagged-union
-    // dispatch), the `ObjCheck` and `LoadField` for that key are hoisted
-    // out of the per-arm prologue. Slot 1 then holds the loaded key value
-    // and is preserved across arms via `ResetArm.keep_above = 2`.
-    let shared_key: Option<Arc<str>> = detect_shared_first_key(arms);
+    // Cross-arm prefix sharing comes in two flavours: object patterns
+    // share a leading key sequence, or array patterns share a fixed
+    // length. The two are mutually exclusive (an arm is `Pat::Obj` xor
+    // `Pat::Arr`), so each match expression picks at most one prelude
+    // shape. Loaded values land in slots `1..=N` and are preserved
+    // across arms via `ResetArm.keep_above = N + 1`. A trailing
+    // wildcard or bind arm participates as a catch-all: prelude
+    // failures (not-an-object, key missing, length mismatch) jump
+    // straight to the catch-all arm rather than the global `Fail` op.
+    let trailing_catchall_idx: Option<usize> = arms
+        .last()
+        .map(|a| matches!(a.pat, Pat::Wild | Pat::Bind(_)))
+        .filter(|b| *b)
+        .map(|_| arms.len() - 1);
+    let typed_arms: &[crate::parse::ast::MatchArm] = match trailing_catchall_idx {
+        Some(_) => &arms[..arms.len() - 1],
+        None => arms,
+    };
+    let shared_keys: Vec<Arc<str>> = detect_shared_key_prefix(typed_arms);
+    let shared_arr_len: Option<u32> = if shared_keys.is_empty() {
+        detect_shared_arr_len(typed_arms)
+    } else {
+        None
+    };
     let mut prelude_pending: Vec<u32> = Vec::new();
-    if let Some(key) = shared_key.as_ref() {
-        // Emit shared prelude. Failures jump to the trailing `Fail` op
-        // (target is patched once `fail_pc` is known).
-        let p1 = b.emit(MatchOp::ObjCheck {
+    if !shared_keys.is_empty() {
+        // Object prelude: `ObjCheck` plus one `LoadField` per shared key.
+        let p_check = b.emit(MatchOp::ObjCheck {
             slot: 0,
             else_pc: u32::MAX,
         });
-        let p2 = b.emit(MatchOp::LoadField {
-            src: 0,
-            key: Arc::clone(key),
-            dst: 1,
+        prelude_pending.push(p_check);
+        for (i, key) in shared_keys.iter().enumerate() {
+            let p_load = b.emit(MatchOp::LoadField {
+                src: 0,
+                key: Arc::clone(key),
+                dst: (i + 1) as u16,
+                else_pc: u32::MAX,
+            });
+            prelude_pending.push(p_load);
+        }
+    } else if let Some(len) = shared_arr_len {
+        // Array prelude: a single `LenCheck` against the agreed length.
+        let p_len = b.emit(MatchOp::LenCheck {
+            slot: 0,
+            len,
+            exact: true,
             else_pc: u32::MAX,
         });
-        prelude_pending.push(p1);
-        prelude_pending.push(p2);
+        prelude_pending.push(p_len);
     }
-    let keep_above: u16 = if shared_key.is_some() { 2 } else { 1 };
+    let keep_above: u16 = if !shared_keys.is_empty() {
+        (shared_keys.len() + 1) as u16
+    } else {
+        1
+    };
 
-    for arm in arms {
+    for (arm_idx, arm) in arms.iter().enumerate() {
         // Open a fresh patch-bucket for this arm so its `else_pc`
         // placeholders are tracked independently of earlier arms.
         b.pending_else.push(Vec::new());
@@ -1111,30 +1143,54 @@ fn compile_match(
         // shared key's loaded value, so per-arm allocation begins at 2.
         let mut slot_alloc = SlotAlloc::starting_at(keep_above);
 
-        match (shared_key.as_ref(), &arm.pat) {
-            (Some(key), Pat::Obj { fields, open: _ }) => {
-                // Compile the shared-key field's sub-pattern against
-                // slot 1 directly; remaining fields take the standard
-                // load-field path.
-                for (k, sub_pat) in fields {
-                    if k.as_str() == key.as_ref() {
-                        b.compile_pat_for_arm(sub_pat, 1, &mut slot_alloc);
-                    } else {
-                        let dst = slot_alloc.alloc();
-                        b.emit_with_pending_else(MatchOp::LoadField {
-                            src: 0,
-                            key: Arc::from(k.as_str()),
-                            dst,
-                            else_pc: u32::MAX,
-                        });
-                        b.compile_pat_for_arm(sub_pat, dst, &mut slot_alloc);
-                    }
-                }
+        // The trailing catch-all arm uses standard codegen even when a
+        // shared prefix is active. Sharing only governs the typed arms
+        // (which are uniformly `Pat::Obj` or `Pat::Arr`); the catch-all
+        // is `Pat::Wild` / `Pat::Bind` and produces no field tests.
+        let is_trailing_catchall = trailing_catchall_idx == Some(arm_idx);
+
+        if !shared_keys.is_empty() && !is_trailing_catchall {
+            // Object prefix sharing: every arm is `Pat::Obj` whose first
+            // `shared_keys.len()` fields agree on key order. Compile
+            // those sub-patterns against prelude-allocated slots; let
+            // any extra fields go through the standard load-field path.
+            let Pat::Obj { fields, open: _ } = &arm.pat else {
+                unreachable!("shared-prefix invariant: every arm is Pat::Obj");
+            };
+            for (i, key) in shared_keys.iter().enumerate() {
+                debug_assert_eq!(fields[i].0.as_str(), key.as_ref());
+                b.compile_pat_for_arm(&fields[i].1, (i + 1) as u16, &mut slot_alloc);
             }
-            _ => {
-                // Standard codegen path: full pattern compile against slot 0.
-                b.compile_pat_for_arm(&arm.pat, 0, &mut slot_alloc);
+            for (k, sub_pat) in fields.iter().skip(shared_keys.len()) {
+                let dst = slot_alloc.alloc();
+                b.emit_with_pending_else(MatchOp::LoadField {
+                    src: 0,
+                    key: Arc::from(k.as_str()),
+                    dst,
+                    else_pc: u32::MAX,
+                });
+                b.compile_pat_for_arm(sub_pat, dst, &mut slot_alloc);
             }
+        } else if shared_arr_len.is_some() && !is_trailing_catchall {
+            // Array length sharing: every arm is `Pat::Arr` with the
+            // same exact length and no rest binding. The prelude has
+            // already verified the length, so per-arm codegen skips
+            // `LenCheck` and goes straight to per-element loads.
+            let Pat::Arr { elems, rest: _ } = &arm.pat else {
+                unreachable!("shared-arr invariant: every arm is Pat::Arr");
+            };
+            for (i, sub_pat) in elems.iter().enumerate() {
+                let dst = slot_alloc.alloc();
+                b.emit(MatchOp::LoadIndex {
+                    src: 0,
+                    idx: i as u32,
+                    dst,
+                });
+                b.compile_pat_for_arm(sub_pat, dst, &mut slot_alloc);
+            }
+        } else {
+            // Standard codegen path: full pattern compile against slot 0.
+            b.compile_pat_for_arm(&arm.pat, 0, &mut slot_alloc);
         }
 
         // Guard (optional).
@@ -1159,10 +1215,14 @@ fn compile_match(
     let fail_pc = b.next_pc();
     b.emit(MatchOp::Fail);
 
-    // Patch the shared-prelude placeholders (object check + key load) to
-    // the trailing `Fail` op when sharing is active.
+    // Patch the shared-prelude placeholders (object check, key loads,
+    // length check) to the catch-all arm's start if one exists, or to
+    // the trailing `Fail` op otherwise.
+    let prelude_miss_target: u32 = trailing_catchall_idx
+        .and_then(|i| arm_starts.get(i).copied())
+        .unwrap_or(fail_pc);
     for pc in prelude_pending {
-        b.patch_else_pc(pc, fail_pc);
+        b.patch_else_pc(pc, prelude_miss_target);
     }
 
     // Patch all `else_pc` placeholders to next-arm-start (or `fail_pc` for
@@ -1236,37 +1296,85 @@ fn compute_max_slots(ops: &[MatchOp]) -> u16 {
     hi
 }
 
-/// Detect when every arm is a `Pat::Obj` that lists the same first key.
-/// This is the dispatch shape for tagged-union match expressions
-/// (`{role: "admin"} -> ..., {role: "user"} -> ...`) and unlocks
-/// hoisting the shared `ObjCheck + LoadField` ops out of every arm's
-/// prologue. Returns the shared key when applicable, `None` otherwise.
+/// Detect when every arm of a `match` is a fixed-length array pattern
+/// (`Pat::Arr` with no rest binding) of the same length, allowing the
+/// `LenCheck` to be hoisted into a single match-level prelude. Returns
+/// the agreed length when applicable, `None` otherwise.
 ///
-/// The optimization is conservative: it requires every arm — including
-/// the catch-all — to be `Pat::Obj` with the same leading key. Mixing
-/// `Pat::Wild` / `Pat::Bind` catch-alls would require splitting the
-/// failure path between "not an object" and "object but no arm matched"
-/// and is left to a richer cross-arm pass.
-fn detect_shared_first_key(arms: &[crate::parse::ast::MatchArm]) -> Option<Arc<str>> {
+/// Like the object variant, the optimization needs at least two arms
+/// and is disabled when any arm has a different shape (including arms
+/// that bind a rest tail, since a rest binding implies a `>=` length
+/// test that does not compose with an exact-length prelude).
+fn detect_shared_arr_len(arms: &[crate::parse::ast::MatchArm]) -> Option<u32> {
     use crate::parse::ast::Pat;
+
     if arms.len() < 2 {
         return None;
     }
-    let mut shared: Option<&str> = None;
+    let mut shared: Option<u32> = None;
     for arm in arms {
-        let Pat::Obj { fields, .. } = &arm.pat else {
+        let Pat::Arr { elems, rest } = &arm.pat else {
             return None;
         };
-        let Some((first_key, _)) = fields.first() else {
+        if rest.is_some() {
             return None;
-        };
+        }
+        let len = elems.len() as u32;
         match shared {
-            None => shared = Some(first_key.as_str()),
-            Some(k) if k == first_key.as_str() => {}
+            None => shared = Some(len),
+            Some(n) if n == len => {}
             _ => return None,
         }
     }
-    shared.map(Arc::from)
+    shared
+}
+
+/// Detect the longest leading key sequence that every arm of a `match`
+/// agrees on. Each arm must be a `Pat::Obj` whose first N fields list the
+/// same keys in the same order; the returned vector contains those keys
+/// (in source order) and unlocks hoisting the corresponding
+/// `ObjCheck + LoadField` ops out of every arm's prologue.
+///
+/// Returns an empty vector when any arm is non-object, when arms have no
+/// leading key in common, or when fewer than two arms exist (the
+/// optimization needs at least two arms to be worth its prelude cost).
+fn detect_shared_key_prefix(arms: &[crate::parse::ast::MatchArm]) -> Vec<Arc<str>> {
+    use crate::parse::ast::Pat;
+
+    if arms.len() < 2 {
+        return Vec::new();
+    }
+
+    // Seed the shared prefix with the first arm's full key list.
+    let Pat::Obj {
+        fields: first_fields,
+        ..
+    } = &arms[0].pat
+    else {
+        return Vec::new();
+    };
+    let mut prefix: Vec<&str> = first_fields.iter().map(|(k, _)| k.as_str()).collect();
+    if prefix.is_empty() {
+        return Vec::new();
+    }
+
+    // Intersect against each subsequent arm.
+    for arm in &arms[1..] {
+        let Pat::Obj { fields, .. } = &arm.pat else {
+            return Vec::new();
+        };
+        let common = prefix
+            .iter()
+            .zip(fields.iter().map(|(k, _)| k.as_str()))
+            .take_while(|(a, b)| **a == *b)
+            .count();
+        prefix.truncate(common);
+        if prefix.is_empty() {
+            return Vec::new();
+        }
+    }
+
+    prefix.into_iter().map(Arc::from).collect()
 }
 
 /// Mutable state used while emitting a `CompiledMatch`. Tracks the op
