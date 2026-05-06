@@ -4,9 +4,9 @@
 //!
 //! ```text
 //! source text
-//!   │  parser::parse()      → Expr AST
-//!   │  planner::plan_query()→ QueryPlan (physical IR)
-//!   │  physical_eval::run() → dispatches to:
+//!   │  parse::parser::parse() → Expr AST
+//!   │  plan::physical::plan_query() → QueryPlan (physical IR)
+//!   │  exec::router::collect_*() → dispatches to:
 //!   │    StructuralIndex backend  (jetro-experimental bitmap)
 //!   │    ViewPipeline backend     (borrowed tape/Val navigation)
 //!   │    Pipeline backend         (pull-based composed stages)
@@ -21,38 +21,16 @@
 //! assert_eq!(j.collect("$.books.len()").unwrap(), serde_json::json!(1));
 //! ```
 
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) mod analysis;
-pub(crate) mod ast;
-pub(crate) mod builtin_helpers;
-pub(crate) mod builtin_registry;
 pub(crate) mod builtins;
-pub(crate) mod chain_ir;
-pub(crate) mod composed;
-pub(crate) mod context;
-pub(crate) mod executor;
-pub(crate) mod parser;
-pub(crate) mod physical;
-pub(crate) mod physical_eval;
-pub(crate) mod pipeline;
-pub(crate) mod planner;
-pub(crate) mod runtime;
-pub(crate) mod strref;
-pub(crate) mod structural;
+pub(crate) mod compile;
+pub(crate) mod data;
+pub(crate) mod exec;
+pub(crate) mod ir;
+pub(crate) mod parse;
+pub(crate) mod plan;
 pub(crate) mod util;
-pub(crate) mod value;
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) mod value_view;
-pub(crate) mod view_pipeline;
-pub(crate) mod compiler;
-pub(crate) mod compiler_passes;
 pub(crate) mod vm;
-pub(crate) mod logical_plan;
-pub(crate) mod logical_planner;
-pub(crate) mod optimizer;
 
-#[cfg(test)]
-mod examples;
 #[cfg(test)]
 mod tests;
 
@@ -61,12 +39,21 @@ use std::cell::{OnceCell, RefCell};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
-use value::Val;
+use data::value::Val;
 
-pub use context::EvalError;
+pub use data::context::EvalError;
 #[cfg(test)]
-use parser::ParseError;
+use parse::parser::ParseError;
 use vm::VM;
+
+/// Internal parser surface re-exported only when the `fuzz_internal` feature
+/// is enabled. Used by the `cargo-fuzz` harness to reach the PEG parser
+/// without going through `Jetro::collect`. NOT a stable public API.
+#[cfg(feature = "fuzz_internal")]
+pub mod __fuzz_internal {
+    pub use crate::parse::parser::{parse, ParseError};
+    pub use crate::plan::physical::plan_query;
+}
 
 
 #[cfg(test)]
@@ -144,7 +131,7 @@ pub struct Jetro {
 
     /// Lazily parsed simd-json tape; `Err` is cached to avoid re-parsing after failure.
     #[cfg(feature = "simd-json")]
-    tape: OnceCell<std::result::Result<Arc<crate::strref::TapeData>, String>>,
+    tape: OnceCell<std::result::Result<Arc<crate::data::tape::TapeData>, String>>,
     /// Unused placeholder so the field name is consistent regardless of features.
     #[cfg(not(feature = "simd-json"))]
     #[allow(dead_code)]
@@ -157,7 +144,7 @@ pub struct Jetro {
     /// Per-document cache from `Arc<Vec<Val>>` pointer addresses to promoted
     /// `ObjVecData` columnar representations; keyed by pointer to avoid re-promotion.
     pub(crate) objvec_cache:
-        std::sync::Mutex<std::collections::HashMap<usize, Arc<crate::value::ObjVecData>>>,
+        std::sync::Mutex<std::collections::HashMap<usize, Arc<crate::data::value::ObjVecData>>>,
 }
 
 
@@ -167,7 +154,7 @@ pub struct Jetro {
 /// thread-local state.
 pub struct JetroEngine {
     /// Maps `"<context_key>\0<expr>"` to compiled `QueryPlan`; evicted wholesale when full.
-    plan_cache: Mutex<HashMap<String, physical::QueryPlan>>,
+    plan_cache: Mutex<HashMap<String, ir::physical::QueryPlan>>,
     /// Maximum number of entries before the cache is cleared; 0 disables caching.
     plan_cache_limit: usize,
     /// The shared `VM` used by all `collect*` calls on this engine instance.
@@ -251,9 +238,9 @@ impl JetroEngine {
         document: &Jetro,
         expr: S,
     ) -> std::result::Result<Value, EvalError> {
-        let plan = self.cached_plan(expr.as_ref(), executor::planning_context(document));
+        let plan = self.cached_plan(expr.as_ref(), exec::router::planning_context(document));
         let mut vm = self.vm.lock().expect("vm cache poisoned");
-        executor::collect_plan_json_with_vm(document, &plan, &mut vm)
+        exec::router::collect_plan_json_with_vm(document, &plan, &mut vm)
     }
 
     /// Convenience wrapper: wrap a `serde_json::Value` in a `Jetro` and evaluate `expr`.
@@ -279,14 +266,14 @@ impl JetroEngine {
 
     /// Look up a compiled `QueryPlan` by expression string and planning context,
     /// compiling and inserting it if not already cached; evicts the whole cache if full.
-    fn cached_plan(&self, expr: &str, context: planner::PlanningContext) -> physical::QueryPlan {
+    fn cached_plan(&self, expr: &str, context: plan::physical::PlanningContext) -> ir::physical::QueryPlan {
         let mut cache = self.plan_cache.lock().expect("plan cache poisoned");
         let cache_key = format!("{}\0{}", context.cache_key(), expr);
         if let Some(plan) = cache.get(&cache_key) {
             return plan.clone();
         }
 
-        let plan = planner::plan_query_with_context(expr, context);
+        let plan = plan::physical::plan_query_with_context(expr, context);
         if self.plan_cache_limit > 0 {
             if cache.len() >= self.plan_cache_limit {
                 cache.clear();
@@ -297,8 +284,8 @@ impl JetroEngine {
     }
 }
 
-impl pipeline::PipelineData for Jetro {
-    fn promote_objvec(&self, arr: &Arc<Vec<Val>>) -> Option<Arc<crate::value::ObjVecData>> {
+impl exec::pipeline::PipelineData for Jetro {
+    fn promote_objvec(&self, arr: &Arc<Vec<Val>>) -> Option<Arc<crate::data::value::ObjVecData>> {
         self.get_or_promote_objvec(arr)
     }
 }
@@ -309,7 +296,7 @@ impl Jetro {
     #[cfg(feature = "simd-json")]
     pub(crate) fn lazy_tape(
         &self,
-    ) -> std::result::Result<Option<&Arc<crate::strref::TapeData>>, EvalError> {
+    ) -> std::result::Result<Option<&Arc<crate::data::tape::TapeData>>, EvalError> {
         if let Some(result) = self.tape.get() {
             return result
                 .as_ref()
@@ -320,7 +307,7 @@ impl Jetro {
             return Ok(None);
         };
         let bytes: Vec<u8> = (**raw).to_vec();
-        let parsed = crate::strref::TapeData::parse(bytes).map_err(|err| err.to_string());
+        let parsed = crate::data::tape::TapeData::parse(bytes).map_err(|err| err.to_string());
         let _ = self.tape.set(parsed);
         self.tape
             .get()
@@ -335,14 +322,14 @@ impl Jetro {
     pub(crate) fn get_or_promote_objvec(
         &self,
         arr: &Arc<Vec<Val>>,
-    ) -> Option<Arc<crate::value::ObjVecData>> {
+    ) -> Option<Arc<crate::data::value::ObjVecData>> {
         let key = Arc::as_ptr(arr) as usize;
         if let Ok(cache) = self.objvec_cache.lock() {
             if let Some(d) = cache.get(&key) {
                 return Some(Arc::clone(d));
             }
         }
-        let promoted = pipeline::Pipeline::try_promote_objvec_arr(arr)?;
+        let promoted = exec::pipeline::Pipeline::try_promote_objvec_arr(arr)?;
         if let Ok(mut cache) = self.objvec_cache.lock() {
             cache.entry(key).or_insert_with(|| Arc::clone(&promoted));
         }
@@ -488,7 +475,7 @@ impl Jetro {
     /// as a `serde_json::Value`. Uses the thread-local `VM` with compile and
     /// path-resolution caches for repeated calls.
     pub fn collect<S: AsRef<str>>(&self, expr: S) -> std::result::Result<Value, EvalError> {
-        executor::collect_json(self, expr.as_ref())
+        exec::router::collect_json(self, expr.as_ref())
     }
 }
 

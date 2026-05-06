@@ -6,10 +6,10 @@ use indexmap::IndexMap;
 use std::cmp::Ordering;
 use std::sync::Arc;
 
-use crate::ast::BinOp;
-use crate::ast::KindType;
-use crate::context::EvalError;
-use crate::value::Val;
+use crate::parse::ast::BinOp;
+use crate::parse::ast::KindType;
+use crate::data::context::EvalError;
+use crate::data::value::Val;
 
 
 /// Borrowed scalar view — used by `ValueView` implementations so scalar

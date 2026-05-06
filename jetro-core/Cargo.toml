@@ -1,6 +1,6 @@
 [package]
 name = "jetro-core"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2021"
 authors = ["Milad (Mike) Taghavi <mitghi.at.me.com>"]
 license = "MIT"
@@ -31,6 +31,9 @@ jetro-experimental = "0.2"
 # Users wanting the legacy serde-only path: default-features = false.
 default = ["simd-json"]
 simd-json = ["dep:simd-json"]
+# fuzz_internal: re-exports parser/planner internals for cargo-fuzz harness.
+# Not for production use; API has no stability guarantees.
+fuzz_internal = []
 
 [dev-dependencies]
 jaq-core = "3.0"

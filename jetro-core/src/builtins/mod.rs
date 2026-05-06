@@ -6,8 +6,8 @@
 //! buffered work. Streaming consumers call `*_one`; barrier consumers call
 //! `*_apply`. This module owns the loop and truthy-check logic exactly once.
 
-use crate::context::EvalError;
-use crate::value::Val;
+use crate::data::context::EvalError;
+use crate::data::value::Val;
 use indexmap::IndexMap;
 use std::sync::Arc;
 
@@ -437,7 +437,7 @@ impl BuiltinMethod {
     /// Resolves a method name string to the corresponding `BuiltinMethod` variant.
     /// Returns [`BuiltinMethod::Unknown`] when the name is not registered.
     pub fn from_name(name: &str) -> Self {
-        crate::builtin_registry::by_name(name)
+        crate::builtins::registry::by_name(name)
             .and_then(|id| id.method())
             .unwrap_or(Self::Unknown)
     }
@@ -663,6 +663,8 @@ pub enum BuiltinDemandLaw {
     First,
     /// The last element is needed; requires all ordered input.
     Last,
+    /// A specific positional element is needed.
+    Nth,
     /// Only a count is needed; requires all inputs but no value payloads.
     Count,
     /// A numeric aggregate (sum/min/max/avg); requires all inputs with numeric-only payload.
@@ -786,6 +788,11 @@ pub enum BuiltinSinkDemand {
     /// Can stop after the first qualifying row.
     First {
         /// Which aspect of the first row's value is needed.
+        value: BuiltinSinkValueNeed,
+    },
+    /// Can satisfy selection by reading from the tail of a reversible/indexed source.
+    Last {
+        /// Which aspect of the last row's value is needed.
         value: BuiltinSinkValueNeed,
     },
 }
@@ -1062,6 +1069,11 @@ pub enum BuiltinPipelineLowering {
     Sort,
     /// Terminal sink (no stage emitted).
     TerminalSink,
+    /// Terminal sink with one `usize` argument (e.g. `nth(i)`).
+    TerminalUsizeSink {
+        /// Minimum legal argument value; arguments below this are rejected.
+        min: usize,
+    },
 }
 
 /// Broad category for a builtin, used for grouping and display purposes.
@@ -1194,9 +1206,8 @@ impl BuiltinSpec {
                 BuiltinSelectionPosition::First => BuiltinSinkDemand::First {
                     value: BuiltinSinkValueNeed::Whole,
                 },
-                BuiltinSelectionPosition::Last => BuiltinSinkDemand::All {
+                BuiltinSelectionPosition::Last => BuiltinSinkDemand::Last {
                     value: BuiltinSinkValueNeed::Whole,
-                    order: true,
                 },
             },
         });
@@ -1348,7 +1359,7 @@ impl BuiltinMethod {
         macro_rules! spec_arm {
             ( $( $variant:ident ),* $(,)? ) => {
                 match self {
-                    $( Self::$variant => <defs::$variant as builtin_def::Builtin>::spec(), )*
+                    $( Self::$variant => <defs::$variant as builtin::Builtin>::spec(), )*
                 }
             };
         }
@@ -1357,7 +1368,7 @@ impl BuiltinMethod {
         macro_rules! cancel_arm {
             ( $( $variant:ident ),* $(,)? ) => {
                 match self {
-                    $( Self::$variant => <defs::$variant as builtin_def::Builtin>::cancellation(), )*
+                    $( Self::$variant => <defs::$variant as builtin::Builtin>::cancellation(), )*
                 }
             };
         }
@@ -1449,11 +1460,11 @@ impl BuiltinCall {
                 match self.method {
                     $( BuiltinMethod::$variant => {
                         if matches!(self.args, BuiltinArgs::None) {
-                            if let Some(v) = <defs::$variant as builtin_def::Builtin>::apply_one(recv) {
+                            if let Some(v) = <defs::$variant as builtin::Builtin>::apply_one(recv) {
                                 return Some(v);
                             }
                         }
-                        if let Some(v) = <defs::$variant as builtin_def::Builtin>::apply_args(recv, &self.args) {
+                        if let Some(v) = <defs::$variant as builtin::Builtin>::apply_args(recv, &self.args) {
                             return Some(v);
                         }
                     } )*
@@ -1882,8 +1893,8 @@ impl BuiltinCall {
     /// Attempts to construct a `BuiltinCall` from AST arguments that are all compile-time
     /// literals. Non-literal or lambda arguments cause `None` to be returned, falling back
     /// to runtime evaluation.
-    pub fn from_literal_ast_args(name: &str, args: &[crate::ast::Arg]) -> Option<Self> {
-        use crate::ast::{Arg, ArrayElem, Expr, ObjField};
+    pub fn from_literal_ast_args(name: &str, args: &[crate::parse::ast::Arg]) -> Option<Self> {
+        use crate::parse::ast::{Arg, ArrayElem, Expr, ObjField};
 
         let method = BuiltinMethod::from_name(name);
         if method == BuiltinMethod::Unknown {
@@ -1949,7 +1960,7 @@ impl BuiltinCall {
 
     /// Like [`BuiltinCall::from_literal_ast_args`] but also requires the method to be a
     /// registered pipeline element method, returning `None` otherwise.
-    pub fn from_pipeline_literal_args(name: &str, args: &[crate::ast::Arg]) -> Option<Self> {
+    pub fn from_pipeline_literal_args(name: &str, args: &[crate::parse::ast::Arg]) -> Option<Self> {
         let call = Self::from_literal_ast_args(name, args)?;
         call.method.is_pipeline_element_method().then_some(call)
     }
@@ -2141,17 +2152,17 @@ fn json_view_str(recv: crate::util::JsonView<'_>) -> Option<&str> {
 pub(crate) fn eval_builtin_method<F, G, H>(
     recv: Val,
     name: &str,
-    args: &[crate::ast::Arg],
+    args: &[crate::parse::ast::Arg],
     mut eval_arg: F,
     mut eval_item: G,
     mut eval_pair: H,
 ) -> Result<Val, EvalError>
 where
-    F: FnMut(&crate::ast::Arg) -> Result<Val, EvalError>,
-    G: FnMut(&Val, &crate::ast::Arg) -> Result<Val, EvalError>,
-    H: FnMut(&Val, &Val, &crate::ast::Arg) -> Result<Val, EvalError>,
+    F: FnMut(&crate::parse::ast::Arg) -> Result<Val, EvalError>,
+    G: FnMut(&Val, &crate::parse::ast::Arg) -> Result<Val, EvalError>,
+    H: FnMut(&Val, &Val, &crate::parse::ast::Arg) -> Result<Val, EvalError>,
 {
-    use crate::ast::{Arg, Expr, ObjField};
+    use crate::parse::ast::{Arg, Expr, ObjField};
 
     let method = BuiltinMethod::from_name(name);
     if method == BuiltinMethod::Unknown {
@@ -2766,28 +2777,25 @@ impl BuiltinMethod {
     /// Pipeline element methods operate on individual values and can run in-stream.
     #[inline]
     pub fn is_pipeline_element_method(self) -> bool {
-        crate::builtin_registry::pipeline_element(crate::builtin_registry::BuiltinId::from_method(
+        crate::builtins::registry::pipeline_element(crate::builtins::registry::BuiltinId::from_method(
             self,
         ))
     }
 }
 
 
-pub mod array;
-pub mod collection;
-pub mod misc;
-pub mod path;
-pub mod regex;
-pub mod schema;
-pub mod string;
+pub mod ops;
 
-pub(crate) mod builtin_def;
+pub(crate) mod builtin;
 pub(crate) mod defs;
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) mod helpers;
+pub(crate) mod registry;
 
-pub use array::*;
-pub use collection::*;
-pub use misc::*;
-pub use path::*;
-pub use regex::*;
-pub use schema::*;
-pub use string::*;
+pub use ops::array::*;
+pub use ops::collection::*;
+pub use ops::misc::*;
+pub use ops::path::*;
+pub use ops::regex::*;
+pub use ops::schema::*;
+pub use ops::string::*;

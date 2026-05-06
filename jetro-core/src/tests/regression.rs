@@ -1,0 +1,3168 @@
+//! Mixed-feature regression test corpus: parsing, evaluation, fusion, plan
+//! analysis, fixtures, and assorted backend-comparison checks. The tests in
+//! this file pre-date the feature-specific splits (`chain_write`,
+//! `deep_search`) and are kept together for now.
+
+#[cfg(test)]
+mod tests {
+    use super::super::common::{books, vm_query};
+    use serde_json::json;
+
+    
+    #[test]
+    fn field_access() {
+        let doc = books();
+        let r = vm_query("$.user.name", &doc).unwrap();
+        assert_eq!(r, json!("Alice"));
+    }
+
+    #[test]
+    fn test_playground() {
+        let doc = books();
+        let r = vm_query("$..books[0].filter(title == \"1984\")[0].title", &doc).unwrap();
+        assert_eq!(r, json!("1984"));
+    }
+
+    #[test]
+    fn nested_field() {
+        let doc = books();
+        let r = vm_query("$.store.books[0].title", &doc).unwrap();
+        assert_eq!(r, json!("Dune"));
+    }
+
+    #[test]
+    fn negative_index() {
+        let doc = books();
+        let r = vm_query("$.store.books[-1].title", &doc).unwrap();
+        assert_eq!(r, json!("1984"));
+    }
+
+    #[test]
+    fn slice() {
+        let doc = books();
+        let r = vm_query("$.store.books[0:2].map(title)", &doc).unwrap();
+        assert_eq!(r, json!(["Dune", "Foundation"]));
+    }
+
+    #[test]
+    fn descendant() {
+        let doc = books();
+        let r = vm_query("$..title", &doc).unwrap();
+        let titles = r.as_array().unwrap();
+        assert!(titles.contains(&json!("Dune")));
+        assert!(titles.contains(&json!("1984")));
+    }
+
+    #[test]
+    fn optional_field_null_safe() {
+        let doc = json!({"user": {"name": "Bob"}});
+        let r = vm_query("$.user?.email", &doc).unwrap();
+        assert_eq!(r, json!(null));
+    }
+
+    #[test]
+    fn optional_field_chain() {
+        let doc = json!({"user": null});
+        let r = vm_query("$.user?.name", &doc).unwrap();
+        assert_eq!(r, json!(null));
+    }
+
+    
+    #[test]
+    fn filter_simple() {
+        let doc = books();
+        let r = vm_query("$.store.books.filter(price > 10)", &doc).unwrap();
+        let arr = r.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+    }
+
+    #[test]
+    fn filter_and() {
+        let doc = books();
+        let r = vm_query("$.store.books.filter(price > 10 and rating >= 4.5)", &doc).unwrap();
+        let arr = r.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["title"], json!("Dune"));
+    }
+
+    #[test]
+    fn filter_lambda() {
+        let doc = books();
+        let r = vm_query("$.store.books.filter(lambda b: b.price > 10)", &doc).unwrap();
+        let arr = r.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+    }
+
+    #[test]
+    fn filter_not() {
+        let doc = books();
+        let r = vm_query("$.store.books.filter(not price > 10)", &doc).unwrap();
+        let arr = r.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+    }
+
+    
+    #[test]
+    fn map_pluck() {
+        let doc = books();
+        let r = vm_query("$.store.books.map(title)", &doc).unwrap();
+        assert_eq!(r, json!(["Dune", "Foundation", "Neuromancer", "1984"]));
+    }
+
+    #[test]
+    fn map_object_shorthand() {
+        let doc = books();
+        let r = vm_query("$.store.books.map({title, price})", &doc).unwrap();
+        let arr = r.as_array().unwrap();
+        assert_eq!(arr[0]["title"], json!("Dune"));
+        assert_eq!(arr[0]["price"], json!(12.99));
+    }
+
+    #[test]
+    fn map_rename() {
+        let doc = books();
+        let r = vm_query("$.store.books.map({name: title, cost: price})", &doc).unwrap();
+        let arr = r.as_array().unwrap();
+        assert_eq!(arr[0]["name"], json!("Dune"));
+        assert_eq!(arr[0]["cost"], json!(12.99));
+    }
+
+    #[test]
+    fn map_computed_field() {
+        let doc = books();
+        let r = vm_query("$.store.books.map({title, expensive: price > 10})", &doc).unwrap();
+        let arr = r.as_array().unwrap();
+        assert_eq!(arr[0]["expensive"], json!(true));
+        assert_eq!(arr[1]["expensive"], json!(false));
+    }
+
+    
+    #[test]
+    fn len() {
+        let doc = books();
+        assert_eq!(vm_query("$.store.books.len()", &doc).unwrap(), json!(4));
+    }
+
+    #[test]
+    fn sum() {
+        let doc = json!({"nums": [1, 2, 3, 4]});
+        assert_eq!(vm_query("$.nums.sum()", &doc).unwrap(), json!(10));
+    }
+
+    #[test]
+    fn sum_field() {
+        let doc = json!({"items": [{"v": 1}, {"v": 2}, {"v": 3}]});
+        assert_eq!(vm_query("$.items.sum(v)", &doc).unwrap(), json!(6));
+    }
+
+    #[test]
+    fn first_last() {
+        let doc = books();
+        assert_eq!(
+            vm_query("$.store.books.first().title", &doc).unwrap(),
+            json!("Dune")
+        );
+        assert_eq!(
+            vm_query("$.store.books.last().title", &doc).unwrap(),
+            json!("1984")
+        );
+    }
+
+    #[test]
+    fn first_n() {
+        let doc = books();
+        let r = vm_query("$.store.books.first(2).map(title)", &doc).unwrap();
+        assert_eq!(r, json!(["Dune", "Foundation"]));
+    }
+
+    #[test]
+    fn sort_asc() {
+        let doc = books();
+        let r = vm_query("$.store.books.sort(price).map(title)", &doc).unwrap();
+        assert_eq!(r.as_array().unwrap()[0], json!("1984"));
+    }
+
+    #[test]
+    fn sort_desc() {
+        let doc = books();
+        let r = vm_query("$.store.books.sort(-price).map(title)", &doc).unwrap();
+        assert_eq!(r.as_array().unwrap()[0], json!("Dune"));
+    }
+
+    
+    #[test]
+    fn or_default() {
+        let doc = json!({"user": {}});
+        assert_eq!(
+            vm_query("$.user.name.or(\"anon\")", &doc).unwrap(),
+            json!("anon")
+        );
+    }
+
+    #[test]
+    fn has_field() {
+        let doc = json!({"user": {"name": "Alice", "email": "a@b.com"}});
+        assert_eq!(
+            vm_query("$.user.has(\"email\")", &doc).unwrap(),
+            json!(true)
+        );
+        assert_eq!(
+            vm_query("$.user.has(\"phone\")", &doc).unwrap(),
+            json!(false)
+        );
+    }
+
+    #[test]
+    fn missing_field() {
+        let doc = json!({"user": {"name": "Alice"}});
+        assert_eq!(
+            vm_query("$.user.missing(\"phone\")", &doc).unwrap(),
+            json!(true)
+        );
+    }
+
+    #[test]
+    fn compact() {
+        let doc = json!({"vals": [1, null, 2, null, 3]});
+        assert_eq!(
+            vm_query("$.vals.compact()", &doc).unwrap(),
+            json!([1, 2, 3])
+        );
+    }
+
+    
+    #[test]
+    fn kind_number() {
+        let doc = json!({"items": [{"v": 1}, {"v": "x"}, {"v": null}]});
+        let r = vm_query("$.items.filter(v kind number)", &doc).unwrap();
+        assert_eq!(r, json!([{"v": 1}]));
+    }
+
+    #[test]
+    fn kind_not_null() {
+        let doc = json!({"items": [{"v": 1}, {"v": null}]});
+        let r = vm_query("$.items.filter(v kind not null)", &doc).unwrap();
+        assert_eq!(r, json!([{"v": 1}]));
+    }
+
+    
+    #[test]
+    fn list_comp_basic() {
+        let doc = books();
+        let r = vm_query("[b.title for b in $.store.books]", &doc).unwrap();
+        assert_eq!(r, json!(["Dune", "Foundation", "Neuromancer", "1984"]));
+    }
+
+    #[test]
+    fn list_comp_with_cond() {
+        let doc = books();
+        let r = vm_query("[b.title for b in $.store.books if b.price > 10]", &doc).unwrap();
+        assert_eq!(r, json!(["Dune", "Neuromancer"]));
+    }
+
+    #[test]
+    fn dict_comp() {
+        let doc = json!({"users": [{"id": "a1", "name": "Alice"}, {"id": "b2", "name": "Bob"}]});
+        let r = vm_query("{u.id: u.name for u in $.users}", &doc).unwrap();
+        assert_eq!(r["a1"], json!("Alice"));
+        assert_eq!(r["b2"], json!("Bob"));
+    }
+
+    #[test]
+    fn set_comp_unique() {
+        let doc =
+            json!({"items": [{"genre": "sci-fi"}, {"genre": "sci-fi"}, {"genre": "dystopia"}]});
+        let r = vm_query("{item.genre for item in $.items}", &doc).unwrap();
+        let arr = r.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+    }
+
+    
+    #[test]
+    fn lambda_update() {
+        let doc = json!({"prices": [10, 20, 30]});
+        let r = vm_query("$.prices.map(lambda p: p * 2)", &doc).unwrap();
+        assert_eq!(r, json!([20, 40, 60]));
+    }
+
+    
+    #[test]
+    fn let_binding() {
+        let doc = books();
+        let r = vm_query(
+            "let expensive = $.store.books.filter(price > 10) in expensive.len()",
+            &doc,
+        )
+        .unwrap();
+        assert_eq!(r, json!(2));
+    }
+
+    #[test]
+    fn let_nested() {
+        let doc = books();
+        let r = vm_query(
+            "let top = $.store.books.sort(-rating).first(2) in let titles = top.map(title) in titles",
+            &doc
+        ).unwrap();
+        let arr = r.as_array().unwrap();
+        assert_eq!(arr[0], json!("Dune"));
+        assert_eq!(arr[1], json!("1984"));
+    }
+
+    
+    #[test]
+    fn enumerate() {
+        let doc = json!({"items": ["a", "b", "c"]});
+        let r = vm_query("$.items.enumerate()", &doc).unwrap();
+        let arr = r.as_array().unwrap();
+        assert_eq!(arr[0]["index"], json!(0));
+        assert_eq!(arr[0]["value"], json!("a"));
+    }
+
+    #[test]
+    fn pairwise() {
+        let doc = json!({"vals": [1, 2, 3, 4]});
+        let r = vm_query("$.vals.pairwise()", &doc).unwrap();
+        assert_eq!(r, json!([[1, 2], [2, 3], [3, 4]]));
+    }
+
+    #[test]
+    fn window() {
+        let doc = json!({"vals": [1, 2, 3, 4, 5]});
+        let r = vm_query("$.vals.window(3)", &doc).unwrap();
+        assert_eq!(r, json!([[1, 2, 3], [2, 3, 4], [3, 4, 5]]));
+    }
+
+    #[test]
+    fn chunk() {
+        let doc = json!({"vals": [1, 2, 3, 4, 5]});
+        let r = vm_query("$.vals.chunk(2)", &doc).unwrap();
+        assert_eq!(r, json!([[1, 2], [3, 4], [5]]));
+    }
+
+    #[test]
+    fn accumulate() {
+        let doc = json!({"vals": [1, 2, 3, 4]});
+        let r = vm_query("$.vals.accumulate(lambda acc, x: acc + x)", &doc).unwrap();
+        assert_eq!(r, json!([1, 3, 6, 10]));
+    }
+
+    #[test]
+    fn partition() {
+        let doc = json!({"nums": [1, 2, 3, 4, 5, 6]});
+        let r = vm_query("$.nums.partition(lambda n: n % 2 == 0)", &doc).unwrap();
+        assert_eq!(r["true"], json!([2, 4, 6]));
+        assert_eq!(r["false"], json!([1, 3, 5]));
+    }
+
+    #[test]
+    fn takewhile() {
+        let doc = json!({"vals": [1, 2, 3, 4, 5]});
+        let r = vm_query("$.vals.takewhile(lambda v: v < 4)", &doc).unwrap();
+        assert_eq!(r, json!([1, 2, 3]));
+    }
+
+    #[test]
+    fn dropwhile() {
+        let doc = json!({"vals": [1, 2, 3, 4, 5]});
+        let r = vm_query("$.vals.dropwhile(lambda v: v < 3)", &doc).unwrap();
+        assert_eq!(r, json!([3, 4, 5]));
+    }
+
+    #[test]
+    fn fused_filter_drop_while() {
+        let doc = json!({"vals": [1, 2, 3, 4, 5, 6]});
+        let r = vm_query(
+            "$.vals.filter(lambda v: v > 1).dropwhile(lambda v: v < 4)",
+            &doc,
+        )
+        .unwrap();
+        assert_eq!(r, json!([4, 5, 6]));
+    }
+
+    #[test]
+    fn fused_map_unique() {
+        let doc = json!({"xs": [1, 2, 2, 3, 3, 3]});
+        let r = vm_query("$.xs.map(lambda v: v * 2).unique()", &doc).unwrap();
+        assert_eq!(r, json!([2, 4, 6]));
+    }
+
+    
+    #[test]
+    fn coalesce() {
+        let doc = json!({"a": null, "b": null, "c": 42});
+        assert_eq!(
+            vm_query("coalesce($.a, $.b, $.c)", &doc).unwrap(),
+            json!(42)
+        );
+        assert_eq!(vm_query("coalesce($.a, $.b, 99)", &doc).unwrap(), json!(99));
+    }
+
+    #[test]
+    fn chain_arrays() {
+        let doc = json!({"a": [1, 2], "b": [3, 4]});
+        let r = vm_query("chain($.a, $.b)", &doc).unwrap();
+        assert_eq!(r, json!([1, 2, 3, 4]));
+    }
+
+    #[test]
+    fn zip_arrays() {
+        let doc = json!({"a": [1, 2, 3], "b": ["x", "y", "z"]});
+        let r = vm_query("zip($.a, $.b)", &doc).unwrap();
+        assert_eq!(r, json!([[1, "x"], [2, "y"], [3, "z"]]));
+    }
+
+    #[test]
+    fn product() {
+        let doc = json!({"colors": ["red", "blue"], "sizes": ["S", "M"]});
+        let r = vm_query("product($.colors, $.sizes)", &doc).unwrap();
+        let arr = r.as_array().unwrap();
+        assert_eq!(arr.len(), 4);
+    }
+
+    
+    #[test]
+    fn object_construction() {
+        let doc = books();
+        let r = vm_query(
+            "{total: $.store.books.sum(price), count: $.store.books.len()}",
+            &doc,
+        )
+        .unwrap();
+        assert_eq!(r["count"], json!(4));
+    }
+
+    #[test]
+    fn nested_obj_construct_indefinite() {
+        let doc = json!({
+            "books": [{"t":"x"},{"t":"y"}],
+            "another": {"field": 42},
+            "deep": {"a": {"b": {"c": "leaf"}}}
+        });
+        let r = vm_query("{a: $.books, b: {c: $.another.field}}", &doc).unwrap();
+        assert_eq!(r, json!({"a":[{"t":"x"},{"t":"y"}],"b":{"c":42}}));
+        let r2 = vm_query(
+            "{x: {y: {z: $.deep.a.b.c, arr: [1, $.another.field, {w: $.books[0].t}]}}}",
+            &doc,
+        )
+        .unwrap();
+        assert_eq!(r2, json!({"x":{"y":{"z":"leaf","arr":[1,42,{"w":"x"}]}}}));
+    }
+
+    #[test]
+    fn optional_field_omitted() {
+        let doc = json!({"user": {"name": "Alice"}});
+        let _r = vm_query("$.user.map({name, email?})", &doc);
+        
+        let r2 = vm_query("{name: $.user.name, email?: $.user.email}", &doc).unwrap();
+        assert!(r2.get("email").is_none());
+        assert_eq!(r2["name"], json!("Alice"));
+    }
+
+    
+    #[test]
+    fn pipe_to_method() {
+        let doc = books();
+        let r = vm_query("$.store.books | len", &doc).unwrap();
+        assert_eq!(r, json!(4));
+    }
+
+    #[test]
+    fn gen_comp_pipe() {
+        let doc = books();
+        let r = vm_query(
+            "(b.price for b in $.store.books if b.price > 10) | len",
+            &doc,
+        )
+        .unwrap();
+        assert_eq!(r, json!(2));
+    }
+
+    
+    #[test]
+    fn null_coalesce_basic() {
+        let doc = json!({"a": null, "b": 42});
+        assert_eq!(vm_query("$.a ?| $.b", &doc).unwrap(), json!(42));
+    }
+
+    #[test]
+    fn null_coalesce_non_null_short_circuits() {
+        let doc = json!({"a": 1, "b": 99});
+        assert_eq!(vm_query("$.a ?| $.b", &doc).unwrap(), json!(1));
+    }
+
+    #[test]
+    fn null_coalesce_chain() {
+        let doc = json!({"a": null, "b": null, "c": "found"});
+        assert_eq!(vm_query("$.a ?| $.b ?| $.c", &doc).unwrap(), json!("found"));
+    }
+
+    
+    #[test]
+    fn bind_simple_name() {
+        let doc = books();
+        
+        let r = vm_query(
+            "$.store.books -> books | {count: books.len(), first: books[0].title}",
+            &doc,
+        )
+        .unwrap();
+        assert_eq!(r["count"], json!(4));
+        assert_eq!(r["first"], json!("Dune"));
+    }
+
+    #[test]
+    fn bind_object_destructure() {
+        let doc = json!({"user": {"name": "Alice", "age": 30, "role": "admin"}});
+        let r = vm_query("$.user -> {name, age} | {greeting: name, years: age}", &doc).unwrap();
+        assert_eq!(r["greeting"], json!("Alice"));
+        assert_eq!(r["years"], json!(30));
+    }
+
+    #[test]
+    fn bind_object_rest() {
+        let doc = json!({"obj": {"a": 1, "b": 2, "c": 3}});
+        let r = vm_query("$.obj -> {a, ...rest} | rest.len()", &doc).unwrap();
+        assert_eq!(r, json!(2));
+    }
+
+    #[test]
+    fn bind_array_destructure() {
+        let doc = json!({"nums": [10, 20, 30]});
+        let r = vm_query("$.nums -> [x, y, z] | x + y + z", &doc).unwrap();
+        assert_eq!(r, json!(60));
+    }
+
+    
+    #[test]
+    fn object_spread() {
+        let doc = json!({"base": {"a": 1, "b": 2}, "extra": {"c": 3}});
+        let r = vm_query("{...$.base, ...$.extra}", &doc).unwrap();
+        assert_eq!(r["a"], json!(1));
+        assert_eq!(r["b"], json!(2));
+        assert_eq!(r["c"], json!(3));
+    }
+
+    #[test]
+    fn object_spread_override() {
+        let doc = json!({"base": {"a": 1, "b": 2}});
+        let r = vm_query("{...$.base, b: 99}", &doc).unwrap();
+        assert_eq!(r["a"], json!(1));
+        assert_eq!(r["b"], json!(99));
+    }
+
+    
+    #[test]
+    fn array_spread() {
+        let doc = json!({"a": [1, 2], "b": [3, 4]});
+        let r = vm_query("[...$.a, ...$.b]", &doc).unwrap();
+        assert_eq!(r, json!([1, 2, 3, 4]));
+    }
+
+    #[test]
+    fn array_spread_with_literal() {
+        let doc = json!({"items": [2, 3]});
+        let r = vm_query("[1, ...$.items, 4]", &doc).unwrap();
+        assert_eq!(r, json!([1, 2, 3, 4]));
+    }
+
+    
+    #[test]
+    fn fstring_basic() {
+        let doc = json!({"user": {"name": "Alice", "age": 30}});
+        let r = vm_query("f\"Hello {$.user.name}!\"", &doc).unwrap();
+        assert_eq!(r, json!("Hello Alice!"));
+    }
+
+    #[test]
+    fn fstring_multiple_interp() {
+        let doc = json!({"user": {"name": "Bob", "score": 95}});
+        let r = vm_query("f\"{$.user.name} scored {$.user.score}\"", &doc).unwrap();
+        assert_eq!(r, json!("Bob scored 95"));
+    }
+
+    #[test]
+    fn fstring_pipe_method() {
+        let doc = json!({"name": "alice"});
+        let r = vm_query("f\"Hello {$.name|upper}!\"", &doc).unwrap();
+        assert_eq!(r, json!("Hello ALICE!"));
+    }
+
+    
+    #[test]
+    fn str_upper_lower() {
+        let doc = json!({"s": "Hello World"});
+        assert_eq!(vm_query("$.s.upper()", &doc).unwrap(), json!("HELLO WORLD"));
+        assert_eq!(vm_query("$.s.lower()", &doc).unwrap(), json!("hello world"));
+    }
+
+    #[test]
+    fn str_trim() {
+        let doc = json!({"s": "  hello  "});
+        assert_eq!(vm_query("$.s.trim()", &doc).unwrap(), json!("hello"));
+        assert_eq!(vm_query("$.s.trim_left()", &doc).unwrap(), json!("hello  "));
+        assert_eq!(
+            vm_query("$.s.trim_right()", &doc).unwrap(),
+            json!("  hello")
+        );
+    }
+
+    #[test]
+    fn str_pad() {
+        let doc = json!({"s": "hi"});
+        assert_eq!(vm_query("$.s.pad_left(5)", &doc).unwrap(), json!("   hi"));
+        assert_eq!(vm_query("$.s.pad_right(5)", &doc).unwrap(), json!("hi   "));
+        assert_eq!(
+            vm_query("$.s.pad_left(5, \"0\")", &doc).unwrap(),
+            json!("000hi")
+        );
+    }
+
+    #[test]
+    fn str_starts_ends_with() {
+        let doc = json!({"s": "hello world"});
+        assert_eq!(
+            vm_query("$.s.starts_with(\"hello\")", &doc).unwrap(),
+            json!(true)
+        );
+        assert_eq!(
+            vm_query("$.s.ends_with(\"world\")", &doc).unwrap(),
+            json!(true)
+        );
+        assert_eq!(
+            vm_query("$.s.starts_with(\"world\")", &doc).unwrap(),
+            json!(false)
+        );
+    }
+
+    #[test]
+    fn str_replace() {
+        let doc = json!({"s": "foo foo foo"});
+        
+        assert_eq!(
+            vm_query("$.s.replace(\"foo\", \"bar\")", &doc).unwrap(),
+            json!("bar foo foo")
+        );
+        assert_eq!(
+            vm_query("$.s.replace_all(\"foo\", \"bar\")", &doc).unwrap(),
+            json!("bar bar bar")
+        );
+    }
+
+    #[test]
+    fn str_split() {
+        let doc = json!({"s": "a,b,c"});
+        assert_eq!(
+            vm_query("$.s.split(\",\")", &doc).unwrap(),
+            json!(["a", "b", "c"])
+        );
+    }
+
+    #[test]
+    fn str_index_of() {
+        let doc = json!({"s": "hello world"});
+        assert_eq!(vm_query("$.s.index_of(\"world\")", &doc).unwrap(), json!(6));
+        assert_eq!(vm_query("$.s.index_of(\"xyz\")", &doc).unwrap(), json!(-1));
+    }
+
+    #[test]
+    fn str_slice() {
+        let doc = json!({"s": "hello"});
+        assert_eq!(vm_query("$.s.slice(1, 4)", &doc).unwrap(), json!("ell"));
+        assert_eq!(vm_query("$.s.slice(2)", &doc).unwrap(), json!("llo"));
+    }
+
+    #[test]
+    fn str_repeat() {
+        let doc = json!({"s": "ab"});
+        assert_eq!(vm_query("$.s.repeat(3)", &doc).unwrap(), json!("ababab"));
+    }
+
+    #[test]
+    fn str_strip_prefix_suffix() {
+        let doc = json!({"s": "foobar"});
+        assert_eq!(
+            vm_query("$.s.strip_prefix(\"foo\")", &doc).unwrap(),
+            json!("bar")
+        );
+        assert_eq!(
+            vm_query("$.s.strip_suffix(\"bar\")", &doc).unwrap(),
+            json!("foo")
+        );
+    }
+
+    #[test]
+    fn str_to_number() {
+        let doc = json!({"s": "42"});
+        assert_eq!(vm_query("$.s.to_number()", &doc).unwrap(), json!(42));
+    }
+
+    #[test]
+    fn str_base64_roundtrip() {
+        let doc = json!({"s": "hello world"});
+        let encoded = vm_query("$.s.to_base64()", &doc).unwrap();
+        let decoded_doc = json!({"s": encoded});
+        let r = vm_query("$.s.from_base64()", &decoded_doc).unwrap();
+        assert_eq!(r, json!("hello world"));
+    }
+
+    #[test]
+    fn str_url_encode_decode() {
+        let doc = json!({"s": "hello world&foo=bar"});
+        let encoded = vm_query("$.s.url_encode()", &doc).unwrap();
+        assert!(
+            encoded.as_str().unwrap().contains("%20") || encoded.as_str().unwrap().contains("+")
+        );
+        let encoded_doc = json!({"s": encoded});
+        let decoded = vm_query("$.s.url_decode()", &encoded_doc).unwrap();
+        assert_eq!(decoded, json!("hello world&foo=bar"));
+    }
+
+    #[test]
+    fn str_html_escape() {
+        let doc = json!({"s": "<b>Hello & World</b>"});
+        let r = vm_query("$.s.html_escape()", &doc).unwrap();
+        assert_eq!(r, json!("&lt;b&gt;Hello &amp; World&lt;/b&gt;"));
+    }
+
+    #[test]
+    fn str_lines_words_chars() {
+        let doc = json!({"s": "a b\nc d"});
+        let lines = vm_query("$.s.lines()", &doc).unwrap();
+        assert_eq!(lines, json!(["a b", "c d"]));
+        let words = vm_query("$.s.words()", &doc).unwrap();
+        assert_eq!(words, json!(["a", "b", "c", "d"]));
+    }
+
+    #[test]
+    fn str_capitalize() {
+        let doc = json!({"s": "hello world"});
+        assert_eq!(
+            vm_query("$.s.capitalize()", &doc).unwrap(),
+            json!("Hello world")
+        );
+    }
+
+    #[test]
+    fn str_title_case() {
+        let doc = json!({"s": "hello world"});
+        assert_eq!(
+            vm_query("$.s.title_case()", &doc).unwrap(),
+            json!("Hello World")
+        );
+    }
+
+    
+    #[test]
+    fn pick_fields() {
+        let doc = json!({"user": {"name": "Alice", "age": 30, "password": "secret"}});
+        let r = vm_query("$.user.pick(\"name\", \"age\")", &doc).unwrap();
+        assert_eq!(r["name"], json!("Alice"));
+        assert_eq!(r["age"], json!(30));
+        assert!(r.get("password").is_none());
+    }
+
+    #[test]
+    fn omit_fields() {
+        let doc = json!({"user": {"name": "Alice", "password": "secret"}});
+        let r = vm_query("$.user.omit(\"password\")", &doc).unwrap();
+        assert_eq!(r["name"], json!("Alice"));
+        assert!(r.get("password").is_none());
+    }
+
+    #[test]
+    fn rename_fields() {
+        let doc = json!({"obj": {"old_name": "value"}});
+        let r = vm_query("$.obj.rename({old_name: \"new_name\"})", &doc).unwrap();
+        assert_eq!(r["new_name"], json!("value"));
+        assert!(r.get("old_name").is_none());
+    }
+
+    #[test]
+    fn merge_objects() {
+        
+        let doc = json!({"a": {"x": 1}, "b": {"y": 2}});
+        let r = vm_query("$.a | merge($.b)", &doc).unwrap();
+        assert_eq!(r["x"], json!(1));
+        assert_eq!(r["y"], json!(2));
+    }
+
+    #[test]
+    fn deep_merge_objects() {
+        let doc = json!({"a": {"x": {"p": 1}}, "b": {"x": {"q": 2}, "y": 3}});
+        let r = vm_query("$.a | deep_merge($.b)", &doc).unwrap();
+        assert_eq!(r["x"]["p"], json!(1));
+        assert_eq!(r["x"]["q"], json!(2));
+        assert_eq!(r["y"], json!(3));
+    }
+
+    #[test]
+    fn defaults_fill_nulls() {
+        let doc = json!({"obj": {"a": 1, "b": null}, "defs": {"b": 99, "c": 100}});
+        let r = vm_query("$.obj.defaults($.defs)", &doc).unwrap();
+        assert_eq!(r["a"], json!(1));
+        assert_eq!(r["b"], json!(99));
+        assert_eq!(r["c"], json!(100));
+    }
+
+    #[test]
+    fn transform_keys() {
+        let doc = json!({"obj": {"foo_bar": 1, "baz_qux": 2}});
+        let r = vm_query("$.obj.transform_keys(lambda k: k.upper())", &doc).unwrap();
+        assert!(r.get("FOO_BAR").is_some() || r.get("BAZ_QUX").is_some());
+    }
+
+    #[test]
+    fn transform_values() {
+        let doc = json!({"obj": {"a": 1, "b": 2, "c": 3}});
+        let r = vm_query("$.obj.transform_values(lambda v: v * 10)", &doc).unwrap();
+        assert_eq!(r["a"], json!(10));
+        assert_eq!(r["b"], json!(20));
+    }
+
+    #[test]
+    fn filter_keys_test() {
+        let doc = json!({"obj": {"name": "Alice", "_private": "x", "_secret": "y"}});
+        let r = vm_query(
+            "$.obj.filter_keys(lambda k: not k.starts_with(\"_\"))",
+            &doc,
+        )
+        .unwrap();
+        assert!(r.get("name").is_some());
+        assert!(r.get("_private").is_none());
+    }
+
+    #[test]
+    fn filter_values_test() {
+        let doc = json!({"obj": {"a": 1, "b": null, "c": 3}});
+        let r = vm_query("$.obj.filter_values(lambda v: v kind not null)", &doc).unwrap();
+        assert!(r.get("a").is_some());
+        assert!(r.get("b").is_none());
+        assert!(r.get("c").is_some());
+    }
+
+    #[test]
+    fn invert_object() {
+        let doc = json!({"obj": {"a": "x", "b": "y"}});
+        let r = vm_query("$.obj.invert()", &doc).unwrap();
+        assert_eq!(r["x"], json!("a"));
+        assert_eq!(r["y"], json!("b"));
+    }
+
+    #[test]
+    fn to_pairs_from_pairs() {
+        let doc = json!({"obj": {"a": 1, "b": 2}});
+        let pairs = vm_query("$.obj.to_pairs()", &doc).unwrap();
+        let arr = pairs.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        
+        let pairs_doc = json!({"pairs": pairs});
+        let restored = vm_query("$.pairs.from_pairs()", &pairs_doc).unwrap();
+        assert_eq!(restored["a"], json!(1));
+        assert_eq!(restored["b"], json!(2));
+    }
+
+    
+    #[test]
+    fn get_path_op() {
+        let doc = json!({"a": {"b": {"c": 42}}});
+        assert_eq!(vm_query("$.get_path(\"a.b.c\")", &doc).unwrap(), json!(42));
+    }
+
+    #[test]
+    fn set_path_op() {
+        let doc = json!({"a": {"b": 1}});
+        let r = vm_query("$.set_path(\"a.b\", 99)", &doc).unwrap();
+        assert_eq!(r["a"]["b"], json!(99));
+    }
+
+    #[test]
+    fn del_path_op() {
+        let doc = json!({"a": {"b": 1, "c": 2}});
+        let r = vm_query("$.del_path(\"a.b\")", &doc).unwrap();
+        assert!(r["a"].get("b").is_none());
+        assert_eq!(r["a"]["c"], json!(2));
+    }
+
+    #[test]
+    fn has_path_op() {
+        let doc = json!({"a": {"b": {"c": 1}}});
+        assert_eq!(
+            vm_query("$.has_path(\"a.b.c\")", &doc).unwrap(),
+            json!(true)
+        );
+        assert_eq!(
+            vm_query("$.has_path(\"a.x.y\")", &doc).unwrap(),
+            json!(false)
+        );
+    }
+
+    #[test]
+    fn flatten_keys_op() {
+        let doc = json!({"a": {"b": {"c": 1}, "d": 2}});
+        let r = vm_query("$.flatten_keys()", &doc).unwrap();
+        assert_eq!(r["a.b.c"], json!(1));
+        assert_eq!(r["a.d"], json!(2));
+    }
+
+    #[test]
+    fn unflatten_keys_op() {
+        let doc = json!({"flat": {"a.b.c": 1, "a.d": 2}});
+        let r = vm_query("$.flat.unflatten_keys()", &doc).unwrap();
+        assert_eq!(r["a"]["b"]["c"], json!(1));
+        assert_eq!(r["a"]["d"], json!(2));
+    }
+
+    
+    #[test]
+    fn set_diff() {
+        let doc = json!({"a": [1, 2, 3, 4], "b": [2, 4]});
+        let r = vm_query("$.a.diff($.b)", &doc).unwrap();
+        assert_eq!(r, json!([1, 3]));
+    }
+
+    #[test]
+    fn set_intersect() {
+        let doc = json!({"a": [1, 2, 3], "b": [2, 3, 4]});
+        let r = vm_query("$.a.intersect($.b)", &doc).unwrap();
+        assert_eq!(r, json!([2, 3]));
+    }
+
+    #[test]
+    fn set_union() {
+        let doc = json!({"a": [1, 2, 3], "b": [3, 4, 5]});
+        let r = vm_query("$.a.union($.b)", &doc).unwrap();
+        let arr = r.as_array().unwrap();
+        assert_eq!(arr.len(), 5);
+        assert!(arr.contains(&json!(1)));
+        assert!(arr.contains(&json!(5)));
+    }
+
+    
+    #[test]
+    fn type_method() {
+        let doc = json!({"n": 42, "s": "hello", "a": [1], "o": {}, "b": true, "z": null});
+        assert_eq!(vm_query("$.n.type()", &doc).unwrap(), json!("number"));
+        assert_eq!(vm_query("$.s.type()", &doc).unwrap(), json!("string"));
+        assert_eq!(vm_query("$.a.type()", &doc).unwrap(), json!("array"));
+        assert_eq!(vm_query("$.o.type()", &doc).unwrap(), json!("object"));
+        assert_eq!(vm_query("$.b.type()", &doc).unwrap(), json!("bool"));
+        assert_eq!(vm_query("$.z.type()", &doc).unwrap(), json!("null"));
+    }
+
+    #[test]
+    fn from_json_to_json() {
+        let doc = json!({"s": "{\"x\":1}"});
+        let parsed = vm_query("$.s.from_json()", &doc).unwrap();
+        assert_eq!(parsed["x"], json!(1));
+        let serialized = vm_query("$.s.from_json().to_json()", &doc).unwrap();
+        assert!(serialized.as_str().unwrap().contains("\"x\""));
+    }
+
+    
+    #[test]
+    fn inline_filter_basic() {
+        let doc = books();
+        
+        let r = vm_query("$.store.books{price > 10}", &doc).unwrap();
+        let arr = r.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert!(arr.iter().all(|b| b["price"].as_f64().unwrap() > 10.0));
+    }
+
+    #[test]
+    fn quantifier_first() {
+        let doc = books();
+        
+        
+        let r = vm_query("$.store.books{price > 10}.first()", &doc).unwrap();
+        assert_eq!(r["title"], json!("Dune"));
+    }
+
+    #[test]
+    fn quantifier_one_ok() {
+        let doc = books();
+        let r = vm_query("$.store.books{title == \"1984\"}!", &doc).unwrap();
+        assert_eq!(r["title"], json!("1984"));
+    }
+
+    #[test]
+    fn quantifier_one_error() {
+        let doc = books();
+        
+        let r = vm_query("$.store.books{price > 10}!", &doc);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn descend_all_inline_filter() {
+        let doc = books();
+        
+        let r = vm_query("$.store..{title == \"1984\"}!.title", &doc).unwrap();
+        assert_eq!(r, json!("1984"));
+    }
+
+    #[test]
+    fn descend_all_collect() {
+        let doc = json!({"a": {"b": 1, "c": 2}, "d": 3});
+        
+        let r = vm_query("$..", &doc).unwrap();
+        let arr = r.as_array().unwrap();
+        
+        assert!(arr.len() > 1);
+    }
+
+    
+    #[test]
+    fn fusion_drop_noop_before_len() {
+        use crate::builtins::BuiltinMethod;
+        use crate::compile::compiler::Compiler;
+        use crate::vm::Opcode;
+        
+        let p1 = Compiler::compile_str("$.xs.sort().len()").unwrap();
+        let sort_ct = p1
+            .ops
+            .iter()
+            .filter(|o| matches!(o, Opcode::CallMethod(c) if c.method == BuiltinMethod::Sort))
+            .count();
+        assert_eq!(
+            sort_ct, 0,
+            "sort should be dropped before length; ops: {:?}",
+            p1.ops
+        );
+
+        
+        let p2 = Compiler::compile_str("$.xs.map(@ * 2).count()").unwrap();
+        let map_ct = p2
+            .ops
+            .iter()
+            .filter(|o| matches!(o, Opcode::CallMethod(c) if c.method == BuiltinMethod::Map))
+            .count();
+        assert_eq!(
+            map_ct, 0,
+            "map should be dropped before count; ops: {:?}",
+            p2.ops
+        );
+    }
+
+    #[test]
+    fn fusion_drop_noop_before_len_semantics() {
+        let doc = json!({"xs": [3, 1, 4, 1, 5, 9, 2, 6]});
+        assert_eq!(vm_query("$.xs.sort().len()", &doc).unwrap(), json!(8));
+        assert_eq!(vm_query("$.xs.reverse().count()", &doc).unwrap(), json!(8));
+        assert_eq!(vm_query("$.xs.map(@ * 2).len()", &doc).unwrap(), json!(8));
+    }
+
+    #[test]
+    fn fusion_map_filter_unfused_after_pipeline_migration() {
+        
+        
+        use crate::compile::compiler::Compiler;
+        let prog = Compiler::compile_str("$.xs.map(@ * 2).filter(@ > 5)").unwrap();
+        let dbg = format!("{:?}", prog.ops);
+        assert!(
+            !dbg.contains("MapFilter"),
+            "MapFilter should not appear after deletion; ops: {}",
+            dbg
+        );
+    }
+
+    #[test]
+    fn fusion_map_filter_semantics() {
+        let doc = json!({"xs": [1, 2, 3, 4, 5]});
+        let r = vm_query("$.xs.map(@ * 2).filter(@ > 5)", &doc).unwrap();
+        assert_eq!(r, json!([6, 8, 10]));
+    }
+
+    #[test]
+    fn fusion_field_chain_opcode_emitted() {
+        use crate::compile::compiler::Compiler;
+        use crate::vm::Opcode;
+        
+        
+        let prog = Compiler::compile_str("$.items.first().a.b.c").unwrap();
+        let has_fc = prog
+            .ops
+            .iter()
+            .any(|o| matches!(o, Opcode::FieldChain(c) if c.len() == 3));
+        let get_field_count = prog
+            .ops
+            .iter()
+            .filter(|o| matches!(o, Opcode::GetField(_)))
+            .count();
+        assert!(has_fc, "FieldChain not emitted; ops: {:?}", prog.ops);
+        assert_eq!(
+            get_field_count, 0,
+            "residual GetField after fusion: {:?}",
+            prog.ops
+        );
+    }
+
+    #[test]
+    fn fusion_opt_field_absorbed_into_field_chain() {
+        use crate::compile::compiler::Compiler;
+        use crate::vm::Opcode;
+        
+        
+        let prog = Compiler::compile_str("$.items.first()?.a?.b?.c").unwrap();
+        let has_fc = prog
+            .ops
+            .iter()
+            .any(|o| matches!(o, Opcode::FieldChain(c) if c.len() >= 2));
+        let residual = prog
+            .ops
+            .iter()
+            .filter(|o| matches!(o, Opcode::OptField(_) | Opcode::GetField(_)))
+            .count();
+        assert!(has_fc, "FieldChain not emitted; ops: {:?}", prog.ops);
+        assert_eq!(residual, 0, "residual per-step field ops: {:?}", prog.ops);
+    }
+
+    #[test]
+    fn fusion_opt_field_chain_semantics() {
+        let doc = json!({"items": [{"a": {"b": {"c": 42}}}]});
+        let r = vm_query("$.items.first()?.a?.b?.c", &doc).unwrap();
+        assert_eq!(r, json!(42));
+        let missing = json!({"items": [{"a": null}]});
+        let r2 = vm_query("$.items.first()?.a?.b?.c", &missing).unwrap();
+        assert!(r2.is_null());
+    }
+
+    #[test]
+    fn fusion_field_chain_semantics() {
+        let doc = json!({"items": [{"a": {"b": {"c": 42}}}]});
+        let r = vm_query("$.items.first().a.b.c", &doc).unwrap();
+        assert_eq!(r, json!(42));
+    }
+
+    
+    #[test]
+    fn try_bare_missing_field_uses_default() {
+        let r = vm_query("try $.a.b.c else 0", &json!({})).unwrap();
+        assert_eq!(r, json!(0));
+    }
+
+    #[test]
+    fn try_bare_present_returns_body() {
+        let r = vm_query("try $.a else 0", &json!({"a": 42})).unwrap();
+        assert_eq!(r, json!(42));
+    }
+
+    #[test]
+    fn try_paren_form() {
+        let r = vm_query("try ($.a.b.c) else 0", &json!({})).unwrap();
+        assert_eq!(r, json!(0));
+        let r = vm_query("try ($.a) else 0", &json!({"a": 42})).unwrap();
+        assert_eq!(r, json!(42));
+    }
+
+    #[test]
+    fn try_catches_eval_error() {
+        
+        let r = vm_query(r#"try ('bad' | from_json) else null"#, &json!(null)).unwrap();
+        assert!(r.is_null());
+    }
+
+    #[test]
+    fn try_chain_right_associative() {
+        
+        let r = vm_query("try $.a else try $.b else 'c'", &json!({"b": "B"})).unwrap();
+        assert_eq!(r, json!("B"));
+        
+        let r = vm_query("try $.a else try $.b else 'c'", &json!({})).unwrap();
+        assert_eq!(r, json!("c"));
+    }
+
+    #[test]
+    fn try_inside_object_shaping() {
+        let doc = json!([
+            {"id": 1, "name": "A"},
+            {"id": 2}
+        ]);
+        let r = vm_query(r#"$.map({id, name: try name else 'anon'})"#, &doc).unwrap();
+        assert_eq!(
+            r,
+            json!([
+                {"id": 1, "name": "A"},
+                {"id": 2, "name": "anon"}
+            ])
+        );
+    }
+
+    #[test]
+    fn try_zero_is_not_null() {
+        
+        let r = vm_query("try 0 else 99", &json!(null)).unwrap();
+        assert_eq!(r, json!(0));
+    }
+
+    #[test]
+    fn try_paren_required_for_ternary_inside() {
+        let r = vm_query("try (1 if false else 2) else 99", &json!(null)).unwrap();
+        assert_eq!(r, json!(2));
+    }
+
+    #[test]
+    fn try_inside_list_comp() {
+        let doc = json!([{"tags":["a"]}, {}]);
+        let r = vm_query("[try x.tags else [] for x in $]", &doc).unwrap();
+        assert_eq!(r, json!([["a"], []]));
+    }
+
+    #[test]
+    fn try_constant_body_folds_at_compile_time() {
+        use crate::compile::compiler::Compiler;
+        use crate::vm::Opcode;
+        
+        let prog = Compiler::compile_str("try 42 else 0").unwrap();
+        let has_try = prog.ops.iter().any(|o| matches!(o, Opcode::TryExpr { .. }));
+        assert!(
+            !has_try,
+            "constant non-null try should fold; ops: {:?}",
+            prog.ops
+        );
+        
+        let prog = Compiler::compile_str("try null else 7").unwrap();
+        let has_try = prog.ops.iter().any(|o| matches!(o, Opcode::TryExpr { .. }));
+        assert!(
+            !has_try,
+            "null body try should fold to default; ops: {:?}",
+            prog.ops
+        );
+    }
+
+    
+    #[test]
+    fn redundant_reverse_eliminated() {
+        use crate::builtins::BuiltinMethod;
+        use crate::compile::compiler::Compiler;
+        use crate::vm::Opcode;
+        let prog = Compiler::compile_str("$.books.reverse().reverse()").unwrap();
+        let reverse_count = prog
+            .ops
+            .iter()
+            .filter(|o| {
+                matches!(o,
+                    Opcode::CallMethod(c) if c.method == BuiltinMethod::Reverse
+                )
+            })
+            .count();
+        assert_eq!(reverse_count, 0, "adjacent reverse+reverse should cancel");
+    }
+
+    #[test]
+    fn redundant_unique_collapsed() {
+        use crate::builtins::BuiltinMethod;
+        use crate::compile::compiler::Compiler;
+        use crate::vm::Opcode;
+        let prog = Compiler::compile_str("$.books.unique().unique()").unwrap();
+        let unique_count = prog
+            .ops
+            .iter()
+            .filter(|o| {
+                matches!(o,
+                    Opcode::CallMethod(c) if c.method == BuiltinMethod::Unique
+                )
+            })
+            .count();
+        assert_eq!(unique_count, 1, "duplicate unique() should collapse");
+    }
+
+    #[test]
+    fn bool_short_circuit_folded() {
+        use crate::compile::compiler::Compiler;
+        use crate::vm::Opcode;
+        let prog = Compiler::compile_str("false and $.expensive.deeply.nested").unwrap();
+        
+        let has_and = prog.ops.iter().any(|o| matches!(o, Opcode::AndOp(_)));
+        assert!(!has_and, "false and _ should fold to just PushBool(false)");
+    }
+
+    
+    #[test]
+    fn find_first_matches_semantics() {
+        let doc = books();
+        
+        let fused = vm_query("$.store.books{price > 10}.first()", &doc).unwrap();
+        assert_eq!(fused["title"], json!("Dune"));
+    }
+
+    #[test]
+    fn find_one_error_on_multiple() {
+        let doc = books();
+        let r = vm_query("$.store.books{price > 10}!", &doc);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn find_one_error_on_zero() {
+        let doc = books();
+        let r = vm_query("$.store.books{price > 9999}!", &doc);
+        assert!(r.is_err());
+    }
+
+    
+    #[test]
+    fn kind_check_literal_fold_int() {
+        use crate::compile::compiler::Compiler;
+        use crate::vm::Opcode;
+        let prog = Compiler::compile_str("42 kind number").unwrap();
+        let has_kind = prog
+            .ops
+            .iter()
+            .any(|o| matches!(o, Opcode::KindCheck { .. }));
+        assert!(!has_kind, "literal kind check should fold away");
+        assert!(matches!(prog.ops.first(), Some(Opcode::PushBool(true))));
+    }
+
+    #[test]
+    fn kind_check_literal_fold_mismatch() {
+        use crate::compile::compiler::Compiler;
+        use crate::vm::Opcode;
+        let prog = Compiler::compile_str("\"hi\" kind number").unwrap();
+        assert!(matches!(prog.ops.first(), Some(Opcode::PushBool(false))));
+        assert!(!prog
+            .ops
+            .iter()
+            .any(|o| matches!(o, Opcode::KindCheck { .. })));
+    }
+
+    #[test]
+    fn kind_check_literal_negate() {
+        use crate::compile::compiler::Compiler;
+        use crate::vm::Opcode;
+        let prog = Compiler::compile_str("42 kind not string").unwrap();
+        assert!(matches!(prog.ops.first(), Some(Opcode::PushBool(true))));
+        assert!(!prog
+            .ops
+            .iter()
+            .any(|o| matches!(o, Opcode::KindCheck { .. })));
+    }
+
+    #[test]
+    fn analysis_infer_result_type() {
+        use crate::plan::analysis::{infer_result_type, VType};
+        use crate::compile::compiler::Compiler;
+        let p = Compiler::compile_str("42 + 1").unwrap();
+        let av = infer_result_type(&p);
+        assert_eq!(av.ty, VType::Int);
+        let p = Compiler::compile_str("[1,2,3]").unwrap();
+        assert_eq!(infer_result_type(&p).ty, VType::Arr);
+        let p = Compiler::compile_str("\"hi\"").unwrap();
+        assert_eq!(infer_result_type(&p).ty, VType::Str);
+    }
+
+    #[test]
+    fn analysis_count_ident_uses() {
+        use crate::plan::analysis::count_ident_uses;
+        use crate::compile::compiler::Compiler;
+        let p = Compiler::compile_str("let x = 10 in x + x + 1").unwrap();
+        assert_eq!(count_ident_uses(&p, "x"), 2);
+        let p = Compiler::compile_str("let y = 10 in 42").unwrap();
+        assert_eq!(count_ident_uses(&p, "y"), 0);
+    }
+
+    #[test]
+    fn analysis_collect_accessed_fields() {
+        use crate::plan::analysis::collect_accessed_fields;
+        use crate::compile::compiler::Compiler;
+        let p = Compiler::compile_str("$.store.books.map(@.title)").unwrap();
+        let fields = collect_accessed_fields(&p);
+        assert!(fields.iter().any(|f| f.as_ref() == "store"));
+        assert!(fields.iter().any(|f| f.as_ref() == "books"));
+        assert!(fields.iter().any(|f| f.as_ref() == "title"));
+    }
+
+    #[test]
+    fn analysis_program_signature_stable() {
+        use crate::plan::analysis::program_signature;
+        use crate::compile::compiler::Compiler;
+        let a = Compiler::compile_str("$.x.y + 1").unwrap();
+        let b = Compiler::compile_str("$.x.y + 1").unwrap();
+        assert_eq!(program_signature(&a), program_signature(&b));
+        let c = Compiler::compile_str("$.x.y + 2").unwrap();
+        assert_ne!(program_signature(&a), program_signature(&c));
+    }
+
+    #[test]
+    fn dead_let_eliminated() {
+        use crate::compile::compiler::Compiler;
+        use crate::vm::Opcode;
+        let prog = Compiler::compile_str("let x = 100 in 42").unwrap();
+        let has_let = prog.ops.iter().any(|o| matches!(o, Opcode::LetExpr { .. }));
+        assert!(!has_let, "unused let should be eliminated");
+        assert!(matches!(prog.ops.as_ref(), [Opcode::PushInt(42)]));
+    }
+
+    #[test]
+    fn dead_let_kept_when_used() {
+        use crate::compile::compiler::Compiler;
+        use crate::vm::Opcode;
+        let prog = Compiler::compile_str("let x = 10 in x + 1").unwrap();
+        assert!(prog.ops.iter().any(|o| matches!(o, Opcode::LetExpr { .. })));
+    }
+
+    #[test]
+    fn const_fold_comparison() {
+        use crate::compile::compiler::Compiler;
+        use crate::vm::Opcode;
+        let prog = Compiler::compile_str("1 < 2").unwrap();
+        assert!(matches!(prog.ops.as_ref(), [Opcode::PushBool(true)]));
+        let prog = Compiler::compile_str("5 == 5").unwrap();
+        assert!(matches!(prog.ops.as_ref(), [Opcode::PushBool(true)]));
+        let prog = Compiler::compile_str("\"a\" == \"b\"").unwrap();
+        assert!(matches!(prog.ops.as_ref(), [Opcode::PushBool(false)]));
+    }
+
+    #[test]
+    fn const_fold_mixed_int_float_arith() {
+        use crate::compile::compiler::Compiler;
+        use crate::vm::Opcode;
+        let prog = Compiler::compile_str("1 + 2.5").unwrap();
+        assert!(
+            matches!(prog.ops.as_ref(), [Opcode::PushFloat(f)] if (*f - 3.5).abs() < 1e-9),
+            "1 + 2.5 should fold to 3.5; got {:?}",
+            prog.ops
+        );
+        let prog = Compiler::compile_str("2.0 * 3").unwrap();
+        assert!(matches!(prog.ops.as_ref(), [Opcode::PushFloat(f)] if (*f - 6.0).abs() < 1e-9));
+        let prog = Compiler::compile_str("10 / 4.0").unwrap();
+        assert!(matches!(prog.ops.as_ref(), [Opcode::PushFloat(f)] if (*f - 2.5).abs() < 1e-9));
+    }
+
+    #[test]
+    fn const_fold_mixed_int_float_cmp() {
+        use crate::compile::compiler::Compiler;
+        use crate::vm::Opcode;
+        let prog = Compiler::compile_str("1 < 2.5").unwrap();
+        assert!(matches!(prog.ops.as_ref(), [Opcode::PushBool(true)]));
+        let prog = Compiler::compile_str("3.14 > 3").unwrap();
+        assert!(matches!(prog.ops.as_ref(), [Opcode::PushBool(true)]));
+        let prog = Compiler::compile_str("2.0 <= 2").unwrap();
+        assert!(matches!(prog.ops.as_ref(), [Opcode::PushBool(true)]));
+    }
+
+    #[test]
+    fn const_fold_unary() {
+        use crate::compile::compiler::Compiler;
+        use crate::vm::Opcode;
+        let prog = Compiler::compile_str("not true").unwrap();
+        assert!(matches!(prog.ops.as_ref(), [Opcode::PushBool(false)]));
+        let prog = Compiler::compile_str("-42").unwrap();
+        assert!(matches!(prog.ops.as_ref(), [Opcode::PushInt(-42)]));
+    }
+
+    #[test]
+    fn fusion_topn_opcode() {
+        
+        
+        use crate::compile::compiler::Compiler;
+        use crate::vm::Opcode;
+        let prog = Compiler::compile_str("$.nums.sort()[0:3]").unwrap();
+        let has_slice = prog.ops.iter().any(|o| matches!(o, Opcode::GetSlice(_, _)));
+        assert!(
+            has_slice,
+            "sort+[0:n] should still emit GetSlice in opcode path"
+        );
+    }
+
+    #[test]
+    fn fusion_topn_semantics() {
+        let doc = json!({"nums": [5, 3, 1, 4, 2, 9, 7]});
+        let r = vm_query("$.nums.sort()[0:3]", &doc).unwrap();
+        assert_eq!(r, json!([1, 2, 3]));
+    }
+
+    #[test]
+    fn analysis_monotonicity_sort() {
+        use crate::plan::analysis::{infer_monotonicity, Monotonicity};
+        use crate::compile::compiler::Compiler;
+        let p = Compiler::compile_str("$.x.sort()").unwrap();
+        assert_eq!(infer_monotonicity(&p), Monotonicity::Asc);
+        let p = Compiler::compile_str("$.x.sort().reverse()").unwrap();
+        assert_eq!(infer_monotonicity(&p), Monotonicity::Desc);
+    }
+
+    #[test]
+    fn analysis_cost_nonzero() {
+        use crate::plan::analysis::program_cost;
+        use crate::compile::compiler::Compiler;
+        let cheap = Compiler::compile_str("42").unwrap();
+        let expensive =
+            Compiler::compile_str("$.books.filter(@.price > 10).map(@.title).sort()").unwrap();
+        assert!(program_cost(&cheap) < program_cost(&expensive));
+    }
+
+    #[test]
+    fn analysis_selectivity_score() {
+        use crate::plan::analysis::selectivity_score;
+        use crate::parse::parser::parse;
+        let eq = parse("x == 1").unwrap();
+        let lt = parse("x < 1").unwrap();
+        let t = parse("true").unwrap();
+        assert!(selectivity_score(&eq) < selectivity_score(&lt));
+        assert!(selectivity_score(&lt) < selectivity_score(&t));
+    }
+
+    #[test]
+    fn analysis_escapes_doc() {
+        use crate::plan::analysis::escapes_doc;
+        use crate::compile::compiler::Compiler;
+        let p = Compiler::compile_str("42").unwrap();
+        assert!(!escapes_doc(&p));
+        let p = Compiler::compile_str("$.x").unwrap();
+        assert!(escapes_doc(&p));
+    }
+
+    
+    #[test]
+    fn fusion_filter_first_semantics() {
+        let doc = books();
+        let fused = vm_query("$.store.books.filter(@.price > 10).first()", &doc).unwrap();
+        let plain = vm_query("$.store.books.filter(@.price > 10) | first()", &doc).unwrap();
+        assert_eq!(fused, plain);
+    }
+
+    #[test]
+    fn fusion_filter_map_sum_opcode() {
+        
+        
+        use crate::compile::compiler::Compiler;
+        let prog =
+            Compiler::compile_str("$.books.filter(@.price > 10).map(@.price).sum()").unwrap();
+        let dbg = format!("{:?}", prog.ops);
+        assert!(
+            !dbg.contains("FilterMap"),
+            "FilterMap should not appear after deletion; ops: {}",
+            dbg
+        );
+    }
+
+    #[test]
+    fn fusion_filter_map_avg_opcode() {
+        use crate::compile::compiler::Compiler;
+        let prog =
+            Compiler::compile_str("$.books.filter(@.price > 10).map(@.price).avg()").unwrap();
+        let dbg = format!("{:?}", prog.ops);
+        assert!(
+            !dbg.contains("FilterMap"),
+            "FilterMap should not appear after deletion; ops: {}",
+            dbg
+        );
+    }
+
+    #[test]
+    fn fusion_filter_map_sum_semantics() {
+        let doc = books();
+        let fused = vm_query(
+            "$.store.books.filter(@.price > 10).map(@.price).sum()",
+            &doc,
+        )
+        .unwrap();
+        let plain = vm_query("$.store.books.filter(@.price > 10).sum(price)", &doc).unwrap();
+        assert_eq!(fused, plain);
+    }
+
+    #[test]
+    fn fusion_filter_map_avg_semantics() {
+        let doc = books();
+        let fused = vm_query(
+            "$.store.books.filter(@.price > 10).map(@.price).avg()",
+            &doc,
+        )
+        .unwrap();
+        let plain = vm_query("$.store.books.filter(@.price > 10).avg(price)", &doc).unwrap();
+        assert_eq!(fused, plain);
+    }
+
+    
+    #[test]
+    fn fusion_map_first_last_semantics() {
+        let doc = books();
+        let f = vm_query("$.store.books.map(@.price).first()", &doc).unwrap();
+        let l = vm_query("$.store.books.map(@.price).last()", &doc).unwrap();
+        let all = vm_query("$.store.books.map(@.price)", &doc).unwrap();
+        let arr = all.as_array().unwrap();
+        assert_eq!(f, arr[0]);
+        assert_eq!(l, arr[arr.len() - 1]);
+
+        let empty_doc: serde_json::Value = serde_json::from_str(r#"{"xs":[]}"#).unwrap();
+        let f_empty = vm_query("$.xs.map(@.price).first()", &empty_doc).unwrap();
+        assert!(f_empty.is_null());
+    }
+
+    #[test]
+    fn fusion_filter_map_first_opcode() {
+        
+        
+        use crate::compile::compiler::Compiler;
+        let prog =
+            Compiler::compile_str("$.books.filter(@.price > 10).map(@.title).first()").unwrap();
+        let dbg = format!("{:?}", prog.ops);
+        assert!(
+            !dbg.contains("FilterMap"),
+            "FilterMap should not appear after deletion; ops: {}",
+            dbg
+        );
+    }
+
+    #[test]
+    fn fusion_filter_map_first_semantics() {
+        let doc = books();
+        let fused = vm_query(
+            "$.store.books.filter(@.price > 10).map(@.title).first()",
+            &doc,
+        )
+        .unwrap();
+        let plain = vm_query("$.store.books.filter(@.price > 10).map(@.title)", &doc).unwrap();
+        let arr = plain.as_array().unwrap();
+        if arr.is_empty() {
+            assert!(fused.is_null());
+        } else {
+            assert_eq!(fused, arr[0]);
+        }
+
+        let empty_doc: serde_json::Value = serde_json::from_str(r#"{"xs":[]}"#).unwrap();
+        let e = vm_query("$.xs.filter(@.price > 0).map(@.title).first()", &empty_doc).unwrap();
+        assert!(e.is_null());
+    }
+
+    #[test]
+    fn const_fold_string_concat_and_cmp() {
+        use crate::compile::compiler::Compiler;
+        use crate::vm::{CompiledPipeStep, Opcode};
+        
+        
+        fn collect_all_ops(ops: &[Opcode], out: &mut Vec<Opcode>) {
+            for o in ops {
+                out.push(o.clone());
+                if let Opcode::PipelineRun { base, steps } = o {
+                    collect_all_ops(&base.ops, out);
+                    for s in steps.iter() {
+                        if let CompiledPipeStep::Forward(p) = s {
+                            collect_all_ops(&p.ops, out);
+                        }
+                    }
+                }
+            }
+        }
+        let p1 = Compiler::compile_str(r#"$ | "a" + "bc""#).unwrap();
+        let mut all1 = Vec::new();
+        collect_all_ops(&p1.ops, &mut all1);
+        assert!(
+            all1.iter()
+                .any(|o| matches!(o, Opcode::PushStr(s) if s.as_ref() == "abc")),
+            "\"a\" + \"bc\" should fold to PushStr(\"abc\"): {:?}",
+            p1.ops
+        );
+
+        let p2 = Compiler::compile_str(r#"$ | "a" < "b""#).unwrap();
+        let mut all2 = Vec::new();
+        collect_all_ops(&p2.ops, &mut all2);
+        assert!(
+            all2.iter().any(|o| matches!(o, Opcode::PushBool(true))),
+            "\"a\" < \"b\" should fold to PushBool(true): {:?}",
+            p2.ops
+        );
+
+        let p3 = Compiler::compile_str(r#"$ | "zz" >= "aa""#).unwrap();
+        let mut all3 = Vec::new();
+        collect_all_ops(&p3.ops, &mut all3);
+        assert!(
+            all3.iter().any(|o| matches!(o, Opcode::PushBool(true))),
+            "\"zz\" >= \"aa\" should fold: {:?}",
+            p3.ops
+        );
+    }
+
+    #[test]
+    fn fusion_filter_last_opcode() {
+        use crate::compile::compiler::Compiler;
+        use crate::vm::Opcode;
+        let prog = Compiler::compile_str("$.books.filter(@.price > 10).last()").unwrap();
+        
+        
+        let has = prog.ops.iter().any(|o|
+            matches!(o, Opcode::CallMethod(c) if c.method == crate::builtins::BuiltinMethod::Last));
+        assert!(
+            has,
+            "expected CallMethod(Last) in unfused form: {:?}",
+            prog.ops
+        );
+    }
+
+    #[test]
+    fn fusion_filter_last_semantics() {
+        let doc = books();
+        let fused = vm_query("$.store.books.filter(@.price > 10).last()", &doc).unwrap();
+        let plain = vm_query("$.store.books.filter(@.price > 10)", &doc).unwrap();
+        let arr = plain.as_array().unwrap();
+        if arr.is_empty() {
+            assert!(fused.is_null());
+        } else {
+            assert_eq!(fused, arr[arr.len() - 1]);
+        }
+
+        let empty_doc: serde_json::Value = serde_json::from_str(r#"{"xs":[]}"#).unwrap();
+        let e = vm_query("$.xs.filter(@.price > 0).last()", &empty_doc).unwrap();
+        assert!(e.is_null());
+    }
+
+    #[test]
+    fn fusion_sort_sort_idempotent_collapse() {
+        use crate::builtins::BuiltinMethod;
+        use crate::compile::compiler::Compiler;
+        use crate::vm::Opcode;
+        let prog = Compiler::compile_str("$.books.sort().sort().first()").unwrap();
+        let sorts = prog
+            .ops
+            .iter()
+            .filter(|o| {
+                matches!(o,
+            Opcode::CallMethod(c) if c.method == BuiltinMethod::Sort)
+            })
+            .count();
+        
+        assert_eq!(sorts, 0, "sort().sort() should collapse: {:?}", prog.ops);
+    }
+
+    #[test]
+    fn fusion_unique_unique_collapse() {
+        use crate::builtins::BuiltinMethod;
+        use crate::compile::compiler::Compiler;
+        use crate::vm::Opcode;
+        let prog = Compiler::compile_str("$.items.unique().unique()").unwrap();
+        let uniqs = prog
+            .ops
+            .iter()
+            .filter(|o| {
+                matches!(o,
+            Opcode::CallMethod(c) if c.method == BuiltinMethod::Unique)
+            })
+            .count();
+        assert_eq!(
+            uniqs, 1,
+            "unique().unique() should collapse: {:?}",
+            prog.ops
+        );
+    }
+
+    #[test]
+    fn fusion_reverse_reverse_dropped() {
+        use crate::builtins::BuiltinMethod;
+        use crate::compile::compiler::Compiler;
+        use crate::vm::Opcode;
+        let prog = Compiler::compile_str("$.items.reverse().reverse()").unwrap();
+        let revs = prog
+            .ops
+            .iter()
+            .filter(|o| {
+                matches!(o,
+            Opcode::CallMethod(c) if c.method == BuiltinMethod::Reverse)
+            })
+            .count();
+        assert_eq!(
+            revs, 0,
+            "reverse().reverse() should be dropped: {:?}",
+            prog.ops
+        );
+    }
+
+    #[test]
+    fn fusion_idempotent_semantics() {
+        let doc = json!({"xs": [3, 1, 2, 1, 3]});
+        let a = vm_query("$.xs.unique().unique()", &doc).unwrap();
+        let b = vm_query("$.xs.unique()", &doc).unwrap();
+        assert_eq!(a, b);
+        let c = vm_query("$.xs.reverse().reverse()", &doc).unwrap();
+        assert_eq!(c, json!([3, 1, 2, 1, 3]));
+    }
+
+    #[test]
+    fn field_chain_ics_hit_across_shape_uniform_items() {
+        
+        
+        let doc = json!({
+            "xs": [
+                {"a": {"b": {"c": 1}}, "tag": "k"},
+                {"a": {"b": {"c": 2}}, "tag": "k"},
+                {"a": {"b": {"c": 3}}, "tag": "x"},
+                {"a": {"b": {"c": 4}}, "tag": "k"},
+            ]
+        });
+        let r = vm_query("$.xs.filter(tag == 'k').map(a.b.c)", &doc).unwrap();
+        assert_eq!(r, json!([1, 2, 4]));
+    }
+
+    #[test]
+    fn descendant_first_tree_walker_early_exit() {
+        
+        let doc = json!({
+            "id": 1,
+            "child": {"id": 2, "grand": {"id": 3}},
+            "siblings": [{"id": 4}, {"id": 5}]
+        });
+        let r = vm_query("$..id.first()", &doc).unwrap();
+        assert_eq!(r, json!(1));
+    }
+
+    #[test]
+    fn descendant_first_matches_collect_then_first() {
+        let doc = json!({
+            "a": {"k": "hit"},
+            "b": {"c": {"k": "nested"}},
+            "xs": [{"k": "in_array"}, {"k": "late"}]
+        });
+        let early = vm_query("$..k.first()", &doc).unwrap();
+        let all = vm_query("$..k", &doc).unwrap();
+        let first_of_all = all
+            .as_array()
+            .and_then(|a| a.first())
+            .cloned()
+            .unwrap_or(json!(null));
+        assert_eq!(early, first_of_all);
+    }
+
+    #[test]
+    fn descendant_first_missing_key_is_null() {
+        let doc = json!({"a": 1, "b": {"c": 2}});
+        let r = vm_query("$..missing.first()", &doc).unwrap();
+        assert!(r.is_null());
+    }
+
+    #[test]
+    fn descendant_quantifier_first_tree_walker() {
+        
+        
+        let doc = json!({"id": 1, "nested": {"id": 2}});
+        let r = vm_query("$..id!", &doc);
+        if let Ok(v) = r {
+            assert_eq!(v, json!(1));
+        }
+    }
+
+    #[test]
+    fn fusion_sort_by_first_emits_argextreme() {
+        
+        
+        use crate::builtins::BuiltinMethod;
+        use crate::compile::compiler::Compiler;
+        use crate::vm::Opcode;
+        let prog = Compiler::compile_str("$.books.sort(price).first()").unwrap();
+        let has_first = prog.ops.iter().any(|o| {
+            matches!(o,
+            Opcode::CallMethod(c) if c.method == BuiltinMethod::First)
+        });
+        assert!(
+            has_first,
+            "sort(k).first() should retain First call: {:?}",
+            prog.ops
+        );
+    }
+
+    #[test]
+    fn fusion_sort_by_last_emits_argextreme_max() {
+        use crate::builtins::BuiltinMethod;
+        use crate::compile::compiler::Compiler;
+        use crate::vm::Opcode;
+        let prog = Compiler::compile_str("$.books.sort(price).last()").unwrap();
+        let has_last = prog.ops.iter().any(|o| {
+            matches!(o,
+            Opcode::CallMethod(c) if c.method == BuiltinMethod::Last)
+        });
+        assert!(
+            has_last,
+            "sort(k).last() should retain Last call: {:?}",
+            prog.ops
+        );
+    }
+
+    #[test]
+    fn argextreme_sort_by_first_matches_naive() {
+        let doc = json!({"books": [
+            {"title": "a", "price": 9},
+            {"title": "b", "price": 3},
+            {"title": "c", "price": 5},
+            {"title": "d", "price": 3},
+        ]});
+        let r = vm_query("$.books.sort(price).first()", &doc).unwrap();
+        assert_eq!(r, json!({"title": "b", "price": 3}));
+    }
+
+    #[test]
+    fn argextreme_sort_by_last_matches_naive() {
+        let doc = json!({"books": [
+            {"title": "a", "price": 9},
+            {"title": "b", "price": 3},
+            {"title": "c", "price": 9},
+            {"title": "d", "price": 5},
+        ]});
+        let r = vm_query("$.books.sort(price).last()", &doc).unwrap();
+        assert_eq!(r, json!({"title": "c", "price": 9}));
+    }
+
+    #[test]
+    fn argextreme_empty_array_is_null() {
+        let doc = json!({"empty": []});
+        let r = vm_query("$.empty.sort(price).first()", &doc).unwrap();
+        assert!(r.is_null());
+        let r = vm_query("$.empty.sort(price).last()", &doc).unwrap();
+        assert!(r.is_null());
+    }
+
+    #[test]
+    fn argextreme_vm_path_matches_tree() {
+        use crate::compile::compiler::Compiler;
+        use crate::vm::VM;
+        let doc = json!({"xs": [
+            {"n": 2, "id": 1},
+            {"n": -1, "id": 2},
+            {"n": 3, "id": 3},
+            {"n": -1, "id": 4},
+        ]});
+        let prog = Compiler::compile_str("$.xs.sort(n).first()").unwrap();
+        let mut vm = VM::new();
+        let v = vm.run_str("$.xs.sort(n).first()", &doc).unwrap();
+        
+        assert_eq!(v, json!({"n": -1, "id": 2}));
+
+        let v = vm.run_str("$.xs.sort(n).last()", &doc).unwrap();
+        
+        assert_eq!(v, json!({"n": 3, "id": 3}));
+
+        
+        use crate::builtins::BuiltinMethod;
+        use crate::vm::Opcode;
+        let has_sort = prog.ops.iter().any(|o| {
+            matches!(o,
+            Opcode::CallMethod(c) if c.method == BuiltinMethod::Sort)
+        });
+        assert!(has_sort, "expected Sort in compiled program");
+    }
+
+    #[test]
+    fn fusion_sort_sum_drops_sort() {
+        use crate::builtins::BuiltinMethod;
+        use crate::compile::compiler::Compiler;
+        use crate::vm::Opcode;
+        let prog = Compiler::compile_str("$.books.sort().sum()").unwrap();
+        let has_sort = prog.ops.iter().any(|o| {
+            matches!(o,
+            Opcode::CallMethod(c) if c.method == BuiltinMethod::Sort)
+        });
+        assert!(!has_sort, "sort before sum should be strength-reduced away");
+    }
+
+    #[test]
+    fn fusion_reverse_max_drops_reverse() {
+        use crate::builtins::BuiltinMethod;
+        use crate::compile::compiler::Compiler;
+        use crate::vm::Opcode;
+        let prog = Compiler::compile_str("$.books.reverse().max()").unwrap();
+        let has_rev = prog.ops.iter().any(|o| {
+            matches!(o,
+            Opcode::CallMethod(c) if c.method == BuiltinMethod::Reverse)
+        });
+        assert!(
+            !has_rev,
+            "reverse before max should be strength-reduced away"
+        );
+    }
+
+    #[test]
+    fn fusion_reorder_aggregate_semantics() {
+        let doc = books();
+        
+        let a = vm_query("$.store.books.sort(price).min(price)", &doc).unwrap();
+        let b = vm_query("$.store.books.min(price)", &doc).unwrap();
+        assert_eq!(a, b);
+        let c = vm_query("$.store.books.reverse().max(price)", &doc).unwrap();
+        let d = vm_query("$.store.books.max(price)", &doc).unwrap();
+        assert_eq!(c, d);
+    }
+
+    #[test]
+    fn fusion_map_sum_semantics() {
+        let doc = books();
+        let r = vm_query("$.store.books.map(@.price).sum()", &doc).unwrap();
+        let plain = vm_query("$.store.books.sum(price)", &doc).unwrap();
+        assert_eq!(r, plain);
+    }
+
+    #[test]
+    fn fusion_map_avg_semantics() {
+        let doc = books();
+        let r = vm_query("$.store.books.map(@.price).avg()", &doc).unwrap();
+        let plain = vm_query("$.store.books.avg(price)", &doc).unwrap();
+        assert_eq!(r, plain);
+    }
+
+    #[test]
+    fn analysis_dedup_subprograms() {
+        use crate::plan::analysis::dedup_subprograms;
+        use crate::compile::compiler::Compiler;
+        
+        let prog = Compiler::compile_str("[$.a.b + 1, $.a.b + 1]").unwrap();
+        let deduped = dedup_subprograms(&prog);
+        
+        use crate::vm::Opcode;
+        use std::sync::Arc;
+        let arcs: Vec<Arc<crate::vm::Program>> = deduped
+            .ops
+            .iter()
+            .flat_map(|o| match o {
+                Opcode::MakeArr(progs) => {
+                    progs.iter().map(|(p, _)| Arc::clone(p)).collect::<Vec<_>>()
+                }
+                _ => vec![],
+            })
+            .collect();
+        assert_eq!(arcs.len(), 2);
+        assert!(
+            std::sync::Arc::ptr_eq(&arcs[0], &arcs[1]),
+            "identical sub-progs should share Arc"
+        );
+    }
+
+    #[test]
+    fn analysis_find_common_subexprs() {
+        use crate::plan::analysis::find_common_subexprs;
+        use crate::compile::compiler::Compiler;
+        let prog = Compiler::compile_str("[$.x.y, $.x.y, $.z]").unwrap();
+        let cs = find_common_subexprs(&prog);
+        assert!(
+            !cs.is_empty(),
+            "should find at least one repeated sub-program"
+        );
+    }
+
+    #[test]
+    fn method_const_fold_str_len() {
+        use crate::compile::compiler::Compiler;
+        use crate::vm::Opcode;
+        let prog = Compiler::compile_str("\"hello\".len()").unwrap();
+        assert!(matches!(prog.ops.as_ref(), [Opcode::PushInt(5)]));
+    }
+
+    #[test]
+    fn method_const_fold_str_upper() {
+        use crate::compile::compiler::Compiler;
+        use crate::vm::Opcode;
+        let prog = Compiler::compile_str("\"hi\".upper()").unwrap();
+        assert!(matches!(prog.ops.as_ref(), [Opcode::PushStr(s)] if s.as_ref() == "HI"));
+    }
+
+    #[test]
+    fn method_const_fold_arr_len() {
+        use crate::compile::compiler::Compiler;
+        use crate::vm::Opcode;
+        let prog = Compiler::compile_str("[1,2,3,4].len()").unwrap();
+        assert!(matches!(prog.ops.as_ref(), [Opcode::PushInt(4)]));
+    }
+
+    #[test]
+    fn analysis_expr_uses_ident() {
+        use crate::plan::analysis::expr_uses_ident;
+        use crate::parse::parser::parse;
+        let e = parse("x + 1").unwrap();
+        assert!(expr_uses_ident(&e, "x"));
+        assert!(!expr_uses_ident(&e, "y"));
+        let e = parse("let x = 10 in x + 1").unwrap();
+        assert!(!expr_uses_ident(&e, "x"), "inner let shadows");
+    }
+
+    #[test]
+    fn analysis_fold_kind_check_helper() {
+        use crate::plan::analysis::{fold_kind_check, VType};
+        use crate::parse::ast::KindType;
+        assert_eq!(
+            fold_kind_check(VType::Int, KindType::Number, false),
+            Some(true)
+        );
+        assert_eq!(
+            fold_kind_check(VType::Str, KindType::Number, false),
+            Some(false)
+        );
+        assert_eq!(
+            fold_kind_check(VType::Str, KindType::Str, true),
+            Some(false)
+        );
+        assert_eq!(fold_kind_check(VType::Unknown, KindType::Str, false), None);
+    }
+
+    
+    fn big_store() -> serde_json::Value {
+        
+        
+        json!({
+            "store": {
+                "books": [
+                    {"id": 1,  "title": "Dune",              "price": 12.99, "rating": 4.8, "genre": "sci-fi",   "tags": ["sci-fi","classic"],    "author": {"name": "Frank Herbert",  "born": 1920}, "pages": 688},
+                    {"id": 2,  "title": "Foundation",        "price":  9.99, "rating": 4.5, "genre": "sci-fi",   "tags": ["sci-fi","series"],     "author": {"name": "Isaac Asimov",   "born": 1920}, "pages": 255},
+                    {"id": 3,  "title": "Neuromancer",       "price": 11.50, "rating": 4.2, "genre": "cyberpunk","tags": ["sci-fi","cyberpunk"],  "author": {"name": "William Gibson", "born": 1948}, "pages": 271},
+                    {"id": 4,  "title": "1984",              "price":  7.99, "rating": 4.6, "genre": "dystopia", "tags": ["classic","dystopia"],  "author": {"name": "George Orwell",  "born": 1903}, "pages": 328},
+                    {"id": 5,  "title": "Brave New World",   "price":  8.50, "rating": 4.3, "genre": "dystopia", "tags": ["classic","dystopia"],  "author": {"name": "Aldous Huxley",  "born": 1894}, "pages": 311},
+                    {"id": 6,  "title": "Hyperion",          "price": 13.25, "rating": 4.7, "genre": "sci-fi",   "tags": ["sci-fi","epic"],       "author": {"name": "Dan Simmons",    "born": 1948}, "pages": 482},
+                    {"id": 7,  "title": "Snow Crash",        "price": 10.50, "rating": 4.1, "genre": "cyberpunk","tags": ["sci-fi","cyberpunk"],  "author": {"name": "Neal Stephenson","born": 1959}, "pages": 470},
+                    {"id": 8,  "title": "Fahrenheit 451",    "price":  6.99, "rating": 4.4, "genre": "dystopia", "tags": ["classic","dystopia"],  "author": {"name": "Ray Bradbury",   "born": 1920}, "pages": 249},
+                    {"id": 9,  "title": "Ender's Game",      "price":  8.75, "rating": 4.6, "genre": "sci-fi",   "tags": ["sci-fi","military"],   "author": {"name": "Orson Scott Card","born": 1951},"pages": 324},
+                    {"id": 10, "title": "The Left Hand",     "price":  9.25, "rating": 4.2, "genre": "sci-fi",   "tags": ["sci-fi","feminist"],   "author": {"name": "Ursula K. Le Guin","born":1929},"pages": 304},
+                    {"id": 11, "title": "A Scanner Darkly",  "price":  8.00, "rating": 4.0, "genre": "sci-fi",   "tags": ["sci-fi","philosophy"], "author": {"name": "Philip K. Dick", "born": 1928}, "pages": 280},
+                    {"id": 12, "title": "Gateway",           "price":  7.50, "rating": 4.1, "genre": "sci-fi",   "tags": ["sci-fi","classic"],    "author": {"name": "Frederik Pohl",  "born": 1919}, "pages": 313},
+                    {"id": 13, "title": "Stranger",          "price":  9.00, "rating": 4.3, "genre": "sci-fi",   "tags": ["sci-fi","classic"],    "author": {"name": "Robert Heinlein","born": 1907}, "pages": 438},
+                    {"id": 14, "title": "Rendezvous",        "price": 10.00, "rating": 4.5, "genre": "sci-fi",   "tags": ["sci-fi","classic"],    "author": {"name": "Arthur C. Clarke","born": 1917},"pages": 304},
+                    {"id": 15, "title": "Solaris",           "price":  8.25, "rating": 4.2, "genre": "sci-fi",   "tags": ["sci-fi","philosophy"], "author": {"name": "Stanisław Lem",  "born": 1921}, "pages": 204},
+                    {"id": 16, "title": "The Road",          "price":  9.75, "rating": 4.4, "genre": "dystopia", "tags": ["literary","dystopia"], "author": {"name": "Cormac McCarthy","born": 1933}, "pages": 287},
+                    {"id": 17, "title": "Never Let Me Go",   "price":  8.50, "rating": 4.3, "genre": "dystopia", "tags": ["literary","dystopia"], "author": {"name": "Kazuo Ishiguro", "born": 1954}, "pages": 288},
+                    {"id": 18, "title": "Station Eleven",    "price": 11.00, "rating": 4.5, "genre": "dystopia", "tags": ["literary","dystopia"], "author": {"name": "Emily St. John", "born": 1979}, "pages": 333},
+                    {"id": 19, "title": "The Martian",       "price": 12.00, "rating": 4.7, "genre": "sci-fi",   "tags": ["sci-fi","survival"],   "author": {"name": "Andy Weir",      "born": 1972}, "pages": 369},
+                    {"id": 20, "title": "Project Hail Mary", "price": 14.50, "rating": 4.9, "genre": "sci-fi",   "tags": ["sci-fi","survival"],   "author": {"name": "Andy Weir",      "born": 1972}, "pages": 496},
+                ]
+            }
+        })
+    }
+
+    #[test]
+    fn optimized_deep_filter_map_map_fusion() {
+        
+        
+        let doc = big_store();
+        let q = "$.store.books \
+                 .filter(price >= 8.0 and price <= 12.0 and rating >= 4.2) \
+                 .map({title: title, cost: price, score: rating}) \
+                 .map({label: title, gross: cost}) \
+                 .sort(gross)[0:3]";
+        let r = vm_query(q, &doc).unwrap();
+        let arr = r.as_array().unwrap();
+        assert_eq!(arr.len(), 3);
+        
+        let grosses: Vec<f64> = arr.iter().map(|v| v["gross"].as_f64().unwrap()).collect();
+        let mut sorted = grosses.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(grosses, sorted);
+        
+        assert!(grosses.iter().all(|&g| g >= 8.0 && g <= 12.0));
+    }
+
+    #[test]
+    fn optimized_filter_sum_fusion_with_kind_check() {
+        
+        
+        let doc = big_store();
+        let q = "$.store.books \
+                 .filter(price kind number and genre == \"sci-fi\") \
+                 .sum(price)";
+        let r = vm_query(q, &doc).unwrap();
+        let total = r.as_f64().unwrap();
+        
+        
+        let expected =
+            12.99 + 9.99 + 13.25 + 8.75 + 9.25 + 8.00 + 7.50 + 9.00 + 10.00 + 8.25 + 12.00 + 14.50;
+        assert!(
+            (total - expected).abs() < 0.001,
+            "got {} want {}",
+            total,
+            expected
+        );
+    }
+
+    #[test]
+    fn optimized_nested_let_with_cse_and_avg() {
+        
+        
+        let doc = big_store();
+        let q = "let sci = $.store.books.filter(genre == \"sci-fi\") in \
+                 {\
+                    count: sci.len(), \
+                    avg_price:  sci.avg(price), \
+                    avg_rating: sci.avg(rating), \
+                    top_rated:  sci.sort(rating).reverse()[0:3].map(title)\
+                 }";
+        let r = vm_query(q, &doc).unwrap();
+        assert_eq!(r["count"], json!(12));
+        assert!(r["avg_price"].as_f64().unwrap() > 8.0);
+        assert!(r["avg_rating"].as_f64().unwrap() > 4.0);
+        let top = r["top_rated"].as_array().unwrap();
+        assert_eq!(top.len(), 3);
+        
+        assert_eq!(top[0], json!("Project Hail Mary"));
+    }
+
+    #[test]
+    fn optimized_find_quantifier_fusion_short_circuit() {
+        
+        
+        let doc = big_store();
+        let q = "$.store.books.filter(rating > 4.5 and id == 19).first()";
+        let r = vm_query(q, &doc).unwrap();
+        assert_eq!(r["title"], json!("The Martian"));
+        assert_eq!(r["id"], json!(19));
+    }
+
+    #[test]
+    fn optimized_group_then_aggregate_complex_reshape() {
+        
+        
+        let doc = big_store();
+        let q = "$.store.books \
+                 .filter(rating >= 4.0) \
+                 .group_by(genre) \
+                 .entries() \
+                 .map({genre: @[0], count: @[1].len(), avg_price: @[1].avg(price)}) \
+                 .sort(avg_price) \
+                 .reverse()";
+        let r = vm_query(q, &doc).unwrap();
+        let arr = r.as_array().unwrap();
+        assert!(arr.len() >= 3); 
+        let genres: Vec<&str> = arr.iter().map(|v| v["genre"].as_str().unwrap()).collect();
+        
+        let mut u = genres.clone();
+        u.sort();
+        u.dedup();
+        assert_eq!(u.len(), genres.len());
+    }
+
+    #[test]
+    fn optimized_map_flatten_fusion_with_unique() {
+        
+        
+        let doc = big_store();
+        let q = "$.store.books.map(tags).flatten().unique().sort()";
+        let r = vm_query(q, &doc).unwrap();
+        let tags = r.as_array().unwrap();
+        
+        let strs: Vec<&str> = tags.iter().map(|v| v.as_str().unwrap()).collect();
+        let mut s = strs.clone();
+        s.sort();
+        s.dedup();
+        assert_eq!(s, strs);
+        
+        assert!(strs.contains(&"sci-fi"));
+        assert!(strs.contains(&"dystopia"));
+        assert!(strs.contains(&"cyberpunk"));
+    }
+
+    #[test]
+    fn optimized_filter_take_while_fusion() {
+        
+        
+        let doc = big_store();
+        
+        let q = "$.store.books.filter(price > 5.0).takewhile(price < 12.0).map(title)";
+        let r = vm_query(q, &doc).unwrap();
+        let titles = r.as_array().unwrap();
+        
+        
+        assert_eq!(titles.len(), 0);
+    }
+
+    #[test]
+    fn optimized_deep_chain_with_comprehension_and_fstring() {
+        
+        
+        let doc = big_store();
+        let q = "[f\"{b.title} (${b.price})\" \
+                 for b in $.store.books \
+                 if b.rating >= 4.5 and b.genre == \"sci-fi\" \
+                 and b.author.born >= 1940]";
+        let r = vm_query(q, &doc).unwrap();
+        let items = r.as_array().unwrap();
+        
+        assert!(items.len() >= 3);
+        for s in items {
+            let t = s.as_str().unwrap();
+            assert!(t.contains("$"));
+        }
+    }
+
+    #[test]
+    fn optimized_let_chained_pipelines_with_aggregation() {
+        
+        
+        let doc = big_store();
+        let q = "let books = $.store.books in \
+                 let cheap = books.filter(price < 10.0) in \
+                 let expensive = books.filter(price >= 10.0) in \
+                 {\
+                    total: books.len(), \
+                    cheap_count: cheap.len(), \
+                    expensive_count: expensive.len(), \
+                    cheap_avg: cheap.avg(price), \
+                    expensive_avg: expensive.avg(price), \
+                    delta: expensive.avg(price) - cheap.avg(price), \
+                    price_range: books.max(price) - books.min(price), \
+                    top_author: books.sort(rating).reverse()[0].author.name\
+                 }";
+        let r = vm_query(q, &doc).unwrap();
+        assert_eq!(r["total"], json!(20));
+        assert!(r["cheap_count"].as_i64().unwrap() > 0);
+        assert!(r["expensive_count"].as_i64().unwrap() > 0);
+        assert!(r["delta"].as_f64().unwrap() > 0.0);
+        assert!(r["price_range"].as_f64().unwrap() > 5.0);
+        
+        assert_eq!(r["top_author"], json!("Andy Weir"));
+    }
+
+    #[test]
+    fn optimized_const_fold_across_arithmetic_and_comparisons() {
+        
+        
+        let doc = big_store();
+        let q = "$.store.books \
+                 .filter((1 + 2) * 3 == 9 and not (5 < 3) and price > 11.0) \
+                 .map(title) \
+                 .sort()";
+        let r = vm_query(q, &doc).unwrap();
+        let titles: Vec<String> = r
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert!(titles.iter().any(|t| t == "Dune"));
+        assert!(titles.iter().any(|t| t == "Project Hail Mary"));
+    }
+
+    
+    #[test]
+    #[ignore]
+    fn bench_fusion_vs_naive() {
+        use crate::compile::compiler::PassConfig;
+        use crate::vm::VM;
+        use std::time::Instant;
+
+        
+        let mut books = Vec::with_capacity(2000);
+        let genres = ["sci-fi", "dystopia", "cyberpunk", "classic"];
+        for i in 0..2000 {
+            let g = genres[i % 4];
+            books.push(json!({
+                "id": i,
+                "title": format!("Book {}", i),
+                "price": (i % 50) as f64 + 5.0,
+                "rating": ((i * 7) % 50) as f64 / 10.0,
+                "genre": g,
+                "tags":  ["a","b","c","d"],
+                "author": {"name": format!("Author {}", i % 100), "born": 1900 + (i % 120)},
+            }));
+        }
+        let doc = json!({"store": {"books": books}});
+
+        let pipelines = &[
+            "$.store.books.filter(price > 20 and rating > 3.5).map({t: title, p: price}).map({label: t, cost: p}).sort(cost)[0:10]",
+            "$.store.books.filter(genre == \"sci-fi\").sum(price)",
+            "$.store.books.map(tags).flatten().unique().sort()",
+            "$.store.books.filter(price > 10).first()",
+            "$.store.books.group_by(genre).entries().map({g: @[0], n: @[1].len(), avg: @[1].avg(price)})",
+        ];
+
+        let iters = 50;
+        for q in pipelines {
+            
+            let mut vm = VM::new();
+            vm.set_pass_config(PassConfig::default());
+            let start = Instant::now();
+            for _ in 0..iters {
+                let _ = vm.run_str(q, &doc).unwrap();
+            }
+            let fused = start.elapsed();
+
+            
+            let mut vm = VM::new();
+            vm.set_pass_config(PassConfig::none());
+            let start = Instant::now();
+            for _ in 0..iters {
+                let _ = vm.run_str(q, &doc).unwrap();
+            }
+            let naive = start.elapsed();
+
+            let ratio = naive.as_secs_f64() / fused.as_secs_f64();
+            println!(
+                "[bench] iters={:<3} fused={:>8.2?} naive={:>8.2?}  speedup={:.2}x  q={}",
+                iters, fused, naive, ratio, q
+            );
+        }
+    }
+
+    #[test]
+    fn pass_config_cache_isolation() {
+        use crate::compile::compiler::PassConfig;
+        use crate::vm::VM;
+        let mut vm = VM::new();
+        let doc = big_store();
+        let q = "$.store.books.filter(price > 10).map(title).sort()";
+
+        
+        let r1 = vm.run_str(q, &doc).unwrap();
+        let (n1, _) = vm.cache_stats();
+        assert!(n1 >= 1);
+
+        
+        vm.set_pass_config(PassConfig::none());
+        let r2 = vm.run_str(q, &doc).unwrap();
+        let (n2, _) = vm.cache_stats();
+        assert_eq!(n2, n1 + 1, "separate cache entry per config");
+
+        
+        assert_eq!(r1, r2);
+    }
+
+    #[test]
+    fn lru_compile_cache_evicts_oldest() {
+        use crate::vm::VM;
+        let mut vm = VM::with_capacity(2, 16);
+        let doc = json!({"a": 1, "b": 2, "c": 3});
+        let _ = vm.run_str("$.a", &doc).unwrap();
+        let _ = vm.run_str("$.b", &doc).unwrap();
+        assert_eq!(vm.cache_stats().0, 2);
+        
+        let _ = vm.run_str("$.a", &doc).unwrap();
+        let _ = vm.run_str("$.c", &doc).unwrap();
+        assert_eq!(vm.cache_stats().0, 2, "cap enforced");
+        
+        let _ = vm.run_str("$.a", &doc).unwrap();
+        assert_eq!(vm.cache_stats().0, 2);
+        
+        let _ = vm.run_str("$.b", &doc).unwrap();
+        assert_eq!(vm.cache_stats().0, 2);
+    }
+
+    #[test]
+    fn optimized_equi_join_hash_probe() {
+        
+        let doc = json!({
+            "books": [
+                {"title": "Dune",       "author_name": "Frank Herbert"},
+                {"title": "Foundation", "author_name": "Isaac Asimov"},
+                {"title": "1984",       "author_name": "George Orwell"},
+                {"title": "Unknown",    "author_name": "No Match"},
+            ],
+            "authors": [
+                {"name": "Frank Herbert", "nationality": "US"},
+                {"name": "Isaac Asimov",  "nationality": "US"},
+                {"name": "George Orwell", "nationality": "UK"},
+            ]
+        });
+        let q = "$.books.equi_join($.authors, \"author_name\", \"name\")";
+        let r = vm_query(q, &doc).unwrap();
+        let rows = r.as_array().unwrap();
+        assert_eq!(rows.len(), 3); 
+        for row in rows {
+            assert!(row.get("title").is_some());
+            assert!(row.get("nationality").is_some());
+            assert!(row.get("name").is_some());
+        }
+    }
+
+    #[test]
+    fn optimized_pipeline_stress_many_stages() {
+        
+        
+        let doc = big_store();
+        let q = "$.store.books \
+                 .filter(rating >= 4.0) \
+                 .filter(price < 15.0) \
+                 .map({t: title, p: price, r: rating, g: genre, b: author.born}) \
+                 .filter(b >= 1900) \
+                 .map({title: t, price: p, score: r * 20, genre: g, era: b}) \
+                 .filter(score >= 85) \
+                 .sort(price) \
+                 .reverse() \
+                 .map({title, price}) \
+                 [0:5]";
+        let r = vm_query(q, &doc).unwrap();
+        let arr = r.as_array().unwrap();
+        assert_eq!(arr.len(), 5);
+        
+        let mut last = f64::MAX;
+        for it in arr {
+            assert!(it.get("title").is_some());
+            let p = it["price"].as_f64().unwrap();
+            assert!(p <= last, "not sorted descending: {} > {}", p, last);
+            last = p;
+        }
+    }
+
+    
+    #[test]
+    fn pipe_alias_long() {
+        let doc = books();
+        let a = vm_query("$.store.books | count()", &doc).unwrap();
+        let b = vm_query("$.store.books |> count()", &doc).unwrap();
+        assert_eq!(a, b);
+        assert_eq!(a, json!(4));
+    }
+
+    #[test]
+    fn coalesce_double_q() {
+        let doc = json!({"a": null, "b": 5});
+        let a = vm_query("$.a ?| $.b", &doc).unwrap();
+        let b = vm_query("$.a ?? $.b", &doc).unwrap();
+        assert_eq!(a, b);
+        assert_eq!(a, json!(5));
+    }
+
+    #[test]
+    fn coalesce_double_q_chain() {
+        let doc = json!({"a": null, "b": null, "c": 7});
+        let r = vm_query("$.a ?? $.b ?? $.c", &doc).unwrap();
+        assert_eq!(r, json!(7));
+    }
+
+    #[test]
+    fn is_kind_alias() {
+        let doc = json!({"x": 42});
+        let a = vm_query("$.x kind number", &doc).unwrap();
+        let b = vm_query("$.x is number", &doc).unwrap();
+        assert_eq!(a, b);
+        assert_eq!(a, json!(true));
+    }
+
+    #[test]
+    fn is_not_kind_alias() {
+        let doc = json!({"x": "hello"});
+        let a = vm_query("$.x kind not number", &doc).unwrap();
+        let b = vm_query("$.x is not number", &doc).unwrap();
+        assert_eq!(a, b);
+        assert_eq!(a, json!(true));
+    }
+
+    #[test]
+    fn multi_binding_let() {
+        let doc = books();
+        let r = vm_query("let a = 2, b = 3 in a + b", &doc).unwrap();
+        assert_eq!(r, json!(5));
+    }
+
+    #[test]
+    fn multi_binding_let_nested_ref() {
+        let doc = books();
+        
+        let r = vm_query("let a = 10, b = a * 2 in b", &doc).unwrap();
+        assert_eq!(r, json!(20));
+    }
+
+    #[test]
+    fn arrow_lambda_single_param() {
+        let doc = books();
+        let r = vm_query("$.store.books.map(b => b.price)", &doc).unwrap();
+        let arr = r.as_array().unwrap();
+        assert_eq!(arr.len(), 4);
+        assert_eq!(arr[0], json!(12.99));
+    }
+
+    #[test]
+    fn arrow_lambda_paren_params() {
+        let doc = json!({"nums": [1,2,3,4]});
+        let r = vm_query("$.nums.map((x) => x * 2)", &doc).unwrap();
+        assert_eq!(r, json!([2, 4, 6, 8]));
+    }
+
+    #[test]
+    fn arrow_lambda_multi_param() {
+        
+        
+        let doc = json!({"nums": [3, 1, 4, 1, 5, 9, 2, 6]});
+        let r = vm_query("$.nums.sort((a, b) => a < b)", &doc).unwrap();
+        assert_eq!(r, json!([1, 1, 2, 3, 4, 5, 6, 9]));
+    }
+
+    #[test]
+    fn cast_int_from_str() {
+        let doc = json!({"s": "42"});
+        let r = vm_query("$.s as int", &doc).unwrap();
+        assert_eq!(r, json!(42));
+    }
+
+    #[test]
+    fn cast_float_from_int() {
+        let doc = json!({"n": 3});
+        let r = vm_query("$.n as float", &doc).unwrap();
+        assert_eq!(r, json!(3.0));
+    }
+
+    #[test]
+    fn cast_str_from_number() {
+        let doc = json!({"n": 42});
+        let r = vm_query("$.n as string", &doc).unwrap();
+        assert_eq!(r, json!("42"));
+    }
+
+    #[test]
+    fn cast_bool_from_int() {
+        let doc = json!({"n": 1});
+        let r = vm_query("$.n as bool", &doc).unwrap();
+        assert_eq!(r, json!(true));
+    }
+
+    #[test]
+    fn cast_chain_with_arithmetic() {
+        let doc = json!({"s": "10"});
+        
+        let r = vm_query("$.s as int * 2", &doc).unwrap();
+        assert_eq!(r, json!(20));
+    }
+
+    #[test]
+    fn dyn_field_string_key() {
+        let doc = json!({"user": {"name": "Alice", "age": 30}});
+        
+        let r = vm_query("let k = \"name\" in $.user.{k}", &doc).unwrap();
+        assert_eq!(r, json!("Alice"));
+    }
+
+    #[test]
+    fn dyn_field_int_index() {
+        let doc = json!({"items": [10, 20, 30]});
+        let r = vm_query("let i = 1 in $.items.{i}", &doc).unwrap();
+        assert_eq!(r, json!(20));
+    }
+
+    #[test]
+    fn dyn_field_computed_key() {
+        let doc = json!({"prefix_name": "hello", "key": "name"});
+        let r = vm_query("$.{\"prefix_\" + $.key}", &doc).unwrap();
+        assert_eq!(r, json!("hello"));
+    }
+
+    #[test]
+    fn dyn_field_equivalent_to_bracket() {
+        let doc = json!({"user": {"name": "Bob"}});
+        let a = vm_query("$.user[\"name\"]", &doc).unwrap();
+        let b = vm_query("$.user.{\"name\"}", &doc).unwrap();
+        assert_eq!(a, b);
+    }
+
+    
+    #[test]
+    fn map_shape_basic() {
+        let doc = books();
+        let a = vm_query("$.store.books.map({title})", &doc).unwrap();
+        let b = vm_query("$.store.books[*] => {title}", &doc).unwrap();
+        assert_eq!(a, b);
+        assert_eq!(a.as_array().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn map_shape_with_guard() {
+        let doc = books();
+        let a = vm_query("$.store.books.filter(price > 10).map({title, price})", &doc).unwrap();
+        let b = vm_query("$.store.books[* if price > 10] => {title, price}", &doc).unwrap();
+        assert_eq!(a, b);
+        let arr = b.as_array().unwrap();
+        assert!(arr.len() >= 2);
+        for it in arr {
+            assert!(it.get("title").is_some());
+            assert!(it.get("price").unwrap().as_f64().unwrap() > 10.0);
+        }
+    }
+
+    #[test]
+    fn map_shape_nested() {
+        let doc = json!({
+            "groups": [
+                {"name": "A", "items": [{"n": 1}, {"n": 2}]},
+                {"name": "B", "items": [{"n": 3}]},
+            ]
+        });
+        let r = vm_query("$.groups[*] => {name, ns: items[*] => n}", &doc).unwrap();
+        assert_eq!(
+            r,
+            json!([
+                {"name": "A", "ns": [1, 2]},
+                {"name": "B", "ns": [3]},
+            ])
+        );
+    }
+
+    #[test]
+    fn map_shape_projection_subset() {
+        let doc = books();
+        let r = vm_query("$.store.books[*] => {title, price}", &doc).unwrap();
+        let arr = r.as_array().unwrap();
+        assert_eq!(arr.len(), 4);
+        for it in arr {
+            let obj = it.as_object().unwrap();
+            assert_eq!(obj.len(), 2);
+            assert!(obj.contains_key("title"));
+            assert!(obj.contains_key("price"));
+        }
+    }
+
+    
+    #[test]
+    fn when_field_included_true() {
+        let doc = json!({"name": "Alice", "email": "a@x.com", "verified": true});
+        let r = vm_query("{name, email: $.email when $.verified}", &doc).unwrap();
+        assert_eq!(r, json!({"name": "Alice", "email": "a@x.com"}));
+    }
+
+    #[test]
+    fn when_field_excluded_false() {
+        let doc = json!({"name": "Alice", "email": "a@x.com", "verified": false});
+        let r = vm_query("{name, email: $.email when $.verified}", &doc).unwrap();
+        assert_eq!(r, json!({"name": "Alice"}));
+    }
+
+    #[test]
+    fn when_field_excluded_null_guard() {
+        let doc = json!({"name": "Bob"});
+        let r = vm_query("{name, email: \"default\" when $.verified}", &doc).unwrap();
+        assert_eq!(r, json!({"name": "Bob"}));
+    }
+
+    #[test]
+    fn when_field_in_nested_shape() {
+        let doc = json!({
+            "users": [
+                {"name": "A", "active": true,  "role": "admin"},
+                {"name": "B", "active": false, "role": "user"},
+            ]
+        });
+        
+        let r = vm_query("$.users[*] => {name, role: role when active}", &doc).unwrap();
+        assert_eq!(
+            r,
+            json!([
+                {"name": "A", "role": "admin"},
+                {"name": "B"},
+            ])
+        );
+    }
+
+    #[test]
+    fn when_field_guard_uses_other_fields() {
+        let doc = json!({"score": 85, "threshold": 70});
+        let r = vm_query("{grade: \"pass\" when score > threshold}", &doc).unwrap();
+        assert_eq!(r, json!({"grade": "pass"}));
+    }
+
+    
+    #[test]
+    fn spread_deep_merges_nested_objects() {
+        let doc = json!({
+            "base": {"x": {"p": 1, "q": 2}, "y": 10},
+            "over": {"x": {"q": 99, "r": 3}, "z": 20},
+        });
+        
+        let r = vm_query("{...**$.base, ...**$.over}", &doc).unwrap();
+        assert_eq!(
+            r,
+            json!({
+                "x": {"p": 1, "q": 99, "r": 3},
+                "y": 10,
+                "z": 20,
+            })
+        );
+    }
+
+    #[test]
+    fn spread_deep_vs_shallow() {
+        let doc = json!({
+            "base": {"x": {"p": 1}},
+            "over": {"x": {"q": 2}},
+        });
+        let shallow = vm_query("{...$.base, ...$.over}", &doc).unwrap();
+        let deep = vm_query("{...**$.base, ...**$.over}", &doc).unwrap();
+        
+        assert_eq!(shallow, json!({"x": {"q": 2}}));
+        assert_eq!(deep, json!({"x": {"p": 1, "q": 2}}));
+    }
+
+    #[test]
+    fn spread_deep_concatenates_arrays() {
+        let doc = json!({
+            "a": {"tags": ["one", "two"]},
+            "b": {"tags": ["three"]},
+        });
+        let r = vm_query("{...**$.a, ...**$.b}", &doc).unwrap();
+        assert_eq!(r, json!({"tags": ["one", "two", "three"]}));
+    }
+
+    #[test]
+    fn spread_deep_scalar_rhs_wins() {
+        let doc = json!({
+            "a": {"name": "Alice", "info": {"nested": 1}},
+            "b": {"name": "Bob"},
+        });
+        let r = vm_query("{...**$.a, ...**$.b}", &doc).unwrap();
+        assert_eq!(r, json!({"name": "Bob", "info": {"nested": 1}}));
+    }
+
+
+    
+    fn saas() -> serde_json::Value {
+        json!({
+            "org": "acme",
+            "teams": [
+                {
+                    "name": "platform",
+                    "members": [
+                        {"email": "a@acme.io", "role": "lead"},
+                        {"email": "b@acme.io", "role": "eng"}
+                    ],
+                    "projects": [
+                        {"id": 1, "name": "api",     "tasks": [{"id": "t1", "status": "open"}, {"id": "t2", "status": "done"}]},
+                        {"id": 2, "name": "runtime", "tasks": [{"id": "t3", "status": "open"}]}
+                    ]
+                },
+                {
+                    "name": "growth",
+                    "members": [
+                        {"email": "c@acme.io", "role": "lead"},
+                        {"email": "a@acme.io", "role": "eng"}
+                    ],
+                    "projects": [
+                        {"id": 3, "name": "funnel", "tasks": []}
+                    ]
+                }
+            ],
+            "billing": {
+                "invoices": [
+                    {"email": "acme-finance@acme.io", "total": 100}
+                ]
+            }
+        })
+    }
+
+    #[test]
+    fn tier1_find_alias() {
+        let doc = books();
+        let r = vm_query(r#"$.store.books.find(price > 10).map(title)"#, &doc).unwrap();
+        assert_eq!(r, json!(["Dune", "Neuromancer"]));
+    }
+
+    #[test]
+    fn tier1_find_all_alias() {
+        let doc = books();
+        let r = vm_query(r#"$.store.books.find_all(rating > 4.5).map(title)"#, &doc).unwrap();
+        let titles = r.as_array().unwrap();
+        assert!(titles.contains(&json!("Dune")));
+        assert!(titles.contains(&json!("1984")));
+    }
+
+    #[test]
+    fn tier1_unique_by_lambda() {
+        let doc = saas();
+        let r = vm_query(
+            r#"$.teams.flat_map(lambda t: t.members).unique_by(lambda m: m.email).map(email)"#,
+            &doc,
+        )
+        .unwrap();
+        let emails = r.as_array().unwrap();
+        assert_eq!(emails.len(), 3);
+        assert!(emails.contains(&json!("a@acme.io")));
+        assert!(emails.contains(&json!("b@acme.io")));
+        assert!(emails.contains(&json!("c@acme.io")));
+    }
+
+    #[test]
+    fn tier1_collect_scalar() {
+        let doc = json!({"x": 42});
+        let r = vm_query(r#"$.x.collect()"#, &doc).unwrap();
+        assert_eq!(r, json!([42]));
+    }
+
+    #[test]
+    fn tier1_collect_array_identity() {
+        let doc = json!({"xs": [1,2,3]});
+        let r = vm_query(r#"$.xs.collect()"#, &doc).unwrap();
+        assert_eq!(r, json!([1, 2, 3]));
+    }
+
+    #[test]
+    fn tier1_collect_null_to_empty() {
+        let doc = json!({"x": null});
+        let r = vm_query(r#"$.x.collect()"#, &doc).unwrap();
+        assert_eq!(r, json!([]));
+    }
+
+    #[test]
+    fn tier1_deep_shape_email_keys() {
+        let doc = saas();
+        
+        let r = vm_query(r#"$.deep_shape({email})"#, &doc).unwrap();
+        let arr = r.as_array().unwrap();
+        
+        assert_eq!(arr.len(), 5);
+    }
+
+    #[test]
+    fn tier1_deep_like_role_lead() {
+        let doc = saas();
+        let r = vm_query(r#"$.deep_like({role: "lead"})"#, &doc).unwrap();
+        let arr = r.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        for item in arr {
+            assert_eq!(item.get("role").unwrap(), &json!("lead"));
+        }
+    }
+
+    #[test]
+    fn tier1_pick_ident_keys() {
+        let doc = json!({"user": {"name": "Alice", "age": 30, "score": 85}});
+        let r = vm_query(r#"$.user.pick(name, age)"#, &doc).unwrap();
+        assert_eq!(r, json!({"name": "Alice", "age": 30}));
+    }
+
+    #[test]
+    fn tier1_pick_alias() {
+        let doc = json!({"user": {"name": "Alice", "age": 30}});
+        let r = vm_query(r#"$.user.pick(name, years: age)"#, &doc).unwrap();
+        assert_eq!(r, json!({"name": "Alice", "years": 30}));
+    }
+
+    #[test]
+    fn tier1_pick_over_array() {
+        let doc = saas();
+        let r = vm_query(r#"$.teams[0].members.pick(email)"#, &doc).unwrap();
+        assert_eq!(r, json!([{"email": "a@acme.io"}, {"email": "b@acme.io"}]));
+    }
+
+    #[test]
+    fn tier1_pick_alias_over_array() {
+        let doc = saas();
+        let r = vm_query(r#"$.teams[0].members.pick(addr: email, role)"#, &doc).unwrap();
+        assert_eq!(
+            r,
+            json!([
+                {"addr": "a@acme.io", "role": "lead"},
+                {"addr": "b@acme.io", "role": "eng"}
+            ])
+        );
+    }
+
+    #[test]
+    fn tier1_deep_find_status_open() {
+        let doc = saas();
+        let r = vm_query(r#"$.deep_find(@ kind object and status == "open")"#, &doc).unwrap();
+        let arr = r.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+    }
+
+    #[test]
+    fn tier1_dotdot_find_sugar() {
+        let doc = saas();
+        let r = vm_query(r#"$..find(@ kind object and status == "open")"#, &doc).unwrap();
+        let arr = r.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+    }
+
+    #[test]
+    fn tier1_dotdot_shape_sugar() {
+        let doc = saas();
+        let r = vm_query(r#"$..shape({email})"#, &doc).unwrap();
+        let arr = r.as_array().unwrap();
+        assert_eq!(arr.len(), 5);
+    }
+
+    #[test]
+    fn tier1_dotdot_like_sugar() {
+        let doc = saas();
+        let r = vm_query(r#"$..like({role: "lead"})"#, &doc).unwrap();
+        let arr = r.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+    }
+
+    
+    #[test]
+    fn tier1_chain_set_field() {
+        let doc = json!({"user": {"name": "Alice", "age": 30}});
+        let r = vm_query(r#"$.user.name.set("Bob")"#, &doc).unwrap();
+        assert_eq!(r, json!({"user": {"name": "Bob", "age": 30}}));
+    }
+
+    #[test]
+    fn tier1_chain_set_deep() {
+        let doc = saas();
+        let r = vm_query(r#"$.teams[0].projects[0].name.set("API")"#, &doc).unwrap();
+        assert_eq!(
+            r.pointer("/teams/0/projects/0/name").unwrap(),
+            &json!("API")
+        );
+        
+        assert_eq!(
+            r.pointer("/teams/0/projects/1/name").unwrap(),
+            &json!("runtime")
+        );
+        assert_eq!(r.pointer("/org").unwrap(), &json!("acme"));
+    }
+
+    #[test]
+    fn tier1_chain_modify_using_current() {
+        let doc = json!({"counts": {"n": 5}});
+        let r = vm_query(r#"$.counts.n.modify(@ * 2)"#, &doc).unwrap();
+        assert_eq!(r, json!({"counts": {"n": 10}}));
+    }
+
+    #[test]
+    fn tier1_chain_delete_field() {
+        let doc = json!({"user": {"name": "Alice", "age": 30}});
+        let r = vm_query(r#"$.user.age.delete()"#, &doc).unwrap();
+        assert_eq!(r, json!({"user": {"name": "Alice"}}));
+    }
+
+    #[test]
+    fn tier1_chain_unset_key() {
+        let doc = json!({"user": {"name": "Alice", "age": 30}});
+        let r = vm_query(r#"$.user.unset("age")"#, &doc).unwrap();
+        assert_eq!(r, json!({"user": {"name": "Alice"}}));
+    }
+
+    #[test]
+    fn tier1_chain_set_subtree() {
+        let doc = json!({"a": {"b": {"c": 1}}});
+        let r = vm_query(r#"$.a.b.set({x: 42})"#, &doc).unwrap();
+        assert_eq!(r, json!({"a": {"b": {"x": 42}}}));
+    }
+
+    #[test]
+    fn tier1_chain_descendant_set() {
+        let doc = saas();
+        
+        let r = vm_query(r#"$..status.set("closed")"#, &doc).unwrap();
+        let statuses: Vec<&serde_json::Value> = r
+            .pointer("/teams/0/projects/0/tasks")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t.get("status").unwrap())
+            .collect();
+        assert!(statuses.iter().all(|s| *s == &json!("closed")));
+    }
+
+    #[test]
+    fn tier1_chain_descendant_delete() {
+        let doc = json!({"a": {"id": 1, "b": {"id": 2, "c": {"id": 3}}}});
+        let r = vm_query(r#"$..id.delete()"#, &doc).unwrap();
+        assert_eq!(r, json!({"a": {"b": {"c": {}}}}));
+    }
+
+    #[test]
+    fn tier1_chain_dyn_index() {
+        let doc = json!({"xs": [10, 20, 30, 40], "i": 2});
+        let r = vm_query(r#"$.xs[$.i].set(99)"#, &doc).unwrap();
+        assert_eq!(r.pointer("/xs").unwrap(), &json!([10, 20, 99, 40]));
+    }
+
+    #[test]
+    fn tier1_chain_merge() {
+        let doc = json!({"config": {"host": "a", "port": 80}});
+        let r = vm_query(r#"$.config.merge({port: 443, tls: true})"#, &doc).unwrap();
+        assert_eq!(
+            r,
+            json!({"config": {"host": "a", "port": 443, "tls": true}})
+        );
+    }
+
+    #[test]
+    fn tier1_chain_deep_merge() {
+        let doc = json!({"a": {"b": {"x": 1}}});
+        let r = vm_query(r#"$.a.deep_merge({b: {y: 2}})"#, &doc).unwrap();
+        assert_eq!(r, json!({"a": {"b": {"x": 1, "y": 2}}}));
+    }
+
+    #[test]
+    fn tier1_chain_modify_lambda() {
+        let doc = json!({"counts": {"n": 5}});
+        let r = vm_query(r#"$.counts.n.modify(lambda x: x * 3)"#, &doc).unwrap();
+        assert_eq!(r, json!({"counts": {"n": 15}}));
+    }
+
+    #[test]
+    fn tier1_non_root_set_is_method_call() {
+        
+        let doc = json!({"x": 1});
+        let r = vm_query(r#"$.x | set(99)"#, &doc).unwrap();
+        assert_eq!(r, json!(99));
+    }
+
+    #[test]
+    fn tier1_descendant_still_works() {
+        
+        let doc = books();
+        let r = vm_query("$..title", &doc).unwrap();
+        let titles = r.as_array().unwrap();
+        assert!(titles.contains(&json!("Dune")));
+    }
+
+
+    
+    #[test]
+    fn range_one_arg() {
+        let doc = json!({});
+        assert_eq!(vm_query("range(5)", &doc).unwrap(), json!([0, 1, 2, 3, 4]));
+    }
+
+    #[test]
+    fn range_two_args() {
+        let doc = json!({});
+        assert_eq!(vm_query("range(2, 5)", &doc).unwrap(), json!([2, 3, 4]));
+    }
+
+    #[test]
+    fn range_three_args_positive_step() {
+        let doc = json!({});
+        assert_eq!(
+            vm_query("range(0, 10, 2)", &doc).unwrap(),
+            json!([0, 2, 4, 6, 8])
+        );
+    }
+
+    #[test]
+    fn range_three_args_negative_step() {
+        let doc = json!({});
+        assert_eq!(
+            vm_query("range(10, 0, -2)", &doc).unwrap(),
+            json!([10, 8, 6, 4, 2])
+        );
+    }
+
+    #[test]
+    fn range_empty_when_step_wrong_direction() {
+        let doc = json!({});
+        assert_eq!(vm_query("range(5, 0, 1)", &doc).unwrap(), json!([]));
+        assert_eq!(vm_query("range(0, 5, -1)", &doc).unwrap(), json!([]));
+    }
+
+    #[test]
+    fn range_zero_step_empty() {
+        let doc = json!({});
+        assert_eq!(vm_query("range(0, 5, 0)", &doc).unwrap(), json!([]));
+    }
+
+    #[test]
+    fn ceil_floor_round_floats() {
+        let doc = json!({"x": 3.3, "y": 3.7, "z": 3.5, "n": -2.4});
+        assert_eq!(vm_query("$.x.ceil()", &doc).unwrap(), json!(4));
+        assert_eq!(vm_query("$.x.floor()", &doc).unwrap(), json!(3));
+        assert_eq!(vm_query("$.y.floor()", &doc).unwrap(), json!(3));
+        assert_eq!(vm_query("$.y.round()", &doc).unwrap(), json!(4));
+        assert_eq!(vm_query("$.z.round()", &doc).unwrap(), json!(4));
+        assert_eq!(vm_query("$.n.ceil()", &doc).unwrap(), json!(-2));
+        assert_eq!(vm_query("$.n.floor()", &doc).unwrap(), json!(-3));
+    }
+
+    #[test]
+    fn ceil_floor_round_int_identity() {
+        let doc = json!({"x": 42});
+        assert_eq!(vm_query("$.x.ceil()", &doc).unwrap(), json!(42));
+        assert_eq!(vm_query("$.x.floor()", &doc).unwrap(), json!(42));
+        assert_eq!(vm_query("$.x.round()", &doc).unwrap(), json!(42));
+    }
+
+    #[test]
+    fn abs_number() {
+        let doc = json!({"a": -3.5, "b": 7});
+        assert_eq!(vm_query("$.a.abs()", &doc).unwrap(), json!(3.5));
+        assert_eq!(vm_query("$.b.abs()", &doc).unwrap(), json!(7));
+    }
+
+    #[test]
+    fn range_composes_with_map_sum() {
+        let doc = json!({});
+        
+        assert_eq!(vm_query("range(1, 10).sum()", &doc).unwrap(), json!(45));
+    }
+}
