@@ -45,11 +45,148 @@ impl From<pest::error::Error<Rule>> for ParseError {
 
 /// Parse a Jetro query string into an `Expr` AST. This is the primary public
 /// entry point; all other `parse_*` functions are internal helpers.
+///
+/// In addition to grammar-level parsing, this entry point runs post-parse
+/// semantic validation passes (currently or-pattern linearity for `match`
+/// expressions) so callers see structural errors before the expression
+/// reaches the compiler.
 pub fn parse(input: &str) -> Result<Expr, ParseError> {
     let mut pairs = V2Parser::parse(Rule::program, input)?;
     let program = pairs.next().unwrap();
     let expr_pair = program.into_inner().next().unwrap();
-    Ok(parse_expr(expr_pair))
+    let expr = parse_expr(expr_pair);
+    validate_pattern_linearity(&expr)?;
+    Ok(expr)
+}
+
+/// Walk the `Expr` tree and validate that every `match` arm's pattern
+/// satisfies the linearity rule for or-patterns: each alternative inside
+/// an `Or` must bind exactly the same set of variable names. This rules
+/// out arms whose body cannot consistently reference a captured value
+/// (e.g. `{a: x} | {b: y} -> x` would be ambiguous).
+fn validate_pattern_linearity(expr: &Expr) -> Result<(), ParseError> {
+    use std::collections::BTreeSet;
+
+    fn collect_binds(pat: &Pat, out: &mut BTreeSet<String>) {
+        match pat {
+            Pat::Wild | Pat::Lit(_) => {}
+            Pat::Bind(name) => {
+                out.insert(name.clone());
+            }
+            Pat::Kind { name, .. } => {
+                if let Some(n) = name.as_deref() {
+                    out.insert(n.to_string());
+                }
+            }
+            Pat::Or(alts) => {
+                for alt in alts {
+                    collect_binds(alt, out);
+                }
+            }
+            Pat::Obj { fields, .. } => {
+                for (_, sub) in fields {
+                    collect_binds(sub, out);
+                }
+            }
+            Pat::Arr { elems, rest } => {
+                for sub in elems {
+                    collect_binds(sub, out);
+                }
+                if let Some(Some(name)) = rest {
+                    out.insert(name.clone());
+                }
+            }
+        }
+    }
+
+    fn walk_pat(pat: &Pat) -> Result<(), ParseError> {
+        if let Pat::Or(alts) = pat {
+            let mut first: Option<BTreeSet<String>> = None;
+            for alt in alts {
+                let mut names = BTreeSet::new();
+                collect_binds(alt, &mut names);
+                match &first {
+                    None => first = Some(names),
+                    Some(existing) if existing == &names => {}
+                    Some(existing) => {
+                        return Err(ParseError(format!(
+                            "or-pattern arms must bind the same variables; \
+                             got {{{}}} vs {{{}}}",
+                            existing.iter().cloned().collect::<Vec<_>>().join(", "),
+                            names.iter().cloned().collect::<Vec<_>>().join(", "),
+                        )));
+                    }
+                }
+            }
+        }
+        match pat {
+            Pat::Wild | Pat::Lit(_) | Pat::Bind(_) | Pat::Kind { .. } => {}
+            Pat::Or(alts) => {
+                for alt in alts {
+                    walk_pat(alt)?;
+                }
+            }
+            Pat::Obj { fields, .. } => {
+                for (_, sub) in fields {
+                    walk_pat(sub)?;
+                }
+            }
+            Pat::Arr { elems, .. } => {
+                for sub in elems {
+                    walk_pat(sub)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn walk(e: &Expr) -> Result<(), ParseError> {
+        match e {
+            Expr::Match { scrutinee, arms } => {
+                walk(scrutinee)?;
+                for arm in arms {
+                    walk_pat(&arm.pat)?;
+                    if let Some(g) = arm.guard.as_ref() {
+                        walk(g)?;
+                    }
+                    walk(&arm.body)?;
+                }
+            }
+            Expr::Chain(base, _) => walk(base)?,
+            Expr::BinOp(l, _, r) | Expr::Coalesce(l, r) => {
+                walk(l)?;
+                walk(r)?;
+            }
+            Expr::UnaryNeg(e) | Expr::Not(e) | Expr::Cast { expr: e, .. } => walk(e)?,
+            Expr::Kind { expr, .. } => walk(expr)?,
+            Expr::Object(_)
+            | Expr::Array(_)
+            | Expr::Pipeline { .. }
+            | Expr::ListComp { .. }
+            | Expr::DictComp { .. }
+            | Expr::SetComp { .. }
+            | Expr::GenComp { .. }
+            | Expr::Lambda { .. }
+            | Expr::Let { .. }
+            | Expr::IfElse { .. }
+            | Expr::Try { .. }
+            | Expr::GlobalCall { .. }
+            | Expr::Patch { .. }
+            | Expr::FString(_)
+            | Expr::Null
+            | Expr::Bool(_)
+            | Expr::Int(_)
+            | Expr::Float(_)
+            | Expr::Str(_)
+            | Expr::Root
+            | Expr::Current
+            | Expr::Ident(_)
+            | Expr::DeleteMark => {}
+        }
+        Ok(())
+    }
+
+    walk(expr)
 }
 
 

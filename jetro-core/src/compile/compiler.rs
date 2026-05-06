@@ -14,7 +14,7 @@ use crate::data::context::EvalError;
 use crate::vm::{
     Opcode, Program, CompiledCall, CompiledObjEntry, KvStep, CompiledFSPart,
     BindObjSpec, CompiledPipeStep, CompSpec, DictCompSpec,
-    CompiledMatch, CompiledMatchArm, CompiledPatch, CompiledPatchOp, CompiledPatchVal, CompiledPathStep,
+    CompiledMatch, CompiledPatch, CompiledPatchOp, CompiledPatchVal, CompiledPathStep, MatchOp, MatchSlot,
     fresh_ics, disable_opcode_fusion,
 };
 
@@ -602,22 +602,8 @@ impl Compiler {
             }
 
             Expr::Match { scrutinee, arms } => {
-                let scrutinee_prog = Arc::new(Self::compile_sub(scrutinee, ctx));
-                let compiled_arms: Vec<CompiledMatchArm> = arms
-                    .iter()
-                    .map(|arm| CompiledMatchArm {
-                        pat: arm.pat.clone(),
-                        guard: arm
-                            .guard
-                            .as_ref()
-                            .map(|g| Arc::new(Self::compile_sub(g, ctx))),
-                        body: Arc::new(Self::compile_sub(&arm.body, ctx)),
-                    })
-                    .collect();
-                ops.push(Opcode::Match(Arc::new(CompiledMatch {
-                    scrutinee: scrutinee_prog,
-                    arms: Arc::from(compiled_arms),
-                })));
+                let compiled = compile_match(scrutinee, arms, ctx);
+                ops.push(Opcode::Match(Arc::new(compiled)));
             }
         }
     }
@@ -1062,5 +1048,529 @@ impl PassConfig {
             }
         }
         bits
+    }
+}
+
+/// Lower a `match scrutinee with { arms }` AST node into a `CompiledMatch`
+/// suitable for the flat decision-machine interpreter in `vm::exec`. Each
+/// arm contributes a contiguous block of `MatchOp`s framed by `ResetArm`,
+/// pattern tests, optional guard, and a terminating `Body`. Failed tests
+/// jump forward to the start of the next arm; the trailing `Fail` op is
+/// reached only when no arm matches.
+fn compile_match(
+    scrutinee: &Expr,
+    arms: &[crate::parse::ast::MatchArm],
+    ctx: &VarCtx,
+) -> CompiledMatch {
+    use crate::parse::ast::Pat;
+
+    let mut b = MatchBuilder::default();
+    // Reserve a placeholder for each arm-start PC so backward jumps from a
+    // miss inside arm N go to arm N+1's `ResetArm`. Final fall-through PC
+    // is set to the position of the trailing `Fail` op.
+    let mut arm_starts: Vec<u32> = Vec::with_capacity(arms.len());
+
+    // Cross-arm prefix sharing: when every arm is an object pattern that
+    // tests the same first key (the most common shape for tagged-union
+    // dispatch), the `ObjCheck` and `LoadField` for that key are hoisted
+    // out of the per-arm prologue. Slot 1 then holds the loaded key value
+    // and is preserved across arms via `ResetArm.keep_above = 2`.
+    let shared_key: Option<Arc<str>> = detect_shared_first_key(arms);
+    let mut prelude_pending: Vec<u32> = Vec::new();
+    if let Some(key) = shared_key.as_ref() {
+        // Emit shared prelude. Failures jump to the trailing `Fail` op
+        // (target is patched once `fail_pc` is known).
+        let p1 = b.emit(MatchOp::ObjCheck {
+            slot: 0,
+            else_pc: u32::MAX,
+        });
+        let p2 = b.emit(MatchOp::LoadField {
+            src: 0,
+            key: Arc::clone(key),
+            dst: 1,
+            else_pc: u32::MAX,
+        });
+        prelude_pending.push(p1);
+        prelude_pending.push(p2);
+    }
+    let keep_above: u16 = if shared_key.is_some() { 2 } else { 1 };
+
+    for arm in arms {
+        // Open a fresh patch-bucket for this arm so its `else_pc`
+        // placeholders are tracked independently of earlier arms.
+        b.pending_else.push(Vec::new());
+        arm_starts.push(b.next_pc());
+        // ResetArm placeholder; slot count patched once we know how many
+        // sub-projections the arm allocated.
+        let reset_idx = b.emit(MatchOp::ResetArm {
+            slots: keep_above,
+            keep_above,
+        });
+
+        // Slot space: when sharing is active, slot 1 already holds the
+        // shared key's loaded value, so per-arm allocation begins at 2.
+        let mut slot_alloc = SlotAlloc::starting_at(keep_above);
+
+        match (shared_key.as_ref(), &arm.pat) {
+            (Some(key), Pat::Obj { fields, open: _ }) => {
+                // Compile the shared-key field's sub-pattern against
+                // slot 1 directly; remaining fields take the standard
+                // load-field path.
+                for (k, sub_pat) in fields {
+                    if k.as_str() == key.as_ref() {
+                        b.compile_pat_for_arm(sub_pat, 1, &mut slot_alloc);
+                    } else {
+                        let dst = slot_alloc.alloc();
+                        b.emit_with_pending_else(MatchOp::LoadField {
+                            src: 0,
+                            key: Arc::from(k.as_str()),
+                            dst,
+                            else_pc: u32::MAX,
+                        });
+                        b.compile_pat_for_arm(sub_pat, dst, &mut slot_alloc);
+                    }
+                }
+            }
+            _ => {
+                // Standard codegen path: full pattern compile against slot 0.
+                b.compile_pat_for_arm(&arm.pat, 0, &mut slot_alloc);
+            }
+        }
+
+        // Guard (optional).
+        if let Some(guard_expr) = arm.guard.as_ref() {
+            let prog = Arc::new(Compiler::compile_sub(guard_expr, ctx));
+            let prog_idx = b.add_guard(prog);
+            b.emit_with_pending_else(MatchOp::Guard {
+                prog: prog_idx,
+                else_pc: u32::MAX,
+            });
+        }
+
+        // Body terminator: bindings already pushed; run body program.
+        let body_prog = Arc::new(Compiler::compile_sub(&arm.body, ctx));
+        let body_idx = b.add_body(body_prog);
+        b.emit(MatchOp::Body { prog: body_idx });
+
+        // Patch arm-local slot count into the reset op.
+        b.patch_reset_slots(reset_idx, slot_alloc.high_water_mark());
+    }
+
+    let fail_pc = b.next_pc();
+    b.emit(MatchOp::Fail);
+
+    // Patch the shared-prelude placeholders (object check + key load) to
+    // the trailing `Fail` op when sharing is active.
+    for pc in prelude_pending {
+        b.patch_else_pc(pc, fail_pc);
+    }
+
+    // Patch all `else_pc` placeholders to next-arm-start (or `fail_pc` for
+    // the last arm).
+    for (i, miss_pcs) in std::mem::take(&mut b.pending_else).into_iter().enumerate() {
+        let target = arm_starts.get(i + 1).copied().unwrap_or(fail_pc);
+        for pc in miss_pcs {
+            b.patch_else_pc(pc, target);
+        }
+    }
+
+    // Compute the maximum slot count the runtime ever needs, so the VM
+    // can size its slot vector once instead of growing per arm. The walk
+    // inspects each `ResetArm.slots` and any explicit `dst` slot — slots
+    // are dense within a single match expression.
+    let max_slots = compute_max_slots(&b.ops);
+
+    CompiledMatch {
+        scrutinee: Arc::new(Compiler::compile_sub(scrutinee, ctx)),
+        ops: Arc::from(b.ops),
+        lits: Arc::from(b.lits),
+        guards: Arc::from(b.guards),
+        bodies: Arc::from(b.bodies),
+        subpats: Arc::from(b.subpats),
+        max_slots,
+    }
+}
+
+/// Walk a freshly-emitted op stream and return the largest slot index
+/// referenced plus one. Used to size the runtime slot vector once at the
+/// top of `exec_match` so prelude ops (which run before any `ResetArm`)
+/// can index any slot up to `max_slots - 1`.
+fn compute_max_slots(ops: &[MatchOp]) -> u16 {
+    let mut hi: u16 = 1;
+    for op in ops {
+        match op {
+            MatchOp::ResetArm { slots, .. } => {
+                if *slots > hi {
+                    hi = *slots;
+                }
+            }
+            MatchOp::KindCheck { slot, .. }
+            | MatchOp::LitEq { slot, .. }
+            | MatchOp::ObjCheck { slot, .. }
+            | MatchOp::LenCheck { slot, .. }
+            | MatchOp::TestSubPat { slot, .. }
+            | MatchOp::Bind { slot, .. } => {
+                let n = slot.saturating_add(1);
+                if n > hi {
+                    hi = n;
+                }
+            }
+            MatchOp::LoadField { src, dst, .. } => {
+                let n = src.max(dst).saturating_add(1);
+                if n > hi {
+                    hi = n;
+                }
+            }
+            MatchOp::LoadIndex { src, dst, .. } | MatchOp::LoadTail { src, dst, .. } => {
+                let n = src.max(dst).saturating_add(1);
+                if n > hi {
+                    hi = n;
+                }
+            }
+            MatchOp::Guard { .. }
+            | MatchOp::Body { .. }
+            | MatchOp::Fail
+            | MatchOp::Jump { .. } => {}
+        }
+    }
+    hi
+}
+
+/// Detect when every arm is a `Pat::Obj` that lists the same first key.
+/// This is the dispatch shape for tagged-union match expressions
+/// (`{role: "admin"} -> ..., {role: "user"} -> ...`) and unlocks
+/// hoisting the shared `ObjCheck + LoadField` ops out of every arm's
+/// prologue. Returns the shared key when applicable, `None` otherwise.
+///
+/// The optimization is conservative: it requires every arm — including
+/// the catch-all — to be `Pat::Obj` with the same leading key. Mixing
+/// `Pat::Wild` / `Pat::Bind` catch-alls would require splitting the
+/// failure path between "not an object" and "object but no arm matched"
+/// and is left to a richer cross-arm pass.
+fn detect_shared_first_key(arms: &[crate::parse::ast::MatchArm]) -> Option<Arc<str>> {
+    use crate::parse::ast::Pat;
+    if arms.len() < 2 {
+        return None;
+    }
+    let mut shared: Option<&str> = None;
+    for arm in arms {
+        let Pat::Obj { fields, .. } = &arm.pat else {
+            return None;
+        };
+        let Some((first_key, _)) = fields.first() else {
+            return None;
+        };
+        match shared {
+            None => shared = Some(first_key.as_str()),
+            Some(k) if k == first_key.as_str() => {}
+            _ => return None,
+        }
+    }
+    shared.map(Arc::from)
+}
+
+/// Mutable state used while emitting a `CompiledMatch`. Tracks the op
+/// stream, sub-program pools, the literal pool, and the per-arm
+/// `else_pc` placeholders that need patching once arm-start PCs are known.
+#[derive(Default)]
+struct MatchBuilder {
+    ops: Vec<MatchOp>,
+    lits: Vec<crate::parse::ast::PatLit>,
+    guards: Vec<Arc<Program>>,
+    bodies: Vec<Arc<Program>>,
+    subpats: Vec<crate::parse::ast::Pat>,
+    /// One entry per arm; each holds the op indices whose `else_pc` field
+    /// must be patched to point to the next arm's start.
+    pending_else: Vec<Vec<u32>>,
+}
+
+impl MatchBuilder {
+    /// PC of the next op to be emitted.
+    fn next_pc(&self) -> u32 {
+        self.ops.len() as u32
+    }
+
+    /// Append an op without registering it for an arm-relative patch.
+    fn emit(&mut self, op: MatchOp) -> u32 {
+        let idx = self.ops.len() as u32;
+        self.ops.push(op);
+        idx
+    }
+
+    /// Append an op whose `else_pc` field is a sentinel; record its index
+    /// in the current arm's patch bucket so it can be resolved to the
+    /// next-arm start once the arm has finished emitting.
+    fn emit_with_pending_else(&mut self, op: MatchOp) -> u32 {
+        let idx = self.emit(op);
+        let bucket = self
+            .pending_else
+            .last_mut()
+            .expect("emit_with_pending_else called outside an arm");
+        bucket.push(idx);
+        idx
+    }
+
+    /// Append a literal to the pool, returning its index.
+    fn add_lit(&mut self, lit: crate::parse::ast::PatLit) -> u16 {
+        let idx = self.lits.len() as u16;
+        self.lits.push(lit);
+        idx
+    }
+
+    /// Append a sub-pattern (e.g. `Or`) to the pool, returning its index.
+    fn add_subpat(&mut self, pat: crate::parse::ast::Pat) -> u16 {
+        let idx = self.subpats.len() as u16;
+        self.subpats.push(pat);
+        idx
+    }
+
+    /// Append a guard sub-program, returning its index.
+    fn add_guard(&mut self, prog: Arc<Program>) -> u16 {
+        let idx = self.guards.len() as u16;
+        self.guards.push(prog);
+        idx
+    }
+
+    /// Append a body sub-program, returning its index.
+    fn add_body(&mut self, prog: Arc<Program>) -> u16 {
+        let idx = self.bodies.len() as u16;
+        self.bodies.push(prog);
+        idx
+    }
+
+    /// Patch the slot-count field of a previously emitted `ResetArm`.
+    fn patch_reset_slots(&mut self, reset_idx: u32, slots: u16) {
+        if let MatchOp::ResetArm { slots: s, .. } = &mut self.ops[reset_idx as usize] {
+            *s = slots;
+        }
+    }
+
+    /// Patch the `else_pc` field of a previously emitted miss-jumping op.
+    fn patch_else_pc(&mut self, idx: u32, target: u32) {
+        match &mut self.ops[idx as usize] {
+            MatchOp::KindCheck { else_pc, .. }
+            | MatchOp::LitEq { else_pc, .. }
+            | MatchOp::ObjCheck { else_pc, .. }
+            | MatchOp::LoadField { else_pc, .. }
+            | MatchOp::LenCheck { else_pc, .. }
+            | MatchOp::TestSubPat { else_pc, .. }
+            | MatchOp::Guard { else_pc, .. } => *else_pc = target,
+            other => panic!("patch_else_pc on op without else_pc: {other:?}"),
+        }
+    }
+
+    /// Compile a single arm's pattern by emitting the appropriate test /
+    /// load / bind ops against `slot`, allocating sub-slots for nested
+    /// projections from `slot_alloc`.
+    fn compile_pat_for_arm(
+        &mut self,
+        pat: &crate::parse::ast::Pat,
+        slot: MatchSlot,
+        slot_alloc: &mut SlotAlloc,
+    ) {
+        use crate::parse::ast::Pat;
+        match pat {
+            Pat::Wild => {
+                // Always matches; emit nothing.
+            }
+            Pat::Bind(name) => {
+                self.emit(MatchOp::Bind {
+                    name: Arc::from(name.as_str()),
+                    slot,
+                });
+            }
+            Pat::Lit(lit) => {
+                let lit_idx = self.add_lit(lit.clone());
+                self.emit_with_pending_else(MatchOp::LitEq {
+                    slot,
+                    lit: lit_idx,
+                    else_pc: u32::MAX,
+                });
+            }
+            Pat::Kind { name, kind } => {
+                self.emit_with_pending_else(MatchOp::KindCheck {
+                    slot,
+                    kind: *kind,
+                    else_pc: u32::MAX,
+                });
+                if let Some(n) = name.as_deref() {
+                    self.emit(MatchOp::Bind {
+                        name: Arc::from(n),
+                        slot,
+                    });
+                }
+            }
+            Pat::Or(alts) if alts.iter().all(|a| matches!(a, Pat::Lit(_))) => {
+                // Or-of-literals cascade: emit one `LitEq` per alt with a
+                // forward miss-jump to the next alt's PC, plus an
+                // unconditional jump after each successful test that
+                // skips past every remaining alternative. The last alt's
+                // miss jumps to the arm boundary like any other test.
+                //
+                // Layout for `a | b | c`:
+                //   pc0:  LitEq a, else_pc=pc2
+                //   pc1:  Jump exit
+                //   pc2:  LitEq b, else_pc=pc4
+                //   pc3:  Jump exit
+                //   pc4:  LitEq c, else_pc=ARM_MISS
+                //   exit: ...
+                let mut miss_to_patch: Vec<(u32, usize)> = Vec::new();
+                let mut jump_to_patch: Vec<u32> = Vec::new();
+                for (i, alt) in alts.iter().enumerate() {
+                    let Pat::Lit(lit) = alt else {
+                        unreachable!("guarded above")
+                    };
+                    let lit_idx = self.add_lit(lit.clone());
+                    let is_last = i + 1 == alts.len();
+                    let cmp_pc = if is_last {
+                        // Final alt: miss exits to arm boundary via the
+                        // standard pending_else patch path.
+                        self.emit_with_pending_else(MatchOp::LitEq {
+                            slot,
+                            lit: lit_idx,
+                            else_pc: u32::MAX,
+                        })
+                    } else {
+                        let pc = self.emit(MatchOp::LitEq {
+                            slot,
+                            lit: lit_idx,
+                            else_pc: u32::MAX,
+                        });
+                        // Unconditional jump-to-exit on success.
+                        let jpc = self.emit(MatchOp::Jump {
+                            target_pc: u32::MAX,
+                        });
+                        miss_to_patch.push((pc, i + 1));
+                        jump_to_patch.push(jpc);
+                        pc
+                    };
+                    let _ = cmp_pc;
+                }
+                let exit_pc = self.next_pc();
+                // Patch each non-final miss to the start of the next alt.
+                let alt_starts: Vec<u32> = (0..alts.len())
+                    .map(|i| {
+                        // Each alt occupies 1 op (LitEq) + 1 op (Jump)
+                        // except the final which has no Jump. Compute by
+                        // recovering from `miss_to_patch` ordering: the
+                        // alts were emitted contiguously, and we recorded
+                        // each cmp_pc.
+                        miss_to_patch
+                            .iter()
+                            .find(|(_, idx)| *idx == i)
+                            .map(|(_pc, _)| {
+                                // alt i (i>=1) starts immediately after
+                                // alt (i-1)'s Jump op.
+                                miss_to_patch[i - 1].0 + 2
+                            })
+                            .unwrap_or_else(|| miss_to_patch.first().map(|(p, _)| *p).unwrap_or(0))
+                    })
+                    .collect();
+                for (cmp_pc, alt_idx) in &miss_to_patch {
+                    let target = alt_starts[*alt_idx];
+                    self.patch_else_pc(*cmp_pc, target);
+                }
+                // Patch every success-jump to the cascade exit.
+                for jpc in jump_to_patch {
+                    if let MatchOp::Jump { target_pc } = &mut self.ops[jpc as usize] {
+                        *target_pc = exit_pc;
+                    }
+                }
+            }
+            Pat::Or(_) => {
+                // Or-patterns with binders or nested shapes retain their
+                // tree shape so the runtime helper can backtrack bindings
+                // between alternatives.
+                let subpat_idx = self.add_subpat(pat.clone());
+                self.emit_with_pending_else(MatchOp::TestSubPat {
+                    slot,
+                    subpat: subpat_idx,
+                    else_pc: u32::MAX,
+                });
+            }
+            Pat::Obj { fields, open: _ } => {
+                self.emit_with_pending_else(MatchOp::ObjCheck {
+                    slot,
+                    else_pc: u32::MAX,
+                });
+                for (key, sub_pat) in fields {
+                    let dst = slot_alloc.alloc();
+                    self.emit_with_pending_else(MatchOp::LoadField {
+                        src: slot,
+                        key: Arc::from(key.as_str()),
+                        dst,
+                        else_pc: u32::MAX,
+                    });
+                    self.compile_pat_for_arm(sub_pat, dst, slot_alloc);
+                }
+            }
+            Pat::Arr { elems, rest } => {
+                let prefix = elems.len() as u32;
+                let exact = rest.is_none();
+                self.emit_with_pending_else(MatchOp::LenCheck {
+                    slot,
+                    len: prefix,
+                    exact,
+                    else_pc: u32::MAX,
+                });
+                for (i, sub_pat) in elems.iter().enumerate() {
+                    let dst = slot_alloc.alloc();
+                    self.emit(MatchOp::LoadIndex {
+                        src: slot,
+                        idx: i as u32,
+                        dst,
+                    });
+                    self.compile_pat_for_arm(sub_pat, dst, slot_alloc);
+                }
+                if let Some(rest_name) = rest.as_ref().and_then(|n| n.as_deref()) {
+                    let dst = slot_alloc.alloc();
+                    self.emit(MatchOp::LoadTail {
+                        src: slot,
+                        from: prefix,
+                        dst,
+                    });
+                    self.emit(MatchOp::Bind {
+                        name: Arc::from(rest_name),
+                        slot: dst,
+                    });
+                }
+            }
+        }
+    }
+}
+
+/// Per-arm slot index allocator. Slot 0 is reserved for the scrutinee, so
+/// allocation begins at 1. The high-water mark drives `ResetArm.slots`.
+struct SlotAlloc {
+    next: u16,
+}
+
+impl SlotAlloc {
+    /// Create a fresh allocator that will hand out slots starting at index 1.
+    #[allow(dead_code)]
+    fn new() -> Self {
+        Self::starting_at(1)
+    }
+
+    /// Create an allocator whose next slot index is `start`. Used when a
+    /// match-level prelude has already populated some slots that should
+    /// not collide with arm-local sub-projections.
+    fn starting_at(start: u16) -> Self {
+        Self { next: start.max(1) }
+    }
+
+    /// Allocate and return the next slot index.
+    fn alloc(&mut self) -> MatchSlot {
+        let s = self.next;
+        self.next = self
+            .next
+            .checked_add(1)
+            .expect("match arm exceeded u16 slot capacity");
+        s
+    }
+
+    /// Return the total number of slots required so far (including slot 0).
+    fn high_water_mark(&self) -> u16 {
+        self.next
     }
 }

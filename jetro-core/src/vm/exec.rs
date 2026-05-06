@@ -2822,37 +2822,175 @@ impl VM {
         }
     }
 
-    /// Evaluate a compiled `match` expression: walk arms in order, attempt
-    /// to match the scrutinee against each pattern, run the optional guard,
-    /// and evaluate the body of the first arm that fires. Returns an
-    /// evaluation error when no arm matches.
+    /// Evaluate a compiled `match` expression by walking the flat
+    /// `MatchOp` instruction stream produced by the compiler. Slot 0 holds
+    /// the scrutinee; pattern tests project sub-values into successive
+    /// slots, and bindings are accumulated into a per-arm stack until a
+    /// `Body` op terminates the loop. A failed test jumps to the start of
+    /// the next arm; the trailing `Fail` op raises a non-exhaustive error.
     fn exec_match(
         &mut self,
         cm: &CompiledMatch,
         scrutinee: &Val,
         env: &Env,
     ) -> Result<Val, EvalError> {
-        for arm in cm.arms.iter() {
-            let mut bindings: Vec<(Arc<str>, Val)> = Vec::new();
-            if !match_pat(&arm.pat, scrutinee, &mut bindings) {
-                continue;
-            }
-            let arm_env = bindings
-                .iter()
-                .fold(env.clone(), |e, (n, v)| e.with_var(n.as_ref(), v.clone()));
-            if let Some(guard) = arm.guard.as_ref() {
-                let g = self.exec(guard, &arm_env)?;
-                if !crate::util::is_truthy(&g) {
-                    continue;
+        let total = (cm.max_slots as usize).max(1);
+        let mut slots: SmallVec<[Val; 8]> = SmallVec::with_capacity(total);
+        slots.resize(total, Val::Null);
+        slots[0] = scrutinee.clone();
+        let mut bindings: SmallVec<[(Arc<str>, Val); 8]> = SmallVec::new();
+        let mut pc: u32 = 0;
+        let ops = &cm.ops;
+        loop {
+            let op = &ops[pc as usize];
+            match op {
+                MatchOp::ResetArm {
+                    slots: _,
+                    keep_above,
+                } => {
+                    bindings.clear();
+                    // Preserve slots [0..keep_above); zero everything from
+                    // `keep_above` onwards so residue from a missed arm
+                    // does not leak into this one. `keep_above >= 1`
+                    // always — slot 0 (scrutinee) is invariant. The slot
+                    // vector itself was pre-sized at the top of
+                    // `exec_match` from `cm.max_slots`, so no growth is
+                    // needed here.
+                    let keep = (*keep_above as usize).max(1);
+                    for s in slots.iter_mut().skip(keep) {
+                        *s = Val::Null;
+                    }
+                    pc += 1;
+                }
+                MatchOp::KindCheck { slot, kind, else_pc } => {
+                    if val_matches_kind(&slots[*slot as usize], *kind) {
+                        pc += 1;
+                    } else {
+                        pc = *else_pc;
+                    }
+                }
+                MatchOp::LitEq { slot, lit, else_pc } => {
+                    if match_pat_lit(&cm.lits[*lit as usize], &slots[*slot as usize]) {
+                        pc += 1;
+                    } else {
+                        pc = *else_pc;
+                    }
+                }
+                MatchOp::ObjCheck { slot, else_pc } => {
+                    if matches!(
+                        &slots[*slot as usize],
+                        Val::Obj(_) | Val::ObjSmall(_)
+                    ) {
+                        pc += 1;
+                    } else {
+                        pc = *else_pc;
+                    }
+                }
+                MatchOp::LoadField {
+                    src,
+                    key,
+                    dst,
+                    else_pc,
+                } => {
+                    match obj_like_get(&slots[*src as usize], key.as_ref()) {
+                        Some(v) => {
+                            slots[*dst as usize] = v;
+                            pc += 1;
+                        }
+                        None => pc = *else_pc,
+                    }
+                }
+                MatchOp::LenCheck {
+                    slot,
+                    len,
+                    exact,
+                    else_pc,
+                } => {
+                    let arr_len = match arr_like_len(&slots[*slot as usize]) {
+                        Some(n) => n,
+                        None => {
+                            pc = *else_pc;
+                            continue;
+                        }
+                    };
+                    let want = *len as usize;
+                    let ok = if *exact { arr_len == want } else { arr_len >= want };
+                    if ok {
+                        pc += 1;
+                    } else {
+                        pc = *else_pc;
+                    }
+                }
+                MatchOp::LoadIndex { src, idx, dst } => {
+                    slots[*dst as usize] = arr_like_get(&slots[*src as usize], *idx as usize);
+                    pc += 1;
+                }
+                MatchOp::LoadTail { src, from, dst } => {
+                    let len = arr_like_len(&slots[*src as usize]).unwrap_or(0);
+                    let from_idx = *from as usize;
+                    let mut tail: Vec<Val> = Vec::with_capacity(len.saturating_sub(from_idx));
+                    for i in from_idx..len {
+                        tail.push(arr_like_get(&slots[*src as usize], i));
+                    }
+                    slots[*dst as usize] = Val::arr(tail);
+                    pc += 1;
+                }
+                MatchOp::TestSubPat { slot, subpat, else_pc } => {
+                    let saved = bindings.len();
+                    let mut tmp: Vec<(Arc<str>, Val)> = Vec::new();
+                    let ok = match_pat(
+                        &cm.subpats[*subpat as usize],
+                        &slots[*slot as usize],
+                        &mut tmp,
+                    );
+                    if ok {
+                        for b in tmp {
+                            bindings.push(b);
+                        }
+                        pc += 1;
+                    } else {
+                        bindings.truncate(saved);
+                        pc = *else_pc;
+                    }
+                }
+                MatchOp::Bind { name, slot } => {
+                    bindings.push((Arc::clone(name), slots[*slot as usize].clone()));
+                    pc += 1;
+                }
+                MatchOp::Guard { prog, else_pc } => {
+                    let arm_env = build_arm_env(env, &bindings);
+                    let g = self.exec(&cm.guards[*prog as usize], &arm_env)?;
+                    if crate::util::is_truthy(&g) {
+                        pc += 1;
+                    } else {
+                        pc = *else_pc;
+                    }
+                }
+                MatchOp::Body { prog } => {
+                    let arm_env = build_arm_env(env, &bindings);
+                    return self.exec(&cm.bodies[*prog as usize], &arm_env);
+                }
+                MatchOp::Fail => {
+                    return Err(EvalError(format!(
+                        "match: no arm matched value of kind {}",
+                        kind_label(scrutinee)
+                    )));
+                }
+                MatchOp::Jump { target_pc } => {
+                    pc = *target_pc;
                 }
             }
-            return self.exec(&arm.body, &arm_env);
         }
-        Err(EvalError(format!(
-            "match: no arm matched value of kind {}",
-            kind_label(scrutinee)
-        )))
     }
+}
+
+/// Build the body / guard environment for a match arm by extending `env`
+/// with every binding the arm has accumulated so far. Bindings later in
+/// the list shadow earlier ones, matching let-style scoping.
+fn build_arm_env(env: &Env, bindings: &[(Arc<str>, Val)]) -> Env {
+    bindings
+        .iter()
+        .fold(env.clone(), |e, (n, v)| e.with_var(n.as_ref(), v.clone()))
 }
 
 /// Short type-tag string used in `match` non-exhaustive errors.

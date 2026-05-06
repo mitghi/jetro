@@ -234,7 +234,10 @@ pat_atom = {
 }
 pat_or  = { pat_atom ~ ("|" ~ pat_atom)* }
 
-match_arm = { pat_or ~ (kw_when ~ expr)? ~ "->" ~ expr }
+// Guard expression sits below pipe precedence so a trailing `->` belongs to
+// the arm separator rather than being eaten as a `pipe_bind` step inside
+// the guard. Arm bodies use the full `expr` grammar.
+match_arm = { pat_or ~ (kw_when ~ coalesce_expr)? ~ "->" ~ expr }
 // `match scrutinee with { arms }` — `with` separator avoids ambiguity with
 // `expr { inline_filter }` postfix. Without it, `match $.x { v -> v }` parses
 // the `{ v -> v }` as inline_filter (since `v -> v` is a valid pipe-bind expr).
