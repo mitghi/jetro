@@ -1113,6 +1113,102 @@ fn runtime_deep_match_no_matches_returns_empty() {
 }
 
 #[test]
+fn match_runtimes_agree_on_canonical_corpus() {
+    // Cross-check the `Val`-domain and view-domain runtimes against a
+    // shared corpus of inputs. The two paths are structurally distinct
+    // (one materialises sub-`Val`s eagerly, the other walks borrowed
+    // views) so any divergence on these inputs would point to a
+    // semantic regression.
+    use crate::compile::compiler::Compiler;
+    use crate::data::context::Env;
+    use crate::data::value::Val as DVal;
+    use crate::data::view::ValView;
+    use crate::parse::parser::parse;
+    use crate::vm::{Opcode, VM};
+
+    let cases = [
+        // (match expression, scrutinee JSON)
+        (
+            r#"match @ with {
+                {role: "admin"} -> "a",
+                {role: "user"}  -> "u",
+                _               -> "x"
+            }"#,
+            json!({"role": "admin", "id": 1}),
+        ),
+        (
+            r#"match @ with {
+                {role: "admin"} -> "a",
+                {role: "user"}  -> "u",
+                _               -> "x"
+            }"#,
+            json!({"name": "alice"}),
+        ),
+        (
+            r#"match @ with {
+                [a, b]    -> {ok: a},
+                [a, b, c] -> {ok: c},
+                _         -> {none: true}
+            }"#,
+            json!([1, 2, 3]),
+        ),
+        (
+            r#"match @ with {
+                n: number when n > 100 -> "big",
+                _                       -> "small"
+            }"#,
+            json!(250),
+        ),
+        (
+            r#"match @ with {
+                "GET" | "HEAD" -> "safe",
+                _              -> "other"
+            }"#,
+            json!("HEAD"),
+        ),
+        (
+            r#"match @ with {
+                1..=10  -> "lo",
+                11..=99 -> "mid",
+                _       -> "hi"
+            }"#,
+            json!(7),
+        ),
+    ];
+
+    for (src, scrutinee_json) in cases {
+        let expr = parse(src).unwrap_or_else(|e| panic!("parse {src}: {e}"));
+        let prog = Compiler::compile(&expr, src);
+        let cm = prog
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                Opcode::Match(cm) => Some(cm.clone()),
+                _ => None,
+            })
+            .expect("compiled match opcode");
+
+        let scrutinee_val = DVal::from(&scrutinee_json);
+        let mut vm = VM::new();
+        let env = Env::new(scrutinee_val.clone());
+
+        let val_result = vm.exec_match(&cm, &scrutinee_val, &env);
+        let view_result =
+            crate::vm::exec::exec_match_view(&mut vm, &cm, ValView::new(&scrutinee_val), &env);
+
+        match (val_result, view_result) {
+            (Ok(a), Ok(b)) => {
+                let aj: serde_json::Value = a.into();
+                let bj: serde_json::Value = b.into();
+                assert_eq!(aj, bj, "domains diverged on `{src}`");
+            }
+            (Err(_), Err(_)) => {}
+            (a, b) => panic!("domains disagreed (one errored) on `{src}`: {a:?} vs {b:?}"),
+        }
+    }
+}
+
+#[test]
 fn runtime_match_chained_with_postfix() {
     // Result of a match flows into a subsequent method call.
     let src = br#"{"xs": [1, 2, 3]}"#;
