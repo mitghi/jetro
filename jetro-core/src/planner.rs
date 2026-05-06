@@ -12,7 +12,7 @@ use std::sync::Arc;
 use crate::analysis;
 use crate::parse::ast::{ArrayElem, Expr, ObjField, Step};
 use crate::builtins::{BuiltinCall, BuiltinMethod};
-use crate::compiler::Compiler;
+use crate::compile::compiler::Compiler;
 use crate::parse::parser;
 use crate::physical::{
     BackendPlan, ExecutionFacts, NodeId, PhysicalArrayElem, PhysicalChainStep, PhysicalNode,

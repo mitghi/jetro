@@ -186,7 +186,7 @@ fn apply_method(input: LogicalPlan, name: &str, args: &[Arg]) -> Option<LogicalP
                         ),
                         other => other.clone(),
                     };
-                    let key_prog = Arc::new(crate::compiler::Compiler::compile(&rooted, ""));
+                    let key_prog = Arc::new(crate::compile::compiler::Compiler::compile(&rooted, ""));
                     LogicalPlan::Sort {
                         input: Box::new(input),
                         spec: SortSpec::keyed(key_prog, descending),

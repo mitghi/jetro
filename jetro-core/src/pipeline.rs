@@ -666,7 +666,7 @@ mod tests {
     #[test]
     fn debug_filter_pred_shape() {
         let expr = crate::parse::parser::parse("@.total > 100").unwrap();
-        let prog = crate::compiler::Compiler::compile(&expr, "");
+        let prog = crate::compile::compiler::Compiler::compile(&expr, "");
         eprintln!("PRED OPS = {:#?}", prog.ops);
     }
 

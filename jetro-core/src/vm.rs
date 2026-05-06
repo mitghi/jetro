@@ -843,7 +843,7 @@ fn agg_minmax_typed(a: &[Val], want_max: bool) -> Val {
 }
 
 
-use crate::compiler::{Compiler, PassConfig};
+use crate::compile::compiler::{Compiler, PassConfig};
 
 
 

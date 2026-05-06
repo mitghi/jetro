@@ -239,7 +239,7 @@ impl Compiler {
     /// Run the subset of peephole passes enabled in `cfg`, respecting the
     /// `JETRO_DISABLE_OPCODE_FUSION` environment override.
     fn optimize_with(ops: Vec<Opcode>, cfg: PassConfig) -> Vec<Opcode> {
-        use crate::compiler_passes as cp;
+        use crate::compile::passes as cp;
         let no_fusion = disable_opcode_fusion();
         let ops = if cfg.root_chain && !no_fusion { cp::pass_root_chain(ops) } else { ops };
         let ops = if cfg.field_chain && !no_fusion { cp::pass_field_chain(ops) } else { ops };

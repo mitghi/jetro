@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use crate::{compiler, parse::parser, vm};
+    use crate::{compile::compiler, parse::parser, vm};
     use serde_json::json;
 
     fn vm_query(expr: &str, doc: &serde_json::Value) -> Result<serde_json::Value, crate::Error> {
@@ -1032,7 +1032,7 @@ mod tests {
     #[test]
     fn fusion_drop_noop_before_len() {
         use crate::builtins::BuiltinMethod;
-        use crate::compiler::Compiler;
+        use crate::compile::compiler::Compiler;
         use crate::vm::Opcode;
         
         let p1 = Compiler::compile_str("$.xs.sort().len()").unwrap();
@@ -1073,7 +1073,7 @@ mod tests {
     fn fusion_map_filter_unfused_after_pipeline_migration() {
         
         
-        use crate::compiler::Compiler;
+        use crate::compile::compiler::Compiler;
         let prog = Compiler::compile_str("$.xs.map(@ * 2).filter(@ > 5)").unwrap();
         let dbg = format!("{:?}", prog.ops);
         assert!(
@@ -1092,7 +1092,7 @@ mod tests {
 
     #[test]
     fn fusion_field_chain_opcode_emitted() {
-        use crate::compiler::Compiler;
+        use crate::compile::compiler::Compiler;
         use crate::vm::Opcode;
         
         
@@ -1116,7 +1116,7 @@ mod tests {
 
     #[test]
     fn fusion_opt_field_absorbed_into_field_chain() {
-        use crate::compiler::Compiler;
+        use crate::compile::compiler::Compiler;
         use crate::vm::Opcode;
         
         
@@ -1227,7 +1227,7 @@ mod tests {
 
     #[test]
     fn try_constant_body_folds_at_compile_time() {
-        use crate::compiler::Compiler;
+        use crate::compile::compiler::Compiler;
         use crate::vm::Opcode;
         
         let prog = Compiler::compile_str("try 42 else 0").unwrap();
@@ -1251,7 +1251,7 @@ mod tests {
     #[test]
     fn redundant_reverse_eliminated() {
         use crate::builtins::BuiltinMethod;
-        use crate::compiler::Compiler;
+        use crate::compile::compiler::Compiler;
         use crate::vm::Opcode;
         let prog = Compiler::compile_str("$.books.reverse().reverse()").unwrap();
         let reverse_count = prog
@@ -1269,7 +1269,7 @@ mod tests {
     #[test]
     fn redundant_unique_collapsed() {
         use crate::builtins::BuiltinMethod;
-        use crate::compiler::Compiler;
+        use crate::compile::compiler::Compiler;
         use crate::vm::Opcode;
         let prog = Compiler::compile_str("$.books.unique().unique()").unwrap();
         let unique_count = prog
@@ -1286,7 +1286,7 @@ mod tests {
 
     #[test]
     fn bool_short_circuit_folded() {
-        use crate::compiler::Compiler;
+        use crate::compile::compiler::Compiler;
         use crate::vm::Opcode;
         let prog = Compiler::compile_str("false and $.expensive.deeply.nested").unwrap();
         
@@ -1320,7 +1320,7 @@ mod tests {
     
     #[test]
     fn kind_check_literal_fold_int() {
-        use crate::compiler::Compiler;
+        use crate::compile::compiler::Compiler;
         use crate::vm::Opcode;
         let prog = Compiler::compile_str("42 kind number").unwrap();
         let has_kind = prog
@@ -1333,7 +1333,7 @@ mod tests {
 
     #[test]
     fn kind_check_literal_fold_mismatch() {
-        use crate::compiler::Compiler;
+        use crate::compile::compiler::Compiler;
         use crate::vm::Opcode;
         let prog = Compiler::compile_str("\"hi\" kind number").unwrap();
         assert!(matches!(prog.ops.first(), Some(Opcode::PushBool(false))));
@@ -1345,7 +1345,7 @@ mod tests {
 
     #[test]
     fn kind_check_literal_negate() {
-        use crate::compiler::Compiler;
+        use crate::compile::compiler::Compiler;
         use crate::vm::Opcode;
         let prog = Compiler::compile_str("42 kind not string").unwrap();
         assert!(matches!(prog.ops.first(), Some(Opcode::PushBool(true))));
@@ -1358,7 +1358,7 @@ mod tests {
     #[test]
     fn analysis_infer_result_type() {
         use crate::analysis::{infer_result_type, VType};
-        use crate::compiler::Compiler;
+        use crate::compile::compiler::Compiler;
         let p = Compiler::compile_str("42 + 1").unwrap();
         let av = infer_result_type(&p);
         assert_eq!(av.ty, VType::Int);
@@ -1371,7 +1371,7 @@ mod tests {
     #[test]
     fn analysis_count_ident_uses() {
         use crate::analysis::count_ident_uses;
-        use crate::compiler::Compiler;
+        use crate::compile::compiler::Compiler;
         let p = Compiler::compile_str("let x = 10 in x + x + 1").unwrap();
         assert_eq!(count_ident_uses(&p, "x"), 2);
         let p = Compiler::compile_str("let y = 10 in 42").unwrap();
@@ -1381,7 +1381,7 @@ mod tests {
     #[test]
     fn analysis_collect_accessed_fields() {
         use crate::analysis::collect_accessed_fields;
-        use crate::compiler::Compiler;
+        use crate::compile::compiler::Compiler;
         let p = Compiler::compile_str("$.store.books.map(@.title)").unwrap();
         let fields = collect_accessed_fields(&p);
         assert!(fields.iter().any(|f| f.as_ref() == "store"));
@@ -1392,7 +1392,7 @@ mod tests {
     #[test]
     fn analysis_program_signature_stable() {
         use crate::analysis::program_signature;
-        use crate::compiler::Compiler;
+        use crate::compile::compiler::Compiler;
         let a = Compiler::compile_str("$.x.y + 1").unwrap();
         let b = Compiler::compile_str("$.x.y + 1").unwrap();
         assert_eq!(program_signature(&a), program_signature(&b));
@@ -1402,7 +1402,7 @@ mod tests {
 
     #[test]
     fn dead_let_eliminated() {
-        use crate::compiler::Compiler;
+        use crate::compile::compiler::Compiler;
         use crate::vm::Opcode;
         let prog = Compiler::compile_str("let x = 100 in 42").unwrap();
         let has_let = prog.ops.iter().any(|o| matches!(o, Opcode::LetExpr { .. }));
@@ -1412,7 +1412,7 @@ mod tests {
 
     #[test]
     fn dead_let_kept_when_used() {
-        use crate::compiler::Compiler;
+        use crate::compile::compiler::Compiler;
         use crate::vm::Opcode;
         let prog = Compiler::compile_str("let x = 10 in x + 1").unwrap();
         assert!(prog.ops.iter().any(|o| matches!(o, Opcode::LetExpr { .. })));
@@ -1420,7 +1420,7 @@ mod tests {
 
     #[test]
     fn const_fold_comparison() {
-        use crate::compiler::Compiler;
+        use crate::compile::compiler::Compiler;
         use crate::vm::Opcode;
         let prog = Compiler::compile_str("1 < 2").unwrap();
         assert!(matches!(prog.ops.as_ref(), [Opcode::PushBool(true)]));
@@ -1432,7 +1432,7 @@ mod tests {
 
     #[test]
     fn const_fold_mixed_int_float_arith() {
-        use crate::compiler::Compiler;
+        use crate::compile::compiler::Compiler;
         use crate::vm::Opcode;
         let prog = Compiler::compile_str("1 + 2.5").unwrap();
         assert!(
@@ -1448,7 +1448,7 @@ mod tests {
 
     #[test]
     fn const_fold_mixed_int_float_cmp() {
-        use crate::compiler::Compiler;
+        use crate::compile::compiler::Compiler;
         use crate::vm::Opcode;
         let prog = Compiler::compile_str("1 < 2.5").unwrap();
         assert!(matches!(prog.ops.as_ref(), [Opcode::PushBool(true)]));
@@ -1460,7 +1460,7 @@ mod tests {
 
     #[test]
     fn const_fold_unary() {
-        use crate::compiler::Compiler;
+        use crate::compile::compiler::Compiler;
         use crate::vm::Opcode;
         let prog = Compiler::compile_str("not true").unwrap();
         assert!(matches!(prog.ops.as_ref(), [Opcode::PushBool(false)]));
@@ -1472,7 +1472,7 @@ mod tests {
     fn fusion_topn_opcode() {
         
         
-        use crate::compiler::Compiler;
+        use crate::compile::compiler::Compiler;
         use crate::vm::Opcode;
         let prog = Compiler::compile_str("$.nums.sort()[0:3]").unwrap();
         let has_slice = prog.ops.iter().any(|o| matches!(o, Opcode::GetSlice(_, _)));
@@ -1492,7 +1492,7 @@ mod tests {
     #[test]
     fn analysis_monotonicity_sort() {
         use crate::analysis::{infer_monotonicity, Monotonicity};
-        use crate::compiler::Compiler;
+        use crate::compile::compiler::Compiler;
         let p = Compiler::compile_str("$.x.sort()").unwrap();
         assert_eq!(infer_monotonicity(&p), Monotonicity::Asc);
         let p = Compiler::compile_str("$.x.sort().reverse()").unwrap();
@@ -1502,7 +1502,7 @@ mod tests {
     #[test]
     fn analysis_cost_nonzero() {
         use crate::analysis::program_cost;
-        use crate::compiler::Compiler;
+        use crate::compile::compiler::Compiler;
         let cheap = Compiler::compile_str("42").unwrap();
         let expensive =
             Compiler::compile_str("$.books.filter(@.price > 10).map(@.title).sort()").unwrap();
@@ -1523,7 +1523,7 @@ mod tests {
     #[test]
     fn analysis_escapes_doc() {
         use crate::analysis::escapes_doc;
-        use crate::compiler::Compiler;
+        use crate::compile::compiler::Compiler;
         let p = Compiler::compile_str("42").unwrap();
         assert!(!escapes_doc(&p));
         let p = Compiler::compile_str("$.x").unwrap();
@@ -1543,7 +1543,7 @@ mod tests {
     fn fusion_filter_map_sum_opcode() {
         
         
-        use crate::compiler::Compiler;
+        use crate::compile::compiler::Compiler;
         let prog =
             Compiler::compile_str("$.books.filter(@.price > 10).map(@.price).sum()").unwrap();
         let dbg = format!("{:?}", prog.ops);
@@ -1556,7 +1556,7 @@ mod tests {
 
     #[test]
     fn fusion_filter_map_avg_opcode() {
-        use crate::compiler::Compiler;
+        use crate::compile::compiler::Compiler;
         let prog =
             Compiler::compile_str("$.books.filter(@.price > 10).map(@.price).avg()").unwrap();
         let dbg = format!("{:?}", prog.ops);
@@ -1611,7 +1611,7 @@ mod tests {
     fn fusion_filter_map_first_opcode() {
         
         
-        use crate::compiler::Compiler;
+        use crate::compile::compiler::Compiler;
         let prog =
             Compiler::compile_str("$.books.filter(@.price > 10).map(@.title).first()").unwrap();
         let dbg = format!("{:?}", prog.ops);
@@ -1645,7 +1645,7 @@ mod tests {
 
     #[test]
     fn const_fold_string_concat_and_cmp() {
-        use crate::compiler::Compiler;
+        use crate::compile::compiler::Compiler;
         use crate::vm::{CompiledPipeStep, Opcode};
         
         
@@ -1693,7 +1693,7 @@ mod tests {
 
     #[test]
     fn fusion_filter_last_opcode() {
-        use crate::compiler::Compiler;
+        use crate::compile::compiler::Compiler;
         use crate::vm::Opcode;
         let prog = Compiler::compile_str("$.books.filter(@.price > 10).last()").unwrap();
         
@@ -1727,7 +1727,7 @@ mod tests {
     #[test]
     fn fusion_sort_sort_idempotent_collapse() {
         use crate::builtins::BuiltinMethod;
-        use crate::compiler::Compiler;
+        use crate::compile::compiler::Compiler;
         use crate::vm::Opcode;
         let prog = Compiler::compile_str("$.books.sort().sort().first()").unwrap();
         let sorts = prog
@@ -1745,7 +1745,7 @@ mod tests {
     #[test]
     fn fusion_unique_unique_collapse() {
         use crate::builtins::BuiltinMethod;
-        use crate::compiler::Compiler;
+        use crate::compile::compiler::Compiler;
         use crate::vm::Opcode;
         let prog = Compiler::compile_str("$.items.unique().unique()").unwrap();
         let uniqs = prog
@@ -1766,7 +1766,7 @@ mod tests {
     #[test]
     fn fusion_reverse_reverse_dropped() {
         use crate::builtins::BuiltinMethod;
-        use crate::compiler::Compiler;
+        use crate::compile::compiler::Compiler;
         use crate::vm::Opcode;
         let prog = Compiler::compile_str("$.items.reverse().reverse()").unwrap();
         let revs = prog
@@ -1862,7 +1862,7 @@ mod tests {
         
         
         use crate::builtins::BuiltinMethod;
-        use crate::compiler::Compiler;
+        use crate::compile::compiler::Compiler;
         use crate::vm::Opcode;
         let prog = Compiler::compile_str("$.books.sort(price).first()").unwrap();
         let has_first = prog.ops.iter().any(|o| {
@@ -1879,7 +1879,7 @@ mod tests {
     #[test]
     fn fusion_sort_by_last_emits_argextreme_max() {
         use crate::builtins::BuiltinMethod;
-        use crate::compiler::Compiler;
+        use crate::compile::compiler::Compiler;
         use crate::vm::Opcode;
         let prog = Compiler::compile_str("$.books.sort(price).last()").unwrap();
         let has_last = prog.ops.iter().any(|o| {
@@ -1928,7 +1928,7 @@ mod tests {
 
     #[test]
     fn argextreme_vm_path_matches_tree() {
-        use crate::compiler::Compiler;
+        use crate::compile::compiler::Compiler;
         use crate::vm::VM;
         let doc = json!({"xs": [
             {"n": 2, "id": 1},
@@ -1959,7 +1959,7 @@ mod tests {
     #[test]
     fn fusion_sort_sum_drops_sort() {
         use crate::builtins::BuiltinMethod;
-        use crate::compiler::Compiler;
+        use crate::compile::compiler::Compiler;
         use crate::vm::Opcode;
         let prog = Compiler::compile_str("$.books.sort().sum()").unwrap();
         let has_sort = prog.ops.iter().any(|o| {
@@ -1972,7 +1972,7 @@ mod tests {
     #[test]
     fn fusion_reverse_max_drops_reverse() {
         use crate::builtins::BuiltinMethod;
-        use crate::compiler::Compiler;
+        use crate::compile::compiler::Compiler;
         use crate::vm::Opcode;
         let prog = Compiler::compile_str("$.books.reverse().max()").unwrap();
         let has_rev = prog.ops.iter().any(|o| {
@@ -2016,7 +2016,7 @@ mod tests {
     #[test]
     fn analysis_dedup_subprograms() {
         use crate::analysis::dedup_subprograms;
-        use crate::compiler::Compiler;
+        use crate::compile::compiler::Compiler;
         
         let prog = Compiler::compile_str("[$.a.b + 1, $.a.b + 1]").unwrap();
         let deduped = dedup_subprograms(&prog);
@@ -2043,7 +2043,7 @@ mod tests {
     #[test]
     fn analysis_find_common_subexprs() {
         use crate::analysis::find_common_subexprs;
-        use crate::compiler::Compiler;
+        use crate::compile::compiler::Compiler;
         let prog = Compiler::compile_str("[$.x.y, $.x.y, $.z]").unwrap();
         let cs = find_common_subexprs(&prog);
         assert!(
@@ -2054,7 +2054,7 @@ mod tests {
 
     #[test]
     fn method_const_fold_str_len() {
-        use crate::compiler::Compiler;
+        use crate::compile::compiler::Compiler;
         use crate::vm::Opcode;
         let prog = Compiler::compile_str("\"hello\".len()").unwrap();
         assert!(matches!(prog.ops.as_ref(), [Opcode::PushInt(5)]));
@@ -2062,7 +2062,7 @@ mod tests {
 
     #[test]
     fn method_const_fold_str_upper() {
-        use crate::compiler::Compiler;
+        use crate::compile::compiler::Compiler;
         use crate::vm::Opcode;
         let prog = Compiler::compile_str("\"hi\".upper()").unwrap();
         assert!(matches!(prog.ops.as_ref(), [Opcode::PushStr(s)] if s.as_ref() == "HI"));
@@ -2070,7 +2070,7 @@ mod tests {
 
     #[test]
     fn method_const_fold_arr_len() {
-        use crate::compiler::Compiler;
+        use crate::compile::compiler::Compiler;
         use crate::vm::Opcode;
         let prog = Compiler::compile_str("[1,2,3,4].len()").unwrap();
         assert!(matches!(prog.ops.as_ref(), [Opcode::PushInt(4)]));
@@ -2343,7 +2343,7 @@ mod tests {
     #[test]
     #[ignore]
     fn bench_fusion_vs_naive() {
-        use crate::compiler::PassConfig;
+        use crate::compile::compiler::PassConfig;
         use crate::vm::VM;
         use std::time::Instant;
 
@@ -2402,7 +2402,7 @@ mod tests {
 
     #[test]
     fn pass_config_cache_isolation() {
-        use crate::compiler::PassConfig;
+        use crate::compile::compiler::PassConfig;
         use crate::vm::VM;
         let mut vm = VM::new();
         let doc = big_store();

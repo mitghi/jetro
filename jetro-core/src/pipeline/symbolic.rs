@@ -239,7 +239,7 @@ fn suffix_consumes_value(stages: &[Stage]) -> bool {
 }
 
 fn compile_stage_expr(expr: &Expr) -> Arc<crate::vm::Program> {
-    Arc::new(crate::compiler::Compiler::compile(expr, "<pipeline-rewrite>"))
+    Arc::new(crate::compile::compiler::Compiler::compile(expr, "<pipeline-rewrite>"))
 }
 
 fn simplify_expr(expr: Expr) -> Expr {

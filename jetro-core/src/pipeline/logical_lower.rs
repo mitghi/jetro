@@ -304,5 +304,5 @@ fn compile_expr_body(expr: &Expr) -> Arc<crate::vm::Program> {
         }
         other => other.clone(),
     };
-    Arc::new(crate::compiler::Compiler::compile(&rooted, ""))
+    Arc::new(crate::compile::compiler::Compiler::compile(&rooted, ""))
 }

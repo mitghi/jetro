@@ -409,7 +409,7 @@ pub(super) fn compile_subexpr(arg: &crate::parse::ast::Arg) -> Option<Arc<crate:
         Expr::Chain(base, _) if matches!(base.as_ref(), Expr::Current) => inner.clone(),
         other => other.clone(),
     };
-    Some(Arc::new(crate::compiler::Compiler::compile(&rooted, "")))
+    Some(Arc::new(crate::compile::compiler::Compiler::compile(&rooted, "")))
 }
 
 /// Compiles a sort-key argument into a `SortSpec`, interpreting `UnaryNeg`-wrapping as descending order.
