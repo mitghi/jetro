@@ -56,7 +56,61 @@ pub fn parse(input: &str) -> Result<Expr, ParseError> {
     let expr_pair = program.into_inner().next().unwrap();
     let expr = parse_expr(expr_pair);
     validate_pattern_linearity(&expr)?;
+    if strict_match_lint_enabled() {
+        validate_match_exhaustiveness(&expr)?;
+    }
     Ok(expr)
+}
+
+/// Read the `JETRO_STRICT_MATCH` environment variable on every parse.
+/// Toggling the flag at runtime is rare in practice, and reading it per
+/// call lets tooling and tests flip the lint without restarting the
+/// process.
+fn strict_match_lint_enabled() -> bool {
+    std::env::var_os("JETRO_STRICT_MATCH").is_some()
+}
+
+/// Walk the `Expr` tree and reject any `match` whose arms cannot prove
+/// exhaustiveness — that is, when no arm has an unconditional catch-all
+/// (`Pat::Wild` or a bare `Pat::Bind`) without a guard. Triggered only
+/// when the `JETRO_STRICT_MATCH` environment variable is set; the
+/// default behaviour is to surface non-exhaustive matches as a runtime
+/// `EvalError` when no arm fires.
+fn validate_match_exhaustiveness(expr: &Expr) -> Result<(), ParseError> {
+    fn check(e: &Expr) -> Result<(), ParseError> {
+        match e {
+            Expr::Match { scrutinee, arms } => {
+                check(scrutinee)?;
+                let exhaustive = arms.iter().any(|a| {
+                    a.guard.is_none()
+                        && matches!(a.pat, Pat::Wild | Pat::Bind(_))
+                });
+                if !exhaustive {
+                    return Err(ParseError(
+                        "non-exhaustive match: no unconditional catch-all arm \
+                         (`_` or a bare bind without `when`)"
+                            .to_string(),
+                    ));
+                }
+                for arm in arms {
+                    if let Some(g) = arm.guard.as_ref() {
+                        check(g)?;
+                    }
+                    check(&arm.body)?;
+                }
+                Ok(())
+            }
+            Expr::Chain(base, _) => check(base),
+            Expr::BinOp(l, _, r) | Expr::Coalesce(l, r) => {
+                check(l)?;
+                check(r)
+            }
+            Expr::UnaryNeg(e) | Expr::Not(e) | Expr::Cast { expr: e, .. } => check(e),
+            Expr::Kind { expr, .. } => check(expr),
+            _ => Ok(()),
+        }
+    }
+    check(expr)
 }
 
 /// Walk the `Expr` tree and validate that every `match` arm's pattern
@@ -69,7 +123,7 @@ fn validate_pattern_linearity(expr: &Expr) -> Result<(), ParseError> {
 
     fn collect_binds(pat: &Pat, out: &mut BTreeSet<String>) {
         match pat {
-            Pat::Wild | Pat::Lit(_) => {}
+            Pat::Wild | Pat::Lit(_) | Pat::Range { .. } => {}
             Pat::Bind(name) => {
                 out.insert(name.clone());
             }
@@ -120,7 +174,11 @@ fn validate_pattern_linearity(expr: &Expr) -> Result<(), ParseError> {
             }
         }
         match pat {
-            Pat::Wild | Pat::Lit(_) | Pat::Bind(_) | Pat::Kind { .. } => {}
+            Pat::Wild
+            | Pat::Lit(_)
+            | Pat::Bind(_)
+            | Pat::Kind { .. }
+            | Pat::Range { .. } => {}
             Pat::Or(alts) => {
                 for alt in alts {
                     walk_pat(alt)?;
@@ -960,6 +1018,16 @@ fn parse_pat(pair: Pair<Rule>) -> Pat {
         Rule::pat_atom => {
             let inner = pair.into_inner().next().expect("pat_atom inner");
             parse_pat(inner)
+        }
+        Rule::pat_range => {
+            let mut it = pair.into_inner();
+            let lo_pair = it.next().expect("pat_range: lo");
+            let op_pair = it.next().expect("pat_range: op");
+            let hi_pair = it.next().expect("pat_range: hi");
+            let lo: f64 = lo_pair.as_str().parse().expect("range lo as f64");
+            let hi: f64 = hi_pair.as_str().parse().expect("range hi as f64");
+            let inclusive = op_pair.as_str() == "..=";
+            Pat::Range { lo, hi, inclusive }
         }
         Rule::pat_wild => Pat::Wild,
         Rule::pat_literal => Pat::Lit(parse_pat_literal(pair)),

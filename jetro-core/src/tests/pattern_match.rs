@@ -715,6 +715,253 @@ fn parse_accepts_literal_only_or_pattern() {
 }
 
 #[test]
+fn runtime_filter_match_take_demand_cuts_through() {
+    // Pipeline: `.filter(match @ ...) | take(3)` should emit only the
+    // first three matches without exhausting the source. The chain IR
+    // recognises `Stage::Filter` whose body is a single `Opcode::Match`
+    // as `ChainOp::Match { Predicate }` so demand widens to
+    // `UntilOutput(3)` instead of bounded `FirstInput`.
+    let src = br#"{"xs": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]}"#;
+    let v = run(
+        src,
+        r#"$.xs.filter(match @ with {
+            n when n > 2 -> true,
+            _            -> false
+        }).take(3)"#,
+    );
+    assert_eq!(v, json!([3, 4, 5]));
+}
+
+#[test]
+fn runtime_map_match_passthrough() {
+    // Pipeline: `.map(match @ ...)` is 1:1 — every input row produces
+    // exactly one output. Used as a tagged-decoder over an array.
+    let src = br#"{"events": [
+        {"tag": "view", "p": "/home"},
+        {"tag": "click", "id": "btn"},
+        {"tag": "error", "code": 500}
+    ]}"#;
+    let v = run(
+        src,
+        r#"$.events.map(match @ with {
+            {tag: "view",  p: x}    -> {sort: "view",  v: x},
+            {tag: "click", id: x}   -> {sort: "click", v: x},
+            {tag: "error", code: x} -> {sort: "error", v: x},
+            _                       -> {sort: "other"}
+        })"#,
+    );
+    assert_eq!(
+        v,
+        json!([
+            {"sort": "view",  "v": "/home"},
+            {"sort": "click", "v": "btn"},
+            {"sort": "error", "v": 500}
+        ])
+    );
+}
+
+#[test]
+fn runtime_range_pattern_inclusive() {
+    // `1..=10` matches integers 1 through 10 inclusive.
+    let cases = [
+        (1, "low"),
+        (5, "low"),
+        (10, "low"),
+        (11, "high"),
+        (0, "high"),
+    ];
+    for (n, expected) in cases {
+        let v = run(
+            format!(r#"{{"x": {n}}}"#).as_bytes(),
+            r#"match $.x with {
+                1..=10 -> "low",
+                _      -> "high"
+            }"#,
+        );
+        assert_eq!(v, json!(expected), "n={n}");
+    }
+}
+
+#[test]
+fn runtime_range_pattern_exclusive() {
+    // `1..10` matches integers 1 through 9; 10 falls into the catch-all.
+    let cases = [(1, "lo"), (9, "lo"), (10, "hi")];
+    for (n, expected) in cases {
+        let v = run(
+            format!(r#"{{"x": {n}}}"#).as_bytes(),
+            r#"match $.x with {
+                1..10 -> "lo",
+                _     -> "hi"
+            }"#,
+        );
+        assert_eq!(v, json!(expected), "n={n}");
+    }
+}
+
+#[test]
+fn runtime_range_pattern_float() {
+    // Floats accepted as bounds and as scrutinees.
+    let v = run(
+        br#"{"x": 0.5}"#,
+        r#"match $.x with {
+            0.0..=1.0 -> "unit",
+            _         -> "other"
+        }"#,
+    );
+    assert_eq!(v, json!("unit"));
+}
+
+#[test]
+fn runtime_range_pattern_int_widens_to_float() {
+    // Integer scrutinee widens to f64 for range comparison.
+    let v = run(
+        br#"{"x": 3}"#,
+        r#"match $.x with {
+            0.0..5.0 -> "in",
+            _        -> "out"
+        }"#,
+    );
+    assert_eq!(v, json!("in"));
+}
+
+#[test]
+fn runtime_range_pattern_inside_or() {
+    // Range patterns compose with or-patterns via the tree-walker path.
+    let v = run(
+        br#"{"x": 7}"#,
+        r#"match $.x with {
+            1..=3 | 5..=10 -> "ok",
+            _              -> "no"
+        }"#,
+    );
+    assert_eq!(v, json!("ok"));
+}
+
+#[test]
+fn runtime_range_pattern_non_numeric_skipped() {
+    // String scrutinee falls through to catch-all because RangeCheck
+    // requires a numeric value.
+    let v = run(
+        br#"{"x": "hello"}"#,
+        r#"match $.x with {
+            1..=10 -> "num",
+            _      -> "other"
+        }"#,
+    );
+    assert_eq!(v, json!("other"));
+}
+
+#[test]
+fn runtime_range_pattern_inside_object() {
+    // Range patterns work inside object sub-pattern positions.
+    let v = run(
+        br#"{"u": {"age": 65}}"#,
+        r#"match $.u with {
+            {age: 0..=17}    -> "minor",
+            {age: 18..=64}   -> "adult",
+            {age: 65..=120}  -> "senior",
+            _                -> "unknown"
+        }"#,
+    );
+    assert_eq!(v, json!("senior"));
+}
+
+#[test]
+fn runtime_shared_kind_dispatch() {
+    // Every typed arm is a `Pat::Kind` testing the same scalar kind, so
+    // the compiler hoists the `KindCheck` into a single prelude. Each
+    // arm just pushes its binding then runs the guard / body.
+    let v = run(
+        br#"{"x": "hello"}"#,
+        r#"match $.x with {
+            s: string when s.len() > 3 -> "long",
+            s: string                  -> "short",
+            _                          -> "other"
+        }"#,
+    );
+    assert_eq!(v, json!("long"));
+    let v = run(
+        br#"{"x": "hi"}"#,
+        r#"match $.x with {
+            s: string when s.len() > 3 -> "long",
+            s: string                  -> "short",
+            _                          -> "other"
+        }"#,
+    );
+    assert_eq!(v, json!("short"));
+    let v = run(
+        br#"{"x": 42}"#,
+        r#"match $.x with {
+            s: string when s.len() > 3 -> "long",
+            s: string                  -> "short",
+            _                          -> "other"
+        }"#,
+    );
+    assert_eq!(v, json!("other"));
+}
+
+#[test]
+fn runtime_range_pattern_negative_bounds() {
+    let cases = [(-5, "neg"), (-1, "neg"), (0, "zero"), (10, "pos")];
+    for (n, expected) in cases {
+        let v = run(
+            format!(r#"{{"x": {n}}}"#).as_bytes(),
+            r#"match $.x with {
+                -10..0 -> "neg",
+                0      -> "zero",
+                _      -> "pos"
+            }"#,
+        );
+        assert_eq!(v, json!(expected), "n={n}");
+    }
+}
+
+#[test]
+fn view_domain_runtime_runs_against_borrowed_view() {
+    // Compile a match expression, then dispatch the view-domain runtime
+    // (`exec_match_view`) directly against a `ValView` borrow of the
+    // scrutinee. This exercises the pattern test path that runs against
+    // borrowed scalars / sub-projections without materialising the
+    // missed-arm subtree.
+    use crate::compile::compiler::Compiler;
+    use crate::data::context::Env;
+    use crate::data::value::Val as DVal;
+    use crate::data::view::ValView;
+    use crate::parse::parser::parse;
+    use crate::vm::{Opcode, VM};
+
+    // Build the AST and locate the embedded `Match` opcode by compiling
+    // the expression and inspecting its op stream.
+    let expr = parse(r#"match @ with {
+        {role: "admin", id: i} -> {sort: "admin", n: i},
+        {role: "user", id: i}  -> {sort: "user", n: i},
+        {role: r}              -> {sort: r, n: 0}
+    }"#)
+    .expect("parse");
+    let prog = Compiler::compile(&expr, "match-view-test");
+    let cm = prog
+        .ops
+        .iter()
+        .find_map(|op| match op {
+            Opcode::Match(cm) => Some(cm.clone()),
+            _ => None,
+        })
+        .expect("compiled match opcode");
+
+    // Drive `exec_match_view` directly against a borrowed view of the
+    // input object. The runtime should pick the first arm and produce
+    // the corresponding output object.
+    let scrutinee_val: DVal = DVal::from(&json!({"role": "admin", "id": 9}));
+    let view = ValView::new(&scrutinee_val);
+    let mut vm = VM::new();
+    let env = Env::new(scrutinee_val.clone());
+    let result = crate::vm::exec::exec_match_view(&mut vm, &cm, view, &env)
+        .expect("view-domain match should succeed");
+    let as_json: serde_json::Value = result.into();
+    assert_eq!(as_json, json!({"sort": "admin", "n": 9}));
+}
+
+#[test]
 fn runtime_match_chained_with_postfix() {
     // Result of a match flows into a subsequent method call.
     let src = br#"{"xs": [1, 2, 3]}"#;

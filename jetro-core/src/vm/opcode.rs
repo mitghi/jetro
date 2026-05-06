@@ -339,6 +339,21 @@ pub enum Opcode {
     Match(Arc<CompiledMatch>),
 }
 
+/// Strategy for producing the scrutinee value of a compiled `match`
+/// expression. Most query authors write `match @ with { ... }` (matching
+/// the current row) or `match $.path with { ... }` (matching the
+/// document root or a navigation chain). The first two cases avoid VM
+/// re-entry by reading directly from the runtime environment.
+#[derive(Debug, Clone)]
+pub enum MatchScrutinee {
+    /// Read the current row from `Env::current` (the `@` token).
+    Current,
+    /// Read the document root from `Env::root` (the `$` token).
+    Root,
+    /// Evaluate an arbitrary scrutinee program against the current env.
+    Program(Arc<Program>),
+}
+
 /// Compiled representation of a `match scrutinee with { arms }` expression.
 /// Arms are lowered to a flat `MatchOp` instruction stream with explicit
 /// jumps between arms; each arm starts with `ResetArm`, which initialises
@@ -346,8 +361,8 @@ pub enum Opcode {
 /// separate `Program` pools indexed from the op stream.
 #[derive(Debug, Clone)]
 pub struct CompiledMatch {
-    /// Program that evaluates the value being matched.
-    pub scrutinee: Arc<Program>,
+    /// Strategy for evaluating the value being matched.
+    pub scrutinee: MatchScrutinee,
     /// Flat instruction stream describing arm tests, captures, guards, and bodies.
     pub ops: Arc<[MatchOp]>,
     /// Pool of pattern literals indexed by `MatchOp::LitEq.lit`.
@@ -365,6 +380,12 @@ pub struct CompiledMatch {
     /// run before the first `ResetArm`) can write into projection slots
     /// without underflow.
     pub max_slots: u16,
+    /// `true` when at least one arm has an unconditional catch-all
+    /// pattern (`_` or a bare `Bind`) with no guard. Tooling and
+    /// future analysers consume this flag; the runtime always produces
+    /// the same non-exhaustive error if every arm misses, regardless of
+    /// the flag value.
+    pub is_exhaustive: bool,
 }
 
 /// Slot identifier used by the match instruction stream. Slot 0 always
@@ -413,6 +434,22 @@ pub enum MatchOp {
         /// Index into `CompiledMatch::lits`.
         lit: u16,
         /// PC to jump to on inequality.
+        else_pc: u32,
+    },
+
+    /// Test that the value at `slot` is a number in the range `[lo, hi)`
+    /// when `inclusive == false`, or `[lo, hi]` when `inclusive == true`.
+    /// Non-numeric values fail and jump to `else_pc`.
+    RangeCheck {
+        /// Slot whose value is being range-tested.
+        slot: MatchSlot,
+        /// Lower bound (inclusive).
+        lo: f64,
+        /// Upper bound (semantics determined by `inclusive`).
+        hi: f64,
+        /// `true` when `hi` is inclusive (`..=` syntax).
+        inclusive: bool,
+        /// PC to jump to when the value is non-numeric or out of range.
         else_pc: u32,
     },
 

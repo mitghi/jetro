@@ -638,6 +638,17 @@ impl Stage {
         match self {
             Stage::CompiledMap(_) => Some(ChainOp::builtin(BuiltinMethod::Map)),
             Stage::SortedDedup(_) => None,
+            // Filter and Map whose body is a single `match` expression
+            // are reported as `ChainOp::Match` so the demand model can
+            // reason about them with the role-specific propagation rules
+            // (`Predicate` widens upstream demand to scan-until-output;
+            // `Transform` is 1:1).
+            Stage::Filter(prog, _) if program_is_match_only(prog) => {
+                Some(ChainOp::match_role(crate::parse::chain_ir::MatchRole::Predicate))
+            }
+            Stage::Map(prog, _) if program_is_match_only(prog) => {
+                Some(ChainOp::match_role(crate::parse::chain_ir::MatchRole::Transform))
+            }
             _ => self.chain_demand_op(),
         }
     }
@@ -864,6 +875,36 @@ pub(super) fn stages_can_run_with_materialized_receiver(stages: &[Stage]) -> boo
     stages
         .iter()
         .all(|stage| stage.can_run_with_receiver_only(program_is_current_only))
+}
+
+/// Return the `CompiledMatch` payload when `program`'s op stream is a
+/// single `Opcode::Match` instruction (any leading `SetCurrent` /
+/// `PushCurrent` is permitted because the pipeline lowering wraps lambda
+/// bodies that bind the row to `@`). Returning the payload — rather than
+/// just a boolean — lets callers in `composed.rs` build a dedicated
+/// `MatchFilter` / `MatchMap` stage that dispatches directly into the
+/// flat-IR runtime, skipping VM opcode-dispatch overhead per row.
+pub(super) fn program_match_only(program: &Program) -> Option<Arc<crate::vm::CompiledMatch>> {
+    let mut ops = program.ops.iter();
+    while let Some(op) = ops.next() {
+        match op {
+            Opcode::SetCurrent | Opcode::PushCurrent => continue,
+            Opcode::Match(cm) => {
+                if ops.next().is_none() {
+                    return Some(Arc::clone(cm));
+                }
+                return None;
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// Boolean wrapper retained for the chain-IR demand classifier, which
+/// only needs to know whether a stage program *is* a match expression.
+fn program_is_match_only(program: &Program) -> bool {
+    program_match_only(program).is_some()
 }
 
 pub(super) fn program_is_current_only(program: &Program) -> bool {

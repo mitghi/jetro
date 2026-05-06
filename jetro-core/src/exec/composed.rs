@@ -674,6 +674,59 @@ impl Stage for GenericFilter {
     }
 }
 
+/// A pipeline stage that runs a compiled `match` expression as a boolean
+/// predicate against each row, bypassing VM stack/opcode dispatch. The
+/// arm bodies are expected to evaluate to truthy/falsy values; on
+/// match-time error the row is dropped.
+pub struct MatchFilter {
+    /// The compiled flat-IR match program to dispatch into per row.
+    pub cm: std::sync::Arc<crate::vm::CompiledMatch>,
+    /// Shared VM and environment context, wrapped for interior mutability.
+    pub ctx: std::rc::Rc<std::cell::RefCell<VmCtx>>,
+}
+
+impl Stage for MatchFilter {
+    /// Set `@` to `x`, evaluate the match flat-IR with `x` as the
+    /// scrutinee, and pass the row through when the chosen arm body is
+    /// truthy. Errors and non-exhaustive matches degrade to `Filtered`.
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        let mut c = self.ctx.borrow_mut();
+        let VmCtx { vm, env } = &mut *c;
+        let prev = env.swap_current(x.clone());
+        let r = vm.exec_match(&self.cm, x, env);
+        env.restore_current(prev);
+        match r {
+            Ok(v) if crate::util::is_truthy(&v) => StageOutput::Pass(Cow::Borrowed(x)),
+            _ => StageOutput::Filtered,
+        }
+    }
+}
+
+/// A pipeline stage that runs a compiled `match` expression to project
+/// each row into a new value, bypassing VM stack/opcode dispatch.
+pub struct MatchMap {
+    /// The compiled flat-IR match program to dispatch into per row.
+    pub cm: std::sync::Arc<crate::vm::CompiledMatch>,
+    /// Shared VM and environment context, wrapped for interior mutability.
+    pub ctx: std::rc::Rc<std::cell::RefCell<VmCtx>>,
+}
+
+impl Stage for MatchMap {
+    /// Set `@` to `x`, evaluate the match flat-IR, and forward the
+    /// arm-body result. Errors degrade to `Filtered`.
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        let mut c = self.ctx.borrow_mut();
+        let VmCtx { vm, env } = &mut *c;
+        let prev = env.swap_current(x.clone());
+        let r = vm.exec_match(&self.cm, x, env);
+        env.restore_current(prev);
+        match r {
+            Ok(v) => StageOutput::Pass(Cow::Owned(v)),
+            Err(_) => StageOutput::Filtered,
+        }
+    }
+}
+
 /// A pipeline stage that maps each element through a compiled expression,
 /// producing a new owned `Val` per row.
 pub struct GenericMap {

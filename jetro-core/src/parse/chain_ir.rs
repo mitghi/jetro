@@ -73,6 +73,34 @@ pub enum ChainOp {
         /// Optional count argument used by demand-propagation for `take`/`skip`.
         demand_arg: BuiltinDemandArg,
     },
+    /// A `match` expression participating in a streaming chain. Match
+    /// behaves as one of three shapes depending on how the surrounding
+    /// pipeline uses its result, captured here as `MatchRole`. Demand
+    /// propagation treats each role like its closest builtin analogue
+    /// (`Filter`, `Map`, `FlatMap`).
+    Match {
+        /// How the surrounding chain consumes match output.
+        role: MatchRole,
+    },
+}
+
+/// The shape a `match` expression takes when embedded in a streaming
+/// pipeline. The role determines its demand-flow behaviour and selects
+/// the streaming analogue (filter / map / flat-map) used during planning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MatchRole {
+    /// Boolean predicate: arm bodies are `true` / `false`. Drops rows that
+    /// do not match (or whose arm body is falsy). Demand law is
+    /// `Cardinality::Filtering`.
+    Predicate,
+    /// Single-value transform: every input row yields exactly one output.
+    /// Demand law is `Cardinality::OneToOne`.
+    Transform,
+    /// Each input row produces zero or more output rows (an arm body
+    /// returns an iterable). Demand law is `Cardinality::Expanding`.
+    /// Reserved for future pipeline integration; current arm bodies
+    /// always produce a single value, so this role is not yet emitted.
+    Multi,
 }
 
 /// Static specification describing the kind of values a `ChainOp` consumes
@@ -106,10 +134,28 @@ impl ChainOp {
         }
     }
 
+    /// Construct a `ChainOp::Match` for the given `role`.
+    pub fn match_role(role: MatchRole) -> Self {
+        Self::Match { role }
+    }
+
     /// Derive the static `OpSpec` for this operator by consulting the builtin
     /// category registry.
     pub fn spec(&self) -> OpSpec {
         match self {
+            ChainOp::Match { role } => {
+                let cardinality = match role {
+                    MatchRole::Predicate => Cardinality::Filtering,
+                    MatchRole::Transform => Cardinality::OneToOne,
+                    MatchRole::Multi => Cardinality::Expanding,
+                };
+                OpSpec {
+                    input: ValueKind::Stream,
+                    output: ValueKind::Stream,
+                    cardinality,
+                    preserves_order: true,
+                }
+            }
             ChainOp::Builtin { id, .. } => {
                 use crate::builtins::BuiltinCategory as Cat;
 
@@ -162,6 +208,44 @@ impl ChainOp {
 impl DemandOperator for ChainOp {
     fn propagate_demand(&self, downstream: Demand) -> Demand {
         match self {
+            ChainOp::Match { role } => match role {
+                // Predicate match drops rows: downstream demand of N
+                // outputs requires scanning until N pass the predicate,
+                // matching `Filter` semantics. The value need passes
+                // through unchanged because the body re-emits the
+                // matched element (or maps it to a body value when
+                // used as a Transform).
+                MatchRole::Predicate => Demand {
+                    pull: match downstream.pull {
+                        crate::plan::demand::PullDemand::FirstInput(n) => {
+                            // Filter cannot guarantee N outputs from N
+                            // inputs; widen to scan-until-output.
+                            crate::plan::demand::PullDemand::UntilOutput(n)
+                        }
+                        crate::plan::demand::PullDemand::UntilOutput(n) => {
+                            crate::plan::demand::PullDemand::UntilOutput(n)
+                        }
+                        other => other,
+                    },
+                    value: downstream.value,
+                    order: downstream.order,
+                },
+                // Transform match is 1:1 — demand passes through.
+                MatchRole::Transform => downstream,
+                // Multi match expands rows; widen `FirstInput(n)` to
+                // `All` since one input may produce many outputs.
+                MatchRole::Multi => Demand {
+                    pull: match downstream.pull {
+                        crate::plan::demand::PullDemand::FirstInput(_)
+                        | crate::plan::demand::PullDemand::UntilOutput(_) => {
+                            crate::plan::demand::PullDemand::All
+                        }
+                        other => other,
+                    },
+                    value: downstream.value,
+                    order: downstream.order,
+                },
+            },
             ChainOp::Builtin { id, demand_arg } => {
                 propagate_builtin_demand(*id, *demand_arg, downstream)
             }
@@ -179,6 +263,65 @@ mod tests {
 
     fn op_usize(method: BuiltinMethod, n: usize) -> ChainOp {
         ChainOp::builtin_usize(method, n)
+    }
+
+    fn match_op(role: MatchRole) -> ChainOp {
+        ChainOp::match_role(role)
+    }
+
+    #[test]
+    fn match_predicate_classifies_as_filter() {
+        let spec = match_op(MatchRole::Predicate).spec();
+        assert_eq!(spec.cardinality, Cardinality::Filtering);
+        assert_eq!(spec.input, ValueKind::Stream);
+        assert_eq!(spec.output, ValueKind::Stream);
+        assert!(spec.preserves_order);
+    }
+
+    #[test]
+    fn match_transform_classifies_as_map() {
+        let spec = match_op(MatchRole::Transform).spec();
+        assert_eq!(spec.cardinality, Cardinality::OneToOne);
+    }
+
+    #[test]
+    fn match_multi_classifies_as_flat_map() {
+        let spec = match_op(MatchRole::Multi).spec();
+        assert_eq!(spec.cardinality, Cardinality::Expanding);
+    }
+
+    #[test]
+    fn match_predicate_first_scans_until_one_output() {
+        // `match (Predicate) | first` ≡ `filter | first`: scan until one
+        // output is produced.
+        let ops = [match_op(MatchRole::Predicate), op(BuiltinMethod::First)];
+        let demand = source_demand(&ops, Demand::RESULT);
+        assert_eq!(demand.pull, PullDemand::UntilOutput(1));
+        assert_eq!(demand.value, ValueNeed::Whole);
+    }
+
+    #[test]
+    fn match_transform_take_caps_upstream() {
+        // `match (Transform) | take(3)` is 1:1 from match's POV, so the
+        // upstream cap propagates exactly.
+        let ops = [
+            match_op(MatchRole::Transform),
+            op_usize(BuiltinMethod::Take, 3),
+        ];
+        let demand = source_demand(&ops, Demand::RESULT);
+        assert_eq!(demand.pull, PullDemand::FirstInput(3));
+    }
+
+    #[test]
+    fn match_predicate_take_widens_to_scan() {
+        // `match (Predicate) | take(3)`: cannot bound input by 3 since
+        // some rows are dropped. Widens to `UntilOutput(3)`.
+        let ops = [
+            match_op(MatchRole::Predicate),
+            op_usize(BuiltinMethod::Take, 3),
+        ];
+        let demand = source_demand(&ops, Demand::RESULT);
+        assert_eq!(demand.pull, PullDemand::UntilOutput(3));
     }
 
     #[test]

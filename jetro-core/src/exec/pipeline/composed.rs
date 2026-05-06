@@ -18,6 +18,7 @@ use crate::exec::composed as cmp;
 use crate::plan::demand::PullDemand;
 use crate::vm::Program;
 
+use super::ir::program_match_only;
 use super::{
     compute_strategies_with_kernels, ordered_by_key_cmp, row_source, BodyKernel, Pipeline, Sink,
     Source, Stage, StageStrategy,
@@ -99,6 +100,23 @@ impl<'a> ComposedStageBuilder<'a> {
                 }
             }
             (Stage::Builtin(call), _) => Box::new(cmp::BuiltinStage::new(call.clone())),
+            // When a filter / map body is a single `match` expression we
+            // dispatch directly into the flat-IR runtime, skipping VM
+            // stack and opcode-dispatch overhead per row. The detector
+            // accepts a leading `SetCurrent`/`PushCurrent` from lambda
+            // binding so `.filter(match @ with {...})` matches.
+            (Stage::Filter(p, _), _) if let Some(cm) = program_match_only(p) => {
+                Box::new(cmp::MatchFilter {
+                    cm,
+                    ctx: self.vm_ctx(),
+                })
+            }
+            (Stage::Map(p, _), _) if let Some(cm) = program_match_only(p) => {
+                Box::new(cmp::MatchMap {
+                    cm,
+                    ctx: self.vm_ctx(),
+                })
+            }
             (Stage::Filter(p, _), _) => Box::new(cmp::GenericFilter {
                 prog: Arc::clone(p),
                 ctx: self.vm_ctx(),

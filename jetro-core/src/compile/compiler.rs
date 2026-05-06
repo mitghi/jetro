@@ -1094,6 +1094,13 @@ fn compile_match(
     } else {
         None
     };
+    let shared_kind: Option<crate::parse::ast::KindType> = if shared_keys.is_empty()
+        && shared_arr_len.is_none()
+    {
+        detect_shared_kind(typed_arms)
+    } else {
+        None
+    };
     let mut prelude_pending: Vec<u32> = Vec::new();
     if !shared_keys.is_empty() {
         // Object prelude: `ObjCheck` plus one `LoadField` per shared key.
@@ -1120,6 +1127,15 @@ fn compile_match(
             else_pc: u32::MAX,
         });
         prelude_pending.push(p_len);
+    } else if let Some(kind) = shared_kind {
+        // Kind prelude: every arm tests the same scalar kind. Hoist the
+        // single `KindCheck` so per-arm prologue only emits the binding.
+        let p_kind = b.emit(MatchOp::KindCheck {
+            slot: 0,
+            kind,
+            else_pc: u32::MAX,
+        });
+        prelude_pending.push(p_kind);
     }
     let keep_above: u16 = if !shared_keys.is_empty() {
         (shared_keys.len() + 1) as u16
@@ -1170,6 +1186,19 @@ fn compile_match(
                     else_pc: u32::MAX,
                 });
                 b.compile_pat_for_arm(sub_pat, dst, &mut slot_alloc);
+            }
+        } else if shared_kind.is_some() && !is_trailing_catchall {
+            // Kind sharing: every arm is `Pat::Kind` testing the same
+            // scalar kind. The prelude has already verified the kind, so
+            // per-arm codegen only needs to push the optional binding.
+            let Pat::Kind { name, kind: _ } = &arm.pat else {
+                unreachable!("shared-kind invariant: every arm is Pat::Kind");
+            };
+            if let Some(n) = name.as_deref() {
+                b.emit(MatchOp::Bind {
+                    name: Arc::from(n),
+                    slot: 0,
+                });
             }
         } else if shared_arr_len.is_some() && !is_trailing_catchall {
             // Array length sharing: every arm is `Pat::Arr` with the
@@ -1241,13 +1270,28 @@ fn compile_match(
     let max_slots = compute_max_slots(&b.ops);
 
     CompiledMatch {
-        scrutinee: Arc::new(Compiler::compile_sub(scrutinee, ctx)),
+        scrutinee: classify_match_scrutinee(scrutinee, ctx),
         ops: Arc::from(b.ops),
         lits: Arc::from(b.lits),
         guards: Arc::from(b.guards),
         bodies: Arc::from(b.bodies),
         subpats: Arc::from(b.subpats),
         max_slots,
+        is_exhaustive: arms.iter().any(|a| {
+            a.guard.is_none() && matches!(a.pat, Pat::Wild | Pat::Bind(_))
+        }),
+    }
+}
+
+/// Pick the cheapest strategy for evaluating a `match` scrutinee at run
+/// time. `match @ with { ... }` and `match $ with { ... }` skip VM
+/// re-entry entirely by reading directly from `Env::current` /
+/// `Env::root`; everything else compiles a sub-program.
+fn classify_match_scrutinee(expr: &Expr, ctx: &VarCtx) -> crate::vm::MatchScrutinee {
+    match expr {
+        Expr::Current => crate::vm::MatchScrutinee::Current,
+        Expr::Root => crate::vm::MatchScrutinee::Root,
+        _ => crate::vm::MatchScrutinee::Program(Arc::new(Compiler::compile_sub(expr, ctx))),
     }
 }
 
@@ -1266,6 +1310,7 @@ fn compute_max_slots(ops: &[MatchOp]) -> u16 {
             }
             MatchOp::KindCheck { slot, .. }
             | MatchOp::LitEq { slot, .. }
+            | MatchOp::RangeCheck { slot, .. }
             | MatchOp::ObjCheck { slot, .. }
             | MatchOp::LenCheck { slot, .. }
             | MatchOp::TestSubPat { slot, .. }
@@ -1294,6 +1339,31 @@ fn compute_max_slots(ops: &[MatchOp]) -> u16 {
         }
     }
     hi
+}
+
+/// Detect when every arm of a `match` is a `Pat::Kind` pattern testing
+/// the same scalar kind (`s: string`, `n: number`, ...). When applicable
+/// the runtime kind check is hoisted out of every per-arm prologue and
+/// emitted once as a match-level prelude, similar to the object/array
+/// prefix sharing variants.
+fn detect_shared_kind(arms: &[crate::parse::ast::MatchArm]) -> Option<crate::parse::ast::KindType> {
+    use crate::parse::ast::Pat;
+
+    if arms.len() < 2 {
+        return None;
+    }
+    let mut shared: Option<crate::parse::ast::KindType> = None;
+    for arm in arms {
+        let Pat::Kind { kind, .. } = &arm.pat else {
+            return None;
+        };
+        match shared {
+            None => shared = Some(*kind),
+            Some(k) if k == *kind => {}
+            _ => return None,
+        }
+    }
+    shared
 }
 
 /// Detect when every arm of a `match` is a fixed-length array pattern
@@ -1458,6 +1528,7 @@ impl MatchBuilder {
         match &mut self.ops[idx as usize] {
             MatchOp::KindCheck { else_pc, .. }
             | MatchOp::LitEq { else_pc, .. }
+            | MatchOp::RangeCheck { else_pc, .. }
             | MatchOp::ObjCheck { else_pc, .. }
             | MatchOp::LoadField { else_pc, .. }
             | MatchOp::LenCheck { else_pc, .. }
@@ -1492,6 +1563,15 @@ impl MatchBuilder {
                 self.emit_with_pending_else(MatchOp::LitEq {
                     slot,
                     lit: lit_idx,
+                    else_pc: u32::MAX,
+                });
+            }
+            Pat::Range { lo, hi, inclusive } => {
+                self.emit_with_pending_else(MatchOp::RangeCheck {
+                    slot,
+                    lo: *lo,
+                    hi: *hi,
+                    inclusive: *inclusive,
                     else_pc: u32::MAX,
                 });
             }

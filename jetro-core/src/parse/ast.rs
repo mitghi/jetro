@@ -225,6 +225,17 @@ pub enum Pat {
     Arr { elems: Vec<Pat>, rest: Option<Option<String>> },
     /// Type-kind pattern `name: kind` (e.g. `s: str`) — matches a kind, binds the value.
     Kind { name: Option<String>, kind: KindType },
+    /// Numeric range pattern `lo..hi` (exclusive) or `lo..=hi` (inclusive).
+    /// Both bounds are stored as `f64` and compared as floating-point at
+    /// runtime; integer scrutinees are widened transparently.
+    Range {
+        /// Lower bound (inclusive).
+        lo: f64,
+        /// Upper bound (exclusive when `inclusive == false`, inclusive otherwise).
+        hi: f64,
+        /// Whether the upper bound is inclusive.
+        inclusive: bool,
+    },
 }
 
 /// Literal sub-form of `Pat::Lit`. Restricted to scalar literals; arbitrary

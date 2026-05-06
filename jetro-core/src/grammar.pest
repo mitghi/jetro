@@ -208,6 +208,15 @@ pat_lit_int   = @{ "-"? ~ ASCII_DIGIT+ }
 pat_lit_str   = { lit_str_dq | lit_str_sq }
 pat_literal   = { pat_lit_null | pat_lit_true | pat_lit_false | pat_lit_float | pat_lit_int | pat_lit_str }
 
+// Numeric range patterns. `1..10` is half-open `[1, 10)`; `1..=10` is
+// closed `[1, 10]`. Bounds are integer or float literals; mixing the two
+// is allowed (compared as `f64` at runtime). Listed before `pat_literal`
+// in `pat_atom` so the parser does not commit to the leading numeric
+// literal before checking for a range operator.
+pat_range_num    = @{ "-"? ~ ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)? }
+pat_range_op     = @{ "..=" | ".." }
+pat_range        = { pat_range_num ~ pat_range_op ~ pat_range_num }
+
 pat_wild      = @{ "_" ~ !ident_char }
 pat_kind_bind = { ident ~ ":" ~ kind_type }
 pat_kind_only = { kind_type }
@@ -224,6 +233,7 @@ pat_arr            = { "[" ~ (pat_or ~ ("," ~ pat_or)* ~ ("," ~ pat_arr_rest)? ~
 
 pat_atom = {
     pat_wild     |
+    pat_range    |
     pat_literal  |
     pat_kind_bind|
     pat_kind_only|
