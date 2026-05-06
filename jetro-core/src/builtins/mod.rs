@@ -7,7 +7,7 @@
 //! `*_apply`. This module owns the loop and truthy-check logic exactly once.
 
 use crate::context::EvalError;
-use crate::value::Val;
+use crate::data::value::Val;
 use indexmap::IndexMap;
 use std::sync::Arc;
 

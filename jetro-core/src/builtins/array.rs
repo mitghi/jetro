@@ -1,6 +1,6 @@
 use crate::context::EvalError;
 use crate::util::{cmp_vals, is_truthy, zip_arrays};
-use crate::value::Val;
+use crate::data::value::Val;
 use indexmap::IndexMap;
 use std::sync::Arc;
 

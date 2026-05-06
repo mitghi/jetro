@@ -30,19 +30,15 @@ pub(crate) mod builtins;
 pub(crate) mod chain_ir;
 pub(crate) mod composed_pipeline;
 pub(crate) mod context;
+pub(crate) mod data;
 pub(crate) mod executor;
 pub(crate) mod parser;
 pub(crate) mod physical;
 pub(crate) mod physical_eval;
 pub(crate) mod pipeline;
 pub(crate) mod planner;
-pub(crate) mod runtime;
-pub(crate) mod tape;
 pub(crate) mod structural;
 pub(crate) mod util;
-pub(crate) mod value;
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) mod value_view;
 pub(crate) mod view_pipeline;
 pub(crate) mod compiler;
 pub(crate) mod compiler_passes;
@@ -61,7 +57,7 @@ use std::cell::{OnceCell, RefCell};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
-use value::Val;
+use data::value::Val;
 
 pub use context::EvalError;
 #[cfg(test)]
@@ -144,7 +140,7 @@ pub struct Jetro {
 
     /// Lazily parsed simd-json tape; `Err` is cached to avoid re-parsing after failure.
     #[cfg(feature = "simd-json")]
-    tape: OnceCell<std::result::Result<Arc<crate::tape::TapeData>, String>>,
+    tape: OnceCell<std::result::Result<Arc<crate::data::tape::TapeData>, String>>,
     /// Unused placeholder so the field name is consistent regardless of features.
     #[cfg(not(feature = "simd-json"))]
     #[allow(dead_code)]
@@ -157,7 +153,7 @@ pub struct Jetro {
     /// Per-document cache from `Arc<Vec<Val>>` pointer addresses to promoted
     /// `ObjVecData` columnar representations; keyed by pointer to avoid re-promotion.
     pub(crate) objvec_cache:
-        std::sync::Mutex<std::collections::HashMap<usize, Arc<crate::value::ObjVecData>>>,
+        std::sync::Mutex<std::collections::HashMap<usize, Arc<crate::data::value::ObjVecData>>>,
 }
 
 
@@ -298,7 +294,7 @@ impl JetroEngine {
 }
 
 impl pipeline::PipelineData for Jetro {
-    fn promote_objvec(&self, arr: &Arc<Vec<Val>>) -> Option<Arc<crate::value::ObjVecData>> {
+    fn promote_objvec(&self, arr: &Arc<Vec<Val>>) -> Option<Arc<crate::data::value::ObjVecData>> {
         self.get_or_promote_objvec(arr)
     }
 }
@@ -309,7 +305,7 @@ impl Jetro {
     #[cfg(feature = "simd-json")]
     pub(crate) fn lazy_tape(
         &self,
-    ) -> std::result::Result<Option<&Arc<crate::tape::TapeData>>, EvalError> {
+    ) -> std::result::Result<Option<&Arc<crate::data::tape::TapeData>>, EvalError> {
         if let Some(result) = self.tape.get() {
             return result
                 .as_ref()
@@ -320,7 +316,7 @@ impl Jetro {
             return Ok(None);
         };
         let bytes: Vec<u8> = (**raw).to_vec();
-        let parsed = crate::tape::TapeData::parse(bytes).map_err(|err| err.to_string());
+        let parsed = crate::data::tape::TapeData::parse(bytes).map_err(|err| err.to_string());
         let _ = self.tape.set(parsed);
         self.tape
             .get()
@@ -335,7 +331,7 @@ impl Jetro {
     pub(crate) fn get_or_promote_objvec(
         &self,
         arr: &Arc<Vec<Val>>,
-    ) -> Option<Arc<crate::value::ObjVecData>> {
+    ) -> Option<Arc<crate::data::value::ObjVecData>> {
         let key = Arc::as_ptr(arr) as usize;
         if let Ok(cache) = self.objvec_cache.lock() {
             if let Some(d) = cache.get(&key) {

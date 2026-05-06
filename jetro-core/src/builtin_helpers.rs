@@ -2,7 +2,7 @@
 //! Utility functions for case conversion, base64, and string formatting
 //! that would be noise inside the large `builtins.rs` dispatch table.
 
-use crate::value::Val;
+use crate::data::value::Val;
 
 /// Split a camelCase, snake_case, or kebab-case string into lowercase words.
 /// Used by case-conversion builtins such as `snake_case` and `camel_case`.

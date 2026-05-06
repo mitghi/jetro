@@ -2,7 +2,7 @@
 //! Tracks running sum, count, min, and max in a single pass so `avg`, `sum`,
 //! `min`, `max`, and `count` share one loop over the source elements.
 
-use crate::value::Val;
+use crate::data::value::Val;
 
 use super::{num_finalise, num_fold, ReducerOp, ReducerSpec};
 

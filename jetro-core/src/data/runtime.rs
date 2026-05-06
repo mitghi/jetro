@@ -12,7 +12,7 @@ use crate::ast::{Arg, Expr};
 use crate::context::{Env, EvalError};
 use crate::physical::PipelinePlanSource;
 use crate::pipeline::{self, PipelineBody};
-use crate::value::Val;
+use crate::data::value::Val;
 use crate::vm::{CompiledCall, VM};
 
 /// Allows `physical_eval`'s `ExecCtx` to hand a pipeline-source resolution

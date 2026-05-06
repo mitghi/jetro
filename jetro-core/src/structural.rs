@@ -17,7 +17,7 @@ use crate::ast::{Arg, BinOp, Expr, KindType, ObjField, Step};
 use crate::builtin_registry::{self, BuiltinId};
 use crate::builtins::{BuiltinMethod, BuiltinStructural};
 use crate::context::EvalError;
-use crate::value::Val;
+use crate::data::value::Val;
 
 /// A compiled structural deep-search plan. Carried inside `PlanNode::Structural`
 /// and evaluated by `physical_eval` against a `StructuralIndex`.

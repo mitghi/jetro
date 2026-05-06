@@ -1,5 +1,5 @@
 use crate::context::EvalError;
-use crate::value::Val;
+use crate::data::value::Val;
 use std::sync::Arc;
 
 fn compile_regex_eval(pat: &str) -> Result<Arc<regex::Regex>, EvalError> {

@@ -14,9 +14,9 @@ use crate::physical::{
     PhysicalPathStep, PipelinePlanSource, PlanNode, QueryPlan,
 };
 use crate::pipeline;
-use crate::runtime::{PipelineSourceResolver, ResolvedPipelineSource};
-use crate::value::Val;
-use crate::value_view::{ValView, ValueView};
+use crate::data::runtime::{PipelineSourceResolver, ResolvedPipelineSource};
+use crate::data::value::Val;
+use crate::data::view::{ValView, ValueView};
 use crate::view_pipeline;
 use crate::{Jetro, VM};
 
@@ -464,7 +464,7 @@ impl ExecCtx<'_> {
                 Ok(tape) => tape,
                 Err(err) => return Some(Err(err)),
             } {
-                let root = crate::value_view::TapeView::root(tape);
+                let root = crate::data::view::TapeView::root(tape);
                 let source = view_pipeline::walk_fields(root, keys);
                 let env = self.null_env_with_fast_locals();
                 return view_pipeline::run_with_env(source, body, Some(self.j), &env);
@@ -509,7 +509,7 @@ impl ExecCtx<'_> {
                 Ok(tape) => tape,
                 Err(err) => return Some(Err(err)),
             } {
-                let root = crate::value_view::TapeView::root(tape);
+                let root = crate::data::view::TapeView::root(tape);
                 let source = view_pipeline::walk_fields(root, keys);
                 let pipeline = body
                     .clone()
@@ -558,7 +558,7 @@ impl ExecCtx<'_> {
             Ok(tape) => tape,
             Err(err) => return Some(Err(err)),
         } {
-            let root = crate::value_view::TapeView::root(tape);
+            let root = crate::data::view::TapeView::root(tape);
             return Some(Ok(walk_path_view(root, steps).materialize()));
         }
         None

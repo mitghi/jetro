@@ -5,7 +5,7 @@
 
 use crate::{
     builtins::{BuiltinSelectionPosition, BuiltinSinkAccumulator},
-    value::Val,
+    data::value::Val,
 };
 
 use super::{ReducerAccumulator, Sink};

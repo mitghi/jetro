@@ -290,7 +290,7 @@ mod tests {
         BodyKernel, NumOp, PipelineBody, ReducerOp, ReducerSpec, Sink, Stage, ViewInputMode,
         ViewMaterialization, ViewOutputMode, ViewSinkCapability, ViewStageCapability,
     };
-    use crate::value::Val;
+    use crate::data::value::Val;
 
     use super::{view_capabilities, view_prefix_capabilities};
 

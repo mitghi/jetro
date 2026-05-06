@@ -20,7 +20,7 @@ use crate::physical::{
 };
 use crate::pipeline::{Pipeline, Source};
 use crate::structural::{StructuralPathStep, StructuralPlan};
-use crate::value::Val;
+use crate::data::value::Val;
 
 /// Accumulates `PhysicalNode`s as the AST is lowered and tracks lexical state
 /// needed to distinguish let-bound locals from bare field identifiers.

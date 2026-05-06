@@ -73,9 +73,9 @@ impl Builtin for Filter {
     #[inline]
     fn apply_stream(
         ctx: &mut super::builtin::StreamCtx<'_, '_>,
-        item: crate::value::Val,
+        item: crate::data::value::Val,
         body: Option<&crate::vm::Program>,
-    ) -> Result<crate::pipeline::StageFlow<crate::value::Val>, crate::context::EvalError> {
+    ) -> Result<crate::pipeline::StageFlow<crate::data::value::Val>, crate::context::EvalError> {
         let prog = body.expect("filter body");
         let keep = super::filter_one(&item, |v| {
             crate::pipeline::eval_kernel(ctx.kernel, v, |it| {
@@ -91,7 +91,7 @@ impl Builtin for Filter {
 #[inline]
     fn apply_barrier(
         ctx: &mut super::builtin::BarrierCtx<'_>,
-        buf: &mut Vec<crate::value::Val>,
+        buf: &mut Vec<crate::data::value::Val>,
         body: Option<&crate::vm::Program>,
     ) -> Option<Result<(), crate::context::EvalError>> {
         let prog = body?;
@@ -139,7 +139,7 @@ impl Builtin for Compact {
         BuiltinSpec::new(BuiltinCategory::StreamingFilter, BuiltinCardinality::Filtering).cost(10.0)
     }
     #[inline]
-    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+    fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
         Some(super::compact_apply(recv).unwrap_or_else(|| recv.clone()))
     }
 }
@@ -154,7 +154,7 @@ impl Builtin for Remove {
         BuiltinSpec::new(BuiltinCategory::StreamingFilter, BuiltinCardinality::Filtering).cost(10.0)
     }
     #[inline]
-    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
             super::BuiltinArgs::Val(item) => Some(super::remove_value_apply(recv, item).unwrap_or_else(|| recv.clone())),
             _ => None,
@@ -185,9 +185,9 @@ impl Builtin for Map {
     #[inline]
     fn apply_stream(
         ctx: &mut super::builtin::StreamCtx<'_, '_>,
-        item: crate::value::Val,
+        item: crate::data::value::Val,
         body: Option<&crate::vm::Program>,
-    ) -> Result<crate::pipeline::StageFlow<crate::value::Val>, crate::context::EvalError> {
+    ) -> Result<crate::pipeline::StageFlow<crate::data::value::Val>, crate::context::EvalError> {
         let prog = body.expect("map body");
         // Terminal-map collector short-circuit (avoid allocating intermediate Val).
         if Some(ctx.stage_idx) == ctx.terminal_map_idx {
@@ -210,7 +210,7 @@ impl Builtin for Map {
     #[inline]
     fn apply_barrier(
         ctx: &mut super::builtin::BarrierCtx<'_>,
-        buf: &mut Vec<crate::value::Val>,
+        buf: &mut Vec<crate::data::value::Val>,
         body: Option<&crate::vm::Program>,
     ) -> Option<Result<(), crate::context::EvalError>> {
         let prog = body?;
@@ -245,11 +245,11 @@ impl Builtin for FlatMap {
     #[inline]
     fn apply_barrier(
         ctx: &mut super::builtin::BarrierCtx<'_>,
-        buf: &mut Vec<crate::value::Val>,
+        buf: &mut Vec<crate::data::value::Val>,
         body: Option<&crate::vm::Program>,
     ) -> Option<Result<(), crate::context::EvalError>> {
         let prog = body?;
-        let mut out: Vec<crate::value::Val> = Vec::new();
+        let mut out: Vec<crate::data::value::Val> = Vec::new();
         for v in buf.iter() {
             let inner = match crate::pipeline::eval_kernel(ctx.kernel, v, |item| {
                 crate::pipeline::apply_item_in_env(ctx.vm, ctx.env, item, prog)
@@ -289,9 +289,9 @@ impl Builtin for Take {
     #[inline]
     fn apply_stream(
         ctx: &mut super::builtin::StreamCtx<'_, '_>,
-        item: crate::value::Val,
+        item: crate::data::value::Val,
         _body: Option<&crate::vm::Program>,
-    ) -> Result<crate::pipeline::StageFlow<crate::value::Val>, crate::context::EvalError> {
+    ) -> Result<crate::pipeline::StageFlow<crate::data::value::Val>, crate::context::EvalError> {
         let n = match ctx.stage.descriptor().and_then(|d| d.usize_arg) {
             Some(n) => n,
             None => return Ok(crate::pipeline::StageFlow::Continue(item)),
@@ -307,7 +307,7 @@ impl Builtin for Take {
     #[inline]
     fn apply_barrier(
         ctx: &mut super::builtin::BarrierCtx<'_>,
-        buf: &mut Vec<crate::value::Val>,
+        buf: &mut Vec<crate::data::value::Val>,
         _body: Option<&crate::vm::Program>,
     ) -> Option<Result<(), crate::context::EvalError>> {
         let n = ctx.stage.descriptor().and_then(|d| d.usize_arg)?;
@@ -336,9 +336,9 @@ impl Builtin for Skip {
     #[inline]
     fn apply_stream(
         ctx: &mut super::builtin::StreamCtx<'_, '_>,
-        item: crate::value::Val,
+        item: crate::data::value::Val,
         _body: Option<&crate::vm::Program>,
-    ) -> Result<crate::pipeline::StageFlow<crate::value::Val>, crate::context::EvalError> {
+    ) -> Result<crate::pipeline::StageFlow<crate::data::value::Val>, crate::context::EvalError> {
         let n = match ctx.stage.descriptor().and_then(|d| d.usize_arg) {
             Some(n) => n,
             None => return Ok(crate::pipeline::StageFlow::Continue(item)),
@@ -354,7 +354,7 @@ impl Builtin for Skip {
     #[inline]
     fn apply_barrier(
         ctx: &mut super::builtin::BarrierCtx<'_>,
-        buf: &mut Vec<crate::value::Val>,
+        buf: &mut Vec<crate::data::value::Val>,
         _body: Option<&crate::vm::Program>,
     ) -> Option<Result<(), crate::context::EvalError>> {
         let n = ctx.stage.descriptor().and_then(|d| d.usize_arg)?;
@@ -381,7 +381,7 @@ impl Builtin for First {
             .lowering(BuiltinPipelineLowering::TerminalSink)
     }
     #[inline]
-    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
             super::BuiltinArgs::I64(n) => { super::first_apply(recv, *n) }
             _ => None,
@@ -403,7 +403,7 @@ impl Builtin for Last {
             .lowering(BuiltinPipelineLowering::TerminalSink)
     }
     #[inline]
-    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
             super::BuiltinArgs::I64(n) => { super::last_apply(recv, *n) }
             _ => None,
@@ -438,9 +438,9 @@ impl Builtin for TakeWhile {
     #[inline]
     fn apply_stream(
         ctx: &mut super::builtin::StreamCtx<'_, '_>,
-        item: crate::value::Val,
+        item: crate::data::value::Val,
         body: Option<&crate::vm::Program>,
-    ) -> Result<crate::pipeline::StageFlow<crate::value::Val>, crate::context::EvalError> {
+    ) -> Result<crate::pipeline::StageFlow<crate::data::value::Val>, crate::context::EvalError> {
         let prog = body.expect("take_while body");
         let pass = super::take_while_one(&item, |v| {
             crate::pipeline::eval_kernel(ctx.kernel, v, |it| {
@@ -457,7 +457,7 @@ impl Builtin for TakeWhile {
     #[inline]
     fn apply_barrier(
         ctx: &mut super::builtin::BarrierCtx<'_>,
-        buf: &mut Vec<crate::value::Val>,
+        buf: &mut Vec<crate::data::value::Val>,
         body: Option<&crate::vm::Program>,
     ) -> Option<Result<(), crate::context::EvalError>> {
         let prog = body?;
@@ -501,16 +501,16 @@ impl Builtin for DropWhile {
     #[inline]
     fn apply_stream(
         _ctx: &mut super::builtin::StreamCtx<'_, '_>,
-        item: crate::value::Val,
+        item: crate::data::value::Val,
         _body: Option<&crate::vm::Program>,
-    ) -> Result<crate::pipeline::StageFlow<crate::value::Val>, crate::context::EvalError> {
+    ) -> Result<crate::pipeline::StageFlow<crate::data::value::Val>, crate::context::EvalError> {
         Ok(crate::pipeline::StageFlow::Continue(item))
     }
 
     #[inline]
     fn apply_barrier(
         ctx: &mut super::builtin::BarrierCtx<'_>,
-        buf: &mut Vec<crate::value::Val>,
+        buf: &mut Vec<crate::data::value::Val>,
         body: Option<&crate::vm::Program>,
     ) -> Option<Result<(), crate::context::EvalError>> {
         let prog = body?;
@@ -541,7 +541,7 @@ impl Builtin for Len {
             .count_sink()
     }
     #[inline]
-    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+    fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
         Some(super::len_apply(recv).unwrap_or_else(|| recv.clone()))
     }
 }
@@ -662,11 +662,11 @@ impl Builtin for FindIndex {
     #[inline]
     fn apply_barrier(
         ctx: &mut super::builtin::BarrierCtx<'_>,
-        buf: &mut Vec<crate::value::Val>,
+        buf: &mut Vec<crate::data::value::Val>,
         body: Option<&crate::vm::Program>,
     ) -> Option<Result<(), crate::context::EvalError>> {
         let prog = body?;
-        let mut found: crate::value::Val = crate::value::Val::Null;
+        let mut found: crate::data::value::Val = crate::data::value::Val::Null;
         for (i, v) in buf.iter().enumerate() {
             match super::filter_one(v, |item| {
                 crate::pipeline::eval_kernel(ctx.kernel, item, |it| {
@@ -674,7 +674,7 @@ impl Builtin for FindIndex {
                 })
             }) {
                 Ok(true) => {
-                    found = crate::value::Val::Int(i as i64);
+                    found = crate::data::value::Val::Int(i as i64);
                     break;
                 }
                 Ok(false) => {}
@@ -699,7 +699,7 @@ impl Builtin for IndicesWhere {
     #[inline]
     fn apply_barrier(
         ctx: &mut super::builtin::BarrierCtx<'_>,
-        buf: &mut Vec<crate::value::Val>,
+        buf: &mut Vec<crate::data::value::Val>,
         body: Option<&crate::vm::Program>,
     ) -> Option<Result<(), crate::context::EvalError>> {
         let prog = body?;
@@ -715,7 +715,7 @@ impl Builtin for IndicesWhere {
                 Err(err) => return Some(Err(err)),
             }
         }
-        *buf = vec![crate::value::Val::int_vec(out)];
+        *buf = vec![crate::data::value::Val::int_vec(out)];
         Some(Ok(()))
     }
 }
@@ -724,13 +724,13 @@ impl Builtin for IndicesWhere {
 #[inline]
 fn arg_extreme_apply_barrier(
     ctx: &mut super::builtin::BarrierCtx<'_>,
-    buf: &mut Vec<crate::value::Val>,
+    buf: &mut Vec<crate::data::value::Val>,
     body: Option<&crate::vm::Program>,
     max: bool,
 ) -> Option<Result<(), crate::context::EvalError>> {
     let prog = body?;
     if buf.is_empty() {
-        *buf = vec![crate::value::Val::Null];
+        *buf = vec![crate::data::value::Val::Null];
         return Some(Ok(()));
     }
     let mut best_idx = 0usize;
@@ -776,7 +776,7 @@ impl Builtin for MaxBy {
     #[inline]
     fn apply_barrier(
         ctx: &mut super::builtin::BarrierCtx<'_>,
-        buf: &mut Vec<crate::value::Val>,
+        buf: &mut Vec<crate::data::value::Val>,
         body: Option<&crate::vm::Program>,
     ) -> Option<Result<(), crate::context::EvalError>> {
         arg_extreme_apply_barrier(ctx, buf, body, true)
@@ -796,7 +796,7 @@ impl Builtin for MinBy {
     #[inline]
     fn apply_barrier(
         ctx: &mut super::builtin::BarrierCtx<'_>,
-        buf: &mut Vec<crate::value::Val>,
+        buf: &mut Vec<crate::data::value::Val>,
         body: Option<&crate::vm::Program>,
     ) -> Option<Result<(), crate::context::EvalError>> {
         arg_extreme_apply_barrier(ctx, buf, body, false)
@@ -817,7 +817,7 @@ impl Builtin for Enumerate {
             .element()
     }
     #[inline]
-    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+    fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
         Some(super::enumerate_apply(recv).unwrap_or_else(|| recv.clone()))
     }
 }
@@ -834,7 +834,7 @@ impl Builtin for Pairwise {
             .element()
     }
     #[inline]
-    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+    fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
         Some(super::pairwise_apply(recv).unwrap_or_else(|| recv.clone()))
     }
 }
@@ -853,7 +853,7 @@ impl Builtin for Flatten {
     const NAME: &'static str = "flatten";
     fn spec() -> BuiltinSpec { expand_simple_spec() }
     #[inline]
-    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
             super::BuiltinArgs::Usize(depth) => { super::flatten_depth_apply(recv, *depth) }
             _ => None,
@@ -868,7 +868,7 @@ impl Builtin for Explode {
     const NAME: &'static str = "explode";
     fn spec() -> BuiltinSpec { expand_simple_spec() }
     #[inline]
-    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
             super::BuiltinArgs::Str(field) => { super::explode_apply(recv, field) }
             _ => None,
@@ -894,7 +894,7 @@ impl Builtin for Split {
             .lowering(BuiltinPipelineLowering::StringArg)
     }
     #[inline]
-    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
             super::BuiltinArgs::Str(p) => { super::split_apply(recv, p) }
             _ => None,
@@ -916,7 +916,7 @@ impl Builtin for Lines {
     const NAME: &'static str = "lines";
     fn spec() -> BuiltinSpec { expand_element_spec() }
     #[inline]
-    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+    fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
         Some(super::lines_apply(recv).unwrap_or_else(|| recv.clone()))
     }
 }
@@ -928,7 +928,7 @@ impl Builtin for Words {
     const NAME: &'static str = "words";
     fn spec() -> BuiltinSpec { expand_element_spec() }
     #[inline]
-    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+    fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
         Some(super::words_apply(recv).unwrap_or_else(|| recv.clone()))
     }
 }
@@ -940,7 +940,7 @@ impl Builtin for Chars {
     const NAME: &'static str = "chars";
     fn spec() -> BuiltinSpec { expand_element_spec() }
     #[inline]
-    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+    fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
         Some(super::chars_apply(recv).unwrap_or_else(|| recv.clone()))
     }
 }
@@ -952,7 +952,7 @@ impl Builtin for CharsOf {
     const NAME: &'static str = "chars_of";
     fn spec() -> BuiltinSpec { expand_element_spec() }
     #[inline]
-    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+    fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
         Some(super::chars_of_apply(recv).unwrap_or_else(|| recv.clone()))
     }
 }
@@ -964,7 +964,7 @@ impl Builtin for Bytes {
     const NAME: &'static str = "bytes";
     fn spec() -> BuiltinSpec { expand_element_spec() }
     #[inline]
-    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+    fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
         Some(super::bytes_of_apply(recv).unwrap_or_else(|| recv.clone()))
     }
 }
@@ -1014,7 +1014,7 @@ impl Builtin for Nth {
     const NAME: &'static str = "nth";
     fn spec() -> BuiltinSpec { positional_native_spec() }
     #[inline]
-    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
             super::BuiltinArgs::I64(n) => { super::nth_any_apply(recv, *n) }
             _ => None,
@@ -1029,7 +1029,7 @@ impl Builtin for Collect {
     const NAME: &'static str = "collect";
     fn spec() -> BuiltinSpec { positional_native_spec() }
     #[inline]
-    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+    fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
         Some(super::collect_apply(recv))
     }
 }
@@ -1056,7 +1056,7 @@ impl Builtin for Sort {
     #[inline]
     fn apply_barrier(
         ctx: &mut super::builtin::BarrierCtx<'_>,
-        buf: &mut Vec<crate::value::Val>,
+        buf: &mut Vec<crate::data::value::Val>,
         body: Option<&crate::vm::Program>,
     ) -> Option<Result<(), crate::context::EvalError>> {
         let _ = body;
@@ -1076,7 +1076,7 @@ impl Builtin for Sort {
                     std::mem::take(buf), descending, strategy, |v| {
                         Ok(crate::pipeline::eval_kernel(ctx.kernel, v, |item| {
                             crate::pipeline::apply_item_in_env(ctx.vm, ctx.env, item, &key_prog)
-                        }).unwrap_or(crate::value::Val::Null))
+                        }).unwrap_or(crate::data::value::Val::Null))
                     },
                 )
             }
@@ -1124,7 +1124,7 @@ impl Builtin for Window {
     #[inline]
     fn apply_barrier(
         ctx: &mut super::builtin::BarrierCtx<'_>,
-        buf: &mut Vec<crate::value::Val>,
+        buf: &mut Vec<crate::data::value::Val>,
         _body: Option<&crate::vm::Program>,
     ) -> Option<Result<(), crate::context::EvalError>> {
         let n = ctx.stage.descriptor().and_then(|d| d.usize_arg)?;
@@ -1154,7 +1154,7 @@ impl Builtin for Chunk {
     #[inline]
     fn apply_barrier(
         ctx: &mut super::builtin::BarrierCtx<'_>,
-        buf: &mut Vec<crate::value::Val>,
+        buf: &mut Vec<crate::data::value::Val>,
         _body: Option<&crate::vm::Program>,
     ) -> Option<Result<(), crate::context::EvalError>> {
         let n = ctx.stage.descriptor().and_then(|d| d.usize_arg)?;
@@ -1170,7 +1170,7 @@ impl Builtin for RollingSum {
     const NAME: &'static str = "rolling_sum";
     fn spec() -> BuiltinSpec { barrier_default_spec() }
     #[inline]
-    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
             super::BuiltinArgs::Usize(n) => { super::rolling_sum_apply(recv, *n) }
             _ => None,
@@ -1185,7 +1185,7 @@ impl Builtin for RollingAvg {
     const NAME: &'static str = "rolling_avg";
     fn spec() -> BuiltinSpec { barrier_default_spec() }
     #[inline]
-    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
             super::BuiltinArgs::Usize(n) => { super::rolling_avg_apply(recv, *n) }
             _ => None,
@@ -1200,7 +1200,7 @@ impl Builtin for RollingMin {
     const NAME: &'static str = "rolling_min";
     fn spec() -> BuiltinSpec { barrier_default_spec() }
     #[inline]
-    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
             super::BuiltinArgs::Usize(n) => { super::rolling_min_apply(recv, *n) }
             _ => None,
@@ -1215,7 +1215,7 @@ impl Builtin for RollingMax {
     const NAME: &'static str = "rolling_max";
     fn spec() -> BuiltinSpec { barrier_default_spec() }
     #[inline]
-    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
             super::BuiltinArgs::Usize(n) => { super::rolling_max_apply(recv, *n) }
             _ => None,
@@ -1251,7 +1251,7 @@ impl Builtin for GroupBy {
     #[inline]
     fn apply_barrier(
         ctx: &mut super::builtin::BarrierCtx<'_>,
-        buf: &mut Vec<crate::value::Val>,
+        buf: &mut Vec<crate::data::value::Val>,
         body: Option<&crate::vm::Program>,
     ) -> Option<Result<(), crate::context::EvalError>> {
         let _ = body;
@@ -1267,7 +1267,7 @@ impl Builtin for GroupBy {
         });
         match result {
             Ok(out_obj) => {
-                *buf = vec![crate::value::Val::Obj(std::sync::Arc::new(out_obj))];
+                *buf = vec![crate::data::value::Val::Obj(std::sync::Arc::new(out_obj))];
                 Some(Ok(()))
             }
             Err(err) => Some(Err(err)),
@@ -1300,7 +1300,7 @@ impl Builtin for CountBy {
     #[inline]
     fn apply_barrier(
         ctx: &mut super::builtin::BarrierCtx<'_>,
-        buf: &mut Vec<crate::value::Val>,
+        buf: &mut Vec<crate::data::value::Val>,
         body: Option<&crate::vm::Program>,
     ) -> Option<Result<(), crate::context::EvalError>> {
         let prog = body?;
@@ -1311,7 +1311,7 @@ impl Builtin for CountBy {
         });
         match result {
             Ok(map) => {
-                *buf = vec![crate::value::Val::obj(map)];
+                *buf = vec![crate::data::value::Val::obj(map)];
                 Some(Ok(()))
             }
             Err(err) => Some(Err(err)),
@@ -1344,7 +1344,7 @@ impl Builtin for IndexBy {
     #[inline]
     fn apply_barrier(
         ctx: &mut super::builtin::BarrierCtx<'_>,
-        buf: &mut Vec<crate::value::Val>,
+        buf: &mut Vec<crate::data::value::Val>,
         body: Option<&crate::vm::Program>,
     ) -> Option<Result<(), crate::context::EvalError>> {
         let prog = body?;
@@ -1355,7 +1355,7 @@ impl Builtin for IndexBy {
         });
         match result {
             Ok(map) => {
-                *buf = vec![crate::value::Val::obj(map)];
+                *buf = vec![crate::data::value::Val::obj(map)];
                 Some(Ok(()))
             }
             Err(err) => Some(Err(err)),
@@ -1384,7 +1384,7 @@ fn unique_spec() -> BuiltinSpec {
 #[inline]
 fn unique_apply_barrier(
     ctx: &mut super::builtin::BarrierCtx<'_>,
-    buf: &mut Vec<crate::value::Val>,
+    buf: &mut Vec<crate::data::value::Val>,
     body: Option<&crate::vm::Program>,
 ) -> Option<Result<(), crate::context::EvalError>> {
     match body {
@@ -1399,10 +1399,10 @@ fn unique_apply_barrier(
                 let key = crate::pipeline::eval_kernel(ctx.kernel, v, |item| {
                     crate::pipeline::apply_item_in_env(ctx.vm, ctx.env, item, prog)
                 })
-                .unwrap_or(crate::value::Val::Null);
+                .unwrap_or(crate::data::value::Val::Null);
                 keep.push(seen.insert(format!("{:?}", key)));
             }
-            let mut out: Vec<crate::value::Val> = Vec::with_capacity(buf.len());
+            let mut out: Vec<crate::data::value::Val> = Vec::with_capacity(buf.len());
             for (i, v) in std::mem::take(buf).into_iter().enumerate() {
                 if keep[i] {
                     out.push(v);
@@ -1424,13 +1424,13 @@ impl Builtin for Unique {
         unique_spec().lowering(BuiltinPipelineLowering::Nullary)
     }
     #[inline]
-    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+    fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
         Some(super::unique_arr_apply(recv).unwrap_or_else(|| recv.clone()))
     }
     #[inline]
     fn apply_barrier(
         ctx: &mut super::builtin::BarrierCtx<'_>,
-        buf: &mut Vec<crate::value::Val>,
+        buf: &mut Vec<crate::data::value::Val>,
         body: Option<&crate::vm::Program>,
     ) -> Option<Result<(), crate::context::EvalError>> {
         unique_apply_barrier(ctx, buf, body)
@@ -1448,7 +1448,7 @@ impl Builtin for UniqueBy {
     #[inline]
     fn apply_barrier(
         ctx: &mut super::builtin::BarrierCtx<'_>,
-        buf: &mut Vec<crate::value::Val>,
+        buf: &mut Vec<crate::data::value::Val>,
         body: Option<&crate::vm::Program>,
     ) -> Option<Result<(), crate::context::EvalError>> {
         unique_apply_barrier(ctx, buf, body)
@@ -1471,14 +1471,14 @@ impl Builtin for Reverse {
             .lowering(BuiltinPipelineLowering::Nullary)
     }
     #[inline]
-    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+    fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
         Some(super::reverse_any_apply(recv).unwrap_or_else(|| recv.clone()))
     }
 
     #[inline]
     fn apply_barrier(
         _ctx: &mut super::builtin::BarrierCtx<'_>,
-        buf: &mut Vec<crate::value::Val>,
+        buf: &mut Vec<crate::data::value::Val>,
         _body: Option<&crate::vm::Program>,
     ) -> Option<Result<(), crate::context::EvalError>> {
         buf.reverse();
@@ -1500,7 +1500,7 @@ impl Builtin for Append {
     const NAME: &'static str = "append";
     fn spec() -> BuiltinSpec { barrier_simple_spec() }
     #[inline]
-    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
             super::BuiltinArgs::Val(item) => Some(super::append_apply(recv, item).unwrap_or_else(|| recv.clone())),
             _ => None,
@@ -1515,7 +1515,7 @@ impl Builtin for Prepend {
     const NAME: &'static str = "prepend";
     fn spec() -> BuiltinSpec { barrier_simple_spec() }
     #[inline]
-    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
             super::BuiltinArgs::Val(item) => Some(super::prepend_apply(recv, item).unwrap_or_else(|| recv.clone())),
             _ => None,
@@ -1530,9 +1530,9 @@ impl Builtin for Diff {
     const NAME: &'static str = "diff";
     fn spec() -> BuiltinSpec { barrier_simple_spec() }
     #[inline]
-    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
-            super::BuiltinArgs::ValVec(other) => { let arr_recv = recv.clone().into_vec().map(crate::value::Val::arr)?; super::diff_apply(&arr_recv, other) }
+            super::BuiltinArgs::ValVec(other) => { let arr_recv = recv.clone().into_vec().map(crate::data::value::Val::arr)?; super::diff_apply(&arr_recv, other) }
             _ => None,
         }
     }
@@ -1545,9 +1545,9 @@ impl Builtin for Intersect {
     const NAME: &'static str = "intersect";
     fn spec() -> BuiltinSpec { barrier_simple_spec() }
     #[inline]
-    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
-            super::BuiltinArgs::ValVec(other) => { let arr_recv = recv.clone().into_vec().map(crate::value::Val::arr)?; super::intersect_apply(&arr_recv, other) }
+            super::BuiltinArgs::ValVec(other) => { let arr_recv = recv.clone().into_vec().map(crate::data::value::Val::arr)?; super::intersect_apply(&arr_recv, other) }
             _ => None,
         }
     }
@@ -1560,9 +1560,9 @@ impl Builtin for Union {
     const NAME: &'static str = "union";
     fn spec() -> BuiltinSpec { barrier_simple_spec() }
     #[inline]
-    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
-            super::BuiltinArgs::ValVec(other) => { let arr_recv = recv.clone().into_vec().map(crate::value::Val::arr)?; super::union_apply(&arr_recv, other) }
+            super::BuiltinArgs::ValVec(other) => { let arr_recv = recv.clone().into_vec().map(crate::data::value::Val::arr)?; super::union_apply(&arr_recv, other) }
             _ => None,
         }
     }
@@ -1575,7 +1575,7 @@ impl Builtin for Join {
     const NAME: &'static str = "join";
     fn spec() -> BuiltinSpec { barrier_simple_spec() }
     #[inline]
-    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
             super::BuiltinArgs::Str(sep) => Some(super::join_apply(recv, sep).unwrap_or_else(|| recv.clone())),
             _ => None,
@@ -1629,7 +1629,7 @@ impl Builtin for Keys {
     const NAME: &'static str = "keys";
     fn spec() -> BuiltinSpec { object_element_spec() }
     #[inline]
-    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+    fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
         Some(super::keys_apply(recv))
     }
 }
@@ -1641,7 +1641,7 @@ impl Builtin for Values {
     const NAME: &'static str = "values";
     fn spec() -> BuiltinSpec { object_element_spec() }
     #[inline]
-    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+    fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
         Some(super::values_apply(recv))
     }
 }
@@ -1653,7 +1653,7 @@ impl Builtin for Entries {
     const NAME: &'static str = "entries";
     fn spec() -> BuiltinSpec { object_element_spec() }
     #[inline]
-    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+    fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
         Some(super::entries_apply(recv))
     }
 }
@@ -1670,7 +1670,7 @@ impl Builtin for ToPairs {
     const NAME: &'static str = "to_pairs";
     fn spec() -> BuiltinSpec { object_simple_spec() }
     #[inline]
-    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+    fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
         Some(super::to_pairs_apply(recv).unwrap_or_else(|| recv.clone()))
     }
 }
@@ -1682,7 +1682,7 @@ impl Builtin for FromPairs {
     const NAME: &'static str = "from_pairs";
     fn spec() -> BuiltinSpec { object_simple_spec() }
     #[inline]
-    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+    fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
         Some(super::from_pairs_apply(recv).unwrap_or_else(|| recv.clone()))
     }
 }
@@ -1694,7 +1694,7 @@ impl Builtin for Invert {
     const NAME: &'static str = "invert";
     fn spec() -> BuiltinSpec { object_simple_spec() }
     #[inline]
-    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+    fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
         Some(super::invert_apply(recv).unwrap_or_else(|| recv.clone()))
     }
 }
@@ -1706,7 +1706,7 @@ impl Builtin for Pick {
     const NAME: &'static str = "pick";
     fn spec() -> BuiltinSpec { object_simple_spec() }
     #[inline]
-    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
             super::BuiltinArgs::StrVec(keys) => { super::pick_apply(recv, keys) }
             _ => None,
@@ -1721,7 +1721,7 @@ impl Builtin for Omit {
     const NAME: &'static str = "omit";
     fn spec() -> BuiltinSpec { object_simple_spec() }
     #[inline]
-    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
             super::BuiltinArgs::StrVec(keys) => { super::omit_apply(recv, keys) }
             _ => None,
@@ -1736,7 +1736,7 @@ impl Builtin for Merge {
     const NAME: &'static str = "merge";
     fn spec() -> BuiltinSpec { object_simple_spec() }
     #[inline]
-    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
             super::BuiltinArgs::Val(other) => { super::merge_apply(recv, other) }
             _ => None,
@@ -1751,7 +1751,7 @@ impl Builtin for DeepMerge {
     const NAME: &'static str = "deep_merge";
     fn spec() -> BuiltinSpec { object_simple_spec() }
     #[inline]
-    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
             super::BuiltinArgs::Val(other) => { super::deep_merge_apply(recv, other) }
             _ => None,
@@ -1766,7 +1766,7 @@ impl Builtin for Defaults {
     const NAME: &'static str = "defaults";
     fn spec() -> BuiltinSpec { object_simple_spec() }
     #[inline]
-    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
             super::BuiltinArgs::Val(other) => { super::defaults_apply(recv, other) }
             _ => None,
@@ -1781,7 +1781,7 @@ impl Builtin for Rename {
     const NAME: &'static str = "rename";
     fn spec() -> BuiltinSpec { object_simple_spec() }
     #[inline]
-    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
             super::BuiltinArgs::Val(other) => { super::rename_apply(recv, other) }
             _ => None,
@@ -1804,7 +1804,7 @@ impl Builtin for Implode {
     const NAME: &'static str = "implode";
     fn spec() -> BuiltinSpec { object_simple_spec() }
     #[inline]
-    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
             super::BuiltinArgs::Str(field) => { super::implode_apply(recv, field) }
             _ => None,
@@ -1835,16 +1835,16 @@ impl Builtin for TransformKeys {
     #[inline]
     fn apply_stream(
         ctx: &mut super::builtin::StreamCtx<'_, '_>,
-        item: crate::value::Val,
+        item: crate::data::value::Val,
         body: Option<&crate::vm::Program>,
-    ) -> Result<crate::pipeline::StageFlow<crate::value::Val>, crate::context::EvalError> {
+    ) -> Result<crate::pipeline::StageFlow<crate::data::value::Val>, crate::context::EvalError> {
         object_lambda_apply_stream(ctx, item, body)
     }
 
     #[inline]
     fn apply_barrier(
         ctx: &mut super::builtin::BarrierCtx<'_>,
-        buf: &mut Vec<crate::value::Val>,
+        buf: &mut Vec<crate::data::value::Val>,
         body: Option<&crate::vm::Program>,
     ) -> Option<Result<(), crate::context::EvalError>> {
         object_lambda_apply_barrier(ctx, buf, body)
@@ -1856,9 +1856,9 @@ impl Builtin for TransformKeys {
 #[inline]
 fn object_lambda_apply_stream(
     ctx: &mut super::builtin::StreamCtx<'_, '_>,
-    item: crate::value::Val,
+    item: crate::data::value::Val,
     body: Option<&crate::vm::Program>,
-) -> Result<crate::pipeline::StageFlow<crate::value::Val>, crate::context::EvalError> {
+) -> Result<crate::pipeline::StageFlow<crate::data::value::Val>, crate::context::EvalError> {
     let prog = body.expect("object lambda body");
     let result = crate::pipeline::materialized_exec::apply_lambda_obj(
         ctx.stage, &item, ctx.vm, ctx.env, ctx.kernel, prog,
@@ -1870,11 +1870,11 @@ fn object_lambda_apply_stream(
 #[inline]
 fn object_lambda_apply_barrier(
     ctx: &mut super::builtin::BarrierCtx<'_>,
-    buf: &mut Vec<crate::value::Val>,
+    buf: &mut Vec<crate::data::value::Val>,
     body: Option<&crate::vm::Program>,
 ) -> Option<Result<(), crate::context::EvalError>> {
     let prog = body?;
-    let mut out: Vec<crate::value::Val> = Vec::with_capacity(buf.len());
+    let mut out: Vec<crate::data::value::Val> = Vec::with_capacity(buf.len());
     for v in std::mem::take(buf) {
         match crate::pipeline::materialized_exec::apply_lambda_obj(
             ctx.stage, &v, ctx.vm, ctx.env, ctx.kernel, prog,
@@ -1899,16 +1899,16 @@ impl Builtin for TransformValues {
     #[inline]
     fn apply_stream(
         ctx: &mut super::builtin::StreamCtx<'_, '_>,
-        item: crate::value::Val,
+        item: crate::data::value::Val,
         body: Option<&crate::vm::Program>,
-    ) -> Result<crate::pipeline::StageFlow<crate::value::Val>, crate::context::EvalError> {
+    ) -> Result<crate::pipeline::StageFlow<crate::data::value::Val>, crate::context::EvalError> {
         object_lambda_apply_stream(ctx, item, body)
     }
 
     #[inline]
     fn apply_barrier(
         ctx: &mut super::builtin::BarrierCtx<'_>,
-        buf: &mut Vec<crate::value::Val>,
+        buf: &mut Vec<crate::data::value::Val>,
         body: Option<&crate::vm::Program>,
     ) -> Option<Result<(), crate::context::EvalError>> {
         object_lambda_apply_barrier(ctx, buf, body)
@@ -1924,16 +1924,16 @@ impl Builtin for FilterKeys {
     #[inline]
     fn apply_stream(
         ctx: &mut super::builtin::StreamCtx<'_, '_>,
-        item: crate::value::Val,
+        item: crate::data::value::Val,
         body: Option<&crate::vm::Program>,
-    ) -> Result<crate::pipeline::StageFlow<crate::value::Val>, crate::context::EvalError> {
+    ) -> Result<crate::pipeline::StageFlow<crate::data::value::Val>, crate::context::EvalError> {
         object_lambda_apply_stream(ctx, item, body)
     }
 
     #[inline]
     fn apply_barrier(
         ctx: &mut super::builtin::BarrierCtx<'_>,
-        buf: &mut Vec<crate::value::Val>,
+        buf: &mut Vec<crate::data::value::Val>,
         body: Option<&crate::vm::Program>,
     ) -> Option<Result<(), crate::context::EvalError>> {
         object_lambda_apply_barrier(ctx, buf, body)
@@ -1949,16 +1949,16 @@ impl Builtin for FilterValues {
     #[inline]
     fn apply_stream(
         ctx: &mut super::builtin::StreamCtx<'_, '_>,
-        item: crate::value::Val,
+        item: crate::data::value::Val,
         body: Option<&crate::vm::Program>,
-    ) -> Result<crate::pipeline::StageFlow<crate::value::Val>, crate::context::EvalError> {
+    ) -> Result<crate::pipeline::StageFlow<crate::data::value::Val>, crate::context::EvalError> {
         object_lambda_apply_stream(ctx, item, body)
     }
 
     #[inline]
     fn apply_barrier(
         ctx: &mut super::builtin::BarrierCtx<'_>,
-        buf: &mut Vec<crate::value::Val>,
+        buf: &mut Vec<crate::data::value::Val>,
         body: Option<&crate::vm::Program>,
     ) -> Option<Result<(), crate::context::EvalError>> {
         object_lambda_apply_barrier(ctx, buf, body)
@@ -1981,7 +1981,7 @@ impl Builtin for GetPath {
     const NAME: &'static str = "get_path";
     fn spec() -> BuiltinSpec { path_element_spec() }
     #[inline]
-    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
             super::BuiltinArgs::Str(p) => { super::get_path_apply(recv, p) }
             _ => None,
@@ -1996,7 +1996,7 @@ impl Builtin for DelPath {
     const NAME: &'static str = "del_path";
     fn spec() -> BuiltinSpec { path_element_spec() }
     #[inline]
-    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
             super::BuiltinArgs::Str(p) => { super::del_path_apply(recv, p) }
             _ => None,
@@ -2011,7 +2011,7 @@ impl Builtin for HasPath {
     const NAME: &'static str = "has_path";
     fn spec() -> BuiltinSpec { path_element_spec() }
     #[inline]
-    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
             super::BuiltinArgs::Str(p) => { super::has_path_apply(recv, p) }
             _ => None,
@@ -2047,7 +2047,7 @@ impl Builtin for FlattenKeys {
     const NAME: &'static str = "flatten_keys";
     fn spec() -> BuiltinSpec { path_indexed_spec() }
     #[inline]
-    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
             super::BuiltinArgs::Str(p) => { super::flatten_keys_apply(recv, p) }
             _ => None,
@@ -2062,7 +2062,7 @@ impl Builtin for UnflattenKeys {
     const NAME: &'static str = "unflatten_keys";
     fn spec() -> BuiltinSpec { path_indexed_spec() }
     #[inline]
-    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
             super::BuiltinArgs::Str(p) => { super::unflatten_keys_apply(recv, p) }
             _ => None,
@@ -2161,7 +2161,7 @@ impl Builtin for ToCsv {
     const NAME: &'static str = "to_csv";
     fn spec() -> BuiltinSpec { serialization_spec() }
     #[inline]
-    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+    fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
         Some(super::to_csv_apply(recv).unwrap_or_else(|| recv.clone()))
     }
 }
@@ -2173,7 +2173,7 @@ impl Builtin for ToTsv {
     const NAME: &'static str = "to_tsv";
     fn spec() -> BuiltinSpec { serialization_spec() }
     #[inline]
-    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+    fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
         Some(super::to_tsv_apply(recv).unwrap_or_else(|| recv.clone()))
     }
 }
@@ -2199,7 +2199,7 @@ impl Builtin for Set {
             .element()
     }
     #[inline]
-    fn apply_args(_recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+    fn apply_args(_recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
             super::BuiltinArgs::Val(item) => Some(item.clone()),
             _ => None,
@@ -2234,7 +2234,7 @@ impl Builtin for Lag {
     const NAME: &'static str = "lag";
     fn spec() -> BuiltinSpec { streaming_one_to_one_element_spec() }
     #[inline]
-    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
             super::BuiltinArgs::Usize(n) => { super::lag_apply(recv, *n) }
             _ => None,
@@ -2249,7 +2249,7 @@ impl Builtin for Lead {
     const NAME: &'static str = "lead";
     fn spec() -> BuiltinSpec { streaming_one_to_one_element_spec() }
     #[inline]
-    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
             super::BuiltinArgs::Usize(n) => { super::lead_apply(recv, *n) }
             _ => None,
@@ -2264,7 +2264,7 @@ impl Builtin for DiffWindow {
     const NAME: &'static str = "diff_window";
     fn spec() -> BuiltinSpec { streaming_one_to_one_element_spec() }
     #[inline]
-    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
             super::BuiltinArgs::None => { Some(super::diff_window_apply(recv).unwrap_or_else(|| recv.clone())) }
             _ => None,
@@ -2279,7 +2279,7 @@ impl Builtin for PctChange {
     const NAME: &'static str = "pct_change";
     fn spec() -> BuiltinSpec { streaming_one_to_one_element_spec() }
     #[inline]
-    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
             super::BuiltinArgs::None => { Some(super::pct_change_apply(recv).unwrap_or_else(|| recv.clone())) }
             _ => None,
@@ -2294,7 +2294,7 @@ impl Builtin for CumMax {
     const NAME: &'static str = "cummax";
     fn spec() -> BuiltinSpec { streaming_one_to_one_element_spec() }
     #[inline]
-    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
             super::BuiltinArgs::None => { Some(super::cummax_apply(recv).unwrap_or_else(|| recv.clone())) }
             _ => None,
@@ -2309,7 +2309,7 @@ impl Builtin for CumMin {
     const NAME: &'static str = "cummin";
     fn spec() -> BuiltinSpec { streaming_one_to_one_element_spec() }
     #[inline]
-    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
             super::BuiltinArgs::None => { Some(super::cummin_apply(recv).unwrap_or_else(|| recv.clone())) }
             _ => None,
@@ -2324,7 +2324,7 @@ impl Builtin for Zscore {
     const NAME: &'static str = "zscore";
     fn spec() -> BuiltinSpec { streaming_one_to_one_element_spec() }
     #[inline]
-    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
             super::BuiltinArgs::None => { Some(super::zscore_apply(recv).unwrap_or_else(|| recv.clone())) }
             _ => None,
@@ -2367,7 +2367,7 @@ macro_rules! scalar_native_element {
                 fn spec() -> BuiltinSpec { scalar_native_element_spec() }
                 $(
                     #[inline]
-                    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+                    fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
                         Some(super::$apply(recv).unwrap_or_else(|| recv.clone()))
                     }
                 )?
@@ -2390,7 +2390,7 @@ macro_rules! scalar_view_scalar_element {
                 fn spec() -> BuiltinSpec { scalar_view_scalar_element_spec() }
                 $(
                     #[inline]
-                    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+                    fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
                         Some(super::$apply(recv).unwrap_or_else(|| recv.clone()))
                     }
                 )?
@@ -2461,7 +2461,7 @@ impl Builtin for Slice {
             .lowering(BuiltinPipelineLowering::IntRangeArg)
     }
     #[inline]
-    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
             super::BuiltinArgs::I64Opt { first, second } => { Some(super::slice_apply(recv.clone(), *first, *second)) }
             _ => None,
@@ -2488,7 +2488,7 @@ impl Builtin for Replace {
             .lowering(BuiltinPipelineLowering::StringPairArg)
     }
     #[inline]
-    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
             super::BuiltinArgs::StrPair { first, second } => { super::replace_apply(recv.clone(), first, second, false) }
             _ => None,
@@ -2515,7 +2515,7 @@ impl Builtin for ReplaceAll {
             .lowering(BuiltinPipelineLowering::StringPairArg)
     }
     #[inline]
-    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
             super::BuiltinArgs::StrPair { first, second } => { super::replace_apply(recv.clone(), first, second, true) }
             _ => None,
@@ -2546,7 +2546,7 @@ impl Builtin for FromJson {
     const NAME: &'static str = "from_json";
     fn spec() -> BuiltinSpec { default_scalar_spec(BuiltinMethod::FromJson) }
     #[inline]
-    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+    fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
         Some(super::from_json_apply(recv).unwrap_or_else(|| recv.clone()))
     }
 }
@@ -2559,7 +2559,7 @@ impl Builtin for Includes {
     const ALIASES: &'static [&'static str] = &["contains"];
     fn spec() -> BuiltinSpec { default_scalar_spec(BuiltinMethod::Includes) }
     #[inline]
-    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
             super::BuiltinArgs::Val(item) => Some(super::includes_apply(recv, item)),
             _ => None,
@@ -2574,7 +2574,7 @@ impl Builtin for Index {
     const NAME: &'static str = "index";
     fn spec() -> BuiltinSpec { default_scalar_spec(BuiltinMethod::Index) }
     #[inline]
-    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
             super::BuiltinArgs::Val(item) => Some(super::index_value_apply(recv, item).unwrap_or_else(|| recv.clone())),
             _ => None,
@@ -2589,7 +2589,7 @@ impl Builtin for IndicesOf {
     const NAME: &'static str = "indices_of";
     fn spec() -> BuiltinSpec { default_scalar_spec(BuiltinMethod::IndicesOf) }
     #[inline]
-    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
             super::BuiltinArgs::Val(item) => Some(super::indices_of_apply(recv, item).unwrap_or_else(|| recv.clone())),
             _ => None,
@@ -2604,7 +2604,7 @@ impl Builtin for Missing {
     const NAME: &'static str = "missing";
     fn spec() -> BuiltinSpec { default_scalar_spec(BuiltinMethod::Missing) }
     #[inline]
-    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
             super::BuiltinArgs::Str(key) => Some(super::missing_apply(recv, key)),
             _ => None,
@@ -2637,7 +2637,7 @@ impl Builtin for ToBase64 {
     const NAME: &'static str = "to_base64";
     fn spec() -> BuiltinSpec { scalar_native_element_spec() }
     #[inline]
-    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+    fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
         Some(super::to_base64_apply(recv).unwrap_or_else(|| recv.clone()))
     }
     #[inline]
@@ -2656,7 +2656,7 @@ impl Builtin for FromBase64 {
     const NAME: &'static str = "from_base64";
     fn spec() -> BuiltinSpec { scalar_native_element_spec() }
     #[inline]
-    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+    fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
         Some(super::from_base64_apply(recv).unwrap_or_else(|| recv.clone()))
     }
     #[inline]
@@ -2675,7 +2675,7 @@ impl Builtin for UrlEncode {
     const NAME: &'static str = "url_encode";
     fn spec() -> BuiltinSpec { scalar_native_element_spec() }
     #[inline]
-    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+    fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
         Some(super::url_encode_apply(recv).unwrap_or_else(|| recv.clone()))
     }
     #[inline]
@@ -2694,7 +2694,7 @@ impl Builtin for UrlDecode {
     const NAME: &'static str = "url_decode";
     fn spec() -> BuiltinSpec { scalar_native_element_spec() }
     #[inline]
-    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+    fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
         Some(super::url_decode_apply(recv).unwrap_or_else(|| recv.clone()))
     }
     #[inline]
@@ -2713,7 +2713,7 @@ impl Builtin for HtmlEscape {
     const NAME: &'static str = "html_escape";
     fn spec() -> BuiltinSpec { scalar_native_element_spec() }
     #[inline]
-    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+    fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
         Some(super::html_escape_apply(recv).unwrap_or_else(|| recv.clone()))
     }
     #[inline]
@@ -2732,7 +2732,7 @@ impl Builtin for HtmlUnescape {
     const NAME: &'static str = "html_unescape";
     fn spec() -> BuiltinSpec { scalar_native_element_spec() }
     #[inline]
-    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+    fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
         Some(super::html_unescape_apply(recv).unwrap_or_else(|| recv.clone()))
     }
     #[inline]
@@ -2751,7 +2751,7 @@ impl Builtin for ReverseStr {
     const NAME: &'static str = "reverse_str";
     fn spec() -> BuiltinSpec { scalar_native_element_spec() }
     #[inline]
-    fn apply_one(recv: &crate::value::Val) -> Option<crate::value::Val> {
+    fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
         Some(super::reverse_str_apply(recv).unwrap_or_else(|| recv.clone()))
     }
     #[inline]
@@ -2769,7 +2769,7 @@ impl Builtin for Or {
     const NAME: &'static str = "or";
     fn spec() -> BuiltinSpec { scalar_native_element_spec() }
     #[inline]
-    fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
             super::BuiltinArgs::Val(default) => Some(super::or_apply(recv, default)),
             _ => None,
@@ -2789,7 +2789,7 @@ macro_rules! str_arg_scalar_native {
                 $( const ALIASES: &'static [&'static str] = &[ $( $alias ),* ]; )?
                 fn spec() -> BuiltinSpec { scalar_native_element_spec() }
                 #[inline]
-                fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+                fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
                     match args {
                         super::BuiltinArgs::Str(p) => {
                             Some(super::$apply(recv, p).unwrap_or_else(|| recv.clone()))
@@ -2830,7 +2830,7 @@ macro_rules! str_vec_arg_scalar_native {
                 const NAME: &'static str = $name;
                 fn spec() -> BuiltinSpec { scalar_native_element_spec() }
                 #[inline]
-                fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+                fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
                     match args {
                         super::BuiltinArgs::StrVec(v) => {
                             Some(super::$apply(recv, v).unwrap_or_else(|| recv.clone()))
@@ -2857,7 +2857,7 @@ macro_rules! usize_arg_scalar_native {
                 $( const ALIASES: &'static [&'static str] = &[ $( $alias ),* ]; )?
                 fn spec() -> BuiltinSpec { scalar_native_element_spec() }
                 #[inline]
-                fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+                fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
                     match args {
                         super::BuiltinArgs::Usize(n) => {
                             Some(super::$apply(recv, *n).unwrap_or_else(|| recv.clone()))
@@ -2883,7 +2883,7 @@ macro_rules! pad_arg_scalar_native {
                 const NAME: &'static str = $name;
                 fn spec() -> BuiltinSpec { scalar_native_element_spec() }
                 #[inline]
-                fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+                fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
                     match args {
                         super::BuiltinArgs::Pad { width, fill } => {
                             Some(super::$apply(recv, *width, *fill).unwrap_or_else(|| recv.clone()))
@@ -2910,7 +2910,7 @@ macro_rules! str_pair_scalar_native {
                 const NAME: &'static str = $name;
                 fn spec() -> BuiltinSpec { scalar_native_element_spec() }
                 #[inline]
-                fn apply_args(recv: &crate::value::Val, args: &super::BuiltinArgs) -> Option<crate::value::Val> {
+                fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
                     match args {
                         super::BuiltinArgs::StrPair { first, second } => {
                             Some($apply(recv, first, second).unwrap_or_else(|| recv.clone()))

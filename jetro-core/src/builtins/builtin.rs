@@ -14,7 +14,7 @@
 //! After full migration, each builtin = one `impl Builtin for X` block.
 
 use crate::context::{Env, EvalError};
-use crate::value::Val;
+use crate::data::value::Val;
 use crate::vm::{Program, VM};
 
 use super::{BuiltinCancellation, BuiltinMethod, BuiltinSpec};

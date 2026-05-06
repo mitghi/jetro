@@ -1,5 +1,5 @@
 use crate::context::EvalError;
-use crate::value::Val;
+use crate::data::value::Val;
 use super::BuiltinMethod;
 use std::sync::Arc;
 
@@ -35,7 +35,7 @@ pub fn slice_apply(recv: Val, start: i64, end: Option<i64>) -> Val {
         if start_u == 0 && end_u == blen {
             return Val::Str(parent);
         }
-        return Val::StrSlice(crate::tape::StrRef::slice(
+        return Val::StrSlice(crate::data::tape::StrRef::slice(
             parent,
             base_off + start_u,
             base_off + end_u,
@@ -58,7 +58,7 @@ pub fn slice_apply(recv: Val, start: i64, end: Option<i64>) -> Val {
     if s_b == 0 && e_b == view.len() {
         return Val::Str(parent);
     }
-    Val::StrSlice(crate::tape::StrRef::slice(
+    Val::StrSlice(crate::data::tape::StrRef::slice(
         parent,
         base_off + s_b,
         base_off + e_b,

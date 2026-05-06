@@ -12,7 +12,7 @@ use crate::ast::{BinOp, KindType};
 use crate::builtins::BuiltinCall;
 use crate::pipeline::PipelineBody;
 use crate::structural::StructuralPlan;
-use crate::value::Val;
+use crate::data::value::Val;
 use crate::vm::Program;
 
 /// Compiled query plan: a DAG of `PhysicalNode`s plus a root selector.

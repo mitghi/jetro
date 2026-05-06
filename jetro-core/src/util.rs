@@ -9,7 +9,7 @@ use std::sync::Arc;
 use crate::ast::BinOp;
 use crate::ast::KindType;
 use crate::context::EvalError;
-use crate::value::Val;
+use crate::data::value::Val;
 
 
 /// Borrowed scalar view — used by `ValueView` implementations so scalar

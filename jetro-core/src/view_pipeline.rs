@@ -11,8 +11,8 @@ use std::sync::Arc;
 use crate::chain_ir::PullDemand;
 use crate::context::{Env, EvalError};
 use crate::pipeline;
-use crate::value::Val;
-use crate::value_view::{scalar_view_to_owned_val, ValueView};
+use crate::data::value::Val;
+use crate::data::view::{scalar_view_to_owned_val, ValueView};
 
 mod key;
 mod reducer_stage;
@@ -955,8 +955,8 @@ mod tests {
     use crate::context::Env;
     use crate::pipeline::{BodyKernel, PipelineBody, Sink, Stage, ViewStageCapability};
     use crate::util::JsonView;
-    use crate::value::Val;
-    use crate::value_view::{ValView, ValueView};
+    use crate::data::value::Val;
+    use crate::data::view::{ValView, ValueView};
 
     #[derive(Clone)]
     struct CountingView {

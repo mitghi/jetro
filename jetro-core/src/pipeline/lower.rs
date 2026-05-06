@@ -14,7 +14,7 @@ use crate::builtin_registry::{pipeline_accepts_arity, pipeline_lowering, Builtin
 use crate::builtins::{
     BuiltinMethod, BuiltinPipelineLowering, BuiltinSinkAccumulator, BuiltinViewStage,
 };
-use crate::{context::EvalError, value::Val};
+use crate::{context::EvalError, data::value::Val};
 
 use super::{
     expr_label, plan_with_exprs, plan_with_kernels, sink_name, source_name, trace_enabled,

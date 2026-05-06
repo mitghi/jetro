@@ -6,7 +6,7 @@ use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::sync::Arc;
 
-use crate::{context::EvalError, value::Val};
+use crate::{context::EvalError, data::value::Val};
 
 use super::{NumOp, StageStrategy};
 

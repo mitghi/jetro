@@ -4,7 +4,7 @@
 
 use crate::{
     context::{Env, EvalError},
-    value::Val,
+    data::value::Val,
 };
 
 use super::{materialized_exec, BodyKernel, Stage, StageFlow, TerminalMapCollector};

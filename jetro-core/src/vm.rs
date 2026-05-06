@@ -21,12 +21,12 @@ use std::{
 use crate::ast::*;
 pub use crate::builtins::BuiltinMethod;
 use crate::context::{Env, EvalError};
-use crate::runtime::call_builtin_method_compiled;
+use crate::data::runtime::call_builtin_method_compiled;
 use crate::util::{
     add_vals, cmp_vals_binop, is_truthy, kind_matches, num_op, obj2, val_to_key, val_to_string,
     vals_eq,
 };
-use crate::value::Val;
+use crate::data::value::Val;
 
 /// Pop the top of the operand stack, returning a `stack underflow` error if empty.
 macro_rules! pop {
@@ -1732,7 +1732,7 @@ impl VM {
             
             match call.name.as_ref() {
                 "coalesce" | "chain" | "join" | "zip" | "zip_longest" | "product" | "range" => {
-                    return crate::runtime::eval_global_compiled(self, call, env);
+                    return crate::data::runtime::eval_global_compiled(self, call, env);
                 }
                 _ => {}
             }

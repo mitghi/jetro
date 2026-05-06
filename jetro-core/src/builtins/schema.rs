@@ -1,4 +1,4 @@
-use crate::value::Val;
+use crate::data::value::Val;
 use indexmap::IndexMap;
 use std::sync::Arc;
 

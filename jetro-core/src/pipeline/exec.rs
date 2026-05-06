@@ -5,7 +5,7 @@
 
 use crate::{
     context::{Env, EvalError},
-    value::Val,
+    data::value::Val,
 };
 
 use super::columnar;

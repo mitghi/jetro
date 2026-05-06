@@ -10,8 +10,8 @@ use std::sync::Arc;
 use crate::builtins::BuiltinCall;
 use crate::context::EvalError;
 use crate::util::JsonView;
-use crate::value::Val;
-use crate::value_view::{scalar_view_to_owned_val, ValueView};
+use crate::data::value::Val;
+use crate::data::view::{scalar_view_to_owned_val, ValueView};
 
 /// Pre-classified stage body expression; variants are ordered least-to-most expensive, `Generic` re-enters the VM.
 #[derive(Debug, Clone)]

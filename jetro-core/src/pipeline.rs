@@ -14,7 +14,7 @@ use crate::builtins::{
     BuiltinCancellation, BuiltinMethod, BuiltinNumericReducer, BuiltinViewStage,
 };
 use crate::context::{Env, EvalError};
-use crate::value::Val;
+use crate::data::value::Val;
 
 mod capability;
 mod collector;
@@ -83,7 +83,7 @@ pub(crate) enum StageFlow<T> {
 /// the first matching value or `None` if the shape is not tape-compatible.
 pub(crate) fn run_tape_field_chain(
     body: &PipelineBody,
-    tape: &crate::tape::TapeData,
+    tape: &crate::data::tape::TapeData,
     keys: &[Arc<str>],
     base_env: &Env,
 ) -> Option<Result<Val, EvalError>> {
@@ -95,7 +95,7 @@ pub(crate) fn run_tape_field_chain(
 pub trait PipelineData {
     /// Attempts to interpret `arr` as a columnar object-vector, returning `None` if the
     /// array layout does not match the expected uniform-key schema.
-    fn promote_objvec(&self, arr: &Arc<Vec<Val>>) -> Option<Arc<crate::value::ObjVecData>>;
+    fn promote_objvec(&self, arr: &Arc<Vec<Val>>) -> Option<Arc<crate::data::value::ObjVecData>>;
 }
 
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -525,7 +525,7 @@ mod tests {
     fn row_source_keeps_objvec_as_streaming_provider() {
         let keys: std::sync::Arc<[std::sync::Arc<str>]> =
             vec![std::sync::Arc::<str>::from("id")].into();
-        let data = std::sync::Arc::new(crate::value::ObjVecData {
+        let data = std::sync::Arc::new(crate::data::value::ObjVecData {
             keys,
             cells: vec![Val::Int(1), Val::Int(2)],
             typed_cols: None,
@@ -546,14 +546,14 @@ mod tests {
     #[test]
     fn tape_row_source_walks_field_chain_array_lazily() {
         let tape =
-            crate::tape::TapeData::parse(br#"{"books":[{"id":1},{"id":2}],"skip":[3]}"#.to_vec())
+            crate::data::tape::TapeData::parse(br#"{"books":[{"id":1},{"id":2}],"skip":[3]}"#.to_vec())
                 .unwrap();
         let keys = vec![std::sync::Arc::<str>::from("books")];
 
         let source = row_source::TapeRowSource::from_field_chain(&tape, &keys);
         assert!(source.is_array_provider());
 
-        use crate::value_view::ValueView;
+        use crate::data::view::ValueView;
 
         let mut iter = source.iter_views();
         assert!(matches!(iter, row_source::TapeRowsIter::Array { .. }));

@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use crate::{
     context::{Env, EvalError},
-    value::Val,
+    data::value::Val,
 };
 
 use super::lower::run_compiled_map;
@@ -123,7 +123,7 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
 #[cfg(feature = "simd-json")]
 pub(super) fn run_tape_field_chain(
     body: &PipelineBody,
-    tape: &crate::tape::TapeData,
+    tape: &crate::data::tape::TapeData,
     keys: &[Arc<str>],
     base_env: &Env,
 ) -> Option<Result<Val, EvalError>> {

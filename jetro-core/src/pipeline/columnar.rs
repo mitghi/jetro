@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use crate::builtins::BuiltinColumnarStage;
-use crate::{context::EvalError, value::Val};
+use crate::{context::EvalError, data::value::Val};
 
 use super::ReducerOp;
 use super::{
@@ -133,8 +133,8 @@ fn stage_program_pair<'a>(
 
 // Builds per-column typed vectors from a flat row-major cell buffer.
 // Enables scalar loops in hot aggregation paths by avoiding per-element Val dispatch.
-fn build_typed_cols(cells: &[Val], stride: usize, nrows: usize) -> Vec<crate::value::ObjVecCol> {
-    use crate::value::ObjVecCol;
+fn build_typed_cols(cells: &[Val], stride: usize, nrows: usize) -> Vec<crate::data::value::ObjVecCol> {
+    use crate::data::value::ObjVecCol;
     let mut out: Vec<ObjVecCol> = Vec::with_capacity(stride);
     if stride == 0 || nrows == 0 {
         for _ in 0..stride {
@@ -456,7 +456,7 @@ impl Pipeline {
 
     /// Promotes a `Val::Arr` of uniform-shape objects to `ObjVecData`, returning
     /// the inner `Arc` directly. Returns `None` if promotion fails (e.g. mixed shapes).
-    pub fn try_promote_objvec_arr(arr: &Arc<Vec<Val>>) -> Option<Arc<crate::value::ObjVecData>> {
+    pub fn try_promote_objvec_arr(arr: &Arc<Vec<Val>>) -> Option<Arc<crate::data::value::ObjVecData>> {
         if let Some(Val::ObjVec(d)) = Self::try_promote_objvec(arr) {
             Some(d)
         } else {
@@ -502,7 +502,7 @@ impl Pipeline {
         let nrows = if stride == 0 { 0 } else { cells.len() / stride };
         let typed_cols = build_typed_cols(&cells, stride, nrows);
 
-        Some(Val::ObjVec(Arc::new(crate::value::ObjVecData {
+        Some(Val::ObjVec(Arc::new(crate::data::value::ObjVecData {
             keys: keys.into(),
             cells,
             typed_cols: Some(Arc::new(typed_cols)),
@@ -803,7 +803,7 @@ fn single_cmp_prog<'a>(prog: &'a crate::vm::Program) -> Option<(&'a str, crate::
     decode_cmp_ops(prog.ops.as_ref())
 }
 
-fn objvec_flatmap_count_slot(d: &Arc<crate::value::ObjVecData>, slot: usize) -> Val {
+fn objvec_flatmap_count_slot(d: &Arc<crate::data::value::ObjVecData>, slot: usize) -> Val {
     let stride = d.stride();
     let nrows = d.nrows();
     let mut count: i64 = 0;
@@ -823,8 +823,8 @@ fn objvec_flatmap_count_slot(d: &Arc<crate::value::ObjVecData>, slot: usize) -> 
 }
 
 // Prefers typed column slices over cell-level dispatch to avoid Val boxing per row.
-fn objvec_num_slot(d: &Arc<crate::value::ObjVecData>, slot: usize, op: NumOp) -> Val {
-    use crate::value::ObjVecCol;
+fn objvec_num_slot(d: &Arc<crate::data::value::ObjVecData>, slot: usize, op: NumOp) -> Val {
+    use crate::data::value::ObjVecCol;
 
     if let Some(cols) = &d.typed_cols {
         match cols.get(slot) {
@@ -891,13 +891,13 @@ fn objvec_num_slot(d: &Arc<crate::value::ObjVecData>, slot: usize, op: NumOp) ->
 
 // Prefers typed column slices for the predicate check to avoid Val boxing.
 fn objvec_filter_count_slot(
-    d: &Arc<crate::value::ObjVecData>,
+    d: &Arc<crate::data::value::ObjVecData>,
     slot: usize,
     op: crate::ast::BinOp,
     lit: &Val,
 ) -> Val {
     use crate::ast::BinOp as B;
-    use crate::value::ObjVecCol;
+    use crate::data::value::ObjVecCol;
 
     if let Some(cols) = &d.typed_cols {
         match (cols.get(slot), lit) {
@@ -971,7 +971,7 @@ fn objvec_filter_count_slot(
 
 // Exploits typed column slices for both predicate and aggregation columns when homogeneous.
 fn objvec_filter_num_slots(
-    d: &Arc<crate::value::ObjVecData>,
+    d: &Arc<crate::data::value::ObjVecData>,
     pred_slot: usize,
     cop: crate::ast::BinOp,
     lit: &Val,
@@ -979,7 +979,7 @@ fn objvec_filter_num_slots(
     op: NumOp,
 ) -> Val {
     use crate::ast::BinOp as B;
-    use crate::value::ObjVecCol;
+    use crate::data::value::ObjVecCol;
 
     if let Some(cols) = &d.typed_cols {
         // int-pred × int-map fast path avoids Val allocation entirely
@@ -1049,14 +1049,14 @@ fn objvec_filter_num_slots(
 // Returns a typed-vec result (`IntVec`, `FloatVec`, or `StrVec`) when both columns are
 // homogeneous; returns `None` otherwise so the caller can fall back to generic execution.
 fn objvec_typed_filter_map_collect(
-    d: &Arc<crate::value::ObjVecData>,
+    d: &Arc<crate::data::value::ObjVecData>,
     pk: &str,
     pop: crate::ast::BinOp,
     plit: &Val,
     mk: &str,
 ) -> Option<Result<Val, EvalError>> {
     use crate::ast::BinOp as B;
-    use crate::value::ObjVecCol;
+    use crate::data::value::ObjVecCol;
     let cols = d.typed_cols.as_ref()?;
     let pred_slot = d.slot_of(pk)?;
     let map_slot = d.slot_of(mk)?;
@@ -1187,8 +1187,8 @@ fn objvec_typed_filter_map_collect(
 }
 
 // Returns `None` when the key column is not a homogeneous `Strs`, `Ints`, or `Bools` column.
-fn objvec_typed_group_by(d: &Arc<crate::value::ObjVecData>, key_field: &str) -> Option<Val> {
-    use crate::value::ObjVecCol;
+fn objvec_typed_group_by(d: &Arc<crate::data::value::ObjVecData>, key_field: &str) -> Option<Val> {
+    use crate::data::value::ObjVecCol;
     let cols = d.typed_cols.as_ref()?;
     let key_slot = d.slot_of(key_field)?;
     let key_col = cols.get(key_slot)?;
@@ -1241,8 +1241,8 @@ fn objvec_typed_group_by(d: &Arc<crate::value::ObjVecData>, key_field: &str) -> 
     Some(Val::Obj(Arc::new(out)))
 }
 
-fn materialise_typed_indices(col: &crate::value::ObjVecCol, indices: &[usize]) -> Val {
-    use crate::value::ObjVecCol;
+fn materialise_typed_indices(col: &crate::data::value::ObjVecCol, indices: &[usize]) -> Val {
+    use crate::data::value::ObjVecCol;
     match col {
         ObjVecCol::Ints(c) => {
             let mut o: Vec<i64> = Vec::with_capacity(indices.len());
@@ -1278,11 +1278,11 @@ fn materialise_typed_indices(col: &crate::value::ObjVecCol, indices: &[usize]) -
 
 // Builds inline `Checker` variants backed by typed column slices to avoid Val allocation per row.
 fn objvec_filter_count_and_slots(
-    d: &Arc<crate::value::ObjVecData>,
+    d: &Arc<crate::data::value::ObjVecData>,
     leaves: &[(usize, crate::ast::BinOp, Val)],
 ) -> Val {
     use crate::ast::BinOp as B;
-    use crate::value::ObjVecCol;
+    use crate::data::value::ObjVecCol;
 
     if let Some(cols) = &d.typed_cols {
         // local Checker avoids heap allocation and dynamic dispatch per predicate

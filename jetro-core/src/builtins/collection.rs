@@ -1,4 +1,4 @@
-use crate::value::Val;
+use crate::data::value::Val;
 use std::sync::Arc;
 
 /// Returns the logical length of an array, object, or string (char count), or `None` for scalars.

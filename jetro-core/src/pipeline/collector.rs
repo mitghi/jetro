@@ -6,8 +6,8 @@
 
 use std::sync::Arc;
 
-use crate::value::{ObjVecData, Val};
-use crate::value_view::{scalar_view_to_owned_val, ValueView};
+use crate::data::value::{ObjVecData, Val};
+use crate::data::view::{scalar_view_to_owned_val, ValueView};
 
 use super::{BodyKernel, CollectLayout, ObjectKernel, ViewKernelValue};
 

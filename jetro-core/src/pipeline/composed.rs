@@ -15,7 +15,7 @@ use crate::builtins::{BuiltinNumericReducer, BuiltinSelectionPosition, BuiltinSi
 use crate::chain_ir::PullDemand;
 use crate::composed_pipeline as cmp;
 use crate::context::{Env, EvalError};
-use crate::value::Val;
+use crate::data::value::Val;
 use crate::vm::Program;
 
 use super::{

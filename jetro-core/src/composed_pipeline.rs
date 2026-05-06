@@ -11,7 +11,7 @@ use std::borrow::{Borrow, Cow};
 
 use crate::builtins::BuiltinCall;
 use crate::chain_ir::PullDemand;
-use crate::value::Val;
+use crate::data::value::Val;
 
 /// Per-element output of a `Stage::apply`. `Pass(Cow::Borrowed)` is the
 /// hot path for filter and field-read (zero clone); `Cow::Owned` for
@@ -1427,11 +1427,11 @@ mod tests {
             ),
         ];
         let kernels = vec![
-            BodyKernel::FieldCmpLit(Arc::from("price"), BinOp::Lt, crate::value::Val::Int(100)),
+            BodyKernel::FieldCmpLit(Arc::from("price"), BinOp::Lt, crate::data::value::Val::Int(100)),
             BodyKernel::FieldCmpLit(
                 Arc::from("active"),
                 BinOp::Eq,
-                crate::value::Val::Bool(true),
+                crate::data::value::Val::Bool(true),
             ),
         ];
         let p = plan_with_kernels(

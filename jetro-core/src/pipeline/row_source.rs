@@ -8,7 +8,7 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 
-use crate::value::{ObjVecData, Val};
+use crate::data::value::{ObjVecData, Val};
 
 use super::{walk_field_chain, Source};
 
@@ -57,14 +57,14 @@ pub(super) enum ValRowsIter<'a> {
 pub(super) enum TapeRowSource<'a> {
     /// The source tape node is an array; iteration yields each element by span.
     Array {
-        tape: &'a crate::tape::TapeData,
+        tape: &'a crate::data::tape::TapeData,
         // Index of the first array element in the tape.
         first: usize,
         // Number of elements in the array.
         len: usize,
     },
     /// The source tape node is a scalar or object; treated as a single row.
-    Single(crate::value_view::TapeView<'a>),
+    Single(crate::data::view::TapeView<'a>),
     /// The requested field path did not resolve to any tape node.
     Missing,
 }
@@ -74,14 +74,14 @@ pub(super) enum TapeRowSource<'a> {
 pub(super) enum TapeRowsIter<'a> {
     /// Advances through array elements by consuming tape spans.
     Array {
-        tape: &'a crate::tape::TapeData,
+        tape: &'a crate::data::tape::TapeData,
         // Elements remaining to be yielded.
         remaining: usize,
         // Current tape index.
         cur: usize,
     },
     /// Single-element iterator for a non-array tape node.
-    Single(std::option::IntoIter<crate::value_view::TapeView<'a>>),
+    Single(std::option::IntoIter<crate::data::view::TapeView<'a>>),
     /// Iterator for a `Missing` source; always returns `None`.
     Empty,
 }
@@ -111,11 +111,11 @@ impl Iterator for ValRowsIter<'_> {
 
 #[cfg(feature = "simd-json")]
 impl<'a> Iterator for TapeRowsIter<'a> {
-    type Item = crate::value_view::TapeView<'a>;
+    type Item = crate::data::view::TapeView<'a>;
 
     // Advances the current tape index by the node's span before returning the view.
     fn next(&mut self) -> Option<Self::Item> {
-        use crate::value_view::TapeView;
+        use crate::data::view::TapeView;
 
         match self {
             Self::Array {
@@ -142,7 +142,7 @@ impl Iterator for TapeMaterializedRowsIter<'_> {
     type Item = Val;
 
     fn next(&mut self) -> Option<Self::Item> {
-        use crate::value_view::ValueView;
+        use crate::data::view::ValueView;
 
         self.0.next().map(|view| view.materialize())
     }
@@ -231,7 +231,7 @@ impl<'a> ValRowSource<'a> {
 #[cfg(feature = "simd-json")]
 impl<'a> TapeRowSource<'a> {
     /// Walks `keys` through `tape` and returns a `TapeRowSource` rooted at the resolved node, or `Missing` when any key is absent.
-    pub(super) fn from_field_chain(tape: &'a crate::tape::TapeData, keys: &[Arc<str>]) -> Self {
+    pub(super) fn from_field_chain(tape: &'a crate::data::tape::TapeData, keys: &[Arc<str>]) -> Self {
         let Some(idx) = tape_walk_field_chain(tape, keys) else {
             return Self::Missing;
         };
@@ -239,14 +239,14 @@ impl<'a> TapeRowSource<'a> {
     }
 
     /// Constructs a `TapeRowSource` at tape node `idx`, choosing `Array` for JSON arrays and `Single` otherwise.
-    pub(super) fn from_tape_index(tape: &'a crate::tape::TapeData, idx: usize) -> Self {
+    pub(super) fn from_tape_index(tape: &'a crate::data::tape::TapeData, idx: usize) -> Self {
         match tape.nodes.get(idx) {
-            Some(crate::tape::TapeNode::Array { len, .. }) => Self::Array {
+            Some(crate::data::tape::TapeNode::Array { len, .. }) => Self::Array {
                 tape,
                 first: idx + 1,
                 len: *len,
             },
-            Some(_) => Self::Single(crate::value_view::TapeView::Node { tape, idx }),
+            Some(_) => Self::Single(crate::data::view::TapeView::Node { tape, idx }),
             None => Self::Missing,
         }
     }
@@ -329,7 +329,7 @@ fn objvec_row(data: &ObjVecData, row: usize) -> Val {
 
 // Returns the tape index of the final node after walking `keys`, or `None` if any key is missing.
 #[cfg(feature = "simd-json")]
-fn tape_walk_field_chain(tape: &crate::tape::TapeData, keys: &[Arc<str>]) -> Option<usize> {
+fn tape_walk_field_chain(tape: &crate::data::tape::TapeData, keys: &[Arc<str>]) -> Option<usize> {
     let mut cur = 0usize;
     for key in keys {
         cur = tape_field(tape, cur, key.as_ref())?;
@@ -339,8 +339,8 @@ fn tape_walk_field_chain(tape: &crate::tape::TapeData, keys: &[Arc<str>]) -> Opt
 
 // Scans the tape object at `idx` for `key` and returns the tape index of its value, or `None` when absent.
 #[cfg(feature = "simd-json")]
-fn tape_field(tape: &crate::tape::TapeData, idx: usize, key: &str) -> Option<usize> {
-    let crate::tape::TapeNode::Object { len, .. } = *tape.nodes.get(idx)? else {
+fn tape_field(tape: &crate::data::tape::TapeData, idx: usize, key: &str) -> Option<usize> {
+    let crate::data::tape::TapeNode::Object { len, .. } = *tape.nodes.get(idx)? else {
         return None;
     };
     let mut cur = idx + 1;

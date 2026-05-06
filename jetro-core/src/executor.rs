@@ -88,7 +88,7 @@ mod tests {
     };
     use crate::pipeline::{BodyKernel, NumOp, ReducerOp, Sink, Stage};
     use crate::planner;
-    use crate::value::Val;
+    use crate::data::value::Val;
     use crate::{Jetro, JetroEngine};
 
     fn assert_no_vm_fallback(plan: &crate::physical::QueryPlan, id: NodeId) {

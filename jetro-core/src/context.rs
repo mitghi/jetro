@@ -4,7 +4,7 @@
 //! root (`$`), the current item (`@`), and named let-bindings. It is cloned
 //! per-scope but kept cheap via `SmallVec` (inline storage for ≤4 vars).
 
-use crate::value::Val;
+use crate::data::value::Val;
 use smallvec::SmallVec;
 use std::sync::Arc;
 

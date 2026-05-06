@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use crate::{util::JsonView, value::Val};
+use crate::{util::JsonView, data::value::Val};
 
 /// A hashable, equality-comparable key derived from a `ValueView` scalar,
 /// used as the hash-map key for `group_by`, `count_by`, `index_by`, and

@@ -1,5 +1,5 @@
 use crate::context::EvalError;
-use crate::value::Val;
+use crate::data::value::Val;
 use std::sync::Arc;
 
 pub fn to_csv_apply(recv: &Val) -> Option<Val> {
