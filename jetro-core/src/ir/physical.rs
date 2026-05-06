@@ -10,8 +10,8 @@ use std::sync::Arc;
 
 use crate::parse::ast::{BinOp, KindType};
 use crate::builtins::BuiltinCall;
-use crate::pipeline::PipelineBody;
-use crate::structural::StructuralPlan;
+use crate::exec::pipeline::PipelineBody;
+use crate::exec::structural::StructuralPlan;
 use crate::data::value::Val;
 use crate::vm::Program;
 
@@ -385,8 +385,8 @@ impl ExecutionFacts {
             PlanNode::Literal(_) => Self::constant(),
             PlanNode::Pipeline { source, body } => {
                 let field_chain = matches!(source, PipelinePlanSource::FieldChain { .. });
-                let view_native = crate::pipeline::view_capabilities(body).is_some();
-                let view_prefix = crate::pipeline::view_prefix_capabilities(body).is_some();
+                let view_native = crate::exec::pipeline::view_capabilities(body).is_some();
+                let view_prefix = crate::exec::pipeline::view_prefix_capabilities(body).is_some();
                 let materialized_source = field_chain && body.can_run_with_materialized_receiver();
                 let can_complete_without_root = field_chain && (view_native || materialized_source);
                 Self {
@@ -669,7 +669,7 @@ pub enum PhysicalArrayElem {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pipeline::{BodyKernel, Sink};
+    use crate::exec::pipeline::{BodyKernel, Sink};
 
     fn empty_body() -> PipelineBody {
         PipelineBody {

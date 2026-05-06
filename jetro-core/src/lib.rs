@@ -4,9 +4,9 @@
 //!
 //! ```text
 //! source text
-//!   │  parser::parse()      → Expr AST
+//!   │  parse::parser::parse() → Expr AST
 //!   │  plan::physical::plan_query() → QueryPlan (physical IR)
-//!   │  physical_eval::run() → dispatches to:
+//!   │  exec::router::collect_*() → dispatches to:
 //!   │    StructuralIndex backend  (jetro-experimental bitmap)
 //!   │    ViewPipeline backend     (borrowed tape/Val navigation)
 //!   │    Pipeline backend         (pull-based composed stages)
@@ -25,19 +25,14 @@
 pub(crate) mod builtin_helpers;
 pub(crate) mod builtin_registry;
 pub(crate) mod builtins;
-pub(crate) mod composed_pipeline;
+pub(crate) mod compile;
 pub(crate) mod context;
 pub(crate) mod data;
-pub(crate) mod executor;
+pub(crate) mod exec;
 pub(crate) mod ir;
 pub(crate) mod parse;
-pub(crate) mod physical_eval;
-pub(crate) mod pipeline;
 pub(crate) mod plan;
-pub(crate) mod structural;
 pub(crate) mod util;
-pub(crate) mod view_pipeline;
-pub(crate) mod compile;
 pub(crate) mod vm;
 
 #[cfg(test)]
@@ -240,9 +235,9 @@ impl JetroEngine {
         document: &Jetro,
         expr: S,
     ) -> std::result::Result<Value, EvalError> {
-        let plan = self.cached_plan(expr.as_ref(), executor::planning_context(document));
+        let plan = self.cached_plan(expr.as_ref(), exec::router::planning_context(document));
         let mut vm = self.vm.lock().expect("vm cache poisoned");
-        executor::collect_plan_json_with_vm(document, &plan, &mut vm)
+        exec::router::collect_plan_json_with_vm(document, &plan, &mut vm)
     }
 
     /// Convenience wrapper: wrap a `serde_json::Value` in a `Jetro` and evaluate `expr`.
@@ -286,7 +281,7 @@ impl JetroEngine {
     }
 }
 
-impl pipeline::PipelineData for Jetro {
+impl exec::pipeline::PipelineData for Jetro {
     fn promote_objvec(&self, arr: &Arc<Vec<Val>>) -> Option<Arc<crate::data::value::ObjVecData>> {
         self.get_or_promote_objvec(arr)
     }
@@ -331,7 +326,7 @@ impl Jetro {
                 return Some(Arc::clone(d));
             }
         }
-        let promoted = pipeline::Pipeline::try_promote_objvec_arr(arr)?;
+        let promoted = exec::pipeline::Pipeline::try_promote_objvec_arr(arr)?;
         if let Ok(mut cache) = self.objvec_cache.lock() {
             cache.entry(key).or_insert_with(|| Arc::clone(&promoted));
         }
@@ -477,7 +472,7 @@ impl Jetro {
     /// as a `serde_json::Value`. Uses the thread-local `VM` with compile and
     /// path-resolution caches for repeated calls.
     pub fn collect<S: AsRef<str>>(&self, expr: S) -> std::result::Result<Value, EvalError> {
-        executor::collect_json(self, expr.as_ref())
+        exec::router::collect_json(self, expr.as_ref())
     }
 }
 

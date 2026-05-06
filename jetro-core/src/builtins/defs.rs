@@ -75,17 +75,17 @@ impl Builtin for Filter {
         ctx: &mut super::builtin::StreamCtx<'_, '_>,
         item: crate::data::value::Val,
         body: Option<&crate::vm::Program>,
-    ) -> Result<crate::pipeline::StageFlow<crate::data::value::Val>, crate::context::EvalError> {
+    ) -> Result<crate::exec::pipeline::StageFlow<crate::data::value::Val>, crate::context::EvalError> {
         let prog = body.expect("filter body");
         let keep = super::filter_one(&item, |v| {
-            crate::pipeline::eval_kernel(ctx.kernel, v, |it| {
-                crate::pipeline::apply_item_in_env(ctx.vm, ctx.env, it, prog)
+            crate::exec::pipeline::eval_kernel(ctx.kernel, v, |it| {
+                crate::exec::pipeline::apply_item_in_env(ctx.vm, ctx.env, it, prog)
             })
         })?;
         Ok(if keep {
-            crate::pipeline::StageFlow::Continue(item)
+            crate::exec::pipeline::StageFlow::Continue(item)
         } else {
-            crate::pipeline::StageFlow::SkipRow
+            crate::exec::pipeline::StageFlow::SkipRow
         })
     }
 #[inline]
@@ -96,8 +96,8 @@ impl Builtin for Filter {
     ) -> Option<Result<(), crate::context::EvalError>> {
         let prog = body?;
         let result = super::filter_apply(std::mem::take(buf), |v| {
-            crate::pipeline::eval_kernel(ctx.kernel, v, |item| {
-                crate::pipeline::apply_item_in_env(ctx.vm, ctx.env, item, prog)
+            crate::exec::pipeline::eval_kernel(ctx.kernel, v, |item| {
+                crate::exec::pipeline::apply_item_in_env(ctx.vm, ctx.env, item, prog)
             })
         });
         match result {
@@ -187,7 +187,7 @@ impl Builtin for Map {
         ctx: &mut super::builtin::StreamCtx<'_, '_>,
         item: crate::data::value::Val,
         body: Option<&crate::vm::Program>,
-    ) -> Result<crate::pipeline::StageFlow<crate::data::value::Val>, crate::context::EvalError> {
+    ) -> Result<crate::exec::pipeline::StageFlow<crate::data::value::Val>, crate::context::EvalError> {
         let prog = body.expect("map body");
         // Terminal-map collector short-circuit (avoid allocating intermediate Val).
         if Some(ctx.stage_idx) == ctx.terminal_map_idx {
@@ -195,16 +195,16 @@ impl Builtin for Map {
                 .as_mut()
                 .expect("terminal map collector")
                 .push_val_row(&item, ctx.kernel, |it| {
-                    crate::pipeline::apply_item_in_env(ctx.vm, ctx.env, it, prog)
+                    crate::exec::pipeline::apply_item_in_env(ctx.vm, ctx.env, it, prog)
                 })?;
-            return Ok(crate::pipeline::StageFlow::TerminalCollected);
+            return Ok(crate::exec::pipeline::StageFlow::TerminalCollected);
         }
         let mapped = super::map_one(&item, |v| {
-            crate::pipeline::eval_kernel(ctx.kernel, v, |it| {
-                crate::pipeline::apply_item_in_env(ctx.vm, ctx.env, it, prog)
+            crate::exec::pipeline::eval_kernel(ctx.kernel, v, |it| {
+                crate::exec::pipeline::apply_item_in_env(ctx.vm, ctx.env, it, prog)
             })
         })?;
-        Ok(crate::pipeline::StageFlow::Continue(mapped))
+        Ok(crate::exec::pipeline::StageFlow::Continue(mapped))
     }
 
     #[inline]
@@ -215,8 +215,8 @@ impl Builtin for Map {
     ) -> Option<Result<(), crate::context::EvalError>> {
         let prog = body?;
         let result = super::map_apply(std::mem::take(buf), |v| {
-            crate::pipeline::eval_kernel(ctx.kernel, v, |item| {
-                crate::pipeline::apply_item_in_env(ctx.vm, ctx.env, item, prog)
+            crate::exec::pipeline::eval_kernel(ctx.kernel, v, |item| {
+                crate::exec::pipeline::apply_item_in_env(ctx.vm, ctx.env, item, prog)
             })
         });
         match result {
@@ -251,8 +251,8 @@ impl Builtin for FlatMap {
         let prog = body?;
         let mut out: Vec<crate::data::value::Val> = Vec::new();
         for v in buf.iter() {
-            let inner = match crate::pipeline::eval_kernel(ctx.kernel, v, |item| {
-                crate::pipeline::apply_item_in_env(ctx.vm, ctx.env, item, prog)
+            let inner = match crate::exec::pipeline::eval_kernel(ctx.kernel, v, |item| {
+                crate::exec::pipeline::apply_item_in_env(ctx.vm, ctx.env, item, prog)
             }) {
                 Ok(inner) => inner,
                 Err(err) => return Some(Err(err)),
@@ -291,16 +291,16 @@ impl Builtin for Take {
         ctx: &mut super::builtin::StreamCtx<'_, '_>,
         item: crate::data::value::Val,
         _body: Option<&crate::vm::Program>,
-    ) -> Result<crate::pipeline::StageFlow<crate::data::value::Val>, crate::context::EvalError> {
+    ) -> Result<crate::exec::pipeline::StageFlow<crate::data::value::Val>, crate::context::EvalError> {
         let n = match ctx.stage.descriptor().and_then(|d| d.usize_arg) {
             Some(n) => n,
-            None => return Ok(crate::pipeline::StageFlow::Continue(item)),
+            None => return Ok(crate::exec::pipeline::StageFlow::Continue(item)),
         };
         if ctx.stage_taken[ctx.stage_idx] >= n {
-            Ok(crate::pipeline::StageFlow::Stop)
+            Ok(crate::exec::pipeline::StageFlow::Stop)
         } else {
             ctx.stage_taken[ctx.stage_idx] += 1;
-            Ok(crate::pipeline::StageFlow::Continue(item))
+            Ok(crate::exec::pipeline::StageFlow::Continue(item))
         }
     }
 
@@ -338,16 +338,16 @@ impl Builtin for Skip {
         ctx: &mut super::builtin::StreamCtx<'_, '_>,
         item: crate::data::value::Val,
         _body: Option<&crate::vm::Program>,
-    ) -> Result<crate::pipeline::StageFlow<crate::data::value::Val>, crate::context::EvalError> {
+    ) -> Result<crate::exec::pipeline::StageFlow<crate::data::value::Val>, crate::context::EvalError> {
         let n = match ctx.stage.descriptor().and_then(|d| d.usize_arg) {
             Some(n) => n,
-            None => return Ok(crate::pipeline::StageFlow::Continue(item)),
+            None => return Ok(crate::exec::pipeline::StageFlow::Continue(item)),
         };
         if ctx.stage_skipped[ctx.stage_idx] < n {
             ctx.stage_skipped[ctx.stage_idx] += 1;
-            Ok(crate::pipeline::StageFlow::SkipRow)
+            Ok(crate::exec::pipeline::StageFlow::SkipRow)
         } else {
-            Ok(crate::pipeline::StageFlow::Continue(item))
+            Ok(crate::exec::pipeline::StageFlow::Continue(item))
         }
     }
 
@@ -440,17 +440,17 @@ impl Builtin for TakeWhile {
         ctx: &mut super::builtin::StreamCtx<'_, '_>,
         item: crate::data::value::Val,
         body: Option<&crate::vm::Program>,
-    ) -> Result<crate::pipeline::StageFlow<crate::data::value::Val>, crate::context::EvalError> {
+    ) -> Result<crate::exec::pipeline::StageFlow<crate::data::value::Val>, crate::context::EvalError> {
         let prog = body.expect("take_while body");
         let pass = super::take_while_one(&item, |v| {
-            crate::pipeline::eval_kernel(ctx.kernel, v, |it| {
-                crate::pipeline::apply_item_in_env(ctx.vm, ctx.env, it, prog)
+            crate::exec::pipeline::eval_kernel(ctx.kernel, v, |it| {
+                crate::exec::pipeline::apply_item_in_env(ctx.vm, ctx.env, it, prog)
             })
         })?;
         Ok(if pass {
-            crate::pipeline::StageFlow::Continue(item)
+            crate::exec::pipeline::StageFlow::Continue(item)
         } else {
-            crate::pipeline::StageFlow::Stop
+            crate::exec::pipeline::StageFlow::Stop
         })
     }
 
@@ -462,8 +462,8 @@ impl Builtin for TakeWhile {
     ) -> Option<Result<(), crate::context::EvalError>> {
         let prog = body?;
         let result = super::take_while_apply(std::mem::take(buf), |v| {
-            crate::pipeline::eval_kernel(ctx.kernel, v, |item| {
-                crate::pipeline::apply_item_in_env(ctx.vm, ctx.env, item, prog)
+            crate::exec::pipeline::eval_kernel(ctx.kernel, v, |item| {
+                crate::exec::pipeline::apply_item_in_env(ctx.vm, ctx.env, item, prog)
             })
         });
         match result {
@@ -503,8 +503,8 @@ impl Builtin for DropWhile {
         _ctx: &mut super::builtin::StreamCtx<'_, '_>,
         item: crate::data::value::Val,
         _body: Option<&crate::vm::Program>,
-    ) -> Result<crate::pipeline::StageFlow<crate::data::value::Val>, crate::context::EvalError> {
-        Ok(crate::pipeline::StageFlow::Continue(item))
+    ) -> Result<crate::exec::pipeline::StageFlow<crate::data::value::Val>, crate::context::EvalError> {
+        Ok(crate::exec::pipeline::StageFlow::Continue(item))
     }
 
     #[inline]
@@ -515,8 +515,8 @@ impl Builtin for DropWhile {
     ) -> Option<Result<(), crate::context::EvalError>> {
         let prog = body?;
         let result = super::drop_while_apply(std::mem::take(buf), |v| {
-            crate::pipeline::eval_kernel(ctx.kernel, v, |item| {
-                crate::pipeline::apply_item_in_env(ctx.vm, ctx.env, item, prog)
+            crate::exec::pipeline::eval_kernel(ctx.kernel, v, |item| {
+                crate::exec::pipeline::apply_item_in_env(ctx.vm, ctx.env, item, prog)
             })
         });
         match result {
@@ -669,8 +669,8 @@ impl Builtin for FindIndex {
         let mut found: crate::data::value::Val = crate::data::value::Val::Null;
         for (i, v) in buf.iter().enumerate() {
             match super::filter_one(v, |item| {
-                crate::pipeline::eval_kernel(ctx.kernel, item, |it| {
-                    crate::pipeline::apply_item_in_env(ctx.vm, ctx.env, it, prog)
+                crate::exec::pipeline::eval_kernel(ctx.kernel, item, |it| {
+                    crate::exec::pipeline::apply_item_in_env(ctx.vm, ctx.env, it, prog)
                 })
             }) {
                 Ok(true) => {
@@ -706,8 +706,8 @@ impl Builtin for IndicesWhere {
         let mut out: Vec<i64> = Vec::new();
         for (i, v) in buf.iter().enumerate() {
             match super::filter_one(v, |item| {
-                crate::pipeline::eval_kernel(ctx.kernel, item, |it| {
-                    crate::pipeline::apply_item_in_env(ctx.vm, ctx.env, it, prog)
+                crate::exec::pipeline::eval_kernel(ctx.kernel, item, |it| {
+                    crate::exec::pipeline::apply_item_in_env(ctx.vm, ctx.env, it, prog)
                 })
             }) {
                 Ok(true) => out.push(i as i64),
@@ -734,20 +734,20 @@ fn arg_extreme_apply_barrier(
         return Some(Ok(()));
     }
     let mut best_idx = 0usize;
-    let mut best_key = match crate::pipeline::eval_kernel(ctx.kernel, &buf[0], |item| {
-        crate::pipeline::apply_item_in_env(ctx.vm, ctx.env, item, prog)
+    let mut best_key = match crate::exec::pipeline::eval_kernel(ctx.kernel, &buf[0], |item| {
+        crate::exec::pipeline::apply_item_in_env(ctx.vm, ctx.env, item, prog)
     }) {
         Ok(key) => key,
         Err(err) => return Some(Err(err)),
     };
     for i in 1..buf.len() {
-        let key = match crate::pipeline::eval_kernel(ctx.kernel, &buf[i], |item| {
-            crate::pipeline::apply_item_in_env(ctx.vm, ctx.env, item, prog)
+        let key = match crate::exec::pipeline::eval_kernel(ctx.kernel, &buf[i], |item| {
+            crate::exec::pipeline::apply_item_in_env(ctx.vm, ctx.env, item, prog)
         }) {
             Ok(key) => key,
             Err(err) => return Some(Err(err)),
         };
-        let cmp = crate::pipeline::cmp_val_total(&key, &best_key);
+        let cmp = crate::exec::pipeline::cmp_val_total(&key, &best_key);
         let take = if max {
             cmp == std::cmp::Ordering::Greater
         } else {
@@ -1061,21 +1061,21 @@ impl Builtin for Sort {
     ) -> Option<Result<(), crate::context::EvalError>> {
         let _ = body;
         let _ = ctx;
-        let crate::pipeline::Stage::Sort(spec) = ctx.stage else {
+        let crate::exec::pipeline::Stage::Sort(spec) = ctx.stage else {
             return None;
         };
         let descending = spec.descending;
         let strategy = ctx.strategy;
         let result = match &spec.key {
-            None => crate::pipeline::bounded_sort_by_key(
+            None => crate::exec::pipeline::bounded_sort_by_key(
                 std::mem::take(buf), descending, strategy, |v| Ok(v.clone()),
             ),
             Some(prog) => {
                 let key_prog = prog.clone();
-                crate::pipeline::bounded_sort_by_key(
+                crate::exec::pipeline::bounded_sort_by_key(
                     std::mem::take(buf), descending, strategy, |v| {
-                        Ok(crate::pipeline::eval_kernel(ctx.kernel, v, |item| {
-                            crate::pipeline::apply_item_in_env(ctx.vm, ctx.env, item, &key_prog)
+                        Ok(crate::exec::pipeline::eval_kernel(ctx.kernel, v, |item| {
+                            crate::exec::pipeline::apply_item_in_env(ctx.vm, ctx.env, item, &key_prog)
                         }).unwrap_or(crate::data::value::Val::Null))
                     },
                 )
@@ -1261,8 +1261,8 @@ impl Builtin for GroupBy {
             None => return Some(Ok(())),
         };
         let result = super::group_by_apply(std::mem::take(buf), |v| {
-            crate::pipeline::eval_kernel(ctx.kernel, v, |item| {
-                crate::pipeline::apply_item_in_env(ctx.vm, ctx.env, item, prog)
+            crate::exec::pipeline::eval_kernel(ctx.kernel, v, |item| {
+                crate::exec::pipeline::apply_item_in_env(ctx.vm, ctx.env, item, prog)
             })
         });
         match result {
@@ -1305,8 +1305,8 @@ impl Builtin for CountBy {
     ) -> Option<Result<(), crate::context::EvalError>> {
         let prog = body?;
         let result = super::count_by_apply(std::mem::take(buf), |v| {
-            crate::pipeline::eval_kernel(ctx.kernel, v, |item| {
-                crate::pipeline::apply_item_in_env(ctx.vm, ctx.env, item, prog)
+            crate::exec::pipeline::eval_kernel(ctx.kernel, v, |item| {
+                crate::exec::pipeline::apply_item_in_env(ctx.vm, ctx.env, item, prog)
             })
         });
         match result {
@@ -1349,8 +1349,8 @@ impl Builtin for IndexBy {
     ) -> Option<Result<(), crate::context::EvalError>> {
         let prog = body?;
         let result = super::index_by_apply(std::mem::take(buf), |v| {
-            crate::pipeline::eval_kernel(ctx.kernel, v, |item| {
-                crate::pipeline::apply_item_in_env(ctx.vm, ctx.env, item, prog)
+            crate::exec::pipeline::eval_kernel(ctx.kernel, v, |item| {
+                crate::exec::pipeline::apply_item_in_env(ctx.vm, ctx.env, item, prog)
             })
         });
         match result {
@@ -1396,8 +1396,8 @@ fn unique_apply_barrier(
             let mut seen: std::collections::HashSet<String> = Default::default();
             let mut keep: Vec<bool> = Vec::with_capacity(buf.len());
             for v in buf.iter() {
-                let key = crate::pipeline::eval_kernel(ctx.kernel, v, |item| {
-                    crate::pipeline::apply_item_in_env(ctx.vm, ctx.env, item, prog)
+                let key = crate::exec::pipeline::eval_kernel(ctx.kernel, v, |item| {
+                    crate::exec::pipeline::apply_item_in_env(ctx.vm, ctx.env, item, prog)
                 })
                 .unwrap_or(crate::data::value::Val::Null);
                 keep.push(seen.insert(format!("{:?}", key)));
@@ -1837,7 +1837,7 @@ impl Builtin for TransformKeys {
         ctx: &mut super::builtin::StreamCtx<'_, '_>,
         item: crate::data::value::Val,
         body: Option<&crate::vm::Program>,
-    ) -> Result<crate::pipeline::StageFlow<crate::data::value::Val>, crate::context::EvalError> {
+    ) -> Result<crate::exec::pipeline::StageFlow<crate::data::value::Val>, crate::context::EvalError> {
         object_lambda_apply_stream(ctx, item, body)
     }
 
@@ -1858,12 +1858,12 @@ fn object_lambda_apply_stream(
     ctx: &mut super::builtin::StreamCtx<'_, '_>,
     item: crate::data::value::Val,
     body: Option<&crate::vm::Program>,
-) -> Result<crate::pipeline::StageFlow<crate::data::value::Val>, crate::context::EvalError> {
+) -> Result<crate::exec::pipeline::StageFlow<crate::data::value::Val>, crate::context::EvalError> {
     let prog = body.expect("object lambda body");
-    let result = crate::pipeline::materialized_exec::apply_lambda_obj(
+    let result = crate::exec::pipeline::materialized_exec::apply_lambda_obj(
         ctx.stage, &item, ctx.vm, ctx.env, ctx.kernel, prog,
     )?;
-    Ok(crate::pipeline::StageFlow::Continue(result))
+    Ok(crate::exec::pipeline::StageFlow::Continue(result))
 }
 
 /// Helper used by all ObjectLambda variants for barrier (whole-buffer) execution.
@@ -1876,7 +1876,7 @@ fn object_lambda_apply_barrier(
     let prog = body?;
     let mut out: Vec<crate::data::value::Val> = Vec::with_capacity(buf.len());
     for v in std::mem::take(buf) {
-        match crate::pipeline::materialized_exec::apply_lambda_obj(
+        match crate::exec::pipeline::materialized_exec::apply_lambda_obj(
             ctx.stage, &v, ctx.vm, ctx.env, ctx.kernel, prog,
         ) {
             Ok(mapped) => out.push(mapped),
@@ -1901,7 +1901,7 @@ impl Builtin for TransformValues {
         ctx: &mut super::builtin::StreamCtx<'_, '_>,
         item: crate::data::value::Val,
         body: Option<&crate::vm::Program>,
-    ) -> Result<crate::pipeline::StageFlow<crate::data::value::Val>, crate::context::EvalError> {
+    ) -> Result<crate::exec::pipeline::StageFlow<crate::data::value::Val>, crate::context::EvalError> {
         object_lambda_apply_stream(ctx, item, body)
     }
 
@@ -1926,7 +1926,7 @@ impl Builtin for FilterKeys {
         ctx: &mut super::builtin::StreamCtx<'_, '_>,
         item: crate::data::value::Val,
         body: Option<&crate::vm::Program>,
-    ) -> Result<crate::pipeline::StageFlow<crate::data::value::Val>, crate::context::EvalError> {
+    ) -> Result<crate::exec::pipeline::StageFlow<crate::data::value::Val>, crate::context::EvalError> {
         object_lambda_apply_stream(ctx, item, body)
     }
 
@@ -1951,7 +1951,7 @@ impl Builtin for FilterValues {
         ctx: &mut super::builtin::StreamCtx<'_, '_>,
         item: crate::data::value::Val,
         body: Option<&crate::vm::Program>,
-    ) -> Result<crate::pipeline::StageFlow<crate::data::value::Val>, crate::context::EvalError> {
+    ) -> Result<crate::exec::pipeline::StageFlow<crate::data::value::Val>, crate::context::EvalError> {
         object_lambda_apply_stream(ctx, item, body)
     }
 

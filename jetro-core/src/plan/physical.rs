@@ -18,8 +18,8 @@ use crate::ir::physical::{
     BackendPlan, ExecutionFacts, NodeId, PhysicalArrayElem, PhysicalChainStep, PhysicalNode,
     PhysicalObjField, PhysicalPathStep, PipelinePlanSource, PlanNode, QueryPlan,
 };
-use crate::pipeline::{Pipeline, Source};
-use crate::structural::{StructuralPathStep, StructuralPlan};
+use crate::exec::pipeline::{Pipeline, Source};
+use crate::exec::structural::{StructuralPathStep, StructuralPlan};
 use crate::data::value::Val;
 
 /// Accumulates `PhysicalNode`s as the AST is lowered and tracks lexical state
@@ -339,14 +339,14 @@ fn try_lower_pipeline(builder: &PlanBuilder, expr: &Expr) -> Option<PlanNode> {
 fn lower_via_logical(expr: &Expr) -> Option<Pipeline> {
     let logical = crate::plan::logical::try_lower(expr)?;
     let optimized = crate::plan::optimize::Optimizer::default_rules().optimize(logical);
-    crate::pipeline::logical_lower::try_lower(optimized)
+    crate::exec::pipeline::logical_lower::try_lower(optimized)
 }
 
 /// Converts a decomposed pipeline `(source, body)` pair into a `PlanNode::Pipeline`, returning
 /// `None` when the source is a `Receiver` (those go through `try_lower_receiver_pipeline`).
 fn pipeline_parts_to_plan_node(
     source: Source,
-    body: crate::pipeline::PipelineBody,
+    body: crate::exec::pipeline::PipelineBody,
 ) -> Option<PlanNode> {
     let source = match source {
         Source::FieldChain { keys } => PipelinePlanSource::FieldChain { keys },
@@ -358,13 +358,13 @@ fn pipeline_parts_to_plan_node(
 /// Returns `true` when the pipeline has no stages and sinks straight to `Collect`,
 /// meaning it is semantically equivalent to just evaluating the source expression.
 fn is_trivial_collect_pipeline(pipeline: &Pipeline) -> bool {
-    pipeline.stages.is_empty() && matches!(pipeline.sink, crate::pipeline::Sink::Collect)
+    pipeline.stages.is_empty() && matches!(pipeline.sink, crate::exec::pipeline::Sink::Collect)
 }
 
 /// Demotes any stage or sink kernel that references an in-scope local variable to `Generic`,
 /// ensuring the pipeline evaluator resolves the name through the `Env` rather than as a row field.
 fn mask_active_local_stage_kernels(
-    body: &mut crate::pipeline::PipelineBody,
+    body: &mut crate::exec::pipeline::PipelineBody,
     builder: &PlanBuilder,
 ) {
     if builder.locals.is_empty() {
@@ -383,12 +383,12 @@ fn mask_active_local_stage_kernels(
                 .any(|local| analysis::expr_uses_ident(expr, local.as_ref()))
             {
                 recompile_stage_body_for_lexical_env(&mut body.stages[idx], expr);
-                body.stage_kernels[idx] = crate::pipeline::BodyKernel::Generic;
+                body.stage_kernels[idx] = crate::exec::pipeline::BodyKernel::Generic;
             }
         }
     }
 
-    if let crate::pipeline::Sink::Reducer(spec) = &mut body.sink {
+    if let crate::exec::pipeline::Sink::Reducer(spec) = &mut body.sink {
         let mut kernel_idx = 0usize;
         if let (Some(program), Some(expr)) = (&mut spec.predicate, spec.predicate_expr.as_ref()) {
             if builder
@@ -398,7 +398,7 @@ fn mask_active_local_stage_kernels(
             {
                 *program = Arc::new(Compiler::compile(expr, "<local-aware-pipeline-sink>"));
                 if let Some(kernel) = body.sink_kernels.get_mut(kernel_idx) {
-                    *kernel = crate::pipeline::BodyKernel::Generic;
+                    *kernel = crate::exec::pipeline::BodyKernel::Generic;
                 }
             }
             kernel_idx += 1;
@@ -411,14 +411,14 @@ fn mask_active_local_stage_kernels(
             {
                 *program = Arc::new(Compiler::compile(expr, "<local-aware-pipeline-sink>"));
                 if let Some(kernel) = body.sink_kernels.get_mut(kernel_idx) {
-                    *kernel = crate::pipeline::BodyKernel::Generic;
+                    *kernel = crate::exec::pipeline::BodyKernel::Generic;
                 }
             }
         }
     } else {
         for kernel in &mut body.sink_kernels {
             if kernel_mentions_active_local(kernel, &builder.locals) {
-                *kernel = crate::pipeline::BodyKernel::Generic;
+                *kernel = crate::exec::pipeline::BodyKernel::Generic;
             }
         }
     }
@@ -426,24 +426,24 @@ fn mask_active_local_stage_kernels(
 
 /// Recompiles the stored kernel program of a pipeline stage so it will be evaluated inside
 /// a full `Env` (picking up let-bound variables) rather than against a bare row.
-fn recompile_stage_body_for_lexical_env(stage: &mut crate::pipeline::Stage, expr: &Expr) {
+fn recompile_stage_body_for_lexical_env(stage: &mut crate::exec::pipeline::Stage, expr: &Expr) {
     let program = Arc::new(Compiler::compile(expr, "<local-aware-pipeline-stage>"));
     match stage {
-        crate::pipeline::Stage::Filter(body, _)
-        | crate::pipeline::Stage::Map(body, _)
-        | crate::pipeline::Stage::FlatMap(body, _) => *body = program,
-        crate::pipeline::Stage::ExprBuiltin { body, .. } => *body = program,
-        crate::pipeline::Stage::UniqueBy(Some(body)) => *body = program,
-        crate::pipeline::Stage::Sort(sort) if sort.key.is_some() => sort.key = Some(program),
-        crate::pipeline::Stage::CompiledMap(_) => {
-            *stage = crate::pipeline::Stage::Map(program, crate::builtins::BuiltinViewStage::Map);
+        crate::exec::pipeline::Stage::Filter(body, _)
+        | crate::exec::pipeline::Stage::Map(body, _)
+        | crate::exec::pipeline::Stage::FlatMap(body, _) => *body = program,
+        crate::exec::pipeline::Stage::ExprBuiltin { body, .. } => *body = program,
+        crate::exec::pipeline::Stage::UniqueBy(Some(body)) => *body = program,
+        crate::exec::pipeline::Stage::Sort(sort) if sort.key.is_some() => sort.key = Some(program),
+        crate::exec::pipeline::Stage::CompiledMap(_) => {
+            *stage = crate::exec::pipeline::Stage::Map(program, crate::builtins::BuiltinViewStage::Map);
         }
         _ => {}
     }
 }
 
 /// Returns `true` if `kernel` references any identifier that is currently a let-bound local.
-fn kernel_mentions_active_local(kernel: &crate::pipeline::BodyKernel, locals: &[Arc<str>]) -> bool {
+fn kernel_mentions_active_local(kernel: &crate::exec::pipeline::BodyKernel, locals: &[Arc<str>]) -> bool {
     kernel.mentions_any_field_like_ident(locals)
 }
 
@@ -864,10 +864,10 @@ mod tests {
             source: PipelinePlanSource::FieldChain {
                 keys: Arc::from([Arc::<str>::from("rows")]),
             },
-            body: crate::pipeline::PipelineBody {
+            body: crate::exec::pipeline::PipelineBody {
                 stages: Vec::new(),
                 stage_exprs: Vec::new(),
-                sink: crate::pipeline::Sink::Collect,
+                sink: crate::exec::pipeline::Sink::Collect,
                 stage_kernels: Vec::new(),
                 sink_kernels: Vec::new(),
             },
@@ -1147,17 +1147,17 @@ mod tests {
             panic!("expected physical receiver pipeline");
         };
         assert!(matches!(source, PipelinePlanSource::Expr(_)));
-        assert!(matches!(body.stages[0], crate::pipeline::Stage::Sort(_)));
+        assert!(matches!(body.stages[0], crate::exec::pipeline::Stage::Sort(_)));
         assert!(matches!(
             body.stages[1],
-            crate::pipeline::Stage::ExprBuiltin {
+            crate::exec::pipeline::Stage::ExprBuiltin {
                 method: crate::builtins::BuiltinMethod::TakeWhile,
                 ..
             }
         ));
         assert!(matches!(
             body.stages[2],
-            crate::pipeline::Stage::UsizeBuiltin {
+            crate::exec::pipeline::Stage::UsizeBuiltin {
                 method: crate::builtins::BuiltinMethod::Take,
                 value: 2
             }

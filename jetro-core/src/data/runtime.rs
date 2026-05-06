@@ -11,7 +11,7 @@ use std::sync::Arc;
 use crate::parse::ast::{Arg, Expr};
 use crate::context::{Env, EvalError};
 use crate::ir::physical::PipelinePlanSource;
-use crate::pipeline::{self, PipelineBody};
+use crate::exec::pipeline::{self, PipelineBody};
 use crate::data::value::Val;
 use crate::vm::{CompiledCall, VM};
 

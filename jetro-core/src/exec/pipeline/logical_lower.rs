@@ -10,7 +10,7 @@ use std::sync::Arc;
 use crate::parse::ast::{Expr, Step};
 use crate::builtins::{BuiltinMethod, BuiltinViewStage};
 use crate::ir::logical::LogicalPlan;
-use crate::pipeline::{
+use crate::exec::pipeline::{
     plan_with_exprs, BodyKernel, NumOp, Pipeline, PipelineBody, ReducerOp,
     ReducerSpec, Sink, Source, Stage,
 };

@@ -4,7 +4,7 @@
 
 use indexmap::IndexMap;
 
-use crate::{builtins::BuiltinKeyedReducer, pipeline, data::value::Val, data::view::ValueView};
+use crate::{builtins::BuiltinKeyedReducer, exec::pipeline, data::value::Val, data::view::ValueView};
 
 use super::key::ViewKey;
 

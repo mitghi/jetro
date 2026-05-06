@@ -13,11 +13,11 @@ use crate::ir::physical::{
     BackendPreference, NodeId, PhysicalArrayElem, PhysicalChainStep, PhysicalObjField,
     PhysicalPathStep, PipelinePlanSource, PlanNode, QueryPlan,
 };
-use crate::pipeline;
+use crate::exec::pipeline;
 use crate::data::runtime::{PipelineSourceResolver, ResolvedPipelineSource};
 use crate::data::value::Val;
 use crate::data::view::{ValView, ValueView};
-use crate::view_pipeline;
+use crate::exec::view as view_pipeline;
 use crate::{Jetro, VM};
 
 /// Entry point: constructs an `ExecCtx` and evaluates the plan DAG starting from `root_id`.

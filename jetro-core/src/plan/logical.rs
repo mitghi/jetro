@@ -10,7 +10,7 @@ use std::sync::Arc;
 use crate::parse::ast::{Arg, Expr, Step};
 use crate::builtins::BuiltinMethod;
 use crate::ir::logical::LogicalPlan;
-use crate::pipeline::{SortSpec, Source};
+use crate::exec::pipeline::{SortSpec, Source};
 
 /// Try to lower a pipeline-shaped `Expr` to a `LogicalPlan`.
 /// Returns `None` for expressions that are not pipeline-shaped.

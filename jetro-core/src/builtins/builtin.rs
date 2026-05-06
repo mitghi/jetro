@@ -28,13 +28,13 @@ use super::{BuiltinCancellation, BuiltinMethod, BuiltinSpec};
 pub(crate) struct StreamCtx<'a, 'b> {
     pub vm: &'a mut VM,
     pub env: &'a mut Env,
-    pub kernel: &'a super::super::pipeline::BodyKernel,
-    pub stage: &'a super::super::pipeline::Stage,
+    pub kernel: &'a crate::exec::pipeline::BodyKernel,
+    pub stage: &'a crate::exec::pipeline::Stage,
     pub stage_idx: usize,
     pub stage_taken: &'a mut [usize],
     pub stage_skipped: &'a mut [usize],
     pub terminal_map_idx: Option<usize>,
-    pub terminal_map_collect: &'a mut Option<super::super::pipeline::TerminalMapCollector<'b>>,
+    pub terminal_map_collect: &'a mut Option<crate::exec::pipeline::TerminalMapCollector<'b>>,
 }
 
 /// Concrete context passed to `Builtin::apply_barrier`.
@@ -44,9 +44,9 @@ pub(crate) struct StreamCtx<'a, 'b> {
 pub(crate) struct BarrierCtx<'a> {
     pub vm: &'a mut VM,
     pub env: &'a mut Env,
-    pub kernel: &'a super::super::pipeline::BodyKernel,
-    pub stage: &'a super::super::pipeline::Stage,
-    pub strategy: super::super::pipeline::StageStrategy,
+    pub kernel: &'a crate::exec::pipeline::BodyKernel,
+    pub stage: &'a crate::exec::pipeline::Stage,
+    pub strategy: crate::exec::pipeline::StageStrategy,
 }
 
 /// Per-method definition trait. Each `BuiltinMethod` variant has a corresponding zero-sized
@@ -108,8 +108,8 @@ pub(crate) trait Builtin {
         _ctx: &mut StreamCtx<'_, '_>,
         item: Val,
         _body: Option<&Program>,
-    ) -> Result<super::super::pipeline::StageFlow<Val>, EvalError> {
-        Ok(super::super::pipeline::StageFlow::Continue(item))
+    ) -> Result<crate::exec::pipeline::StageFlow<Val>, EvalError> {
+        Ok(crate::exec::pipeline::StageFlow::Continue(item))
     }
 
     /// Barrier full-buffer runtime: transforms `buf` in place. Default leaves `buf`

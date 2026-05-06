@@ -862,11 +862,11 @@ pub fn barrier_bottom_k(buf: Vec<Val>, key: &KeySource, k: usize) -> Vec<Val> {
 /// to `pipeline::bounded_sort_by_key_cmp` with the appropriate `StageStrategy`.
 fn barrier_top_or_bottom_k(buf: Vec<Val>, key: &KeySource, k: usize, largest: bool) -> Vec<Val> {
     let strategy = if largest {
-        crate::pipeline::StageStrategy::SortBottomK(k)
+        crate::exec::pipeline::StageStrategy::SortBottomK(k)
     } else {
-        crate::pipeline::StageStrategy::SortTopK(k)
+        crate::exec::pipeline::StageStrategy::SortTopK(k)
     };
-    crate::pipeline::bounded_sort_by_key_cmp(buf, false, strategy, |v| Ok(key.extract(v)), cmp_val)
+    crate::exec::pipeline::bounded_sort_by_key_cmp(buf, false, strategy, |v| Ok(key.extract(v)), cmp_val)
         .unwrap_or_default()
 }
 
@@ -1411,7 +1411,7 @@ mod tests {
     fn step3d_phase3_filter_reorder() {
         // Two consecutive Filter stages should be fused/reordered into one by the planner.
         use crate::parse::ast::BinOp;
-        use crate::pipeline::{plan_with_kernels, BodyKernel, Sink, Stage};
+        use crate::exec::pipeline::{plan_with_kernels, BodyKernel, Sink, Stage};
         use std::sync::Arc;
         let dummy = Arc::new(crate::vm::Program::new(Vec::new(), ""));
         let stages = vec![
@@ -1437,7 +1437,7 @@ mod tests {
         let p = plan_with_kernels(
             stages,
             &kernels,
-            Sink::Reducer(crate::pipeline::ReducerSpec::count()),
+            Sink::Reducer(crate::exec::pipeline::ReducerSpec::count()),
         );
         // both filters should be merged into a single composed stage
         assert_eq!(p.stages.len(), 1);
@@ -1474,7 +1474,7 @@ mod tests {
 
     #[test]
     fn step3d_phase4_merge_take_skip() {
-        use crate::pipeline::{plan, Sink, Stage};
+        use crate::exec::pipeline::{plan, Sink, Stage};
         // take(5).take(3) → take(3)
         let p = plan(
             vec![
@@ -1535,7 +1535,7 @@ mod tests {
 
     #[test]
     fn step3d_phase5_strategy_selection() {
-        use crate::pipeline::{
+        use crate::exec::pipeline::{
             select_strategy, NumOp, ReducerOp, ReducerSpec, Sink, SortSpec, Stage, Strategy,
         };
         let first_sink = Sink::Terminal(BuiltinMethod::First);
@@ -1590,7 +1590,7 @@ mod tests {
 
     #[test]
     fn step3d_phase1_compute_strategies() {
-        use crate::pipeline::{
+        use crate::exec::pipeline::{
             compute_strategies, NumOp, ReducerOp, ReducerSpec, Sink, SortSpec, Stage, StageStrategy,
         };
         use std::sync::Arc;

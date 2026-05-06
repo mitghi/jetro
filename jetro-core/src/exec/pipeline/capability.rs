@@ -286,7 +286,7 @@ mod tests {
     use crate::builtins::{
         BuiltinMethod, BuiltinSelectionPosition, BuiltinSinkAccumulator, BuiltinViewStage,
     };
-    use crate::pipeline::{
+    use crate::exec::pipeline::{
         BodyKernel, NumOp, PipelineBody, ReducerOp, ReducerSpec, Sink, Stage, ViewInputMode,
         ViewMaterialization, ViewOutputMode, ViewSinkCapability, ViewStageCapability,
     };
@@ -487,7 +487,7 @@ mod tests {
                     Arc::new(crate::vm::Program::new(Vec::new(), "")),
                     BuiltinViewStage::Map,
                 ),
-                Stage::Builtin(crate::pipeline::PipelineBuiltinCall {
+                Stage::Builtin(crate::exec::pipeline::PipelineBuiltinCall {
                     method: crate::builtins::BuiltinMethod::Upper,
                     args: crate::builtins::BuiltinArgs::None,
                 }),

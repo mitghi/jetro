@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use crate::builtins::{BuiltinNumericReducer, BuiltinSelectionPosition, BuiltinSinkAccumulator};
 use crate::parse::chain_ir::PullDemand;
-use crate::composed_pipeline as cmp;
+use crate::exec::composed as cmp;
 use crate::context::{Env, EvalError};
 use crate::data::value::Val;
 use crate::vm::Program;

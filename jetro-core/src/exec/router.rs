@@ -9,7 +9,7 @@ use serde_json::Value;
 
 use crate::context::EvalError;
 use crate::ir::physical::{QueryPlan, QueryRoot};
-use crate::physical_eval;
+use crate::exec::interpreted as physical_eval;
 use crate::plan::physical as planner;
 use crate::{with_vm, Jetro, VM};
 
@@ -86,7 +86,7 @@ mod tests {
         PhysicalChainStep, PhysicalNode, PhysicalObjField, PhysicalPathStep, PipelinePlanSource,
         PlanNode, QueryPlan,
     };
-    use crate::pipeline::{BodyKernel, NumOp, ReducerOp, Sink, Stage};
+    use crate::exec::pipeline::{BodyKernel, NumOp, ReducerOp, Sink, Stage};
     use crate::plan::physical as planner;
     use crate::data::value::Val;
     use crate::{Jetro, JetroEngine};
@@ -173,7 +173,7 @@ mod tests {
     fn collect_test_val(j: &Jetro, expr: &str) -> Val {
         let plan = planner::plan_query(expr);
         match plan.root() {
-            QueryRoot::Node(root) => crate::physical_eval::run(j, &plan, *root).unwrap(),
+            QueryRoot::Node(root) => crate::exec::interpreted::run(j, &plan, *root).unwrap(),
             QueryRoot::SourceVm(_) => panic!("unexpected source VM fallback"),
         }
     }

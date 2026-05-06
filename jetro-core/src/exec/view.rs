@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use crate::parse::chain_ir::PullDemand;
 use crate::context::{Env, EvalError};
-use crate::pipeline;
+use crate::exec::pipeline;
 use crate::data::value::Val;
 use crate::data::view::{scalar_view_to_owned_val, ValueView};
 
@@ -953,7 +953,7 @@ mod tests {
 
     use crate::parse::ast::BinOp;
     use crate::context::Env;
-    use crate::pipeline::{BodyKernel, PipelineBody, Sink, Stage, ViewStageCapability};
+    use crate::exec::pipeline::{BodyKernel, PipelineBody, Sink, Stage, ViewStageCapability};
     use crate::util::JsonView;
     use crate::data::value::Val;
     use crate::data::view::{ValView, ValueView};
@@ -1235,7 +1235,7 @@ mod tests {
         let body = PipelineBody {
             stages: vec![Stage::UniqueBy(None)],
             stage_exprs: Vec::new(),
-            sink: Sink::Reducer(crate::pipeline::ReducerSpec::count()),
+            sink: Sink::Reducer(crate::exec::pipeline::ReducerSpec::count()),
             stage_kernels: vec![BodyKernel::Generic],
             sink_kernels: Vec::new(),
         };

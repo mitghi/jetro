@@ -6,7 +6,7 @@
 //! been applied.
 
 use crate::parse::ast::Expr;
-use crate::pipeline::{SortSpec, Source};
+use crate::exec::pipeline::{SortSpec, Source};
 
 /// A tree-shaped, uncompiled pipeline plan.
 ///
