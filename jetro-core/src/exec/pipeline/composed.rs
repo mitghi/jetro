@@ -483,9 +483,17 @@ fn run_lazy_ordered_suffix(
         None => cmp::KeySource::None,
         Some(_) => key_from_kernel(kernel)?,
     };
+    let final_demand = Pipeline::segment_source_demand(&stages[sort_idx + 1..], sink)
+        .chain
+        .pull;
+    let ordered_descending = if matches!(final_demand, PullDemand::LastInput(_)) {
+        !spec.descending
+    } else {
+        spec.descending
+    };
     let ordered = match ordered_by_key_cmp(
         rows,
-        spec.descending,
+        ordered_descending,
         |v| Ok(key.extract(v)),
         cmp::cmp_val,
     ) {
@@ -493,9 +501,6 @@ fn run_lazy_ordered_suffix(
         Err(err) => return Some(Err(err)),
     };
     let chain = build_chain(stages, kernels, sort_idx + 1..stages.len(), stage_builder)?;
-    let final_demand = Pipeline::segment_source_demand(&stages[sort_idx + 1..], sink)
-        .chain
-        .pull;
     let (sink, chain) = append_reducer_sink_stages(sink, sink_kernels, stage_builder, chain)?;
     run_sink_owned_iter(&sink, ordered, chain.as_ref(), final_demand).map(Ok)
 }

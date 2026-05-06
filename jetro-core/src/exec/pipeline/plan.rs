@@ -63,10 +63,14 @@ pub fn compute_strategies_with_kernels(
                     }
                 }
                 PullDemand::LastInput(k) => {
-                    strategies[i] = match demand.positional {
-                        Some(Position::First) => StageStrategy::SortTopK(k),
-                        _ => StageStrategy::SortBottomK(k),
-                    };
+                    if suffix_is_one_to_one(&stages[i + 1..]) {
+                        strategies[i] = match demand.positional {
+                            Some(Position::First) => StageStrategy::SortTopK(k),
+                            _ => StageStrategy::SortBottomK(k),
+                        };
+                    } else {
+                        strategies[i] = StageStrategy::SortUntilOutput(k);
+                    }
                 }
                 PullDemand::NthInput(_) | PullDemand::All => {}
             }
@@ -85,6 +89,15 @@ fn ordered_prefix_suffix_is_safe(
     suffix.iter().enumerate().all(|(idx, stage)| {
         let kernel = kernels.get(idx).unwrap_or(&BodyKernel::Generic);
         stage.ordered_prefix_effect(sort, sort_kernel, kernel)
+    })
+}
+
+fn suffix_is_one_to_one(stages: &[Stage]) -> bool {
+    stages.iter().all(|stage| {
+        matches!(
+            stage.shape().cardinality,
+            crate::parse::chain_ir::Cardinality::OneToOne
+        )
     })
 }
 

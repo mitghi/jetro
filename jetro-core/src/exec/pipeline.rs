@@ -1219,6 +1219,154 @@ mod tests {
     }
 
     #[test]
+    fn sort_filter_map_last_uses_lazy_tail_scan_and_matches_vm() {
+        use serde_json::json;
+
+        let query = "$.rows.sort(-score).filter(price > 20).map(isbn).last()";
+        let p = lower_query(query).unwrap();
+        let strategies = compute_strategies_with_kernels(&p.stages, &p.stage_kernels, &p.sink);
+        assert!(matches!(strategies[0], StageStrategy::SortUntilOutput(1)));
+
+        assert_pipeline_matches_vm(
+            query,
+            json!({
+                "rows": [
+                    {"isbn": "top-fails", "score": 100, "price": 10},
+                    {"isbn": "answer", "score": 90, "price": 30},
+                    {"isbn": "tail-fails", "score": 80, "price": 5}
+                ]
+            }),
+        );
+    }
+
+    #[test]
+    fn sort_prefix_filter_last_does_not_shrink_before_filtering() {
+        use serde_json::json;
+
+        let query = "$.rows.sort(-score).filter(score > 80).map(isbn).last()";
+        let p = lower_query(query).unwrap();
+        let strategies = compute_strategies_with_kernels(&p.stages, &p.stage_kernels, &p.sink);
+        assert!(matches!(strategies[0], StageStrategy::SortUntilOutput(1)));
+
+        assert_pipeline_matches_vm(
+            query,
+            json!({
+                "rows": [
+                    {"isbn": "top", "score": 100},
+                    {"isbn": "answer", "score": 90},
+                    {"isbn": "tail-fails", "score": 70}
+                ]
+            }),
+        );
+    }
+
+    #[test]
+    fn sort_map_last_can_still_use_bounded_bottomk() {
+        use serde_json::json;
+
+        let query = "$.rows.sort(-score).map(isbn).last()";
+        let p = lower_query(query).unwrap();
+        let strategies = compute_strategies_with_kernels(&p.stages, &p.stage_kernels, &p.sink);
+        assert!(matches!(strategies[0], StageStrategy::SortBottomK(1)));
+
+        assert_pipeline_matches_vm(
+            query,
+            json!({
+                "rows": [
+                    {"isbn": "top", "score": 100},
+                    {"isbn": "answer", "score": 70},
+                    {"isbn": "mid", "score": 90}
+                ]
+            }),
+        );
+    }
+
+    #[test]
+    fn adversarial_bounded_demand_chains_match_vm() {
+        use serde_json::json;
+
+        let doc = json!({
+            "rows": [
+                {"isbn": "top-fails-price", "score": 100, "price": 10, "tags": ["a", "b"]},
+                {"isbn": "high-pass", "score": 90, "price": 30, "tags": []},
+                {"isbn": "middle-pass", "score": 80, "price": 40, "tags": ["c"]},
+                {"isbn": "low-fails-price", "score": 70, "price": 5, "tags": ["d", "e"]},
+                {"isbn": "tail-pass", "score": 60, "price": 50, "tags": ["f"]}
+            ],
+            "dups": ["a", "b", "a", "c", "b"]
+        });
+
+        for (pipeline_query, vm_query) in [
+            (
+                "$.rows.filter(price > 20).map(isbn).last()",
+                "$.rows.filter(price > 20).map(isbn).last()",
+            ),
+            (
+                "$.rows.map(price).filter(@ > 20).last()",
+                "$.rows.map(price).filter(@ > 20).last()",
+            ),
+            (
+                "$.rows.take(2).filter(price > 20).last()",
+                "$.rows.first(2).filter(price > 20).last()",
+            ),
+            (
+                "$.rows.take_while(price > 20).last()",
+                "$.rows.take_while(price > 20).last()",
+            ),
+            (
+                "$.rows.drop_while(price < 20).last()",
+                "$.rows.drop_while(price < 20).last()",
+            ),
+            (
+                "$.rows.sort(-score).filter(price > 20).map(isbn).last()",
+                "$.rows.sort(-score).filter(price > 20).map(isbn).last()",
+            ),
+            (
+                "$.rows.sort(score).filter(price > 20).map(isbn).last()",
+                "$.rows.sort(score).filter(price > 20).map(isbn).last()",
+            ),
+            (
+                "$.rows.sort(-score).filter(score > 80).map(isbn).last()",
+                "$.rows.sort(-score).filter(score > 80).map(isbn).last()",
+            ),
+            (
+                "$.rows.sort(-score).filter(score < 80).map(isbn).last()",
+                "$.rows.sort(-score).filter(score < 80).map(isbn).last()",
+            ),
+            (
+                "$.rows.sort(-score).filter(price > 20).map(isbn).nth(1)",
+                "$.rows.sort(-score).filter(price > 20).map(isbn).nth(1)",
+            ),
+            (
+                "$.rows.sort(-score).take(3).filter(price > 20).map(isbn).last()",
+                "$.rows.sort(-score).first(3).filter(price > 20).map(isbn).last()",
+            ),
+            (
+                "$.rows.reverse().filter(price > 20).map(isbn).last()",
+                "$.rows.reverse().filter(price > 20).map(isbn).last()",
+            ),
+            ("$.dups.unique().last()", "$.dups.unique().last()"),
+        ] {
+            assert_pipeline_matches_vm_query(pipeline_query, vm_query, doc.clone());
+        }
+
+        let pipeline = lower_query("$.rows.skip(1).last()").unwrap();
+        let actual: serde_json::Value = pipeline.run(&Val::from(&doc)).unwrap().into();
+        assert_eq!(
+            actual,
+            json!({"isbn": "tail-pass", "score": 60, "price": 50, "tags": ["f"]})
+        );
+
+        let pipeline = lower_query("$.rows.flat_map(tags).last()").unwrap();
+        let actual: serde_json::Value = pipeline.run(&Val::from(&doc)).unwrap().into();
+        assert_eq!(actual, json!("f"));
+
+        let pipeline = lower_query("$.rows.sort(-score).flat_map(tags).last()").unwrap();
+        let actual: serde_json::Value = pipeline.run(&Val::from(&doc)).unwrap().into();
+        assert_eq!(actual, json!("f"));
+    }
+
+    #[test]
     fn first_sink_stops_after_first_passing_filter_row() {
         use serde_json::json;
         let doc: Val = (&json!({

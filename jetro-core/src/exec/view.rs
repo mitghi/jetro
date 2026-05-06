@@ -723,7 +723,16 @@ where
     V: ValueView<'a>,
 {
     let suffix = view_suffix_capabilities(body, plan.sort_stage + 1)?;
-    let mut sorter = pipeline::OrderedKeySorter::new(plan.descending, pipeline::cmp_val_total);
+    let source_demand =
+        pipeline::Pipeline::segment_source_demand(&body.stages[plan.sort_stage + 1..], &body.sink)
+            .chain
+            .pull;
+    let ordered_descending = if matches!(source_demand, PullDemand::LastInput(_)) {
+        !plan.descending
+    } else {
+        plan.descending
+    };
+    let mut sorter = pipeline::OrderedKeySorter::new(ordered_descending, pipeline::cmp_val_total);
 
     drive_view_frontier(
         source,
@@ -738,10 +747,6 @@ where
     )?;
 
     let mut sink_acc = pipeline::SinkAccumulator::new(&body.sink);
-    let source_demand =
-        pipeline::Pipeline::segment_source_demand(&body.stages[plan.sort_stage + 1..], &body.sink)
-            .chain
-            .pull;
 
     drive_view_iter(
         sorter.finish(),

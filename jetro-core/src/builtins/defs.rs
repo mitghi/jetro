@@ -1382,6 +1382,7 @@ fn unique_spec() -> BuiltinSpec {
             1.0,
         ))
         .order_effect(BuiltinPipelineOrderEffect::Preserves)
+        .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
 }
 
 /// Shared barrier body for Unique / UniqueBy.
