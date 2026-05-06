@@ -1264,6 +1264,42 @@ fn runtime_object_anonymous_rest_does_not_bind() {
 }
 
 #[test]
+fn runtime_array_head_tail_pattern() {
+    // The standard `[head, ...tail]` shape extracts the first element
+    // and binds the remainder as a fresh `Val::Arr`. Empty arrays and
+    // non-arrays fall through to subsequent arms.
+    let v = run(
+        br#"{"xs": [10, 20, 30, 40]}"#,
+        r#"match $.xs with {
+            [head, ...tail] -> {h: head, t: tail},
+            []              -> {empty: true},
+            _               -> @
+        }"#,
+    );
+    assert_eq!(v, json!({"h": 10, "t": [20, 30, 40]}));
+
+    let v = run(
+        br#"{"xs": []}"#,
+        r#"match $.xs with {
+            [head, ...tail] -> {h: head, t: tail},
+            []              -> {empty: true},
+            _               -> @
+        }"#,
+    );
+    assert_eq!(v, json!({"empty": true}));
+
+    let v = run(
+        br#"{"xs": [42]}"#,
+        r#"match $.xs with {
+            [head, ...tail] -> {h: head, t: tail},
+            []              -> {empty: true},
+            _               -> @
+        }"#,
+    );
+    assert_eq!(v, json!({"h": 42, "t": []}));
+}
+
+#[test]
 fn runtime_match_chained_with_postfix() {
     // Result of a match flows into a subsequent method call.
     let src = br#"{"xs": [1, 2, 3]}"#;
