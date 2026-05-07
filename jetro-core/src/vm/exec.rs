@@ -1676,16 +1676,18 @@ impl VM {
         env: &Env,
     ) -> Result<Val, EvalError> {
         let sub = call.sub_progs.first();
-        
-        
+        let sub_kernel = call.sub_kernels.first();
+        let no_op_kernel = crate::exec::pipeline::BodyKernel::Generic;
+        let kernel0 = sub_kernel.unwrap_or(&no_op_kernel);
+
         let lam_param: Option<&str> = match call.orig_args.first() {
             Some(Arg::Pos(Expr::Lambda { params, .. })) if !params.is_empty() => {
                 Some(params[0].as_str())
             }
             _ => None,
         };
-        
-        
+
+
         let mut scratch = env.clone();
 
         match call.method {
@@ -1696,7 +1698,7 @@ impl VM {
                     .ok_or_else(|| EvalError("filter: expected array".into()))?;
                 let out =
                     crate::builtins::filter_apply_bounded(items, call.demand_max_keep, |item| {
-                        self.exec_lam_body_scratch(pred, item, lam_param, &mut scratch)
+                        self.exec_lam_body_kernel(pred, kernel0, item, lam_param, &mut scratch)
                     })?;
                 Ok(Val::arr(out))
             }
@@ -1707,7 +1709,7 @@ impl VM {
                     .ok_or_else(|| EvalError("map: expected array".into()))?;
                 let out =
                     crate::builtins::map_apply_bounded(items, call.demand_max_keep, |item| {
-                        self.exec_lam_body_scratch(mapper, item, lam_param, &mut scratch)
+                        self.exec_lam_body_kernel(mapper, kernel0, item, lam_param, &mut scratch)
                     })?;
                 Ok(Val::arr(out))
             }
@@ -1717,7 +1719,7 @@ impl VM {
                     .into_vec()
                     .ok_or_else(|| EvalError("flatMap: expected array".into()))?;
                 let out = crate::builtins::flat_map_apply(items, |item| {
-                    self.exec_lam_body_scratch(mapper, item, lam_param, &mut scratch)
+                    self.exec_lam_body_kernel(mapper, kernel0, item, lam_param, &mut scratch)
                 })?;
                 Ok(Val::arr(out))
             }
@@ -1765,7 +1767,7 @@ impl VM {
                     let pred = sub.ok_or_else(|| EvalError("any: requires predicate".into()))?;
                     for item in a.iter() {
                         if crate::builtins::any_one(item, |v| {
-                            self.exec_lam_body_scratch(pred, v, lam_param, &mut scratch)
+                            self.exec_lam_body_kernel(pred, kernel0, v, lam_param, &mut scratch)
                         })? {
                             return Ok(Val::Bool(true));
                         }
@@ -1783,7 +1785,7 @@ impl VM {
                     let pred = sub.ok_or_else(|| EvalError("all: requires predicate".into()))?;
                     for item in a.iter() {
                         if !crate::builtins::all_one(item, |v| {
-                            self.exec_lam_body_scratch(pred, v, lam_param, &mut scratch)
+                            self.exec_lam_body_kernel(pred, kernel0, v, lam_param, &mut scratch)
                         })? {
                             return Ok(Val::Bool(false));
                         }
@@ -1799,7 +1801,7 @@ impl VM {
                     let mut n: i64 = 0;
                     for item in a.iter() {
                         if crate::builtins::filter_one(item, |v| {
-                            self.exec_lam_body_scratch(pred, v, lam_param, &mut scratch)
+                            self.exec_lam_body_kernel(pred, kernel0, v, lam_param, &mut scratch)
                         })? {
                             n += 1;
                         }
@@ -2676,6 +2678,44 @@ impl VM {
         lam_param: Option<&str>,
         scratch: &mut Env,
     ) -> Result<Val, EvalError> {
+        let frame = scratch.push_lam(lam_param, item.clone());
+        let r = self.exec(prog, scratch);
+        scratch.pop_lam(frame);
+        r
+    }
+
+    /// Like `exec_lam_body_scratch` but consults a pre-classified
+    /// `BodyKernel`. When the kernel is non-`Generic` and the lambda
+    /// has no named parameter, the body is evaluated through native
+    /// Rust kernels (no VM stack init, no opcode dispatch). Used by
+    /// the per-element loops of `.any` / `.all` / `.find` / `.count`
+    /// / etc. so simple-predicate lambdas (the common case) avoid
+    /// VM re-entry per iteration.
+    fn exec_lam_body_kernel(
+        &mut self,
+        prog: &Program,
+        kernel: &crate::exec::pipeline::BodyKernel,
+        item: &Val,
+        lam_param: Option<&str>,
+        scratch: &mut Env,
+    ) -> Result<Val, EvalError> {
+        use crate::exec::pipeline::{eval_kernel, BodyKernel};
+        // The kernel path treats `item` as `@` and resolves bare names
+        // as fields on it. That is only safe when no `let`-bound
+        // variables shadow those names; otherwise the kernel would
+        // bypass the binding lookup that the VM does for `LoadIdent`.
+        // Skip the fast path when env has any let-bindings.
+        if lam_param.is_none()
+            && scratch.has_no_vars()
+            && !matches!(kernel, BodyKernel::Generic)
+        {
+            return eval_kernel(kernel, item, |fallback_item| {
+                let frame = scratch.push_lam(None, fallback_item.clone());
+                let result = self.exec(prog, scratch);
+                scratch.pop_lam(frame);
+                result
+            });
+        }
         let frame = scratch.push_lam(lam_param, item.clone());
         let r = self.exec(prog, scratch);
         scratch.pop_lam(frame);

@@ -244,7 +244,7 @@ fn apply_compiled_item(
     // `item` without entering the VM. The kernel reads `@` semantically
     // by treating `item` as the current value.
     if let Some(k) = kernel {
-        if !matches!(k, BodyKernel::Generic) {
+        if !matches!(k, BodyKernel::Generic) && env.has_no_vars() {
             let lambda_name = match arg {
                 Arg::Pos(Expr::Lambda { params, .. })
                 | Arg::Named(_, Expr::Lambda { params, .. }) => params.first().map(|s| s.as_str()),
