@@ -8,7 +8,7 @@ use crate::{
     data::value::Val,
 };
 
-use super::{PredicateSinkOp, ReducerAccumulator, Sink};
+use super::{MembershipSinkOp, PredicateSinkOp, ReducerAccumulator, Sink};
 
 /// Stateful wrapper that accumulates one pipeline element at a time on behalf of a `Sink`.
 pub(crate) struct SinkAccumulator<'a> {
@@ -28,6 +28,9 @@ pub(crate) struct SinkAccumulator<'a> {
     predicate_seen: usize,
     predicate_matched: Option<usize>,
     predicate_all: bool,
+    membership_seen: usize,
+    membership_matched: Option<usize>,
+    membership_indices: Vec<i64>,
     // HyperLogLog register array for approximate-distinct-count sinks
     hll: [u8; HLL_M],
 }
@@ -46,6 +49,9 @@ impl<'a> SinkAccumulator<'a> {
             predicate_seen: 0,
             predicate_matched: None,
             predicate_all: true,
+            membership_seen: 0,
+            membership_matched: None,
+            membership_indices: Vec::new(),
             hll: [0; HLL_M],
         }
     }
@@ -69,6 +75,7 @@ impl<'a> SinkAccumulator<'a> {
                 false
             }
             Sink::Predicate(_) => false,
+            Sink::Membership(_) => false,
             Sink::Nth(idx) => self.observe_nth(*idx, item),
             Sink::Terminal(_) => false,
         }
@@ -217,6 +224,43 @@ impl<'a> SinkAccumulator<'a> {
         }
     }
 
+    /// Updates a value-membership terminal sink with one row; returns true once decided.
+    pub(crate) fn observe_membership(
+        &mut self,
+        op: MembershipSinkOp,
+        item: &Val,
+        target: &Val,
+    ) -> bool {
+        let matched = crate::util::vals_eq(item, target);
+        match op {
+            MembershipSinkOp::Includes => {
+                if matched {
+                    self.membership_matched = Some(self.membership_seen);
+                    true
+                } else {
+                    self.membership_seen += 1;
+                    false
+                }
+            }
+            MembershipSinkOp::Index => {
+                if matched {
+                    self.membership_matched = Some(self.membership_seen);
+                    true
+                } else {
+                    self.membership_seen += 1;
+                    false
+                }
+            }
+            MembershipSinkOp::IndicesOf => {
+                if matched {
+                    self.membership_indices.push(self.membership_seen as i64);
+                }
+                self.membership_seen += 1;
+                false
+            }
+        }
+    }
+
     /// Hashes `item` into the HyperLogLog registers for cardinality estimation.
     pub(crate) fn observe_approx_distinct(&mut self, item: &Val) {
         hll_observe(&mut self.hll, item);
@@ -260,6 +304,14 @@ impl<'a> SinkAccumulator<'a> {
                     .predicate_matched
                     .map(|idx| Val::Int(idx as i64))
                     .unwrap_or(Val::Null),
+            },
+            Sink::Membership(spec) => match spec.op {
+                MembershipSinkOp::Includes => Val::Bool(self.membership_matched.is_some()),
+                MembershipSinkOp::Index => self
+                    .membership_matched
+                    .map(|idx| Val::Int(idx as i64))
+                    .unwrap_or(Val::Null),
+                MembershipSinkOp::IndicesOf => Val::int_vec(self.membership_indices),
             },
             Sink::Nth(_) => self.nth.unwrap_or(Val::Null),
             Sink::Terminal(_) => Val::Null,

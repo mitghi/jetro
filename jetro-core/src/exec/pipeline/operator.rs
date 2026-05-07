@@ -33,6 +33,17 @@ pub struct PredicateSinkSpec {
     pub predicate: Arc<Program>,
 }
 
+/// Specification for value-membership terminal sinks (`includes`, `index`, `indices_of`).
+#[derive(Debug, Clone)]
+pub struct MembershipSinkSpec {
+    /// Terminal operation to perform.
+    pub op: MembershipSinkOp,
+    /// Value compared against each row.
+    pub target: crate::data::value::Val,
+    /// Original builtin method used for scalar fallback.
+    pub method: BuiltinMethod,
+}
+
 /// Predicate terminal operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PredicateSinkOp {
@@ -42,6 +53,17 @@ pub enum PredicateSinkOp {
     All,
     /// Returns the zero-based index of the first matching row, or null.
     FindIndex,
+}
+
+/// Value-membership terminal operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MembershipSinkOp {
+    /// Returns true when any row equals the target.
+    Includes,
+    /// Returns the zero-based index of the first matching row, or null.
+    Index,
+    /// Returns all zero-based indices matching the target.
+    IndicesOf,
 }
 
 impl PredicateSinkSpec {

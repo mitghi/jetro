@@ -706,6 +706,16 @@ mod tests {
             1,
             true
         ));
+        assert!(pipeline_accepts_arity(
+            BuiltinId::from_method(BuiltinMethod::Includes),
+            1,
+            true
+        ));
+        assert!(!pipeline_accepts_arity(
+            BuiltinId::from_method(BuiltinMethod::Includes),
+            1,
+            false
+        ));
     }
 
     #[test]

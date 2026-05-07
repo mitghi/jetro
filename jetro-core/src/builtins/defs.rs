@@ -2583,7 +2583,10 @@ impl Builtin for Includes {
     const METHOD: BuiltinMethod = BuiltinMethod::Includes;
     const NAME: &'static str = "includes";
     const ALIASES: &'static [&'static str] = &["contains"];
-    fn spec() -> BuiltinSpec { default_scalar_spec(BuiltinMethod::Includes) }
+    fn spec() -> BuiltinSpec {
+        default_scalar_spec(BuiltinMethod::Includes)
+            .lowering(BuiltinPipelineLowering::TerminalSink)
+    }
     #[inline]
     fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
@@ -2598,7 +2601,9 @@ pub(crate) struct Index;
 impl Builtin for Index {
     const METHOD: BuiltinMethod = BuiltinMethod::Index;
     const NAME: &'static str = "index";
-    fn spec() -> BuiltinSpec { default_scalar_spec(BuiltinMethod::Index) }
+    fn spec() -> BuiltinSpec {
+        default_scalar_spec(BuiltinMethod::Index).lowering(BuiltinPipelineLowering::TerminalSink)
+    }
     #[inline]
     fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
@@ -2613,7 +2618,10 @@ pub(crate) struct IndicesOf;
 impl Builtin for IndicesOf {
     const METHOD: BuiltinMethod = BuiltinMethod::IndicesOf;
     const NAME: &'static str = "indices_of";
-    fn spec() -> BuiltinSpec { default_scalar_spec(BuiltinMethod::IndicesOf) }
+    fn spec() -> BuiltinSpec {
+        default_scalar_spec(BuiltinMethod::IndicesOf)
+            .lowering(BuiltinPipelineLowering::TerminalSink)
+    }
     #[inline]
     fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {

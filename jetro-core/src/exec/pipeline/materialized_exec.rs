@@ -36,6 +36,11 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
     let mut emitted_outputs: usize = 0;
 
     let mut sink_acc = SinkAccumulator::new(&pipeline.sink);
+    if let Sink::Membership(spec) = &pipeline.sink {
+        if pipeline.stages.is_empty() && row_source::array_like_rows(&recv).is_none() {
+            return Ok(apply_membership_scalar_sink(spec, &recv));
+        }
+    }
 
     let needs_barrier = pipeline
         .stages
@@ -99,6 +104,7 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
             Sink::Predicate(_) => {
                 observe_predicate_sink_item(pipeline, item, &mut sink_acc, &mut vm, &mut loop_env)?
             }
+            Sink::Membership(spec) => sink_acc.observe_membership(spec.op, &item, &spec.target),
             Sink::Reducer(_) => {
                 match observe_reducer_item(pipeline, item, &mut sink_acc, &mut vm, &mut loop_env)? {
                     ReducerItemFlow::Observed => false,
@@ -240,6 +246,7 @@ where
             Sink::Predicate(_) => {
                 observe_predicate_sink_item(pipeline, item, &mut sink_acc, &mut vm, &mut loop_env)?
             }
+            Sink::Membership(spec) => sink_acc.observe_membership(spec.op, &item, &spec.target),
             Sink::Reducer(_) => {
                 match observe_reducer_item(pipeline, item, &mut sink_acc, &mut vm, &mut loop_env)? {
                     ReducerItemFlow::Observed => false,
@@ -480,6 +487,21 @@ fn observe_reducer_item(
     }
 
     Ok(ReducerItemFlow::Observed)
+}
+
+fn apply_membership_scalar_sink(spec: &super::MembershipSinkSpec, recv: &Val) -> Val {
+    match spec.method {
+        crate::builtins::BuiltinMethod::Includes => {
+            crate::builtins::includes_apply(recv, &spec.target)
+        }
+        crate::builtins::BuiltinMethod::Index => {
+            crate::builtins::index_value_apply(recv, &spec.target).unwrap_or(Val::Null)
+        }
+        crate::builtins::BuiltinMethod::IndicesOf => {
+            crate::builtins::indices_of_apply(recv, &spec.target).unwrap_or(Val::Null)
+        }
+        _ => Val::Null,
+    }
 }
 
 fn observe_predicate_sink_item(

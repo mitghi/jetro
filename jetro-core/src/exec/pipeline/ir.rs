@@ -78,6 +78,16 @@ impl Sink {
                 positional: None,
             };
         }
+        if matches!(self, Sink::Membership(_)) {
+            return SinkDemand {
+                chain: ChainDemand {
+                    pull: PullDemand::All,
+                    value: ValueNeed::Whole,
+                    order: false,
+                },
+                positional: None,
+            };
+        }
         if let Some(spec) = self.builtin_sink_spec() {
             return sink_demand_from_builtin(spec);
         }
@@ -92,7 +102,11 @@ impl Sink {
         F: FnMut(&crate::vm::Program) -> bool,
     {
         match self {
-            Sink::Collect | Sink::Terminal(_) | Sink::Nth(_) | Sink::ApproxCountDistinct => true,
+            Sink::Collect
+            | Sink::Terminal(_)
+            | Sink::Nth(_)
+            | Sink::ApproxCountDistinct
+            | Sink::Membership(_) => true,
             Sink::Predicate(spec) => program_ok(&spec.predicate),
             Sink::Reducer(spec) => spec.sink_programs().all(|prog| program_ok(prog)),
         }
@@ -145,6 +159,7 @@ impl Sink {
             Sink::Terminal(method) => method.spec().sink,
             Sink::Nth(_) => None,
             Sink::Predicate(_) => None,
+            Sink::Membership(_) => None,
             Sink::Reducer(spec) => spec.method()?.spec().sink,
             Sink::ApproxCountDistinct => BuiltinMethod::ApproxCountDistinct.spec().sink,
             Sink::Collect => None,

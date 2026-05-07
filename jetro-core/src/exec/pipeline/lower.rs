@@ -488,7 +488,10 @@ pub(super) fn arg_expr(arg: &crate::parse::ast::Arg) -> Option<Arc<Expr>> {
 // Registry-driven stage factory (formerly stage_factory.rs)
 // ---------------------------------------------------------------------------
 
-use super::{NumOp, PredicateSinkOp, PredicateSinkSpec, ReducerOp, ReducerSpec};
+use super::{
+    MembershipSinkOp, MembershipSinkSpec, NumOp, PredicateSinkOp, PredicateSinkSpec, ReducerOp,
+    ReducerSpec,
+};
 
 /// Lowers a `BuiltinMethod` call to a concrete `Stage` or `Sink`, returning `None` when the method cannot be lowered at this position.
 pub(super) fn lower_method_from_registry(
@@ -735,12 +738,27 @@ fn string_arg(arg: &crate::parse::ast::Arg) -> Option<Arc<str>> {
     }
 }
 
+// Extracts a literal value from `arg` for value-membership terminal sinks.
+fn literal_arg_value(arg: &crate::parse::ast::Arg) -> Option<Val> {
+    match arg {
+        crate::parse::ast::Arg::Pos(Expr::Null) => Some(Val::Null),
+        crate::parse::ast::Arg::Pos(Expr::Bool(b)) => Some(Val::Bool(*b)),
+        crate::parse::ast::Arg::Pos(Expr::Int(n)) => Some(Val::Int(*n)),
+        crate::parse::ast::Arg::Pos(Expr::Float(n)) => Some(Val::Float(*n)),
+        crate::parse::ast::Arg::Pos(Expr::Str(s)) => Some(Val::Str(Arc::from(s.as_str()))),
+        _ => None,
+    }
+}
+
 // Constructs the terminal `Sink` for `method`, handling count predicates, numeric reducers, and positional selects.
 fn terminal_sink_for_method(
     method: BuiltinMethod,
     args: &[crate::parse::ast::Arg],
 ) -> Option<Sink> {
     if let Some(sink) = predicate_sink_for_method(method, args) {
+        return Some(sink);
+    }
+    if let Some(sink) = membership_sink_for_method(method, args) {
         return Some(sink);
     }
     let spec = method.spec();
@@ -795,6 +813,26 @@ fn predicate_sink_for_method(
     Some(Sink::Predicate(PredicateSinkSpec {
         op,
         predicate: compile_subexpr(arg)?,
+    }))
+}
+
+fn membership_sink_for_method(
+    method: BuiltinMethod,
+    args: &[crate::parse::ast::Arg],
+) -> Option<Sink> {
+    let [arg] = args else {
+        return None;
+    };
+    let op = match method {
+        BuiltinMethod::Includes => MembershipSinkOp::Includes,
+        BuiltinMethod::Index => MembershipSinkOp::Index,
+        BuiltinMethod::IndicesOf => MembershipSinkOp::IndicesOf,
+        _ => return None,
+    };
+    Some(Sink::Membership(MembershipSinkSpec {
+        op,
+        target: literal_arg_value(arg)?,
+        method,
     }))
 }
 

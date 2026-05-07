@@ -50,7 +50,10 @@ pub use ir::Strategy;
 pub use ir::{PhysicalExecPath, Plan, Position, StageStrategy};
 pub use kernels::{eval_cmp_op, eval_kernel, BodyKernel};
 pub(crate) use kernels::{eval_view_kernel, CollectLayout, ObjectKernel, ViewKernelValue};
-pub use operator::{PredicateSinkOp, PredicateSinkSpec, ReducerOp, ReducerSpec};
+pub use operator::{
+    MembershipSinkOp, MembershipSinkSpec, PredicateSinkOp, PredicateSinkSpec, ReducerOp,
+    ReducerSpec,
+};
 #[cfg(test)]
 pub use plan::compute_strategies;
 #[cfg(test)]
@@ -125,6 +128,11 @@ fn sink_name(s: &Sink) -> &'static str {
             ReducerOp::Numeric(NumOp::Min) => "min",
             ReducerOp::Numeric(NumOp::Max) => "max",
             ReducerOp::Numeric(NumOp::Avg) => "avg",
+        },
+        Sink::Membership(spec) => match spec.op {
+            MembershipSinkOp::Includes => "includes",
+            MembershipSinkOp::Index => "index",
+            MembershipSinkOp::IndicesOf => "indices_of",
         },
         Sink::Predicate(spec) => match spec.op {
             PredicateSinkOp::Any => "any",
@@ -353,6 +361,8 @@ pub enum Sink {
     Reducer(ReducerSpec),
     /// Evaluates a predicate terminal (`any`, `all`, `find_index`) with sink-owned state.
     Predicate(PredicateSinkSpec),
+    /// Evaluates an element-membership terminal (`includes`, `index`, `indices_of`).
+    Membership(MembershipSinkSpec),
     /// Delegates to a built-in method that consumes the stream (e.g. `first`, `last`).
     Terminal(BuiltinMethod),
     /// Selects the nth emitted row from the stream.
@@ -1724,6 +1734,52 @@ mod tests {
         assert_eq!(
             find_index.source_demand().chain.pull,
             crate::plan::demand::PullDemand::All
+        );
+    }
+
+    #[test]
+    fn membership_terminal_sinks_match_vm() {
+        use serde_json::json;
+        let doc = json!({
+            "xs": ["a", "urgent", "x", "urgent"],
+            "s": "hello",
+            "obj": {"urgent": true}
+        });
+
+        for query in [
+            "$.xs.includes(\"urgent\")",
+            "$.xs.contains(\"urgent\")",
+            "$.xs.index(\"urgent\")",
+            "$.xs.indices_of(\"urgent\")",
+            "$.xs.map(@).includes(\"x\")",
+            "$.s.includes(\"ell\")",
+            "$.obj.includes(\"urgent\")",
+        ] {
+            assert_pipeline_matches_vm(query, doc.clone());
+        }
+    }
+
+    #[test]
+    fn membership_terminal_sinks_keep_conservative_source_demand() {
+        let includes = lower_query("$.xs.includes(\"urgent\")").unwrap();
+        assert!(
+            matches!(includes.sink, Sink::Membership(ref spec) if spec.op == MembershipSinkOp::Includes)
+        );
+        assert_eq!(
+            includes.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::All
+        );
+        assert_eq!(
+            includes.source_demand().chain.value,
+            crate::plan::demand::ValueNeed::Whole
+        );
+
+        let index = lower_query("$.xs.index(\"urgent\")").unwrap();
+        assert!(matches!(index.sink, Sink::Membership(ref spec) if spec.op == MembershipSinkOp::Index));
+
+        let indices = lower_query("$.xs.indices_of(\"urgent\")").unwrap();
+        assert!(
+            matches!(indices.sink, Sink::Membership(ref spec) if spec.op == MembershipSinkOp::IndicesOf)
         );
     }
 }
