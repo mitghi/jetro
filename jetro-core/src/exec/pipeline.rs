@@ -138,6 +138,7 @@ fn sink_name(s: &Sink) -> &'static str {
             PredicateSinkOp::Any => "any",
             PredicateSinkOp::All => "all",
             PredicateSinkOp::FindIndex => "find_index",
+            PredicateSinkOp::IndicesWhere => "indices_where",
         },
         Sink::Terminal(BuiltinMethod::First) => "first",
         Sink::Terminal(BuiltinMethod::Last) => "last",
@@ -1701,6 +1702,7 @@ mod tests {
             "$.xs.exists(score > 10)",
             "$.xs.all(score > 0)",
             "$.xs.find_index(score > 10)",
+            "$.xs.indices_where(score > 5)",
             "$.xs.map(isbn).find_index(@ == \"c\")",
         ] {
             assert_pipeline_matches_vm(query, doc.clone());
@@ -1734,6 +1736,15 @@ mod tests {
         assert_eq!(
             find_index.source_demand().chain.pull,
             crate::plan::demand::PullDemand::All
+        );
+
+        let indices_where = lower_query("$.xs.indices_where(@ > 2)").unwrap();
+        assert!(
+            matches!(indices_where.sink, Sink::Predicate(ref spec) if spec.op == PredicateSinkOp::IndicesWhere)
+        );
+        assert_eq!(
+            indices_where.source_demand().chain.value,
+            crate::plan::demand::ValueNeed::Predicate
         );
     }
 

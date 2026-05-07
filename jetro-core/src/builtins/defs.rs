@@ -711,7 +711,7 @@ impl Builtin for IndicesWhere {
     const NAME: &'static str = "indices_where";
 
     fn spec() -> BuiltinSpec {
-        predicate_reducer_spec()
+        predicate_terminal_sink_spec()
     }
 
     #[inline]

@@ -53,6 +53,8 @@ pub enum PredicateSinkOp {
     All,
     /// Returns the zero-based index of the first matching row, or null.
     FindIndex,
+    /// Returns all zero-based indices whose rows match the predicate.
+    IndicesWhere,
 }
 
 /// Value-membership terminal operation.

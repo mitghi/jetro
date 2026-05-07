@@ -808,6 +808,7 @@ fn predicate_sink_for_method(
         BuiltinMethod::Any => PredicateSinkOp::Any,
         BuiltinMethod::All => PredicateSinkOp::All,
         BuiltinMethod::FindIndex => PredicateSinkOp::FindIndex,
+        BuiltinMethod::IndicesWhere => PredicateSinkOp::IndicesWhere,
         _ => return None,
     };
     Some(Sink::Predicate(PredicateSinkSpec {

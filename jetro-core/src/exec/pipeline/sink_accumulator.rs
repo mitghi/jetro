@@ -28,6 +28,7 @@ pub(crate) struct SinkAccumulator<'a> {
     predicate_seen: usize,
     predicate_matched: Option<usize>,
     predicate_all: bool,
+    predicate_indices: Vec<i64>,
     membership_seen: usize,
     membership_matched: Option<usize>,
     membership_indices: Vec<i64>,
@@ -49,6 +50,7 @@ impl<'a> SinkAccumulator<'a> {
             predicate_seen: 0,
             predicate_matched: None,
             predicate_all: true,
+            predicate_indices: Vec::new(),
             membership_seen: 0,
             membership_matched: None,
             membership_indices: Vec::new(),
@@ -221,6 +223,13 @@ impl<'a> SinkAccumulator<'a> {
                     false
                 }
             }
+            PredicateSinkOp::IndicesWhere => {
+                if matched {
+                    self.predicate_indices.push(self.predicate_seen as i64);
+                }
+                self.predicate_seen += 1;
+                false
+            }
         }
     }
 
@@ -304,6 +313,7 @@ impl<'a> SinkAccumulator<'a> {
                     .predicate_matched
                     .map(|idx| Val::Int(idx as i64))
                     .unwrap_or(Val::Null),
+                PredicateSinkOp::IndicesWhere => Val::int_vec(self.predicate_indices),
             },
             Sink::Membership(spec) => match spec.op {
                 MembershipSinkOp::Includes => Val::Bool(self.membership_matched.is_some()),
