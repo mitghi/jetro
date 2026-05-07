@@ -24,7 +24,7 @@ use crate::vm::{CompiledObjEntry, Opcode, Program};
 
 use super::{
     BodyKernel, Pipeline, PipelineBody, PredicateSinkOp, Sink, Stage, ViewSinkCapability,
-    ViewStageCapability,
+    ViewMembershipTarget, ViewStageCapability,
 };
 
 /// Indicates whether a positional terminal sink wants the first or the last qualifying element.
@@ -172,13 +172,10 @@ impl Sink {
             });
         }
         if let Sink::Membership(spec) = self {
-            if let super::MembershipSinkTarget::Literal(target) = &spec.target {
-                return Some(ViewSinkCapability::Membership {
-                    op: spec.op,
-                    target: target.clone(),
-                });
-            }
-            return None;
+            return Some(ViewSinkCapability::Membership {
+                op: spec.op,
+                target: ViewMembershipTarget::from(&spec.target),
+            });
         }
 
         let sink_spec = self.builtin_sink_spec()?;

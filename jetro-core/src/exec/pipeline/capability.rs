@@ -10,8 +10,9 @@ use crate::builtins::{
 };
 use crate::data::value::Val;
 use crate::plan::demand::PullDemand;
+use crate::vm::Program;
 
-use super::{MembershipSinkOp, PipelineBody, PredicateSinkOp, Stage};
+use super::{MembershipSinkOp, MembershipSinkTarget, PipelineBody, PredicateSinkOp, Stage};
 
 /// Describes how a source can be traversed without materialising the full row set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -269,8 +270,8 @@ pub(crate) enum ViewSinkCapability {
     Membership {
         /// Membership terminal operation to perform.
         op: MembershipSinkOp,
-        /// Literal target compared against each row.
-        target: Val,
+        /// Target compared against each row.
+        target: ViewMembershipTarget,
     },
     /// Bounded positional selector for terminal `first(n)` / `last(n)`.
     SelectMany {
@@ -314,13 +315,40 @@ impl ViewSinkCapability {
                 }
             }
             Self::Membership { target, .. } => {
-                if target_is_scalar(target) {
+                if target.is_scalar_literal() {
                     ViewMaterialization::Never
                 } else {
                     ViewMaterialization::SinkInputRows
                 }
             }
             Self::SelectMany { .. } => ViewMaterialization::SinkOutputRows,
+        }
+    }
+}
+
+/// Target for a view-native membership terminal.
+#[derive(Debug, Clone)]
+pub(crate) enum ViewMembershipTarget {
+    /// Literal known during lowering.
+    Literal(Val),
+    /// Expression evaluated once against the outer environment before row streaming.
+    Program(std::sync::Arc<Program>),
+}
+
+impl ViewMembershipTarget {
+    fn is_scalar_literal(&self) -> bool {
+        match self {
+            Self::Literal(value) => target_is_scalar(value),
+            Self::Program(_) => false,
+        }
+    }
+}
+
+impl From<&MembershipSinkTarget> for ViewMembershipTarget {
+    fn from(target: &MembershipSinkTarget) -> Self {
+        match target {
+            MembershipSinkTarget::Literal(value) => Self::Literal(value.clone()),
+            MembershipSinkTarget::Program(program) => Self::Program(std::sync::Arc::clone(program)),
         }
     }
 }
@@ -401,8 +429,8 @@ mod tests {
     use crate::exec::pipeline::{
         BodyKernel, MembershipSinkOp, MembershipSinkSpec, MembershipSinkTarget, NumOp,
         PipelineBody, PredicateSinkOp, PredicateSinkSpec, ReducerOp, ReducerSpec, Sink, Stage,
-        ViewInputMode, ViewMaterialization, ViewOutputMode, ViewSinkCapability,
-        ViewStageCapability,
+        ViewInputMode, ViewMaterialization, ViewMembershipTarget, ViewOutputMode,
+        ViewSinkCapability, ViewStageCapability,
     };
     use crate::parse::ast::BinOp;
 
@@ -526,7 +554,7 @@ mod tests {
         assert_eq!(
             ViewSinkCapability::Membership {
                 op: MembershipSinkOp::Includes,
-                target: Val::Int(3),
+                target: ViewMembershipTarget::Literal(Val::Int(3)),
             }
             .materialization(),
             ViewMaterialization::Never
@@ -534,7 +562,7 @@ mod tests {
         assert_eq!(
             ViewSinkCapability::Membership {
                 op: MembershipSinkOp::Includes,
-                target: Val::arr(vec![Val::Int(3)]),
+                target: ViewMembershipTarget::Literal(Val::arr(vec![Val::Int(3)])),
             }
             .materialization(),
             ViewMaterialization::SinkInputRows
@@ -615,7 +643,22 @@ mod tests {
             .view_capability(&[]),
             Some(ViewSinkCapability::Membership {
                 op: MembershipSinkOp::Includes,
-                target: Val::Int(3),
+                target: ViewMembershipTarget::Literal(Val::Int(3)),
+            })
+        ));
+        assert!(matches!(
+            Sink::Membership(MembershipSinkSpec {
+                op: MembershipSinkOp::Includes,
+                target: MembershipSinkTarget::Program(Arc::new(crate::vm::Program::new(
+                    Vec::new(),
+                    ""
+                ))),
+                method: BuiltinMethod::Includes,
+            })
+            .view_capability(&[]),
+            Some(ViewSinkCapability::Membership {
+                op: MembershipSinkOp::Includes,
+                target: ViewMembershipTarget::Program(_),
             })
         ));
     }
