@@ -15,6 +15,9 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: "1.95"
+        components: rustfmt, clippy
     - name: Build
       run: cargo build --verbose --workspace
     - name: Run tests (release)
