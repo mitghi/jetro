@@ -1568,6 +1568,15 @@ mod tests {
     }
 
     #[test]
+    fn positional_many_terminal_sinks_use_indexed_dispatch_for_indexed_chains() {
+        let first = lower_query("$.xs.map(@ + 1).first(2)").unwrap();
+        assert_eq!(first.exec_path, PhysicalExecPath::Indexed);
+
+        let last = lower_query("$.xs.map(@ + 1).last(2)").unwrap();
+        assert_eq!(last.exec_path, PhysicalExecPath::Indexed);
+    }
+
+    #[test]
     fn positional_many_terminal_sinks_propagate_bounded_demand() {
         let first = lower_query("$.xs.first(3)").unwrap();
         assert!(matches!(
