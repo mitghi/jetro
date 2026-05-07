@@ -456,6 +456,29 @@ mod tests {
     }
 
     #[test]
+    fn chunk_and_window_map_bounded_output_to_input_prefix() {
+        let ops = [
+            op_usize(BuiltinMethod::Chunk, 4),
+            op_usize(BuiltinMethod::Take, 3),
+        ];
+        let demand = source_demand(&ops, Demand::RESULT);
+        assert_eq!(demand.pull, PullDemand::FirstInput(12));
+        assert_eq!(demand.value, ValueNeed::Whole);
+
+        let ops = [
+            op_usize(BuiltinMethod::Window, 4),
+            op_usize(BuiltinMethod::Take, 3),
+        ];
+        let demand = source_demand(&ops, Demand::RESULT);
+        assert_eq!(demand.pull, PullDemand::FirstInput(6));
+        assert_eq!(demand.value, ValueNeed::Whole);
+
+        let ops = [op_usize(BuiltinMethod::Window, 4), op(BuiltinMethod::Last)];
+        let demand = source_demand(&ops, Demand::RESULT);
+        assert_eq!(demand.pull, PullDemand::All);
+    }
+
+    #[test]
     fn count_does_not_need_whole_values() {
         let ops = [op(BuiltinMethod::Map), op(BuiltinMethod::Count)];
         let demand = source_demand(&ops, Demand::RESULT);

@@ -1129,6 +1129,7 @@ impl Builtin for Window {
                 2.0,
                 1.0,
             ))
+            .demand_law(BuiltinDemandLaw::Window)
             .lowering(BuiltinPipelineLowering::UsizeArg { min: 1 })
     }
 
@@ -1159,6 +1160,7 @@ impl Builtin for Chunk {
                 2.0,
                 1.0,
             ))
+            .demand_law(BuiltinDemandLaw::Chunk)
             .lowering(BuiltinPipelineLowering::UsizeArg { min: 1 })
     }
 

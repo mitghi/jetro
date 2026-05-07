@@ -46,7 +46,10 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
     }
 
     let pre_iter: LegacyPreIter = {
-        let mut buf: Vec<Val> = row_source::materialize_source(&recv);
+        let mut buf: Vec<Val> = match source_demand {
+            PullDemand::FirstInput(n) => row_source::materialize_source_prefix(&recv, n),
+            _ => row_source::materialize_source(&recv),
+        };
         let strategies = compute_strategies_with_kernels(
             &pipeline.stages,
             &pipeline.stage_kernels,

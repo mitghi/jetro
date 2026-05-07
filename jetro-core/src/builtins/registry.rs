@@ -124,6 +124,44 @@ pub(crate) fn propagate_demand(id: BuiltinId, arg: BuiltinDemandArg, downstream:
             },
             BuiltinDemandArg::None => downstream,
         },
+        BuiltinDemandLaw::Chunk => match arg {
+            BuiltinDemandArg::Usize(n) => {
+                let width = n.max(1);
+                Demand {
+                    pull: match downstream.pull {
+                        PullDemand::FirstInput(k) | PullDemand::UntilOutput(k) => {
+                            PullDemand::FirstInput(width.saturating_mul(k))
+                        }
+                        PullDemand::NthInput(i) => {
+                            PullDemand::FirstInput(width.saturating_mul(i.saturating_add(1)))
+                        }
+                        PullDemand::All | PullDemand::LastInput(_) => PullDemand::All,
+                    },
+                    value: downstream.value.merge(ValueNeed::Whole),
+                    order: true,
+                }
+            }
+            BuiltinDemandArg::None => Demand::all(ValueNeed::Whole),
+        },
+        BuiltinDemandLaw::Window => match arg {
+            BuiltinDemandArg::Usize(n) => {
+                let width = n.max(1);
+                Demand {
+                    pull: match downstream.pull {
+                        PullDemand::FirstInput(k) | PullDemand::UntilOutput(k) => {
+                            PullDemand::FirstInput(width.saturating_add(k.saturating_sub(1)))
+                        }
+                        PullDemand::NthInput(i) => {
+                            PullDemand::FirstInput(width.saturating_add(i))
+                        }
+                        PullDemand::All | PullDemand::LastInput(_) => PullDemand::All,
+                    },
+                    value: downstream.value.merge(ValueNeed::Whole),
+                    order: true,
+                }
+            }
+            BuiltinDemandArg::None => Demand::all(ValueNeed::Whole),
+        },
         BuiltinDemandLaw::First => Demand::first(ValueNeed::Whole),
         BuiltinDemandLaw::Last => Demand {
             pull: PullDemand::LastInput(1),
@@ -410,6 +448,8 @@ mod tests {
         let reverse = BuiltinId::from_method(BuiltinMethod::Reverse);
         let drop_while = BuiltinId::from_method(BuiltinMethod::DropWhile);
         let slice = BuiltinId::from_method(BuiltinMethod::Slice);
+        let chunk = BuiltinId::from_method(BuiltinMethod::Chunk);
+        let window = BuiltinId::from_method(BuiltinMethod::Window);
 
         let demand = propagate_demand(take, BuiltinDemandArg::Usize(3), Demand::RESULT);
         assert_eq!(demand.pull, PullDemand::FirstInput(3));
@@ -487,6 +527,24 @@ mod tests {
         assert_eq!(demand.pull, PullDemand::LastInput(1));
         assert_eq!(demand.value, ValueNeed::Whole);
         assert!(demand.order);
+
+        let downstream = Demand {
+            pull: PullDemand::FirstInput(3),
+            value: ValueNeed::Whole,
+            order: true,
+        };
+        let demand = propagate_demand(chunk, BuiltinDemandArg::Usize(4), downstream);
+        assert_eq!(demand.pull, PullDemand::FirstInput(12));
+        assert_eq!(demand.value, ValueNeed::Whole);
+
+        let downstream = Demand {
+            pull: PullDemand::UntilOutput(3),
+            value: ValueNeed::Whole,
+            order: true,
+        };
+        let demand = propagate_demand(window, BuiltinDemandArg::Usize(4), downstream);
+        assert_eq!(demand.pull, PullDemand::FirstInput(6));
+        assert_eq!(demand.value, ValueNeed::Whole);
     }
 
     #[test]

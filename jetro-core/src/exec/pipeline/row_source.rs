@@ -301,6 +301,11 @@ pub(super) fn materialize_source(recv: &Val) -> Vec<Val> {
     ValRowSource::from_receiver(recv).materialize()
 }
 
+/// Materialises at most the first `limit` rows from `recv`.
+pub(super) fn materialize_source_prefix(recv: &Val, limit: usize) -> Vec<Val> {
+    ValRowSource::from_receiver(recv).iter().take(limit).collect()
+}
+
 /// Returns the number of rows in `recv`, or `None` when `recv` is a scalar or non-iterable.
 pub(super) fn row_count(recv: &Val) -> Option<usize> {
     recv.array_len()

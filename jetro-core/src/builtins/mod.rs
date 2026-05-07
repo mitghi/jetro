@@ -663,6 +663,10 @@ pub enum BuiltinDemandLaw {
     Take,
     /// Shift the upstream pull window by the provided count argument.
     Skip,
+    /// Fixed-size chunking; bounded output demand maps to a bounded input prefix.
+    Chunk,
+    /// Sliding window; bounded output demand maps to a bounded input prefix.
+    Window,
     /// Only the first element is needed; translates any downstream demand to `FirstInput(1)`.
     First,
     /// The last element is needed; requires all ordered input.

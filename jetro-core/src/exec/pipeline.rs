@@ -1637,4 +1637,31 @@ mod tests {
         let out: serde_json::Value = p.run(&doc).unwrap().into();
         assert_eq!(out, json!("de"));
     }
+
+    #[test]
+    fn chunk_and_window_bounded_demand_match_vm() {
+        use serde_json::json;
+        let doc: Val = (&json!({"xs": [1, 2, 3, 4, 5, 6, 7, 8]})).into();
+
+        let p = lower_query("$.xs.chunk(3).take(2)").unwrap();
+        assert_eq!(
+            p.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::FirstInput(6)
+        );
+        let out: serde_json::Value = p.run(&doc).unwrap().into();
+        assert_eq!(out, json!([[1, 2, 3], [4, 5, 6]]));
+
+        let p = lower_query("$.xs.window(3).take(2)").unwrap();
+        assert_eq!(
+            p.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::FirstInput(4)
+        );
+        let out: serde_json::Value = p.run(&doc).unwrap().into();
+        assert_eq!(out, json!([[1, 2, 3], [2, 3, 4]]));
+
+        let p = lower_query("$.xs.window(3).last()").unwrap();
+        assert_eq!(p.source_demand().chain.pull, crate::plan::demand::PullDemand::All);
+        let out: serde_json::Value = p.run(&doc).unwrap().into();
+        assert_eq!(out, json!([6, 7, 8]));
+    }
 }
