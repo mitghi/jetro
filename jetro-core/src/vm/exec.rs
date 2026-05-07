@@ -2701,12 +2701,23 @@ impl VM {
     ) -> Result<Val, EvalError> {
         use crate::exec::pipeline::{eval_kernel, BodyKernel};
         // The kernel path treats `item` as `@` and resolves bare names
-        // as fields on it. That is only safe when no `let`-bound
-        // variables shadow those names; otherwise the kernel would
-        // bypass the binding lookup that the VM does for `LoadIdent`.
-        // Skip the fast path when env has any let-bindings.
+        // as fields on it. That is only safe when:
+        //   - the lambda has no named parameter (the kernel always
+        //     reads `@`, not a per-call binding),
+        //   - the env has no let-bindings (otherwise a let-shadowed
+        //     name would be silently rerouted to a field read), and
+        //   - the program does not begin with `LoadIdent` — that
+        //     opcode dispatches to a no-arg builtin when the current
+        //     value is array/string and the ident matches a builtin
+        //     name (e.g. `.map(len)` invokes `len` as a builtin), a
+        //     dispatch the kernel form drops on the floor.
+        let starts_with_load_ident = matches!(
+            prog.ops.first(),
+            Some(crate::vm::Opcode::LoadIdent(_))
+        );
         if lam_param.is_none()
             && scratch.has_no_vars()
+            && !starts_with_load_ident
             && !matches!(kernel, BodyKernel::Generic)
         {
             return eval_kernel(kernel, item, |fallback_item| {

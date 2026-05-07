@@ -250,7 +250,14 @@ fn apply_compiled_item(
                 | Arg::Named(_, Expr::Lambda { params, .. }) => params.first().map(|s| s.as_str()),
                 _ => None,
             };
-            if lambda_name.is_none() {
+            // `LoadIdent` at the head of a body program dispatches to
+            // a no-arg builtin when current is array/string and the
+            // ident is a builtin name (e.g. `.map(len)` invokes `len`
+            // as a builtin) — a path the kernel form drops. Skip the
+            // fast path for those programs.
+            let starts_with_load_ident =
+                matches!(prog.ops.first(), Some(crate::vm::Opcode::LoadIdent(_)));
+            if lambda_name.is_none() && !starts_with_load_ident {
                 return eval_kernel(k, &item, |fallback_item| {
                     let frame = env.push_lam(None, fallback_item.clone());
                     let result = vm.exec_in_env(prog, env);
