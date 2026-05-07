@@ -365,6 +365,18 @@ impl<'a> SinkAccumulator<'a> {
 
     /// Updates an arg-extreme terminal sink with one row and its projected key.
     pub(crate) fn observe_arg_extreme(&mut self, want_max: bool, item: Val, key: Val) {
+        self.observe_arg_extreme_lazy(want_max, key, || item);
+    }
+
+    /// Lazy arg-extreme update. The row is materialised only when its key becomes the new best.
+    pub(crate) fn observe_arg_extreme_lazy<F>(
+        &mut self,
+        want_max: bool,
+        key: Val,
+        materialize_item: F,
+    ) where
+        F: FnOnce() -> Val,
+    {
         let should_take = match self.arg_extreme_key.as_ref() {
             None => true,
             Some(best_key) => {
@@ -378,7 +390,7 @@ impl<'a> SinkAccumulator<'a> {
         };
         if should_take {
             self.arg_extreme_key = Some(key);
-            self.arg_extreme_value = Some(item);
+            self.arg_extreme_value = Some(materialize_item());
         }
     }
 

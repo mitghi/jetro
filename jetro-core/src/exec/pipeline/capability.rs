@@ -273,6 +273,13 @@ pub(crate) enum ViewSinkCapability {
         /// Target compared against each row.
         target: ViewMembershipTarget,
     },
+    /// Arg-extreme terminal sink (`max_by`, `min_by`).
+    ArgExtreme {
+        /// When true, keeps the row with the largest key; otherwise the smallest key.
+        want_max: bool,
+        /// Index of the view-native key kernel in `sink_kernels`.
+        key_kernel: usize,
+    },
     /// Bounded positional selector for terminal `first(n)` / `last(n)`.
     SelectMany {
         /// Number of rows requested by the terminal sink.
@@ -321,6 +328,7 @@ impl ViewSinkCapability {
                     ViewMaterialization::SinkInputRows
                 }
             }
+            Self::ArgExtreme { .. } => ViewMaterialization::SinkFinalRow,
             Self::SelectMany { .. } => ViewMaterialization::SinkOutputRows,
         }
     }
@@ -427,10 +435,10 @@ mod tests {
     };
     use crate::data::value::Val;
     use crate::exec::pipeline::{
-        BodyKernel, MembershipSinkOp, MembershipSinkSpec, MembershipSinkTarget, NumOp,
-        PipelineBody, PredicateSinkOp, PredicateSinkSpec, ReducerOp, ReducerSpec, Sink, Stage,
-        ViewInputMode, ViewMaterialization, ViewMembershipTarget, ViewOutputMode,
-        ViewSinkCapability, ViewStageCapability,
+        ArgExtremeSinkSpec, BodyKernel, MembershipSinkOp, MembershipSinkSpec,
+        MembershipSinkTarget, NumOp, PipelineBody, PredicateSinkOp, PredicateSinkSpec,
+        ReducerOp, ReducerSpec, Sink, Stage, ViewInputMode, ViewMaterialization,
+        ViewMembershipTarget, ViewOutputMode, ViewSinkCapability, ViewStageCapability,
     };
     use crate::parse::ast::BinOp;
 
@@ -568,6 +576,14 @@ mod tests {
             ViewMaterialization::SinkInputRows
         );
         assert_eq!(
+            ViewSinkCapability::ArgExtreme {
+                want_max: true,
+                key_kernel: 0,
+            }
+            .materialization(),
+            ViewMaterialization::SinkFinalRow
+        );
+        assert_eq!(
             ViewSinkCapability::SelectMany {
                 n: 2,
                 from_end: true,
@@ -661,6 +677,25 @@ mod tests {
                 target: ViewMembershipTarget::Program(_),
             })
         ));
+        assert!(matches!(
+            Sink::ArgExtreme(ArgExtremeSinkSpec {
+                want_max: true,
+                key: Arc::new(crate::vm::Program::new(Vec::new(), "")),
+            })
+            .view_capability(&[BodyKernel::FieldRead(Arc::from("score"))]),
+            Some(ViewSinkCapability::ArgExtreme {
+                want_max: true,
+                key_kernel: 0,
+            })
+        ));
+        assert!(
+            Sink::ArgExtreme(ArgExtremeSinkSpec {
+                want_max: false,
+                key: Arc::new(crate::vm::Program::new(Vec::new(), "")),
+            })
+            .view_capability(&[BodyKernel::Generic])
+            .is_none()
+        );
     }
 
     #[test]

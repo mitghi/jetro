@@ -177,6 +177,12 @@ impl Sink {
                 target: ViewMembershipTarget::from(&spec.target),
             });
         }
+        if let Sink::ArgExtreme(spec) = self {
+            return Some(ViewSinkCapability::ArgExtreme {
+                want_max: spec.want_max,
+                key_kernel: view_native_sink_kernel(sink_kernels, spec.key_kernel_index())?,
+            });
+        }
 
         let sink_spec = self.builtin_sink_spec()?;
         let reducer = self.reducer_spec();

@@ -229,6 +229,14 @@ where
                 ViewRowAction::Skip
             })
         }
+        pipeline::ViewSinkCapability::ArgExtreme {
+            want_max,
+            key_kernel,
+        } => {
+            let key = view_arg_extreme_key(item, sink_kernels.get(*key_kernel)?)?;
+            sink_acc.observe_arg_extreme_lazy(*want_max, key, || item.materialize());
+            Some(ViewRowAction::Emit)
+        }
         pipeline::ViewSinkCapability::SelectMany {
             n,
             from_end,
@@ -256,6 +264,18 @@ where
         return crate::util::json_vals_eq(item.scalar(), target_view);
     }
     crate::util::vals_eq(&item.materialize(), target)
+}
+
+fn view_arg_extreme_key<'a, V>(item: &V, kernel: &pipeline::BodyKernel) -> Option<Val>
+where
+    V: ValueView<'a>,
+{
+    match pipeline::eval_view_kernel(kernel, item)? {
+        pipeline::ViewKernelValue::View(view) => {
+            scalar_view_to_owned_val(view.scalar()).or_else(|| Some(view.materialize()))
+        }
+        pipeline::ViewKernelValue::Owned(value) => Some(value),
+    }
 }
 
 /// Evaluates the sink's optional predicate kernel against `item`. Returns
@@ -1117,8 +1137,8 @@ mod tests {
     use crate::data::value::Val;
     use crate::data::view::{ValView, ValueView};
     use crate::exec::pipeline::{
-        BodyKernel, MembershipSinkOp, MembershipSinkSpec, MembershipSinkTarget, PipelineBody,
-        Sink, Stage, ViewStageCapability,
+        ArgExtremeSinkSpec, BodyKernel, MembershipSinkOp, MembershipSinkSpec,
+        MembershipSinkTarget, PipelineBody, Sink, Stage, ViewStageCapability,
     };
     use crate::parse::ast::BinOp;
     use crate::util::JsonView;
@@ -1392,6 +1412,44 @@ mod tests {
         assert_eq!(indices_json, serde_json::json!([0, 2]));
         assert_eq!(indices_source.materialize_reads(), 0);
         assert_eq!(indices_source.scalar_reads(), 4);
+    }
+
+    #[test]
+    fn view_full_runner_handles_arg_extreme_sinks_lazily() {
+        let max_source = CountingView::root(&[2, 1, 4, 3]);
+        let max_body = PipelineBody {
+            stages: Vec::new(),
+            stage_exprs: Vec::new(),
+            sink: Sink::ArgExtreme(ArgExtremeSinkSpec {
+                want_max: true,
+                key: Arc::new(crate::vm::Program::new(Vec::new(), "")),
+            }),
+            stage_kernels: Vec::new(),
+            sink_kernels: vec![BodyKernel::Current],
+        };
+
+        let max = super::run_full(max_source.clone(), &max_body)
+            .unwrap()
+            .unwrap();
+        assert_eq!(max, Val::Int(4));
+        assert_eq!(max_source.scalar_reads(), 4);
+        assert_eq!(max_source.materialize_reads(), 2);
+
+        let min_source = CountingView::root(&[3, 4, 1, 2]);
+        let min_body = PipelineBody {
+            sink: Sink::ArgExtreme(ArgExtremeSinkSpec {
+                want_max: false,
+                key: Arc::new(crate::vm::Program::new(Vec::new(), "")),
+            }),
+            ..max_body
+        };
+
+        let min = super::run_full(min_source.clone(), &min_body)
+            .unwrap()
+            .unwrap();
+        assert_eq!(min, Val::Int(1));
+        assert_eq!(min_source.scalar_reads(), 4);
+        assert_eq!(min_source.materialize_reads(), 2);
     }
 
     #[test]
