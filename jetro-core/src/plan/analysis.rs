@@ -390,6 +390,7 @@ fn apply_op(op: &Opcode, stack: &mut Vec<AbstractVal>) {
         Opcode::Match(_) => stack.push(AbstractVal::UNKNOWN),
         Opcode::DeepMatchAll(_) => stack.push(AbstractVal::UNKNOWN),
         Opcode::DeepMatchFirst(_) => stack.push(AbstractVal::UNKNOWN),
+        Opcode::BindLamCurrent { .. } => stack.push(AbstractVal::UNKNOWN),
     }
 }
 
@@ -1089,6 +1090,10 @@ fn rewrite_op(op: &Opcode, cache: &mut HashMap<u64, Arc<Program>>) -> Opcode {
             };
             Opcode::DictComp(Arc::new(new_spec))
         }
+        Opcode::BindLamCurrent { name, body } => Opcode::BindLamCurrent {
+            name: name.clone(),
+            body: dedup_rec(body, cache),
+        },
         _ => op.clone(),
     }
 }
@@ -1217,6 +1222,7 @@ pub fn opcode_cost(op: &Opcode) -> u32 {
                     })
                     .sum::<u32>()
         }
+        Opcode::BindLamCurrent { body, .. } => 2 + program_cost(body),
     }
 }
 

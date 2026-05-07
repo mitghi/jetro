@@ -691,26 +691,64 @@ impl Compiler {
     }
 
     /// Compile a method argument that may be a lambda or a plain expression.
-    /// For single-param lambdas, the parameter identifier is rewritten to `PushCurrent`
-    /// so the body can be executed without an extra variable lookup.
+    ///
+    /// For single-param lambdas, the parameter identifier is substituted with
+    /// `Expr::Current` at the AST level — recursively, with shadowing-aware
+    /// stop-conditions for nested lambdas, `let`, comprehensions, match-arm
+    /// pattern bindings, and pipeline binds — before the body is emitted.
+    /// The resulting program is identical to what the equivalent `@`-form
+    /// would produce, which means kernel classification (`BodyKernel`) and
+    /// every peephole pass apply uniformly. Multi-param lambdas keep their
+    /// runtime-binding path: each param resolves through `env.get_var` after
+    /// a `push_lam` at call time.
     fn compile_lambda_or_expr(expr: &Expr, ctx: &VarCtx) -> Program {
         match expr {
+            Expr::Lambda { params, body } if params.len() == 1 => {
+                let name = &params[0];
+                let lowered = crate::compile::lambda_lower::substitute_current(
+                    (**body).clone(),
+                    name.as_str(),
+                );
+                let inner_ctx = ctx.with_vars(params);
+                let prog = Self::compile_sub(&lowered, &inner_ctx);
+                // If the substituted body still references the parameter
+                // name (only possible from inside a nested lambda whose
+                // own `@` is reassigned), wrap the program in a runtime
+                // binding opcode so `LoadIdent(name)` resolves to the
+                // outer iteration item even when the host pipeline stage
+                // advances per row via `swap_current`.
+                if crate::plan::analysis::expr_uses_ident(&lowered, name.as_str()) {
+                    let body = Arc::new(prog);
+                    let ops = vec![Opcode::BindLamCurrent {
+                        name: Some(Arc::from(name.as_str())),
+                        body,
+                    }];
+                    Program::new(ops, "<lam-body-bind>")
+                } else {
+                    prog
+                }
+            }
+            Expr::Lambda { params, body } if params.len() >= 2 => {
+                // Multi-param fast path: `apply_compiled_pair` pushes
+                // params left-to-right via `push_lam`, so `env.current`
+                // ends up bound to the rightmost argument. Substitute
+                // that param's identifier with `Expr::Current` at the
+                // AST level — the inner params 0..N-1 still resolve
+                // through `LoadIdent` / `env.get_var`, but the rightmost
+                // (the one read most heavily in comparators and pair
+                // reducers per row's right operand) skips the var
+                // lookup entirely.
+                let last = params.last().expect("multi-param lambda");
+                let lowered = crate::compile::lambda_lower::substitute_current(
+                    (**body).clone(),
+                    last.as_str(),
+                );
+                let inner_ctx = ctx.with_vars(params);
+                Self::compile_sub(&lowered, &inner_ctx)
+            }
             Expr::Lambda { params, body } => {
                 let inner = ctx.with_vars(params);
-                let mut p = Self::compile_sub(body, &inner);
-                if params.len() == 1 {
-                    let name = params[0].as_str();
-                    let new_ops: Vec<Opcode> = p
-                        .ops
-                        .iter()
-                        .map(|op| match op {
-                            Opcode::LoadIdent(k) if k.as_ref() == name => Opcode::PushCurrent,
-                            other => other.clone(),
-                        })
-                        .collect();
-                    p = Program::new(Self::optimize(new_ops), "<lam-body>");
-                }
-                p
+                Self::compile_sub(body, &inner)
             }
             other => Self::compile_sub(other, ctx),
         }

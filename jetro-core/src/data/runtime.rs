@@ -239,25 +239,24 @@ fn apply_compiled_item(
         .ok_or_else(|| EvalError(format!("{}: missing compiled argument", call.name)))?;
     let kernel = call.sub_kernels.get(idx);
 
-    // Fast path: when the kernel is a non-`Generic` shape and the lambda
-    // does not introduce a named parameter, evaluate directly against
-    // `item` without entering the VM. The kernel reads `@` semantically
-    // by treating `item` as the current value.
+    // Fast path: when the kernel is a non-`Generic` shape, evaluate `prog`
+    // directly against `item` through native Rust kernels — no VM stack
+    // init, no opcode-dispatch loop. The compile-time AST lambda lowering
+    // rewrites `r => r.id` to the same opcodes as `@.id`, so single-param
+    // named lambdas are kernel-eligible exactly when the equivalent
+    // `@`-form is. Multi-param lambdas and bodies wrapped in
+    // `BindLamCurrent` (nested-ref case) classify as `Generic`, so the
+    // gate alone is sufficient.
     if let Some(k) = kernel {
         if !matches!(k, BodyKernel::Generic) && env.has_no_vars() {
-            let lambda_name = match arg {
-                Arg::Pos(Expr::Lambda { params, .. })
-                | Arg::Named(_, Expr::Lambda { params, .. }) => params.first().map(|s| s.as_str()),
-                _ => None,
-            };
-            // `LoadIdent` at the head of a body program dispatches to
-            // a no-arg builtin when current is array/string and the
-            // ident is a builtin name (e.g. `.map(len)` invokes `len`
-            // as a builtin) — a path the kernel form drops. Skip the
-            // fast path for those programs.
+            // `LoadIdent` at the head of a body program dispatches to a
+            // no-arg builtin when current is array/string and the ident
+            // is a builtin name (e.g. `.map(len)` invokes `len` as a
+            // builtin) — a path the kernel form drops. Skip the fast
+            // path for those programs.
             let starts_with_load_ident =
                 matches!(prog.ops.first(), Some(crate::vm::Opcode::LoadIdent(_)));
-            if lambda_name.is_none() && !starts_with_load_ident {
+            if !starts_with_load_ident {
                 return eval_kernel(k, &item, |fallback_item| {
                     let frame = env.push_lam(None, fallback_item.clone());
                     let result = vm.exec_in_env(prog, env);
@@ -270,7 +269,16 @@ fn apply_compiled_item(
 
     match arg {
         Arg::Pos(Expr::Lambda { params, .. }) | Arg::Named(_, Expr::Lambda { params, .. }) => {
-            let name = params.first().map(|s| s.as_str());
+            // Single-param lambda body has been AST-substituted to the
+            // `@`-form opcode shape — name is unreferenced in `prog`,
+            // so push_lam can skip the var insert/remove and only swap
+            // `current`. Multi-param lambdas (handled in
+            // `apply_compiled_pair`) keep their named bindings.
+            let name = if params.len() == 1 {
+                None
+            } else {
+                params.first().map(|s| s.as_str())
+            };
             let frame = env.push_lam(name, item);
             let result = vm.exec_in_env(prog, env);
             env.pop_lam(frame);
@@ -311,15 +319,20 @@ fn apply_compiled_pair(
                     env.pop_lam(frame);
                     result
                 }
-                [param] => {
-                    let frame = env.push_lam(Some(param), second);
+                [_param] => {
+                    // Single-param lambda body is AST-substituted; param
+                    // name is no longer referenced in `prog`.
+                    let frame = env.push_lam(None, second);
                     let result = vm.exec_in_env(prog, env);
                     env.pop_lam(frame);
                     result
                 }
-                [left, right, ..] => {
+                [left, _right, ..] => {
+                    // Multi-param fast path: rightmost param substituted
+                    // to `Current`, only earlier params keep their named
+                    // bindings.
                     let left_frame = env.push_lam(Some(left), first);
-                    let right_frame = env.push_lam(Some(right), second);
+                    let right_frame = env.push_lam(None, second);
                     let result = vm.exec_in_env(prog, env);
                     env.pop_lam(right_frame);
                     env.pop_lam(left_frame);

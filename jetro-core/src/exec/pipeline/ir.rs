@@ -1016,6 +1016,7 @@ pub(super) fn opcode_is_current_only(opcode: &Opcode) -> bool {
         | Opcode::AndOp(prog)
         | Opcode::OrOp(prog)
         | Opcode::CoalesceOp(prog) => program_is_current_only(prog),
+        Opcode::BindLamCurrent { body, .. } => program_is_current_only(body),
         Opcode::CallMethod(call) | Opcode::CallOptMethod(call) => call
             .sub_progs
             .iter()

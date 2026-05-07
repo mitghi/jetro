@@ -441,11 +441,17 @@ fn prog_const_bool(prog: &crate::vm::Program) -> Option<bool> {
 
 /// Compiles a positional argument into a VM `Program`, rewriting bare `Ident` nodes into `@.<ident>` field accesses.
 pub(super) fn compile_subexpr(arg: &crate::parse::ast::Arg) -> Option<Arc<crate::vm::Program>> {
-    use crate::parse::ast::{Arg, Expr, Step};
+    use crate::parse::ast::{Arg, Step};
     let inner = match arg {
         Arg::Pos(e) => e,
         _ => return None,
     };
+    // Single-param lambda: route through `compile_lambda_arg` so the body
+    // is substituted and, when nested-lambda refs to the param remain,
+    // wrapped in `BindLamCurrent` for correct outer-row binding.
+    if matches!(inner, Expr::Lambda { params, .. } if params.len() == 1) {
+        return Some(crate::compile::lambda_lower::compile_lambda_arg(inner, ""));
+    }
     let rooted: Expr = match inner {
         Expr::Ident(name) => Expr::Chain(Box::new(Expr::Current), vec![Step::Field(name.clone())]),
         Expr::Chain(base, _) if matches!(base.as_ref(), Expr::Current) => inner.clone(),
@@ -462,12 +468,16 @@ fn compile_raw_arg_expr(arg: &crate::parse::ast::Arg) -> Option<Arc<crate::vm::P
         Arg::Pos(e) => e,
         Arg::Named(_, _) => return None,
     };
-    Some(Arc::new(crate::compile::compiler::Compiler::compile(
-        expr, "",
-    )))
+    Some(crate::compile::lambda_lower::compile_lambda_arg(expr, ""))
 }
 
 /// Compiles a sort-key argument into a `SortSpec`, interpreting `UnaryNeg`-wrapping as descending order.
+///
+/// Returns `None` for multi-param `Expr::Lambda` arguments — those are
+/// 2-arg comparator lambdas (`.sort((a, b) => …)`) which the pipeline IR
+/// cannot represent as a single-key `SortSpec`. Bailing out forces the
+/// router to fall back to the VM path, where `exec_lambda_method` handles
+/// the comparator via `sort_comparator_apply`.
 pub(super) fn compile_sort_spec(
     arg: &crate::parse::ast::Arg,
 ) -> Option<(SortSpec, Option<Arc<Expr>>)> {
@@ -476,6 +486,9 @@ pub(super) fn compile_sort_spec(
         Arg::Pos(e) => e,
         _ => return None,
     };
+    if matches!(expr, Expr::Lambda { params, .. } if params.len() >= 2) {
+        return None;
+    }
     let (key_expr, descending) = match expr {
         Expr::UnaryNeg(inner) => (inner.as_ref().clone(), true),
         other => (other.clone(), false),

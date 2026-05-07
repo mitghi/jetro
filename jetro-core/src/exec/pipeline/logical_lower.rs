@@ -308,11 +308,18 @@ fn build_body(
 /// This replicates the `Ident→@.field` rewrite that `compile_subexpr` performs in `lower.rs`,
 /// without requiring access to the `pub(super)` helper there.
 fn compile_expr_body(expr: &Expr) -> Arc<crate::vm::Program> {
-    let rooted: Expr = match expr {
+    // Route single-param `Expr::Lambda` through `compile_lambda_arg` so
+    // the body is substituted and — when nested-lambda references to the
+    // param remain — wrapped in `BindLamCurrent` for correct outer-row
+    // binding under pipeline stages that advance via `swap_current`.
+    if matches!(expr, Expr::Lambda { params, .. } if params.len() == 1) {
+        return crate::compile::lambda_lower::compile_lambda_arg(expr, "");
+    }
+    let lowered: Expr = match expr {
         Expr::Ident(name) => {
             Expr::Chain(Box::new(Expr::Current), vec![Step::Field(name.clone())])
         }
         other => other.clone(),
     };
-    Arc::new(crate::compile::compiler::Compiler::compile(&rooted, ""))
+    Arc::new(crate::compile::compiler::Compiler::compile(&lowered, ""))
 }

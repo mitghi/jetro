@@ -294,6 +294,22 @@ pub enum Opcode {
     /// consumed during compilation and stripped from the final program.
     SetCurrent,
 
+    /// Bind `@` (and optionally a named identifier) to the value already on
+    /// `env.current`, run `body` in that extended environment, and restore
+    /// the previous bindings on exit. Emitted by the AST-level lambda
+    /// lowering whenever a single-param lambda body — after `outer` →
+    /// `Current` substitution — still references `outer` from inside a
+    /// nested lambda. The wrapper makes `env.get_var(outer)` resolve to the
+    /// outer iteration item even when the host pipeline stage uses
+    /// `swap_current` rather than `push_lam` to advance per row.
+    BindLamCurrent {
+        /// Identifier bound to the current value for this scope (single-
+        /// param lambda parameter name); `None` for anonymous binding.
+        name: Option<Arc<str>>,
+        /// Lambda body program executed under the extended environment.
+        body: Arc<Program>,
+    },
+
     /// Evaluate `base`, then run each `CompiledPipeStep` in sequence, threading
     /// the current value and environment through the pipeline.
     PipelineRun {

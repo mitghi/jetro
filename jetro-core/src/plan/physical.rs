@@ -396,7 +396,8 @@ fn mask_active_local_stage_kernels(
                 .iter()
                 .any(|local| analysis::expr_uses_ident(expr, local.as_ref()))
             {
-                *program = Arc::new(Compiler::compile(expr, "<local-aware-pipeline-sink>"));
+                let lowered = crate::compile::lambda_lower::unwrap_single_lambda(expr);
+                *program = Arc::new(Compiler::compile(&lowered, "<local-aware-pipeline-sink>"));
                 if let Some(kernel) = body.sink_kernels.get_mut(kernel_idx) {
                     *kernel = crate::exec::pipeline::BodyKernel::Generic;
                 }
@@ -409,7 +410,8 @@ fn mask_active_local_stage_kernels(
                 .iter()
                 .any(|local| analysis::expr_uses_ident(expr, local.as_ref()))
             {
-                *program = Arc::new(Compiler::compile(expr, "<local-aware-pipeline-sink>"));
+                let lowered = crate::compile::lambda_lower::unwrap_single_lambda(expr);
+                *program = Arc::new(Compiler::compile(&lowered, "<local-aware-pipeline-sink>"));
                 if let Some(kernel) = body.sink_kernels.get_mut(kernel_idx) {
                     *kernel = crate::exec::pipeline::BodyKernel::Generic;
                 }
@@ -427,7 +429,8 @@ fn mask_active_local_stage_kernels(
 /// Recompiles the stored kernel program of a pipeline stage so it will be evaluated inside
 /// a full `Env` (picking up let-bound variables) rather than against a bare row.
 fn recompile_stage_body_for_lexical_env(stage: &mut crate::exec::pipeline::Stage, expr: &Expr) {
-    let program = Arc::new(Compiler::compile(expr, "<local-aware-pipeline-stage>"));
+    let lowered = crate::compile::lambda_lower::unwrap_single_lambda(expr);
+    let program = Arc::new(Compiler::compile(&lowered, "<local-aware-pipeline-stage>"));
     match stage {
         crate::exec::pipeline::Stage::Filter(body, _)
         | crate::exec::pipeline::Stage::Map(body, _)

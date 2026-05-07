@@ -253,10 +253,14 @@ fn suffix_consumes_value(stages: &[Stage]) -> bool {
 }
 
 fn compile_stage_expr(expr: &Expr) -> Arc<crate::vm::Program> {
-    Arc::new(crate::compile::compiler::Compiler::compile(
-        expr,
-        "<pipeline-rewrite>",
-    ))
+    // Pipeline-rewritten stage bodies are produced as raw `Expr`. When the
+    // body is a single-param `Expr::Lambda` we apply the same AST-level
+    // substitution that `Compiler::compile_lambda_or_expr` uses for method
+    // arguments — replacing the param identifier with `Expr::Current` —
+    // before compiling. Without this, `Compiler::compile` would emit
+    // `Opcode::PushNull` for a top-level `Expr::Lambda` (per `compile.rs`'s
+    // top-level fallback) and the stage would map every row to `null`.
+    crate::compile::lambda_lower::compile_lambda_arg(expr, "<pipeline-rewrite>")
 }
 
 fn simplify_expr(expr: Expr) -> Expr {
