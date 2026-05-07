@@ -269,15 +269,25 @@ fn build_body(
     let plan_result = plan_with_exprs(stages, stage_exprs, &kernels, sink);
 
     let stage_kernels = classify_kernels(&plan_result.stages);
-    let sink_kernels = plan_result
-        .sink
-        .reducer_spec()
-        .map(|spec| {
-            spec.sink_programs()
-                .map(|p| BodyKernel::classify(p))
-                .collect()
-        })
-        .unwrap_or_default();
+    let sink_kernels = match &plan_result.sink {
+        Sink::Reducer(spec) => spec
+            .sink_programs()
+            .map(|p| BodyKernel::classify(p))
+            .collect(),
+        Sink::Predicate(spec) => spec
+            .sink_programs()
+            .map(|p| BodyKernel::classify(p))
+            .collect(),
+        Sink::Membership(spec) => spec
+            .sink_programs()
+            .map(|p| BodyKernel::classify(p))
+            .collect(),
+        Sink::ArgExtreme(spec) => spec
+            .sink_programs()
+            .map(|p| BodyKernel::classify(p))
+            .collect(),
+        _ => Vec::new(),
+    };
 
     PipelineBody {
         stages: plan_result.stages,
@@ -298,11 +308,18 @@ fn build_body(
 /// This replicates the `Ident→@.field` rewrite that `compile_subexpr` performs in `lower.rs`,
 /// without requiring access to the `pub(super)` helper there.
 fn compile_expr_body(expr: &Expr) -> Arc<crate::vm::Program> {
-    let rooted: Expr = match expr {
+    // Route single-param `Expr::Lambda` through `compile_lambda_arg` so
+    // the body is substituted and — when nested-lambda references to the
+    // param remain — wrapped in `BindLamCurrent` for correct outer-row
+    // binding under pipeline stages that advance via `swap_current`.
+    if matches!(expr, Expr::Lambda { params, .. } if params.len() == 1) {
+        return crate::compile::lambda_lower::compile_lambda_arg(expr, "");
+    }
+    let lowered: Expr = match expr {
         Expr::Ident(name) => {
             Expr::Chain(Box::new(Expr::Current), vec![Step::Field(name.clone())])
         }
         other => other.clone(),
     };
-    Arc::new(crate::compile::compiler::Compiler::compile(&rooted, ""))
+    Arc::new(crate::compile::compiler::Compiler::compile(&lowered, ""))
 }

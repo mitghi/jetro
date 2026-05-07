@@ -4,4 +4,5 @@
 //! rewrites applied to programs before they reach the VM.
 
 pub(crate) mod compiler;
+pub(crate) mod lambda_lower;
 pub(crate) mod passes;

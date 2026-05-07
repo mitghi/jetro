@@ -268,6 +268,32 @@ where
     Ok(Val::arr(out))
 }
 
+/// Returns the first element for which every predicate is truthy. Distinct
+/// from `find_apply` (which keeps every match): this corresponds to the
+/// conventional `.find(pred)` semantics in JavaScript / Rust / Python
+/// iterators. Returns `Val::Null` when nothing matches.
+#[inline]
+pub fn find_first_apply<F>(recv: Val, pred_count: usize, mut eval: F) -> Result<Val, EvalError>
+where
+    F: FnMut(&Val, usize) -> Result<Val, EvalError>,
+{
+    if pred_count == 0 {
+        return Err(EvalError("find: requires at least one predicate".into()));
+    }
+    let items = recv
+        .into_vec()
+        .ok_or_else(|| EvalError("find: expected array".into()))?;
+    'outer: for item in items {
+        for idx in 0..pred_count {
+            if !is_truthy(&eval(&item, idx)?) {
+                continue 'outer;
+            }
+        }
+        return Ok(item);
+    }
+    Ok(Val::Null)
+}
+
 /// Deduplicates an array by a key expression, keeping the first occurrence of each distinct key.
 #[inline]
 pub fn unique_by_apply<F>(recv: Val, mut eval: F) -> Result<Val, EvalError>
@@ -1040,34 +1066,43 @@ where
 /// Returns an array of every key in the object, or an empty array for non-objects.
 #[inline]
 pub fn keys_apply(recv: &Val) -> Val {
-    Val::arr(
-        recv.as_object()
-            .map(|m| m.keys().map(|k| Val::Str(k.clone())).collect())
-            .unwrap_or_default(),
-    )
+    match recv {
+        Val::Obj(m) => Val::arr(m.keys().map(|k| Val::Str(k.clone())).collect()),
+        Val::ObjSmall(pairs) => Val::arr(
+            pairs
+                .iter()
+                .map(|(key, _)| Val::Str(key.clone()))
+                .collect(),
+        ),
+        _ => Val::arr(Vec::new()),
+    }
 }
 
 /// Returns an array of every value in the object, or an empty array for non-objects.
 #[inline]
 pub fn values_apply(recv: &Val) -> Val {
-    Val::arr(
-        recv.as_object()
-            .map(|m| m.values().cloned().collect())
-            .unwrap_or_default(),
-    )
+    match recv {
+        Val::Obj(m) => Val::arr(m.values().cloned().collect()),
+        Val::ObjSmall(pairs) => Val::arr(pairs.iter().map(|(_, value)| value.clone()).collect()),
+        _ => Val::arr(Vec::new()),
+    }
 }
 
 /// Returns `[[key, value], ...]` pairs for each entry in the object.
 #[inline]
 pub fn entries_apply(recv: &Val) -> Val {
-    Val::arr(
-        recv.as_object()
-            .map(|m| {
-                m.iter()
-                    .map(|(k, v)| Val::arr(vec![Val::Str(k.clone()), v.clone()]))
-                    .collect()
-            })
-            .unwrap_or_default(),
-    )
+    match recv {
+        Val::Obj(m) => Val::arr(
+            m.iter()
+                .map(|(k, v)| Val::arr(vec![Val::Str(k.clone()), v.clone()]))
+                .collect(),
+        ),
+        Val::ObjSmall(pairs) => Val::arr(
+            pairs
+                .iter()
+                .map(|(k, v)| Val::arr(vec![Val::Str(k.clone()), v.clone()]))
+                .collect(),
+        ),
+        _ => Val::arr(Vec::new()),
+    }
 }
-

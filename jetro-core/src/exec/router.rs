@@ -753,6 +753,26 @@ mod tests {
 
     #[cfg(feature = "simd-json")]
     #[test]
+    fn view_object_key_projection_last_uses_tape_native_helpers() {
+        let j = Jetro::from_bytes(
+            br#"{"books":[{"title":"low","score":1,"debug":true},{"title":"b","score":902,"debug":false}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let keys = j.collect(r#"$.books.map(@.keys()).last()"#).unwrap();
+        let picked = j
+            .collect(r#"$.books.map(@.pick("title", "score")).last()"#)
+            .unwrap();
+
+        assert_eq!(keys, json!(["title", "score", "debug"]));
+        assert_eq!(picked, json!({"title": "b", "score": 902}));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
     fn view_object_map_collects_scalar_cells_without_materializing_subtrees() {
         let j = Jetro::from_bytes(
             br#"{"books":[{"title":"low","score":1},{"title":"a","score":901},{"title":"b","score":902}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
@@ -857,7 +877,7 @@ mod tests {
 
         assert_eq!(out, json!("bob"));
         assert!(!j.root_val_is_materialized());
-        assert_eq!(j.tape_materialized_subtrees(), 1);
+        assert_eq!(j.tape_materialized_subtrees(), 0);
     }
 
     #[cfg(feature = "simd-json")]
@@ -875,7 +895,7 @@ mod tests {
 
         assert_eq!(out, json!("bob"));
         assert!(!j.root_val_is_materialized());
-        assert_eq!(j.tape_materialized_subtrees(), 1);
+        assert_eq!(j.tape_materialized_subtrees(), 0);
     }
 
     #[cfg(feature = "simd-json")]

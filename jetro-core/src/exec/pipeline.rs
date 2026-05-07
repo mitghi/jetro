@@ -37,7 +37,8 @@ mod symbolic;
 mod val_stage_flow;
 pub(crate) use capability::{
     view_capabilities, view_prefix_capabilities, SourceAccessMode, SourceCapabilities,
-    ViewInputMode, ViewMaterialization, ViewOutputMode, ViewSinkCapability, ViewStageCapability,
+    ViewInputMode, ViewMaterialization, ViewMembershipTarget, ViewOutputMode, ViewSinkCapability,
+    ViewStageCapability,
 };
 pub(crate) use collector::{TerminalCollector, TerminalMapCollector};
 pub(crate) use common::{
@@ -50,7 +51,10 @@ pub use ir::Strategy;
 pub use ir::{PhysicalExecPath, Plan, Position, StageStrategy};
 pub use kernels::{eval_cmp_op, eval_kernel, BodyKernel};
 pub(crate) use kernels::{eval_view_kernel, CollectLayout, ObjectKernel, ViewKernelValue};
-pub use operator::{ReducerOp, ReducerSpec};
+pub use operator::{
+    ArgExtremeSinkSpec, MembershipSinkOp, MembershipSinkSpec, MembershipSinkTarget,
+    PredicateSinkOp, PredicateSinkSpec, ReducerOp, ReducerSpec,
+};
 #[cfg(test)]
 pub use plan::compute_strategies;
 #[cfg(test)]
@@ -126,8 +130,24 @@ fn sink_name(s: &Sink) -> &'static str {
             ReducerOp::Numeric(NumOp::Max) => "max",
             ReducerOp::Numeric(NumOp::Avg) => "avg",
         },
+        Sink::Membership(spec) => match spec.op {
+            MembershipSinkOp::Includes => "includes",
+            MembershipSinkOp::Index => "index",
+            MembershipSinkOp::IndicesOf => "indices_of",
+        },
+        Sink::Predicate(spec) => match spec.op {
+            PredicateSinkOp::Any => "any",
+            PredicateSinkOp::All => "all",
+            PredicateSinkOp::FindIndex => "find_index",
+            PredicateSinkOp::IndicesWhere => "indices_where",
+            PredicateSinkOp::FindOne => "find_one",
+        },
+        Sink::ArgExtreme(spec) if spec.want_max => "max_by",
+        Sink::ArgExtreme(_) => "min_by",
         Sink::Terminal(BuiltinMethod::First) => "first",
         Sink::Terminal(BuiltinMethod::Last) => "last",
+        Sink::SelectMany { from_end: false, .. } => "first_n",
+        Sink::SelectMany { from_end: true, .. } => "last_n",
         Sink::Nth(_) => "nth",
         Sink::Terminal(_) => "terminal",
         Sink::ApproxCountDistinct => "approx_count_distinct",
@@ -346,8 +366,21 @@ pub enum Sink {
 
     /// Folds the stream using the given `ReducerSpec` (count, sum, min, max, avg).
     Reducer(ReducerSpec),
+    /// Evaluates a predicate terminal (`any`, `all`, `find_index`) with sink-owned state.
+    Predicate(PredicateSinkSpec),
+    /// Evaluates an element-membership terminal (`includes`, `index`, `indices_of`).
+    Membership(MembershipSinkSpec),
+    /// Keeps the row with the largest or smallest projected key (`max_by`, `min_by`).
+    ArgExtreme(ArgExtremeSinkSpec),
     /// Delegates to a built-in method that consumes the stream (e.g. `first`, `last`).
     Terminal(BuiltinMethod),
+    /// Selects a bounded prefix or suffix from the stream.
+    SelectMany {
+        /// Number of rows to return.
+        n: usize,
+        /// When true, returns the last `n` rows; otherwise returns the first `n`.
+        from_end: bool,
+    },
     /// Selects the nth emitted row from the stream.
     Nth(usize),
 
@@ -1450,6 +1483,34 @@ mod tests {
     }
 
     #[test]
+    fn reverse_propagates_positional_demand() {
+        use serde_json::json;
+        let doc: Val = (&json!({"xs": [10, 20, 30, 40]})).into();
+
+        let first = lower_query("$.xs.reverse().first()").unwrap();
+        assert_eq!(
+            first.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::LastInput(1)
+        );
+        assert_eq!(first.run(&doc).unwrap(), Val::Int(40));
+
+        let last = lower_query("$.xs.reverse().last()").unwrap();
+        assert_eq!(
+            last.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::FirstInput(1)
+        );
+        assert_eq!(last.run(&doc).unwrap(), Val::Int(10));
+
+        let take = lower_query("$.xs.reverse().take(2)").unwrap();
+        assert_eq!(
+            take.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::LastInput(2)
+        );
+        let take_json: serde_json::Value = take.run(&doc).unwrap().into();
+        assert_eq!(take_json, json!([40, 30]));
+    }
+
+    #[test]
     fn nth_sink_requests_indexed_input_when_available() {
         use serde_json::json;
         let doc: Val = (&json!({
@@ -1469,6 +1530,80 @@ mod tests {
         let out = p.run(&doc).unwrap();
         let out_json: serde_json::Value = out.into();
         assert_eq!(out_json, json!(902));
+    }
+
+    #[test]
+    fn positional_many_terminal_sinks_match_runtime_semantics() {
+        use serde_json::json;
+        let root = Val::from(&json!({"xs": [1, 2, 3, 4]}));
+
+        let first_one: serde_json::Value =
+            lower_query("$.xs.first(1)").unwrap().run(&root).unwrap().into();
+        assert_eq!(first_one, json!(1));
+
+        let first_two: serde_json::Value =
+            lower_query("$.xs.first(2)").unwrap().run(&root).unwrap().into();
+        assert_eq!(first_two, json!([1, 2]));
+
+        let last_one: serde_json::Value =
+            lower_query("$.xs.last(1)").unwrap().run(&root).unwrap().into();
+        assert_eq!(last_one, json!(4));
+
+        let last_two: serde_json::Value =
+            lower_query("$.xs.last(2)").unwrap().run(&root).unwrap().into();
+        assert_eq!(last_two, json!([3, 4]));
+
+        let mapped_first: serde_json::Value = lower_query("$.xs.map(@ + 1).first(2)")
+            .unwrap()
+            .run(&root)
+            .unwrap()
+            .into();
+        assert_eq!(mapped_first, json!([2, 3]));
+
+        let mapped_last: serde_json::Value = lower_query("$.xs.map(@ + 1).last(2)")
+            .unwrap()
+            .run(&root)
+            .unwrap()
+            .into();
+        assert_eq!(mapped_last, json!([4, 5]));
+    }
+
+    #[test]
+    fn positional_many_terminal_sinks_use_indexed_dispatch_for_indexed_chains() {
+        let first = lower_query("$.xs.map(@ + 1).first(2)").unwrap();
+        assert_eq!(first.exec_path, PhysicalExecPath::Indexed);
+
+        let last = lower_query("$.xs.map(@ + 1).last(2)").unwrap();
+        assert_eq!(last.exec_path, PhysicalExecPath::Indexed);
+    }
+
+    #[test]
+    fn positional_many_terminal_sinks_propagate_bounded_demand() {
+        let first = lower_query("$.xs.first(3)").unwrap();
+        assert!(matches!(
+            first.sink,
+            Sink::SelectMany {
+                n: 3,
+                from_end: false
+            }
+        ));
+        assert_eq!(
+            first.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::FirstInput(3)
+        );
+
+        let last = lower_query("$.xs.last(3)").unwrap();
+        assert!(matches!(
+            last.sink,
+            Sink::SelectMany {
+                n: 3,
+                from_end: true
+            }
+        ));
+        assert_eq!(
+            last.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::LastInput(3)
+        );
     }
 
     #[test]
@@ -1571,5 +1706,269 @@ mod tests {
         let p = lower_query("$.xs.skip(1).take(2).sum()").unwrap();
         let out = p.run(&doc).unwrap();
         assert_eq!(out, Val::Int(50));
+    }
+
+    #[test]
+    fn path_slice_lowers_to_bounded_positional_stages() {
+        use serde_json::json;
+        let doc: Val = (&json!({"xs": [10, 20, 30, 40, 50]})).into();
+
+        let p = lower_query("$.xs[0:3].last()").unwrap();
+        assert_eq!(
+            p.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::FirstInput(3)
+        );
+        assert_eq!(p.run(&doc).unwrap(), Val::Int(30));
+
+        let p = lower_query("$.xs[2:].take(2)").unwrap();
+        assert_eq!(
+            p.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::FirstInput(4)
+        );
+        let out: serde_json::Value = p.run(&doc).unwrap().into();
+        assert_eq!(out, json!([30, 40]));
+
+        assert!(lower_query("$.xs[-2:].first()").is_none());
+    }
+
+    #[test]
+    fn scalar_slice_preserves_pipeline_demand() {
+        use serde_json::json;
+        let doc: Val = (&json!({"rows": ["abc", "def"]})).into();
+
+        let p = lower_query("$.rows.slice(0, 2).last()").unwrap();
+        assert_eq!(
+            p.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::LastInput(1)
+        );
+        let out: serde_json::Value = p.run(&doc).unwrap().into();
+        assert_eq!(out, json!("de"));
+    }
+
+    #[test]
+    fn chunk_and_window_bounded_demand_match_vm() {
+        use serde_json::json;
+        let doc: Val = (&json!({"xs": [1, 2, 3, 4, 5, 6, 7, 8]})).into();
+
+        let p = lower_query("$.xs.chunk(3).take(2)").unwrap();
+        assert_eq!(
+            p.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::FirstInput(6)
+        );
+        let out: serde_json::Value = p.run(&doc).unwrap().into();
+        assert_eq!(out, json!([[1, 2, 3], [4, 5, 6]]));
+
+        let p = lower_query("$.xs.window(3).take(2)").unwrap();
+        assert_eq!(
+            p.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::FirstInput(4)
+        );
+        let out: serde_json::Value = p.run(&doc).unwrap().into();
+        assert_eq!(out, json!([[1, 2, 3], [2, 3, 4]]));
+
+        let p = lower_query("$.xs.window(3).last()").unwrap();
+        assert_eq!(
+            p.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::All
+        );
+        let out: serde_json::Value = p.run(&doc).unwrap().into();
+        assert_eq!(out, json!([6, 7, 8]));
+    }
+
+    #[test]
+    fn predicate_terminal_sinks_match_vm() {
+        use serde_json::json;
+        let doc = json!({
+            "xs": [
+                {"score": 1, "isbn": "a"},
+                {"score": 9, "isbn": "b"},
+                {"score": 11, "isbn": "c"}
+            ]
+        });
+
+        for query in [
+            "$.xs.any(score > 10)",
+            "$.xs.exists(score > 10)",
+            "$.xs.all(score > 0)",
+            "$.xs.find_index(score > 10)",
+            "$.xs.indices_where(score > 5)",
+            "$.xs.map(isbn).find_index(@ == \"c\")",
+        ] {
+            assert_pipeline_matches_vm(query, doc.clone());
+        }
+
+        let pipeline = lower_query("$.xs.find_one(score == 9)").unwrap();
+        let root = Val::from(&doc);
+        let actual: serde_json::Value = pipeline.run(&root).unwrap().into();
+        assert_eq!(actual["isbn"], json!("b"));
+    }
+
+    #[test]
+    fn predicate_terminal_sinks_keep_conservative_source_demand() {
+        let any = lower_query("$.xs.any(@ > 2)").unwrap();
+        assert!(matches!(any.sink, Sink::Predicate(ref spec) if spec.op == PredicateSinkOp::Any));
+        assert_eq!(
+            any.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::All
+        );
+        assert_eq!(
+            any.source_demand().chain.value,
+            crate::plan::demand::ValueNeed::Predicate
+        );
+
+        let all = lower_query("$.xs.all(@ > 2)").unwrap();
+        assert!(matches!(all.sink, Sink::Predicate(ref spec) if spec.op == PredicateSinkOp::All));
+        assert_eq!(
+            all.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::All
+        );
+
+        let find_index = lower_query("$.xs.find_index(@ > 2)").unwrap();
+        assert!(
+            matches!(find_index.sink, Sink::Predicate(ref spec) if spec.op == PredicateSinkOp::FindIndex)
+        );
+        assert_eq!(
+            find_index.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::All
+        );
+
+        let indices_where = lower_query("$.xs.indices_where(@ > 2)").unwrap();
+        assert!(
+            matches!(indices_where.sink, Sink::Predicate(ref spec) if spec.op == PredicateSinkOp::IndicesWhere)
+        );
+        assert_eq!(
+            indices_where.source_demand().chain.value,
+            crate::plan::demand::ValueNeed::Predicate
+        );
+
+        let find_one = lower_query("$.xs.find_one(@ > 2)").unwrap();
+        assert!(matches!(find_one.sink, Sink::Predicate(ref spec) if spec.op == PredicateSinkOp::FindOne));
+        assert_eq!(
+            find_one.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::All
+        );
+        assert_eq!(
+            find_one.source_demand().chain.value,
+            crate::plan::demand::ValueNeed::Whole
+        );
+    }
+
+    #[test]
+    fn find_one_terminal_sink_errors_on_zero_or_multiple_matches() {
+        use serde_json::json;
+        let doc = json!({
+            "xs": [
+                {"score": 1},
+                {"score": 9},
+                {"score": 11}
+            ]
+        });
+        let root = Val::from(&doc);
+
+        let zero = lower_query("$.xs.find_one(score > 100)").unwrap();
+        assert!(zero.run(&root).is_err());
+
+        let multiple = lower_query("$.xs.find_one(score > 5)").unwrap();
+        assert!(multiple.run(&root).is_err());
+    }
+
+    #[test]
+    fn membership_terminal_sinks_match_vm() {
+        use serde_json::json;
+        let doc = json!({
+            "xs": ["a", "urgent", "x", "urgent"],
+            "needle": "urgent",
+            "s": "hello",
+            "substring": "ell",
+            "obj": {"urgent": true}
+        });
+
+        for query in [
+            "$.xs.includes(\"urgent\")",
+            "$.xs.contains(\"urgent\")",
+            "$.xs.index(\"urgent\")",
+            "$.xs.indices_of(\"urgent\")",
+            "$.xs.includes($.needle)",
+            "$.xs.index($.needle)",
+            "$.xs.indices_of($.needle)",
+            "$.xs.map(@).includes(\"x\")",
+            "$.xs.map(@).includes($.needle)",
+            "$.s.includes(\"ell\")",
+            "$.s.includes($.substring)",
+            "$.obj.includes(\"urgent\")",
+        ] {
+            assert_pipeline_matches_vm(query, doc.clone());
+        }
+    }
+
+    #[test]
+    fn membership_terminal_sinks_keep_conservative_source_demand() {
+        let includes = lower_query("$.xs.includes(\"urgent\")").unwrap();
+        assert!(
+            matches!(includes.sink, Sink::Membership(ref spec) if spec.op == MembershipSinkOp::Includes)
+        );
+        assert_eq!(
+            includes.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::All
+        );
+        assert_eq!(
+            includes.source_demand().chain.value,
+            crate::plan::demand::ValueNeed::Whole
+        );
+
+        let index = lower_query("$.xs.index(\"urgent\")").unwrap();
+        assert!(matches!(index.sink, Sink::Membership(ref spec) if spec.op == MembershipSinkOp::Index));
+
+        let indices = lower_query("$.xs.indices_of(\"urgent\")").unwrap();
+        assert!(
+            matches!(indices.sink, Sink::Membership(ref spec) if spec.op == MembershipSinkOp::IndicesOf)
+        );
+
+        let dynamic = lower_query("$.xs.includes($.needle)").unwrap();
+        assert!(
+            matches!(dynamic.sink, Sink::Membership(ref spec)
+                if matches!(spec.target, MembershipSinkTarget::Program(_)))
+        );
+    }
+
+    #[test]
+    fn arg_extreme_terminal_sinks_match_vm() {
+        use serde_json::json;
+        let doc = json!({
+            "xs": [
+                {"title": "A", "score": 1, "price": 20},
+                {"title": "B", "score": 9, "price": 10},
+                {"title": "C", "score": 9, "price": 30}
+            ],
+            "names": ["a", "abc", "ab"]
+        });
+
+        for query in [
+            "$.xs.max_by(score)",
+            "$.xs.min_by(price)",
+            "$.names.max_by(@.len())",
+            "$.names.min_by(@.len())",
+            "$.xs.map(@).max_by(score)",
+        ] {
+            assert_pipeline_matches_vm(query, doc.clone());
+        }
+    }
+
+    #[test]
+    fn arg_extreme_terminal_sinks_keep_conservative_source_demand() {
+        let max_by = lower_query("$.xs.max_by(score)").unwrap();
+        assert!(matches!(max_by.sink, Sink::ArgExtreme(ref spec) if spec.want_max));
+        assert_eq!(
+            max_by.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::All
+        );
+        assert_eq!(
+            max_by.source_demand().chain.value,
+            crate::plan::demand::ValueNeed::Whole
+        );
+        assert!(max_by.source_demand().chain.order);
+
+        let min_by = lower_query("$.xs.min_by(score)").unwrap();
+        assert!(matches!(min_by.sink, Sink::ArgExtreme(ref spec) if !spec.want_max));
     }
 }

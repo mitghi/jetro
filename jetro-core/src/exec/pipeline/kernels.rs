@@ -478,26 +478,34 @@ fn classify_structural_view_kernel(ops: &[crate::vm::Opcode]) -> Option<BodyKern
             Some(BodyKernel::FieldChain(keys.into()))
         }
         [receiver @ .., Opcode::CallMethod(call)] if call.method.spec().view_scalar => {
-            let receiver = classify_structural_view_kernel(receiver)?;
-            let builtin_call = BuiltinCall::from_static_args(
-                call.method,
-                call.name.as_ref(),
-                call.orig_args.len(),
-                |idx| {
-                    Ok(call
-                        .sub_progs
-                        .get(idx)
-                        .and_then(|prog| static_prog_val(prog)))
-                },
-                |idx| match call.orig_args.get(idx) {
-                    Some(crate::parse::ast::Arg::Pos(crate::parse::ast::Expr::Ident(value))) => {
-                        Some(Arc::from(value.as_str()))
-                    }
-                    _ => None,
-                },
-            )
-            .ok()
-            .flatten()?;
+            let receiver = if receiver.is_empty() {
+                BodyKernel::Current
+            } else {
+                classify_structural_view_kernel(receiver)?
+            };
+            let builtin_call = if call.method == crate::builtins::BuiltinMethod::Pick {
+                static_positional_pick_call(call)?
+            } else {
+                BuiltinCall::from_static_args(
+                    call.method,
+                    call.name.as_ref(),
+                    call.orig_args.len(),
+                    |idx| {
+                        Ok(call
+                            .sub_progs
+                            .get(idx)
+                            .and_then(|prog| static_prog_val(prog)))
+                    },
+                    |idx| match call.orig_args.get(idx) {
+                        Some(crate::parse::ast::Arg::Pos(crate::parse::ast::Expr::Ident(
+                            value,
+                        ))) => Some(Arc::from(value.as_str())),
+                        _ => None,
+                    },
+                )
+                .ok()
+                .flatten()?
+            };
             if !builtin_call.spec().view_scalar {
                 return None;
             }
@@ -515,6 +523,31 @@ fn static_prog_val(prog: &crate::vm::Program) -> Option<Val> {
         [op] => trivial_lit(op),
         _ => None,
     }
+}
+
+fn static_positional_pick_call(call: &crate::vm::CompiledCall) -> Option<BuiltinCall> {
+    let mut keys = Vec::with_capacity(call.orig_args.len());
+    for (idx, arg) in call.orig_args.iter().enumerate() {
+        let key = match arg {
+            crate::parse::ast::Arg::Pos(crate::parse::ast::Expr::Ident(value)) => {
+                Arc::from(value.as_str())
+            }
+            crate::parse::ast::Arg::Pos(_) => match call
+                .sub_progs
+                .get(idx)
+                .and_then(|prog| static_prog_val(prog))
+            {
+                Some(Val::Str(value)) => value,
+                _ => return None,
+            },
+            crate::parse::ast::Arg::Named(_, _) => return None,
+        };
+        keys.push(key);
+    }
+    Some(BuiltinCall::new(
+        crate::builtins::BuiltinMethod::Pick,
+        crate::builtins::BuiltinArgs::StrVec(keys),
+    ))
 }
 
 #[inline]
@@ -730,9 +763,32 @@ where
             Some(ViewKernelValue::Owned(Val::ObjSmall(pairs.into())))
         }
         BodyKernel::BuiltinCall { receiver, call } => match eval_view_kernel(receiver, item)? {
-            ViewKernelValue::View(view) => call
-                .try_apply_json_view(view.scalar())
-                .map(ViewKernelValue::Owned),
+            ViewKernelValue::View(view) => match (call.method, &call.args) {
+                (
+                    crate::builtins::BuiltinMethod::HasKey,
+                    crate::builtins::BuiltinArgs::Str(key),
+                ) => view.has_key(key.as_ref()).map(Val::Bool).map(ViewKernelValue::Owned),
+                (crate::builtins::BuiltinMethod::Keys, crate::builtins::BuiltinArgs::None) => {
+                    view.object_keys().map(ViewKernelValue::Owned)
+                }
+                (crate::builtins::BuiltinMethod::Values, crate::builtins::BuiltinArgs::None) => {
+                    view.object_values().map(ViewKernelValue::Owned)
+                }
+                (crate::builtins::BuiltinMethod::Entries, crate::builtins::BuiltinArgs::None) => {
+                    view.object_entries().map(ViewKernelValue::Owned)
+                }
+                (
+                    crate::builtins::BuiltinMethod::Pick,
+                    crate::builtins::BuiltinArgs::StrVec(keys),
+                ) => view.pick_keys(keys).map(ViewKernelValue::Owned),
+                (
+                    crate::builtins::BuiltinMethod::Omit,
+                    crate::builtins::BuiltinArgs::StrVec(keys),
+                ) => view.omit_keys(keys).map(ViewKernelValue::Owned),
+                _ => call
+                    .try_apply_json_view(view.scalar())
+                    .map(ViewKernelValue::Owned),
+            },
             ViewKernelValue::Owned(value) => call
                 .try_apply(&value)
                 .ok()

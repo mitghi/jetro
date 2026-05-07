@@ -407,7 +407,8 @@ pub fn select_strategy(stages: &[Stage], sink: &Sink) -> Strategy {
     use crate::parse::chain_ir::Cardinality;
 
     let stages_can_indexed = stages.iter().all(|s| s.shape().can_indexed);
-    let sink_positional = sink.demand().positional.is_some();
+    let sink_positional =
+        sink.demand().positional.is_some() || matches!(sink, Sink::SelectMany { .. });
     let has_barrier = stages
         .iter()
         .any(|s| matches!(s.shape().cardinality, Cardinality::Barrier));

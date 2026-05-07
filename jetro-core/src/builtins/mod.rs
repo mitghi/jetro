@@ -153,7 +153,7 @@ pub enum BuiltinMethod {
     DropWhile,
     /// Returns the first element satisfying the predicate, or null.
     FindFirst,
-    /// Alias of `find_first`.
+    /// Returns the only element satisfying the predicate, erroring on zero or multiple matches.
     FindOne,
     /// Counts approximate distinct values using a HyperLogLog-style sketch.
     ApproxCountDistinct,
@@ -221,6 +221,8 @@ pub enum BuiltinMethod {
     Or,
     /// Returns true if the object contains the given key.
     Has,
+    /// Returns true if the object contains the given key.
+    HasKey,
     /// Returns true if a field path is absent or null in the receiver.
     Missing,
     /// Returns true if the array/string/object contains the given item.
@@ -414,8 +416,8 @@ macro_rules! for_each_builtin {
             DropWhile, EndsWith, Entries, Enumerate, EquiJoin, Explode, Fanout, Filter,
             FilterKeys, FilterValues, Find, FindAll, FindFirst, FindIndex, FindOne, First,
             FlatMap, Flatten, FlattenKeys, Floor, FromBase64, FromJson, FromPairs, GetPath,
-            GroupBy, GroupShape, Has, HasPath, HtmlEscape, HtmlUnescape, Implode, Includes,
-            Indent, Index, IndexBy, IndexOf, IndicesOf, IndicesWhere, Intersect, Invert,
+            GroupBy, GroupShape, Has, HasKey, HasPath, HtmlEscape, HtmlUnescape, Implode,
+            Includes, Indent, Index, IndexBy, IndexOf, IndicesOf, IndicesWhere, Intersect, Invert,
             IsAlpha, IsAscii, IsBlank, IsNumeric, Join, KebabCase, Keys, Lag, Last,
             LastIndexOf, Lead, Len, Lines, Lower, Map, Matches, Max, MaxBy, Merge, Min,
             MinBy, Missing, Nth, Omit, Or, PadLeft, PadRight, Pairwise, ParseBool,
@@ -649,16 +651,24 @@ pub enum BuiltinDemandLaw {
     FilterLike,
     /// Like `take_while`: stops at the first predicate failure, so `UntilOutput(n)` becomes `FirstInput(n)`.
     TakeWhile,
+    /// Like `drop_while`: prefix predicate barrier; safe upstream demand is a full ordered scan.
+    DropWhile,
     /// Like `unique`/`unique_by`: scan until enough distinct outputs are observed.
     UniqueLike,
     /// Like map: the output count equals the input count; passes demand through but requires whole values.
     MapLike,
+    /// Like scalar `slice`: one-to-one and order-preserving, but consumes the whole input value.
+    Slice,
     /// Like `flat_map`: output count is unbounded relative to input, so always requests all input.
     FlatMapLike,
     /// Cap the upstream pull to the provided count argument.
     Take,
     /// Shift the upstream pull window by the provided count argument.
     Skip,
+    /// Fixed-size chunking; bounded output demand maps to a bounded input prefix.
+    Chunk,
+    /// Sliding window; bounded output demand maps to a bounded input prefix.
+    Window,
     /// Only the first element is needed; translates any downstream demand to `FirstInput(1)`.
     First,
     /// The last element is needed; requires all ordered input.
@@ -673,6 +683,8 @@ pub enum BuiltinDemandLaw {
     KeyedReducer,
     /// A full-input ordering barrier; downstream limits can choose strategy, but source scan remains all input.
     OrderBarrier,
+    /// Reverses one-to-one output order, swapping first/last positional demand.
+    Reverse,
 }
 
 /// Marker that a builtin has a structural (index-based) execution backend.
@@ -1581,7 +1593,9 @@ impl BuiltinCall {
             (BuiltinMethod::Implode, BuiltinArgs::Str(field)) => {
                 apply_or_recv!(implode_apply(recv, field))
             }
-            (BuiltinMethod::Has, BuiltinArgs::Str(k)) => apply_or_recv!(has_apply(recv, k)),
+            (BuiltinMethod::Has | BuiltinMethod::HasKey, BuiltinArgs::Str(k)) => {
+                apply_or_recv!(has_apply(recv, k))
+            }
             (BuiltinMethod::GetPath, BuiltinArgs::Str(p)) => {
                 apply_or_recv!(get_path_apply(recv, p))
             }
@@ -1823,6 +1837,7 @@ impl BuiltinCall {
             BuiltinMethod::GetPath
             | BuiltinMethod::HasPath
             | BuiltinMethod::Has
+            | BuiltinMethod::HasKey
             | BuiltinMethod::Join
             | BuiltinMethod::Explode
             | BuiltinMethod::Implode
@@ -1871,6 +1886,13 @@ impl BuiltinCall {
             ),
             BuiltinMethod::ContainsAny | BuiltinMethod::ContainsAll => {
                 Self::new(method, BuiltinArgs::StrVec(args.str_vec(0)?))
+            }
+            BuiltinMethod::Omit => {
+                let mut keys = Vec::with_capacity(arg_len);
+                for idx in 0..arg_len {
+                    keys.push(args.str(idx)?);
+                }
+                Self::new(method, BuiltinArgs::StrVec(keys))
             }
             BuiltinMethod::Repeat => Self::new(method, BuiltinArgs::Usize(args.usize(0)?)),
             BuiltinMethod::Indent => {
@@ -2339,7 +2361,10 @@ where
             }
             return Ok(Val::Int(n));
         }
-        BuiltinMethod::Find | BuiltinMethod::FindAll => {
+        BuiltinMethod::Find | BuiltinMethod::FindFirst => {
+            return find_first_apply(recv, args.len(), |item, idx| eval_item(item, &args[idx]));
+        }
+        BuiltinMethod::FindAll => {
             return find_apply(recv, args.len(), |item, idx| eval_item(item, &args[idx]));
         }
         BuiltinMethod::FindIndex => {
@@ -2633,6 +2658,7 @@ where
         BuiltinMethod::GetPath
         | BuiltinMethod::HasPath
         | BuiltinMethod::Has
+        | BuiltinMethod::HasKey
         | BuiltinMethod::Missing
         | BuiltinMethod::Explode
         | BuiltinMethod::Implode

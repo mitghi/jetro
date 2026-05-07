@@ -78,7 +78,7 @@ fn apply_method(input: LogicalPlan, name: &str, args: &[Arg]) -> Option<LogicalP
     }
 
     let plan = match method {
-        BuiltinMethod::Filter | BuiltinMethod::Find | BuiltinMethod::FindAll => {
+        BuiltinMethod::Filter | BuiltinMethod::FindAll => {
             let pred = single_expr_arg(args)?;
             LogicalPlan::Filter {
                 input: Box::new(input),
@@ -174,17 +174,28 @@ fn apply_method(input: LogicalPlan, name: &str, args: &[Arg]) -> Option<LogicalP
                         Arg::Pos(e) => e,
                         _ => return None,
                     };
+                    // 2-arg comparator lambdas (`.sort((a, b) => …)`) cannot
+                    // be represented as a single-key SortSpec. Bail out so
+                    // the router falls back to the VM path, where
+                    // `exec_lambda_method` dispatches to
+                    // `sort_comparator_apply`.
+                    if matches!(arg_expr, Expr::Lambda { params, .. } if params.len() >= 2) {
+                        return None;
+                    }
                     let (key_expr, descending) = match arg_expr {
                         Expr::UnaryNeg(inner) => (inner.as_ref().clone(), true),
                         other => (other.clone(), false),
                     };
-                    // Rewrite bare Ident to @.field (body context).
-                    let rooted: Expr = match &key_expr {
-                        Expr::Ident(name) => Expr::Chain(
-                            Box::new(Expr::Current),
-                            vec![Step::Field(name.clone())],
-                        ),
-                        other => other.clone(),
+                    // Rewrite bare Ident to @.field (body context). Single-
+                    // param `Lambda` is unwrapped to its substituted body so
+                    // `Compiler::compile` does not lower it to `PushNull`.
+                    let unwrapped =
+                        crate::compile::lambda_lower::unwrap_single_lambda(&key_expr);
+                    let rooted: Expr = match unwrapped {
+                        Expr::Ident(name) => {
+                            Expr::Chain(Box::new(Expr::Current), vec![Step::Field(name)])
+                        }
+                        other => other,
                     };
                     let key_prog = Arc::new(crate::compile::compiler::Compiler::compile(&rooted, ""));
                     LogicalPlan::Sort {

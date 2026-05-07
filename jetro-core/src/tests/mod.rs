@@ -26,3 +26,7 @@ mod examples;
 mod pattern_match;
 #[cfg(test)]
 mod regression;
+#[cfg(test)]
+mod dyn_index_lambda;
+#[cfg(test)]
+mod lambda_forms;

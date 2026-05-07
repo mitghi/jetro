@@ -23,7 +23,8 @@ use crate::plan::demand::{Demand as ChainDemand, PullDemand, ValueNeed};
 use crate::vm::{CompiledObjEntry, Opcode, Program};
 
 use super::{
-    BodyKernel, Pipeline, PipelineBody, Sink, Stage, ViewSinkCapability, ViewStageCapability,
+    BodyKernel, Pipeline, PipelineBody, PredicateSinkOp, Sink, Stage, ViewSinkCapability,
+    ViewMembershipTarget, ViewStageCapability,
 };
 
 /// Indicates whether a positional terminal sink wants the first or the last qualifying element.
@@ -68,6 +69,54 @@ impl Sink {
                 positional: Some(Position::First),
             };
         }
+        if let Sink::SelectMany { n, from_end } = self {
+            return SinkDemand {
+                chain: ChainDemand {
+                    pull: if *from_end {
+                        PullDemand::LastInput(*n)
+                    } else {
+                        PullDemand::FirstInput(*n)
+                    },
+                    value: ValueNeed::Whole,
+                    order: true,
+                },
+                positional: None,
+            };
+        }
+        if matches!(self, Sink::Predicate(_)) {
+            let value = match self {
+                Sink::Predicate(spec) if spec.op == PredicateSinkOp::FindOne => ValueNeed::Whole,
+                _ => ValueNeed::Predicate,
+            };
+            return SinkDemand {
+                chain: ChainDemand {
+                    pull: PullDemand::All,
+                    value,
+                    order: false,
+                },
+                positional: None,
+            };
+        }
+        if matches!(self, Sink::Membership(_)) {
+            return SinkDemand {
+                chain: ChainDemand {
+                    pull: PullDemand::All,
+                    value: ValueNeed::Whole,
+                    order: false,
+                },
+                positional: None,
+            };
+        }
+        if matches!(self, Sink::ArgExtreme(_)) {
+            return SinkDemand {
+                chain: ChainDemand {
+                    pull: PullDemand::All,
+                    value: ValueNeed::Whole,
+                    order: true,
+                },
+                positional: None,
+            };
+        }
         if let Some(spec) = self.builtin_sink_spec() {
             return sink_demand_from_builtin(spec);
         }
@@ -82,7 +131,14 @@ impl Sink {
         F: FnMut(&crate::vm::Program) -> bool,
     {
         match self {
-            Sink::Collect | Sink::Terminal(_) | Sink::Nth(_) | Sink::ApproxCountDistinct => true,
+            Sink::Collect
+            | Sink::Terminal(_)
+            | Sink::SelectMany { .. }
+            | Sink::Nth(_)
+            | Sink::ApproxCountDistinct => true,
+            Sink::Membership(spec) => spec.sink_programs().all(|prog| program_ok(prog)),
+            Sink::Predicate(spec) => program_ok(&spec.predicate),
+            Sink::ArgExtreme(spec) => program_ok(&spec.key),
             Sink::Reducer(spec) => spec.sink_programs().all(|prog| program_ok(prog)),
         }
     }
@@ -96,8 +152,36 @@ impl Sink {
         if matches!(self, Sink::Collect) {
             return Some(ViewSinkCapability::Collect);
         }
+        if let Sink::SelectMany { n, from_end } = self {
+            return Some(ViewSinkCapability::SelectMany {
+                n: *n,
+                from_end: *from_end,
+                source_reversed: false,
+            });
+        }
         if let Sink::Nth(index) = self {
             return Some(ViewSinkCapability::Nth { index: *index });
+        }
+        if let Sink::Predicate(spec) = self {
+            return Some(ViewSinkCapability::Predicate {
+                op: spec.op,
+                predicate_kernel: view_native_sink_kernel(
+                    sink_kernels,
+                    spec.predicate_kernel_index(),
+                )?,
+            });
+        }
+        if let Sink::Membership(spec) = self {
+            return Some(ViewSinkCapability::Membership {
+                op: spec.op,
+                target: ViewMembershipTarget::from(&spec.target),
+            });
+        }
+        if let Sink::ArgExtreme(spec) = self {
+            return Some(ViewSinkCapability::ArgExtreme {
+                want_max: spec.want_max,
+                key_kernel: view_native_sink_kernel(sink_kernels, spec.key_kernel_index())?,
+            });
         }
 
         let sink_spec = self.builtin_sink_spec()?;
@@ -133,6 +217,10 @@ impl Sink {
         match self {
             Sink::Terminal(method) => method.spec().sink,
             Sink::Nth(_) => None,
+            Sink::SelectMany { .. } => None,
+            Sink::Predicate(_) => None,
+            Sink::Membership(_) => None,
+            Sink::ArgExtreme(_) => None,
             Sink::Reducer(spec) => spec.method()?.spec().sink,
             Sink::ApproxCountDistinct => BuiltinMethod::ApproxCountDistinct.spec().sink,
             Sink::Collect => None,
@@ -643,12 +731,12 @@ impl Stage {
             // reason about them with the role-specific propagation rules
             // (`Predicate` widens upstream demand to scan-until-output;
             // `Transform` is 1:1).
-            Stage::Filter(prog, _) if program_is_match_only(prog) => {
-                Some(ChainOp::match_role(crate::parse::chain_ir::MatchRole::Predicate))
-            }
-            Stage::Map(prog, _) if program_is_match_only(prog) => {
-                Some(ChainOp::match_role(crate::parse::chain_ir::MatchRole::Transform))
-            }
+            Stage::Filter(prog, _) if program_is_match_only(prog) => Some(ChainOp::match_role(
+                crate::parse::chain_ir::MatchRole::Predicate,
+            )),
+            Stage::Map(prog, _) if program_is_match_only(prog) => Some(ChainOp::match_role(
+                crate::parse::chain_ir::MatchRole::Transform,
+            )),
             _ => self.chain_demand_op(),
         }
     }
@@ -928,6 +1016,7 @@ pub(super) fn opcode_is_current_only(opcode: &Opcode) -> bool {
         | Opcode::AndOp(prog)
         | Opcode::OrOp(prog)
         | Opcode::CoalesceOp(prog) => program_is_current_only(prog),
+        Opcode::BindLamCurrent { body, .. } => program_is_current_only(body),
         Opcode::CallMethod(call) | Opcode::CallOptMethod(call) => call
             .sub_progs
             .iter()

@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.5.3
+
+### Lambda
+
+- AST-level single-param lambda lowering: `r => r.id` and `lambda r: r.id`
+  emit byte-identical opcodes to the equivalent `@`-form. Kernel
+  classification (`FieldRead`, `FieldChain`, `FString`, `Object`,
+  `FieldCmpLit`, …) fires uniformly across all forms.
+- Multi-param fast path: rightmost param substituted to `Current` so
+  comparator and binary-HOF bodies skip one `LoadIdent` per row.
+- `Opcode::BindLamCurrent` for nested-lambda outer-param refs: emitted
+  only when an inner lambda body reads the outer param. One env clone +
+  `push_lam` / `pop_lam` per outer row, never per inner element.
+- Kernel fast path no longer gates on `lam_param.is_none()` —
+  single-param named lambdas hit the same Rust kernels as `@`-form.
+- `push_lam` skips the unused-name binding when the AST substitution
+  has removed every reference, dropping one env-var insert/remove per
+  row across HOFs.
+- First-class lambdas via let-bound macro expansion:
+  `let f = (x => x*2) in $.xs.map(f)` desugars at parse time. Aliased
+  chains (`let g = f`) supported. Method-arg position only.
+
+### Engine
+
+- Filter-pushdown over arithmetic projections fixed: `FilterBeforeMap`
+  optimizer rewrites the pushed-down predicate via
+  `substitute_current_with_expr(predicate, projection)` so the swapped
+  filter sees source rows but tests the same mapped value the original
+  placement would have observed.
+- `normalize_symbolic` unwraps single-param `Expr::Lambda` wrappers
+  before threading them through symbolic substitution, so vm and
+  engine paths agree on lambda-bearing pipelines.
+- `compile_stage_expr` no longer re-unwraps lambdas; the symbolic pass
+  owns that responsibility (prevents corruption of
+  `r => (x => x)`-style outer-Lambda-wrapping-inner-Lambda bodies).
+- `.sort((a, b) => …)` engine path: pipeline lowering bails out on
+  multi-param lambda args so the router falls back to VM
+  `sort_comparator_apply`.
+- VM `Opcode::DynIndex` accepts `Val::StrSlice` keys (simd-json tape
+  paths) — previously fell through to `Val::Null` for borrowed strings.
+
+### Builtins
+
+- `.find(pred)` returns the first match (conventional first-match
+  semantics) and `Val::Null` when nothing matches. `.find_all(pred)`
+  keeps the previous filter-alias semantics. Spec migrated to
+  `BuiltinPipelineLowering::TerminalExprArg { terminal: First }`; VM
+  dispatch routes `Find | FindFirst` through `find_first_apply`.
+
 ## 0.5.2 — unreleased
 
 ### Pattern Matching

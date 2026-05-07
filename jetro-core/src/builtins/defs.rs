@@ -26,22 +26,22 @@ fn numeric_reducer_spec(reducer: BuiltinNumericReducer) -> BuiltinSpec {
         .lowering(BuiltinPipelineLowering::TerminalSink)
 }
 
-/// Predicate-driven reducer-with-take-first skeleton (FindIndex / IndicesWhere / MaxBy / MinBy).
+/// Arg-extreme reducer (`max_by` / `min_by`) skeleton.
 #[inline]
-fn predicate_reducer_spec() -> BuiltinSpec {
+fn arg_extreme_reducer_spec() -> BuiltinSpec {
     BuiltinSpec::new(BuiltinCategory::Reducer, BuiltinCardinality::Reducing)
         .view_native()
         .cost(10.0)
-        .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
-        .pipeline_shape(BuiltinPipelineShape::new(
-            BuiltinCardinality::OneToOne,
-            true,
-            1.0,
-            1.0,
-        ))
-        .lowering(BuiltinPipelineLowering::TerminalExprArg {
-            terminal: BuiltinMethod::First,
-        })
+        .lowering(BuiltinPipelineLowering::TerminalSink)
+}
+
+/// Predicate terminal sink skeleton for short-circuiting reducers.
+#[inline]
+fn predicate_terminal_sink_spec() -> BuiltinSpec {
+    BuiltinSpec::new(BuiltinCategory::Reducer, BuiltinCardinality::Reducing)
+        .view_native()
+        .cost(10.0)
+        .lowering(BuiltinPipelineLowering::TerminalSink)
 }
 
 // ── Streaming filters ────────────────────────────────────────────────────────
@@ -107,14 +107,22 @@ impl Builtin for Filter {
     }
 }
 
-/// Surface alias of `Filter` (same semantics; user-facing v2 name).
+/// `find(pred)` — returns the first element for which `pred` is truthy,
+/// or `null` when nothing matches. Matches the conventional first-match
+/// semantics found in JavaScript / Rust / Python iterators. Use
+/// `find_all` (filter alias) when every match is desired.
 pub(crate) struct Find;
 impl Builtin for Find {
     const METHOD: BuiltinMethod = BuiltinMethod::Find;
     const NAME: &'static str = "find";
 
     fn spec() -> BuiltinSpec {
-        filter_spec()
+        BuiltinSpec::new(BuiltinCategory::StreamingFilter, BuiltinCardinality::Filtering)
+            .cost(10.0)
+            .demand_law(BuiltinDemandLaw::FilterLike)
+            .lowering(BuiltinPipelineLowering::TerminalExprArg {
+                terminal: BuiltinMethod::First,
+            })
     }
 }
 
@@ -490,6 +498,7 @@ impl Builtin for DropWhile {
         BuiltinSpec::new(BuiltinCategory::StreamingFilter, BuiltinCardinality::Filtering)
             .view_stage(BuiltinViewStage::DropWhile)
             .cost(10.0)
+            .demand_law(BuiltinDemandLaw::DropWhile)
             .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
             .pipeline_shape(BuiltinPipelineShape::new(
                 BuiltinCardinality::Filtering,
@@ -639,6 +648,7 @@ impl Builtin for Any {
         BuiltinSpec::new(BuiltinCategory::Reducer, BuiltinCardinality::Reducing)
             .view_native()
             .cost(10.0)
+            .lowering(BuiltinPipelineLowering::TerminalSink)
     }
 }
 
@@ -652,6 +662,7 @@ impl Builtin for All {
         BuiltinSpec::new(BuiltinCategory::Reducer, BuiltinCardinality::Reducing)
             .view_native()
             .cost(10.0)
+            .lowering(BuiltinPipelineLowering::TerminalSink)
     }
 }
 
@@ -662,7 +673,7 @@ impl Builtin for FindIndex {
     const NAME: &'static str = "find_index";
 
     fn spec() -> BuiltinSpec {
-        predicate_reducer_spec()
+        predicate_terminal_sink_spec()
     }
 
     #[inline]
@@ -699,7 +710,7 @@ impl Builtin for IndicesWhere {
     const NAME: &'static str = "indices_where";
 
     fn spec() -> BuiltinSpec {
-        predicate_reducer_spec()
+        predicate_terminal_sink_spec()
     }
 
     #[inline]
@@ -776,7 +787,7 @@ impl Builtin for MaxBy {
     const NAME: &'static str = "max_by";
 
     fn spec() -> BuiltinSpec {
-        predicate_reducer_spec()
+        arg_extreme_reducer_spec()
     }
 
     #[inline]
@@ -796,7 +807,7 @@ impl Builtin for MinBy {
     const NAME: &'static str = "min_by";
 
     fn spec() -> BuiltinSpec {
-        predicate_reducer_spec()
+        arg_extreme_reducer_spec()
     }
 
     #[inline]
@@ -992,7 +1003,7 @@ impl Builtin for FindFirst {
     }
 }
 
-/// `find_one(pred)` — terminal expr-arg without demand annotation.
+/// `find_one(pred)` — terminal predicate sink requiring exactly one match.
 pub(crate) struct FindOne;
 impl Builtin for FindOne {
     const METHOD: BuiltinMethod = BuiltinMethod::FindOne;
@@ -1000,9 +1011,7 @@ impl Builtin for FindOne {
     fn spec() -> BuiltinSpec {
         BuiltinSpec::new(BuiltinCategory::StreamingFilter, BuiltinCardinality::Filtering)
             .cost(10.0)
-            .lowering(BuiltinPipelineLowering::TerminalExprArg {
-                terminal: BuiltinMethod::First,
-            })
+            .lowering(BuiltinPipelineLowering::TerminalSink)
     }
 }
 
@@ -1128,6 +1137,7 @@ impl Builtin for Window {
                 2.0,
                 1.0,
             ))
+            .demand_law(BuiltinDemandLaw::Window)
             .lowering(BuiltinPipelineLowering::UsizeArg { min: 1 })
     }
 
@@ -1158,6 +1168,7 @@ impl Builtin for Chunk {
                 2.0,
                 1.0,
             ))
+            .demand_law(BuiltinDemandLaw::Chunk)
             .lowering(BuiltinPipelineLowering::UsizeArg { min: 1 })
     }
 
@@ -1477,7 +1488,7 @@ impl Builtin for Reverse {
         BuiltinSpec::new(BuiltinCategory::Barrier, BuiltinCardinality::Barrier)
             .cost(10.0)
             .cancellation(BuiltinCancellation::SelfInverse(BuiltinCancelGroup::Reverse))
-            .demand_law(BuiltinDemandLaw::OrderBarrier)
+            .demand_law(BuiltinDemandLaw::Reverse)
             .materialization(BuiltinPipelineMaterialization::ComposedBarrier)
             .lowering(BuiltinPipelineLowering::Nullary)
     }
@@ -1630,7 +1641,12 @@ impl Builtin for ZipShape {
 
 #[inline]
 fn object_element_spec() -> BuiltinSpec {
-    BuiltinSpec::new(BuiltinCategory::Object, BuiltinCardinality::OneToOne).element()
+    BuiltinSpec::new(BuiltinCategory::Object, BuiltinCardinality::OneToOne)
+        .view_scalar()
+        .demand_law(BuiltinDemandLaw::MapLike)
+        .order_effect(BuiltinPipelineOrderEffect::Preserves)
+        .lowering(BuiltinPipelineLowering::Nullary)
+        .element()
 }
 
 /// `keys` — extract keys of an object (element-wise).
@@ -1715,7 +1731,13 @@ pub(crate) struct Pick;
 impl Builtin for Pick {
     const METHOD: BuiltinMethod = BuiltinMethod::Pick;
     const NAME: &'static str = "pick";
-    fn spec() -> BuiltinSpec { object_simple_spec() }
+    fn spec() -> BuiltinSpec {
+        object_simple_spec()
+            .view_scalar()
+            .demand_law(BuiltinDemandLaw::MapLike)
+            .order_effect(BuiltinPipelineOrderEffect::Preserves)
+            .element()
+    }
     #[inline]
     fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
@@ -1730,7 +1752,13 @@ pub(crate) struct Omit;
 impl Builtin for Omit {
     const METHOD: BuiltinMethod = BuiltinMethod::Omit;
     const NAME: &'static str = "omit";
-    fn spec() -> BuiltinSpec { object_simple_spec() }
+    fn spec() -> BuiltinSpec {
+        object_simple_spec()
+            .view_scalar()
+            .demand_law(BuiltinDemandLaw::MapLike)
+            .order_effect(BuiltinPipelineOrderEffect::Preserves)
+            .element()
+    }
     #[inline]
     fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
@@ -2469,6 +2497,7 @@ impl Builtin for Slice {
                 1.0,
             ))
             .order_effect(BuiltinPipelineOrderEffect::Preserves)
+            .demand_law(BuiltinDemandLaw::Slice)
             .lowering(BuiltinPipelineLowering::IntRangeArg)
     }
     #[inline]
@@ -2568,7 +2597,10 @@ impl Builtin for Includes {
     const METHOD: BuiltinMethod = BuiltinMethod::Includes;
     const NAME: &'static str = "includes";
     const ALIASES: &'static [&'static str] = &["contains"];
-    fn spec() -> BuiltinSpec { default_scalar_spec(BuiltinMethod::Includes) }
+    fn spec() -> BuiltinSpec {
+        default_scalar_spec(BuiltinMethod::Includes)
+            .lowering(BuiltinPipelineLowering::TerminalSink)
+    }
     #[inline]
     fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
@@ -2583,7 +2615,9 @@ pub(crate) struct Index;
 impl Builtin for Index {
     const METHOD: BuiltinMethod = BuiltinMethod::Index;
     const NAME: &'static str = "index";
-    fn spec() -> BuiltinSpec { default_scalar_spec(BuiltinMethod::Index) }
+    fn spec() -> BuiltinSpec {
+        default_scalar_spec(BuiltinMethod::Index).lowering(BuiltinPipelineLowering::TerminalSink)
+    }
     #[inline]
     fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
@@ -2598,7 +2632,10 @@ pub(crate) struct IndicesOf;
 impl Builtin for IndicesOf {
     const METHOD: BuiltinMethod = BuiltinMethod::IndicesOf;
     const NAME: &'static str = "indices_of";
-    fn spec() -> BuiltinSpec { default_scalar_spec(BuiltinMethod::IndicesOf) }
+    fn spec() -> BuiltinSpec {
+        default_scalar_spec(BuiltinMethod::IndicesOf)
+            .lowering(BuiltinPipelineLowering::TerminalSink)
+    }
     #[inline]
     fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
@@ -2822,6 +2859,26 @@ str_arg_scalar_native! {
     ReMatchFirst, "match_first", re_match_first_apply;
     ReMatchAll, "match_all", re_match_all_apply;
     ReCaptures, "captures", re_captures_apply;
+}
+
+/// `has_key(key)` — object key existence test with a view/tape-native backend.
+pub(crate) struct HasKey;
+impl Builtin for HasKey {
+    const METHOD: BuiltinMethod = BuiltinMethod::HasKey;
+    const NAME: &'static str = "has_key";
+    fn spec() -> BuiltinSpec {
+        scalar_native_element_spec().view_scalar()
+    }
+    #[inline]
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
+        match args {
+            super::BuiltinArgs::Str(p) => Some(super::has_apply(recv, p).unwrap_or_else(|| recv.clone())),
+            _ => None,
+        }
+    }
 }
 
 // ── More multi-arg scalar element methods ──

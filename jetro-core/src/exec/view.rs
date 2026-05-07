@@ -51,7 +51,10 @@ where
     if let Some(result) = run_terminal_collect(source.clone(), body) {
         return Some(result);
     }
-    if let Some(result) = run_full(source.clone(), body) {
+    if let Some(result) = run_terminal_select_projection(source.clone(), body) {
+        return Some(result);
+    }
+    if let Some(result) = run_full_with_env(source.clone(), body, Some(base_env)) {
         return Some(result);
     }
     if let Some(result) =
@@ -70,7 +73,19 @@ where
 /// Runs the complete pipeline entirely in the view domain when all stages and
 /// the sink have a `ViewCapability`. Returns `None` when any stage lacks
 /// view support, allowing a less specialised path to take over.
+#[cfg(test)]
 fn run_full<'a, V>(source: V, body: &pipeline::PipelineBody) -> Option<Result<Val, EvalError>>
+where
+    V: ValueView<'a>,
+{
+    run_full_with_env(source, body, None)
+}
+
+fn run_full_with_env<'a, V>(
+    source: V,
+    body: &pipeline::PipelineBody,
+    base_env: Option<&Env>,
+) -> Option<Result<Val, EvalError>>
 where
     V: ValueView<'a>,
 {
@@ -83,7 +98,20 @@ where
         (PullDemand::NthInput(_), pipeline::ViewSinkCapability::Nth { .. }) => {
             pipeline::ViewSinkCapability::Nth { index: 0 }
         }
+        (
+            PullDemand::LastInput(_),
+            pipeline::ViewSinkCapability::SelectMany { n, from_end, .. },
+        ) => pipeline::ViewSinkCapability::SelectMany {
+            n,
+            from_end,
+            source_reversed: true,
+        },
         (_, sink) => sink,
+    };
+    let sink = match resolve_view_sink(sink, base_env) {
+        Some(Ok(sink)) => sink,
+        Some(Err(err)) => return Some(Err(err)),
+        None => return None,
     };
 
     drive_view_frontier(
@@ -91,10 +119,32 @@ where
         &capabilities.stages,
         &body.stage_kernels,
         source_demand,
-        |item| observe_view_sink(item, sink, &mut sink_acc, &body.sink_kernels),
+        |item| observe_view_sink(item, &sink, &mut sink_acc, &body.sink_kernels),
     )?;
 
-    Some(Ok(sink_acc.finish(false)))
+    Some(sink_acc.finish_result(false))
+}
+
+fn resolve_view_sink(
+    sink: pipeline::ViewSinkCapability,
+    base_env: Option<&Env>,
+) -> Option<Result<pipeline::ViewSinkCapability, EvalError>> {
+    match sink {
+        pipeline::ViewSinkCapability::Membership {
+            op,
+            target: pipeline::ViewMembershipTarget::Program(program),
+        } => {
+            let env = base_env?;
+            let mut vm = crate::vm::VM::new();
+            Some(vm.exec_in_env(&program, env).map(|target| {
+                pipeline::ViewSinkCapability::Membership {
+                    op,
+                    target: pipeline::ViewMembershipTarget::Literal(target),
+                }
+            }))
+        }
+        sink => Some(Ok(sink)),
+    }
 }
 
 /// Feeds one view row into the sink accumulator according to `sink`'s capability.
@@ -102,7 +152,7 @@ where
 /// returns `None` when a kernel lookup fails (signals the view path is unusable).
 fn observe_view_sink<'a, V>(
     item: &V,
-    sink: pipeline::ViewSinkCapability,
+    sink: &pipeline::ViewSinkCapability,
     sink_acc: &mut pipeline::SinkAccumulator,
     sink_kernels: &[pipeline::BodyKernel],
 ) -> Option<ViewRowAction>
@@ -124,14 +174,14 @@ where
             project_kernel,
             ..
         } => {
-            if !view_sink_predicate_matches(item, predicate_kernel, sink_kernels)? {
+            if !view_sink_predicate_matches(item, *predicate_kernel, sink_kernels)? {
                 return Some(ViewRowAction::Skip);
             }
             let sink_done = sink_acc.observe_builtin_lazy(
-                accumulator,
+                *accumulator,
                 || item.materialize(),
                 || {
-                    let kernel = project_kernel?;
+                    let kernel = (*project_kernel)?;
                     let kernel = sink_kernels.get(kernel)?;
                     eval_owned_scalar_or_value_kernel(item, kernel)
                 },
@@ -144,13 +194,90 @@ where
             })
         }
         pipeline::ViewSinkCapability::Nth { index } => {
-            let sink_done = sink_acc.observe_nth_lazy(index, || item.materialize());
+            let sink_done = sink_acc.observe_nth_lazy(*index, || item.materialize());
             Some(if sink_done {
                 ViewRowAction::Stop
             } else {
                 ViewRowAction::Emit
             })
         }
+        pipeline::ViewSinkCapability::Predicate {
+            op,
+            predicate_kernel,
+        } => {
+            let kernel = sink_kernels.get(*predicate_kernel)?;
+            let matched = eval_filter_kernel(item, kernel)?;
+            let sink_done = sink_acc
+                .observe_predicate_lazy(*op, matched, || item.materialize())
+                .ok()?;
+            Some(if sink_done {
+                ViewRowAction::Stop
+            } else if matched {
+                ViewRowAction::Emit
+            } else {
+                ViewRowAction::Skip
+            })
+        }
+        pipeline::ViewSinkCapability::Membership { op, target } => {
+            let pipeline::ViewMembershipTarget::Literal(target) = target else {
+                return None;
+            };
+            let matched = view_membership_matches(item, target);
+            let sink_done = sink_acc.observe_membership_match(*op, matched);
+            Some(if sink_done {
+                ViewRowAction::Stop
+            } else if matched {
+                ViewRowAction::Emit
+            } else {
+                ViewRowAction::Skip
+            })
+        }
+        pipeline::ViewSinkCapability::ArgExtreme {
+            want_max,
+            key_kernel,
+        } => {
+            let key = view_arg_extreme_key(item, sink_kernels.get(*key_kernel)?)?;
+            sink_acc.observe_arg_extreme_lazy(*want_max, key, || item.materialize());
+            Some(ViewRowAction::Emit)
+        }
+        pipeline::ViewSinkCapability::SelectMany {
+            n,
+            from_end,
+            source_reversed,
+        } => {
+            let sink_done =
+                sink_acc.observe_select_many_lazy(*n, *from_end, *source_reversed, || {
+                    item.materialize()
+                });
+            Some(if sink_done {
+                ViewRowAction::Stop
+            } else {
+                ViewRowAction::Emit
+            })
+        }
+    }
+}
+
+fn view_membership_matches<'a, V>(item: &V, target: &Val) -> bool
+where
+    V: ValueView<'a>,
+{
+    let target_view = JsonView::from_val(target);
+    if !matches!(target_view, JsonView::ArrayLen(_) | JsonView::ObjectLen(_)) {
+        return crate::util::json_vals_eq(item.scalar(), target_view);
+    }
+    crate::util::vals_eq(&item.materialize(), target)
+}
+
+fn view_arg_extreme_key<'a, V>(item: &V, kernel: &pipeline::BodyKernel) -> Option<Val>
+where
+    V: ValueView<'a>,
+{
+    match pipeline::eval_view_kernel(kernel, item)? {
+        pipeline::ViewKernelValue::View(view) => {
+            scalar_view_to_owned_val(view.scalar()).or_else(|| Some(view.materialize()))
+        }
+        pipeline::ViewKernelValue::Owned(value) => Some(value),
     }
 }
 
@@ -245,6 +372,45 @@ where
     )?;
 
     Some(Ok(collector.finish()))
+}
+
+/// Optimised path for `map(...).first()` / `map(...).last()` style suffixes
+/// where the trailing projection can run only on the selected view row.
+fn run_terminal_select_projection<'a, V>(
+    source: V,
+    body: &pipeline::PipelineBody,
+) -> Option<Result<Val, EvalError>>
+where
+    V: ValueView<'a>,
+{
+    let (prefix_len, project_kernel) = terminal_projection_run(body, 0)?;
+    let sink_spec = body.sink.builtin_sink_spec()?;
+    let crate::builtins::BuiltinSinkAccumulator::SelectOne(position) = sink_spec.accumulator else {
+        return None;
+    };
+    let prefix = terminal_collect_prefix_from(&body.stages[..prefix_len], body, 0)?;
+    let source_demand = pipeline::Pipeline::segment_source_demand(&body.stages[..prefix_len], &body.sink)
+        .chain
+        .pull;
+    let mut selected = Val::Null;
+    let mut seen = false;
+
+    drive_view_frontier(
+        source,
+        &prefix,
+        &body.stage_kernels,
+        source_demand,
+        |item| {
+            selected = eval_owned_scalar_or_value_kernel(item, &project_kernel)?;
+            seen = true;
+            Some(match position {
+                crate::builtins::BuiltinSelectionPosition::First => ViewRowAction::Stop,
+                crate::builtins::BuiltinSelectionPosition::Last => ViewRowAction::Emit,
+            })
+        },
+    )?;
+
+    Some(Ok(if seen { selected } else { Val::Null }))
 }
 
 /// Action returned by a sink observer after processing one view row.
@@ -643,7 +809,7 @@ where
         .copied()
         .unwrap_or(pipeline::StageStrategy::Default);
     if matches!(strategy, pipeline::StageStrategy::SortUntilOutput(_)) {
-        return run_sort_prefix_then_view_suffix(source, body, &plan);
+        return run_sort_prefix_then_view_suffix(source, body, &plan, base_env);
     }
     let collect_suffix = terminal_collect_plan_from(body, plan.sort_stage + 1);
     if collect_suffix.is_none()
@@ -718,11 +884,17 @@ fn run_sort_prefix_then_view_suffix<'a, V>(
     source: V,
     body: &pipeline::PipelineBody,
     plan: &SortBarrierPlan,
+    base_env: &Env,
 ) -> Option<Result<Val, EvalError>>
 where
     V: ValueView<'a>,
 {
     let suffix = view_suffix_capabilities(body, plan.sort_stage + 1)?;
+    let sink = match resolve_view_sink(suffix.sink, Some(base_env)) {
+        Some(Ok(sink)) => sink,
+        Some(Err(err)) => return Some(Err(err)),
+        None => return None,
+    };
     let source_demand =
         pipeline::Pipeline::segment_source_demand(&body.stages[plan.sort_stage + 1..], &body.sink)
             .chain
@@ -753,10 +925,10 @@ where
         &suffix.stages,
         &body.stage_kernels,
         source_demand,
-        |item| observe_view_sink(item, suffix.sink, &mut sink_acc, &body.sink_kernels),
+        |item| observe_view_sink(item, &sink, &mut sink_acc, &body.sink_kernels),
     )?;
 
-    Some(Ok(sink_acc.finish(false)))
+    Some(sink_acc.finish_result(false))
 }
 
 /// Plan produced when a `Sort` barrier is detected. Records the view-domain
@@ -1000,10 +1172,16 @@ mod tests {
     use std::rc::Rc;
     use std::sync::Arc;
 
+    use indexmap::IndexMap;
+
+    use crate::compile::compiler::Compiler;
     use crate::data::context::Env;
     use crate::data::value::Val;
     use crate::data::view::{ValView, ValueView};
-    use crate::exec::pipeline::{BodyKernel, PipelineBody, Sink, Stage, ViewStageCapability};
+    use crate::exec::pipeline::{
+        ArgExtremeSinkSpec, BodyKernel, MembershipSinkOp, MembershipSinkSpec,
+        MembershipSinkTarget, PipelineBody, Sink, Stage, ViewStageCapability,
+    };
     use crate::parse::ast::BinOp;
     use crate::util::JsonView;
 
@@ -1037,6 +1215,9 @@ mod tests {
     impl<'a> ValueView<'a> for CountingView {
         fn scalar(&self) -> JsonView<'_> {
             self.scalar_reads.set(self.scalar_reads.get() + 1);
+            if self.idx.is_none() {
+                return JsonView::ArrayLen(self.rows.len());
+            }
             self.idx
                 .and_then(|idx| self.rows.get(idx).copied())
                 .map(JsonView::Int)
@@ -1050,6 +1231,30 @@ mod tests {
                 scalar_reads: Rc::clone(&self.scalar_reads),
                 materialize_reads: Rc::clone(&self.materialize_reads),
             }
+        }
+
+        fn has_key(&self, _key: &str) -> Option<bool> {
+            None
+        }
+
+        fn object_keys(&self) -> Option<Val> {
+            None
+        }
+
+        fn object_values(&self) -> Option<Val> {
+            None
+        }
+
+        fn object_entries(&self) -> Option<Val> {
+            None
+        }
+
+        fn pick_keys(&self, _keys: &[Arc<str>]) -> Option<Val> {
+            None
+        }
+
+        fn omit_keys(&self, _keys: &[Arc<str>]) -> Option<Val> {
+            None
         }
 
         fn index(&self, idx: i64) -> Self {
@@ -1114,6 +1319,203 @@ mod tests {
         let out_json: serde_json::Value = out.into();
         assert_eq!(out_json, serde_json::json!([1, 2]));
         assert_eq!(source.scalar_reads(), 2);
+    }
+
+    #[test]
+    fn view_full_runner_handles_select_many_first_and_last() {
+        let first_source = CountingView::root(&[1, 2, 3, 4]);
+        let first_body = PipelineBody {
+            stages: Vec::new(),
+            stage_exprs: Vec::new(),
+            sink: Sink::SelectMany {
+                n: 2,
+                from_end: false,
+            },
+            stage_kernels: Vec::new(),
+            sink_kernels: Vec::new(),
+        };
+
+        let first = super::run_full(first_source.clone(), &first_body)
+            .unwrap()
+            .unwrap();
+        let first_json: serde_json::Value = first.into();
+        assert_eq!(first_json, serde_json::json!([1, 2]));
+        assert_eq!(first_source.materialize_reads(), 2);
+
+        let last_source = CountingView::root(&[1, 2, 3, 4]);
+        let last_body = PipelineBody {
+            sink: Sink::SelectMany {
+                n: 2,
+                from_end: true,
+            },
+            ..first_body
+        };
+
+        let last = super::run_full(last_source.clone(), &last_body)
+            .unwrap()
+            .unwrap();
+        let last_json: serde_json::Value = last.into();
+        assert_eq!(last_json, serde_json::json!([3, 4]));
+        assert_eq!(last_source.materialize_reads(), 2);
+    }
+
+    #[test]
+    fn view_full_runner_handles_literal_membership_sinks_without_materializing_scalars() {
+        let includes_source = CountingView::root(&[1, 2, 3, 4]);
+        let includes_body = PipelineBody {
+            stages: Vec::new(),
+            stage_exprs: Vec::new(),
+            sink: Sink::Membership(MembershipSinkSpec {
+                op: MembershipSinkOp::Includes,
+                target: MembershipSinkTarget::Literal(Val::Int(3)),
+                method: crate::builtins::BuiltinMethod::Includes,
+            }),
+            stage_kernels: Vec::new(),
+            sink_kernels: Vec::new(),
+        };
+
+        let includes = super::run_full(includes_source.clone(), &includes_body)
+            .unwrap()
+            .unwrap();
+        assert_eq!(includes, Val::Bool(true));
+        assert_eq!(includes_source.materialize_reads(), 0);
+        assert_eq!(includes_source.scalar_reads(), 3);
+
+        let index_source = CountingView::root(&[1, 2, 3, 4]);
+        let index_body = PipelineBody {
+            sink: Sink::Membership(MembershipSinkSpec {
+                op: MembershipSinkOp::Index,
+                target: MembershipSinkTarget::Literal(Val::Int(4)),
+                method: crate::builtins::BuiltinMethod::Index,
+            }),
+            ..includes_body
+        };
+
+        let index = super::run_full(index_source.clone(), &index_body)
+            .unwrap()
+            .unwrap();
+        assert_eq!(index, Val::Int(3));
+        assert_eq!(index_source.materialize_reads(), 0);
+        assert_eq!(index_source.scalar_reads(), 4);
+
+        let indices_source = CountingView::root(&[1, 2, 1, 3]);
+        let indices_body = PipelineBody {
+            sink: Sink::Membership(MembershipSinkSpec {
+                op: MembershipSinkOp::IndicesOf,
+                target: MembershipSinkTarget::Literal(Val::Int(1)),
+                method: crate::builtins::BuiltinMethod::IndicesOf,
+            }),
+            ..index_body
+        };
+
+        let indices = super::run_full(indices_source.clone(), &indices_body)
+            .unwrap()
+            .unwrap();
+        let indices_json: serde_json::Value = indices.into();
+        assert_eq!(indices_json, serde_json::json!([0, 2]));
+        assert_eq!(indices_source.materialize_reads(), 0);
+        assert_eq!(indices_source.scalar_reads(), 4);
+    }
+
+    #[test]
+    fn view_full_runner_evaluates_dynamic_membership_targets_once() {
+        let mut root = IndexMap::new();
+        root.insert(Arc::<str>::from("needle"), Val::Int(3));
+        let env = Env::new(Val::obj(root));
+        let target = Arc::new(Compiler::compile_str("$.needle").unwrap());
+
+        let includes_source = CountingView::root(&[1, 2, 3, 4]);
+        let includes_body = PipelineBody {
+            stages: Vec::new(),
+            stage_exprs: Vec::new(),
+            sink: Sink::Membership(MembershipSinkSpec {
+                op: MembershipSinkOp::Includes,
+                target: MembershipSinkTarget::Program(Arc::clone(&target)),
+                method: crate::builtins::BuiltinMethod::Includes,
+            }),
+            stage_kernels: Vec::new(),
+            sink_kernels: Vec::new(),
+        };
+
+        let includes = super::run_full_with_env(includes_source.clone(), &includes_body, Some(&env))
+            .unwrap()
+            .unwrap();
+        assert_eq!(includes, Val::Bool(true));
+        assert_eq!(includes_source.materialize_reads(), 0);
+        assert_eq!(includes_source.scalar_reads(), 3);
+
+        let index_source = CountingView::root(&[1, 2, 3, 4]);
+        let index_body = PipelineBody {
+            sink: Sink::Membership(MembershipSinkSpec {
+                op: MembershipSinkOp::Index,
+                target: MembershipSinkTarget::Program(Arc::clone(&target)),
+                method: crate::builtins::BuiltinMethod::Index,
+            }),
+            ..includes_body
+        };
+
+        let index = super::run_full_with_env(index_source.clone(), &index_body, Some(&env))
+            .unwrap()
+            .unwrap();
+        assert_eq!(index, Val::Int(2));
+        assert_eq!(index_source.materialize_reads(), 0);
+        assert_eq!(index_source.scalar_reads(), 3);
+
+        let indices_source = CountingView::root(&[3, 1, 3, 4]);
+        let indices_body = PipelineBody {
+            sink: Sink::Membership(MembershipSinkSpec {
+                op: MembershipSinkOp::IndicesOf,
+                target: MembershipSinkTarget::Program(target),
+                method: crate::builtins::BuiltinMethod::IndicesOf,
+            }),
+            ..index_body
+        };
+
+        let indices = super::run_full_with_env(indices_source.clone(), &indices_body, Some(&env))
+            .unwrap()
+            .unwrap();
+        let indices_json: serde_json::Value = indices.into();
+        assert_eq!(indices_json, serde_json::json!([0, 2]));
+        assert_eq!(indices_source.materialize_reads(), 0);
+        assert_eq!(indices_source.scalar_reads(), 4);
+    }
+
+    #[test]
+    fn view_full_runner_handles_arg_extreme_sinks_lazily() {
+        let max_source = CountingView::root(&[2, 1, 4, 3]);
+        let max_body = PipelineBody {
+            stages: Vec::new(),
+            stage_exprs: Vec::new(),
+            sink: Sink::ArgExtreme(ArgExtremeSinkSpec {
+                want_max: true,
+                key: Arc::new(crate::vm::Program::new(Vec::new(), "")),
+            }),
+            stage_kernels: Vec::new(),
+            sink_kernels: vec![BodyKernel::Current],
+        };
+
+        let max = super::run_full(max_source.clone(), &max_body)
+            .unwrap()
+            .unwrap();
+        assert_eq!(max, Val::Int(4));
+        assert_eq!(max_source.scalar_reads(), 4);
+        assert_eq!(max_source.materialize_reads(), 2);
+
+        let min_source = CountingView::root(&[3, 4, 1, 2]);
+        let min_body = PipelineBody {
+            sink: Sink::ArgExtreme(ArgExtremeSinkSpec {
+                want_max: false,
+                key: Arc::new(crate::vm::Program::new(Vec::new(), "")),
+            }),
+            ..max_body
+        };
+
+        let min = super::run_full(min_source.clone(), &min_body)
+            .unwrap()
+            .unwrap();
+        assert_eq!(min, Val::Int(1));
+        assert_eq!(min_source.scalar_reads(), 4);
+        assert_eq!(min_source.materialize_reads(), 2);
     }
 
     #[test]

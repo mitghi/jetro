@@ -691,6 +691,7 @@ impl VM {
                     stack.push(match key {
                         Val::Int(i) => v.get_index(i),
                         Val::Str(s) => v.get_field(s.as_ref()),
+                        Val::StrSlice(s) => v.get_field(s.as_str()),
                         _ => Val::Null,
                     });
                 }
@@ -1036,8 +1037,22 @@ impl VM {
 
                 
                 Opcode::SetCurrent => {
-                    
-                    
+
+
+                }
+                Opcode::BindLamCurrent { name, body } => {
+                    // Bind `name` (when present) to the current item in a
+                    // local clone of `env`, run `body` under that env, then
+                    // pop the binding. Lets nested-lambda `LoadIdent(name)`
+                    // resolve to the outer iteration item even when the
+                    // host pipeline stage uses `swap_current` rather than
+                    // `push_lam` to advance.
+                    let mut scratch = env.clone();
+                    let frame = scratch
+                        .push_lam(name.as_deref(), env.current.clone());
+                    let result = self.exec(body, &scratch);
+                    scratch.pop_lam(frame);
+                    stack.push(result?);
                 }
                 Opcode::PipelineRun { base, steps } => {
                     let val = self.exec(base, env)?;
@@ -1351,8 +1366,11 @@ impl VM {
                 .sub_progs
                 .first()
                 .ok_or_else(|| EvalError(format!("{}: requires projection", call.name)))?;
+            // Single-param lambda body has been AST-substituted to the
+            // `@`-form opcode shape — name is unreferenced in `proj`,
+            // so push_lam can pass None and skip the var insert.
             let lam_param: Option<&str> = match call.orig_args.first() {
-                Some(Arg::Pos(Expr::Lambda { params, .. })) if !params.is_empty() => {
+                Some(Arg::Pos(Expr::Lambda { params, .. })) if params.len() >= 2 => {
                     Some(params[0].as_str())
                 }
                 _ => None,
@@ -1680,8 +1698,12 @@ impl VM {
         let no_op_kernel = crate::exec::pipeline::BodyKernel::Generic;
         let kernel0 = sub_kernel.unwrap_or(&no_op_kernel);
 
+        // Single-param lambda body has been AST-substituted; param name is
+        // unreferenced in the compiled body, so push_lam may use None to
+        // skip the var insert/remove. Only multi-param lambdas keep their
+        // first-param name (used for binary HOF binding pre-pair-binding).
         let lam_param: Option<&str> = match call.orig_args.first() {
-            Some(Arg::Pos(Expr::Lambda { params, .. })) if !params.is_empty() => {
+            Some(Arg::Pos(Expr::Lambda { params, .. })) if params.len() >= 2 => {
                 Some(params[0].as_str())
             }
             _ => None,
@@ -1750,10 +1772,12 @@ impl VM {
                         .orig_args
                         .get(idx)
                         .ok_or_else(|| EvalError("sort: missing key".into()))?;
+                    // Single-param lambdas are AST-substituted; param
+                    // name is unreferenced in the compiled body.
                     let lam_param = match arg {
                         Arg::Pos(Expr::Lambda { params, .. })
                         | Arg::Named(_, Expr::Lambda { params, .. })
-                            if !params.is_empty() =>
+                            if params.len() >= 2 =>
                         {
                             Some(params[0].as_str())
                         }
@@ -2205,15 +2229,19 @@ impl VM {
                         scratch.pop_lam(frame);
                         result
                     }
-                    [param] => {
-                        let frame = scratch.push_lam(Some(param), right.clone());
+                    [_param] => {
+                        // Single-param lambda body AST-substituted; name unused.
+                        let frame = scratch.push_lam(None, right.clone());
                         let result = self.exec(prog, &scratch);
                         scratch.pop_lam(frame);
                         result
                     }
-                    [left_name, right_name, ..] => {
+                    [left_name, _right_name, ..] => {
+                        // Multi-param fast path: rightmost param substituted
+                        // to `Current`; only earlier params keep their named
+                        // bindings.
                         let left_frame = scratch.push_lam(Some(left_name), left.clone());
-                        let right_frame = scratch.push_lam(Some(right_name), right.clone());
+                        let right_frame = scratch.push_lam(None, right.clone());
                         let result = self.exec(prog, &scratch);
                         scratch.pop_lam(right_frame);
                         scratch.pop_lam(left_frame);
@@ -2701,9 +2729,7 @@ impl VM {
     ) -> Result<Val, EvalError> {
         use crate::exec::pipeline::{eval_kernel, BodyKernel};
         // The kernel path treats `item` as `@` and resolves bare names
-        // as fields on it. That is only safe when:
-        //   - the lambda has no named parameter (the kernel always
-        //     reads `@`, not a per-call binding),
+        // as fields on it. Safe whenever:
         //   - the env has no let-bindings (otherwise a let-shadowed
         //     name would be silently rerouted to a field read), and
         //   - the program does not begin with `LoadIdent` — that
@@ -2711,12 +2737,17 @@ impl VM {
         //     value is array/string and the ident matches a builtin
         //     name (e.g. `.map(len)` invokes `len` as a builtin), a
         //     dispatch the kernel form drops on the floor.
+        //
+        // Single-param named lambdas have already been substituted to the
+        // same opcode shape as the equivalent `@`-form at compile time,
+        // so `lam_param` no longer gates the fast path. Multi-param and
+        // nested-ref-wrapped lambdas classify as `Generic` and naturally
+        // fall through.
         let starts_with_load_ident = matches!(
             prog.ops.first(),
             Some(crate::vm::Opcode::LoadIdent(_))
         );
-        if lam_param.is_none()
-            && scratch.has_no_vars()
+        if scratch.has_no_vars()
             && !starts_with_load_ident
             && !matches!(kernel, BodyKernel::Generic)
         {

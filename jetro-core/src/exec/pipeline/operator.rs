@@ -3,8 +3,8 @@
 
 use std::sync::Arc;
 
-use crate::parse::ast::Expr;
 use crate::builtins::BuiltinMethod;
+use crate::parse::ast::Expr;
 use crate::vm::Program;
 
 use super::NumOp;
@@ -22,6 +22,105 @@ pub struct ReducerSpec {
     pub predicate_expr: Option<Arc<Expr>>,
     /// Source AST for `projection`, used during IR analysis.
     pub projection_expr: Option<Arc<Expr>>,
+}
+
+/// Specification for predicate terminal sinks (`any`, `all`, `find_index`, `find_one`).
+#[derive(Debug, Clone)]
+pub struct PredicateSinkSpec {
+    /// Terminal operation to perform.
+    pub op: PredicateSinkOp,
+    /// Predicate evaluated for each row until the terminal can decide.
+    pub predicate: Arc<Program>,
+}
+
+/// Specification for value-membership terminal sinks (`includes`, `index`, `indices_of`).
+#[derive(Debug, Clone)]
+pub struct MembershipSinkSpec {
+    /// Terminal operation to perform.
+    pub op: MembershipSinkOp,
+    /// Value compared against each row.
+    pub target: MembershipSinkTarget,
+    /// Original builtin method used for scalar fallback.
+    pub method: BuiltinMethod,
+}
+
+/// Target value source for value-membership terminal sinks.
+#[derive(Debug, Clone)]
+pub enum MembershipSinkTarget {
+    /// Literal known during lowering.
+    Literal(crate::data::value::Val),
+    /// Expression evaluated once before rows are streamed.
+    Program(Arc<Program>),
+}
+
+/// Specification for arg-extreme terminal sinks (`max_by`, `min_by`).
+#[derive(Debug, Clone)]
+pub struct ArgExtremeSinkSpec {
+    /// When true, keeps the row with the largest key; otherwise keeps the smallest key.
+    pub want_max: bool,
+    /// Key expression evaluated for each row.
+    pub key: Arc<Program>,
+}
+
+/// Predicate terminal operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PredicateSinkOp {
+    /// Returns true when any row matches the predicate.
+    Any,
+    /// Returns true when every row matches the predicate.
+    All,
+    /// Returns the zero-based index of the first matching row, or null.
+    FindIndex,
+    /// Returns all zero-based indices whose rows match the predicate.
+    IndicesWhere,
+    /// Returns exactly one matching row, erroring on zero or multiple matches.
+    FindOne,
+}
+
+/// Value-membership terminal operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MembershipSinkOp {
+    /// Returns true when any row equals the target.
+    Includes,
+    /// Returns the zero-based index of the first matching row, or null.
+    Index,
+    /// Returns all zero-based indices matching the target.
+    IndicesOf,
+}
+
+impl PredicateSinkSpec {
+    /// Iterates over embedded programs for kernel enumeration.
+    pub(crate) fn sink_programs(&self) -> impl Iterator<Item = &Arc<Program>> {
+        std::iter::once(&self.predicate)
+    }
+
+    /// Returns the sink-kernel index for the predicate.
+    pub(crate) fn predicate_kernel_index(&self) -> usize {
+        0
+    }
+}
+
+impl MembershipSinkSpec {
+    /// Iterates over embedded programs for kernel enumeration.
+    pub(crate) fn sink_programs(&self) -> impl Iterator<Item = &Arc<Program>> {
+        match &self.target {
+            MembershipSinkTarget::Literal(_) => None,
+            MembershipSinkTarget::Program(program) => Some(program),
+        }
+        .into_iter()
+    }
+}
+
+impl ArgExtremeSinkSpec {
+    /// Iterates over embedded programs for kernel enumeration.
+    pub(crate) fn sink_programs(&self) -> impl Iterator<Item = &Arc<Program>> {
+        std::iter::once(&self.key)
+    }
+
+    /// Returns the sink-kernel index for the key projection.
+    pub(crate) fn key_kernel_index(&self) -> usize {
+        0
+    }
 }
 
 /// The kind of reduction a `ReducerSpec` performs.

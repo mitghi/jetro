@@ -7,7 +7,9 @@
 
 use std::sync::Arc;
 
-use crate::parse::ast::{Arg, ArrayElem, Expr, FStringPart, MatchArm, ObjField, PatchOp, PathStep, PipeStep, Step};
+use crate::parse::ast::{
+    Arg, ArrayElem, Expr, FStringPart, MatchArm, ObjField, PatchOp, PathStep, PipeStep, Step,
+};
 
 use super::{BodyKernel, ReducerOp, Sink, Stage};
 
@@ -46,7 +48,19 @@ fn sink_runtime_demand(sink: &Sink) -> RuntimeDemand {
             value: ValueDemand::Whole,
             order: false,
         },
-        Sink::Collect | Sink::Terminal(_) | Sink::Nth(_) => RuntimeDemand {
+        Sink::Predicate(_) => RuntimeDemand {
+            value: ValueDemand::Whole,
+            order: false,
+        },
+        Sink::Membership(_) => RuntimeDemand {
+            value: ValueDemand::Whole,
+            order: false,
+        },
+        Sink::ArgExtreme(_) => RuntimeDemand {
+            value: ValueDemand::Whole,
+            order: true,
+        },
+        Sink::Collect | Sink::Terminal(_) | Sink::SelectMany { .. } | Sink::Nth(_) => RuntimeDemand {
             value: ValueDemand::Whole,
             order: true,
         },
@@ -70,7 +84,25 @@ pub(super) fn normalize_symbolic(
     let mut out = SymbolicEmitter::new(demand);
     for idx in 0..in_stages.len() {
         let stage = in_stages[idx].clone();
-        let expr = in_exprs.get(idx).cloned().unwrap_or(None);
+        // Unwrap a single-param `Expr::Lambda` here so the symbolic
+        // substitution operates on the actual body expression rather than
+        // a `Lambda` wrapper (which `substitute_current` passes through
+        // intact and which would otherwise leak into downstream stage
+        // bodies as `Opcode::PushNull`).
+        let expr = in_exprs
+            .get(idx)
+            .cloned()
+            .unwrap_or(None)
+            .map(|e| match e.as_ref() {
+                Expr::Lambda { params, body } if params.len() == 1 => {
+                    let lowered = crate::compile::lambda_lower::substitute_current(
+                        (**body).clone(),
+                        params[0].as_str(),
+                    );
+                    Arc::new(lowered)
+                }
+                _ => e,
+            });
         match stage {
             _ if stage.is_symbolic_map_stage() => {
                 if let Some(expr) = expr.as_ref().filter(|e| is_pure_expr(e)) {
@@ -239,7 +271,16 @@ fn suffix_consumes_value(stages: &[Stage]) -> bool {
 }
 
 fn compile_stage_expr(expr: &Expr) -> Arc<crate::vm::Program> {
-    Arc::new(crate::compile::compiler::Compiler::compile(expr, "<pipeline-rewrite>"))
+    // Pipeline-rewritten stage bodies arrive after `normalize_symbolic`
+    // has already unwrapped any single-param `Expr::Lambda` wrapper, so
+    // compile straight via `Compiler::compile`. Re-applying lambda
+    // unwrapping here would strip a second level for `r => (x => x)`-
+    // style bodies whose value is itself a lambda (no-op runtime value)
+    // and corrupt them.
+    Arc::new(crate::compile::compiler::Compiler::compile(
+        expr,
+        "<pipeline-rewrite>",
+    ))
 }
 
 fn simplify_expr(expr: Expr) -> Expr {

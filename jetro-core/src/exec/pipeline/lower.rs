@@ -123,15 +123,7 @@ impl Pipeline {
         p.stage_exprs = plan_result.stage_exprs;
         p.sink = plan_result.sink;
         p.stage_kernels = classify_kernels(&p.stages);
-        p.sink_kernels = p
-            .sink
-            .reducer_spec()
-            .map(|spec| {
-                spec.sink_programs()
-                    .map(|p| BodyKernel::classify(p))
-                    .collect()
-            })
-            .unwrap_or_default();
+        p.sink_kernels = sink_kernels(&p.sink);
         Some(p)
     }
 
@@ -274,10 +266,49 @@ fn decode_method_chain(
                     &mut sink,
                 )?;
             }
+            Step::Slice(start, end) => {
+                push_path_slice_stages(*start, *end, &mut stages, &mut stage_exprs)?;
+            }
             _ => return None,
         }
     }
     Some((stages, stage_exprs, sink))
+}
+
+fn push_path_slice_stages(
+    start: Option<i64>,
+    end: Option<i64>,
+    stages: &mut Vec<Stage>,
+    stage_exprs: &mut Vec<Option<Arc<Expr>>>,
+) -> Option<()> {
+    let start = match start {
+        Some(n) if n < 0 => return None,
+        Some(n) => n as usize,
+        None => 0,
+    };
+    let end = match end {
+        Some(n) if n < 0 => return None,
+        Some(n) => Some(n as usize),
+        None => None,
+    };
+
+    if start > 0 {
+        stages.push(Stage::UsizeBuiltin {
+            method: BuiltinMethod::Skip,
+            value: start,
+        });
+        stage_exprs.push(None);
+    }
+
+    if let Some(end) = end {
+        stages.push(Stage::UsizeBuiltin {
+            method: BuiltinMethod::Take,
+            value: end.saturating_sub(start),
+        });
+        stage_exprs.push(None);
+    }
+
+    Some(())
 }
 
 // Repeatedly applies `rewrite_step` until fixpoint (at most 16 iterations).
@@ -410,11 +441,17 @@ fn prog_const_bool(prog: &crate::vm::Program) -> Option<bool> {
 
 /// Compiles a positional argument into a VM `Program`, rewriting bare `Ident` nodes into `@.<ident>` field accesses.
 pub(super) fn compile_subexpr(arg: &crate::parse::ast::Arg) -> Option<Arc<crate::vm::Program>> {
-    use crate::parse::ast::{Arg, Expr, Step};
+    use crate::parse::ast::{Arg, Step};
     let inner = match arg {
         Arg::Pos(e) => e,
         _ => return None,
     };
+    // Single-param lambda: route through `compile_lambda_arg` so the body
+    // is substituted and, when nested-lambda refs to the param remain,
+    // wrapped in `BindLamCurrent` for correct outer-row binding.
+    if matches!(inner, Expr::Lambda { params, .. } if params.len() == 1) {
+        return Some(crate::compile::lambda_lower::compile_lambda_arg(inner, ""));
+    }
     let rooted: Expr = match inner {
         Expr::Ident(name) => Expr::Chain(Box::new(Expr::Current), vec![Step::Field(name.clone())]),
         Expr::Chain(base, _) if matches!(base.as_ref(), Expr::Current) => inner.clone(),
@@ -425,7 +462,22 @@ pub(super) fn compile_subexpr(arg: &crate::parse::ast::Arg) -> Option<Arc<crate:
     )))
 }
 
+fn compile_raw_arg_expr(arg: &crate::parse::ast::Arg) -> Option<Arc<crate::vm::Program>> {
+    use crate::parse::ast::Arg;
+    let expr = match arg {
+        Arg::Pos(e) => e,
+        Arg::Named(_, _) => return None,
+    };
+    Some(crate::compile::lambda_lower::compile_lambda_arg(expr, ""))
+}
+
 /// Compiles a sort-key argument into a `SortSpec`, interpreting `UnaryNeg`-wrapping as descending order.
+///
+/// Returns `None` for multi-param `Expr::Lambda` arguments — those are
+/// 2-arg comparator lambdas (`.sort((a, b) => …)`) which the pipeline IR
+/// cannot represent as a single-key `SortSpec`. Bailing out forces the
+/// router to fall back to the VM path, where `exec_lambda_method` handles
+/// the comparator via `sort_comparator_apply`.
 pub(super) fn compile_sort_spec(
     arg: &crate::parse::ast::Arg,
 ) -> Option<(SortSpec, Option<Arc<Expr>>)> {
@@ -434,6 +486,9 @@ pub(super) fn compile_sort_spec(
         Arg::Pos(e) => e,
         _ => return None,
     };
+    if matches!(expr, Expr::Lambda { params, .. } if params.len() >= 2) {
+        return None;
+    }
     let (key_expr, descending) = match expr {
         Expr::UnaryNeg(inner) => (inner.as_ref().clone(), true),
         other => (other.clone(), false),
@@ -457,7 +512,10 @@ pub(super) fn arg_expr(arg: &crate::parse::ast::Arg) -> Option<Arc<Expr>> {
 // Registry-driven stage factory (formerly stage_factory.rs)
 // ---------------------------------------------------------------------------
 
-use super::{NumOp, ReducerOp, ReducerSpec};
+use super::{
+    ArgExtremeSinkSpec, MembershipSinkOp, MembershipSinkSpec, MembershipSinkTarget, NumOp,
+    PredicateSinkOp, PredicateSinkSpec, ReducerOp, ReducerSpec,
+};
 
 /// Lowers a `BuiltinMethod` call to a concrete `Stage` or `Sink`, returning `None` when the method cannot be lowered at this position.
 pub(super) fn lower_method_from_registry(
@@ -505,6 +563,12 @@ pub(super) fn lower_method_from_registry(
                     stages.push(Stage::Reverse(cancel));
                 }
                 BuiltinMethod::Unique => stages.push(Stage::UniqueBy(None)),
+                _ if method.is_pipeline_element_method() => {
+                    stages.push(Stage::Builtin(crate::builtins::BuiltinCall::new(
+                        method,
+                        crate::builtins::BuiltinArgs::None,
+                    )));
+                }
                 _ => return None,
             }
             stage_exprs.push(None);
@@ -704,11 +768,32 @@ fn string_arg(arg: &crate::parse::ast::Arg) -> Option<Arc<str>> {
     }
 }
 
+// Extracts a literal value from `arg` for value-membership terminal sinks.
+fn literal_arg_value(arg: &crate::parse::ast::Arg) -> Option<Val> {
+    match arg {
+        crate::parse::ast::Arg::Pos(Expr::Null) => Some(Val::Null),
+        crate::parse::ast::Arg::Pos(Expr::Bool(b)) => Some(Val::Bool(*b)),
+        crate::parse::ast::Arg::Pos(Expr::Int(n)) => Some(Val::Int(*n)),
+        crate::parse::ast::Arg::Pos(Expr::Float(n)) => Some(Val::Float(*n)),
+        crate::parse::ast::Arg::Pos(Expr::Str(s)) => Some(Val::Str(Arc::from(s.as_str()))),
+        _ => None,
+    }
+}
+
 // Constructs the terminal `Sink` for `method`, handling count predicates, numeric reducers, and positional selects.
 fn terminal_sink_for_method(
     method: BuiltinMethod,
     args: &[crate::parse::ast::Arg],
 ) -> Option<Sink> {
+    if let Some(sink) = predicate_sink_for_method(method, args) {
+        return Some(sink);
+    }
+    if let Some(sink) = membership_sink_for_method(method, args) {
+        return Some(sink);
+    }
+    if let Some(sink) = arg_extreme_sink_for_method(method, args) {
+        return Some(sink);
+    }
     let spec = method.spec();
     match spec.sink?.accumulator {
         BuiltinSinkAccumulator::ApproxDistinct if args.is_empty() => {
@@ -740,7 +825,106 @@ fn terminal_sink_for_method(
                 _ => return None,
             },
         })),
+        BuiltinSinkAccumulator::SelectOne(_) if method == BuiltinMethod::First => match args {
+            [] => Some(Sink::Terminal(method)),
+            [arg] => Some(Sink::SelectMany {
+                n: usize_arg_at_least(arg, 1)?,
+                from_end: false,
+            }),
+            _ => None,
+        },
+        BuiltinSinkAccumulator::SelectOne(_) if method == BuiltinMethod::Last => match args {
+            [] => Some(Sink::Terminal(method)),
+            [arg] => Some(Sink::SelectMany {
+                n: usize_arg_at_least(arg, 1)?,
+                from_end: true,
+            }),
+            _ => None,
+        },
         BuiltinSinkAccumulator::SelectOne(_) if args.is_empty() => Some(Sink::Terminal(method)),
         _ => None,
+    }
+}
+
+fn predicate_sink_for_method(
+    method: BuiltinMethod,
+    args: &[crate::parse::ast::Arg],
+) -> Option<Sink> {
+    let [arg] = args else {
+        return None;
+    };
+    let op = match method {
+        BuiltinMethod::Any => PredicateSinkOp::Any,
+        BuiltinMethod::All => PredicateSinkOp::All,
+        BuiltinMethod::FindIndex => PredicateSinkOp::FindIndex,
+        BuiltinMethod::IndicesWhere => PredicateSinkOp::IndicesWhere,
+        BuiltinMethod::FindOne => PredicateSinkOp::FindOne,
+        _ => return None,
+    };
+    Some(Sink::Predicate(PredicateSinkSpec {
+        op,
+        predicate: compile_subexpr(arg)?,
+    }))
+}
+
+fn membership_sink_for_method(
+    method: BuiltinMethod,
+    args: &[crate::parse::ast::Arg],
+) -> Option<Sink> {
+    let [arg] = args else {
+        return None;
+    };
+    let op = match method {
+        BuiltinMethod::Includes => MembershipSinkOp::Includes,
+        BuiltinMethod::Index => MembershipSinkOp::Index,
+        BuiltinMethod::IndicesOf => MembershipSinkOp::IndicesOf,
+        _ => return None,
+    };
+    Some(Sink::Membership(MembershipSinkSpec {
+        op,
+        target: literal_arg_value(arg)
+            .map(MembershipSinkTarget::Literal)
+            .or_else(|| Some(MembershipSinkTarget::Program(compile_raw_arg_expr(arg)?)))?,
+        method,
+    }))
+}
+
+fn arg_extreme_sink_for_method(
+    method: BuiltinMethod,
+    args: &[crate::parse::ast::Arg],
+) -> Option<Sink> {
+    let [arg] = args else {
+        return None;
+    };
+    let want_max = match method {
+        BuiltinMethod::MaxBy => true,
+        BuiltinMethod::MinBy => false,
+        _ => return None,
+    };
+    Some(Sink::ArgExtreme(ArgExtremeSinkSpec {
+        want_max,
+        key: compile_subexpr(arg)?,
+    }))
+}
+
+fn sink_kernels(sink: &Sink) -> Vec<BodyKernel> {
+    match sink {
+        Sink::Reducer(spec) => spec
+            .sink_programs()
+            .map(|p| BodyKernel::classify(p))
+            .collect(),
+        Sink::Predicate(spec) => spec
+            .sink_programs()
+            .map(|p| BodyKernel::classify(p))
+            .collect(),
+        Sink::Membership(spec) => spec
+            .sink_programs()
+            .map(|p| BodyKernel::classify(p))
+            .collect(),
+        Sink::ArgExtreme(spec) => spec
+            .sink_programs()
+            .map(|p| BodyKernel::classify(p))
+            .collect(),
+        _ => Vec::new(),
     }
 }

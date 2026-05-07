@@ -342,6 +342,33 @@ mod tests {
     }
 
     #[test]
+    fn reverse_swaps_first_and_last_input_demand() {
+        let ops = [op(BuiltinMethod::Reverse), op(BuiltinMethod::First)];
+        let demand = source_demand(&ops, Demand::RESULT);
+        assert_eq!(demand.pull, PullDemand::LastInput(1));
+        assert_eq!(demand.value, ValueNeed::Whole);
+
+        let ops = [op(BuiltinMethod::Reverse), op(BuiltinMethod::Last)];
+        let demand = source_demand(&ops, Demand::RESULT);
+        assert_eq!(demand.pull, PullDemand::FirstInput(1));
+        assert_eq!(demand.value, ValueNeed::Whole);
+
+        let ops = [op(BuiltinMethod::Reverse), op_usize(BuiltinMethod::Take, 2)];
+        let demand = source_demand(&ops, Demand::RESULT);
+        assert_eq!(demand.pull, PullDemand::LastInput(2));
+        assert_eq!(demand.value, ValueNeed::Whole);
+    }
+
+    #[test]
+    fn drop_while_is_a_prefix_barrier() {
+        let ops = [op(BuiltinMethod::DropWhile), op(BuiltinMethod::First)];
+        let demand = source_demand(&ops, Demand::RESULT);
+        assert_eq!(demand.pull, PullDemand::All);
+        assert_eq!(demand.value, ValueNeed::Whole);
+        assert!(demand.order);
+    }
+
+    #[test]
     fn map_last_requests_last_input() {
         let ops = [op(BuiltinMethod::Map), op(BuiltinMethod::Last)];
         let demand = source_demand(&ops, Demand::RESULT);
@@ -354,6 +381,14 @@ mod tests {
         let ops = [op(BuiltinMethod::Map), op_usize(BuiltinMethod::Nth, 2)];
         let demand = source_demand(&ops, Demand::RESULT);
         assert_eq!(demand.pull, PullDemand::NthInput(2));
+        assert_eq!(demand.value, ValueNeed::Whole);
+    }
+
+    #[test]
+    fn scalar_slice_preserves_positional_demand() {
+        let ops = [op(BuiltinMethod::Slice), op(BuiltinMethod::Last)];
+        let demand = source_demand(&ops, Demand::RESULT);
+        assert_eq!(demand.pull, PullDemand::LastInput(1));
         assert_eq!(demand.value, ValueNeed::Whole);
     }
 
@@ -418,6 +453,29 @@ mod tests {
         let demand = source_demand(&ops, Demand::RESULT);
         assert_eq!(demand.pull, PullDemand::FirstInput(3));
         assert_eq!(demand.value, ValueNeed::Whole);
+    }
+
+    #[test]
+    fn chunk_and_window_map_bounded_output_to_input_prefix() {
+        let ops = [
+            op_usize(BuiltinMethod::Chunk, 4),
+            op_usize(BuiltinMethod::Take, 3),
+        ];
+        let demand = source_demand(&ops, Demand::RESULT);
+        assert_eq!(demand.pull, PullDemand::FirstInput(12));
+        assert_eq!(demand.value, ValueNeed::Whole);
+
+        let ops = [
+            op_usize(BuiltinMethod::Window, 4),
+            op_usize(BuiltinMethod::Take, 3),
+        ];
+        let demand = source_demand(&ops, Demand::RESULT);
+        assert_eq!(demand.pull, PullDemand::FirstInput(6));
+        assert_eq!(demand.value, ValueNeed::Whole);
+
+        let ops = [op_usize(BuiltinMethod::Window, 4), op(BuiltinMethod::Last)];
+        let demand = source_demand(&ops, Demand::RESULT);
+        assert_eq!(demand.pull, PullDemand::All);
     }
 
     #[test]

@@ -36,6 +36,19 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
     let mut emitted_outputs: usize = 0;
 
     let mut sink_acc = SinkAccumulator::new(&pipeline.sink);
+    let membership_target = match &pipeline.sink {
+        Sink::Membership(spec) => Some(eval_membership_target(spec, &mut vm, &loop_env)?),
+        _ => None,
+    };
+    if let Sink::Membership(spec) = &pipeline.sink {
+        if pipeline.stages.is_empty() && row_source::array_like_rows(&recv).is_none() {
+            return Ok(apply_membership_scalar_sink(
+                spec,
+                membership_target.as_ref().expect("membership target exists"),
+                &recv,
+            ));
+        }
+    }
 
     let needs_barrier = pipeline
         .stages
@@ -46,7 +59,10 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
     }
 
     let pre_iter: LegacyPreIter = {
-        let mut buf: Vec<Val> = row_source::materialize_source(&recv);
+        let mut buf: Vec<Val> = match source_demand {
+            PullDemand::FirstInput(n) => row_source::materialize_source_prefix(&recv, n),
+            _ => row_source::materialize_source(&recv),
+        };
         let strategies = compute_strategies_with_kernels(
             &pipeline.stages,
             &pipeline.stage_kernels,
@@ -93,6 +109,17 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
         pulled_inputs += 1;
 
         let sink_done = match &pipeline.sink {
+            Sink::Predicate(_) => {
+                observe_predicate_sink_item(pipeline, item, &mut sink_acc, &mut vm, &mut loop_env)?
+            }
+            Sink::Membership(spec) => sink_acc.observe_membership(
+                spec.op,
+                &item,
+                membership_target.as_ref().expect("membership target exists"),
+            ),
+            Sink::ArgExtreme(_) => {
+                observe_arg_extreme_sink_item(pipeline, item, &mut sink_acc, &mut vm, &mut loop_env)?
+            }
             Sink::Reducer(_) => {
                 match observe_reducer_item(pipeline, item, &mut sink_acc, &mut vm, &mut loop_env)? {
                     ReducerItemFlow::Observed => false,
@@ -116,7 +143,7 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
         .last()
         .and_then(Stage::descriptor)
         .is_some_and(|desc| desc.method == Some(BuiltinMethod::GroupBy));
-    Ok(sink_acc.finish(unwrap_single_collect_obj))
+    sink_acc.finish_result(unwrap_single_collect_obj)
 }
 
 /// Streams a pipeline directly from a `simd-json` tape; returns `None` when any stage requires materialisation.
@@ -161,6 +188,10 @@ where
     let mut stage_taken: Vec<usize> = vec![0; pipeline.stages.len()];
     let mut stage_skipped: Vec<usize> = vec![0; pipeline.stages.len()];
     let mut sink_acc = SinkAccumulator::new(&pipeline.sink);
+    let membership_target = match &pipeline.sink {
+        Sink::Membership(spec) => Some(eval_membership_target(spec, &mut vm, &loop_env)?),
+        _ => None,
+    };
     let terminal_map_idx = if matches!(pipeline.sink, Sink::Collect)
         && pipeline
             .stages
@@ -231,6 +262,17 @@ where
         }
 
         let sink_done = match &pipeline.sink {
+            Sink::Predicate(_) => {
+                observe_predicate_sink_item(pipeline, item, &mut sink_acc, &mut vm, &mut loop_env)?
+            }
+            Sink::Membership(spec) => sink_acc.observe_membership(
+                spec.op,
+                &item,
+                membership_target.as_ref().expect("membership target exists"),
+            ),
+            Sink::ArgExtreme(_) => {
+                observe_arg_extreme_sink_item(pipeline, item, &mut sink_acc, &mut vm, &mut loop_env)?
+            }
             Sink::Reducer(_) => {
                 match observe_reducer_item(pipeline, item, &mut sink_acc, &mut vm, &mut loop_env)? {
                     ReducerItemFlow::Observed => false,
@@ -251,7 +293,7 @@ where
     if let Some(collector) = terminal_map_collect {
         return Ok(collector.finish());
     }
-    Ok(sink_acc.finish(false))
+    sink_acc.finish_result(false)
 }
 
 // barrier stages always produce a Vec<Val>, so only the Owned variant is needed here
@@ -471,6 +513,81 @@ fn observe_reducer_item(
     }
 
     Ok(ReducerItemFlow::Observed)
+}
+
+fn eval_membership_target(
+    spec: &super::MembershipSinkSpec,
+    vm: &mut crate::vm::VM,
+    env: &Env,
+) -> Result<Val, EvalError> {
+    match &spec.target {
+        super::MembershipSinkTarget::Literal(value) => Ok(value.clone()),
+        super::MembershipSinkTarget::Program(program) => vm.exec_in_env(program, env),
+    }
+}
+
+fn apply_membership_scalar_sink(
+    spec: &super::MembershipSinkSpec,
+    target: &Val,
+    recv: &Val,
+) -> Val {
+    match spec.method {
+        crate::builtins::BuiltinMethod::Includes => {
+            crate::builtins::includes_apply(recv, target)
+        }
+        crate::builtins::BuiltinMethod::Index => {
+            crate::builtins::index_value_apply(recv, target).unwrap_or(Val::Null)
+        }
+        crate::builtins::BuiltinMethod::IndicesOf => {
+            crate::builtins::indices_of_apply(recv, target).unwrap_or(Val::Null)
+        }
+        _ => Val::Null,
+    }
+}
+
+fn observe_predicate_sink_item(
+    pipeline: &Pipeline,
+    item: Val,
+    sink_acc: &mut SinkAccumulator<'_>,
+    vm: &mut crate::vm::VM,
+    loop_env: &mut Env,
+) -> Result<bool, EvalError> {
+    let Sink::Predicate(spec) = &pipeline.sink else {
+        return Ok(sink_acc.push(item));
+    };
+
+    let kernel_idx = spec.predicate_kernel_index();
+    let kernel = pipeline
+        .sink_kernels
+        .get(kernel_idx)
+        .unwrap_or(&BodyKernel::Generic);
+    let predicate = eval_kernel(kernel, &item, |item| {
+        apply_item_in_env(vm, loop_env, item, &spec.predicate)
+    })?;
+    sink_acc.observe_predicate_item(spec.op, crate::util::is_truthy(&predicate), item)
+}
+
+fn observe_arg_extreme_sink_item(
+    pipeline: &Pipeline,
+    item: Val,
+    sink_acc: &mut SinkAccumulator<'_>,
+    vm: &mut crate::vm::VM,
+    loop_env: &mut Env,
+) -> Result<bool, EvalError> {
+    let Sink::ArgExtreme(spec) = &pipeline.sink else {
+        return Ok(sink_acc.push(item));
+    };
+
+    let kernel_idx = spec.key_kernel_index();
+    let kernel = pipeline
+        .sink_kernels
+        .get(kernel_idx)
+        .unwrap_or(&BodyKernel::Generic);
+    let key = eval_kernel(kernel, &item, |item| {
+        apply_item_in_env(vm, loop_env, item, &spec.key)
+    })?;
+    sink_acc.observe_arg_extreme(spec.want_max, item, key);
+    Ok(false)
 }
 
 /// Applies an object-lambda stage (`TransformKeys`, `TransformValues`, `FilterKeys`, `FilterValues`) to `recv`.

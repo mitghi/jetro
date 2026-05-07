@@ -363,6 +363,7 @@ fn run_sink(sink: &Sink, rows: &[Val], chain: &dyn cmp::Stage, demand: PullDeman
         Sink::Reducer(_) | Sink::Terminal(_) => {
             run_composed_sink!(run_pipeline_with_demand, rows, chain, demand, sink)
         }
+        Sink::Predicate(_) | Sink::Membership(_) | Sink::ArgExtreme(_) | Sink::SelectMany { .. } => return None,
         Sink::ApproxCountDistinct => return None,
     };
 
@@ -391,6 +392,7 @@ where
             demand,
             sink
         ),
+        Sink::Predicate(_) | Sink::Membership(_) | Sink::ArgExtreme(_) | Sink::SelectMany { .. } => return None,
         Sink::ApproxCountDistinct => return None,
     };
 

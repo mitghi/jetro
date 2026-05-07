@@ -8,9 +8,11 @@ use crate::builtins::{
     BuiltinKeyedReducer, BuiltinSinkAccumulator, BuiltinSinkSpec, BuiltinViewInputMode,
     BuiltinViewOutputMode, BuiltinViewStage,
 };
+use crate::data::value::Val;
 use crate::plan::demand::PullDemand;
+use crate::vm::Program;
 
-use super::{PipelineBody, Stage};
+use super::{MembershipSinkOp, MembershipSinkTarget, PipelineBody, PredicateSinkOp, Stage};
 
 /// Describes how a source can be traversed without materialising the full row set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,6 +106,8 @@ pub(crate) enum ViewMaterialization {
     SinkFinalRow,
     /// The sink materialises each element's numeric input for folding (e.g. `sum`).
     SinkNumericInput,
+    /// The sink materialises input rows for its own comparison/state, not for output.
+    SinkInputRows,
 }
 
 /// Full capability descriptor for a `PipelineBody`: per-stage entries plus the sink capability.
@@ -235,7 +239,7 @@ impl ViewStageCapability {
 }
 
 /// Describes how a pipeline sink interacts with the view domain.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) enum ViewSinkCapability {
     /// The sink collects all views, materialising each row into the output array.
     Collect,
@@ -255,6 +259,36 @@ pub(crate) enum ViewSinkCapability {
         /// Zero-based output index selected by the sink.
         index: usize,
     },
+    /// Predicate terminal sink (`any`, `all`, `find_index`, `indices_where`, `find_one`).
+    Predicate {
+        /// Predicate terminal operation to perform.
+        op: PredicateSinkOp,
+        /// Index of the view-native predicate kernel in `sink_kernels`.
+        predicate_kernel: usize,
+    },
+    /// Literal value-membership terminal sink (`includes`, `index`, `indices_of`).
+    Membership {
+        /// Membership terminal operation to perform.
+        op: MembershipSinkOp,
+        /// Target compared against each row.
+        target: ViewMembershipTarget,
+    },
+    /// Arg-extreme terminal sink (`max_by`, `min_by`).
+    ArgExtreme {
+        /// When true, keeps the row with the largest key; otherwise the smallest key.
+        want_max: bool,
+        /// Index of the view-native key kernel in `sink_kernels`.
+        key_kernel: usize,
+    },
+    /// Bounded positional selector for terminal `first(n)` / `last(n)`.
+    SelectMany {
+        /// Number of rows requested by the terminal sink.
+        n: usize,
+        /// Whether the semantic selector wants rows from the end.
+        from_end: bool,
+        /// Whether the source iterator is running in reverse physical order.
+        source_reversed: bool,
+    },
 }
 
 impl ViewSinkCapability {
@@ -273,15 +307,65 @@ impl ViewSinkCapability {
     }
 
     /// Returns when this sink must materialise element values from the view domain.
-    pub(crate) fn materialization(self) -> ViewMaterialization {
+    pub(crate) fn materialization(&self) -> ViewMaterialization {
         match self {
             Self::Collect => ViewMaterialization::SinkOutputRows,
             Self::Builtin {
                 materialization, ..
-            } => materialization,
+            } => *materialization,
             Self::Nth { .. } => ViewMaterialization::SinkFinalRow,
+            Self::Predicate { op, .. } => {
+                if *op == PredicateSinkOp::FindOne {
+                    ViewMaterialization::SinkFinalRow
+                } else {
+                    ViewMaterialization::Never
+                }
+            }
+            Self::Membership { target, .. } => {
+                if target.is_scalar_literal() {
+                    ViewMaterialization::Never
+                } else {
+                    ViewMaterialization::SinkInputRows
+                }
+            }
+            Self::ArgExtreme { .. } => ViewMaterialization::SinkFinalRow,
+            Self::SelectMany { .. } => ViewMaterialization::SinkOutputRows,
         }
     }
+}
+
+/// Target for a view-native membership terminal.
+#[derive(Debug, Clone)]
+pub(crate) enum ViewMembershipTarget {
+    /// Literal known during lowering.
+    Literal(Val),
+    /// Expression evaluated once against the outer environment before row streaming.
+    Program(std::sync::Arc<Program>),
+}
+
+impl ViewMembershipTarget {
+    fn is_scalar_literal(&self) -> bool {
+        match self {
+            Self::Literal(value) => target_is_scalar(value),
+            Self::Program(_) => false,
+        }
+    }
+}
+
+impl From<&MembershipSinkTarget> for ViewMembershipTarget {
+    fn from(target: &MembershipSinkTarget) -> Self {
+        match target {
+            MembershipSinkTarget::Literal(value) => Self::Literal(value.clone()),
+            MembershipSinkTarget::Program(program) => Self::Program(std::sync::Arc::clone(program)),
+        }
+    }
+}
+
+fn target_is_scalar(value: &Val) -> bool {
+    matches!(
+        value,
+        Val::Null | Val::Bool(_) | Val::Int(_) | Val::Float(_) | Val::Str(_) | Val::StrSlice(_)
+    )
 }
 
 // maps the builtin sink accumulator kind to the materialisation policy it requires
@@ -351,8 +435,10 @@ mod tests {
     };
     use crate::data::value::Val;
     use crate::exec::pipeline::{
-        BodyKernel, NumOp, PipelineBody, ReducerOp, ReducerSpec, Sink, Stage, ViewInputMode,
-        ViewMaterialization, ViewOutputMode, ViewSinkCapability, ViewStageCapability,
+        ArgExtremeSinkSpec, BodyKernel, MembershipSinkOp, MembershipSinkSpec,
+        MembershipSinkTarget, NumOp, PipelineBody, PredicateSinkOp, PredicateSinkSpec,
+        ReducerOp, ReducerSpec, Sink, Stage, ViewInputMode, ViewMaterialization,
+        ViewMembershipTarget, ViewOutputMode, ViewSinkCapability, ViewStageCapability,
     };
     use crate::parse::ast::BinOp;
 
@@ -457,6 +543,55 @@ mod tests {
             .materialization(),
             ViewMaterialization::SinkFinalRow
         );
+        assert_eq!(
+            ViewSinkCapability::Predicate {
+                op: PredicateSinkOp::Any,
+                predicate_kernel: 0,
+            }
+            .materialization(),
+            ViewMaterialization::Never
+        );
+        assert_eq!(
+            ViewSinkCapability::Predicate {
+                op: PredicateSinkOp::FindOne,
+                predicate_kernel: 0,
+            }
+            .materialization(),
+            ViewMaterialization::SinkFinalRow
+        );
+        assert_eq!(
+            ViewSinkCapability::Membership {
+                op: MembershipSinkOp::Includes,
+                target: ViewMembershipTarget::Literal(Val::Int(3)),
+            }
+            .materialization(),
+            ViewMaterialization::Never
+        );
+        assert_eq!(
+            ViewSinkCapability::Membership {
+                op: MembershipSinkOp::Includes,
+                target: ViewMembershipTarget::Literal(Val::arr(vec![Val::Int(3)])),
+            }
+            .materialization(),
+            ViewMaterialization::SinkInputRows
+        );
+        assert_eq!(
+            ViewSinkCapability::ArgExtreme {
+                want_max: true,
+                key_kernel: 0,
+            }
+            .materialization(),
+            ViewMaterialization::SinkFinalRow
+        );
+        assert_eq!(
+            ViewSinkCapability::SelectMany {
+                n: 2,
+                from_end: true,
+                source_reversed: true,
+            }
+            .materialization(),
+            ViewMaterialization::SinkOutputRows
+        );
     }
 
     #[test]
@@ -488,6 +623,79 @@ mod tests {
                 materialization: ViewMaterialization::SinkFinalRow,
             })
         ));
+        assert!(matches!(
+            Sink::Predicate(PredicateSinkSpec {
+                op: PredicateSinkOp::Any,
+                predicate: Arc::new(crate::vm::Program::new(Vec::new(), "")),
+            })
+            .view_capability(&[BodyKernel::FieldCmpLit(
+                Arc::from("score"),
+                BinOp::Gt,
+                Val::Int(10),
+            )]),
+            Some(ViewSinkCapability::Predicate {
+                op: PredicateSinkOp::Any,
+                predicate_kernel: 0,
+            })
+        ));
+        assert!(matches!(
+            Sink::SelectMany {
+                n: 2,
+                from_end: true,
+            }
+            .view_capability(&[]),
+            Some(ViewSinkCapability::SelectMany {
+                n: 2,
+                from_end: true,
+                source_reversed: false,
+            })
+        ));
+        assert!(matches!(
+            Sink::Membership(MembershipSinkSpec {
+                op: MembershipSinkOp::Includes,
+                target: MembershipSinkTarget::Literal(Val::Int(3)),
+                method: BuiltinMethod::Includes,
+            })
+            .view_capability(&[]),
+            Some(ViewSinkCapability::Membership {
+                op: MembershipSinkOp::Includes,
+                target: ViewMembershipTarget::Literal(Val::Int(3)),
+            })
+        ));
+        assert!(matches!(
+            Sink::Membership(MembershipSinkSpec {
+                op: MembershipSinkOp::Includes,
+                target: MembershipSinkTarget::Program(Arc::new(crate::vm::Program::new(
+                    Vec::new(),
+                    ""
+                ))),
+                method: BuiltinMethod::Includes,
+            })
+            .view_capability(&[]),
+            Some(ViewSinkCapability::Membership {
+                op: MembershipSinkOp::Includes,
+                target: ViewMembershipTarget::Program(_),
+            })
+        ));
+        assert!(matches!(
+            Sink::ArgExtreme(ArgExtremeSinkSpec {
+                want_max: true,
+                key: Arc::new(crate::vm::Program::new(Vec::new(), "")),
+            })
+            .view_capability(&[BodyKernel::FieldRead(Arc::from("score"))]),
+            Some(ViewSinkCapability::ArgExtreme {
+                want_max: true,
+                key_kernel: 0,
+            })
+        ));
+        assert!(
+            Sink::ArgExtreme(ArgExtremeSinkSpec {
+                want_max: false,
+                key: Arc::new(crate::vm::Program::new(Vec::new(), "")),
+            })
+            .view_capability(&[BodyKernel::Generic])
+            .is_none()
+        );
     }
 
     #[test]

@@ -3,12 +3,14 @@
 //! Mirrors the composed `Sink` contract but without a generic type parameter, for compatibility
 //! with older execution paths.
 
+use std::collections::VecDeque;
+
 use crate::{
     builtins::{BuiltinSelectionPosition, BuiltinSinkAccumulator},
-    data::value::Val,
+    data::{context::EvalError, value::Val},
 };
 
-use super::{ReducerAccumulator, Sink};
+use super::{cmp_val_total, MembershipSinkOp, PredicateSinkOp, ReducerAccumulator, Sink};
 
 /// Stateful wrapper that accumulates one pipeline element at a time on behalf of a `Sink`.
 pub(crate) struct SinkAccumulator<'a> {
@@ -25,6 +27,17 @@ pub(crate) struct SinkAccumulator<'a> {
     // nth observed item for Sink::Nth
     nth: Option<Val>,
     nth_seen: usize,
+    select_many: VecDeque<Val>,
+    predicate_seen: usize,
+    predicate_matched: Option<usize>,
+    predicate_value: Option<Val>,
+    predicate_all: bool,
+    predicate_indices: Vec<i64>,
+    membership_seen: usize,
+    membership_matched: Option<usize>,
+    membership_indices: Vec<i64>,
+    arg_extreme_key: Option<Val>,
+    arg_extreme_value: Option<Val>,
     // HyperLogLog register array for approximate-distinct-count sinks
     hll: [u8; HLL_M],
 }
@@ -40,6 +53,17 @@ impl<'a> SinkAccumulator<'a> {
             last: None,
             nth: None,
             nth_seen: 0,
+            select_many: VecDeque::new(),
+            predicate_seen: 0,
+            predicate_matched: None,
+            predicate_value: None,
+            predicate_all: true,
+            predicate_indices: Vec::new(),
+            membership_seen: 0,
+            membership_matched: None,
+            membership_indices: Vec::new(),
+            arg_extreme_key: None,
+            arg_extreme_value: None,
             hll: [0; HLL_M],
         }
     }
@@ -62,6 +86,10 @@ impl<'a> SinkAccumulator<'a> {
                 self.observe_approx_distinct(&item);
                 false
             }
+            Sink::Predicate(_) => false,
+            Sink::Membership(_) => false,
+            Sink::ArgExtreme(_) => false,
+            Sink::SelectMany { n, from_end } => self.observe_select_many(*n, *from_end, item),
             Sink::Nth(idx) => self.observe_nth(*idx, item),
             Sink::Terminal(_) => false,
         }
@@ -177,6 +205,195 @@ impl<'a> SinkAccumulator<'a> {
         }
     }
 
+    /// Captures a bounded prefix or suffix. Prefix selection stops once full; suffix selection
+    /// retains only the latest `n` rows.
+    pub(crate) fn observe_select_many(&mut self, n: usize, from_end: bool, item: Val) -> bool {
+        self.observe_select_many_lazy(n, from_end, false, || item)
+    }
+
+    /// Lazy bounded prefix/suffix selector. `prepend` is used when a reverse source is
+    /// satisfying a suffix demand so final output remains in semantic input order.
+    pub(crate) fn observe_select_many_lazy<F>(
+        &mut self,
+        n: usize,
+        from_end: bool,
+        prepend: bool,
+        materialize_item: F,
+    ) -> bool
+    where
+        F: FnOnce() -> Val,
+    {
+        if n == 0 {
+            return true;
+        }
+        let item = materialize_item();
+        if prepend {
+            if self.select_many.len() == n {
+                self.select_many.pop_back();
+            }
+            self.select_many.push_front(item);
+            return self.select_many.len() >= n;
+        }
+        if from_end {
+            if self.select_many.len() == n {
+                self.select_many.pop_front();
+            }
+            self.select_many.push_back(item);
+            false
+        } else {
+            self.select_many.push_back(item);
+            self.select_many.len() >= n
+        }
+    }
+
+    /// Updates a predicate terminal sink with one predicate result and row value.
+    pub(crate) fn observe_predicate_item(
+        &mut self,
+        op: PredicateSinkOp,
+        matched: bool,
+        item: Val,
+    ) -> Result<bool, EvalError> {
+        self.observe_predicate_lazy(op, matched, || item)
+    }
+
+    /// Lazy predicate sink variant; materialises the row only for sinks that store it.
+    pub(crate) fn observe_predicate_lazy<F>(
+        &mut self,
+        op: PredicateSinkOp,
+        matched: bool,
+        materialize_item: F,
+    ) -> Result<bool, EvalError>
+    where
+        F: FnOnce() -> Val,
+    {
+        match op {
+            PredicateSinkOp::Any => {
+                if matched {
+                    self.predicate_matched = Some(self.predicate_seen);
+                    Ok(true)
+                } else {
+                    self.predicate_seen += 1;
+                    Ok(false)
+                }
+            }
+            PredicateSinkOp::All => {
+                self.predicate_seen += 1;
+                if matched {
+                    Ok(false)
+                } else {
+                    self.predicate_all = false;
+                    Ok(true)
+                }
+            }
+            PredicateSinkOp::FindIndex => {
+                if matched {
+                    self.predicate_matched = Some(self.predicate_seen);
+                    Ok(true)
+                } else {
+                    self.predicate_seen += 1;
+                    Ok(false)
+                }
+            }
+            PredicateSinkOp::IndicesWhere => {
+                if matched {
+                    self.predicate_indices.push(self.predicate_seen as i64);
+                }
+                self.predicate_seen += 1;
+                Ok(false)
+            }
+            PredicateSinkOp::FindOne => {
+                if matched {
+                    if self.predicate_matched.is_some() {
+                        return Err(EvalError(
+                            "find_one: expected exactly one element, got multiple".into(),
+                        ));
+                    }
+                    self.predicate_matched = Some(self.predicate_seen);
+                    self.predicate_value = Some(materialize_item());
+                }
+                self.predicate_seen += 1;
+                Ok(false)
+            }
+        }
+    }
+
+    /// Updates a value-membership terminal sink with one row; returns true once decided.
+    pub(crate) fn observe_membership(
+        &mut self,
+        op: MembershipSinkOp,
+        item: &Val,
+        target: &Val,
+    ) -> bool {
+        let matched = crate::util::vals_eq(item, target);
+        self.observe_membership_match(op, matched)
+    }
+
+    /// Updates a value-membership terminal sink with an already-computed comparison result.
+    pub(crate) fn observe_membership_match(
+        &mut self,
+        op: MembershipSinkOp,
+        matched: bool,
+    ) -> bool {
+        match op {
+            MembershipSinkOp::Includes => {
+                if matched {
+                    self.membership_matched = Some(self.membership_seen);
+                    true
+                } else {
+                    self.membership_seen += 1;
+                    false
+                }
+            }
+            MembershipSinkOp::Index => {
+                if matched {
+                    self.membership_matched = Some(self.membership_seen);
+                    true
+                } else {
+                    self.membership_seen += 1;
+                    false
+                }
+            }
+            MembershipSinkOp::IndicesOf => {
+                if matched {
+                    self.membership_indices.push(self.membership_seen as i64);
+                }
+                self.membership_seen += 1;
+                false
+            }
+        }
+    }
+
+    /// Updates an arg-extreme terminal sink with one row and its projected key.
+    pub(crate) fn observe_arg_extreme(&mut self, want_max: bool, item: Val, key: Val) {
+        self.observe_arg_extreme_lazy(want_max, key, || item);
+    }
+
+    /// Lazy arg-extreme update. The row is materialised only when its key becomes the new best.
+    pub(crate) fn observe_arg_extreme_lazy<F>(
+        &mut self,
+        want_max: bool,
+        key: Val,
+        materialize_item: F,
+    ) where
+        F: FnOnce() -> Val,
+    {
+        let should_take = match self.arg_extreme_key.as_ref() {
+            None => true,
+            Some(best_key) => {
+                let ord = cmp_val_total(&key, best_key);
+                if want_max {
+                    ord.is_gt()
+                } else {
+                    ord.is_lt()
+                }
+            }
+        };
+        if should_take {
+            self.arg_extreme_key = Some(key);
+            self.arg_extreme_value = Some(materialize_item());
+        }
+    }
+
     /// Hashes `item` into the HyperLogLog registers for cardinality estimation.
     pub(crate) fn observe_approx_distinct(&mut self, item: &Val) {
         hll_observe(&mut self.hll, item);
@@ -213,9 +430,45 @@ impl<'a> SinkAccumulator<'a> {
                 .expect("reducer sinks construct reducer")
                 .finish(),
             Sink::ApproxCountDistinct => Val::Int(hll_estimate(&self.hll) as i64),
+            Sink::Predicate(spec) => match spec.op {
+                PredicateSinkOp::Any => Val::Bool(self.predicate_matched.is_some()),
+                PredicateSinkOp::All => Val::Bool(self.predicate_all),
+                PredicateSinkOp::FindIndex => self
+                    .predicate_matched
+                    .map(|idx| Val::Int(idx as i64))
+                    .unwrap_or(Val::Null),
+                PredicateSinkOp::IndicesWhere => Val::int_vec(self.predicate_indices),
+                PredicateSinkOp::FindOne => self.predicate_value.unwrap_or(Val::Null),
+            },
+            Sink::Membership(spec) => match spec.op {
+                MembershipSinkOp::Includes => Val::Bool(self.membership_matched.is_some()),
+                MembershipSinkOp::Index => self
+                    .membership_matched
+                    .map(|idx| Val::Int(idx as i64))
+                    .unwrap_or(Val::Null),
+                MembershipSinkOp::IndicesOf => Val::int_vec(self.membership_indices),
+            },
+            Sink::ArgExtreme(_) => self.arg_extreme_value.unwrap_or(Val::Null),
+            Sink::SelectMany { n: 0, .. } => Val::Null,
+            Sink::SelectMany { n, .. } if *n == 1 => self
+                .select_many
+                .into_iter()
+                .next()
+                .unwrap_or(Val::Null),
+            Sink::SelectMany { .. } => Val::arr(self.select_many.into_iter().collect()),
             Sink::Nth(_) => self.nth.unwrap_or(Val::Null),
             Sink::Terminal(_) => Val::Null,
         }
+    }
+
+    /// Fallible finalisation for sinks whose terminal semantics can fail.
+    pub(crate) fn finish_result(self, unwrap_single_collect_obj: bool) -> Result<Val, EvalError> {
+        if matches!(self.sink, Sink::Predicate(spec) if spec.op == PredicateSinkOp::FindOne) {
+            return self.predicate_value.ok_or_else(|| {
+                EvalError("find_one: expected exactly one element, got 0".into())
+            });
+        }
+        Ok(self.finish(unwrap_single_collect_obj))
     }
 
     /// Finalises state for a builtin-registered sink, delegating to the reducer or HLL as needed.

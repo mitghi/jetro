@@ -210,6 +210,14 @@ mod tests {
             vm_query("$.user.has(\"phone\")", &doc).unwrap(),
             json!(false)
         );
+        assert_eq!(
+            vm_query("$.user.has_key(\"email\")", &doc).unwrap(),
+            json!(true)
+        );
+        assert_eq!(
+            vm_query("$.user.has_key(\"phone\")", &doc).unwrap(),
+            json!(false)
+        );
     }
 
     #[test]
@@ -2828,8 +2836,11 @@ mod tests {
     #[test]
     fn tier1_find_alias() {
         let doc = books();
-        let r = vm_query(r#"$.store.books.find(price > 10).map(title)"#, &doc).unwrap();
-        assert_eq!(r, json!(["Dune", "Neuromancer"]));
+        // `.find(pred)` now returns the first match (conventional
+        // first-match semantics). `.find_all(pred)` keeps the filter-alias
+        // semantics for the rest of the suite.
+        let r = vm_query(r#"$.store.books.find(price > 10)"#, &doc).unwrap();
+        assert_eq!(r["title"], json!("Dune"));
     }
 
     #[test]

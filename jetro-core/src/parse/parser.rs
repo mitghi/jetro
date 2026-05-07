@@ -59,6 +59,10 @@ pub fn parse(input: &str) -> Result<Expr, ParseError> {
     if strict_match_lint_enabled() {
         validate_match_exhaustiveness(&expr)?;
     }
+    // First-class lambda macro expansion: `let f = (x => …) in …` inlines
+    // `f` at every method-arg position so downstream compile sees the
+    // lambda directly. Pure AST rewrite; no runtime closure value.
+    let expr = crate::compile::lambda_lower::inline_let_bound_lambdas(expr);
     Ok(expr)
 }
 
