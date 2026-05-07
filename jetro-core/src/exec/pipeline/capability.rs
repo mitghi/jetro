@@ -8,9 +8,10 @@ use crate::builtins::{
     BuiltinKeyedReducer, BuiltinSinkAccumulator, BuiltinSinkSpec, BuiltinViewInputMode,
     BuiltinViewOutputMode, BuiltinViewStage,
 };
+use crate::data::value::Val;
 use crate::plan::demand::PullDemand;
 
-use super::{PipelineBody, PredicateSinkOp, Stage};
+use super::{MembershipSinkOp, PipelineBody, PredicateSinkOp, Stage};
 
 /// Describes how a source can be traversed without materialising the full row set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,6 +105,8 @@ pub(crate) enum ViewMaterialization {
     SinkFinalRow,
     /// The sink materialises each element's numeric input for folding (e.g. `sum`).
     SinkNumericInput,
+    /// The sink materialises input rows for its own comparison/state, not for output.
+    SinkInputRows,
 }
 
 /// Full capability descriptor for a `PipelineBody`: per-stage entries plus the sink capability.
@@ -235,7 +238,7 @@ impl ViewStageCapability {
 }
 
 /// Describes how a pipeline sink interacts with the view domain.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) enum ViewSinkCapability {
     /// The sink collects all views, materialising each row into the output array.
     Collect,
@@ -261,6 +264,13 @@ pub(crate) enum ViewSinkCapability {
         op: PredicateSinkOp,
         /// Index of the view-native predicate kernel in `sink_kernels`.
         predicate_kernel: usize,
+    },
+    /// Literal value-membership terminal sink (`includes`, `index`, `indices_of`).
+    Membership {
+        /// Membership terminal operation to perform.
+        op: MembershipSinkOp,
+        /// Literal target compared against each row.
+        target: Val,
     },
     /// Bounded positional selector for terminal `first(n)` / `last(n)`.
     SelectMany {
@@ -289,23 +299,37 @@ impl ViewSinkCapability {
     }
 
     /// Returns when this sink must materialise element values from the view domain.
-    pub(crate) fn materialization(self) -> ViewMaterialization {
+    pub(crate) fn materialization(&self) -> ViewMaterialization {
         match self {
             Self::Collect => ViewMaterialization::SinkOutputRows,
             Self::Builtin {
                 materialization, ..
-            } => materialization,
+            } => *materialization,
             Self::Nth { .. } => ViewMaterialization::SinkFinalRow,
             Self::Predicate { op, .. } => {
-                if op == PredicateSinkOp::FindOne {
+                if *op == PredicateSinkOp::FindOne {
                     ViewMaterialization::SinkFinalRow
                 } else {
                     ViewMaterialization::Never
                 }
             }
+            Self::Membership { target, .. } => {
+                if target_is_scalar(target) {
+                    ViewMaterialization::Never
+                } else {
+                    ViewMaterialization::SinkInputRows
+                }
+            }
             Self::SelectMany { .. } => ViewMaterialization::SinkOutputRows,
         }
     }
+}
+
+fn target_is_scalar(value: &Val) -> bool {
+    matches!(
+        value,
+        Val::Null | Val::Bool(_) | Val::Int(_) | Val::Float(_) | Val::Str(_) | Val::StrSlice(_)
+    )
 }
 
 // maps the builtin sink accumulator kind to the materialisation policy it requires
@@ -375,9 +399,10 @@ mod tests {
     };
     use crate::data::value::Val;
     use crate::exec::pipeline::{
-        BodyKernel, NumOp, PipelineBody, PredicateSinkOp, PredicateSinkSpec, ReducerOp,
-        ReducerSpec, Sink, Stage, ViewInputMode, ViewMaterialization, ViewOutputMode,
-        ViewSinkCapability, ViewStageCapability,
+        BodyKernel, MembershipSinkOp, MembershipSinkSpec, MembershipSinkTarget, NumOp,
+        PipelineBody, PredicateSinkOp, PredicateSinkSpec, ReducerOp, ReducerSpec, Sink, Stage,
+        ViewInputMode, ViewMaterialization, ViewOutputMode, ViewSinkCapability,
+        ViewStageCapability,
     };
     use crate::parse::ast::BinOp;
 
@@ -499,6 +524,22 @@ mod tests {
             ViewMaterialization::SinkFinalRow
         );
         assert_eq!(
+            ViewSinkCapability::Membership {
+                op: MembershipSinkOp::Includes,
+                target: Val::Int(3),
+            }
+            .materialization(),
+            ViewMaterialization::Never
+        );
+        assert_eq!(
+            ViewSinkCapability::Membership {
+                op: MembershipSinkOp::Includes,
+                target: Val::arr(vec![Val::Int(3)]),
+            }
+            .materialization(),
+            ViewMaterialization::SinkInputRows
+        );
+        assert_eq!(
             ViewSinkCapability::SelectMany {
                 n: 2,
                 from_end: true,
@@ -563,6 +604,18 @@ mod tests {
                 n: 2,
                 from_end: true,
                 source_reversed: false,
+            })
+        ));
+        assert!(matches!(
+            Sink::Membership(MembershipSinkSpec {
+                op: MembershipSinkOp::Includes,
+                target: MembershipSinkTarget::Literal(Val::Int(3)),
+                method: BuiltinMethod::Includes,
+            })
+            .view_capability(&[]),
+            Some(ViewSinkCapability::Membership {
+                op: MembershipSinkOp::Includes,
+                target: Val::Int(3),
             })
         ));
     }

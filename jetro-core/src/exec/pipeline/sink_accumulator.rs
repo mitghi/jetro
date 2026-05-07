@@ -325,6 +325,15 @@ impl<'a> SinkAccumulator<'a> {
         target: &Val,
     ) -> bool {
         let matched = crate::util::vals_eq(item, target);
+        self.observe_membership_match(op, matched)
+    }
+
+    /// Updates a value-membership terminal sink with an already-computed comparison result.
+    pub(crate) fn observe_membership_match(
+        &mut self,
+        op: MembershipSinkOp,
+        matched: bool,
+    ) -> bool {
         match op {
             MembershipSinkOp::Includes => {
                 if matched {

@@ -171,6 +171,15 @@ impl Sink {
                 )?,
             });
         }
+        if let Sink::Membership(spec) = self {
+            if let super::MembershipSinkTarget::Literal(target) = &spec.target {
+                return Some(ViewSinkCapability::Membership {
+                    op: spec.op,
+                    target: target.clone(),
+                });
+            }
+            return None;
+        }
 
         let sink_spec = self.builtin_sink_spec()?;
         let reducer = self.reducer_spec();
