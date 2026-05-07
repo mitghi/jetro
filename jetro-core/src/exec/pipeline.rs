@@ -139,6 +139,7 @@ fn sink_name(s: &Sink) -> &'static str {
             PredicateSinkOp::All => "all",
             PredicateSinkOp::FindIndex => "find_index",
             PredicateSinkOp::IndicesWhere => "indices_where",
+            PredicateSinkOp::FindOne => "find_one",
         },
         Sink::ArgExtreme(spec) if spec.want_max => "max_by",
         Sink::ArgExtreme(_) => "min_by",
@@ -1711,6 +1712,11 @@ mod tests {
         ] {
             assert_pipeline_matches_vm(query, doc.clone());
         }
+
+        let pipeline = lower_query("$.xs.find_one(score == 9)").unwrap();
+        let root = Val::from(&doc);
+        let actual: serde_json::Value = pipeline.run(&root).unwrap().into();
+        assert_eq!(actual["isbn"], json!("b"));
     }
 
     #[test]
@@ -1750,6 +1756,36 @@ mod tests {
             indices_where.source_demand().chain.value,
             crate::plan::demand::ValueNeed::Predicate
         );
+
+        let find_one = lower_query("$.xs.find_one(@ > 2)").unwrap();
+        assert!(matches!(find_one.sink, Sink::Predicate(ref spec) if spec.op == PredicateSinkOp::FindOne));
+        assert_eq!(
+            find_one.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::All
+        );
+        assert_eq!(
+            find_one.source_demand().chain.value,
+            crate::plan::demand::ValueNeed::Whole
+        );
+    }
+
+    #[test]
+    fn find_one_terminal_sink_errors_on_zero_or_multiple_matches() {
+        use serde_json::json;
+        let doc = json!({
+            "xs": [
+                {"score": 1},
+                {"score": 9},
+                {"score": 11}
+            ]
+        });
+        let root = Val::from(&doc);
+
+        let zero = lower_query("$.xs.find_one(score > 100)").unwrap();
+        assert!(zero.run(&root).is_err());
+
+        let multiple = lower_query("$.xs.find_one(score > 5)").unwrap();
+        assert!(multiple.run(&root).is_err());
     }
 
     #[test]

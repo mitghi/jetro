@@ -153,7 +153,7 @@ pub enum BuiltinMethod {
     DropWhile,
     /// Returns the first element satisfying the predicate, or null.
     FindFirst,
-    /// Alias of `find_first`.
+    /// Returns the only element satisfying the predicate, erroring on zero or multiple matches.
     FindOne,
     /// Counts approximate distinct values using a HyperLogLog-style sketch.
     ApproxCountDistinct,

@@ -5,7 +5,7 @@
 
 use crate::{
     builtins::{BuiltinSelectionPosition, BuiltinSinkAccumulator},
-    data::value::Val,
+    data::{context::EvalError, value::Val},
 };
 
 use super::{cmp_val_total, MembershipSinkOp, PredicateSinkOp, ReducerAccumulator, Sink};
@@ -27,6 +27,7 @@ pub(crate) struct SinkAccumulator<'a> {
     nth_seen: usize,
     predicate_seen: usize,
     predicate_matched: Option<usize>,
+    predicate_value: Option<Val>,
     predicate_all: bool,
     predicate_indices: Vec<i64>,
     membership_seen: usize,
@@ -51,6 +52,7 @@ impl<'a> SinkAccumulator<'a> {
             nth_seen: 0,
             predicate_seen: 0,
             predicate_matched: None,
+            predicate_value: None,
             predicate_all: true,
             predicate_indices: Vec::new(),
             membership_seen: 0,
@@ -198,34 +200,39 @@ impl<'a> SinkAccumulator<'a> {
         }
     }
 
-    /// Updates a predicate terminal sink with one predicate result; returns true once decided.
-    pub(crate) fn observe_predicate(&mut self, op: PredicateSinkOp, matched: bool) -> bool {
+    /// Updates a predicate terminal sink with one predicate result and row value.
+    pub(crate) fn observe_predicate_item(
+        &mut self,
+        op: PredicateSinkOp,
+        matched: bool,
+        item: Val,
+    ) -> Result<bool, EvalError> {
         match op {
             PredicateSinkOp::Any => {
                 if matched {
                     self.predicate_matched = Some(self.predicate_seen);
-                    true
+                    Ok(true)
                 } else {
                     self.predicate_seen += 1;
-                    false
+                    Ok(false)
                 }
             }
             PredicateSinkOp::All => {
                 self.predicate_seen += 1;
                 if matched {
-                    false
+                    Ok(false)
                 } else {
                     self.predicate_all = false;
-                    true
+                    Ok(true)
                 }
             }
             PredicateSinkOp::FindIndex => {
                 if matched {
                     self.predicate_matched = Some(self.predicate_seen);
-                    true
+                    Ok(true)
                 } else {
                     self.predicate_seen += 1;
-                    false
+                    Ok(false)
                 }
             }
             PredicateSinkOp::IndicesWhere => {
@@ -233,7 +240,20 @@ impl<'a> SinkAccumulator<'a> {
                     self.predicate_indices.push(self.predicate_seen as i64);
                 }
                 self.predicate_seen += 1;
-                false
+                Ok(false)
+            }
+            PredicateSinkOp::FindOne => {
+                if matched {
+                    if self.predicate_matched.is_some() {
+                        return Err(EvalError(
+                            "find_one: expected exactly one element, got multiple".into(),
+                        ));
+                    }
+                    self.predicate_matched = Some(self.predicate_seen);
+                    self.predicate_value = Some(item);
+                }
+                self.predicate_seen += 1;
+                Ok(false)
             }
         }
     }
@@ -338,6 +358,7 @@ impl<'a> SinkAccumulator<'a> {
                     .map(|idx| Val::Int(idx as i64))
                     .unwrap_or(Val::Null),
                 PredicateSinkOp::IndicesWhere => Val::int_vec(self.predicate_indices),
+                PredicateSinkOp::FindOne => self.predicate_value.unwrap_or(Val::Null),
             },
             Sink::Membership(spec) => match spec.op {
                 MembershipSinkOp::Includes => Val::Bool(self.membership_matched.is_some()),
@@ -351,6 +372,16 @@ impl<'a> SinkAccumulator<'a> {
             Sink::Nth(_) => self.nth.unwrap_or(Val::Null),
             Sink::Terminal(_) => Val::Null,
         }
+    }
+
+    /// Fallible finalisation for sinks whose terminal semantics can fail.
+    pub(crate) fn finish_result(self, unwrap_single_collect_obj: bool) -> Result<Val, EvalError> {
+        if matches!(self.sink, Sink::Predicate(spec) if spec.op == PredicateSinkOp::FindOne) {
+            return self.predicate_value.ok_or_else(|| {
+                EvalError("find_one: expected exactly one element, got 0".into())
+            });
+        }
+        Ok(self.finish(unwrap_single_collect_obj))
     }
 
     /// Finalises state for a builtin-registered sink, delegating to the reducer or HLL as needed.

@@ -24,7 +24,7 @@ pub struct ReducerSpec {
     pub projection_expr: Option<Arc<Expr>>,
 }
 
-/// Specification for predicate terminal sinks (`any`, `all`, `find_index`).
+/// Specification for predicate terminal sinks (`any`, `all`, `find_index`, `find_one`).
 #[derive(Debug, Clone)]
 pub struct PredicateSinkSpec {
     /// Terminal operation to perform.
@@ -73,6 +73,8 @@ pub enum PredicateSinkOp {
     FindIndex,
     /// Returns all zero-based indices whose rows match the predicate.
     IndicesWhere,
+    /// Returns exactly one matching row, erroring on zero or multiple matches.
+    FindOne,
 }
 
 /// Value-membership terminal operation.

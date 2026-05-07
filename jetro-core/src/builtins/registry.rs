@@ -604,9 +604,7 @@ mod tests {
         );
         assert_eq!(
             pipeline_lowering(BuiltinId::from_method(BuiltinMethod::FindOne)),
-            Some(BuiltinPipelineLowering::TerminalExprArg {
-                terminal: BuiltinMethod::First,
-            })
+            Some(BuiltinPipelineLowering::TerminalSink)
         );
         assert_eq!(
             pipeline_lowering(BuiltinId::from_method(BuiltinMethod::Take)),

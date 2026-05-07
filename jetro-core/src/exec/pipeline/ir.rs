@@ -23,7 +23,8 @@ use crate::plan::demand::{Demand as ChainDemand, PullDemand, ValueNeed};
 use crate::vm::{CompiledObjEntry, Opcode, Program};
 
 use super::{
-    BodyKernel, Pipeline, PipelineBody, Sink, Stage, ViewSinkCapability, ViewStageCapability,
+    BodyKernel, Pipeline, PipelineBody, PredicateSinkOp, Sink, Stage, ViewSinkCapability,
+    ViewStageCapability,
 };
 
 /// Indicates whether a positional terminal sink wants the first or the last qualifying element.
@@ -69,10 +70,14 @@ impl Sink {
             };
         }
         if matches!(self, Sink::Predicate(_)) {
+            let value = match self {
+                Sink::Predicate(spec) if spec.op == PredicateSinkOp::FindOne => ValueNeed::Whole,
+                _ => ValueNeed::Predicate,
+            };
             return SinkDemand {
                 chain: ChainDemand {
                     pull: PullDemand::All,
-                    value: ValueNeed::Predicate,
+                    value,
                     order: false,
                 },
                 positional: None,

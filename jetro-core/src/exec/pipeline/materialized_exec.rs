@@ -143,7 +143,7 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
         .last()
         .and_then(Stage::descriptor)
         .is_some_and(|desc| desc.method == Some(BuiltinMethod::GroupBy));
-    Ok(sink_acc.finish(unwrap_single_collect_obj))
+    sink_acc.finish_result(unwrap_single_collect_obj)
 }
 
 /// Streams a pipeline directly from a `simd-json` tape; returns `None` when any stage requires materialisation.
@@ -293,7 +293,7 @@ where
     if let Some(collector) = terminal_map_collect {
         return Ok(collector.finish());
     }
-    Ok(sink_acc.finish(false))
+    sink_acc.finish_result(false)
 }
 
 // barrier stages always produce a Vec<Val>, so only the Owned variant is needed here
@@ -564,7 +564,7 @@ fn observe_predicate_sink_item(
     let predicate = eval_kernel(kernel, &item, |item| {
         apply_item_in_env(vm, loop_env, item, &spec.predicate)
     })?;
-    Ok(sink_acc.observe_predicate(spec.op, crate::util::is_truthy(&predicate)))
+    sink_acc.observe_predicate_item(spec.op, crate::util::is_truthy(&predicate), item)
 }
 
 fn observe_arg_extreme_sink_item(

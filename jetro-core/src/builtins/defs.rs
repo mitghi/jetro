@@ -995,7 +995,7 @@ impl Builtin for FindFirst {
     }
 }
 
-/// `find_one(pred)` — terminal expr-arg without demand annotation.
+/// `find_one(pred)` — terminal predicate sink requiring exactly one match.
 pub(crate) struct FindOne;
 impl Builtin for FindOne {
     const METHOD: BuiltinMethod = BuiltinMethod::FindOne;
@@ -1003,9 +1003,7 @@ impl Builtin for FindOne {
     fn spec() -> BuiltinSpec {
         BuiltinSpec::new(BuiltinCategory::StreamingFilter, BuiltinCardinality::Filtering)
             .cost(10.0)
-            .lowering(BuiltinPipelineLowering::TerminalExprArg {
-                terminal: BuiltinMethod::First,
-            })
+            .lowering(BuiltinPipelineLowering::TerminalSink)
     }
 }
 
