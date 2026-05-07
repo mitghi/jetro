@@ -79,6 +79,11 @@ pub(crate) fn propagate_demand(id: BuiltinId, arg: BuiltinDemandArg, downstream:
             value: downstream.value.merge(ValueNeed::Predicate),
             order: downstream.order,
         },
+        BuiltinDemandLaw::DropWhile => Demand {
+            pull: PullDemand::All,
+            value: downstream.value.merge(ValueNeed::Predicate),
+            order: true,
+        },
         BuiltinDemandLaw::UniqueLike => Demand {
             pull: match downstream.pull {
                 PullDemand::All => PullDemand::All,
@@ -148,6 +153,16 @@ pub(crate) fn propagate_demand(id: BuiltinId, arg: BuiltinDemandArg, downstream:
             pull: PullDemand::All,
             value: downstream.value.merge(ValueNeed::Whole),
             order: true,
+        },
+        BuiltinDemandLaw::Reverse => Demand {
+            pull: match downstream.pull {
+                PullDemand::FirstInput(n) | PullDemand::UntilOutput(n) => PullDemand::LastInput(n),
+                PullDemand::LastInput(n) => PullDemand::FirstInput(n),
+                PullDemand::NthInput(_) => PullDemand::All,
+                PullDemand::All => PullDemand::All,
+            },
+            value: downstream.value,
+            order: downstream.order,
         },
     }
 }
@@ -388,6 +403,8 @@ mod tests {
         let unique = BuiltinId::from_method(BuiltinMethod::Unique);
         let count_by = BuiltinId::from_method(BuiltinMethod::CountBy);
         let sort = BuiltinId::from_method(BuiltinMethod::Sort);
+        let reverse = BuiltinId::from_method(BuiltinMethod::Reverse);
+        let drop_while = BuiltinId::from_method(BuiltinMethod::DropWhile);
 
         let demand = propagate_demand(take, BuiltinDemandArg::Usize(3), Demand::RESULT);
         assert_eq!(demand.pull, PullDemand::FirstInput(3));
@@ -422,6 +439,36 @@ mod tests {
             order: false,
         };
         let demand = propagate_demand(sort, BuiltinDemandArg::None, downstream);
+        assert_eq!(demand.pull, PullDemand::All);
+        assert_eq!(demand.value, ValueNeed::Whole);
+        assert!(demand.order);
+
+        let downstream = Demand {
+            pull: PullDemand::FirstInput(2),
+            value: ValueNeed::Whole,
+            order: true,
+        };
+        let demand = propagate_demand(reverse, BuiltinDemandArg::None, downstream);
+        assert_eq!(demand.pull, PullDemand::LastInput(2));
+        assert_eq!(demand.value, ValueNeed::Whole);
+        assert!(demand.order);
+
+        let downstream = Demand {
+            pull: PullDemand::LastInput(1),
+            value: ValueNeed::Whole,
+            order: true,
+        };
+        let demand = propagate_demand(reverse, BuiltinDemandArg::None, downstream);
+        assert_eq!(demand.pull, PullDemand::FirstInput(1));
+        assert_eq!(demand.value, ValueNeed::Whole);
+        assert!(demand.order);
+
+        let downstream = Demand {
+            pull: PullDemand::FirstInput(1),
+            value: ValueNeed::Whole,
+            order: false,
+        };
+        let demand = propagate_demand(drop_while, BuiltinDemandArg::None, downstream);
         assert_eq!(demand.pull, PullDemand::All);
         assert_eq!(demand.value, ValueNeed::Whole);
         assert!(demand.order);

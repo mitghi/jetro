@@ -490,6 +490,7 @@ impl Builtin for DropWhile {
         BuiltinSpec::new(BuiltinCategory::StreamingFilter, BuiltinCardinality::Filtering)
             .view_stage(BuiltinViewStage::DropWhile)
             .cost(10.0)
+            .demand_law(BuiltinDemandLaw::DropWhile)
             .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
             .pipeline_shape(BuiltinPipelineShape::new(
                 BuiltinCardinality::Filtering,
@@ -1477,7 +1478,7 @@ impl Builtin for Reverse {
         BuiltinSpec::new(BuiltinCategory::Barrier, BuiltinCardinality::Barrier)
             .cost(10.0)
             .cancellation(BuiltinCancellation::SelfInverse(BuiltinCancelGroup::Reverse))
-            .demand_law(BuiltinDemandLaw::OrderBarrier)
+            .demand_law(BuiltinDemandLaw::Reverse)
             .materialization(BuiltinPipelineMaterialization::ComposedBarrier)
             .lowering(BuiltinPipelineLowering::Nullary)
     }

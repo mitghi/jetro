@@ -649,6 +649,8 @@ pub enum BuiltinDemandLaw {
     FilterLike,
     /// Like `take_while`: stops at the first predicate failure, so `UntilOutput(n)` becomes `FirstInput(n)`.
     TakeWhile,
+    /// Like `drop_while`: prefix predicate barrier; safe upstream demand is a full ordered scan.
+    DropWhile,
     /// Like `unique`/`unique_by`: scan until enough distinct outputs are observed.
     UniqueLike,
     /// Like map: the output count equals the input count; passes demand through but requires whole values.
@@ -673,6 +675,8 @@ pub enum BuiltinDemandLaw {
     KeyedReducer,
     /// A full-input ordering barrier; downstream limits can choose strategy, but source scan remains all input.
     OrderBarrier,
+    /// Reverses one-to-one output order, swapping first/last positional demand.
+    Reverse,
 }
 
 /// Marker that a builtin has a structural (index-based) execution backend.

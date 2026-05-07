@@ -342,6 +342,33 @@ mod tests {
     }
 
     #[test]
+    fn reverse_swaps_first_and_last_input_demand() {
+        let ops = [op(BuiltinMethod::Reverse), op(BuiltinMethod::First)];
+        let demand = source_demand(&ops, Demand::RESULT);
+        assert_eq!(demand.pull, PullDemand::LastInput(1));
+        assert_eq!(demand.value, ValueNeed::Whole);
+
+        let ops = [op(BuiltinMethod::Reverse), op(BuiltinMethod::Last)];
+        let demand = source_demand(&ops, Demand::RESULT);
+        assert_eq!(demand.pull, PullDemand::FirstInput(1));
+        assert_eq!(demand.value, ValueNeed::Whole);
+
+        let ops = [op(BuiltinMethod::Reverse), op_usize(BuiltinMethod::Take, 2)];
+        let demand = source_demand(&ops, Demand::RESULT);
+        assert_eq!(demand.pull, PullDemand::LastInput(2));
+        assert_eq!(demand.value, ValueNeed::Whole);
+    }
+
+    #[test]
+    fn drop_while_is_a_prefix_barrier() {
+        let ops = [op(BuiltinMethod::DropWhile), op(BuiltinMethod::First)];
+        let demand = source_demand(&ops, Demand::RESULT);
+        assert_eq!(demand.pull, PullDemand::All);
+        assert_eq!(demand.value, ValueNeed::Whole);
+        assert!(demand.order);
+    }
+
+    #[test]
     fn map_last_requests_last_input() {
         let ops = [op(BuiltinMethod::Map), op(BuiltinMethod::Last)];
         let demand = source_demand(&ops, Demand::RESULT);

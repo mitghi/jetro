@@ -1450,6 +1450,34 @@ mod tests {
     }
 
     #[test]
+    fn reverse_propagates_positional_demand() {
+        use serde_json::json;
+        let doc: Val = (&json!({"xs": [10, 20, 30, 40]})).into();
+
+        let first = lower_query("$.xs.reverse().first()").unwrap();
+        assert_eq!(
+            first.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::LastInput(1)
+        );
+        assert_eq!(first.run(&doc).unwrap(), Val::Int(40));
+
+        let last = lower_query("$.xs.reverse().last()").unwrap();
+        assert_eq!(
+            last.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::FirstInput(1)
+        );
+        assert_eq!(last.run(&doc).unwrap(), Val::Int(10));
+
+        let take = lower_query("$.xs.reverse().take(2)").unwrap();
+        assert_eq!(
+            take.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::LastInput(2)
+        );
+        let take_json: serde_json::Value = take.run(&doc).unwrap().into();
+        assert_eq!(take_json, json!([40, 30]));
+    }
+
+    #[test]
     fn nth_sink_requests_indexed_input_when_available() {
         use serde_json::json;
         let doc: Val = (&json!({
