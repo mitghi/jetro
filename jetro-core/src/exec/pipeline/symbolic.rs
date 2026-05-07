@@ -56,6 +56,10 @@ fn sink_runtime_demand(sink: &Sink) -> RuntimeDemand {
             value: ValueDemand::Whole,
             order: false,
         },
+        Sink::ArgExtreme(_) => RuntimeDemand {
+            value: ValueDemand::Whole,
+            order: true,
+        },
         Sink::Collect | Sink::Terminal(_) | Sink::Nth(_) => RuntimeDemand {
             value: ValueDemand::Whole,
             order: true,

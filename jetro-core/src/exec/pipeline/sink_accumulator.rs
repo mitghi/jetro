@@ -8,7 +8,7 @@ use crate::{
     data::value::Val,
 };
 
-use super::{MembershipSinkOp, PredicateSinkOp, ReducerAccumulator, Sink};
+use super::{cmp_val_total, MembershipSinkOp, PredicateSinkOp, ReducerAccumulator, Sink};
 
 /// Stateful wrapper that accumulates one pipeline element at a time on behalf of a `Sink`.
 pub(crate) struct SinkAccumulator<'a> {
@@ -32,6 +32,8 @@ pub(crate) struct SinkAccumulator<'a> {
     membership_seen: usize,
     membership_matched: Option<usize>,
     membership_indices: Vec<i64>,
+    arg_extreme_key: Option<Val>,
+    arg_extreme_value: Option<Val>,
     // HyperLogLog register array for approximate-distinct-count sinks
     hll: [u8; HLL_M],
 }
@@ -54,6 +56,8 @@ impl<'a> SinkAccumulator<'a> {
             membership_seen: 0,
             membership_matched: None,
             membership_indices: Vec::new(),
+            arg_extreme_key: None,
+            arg_extreme_value: None,
             hll: [0; HLL_M],
         }
     }
@@ -78,6 +82,7 @@ impl<'a> SinkAccumulator<'a> {
             }
             Sink::Predicate(_) => false,
             Sink::Membership(_) => false,
+            Sink::ArgExtreme(_) => false,
             Sink::Nth(idx) => self.observe_nth(*idx, item),
             Sink::Terminal(_) => false,
         }
@@ -270,6 +275,25 @@ impl<'a> SinkAccumulator<'a> {
         }
     }
 
+    /// Updates an arg-extreme terminal sink with one row and its projected key.
+    pub(crate) fn observe_arg_extreme(&mut self, want_max: bool, item: Val, key: Val) {
+        let should_take = match self.arg_extreme_key.as_ref() {
+            None => true,
+            Some(best_key) => {
+                let ord = cmp_val_total(&key, best_key);
+                if want_max {
+                    ord.is_gt()
+                } else {
+                    ord.is_lt()
+                }
+            }
+        };
+        if should_take {
+            self.arg_extreme_key = Some(key);
+            self.arg_extreme_value = Some(item);
+        }
+    }
+
     /// Hashes `item` into the HyperLogLog registers for cardinality estimation.
     pub(crate) fn observe_approx_distinct(&mut self, item: &Val) {
         hll_observe(&mut self.hll, item);
@@ -323,6 +347,7 @@ impl<'a> SinkAccumulator<'a> {
                     .unwrap_or(Val::Null),
                 MembershipSinkOp::IndicesOf => Val::int_vec(self.membership_indices),
             },
+            Sink::ArgExtreme(_) => self.arg_extreme_value.unwrap_or(Val::Null),
             Sink::Nth(_) => self.nth.unwrap_or(Val::Null),
             Sink::Terminal(_) => Val::Null,
         }

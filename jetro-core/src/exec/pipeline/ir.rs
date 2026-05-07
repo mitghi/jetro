@@ -88,6 +88,16 @@ impl Sink {
                 positional: None,
             };
         }
+        if matches!(self, Sink::ArgExtreme(_)) {
+            return SinkDemand {
+                chain: ChainDemand {
+                    pull: PullDemand::All,
+                    value: ValueNeed::Whole,
+                    order: true,
+                },
+                positional: None,
+            };
+        }
         if let Some(spec) = self.builtin_sink_spec() {
             return sink_demand_from_builtin(spec);
         }
@@ -108,6 +118,7 @@ impl Sink {
             | Sink::ApproxCountDistinct
             | Sink::Membership(_) => true,
             Sink::Predicate(spec) => program_ok(&spec.predicate),
+            Sink::ArgExtreme(spec) => program_ok(&spec.key),
             Sink::Reducer(spec) => spec.sink_programs().all(|prog| program_ok(prog)),
         }
     }
@@ -160,6 +171,7 @@ impl Sink {
             Sink::Nth(_) => None,
             Sink::Predicate(_) => None,
             Sink::Membership(_) => None,
+            Sink::ArgExtreme(_) => None,
             Sink::Reducer(spec) => spec.method()?.spec().sink,
             Sink::ApproxCountDistinct => BuiltinMethod::ApproxCountDistinct.spec().sink,
             Sink::Collect => None,

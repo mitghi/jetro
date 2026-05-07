@@ -489,8 +489,8 @@ pub(super) fn arg_expr(arg: &crate::parse::ast::Arg) -> Option<Arc<Expr>> {
 // ---------------------------------------------------------------------------
 
 use super::{
-    MembershipSinkOp, MembershipSinkSpec, NumOp, PredicateSinkOp, PredicateSinkSpec, ReducerOp,
-    ReducerSpec,
+    ArgExtremeSinkSpec, MembershipSinkOp, MembershipSinkSpec, NumOp, PredicateSinkOp,
+    PredicateSinkSpec, ReducerOp, ReducerSpec,
 };
 
 /// Lowers a `BuiltinMethod` call to a concrete `Stage` or `Sink`, returning `None` when the method cannot be lowered at this position.
@@ -761,6 +761,9 @@ fn terminal_sink_for_method(
     if let Some(sink) = membership_sink_for_method(method, args) {
         return Some(sink);
     }
+    if let Some(sink) = arg_extreme_sink_for_method(method, args) {
+        return Some(sink);
+    }
     let spec = method.spec();
     match spec.sink?.accumulator {
         BuiltinSinkAccumulator::ApproxDistinct if args.is_empty() => {
@@ -837,6 +840,24 @@ fn membership_sink_for_method(
     }))
 }
 
+fn arg_extreme_sink_for_method(
+    method: BuiltinMethod,
+    args: &[crate::parse::ast::Arg],
+) -> Option<Sink> {
+    let [arg] = args else {
+        return None;
+    };
+    let want_max = match method {
+        BuiltinMethod::MaxBy => true,
+        BuiltinMethod::MinBy => false,
+        _ => return None,
+    };
+    Some(Sink::ArgExtreme(ArgExtremeSinkSpec {
+        want_max,
+        key: compile_subexpr(arg)?,
+    }))
+}
+
 fn sink_kernels(sink: &Sink) -> Vec<BodyKernel> {
     match sink {
         Sink::Reducer(spec) => spec
@@ -844,6 +865,10 @@ fn sink_kernels(sink: &Sink) -> Vec<BodyKernel> {
             .map(|p| BodyKernel::classify(p))
             .collect(),
         Sink::Predicate(spec) => spec
+            .sink_programs()
+            .map(|p| BodyKernel::classify(p))
+            .collect(),
+        Sink::ArgExtreme(spec) => spec
             .sink_programs()
             .map(|p| BodyKernel::classify(p))
             .collect(),

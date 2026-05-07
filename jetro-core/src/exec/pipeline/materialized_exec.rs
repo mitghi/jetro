@@ -105,6 +105,9 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
                 observe_predicate_sink_item(pipeline, item, &mut sink_acc, &mut vm, &mut loop_env)?
             }
             Sink::Membership(spec) => sink_acc.observe_membership(spec.op, &item, &spec.target),
+            Sink::ArgExtreme(_) => {
+                observe_arg_extreme_sink_item(pipeline, item, &mut sink_acc, &mut vm, &mut loop_env)?
+            }
             Sink::Reducer(_) => {
                 match observe_reducer_item(pipeline, item, &mut sink_acc, &mut vm, &mut loop_env)? {
                     ReducerItemFlow::Observed => false,
@@ -247,6 +250,9 @@ where
                 observe_predicate_sink_item(pipeline, item, &mut sink_acc, &mut vm, &mut loop_env)?
             }
             Sink::Membership(spec) => sink_acc.observe_membership(spec.op, &item, &spec.target),
+            Sink::ArgExtreme(_) => {
+                observe_arg_extreme_sink_item(pipeline, item, &mut sink_acc, &mut vm, &mut loop_env)?
+            }
             Sink::Reducer(_) => {
                 match observe_reducer_item(pipeline, item, &mut sink_acc, &mut vm, &mut loop_env)? {
                     ReducerItemFlow::Observed => false,
@@ -524,6 +530,29 @@ fn observe_predicate_sink_item(
         apply_item_in_env(vm, loop_env, item, &spec.predicate)
     })?;
     Ok(sink_acc.observe_predicate(spec.op, crate::util::is_truthy(&predicate)))
+}
+
+fn observe_arg_extreme_sink_item(
+    pipeline: &Pipeline,
+    item: Val,
+    sink_acc: &mut SinkAccumulator<'_>,
+    vm: &mut crate::vm::VM,
+    loop_env: &mut Env,
+) -> Result<bool, EvalError> {
+    let Sink::ArgExtreme(spec) = &pipeline.sink else {
+        return Ok(sink_acc.push(item));
+    };
+
+    let kernel_idx = spec.key_kernel_index();
+    let kernel = pipeline
+        .sink_kernels
+        .get(kernel_idx)
+        .unwrap_or(&BodyKernel::Generic);
+    let key = eval_kernel(kernel, &item, |item| {
+        apply_item_in_env(vm, loop_env, item, &spec.key)
+    })?;
+    sink_acc.observe_arg_extreme(spec.want_max, item, key);
+    Ok(false)
 }
 
 /// Applies an object-lambda stage (`TransformKeys`, `TransformValues`, `FilterKeys`, `FilterValues`) to `recv`.

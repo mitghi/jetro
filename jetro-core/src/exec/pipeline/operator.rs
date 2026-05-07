@@ -44,6 +44,15 @@ pub struct MembershipSinkSpec {
     pub method: BuiltinMethod,
 }
 
+/// Specification for arg-extreme terminal sinks (`max_by`, `min_by`).
+#[derive(Debug, Clone)]
+pub struct ArgExtremeSinkSpec {
+    /// When true, keeps the row with the largest key; otherwise keeps the smallest key.
+    pub want_max: bool,
+    /// Key expression evaluated for each row.
+    pub key: Arc<Program>,
+}
+
 /// Predicate terminal operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PredicateSinkOp {
@@ -76,6 +85,18 @@ impl PredicateSinkSpec {
 
     /// Returns the sink-kernel index for the predicate.
     pub(crate) fn predicate_kernel_index(&self) -> usize {
+        0
+    }
+}
+
+impl ArgExtremeSinkSpec {
+    /// Iterates over embedded programs for kernel enumeration.
+    pub(crate) fn sink_programs(&self) -> impl Iterator<Item = &Arc<Program>> {
+        std::iter::once(&self.key)
+    }
+
+    /// Returns the sink-kernel index for the key projection.
+    pub(crate) fn key_kernel_index(&self) -> usize {
         0
     }
 }

@@ -26,22 +26,13 @@ fn numeric_reducer_spec(reducer: BuiltinNumericReducer) -> BuiltinSpec {
         .lowering(BuiltinPipelineLowering::TerminalSink)
 }
 
-/// Predicate-driven barrier reducer skeleton (IndicesWhere / MaxBy / MinBy).
+/// Arg-extreme reducer (`max_by` / `min_by`) skeleton.
 #[inline]
-fn predicate_reducer_spec() -> BuiltinSpec {
+fn arg_extreme_reducer_spec() -> BuiltinSpec {
     BuiltinSpec::new(BuiltinCategory::Reducer, BuiltinCardinality::Reducing)
         .view_native()
         .cost(10.0)
-        .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
-        .pipeline_shape(BuiltinPipelineShape::new(
-            BuiltinCardinality::OneToOne,
-            true,
-            1.0,
-            1.0,
-        ))
-        .lowering(BuiltinPipelineLowering::TerminalExprArg {
-            terminal: BuiltinMethod::First,
-        })
+        .lowering(BuiltinPipelineLowering::TerminalSink)
 }
 
 /// Predicate terminal sink skeleton for short-circuiting reducers.
@@ -788,7 +779,7 @@ impl Builtin for MaxBy {
     const NAME: &'static str = "max_by";
 
     fn spec() -> BuiltinSpec {
-        predicate_reducer_spec()
+        arg_extreme_reducer_spec()
     }
 
     #[inline]
@@ -808,7 +799,7 @@ impl Builtin for MinBy {
     const NAME: &'static str = "min_by";
 
     fn spec() -> BuiltinSpec {
-        predicate_reducer_spec()
+        arg_extreme_reducer_spec()
     }
 
     #[inline]

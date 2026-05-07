@@ -51,8 +51,8 @@ pub use ir::{PhysicalExecPath, Plan, Position, StageStrategy};
 pub use kernels::{eval_cmp_op, eval_kernel, BodyKernel};
 pub(crate) use kernels::{eval_view_kernel, CollectLayout, ObjectKernel, ViewKernelValue};
 pub use operator::{
-    MembershipSinkOp, MembershipSinkSpec, PredicateSinkOp, PredicateSinkSpec, ReducerOp,
-    ReducerSpec,
+    ArgExtremeSinkSpec, MembershipSinkOp, MembershipSinkSpec, PredicateSinkOp, PredicateSinkSpec,
+    ReducerOp, ReducerSpec,
 };
 #[cfg(test)]
 pub use plan::compute_strategies;
@@ -140,6 +140,8 @@ fn sink_name(s: &Sink) -> &'static str {
             PredicateSinkOp::FindIndex => "find_index",
             PredicateSinkOp::IndicesWhere => "indices_where",
         },
+        Sink::ArgExtreme(spec) if spec.want_max => "max_by",
+        Sink::ArgExtreme(_) => "min_by",
         Sink::Terminal(BuiltinMethod::First) => "first",
         Sink::Terminal(BuiltinMethod::Last) => "last",
         Sink::Nth(_) => "nth",
@@ -364,6 +366,8 @@ pub enum Sink {
     Predicate(PredicateSinkSpec),
     /// Evaluates an element-membership terminal (`includes`, `index`, `indices_of`).
     Membership(MembershipSinkSpec),
+    /// Keeps the row with the largest or smallest projected key (`max_by`, `min_by`).
+    ArgExtreme(ArgExtremeSinkSpec),
     /// Delegates to a built-in method that consumes the stream (e.g. `first`, `last`).
     Terminal(BuiltinMethod),
     /// Selects the nth emitted row from the stream.
@@ -1792,5 +1796,46 @@ mod tests {
         assert!(
             matches!(indices.sink, Sink::Membership(ref spec) if spec.op == MembershipSinkOp::IndicesOf)
         );
+    }
+
+    #[test]
+    fn arg_extreme_terminal_sinks_match_vm() {
+        use serde_json::json;
+        let doc = json!({
+            "xs": [
+                {"title": "A", "score": 1, "price": 20},
+                {"title": "B", "score": 9, "price": 10},
+                {"title": "C", "score": 9, "price": 30}
+            ],
+            "names": ["a", "abc", "ab"]
+        });
+
+        for query in [
+            "$.xs.max_by(score)",
+            "$.xs.min_by(price)",
+            "$.names.max_by(@.len())",
+            "$.names.min_by(@.len())",
+            "$.xs.map(@).max_by(score)",
+        ] {
+            assert_pipeline_matches_vm(query, doc.clone());
+        }
+    }
+
+    #[test]
+    fn arg_extreme_terminal_sinks_keep_conservative_source_demand() {
+        let max_by = lower_query("$.xs.max_by(score)").unwrap();
+        assert!(matches!(max_by.sink, Sink::ArgExtreme(ref spec) if spec.want_max));
+        assert_eq!(
+            max_by.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::All
+        );
+        assert_eq!(
+            max_by.source_demand().chain.value,
+            crate::plan::demand::ValueNeed::Whole
+        );
+        assert!(max_by.source_demand().chain.order);
+
+        let min_by = lower_query("$.xs.min_by(score)").unwrap();
+        assert!(matches!(min_by.sink, Sink::ArgExtreme(ref spec) if !spec.want_max));
     }
 }
