@@ -96,7 +96,7 @@ inline_filter  = { "{" ~ expr ~ "}" }
 // Allow `.` / `?` to follow so postfix `?` can be chained with more steps
 // (e.g. `..services?.name`, `.a?.b?`).  Still reject `?|` to avoid
 // conflict with pipe, and `??` which is coalesce.
-quantifier     = { ("?" ~ !("|" | "?")) | "!" }
+quantifier     = { ("?" ~ !("|" | "?")) | ("!" ~ !"=") }
 postfix = { deep_match | deep_method | descendant | method_call | dyn_field | map_into_shape | field_access | index_access | inline_filter | quantifier }
 
 // ── Expression hierarchy ──────────────────────────────────────────────────────

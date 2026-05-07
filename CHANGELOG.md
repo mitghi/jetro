@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.5.4
+
+### Grammar fix
+
+- `!=` operator now parses everywhere — top-level, method args, lambda
+  bodies, match guards, inline filters, list-comp guards, ternary
+  conditions. The postfix `!` quantifier previously consumed the leading
+  `!` of every `!=`, surfacing as a confusing
+  "expected kw_and / kw_or / kw_if / kw_kind" diagnostic at the
+  whitespace before the comparator. Quantifier rule now uses a `!"="`
+  negative lookahead, mirroring the existing `?` quantifier's defensive
+  `!("|" | "?")` lookahead. The bare `!` quantifier on its own (e.g.
+  `xs!` exactly-one assertion) keeps working.
+  
 ## 0.5.3
 
 ### Lambda

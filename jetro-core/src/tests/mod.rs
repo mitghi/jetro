@@ -30,3 +30,5 @@ mod regression;
 mod dyn_index_lambda;
 #[cfg(test)]
 mod lambda_forms;
+#[cfg(test)]
+mod neq_grammar;
