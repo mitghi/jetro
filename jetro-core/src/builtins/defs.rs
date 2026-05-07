@@ -2827,6 +2827,7 @@ macro_rules! str_arg_scalar_native {
 
 str_arg_scalar_native! {
     Has, "has", has_apply;
+    HasKey, "has_key", has_apply;
     StripPrefix, "strip_prefix", strip_prefix_apply;
     StripSuffix, "strip_suffix", strip_suffix_apply;
     Scan, "scan", scan_apply;

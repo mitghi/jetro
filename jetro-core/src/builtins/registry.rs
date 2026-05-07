@@ -735,6 +735,7 @@ mod tests {
             BuiltinMethod::Abs,
             BuiltinMethod::ParseInt,
             BuiltinMethod::Has,
+            BuiltinMethod::HasKey,
             BuiltinMethod::Lines,
             BuiltinMethod::GetPath,
         ] {

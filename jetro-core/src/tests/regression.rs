@@ -210,6 +210,14 @@ mod tests {
             vm_query("$.user.has(\"phone\")", &doc).unwrap(),
             json!(false)
         );
+        assert_eq!(
+            vm_query("$.user.has_key(\"email\")", &doc).unwrap(),
+            json!(true)
+        );
+        assert_eq!(
+            vm_query("$.user.has_key(\"phone\")", &doc).unwrap(),
+            json!(false)
+        );
     }
 
     #[test]

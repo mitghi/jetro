@@ -221,6 +221,8 @@ pub enum BuiltinMethod {
     Or,
     /// Returns true if the object contains the given key.
     Has,
+    /// Returns true if the object contains the given key.
+    HasKey,
     /// Returns true if a field path is absent or null in the receiver.
     Missing,
     /// Returns true if the array/string/object contains the given item.
@@ -414,8 +416,8 @@ macro_rules! for_each_builtin {
             DropWhile, EndsWith, Entries, Enumerate, EquiJoin, Explode, Fanout, Filter,
             FilterKeys, FilterValues, Find, FindAll, FindFirst, FindIndex, FindOne, First,
             FlatMap, Flatten, FlattenKeys, Floor, FromBase64, FromJson, FromPairs, GetPath,
-            GroupBy, GroupShape, Has, HasPath, HtmlEscape, HtmlUnescape, Implode, Includes,
-            Indent, Index, IndexBy, IndexOf, IndicesOf, IndicesWhere, Intersect, Invert,
+            GroupBy, GroupShape, Has, HasKey, HasPath, HtmlEscape, HtmlUnescape, Implode,
+            Includes, Indent, Index, IndexBy, IndexOf, IndicesOf, IndicesWhere, Intersect, Invert,
             IsAlpha, IsAscii, IsBlank, IsNumeric, Join, KebabCase, Keys, Lag, Last,
             LastIndexOf, Lead, Len, Lines, Lower, Map, Matches, Max, MaxBy, Merge, Min,
             MinBy, Missing, Nth, Omit, Or, PadLeft, PadRight, Pairwise, ParseBool,
@@ -1591,7 +1593,9 @@ impl BuiltinCall {
             (BuiltinMethod::Implode, BuiltinArgs::Str(field)) => {
                 apply_or_recv!(implode_apply(recv, field))
             }
-            (BuiltinMethod::Has, BuiltinArgs::Str(k)) => apply_or_recv!(has_apply(recv, k)),
+            (BuiltinMethod::Has | BuiltinMethod::HasKey, BuiltinArgs::Str(k)) => {
+                apply_or_recv!(has_apply(recv, k))
+            }
             (BuiltinMethod::GetPath, BuiltinArgs::Str(p)) => {
                 apply_or_recv!(get_path_apply(recv, p))
             }
@@ -1833,6 +1837,7 @@ impl BuiltinCall {
             BuiltinMethod::GetPath
             | BuiltinMethod::HasPath
             | BuiltinMethod::Has
+            | BuiltinMethod::HasKey
             | BuiltinMethod::Join
             | BuiltinMethod::Explode
             | BuiltinMethod::Implode
@@ -2643,6 +2648,7 @@ where
         BuiltinMethod::GetPath
         | BuiltinMethod::HasPath
         | BuiltinMethod::Has
+        | BuiltinMethod::HasKey
         | BuiltinMethod::Missing
         | BuiltinMethod::Explode
         | BuiltinMethod::Implode

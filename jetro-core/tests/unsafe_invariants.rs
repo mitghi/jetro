@@ -683,6 +683,8 @@ fn has_object_key() {
     let doc = json!({"name": "X", "age": 1});
     assert_eq!(q("$ has 'name'", &doc).unwrap(), json!(true));
     assert_eq!(q("$ has 'absent'", &doc).unwrap(), json!(false));
+    assert_eq!(q("$.has_key('name')", &doc).unwrap(), json!(true));
+    assert_eq!(q("$.has_key('absent')", &doc).unwrap(), json!(false));
 }
 
 #[test]
