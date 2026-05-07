@@ -26,7 +26,7 @@ fn numeric_reducer_spec(reducer: BuiltinNumericReducer) -> BuiltinSpec {
         .lowering(BuiltinPipelineLowering::TerminalSink)
 }
 
-/// Predicate-driven reducer-with-take-first skeleton (FindIndex / IndicesWhere / MaxBy / MinBy).
+/// Predicate-driven barrier reducer skeleton (IndicesWhere / MaxBy / MinBy).
 #[inline]
 fn predicate_reducer_spec() -> BuiltinSpec {
     BuiltinSpec::new(BuiltinCategory::Reducer, BuiltinCardinality::Reducing)
@@ -42,6 +42,15 @@ fn predicate_reducer_spec() -> BuiltinSpec {
         .lowering(BuiltinPipelineLowering::TerminalExprArg {
             terminal: BuiltinMethod::First,
         })
+}
+
+/// Predicate terminal sink skeleton for short-circuiting reducers.
+#[inline]
+fn predicate_terminal_sink_spec() -> BuiltinSpec {
+    BuiltinSpec::new(BuiltinCategory::Reducer, BuiltinCardinality::Reducing)
+        .view_native()
+        .cost(10.0)
+        .lowering(BuiltinPipelineLowering::TerminalSink)
 }
 
 // ── Streaming filters ────────────────────────────────────────────────────────
@@ -640,6 +649,7 @@ impl Builtin for Any {
         BuiltinSpec::new(BuiltinCategory::Reducer, BuiltinCardinality::Reducing)
             .view_native()
             .cost(10.0)
+            .lowering(BuiltinPipelineLowering::TerminalSink)
     }
 }
 
@@ -653,6 +663,7 @@ impl Builtin for All {
         BuiltinSpec::new(BuiltinCategory::Reducer, BuiltinCardinality::Reducing)
             .view_native()
             .cost(10.0)
+            .lowering(BuiltinPipelineLowering::TerminalSink)
     }
 }
 
@@ -663,7 +674,7 @@ impl Builtin for FindIndex {
     const NAME: &'static str = "find_index";
 
     fn spec() -> BuiltinSpec {
-        predicate_reducer_spec()
+        predicate_terminal_sink_spec()
     }
 
     #[inline]

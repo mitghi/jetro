@@ -8,7 +8,7 @@ use crate::{
     data::value::Val,
 };
 
-use super::{ReducerAccumulator, Sink};
+use super::{PredicateSinkOp, ReducerAccumulator, Sink};
 
 /// Stateful wrapper that accumulates one pipeline element at a time on behalf of a `Sink`.
 pub(crate) struct SinkAccumulator<'a> {
@@ -25,6 +25,9 @@ pub(crate) struct SinkAccumulator<'a> {
     // nth observed item for Sink::Nth
     nth: Option<Val>,
     nth_seen: usize,
+    predicate_seen: usize,
+    predicate_matched: Option<usize>,
+    predicate_all: bool,
     // HyperLogLog register array for approximate-distinct-count sinks
     hll: [u8; HLL_M],
 }
@@ -40,6 +43,9 @@ impl<'a> SinkAccumulator<'a> {
             last: None,
             nth: None,
             nth_seen: 0,
+            predicate_seen: 0,
+            predicate_matched: None,
+            predicate_all: true,
             hll: [0; HLL_M],
         }
     }
@@ -62,6 +68,7 @@ impl<'a> SinkAccumulator<'a> {
                 self.observe_approx_distinct(&item);
                 false
             }
+            Sink::Predicate(_) => false,
             Sink::Nth(idx) => self.observe_nth(*idx, item),
             Sink::Terminal(_) => false,
         }
@@ -177,6 +184,39 @@ impl<'a> SinkAccumulator<'a> {
         }
     }
 
+    /// Updates a predicate terminal sink with one predicate result; returns true once decided.
+    pub(crate) fn observe_predicate(&mut self, op: PredicateSinkOp, matched: bool) -> bool {
+        match op {
+            PredicateSinkOp::Any => {
+                if matched {
+                    self.predicate_matched = Some(self.predicate_seen);
+                    true
+                } else {
+                    self.predicate_seen += 1;
+                    false
+                }
+            }
+            PredicateSinkOp::All => {
+                self.predicate_seen += 1;
+                if matched {
+                    false
+                } else {
+                    self.predicate_all = false;
+                    true
+                }
+            }
+            PredicateSinkOp::FindIndex => {
+                if matched {
+                    self.predicate_matched = Some(self.predicate_seen);
+                    true
+                } else {
+                    self.predicate_seen += 1;
+                    false
+                }
+            }
+        }
+    }
+
     /// Hashes `item` into the HyperLogLog registers for cardinality estimation.
     pub(crate) fn observe_approx_distinct(&mut self, item: &Val) {
         hll_observe(&mut self.hll, item);
@@ -213,6 +253,14 @@ impl<'a> SinkAccumulator<'a> {
                 .expect("reducer sinks construct reducer")
                 .finish(),
             Sink::ApproxCountDistinct => Val::Int(hll_estimate(&self.hll) as i64),
+            Sink::Predicate(spec) => match spec.op {
+                PredicateSinkOp::Any => Val::Bool(self.predicate_matched.is_some()),
+                PredicateSinkOp::All => Val::Bool(self.predicate_all),
+                PredicateSinkOp::FindIndex => self
+                    .predicate_matched
+                    .map(|idx| Val::Int(idx as i64))
+                    .unwrap_or(Val::Null),
+            },
             Sink::Nth(_) => self.nth.unwrap_or(Val::Null),
             Sink::Terminal(_) => Val::Null,
         }

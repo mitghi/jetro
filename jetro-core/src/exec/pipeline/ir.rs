@@ -68,6 +68,16 @@ impl Sink {
                 positional: Some(Position::First),
             };
         }
+        if matches!(self, Sink::Predicate(_)) {
+            return SinkDemand {
+                chain: ChainDemand {
+                    pull: PullDemand::All,
+                    value: ValueNeed::Predicate,
+                    order: false,
+                },
+                positional: None,
+            };
+        }
         if let Some(spec) = self.builtin_sink_spec() {
             return sink_demand_from_builtin(spec);
         }
@@ -83,6 +93,7 @@ impl Sink {
     {
         match self {
             Sink::Collect | Sink::Terminal(_) | Sink::Nth(_) | Sink::ApproxCountDistinct => true,
+            Sink::Predicate(spec) => program_ok(&spec.predicate),
             Sink::Reducer(spec) => spec.sink_programs().all(|prog| program_ok(prog)),
         }
     }
@@ -133,6 +144,7 @@ impl Sink {
         match self {
             Sink::Terminal(method) => method.spec().sink,
             Sink::Nth(_) => None,
+            Sink::Predicate(_) => None,
             Sink::Reducer(spec) => spec.method()?.spec().sink,
             Sink::ApproxCountDistinct => BuiltinMethod::ApproxCountDistinct.spec().sink,
             Sink::Collect => None,
@@ -643,12 +655,12 @@ impl Stage {
             // reason about them with the role-specific propagation rules
             // (`Predicate` widens upstream demand to scan-until-output;
             // `Transform` is 1:1).
-            Stage::Filter(prog, _) if program_is_match_only(prog) => {
-                Some(ChainOp::match_role(crate::parse::chain_ir::MatchRole::Predicate))
-            }
-            Stage::Map(prog, _) if program_is_match_only(prog) => {
-                Some(ChainOp::match_role(crate::parse::chain_ir::MatchRole::Transform))
-            }
+            Stage::Filter(prog, _) if program_is_match_only(prog) => Some(ChainOp::match_role(
+                crate::parse::chain_ir::MatchRole::Predicate,
+            )),
+            Stage::Map(prog, _) if program_is_match_only(prog) => Some(ChainOp::match_role(
+                crate::parse::chain_ir::MatchRole::Transform,
+            )),
             _ => self.chain_demand_op(),
         }
     }

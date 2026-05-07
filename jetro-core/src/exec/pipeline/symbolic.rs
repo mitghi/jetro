@@ -7,7 +7,9 @@
 
 use std::sync::Arc;
 
-use crate::parse::ast::{Arg, ArrayElem, Expr, FStringPart, MatchArm, ObjField, PatchOp, PathStep, PipeStep, Step};
+use crate::parse::ast::{
+    Arg, ArrayElem, Expr, FStringPart, MatchArm, ObjField, PatchOp, PathStep, PipeStep, Step,
+};
 
 use super::{BodyKernel, ReducerOp, Sink, Stage};
 
@@ -43,6 +45,10 @@ fn sink_runtime_demand(sink: &Sink) -> RuntimeDemand {
             order: false,
         },
         Sink::Reducer(_) => RuntimeDemand {
+            value: ValueDemand::Whole,
+            order: false,
+        },
+        Sink::Predicate(_) => RuntimeDemand {
             value: ValueDemand::Whole,
             order: false,
         },
@@ -239,7 +245,10 @@ fn suffix_consumes_value(stages: &[Stage]) -> bool {
 }
 
 fn compile_stage_expr(expr: &Expr) -> Arc<crate::vm::Program> {
-    Arc::new(crate::compile::compiler::Compiler::compile(expr, "<pipeline-rewrite>"))
+    Arc::new(crate::compile::compiler::Compiler::compile(
+        expr,
+        "<pipeline-rewrite>",
+    ))
 }
 
 fn simplify_expr(expr: Expr) -> Expr {

@@ -3,8 +3,8 @@
 
 use std::sync::Arc;
 
-use crate::parse::ast::Expr;
 use crate::builtins::BuiltinMethod;
+use crate::parse::ast::Expr;
 use crate::vm::Program;
 
 use super::NumOp;
@@ -22,6 +22,38 @@ pub struct ReducerSpec {
     pub predicate_expr: Option<Arc<Expr>>,
     /// Source AST for `projection`, used during IR analysis.
     pub projection_expr: Option<Arc<Expr>>,
+}
+
+/// Specification for predicate terminal sinks (`any`, `all`, `find_index`).
+#[derive(Debug, Clone)]
+pub struct PredicateSinkSpec {
+    /// Terminal operation to perform.
+    pub op: PredicateSinkOp,
+    /// Predicate evaluated for each row until the terminal can decide.
+    pub predicate: Arc<Program>,
+}
+
+/// Predicate terminal operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PredicateSinkOp {
+    /// Returns true when any row matches the predicate.
+    Any,
+    /// Returns true when every row matches the predicate.
+    All,
+    /// Returns the zero-based index of the first matching row, or null.
+    FindIndex,
+}
+
+impl PredicateSinkSpec {
+    /// Iterates over embedded programs for kernel enumeration.
+    pub(crate) fn sink_programs(&self) -> impl Iterator<Item = &Arc<Program>> {
+        std::iter::once(&self.predicate)
+    }
+
+    /// Returns the sink-kernel index for the predicate.
+    pub(crate) fn predicate_kernel_index(&self) -> usize {
+        0
+    }
 }
 
 /// The kind of reduction a `ReducerSpec` performs.

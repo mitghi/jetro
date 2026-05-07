@@ -123,15 +123,7 @@ impl Pipeline {
         p.stage_exprs = plan_result.stage_exprs;
         p.sink = plan_result.sink;
         p.stage_kernels = classify_kernels(&p.stages);
-        p.sink_kernels = p
-            .sink
-            .reducer_spec()
-            .map(|spec| {
-                spec.sink_programs()
-                    .map(|p| BodyKernel::classify(p))
-                    .collect()
-            })
-            .unwrap_or_default();
+        p.sink_kernels = sink_kernels(&p.sink);
         Some(p)
     }
 
@@ -496,7 +488,7 @@ pub(super) fn arg_expr(arg: &crate::parse::ast::Arg) -> Option<Arc<Expr>> {
 // Registry-driven stage factory (formerly stage_factory.rs)
 // ---------------------------------------------------------------------------
 
-use super::{NumOp, ReducerOp, ReducerSpec};
+use super::{NumOp, PredicateSinkOp, PredicateSinkSpec, ReducerOp, ReducerSpec};
 
 /// Lowers a `BuiltinMethod` call to a concrete `Stage` or `Sink`, returning `None` when the method cannot be lowered at this position.
 pub(super) fn lower_method_from_registry(
@@ -748,6 +740,9 @@ fn terminal_sink_for_method(
     method: BuiltinMethod,
     args: &[crate::parse::ast::Arg],
 ) -> Option<Sink> {
+    if let Some(sink) = predicate_sink_for_method(method, args) {
+        return Some(sink);
+    }
     let spec = method.spec();
     match spec.sink?.accumulator {
         BuiltinSinkAccumulator::ApproxDistinct if args.is_empty() => {
@@ -781,5 +776,38 @@ fn terminal_sink_for_method(
         })),
         BuiltinSinkAccumulator::SelectOne(_) if args.is_empty() => Some(Sink::Terminal(method)),
         _ => None,
+    }
+}
+
+fn predicate_sink_for_method(
+    method: BuiltinMethod,
+    args: &[crate::parse::ast::Arg],
+) -> Option<Sink> {
+    let [arg] = args else {
+        return None;
+    };
+    let op = match method {
+        BuiltinMethod::Any => PredicateSinkOp::Any,
+        BuiltinMethod::All => PredicateSinkOp::All,
+        BuiltinMethod::FindIndex => PredicateSinkOp::FindIndex,
+        _ => return None,
+    };
+    Some(Sink::Predicate(PredicateSinkSpec {
+        op,
+        predicate: compile_subexpr(arg)?,
+    }))
+}
+
+fn sink_kernels(sink: &Sink) -> Vec<BodyKernel> {
+    match sink {
+        Sink::Reducer(spec) => spec
+            .sink_programs()
+            .map(|p| BodyKernel::classify(p))
+            .collect(),
+        Sink::Predicate(spec) => spec
+            .sink_programs()
+            .map(|p| BodyKernel::classify(p))
+            .collect(),
+        _ => Vec::new(),
     }
 }

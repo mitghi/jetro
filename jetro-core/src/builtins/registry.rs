@@ -283,7 +283,12 @@ pub(crate) fn pipeline_arity(id: BuiltinId, is_last: bool) -> Option<BuiltinPipe
 
 #[inline]
 fn terminal_sink_arity(method: BuiltinMethod) -> Option<BuiltinPipelineArity> {
-    let Some(sink) = method.spec().sink else {
+    let spec = method.spec();
+    if spec.sink.is_none() && matches!(spec.lowering, Some(BuiltinPipelineLowering::TerminalSink))
+    {
+        return Some(BuiltinPipelineArity::Exact(1));
+    }
+    let Some(sink) = spec.sink else {
         return None;
     };
     Some(match sink.accumulator {

@@ -269,15 +269,17 @@ fn build_body(
     let plan_result = plan_with_exprs(stages, stage_exprs, &kernels, sink);
 
     let stage_kernels = classify_kernels(&plan_result.stages);
-    let sink_kernels = plan_result
-        .sink
-        .reducer_spec()
-        .map(|spec| {
-            spec.sink_programs()
-                .map(|p| BodyKernel::classify(p))
-                .collect()
-        })
-        .unwrap_or_default();
+    let sink_kernels = match &plan_result.sink {
+        Sink::Reducer(spec) => spec
+            .sink_programs()
+            .map(|p| BodyKernel::classify(p))
+            .collect(),
+        Sink::Predicate(spec) => spec
+            .sink_programs()
+            .map(|p| BodyKernel::classify(p))
+            .collect(),
+        _ => Vec::new(),
+    };
 
     PipelineBody {
         stages: plan_result.stages,

@@ -50,7 +50,7 @@ pub use ir::Strategy;
 pub use ir::{PhysicalExecPath, Plan, Position, StageStrategy};
 pub use kernels::{eval_cmp_op, eval_kernel, BodyKernel};
 pub(crate) use kernels::{eval_view_kernel, CollectLayout, ObjectKernel, ViewKernelValue};
-pub use operator::{ReducerOp, ReducerSpec};
+pub use operator::{PredicateSinkOp, PredicateSinkSpec, ReducerOp, ReducerSpec};
 #[cfg(test)]
 pub use plan::compute_strategies;
 #[cfg(test)]
@@ -125,6 +125,11 @@ fn sink_name(s: &Sink) -> &'static str {
             ReducerOp::Numeric(NumOp::Min) => "min",
             ReducerOp::Numeric(NumOp::Max) => "max",
             ReducerOp::Numeric(NumOp::Avg) => "avg",
+        },
+        Sink::Predicate(spec) => match spec.op {
+            PredicateSinkOp::Any => "any",
+            PredicateSinkOp::All => "all",
+            PredicateSinkOp::FindIndex => "find_index",
         },
         Sink::Terminal(BuiltinMethod::First) => "first",
         Sink::Terminal(BuiltinMethod::Last) => "last",
@@ -346,6 +351,8 @@ pub enum Sink {
 
     /// Folds the stream using the given `ReducerSpec` (count, sum, min, max, avg).
     Reducer(ReducerSpec),
+    /// Evaluates a predicate terminal (`any`, `all`, `find_index`) with sink-owned state.
+    Predicate(PredicateSinkSpec),
     /// Delegates to a built-in method that consumes the stream (e.g. `first`, `last`).
     Terminal(BuiltinMethod),
     /// Selects the nth emitted row from the stream.
@@ -1660,8 +1667,63 @@ mod tests {
         assert_eq!(out, json!([[1, 2, 3], [2, 3, 4]]));
 
         let p = lower_query("$.xs.window(3).last()").unwrap();
-        assert_eq!(p.source_demand().chain.pull, crate::plan::demand::PullDemand::All);
+        assert_eq!(
+            p.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::All
+        );
         let out: serde_json::Value = p.run(&doc).unwrap().into();
         assert_eq!(out, json!([6, 7, 8]));
+    }
+
+    #[test]
+    fn predicate_terminal_sinks_match_vm() {
+        use serde_json::json;
+        let doc = json!({
+            "xs": [
+                {"score": 1, "isbn": "a"},
+                {"score": 9, "isbn": "b"},
+                {"score": 11, "isbn": "c"}
+            ]
+        });
+
+        for query in [
+            "$.xs.any(score > 10)",
+            "$.xs.exists(score > 10)",
+            "$.xs.all(score > 0)",
+            "$.xs.find_index(score > 10)",
+            "$.xs.map(isbn).find_index(@ == \"c\")",
+        ] {
+            assert_pipeline_matches_vm(query, doc.clone());
+        }
+    }
+
+    #[test]
+    fn predicate_terminal_sinks_keep_conservative_source_demand() {
+        let any = lower_query("$.xs.any(@ > 2)").unwrap();
+        assert!(matches!(any.sink, Sink::Predicate(ref spec) if spec.op == PredicateSinkOp::Any));
+        assert_eq!(
+            any.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::All
+        );
+        assert_eq!(
+            any.source_demand().chain.value,
+            crate::plan::demand::ValueNeed::Predicate
+        );
+
+        let all = lower_query("$.xs.all(@ > 2)").unwrap();
+        assert!(matches!(all.sink, Sink::Predicate(ref spec) if spec.op == PredicateSinkOp::All));
+        assert_eq!(
+            all.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::All
+        );
+
+        let find_index = lower_query("$.xs.find_index(@ > 2)").unwrap();
+        assert!(
+            matches!(find_index.sink, Sink::Predicate(ref spec) if spec.op == PredicateSinkOp::FindIndex)
+        );
+        assert_eq!(
+            find_index.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::All
+        );
     }
 }

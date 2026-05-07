@@ -96,6 +96,9 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
         pulled_inputs += 1;
 
         let sink_done = match &pipeline.sink {
+            Sink::Predicate(_) => {
+                observe_predicate_sink_item(pipeline, item, &mut sink_acc, &mut vm, &mut loop_env)?
+            }
             Sink::Reducer(_) => {
                 match observe_reducer_item(pipeline, item, &mut sink_acc, &mut vm, &mut loop_env)? {
                     ReducerItemFlow::Observed => false,
@@ -234,6 +237,9 @@ where
         }
 
         let sink_done = match &pipeline.sink {
+            Sink::Predicate(_) => {
+                observe_predicate_sink_item(pipeline, item, &mut sink_acc, &mut vm, &mut loop_env)?
+            }
             Sink::Reducer(_) => {
                 match observe_reducer_item(pipeline, item, &mut sink_acc, &mut vm, &mut loop_env)? {
                     ReducerItemFlow::Observed => false,
@@ -474,6 +480,28 @@ fn observe_reducer_item(
     }
 
     Ok(ReducerItemFlow::Observed)
+}
+
+fn observe_predicate_sink_item(
+    pipeline: &Pipeline,
+    item: Val,
+    sink_acc: &mut SinkAccumulator<'_>,
+    vm: &mut crate::vm::VM,
+    loop_env: &mut Env,
+) -> Result<bool, EvalError> {
+    let Sink::Predicate(spec) = &pipeline.sink else {
+        return Ok(sink_acc.push(item));
+    };
+
+    let kernel_idx = spec.predicate_kernel_index();
+    let kernel = pipeline
+        .sink_kernels
+        .get(kernel_idx)
+        .unwrap_or(&BodyKernel::Generic);
+    let predicate = eval_kernel(kernel, &item, |item| {
+        apply_item_in_env(vm, loop_env, item, &spec.predicate)
+    })?;
+    Ok(sink_acc.observe_predicate(spec.op, crate::util::is_truthy(&predicate)))
 }
 
 /// Applies an object-lambda stage (`TransformKeys`, `TransformValues`, `FilterKeys`, `FilterValues`) to `recv`.
